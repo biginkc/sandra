@@ -18,6 +18,8 @@ type ReplyComposerProps = {
   enabled?: boolean;
   routeKey?: string;
   onClose?: () => void;
+  fetcher?: typeof fetch;
+  initialDraft?: string;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -56,9 +58,12 @@ export const exclusionCopy: Record<InboxReplyExclusion, string> = {
 
 const blockerCopy: Record<"empty" | "recipient_limit" | "duplicate_destination", string> = {
   empty: "No eligible recipients remain in this review.",
-  recipient_limit: `Replies are limited to ${INBOX_REPLY_RECIPIENT_LIMIT} recipients.`,
+  recipient_limit: `The server found more than ${INBOX_REPLY_RECIPIENT_LIMIT} distinct eligible reply destinations after exclusions and duplicate destinations were removed. Narrow the selection and review again.`,
   duplicate_destination: "Two selected conversations share the same destination.",
 };
+
+const UNCONFIRMED_RECEIPT_STATES = ["pending", "dispatch_started", "uncertain"] as const;
+const POLL_BACKOFF_MS = [500, 1000, 2000] as const;
 
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -104,7 +109,7 @@ function parseItem(value: unknown): PreparedInboxReplyItem {
 export function parsePreparedReply(value: unknown, idempotencyKey: string): PreparedInboxReply {
   const row = object(value);
   const prepared = object(row && object(row.prepared) ? row.prepared : row);
-  if (!prepared || typeof prepared.preparationId !== "string" || !UUID.test(prepared.preparationId) || prepared.idempotencyKey !== idempotencyKey || typeof prepared.expiresAt !== "string" || !Number.isFinite(Date.parse(prepared.expiresAt)) || !Array.isArray(prepared.items) || prepared.items.length > 500 || typeof prepared.recipientCount !== "number" || !Number.isSafeInteger(prepared.recipientCount) || prepared.recipientCount < 0 || prepared.recipientCount > INBOX_REPLY_RECIPIENT_LIMIT || !Array.isArray(prepared.blockers)) throw Error("The reply review could not be verified.");
+  if (!prepared || typeof prepared.preparationId !== "string" || !UUID.test(prepared.preparationId) || prepared.idempotencyKey !== idempotencyKey || typeof prepared.expiresAt !== "string" || !Number.isFinite(Date.parse(prepared.expiresAt)) || !Array.isArray(prepared.items) || prepared.items.length > 500 || typeof prepared.recipientCount !== "number" || !Number.isSafeInteger(prepared.recipientCount) || prepared.recipientCount < 0 || !Array.isArray(prepared.blockers)) throw Error("The reply review could not be verified.");
   const blockers = prepared.blockers.filter((value): value is keyof typeof blockerCopy => Object.hasOwn(blockerCopy, value));
   if (blockers.length !== prepared.blockers.length || new Set(blockers).size !== blockers.length) throw Error("The reply review could not be verified.");
   const items = prepared.items.map(parseItem);
@@ -138,7 +143,7 @@ function receiptLabel(status: InboxReplyStatus): string {
 }
 
 function statusMessage(status: InboxReplyStatus): string {
-  if (status.receipts.some(receipt => ["uncertain", "dispatch_started"].includes(receipt.state))) return "The provider result is uncertain. Do not resend this reply.";
+  if (status.receipts.some(receipt => UNCONFIRMED_RECEIPT_STATES.includes(receipt.state as typeof UNCONFIRMED_RECEIPT_STATES[number]))) return "The provider result is not yet confirmed. Do not resend this reply.";
   const failure = status.receipts.find(receipt => receipt.reason)?.reason;
   return failure ?? (receiptLabel(status) === "Accepted by provider" ? "The provider accepted the reply; delivery can update separately." : "The server recorded the reply result.");
 }
@@ -161,53 +166,56 @@ function PreparedReview({ prepared, names, onEdit, onSend, sending, bulk }: { pr
   </section>;
 }
 
-function ReceiptSummary({ status, operationId, bulk }: { status: InboxReplyStatus; operationId?: string; bulk: boolean }) {
-  const uncertain = status.receipts.some(receipt => ["uncertain", "dispatch_started"].includes(receipt.state));
+function ReceiptSummary({ status, operationId, bulk, uncertainResult = false }: { status?: InboxReplyStatus; operationId?: string; bulk: boolean; uncertainResult?: boolean }) {
+  if (!status && !operationId) return null;
+  const uncertain = uncertainResult || !!status?.receipts.some(receipt => UNCONFIRMED_RECEIPT_STATES.includes(receipt.state as typeof UNCONFIRMED_RECEIPT_STATES[number]));
   return <section className={`${styles.receipt} ${uncertain ? styles.uncertain : ""}`} role={uncertain ? "alert" : "status"}>
-    <strong>{uncertain ? "Send result not confirmed" : receiptLabel(status)}</strong>
-    <p>{statusMessage(status)}{uncertain ? " Check the receipt or conversation manually; this screen will not resend it." : ""}</p>
-    <ul className={styles.receiptList}>{status.items.map(item => {
+    <strong>{uncertain ? "Send result not confirmed" : status ? receiptLabel(status) : "Checking receipt"}</strong>
+    <p>{status ? statusMessage(status) : uncertain ? "The send result was not confirmed. Do not resend this reply." : "The durable receipt is still being checked."}{uncertain ? " Check the receipt or conversation manually; this screen will not resend it." : ""}</p>
+    {status && <ul className={styles.receiptList}>{status.items.map(item => {
       const receipt = status.receipts.find(value => value.itemId === item.id);
       const name = item.recipient?.contactName ?? "Excluded recipient";
       return <li className={styles.receiptRow} key={item.id}><span>{name}</span><strong>{receipt?.state ?? (item.exclusion ? "excluded" : "pending")}</strong></li>;
-    })}</ul>
+    })}</ul>}
     {operationId && <a href={`/inbox/replies/${encodeURIComponent(operationId)}`} className={styles.secondary}>{bulk ? "Open bulk receipt" : "Open reply receipt"}</a>}
   </section>;
 }
 
-export function InboxReplyComposer({ targets, names, enabled = false, routeKey = "route-unknown", onClose }: ReplyComposerProps) {
-  const [state, dispatch] = useReducer(replyStateReducer, initialReplyState());
+export function InboxReplyComposer({ targets, names, enabled = false, routeKey = "route-unknown", onClose, fetcher, initialDraft = "" }: ReplyComposerProps) {
+  const [state, dispatch] = useReducer(replyStateReducer, initialDraft, initialReplyState);
   const sendInFlight = useRef(false);
   const request = useRef<AbortController | null>(null);
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bulk = targets.length > 1;
   const targetKeyValue = useMemo(() => targets.map(targetKey).sort().join("|"), [targets]);
+  const requestFetch = fetcher ?? fetch;
 
   useEffect(() => {
-    dispatch({ type: "reset" });
+    dispatch({ type: "reset", draft: initialDraft });
     request.current?.abort();
+    if (pollTimer.current) clearTimeout(pollTimer.current);
+    pollTimer.current = null;
     sendInFlight.current = false;
-  }, [targetKeyValue]);
+  }, [initialDraft, targetKeyValue]);
 
   useEffect(() => {
     if (state.phase === "reviewing" && state.review && state.review.routeKey !== routeKey) dispatch({ type: "route_changed", message: "The sending route changed. Review the current route before sending." });
   }, [routeKey, state.phase, state.review]);
 
-  useEffect(() => () => request.current?.abort(), []);
+  useEffect(() => () => {
+    request.current?.abort();
+    if (pollTimer.current) clearTimeout(pollTimer.current);
+  }, []);
 
   async function reviewReply() {
     const draft = state.draft.trim();
     if (!draft || state.phase === "reviewing" || state.phase === "sending") return;
     dispatch({ type: "review_requested", draft: state.draft });
     const idempotencyKey = crypto.randomUUID();
-    if (targets.length > INBOX_REPLY_RECIPIENT_LIMIT) {
-      const blocked: PreparedInboxReply = { preparationId: "00000000-0000-4000-8000-000000000000", idempotencyKey, inputHash: "", expiresAt: new Date(Date.now() + 60_000).toISOString(), items: [], recipientCount: 0, blockers: ["recipient_limit"] };
-      dispatch({ type: "review_blocked", review: { prepared: blocked, routeKey }, message: `Replies are limited to ${INBOX_REPLY_RECIPIENT_LIMIT} recipients.` });
-      return;
-    }
     const controller = new AbortController();
     request.current?.abort(); request.current = controller;
     try {
-      const response = await fetch("/api/inbox/replies/prepare", { method: "POST", headers: { "content-type": "application/json" }, credentials: "same-origin", cache: "no-store", redirect: "error", body: JSON.stringify({ idempotencyKey, targets, template: draft }), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(20_000)]) });
+      const response = await requestFetch("/api/inbox/replies/prepare", { method: "POST", headers: { "content-type": "application/json" }, credentials: "same-origin", cache: "no-store", redirect: "error", body: JSON.stringify({ idempotencyKey, targets, template: draft }), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(20_000)]) });
       const body = await response.json().catch(() => null);
       if (!response.ok) throw Object.assign(new Error(response.status === 404 ? "Reviewed replies are not enabled for this workspace yet." : "The reply review could not be prepared."), { code: errorCode(body), status: response.status });
       const prepared = parsePreparedReply(body, idempotencyKey);
@@ -220,17 +228,25 @@ export function InboxReplyComposer({ targets, names, enabled = false, routeKey =
     }
   }
 
-  async function poll(operationId: string, review: ReplyReview) {
+  function schedulePoll(operationId: string, attempt: number) {
+    if (pollTimer.current) clearTimeout(pollTimer.current);
+    pollTimer.current = setTimeout(() => { pollTimer.current = null; void poll(operationId, attempt + 1); }, POLL_BACKOFF_MS[Math.min(attempt, POLL_BACKOFF_MS.length - 1)]);
+  }
+
+  async function poll(operationId: string, attempt = 0) {
     const controller = new AbortController(); request.current = controller;
     try {
-      const response = await fetch(`/api/inbox/replies/${encodeURIComponent(operationId)}`, { credentials: "same-origin", cache: "no-store", redirect: "error", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]) });
+      const response = await requestFetch(`/api/inbox/replies/${encodeURIComponent(operationId)}`, { credentials: "same-origin", cache: "no-store", redirect: "error", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]) });
       if (!response.ok) throw Error("The reply receipt is not available yet.");
       const status = await response.json() as InboxReplyStatus;
       if (controller.signal.aborted || status.operationId !== operationId || !Array.isArray(status.receipts)) throw Error("The reply receipt could not be verified.");
       if (status.dispatchComplete) dispatch({ type: "receipt", status });
-      else setTimeout(() => { void poll(operationId, review); }, 1000);
+      else schedulePoll(operationId, attempt);
     } catch (error) {
-      if (!controller.signal.aborted) dispatch({ type: "uncertain", message: error instanceof Error ? error.message : "The reply result could not be checked." });
+      if (!controller.signal.aborted) {
+        if (attempt < POLL_BACKOFF_MS.length) schedulePoll(operationId, attempt);
+        else dispatch({ type: "uncertain", message: error instanceof Error ? error.message : "The reply result could not be checked." });
+      }
     }
   }
 
@@ -240,7 +256,7 @@ export function InboxReplyComposer({ targets, names, enabled = false, routeKey =
     sendInFlight.current = true; dispatch({ type: "send_requested" });
     const controller = new AbortController(); request.current?.abort(); request.current = controller;
     try {
-      const response = await fetch("/api/inbox/replies/accept", { method: "POST", headers: { "content-type": "application/json" }, credentials: "same-origin", cache: "no-store", redirect: "error", body: JSON.stringify({ preparationId: review.prepared.preparationId, idempotencyKey: review.prepared.idempotencyKey }), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(20_000)]) });
+      const response = await requestFetch("/api/inbox/replies/accept", { method: "POST", headers: { "content-type": "application/json" }, credentials: "same-origin", cache: "no-store", redirect: "error", body: JSON.stringify({ preparationId: review.prepared.preparationId, idempotencyKey: review.prepared.idempotencyKey }), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(20_000)]) });
       const body = await response.json().catch(() => null);
       if (!response.ok) {
         const code = errorCode(body);
@@ -254,7 +270,7 @@ export function InboxReplyComposer({ targets, names, enabled = false, routeKey =
       const operationId = object(body)?.operationId;
       if (typeof operationId !== "string" || !UUID.test(operationId)) throw Error("The send result could not be verified.");
       dispatch({ type: "send_started", operationId });
-      await poll(operationId, review);
+      await poll(operationId);
     } catch (error) {
       if (!controller.signal.aborted) dispatch({ type: "uncertain", message: error instanceof Error ? error.message : "The send result was not confirmed. Check the receipt before taking any further action." });
     } finally {
@@ -275,8 +291,8 @@ export function InboxReplyComposer({ targets, names, enabled = false, routeKey =
       <div className={styles.footer}><span className={styles.counter}>{state.draft.length} / {MAX_BODY} characters · {targets.length} selected</span>{state.phase !== "reviewing" && state.phase !== "blocked" && <button type="button" className={styles.primary} onClick={() => void reviewReply()} disabled={!state.draft.trim() || reviewBusy || state.phase === "sending"}>{reviewBusy ? "Checking…" : "Review reply"}</button>}</div></>}
     {reviewBusy && <p className={styles.notice} role="status">Checking current eligibility and recipient routes…</p>}
     {review && !sent && <PreparedReview prepared={review} names={names} onEdit={() => dispatch({ type: "edit", draft: state.draft })} onSend={() => void sendReply()} sending={state.phase === "sending"} bulk={bulk} />}
-    {state.message && state.phase === "blocked" && <p className={styles.error} role="alert">{state.message}</p>}
-    {state.status && <ReceiptSummary status={state.status} operationId={state.operationId} bulk={bulk} />}
+    {!review && state.message && state.phase === "blocked" && <p className={styles.error} role="alert">{state.message}</p>}
+    {(state.status || state.operationId) && <ReceiptSummary status={state.status} operationId={state.operationId} bulk={bulk} uncertainResult={state.phase === "uncertain" && !state.status} />}
     {onClose && <button className={styles.secondary} type="button" onClick={onClose}>Close</button>}
   </section>;
 }

@@ -7,6 +7,7 @@ const conversationId = "00000000-0000-4000-8000-000000000001";
 const operationId = "00000000-0000-4000-8000-000000000002";
 const itemId = "00000000-0000-4000-8000-000000000003";
 const target = { kind: "conversation" as const, id: conversationId };
+const targetFor = (index: number) => ({ kind: "conversation" as const, id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}` });
 
 function prepared(key: string, exclusion: PreparedInboxReply["items"][number]["exclusion"] = null): PreparedInboxReply {
   return {
@@ -28,7 +29,7 @@ function responseFor(url: string, init?: RequestInit, receiptState: InboxReplySt
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => Promise.resolve(responseFor(url, init))));
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 function mount(routeKey = "route-a") {
   return render(<InboxReplyComposer targets={[target]} routeKey={routeKey} enabled />);
@@ -52,6 +53,29 @@ describe("InboxReplyComposer", () => {
     expect(screen.queryByRole("button", { name: "Send reply" })).toBeNull();
     await act(async () => { resolve(Response.json(prepared(requestedKey))); });
     await screen.findByText("Review before sending");
+  });
+
+  it("delegates a selection over 50 targets to the server review", async () => {
+    // MUTATION GUARD: restoring a client-side 50-target short-circuit must fail this test.
+    const targets = Array.from({ length: 51 }, (_, index) => targetFor(index + 10));
+    const view = render(<InboxReplyComposer targets={targets} routeKey="route-a" enabled />);
+    fireEvent.change(view.getByRole("textbox", { name: "Reply message" }), { target: { value: "Draft" } });
+    fireEvent.click(view.getByRole("button", { name: "Review reply" }));
+    await view.findByText("Review before sending");
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith("/replies/prepare"))).toHaveLength(1);
+    view.unmount();
+  });
+
+  it("renders the server recipient-limit blocker without pretending the selection itself is capped at 50", async () => {
+    // MUTATION GUARD: rejecting recipientCount > 50 before rendering the server blocker must fail this test.
+    vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => url.endsWith("/replies/prepare")
+      ? Promise.resolve(Response.json({ ...prepared(JSON.parse(String(init?.body)).idempotencyKey), items: [], recipientCount: 51, blockers: ["recipient_limit"] }))
+      : Promise.reject(Error("accept must not run"))));
+    mount();
+    fireEvent.change(screen.getByRole("textbox", { name: "Reply message" }), { target: { value: "Draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Review reply" }));
+    await screen.findAllByText(/distinct eligible reply destinations/);
+    expect(screen.queryByRole("button", { name: "Send reply" })).toBeNull();
   });
 
   it("sends only after the review and renders the terminal receipt", async () => {
@@ -100,6 +124,60 @@ describe("InboxReplyComposer", () => {
     await screen.findByText("Send result not confirmed");
     expect(screen.getByText(/Do not resend/)).toBeVisible();
     expect(screen.queryByRole("button", { name: "Send reply" })).toBeNull();
+  });
+
+  it("retries receipt polling with backoff and keeps the durable receipt link visible", async () => {
+    let receiptAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/replies/prepare")) return Response.json(prepared(JSON.parse(String(init?.body)).idempotencyKey));
+      if (url.endsWith("/replies/accept")) return Response.json({ operationId });
+      receiptAttempts += 1;
+      throw Error("Receipt temporarily unavailable");
+    }));
+    mount();
+    fireEvent.change(screen.getByRole("textbox", { name: "Reply message" }), { target: { value: "Draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Review reply" }));
+    await screen.findByText("Review before sending");
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByRole("link", { name: "Open reply receipt" })).toHaveAttribute("href", `/inbox/replies/${operationId}`);
+    expect(receiptAttempts).toBe(1);
+    await act(async () => { vi.advanceTimersByTime(500); await Promise.resolve(); await Promise.resolve(); });
+    expect(receiptAttempts).toBe(2);
+    await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); await Promise.resolve(); });
+    expect(receiptAttempts).toBe(3);
+    expect(screen.queryByText("Send result not confirmed")).not.toBeInTheDocument();
+    await act(async () => { vi.advanceTimersByTime(2000); await Promise.resolve(); await Promise.resolve(); });
+    expect(receiptAttempts).toBe(4);
+    expect(screen.getAllByText("Send result not confirmed").length).toBeGreaterThan(0);
+    expect(screen.getByRole("link", { name: "Open reply receipt" })).toBeVisible();
+    vi.useRealTimers();
+  });
+
+  it("backs off pending receipt polling before classifying the result as uncertain", async () => {
+    let receiptAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/replies/prepare")) return Response.json(prepared(JSON.parse(String(init?.body)).idempotencyKey));
+      if (url.endsWith("/replies/accept")) return Response.json({ operationId });
+      receiptAttempts += 1;
+      return Response.json({ ...status("pending"), dispatchComplete: false });
+    }));
+    mount();
+    fireEvent.change(screen.getByRole("textbox", { name: "Reply message" }), { target: { value: "Draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Review reply" }));
+    await screen.findByText("Review before sending");
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(receiptAttempts).toBe(1);
+    await act(async () => { vi.advanceTimersByTime(500); await Promise.resolve(); await Promise.resolve(); });
+    expect(receiptAttempts).toBe(2);
+    expect(screen.queryByText("Send result not confirmed")).not.toBeInTheDocument();
+    await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); await Promise.resolve(); });
+    expect(receiptAttempts).toBe(3);
+    expect(screen.queryByText("Send result not confirmed")).not.toBeInTheDocument();
+    vi.useRealTimers();
   });
 
   it("keeps a prepare network error separate and never calls accept", async () => {

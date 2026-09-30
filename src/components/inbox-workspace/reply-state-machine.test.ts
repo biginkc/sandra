@@ -62,6 +62,22 @@ describe("review-before-send state machine", () => {
     expect(state.phase).toBe("sent");
   });
 
+  it.each(["pending", "dispatch_started", "uncertain"] as const)(
+    "classifies a %s receipt as uncertain and never as sent",
+    (receiptState) => {
+      // MUTATION M3 GUARD: forcing receipt handling to "sent" must fail every case here.
+      const state = replyStateReducer(
+        { ...initialReplyState("Hello"), phase: "sending", operationId: "operation-1", review: review() },
+        { type: "receipt", status: status({
+          operationId: "operation-1", preparationId: "00000000-0000-4000-8000-000000000001", dispatchComplete: false,
+          items: prepared().items, receipts: [{ itemId: prepared().items[0].id, attemptId: null, version: "1", state: receiptState, reason: null }],
+        }) },
+      );
+      expect(state.phase).toBe("uncertain");
+      expect(state.phase).not.toBe("sent");
+    },
+  );
+
   it("blocks every exclusion code without creating a sendable review", () => {
     const codes = [
       "unsupported_target", "conversation_unavailable", "property_unavailable", "property_suppressed",

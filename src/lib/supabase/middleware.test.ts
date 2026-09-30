@@ -141,6 +141,18 @@ describe("isPublicPath", () => {
 });
 
 describe("updateSession membership authorization", () => {
+  it("keeps fixture-only brand previews independent of Supabase configuration", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "");
+
+    const response = await updateSession(
+      new NextRequest("https://sandra.test/brand/drips/messages"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(createServerClient).not.toHaveBeenCalled();
+  });
+
   it("allows a protected request only when the signed-in UID has a membership", async () => {
     const { signOut, eq } = mockProtectedSession({
       memberships: [{ user_id: "seeded-auth-user" }],

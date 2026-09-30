@@ -11,7 +11,6 @@ import { ConversationHistory, type InboxDetailSnapshot } from "./conversation-hi
 import { useInboxMetadataActions } from "./use-metadata-actions";
 import { InboxReplyComposer } from "./reply-composer";
 import type { InboxReplyTarget } from "@/lib/inbox/reply-api-contract";
-import replyStyles from "./reply-composer.module.css";
 
 const labels: Record<InboxFilter["view"], string> = { active: "All", all: "All", mine: "Assigned to me", unassigned: "Unassigned", unread: "Unread", escalated: "Needs review", dispo: "Has outcome", needs_outcome: "Needs outcome", unknown: "Unknown senders", dismissed: "Dismissed" };
 type Scope = WorkspaceScope & { nextCursor: string | null; refreshed: boolean };
@@ -28,6 +27,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   const [filter, setFilter] = useState(initialFilter);
   const [search, setSearch] = useState(initialFilter.search ?? "");
   const [selected, setSelected] = useState<readonly WorkspaceId[]>([]);
+  const selectedRef = useRef<readonly WorkspaceId[]>([]);
   const [invalidatedIds, setInvalidatedIds] = useState<readonly WorkspaceId[]>([]);
   const activeOpen = useRef<WorkspaceId | null>(null);
   const [review, setReview] = useState(false);
@@ -47,13 +47,18 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   const [selectionNames, setSelectionNames] = useState(new Map<WorkspaceId, string>());
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const clearActions = useRef<() => void>(() => {});
+  const replaceSelected = useCallback((ids: readonly WorkspaceId[]) => {
+    selectedRef.current = ids;
+    setSelected(ids);
+    if (ids.length < 2) setBulkReplyOpen(false);
+  }, []);
   const accessLost = useCallback(() => {
     if (denied.current) return;
     denied.current = true; sequence.current++;
     request.current?.abort(); clearActions.current(); cache.close();
-    setSelectionNames(new Map()); setSelected([]); activeOpen.current = null; setOpened(null); setCounts(undefined); setReview(false);
+    setSelectionNames(new Map()); replaceSelected([]); activeOpen.current = null; setOpened(null); setCounts(undefined); setReview(false);
     sync.current?.revoke(); setSnapshot({ state: "permission_lost", rows: [] }); setBusy(false);
-  }, [cache]);
+  }, [cache, replaceSelected]);
   /** A single item-scoped denial (404): only this target is affected. Invalidate its
    * cached detail, prune it from selection the same way the sync adapter's authoritative
    * onInvalidated does below (selected IDs must never silently become replacement rows,
@@ -65,10 +70,10 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     const id = workspaceId(target);
     cache.invalidate("detail", id);
     setInvalidatedIds(previous => (previous.includes(id) ? previous : [...previous, id]));
-    setSelected(previous => previous.filter(value => value !== id));
+    replaceSelected(selectedRef.current.filter(value => value !== id));
     setSelectionNames(previous => { if (!previous.has(id)) return previous; const next = new Map(previous); next.delete(id); return next; });
     if (activeOpen.current === id) { sequence.current++; activeOpen.current = null; setOpened(null); }
-  }, [cache]);
+  }, [cache, replaceSelected]);
   const unavailable = useCallback((conversationId: string) =>
     invalidateTarget({ kind: "conversation", orgId: identity.orgId, conversationId }), [invalidateTarget, identity.orgId]);
   const unavailableSenderGroup = useCallback((senderGroupId: string) =>
@@ -122,7 +127,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     const adapter = createWorkspaceSync({ origin: window.location.origin, onChange: setSnapshot, onAccessBoundary: accessLost,
       onInvalidated: ids => {
         setInvalidatedIds(previous => [...new Set([...previous, ...ids])]);
-        setSelected(previous => previous.filter(id => !ids.includes(id)));
+        replaceSelected(selectedRef.current.filter(id => !ids.includes(id)));
         setSelectionNames(previous => new Map([...previous].filter(([id]) => !ids.includes(id))));
         for (const id of ids) cache.invalidate("detail", id);
         if (activeOpen.current && ids.includes(activeOpen.current)) { sequence.current++; activeOpen.current = null; setOpened(null); }
@@ -145,7 +150,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     if (ids.length > 500) { setError("Select up to 500 conversations at a time."); return; }
     const names = new Map<WorkspaceId, string>();
     for (const id of ids) names.set(id, snapshot.rows.find(row => workspaceId(row.target) === id)?.name ?? selectionNames.get(id) ?? "Conversation outside this view");
-    setSelectionNames(names); setSelected(ids);
+    setSelectionNames(names); replaceSelected(ids);
   }
   async function open(id: WorkspaceId, fresh = false) {
     const generation = ++sequence.current; activeOpen.current = id;
@@ -188,6 +193,6 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
       activity={metadata.activity ?? <p>{actionsEnabled ? "Select an action to review eligible records. Replies and remaining individual tools are being connected." : "Bulk actions and remaining individual tools are being connected."}</p>} />
     {metadata.review}
     <Dialog open={review} onOpenChange={setReview}><DialogContent className="max-h-[85dvh] overflow-auto"><DialogTitle>{selected.length} selected conversations</DialogTitle><DialogDescription>Remove any conversations that do not belong in this group, including those outside the current view.</DialogDescription><ul>{selected.map(id => <li className="flex items-center justify-between gap-4 py-2" key={id}>{selectionNames.get(id)}<button onClick={() => select(selected.filter(value => value !== id))}>Remove</button></li>)}</ul></DialogContent></Dialog>
-    {repliesEnabled && bulkReplyOpen && selectedReplyTargets.length >= 2 && <><div className={replyStyles.bulkBackdrop} aria-hidden="true" onClick={() => setBulkReplyOpen(false)} /><div className={replyStyles.bulkPanel} role="dialog" aria-label="Bulk reply review"><InboxReplyComposer targets={selectedReplyTargets} names={replyNames} routeKey={selectedReplyTargets.map(replyTargetName).sort().join("|")} enabled onClose={() => setBulkReplyOpen(false)} /></div></>}
+    <Dialog open={repliesEnabled && bulkReplyOpen && selectedReplyTargets.length >= 2} onOpenChange={setBulkReplyOpen}><DialogContent className="max-h-[85dvh] overflow-auto"><DialogTitle>Bulk reply review</DialogTitle><DialogDescription>Review every eligible destination before anything is sent. Excluded conversations stay visible with the server&apos;s reason.</DialogDescription>{selectedReplyTargets.length >= 2 && <InboxReplyComposer targets={selectedReplyTargets} names={replyNames} routeKey={selectedReplyTargets.map(replyTargetName).sort().join("|")} enabled onClose={() => setBulkReplyOpen(false)} />}</DialogContent></Dialog>
   </QueryClientProvider>;
 }
