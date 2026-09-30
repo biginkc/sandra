@@ -266,6 +266,8 @@ test("proves the synthetic live-coach machine acceptance path", async ({ page },
     await expect(page.getByTestId("coach-motivation-prompt")).toHaveCount(0);
     // A duplicate of the dismissed card must not bring it back; a genuinely newer card shows.
     await page.evaluate(() => window.coachBehaviorHarness.newerObjectionPrompt());
+    // The phone side re-sends a card whose delivery failed: same card, same statement, later time.
+    await page.evaluate(() => window.coachBehaviorHarness.resentObjectionPrompt());
     await page.waitForTimeout(50);
     await expect(page.getByTestId("coach-objection-prompt")).toHaveCount(0);
     await page.evaluate(() => window.coachBehaviorHarness.afterDismissObjectionPrompt());

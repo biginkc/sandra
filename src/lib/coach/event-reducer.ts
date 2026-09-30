@@ -82,16 +82,14 @@ let transcriptSeq = 0;
 let objectionCardSeq = 0;
 let nudgeSeq = 0;
 
+/** The same card for the same seller statement. Jitter re-sends a card whose
+ * publish failed or timed out with a FRESH ts, so ts is not part of identity:
+ * a re-send must not re-show a card the rep is looking at or has dismissed. */
 function isSameObjectionPrompt(
   current: NonNullable<CoachState["objectionPrompt"]>,
   incoming: Extract<CoachEvent, { type: "objection_prompt" }>,
 ): boolean {
-  return current.objectionId === incoming.objectionId
-    && current.label === incoming.label
-    && current.sellerTurn === incoming.sellerTurn
-    && current.classifierModel === incoming.classifierModel
-    && current.questionsSha256 === incoming.questionsSha256
-    && current.ts === incoming.ts;
+  return current.objectionId === incoming.objectionId && current.sellerTurn === incoming.sellerTurn;
 }
 
 function isOlderObjectionPrompt(
@@ -241,12 +239,14 @@ export function createCoachReducer(bundle: ScriptBundle | null) {
       };
     }
     case "objection_prompt": {
-      if (
-        state.lastObjectionPrompt &&
-        (isSameObjectionPrompt(state.lastObjectionPrompt, action) ||
-          isOlderObjectionPrompt(state.lastObjectionPrompt, action))
-      ) {
-        return state;
+      if (state.lastObjectionPrompt) {
+        if (isOlderObjectionPrompt(state.lastObjectionPrompt, action)) return state;
+        if (isSameObjectionPrompt(state.lastObjectionPrompt, action)) {
+          // Remember the re-send's ts so a slower, older card still counts as older.
+          return state.lastObjectionPrompt.ts === action.ts
+            ? state
+            : { ...state, lastObjectionPrompt: { ...state.lastObjectionPrompt, ts: action.ts } };
+        }
       }
       const objectionPrompt = {
         objectionId: action.objectionId, label: action.label, sellerTurn: action.sellerTurn,
@@ -268,14 +268,18 @@ export function createCoachReducer(bundle: ScriptBundle | null) {
       if (current) {
         const currentMs = Date.parse(current.ts);
         const incomingMs = Date.parse(action.ts);
-        const duplicate = current.ts === action.ts && current.sellerTurn === action.sellerTurn
-          && current.label === action.label && current.subType === action.subType
-          && current.classifierModel === action.classifierModel
-          && current.questionsSha256 === action.questionsSha256;
         const older = Number.isFinite(currentMs) && Number.isFinite(incomingMs) && currentMs !== incomingMs
           ? incomingMs < currentMs
           : action.sellerTurn < current.sellerTurn;
-        if (duplicate || older) return state;
+        if (older) return state;
+        // Same card for the same seller statement (ts is not identity: Jitter re-sends with a
+        // fresh ts). A general card for a statement that already had a sub-type card is the
+        // same statement's weaker card and never replaces it.
+        const duplicate = current.sellerTurn === action.sellerTurn
+          && (current.subType === action.subType || action.subType === undefined);
+        if (duplicate) {
+          return current.ts === action.ts ? state : { ...state, lastMotivationPrompt: { ...current, ts: action.ts } };
+        }
       }
       const motivationPrompt = {
         label: action.label, ...(action.subType === undefined ? {} : { subType: action.subType }), sellerTurn: action.sellerTurn,
