@@ -9,6 +9,7 @@ failure text, then derives the evidence markdown from that raw log.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -33,7 +34,7 @@ WORKER_TRANSPORT = ROOT / "experiments/inbox-reply-send-worker/vendor/test-trans
 LOCAL_DB_RETRY = ROOT / "experiments/inbox-reply-send-worker/restate-retry-local-db.py"
 PROVIDER_FIX = ROOT / "experiments/inbox-reply-send/provider-fix-proof.py"
 PROVIDER_FIX_MINIMAL = ROOT / "experiments/inbox-reply-send/provider-fix-minimal.py"
-LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r5.log")
+LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r7.log")
 EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-evidence.md")
 
 
@@ -339,43 +340,127 @@ REAL_NOT_RUN = {
 }
 
 
-def derive_evidence(raw: str) -> str:
-    sections = raw.split("===== ")[1:]
-    rows: list[str] = [
-        "# Reply-persistence v5 mutation evidence (generated)",
-        "",
-        "This file is generated from `replypersist-mutation-run-r5.log`; failure text is copied from captured child output.",
-        "",
-        "| Test | Executed | Mechanism | Captured mutated failure |",
-        "|---|---|---|---|",
-    ]
-    seen = set()
-    for section in sections:
-        header, _, body = section.partition(" =====\n")
-        if header.startswith("END ") or " mutation" not in header:
+SECTION_RE = re.compile(r"^===== (.+?) =====\n(.*?)^===== END \1 =====\n?", re.MULTILINE | re.DOTALL)
+TEST_ID_RE = re.compile(r"(?:T-R\d+b?|T\d+|B\d+)")
+NOT_RUN_MARKERS = (
+    "NOT RUN",
+    "could not connect",
+    "No such file or directory",
+    "PROJECTION_PGHOST is required",
+    "ERR_MODULE_NOT_FOUND",
+    "Cannot find package",
+    "reply-worker fixture is unavailable",
+)
+HARNESS_FAILURE_MARKERS = ("syntax error at or near", "scanner_yyerror")
+
+
+def captured_sections(raw: str) -> list[tuple[str, str]]:
+    return [(match.group(1), match.group(2)) for match in SECTION_RE.finditer(raw)]
+
+
+def test_id(header: str) -> str:
+    match = TEST_ID_RE.search(header)
+    return match.group(0) if match else header.split()[0]
+
+
+def baseline_for(mutation_header: str, sections: list[tuple[str, str]]) -> tuple[str, str] | None:
+    mutation_tokens = set(mutation_header.lower().split()) - {"mutation", "baseline"}
+    candidates: list[tuple[int, str, str]] = []
+    mutation_test = test_id(mutation_header)
+    for header, body in sections:
+        if "baseline" not in header.lower() or test_id(header) != mutation_test:
             continue
-        lines = [line.strip() for line in body.splitlines() if line.strip()]
-        result_lines = [line for line in lines if " FAIL " in line or "Error:" in line or "ERROR:" in line or "AssertionError:" in line or "expected" in line.lower()]
-        selected = result_lines[:3] or lines[-3:]
-        test = header.split()[0]
+        candidate_tokens = set(header.lower().split()) - {"mutation", "baseline"}
+        candidates.append((len(mutation_tokens & candidate_tokens), header, body))
+    if not candidates:
+        return None
+    _, header, body = max(candidates, key=lambda candidate: candidate[0])
+    return header, body
+
+
+def result_kind(header: str, body: str, *, baseline: bool = False) -> str:
+    upper = f"{header}\n{body}".upper()
+    if re.search(r"\bSKIP\b", upper):
+        return "SKIP"
+    if any(marker.lower() in f"{header}\n{body}".lower() for marker in NOT_RUN_MARKERS):
+        return "NOT RUN"
+    exit_match = re.search(r"^exit=(-?\d+)$", body, re.MULTILINE)
+    if exit_match and int(exit_match.group(1)) == 0:
+        return "PASS" if baseline else "NOT RUN"
+    if baseline:
+        return "FAIL"
+    if any(marker.lower() in body.lower() for marker in HARNESS_FAILURE_MARKERS):
+        return "NOT RUN"
+    return "FAILED"
+
+
+def failure_excerpt(body: str) -> str:
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    selected = [
+        line for line in lines
+        if " FAIL " in line
+        or "Error:" in line
+        or "ERROR:" in line
+        or "AssertionError:" in line
+        or "expected" in line.lower()
+        or "not yet settled" in line
+    ]
+    return "<br>".join((selected or lines[-3:] or ["no captured output"])[:3])
+
+
+def derive_evidence(raw: str) -> str:
+    sections = captured_sections(raw)
+    rows: list[str] = [
+        "# Reply-persistence v7 mutation evidence (generated)",
+        "",
+        "This file is generated from `replypersist-mutation-run-r7.log`. EXECUTED requires a passing baseline and a natural non-zero mutation result; baseline failures are never counted as executed.",
+        "",
+        "| Test | Status | Baseline result | Mechanism | Natural mutated failure |",
+        "|---|---|---|---|---|",
+    ]
+    seen: set[str] = set()
+    for header, body in sections:
+        if " mutation" not in header.lower():
+            continue
+        test = test_id(header)
         seen.add(test)
-        label = header.replace("|", "\\|")
-        value = "<br>".join(line.replace("|", "\\|") for line in selected)
-        executed = "SKIP" if "SKIP" in header or "SKIP" in body else ("NOT RUN" if "NOT RUN" in header or "NOT RUN" in body or "could not connect" in body or "No such file or directory" in body or "PROJECTION_PGHOST is required" in body or "ERR_MODULE_NOT_FOUND" in body or "Cannot find package" in body else "EXECUTED")
-        rows.append(f"| {test} | {executed} | {label} | `{value}` |")
+        baseline = baseline_for(header, sections)
+        baseline_header, baseline_body = baseline if baseline else ("no captured baseline", "NOT RUN")
+        baseline_kind = result_kind(baseline_header, baseline_body, baseline=True)
+        mutated_kind = result_kind(header, body)
+        if baseline_kind == "SKIP":
+            status = "SKIP"
+        elif baseline_kind == "NOT RUN":
+            status = "NOT RUN"
+        elif baseline_kind != "PASS":
+            status = "BASELINE FAIL"
+        elif mutated_kind == "FAILED":
+            status = "EXECUTED"
+        elif mutated_kind == "SKIP":
+            status = "SKIP"
+        else:
+            status = "NOT RUN"
+        mechanism = header.replace("|", "\\|")
+        baseline_result = f"{baseline_kind}: {failure_excerpt(baseline_body)}"
+        mutated_failure = failure_excerpt(body) if status == "EXECUTED" else (
+            "not considered: baseline did not pass" if status == "BASELINE FAIL" else f"not naturally failed ({mutated_kind.lower()})"
+        )
+        rows.append(
+            f"| {test} | {status} | `{baseline_result}` | {mechanism} | `{mutated_failure}` |"
+        )
     for n in range(1, 28):
         test = f"T{n}"
         if test not in seen:
-            rows.append(f"| {test} | NOT RUN | no mutation record | `no captured run` |")
+            rows.append(f"| {test} | NOT RUN | `no captured baseline` | no mutation record | `no captured run` |")
     for test, reason in REAL_NOT_RUN.items():
-        rows.append(f"| {test} | NOT RUN | REAL ruling row | `{reason}` |")
+        rows.append(f"| {test} | NOT RUN | `ruling row not run` | REAL ruling row | `{reason}` |")
     return "\n".join(rows) + "\n"
 
 
 def main() -> int:
     LOG.parent.mkdir(parents=True, exist_ok=True)
     with LOG.open("w", encoding="utf-8") as handle:
-        handle.write("reply-persistence v5 round-5 mutation run; machine-produced raw child output\n")
+        handle.write("reply-persistence v7 round-7 mutation run; machine-produced raw child output\n")
         for n in range(1, 28):
             run_sql_cases(handle, n)
         run_t17_application(handle)
