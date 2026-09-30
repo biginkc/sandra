@@ -19,6 +19,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PEM_BLOCK = /-----BEGIN [A-Z0-9 ]+-----[\s\S]*?-----END [A-Z0-9 ]+-----/g;
 const CERTIFICATE = /-----BEGIN CERTIFICATE-----\r?\n([\s\S]*?)\r?\n-----END CERTIFICATE-----/;
 const RECOVERY_REBUILD_TIMEOUT_MS = 90_000;
+const RECOVERY_BATCH_SIZE = 10;
+const RECOVERY_SOURCE_BATCH_SIZE = 100;
 
 export const SOURCE_WRITERS = Object.freeze([
   ["public.messages", "zzzzz_inbox_message_direct"],
@@ -97,6 +99,15 @@ export class ReconciliationBlocked extends Error {
   constructor(code) {
     super(code);
     this.code = code;
+  }
+}
+
+export class ReconciliationCommitted extends Error {
+  constructor(code, cause) {
+    super(code);
+    this.code = code;
+    this.cause = cause;
+    this.committed = true;
   }
 }
 
@@ -382,6 +393,18 @@ async function captureDirtyGenerationDigest(client) {
       ORDER BY org_id,target_kind,target_id`,
   )).rows;
   return digestJson(rows);
+}
+
+async function captureDirtyGenerationRows(client) {
+  return (await client.query(
+    `SELECT org_id::text AS org_id,target_kind,target_id::text AS target_id,generation
+       FROM inbox_message_capture.dirty
+      ORDER BY org_id,target_kind,target_id`,
+  )).rows;
+}
+
+function targetMapKey(row) {
+  return `${row.org_id}|${row.target_kind}|${row.target_id}`;
 }
 
 function compareProjectionRows(expectedRows, actualRows) {
@@ -674,9 +697,23 @@ async function collectState(client) {
             count(*) FILTER (WHERE cardinality(duplicate_thread_ids)=2)::int AS duplicate_threads
        FROM inbox_backfill.collisions`,
   )).rows[0];
+  const baseDuplicates = (await client.query(
+    `SELECT org_id::text AS org_id,
+            count(*)::int AS duplicate_group_count,
+            sum(thread_count - 1)::int AS duplicate_excess_count
+       FROM (
+         SELECT org_id,conversation_id,count(*)::int AS thread_count
+           FROM public.message_threads
+          WHERE conversation_id IS NOT NULL
+          GROUP BY org_id,conversation_id
+         HAVING count(*) > 1
+       ) duplicates
+      GROUP BY org_id
+      ORDER BY org_id`,
+  )).rows;
   const liveCaptureFingerprint = (await client.query("SELECT inbox_backfill.fingerprint() AS fingerprint")).rows[0]?.fingerprint ?? null;
   const jobFingerprintMismatches = jobs.filter((job) => job.capture_fingerprint !== liveCaptureFingerprint).length;
-  return { rollout: rollout[0] ?? null, baseline: baseline[0] ?? null, generation: generation[0]?.generation ?? null, jobs, pending, collisions, liveCaptureFingerprint, jobFingerprintMismatches };
+  return { rollout: rollout[0] ?? null, baseline: baseline[0] ?? null, generation: generation[0]?.generation ?? null, jobs, pending, collisions, baseDuplicates, liveCaptureFingerprint, jobFingerprintMismatches };
 }
 
 export async function collectEvidence(client, {
@@ -696,6 +733,7 @@ export async function collectEvidence(client, {
   const baselineComplete = state.baseline?.stage === "done";
   const noPendingWork = Object.values(state.pending).every((value) => Number(value) === 0);
   const noCollisions = Number(state.collisions.unresolved) === 0 && Number(state.collisions.duplicate_threads) === 0;
+  const noBaseTableDuplicates = state.baseDuplicates.length === 0;
   const markersConsistent = state.rollout && (state.rollout.backfill_complete === state.rollout.reconciliation_complete);
   const catalogMatch = typeof expectedCatalogFingerprint === "string" && HEX64.test(expectedCatalogFingerprint) && liveCatalogFingerprint === expectedCatalogFingerprint.toLowerCase();
   const reconciliation = await collectOrgReconciliation(client);
@@ -706,6 +744,7 @@ export async function collectEvidence(client, {
     backfill_complete: backfillComplete,
     no_pending_work: noPendingWork,
     no_unresolved_collisions: noCollisions,
+    no_base_table_duplicates: noBaseTableDuplicates,
     projection_reconciled: reconciliation.pass,
     filter_reconciled: reconciliation.pass,
     catalog_fingerprint_match: catalogMatch,
@@ -732,6 +771,16 @@ export async function collectEvidence(client, {
     collisions: {
       unresolved_count: Number(state.collisions.unresolved),
       duplicate_thread_count: Number(state.collisions.duplicate_threads),
+    },
+    base_table_duplicates: {
+      organization_count: state.baseDuplicates.length,
+      duplicate_group_count: state.baseDuplicates.reduce((sum, row) => sum + Number(row.duplicate_group_count), 0),
+      duplicate_excess_count: state.baseDuplicates.reduce((sum, row) => sum + Number(row.duplicate_excess_count), 0),
+      organizations: state.baseDuplicates.map((row) => ({
+        org_digest: orgDigest(row.org_id),
+        duplicate_group_count: Number(row.duplicate_group_count),
+        duplicate_excess_count: Number(row.duplicate_excess_count),
+      })),
     },
     reconciliation: {
       organizations: reconciliation.organizations,
@@ -788,10 +837,14 @@ async function collectRecoveryPlan(client, { expectedCatalogFingerprint = EXPECT
   const sourceGenerationDigest = await captureDirtyGenerationDigest(client);
   const boundaryCount = Number((await client.query("SELECT count(*)::int AS count FROM inbox_read.boundaries")).rows[0]?.count ?? 0);
   const catalogMatch = typeof expectedCatalogFingerprint === "string" && HEX64.test(expectedCatalogFingerprint) && liveCatalogFingerprint === expectedCatalogFingerprint.toLowerCase();
+  const noCollisions = Number(state.collisions.unresolved) === 0 && Number(state.collisions.duplicate_threads) === 0;
+  const noBaseTableDuplicates = state.baseDuplicates.length === 0;
   const checks = {
     serving_disabled: state.rollout?.serving_enabled === false,
     source_writer_coverage: writer.pass,
     catalog_fingerprint_match: catalogMatch,
+    no_unresolved_collisions: noCollisions,
+    no_base_table_duplicates: noBaseTableDuplicates,
     full_reconciliation: reconciliation.pass,
   };
   const evidence = {
@@ -818,6 +871,20 @@ async function collectRecoveryPlan(client, { expectedCatalogFingerprint = EXPECT
       source_tables: reconciliation.source_tables,
       unknown_source_table: reconciliation.unknown_source_table,
       per_org: reconciliation.per_org,
+    },
+    collisions: {
+      unresolved_count: Number(state.collisions.unresolved),
+      duplicate_thread_count: Number(state.collisions.duplicate_threads),
+    },
+    base_table_duplicates: {
+      organization_count: state.baseDuplicates.length,
+      duplicate_group_count: state.baseDuplicates.reduce((sum, row) => sum + Number(row.duplicate_group_count), 0),
+      duplicate_excess_count: state.baseDuplicates.reduce((sum, row) => sum + Number(row.duplicate_excess_count), 0),
+      organizations: state.baseDuplicates.map((row) => ({
+        org_digest: orgDigest(row.org_id),
+        duplicate_group_count: Number(row.duplicate_group_count),
+        duplicate_excess_count: Number(row.duplicate_excess_count),
+      })),
     },
     fingerprints: {
       expected_catalog: typeof expectedCatalogFingerprint === "string" && HEX64.test(expectedCatalogFingerprint) ? expectedCatalogFingerprint.toLowerCase() : null,
@@ -851,92 +918,254 @@ async function readOnlyRecoveryPlan(client, options) {
   }
 }
 
-async function rebuildCaptureAndProjection(client, observedAt) {
-  const deadline = Date.now() + RECOVERY_REBUILD_TIMEOUT_MS;
-  await client.query("UPDATE inbox_message_capture.dirty SET generation=generation+1");
-  const unknownSources = (await client.query(`
-    SELECT DISTINCT org_id,from_address AS raw_sender
-    FROM public.messages
-    WHERE channel='sms' AND direction='inbound' AND contact_id IS NULL
-      AND from_address IS NOT NULL AND from_address<>''
-    ORDER BY org_id,raw_sender
-  `)).rows;
-  for (const source of unknownSources) {
-    await client.query("SELECT inbox_message_capture.sender_id($1,$2)", [source.org_id, source.raw_sender]);
-  }
-  await client.query(`
-    WITH known_targets AS (
-      SELECT DISTINCT org_id,'known_conversation'::text AS target_kind,conversation_id AS target_id
-      FROM public.messages WHERE channel='sms' AND conversation_id IS NOT NULL
-      UNION
-      SELECT DISTINCT org_id,'known_conversation'::text,conversation_id
-      FROM public.ai_disposition_reviews WHERE conversation_id IS NOT NULL
-      UNION
-      SELECT DISTINCT org_id,'known_conversation'::text,conversation_id
-      FROM public.message_threads WHERE conversation_id IS NOT NULL
-    ), unknown_targets AS (
-      SELECT m.org_id,'unknown_sender'::text AS target_kind,g.sender_group_id AS target_id
-      FROM (SELECT DISTINCT org_id,from_address FROM public.messages WHERE channel='sms' AND direction='inbound' AND contact_id IS NULL AND from_address IS NOT NULL AND from_address<>'') m
-      JOIN inbox_message_capture.sender_groups g ON g.org_id=m.org_id AND g.raw_sender COLLATE "C"=m.from_address COLLATE "C"
-    ), targets AS (
-      SELECT * FROM known_targets UNION SELECT * FROM unknown_targets
-    )
-    INSERT INTO inbox_message_capture.dirty(org_id,target_kind,target_id,generation)
-    SELECT org_id,target_kind,target_id,1 FROM targets
-    ON CONFLICT(org_id,target_kind,target_id) DO UPDATE SET generation=inbox_message_capture.dirty.generation+1
-  `);
-  const sourceGenerationDigest = await captureDirtyGenerationDigest(client);
-  await client.query(`
-    DELETE FROM inbox_bridge.summaries s
-    WHERE NOT EXISTS (SELECT 1 FROM inbox_message_capture.dirty d WHERE d.org_id=s.org_id AND d.target_kind=s.target_kind AND d.target_id=s.target_id);
-    DELETE FROM inbox_bridge.filter_rows f
-    WHERE NOT EXISTS (SELECT 1 FROM inbox_message_capture.dirty d WHERE d.org_id=f.org_id AND d.target_kind=f.target_kind AND d.target_id=f.target_id);
-    DELETE FROM inbox_maintained.rows r
-    WHERE NOT EXISTS (SELECT 1 FROM inbox_message_capture.dirty d WHERE d.org_id=r.org_id AND d.target_kind=r.target_kind AND d.target_id=r.target_id);
-    DELETE FROM inbox_message_capture.route_edges;
-    INSERT INTO inbox_message_capture.route_edges(org_id,message_id,conversation_id,phone_e164)
-    SELECT m.org_id,m.id,m.conversation_id,
-      CASE WHEN length(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'))=10
-        THEN '+1'||regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g')
-        WHEN length(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'))=11
-          AND left(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'),1)='1'
-        THEN '+'||regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g') END
-    FROM public.messages m
-    WHERE m.channel='sms' AND m.conversation_id IS NOT NULL
-      AND CASE WHEN length(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'))=10
-        THEN '+1'||regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g')
-        WHEN length(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'))=11
-          AND left(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'),1)='1'
-        THEN '+'||regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g') END IS NOT NULL
-  `);
-  const dirty = (await client.query("SELECT org_id,target_kind,target_id FROM inbox_message_capture.dirty ORDER BY org_id,target_kind,target_id")).rows;
-  const resultCounts = { targets: dirty.length, applied: 0, already_applied: 0 };
-  for (const row of dirty) {
+async function rebuildCaptureAndProjection(client, observedAt, {
+  deadline = Date.now() + RECOVERY_REBUILD_TIMEOUT_MS,
+  batchSize = RECOVERY_BATCH_SIZE,
+  sourceBatchSize = RECOVERY_SOURCE_BATCH_SIZE,
+  onBatchBeforeCommit,
+  onBatchCommitted,
+} = {}) {
+  const resultCounts = {
+    target_batches: 0,
+    target_rows: 0,
+    applied: 0,
+    already_applied: 0,
+    sender_batches: 0,
+    route_batches: 0,
+    stale_route_edges_deleted: 0,
+    stale_projection_rows_deleted: 0,
+    queue_cleared: 0,
+  };
+  const processedGenerations = new Map();
+  let committedBatchCount = 0;
+
+  const runBatch = async (kind, work) => {
     if (Date.now() > deadline) throw new ReconciliationBlocked("RECOVERY_REBUILD_TIMEOUT");
-    const candidate = (await client.query(
-      "SELECT inbox_maintained.snapshot($1,$2,$3,$4) AS candidate",
-      [row.org_id, row.target_kind, row.target_id, observedAt],
-    )).rows[0]?.candidate;
-    if (!candidate) throw new ReconciliationBlocked("RECOVERY_SNAPSHOT_MISSING");
-    const result = (await client.query("SELECT inbox_maintained.publish($1) AS result", [candidate])).rows[0]?.result;
-    if (!['applied', 'already_applied'].includes(result)) throw new ReconciliationBlocked(`RECOVERY_PUBLISH_${String(result).toUpperCase()}`);
-    resultCounts[result]++;
+    await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+    let committed = false;
+    try {
+      await client.query("SET LOCAL statement_timeout='15s'");
+      await client.query("SET LOCAL lock_timeout='2s'");
+      const value = await work();
+      await onBatchBeforeCommit?.({ kind, ...value });
+      await client.query("COMMIT");
+      committed = true;
+      committedBatchCount++;
+      await onBatchCommitted?.({ kind, batch_number: committedBatchCount, ...value });
+      return value;
+    } catch (error) {
+      if (!committed) await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    }
+  };
+
+  let senderCursor = null;
+  for (;;) {
+    const value = await runBatch("sender-groups", async () => {
+      const rows = (await client.query(
+        `SELECT DISTINCT org_id,from_address AS raw_sender
+           FROM public.messages
+          WHERE channel='sms' AND direction='inbound' AND contact_id IS NULL
+            AND from_address IS NOT NULL AND from_address<>''
+            AND ($1::uuid IS NULL OR org_id>$1::uuid OR (org_id=$1::uuid AND from_address>$2))
+          ORDER BY org_id,raw_sender
+          LIMIT $3`,
+        [senderCursor?.org_id ?? null, senderCursor?.raw_sender ?? null, sourceBatchSize],
+      )).rows;
+      for (const row of rows) await client.query("SELECT inbox_message_capture.sender_id($1,$2)", [row.org_id, row.raw_sender]);
+      return { rows: rows.length, last: rows.at(-1) ?? null };
+    });
+    resultCounts.sender_batches++;
+    if (value.rows === 0) break;
+    senderCursor = value.last;
   }
+
+  let messageCursor = null;
+  for (;;) {
+    const value = await runBatch("route-edges", async () => {
+      const rows = (await client.query(
+        `SELECT id,org_id,conversation_id,channel,direction,from_address,to_address
+           FROM public.messages
+          WHERE ($1::uuid IS NULL OR id>$1::uuid)
+          ORDER BY id
+          LIMIT $2`,
+        [messageCursor, sourceBatchSize],
+      )).rows;
+      const ids = rows.map((row) => row.id);
+      if (ids.length > 0) {
+        await client.query("DELETE FROM inbox_message_capture.route_edges WHERE message_id=ANY($1::uuid[])", [ids]);
+        await client.query(
+          `INSERT INTO inbox_message_capture.route_edges(org_id,message_id,conversation_id,phone_e164)
+           SELECT m.org_id,m.id,m.conversation_id,
+             CASE WHEN length(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'))=10
+               THEN '+1'||regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g')
+               WHEN length(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'))=11
+                 AND left(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'),1)='1'
+               THEN '+'||regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g') END
+           FROM public.messages m
+          WHERE m.id=ANY($1::uuid[])
+            AND m.channel='sms' AND m.conversation_id IS NOT NULL
+            AND CASE WHEN length(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'))=10
+              THEN '+1'||regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g')
+              WHEN length(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'))=11
+                AND left(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'),1)='1'
+              THEN '+'||regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g') END IS NOT NULL
+           ON CONFLICT(org_id,message_id) DO UPDATE SET conversation_id=excluded.conversation_id,phone_e164=excluded.phone_e164`,
+          [ids],
+        );
+      }
+      return { rows, row_count: rows.length };
+    });
+    resultCounts.route_batches++;
+    if (value.row_count === 0) break;
+    messageCursor = value.rows.at(-1).id;
+  }
+
+  for (;;) {
+    const value = await runBatch("stale-route-edges", async () => {
+      const result = await client.query(
+        `WITH stale AS (
+           SELECT e.org_id,e.message_id
+             FROM inbox_message_capture.route_edges e
+             LEFT JOIN public.messages m ON m.org_id=e.org_id AND m.id=e.message_id
+            WHERE m.id IS NULL
+            ORDER BY e.org_id,e.message_id
+            LIMIT $1
+         )
+         DELETE FROM inbox_message_capture.route_edges e
+          USING stale
+          WHERE e.org_id=stale.org_id AND e.message_id=stale.message_id`,
+        [sourceBatchSize],
+      );
+      return { rows: result.rowCount };
+    });
+    resultCounts.stale_route_edges_deleted += value.rows;
+    if (value.rows === 0) break;
+  }
+
+  let targetCursor = null;
+  for (;;) {
+    const value = await runBatch("targets", async () => {
+      const rows = (await client.query(
+        `WITH known_targets AS (
+           SELECT DISTINCT org_id,'known_conversation'::text AS target_kind,conversation_id AS target_id
+             FROM public.messages WHERE channel='sms' AND conversation_id IS NOT NULL
+           UNION
+           SELECT DISTINCT org_id,'known_conversation'::text,conversation_id
+             FROM public.ai_disposition_reviews WHERE conversation_id IS NOT NULL
+           UNION
+           SELECT DISTINCT org_id,'known_conversation'::text,conversation_id
+             FROM public.message_threads WHERE conversation_id IS NOT NULL
+         ), unknown_targets AS (
+           SELECT DISTINCT m.org_id,'unknown_sender'::text AS target_kind,g.sender_group_id AS target_id
+             FROM public.messages m
+             JOIN inbox_message_capture.sender_groups g
+               ON g.org_id=m.org_id AND g.raw_sender COLLATE "C"=m.from_address COLLATE "C"
+            WHERE m.channel='sms' AND m.direction='inbound' AND m.contact_id IS NULL
+              AND m.from_address IS NOT NULL AND m.from_address<>''
+         ), all_targets AS (
+           SELECT org_id,target_kind,target_id FROM known_targets
+           UNION
+           SELECT org_id,target_kind,target_id FROM unknown_targets
+           UNION
+           SELECT org_id,target_kind,target_id FROM inbox_message_capture.dirty
+         )
+         SELECT org_id,target_kind,target_id
+           FROM all_targets
+          WHERE $1::uuid IS NULL OR (org_id,target_kind,target_id)>($1::uuid,$2::text,$3::uuid)
+          ORDER BY org_id,target_kind,target_id
+          LIMIT $4`,
+        [targetCursor?.org_id ?? null, targetCursor?.target_kind ?? null, targetCursor?.target_id ?? null, batchSize],
+      )).rows;
+      let applied = 0;
+      let alreadyApplied = 0;
+      let queueCleared = 0;
+      for (const row of rows) {
+        const dirty = (await client.query(
+          `INSERT INTO inbox_message_capture.dirty(org_id,target_kind,target_id,generation)
+           VALUES($1,$2,$3,1)
+           ON CONFLICT(org_id,target_kind,target_id)
+           DO UPDATE SET generation=inbox_message_capture.dirty.generation+1
+           RETURNING generation`,
+          [row.org_id, row.target_kind, row.target_id],
+        )).rows[0];
+        processedGenerations.set(targetMapKey(row), Number(dirty.generation));
+        const candidate = (await client.query(
+          "SELECT inbox_maintained.snapshot($1,$2,$3,$4) AS candidate",
+          [row.org_id, row.target_kind, row.target_id, observedAt],
+        )).rows[0]?.candidate;
+        if (!candidate) throw new ReconciliationBlocked("RECOVERY_SNAPSHOT_MISSING");
+        const result = (await client.query("SELECT inbox_maintained.publish($1) AS result", [candidate])).rows[0]?.result;
+        if (!['applied', 'already_applied'].includes(result)) throw new ReconciliationBlocked(`RECOVERY_PUBLISH_${String(result).toUpperCase()}`);
+        if (result === "applied") applied++;
+        else alreadyApplied++;
+        queueCleared += (await client.query(
+          "DELETE FROM inbox_maintained.queue WHERE org_id=$1 AND target_kind=$2 AND target_id=$3",
+          [row.org_id, row.target_kind, row.target_id],
+        )).rowCount;
+      }
+      return { rows, row_count: rows.length, applied, already_applied: alreadyApplied, queue_cleared: queueCleared };
+    });
+    resultCounts.target_batches++;
+    resultCounts.target_rows += value.row_count;
+    resultCounts.applied += value.applied;
+    resultCounts.already_applied += value.already_applied;
+    resultCounts.queue_cleared += value.queue_cleared;
+    if (value.row_count === 0) break;
+    targetCursor = value.rows.at(-1);
+  }
+
+  for (;;) {
+    const value = await runBatch("stale-projections", async () => {
+      let deleted = 0;
+      for (const relation of ["inbox_bridge.summaries", "inbox_bridge.filter_rows", "inbox_maintained.rows"]) {
+        const result = await client.query(
+          `WITH stale AS (
+             SELECT p.org_id,p.target_kind,p.target_id
+               FROM ${relation} p
+              WHERE NOT EXISTS (
+                SELECT 1 FROM inbox_message_capture.dirty d
+                 WHERE d.org_id=p.org_id AND d.target_kind=p.target_kind AND d.target_id=p.target_id
+              )
+              ORDER BY p.org_id,p.target_kind,p.target_id
+              LIMIT $1
+           )
+           DELETE FROM ${relation} p
+            USING stale
+            WHERE p.org_id=stale.org_id AND p.target_kind=stale.target_kind AND p.target_id=stale.target_id`,
+          [batchSize],
+        );
+        deleted += result.rowCount;
+      }
+      return { rows: deleted };
+    });
+    resultCounts.stale_projection_rows_deleted += value.rows;
+    if (value.rows === 0) break;
+  }
+
   if (Date.now() > deadline) throw new ReconciliationBlocked("RECOVERY_REBUILD_TIMEOUT");
-  const finalSourceGenerationDigest = await captureDirtyGenerationDigest(client);
-  if (finalSourceGenerationDigest !== sourceGenerationDigest) throw new ReconciliationBlocked("RECOVERY_SOURCE_CHANGED");
-  const cleared = await client.query("DELETE FROM inbox_maintained.queue");
-  resultCounts.queue_cleared = cleared.rowCount;
-  resultCounts.source_generation_digest = sourceGenerationDigest;
+  const currentDirty = await captureDirtyGenerationRows(client);
+  const currentByTarget = new Map(currentDirty.map((row) => [targetMapKey(row), Number(row.generation)]));
+  for (const [key, expectedGeneration] of processedGenerations) {
+    if (currentByTarget.get(key) !== expectedGeneration) throw new ReconciliationBlocked("RECOVERY_SOURCE_CHANGED");
+  }
+  resultCounts.source_generation_digest = digestJson(currentDirty);
+  resultCounts.processed_target_count = processedGenerations.size;
+  resultCounts.committed_batch_count = committedBatchCount;
   return resultCounts;
 }
 
 async function runCaptureRecovery(client, {
   expectedCatalogFingerprint = EXPECTED_CATALOG_FINGERPRINT,
   apply = false,
+  recoveryBatchSize = RECOVERY_BATCH_SIZE,
+  recoverySourceBatchSize = RECOVERY_SOURCE_BATCH_SIZE,
+  onRecoveryBatchBeforeCommit,
+  onRecoveryBatchCommitted,
 } = {}) {
   const initial = await readOnlyRecoveryPlan(client, { expectedCatalogFingerprint });
   if (initial.serving_enabled === true) return { status: "blocked", evidence: initial, recovery: null };
+  if (initial.status !== "ready") return { status: "blocked", evidence: initial, recovery: null };
   if (!apply) return { status: "recovery-dry-run", evidence: initial, recovery: { applied: false } };
   await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
   let committed = false;
@@ -945,20 +1174,24 @@ async function runCaptureRecovery(client, {
     await client.query("SET LOCAL lock_timeout='2s'");
     await client.query("SELECT singleton FROM inbox_control.rollout WHERE singleton FOR UPDATE");
     const recheck = await collectRecoveryPlan(client, { expectedCatalogFingerprint });
-    if (!recheck.checks.serving_disabled) throw new ReconciliationBlocked("SERVING_ENABLED");
-    if (!recheck.checks.catalog_fingerprint_match) throw new ReconciliationBlocked("CATALOG_FINGERPRINT_MISMATCH");
-    if (!recheck.checks.source_writer_coverage) throw new ReconciliationBlocked("SOURCE_WRITER_COVERAGE");
+    if (recheck.status !== "ready") throw new ReconciliationBlocked(`RECOVERY_GATE_${recheck.errors[0] ?? "BLOCKED"}`);
     const oldGeneration = recheck.capture_generation;
     const generation = (await client.query("UPDATE inbox_capture_boundary.generation SET generation=gen_random_uuid() WHERE singleton RETURNING generation::text AS generation")).rows[0]?.generation;
     if (!generation) throw new ReconciliationBlocked("CAPTURE_GENERATION_MISSING");
     const invalidated = await client.query("DELETE FROM inbox_read.boundaries WHERE generation IS DISTINCT FROM $1::uuid", [generation]);
-    const rebuild = await rebuildCaptureAndProjection(client, new Date().toISOString());
-    const beforeCommit = await collectRecoveryPlan(client, { expectedCatalogFingerprint });
-    if (!beforeCommit.checks.full_reconciliation) throw new ReconciliationBlocked("RECOVERY_RECONCILIATION_FAILED");
     await client.query("COMMIT");
     committed = true;
+    const rebuild = await rebuildCaptureAndProjection(client, new Date().toISOString(), {
+      batchSize: recoveryBatchSize,
+      sourceBatchSize: recoverySourceBatchSize,
+      onBatchBeforeCommit: onRecoveryBatchBeforeCommit,
+      onBatchCommitted: async (context) => {
+        committed = true;
+        await onRecoveryBatchCommitted?.(context);
+      },
+    });
     const after = await readOnlyRecoveryPlan(client, { expectedCatalogFingerprint });
-    if (!after.checks.full_reconciliation) throw new ReconciliationBlocked("RECOVERY_RECONCILIATION_FAILED");
+    if (after.status !== "ready") throw new ReconciliationBlocked(`RECOVERY_RECONCILIATION_FAILED_${after.errors[0] ?? "BLOCKED"}`);
     if (after.source_generation_digest !== rebuild.source_generation_digest) throw new ReconciliationBlocked("RECOVERY_SOURCE_CHANGED");
     after.recovery = {
       applied: true,
@@ -972,6 +1205,9 @@ async function runCaptureRecovery(client, {
     return { status: "recovery-written", evidence: after, recovery: after.recovery };
   } catch (error) {
     if (!committed) await client.query("ROLLBACK").catch(() => {});
+    if (committed && !(error instanceof ReconciliationCommitted)) {
+      throw new ReconciliationCommitted("RECOVERY_COMMITTED_POSTCHECK_FAILED", error);
+    }
     throw error;
   }
 }
@@ -983,9 +1219,20 @@ export async function reconcileAndMaybeWrite(client, {
   writeMarkers = false,
   recoverCaptureBypass = false,
   applyCaptureRecovery = false,
+  recoveryBatchSize = RECOVERY_BATCH_SIZE,
+  recoverySourceBatchSize = RECOVERY_SOURCE_BATCH_SIZE,
+  onRecoveryBatchBeforeCommit,
+  onRecoveryBatchCommitted,
   beforeWrite,
 } = {}) {
-  if (recoverCaptureBypass) return runCaptureRecovery(client, { expectedCatalogFingerprint, apply: applyCaptureRecovery });
+  if (recoverCaptureBypass) return runCaptureRecovery(client, {
+    expectedCatalogFingerprint,
+    apply: applyCaptureRecovery,
+    recoveryBatchSize,
+    recoverySourceBatchSize,
+    onRecoveryBatchBeforeCommit,
+    onRecoveryBatchCommitted,
+  });
   const initial = await readOnlyEvidence(client, { expectedCatalogFingerprint, sourceWriterAttestation, attestationPath });
   if (initial.status !== "ready") return { status: "blocked", evidence: initial, marker_write: null };
   if (!writeMarkers) return { status: "ready", evidence: initial, marker_write: null };
@@ -993,6 +1240,7 @@ export async function reconcileAndMaybeWrite(client, {
   await beforeWrite?.(initial);
 
   await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+  let committed = false;
   try {
     await client.query("SET LOCAL statement_timeout='60s'");
     await client.query("SET LOCAL lock_timeout='2s'");
@@ -1012,18 +1260,27 @@ export async function reconcileAndMaybeWrite(client, {
     );
     if (updated.rowCount === 1) {
       await client.query("COMMIT");
-      return { status: "written", evidence: recheck, marker_write: { rows_changed: 1 } };
+      committed = true;
+      const after = await readOnlyEvidence(client, { expectedCatalogFingerprint, sourceWriterAttestation, attestationPath });
+      if (after.status !== "ready") throw new ReconciliationBlocked(`MARKER_POSTCHECK_FAILED_${after.errors[0] ?? "BLOCKED"}`);
+      return { status: "written", evidence: after, marker_write: { rows_changed: 1 } };
     }
     const row = (await client.query(
       "SELECT backfill_complete,reconciliation_complete,serving_enabled FROM inbox_control.rollout WHERE singleton",
     )).rows[0];
     if (row?.serving_enabled === false && row?.backfill_complete === true && row?.reconciliation_complete === true) {
       await client.query("COMMIT");
-      return { status: "idempotent", evidence: recheck, marker_write: { rows_changed: 0 } };
+      committed = true;
+      const after = await readOnlyEvidence(client, { expectedCatalogFingerprint, sourceWriterAttestation, attestationPath });
+      if (after.status !== "ready") throw new ReconciliationBlocked(`MARKER_POSTCHECK_FAILED_${after.errors[0] ?? "BLOCKED"}`);
+      return { status: "idempotent", evidence: after, marker_write: { rows_changed: 0 } };
     }
     throw new ReconciliationBlocked("MARKER_STATE_CHANGED");
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
+    if (!committed) await client.query("ROLLBACK").catch(() => {});
+    if (committed && !(error instanceof ReconciliationCommitted)) {
+      throw new ReconciliationCommitted("MARKER_COMMITTED_POSTCHECK_FAILED", error);
+    }
     throw error;
   }
 }
@@ -1048,6 +1305,17 @@ function args(argv, env = process.env) {
 
 function redactedError(error) {
   return error instanceof ReconciliationBlocked ? error.code : /^[A-Z0-9_]+$/.test(error?.message ?? "") ? error.message : "RECONCILIATION_FAILED";
+}
+
+export function reconciliationExitCode(error) {
+  return error instanceof ReconciliationCommitted ? 3 : 2;
+}
+
+function errorReport(error) {
+  if (error instanceof ReconciliationCommitted) {
+    return `${error.code}: change landed; post-commit verification failed, rerun to resume or verify`;
+  }
+  return redactedError(error);
 }
 
 export async function main(argv = process.argv.slice(2), env = process.env) {
@@ -1081,7 +1349,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().then((code) => { process.exitCode = code; }).catch((error) => {
-    process.stderr.write(`${redactedError(error)}\n`);
-    process.exitCode = 2;
+    process.stderr.write(`${errorReport(error)}\n`);
+    process.exitCode = reconciliationExitCode(error);
   });
 }

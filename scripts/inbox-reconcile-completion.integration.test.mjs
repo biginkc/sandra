@@ -5,6 +5,7 @@ import { Client } from "pg";
 
 import {
   EXPECTED_CATALOG_FINGERPRINT,
+  ReconciliationCommitted,
   SOURCE_WRITERS,
   attestationDigest,
   catalogFingerprint,
@@ -12,6 +13,7 @@ import {
   connectionConfig,
   digestJson,
   reconcileAndMaybeWrite,
+  reconciliationExitCode,
 } from "./inbox-reconcile-completion.mjs";
 
 const BASE_DSN = process.env.INBOX_RECONCILIATION_TEST_DATABASE_URL;
@@ -196,6 +198,38 @@ test("R6a runs against the real J5a schema and proves source, projection, filter
     await client.query("DELETE FROM inbox_bridge.summaries WHERE org_id=$1 AND target_id=$2", [ids.org, tombstone]);
     await client.query("DELETE FROM inbox_bridge.filter_rows WHERE org_id=$1 AND target_id=$2", [ids.org, tombstone]);
 
+    const duplicateConversation = randomUUID();
+    const duplicateThreadIds = [randomUUID(), randomUUID()];
+    await client.query("ALTER TABLE public.message_threads DISABLE TRIGGER zzzzz_inbox_backfill_collision");
+    try {
+      for (const threadId of duplicateThreadIds) {
+        await client.query(
+          "INSERT INTO public.message_threads(id,org_id,channel,contact_id,property_id,conversation_id) VALUES($1,$2,'sms',$3,$4,$5)",
+          [threadId, ids.org, ids.contact, ids.property, duplicateConversation],
+        );
+      }
+    } finally {
+      await client.query("ALTER TABLE public.message_threads ENABLE TRIGGER zzzzz_inbox_backfill_collision");
+    }
+    await publishKnown(client, { org: ids.org, conversation: duplicateConversation });
+    await client.query("DELETE FROM inbox_maintained.queue WHERE org_id=$1 AND target_id=$2", [ids.org, duplicateConversation]);
+    let duplicateEvidence = await collectEvidence(client, base);
+    assert.equal(duplicateEvidence.status, "blocked", "a base-table duplicate must block even without eligible messages");
+    assert.equal(duplicateEvidence.checks.no_base_table_duplicates, false);
+    assert.equal(duplicateEvidence.base_table_duplicates.duplicate_group_count, 1);
+    result = await reconcileAndMaybeWrite(client, { ...base, writeMarkers: true });
+    assert.equal(result.status, "blocked", "marker gate must independently reject a bypass-created duplicate");
+    assert.equal(result.evidence.checks.no_base_table_duplicates, false);
+    result = await reconcileAndMaybeWrite(client, { expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT, recoverCaptureBypass: true });
+    assert.equal(result.status, "blocked", "recovery gate must independently reject a bypass-created duplicate");
+    assert.equal(result.evidence.checks.no_base_table_duplicates, false);
+    await client.query("DELETE FROM public.message_threads WHERE org_id=$1 AND conversation_id=$2", [ids.org, duplicateConversation]);
+    await client.query("DELETE FROM inbox_maintained.queue WHERE org_id=$1 AND target_id=$2", [ids.org, duplicateConversation]);
+    await client.query("DELETE FROM inbox_maintained.rows WHERE org_id=$1 AND target_id=$2", [ids.org, duplicateConversation]);
+    await client.query("DELETE FROM inbox_message_capture.dirty WHERE org_id=$1 AND target_id=$2", [ids.org, duplicateConversation]);
+    await client.query("DELETE FROM inbox_bridge.summaries WHERE org_id=$1 AND target_id=$2", [ids.org, duplicateConversation]);
+    await client.query("DELETE FROM inbox_bridge.filter_rows WHERE org_id=$1 AND target_id=$2", [ids.org, duplicateConversation]);
+
     const concurrentConversation = randomUUID();
     const concurrentMessage = randomUUID();
     result = await reconcileAndMaybeWrite(client, {
@@ -239,10 +273,64 @@ test("R6a runs against the real J5a schema and proves source, projection, filter
     result = await reconcileAndMaybeWrite(client, { expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT, recoverCaptureBypass: true });
     assert.equal(result.status, "recovery-dry-run");
     assert.equal((await client.query("SELECT generation::text AS generation FROM inbox_capture_boundary.generation WHERE singleton")).rows[0].generation, beforeRecovery);
+
+    let writerPromise = null;
+    let writerStartedAt = null;
+    let writerElapsedMs = null;
+    const recoveryWriterMessage = randomUUID();
+    const concurrentRecoveryOptions = {
+      expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT,
+      recoverCaptureBypass: true,
+      applyCaptureRecovery: true,
+      recoveryBatchSize: 1,
+      onRecoveryBatchBeforeCommit: async ({ kind, rows = [] }) => {
+        if (kind !== "targets" || writerPromise || !rows.some((row) => String(row.org_id) === ids.org && String(row.target_id) === ids.conversation)) return;
+        writerStartedAt = Date.now();
+        writerPromise = peer.query(`
+          INSERT INTO public.messages(id,org_id,channel,direction,status,property_id,contact_id,conversation_id,from_address,to_address,body,created_at)
+          VALUES($1,$2,'sms','inbound','received',$3,$4,$5,'+18165550103','+18162804181','Recovery concurrent writer',clock_timestamp())
+        `, [recoveryWriterMessage, ids.org, ids.property, ids.contact, ids.conversation]);
+      },
+      onRecoveryBatchCommitted: async ({ kind }) => {
+        if (kind === "targets" && writerPromise && writerElapsedMs === null) {
+          await writerPromise;
+          writerElapsedMs = Date.now() - writerStartedAt;
+        }
+      },
+    };
+    await assert.rejects(
+      reconcileAndMaybeWrite(client, concurrentRecoveryOptions),
+      (error) => error instanceof ReconciliationCommitted && error.code === "RECOVERY_COMMITTED_POSTCHECK_FAILED",
+    );
+    assert.ok(writerElapsedMs !== null, "the writer must overlap a recovery target batch");
+    assert.ok(writerElapsedMs < 2_000, `existing-conversation writer waited ${writerElapsedMs}ms for recovery; the batch bound was lost`);
+    await peer.query("DELETE FROM public.messages WHERE id=$1", [recoveryWriterMessage]);
+    await publishKnown(client, ids);
+    await client.query("DELETE FROM inbox_maintained.queue WHERE org_id=$1", [ids.org]);
+
+    let interrupted = false;
+    await assert.rejects(
+      reconcileAndMaybeWrite(client, {
+        expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT,
+        recoverCaptureBypass: true,
+        applyCaptureRecovery: true,
+        recoveryBatchSize: 1,
+        onRecoveryBatchCommitted: async ({ kind }) => {
+          if (kind === "targets" && !interrupted) {
+            interrupted = true;
+            throw new Error("test interruption after committed recovery batch");
+          }
+        },
+      }),
+      (error) => error instanceof ReconciliationCommitted && error.code === "RECOVERY_COMMITTED_POSTCHECK_FAILED",
+    );
+    assert.equal(interrupted, true, "the interruption must occur after a committed batch");
     result = await reconcileAndMaybeWrite(client, { expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT, recoverCaptureBypass: true, applyCaptureRecovery: true });
     assert.equal(result.status, "recovery-written");
     assert.notEqual(result.recovery.capture_generation_before, result.recovery.capture_generation_after);
     assert.equal(result.evidence.checks.full_reconciliation, true);
+    assert.equal(result.evidence.checks.no_base_table_duplicates, true);
+    assert.equal(reconciliationExitCode(new ReconciliationCommitted("TEST")), 3);
     assert.deepEqual((await client.query("SELECT serving_enabled,backfill_complete,reconciliation_complete FROM inbox_control.rollout WHERE singleton")).rows[0], {
       serving_enabled: false,
       backfill_complete: false,

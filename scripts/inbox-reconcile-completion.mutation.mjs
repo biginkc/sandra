@@ -18,6 +18,17 @@ function replaceOnce(input, needle, replacement, name) {
   return `${input.slice(0, index)}${replacement}${input.slice(index + needle.length)}`;
 }
 
+function replaceOccurrence(input, needle, replacement, occurrence, name) {
+  let from = 0;
+  let index = -1;
+  for (let count = 0; count < occurrence; count++) {
+    index = input.indexOf(needle, from);
+    if (index < 0) throw new Error(`${name}: mutation target not found`);
+    from = index + needle.length;
+  }
+  return `${input.slice(0, index)}${replacement}${input.slice(index + needle.length)}`;
+}
+
 const mutations = [
   {
     name: "M1 recheck=initial",
@@ -37,6 +48,25 @@ const mutations = [
       "serving_enabled guard removed",
     ),
   },
+  {
+    name: "marker base-table duplicate guard removed",
+    source: replaceOnce(
+      source,
+      "no_base_table_duplicates: noBaseTableDuplicates,",
+      "no_base_table_duplicates: true,",
+      "marker base-table duplicate guard removed",
+    ),
+  },
+  {
+    name: "recovery base-table duplicate guard removed",
+    source: replaceOccurrence(
+      source,
+      "no_base_table_duplicates: noBaseTableDuplicates,",
+      "no_base_table_duplicates: true,",
+      2,
+      "recovery base-table duplicate guard removed",
+    ),
+  },
 ];
 
 for (const mutation of mutations) {
@@ -51,6 +81,8 @@ for (const mutation of mutations) {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
+    process.stdout.write(`--- ${mutation.name}: child stdout ---\n${result.stdout || "(empty)"}`);
+    process.stderr.write(`--- ${mutation.name}: child stderr ---\n${result.stderr || "(empty)"}`);
     if (result.status === 0) throw new Error(`${mutation.name} survived; the integration guard is hollow`);
     process.stdout.write(`${mutation.name}: killed (integration test failed as expected)\n`);
   } finally {

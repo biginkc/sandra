@@ -55,7 +55,7 @@ jobs:
       - name: Run R6a integration and mutation guards
         run: INBOX_RECONCILIATION_TEST_DATABASE_URL="$E2E_CI_SUPABASE_DB_URL" npm run test:inbox-reconcile
 
-      - name: Kill M1 and serving-enabled mutants
+      - name: Kill reconciliation guard mutants
         run: INBOX_RECONCILIATION_TEST_DATABASE_URL="$E2E_CI_SUPABASE_DB_URL" npm run test:inbox-reconcile-mutations
 
       - name: Destroy disposable stack
