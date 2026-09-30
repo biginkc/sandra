@@ -26,12 +26,18 @@ test('image evidence binds exact source sha, immutable images, and manifest file
       assert.ok(Object.keys(service.files).length > 0);
       for (const hash of Object.values(service.files)) assert.match(hash, /^[a-f0-9]{64}$/);
     }
+    assert.deepEqual(Object.keys(evidence.services['operation-worker'].files).sort(), [
+      'core.mjs', 'package-lock.json', 'package.json', 'server.mjs',
+    ]);
     assert.deepEqual(Object.keys(evidence.services['reply-send-worker'].files).sort(), [
-      'Dockerfile', 'core.mjs', 'package-lock.json', 'package.json', 'runner.mjs', 'server.mjs',
-      'vendor/reply-provider.mjs', 'vendor/test-transport.mjs', 'worker-role.sql', 'worker.sql',
+      'core.mjs', 'package-lock.json', 'package.json', 'runner.mjs', 'server.mjs',
+      'vendor/reply-provider.mjs',
     ]);
     assert.deepEqual(Object.keys(evidence.services['projection-worker'].files).sort(), [
-      'Dockerfile', 'config.mjs', 'config.test.mjs', 'core.mjs', 'package-lock.json', 'package.json', 'server.mjs', 'worker-role.sql',
+      'config.mjs', 'core.mjs', 'package-lock.json', 'package.json', 'server.mjs',
+    ]);
+    assert.deepEqual(Object.keys(evidence.services['sync-relay'].files).sort(), [
+      'server.mjs',
     ]);
     assert.deepEqual(JSON.parse(await readFile(output, 'utf8')), evidence);
   } finally {
@@ -54,8 +60,12 @@ test('runtime image workflow pins source, base image, GHCR permissions, and all 
   assert.match(workflow, /sha:\n\s+description:[^\n]+\n\s+required:\s+true/);
   assert.match(workflow, /packages:\s*write/);
   assert.match(workflow, /ref:\s*\$\{\{ inputs\.sha \}\}/);
+  assert.match(workflow, /fetch-depth:\s*0/);
+  assert.match(workflow, /git merge-base --is-ancestor "\$SOURCE_SHA" refs\/remotes\/origin\/main/);
   assert.match(workflow, /node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5/);
-  assert.equal((workflow.match(/docker\/build-push-action@v6/g) ?? []).length, 4);
+  assert.equal((workflow.match(/docker\/build-push-action@[0-9a-f]{40} # v6/g) ?? []).length, 4);
   assert.match(workflow, /secrets\.GITHUB_TOKEN/);
-  assert.match(workflow, /upload-artifact@v4/);
+  assert.match(workflow, /upload-artifact@[0-9a-f]{40} # v4/);
+  assert.doesNotMatch(workflow, /uses:\s+[^\n]+@[vV][0-9]/);
+  assert.equal((workflow.match(/uses:\s+[^\n]+@[0-9a-f]{40}\s+#\s+v[0-9]+/g) ?? []).length, 8);
 });

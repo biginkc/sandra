@@ -5,7 +5,7 @@ import {createEndpointHandler} from '@restatedev/restate-sdk/node';
 import {createRunner,dispatchBatch,workerConfiguration,createReadinessProbe,createRestateReadinessProbe,databaseConfiguration} from './core.mjs';
 if(process.env.INBOX_ACTION_WORKER_ENABLED!=='1')throw Error('Inbox action worker is disabled');
 if(!process.env.INBOX_ACTION_DATABASE_URL||!process.env.INBOX_RESTATE_INGRESS_URL)throw Error('Private worker configuration missing');
-const {ingress,identityKeys,connections}=workerConfiguration(process.env);
+const {ingress,identityKeys,connections,registrationPath}=workerConfiguration(process.env);
 const pool=new pg.Pool({...databaseConfiguration(process.env),max:connections,connectionTimeoutMillis:5000,idleTimeoutMillis:10000,statement_timeout:15000,query_timeout:20000,application_name:'sandra-inbox-action-worker'});
 const authority=(await pool.query(`SELECT current_user AS role,
  NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls)
@@ -40,7 +40,10 @@ const server=http.createServer(async(req,res)=>{
   res.writeHead(healthy?200:503,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify({ready:healthy}));return;
  }
  if(stopping){res.writeHead(503);res.end();return;}
- return endpoint(req,res);
+ const restatePrefix=`${registrationPath}/`;
+ if(!req.url.startsWith(restatePrefix)){res.writeHead(404);res.end();return;}
+ const originalUrl=req.url;req.url=req.url.slice(registrationPath.length)||'/';
+ try{return await endpoint(req,res);}finally{req.url=originalUrl;}
 });
 server.listen(Number(process.env.PORT??9080),process.env.INBOX_WORKER_BIND??'127.0.0.1');
 async function shutdown(){if(stopping)return;stopping=true;clearInterval(timer);server.close();await inflight;await pool.end();}

@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from urllib.error import HTTPError, URLError
@@ -58,6 +59,7 @@ RESTATE_IMAGE = (
     "docker.restate.dev/restatedev/restate@sha256:"
     "675b85e7bf674f9dfda04a391fa33e850650d57e464b694ca8df5866acad95cc"
 )
+VERSIONED_RUNTIME_PATH = re.compile(r"^/runtime/[a-f0-9]{64}$")
 
 
 class GuardError(RuntimeError):
@@ -132,6 +134,9 @@ def check_worker(name: str, expected: dict) -> dict:
     assert_running_image(state, image_id, name)
     if expected["enabled"] not in env:
         raise GuardError(f"worker {name} is not explicitly enabled")
+    expected_path = f"INBOX_RESTATE_REGISTRATION_PATH=/runtime/{image_id.removeprefix('sha256:')}"
+    if expected_path not in env:
+        raise GuardError(f"worker {name} does not expose its immutable image generation path")
     # The local profile must use the provider double.  A real provider key is
     # deliberately not accepted by this release-only registration helper.
     if "INBOX_ACTION_LOCAL_FIXTURE=1" not in env:
@@ -141,13 +146,20 @@ def check_worker(name: str, expected: dict) -> dict:
             raise GuardError("reply worker is missing the exact fixture provider double")
         if any(value.startswith("SENDILLO_API_KEY=") for value in env):
             raise GuardError("reply worker must not carry a provider credential in the fixture profile")
+    registration_endpoint = versioned_endpoint(expected["endpoint"], image_id)
     return {
         "name": name,
-        "endpoint": expected["endpoint"],
+        "endpoint": registration_endpoint,
         "image": state["Config"].get("Image"),
         "image_id": image_id,
         "service": expected["service"],
     }
+
+
+def versioned_endpoint(base: str, image_id: str) -> str:
+    if not re.fullmatch(r"sha256:[a-f0-9]{64}", image_id):
+        raise GuardError("worker image ID must be a full sha256 digest")
+    return f"{base}/runtime/{image_id.removeprefix('sha256:')}"
 
 
 def http_request(url: str, *, method: str = "GET", payload: dict | None = None, json_body: bool = True) -> tuple[int, object]:
@@ -194,12 +206,15 @@ def canonical_root_endpoint(value: object) -> tuple[str, str, int | None, str] |
         parsed = urlsplit(value)
         if parsed.scheme.lower() != "http" or parsed.username or parsed.password:
             return None
-        if parsed.hostname is None or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+        if parsed.hostname is None or parsed.query or parsed.fragment:
+            return None
+        path = parsed.path or "/"
+        if path != "/" and not VERSIONED_RUNTIME_PATH.fullmatch(path.rstrip("/")):
             return None
         port = parsed.port
     except ValueError:
         return None
-    return (parsed.scheme.lower(), parsed.hostname.lower(), port, "/")
+    return (parsed.scheme.lower(), parsed.hostname.lower(), port, path.rstrip("/") or "/")
 
 
 def deployment_uri_matches(actual: object, expected: str) -> bool:
@@ -254,15 +269,30 @@ def assert_generation_capacity(registry: dict, service: str) -> int:
     return generation_count
 
 
+def configured_railway_workers() -> dict:
+    generation = os.environ.get("INBOX_RUNTIME_GENERATION", "")
+    if not re.fullmatch(r"[a-f0-9]{64}", generation):
+        raise GuardError("INBOX_RUNTIME_GENERATION must be a full image digest")
+    return {
+        key: {
+            **worker,
+            "liveness_endpoint": worker["endpoint"],
+            "endpoint": f"{worker['endpoint']}/runtime/{generation}",
+        }
+        for key, worker in RAILWAY_WORKERS.items()
+    }
+
+
 def railway_liveness(worker: dict) -> dict:
-    status, _ = http_request(f"{worker['endpoint']}/livez", json_body=False)
+    status, _ = http_request(f"{worker.get('liveness_endpoint', worker['endpoint'])}/livez", json_body=False)
     if status != 200:
         raise GuardError(f"Railway worker {worker['service']} is not live: HTTP {status}")
     return {"endpoint": worker["endpoint"], "service": worker["service"], "status": status}
 
 
 def run_railway(register: bool) -> dict:
-    liveness = [railway_liveness(worker) for worker in RAILWAY_WORKERS.values()]
+    workers = configured_railway_workers()
+    liveness = [railway_liveness(worker) for worker in workers.values()]
     status, _ = http_request(f"{RAILWAY_ADMIN}/health", json_body=False)
     if status != 200:
         raise GuardError(f"Railway Restate admin is not healthy: HTTP {status}")
@@ -270,7 +300,7 @@ def run_railway(register: bool) -> dict:
     if registry_status != 200:
         raise GuardError(f"Railway Restate deployment registry is unavailable: HTTP {registry_status}")
     registrations = []
-    for worker in RAILWAY_WORKERS.values():
+    for worker in workers.values():
         current = deployment_matches(registry, worker["endpoint"], worker["service"])
         if current is not None:
             registrations.append({"endpoint": worker["endpoint"], "service": worker["service"], "state": "already_registered", **current})
@@ -344,6 +374,7 @@ def main() -> int:
         if current is not None:
             registrations.append({"endpoint": worker["endpoint"], "service": worker["service"], "state": "already_registered", **current})
             continue
+        assert_generation_capacity(registry, worker["service"])
         if args.register_owned_runtime:
             code, body = http_json(
                 "http://127.0.0.1:9070/deployments",

@@ -5,38 +5,28 @@ import { pathToFileURL } from 'node:url';
 
 const serviceFiles = {
   'operation-worker': [
-    'experiments/inbox-operation-worker/Dockerfile',
     'experiments/inbox-operation-worker/package.json',
     'experiments/inbox-operation-worker/package-lock.json',
     'experiments/inbox-operation-worker/core.mjs',
     'experiments/inbox-operation-worker/server.mjs',
   ],
   'reply-send-worker': [
-    'experiments/inbox-reply-send-worker/Dockerfile',
     'experiments/inbox-reply-send-worker/package.json',
     'experiments/inbox-reply-send-worker/package-lock.json',
     'experiments/inbox-reply-send-worker/core.mjs',
     'experiments/inbox-reply-send-worker/runner.mjs',
     'experiments/inbox-reply-send-worker/server.mjs',
     'experiments/inbox-reply-send-worker/vendor/reply-provider.mjs',
-    'experiments/inbox-reply-send-worker/vendor/test-transport.mjs',
-    'experiments/inbox-reply-send-worker/worker-role.sql',
-    'experiments/inbox-reply-send-worker/worker.sql',
   ],
   'projection-worker': [
-    'services/inbox-projection-worker/Dockerfile',
     'services/inbox-projection-worker/package.json',
     'services/inbox-projection-worker/package-lock.json',
     'services/inbox-projection-worker/core.mjs',
     'services/inbox-projection-worker/config.mjs',
     'services/inbox-projection-worker/server.mjs',
-    'services/inbox-projection-worker/worker-role.sql',
-    'services/inbox-projection-worker/config.test.mjs',
   ],
   'sync-relay': [
-    'services/inbox-sync-relay/Dockerfile',
     'services/inbox-sync-relay/server.mjs',
-    'services/inbox-sync-relay/railway.json',
   ],
 };
 const serviceContexts = {

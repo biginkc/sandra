@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import os
 from pathlib import Path
 import unittest
 
@@ -46,6 +47,44 @@ class RestateRegistrationTests(unittest.TestCase):
         self.assertFalse(module.deployment_uri_matches("http://127.0.0.1:9080//", "http://127.0.0.1:9080"))
         self.assertFalse(module.deployment_uri_matches("http://127.0.0.1:9080/?x=1", "http://127.0.0.1:9080"))
 
+    def test_registration_identity_contains_immutable_image_generation(self):
+        digest = "a" * 64
+        endpoint = module.versioned_endpoint("http://127.0.0.1:9080", "sha256:" + digest)
+        self.assertEqual(endpoint, "http://127.0.0.1:9080/runtime/" + digest)
+        self.assertTrue(module.deployment_uri_matches(endpoint + "/", endpoint))
+        self.assertFalse(module.deployment_uri_matches(endpoint.replace("a" * 64, "b" * 64), endpoint))
+        with self.assertRaises(module.GuardError):
+            module.versioned_endpoint("http://127.0.0.1:9080", "sha256:" + "A" * 64)
+
+    def test_local_worker_must_serve_the_image_generation_path(self):
+        digest = "d" * 64
+        state = {
+            "Config": {"Labels": {"purpose": module.PURPOSE, "owner": "release-infra", "marker": module.MARKER}, "Env": [
+                "INBOX_ACTION_WORKER_ENABLED=1",
+                "INBOX_ACTION_LOCAL_FIXTURE=1",
+                f"INBOX_RESTATE_REGISTRATION_PATH=/runtime/{digest}",
+            ], "Image": "release:tag"},
+            "State": {"Running": True},
+            "HostConfig": {"NetworkMode": "host"},
+            "Image": "sha256:" + digest,
+        }
+        original_require = module.require_release_container
+        original_image = os.environ.get("INBOX_RELEASE_OPERATION_IMAGE_ID")
+        module.require_release_container = lambda name: state
+        os.environ["INBOX_RELEASE_OPERATION_IMAGE_ID"] = "sha256:" + digest
+        try:
+            result = module.check_worker(module.WORKERS["operation"]["name"], module.WORKERS["operation"])
+            self.assertTrue(result["endpoint"].endswith("/runtime/" + digest))
+            state["Config"]["Env"] = ["INBOX_ACTION_WORKER_ENABLED=1", "INBOX_ACTION_LOCAL_FIXTURE=1"]
+            with self.assertRaises(module.GuardError):
+                module.check_worker(module.WORKERS["operation"]["name"], module.WORKERS["operation"])
+        finally:
+            module.require_release_container = original_require
+            if original_image is None:
+                os.environ.pop("INBOX_RELEASE_OPERATION_IMAGE_ID", None)
+            else:
+                os.environ["INBOX_RELEASE_OPERATION_IMAGE_ID"] = original_image
+
     def test_railway_mode_uses_fixed_private_hostnames(self):
         self.assertEqual(module.RAILWAY_ADMIN, "http://inbox-restate.railway.internal:9070")
         self.assertEqual(module.RAILWAY_WORKERS["operation"]["endpoint"], "http://inbox-operation-worker.railway.internal:9080")
@@ -74,13 +113,29 @@ class RestateRegistrationTests(unittest.TestCase):
         original_json = module.http_json
         module.http_request = fake_request
         module.http_json = lambda url, **kwargs: fake_request(url, **kwargs)
+        old_generation = os.environ.get("INBOX_RUNTIME_GENERATION")
+        os.environ["INBOX_RUNTIME_GENERATION"] = "c" * 64
         try:
             receipt = module.run_railway(False)
         finally:
             module.http_request = original_request
             module.http_json = original_json
+            if old_generation is None:
+                os.environ.pop("INBOX_RUNTIME_GENERATION", None)
+            else:
+                os.environ["INBOX_RUNTIME_GENERATION"] = old_generation
         self.assertEqual(receipt["status"], "READY_TO_REGISTER")
         self.assertNotIn((module.RAILWAY_ADMIN + "/deployments", "POST"), calls)
+        self.assertTrue(all(endpoint["endpoint"].endswith("/runtime/" + "c" * 64) for endpoint in receipt["worker_endpoints"]))
+
+    def test_railway_requires_version_generation(self):
+        old_generation = os.environ.pop("INBOX_RUNTIME_GENERATION", None)
+        try:
+            with self.assertRaises(module.GuardError):
+                module.configured_railway_workers()
+        finally:
+            if old_generation is not None:
+                os.environ["INBOX_RUNTIME_GENERATION"] = old_generation
 
 
 if __name__ == "__main__":

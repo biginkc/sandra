@@ -52,11 +52,13 @@ export function workerConfiguration(env) {
   const preview = env.NODE_ENV === 'test' && env.INBOX_ACTION_LOCAL_FIXTURE === '1' && env.INBOX_ACTION_FIXTURE_PROFILE === 'preview';
   const approved = preview ? ingress.hostname === 'sandra-inbox-preview-restate-owned' && ingress.port === '8480' : new Set(['inbox-restate.railway.internal', 'sandra-inbox-restate-owned']).has(ingress.hostname) && ingress.port === '8080';
   if (ingress.protocol !== 'http:' || !approved || ingress.username || ingress.password || ingress.search || ingress.hash || ingress.pathname !== '/') throw Error('Unapproved private Restate ingress');
+  const registrationPath = env.INBOX_RESTATE_REGISTRATION_PATH ?? '';
+  if (!/^\/runtime\/[a-f0-9]{64}$/.test(registrationPath)) throw Error('Version-specific Restate registration path required');
   let identityKeys; try { identityKeys = JSON.parse(env.INBOX_RESTATE_IDENTITY_KEYS ?? ''); } catch { throw Error('Restate signing keys required'); }
   if (!Array.isArray(identityKeys) || identityKeys.length < 1 || identityKeys.length > 2 || identityKeys.some(k => typeof k !== 'string' || !/^publickeyv1_[1-9A-HJ-NP-Za-km-z]{40,50}$/.test(k))) throw Error('Invalid Restate signing keys');
   const connections = Number(env.INBOX_REPLY_SEND_CONNECTIONS ?? 2);
   if (!Number.isInteger(connections) || connections < 1 || connections > 2) throw Error('Reply-send connection budget exceeds two');
-  return { ingress, identityKeys, connections };
+  return { ingress, identityKeys, connections, registrationPath };
 }
 export function createReadinessProbe(check, clock = Date.now) {
   let pending, cached = false, until = 0, generation = 0;

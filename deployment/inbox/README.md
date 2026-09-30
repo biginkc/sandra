@@ -67,6 +67,27 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
 - Store DB credentials and relay secret only in the named services' secret
   variables. Scope the DB role to the required projection or operation wrappers.
   Require verified TLS to Supabase. No administrator database fallback.
+- The production Electric role packet is `experiments/inbox-production-install/electric-replication-role.production.sql`.
+  Run it only through `run-electric-replication-role.py` with `PGHOST` set to
+  the direct host `db.<project-ref>.supabase.co`; the runner compares that
+  host-derived ref with `--project-ref` before invoking psql. The role password
+  input must be a client-computed `SCRAM-SHA-256$...` verifier on stdin, for
+  example:
+  ```sh
+  printf '%s\n' "$SCRAM_VERIFIER" | python3 experiments/inbox-production-install/run-electric-replication-role.py --packet install --project-ref "$PROJECT_REF"
+  ```
+  The runner emits `\set` directives followed by `\i`, so the verifier is
+  never a process argument and plaintext passwords are refused. Do not use
+  `psql -v electric_password=...` or put a password in a DSN. Keep the
+  preflight receipt's `prior_replica_identity` and
+  `prior_replica_identity_index`; teardown requires those exact values and
+  restores them after dropping the publication.
+- Every Restate worker deployment must set
+  `INBOX_RESTATE_REGISTRATION_PATH=/runtime/<64-lowercase-hex-image-digest>`.
+  The worker serves that versioned path and the registration helper uses it as
+  the deployment identity. Railway registration also requires
+  `INBOX_RUNTIME_GENERATION=<64-lowercase-hex-image-digest>`; a missing or
+  reused generation is rejected before registration.
 - `INBOX_ELECTRIC_RELAY_TOKEN` (Next, read by `src/lib/inbox/sync-upstream-config.ts`)
   and `INBOX_RELAY_TOKEN` (relay, read by `services/inbox-sync-relay/server.mjs`)
   are the SAME secret in two processes' own env vars — not a mismatch to

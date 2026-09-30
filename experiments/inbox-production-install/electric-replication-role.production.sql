@@ -1,11 +1,17 @@
 \set ON_ERROR_STOP on
--- Production Electric packet. Run only through the reviewed secret-safe SQL
--- runner with -v project_ref=<exact Supabase ref> and -v electric_password.
--- The project-ref binding is supplied from the verified DSN host/username;
--- this packet never accepts the local fixture marker.
+-- Production Electric packet. Run only through
+-- run-electric-replication-role.py. It reads a client-computed
+-- SCRAM-SHA-256 verifier from stdin, writes the psql \set directives to the
+-- same stdin stream, and includes this file with \i. Never pass a role
+-- password in argv, -v, or as plaintext.
 \if :{?project_ref}
 \else
   \echo 'project_ref is required'
+  \quit 3
+\endif
+\if :{?connection_project_ref}
+\else
+  \echo 'connection_project_ref is required'
   \quit 3
 \endif
 \if :{?electric_password}
@@ -14,14 +20,33 @@
   \quit 3
 \endif
 
+SELECT set_config('sandra.inbox_project_ref', :'project_ref', false) AS _set_project_ref \gset
+SELECT set_config('sandra.inbox_connection_project_ref', :'connection_project_ref', false) AS _set_connection_project_ref \gset
+SELECT set_config('sandra.inbox_electric_verifier', :'electric_password', false) AS _set_electric_verifier \gset
+
 DO $$
-DECLARE supplied_ref text := :'project_ref';
+DECLARE
+  supplied_ref text := current_setting('sandra.inbox_project_ref');
+  connected_ref text := current_setting('sandra.inbox_connection_project_ref');
+  verifier text := current_setting('sandra.inbox_electric_verifier');
 BEGIN
   IF current_database() <> 'postgres' THEN
     RAISE EXCEPTION 'production Electric packet must run in database postgres';
   END IF;
+  IF connected_ref NOT IN ('ncsngxlcyxylaeskiteu', 'copflsklaefwzipsrjqz') THEN
+    RAISE EXCEPTION 'connected database has an unapproved project ref';
+  END IF;
+  IF supplied_ref <> connected_ref THEN
+    RAISE EXCEPTION 'operator project ref does not match the connected database';
+  END IF;
   IF supplied_ref NOT IN ('ncsngxlcyxylaeskiteu', 'copflsklaefwzipsrjqz') THEN
     RAISE EXCEPTION 'production Electric packet has an unapproved project ref';
+  END IF;
+  IF verifier !~ '^SCRAM-SHA-256\$[1-9][0-9]{0,9}:[A-Za-z0-9+/]{22}\$[A-Za-z0-9+/]{43}:[A-Za-z0-9+/]{43}$' THEN
+    RAISE EXCEPTION 'electric_password must be a well-formed SCRAM-SHA-256 verifier';
+  END IF;
+  IF split_part(split_part(verifier, '$', 2), ':', 1)::bigint < 4096 THEN
+    RAISE EXCEPTION 'electric_password SCRAM iteration count is too low';
   END IF;
   IF to_regclass('inbox_bridge.summaries') IS NULL THEN
     RAISE EXCEPTION 'inbox_bridge.summaries is not installed';
@@ -49,7 +74,7 @@ END $$;
 -- operator keeps it with the deployment receipt and supplies the two identity
 -- fields to the reviewed teardown packet if restoration is later approved.
 SELECT json_build_object(
-  'project_ref', :'project_ref',
+  'project_ref', current_setting('sandra.inbox_project_ref'),
   'database', current_database(),
   'table', 'inbox_bridge.summaries',
   'prior_replica_identity', c.relreplident,
@@ -71,7 +96,15 @@ BEGIN
   END IF;
 END $$;
 ALTER ROLE inbox_electric_replication
-  LOGIN REPLICATION BYPASSRLS CONNECTION LIMIT 4 PASSWORD :'electric_password';
+  LOGIN REPLICATION BYPASSRLS CONNECTION LIMIT 4;
+
+DO $$
+BEGIN
+  EXECUTE format(
+    'ALTER ROLE inbox_electric_replication PASSWORD %L',
+    current_setting('sandra.inbox_electric_verifier')
+  );
+END $$;
 
 GRANT CONNECT ON DATABASE postgres TO inbox_electric_replication;
 GRANT USAGE ON SCHEMA inbox_bridge TO inbox_electric_replication;
@@ -134,3 +167,5 @@ BEGIN
   END IF;
 END $$;
 COMMIT;
+
+SELECT set_config('sandra.inbox_electric_verifier', '', false) AS _clear_electric_verifier \gset
