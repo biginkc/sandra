@@ -7,6 +7,7 @@ import type { DialpadRecordingBrowserCrossing, DialpadRecordingBrowserFinalResul
 import type { DialpadPanelBootstrap } from '@/lib/dialpad-cti/dispatch';
 import {
   createSandraCaptureHandleProof,
+  createDialpadCaptureSourceSession,
   prepareDialpadBrowserCapture,
   type ActiveDialpadCapture,
   type PreparedDialpadCapture,
@@ -124,6 +125,14 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
   const [recording, setRecording] = useState<RecordingPanelState | null>(null);
   const [statusRetryNonce, setStatusRetryNonce] = useState(0);
   const recordingRef = useRef<RecordingPanelState | null>(null);
+  const mediaOwnerRef = useRef<ReturnType<typeof createDialpadCaptureSourceSession> | null>(null);
+  const [sharingAudio, setSharingAudio] = useState(false);
+  const releaseAudioSources = () => {
+    const owner = mediaOwnerRef.current;
+    mediaOwnerRef.current = null;
+    owner?.dispose();
+    if (mountedRef.current) setSharingAudio(false);
+  };
   const attemptedUser = useRef<string | null>(null);
   const enabledTab = useRef(false);
   const startFired = useRef<string | null>(null);
@@ -171,6 +180,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
   useEffect(() => { chooserRef.current = chooser; }, [chooser]);
   useEffect(() => { recordingRef.current = recording; }, [recording]);
   useEffect(() => () => {
+    releaseAudioSources();
     const current = recordingRef.current;
     void (current?.session ? current.session.dispose() : current?.active ? current.active.dispose() : current?.prepared?.dispose());
   }, []);
@@ -187,6 +197,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
           iframeUserRef.current = next;
           authGeneration.current += 1;
           recordingGenerationRef.current += 1;
+          releaseAudioSources();
           const current = recordingRef.current;
           if (current) void (current.session ? current.session.dispose() : current.active ? current.active.dispose() : current.prepared?.dispose());
           recordingRef.current = null;
@@ -455,8 +466,20 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
     };
     try {
       const mediaDevices = navigator.mediaDevices as (MediaDevices & { setCaptureHandleConfig?: (config: { handle: string; exposeOrigin: boolean; permittedOrigins: readonly string[] }) => void }) | undefined;
-      const proof = createSandraCaptureHandleProof({ origin: window.location.origin, setCaptureHandleConfig: mediaDevices?.setCaptureHandleConfig?.bind(mediaDevices) });
-      const prepared = await prepareDialpadBrowserCapture({ proof });
+      let owner = mediaOwnerRef.current;
+      if (!owner) {
+        const proof = createSandraCaptureHandleProof({ origin: window.location.origin, setCaptureHandleConfig: mediaDevices?.setCaptureHandleConfig?.bind(mediaDevices) });
+        owner = createDialpadCaptureSourceSession({ proof, onStopped: () => {
+          if (mediaOwnerRef.current !== owner) return;
+          mediaOwnerRef.current = null;
+          if (mountedRef.current) setSharingAudio(false);
+        } });
+        mediaOwnerRef.current = owner;
+      }
+      const sources = await owner.acquire();
+      if (!mountedRef.current || mediaOwnerRef.current !== owner || generation !== recordingGenerationRef.current) { sources.invalidate(); sources.release(); return null; }
+      setSharingAudio(true);
+      const prepared = await prepareDialpadBrowserCapture({ proof: owner.proof, sources });
       if (!mountedRef.current || generation !== recordingGenerationRef.current || (ownerChooserGeneration !== undefined && ownerChooserGeneration !== chooserGenerationRef.current)) { await prepared.dispose(); clearOwnedPreparation(); return null; }
       if (!prepared.startLocal) throw new Error('This browser cannot start local capture before the call.');
       const active = await prepared.startLocal(1);
@@ -724,6 +747,10 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
           </div>
         </div>
       )}
+      {sharingAudio && <div className="mb-3 flex items-center gap-2 text-sm">
+        <span>Audio sharing is ready. Calls record automatically; nothing is recorded between calls.</span>
+        <Button type="button" variant="outline" onClick={releaseAudioSources}>Stop sharing audio</Button>
+      </div>}
       {calls.length > 0 && (
         <ul className="mb-3 space-y-2" aria-label="Recent Dialpad calls">
           {calls.map((call) => (
@@ -736,7 +763,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
               {bootstrap.recording && ACTIVE_STATES.has(call.state) && (
                 <span className="ml-2 inline-flex items-center gap-2">
                   {(recording?.intentId !== call.intentId || (recording?.intentId === call.intentId && !recording.active && !recording.session && !recording.hydrated)) && <Button type="button" variant="outline" disabled={recording?.busy} onClick={() => void prepareRecording(call)}>{recording?.intentId === call.intentId ? 'Prepare again' : 'Prepare recording'}</Button>}
-                  {recording?.intentId === call.intentId && recording.active && !recording.session && <Button type="button" variant="outline" disabled={recording.busy} onClick={() => void startRecording(call)}>{recording.busy ? 'Starting…' : 'Start recording'}</Button>}
+                  {recording?.intentId === call.intentId && recording.active && !recording.session && <span role="status">{recording.busy ? 'Starting recording…' : 'Recording starts automatically when Dialpad confirms the connection.'}</span>}
                   {recording?.intentId === call.intentId && recording.session && <Button type="button" variant="outline" disabled={recording.busy} onClick={() => void stopRecording(call)}>{recording.busy ? 'Finishing…' : 'End recording'}</Button>}
                 </span>
               )}

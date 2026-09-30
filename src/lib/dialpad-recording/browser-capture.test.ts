@@ -8,6 +8,7 @@ import {
   MediaRecorderCollector,
   assertSandraCaptureHandle,
   createSandraCaptureHandleProof,
+  createDialpadCaptureSourceSession,
   monitorSandraCaptureHandle,
   monitorDialpadTrackEnded,
   prepareDialpadBrowserCapture,
@@ -19,9 +20,12 @@ import { PCM_FRAME_SAMPLES, startPcmWorkletSession, type PcmFrame, type PcmTailR
 
 class FakeTrack extends EventTarget {
   stopped = 0;
+  readyState = "live";
   constructor(public handle: string | null = "tab-handle") { super(); }
+  clone = () => new FakeTrack(this.handle) as unknown as MediaStreamTrack;
   getCaptureHandle = () => this.handle ? { handle: this.handle, origin: "https://sandra.example" } : null;
-  stop = () => { this.stopped += 1; this.dispatchEvent(new Event("ended")); };
+  stop = () => { this.stopped += 1; this.readyState = "ended"; };
+  endExternally = () => { this.readyState = "ended"; this.dispatchEvent(new Event("ended")); };
 }
 
 class FakeStream {
@@ -94,6 +98,111 @@ function realPcmFactory(nodes: PcmWorkletPort[], timeoutMs = 20): NonNullable<Br
     }, stream, track, epoch, onFrame, onTail, { ...options, timeoutMs, startupTimeoutMs: timeoutMs });
   };
 }
+
+describe("calling-session audio sources", () => {
+  it("reuses permission for separate calls and runs no idle recorder or PCM worklet", async () => {
+    const video = new FakeTrack();
+    const tab = new FakeTrack();
+    const mic = new FakeTrack();
+    const recorders: FakeRecorder[] = [];
+    const rt = runtime(mediaStream(video, tab), new FakeStream([], [mic]) as unknown as MediaStream, () => {
+      const recorder = new FakeRecorder(); recorders.push(recorder); return recorder;
+    });
+    const pcm = vi.fn(rt.createPcmSession!);
+    const owner = createDialpadCaptureSourceSession({ proof: { handle: "tab-handle", origin: "https://sandra.example" }, runtime: rt });
+    const first = await owner.acquire();
+    expect(recorders).toHaveLength(0);
+    const prepare = (sources: typeof first) => prepareDialpadBrowserCapture({ proof: owner.proof, sources, runtime: { ...rt, createPcmSession: pcm } });
+    const one = await prepare(first);
+    const activeOne = await one.startLocal!();
+    const firstChunks: string[] = [];
+    await activeOne.attach!({ onWebmChunk: async (chunk) => { firstChunks.push(`${chunk.seq}:${await chunk.blob.text()}`); }, onPcmFrame: () => undefined });
+    recorders[0]!.emit(new Blob(["call-one"]));
+    expect(recorders).toHaveLength(2);
+    await expect(owner.acquire()).rejects.toThrow(/already in use/);
+    await activeOne.stop();
+    expect(tab.stopped).toBe(0); expect(mic.stopped).toBe(0); expect(video.stopped).toBe(0);
+    expect(recorders.every((recorder) => recorder.state === "inactive")).toBe(true);
+    const second = await owner.acquire();
+    await one.dispose(); // stale disposal must not release the newer lease
+    await expect(owner.acquire()).rejects.toThrow(/already in use/);
+    const two = await prepare(second);
+    const activeTwo = await two.startLocal!();
+    const secondChunks: string[] = [];
+    await activeTwo.attach!({ onWebmChunk: async (chunk) => { secondChunks.push(`${chunk.seq}:${await chunk.blob.text()}`); }, onPcmFrame: () => undefined });
+    recorders[0]!.emit(new Blob(["late-old-call"]));
+    recorders[2]!.emit(new Blob(["call-two"]));
+    expect(activeTwo).not.toBe(activeOne);
+    expect(rt.getDisplayMedia).toHaveBeenCalledTimes(1);
+    expect(rt.getUserMedia).toHaveBeenCalledTimes(1);
+    expect(pcm).toHaveBeenCalledTimes(4);
+    await activeTwo.stop();
+    expect(firstChunks).toEqual(["0:call-one"]);
+    expect(secondChunks).toEqual(["0:call-two"]);
+    owner.dispose();
+    expect(tab.stopped).toBeGreaterThan(0); expect(mic.stopped).toBeGreaterThan(0);
+    await expect(owner.acquire()).rejects.toThrow(/unavailable/);
+  });
+
+  it("invalidates an active lease explicitly when sharing stops", async () => {
+    const video = new FakeTrack(); const tab = new FakeTrack(); const mic = new FakeTrack();
+    // Native explicit stop does not fire ended; owner invalidation must abort.
+    for (const track of [video, tab, mic]) track.stop = () => { track.stopped += 1; };
+    const rt = runtime(mediaStream(video, tab), new FakeStream([], [mic]) as unknown as MediaStream, () => new FakeRecorder());
+    const owner = createDialpadCaptureSourceSession({ proof: { handle: "tab-handle", origin: "https://sandra.example" }, runtime: rt });
+    const lease = await owner.acquire();
+    const prepared = await prepareDialpadBrowserCapture({ proof: owner.proof, sources: lease, runtime: rt });
+    const active = await prepared.startLocal!();
+    owner.dispose();
+    expect(lease.signal.aborted).toBe(true);
+    expect(active.state()).toBe("interrupted");
+    await active.dispose();
+  });
+
+  it("releases display immediately if sharing changes during a pending microphone prompt", async () => {
+    const video = new FakeTrack(); const tab = new FakeTrack(); const mic = new FakeTrack();
+    let grantMic!: (stream: MediaStream) => void;
+    const rt = runtime(mediaStream(video, tab), new FakeStream([], [mic]) as unknown as MediaStream, () => new FakeRecorder());
+    const owner = createDialpadCaptureSourceSession({ proof: { handle: "tab-handle", origin: "https://sandra.example" }, runtime: { ...rt, getUserMedia: () => new Promise((resolve) => { grantMic = resolve; }) } });
+    const pending = owner.acquire();
+    await Promise.resolve();
+    video.handle = "other-tab";
+    video.dispatchEvent(new Event("capturehandlechange"));
+    expect(tab.readyState).toBe("ended");
+    grantMic(new FakeStream([], [mic]) as unknown as MediaStream);
+    await expect(pending).rejects.toThrow(/cancelled/);
+    expect(mic.readyState).toBe("ended");
+  });
+
+  it("invalidates externally ended sources while idle", async () => {
+    const video = new FakeTrack(); const tab = new FakeTrack(); const mic = new FakeTrack();
+    const rt = runtime(mediaStream(video, tab), new FakeStream([], [mic]) as unknown as MediaStream, () => new FakeRecorder());
+    const owner = createDialpadCaptureSourceSession({ proof: { handle: "tab-handle", origin: "https://sandra.example" }, runtime: rt });
+    (await owner.acquire()).release();
+    mic.endExternally();
+    expect(video.readyState).toBe("ended");
+    await expect(owner.acquire()).rejects.toThrow(/unavailable/);
+  });
+
+  it("rejects a changed tab identity while idle and stops late permission results", async () => {
+    const video = new FakeTrack(); const tab = new FakeTrack(); const mic = new FakeTrack();
+    const rt = runtime(mediaStream(video, tab), new FakeStream([], [mic]) as unknown as MediaStream, () => new FakeRecorder());
+    const owner = createDialpadCaptureSourceSession({ proof: { handle: "tab-handle", origin: "https://sandra.example" }, runtime: rt });
+    (await owner.acquire()).release();
+    video.handle = "different-tab";
+    video.dispatchEvent(new Event("capturehandlechange"));
+    await expect(owner.acquire()).rejects.toThrow(/unavailable/);
+    let grant!: (stream: MediaStream) => void;
+    const lateVideo = new FakeTrack(); const lateTab = new FakeTrack();
+    const late = createDialpadCaptureSourceSession({ proof: owner.proof, runtime: { ...rt, getDisplayMedia: () => new Promise((resolve) => { grant = resolve; }) } });
+    const pending = late.acquire();
+    late.dispose();
+    grant(mediaStream(lateVideo, lateTab));
+    await expect(pending).rejects.toThrow(/cancelled/);
+    expect(lateVideo.stopped).toBeGreaterThan(0);
+    expect(lateTab.stopped).toBeGreaterThan(0);
+  });
+});
 
 describe("Dialpad browser capture proof", () => {
   it("configures a fresh exact-origin capture handle", () => {
