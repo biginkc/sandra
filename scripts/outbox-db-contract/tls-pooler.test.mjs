@@ -296,10 +296,10 @@ test('catalog adapter refuses libpq downgrades, malformed conninfo, and psql18 f
     assert.notEqual(system.status,0);assert.match(system.stderr,/CATALOG_TLS_CONFIG_REFUSED/);
     const fixturePath=name=>path.resolve('scripts/outbox-db-contract/fixtures',name);
     const parsed=parseProductionConninfo([
-      fixturePath('conninfo-psql17.txt'),fixturePath('conninfo-psql18.txt'),
+      fixturePath('conninfo-psql17.txt'),fixturePath('conninfo-psql18.txt'),fixturePath('conninfo-psql18-hostaddr.txt'),
       fixturePath('conninfo-psql18-unknown-field.txt'),fixturePath('conninfo-psql18-missing-ssl.txt')]);
-    assert.deepEqual(parsed.slice(0,2),[{ok:['TLSv1.3','TLS_AES_256_GCM_SHA384']},{ok:['TLSv1.3','TLS_AES_256_GCM_SHA384']}]);
-    assert.deepEqual(parsed.slice(2),[{error:'CATALOG_TLS_EVIDENCE_MISSING'},{error:'CATALOG_TLS_EVIDENCE_MISSING'}]);
+    assert.deepEqual(parsed.slice(0,3),[{ok:['TLSv1.3','TLS_AES_256_GCM_SHA384']},{ok:['TLSv1.3','TLS_AES_256_GCM_SHA384']},{ok:['TLSv1.3','TLS_AES_256_GCM_SHA384']}]);
+    assert.deepEqual(parsed.slice(3),[{error:'CATALOG_TLS_EVIDENCE_MISSING'},{error:'CATALOG_TLS_EVIDENCE_MISSING'}]);
   } finally {rmSync(f.dir,{recursive:true,force:true});}
 });
 
