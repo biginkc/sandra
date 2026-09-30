@@ -170,9 +170,9 @@ BEGIN
 END $$;
 
 -- The wrapper owns the durable persist replay cases. The additive projection
--- migration re-issues this exact definition with CREATE OR REPLACE; keeping
--- the fixture source in lockstep lets the worker proof exercise the same
--- worker-facing API without granting the raw persist function.
+-- migration re-issues this definition with CREATE OR REPLACE; this fixture
+-- creates it once so the worker proof exercises the same worker-facing API
+-- without granting the raw persist function.
 CREATE FUNCTION inbox_reply_send.worker_persist_result(o uuid,attempt_id uuid,token uuid,result jsonb) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
 DECLARE row inbox_reply_send.attempts;kind text;reason text;reference text;

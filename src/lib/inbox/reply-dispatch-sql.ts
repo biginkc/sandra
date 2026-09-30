@@ -25,7 +25,7 @@ function startDispatchFailureReason(error: unknown): string {
 }
 
 /** SQL adapter implementing ReplyDispatchDependencies against
- * inbox_reply_send.worker_claim/worker_start_dispatch/worker_persist
+ * inbox_reply_send.worker_claim/worker_start_dispatch/worker_persist_result
  * (experiments/inbox-reply-send-worker/worker.sql) — the SECURITY DEFINER
  * entry points granted to inbox_reply_send_worker. Mirrors
  * experiments/inbox-reply-send-worker/runner.mjs's own JS control flow so
@@ -94,7 +94,7 @@ export function createReplyDispatchSqlAdapter(
       const providerResult = result.kind === "accepted" ? { kind: "accepted", externalId: result.externalId, status: result.providerStatus }
         : result.kind === "not_attempted" ? { kind: "not_attempted", reason: result.reason }
         : { kind: "uncertain", reason: result.reason };
-      const receiptRow = (await executor.query<{ result: unknown }>("SELECT inbox_reply_send.worker_persist($1,$2,$3,$4::jsonb) AS result", [orgId, attemptId, token, JSON.stringify(providerResult)])).rows[0]?.result;
+      const receiptRow = (await executor.query<{ result: unknown }>("SELECT inbox_reply_send.worker_persist_result($1,$2,$3,$4::jsonb) AS result", [orgId, attemptId, token, JSON.stringify(providerResult)])).rows[0]?.result;
       if (!receiptRow || typeof receiptRow !== "object") throw Error("Invalid reply persist result");
       const receipt = receiptRow as { state?: string };
       if (typeof receipt.state !== "string") throw Error("Invalid reply persist result");

@@ -5,9 +5,8 @@
 -- history fields required by the ruling.
 --
 -- Drips migration 20260930035000 is intentionally not copied here. T24-T26
--- use a TEST-ONLY stand-in for its status IS DISTINCT FROM 'failed' predicate
--- and carry a TODO to replace that fixture with the merged migration body
--- before activation.
+-- load the merged migration into their disposable fixture verbatim; this
+-- branch owns no Drips text.
 
 BEGIN;
 SET LOCAL lock_timeout='2s';
@@ -45,8 +44,7 @@ DECLARE
 BEGIN
  SELECT * INTO row
  FROM inbox_reply_send.attempts a
- WHERE a.org_id=o AND a.id=attempt_id
- FOR UPDATE;
+ WHERE a.org_id=o AND a.id=attempt_id;
  IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_PROJECTION_TARGET';END IF;
  IF row.state IN ('approved','claimed','skipped_ineligible') THEN RETURN;END IF;
 
@@ -83,8 +81,8 @@ BEGIN
  SET status=projected_status,
      external_id=projected_external_id,
      sent_at=CASE WHEN projected_sent_at IS NULL THEN NULL ELSE coalesce(m.sent_at,projected_sent_at) END,
-     delivered_at=CASE WHEN projected_delivered_at IS NULL THEN NULL ELSE coalesce(m.delivered_at,projected_delivered_at) END,
-     failed_at=CASE WHEN projected_failed_at IS NULL THEN NULL ELSE coalesce(m.failed_at,projected_failed_at) END,
+     delivered_at=projected_delivered_at,
+     failed_at=projected_failed_at,
      error_message=projected_error,
      metadata=projected_metadata
  WHERE m.org_id=o
@@ -286,7 +284,12 @@ BEGIN
  ) SELECT jsonb_build_object('requester_id',requester,'org_id',p_org,'conversation_id',p_conversation,'head_revision',(SELECT revision FROM head),
   'history',coalesce((SELECT jsonb_agg(jsonb_build_object('id',b.id,'created_at_raw',b.created_at::text,'body',b.body,'direction',b.direction,
    'read_at_raw',b.read_at::text,'inbound_revision',b.inbox_inbound_revision::text,'status',b.status,'delivery',
-   CASE WHEN b.direction='inbound' THEN 'delivered' WHEN b.status IN ('pending','queued') THEN 'sending' WHEN b.status='failed' AND b.metadata->>'providerOutcome'='provider_unknown' THEN 'not_confirmed' WHEN b.status IN ('sent','delivered','failed') THEN b.status ELSE NULL END)
+   CASE WHEN b.direction='inbound' THEN 'delivered'
+    WHEN b.status IN ('pending','queued') THEN 'sending'
+    WHEN b.status='failed' AND b.metadata->>'providerOutcome'='provider_unknown' THEN 'not_confirmed'
+    WHEN b.status IN ('sent','delivered') THEN b.status
+    WHEN b.status IN ('failed','bounced') THEN 'failed'
+    ELSE 'failed' END)
    ORDER BY b.created_at DESC,b.id DESC) FROM bodies b),'[]'::jsonb)) INTO result;
  RETURN result;
 END $$;
@@ -317,7 +320,12 @@ BEGIN
  ) SELECT jsonb_build_object('requester_id',requester,'org_id',p_org,'conversation_id',p_conversation,'head_revision',(SELECT revision FROM head),
   'history',coalesce((SELECT jsonb_agg(jsonb_build_object('id',b.id,'created_at_raw',b.created_at::text,'body',b.body,'direction',b.direction,
    'read_at_raw',b.read_at::text,'inbound_revision',b.inbox_inbound_revision::text,'status',b.status,'delivery',
-   CASE WHEN b.direction='inbound' THEN 'delivered' WHEN b.status IN ('pending','queued') THEN 'sending' WHEN b.status='failed' AND b.metadata->>'providerOutcome'='provider_unknown' THEN 'not_confirmed' WHEN b.status IN ('sent','delivered','failed') THEN b.status ELSE NULL END)
+   CASE WHEN b.direction='inbound' THEN 'delivered'
+    WHEN b.status IN ('pending','queued') THEN 'sending'
+    WHEN b.status='failed' AND b.metadata->>'providerOutcome'='provider_unknown' THEN 'not_confirmed'
+    WHEN b.status IN ('sent','delivered') THEN b.status
+    WHEN b.status IN ('failed','bounced') THEN 'failed'
+    ELSE 'failed' END)
    ORDER BY b.created_at DESC,b.id DESC) FROM bodies b),'[]'::jsonb)) INTO result;
  RETURN result;
 END $$;
