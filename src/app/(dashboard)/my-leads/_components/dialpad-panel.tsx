@@ -363,10 +363,12 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
   };
 
   const cancelChooser = () => {
+    const nonce = chooserRef.current?.request.nonce;
     chooserGenerationRef.current += 1;
     startFired.current = null;
     chooserRef.current = null;
     setChooser(null);
+    if (nonce !== undefined) onCallRequestHandled?.(nonce);
   };
 
   const startCall = async () => {
@@ -708,7 +710,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
           return;
         }
         const status = result.status;
-        setRecording((latest) => latest?.captureId === current.captureId ? { ...latest, captureStatus: status.captureStatus, measuredSamples: status.totalSamples, measurementStatus: status.measurementStatus, crossing: status.crossing, liveThresholdCrossing: null, finalResult: status.finalResult, message: status.finalResult?.status === 'eligible' ? 'Recording verified: eligible seller speech.' : status.finalResult?.status === 'ineligible' && status.finalResult.reasons.includes('below_threshold') ? 'Recording verified: below the five-minute seller-speech threshold.' : status.finalResult?.status === 'ineligible' ? 'Recording verified: evidence is incomplete.' : status.finalResult?.status === 'unknown' ? 'Recording qualification is unavailable until evidence is accepted.' : `Recording ${status.captureStatus}.` } : latest);
+        setRecording((latest) => latest?.captureId === current.captureId ? { ...latest, captureStatus: status.captureStatus, measuredSamples: status.totalSamples, measurementStatus: status.measurementStatus, crossing: status.crossing, liveThresholdCrossing: null, finalResult: status.finalResult, message: status.finalResult?.status === 'eligible' ? 'Recording verified: eligible seller speech.' : status.finalResult?.status === 'ineligible' && status.finalResult.reasons.includes('below_threshold') ? 'Recording verified: below the five-minute seller-speech threshold.' : status.finalResult?.status === 'ineligible' ? 'Recording verified: evidence is incomplete.' : status.finalResult?.status === 'unknown' ? 'Recording qualification is unavailable until evidence is accepted.' : status.finalResult?.status === 'stale' ? 'Recording qualification is stale. Refresh to check again.' : `Recording ${status.captureStatus}.` } : latest);
         const finalSettled = status.finalResult !== null && status.finalResult.status !== 'stale';
         if ((status.captureStatus === 'sealed' || status.captureStatus === 'partial' || status.captureStatus === 'failed') && finalSettled) {
           cancelled = true;
@@ -817,7 +819,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
               {recording?.intentId === call.intentId && recording.message && <span role="status" className="ml-2 text-xs text-muted-foreground">{recording.message}</span>}
               {recording?.intentId === call.intentId && recording.measuredSamples !== null && <span className="ml-2 text-xs text-muted-foreground">{Math.floor(recording.measuredSamples / 16_000)}s measured ({recording.measurementStatus ?? 'provisional'})</span>}
               {recording?.intentId === call.intentId && (recording.crossing || recording.liveThresholdCrossing) && (!recording.finalResult || recording.finalResult.status === 'stale') && <span className="ml-2 text-xs text-muted-foreground">Observed seller speech crossed 300s; final qualification is still being verified.</span>}
-              {recording?.intentId === call.intentId && recording.finalResult && <span className="ml-2 text-xs text-muted-foreground">{recording.finalResult.status === 'eligible' ? `Verified seller speech: ${Math.floor((recording.finalResult.eligibleSamples ?? 0) / 16_000)}s.` : recording.finalResult.status === 'ineligible' && recording.finalResult.reasons.includes('below_threshold') ? 'Not eligible: seller speech below 5 minutes.' : recording.finalResult.status === 'ineligible' ? 'Not eligible: evidence incomplete.' : recording.finalResult.status === 'stale' ? 'Verification changed; retrying.' : recording.finalResult.reasons.includes('policy_not_accepted') ? 'Final qualification unavailable: acceptance evidence pending.' : 'Final qualification unavailable: evidence incomplete.'}</span>}
+              {recording?.intentId === call.intentId && recording.finalResult && <span className="ml-2 text-xs text-muted-foreground">{recording.finalResult.status === 'eligible' ? `Verified seller speech: ${Math.floor((recording.finalResult.eligibleSamples ?? 0) / 16_000)}s.` : recording.finalResult.status === 'ineligible' && recording.finalResult.reasons.includes('below_threshold') ? 'Not eligible: seller speech below 5 minutes.' : recording.finalResult.status === 'ineligible' ? 'Not eligible: evidence incomplete.' : recording.finalResult.status === 'stale' ? 'Verification is stale. Refresh to check again.' : recording.finalResult.reasons.includes('policy_not_accepted') ? 'Final qualification unavailable: acceptance evidence pending.' : 'Final qualification unavailable: evidence incomplete.'}</span>}
               {recording?.intentId === call.intentId && recording.captureId && !recording.session && <Button type="button" variant="ghost" className="ml-2" onClick={() => setStatusRetryNonce((value) => value + 1)}>Refresh recording status</Button>}
             </li>
           ))}

@@ -1994,7 +1994,7 @@ describe("20260929210000 Dialpad recording foundation concurrency", () => {
 
       const softphoneActivityId = uuid();
       await service(() => pg.query(
-        "insert into public.call_activities(id,org_id,property_id,contact_id,jitter_attempt_id,jitter_session_id,provider,operator_user_id,provider_call_id,call_purpose) values ($1,$2,null,null,$3,'softphone-session','sandra_softphone',$4,'softphone-old','customer')",
+        "insert into public.call_activities(id,org_id,property_id,contact_id,jitter_attempt_id,jitter_session_id,provider,operator_user_id,provider_call_id,call_purpose) values ($1,$2,null,null,$3,'softphone-session','sandra_softphone',$4,'softphone-old','internal_training')",
         [softphoneActivityId, orgId, `sandra-${softphoneActivityId}`, repA],
       ));
       const softphoneUpdate = await service(() => pg.query(

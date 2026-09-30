@@ -297,6 +297,44 @@ describe('DialpadPanel dialing', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('before the deadline');
     expect(screen.getByRole('button', { name: 'Call' })).toBeDisabled();
   });
+
+  it('cancels the owned nonce and fences a late reply after a new request is mounted', async () => {
+    let resolveOld!: (value: unknown) => void;
+    mocks.targets
+      .mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce({ ok: true, contactId: 'contact-2', phones: [{ slot: 1, masked: '••• ••• 0142' }], grants: [] });
+    const handled = vi.fn();
+    const ctx = await readyPanel({ callRequest: request, onCallRequestHandled: handled, targetLookupDeadlineMs: 1_000 });
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(handled).toHaveBeenCalledWith(request.nonce);
+    const replacement = { ...request, nonce: 2, propertyId: 'property-2', contactId: 'contact-2', label: 'Replacement homeowner' };
+    ctx.view.rerender(<DialpadPanel bootstrap={verifiedBootstrap} callRequest={replacement} onLogOutcome={ctx.onLogOutcome} onCallRequestHandled={handled} targetLookupDeadlineMs={1_000} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Call' })).toBeInTheDocument());
+    resolveOld({ ok: true, contactId: 'contact-1', phones: [{ slot: 1, masked: 'late' }], grants: [] });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(handled).toHaveBeenCalledWith(2);
+    expect(handled).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('Replacement homeowner')).toBeInTheDocument();
+  });
+
+  it('fences a stale finalizer when only the callback identity churns for the same request', async () => {
+    let resolveOld!: (value: unknown) => void;
+    let resolveCurrent!: (value: unknown) => void;
+    mocks.targets
+      .mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveCurrent = resolve; }));
+    const firstHandled = vi.fn();
+    const currentHandled = vi.fn();
+    const ctx = await readyPanel({ callRequest: request, onCallRequestHandled: firstHandled, targetLookupDeadlineMs: 1_000 });
+    ctx.view.rerender(<DialpadPanel bootstrap={verifiedBootstrap} callRequest={request} onLogOutcome={ctx.onLogOutcome} onCallRequestHandled={currentHandled} targetLookupDeadlineMs={1_000} />);
+    resolveOld({ ok: true, contactId: 'contact-1', phones: [{ slot: 1, masked: 'old' }], grants: [] });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(firstHandled).not.toHaveBeenCalled();
+    expect(currentHandled).not.toHaveBeenCalled();
+    resolveCurrent({ ok: true, contactId: 'contact-1', phones: [{ slot: 1, masked: 'current' }], grants: [] });
+    await waitFor(() => expect(currentHandled).toHaveBeenCalledWith(request.nonce));
+    expect(screen.getByText(/current/)).toBeInTheDocument();
+  });
 });
 
 describe('DialpadPanel recording capture', () => {
@@ -521,7 +559,7 @@ describe('DialpadPanel recording capture', () => {
     mocks.status.mockResolvedValue(status('ended'));
     await waitFor(() => expect(mocks.closeCapture).toHaveBeenCalledWith('capture-1'));
     expect(await screen.findByText(/Recording sealed\. Seller-speech verification is pending/)).toBeInTheDocument();
-    expect(screen.getByText('Verification changed; retrying.')).toBeInTheDocument();
+    expect(screen.getByText('Verification is stale. Refresh to check again.')).toBeInTheDocument();
     mocks.recordingStatus.mockResolvedValue({ ok: true, status: { ...sealed.status, finalResult: { status: 'ineligible', observedSamples: 4_800_001, eligibleSamples: 0, reasons: ['below_threshold'], evaluatedAt: '2026-09-29T15:01:00.000Z' } } });
     await userEvent.click(screen.getByRole('button', { name: 'Refresh recording status' }));
     expect(await screen.findByText(/Not eligible: seller speech below 5 minutes/)).toBeInTheDocument();
