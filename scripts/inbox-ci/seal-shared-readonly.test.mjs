@@ -95,6 +95,22 @@ test('sealer rejects a waived field with a bare PASS verdict', async () => {
   f.save();
   assert.throws(() => sealSharedReadonly(f.args), /Platform comparison mismatch/);
 });
+test('sealer rejects a recorded NOT_VERIFIED field without its waiver', async () => {
+  const f = await fixture();
+  f.source.platform_config.postgrest_major = NOT_VERIFIED;
+  const majors = Object.fromEntries(['postgres_major', 'postgrest_major', 'gotrue_major'].map(key => [key, f.source.platform_config[key]]));
+  f.source.platform_config.sha256 = digest(JSON.stringify(majors));
+  f.source.comparisons.platform.observed_sha256 = f.source.platform_config.sha256;
+  f.save();
+  assert.throws(() => sealSharedReadonly(f.args), /Platform comparison mismatch/);
+});
+test('sealer rejects a waived field when the recorded value matches the baseline', async () => {
+  const f = await fixture();
+  f.source.comparisons.platform.verdict = { postgres_major: 'PASS', postgrest_major: NOT_VERIFIED, gotrue_major: 'PASS' };
+  f.source.comparisons.platform.waived_fields = ['postgrest_major'];
+  f.save();
+  assert.throws(() => sealSharedReadonly(f.args), /Platform comparison mismatch/);
+});
 test('sealer rejects a waiver-shaped but non-exact PostgREST value', async () => {
   const f = await fixture();
   f.source.platform_config.postgrest_major = 'unknown';
