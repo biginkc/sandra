@@ -7,6 +7,7 @@ import {
   type DialpadBrowserServerMessage,
   type DialpadBrowserTrack,
 } from './browser-protocol';
+import { encodeDialpadTimingBatch, type DialpadTimingReason, type DialpadTimingRecord } from './timing-evidence';
 import type {
   ActiveDialpadCapture,
   BrowserCaptureError,
@@ -62,6 +63,8 @@ export type DialpadBrowserSessionOptions = {
   readonly maxPendingRecordingChunks?: number;
   readonly maxPendingPackets?: number;
   readonly maxBufferedBytes?: number;
+  /** Opt in only after the compatible Jitter endpoint has been deployed. */
+  readonly enableTiming?: boolean;
   readonly onSnapshot?: (snapshot: DialpadBrowserMeasurementSnapshotMessage) => void;
   readonly onCaptureState?: (state: DialpadBrowserCaptureStateMessage) => void;
   readonly onServerMessage?: (message: DialpadBrowserServerMessage) => void;
@@ -121,6 +124,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
   const maxPendingChunks = options.maxPendingRecordingChunks ?? DEFAULT_MAX_PENDING_CHUNKS;
   const maxPendingPackets = options.maxPendingPackets ?? 64;
   const maxBufferedBytes = options.maxBufferedBytes ?? DEFAULT_MAX_BUFFERED_BYTES;
+  const enableTiming = options.enableTiming === true;
   if (!Number.isSafeInteger(options.epoch) || options.epoch < DIALPAD_BROWSER_PROTOCOL.minEpoch || options.epoch > DIALPAD_BROWSER_PROTOCOL.maxEpoch) {
     throw new DialpadBrowserSessionError('protocol', 'Invalid recording epoch.');
   }
@@ -142,6 +146,20 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
   let ready = false;
   let snapshot = false;
   let captureState = false;
+  let timingNegotiated = false;
+  let timingIncomplete = false;
+  let timingBarrierSent = false;
+  let timingSendQueue = Promise.resolve();
+  let timingBatchInFlight: { batchId: string; records: readonly DialpadTimingRecord[]; bytes: number; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  let timingProbeInFlight: { seq: number; nonce: string | null; browserSendMs: number; browserReceiveMs: number | null; replyFingerprint: string | null; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  let timingProbePromise: Promise<void> | null = null;
+  const timingProbeHistory = new Map<number, { readonly nonce: string; readonly browserReceiveMs: number; readonly replyFingerprint: string }>();
+  let timingEndInFlight: { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  let timingProbeTimer: ReturnType<typeof setInterval> | null = null;
+  let timingExchangeSeq = 0;
+  const pendingTimingRecords: DialpadTimingRecord[] = [];
+  let pendingTimingBytes = 0;
+  const timingDurableLastSeq = { tabAnchor: -1, micAnchor: -1, tabContext: -1, micContext: -1, exchange: -1 };
   let queueDepth = 0;
   let queuedBytes = 0;
   let sendQueue = Promise.resolve();
@@ -225,6 +243,28 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     pcmCreditWakeups = 0;
   };
 
+  const settleTiming = (error: DialpadBrowserSessionError) => {
+    if (timingProbeTimer) {
+      clearInterval(timingProbeTimer);
+      timingProbeTimer = null;
+    }
+    if (timingBatchInFlight) {
+      clearTimeout(timingBatchInFlight.timer);
+      timingBatchInFlight.reject(error);
+      timingBatchInFlight = null;
+    }
+    if (timingProbeInFlight) {
+      clearTimeout(timingProbeInFlight.timer);
+      timingProbeInFlight.reject(error);
+      timingProbeInFlight = null;
+    }
+    if (timingEndInFlight) {
+      clearTimeout(timingEndInFlight.timer);
+      timingEndInFlight.reject(error);
+      timingEndInFlight = null;
+    }
+  };
+
   function disposeCapture(): Promise<void> {
     if (!cleanupPromise) {
       cleanupPromise = Promise.resolve().then(() => options.capture.dispose()).catch(() => undefined);
@@ -240,6 +280,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     lifecycleGeneration += 1;
     settlePendingChunkAcks(error);
     settlePendingPcmAcks(error);
+    settleTiming(error);
     try { options.onFailure?.(error); } catch { /* failure remains sticky */ }
     if (socket) {
       detach();
@@ -248,37 +289,161 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     void disposeCapture();
   }
 
-  function enqueueSend(data: string | ArrayBuffer | Uint8Array, countsAsChunk = false): Promise<void> {
+  function enqueueSend(data: string | ArrayBuffer | Uint8Array, countsAsChunk = false, timingOnly = false): Promise<void> {
     if (failed || disposed || !socket || socket.readyState !== OPEN) return Promise.reject(failed ?? new DialpadBrowserSessionError('socket', 'Recording transport is not open.'));
     if ((!countsAsChunk && typeof data !== 'string' && queueDepth >= maxPendingPackets) || (countsAsChunk && pendingChunkAcks.size > maxPendingChunks)) {
       const error = new DialpadBrowserSessionError('queue_overflow', 'Recording transport queue capacity was exceeded.');
-      fail(error);
+      if (timingOnly) timingIncomplete = true; else fail(error);
       return Promise.reject(error);
     }
     const bytes = byteLength(data);
     const nativeBuffered = socket.bufferedAmount ?? 0;
     if (!Number.isFinite(nativeBuffered) || nativeBuffered < 0 || queuedBytes + bytes + nativeBuffered > maxBufferedBytes) {
       const error = new DialpadBrowserSessionError('queue_overflow', 'Recording transport byte capacity was exceeded.');
-      fail(error);
+      if (timingOnly) timingIncomplete = true; else fail(error);
       return Promise.reject(error);
     }
     queueDepth += 1;
     queuedBytes += bytes;
-    sendQueue = sendQueue.then(() => {
+    const operation = sendQueue.then(() => {
       if (failed || !socket || socket.readyState !== OPEN) throw failed ?? new DialpadBrowserSessionError('socket', 'Recording transport is not open.');
       if ((socket.bufferedAmount ?? 0) + bytes > maxBufferedBytes) throw new DialpadBrowserSessionError('queue_overflow', 'Native recording transport buffer was full.');
       socket.send(asBinaryData(data));
       if ((socket.bufferedAmount ?? 0) > maxBufferedBytes) throw new DialpadBrowserSessionError('queue_overflow', 'Native recording transport buffer exceeded its limit.');
-    }).catch((error: unknown) => {
+    });
+    const settled = operation.catch((error: unknown) => {
       const normalized = error instanceof DialpadBrowserSessionError ? error : new DialpadBrowserSessionError('socket', 'Recording transport send failed.');
+      if (timingOnly) {
+        timingIncomplete = true;
+        return;
+      }
       fail(normalized);
       throw normalized;
-    }).finally(() => { queueDepth -= 1; queuedBytes -= bytes; });
-    return sendQueue;
+    });
+    sendQueue = settled.finally(() => { queueDepth -= 1; queuedBytes -= bytes; });
+    return timingOnly ? operation : sendQueue;
   }
 
-  function sendControl(message: Record<string, unknown>): Promise<void> {
-    return enqueueSend(JSON.stringify(message));
+  function sendControl(message: Record<string, unknown>, timingOnly = false): Promise<void> {
+    return enqueueSend(JSON.stringify(message), false, timingOnly);
+  }
+
+  function timingNow(): number {
+    return typeof performance === 'undefined' ? Date.now() : performance.now();
+  }
+
+  function timingUuid(): string {
+    return globalThis.crypto?.randomUUID?.() ?? `00000000-0000-4000-8000-${Math.floor(Math.random() * 0xffffffffffff).toString(16).padStart(12, '0')}`;
+  }
+
+  function timingRecordBytes(record: DialpadTimingRecord): number {
+    return new TextEncoder().encode(JSON.stringify(record)).byteLength;
+  }
+
+  function timingBufferedRecordCount(): number {
+    return pendingTimingRecords.length + (timingBatchInFlight?.records.length ?? 0);
+  }
+
+  function timingBufferedBytes(): number {
+    return pendingTimingBytes + (timingBatchInFlight?.bytes ?? 0);
+  }
+
+  function noteTimingRecord(record: DialpadTimingRecord): void {
+    if (!timingNegotiated || timingBarrierSent || timingIncomplete) return;
+    const recordBytes = timingRecordBytes(record);
+    if (timingBufferedRecordCount() >= 32 || timingBufferedBytes() + recordBytes > 64 * 1024) {
+      timingIncomplete = true;
+      pendingTimingRecords.length = 0;
+      pendingTimingBytes = 0;
+      return;
+    }
+    pendingTimingRecords.push(record);
+    pendingTimingBytes += recordBytes;
+    void flushTimingBatches();
+  }
+
+  async function flushTimingBatches(): Promise<void> {
+    if (!timingNegotiated || timingIncomplete) return;
+    timingSendQueue = timingSendQueue.then(async () => {
+      while (pendingTimingRecords.length > 0 && !timingIncomplete) {
+        const batch: DialpadTimingRecord[] = [];
+        while (pendingTimingRecords.length > 0 && batch.length < 16) {
+          const candidate = pendingTimingRecords[0]!;
+          try { encodeDialpadTimingBatch(options.epoch, timingUuid(), [...batch, candidate]); } catch { if (batch.length === 0) { timingIncomplete = true; pendingTimingRecords.length = 0; pendingTimingBytes = 0; } break; }
+          batch.push(pendingTimingRecords.shift()!);
+          pendingTimingBytes -= timingRecordBytes(candidate);
+        }
+        if (batch.length === 0) break;
+        const batchId = timingUuid();
+        const encoded = encodeDialpadTimingBatch(options.epoch, batchId, batch);
+        const batchBytes = batch.reduce((total, record) => total + timingRecordBytes(record), 0);
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            if (timingBatchInFlight?.batchId !== batchId) return;
+            timingBatchInFlight = null;
+            timingIncomplete = true;
+            reject(new DialpadBrowserSessionError('timeout', 'Timing batch acknowledgement timed out.'));
+          }, ackTimeoutMs);
+          timingBatchInFlight = { batchId, records: batch, bytes: batchBytes, resolve, reject, timer };
+          void enqueueSend(encoded, false, true).catch((error) => {
+            if (timingBatchInFlight?.batchId === batchId) timingBatchInFlight = null;
+            timingIncomplete = true;
+            clearTimeout(timer);
+            reject(error instanceof Error ? error : new Error('Timing batch send failed.'));
+          });
+        }).catch(() => undefined);
+      }
+    });
+    await timingSendQueue;
+  }
+
+  async function sendTimingProbe(final = false): Promise<void> {
+    if (!timingNegotiated || timingIncomplete) return;
+    if (timingProbePromise) {
+      await timingProbePromise.catch(() => undefined);
+      if (!final || timingIncomplete) return;
+    }
+    if (timingIncomplete) return;
+    const seq = timingExchangeSeq++;
+    const browserSendMs = timingNow();
+    const exchange = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (timingProbeInFlight?.seq !== seq) return;
+        timingProbeInFlight = null;
+        timingIncomplete = true;
+        reject(new DialpadBrowserSessionError('timeout', 'Timing exchange timed out.'));
+      }, ackTimeoutMs);
+      timingProbeInFlight = { seq, nonce: null, browserSendMs, browserReceiveMs: null, replyFingerprint: null, resolve, reject, timer };
+      void sendControl({ type: 'timing_probe', epoch: options.epoch, seq, browserSendMs }, true).catch((error) => {
+        if (timingProbeInFlight?.seq === seq) timingProbeInFlight = null;
+        clearTimeout(timer);
+        timingIncomplete = true;
+        reject(error instanceof Error ? error : new Error('Timing probe send failed.'));
+      });
+    });
+    timingProbePromise = exchange;
+    try { await exchange; } catch { timingIncomplete = true; } finally { if (timingProbePromise === exchange) timingProbePromise = null; }
+  }
+
+  async function finishTiming(): Promise<void> {
+    if (!timingNegotiated || timingBarrierSent) return;
+    if (timingProbeTimer) {
+      clearInterval(timingProbeTimer);
+      timingProbeTimer = null;
+    }
+    await flushTimingBatches();
+    await sendTimingProbe(true);
+    await flushTimingBatches();
+    timingBarrierSent = true;
+    const outcome = timingIncomplete ? 'incomplete' : 'collected';
+    const reasons: DialpadTimingReason[] = timingIncomplete ? ['persistence_failed'] : [];
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => { timingEndInFlight = null; reject(new DialpadBrowserSessionError('timeout', 'Timing end acknowledgement timed out.')); }, ackTimeoutMs);
+        timingEndInFlight = { resolve, reject, timer };
+        void sendControl({ type: 'timing_end', epoch: options.epoch, lastSeq: timingDurableLastSeq, outcome, reasons }, true).catch(reject);
+      });
+    } catch { timingIncomplete = true; }
   }
 
   async function onOpen(): Promise<void> {
@@ -286,7 +451,8 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     opened = true;
     state = 'authenticating';
     try {
-      await enqueueSend(JSON.stringify({ type: 'auth', token: options.token, epoch: options.epoch, controlVersion: DIALPAD_BROWSER_PROTOCOL.controlVersion }));
+      const auth = { type: 'auth', token: options.token, epoch: options.epoch, controlVersion: DIALPAD_BROWSER_PROTOCOL.controlVersion, ...(enableTiming ? { capabilities: ['capture_timing_v1'] as const } : {}) };
+      await enqueueSend(JSON.stringify(auth));
     } catch (error) {
       fail(error instanceof DialpadBrowserSessionError ? error : new DialpadBrowserSessionError('socket', 'Authentication could not be sent.'));
     }
@@ -310,6 +476,11 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
       options.onServerMessage?.(message);
       if (message.type === 'ready') {
         ready = true;
+        timingNegotiated = enableTiming && message.capabilities?.includes('capture_timing_v1') === true;
+        if (timingNegotiated && timingProbeTimer === null) {
+          void sendTimingProbe();
+          timingProbeTimer = setInterval(() => { void sendTimingProbe(); }, 10_000);
+        }
         state = 'hydrating';
       } else if (message.type === 'measurement_snapshot') {
         if (message.revision < snapshotRevision) return;
@@ -365,6 +536,64 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
           return;
         }
         pcmDrainAcks.set(message.track, message.endSample);
+      } else if (message.type === 'timing_batch_ack') {
+        if (timingIncomplete) return;
+        if (!timingBatchInFlight || timingBatchInFlight.batchId !== message.batchId) {
+          throw new DialpadBrowserSessionError('protocol', 'Unexpected timing batch acknowledgement.');
+        }
+        const completed = timingBatchInFlight;
+        clearTimeout(completed.timer);
+        for (const record of completed.records) {
+          if (record.kind === 'anchor') timingDurableLastSeq[record.track === 'tab' ? 'tabAnchor' : 'micAnchor'] = Math.max(timingDurableLastSeq[record.track === 'tab' ? 'tabAnchor' : 'micAnchor'], record.seq);
+          else if (record.kind === 'context_clock') timingDurableLastSeq[record.track === 'tab' ? 'tabContext' : 'micContext'] = Math.max(timingDurableLastSeq[record.track === 'tab' ? 'tabContext' : 'micContext'], record.seq);
+        }
+        completed.resolve(); timingBatchInFlight = null;
+      } else if (message.type === 'timing_probe_reply') {
+        if (timingIncomplete || timingBarrierSent) return;
+        const replyFingerprint = JSON.stringify(message);
+        if (!timingProbeInFlight || timingProbeInFlight.seq !== message.seq) {
+          const completed = timingProbeHistory.get(message.seq);
+          if (!completed) throw new DialpadBrowserSessionError('protocol', 'Unexpected timing probe reply.');
+          if (completed.replyFingerprint !== replyFingerprint || completed.nonce !== message.nonce) {
+            timingIncomplete = true;
+            return;
+          }
+          try {
+            await sendControl({ type: 'timing_confirm', epoch: options.epoch, seq: message.seq, nonce: completed.nonce, browserReceiveMs: completed.browserReceiveMs }, true);
+          } catch {
+            timingIncomplete = true;
+          }
+          return;
+        }
+        const pending = timingProbeInFlight;
+        if (pending.replyFingerprint !== null && pending.replyFingerprint !== replyFingerprint) {
+          timingIncomplete = true;
+          return;
+        }
+        if (pending.nonce !== null && pending.nonce !== message.nonce) {
+          timingIncomplete = true;
+          return;
+        }
+        const firstReply = pending.replyFingerprint === null;
+        pending.replyFingerprint = replyFingerprint;
+        pending.nonce = message.nonce;
+        pending.browserReceiveMs ??= timingNow();
+        if (firstReply) {
+          timingProbeHistory.set(message.seq, { nonce: message.nonce, browserReceiveMs: pending.browserReceiveMs, replyFingerprint });
+          while (timingProbeHistory.size > 32) timingProbeHistory.delete(timingProbeHistory.keys().next().value!);
+        }
+        try {
+          await sendControl({ type: 'timing_confirm', epoch: options.epoch, seq: message.seq, nonce: message.nonce, browserReceiveMs: pending.browserReceiveMs }, true);
+        } catch {
+          timingIncomplete = true;
+        }
+      } else if (message.type === 'timing_exchange_ack') {
+        if (timingIncomplete) return;
+        if (!timingProbeInFlight || timingProbeInFlight.seq !== message.seq) return;
+        clearTimeout(timingProbeInFlight.timer); timingDurableLastSeq.exchange = Math.max(timingDurableLastSeq.exchange, message.seq); timingProbeInFlight.resolve(); timingProbeInFlight = null;
+      } else if (message.type === 'timing_end_ack') {
+        if (message.status === 'incomplete') timingIncomplete = true;
+        if (timingEndInFlight) { clearTimeout(timingEndInFlight.timer); timingEndInFlight.resolve(); timingEndInFlight = null; }
       }
       if (ready && snapshot && captureState && state === 'hydrating') await beginCapture();
     } catch (error) {
@@ -392,6 +621,8 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         }
       },
       onPcmTail: async (tail) => { pcmTails.set(tail.track, tail); },
+      onTiming: async (record) => { noteTimingRecord(record); },
+      onTimingFailure: () => { timingIncomplete = true; },
       onWebmChunk: async (chunk) => {
         try { await sendRecordingChunk(chunk); } catch (error) {
           const normalized = error instanceof DialpadBrowserSessionError ? error : new DialpadBrowserSessionError('socket', 'Recording delivery failed.');
@@ -548,6 +779,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
 
   async function finishControls(): Promise<void> {
     await waitForAcks(() => pendingPcmAcks.size === 0 && pcmCreditWaiters.length === 0 && pcmCreditWakeups === 0, 'PCM frame');
+    await finishTiming();
     for (const track of TRACKS) {
       const tail = pcmTails.get(track);
       const discardedTailSamples = tail ? boundedTail(tail) : null;
@@ -665,6 +897,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     lifecycleGeneration += 1;
     settlePendingChunkAcks(new DialpadBrowserSessionError('interrupted', 'Recording session was disposed.'));
     settlePendingPcmAcks(new DialpadBrowserSessionError('interrupted', 'Recording session was disposed.'));
+    settleTiming(new DialpadBrowserSessionError('interrupted', 'Recording session was disposed.'));
     if (socket) {
       detach();
       try { socket.close(1000, 'recording session disposed'); } catch { /* closed */ }

@@ -82,6 +82,15 @@ describe('loadDialpadPanelBootstrap', () => {
     const invalid = await loadDialpadPanelBootstrap(fakeDb({ loadConnection: async () => ({ id: 'c', status: 'active', allowedOrigins: ['https://dialpad.com'], companyId: null, directoryKeyRef: null, recordingIngestEndpoint: 'https://evil.example.test/dialpad-browser-ingest' }) }), actor);
     expect(invalid).not.toHaveProperty('recording');
   });
+
+  it('keeps timing evidence disabled unless the rollout capability is explicit', async () => {
+    const connection = { id: 'c', status: 'active' as const, allowedOrigins: ['https://dialpad.com'], companyId: null, directoryKeyRef: null, recordingIngestEndpoint: 'wss://recording.example.test/dialpad-browser-ingest' };
+    vi.stubEnv('DIALPAD_RECORDING_TIMING_ENABLED', 'false');
+    await expect(loadDialpadPanelBootstrap(fakeDb({ loadConnection: async () => connection }), actor)).resolves.toMatchObject({ recording: { ingestEndpoint: connection.recordingIngestEndpoint } });
+    vi.stubEnv('DIALPAD_RECORDING_TIMING_ENABLED', 'true');
+    await expect(loadDialpadPanelBootstrap(fakeDb({ loadConnection: async () => connection }), actor)).resolves.toMatchObject({ recording: { ingestEndpoint: connection.recordingIngestEndpoint, timingEnabled: true } });
+    vi.unstubAllEnvs();
+  });
 });
 
 describe('verifyDialpadBinding (trusted path)', () => {

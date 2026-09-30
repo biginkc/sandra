@@ -317,6 +317,24 @@ export function parseDialpadRecordingBrowserGrantResult(value: Json | null | und
   };
 }
 
+export interface DialpadRecordingBrowserCrossing {
+  status: 'latched';
+  thresholdSamples: number;
+  crossingTotalSamples: number;
+  crossingEpoch: number;
+  crossingSample: number;
+  crossingStartSample: number;
+  crossingEndSample: number;
+}
+
+export interface DialpadRecordingBrowserFinalResult {
+  status: 'stale' | 'eligible' | 'ineligible' | 'unknown';
+  observedSamples: number;
+  eligibleSamples: number | null;
+  reasons: string[];
+  evaluatedAt: string;
+}
+
 export interface DialpadRecordingBrowserStatus {
   captureId: string;
   captureStatus: DialpadCaptureState;
@@ -328,6 +346,8 @@ export interface DialpadRecordingBrowserStatus {
   tracks: DialpadRecordingTrack[];
   totalSamples: number;
   measurementStatus: 'provisional' | 'partial' | 'finalized';
+  crossing: DialpadRecordingBrowserCrossing | null;
+  finalResult: DialpadRecordingBrowserFinalResult | null;
 }
 
 export function parseDialpadRecordingBrowserStatus(value: Json | null | undefined): DialpadRecordingBrowserStatus {
@@ -335,6 +355,30 @@ export function parseDialpadRecordingBrowserStatus(value: Json | null | undefine
   if (data.controlVersion !== 2) throw new Error('Invalid controlVersion.');
   if (!Array.isArray(data.tracks) || data.tracks.length !== 2 || data.tracks[0] !== 'tab' || data.tracks[1] !== 'mic') throw new Error('Invalid tracks.');
   const endpoint = data.ingestEndpoint === null || data.ingestEndpoint === undefined ? null : trustedIngestEndpoint(data.ingestEndpoint);
+  let crossing: DialpadRecordingBrowserCrossing | null = null;
+  if (data.crossing !== null && data.crossing !== undefined) {
+    const value = record(data.crossing, 'browser crossing');
+    crossing = {
+      status: oneOf(value.status, ['latched'] as const, 'crossing status'),
+      thresholdSamples: bigish(value.thresholdSamples, 'thresholdSamples'),
+      crossingTotalSamples: bigish(value.crossingTotalSamples, 'crossingTotalSamples'),
+      crossingEpoch: int(value.crossingEpoch, 'crossingEpoch'),
+      crossingSample: bigish(value.crossingSample, 'crossingSample'),
+      crossingStartSample: bigish(value.crossingStartSample, 'crossingStartSample'),
+      crossingEndSample: bigish(value.crossingEndSample, 'crossingEndSample'),
+    };
+  }
+  let finalResult: DialpadRecordingBrowserFinalResult | null = null;
+  if (data.finalResult !== null && data.finalResult !== undefined) {
+    const value = record(data.finalResult, 'browser final result');
+    finalResult = {
+      status: oneOf(value.status, ['stale', 'eligible', 'ineligible', 'unknown'] as const, 'final result status'),
+      observedSamples: bigish(value.observedSamples, 'final result observed samples'),
+      eligibleSamples: nullableInt(value.eligibleSamples, 'final result eligible samples'),
+      reasons: strings(value.reasons, 'final result reasons'),
+      evaluatedAt: str(value.evaluatedAt, 'final result evaluatedAt'),
+    };
+  }
   return {
     captureId: str(data.captureId, 'captureId'),
     captureStatus: oneOf(data.captureStatus, DIALPAD_CAPTURE_STATES, 'captureStatus'),
@@ -346,6 +390,8 @@ export function parseDialpadRecordingBrowserStatus(value: Json | null | undefine
     tracks: ['tab', 'mic'],
     totalSamples: bigish(data.totalSamples, 'totalSamples'),
     measurementStatus: oneOf(data.measurementStatus, ['provisional', 'partial', 'finalized'] as const, 'measurementStatus'),
+    crossing,
+    finalResult,
   };
 }
 
