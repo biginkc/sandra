@@ -169,7 +169,7 @@ test("walks every PDF-aligned section forward and backward with correct boundari
 test("starts each navigated section at the top without resetting scroll for live updates", async ({ page }) => {
   await mountCoach(page, { width: 1440, height: 520 });
   await page.getByTestId("variant-Opener-cold_call").click();
-  const panel = page.getByTestId("coach-script-panel");
+  const panel = page.getByTestId("coach-script-scroll");
   await panel.evaluate((element) => { element.scrollTop = element.scrollHeight; });
   await expect.poll(() => panel.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   await emitStimulus(page, "legacyBatch");

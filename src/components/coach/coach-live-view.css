@@ -149,7 +149,11 @@
 }
 
 [data-testid="coach-live-view"] {
-  .coach-card-tray { order: 2; display: grid; gap: 10px; flex-shrink: 0; max-height: min(42vh, 370px); overflow-y: auto; padding: 8px 12px; background: var(--background); }
+  .coach-card-tray { order: 2; display: grid; gap: 10px; flex: 0 1 auto; min-height: 0; max-height: min(40vh, 370px); overflow-y: auto; overscroll-behavior: contain; padding: 8px 12px; background: var(--background); }
+  /* Column order in the script panel: script box, Up next, card tray, Back/Next. The footer wrapper is display:contents so its children take part in this ordering. */
+  .coach-script-footer { display: contents; }
+  .coach-script-footer > [data-testid="next-section-preview"] { order: 1; flex-shrink: 0; margin-top: 12px; background: var(--background); }
+  .coach-script-footer > [data-testid="section-navigation"] { order: 3; flex-shrink: 0; background: var(--background); }
   .coach-prompt-card { animation: coach-card-arrive 220ms ease-out both; border: 2px solid var(--coach-sky); border-left: 5px solid var(--coach-sky); border-radius: 12px; background: var(--card); padding: 14px 18px; color: var(--foreground); box-shadow: 0 4px 14px var(--border); }
   .coach-prompt-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; font-size: 16px; line-height: 1.4; }
   .coach-prompt-heading strong { display: block; color: var(--coach-sky); font-size: 18px; }
@@ -215,5 +219,20 @@
     .coach-identity { min-width: 260px; flex: 0 1 auto; }
     .coach-status { order: 3; min-width: 260px; flex-wrap: nowrap; }
     [data-testid="coach-phase-scroller"] { flex: 1 1 auto; justify-content: safe center; }
+  }
+}
+
+/* Short script column (for example desktop with the keypad open): keep Up next,
+   the card tray and Back/Next all on screen by tightening their padding and
+   trimming the preview to one line. The script box keeps its own scroll. */
+@media (min-width: 1280px) {
+  [data-testid="coach-live-view"] [data-testid="coach-script-panel"] { container-type: size; }
+  @container (max-height: 420px) {
+    .coach-script-column { padding-top: 8px; }
+    [data-testid="coach-script-scroll"] { min-height: 3rem; }
+    .coach-script-footer > [data-testid="next-section-preview"] { margin-top: 6px; padding-top: 8px; padding-bottom: 8px; }
+    .coach-script-footer > [data-testid="next-section-preview"] p { margin-top: 2px; -webkit-line-clamp: 1; line-clamp: 1; font-size: 15px; }
+    .coach-script-footer > [data-testid="section-navigation"] { padding-top: 8px; padding-bottom: 8px; }
+    .coach-card-tray { min-height: 2rem; padding-top: 4px; padding-bottom: 4px; }
   }
 }

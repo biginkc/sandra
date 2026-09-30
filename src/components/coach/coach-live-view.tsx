@@ -954,11 +954,11 @@ function ScriptPanel({
     : null;
   return (
     <main
-      className="flex min-h-[28rem] min-w-0 flex-1 flex-col overflow-hidden border-b border-border px-4 pt-7 md:px-8 xl:min-h-0 xl:border-b-0 xl:px-12"
+      className="flex min-w-0 flex-1 flex-col border-b border-border px-4 md:px-8 xl:min-h-0 xl:overflow-hidden xl:border-b-0 xl:px-12"
       data-testid="coach-script-panel"
     >
-      <div className="mx-auto flex min-h-0 w-full max-w-[820px] flex-1 flex-col">
-        <div ref={panelRef} className="min-h-0 flex-1 overflow-y-auto" data-testid="coach-script-scroll">
+      <div className="coach-script-column mx-auto flex w-full max-w-[820px] flex-1 flex-col pt-7 xl:min-h-0">
+        <div ref={panelRef} className="max-h-[min(55vh,30rem)] min-h-[14rem] flex-1 overflow-y-auto xl:max-h-none xl:min-h-32" data-testid="coach-script-scroll">
           {contextLoad.status === "error" ? (
             <div
               role="alert"
@@ -1153,7 +1153,7 @@ function CoachCardTray({
   onDismissMotivation: () => void;
 }) {
   return (
-    <div data-testid="coach-card-tray" className="coach-card-tray">
+    <div data-testid="coach-card-tray" className="coach-card-tray" aria-live="polite">
       {objectionPrompt ? (
         <ObjectionPromptCard
           key={JSON.stringify(objectionPrompt)}
