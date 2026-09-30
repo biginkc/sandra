@@ -1224,55 +1224,29 @@ async function rebuildCaptureAndProjection(client, _observedAt, {
     if (value.row_count === 0) break;
   }
 
-  for (;;) {
-    const value = await retrySkippedBatch("stale-route-edges", async () => {
-      const result = await client.query(
-        `WITH candidates AS MATERIALIZED (
-         SELECT e.org_id,e.message_id
-             FROM inbox_message_capture.route_edges e
-            LEFT JOIN public.messages m ON m.org_id=e.org_id AND m.id=e.message_id
-            CROSS JOIN LATERAL (
-              SELECT regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g') AS digits
-            ) d
-            WHERE m.id IS NULL
-               OR m.channel<>'sms'
-               OR m.conversation_id IS NULL
-               OR (CASE WHEN length(d.digits)=10 THEN '+1'||d.digits
-                        WHEN length(d.digits)=11 AND left(d.digits,1)='1' THEN '+'||d.digits
-                   END) IS NULL
-         ),
-         picked AS MATERIALIZED (
-           SELECT c.org_id,c.message_id
-             FROM candidates c
-             JOIN inbox_message_capture.route_edges e ON e.org_id=c.org_id AND e.message_id=c.message_id
-            ORDER BY c.org_id,c.message_id
-            LIMIT $1
-            FOR UPDATE OF e SKIP LOCKED
-         )
-         SELECT (SELECT count(*)::int FROM candidates) AS candidate_count,
-                coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY p.org_id,p.message_id) FROM picked p),'[]'::jsonb) AS rows`,
-        [sourceBatchSize],
-      );
-      const candidateCount = Number(result.rows[0]?.candidate_count ?? 0);
-      const rows = result.rows[0]?.rows ?? [];
-      if (rows.length > 0) {
-        await client.query(
-          `DELETE FROM inbox_message_capture.route_edges e
-             USING jsonb_to_recordset($1::jsonb) AS p(org_id uuid,message_id uuid)
-            WHERE e.org_id=p.org_id AND e.message_id=p.message_id`,
-          [JSON.stringify(rows)],
-        );
-      }
-      return {
-        rows,
-        row_count: rows.length,
-        skipped_count: candidateCount <= sourceBatchSize ? Math.max(0, candidateCount - rows.length) : 0,
-      };
-    }, "stale_route_edge_retries");
-    resultCounts.stale_route_edges_deleted += value.rows;
-    resultCounts.stale_route_edges_skipped += value.skipped_count;
-    if (value.rows === 0) break;
-  }
+  const staleRouteEdges = await runBatch("stale-route-edges", async () => {
+    const result = await client.query(`
+      DELETE FROM inbox_message_capture.route_edges e
+       WHERE NOT EXISTS (
+         SELECT 1 FROM public.messages m
+          WHERE m.org_id=e.org_id AND m.id=e.message_id
+       )
+          OR EXISTS (
+         SELECT 1
+           FROM public.messages m
+           CROSS JOIN LATERAL (
+             SELECT regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g') AS digits
+           ) d
+          WHERE m.org_id=e.org_id AND m.id=e.message_id
+            AND (m.channel<>'sms' OR m.conversation_id IS NULL
+              OR (CASE WHEN length(d.digits)=10 THEN '+1'||d.digits
+                       WHEN length(d.digits)=11 AND left(d.digits,1)='1' THEN '+'||d.digits
+                  END) IS NULL)
+       )
+    `);
+    return { rows: result.rowCount, row_count: result.rowCount, skipped_count: 0 };
+  });
+  resultCounts.stale_route_edges_deleted += staleRouteEdges.rows;
 
   const plan = await readOnlyRecoveryPlan(client, { expectedCatalogFingerprint });
   if (plan.status !== "ready") throw new ReconciliationBlocked(plan.error_code ?? "RECOVERY_GATE_BLOCKED");

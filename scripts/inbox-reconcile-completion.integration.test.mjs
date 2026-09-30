@@ -656,10 +656,11 @@ test("route-edge reconciliation mirrors canonical eligibility and gates markers"
         ($1,$2,'sms','inbound','received',$3,$4,NULL,'+18165550121','+18162804181','null conversation',clock_timestamp()),
         ($5,$2,'email','outbound','sent',$3,$4,$6,'sender@example.com','recipient@example.com','non-SMS message',clock_timestamp())
     `, [nullConversationMessage, ids.org, ids.property, ids.contact, nonSmsMessage, ids.conversation]);
-    assert.deepEqual((await client.query(
+    const unexpectedEdges = (await client.query(
       "SELECT message_id::text AS message_id FROM inbox_message_capture.route_edges WHERE org_id=$1 AND message_id=ANY($2::uuid[]) ORDER BY message_id",
       [ids.org, [nullConversationMessage, nonSmsMessage]],
-    )).rows, [], "canonical trigger must not create edges for null-conversation or non-SMS rows");
+    )).rows;
+    assert.deepEqual(unexpectedEdges, [], `canonical trigger must not create edges for null-conversation or non-SMS rows: ${JSON.stringify({ nullConversationMessage, nonSmsMessage, unexpectedEdges })}`);
 
     await client.query("ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct");
     try {
