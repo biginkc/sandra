@@ -104,6 +104,27 @@ describe("coachReducer — motivation prompt", () => {
   });
 });
 
+describe("coachReducer — a dismissed card stays dismissed", () => {
+  const objection = { type: "objection_prompt" as const, objectionId: "price", label: "Price concern", sellerTurn: 2, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z", ...V };
+  const motivation = { type: "motivation_prompt" as const, label: "Motivation", sellerTurn: 2, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z", ...V };
+
+  it.each([
+    ["objection", objection, { type: "dismiss_objection_prompt" as const }, "objectionPrompt" as const],
+    ["motivation", motivation, { type: "dismiss_motivation_prompt" as const }, "motivationPrompt" as const],
+  ])("%s: a duplicate or older event cannot bring it back, a newer one shows, reset forgets", (_kind, event, dismiss, field) => {
+    let state = coachReducer(initialCoachState(), event);
+    state = coachReducer(state, dismiss);
+    expect(state[field]).toBeNull();
+    expect(coachReducer(state, event)[field]).toBeNull();
+    expect(coachReducer(state, { ...event, ts: "2026-09-29T11:59:00Z", sellerTurn: 9 })[field]).toBeNull();
+    expect(coachReducer(state, { ...event, sellerTurn: 1 })[field]).toBeNull();
+    const newer = coachReducer(state, { ...event, ts: "2026-09-29T12:00:30Z", sellerTurn: 4 });
+    expect(newer[field]).toMatchObject({ sellerTurn: 4 });
+    const reset = coachReducer(state, { type: "reset", startingPhaseId: "introduction" });
+    expect(coachReducer(reset, event)[field]).toMatchObject({ sellerTurn: 2 });
+  });
+});
+
 describe("coachReducer — transcript", () => {
   it("appends a final line for a fresh speaker turn", () => {
     const state = coachReducer(initialCoachState(), {

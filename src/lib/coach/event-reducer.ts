@@ -59,6 +59,8 @@ export function initialCoachState(startingPhaseId: CoachPhaseId = "introduction"
     objectionCards: [],
     objectionPrompt: null,
     motivationPrompt: null,
+    lastObjectionPrompt: null,
+    lastMotivationPrompt: null,
     nudges: [],
     probeCount: 0,
     gates: {},
@@ -240,27 +242,29 @@ export function createCoachReducer(bundle: ScriptBundle | null) {
     }
     case "objection_prompt": {
       if (
-        state.objectionPrompt &&
-        (isSameObjectionPrompt(state.objectionPrompt, action) ||
-          isOlderObjectionPrompt(state.objectionPrompt, action))
+        state.lastObjectionPrompt &&
+        (isSameObjectionPrompt(state.lastObjectionPrompt, action) ||
+          isOlderObjectionPrompt(state.lastObjectionPrompt, action))
       ) {
         return state;
       }
+      const objectionPrompt = {
+        objectionId: action.objectionId, label: action.label, sellerTurn: action.sellerTurn,
+        classifierModel: action.classifierModel, questionsSha256: action.questionsSha256,
+        ts: action.ts,
+      };
       return {
         ...state,
         connected: true,
         lastEventAt: action.ts,
-        objectionPrompt: {
-          objectionId: action.objectionId, label: action.label, sellerTurn: action.sellerTurn,
-          classifierModel: action.classifierModel, questionsSha256: action.questionsSha256,
-          ts: action.ts,
-        },
+        objectionPrompt: objectionPrompt,
+        lastObjectionPrompt: objectionPrompt,
       };
     }
     case "motivation_prompt": {
       // Owner-approved separate motivation card (2026-09-29). Latest wins; a duplicate
       // or an older event (earlier ts, or same ts on an earlier seller turn) is ignored.
-      const current = state.motivationPrompt;
+      const current = state.lastMotivationPrompt;
       if (current) {
         const currentMs = Date.parse(current.ts);
         const incomingMs = Date.parse(action.ts);
@@ -273,15 +277,17 @@ export function createCoachReducer(bundle: ScriptBundle | null) {
           : action.sellerTurn < current.sellerTurn;
         if (duplicate || older) return state;
       }
+      const motivationPrompt = {
+        label: action.label, ...(action.subType === undefined ? {} : { subType: action.subType }), sellerTurn: action.sellerTurn,
+        classifierModel: action.classifierModel, questionsSha256: action.questionsSha256,
+        ts: action.ts,
+      };
       return {
         ...state,
         connected: true,
         lastEventAt: action.ts,
-        motivationPrompt: {
-          label: action.label, ...(action.subType === undefined ? {} : { subType: action.subType }), sellerTurn: action.sellerTurn,
-          classifierModel: action.classifierModel, questionsSha256: action.questionsSha256,
-          ts: action.ts,
-        },
+        motivationPrompt: motivationPrompt,
+        lastMotivationPrompt: motivationPrompt,
       };
     }
     case "counter":
@@ -358,6 +364,8 @@ export function createCoachReducer(bundle: ScriptBundle | null) {
         ...state,
         objectionCards: state.objectionCards.filter((card) => card.id !== action.cardId),
       };
+    // Dismiss hides the card only. The last accepted event stays as the dedupe reference, so a
+    // duplicate or older event cannot bring a dismissed card back; a newer one still shows.
     case "dismiss_objection_prompt":
       return { ...state, objectionPrompt: null };
     case "dismiss_motivation_prompt":

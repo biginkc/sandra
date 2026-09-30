@@ -36,7 +36,9 @@ export type CoachNudge = { id: string; text: string; phaseId: CoachPhaseId; ts: 
 export type CoachState = {
   connected: boolean; currentPhaseId: CoachPhaseId; overriddenPhaseId: CoachPhaseId | null;
   transcript: CoachTranscriptLine[]; transcriptFragments: CoachTranscriptLine[];
-  objectionCards: CoachObjectionCard[]; objectionPrompt: CoachObjectionPrompt | null; motivationPrompt: CoachMotivationPrompt | null; nudges: CoachNudge[]; probeCount: number;
+  objectionCards: CoachObjectionCard[]; objectionPrompt: CoachObjectionPrompt | null; motivationPrompt: CoachMotivationPrompt | null;
+  /** The last accepted prompt of each kind, kept after a dismiss so a duplicate or older event cannot bring a dismissed card back. Cleared on reset. */
+  lastObjectionPrompt: CoachObjectionPrompt | null; lastMotivationPrompt: CoachMotivationPrompt | null; nudges: CoachNudge[]; probeCount: number;
   gates: Record<string, boolean>; holdTimer: CoachHoldTimer | null; lastEventAt: string | null;
   entryFields: CoachEntryFields; cursor: CoachCursor | null;
 };
