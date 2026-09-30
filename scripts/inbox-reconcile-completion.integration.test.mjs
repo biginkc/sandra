@@ -590,6 +590,145 @@ test("route-edge recovery serializes the source row before an atomic upsert", { 
   }
 });
 
+test("a held route source lock reports incomplete recovery, then reruns cleanly after release", { skip: !RUN }, async () => {
+  const client = new Client({ connectionString: BASE_DSN });
+  const peer = new Client({ connectionString: BASE_DSN });
+  await client.connect();
+  await peer.connect();
+  let ids;
+  try {
+    ids = await seed(client);
+    await client.query("UPDATE inbox_control.rollout SET backfill_complete=false,reconciliation_complete=false WHERE singleton");
+    await client.query("ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct");
+    try {
+      await client.query("UPDATE public.messages SET from_address='+18165550998' WHERE id=$1", [ids.message]);
+    } finally {
+      await client.query("ALTER TABLE public.messages ENABLE TRIGGER zzzzz_inbox_message_direct");
+    }
+
+    await peer.query("BEGIN");
+    await peer.query("SELECT id FROM public.messages WHERE id=$1 FOR UPDATE", [ids.message]);
+    let result = await reconcileAndMaybeWrite(client, {
+      expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT,
+      recoverCaptureBypass: true,
+      applyCaptureRecovery: true,
+    });
+    assert.equal(result.status, "recovery-incomplete", "a skipped route repair must never report recovery success");
+    assert.equal(result.recovery.incomplete_reason, "ROUTE_EDGE_REPAIRS_SKIPPED");
+    assert.ok(result.recovery.rebuild.route_repairs_skipped > 0);
+    assert.ok(result.recovery.rebuild.route_retries > 0, "a skipped route repair must be retried with bounded backoff");
+    assert.equal(result.evidence.checks.route_edges_reconciled, false);
+
+    await peer.query("COMMIT");
+    result = await reconcileAndMaybeWrite(client, {
+      expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT,
+      recoverCaptureBypass: true,
+      applyCaptureRecovery: true,
+    });
+    assert.equal(result.status, "recovery-written");
+    assert.equal(result.evidence.checks.route_edges_reconciled, true);
+    assert.equal(result.evidence.checks.recovery_gate, true);
+    assert.deepEqual((await client.query(
+      "SELECT phone_e164 FROM inbox_message_capture.route_edges WHERE org_id=$1 AND message_id=$2",
+      [ids.org, ids.message],
+    )).rows, [{ phone_e164: "+18165550998" }]);
+  } finally {
+    await peer.query("ROLLBACK").catch(() => {});
+    if (ids) await cleanup(client, ids);
+    await peer.end();
+    await client.end();
+  }
+});
+
+test("route-edge reconciliation mirrors canonical eligibility and gates markers", { skip: !RUN }, async () => {
+  const client = new Client({ connectionString: BASE_DSN });
+  await client.connect();
+  let ids;
+  try {
+    ids = await seed(client);
+    const nullConversationMessage = randomUUID();
+    const nonSmsMessage = randomUUID();
+    await client.query(`
+      INSERT INTO public.messages(
+        id,org_id,channel,direction,status,property_id,contact_id,conversation_id,
+        from_address,to_address,body,created_at
+      ) VALUES
+        ($1,$2,'sms','inbound','received',$3,$4,NULL,'+18165550121','+18162804181','null conversation',clock_timestamp()),
+        ($5,$2,'email','outbound','sent',$3,$4,$6,'sender@example.com','recipient@example.com','non-SMS message',clock_timestamp())
+    `, [nullConversationMessage, ids.org, ids.property, ids.contact, nonSmsMessage, ids.conversation]);
+    assert.equal((await client.query(
+      "SELECT count(*)::int AS count FROM inbox_message_capture.route_edges WHERE org_id=$1 AND message_id=ANY($2::uuid[])",
+      [ids.org, [nullConversationMessage, nonSmsMessage]],
+    )).rows[0].count, 0, "canonical trigger must not create edges for null-conversation or non-SMS rows");
+
+    await client.query("ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct");
+    try {
+      await client.query("UPDATE public.messages SET conversation_id=NULL WHERE id=$1", [ids.message]);
+    } finally {
+      await client.query("ALTER TABLE public.messages ENABLE TRIGGER zzzzz_inbox_message_direct");
+    }
+    const generation = (await client.query("SELECT generation::text AS generation FROM inbox_capture_boundary.generation WHERE singleton")).rows[0].generation;
+    const sourceWriterAttestation = attestation(generation);
+    const base = { expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT, sourceWriterAttestation };
+    let result = await collectEvidence(client, base);
+    assert.equal(result.status, "blocked");
+    assert.equal(result.checks.route_edges_reconciled, false, "the independent route snapshot must see the now-ineligible edge");
+    assert.ok(result.route_edges.extra_count > 0);
+
+    result = await reconcileAndMaybeWrite(client, { ...base, writeMarkers: true });
+    assert.equal(result.status, "blocked", "route-edge mismatch must block completion markers");
+    assert.equal(result.evidence.checks.route_edges_reconciled, false);
+    assert.deepEqual((await client.query(
+      "SELECT backfill_complete,reconciliation_complete FROM inbox_control.rollout WHERE singleton",
+    )).rows[0], { backfill_complete: false, reconciliation_complete: false });
+
+    result = await reconcileAndMaybeWrite(client, {
+      expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT,
+      recoverCaptureBypass: true,
+      applyCaptureRecovery: true,
+    });
+    assert.equal(result.status, "recovery-written");
+    assert.equal(result.evidence.checks.route_edges_reconciled, true);
+    assert.equal((await client.query(
+      "SELECT count(*)::int AS count FROM inbox_message_capture.route_edges WHERE org_id=$1 AND message_id=ANY($2::uuid[])",
+      [ids.org, [ids.message, nullConversationMessage, nonSmsMessage]],
+    )).rows[0].count, 0, "recovery must remove the now-ineligible edge and preserve the canonical no-edge cases");
+  } finally {
+    if (ids) await cleanup(client, ids);
+    await client.end();
+  }
+});
+
+test("the final route-edge snapshot gates recovery success", { skip: !RUN }, async () => {
+  const client = new Client({ connectionString: BASE_DSN });
+  await client.connect();
+  let ids;
+  try {
+    ids = await seed(client);
+    let corrupted = false;
+    await assert.rejects(
+      reconcileAndMaybeWrite(client, {
+        expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT,
+        recoverCaptureBypass: true,
+        applyCaptureRecovery: true,
+        onRecoveryBatchCommitted: async ({ kind }) => {
+          if (kind !== "stale-route-edges" || corrupted) return;
+          corrupted = true;
+          await client.query(
+            "UPDATE inbox_message_capture.route_edges SET phone_e164='+18165550000' WHERE org_id=$1 AND message_id=$2",
+            [ids.org, ids.message],
+          );
+        },
+      }),
+      (error) => error instanceof ReconciliationCommitted && error.code === "RECOVERY_COMMITTED_POSTCHECK_FAILED",
+    );
+    assert.equal(corrupted, true, "the final route snapshot must be reached after the route repair batches");
+  } finally {
+    if (ids) await cleanup(client, ids);
+    await client.end();
+  }
+});
+
 test("operator assertion digest is stable and explicitly named", () => {
   const payload = { capture_generation: "10000000-0000-0000-0000-000000000001", bypass_since_install: false, covered_tables: ["public.messages"], catalog_fingerprint: "a".repeat(64) };
   assert.equal(attestationDigest(payload), digestJson({ ...payload, covered_tables: ["public.messages"] }));

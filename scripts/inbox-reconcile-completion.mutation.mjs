@@ -89,9 +89,55 @@ const mutations = [
     name: "route-edge source lock removed",
     source: replaceOnce(
       source,
-      "FOR UPDATE OF m SKIP LOCKED",
+      "FOR NO KEY UPDATE OF m SKIP LOCKED",
       "/* source lock removed */",
       "route-edge source lock removed",
+    ),
+  },
+  {
+    name: "route-edge canonical eligibility removed",
+    source: replaceOccurrence(
+      source,
+      "WHERE channel='sms' AND conversation_id IS NOT NULL",
+      "WHERE true",
+      2,
+      "route-edge canonical eligibility removed",
+    ),
+  },
+  {
+    name: "route-edge marker guard removed",
+    source: replaceOnce(
+      source,
+      "route_edges_reconciled: routeEdges.pass,",
+      "route_edges_reconciled: true,",
+      "route-edge marker guard removed",
+    ),
+  },
+  {
+    name: "route-edge recovery gate removed",
+    source: replaceOnce(
+      source,
+      "recovery_gate: reconciliation.recovery_pass && routeEdges.pass,",
+      "recovery_gate: reconciliation.recovery_pass,",
+      "route-edge recovery gate removed",
+    ),
+  },
+  {
+    name: "skipped route repairs accepted as complete",
+    source: replaceOnce(
+      source,
+      "if (Number(rebuild.route_repairs_skipped ?? 0) > 0) {",
+      "if (false) {",
+      "skipped route repairs accepted as complete",
+    ),
+  },
+  {
+    name: "bounded route retry removed",
+    source: replaceOnce(
+      source,
+      "const RECOVERY_SKIP_RETRY_ATTEMPTS = 4;",
+      "const RECOVERY_SKIP_RETRY_ATTEMPTS = 0;",
+      "bounded route retry removed",
     ),
   },
 ];

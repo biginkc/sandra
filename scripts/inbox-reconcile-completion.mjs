@@ -23,6 +23,9 @@ const RECOVERY_BATCH_SIZE = 20;
 const RECOVERY_SOURCE_BATCH_SIZE = 100;
 const RECOVERY_LOCK_TIMEOUT = "50ms";
 const RECOVERY_TARGET_TXN_BUDGET_MS = 25;
+const RECOVERY_SKIP_RETRY_ATTEMPTS = 4;
+const RECOVERY_SKIP_RETRY_BACKOFF_MS = 25;
+const RECOVERY_SKIP_RETRY_MAX_BACKOFF_MS = 200;
 
 export const SOURCE_WRITERS = Object.freeze([
   ["public.messages", "zzzzz_inbox_message_direct"],
@@ -709,6 +712,60 @@ async function collectOrgReconciliation(client, { observedAt = new Date().toISOS
   };
 }
 
+async function collectRouteEdgeReconciliation(client) {
+  // This is deliberately independent of capture dirty rows and projection
+  // evidence. The expected set mirrors zzzzz_inbox_message_direct exactly:
+  // only SMS messages with a conversation_id and a canonical phone produce an
+  // edge; every other existing edge is stale and must be removed.
+  const result = await client.query(`
+    WITH normalized AS (
+      SELECT m.org_id,m.id AS message_id,m.channel,m.conversation_id,d.digits
+        FROM public.messages m
+        CROSS JOIN LATERAL (
+          SELECT regexp_replace(
+            coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),
+            '[^0-9]','','g'
+          ) AS digits
+        ) d
+    ),
+    expected AS (
+      SELECT org_id,message_id,conversation_id,
+             CASE WHEN length(digits)=10 THEN '+1'||digits
+                  WHEN length(digits)=11 AND left(digits,1)='1' THEN '+'||digits
+             END AS phone_e164
+        FROM normalized
+       WHERE channel='sms' AND conversation_id IS NOT NULL
+         AND (length(digits)=10 OR (length(digits)=11 AND left(digits,1)='1'))
+    ),
+    actual AS (
+      SELECT org_id,message_id,conversation_id,phone_e164
+        FROM inbox_message_capture.route_edges
+    ),
+    comparison AS (
+      SELECT e.org_id AS expected_org_id,e.message_id AS expected_message_id,
+             e.conversation_id AS expected_conversation_id,e.phone_e164 AS expected_phone_e164,
+             a.org_id AS actual_org_id,a.message_id AS actual_message_id,
+             a.conversation_id AS actual_conversation_id,a.phone_e164 AS actual_phone_e164
+        FROM expected e
+        FULL OUTER JOIN actual a ON a.org_id=e.org_id AND a.message_id=e.message_id
+    )
+    SELECT
+      count(*) FILTER (WHERE expected_message_id IS NOT NULL)::int AS expected_count,
+      count(*) FILTER (WHERE actual_message_id IS NOT NULL)::int AS actual_count,
+      count(*) FILTER (WHERE expected_message_id IS NOT NULL AND actual_message_id IS NULL)::int AS missing_count,
+      count(*) FILTER (WHERE expected_message_id IS NULL AND actual_message_id IS NOT NULL)::int AS extra_count,
+      count(*) FILTER (
+        WHERE expected_message_id IS NOT NULL AND actual_message_id IS NOT NULL
+          AND (expected_conversation_id IS DISTINCT FROM actual_conversation_id
+            OR expected_phone_e164 IS DISTINCT FROM actual_phone_e164)
+      )::int AS mismatched_count
+    FROM comparison
+  `);
+  const row = result.rows[0] ?? {};
+  const counts = Object.fromEntries(Object.entries(row).map(([key, value]) => [key, Number(value ?? 0)]));
+  return { ...counts, total: counts.missing_count + counts.extra_count + counts.mismatched_count, pass: counts.missing_count + counts.extra_count + counts.mismatched_count === 0 };
+}
+
 async function collectState(client) {
   const rollout = (await client.query(
     `SELECT singleton,serving_enabled,backfill_complete,reconciliation_complete
@@ -774,6 +831,7 @@ export async function collectEvidence(client, {
   const state = await collectState(client);
   const writer = await collectSourceWriterEvidence(client);
   const liveCatalogFingerprint = await catalogFingerprint(client);
+  const routeEdges = await collectRouteEdgeReconciliation(client);
   const attestation = validateAttestation(sourceWriterAttestation, {
     generation: state.generation,
     expectedCatalogFingerprint,
@@ -800,6 +858,7 @@ export async function collectEvidence(client, {
     source_writer_coverage: writer.pass,
     source_writer_attestation: attestation.pass,
     capture_fingerprint_stable: state.jobFingerprintMismatches === 0 && state.liveCaptureFingerprint !== null,
+    route_edges_reconciled: routeEdges.pass,
   };
   const errors = Object.entries(checks).filter(([, pass]) => !pass).map(([name]) => name.toUpperCase());
   const evidence = {
@@ -858,6 +917,7 @@ export async function collectEvidence(client, {
       disabled_trigger_count: writer.disabled_trigger_count,
       trigger_fingerprint: writer.trigger_fingerprint,
     },
+    route_edges: routeEdges,
     checks,
     status: errors.length === 0 ? "ready" : "blocked",
     errors,
@@ -899,6 +959,7 @@ async function collectRecoverySafety(client, { expectedCatalogFingerprint = EXPE
 async function collectRecoveryPlan(client, { expectedCatalogFingerprint = EXPECTED_CATALOG_FINGERPRINT, observedAt = new Date().toISOString() } = {}) {
   const safety = await collectRecoverySafety(client, { expectedCatalogFingerprint });
   const reconciliation = await collectOrgReconciliation(client, { observedAt });
+  const routeEdges = await collectRouteEdgeReconciliation(client);
   const boundaryCount = Number((await client.query("SELECT count(*)::int AS count FROM inbox_read.boundaries")).rows[0]?.count ?? 0);
   const { state, writer, liveCatalogFingerprint } = safety;
   const evidence = {
@@ -951,14 +1012,16 @@ async function collectRecoveryPlan(client, { expectedCatalogFingerprint = EXPECT
       disabled_trigger_count: writer.disabled_trigger_count,
       trigger_fingerprint: writer.trigger_fingerprint,
     },
+    route_edges: routeEdges,
     checks: {
       ...safety.checks,
-      recovery_gate: reconciliation.recovery_pass,
+      route_edges_reconciled: routeEdges.pass,
+      recovery_gate: reconciliation.recovery_pass && routeEdges.pass,
     },
     status: safety.errors.length === 0 ? "ready" : "blocked",
     errors: safety.errors,
     error_code: safety.error_code,
-    recovery_error_code: reconciliation.recovery_pass ? null : "RECOVERY_RECONCILIATION_FAILED",
+    recovery_error_code: reconciliation.recovery_pass && routeEdges.pass ? null : routeEdges.pass ? "RECOVERY_RECONCILIATION_FAILED" : "RECOVERY_ROUTE_EDGE_RECONCILIATION_FAILED",
   };
   evidence.evidence_digest = digestJson({ ...evidence, observed_at: undefined, evidence_digest: undefined });
   // The diff is operator-internal work input. Keep UUIDs out of the digest-only
@@ -981,6 +1044,7 @@ async function readOnlyRecoveryPlan(client, options) {
 }
 
 async function rebuildCaptureAndProjection(client, _observedAt, {
+  expectedCatalogFingerprint = EXPECTED_CATALOG_FINGERPRINT,
   deadline = Date.now() + RECOVERY_REBUILD_TIMEOUT_MS,
   batchSize = RECOVERY_BATCH_SIZE,
   sourceBatchSize = RECOVERY_SOURCE_BATCH_SIZE,
@@ -993,8 +1057,14 @@ async function rebuildCaptureAndProjection(client, _observedAt, {
   // existing projection worker owns snapshot()/finish_work().
   const resultCounts = {
     sender_batches: 0,
+    sender_retries: 0,
+    sender_repairs_skipped: 0,
     route_batches: 0,
+    route_retries: 0,
+    route_repairs_skipped: 0,
     stale_route_edges_deleted: 0,
+    stale_route_edge_retries: 0,
+    stale_route_edges_skipped: 0,
     marker_batches: 0,
     marker_rows: 0,
     marker_retries: 0,
@@ -1024,96 +1094,191 @@ async function rebuildCaptureAndProjection(client, _observedAt, {
     }
   };
 
-  for (;;) {
-    const value = await runBatch("sender-groups", async () => {
-      const rows = (await client.query(
-        `SELECT DISTINCT m.org_id,m.from_address AS raw_sender
-           FROM public.messages m
-          WHERE m.channel='sms' AND m.direction='inbound' AND m.contact_id IS NULL
-            AND m.from_address IS NOT NULL AND m.from_address<>''
-            AND NOT EXISTS (
-              SELECT 1 FROM inbox_message_capture.sender_groups g
-               WHERE g.org_id=m.org_id AND g.raw_sender COLLATE "C"=m.from_address COLLATE "C"
-            )
-          ORDER BY m.org_id,raw_sender
-          LIMIT $1`,
-        [sourceBatchSize],
-      )).rows;
-      for (const row of rows) await client.query("SELECT inbox_message_capture.sender_id($1,$2)", [row.org_id, row.raw_sender]);
-      return { rows: rows.length };
-    });
-    resultCounts.sender_batches++;
-    if (value.rows === 0) break;
-  }
+  const retrySkippedBatch = async (kind, work, retryCounter) => {
+    for (let attempt = 0; ; attempt++) {
+      const value = await runBatch(kind, work);
+      if (Number(value.skipped_count ?? 0) === 0 || attempt >= RECOVERY_SKIP_RETRY_ATTEMPTS - 1) return value;
+      resultCounts[retryCounter]++;
+      if (Date.now() > deadline) throw new ReconciliationBlocked("RECOVERY_REBUILD_TIMEOUT");
+      const backoff = Math.min(RECOVERY_SKIP_RETRY_MAX_BACKOFF_MS, RECOVERY_SKIP_RETRY_BACKOFF_MS * (2 ** attempt));
+      await new Promise((resolve) => setTimeout(resolve, backoff));
+    }
+  };
 
   for (;;) {
-    const value = await runBatch("route-edges", async () => {
-      const rows = (await client.query(
-        `SELECT m.id,m.org_id,m.conversation_id,
-                CASE WHEN length(d.digits)=10 THEN '+1'||d.digits
-                     WHEN length(d.digits)=11 AND left(d.digits,1)='1' THEN '+'||d.digits
-                END AS phone_e164
-           FROM public.messages m
-           CROSS JOIN LATERAL (SELECT regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g') AS digits) d
-           LEFT JOIN inbox_message_capture.route_edges e ON e.org_id=m.org_id AND e.message_id=m.id
-          WHERE (
-            (CASE WHEN length(d.digits)=10 THEN '+1'||d.digits WHEN length(d.digits)=11 AND left(d.digits,1)='1' THEN '+'||d.digits END IS NULL AND e.message_id IS NOT NULL)
-            OR
-            (CASE WHEN length(d.digits)=10 THEN '+1'||d.digits WHEN length(d.digits)=11 AND left(d.digits,1)='1' THEN '+'||d.digits END IS NOT NULL
-             AND (e.message_id IS NULL OR e.conversation_id IS DISTINCT FROM m.conversation_id OR e.phone_e164 IS DISTINCT FROM CASE WHEN length(d.digits)=10 THEN '+1'||d.digits WHEN length(d.digits)=11 AND left(d.digits,1)='1' THEN '+'||d.digits END))
-          )
-          ORDER BY m.org_id,m.id
-          LIMIT $1
-          FOR UPDATE OF m SKIP LOCKED`,
+    const value = await retrySkippedBatch("sender-groups", async () => {
+      const result = await client.query(
+        `WITH candidates AS MATERIALIZED (
+           SELECT DISTINCT m.org_id,m.from_address AS raw_sender
+             FROM public.messages m
+            WHERE m.channel='sms' AND m.direction='inbound' AND m.contact_id IS NULL
+              AND m.from_address IS NOT NULL AND m.from_address<>''
+              AND NOT EXISTS (
+                SELECT 1 FROM inbox_message_capture.sender_groups g
+                 WHERE g.org_id=m.org_id AND g.raw_sender COLLATE "C"=m.from_address COLLATE "C"
+              )
+         ),
+         picked_messages AS MATERIALIZED (
+           SELECT m.org_id,m.from_address AS raw_sender
+             FROM public.messages m
+            WHERE m.channel='sms' AND m.direction='inbound' AND m.contact_id IS NULL
+              AND m.from_address IS NOT NULL AND m.from_address<>''
+              AND NOT EXISTS (
+                SELECT 1 FROM inbox_message_capture.sender_groups g
+                 WHERE g.org_id=m.org_id AND g.raw_sender COLLATE "C"=m.from_address COLLATE "C"
+              )
+            ORDER BY m.org_id,m.from_address COLLATE "C",m.id
+            LIMIT $1
+            FOR NO KEY UPDATE SKIP LOCKED
+         ),
+         picked AS MATERIALIZED (
+           SELECT DISTINCT org_id,raw_sender FROM picked_messages
+         ),
+         resolved AS (
+           SELECT p.org_id,p.raw_sender,
+                  inbox_message_capture.sender_id(p.org_id,p.raw_sender) AS sender_group_id
+             FROM picked p
+         )
+         SELECT (SELECT count(*)::int FROM candidates) AS candidate_count,
+                coalesce((SELECT jsonb_agg(to_jsonb(r) ORDER BY r.org_id,r.raw_sender) FROM resolved r),'[]'::jsonb) AS rows`,
         [sourceBatchSize],
-      )).rows;
-      await onRouteEdgeCandidates?.(rows);
-      for (const row of rows) {
-        if (row.phone_e164 === null) {
-          await client.query("DELETE FROM inbox_message_capture.route_edges WHERE org_id=$1 AND message_id=$2", [row.org_id, row.id]);
-        } else {
-          // Route-edge race fix from research-reconcile-recovery-locking.md:
-          // lock the source message briefly, then use an atomic upsert. A
-          // writer cannot observe an unlocked delete followed by a stale insert.
-          await client.query(
-            `INSERT INTO inbox_message_capture.route_edges(org_id,message_id,conversation_id,phone_e164)
-             VALUES($1,$2,$3,$4)
-             ON CONFLICT(org_id,message_id) DO UPDATE
-               SET conversation_id=excluded.conversation_id,phone_e164=excluded.phone_e164`,
-            [row.org_id, row.id, row.conversation_id, row.phone_e164],
-          );
-        }
-      }
-      return { rows, row_count: rows.length };
-    });
-    resultCounts.route_batches++;
+      );
+      const candidateCount = Number(result.rows[0]?.candidate_count ?? 0);
+      const rows = result.rows[0]?.rows ?? [];
+      return {
+        rows,
+        row_count: rows.length,
+        skipped_count: candidateCount <= sourceBatchSize ? Math.max(0, candidateCount - rows.length) : 0,
+      };
+    }, "sender_retries");
+    resultCounts.sender_batches++;
+    resultCounts.sender_repairs_skipped += value.skipped_count;
     if (value.row_count === 0) break;
   }
 
   for (;;) {
-    const value = await runBatch("stale-route-edges", async () => {
+    const value = await retrySkippedBatch("route-edges", async () => {
       const result = await client.query(
-        `WITH stale AS (
-           SELECT e.org_id,e.message_id
+        `WITH normalized AS MATERIALIZED (
+           SELECT m.id,m.org_id,m.channel,m.conversation_id,
+                  CASE WHEN length(d.digits)=10 THEN '+1'||d.digits
+                       WHEN length(d.digits)=11 AND left(d.digits,1)='1' THEN '+'||d.digits
+                  END AS phone_e164
+             FROM public.messages m
+             CROSS JOIN LATERAL (
+               SELECT regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g') AS digits
+             ) d
+         ),
+         candidates AS MATERIALIZED (
+           SELECT n.id,n.org_id,n.conversation_id,n.channel='sms' AND n.conversation_id IS NOT NULL AS canonical_eligible,n.phone_e164
+             FROM normalized n
+             LEFT JOIN inbox_message_capture.route_edges e ON e.org_id=n.org_id AND e.message_id=n.id
+            WHERE ((NOT (n.channel='sms' AND n.conversation_id IS NOT NULL) OR n.phone_e164 IS NULL) AND e.message_id IS NOT NULL)
+               OR ((n.channel='sms' AND n.conversation_id IS NOT NULL) AND n.phone_e164 IS NOT NULL
+                   AND (e.message_id IS NULL OR e.conversation_id IS DISTINCT FROM n.conversation_id OR e.phone_e164 IS DISTINCT FROM n.phone_e164))
+         ),
+         picked AS MATERIALIZED (
+           SELECT c.*
+             FROM candidates c
+             JOIN public.messages m ON m.org_id=c.org_id AND m.id=c.id
+            ORDER BY c.org_id,c.id
+            LIMIT $1
+            FOR NO KEY UPDATE OF m SKIP LOCKED
+         )
+         SELECT (SELECT count(*)::int FROM candidates) AS candidate_count,
+                coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY p.org_id,p.id) FROM picked p),'[]'::jsonb) AS rows`,
+        [sourceBatchSize],
+      );
+      const candidateCount = Number(result.rows[0]?.candidate_count ?? 0);
+      const rows = result.rows[0]?.rows ?? [];
+      await onRouteEdgeCandidates?.(rows);
+      if (rows.length > 0) {
+        const payload = JSON.stringify(rows);
+        // The source locks remain held until this transaction commits. The
+        // delete and upsert are set-based, so the writer cannot observe a
+        // per-row DELETE-then-INSERT gap.
+        await client.query(
+          `DELETE FROM inbox_message_capture.route_edges e
+             USING jsonb_to_recordset($1::jsonb) AS p(org_id uuid,id uuid)
+            WHERE e.org_id=p.org_id AND e.message_id=p.id`,
+          [payload],
+        );
+        await client.query(
+          `INSERT INTO inbox_message_capture.route_edges(org_id,message_id,conversation_id,phone_e164)
+           SELECT p.org_id,p.id,p.conversation_id,p.phone_e164
+             FROM jsonb_to_recordset($1::jsonb) AS p(org_id uuid,id uuid,conversation_id uuid,canonical_eligible boolean,phone_e164 text)
+            WHERE p.canonical_eligible AND p.phone_e164 IS NOT NULL
+           ON CONFLICT(org_id,message_id) DO UPDATE
+             SET conversation_id=excluded.conversation_id,phone_e164=excluded.phone_e164`,
+          [payload],
+        );
+      }
+      return {
+        rows,
+        row_count: rows.length,
+        skipped_count: candidateCount <= sourceBatchSize ? Math.max(0, candidateCount - rows.length) : 0,
+      };
+    }, "route_retries");
+    resultCounts.route_batches++;
+    resultCounts.route_repairs_skipped += value.skipped_count;
+    if (value.row_count === 0) break;
+  }
+
+  for (;;) {
+    const value = await retrySkippedBatch("stale-route-edges", async () => {
+      const result = await client.query(
+        `WITH candidates AS MATERIALIZED (
+         SELECT e.org_id,e.message_id
              FROM inbox_message_capture.route_edges e
-             LEFT JOIN public.messages m ON m.org_id=e.org_id AND m.id=e.message_id
-            WHERE m.id IS NULL
-            ORDER BY e.org_id,e.message_id
+            WHERE NOT EXISTS (
+              SELECT 1
+                FROM public.messages m
+                CROSS JOIN LATERAL (
+                  SELECT regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g') AS digits
+                ) d
+               WHERE m.org_id=e.org_id AND m.id=e.message_id
+                 AND m.channel='sms' AND m.conversation_id IS NOT NULL
+                 AND e.conversation_id=m.conversation_id
+                 AND e.phone_e164 IS NOT DISTINCT FROM CASE
+                   WHEN length(d.digits)=10 THEN '+1'||d.digits
+                   WHEN length(d.digits)=11 AND left(d.digits,1)='1' THEN '+'||d.digits
+                 END
+            )
+         ),
+         picked AS MATERIALIZED (
+           SELECT c.org_id,c.message_id
+             FROM candidates c
+             JOIN inbox_message_capture.route_edges e ON e.org_id=c.org_id AND e.message_id=c.message_id
+            ORDER BY c.org_id,c.message_id
             LIMIT $1
             FOR UPDATE OF e SKIP LOCKED
          )
-         DELETE FROM inbox_message_capture.route_edges e
-          USING stale
-          WHERE e.org_id=stale.org_id AND e.message_id=stale.message_id`,
+         SELECT (SELECT count(*)::int FROM candidates) AS candidate_count,
+                coalesce((SELECT jsonb_agg(to_jsonb(p) ORDER BY p.org_id,p.message_id) FROM picked p),'[]'::jsonb) AS rows`,
         [sourceBatchSize],
       );
-      return { rows: result.rowCount };
-    });
+      const candidateCount = Number(result.rows[0]?.candidate_count ?? 0);
+      const rows = result.rows[0]?.rows ?? [];
+      if (rows.length > 0) {
+        await client.query(
+          `DELETE FROM inbox_message_capture.route_edges e
+             USING jsonb_to_recordset($1::jsonb) AS p(org_id uuid,message_id uuid)
+            WHERE e.org_id=p.org_id AND e.message_id=p.message_id`,
+          [JSON.stringify(rows)],
+        );
+      }
+      return {
+        rows,
+        row_count: rows.length,
+        skipped_count: candidateCount <= sourceBatchSize ? Math.max(0, candidateCount - rows.length) : 0,
+      };
+    }, "stale_route_edge_retries");
     resultCounts.stale_route_edges_deleted += value.rows;
+    resultCounts.stale_route_edges_skipped += value.skipped_count;
     if (value.rows === 0) break;
   }
 
-  const plan = await readOnlyRecoveryPlan(client);
+  const plan = await readOnlyRecoveryPlan(client, { expectedCatalogFingerprint });
   if (plan.status !== "ready") throw new ReconciliationBlocked(plan.error_code ?? "RECOVERY_GATE_BLOCKED");
   const markerKeys = plan._recoveryDiff.marker_keys;
   let adaptiveBatchSize = Math.min(100, Math.max(1, Number(batchSize) || RECOVERY_BATCH_SIZE));
@@ -1279,6 +1444,7 @@ async function runCaptureRecovery(client, {
     // source-generation digest is carried across runs; consistent keys are
     // absent from the next DIFF and therefore are not bumped again.
     const rebuild = await rebuildCaptureAndProjection(client, new Date().toISOString(), {
+      expectedCatalogFingerprint,
       batchSize: recoveryBatchSize,
       sourceBatchSize: recoverySourceBatchSize,
       onBatchBeforeCommit: onRecoveryBatchBeforeCommit,
@@ -1290,13 +1456,20 @@ async function runCaptureRecovery(client, {
     });
     const after = await readOnlyRecoveryPlan(client, { expectedCatalogFingerprint });
     if (after.status !== "ready") throw new ReconciliationBlocked(after.error_code ?? "RECOVERY_GATE_BLOCKED");
-    if (after.checks.recovery_gate !== true) throw new ReconciliationBlocked(after.recovery_error_code ?? "RECOVERY_RECONCILIATION_FAILED");
     after.recovery = {
       applied: true,
       ...transition,
       rebuild,
       final_gate: "single_repeatable_read_snapshot",
     };
+    if (Number(rebuild.route_repairs_skipped ?? 0) > 0) {
+      after.recovery.incomplete_reason = "ROUTE_EDGE_REPAIRS_SKIPPED";
+      after.evidence_digest = digestJson({ ...after, observed_at: undefined, evidence_digest: undefined });
+      return { status: "recovery-incomplete", evidence: after, recovery: after.recovery };
+    }
+    if (after.checks.recovery_gate !== true) {
+      throw new ReconciliationBlocked(after.recovery_error_code ?? "RECOVERY_RECONCILIATION_FAILED");
+    }
     after.evidence_digest = digestJson({ ...after, observed_at: undefined, evidence_digest: undefined });
     return { status: "recovery-written", evidence: after, recovery: after.recovery };
   } catch (error) {
@@ -1439,7 +1612,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     const text = `${JSON.stringify(output, null, 2)}\n`;
     if (parsed.output) writeFileSync(parsed.output, text, { mode: 0o600 });
     else process.stdout.write(text);
-    return result.status === "blocked" ? 2 : 0;
+    return ["blocked", "recovery-incomplete"].includes(result.status) ? 2 : 0;
   } finally {
     await client.end();
   }
