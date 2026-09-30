@@ -228,6 +228,7 @@ test("R6a runs against the real J5a schema and proves source, projection, filter
     assert.equal(result.status, "blocked", "recovery gate must independently reject a bypass-created duplicate");
     assert.equal(result.evidence.checks.no_base_table_duplicates, false);
     await client.query("DELETE FROM public.message_threads WHERE org_id=$1 AND conversation_id=$2", [ids.org, duplicateConversation]);
+    await client.query("DELETE FROM inbox_backfill.collisions WHERE org_id=$1 AND conversation_id=$2", [ids.org, duplicateConversation]);
     await client.query("DELETE FROM inbox_maintained.queue WHERE org_id=$1 AND target_id=$2", [ids.org, duplicateConversation]);
     await client.query("DELETE FROM inbox_maintained.rows WHERE org_id=$1 AND target_id=$2", [ids.org, duplicateConversation]);
     await client.query("DELETE FROM inbox_message_capture.dirty WHERE org_id=$1 AND target_id=$2", [ids.org, duplicateConversation]);
