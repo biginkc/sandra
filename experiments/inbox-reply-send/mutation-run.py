@@ -368,7 +368,7 @@ def baseline_for(mutation_header: str, sections: list[tuple[str, str]]) -> tuple
     candidates: list[tuple[int, str, str]] = []
     mutation_test = test_id(mutation_header)
     for header, body in sections:
-        if "baseline" not in header.lower() or test_id(header) != mutation_test:
+        if "baseline" not in header.lower() or not re.search(rf"(?<![A-Za-z0-9-]){re.escape(mutation_test)}(?![A-Za-z0-9-])", header):
             continue
         candidate_tokens = set(header.lower().split()) - {"mutation", "baseline"}
         candidates.append((len(mutation_tokens & candidate_tokens), header, body))
