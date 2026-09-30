@@ -5,8 +5,13 @@ import {
   assertCanaryDispatchEligibility, assertCanaryReceipt, assertCentralSendWindow, assertDeliveryWebhook, assertFreshCanaryFixture,
   FIXTURE_ADDRESS, preflightFixture, RECEIVER_NUMBER, SENDILLO_SENDER,
 } from "../../../scripts/sequence-canary-fixture";
-import { runSequenceSmoke } from "../../../scripts/smoke-sequences-prod";
+import { runSequencePreflight, runSequenceSmoke } from "../../../scripts/smoke-sequences-prod";
 import fs from "node:fs";
+
+vi.mock("../../../scripts/sequence-canary-cleanup", () => ({
+  cleanupAllCanaries: vi.fn(async () => 0),
+  cleanupCanary: vi.fn(async () => undefined),
+}));
 
 const ids = { userId: "11111111-1111-4111-8111-111111111111", propertyId: "22222222-2222-4222-8222-222222222222", contactId: "33333333-3333-4333-8333-333333333333" };
 const org = "44444444-4444-4444-8444-444444444444";
@@ -28,13 +33,19 @@ function fixtureClient(overrides: Record<string, unknown[]> = {}, errors: string
     from(table: string) {
       const filters: Record<string, unknown> = {};
       queried.push({ table, filters });
-      const matching = () => rows[table]?.filter((row) => Object.entries(filters).every(([k, v]) => row[k] === v)) ?? [];
+      let ordering: { column: string; ascending: boolean } | null = null;
+      let maxRows: number | null = null;
+      const matching = () => {
+        const found = rows[table]?.filter((row) => Object.entries(filters).every(([k, v]) => row[k] === v)) ?? [];
+        if (ordering) found.sort((a, b) => String(a[ordering!.column]).localeCompare(String(b[ordering!.column])) * (ordering!.ascending ? 1 : -1));
+        return maxRows === null ? found : found.slice(0, maxRows);
+      };
       const result = (single: boolean) => ({ data: single ? matching()[0] ?? null : matching(), error: errors.includes(table) ? { message: "query failed" } : null });
       const query = {
         select: () => query,
         eq: (column: string, value: unknown) => { filters[column] = value; return query; },
-        order: () => query,
-        limit: () => query,
+        order: (column: string, options: { ascending: boolean }) => { ordering = { column, ascending: options.ascending }; return query; },
+        limit: (count: number) => { maxRows = count; return query; },
         maybeSingle: async () => result(true),
         then(resolve: (value: unknown) => unknown) { return Promise.resolve(resolve(result(false))); },
       };
@@ -98,6 +109,18 @@ describe("send eligibility", () => {
     await expect(preflightFixture(fixtureClient({ sms_phone_suppressions: [{ org_id: org, channel: "sms", phone_e164: RECEIVER_NUMBER }] }).client, ids, daytime)).rejects.toThrow("suppression");
     await expect(preflightFixture(fixtureClient({}, ["sms_phone_suppressions"]).client, ids, daytime)).rejects.toThrow("suppression");
   });
+  it("rejects a different homeowner contact even when the fixture contact is otherwise valid", async () => {
+    const { rows } = fixtureClient();
+    const { client } = fixtureClient({ properties: [{ ...rows.properties[0], homeowner_contact_id: "other" }] });
+    await expect(preflightFixture(client, ids, daytime)).rejects.toThrow("eligibility");
+  });
+  it("uses the newest SMS consent when an older opt-in precedes an opt-out", async () => {
+    const { client } = fixtureClient({ consent_events: [
+      { id: "old", org_id: org, contact_id: ids.contactId, channel: "sms", occurred_at: "2026-09-27T00:00:00Z", event_type: "opt_in_marketing_written" },
+      { id: "new", org_id: org, contact_id: ids.contactId, channel: "sms", occurred_at: "2026-09-28T00:00:00Z", event_type: "opt_out" },
+    ] });
+    await expect(preflightFixture(client, ids, daytime)).rejects.toThrow("consent");
+  });
   it("rejects revoked consent and another property relationship", async () => {
     await expect(preflightFixture(fixtureClient({ consent_events: [{ id: "latest", org_id: org, contact_id: ids.contactId, channel: "sms", event_type: "opt_out" }] }).client, ids, daytime)).rejects.toThrow("consent");
     await expect(preflightFixture(fixtureClient({ property_contacts: [{ contact_id: ids.contactId, property_id: "other" }] }).client, ids, daytime)).rejects.toThrow("relationship");
@@ -160,23 +183,81 @@ describe("run-specific Sendillo proof", () => {
     try {
       const input = { propertyId: ids.propertyId, contactId: ids.contactId, to: RECEIVER_NUMBER,
         from: SENDILLO_SENDER, provider: "sendillo", body: "PROD-SMOKE run" };
+      vi.useFakeTimers();
+      vi.setSystemTime(daytime);
       await expect(assertCanaryDispatchEligibility(fixtureClient().client, { ...input, from: "other" }))
         .rejects.toThrow("sender mismatch");
       await expect(assertCanaryDispatchEligibility(fixtureClient().client, { ...input, contactId: "other" }))
         .rejects.toThrow("identity");
+      await expect(assertCanaryDispatchEligibility(fixtureClient().client, { ...input, provider: "twilio" }))
+        .rejects.toThrow("sender mismatch");
       const { rows } = fixtureClient();
       await expect(assertCanaryDispatchEligibility(fixtureClient({ properties: [{ ...rows.properties[0], state: "KS" }] }).client, input))
         .rejects.toThrow("eligibility");
     } finally {
+      vi.useRealTimers();
       vi.unstubAllEnvs();
     }
   });
+  it.each(["failed claim", "failed message", "delivery timeout"])("logs known IDs before cleanup on %s", async (failure) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(daytime);
+    const { client } = fixtureClient();
+    const originalFrom = client.from.bind(client);
+    const message = { id: "message-id", body: "", to_address: RECEIVER_NUMBER, from_address: SENDILLO_SENDER,
+      provider: "sendillo", external_id: "external-id", status: failure === "failed message" ? "failed" : "sent",
+      sent_at: failure === "delivery timeout" ? "2026-09-29T14:56:00Z" : daytime.toISOString(), delivered_at: null };
+    const fake = {
+      ...client,
+      from(table: string) {
+        if (!["sequences", "sequence_steps", "sequence_enrollments", "sequence_step_runs", "messages"].includes(table)) return originalFrom(table as "properties");
+        const row = table === "sequences" ? { id: "sequence-id" } : table === "sequence_steps" ? { id: "step-id" } :
+          table === "sequence_enrollments" ? { id: "enrollment-id" } : table === "sequence_step_runs" ?
+            { id: "claim-id", message_id: "message-id", attempt_outcome: failure === "failed claim" ? "failed" : "accepted" } : message;
+        const query = {
+          insert: () => query, select: () => query, eq: () => query, limit: () => query,
+          single: async () => ({ data: row, error: null }),
+          then(resolve: (value: unknown) => unknown) { return Promise.resolve(resolve({ data: [row], error: null })); },
+        };
+        return query;
+      },
+    } as unknown as SupabaseClient<Database>;
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...args) => { logs.push(args.map(String).join(" ")); });
+    try {
+      await expect(runSequenceSmoke(fake, ids, false, SENDILLO_SENDER)).rejects.toThrow();
+      const finalEvidence = logs.find((line) => line.startsWith("[smoke] evidence before cleanup"));
+      expect(finalEvidence).toBeDefined();
+      const evidence = JSON.parse(finalEvidence!.slice("[smoke] evidence before cleanup ".length));
+      expect(evidence.claimId).toBe("claim-id");
+      expect(evidence.messageId).toBe("message-id");
+      expect(evidence.externalId).toBe(failure === "failed claim" ? null : "external-id");
+      expect(evidence.status).toBe(failure === "failed claim" ? "failed" : failure === "failed message" ? "failed" : "sent");
+    } finally {
+      spy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+});
+
+it("preflight-only selects reference rows without any insert or enrollment", async () => {
+  const tables: string[] = [];
+  const client = { from(table: string) {
+    tables.push(table);
+    const query = { select: () => query, eq: () => query, maybeSingle: async () => ({ data: { id: "existing" }, error: null }) };
+    return query;
+  } } as unknown as SupabaseClient<Database>;
+  const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+  try {
+    await runSequencePreflight(client, "https://copflsklaefwzipsrjqz.supabase.co", ids.userId, ids.contactId);
+    expect(tables).toEqual(["messages", "webhook_events"]);
+  } finally { log.mockRestore(); }
 });
 
 it("workflow gates schedule and gives cleanup its own timeout", () => {
   const workflow = fs.readFileSync(".github/workflows/canary-sequences.yml", "utf8");
   expect(workflow).toMatch(/if:\s*\$\{\{\s*github\.event_name != 'schedule' \|\| vars\.SEQUENCE_CANARY_SCHEDULE_ENABLED == 'true'\s*\}\}/);
-  expect(workflow).toContain("workflow_dispatch: {}");
+  expect(workflow).toContain("preflight-only");
   expect(workflow).toContain("cancel-in-progress: false");
   expect(workflow).toContain("timeout-minutes: 35");
   expect(workflow).toMatch(/Clean up tagged canary data[\s\S]*if: always\(\)[\s\S]*timeout-minutes: 5/);

@@ -2,6 +2,21 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Getting Started
 
+### Sequences production canary runbook
+
+The dispatch guard requires `SEQUENCE_CANARY_USER_ID`,
+`SEQUENCE_CANARY_PROPERTY_ID`, and `SEQUENCE_CANARY_CONTACT_ID` in **both**
+GitHub Actions secrets and Vercel production environment variables. Keep
+`SEQUENCE_CANARY_SCHEDULE_ENABLED` unset or `false` until the owner gates and
+production checks pass. A missing Vercel value makes dispatch fail closed.
+
+For a read-only runner check, dispatch **Sequences V1 Prod Canary** with
+`mode=preflight-only` and existing message and webhook event UUIDs. This mode
+compares the runner's `PROD_SUPABASE_URL` hostname with
+`copflsklaefwzipsrjqz.supabase.co` and SELECTs those two rows. It does not
+enroll, send, or clean up. Use `mode=full` only for the authorized send window;
+scheduled runs use full mode when the schedule variable is `true`.
+
 ### Outbox regression record
 
 `npm run test:outbox-regression` requires the owned disposable Supabase stack on

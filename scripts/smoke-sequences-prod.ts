@@ -33,6 +33,28 @@ function loadLocalEnv(file: string): Record<string, string> {
   return out;
 }
 
+const PROD_HOST = "copflsklaefwzipsrjqz.supabase.co";
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Read-only runner alignment check. No fixture lookup or mutation is reachable here. */
+export async function runSequencePreflight(
+  supabase: ReturnType<typeof createClient<Database>>,
+  prodUrl: string,
+  messageId: string,
+  webhookEventId: string,
+): Promise<void> {
+  if (!UUID.test(messageId) || !UUID.test(webhookEventId)) throw new Error("Preflight requires message and webhook event UUIDs");
+  const hostnameMatches = new URL(prodUrl).hostname === PROD_HOST;
+  console.log("[preflight] hostnameMatches", hostnameMatches);
+  if (!hostnameMatches) throw new Error("PROD_SUPABASE_URL hostname mismatch");
+  const { data: message, error: messageError } = await supabase.from("messages").select("id").eq("id", messageId).maybeSingle();
+  if (messageError) throw messageError;
+  const { data: webhook, error: webhookError } = await supabase.from("webhook_events").select("id").eq("id", webhookEventId).maybeSingle();
+  if (webhookError) throw webhookError;
+  console.log("[preflight] rows", JSON.stringify({ messageId, messageExists: !!message, webhookEventId, webhookEventExists: !!webhook }));
+  if (!message || !webhook) throw new Error("Preflight reference row missing");
+}
+
 // ---------- run ------------------------------------------------------------
 
 export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<Database>>, ids: FixtureIds, cleanupOnly = false, expectedSender = process.env.SENDILLO_FROM_NUMBER) {
@@ -49,7 +71,13 @@ export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<
   const sentBody = `Mel with BMH. ${UNIQUE_BODY} - Reply STOP.`;
   let sequenceId: string | null = null;
   const evidence: Record<string, string | null> = { sequenceId: null, enrollmentId: null, stepId: null,
-    claimId: null, messageId: null, externalId: null, webhookEventId: null };
+    claimId: null, messageId: null, externalId: null, webhookEventId: null, status: null, webhookStatus: null };
+  const record = (patch: Record<string, string | null>) => {
+    for (const [key, value] of Object.entries(patch)) {
+      if (value !== null || evidence[key] === null) evidence[key] = value;
+    }
+    console.log("[smoke] evidence", JSON.stringify(evidence));
+  };
   try {
     console.log(`[smoke] start   ${TS}`);
 
@@ -67,9 +95,11 @@ export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<
       })
       .select("id")
       .single();
+    if (seq) {
+      sequenceId = seq.id;
+      record({ sequenceId: seq.id });
+    }
     if (seqErr || !seq) throw seqErr ?? new Error("seq insert failed");
-    sequenceId = seq.id;
-    evidence.sequenceId = seq.id;
     console.log(`[smoke] seq     ${seq.id}`);
 
     const { data: step, error: stepErr } = await supabase
@@ -83,8 +113,8 @@ export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<
       })
       .select("id")
       .single();
+    if (step) record({ stepId: step.id });
     if (stepErr || !step) throw stepErr ?? new Error("step insert failed");
-    evidence.stepId = step.id;
     console.log(`[smoke] step    ${step.id}`);
 
     // Enroll (next_run_at = now so the next cron tick picks it up)
@@ -102,8 +132,8 @@ export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<
       })
       .select("id")
       .single();
+    if (enrollment) record({ enrollmentId: enrollment.id });
     if (enrErr || !enrollment) throw enrErr ?? new Error("enrollment insert failed");
-    evidence.enrollmentId = enrollment.id;
     console.log(`[smoke] enrol   ${enrollment.id}`);
     console.log(`[smoke] sent body = ${sentBody}`);
     async function waitFor<T>(label: string, deadline: number, read: () => Promise<T | null>): Promise<T> {
@@ -117,19 +147,19 @@ export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<
     const claim = await waitFor("accepted claim", Date.now() + 12 * 60_000, async () => {
       const { data, error } = await supabase.from("sequence_step_runs")
         .select("id,step_id,enrollment_id,attempt_outcome,message_id").eq("enrollment_id", enrollment.id).eq("step_id", step.id).limit(2);
+      const row = data?.[0];
+      if (row) record({ claimId: row.id, messageId: row.message_id, status: row.attempt_outcome });
       if (error) throw error;
       if ((data?.length ?? 0) > 1) throw new Error("Multiple canary claims");
-      const row = data?.[0];
       if (row && !["not_attempted", "accepted"].includes(row.attempt_outcome)) throw new Error(`Canary claim failed: ${row.attempt_outcome}`);
       return row?.attempt_outcome === "accepted" && row.message_id ? row : null;
     });
     console.log(`[smoke] claim   ${claim.id} message ${claim.message_id}`);
     const messageId = claim.message_id!;
-    evidence.claimId = claim.id;
-    evidence.messageId = messageId;
     const sent = await waitFor("sent_at", Date.now() + 2 * 60_000, async () => {
       const { data, error } = await supabase.from("messages")
         .select("id,body,to_address,from_address,provider,external_id,status,sent_at,delivered_at").eq("id", messageId).single();
+      if (data) record({ messageId: data.id, externalId: data.external_id, status: data.status });
       if (error || !data) throw error ?? new Error("Canary message missing");
       if (["failed", "undelivered", "canceled"].includes(data.status)) throw new Error(`Canary message failed: ${data.status}`);
       return data.sent_at ? data : null;
@@ -138,24 +168,24 @@ export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<
     const delivered = await waitFor("delivery", deliveryDeadline, async () => {
       const { data, error } = await supabase.from("messages")
         .select("id,body,to_address,from_address,provider,external_id,status,sent_at,delivered_at").eq("id", messageId).single();
+      if (data) record({ messageId: data.id, externalId: data.external_id, status: data.status });
       if (error || !data) throw error ?? new Error("Canary message missing");
       if (["failed", "undelivered", "canceled"].includes(data.status)) throw new Error(`Canary message failed: ${data.status}`);
       return data.status === "delivered" ? data : null;
     });
-    evidence.externalId = delivered.external_id;
     assertCanaryReceipt(delivered, sentBody);
     const webhook = await waitFor("webhook", deliveryDeadline, async () => {
       const { data, error } = await supabase.from("webhook_events")
         .select("id,provider,external_id,event_type,signature_verified,processing_status")
         .eq("org_id", orgId).eq("provider", "sendillo").eq("external_id", delivered.external_id!)
         .eq("event_type", "sms_status_delivered").limit(2);
+      const row = data?.[0];
+      if (row) record({ webhookEventId: row.id, webhookStatus: row.processing_status });
       if (error) throw error;
       if ((data?.length ?? 0) > 1) throw new Error("Multiple matching canary webhooks");
-      const row = data?.[0];
       if (row && (row.signature_verified !== true || row.processing_status === "failed")) throw new Error("Canary webhook authentication or processing failed");
       return row?.processing_status === "processed" ? row : null;
     });
-    evidence.webhookEventId = webhook.id;
     assertDeliveryWebhook(webhook, delivered.external_id!);
     const { data: after, error: afterError } = await supabase.from("sequence_enrollments")
       .select("status,completed_at").eq("id", enrollment.id).single();
@@ -176,9 +206,9 @@ export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const env = { ...loadLocalEnv(".env.local"), ...process.env };
-  const URL = env.NEXT_PUBLIC_SUPABASE_URL;
+  const preflightOnly = process.argv.includes("--preflight-only");
+  const URL = preflightOnly ? env.PROD_SUPABASE_URL : env.NEXT_PUBLIC_SUPABASE_URL;
   const KEY = env.SUPABASE_SERVICE_ROLE_KEY;
-  const ids = fixtureIds(env);
   if (!URL || !KEY) {
     console.error("Missing URL or service key");
     process.exit(2);
@@ -190,7 +220,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const supabase = createClient<Database>(URL, KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
-  runSequenceSmoke(supabase, ids, process.argv.includes("--cleanup-only"), env.SENDILLO_FROM_NUMBER).catch((err) => {
+  const args = process.argv.slice(2);
+  const valueAfter = (flag: string) => args.includes(flag) ? args[args.indexOf(flag) + 1] ?? "" : "";
+  const run = preflightOnly
+    ? runSequencePreflight(supabase, URL, valueAfter("--message-id"), valueAfter("--webhook-event-id"))
+    : runSequenceSmoke(supabase, fixtureIds(env), args.includes("--cleanup-only"), env.SENDILLO_FROM_NUMBER);
+  run.catch((err) => {
     console.error("[smoke] ERROR", err);
     process.exitCode = 1;
   });

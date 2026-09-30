@@ -17,6 +17,8 @@ permissions:
 # The owner-provisioned property, contact, and consent remain permanent.
 #
 # Cost: one Sendillo outbound SMS per enabled run.
+# Dispatch guard requires SEQUENCE_CANARY_USER_ID, SEQUENCE_CANARY_PROPERTY_ID,
+# and SEQUENCE_CANARY_CONTACT_ID in BOTH GitHub secrets and Vercel production env.
 
 on:
   schedule:
@@ -24,7 +26,19 @@ on:
     # enough that any failure surfaces before the workday really kicks
     # off, late enough that we're not alerting anyone at 5am.
     - cron: "0 14 * * 1-5"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Read-only runner check or full canary send"
+        type: choice
+        options: [preflight-only, full]
+        default: preflight-only
+      message_id:
+        description: "Existing message UUID for preflight-only"
+        type: string
+      webhook_event_id:
+        description: "Existing webhook_events UUID for preflight-only"
+        type: string
 
 jobs:
   canary:
@@ -42,6 +56,7 @@ jobs:
       # secrets so the canary works without any dependency on a
       # developer's local `.env.local`.
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
+      PROD_SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.PROD_SUPABASE_SERVICE_ROLE_KEY }}
       SEQUENCE_CANARY_USER_ID: ${{ secrets.SEQUENCE_CANARY_USER_ID }}
       SEQUENCE_CANARY_PROPERTY_ID: ${{ secrets.SEQUENCE_CANARY_PROPERTY_ID }}
@@ -61,11 +76,19 @@ jobs:
         run: npm ci
 
       - name: Run Sequences V1 prod canary
+        if: github.event_name == 'schedule' || inputs.mode == 'full'
         # Waits for the accepted claim, sent message, authenticated Sendillo
         # delivery webhook, and completed enrollment.
         run: npx tsx scripts/smoke-sequences-prod.ts
 
+      - name: Check runner and reference rows (SELECT only)
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'preflight-only'
+        env:
+          PREFLIGHT_MESSAGE_ID: ${{ inputs.message_id }}
+          PREFLIGHT_WEBHOOK_EVENT_ID: ${{ inputs.webhook_event_id }}
+        run: npx tsx scripts/smoke-sequences-prod.ts --preflight-only --message-id "$PREFLIGHT_MESSAGE_ID" --webhook-event-id "$PREFLIGHT_WEBHOOK_EVENT_ID"
+
       - name: Clean up tagged canary data
-        if: always()
+        if: always() && (github.event_name == 'schedule' || inputs.mode == 'full')
         timeout-minutes: 5
         run: npx tsx scripts/smoke-sequences-prod.ts --cleanup-only
