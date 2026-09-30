@@ -8,6 +8,7 @@ import { Client } from 'pg';
 import { makeRest } from '../outbox-db-contract/postgrest.mjs';
 import { createFixture } from '../outbox-db-contract/fixture.mjs';
 import { platformFingerprint } from '../outbox-db-contract/platform.mjs';
+import { readPostgrestMajor } from '../outbox-db-contract/readonly.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const argv = process.argv.slice(2);
@@ -37,9 +38,18 @@ writeFileSync(catalogPath, catalog.stdout);
 const client = new Client({ connectionString: process.env.E2E_CI_SUPABASE_DB_URL, ssl: false });
 await client.connect();
 let major;
-try { major = String(Math.floor(Number((await client.query('SHOW server_version_num')).rows[0].server_version_num) / 10000)); }
+let postgrestMajor;
+try {
+  major = String(Math.floor(Number((await client.query('SHOW server_version_num')).rows[0].server_version_num) / 10000));
+  await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+  postgrestMajor = await readPostgrestMajor(client);
+  await client.query('COMMIT');
+} catch (error) {
+  await client.query('ROLLBACK').catch(() => {});
+  throw error;
+}
 finally { await client.end(); }
-const platform = await platformFingerprint(process.env.TEST_SUPABASE_URL, process.env.TEST_SUPABASE_ANON_KEY, major);
+const platform = await platformFingerprint(process.env.TEST_SUPABASE_URL, process.env.TEST_SUPABASE_ANON_KEY, major, undefined, { postgrestMajor });
 const platformPath = path.join(scratch, 'platform.json');
 writeFileSync(platformPath, JSON.stringify(platform));
 const output = options['--output'] ?? path.join(scratch, 'readonly.json');

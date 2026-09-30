@@ -9,6 +9,7 @@ import { makeRest } from './outbox-db-contract/postgrest.mjs';
 import { createFixture } from './outbox-db-contract/fixture.mjs';
 import { sealPhaseRecord } from './outbox-db-contract.mjs';
 import { platformFingerprint } from './outbox-db-contract/platform.mjs';
+import { readPostgrestMajor } from './outbox-db-contract/readonly.mjs';
 
 const MUTATIONS = [
   ['M1', 'REVOKE SELECT ON public.messages FROM authenticated', 'GRANT SELECT ON public.messages TO authenticated', ['PIN_BASE_GRANTS', 'C00', 'C01', 'C02', 'C03', 'C04', 'C05', 'C06', 'C07', 'C08', 'C08b', 'C09', 'D02', 'D03']],
@@ -151,8 +152,11 @@ export async function runMutations(output, phase) {
     if (!failure && phase === 'pre') {
       try {
         const version = (await db.query('SHOW server_version_num')).rows[0].server_version_num;
-        platformConfig = await platformFingerprint(process.env.TEST_SUPABASE_URL, process.env.TEST_SUPABASE_ANON_KEY, String(Math.floor(Number(version) / 10000)));
-      } catch (error) { failure = error; }
+        await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+        const postgrestMajor = await readPostgrestMajor(db);
+        await db.query('COMMIT');
+        platformConfig = await platformFingerprint(process.env.TEST_SUPABASE_URL, process.env.TEST_SUPABASE_ANON_KEY, String(Math.floor(Number(version) / 10000)), undefined, { postgrestMajor });
+      } catch (error) { await db.query('ROLLBACK').catch(() => {}); failure = error; }
     }
     await db.end();
     const checks = baseline?.contracts ?? [];

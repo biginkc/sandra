@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
 import { collect, reconcile, stabilityProbe } from './outbox-db-contract/readonly.mjs';
-import { platformFingerprint, comparePlatform } from './outbox-db-contract/platform.mjs';
+import { platformFingerprint, compareObservedPlatform, comparePlatform, NOT_VERIFIED } from './outbox-db-contract/platform.mjs';
 import { CATALOG_SECTIONS, hasExactKeys } from './outbox-db-contract/catalog-sections.mjs';
 import { connectionConfig, connectionEvidence, pinnedCa } from './outbox-db-contract/connection.mjs';
 import { catalogIndexes, compareIndexes, comparePlans, planCostRatios } from './outbox-db-contract/plan-contract.mjs';
@@ -121,6 +121,7 @@ export function assertSealedPre({ manifest, sealed, sealedBytes, rawBytes, targe
       sealed.source_output_sha256 !== sha(rawBytes)) throw new Error('PLAN_PRE_NOT_SEALED');
   return sealed;
 }
+const platformSummary = postgrestMajor => `Auth health returned 200 with the publishable key; GoTrue major matched. Our publishable-key PostgREST request was rejected. PostgREST major was ${postgrestMajor === NOT_VERIFIED ? 'NOT_VERIFIED: no PostgREST connection was visible, which does not prove none existed' : 'observed from its connection name and matched'}. Hosted app/SSR/PostgREST behaviour is inferred from same-SHA disposable runs plus catalog and claim-plumbing equality.`;
 export async function main({ argv = args, createClient = config => new Client(config), collectData = collect, readCatalog = catalog } = {}) {
   const args = argv;
   const dsn = process.env.DATABASE_URL;
@@ -161,8 +162,8 @@ export async function main({ argv = args, createClient = config => new Client(co
     if (pre && (pre.target !== args.target || pre.phase !== 'pre')) throw new Error('PLAN_PRE_TARGET_MISMATCH');
     const tls = hostedReadOnly ? await connectionEvidence(client, dsn, pinnedCa()) : null;
     const data = await collectData(client, args.org, { previousIds: pre ? Object.keys(pre.queued.per_row) : [] });
-    const major = (await client.query('SHOW server_version_num')).rows[0].server_version_num.slice(0, 2);
-    const result = { verdict: 'PASS', items: {}, summary: 'no hosted HTTP 200 was observed at the shared boundary; hosted app/SSR/PostgREST behaviour is inferred from same-SHA disposable runs plus catalog-fingerprint, platform-config and claim-plumbing equality; a GoTrue major match does not prove identical hosted claim configuration.', target: args.target, phase: args.phase, ...data, ...(tls ? { tls } : {}) };
+    const major = String(Math.floor(Number((await client.query('SHOW server_version_num')).rows[0].server_version_num) / 10000));
+    const result = { verdict: 'PASS', items: {}, summary: platformSummary(data.postgrest_major), target: args.target, phase: args.phase, ...data, ...(tls ? { tls } : {}) };
     if (args.target === 'production') { result.member_org_count = data.member_orgs.length; delete result.member_orgs; }
     if (args['pre-file']) {
       result.items.queued_invariants = reconcile(pre.queued, data.queued, data.current_status);
@@ -170,7 +171,13 @@ export async function main({ argv = args, createClient = config => new Client(co
       if (result.items.queued_invariants.verdict === 'INCONCLUSIVE' && args.target === 'production') result.verdict = 'INCONCLUSIVE';
     }
     delete result.current_status;
-    if (args['api-url']) result.platform_config = await platformFingerprint(args['api-url'], process.env.SUPABASE_ANON_KEY, major);
+    if (args['api-url']) {
+      result.platform_config = await platformFingerprint(args['api-url'], process.env.SUPABASE_ANON_KEY, major, undefined, {
+        mode: hostedReadOnly ? 'hosted' : 'disposable', postgrestMajor: data.postgrest_major,
+      });
+      if (pre?.platform_config) compareObservedPlatform(pre.platform_config, result.platform_config);
+      result.summary = platformSummary(result.platform_config.postgrest_major);
+    }
     if (args['platform-compare']) {
       const bytes = await readFile(args['platform-compare']);
       comparePlatform(JSON.parse(bytes), result.platform_config);

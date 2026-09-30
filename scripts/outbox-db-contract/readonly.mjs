@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describePlan } from './plan-contract.mjs';
+import { NOT_VERIFIED } from './platform.mjs';
 
 const CLAIM_PIN = JSON.parse(readFileSync(new URL('./expected/claims-shape.json', import.meta.url), 'utf8'));
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -20,6 +21,23 @@ export async function openReadTxn(client, begin = 'BEGIN ISOLATION LEVEL REPEATA
   const isolation = (await client.query('SHOW transaction_isolation')).rows[0].transaction_isolation;
   const readonly = (await client.query('SHOW transaction_read_only')).rows[0].transaction_read_only;
   if (isolation !== 'repeatable read' || readonly !== 'on') throw new Error('READ_PRECONDITION_FAILED');
+}
+export async function readPostgrestMajor(client) {
+  let rows;
+  try {
+    rows = (await client.query("SELECT application_name FROM pg_stat_activity WHERE usename='authenticator' AND datname=current_database()")).rows;
+  } catch {
+    throw new Error('PLATFORM_READ_FAILED');
+  }
+  const majors = new Set();
+  for (const row of rows) {
+    const match = typeof row?.application_name === 'string' ? /^PostgREST (\d+)\./.exec(row.application_name) : null;
+    if (!match) throw new Error('PLATFORM_UNIDENTIFIED');
+    majors.add(match[1]);
+  }
+  if (!rows.length) return NOT_VERIFIED;
+  if (majors.size > 1) throw new Error('PLATFORM_AMBIGUOUS');
+  return [...majors][0];
 }
 export async function preconditions(client) {
   const { rows } = await client.query(`SELECT has_table_privilege(current_user,'public.messages','SELECT') AS messages, has_table_privilege(current_user,'public.memberships','SELECT') AS memberships, has_table_privilege(current_user,'public.organizations','SELECT') AS organizations, has_table_privilege(current_user,'public.properties','SELECT') AS properties, has_table_privilege(current_user,'public.contacts','SELECT') AS contacts, ${['pg_class','pg_namespace','pg_proc','pg_type','pg_attribute','pg_attrdef','pg_constraint','pg_index','pg_trigger','pg_policy','pg_extension'].map(n => `has_table_privilege(current_user,'pg_catalog.${n}','SELECT') AS ${n}`).join(', ')}, has_table_privilege(current_user,'supabase_migrations.schema_migrations','SELECT') AS migration_ledger, has_function_privilege(current_user,'auth.uid()','EXECUTE') AS uid, has_function_privilege(current_user,'auth.role()','EXECUTE') AS role, pg_has_role(current_user,'authenticated','MEMBER') AS can_switch`);
@@ -81,6 +99,7 @@ export async function collect(client, org, options = {}) {
   await openReadTxn(client, options.begin);
   try {
     await preconditions(client);
+    const postgrest_major = await readPostgrestMajor(client);
     await client.query("SET LOCAL statement_timeout='60s'");
     const now = (await client.query('SELECT now() AS at')).rows[0].at;
     const member = (await client.query(`SELECT mb.user_id FROM public.memberships mb WHERE mb.org_id=$1 AND ${ACTIVE} ORDER BY mb.created_at,mb.user_id LIMIT 1`, [org])).rows[0]?.user_id;
@@ -110,7 +129,7 @@ export async function collect(client, org, options = {}) {
     const memberPlan = await explainShapes(client, cursor, tail);
     await client.query('RESET ROLE');
     await client.query('COMMIT');
-    return { member_sub: member, member_orgs: orgs, snapshot_at: now, queued: snapshot(queued.rows), current_status: currentStatus, shapes, rls, plans: { privileged: privilegedPlan, member: memberPlan } };
+    return { member_sub: member, member_orgs: orgs, snapshot_at: now, postgrest_major, queued: snapshot(queued.rows), current_status: currentStatus, shapes, rls, plans: { privileged: privilegedPlan, member: memberPlan } };
   } catch (e) { await client.query('ROLLBACK'); throw e; }
 }
 export async function stabilityProbe(client, org, waitMs = 300000) {
