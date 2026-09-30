@@ -101,6 +101,9 @@ describe("isPublicPath", () => {
   it("preserves independently authenticated webhook and cron exemptions", () => {
     expect(isPublicPath("/api/webhooks/slack/actions")).toBe(true);
     expect(isPublicPath("/api/cron/sequence-tick")).toBe(true);
+    expect(isPublicPath("/api/internal/canary/runtime-proof")).toBe(true);
+    expect(isPublicPath("/api/internal/canary/deployment-identity")).toBe(true);
+    expect(isPublicPath("/api/internal/other")).toBe(false);
   });
 
   it("allows signed Jitter internal API routes to handle their own auth", () => {
