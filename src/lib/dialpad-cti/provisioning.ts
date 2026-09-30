@@ -879,7 +879,9 @@ async function applyActivate(ctx: ApplyContext): Promise<void> {
       ctx,
       id,
       async () => {
-        const response = await ports.dialpad.request('PATCH', `/api/v2/subscriptions/call/${subId}`, '{"enabled":true}');
+        // Dialpad requires call_states on PATCH even when only enabling.
+        const body = JSON.stringify({ enabled: true, call_states: sub.record.callStates });
+        const response = await ports.dialpad.request('PATCH', `/api/v2/subscriptions/call/${subId}`, body);
         if (response.status !== 200) throw new ProvisioningError('subscription_enable_failed', `enable subscription returned HTTP ${response.status}`);
       },
       verifyEnabled,

@@ -237,7 +237,12 @@ function makePorts(w: World): ProvisioningPorts {
           const sub = w.subs.find((entry) => entry.id === patch[1]);
           const after = gate(w, `dialpad.subscription.enable:${sub?.target_id}`);
           if (!sub) return { status: 404, text: '{}' };
-          sub.enabled = JSON.parse(bodyText!).enabled === true;
+          const body = JSON.parse(bodyText!);
+          if (!Array.isArray(body.call_states) || body.call_states.length === 0) {
+            return { status: 400, text: JSON.stringify({ error: { message: 'Call states must be provided.' } }) };
+          }
+          sub.call_states = body.call_states;
+          sub.enabled = body.enabled === true;
           w.log.push(`PATCH ${sub.target_id}`);
           if (after) throw new Error('lost response');
           return { status: 200, text: rawId(JSON.stringify(subJson(sub))) };
@@ -780,7 +785,7 @@ describe('activate mode', () => {
     expect(w.connection?.status).toBe('disabled');
   });
 
-  it('enables and re-verifies owned canary subscriptions before activating the connection', async () => {
+  it('preserves required call states while enabling and re-verifying owned canary subscriptions', async () => {
     const w = await prepared();
     const before = snapshotUnrelated(w);
     const result = await execute(w, activateInputs, { confirmLiveReadiness: CONNECTION_ID });
@@ -788,6 +793,7 @@ describe('activate mode', () => {
     expect(w.log).toEqual([`PATCH ${U1}`, `PATCH ${U2}`, 'db.activate']);
     expect(w.connection?.status).toBe('active');
     expect(w.subs.filter((s) => s.webhook_id === '7000000000000001').every((s) => s.enabled)).toBe(true);
+    expect(w.subs.filter((s) => s.webhook_id === '7000000000000001').map((s) => s.call_states)).toEqual([[...CALL_STATES], [...CALL_STATES]]);
     expect(snapshotUnrelated(w)).toBe(before);
     const rerun = await execute(w, activateInputs, { confirmLiveReadiness: CONNECTION_ID });
     expect(rerun.exitCode).toBe(0);
