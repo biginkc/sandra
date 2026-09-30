@@ -371,7 +371,7 @@ describe("updatePropertyStatus (integration)", () => {
       await db.query(`
         drop trigger if exists zzzzzzzzzz_t23_capture on public.messages;
         drop function if exists inbox_reply_test.capture_t23_messages();
-        drop table if exists inbox_reply_test.t23_message_capture;
+        drop schema if exists inbox_reply_test cascade;
       `);
       await db.end();
     }
