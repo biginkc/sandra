@@ -247,6 +247,62 @@ describe("stateful Dialpad PCM capture", () => {
     expect(order).toEqual(["frame"]);
   });
 
+  it("drains only the accepted worklet prefix and preserves the first callback failure", async () => {
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const first = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const second = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const frames: number[] = [];
+    const failures: Error[] = [];
+    const port: PcmWorkletPort = {
+      onmessage: null,
+      postMessage: (message) => {
+        if ((message as { type?: string }).type === "flush") {
+          port.onmessage?.({ data: { type: "tail", totalInputSamples: 640, creditedSamples: 640, uncreditedTailSamples: 0 } } as MessageEvent);
+        }
+      },
+    };
+    const context = {
+      sampleRate: 48_000,
+      state: "running",
+      audioWorklet: { addModule: async () => undefined },
+      createMediaStreamSource: () => ({ channelCount: 1, connect: () => undefined, disconnect: () => undefined }),
+      createGain: () => ({ gain: { value: 0 }, connect: () => undefined }),
+      close: async () => undefined,
+    } as unknown as AudioContext;
+    const session = await startPcmWorkletSession({
+      createAudioContext: () => context,
+      createObjectURL: () => "blob:prefix-drain",
+      revokeObjectURL: () => undefined,
+      createNode: () => { announceInputFormat(port); return { port, connect: () => undefined, disconnect: () => undefined } as unknown as AudioWorkletNode; },
+    }, {} as MediaStream, "tab", 13, async (frame) => {
+      frames.push(frame.frameIndex);
+      await (frame.frameIndex === 0 ? first : second);
+    }, () => undefined, { timeoutMs: 1_000, onFailure: (error) => failures.push(error) });
+    const samples = new Int16Array(PCM_FRAME_SAMPLES).buffer;
+    port.onmessage?.({ data: { type: "frame", frameIndex: 0, samples } } as MessageEvent);
+    await Promise.resolve();
+    const prefix = session.drainAcceptedFrames!();
+    port.onmessage?.({ data: { type: "frame", frameIndex: 1, samples } } as MessageEvent);
+    releaseFirst();
+    const settled = await Promise.race([prefix.then(() => "prefix" as const), second.then(() => "future" as const)]);
+    expect(settled).toBe("prefix");
+    expect(frames).toEqual([0, 1]);
+    expect(failures).toEqual([]);
+    releaseSecond();
+    await session.stop();
+
+    const rejected = await startPcmWorkletSession({
+      createAudioContext: () => context,
+      createObjectURL: () => "blob:prefix-reject",
+      revokeObjectURL: () => undefined,
+      createNode: () => { announceInputFormat(port); return { port, connect: () => undefined, disconnect: () => undefined } as unknown as AudioWorkletNode; },
+    }, {} as MediaStream, "tab", 14, () => { throw new Error("accepted callback failed"); }, () => undefined, { timeoutMs: 1_000 });
+    port.onmessage?.({ data: { type: "frame", frameIndex: 0, samples } } as MessageEvent);
+    await expect(rejected.drainAcceptedFrames!()).rejects.toThrow("accepted callback failed");
+    await rejected.stop();
+  });
+
   it.each([
     { label: "waits for a 1.65 second accepted delivery", tailDelayMs: 0, delayedDeliveryMs: 1_650, deliveryTimeoutMs: 2_000, deliveryTimedOut: false },
     { label: "starts delivery timing at tail receipt", tailDelayMs: 900, delayedDeliveryMs: 1_650, deliveryTimeoutMs: 2_000, deliveryTimedOut: false },

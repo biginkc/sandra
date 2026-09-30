@@ -613,6 +613,7 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
       let pcmPrefixDraining = false;
       const startupPcmFrames: PcmFrame[] = [];
       let pcmDeliveryQueue = Promise.resolve();
+      let webmDeliveryQueue = Promise.resolve();
       let queuedPcmFrames = 0;
       const startupAbort = new AbortController();
       const fail = (error: BrowserCaptureError) => {
@@ -630,12 +631,48 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
         return false;
       };
       const deliverFormat = async (format: BrowserCaptureTrackFormat): Promise<void> => {
-        if (spoolMode !== "live" || !attachedSinks) {
+        if (spoolMode === "buffering" || !attachedSinks) {
           if (!spool || !appendSpool(128)) return;
           spool.formats[format.track] = format;
           return;
         }
         await attachedSinks.onTrackFormat?.(format);
+      };
+      const drainWorkletPrefix = async (): Promise<void> => {
+        await Promise.all([
+          tabPcm?.drainAcceptedFrames?.(),
+          micPcm?.drainAcceptedFrames?.(),
+        ]);
+        if (failed) throw failed;
+        if (disposed) throw new BrowserCaptureError("interrupted", "Capture has been disposed.");
+      };
+      const drainPcmDeliveryPrefix = async (): Promise<void> => {
+        const accepted = pcmDeliveryQueue;
+        await accepted;
+        if (failed) throw failed;
+        if (disposed) throw new BrowserCaptureError("interrupted", "Capture has been disposed.");
+      };
+      const flushSpoolPcmPrefix = async (nextSinks: BrowserCaptureSinks): Promise<void> => {
+        if (!spool) return;
+        const pcm = spool.pcm.splice(0);
+        const latePcm = startupPcmFrames.splice(0);
+        for (const frame of [...pcm, ...latePcm]) {
+          if (failed) throw failed;
+          if (disposed) throw new BrowserCaptureError("interrupted", "Capture has been disposed.");
+          await nextSinks.onPcmFrame({ ...frame, epoch: captureEpoch });
+        }
+      };
+      const deliverWebmTurn = async (normalized: EncodedMediaChunk): Promise<void> => {
+        const turn = webmDeliveryQueue.then(async () => {
+          await drainWorkletPrefix();
+          if (spoolMode === "draining") await flushSpoolPcmPrefix(attachedSinks!);
+          await drainPcmDeliveryPrefix();
+          if (failed) throw failed;
+          if (disposed) throw new BrowserCaptureError("interrupted", "Capture has been disposed.");
+          await attachedSinks!.onWebmChunk(normalized);
+        });
+        webmDeliveryQueue = turn;
+        await turn;
       };
       const deliverWebm = async (chunk: EncodedMediaChunk): Promise<void> => {
         const normalized = { ...chunk, epoch: captureEpoch };
@@ -644,7 +681,7 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
           spool.webm.push(normalized);
           return;
         }
-        await attachedSinks.onWebmChunk(normalized);
+        await deliverWebmTurn(normalized);
       };
       const deliverTiming = async (record: PcmTimingRecord): Promise<void> => {
         if (timingFailed) return;
@@ -782,21 +819,22 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
             const format = spool.formats[track];
             if (format) await nextSinks.onTrackFormat?.(format);
           }
-          let flushed = false;
           while (spool.webm.length > 0 || spool.pcm.length > 0 || spool.tails.length > 0 || spool.timing.length > 0 || startupPcmFrames.length > 0) {
             const webm = spool.webm.splice(0);
-            const pcm = spool.pcm.splice(0);
             const tails = spool.tails.splice(0);
             const timing = spool.timing.splice(0);
-            const latePcm = startupPcmFrames.splice(0);
             for (const record of timing) await nextSinks.onTiming?.(record);
-            for (const chunk of webm) await nextSinks.onWebmChunk({ ...chunk, epoch: captureEpoch });
-            for (const frame of [...pcm, ...latePcm]) {
-              const normalized = { ...frame, epoch: captureEpoch };
-              pcmDeliveryQueue = pcmDeliveryQueue.then(() => nextSinks.onPcmFrame(normalized));
-              flushed = true;
-            }
-            if (flushed) await pcmDeliveryQueue;
+            // Worklet callbacks accepted before this turn may still be hidden
+            // behind each worklet's serial delivery queue. Drain that finite
+            // prefix first; those callbacks append to the spool while attach
+            // is draining, so splice the spool only after the snapshot settles.
+            await drainWorkletPrefix();
+            await flushSpoolPcmPrefix(nextSinks);
+            await drainPcmDeliveryPrefix();
+            // Use the same global WebM turn policy as live capture. The first
+            // turn may have just flushed the spool prefix; later turns snapshot
+            // only PCM accepted before their own turn.
+            for (const chunk of webm) await deliverWebmTurn({ ...chunk, epoch: captureEpoch });
             for (const tail of tails) await nextSinks.onPcmTail?.({ ...tail, epoch: captureEpoch });
           }
           spoolMode = "live";

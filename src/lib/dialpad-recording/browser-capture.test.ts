@@ -498,6 +498,149 @@ describe("Dialpad capture preparation", () => {
     await prepared.dispose();
   });
 
+  it("waits for each worklet's accepted PCM prefix before a live WebM turn", async () => {
+    const callbacks: { tab: ((frame: PcmFrame) => void | Promise<void>) | null; mic: ((frame: PcmFrame) => void | Promise<void>) | null } = { tab: null, mic: null };
+    let releaseTabDrain!: () => void;
+    const tabDrain = new Promise<void>((resolve) => { releaseTabDrain = resolve; });
+    const events: string[] = [];
+    const tabRecorder = new FakeRecorder();
+    const micRecorder = new FakeRecorder();
+    const createPcmSession = vi.fn(async (_stream: MediaStream, track: "tab" | "mic", epoch: number, onFrame: (frame: PcmFrame) => void | Promise<void>) => {
+      callbacks[track] = onFrame;
+      return {
+        sourceSampleRateHz: 48_000,
+        inputChannels: 1,
+        drainAcceptedFrames: () => track === "tab" ? tabDrain : Promise.resolve(),
+        stop: async () => ({ track, epoch, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 }),
+      };
+    });
+    const prepared = await prepareDialpadBrowserCapture({
+      proof: { handle: "tab-handle", origin: "https://sandra.example" },
+      runtime: runtime(mediaStream(new FakeTrack(), new FakeTrack()), new FakeStream([], [new FakeTrack()]) as unknown as MediaStream, (() => { const recorders = [tabRecorder, micRecorder]; return () => recorders.shift()!; })(), createPcmSession),
+    });
+    const active = await prepared.start({
+      onTrackFormat: vi.fn(),
+      onPcmFrame: (frame) => { events.push(`pcm:${frame.frameIndex}`); },
+      onWebmChunk: (chunk) => { events.push(`webm:${chunk.track}:${chunk.seq}`); },
+    });
+    const frame = { track: "tab" as const, epoch: 1, frameIndex: 0, samples: new Int16Array(PCM_FRAME_SAMPLES), bytes: new Uint8Array(PCM_FRAME_SAMPLES * 2) };
+    void callbacks.tab!(frame);
+    await Promise.resolve();
+    tabRecorder.emit(new Blob(["webm-prefix"]));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(events).toEqual(["pcm:0"]);
+    releaseTabDrain();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(events).toEqual(["pcm:0", "webm:tab:0"]);
+    await active.dispose();
+    await prepared.dispose();
+  });
+
+  it("serializes WebM turns globally while future PCM remains bounded to later snapshots", async () => {
+    const callbacks: { tab: ((frame: PcmFrame) => void | Promise<void>) | null; mic: ((frame: PcmFrame) => void | Promise<void>) | null } = { tab: null, mic: null };
+    const tabRecorder = new FakeRecorder();
+    const micRecorder = new FakeRecorder();
+    let releaseFirstWebm!: () => void;
+    const firstWebm = new Promise<void>((resolve) => { releaseFirstWebm = resolve; });
+    let resolveFutureFrame!: () => void;
+    const futureFrame = new Promise<void>((resolve) => { resolveFutureFrame = resolve; });
+    let resolveFutureStarted!: () => void;
+    const futureFrameStarted = new Promise<void>((resolve) => { resolveFutureStarted = resolve; });
+    const webm: string[] = [];
+    let webmInFlight = 0;
+    let maxWebmInFlight = 0;
+    let tabDrainCalls = 0;
+    const createPcmSession = vi.fn(async (_stream: MediaStream, track: "tab" | "mic", epoch: number, onFrame: (frame: PcmFrame) => void | Promise<void>) => {
+      callbacks[track] = onFrame;
+      return {
+        sourceSampleRateHz: 48_000,
+        inputChannels: 1,
+        drainAcceptedFrames: async () => {
+          if (track === "tab") {
+            tabDrainCalls += 1;
+            if (tabDrainCalls === 2) {
+              setTimeout(() => void callbacks.tab?.({ track: "tab", epoch: 1, frameIndex: 1, samples: new Int16Array(PCM_FRAME_SAMPLES), bytes: new Uint8Array(PCM_FRAME_SAMPLES * 2) }), 0);
+            }
+          }
+        },
+        stop: async () => ({ track, epoch, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 }),
+      };
+    });
+    const prepared = await prepareDialpadBrowserCapture({
+      proof: { handle: "tab-handle", origin: "https://sandra.example" },
+      runtime: runtime(mediaStream(new FakeTrack(), new FakeTrack()), new FakeStream([], [new FakeTrack()]) as unknown as MediaStream, (() => { const recorders = [tabRecorder, micRecorder]; return () => recorders.shift()!; })(), createPcmSession),
+    });
+    const active = await prepared.start({
+      onTrackFormat: vi.fn(),
+      onPcmFrame: async (frame) => {
+        if (frame.frameIndex === 1) {
+          resolveFutureStarted();
+          await futureFrame;
+        }
+      },
+      onWebmChunk: async (chunk) => {
+        webmInFlight += 1;
+        maxWebmInFlight = Math.max(maxWebmInFlight, webmInFlight);
+        webm.push(`${chunk.track}:${chunk.seq}`);
+        if (webm.length === 1) await firstWebm;
+        webmInFlight -= 1;
+      },
+    });
+    tabRecorder.emit(new Blob(["tab-webm"]));
+    micRecorder.emit(new Blob(["mic-webm"]));
+    for (let attempt = 0; webm.length < 1 && attempt < 100; attempt += 1) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(webm).toHaveLength(1);
+    expect(webm).toEqual(["tab:0"]);
+    expect(maxWebmInFlight).toBe(1);
+    releaseFirstWebm();
+    for (let attempt = 0; webm.length < 2 && attempt < 100; attempt += 1) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(webm).toHaveLength(2);
+    await futureFrameStarted;
+    expect(webm).toEqual(["tab:0", "mic:0"]);
+    expect(maxWebmInFlight).toBe(1);
+    resolveFutureFrame();
+    await active.dispose();
+    await prepared.dispose();
+  });
+
+  it("drains hidden accepted PCM before sending an attached spool WebM prefix", async () => {
+    const callbacks: { tab: ((frame: PcmFrame) => void | Promise<void>) | null; mic: ((frame: PcmFrame) => void | Promise<void>) | null } = { tab: null, mic: null };
+    let releaseTabDrain!: () => void;
+    const tabDrain = new Promise<void>((resolve) => { releaseTabDrain = resolve; });
+    const tabRecorder = new FakeRecorder();
+    const micRecorder = new FakeRecorder();
+    const events: string[] = [];
+    const createPcmSession = vi.fn(async (_stream: MediaStream, track: "tab" | "mic", epoch: number, onFrame: (frame: PcmFrame) => void | Promise<void>) => {
+      callbacks[track] = onFrame;
+      return {
+        sourceSampleRateHz: 48_000,
+        inputChannels: 1,
+        drainAcceptedFrames: () => track === "tab" ? tabDrain : Promise.resolve(),
+        stop: async () => ({ track, epoch, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 }),
+      };
+    });
+    const prepared = await prepareDialpadBrowserCapture({
+      proof: { handle: "tab-handle", origin: "https://sandra.example" },
+      runtime: runtime(mediaStream(new FakeTrack(), new FakeTrack()), new FakeStream([], [new FakeTrack()]) as unknown as MediaStream, (() => { const recorders = [tabRecorder, micRecorder]; return () => recorders.shift()!; })(), createPcmSession),
+    });
+    const active = await prepared.startLocal!(1);
+    void callbacks.tab!({ track: "tab", epoch: 1, frameIndex: 0, samples: new Int16Array(PCM_FRAME_SAMPLES), bytes: new Uint8Array(PCM_FRAME_SAMPLES * 2) });
+    tabRecorder.emit(new Blob(["spooled-webm"]));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const attach = active.attach!({
+      onTrackFormat: vi.fn(),
+      onPcmFrame: (frame) => { events.push(`pcm:${frame.frameIndex}`); },
+      onWebmChunk: (chunk) => { events.push(`webm:${chunk.track}:${chunk.seq}`); },
+    }, 7);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(events).toEqual([]);
+    releaseTabDrain();
+    await attach;
+    expect(events).toEqual(["pcm:0", "webm:tab:0"]);
+    await active.dispose();
+    await prepared.dispose();
+  });
+
   it("starts a bounded local spool and drains its immutable PCM prefix before live frames", async () => {
     const callbacks: Record<"tab" | "mic", ((frame: PcmFrame) => void | Promise<void>) | null> = { tab: null, mic: null };
     const recorders = [new FakeRecorder(), new FakeRecorder()];

@@ -314,6 +314,8 @@ export type PcmWorkletSession = {
   /** Actual input layout observed by the AudioContext source before collection starts. */
   readonly inputChannels: number;
   readonly contextId?: string;
+  /** Drain only callbacks accepted before this call; future frames do not extend the snapshot. */
+  readonly drainAcceptedFrames?: () => Promise<void>;
   stop(): Promise<PcmTailReport>;
 };
 
@@ -422,9 +424,11 @@ export async function startPcmWorkletSession(
   const onContextStateChange = () => emitContextClock('state_change', context.state === 'closed' ? 'closed' : context.state === 'suspended' ? 'suspended' : 'running');
   let pendingDeliveries = 0;
   let failureNotified = false;
+  let deliveryFailure: Error | null = null;
   const notifyFailure = (error: Error) => {
     if (failureNotified) return;
     failureNotified = true;
+    deliveryFailure = error;
     deliveryActive = false;
     try { options.onFailure?.(error); } catch { /* the original PCM failure remains authoritative */ }
   };
@@ -543,6 +547,11 @@ export async function startPcmWorkletSession(
     sourceSampleRateHz: context.sampleRate,
     inputChannels,
     contextId,
+    drainAcceptedFrames: async () => {
+      const accepted = deliveryQueue;
+      await accepted;
+      if (deliveryFailure) throw deliveryFailure;
+    },
     stop: async () => {
       if (stopPromise) return stopPromise;
       stopPromise = (async () => {
