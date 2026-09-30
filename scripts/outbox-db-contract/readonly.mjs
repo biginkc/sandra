@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describePlan } from './plan-contract.mjs';
-import { assertBackendTls } from './connection.mjs';
 
 const CLAIM_PIN = JSON.parse(readFileSync(new URL('./expected/claims-shape.json', import.meta.url), 'utf8'));
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -82,7 +81,6 @@ export async function collect(client, org, options = {}) {
   await openReadTxn(client, options.begin);
   try {
     await preconditions(client);
-    const tls = options.hosted ? await assertBackendTls(client) : null;
     await client.query("SET LOCAL statement_timeout='60s'");
     const now = (await client.query('SELECT now() AS at')).rows[0].at;
     const member = (await client.query(`SELECT mb.user_id FROM public.memberships mb WHERE mb.org_id=$1 AND ${ACTIVE} ORDER BY mb.created_at,mb.user_id LIMIT 1`, [org])).rows[0]?.user_id;
@@ -112,7 +110,7 @@ export async function collect(client, org, options = {}) {
     const memberPlan = await explainShapes(client, cursor, tail);
     await client.query('RESET ROLE');
     await client.query('COMMIT');
-    return { member_sub: member, member_orgs: orgs, snapshot_at: now, queued: snapshot(queued.rows), current_status: currentStatus, shapes, rls, plans: { privileged: privilegedPlan, member: memberPlan }, ...(tls ? { tls } : {}) };
+    return { member_sub: member, member_orgs: orgs, snapshot_at: now, queued: snapshot(queued.rows), current_status: currentStatus, shapes, rls, plans: { privileged: privilegedPlan, member: memberPlan } };
   } catch (e) { await client.query('ROLLBACK'); throw e; }
 }
 export async function stabilityProbe(client, org, waitMs = 300000) {

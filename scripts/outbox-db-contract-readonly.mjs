@@ -8,7 +8,7 @@ import path from 'node:path';
 import { collect, reconcile, stabilityProbe } from './outbox-db-contract/readonly.mjs';
 import { platformFingerprint, comparePlatform } from './outbox-db-contract/platform.mjs';
 import { CATALOG_SECTIONS, hasExactKeys } from './outbox-db-contract/catalog-sections.mjs';
-import { connectionConfig, assertBackendTls } from './outbox-db-contract/connection.mjs';
+import { connectionConfig, connectionEvidence, pinnedCa } from './outbox-db-contract/connection.mjs';
 import { catalogIndexes, compareIndexes, comparePlans, planCostRatios } from './outbox-db-contract/plan-contract.mjs';
 export { CATALOG_SECTIONS } from './outbox-db-contract/catalog-sections.mjs';
 
@@ -51,17 +51,30 @@ function assertTarget(target, dsn, { apiUrl, ack = process.env.INBOX_PROD_READON
   }
 }
 export { assertTarget };
-export function catalogChildEnv(dsn, parentEnv) {
+export function catalogChildEnv(dsn, parentEnv, target, expectedFingerprint) {
   const url = new URL(dsn);
-  const env = { ...parentEnv, PGDATABASE: url.pathname.slice(1), PGHOST: url.hostname, PGPORT: url.port, PGUSER: decodeURIComponent(url.username), PGPASSWORD: decodeURIComponent(url.password), PGSSLMODE: parentEnv.INBOX_CATALOG_TLS_MODE ?? 'disable' };
-  delete env.PGSSLROOTCERT;
-  if (env.PGSSLMODE === 'verify-full') env.PGSSLROOTCERT = parentEnv.NODE_EXTRA_CA_CERTS ?? 'system';
+  if ([...url.searchParams.keys()].some(key => /^ssl/i.test(key))) throw new Error('TARGET_REFUSED');
+  const hosted = target === 'shared-readonly' || target === 'production';
+  if (!hosted && target !== 'disposable-readonly') throw new Error('TARGET_REFUSED');
+  const env = { ...parentEnv };
+  for (const key of Object.keys(env)) {
+    if (/^PG[A-Z_]/i.test(key)) delete env[key];
+  }
+  delete env.INBOX_CATALOG_HOSTED_TLS;
+  Object.assign(env, { PGDATABASE: url.pathname.slice(1), PGHOST: url.hostname,
+    PGPORT: url.port || '5432', PGUSER: decodeURIComponent(url.username),
+    PGPASSWORD: decodeURIComponent(url.password), LC_ALL: 'C' });
+  if (hosted) {
+    const ca = pinnedCa(parentEnv, expectedFingerprint);
+    Object.assign(env, { PGSSLMODE: 'verify-full', PGSSLROOTCERT: ca.path,
+      PGSSLMINPROTOCOLVERSION: 'TLSv1.2', PGGSSENCMODE: 'disable', INBOX_CATALOG_HOSTED_TLS: '1' });
+  } else env.PGSSLMODE = 'disable';
   return env;
 }
-async function catalog(dsn) {
+async function catalog(dsn, target) {
   const path = 'experiments/inbox-production-install/catalog_fingerprint.py';
   if (!existsSync(path)) throw new Error('CATALOG_TOOL_UNAVAILABLE: rebase migrations branch');
-  const run = spawnSync('python3', ['scripts/outbox-db-contract/catalog-readonly.py'], { env: catalogChildEnv(dsn, process.env), encoding: 'utf8' });
+  const run = spawnSync('python3', ['scripts/outbox-db-contract/catalog-readonly.py'], { env: catalogChildEnv(dsn, process.env, target), encoding: 'utf8' });
   if (run.status !== 0) throw new Error(`CATALOG_FAILED ${run.stderr.trim()}`);
   return JSON.parse(run.stdout);
 }
@@ -95,12 +108,12 @@ export async function main({ argv = args, createClient = config => new Client(co
     const probe = createClient(connectionConfig(args.target, dsn));
     await probe.connect();
     try {
+      const tls = await connectionEvidence(probe, dsn, pinnedCa());
       await probe.query('SET default_transaction_read_only=on');
       await probe.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
       const isolation = (await probe.query('SHOW transaction_isolation')).rows[0].transaction_isolation;
       const readonly = (await probe.query('SHOW transaction_read_only')).rows[0].transaction_read_only;
       if (isolation !== 'repeatable read' || readonly !== 'on') throw new Error('READ_PRECONDITION_FAILED');
-      const tls = await assertBackendTls(probe);
       if ((await probe.query('SELECT 1 AS one')).rows[0].one !== 1) throw new Error('PROBE_FAILED');
       await probe.query('ROLLBACK');
       const record = JSON.stringify({ verdict: 'PASS', target: args.target, tls, transaction: { isolation, read_only: readonly }, select_one: true }, null, 2) + '\n';
@@ -121,9 +134,10 @@ export async function main({ argv = args, createClient = config => new Client(co
     const preBytes = args['pre-file'] ? await readFile(args['pre-file']) : null;
     const pre = preBytes ? JSON.parse(preBytes) : null;
     if (pre && (pre.target !== args.target || pre.phase !== 'pre')) throw new Error('PLAN_PRE_TARGET_MISMATCH');
-    const data = await collectData(client, args.org, { previousIds: pre ? Object.keys(pre.queued.per_row) : [], hosted: hostedReadOnly });
+    const tls = hostedReadOnly ? await connectionEvidence(client, dsn, pinnedCa()) : null;
+    const data = await collectData(client, args.org, { previousIds: pre ? Object.keys(pre.queued.per_row) : [] });
     const major = (await client.query('SHOW server_version_num')).rows[0].server_version_num.slice(0, 2);
-    const result = { verdict: 'PASS', items: {}, summary: 'no hosted HTTP 200 was observed at the shared boundary; hosted app/SSR/PostgREST behaviour is inferred from same-SHA disposable runs plus catalog-fingerprint, platform-config and claim-plumbing equality; a GoTrue major match does not prove identical hosted claim configuration.', target: args.target, phase: args.phase, ...data };
+    const result = { verdict: 'PASS', items: {}, summary: 'no hosted HTTP 200 was observed at the shared boundary; hosted app/SSR/PostgREST behaviour is inferred from same-SHA disposable runs plus catalog-fingerprint, platform-config and claim-plumbing equality; a GoTrue major match does not prove identical hosted claim configuration.', target: args.target, phase: args.phase, ...data, ...(tls ? { tls } : {}) };
     if (args.target === 'production') { result.member_org_count = data.member_orgs.length; delete result.member_orgs; }
     if (args['pre-file']) {
       result.items.queued_invariants = reconcile(pre.queued, data.queued, data.current_status);
@@ -138,8 +152,7 @@ export async function main({ argv = args, createClient = config => new Client(co
       result.comparisons = { ...result.comparisons, platform: { verdict: 'PASS', input_sha256: (await import('node:crypto')).createHash('sha256').update(bytes).digest('hex'), observed_sha256: result.platform_config.sha256 } };
     }
     if (args['catalog'] || args['catalog-compare']) {
-      process.env.INBOX_CATALOG_TLS_MODE = hostedReadOnly ? 'verify-full' : 'disable';
-      result.catalog_fingerprint = await readCatalog(dsn);
+      result.catalog_fingerprint = await readCatalog(dsn, args.target);
       result.catalog_indexes = catalogIndexes(result.catalog_fingerprint);
       if (pre) {
         try {

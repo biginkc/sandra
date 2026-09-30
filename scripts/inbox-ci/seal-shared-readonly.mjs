@@ -52,8 +52,15 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
       if (!HEX.test(plan.sha256) || !['Seq Scan','Index'].includes(plan.messages_scan) || !Number.isFinite(plan.total_cost)) throw new Error('Invalid plan digest');
     }
   }
-  keys(source.tls, ['ssl','version','cipher'], 'TLS');
-  if (source.tls.ssl !== true || typeof source.tls.version !== 'string' || typeof source.tls.cipher !== 'string') throw new Error('Invalid TLS proof');
+  keys(source.tls, ['protocol','cipher','leaf_fingerprint','pinned_ca_fingerprint','root_in_peer_chain','upstream_hop_ssl'], 'TLS');
+  if (!['TLSv1.2','TLSv1.3'].includes(source.tls.protocol) || typeof source.tls.cipher !== 'string' || !source.tls.cipher ||
+      !/^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$/.test(source.tls.leaf_fingerprint) ||
+      source.tls.pinned_ca_fingerprint !== '80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA' ||
+      typeof source.tls.root_in_peer_chain !== 'boolean' ||
+      (source.tls.upstream_hop_ssl !== null && (typeof source.tls.upstream_hop_ssl !== 'object' || Array.isArray(source.tls.upstream_hop_ssl) ||
+        !hasExactKeys(source.tls.upstream_hop_ssl, ['ssl','version','cipher'], () => true) ||
+        typeof source.tls.upstream_hop_ssl.ssl !== 'boolean' ||
+        !['version','cipher'].every(k => source.tls.upstream_hop_ssl[k] === null || typeof source.tls.upstream_hop_ssl[k] === 'string')))) throw new Error('Invalid TLS proof');
   if (!source.catalog_indexes || Array.isArray(source.catalog_indexes) || typeof source.catalog_indexes !== 'object') throw new Error('Missing index summary');
   for (const value of Object.values(source.catalog_indexes)) {
     keys(value, ['relation','valid'], 'index summary');
