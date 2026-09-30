@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
-import { describe, expect, it } from "vitest";
-import { assertRuntimeResponse, scheduledSendDeadline } from "./sequence-canary-runtime";
+import { describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { assertRuntimeResponse, inspectRuntime, scheduledSendDeadline } from "./sequence-canary-runtime";
 import { CANARY_HOST } from "../src/lib/sequences/canary-runtime-proof";
 
 const key = "approved-key";
@@ -12,6 +13,7 @@ const input = {
   sequenceId: "11111111-1111-4111-8111-111111111111",
   runId: "12345", runMode: "scheduled" as const,
 };
+vi.mock("node:child_process", () => ({ execFileSync: vi.fn() }));
 function response() {
   return {
     providerIsSendillo: true, senderMatches: true, senderLast4: "6899",
@@ -21,6 +23,14 @@ function response() {
   };
 }
 describe("runner runtime comparison", () => {
+  it("passes curl options after the Vercel separator", () => {
+    vi.mocked(execFileSync).mockReturnValue("HTTP/1.1 200 OK\r\nCache-Control: no-store\r\n\r\n{}" as never);
+    expect(() => inspectRuntime({ ...input, runMode: "manual" })).toThrow(/alias deployment mismatch/);
+    expect(execFileSync).toHaveBeenCalledWith("vercel", [
+      "curl", "/api/internal/canary/deployment-identity", "--deployment",
+      "https://sandra.example.test", "--", "-sS", "-D", "-",
+    ], expect.objectContaining({ encoding: "utf8" }));
+  });
   it("creates a signed, short-lived manual proof for a matching live response", () => {
     const signed = assertRuntimeResponse(response(), nonce, { ...input, runMode: "manual" }, "dpl_expected");
     expect(signed).toMatch(/^CANARY_RUNTIME_PROOF_V1:/);

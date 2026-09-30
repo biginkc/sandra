@@ -46,7 +46,7 @@ function vercelCurl(path: string, deploymentUrl: string, extra: string[] = []): 
   let raw: string;
   try {
     raw = execFileSync("vercel", [
-      "curl", path, "--deployment", deploymentUrl, "-sS", "-D", "-",
+      "curl", path, "--deployment", deploymentUrl, "--", "-sS", "-D", "-",
       ...extra,
     ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 20_000 });
   } catch {

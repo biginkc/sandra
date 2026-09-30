@@ -1,4 +1,5 @@
 name: Sequences V1 Prod Canary
+run-name: Sequences V1 Prod Canary ${{ github.event_name == 'schedule' && 'full' || inputs.mode }}
 
 permissions:
   actions: read
@@ -20,6 +21,9 @@ permissions:
 # Cost: one Sendillo outbound SMS per enabled run.
 # Dispatch guard requires SEQUENCE_CANARY_USER_ID, SEQUENCE_CANARY_PROPERTY_ID,
 # and SEQUENCE_CANARY_CONTACT_ID in BOTH GitHub secrets and Vercel production env.
+# A non-successful completed full run latches future sends. An operator must
+# review it and set SEQUENCE_CANARY_FAILURE_ACK_RUN_ID to that run's ID to resume.
+# This workflow and the app only READ the variable; neither can acknowledge it.
 
 on:
   schedule:
@@ -131,6 +135,10 @@ jobs:
             allowed=$(gh api "repos/$GITHUB_REPOSITORY/actions/variables/SEQUENCE_CANARY_MANUAL_RUN_ID" --jq .value)
             [[ "$allowed" == "$GITHUB_RUN_ID" ]] || { echo "Manual run is not the authorized attempt"; exit 1; }
           fi
+
+      - name: Check prior full-run failure latch before enrollment
+        if: github.event_name == 'schedule' || inputs.mode == 'full'
+        run: npx tsx scripts/check-sequence-canary-failure-latch.ts
 
       - name: Run Sequences V1 prod canary
         if: github.event_name == 'schedule' || inputs.mode == 'full'

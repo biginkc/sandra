@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/types";
+import { assertNoUnacknowledgedCanaryFailure } from "./canary-failure-latch";
 
 export const CANARY_PROOF_PREFIX = "CANARY_RUNTIME_PROOF_V1:";
 export const CANARY_PROOF_TTL_MS = 20 * 60_000;
@@ -156,6 +157,7 @@ export async function assertCanaryStopState(proof: CanaryProof): Promise<void> {
         runBody.run_attempt !== 1 || runBody.event !== expectedEvent) {
       throw new Error("Canary stopped or unauthorized");
     }
+    await assertNoUnacknowledgedCanaryFailure(proof.runId, token);
   } catch {
     throw new Error("Canary stop state could not be verified");
   }

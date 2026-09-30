@@ -269,6 +269,7 @@ it("preflight-only selects reference rows without any insert or enrollment", asy
 it("workflow gates schedule and gives cleanup its own timeout", () => {
   const workflow = fs.readFileSync(".github/workflows/canary-sequences.yml", "utf8");
   expect(workflow).toMatch(/if:\s*\$\{\{\s*github\.event_name != 'schedule' \|\| vars\.SEQUENCE_CANARY_SCHEDULE_ENABLED == 'true'\s*\}\}/);
+  expect(workflow).toContain("npx tsx scripts/check-sequence-canary-failure-latch.ts");
   expect(workflow).toContain("preflight-only");
   expect(workflow).toContain("cancel-in-progress: false");
   expect(workflow).toContain("queue: max");

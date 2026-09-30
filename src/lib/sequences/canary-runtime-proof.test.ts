@@ -77,6 +77,12 @@ describe("canary runtime proof", () => {
     expect(() => verifyCanaryProof(proof({ expiresAt: Date.now() - 1 }))).toThrow(/expired/);
   });
 
+  it("rejects a passed send deadline while the proof is still unexpired", () => {
+    const now = Date.now();
+    expect(() => verifyCanaryProof(proof({ latestSendAt: now - 1, expiresAt: now + 60_000 }), now))
+      .toThrow(/expired/);
+  });
+
   it("rejects a changed production alias", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
       JSON.stringify({ deploymentId: "dpl_new", commitSha }),
@@ -95,6 +101,22 @@ describe("canary runtime proof", () => {
     await expect(assertCanaryStopState(verifyCanaryProof(proof()))).rejects.toThrow(/stop state/);
   });
 
+  it("blocks dispatch after a prior failed full run", async () => {
+    vi.stubEnv("CANARY_GITHUB_READ_TOKEN", "read-token");
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("FAILURE_ACK_RUN_ID")) return new Response(JSON.stringify({ value: "" }));
+      if (url.includes("/workflows/")) return new Response(JSON.stringify({
+        workflow_runs: [{ id: 99, event: "schedule", status: "completed", conclusion: "failure" }], total_count: 1,
+      }));
+      if (url.includes("/runs/")) return new Response(JSON.stringify({ status: "in_progress", run_attempt: 1, event: "schedule" }));
+      return new Response(JSON.stringify({ value: "true" }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(assertCanaryStopState(verifyCanaryProof(proof())))
+      .rejects.toThrow(/stop state/);
+    expect(fetchMock.mock.calls.some(([url]) => url.includes("/workflows/"))).toBe(true);
+  });
+
   it("accepts a matching fixture proof only after current run and alias checks", async () => {
     vi.stubEnv("CANARY_GITHUB_READ_TOKEN", "read-token");
     const sequenceId = "11111111-1111-4111-8111-111111111111";
@@ -104,6 +126,7 @@ describe("canary runtime proof", () => {
       .mockResolvedValueOnce(new Response(JSON.stringify({
         status: "in_progress", run_attempt: 1, event: "schedule",
       }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ workflow_runs: [], total_count: 0 }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ deploymentId, commitSha }), {
         status: 200, headers: { "Cache-Control": "no-store" },
       }));
@@ -121,7 +144,37 @@ describe("canary runtime proof", () => {
     await expect(assertCanarySendBinding(client as never, {
       propertyId: "fixture-property", body: "PROD-SMOKE", enrollmentId: "enr",
     })).resolves.toBeUndefined();
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("rejects when the send deadline passes during network checks", async () => {
+    vi.useFakeTimers();
+    try {
+      const now = Date.now();
+      const description = proof({ latestSendAt: now + 1_000, expiresAt: now + 60_000 });
+      vi.stubEnv("CANARY_GITHUB_READ_TOKEN", "read-token");
+      vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+        if (url.includes("deployment-identity")) {
+          vi.setSystemTime(now + 2_000);
+          return new Response(JSON.stringify({ deploymentId, commitSha }), {
+            status: 200, headers: { "Cache-Control": "no-store" },
+          });
+        }
+        if (url.includes("FAILURE_ACK_RUN_ID")) return new Response(JSON.stringify({ value: "" }));
+        if (url.includes("/workflows/")) return new Response(JSON.stringify({ workflow_runs: [], total_count: 0 }));
+        if (url.includes("/runs/")) return new Response(JSON.stringify({ status: "in_progress", run_attempt: 1, event: "schedule" }));
+        return new Response(JSON.stringify({ value: "true" }));
+      }));
+      const client = { from: (table: string) => ({ select: () => ({ eq: () => ({ single: async () => ({
+        data: table === "sequence_enrollments"
+          ? { sequence_id: "11111111-1111-4111-8111-111111111111", property_id: "fixture-property", contact_id: "fixture-contact" }
+          : { description, created_by: "fixture-user" },
+        error: null,
+      }) }) }) }) };
+      await expect(assertCanarySendBinding(client as never, {
+        propertyId: "fixture-property", body: "PROD-SMOKE", enrollmentId: "enr",
+      })).rejects.toThrow(/expired/);
+    } finally { vi.useRealTimers(); }
   });
 
   it("blocks a fixture before the provider boundary when proof is missing", async () => {
