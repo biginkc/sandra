@@ -17,7 +17,20 @@ test('streaming durable response is cancelled at byte bound before ack',async()=
 test('runtime requires exact private host, signing keys and two-connection ceiling',()=>{const env={INBOX_RESTATE_INGRESS_URL:'http://inbox-restate.railway.internal:8080/',INBOX_RESTATE_IDENTITY_KEYS:JSON.stringify(['publickeyv1_'+'A'.repeat(43)])};assert.equal(workerConfiguration(env).connections,2);for(const change of [{INBOX_RESTATE_INGRESS_URL:'https://public.example:8080/'},{INBOX_RESTATE_IDENTITY_KEYS:'[]'},{INBOX_ACTION_CONNECTIONS:'3'}])assert.throws(()=>workerConfiguration({...env,...change}));});
 test('readiness probes coalesce and invalidation defeats late healthy reply',async()=>{let resolve,calls=0,now=100;const ready=createReadinessProbe(()=>{calls++;return new Promise(r=>{resolve=r;});},()=>now);const first=ready.read(),second=ready.read();assert.equal(calls,1);ready.invalidate();resolve(true);assert.deepEqual(await Promise.all([first,second]),[false,false]);assert.equal(await ready.read(),false);now=2201;const third=ready.read();resolve(true);assert.equal(await third,true);assert.equal(calls,2);});
 import {databaseConfiguration} from './core.mjs';
-test('production database TLS verifies chain and exact hostname; URL cannot override ssl',()=>{const env={INBOX_ACTION_DATABASE_URL:'postgres://inbox_action_worker:synthetic@db.example.supabase.co:5432/postgres'};const c=databaseConfiguration(env);assert.equal(c.ssl.rejectUnauthorized,true);assert.equal(c.ssl.servername,'db.example.supabase.co');assert.throws(()=>databaseConfiguration({...env,INBOX_ACTION_DATABASE_URL:env.INBOX_ACTION_DATABASE_URL+'?sslmode=require'}));assert.throws(()=>databaseConfiguration({...env,INBOX_ACTION_LOCAL_FIXTURE:'1'}));});
+test('production database accepts only known direct/session Supabase targets with pinned TLS',()=>{
+ const ca='-----BEGIN CERTIFICATE-----\nsynthetic\n-----END CERTIFICATE-----';
+ const direct={INBOX_ACTION_DATABASE_URL:'postgres://inbox_action_worker:synthetic@db.ncsngxlcyxylaeskiteu.supabase.co:5432/postgres',INBOX_ACTION_DATABASE_CA:ca};
+ const c=databaseConfiguration(direct);assert.deepEqual(c.ssl,{rejectUnauthorized:true,servername:'db.ncsngxlcyxylaeskiteu.supabase.co',minVersion:'TLSv1.2',ca});
+ const pooler=databaseConfiguration({...direct,INBOX_ACTION_DATABASE_URL:'postgres://inbox_action_worker.copflsklaefwzipsrjqz:synthetic@aws-1-us-east-1.pooler.supabase.com:5432/postgres'});assert.equal(pooler.host,'aws-1-us-east-1.pooler.supabase.com');
+ for(const patch of [
+  {INBOX_ACTION_DATABASE_URL:direct.INBOX_ACTION_DATABASE_URL+'?sslmode=require'},
+  {INBOX_ACTION_DATABASE_URL:'postgres://inbox_action_worker:synthetic@db.example.supabase.co:5432/postgres'},
+  {INBOX_ACTION_DATABASE_URL:'postgres://inbox_action_worker.otherref:synthetic@aws-1-us-east-1.pooler.supabase.com:5432/postgres'},
+  {INBOX_ACTION_DATABASE_URL:'postgres://inbox_action_worker:synthetic@db.ncsngxlcyxylaeskiteu.supabase.co:6543/postgres'},
+  {INBOX_ACTION_DATABASE_CA:'wrong'},
+ ]) assert.throws(()=>databaseConfiguration({...direct,...patch}));
+ assert.throws(()=>databaseConfiguration({...direct,INBOX_ACTION_LOCAL_FIXTURE:'1'}));
+});
 test('plaintext is restricted to explicit test mode and exact owned database alias/name',()=>{const env={INBOX_ACTION_DATABASE_URL:'postgres://inbox_action_worker:synthetic@sandra-inbox-actions-db-owned:5432/sandra_inbox_action_runtime_20260913',INBOX_ACTION_LOCAL_FIXTURE:'1',NODE_ENV:'test'};assert.equal(databaseConfiguration(env).ssl,false);assert.throws(()=>databaseConfiguration({...env,NODE_ENV:'production'}));assert.throws(()=>databaseConfiguration({...env,INBOX_ACTION_DATABASE_URL:env.INBOX_ACTION_DATABASE_URL.replace('runtime_20260913','other')}));});
 
 test('release HTTP fixture requires the exact target, launcher marker, labels, and constrained login',()=>{

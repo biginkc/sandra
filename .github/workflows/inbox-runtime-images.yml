@@ -1,0 +1,126 @@
+name: Build Sandra Inbox runtime images
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Exact 40-hex source commit to build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build and publish pinned runtime images
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SOURCE_SHA: ${{ inputs.sha }}
+    steps:
+      - name: Validate exact source SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo 'sha must be exactly 40 lowercase hexadecimal characters' >&2; exit 1; }
+
+      - name: Checkout exact source SHA
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+
+      - name: Verify exact checkout and pinned base images
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          test -z "$(git status --porcelain)"
+          expected='node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5'
+          for dockerfile in \
+            experiments/inbox-operation-worker/Dockerfile \
+            experiments/inbox-reply-send-worker/Dockerfile \
+            services/inbox-projection-worker/Dockerfile \
+            services/inbox-sync-relay/Dockerfile; do
+            grep -Fqx "FROM $expected" "$dockerfile"
+          done
+
+      - name: Log in to GHCR with the workflow token
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build operation worker
+        id: build-operation
+        uses: docker/build-push-action@v6
+        with:
+          context: ./experiments/inbox-operation-worker
+          file: ./experiments/inbox-operation-worker/Dockerfile
+          push: true
+          tags: ghcr.io/biginkc/sandra-inbox-operation-worker:sha-${{ inputs.sha }}
+          labels: org.opencontainers.image.revision=${{ inputs.sha }}
+
+      - name: Build reply-send worker
+        id: build-reply
+        uses: docker/build-push-action@v6
+        with:
+          context: ./experiments/inbox-reply-send-worker
+          file: ./experiments/inbox-reply-send-worker/Dockerfile
+          push: true
+          tags: ghcr.io/biginkc/sandra-inbox-reply-send-worker:sha-${{ inputs.sha }}
+          labels: org.opencontainers.image.revision=${{ inputs.sha }}
+
+      - name: Build projection worker
+        id: build-projection
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/inbox-projection-worker
+          file: ./services/inbox-projection-worker/Dockerfile
+          push: true
+          tags: ghcr.io/biginkc/sandra-inbox-projection-worker:sha-${{ inputs.sha }}
+          labels: org.opencontainers.image.revision=${{ inputs.sha }}
+
+      - name: Build sync relay
+        id: build-relay
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/inbox-sync-relay
+          file: ./services/inbox-sync-relay/Dockerfile
+          push: true
+          tags: ghcr.io/biginkc/sandra-inbox-sync-relay:sha-${{ inputs.sha }}
+          labels: org.opencontainers.image.revision=${{ inputs.sha }}
+
+      - name: Write digest evidence
+        env:
+          OPERATION_IMAGE: ghcr.io/biginkc/sandra-inbox-operation-worker@${{ steps.build-operation.outputs.digest }}
+          REPLY_IMAGE: ghcr.io/biginkc/sandra-inbox-reply-send-worker@${{ steps.build-reply.outputs.digest }}
+          PROJECTION_IMAGE: ghcr.io/biginkc/sandra-inbox-projection-worker@${{ steps.build-projection.outputs.digest }}
+          RELAY_IMAGE: ghcr.io/biginkc/sandra-inbox-sync-relay@${{ steps.build-relay.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for image in "$OPERATION_IMAGE" "$REPLY_IMAGE" "$PROJECTION_IMAGE" "$RELAY_IMAGE"; do
+            [[ "$image" =~ ^ghcr\.io/biginkc/[^@]+@sha256:[a-f0-9]{64}$ ]]
+          done
+          node scripts/inbox-runtime-image-evidence.mjs \
+            --source-sha "$SOURCE_SHA" \
+            --output "$RUNNER_TEMP/inbox-runtime-image-evidence.json" \
+            --image "operation-worker=$OPERATION_IMAGE" \
+            --image "reply-send-worker=$REPLY_IMAGE" \
+            --image "projection-worker=$PROJECTION_IMAGE" \
+            --image "sync-relay=$RELAY_IMAGE"
+
+      - name: Upload digest evidence artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: inbox-runtime-image-evidence-${{ inputs.sha }}
+          path: ${{ runner.temp }}/inbox-runtime-image-evidence.json
+          if-no-files-found: error
+          retention-days: 90

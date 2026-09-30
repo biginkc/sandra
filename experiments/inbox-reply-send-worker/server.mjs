@@ -88,6 +88,10 @@ async function dispatch() {
 }
 const timer = setInterval(() => { if (!inflight) inflight = dispatch().finally(() => { inflight = undefined; }); }, 1000);
 const server = http.createServer(async (req, res) => {
+  if (req.url === '/livez') {
+    const live = !stopping;
+    res.writeHead(live ? 200 : 503, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify({ live })); return;
+  }
   if (req.url === '/readyz') {
     let healthy = false;
     try { healthy = !stopping && Date.now() - lastDispatchOk < 5000 && await readiness.read(); } catch { }

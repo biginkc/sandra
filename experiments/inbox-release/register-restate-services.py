@@ -5,7 +5,9 @@ The default mode is read-only inspection.  Registration requires both the
 explicit ``--register-owned-runtime`` flag and
 ``INBOX_RELEASE_ALLOW_RUNTIME_MUTATION=1``.  Every inspected container must
 carry the release marker and exact pinned image; this helper never starts,
-stops, pulls, or removes a container and never prints credentials.
+stops, pulls, or removes a container and never prints credentials. The
+``--railway`` mode performs the same inspect-first flow against fixed private
+Railway hostnames and is suitable for the one-shot registration job.
 """
 
 from __future__ import annotations
@@ -40,6 +42,18 @@ WORKERS = {
         "service": "InboxReplySend",
     },
 }
+RAILWAY_ADMIN = "http://inbox-restate.railway.internal:9070"
+RAILWAY_WORKERS = {
+    "operation": {
+        "endpoint": "http://inbox-operation-worker.railway.internal:9080",
+        "service": "InboxMetadataOperation",
+    },
+    "reply": {
+        "endpoint": "http://inbox-reply-send-worker.railway.internal:9081",
+        "service": "InboxReplySend",
+    },
+}
+RAILWAY_EXPECTED_SERVICES = {"InboxMetadataOperation", "InboxReplySend"}
 RESTATE_IMAGE = (
     "docker.restate.dev/restatedev/restate@sha256:"
     "675b85e7bf674f9dfda04a391fa33e850650d57e464b694ca8df5866acad95cc"
@@ -201,7 +215,7 @@ def deployment_matches(registry: dict, endpoint: str, service: str) -> dict | No
     for deployment in deployments:
         if not isinstance(deployment, dict) or not deployment_uri_matches(deployment.get("uri"), endpoint):
             continue
-        if not deployment.get("id") or not isinstance(deployment.get("sdk_version"), str) or not deployment["sdk_version"]:
+        if not isinstance(deployment.get("id"), str) or not deployment["id"] or not isinstance(deployment.get("sdk_version"), str) or not deployment["sdk_version"]:
             raise GuardError(f"Restate deployment for {endpoint} has no immutable ID/SDK version")
         if deployment.get("http_version") not in {"1.1", "HTTP/1.1"}:
             raise GuardError(f"Restate deployment for {endpoint} is not HTTP/1.1")
@@ -211,17 +225,111 @@ def deployment_matches(registry: dict, endpoint: str, service: str) -> dict | No
         match = next((item for item in services if isinstance(item, dict) and item.get("name") == service), None)
         if not isinstance(match, dict) or not isinstance(match.get("revision"), int) or match["revision"] < 1:
             raise GuardError(f"Restate deployment for {endpoint} does not expose service {service} with a revision")
-        return {"id": deployment["id"], "sdk_version": deployment["sdk_version"], "revision": match["revision"], "http_version": deployment["http_version"]}
+        service_names = sorted({item.get("name") for item in services if isinstance(item, dict) and isinstance(item.get("name"), str)})
+        return {"id": deployment["id"], "sdk_version": deployment["sdk_version"], "revision": match["revision"], "http_version": deployment["http_version"], "service_names": service_names}
     return None
+
+
+def service_deployment_ids(registry: dict, service: str) -> set[str]:
+    deployments = registry.get("deployments")
+    if not isinstance(deployments, list):
+        raise GuardError("Restate deployment registry has no deployments list")
+    identifiers = set()
+    for deployment in deployments:
+        if not isinstance(deployment, dict):
+            continue
+        services = deployment.get("services")
+        has_service = isinstance(services, list) and any(isinstance(item, dict) and item.get("name") == service for item in services)
+        if has_service and not isinstance(deployment.get("id"), str):
+            raise GuardError(f"Restate deployment for {service} has no immutable ID")
+        if has_service:
+            identifiers.add(deployment["id"])
+    return identifiers
+
+
+def assert_generation_capacity(registry: dict, service: str) -> int:
+    generation_count = len(service_deployment_ids(registry, service))
+    if generation_count >= 2:
+        raise GuardError(f"registering {service} would create a third generation")
+    return generation_count
+
+
+def railway_liveness(worker: dict) -> dict:
+    status, _ = http_request(f"{worker['endpoint']}/livez", json_body=False)
+    if status != 200:
+        raise GuardError(f"Railway worker {worker['service']} is not live: HTTP {status}")
+    return {"endpoint": worker["endpoint"], "service": worker["service"], "status": status}
+
+
+def run_railway(register: bool) -> dict:
+    liveness = [railway_liveness(worker) for worker in RAILWAY_WORKERS.values()]
+    status, _ = http_request(f"{RAILWAY_ADMIN}/health", json_body=False)
+    if status != 200:
+        raise GuardError(f"Railway Restate admin is not healthy: HTTP {status}")
+    registry_status, registry = http_json(f"{RAILWAY_ADMIN}/deployments")
+    if registry_status != 200:
+        raise GuardError(f"Railway Restate deployment registry is unavailable: HTTP {registry_status}")
+    registrations = []
+    for worker in RAILWAY_WORKERS.values():
+        current = deployment_matches(registry, worker["endpoint"], worker["service"])
+        if current is not None:
+            registrations.append({"endpoint": worker["endpoint"], "service": worker["service"], "state": "already_registered", **current})
+            continue
+        generation_count = assert_generation_capacity(registry, worker["service"])
+        if not register:
+            registrations.append({"endpoint": worker["endpoint"], "service": worker["service"], "state": "not_registered", "http_status": None, "existing_generations": generation_count})
+            continue
+        code, _ = http_json(
+            f"{RAILWAY_ADMIN}/deployments",
+            method="POST",
+            payload={"uri": worker["endpoint"], "use_http_11": True},
+        )
+        if code not in {200, 201, 409}:
+            raise GuardError(f"Railway Restate registration failed for {worker['service']}: HTTP {code}")
+        registry_status, registry = http_json(f"{RAILWAY_ADMIN}/deployments")
+        if registry_status != 200:
+            raise GuardError("Railway Restate deployment registry could not be read after registration")
+        verified = deployment_matches(registry, worker["endpoint"], worker["service"])
+        if verified is None:
+            raise GuardError(f"Railway registration did not expose {worker['service']} at {worker['endpoint']}")
+        registrations.append({"endpoint": worker["endpoint"], "service": worker["service"], "state": "registered", "http_status": code, **verified})
+    discovered_services = sorted({
+        item.get("name")
+        for deployment in registry.get("deployments", [])
+        if isinstance(deployment, dict)
+        for item in (deployment.get("services") or [])
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    })
+    if register and not RAILWAY_EXPECTED_SERVICES.issubset(discovered_services):
+        raise GuardError("Railway Restate registry is missing an expected worker service")
+    return {
+        "status": "REGISTERED" if register else "READY_TO_REGISTER",
+        "mode": "railway",
+        "restate_admin_url": RAILWAY_ADMIN,
+        "restate_health_status": status,
+        "worker_liveness": liveness,
+        "worker_endpoints": registrations,
+        "discovered_services": discovered_services,
+        "credentials_logged": False,
+        "limits": ["fixed private Railway hostnames", "inspect-only unless explicit mutation flag", "no provider traffic"],
+    }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--register-owned-runtime", action="store_true")
+    parser.add_argument("--railway", "--railway-aware", dest="railway", action="store_true")
     parser.add_argument("--write", type=Path, help="write redacted registration receipt")
     args = parser.parse_args()
     if args.register_owned_runtime and os.environ.get("INBOX_RELEASE_ALLOW_RUNTIME_MUTATION") != "1":
         raise GuardError("registration requires INBOX_RELEASE_ALLOW_RUNTIME_MUTATION=1")
+    if args.railway:
+        receipt = run_railway(args.register_owned_runtime)
+        if args.write:
+            args.write.parent.mkdir(parents=True, exist_ok=True)
+            args.write.write_text(json.dumps(receipt, indent=2) + "\n")
+        print(json.dumps(receipt, indent=2))
+        return 0
     restate = require_release_container(RESTATE_NAME, image=RESTATE_IMAGE)
     workers = [check_worker(item["name"], item) for item in WORKERS.values()]
     status, _ = http_request("http://127.0.0.1:9070/health", json_body=False)

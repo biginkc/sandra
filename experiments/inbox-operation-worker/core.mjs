@@ -1,5 +1,12 @@
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const terminal=new Set(['succeeded','failed','conflicted','cancelled','blocked']);
+const PROJECT_REFS=new Set(['ncsngxlcyxylaeskiteu','copflsklaefwzipsrjqz']);
+const DIRECT_HOSTS=new Map([
+ ['db.ncsngxlcyxylaeskiteu.supabase.co','ncsngxlcyxylaeskiteu'],
+ ['db.copflsklaefwzipsrjqz.supabase.co','copflsklaefwzipsrjqz'],
+]);
+const POOLER_HOSTS=new Set(['aws-0-us-east-1.pooler.supabase.com','aws-1-us-east-1.pooler.supabase.com']);
+const CERTIFICATE=/-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----/;
 function id(value){if(typeof value!=='string'||!UUID.test(value))throw Error('Invalid worker identity');return value;}
 async function transaction(pool,statement,args){
  for(let attempt=0;;attempt++){
@@ -87,9 +94,17 @@ export function databaseConfiguration(env){
    decodeURIComponent(url.username)!=='inbox_action_worker'))throw Error('Invalid owned HTTP fixture guard');
   ssl=false;
  }else{
-  if(port!==5432)throw Error('Unapproved production database port');
-  if(!url.hostname.endsWith('.supabase.co')&&!url.hostname.endsWith('.pooler.supabase.com'))throw Error('Unapproved production database host');
-  if(env.INBOX_ACTION_DATABASE_CA){if(!env.INBOX_ACTION_DATABASE_CA.includes('-----BEGIN CERTIFICATE-----'))throw Error('Invalid database CA');ssl.ca=env.INBOX_ACTION_DATABASE_CA;}
+  if(port!==5432||database!=='postgres')throw Error('Unapproved production database target');
+  const user=decodeURIComponent(url.username);
+  const directRef=DIRECT_HOSTS.get(url.hostname);
+  if(directRef){
+   if(user!=='inbox_action_worker')throw Error('Unapproved direct worker login');
+  }else if(POOLER_HOSTS.has(url.hostname)){
+   const match=/^inbox_action_worker\.([a-z0-9]{20})$/.exec(user);
+   if(!match||!PROJECT_REFS.has(match[1]))throw Error('Unapproved session-pooler worker login');
+  }else throw Error('Unapproved production database host');
+  if(typeof env.INBOX_ACTION_DATABASE_CA!=='string'||!CERTIFICATE.test(env.INBOX_ACTION_DATABASE_CA))throw Error('Verified database CA required');
+  ssl={rejectUnauthorized:true,servername:url.hostname,minVersion:'TLSv1.2',ca:env.INBOX_ACTION_DATABASE_CA};
  }
  return {host:url.hostname,port,user:decodeURIComponent(url.username),password:decodeURIComponent(url.password),database,ssl};
 }

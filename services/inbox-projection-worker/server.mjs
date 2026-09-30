@@ -23,6 +23,10 @@ const pool=new pg.Pool({...database,max:1,idleTimeoutMillis:0,connectionTimeoutM
   }});
 pool.on('error',()=>{failed=true;stopping=true;process.exitCode=1;console.error(JSON.stringify({event:'projection_connection_error'}));});
 const server=createServer((req,res)=>{
+  if(req.method==='GET'&&req.url==='/livez'){
+    const live=!stopping;
+    res.writeHead(live?200:503,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify({live}));return;
+  }
   if(req.method!=='GET'||req.url!=='/health'){res.writeHead(404);res.end();return;}
   const healthy=!failed&&!stopping&&lastSuccess>0&&Date.now()-lastSuccess<60000;
   res.writeHead(healthy?200:503,{'content-type':'application/json','cache-control':'no-store'});
