@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { InboxWorkspace, type WorkspaceRow } from "@/components/inbox-workspace/inbox-workspace";
 import { ConversationHistory, type InboxDetailSnapshot } from "@/components/inbox-workspace/conversation-history";
-import { InboxReplyComposer } from "@/components/inbox-workspace/reply-composer";
+import { PreviewInboxReplyComposer } from "@/components/inbox-workspace/reply-composer";
 import { workspaceId, type WorkspaceId } from "@/components/inbox-workspace/selection";
 import { INBOX_REPLY_TERMINAL_RECEIPT_STATES, type InboxReplyStatus, type InboxReplyTarget, type PreparedInboxReply, type PreparedInboxReplyItem } from "@/lib/inbox/reply-api-contract";
 import type { ReplyState } from "@/components/inbox-workspace/reply-state-machine";
@@ -143,12 +143,12 @@ export function InboxReplyPreview({ state }: { state: InboxReplyPreviewState }) 
 
   const detailContent = openedId ? <div className={styles.detailBody}>
     <div className={styles.history}><ConversationHistory orgId={fixture.orgId} conversationId={openedTarget.id} requestGeneration={1} snapshot={{ requestGeneration: 1, data: { ...historySnapshot, conversationId: openedTarget.id } }} visible onRefresh={() => {}} onAccessLost={() => {}} onUnavailable={() => {}} fetch={fixtureRead} /></div>
-    <InboxReplyComposer targets={[openedTarget]} names={names} routeKey={detailRouteKey} enabled fetcher={fixtureFetch} initialDraft={fixture.body} initialState={detailInitialState} />
+    <PreviewInboxReplyComposer targets={[openedTarget]} names={names} routeKey={detailRouteKey} enabled fetcher={fixtureFetch} initialDraft={fixture.body} initialState={detailInitialState} />
   </div> : undefined;
 
   return <div className={styles.preview}>
     <nav className={styles.previewNav} aria-label="Inbox reply fixture states"><strong>Sandra · Inbox</strong><div><span className={styles.fixtureTag}>NO AUTH · LOCAL FIXTURE FETCH</span>{previewStates.filter(value => !value.startsWith("blocked-")).map(value => <Link key={value} href={href(value)} aria-current={state === value ? "page" : undefined}>{stateLabel(value)}</Link>)}<label>Blocked <select aria-label="Blocked reason fixture" value={blockedCode(state) ? state : ""} onChange={event => event.target.value && (window.location.href = href(event.target.value as InboxReplyPreviewState))}><option value="">Choose</option>{previewStates.filter(value => value.startsWith("blocked-")).map(value => <option key={value} value={value}>{stateLabel(value)}</option>)}</select></label></div></nav>
     <InboxWorkspace scopeLabel="All" rows={rows} selectedIds={selected} openId={openedId} onSelectionChange={ids => { setSelected(ids); if (ids.length < 2) setBulkOpen(false); }} onOpen={id => setOpenedId(id)} onCloseDetail={() => setOpenedId(null)} onBack={() => { window.location.href = href("ready"); }} onReviewSelection={() => {}} replyUiEnabled onBulkReply={() => setBulkOpen(true)} onAction={() => {}} actions={[]} connection={{ state: "live", label: "Fixture data · no live connection" }} toolbar={<><span>View <strong>All</strong></span><span>Selection stays in memory · no provider calls</span></>} pageControl={<span>3 fixture conversations</span>} detail={openedId ? { targetId: openedId, title: openedId === secondTargetId ? fixture.secondName : fixture.name, context: openedId === secondTargetId ? fixture.secondProperty : fixture.property, state: "ready", content: detailContent } : undefined} />
-    <Dialog open={bulkOpen && bulk} onOpenChange={setBulkOpen}><DialogContent data-preview-bulk-dialog className="max-h-[85dvh] overflow-auto"><DialogTitle>Bulk reply review</DialogTitle><DialogDescription>Every destination is fixture data. The real composer is using a local fetch stub; no provider call or message send occurs.</DialogDescription><InboxReplyComposer targets={replyTargets} names={names} routeKey={bulkRouteKey} enabled fetcher={fixtureFetch} initialDraft={fixture.body} initialState={bulkInitialState} onClose={() => setBulkOpen(false)} /></DialogContent></Dialog>
+    <Dialog open={bulkOpen && bulk} onOpenChange={setBulkOpen}><DialogContent data-preview-bulk-dialog className="max-h-[85dvh] overflow-auto"><DialogTitle>Bulk reply review</DialogTitle><DialogDescription>Every destination is fixture data. The real composer is using a local fetch stub; no provider call or message send occurs.</DialogDescription><PreviewInboxReplyComposer targets={replyTargets} names={names} routeKey={bulkRouteKey} enabled fetcher={fixtureFetch} initialDraft={fixture.body} initialState={bulkInitialState} onClose={() => setBulkOpen(false)} /></DialogContent></Dialog>
   </div>;
 }

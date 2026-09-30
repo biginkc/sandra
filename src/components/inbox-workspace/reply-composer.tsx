@@ -4,13 +4,21 @@ import { useEffect, useMemo, useReducer, useRef } from "react";
 import {
   type InboxReplyExclusion,
   INBOX_REPLY_RECIPIENT_LIMIT,
-  INBOX_REPLY_TERMINAL_RECEIPT_STATES,
   type InboxReplyStatus,
   type InboxReplyTarget,
   type PreparedInboxReply,
   type PreparedInboxReplyItem,
 } from "@/lib/inbox/reply-api-contract";
 import { initialReplyState, replyStateReducer, type ReplyReview, type ReplyState } from "./reply-state-machine";
+import {
+  classifyReceipt,
+  isTerminalReceiptStatus,
+  MAX_POLL_DURATION_MS,
+  receiptPollDelay,
+  receiptProgress,
+  receiptProgressCopy,
+  type ReceiptPollTracker,
+} from "./reply-receipt-policy";
 import styles from "./reply-composer.module.css";
 
 type ReplyComposerProps = {
@@ -21,8 +29,11 @@ type ReplyComposerProps = {
   onClose?: () => void;
   fetcher?: typeof fetch;
   initialDraft?: string;
-  /** Preview-only hydration hook; production callers continue from ready. */
-  initialState?: ReplyState;
+};
+
+type PreviewReplyComposerProps = ReplyComposerProps & {
+  /** Preview-only hydration hook; never part of the production composer API. */
+  initialState: ReplyState;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -64,12 +75,6 @@ const blockerCopy: Record<"empty" | "recipient_limit" | "duplicate_destination",
   recipient_limit: `The server found more than ${INBOX_REPLY_RECIPIENT_LIMIT} distinct eligible reply destinations after exclusions and duplicate destinations were removed. Narrow the selection and review again.`,
   duplicate_destination: "Two selected conversations share the same destination.",
 };
-
-const UNCONFIRMED_RECEIPT_STATES = ["pending", "dispatch_started", "uncertain"] as const;
-const POLL_BACKOFF_MS = [500, 1000, 2000, 4000, 8000, 16000, 30000] as const;
-// reply-api.ts:375-388 exposes no operation timeout. Two minutes without a
-// receipt-state change is an operational default, not a server completion claim.
-export const MAX_POLL_DURATION_MS = 120_000;
 
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -149,34 +154,9 @@ function receiptLabel(status: InboxReplyStatus): string {
 }
 
 function statusMessage(status: InboxReplyStatus): string {
-  if (status.receipts.some(receipt => receipt.state === "uncertain")) return "The provider result is not yet confirmed. Do not resend this reply.";
-  if (status.receipts.some(receipt => UNCONFIRMED_RECEIPT_STATES.includes(receipt.state as typeof UNCONFIRMED_RECEIPT_STATES[number]))) return "The durable receipt is still being checked.";
+  if (!isTerminalReceiptStatus(status)) return "The durable receipt is still being checked.";
   const failure = status.receipts.find(receipt => receipt.reason)?.reason;
   return failure ?? (receiptLabel(status) === "Accepted by provider" ? "The provider accepted the reply; delivery can update separately." : "The server recorded the reply result.");
-}
-
-function isTerminalReceiptState(state: InboxReplyStatus["receipts"][number]["state"]): boolean {
-  return INBOX_REPLY_TERMINAL_RECEIPT_STATES.includes(state as typeof INBOX_REPLY_TERMINAL_RECEIPT_STATES[number]);
-}
-
-function statusFingerprint(status: InboxReplyStatus): string {
-  return JSON.stringify({
-    dispatchComplete: status.dispatchComplete,
-    receipts: [...status.receipts]
-      .map(receipt => ({ itemId: receipt.itemId, version: receipt.version, state: receipt.state, reason: receipt.reason }))
-      .sort((left, right) => left.itemId.localeCompare(right.itemId)),
-  });
-}
-
-function terminalStatus(status: InboxReplyStatus): boolean {
-  return status.receipts.length > 0 && status.receipts.every(receipt => isTerminalReceiptState(receipt.state));
-}
-
-function receiptProgress(status: InboxReplyStatus): { completed: number; total: number } {
-  return {
-    completed: status.receipts.filter(receipt => isTerminalReceiptState(receipt.state)).length,
-    total: status.receipts.length,
-  };
 }
 
 function PreparedReview({ prepared, names, onEdit, onSend, sending, bulk }: { prepared: PreparedInboxReply; names?: ReadonlyMap<string, string>; onEdit: () => void; onSend: () => void; sending: boolean; bulk: boolean }) {
@@ -199,12 +179,12 @@ function PreparedReview({ prepared, names, onEdit, onSend, sending, bulk }: { pr
 
 function ReceiptSummary({ status, operationId, bulk, sending = false, uncertainResult = false, message }: { status?: InboxReplyStatus; operationId?: string; bulk: boolean; sending?: boolean; uncertainResult?: boolean; message?: string }) {
   if (!status && !operationId) return null;
-  const uncertain = uncertainResult || !!status?.receipts.some(receipt => receipt.state === "uncertain");
+  const uncertain = uncertainResult;
   const progress = status ? receiptProgress(status) : null;
-  const stillSending = sending && !!status && !uncertain && !terminalStatus(status);
-  return <section className={`${styles.receipt} ${uncertain ? styles.uncertain : ""}`} role={uncertain ? "alert" : "status"}>
+  const stillSending = sending && !!status && !uncertain && !isTerminalReceiptStatus(status);
+  return <section className={`${styles.receipt} ${stillSending ? styles.receiptPending : ""} ${uncertain ? styles.uncertain : ""}`} role={uncertain ? "alert" : "status"}>
     <strong>{uncertain ? "Send result not confirmed" : stillSending ? "Still sending…" : status ? receiptLabel(status) : "Checking receipt"}</strong>
-    <p>{uncertain && message ? message : stillSending && progress ? `${progress.completed} of ${progress.total} recipients have a terminal receipt. We’ll keep checking the server; do not resend this reply.` : status ? statusMessage(status) : uncertain ? "The send result was not confirmed. Do not resend this reply." : "The durable receipt is still being checked."}{uncertain ? " Check the receipt or conversation manually; this screen will not resend it." : ""}</p>
+    <p>{uncertain && message ? message : stillSending && progress ? receiptProgressCopy(progress) : status ? statusMessage(status) : uncertain ? "The send result was not confirmed. Do not resend this reply." : "The durable receipt is still being checked."}{uncertain ? " Check the receipt or conversation manually; this screen will not resend it." : ""}</p>
     {status && <ul className={styles.receiptList}>{status.items.map(item => {
       const receipt = status.receipts.find(value => value.itemId === item.id);
       const name = item.recipient?.contactName ?? "Excluded recipient";
@@ -214,7 +194,7 @@ function ReceiptSummary({ status, operationId, bulk, sending = false, uncertainR
   </section>;
 }
 
-export function InboxReplyComposer({ targets, names, enabled = false, routeKey = "route-unknown", onClose, fetcher, initialDraft = "", initialState }: ReplyComposerProps) {
+function ReplyComposer({ targets, names, enabled = false, routeKey = "route-unknown", onClose, fetcher, initialDraft = "", initialState }: ReplyComposerProps & { initialState?: ReplyState }) {
   const [state, dispatch] = useReducer(replyStateReducer, { draft: initialDraft, state: initialState }, value => value.state ?? initialReplyState(value.draft));
   const sendInFlight = useRef(false);
   const request = useRef<AbortController | null>(null);
@@ -261,42 +241,41 @@ export function InboxReplyComposer({ targets, names, enabled = false, routeKey =
     }
   }
 
-  function schedulePoll(operationId: string, attempt: number, unchangedSince: number, lastStatus?: InboxReplyStatus, lastFingerprint?: string) {
+  function schedulePoll(operationId: string, attempt: number, tracker: ReceiptPollTracker, lastStatus?: InboxReplyStatus) {
     if (pollTimer.current) clearTimeout(pollTimer.current);
-    const delay = POLL_BACKOFF_MS[Math.min(attempt, POLL_BACKOFF_MS.length - 1)];
-    const remaining = Math.max(0, MAX_POLL_DURATION_MS - (Date.now() - unchangedSince));
-    if (remaining === 0) {
+    const delay = receiptPollDelay(attempt, tracker.unchangedSince);
+    if (delay === null) {
       dispatch({ type: "uncertain", status: lastStatus, message: "The receipt could not be confirmed within the polling window. Check the receipt before taking any further action." });
       return;
     }
     pollTimer.current = setTimeout(() => {
       pollTimer.current = null;
-      if (Date.now() - unchangedSince >= MAX_POLL_DURATION_MS) {
+      if (receiptPollDelay(attempt, tracker.unchangedSince) === null) {
         dispatch({ type: "uncertain", status: lastStatus, message: "The receipt could not be confirmed within the polling window. Check the receipt before taking any further action." });
         return;
       }
-      void poll(operationId, attempt + 1, unchangedSince, lastStatus, lastFingerprint);
-    }, Math.min(delay, remaining));
+      void poll(operationId, attempt + 1, tracker, lastStatus);
+    }, delay);
   }
 
-  async function poll(operationId: string, attempt = 0, unchangedSince = Date.now(), lastStatus?: InboxReplyStatus, lastFingerprint?: string) {
+  async function poll(operationId: string, attempt = 0, tracker: ReceiptPollTracker = { unchangedSince: Date.now() }, lastStatus?: InboxReplyStatus) {
     const controller = new AbortController(); request.current = controller;
     try {
       const response = await requestFetch(`/api/inbox/replies/${encodeURIComponent(operationId)}`, { credentials: "same-origin", cache: "no-store", redirect: "error", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]) });
       if (!response.ok) throw Error("The reply receipt is not available yet.");
       const status = await response.json() as InboxReplyStatus;
       if (controller.signal.aborted || status.operationId !== operationId || !Array.isArray(status.receipts)) throw Error("The reply receipt could not be verified.");
-      const fingerprint = statusFingerprint(status);
-      const nextUnchangedSince = lastFingerprint === undefined || fingerprint !== lastFingerprint ? Date.now() : unchangedSince;
-      if (status.receipts.some(receipt => receipt.state === "uncertain") || terminalStatus(status)) dispatch({ type: "receipt", status });
-      else if (Date.now() - nextUnchangedSince >= MAX_POLL_DURATION_MS) dispatch({ type: "uncertain", status, message: "The receipt did not change within the polling window. Check the receipt before taking any further action." });
+      const decision = classifyReceipt(status, tracker);
+      const nextTracker = { fingerprint: decision.fingerprint, unchangedSince: decision.unchangedSince };
+      if (decision.classification === "terminal") dispatch({ type: "receipt", status });
+      else if (decision.classification === "not_confirmed") dispatch({ type: "uncertain", status, message: "The receipt did not change within the polling window. Check the receipt before taking any further action." });
       else {
         dispatch({ type: "receipt_update", status });
-        schedulePoll(operationId, attempt, nextUnchangedSince, status, fingerprint);
+        schedulePoll(operationId, attempt, nextTracker, status);
       }
     } catch (error) {
       if (!controller.signal.aborted) {
-        if (Date.now() - unchangedSince < MAX_POLL_DURATION_MS) schedulePoll(operationId, attempt, unchangedSince, lastStatus, lastFingerprint);
+        if (receiptPollDelay(attempt, tracker.unchangedSince) !== null) schedulePoll(operationId, attempt, tracker, lastStatus);
         else dispatch({ type: "uncertain", status: lastStatus, message: error instanceof Error ? error.message : "The reply result could not be checked." });
       }
     }
@@ -349,4 +328,13 @@ export function InboxReplyComposer({ targets, names, enabled = false, routeKey =
   </section>;
 }
 
-export { receiptLabel, statusMessage };
+export function InboxReplyComposer(props: ReplyComposerProps) {
+  const { targets, names, enabled, routeKey, onClose, fetcher, initialDraft } = props;
+  return <ReplyComposer targets={targets} names={names} enabled={enabled} routeKey={routeKey} onClose={onClose} fetcher={fetcher} initialDraft={initialDraft} />;
+}
+
+export function PreviewInboxReplyComposer({ initialState, ...props }: PreviewReplyComposerProps) {
+  return <ReplyComposer {...props} initialState={initialState} />;
+}
+
+export { receiptLabel, statusMessage, MAX_POLL_DURATION_MS };
