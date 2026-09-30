@@ -44,7 +44,7 @@ function poolConfig() {
     max: 4,
     statement_timeout: 15_000,
     query_timeout: 20_000,
-    application_name: 'restate-retry-local-db-r5',
+    application_name: 'restate-retry-local-db-r7',
   };
 }
 
@@ -107,7 +107,8 @@ BEGIN
  RETURN NEW;
 END $$;
 CREATE TRIGGER zzz_restate_r12b_marker_sleep BEFORE UPDATE OF state ON inbox_reply_send.attempts FOR EACH ROW EXECUTE FUNCTION inbox_reply_test.restate_r12b_marker_sleep();` : '';
-  const itemList = Array.from({ length: items }, (_, offset) => itemValue(n, offset)).join(',');
+  const itemCount = secondAttempt ? Math.max(items, 2) : items;
+  const itemList = Array.from({ length: itemCount }, (_, offset) => itemValue(n, offset)).join(',');
   const secondOwner = secondAttempt ? `
 INSERT INTO auth.users(id,email) VALUES('${y.c}','restate-local-db-${n}-second-owner@example.invalid');
 INSERT INTO memberships(user_id,org_id,role,access_status) VALUES('${y.c}','${x.o}','owner','active');` : '';
@@ -123,12 +124,12 @@ ALTER TABLE inbox_reply_review.preparations ENABLE TRIGGER immutable_reply_prepa
       await client.query(`
 INSERT INTO organizations(id,name) VALUES('${x.o}','projection-test-${n}');
 INSERT INTO contacts(id,org_id,first_name,phone_1,phone_1_type) VALUES('${x.c}','${x.o}','Projection','+12025550101','mobile');
-INSERT INTO consent_events(contact_id,channel,event_type,source) VALUES('${x.c}','sms','opt_in_marketing_written','projection-test');
+INSERT INTO consent_events(org_id,contact_id,channel,event_type,source) VALUES('${x.o}','${x.c}','sms','opt_in_marketing_written','projection-test');
 INSERT INTO properties(id,org_id,address,state,homeowner_contact_id) VALUES('${x.p}','${x.o}','Projection Test ${n}','MO','${x.c}');
 INSERT INTO auth.users(id,email) VALUES('${x.c}','restate-local-db-${n}@example.invalid');
 INSERT INTO memberships(user_id,org_id,role,access_status) VALUES('${x.c}','${x.o}','owner','active');
 ${secondOwner}
-INSERT INTO inbox_reply_review.preparations(id,org_id,requester_id,request_key,input_hash,canonical_input,items,expires_at) VALUES('${x.prep}','${x.o}','${x.c}',gen_random_uuid(),'x','{}','[${itemList}]'::jsonb,clock_timestamp()+interval '1 hour');
+INSERT INTO inbox_reply_review.preparations(id,org_id,requester_id,request_key,input_hash,canonical_input,items,expires_at) VALUES('${x.prep}','${x.o}','${x.c}',gen_random_uuid(),'x','{}',jsonb_build_array(${itemList}),clock_timestamp()+interval '1 hour');
 INSERT INTO inbox_reply_send.operations(org_id,id,requester_id,preparation_id,idempotency_key) VALUES('${x.o}','${x.op}','${x.c}','${x.prep}',gen_random_uuid());
 INSERT INTO provider_sender_numbers(id,org_id,provider,phone_e164,provider_number_id,status,messaging_status) VALUES('${x.token}','${x.o}','sendillo','+12025550001','restate-local-db-${n}','active','active');
 INSERT INTO inbox_inbound_heads(org_id,conversation_id,revision) VALUES('${x.o}','${x.conv}',1);

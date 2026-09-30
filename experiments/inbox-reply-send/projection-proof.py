@@ -131,7 +131,7 @@ BEGIN;
 SET LOCAL client_min_messages='warning';
 INSERT INTO organizations(id,name) VALUES('{x['o']}','projection-test-{n}');
 INSERT INTO contacts(id,org_id,first_name,phone_1,phone_1_type) VALUES('{x['c']}','{x['o']}','Projection','+12025550101','mobile');
-INSERT INTO consent_events(contact_id,channel,event_type,source) VALUES('{x['c']}','sms','opt_in_marketing_written','projection-test');
+INSERT INTO consent_events(org_id,contact_id,channel,event_type,source) VALUES('{x['o']}','{x['c']}','sms','opt_in_marketing_written','projection-test');
 INSERT INTO properties(id,org_id,address,state,homeowner_contact_id) VALUES('{x['p']}','{x['o']}','Projection Test {n}','MO','{x['c']}');
 INSERT INTO inbox_reply_review.preparations(id,org_id,requester_id,request_key,input_hash,canonical_input,items,expires_at)
 VALUES('{x['prep']}','{x['o']}','{x['c']}',gen_random_uuid(),'x','{{}}',{item_values(n, items)},clock_timestamp()+interval '1 hour');
