@@ -63,6 +63,7 @@ export function catalogChildEnv(dsn, parentEnv, target, expectedFingerprint) {
     if (/^PG[A-Z_]/i.test(key)) delete env[key];
   }
   delete env.INBOX_CATALOG_HOSTED_TLS;
+  delete env.INBOX_CATALOG_LOCAL_TLS;
   Object.assign(env, { PGDATABASE: url.pathname.slice(1), PGHOST: url.hostname,
     PGPORT: url.port || '5432', PGUSER: decodeURIComponent(url.username),
     PGPASSWORD: decodeURIComponent(url.password), LC_ALL: 'C' });

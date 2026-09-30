@@ -54,6 +54,7 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   }
   keys(source.tls, ['protocol','cipher','leaf_fingerprint','pinned_ca_fingerprint','root_in_peer_chain','upstream_hop_ssl'], 'TLS');
   if (!['TLSv1.2','TLSv1.3'].includes(source.tls.protocol) || typeof source.tls.cipher !== 'string' || !source.tls.cipher ||
+      typeof source.tls.leaf_fingerprint !== 'string' ||
       !/^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$/.test(source.tls.leaf_fingerprint) ||
       source.tls.pinned_ca_fingerprint !== '80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA' ||
       typeof source.tls.root_in_peer_chain !== 'boolean' ||

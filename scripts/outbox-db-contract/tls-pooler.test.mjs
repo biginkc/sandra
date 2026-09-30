@@ -5,7 +5,7 @@ import { createServer } from 'node:net';
 import { TLSSocket, createSecureContext } from 'node:tls';
 import { X509Certificate } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { connectionConfig, connectionEvidence, pinnedCa } from './connection.mjs';
@@ -24,6 +24,9 @@ function fixture() {
   run(dir, 'req','-newkey','rsa:2048','-nodes','-keyout','leaf.key','-out','leaf.csr','-subj','/CN=localhost');
   writeFileSync(path.join(dir,'leaf.ext'),'subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\n');
   run(dir, 'x509','-req','-in','leaf.csr','-CA','inter.pem','-CAkey','inter.key','-CAcreateserial','-days','1','-out','leaf.pem','-extfile','leaf.ext');
+  run(dir, 'req','-newkey','rsa:2048','-nodes','-keyout','wrong.key','-out','wrong.csr','-subj','/CN=wrong.example');
+  writeFileSync(path.join(dir,'wrong.ext'),'subjectAltName=DNS:wrong.example\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\n');
+  run(dir, 'x509','-req','-in','wrong.csr','-CA','inter.pem','-CAkey','inter.key','-CAserial','inter.srl','-days','1','-out','wrong.pem','-extfile','wrong.ext');
   run(dir, 'req','-x509','-newkey','rsa:2048','-nodes','-days','1','-keyout','attacker.key','-out','attacker.pem','-subj','/CN=attacker root','-addext','basicConstraints=critical,CA:TRUE');
   const read = name => readFileSync(path.join(dir,name));
   const fp = new X509Certificate(read('root.pem')).fingerprint256;
@@ -32,11 +35,11 @@ function fixture() {
 function packet(type, payload = Buffer.alloc(0)) {
   const b = Buffer.alloc(5 + payload.length); b.write(type,0); b.writeInt32BE(b.length-1,1); payload.copy(b,5); return b;
 }
-async function serverFor(f, {cert = 'leaf.pem', chain = 'inter.pem', plain = false, maxVersion} = {}) {
+async function serverFor(f, {cert = 'leaf.pem', key = 'leaf.key', chain = 'inter.pem', plain = false, maxVersion} = {}) {
   let seenTls = 0;
   let seenConnections = 0;
   const sockets = new Set();
-  const context = createSecureContext({key:f.read('leaf.key'),cert:Buffer.concat([f.read(cert), ...(chain ? [f.read(chain)] : [])]),
+  const context = createSecureContext({key:f.read(key),cert:Buffer.concat([f.read(cert), ...(chain ? [f.read(chain)] : [])]),
     ...(maxVersion ? {minVersion:maxVersion,maxVersion} : {})});
   const server = createServer(socket => {
     seenConnections++;
@@ -142,7 +145,7 @@ test('Node pg local TLS positive omits root and records upstream row information
   } finally {client?.connection?.stream?.destroy(); await client?.end().catch(()=>{}); await srv.close();rmSync(f.dir,{recursive:true,force:true});}
 });
 test('Node pg local TLS negative controls and config mutations', async()=>{
-  const f=fixture(); const srv=await serverFor(f); const plain=await serverFor(f,{plain:true}); const incomplete=await serverFor(f,{chain:null});
+  const f=fixture(); const srv=await serverFor(f); const mismatch=await serverFor(f,{cert:'wrong.pem',key:'wrong.key'}); const plain=await serverFor(f,{plain:true}); const incomplete=await serverFor(f,{chain:null});
   const oldTls=await serverFor(f,{maxVersion:'TLSv1.1'});
   let downgraded;
   try {
@@ -151,6 +154,8 @@ test('Node pg local TLS negative controls and config mutations', async()=>{
     assert.throws(()=>connectionConfig('shared-readonly',dsn(srv.port),{NODE_EXTRA_CA_CERTS:path.join(f.dir,'leaf.pem')},f.fp),/TLS_CA_PIN_MISMATCH/);
     assert.throws(()=>connectionConfig('shared-readonly',dsn(srv.port)+'?sslmode=disable',{NODE_EXTRA_CA_CERTS:path.join(f.dir,'root.pem')},f.fp),/TARGET_REFUSED/);
     await assert.rejects(connect(f,plain),/server does not support SSL|SSL/i);
+    await assert.rejects(connect(f,mismatch),/hostname|altname|certificate/i);
+    assert.ok(mismatch.seenConnections > 0);
     await assert.rejects(connect(f,incomplete),/certificate|verify|issuer|chain/i);
     await assert.rejects(connect(f,oldTls),/SSL|TLS|protocol|alert|version/i);
     const config=connectionConfig('shared-readonly',dsn(srv.port),{NODE_EXTRA_CA_CERTS:path.join(f.dir,'root.pem')},f.fp);
@@ -161,7 +166,7 @@ test('Node pg local TLS negative controls and config mutations', async()=>{
     downgraded.on('error',()=>{});
     await downgraded.connect();
     await assert.rejects(connectionEvidence(downgraded,dsn(srv.port),pinnedCa({NODE_EXTRA_CA_CERTS:path.join(f.dir,'root.pem')},f.fp),f.fp),/TLS_CONFIG_DOWNGRADE/);
-  } finally {downgraded?.connection?.stream?.destroy(); await downgraded?.end().catch(()=>{}); await Promise.all([srv.close(),plain.close(),incomplete.close(),oldTls.close()]);rmSync(f.dir,{recursive:true,force:true});}
+  } finally {downgraded?.connection?.stream?.destroy(); await downgraded?.end().catch(()=>{}); await Promise.all([srv.close(),mismatch.close(),plain.close(),incomplete.close(),oldTls.close()]);rmSync(f.dir,{recursive:true,force:true});}
 });
 test('Node pg refuses every exclusive-CA bundle before a TCP connection', async()=>{
   const f=fixture(); const srv=await serverFor(f);
@@ -181,14 +186,21 @@ test('catalog child env neutralizes inherited libpq overrides and refuses downgr
     assert.throws(()=>catalogChildEnv(dsn(5432),{NODE_EXTRA_CA_CERTS:path.join(f.dir,'root.pem')},'shared-readonly','00:'+'00:'.repeat(30)+'00'),/TLS_CA_PIN_MISMATCH/);
     assert.throws(()=>catalogChildEnv(dsn(5432)+'?sslmode=disable',{NODE_EXTRA_CA_CERTS:path.join(f.dir,'root.pem')},'shared-readonly',f.fp),/TARGET_REFUSED/);
     env=catalogChildEnv('postgres://user:password@localhost:5432/postgres',{
-      NODE_EXTRA_CA_CERTS:path.join(f.dir,'root.pem'),PGSERVICE:'evil',PGSERVICEFILE:'evil',PGSSLMODE:'disable',PGSSLROOTCERT:'system',PGGSSENCMODE:'prefer',PGHOST:'evil',PGHOSTADDR:'evil',PGPORT:'1'},'shared-readonly',f.fp);
+      NODE_EXTRA_CA_CERTS:path.join(f.dir,'root.pem'),PGSERVICE:'evil',PGSERVICEFILE:'evil',PGSSLMODE:'disable',PGSSLROOTCERT:'system',PGGSSENCMODE:'prefer',PGHOST:'evil',PGHOSTADDR:'evil',PGPORT:'1',INBOX_CATALOG_LOCAL_TLS:'1'},'shared-readonly',f.fp);
     assert.equal(env.PGSSLMODE,'verify-full'); assert.notEqual(env.PGSSLROOTCERT,path.join(f.dir,'root.pem'));
     assert.equal(readFileSync(env.PGSSLROOTCERT,'utf8'),readFileSync(path.join(f.dir,'root.pem'),'utf8'));
     assert.equal(statSync(env.PGSSLROOTCERT).mode & 0o777,0o600);
     assert.equal(env.PGSSLMINPROTOCOLVERSION,'TLSv1.2'); assert.equal(env.PGGSSENCMODE,'disable');
-    for(const key of ['PGSERVICE','PGSERVICEFILE','PGHOSTADDR']) assert.equal(env[key],undefined);
+    for(const key of ['PGSERVICE','PGSERVICEFILE','PGHOSTADDR','INBOX_CATALOG_LOCAL_TLS']) assert.equal(env[key],undefined);
     assert.equal(env.PGHOST,'localhost');assert.equal(env.PGPORT,'5432');assert.equal(env.LC_ALL,'C');
     for(const value of ['disable','require','verify-ca','system']) assert.notEqual(env.PGSSLMODE,value);
+    const rawCaPath=path.join(f.dir,'raw-ca.pem');
+    writeFileSync(rawCaPath,Buffer.concat([f.read('root.pem'),Buffer.from('\n')]));
+    const rawEnv={NODE_EXTRA_CA_CERTS:rawCaPath};
+    const config=connectionConfig('shared-readonly',dsn(5432),rawEnv,f.fp);
+    const canonical=pinnedCa(rawEnv,f.fp);
+    assert.equal(config.ssl.ca,canonical.pem);
+    assert.notEqual(config.ssl.ca,readFileSync(rawCaPath,'utf8'));
   } finally {disposeCatalogChildEnv(env);rmSync(f.dir,{recursive:true,force:true});}
 });
 
@@ -205,6 +217,19 @@ test('real psql catalog path refuses every exclusive-CA bundle before TCP or pas
       assert.notEqual(result.status,0,label);
       assert.match(result.stderr,/CATALOG_TLS_CA_INVALID/,label);
     }
+    assert.equal(srv.seenConnections,0);
+  } finally {await srv.close();rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('catalog adapter rejects a local TLS server with an unpinned CA before handshake',async()=>{
+  const f=fixture(); const srv=await serverFor(f);
+  const env={...process.env,INBOX_CATALOG_HOSTED_TLS:'1',PGSSLMODE:'verify-full',
+    PGSSLMINPROTOCOLVERSION:'TLSv1.2',PGGSSENCMODE:'disable',PGHOST:'localhost',PGPORT:String(srv.port),
+    PGSSLROOTCERT:path.join(f.dir,'root.pem'),PGUSER:'user',PGPASSWORD:'password',PGDATABASE:'postgres',LC_ALL:'C'};
+  try {
+    const result=spawnSync('python3',['scripts/outbox-db-contract/catalog-readonly.py'],{env,encoding:'utf8',timeout:5000});
+    assert.notEqual(result.status,0);
+    assert.match(result.stderr,/CATALOG_TLS_CA_PIN_MISMATCH/);
     assert.equal(srv.seenConnections,0);
   } finally {await srv.close();rmSync(f.dir,{recursive:true,force:true});}
 });
@@ -241,7 +266,24 @@ test('real psql subprocess verifies local TLS and refuses wrong hostname, CA and
   } finally {await Promise.all([valid.close(),plain.close(),incomplete.close(),oldTls.close()]);rmSync(f.dir,{recursive:true,force:true});}
 });
 
-test('catalog adapter refuses libpq downgrades and unparseable conninfo',()=>{
+function parseProductionConninfo(files) {
+  const script=`import importlib.util, json, pathlib, sys
+p=pathlib.Path('scripts/outbox-db-contract/catalog-readonly.py').resolve()
+spec=importlib.util.spec_from_file_location('catalog_readonly_test',p)
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+for filename in sys.argv[1:]:
+ try:
+  print(json.dumps({'ok': module.parse_conninfo(pathlib.Path(filename).read_text())}))
+ except Exception as error:
+  print(json.dumps({'error': str(error)}))
+`;
+  const result=spawnSync('python3',['-c',script,...files],{encoding:'utf8'});
+  assert.equal(result.status,0,result.stderr);
+  return result.stdout.trim().split('\n').filter(Boolean).map(line=>JSON.parse(line));
+}
+
+test('catalog adapter refuses libpq downgrades, malformed conninfo, and psql18 field drift',()=>{
   const f=fixture();
   try {
     const base={...process.env,INBOX_CATALOG_HOSTED_TLS:'1',PGSSLMODE:'verify-full',
@@ -252,9 +294,31 @@ test('catalog adapter refuses libpq downgrades and unparseable conninfo',()=>{
     }
     const system=spawnSync('python3',['scripts/outbox-db-contract/catalog-readonly.py'],{env:{...base,PGSSLROOTCERT:'system'},encoding:'utf8'});
     assert.notEqual(system.status,0);assert.match(system.stderr,/CATALOG_TLS_CONFIG_REFUSED/);
-    const parse=`import ast, pathlib, re\np=pathlib.Path('scripts/outbox-db-contract/catalog-readonly.py')\nt=ast.parse(p.read_text())\nf=next(x for x in t.body if isinstance(x,ast.FunctionDef) and x.name=='parse_conninfo')\nns={'re':re,'TABLE_FIELDS':{'Database','Client User','Host','Server Port','Options','Protocol Version','Password Used','GSSAPI Authenticated','Backend PID','SSL Connection','Superuser','Hot Standby','SSL Library','SSL Protocol','SSL Key Bits','SSL Cipher','SSL Compression','ALPN'}}\nexec(compile(ast.Module(body=[f],type_ignores=[]),str(p),'exec'),ns)\nfor fixture, expected in [('scripts/outbox-db-contract/fixtures/conninfo-psql17.txt',('TLSv1.3','TLS_AES_256_GCM_SHA384')),('scripts/outbox-db-contract/fixtures/conninfo-psql18.txt',('TLSv1.3','TLS_AES_256_GCM_SHA384'))]:\n assert ns['parse_conninfo'](pathlib.Path(fixture).read_text())==expected\nfor value in ('', 'You are connected to database x\\n', 'Database|postgres\\nSSL Protocol|TLSv1.3'):\n try: ns['parse_conninfo'](value)\n except RuntimeError as e: assert str(e)=='CATALOG_TLS_EVIDENCE_MISSING'\n else: raise AssertionError('unparseable conninfo accepted')\n`;
-    const result=spawnSync('python3',['-c',parse],{encoding:'utf8'});
-    assert.equal(result.status,0,result.stderr);
+    const fixturePath=name=>path.resolve('scripts/outbox-db-contract/fixtures',name);
+    const parsed=parseProductionConninfo([
+      fixturePath('conninfo-psql17.txt'),fixturePath('conninfo-psql18.txt'),
+      fixturePath('conninfo-psql18-unknown-field.txt'),fixturePath('conninfo-psql18-missing-ssl.txt')]);
+    assert.deepEqual(parsed.slice(0,2),[{ok:['TLSv1.3','TLS_AES_256_GCM_SHA384']},{ok:['TLSv1.3','TLS_AES_256_GCM_SHA384']}]);
+    assert.deepEqual(parsed.slice(2),[{error:'CATALOG_TLS_EVIDENCE_MISSING'},{error:'CATALOG_TLS_EVIDENCE_MISSING'}]);
+  } finally {rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('catalog adapter fails closed when same-session conninfo is missing or garbled',()=>{
+  const f=fixture();
+  try {
+    const bin=path.join(f.dir,'bin'); mkdirSync(bin);
+    const fakePsql=path.join(bin,'psql');
+    writeFileSync(fakePsql,'#!/usr/bin/env python3\nimport os, sys\nif not sys.stdin.read().startswith("\\\\conninfo\\nBEGIN"): raise SystemExit(3)\nsys.stdout.write(os.environ["FAKE_PSQL_OUTPUT"])\n');
+    chmodSync(fakePsql,0o700);
+    const catalog=JSON.stringify({relations:[],functions:[],types:[],schemas:[],trigger_names:[],index_names:[],schema_migrations:[]});
+    const base={...process.env,PATH:`${bin}:${process.env.PATH}`,INBOX_CATALOG_LOCAL_TLS:'1',
+      PGSSLMODE:'verify-full',PGSSLROOTCERT:path.join(f.dir,'root.pem'),PGSSLMINPROTOCOLVERSION:'TLSv1.2',
+      PGGSSENCMODE:'disable',PGHOST:'localhost',PGPORT:'5432',LC_ALL:'C'};
+    for(const prefix of ['', 'garbled conninfo\n']) {
+      const result=spawnSync('python3',['scripts/outbox-db-contract/catalog-readonly.py'],{env:{...base,FAKE_PSQL_OUTPUT:`${prefix}BEGIN\nrepeatable read\non\n${catalog}\nCOMMIT\n`},encoding:'utf8'});
+      assert.notEqual(result.status,0,prefix||'missing conninfo');
+      assert.match(result.stderr,/CATALOG_TLS_EVIDENCE_MISSING/,prefix||'missing conninfo');
+    }
   } finally {rmSync(f.dir,{recursive:true,force:true});}
 });
 

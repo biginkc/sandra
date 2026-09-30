@@ -32,8 +32,9 @@ TABLE_FIELDS = {
     'Database', 'Client User', 'Host', 'Server Port', 'Options', 'Protocol Version',
     'Password Used', 'GSSAPI Authenticated', 'Backend PID', 'SSL Connection',
     'Superuser', 'Hot Standby', 'SSL Library', 'SSL Protocol', 'SSL Key Bits',
-    'SSL Cipher', 'SSL Compression', 'ALPN', 'Host Address',
+    'SSL Cipher', 'SSL Compression', 'ALPN',
 }
+OPTIONAL_TABLE_FIELDS = {'Host Address'}
 
 
 def exclusive_ca(path):
@@ -112,11 +113,10 @@ def parse_conninfo(text):
     table = {}
     for line in lines:
         key, value = line.split('|', 1)
-        if key not in TABLE_FIELDS or key in table:
+        if key in table:
             raise RuntimeError('CATALOG_TLS_EVIDENCE_MISSING')
         table[key] = value
-    expected = TABLE_FIELDS | {'Host Address'} if 'Host Address' in table else TABLE_FIELDS
-    if set(table) != expected or table.get('SSL Connection') != 'true':
+    if not TABLE_FIELDS.issubset(table) or set(table) - TABLE_FIELDS - OPTIONAL_TABLE_FIELDS or table.get('SSL Connection') != 'true':
         raise RuntimeError('CATALOG_TLS_EVIDENCE_MISSING')
     protocol, cipher = table.get('SSL Protocol'), table.get('SSL Cipher')
     if protocol not in ('TLSv1.2', 'TLSv1.3') or not cipher:
@@ -145,11 +145,12 @@ def guarded_run(*args, **kwargs):
 
 
 module.subprocess.run = guarded_run
-sys.argv = [str(SOURCE)]
-temp_ca = install_exclusive_ca()
-try:
-    os.environ['LC_ALL'] = 'C'
-    module.main()
-finally:
-    if temp_ca:
-        Path(temp_ca).unlink(missing_ok=True)
+if __name__ == '__main__':
+    sys.argv = [str(SOURCE)]
+    temp_ca = install_exclusive_ca()
+    try:
+        os.environ['LC_ALL'] = 'C'
+        module.main()
+    finally:
+        if temp_ca:
+            Path(temp_ca).unlink(missing_ok=True)

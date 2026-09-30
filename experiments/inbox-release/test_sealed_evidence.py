@@ -116,6 +116,29 @@ class SealedEvidenceTests(unittest.TestCase):
         output_path = self.repo / directory / "readonly.json"
         original_manifest = json.loads(manifest_path.read_text())
         original_output = json.loads(output_path.read_text())
+        original_raw = raw_path.read_bytes()
+        raw_array = json.loads(json.dumps(raw))
+        raw_array["tls"]["leaf_fingerprint"] = [raw_array["tls"]["leaf_fingerprint"]]
+        raw_path.write_text(json.dumps(raw_array))
+        bad_args = {**args, "now": "2026-09-28T12:01:00.000Z"}
+        rejected_by_sealer = subprocess.run(
+            ["node", "--input-type=module", "-e", node, json.dumps(bad_args)],
+            cwd=source, capture_output=True, text=True,
+        )
+        self.assertNotEqual(rejected_by_sealer.returncode, 0)
+        self.assertIn("Invalid TLS proof", rejected_by_sealer.stderr)
+        raw_path.write_bytes(original_raw)
+
+        sealed_array = json.loads(json.dumps(original_output))
+        sealed_array["tls"]["leaf_fingerprint"] = [sealed_array["tls"]["leaf_fingerprint"]]
+        output_path.write_text(json.dumps(sealed_array))
+        array_manifest = json.loads(json.dumps(original_manifest))
+        array_manifest["artifacts"]["readonly.json"] = hashlib.sha256(output_path.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(array_manifest))
+        self.commit("mutate array fingerprint")
+        with self.assertRaisesRegex(EvidenceError, "invalid shared-readonly TLS"):
+            check()
+
         for dropped in ("scripts/outbox-db-contract/connection.mjs", evidence.OPERATOR_LIST):
             with self.subTest(dropped=dropped):
                 manifest = json.loads(json.dumps(original_manifest))
