@@ -15,6 +15,7 @@ import {
   reconcileAndMaybeWrite,
   reconciliationExitCode,
 } from "./inbox-reconcile-completion.mjs";
+import { projectionRound } from "../services/inbox-projection-worker/core.mjs";
 
 const BASE_DSN = process.env.INBOX_RECONCILIATION_TEST_DATABASE_URL;
 const RUN = Boolean(BASE_DSN);
@@ -37,6 +38,24 @@ function attestation(generation) {
 
 function orgDigest(orgId) {
   return createHash("sha256").update(`org:${orgId}`).digest("hex");
+}
+
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function drainProjection(client, { maxRounds = 30 } = {}) {
+  let last;
+  for (let round = 0; round < maxRounds; round++) {
+    last = await projectionRound(client, { batchSize: 25 });
+    const pending = (await client.query(
+      `SELECT count(*) FILTER (WHERE q.org_id IS NOT NULL)::int AS queue_pending,
+              count(*) FILTER (WHERE r.org_id IS NULL OR r.source_generation<>d.generation)::int AS capture_pending
+         FROM inbox_message_capture.dirty d
+         LEFT JOIN inbox_maintained.rows r USING(org_id,target_kind,target_id)
+         LEFT JOIN inbox_maintained.queue q USING(org_id,target_kind,target_id)`,
+    )).rows[0];
+    if (Number(pending.queue_pending) === 0 && Number(pending.capture_pending) === 0) return last;
+  }
+  assert.fail(`projection worker did not drain: ${JSON.stringify(last)}`);
 }
 
 async function publishKnown(client, ids) {
@@ -273,11 +292,25 @@ test("R6a runs against the real J5a schema and proves source, projection, filter
     result = await reconcileAndMaybeWrite(client, { ...base, writeMarkers: true });
     assert.equal(result.status, "idempotent");
 
+    await client.query("UPDATE inbox_control.rollout SET serving_enabled=true WHERE singleton");
+    result = await reconcileAndMaybeWrite(client, { expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT, recoverCaptureBypass: true });
+    assert.equal(result.status, "blocked", "recovery must be blocked by serving_enabled, not by reconciliation status");
+    assert.equal(result.evidence.error_code, "RECOVERY_GATE_SERVING_DISABLED");
+    await client.query("UPDATE inbox_control.rollout SET serving_enabled=false WHERE singleton");
+
     await client.query("UPDATE inbox_control.rollout SET backfill_complete=false,reconciliation_complete=false WHERE singleton");
     const beforeRecovery = (await client.query("SELECT generation::text AS generation FROM inbox_capture_boundary.generation WHERE singleton")).rows[0].generation;
+    await client.query("ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct");
+    try {
+      await client.query("UPDATE public.messages SET body='Real bypass recovery source' WHERE id=$1", [ids.message]);
+    } finally {
+      await client.query("ALTER TABLE public.messages ENABLE TRIGGER zzzzz_inbox_message_direct");
+    }
     result = await reconcileAndMaybeWrite(client, { expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT, recoverCaptureBypass: true });
     assert.equal(result.status, "recovery-dry-run");
     assert.equal((await client.query("SELECT generation::text AS generation FROM inbox_capture_boundary.generation WHERE singleton")).rows[0].generation, beforeRecovery);
+    assert.equal(result.evidence.checks.recovery_gate, false, "the dry-run must expose the bypass diff");
+    assert.ok(result.evidence.planned.marker_key_count > 0, "the bypass key must be the only marker work");
 
     let writerPromise = null;
     let writerStartedAt = null;
@@ -295,6 +328,10 @@ test("R6a runs against the real J5a schema and proves source, projection, filter
           INSERT INTO public.messages(id,org_id,channel,direction,status,property_id,contact_id,conversation_id,from_address,to_address,body,created_at)
           VALUES($1,$2,'sms','inbound','received',$3,$4,$5,'+18165550103','+18162804181','Recovery concurrent writer',clock_timestamp())
         `, [recoveryWriterMessage, ids.org, ids.property, ids.contact, ids.conversation]);
+        // Keep the marker transaction open after it acquired the dirty-row
+        // lock. This is a two-session mid-batch wait, not a pre-COMMIT-only
+        // timing hook (T4/T14, research-reconcile-recovery-locking.md).
+        await delay(50);
       },
       onRecoveryBatchCommitted: async ({ kind }) => {
         if (kind === "targets" && writerPromise && writerElapsedMs === null) {
@@ -303,16 +340,25 @@ test("R6a runs against the real J5a schema and proves source, projection, filter
         }
       },
     };
-    await assert.rejects(
-      reconcileAndMaybeWrite(client, concurrentRecoveryOptions),
-      (error) => error instanceof ReconciliationCommitted && error.code === "RECOVERY_COMMITTED_POSTCHECK_FAILED",
-    );
+    result = await reconcileAndMaybeWrite(client, concurrentRecoveryOptions);
+    assert.equal(result.status, "recovery-written");
+    assert.equal(result.evidence.checks.recovery_gate, true, "a captured write during recovery is pending work, not a cross-time failure");
     assert.ok(writerElapsedMs !== null, "the writer must overlap a recovery target batch");
-    assert.ok(writerElapsedMs < 2_000, `existing-conversation writer waited ${writerElapsedMs}ms for recovery; the batch bound was lost`);
+    assert.ok(writerElapsedMs < 500, `existing-conversation writer waited ${writerElapsedMs}ms for recovery; marker transaction exceeded the tight bound`);
+    await drainProjection(client);
+    const postBypass = await collectEvidence(client, base);
+    assert.equal(postBypass.checks.projection_reconciled, true, "the real trigger-disabled bypass must be repaired by the projection worker");
+    assert.equal(postBypass.checks.filter_reconciled, true);
+    assert.equal(postBypass.checks.no_pending_work, true);
     await peer.query("DELETE FROM public.messages WHERE id=$1", [recoveryWriterMessage]);
-    await publishKnown(client, ids);
-    await client.query("DELETE FROM inbox_maintained.queue WHERE org_id=$1", [ids.org]);
+    await drainProjection(client);
 
+    await client.query("ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct");
+    try {
+      await client.query("UPDATE public.messages SET body='Interrupted bypass recovery source' WHERE id=$1", [ids.message]);
+    } finally {
+      await client.query("ALTER TABLE public.messages ENABLE TRIGGER zzzzz_inbox_message_direct");
+    }
     let interrupted = false;
     await assert.rejects(
       reconcileAndMaybeWrite(client, {
@@ -330,10 +376,27 @@ test("R6a runs against the real J5a schema and proves source, projection, filter
       (error) => error instanceof ReconciliationCommitted && error.code === "RECOVERY_COMMITTED_POSTCHECK_FAILED",
     );
     assert.equal(interrupted, true, "the interruption must occur after a committed batch");
+    const resumedDryRun = await reconcileAndMaybeWrite(client, { expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT, recoverCaptureBypass: true });
+    assert.equal(resumedDryRun.status, "recovery-dry-run");
+    assert.equal(resumedDryRun.evidence.planned.marker_key_count, 0, "the committed marker is pending worker work, not a cursor to repeat");
     result = await reconcileAndMaybeWrite(client, { expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT, recoverCaptureBypass: true, applyCaptureRecovery: true });
     assert.equal(result.status, "recovery-written");
-    assert.notEqual(result.recovery.capture_generation_before, result.recovery.capture_generation_after);
-    assert.equal(result.evidence.checks.full_reconciliation, true);
+    assert.equal(result.recovery.capture_generation_before, result.recovery.capture_generation_after, "no read boundaries means reruns do not bump the global generation");
+    await drainProjection(client);
+    assert.equal((await collectEvidence(client, base)).checks.projection_reconciled, true);
+
+    const beforeConsistentRerun = (await client.query(
+      "SELECT d.generation, g.generation::text AS capture_generation FROM inbox_message_capture.dirty d CROSS JOIN inbox_capture_boundary.generation g WHERE d.org_id=$1 AND d.target_id=$2 AND d.target_kind='known_conversation' AND g.singleton",
+      [ids.org, ids.conversation],
+    )).rows[0];
+    result = await reconcileAndMaybeWrite(client, { expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT, recoverCaptureBypass: true, applyCaptureRecovery: true });
+    assert.equal(result.status, "recovery-written");
+    assert.equal(result.recovery.rebuild.marker_rows, 0, "a consistent rerun must not bump the key");
+    const afterConsistentRerun = (await client.query(
+      "SELECT d.generation, g.generation::text AS capture_generation FROM inbox_message_capture.dirty d CROSS JOIN inbox_capture_boundary.generation g WHERE d.org_id=$1 AND d.target_id=$2 AND d.target_kind='known_conversation' AND g.singleton",
+      [ids.org, ids.conversation],
+    )).rows[0];
+    assert.deepEqual(afterConsistentRerun, beforeConsistentRerun, "a consistent rerun must not bump the global generation either");
     assert.equal(result.evidence.checks.no_base_table_duplicates, true);
     assert.equal(reconciliationExitCode(new ReconciliationCommitted("TEST")), 3);
     assert.deepEqual((await client.query("SELECT serving_enabled,backfill_complete,reconciliation_complete FROM inbox_control.rollout WHERE singleton")).rows[0], {
@@ -360,6 +423,158 @@ test("committed catalog fingerprint drift fails loudly", { skip: !RUN }, async (
     assert.equal(drifted.fingerprints.expected_catalog, "0".repeat(64));
     assert.equal(drifted.fingerprints.live_catalog, live);
   } finally {
+    await client.end();
+  }
+});
+
+test("two-session dirty markers use SKIP LOCKED and keep writer waits bounded", { skip: !RUN }, async () => {
+  const client = new Client({ connectionString: BASE_DSN });
+  const peer = new Client({ connectionString: BASE_DSN });
+  await client.connect();
+  await peer.connect();
+  let ids;
+  try {
+    ids = await seed(client);
+    const peerPid = (await peer.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+
+    await client.query("BEGIN");
+    await client.query("UPDATE inbox_message_capture.dirty SET generation=generation+1 WHERE org_id=$1 AND target_id=$2 AND target_kind='known_conversation'", [ids.org, ids.conversation]);
+    const blockedWriter = peer.query(`
+      INSERT INTO public.messages(id,org_id,channel,direction,status,property_id,contact_id,conversation_id,from_address,to_address,body,created_at)
+      VALUES($1,$2,'sms','inbound','received',$3,$4,$5,'+18165550104','+18162804181','same-key lock proof',clock_timestamp())
+    `, [randomUUID(), ids.org, ids.property, ids.contact, ids.conversation]);
+    let waiting = false;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const state = (await client.query("SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1", [peerPid])).rows[0];
+      if (state?.wait_event_type === "Lock") {
+        waiting = true;
+        break;
+      }
+      await delay(5);
+    }
+    assert.equal(waiting, true, "the same-key writer must visibly wait on the recovery marker lock");
+    await client.query("COMMIT");
+    await blockedWriter;
+
+    const otherConversation = randomUUID();
+    await client.query("INSERT INTO inbox_message_capture.dirty(org_id,target_kind,target_id,generation) VALUES($1,'known_conversation',$2,1)", [ids.org, otherConversation]);
+    await peer.query("BEGIN");
+    await peer.query(`
+      INSERT INTO public.messages(id,org_id,channel,direction,status,property_id,contact_id,conversation_id,from_address,to_address,body,created_at)
+      VALUES($1,$2,'sms','inbound','received',$3,$4,$5,'+18165550105','+18162804181','skip-locked writer',clock_timestamp())
+    `, [randomUUID(), ids.org, ids.property, ids.contact, ids.conversation]);
+    await client.query("BEGIN");
+    const picked = (await client.query(
+      `SELECT d.target_id::text AS target_id
+         FROM inbox_message_capture.dirty d
+        WHERE d.org_id=$1 AND d.target_id=ANY($2::uuid[])
+        ORDER BY d.target_id
+        FOR NO KEY UPDATE SKIP LOCKED`,
+      [ids.org, [ids.conversation, otherConversation]],
+    )).rows;
+    assert.deepEqual(picked.map((row) => row.target_id), [otherConversation], "a locked key is retried, never silently consumed");
+    const peerCommitStarted = Date.now();
+    await peer.query("COMMIT");
+    assert.ok(Date.now() - peerCommitStarted < 500, "SKIP LOCKED must not hold the writer behind the recovery session");
+    await client.query("COMMIT");
+  } finally {
+    await peer.query("ROLLBACK").catch(() => {});
+    await client.query("ROLLBACK").catch(() => {});
+    if (ids) await cleanup(client, ids);
+    await peer.end();
+    await client.end();
+  }
+});
+
+test("the recovery gate passes from one snapshot while a writer transaction is active", { skip: !RUN }, async () => {
+  const client = new Client({ connectionString: BASE_DSN });
+  const peer = new Client({ connectionString: BASE_DSN });
+  await client.connect();
+  await peer.connect();
+  let ids;
+  let activeWriterPromise;
+  let writerActive = false;
+  try {
+    ids = await seed(client);
+    await client.query("ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct");
+    try {
+      await client.query("UPDATE public.messages SET body='active-gate bypass' WHERE id=$1", [ids.message]);
+    } finally {
+      await client.query("ALTER TABLE public.messages ENABLE TRIGGER zzzzz_inbox_message_direct");
+    }
+    let writerReady;
+    const writerIsReady = new Promise((resolve) => { writerReady = resolve; });
+    const gateConversation = randomUUID();
+    activeWriterPromise = (async () => {
+      await peer.query("BEGIN");
+      await peer.query(`
+        INSERT INTO public.messages(id,org_id,channel,direction,status,property_id,contact_id,conversation_id,from_address,to_address,body,created_at)
+        VALUES($1,$2,'sms','inbound','received',$3,$4,$5,'+18165550106','+18162804181','writer active during gate',clock_timestamp())
+      `, [randomUUID(), ids.org, ids.property, ids.contact, gateConversation]);
+      writerActive = true;
+      writerReady();
+      await delay(2000);
+      await peer.query("COMMIT");
+      writerActive = false;
+    })();
+    const result = await reconcileAndMaybeWrite(client, {
+      expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT,
+      recoverCaptureBypass: true,
+      applyCaptureRecovery: true,
+      recoveryBatchSize: 1,
+      onRecoveryBatchBeforeCommit: async ({ kind, rows = [] }) => {
+        if (kind === "targets" && rows.some((row) => String(row.target_id) === ids.conversation)) await writerIsReady;
+      },
+    });
+    assert.equal(result.status, "recovery-written");
+    assert.equal(result.evidence.checks.recovery_gate, true, "the RR gate must prove the snapshot, not wait for a quiet database");
+    assert.equal(writerActive, true, "the proof must overlap an active writer transaction");
+    await activeWriterPromise;
+    await drainProjection(client);
+  } finally {
+    await activeWriterPromise?.catch(() => {});
+    await peer.query("ROLLBACK").catch(() => {});
+    if (ids) await cleanup(client, ids);
+    await peer.end();
+    await client.end();
+  }
+});
+
+test("route-edge recovery serializes the source row before an atomic upsert", { skip: !RUN }, async () => {
+  const client = new Client({ connectionString: BASE_DSN });
+  const peer = new Client({ connectionString: BASE_DSN });
+  await client.connect();
+  await peer.connect();
+  let ids;
+  let writerPromise;
+  try {
+    ids = await seed(client);
+    await client.query("ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct");
+    try {
+      await client.query("UPDATE public.messages SET from_address='+18165550999' WHERE id=$1", [ids.message]);
+    } finally {
+      await client.query("ALTER TABLE public.messages ENABLE TRIGGER zzzzz_inbox_message_direct");
+    }
+    const result = await reconcileAndMaybeWrite(client, {
+      expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT,
+      recoverCaptureBypass: true,
+      applyCaptureRecovery: true,
+      onRecoveryRouteEdgeCandidates: async (rows) => {
+        if (!rows.some((row) => String(row.id) === ids.message) || writerPromise) return;
+        writerPromise = peer.query("UPDATE public.messages SET from_address='not-a-phone' WHERE id=$1", [ids.message]);
+        await delay(50);
+      },
+      onRecoveryBatchCommitted: async ({ kind }) => {
+        if (kind === "route-edges" && writerPromise) await writerPromise;
+      },
+    });
+    assert.equal(result.status, "recovery-written");
+    assert.ok(writerPromise, "the writer must overlap the route-edge repair");
+    assert.equal((await client.query("SELECT 1 FROM inbox_message_capture.route_edges WHERE org_id=$1 AND message_id=$2", [ids.org, ids.message])).rowCount, 0, "a writer that removes the phone must not leave a stale recovery edge");
+  } finally {
+    if (writerPromise) await writerPromise.catch(() => {});
+    if (ids) await cleanup(client, ids);
+    await peer.end();
     await client.end();
   }
 });

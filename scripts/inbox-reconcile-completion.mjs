@@ -19,8 +19,10 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PEM_BLOCK = /-----BEGIN [A-Z0-9 ]+-----[\s\S]*?-----END [A-Z0-9 ]+-----/g;
 const CERTIFICATE = /-----BEGIN CERTIFICATE-----\r?\n([\s\S]*?)\r?\n-----END CERTIFICATE-----/;
 const RECOVERY_REBUILD_TIMEOUT_MS = 90_000;
-const RECOVERY_BATCH_SIZE = 10;
+const RECOVERY_BATCH_SIZE = 20;
 const RECOVERY_SOURCE_BATCH_SIZE = 100;
+const RECOVERY_LOCK_TIMEOUT = "50ms";
+const RECOVERY_TARGET_TXN_BUDGET_MS = 25;
 
 export const SOURCE_WRITERS = Object.freeze([
   ["public.messages", "zzzzz_inbox_message_direct"],
@@ -386,30 +388,13 @@ function rowKey(row) {
   return `${row.org_id}|${row.target_kind}|${row.target_id}`;
 }
 
-async function captureDirtyGenerationDigest(client) {
-  const rows = (await client.query(
-    `SELECT org_id::text AS org_id,target_kind,target_id::text AS target_id,generation
-       FROM inbox_message_capture.dirty
-      ORDER BY org_id,target_kind,target_id`,
-  )).rows;
-  return digestJson(rows);
-}
-
-async function captureDirtyGenerationRows(client) {
-  return (await client.query(
-    `SELECT org_id::text AS org_id,target_kind,target_id::text AS target_id,generation
-       FROM inbox_message_capture.dirty
-      ORDER BY org_id,target_kind,target_id`,
-  )).rows;
-}
-
 function targetMapKey(row) {
   return `${row.org_id}|${row.target_kind}|${row.target_id}`;
 }
 
-function compareProjectionRows(expectedRows, actualRows) {
-  const expected = new Map(expectedRows.map((row) => [rowKey(row), row]));
-  const actual = new Map(actualRows.map((row) => [rowKey(row), row]));
+function compareProjectionRows(expectedRows, actualRows, ignoredKeys = new Set()) {
+  const expected = new Map(expectedRows.filter((row) => !ignoredKeys.has(rowKey(row))).map((row) => [rowKey(row), row]));
+  const actual = new Map(actualRows.filter((row) => !ignoredKeys.has(rowKey(row))).map((row) => [rowKey(row), row]));
   let missing = 0;
   let extra = 0;
   let mismatched = 0;
@@ -480,6 +465,8 @@ async function collectOrgReconciliation(client, { observedAt = new Date().toISOS
     ),
     canonical AS (
       SELECT a.org_id::text,a.target_kind,a.target_id::text,a.base_target,
+             d.generation::text AS dirty_generation,
+             q.org_id IS NOT NULL AS queue_pending,
              candidate.candidate,
              CASE WHEN r.org_id IS NULL THEN NULL ELSE jsonb_build_object(
                'org_id',r.org_id::text,'target_kind',r.target_kind,'target_id',r.target_id::text,
@@ -487,6 +474,10 @@ async function collectOrgReconciliation(client, { observedAt = new Date().toISOS
                'summary',r.summary,'next_expiry',r.next_expiry
              ) END AS actual
       FROM all_targets a
+      LEFT JOIN inbox_message_capture.dirty d
+        ON d.org_id=a.org_id AND d.target_kind=a.target_kind AND d.target_id=a.target_id
+      LEFT JOIN inbox_maintained.queue q
+        ON q.org_id=a.org_id AND q.target_kind=a.target_kind AND q.target_id=a.target_id
       LEFT JOIN inbox_maintained.rows r
         ON r.org_id=a.org_id AND r.target_kind=a.target_kind AND r.target_id=a.target_id
       LEFT JOIN LATERAL (
@@ -589,40 +580,90 @@ async function collectOrgReconciliation(client, { observedAt = new Date().toISOS
   for (const row of actualFilter) add(byOrg, row, "actualFilter");
   for (const row of unknownSources) add(byOrg, row, "unknownSources");
 
+  const diff = { marker_keys: new Map(), extra_projection_keys: new Map() };
+  const addMarkerKey = (row) => {
+    const key = rowKey(row);
+    const target = { org_id: String(row.org_id), target_kind: row.target_kind, target_id: String(row.target_id) };
+    if (row.dirty_generation === null || row.dirty_generation === undefined) diff.marker_keys.set(key, { ...target, missing: true });
+    else diff.marker_keys.set(key, { ...target, missing: false });
+  };
   const perOrg = [];
   for (const [orgId, value] of [...byOrg.entries()].sort(([left], [right]) => left.localeCompare(right))) {
     const targetExpected = new Map();
     const targetActual = new Map();
+    const pendingKeys = new Set();
     let baseCount = 0;
     let canonicalMissing = 0;
+    let recoveryCanonicalMissing = 0;
     for (const row of value.canonical) {
       const key = rowKey(row);
       if (row.base_target) baseCount++;
       if (row.candidate === null) canonicalMissing++;
       if (row.candidate !== null) targetExpected.set(key, row.candidate);
       if (row.actual !== null) targetActual.set(key, row.actual);
+      const pending = row.queue_pending === true && row.dirty_generation !== null &&
+        (row.actual === null || String(row.dirty_generation) !== String(row.actual.source_generation));
+      if (pending) pendingKeys.add(key);
+      if (row.candidate === null && !pending) recoveryCanonicalMissing++;
+      if (row.base_target && row.candidate === null && !pending) addMarkerKey(row);
     }
     let maintainedMissing = 0;
+    let recoveryMaintainedMissing = 0;
     let maintainedMismatched = 0;
+    let recoveryTargetMismatches = 0;
     for (const row of value.canonical) {
-      if (row.base_target && row.actual === null) maintainedMissing++;
-      if (row.candidate === null || row.actual === null) continue;
+      const key = rowKey(row);
+      const pending = pendingKeys.has(key);
+      if (row.base_target && row.actual === null) {
+        maintainedMissing++;
+        if (!pending) recoveryMaintainedMissing++;
+        if (!pending && row.candidate !== null) addMarkerKey(row);
+      }
+      if (row.candidate === null || row.actual === null) {
+        if (row.candidate === null && row.actual !== null && !pending) addMarkerKey(row);
+        continue;
+      }
       const actual = row.actual;
       const candidate = row.candidate;
       if (actual.revision !== candidate.expected_revision || actual.source_generation !== candidate.generation || JSON.stringify(stable(comparableSummary(actual.summary))) !== JSON.stringify(stable(comparableSummary(candidate.summary))) || iso(actual.next_expiry) !== iso(candidate.summary?.next_window_expiry)) {
         maintainedMismatched++;
+        if (!pending) recoveryTargetMismatches++;
       }
+      if (!pending && (actual.revision !== candidate.expected_revision || actual.source_generation !== candidate.generation || JSON.stringify(stable(comparableSummary(actual.summary))) !== JSON.stringify(stable(comparableSummary(candidate.summary))) || iso(actual.next_expiry) !== iso(candidate.summary?.next_window_expiry))) addMarkerKey(row);
     }
     const baseTargetKeys = new Set(value.canonical.filter((row) => row.base_target).map(rowKey));
     for (const row of value.maintained) {
       if (baseTargetKeys.has(rowKey(row))) continue;
-      if (row.summary?.exists === true) maintainedMismatched++;
+      if (row.summary?.exists === true) {
+        maintainedMismatched++;
+        diff.extra_projection_keys.set(rowKey(row), { org_id: String(row.org_id), target_kind: row.target_kind, target_id: String(row.target_id) });
+      }
     }
     const maintainedExtra = value.maintained.filter((row) => !baseTargetKeys.has(rowKey(row)) && row.summary?.exists !== false && row.summary?.exists !== true).length;
     const bridgeComparison = compareProjectionRows(value.expectedBridge, value.actualBridge);
     const filterComparison = compareProjectionRows(value.expectedFilter, value.actualFilter);
+    const recoveryBridgeComparison = compareProjectionRows(value.expectedBridge, value.actualBridge, pendingKeys);
+    const recoveryFilterComparison = compareProjectionRows(value.expectedFilter, value.actualFilter, pendingKeys);
+    const projectionKeys = new Set([
+      ...value.expectedBridge.map(rowKey),
+      ...value.actualBridge.map(rowKey),
+      ...value.expectedFilter.map(rowKey),
+      ...value.actualFilter.map(rowKey),
+    ]);
+    for (const key of projectionKeys) {
+      if (pendingKeys.has(key)) continue;
+      const expectedBridge = value.expectedBridge.find((row) => rowKey(row) === key);
+      const actualBridge = value.actualBridge.find((row) => rowKey(row) === key);
+      const expectedFilter = value.expectedFilter.find((row) => rowKey(row) === key);
+      const actualFilter = value.actualFilter.find((row) => rowKey(row) === key);
+      if (JSON.stringify(stable(expectedBridge ?? null)) !== JSON.stringify(stable(actualBridge ?? null)) || JSON.stringify(stable(expectedFilter ?? null)) !== JSON.stringify(stable(actualFilter ?? null))) {
+        const target = value.canonical.find((row) => rowKey(row) === key);
+        if (target) addMarkerKey(target);
+      }
+    }
     const unknownMappingMissing = value.unknownSources.filter((row) => row.mapped !== true).length;
     const mismatchCount = canonicalMissing + maintainedMissing + maintainedMismatched + maintainedExtra + bridgeComparison.total + filterComparison.total + unknownMappingMissing;
+    const recoveryMismatchCount = recoveryCanonicalMissing + recoveryMaintainedMissing + recoveryTargetMismatches + maintainedExtra + recoveryBridgeComparison.total + recoveryFilterComparison.total + unknownMappingMissing;
     const expectedTargets = [...targetExpected.values()].map((row) => ({ target_kind: row.target_kind, target_id: row.target_id, source_generation: row.generation, summary: row.summary }));
     const actualTargets = [...targetActual.values()].map((row) => ({ target_kind: row.target_kind, target_id: row.target_id, source_generation: row.source_generation, summary: row.summary }));
     perOrg.push({
@@ -644,6 +685,8 @@ async function collectOrgReconciliation(client, { observedAt = new Date().toISOS
       filter_extra_count: filterComparison.extra,
       filter_mismatch_count: filterComparison.mismatched,
       mismatch_count: mismatchCount,
+      recovery_mismatch_count: recoveryMismatchCount,
+      pending_count: pendingKeys.size,
       source_hash: hashRows(expectedTargets),
       maintained_hash: hashRows(actualTargets),
       projection_hash: hashRows(value.actualBridge),
@@ -655,8 +698,14 @@ async function collectOrgReconciliation(client, { observedAt = new Date().toISOS
     unknown_source_table: "public.messages",
     organizations: perOrg.length,
     mismatched_organizations: perOrg.filter((row) => row.mismatch_count !== 0).length,
+    recovery_mismatched_organizations: perOrg.filter((row) => row.recovery_mismatch_count !== 0).length,
     per_org: perOrg,
     pass: perOrg.every((row) => row.mismatch_count === 0),
+    recovery_pass: perOrg.every((row) => row.recovery_mismatch_count === 0),
+    diff: {
+      marker_keys: [...diff.marker_keys.values()],
+      extra_projection_keys: [...diff.extra_projection_keys.values()],
+    },
   };
 }
 
@@ -829,13 +878,10 @@ async function readOnlyEvidence(client, options) {
   }
 }
 
-async function collectRecoveryPlan(client, { expectedCatalogFingerprint = EXPECTED_CATALOG_FINGERPRINT, observedAt = new Date().toISOString() } = {}) {
+async function collectRecoverySafety(client, { expectedCatalogFingerprint = EXPECTED_CATALOG_FINGERPRINT } = {}) {
   const state = await collectState(client);
   const writer = await collectSourceWriterEvidence(client);
   const liveCatalogFingerprint = await catalogFingerprint(client);
-  const reconciliation = await collectOrgReconciliation(client, { observedAt });
-  const sourceGenerationDigest = await captureDirtyGenerationDigest(client);
-  const boundaryCount = Number((await client.query("SELECT count(*)::int AS count FROM inbox_read.boundaries")).rows[0]?.count ?? 0);
   const catalogMatch = typeof expectedCatalogFingerprint === "string" && HEX64.test(expectedCatalogFingerprint) && liveCatalogFingerprint === expectedCatalogFingerprint.toLowerCase();
   const noCollisions = Number(state.collisions.unresolved) === 0 && Number(state.collisions.duplicate_threads) === 0;
   const noBaseTableDuplicates = state.baseDuplicates.length === 0;
@@ -845,29 +891,35 @@ async function collectRecoveryPlan(client, { expectedCatalogFingerprint = EXPECT
     catalog_fingerprint_match: catalogMatch,
     no_unresolved_collisions: noCollisions,
     no_base_table_duplicates: noBaseTableDuplicates,
-    full_reconciliation: reconciliation.pass,
   };
+  const errors = Object.entries(checks).filter(([, pass]) => !pass).map(([name]) => name.toUpperCase());
+  return { state, writer, liveCatalogFingerprint, checks, errors, error_code: errors.length ? `RECOVERY_GATE_${errors[0]}` : null };
+}
+
+async function collectRecoveryPlan(client, { expectedCatalogFingerprint = EXPECTED_CATALOG_FINGERPRINT, observedAt = new Date().toISOString() } = {}) {
+  const safety = await collectRecoverySafety(client, { expectedCatalogFingerprint });
+  const reconciliation = await collectOrgReconciliation(client, { observedAt });
+  const boundaryCount = Number((await client.query("SELECT count(*)::int AS count FROM inbox_read.boundaries")).rows[0]?.count ?? 0);
+  const { state, writer, liveCatalogFingerprint } = safety;
   const evidence = {
-    evidence_version: 2,
+    evidence_version: 3,
     observed_at: observedAt,
     mode: "capture-bypass-recovery",
     capture_generation: state.generation,
-    source_generation_digest: sourceGenerationDigest,
     serving_enabled: state.rollout?.serving_enabled ?? null,
     read_boundary_count: boundaryCount,
     planned: {
-      capture_generation_bump: true,
+      capture_generation_bump: boundaryCount > 0,
       invalidate_prior_read_boundaries: boundaryCount,
-      rebuild_capture_targets: true,
-      republish_maintained_rows: true,
-      reconcile_bridge_summaries: true,
-      reconcile_bridge_filter_rows: true,
+      marker_key_count: reconciliation.diff.marker_keys.length,
+      extra_projection_key_count: reconciliation.diff.extra_projection_keys.length,
       marker_write: false,
       serving_write: false,
     },
     reconciliation: {
       organizations: reconciliation.organizations,
       mismatched_organizations: reconciliation.mismatched_organizations,
+      recovery_mismatched_organizations: reconciliation.recovery_mismatched_organizations,
       source_tables: reconciliation.source_tables,
       unknown_source_table: reconciliation.unknown_source_table,
       per_org: reconciliation.per_org,
@@ -899,10 +951,20 @@ async function collectRecoveryPlan(client, { expectedCatalogFingerprint = EXPECT
       disabled_trigger_count: writer.disabled_trigger_count,
       trigger_fingerprint: writer.trigger_fingerprint,
     },
-    checks,
-    status: Object.values(checks).every(Boolean) ? "ready" : "blocked",
+    checks: {
+      ...safety.checks,
+      recovery_gate: reconciliation.recovery_pass,
+    },
+    status: safety.errors.length === 0 ? "ready" : "blocked",
+    errors: safety.errors,
+    error_code: safety.error_code,
+    recovery_error_code: reconciliation.recovery_pass ? null : "RECOVERY_RECONCILIATION_FAILED",
   };
   evidence.evidence_digest = digestJson({ ...evidence, observed_at: undefined, evidence_digest: undefined });
+  // The diff is operator-internal work input. Keep UUIDs out of the digest-only
+  // receipt and CLI output; H2'/H5 of research-reconcile-recovery-locking.md
+  // require rerunning this snapshot instead of persisting a cursor.
+  Object.defineProperty(evidence, "_recoveryDiff", { value: reconciliation.diff, enumerable: false });
   return evidence;
 }
 
@@ -918,25 +980,27 @@ async function readOnlyRecoveryPlan(client, options) {
   }
 }
 
-async function rebuildCaptureAndProjection(client, observedAt, {
+async function rebuildCaptureAndProjection(client, _observedAt, {
   deadline = Date.now() + RECOVERY_REBUILD_TIMEOUT_MS,
   batchSize = RECOVERY_BATCH_SIZE,
   sourceBatchSize = RECOVERY_SOURCE_BATCH_SIZE,
   onBatchBeforeCommit,
   onBatchCommitted,
+  onRouteEdgeCandidates,
 } = {}) {
+  // Research H1/H2/H5: recovery does not compute or publish while holding a
+  // dirty-row lock. It only writes a short-lived marker transaction; the
+  // existing projection worker owns snapshot()/finish_work().
   const resultCounts = {
-    target_batches: 0,
-    target_rows: 0,
-    applied: 0,
-    already_applied: 0,
     sender_batches: 0,
     route_batches: 0,
     stale_route_edges_deleted: 0,
+    marker_batches: 0,
+    marker_rows: 0,
+    marker_retries: 0,
     stale_projection_rows_deleted: 0,
-    queue_cleared: 0,
+    committed_batch_count: 0,
   };
-  const processedGenerations = new Map();
   let committedBatchCount = 0;
 
   const runBatch = async (kind, work) => {
@@ -944,13 +1008,14 @@ async function rebuildCaptureAndProjection(client, observedAt, {
     await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
     let committed = false;
     try {
-      await client.query("SET LOCAL statement_timeout='15s'");
-      await client.query("SET LOCAL lock_timeout='2s'");
+      await client.query("SET LOCAL statement_timeout='5s'");
+      await client.query(`SET LOCAL lock_timeout='${RECOVERY_LOCK_TIMEOUT}'`);
       const value = await work();
       await onBatchBeforeCommit?.({ kind, ...value });
       await client.query("COMMIT");
       committed = true;
       committedBatchCount++;
+      resultCounts.committed_batch_count = committedBatchCount;
       await onBatchCommitted?.({ kind, batch_number: committedBatchCount, ...value });
       return value;
     } catch (error) {
@@ -959,66 +1024,70 @@ async function rebuildCaptureAndProjection(client, observedAt, {
     }
   };
 
-  let senderCursor = null;
   for (;;) {
     const value = await runBatch("sender-groups", async () => {
       const rows = (await client.query(
-        `SELECT DISTINCT org_id,from_address AS raw_sender
-           FROM public.messages
-          WHERE channel='sms' AND direction='inbound' AND contact_id IS NULL
-            AND from_address IS NOT NULL AND from_address<>''
-            AND ($1::uuid IS NULL OR org_id>$1::uuid OR (org_id=$1::uuid AND from_address>$2))
-          ORDER BY org_id,raw_sender
-          LIMIT $3`,
-        [senderCursor?.org_id ?? null, senderCursor?.raw_sender ?? null, sourceBatchSize],
+        `SELECT DISTINCT m.org_id,m.from_address AS raw_sender
+           FROM public.messages m
+          WHERE m.channel='sms' AND m.direction='inbound' AND m.contact_id IS NULL
+            AND m.from_address IS NOT NULL AND m.from_address<>''
+            AND NOT EXISTS (
+              SELECT 1 FROM inbox_message_capture.sender_groups g
+               WHERE g.org_id=m.org_id AND g.raw_sender COLLATE "C"=m.from_address COLLATE "C"
+            )
+          ORDER BY m.org_id,raw_sender
+          LIMIT $1`,
+        [sourceBatchSize],
       )).rows;
       for (const row of rows) await client.query("SELECT inbox_message_capture.sender_id($1,$2)", [row.org_id, row.raw_sender]);
-      return { rows: rows.length, last: rows.at(-1) ?? null };
+      return { rows: rows.length };
     });
     resultCounts.sender_batches++;
     if (value.rows === 0) break;
-    senderCursor = value.last;
   }
 
-  let messageCursor = null;
   for (;;) {
     const value = await runBatch("route-edges", async () => {
       const rows = (await client.query(
-        `SELECT id,org_id,conversation_id,channel,direction,from_address,to_address
-           FROM public.messages
-          WHERE ($1::uuid IS NULL OR id>$1::uuid)
-          ORDER BY id
-          LIMIT $2`,
-        [messageCursor, sourceBatchSize],
-      )).rows;
-      const ids = rows.map((row) => row.id);
-      if (ids.length > 0) {
-        await client.query("DELETE FROM inbox_message_capture.route_edges WHERE message_id=ANY($1::uuid[])", [ids]);
-        await client.query(
-          `INSERT INTO inbox_message_capture.route_edges(org_id,message_id,conversation_id,phone_e164)
-           SELECT m.org_id,m.id,m.conversation_id,
-             CASE WHEN length(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'))=10
-               THEN '+1'||regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g')
-               WHEN length(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'))=11
-                 AND left(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'),1)='1'
-               THEN '+'||regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g') END
+        `SELECT m.id,m.org_id,m.conversation_id,
+                CASE WHEN length(d.digits)=10 THEN '+1'||d.digits
+                     WHEN length(d.digits)=11 AND left(d.digits,1)='1' THEN '+'||d.digits
+                END AS phone_e164
            FROM public.messages m
-          WHERE m.id=ANY($1::uuid[])
-            AND m.channel='sms' AND m.conversation_id IS NOT NULL
-            AND CASE WHEN length(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'))=10
-              THEN '+1'||regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g')
-              WHEN length(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'))=11
-                AND left(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'),1)='1'
-              THEN '+'||regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g') END IS NOT NULL
-           ON CONFLICT(org_id,message_id) DO UPDATE SET conversation_id=excluded.conversation_id,phone_e164=excluded.phone_e164`,
-          [ids],
-        );
+           CROSS JOIN LATERAL (SELECT regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g') AS digits) d
+           LEFT JOIN inbox_message_capture.route_edges e ON e.org_id=m.org_id AND e.message_id=m.id
+          WHERE (
+            (CASE WHEN length(d.digits)=10 THEN '+1'||d.digits WHEN length(d.digits)=11 AND left(d.digits,1)='1' THEN '+'||d.digits END IS NULL AND e.message_id IS NOT NULL)
+            OR
+            (CASE WHEN length(d.digits)=10 THEN '+1'||d.digits WHEN length(d.digits)=11 AND left(d.digits,1)='1' THEN '+'||d.digits END IS NOT NULL
+             AND (e.message_id IS NULL OR e.conversation_id IS DISTINCT FROM m.conversation_id OR e.phone_e164 IS DISTINCT FROM CASE WHEN length(d.digits)=10 THEN '+1'||d.digits WHEN length(d.digits)=11 AND left(d.digits,1)='1' THEN '+'||d.digits END))
+          )
+          ORDER BY m.org_id,m.id
+          LIMIT $1
+          FOR UPDATE OF m SKIP LOCKED`,
+        [sourceBatchSize],
+      )).rows;
+      await onRouteEdgeCandidates?.(rows);
+      for (const row of rows) {
+        if (row.phone_e164 === null) {
+          await client.query("DELETE FROM inbox_message_capture.route_edges WHERE org_id=$1 AND message_id=$2", [row.org_id, row.id]);
+        } else {
+          // Route-edge race fix from research-reconcile-recovery-locking.md:
+          // lock the source message briefly, then use an atomic upsert. A
+          // writer cannot observe an unlocked delete followed by a stale insert.
+          await client.query(
+            `INSERT INTO inbox_message_capture.route_edges(org_id,message_id,conversation_id,phone_e164)
+             VALUES($1,$2,$3,$4)
+             ON CONFLICT(org_id,message_id) DO UPDATE
+               SET conversation_id=excluded.conversation_id,phone_e164=excluded.phone_e164`,
+            [row.org_id, row.id, row.conversation_id, row.phone_e164],
+          );
+        }
       }
       return { rows, row_count: rows.length };
     });
     resultCounts.route_batches++;
     if (value.row_count === 0) break;
-    messageCursor = value.rows.at(-1).id;
   }
 
   for (;;) {
@@ -1031,6 +1100,7 @@ async function rebuildCaptureAndProjection(client, observedAt, {
             WHERE m.id IS NULL
             ORDER BY e.org_id,e.message_id
             LIMIT $1
+            FOR UPDATE OF e SKIP LOCKED
          )
          DELETE FROM inbox_message_capture.route_edges e
           USING stale
@@ -1043,76 +1113,82 @@ async function rebuildCaptureAndProjection(client, observedAt, {
     if (value.rows === 0) break;
   }
 
-  let targetCursor = null;
-  for (;;) {
-    const value = await runBatch("targets", async () => {
-      const rows = (await client.query(
-        `WITH known_targets AS (
-           SELECT DISTINCT org_id,'known_conversation'::text AS target_kind,conversation_id AS target_id
-             FROM public.messages WHERE channel='sms' AND conversation_id IS NOT NULL
-           UNION
-           SELECT DISTINCT org_id,'known_conversation'::text,conversation_id
-             FROM public.ai_disposition_reviews WHERE conversation_id IS NOT NULL
-           UNION
-           SELECT DISTINCT org_id,'known_conversation'::text,conversation_id
-             FROM public.message_threads WHERE conversation_id IS NOT NULL
-         ), unknown_targets AS (
-           SELECT DISTINCT m.org_id,'unknown_sender'::text AS target_kind,g.sender_group_id AS target_id
-             FROM public.messages m
-             JOIN inbox_message_capture.sender_groups g
-               ON g.org_id=m.org_id AND g.raw_sender COLLATE "C"=m.from_address COLLATE "C"
-            WHERE m.channel='sms' AND m.direction='inbound' AND m.contact_id IS NULL
-              AND m.from_address IS NOT NULL AND m.from_address<>''
-         ), all_targets AS (
-           SELECT org_id,target_kind,target_id FROM known_targets
-           UNION
-           SELECT org_id,target_kind,target_id FROM unknown_targets
-           UNION
-           SELECT org_id,target_kind,target_id FROM inbox_message_capture.dirty
-         )
-         SELECT org_id,target_kind,target_id
-           FROM all_targets
-          WHERE $1::uuid IS NULL OR (org_id,target_kind,target_id)>($1::uuid,$2::text,$3::uuid)
-          ORDER BY org_id,target_kind,target_id
-          LIMIT $4`,
-        [targetCursor?.org_id ?? null, targetCursor?.target_kind ?? null, targetCursor?.target_id ?? null, batchSize],
-      )).rows;
-      let applied = 0;
-      let alreadyApplied = 0;
-      let queueCleared = 0;
-      for (const row of rows) {
-        const dirty = (await client.query(
+  const plan = await readOnlyRecoveryPlan(client);
+  if (plan.status !== "ready") throw new ReconciliationBlocked(plan.error_code ?? "RECOVERY_GATE_BLOCKED");
+  const markerKeys = plan._recoveryDiff.marker_keys;
+  let adaptiveBatchSize = Math.min(100, Math.max(1, Number(batchSize) || RECOVERY_BATCH_SIZE));
+  const markChunk = async (keys) => {
+    const started = Date.now();
+    try {
+      const value = await runBatch("targets", async () => {
+        // Keep the approved marker-write recheck, but keep it metadata-only:
+        // the report's H1/H2 rule forbids snapshot()/publish() under the
+        // dirty-row lock. Locking this singleton does not lock message writes.
+        const rollout = (await client.query("SELECT serving_enabled FROM inbox_control.rollout WHERE singleton FOR SHARE")).rows[0];
+        if (rollout?.serving_enabled !== false) throw new ReconciliationBlocked("RECOVERY_GATE_SERVING_DISABLED");
+        const picked = (await client.query(
+          `SELECT d.org_id,d.target_kind,d.target_id
+             FROM inbox_message_capture.dirty d
+             JOIN jsonb_to_recordset($1::jsonb) AS r(org_id uuid,target_kind text,target_id uuid)
+               ON d.org_id=r.org_id AND d.target_kind=r.target_kind AND d.target_id=r.target_id
+            ORDER BY d.org_id,d.target_kind,d.target_id
+            FOR NO KEY UPDATE SKIP LOCKED`,
+          [JSON.stringify(keys)],
+        )).rows;
+        if (picked.length > 0) {
+          await client.query(
+            `UPDATE inbox_message_capture.dirty d
+                SET generation=d.generation+1
+               FROM jsonb_to_recordset($1::jsonb) AS r(org_id uuid,target_kind text,target_id uuid)
+              WHERE d.org_id=r.org_id AND d.target_kind=r.target_kind AND d.target_id=r.target_id`,
+            [JSON.stringify(picked)],
+          );
+        }
+        const inserted = (await client.query(
           `INSERT INTO inbox_message_capture.dirty(org_id,target_kind,target_id,generation)
-           VALUES($1,$2,$3,1)
-           ON CONFLICT(org_id,target_kind,target_id)
-           DO UPDATE SET generation=inbox_message_capture.dirty.generation+1
-           RETURNING generation`,
-          [row.org_id, row.target_kind, row.target_id],
-        )).rows[0];
-        processedGenerations.set(targetMapKey(row), Number(dirty.generation));
-        const candidate = (await client.query(
-          "SELECT inbox_maintained.snapshot($1,$2,$3,$4) AS candidate",
-          [row.org_id, row.target_kind, row.target_id, observedAt],
-        )).rows[0]?.candidate;
-        if (!candidate) throw new ReconciliationBlocked("RECOVERY_SNAPSHOT_MISSING");
-        const result = (await client.query("SELECT inbox_maintained.publish($1) AS result", [candidate])).rows[0]?.result;
-        if (!['applied', 'already_applied'].includes(result)) throw new ReconciliationBlocked(`RECOVERY_PUBLISH_${String(result).toUpperCase()}`);
-        if (result === "applied") applied++;
-        else alreadyApplied++;
-        queueCleared += (await client.query(
-          "DELETE FROM inbox_maintained.queue WHERE org_id=$1 AND target_kind=$2 AND target_id=$3",
-          [row.org_id, row.target_kind, row.target_id],
-        )).rowCount;
+           SELECT r.org_id,r.target_kind,r.target_id,1
+             FROM jsonb_to_recordset($1::jsonb) AS r(org_id uuid,target_kind text,target_id uuid)
+            WHERE NOT EXISTS (
+              SELECT 1 FROM inbox_message_capture.dirty d
+               WHERE d.org_id=r.org_id AND d.target_kind=r.target_kind AND d.target_id=r.target_id
+            )
+           ON CONFLICT(org_id,target_kind,target_id) DO NOTHING
+           RETURNING org_id,target_kind,target_id`,
+          [JSON.stringify(keys)],
+        )).rows;
+        return { rows: [...picked, ...inserted], row_count: picked.length + inserted.length };
+      });
+      return value;
+    } catch (error) {
+      if (error?.code !== "55P03" || keys.length === 1) throw error;
+      throw Object.assign(error, { recovery_retryable: true });
+    } finally {
+      const elapsed = Date.now() - started;
+      if (elapsed > RECOVERY_TARGET_TXN_BUDGET_MS) adaptiveBatchSize = Math.max(1, Math.floor(adaptiveBatchSize / 2));
+      else if (elapsed < 5) adaptiveBatchSize = Math.min(100, Math.max(adaptiveBatchSize, adaptiveBatchSize * 2));
+    }
+  };
+
+  let remaining = markerKeys.slice();
+  while (remaining.length > 0) {
+    if (Date.now() > deadline) throw new ReconciliationBlocked("RECOVERY_REBUILD_TIMEOUT");
+    const chunk = remaining.slice(0, adaptiveBatchSize);
+    try {
+      const value = await markChunk(chunk);
+      resultCounts.marker_batches++;
+      resultCounts.marker_rows += value.row_count;
+      const completed = new Set(value.rows.map(targetMapKey));
+      if (completed.size === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      } else {
+        remaining = remaining.filter((key) => !completed.has(targetMapKey(key)));
       }
-      return { rows, row_count: rows.length, applied, already_applied: alreadyApplied, queue_cleared: queueCleared };
-    });
-    resultCounts.target_batches++;
-    resultCounts.target_rows += value.row_count;
-    resultCounts.applied += value.applied;
-    resultCounts.already_applied += value.already_applied;
-    resultCounts.queue_cleared += value.queue_cleared;
-    if (value.row_count === 0) break;
-    targetCursor = value.rows.at(-1);
+    } catch (error) {
+      if (!error.recovery_retryable) throw error;
+      resultCounts.marker_retries++;
+      adaptiveBatchSize = Math.max(1, Math.floor(adaptiveBatchSize / 2));
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
   }
 
   for (;;) {
@@ -1129,11 +1205,12 @@ async function rebuildCaptureAndProjection(client, observedAt, {
               )
               ORDER BY p.org_id,p.target_kind,p.target_id
               LIMIT $1
+              FOR UPDATE OF p SKIP LOCKED
            )
            DELETE FROM ${relation} p
             USING stale
             WHERE p.org_id=stale.org_id AND p.target_kind=stale.target_kind AND p.target_id=stale.target_id`,
-          [batchSize],
+          [adaptiveBatchSize],
         );
         deleted += result.rowCount;
       }
@@ -1143,16 +1220,43 @@ async function rebuildCaptureAndProjection(client, observedAt, {
     if (value.rows === 0) break;
   }
 
-  if (Date.now() > deadline) throw new ReconciliationBlocked("RECOVERY_REBUILD_TIMEOUT");
-  const currentDirty = await captureDirtyGenerationRows(client);
-  const currentByTarget = new Map(currentDirty.map((row) => [targetMapKey(row), Number(row.generation)]));
-  for (const [key, expectedGeneration] of processedGenerations) {
-    if (currentByTarget.get(key) !== expectedGeneration) throw new ReconciliationBlocked("RECOVERY_SOURCE_CHANGED");
-  }
-  resultCounts.source_generation_digest = digestJson(currentDirty);
-  resultCounts.processed_target_count = processedGenerations.size;
-  resultCounts.committed_batch_count = committedBatchCount;
+  resultCounts.marker_chunk_size = adaptiveBatchSize;
   return resultCounts;
+}
+
+async function transitionCaptureBoundary(client, expectedCatalogFingerprint) {
+  await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+  let committed = false;
+  try {
+    await client.query("SET LOCAL statement_timeout='5s'");
+    await client.query("SET LOCAL lock_timeout='2s'");
+    await client.query("SELECT singleton FROM inbox_control.rollout WHERE singleton FOR UPDATE");
+    // H1/H2 of research-reconcile-recovery-locking.md: the only work under
+    // the rollout lock is a metadata/safety recheck and (when necessary) one
+    // generation transition. Projection computation is never here.
+    const safety = await collectRecoverySafety(client, { expectedCatalogFingerprint });
+    if (safety.errors.length > 0) throw new ReconciliationBlocked(safety.error_code ?? "RECOVERY_GATE_BLOCKED");
+    const oldGeneration = safety.state.generation;
+    const boundaryCount = Number((await client.query("SELECT count(*)::int AS count FROM inbox_read.boundaries")).rows[0]?.count ?? 0);
+    let generation = oldGeneration;
+    let invalidated = 0;
+    if (boundaryCount > 0) {
+      generation = (await client.query("UPDATE inbox_capture_boundary.generation SET generation=gen_random_uuid() WHERE singleton RETURNING generation::text AS generation")).rows[0]?.generation;
+      if (!generation) throw new ReconciliationBlocked("CAPTURE_GENERATION_MISSING");
+      invalidated = (await client.query("DELETE FROM inbox_read.boundaries WHERE generation IS DISTINCT FROM $1::uuid", [generation])).rowCount;
+    }
+    await client.query("COMMIT");
+    committed = true;
+    return {
+      capture_generation_before: oldGeneration,
+      capture_generation_after: generation,
+      capture_generation_bumped: generation !== oldGeneration,
+      read_boundaries_invalidated: invalidated,
+    };
+  } catch (error) {
+    if (!committed) await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  }
 }
 
 async function runCaptureRecovery(client, {
@@ -1162,44 +1266,36 @@ async function runCaptureRecovery(client, {
   recoverySourceBatchSize = RECOVERY_SOURCE_BATCH_SIZE,
   onRecoveryBatchBeforeCommit,
   onRecoveryBatchCommitted,
+  onRecoveryRouteEdgeCandidates,
 } = {}) {
   const initial = await readOnlyRecoveryPlan(client, { expectedCatalogFingerprint });
-  if (initial.serving_enabled === true) return { status: "blocked", evidence: initial, recovery: null };
   if (initial.status !== "ready") return { status: "blocked", evidence: initial, recovery: null };
   if (!apply) return { status: "recovery-dry-run", evidence: initial, recovery: { applied: false } };
-  await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
   let committed = false;
   try {
-    await client.query("SET LOCAL statement_timeout='15s'");
-    await client.query("SET LOCAL lock_timeout='2s'");
-    await client.query("SELECT singleton FROM inbox_control.rollout WHERE singleton FOR UPDATE");
-    const recheck = await collectRecoveryPlan(client, { expectedCatalogFingerprint });
-    if (recheck.status !== "ready") throw new ReconciliationBlocked(`RECOVERY_GATE_${recheck.errors[0] ?? "BLOCKED"}`);
-    const oldGeneration = recheck.capture_generation;
-    const generation = (await client.query("UPDATE inbox_capture_boundary.generation SET generation=gen_random_uuid() WHERE singleton RETURNING generation::text AS generation")).rows[0]?.generation;
-    if (!generation) throw new ReconciliationBlocked("CAPTURE_GENERATION_MISSING");
-    const invalidated = await client.query("DELETE FROM inbox_read.boundaries WHERE generation IS DISTINCT FROM $1::uuid", [generation]);
-    await client.query("COMMIT");
+    const transition = await transitionCaptureBoundary(client, expectedCatalogFingerprint);
     committed = true;
+    // H2'/H5: recompute the DIFF after every interruption. No cursor or
+    // source-generation digest is carried across runs; consistent keys are
+    // absent from the next DIFF and therefore are not bumped again.
     const rebuild = await rebuildCaptureAndProjection(client, new Date().toISOString(), {
       batchSize: recoveryBatchSize,
       sourceBatchSize: recoverySourceBatchSize,
       onBatchBeforeCommit: onRecoveryBatchBeforeCommit,
+      onRouteEdgeCandidates: onRecoveryRouteEdgeCandidates,
       onBatchCommitted: async (context) => {
         committed = true;
         await onRecoveryBatchCommitted?.(context);
       },
     });
     const after = await readOnlyRecoveryPlan(client, { expectedCatalogFingerprint });
-    if (after.status !== "ready") throw new ReconciliationBlocked(`RECOVERY_RECONCILIATION_FAILED_${after.errors[0] ?? "BLOCKED"}`);
-    if (after.source_generation_digest !== rebuild.source_generation_digest) throw new ReconciliationBlocked("RECOVERY_SOURCE_CHANGED");
+    if (after.status !== "ready") throw new ReconciliationBlocked(after.error_code ?? "RECOVERY_GATE_BLOCKED");
+    if (after.checks.recovery_gate !== true) throw new ReconciliationBlocked(after.recovery_error_code ?? "RECOVERY_RECONCILIATION_FAILED");
     after.recovery = {
       applied: true,
-      capture_generation_before: oldGeneration,
-      capture_generation_after: generation,
-      read_boundaries_invalidated: invalidated.rowCount,
+      ...transition,
       rebuild,
-      source_generation_stable: true,
+      final_gate: "single_repeatable_read_snapshot",
     };
     after.evidence_digest = digestJson({ ...after, observed_at: undefined, evidence_digest: undefined });
     return { status: "recovery-written", evidence: after, recovery: after.recovery };
@@ -1223,6 +1319,7 @@ export async function reconcileAndMaybeWrite(client, {
   recoverySourceBatchSize = RECOVERY_SOURCE_BATCH_SIZE,
   onRecoveryBatchBeforeCommit,
   onRecoveryBatchCommitted,
+  onRecoveryRouteEdgeCandidates,
   beforeWrite,
 } = {}) {
   if (recoverCaptureBypass) return runCaptureRecovery(client, {
@@ -1232,6 +1329,7 @@ export async function reconcileAndMaybeWrite(client, {
     recoverySourceBatchSize,
     onRecoveryBatchBeforeCommit,
     onRecoveryBatchCommitted,
+    onRecoveryRouteEdgeCandidates,
   });
   const initial = await readOnlyEvidence(client, { expectedCatalogFingerprint, sourceWriterAttestation, attestationPath });
   if (initial.status !== "ready") return { status: "blocked", evidence: initial, marker_write: null };

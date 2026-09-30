@@ -67,6 +67,33 @@ const mutations = [
       "recovery base-table duplicate guard removed",
     ),
   },
+  {
+    name: "recovery reconciliation precondition restored",
+    source: replaceOnce(
+      source,
+      'if (initial.status !== "ready") return { status: "blocked", evidence: initial, recovery: null };',
+      'if (initial.status !== "ready" || initial.checks.recovery_gate !== true) return { status: "blocked", evidence: initial, recovery: null };',
+      "recovery reconciliation precondition restored",
+    ),
+  },
+  {
+    name: "global generation repeated on every rerun",
+    source: replaceOnce(
+      source,
+      "if (boundaryCount > 0) {",
+      "if (true) {",
+      "global generation repeated on every rerun",
+    ),
+  },
+  {
+    name: "route-edge source lock removed",
+    source: replaceOnce(
+      source,
+      "FOR UPDATE OF m SKIP LOCKED",
+      "/* source lock removed */",
+      "route-edge source lock removed",
+    ),
+  },
 ];
 
 for (const mutation of mutations) {
