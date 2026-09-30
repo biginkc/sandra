@@ -6,8 +6,8 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { collect, compareSets, reconcile, snapshot, openReadTxn, stabilityProbe, readPostgrestMajor, ACTIVE, planSkeleton } from './outbox-db-contract/readonly.mjs';
-import { readonlyGet, compareObservedPlatform, comparePlatform, platformFingerprint, NOT_VERIFIED } from './outbox-db-contract/platform.mjs';
-import { assertTarget, main, parseArgs, compareCatalog, assertSealedPre, catalogChildEnv, platformSummary } from './outbox-db-contract-readonly.mjs';
+import { readonlyGet, compareObservedPlatform, comparePlatform, platformFingerprint, platformDigest, NOT_VERIFIED } from './outbox-db-contract/platform.mjs';
+import { assertTarget, main, parseArgs, compareCatalog, assertSealedPre, catalogChildEnv, platformSummary, catalogFingerprint } from './outbox-db-contract-readonly.mjs';
 import { connectionConfig, pinnedCa } from './outbox-db-contract/connection.mjs';
 import { describePlan, comparePlans, catalogIndexes, compareIndexes, OPERATOR_INDEXES, OPERATOR_RELATIONS } from './outbox-db-contract/plan-contract.mjs';
 
@@ -186,18 +186,32 @@ test('NC-R1/R2 static surface', () => {
   assert.doesNotMatch(plat,/\bfetch\(/);
   assert.match(ACTIVE,/access_expires_at > now\(\)/);
 });
-test('NC platform major mismatch',()=>fails('major',()=>comparePlatform({postgres_major:'17',postgrest_major:'12',gotrue_major:'2'},{postgres_major:'17',postgrest_major:'13',gotrue_major:'2'}),/PLATFORM_MISMATCH/));
+const platformFixture = (postgrest_major = '12', postgrest_reason = null, postgrest_observed_major = postgrest_major) => {
+  const value = { postgres_major: '17', postgrest_major, gotrue_major: '2', postgrest_reason, postgrest_observed_major };
+  return { ...value, sha256: platformDigest(value) };
+};
+test('NC platform major mismatch',()=>fails('major',()=>comparePlatform(platformFixture(),platformFixture('13')),/PLATFORM_MISMATCH/));
 test('RULING pg_stat_activity outcomes are scoped, strict, and duplicate-tolerant', async () => {
   let sql;
   const query = rows => ({ query: async statement => { sql = statement; return { rows }; } });
-  assert.equal(await readPostgrestMajor(query([])), NOT_VERIFIED);
-  assert.equal(await readPostgrestMajor(query([{application_name:'PostgREST 12.2.0'}, {application_name:'PostgREST 12.3.1'}])), '12');
+  assert.deepEqual(await readPostgrestMajor(query([])), { postgrest_major: NOT_VERIFIED, postgrest_reason: 'NO_CONNECTION', postgrest_observed_major: null });
+  assert.deepEqual(await readPostgrestMajor(query([{application_name:'PostgREST 12.2.0'}, {application_name:'PostgREST 12.3.1'}])), { postgrest_major: '12', postgrest_reason: null, postgrest_observed_major: '12' });
+  assert.deepEqual(await readPostgrestMajor(query([{application_name:'postgrest'}])), { postgrest_major: NOT_VERIFIED, postgrest_reason: 'NAME_UNVERSIONED', postgrest_observed_major: null });
+  assert.deepEqual(await readPostgrestMajor(query([{application_name:'PostgREST 12.2.0'}, {application_name:'POSTGREST'}])), { postgrest_major: NOT_VERIFIED, postgrest_reason: 'MIXED_NAMES', postgrest_observed_major: '12' });
+  await assert.rejects(readPostgrestMajor(query([{application_name:'PostGREST 12.2.0'}, {application_name:'postgrest'}])), /PLATFORM_UNIDENTIFIED/);
+  await assert.rejects(readPostgrestMajor(query([{application_name:'postgrest 12.2.0'}])), /PLATFORM_UNIDENTIFIED/);
+  await assert.rejects(readPostgrestMajor(query([{application_name:'postgrest-x'}])), /PLATFORM_UNIDENTIFIED/);
   await assert.rejects(readPostgrestMajor(query([{application_name:'PostgREST 12.2.0'}, {application_name:'PostgREST 13.0.0'}])), /PLATFORM_AMBIGUOUS/);
+  await assert.rejects(readPostgrestMajor(query([{application_name:'postgrest'}, {application_name:'PostgREST 12.2.0'}, {application_name:'PostgREST 13.0.0'}])), /PLATFORM_AMBIGUOUS/);
+  await assert.rejects(readPostgrestMajor(query([{application_name:'postgrest'}, {application_name:''}])), /PLATFORM_UNIDENTIFIED/);
   await assert.rejects(readPostgrestMajor(query([{application_name:'PostgREST 12.2.0'}, {application_name:''}])), /PLATFORM_UNIDENTIFIED/);
   await assert.rejects(readPostgrestMajor(query([{application_name:null}])), /PLATFORM_UNIDENTIFIED/);
   assert.match(sql, /usename='authenticator'/);
   assert.match(sql, /datname=current_database\(\)/);
   await assert.rejects(readPostgrestMajor({query: async () => { throw new Error('database unavailable'); }}), /PLATFORM_READ_FAILED/);
+});
+test('RULING mixed observed major mismatch remains blocking even when waived', () => {
+  fails('mixed mismatch', () => comparePlatform(platformFixture(), platformFixture(NOT_VERIFIED, 'MIXED_NAMES', '13')), /PLATFORM_MISMATCH postgrest_major/);
 });
 test('RULING collect reads PostgREST before its read-only transaction commits', async () => {
   const trace = [];
@@ -226,47 +240,70 @@ test('RULING collect reads PostgREST before its read-only transaction commits', 
   const statIndex = trace.findIndex(sql => sql.includes('FROM pg_stat_activity'));
   const commitIndex = trace.lastIndexOf('COMMIT');
   assert.equal(result.postgrest_major, '12');
+  assert.equal(result.postgrest_reason, null);
   assert.ok(statIndex >= 0 && statIndex < commitIndex, 'PostGREST observation must precede COMMIT');
   assert.match(trace[statIndex], /usename='authenticator'/);
   assert.match(trace[statIndex], /datname=current_database\(\)/);
 });
 const catalogSections = ['relations', 'functions', 'types', 'extensions', 'schemas', 'index_names', 'trigger_names', 'schema_migrations', 'created_objects_present'];
-const catalogMap = () => Object.fromEntries(catalogSections.map((name, index) => [name, String(index).padStart(64, 'a')]));
+const catalogStable = value => Array.isArray(value) ? `[${value.map(catalogStable).join(',')}]` : value && typeof value === 'object' ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${catalogStable(value[key])}`).join(',')}}` : JSON.stringify(value);
+const catalogFixture = () => {
+  const sections = Object.fromEntries(catalogSections.map(name => [name, []]));
+  const section_sha256 = Object.fromEntries(Object.entries(sections).sort(([a], [b]) => a.localeCompare(b)).map(([name, value]) => [name, readableDigest(Buffer.from(catalogStable(value)))]));
+  return { catalog_format_version: 2, sections, section_sha256, sha256: readableDigest(Buffer.from(catalogStable({ catalog_format_version: 2, section_sha256 }))) };
+};
+const catalogMap = () => catalogFixture().section_sha256;
+const catalogWithHashes = section_sha256 => ({ ...catalogFixture(), section_sha256 });
 test('NC catalog empty section map fails', () => {
-  fails('empty expected', () => compareCatalog({section_sha256:{}}, {section_sha256:catalogMap()}), /CATALOG_MISMATCH/);
-  fails('empty observed', () => compareCatalog({section_sha256:catalogMap()}, {section_sha256:{}}), /CATALOG_MISMATCH/);
+  fails('empty expected', () => compareCatalog(catalogWithHashes({}), catalogFixture()), /CATALOG_MISMATCH/);
+  fails('empty observed', () => compareCatalog(catalogFixture(), catalogWithHashes({})), /CATALOG_MISMATCH/);
 });
 test('NC catalog omitted section fails', () => {
   const expected = catalogMap();
   delete expected.relations;
-  fails('omitted expected', () => compareCatalog({section_sha256:expected}, {section_sha256:catalogMap()}), /CATALOG_MISMATCH/);
-  fails('omitted observed', () => compareCatalog({section_sha256:catalogMap()}, {section_sha256:expected}), /CATALOG_MISMATCH/);
+  fails('omitted expected', () => compareCatalog(catalogWithHashes(expected), catalogFixture()), /CATALOG_MISMATCH/);
+  fails('omitted observed', () => compareCatalog(catalogFixture(), catalogWithHashes(expected)), /CATALOG_MISMATCH/);
 });
 test('NC catalog extra section fails', () => {
-  fails('extra observed', () => compareCatalog({section_sha256:catalogMap()}, {section_sha256:{...catalogMap(), unexpected:'f'.repeat(64)}}), /CATALOG_MISMATCH/);
-  fails('extra expected', () => compareCatalog({section_sha256:{...catalogMap(), unexpected:'f'.repeat(64)}}, {section_sha256:catalogMap()}), /CATALOG_MISMATCH/);
+  fails('extra observed', () => compareCatalog(catalogFixture(), catalogWithHashes({...catalogMap(), unexpected:'f'.repeat(64)})), /CATALOG_MISMATCH/);
+  fails('extra expected', () => compareCatalog(catalogWithHashes({...catalogMap(), unexpected:'f'.repeat(64)}), catalogFixture()), /CATALOG_MISMATCH/);
 });
 test('NC catalog refuses a single key containing the entire joined section list', () => {
   const combined = { [catalogSections.slice().sort().join(',')]: 'f'.repeat(64) };
-  fails('combined expected', () => compareCatalog({section_sha256:combined}, {section_sha256:combined}), /CATALOG_MISMATCH/);
-  fails('combined observed', () => compareCatalog({section_sha256:catalogMap()}, {section_sha256:combined}), /CATALOG_MISMATCH/);
+  fails('combined expected', () => compareCatalog(catalogWithHashes(combined), catalogWithHashes(combined)), /CATALOG_MISMATCH/);
+  fails('combined observed', () => compareCatalog(catalogFixture(), catalogWithHashes(combined)), /CATALOG_MISMATCH/);
 });
 test('NC catalog refuses duplicate-looking keys that collide when joined', () => {
   const sections = catalogSections.slice().sort();
   const keys = [`${sections[0]},${sections[1]}`, ...sections.slice(2)];
   const collided = Object.fromEntries(keys.map(key => [key, 'f'.repeat(64)]));
   assert.equal(keys.join(','), sections.join(','));
-  fails('joined collision expected', () => compareCatalog({section_sha256:collided}, {section_sha256:collided}), /CATALOG_MISMATCH/);
-  fails('joined collision observed', () => compareCatalog({section_sha256:catalogMap()}, {section_sha256:collided}), /CATALOG_MISMATCH/);
+  fails('joined collision expected', () => compareCatalog(catalogWithHashes(collided), catalogWithHashes(collided)), /CATALOG_MISMATCH/);
+  fails('joined collision observed', () => compareCatalog(catalogFixture(), catalogWithHashes(collided)), /CATALOG_MISMATCH/);
 });
 test('NC catalog malformed digest fails on either side', () => {
-  fails('malformed expected', () => compareCatalog({section_sha256:{...catalogMap(), relations:'x'}}, {section_sha256:{...catalogMap(), relations:'x'}}), /CATALOG_MISMATCH/);
-  fails('malformed observed', () => compareCatalog({section_sha256:catalogMap()}, {section_sha256:{...catalogMap(), relations:'x'}}), /CATALOG_MISMATCH/);
+  fails('malformed expected', () => compareCatalog(catalogWithHashes({...catalogMap(), relations:'x'}), catalogWithHashes({...catalogMap(), relations:'x'})), /CATALOG_MISMATCH/);
+  fails('malformed observed', () => compareCatalog(catalogFixture(), catalogWithHashes({...catalogMap(), relations:'x'})), /CATALOG_MISMATCH/);
 });
 test('NC catalog changed policies or grants digest fails', () => {
   const changed = {...catalogMap(), relations:'f'.repeat(64)};
-  fails('relation policies/grants', () => compareCatalog({section_sha256:catalogMap()}, {section_sha256:changed}), /CATALOG_MISMATCH/);
-  assert.doesNotThrow(() => compareCatalog({section_sha256:catalogMap()}, {section_sha256:catalogMap()}));
+  fails('relation policies/grants', () => compareCatalog(catalogFixture(), catalogWithHashes(changed)), /CATALOG_MISMATCH/);
+  assert.doesNotThrow(() => compareCatalog(catalogFixture(), catalogFixture()));
+});
+test('RULING catalog drift is disjoint and emits the named failure codes', () => {
+  const sections = Object.fromEntries(catalogSections.map(name => [name, []]));
+  sections.relations = [{ identity: 'public.message_threads', owner: 'postgres', columns: [], indexes: [], constraints: [], triggers: [], policies: [] }];
+  const baseline = catalogFingerprint(sections);
+  const item = { object: 'public.message_threads', attribute: 'columns', name: 'extra', canonical_definition: 'uuid', classification: { class: 'column', nullable: true, default: null, attidentity: '', attgenerated: '', column_acl: null, owner: 'postgres' }, origin: 'unknown', approval_sha256: null };
+  const driftPayload = { record_version: 1, target_ref: TEST_REF, candidate_sha: 'a'.repeat(40), baseline_digest: baseline.sha256, catalog_format_version: 2, items: [item] };
+  const drift = { ...driftPayload, sha256: readableDigest(Buffer.from(catalogStable(driftPayload))) };
+  const observedSections = JSON.parse(JSON.stringify(sections));
+  observedSections.relations[0].columns.push({ name: 'extra', type: 'uuid', not_null: false, default: null, acl: null, attgenerated: '', attidentity: '' });
+  const observed = catalogFingerprint(observedSections);
+  fails('unrecorded', () => compareCatalog(baseline, observed), /CATALOG_DRIFT_UNRECORDED/);
+  assert.doesNotThrow(() => compareCatalog(baseline, observed, { driftRecord: drift, targetRef: TEST_REF, candidateSha: 'a'.repeat(40) }));
+  const stale = JSON.parse(JSON.stringify(drift)); stale.items[0].canonical_definition = 'text'; stale.sha256 = readableDigest(Buffer.from(catalogStable(Object.fromEntries(['record_version','target_ref','candidate_sha','baseline_digest','catalog_format_version','items'].map(key => [key, stale[key]])))));
+  fails('stale', () => compareCatalog(baseline, observed, { driftRecord: stale, targetRef: TEST_REF, candidateSha: 'a'.repeat(40) }), /DRIFT_RECORD_STALE/);
 });
 test('NC platform accepts only identifiable PostgREST versions', async () => {
   const probe = async (server, versionHeader) => platformFingerprint('http://127.0.0.1:55421', 'anon', 17, async url => ({
@@ -386,7 +423,7 @@ test('RULING hosted sends publishable apikey, makes no REST call, and allows onl
     calls.push({ path: new URL(url).pathname, headers: options.headers });
     return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ version: '2.151.0' }) };
   };
-  const result = await platformFingerprint('https://example.invalid', 'publishable', '17', transport, { mode: 'hosted', postgrestMajor: NOT_VERIFIED });
+  const result = await platformFingerprint('https://example.invalid', 'publishable', '17', transport, { mode: 'hosted', postgrestMajor: NOT_VERIFIED, postgrestReason: 'NO_CONNECTION' });
   assert.deepEqual(calls, [{ path: '/auth/v1/health', headers: { apikey: 'publishable' } }]);
   assert.equal(result.postgrest_major, NOT_VERIFIED);
   await assert.rejects(platformFingerprint('https://example.invalid', undefined, '17', transport, { mode: 'hosted', postgrestMajor: '12' }), /PLATFORM_READ_FAILED/);
@@ -397,12 +434,12 @@ test('RULING checker summary uses target-appropriate observed or NOT_VERIFIED wo
   assert.match(disposableObserved, /PostgREST request returned 200/);
   assert.doesNotMatch(disposableObserved, /request was rejected/);
   assert.match(disposableObserved, /observed from its HTTP response and SQL connection name and matched/);
-  const hostedMissing = platformSummary(NOT_VERIFIED, 'shared-readonly');
+  const hostedMissing = platformSummary(NOT_VERIFIED, 'shared-readonly', 'NO_CONNECTION');
   assert.match(hostedMissing, /request was rejected/);
   assert.match(hostedMissing, /NOT_VERIFIED: no PostgREST connection was visible, which does not prove none existed/);
-  assert.match(hostedMissing, /Hosted app\/SSR\/PostgREST behaviour is inferred from same-SHA disposable runs plus catalog and claim-plumbing equality\./);
+  assert.match(hostedMissing, /Hosted app\/SSR\/PostgREST behaviour is inferred from same-SHA disposable runs plus catalog and claim-plumbing equality, which cannot establish hosted runtime\/configuration equality/);
 });
-const mainData = postgrest_major => ({ queued: { count: 1, per_row: {} }, current_status: {}, member_orgs: [], postgrest_major, rls: { verdict: 'PASS' }, plans: {} });
+const mainData = postgrest_major => ({ queued: { count: 1, per_row: {} }, current_status: {}, member_orgs: [], postgrest_major, postgrest_reason: postgrest_major === NOT_VERIFIED ? 'NO_CONNECTION' : null, postgrest_observed_major: postgrest_major === NOT_VERIFIED ? null : postgrest_major, rls: { verdict: 'PASS' }, plans: {} });
 const fakeMainClient = () => ({ connect: async () => {}, end: async () => {}, query: async sql => sql === 'SHOW server_version_num' ? { rows: [{ server_version_num: '170000' }] } : { rows: [] } });
 async function withMainEnv(values, fn) {
   const previous = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]));
@@ -439,11 +476,12 @@ test('RULING main hosted mode makes no REST call and carries field-scoped NOT_VE
   const dir = mkdtempSync(path.join(os.tmpdir(), 'readonly-main-hosted-'));
   const previousFetch = globalThis.fetch;
   const calls = [];
-  const sections = Object.fromEntries(['relations', 'functions', 'types', 'extensions', 'schemas', 'index_names', 'trigger_names', 'schema_migrations', 'created_objects_present'].map(name => [name, 'a'.repeat(64)]));
-  const platform = { postgres_major: '17', postgrest_major: '12', gotrue_major: '2' };
+  const catalog = catalogFixture();
+  const sections = catalog.section_sha256;
+  const platform = platformFixture();
   const catalogPath = path.join(dir, 'catalog.json');
   const platformPath = path.join(dir, 'platform.json');
-  writeFileSync(catalogPath, JSON.stringify({ section_sha256: sections }));
+  writeFileSync(catalogPath, JSON.stringify(catalog));
   writeFileSync(platformPath, JSON.stringify(platform));
   globalThis.fetch = async (url, options) => {
     calls.push({ pathname: new URL(url).pathname, headers: options.headers });
@@ -452,7 +490,7 @@ test('RULING main hosted mode makes no REST call and carries field-scoped NOT_VE
   try {
     await withMainEnv({ DATABASE_URL: `postgres://postgres.${TEST_REF}:unused@aws-0-us-east-1.pooler.supabase.com:5432/postgres`, SUPABASE_ANON_KEY: 'publishable' }, async () => {
       const output = path.join(dir, 'result.json');
-      await main({ argv: { target: 'shared-readonly', phase: 'pre', org: '00000000-0000-0000-0000-000000000001', 'api-url': api(TEST_REF), 'catalog-compare': catalogPath, 'platform-compare': platformPath, output }, createClient: fakeMainClient, makeClientConfig: () => ({}), collectData: async () => mainData(NOT_VERIFIED), readCatalog: async () => ({ sections: { relations: [] }, section_sha256: sections }), readConnectionEvidence: async () => ({ protocol: 'TLSv1.3' }), getPinnedCa: () => ({}) });
+      await main({ argv: { target: 'shared-readonly', phase: 'pre', org: '00000000-0000-0000-0000-000000000001', 'api-url': api(TEST_REF), 'catalog-compare': catalogPath, 'platform-compare': platformPath, output }, createClient: fakeMainClient, makeClientConfig: () => ({}), collectData: async () => mainData(NOT_VERIFIED), readCatalog: async () => catalog, readConnectionEvidence: async () => ({ protocol: 'TLSv1.3' }), getPinnedCa: () => ({}) });
       const result = JSON.parse(readFileSync(output, 'utf8'));
       assert.deepEqual(calls, [{ pathname: '/auth/v1/health', headers: { apikey: 'publishable' } }]);
       assert.deepEqual(result.comparisons.platform.waived_fields, ['postgrest_major']);
@@ -471,7 +509,7 @@ test('RULING main POST rejects a hosted major that differs from PRE observation'
     : { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ version: '2.151.0' }) };
   try {
     await withMainEnv({ DATABASE_URL: 'postgres://postgres@127.0.0.1:55422/postgres', E2E_DISPOSABLE_DATABASE: '1', SUPABASE_ANON_KEY: 'publishable' }, async () => {
-      const pre = { target: 'disposable-readonly', phase: 'pre', queued: { per_row: {} }, platform_config: { postgres_major: '17', postgrest_major: '12', gotrue_major: '2', sha256: readableDigest(Buffer.from(JSON.stringify({ postgres_major: '17', postgrest_major: '12', gotrue_major: '2' }))) } };
+      const pre = { target: 'disposable-readonly', phase: 'pre', queued: { per_row: {} }, platform_config: platformFixture() };
       const prePath = path.join(dir, 'pre.json');
       writeFileSync(prePath, JSON.stringify(pre));
       await assert.rejects(main({ argv: { target: 'disposable-readonly', phase: 'post', org: '00000000-0000-0000-0000-000000000001', 'api-url': 'http://127.0.0.1:55421', 'pre-file': prePath }, createClient: fakeMainClient, collectData: async () => mainData('13') }), /PLATFORM_MISMATCH postgrest_major/);
@@ -482,11 +520,12 @@ test('RULING main POST rejects a hosted major that differs from PRE observation'
   }
 });
 test('RULING Postgres and GoTrue remain blocking while PostgREST waiver is field-scoped', () => {
-  fails('postgres', () => comparePlatform({postgres_major:'17',postgrest_major:'12',gotrue_major:'2'}, {postgres_major:'16',postgrest_major:NOT_VERIFIED,gotrue_major:'2'}), /PLATFORM_MISMATCH postgres_major/);
-  fails('gotrue', () => comparePlatform({postgres_major:'17',postgrest_major:'12',gotrue_major:'2'}, {postgres_major:'17',postgrest_major:NOT_VERIFIED,gotrue_major:'1'}), /PLATFORM_MISMATCH gotrue_major/);
-  assert.deepEqual(comparePlatform({postgres_major:'17',postgrest_major:'12',gotrue_major:'2'}, {postgres_major:'17',postgrest_major:NOT_VERIFIED,gotrue_major:'2'}), {waived_fields:['postgrest_major']});
-  assert.doesNotThrow(() => compareObservedPlatform({postgres_major:'17',postgrest_major:NOT_VERIFIED,gotrue_major:'2'}, {postgres_major:'17',postgrest_major:'12',gotrue_major:'2'}));
-  assert.doesNotThrow(() => compareObservedPlatform({postgres_major:'17',postgrest_major:NOT_VERIFIED,gotrue_major:'2'}, {postgres_major:'17',postgrest_major:NOT_VERIFIED,gotrue_major:'2'}));
-  fails('non-exact waiver', () => compareObservedPlatform({postgres_major:'17',postgrest_major:'unknown',gotrue_major:'2'}, {postgres_major:'17',postgrest_major:NOT_VERIFIED,gotrue_major:'2'}), /PLATFORM_MISMATCH postgrest_major/);
-  fails('observed mismatch', () => compareObservedPlatform({postgres_major:'17',postgrest_major:'12',gotrue_major:'2'}, {postgres_major:'17',postgrest_major:'13',gotrue_major:'2'}), /PLATFORM_MISMATCH postgrest_major/);
+  const verified = platformFixture();
+  fails('postgres', () => comparePlatform(verified, { ...platformFixture(NOT_VERIFIED, 'NO_CONNECTION', null), postgres_major: '16', sha256: platformDigest({ ...platformFixture(NOT_VERIFIED, 'NO_CONNECTION', null), postgres_major: '16' }) }), /PLATFORM_MISMATCH postgres_major/);
+  fails('gotrue', () => comparePlatform(verified, { ...platformFixture(NOT_VERIFIED, 'NO_CONNECTION', null), gotrue_major: '1', sha256: platformDigest({ ...platformFixture(NOT_VERIFIED, 'NO_CONNECTION', null), gotrue_major: '1' }) }), /PLATFORM_MISMATCH gotrue_major/);
+  assert.deepEqual(comparePlatform(verified, platformFixture(NOT_VERIFIED, 'NO_CONNECTION', null)), {waived_fields:['postgrest_major'], waiver_reasons:{postgrest_major:'NO_CONNECTION'}});
+  assert.doesNotThrow(() => compareObservedPlatform(platformFixture(NOT_VERIFIED, 'NO_CONNECTION', null), verified));
+  assert.doesNotThrow(() => compareObservedPlatform(platformFixture(NOT_VERIFIED, 'NO_CONNECTION', null), platformFixture(NOT_VERIFIED, 'NO_CONNECTION', null)));
+  fails('non-exact waiver', () => compareObservedPlatform({ ...verified, postgrest_major:'unknown', sha256: platformDigest({ ...verified, postgrest_major:'unknown' }) }, platformFixture(NOT_VERIFIED, 'NO_CONNECTION', null)), /PLATFORM_INVALID_FIELDS|PLATFORM_MISMATCH postgrest_major/);
+  fails('observed mismatch', () => compareObservedPlatform(verified, platformFixture('13')), /PLATFORM_MISMATCH postgrest_major/);
 });

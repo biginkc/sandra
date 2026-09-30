@@ -1,8 +1,8 @@
 {
   "build.py": "3115fd8904087b65f1a2309cdc6b78eb995396910ba0dc0689122ddb23998ce3",
   "catalog-pin-provenance.json": "71b91ff986963ee6e5eb3e4d712c28327199e04d364d7a7c23bee77d47866b34",
-  "catalog-scope.json": "13c0362615dd0641b045dd9f57efcd48cf4e6ed5c6a579008b084d5394fc1dc5",
-  "catalog_fingerprint.py": "66adc05cfe91af18f1341c147399d858add3536dbf1fa810ceda514429fbd345",
+  "catalog-scope.json": "0ccc94fe4cbb9ff1a168518377bff3551ba993e807ec4bf659feb76b79f77b0f",
+  "catalog_fingerprint.py": "43309ba1fec6abb4e1e557974b93afb05e0a8e6e91038d38b5a8c94859b76c38",
   "column-acl.json": "0e2d92be9a0252c009395a4353d7c5723b08f04ae67c5e92752e0f0d8231371a",
   "command-admission.sql": "466dcbf7f7e2f69073291a1f55c86cc01ace5f93f57e10f5c80d6024a1351b99",
   "components.json": "db107ff336a10809a1b7b46ba45113141bb95e6eee4caf59cfc6131bc08990f6",
