@@ -4,6 +4,33 @@
 -- Customer calls retain the historical attempt-backed path unchanged.
 begin;
 
+-- Keep the provider identity frozen once a Dialpad training activity has been
+-- established. The existing training guard intentionally permits ordinary
+-- wrap-up/provider artifact updates, so this remains narrow: customer calls
+-- and Sandra softphone training calls retain their historical behavior.
+create or replace function public.guard_homeowner_training_call() returns trigger
+language plpgsql set search_path = public as $$
+begin
+  if TG_OP = 'INSERT' then
+    if new.call_purpose = 'internal_training' and coalesce(auth.role(), '') <> 'service_role' then
+      raise exception 'Only the server may create training calls' using errcode = '42501';
+    end if;
+  elsif new.call_purpose is distinct from old.call_purpose then
+    raise exception 'Call purpose is immutable' using errcode = '23514';
+  end if;
+  if TG_OP = 'UPDATE' and old.call_purpose = 'internal_training' and (
+    new.org_id is distinct from old.org_id or new.provider is distinct from old.provider
+    or new.jitter_attempt_id is distinct from old.jitter_attempt_id
+    or (new.operator_user_id is not null and new.operator_user_id is distinct from old.operator_user_id)
+    or new.phone_e164 is distinct from old.phone_e164
+    or (old.provider = 'dialpad' and old.provider_call_id is not null and new.provider_call_id is distinct from old.provider_call_id)
+  ) then
+    raise exception 'Training call identity is immutable' using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
 create or replace function public.fn_dialpad_recording_library_sources(p_actor uuid,p_scope text)
 returns jsonb language plpgsql stable security definer set search_path='' as $$
 begin

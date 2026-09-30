@@ -184,6 +184,7 @@ async function seedSandraLibraryFixture(training = false): Promise<void> {
     await pg.query("insert into public.organizations(id,name) values ($1,'Sandra playback test org') on conflict (id) do nothing", [orgId]);
     await pg.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'owner') on conflict (user_id,org_id) do update set role='owner', access_status='active', deletion_prepared_at=null, access_expires_at=null", [ownerId, orgId]);
     await pg.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'member') on conflict (user_id,org_id) do update set access_status='active', deletion_prepared_at=null, access_expires_at=null", [repA, orgId]);
+    await pg.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'member') on conflict (user_id,org_id) do update set access_status='active', deletion_prepared_at=null, access_expires_at=null", [repB, orgId]);
   });
   // The projection test seeds its member directly inside the surrounding
   // transaction; the owner designation RPC is covered by the acquisition
@@ -195,6 +196,7 @@ async function seedSandraLibraryFixture(training = false): Promise<void> {
   } finally {
     await pg.query("alter table public.memberships enable trigger trg_my_leads_designation_guard");
   }
+  await setDesignation(repB, orgId, true);
   await pg.query("insert into public.acquisition_org_settings(org_id,my_leads_enabled) values ($1,true) on conflict (org_id) do update set my_leads_enabled=true", [orgId]);
   await pg.query(
     "insert into public.contacts(id,org_id,first_name,phone_1,phone_1_type) values ($1,$2,'Sandra playback seller',$3,'mobile')",
@@ -483,6 +485,11 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
           "fn_finalize_dialpad_recording_shadow",
           "fn_finish_dialpad_recording_timing",
           "fn_get_dialpad_recording_shadow_measurement",
+          "fn_get_dialpad_recording_final_input",
+          "fn_finalize_dialpad_recording_provider_window",
+          "fn_list_dialpad_recording_provider_window_candidates",
+          "fn_get_dialpad_recording_provider_window_result",
+          "dialpad_recording_provider_window_is_eligible",
         ].sort(),
       );
       const { captureId } = await openedCapture();
@@ -1950,6 +1957,9 @@ describe("20260929210000 Dialpad recording foundation concurrency", () => {
       expect(mineSources).toHaveLength(1);
       expect(mineSources[0]).toMatchObject({ id: String(capture.call_activity_id), actorId: repA, source: "dialpad" });
 
+      const sameOrgOtherRepSources = await rpc("fn_dialpad_recording_library_sources", [repB, "mine"]);
+      expect(sameOrgOtherRepSources).toEqual([]);
+
       const playback = await rpc("fn_dialpad_recording_playback_file", [repA, "mine", ownerFiles[0]!.id]);
       expect(playback).toMatchObject({
         source: "dialpad",
@@ -1964,6 +1974,34 @@ describe("20260929210000 Dialpad recording foundation concurrency", () => {
         },
       });
       expect(String((playback.file as Json).storagePath)).toBe(`${orgId}/${captureId}/final/1/${ownerFiles[0]!.track}`);
+      expect(await rpc("fn_dialpad_recording_playback_file", [repB, "mine", ownerFiles[0]!.id])).toBeNull();
+    });
+
+    it("freezes an established Dialpad training provider call id without changing unrelated providers or replay", async () => {
+      await seedSandraLibraryFixture(true);
+      const { captureId } = await sealedReady(String(Date.now()));
+      const capture = await captureRow(captureId);
+      const activityId = String(capture.call_activity_id);
+      const changed = await failure(() => service(() => pg.query(
+        "update public.call_activities set provider_call_id=$2 where id=$1",
+        [activityId, "9999999999999999999"],
+      )));
+      expect(changed.code).toBe("23514");
+      expect((await pg.query("select provider_call_id from public.call_activities where id=$1", [activityId])).rows[0]!.provider_call_id).toBe(capture.provider_call_id);
+
+      const replay = await rpc("dialpad_cti_project_intent", [capture.intent_id]);
+      expect(replay).toMatchObject({ projected: true, intentId: capture.intent_id, callActivityId: activityId });
+
+      const softphoneActivityId = uuid();
+      await service(() => pg.query(
+        "insert into public.call_activities(id,org_id,property_id,contact_id,jitter_attempt_id,jitter_session_id,provider,operator_user_id,provider_call_id,call_purpose) values ($1,$2,null,null,$3,'softphone-session','sandra_softphone',$4,'softphone-old','customer')",
+        [softphoneActivityId, orgId, `sandra-${softphoneActivityId}`, repA],
+      ));
+      const softphoneUpdate = await service(() => pg.query(
+        "update public.call_activities set provider_call_id='softphone-new' where id=$1",
+        [softphoneActivityId],
+      ));
+      expect(softphoneUpdate.rowCount).toBe(1);
     });
 
     it("fails closed for revoked or foreign members and forged training links", async () => {
