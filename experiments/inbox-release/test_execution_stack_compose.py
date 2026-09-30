@@ -32,6 +32,13 @@ def compose_command() -> list[str] | None:
 
 
 class ExecutionStackComposeTests(unittest.TestCase):
+    def test_compose_pins_the_release_electric_stream_id(self) -> None:
+        compose_source = COMPOSE.read_text()
+        env_example = (HERE / "full-stack.env.example").read_text()
+        self.assertIn("ELECTRIC_REPLICATION_STREAM_ID: inbox_release_20260917", compose_source)
+        self.assertNotIn("ELECTRIC_REPLICATION_STREAM_ID: ${", compose_source)
+        self.assertIn("ELECTRIC_REPLICATION_STREAM_ID=inbox_release_20260917", env_example)
+
     def test_compose_env_loads_and_both_workers_start_with_versioned_paths(self) -> None:
         compose = compose_command()
         node = shutil.which("node")
@@ -61,7 +68,6 @@ class ExecutionStackComposeTests(unittest.TestCase):
                         f"INBOX_RESTATE_PRIVATE_KEY_FILE={key}",
                         "INBOX_ELECTRIC_DATABASE_URL=postgresql://fixture:fixture@127.0.0.1:54322/postgres",
                         "ELECTRIC_MANUAL_TABLE_PUBLISHING=true",
-                        "ELECTRIC_REPLICATION_STREAM_ID=inbox_release_20260917",
                         f"INBOX_RELEASE_RUNTIME_ENV_FILE={runtime_env}",
                         f"INBOX_RELEASE_PROJECTION_ENV_FILE={projection_env}",
                         "INBOX_RELAY_TOKEN=fixture-token-012345678901234567890123456789",

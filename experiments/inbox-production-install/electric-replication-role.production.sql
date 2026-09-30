@@ -12,6 +12,9 @@
 -- not BYPASSRLS: https://electric.ax/docs/sync/guides/postgres-permissions.
 -- Electric's deployment guide says the replication stream ID supplies the
 -- publication/slot suffix: https://electric.ax/docs/sync/guides/deployment.
+-- Naming contract source: notes/research-electric-slot-naming.md (Electric
+-- 1.8.1): stream id inbox_<project_ref>, slot electric_slot_<stream_id>, and
+-- publication electric_publication_<stream_id>. Electric creates one slot.
 -- The Electric replication client uses PostgreSQL's pgoutput plugin; keep the
 -- reviewed upstream implementation reference with this packet:
 -- https://github.com/electric-sql/electric/blob/main/packages/sync-service/lib/electric/replication/postgres/replication_client.ex
@@ -151,7 +154,12 @@ ALTER TABLE inbox_bridge.summaries REPLICA IDENTITY FULL;
 DO $$
 DECLARE
   electric_publication_name text := 'electric_publication_inbox_' || current_setting('sandra.inbox_project_ref');
+  contract_publication_name text := 'electric_publication_inbox_' || current_setting('sandra.inbox_project_ref');
+  created_publication_name text;
 BEGIN
+  IF electric_publication_name IS DISTINCT FROM contract_publication_name THEN
+    RAISE EXCEPTION 'Electric publication name % does not equal required contract %', electric_publication_name, contract_publication_name;
+  END IF;
   IF EXISTS (
     SELECT 1 FROM pg_publication
     WHERE pubname = electric_publication_name
@@ -179,6 +187,13 @@ BEGIN
       AND schemaname = 'inbox_bridge' AND tablename = 'summaries'
   ) THEN
     EXECUTE format('ALTER PUBLICATION %I ADD TABLE inbox_bridge.summaries', electric_publication_name);
+  END IF;
+  SELECT pubname
+  INTO created_publication_name
+  FROM pg_publication
+  WHERE pubname = electric_publication_name;
+  IF created_publication_name IS DISTINCT FROM contract_publication_name THEN
+    RAISE EXCEPTION 'Electric publication created as %, expected %', created_publication_name, contract_publication_name;
   END IF;
 END $$;
 

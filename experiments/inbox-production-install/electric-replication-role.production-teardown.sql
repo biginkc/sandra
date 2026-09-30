@@ -8,6 +8,9 @@
 -- not BYPASSRLS: https://electric.ax/docs/sync/guides/postgres-permissions.
 -- Electric's deployment guide says the replication stream ID supplies the
 -- publication/slot suffix: https://electric.ax/docs/sync/guides/deployment.
+-- Naming contract source: notes/research-electric-slot-naming.md (Electric
+-- 1.8.1): stream id inbox_<project_ref>, slot electric_slot_<stream_id>, and
+-- publication electric_publication_<stream_id>. Electric creates one slot.
 -- The Electric replication client uses PostgreSQL's pgoutput plugin; keep the
 -- reviewed upstream implementation reference with this packet:
 -- https://github.com/electric-sql/electric/blob/main/packages/sync-service/lib/electric/replication/postgres/replication_client.ex
@@ -55,7 +58,6 @@ DECLARE
   requested_slot_name text := current_setting('sandra.inbox_replication_slot_name');
   electric_stream_id text := 'inbox_' || supplied_ref;
   expected_slot_name text := 'electric_slot_' || electric_stream_id;
-  electric_slot_prefix text := 'electric_slot_' || electric_stream_id;
   electric_publication_name text := 'electric_publication_' || electric_stream_id;
   other_electric_slots text;
   slot_database text;
@@ -122,10 +124,7 @@ BEGIN
   WHERE replication_slot.database::text = current_database()
     AND replication_slot.slot_type = 'logical'
     AND replication_slot.slot_name <> expected_slot_name
-    AND (
-      replication_slot.slot_name = electric_slot_prefix
-      OR replication_slot.slot_name LIKE electric_slot_prefix || '\_%' ESCAPE '\'
-    );
+    AND replication_slot.slot_name LIKE 'electric\_slot\_%' ESCAPE '\';
   IF other_electric_slots IS NOT NULL THEN
     RAISE EXCEPTION 'Electric teardown found other logical slot(s) for stream % in database %: %; teardown is incomplete', electric_stream_id, current_database(), other_electric_slots;
   END IF;

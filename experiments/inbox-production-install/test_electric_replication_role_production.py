@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from pathlib import Path
 import json
 import os
@@ -18,6 +19,8 @@ ELECTRIC_STREAM_ID = f"inbox_{PROJECT_REF}"
 REPLICATION_SLOT = f"electric_slot_{ELECTRIC_STREAM_ID}"
 ELECTRIC_PUBLICATION = f"electric_publication_{ELECTRIC_STREAM_ID}"
 OTHER_ELECTRIC_SLOT = f"electric_slot_{ELECTRIC_STREAM_ID}_other"
+LEGACY_ELECTRIC_SLOT = "electric_slot_inbox"
+TEMPORARY_ELECTRIC_SLOT = "electric_slot_" + ("0123456789abcdef" * 2)
 EXECUTOR_ROLE = "inbox_packet_executor"
 NON_OWNER_ROLE = "inbox_teardown_non_owner"
 NO_REPLICATION_ROLE = "inbox_install_no_replication"
@@ -55,6 +58,8 @@ class ProductionElectricPacketTests(unittest.TestCase):
         self.assertIn("well-formed SCRAM-SHA-256 verifier", source)
         self.assertIn("ALTER TABLE inbox_bridge.summaries REPLICA IDENTITY FULL", source)
         self.assertIn("CREATE PUBLICATION %I", source)
+        self.assertIn("Electric publication created as %", source)
+        self.assertIn("contract_publication_name", source)
         self.assertNotIn("install_fixture", source)
 
     def test_install_requires_a_scram_verifier_and_connected_ref(self):
@@ -83,6 +88,8 @@ class ProductionElectricPacketTests(unittest.TestCase):
         self.assertIn("slot_type", source)
         self.assertIn("pgoutput", source)
         self.assertIn("other logical slot(s)", source)
+        self.assertIn(r"slot_name LIKE 'electric\_slot\_%' ESCAPE '\'", source)
+        self.assertNotIn("electric_slot_prefix", source)
         self.assertIn("replication_slot_action", source)
         self.assertLess(source.index("COMMIT;"), source.index("pg_drop_replication_slot"))
         self.assertNotIn("install_fixture", source)
@@ -278,6 +285,26 @@ class ProductionElectricPacketTests(unittest.TestCase):
             self.assertIn("does not match PGHOST", mismatch.stderr)
             self.assertNotIn(scram, mismatch.stdout + mismatch.stderr)
 
+    def test_teardown_rejects_legacy_electric_slot_on_postgres17(self):
+        with self._installed_pg17_cluster() as (bindir, env):
+            self._create_slot(bindir, env, slot_name=LEGACY_ELECTRIC_SLOT)
+            rejected = self._psql(bindir, env, self._teardown_input(), expect_success=False)
+            self.assertIn(LEGACY_ELECTRIC_SLOT, rejected.stderr)
+            self.assertIn("teardown is incomplete", rejected.stderr)
+            self._assert_installed_state(bindir, env, expected_slot_count="0")
+            self.assertEqual(self._slot_count(bindir, env, LEGACY_ELECTRIC_SLOT), "1")
+            self._drop_slot(bindir, env, LEGACY_ELECTRIC_SLOT)
+
+    def test_teardown_rejects_temporary_style_electric_slot_on_postgres17(self):
+        with self._installed_pg17_cluster() as (bindir, env):
+            self._create_slot(bindir, env, slot_name=TEMPORARY_ELECTRIC_SLOT)
+            rejected = self._psql(bindir, env, self._teardown_input(), expect_success=False)
+            self.assertIn(TEMPORARY_ELECTRIC_SLOT, rejected.stderr)
+            self.assertIn("teardown is incomplete", rejected.stderr)
+            self._assert_installed_state(bindir, env, expected_slot_count="0")
+            self.assertEqual(self._slot_count(bindir, env, TEMPORARY_ELECTRIC_SLOT), "1")
+            self._drop_slot(bindir, env, TEMPORARY_ELECTRIC_SLOT)
+
     def test_host_routing_and_tls_overrides_are_refused(self):
         base = {**os.environ, "PGHOST": f"db.{PROJECT_REF}.supabase.co", "PGSSLMODE": "verify-full", "PGSSLROOTCERT": str(PINNED_CA), "INBOX_ELECTRIC_PSQL_BIN": "/definitely/missing/psql"}
         for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
@@ -293,6 +320,54 @@ class ProductionElectricPacketTests(unittest.TestCase):
 
     def _create_slot(self, bindir: Path, env: dict[str, str], plugin: str = "pgoutput", slot_name: str = REPLICATION_SLOT) -> None:
         self._psql(bindir, env, f"SELECT pg_create_logical_replication_slot('{slot_name}', '{plugin}');", expect_success=True)
+
+    @contextmanager
+    def _installed_pg17_cluster(self):
+        bindir = postgres_bin()
+        if bindir is None:
+            if os.environ.get("CI", "").lower() == "true":
+                self.fail("PostgreSQL 17 local binaries are required in CI; refusing a silent skip")
+            self.skipTest("PostgreSQL 17 local binaries are required")
+        with tempfile.TemporaryDirectory(prefix="pg17-") as temp:
+            root = Path(temp)
+            data = root / "data"
+            socket = root / "socket"
+            socket.mkdir()
+            subprocess.run([bindir / "initdb", "-D", data, "-A", "trust", "-U", "postgres", "--no-locale"], check=True, capture_output=True, text=True)
+            log = root / "postgres.log"
+            started = subprocess.run([bindir / "pg_ctl", "-D", data, "-l", log, "-o", f"-k {socket} -c listen_addresses='' -c wal_level=logical", "-w", "start"], check=False, capture_output=True, text=True)
+            if started.returncode:
+                raise AssertionError(f"PostgreSQL 17 failed to start: {started.stderr}\n{log.read_text() if log.exists() else '<missing log>'}")
+            admin_env = {**os.environ, "PGHOST": str(socket), "PGUSER": "postgres", "PGDATABASE": "postgres"}
+            env = {**admin_env, "PGUSER": EXECUTOR_ROLE}
+            try:
+                self._psql(
+                    bindir,
+                    admin_env,
+                    "CREATE ROLE inbox_packet_executor LOGIN CREATEROLE REPLICATION BYPASSRLS;"
+                    "GRANT CONNECT ON DATABASE postgres TO inbox_packet_executor WITH GRANT OPTION;"
+                    "GRANT CREATE ON DATABASE postgres TO inbox_packet_executor;"
+                    "CREATE SCHEMA inbox_bridge;"
+                    "CREATE TABLE inbox_bridge.summaries (id bigint NOT NULL, body text);"
+                    "CREATE UNIQUE INDEX summaries_replica_identity_idx ON inbox_bridge.summaries (id);"
+                    "ALTER TABLE inbox_bridge.summaries REPLICA IDENTITY USING INDEX summaries_replica_identity_idx;"
+                    "ALTER TABLE inbox_bridge.summaries OWNER TO inbox_packet_executor;"
+                    "ALTER SCHEMA inbox_bridge OWNER TO inbox_packet_executor;"
+                    "SET password_encryption = 'scram-sha-256';"
+                    "CREATE ROLE scram_verifier_source NOLOGIN PASSWORD 'dummy-electric-password';",
+                    expect_success=True,
+                )
+                scram = self._psql(bindir, admin_env, "SELECT rolpassword FROM pg_authid WHERE rolname = 'scram_verifier_source';", expect_success=True).stdout.strip()
+                self._psql(
+                    bindir,
+                    env,
+                    self._packet_input(INSTALL, {"project_ref": PROJECT_REF, "connection_project_ref": PROJECT_REF, "electric_password": scram}),
+                    expect_success=True,
+                )
+                self._assert_installed_state(bindir, env, expected_slot_count="0")
+                yield bindir, env
+            finally:
+                subprocess.run([bindir / "pg_ctl", "-D", data, "-w", "stop"], check=True, capture_output=True, text=True)
 
     def _drop_slot(self, bindir: Path, env: dict[str, str], slot_name: str) -> None:
         for _ in range(20):

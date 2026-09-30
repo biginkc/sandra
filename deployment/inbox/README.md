@@ -50,7 +50,7 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
 - Pin all images, including the final worker; do not auto-update image tags.
   The relay Node22 image index was resolved from Docker's registry on2026-09-13.
 - Electric settings: storage at /var/lib/electric, manual publication, the
-  project-bound `inbox_<project-ref>` replication stream ID,
+  single project-bound `inbox_<project-ref>` replication stream ID,
   `ELECTRIC_LONG_POLL_TIMEOUT=8000ms`, query
   pool2 initially, and telemetry off. When the reviewed database packet creates
   the publication, the Electric service must use the matching settings:
@@ -62,10 +62,17 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
   ```
 
   `ELECTRIC_MANUAL_TABLE_PUBLISHING` makes Electric validate the DBA-created
-  publication instead of trying to manage it; `ELECTRIC_REPLICATION_STREAM_ID`
-  makes the expected publication/slot suffix `inbox_<project-ref>`. For TEST
-  use `inbox_ncsngxlcyxylaeskiteu`; for production use
-  `inbox_copflsklaefwzipsrjqz`. This follows Electric's
+  publication instead of trying to manage it. The one naming contract is
+  `stream_id = inbox_<project_ref>`, `slot = electric_slot_<stream_id>`, and
+  `publication = electric_publication_<stream_id>`; the ref is lowercase and
+  contains no hyphens. The exact reviewed values are:
+
+  | Target | Project ref | Stream ID | Slot | Publication |
+  | --- | --- | --- | --- | --- |
+  | TEST | `ncsngxlcyxylaeskiteu` | `inbox_ncsngxlcyxylaeskiteu` | `electric_slot_inbox_ncsngxlcyxylaeskiteu` | `electric_publication_inbox_ncsngxlcyxylaeskiteu` |
+  | PROD | `copflsklaefwzipsrjqz` | `inbox_copflsklaefwzipsrjqz` | `electric_slot_inbox_copflsklaefwzipsrjqz` | `electric_publication_inbox_copflsklaefwzipsrjqz` |
+
+  This follows Electric's
   [PostgreSQL permissions guide](https://electric.ax/docs/sync/guides/postgres-permissions)
   and [deployment guide](https://electric.ax/docs/sync/guides/deployment).
   Scrape a metrics endpoint if enabled; otherwise leave it disabled. Allowlist
@@ -117,8 +124,8 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
   provenance receipt with `--replication-slot` (`electric_slot_inbox_<project-ref>`).
   The teardown packet rejects a name that is not derived from the packet's
   stream ID and project ref, rejects active/wrong-database/wrong-plugin slots,
-  and accepts an absent slot only when no other logical slot matches that
-  Electric stream pattern in the current database.
+  and accepts an absent slot only when no other logical slot matching
+  `electric\_slot\_%` exists in the current database.
 - Every Restate worker deployment must set
   `INBOX_RESTATE_REGISTRATION_PATH=/runtime/<64-lowercase-hex-image-digest>`.
   The worker serves that versioned path and the registration helper uses it as
