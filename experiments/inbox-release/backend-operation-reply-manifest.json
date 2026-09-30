@@ -2,7 +2,7 @@
   "schema_version": 2,
   "status": "PENDING_REVIEW_NO_INSTALL",
   "source_repository": ".",
-  "source_commit": "0d49aa284b5c941a91caff6cf6789a292fd04936",
+  "source_commit": "a18092714821f3805923007a885da4327b596a7e",
   "source_commit_role": "coordinator integration exact snapshot; read with git show; no branch import",
   "sql_packet": {
     "path": "experiments/inbox-release/generated/backend-operation-reply.sql",
@@ -251,8 +251,8 @@
       "name": "operation_worker_server",
       "kind": "runtime",
       "path": "experiments/inbox-operation-worker/server.mjs",
-      "sha256": "a3fe9136164d931a5858fdeddbf49b3f5dd8352bab328905b0c2189ac2d84801",
-      "bytes": 5138
+      "sha256": "71e431b96d5306d89837aef0a94dc6775ed455b38363fa0070835daa00cbbbd0",
+      "bytes": 4763
     },
     {
       "name": "reply_worker_Dockerfile",
@@ -293,8 +293,8 @@
       "name": "reply_worker_server",
       "kind": "runtime",
       "path": "experiments/inbox-reply-send-worker/server.mjs",
-      "sha256": "c8d5bdc58ba649f5b12d0066ae03dc50014718a0904e1792710b41b75b1de2c1",
-      "bytes": 6767
+      "sha256": "94d909911368e00abed3f2c1aae12a69b4947689848c39243a455cb4044a88ea",
+      "bytes": 7612
     },
     {
       "name": "reply_provider_adapter",
