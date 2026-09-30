@@ -341,7 +341,7 @@ REAL_NOT_RUN = {
 
 
 SECTION_RE = re.compile(r"^===== (.+?) =====\n(.*?)^===== END \1 =====\n?", re.MULTILINE | re.DOTALL)
-TEST_ID_RE = re.compile(r"(?:T-R\d+b?|T\d+|B\d+)")
+TEST_ID_RE = re.compile(r"(?:T-R\d+[a-z]?|T\d+|B\d+)")
 NOT_RUN_MARKERS = (
     "NOT RUN",
     "could not connect",
