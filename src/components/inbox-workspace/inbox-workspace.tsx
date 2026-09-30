@@ -27,6 +27,10 @@ export interface InboxWorkspaceProps {
   onCloseDetail: () => void;
   onBack: () => void;
   onReviewSelection: () => void;
+  /** Reply UI is separately admitted by INBOX_REPLIES_SERVER_ENABLED. */
+  replyUiEnabled?: boolean;
+  /** Contextual bulk reply action; it is intentionally absent from the rail. */
+  onBulkReply?: () => void;
   actions: readonly WorkspaceAction[];
   /** Both click and drop request the SAME preparation/review flow; never direct dispatch. */
   onAction: (actionId: string, ids: readonly WorkspaceId[]) => void;
@@ -135,6 +139,7 @@ export function InboxWorkspace(props: InboxWorkspaceProps) {
     <div className={`${styles.body} ${openId?styles.withDetail:""}`}>
       <section className={styles.listPane} aria-label="Conversation selection">
         <div className={styles.selection}><strong aria-live="polite">{selectedIds.length} selected{hidden?` · ${hidden} not loaded here`:""}</strong><button type="button" onClick={props.onReviewSelection} disabled={!selectedIds.length}>Review selection</button><button type="button" onClick={()=>select([])} disabled={!selectedIds.length}>Clear</button></div>
+        {props.replyUiEnabled && props.onBulkReply && selectedIds.length >= 2 && <div className={styles.contextual} role="toolbar" aria-label="Bulk reply actions"><div><strong>Reply to the selected conversations</strong><span>Review each recipient before anything is sent.</span></div><button type="button" onClick={props.onBulkReply}>Review reply to {selectedIds.length}</button></div>}
         <p className={styles.hint} id={hintId}>Click selects one · Shift-click adds/removes · Shift-drag draws a box. Or use checkboxes.</p>
         {props.newMessagesLabel&&<button className={styles.arrivals} type="button" disabled={!!visual||!props.onRefreshRows} onClick={props.onRefreshRows}>{props.newMessagesLabel}</button>}
         {props.listError&&<div role="alert" className={styles.error}>{props.listError}{props.onRetryList&&<button type="button" onClick={props.onRetryList}>Retry list</button>}</div>}
@@ -153,7 +158,7 @@ export function InboxWorkspace(props: InboxWorkspaceProps) {
           {box&&<div aria-hidden="true" className={styles.rectangle} style={{left:box.left,top:box.top,width:box.right-box.left,height:box.bottom-box.top}}/>}
         </div><footer className={styles.page}>{props.pageControl}</footer>
       </section>
-      {openId&&<aside className={styles.detail} aria-label="Open conversation"><header><div><h2>{detail?.title??"Conversation"}</h2><p>{detail?.context}</p></div><button ref={closeButton} type="button" onClick={closeDetail} aria-label="Close conversation details">Close</button></header><div className={styles.detailContent}>{!detail||detail.state==="loading"?<p role="status">Loading conversation…</p>:detail.state==="error"?<div role="alert">{detail.error??"Conversation unavailable."}{detail.onRetry&&<button type="button" onClick={detail.onRetry}>Retry conversation</button>}</div>:detail.content}</div></aside>}
+      {openId&&<aside className={styles.detail} aria-label="Open conversation"><header><div><h2>{detail?.title??"Conversation"}</h2><p>{detail?.context}</p></div><button ref={closeButton} type="button" onClick={closeDetail}><span aria-hidden="true">{props.replyUiEnabled ? "← Inbox" : "Close"}</span><span className={styles.srOnly}>Close conversation details</span></button></header><div className={styles.detailContent}>{!detail||detail.state==="loading"?<p role="status">Loading conversation…</p>:detail.state==="error"?<div role="alert">{detail.error??"Conversation unavailable."}{detail.onRetry&&<button type="button" onClick={detail.onRetry}>Retry conversation</button>}</div>:detail.content}</div></aside>}
       <aside ref={actionRail} className={styles.actions} aria-label="Actions for selection"><h2>Actions · click or drop</h2><p className={styles.dragStatus} role="status">{visual?.mode==="action"?`Dragging ${visual.selected.length} selected · Escape to cancel`:selectedIds.length?`${selectedIds.length} selected · click or drag`:"Select conversations to act"}</p>{props.actions.map((action)=><div key={action.id}><button type="button" data-workspace-action={action.id} className={`${styles.action} ${action.prominent?styles.prominent:""} ${dropId===action.id?styles.drop:""}`} disabled={!selectedIds.length||action.pending||!!action.disabledReason} onClick={()=>clickAction(action)}><span>{action.label}</span>{action.pending&&<small>In progress…</small>}</button>{(action.disabledReason||action.description)&&<small>{action.disabledReason??action.description}</small>}{action.error&&<p role="alert" className={styles.error}>{action.error}</p>}</div>)}{!props.actions.length&&<p>No actions available.</p>}{props.activity&&<div className={styles.activity}>{props.activity}</div>}</aside>
     </div></>}
   </section>;
