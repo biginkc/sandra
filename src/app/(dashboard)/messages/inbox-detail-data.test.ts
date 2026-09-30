@@ -1026,6 +1026,31 @@ describe("fetchInboxDetail", () => {
     expect(resumed?.dripReplyLabels).toEqual({ reply: "Reply to drip text 1" });
   });
 
+  it.each([
+    { label: "failed", statuses: ["failed"], expected: true },
+    { label: "uncertain legacy failure", statuses: ["failed"], metadata: { providerOutcome: "provider_unknown" }, expected: true },
+    { label: "sent", statuses: ["sent"], expected: false },
+    { label: "delivered", statuses: ["delivered"], expected: false },
+    { label: "pending", statuses: ["pending"], expected: false },
+    { label: "queued", statuses: ["queued"], expected: false },
+    { label: "failed then sent", statuses: ["failed", "sent"], expected: false },
+  ])("keeps the drip reply pill state after $label rep messages", async ({ statuses, metadata, expected }) => {
+    const seed: SeedData = {
+      messages: [
+        makeMessage({ id: "drip-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", status: "sent", created_at: "2026-06-09T12:00:00Z" }),
+        makeMessage({ id: "reply", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "inbound", created_at: "2026-06-09T12:02:00Z" }),
+        ...statuses.map((status, index) => makeMessage({ id: `rep-${index}`, contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", status, metadata: index === 0 ? metadata : undefined, created_at: `2026-06-09T12:0${index + 3}:00Z` })),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+      sequence_enrollments: [{ id: "enrollment", org_id: "org-1", property_id: RECENT_PROPERTY_ID, contact_id: CONTACT_ID, sequence_id: "drip", status: "paused", pause_reason: "inbound_reply", current_step_index: 1, enrolled_at: "2026-06-09T11:00:00Z", updated_at: "2026-06-09T12:02:00Z" }],
+      sequence_step_runs: [{ message_id: "drip-text", enrollment_id: "enrollment", sequence_enrollments: { org_id: "org-1", sequence_id: "drip" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
+      sequences: [{ id: "drip", org_id: "org-1", name: "Seller follow-up" }],
+      sequence_steps: [{ id: "step-1", sequence_id: "drip" }, { id: "step-2", sequence_id: "drip" }],
+    };
+    expect((await fetchInboxDetail(makeSupabaseStub(seed) as never, CONVERSATION_ID))?.drip?.replied).toBe(expected);
+  });
+
   it.each(["dispo", "logged attempt", ...DRIP_REPLY_CLEAR_WORKFLOW_OPERATIONS])(
     "clears outstanding reply after %s", async (action) => {
     const seed: SeedData = {

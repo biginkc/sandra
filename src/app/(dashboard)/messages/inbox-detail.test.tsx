@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
 import { InboxDetail } from "./inbox-detail";
-import type { InboxDetail as InboxDetailData } from "./inbox-detail-data";
+import { outboundStatusClearsDripReply, type InboxDetail as InboxDetailData } from "./inbox-detail-data";
 import { sendSmsFromLead } from "../leads/actions";
 import type { Database } from "@/lib/supabase/types";
 
@@ -1502,6 +1502,24 @@ describe("<InboxDetail />", () => {
     rerender(<InboxDetail data={makeData({ contactId: "drip-ui", drip: { ...drip, status: "completed", replied: false, stoppedAt: null }, initialMessages: [sent, manual], dripMessageLabels: { "drip-sent": "Drip · Seller follow-up · text 1 of 4" } })} assigneeEmails={{}} currentUserId="user-1" />);
     expect(screen.getByTestId("inbox-detail-drip-line")).toHaveTextContent("Was in Seller follow-up · ended");
     expect(screen.getByTestId("inbox-detail-drip-line")).not.toHaveTextContent("text 2 of 4");
+  });
+
+  it.each([
+    { label: "failed", statuses: ["failed"], visible: true },
+    { label: "uncertain legacy failure", statuses: ["failed"], metadata: { providerOutcome: "provider_unknown" }, visible: true },
+    { label: "sent", statuses: ["sent"], visible: false },
+    { label: "delivered", statuses: ["delivered"], visible: false },
+    { label: "pending", statuses: ["pending"], visible: false },
+    { label: "queued", statuses: ["queued"], visible: false },
+    { label: "failed then sent", statuses: ["failed", "sent"], visible: false },
+  ])("renders the Replied to drip pill after $label rep messages", ({ statuses, metadata, visible }) => {
+    const replied = !statuses.some(outboundStatusClearsDripReply);
+    render(<InboxDetail data={makeData({
+      contactId: "drip-status-ui",
+      drip: { enrollmentId: "e1", sequenceId: "s1", name: "Seller follow-up", step: 2, total: 4, status: "paused", replied, stoppedAt: "2026-04-29T12:02:00Z" },
+      initialMessages: statuses.map((status, index) => makeMessage({ id: `rep-status-${index}`, body: "Rep reply", contact_id: "drip-status-ui", direction: "outbound", status: status as MessageRow["status"], metadata: index === 0 ? metadata : undefined })),
+    })} assigneeEmails={{}} currentUserId="user-1" />);
+    expect(Boolean(screen.queryByText("Replied to drip"))).toBe(visible);
   });
 
   it("preserves the saved outcome and offers switch when enrollment reports an active drip", async () => {
