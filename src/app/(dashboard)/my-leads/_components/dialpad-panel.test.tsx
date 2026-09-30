@@ -318,6 +318,21 @@ describe('DialpadPanel recording capture', () => {
     expect(mocks.captures[0]?.prepared.startLocal).toHaveBeenCalledTimes(1);
   });
 
+  it('reconciles server-driven recording completion without declaring the call ended', async () => {
+    mocks.start.mockResolvedValue(released);
+    mocks.status.mockResolvedValue(status('connected'));
+    const { call } = await chooseAndCall({ bootstrap: recordingBootstrap, pollMs: 15 });
+    await userEvent.click(call);
+    await screen.findByRole('button', { name: 'End recording' });
+    mocks.status.mockResolvedValue({ ok: false, code: 'unavailable', message: 'Temporarily unavailable' });
+    mocks.recordingStatus.mockResolvedValue({ ok: true, status: { captureStatus: 'sealed', totalSamples: 0, measurementStatus: 'final', finalResult: { status: 'ineligible', reasons: ['below_threshold'] } } });
+    act(() => { (mocks.lastSessionOptions?.onStopped as (() => void) | undefined)?.(); });
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'End recording' })).not.toBeInTheDocument());
+    expect(await screen.findByText('Recording verified: below the five-minute seller-speech threshold.')).toBeInTheDocument();
+    expect(screen.getByText('Connected. Confirmed by Dialpad.')).toBeInTheDocument();
+    expect(mocks.closeCapture).not.toHaveBeenCalled();
+  });
+
   it('passes timing only when the server rollout explicitly enables it', async () => {
     mocks.start.mockResolvedValue(released);
     const { call } = await chooseAndCall({
