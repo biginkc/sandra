@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
+import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { Client } from "pg";
 
 import {
+  EXPECTED_CATALOG_FINGERPRINT,
   SOURCE_WRITERS,
   attestationDigest,
   collectEvidence,
@@ -14,191 +13,220 @@ import {
   reconcileAndMaybeWrite,
 } from "./inbox-reconcile-completion.mjs";
 
-const RUN = process.env.INBOX_RECONCILIATION_RUN_LOCAL_INTEGRATION === "1";
-const BASE_DSN = process.env.INBOX_RECONCILIATION_TEST_DATABASE_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres";
+const BASE_DSN = process.env.INBOX_RECONCILIATION_TEST_DATABASE_URL;
+const RUN = Boolean(BASE_DSN);
 
-function localDsn(dsn) {
-  const url = new URL(dsn);
-  if (url.hostname !== "127.0.0.1" || !url.port || !['postgres:', 'postgresql:'].includes(url.protocol)) {
-    throw new Error("local integration requires a loopback PostgreSQL URL");
-  }
-  return url;
-}
-
-async function createDatabase() {
-  const base = localDsn(BASE_DSN);
-  const adminUrl = new URL(base);
-  adminUrl.pathname = "/postgres";
-  const admin = new Client({ connectionString: adminUrl.toString() });
-  await admin.connect();
-  const database = `inbox_reconcile_${process.pid}_${Date.now().toString(36)}`.replace(/[^a-z0-9_]/g, "_");
-  await admin.query(`CREATE DATABASE "${database}"`);
-  await admin.end();
-  const disposable = new URL(base);
-  disposable.pathname = `/${database}`;
-  const client = new Client({ connectionString: disposable.toString() });
-  await client.connect();
-  return {
-    client,
-    database,
-    adminUrl,
-    async dispose() {
-      await client.end();
-      const cleanup = new Client({ connectionString: adminUrl.toString() });
-      await cleanup.connect();
-      await cleanup.query(`DROP DATABASE "${database}" WITH (FORCE)`);
-      await cleanup.end();
-    },
+function attestation(generation) {
+  const payload = {
+    capture_generation: generation,
+    bypass_since_install: false,
+    covered_tables: [...new Set(SOURCE_WRITERS.map(([table]) => table))],
+    catalog_fingerprint: EXPECTED_CATALOG_FINGERPRINT,
   };
+  return { ...payload, operator_assertion_digest: attestationDigest(payload) };
 }
 
-async function fixture(client) {
+async function publishKnown(client, ids) {
+  const candidate = (await client.query(
+    "SELECT inbox_maintained.snapshot($1,'known_conversation',$2,$3) AS candidate",
+    [ids.org, ids.conversation, new Date().toISOString()],
+  )).rows[0]?.candidate;
+  assert.ok(candidate, "J5a snapshot must produce the seeded candidate");
+  const result = (await client.query("SELECT inbox_maintained.publish($1) AS result", [candidate])).rows[0].result;
+  assert.ok(["applied", "already_applied"].includes(result));
+  if (result === "already_applied") {
+    await client.query(
+      `UPDATE inbox_maintained.rows
+          SET revision=$1,source_generation=$2,summary=$3,next_expiry=$4
+        WHERE org_id=$5 AND target_kind=$6 AND target_id=$7`,
+      [candidate.expected_revision, candidate.generation, candidate.summary, candidate.summary.next_window_expiry, candidate.org_id, candidate.target_kind, candidate.target_id],
+    );
+  }
+}
+
+async function seed(client) {
+  for (const table of [
+    "inbox_read.boundaries", "inbox_bridge.summaries", "inbox_bridge.filter_rows", "inbox_maintained.queue",
+    "inbox_maintained.rows", "inbox_message_capture.route_edges", "inbox_message_capture.dirty",
+    "inbox_message_capture.sender_groups", "inbox_message_capture.sender_buckets", "inbox_parent.work",
+    "inbox_safety.routes", "inbox_backfill.collisions", "inbox_backfill.jobs", "inbox_policy.versions",
+    "inbox_operation_domain.target_versions", "inbox_operation_domain.sms_scopes", "inbox_reply_context.versions",
+  ]) {
+    await client.query(`DELETE FROM ${table} d WHERE NOT EXISTS (SELECT 1 FROM public.organizations o WHERE o.id=d.org_id)`);
+  }
+  const ids = {
+    org: randomUUID(),
+    contact: randomUUID(),
+    property: randomUUID(),
+    conversation: randomUUID(),
+    message: randomUUID(),
+  };
+  await client.query("UPDATE inbox_control.rollout SET serving_enabled=false,backfill_complete=false,reconciliation_complete=false WHERE singleton");
+  await client.query("UPDATE inbox_control.baseline_progress SET stage='done',cursor=NULL WHERE singleton");
+  await client.query("INSERT INTO public.organizations(id,name) VALUES($1,$2)", [ids.org, `Inbox RT ${ids.org}`]);
+  await client.query("INSERT INTO public.contacts(id,org_id,first_name,last_name) VALUES($1,$2,'Runtime','Fixture')", [ids.contact, ids.org]);
+  await client.query("INSERT INTO public.properties(id,org_id,address,state,status,homeowner_contact_id) VALUES($1,$2,'100 Runtime Way','MO','contacted',$3)", [ids.property, ids.org, ids.contact]);
+  await client.query("INSERT INTO public.message_threads(org_id,channel,contact_id,property_id,conversation_id) VALUES($1,'sms',$2,$3,$4)", [ids.org, ids.contact, ids.property, ids.conversation]);
   await client.query(`
-    CREATE SCHEMA inbox_control;
-    CREATE SCHEMA inbox_backfill;
-    CREATE SCHEMA inbox_capture_boundary;
-    CREATE SCHEMA inbox_message_capture;
-    CREATE SCHEMA inbox_maintained;
-    CREATE SCHEMA inbox_parent;
-    CREATE SCHEMA inbox_safety;
-    CREATE SCHEMA inbox_bridge;
-    CREATE TABLE public.organizations(id uuid PRIMARY KEY);
-    CREATE TABLE public.messages(id uuid PRIMARY KEY, org_id uuid);
-    CREATE TABLE public.properties(id uuid PRIMARY KEY, org_id uuid);
-    CREATE TABLE public.contacts(id uuid PRIMARY KEY, org_id uuid);
-    CREATE TABLE public.ai_disposition_reviews(id uuid PRIMARY KEY, org_id uuid);
-    CREATE TABLE public.consent_events(id uuid PRIMARY KEY, org_id uuid);
-    CREATE TABLE public.message_threads(id uuid PRIMARY KEY, org_id uuid, conversation_id uuid);
-    CREATE TABLE public.sms_phone_suppressions(id uuid PRIMARY KEY, org_id uuid);
-    CREATE TABLE public.memberships(id uuid PRIMARY KEY, org_id uuid);
-    CREATE SCHEMA auth;
-    CREATE TABLE auth.sessions(id uuid PRIMARY KEY, user_id uuid);
-    CREATE OR REPLACE FUNCTION public.inbox_test_writer() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
-    CREATE TRIGGER zzzzz_inbox_message_direct AFTER INSERT OR UPDATE OR DELETE ON public.messages FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzz_inbox_guard_inbound_revision_insert BEFORE INSERT ON public.messages FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzz_inbox_guard_inbound_revision_update BEFORE UPDATE ON public.messages FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER inbox_capture_inbound_head AFTER INSERT OR UPDATE ON public.messages FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzzzz_inbox_parent AFTER INSERT OR UPDATE OR DELETE ON public.properties FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzzzzz_inbox_policy AFTER INSERT OR UPDATE OR DELETE ON public.properties FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzzzz_inbox_parent AFTER INSERT OR UPDATE OR DELETE ON public.contacts FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzzzzz_inbox_policy AFTER INSERT OR UPDATE OR DELETE ON public.contacts FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzzzz_inbox_parent_review AFTER INSERT OR UPDATE OR DELETE ON public.ai_disposition_reviews FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzzzzz_inbox_policy AFTER INSERT OR UPDATE OR DELETE ON public.ai_disposition_reviews FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzzzz_inbox_safety_consent AFTER INSERT OR UPDATE OR DELETE ON public.consent_events FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzzzzz_inbox_policy AFTER INSERT OR UPDATE OR DELETE ON public.consent_events FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzzzz_inbox_safety_thread AFTER INSERT OR UPDATE OR DELETE ON public.message_threads FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzzzz_inbox_backfill_collision AFTER INSERT OR UPDATE OR DELETE ON public.message_threads FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzzzzz_inbox_policy AFTER INSERT OR UPDATE OR DELETE ON public.message_threads FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzzzz_inbox_safety_suppression AFTER INSERT OR UPDATE OR DELETE ON public.sms_phone_suppressions FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzzzzz_inbox_policy AFTER INSERT OR UPDATE OR DELETE ON public.sms_phone_suppressions FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzzzzz_inbox_policy AFTER INSERT OR UPDATE OR DELETE ON public.memberships FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzzzzzz_inbox_access AFTER INSERT OR UPDATE OR DELETE ON public.memberships FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER zzzzzzz_inbox_access AFTER INSERT OR UPDATE OR DELETE ON auth.sessions FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TABLE inbox_control.rollout(singleton boolean PRIMARY KEY CHECK(singleton), serving_enabled boolean NOT NULL DEFAULT false, backfill_complete boolean NOT NULL DEFAULT false, reconciliation_complete boolean NOT NULL DEFAULT false);
-    INSERT INTO inbox_control.rollout(singleton) VALUES (true);
-    CREATE TABLE inbox_control.baseline_progress(singleton boolean PRIMARY KEY CHECK(singleton), stage text NOT NULL, cursor uuid);
-    INSERT INTO inbox_control.baseline_progress(singleton,stage) VALUES (true,'done');
-    CREATE TABLE inbox_capture_boundary.generation(singleton boolean PRIMARY KEY CHECK(singleton), generation uuid NOT NULL);
-    INSERT INTO inbox_capture_boundary.generation VALUES (true,'10000000-0000-0000-0000-000000000001');
-    CREATE TABLE inbox_backfill.jobs(org_id uuid PRIMARY KEY, stream text NOT NULL, claim_token uuid, capture_fingerprint text NOT NULL, completed_at timestamptz);
-    CREATE TABLE inbox_backfill.collisions(org_id uuid NOT NULL, conversation_id uuid NOT NULL, generation integer NOT NULL, ack integer NOT NULL, duplicate_thread_ids uuid[], PRIMARY KEY(org_id,conversation_id));
-    CREATE OR REPLACE FUNCTION inbox_backfill.fingerprint() RETURNS text LANGUAGE sql STABLE AS $$ SELECT 'fixture-writer-v1' $$;
-    CREATE TABLE inbox_parent.work(org_id uuid PRIMARY KEY, generation integer NOT NULL, ack integer NOT NULL, claim_token uuid);
-    CREATE TABLE inbox_safety.routes(org_id uuid PRIMARY KEY, generation integer NOT NULL, ack integer NOT NULL, claim_token uuid);
-    CREATE TABLE inbox_maintained.rows(org_id uuid NOT NULL, target_kind text NOT NULL, target_id uuid NOT NULL, revision bigint NOT NULL, source_generation bigint NOT NULL, summary jsonb, next_expiry timestamptz, PRIMARY KEY(org_id,target_kind,target_id));
-    CREATE TABLE inbox_maintained.queue(org_id uuid NOT NULL, target_kind text NOT NULL, target_id uuid NOT NULL, PRIMARY KEY(org_id,target_kind,target_id));
-    CREATE TABLE inbox_message_capture.dirty(org_id uuid NOT NULL, target_kind text NOT NULL, target_id uuid NOT NULL, generation bigint NOT NULL, PRIMARY KEY(org_id,target_kind,target_id));
-    CREATE TABLE inbox_bridge.summaries(org_id uuid NOT NULL, target_kind text NOT NULL, target_id uuid NOT NULL, projection_revision bigint NOT NULL, source_generation bigint NOT NULL, name text NOT NULL, context text NOT NULL, preview text NOT NULL, time_label text NOT NULL, outcome_label text NOT NULL, assigned_label text NOT NULL, unread boolean, latest_at timestamptz, visible_active boolean NOT NULL, visible_dismissed boolean NOT NULL, visible_review boolean NOT NULL, visible_unread boolean NOT NULL, PRIMARY KEY(org_id,target_kind,target_id));
-    CREATE TRIGGER maintained_queue AFTER INSERT OR UPDATE ON inbox_message_capture.dirty FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER bridge_projection AFTER INSERT OR UPDATE ON inbox_maintained.rows FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TRIGGER bridge_filter_projection AFTER INSERT OR UPDATE ON inbox_maintained.rows FOR EACH ROW EXECUTE FUNCTION public.inbox_test_writer();
-    CREATE TABLE inbox_control.marker_audit(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY);
-    CREATE OR REPLACE FUNCTION inbox_control.audit_marker() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.backfill_complete IS DISTINCT FROM OLD.backfill_complete OR NEW.reconciliation_complete IS DISTINCT FROM OLD.reconciliation_complete THEN INSERT INTO inbox_control.marker_audit DEFAULT VALUES; END IF; RETURN NEW; END $$;
-    CREATE TRIGGER marker_audit AFTER UPDATE ON inbox_control.rollout FOR EACH ROW EXECUTE FUNCTION inbox_control.audit_marker();
-  `);
-  const org = "10000000-0000-0000-0000-000000000010";
-  const emptyOrg = "10000000-0000-0000-0000-000000000011";
-  const target = "20000000-0000-0000-0000-000000000020";
-  const tombstone = "20000000-0000-0000-0000-000000000021";
-  const now = "2026-09-29T12:00:00.000Z";
-  const summary = { exists: true, target_kind: "known_conversation", conversation_id: target, contact_name: "Synthetic contact", property_address: "Synthetic address", last_message_preview: "Synthetic preview", last_message_at: now, outreach_dispo: "No outcome", assigned_user_id: null, unread_count: 1, visible_all_hide_noise: true, visible_review: false, visible_unread_hide_noise: true };
-  await client.query("INSERT INTO public.organizations VALUES ($1),($2)", [org, emptyOrg]);
-  await client.query("INSERT INTO inbox_backfill.jobs VALUES ($1,'done',NULL,'fixture-writer-v1',$2),($3,'done',NULL,'fixture-writer-v1',$2)", [org, now, emptyOrg]);
-  await client.query("INSERT INTO inbox_message_capture.dirty VALUES ($1,'known_conversation',$2,4)", [org, target]);
-  await client.query("INSERT INTO inbox_maintained.rows VALUES ($1,'known_conversation',$2,2,4,$3,NULL)", [org, target, JSON.stringify(summary)]);
-  await client.query("INSERT INTO inbox_bridge.summaries VALUES ($1,'known_conversation',$2,2,4,'Synthetic contact','Synthetic address','Synthetic preview',$3,'No outcome','Unassigned',true,$4,true,false,false,true)", [org, target, now, now]);
-  await client.query("INSERT INTO inbox_message_capture.dirty VALUES ($1,'known_conversation',$2,1)", [emptyOrg, tombstone]);
-  await client.query("INSERT INTO inbox_maintained.rows VALUES ($1,'known_conversation',$2,1,1,$3,NULL)", [emptyOrg, tombstone, JSON.stringify({ exists: false, target_kind: "known_conversation", conversation_id: tombstone })]);
+    INSERT INTO public.messages(id,org_id,channel,direction,status,property_id,contact_id,conversation_id,from_address,to_address,body,created_at)
+    VALUES($1,$2,'sms','inbound','received',$3,$4,$5,'+18165550101','+18162804181','Runtime reconciliation fixture',clock_timestamp())
+  `, [ids.message, ids.org, ids.property, ids.contact, ids.conversation]);
+
+  const organizations = (await client.query("SELECT id FROM public.organizations ORDER BY id")).rows;
+  for (const { id } of organizations) {
+    const job = (await client.query("SELECT 1 FROM inbox_backfill.jobs WHERE org_id=$1", [id])).rowCount;
+    if (!job) await client.query("SELECT inbox_backfill.start($1)", [id]);
+  }
+  await client.query("UPDATE inbox_backfill.jobs SET stream='done',cursor=NULL,claim_token=NULL,lease_until=NULL,capture_fingerprint=inbox_backfill.fingerprint(),completed_at=clock_timestamp()");
+  await client.query("UPDATE inbox_parent.work SET ack=generation,claim_token=NULL,lease_until=NULL,scan_generation=NULL,stream=NULL,cursor=NULL");
+  await client.query("UPDATE inbox_safety.routes SET ack=generation,claim_token=NULL,lease_until=NULL,scan_generation=NULL,cursor=NULL");
+  await client.query("UPDATE inbox_backfill.collisions SET ack=generation,duplicate_thread_ids=NULL,checked_at=clock_timestamp()");
+  await publishKnown(client, ids);
+  await client.query("DELETE FROM inbox_maintained.queue");
+  return ids;
 }
 
-test("R6a local disposable database guard matrix", { skip: !RUN }, async () => {
-  const disposable = await createDatabase();
-  const directory = await mkdtemp(path.join(os.tmpdir(), "inbox-reconcile-test-"));
+async function cleanup(client, ids) {
+  for (const table of [
+    "inbox_read.boundaries", "inbox_bridge.summaries", "inbox_bridge.filter_rows", "inbox_maintained.queue",
+    "inbox_maintained.rows", "inbox_message_capture.route_edges", "inbox_message_capture.dirty",
+    "inbox_message_capture.sender_groups", "inbox_message_capture.sender_buckets", "inbox_parent.work",
+    "inbox_safety.routes", "inbox_backfill.collisions", "inbox_backfill.jobs", "inbox_policy.versions",
+    "inbox_operation_domain.target_versions", "inbox_operation_domain.sms_scopes", "inbox_reply_context.versions",
+  ]) {
+    await client.query(`DELETE FROM ${table} WHERE org_id=$1`, [ids.org]).catch(() => {});
+  }
+  await client.query("DELETE FROM public.messages WHERE org_id=$1", [ids.org]);
+  await client.query("DELETE FROM public.message_threads WHERE org_id=$1", [ids.org]);
+  await client.query("DELETE FROM public.properties WHERE org_id=$1", [ids.org]);
+  await client.query("DELETE FROM public.contacts WHERE org_id=$1", [ids.org]);
+  await client.query("DELETE FROM public.organizations WHERE id=$1", [ids.org]);
+  for (const table of [
+    "inbox_read.boundaries", "inbox_bridge.summaries", "inbox_bridge.filter_rows", "inbox_maintained.queue",
+    "inbox_maintained.rows", "inbox_message_capture.route_edges", "inbox_message_capture.dirty",
+    "inbox_message_capture.sender_groups", "inbox_message_capture.sender_buckets", "inbox_parent.work",
+    "inbox_safety.routes", "inbox_backfill.collisions", "inbox_backfill.jobs", "inbox_policy.versions",
+    "inbox_operation_domain.target_versions", "inbox_operation_domain.sms_scopes", "inbox_reply_context.versions",
+  ]) {
+    await client.query(`DELETE FROM ${table} d WHERE NOT EXISTS (SELECT 1 FROM public.organizations o WHERE o.id=d.org_id)`);
+  }
+}
+
+test("R6a runs against the real J5a schema and proves source, projection, filter, recovery, and write guards", { skip: !RUN }, async () => {
+  const client = new Client({ connectionString: BASE_DSN });
+  const peer = new Client({ connectionString: BASE_DSN });
+  await client.connect();
+  await peer.connect();
+  let ids;
   try {
-    await fixture(disposable.client);
-    // Derive the reviewed fingerprint from the fixture catalog before each run.
-    const catalogResult = await collectEvidence(disposable.client, { expectedCatalogFingerprint: "0".repeat(64), sourceWriterAttestation: null });
-    assert.equal(catalogResult.status, "blocked");
-    assert.equal(catalogResult.checks.catalog_fingerprint_match, false);
-    const expectedCatalog = catalogResult.fingerprints.live_catalog;
-    const source = {
-      capture_generation: "10000000-0000-0000-0000-000000000001",
-      bypass_since_install: false,
-      covered_tables: [...new Set(SOURCE_WRITERS.map(([table]) => table))],
-      catalog_fingerprint: expectedCatalog,
-    };
-    const attestationPath = path.join(directory, "coverage.json");
-    await writeFile(attestationPath, JSON.stringify({ ...source, digest: attestationDigest(source) }));
-    const attestedSource = { ...source, digest: attestationDigest(source) };
-    const base = { expectedCatalogFingerprint: expectedCatalog, sourceWriterAttestation: attestedSource, attestationPath };
+    ids = await seed(client);
+    const generation = (await client.query("SELECT generation::text AS generation FROM inbox_capture_boundary.generation WHERE singleton")).rows[0].generation;
+    const sourceWriterAttestation = attestation(generation);
+    const base = { expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT, sourceWriterAttestation };
 
-    await disposable.client.query("ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct");
-    let coverageResult = await collectEvidence(disposable.client, base);
-    assert.equal(coverageResult.checks.source_writer_coverage, false);
-    await disposable.client.query("ALTER TABLE public.messages ENABLE TRIGGER zzzzz_inbox_message_direct");
+    const initial = await collectEvidence(client, base);
+    assert.equal(initial.status, "ready");
+    assert.equal(initial.checks.projection_reconciled, true);
+    assert.equal(initial.checks.filter_reconciled, true);
+    assert.equal(initial.fingerprints.expected_catalog, EXPECTED_CATALOG_FINGERPRINT);
+    assert.equal(initial.source_writer_attestation.operator_assertion_digest, sourceWriterAttestation.operator_assertion_digest);
+    assert.equal(JSON.stringify(initial).includes(ids.org), false, "evidence must not expose fixture IDs");
 
-    let evidenceText = JSON.stringify((await collectEvidence(disposable.client, base)));
-    assert.equal(evidenceText.includes("10000000-0000-0000-0000-000000000010"), false);
-    assert.equal(evidenceText.includes("Synthetic"), false);
-
-    let result = await reconcileAndMaybeWrite(disposable.client, base);
-    assert.equal(result.status, "ready");
-    assert.equal((await disposable.client.query("SELECT count(*)::int AS n FROM inbox_control.marker_audit")).rows[0].n, 0);
-
-    await disposable.client.query("UPDATE inbox_backfill.jobs SET stream='messages',completed_at=NULL WHERE org_id=$1", ["10000000-0000-0000-0000-000000000011"]);
-    result = await reconcileAndMaybeWrite(disposable.client, base);
+    await client.query("DELETE FROM inbox_maintained.rows WHERE org_id=$1 AND target_id=$2", [ids.org, ids.conversation]);
+    let result = await reconcileAndMaybeWrite(client, base);
     assert.equal(result.status, "blocked");
-    assert.equal(result.evidence.checks.backfill_complete, false);
-    assert.equal((await disposable.client.query("SELECT backfill_complete,reconciliation_complete FROM inbox_control.rollout")).rows[0].backfill_complete, false);
+    assert.ok(result.evidence.reconciliation.per_org.some((row) => row.maintained_missing_count > 0));
+    await publishKnown(client, ids);
 
-    await disposable.client.query("UPDATE inbox_backfill.jobs SET stream='done',completed_at=$1 WHERE org_id=$2", ["2026-09-29T12:00:00.000Z", "10000000-0000-0000-0000-000000000011"]);
-    await disposable.client.query("INSERT INTO inbox_backfill.collisions VALUES ($1,$2,2,2,ARRAY['30000000-0000-0000-0000-000000000030'::uuid,'30000000-0000-0000-0000-000000000031'::uuid])", ["10000000-0000-0000-0000-000000000010", "20000000-0000-0000-0000-000000000020"]);
-    result = await reconcileAndMaybeWrite(disposable.client, { ...base, writeMarkers: true });
+    await client.query("UPDATE inbox_maintained.rows SET summary=jsonb_set(summary,'{last_message_preview}',to_jsonb($2::text),true) WHERE org_id=$1 AND target_id=$3", [ids.org, "mutated maintained", ids.conversation]);
+    result = await reconcileAndMaybeWrite(client, base);
     assert.equal(result.status, "blocked");
-    assert.equal(result.evidence.checks.no_unresolved_collisions, false);
-    assert.equal((await disposable.client.query("SELECT count(*)::int AS n FROM inbox_control.marker_audit")).rows[0].n, 0);
+    assert.ok(result.evidence.reconciliation.per_org.some((row) => row.maintained_mismatch_count > 0));
+    await publishKnown(client, ids);
 
-    await disposable.client.query("DELETE FROM inbox_backfill.collisions");
-    await disposable.client.query("UPDATE inbox_bridge.summaries SET preview='wrong projection' WHERE org_id=$1", ["10000000-0000-0000-0000-000000000010"]);
-    result = await reconcileAndMaybeWrite(disposable.client, base);
+    await client.query("ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct");
+    let coverage = await collectEvidence(client, base);
+    assert.equal(coverage.checks.source_writer_coverage, false);
+    await client.query("ALTER TABLE public.messages ENABLE TRIGGER zzzzz_inbox_message_direct");
+
+    await client.query("UPDATE inbox_bridge.summaries SET preview='mutated projection' WHERE org_id=$1", [ids.org]);
+    result = await reconcileAndMaybeWrite(client, base);
     assert.equal(result.status, "blocked");
     assert.equal(result.evidence.checks.projection_reconciled, false);
-    await disposable.client.query("UPDATE inbox_bridge.summaries SET preview='Synthetic preview' WHERE org_id=$1", ["10000000-0000-0000-0000-000000000010"]);
-    result = await reconcileAndMaybeWrite(disposable.client, { ...base, writeMarkers: true });
-    assert.equal(result.status, "written");
-    assert.deepEqual((await disposable.client.query("SELECT backfill_complete,reconciliation_complete,serving_enabled FROM inbox_control.rollout")).rows[0], { backfill_complete: true, reconciliation_complete: true, serving_enabled: false });
-    assert.equal((await disposable.client.query("SELECT count(*)::int AS n FROM inbox_control.marker_audit")).rows[0].n, 1);
+    await client.query("UPDATE inbox_bridge.summaries SET preview='Runtime reconciliation fixture' WHERE org_id=$1", [ids.org]);
 
-    result = await reconcileAndMaybeWrite(disposable.client, { ...base, writeMarkers: true });
+    await client.query("UPDATE inbox_bridge.filter_rows SET unread=false WHERE org_id=$1", [ids.org]);
+    result = await reconcileAndMaybeWrite(client, base);
+    assert.equal(result.status, "blocked");
+    assert.equal(result.evidence.checks.filter_reconciled, false);
+    await client.query("UPDATE inbox_bridge.filter_rows SET unread=true WHERE org_id=$1", [ids.org]);
+
+    const extra = randomUUID();
+    await client.query("INSERT INTO inbox_message_capture.dirty(org_id,target_kind,target_id,generation) VALUES($1,'known_conversation',$2,1)", [ids.org, extra]);
+    await client.query("INSERT INTO inbox_maintained.rows(org_id,target_kind,target_id,revision,source_generation,summary) VALUES($1,'known_conversation',$2,1,1,$3)", [ids.org, extra, JSON.stringify({ exists: false, org_id: ids.org, target_kind: 'known_conversation', conversation_id: extra })]);
+    result = await reconcileAndMaybeWrite(client, base);
+    assert.equal(result.status, "blocked");
+    assert.ok(result.evidence.reconciliation.per_org.some((row) => row.maintained_extra_count > 0));
+    await client.query("DELETE FROM inbox_maintained.rows WHERE org_id=$1 AND target_id=$2", [ids.org, extra]);
+    await client.query("DELETE FROM inbox_message_capture.dirty WHERE org_id=$1 AND target_id=$2", [ids.org, extra]);
+    await client.query("DELETE FROM inbox_bridge.summaries WHERE org_id=$1 AND target_id=$2", [ids.org, extra]);
+    await client.query("DELETE FROM inbox_bridge.filter_rows WHERE org_id=$1 AND target_id=$2", [ids.org, extra]);
+    await client.query("DELETE FROM inbox_maintained.queue WHERE org_id=$1 AND target_id=$2", [ids.org, extra]);
+
+    const concurrentConversation = randomUUID();
+    const concurrentMessage = randomUUID();
+    result = await reconcileAndMaybeWrite(client, {
+      ...base,
+      writeMarkers: true,
+      beforeWrite: async () => {
+        await peer.query(`
+          INSERT INTO public.messages(id,org_id,channel,direction,status,property_id,contact_id,conversation_id,from_address,to_address,body,created_at)
+          VALUES($1,$2,'sms','inbound','received',$3,$4,$5,'+18165550102','+18162804181','Concurrent source row',clock_timestamp())
+        `, [concurrentMessage, ids.org, ids.property, ids.contact, concurrentConversation]);
+      },
+    });
+    assert.equal(result.status, "blocked", "the in-transaction re-check must reject evidence changed after the dry-run");
+    assert.equal((await client.query("SELECT backfill_complete FROM inbox_control.rollout WHERE singleton")).rows[0].backfill_complete, false);
+    await peer.query("DELETE FROM public.messages WHERE id=$1", [concurrentMessage]);
+    await client.query("DELETE FROM inbox_maintained.rows WHERE org_id=$1 AND target_id=$2", [ids.org, concurrentConversation]);
+    await client.query("DELETE FROM inbox_message_capture.dirty WHERE org_id=$1 AND target_id=$2", [ids.org, concurrentConversation]);
+    await client.query("DELETE FROM inbox_bridge.summaries WHERE org_id=$1 AND target_id=$2", [ids.org, concurrentConversation]);
+    await client.query("DELETE FROM inbox_bridge.filter_rows WHERE org_id=$1 AND target_id=$2", [ids.org, concurrentConversation]);
+    await client.query("DELETE FROM inbox_maintained.queue WHERE org_id=$1", [ids.org]);
+
+    await client.query("UPDATE inbox_control.rollout SET serving_enabled=true WHERE singleton");
+    result = await reconcileAndMaybeWrite(client, { ...base, writeMarkers: true });
+    assert.equal(result.status, "blocked", "serving_enabled=true must refuse marker writes");
+    assert.deepEqual((await client.query("SELECT backfill_complete,reconciliation_complete FROM inbox_control.rollout WHERE singleton")).rows[0], { backfill_complete: false, reconciliation_complete: false });
+    await client.query("UPDATE inbox_control.rollout SET serving_enabled=false WHERE singleton");
+
+    result = await reconcileAndMaybeWrite(client, { ...base, writeMarkers: true });
+    assert.equal(result.status, "written");
+    result = await reconcileAndMaybeWrite(client, { ...base, writeMarkers: true });
     assert.equal(result.status, "idempotent");
-    assert.equal((await disposable.client.query("SELECT count(*)::int AS n FROM inbox_control.marker_audit")).rows[0].n, 1);
+
+    await client.query("UPDATE inbox_control.rollout SET backfill_complete=false,reconciliation_complete=false WHERE singleton");
+    const beforeRecovery = (await client.query("SELECT generation::text AS generation FROM inbox_capture_boundary.generation WHERE singleton")).rows[0].generation;
+    result = await reconcileAndMaybeWrite(client, { expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT, recoverCaptureBypass: true });
+    assert.equal(result.status, "recovery-dry-run");
+    assert.equal((await client.query("SELECT generation::text AS generation FROM inbox_capture_boundary.generation WHERE singleton")).rows[0].generation, beforeRecovery);
+    result = await reconcileAndMaybeWrite(client, { expectedCatalogFingerprint: EXPECTED_CATALOG_FINGERPRINT, recoverCaptureBypass: true, applyCaptureRecovery: true });
+    assert.equal(result.status, "recovery-written");
+    assert.notEqual(result.recovery.capture_generation_before, result.recovery.capture_generation_after);
+    assert.equal(result.evidence.checks.full_reconciliation, true);
+    assert.deepEqual((await client.query("SELECT serving_enabled,backfill_complete,reconciliation_complete FROM inbox_control.rollout WHERE singleton")).rows[0], {
+      serving_enabled: false,
+      backfill_complete: false,
+      reconciliation_complete: false,
+    });
   } finally {
-    await rm(directory, { recursive: true, force: true });
-    await disposable.dispose();
+    if (ids) await cleanup(client, ids);
+    await peer.end();
+    await client.end();
   }
 });
 
-test("attestation digest is stable and does not include a secret-bearing field", () => {
+test("operator assertion digest is stable and explicitly named", () => {
   const payload = { capture_generation: "10000000-0000-0000-0000-000000000001", bypass_since_install: false, covered_tables: ["public.messages"], catalog_fingerprint: "a".repeat(64) };
   assert.equal(attestationDigest(payload), digestJson({ ...payload, covered_tables: ["public.messages"] }));
   assert.equal(attestationDigest({ ...payload, secret: "must-not-be-read" }), attestationDigest(payload));

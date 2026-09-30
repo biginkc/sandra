@@ -8,6 +8,9 @@ import tls from "node:tls";
 import { pathToFileURL } from "node:url";
 import { Client } from "pg";
 
+const CATALOG_ARTIFACT = JSON.parse(readFileSync(new URL("./inbox-reconcile-catalog.expected.json", import.meta.url), "utf8"));
+export const EXPECTED_CATALOG_FINGERPRINT = CATALOG_ARTIFACT.catalog_fingerprint;
+
 export const PINNED_CA_FINGERPRINT =
   "80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA";
 
@@ -18,11 +21,15 @@ const CERTIFICATE = /-----BEGIN CERTIFICATE-----\r?\n([\s\S]*?)\r?\n-----END CER
 
 export const SOURCE_WRITERS = Object.freeze([
   ["public.messages", "zzzzz_inbox_message_direct"],
+  ["public.messages", "zzzzzzzz_inbox_operation_target"],
   ["public.messages", "zzz_inbox_guard_inbound_revision_insert"],
   ["public.messages", "zzz_inbox_guard_inbound_revision_update"],
   ["public.messages", "inbox_capture_inbound_head"],
+  ["public.ai_disposition_reviews", "zzzzzzzz_inbox_operation_target"],
   ["public.properties", "zzzzz_inbox_parent"],
   ["public.properties", "zzzzzz_inbox_policy"],
+  ["public.properties", "zzzzzzzzz_inbox_sms_scope"],
+  ["public.properties", "zzzzzzz_inbox_reply_context"],
   ["public.contacts", "zzzzz_inbox_parent"],
   ["public.contacts", "zzzzzz_inbox_policy"],
   ["public.ai_disposition_reviews", "zzzzz_inbox_parent_review"],
@@ -36,6 +43,9 @@ export const SOURCE_WRITERS = Object.freeze([
   ["public.sms_phone_suppressions", "zzzzzz_inbox_policy"],
   ["public.memberships", "zzzzzz_inbox_policy"],
   ["public.memberships", "zzzzzzz_inbox_access"],
+  ["public.sequence_enrollments", "zzzzzzzzz_inbox_sms_scope"],
+  ["public.provider_sender_numbers", "zzzzzzz_inbox_reply_context"],
+  ["public.organizations", "zzzzzzz_inbox_reply_context"],
   ["auth.sessions", "zzzzzzz_inbox_access"],
   ["inbox_message_capture.dirty", "maintained_queue"],
   ["inbox_maintained.rows", "bridge_projection"],
@@ -43,15 +53,41 @@ export const SOURCE_WRITERS = Object.freeze([
 ]);
 
 const CATALOG_SCHEMAS = Object.freeze([
-  "inbox_backfill",
-  "inbox_bridge",
   "inbox_capture_boundary",
   "inbox_control",
+  "inbox_summary_contract",
+  "inbox_unknown_summary",
+  "inbox_authenticated_detail",
   "inbox_maintained",
   "inbox_message_capture",
   "inbox_parent",
   "inbox_policy",
   "inbox_safety",
+  "inbox_backfill",
+  "inbox_bridge",
+  "inbox_read",
+  "inbox_operations",
+  "inbox_saved_actions",
+  "inbox_operation_domain",
+  "inbox_action_api",
+  "inbox_reply_context",
+  "inbox_reply_preparation",
+  "inbox_reply_review",
+  "inbox_reply_send",
+]);
+
+const CATALOG_RELATIONS = Object.freeze([
+  "public.messages",
+  "public.properties",
+  "public.contacts",
+  "public.ai_disposition_reviews",
+  "public.consent_events",
+  "public.message_threads",
+  "public.sms_phone_suppressions",
+  "public.memberships",
+  "public.sequence_enrollments",
+  "public.provider_sender_numbers",
+  "auth.sessions",
 ]);
 
 const sql = (text, values = []) => ({ text, values });
@@ -208,53 +244,6 @@ function iso(value) {
   return date.toISOString();
 }
 
-function projectionRecord(row) {
-  const summary = row.summary;
-  if (!summary || summary.exists !== true) return null;
-  const unknown = row.target_kind === "unknown_sender";
-  const assigned = summary.assigned_user_id == null ? "Unassigned" : "Assigned";
-  const latest = unknown ? summary.latest_at : summary.last_message_at;
-  return {
-    target_kind: row.target_kind,
-    target_id: row.target_id,
-    projection_revision: String(row.revision),
-    source_generation: String(row.source_generation),
-    name: String((unknown ? (summary.raw_sender_key || "Unknown sender") : (summary.contact_name || summary.thread_customer_phone || "Unknown contact"))).slice(0, 2000),
-    context: String(unknown ? "Unknown sender" : (summary.property_address || "No property linked")).slice(0, 2000),
-    preview: String(unknown ? (summary.latest_preview || "") : (summary.last_message_preview || "")).slice(0, 2000),
-    time_label: String(latest || ""),
-    outcome_label: unknown ? (summary.is_dismissed === true ? "Dismissed" : "Unknown sender") : String(summary.outreach_dispo || "No outcome"),
-    assigned_label: assigned,
-    unread: unknown ? null : Number(summary.unread_count || 0) > 0,
-    latest_at: iso(latest),
-    visible_active: Boolean(unknown ? summary.visible_unknown : summary.visible_all_hide_noise),
-    visible_dismissed: unknown && Boolean(summary.visible_dismissed),
-    visible_review: !unknown && Boolean(summary.visible_review),
-    visible_unread: !unknown && Boolean(summary.visible_unread_hide_noise),
-  };
-}
-
-function actualProjectionRecord(row) {
-  return {
-    target_kind: row.target_kind,
-    target_id: row.target_id,
-    projection_revision: String(row.projection_revision),
-    source_generation: String(row.source_generation),
-    name: row.name,
-    context: row.context,
-    preview: row.preview,
-    time_label: row.time_label,
-    outcome_label: row.outcome_label,
-    assigned_label: row.assigned_label,
-    unread: row.unread,
-    latest_at: iso(row.latest_at),
-    visible_active: row.visible_active,
-    visible_dismissed: row.visible_dismissed,
-    visible_review: row.visible_review,
-    visible_unread: row.visible_unread,
-  };
-}
-
 function hashRows(rows) {
   return digestJson(rows.map(stable).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))));
 }
@@ -308,18 +297,9 @@ async function catalogFingerprint(client) {
        JOIN pg_class c ON c.oid=t.tgrelid
        JOIN pg_namespace tn ON tn.oid=c.relnamespace
       WHERE NOT t.tgisinternal
-        AND (tn.nspname=ANY($1::text[]) OR c.oid IN (
-          'public.messages'::regclass,
-          'public.properties'::regclass,
-          'public.contacts'::regclass,
-          'public.ai_disposition_reviews'::regclass,
-          'public.consent_events'::regclass,
-          'public.message_threads'::regclass,
-          'public.sms_phone_suppressions'::regclass,
-          'public.memberships'::regclass
-        ))
+        AND (tn.nspname=ANY($1::text[]) OR format('%I.%I',tn.nspname,c.relname)=ANY($2::text[]))
       ORDER BY tn.nspname,c.oid::regclass::text,t.tgname`,
-    [CATALOG_SCHEMAS],
+    [CATALOG_SCHEMAS, CATALOG_RELATIONS],
   ))).rows;
   return digestJson({ functions, tables, triggers });
 }
@@ -375,10 +355,10 @@ function validateAttestation(raw, { generation, expectedCatalogFingerprint }) {
     return { pass: false, code: "SOURCE_WRITER_ATTESTATION_INVALID" };
   }
   const payload = expectedAttestationPayload(raw);
-  if (raw.digest !== digestJson(payload) || raw.capture_generation !== generation) {
+  if (raw.operator_assertion_digest !== digestJson(payload) || raw.capture_generation !== generation) {
     return { pass: false, code: "SOURCE_WRITER_ATTESTATION_INVALID" };
   }
-  return { pass: true, digest: raw.digest };
+  return { pass: true, operator_assertion_digest: raw.operator_assertion_digest };
 }
 
 async function readAttestation(path) {
@@ -390,59 +370,256 @@ async function readAttestation(path) {
   }
 }
 
-async function collectOrgReconciliation(client) {
-  const orgRows = (await client.query("SELECT id::text AS id FROM public.organizations ORDER BY id")).rows;
-  const sourceRows = (await client.query(
-    `SELECT org_id::text AS org_id,target_kind,target_id::text AS target_id,revision,source_generation,summary
-       FROM inbox_maintained.rows
-      ORDER BY org_id,target_kind,target_id`,
-  )).rows;
-  const projectionRows = (await client.query(
-    `SELECT org_id::text AS org_id,target_kind,target_id::text AS target_id,projection_revision,source_generation,
-            name,context,preview,time_label,outcome_label,assigned_label,unread,latest_at,
-            visible_active,visible_dismissed,visible_review,visible_unread
-       FROM inbox_bridge.summaries
-      ORDER BY org_id,target_kind,target_id`,
-  )).rows;
-  const byOrg = new Map(orgRows.map(({ id }) => [id, { source: [], projection: [], tombstones: 0 }]));
-  for (const row of sourceRows) {
-    if (!byOrg.has(row.org_id)) byOrg.set(row.org_id, { source: [], projection: [], tombstones: 0 });
-    const target = byOrg.get(row.org_id);
-    const record = projectionRecord(row);
-    if (record) target.source.push(record);
-    else target.tombstones++;
+function rowKey(row) {
+  return `${row.org_id}|${row.target_kind}|${row.target_id}`;
+}
+
+function compareProjectionRows(expectedRows, actualRows) {
+  const expected = new Map(expectedRows.map((row) => [rowKey(row), row]));
+  const actual = new Map(actualRows.map((row) => [rowKey(row), row]));
+  let missing = 0;
+  let extra = 0;
+  let mismatched = 0;
+  for (const [key, value] of expected) {
+    if (!actual.has(key)) missing++;
+    else if (JSON.stringify(stable(value)) !== JSON.stringify(stable(actual.get(key)))) mismatched++;
   }
-  for (const row of projectionRows) {
-    if (!byOrg.has(row.org_id)) byOrg.set(row.org_id, { source: [], projection: [], tombstones: 0 });
-    byOrg.get(row.org_id).projection.push(actualProjectionRecord(row));
-  }
+  for (const key of actual.keys()) if (!expected.has(key)) extra++;
+  return { missing, extra, mismatched, total: missing + extra + mismatched };
+}
+
+function comparableSummary(summary) {
+  if (!summary || typeof summary !== "object") return summary;
+  const copy = { ...summary };
+  // J5a records the evaluation clock in the summary. It is evidence of when
+  // the candidate was computed, not a source value that must equal the next
+  // read-only snapshot's clock.
+  delete copy.as_of;
+  delete copy.cutoff;
+  return copy;
+}
+
+async function collectOrgReconciliation(client, { observedAt = new Date().toISOString() } = {}) {
+  // The target set is deliberately derived from the same canonical source tables
+  // read by J5a capture/summary functions. The expected maintained candidate is
+  // produced by inbox_maintained.snapshot(), not by a JavaScript summary clone.
+  const result = await client.query(`
+    WITH params AS (SELECT $1::timestamptz AS at_time),
+    known_targets AS (
+      SELECT DISTINCT org_id, 'known_conversation'::text AS target_kind, conversation_id AS target_id
+      FROM public.messages WHERE channel='sms' AND conversation_id IS NOT NULL
+      UNION
+      SELECT DISTINCT org_id, 'known_conversation'::text, conversation_id
+      FROM public.ai_disposition_reviews WHERE conversation_id IS NOT NULL
+      UNION
+      SELECT DISTINCT org_id, 'known_conversation'::text, conversation_id
+      FROM public.message_threads WHERE conversation_id IS NOT NULL
+    ),
+    unknown_sources AS (
+      SELECT DISTINCT org_id, from_address AS raw_sender
+      FROM public.messages
+      WHERE channel='sms' AND direction='inbound' AND contact_id IS NULL
+        AND from_address IS NOT NULL AND from_address<>''
+    ),
+    unknown_targets AS (
+      SELECT u.org_id, u.raw_sender, 'unknown_sender'::text AS target_kind, g.sender_group_id AS target_id
+      FROM unknown_sources u
+      JOIN inbox_message_capture.sender_groups g
+        ON g.org_id=u.org_id AND g.raw_sender COLLATE "C"=u.raw_sender COLLATE "C"
+    ),
+    base_targets AS (
+      SELECT * FROM known_targets
+      UNION
+      SELECT org_id,target_kind,target_id FROM unknown_targets
+    ),
+    dirty_targets AS (
+      SELECT org_id,target_kind,target_id FROM inbox_message_capture.dirty
+    ),
+    all_targets AS (
+      SELECT org_id,target_kind,target_id,true AS base_target FROM base_targets
+      UNION
+      SELECT d.org_id,d.target_kind,d.target_id,false
+      FROM dirty_targets d
+      WHERE NOT EXISTS (
+        SELECT 1 FROM base_targets b
+        WHERE b.org_id=d.org_id AND b.target_kind=d.target_kind AND b.target_id=d.target_id
+      )
+    ),
+    canonical AS (
+      SELECT a.org_id::text,a.target_kind,a.target_id::text,a.base_target,
+             candidate.candidate,
+             CASE WHEN r.org_id IS NULL THEN NULL ELSE jsonb_build_object(
+               'org_id',r.org_id::text,'target_kind',r.target_kind,'target_id',r.target_id::text,
+               'revision',r.revision::text,'source_generation',r.source_generation::text,
+               'summary',r.summary,'next_expiry',r.next_expiry
+             ) END AS actual
+      FROM all_targets a
+      LEFT JOIN inbox_maintained.rows r
+        ON r.org_id=a.org_id AND r.target_kind=a.target_kind AND r.target_id=a.target_id
+      LEFT JOIN LATERAL (
+        SELECT inbox_maintained.snapshot(a.org_id,a.target_kind,a.target_id,params.at_time) AS candidate
+        FROM params
+      ) candidate ON true
+    ),
+    expected_bridge AS (
+      SELECT jsonb_build_object(
+        'org_id',c.org_id,'target_kind',c.target_kind,'target_id',c.target_id,
+        'projection_revision',c.candidate->>'expected_revision','source_generation',c.candidate->>'generation',
+        'name',left(CASE WHEN c.target_kind='unknown_sender' THEN coalesce(s->>'raw_sender_key','Unknown sender') ELSE coalesce(nullif(s->>'contact_name',''),s->>'thread_customer_phone','Unknown contact') END,2000),
+        'context',left(CASE WHEN c.target_kind='unknown_sender' THEN 'Unknown sender' ELSE coalesce(s->>'property_address','No property linked') END,2000),
+        'preview',left(coalesce(CASE WHEN c.target_kind='unknown_sender' THEN s->>'latest_preview' ELSE s->>'last_message_preview' END,''),2000),
+        'time_label',coalesce(CASE WHEN c.target_kind='unknown_sender' THEN s->>'latest_at' ELSE s->>'last_message_at' END,''),
+        'outcome_label',CASE WHEN c.target_kind='unknown_sender' THEN CASE WHEN (s->>'is_dismissed')::boolean THEN 'Dismissed' ELSE 'Unknown sender' END ELSE coalesce(s->>'outreach_dispo','No outcome') END,
+        'assigned_label',CASE WHEN s->>'assigned_user_id' IS NULL THEN 'Unassigned' ELSE 'Assigned' END,
+        'unread',CASE WHEN c.target_kind='unknown_sender' THEN NULL ELSE coalesce((s->>'unread_count')::bigint,0)>0 END,
+        'latest_at',CASE WHEN c.target_kind='unknown_sender' THEN s->>'latest_at' ELSE s->>'last_message_at' END,
+        'visible_active',CASE WHEN c.target_kind='unknown_sender' THEN coalesce((s->>'visible_unknown')::boolean,false) ELSE coalesce((s->>'visible_all_hide_noise')::boolean,false) END,
+        'visible_dismissed',c.target_kind='unknown_sender' AND coalesce((s->>'visible_dismissed')::boolean,false),
+        'visible_review',c.target_kind<>'unknown_sender' AND coalesce((s->>'visible_review')::boolean,false),
+        'visible_unread',c.target_kind<>'unknown_sender' AND coalesce((s->>'visible_unread_hide_noise')::boolean,false)
+      ) AS row
+      FROM canonical c
+      CROSS JOIN LATERAL (SELECT c.candidate->'summary' AS s) summary
+      WHERE c.candidate IS NOT NULL AND c.candidate->'summary'->>'exists'='true'
+    ),
+    expected_filter AS (
+      SELECT jsonb_build_object(
+        'org_id',c.org_id,'target_kind',c.target_kind,'target_id',c.target_id,'revision',c.candidate->>'expected_revision',
+        'latest_at',CASE WHEN c.target_kind='unknown_sender' THEN s->>'latest_at' ELSE s->>'last_message_at' END,
+        'contact_id',s->>'contact_id','has_recent',coalesce((s->>'has_recent')::boolean,false),
+        'is_noise',coalesce((s->>'is_noise')::boolean,false),
+        'assignable',coalesce(s->>'property_status'<>'prospect',false),
+        'assigned_user_id',s->>'assigned_user_id',
+        'unread',CASE WHEN c.target_kind='unknown_sender' THEN NULL ELSE coalesce((s->>'unread_count')::bigint,0)>0 END,
+        'escalated',coalesce(s->>'ai_responder_status'='escalated',false),
+        'needs_outcome',coalesce((s->>'needs_outcome')::boolean,false),
+        'review',s->>'ai_disposition_review_id' IS NOT NULL AND NOT coalesce((s->>'is_test_traffic')::boolean,false),
+        'unknown_active',coalesce((s->>'visible_unknown')::boolean,false),
+        'unknown_dismissed',coalesce((s->>'visible_dismissed')::boolean,false),
+        'outreach_dispo',s->>'outreach_dispo'
+      ) AS row
+      FROM canonical c
+      CROSS JOIN LATERAL (SELECT c.candidate->'summary' AS s) summary
+      WHERE c.candidate IS NOT NULL AND c.candidate->'summary'->>'exists'='true'
+    ),
+    actual_bridge AS (
+      SELECT jsonb_build_object(
+        'org_id',r.org_id::text,'target_kind',r.target_kind,'target_id',r.target_id::text,
+        'projection_revision',r.projection_revision::text,'source_generation',r.source_generation::text,
+        'name',r.name,'context',r.context,'preview',r.preview,'time_label',r.time_label,
+        'outcome_label',r.outcome_label,'assigned_label',r.assigned_label,'unread',r.unread,
+        'latest_at',r.latest_at,'visible_active',r.visible_active,'visible_dismissed',r.visible_dismissed,
+        'visible_review',r.visible_review,'visible_unread',r.visible_unread
+      ) AS row
+      FROM inbox_bridge.summaries r
+    ),
+    actual_filter AS (
+      SELECT jsonb_build_object(
+        'org_id',r.org_id::text,'target_kind',r.target_kind,'target_id',r.target_id::text,'revision',r.revision::text,
+        'latest_at',r.latest_at,'contact_id',r.contact_id,'has_recent',r.has_recent,'is_noise',r.is_noise,
+        'assignable',r.assignable,'assigned_user_id',r.assigned_user_id,'unread',r.unread,
+        'escalated',r.escalated,'needs_outcome',r.needs_outcome,'review',r.review,
+        'unknown_active',r.unknown_active,'unknown_dismissed',r.unknown_dismissed,'outreach_dispo',r.outreach_dispo
+      ) AS row
+      FROM inbox_bridge.filter_rows r
+    )
+    SELECT
+      coalesce((SELECT jsonb_agg(jsonb_build_object('id',id::text) ORDER BY id) FROM public.organizations),'[]'::jsonb) AS organizations,
+      coalesce((SELECT jsonb_agg(jsonb_build_object('org_id',u.org_id::text,'mapped',EXISTS(SELECT 1 FROM unknown_targets t WHERE t.org_id=u.org_id AND t.raw_sender COLLATE "C"=u.raw_sender COLLATE "C")) ORDER BY u.org_id,u.raw_sender) FROM unknown_sources u),'[]'::jsonb) AS unknown_sources,
+      coalesce((SELECT jsonb_agg(to_jsonb(c) ORDER BY c.org_id,c.target_kind,c.target_id) FROM canonical c),'[]'::jsonb) AS canonical_rows,
+      coalesce((SELECT jsonb_agg(to_jsonb(r) ORDER BY r.org_id,r.target_kind,r.target_id) FROM inbox_maintained.rows r),'[]'::jsonb) AS maintained_rows,
+      coalesce((SELECT jsonb_agg(row ORDER BY row->>'org_id',row->>'target_kind',row->>'target_id') FROM expected_bridge),'[]'::jsonb) AS expected_bridge,
+      coalesce((SELECT jsonb_agg(row ORDER BY row->>'org_id',row->>'target_kind',row->>'target_id') FROM actual_bridge),'[]'::jsonb) AS actual_bridge,
+      coalesce((SELECT jsonb_agg(row ORDER BY row->>'org_id',row->>'target_kind',row->>'target_id') FROM expected_filter),'[]'::jsonb) AS expected_filter,
+      coalesce((SELECT jsonb_agg(row ORDER BY row->>'org_id',row->>'target_kind',row->>'target_id') FROM actual_filter),'[]'::jsonb) AS actual_filter
+  `, [observedAt]);
+  const payload = result.rows[0];
+  const organizations = (payload.organizations ?? []).map(({ id }) => String(id));
+  const canonicalRows = payload.canonical_rows ?? [];
+  const maintainedRows = payload.maintained_rows ?? [];
+  const unknownSources = payload.unknown_sources ?? [];
+  const expectedBridge = payload.expected_bridge ?? [];
+  const actualBridge = payload.actual_bridge ?? [];
+  const expectedFilter = payload.expected_filter ?? [];
+  const actualFilter = payload.actual_filter ?? [];
+  const byOrg = new Map(organizations.map((id) => [id, { canonical: [], maintained: [], expectedBridge: [], actualBridge: [], expectedFilter: [], actualFilter: [], unknownSources: [] }]));
+  const add = (map, row, field) => {
+    const org = String(row.org_id);
+    if (!map.has(org)) map.set(org, { canonical: [], maintained: [], expectedBridge: [], actualBridge: [], expectedFilter: [], actualFilter: [], unknownSources: [] });
+    map.get(org)[field].push(row);
+  };
+  for (const row of canonicalRows) add(byOrg, row, "canonical");
+  for (const row of maintainedRows) add(byOrg, row, "maintained");
+  for (const row of expectedBridge) add(byOrg, row, "expectedBridge");
+  for (const row of actualBridge) add(byOrg, row, "actualBridge");
+  for (const row of expectedFilter) add(byOrg, row, "expectedFilter");
+  for (const row of actualFilter) add(byOrg, row, "actualFilter");
+  for (const row of unknownSources) add(byOrg, row, "unknownSources");
+
   const perOrg = [];
-  for (const [id, value] of [...byOrg.entries()].sort(([left], [right]) => left.localeCompare(right))) {
-    const expected = new Map(value.source.map((row) => [`${row.target_kind}|${row.target_id}`, row]));
-    const actual = new Map(value.projection.map((row) => [`${row.target_kind}|${row.target_id}`, row]));
-    let mismatches = 0;
-    let orphan = 0;
-    for (const [key, row] of expected) {
-      if (!actual.has(key)) mismatches++;
-      else if (JSON.stringify(stable(row)) !== JSON.stringify(stable(actual.get(key)))) mismatches++;
+  for (const [orgId, value] of [...byOrg.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    const targetExpected = new Map();
+    const targetActual = new Map();
+    let baseCount = 0;
+    let canonicalMissing = 0;
+    for (const row of value.canonical) {
+      const key = rowKey(row);
+      if (row.base_target) baseCount++;
+      if (row.candidate === null) canonicalMissing++;
+      if (row.candidate !== null) targetExpected.set(key, row.candidate);
+      if (row.actual !== null) targetActual.set(key, row.actual);
     }
-    for (const key of actual.keys()) if (!expected.has(key)) { mismatches++; orphan++; }
+    let maintainedMissing = 0;
+    let maintainedMismatched = 0;
+    for (const row of value.canonical) {
+      if (row.base_target && row.actual === null) maintainedMissing++;
+      if (row.candidate === null || row.actual === null) continue;
+      const actual = row.actual;
+      const candidate = row.candidate;
+      if (actual.revision !== candidate.expected_revision || actual.source_generation !== candidate.generation || JSON.stringify(stable(comparableSummary(actual.summary))) !== JSON.stringify(stable(comparableSummary(candidate.summary))) || iso(actual.next_expiry) !== iso(candidate.summary?.next_window_expiry)) {
+        maintainedMismatched++;
+      }
+    }
+    const baseTargetKeys = new Set(value.canonical.filter((row) => row.base_target).map(rowKey));
+    const maintainedExtra = value.maintained.filter((row) => !baseTargetKeys.has(rowKey(row))).length;
+    const bridgeComparison = compareProjectionRows(value.expectedBridge, value.actualBridge);
+    const filterComparison = compareProjectionRows(value.expectedFilter, value.actualFilter);
+    const unknownMappingMissing = value.unknownSources.filter((row) => row.mapped !== true).length;
+    const mismatchCount = canonicalMissing + maintainedMissing + maintainedMismatched + maintainedExtra + bridgeComparison.total + filterComparison.total + unknownMappingMissing;
+    const expectedTargets = [...targetExpected.values()].map((row) => ({ target_kind: row.target_kind, target_id: row.target_id, source_generation: row.generation, summary: row.summary }));
+    const actualTargets = [...targetActual.values()].map((row) => ({ target_kind: row.target_kind, target_id: row.target_id, source_generation: row.source_generation, summary: row.summary }));
     perOrg.push({
-      org_digest: orgDigest(id),
-      source_count: value.source.length,
-      projection_count: value.projection.length,
-      tombstone_count: value.tombstones,
-      orphan_projection_count: orphan,
-      mismatch_count: mismatches,
-      source_hash: hashRows(value.source),
-      projection_hash: hashRows(value.projection),
+      org_digest: orgDigest(orgId),
+      base_conversation_count: baseCount,
+      unknown_source_count: value.unknownSources.length,
+      unknown_mapping_missing_count: unknownMappingMissing,
+      maintained_count: value.maintained.length,
+      canonical_missing_count: canonicalMissing,
+      maintained_missing_count: maintainedMissing,
+      maintained_extra_count: maintainedExtra,
+      maintained_mismatch_count: maintainedMismatched,
+      projection_count: value.actualBridge.length,
+      filter_count: value.actualFilter.length,
+      projection_missing_count: bridgeComparison.missing,
+      projection_extra_count: bridgeComparison.extra,
+      projection_mismatch_count: bridgeComparison.mismatched,
+      filter_missing_count: filterComparison.missing,
+      filter_extra_count: filterComparison.extra,
+      filter_mismatch_count: filterComparison.mismatched,
+      mismatch_count: mismatchCount,
+      source_hash: hashRows(expectedTargets),
+      maintained_hash: hashRows(actualTargets),
+      projection_hash: hashRows(value.actualBridge),
+      filter_hash: hashRows(value.actualFilter),
     });
   }
   return {
+    source_tables: ["public.messages", "public.ai_disposition_reviews", "public.message_threads"],
+    unknown_source_table: "public.messages",
     organizations: perOrg.length,
-    mismatched_organizations: perOrg.filter((row) => row.mismatch_count !== 0 || row.source_count !== row.projection_count).length,
+    mismatched_organizations: perOrg.filter((row) => row.mismatch_count !== 0).length,
     per_org: perOrg,
-    pass: perOrg.every((row) => row.mismatch_count === 0 && row.source_count === row.projection_count),
+    pass: perOrg.every((row) => row.mismatch_count === 0),
   };
 }
 
@@ -489,7 +666,7 @@ async function collectState(client) {
 }
 
 export async function collectEvidence(client, {
-  expectedCatalogFingerprint,
+  expectedCatalogFingerprint = EXPECTED_CATALOG_FINGERPRINT,
   sourceWriterAttestation,
   attestationPath,
   observedAt = new Date().toISOString(),
@@ -516,6 +693,7 @@ export async function collectEvidence(client, {
     no_pending_work: noPendingWork,
     no_unresolved_collisions: noCollisions,
     projection_reconciled: reconciliation.pass,
+    filter_reconciled: reconciliation.pass,
     catalog_fingerprint_match: catalogMatch,
     source_writer_coverage: writer.pass,
     source_writer_attestation: attestation.pass,
@@ -544,25 +722,29 @@ export async function collectEvidence(client, {
     reconciliation: {
       organizations: reconciliation.organizations,
       mismatched_organizations: reconciliation.mismatched_organizations,
+      source_tables: reconciliation.source_tables,
+      unknown_source_table: reconciliation.unknown_source_table,
       per_org: reconciliation.per_org,
     },
     fingerprints: {
       expected_catalog: typeof expectedCatalogFingerprint === "string" && HEX64.test(expectedCatalogFingerprint) ? expectedCatalogFingerprint.toLowerCase() : null,
+      expected_catalog_source: CATALOG_ARTIFACT.source,
       live_catalog: liveCatalogFingerprint,
       live_capture: state.liveCaptureFingerprint,
       source_writer: writer.trigger_fingerprint,
     },
     source_writer_attestation: {
       present: Boolean(sourceWriterAttestation),
-      digest: attestation.digest ?? null,
+      operator_assertion_digest: attestation.operator_assertion_digest ?? null,
       path_supplied: Boolean(attestationPath),
+      label: "operator assertion; not a cryptographic signature",
     },
     source_writer_coverage: {
       required_trigger_count: writer.required_trigger_count,
       observed_trigger_count: writer.observed_trigger_count,
       missing_trigger_count: writer.missing_trigger_count,
       disabled_trigger_count: writer.disabled_trigger_count,
-      digest: writer.trigger_fingerprint,
+      trigger_fingerprint: writer.trigger_fingerprint,
     },
     checks,
     status: errors.length === 0 ? "ready" : "blocked",
@@ -584,15 +766,200 @@ async function readOnlyEvidence(client, options) {
   }
 }
 
+async function collectRecoveryPlan(client, { expectedCatalogFingerprint = EXPECTED_CATALOG_FINGERPRINT, observedAt = new Date().toISOString() } = {}) {
+  const state = await collectState(client);
+  const writer = await collectSourceWriterEvidence(client);
+  const liveCatalogFingerprint = await catalogFingerprint(client);
+  const reconciliation = await collectOrgReconciliation(client, { observedAt });
+  const boundaryCount = Number((await client.query("SELECT count(*)::int AS count FROM inbox_read.boundaries")).rows[0]?.count ?? 0);
+  const catalogMatch = typeof expectedCatalogFingerprint === "string" && HEX64.test(expectedCatalogFingerprint) && liveCatalogFingerprint === expectedCatalogFingerprint.toLowerCase();
+  const checks = {
+    serving_disabled: state.rollout?.serving_enabled === false,
+    source_writer_coverage: writer.pass,
+    catalog_fingerprint_match: catalogMatch,
+    full_reconciliation: reconciliation.pass,
+  };
+  const evidence = {
+    evidence_version: 2,
+    observed_at: observedAt,
+    mode: "capture-bypass-recovery",
+    capture_generation: state.generation,
+    serving_enabled: state.rollout?.serving_enabled ?? null,
+    read_boundary_count: boundaryCount,
+    planned: {
+      capture_generation_bump: true,
+      invalidate_prior_read_boundaries: boundaryCount,
+      rebuild_capture_targets: true,
+      republish_maintained_rows: true,
+      reconcile_bridge_summaries: true,
+      reconcile_bridge_filter_rows: true,
+      marker_write: false,
+      serving_write: false,
+    },
+    reconciliation: {
+      organizations: reconciliation.organizations,
+      mismatched_organizations: reconciliation.mismatched_organizations,
+      source_tables: reconciliation.source_tables,
+      unknown_source_table: reconciliation.unknown_source_table,
+      per_org: reconciliation.per_org,
+    },
+    fingerprints: {
+      expected_catalog: typeof expectedCatalogFingerprint === "string" && HEX64.test(expectedCatalogFingerprint) ? expectedCatalogFingerprint.toLowerCase() : null,
+      expected_catalog_source: CATALOG_ARTIFACT.source,
+      live_catalog: liveCatalogFingerprint,
+      source_writer: writer.trigger_fingerprint,
+    },
+    source_writer_coverage: {
+      required_trigger_count: writer.required_trigger_count,
+      observed_trigger_count: writer.observed_trigger_count,
+      missing_trigger_count: writer.missing_trigger_count,
+      disabled_trigger_count: writer.disabled_trigger_count,
+      trigger_fingerprint: writer.trigger_fingerprint,
+    },
+    checks,
+    status: Object.values(checks).every(Boolean) ? "ready" : "blocked",
+  };
+  evidence.evidence_digest = digestJson({ ...evidence, observed_at: undefined, evidence_digest: undefined });
+  return evidence;
+}
+
+async function readOnlyRecoveryPlan(client, options) {
+  await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+  try {
+    const evidence = await collectRecoveryPlan(client, options);
+    await client.query("COMMIT");
+    return evidence;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  }
+}
+
+async function rebuildCaptureAndProjection(client, observedAt) {
+  await client.query("UPDATE inbox_message_capture.dirty SET generation=generation+1");
+  const unknownSources = (await client.query(`
+    SELECT DISTINCT org_id,from_address AS raw_sender
+    FROM public.messages
+    WHERE channel='sms' AND direction='inbound' AND contact_id IS NULL
+      AND from_address IS NOT NULL AND from_address<>''
+    ORDER BY org_id,raw_sender
+  `)).rows;
+  for (const source of unknownSources) {
+    await client.query("SELECT inbox_message_capture.sender_id($1,$2)", [source.org_id, source.raw_sender]);
+  }
+  await client.query(`
+    WITH known_targets AS (
+      SELECT DISTINCT org_id,'known_conversation'::text AS target_kind,conversation_id AS target_id
+      FROM public.messages WHERE channel='sms' AND conversation_id IS NOT NULL
+      UNION
+      SELECT DISTINCT org_id,'known_conversation'::text,conversation_id
+      FROM public.ai_disposition_reviews WHERE conversation_id IS NOT NULL
+      UNION
+      SELECT DISTINCT org_id,'known_conversation'::text,conversation_id
+      FROM public.message_threads WHERE conversation_id IS NOT NULL
+    ), unknown_targets AS (
+      SELECT m.org_id,'unknown_sender'::text AS target_kind,g.sender_group_id AS target_id
+      FROM (SELECT DISTINCT org_id,from_address FROM public.messages WHERE channel='sms' AND direction='inbound' AND contact_id IS NULL AND from_address IS NOT NULL AND from_address<>'') m
+      JOIN inbox_message_capture.sender_groups g ON g.org_id=m.org_id AND g.raw_sender COLLATE "C"=m.from_address COLLATE "C"
+    ), targets AS (
+      SELECT * FROM known_targets UNION SELECT * FROM unknown_targets
+    )
+    INSERT INTO inbox_message_capture.dirty(org_id,target_kind,target_id,generation)
+    SELECT org_id,target_kind,target_id,1 FROM targets
+    ON CONFLICT(org_id,target_kind,target_id) DO UPDATE SET generation=inbox_message_capture.dirty.generation+1
+  `);
+  await client.query(`
+    DELETE FROM inbox_bridge.summaries s
+    WHERE NOT EXISTS (SELECT 1 FROM inbox_message_capture.dirty d WHERE d.org_id=s.org_id AND d.target_kind=s.target_kind AND d.target_id=s.target_id);
+    DELETE FROM inbox_bridge.filter_rows f
+    WHERE NOT EXISTS (SELECT 1 FROM inbox_message_capture.dirty d WHERE d.org_id=f.org_id AND d.target_kind=f.target_kind AND d.target_id=f.target_id);
+    DELETE FROM inbox_maintained.rows r
+    WHERE NOT EXISTS (SELECT 1 FROM inbox_message_capture.dirty d WHERE d.org_id=r.org_id AND d.target_kind=r.target_kind AND d.target_id=r.target_id);
+    DELETE FROM inbox_message_capture.route_edges;
+    INSERT INTO inbox_message_capture.route_edges(org_id,message_id,conversation_id,phone_e164)
+    SELECT m.org_id,m.id,m.conversation_id,
+      CASE WHEN length(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'))=10
+        THEN '+1'||regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g')
+        WHEN length(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'))=11
+          AND left(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'),1)='1'
+        THEN '+'||regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g') END
+    FROM public.messages m
+    WHERE m.channel='sms' AND m.conversation_id IS NOT NULL
+      AND CASE WHEN length(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'))=10
+        THEN '+1'||regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g')
+        WHEN length(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'))=11
+          AND left(regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g'),1)='1'
+        THEN '+'||regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g') END IS NOT NULL
+  `);
+  const dirty = (await client.query("SELECT org_id,target_kind,target_id FROM inbox_message_capture.dirty ORDER BY org_id,target_kind,target_id")).rows;
+  const resultCounts = { targets: dirty.length, applied: 0, already_applied: 0 };
+  for (const row of dirty) {
+    const candidate = (await client.query(
+      "SELECT inbox_maintained.snapshot($1,$2,$3,$4) AS candidate",
+      [row.org_id, row.target_kind, row.target_id, observedAt],
+    )).rows[0]?.candidate;
+    if (!candidate) throw new ReconciliationBlocked("RECOVERY_SNAPSHOT_MISSING");
+    const result = (await client.query("SELECT inbox_maintained.publish($1) AS result", [candidate])).rows[0]?.result;
+    if (!['applied', 'already_applied'].includes(result)) throw new ReconciliationBlocked(`RECOVERY_PUBLISH_${String(result).toUpperCase()}`);
+    resultCounts[result]++;
+  }
+  const cleared = await client.query("DELETE FROM inbox_maintained.queue");
+  resultCounts.queue_cleared = cleared.rowCount;
+  return resultCounts;
+}
+
+async function runCaptureRecovery(client, {
+  expectedCatalogFingerprint = EXPECTED_CATALOG_FINGERPRINT,
+  apply = false,
+} = {}) {
+  const initial = await readOnlyRecoveryPlan(client, { expectedCatalogFingerprint });
+  if (initial.serving_enabled === true) return { status: "blocked", evidence: initial, recovery: null };
+  if (!apply) return { status: "recovery-dry-run", evidence: initial, recovery: { applied: false } };
+  await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+  try {
+    await client.query("SET LOCAL statement_timeout='120s'");
+    await client.query("SET LOCAL lock_timeout='5s'");
+    await client.query("LOCK TABLE public.messages,public.ai_disposition_reviews,public.message_threads,public.contacts,public.properties,public.consent_events,public.sms_phone_suppressions,public.memberships IN SHARE MODE");
+    const recheck = await collectRecoveryPlan(client, { expectedCatalogFingerprint });
+    if (recheck.serving_enabled === true) throw new ReconciliationBlocked("SERVING_ENABLED");
+    const oldGeneration = recheck.capture_generation;
+    const generation = (await client.query("UPDATE inbox_capture_boundary.generation SET generation=gen_random_uuid() WHERE singleton RETURNING generation::text AS generation")).rows[0]?.generation;
+    if (!generation) throw new ReconciliationBlocked("CAPTURE_GENERATION_MISSING");
+    const invalidated = await client.query("DELETE FROM inbox_read.boundaries WHERE generation IS DISTINCT FROM $1::uuid", [generation]);
+    const rebuild = await rebuildCaptureAndProjection(client, new Date().toISOString());
+    const after = await collectRecoveryPlan(client, { expectedCatalogFingerprint });
+    if (!after.checks.full_reconciliation) throw new ReconciliationBlocked("RECOVERY_RECONCILIATION_FAILED");
+    after.recovery = {
+      applied: true,
+      capture_generation_before: oldGeneration,
+      capture_generation_after: generation,
+      read_boundaries_invalidated: invalidated.rowCount,
+      rebuild,
+    };
+    after.evidence_digest = digestJson({ ...after, observed_at: undefined, evidence_digest: undefined });
+    await client.query("COMMIT");
+    return { status: "recovery-written", evidence: after, recovery: after.recovery };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  }
+}
+
 export async function reconcileAndMaybeWrite(client, {
-  expectedCatalogFingerprint,
+  expectedCatalogFingerprint = EXPECTED_CATALOG_FINGERPRINT,
   sourceWriterAttestation,
   attestationPath,
   writeMarkers = false,
+  recoverCaptureBypass = false,
+  applyCaptureRecovery = false,
+  beforeWrite,
 } = {}) {
+  if (recoverCaptureBypass) return runCaptureRecovery(client, { expectedCatalogFingerprint, apply: applyCaptureRecovery });
   const initial = await readOnlyEvidence(client, { expectedCatalogFingerprint, sourceWriterAttestation, attestationPath });
   if (initial.status !== "ready") return { status: "blocked", evidence: initial, marker_write: null };
   if (!writeMarkers) return { status: "ready", evidence: initial, marker_write: null };
+
+  await beforeWrite?.(initial);
 
   await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
   try {
@@ -631,10 +998,12 @@ export async function reconcileAndMaybeWrite(client, {
 }
 
 function args(argv, env = process.env) {
-  const result = { writeMarkers: false, output: null, expectedCatalogFingerprint: env.INBOX_RECONCILIATION_EXPECTED_CATALOG_SHA256 ?? null, attestationPath: env.INBOX_RECONCILIATION_SOURCE_WRITER_ATTESTATION ?? null, target: env.INBOX_RECONCILIATION_TARGET ?? "production" };
+  const result = { writeMarkers: false, recoverCaptureBypass: false, applyCaptureRecovery: false, output: null, expectedCatalogFingerprint: env.INBOX_RECONCILIATION_EXPECTED_CATALOG_SHA256 ?? EXPECTED_CATALOG_FINGERPRINT, attestationPath: env.INBOX_RECONCILIATION_SOURCE_WRITER_ATTESTATION ?? null, target: env.INBOX_RECONCILIATION_TARGET ?? "production" };
   for (let index = 0; index < argv.length; index++) {
     const value = argv[index];
     if (value === "--write-markers") result.writeMarkers = true;
+    else if (value === "--recover-capture-bypass") result.recoverCaptureBypass = true;
+    else if (value === "--apply-capture-recovery") result.applyCaptureRecovery = true;
     else if (value === "--output") result.output = argv[++index] ?? null;
     else if (value === "--expected-catalog-fingerprint") result.expectedCatalogFingerprint = argv[++index] ?? null;
     else if (value === "--source-writer-attestation") result.attestationPath = argv[++index] ?? null;
@@ -642,6 +1011,7 @@ function args(argv, env = process.env) {
     else if (value === "--help") result.help = true;
     else throw new Error("ARGUMENT_INVALID");
   }
+  if ((result.writeMarkers && result.recoverCaptureBypass) || (result.applyCaptureRecovery && !result.recoverCaptureBypass)) throw new Error("ARGUMENT_COMBINATION_INVALID");
   return result;
 }
 
@@ -652,7 +1022,7 @@ function redactedError(error) {
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const parsed = args(argv, env);
   if (parsed.help) {
-    process.stdout.write("Dry-run: node scripts/inbox-reconcile-completion.mjs\nMutation: add --write-markers\nDatabase: INBOX_RECONCILIATION_DATABASE_URL\n");
+    process.stdout.write("Dry-run: node scripts/inbox-reconcile-completion.mjs\nMutation: add --write-markers\nRecovery dry-run: add --recover-capture-bypass\nRecovery mutation: add --recover-capture-bypass --apply-capture-recovery\nDatabase: INBOX_RECONCILIATION_DATABASE_URL\n");
     return 0;
   }
   const dsn = env.INBOX_RECONCILIATION_DATABASE_URL;
@@ -665,8 +1035,10 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       sourceWriterAttestation: attestation,
       attestationPath: parsed.attestationPath,
       writeMarkers: parsed.writeMarkers,
+      recoverCaptureBypass: parsed.recoverCaptureBypass,
+      applyCaptureRecovery: parsed.applyCaptureRecovery,
     });
-    const output = { mode: parsed.writeMarkers ? "write-markers" : "dry-run", ...result, connection };
+    const output = { mode: parsed.recoverCaptureBypass ? (parsed.applyCaptureRecovery ? "apply-capture-recovery" : "capture-recovery-dry-run") : (parsed.writeMarkers ? "write-markers" : "dry-run"), ...result, connection };
     const text = `${JSON.stringify(output, null, 2)}\n`;
     if (parsed.output) writeFileSync(parsed.output, text, { mode: 0o600 });
     else process.stdout.write(text);
