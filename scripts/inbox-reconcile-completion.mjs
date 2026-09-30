@@ -1230,20 +1230,16 @@ async function rebuildCaptureAndProjection(client, _observedAt, {
         `WITH candidates AS MATERIALIZED (
          SELECT e.org_id,e.message_id
              FROM inbox_message_capture.route_edges e
-            WHERE NOT EXISTS (
-              SELECT 1
-                FROM public.messages m
-                CROSS JOIN LATERAL (
-                  SELECT regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g') AS digits
-                ) d
-               WHERE m.org_id=e.org_id AND m.id=e.message_id
-                 AND m.channel='sms' AND m.conversation_id IS NOT NULL
-                 AND e.conversation_id=m.conversation_id
-                 AND e.phone_e164 IS NOT DISTINCT FROM CASE
-                   WHEN length(d.digits)=10 THEN '+1'||d.digits
-                   WHEN length(d.digits)=11 AND left(d.digits,1)='1' THEN '+'||d.digits
-                 END
-            )
+            LEFT JOIN public.messages m ON m.org_id=e.org_id AND m.id=e.message_id
+            CROSS JOIN LATERAL (
+              SELECT regexp_replace(coalesce(CASE WHEN m.direction='inbound' THEN m.from_address ELSE m.to_address END,''),'[^0-9]','','g') AS digits
+            ) d
+            WHERE m.id IS NULL
+               OR m.channel<>'sms'
+               OR m.conversation_id IS NULL
+               OR (CASE WHEN length(d.digits)=10 THEN '+1'||d.digits
+                        WHEN length(d.digits)=11 AND left(d.digits,1)='1' THEN '+'||d.digits
+                   END) IS NULL
          ),
          picked AS MATERIALIZED (
            SELECT c.org_id,c.message_id
