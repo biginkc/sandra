@@ -94,6 +94,52 @@ describe("canary failure latch", () => {
     await expect(assertNoUnacknowledgedCanaryFailure("100", "token")).resolves.toBeUndefined();
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+  function mockSkippedRerun(firstConclusion: "failure" | "skipped", ack = "") {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("FAILURE_ACK_RUN_ID")) return new Response(JSON.stringify({ value: ack }));
+      if (url.includes("/attempts/1/jobs") || url.includes("/attempts/2/jobs")) return new Response(JSON.stringify({ total_count: 1, jobs: [
+        { name: "Sequences V1 Prod Canary", status: "completed", conclusion: "skipped", started_at: null },
+      ] }));
+      if (url.includes("/attempts/1")) return new Response(JSON.stringify({
+        id: 99, run_attempt: 1, status: "completed", conclusion: firstConclusion,
+      }));
+      if (url.includes("/jobs?")) return new Response(JSON.stringify({ total_count: 1, jobs: [
+        { name: "Sequences V1 Prod Canary", status: "completed", conclusion: "skipped", started_at: null },
+      ] }));
+      return new Response(JSON.stringify({ total_count: 2, workflow_runs: [
+        run(99, "completed", "skipped", 2), run(98, "completed", "success"),
+      ] }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+  it("blocks a skipped second attempt when its first attempt failed", async () => {
+    const fetchMock = mockSkippedRerun("failure");
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+      .rejects.toThrow(/prior full run 99/);
+    expect(fetchMock.mock.calls.some(([url]) => url.includes("/attempts/1"))).toBe(true);
+  });
+  it("allows a skipped second attempt only after verifying its first never-started skip", async () => {
+    const fetchMock = mockSkippedRerun("skipped");
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token")).resolves.toBeUndefined();
+    expect(fetchMock.mock.calls.some(([url]) => url.includes("/attempts/1/jobs"))).toBe(true);
+    expect(fetchMock.mock.calls.some(([url]) => url.includes("/attempts/2/jobs"))).toBe(true);
+  });
+  it("blocks a skipped second attempt when the first skipped job had started", async () => {
+    const fetchMock = mockSkippedRerun("skipped");
+    const originalFetch = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (url: string) => url.includes("/attempts/1/jobs")
+      ? new Response(JSON.stringify({ total_count: 1, jobs: [
+        { name: "Sequences V1 Prod Canary", status: "completed", conclusion: "skipped", started_at: "2026-09-30T01:00:00Z" },
+      ] })) : originalFetch(url));
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+      .rejects.toThrow(/prior full run 99/);
+  });
+  it("allows an acknowledged failure before a skipped second attempt", async () => {
+    const fetchMock = mockSkippedRerun("failure", "99");
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token")).resolves.toBeUndefined();
+    expect(fetchMock.mock.calls.some(([url]) => url.includes("FAILURE_ACK_RUN_ID"))).toBe(true);
+  });
   it("blocks a cancelled full run even if its job never started", async () => {
     mockHistory("cancelled");
     await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))

@@ -23,7 +23,10 @@ async function earlierAttemptFailed(run: WorkflowRun, token: string): Promise<bo
     };
     if (previous.id !== run.id || previous.run_attempt !== attempt || previous.status !== "completed" ||
       typeof previous.conclusion !== "string") throw new Error("Ambiguous run attempt");
-    if (previous.conclusion !== "success") return true;
+    if (previous.conclusion === "success") continue;
+    if (run.event === "schedule" && previous.conclusion === "skipped" &&
+      await fullJobWasSkipped(run.id, token, attempt)) continue;
+    return true;
   }
   return false;
 }
@@ -37,8 +40,11 @@ async function githubJson(url: string, token: string): Promise<unknown> {
   return response.json();
 }
 
-async function fullJobWasSkipped(runId: number, token: string): Promise<boolean> {
-  const body = await githubJson(`${API}/actions/runs/${runId}/jobs?per_page=100`, token) as {
+async function fullJobWasSkipped(runId: number, token: string, attempt?: number): Promise<boolean> {
+  // Per-attempt jobs: https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run-attempt
+  const path = attempt === undefined ? `${API}/actions/runs/${runId}/jobs` :
+    `${API}/actions/runs/${runId}/attempts/${attempt}/jobs`;
+  const body = await githubJson(`${path}?per_page=100`, token) as {
     total_count?: number;
     jobs?: { name?: string; status?: string; conclusion?: string | null; started_at?: string | null }[];
   };
@@ -87,8 +93,10 @@ export async function assertNoUnacknowledgedCanaryFailure(currentRunId: string, 
       if (run.status !== "completed") throw new Error(`Canary prior full run unresolved: ${run.id}`);
       const ambiguousMode = run.event !== "schedule" &&
         !(run.event === "workflow_dispatch" && run.display_title === FULL_TITLE);
-      if (run.event === "schedule" && run.conclusion === "skipped" && await fullJobWasSkipped(run.id, token)) continue;
-      if (!ambiguousMode && run.conclusion === "success" && !await earlierAttemptFailed(run, token)) return;
+      const earlierFailed = await earlierAttemptFailed(run, token);
+      if (!earlierFailed && run.event === "schedule" && run.conclusion === "skipped" &&
+        await fullJobWasSkipped(run.id, token, run.run_attempt > 1 ? run.run_attempt : undefined)) continue;
+      if (!ambiguousMode && run.conclusion === "success" && !earlierFailed) return;
       const ack = await githubJson(`${API}/actions/variables/SEQUENCE_CANARY_FAILURE_ACK_RUN_ID`, token) as { value?: string };
       if (ack.value === String(run.id)) return;
       throw new Error(`Canary prior full run ${run.id} is not acknowledged${ambiguousMode ? " (ambiguous mode)" : ""}`);
