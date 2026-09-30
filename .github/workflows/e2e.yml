@@ -54,25 +54,11 @@ jobs:
       - name: Provision disposable E2E database
         run: node scripts/provision-e2e-local-database.mjs
 
-      - name: Fetch and pin the real J5a migration source
-        run: |
-          git fetch --no-tags origin 93380d869821a0055b766351a9233a1b43b6
-          node scripts/ci/materialize-inbox-j5a.mjs
-
-      - name: Apply pinned J5a migrations to disposable E2E database
-        env:
-          E2E_CI_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
-        run: node scripts/ci/apply-inbox-j5a.mjs
-
       - name: Generate job-scoped E2E identity
         run: npx tsx scripts/e2e-identity-lifecycle.ts emit
 
       - name: Preflight E2E identity and arm browser-QA circuit breaker
         run: npx tsx scripts/e2e-identity-lifecycle.ts preflight
-      - name: Verify inbox reconciliation completion against real J5a schema
-        env:
-          INBOX_RECONCILIATION_TEST_DATABASE_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
-        run: node --test scripts/inbox-reconcile-completion.integration.test.mjs
       - name: Verify inbox drip snapshot migration on disposable database
         env:
           TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}

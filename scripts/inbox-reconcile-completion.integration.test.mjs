@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import test from "node:test";
 import { Client } from "pg";
 
@@ -7,6 +7,7 @@ import {
   EXPECTED_CATALOG_FINGERPRINT,
   SOURCE_WRITERS,
   attestationDigest,
+  catalogFingerprint,
   collectEvidence,
   connectionConfig,
   digestJson,
@@ -16,6 +17,12 @@ import {
 const BASE_DSN = process.env.INBOX_RECONCILIATION_TEST_DATABASE_URL;
 const RUN = Boolean(BASE_DSN);
 
+if (!RUN) {
+  test("R6a real-schema integration requires INBOX_RECONCILIATION_TEST_DATABASE_URL", () => {
+    assert.fail("Set INBOX_RECONCILIATION_TEST_DATABASE_URL to a disposable Postgres 17 database; the real-schema proof must not be silently skipped");
+  });
+}
+
 function attestation(generation) {
   const payload = {
     capture_generation: generation,
@@ -24,6 +31,10 @@ function attestation(generation) {
     catalog_fingerprint: EXPECTED_CATALOG_FINGERPRINT,
   };
   return { ...payload, operator_assertion_digest: attestationDigest(payload) };
+}
+
+function orgDigest(orgId) {
+  return createHash("sha256").update(`org:${orgId}`).digest("hex");
 }
 
 async function publishKnown(client, ids) {
@@ -129,6 +140,7 @@ test("R6a runs against the real J5a schema and proves source, projection, filter
     assert.equal(initial.checks.projection_reconciled, true);
     assert.equal(initial.checks.filter_reconciled, true);
     assert.equal(initial.fingerprints.expected_catalog, EXPECTED_CATALOG_FINGERPRINT);
+    assert.equal(initial.fingerprints.live_catalog, EXPECTED_CATALOG_FINGERPRINT, "Committed catalog fingerprint drifted; regenerate scripts/inbox-reconcile-catalog.expected.json from the reviewed disposable schema");
     assert.equal(initial.source_writer_attestation.operator_assertion_digest, sourceWriterAttestation.operator_assertion_digest);
     assert.equal(JSON.stringify(initial).includes(ids.org), false, "evidence must not expose fixture IDs");
 
@@ -161,17 +173,28 @@ test("R6a runs against the real J5a schema and proves source, projection, filter
     assert.equal(result.evidence.checks.filter_reconciled, false);
     await client.query("UPDATE inbox_bridge.filter_rows SET unread=true WHERE org_id=$1", [ids.org]);
 
-    const extra = randomUUID();
-    await client.query("INSERT INTO inbox_message_capture.dirty(org_id,target_kind,target_id,generation) VALUES($1,'known_conversation',$2,1)", [ids.org, extra]);
-    await client.query("INSERT INTO inbox_maintained.rows(org_id,target_kind,target_id,revision,source_generation,summary) VALUES($1,'known_conversation',$2,1,1,$3)", [ids.org, extra, JSON.stringify({ exists: false, org_id: ids.org, target_kind: 'known_conversation', conversation_id: extra })]);
+    const tombstone = randomUUID();
+    await client.query("INSERT INTO inbox_message_capture.dirty(org_id,target_kind,target_id,generation) VALUES($1,'known_conversation',$2,1)", [ids.org, tombstone]);
+    await publishKnown(client, { org: ids.org, conversation: tombstone });
+    await client.query("DELETE FROM inbox_maintained.queue WHERE org_id=$1 AND target_id=$2", [ids.org, tombstone]);
     result = await reconcileAndMaybeWrite(client, base);
-    assert.equal(result.status, "blocked");
-    assert.ok(result.evidence.reconciliation.per_org.some((row) => row.maintained_extra_count > 0));
-    await client.query("DELETE FROM inbox_maintained.rows WHERE org_id=$1 AND target_id=$2", [ids.org, extra]);
-    await client.query("DELETE FROM inbox_message_capture.dirty WHERE org_id=$1 AND target_id=$2", [ids.org, extra]);
-    await client.query("DELETE FROM inbox_bridge.summaries WHERE org_id=$1 AND target_id=$2", [ids.org, extra]);
-    await client.query("DELETE FROM inbox_bridge.filter_rows WHERE org_id=$1 AND target_id=$2", [ids.org, extra]);
-    await client.query("DELETE FROM inbox_maintained.queue WHERE org_id=$1 AND target_id=$2", [ids.org, extra]);
+    assert.equal(result.status, "ready", "a source-absent exists=false tombstone is consistent");
+    let reconciliation = result.evidence.reconciliation.per_org.find((row) => row.org_digest === orgDigest(ids.org));
+    assert.equal(reconciliation.maintained_extra_count, 0, "tombstones must not be classified as extras");
+    assert.equal(reconciliation.maintained_mismatch_count, 0, "a correct tombstone must not be a mismatch");
+
+    await client.query("UPDATE inbox_maintained.rows SET summary=jsonb_set(summary,'{exists}','true'::jsonb) WHERE org_id=$1 AND target_id=$2", [ids.org, tombstone]);
+    result = await reconcileAndMaybeWrite(client, base);
+    assert.equal(result.status, "blocked", "a maintained exists=true row with no source must fail");
+    reconciliation = result.evidence.reconciliation.per_org.find((row) => row.org_digest === orgDigest(ids.org));
+    assert.ok(reconciliation.maintained_mismatch_count > 0, "exists=true source-absent rows are mismatches");
+    assert.equal(reconciliation.maintained_extra_count, 0, "exists=true source-absent rows are mismatches, not extras");
+    await publishKnown(client, { org: ids.org, conversation: tombstone });
+    await client.query("DELETE FROM inbox_maintained.queue WHERE org_id=$1 AND target_id=$2", [ids.org, tombstone]);
+    await client.query("DELETE FROM inbox_maintained.rows WHERE org_id=$1 AND target_id=$2", [ids.org, tombstone]);
+    await client.query("DELETE FROM inbox_message_capture.dirty WHERE org_id=$1 AND target_id=$2", [ids.org, tombstone]);
+    await client.query("DELETE FROM inbox_bridge.summaries WHERE org_id=$1 AND target_id=$2", [ids.org, tombstone]);
+    await client.query("DELETE FROM inbox_bridge.filter_rows WHERE org_id=$1 AND target_id=$2", [ids.org, tombstone]);
 
     const concurrentConversation = randomUUID();
     const concurrentMessage = randomUUID();
@@ -185,7 +208,7 @@ test("R6a runs against the real J5a schema and proves source, projection, filter
         `, [concurrentMessage, ids.org, ids.property, ids.contact, concurrentConversation]);
       },
     });
-    assert.equal(result.status, "blocked", "the in-transaction re-check must reject evidence changed after the dry-run");
+    assert.equal(result.status, "blocked", "M1 recheck=initial must fail: the in-transaction re-check must reject evidence changed after the dry-run");
     assert.equal((await client.query("SELECT backfill_complete FROM inbox_control.rollout WHERE singleton")).rows[0].backfill_complete, false);
     await peer.query("DELETE FROM public.messages WHERE id=$1", [concurrentMessage]);
     await client.query("DELETE FROM inbox_maintained.rows WHERE org_id=$1 AND target_id=$2", [ids.org, concurrentConversation]);
@@ -194,9 +217,15 @@ test("R6a runs against the real J5a schema and proves source, projection, filter
     await client.query("DELETE FROM inbox_bridge.filter_rows WHERE org_id=$1 AND target_id=$2", [ids.org, concurrentConversation]);
     await client.query("DELETE FROM inbox_maintained.queue WHERE org_id=$1", [ids.org]);
 
-    await client.query("UPDATE inbox_control.rollout SET serving_enabled=true WHERE singleton");
-    result = await reconcileAndMaybeWrite(client, { ...base, writeMarkers: true });
-    assert.equal(result.status, "blocked", "serving_enabled=true must refuse marker writes");
+    await client.query("UPDATE inbox_control.rollout SET serving_enabled=false WHERE singleton");
+    result = await reconcileAndMaybeWrite(client, {
+      ...base,
+      writeMarkers: true,
+      beforeWrite: async () => {
+        await peer.query("UPDATE inbox_control.rollout SET serving_enabled=true WHERE singleton");
+      },
+    });
+    assert.equal(result.status, "blocked", "serving_enabled guard mutation must fail during the write re-check");
     assert.deepEqual((await client.query("SELECT backfill_complete,reconciliation_complete FROM inbox_control.rollout WHERE singleton")).rows[0], { backfill_complete: false, reconciliation_complete: false });
     await client.query("UPDATE inbox_control.rollout SET serving_enabled=false WHERE singleton");
 
@@ -222,6 +251,22 @@ test("R6a runs against the real J5a schema and proves source, projection, filter
   } finally {
     if (ids) await cleanup(client, ids);
     await peer.end();
+    await client.end();
+  }
+});
+
+test("committed catalog fingerprint drift fails loudly", { skip: !RUN }, async () => {
+  const client = new Client({ connectionString: BASE_DSN });
+  await client.connect();
+  try {
+    const live = await catalogFingerprint(client);
+    assert.equal(live, EXPECTED_CATALOG_FINGERPRINT, "Committed catalog fingerprint drifted; regenerate scripts/inbox-reconcile-catalog.expected.json from the reviewed disposable schema");
+    const drifted = await collectEvidence(client, { expectedCatalogFingerprint: "0".repeat(64) });
+    assert.equal(drifted.status, "blocked");
+    assert.equal(drifted.checks.catalog_fingerprint_match, false, "a catalog drift must block completion");
+    assert.equal(drifted.fingerprints.expected_catalog, "0".repeat(64));
+    assert.equal(drifted.fingerprints.live_catalog, live);
+  } finally {
     await client.end();
   }
 });

@@ -18,6 +18,7 @@ const HEX64 = /^[0-9a-f]{64}$/i;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PEM_BLOCK = /-----BEGIN [A-Z0-9 ]+-----[\s\S]*?-----END [A-Z0-9 ]+-----/g;
 const CERTIFICATE = /-----BEGIN CERTIFICATE-----\r?\n([\s\S]*?)\r?\n-----END CERTIFICATE-----/;
+const RECOVERY_REBUILD_TIMEOUT_MS = 90_000;
 
 export const SOURCE_WRITERS = Object.freeze([
   ["public.messages", "zzzzz_inbox_message_direct"],
@@ -252,7 +253,7 @@ function orgDigest(orgId) {
   return sha256(`org:${orgId}`);
 }
 
-async function catalogFingerprint(client) {
+export async function catalogFingerprint(client) {
   const functions = (await client.query(sql(
     `SELECT n.nspname AS schema_name,
             p.oid::regprocedure::text AS signature,
@@ -372,6 +373,15 @@ async function readAttestation(path) {
 
 function rowKey(row) {
   return `${row.org_id}|${row.target_kind}|${row.target_id}`;
+}
+
+async function captureDirtyGenerationDigest(client) {
+  const rows = (await client.query(
+    `SELECT org_id::text AS org_id,target_kind,target_id::text AS target_id,generation
+       FROM inbox_message_capture.dirty
+      ORDER BY org_id,target_kind,target_id`,
+  )).rows;
+  return digestJson(rows);
 }
 
 function compareProjectionRows(expectedRows, actualRows) {
@@ -581,7 +591,11 @@ async function collectOrgReconciliation(client, { observedAt = new Date().toISOS
       }
     }
     const baseTargetKeys = new Set(value.canonical.filter((row) => row.base_target).map(rowKey));
-    const maintainedExtra = value.maintained.filter((row) => !baseTargetKeys.has(rowKey(row))).length;
+    for (const row of value.maintained) {
+      if (baseTargetKeys.has(rowKey(row))) continue;
+      if (row.summary?.exists === true) maintainedMismatched++;
+    }
+    const maintainedExtra = value.maintained.filter((row) => !baseTargetKeys.has(rowKey(row)) && row.summary?.exists !== false && row.summary?.exists !== true).length;
     const bridgeComparison = compareProjectionRows(value.expectedBridge, value.actualBridge);
     const filterComparison = compareProjectionRows(value.expectedFilter, value.actualFilter);
     const unknownMappingMissing = value.unknownSources.filter((row) => row.mapped !== true).length;
@@ -771,6 +785,7 @@ async function collectRecoveryPlan(client, { expectedCatalogFingerprint = EXPECT
   const writer = await collectSourceWriterEvidence(client);
   const liveCatalogFingerprint = await catalogFingerprint(client);
   const reconciliation = await collectOrgReconciliation(client, { observedAt });
+  const sourceGenerationDigest = await captureDirtyGenerationDigest(client);
   const boundaryCount = Number((await client.query("SELECT count(*)::int AS count FROM inbox_read.boundaries")).rows[0]?.count ?? 0);
   const catalogMatch = typeof expectedCatalogFingerprint === "string" && HEX64.test(expectedCatalogFingerprint) && liveCatalogFingerprint === expectedCatalogFingerprint.toLowerCase();
   const checks = {
@@ -784,6 +799,7 @@ async function collectRecoveryPlan(client, { expectedCatalogFingerprint = EXPECT
     observed_at: observedAt,
     mode: "capture-bypass-recovery",
     capture_generation: state.generation,
+    source_generation_digest: sourceGenerationDigest,
     serving_enabled: state.rollout?.serving_enabled ?? null,
     read_boundary_count: boundaryCount,
     planned: {
@@ -836,6 +852,7 @@ async function readOnlyRecoveryPlan(client, options) {
 }
 
 async function rebuildCaptureAndProjection(client, observedAt) {
+  const deadline = Date.now() + RECOVERY_REBUILD_TIMEOUT_MS;
   await client.query("UPDATE inbox_message_capture.dirty SET generation=generation+1");
   const unknownSources = (await client.query(`
     SELECT DISTINCT org_id,from_address AS raw_sender
@@ -868,6 +885,7 @@ async function rebuildCaptureAndProjection(client, observedAt) {
     SELECT org_id,target_kind,target_id,1 FROM targets
     ON CONFLICT(org_id,target_kind,target_id) DO UPDATE SET generation=inbox_message_capture.dirty.generation+1
   `);
+  const sourceGenerationDigest = await captureDirtyGenerationDigest(client);
   await client.query(`
     DELETE FROM inbox_bridge.summaries s
     WHERE NOT EXISTS (SELECT 1 FROM inbox_message_capture.dirty d WHERE d.org_id=s.org_id AND d.target_kind=s.target_kind AND d.target_id=s.target_id);
@@ -894,6 +912,7 @@ async function rebuildCaptureAndProjection(client, observedAt) {
   const dirty = (await client.query("SELECT org_id,target_kind,target_id FROM inbox_message_capture.dirty ORDER BY org_id,target_kind,target_id")).rows;
   const resultCounts = { targets: dirty.length, applied: 0, already_applied: 0 };
   for (const row of dirty) {
+    if (Date.now() > deadline) throw new ReconciliationBlocked("RECOVERY_REBUILD_TIMEOUT");
     const candidate = (await client.query(
       "SELECT inbox_maintained.snapshot($1,$2,$3,$4) AS candidate",
       [row.org_id, row.target_kind, row.target_id, observedAt],
@@ -903,8 +922,12 @@ async function rebuildCaptureAndProjection(client, observedAt) {
     if (!['applied', 'already_applied'].includes(result)) throw new ReconciliationBlocked(`RECOVERY_PUBLISH_${String(result).toUpperCase()}`);
     resultCounts[result]++;
   }
+  if (Date.now() > deadline) throw new ReconciliationBlocked("RECOVERY_REBUILD_TIMEOUT");
+  const finalSourceGenerationDigest = await captureDirtyGenerationDigest(client);
+  if (finalSourceGenerationDigest !== sourceGenerationDigest) throw new ReconciliationBlocked("RECOVERY_SOURCE_CHANGED");
   const cleared = await client.query("DELETE FROM inbox_maintained.queue");
   resultCounts.queue_cleared = cleared.rowCount;
+  resultCounts.source_generation_digest = sourceGenerationDigest;
   return resultCounts;
 }
 
@@ -916,31 +939,39 @@ async function runCaptureRecovery(client, {
   if (initial.serving_enabled === true) return { status: "blocked", evidence: initial, recovery: null };
   if (!apply) return { status: "recovery-dry-run", evidence: initial, recovery: { applied: false } };
   await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+  let committed = false;
   try {
-    await client.query("SET LOCAL statement_timeout='120s'");
-    await client.query("SET LOCAL lock_timeout='5s'");
-    await client.query("LOCK TABLE public.messages,public.ai_disposition_reviews,public.message_threads,public.contacts,public.properties,public.consent_events,public.sms_phone_suppressions,public.memberships IN SHARE MODE");
+    await client.query("SET LOCAL statement_timeout='15s'");
+    await client.query("SET LOCAL lock_timeout='2s'");
+    await client.query("SELECT singleton FROM inbox_control.rollout WHERE singleton FOR UPDATE");
     const recheck = await collectRecoveryPlan(client, { expectedCatalogFingerprint });
-    if (recheck.serving_enabled === true) throw new ReconciliationBlocked("SERVING_ENABLED");
+    if (!recheck.checks.serving_disabled) throw new ReconciliationBlocked("SERVING_ENABLED");
+    if (!recheck.checks.catalog_fingerprint_match) throw new ReconciliationBlocked("CATALOG_FINGERPRINT_MISMATCH");
+    if (!recheck.checks.source_writer_coverage) throw new ReconciliationBlocked("SOURCE_WRITER_COVERAGE");
     const oldGeneration = recheck.capture_generation;
     const generation = (await client.query("UPDATE inbox_capture_boundary.generation SET generation=gen_random_uuid() WHERE singleton RETURNING generation::text AS generation")).rows[0]?.generation;
     if (!generation) throw new ReconciliationBlocked("CAPTURE_GENERATION_MISSING");
     const invalidated = await client.query("DELETE FROM inbox_read.boundaries WHERE generation IS DISTINCT FROM $1::uuid", [generation]);
     const rebuild = await rebuildCaptureAndProjection(client, new Date().toISOString());
-    const after = await collectRecoveryPlan(client, { expectedCatalogFingerprint });
+    const beforeCommit = await collectRecoveryPlan(client, { expectedCatalogFingerprint });
+    if (!beforeCommit.checks.full_reconciliation) throw new ReconciliationBlocked("RECOVERY_RECONCILIATION_FAILED");
+    await client.query("COMMIT");
+    committed = true;
+    const after = await readOnlyRecoveryPlan(client, { expectedCatalogFingerprint });
     if (!after.checks.full_reconciliation) throw new ReconciliationBlocked("RECOVERY_RECONCILIATION_FAILED");
+    if (after.source_generation_digest !== rebuild.source_generation_digest) throw new ReconciliationBlocked("RECOVERY_SOURCE_CHANGED");
     after.recovery = {
       applied: true,
       capture_generation_before: oldGeneration,
       capture_generation_after: generation,
       read_boundaries_invalidated: invalidated.rowCount,
       rebuild,
+      source_generation_stable: true,
     };
     after.evidence_digest = digestJson({ ...after, observed_at: undefined, evidence_digest: undefined });
-    await client.query("COMMIT");
     return { status: "recovery-written", evidence: after, recovery: after.recovery };
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
+    if (!committed) await client.query("ROLLBACK").catch(() => {});
     throw error;
   }
 }
