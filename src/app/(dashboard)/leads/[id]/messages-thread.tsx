@@ -644,6 +644,10 @@ function getDeliveryStatusLabel(
   tone: "muted" | "destructive";
 } | null {
   if (message.direction !== "outbound") return null;
+  if (message.metadata && typeof message.metadata === "object" && !Array.isArray(message.metadata) &&
+    (message.metadata as { providerOutcome?: unknown }).providerOutcome === "provider_unknown") {
+    return { label: "Not confirmed", tone: "destructive" };
+  }
   if (message.status === "failed") {
     return { label: "Not delivered", tone: "destructive" };
   }

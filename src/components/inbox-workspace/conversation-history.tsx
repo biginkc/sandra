@@ -157,6 +157,14 @@ export function ConversationHistory(props: ConversationHistoryProps) {
   if (!data || !visible) return null;
   const status = readState?.boundary === data.readBoundary ? readState.status : "pending";
   if (status === "permission_lost" || revokedBoundary === data.readBoundary) return null;
+  const deliveryLabel = (message: (typeof data.history)[number]) => {
+    if (message.direction === "inbound") return "Received";
+    if (message.delivery === "not_confirmed") return "Not confirmed";
+    if (message.delivery === "failed") return "Not delivered";
+    if (message.delivery === "sending") return "Sending";
+    if (message.delivery === "delivered") return "Delivered";
+    return "Sent";
+  };
   return <section aria-label="Conversation history">
     <div className="mb-3 flex flex-wrap items-center gap-3 text-sm">
       {nextCursor && <button type="button" className="underline" disabled={pageState?.busy} onClick={() => void older()}>{pageState?.busy ? "Loading older messages…" : "Load older messages"}</button>}
@@ -166,7 +174,7 @@ export function ConversationHistory(props: ConversationHistoryProps) {
     <ol className="space-y-3">
       {[...new Map(pages.flatMap(page => page.history).map(message => [message.id, message])).values()].reverse().map(message => <li key={message.id} className={message.direction === "outbound" ? "ml-8 rounded-lg bg-muted p-3" : "mr-8 rounded-lg border p-3"}>
         <p className="whitespace-pre-wrap break-words">{message.body ?? ""}</p>
-        <p className="mt-1 text-xs text-muted-foreground">{message.direction === "outbound" ? "Sent" : "Received"} · <time dateTime={message.createdAtRaw}>{new Date(message.createdAtRaw).toLocaleString()}</time></p>
+        <p className="mt-1 text-xs text-muted-foreground">{deliveryLabel(message)} · <time dateTime={message.createdAtRaw}>{new Date(message.createdAtRaw).toLocaleString()}</time></p>
       </li>)}
     </ol>
     <div aria-live="polite" className="mt-3 text-sm text-muted-foreground">

@@ -572,6 +572,29 @@ describe("<MessagesThread />", () => {
     expect(label).toHaveClass("text-destructive");
   });
 
+  it("renders 'Not confirmed' when an outbound failure has an unknown provider outcome", () => {
+    render(
+      <MessagesThread
+        initial={[
+          makeMessage({
+            id: "unknown-outcome",
+            direction: "outbound",
+            status: "failed",
+            metadata: { providerOutcome: "provider_unknown" },
+            body: "provider outcome unknown",
+          }),
+        ]}
+        contactId="contact-1"
+        propertyId="property-1"
+      />,
+    );
+
+    expect(screen.getByTestId("messages-thread-delivery-status")).toHaveTextContent(
+      "Not confirmed",
+    );
+    expect(screen.queryByText("Not delivered")).not.toBeInTheDocument();
+  });
+
   it("keeps 'Not delivered' on a failed outbound continuation bubble", () => {
     render(
       <MessagesThread

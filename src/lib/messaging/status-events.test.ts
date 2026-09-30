@@ -27,6 +27,9 @@ type MessageRow = Pick<
   | "error_message"
   | "created_at"
   | "conversation_id"
+  | "external_id"
+  | "provider"
+  | "direction"
   | "metadata"
 >;
 
@@ -40,18 +43,22 @@ function makeSupabase(input: {
   const supabase = {
     from(table: string) {
       if (table !== "messages") throw new Error(`unexpected table ${table}`);
-      return {
-        select: () => ({
-          eq: () => ({
-            eq: () => ({
-              eq: () => ({
-                order: () => ({
-                  limit: async () => ({ data: input.messages, error: null }),
-                }),
-              }),
-            }),
-          }),
+      const selectFilters: Array<[string, unknown]> = [];
+      const selectBuilder = {
+        eq(column: string, value: unknown) {
+          selectFilters.push([column, value]);
+          return selectBuilder;
+        },
+        order: () => selectBuilder,
+        limit: async () => ({
+          data: input.messages.filter((candidate) =>
+            selectFilters.every(([column, value]) => candidate[column as keyof MessageRow] === value),
+          ),
+          error: null,
         }),
+      };
+      return {
+        select: () => selectBuilder,
         update: (patch: Record<string, unknown>) => {
           updates.push(patch);
           const builder = {
@@ -91,6 +98,9 @@ function message(overrides: Partial<MessageRow> = {}): MessageRow {
     error_message: null,
     created_at: "2026-06-24T14:59:00.000Z",
     conversation_id: "conv-1",
+    external_id: "snd-1",
+    provider: "sendillo",
+    direction: "outbound",
     metadata: { generated_by: "ai_responder_v1" } as Json,
     ...overrides,
   };
@@ -104,6 +114,7 @@ describe("applyMessageStatusEvent", () => {
 
   it("T16 forwards terminal events for a marked reply row without updating public.messages", async () => {
     const row = message({
+      external_id: "reply-ext-1",
       status: "pending",
       metadata: { inboxReply: { attemptId: "attempt-1", operationId: "operation-1" } } as Json,
     });
@@ -125,6 +136,7 @@ describe("applyMessageStatusEvent", () => {
 
   it("T16 holds either terminal arrival order behind the reply callback RPC", async () => {
     const row = message({
+      external_id: "reply-order",
       status: "pending",
       metadata: { inboxReply: { attemptId: "attempt-order", operationId: "operation-order" } } as Json,
     });
@@ -158,6 +170,44 @@ describe("applyMessageStatusEvent", () => {
       in_terminal: "delivery_failed",
       in_payload: { kind: "failed", timestamp: "2026-06-24T15:01:00.000Z", errorMessage: "carrier failure" },
     });
+  });
+
+  it("T17 updates a matched non-Inbox legacy row through the provider status path", async () => {
+    const row = message({
+      id: "legacy-target",
+      external_id: "legacy-status-17",
+      metadata: { legacy: true } as Json,
+    });
+    const decoy = message({
+      id: "legacy-decoy",
+      external_id: "another-status-17",
+      metadata: { legacy: true } as Json,
+    });
+    const { supabase, updates, filters } = makeSupabase({
+      messages: [row],
+      updatedRows: [{ id: row.id }],
+    });
+
+    await expect(applyMessageStatusEvent(supabase, "sendillo", {
+      kind: "failed",
+      externalId: row.external_id!,
+      timestamp: new Date("2026-06-24T15:04:00.000Z"),
+      errorMessage: "carrier failure",
+    })).resolves.toBe("updated");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({ status: "failed", error_message: "carrier failure" });
+    expect(filters).toContainEqual(["eq", "id", row.id]);
+
+    // A second outbound row proves the lookup is scoped by the provider id;
+    // this is intentionally a separate assertion so a mutation that removes
+    // the external-id predicate cannot still pass with one fixture row.
+    const unscoped = makeSupabase({ messages: [row, decoy], updatedRows: [{ id: row.id }] });
+    await expect(applyMessageStatusEvent(unscoped.supabase, "sendillo", {
+      kind: "failed",
+      externalId: row.external_id!,
+      timestamp: new Date("2026-06-24T15:04:00.000Z"),
+      errorMessage: "carrier failure",
+    })).resolves.toBe("updated");
   });
 
   it("does not roll Sandra delivery state forward when guarded update matches zero rows", async () => {
@@ -205,6 +255,7 @@ describe("applyMessageStatusEvent", () => {
 
   it("bridges a rep SMS delivery using only the stored sender account identity", async () => {
     const row = message({
+      external_id: "provider-message-1",
       metadata: {
         repSms: {
           provider: "sendillo",
@@ -247,6 +298,7 @@ describe("applyMessageStatusEvent", () => {
 
   it("uses the service-owned receipt and exact message identity for a generic rep SMS", async () => {
     const row = message({
+      external_id: "provider-message-ledger",
       metadata: {
         repSms: {
           provider: "sendillo",
@@ -288,6 +340,7 @@ describe("applyMessageStatusEvent", () => {
 
   it("acknowledges an unmatched manual rep SMS receipt without retrying forever", async () => {
     const row = message({
+      external_id: "provider-message-manual-unmatched",
       metadata: {
         repSms: {
           provider: "sendillo",
@@ -320,6 +373,7 @@ describe("applyMessageStatusEvent", () => {
 
   it("uses the fenced obligation identity when a receipt races the accepted write", async () => {
     const row = message({
+      external_id: "provider-message-raced",
       metadata: {
         repSms: {
           provider: "sendillo",
@@ -366,6 +420,7 @@ describe("applyMessageStatusEvent", () => {
 
   it("bridges an early delivery failure with the exact durable obligation identity", async () => {
     const row = message({
+      external_id: "provider-message-early-failure",
       metadata: {
         repSms: {
           provider: "sendillo",
@@ -418,6 +473,7 @@ describe("applyMessageStatusEvent", () => {
 
   it("does not call the rep bridge for ordinary messages or trust callback fields", async () => {
     const row = message({
+      external_id: "provider-message-2",
       metadata: {
         generated_by: "ai_responder_v1",
         providerAccountId: "attacker-controlled-payload-value",
@@ -440,6 +496,7 @@ describe("applyMessageStatusEvent", () => {
 
   it("leaves a valid rep-SMS webhook retryable when the bridge RPC is unavailable", async () => {
     const row = message({
+      external_id: "provider-message-3",
       metadata: {
         repSms: {
           provider: "sendillo",
@@ -465,6 +522,7 @@ describe("applyMessageStatusEvent", () => {
 
   it("rejects a matched-but-unsettled bridge result so reconciliation cannot acknowledge it", async () => {
     const row = message({
+      external_id: "provider-message-mismatch",
       metadata: {
         repSms: {
           provider: "sendillo",
@@ -491,6 +549,7 @@ describe("applyMessageStatusEvent", () => {
 
   it("keeps a fenced receipt retryable when its exact obligation is not found", async () => {
     const row = message({
+      external_id: "provider-message-fenced-missing",
       metadata: {
         repSms: {
           provider: "sendillo",
@@ -517,6 +576,7 @@ describe("applyMessageStatusEvent", () => {
 
   it("uses the service client when transport reconciliation runs as an authenticated user", async () => {
     const row = message({
+      external_id: "provider-message-authenticated-transport",
       metadata: {
         repSms: {
           provider: "sendillo",
@@ -542,6 +602,7 @@ describe("applyMessageStatusEvent", () => {
 
   it("does not lose a stored delivery transition when reconciliation uses an authenticated transport client", async () => {
     const row = message({
+      external_id: "provider-message-stored",
       metadata: {
         repSms: {
           provider: "sendillo",
@@ -610,6 +671,7 @@ describe("applyMessageStatusEvent", () => {
 
   it("leaves a stored rep-SMS event retryable when the obligation bridge fails", async () => {
     const row = message({
+      external_id: "provider-message-retryable",
       metadata: {
         repSms: {
           provider: "sendillo",
@@ -691,6 +753,7 @@ describe("applyMessageStatusEvent", () => {
 
   it("promotes only the provider_unknown placeholder from failed to delivered", async () => {
     const row = message({
+      external_id: "provider-message-unknown-placeholder",
       status: "failed",
       failed_at: "2026-06-24T15:00:00.000Z",
       error_message: "Sendillo request timed out",

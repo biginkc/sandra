@@ -31,6 +31,12 @@ describe("render-bound conversation read acknowledgment", () => {
     await waitFor(() => expect(transport).toHaveBeenCalledOnce());
     expect(JSON.parse(transport.mock.calls[0][1]!.body as string)).toEqual({ boundaryId: readBoundary, batch: 0 });
   });
+  it("renders an uncertain outbound result as not confirmed", () => {
+    const value = props();
+    value.snapshot!.data.history = [{ ...value.snapshot!.data.history[0], direction: "outbound", status: "failed", delivery: "not_confirmed" }];
+    render(<ConversationHistory {...value} />);
+    expect(screen.getByText(/Not confirmed/)).toBeInTheDocument();
+  });
   it("does not acknowledge hidden, prefetched, or superseded A→B→A snapshots", async () => {
     const transport = vi.fn<typeof fetch>();
     const view = render(<ConversationHistory {...props({ fetch: transport, visible: false })} />);
