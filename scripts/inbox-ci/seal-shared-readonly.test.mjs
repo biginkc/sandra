@@ -121,6 +121,9 @@ test('sealer mutation matrix rejects every catalog-drift guard', () => {
   const extra = h.record([h.column(), h.index()]);
   assert.notEqual(reconstructCatalog(h.baseline, extra).sha256, observed.sha256, 'unrecorded extra');
   const post = reconstructCatalog(h.baseline, valid);
+  const substituted = h.record(); substituted.baseline_digest = post.sha256;
+  substituted.sha256 = digest(Buffer.from(stable(Object.fromEntries(['record_version','target_ref','candidate_sha','baseline_digest','catalog_format_version','items'].map(key => [key, substituted[key]])))));
+  assert.throws(() => reconstructCatalog(h.baseline, substituted), /Drift record binding|digest/, 'PRE/POST record substitution');
   const postCollision = h.record(); postCollision.baseline_digest = post.sha256;
   postCollision.sha256 = digest(Buffer.from(stable(Object.fromEntries(['record_version','target_ref','candidate_sha','baseline_digest','catalog_format_version','items'].map(key => [key, postCollision[key]])))));
   assert.throws(() => reconstructCatalog(post, postCollision), /baseline collision/, 'POST collision');
