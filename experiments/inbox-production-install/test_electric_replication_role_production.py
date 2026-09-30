@@ -1,7 +1,4 @@
 from pathlib import Path
-import base64
-import hashlib
-import hmac
 import os
 import shutil
 import subprocess
@@ -15,17 +12,7 @@ TEARDOWN = HERE / "electric-replication-role.production-teardown.sql"
 RUNNER = HERE / "run-electric-replication-role.py"
 PINNED_CA = HERE / "supabase-prod-ca-2021.crt"
 PROJECT_REF = "ncsngxlcyxylaeskiteu"
-
-
-def verifier(password: str = "dummy-electric-password") -> str:
-    salt = b"sandra-electric1"
-    iterations = 4096
-    salted = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
-    client_key = hmac.new(salted, b"Client Key", hashlib.sha256).digest()
-    stored_key = hashlib.sha256(client_key).digest()
-    server_key = hmac.new(salted, b"Server Key", hashlib.sha256).digest()
-    encode = lambda value: base64.b64encode(value).decode().rstrip("=")
-    return f"SCRAM-SHA-256${iterations}:{encode(salt)}${encode(stored_key)}:{encode(server_key)}"
+REPLICATION_SLOT = "electric_inbox_test_slot"
 
 
 def postgres_bin() -> Path | None:
@@ -75,6 +62,8 @@ class ProductionElectricPacketTests(unittest.TestCase):
         self.assertIn("prior_replica_identity is required", source)
         self.assertIn("DROP PUBLICATION electric_publication_inbox", source)
         self.assertIn("ALTER ROLE inbox_electric_replication NOLOGIN", source)
+        self.assertIn("ALTER ROLE inbox_electric_replication NOLOGIN NOREPLICATION NOBYPASSRLS", source)
+        self.assertIn("pg_drop_replication_slot", source)
         self.assertIn("ALTER TABLE inbox_bridge.summaries REPLICA IDENTITY DEFAULT;", source)
         self.assertIn("ALTER TABLE inbox_bridge.summaries REPLICA IDENTITY NOTHING;", source)
         self.assertIn("ALTER TABLE inbox_bridge.summaries REPLICA IDENTITY FULL;", source)
@@ -95,11 +84,13 @@ class ProductionElectricPacketTests(unittest.TestCase):
             socket.mkdir()
             subprocess.run([bindir / "initdb", "-D", data, "-A", "trust", "-U", "postgres", "--no-locale"], check=True, capture_output=True, text=True)
             log = root / "postgres.log"
-            subprocess.run([bindir / "pg_ctl", "-D", data, "-l", log, "-o", f"-k {socket} -c listen_addresses=''", "-w", "start"], check=True, capture_output=True, text=True)
+            subprocess.run([bindir / "pg_ctl", "-D", data, "-l", log, "-o", f"-k {socket} -c listen_addresses='' -c wal_level=logical", "-w", "start"], check=True, capture_output=True, text=True)
             env = {**os.environ, "PGHOST": str(socket), "PGUSER": "postgres", "PGDATABASE": "postgres"}
             try:
                 self._psql(bindir, env, "CREATE SCHEMA inbox_bridge; CREATE TABLE inbox_bridge.summaries (id bigint NOT NULL, body text); CREATE UNIQUE INDEX summaries_replica_identity_idx ON inbox_bridge.summaries (id); ALTER TABLE inbox_bridge.summaries REPLICA IDENTITY USING INDEX summaries_replica_identity_idx;")
-                scram = verifier()
+                self._psql(bindir, env, "SET password_encryption = 'scram-sha-256'; CREATE ROLE scram_verifier_source NOLOGIN PASSWORD 'dummy-electric-password';", expect_success=True)
+                scram = self._psql(bindir, env, "SELECT rolpassword FROM pg_authid WHERE rolname = 'scram_verifier_source';", expect_success=True).stdout.strip()
+                self.assertRegex(scram, r"^SCRAM-SHA-256\$[1-9][0-9]{0,9}:[A-Za-z0-9+/]{22}==\$[A-Za-z0-9+/]{43}=:[A-Za-z0-9+/]{43}=$")
                 mismatch = self._psql(bindir, env, self._packet_input(INSTALL, {"project_ref": PROJECT_REF, "connection_project_ref": "copflsklaefwzipsrjqz", "electric_password": scram}))
                 self.assertNotEqual(mismatch.returncode, 0)
                 self.assertIn("does not match the connected database", mismatch.stderr)
@@ -113,12 +104,16 @@ class ProductionElectricPacketTests(unittest.TestCase):
                 self.assertNotIn(scram, result.stdout + result.stderr)
                 self.assertEqual(self._psql(bindir, env, "SELECT relreplident FROM pg_class WHERE oid='inbox_bridge.summaries'::regclass;", True).stdout.strip(), "f")
                 self.assertEqual(self._psql(bindir, env, "SELECT count(*) FROM pg_publication_tables WHERE pubname='electric_publication_inbox' AND schemaname='inbox_bridge' AND tablename='summaries';", True).stdout.strip(), "1")
-                teardown = self._packet_input(TEARDOWN, {"project_ref": PROJECT_REF, "connection_project_ref": PROJECT_REF, "prior_replica_identity": "i", "prior_replica_identity_index": "summaries_replica_identity_idx"})
-                self._psql(bindir, env, teardown, expect_success=True)
-                restored = self._psql(bindir, env, "SELECT c.relreplident::text || ':' || coalesce((SELECT c2.relname FROM pg_index i JOIN pg_class c2 ON c2.oid=i.indexrelid WHERE i.indrelid=c.oid AND i.indisreplident), '') FROM pg_class c WHERE c.oid='inbox_bridge.summaries'::regclass;", True).stdout.strip()
-                self.assertEqual(restored, "i:summaries_replica_identity_idx")
-                self.assertEqual(self._psql(bindir, env, "SELECT count(*) FROM pg_publication WHERE pubname='electric_publication_inbox';", True).stdout.strip(), "0")
-                self.assertEqual(self._psql(bindir, env, "SELECT rolcanlogin FROM pg_roles WHERE rolname='inbox_electric_replication';", True).stdout.strip(), "f")
+                self._create_slot(bindir, env)
+                self._assert_teardown(bindir, env, scram)
+                self._assert_teardown_state(bindir, env)
+
+                # The first teardown must leave the role in the exact state the
+                # install preflight accepts, so a fresh install can recover.
+                self._psql(bindir, env, install, expect_success=True)
+                self._create_slot(bindir, env)
+                self._assert_teardown(bindir, env, scram)
+                self._assert_teardown_state(bindir, env)
             finally:
                 subprocess.run([bindir / "pg_ctl", "-D", data, "-w", "stop"], check=True, capture_output=True, text=True)
 
@@ -133,7 +128,7 @@ class ProductionElectricPacketTests(unittest.TestCase):
             rejected = subprocess.run(["python3", str(RUNNER), "--packet", "install", "--project-ref", PROJECT_REF], input="plain-text-password\n", text=True, capture_output=True, env=env, check=False)
             self.assertNotEqual(rejected.returncode, 0)
             self.assertNotIn("plain-text-password", rejected.stdout + rejected.stderr)
-            scram = verifier()
+            scram = "SCRAM-SHA-256$4096:" + "A" * 22 + "==$" + "A" * 43 + "=:" + "B" * 43 + "="
             accepted = subprocess.run(["python3", str(RUNNER), "--packet", "install", "--project-ref", PROJECT_REF], input=scram + "\n", text=True, capture_output=True, env=env, check=False)
             self.assertEqual(accepted.returncode, 0, accepted.stderr)
             self.assertNotIn(scram, accepted.stdout + accepted.stderr)
@@ -147,14 +142,29 @@ class ProductionElectricPacketTests(unittest.TestCase):
         base = {**os.environ, "PGHOST": f"db.{PROJECT_REF}.supabase.co", "PGSSLMODE": "verify-full", "PGSSLROOTCERT": str(PINNED_CA), "INBOX_ELECTRIC_PSQL_BIN": "/definitely/missing/psql"}
         for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
             env = {**base, name: "attacker-controlled"}
-            rejected = subprocess.run(["python3", str(RUNNER), "--packet", "teardown", "--project-ref", PROJECT_REF, "--prior-replica-identity", "d"], text=True, capture_output=True, env=env, check=False)
+            rejected = subprocess.run(["python3", str(RUNNER), "--packet", "teardown", "--project-ref", PROJECT_REF, "--prior-replica-identity", "d", "--replication-slot", REPLICATION_SLOT], text=True, capture_output=True, env=env, check=False)
             self.assertNotEqual(rejected.returncode, 0)
             self.assertIn(name, rejected.stderr)
         for key, value in (("PGSSLMODE", "require"), ("PGSSLROOTCERT", str(HERE / "electric-replication-role.production.sql"))):
             env = {**base, key: value}
-            rejected = subprocess.run(["python3", str(RUNNER), "--packet", "teardown", "--project-ref", PROJECT_REF, "--prior-replica-identity", "d"], text=True, capture_output=True, env=env, check=False)
+            rejected = subprocess.run(["python3", str(RUNNER), "--packet", "teardown", "--project-ref", PROJECT_REF, "--prior-replica-identity", "d", "--replication-slot", REPLICATION_SLOT], text=True, capture_output=True, env=env, check=False)
             self.assertNotEqual(rejected.returncode, 0)
             self.assertIn("pinned Supabase CA" if key == "PGSSLROOTCERT" else "verify-full", rejected.stderr)
+
+    def _create_slot(self, bindir: Path, env: dict[str, str]) -> None:
+        self._psql(bindir, env, f"SELECT pg_create_logical_replication_slot('{REPLICATION_SLOT}', 'pgoutput');", expect_success=True)
+
+    def _assert_teardown(self, bindir: Path, env: dict[str, str], scram: str) -> None:
+        teardown = self._packet_input(TEARDOWN, {"project_ref": PROJECT_REF, "connection_project_ref": PROJECT_REF, "prior_replica_identity": "i", "prior_replica_identity_index": "summaries_replica_identity_idx", "replication_slot_name": REPLICATION_SLOT})
+        result = self._psql(bindir, env, teardown, expect_success=True)
+        self.assertNotIn(scram, result.stdout + result.stderr)
+
+    def _assert_teardown_state(self, bindir: Path, env: dict[str, str]) -> None:
+        self.assertEqual(self._psql(bindir, env, "SELECT count(*) FROM pg_replication_slots WHERE slot_name = 'electric_inbox_test_slot';", True).stdout.strip(), "0")
+        self.assertEqual(self._psql(bindir, env, "SELECT count(*) FROM pg_publication WHERE pubname='electric_publication_inbox';", True).stdout.strip(), "0")
+        self.assertEqual(self._psql(bindir, env, "SELECT rolcanlogin::text || ':' || rolreplication::text || ':' || rolbypassrls::text FROM pg_roles WHERE rolname='inbox_electric_replication';", True).stdout.strip(), "false:false:false")
+        restored = self._psql(bindir, env, "SELECT c.relreplident::text || ':' || coalesce((SELECT c2.relname FROM pg_index i JOIN pg_class c2 ON c2.oid=i.indexrelid WHERE i.indrelid=c.oid AND i.indisreplident), '') FROM pg_class c WHERE c.oid='inbox_bridge.summaries'::regclass;", True).stdout.strip()
+        self.assertEqual(restored, "i:summaries_replica_identity_idx")
 
     @staticmethod
     def _packet_input(packet: Path, values: dict[str, str]) -> str:

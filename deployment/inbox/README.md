@@ -86,7 +86,10 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
   `psql -v electric_password=...` or put a password in a DSN. Keep the
   preflight receipt's `prior_replica_identity` and
   `prior_replica_identity_index`; teardown requires those exact values and
-  restores them after dropping the publication.
+  restores them after dropping the inactive replication slot and publication.
+  Stop Electric first, then pass the exact slot name from its provenance
+  receipt with `--replication-slot`; the teardown packet rejects active or
+  missing slots and drops only that named slot.
 - Every Restate worker deployment must set
   `INBOX_RESTATE_REGISTRATION_PATH=/runtime/<64-lowercase-hex-image-digest>`.
   The worker serves that versioned path and the registration helper uses it as

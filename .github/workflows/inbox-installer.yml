@@ -32,18 +32,20 @@ jobs:
           python-version: '3.12'
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: '24'
+          node-version: '22'
       - name: Install PostgreSQL 17 binaries
         shell: bash
         run: |
           set -euo pipefail
           . /etc/os-release
           sudo apt-get update
-          sudo apt-get install --yes ca-certificates curl
+          sudo apt-get install --yes ca-certificates curl gnupg
           sudo install -d -m 0755 /usr/share/postgresql-common/pgdg
           sudo curl --fail --silent --show-error --location \
             --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
             https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          test "$(gpg --batch --show-keys --with-colons /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc | awk -F: '$1 == "fpr" { print toupper($10); exit }')" = \
+            B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
           sudo tee /etc/apt/sources.list.d/pgdg.sources >/dev/null <<EOF
           Types: deb
           URIs: https://apt.postgresql.org/pub/repos/apt
@@ -74,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           test -x "$PG17_BIN/postgres"
-          python3 experiments/inbox-production-install/test_electric_replication_role_production.py
+          python3 experiments/inbox-production-install/test_electric_replication_role_production.py -v
       - name: Install Node dependencies for compose proof
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

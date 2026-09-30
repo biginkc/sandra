@@ -42,7 +42,7 @@ BEGIN
   IF supplied_ref NOT IN ('ncsngxlcyxylaeskiteu', 'copflsklaefwzipsrjqz') THEN
     RAISE EXCEPTION 'production Electric packet has an unapproved project ref';
   END IF;
-  IF verifier !~ '^SCRAM-SHA-256\$[1-9][0-9]{0,9}:[A-Za-z0-9+/]{22}\$[A-Za-z0-9+/]{43}:[A-Za-z0-9+/]{43}$' THEN
+  IF verifier !~ '^SCRAM-SHA-256\$[1-9][0-9]{0,9}:[A-Za-z0-9+/]{22}==\$[A-Za-z0-9+/]{43}=:[A-Za-z0-9+/]{43}=$' THEN
     RAISE EXCEPTION 'electric_password must be a well-formed SCRAM-SHA-256 verifier';
   END IF;
   IF split_part(split_part(verifier, '$', 2), ':', 1)::bigint < 4096 THEN

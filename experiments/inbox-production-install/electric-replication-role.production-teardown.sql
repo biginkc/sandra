@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
--- Reviewed production teardown/restore packet. Stop Electric and drop only the
--- slot named in its provenance receipt before running this SQL. Supply the
--- exact project_ref and the preflight receipt's replica identity fields.
+-- Reviewed production teardown/restore packet. Stop Electric first and supply
+-- the exact inactive slot named in its provenance receipt. This packet drops
+-- only that slot, the one-table publication, and the reviewed role authority.
 \if :{?project_ref}
 \else
   \echo 'project_ref is required'
@@ -22,11 +22,17 @@
   \echo 'prior_replica_identity_index is required; pass an empty value when the receipt has no index'
   \quit 3
 \endif
+\if :{?replication_slot_name}
+\else
+  \echo 'replication_slot_name is required'
+  \quit 3
+\endif
 
 SELECT set_config('sandra.inbox_project_ref', :'project_ref', false) AS _set_project_ref \gset
 SELECT set_config('sandra.inbox_connection_project_ref', :'connection_project_ref', false) AS _set_connection_project_ref \gset
 SELECT set_config('sandra.inbox_prior_replica_identity', :'prior_replica_identity', false) AS _set_prior_replica_identity \gset
 SELECT set_config('sandra.inbox_prior_replica_identity_index', :'prior_replica_identity_index', false) AS _set_prior_replica_identity_index \gset
+SELECT set_config('sandra.inbox_replication_slot_name', :'replication_slot_name', false) AS _set_replication_slot_name \gset
 
 DO $$
 DECLARE
@@ -34,6 +40,7 @@ DECLARE
   connected_ref text := current_setting('sandra.inbox_connection_project_ref');
   prior_identity text := current_setting('sandra.inbox_prior_replica_identity');
   prior_index text := coalesce(nullif(current_setting('sandra.inbox_prior_replica_identity_index'), ''), '');
+  requested_slot_name text := current_setting('sandra.inbox_replication_slot_name');
 BEGIN
   IF current_database() <> 'postgres' THEN
     RAISE EXCEPTION 'production Electric teardown must run in database postgres';
@@ -49,6 +56,21 @@ BEGIN
   END IF;
   IF prior_identity NOT IN ('d', 'n', 'f', 'i') THEN
     RAISE EXCEPTION 'replica identity receipt is invalid';
+  END IF;
+  IF requested_slot_name !~ '^[a-z_][a-z0-9_]{0,62}$' THEN
+    RAISE EXCEPTION 'replication slot receipt is invalid';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_replication_slots AS replication_slot
+    WHERE replication_slot.slot_name = requested_slot_name
+  ) THEN
+    RAISE EXCEPTION 'expected Electric replication slot is missing';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_replication_slots AS replication_slot
+    WHERE replication_slot.slot_name = requested_slot_name AND replication_slot.active
+  ) THEN
+    RAISE EXCEPTION 'Electric replication slot is active; stop Electric before teardown';
   END IF;
   IF prior_identity = 'i' AND NOT EXISTS (
     SELECT 1
@@ -78,8 +100,9 @@ BEGIN
 END $$;
 
 BEGIN;
+SELECT pg_drop_replication_slot(current_setting('sandra.inbox_replication_slot_name'));
 DROP PUBLICATION electric_publication_inbox;
-ALTER ROLE inbox_electric_replication NOLOGIN;
+ALTER ROLE inbox_electric_replication NOLOGIN NOREPLICATION NOBYPASSRLS;
 DO $$
 DECLARE
   prior_identity text := current_setting('sandra.inbox_prior_replica_identity');
@@ -102,6 +125,7 @@ COMMIT;
 SELECT json_build_object(
   'project_ref', current_setting('sandra.inbox_project_ref'),
   'database', current_database(),
+  'replication_slot_dropped', true,
   'publication_dropped', true,
   'role_login', false,
   'restored_replica_identity', current_setting('sandra.inbox_prior_replica_identity'),

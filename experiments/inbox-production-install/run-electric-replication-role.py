@@ -23,8 +23,8 @@ HERE = Path(__file__).resolve().parent
 PROJECT_REFS = {"ncsngxlcyxylaeskiteu", "copflsklaefwzipsrjqz"}
 DIRECT_HOST = re.compile(r"^db\.([a-z0-9]{20})\.supabase\.co$")
 SCRAM_VERIFIER = re.compile(
-    r"^SCRAM-SHA-256\$([1-9][0-9]{0,9}):([A-Za-z0-9+/]{22})\$"
-    r"([A-Za-z0-9+/]{43}):([A-Za-z0-9+/]{43})$"
+    r"^SCRAM-SHA-256\$([1-9][0-9]{0,9}):([A-Za-z0-9+/]{22}==)\$"
+    r"([A-Za-z0-9+/]{43}=):([A-Za-z0-9+/]{43}=)$"
 )
 PINNED_CA_FILE = HERE / "supabase-prod-ca-2021.crt"
 PINNED_CA_SHA256 = "700723581420dd1ac98fd7e9ac529f0ef210eadcaf87fc868a3ad7d114c2f3b7"
@@ -73,7 +73,15 @@ def psql_set(name: str, value: str) -> str:
     return f"\\set {name} '{value.replace(chr(39), chr(39) * 2)}'"
 
 
-def packet_input(packet: Path, project_ref: str, connected_ref: str, verifier: str | None, prior_identity: str | None, prior_index: str | None) -> str:
+def packet_input(
+    packet: Path,
+    project_ref: str,
+    connected_ref: str,
+    verifier: str | None,
+    prior_identity: str | None,
+    prior_index: str | None,
+    replication_slot: str | None,
+) -> str:
     lines = [
         psql_set("project_ref", project_ref),
         psql_set("connection_project_ref", connected_ref),
@@ -83,6 +91,8 @@ def packet_input(packet: Path, project_ref: str, connected_ref: str, verifier: s
     if prior_identity is not None:
         lines.append(psql_set("prior_replica_identity", prior_identity))
         lines.append(psql_set("prior_replica_identity_index", prior_index or ""))
+    if replication_slot is not None:
+        lines.append(psql_set("replication_slot_name", replication_slot))
     escaped_packet = str(packet).replace("'", "''")
     lines.append(f"\\i '{escaped_packet}'")
     return "\n".join(lines) + "\n"
@@ -98,6 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project-ref", required=True)
     parser.add_argument("--prior-replica-identity")
     parser.add_argument("--prior-replica-identity-index", default="")
+    parser.add_argument("--replication-slot")
     args = parser.parse_args(argv)
 
     if args.project_ref not in PROJECT_REFS:
@@ -108,6 +119,8 @@ def main(argv: list[str] | None = None) -> int:
     validate_hosted_connection_environment()
     if args.packet == "teardown" and args.prior_replica_identity not in {"d", "n", "f", "i"}:
         raise PacketError("teardown requires a recorded replica identity")
+    if args.packet == "teardown" and not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", args.replication_slot or ""):
+        raise PacketError("teardown requires a valid replication slot name")
 
     verifier = None
     if args.packet == "install":
@@ -128,7 +141,15 @@ def main(argv: list[str] | None = None) -> int:
     psql = os.environ.get("INBOX_ELECTRIC_PSQL_BIN", "psql")
     result = subprocess.run(
         [psql, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-f", "-"],
-        input=packet_input(packet, args.project_ref, connected_ref, verifier, args.prior_replica_identity, args.prior_replica_identity_index),
+        input=packet_input(
+            packet,
+            args.project_ref,
+            connected_ref,
+            verifier,
+            args.prior_replica_identity,
+            args.prior_replica_identity_index,
+            args.replication_slot,
+        ),
         text=True,
         capture_output=True,
         check=False,
