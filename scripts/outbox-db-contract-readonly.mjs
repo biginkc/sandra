@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Client } from 'pg';
 import { readFile, writeFile } from 'node:fs/promises';
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
@@ -32,15 +32,36 @@ const DRIFT_APPROVALS = Object.freeze({
   idx_users_name: '4dbc01feffae5acf04236e5aa3611151cc43e1467f84588e05b025dd9fbc7402',
 });
 const OPERATOR_INDEX_NAMES = new Set(['inbox_parent_message_property','inbox_parent_message_contact','inbox_parent_review_property','inbox_backfill_messages','inbox_backfill_reviews','inbox_backfill_threads','inbox_backfill_thread_identity','inbox_unknown_history_page']);
-const ROWTYPE_TABLES = new Set(['inbox_backfill.jobs','inbox_control.baseline_progress','inbox_maintained.queue','inbox_maintained.rows','inbox_parent.work','inbox_safety.routes']);
+const codepointCompare = (a, b) => { const left = Array.from(a, char => char.codePointAt(0)); const right = Array.from(b, char => char.codePointAt(0)); for (let i = 0; i < Math.min(left.length, right.length); i++) if (left[i] !== right[i]) return left[i] - right[i]; return left.length - right.length; };
+function deriveRowtypeTables(sources) {
+  const tables = new Set(); const aliases = new Map();
+  const qualified = '((?:public|auth|storage|inbox_[a-z_]+|supabase_migrations)\\.[a-z_][a-z_0-9]*)';
+  for (const source of sources) {
+    for (const match of source.matchAll(new RegExp('\\b([a-z_][a-z0-9_]*)\\.([a-z_][a-z0-9_]*)%rowtype\\b', 'ig'))) tables.add(`${match[1].toLowerCase()}.${match[2].toLowerCase()}`);
+    for (const match of source.matchAll(new RegExp(`\\b(?:FROM|JOIN)\\s+${qualified}(?:\\s+(?:AS\\s+)?([a-z_][a-z0-9_]*))?`, 'ig'))) {
+      const table = match[1].toLowerCase(); const alias = (match[2] ?? table.split('.').at(-1)).toLowerCase();
+      if (!aliases.has(alias)) aliases.set(alias, new Set()); aliases.get(alias).add(table);
+    }
+    for (const [alias, candidates] of aliases) {
+      const escaped = alias.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+      if (new RegExp(`\\b${escaped}\\s*\\.\\s*\\*`, 'i').test(source)
+          || new RegExp(`\\b(?:SELECT\\s+(?:DISTINCT\\s+)?\\*\\s+FROM\\s+${escaped}\\b|SELECT\\s+\\(?\\s*${escaped}\\s*\\)?\\s*(?:,|FROM|$)|ROW\\s*\\(\\s*${escaped}\\s*\\))`, 'i').test(source)) {
+        for (const table of candidates) tables.add(table);
+      }
+    }
+  }
+  return tables;
+}
+const migrationDir = path.join(import.meta.dirname, '..', 'supabase', 'migrations');
+const ROWTYPE_TABLES = deriveRowtypeTables(readdirSync(migrationDir).filter(file => /^2026093004.*\\.sql$/.test(file)).sort(codepointCompare).map(file => readFileSync(path.join(migrationDir, file), 'utf8')));
 const stable = value => {
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
-  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort(codepointCompare).map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}`;
   return JSON.stringify(value);
 };
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 export const catalogFingerprint = sections => {
-  const section_sha256 = Object.fromEntries(Object.entries(sections).sort(([a],[b]) => a.localeCompare(b)).map(([name, value]) => [name, sha256(stable(value))]));
+  const section_sha256 = Object.fromEntries(Object.entries(sections).sort(([a],[b]) => codepointCompare(a, b)).map(([name, value]) => [name, sha256(stable(value))]));
   return { catalog_format_version: CATALOG_FORMAT_VERSION, sections, section_sha256, sha256: sha256(stable({ catalog_format_version: CATALOG_FORMAT_VERSION, section_sha256 })) };
 };
 function validateCatalogBaseline(value, label = 'catalog') {
@@ -56,7 +77,7 @@ function validateDriftRecord(record, baseline, { targetRef, candidateSha } = {})
   const relations = Object.fromEntries(baseline.sections.relations.map(row => [row.identity, row]));
   const seen = new Set();
   for (const item of record.items) {
-    if (!item || !hasExactKeys(item, ['object','attribute','name','canonical_definition','classification','origin','approval_sha256']) || !['columns','indexes'].includes(item.attribute) || ![item.object,item.name].every(value => typeof value === 'string' && value) || typeof item.canonical_definition !== 'string' || !item.canonical_definition || item.canonical_definition.endsWith('\n')) throw new Error('DRIFT_RECORD_STALE item');
+    if (!item || !hasExactKeys(item, ['object','attribute','name','canonical_definition','definition_sha256','classification','origin','approval_sha256']) || !['columns','indexes'].includes(item.attribute) || ![item.object,item.name].every(value => typeof value === 'string' && value) || typeof item.canonical_definition !== 'string' || !item.canonical_definition || item.canonical_definition.endsWith('\n') || !HEX.test(item.definition_sha256) || sha256(Buffer.from(item.canonical_definition, 'utf8')) !== item.definition_sha256) throw new Error('DRIFT_RECORD_STALE item');
     const identity = `${item.object}\0${item.attribute}\0${item.name}`;
     if (seen.has(identity)) throw new Error('DRIFT_RECORD_STALE duplicate');
     seen.add(identity);
@@ -86,7 +107,7 @@ function reconstructCatalog(baseline, record) {
     const c = item.classification;
     if (item.attribute === 'columns') bucket.push({ name: item.name, type: item.canonical_definition, not_null: !c.nullable, default: c.default, acl: c.column_acl, attgenerated: c.attgenerated, attidentity: c.attidentity });
     else bucket.push({ name: item.name, definition: item.canonical_definition, unique: c.unique, primary: c.primary, constraint: c.constraint, valid: c.valid, ready: c.ready, live: c.live, predicate: c.predicate, expression: c.expression, owner: c.owner });
-    bucket.sort((a,b) => (item.attribute === 'columns' ? a.name.localeCompare(b.name) : a.definition.localeCompare(b.definition)));
+    bucket.sort((a,b) => codepointCompare(item.attribute === 'columns' ? a.name : a.definition, item.attribute === 'columns' ? b.name : b.definition));
   }
   return catalogFingerprint(sections);
 }

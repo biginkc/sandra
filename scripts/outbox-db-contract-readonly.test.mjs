@@ -294,7 +294,7 @@ test('RULING catalog drift is disjoint and emits the named failure codes', () =>
   const sections = Object.fromEntries(catalogSections.map(name => [name, []]));
   sections.relations = [{ identity: 'public.message_threads', owner: 'postgres', columns: [], indexes: [], constraints: [], triggers: [], policies: [] }];
   const baseline = catalogFingerprint(sections);
-  const item = { object: 'public.message_threads', attribute: 'columns', name: 'extra', canonical_definition: 'uuid', classification: { class: 'column', nullable: true, default: null, attidentity: '', attgenerated: '', column_acl: null, owner: 'postgres' }, origin: 'unknown', approval_sha256: null };
+  const item = { object: 'public.message_threads', attribute: 'columns', name: 'extra', canonical_definition: 'uuid', definition_sha256: readableDigest(Buffer.from('uuid')), classification: { class: 'column', nullable: true, default: null, attidentity: '', attgenerated: '', column_acl: null, owner: 'postgres' }, origin: 'unknown', approval_sha256: null };
   const driftPayload = { record_version: 1, target_ref: TEST_REF, candidate_sha: 'a'.repeat(40), baseline_digest: baseline.sha256, catalog_format_version: 2, items: [item] };
   const drift = { ...driftPayload, sha256: readableDigest(Buffer.from(catalogStable(driftPayload))) };
   const observedSections = JSON.parse(JSON.stringify(sections));
@@ -302,7 +302,7 @@ test('RULING catalog drift is disjoint and emits the named failure codes', () =>
   const observed = catalogFingerprint(observedSections);
   fails('unrecorded', () => compareCatalog(baseline, observed), /CATALOG_DRIFT_UNRECORDED/);
   assert.doesNotThrow(() => compareCatalog(baseline, observed, { driftRecord: drift, targetRef: TEST_REF, candidateSha: 'a'.repeat(40) }));
-  const stale = JSON.parse(JSON.stringify(drift)); stale.items[0].canonical_definition = 'text'; stale.sha256 = readableDigest(Buffer.from(catalogStable(Object.fromEntries(['record_version','target_ref','candidate_sha','baseline_digest','catalog_format_version','items'].map(key => [key, stale[key]])))));
+  const stale = JSON.parse(JSON.stringify(drift)); stale.items[0].canonical_definition = 'text'; stale.items[0].definition_sha256 = readableDigest(Buffer.from('text')); stale.sha256 = readableDigest(Buffer.from(catalogStable(Object.fromEntries(['record_version','target_ref','candidate_sha','baseline_digest','catalog_format_version','items'].map(key => [key, stale[key]])))));
   fails('stale', () => compareCatalog(baseline, observed, { driftRecord: stale, targetRef: TEST_REF, candidateSha: 'a'.repeat(40) }), /DRIFT_RECORD_STALE/);
 });
 test('NC platform accepts only identifiable PostgREST versions', async () => {

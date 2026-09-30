@@ -17,14 +17,18 @@ const relative = runPath(sha, 'pre-merge', runId);
 const absolute = path.join(repo, relative);
 if (existsSync(path.join(absolute, 'manifest.json'))) throw new Error('Run record already sealed');
 mkdirSync(absolute, { recursive: true });
-const files = ['drift-record.json', 'catalog-pre.json', 'catalog-post.json', 'pre-readonly.json', 'post-readonly.json', 'contract-suite.txt'];
+const targetRefs = ['ncsngxlcyxylaeskiteu', 'copflsklaefwzipsrjqz'];
+const files = ['catalog-pre.json', 'catalog-post.json', ...targetRefs.flatMap(ref => [
+  `drift-record-${ref}.json`, `catalog-pre-${ref}.json`, `catalog-post-${ref}.json`,
+  `pre-readonly-${ref}.json`, `post-readonly-${ref}.json`, `contract-pre-${ref}.txt`, `contract-post-${ref}.txt`,
+])];
 for (const file of files) {
   const source = path.join(work, file);
   if (!existsSync(source)) throw new Error(`Missing replay result ${file}`);
   copyFileSync(source, path.join(absolute, file));
 }
 const hash = file => createHash('sha256').update(readFileSync(file)).digest('hex');
-const record = JSON.parse(readFileSync(path.join(absolute, 'drift-record.json')));
+const records = Object.fromEntries(targetRefs.map(ref => [ref, JSON.parse(readFileSync(path.join(absolute, `drift-record-${ref}.json`)))]));
 const endStatus = assertOnlyRunDirDirty(repo, relative);
 const artifacts = Object.fromEntries(files.map(file => [file, hash(path.join(absolute, file))]));
 writeManifest(repo, relative, {
@@ -34,5 +38,5 @@ writeManifest(repo, relative, {
   runner_script_sha256: hash(path.join(repo, 'scripts/inbox-ci/drift-replay.sh')),
   workflow_path: '.github/workflows/inbox-heavy-verification.yml', workflow_input_sha: sha, github_run_id: runId, github_run_attempt: attempt,
   artifact_name: `heavy-drift-replay-${sha}-${runId}-${attempt}`, event: env.GITHUB_EVENT_NAME, head_branch: env.GITHUB_REF_NAME, lane: 'drift-replay',
-  summary: { replayed_items: Array.isArray(record.items) ? record.items.length : 0, drift_record_sha256: record.sha256, j5a: "TEST matched the disposable baseline except eight pre-existing items not in any migration, listed here. They are recorded and replayed, not explained; owners unknown. Production's drift is not yet observed." },
+  summary: { replayed_items: Object.fromEntries(targetRefs.map(ref => [ref, records[ref].items.length])), drift_record_sha256: Object.fromEntries(targetRefs.map(ref => [ref, records[ref].sha256])), definition_sha256: Object.fromEntries(targetRefs.map(ref => [ref, records[ref].items.map(item => item.definition_sha256)])), j5a: "TEST matched the disposable baseline except eight pre-existing items not in any migration, listed here. They are recorded and replayed, not explained; owners unknown. Production's drift is not yet observed." },
 });

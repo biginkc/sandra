@@ -21,15 +21,16 @@ class CatalogDriftMutationTests(unittest.TestCase):
         self.baseline = evidence.catalog_digest(sections)
 
     def column(self, object_name="public.message_threads", name="new_column"):
-        return {"object": object_name, "attribute": "columns", "name": name, "canonical_definition": "uuid",
+        return {"object": object_name, "attribute": "columns", "name": name, "canonical_definition": "uuid", "definition_sha256": hashlib.sha256(b"uuid").hexdigest(),
                 "classification": {"class": "column", "nullable": True, "default": None, "attidentity": "", "attgenerated": "", "column_acl": None, "owner": "postgres"},
                 "origin": "unknown", "approval_sha256": None}
 
     def index(self, name="idx_new", **overrides):
         classification = {"class": "index", "unique": False, "primary": False, "constraint": False, "valid": True, "ready": True, "live": True,
                           "predicate": None, "expression": False, "owner": "postgres", **overrides}
+        definition = f"CREATE INDEX {name} ON public.message_threads USING btree (existing)"
         return {"object": "public.message_threads", "attribute": "indexes", "name": name,
-                "canonical_definition": f"CREATE INDEX {name} ON public.message_threads USING btree (existing)",
+                "canonical_definition": definition, "definition_sha256": hashlib.sha256(definition.encode()).hexdigest(),
                 "classification": classification, "origin": "unknown", "approval_sha256": None}
 
     def record(self, items=None, *, target_ref="ncsngxlcyxylaeskiteu", candidate_sha="a" * 40, baseline=None):
@@ -77,6 +78,7 @@ class CatalogDriftMutationTests(unittest.TestCase):
             ("unapproved predicate", lambda r: r.update(items=[self.index("idx_bad_predicate", predicate="(existing IS NOT NULL)")])),
             ("expression-only index", lambda r: r.update(items=[self.index("idx_bad_expression", expression=True)])),
             ("approval digest mismatch", lambda r: r.update(items=[self.index("idx_message_threads_ai_responder_status", predicate="(ai_responder_status IS NOT NULL)", approval_sha256="d" * 64)])),
+            ("approval definition digest mismatch", lambda r: r.update(items=[dict(self.index("idx_message_threads_ai_responder_status", predicate="(ai_responder_status IS NOT NULL)"), approval_sha256=evidence.DRIFT_APPROVALS["idx_message_threads_ai_responder_status"], canonical_definition="CREATE INDEX idx_message_threads_ai_responder_status ON public.message_threads USING btree (changed)", definition_sha256=hashlib.sha256(b"CREATE INDEX idx_message_threads_ai_responder_status ON public.message_threads USING btree (changed)").hexdigest())])),
             ("constraint-backed index", lambda r: r.update(items=[self.index("idx_constraint", constraint=True)])),
         ]
         for label, mutate in mutations:
@@ -99,6 +101,7 @@ class CatalogDriftMutationTests(unittest.TestCase):
 
         stale = copy.deepcopy(valid)
         stale["items"][0]["canonical_definition"] = "text"
+        stale["items"][0]["definition_sha256"] = hashlib.sha256(b"text").hexdigest()
         self.refresh(stale)
         self.assertNotEqual(evidence.reconstruct_drift_catalog(self.baseline, stale)["sha256"], observed["sha256"], "stale item")
         extra = self.record([self.column(), self.index()])
@@ -110,14 +113,33 @@ class CatalogDriftMutationTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "absent from sealed PRE"):
             evidence.validate_replacement_drift_record(original, replacement)
 
+    def test_gate_replacement_requires_full_definition_and_sealed_replay(self):
+        original = self.record()
+        replacement = copy.deepcopy(original)
+        replacement["items"][0]["canonical_definition"] = "text"
+        replacement["items"][0]["definition_sha256"] = hashlib.sha256(b"text").hexdigest()
+        self.refresh(replacement)
+        with self.assertRaisesRegex(evidence.EvidenceError, "absent from sealed PRE"):
+            evidence.validate_replacement_drift_record(original, replacement, replay=replacement)
+        with self.assertRaisesRegex(evidence.EvidenceError, "not linked"):
+            evidence.validate_replacement_drift_record(original, original)
+
     def test_gate_rejects_record_in_ordinary_lane(self):
-        with self.assertRaisesRegex(evidence.EvidenceError, "only permitted in replay lane"):
-            evidence.validate_drift_lane("browser", {"drift-record.json": "x"})
+        for artifact in ("drift-record.json", "drift-record-ncsngxlcyxylaeskiteu.json"):
+            with self.subTest(artifact=artifact), self.assertRaisesRegex(evidence.EvidenceError, "only permitted in replay lane"):
+                evidence.validate_drift_lane("browser", {artifact: "x"})
 
     def test_rowtype_table_guard_is_derived_from_migration_source(self):
-        sql = "\n".join(path.read_text() for path in (Path(__file__).resolve().parents[2] / "supabase/migrations").glob("2026093004*.sql"))
-        derived = {f"{schema.lower()}.{table.lower()}" for schema, table in re.findall(r"\b([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)%rowtype\b", sql, re.I)}
-        self.assertEqual(derived, evidence.ROWTYPE_TABLES)
+        sql = [path.read_text() for path in (Path(__file__).resolve().parents[2] / "supabase/migrations").glob("2026093004*.sql")]
+        self.assertEqual(evidence.derive_rowtype_tables(sql), evidence.ROWTYPE_TABLES)
+
+    def test_rowtype_guard_detects_star_and_row_constructor_reads(self):
+        synthetic = """
+        SELECT m.* FROM public.messages AS m;
+        SELECT * FROM public.contacts c;
+        SELECT ROW(c) FROM public.contacts AS c;
+        """
+        self.assertEqual(evidence.derive_rowtype_tables([synthetic]), {"public.messages", "public.contacts"})
 
 
 if __name__ == "__main__":

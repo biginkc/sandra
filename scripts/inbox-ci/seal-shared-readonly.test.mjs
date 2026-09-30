@@ -34,6 +34,8 @@ async function fixture() {
   for (const file of JSON.parse(readFileSync('scripts/inbox-ci/shared-readonly-operators.json')).operator_scripts) {
     mkdirSync(path.dirname(path.join(repo, file)), { recursive: true }); copyFileSync(file, path.join(repo, file));
   }
+  mkdirSync(path.join(repo, 'experiments/inbox-production-install/drift'), { recursive: true });
+  for (const ref of ['ncsngxlcyxylaeskiteu', 'copflsklaefwzipsrjqz']) writeFileSync(path.join(repo, `experiments/inbox-production-install/drift/${ref}.items.json`), JSON.stringify({ fixture_version: 1, items: [] }));
   git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'base');
   const sha = git(repo, 'rev-parse', 'HEAD');
   const root = `docs/performance/inbox-redesign/evidence/${sha}/pre-merge`;
@@ -52,7 +54,7 @@ async function fixture() {
   const platformRecord = input('platform', 'db-contract', 'pre', 'platform-config.json', platform);
   const driftPayload = { record_version: 1, target_ref: 'ncsngxlcyxylaeskiteu', candidate_sha: sha, baseline_digest: catalog.sha256, catalog_format_version: 2, items: [] };
   const drift = { ...driftPayload, sha256: digest(Buffer.from(stable(driftPayload))) };
-  const driftRecord = input('drift', 'drift-replay', 'n/a', 'drift-record.json', drift);
+  const driftRecord = input('drift', 'drift-replay', 'n/a', 'drift-record-ncsngxlcyxylaeskiteu.json', drift);
   const output = path.join(os.tmpdir(), `shared-output-${sha}.json`);
   const plans = Object.fromEntries(['privileged','member'].map(role => [role, Object.fromEntries(['first','keyset','null_tail'].map(shape => [shape,{sha256:'a'.repeat(64),messages_scan:'Seq Scan',total_cost:10}]))]));
   const source = { verdict: 'PASS', target: 'shared-readonly', phase: 'pre', summary: 'Auth health returned 200 with the publishable key; GoTrue major matched. Our publishable-key PostgREST request was rejected. PostgREST major was observed from its connection name and matched. On TEST the name carries no version, so this check is waived there in practice; Production is expected to be the same. Connection names are diagnostic labels, not attestations. Release may proceed with hosted PostgREST compatibility unverified. Hosted app/SSR/PostgREST behaviour is inferred from same-SHA disposable runs plus catalog and claim-plumbing equality, which cannot establish hosted runtime/configuration equality; a GoTrue major match does not prove identical hosted claim configuration.', plans, tls:{protocol:'TLSv1.3',cipher:'test',leaf_fingerprint:'AA:'.repeat(31)+'AA',pinned_ca_fingerprint:'80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA',root_in_peer_chain:false,upstream_hop_ssl:{ssl:false,version:null,cipher:null}}, catalog_indexes:{}, items: {}, platform_config: platform, comparisons: { catalog: { verdict: 'PASS', input_sha256: digest(Buffer.from(JSON.stringify(catalog))), observed_section_sha256: sections, observed_catalog_sha256: catalog.sha256, drift_record_sha256: drift.sha256 }, platform: { verdict: 'PASS', waived_fields: [], waiver_reasons: {}, input_sha256: digest(Buffer.from(JSON.stringify(platform))), observed_sha256: platform.sha256 } } };
@@ -68,8 +70,8 @@ function driftHarness() {
     { identity: 'inbox_parent.work', owner: 'postgres', columns: [], indexes: [], constraints: [], triggers: [], policies: [] },
   ];
   const baseline = catalogFingerprint(sections);
-  const column = (object = 'public.message_threads', name = 'new_column') => ({ object, attribute: 'columns', name, canonical_definition: 'uuid', classification: { class: 'column', nullable: true, default: null, attidentity: '', attgenerated: '', column_acl: null, owner: 'postgres' }, origin: 'unknown', approval_sha256: null });
-  const index = (name = 'idx_new', overrides = {}) => ({ object: 'public.message_threads', attribute: 'indexes', name, canonical_definition: `CREATE INDEX ${name} ON public.message_threads USING btree (existing)`, classification: { class: 'index', unique: false, primary: false, constraint: false, valid: true, ready: true, live: true, predicate: null, expression: false, owner: 'postgres', ...overrides }, origin: 'unknown', approval_sha256: null });
+  const column = (object = 'public.message_threads', name = 'new_column') => ({ object, attribute: 'columns', name, canonical_definition: 'uuid', definition_sha256: digest(Buffer.from('uuid')), classification: { class: 'column', nullable: true, default: null, attidentity: '', attgenerated: '', column_acl: null, owner: 'postgres' }, origin: 'unknown', approval_sha256: null });
+  const index = (name = 'idx_new', overrides = {}) => ({ object: 'public.message_threads', attribute: 'indexes', name, canonical_definition: `CREATE INDEX ${name} ON public.message_threads USING btree (existing)`, definition_sha256: digest(Buffer.from(`CREATE INDEX ${name} ON public.message_threads USING btree (existing)`)), classification: { class: 'index', unique: false, primary: false, constraint: false, valid: true, ready: true, live: true, predicate: null, expression: false, owner: 'postgres', ...overrides }, origin: 'unknown', approval_sha256: null });
   const record = (items = [column()]) => {
     const payload = { record_version: 1, target_ref: 'ncsngxlcyxylaeskiteu', candidate_sha: 'a'.repeat(40), baseline_digest: baseline.sha256, catalog_format_version: 2, items };
     return { ...payload, sha256: digest(Buffer.from(stable(payload))) };
@@ -84,7 +86,7 @@ test('sealer mutation matrix rejects every catalog-drift guard', () => {
     const record = JSON.parse(JSON.stringify(valid));
     mutate(record);
     record.sha256 = digest(Buffer.from(stable(Object.fromEntries(['record_version','target_ref','candidate_sha','baseline_digest','catalog_format_version','items'].map(key => [key, record[key]])))));
-    assert.throws(() => reconstructCatalog(h.baseline, record, { targetRef: 'ncsngxlcyxylaeskiteu', candidateSha: 'a'.repeat(40) }), /Drift record|Catalog baseline/, label);
+    assert.throws(() => reconstructCatalog(h.baseline, record, { targetRef: 'ncsngxlcyxylaeskiteu', candidateSha: 'a'.repeat(40), rowtypeTables: new Set(['inbox_parent.work']) }), /Drift record|Catalog baseline/, label);
   };
   for (const [label, mutate] of [
     ['duplicate entry', record => { record.items.push(JSON.parse(JSON.stringify(record.items[0]))); }],
@@ -116,7 +118,7 @@ test('sealer mutation matrix rejects every catalog-drift guard', () => {
   const missingBaseline = JSON.parse(JSON.stringify(h.baseline));
   missingBaseline.sections.relations[0].columns = [];
   assert.throws(() => reconstructCatalog(missingBaseline, valid), /Catalog baseline digest/, 'missing baseline column');
-  const stale = h.record(); stale.items[0].canonical_definition = 'text'; stale.sha256 = digest(Buffer.from(stable(Object.fromEntries(['record_version','target_ref','candidate_sha','baseline_digest','catalog_format_version','items'].map(key => [key, stale[key]])))));
+  const stale = h.record(); stale.items[0].canonical_definition = 'text'; stale.items[0].definition_sha256 = digest(Buffer.from('text')); stale.sha256 = digest(Buffer.from(stable(Object.fromEntries(['record_version','target_ref','candidate_sha','baseline_digest','catalog_format_version','items'].map(key => [key, stale[key]])))));
   assert.notEqual(reconstructCatalog(h.baseline, stale).sha256, observed.sha256, 'stale or changed item');
   const extra = h.record([h.column(), h.index()]);
   assert.notEqual(reconstructCatalog(h.baseline, extra).sha256, observed.sha256, 'unrecorded extra');
@@ -127,6 +129,9 @@ test('sealer mutation matrix rejects every catalog-drift guard', () => {
   const postCollision = h.record(); postCollision.baseline_digest = post.sha256;
   postCollision.sha256 = digest(Buffer.from(stable(Object.fromEntries(['record_version','target_ref','candidate_sha','baseline_digest','catalog_format_version','items'].map(key => [key, postCollision[key]])))));
   assert.throws(() => reconstructCatalog(post, postCollision), /baseline collision/, 'POST collision');
+  const approved = h.index('idx_message_threads_ai_responder_status', { predicate: '(ai_responder_status IS NOT NULL)' });
+  approved.approval_sha256 = 'e419f623f1922466db14dba7aa091cdd4720924e2b97901088af2dc5719b108a';
+  assert.throws(() => reconstructCatalog(h.baseline, h.record([approved])), /Drift record approval mismatch/, 'approval definition digest');
 });
 test('seals only digest representation linked to committed inputs', async () => {
   const f = await fixture(); const dir = sealSharedReadonly(f.args);
@@ -141,6 +146,13 @@ test('sealer records a PostgREST NOT_VERIFIED waiver and covers it in the digest
   const dir = sealSharedReadonly(f.args);
   const manifest = JSON.parse(readFileSync(path.join(f.repo, dir, 'manifest.json')));
   assert.deepEqual(manifest.waived_fields, ['postgrest_major']);
+});
+test('sealer requires the replay record and checks the summary', async () => {
+  const f = await fixture();
+  assert.throws(() => sealSharedReadonly({ ...f.args, driftRecord: undefined }), /Drift replay record required/);
+  f.source.summary = 'tampered summary';
+  f.save();
+  assert.throws(() => sealSharedReadonly(f.args), /Platform summary mismatch/);
 });
 test('sealer rejects a NOT_VERIFIED disposable baseline', async () => {
   const f = await fixture();
