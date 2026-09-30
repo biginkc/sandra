@@ -65,7 +65,7 @@ export async function dispatchBatchWithStalls(pool, fetcher, ingress, { stallLog
     // its lease (still unacknowledged); it naturally expires and is retried
     // on a later pass, deferred, never journaled complete.
     if (acknowledgment.rows[0]?.result === true) accepted++;
-    else if (BigInt(entry.generation) >= 150n) {
+    else if (body.status === 'PreviouslyAccepted' && BigInt(entry.generation) >= 150n) {
       stallLogger({ operation_id: operationId, event_id: eventId, invocation_id: body.invocationId, generation: entry.generation });
     }
   }
