@@ -64,6 +64,7 @@ const blockerCopy: Record<"empty" | "recipient_limit" | "duplicate_destination",
 
 const UNCONFIRMED_RECEIPT_STATES = ["pending", "dispatch_started", "uncertain"] as const;
 const POLL_BACKOFF_MS = [500, 1000, 2000] as const;
+export const MAX_POLL_DURATION_MS = 10_000;
 
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -143,7 +144,8 @@ function receiptLabel(status: InboxReplyStatus): string {
 }
 
 function statusMessage(status: InboxReplyStatus): string {
-  if (status.receipts.some(receipt => UNCONFIRMED_RECEIPT_STATES.includes(receipt.state as typeof UNCONFIRMED_RECEIPT_STATES[number]))) return "The provider result is not yet confirmed. Do not resend this reply.";
+  if (status.receipts.some(receipt => receipt.state === "uncertain")) return "The provider result is not yet confirmed. Do not resend this reply.";
+  if (status.receipts.some(receipt => UNCONFIRMED_RECEIPT_STATES.includes(receipt.state as typeof UNCONFIRMED_RECEIPT_STATES[number]))) return "The durable receipt is still being checked.";
   const failure = status.receipts.find(receipt => receipt.reason)?.reason;
   return failure ?? (receiptLabel(status) === "Accepted by provider" ? "The provider accepted the reply; delivery can update separately." : "The server recorded the reply result.");
 }
@@ -166,12 +168,12 @@ function PreparedReview({ prepared, names, onEdit, onSend, sending, bulk }: { pr
   </section>;
 }
 
-function ReceiptSummary({ status, operationId, bulk, uncertainResult = false }: { status?: InboxReplyStatus; operationId?: string; bulk: boolean; uncertainResult?: boolean }) {
+function ReceiptSummary({ status, operationId, bulk, uncertainResult = false, message }: { status?: InboxReplyStatus; operationId?: string; bulk: boolean; uncertainResult?: boolean; message?: string }) {
   if (!status && !operationId) return null;
-  const uncertain = uncertainResult || !!status?.receipts.some(receipt => UNCONFIRMED_RECEIPT_STATES.includes(receipt.state as typeof UNCONFIRMED_RECEIPT_STATES[number]));
+  const uncertain = uncertainResult || !!status?.receipts.some(receipt => receipt.state === "uncertain");
   return <section className={`${styles.receipt} ${uncertain ? styles.uncertain : ""}`} role={uncertain ? "alert" : "status"}>
     <strong>{uncertain ? "Send result not confirmed" : status ? receiptLabel(status) : "Checking receipt"}</strong>
-    <p>{status ? statusMessage(status) : uncertain ? "The send result was not confirmed. Do not resend this reply." : "The durable receipt is still being checked."}{uncertain ? " Check the receipt or conversation manually; this screen will not resend it." : ""}</p>
+    <p>{uncertain && message ? message : status ? statusMessage(status) : uncertain ? "The send result was not confirmed. Do not resend this reply." : "The durable receipt is still being checked."}{uncertain ? " Check the receipt or conversation manually; this screen will not resend it." : ""}</p>
     {status && <ul className={styles.receiptList}>{status.items.map(item => {
       const receipt = status.receipts.find(value => value.itemId === item.id);
       const name = item.recipient?.contactName ?? "Excluded recipient";
@@ -228,25 +230,42 @@ export function InboxReplyComposer({ targets, names, enabled = false, routeKey =
     }
   }
 
-  function schedulePoll(operationId: string, attempt: number, consecutiveFailures: number) {
+  function schedulePoll(operationId: string, attempt: number, consecutiveFailures: number, startedAt: number, lastStatus?: InboxReplyStatus) {
     if (pollTimer.current) clearTimeout(pollTimer.current);
-    pollTimer.current = setTimeout(() => { pollTimer.current = null; void poll(operationId, attempt + 1, consecutiveFailures); }, POLL_BACKOFF_MS[Math.min(attempt, POLL_BACKOFF_MS.length - 1)]);
+    const delay = POLL_BACKOFF_MS[Math.min(attempt, POLL_BACKOFF_MS.length - 1)];
+    const remaining = Math.max(0, MAX_POLL_DURATION_MS - (Date.now() - startedAt));
+    if (remaining === 0) {
+      dispatch({ type: "uncertain", status: lastStatus, message: "The receipt could not be confirmed within the polling window. Check the receipt before taking any further action." });
+      return;
+    }
+    pollTimer.current = setTimeout(() => {
+      pollTimer.current = null;
+      if (Date.now() - startedAt >= MAX_POLL_DURATION_MS) {
+        dispatch({ type: "uncertain", status: lastStatus, message: "The receipt could not be confirmed within the polling window. Check the receipt before taking any further action." });
+        return;
+      }
+      void poll(operationId, attempt + 1, consecutiveFailures, startedAt, lastStatus);
+    }, Math.min(delay, remaining));
   }
 
-  async function poll(operationId: string, attempt = 0, consecutiveFailures = 0) {
+  async function poll(operationId: string, attempt = 0, consecutiveFailures = 0, startedAt = Date.now(), lastStatus?: InboxReplyStatus) {
     const controller = new AbortController(); request.current = controller;
     try {
       const response = await requestFetch(`/api/inbox/replies/${encodeURIComponent(operationId)}`, { credentials: "same-origin", cache: "no-store", redirect: "error", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]) });
       if (!response.ok) throw Error("The reply receipt is not available yet.");
       const status = await response.json() as InboxReplyStatus;
       if (controller.signal.aborted || status.operationId !== operationId || !Array.isArray(status.receipts)) throw Error("The reply receipt could not be verified.");
-      if (status.dispatchComplete) dispatch({ type: "receipt", status });
-      else schedulePoll(operationId, attempt, 0);
+      const hasUncertainReceipt = status.receipts.some(receipt => receipt.state === "uncertain");
+      if (status.dispatchComplete || hasUncertainReceipt) dispatch({ type: "receipt", status });
+      else {
+        dispatch({ type: "receipt_update", status });
+        schedulePoll(operationId, attempt, 0, startedAt, status);
+      }
     } catch (error) {
       if (!controller.signal.aborted) {
         const nextFailures = consecutiveFailures + 1;
-        if (nextFailures <= POLL_BACKOFF_MS.length) schedulePoll(operationId, attempt, nextFailures);
-        else dispatch({ type: "uncertain", message: error instanceof Error ? error.message : "The reply result could not be checked." });
+        if (nextFailures <= POLL_BACKOFF_MS.length && Date.now() - startedAt < MAX_POLL_DURATION_MS) schedulePoll(operationId, attempt, nextFailures, startedAt, lastStatus);
+        else dispatch({ type: "uncertain", status: lastStatus, message: error instanceof Error ? error.message : "The reply result could not be checked." });
       }
     }
   }
@@ -284,16 +303,16 @@ export function InboxReplyComposer({ targets, names, enabled = false, routeKey =
   const reviewBusy = state.phase === "reviewing" && !review;
   const sent = state.phase === "sent" || state.phase === "uncertain";
   return <section className={styles.composer} aria-label={bulk ? "Reply to selected conversations" : "Reply to conversation"}>
-    <div className={styles.heading}><div><span className={styles.eyebrow}>{bulk ? "BULK REPLY" : "SINGLE REPLY"}</span><h3>{bulk ? `Reply to ${targets.length} selected conversations` : "Reply to this conversation"}</h3></div><span className={`${styles.state} ${["blocked", "route_changed", "network_error", "uncertain"].includes(state.phase) ? styles.warning : state.phase === "sent" ? styles.success : ""}`}>{state.phase === "route_changed" ? "Review discarded" : state.phase.replaceAll("_", " ")}</span></div>
+    <div className={styles.heading}><div><span className={styles.eyebrow}>{bulk ? "BULK REPLY" : "SINGLE REPLY"}</span><h3>{bulk ? `Reply to ${targets.length} selected conversations` : `Reply to ${names?.get(targetKey(targets[0])) ?? "this conversation"}`}</h3></div><span className={`${styles.state} ${["blocked", "route_changed", "network_error", "uncertain"].includes(state.phase) ? styles.warning : state.phase === "sent" ? styles.success : ""}`}>{state.phase === "route_changed" ? "Review discarded" : state.phase.replaceAll("_", " ")}</span></div>
     {state.phase === "route_changed" && <div className={styles.notice} role="alert"><strong>Review discarded</strong><p>{state.message}</p><p>Nothing was sent. Review the current route and message again.</p></div>}
     {state.phase === "network_error" && <div className={styles.error} role="alert"><strong>Review unavailable</strong><p>{state.message}</p><p>No send was started from this screen. Reconnect and review again.</p></div>}
     {state.phase === "uncertain" && !state.status && <div className={styles.notice} role="alert"><strong>Send result not confirmed</strong><p>{state.message}</p><p>Do not resend. Check the conversation or receipt manually.</p></div>}
     {!sent && <><label className={styles.label} htmlFor={bulk ? "bulk-reply-message" : "single-reply-message"}>Message</label><textarea id={bulk ? "bulk-reply-message" : "single-reply-message"} className={styles.textarea} aria-label="Reply message" rows={3} maxLength={MAX_BODY} value={state.draft} disabled={reviewBusy || state.phase === "sending" || state.phase === "blocked"} onChange={event => dispatch({ type: "edit", draft: event.target.value })} onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); void reviewReply(); } }} placeholder="Write a reply…" />
-      <div className={styles.footer}><span className={styles.counter}>{state.draft.length} / {MAX_BODY} characters · {targets.length} selected</span>{state.phase !== "reviewing" && state.phase !== "blocked" && state.phase !== "sending" && <button type="button" className={styles.primary} onClick={() => void reviewReply()} disabled={!state.draft.trim() || reviewBusy}>{reviewBusy ? "Checking…" : "Review reply"}</button>}</div></>}
+      <div className={styles.footer}><span className={styles.counter}>{state.draft.length} / {MAX_BODY} characters{bulk ? ` · ${targets.length} selected` : ""}</span>{state.phase !== "reviewing" && state.phase !== "blocked" && state.phase !== "sending" && <button type="button" className={styles.primary} onClick={() => void reviewReply()} disabled={!state.draft.trim() || reviewBusy}>{reviewBusy ? "Checking…" : "Review reply"}</button>}</div></>}
     {reviewBusy && <p className={styles.notice} role="status">Checking current eligibility and recipient routes…</p>}
     {review && !sent && <PreparedReview prepared={review} names={names} onEdit={() => dispatch({ type: "edit", draft: state.draft })} onSend={() => void sendReply()} sending={state.phase === "sending"} bulk={bulk} />}
     {!review && state.message && state.phase === "blocked" && <p className={styles.error} role="alert">{state.message}</p>}
-    {(state.status || state.operationId) && <ReceiptSummary status={state.status} operationId={state.operationId} bulk={bulk} uncertainResult={state.phase === "uncertain" && !state.status} />}
+    {(state.status || state.operationId) && <ReceiptSummary status={state.status} operationId={state.operationId} bulk={bulk} uncertainResult={state.phase === "uncertain"} message={state.message} />}
     {onClose && <button className={styles.secondary} type="button" onClick={onClose}>Close</button>}
   </section>;
 }

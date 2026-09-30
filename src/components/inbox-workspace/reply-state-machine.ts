@@ -35,8 +35,9 @@ export type ReplyEvent =
   | { type: "route_changed"; message: string }
   | { type: "send_requested" }
   | { type: "send_started"; operationId: string }
+  | { type: "receipt_update"; status: InboxReplyStatus }
   | { type: "receipt"; status: InboxReplyStatus }
-  | { type: "uncertain"; message: string }
+  | { type: "uncertain"; message: string; status?: InboxReplyStatus }
   | { type: "edit"; draft: string }
   | { type: "reset"; draft?: string };
 
@@ -114,6 +115,11 @@ export function replyStateReducer(
         operationId: event.operationId,
         message: undefined,
       };
+    case "receipt_update":
+      return {
+        ...state,
+        status: event.status,
+      };
     case "receipt":
       return {
         ...state,
@@ -125,6 +131,7 @@ export function replyStateReducer(
       return {
         ...state,
         phase: "uncertain",
+        status: event.status ?? state.status,
         message: event.message,
       };
     case "edit":

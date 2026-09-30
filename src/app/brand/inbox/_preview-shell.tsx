@@ -127,7 +127,7 @@ export function InboxReplyPreview({ state }: { state: InboxReplyPreviewState }) 
 
   const detailContent = openedId ? <div className={styles.detailBody}>
     <div className={styles.history}><ConversationHistory orgId={fixture.orgId} conversationId={openedTarget.id} requestGeneration={1} snapshot={{ requestGeneration: 1, data: { ...historySnapshot, conversationId: openedTarget.id } }} visible onRefresh={() => {}} onAccessLost={() => {}} onUnavailable={() => {}} fetch={fixtureRead} /></div>
-    <InboxReplyComposer targets={[openedTarget]} routeKey={`${fixture.captureGeneration}:${routeVersion}`} enabled fetcher={fixtureFetch} initialDraft={fixture.body} />
+    <InboxReplyComposer targets={[openedTarget]} names={names} routeKey={`${fixture.captureGeneration}:${routeVersion}`} enabled fetcher={fixtureFetch} initialDraft={fixture.body} />
   </div> : undefined;
 
   return <div className={styles.preview}>

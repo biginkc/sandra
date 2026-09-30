@@ -5,3 +5,4 @@
 .receipt > .secondary{display:inline-block;margin-top:8px}
 .composer{width:100%;min-width:0}
 .textarea{display:block;width:100%;min-width:0;box-sizing:border-box;border:1px solid var(--input,#cbd5e1);border-radius:8px;background:#fff!important;padding:8px 10px;font-size:12px!important;line-height:1.5!important;min-height:92px!important;resize:vertical;outline:none;transition:border-color .15s,box-shadow .15s}.textarea:focus-visible{border-color:var(--ring,#4779ff);box-shadow:0 0 0 3px color-mix(in srgb,var(--ring,#4779ff) 50%,transparent)}
+.composer .primary{border:0;background:#172a50;color:#fff}

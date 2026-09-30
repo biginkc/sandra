@@ -17,7 +17,7 @@ function prepared(key: string, exclusion: PreparedInboxReply["items"][number]["e
 }
 
 function status(receiptState: InboxReplyStatus["receipts"][number]["state"]): InboxReplyStatus {
-  return { operationId, preparationId: "00000000-0000-4000-8000-000000000004", dispatchComplete: true, items: [prepared("00000000-0000-4000-8000-000000000007").items[0]], receipts: [{ itemId, attemptId: null, version: "1", state: receiptState, reason: receiptState === "uncertain" ? "provider timeout" : null }] };
+  return { operationId, preparationId: "00000000-0000-4000-8000-000000000004", dispatchComplete: receiptState !== "uncertain", items: [prepared("00000000-0000-4000-8000-000000000007").items[0]], receipts: [{ itemId, attemptId: null, version: "1", state: receiptState, reason: receiptState === "uncertain" ? "provider timeout" : null }] };
 }
 
 function responseFor(url: string, init?: RequestInit, receiptState: InboxReplyStatus["receipts"][number]["state"] = "delivered"): Response {
@@ -120,6 +120,18 @@ describe("InboxReplyComposer", () => {
     expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith("/replies/accept"))).toBe(false);
   });
 
+  it("uses the open contact name for a blocked single review", async () => {
+    vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => url.endsWith("/replies/prepare")
+      ? Promise.resolve(Response.json(prepared(JSON.parse(String(init?.body)).idempotencyKey, "no_consent")))
+      : Promise.reject(Error("accept must not run"))));
+    render(<InboxReplyComposer targets={[target]} names={new Map([[`conversation:${conversationId}`, "Ada Lovelace"]])} routeKey="route-a" enabled />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Reply message" }), { target: { value: "Draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Review reply" }));
+    await screen.findByText("No affirmative SMS consent is on file.");
+    expect(screen.getByText("Ada Lovelace")).toBeVisible();
+    expect(screen.queryByText("Selected conversation")).not.toBeInTheDocument();
+  });
+
   it("discards the review when the route changes and preserves the draft", async () => {
     const view = mount("route-a");
     fireEvent.change(screen.getByRole("textbox", { name: "Reply message" }), { target: { value: "Keep this draft" } });
@@ -142,6 +154,28 @@ describe("InboxReplyComposer", () => {
     await screen.findByText("Send result not confirmed");
     expect(screen.getByText(/Do not resend/)).toBeVisible();
     expect(screen.queryByRole("button", { name: "Send reply" })).toBeNull();
+  });
+
+  it("does not wait for dispatchComplete before showing an uncertain receipt and its recipient results", async () => {
+    let receiptAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
+      if (url.endsWith("/replies/prepare")) return Promise.resolve(Response.json(prepared(JSON.parse(String(init?.body)).idempotencyKey)));
+      if (url.endsWith("/replies/accept")) return Promise.resolve(Response.json({ operationId }));
+      receiptAttempts += 1;
+      return Promise.resolve(Response.json({ ...status("uncertain"), dispatchComplete: false }));
+    }));
+    mount();
+    fireEvent.change(screen.getByRole("textbox", { name: "Reply message" }), { target: { value: "Draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Review reply" }));
+    await screen.findByText("Review before sending");
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await screen.findByText("Send result not confirmed");
+    expect(screen.getAllByText("uncertain", { exact: true }).length).toBeGreaterThan(0);
+    expect(screen.queryByText("sending", { exact: true })).toBeNull();
+    expect(screen.getAllByText("Ada Lovelace").length).toBeGreaterThan(0);
+    expect(screen.getByRole("link", { name: "Open reply receipt" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Send reply" })).toBeNull();
+    expect(receiptAttempts).toBe(1);
   });
 
   it("retries receipt polling with backoff and keeps the durable receipt link visible", async () => {
@@ -195,6 +229,28 @@ describe("InboxReplyComposer", () => {
     await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); await Promise.resolve(); });
     expect(receiptAttempts).toBe(3);
     expect(screen.queryByText("Send result not confirmed")).not.toBeInTheDocument();
+    vi.useRealTimers();
+  });
+
+  it("bounds a never-completing receipt poll and retains the durable receipt link", async () => {
+    let receiptAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/replies/prepare")) return Response.json(prepared(JSON.parse(String(init?.body)).idempotencyKey));
+      if (url.endsWith("/replies/accept")) return Response.json({ operationId });
+      receiptAttempts += 1;
+      return Response.json({ ...status("pending"), dispatchComplete: false });
+    }));
+    mount();
+    fireEvent.change(screen.getByRole("textbox", { name: "Reply message" }), { target: { value: "Draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Review reply" }));
+    await screen.findByText("Review before sending");
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { vi.advanceTimersByTime(10_001); await Promise.resolve(); await Promise.resolve(); });
+    expect(receiptAttempts).toBeGreaterThan(1);
+    expect(screen.getAllByText("Send result not confirmed").length).toBeGreaterThan(0);
+    expect(screen.getByRole("link", { name: "Open reply receipt" })).toBeVisible();
     vi.useRealTimers();
   });
 

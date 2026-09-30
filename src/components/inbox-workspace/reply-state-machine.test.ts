@@ -51,6 +51,19 @@ describe("review-before-send state machine", () => {
     expect(replyStateReducer(reviewing, { type: "send_requested" }).phase).toBe("sending");
   });
 
+  it("surfaces an incomplete receipt update without waiting for dispatch completion", () => {
+    const statusValue = status({
+      operationId: "operation-1", preparationId: "00000000-0000-4000-8000-000000000001", dispatchComplete: false,
+      items: prepared().items, receipts: [{ itemId: prepared().items[0].id, attemptId: null, version: "1", state: "pending", reason: null }],
+    });
+    const state = replyStateReducer(
+      { ...initialReplyState("Hello"), phase: "sending", operationId: "operation-1", review: review() },
+      { type: "receipt_update", status: statusValue },
+    );
+    expect(state.phase).toBe("sending");
+    expect(state.status).toBe(statusValue);
+  });
+
   it("enters sent only from a terminal receipt", () => {
     const state = replyStateReducer(
       { ...initialReplyState("Hello"), phase: "sending", operationId: "operation-1", review: review() },
