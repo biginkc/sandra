@@ -1,9 +1,11 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "source": {
     "file": "src/lib/scoring/contracts/objection-catalog.json",
     "version": "objection-rules-2026-09-07",
-    "sha256": "fe25b222796afd33e8171527789791307a58ae1f85b814320b0f1ed9dc6ecd77"
+    "sha256": "fe25b222796afd33e8171527789791307a58ae1f85b814320b0f1ed9dc6ecd77",
+    "exportSha256": "41993b4ad0362cc6ec57490499697e497479c7295eeb50643ec63ca704abdf9d",
+    "cleaning": "rule 2A (Jarrad, 2026-09-30): header line and (Boiler Room, date) tags removed; Kyle/Julia/Ivan/Stone -> Mr. Seller; relocation reply 1C added"
   },
   "sets": {
     "consult": {
@@ -20,7 +22,7 @@
         {
           "catalogId": "review_agreement",
           "variantId": "core",
-          "text": "If they want to review\nCLOSR · PERSUASION PLAYBOOK 4\n\n\n“No worries, Kyle. I want you to have a hundred percent confidence moving forward with us in the first\nplace. Go ahead, pull it up. We’re going to read through.” (Boiler Room, Jun 23)\n“Go ahead, pull it up. We’re going to read through this together so you can have confidence working with\nus, and that way I can get any questions while we’re here together.” (Boiler Room, Jun 23)\n"
+          "text": "If they want to review\n\n\n“No worries, Mr. Seller. I want you to have a hundred percent confidence moving forward with us in the first\nplace. Go ahead, pull it up. We’re going to read through.”\n“Go ahead, pull it up. We’re going to read through this together so you can have confidence working with\nus, and that way I can get any questions while we’re here together.”\n"
         }
       ]
     },
@@ -57,7 +59,7 @@
         {
           "catalogId": "signing_scam",
           "variantId": "signing-confidence",
-          "text": "Of course, Julia, what would make you feel confident and comfortable signing?"
+          "text": "Of course, Mr. Seller, what would make you feel confident and comfortable signing?"
         }
       ]
     },
@@ -80,7 +82,7 @@
         {
           "catalogId": "counteroffer",
           "variantId": "core",
-          "text": "When price is too low\n“Yeah, man. Unfortunately, it did come in lower than you and I were hoping for. What were you hoping they\nwere at least going to say?” (Boiler Room, Jun 25)\n“I’m not sure I can get you that. I’m going to fight for you to get as high as possible… What is the lowest\nyou’d actually be willing to go in order to be able to achieve dream outcome?” (Boiler Room, Jun 25)\nGive-and-take after rejection\n“Look, Stone, at the end of the day, I don’t really think it would work for you either, right? However, that’s\nwith us paying moving costs, that’s with a 14-day close, that’s with all cash, no walkthroughs, nothing like\nthat, right? Would it really matter if it took like an extra 30 days and we got a couple of walkthroughs just to\nmake sure it’s in the condition you promised me, if I’m able to get you X amount in your pocket?” (Boiler\nRoom, Jun 23)\n“Perfect. I’m going to go see if I can get you approved for that program because that one sounds like it’s a\nbetter fit for you in the first place.” (Boiler Room, Jun 23)\n"
+          "text": "When price is too low\n“Yeah, man. Unfortunately, it did come in lower than you and I were hoping for. What were you hoping they\nwere at least going to say?”\n“I’m not sure I can get you that. I’m going to fight for you to get as high as possible… What is the lowest\nyou’d actually be willing to go in order to be able to achieve dream outcome?”\nGive-and-take after rejection\n“Look, Mr. Seller, at the end of the day, I don’t really think it would work for you either, right? However, that’s\nwith us paying moving costs, that’s with a 14-day close, that’s with all cash, no walkthroughs, nothing like\nthat, right? Would it really matter if it took like an extra 30 days and we got a couple of walkthroughs just to\nmake sure it’s in the condition you promised me, if I’m able to get you X amount in your pocket?” (Boiler\nRoom, Jun 23)\n“Perfect. I’m going to go see if I can get you approved for that program because that one sounds like it’s a\nbetter fit for you in the first place.”\n"
         }
       ]
     },
@@ -94,7 +96,7 @@
         {
           "catalogId": "listing_realtor",
           "variantId": "outcome-tradeoffs",
-          "text": "Listing comparison\n“Jayline, honestly, that may be the best option for you… if you’ve got the money for that, you have the next\nsix months to take a risk and list it on the market, and you can honestly afford the mortgage payment and\ntaxes over the next six months, that’s probably the best fit for you to do.” (Boiler Room, Jun 25)\n“But if you’re looking for something with certainty that doesn’t require you to come out of pocket $30,000\nin repairs and cleaning and marketing and waiting six months, and you just want certainty and to alleviate\nthe pain of this company, then that’s what we’re here to do. So which one of those makes more sense for\nyou?” (Boiler Room, Jun 25)\n"
+          "text": "Listing comparison\n“Jayline, honestly, that may be the best option for you… if you’ve got the money for that, you have the next\nsix months to take a risk and list it on the market, and you can honestly afford the mortgage payment and\ntaxes over the next six months, that’s probably the best fit for you to do.”\n“But if you’re looking for something with certainty that doesn’t require you to come out of pocket $30,000\nin repairs and cleaning and marketing and waiting six months, and you just want certainty and to alleviate\nthe pain of this company, then that’s what we’re here to do. So which one of those makes more sense for\nyou?”\n"
         }
       ]
     },
@@ -158,7 +160,7 @@
         {
           "catalogId": "attorney_review",
           "variantId": "core",
-          "text": "Attorney objection\n“Yeah, honestly, that’s a really good idea. Like, it’s probably best for you to be super confident in what\nyou’re actually assigning, making sure you fully understand it.” (Boiler Room, Jun 25)\n“To make sure you have enough time to speak to your attorney, I have some availability on Friday at 1 p.m.\nDoes that work for you?” (Boiler Room, Jun 25)\n“I’ll send this over to you right now. Let’s go through it together. Address any concerns you have now, then\ntalk to your attorney and see what he has to say too. Sound fair?” (Boiler Room, Jun 25)\n"
+          "text": "Attorney objection\n“Yeah, honestly, that’s a really good idea. Like, it’s probably best for you to be super confident in what\nyou’re actually assigning, making sure you fully understand it.”\n“To make sure you have enough time to speak to your attorney, I have some availability on Friday at 1 p.m.\nDoes that work for you?”\n“I’ll send this over to you right now. Let’s go through it together. Address any concerns you have now, then\ntalk to your attorney and see what he has to say too. Sound fair?”\n"
         }
       ]
     },
@@ -167,7 +169,7 @@
         {
           "catalogId": "closing_certainty",
           "variantId": "core",
-          "text": "If they ask whether closing is guaranteed\n“There’s one thing I can guarantee. It’s that nobody’s going to fight to get this harder to the closing table\nthan me.” (Boiler Room, Jul 10b)\n"
+          "text": "If they ask whether closing is guaranteed\n“There’s one thing I can guarantee. It’s that nobody’s going to fight to get this harder to the closing table\nthan me.”\n"
         }
       ]
     },
@@ -176,7 +178,7 @@
         {
           "catalogId": "text_only",
           "variantId": "core",
-          "text": "Inbound seller wants text only\n“As much as I would love to give you an offer on text, do you really think I can find out enough information\nabout one of the largest assets you’ve ever owned in your life over text? I’m not going to waste your time on\na call, but I need to know more about the property and the situation, which is probably going to take an\nhour to see if we can even help you in the first place. Or I can just make it some random lowball cash offer\nand that’s not what you want, is it? You want this property sold.” (Boiler Room, Jul 16)\n"
+          "text": "Inbound seller wants text only\n“As much as I would love to give you an offer on text, do you really think I can find out enough information\nabout one of the largest assets you’ve ever owned in your life over text? I’m not going to waste your time on\na call, but I need to know more about the property and the situation, which is probably going to take an\nhour to see if we can even help you in the first place. Or I can just make it some random lowball cash offer\nand that’s not what you want, is it? You want this property sold.”\n"
         }
       ]
     },
@@ -185,7 +187,7 @@
         {
           "catalogId": "busy_callback",
           "variantId": "core",
-          "text": "Seller is busy for real\nCLOSR · PERSUASION PLAYBOOK 4\n\n\n“Look, you might be busy right now. That’s completely fine. I have one or two openings tomorrow on my\ncalendar. What time is best for you?” (Boiler Room, Jun 23)\n"
+          "text": "Seller is busy for real\n\n\n“Look, you might be busy right now. That’s completely fine. I have one or two openings tomorrow on my\ncalendar. What time is best for you?”\n"
         }
       ]
     },
@@ -194,7 +196,7 @@
         {
           "catalogId": "buy_without_visit",
           "variantId": "core",
-          "text": "“How can you offer without seeing it?”\n“Well, we literally just went through 30 minutes of asking you about the property. Did you lie to me? You\ndon’t seem like a liar to me.”\n“Then we don’t need to see it in person yet.” (Boiler Room, Jun 23)\n"
+          "text": "“How can you offer without seeing it?”\n“Well, we literally just went through 30 minutes of asking you about the property. Did you lie to me? You\ndon’t seem like a liar to me.”\n“Then we don’t need to see it in person yet.”\n"
         },
         {
           "catalogId": "buy_without_visit",
@@ -208,7 +210,7 @@
         {
           "catalogId": "timing_feasibility",
           "variantId": "core",
-          "text": "Seven-day close feasibility\nCLOSR · PERSUASION PLAYBOOK 4\n\n\n“I mean, I can give you a seven-day close, but seven-day close isn’t even enough time for me to get an\ninspection. Do you think that I can give you something that is actually fair if I don’t have enough\ntime?” (Boiler Room, Jul 10b)\n"
+          "text": "Seven-day close feasibility\n\n\n“I mean, I can give you a seven-day close, but seven-day close isn’t even enough time for me to get an\ninspection. Do you think that I can give you something that is actually fair if I don’t have enough\ntime?”\n"
         }
       ]
     },
@@ -217,7 +219,7 @@
         {
           "catalogId": "competing_offer",
           "variantId": "core",
-          "text": "Competitor-offer frame\n“Straight up, Ivan, that sounds like a really good offer. What held you back from taking that?” (Boiler Room,\nJun 24)\n“But thinking about it, you told me how important it is for you to move forward now. So help me\nunderstand. Why would you not move forward with that one?” (Boiler Room, Jun 24)\n“So you didn’t really believe they could truly close.” (Boiler Room, Jun 24)\n"
+          "text": "Competitor-offer frame\n“Straight up, Mr. Seller, that sounds like a really good offer. What held you back from taking that?”\n“But thinking about it, you told me how important it is for you to move forward now. So help me\nunderstand. Why would you not move forward with that one?”\n“So you didn’t really believe they could truly close.”\n"
         }
       ]
     },
@@ -226,7 +228,7 @@
         {
           "catalogId": "transaction_process",
           "variantId": "core",
-          "text": "Novation/process concern\n“Ms. Seller, my goal is literally to just get you the price we promise you and the timeframe we promise you.\nAs long as we get X dollars in your pocket in this amount of days, does it really matter how we cut the\ncake?” (Boiler Room, Jul 15)\n"
+          "text": "Novation/process concern\n“Ms. Seller, my goal is literally to just get you the price we promise you and the timeframe we promise you.\nAs long as we get X dollars in your pocket in this amount of days, does it really matter how we cut the\ncake?”\n"
         }
       ]
     },
@@ -244,7 +246,16 @@
         {
           "catalogId": "legal_question",
           "variantId": "core",
-          "text": "If they ask legal questions, do not interpret law. You can review the business terms, encourage\nprofessional review, and stay inside what you actually know. (Boiler Room, Jul 10a)\n"
+          "text": "If they ask legal questions, do not interpret law. You can review the business terms, encourage\nprofessional review, and stay inside what you actually know.\n"
+        }
+      ]
+    },
+    "relocation": {
+      "replies": [
+        {
+          "catalogId": "owner_2026-09-30",
+          "variantId": "1C",
+          "text": "A lot of sellers I work with are in that spot. We can close and let you stay in the house a little while after, so you have the money in hand before you move. Would that help?"
         }
       ]
     }

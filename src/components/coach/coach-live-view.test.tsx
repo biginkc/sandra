@@ -227,9 +227,9 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.queryByTestId("coach-recommendations")).toBeNull();
   });
 
-  it("shows the owner's playbook replies on the objection card, line for line, and nothing for a type without one", async () => {
+  it("shows the owner's approved replies on the objection card, line for line, and nothing for a type without one", async () => {
     const raw = readFileSync("src/lib/coach/live-coach-objection-replies.json");
-    expect(createHash("sha256").update(raw).digest("hex")).toBe("41993b4ad0362cc6ec57490499697e497479c7295eeb50643ec63ca704abdf9d");
+    expect(createHash("sha256").update(raw).digest("hex")).toBe("21332bc237ee5361e5841ba2338136284671d8df14bf78a8718ee1700f25f6b9");
     const file = JSON.parse(raw.toString("utf8")) as { source: { sha256: string }; sets: Record<string, { replies: { catalogId: string; text: string }[] }> };
     expect(file.source.sha256).toBe("fe25b222796afd33e8171527789791307a58ae1f85b814320b0f1ed9dc6ecd77");
     const invisible = /[\s\u200b\u200c\u200d\ufeff]/g;
@@ -243,10 +243,16 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(file.sets.price_pushback.replies.map((reply) => reply.catalogId)).toEqual(["offer_too_low", "counteroffer"]);
     expect(blocks()).toEqual(file.sets.price_pushback.replies.map((reply) => visibleLines(reply.text)));
     expect(blocks().flat().join("\n")).toBe(file.sets.price_pushback.replies.flatMap((reply) => visibleLines(reply.text)).join("\n"));
+    // Owner-approved cleaning (2026-09-30): no playbook header, source tag or recorded seller name on any card.
+    for (const set of Object.values(file.sets)) for (const reply of set.replies) expect(reply.text).not.toMatch(/CLOSR|Boiler Room|Kyle|Julia|Ivan|Stone/);
+    // Owner-approved relocation reply (2026-09-30), exactly as approved.
     broadcast({ ...base, objectionId: "relocation", label: "Housing delay", sellerTurn: 3, ts: "2026-09-29T12:00:10Z" });
     expect(screen.getByTestId("coach-objection-prompt-label")).toHaveTextContent("Housing delay");
+    expect(blocks()).toEqual([["A lot of sellers I work with are in that spot. We can close and let you stay in the house a little while after, so you have the money in hand before you move. Would that help?"]]);
+    broadcast({ ...base, objectionId: "assignment_fee", label: "Assignment fee", sellerTurn: 5, ts: "2026-09-29T12:00:20Z" });
+    expect(screen.getByTestId("coach-objection-prompt-label")).toHaveTextContent("Assignment fee");
     expect(screen.queryByTestId("coach-objection-replies")).toBeNull();
-    expect(file.sets.relocation).toBeUndefined();
+    expect(file.sets.assignment_fee).toBeUndefined();
   });
 
   it("shows the matching sub-type lines, all at once, and replaces them on a later statement", async () => {
