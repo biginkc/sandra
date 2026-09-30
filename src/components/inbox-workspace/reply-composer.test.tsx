@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { InboxReplyStatus, PreparedInboxReply } from "@/lib/inbox/reply-api-contract";
-import { InboxReplyComposer } from "./reply-composer";
+import { INBOX_REPLY_TERMINAL_RECEIPT_STATES, type InboxReplyStatus, type PreparedInboxReply } from "@/lib/inbox/reply-api-contract";
+import { InboxReplyComposer, MAX_POLL_DURATION_MS } from "./reply-composer";
 
 const conversationId = "00000000-0000-4000-8000-000000000001";
 const operationId = "00000000-0000-4000-8000-000000000002";
@@ -17,7 +17,7 @@ function prepared(key: string, exclusion: PreparedInboxReply["items"][number]["e
 }
 
 function status(receiptState: InboxReplyStatus["receipts"][number]["state"]): InboxReplyStatus {
-  return { operationId, preparationId: "00000000-0000-4000-8000-000000000004", dispatchComplete: receiptState !== "uncertain", items: [prepared("00000000-0000-4000-8000-000000000007").items[0]], receipts: [{ itemId, attemptId: null, version: "1", state: receiptState, reason: receiptState === "uncertain" ? "provider timeout" : null }] };
+  return { operationId, preparationId: "00000000-0000-4000-8000-000000000004", dispatchComplete: INBOX_REPLY_TERMINAL_RECEIPT_STATES.includes(receiptState as typeof INBOX_REPLY_TERMINAL_RECEIPT_STATES[number]), items: [prepared("00000000-0000-4000-8000-000000000007").items[0]], receipts: [{ itemId, attemptId: null, version: "1", state: receiptState, reason: receiptState === "uncertain" ? "provider timeout" : null }] };
 }
 
 function responseFor(url: string, init?: RequestInit, receiptState: InboxReplyStatus["receipts"][number]["state"] = "delivered"): Response {
@@ -40,6 +40,14 @@ describe("InboxReplyComposer", () => {
     mount();
     expect(screen.getByRole("button", { name: "Review reply" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Send reply" })).toBeNull();
+  });
+
+  it("hydrates a seeded terminal state without preparing or exposing a resend control", () => {
+    render(<InboxReplyComposer targets={[target]} routeKey="route-a" enabled initialDraft="Draft" initialState={{ phase: "sent", draft: "Draft", operationId, status: status("delivered") }} />);
+    expect(screen.getByText("Delivered")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Review reply" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send reply" })).toBeNull();
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
   });
 
   it("shows reviewing while the server review is in flight and does not mutate", async () => {
@@ -178,6 +186,28 @@ describe("InboxReplyComposer", () => {
     expect(receiptAttempts).toBe(1);
   });
 
+  it("keeps a blocked receipt in still-sending progress until a terminal receipt arrives", async () => {
+    let receiptAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/replies/prepare")) return Response.json(prepared(JSON.parse(String(init?.body)).idempotencyKey));
+      if (url.endsWith("/replies/accept")) return Response.json({ operationId });
+      receiptAttempts += 1;
+      return Response.json(status(receiptAttempts === 1 ? "blocked" : "delivered"));
+    }));
+    mount();
+    fireEvent.change(screen.getByRole("textbox", { name: "Reply message" }), { target: { value: "Draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Review reply" }));
+    await screen.findByText("Review before sending");
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByText("Still sending…")).toBeVisible();
+    expect(screen.getByText(/0 of 1 recipients have a terminal receipt/)).toBeVisible();
+    await act(async () => { vi.advanceTimersByTime(500); await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByText("Delivered")).toBeVisible();
+    expect(receiptAttempts).toBe(2);
+  });
+
   it("retries receipt polling with backoff and keeps the durable receipt link visible", async () => {
     let receiptAttempts = 0;
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
@@ -202,7 +232,7 @@ describe("InboxReplyComposer", () => {
     expect(screen.queryByText("Send result not confirmed")).not.toBeInTheDocument();
     await act(async () => { vi.advanceTimersByTime(2000); await Promise.resolve(); await Promise.resolve(); });
     expect(receiptAttempts).toBe(4);
-    expect(screen.getAllByText("Send result not confirmed").length).toBeGreaterThan(0);
+    expect(screen.getByText("Checking receipt")).toBeVisible();
     expect(screen.getByRole("link", { name: "Open reply receipt" })).toBeVisible();
     vi.useRealTimers();
   });
@@ -232,7 +262,7 @@ describe("InboxReplyComposer", () => {
     vi.useRealTimers();
   });
 
-  it("bounds a never-completing receipt poll and retains the durable receipt link", async () => {
+  it("keeps polling beyond the old 10-second bound and only falls back after two minutes without change", async () => {
     let receiptAttempts = 0;
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
       if (url.endsWith("/replies/prepare")) return Response.json(prepared(JSON.parse(String(init?.body)).idempotencyKey));
@@ -249,19 +279,23 @@ describe("InboxReplyComposer", () => {
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     await act(async () => { vi.advanceTimersByTime(10_001); await Promise.resolve(); await Promise.resolve(); });
     expect(receiptAttempts).toBeGreaterThan(1);
+    expect(screen.queryByText("Send result not confirmed")).not.toBeInTheDocument();
+    expect(screen.getByText("Still sending…")).toBeVisible();
+    await act(async () => { await vi.runAllTimersAsync(); });
+    expect(receiptAttempts).toBeGreaterThan(1);
     expect(screen.getAllByText("Send result not confirmed").length).toBeGreaterThan(0);
     expect(screen.getByRole("link", { name: "Open reply receipt" })).toBeVisible();
+    expect(MAX_POLL_DURATION_MS).toBe(120_000);
     vi.useRealTimers();
   });
 
-  it("resets the failed-poll streak after a valid pending receipt", async () => {
+  it("resets the no-change clock when the receipt changes", async () => {
     let receiptAttempts = 0;
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
       if (url.endsWith("/replies/prepare")) return Response.json(prepared(JSON.parse(String(init?.body)).idempotencyKey));
       if (url.endsWith("/replies/accept")) return Response.json({ operationId });
       receiptAttempts += 1;
-      if (receiptAttempts === 2) return Response.json({ ...status("pending"), dispatchComplete: false });
-      throw Error("Receipt temporarily unavailable");
+      return Response.json({ ...status("pending"), receipts: [{ itemId, attemptId: null, version: String(receiptAttempts), state: "pending", reason: null }], dispatchComplete: false });
     }));
     mount();
     fireEvent.change(screen.getByRole("textbox", { name: "Reply message" }), { target: { value: "Draft" } });
@@ -271,18 +305,12 @@ describe("InboxReplyComposer", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(receiptAttempts).toBe(1);
-    await act(async () => { vi.advanceTimersByTime(500); await Promise.resolve(); await Promise.resolve(); });
-    expect(receiptAttempts).toBe(2);
-    await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); await Promise.resolve(); });
-    expect(receiptAttempts).toBe(3);
-    await act(async () => { vi.advanceTimersByTime(2000); await Promise.resolve(); await Promise.resolve(); });
-    expect(receiptAttempts).toBe(4);
-    await act(async () => { vi.advanceTimersByTime(2000); await Promise.resolve(); await Promise.resolve(); });
-    expect(receiptAttempts).toBe(5);
+    await act(async () => { vi.advanceTimersByTime(MAX_POLL_DURATION_MS - 1); await Promise.resolve(); await Promise.resolve(); });
+    expect(receiptAttempts).toBeGreaterThan(1);
     expect(screen.queryByText("Send result not confirmed")).not.toBeInTheDocument();
-    await act(async () => { vi.advanceTimersByTime(2000); await Promise.resolve(); await Promise.resolve(); });
-    expect(receiptAttempts).toBe(6);
-    expect(screen.getAllByText("Send result not confirmed").length).toBeGreaterThan(0);
+    await act(async () => { vi.advanceTimersByTime(MAX_POLL_DURATION_MS); await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.queryByText("Send result not confirmed")).not.toBeInTheDocument();
+    expect(screen.getByText("Still sending…")).toBeVisible();
     vi.useRealTimers();
   });
 

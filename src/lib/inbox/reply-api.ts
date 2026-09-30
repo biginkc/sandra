@@ -6,7 +6,7 @@ import { InvalidInboxActionError } from "./action-definition";
 import { renderReviewedReply, ReplyTemplateError } from "./reply-template";
 import { retryReceiptTransaction } from "@/lib/messaging/receipt-persistence";
 import { getOutboundSenderName } from "@/lib/messaging/sender-persona";
-import { INBOX_REPLY_EXCLUSIONS, INBOX_REPLY_RECIPIENT_LIMIT, type AcceptedInboxReply, type InboxReplyExclusion, type InboxReplyReceipt, type InboxReplyReceiptState, type InboxReplyRecovery, type InboxReplyStatus, type InboxReplyTarget, type PreparedInboxReply, type PreparedInboxReplyItem } from "./reply-api-contract";
+import { INBOX_REPLY_EXCLUSIONS, INBOX_REPLY_RECIPIENT_LIMIT, INBOX_REPLY_TERMINAL_RECEIPT_STATES, type AcceptedInboxReply, type InboxReplyExclusion, type InboxReplyReceipt, type InboxReplyReceiptState, type InboxReplyRecovery, type InboxReplyStatus, type InboxReplyTarget, type PreparedInboxReply, type PreparedInboxReplyItem } from "./reply-api-contract";
 
 type ReplyDatabase = Omit<Database, "public"> & {
     public: Omit<Database["public"], "Functions"> & {
@@ -372,7 +372,7 @@ export function createInboxReplyRepository(client: InboxReplyClient) {
                 return decoded;
             });
             const RECEIPT_STATES = new Set<InboxReplyReceiptState>(["pending", "blocked", "dispatch_started", "uncertain", "provider_accepted", "delivered", "delivery_failed", "rejected_unsent", "confirmed_not_submitted"]);
-            const TERMINAL_RECEIPT_STATES = new Set<InboxReplyReceiptState>(["provider_accepted", "delivered", "delivery_failed", "rejected_unsent", "confirmed_not_submitted"]);
+            const TERMINAL_RECEIPT_STATES = new Set<InboxReplyReceiptState>(INBOX_REPLY_TERMINAL_RECEIPT_STATES);
             const seenReceiptItemIds = new Set<string>();
             const receipts: InboxReplyReceipt[] = row.receipts.map((raw: unknown) => {
                 const r = record(raw);

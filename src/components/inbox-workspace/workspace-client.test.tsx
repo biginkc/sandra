@@ -60,6 +60,12 @@ it("selection never fetches history; opening and revisiting use the bounded deta
   expect(calls.filter(url => url.includes("/detail"))).toHaveLength(1);
   expect(screen.getByRole("checkbox", { name: "Select Ada" })).toBeChecked();
 });
+it("does not show the legacy connected-activity placeholder when replies are enabled", async () => {
+  render(<InboxWorkspaceClient identity={identity} initialFilter={{ view: "all", hide_noise: true }} repliesEnabled />);
+  await waitFor(() => expect(state.replacements).toHaveLength(1));
+  act(() => state.callbacks!.onChange({ state: "live", rows: [row] }));
+  expect(screen.queryByText(/Replies .*being connected/)).not.toBeInTheDocument();
+});
 it("keeps selected identities across a view change and permits removing hidden selections", async () => {
   await loaded();
   fireEvent.click(screen.getByRole("checkbox", { name: "Select Ada" }));

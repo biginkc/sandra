@@ -7,7 +7,8 @@ import { InboxWorkspace, type WorkspaceRow } from "@/components/inbox-workspace/
 import { ConversationHistory, type InboxDetailSnapshot } from "@/components/inbox-workspace/conversation-history";
 import { InboxReplyComposer } from "@/components/inbox-workspace/reply-composer";
 import { workspaceId, type WorkspaceId } from "@/components/inbox-workspace/selection";
-import type { InboxReplyStatus, InboxReplyTarget, PreparedInboxReply, PreparedInboxReplyItem } from "@/lib/inbox/reply-api-contract";
+import { INBOX_REPLY_TERMINAL_RECEIPT_STATES, type InboxReplyStatus, type InboxReplyTarget, type PreparedInboxReply, type PreparedInboxReplyItem } from "@/lib/inbox/reply-api-contract";
+import type { ReplyState } from "@/components/inbox-workspace/reply-state-machine";
 import { fixture, previewStates, type InboxReplyPreviewState } from "./_fixtures";
 import styles from "./preview.module.css";
 
@@ -71,24 +72,56 @@ function preparedFor(state: InboxReplyPreviewState, targets: readonly InboxReply
 }
 
 function statusFor(prepared: PreparedInboxReply, receiptState: InboxReplyStatus["receipts"][number]["state"]): InboxReplyStatus {
+  const receipts = prepared.items.map(item => ({ itemId: item.id, attemptId: null, version: "1", state: item.exclusion ? "blocked" as const : receiptState, reason: null }));
   return {
     operationId,
     preparationId: prepared.preparationId,
-    dispatchComplete: true,
+    dispatchComplete: receipts.every(receipt => INBOX_REPLY_TERMINAL_RECEIPT_STATES.includes(receipt.state as typeof INBOX_REPLY_TERMINAL_RECEIPT_STATES[number])),
     items: prepared.items,
-    receipts: prepared.items.map(item => ({ itemId: item.id, attemptId: null, version: "1", state: item.exclusion ? "blocked" : receiptState, reason: null })),
+    receipts,
   };
 }
 
+function previewInitialState(state: InboxReplyPreviewState, targets: readonly InboxReplyTarget[], routeKey: string): ReplyState {
+  const prepared = preparedFor(state, targets, "fixture-idempotency-key");
+  const review = { prepared, routeKey };
+  const draft = fixture.body;
+  if (state === "ready") return { phase: "ready", draft };
+  if (state === "checking") return { phase: "reviewing", draft };
+  if (state === "reviewing" || state === "bulk-review") return { phase: "reviewing", draft, review };
+  if (state === "sending") return { phase: "sending", draft, review, operationId, status: statusFor(prepared, "pending") };
+  if (state === "sent" || state === "bulk-receipt") return { phase: "sent", draft, operationId, status: statusFor(prepared, "delivered") };
+  if (state === "uncertain") return { phase: "uncertain", draft, operationId, status: statusFor(prepared, "uncertain"), message: "The provider result is not yet confirmed. Do not resend this reply." };
+  if (state === "route-changed") return { phase: "route_changed", draft, message: "The sending route changed. Review the current route before sending." };
+  if (state === "network-error") return { phase: "network_error", draft, message: "Fixture network unavailable" };
+  return { phase: "blocked", draft, review, message: "No eligible recipients remain in this review." };
+}
+
 export function InboxReplyPreview({ state }: { state: InboxReplyPreviewState }) {
+  useEffect(() => {
+    document.body.dataset.sandraInboxPreview = "true";
+    const devBadgeStyle = document.createElement("style");
+    devBadgeStyle.dataset.sandraInboxPreview = "true";
+    devBadgeStyle.textContent = "body[data-sandra-inbox-preview] script[data-nextjs-dev-overlay] > nextjs-portal { display: none !important; }";
+    document.head.appendChild(devBadgeStyle);
+
+    return () => {
+      delete document.body.dataset.sandraInboxPreview;
+      devBadgeStyle.remove();
+    };
+  }, []);
+
   const bulk = isBulkState(state);
   const [selected, setSelected] = useState<readonly WorkspaceId[]>(bulk ? [targetId, secondTargetId] : [targetId]);
   const [openedId, setOpenedId] = useState<WorkspaceId | null>(targetId);
   const [bulkOpen, setBulkOpen] = useState(bulk);
-  const [routeVersion, setRouteVersion] = useState(0);
   const openedTarget = openedId === secondTargetId ? secondTarget : target;
-  const replyTargets = bulk ? [target, secondTarget] : [openedTarget];
+  const replyTargets = useMemo(() => bulk ? [target, secondTarget] : [openedTarget], [bulk, openedTarget]);
   const names = useMemo(() => new Map([[`${target.kind}:${target.id}`, fixture.name], [`${secondTarget.kind}:${secondTarget.id}`, fixture.secondName]]), []);
+  const detailRouteKey = fixture.captureGeneration;
+  const bulkRouteKey = `${target.kind}:${target.id}|${secondTarget.kind}:${secondTarget.id}`;
+  const detailInitialState = useMemo(() => previewInitialState(isBulkState(state) ? "ready" : state, [openedTarget], detailRouteKey), [detailRouteKey, openedTarget, state]);
+  const bulkInitialState = useMemo(() => previewInitialState(state, replyTargets, bulkRouteKey), [bulkRouteKey, replyTargets, state]);
   const fixtureFetch: typeof fetch = async (input, init) => {
     const url = String(input);
     if (url.endsWith("/replies/prepare")) {
@@ -108,31 +141,14 @@ export function InboxReplyPreview({ state }: { state: InboxReplyPreviewState }) 
     return Response.json({ boundaryId: fixture.boundaryId, batch: 0, changed: 0, completed: true });
   };
 
-  useEffect(() => {
-    if (state === "ready" || (state === "bulk-review" && !bulkOpen)) return;
-    const rootSelector = bulk ? "[data-preview-bulk-dialog]" : undefined;
-    const timers: ReturnType<typeof setTimeout>[] = [];
-    const click = (label: string) => {
-      const root = rootSelector ? document.querySelector(rootSelector) : document;
-      const button = [...(root?.querySelectorAll("button") ?? [])].find(value => value.textContent?.trim() === label);
-      button?.click();
-    };
-    timers.push(setTimeout(() => click("Review reply"), 80));
-    if (["sent", "uncertain", "sending", "bulk-receipt"].includes(state)) {
-      timers.push(setTimeout(() => click(bulk ? "Send to 2 recipients" : "Send reply"), 260));
-    }
-    if (state === "route-changed") timers.push(setTimeout(() => setRouteVersion(1), 260));
-    return () => timers.forEach(clearTimeout);
-  }, [bulk, bulkOpen, state]);
-
   const detailContent = openedId ? <div className={styles.detailBody}>
     <div className={styles.history}><ConversationHistory orgId={fixture.orgId} conversationId={openedTarget.id} requestGeneration={1} snapshot={{ requestGeneration: 1, data: { ...historySnapshot, conversationId: openedTarget.id } }} visible onRefresh={() => {}} onAccessLost={() => {}} onUnavailable={() => {}} fetch={fixtureRead} /></div>
-    <InboxReplyComposer targets={[openedTarget]} names={names} routeKey={`${fixture.captureGeneration}:${routeVersion}`} enabled fetcher={fixtureFetch} initialDraft={fixture.body} />
+    <InboxReplyComposer targets={[openedTarget]} names={names} routeKey={detailRouteKey} enabled fetcher={fixtureFetch} initialDraft={fixture.body} initialState={detailInitialState} />
   </div> : undefined;
 
   return <div className={styles.preview}>
     <nav className={styles.previewNav} aria-label="Inbox reply fixture states"><strong>Sandra · Inbox</strong><div><span className={styles.fixtureTag}>NO AUTH · LOCAL FIXTURE FETCH</span>{previewStates.filter(value => !value.startsWith("blocked-")).map(value => <Link key={value} href={href(value)} aria-current={state === value ? "page" : undefined}>{stateLabel(value)}</Link>)}<label>Blocked <select aria-label="Blocked reason fixture" value={blockedCode(state) ? state : ""} onChange={event => event.target.value && (window.location.href = href(event.target.value as InboxReplyPreviewState))}><option value="">Choose</option>{previewStates.filter(value => value.startsWith("blocked-")).map(value => <option key={value} value={value}>{stateLabel(value)}</option>)}</select></label></div></nav>
     <InboxWorkspace scopeLabel="All" rows={rows} selectedIds={selected} openId={openedId} onSelectionChange={ids => { setSelected(ids); if (ids.length < 2) setBulkOpen(false); }} onOpen={id => setOpenedId(id)} onCloseDetail={() => setOpenedId(null)} onBack={() => { window.location.href = href("ready"); }} onReviewSelection={() => {}} replyUiEnabled onBulkReply={() => setBulkOpen(true)} onAction={() => {}} actions={[]} connection={{ state: "live", label: "Fixture data · no live connection" }} toolbar={<><span>View <strong>All</strong></span><span>Selection stays in memory · no provider calls</span></>} pageControl={<span>3 fixture conversations</span>} detail={openedId ? { targetId: openedId, title: openedId === secondTargetId ? fixture.secondName : fixture.name, context: openedId === secondTargetId ? fixture.secondProperty : fixture.property, state: "ready", content: detailContent } : undefined} />
-    <Dialog open={bulkOpen && bulk} onOpenChange={setBulkOpen}><DialogContent data-preview-bulk-dialog className="max-h-[85dvh] overflow-auto"><DialogTitle>Bulk reply review</DialogTitle><DialogDescription>Every destination is fixture data. The real composer is using a local fetch stub; no provider call or message send occurs.</DialogDescription><InboxReplyComposer targets={replyTargets} names={names} routeKey={replyTargets.map(value => `${value.kind}:${value.id}`).sort().join("|")} enabled fetcher={fixtureFetch} initialDraft={fixture.body} onClose={() => setBulkOpen(false)} /></DialogContent></Dialog>
+    <Dialog open={bulkOpen && bulk} onOpenChange={setBulkOpen}><DialogContent data-preview-bulk-dialog className="max-h-[85dvh] overflow-auto"><DialogTitle>Bulk reply review</DialogTitle><DialogDescription>Every destination is fixture data. The real composer is using a local fetch stub; no provider call or message send occurs.</DialogDescription><InboxReplyComposer targets={replyTargets} names={names} routeKey={bulkRouteKey} enabled fetcher={fixtureFetch} initialDraft={fixture.body} initialState={bulkInitialState} onClose={() => setBulkOpen(false)} /></DialogContent></Dialog>
   </div>;
 }

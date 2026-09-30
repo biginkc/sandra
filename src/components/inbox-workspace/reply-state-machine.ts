@@ -39,6 +39,7 @@ export type ReplyEvent =
   | { type: "receipt"; status: InboxReplyStatus }
   | { type: "uncertain"; message: string; status?: InboxReplyStatus }
   | { type: "edit"; draft: string }
+  | { type: "initialize"; state: ReplyState }
   | { type: "reset"; draft?: string };
 
 export const initialReplyState = (draft = ""): ReplyState => ({
@@ -139,6 +140,8 @@ export function replyStateReducer(
         phase: "ready",
         draft: event.draft,
       };
+    case "initialize":
+      return event.state;
     case "reset":
       return initialReplyState(event.draft ?? "");
   }
