@@ -87,6 +87,14 @@ test('databaseConfiguration accepts only known direct/session Supabase targets w
   ]) assert.throws(() => databaseConfiguration({ ...direct, ...patch }));
   assert.throws(() => databaseConfiguration({ ...direct, INBOX_ACTION_LOCAL_FIXTURE: '1' }));
 });
+test('production database guard rejects the approved host on a non-production port or database', () => {
+  const ca = '-----BEGIN CERTIFICATE-----\nsynthetic\n-----END CERTIFICATE-----';
+  const direct = { INBOX_REPLY_SEND_DATABASE_URL: 'postgres://inbox_reply_send_worker:synthetic@db.copflsklaefwzipsrjqz.supabase.co:5432/postgres', INBOX_REPLY_SEND_DATABASE_CA: ca };
+  for (const patch of [
+    { INBOX_REPLY_SEND_DATABASE_URL: 'postgres://inbox_reply_send_worker:synthetic@db.copflsklaefwzipsrjqz.supabase.co:54322/postgres' },
+    { INBOX_REPLY_SEND_DATABASE_URL: 'postgres://inbox_reply_send_worker:synthetic@db.copflsklaefwzipsrjqz.supabase.co:5432/other' },
+  ]) assert.throws(() => databaseConfiguration({ ...direct, ...patch }), /Unapproved production database target/);
+});
 
 test('databaseConfiguration accepts only the marked release HTTP fixture with the constrained login', () => {
   const env = { NODE_ENV: 'test', INBOX_ACTION_LOCAL_FIXTURE: '1', INBOX_ACTION_FIXTURE_PROFILE: 'release-http', INBOX_REPLY_SEND_OWNED_FIXTURE_PLAINTEXT: 'true', INBOX_REPLY_SEND_FIXTURE_MARKER: 'sandra-inbox-http-owned-synthetic-20260917', INBOX_REPLY_SEND_FIXTURE_OWNER: 'release-infra', INBOX_REPLY_SEND_FIXTURE_PURPOSE: 'sandra-inbox-release-http', INBOX_REPLY_SEND_FIXTURE_LABELS_VERIFIED: 'true', INBOX_REPLY_SEND_DATABASE_URL: 'postgres://inbox_reply_send_worker:synthetic@127.0.0.1:54322/postgres' };

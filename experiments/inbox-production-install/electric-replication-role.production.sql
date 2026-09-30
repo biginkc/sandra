@@ -10,6 +10,11 @@
 --
 -- Electric's manual-publication contract requires REPLICATION and SELECT,
 -- not BYPASSRLS: https://electric.ax/docs/sync/guides/postgres-permissions.
+-- Electric's deployment guide says the replication stream ID supplies the
+-- publication/slot suffix: https://electric.ax/docs/sync/guides/deployment.
+-- The Electric replication client uses PostgreSQL's pgoutput plugin; keep the
+-- reviewed upstream implementation reference with this packet:
+-- https://github.com/electric-sql/electric/blob/main/packages/sync-service/lib/electric/replication/postgres/replication_client.ex
 -- This candidate deliberately keeps BYPASSRLS because inbox_bridge.summaries
 -- is RLS-enabled with no policy, so the Electric reader would otherwise see
 -- no rows. Revisit this grant if the table gets a narrowly scoped policy.
@@ -38,6 +43,9 @@ DECLARE
   supplied_ref text := current_setting('sandra.inbox_project_ref');
   connected_ref text := current_setting('sandra.inbox_connection_project_ref');
   verifier text := current_setting('sandra.inbox_electric_verifier');
+  electric_stream_id text := 'inbox_' || supplied_ref;
+  expected_slot_name text := 'electric_slot_' || electric_stream_id;
+  electric_publication_name text := 'electric_publication_' || electric_stream_id;
   table_owner text;
 BEGIN
   IF current_database() <> 'postgres' THEN
@@ -102,6 +110,9 @@ END $$;
 SELECT json_build_object(
   'project_ref', current_setting('sandra.inbox_project_ref'),
   'database', current_database(),
+  'electric_stream_id', 'inbox_' || current_setting('sandra.inbox_project_ref'),
+  'slot_name', 'electric_slot_inbox_' || current_setting('sandra.inbox_project_ref'),
+  'plugin', 'pgoutput',
   'table', 'inbox_bridge.summaries',
   'prior_replica_identity', c.relreplident,
   'prior_replica_identity_index', identity_index.relname
@@ -138,38 +149,42 @@ GRANT SELECT ON TABLE inbox_bridge.summaries TO inbox_electric_replication;
 ALTER TABLE inbox_bridge.summaries REPLICA IDENTITY FULL;
 
 DO $$
+DECLARE
+  electric_publication_name text := 'electric_publication_inbox_' || current_setting('sandra.inbox_project_ref');
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_publication
-    WHERE pubname = 'electric_publication_inbox'
+    WHERE pubname = electric_publication_name
       AND puballtables
   ) THEN
     RAISE EXCEPTION 'Electric publication must not publish all tables';
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_publication
-    WHERE pubname = 'electric_publication_inbox'
+    WHERE pubname = electric_publication_name
   ) THEN
-    EXECUTE 'CREATE PUBLICATION electric_publication_inbox';
+    EXECUTE format('CREATE PUBLICATION %I', electric_publication_name);
   END IF;
   IF EXISTS (
     SELECT 1
     FROM pg_publication_tables
-    WHERE pubname = 'electric_publication_inbox'
+    WHERE pubname = electric_publication_name
       AND (schemaname <> 'inbox_bridge' OR tablename <> 'summaries')
   ) THEN
     RAISE EXCEPTION 'Electric publication contains a table outside inbox_bridge.summaries';
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_publication_tables
-    WHERE pubname = 'electric_publication_inbox'
+    WHERE pubname = electric_publication_name
       AND schemaname = 'inbox_bridge' AND tablename = 'summaries'
   ) THEN
-    EXECUTE 'ALTER PUBLICATION electric_publication_inbox ADD TABLE inbox_bridge.summaries';
+    EXECUTE format('ALTER PUBLICATION %I ADD TABLE inbox_bridge.summaries', electric_publication_name);
   END IF;
 END $$;
 
 DO $$
+DECLARE
+  electric_publication_name text := 'electric_publication_inbox_' || current_setting('sandra.inbox_project_ref');
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_roles
@@ -182,11 +197,11 @@ BEGIN
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_publication_tables
-    WHERE pubname = 'electric_publication_inbox'
+    WHERE pubname = electric_publication_name
       AND (schemaname <> 'inbox_bridge' OR tablename <> 'summaries')
   ) OR NOT EXISTS (
     SELECT 1 FROM pg_publication_tables
-    WHERE pubname = 'electric_publication_inbox'
+    WHERE pubname = electric_publication_name
       AND schemaname = 'inbox_bridge' AND tablename = 'summaries'
   ) THEN
     RAISE EXCEPTION 'Electric publication final table set is not exact';

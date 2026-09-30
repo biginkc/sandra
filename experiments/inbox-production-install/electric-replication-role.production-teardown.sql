@@ -6,6 +6,11 @@
 --
 -- Electric's manual-publication contract requires REPLICATION and SELECT,
 -- not BYPASSRLS: https://electric.ax/docs/sync/guides/postgres-permissions.
+-- Electric's deployment guide says the replication stream ID supplies the
+-- publication/slot suffix: https://electric.ax/docs/sync/guides/deployment.
+-- The Electric replication client uses PostgreSQL's pgoutput plugin; keep the
+-- reviewed upstream implementation reference with this packet:
+-- https://github.com/electric-sql/electric/blob/main/packages/sync-service/lib/electric/replication/postgres/replication_client.ex
 -- This candidate deliberately retains BYPASSRLS on the Electric role because
 -- inbox_bridge.summaries is RLS-enabled with no policy; without it Electric
 -- cannot read the projection. Revisit this grant if a narrow policy is added.
@@ -48,6 +53,15 @@ DECLARE
   prior_identity text := current_setting('sandra.inbox_prior_replica_identity');
   prior_index text := coalesce(nullif(current_setting('sandra.inbox_prior_replica_identity_index'), ''), '');
   requested_slot_name text := current_setting('sandra.inbox_replication_slot_name');
+  electric_stream_id text := 'inbox_' || supplied_ref;
+  expected_slot_name text := 'electric_slot_' || electric_stream_id;
+  electric_slot_prefix text := 'electric_slot_' || electric_stream_id;
+  electric_publication_name text := 'electric_publication_' || electric_stream_id;
+  other_electric_slots text;
+  slot_database text;
+  slot_type text;
+  slot_plugin text;
+  slot_active boolean;
   table_owner text;
   publication_owner text;
 BEGIN
@@ -78,11 +92,42 @@ BEGIN
   IF requested_slot_name !~ '^[a-z_][a-z0-9_]{0,62}$' THEN
     RAISE EXCEPTION 'replication slot receipt is invalid';
   END IF;
-  IF EXISTS (
-    SELECT 1 FROM pg_replication_slots AS replication_slot
-    WHERE replication_slot.slot_name = requested_slot_name AND replication_slot.active
-  ) THEN
-    RAISE EXCEPTION 'Electric replication slot is active; stop Electric before teardown';
+  IF requested_slot_name IS DISTINCT FROM expected_slot_name THEN
+    RAISE EXCEPTION 'replication slot receipt must equal derived Electric slot name % (stream id %, project ref %)', expected_slot_name, electric_stream_id, supplied_ref;
+  END IF;
+  SELECT replication_slot.database::text,
+         replication_slot.slot_type::text,
+         replication_slot.plugin::text,
+         replication_slot.active
+  INTO slot_database, slot_type, slot_plugin, slot_active
+  FROM pg_replication_slots AS replication_slot
+  WHERE replication_slot.slot_name = expected_slot_name;
+  IF FOUND THEN
+    IF slot_database IS DISTINCT FROM current_database() THEN
+      RAISE EXCEPTION 'Electric replication slot % belongs to database %, not current database %', expected_slot_name, slot_database, current_database();
+    END IF;
+    IF slot_type IS DISTINCT FROM 'logical' THEN
+      RAISE EXCEPTION 'Electric replication slot % has slot_type %, expected logical', expected_slot_name, coalesce(slot_type, '<null>');
+    END IF;
+    IF slot_plugin IS DISTINCT FROM 'pgoutput' THEN
+      RAISE EXCEPTION 'Electric replication slot % uses plugin %, expected pgoutput', expected_slot_name, coalesce(slot_plugin, '<null>');
+    END IF;
+    IF slot_active THEN
+      RAISE EXCEPTION 'Electric replication slot % is active; stop Electric before teardown', expected_slot_name;
+    END IF;
+  END IF;
+  SELECT string_agg(replication_slot.slot_name, ', ' ORDER BY replication_slot.slot_name)
+  INTO other_electric_slots
+  FROM pg_replication_slots AS replication_slot
+  WHERE replication_slot.database::text = current_database()
+    AND replication_slot.slot_type = 'logical'
+    AND replication_slot.slot_name <> expected_slot_name
+    AND (
+      replication_slot.slot_name = electric_slot_prefix
+      OR replication_slot.slot_name LIKE electric_slot_prefix || '\_%' ESCAPE '\'
+    );
+  IF other_electric_slots IS NOT NULL THEN
+    RAISE EXCEPTION 'Electric teardown found other logical slot(s) for stream % in database %: %; teardown is incomplete', electric_stream_id, current_database(), other_electric_slots;
   END IF;
   IF prior_identity = 'i' AND NOT EXISTS (
     SELECT 1
@@ -107,18 +152,18 @@ BEGIN
   IF table_owner IS DISTINCT FROM current_user THEN
     RAISE EXCEPTION 'Electric teardown executor must own inbox_bridge.summaries (owner %, current_user %)', table_owner, current_user;
   END IF;
-  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'electric_publication_inbox') THEN
+  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = electric_publication_name) THEN
     SELECT pg_get_userbyid(pubowner)
     INTO publication_owner
     FROM pg_publication
-    WHERE pubname = 'electric_publication_inbox';
+    WHERE pubname = electric_publication_name;
     IF publication_owner IS DISTINCT FROM current_user THEN
-      RAISE EXCEPTION 'Electric teardown executor must own electric_publication_inbox (owner %, current_user %)', publication_owner, current_user;
+      RAISE EXCEPTION 'Electric teardown executor must own publication % (owner %, current_user %)', electric_publication_name, publication_owner, current_user;
     END IF;
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_publication_tables
-    WHERE pubname = 'electric_publication_inbox'
+    WHERE pubname = electric_publication_name
       AND (schemaname <> 'inbox_bridge' OR tablename <> 'summaries')
   ) THEN
     RAISE EXCEPTION 'refusing to drop a publication with an unexpected table';
@@ -132,7 +177,7 @@ SELECT set_config(
 ) AS _set_slot_present \gset
 SELECT set_config(
   'sandra.inbox_teardown_publication_present',
-  EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'electric_publication_inbox')::text,
+  EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'electric_publication_inbox_' || current_setting('sandra.inbox_project_ref'))::text,
   false
 ) AS _set_publication_present \gset
 SELECT set_config(
@@ -146,9 +191,10 @@ DO $$
 DECLARE
   prior_identity text := current_setting('sandra.inbox_prior_replica_identity');
   prior_index text := current_setting('sandra.inbox_prior_replica_identity_index');
+  electric_publication_name text := 'electric_publication_inbox_' || current_setting('sandra.inbox_project_ref');
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'electric_publication_inbox') THEN
-    DROP PUBLICATION electric_publication_inbox;
+  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = electric_publication_name) THEN
+    EXECUTE format('DROP PUBLICATION %I', electric_publication_name);
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'inbox_electric_replication') THEN
     EXECUTE 'REVOKE ALL PRIVILEGES ON DATABASE postgres FROM inbox_electric_replication';
@@ -193,11 +239,17 @@ END $$;
 SELECT json_build_object(
   'project_ref', current_setting('sandra.inbox_project_ref'),
   'database', current_database(),
+  'slot_name', 'electric_slot_inbox_' || current_setting('sandra.inbox_project_ref'),
+  'plugin', 'pgoutput',
+  'replication_slot_action', CASE
+    WHEN current_setting('sandra.inbox_teardown_slot_present') = 'true' THEN 'dropped'
+    ELSE 'already_absent'
+  END,
   'replication_slot_dropped', current_setting('sandra.inbox_teardown_slot_present') = 'true'
     AND NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = current_setting('sandra.inbox_replication_slot_name')),
   'replication_slot_already_absent', current_setting('sandra.inbox_teardown_slot_present') = 'false',
   'publication_dropped', current_setting('sandra.inbox_teardown_publication_present') = 'true'
-    AND NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'electric_publication_inbox'),
+    AND NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'electric_publication_inbox_' || current_setting('sandra.inbox_project_ref')),
   'publication_already_absent', current_setting('sandra.inbox_teardown_publication_present') = 'false',
   'role_dropped', current_setting('sandra.inbox_teardown_role_present') = 'true'
     AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'inbox_electric_replication'),

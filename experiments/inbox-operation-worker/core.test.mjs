@@ -31,6 +31,14 @@ test('production database accepts only known direct/session Supabase targets wit
  ]) assert.throws(()=>databaseConfiguration({...direct,...patch}));
  assert.throws(()=>databaseConfiguration({...direct,INBOX_ACTION_LOCAL_FIXTURE:'1'}));
 });
+test('production database guard rejects the approved host on a non-production port or database',()=>{
+ const ca='-----BEGIN CERTIFICATE-----\nsynthetic\n-----END CERTIFICATE-----';
+ const direct={INBOX_ACTION_DATABASE_URL:'postgres://inbox_action_worker:synthetic@db.ncsngxlcyxylaeskiteu.supabase.co:5432/postgres',INBOX_ACTION_DATABASE_CA:ca};
+ for(const patch of [
+  {INBOX_ACTION_DATABASE_URL:'postgres://inbox_action_worker:synthetic@db.ncsngxlcyxylaeskiteu.supabase.co:54322/postgres'},
+  {INBOX_ACTION_DATABASE_URL:'postgres://inbox_action_worker:synthetic@db.ncsngxlcyxylaeskiteu.supabase.co:5432/other'},
+ ]) assert.throws(()=>databaseConfiguration({...direct,...patch}),/Unapproved production database target/);
+});
 test('plaintext is restricted to explicit test mode and exact owned database alias/name',()=>{const env={INBOX_ACTION_DATABASE_URL:'postgres://inbox_action_worker:synthetic@sandra-inbox-actions-db-owned:5432/sandra_inbox_action_runtime_20260913',INBOX_ACTION_LOCAL_FIXTURE:'1',NODE_ENV:'test'};assert.equal(databaseConfiguration(env).ssl,false);assert.throws(()=>databaseConfiguration({...env,NODE_ENV:'production'}));assert.throws(()=>databaseConfiguration({...env,INBOX_ACTION_DATABASE_URL:env.INBOX_ACTION_DATABASE_URL.replace('runtime_20260913','other')}));});
 
 test('release HTTP fixture requires the exact target, launcher marker, labels, and constrained login',()=>{

@@ -50,19 +50,22 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
 - Pin all images, including the final worker; do not auto-update image tags.
   The relay Node22 image index was resolved from Docker's registry on2026-09-13.
 - Electric settings: storage at /var/lib/electric, manual publication, the
-  `inbox` replication stream ID, `ELECTRIC_LONG_POLL_TIMEOUT=8000ms`, query
+  project-bound `inbox_<project-ref>` replication stream ID,
+  `ELECTRIC_LONG_POLL_TIMEOUT=8000ms`, query
   pool2 initially, and telemetry off. When the reviewed database packet creates
   the publication, the Electric service must use the matching settings:
 
   ```yaml
   environment:
     ELECTRIC_MANUAL_TABLE_PUBLISHING: "true"
-    ELECTRIC_REPLICATION_STREAM_ID: inbox
+    ELECTRIC_REPLICATION_STREAM_ID: inbox_<project-ref>
   ```
 
   `ELECTRIC_MANUAL_TABLE_PUBLISHING` makes Electric validate the DBA-created
   publication instead of trying to manage it; `ELECTRIC_REPLICATION_STREAM_ID`
-  makes the expected publication/slot suffix `inbox`. This follows Electric's
+  makes the expected publication/slot suffix `inbox_<project-ref>`. For TEST
+  use `inbox_ncsngxlcyxylaeskiteu`; for production use
+  `inbox_copflsklaefwzipsrjqz`. This follows Electric's
   [PostgreSQL permissions guide](https://electric.ax/docs/sync/guides/postgres-permissions)
   and [deployment guide](https://electric.ax/docs/sync/guides/deployment).
   Scrape a metrics endpoint if enabled; otherwise leave it disabled. Allowlist
@@ -84,7 +87,7 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
   Require verified TLS to Supabase. No administrator database fallback.
 - The production Electric install and teardown packets require the connecting
   executor to own `inbox_bridge.summaries`; teardown also requires it to own
-  `electric_publication_inbox` while that publication exists. This is a
+  `electric_publication_inbox_<project-ref>` while that publication exists. This is a
   deliberate PostgreSQL ownership assumption because the packet changes replica
   identity and publication membership. A non-owner must fail the preflight
   before any transaction or slot cleanup begins.
@@ -110,9 +113,12 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
   restores them after the transactional publication/role cleanup and the final
   inactive replication-slot drop. A rerun accepts and reports an already-absent
   slot, publication, or role.
-  Stop Electric first, then pass the exact slot name from its provenance
-  receipt with `--replication-slot`; the teardown packet rejects active slots,
-  accepts an absent named slot, and drops only that named slot.
+  Stop Electric first, then pass the exact derived slot name from its
+  provenance receipt with `--replication-slot` (`electric_slot_inbox_<project-ref>`).
+  The teardown packet rejects a name that is not derived from the packet's
+  stream ID and project ref, rejects active/wrong-database/wrong-plugin slots,
+  and accepts an absent slot only when no other logical slot matches that
+  Electric stream pattern in the current database.
 - Every Restate worker deployment must set
   `INBOX_RESTATE_REGISTRATION_PATH=/runtime/<64-lowercase-hex-image-digest>`.
   The worker serves that versioned path and the registration helper uses it as
