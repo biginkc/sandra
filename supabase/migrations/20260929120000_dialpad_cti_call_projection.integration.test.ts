@@ -338,6 +338,53 @@ describe("20260929120000 Dialpad CTI call projection migration", () => {
   });
 
   describe("permanent training isolation", () => {
+    it("audits and repairs only the known legacy training projection with the guard restored", async () => {
+      await pg.query("rollback");
+      await pg.query("begin");
+      await seedFixture(true);
+      const intent = await prepare();
+      // The legacy ledger can succeed when the queue/disposition branch is
+      // skipped, as happened after production assignment cleanup.
+      await pg.query("update public.acquisition_org_settings set my_leads_enabled=false where org_id=$1", [orgId]);
+      const start = projectionSql.indexOf("create or replace function public.dialpad_cti_project_intent");
+      await pg.query(projectionSql.slice(start, projectionSql.indexOf("\n$$;", start) + 4));
+      const events = answeredCall(String(intent.customData));
+      for (const event of events) await deliver(event);
+      const bad = await ledger();
+      expect(bad.activities[0]).toMatchObject({ call_purpose: "customer", property_id: propertyId });
+      expect(bad.attempts).toHaveLength(1);
+      const repair = trainingSql.slice(trainingSql.indexOf("-- BEGIN OWNED CANARY CORRECTION"), trainingSql.indexOf("-- END OWNED CANARY CORRECTION"))
+        .replaceAll("724dd72e-2cc8-4103-b73f-99be89cee32a", String(intent.intentId))
+        .replaceAll("db5422e7-5501-47b2-8781-2eda58524dbe", String(bad.activities[0]!.id))
+        .replaceAll("f1092591-95d6-43e7-b93c-cd96fc3f0c58", String(bad.attempts[0]!.id))
+        .replaceAll("00000000-0000-0000-0000-000000000bbb", orgId)
+        .replaceAll("b4b8d7cb-d51e-4af8-888a-a15e07001962", propertyId)
+        .replaceAll("b480bc44-8ee6-4ab4-a8c9-f88373cf7fe5", repA)
+        .replaceAll("4732592345882624", ROOT_CALL);
+      await pg.query("savepoint changed_repair_precondition");
+      await pg.query("update public.acquisition_attempts set outcome='wrong_number' where id=$1", [bad.attempts[0]!.id]);
+      expect((await failure(() => pg.query(repair))).message).toContain("preconditions changed");
+      expect(await count("dialpad_training_projection_repairs", "intent_id=$1", [intent.intentId])).toBe(0);
+      await pg.query("rollback to savepoint changed_repair_precondition");
+      await pg.query(repair);
+      await pg.query(repair);
+      const fixed = await ledger();
+      expect(fixed.activities).toHaveLength(1);
+      expect(fixed.activities[0]).toMatchObject({ id: bad.activities[0]!.id, call_purpose: "internal_training", property_id: null, contact_id: null, ended_at: bad.activities[0]!.ended_at });
+      expect(fixed.attempts).toHaveLength(0);
+      const audit = (await pg.query("select * from public.dialpad_training_projection_repairs where intent_id=$1", [intent.intentId])).rows[0];
+      expect(audit.activity_snapshot.call_purpose).toBe("customer");
+      expect(audit.attempt_snapshot.id).toBe(bad.attempts[0]!.id);
+      expect(audit.episode_snapshot).toHaveLength(1);
+      expect(await count("acquisition_assignment_episodes", "org_id=$1 and first_call_provider_key is not null", [orgId])).toBe(0);
+      expect((await pg.query("select tgenabled from pg_trigger where tgname='guard_homeowner_training_call' and tgrelid='public.call_activities'::regclass")).rows[0].tgenabled).toBe("O");
+      expect((await failure(() => service(() => pg.query("update public.call_activities set call_purpose='customer' where id=$1", [bad.activities[0]!.id])))).code).toBe("23514");
+      const patchedStart = trainingSql.indexOf("create or replace function public.dialpad_cti_project_intent");
+      await pg.query(trainingSql.slice(patchedStart, trainingSql.indexOf("\n$$;", patchedStart) + 4));
+      for (const event of events) await deliver(event);
+      expect((await ledger()).attempts).toHaveLength(0);
+    });
+
     it("commits training events, opens recording, and replays without customer ledger effects", async () => {
       await pg.query("rollback");
       await pg.query("begin");

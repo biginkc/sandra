@@ -179,4 +179,98 @@ begin
 end;
 $$;
 
+-- Keep the original misclassification as restricted evidence, without retaining
+-- provider webhook payloads, transcripts, or recording URLs.
+create table if not exists public.dialpad_training_projection_repairs (
+  intent_id uuid primary key,
+  org_id uuid not null,
+  activity_id uuid not null,
+  attempt_id uuid not null,
+  activity_snapshot jsonb not null,
+  attempt_snapshot jsonb not null,
+  episode_snapshot jsonb not null,
+  repaired_at timestamptz not null default now(),
+  reason text not null
+);
+alter table public.dialpad_training_projection_repairs enable row level security;
+revoke all on public.dialpad_training_projection_repairs from public, anon, authenticated, service_role;
+grant select on public.dialpad_training_projection_repairs to service_role;
+
+-- BEGIN OWNED CANARY CORRECTION
+-- The sweeper projected this already-ended training call after its assignment
+-- was restored. Correct only this known canary, not historical customer calls.
+do $$
+declare
+  v_id constant uuid := '724dd72e-2cc8-4103-b73f-99be89cee32a';
+  v_activity_id constant uuid := 'db5422e7-5501-47b2-8781-2eda58524dbe';
+  v_attempt_id constant uuid := 'f1092591-95d6-43e7-b93c-cd96fc3f0c58';
+  v_intent public.dialpad_call_intents%rowtype;
+  v_activity public.call_activities%rowtype;
+  v_attempt public.acquisition_attempts%rowtype;
+  v_key text := 'dialpad-cti:' || v_id::text;
+  v_episode_snapshot jsonb;
+begin
+  select * into v_intent from public.dialpad_call_intents where id = v_id for update;
+  if not found then return; end if; -- No canary in TEST or a clean install.
+  if exists (select 1 from public.dialpad_training_projection_repairs where intent_id = v_id) then
+    if not exists (select 1 from public.call_activities where id = v_activity_id
+      and call_purpose = 'internal_training' and property_id is null and contact_id is null)
+      or exists (select 1 from public.acquisition_attempts where id = v_attempt_id) then
+      raise exception 'Training repair replay does not match repaired state';
+    end if;
+    return;
+  end if;
+  select * into v_activity from public.call_activities where id = v_activity_id for update;
+  select * into v_attempt from public.acquisition_attempts where id = v_attempt_id for update;
+  if v_intent.org_id <> '00000000-0000-0000-0000-000000000bbb'::uuid
+    or v_intent.property_id <> 'b4b8d7cb-d51e-4af8-888a-a15e07001962'::uuid
+    or v_intent.rep_user_id <> 'b480bc44-8ee6-4ab4-a8c9-f88373cf7fe5'::uuid
+    or v_intent.status <> 'matched' or v_intent.matched_provider_call_id <> '4732592345882624'
+    or not exists (select 1 from public.properties where id = v_intent.property_id and org_id = v_intent.org_id and is_training)
+    or v_activity.id is null or v_activity.org_id is distinct from v_intent.org_id
+    or v_activity.property_id is distinct from v_intent.property_id or v_activity.contact_id is distinct from v_intent.contact_id
+    or v_activity.operator_user_id is distinct from v_intent.rep_user_id
+    or v_activity.provider <> 'dialpad' or v_activity.provider_call_id is distinct from v_intent.matched_provider_call_id
+    or v_activity.jitter_attempt_id is distinct from v_key or v_activity.call_purpose <> 'customer'
+    or v_activity.ended_at is null or v_activity.disposition is not null or v_activity.do_not_call_requested
+    or v_activity.dialer_batch_item_id is not null
+    or v_attempt.id is null or v_attempt.org_id is distinct from v_intent.org_id
+    or v_attempt.call_activity_id is distinct from v_activity.id or v_attempt.property_id is distinct from v_intent.property_id
+    or v_attempt.assignment_episode_id is distinct from v_intent.assignment_episode_id
+    or v_attempt.actor_user_id is distinct from v_intent.rep_user_id
+    or v_attempt.provider_attempt_key is distinct from v_key or v_attempt.source <> 'dialpad'
+    or v_attempt.attempt_kind <> 'call' or v_attempt.command_id is not null or v_attempt.outcome is not null
+    or exists (select 1 from public.rep_sms_obligations where attempt_id = v_attempt_id)
+    or not exists (select 1 from pg_trigger where tgrelid = 'public.call_activities'::regclass
+      and tgname = 'guard_homeowner_training_call' and tgenabled = 'O') then
+    raise exception 'Owned training correction preconditions changed';
+  end if;
+  perform 1 from public.acquisition_assignment_episodes
+    where org_id = v_intent.org_id and first_call_provider_key = v_key for update;
+  if exists (select 1 from public.acquisition_assignment_episodes where org_id = v_intent.org_id
+    and first_call_provider_key = v_key and (property_id is distinct from v_intent.property_id
+      or first_call_actor_user_id is distinct from v_intent.rep_user_id
+      or first_call_started_at is distinct from v_activity.started_at)) then
+    raise exception 'Owned training first-call attribution changed';
+  end if;
+  select coalesce(jsonb_agg(to_jsonb(e)), '[]'::jsonb) into v_episode_snapshot
+    from public.acquisition_assignment_episodes e where org_id = v_intent.org_id and first_call_provider_key = v_key;
+  insert into public.dialpad_training_projection_repairs
+    (intent_id, org_id, activity_id, attempt_id, activity_snapshot, attempt_snapshot, episode_snapshot, reason)
+  values (v_id, v_intent.org_id, v_activity_id, v_attempt_id,
+    to_jsonb(v_activity) - 'recording_url', to_jsonb(v_attempt) - 'recording_url', v_episode_snapshot,
+    'Owned training canary was projected as a customer call after assignment cleanup');
+  -- Delete the erroneous customer fact before unlinking its composite FK.
+  delete from public.acquisition_attempts where id = v_attempt_id;
+  alter table public.call_activities disable trigger guard_homeowner_training_call;
+  update public.call_activities set call_purpose = 'internal_training', property_id = null, contact_id = null
+    where id = v_activity_id;
+  alter table public.call_activities enable trigger guard_homeowner_training_call;
+  update public.acquisition_assignment_episodes
+    set first_call_started_at = null, first_call_actor_user_id = null, first_call_provider_key = null
+    where org_id = v_intent.org_id and first_call_provider_key = v_key;
+end;
+$$;
+-- END OWNED CANARY CORRECTION
+
 commit;
