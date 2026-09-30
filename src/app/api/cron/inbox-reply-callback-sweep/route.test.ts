@@ -57,4 +57,23 @@ describe("GET/POST /api/cron/inbox-reply-callback-sweep", () => {
     expect(response.status).toBe(500);
     expect(mocks.reportError).toHaveBeenCalled();
   });
+
+  it("reports projection rows that are past the ten-try retry budget", async () => {
+    const rpc = vi.fn()
+      .mockResolvedValueOnce({ data: { scanned: 0, drained: 0, failed: 0 }, error: null })
+      .mockResolvedValueOnce({ data: { drained: true, projected: false, tries: 11, attempt_id: "attempt-1" }, error: null })
+      .mockResolvedValueOnce({ data: { drained: false, reason: "empty" }, error: null });
+    mocks.createAdminClient.mockReturnValue({ rpc });
+
+    const response = await POST(request());
+
+    expect(response.status).toBe(200);
+    expect(mocks.reportError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "Inbox reply projection rows exceeded ten tries" }),
+      expect.objectContaining({
+        tags: { surface: "cron_inbox_reply_message_projection", kind: "tries_exhausted" },
+        extra: { count: 1, attemptIds: ["attempt-1"] },
+      }),
+    );
+  });
 });

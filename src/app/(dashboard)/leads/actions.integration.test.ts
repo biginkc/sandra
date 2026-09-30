@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const authMocks = vi.hoisted(() => ({
+  getCallerMembershipsOrThrow: vi.fn(),
+  getCallerMemberships: vi.fn(),
+}));
+
+vi.mock("@/lib/auth/memberships", () => authMocks);
+
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
 
@@ -14,12 +21,22 @@ vi.mock("@/lib/supabase/server", () => ({
 
 import {
   qualifyLeadsBulk,
+  sendSmsFromLead,
   updatePropertyStatus,
 } from "@/app/(dashboard)/leads/actions";
+import { getMockMessageLog, resetMockState } from "@/lib/messaging/providers/mock";
 
 describe("updatePropertyStatus (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(testClient);
+    resetMockState();
+    const membership = {
+      org_id: "00000000-0000-0000-0000-000000000001",
+      role: "owner",
+      acquisitions_enabled: false,
+    };
+    authMocks.getCallerMembershipsOrThrow.mockResolvedValue([membership]);
+    authMocks.getCallerMemberships.mockResolvedValue([membership]);
   });
 
   async function seedProperty(status = "new_lead"): Promise<string> {
@@ -31,6 +48,69 @@ describe("updatePropertyStatus (integration)", () => {
     if (error || !data) throw error ?? new Error("seed failed");
     return data.id;
   }
+
+  async function seedSmsLead(): Promise<{ propertyId: string; contactId: string }> {
+    const { data: contact, error: contactError } = await testClient
+      .from("contacts")
+      .insert({ first_name: "Parity", phone_1: "+18165550123", phone_1_type: "mobile" })
+      .select("id")
+      .single();
+    if (contactError || !contact) throw contactError ?? new Error("contact seed failed");
+    const { data: property, error: propertyError } = await testClient
+      .from("properties")
+      .insert({ address: "1 Parity Ln", state: "MO", homeowner_contact_id: contact.id })
+      .select("id")
+      .single();
+    if (propertyError || !property) throw propertyError ?? new Error("property seed failed");
+    await testClient.from("consent_events").insert({
+      contact_id: contact.id,
+      channel: "sms",
+      event_type: "opt_in_marketing_written",
+      source: "actions-integration",
+    });
+    return { propertyId: property.id, contactId: contact.id };
+  }
+
+  it("T23 uses the real sendSmsFromLead path for pending and accepted default-sender stages", async () => {
+    const { propertyId, contactId } = await seedSmsLead();
+    const pending = await sendSmsFromLead(propertyId, "  parity body  ", null, true, null);
+
+    expect(pending.ok).toBe(true);
+    if (!pending.ok || pending.data.outcome.status !== "queued") return;
+    expect(getMockMessageLog()).toHaveLength(0);
+    const { data: queued } = await testClient
+      .from("messages")
+      .select("status, provider, body, contact_id, property_id, from_address, to_address, external_id, metadata")
+      .eq("id", pending.data.outcome.messageId)
+      .single();
+    expect(queued).toMatchObject({
+      status: "queued",
+      provider: "mock",
+      body: "parity body",
+      contact_id: contactId,
+      property_id: propertyId,
+      external_id: null,
+    });
+
+    const accepted = await (await import("@/lib/messaging/send")).releaseQueuedMessage(testClient, pending.data.outcome.messageId);
+    expect(accepted.status).toBe("sent");
+    expect(getMockMessageLog()).toHaveLength(1);
+    const { data: sent } = await testClient
+      .from("messages")
+      .select("status, provider, body, contact_id, property_id, from_address, to_address, external_id, metadata")
+      .eq("id", pending.data.outcome.messageId)
+      .single();
+    expect(sent).toMatchObject({
+      status: "sent",
+      provider: "mock",
+      body: queued?.body,
+      contact_id: queued?.contact_id,
+      property_id: queued?.property_id,
+      from_address: queued?.from_address,
+      to_address: queued?.to_address,
+    });
+    expect(sent?.external_id).toMatch(/^mock_/);
+  });
 
   it("updates status for a valid transition", async () => {
     const id = await seedProperty("new_lead");

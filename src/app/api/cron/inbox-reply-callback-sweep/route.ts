@@ -27,6 +27,11 @@ type SweepDatabase = Omit<Database, "public"> & {
   };
 };
 type SweepClient = Pick<SupabaseClient<SweepDatabase>, "rpc">;
+type JsonObject = { [key: string]: Json | undefined };
+
+function isJsonObject(value: Json): value is JsonObject {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
 /**
  * Durable recovery sweep for the reply-callback ingress
@@ -68,6 +73,15 @@ async function handle(request: Request) {
       }
       projections.push(projection.data);
       if (!projection.data || typeof projection.data !== "object" || Array.isArray(projection.data) || (projection.data as Record<string, unknown>).drained !== true) break;
+    }
+    const exhausted = projections.filter((value): value is JsonObject =>
+      isJsonObject(value) && typeof value.tries === "number" && value.tries > 10,
+    );
+    if (exhausted.length > 0) {
+      reportError(new Error("Inbox reply projection rows exceeded ten tries"), {
+        tags: { surface: "cron_inbox_reply_message_projection", kind: "tries_exhausted" },
+        extra: { count: exhausted.length, attemptIds: exhausted.map((row) => row.attempt_id) },
+      });
     }
     return NextResponse.json({ ok: true, result: data, projections });
   } catch (error) {

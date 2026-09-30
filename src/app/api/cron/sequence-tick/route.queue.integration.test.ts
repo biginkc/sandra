@@ -302,6 +302,36 @@ describe("runSequenceTick — queue drain (integration)", () => {
     );
   });
 
+  it("T18 leaves a pending Inbox reply pending after the sixteen-minute sweep window", async () => {
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18165550119",
+    });
+    const msgId = await seedQueuedMessage({
+      propertyId,
+      contactId,
+      toPhone: "+18165550119",
+      scheduledFor: new Date(SAFE_NOW.getTime() - 60 * 60_000),
+      status: "pending",
+      metadata: {
+        inboxReply: { attemptId: "t18-inbox-attempt", operationId: "t18-inbox-operation" },
+      },
+    });
+
+    vi.advanceTimersByTime(16 * 60_000);
+    const summary = await runSequenceTick(supabase);
+
+    expect(summary.stalePendingFailed).toBe(0);
+    expect(summary.drained).toBe(0);
+    expect(getMockMessageLog()).toHaveLength(0);
+    const { data: message } = await supabase
+      .from("messages")
+      .select("status, metadata")
+      .eq("id", msgId)
+      .single();
+    expect(message?.status).toBe("pending");
+    expect(message?.metadata).toMatchObject({ inboxReply: { attemptId: "t18-inbox-attempt" } });
+  });
+
   it("T18 terminal-fails stale pending provider attempts without re-sending", async () => {
     const { propertyId, contactId } = await seedLead({
       phone: "+18165550116",
