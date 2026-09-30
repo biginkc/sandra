@@ -28,10 +28,12 @@ WORKER_CORE = ROOT / "experiments/inbox-reply-send-worker/core.mjs"
 WORKER_SERVICE = ROOT / "experiments/inbox-reply-send-worker/service.mjs"
 WORKER_DOCKERFILE = ROOT / "experiments/inbox-reply-send-worker/Dockerfile"
 WORKER_HANDLER = ROOT / "experiments/inbox-reply-send-worker/handler.mjs"
+WORKER_RUNNER = ROOT / "experiments/inbox-reply-send-worker/runner.mjs"
+WORKER_TRANSPORT = ROOT / "experiments/inbox-reply-send-worker/vendor/test-transport.mjs"
 LOCAL_DB_RETRY = ROOT / "experiments/inbox-reply-send-worker/restate-retry-local-db.py"
 PROVIDER_FIX = ROOT / "experiments/inbox-reply-send/provider-fix-proof.py"
 PROVIDER_FIX_MINIMAL = ROOT / "experiments/inbox-reply-send/provider-fix-minimal.py"
-LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r4.log")
+LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r5.log")
 EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-evidence.md")
 
 
@@ -49,6 +51,18 @@ def record(handle, label: str, result: subprocess.CompletedProcess[str]) -> None
 
 def run_sql_cases(handle, n: int) -> None:
     base_env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PROJECTION_VERBOSE_FAILURES": "1"}
+    if n == 10:
+        major_probe = execute([
+            "psql", "-XqAt", "-h", base_env.get("PROJECTION_PGHOST", "/tmp/sandra-reply-persist-pg.pPmk5e/socket"),
+            "-p", base_env.get("PROJECTION_PGPORT", "55436"), "-U", base_env.get("PROJECTION_PGUSER", "postgres"),
+            "-d", base_env.get("PROJECTION_PGDATABASE", "postgres"), "-c", "SELECT current_setting('server_version_num')::int/10000;",
+        ], base_env)
+        if major_probe.returncode == 0 and major_probe.stdout.strip() != "17":
+            major = major_probe.stdout.strip()
+            skipped = subprocess.CompletedProcess(["T10", "SKIP"], 0, f"T10 SKIP: granted tuple-lock assertion is pinned to PostgreSQL major 17; observed major {major}\n", "")
+            record(handle, f"T10 baseline SKIP PostgreSQL major {major}", skipped)
+            record(handle, f"T10 mutation SKIP PostgreSQL major {major}", skipped)
+            return
     command = [sys.executable, str(PROOF), f"T{n}"]
     record(handle, f"T{n} baseline", execute(command, base_env))
     if n == 17:
@@ -193,12 +207,13 @@ def run_t17_application(handle) -> None:
 def run_worker_locals(handle) -> None:
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     baseline = ["node", "--test", str(WORKER_TEST)]
-    record(handle, "T-R1/T-R6/T-R7/T-R8 local baseline", execute(baseline, env))
+    record(handle, "T-R1/T-R5c/T-R6/T-R7/T-R8 local baseline", execute(baseline, env))
     mutations = [
         ("T-R1 mutation", WORKER_SERVICE, b"    options: inboxReplySendServiceOptions,\n", b"    // mutation: omit service options\n", "T-R1"),
-        ("T-R6 mutation", WORKER_CORE, b"BigInt(entry.generation) >= 150n", b"BigInt(entry.generation) > 150n", "T-R6"),
+        ("T-R6 Number mutation", WORKER_CORE, b"body.status === 'PreviouslyAccepted' && BigInt(entry.generation) >= 150n", b"body.status === 'PreviouslyAccepted' && Number(entry.generation) >= 150n", "T-R6"),
+        ("T-R6 modulo-boundary mutation", WORKER_CORE, b"body.status === 'PreviouslyAccepted' && BigInt(entry.generation) >= 150n", b"body.status === 'PreviouslyAccepted' && BigInt(entry.generation) % 150n === 0n", "T-R6"),
         ("T-R7 mutation", WORKER_DOCKERFILE, b"core.mjs runner.mjs server.mjs handler.mjs service.mjs", b"core.mjs runner.mjs server.mjs service.mjs", "T-R7"),
-        ("T-R8 mutation", WORKER_HANDLER, b"throw Error('Invalid reply dispatch request');", b"throw Object.assign(new Error('Invalid reply dispatch request'), { terminal: true });", "T-R8"),
+        ("T-R8 RunOptions mutation", WORKER_HANDLER, b"const dispatch = await ctx.run(`dispatch:${attemptId}`, async () => {", b"const dispatch = await ctx.run(`dispatch:${attemptId}`, { maxRetryAttempts: 3 }, async () => {", "T-R8"),
     ]
     for label, path, needle, replacement, test_name in mutations:
         original = path.read_bytes()
@@ -206,9 +221,31 @@ def run_worker_locals(handle) -> None:
             raise RuntimeError(f"{label} mutation target is not unique")
         path.write_bytes(original.replace(needle, replacement, 1))
         try:
-            record(handle, label, execute(["node", "--test", str(WORKER_TEST), "--test-name-pattern", test_name], env))
+            record(handle, label, execute(["node", "--test", "--test-name-pattern", test_name, str(WORKER_TEST)], env))
         finally:
             path.write_bytes(original)
+
+    original = WORKER_HANDLER.read_bytes()
+    import_needle = b"export function createRunHandler({ runner, pool }) {\n"
+    terminal_needle = b"throw Error('Invalid reply dispatch request');"
+    if original.count(import_needle) != 1 or original.count(terminal_needle) != 1:
+        raise RuntimeError("T-R8 TerminalError mutation target is not unique")
+    terminal_mutation = original.replace(import_needle, b"import { TerminalError } from '@restatedev/restate-sdk';\n" + import_needle, 1).replace(terminal_needle, b"throw new TerminalError('Invalid reply dispatch request');", 1)
+    WORKER_HANDLER.write_bytes(terminal_mutation)
+    try:
+        record(handle, "T-R8 TerminalError mutation", execute(["node", "--test", "--test-name-pattern", "T-R8", str(WORKER_TEST)], env))
+    finally:
+        WORKER_HANDLER.write_bytes(original)
+
+    original = WORKER_TRANSPORT.read_bytes()
+    transport_needle = b"    signal.throwIfAborted();\n"
+    if original.count(transport_needle) != 1:
+        raise RuntimeError("T-R5c fixture mutation target is not unique")
+    WORKER_TRANSPORT.write_bytes(original.replace(transport_needle, b"    // mutation: omit fixture deadline check\n", 1))
+    try:
+        record(handle, "T-R5c mutation", execute(["node", "--test", "--test-name-pattern", "T-R5c", str(WORKER_TEST)], env))
+    finally:
+        WORKER_TRANSPORT.write_bytes(original)
 
 
 def run_provider_fixes(handle) -> None:
@@ -258,7 +295,34 @@ def run_restate_local_db(handle) -> None:
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     for name in ("T-R12", "T-R12b", "T-R13"):
         record(handle, f"{name} local-db baseline", execute([sys.executable, str(LOCAL_DB_RETRY), name], env))
-        record(handle, f"{name} local-db mutation", execute([sys.executable, str(LOCAL_DB_RETRY), name, "--mutated"], env))
+        if name == "T-R12":
+            original = WORKER_RUNNER.read_bytes()
+            needle = b"          return { kind: 'not_sent', reason: code ?? 'start_dispatch_failed' };"
+            replacement = b"          return settled('rejected_unsent');"
+            if original.count(needle) != 1:
+                raise RuntimeError("T-R12 runner mutation target is not unique")
+            with tempfile.NamedTemporaryFile(prefix=".runner-t-r12-", suffix=".mjs", dir=WORKER_RUNNER.parent, delete=False) as mutant:
+                mutant.write(original.replace(needle, replacement, 1))
+                mutant_path = Path(mutant.name)
+            try:
+                record(handle, f"{name} local-db mutation", execute([sys.executable, str(LOCAL_DB_RETRY), name], {**env, "REPLY_PERSIST_RUNNER_MODULE": str(mutant_path)}))
+            finally:
+                mutant_path.unlink(missing_ok=True)
+        elif name == "T-R13":
+            original = WORKER_RUNNER.read_bytes()
+            needle = b"          if (code === 'INBOX_REPLY_SENDER_BUSY') return { kind: 'deferred' };\n"
+            replacement = needle + b"          if (code === 'INBOX_REPLY_REQUESTER_UNAUTHORIZED') return settled('rejected_unsent');\n"
+            if original.count(needle) != 1:
+                raise RuntimeError("T-R13 runner mutation target is not unique")
+            with tempfile.NamedTemporaryFile(prefix=".runner-t-r13-", suffix=".mjs", dir=WORKER_RUNNER.parent, delete=False) as mutant:
+                mutant.write(original.replace(needle, replacement, 1))
+                mutant_path = Path(mutant.name)
+            try:
+                record(handle, f"{name} local-db mutation", execute([sys.executable, str(LOCAL_DB_RETRY), name], {**env, "REPLY_PERSIST_RUNNER_MODULE": str(mutant_path)}))
+            finally:
+                mutant_path.unlink(missing_ok=True)
+        else:
+            record(handle, f"{name} local-db mutation", execute([sys.executable, str(LOCAL_DB_RETRY), name], {**env, "RESTATE_LOCAL_DB_FIXTURE_VARIANT": "T-R12b-drop-post-marker"}))
 
 
 REAL_NOT_RUN = {
@@ -280,7 +344,7 @@ def derive_evidence(raw: str) -> str:
     rows: list[str] = [
         "# Reply-persistence v5 mutation evidence (generated)",
         "",
-        "This file is generated from `replypersist-mutation-run-r4.log`; failure text is copied from captured child output.",
+        "This file is generated from `replypersist-mutation-run-r5.log`; failure text is copied from captured child output.",
         "",
         "| Test | Executed | Mechanism | Captured mutated failure |",
         "|---|---|---|---|",
@@ -297,7 +361,7 @@ def derive_evidence(raw: str) -> str:
         seen.add(test)
         label = header.replace("|", "\\|")
         value = "<br>".join(line.replace("|", "\\|") for line in selected)
-        executed = "NOT RUN" if "NOT RUN" in header or "NOT RUN" in body or "could not connect" in body or "No such file or directory" in body or "PROJECTION_PGHOST is required" in body else "EXECUTED"
+        executed = "SKIP" if "SKIP" in header or "SKIP" in body else ("NOT RUN" if "NOT RUN" in header or "NOT RUN" in body or "could not connect" in body or "No such file or directory" in body or "PROJECTION_PGHOST is required" in body or "ERR_MODULE_NOT_FOUND" in body or "Cannot find package" in body else "EXECUTED")
         rows.append(f"| {test} | {executed} | {label} | `{value}` |")
     for n in range(1, 28):
         test = f"T{n}"
@@ -305,15 +369,13 @@ def derive_evidence(raw: str) -> str:
             rows.append(f"| {test} | NOT RUN | no mutation record | `no captured run` |")
     for test, reason in REAL_NOT_RUN.items():
         rows.append(f"| {test} | NOT RUN | REAL ruling row | `{reason}` |")
-    for test in ("T-R5c",):
-        rows.append(f"| {test} | NOT RUN | not in Round 4 local execution set | `not requested for this round` |")
     return "\n".join(rows) + "\n"
 
 
 def main() -> int:
     LOG.parent.mkdir(parents=True, exist_ok=True)
     with LOG.open("w", encoding="utf-8") as handle:
-        handle.write("reply-persistence v5 round-4 mutation run; machine-produced raw child output\n")
+        handle.write("reply-persistence v5 round-5 mutation run; machine-produced raw child output\n")
         for n in range(1, 28):
             run_sql_cases(handle, n)
         run_t17_application(handle)
