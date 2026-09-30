@@ -648,12 +648,15 @@ test("route-edge reconciliation mirrors canonical eligibility and gates markers"
     ids = await seed(client);
     const nullConversationMessage = randomUUID();
     const nonSmsMessage = randomUUID();
+    // The real schema fills conversation_id for contact-bearing SMS rows. Keep
+    // this phone-bearing row genuinely null-conversation so the route trigger's
+    // canonical predicate is tested rather than the identity-filling trigger.
     await client.query(`
       INSERT INTO public.messages(
         id,org_id,channel,direction,status,property_id,contact_id,conversation_id,
         from_address,to_address,body,created_at
       ) VALUES
-        ($1,$2,'sms','inbound','received',$3,$4,NULL,'+18165550121','+18162804181','null conversation',clock_timestamp()),
+        ($1,$2,'sms','inbound','received',$3,NULL,NULL,'+18165550121','+18162804181','null conversation',clock_timestamp()),
         ($5,$2,'email','outbound','sent',$3,$4,$6,'sender@example.com','recipient@example.com','non-SMS message',clock_timestamp())
     `, [nullConversationMessage, ids.org, ids.property, ids.contact, nonSmsMessage, ids.conversation]);
     const unexpectedEdges = (await client.query(
