@@ -371,7 +371,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+try {
+  process.exitCode = await main();
+} catch (error) {
   console.error(`${error.name}: ${error.message}`);
   process.exitCode = 1;
-});
+}
