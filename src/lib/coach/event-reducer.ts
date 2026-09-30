@@ -265,7 +265,8 @@ export function createCoachReducer(bundle: ScriptBundle | null) {
         const currentMs = Date.parse(current.ts);
         const incomingMs = Date.parse(action.ts);
         const duplicate = current.ts === action.ts && current.sellerTurn === action.sellerTurn
-          && current.label === action.label && current.classifierModel === action.classifierModel
+          && current.label === action.label && current.subType === action.subType
+          && current.classifierModel === action.classifierModel
           && current.questionsSha256 === action.questionsSha256;
         const older = Number.isFinite(currentMs) && Number.isFinite(incomingMs) && currentMs !== incomingMs
           ? incomingMs < currentMs
@@ -277,7 +278,7 @@ export function createCoachReducer(bundle: ScriptBundle | null) {
         connected: true,
         lastEventAt: action.ts,
         motivationPrompt: {
-          label: action.label, sellerTurn: action.sellerTurn,
+          label: action.label, ...(action.subType === undefined ? {} : { subType: action.subType }), sellerTurn: action.sellerTurn,
           classifierModel: action.classifierModel, questionsSha256: action.questionsSha256,
           ts: action.ts,
         },

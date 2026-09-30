@@ -226,6 +226,22 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.queryByTestId("coach-recommendations")).toBeNull();
   });
 
+  it("shows the matching sub-type lines, all at once, and replaces them on a later statement", async () => {
+    const approved = JSON.parse(readFileSync("src/lib/coach/live-coach-replies.approved.json", "utf8")) as { sets: Record<string, { replies: { text: string }[] }> };
+    const lines = () => [...screen.getByTestId("coach-motivation-replies").querySelectorAll("li")].map((item) => item.textContent);
+    const base = { type: "motivation_prompt", label: "Motivation", classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64) };
+    render(<ObjectionPromptProvider enabled><Harness {...baseProps()} /></ObjectionPromptProvider>);
+    await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());
+    broadcast({ ...base, subType: "tired_landlord", sellerTurn: 1, ts: "2026-09-29T12:00:00Z" });
+    expect(lines()).toEqual(approved.sets["motivation.tired_landlord"].replies.map((reply) => reply.text));
+    expect(lines()).toHaveLength(6);
+    broadcast({ ...base, subType: "inherited", sellerTurn: 3, ts: "2026-09-29T12:00:10Z" });
+    expect(lines()).toEqual(approved.sets["motivation.inherited"].replies.map((reply) => reply.text));
+    broadcast({ ...base, subType: "not_an_approved_set", sellerTurn: 5, ts: "2026-09-29T12:00:20Z" });
+    expect(lines()).toEqual(approved.sets.motivation.replies.map((reply) => reply.text));
+    expect(screen.getAllByTestId("coach-motivation-prompt")).toHaveLength(1);
+  });
+
   it("shows a separate motivation card beside the objection card, only when enabled", async () => {
     const motivationPayload = { type: "motivation_prompt", label: "Motivation", sellerTurn: 1, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z" };
     const { unmount } = render(<Harness {...baseProps()} />);

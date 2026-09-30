@@ -1172,6 +1172,14 @@ function CoachCardTray({
   );
 }
 
+/** Owner-approved lines only, exactly as in the approved file: the matching sub-type set when the
+ * classifier named one that exists in the file, otherwise the general motivation set. */
+function motivationReplyLines(subType: string | undefined): readonly { text: string }[] {
+  const sets = approvedReplies.sets as Record<string, { replies: { text: string }[] }>;
+  const specific = subType === undefined ? undefined : sets[`motivation.${subType}`];
+  return (specific ?? sets.motivation).replies;
+}
+
 function MotivationPromptCard({ prompt, onDismiss }: { prompt: CoachMotivationPrompt; onDismiss: () => void }) {
   return (
     <section data-testid="coach-motivation-prompt" className="coach-prompt-card">
@@ -1180,7 +1188,7 @@ function MotivationPromptCard({ prompt, onDismiss }: { prompt: CoachMotivationPr
         <button type="button" aria-label="Dismiss motivation" data-testid="coach-motivation-prompt-dismiss" onClick={onDismiss}><XIcon aria-hidden className="size-5" /></button>
       </div>
       <ul data-testid="coach-motivation-replies" className="coach-prompt-replies">
-        {approvedReplies.sets.motivation.replies.map((reply, index) => <li key={index}>{reply.text}</li>)}
+        {motivationReplyLines(prompt.subType).map((reply, index) => <li key={index}>{reply.text}</li>)}
       </ul>
     </section>
   );

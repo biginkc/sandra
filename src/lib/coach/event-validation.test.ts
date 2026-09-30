@@ -37,6 +37,12 @@ describe("parseCoachEvent — motivation prompt", () => {
   it("accepts the bounded shape and ignores unknown fields", () => {
     expect(parseCoachEvent({ ...MOTIVATION, objectionId: "ignored" })).toEqual({ ok: true, event: MOTIVATION });
   });
+  it("accepts an optional sub-type id and rejects a malformed one", () => {
+    expect(parseCoachEvent({ ...MOTIVATION, subType: "tired_landlord" })).toEqual({ ok: true, event: { ...MOTIVATION, subType: "tired_landlord" } });
+    for (const subType of ["", "Has Space", "x".repeat(65), 7]) {
+      expect(parseCoachEvent({ ...MOTIVATION, subType })).toEqual({ ok: false, reason: "malformed", rawType: "motivation_prompt" });
+    }
+  });
   it.each([
     { label: "" }, { label: "x".repeat(81) },
     { sellerTurn: 0 }, { sellerTurn: 1.5 },

@@ -85,6 +85,14 @@ describe("coachReducer — motivation prompt", () => {
     expect(state.motivationPrompt).toBeNull();
   });
 
+  it("stores the sub-type and lets a same-timestamp different sub-type replace the card", () => {
+    let state = coachReducer(initialCoachState(), motivation);
+    expect(state.motivationPrompt).not.toHaveProperty("subType");
+    state = coachReducer(state, { ...motivation, subType: "inherited" });
+    expect(state.motivationPrompt).toMatchObject({ subType: "inherited" });
+    expect(coachReducer(state, { ...motivation, subType: "inherited" })).toBe(state);
+  });
+
   it("ignores an exact duplicate and an older motivation event, accepts a newer one", () => {
     let state = coachReducer(initialCoachState(), motivation);
     vi.setSystemTime(1_005_000);
