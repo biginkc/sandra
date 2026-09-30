@@ -1,0 +1,28 @@
+{
+  "startMs": 1790730371879,
+  "burstEnd": 1790730491924,
+  "stopMs": 1790730554157,
+  "counts": {
+    "scheduled": {
+      "update": 10200,
+      "inbound": 2400
+    },
+    "completed": {
+      "update": 10200,
+      "inbound": 2400
+    },
+    "failed": {
+      "update": 0,
+      "inbound": 0
+    },
+    "worker": {
+      "parent": 60,
+      "parent_sources": 60,
+      "claim": 12307,
+      "finish": 12307,
+      "stale": 0,
+      "errors": 0
+    }
+  },
+  "errors": []
+}

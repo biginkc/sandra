@@ -1,0 +1,16 @@
+[
+  {
+    "query": "UPDATE public.messages SET status=$2,sent_at=statement_timestamp() WHERE id=$1 AND status=$3",
+    "calls": "10200",
+    "mean_exec_time": 2.18321122490197,
+    "min_exec_time": 1.560256,
+    "max_exec_time": 64.617605
+  },
+  {
+    "query": "INSERT INTO public.messages(id,org_id,conversation_id,contact_id,property_id,channel,direction,status,body,from_address,to_address) VALUES($1,$2,$3,$4,$5,$7,$8,$9,$10,$6,$11)",
+    "calls": "2400",
+    "mean_exec_time": 2.57157780291666,
+    "min_exec_time": 0.95199,
+    "max_exec_time": 98.560008
+  }
+]

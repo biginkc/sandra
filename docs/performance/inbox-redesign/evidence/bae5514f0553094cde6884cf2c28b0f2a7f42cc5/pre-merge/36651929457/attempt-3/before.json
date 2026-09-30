@@ -1,0 +1,11 @@
+{
+  "before": {
+    "deadlocks": "0",
+    "xact_rollback": "1"
+  },
+  "deadBefore": {
+    "n_dead_tup": "10215"
+  },
+  "queued": 10200,
+  "known": 3000
+}

@@ -1,0 +1,13 @@
+{
+  "file": "20260930040000_inbox_control_foundation.sql",
+  "exit": 0,
+  "wall_ms": 286.176715,
+  "sample_interval_ms": 50,
+  "access_exclusive_messages_observed_ms": 230.617063,
+  "access_exclusive_samples": 4,
+  "max_waiting_locks": 1,
+  "writer_count": 3,
+  "writer_max_ms": 208.449161,
+  "monitor_error": null,
+  "writer_error": null
+}
