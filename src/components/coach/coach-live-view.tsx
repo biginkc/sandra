@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { createPortal } from "react-dom";
 import approvedReplies from "@/lib/coach/live-coach-replies.approved.json";
+import objectionReplies from "@/lib/coach/live-coach-objection-replies.json";
 import {
   lazy,
   Suspense,
@@ -1194,14 +1195,35 @@ function MotivationPromptCard({ prompt, onDismiss }: { prompt: CoachMotivationPr
   );
 }
 
-function ObjectionPromptCard({ prompt, onDismiss, replies }: { prompt: CoachObjectionPrompt; onDismiss: () => void; replies?: readonly string[] }) {
+/** Characters that make a line look empty: whitespace and zero-width marks. */
+const INVISIBLE = /[\s\u200b\u200c\u200d\ufeff]/g;
+
+/** The owner's playbook replies for this objection type, from the pinned export of Closer Lab's objection
+ * catalog. One block per catalog reply, in catalog order. Each visible line is shown exactly as written;
+ * only lines with nothing visible on them are left out. Types with no playbook reply return no blocks. */
+export function objectionReplyBlocks(objectionId: string): string[][] {
+  const sets = objectionReplies.sets as Record<string, { replies: { text: string }[] }>;
+  return (sets[objectionId]?.replies ?? []).map((reply) =>
+    reply.text.split("\n").filter((line) => line.replace(INVISIBLE, "") !== ""));
+}
+
+function ObjectionPromptCard({ prompt, onDismiss }: { prompt: CoachObjectionPrompt; onDismiss: () => void }) {
+  const blocks = objectionReplyBlocks(prompt.objectionId);
   return (
     <section data-testid="coach-objection-prompt" className="coach-prompt-card">
       <div className="coach-prompt-heading">
         <div><strong>Objection</strong><div data-testid="coach-objection-prompt-label">{prompt.label}</div></div>
         <button type="button" aria-label="Dismiss objection" data-testid="coach-objection-prompt-dismiss" onClick={onDismiss}><XIcon aria-hidden className="size-5" /></button>
       </div>
-      {replies?.length ? <ul className="coach-prompt-replies">{replies.map((reply, index) => <li key={index}>{reply}</li>)}</ul> : null}
+      {blocks.length ? (
+        <div data-testid="coach-objection-replies" className="coach-prompt-reply-blocks">
+          {blocks.map((lines, block) => (
+            <div key={block} data-testid="coach-objection-reply" className="coach-prompt-reply-block">
+              {lines.map((line, index) => <p key={index}>{line}</p>)}
+            </div>
+          ))}
+        </div>
+      ) : null}
     </section>
   );
 }

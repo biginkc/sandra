@@ -1,0 +1,252 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "file": "src/lib/scoring/contracts/objection-catalog.json",
+    "version": "objection-rules-2026-09-07",
+    "sha256": "fe25b222796afd33e8171527789791307a58ae1f85b814320b0f1ed9dc6ecd77"
+  },
+  "sets": {
+    "consult": {
+      "replies": [
+        {
+          "catalogId": "consult_person",
+          "variantId": "core",
+          "text": "“I need to talk to my spouse/kids/partner first.” “I need to think about it.”\nTonality: Curious forward with a hint of concerned\nAcknowledge: Totally, if I were you I would do the exact same thing…\nDissarm: Mr seller… I have 2 available slots tomorrow afternoon at x:xx pm and x:xx pm will those give you enough time to [think about it/talk your attorney/spouse/partner]? Which time works best for you?\n​\nOvercome: Perfect. I’ve got you down for x;xx pm tomorrow… I’ll talk to you then!!! Mr seller, before you go… what questions do you think might arise, when you [think about it/talk your attorney/spouse/partner] just so I can be more prepared for our next call…\n\n\n"
+        }
+      ]
+    },
+    "review_agreement": {
+      "replies": [
+        {
+          "catalogId": "review_agreement",
+          "variantId": "core",
+          "text": "If they want to review\nCLOSR · PERSUASION PLAYBOOK 4\n\n\n“No worries, Kyle. I want you to have a hundred percent confidence moving forward with us in the first\nplace. Go ahead, pull it up. We’re going to read through.” (Boiler Room, Jun 23)\n“Go ahead, pull it up. We’re going to read through this together so you can have confidence working with\nus, and that way I can get any questions while we’re here together.” (Boiler Room, Jun 23)\n"
+        }
+      ]
+    },
+    "not_rushed": {
+      "replies": [
+        {
+          "catalogId": "not_rushed",
+          "variantId": "core",
+          "text": "“I’m not in a rush / I’m not motivated.”\nTonality: Playful/Curious Tonality\n\n\n\n\nAcknowledge: Yeah I totally get it…\nDissarm: In fact, it’s a good thing you’re not in a rush, because typically we can pay more if we have more time…\n​\nOvercome: \n\n\n\n\nHomeowner: When you say you’re not in a rush… where do you plan on going to next? Im assuming you havent identified that yet\n\n\n\n\nTenant: When you say you’re not in a rush… i get it, but tell me with this rental… do you plan on buying more? Or are you hanging up the landlord duties for good.\n\n\n\n\nVacant: When you say you’re not in a rush… i get it, its been sitting there collecting dust for a while anyway… what even came up now that has you considering selling?\n​\n\n\n"
+        },
+        {
+          "catalogId": "not_rushed",
+          "variantId": "readiness",
+          "text": "Ask if they are in a position to move forward once you find a solution that makes sense. If they are not,\nJT’s correction is direct: cut the call. Do not run a full offer call with someone who cannot move. (Boiler\nRoom, Jun 23)\n"
+        }
+      ]
+    },
+    "unknown": {
+      "replies": [
+        {
+          "catalogId": "unknown",
+          "variantId": "owner",
+          "text": "Totally agree, that makes sense, and I’d do the same thing if I were you."
+        }
+      ]
+    },
+    "trust_signing": {
+      "replies": [
+        {
+          "catalogId": "trust",
+          "variantId": "core",
+          "text": "“I don’t trust investors / wholesaling is a scam.”\n\n\n\n\nTonality: Concerned Forward, have a hint of curiosity.\nAcknowledge: Yeah, you’re completely right\n\n\n\n\nDissarm: I’d honestly agree with you..,. You definitely don’t know enough us or our process to be in confident if we would even be a good fit to work with you… in fact I’m not even sure we can help you yet…\n\n\nOvercome: What would make you feel more confident we are someone you can actually trust?\n​\n\n\n"
+        },
+        {
+          "catalogId": "signing_scam",
+          "variantId": "signing-confidence",
+          "text": "Of course, Julia, what would make you feel confident and comfortable signing?"
+        }
+      ]
+    },
+    "earnest_proof": {
+      "replies": [
+        {
+          "catalogId": "earnest_money",
+          "variantId": "core",
+          "text": "“I want more earnest money / I need proof of funds.”\n​\nTonality: \n\n\n\n\nAcknowledge: Yeah Totally.\n\n\n\n\nDissarm: If I were you I WOULD TOO\n\n\nOvercome: How much earnest money do you want? Or What’s your email so when  we submit our offer we can send it with proof of funds.\n\n\n"
+        }
+      ]
+    },
+    "price_pushback": {
+      "replies": [
+        {
+          "catalogId": "offer_too_low",
+          "variantId": "core",
+          "text": "“Your offer is too low.” \n\n\n\n\nTonality: Concerned Tonality\n\n\n\n\nAcknowledge: *Sighhh* Yeah…\nDissarm: I apologize that our offer was a little bit lower than YOU AND I were hoping for…\n​\nOvercome: What were you hoping I was AT LEAST going to say?\n\n\n"
+        },
+        {
+          "catalogId": "counteroffer",
+          "variantId": "core",
+          "text": "When price is too low\n“Yeah, man. Unfortunately, it did come in lower than you and I were hoping for. What were you hoping they\nwere at least going to say?” (Boiler Room, Jun 25)\n“I’m not sure I can get you that. I’m going to fight for you to get as high as possible… What is the lowest\nyou’d actually be willing to go in order to be able to achieve dream outcome?” (Boiler Room, Jun 25)\nGive-and-take after rejection\n“Look, Stone, at the end of the day, I don’t really think it would work for you either, right? However, that’s\nwith us paying moving costs, that’s with a 14-day close, that’s with all cash, no walkthroughs, nothing like\nthat, right? Would it really matter if it took like an extra 30 days and we got a couple of walkthroughs just to\nmake sure it’s in the condition you promised me, if I’m able to get you X amount in your pocket?” (Boiler\nRoom, Jun 23)\n“Perfect. I’m going to go see if I can get you approved for that program because that one sounds like it’s a\nbetter fit for you in the first place.” (Boiler Room, Jun 23)\n"
+        }
+      ]
+    },
+    "listing_realtor": {
+      "replies": [
+        {
+          "catalogId": "listing_realtor",
+          "variantId": "core",
+          "text": "“I can get more / I’m going to list it with a Realtor.”\n\n\nTonality: Curious Tonality\n\n\n\n\nAcknowledge: Yeah you’re right…\nDissarm: Honestly… it may be better for you to list it with a realtor\n​\nOvercome: If you have the money for repairs, cleaning, commissions, closing costs, and you’re fine waiting 3-6 months, and can handle the mortgage payment for that long… it probably is the best fit… but is that something that truly make sense for you?\n\n\n"
+        },
+        {
+          "catalogId": "listing_realtor",
+          "variantId": "outcome-tradeoffs",
+          "text": "Listing comparison\n“Jayline, honestly, that may be the best option for you… if you’ve got the money for that, you have the next\nsix months to take a risk and list it on the market, and you can honestly afford the mortgage payment and\ntaxes over the next six months, that’s probably the best fit for you to do.” (Boiler Room, Jun 25)\n“But if you’re looking for something with certainty that doesn’t require you to come out of pocket $30,000\nin repairs and cleaning and marketing and waiting six months, and you just want certainty and to alleviate\nthe pain of this company, then that’s what we’re here to do. So which one of those makes more sense for\nyou?” (Boiler Room, Jun 25)\n"
+        }
+      ]
+    },
+    "external_valuation": {
+      "replies": [
+        {
+          "catalogId": "external_valuation",
+          "variantId": "core",
+          "text": "“Zillow (or an appraiser) says it’s worth $___.”\n\n\n\n\nTonality: Curious and Concerned tonality.\n\n\n\n\nAcknowledge: Yeah… I’ve seen that too..\nDissarm: Your home definitely could be worth that much if we make repairs…\n​\nOvercome: Mr Seller… do you mind if I share with you, walk away price? Vs Listing Price?\n\n\n\n\n Seller: Of Course\n \nYou: So, listing price, thats exactly what your neighbors are selling there homee for on the market… after they pay for all the repairs the realtor requests, all of the cleaning, and staging, and waiting 3-6 months covering that mortgage… and not to forget all of the commissions closing costs, and attorney fees, and title fees, and transfer taxes that accumulate when listing the property on the market with a realtor.. SO lets put this into real numbers… that house that sold for 200,000 next door. They paid 6% commissions, 3% to buyers closing costs, 2% to the title company and $5k-$10k on the conservative end to get the home market read…\nSo in all… that’s 11% total costs which is $22,000 in fees + 5k getting the market ready.. So thats $27,000 just to list the home on the market… So you’d be walking away with $173,000 now oh mr seller… I know you have mortgage how much is your mortgage payment? \n\n\n\n\n Seller: its $2000\n​\nYou: Ahh… so then you wait 6 more months and that takes another $12,000 away. So realistically you’d walk away with $161,000 - your mortgage at closing… With us we are offering $155,000 that goes directly into your pocket at closing… Mr Seller is it really worth an extra $6,000 to take the risk of hoping it sells on the market?\n​\n\n\n"
+        }
+      ]
+    },
+    "buyer_identity": {
+      "replies": [
+        {
+          "catalogId": "buyer_identity",
+          "variantId": "core",
+          "text": "“Are you actually buying it? Who are you?”\n\n\nTonality: Curious Tonality.. \n\n\n\n\nAcknowledge: Mr Seller, that’s a fantastic question.\n\n\n\n\nDissarm:  To be completely up front with you, I would never hop on a call with someone if I didnt have the hopes and intentions of buying their property… \n\n\nOvercome: That being said, when  we give you a number and a timeline we do whatever it takes to make sure we can do that… so let me ask you this mr seller… as long as you get the price we promise in the time frame we promise you… does it REALLY MATTER how we cut the cake to make you get it?\n\n\n"
+        }
+      ]
+    },
+    "property_access": {
+      "replies": [
+        {
+          "catalogId": "property_access",
+          "variantId": "core",
+          "text": "“I don’t want strangers coming through my house (showings/inspections).”\nTonality: Concerned\n\n\n\n\nAcknowledge: Yeah I totally get it\n\n\n\n\nDissarm: If i were in your shoes, I wouldn’t either…\n\n\nOvercome: Mr Seller, may I ask you something?\n\n\n\n\n Seller: Yes\n \n You: Let’s say you were in the market for a new home… would spend hundreds of thousands of dollars on something you werent allowed to see?\n\n\n Seller: No\n​\n You: Exactly, and honestly mr seller, if you REALLYY dont want to do showings or inspections that’s fine… we can do that. But I will warn you our price will be significantly lower… is it worth a good amount of extra money JUST to let us in a few times?\n\n\n"
+        },
+        {
+          "catalogId": "property_access",
+          "variantId": "access-frequency",
+          "text": "if they're not cool with that, ask them what they're cool with. Maybe it's one day per week. That's fine. This is not that big of a deal."
+        }
+      ]
+    },
+    "right_price_preoffer": {
+      "replies": [
+        {
+          "catalogId": "right_price_preoffer",
+          "variantId": "core",
+          "text": "I’m only selling for the right price…\n\n\nTonality: Playful\n\n\n\n\nAcknowledge: Of course!\nDissarm: Honestly, Mr Seller… I’m not even sure if we can actually help you yet… I still have to ask some questions about the property and the situation to see if I can do anything good for ya.\n\n\nOvercome: *STRAIGHT TO NEXT QUESTION*\n\n\n"
+        }
+      ]
+    },
+    "offer_now": {
+      "replies": [
+        {
+          "catalogId": "offer_now",
+          "variantId": "core",
+          "text": "Get Straight to the offer\nTonality: Concerned\n​\nAcknowledge: Of course MR SELLER\n\n\n\n\nDissarm: Trust me, I want to get to the offer just as bad you, and I mean I can be like everyone else….. get you on the phone, try to ask some personal questions, and give you some BS lowball cash offer. But Honestly, I don’t want to be like everyone else. If you’ll answer these few questions, I’ll take this back to the team and I’ll get you something fair we can firmly stand behind…\n\n\nOvercome: *STRAIGHT TO NEXT QUESTION*\n"
+        },
+        {
+          "catalogId": "offer_now",
+          "variantId": "prior-calls",
+          "text": "Sounds like this process has been frustrating for you. Am I your third call or 33rd?"
+        }
+      ]
+    },
+    "attorney_review": {
+      "replies": [
+        {
+          "catalogId": "attorney_review",
+          "variantId": "core",
+          "text": "Attorney objection\n“Yeah, honestly, that’s a really good idea. Like, it’s probably best for you to be super confident in what\nyou’re actually assigning, making sure you fully understand it.” (Boiler Room, Jun 25)\n“To make sure you have enough time to speak to your attorney, I have some availability on Friday at 1 p.m.\nDoes that work for you?” (Boiler Room, Jun 25)\n“I’ll send this over to you right now. Let’s go through it together. Address any concerns you have now, then\ntalk to your attorney and see what he has to say too. Sound fair?” (Boiler Room, Jun 25)\n"
+        }
+      ]
+    },
+    "closing_certainty": {
+      "replies": [
+        {
+          "catalogId": "closing_certainty",
+          "variantId": "core",
+          "text": "If they ask whether closing is guaranteed\n“There’s one thing I can guarantee. It’s that nobody’s going to fight to get this harder to the closing table\nthan me.” (Boiler Room, Jul 10b)\n"
+        }
+      ]
+    },
+    "text_only": {
+      "replies": [
+        {
+          "catalogId": "text_only",
+          "variantId": "core",
+          "text": "Inbound seller wants text only\n“As much as I would love to give you an offer on text, do you really think I can find out enough information\nabout one of the largest assets you’ve ever owned in your life over text? I’m not going to waste your time on\na call, but I need to know more about the property and the situation, which is probably going to take an\nhour to see if we can even help you in the first place. Or I can just make it some random lowball cash offer\nand that’s not what you want, is it? You want this property sold.” (Boiler Room, Jul 16)\n"
+        }
+      ]
+    },
+    "busy_callback": {
+      "replies": [
+        {
+          "catalogId": "busy_callback",
+          "variantId": "core",
+          "text": "Seller is busy for real\nCLOSR · PERSUASION PLAYBOOK 4\n\n\n“Look, you might be busy right now. That’s completely fine. I have one or two openings tomorrow on my\ncalendar. What time is best for you?” (Boiler Room, Jun 23)\n"
+        }
+      ]
+    },
+    "buy_without_visit": {
+      "replies": [
+        {
+          "catalogId": "buy_without_visit",
+          "variantId": "core",
+          "text": "“How can you offer without seeing it?”\n“Well, we literally just went through 30 minutes of asking you about the property. Did you lie to me? You\ndon’t seem like a liar to me.”\n“Then we don’t need to see it in person yet.” (Boiler Room, Jun 23)\n"
+        },
+        {
+          "catalogId": "buy_without_visit",
+          "variantId": "assessment-explanation",
+          "text": "Right? I totally get it. This isn't an inspection. I'm just making sure I can get you approved for an offer that we firmly stand behind, without surprises."
+        }
+      ]
+    },
+    "timing_feasibility": {
+      "replies": [
+        {
+          "catalogId": "timing_feasibility",
+          "variantId": "core",
+          "text": "Seven-day close feasibility\nCLOSR · PERSUASION PLAYBOOK 4\n\n\n“I mean, I can give you a seven-day close, but seven-day close isn’t even enough time for me to get an\ninspection. Do you think that I can give you something that is actually fair if I don’t have enough\ntime?” (Boiler Room, Jul 10b)\n"
+        }
+      ]
+    },
+    "competing_offer": {
+      "replies": [
+        {
+          "catalogId": "competing_offer",
+          "variantId": "core",
+          "text": "Competitor-offer frame\n“Straight up, Ivan, that sounds like a really good offer. What held you back from taking that?” (Boiler Room,\nJun 24)\n“But thinking about it, you told me how important it is for you to move forward now. So help me\nunderstand. Why would you not move forward with that one?” (Boiler Room, Jun 24)\n“So you didn’t really believe they could truly close.” (Boiler Room, Jun 24)\n"
+        }
+      ]
+    },
+    "transaction_process": {
+      "replies": [
+        {
+          "catalogId": "transaction_process",
+          "variantId": "core",
+          "text": "Novation/process concern\n“Ms. Seller, my goal is literally to just get you the price we promise you and the timeframe we promise you.\nAs long as we get X dollars in your pocket in this amount of days, does it really matter how we cut the\ncake?” (Boiler Room, Jul 15)\n"
+        }
+      ]
+    },
+    "email_refusal": {
+      "replies": [
+        {
+          "catalogId": "email_refusal",
+          "variantId": "owner",
+          "text": "You know what? Some of our sellers have that concern as well, and if you're more comfortable we can have someone bring the offer to you\nWould that work better for you?\nWell I'm afraid we've reached a bit of a standstill. If we can't get you an offer, we can't move forward."
+        }
+      ]
+    },
+    "legal_question": {
+      "replies": [
+        {
+          "catalogId": "legal_question",
+          "variantId": "core",
+          "text": "If they ask legal questions, do not interpret law. You can review the business terms, encourage\nprofessional review, and stay inside what you actually know. (Boiler Room, Jul 10a)\n"
+        }
+      ]
+    }
+  }
+}

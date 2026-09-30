@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   act,
   fireEvent,
@@ -224,6 +225,28 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(tray.parentElement).toBe(panel);
     expect(panel).toContainElement(screen.getByTestId("section-navigation"));
     expect(screen.queryByTestId("coach-recommendations")).toBeNull();
+  });
+
+  it("shows the owner's playbook replies on the objection card, line for line, and nothing for a type without one", async () => {
+    const raw = readFileSync("src/lib/coach/live-coach-objection-replies.json");
+    expect(createHash("sha256").update(raw).digest("hex")).toBe("41993b4ad0362cc6ec57490499697e497479c7295eeb50643ec63ca704abdf9d");
+    const file = JSON.parse(raw.toString("utf8")) as { source: { sha256: string }; sets: Record<string, { replies: { catalogId: string; text: string }[] }> };
+    expect(file.source.sha256).toBe("fe25b222796afd33e8171527789791307a58ae1f85b814320b0f1ed9dc6ecd77");
+    const invisible = /[\s\u200b\u200c\u200d\ufeff]/g;
+    const visibleLines = (text: string) => text.split("\n").filter((line) => line.replace(invisible, "") !== "");
+    const base = { type: "objection_prompt", sellerTurn: 1, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64) };
+    render(<ObjectionPromptProvider enabled><Harness {...baseProps()} /></ObjectionPromptProvider>);
+    await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());
+    broadcast({ ...base, objectionId: "price_pushback", label: "Offered-price pushback", ts: "2026-09-29T12:00:00Z" });
+    const blocks = () => screen.getAllByTestId("coach-objection-reply").map((block) => [...block.querySelectorAll("p")].map((line) => line.textContent));
+    // Both merged catalog entries, in catalog order, every visible line exactly as written.
+    expect(file.sets.price_pushback.replies.map((reply) => reply.catalogId)).toEqual(["offer_too_low", "counteroffer"]);
+    expect(blocks()).toEqual(file.sets.price_pushback.replies.map((reply) => visibleLines(reply.text)));
+    expect(blocks().flat().join("\n")).toBe(file.sets.price_pushback.replies.flatMap((reply) => visibleLines(reply.text)).join("\n"));
+    broadcast({ ...base, objectionId: "relocation", label: "Housing delay", sellerTurn: 3, ts: "2026-09-29T12:00:10Z" });
+    expect(screen.getByTestId("coach-objection-prompt-label")).toHaveTextContent("Housing delay");
+    expect(screen.queryByTestId("coach-objection-replies")).toBeNull();
+    expect(file.sets.relocation).toBeUndefined();
   });
 
   it("shows the matching sub-type lines, all at once, and replaces them on a later statement", async () => {
