@@ -8,6 +8,7 @@ import {
   type DialpadBrowserSocketEvent,
   type DialpadBrowserSocketMessage,
 } from './browser-session';
+import type { PcmTailReport } from './pcm-audio-worklet';
 
 const ENDPOINT = 'wss://recording.example.test/dialpad-browser-ingest';
 
@@ -346,6 +347,132 @@ describe('Dialpad browser session', () => {
     socket.message(JSON.stringify({ type: 'recording_eof_ack', track: 'tab', epoch: 1, lastSeq: 0 }));
     socket.message(JSON.stringify({ type: 'pcm_eof_drained', track: 'tab', epoch: 1, endSample: 0 }));
     socket.message(JSON.stringify({ type: 'pcm_eof_drained', track: 'mic', epoch: 1, endSample: 0 }));
+  });
+
+  it.each(['timedOut', 'deliveryTimedOut'] as const)('suppresses recording EOF for durable WebM when the %s PCM tail is incomplete', async (timeoutField) => {
+    const socket = new FakeSocket();
+    const originalSend = socket.send.bind(socket);
+    socket.send = (data) => {
+      originalSend(data);
+      if (data instanceof Uint8Array) {
+        const binary = decodeDialpadBrowserBinary(data);
+        if (binary.kind === 'recording') {
+          queueMicrotask(() => socket.message(JSON.stringify({ type: 'recording_chunk_ack', track: binary.track, epoch: 1, seq: binary.sequence, status: 'recorded' })));
+        }
+        return;
+      }
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data) as { type?: string; track?: 'tab' | 'mic'; lastSeq?: number; endSample?: number };
+      if (message.type === 'recording_eof') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'recording_eof_ack', epoch: 1, track: message.track, lastSeq: message.lastSeq })));
+      } else if (message.type === 'pcm_eof') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'pcm_eof_drained', epoch: 1, track: message.track, endSample: message.endSample })));
+      }
+    };
+    const timedOutTail: PcmTailReport = {
+      track: 'tab', epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 0,
+      creditedSamples: 0, uncreditedTailSamples: 0,
+      timedOut: timeoutField === 'timedOut', deliveryTimedOut: timeoutField === 'deliveryTimedOut',
+    };
+    const goodTail: PcmTailReport = {
+      track: 'mic', epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 0,
+      creditedSamples: 0, uncreditedTailSamples: 0,
+    };
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 100,
+      capture: {
+        proof: { handle: 'h', origin: 'https://app.example.test' },
+        start: async (sinks) => {
+          if (!sinks) throw new Error('fake capture requires network sinks');
+          await sinks.onTrackFormat?.(format('tab'));
+          await sinks.onTrackFormat?.(format('mic'));
+          await sinks.onWebmChunk({ track: 'tab', epoch: 1, seq: 0, blob: new Blob(['tab-webm']), byteLength: 8 });
+          await sinks.onWebmChunk({ track: 'mic', epoch: 1, seq: 0, blob: new Blob(['mic-webm']), byteLength: 8 });
+          await sinks.onPcmTail?.(timedOutTail);
+          await sinks.onPcmTail?.(goodTail);
+          return { state: () => 'recording', stop: async () => undefined, dispose: async () => undefined };
+        },
+        dispose: async () => undefined,
+      },
+    });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    await session.stop();
+    const controls = socket.sent
+      .filter((entry): entry is string => typeof entry === 'string')
+      .map((entry) => JSON.parse(entry) as { type?: string; track?: string; reason?: string });
+    expect(controls).toContainEqual({ type: 'capture_interrupted', epoch: 1, track: 'tab', reason: 'capture_sink_failed' });
+    expect(controls.filter((control) => control.type === 'recording_eof').map((control) => control.track)).toEqual(['mic']);
+    expect(controls.filter((control) => control.type === 'pcm_eof').map((control) => control.track)).toEqual(['mic']);
+    expect(session.state()).toBe('stopped');
+  });
+
+  it('waits for a delayed graceful PCM tail before sending EOF for durable WebM', async () => {
+    const socket = new FakeSocket();
+    const originalSend = socket.send.bind(socket);
+    let releaseTail!: () => void;
+    let stopStarted = false;
+    const tailReady = new Promise<void>((resolve) => { releaseTail = resolve; });
+    socket.send = (data) => {
+      originalSend(data);
+      if (data instanceof Uint8Array) {
+        const binary = decodeDialpadBrowserBinary(data);
+        if (binary.kind === 'recording') {
+          queueMicrotask(() => socket.message(JSON.stringify({ type: 'recording_chunk_ack', track: binary.track, epoch: 1, seq: binary.sequence, status: 'recorded' })));
+        }
+        return;
+      }
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data) as { type?: string; track?: 'tab' | 'mic'; lastSeq?: number; endSample?: number };
+      if (message.type === 'recording_eof') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'recording_eof_ack', epoch: 1, track: message.track, lastSeq: message.lastSeq })));
+      } else if (message.type === 'pcm_eof') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'pcm_eof_drained', epoch: 1, track: message.track, endSample: message.endSample })));
+      }
+    };
+    const goodTail = (track: 'tab' | 'mic'): PcmTailReport => ({
+      track, epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0,
+    });
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 100,
+      capture: {
+        proof: { handle: 'h', origin: 'https://app.example.test' },
+        start: async (sinks) => {
+          if (!sinks) throw new Error('fake capture requires network sinks');
+          await sinks.onTrackFormat?.(format('tab'));
+          await sinks.onTrackFormat?.(format('mic'));
+          await sinks.onWebmChunk({ track: 'tab', epoch: 1, seq: 0, blob: new Blob(['tab-webm']), byteLength: 8 });
+          await sinks.onWebmChunk({ track: 'mic', epoch: 1, seq: 0, blob: new Blob(['mic-webm']), byteLength: 8 });
+          return {
+            state: () => 'recording',
+            stop: async () => {
+              stopStarted = true;
+              await tailReady;
+              await sinks.onPcmTail?.(goodTail('tab'));
+              await sinks.onPcmTail?.(goodTail('mic'));
+            },
+            dispose: async () => undefined,
+          };
+        },
+        dispose: async () => undefined,
+      },
+    });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    const stopping = session.stop();
+    await waitUntil(() => stopStarted);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(socket.sent.filter((entry): entry is string => typeof entry === 'string').some((entry) => JSON.parse(entry).type === 'recording_eof')).toBe(false);
+    releaseTail();
+    await stopping;
+    const controls = socket.sent.filter((entry): entry is string => typeof entry === 'string').map((entry) => JSON.parse(entry) as { type?: string; track?: string });
+    expect(controls.filter((control) => control.type === 'recording_eof').map((control) => control.track)).toEqual(['tab', 'mic']);
+    expect(controls.filter((control) => control.type === 'pcm_eof').map((control) => control.track)).toEqual(['tab', 'mic']);
+    expect(session.state()).toBe('stopped');
   });
 
   it('fails closed when a chunk ACK does not arrive before the bounded deadline', async () => {

@@ -180,23 +180,33 @@ describe("stateful Dialpad PCM capture", () => {
   });
 
   it("marks an unacknowledged flush as timed out instead of fabricating counters", async () => {
-    const port = { onmessage: null, postMessage: () => undefined } as unknown as PcmWorkletPort;
-    const context = {
-      sampleRate: 48_000,
-      state: "running",
-      audioWorklet: { addModule: async () => undefined },
-      createMediaStreamSource: () => ({ channelCount: 1, connect: () => undefined, disconnect: () => undefined }),
-      createGain: () => ({ gain: { value: 0 }, connect: () => undefined }),
-      close: async () => undefined,
-    } as unknown as AudioContext;
-    const session = await startPcmWorkletSession({
-      createAudioContext: () => context,
-      createObjectURL: () => "blob:timeout",
-      revokeObjectURL: () => undefined,
-      createNode: () => { announceInputFormat(port); return { port, connect: () => undefined, disconnect: () => undefined } as unknown as AudioWorkletNode; },
-      waitMs: async () => undefined,
-    }, {} as MediaStream, "tab", 5, () => undefined, () => undefined, 1);
-    await expect(session.stop()).resolves.toMatchObject({ timedOut: true, totalInputSamples: 0, creditedSamples: 0 });
+    vi.useFakeTimers();
+    try {
+      const port = { onmessage: null, postMessage: () => undefined } as unknown as PcmWorkletPort;
+      const context = {
+        sampleRate: 48_000,
+        state: "running",
+        audioWorklet: { addModule: async () => undefined },
+        createMediaStreamSource: () => ({ channelCount: 1, connect: () => undefined, disconnect: () => undefined }),
+        createGain: () => ({ gain: { value: 0 }, connect: () => undefined }),
+        close: async () => undefined,
+      } as unknown as AudioContext;
+      const session = await startPcmWorkletSession({
+        createAudioContext: () => context,
+        createObjectURL: () => "blob:timeout",
+        revokeObjectURL: () => undefined,
+        createNode: () => { announceInputFormat(port); return { port, connect: () => undefined, disconnect: () => undefined } as unknown as AudioWorkletNode; },
+      }, {} as MediaStream, "tab", 5, () => undefined, () => undefined, { timeoutMs: 1_000, deliveryTimeoutMs: 2_000 });
+      const stopping = session.stop();
+      let settled = false;
+      void stopping.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(stopping).resolves.toMatchObject({ timedOut: true, totalInputSamples: 0, creditedSamples: 0 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("delivers accepted PCM frames before the tail and bounds a stalled sink", async () => {
@@ -235,6 +245,194 @@ describe("stateful Dialpad PCM capture", () => {
     expect(tail.deliveryTimedOut).toBe(true);
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(order).toEqual(["frame"]);
+  });
+
+  it.each([
+    { label: "waits for a 1.65 second accepted delivery", tailDelayMs: 0, delayedDeliveryMs: 1_650, deliveryTimeoutMs: 2_000, deliveryTimedOut: false },
+    { label: "starts delivery timing at tail receipt", tailDelayMs: 900, delayedDeliveryMs: 1_650, deliveryTimeoutMs: 2_000, deliveryTimedOut: false },
+    { label: "reports a delivery timeout after a stalled delivery exceeds 2 seconds", tailDelayMs: 0, delayedDeliveryMs: 2_100, deliveryTimeoutMs: 2_000, deliveryTimedOut: true },
+    { label: "preserves the original deadline without a delivery option", tailDelayMs: 900, delayedDeliveryMs: 200, deliveryTimeoutMs: undefined, deliveryTimedOut: true },
+  ])("$label after a prompt flush tail", async ({ tailDelayMs, delayedDeliveryMs, deliveryTimeoutMs, deliveryTimedOut }) => {
+    vi.useFakeTimers();
+    try {
+      const workletDrainTimeoutMs = 1_000;
+      const callbackBudgetMs = deliveryTimeoutMs ?? workletDrainTimeoutMs;
+      const callbackCompletionFromDeadlineStartMs = deliveryTimeoutMs === undefined
+        ? tailDelayMs + delayedDeliveryMs
+        : delayedDeliveryMs;
+      if (deliveryTimeoutMs === undefined) expect(tailDelayMs).toBeLessThan(workletDrainTimeoutMs);
+      else expect(delayedDeliveryMs).toBeGreaterThan(workletDrainTimeoutMs);
+      if (deliveryTimedOut) expect(callbackCompletionFromDeadlineStartMs).toBeGreaterThanOrEqual(callbackBudgetMs);
+      else expect(callbackCompletionFromDeadlineStartMs).toBeLessThan(callbackBudgetMs);
+      const failures: Error[] = [];
+      const tails: unknown[] = [];
+      let resolveFrameStarted!: () => void;
+      const frameStarted = new Promise<void>((resolve) => { resolveFrameStarted = resolve; });
+      const port: PcmWorkletPort = {
+        onmessage: null,
+        postMessage: (message) => {
+          if ((message as { type?: string }).type === "flush") {
+            setTimeout(() => port.onmessage?.({ data: { type: "tail", totalInputSamples: 960, creditedSamples: 320, uncreditedTailSamples: 0 } } as MessageEvent), tailDelayMs);
+          }
+        },
+      };
+      const context = {
+        sampleRate: 48_000,
+        state: "running",
+        audioWorklet: { addModule: async () => undefined },
+        createMediaStreamSource: () => ({ channelCount: 1, connect: () => undefined, disconnect: () => undefined }),
+        createGain: () => ({ gain: { value: 0 }, connect: () => undefined }),
+        close: async () => undefined,
+      } as unknown as AudioContext;
+      const session = await startPcmWorkletSession({
+        createAudioContext: () => context,
+        createObjectURL: () => "blob:late-delivery",
+        revokeObjectURL: () => undefined,
+        createNode: () => { announceInputFormat(port); return { port, connect: () => undefined, disconnect: () => undefined } as unknown as AudioWorkletNode; },
+      }, {} as MediaStream, "tab", 9, async () => {
+        resolveFrameStarted();
+        await new Promise<void>((resolve) => setTimeout(resolve, tailDelayMs + delayedDeliveryMs));
+      }, (tail) => { tails.push(tail); }, {
+        timeoutMs: workletDrainTimeoutMs,
+        ...(deliveryTimeoutMs === undefined ? {} : { deliveryTimeoutMs }),
+        startupTimeoutMs: 2_000,
+        onFailure: (error) => failures.push(error),
+      });
+      const samples = new Int16Array(PCM_FRAME_SAMPLES).buffer;
+      port.onmessage?.({ data: { type: "frame", frameIndex: 0, samples } } as MessageEvent);
+      await frameStarted;
+
+      const stopping = session.stop();
+      await vi.advanceTimersByTimeAsync(deliveryTimedOut ? callbackBudgetMs : tailDelayMs + delayedDeliveryMs);
+      const tail = await stopping;
+      expect(tail).toMatchObject({ totalInputSamples: 960, creditedSamples: 320, uncreditedTailSamples: 0 });
+      expect(Boolean(tail.deliveryTimedOut)).toBe(deliveryTimedOut);
+      if (deliveryTimedOut) {
+        expect(failures).toHaveLength(1);
+        expect(failures[0]).toMatchObject({ name: "TimeoutError" });
+        expect(tails).toEqual([]);
+        // The callback completes after its configured delivery budget, so the
+        // late tail is suppressed rather than reported as clean.
+        await vi.advanceTimersByTimeAsync(tailDelayMs + delayedDeliveryMs - callbackBudgetMs);
+        await Promise.resolve();
+        expect(tails).toEqual([]);
+      } else {
+        expect(failures).toEqual([]);
+        expect(tails).toHaveLength(1);
+        expect(tails[0]).toMatchObject({ totalInputSamples: 960, creditedSamples: 320, uncreditedTailSamples: 0 });
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("surfaces an accepted callback rejection without publishing a clean tail", async () => {
+    const failures: Error[] = [];
+    const tails: unknown[] = [];
+    const port: PcmWorkletPort = {
+      onmessage: null,
+      postMessage: (message) => {
+        if ((message as { type?: string }).type === "flush") {
+          port.onmessage?.({ data: { type: "tail", totalInputSamples: 960, creditedSamples: 320, uncreditedTailSamples: 0 } } as MessageEvent);
+        }
+      },
+    };
+    const context = {
+      sampleRate: 48_000,
+      state: "running",
+      audioWorklet: { addModule: async () => undefined },
+      createMediaStreamSource: () => ({ channelCount: 1, connect: () => undefined, disconnect: () => undefined }),
+      createGain: () => ({ gain: { value: 0 }, connect: () => undefined }),
+      close: async () => undefined,
+    } as unknown as AudioContext;
+    const session = await startPcmWorkletSession({
+      createAudioContext: () => context,
+      createObjectURL: () => "blob:rejected-delivery",
+      revokeObjectURL: () => undefined,
+      createNode: () => { announceInputFormat(port); return { port, connect: () => undefined, disconnect: () => undefined } as unknown as AudioWorkletNode; },
+    }, {} as MediaStream, "tab", 10, () => { throw new Error("network sink rejected"); }, (tail) => { tails.push(tail); }, { timeoutMs: 1_000, deliveryTimeoutMs: 2_000, onFailure: (error) => failures.push(error) });
+    const samples = new Int16Array(PCM_FRAME_SAMPLES).buffer;
+    port.onmessage?.({ data: { type: "frame", frameIndex: 0, samples } } as MessageEvent);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const tail = await session.stop();
+    expect(tail.deliveryTimedOut).toBeUndefined();
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.message).toContain("network sink rejected");
+    expect(tails).toEqual([]);
+  });
+
+  it("reports delivery timeout when the tail callback itself stalls after publication", async () => {
+    vi.useFakeTimers();
+    try {
+      const failures: Error[] = [];
+      const tails: unknown[] = [];
+      const port: PcmWorkletPort = {
+        onmessage: null,
+        postMessage: (message) => {
+          if ((message as { type?: string }).type === "flush") {
+            port.onmessage?.({ data: { type: "tail", totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 } } as MessageEvent);
+          }
+        },
+      };
+      const context = {
+        sampleRate: 48_000,
+        state: "running",
+        audioWorklet: { addModule: async () => undefined },
+        createMediaStreamSource: () => ({ channelCount: 1, connect: () => undefined, disconnect: () => undefined }),
+        createGain: () => ({ gain: { value: 0 }, connect: () => undefined }),
+        close: async () => undefined,
+      } as unknown as AudioContext;
+      const session = await startPcmWorkletSession({
+        createAudioContext: () => context,
+        createObjectURL: () => "blob:stalled-tail",
+        revokeObjectURL: () => undefined,
+        createNode: () => { announceInputFormat(port); return { port, connect: () => undefined, disconnect: () => undefined } as unknown as AudioWorkletNode; },
+      }, {} as MediaStream, "tab", 12, () => undefined, async (tail) => {
+        tails.push(tail);
+        await new Promise<void>((resolve) => setTimeout(resolve, 2_100));
+      }, { timeoutMs: 1_000, deliveryTimeoutMs: 2_000, onFailure: (error) => failures.push(error) });
+      const stopping = session.stop();
+      await vi.advanceTimersByTimeAsync(2_000);
+      const tail = await stopping;
+      expect(tail).toMatchObject({ deliveryTimedOut: true, totalInputSamples: 0, creditedSamples: 0 });
+      expect(tails).toHaveLength(1);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toMatchObject({ name: "TimeoutError" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("freezes callback admission after a tail and makes repeated stop idempotent", async () => {
+    let frameCalls = 0;
+    const tails: unknown[] = [];
+    const port: PcmWorkletPort = {
+      onmessage: null,
+      postMessage: () => undefined,
+    };
+    const context = {
+      sampleRate: 48_000,
+      state: "running",
+      audioWorklet: { addModule: async () => undefined },
+      createMediaStreamSource: () => ({ channelCount: 1, connect: () => undefined, disconnect: () => undefined }),
+      createGain: () => ({ gain: { value: 0 }, connect: () => undefined }),
+      close: async () => undefined,
+    } as unknown as AudioContext;
+    const session = await startPcmWorkletSession({
+      createAudioContext: () => context,
+      createObjectURL: () => "blob:frozen-after-tail",
+      revokeObjectURL: () => undefined,
+      createNode: () => { announceInputFormat(port); return { port, connect: () => undefined, disconnect: () => undefined } as unknown as AudioWorkletNode; },
+    }, {} as MediaStream, "mic", 11, () => { frameCalls += 1; }, (tail) => { tails.push(tail); }, { timeoutMs: 1_000, deliveryTimeoutMs: 2_000 });
+    port.onmessage?.({ data: { type: "tail", totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 } } as MessageEvent);
+    port.onmessage?.({ data: { type: "frame", frameIndex: 0, samples: new Int16Array(PCM_FRAME_SAMPLES).buffer } } as MessageEvent);
+    await Promise.resolve();
+    expect(frameCalls).toBe(0);
+    const firstStop = session.stop();
+    const secondStop = session.stop();
+    const firstTail = await firstStop;
+    expect(await secondStop).toBe(firstTail);
+    expect(tails).toHaveLength(1);
   });
 
   it("bounds startup and releases context and object URL on a hung addModule", async () => {

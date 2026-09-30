@@ -4,6 +4,7 @@ import {
   type PcmFrame,
   type PcmTailReport,
   type PcmTrack,
+  type PcmWorkletStartOptions,
   startPcmWorkletSession,
   type PcmWorkletSession,
 } from "./pcm-audio-worklet";
@@ -342,7 +343,7 @@ export type BrowserCaptureRuntime = {
   readonly createMediaStream: (tracks: readonly MediaStreamTrack[]) => MediaStream;
   readonly supportsMediaRecorder?: (mimeType: string) => boolean;
   readonly createRecorder: (stream: MediaStream, mimeType?: string) => MediaRecorderLike;
-  readonly createPcmSession?: (stream: MediaStream, track: PcmTrack, epoch: number, onFrame: (frame: PcmFrame) => void | Promise<void>, onTail: (tail: PcmTailReport) => void | Promise<void>, options?: { readonly signal?: AbortSignal; readonly onFailure?: (error: Error) => void; readonly onTiming?: (record: PcmTimingRecord) => void | Promise<void> }) => Promise<PcmWorkletSession>;
+  readonly createPcmSession?: (stream: MediaStream, track: PcmTrack, epoch: number, onFrame: (frame: PcmFrame) => void | Promise<void>, onTail: (tail: PcmTailReport) => void | Promise<void>, options?: Pick<PcmWorkletStartOptions, "signal" | "onFailure" | "onTiming" | "deliveryTimeoutMs">) => Promise<PcmWorkletSession>;
 };
 
 function browserRuntime(): BrowserCaptureRuntime {
@@ -400,6 +401,7 @@ export type ActiveDialpadCapture = {
 
 export const DEFAULT_LOCAL_SPOOL_MAX_BYTES = 16 * MAX_MEDIA_CHUNK_BYTES;
 export const DEFAULT_LOCAL_SPOOL_MAX_MS = 120_000;
+const AUTHENTICATED_PCM_DELIVERY_TIMEOUT_MS = 2_000;
 
 // Chrome otherwise excludes the requesting tab from its chooser. These hints
 // offer the tab; Capture Handle verification below still proves its identity.
@@ -841,7 +843,7 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
           fail(new BrowserCaptureError(error.name === "TimeoutError" ? "timeout" : "sink_failure", error.message));
         };
         const startPcm = async (stream: MediaStream, pcmTrack: PcmTrack): Promise<PcmWorkletSession | null> => {
-          const session = await runtime.createPcmSession!(stream, pcmTrack, epoch, emitPcmFrame, emitPcmTail, { signal: startupAbort.signal, onFailure: pcmFailure, onTiming: deliverTiming });
+          const session = await runtime.createPcmSession!(stream, pcmTrack, epoch, emitPcmFrame, emitPcmTail, { signal: startupAbort.signal, onFailure: pcmFailure, onTiming: deliverTiming, deliveryTimeoutMs: AUTHENTICATED_PCM_DELIVERY_TIMEOUT_MS });
           if (stopRequested || failed || disposed) {
             await session.stop();
             return null;

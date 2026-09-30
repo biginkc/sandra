@@ -38,8 +38,9 @@ class FakeStream {
 class FakeRecorder extends EventTarget implements MediaRecorderLike {
   state = "inactive";
   startCalls = 0;
+  timeslices: (number | undefined)[] = [];
   constructor(private readonly finalBlob: Blob | null = null, private readonly delayedFinal = false) { super(); }
-  start() { this.state = "recording"; this.startCalls += 1; }
+  start(timeslice?: number) { this.state = "recording"; this.startCalls += 1; this.timeslices.push(timeslice); }
   emit(blob: Blob) { this.dispatchEvent(Object.assign(new Event("dataavailable"), { data: blob })); }
   stop() {
     this.state = "inactive";
@@ -95,7 +96,7 @@ function realPcmFactory(nodes: PcmWorkletPort[], timeoutMs = 20): NonNullable<Br
         queueMicrotask(() => port.onmessage?.({ data: { type: "input-format", inputChannels: 1 } } as MessageEvent));
         return { port, connect: () => undefined, disconnect: () => undefined } as unknown as AudioWorkletNode;
       },
-    }, stream, track, epoch, onFrame, onTail, { ...options, timeoutMs, startupTimeoutMs: timeoutMs });
+    }, stream, track, epoch, onFrame, onTail, { ...options, timeoutMs, deliveryTimeoutMs: timeoutMs, startupTimeoutMs: timeoutMs });
   };
 }
 
@@ -251,10 +252,11 @@ describe("MediaRecorderCollector", () => {
     const recorder = new FakeRecorder(new Blob([final]), true);
     const chunks: { seq: number; blob: Blob }[] = [];
     let requestedMimeType: string | undefined;
-    const collector = new MediaRecorderCollector({ track: "tab", stream: {} as MediaStream, createRecorder: (_stream, mimeType) => { requestedMimeType = mimeType; return recorder; }, onChunk: (chunk) => { chunks.push({ seq: chunk.seq, blob: chunk.blob }); }, stopTimeoutMs: 100, finalizationWaitMs: 10 });
+    const collector = new MediaRecorderCollector({ track: "tab", stream: {} as MediaStream, createRecorder: (_stream, mimeType) => { requestedMimeType = mimeType; return recorder; }, onChunk: (chunk) => { chunks.push({ seq: chunk.seq, blob: chunk.blob }); }, timesliceMs: 5_000, stopTimeoutMs: 100, finalizationWaitMs: 10 });
     collector.start(4);
     recorder.emit(new Blob([first]));
     await collector.stop();
+    expect(recorder.timeslices).toEqual([5_000]);
     expect(chunks.map((chunk) => chunk.seq)).toEqual([0, 1, 2, 3]);
     const bytes = new Uint8Array(await new Blob(chunks.map((chunk) => chunk.blob)).arrayBuffer());
     const expected = new Uint8Array(first.length + final.length);
@@ -268,6 +270,26 @@ describe("MediaRecorderCollector", () => {
     expect(digest(bytes)).toBe(digest(expected));
     expect(collector.state).toBe("stopped");
     expect(requestedMimeType).toBe(MEDIA_RECORDER_MIME_TYPE);
+  });
+
+  it("keeps the final short chunk emitted by an explicit 5 second timeslice recorder", async () => {
+    const recorder = new FakeRecorder(new Blob(["final-short"]));
+    const chunks: { seq: number; blob: Blob }[] = [];
+    const collector = new MediaRecorderCollector({
+      track: "tab",
+      stream: {} as MediaStream,
+      createRecorder: () => recorder,
+      onChunk: (chunk) => { chunks.push({ seq: chunk.seq, blob: chunk.blob }); },
+      timesliceMs: 5_000,
+      finalizationWaitMs: 0,
+    });
+    collector.start(1);
+    recorder.emit(new Blob(["periodic"]));
+    await collector.stop();
+    expect(recorder.timeslices).toEqual([5_000]);
+    expect(await Promise.all(chunks.map(async ({ seq, blob }) => `${seq}:${await blob.text()}`))).toEqual(["0:periodic", "1:final-short"]);
+    expect(chunks[1]?.blob.size).toBe("final-short".length);
+    expect(collector.state).toBe("stopped");
   });
 
   it("starts a fresh recorder and sequence for each epoch", async () => {
@@ -308,6 +330,7 @@ describe("MediaRecorderCollector", () => {
         calls.push(chunk.seq);
         if (chunk.seq === 0) await stalled;
       },
+      timesliceMs: 5_000,
       stopTimeoutMs: 10,
       finalizationWaitMs: 0,
     });
@@ -368,9 +391,11 @@ describe("Dialpad capture preparation", () => {
     const micAudio = new FakeTrack();
     const recorders = [new FakeRecorder(), new FakeRecorder()];
     let recorderIndex = 0;
-    const createPcmSession = vi.fn(async (_stream: MediaStream, track: "tab" | "mic", epoch: number, _onFrame: unknown, _onTail: unknown) => {
+    const pcmOptions: { deliveryTimeoutMs?: number }[] = [];
+    const createPcmSession = vi.fn(async (_stream: MediaStream, track: "tab" | "mic", epoch: number, _onFrame: unknown, _onTail: unknown, options?: { deliveryTimeoutMs?: number }) => {
       void _onFrame;
       void _onTail;
+      pcmOptions.push(options ?? {});
       return { sourceSampleRateHz: 48_000, inputChannels: 1, stop: async () => ({ track, epoch, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 }) };
     });
     const prepared = await prepareDialpadBrowserCapture({ proof: { handle: "tab-handle", origin: "https://sandra.example" }, runtime: runtime(mediaStream(video, tabAudio), new FakeStream([], [micAudio]) as unknown as MediaStream, () => recorders[recorderIndex++]!, createPcmSession) });
@@ -378,6 +403,7 @@ describe("Dialpad capture preparation", () => {
     const active = await prepared.start({ onWebmChunk: vi.fn(), onPcmFrame: vi.fn() });
     expect(recorderIndex).toBe(2);
     expect(createPcmSession).toHaveBeenCalledTimes(2);
+    expect(pcmOptions.map((options) => options.deliveryTimeoutMs)).toEqual([2_000, 2_000]);
     await active.stop();
     await active.dispose();
     await prepared.dispose();
