@@ -324,6 +324,7 @@ function BehaviorHarness() {
       replayAcceptanceConversation,
       measureAcceptancePrompt,
       newerObjectionPrompt: () => emitAcceptancePrompt("Timing concern", 4, "2026-09-29T12:10:10.000Z"),
+      afterDismissObjectionPrompt: () => emitAcceptancePrompt("Timing concern", 5, "2026-09-29T12:10:10.500Z"),
       motivationPrompt: () => emitSyntheticCoachBroadcast({
         type: "motivation_prompt", label: "Motivation", sellerTurn: 4,
         classifierModel: "jev-synthetic", questionsSha256: "a".repeat(64),
