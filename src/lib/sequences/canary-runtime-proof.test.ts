@@ -127,6 +127,7 @@ describe("canary runtime proof", () => {
         status: "in_progress", run_attempt: 1, event: "schedule",
       }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ workflow_runs: [], total_count: 0 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ workflow_runs: [], total_count: 0 }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ deploymentId, commitSha }), {
         status: 200, headers: { "Cache-Control": "no-store" },
       }));
@@ -144,7 +145,7 @@ describe("canary runtime proof", () => {
     await expect(assertCanarySendBinding(client as never, {
       propertyId: "fixture-property", body: "PROD-SMOKE", enrollmentId: "enr",
     })).resolves.toBeUndefined();
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
   it("rejects when the send deadline passes during network checks", async () => {

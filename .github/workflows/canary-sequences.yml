@@ -21,9 +21,16 @@ permissions:
 # Cost: one Sendillo outbound SMS per enabled run.
 # Dispatch guard requires SEQUENCE_CANARY_USER_ID, SEQUENCE_CANARY_PROPERTY_ID,
 # and SEQUENCE_CANARY_CONTACT_ID in BOTH GitHub secrets and Vercel production env.
-# A non-successful completed full run latches future sends. An operator must
-# review it and set SEQUENCE_CANARY_FAILURE_ACK_RUN_ID to that run's ID to resume.
-# This workflow and the app only READ the variable; neither can acknowledge it.
+# Every non-successful full run since the last clean success, including earlier
+# attempts, needs acknowledgement. Find IDs with:
+# gh run list --workflow canary-sequences.yml
+# Set the comma-separated repository variable with:
+# gh variable set SEQUENCE_CANARY_FAILURE_ACK_RUN_ID --body "<id>[,<id>]" -R biginkc/sandra
+# UI: Settings > Secrets and variables > Actions > Variables.
+# CANARY_GITHUB_READ_TOKEN: fine-grained PAT for this repository only,
+# Actions: read and Variables: read. This workflow and app only READ the variable.
+# A skipped or cancelled wrong-block needs acknowledgement until live samples
+# confirm the run conclusion and job started_at field values.
 
 on:
   schedule:

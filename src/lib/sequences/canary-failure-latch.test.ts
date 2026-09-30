@@ -85,14 +85,15 @@ describe("canary failure latch", () => {
     const fetchMock = vi.fn(async (url: string) => new Response(JSON.stringify(
       url.includes("/jobs?") ? { total_count: 1, jobs: [
         { name: "Sequences V1 Prod Canary", status: "completed", conclusion: "skipped", started_at: null },
-      ] } : { total_count: 2, workflow_runs: [
+      ] } : url.endsWith("/actions/runs/99") ?
+        { id: 99, run_attempt: 1, status: "completed" } : { total_count: 2, workflow_runs: [
         { id: 99, run_number: 99, run_attempt: 1, event: "schedule", status: "completed", conclusion: "skipped" },
         { id: 98, run_number: 98, run_attempt: 1, event: "schedule", status: "completed", conclusion: "success" },
       ] },
     )));
     vi.stubGlobal("fetch", fetchMock);
     await expect(assertNoUnacknowledgedCanaryFailure("100", "token")).resolves.toBeUndefined();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
   function mockSkippedRerun(firstConclusion: "failure" | "skipped", ack = "") {
     const fetchMock = vi.fn(async (url: string) => {
@@ -102,6 +103,9 @@ describe("canary failure latch", () => {
       ] }));
       if (url.includes("/attempts/1")) return new Response(JSON.stringify({
         id: 99, run_attempt: 1, status: "completed", conclusion: firstConclusion,
+      }));
+      if (url.endsWith("/actions/runs/99")) return new Response(JSON.stringify({
+        id: 99, run_attempt: 2, status: "completed",
       }));
       if (url.includes("/jobs?")) return new Response(JSON.stringify({ total_count: 1, jobs: [
         { name: "Sequences V1 Prod Canary", status: "completed", conclusion: "skipped", started_at: null },
@@ -149,7 +153,9 @@ describe("canary failure latch", () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(
       url.includes("/jobs?") ? { total_count: 1, jobs: [
         { name: "Sequences V1 Prod Canary", status: "completed", conclusion: "skipped", started_at: "2026-09-30T14:17:00Z" },
-      ] } : url.includes("FAILURE_ACK_RUN_ID") ? { value: "" } : { total_count: 1, workflow_runs: [
+      ] } : url.endsWith("/actions/runs/99") ?
+        { id: 99, run_attempt: 1, status: "completed" } :
+        url.includes("FAILURE_ACK_RUN_ID") ? { value: "" } : { total_count: 1, workflow_runs: [
         { id: 99, run_number: 99, run_attempt: 1, event: "schedule", status: "completed", conclusion: "skipped" },
       ] },
     ))));
@@ -180,6 +186,52 @@ describe("canary failure latch", () => {
     ))));
     await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
       .rejects.toThrow(/ambiguous mode/);
+  });
+  it("reports a pending full run as unresolved", async () => {
+    mockRuns([run(99, "pending", null)]);
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+      .rejects.toThrow(/unresolved/);
+  });
+  it("blocks when attempt 1 changes to attempt 2 after its jobs read", async () => {
+    const fetchMock = vi.fn(async (url: string) => new Response(JSON.stringify(
+      url.includes("/attempts/1/jobs") ? { total_count: 1, jobs: [
+        { name: "Sequences V1 Prod Canary", status: "completed", conclusion: "skipped", started_at: null },
+      ] } : url.endsWith("/actions/runs/99") ? run(99, "completed", "skipped", 2) :
+        { workflow_runs: [run(99, "completed", "skipped"), run(98, "completed", "success")], total_count: 2 },
+    )));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+      .rejects.toThrow(/history unavailable|ambiguous/);
+    expect(fetchMock.mock.calls.some(([url]) => url.includes("/attempts/1/jobs"))).toBe(true);
+    expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/actions/runs/99"))).toBe(true);
+  });
+  it("blocks when a run is inserted between paginated reads", async () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => run(200 - index, "completed", "success"));
+    let pageOneReads = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.includes("&page=1")) {
+        pageOneReads++;
+        return new Response(JSON.stringify({ workflow_runs: pageOneReads === 1 ? firstPage :
+          [run(201, "completed", "success"), ...firstPage.slice(0, 99)], total_count: pageOneReads === 1 ? 101 : 102 }));
+      }
+      return new Response(JSON.stringify({ workflow_runs: [run(100, "completed", "success")], total_count: 101 }));
+    }));
+    await expect(assertNoUnacknowledgedCanaryFailure("300", "token"))
+      .rejects.toThrow(/history unavailable|ambiguous/);
+    expect(pageOneReads).toBe(2);
+  });
+  it("requires every failure since the most recent clean success", async () => {
+    mockRuns([run(11, "completed", "failure"), run(10, "completed", "failure"), run(9, "completed", "success")], "11");
+    await expect(assertNoUnacknowledgedCanaryFailure("12", "token"))
+      .rejects.toThrow(/prior full run 10/);
+  });
+  it("accepts comma-separated acknowledgements for every failure", async () => {
+    mockRuns([run(11, "completed", "failure"), run(10, "completed", "failure"), run(9, "completed", "success")], "10,11");
+    await expect(assertNoUnacknowledgedCanaryFailure("12", "token"))
+      .resolves.toBeUndefined();
+    mockRuns([run(12, "completed", "success"), run(11, "completed", "failure"), run(10, "completed", "failure")]);
+    await expect(assertNoUnacknowledgedCanaryFailure("13", "token"))
+      .resolves.toBeUndefined();
   });
   it("fails closed on lookup error", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network")));
