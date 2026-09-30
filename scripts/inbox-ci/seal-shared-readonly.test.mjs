@@ -39,7 +39,7 @@ async function fixture() {
   const platformRecord = input('platform', 'db-contract', 'pre', 'platform-config.json', platform);
   const output = path.join(os.tmpdir(), `shared-output-${sha}.json`);
   const plans = Object.fromEntries(['privileged','member'].map(role => [role, Object.fromEntries(['first','keyset','null_tail'].map(shape => [shape,{sha256:'a'.repeat(64),messages_scan:'Seq Scan',total_cost:10}]))]));
-  const source = { verdict: 'PASS', target: 'shared-readonly', phase: 'pre', plans, tls:{ssl:true,version:'TLSv1.3',cipher:'test'}, catalog_indexes:{}, items: {}, platform_config: platform, comparisons: { catalog: { verdict: 'PASS', input_sha256: digest(JSON.stringify(catalog)), observed_section_sha256: sections }, platform: { verdict: 'PASS', input_sha256: digest(JSON.stringify(platform)), observed_sha256: platform.sha256 } } };
+  const source = { verdict: 'PASS', target: 'shared-readonly', phase: 'pre', plans, tls:{protocol:'TLSv1.3',cipher:'test',leaf_fingerprint:'AA:'.repeat(31)+'AA',pinned_ca_fingerprint:'80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA',root_in_peer_chain:false,upstream_hop_ssl:{ssl:false,version:null,cipher:null}}, catalog_indexes:{}, items: {}, platform_config: platform, comparisons: { catalog: { verdict: 'PASS', input_sha256: digest(JSON.stringify(catalog)), observed_section_sha256: sections }, platform: { verdict: 'PASS', input_sha256: digest(JSON.stringify(platform)), observed_sha256: platform.sha256 } } };
   const args = { repo, sha, phase: 'pre', output, catalogRecord, platformRecord };
   const save = () => writeFileSync(output, JSON.stringify(source)); save();
   return { args, source, save, repo, root };

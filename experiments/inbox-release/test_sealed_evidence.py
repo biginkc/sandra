@@ -79,7 +79,7 @@ class SealedEvidenceTests(unittest.TestCase):
         raw = {
             "verdict": "PASS", "target": "shared-readonly", "phase": "pre",
             "plans": {role: {shape: plan for shape in plan_contract["shapes"]} for role in plan_contract["roles"]},
-            "tls": {"ssl": True, "version": "TLSv1.3", "cipher": "TLS_AES_256_GCM_SHA384"},
+            "tls": {"protocol": "TLSv1.3", "cipher": "TLS_AES_256_GCM_SHA384", "leaf_fingerprint": "AA:" * 31 + "AA", "pinned_ca_fingerprint": "80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA", "root_in_peer_chain": False, "upstream_hop_ssl": {"ssl": False, "version": None, "cipher": None}},
             "catalog_indexes": {"messages_pkey": {"relation": "messages", "valid": True}},
             "platform_config": platform, "items": {},
             "comparisons": {
@@ -233,7 +233,7 @@ class SealedEvidenceTests(unittest.TestCase):
                 plan = {"sha256": "a" * 64, "messages_scan": "Seq Scan", "total_cost": 10}
                 output = {"verdict": "PASS", "target": "shared-test", "phase": phase, "source_output_sha256": "a" * 64,
                           "plans": {role: {shape: plan for shape in evidence.PLAN_SHAPES} for role in evidence.PLAN_ROLES},
-                          "tls": {"ssl": True, "version": "TLSv1.3", "cipher": "fixture"}, "catalog_indexes_sha256": "a" * 64,
+                          "tls": {"protocol": "TLSv1.3", "cipher": "fixture", "leaf_fingerprint": "AA:" * 31 + "AA", "pinned_ca_fingerprint": "80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA", "root_in_peer_chain": False, "upstream_hop_ssl": None}, "catalog_indexes_sha256": "a" * 64,
                           "comparisons": {"catalog": {"verdict": "PASS", "input_sha256": inputs["catalog_record"]["sha256"], "observed_section_sha256": self.catalog_config()["section_sha256"]}, "platform": {"verdict": "PASS", "input_sha256": inputs["platform_record"]["sha256"], "observed_sha256": platform_data["sha256"]}}, "items": {}}
                 artifact.unlink()
                 manifest["artifacts"] = {"readonly.json": hashlib.sha256(json.dumps(output).encode()).hexdigest()}

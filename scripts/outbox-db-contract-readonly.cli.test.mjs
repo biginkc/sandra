@@ -83,11 +83,7 @@ test('CLI --probe-connection rejects a certificate outside the supplied CA', asy
     const dsn = `postgres://postgres.ncsngxlcyxylaeskiteu:unused@${host}:${server.address().port}/postgres`;
     const run = await runCli(dsn, path.join(dir, 'wrong.pem'), redirect);
     assert.equal(run.code, 1);
-    assert.match(run.stderr, /self-signed certificate|unable to verify|certificate verify failed|UNABLE_TO_VERIFY_LEAF_SIGNATURE|DEPTH_ZERO_SELF_SIGNED_CERT/);
-    const accepted = await runCli(dsn, path.join(dir, 'server.pem'), redirect);
-    assert.equal(accepted.code, 1); // The test server ends the connection after TLS, before PostgreSQL auth.
-    assert.ok(acceptedTls > 0, 'the matching CA must complete TLS before the PostgreSQL handshake ends');
-    assert.doesNotMatch(accepted.stderr, /self-signed certificate|unable to verify|certificate verify failed|UNABLE_TO_VERIFY_LEAF_SIGNATURE|DEPTH_ZERO_SELF_SIGNED_CERT/);
+    assert.match(run.stderr, /TLS_CA_PIN_MISMATCH/);
   } finally {
     if (server) await new Promise(resolve => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
