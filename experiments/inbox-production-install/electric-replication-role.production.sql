@@ -4,6 +4,15 @@
 -- SCRAM-SHA-256 verifier from stdin, writes the psql \set directives to the
 -- same stdin stream, and includes this file with \i. Never pass a role
 -- password in argv, -v, or as plaintext.
+-- Table-ownership assumption: the executor must own inbox_bridge.summaries.
+-- This packet changes that table's replica identity and adds it to a
+-- publication, both of which are ownership operations.
+--
+-- Electric's manual-publication contract requires REPLICATION and SELECT,
+-- not BYPASSRLS: https://electric.ax/docs/sync/guides/postgres-permissions.
+-- This candidate deliberately keeps BYPASSRLS because inbox_bridge.summaries
+-- is RLS-enabled with no policy, so the Electric reader would otherwise see
+-- no rows. Revisit this grant if the table gets a narrowly scoped policy.
 \if :{?project_ref}
 \else
   \echo 'project_ref is required'
@@ -29,9 +38,19 @@ DECLARE
   supplied_ref text := current_setting('sandra.inbox_project_ref');
   connected_ref text := current_setting('sandra.inbox_connection_project_ref');
   verifier text := current_setting('sandra.inbox_electric_verifier');
+  table_owner text;
 BEGIN
   IF current_database() <> 'postgres' THEN
     RAISE EXCEPTION 'production Electric packet must run in database postgres';
+  END IF;
+  IF current_setting('server_version_num')::int < 170000 THEN
+    RAISE EXCEPTION 'production Electric packet requires PostgreSQL 17 or newer';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_roles
+    WHERE rolname = current_user AND rolreplication AND rolcreaterole AND rolbypassrls
+  ) THEN
+    RAISE EXCEPTION 'Electric packet executor must have REPLICATION, CREATEROLE, and BYPASSRLS';
   END IF;
   IF connected_ref NOT IN ('ncsngxlcyxylaeskiteu', 'copflsklaefwzipsrjqz') THEN
     RAISE EXCEPTION 'connected database has an unapproved project ref';
@@ -51,12 +70,19 @@ BEGIN
   IF to_regclass('inbox_bridge.summaries') IS NULL THEN
     RAISE EXCEPTION 'inbox_bridge.summaries is not installed';
   END IF;
+  SELECT pg_get_userbyid(c.relowner)
+  INTO table_owner
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'inbox_bridge' AND c.relname = 'summaries';
+  IF table_owner IS DISTINCT FROM current_user THEN
+    RAISE EXCEPTION 'Electric packet executor must own inbox_bridge.summaries (owner %, current_user %)', table_owner, current_user;
+  END IF;
   IF EXISTS (
     SELECT 1 FROM pg_roles
     WHERE rolname = 'inbox_electric_replication'
       AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolcanlogin
-           OR rolreplication OR rolbypassrls OR NOT rolinherit
-           OR rolconnlimit <> 4)
+           OR NOT rolinherit OR rolconnlimit <> 4)
   ) THEN
     RAISE EXCEPTION 'existing Electric role has unexpected authority';
   END IF;

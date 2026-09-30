@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import os
 import shutil
 import subprocess
@@ -13,6 +14,8 @@ RUNNER = HERE / "run-electric-replication-role.py"
 PINNED_CA = HERE / "supabase-prod-ca-2021.crt"
 PROJECT_REF = "ncsngxlcyxylaeskiteu"
 REPLICATION_SLOT = "electric_inbox_test_slot"
+EXECUTOR_ROLE = "inbox_packet_executor"
+NON_OWNER_ROLE = "inbox_teardown_non_owner"
 
 
 def postgres_bin() -> Path | None:
@@ -57,18 +60,20 @@ class ProductionElectricPacketTests(unittest.TestCase):
         self.assertNotIn("DECLARE supplied_ref text := :'project_ref'", source)
         self.assertNotIn("sandra-inbox-http-owned-synthetic-20260917", source)
 
-    def test_teardown_requires_receipt_and_restores_identity_without_dropping_role(self):
+    def test_teardown_requires_receipt_and_drops_role_idempotently(self):
         source = TEARDOWN.read_text()
         self.assertIn("prior_replica_identity is required", source)
         self.assertIn("DROP PUBLICATION electric_publication_inbox", source)
-        self.assertIn("ALTER ROLE inbox_electric_replication NOLOGIN", source)
-        self.assertIn("ALTER ROLE inbox_electric_replication NOLOGIN NOREPLICATION NOBYPASSRLS", source)
+        self.assertIn("DROP ROLE inbox_electric_replication", source)
         self.assertIn("pg_drop_replication_slot", source)
         self.assertIn("ALTER TABLE inbox_bridge.summaries REPLICA IDENTITY DEFAULT;", source)
         self.assertIn("ALTER TABLE inbox_bridge.summaries REPLICA IDENTITY NOTHING;", source)
         self.assertIn("ALTER TABLE inbox_bridge.summaries REPLICA IDENTITY FULL;", source)
         self.assertIn("ALTER TABLE inbox_bridge.summaries REPLICA IDENTITY USING INDEX", source)
-        self.assertNotIn("DROP ROLE inbox_electric_replication", source)
+        self.assertIn("replication_slot_already_absent", source)
+        self.assertIn("publication_already_absent", source)
+        self.assertIn("role_already_absent", source)
+        self.assertLess(source.index("COMMIT;"), source.index("pg_drop_replication_slot"))
         self.assertNotIn("install_fixture", source)
 
     def test_both_packets_execute_on_postgres17_and_restore_recorded_identity(self):
@@ -85,11 +90,30 @@ class ProductionElectricPacketTests(unittest.TestCase):
             subprocess.run([bindir / "initdb", "-D", data, "-A", "trust", "-U", "postgres", "--no-locale"], check=True, capture_output=True, text=True)
             log = root / "postgres.log"
             subprocess.run([bindir / "pg_ctl", "-D", data, "-l", log, "-o", f"-k {socket} -c listen_addresses='' -c wal_level=logical", "-w", "start"], check=True, capture_output=True, text=True)
-            env = {**os.environ, "PGHOST": str(socket), "PGUSER": "postgres", "PGDATABASE": "postgres"}
+            admin_env = {**os.environ, "PGHOST": str(socket), "PGUSER": "postgres", "PGDATABASE": "postgres"}
+            env = {**admin_env, "PGUSER": EXECUTOR_ROLE}
+            non_owner_env = {**admin_env, "PGUSER": NON_OWNER_ROLE}
             try:
-                self._psql(bindir, env, "CREATE SCHEMA inbox_bridge; CREATE TABLE inbox_bridge.summaries (id bigint NOT NULL, body text); CREATE UNIQUE INDEX summaries_replica_identity_idx ON inbox_bridge.summaries (id); ALTER TABLE inbox_bridge.summaries REPLICA IDENTITY USING INDEX summaries_replica_identity_idx;")
-                self._psql(bindir, env, "SET password_encryption = 'scram-sha-256'; CREATE ROLE scram_verifier_source NOLOGIN PASSWORD 'dummy-electric-password';", expect_success=True)
-                scram = self._psql(bindir, env, "SELECT rolpassword FROM pg_authid WHERE rolname = 'scram_verifier_source';", expect_success=True).stdout.strip()
+                self._psql(
+                    bindir,
+                    admin_env,
+                    "CREATE ROLE inbox_packet_executor LOGIN CREATEROLE REPLICATION BYPASSRLS;"
+                    "CREATE ROLE inbox_teardown_non_owner LOGIN CREATEROLE REPLICATION BYPASSRLS;"
+                    "GRANT CONNECT ON DATABASE postgres TO inbox_packet_executor WITH GRANT OPTION;"
+                    "GRANT CREATE ON DATABASE postgres TO inbox_packet_executor;"
+                    "GRANT CONNECT ON DATABASE postgres TO inbox_teardown_non_owner;"
+                    "CREATE SCHEMA inbox_bridge;"
+                    "CREATE TABLE inbox_bridge.summaries (id bigint NOT NULL, body text);"
+                    "CREATE UNIQUE INDEX summaries_replica_identity_idx ON inbox_bridge.summaries (id);"
+                    "ALTER TABLE inbox_bridge.summaries REPLICA IDENTITY USING INDEX summaries_replica_identity_idx;"
+                    "ALTER TABLE inbox_bridge.summaries ENABLE ROW LEVEL SECURITY;"
+                    "ALTER TABLE inbox_bridge.summaries OWNER TO inbox_packet_executor;"
+                    "ALTER SCHEMA inbox_bridge OWNER TO inbox_packet_executor;"
+                    "SET password_encryption = 'scram-sha-256';"
+                    "CREATE ROLE scram_verifier_source NOLOGIN PASSWORD 'dummy-electric-password';",
+                    expect_success=True,
+                )
+                scram = self._psql(bindir, admin_env, "SELECT rolpassword FROM pg_authid WHERE rolname = 'scram_verifier_source';", expect_success=True).stdout.strip()
                 self.assertRegex(scram, r"^SCRAM-SHA-256\$[1-9][0-9]{0,9}:[A-Za-z0-9+/]{22}==\$[A-Za-z0-9+/]{43}=:[A-Za-z0-9+/]{43}=$")
                 mismatch = self._psql(bindir, env, self._packet_input(INSTALL, {"project_ref": PROJECT_REF, "connection_project_ref": "copflsklaefwzipsrjqz", "electric_password": scram}))
                 self.assertNotEqual(mismatch.returncode, 0)
@@ -105,11 +129,37 @@ class ProductionElectricPacketTests(unittest.TestCase):
                 self.assertEqual(self._psql(bindir, env, "SELECT relreplident FROM pg_class WHERE oid='inbox_bridge.summaries'::regclass;", True).stdout.strip(), "f")
                 self.assertEqual(self._psql(bindir, env, "SELECT count(*) FROM pg_publication_tables WHERE pubname='electric_publication_inbox' AND schemaname='inbox_bridge' AND tablename='summaries';", True).stdout.strip(), "1")
                 self._create_slot(bindir, env)
-                self._assert_teardown(bindir, env, scram)
+
+                # A non-owner must fail before BEGIN, leaving every resource
+                # untouched for the real executor.
+                non_owner = self._psql(bindir, non_owner_env, self._teardown_input(), expect_success=False)
+                self.assertIn("must own inbox_bridge.summaries", non_owner.stderr)
+                self._assert_installed_state(bindir, env)
+
+                # Execute exactly through the transactional COMMIT, then model
+                # a process interruption before the non-transactional slot
+                # cleanup. The full packet must recover on the next run.
+                interrupted_packet = root / "teardown-interrupted-after-commit.sql"
+                interrupted_packet.write_text(TEARDOWN.read_text().split("\nCOMMIT;", 1)[0] + "\nCOMMIT;\n")
+                partial = self._psql(bindir, env, self._packet_input(interrupted_packet, self._teardown_values()), expect_success=True)
+                self.assertEqual(partial.stdout.strip(), "")
+                self._assert_transaction_committed_state(bindir, env)
+
+                recovered = self._assert_teardown(bindir, env, scram)
+                recovered_receipt = json.loads(recovered.stdout)
+                self.assertTrue(recovered_receipt["replication_slot_dropped"])
                 self._assert_teardown_state(bindir, env)
 
-                # The first teardown must leave the role in the exact state the
-                # install preflight accepts, so a fresh install can recover.
+                # A completed teardown is a no-op, including an absent slot,
+                # publication, and role, and reports those facts explicitly.
+                noop = self._assert_teardown(bindir, env, scram)
+                noop_receipt = json.loads(noop.stdout)
+                self.assertTrue(noop_receipt["replication_slot_already_absent"])
+                self.assertTrue(noop_receipt["publication_already_absent"])
+                self.assertTrue(noop_receipt["role_already_absent"])
+                self._assert_teardown_state(bindir, env)
+
+                # The next install can recreate the removed role/publication.
                 self._psql(bindir, env, install, expect_success=True)
                 self._create_slot(bindir, env)
                 self._assert_teardown(bindir, env, scram)
@@ -154,15 +204,41 @@ class ProductionElectricPacketTests(unittest.TestCase):
     def _create_slot(self, bindir: Path, env: dict[str, str]) -> None:
         self._psql(bindir, env, f"SELECT pg_create_logical_replication_slot('{REPLICATION_SLOT}', 'pgoutput');", expect_success=True)
 
-    def _assert_teardown(self, bindir: Path, env: dict[str, str], scram: str) -> None:
-        teardown = self._packet_input(TEARDOWN, {"project_ref": PROJECT_REF, "connection_project_ref": PROJECT_REF, "prior_replica_identity": "i", "prior_replica_identity_index": "summaries_replica_identity_idx", "replication_slot_name": REPLICATION_SLOT})
+    def _teardown_values(self) -> dict[str, str]:
+        return {
+            "project_ref": PROJECT_REF,
+            "connection_project_ref": PROJECT_REF,
+            "prior_replica_identity": "i",
+            "prior_replica_identity_index": "summaries_replica_identity_idx",
+            "replication_slot_name": REPLICATION_SLOT,
+        }
+
+    def _teardown_input(self) -> str:
+        return self._packet_input(TEARDOWN, self._teardown_values())
+
+    def _assert_teardown(self, bindir: Path, env: dict[str, str], scram: str):
+        teardown = self._teardown_input()
         result = self._psql(bindir, env, teardown, expect_success=True)
         self.assertNotIn(scram, result.stdout + result.stderr)
+        return result
+
+    def _assert_installed_state(self, bindir: Path, env: dict[str, str]) -> None:
+        self.assertEqual(self._psql(bindir, env, "SELECT count(*) FROM pg_replication_slots WHERE slot_name = 'electric_inbox_test_slot';", True).stdout.strip(), "1")
+        self.assertEqual(self._psql(bindir, env, "SELECT count(*) FROM pg_publication WHERE pubname='electric_publication_inbox';", True).stdout.strip(), "1")
+        self.assertEqual(self._psql(bindir, env, "SELECT count(*) FROM pg_roles WHERE rolname='inbox_electric_replication';", True).stdout.strip(), "1")
+        self.assertEqual(self._psql(bindir, env, "SELECT relreplident FROM pg_class WHERE oid='inbox_bridge.summaries'::regclass;", True).stdout.strip(), "f")
+
+    def _assert_transaction_committed_state(self, bindir: Path, env: dict[str, str]) -> None:
+        self.assertEqual(self._psql(bindir, env, "SELECT count(*) FROM pg_replication_slots WHERE slot_name = 'electric_inbox_test_slot';", True).stdout.strip(), "1")
+        self.assertEqual(self._psql(bindir, env, "SELECT count(*) FROM pg_publication WHERE pubname='electric_publication_inbox';", True).stdout.strip(), "0")
+        self.assertEqual(self._psql(bindir, env, "SELECT count(*) FROM pg_roles WHERE rolname='inbox_electric_replication';", True).stdout.strip(), "0")
+        restored = self._psql(bindir, env, "SELECT c.relreplident::text || ':' || coalesce((SELECT c2.relname FROM pg_index i JOIN pg_class c2 ON c2.oid=i.indexrelid WHERE i.indrelid=c.oid AND i.indisreplident), '') FROM pg_class c WHERE c.oid='inbox_bridge.summaries'::regclass;", True).stdout.strip()
+        self.assertEqual(restored, "i:summaries_replica_identity_idx")
 
     def _assert_teardown_state(self, bindir: Path, env: dict[str, str]) -> None:
         self.assertEqual(self._psql(bindir, env, "SELECT count(*) FROM pg_replication_slots WHERE slot_name = 'electric_inbox_test_slot';", True).stdout.strip(), "0")
         self.assertEqual(self._psql(bindir, env, "SELECT count(*) FROM pg_publication WHERE pubname='electric_publication_inbox';", True).stdout.strip(), "0")
-        self.assertEqual(self._psql(bindir, env, "SELECT rolcanlogin::text || ':' || rolreplication::text || ':' || rolbypassrls::text FROM pg_roles WHERE rolname='inbox_electric_replication';", True).stdout.strip(), "false:false:false")
+        self.assertEqual(self._psql(bindir, env, "SELECT count(*) FROM pg_roles WHERE rolname='inbox_electric_replication';", True).stdout.strip(), "0")
         restored = self._psql(bindir, env, "SELECT c.relreplident::text || ':' || coalesce((SELECT c2.relname FROM pg_index i JOIN pg_class c2 ON c2.oid=i.indexrelid WHERE i.indrelid=c.oid AND i.indisreplident), '') FROM pg_class c WHERE c.oid='inbox_bridge.summaries'::regclass;", True).stdout.strip()
         self.assertEqual(restored, "i:summaries_replica_identity_idx")
 

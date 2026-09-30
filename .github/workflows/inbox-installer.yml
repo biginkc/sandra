@@ -32,7 +32,8 @@ jobs:
           python-version: '3.12'
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: '22'
+          # Keep npm 11's lockfile handling aligned with the committed root lockfile.
+          node-version: '24'
       - name: Install PostgreSQL 17 binaries
         shell: bash
         run: |

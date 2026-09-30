@@ -60,6 +60,8 @@ class ExecutionStackComposeTests(unittest.TestCase):
                     [
                         f"INBOX_RESTATE_PRIVATE_KEY_FILE={key}",
                         "INBOX_ELECTRIC_DATABASE_URL=postgresql://fixture:fixture@127.0.0.1:54322/postgres",
+                        "ELECTRIC_MANUAL_TABLE_PUBLISHING=true",
+                        "ELECTRIC_REPLICATION_STREAM_ID=inbox_release_20260917",
                         f"INBOX_RELEASE_RUNTIME_ENV_FILE={runtime_env}",
                         f"INBOX_RELEASE_PROJECTION_ENV_FILE={projection_env}",
                         "INBOX_RELAY_TOKEN=fixture-token-012345678901234567890123456789",

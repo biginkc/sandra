@@ -49,11 +49,26 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
   canonical schema baseline and full-stack acceptance tests pass.
 - Pin all images, including the final worker; do not auto-update image tags.
   The relay Node22 image index was resolved from Docker's registry on2026-09-13.
-- Electric settings: storage at /var/lib/electric, manual publication, a dedicated
-  replication stream ID, ELECTRIC_LONG_POLL_TIMEOUT=8000ms, query pool2 initially, telemetry off. Scrape a metrics
-  endpoint if enabled; otherwise leave it disabled. Allowlist only the narrow
-  projection with REPLICA IDENTITY FULL. A fixed maximum shape count requires
-  measured generation churn and cleanup before setting its production value.
+- Electric settings: storage at /var/lib/electric, manual publication, the
+  `inbox` replication stream ID, `ELECTRIC_LONG_POLL_TIMEOUT=8000ms`, query
+  pool2 initially, and telemetry off. When the reviewed database packet creates
+  the publication, the Electric service must use the matching settings:
+
+  ```yaml
+  environment:
+    ELECTRIC_MANUAL_TABLE_PUBLISHING: "true"
+    ELECTRIC_REPLICATION_STREAM_ID: inbox
+  ```
+
+  `ELECTRIC_MANUAL_TABLE_PUBLISHING` makes Electric validate the DBA-created
+  publication instead of trying to manage it; `ELECTRIC_REPLICATION_STREAM_ID`
+  makes the expected publication/slot suffix `inbox`. This follows Electric's
+  [PostgreSQL permissions guide](https://electric.ax/docs/sync/guides/postgres-permissions)
+  and [deployment guide](https://electric.ax/docs/sync/guides/deployment).
+  Scrape a metrics endpoint if enabled; otherwise leave it disabled. Allowlist
+  only the narrow projection with REPLICA IDENTITY FULL. A fixed maximum shape
+  count requires measured generation churn and cleanup before setting its
+  production value.
 - Reserve at most8 new direct database connections initially: up to5 for Electric
   management/query/replication,2 operation workers and1 projection maintenance.
   Verify actual connections under load; defaults are not the budget. Existing
@@ -67,6 +82,12 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
 - Store DB credentials and relay secret only in the named services' secret
   variables. Scope the DB role to the required projection or operation wrappers.
   Require verified TLS to Supabase. No administrator database fallback.
+- The production Electric install and teardown packets require the connecting
+  executor to own `inbox_bridge.summaries`; teardown also requires it to own
+  `electric_publication_inbox` while that publication exists. This is a
+  deliberate PostgreSQL ownership assumption because the packet changes replica
+  identity and publication membership. A non-owner must fail the preflight
+  before any transaction or slot cleanup begins.
 - The production Electric role packet is `experiments/inbox-production-install/electric-replication-role.production.sql`.
   Run it only through `run-electric-replication-role.py` with `PGHOST` set to
   the direct host `db.<project-ref>.supabase.co`; the runner compares that
@@ -86,10 +107,12 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
   `psql -v electric_password=...` or put a password in a DSN. Keep the
   preflight receipt's `prior_replica_identity` and
   `prior_replica_identity_index`; teardown requires those exact values and
-  restores them after dropping the inactive replication slot and publication.
+  restores them after the transactional publication/role cleanup and the final
+  inactive replication-slot drop. A rerun accepts and reports an already-absent
+  slot, publication, or role.
   Stop Electric first, then pass the exact slot name from its provenance
-  receipt with `--replication-slot`; the teardown packet rejects active or
-  missing slots and drops only that named slot.
+  receipt with `--replication-slot`; the teardown packet rejects active slots,
+  accepts an absent named slot, and drops only that named slot.
 - Every Restate worker deployment must set
   `INBOX_RESTATE_REGISTRATION_PATH=/runtime/<64-lowercase-hex-image-digest>`.
   The worker serves that versioned path and the registration helper uses it as

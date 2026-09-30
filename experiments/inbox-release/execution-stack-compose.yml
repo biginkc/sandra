@@ -43,8 +43,10 @@ services:
       DATABASE_URL: ${INBOX_ELECTRIC_DATABASE_URL:?set INBOX_ELECTRIC_DATABASE_URL in the ignored runtime env}
       ELECTRIC_INSECURE: "true"
       ELECTRIC_DB_POOL_SIZE: "2"
-      ELECTRIC_MANUAL_TABLE_PUBLISHING: "true"
-      ELECTRIC_REPLICATION_STREAM_ID: inbox_release_20260917
+      # These must match the release packet's manual publication. The
+      # production packet documented in deployment/inbox uses stream ID inbox.
+      ELECTRIC_MANUAL_TABLE_PUBLISHING: ${ELECTRIC_MANUAL_TABLE_PUBLISHING:?set ELECTRIC_MANUAL_TABLE_PUBLISHING in the ignored runtime env}
+      ELECTRIC_REPLICATION_STREAM_ID: ${ELECTRIC_REPLICATION_STREAM_ID:?set ELECTRIC_REPLICATION_STREAM_ID in the ignored runtime env}
       ELECTRIC_LONG_POLL_TIMEOUT: "8000"
       ELECTRIC_MAX_SHAPES: "16"
       ELECTRIC_TELEMETRY: "false"
