@@ -1,0 +1,110 @@
+{
+  "tested_sha": "bae5514f0553094cde6884cf2c28b0f2a7f42cc5",
+  "tier": "pre-merge",
+  "kind": "perf-120k",
+  "phase": "n/a",
+  "target": "disposable",
+  "run_id": "36653805990",
+  "started_at": "2026-09-30T01:10:49Z",
+  "completed_at": "2026-09-30T01:17:11.073942+00:00",
+  "runner_script_sha256": "8f651b8774fb7df37b8faeec8fbf19b0d9003bf376ac6a90b3430fe66b290a1b",
+  "github_run_id": "36653805990",
+  "github_run_attempt": 1,
+  "workflow_path": ".github/workflows/inbox-heavy-verification.yml",
+  "workflow_input_sha": "bae5514f0553094cde6884cf2c28b0f2a7f42cc5",
+  "event": "workflow_dispatch",
+  "head_branch": "main",
+  "lane": "perf-120k",
+  "artifact_name": "heavy-perf-120k-bae5514f0553094cde6884cf2c28b0f2a7f42cc5-36653805990-1",
+  "clean_tree": {
+    "start": true,
+    "end_excluding_run_dir": true,
+    "excluded_path": "docs/performance/inbox-redesign/evidence/bae5514f0553094cde6884cf2c28b0f2a7f42cc5/pre-merge/36653805990"
+  },
+  "exit_status": 0,
+  "verdict": "PASS",
+  "raw_inflated_sha256": {},
+  "artifacts": {
+    "20260930040000_inbox_control_foundation.sql.json": "9b5a1dab308bc8c9dfa431c347f63bd076e18262c4d823b5ac92d7e7aff263ac",
+    "20260930040000_inbox_control_foundation.sql.locks.csv": "2a21f4b9fbd3d6969584dd8d34a705bd3fb2bab020f7abcc739c1525632bfb18",
+    "20260930040000_inbox_control_foundation.sql.psql.log": "245c19f284200737b8ac7d0ad3b44918b76168bd8043eb77855c6754017a7485",
+    "20260930040000_inbox_control_foundation.sql.writer.csv": "a012e21820b1ff0b139b926edde25c4f2e05a192668f9a25d182a5e1d20f1386",
+    "20260930040100_inbox_read_companion.sql.json": "f4b5359c8731134746fa775e6adc0f744ce169aa92625f4071226f90f21ab4f0",
+    "20260930040100_inbox_read_companion.sql.locks.csv": "58a39948aa9fc50ee307d4033275e4d9badcfcb9d932f77ced1220f143cb282f",
+    "20260930040100_inbox_read_companion.sql.psql.log": "76e53d9dcf0763a65201644e10ec307657c4903f70b6f5f44584ba72abd1e440",
+    "20260930040100_inbox_read_companion.sql.writer.csv": "62baa67849ab4404daf0f25ea53c284020b1b98ffe3bc56d4b5016757f1106a4",
+    "20260930040200_inbox_backend_operation_reply.sql.json": "1be1b1f04ee35093c72e4c44913fa0ac01ab5492c80790c4e170359cacd509a8",
+    "20260930040200_inbox_backend_operation_reply.sql.locks.csv": "e3b1aff7bcc5cf47921d19563895f8b40aaddf69e200358f48befe4c4685b6c2",
+    "20260930040200_inbox_backend_operation_reply.sql.psql.log": "afc2e2699edf2028ee4808fc9abded3ce9682449704862dff32df1ab5919644d",
+    "20260930040200_inbox_backend_operation_reply.sql.writer.csv": "1a2d8ff57f97b79e3cc0a9b352025f025886aad823ca8306458765dd82f6418e",
+    "after-relfilenodes.csv": "2060abbd1b9497542f343aa1f96e66d9af2dc7a03eea141cdf5f69c037f6d987",
+    "after-samples.csv": "11bcddd824aa64f76c957bda2fbb940f60e5082fccb7463f08b287d4e4e2f533",
+    "after.log": "37ca4a36e86f824c29eed5bb517cb95e08811515d0ae0e99c9674a53b812c5e9",
+    "analysis.json": "383aa43b1778cee66e35bb4bd489a48f641aed9b3b781ec089cb8d8146c29cfc",
+    "analysis.txt": "383aa43b1778cee66e35bb4bd489a48f641aed9b3b781ec089cb8d8146c29cfc",
+    "baseline-samples.csv": "dce41996d73254127a2502d72fc2d5e4ffcad9ff68571da80ed6973ee51ff4d5",
+    "baseline.log": "a11e09e83441e864ba0e69dd253bb8effe3ea39e189cbec624f183fa9d660191",
+    "before-relfilenodes.csv": "2060abbd1b9497542f343aa1f96e66d9af2dc7a03eea141cdf5f69c037f6d987",
+    "identity.json": "9381d414c8da8ee9a592b203081907bcc6091528cce25d278f59ee6864a90216",
+    "index-builds.log": "400c8ab76096bdb1fae0fff945ce0e12f05567662de7309860e55fa830aa3504",
+    "manifest-6300ba6f-d1b9-449a-b244-6580aa9a856d.json": "44ffa65f7747e1f531f356705102b171c51d1980a8f1330ef7a69f3c95315919",
+    "migration-apply.log": "16176f7e57cdccf28d9d8ee24b097cb320328d22f0537f26541a98c529148ece",
+    "precondition.txt": "da5dd362f185885f23e078c8b0c7e56c0cb9edd97341c2793c3054b240396b2a",
+    "receipt-6300ba6f-d1b9-449a-b244-6580aa9a856d-10000.json": "08bed5d7265486c39489f47794c92e2600a31c3fdec91b3e1956b515335022e2",
+    "receipt-6300ba6f-d1b9-449a-b244-6580aa9a856d-100000.json": "205b613d0cbf6dd2e8becc5f0b7d81b4b598e3a6789a9372670286b7b5267fd2",
+    "receipt-6300ba6f-d1b9-449a-b244-6580aa9a856d-110000.json": "87102c36db39ef7ea9be7b65fc0bc92e215db26f7dd337a74dd4a67470c6a533",
+    "receipt-6300ba6f-d1b9-449a-b244-6580aa9a856d-120000.json": "8b42bbea85042c21be09022407b780ed741244c4f099e13bf30e2c60034698f9",
+    "receipt-6300ba6f-d1b9-449a-b244-6580aa9a856d-20000.json": "0c35d674400560a5c48d1e0d2300fd5e635d893a5dbe85d6e62be2774b3b945a",
+    "receipt-6300ba6f-d1b9-449a-b244-6580aa9a856d-30000.json": "abd7839abf74fc63d04395723001657203f2ef62458afc314e7c08b98b6d98d1",
+    "receipt-6300ba6f-d1b9-449a-b244-6580aa9a856d-40000.json": "c7b5bd462f47d98f4f5ce1edb536a4a297583abf2373e349543a3c245800cd58",
+    "receipt-6300ba6f-d1b9-449a-b244-6580aa9a856d-50000.json": "3562f0d4a69b217067bfb92340fa47db528e31019719b8ea71f67825acaa42fb",
+    "receipt-6300ba6f-d1b9-449a-b244-6580aa9a856d-60000.json": "42812b2f7a9390e90ad32528299e3e4cbacb8c8af9be0486519b75965de2ab48",
+    "receipt-6300ba6f-d1b9-449a-b244-6580aa9a856d-70000.json": "18436df1ef1060ea55346d27f4e0d7438a2e358b4ecd1dc0d7d401fed3e393cb",
+    "receipt-6300ba6f-d1b9-449a-b244-6580aa9a856d-80000.json": "9d731c4fc727b233ec2a0396662457987d48efc0f294083e3d39867fef89667e",
+    "receipt-6300ba6f-d1b9-449a-b244-6580aa9a856d-90000.json": "107fda87794f11cd20c52b3f2542103c7e9b262d88bace436dcff145a3442e19",
+    "seed.log": "aab17b0979c29ff7753f7f94ced5a7eab7afbb7d32a93e5cbd39eb8e6ae77911"
+  },
+  "summary": {
+    "thresholds": {
+      "p95_ms": 5,
+      "p99_ms": 10,
+      "foundation_access_exclusive_upper_ms": 500
+    },
+    "latencies": {
+      "message_insert_inbound": {
+        "n": 2000,
+        "p95_ms": 1.99014,
+        "p99_ms": 2.448771
+      },
+      "message_update_queued_sent": {
+        "n": 2000,
+        "p95_ms": 2.067776,
+        "p99_ms": 2.46132
+      },
+      "message_delete_queued": {
+        "n": 2000,
+        "p95_ms": 1.002972,
+        "p99_ms": 1.266168
+      },
+      "contact_update": {
+        "n": 2000,
+        "p95_ms": 1.604779,
+        "p99_ms": 1.895997
+      },
+      "property_update": {
+        "n": 2000,
+        "p95_ms": 0.87602,
+        "p99_ms": 1.099948
+      },
+      "consent_insert": {
+        "n": 2000,
+        "p95_ms": 1.530437,
+        "p99_ms": 1.962377
+      }
+    },
+    "foundation_file_wall_upper_ms": 282.555494,
+    "foundation_access_exclusive_messages_observed_ms": 227.45839599999996,
+    "informational": true,
+    "production_equivalence": false
+  }
+}

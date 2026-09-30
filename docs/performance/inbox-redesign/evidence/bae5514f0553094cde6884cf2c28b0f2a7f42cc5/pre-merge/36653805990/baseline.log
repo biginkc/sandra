@@ -1,0 +1,6 @@
+baseline message_insert_inbound complete
+baseline message_update_queued_sent complete
+baseline message_delete_queued complete
+baseline contact_update complete
+baseline property_update complete
+baseline consent_insert complete
