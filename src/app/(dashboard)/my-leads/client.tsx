@@ -41,6 +41,9 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const [callRetry,setCallRetry]=useState(0);
   const [dialpadRequest,setDialpadRequest]=useState<DialpadCallRequest|null>(null);
   const dialpadNonce=useRef(0);
+  const onCallRequestHandled=useCallback((nonce:number)=>{
+    setDialpadRequest(current=>current?.nonce===nonce?null:current);
+  },[]);
   const [dialog,setDialog]=useState<{action:MyLeadAction;row:QueueRow;callActivityId?:string|null}|null>(null);
   type Opening = {action:MyLeadAction;row:QueueRow;scope:string;callActivityId?:string|null};
   type CurrentRead = Awaited<ReturnType<typeof loadMyLeads>> | null;
@@ -298,7 +301,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     {error&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{error} <Button variant="outline" onClick={()=>void refresh()}>Refresh</Button></div>}
     {refreshError&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{refreshError} Displayed counts may be out of date. Retrying automatically. <Button variant="outline" onClick={()=>void refresh()}>Retry now</Button> <Button variant="outline" onClick={()=>window.location.reload()}>Reload and reconnect</Button></div>}
     {dialpad&&roster.settings.enabled&&<DialpadPanel bootstrap={dialpad} callRequest={dialpadRequest}
-      onCallRequestHandled={nonce=>setDialpadRequest(current=>current?.nonce===nonce?null:current)}
+      onCallRequestHandled={onCallRequestHandled}
       onRecordingFinalResult={()=>{void refresh(true);}}
       onLogOutcome={(propertyId,callActivityId)=>{if(!rawRow(propertyId)){setError('This lead is no longer in your queue.');return;}action('log-attempt',propertyId,callActivityId);}}/>}
     {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis||!tiles?<p role="status">Loading My Leads…</p>:<>
