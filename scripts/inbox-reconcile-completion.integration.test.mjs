@@ -547,8 +547,10 @@ test("route-edge recovery serializes the source row before an atomic upsert", { 
   await peer.connect();
   let ids;
   let writerPromise;
+  let writerWaitObserved = false;
   try {
     ids = await seed(client);
+    const peerPid = (await peer.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
     await client.query("ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct");
     try {
       await client.query("UPDATE public.messages SET from_address='+18165550999' WHERE id=$1", [ids.message]);
@@ -562,6 +564,14 @@ test("route-edge recovery serializes the source row before an atomic upsert", { 
       onRecoveryRouteEdgeCandidates: async (rows) => {
         if (!rows.some((row) => String(row.id) === ids.message) || writerPromise) return;
         writerPromise = peer.query("UPDATE public.messages SET from_address='not-a-phone' WHERE id=$1", [ids.message]);
+        for (let attempt = 0; attempt < 100; attempt++) {
+          const state = (await client.query("SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1", [peerPid])).rows[0];
+          if (state?.wait_event_type === "Lock") {
+            writerWaitObserved = true;
+            break;
+          }
+          await delay(2);
+        }
         await delay(50);
       },
       onRecoveryBatchCommitted: async ({ kind }) => {
@@ -570,6 +580,7 @@ test("route-edge recovery serializes the source row before an atomic upsert", { 
     });
     assert.equal(result.status, "recovery-written");
     assert.ok(writerPromise, "the writer must overlap the route-edge repair");
+    assert.equal(writerWaitObserved, true, "route-edge repair must hold the source-row lock while the candidate is applied");
     assert.equal((await client.query("SELECT 1 FROM inbox_message_capture.route_edges WHERE org_id=$1 AND message_id=$2", [ids.org, ids.message])).rowCount, 0, "a writer that removes the phone must not leave a stale recovery edge");
   } finally {
     if (writerPromise) await writerPromise.catch(() => {});
