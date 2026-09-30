@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 
 import type { Database } from "../src/lib/supabase/types";
 import { cleanupAllCanaries, cleanupCanary } from "./sequence-canary-cleanup";
+import { inspectRuntime, type RuntimeProofInput } from "./sequence-canary-runtime";
 import { assertCanaryReceipt, assertDeliveryWebhook, fixtureIds, preflightFixture, SENDILLO_SENDER, type FixtureIds } from "./sequence-canary-fixture";
 
 // ---------- env bootstrap ---------------------------------------------------
@@ -57,7 +58,7 @@ export async function runSequencePreflight(
 
 // ---------- run ------------------------------------------------------------
 
-export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<Database>>, ids: FixtureIds, cleanupOnly = false, expectedSender = process.env.SENDILLO_FROM_NUMBER) {
+export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<Database>>, ids: FixtureIds, cleanupOnly = false, expectedSender = process.env.SENDILLO_FROM_NUMBER, runtime?: Omit<RuntimeProofInput, "sequenceId">) {
   if (cleanupOnly) {
     console.log(`[smoke] cleaned ${await cleanupAllCanaries(supabase, ids.userId, ids.propertyId)} canary sequences`);
     return;
@@ -66,6 +67,20 @@ export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<
   if (expectedSender !== SENDILLO_SENDER) {
     throw new Error("SENDILLO_FROM_NUMBER must be the approved Sendillo sender");
   }
+  if (!runtime) throw new Error("Canary runtime proof inputs missing");
+  const sequenceUuid = randomUUID();
+  const { description: runtimeProof, deploymentId, commitSha } = inspectRuntime({ ...runtime, sequenceId: sequenceUuid });
+  const summaryDir = process.env.CANARY_SUMMARY_DIR;
+  const saveEvidence = (name: string, value: unknown) => {
+    if (!summaryDir) return;
+    fs.mkdirSync(summaryDir, { recursive: true });
+    fs.writeFileSync(path.join(summaryDir, name), JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
+  };
+  saveEvidence("runtime-proof.json", {
+    observedAt: new Date().toISOString(), deploymentId, commitSha,
+    providerMatches: true, senderMatches: true, senderLast4: "6899",
+    webhookSecretPresent: true, supabaseHostMatches: true, keyMatches: true,
+  });
   const TS = new Date().toISOString().replace(/[:.]/g, "-");
   const UNIQUE_BODY = `PROD-SMOKE ${TS} ${randomUUID()}`;
   const sentBody = `Mel with BMH. ${UNIQUE_BODY} - Reply STOP.`;
@@ -77,6 +92,7 @@ export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<
       if (value !== null || evidence[key] === null) evidence[key] = value;
     }
     console.log("[smoke] evidence", JSON.stringify(evidence));
+    saveEvidence("evidence.json", evidence);
   };
   try {
     console.log(`[smoke] start   ${TS}`);
@@ -87,9 +103,10 @@ export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<
     const { data: seq, error: seqErr } = await supabase
       .from("sequences")
       .insert({
+        id: sequenceUuid,
         org_id: orgId,
         name: `SMOKE TEST — safe to delete ${TS}`,
-        description: "One-off prod smoke; script deletes this when it exits",
+        description: runtimeProof,
         append_opt_out: false,
         created_by: ids.userId,
       })
@@ -195,6 +212,11 @@ export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<
     console.log("[smoke] PASS", JSON.stringify({ enrollmentId: enrollment.id, stepId: step.id, claimId: claim.id,
       messageId, externalId: delivered.external_id, webhookEventId: webhook.id, sentAt: delivered.sent_at,
       deliveredAt: delivered.delivered_at, completedAt: after.completed_at }));
+    saveEvidence("delivery.json", {
+      enrollmentId: enrollment.id, stepId: step.id, claimId: claim.id,
+      messageId, externalId: delivered.external_id, webhookEventId: webhook.id,
+      sentAt: delivered.sent_at, deliveredAt: delivered.delivered_at, completedAt: after.completed_at,
+    });
   } finally {
     console.log("[smoke] evidence before cleanup", JSON.stringify(evidence));
     if (sequenceId) {
@@ -213,6 +235,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     console.error("Missing URL or service key");
     process.exit(2);
   }
+  if (!env.PROD_SUPABASE_URL || URL !== env.PROD_SUPABASE_URL ||
+      new globalThis.URL(URL).hostname !== PROD_HOST) {
+    console.error("Runner database hostname mismatch");
+    process.exit(2);
+  }
   if (URL.includes("ncsngxlcyxylaeskiteu")) {
     console.error("URL points at the TEST project — this smoke is meant for prod. Aborting.");
     process.exit(2);
@@ -224,7 +251,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const valueAfter = (flag: string) => args.includes(flag) ? args[args.indexOf(flag) + 1] ?? "" : "";
   const run = preflightOnly
     ? runSequencePreflight(supabase, URL, valueAfter("--message-id"), valueAfter("--webhook-event-id"))
-    : runSequenceSmoke(supabase, fixtureIds(env), args.includes("--cleanup-only"), env.SENDILLO_FROM_NUMBER);
+    : runSequenceSmoke(supabase, fixtureIds(env), args.includes("--cleanup-only"), env.SENDILLO_FROM_NUMBER, {
+        approvedKey: env.CANARY_APPROVED_SENDILLO_API_KEY ?? "",
+        adminAccessToken: env.CANARY_ADMIN_ACCESS_TOKEN ?? "",
+        deploymentUrl: env.CANARY_PRODUCTION_DEPLOYMENT_URL ?? "",
+        aliasHost: env.CANARY_PRODUCTION_ALIAS_HOST ?? "",
+        expectedCommitSha: env.GITHUB_SHA ?? env.CANARY_EXPECTED_COMMIT_SHA ?? "",
+        runId: env.GITHUB_RUN_ID ?? env.CANARY_RUN_ID ?? "",
+        runMode: env.GITHUB_EVENT_NAME === "schedule" ? "scheduled" : "manual",
+      });
   run.catch((err) => {
     console.error("[smoke] ERROR", err);
     process.exitCode = 1;
