@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
 import { collect, reconcile, stabilityProbe } from './outbox-db-contract/readonly.mjs';
-import { platformFingerprint, compareObservedPlatform, comparePlatform, NOT_VERIFIED } from './outbox-db-contract/platform.mjs';
+import { platformFingerprint, compareObservedPlatform, comparePlatform, platformVerdict, NOT_VERIFIED } from './outbox-db-contract/platform.mjs';
 import { CATALOG_SECTIONS, hasExactKeys } from './outbox-db-contract/catalog-sections.mjs';
 import { connectionConfig, connectionEvidence, pinnedCa } from './outbox-db-contract/connection.mjs';
 import { catalogIndexes, compareIndexes, comparePlans, planCostRatios } from './outbox-db-contract/plan-contract.mjs';
@@ -121,8 +121,14 @@ export function assertSealedPre({ manifest, sealed, sealedBytes, rawBytes, targe
       sealed.source_output_sha256 !== sha(rawBytes)) throw new Error('PLAN_PRE_NOT_SEALED');
   return sealed;
 }
-const platformSummary = postgrestMajor => `Auth health returned 200 with the publishable key; GoTrue major matched. Our publishable-key PostgREST request was rejected. PostgREST major was ${postgrestMajor === NOT_VERIFIED ? 'NOT_VERIFIED: no PostgREST connection was visible, which does not prove none existed' : 'observed from its connection name and matched'}. Hosted app/SSR/PostgREST behaviour is inferred from same-SHA disposable runs plus catalog and claim-plumbing equality.`;
-export async function main({ argv = args, createClient = config => new Client(config), collectData = collect, readCatalog = catalog } = {}) {
+export const platformSummary = (postgrestMajor, target) => {
+  const observed = postgrestMajor === NOT_VERIFIED
+    ? 'NOT_VERIFIED: no PostgREST connection was visible, which does not prove none existed'
+    : target === 'disposable-readonly' ? 'observed from its HTTP response and SQL connection name and matched' : 'observed from its connection name and matched';
+  if (target === 'disposable-readonly') return `Auth health returned 200 with the publishable key; GoTrue major matched. Our publishable-key PostgREST request returned 200. PostgREST major was ${observed}. Disposable app/SSR/PostgREST behaviour was directly checked by the disposable HTTP/SQL contract.`;
+  return `Auth health returned 200 with the publishable key; GoTrue major matched. Our publishable-key PostgREST request was rejected. PostgREST major was ${observed}. Hosted app/SSR/PostgREST behaviour is inferred from same-SHA disposable runs plus catalog and claim-plumbing equality.`;
+};
+export async function main({ argv = args, createClient = config => new Client(config), makeClientConfig = connectionConfig, collectData = collect, readCatalog = catalog, readConnectionEvidence = connectionEvidence, getPinnedCa = pinnedCa } = {}) {
   const args = argv;
   const dsn = process.env.DATABASE_URL;
   if (!dsn) throw new Error('DATABASE_URL_REQUIRED');
@@ -131,10 +137,10 @@ export async function main({ argv = args, createClient = config => new Client(co
   const hostedReadOnly = ['shared-readonly', 'production'].includes(args.target);
   if (args['probe-connection']) {
     if (!hostedReadOnly || args.phase || args.org) throw new Error('TARGET_REFUSED');
-    const probe = createClient(connectionConfig(args.target, dsn));
+    const probe = createClient(makeClientConfig(args.target, dsn));
     await probe.connect();
     try {
-      const tls = await connectionEvidence(probe, dsn, pinnedCa());
+      const tls = await readConnectionEvidence(probe, dsn, getPinnedCa());
       await probe.query('SET default_transaction_read_only=on');
       await probe.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
       const isolation = (await probe.query('SHOW transaction_isolation')).rows[0].transaction_isolation;
@@ -153,17 +159,17 @@ export async function main({ argv = args, createClient = config => new Client(co
   if (hostedReadOnly && (!args['api-url'] || !args['catalog-compare'] || !args['platform-compare'] || (args.phase === 'post' && (!args['pre-file'] || !args['plan-compare'])))) throw new Error('READ_PRECONDITION_FAILED');
   if (!['pre','post'].includes(args.phase)) throw new Error('PHASE_REQUIRED');
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(args.org ?? '')) throw new Error('ORG_ID_REQUIRED');
-  const client = createClient(connectionConfig(args.target, dsn));
+  const client = createClient(makeClientConfig(args.target, dsn));
   await client.connect();
   try {
     const failures = [];
     const preBytes = args['pre-file'] ? await readFile(args['pre-file']) : null;
     const pre = preBytes ? JSON.parse(preBytes) : null;
     if (pre && (pre.target !== args.target || pre.phase !== 'pre')) throw new Error('PLAN_PRE_TARGET_MISMATCH');
-    const tls = hostedReadOnly ? await connectionEvidence(client, dsn, pinnedCa()) : null;
+    const tls = hostedReadOnly ? await readConnectionEvidence(client, dsn, getPinnedCa()) : null;
     const data = await collectData(client, args.org, { previousIds: pre ? Object.keys(pre.queued.per_row) : [] });
     const major = String(Math.floor(Number((await client.query('SHOW server_version_num')).rows[0].server_version_num) / 10000));
-    const result = { verdict: 'PASS', items: {}, summary: platformSummary(data.postgrest_major), target: args.target, phase: args.phase, ...data, ...(tls ? { tls } : {}) };
+    const result = { verdict: 'PASS', items: {}, summary: platformSummary(data.postgrest_major, args.target), target: args.target, phase: args.phase, ...data, ...(tls ? { tls } : {}) };
     if (args.target === 'production') { result.member_org_count = data.member_orgs.length; delete result.member_orgs; }
     if (args['pre-file']) {
       result.items.queued_invariants = reconcile(pre.queued, data.queued, data.current_status);
@@ -176,12 +182,12 @@ export async function main({ argv = args, createClient = config => new Client(co
         mode: hostedReadOnly ? 'hosted' : 'disposable', postgrestMajor: data.postgrest_major,
       });
       if (pre?.platform_config) compareObservedPlatform(pre.platform_config, result.platform_config);
-      result.summary = platformSummary(result.platform_config.postgrest_major);
+      result.summary = platformSummary(result.platform_config.postgrest_major, args.target);
     }
     if (args['platform-compare']) {
       const bytes = await readFile(args['platform-compare']);
-      comparePlatform(JSON.parse(bytes), result.platform_config);
-      result.comparisons = { ...result.comparisons, platform: { verdict: 'PASS', input_sha256: (await import('node:crypto')).createHash('sha256').update(bytes).digest('hex'), observed_sha256: result.platform_config.sha256 } };
+      const platformComparison = comparePlatform(JSON.parse(bytes), result.platform_config);
+      result.comparisons = { ...result.comparisons, platform: { verdict: platformVerdict(platformComparison.waived_fields), waived_fields: platformComparison.waived_fields, input_sha256: (await import('node:crypto')).createHash('sha256').update(bytes).digest('hex'), observed_sha256: result.platform_config.sha256 } };
     }
     if (args['catalog'] || args['catalog-compare']) {
       result.catalog_fingerprint = await readCatalog(dsn, args.target);

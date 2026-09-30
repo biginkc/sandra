@@ -42,6 +42,7 @@ OPERATOR_LIST = "scripts/inbox-ci/shared-readonly-operators.json"
 PLAN_ROLES = ("privileged", "member")
 PLAN_SHAPES = ("first", "keyset", "null_tail")
 NOT_VERIFIED = "NOT_VERIFIED"
+PLATFORM_FIELDS = ("postgres_major", "postgrest_major", "gotrue_major")
 
 
 class EvidenceError(RuntimeError):
@@ -385,7 +386,7 @@ def _check_shared_readonly(repo: Path, run: dict, selected: dict) -> None:
     if (not isinstance(comparisons, dict) or set(comparisons) != {"catalog", "platform"}
             or any(not isinstance(comparisons.get(label), dict) for label in ("catalog", "platform"))
             or set(comparisons["catalog"]) != {"verdict", "input_sha256", "observed_section_sha256"}
-            or set(comparisons["platform"]) != {"verdict", "input_sha256", "observed_sha256"}):
+            or set(comparisons["platform"]) != {"verdict", "waived_fields", "input_sha256", "observed_sha256"}):
         raise EvidenceError(f"comparison linkage missing: {directory}")
     for label, key, artifact in (("catalog_record", ("pre-merge", "catalog-fingerprint", "n/a", "disposable"), "catalog-pre.json"),
                                  ("platform_record", ("pre-merge", "db-contract", "pre", "disposable"), "platform-config.json")):
@@ -410,24 +411,28 @@ def _check_shared_readonly(repo: Path, run: dict, selected: dict) -> None:
                     or output["comparisons"]["catalog"].get("verdict") != "PASS"):
                 raise EvidenceError(f"catalog mismatch: {directory}")
         else:
-            platform_keys = ("postgres_major", "postgrest_major", "gotrue_major")
+            platform_keys = PLATFORM_FIELDS
             if (not isinstance(data, dict) or set(data) != {*platform_keys, "sha256"}
-                    or any(not isinstance(data[key], str) or (not re.fullmatch(r"[0-9]+", data[key])
-                        and not (key == "postgrest_major" and data[key] == NOT_VERIFIED)) for key in platform_keys)):
+                    or any(not isinstance(data[key], str) or not re.fullmatch(r"[0-9]+", data[key]) for key in platform_keys)):
                 raise EvidenceError(f"invalid consumed platform data: {directory}")
             # platform.mjs hashes JSON.stringify of these fields in this exact insertion order.
             canonical = {key: data[key] for key in platform_keys}
             digest = hashlib.sha256(json.dumps(canonical, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-            if manifest.get("waived_fields") not in ([], ["postgrest_major"]):
+            waived_fields = manifest.get("waived_fields")
+            if waived_fields not in ([], ["postgrest_major"]):
                 raise EvidenceError(f"waived fields mismatch: {directory}")
-            if data["postgrest_major"] == NOT_VERIFIED and manifest["waived_fields"] != ["postgrest_major"]:
+            expected_verdict = "PASS" if not waived_fields else {
+                key: NOT_VERIFIED if key in waived_fields else "PASS" for key in platform_keys
+            }
+            platform_comparison = output["comparisons"]["platform"]
+            if (platform_comparison.get("waived_fields") != waived_fields
+                    or platform_comparison.get("verdict") != expected_verdict):
                 raise EvidenceError(f"waived fields mismatch: {directory}")
-            observed_canonical = {**canonical, "postgrest_major": NOT_VERIFIED} if manifest["waived_fields"] else canonical
+            observed_canonical = {**canonical, "postgrest_major": NOT_VERIFIED} if waived_fields else canonical
             observed_digest = hashlib.sha256(json.dumps(observed_canonical, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
             if (not isinstance(data["sha256"], str) or not HASH.fullmatch(data["sha256"])
                     or data["sha256"] != digest
-                    or output["comparisons"]["platform"].get("verdict") != "PASS"
-                    or output["comparisons"]["platform"].get("observed_sha256") != observed_digest):
+                    or platform_comparison.get("observed_sha256") != observed_digest):
                 raise EvidenceError(f"platform mismatch: {directory}")
 
 

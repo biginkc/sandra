@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CATALOG_SECTIONS, hasExactKeys } from '../outbox-db-contract/catalog-sections.mjs';
 import { ROLES, SHAPE_NAMES } from '../outbox-db-contract/plan-contract.mjs';
-import { NOT_VERIFIED } from '../outbox-db-contract/platform.mjs';
+import { NOT_VERIFIED, PLATFORM_FIELDS, platformVerdict } from '../outbox-db-contract/platform.mjs';
 
 const ROOT = 'docs/performance/inbox-redesign/evidence';
 const REF = 'ncsngxlcyxylaeskiteu';
@@ -70,24 +70,28 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   }
   keys(source.comparisons, ['catalog', 'platform'], 'comparison');
   keys(source.comparisons.catalog, ['verdict', 'input_sha256', 'observed_section_sha256'], 'catalog comparison');
-  keys(source.comparisons.platform, ['verdict', 'input_sha256', 'observed_sha256'], 'platform comparison');
+  keys(source.comparisons.platform, ['verdict', 'waived_fields', 'input_sha256', 'observed_sha256'], 'platform comparison');
   keys(source.platform_config, ['postgres_major', 'postgrest_major', 'gotrue_major', 'sha256'], 'platform config');
   keys(source.items, source.items?.queued_invariants ? ['queued_invariants'] : [], 'items');
-  if (source.comparisons?.catalog?.verdict !== 'PASS' || source.comparisons.catalog.input_sha256 !== catalog.sha256 || source.comparisons?.platform?.verdict !== 'PASS' || source.comparisons.platform.input_sha256 !== platform.sha256) throw new Error('Comparison input linkage mismatch');
+  if (source.comparisons?.catalog?.verdict !== 'PASS' || source.comparisons.catalog.input_sha256 !== catalog.sha256 || source.comparisons.platform.input_sha256 !== platform.sha256) throw new Error('Comparison input linkage mismatch');
   const expectedSections = catalog.data.section_sha256;
   const observedSections = source.comparisons.catalog.observed_section_sha256;
   if (!hasExactKeys(expectedSections, CATALOG_SECTIONS, digest => typeof digest === 'string' && HEX.test(digest)) ||
       !hasExactKeys(observedSections, CATALOG_SECTIONS, digest => typeof digest === 'string' && HEX.test(digest)) ||
       CATALOG_SECTIONS.some(k => observedSections[k] !== expectedSections[k])) throw new Error('Catalog comparison mismatch');
   if (!HEX.test(source.comparisons.platform.observed_sha256)) throw new Error('Platform comparison digest missing');
-  const platformKeys = ['postgres_major', 'postgrest_major', 'gotrue_major'];
+  const platformKeys = PLATFORM_FIELDS;
   keys(platform.data, [...platformKeys, 'sha256'], 'consumed platform');
   const consumedPlatform = Object.fromEntries(platformKeys.map(key => [key, platform.data[key]]));
   if (!HEX.test(platform.data.sha256) || platform.data.sha256 !== hash(JSON.stringify(consumedPlatform))) throw new Error('Consumed platform digest mismatch');
-  if (platformKeys.some(k => !/^[0-9]+$/.test(platform.data[k]) && !(k === 'postgrest_major' && platform.data[k] === NOT_VERIFIED))) throw new Error('Platform comparison mismatch');
+  if (platformKeys.some(k => !/^[0-9]+$/.test(platform.data[k]))) throw new Error('Platform comparison mismatch');
+  const waivedFields = source.comparisons.platform.waived_fields;
+  if (!Array.isArray(waivedFields) || (waivedFields.length !== 0 && JSON.stringify(waivedFields) !== JSON.stringify(['postgrest_major'])) ||
+      JSON.stringify(source.comparisons.platform.verdict) !== JSON.stringify(platformVerdict(waivedFields))) throw new Error('Platform comparison mismatch');
+  const expectedWaivedFields = source.platform_config.postgrest_major === NOT_VERIFIED ? ['postgrest_major'] : [];
+  if (JSON.stringify(waivedFields) !== JSON.stringify(expectedWaivedFields)) throw new Error('Platform comparison mismatch');
   if (platformKeys.some(k => k !== 'postgrest_major' && platform.data[k] !== source.platform_config[k]) ||
-      (source.platform_config.postgrest_major !== NOT_VERIFIED && source.platform_config.postgrest_major !== platform.data.postgrest_major) ||
-      (source.platform_config.postgrest_major === NOT_VERIFIED && !/^[0-9]+$/.test(platform.data.postgrest_major) && platform.data.postgrest_major !== NOT_VERIFIED)) throw new Error('Platform comparison mismatch');
+      (source.platform_config.postgrest_major !== NOT_VERIFIED && source.platform_config.postgrest_major !== platform.data.postgrest_major)) throw new Error('Platform comparison mismatch');
   const observedPlatform = Object.fromEntries(platformKeys.map(key => [key, source.platform_config[key]]));
   if (source.platform_config.sha256 !== hash(JSON.stringify(observedPlatform)) || source.comparisons.platform.observed_sha256 !== source.platform_config.sha256) throw new Error('Observed platform digest mismatch');
   const runId = `shared-readonly-${phase}-${now.toISOString().replace(/[-:.]/g, '').replace('Z', 'Z')}`;
@@ -95,7 +99,7 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   const absolute = path.join(repo, relative);
   const readonly = { verdict: source.verdict, target: 'shared-test', phase, source_output_sha256: hash(readFileSync(output)),
     plans: source.plans, tls: source.tls, catalog_indexes_sha256: hash(Buffer.from(JSON.stringify(source.catalog_indexes))),
-    comparisons: { catalog: { verdict: 'PASS', input_sha256: catalog.sha256, observed_section_sha256: observedSections }, platform: { verdict: 'PASS', input_sha256: platform.sha256, observed_sha256: source.comparisons.platform.observed_sha256 } }, items: {} };
+    comparisons: { catalog: { verdict: 'PASS', input_sha256: catalog.sha256, observed_section_sha256: observedSections }, platform: { verdict: source.comparisons.platform.verdict, waived_fields: waivedFields, input_sha256: platform.sha256, observed_sha256: source.comparisons.platform.observed_sha256 } }, items: {} };
   const queued = source.items?.queued_invariants;
   if (queued) {
     if (typeof queued !== 'object' || Array.isArray(queued) || Object.keys(queued).some(key => !['verdict', 'diff', 'stability_probe'].includes(key)) ||
@@ -114,7 +118,7 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   if (!Array.isArray(scripts) || !scripts.includes(operatorList) || new Set(scripts).size !== scripts.length || scripts.some(script => !/^scripts\/[a-z0-9/.-]+$/.test(script) || script.includes('..'))) throw new Error('Invalid operator list');
   const operator_script_sha256 = Object.fromEntries(scripts.map(script => [script, hash(git(repo, 'show', `${sha}:${script}`))]));
   if (scripts.some(script => operator_script_sha256[script] !== hash(readFileSync(path.join(repo, script))))) throw new Error('Operator script differs from tested SHA');
-  const manifest = { tested_sha: sha, tier: 'pre-merge', kind: 'shared-readonly', phase, target: 'shared-test', verdict: source.verdict, exit_status: 0, run_id: runId, started_at: now.toISOString(), completed_at: now.toISOString(), clean_tree: { start: true, end_excluding_run_dir: true, excluded_path: relative }, artifacts: { 'readonly.json': hash(bytes) }, target_binding: { project_ref: REF, pooler_user: `postgres.${REF}` }, inputs: { catalog_record: { directory: catalog.directory, artifact: catalog.artifact, sha256: catalog.sha256 }, platform_record: { directory: platform.directory, artifact: platform.artifact, sha256: platform.sha256 } }, operator_script_sha256, event: 'operator', workflow_path: '', github_run_id: '', github_run_attempt: '', waived_fields: source.platform_config.postgrest_major === NOT_VERIFIED ? ['postgrest_major'] : [], items: readonly.items };
+  const manifest = { tested_sha: sha, tier: 'pre-merge', kind: 'shared-readonly', phase, target: 'shared-test', verdict: source.verdict, exit_status: 0, run_id: runId, started_at: now.toISOString(), completed_at: now.toISOString(), clean_tree: { start: true, end_excluding_run_dir: true, excluded_path: relative }, artifacts: { 'readonly.json': hash(bytes) }, target_binding: { project_ref: REF, pooler_user: `postgres.${REF}` }, inputs: { catalog_record: { directory: catalog.directory, artifact: catalog.artifact, sha256: catalog.sha256 }, platform_record: { directory: platform.directory, artifact: platform.artifact, sha256: platform.sha256 } }, operator_script_sha256, event: 'operator', workflow_path: '', github_run_id: '', github_run_attempt: '', waived_fields: waivedFields, items: readonly.items };
   mkdirSync(path.dirname(absolute), { recursive: true });
   mkdirSync(absolute, { recursive: false });
   writeFileSync(path.join(absolute, 'readonly.json'), bytes, { flag: 'wx' });
