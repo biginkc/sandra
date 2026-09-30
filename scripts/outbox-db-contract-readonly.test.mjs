@@ -5,8 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { compareSets, reconcile, snapshot, openReadTxn, stabilityProbe, ACTIVE, planSkeleton } from './outbox-db-contract/readonly.mjs';
-import { readonlyGet, comparePlatform, platformFingerprint } from './outbox-db-contract/platform.mjs';
+import { compareSets, reconcile, snapshot, openReadTxn, stabilityProbe, readPostgrestMajor, ACTIVE, planSkeleton } from './outbox-db-contract/readonly.mjs';
+import { readonlyGet, compareObservedPlatform, comparePlatform, platformFingerprint, NOT_VERIFIED } from './outbox-db-contract/platform.mjs';
 import { assertTarget, parseArgs, compareCatalog, assertSealedPre, catalogChildEnv } from './outbox-db-contract-readonly.mjs';
 import { connectionConfig, pinnedCa } from './outbox-db-contract/connection.mjs';
 import { describePlan, comparePlans, catalogIndexes, compareIndexes, OPERATOR_INDEXES, OPERATOR_RELATIONS } from './outbox-db-contract/plan-contract.mjs';
@@ -187,6 +187,24 @@ test('NC-R1/R2 static surface', () => {
   assert.match(ACTIVE,/access_expires_at > now\(\)/);
 });
 test('NC platform major mismatch',()=>fails('major',()=>comparePlatform({postgres_major:'17',postgrest_major:'12',gotrue_major:'2'},{postgres_major:'17',postgrest_major:'13',gotrue_major:'2'}),/PLATFORM_MISMATCH/));
+test('RULING pg_stat_activity outcomes are scoped, strict, and duplicate-tolerant', async () => {
+  let sql;
+  const query = rows => ({ query: async statement => { sql = statement; return { rows }; } });
+  assert.equal(await readPostgrestMajor(query([])), NOT_VERIFIED);
+  assert.equal(await readPostgrestMajor(query([{application_name:'PostgREST 12.2.0'}, {application_name:'PostgREST 12.3.1'}])), '12');
+  await assert.rejects(readPostgrestMajor(query([{application_name:'PostgREST 12.2.0'}, {application_name:'PostgREST 13.0.0'}])), /PLATFORM_AMBIGUOUS/);
+  await assert.rejects(readPostgrestMajor(query([{application_name:'PostgREST 12.2.0'}, {application_name:''}])), /PLATFORM_UNIDENTIFIED/);
+  await assert.rejects(readPostgrestMajor(query([{application_name:null}])), /PLATFORM_UNIDENTIFIED/);
+  assert.match(sql, /usename='authenticator'/);
+  assert.match(sql, /datname=current_database\(\)/);
+  await assert.rejects(readPostgrestMajor({query: async () => { throw new Error('database unavailable'); }}), /PLATFORM_READ_FAILED/);
+});
+test('RULING collect reads PostgREST before its read-only transaction commits', () => {
+  const source = readFileSync(new URL('./outbox-db-contract/readonly.mjs', import.meta.url), 'utf8');
+  const collectSource = source.slice(source.indexOf('export async function collect'));
+  assert.ok(collectSource.indexOf('readPostgrestMajor(client)') < collectSource.indexOf("client.query('COMMIT')"));
+  assert.match(collectSource, /postgrest_major/);
+});
 const catalogSections = ['relations', 'functions', 'types', 'extensions', 'schemas', 'index_names', 'trigger_names', 'schema_migrations', 'created_objects_present'];
 const catalogMap = () => Object.fromEntries(catalogSections.map((name, index) => [name, String(index).padStart(64, 'a')]));
 test('NC catalog empty section map fails', () => {
@@ -230,7 +248,7 @@ test('NC platform accepts only identifiable PostgREST versions', async () => {
     ok:true,
     headers:{get:name => name === 'server' ? server : name === 'x-postgrest-version' ? versionHeader : null},
     json:async()=>({version:'2.1.0'}),
-  }));
+  }), { postgrestMajor: '12' });
   await assert.rejects(probe('nginx/1.25.5', null), /PLATFORM_UNIDENTIFIED/);
   await assert.rejects(probe(null, null), /PLATFORM_UNIDENTIFIED/);
   await assert.rejects(probe('PostgREST/garbage', null), /PLATFORM_UNIDENTIFIED/);
@@ -242,7 +260,7 @@ test('NC platform identifies PostgREST from an OpenAPI body behind Cloudflare', 
     ok: true,
     headers: {get: name => name === 'server' ? 'cloudflare' : null},
     json: async () => new URL(url).pathname === '/rest/v1/' ? body : {version: '2.1.0'},
-  }));
+  }), { postgrestMajor: '12' });
   assert.equal((await probe({swagger: '2.0', info: {version: '12.2.3 (abcdef)'}})).postgrest_major, '12');
   await assert.rejects(probe({openapi: '3.0.0', info: {}}), /PLATFORM_UNIDENTIFIED/);
   await assert.rejects(probe({openapi: '3.0.0', info: {version: 'nginx'}}), /PLATFORM_UNIDENTIFIED/);
@@ -259,7 +277,7 @@ test('NC platform rejects a non-JSON PostgREST body', async () => {
       return {version: '2.1.0'};
     },
   });
-  await assert.rejects(platformFingerprint('http://127.0.0.1:55421', 'anon', 17, transport), /PLATFORM_UNIDENTIFIED/);
+  await assert.rejects(platformFingerprint('http://127.0.0.1:55421', 'anon', 17, transport, { postgrestMajor: '12' }), /PLATFORM_UNIDENTIFIED/);
 });
 test('Outbox source shape and claim pin', () => {
   const actions=readFileSync(new URL('../src/app/(dashboard)/messages/actions.ts',import.meta.url),'utf8');
@@ -325,12 +343,42 @@ test('SEQ POST accepts only hashed sealed PRE output for the same target', () =>
   fails('mutated seal',()=>assertSealedPre({manifest:{...manifest,artifacts:{'readonly.json':'f'.repeat(64)}},sealed,sealedBytes,rawBytes,target:'shared-readonly'}),/PLAN_PRE_NOT_SEALED/);
 });
 function readableDigest(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
-test('platform performs exactly two unauthenticated GETs',async()=>{
+test('RULING disposable performs two blocking GETs and proves SQL/HTTP equality',async()=>{
   const calls=[];
   const { platformFingerprint }=await import('./outbox-db-contract/platform.mjs');
-  const transport=async (url,options)=>{calls.push({path:new URL(url).pathname,method:options.method,headers:options.headers});return {ok:true,headers:{get:name=>name==='x-postgrest-version'?'12.2':null},json:async()=>({version:'2.1.0'})}};
-  const result=await platformFingerprint('http://127.0.0.1:55421','anon',17,transport);
+  const transport=async (url,options)=>{calls.push({path:new URL(url).pathname,method:options.method,headers:options.headers});return {ok:true,status:200,headers:{get:name=>name==='x-postgrest-version'?'12.2':null},json:async()=>({version:'2.1.0'})}};
+  const result=await platformFingerprint('http://127.0.0.1:55421','anon',17,transport,{postgrestMajor:'12'});
   assert.deepEqual(calls.map(x=>[x.path,x.method]),[['/rest/v1/','GET'],['/auth/v1/health','GET']]);
+  assert.deepEqual(calls.map(x=>x.headers),[{apikey:'anon'},{apikey:'anon'}]);
   assert.deepEqual(result.postgres_major,'17');
+  assert.deepEqual(result.postgrest_major,'12');
   assert.deepEqual(result.gotrue_major,'2');
+  await assert.rejects(platformFingerprint('http://127.0.0.1:55421','anon',17,transport,{postgrestMajor:'13'}), /PLATFORM_MISMATCH postgrest_major/);
+});
+test('RULING hosted sends publishable apikey, makes no REST call, and allows only NOT_VERIFIED', async () => {
+  const calls = [];
+  const transport = async (url, options) => {
+    calls.push({ path: new URL(url).pathname, headers: options.headers });
+    return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ version: '2.151.0' }) };
+  };
+  const result = await platformFingerprint('https://example.invalid', 'publishable', '17', transport, { mode: 'hosted', postgrestMajor: NOT_VERIFIED });
+  assert.deepEqual(calls, [{ path: '/auth/v1/health', headers: { apikey: 'publishable' } }]);
+  assert.equal(result.postgrest_major, NOT_VERIFIED);
+  await assert.rejects(platformFingerprint('https://example.invalid', undefined, '17', transport, { mode: 'hosted', postgrestMajor: '12' }), /PLATFORM_READ_FAILED/);
+  await assert.rejects(platformFingerprint('https://example.invalid', 'publishable', '17', transport, { mode: 'hosted', postgrestMajor: 'not-a-major' }), /PLATFORM_READ_FAILED/);
+});
+test('RULING checker summary uses the exact observed or NOT_VERIFIED wording', () => {
+  const source = readFileSync(new URL('./outbox-db-contract-readonly.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /PostgREST major was \[pending\]/);
+  assert.match(source, /PostgREST major was \$\{postgrestMajor === NOT_VERIFIED \? 'NOT_VERIFIED: no PostgREST connection was visible, which does not prove none existed' : 'observed from its connection name and matched'\}/);
+  assert.match(source, /Hosted app\/SSR\/PostgREST behaviour is inferred from same-SHA disposable runs plus catalog and claim-plumbing equality\./);
+});
+test('RULING Postgres and GoTrue remain blocking while PostgREST waiver is field-scoped', () => {
+  fails('postgres', () => comparePlatform({postgres_major:'17',postgrest_major:'12',gotrue_major:'2'}, {postgres_major:'16',postgrest_major:NOT_VERIFIED,gotrue_major:'2'}), /PLATFORM_MISMATCH postgres_major/);
+  fails('gotrue', () => comparePlatform({postgres_major:'17',postgrest_major:'12',gotrue_major:'2'}, {postgres_major:'17',postgrest_major:NOT_VERIFIED,gotrue_major:'1'}), /PLATFORM_MISMATCH gotrue_major/);
+  assert.deepEqual(comparePlatform({postgres_major:'17',postgrest_major:'12',gotrue_major:'2'}, {postgres_major:'17',postgrest_major:NOT_VERIFIED,gotrue_major:'2'}), {waived_fields:['postgrest_major']});
+  assert.doesNotThrow(() => compareObservedPlatform({postgres_major:'17',postgrest_major:NOT_VERIFIED,gotrue_major:'2'}, {postgres_major:'17',postgrest_major:'12',gotrue_major:'2'}));
+  assert.doesNotThrow(() => compareObservedPlatform({postgres_major:'17',postgrest_major:NOT_VERIFIED,gotrue_major:'2'}, {postgres_major:'17',postgrest_major:NOT_VERIFIED,gotrue_major:'2'}));
+  fails('non-exact waiver', () => compareObservedPlatform({postgres_major:'17',postgrest_major:'unknown',gotrue_major:'2'}, {postgres_major:'17',postgrest_major:NOT_VERIFIED,gotrue_major:'2'}), /PLATFORM_MISMATCH postgrest_major/);
+  fails('observed mismatch', () => compareObservedPlatform({postgres_major:'17',postgrest_major:'12',gotrue_major:'2'}, {postgres_major:'17',postgrest_major:'13',gotrue_major:'2'}), /PLATFORM_MISMATCH postgrest_major/);
 });

@@ -117,6 +117,17 @@ class SealedEvidenceTests(unittest.TestCase):
         original_manifest = json.loads(manifest_path.read_text())
         original_output = json.loads(output_path.read_text())
         original_raw = raw_path.read_bytes()
+        self.assertEqual(original_manifest["waived_fields"], [])
+        waived_output = json.loads(json.dumps(original_output))
+        waived_majors = {"postgres_major": "17", "postgrest_major": evidence.NOT_VERIFIED, "gotrue_major": "2"}
+        waived_output["comparisons"]["platform"]["observed_sha256"] = hashlib.sha256(json.dumps(waived_majors, separators=(",", ":")).encode()).hexdigest()
+        output_path.write_text(json.dumps(waived_output))
+        waived_manifest = json.loads(json.dumps(original_manifest))
+        waived_manifest["waived_fields"] = ["postgrest_major"]
+        waived_manifest["artifacts"]["readonly.json"] = hashlib.sha256(output_path.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(waived_manifest))
+        self.commit("accept PostgREST waiver")
+        check()
         raw_array = json.loads(json.dumps(raw))
         raw_array["tls"]["leaf_fingerprint"] = [raw_array["tls"]["leaf_fingerprint"]]
         raw_path.write_text(json.dumps(raw_array))
@@ -250,7 +261,7 @@ class SealedEvidenceTests(unittest.TestCase):
                 if found:
                     v = json.loads(found.read_text())
                     inputs[label] = {"directory": found.parent.relative_to(self.repo).as_posix(), "artifact": filename, "sha256": v["artifacts"][filename]}
-            manifest.update({"event": "operator", "workflow_path": "", "github_run_id": "", "github_run_attempt": "", "target_binding": {"project_ref": "ncsngxlcyxylaeskiteu", "pooler_user": "postgres.ncsngxlcyxylaeskiteu"}, "operator_script_sha256": {name: hashlib.sha256((self.repo / name).read_bytes()).hexdigest() for name in scripts}, "inputs": inputs, "items": {}})
+            manifest.update({"event": "operator", "workflow_path": "", "github_run_id": "", "github_run_attempt": "", "target_binding": {"project_ref": "ncsngxlcyxylaeskiteu", "pooler_user": "postgres.ncsngxlcyxylaeskiteu"}, "operator_script_sha256": {name: hashlib.sha256((self.repo / name).read_bytes()).hexdigest() for name in scripts}, "inputs": inputs, "waived_fields": [], "items": {}})
             if len(inputs) == 2:
                 platform_data = self.platform_config()
                 plan = {"sha256": "a" * 64, "messages_scan": "Seq Scan", "total_cost": 10}
@@ -596,6 +607,8 @@ class SealedEvidenceTests(unittest.TestCase):
             ("empty INCONCLUSIVE diff", mutate_output(lambda o, m: (o["items"].update(queued_invariants={"verdict": "INCONCLUSIVE", "diff": hashlib.sha256(b"[]").hexdigest()}), m["items"].update(o["items"])))),
             ("extra output", mutate_output(lambda o, m: o["comparisons"]["platform"].update(message_body="private"))),
             ("extra manifest", lambda m, d: m.update(message_body="private")),
+            ("waiver omitted", lambda m, d: m.pop("waived_fields")),
+            ("waiver forged", lambda m, d: m.update(waived_fields=["postgres_major"])),
         )
         for label, mutation in cases:
             with self.subTest(label=label):

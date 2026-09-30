@@ -41,6 +41,7 @@ CATALOG_SECTIONS = ("created_objects_present", "extensions", "functions", "index
 OPERATOR_LIST = "scripts/inbox-ci/shared-readonly-operators.json"
 PLAN_ROLES = ("privileged", "member")
 PLAN_SHAPES = ("first", "keyset", "null_tail")
+NOT_VERIFIED = "NOT_VERIFIED"
 
 
 class EvidenceError(RuntimeError):
@@ -147,7 +148,7 @@ def validate_manifest(repo: Path, commit: str, directory: str, paths: set[str], 
     if manifest["kind"] == "shared-readonly":
         expected_fields = {"tested_sha", "tier", "kind", "phase", "target", "verdict", "exit_status", "run_id",
                            "started_at", "completed_at", "clean_tree", "artifacts", "target_binding", "inputs",
-                           "operator_script_sha256", "event", "workflow_path", "github_run_id", "github_run_attempt", "items"}
+                           "operator_script_sha256", "event", "workflow_path", "github_run_id", "github_run_attempt", "waived_fields", "items"}
         if set(manifest) != expected_fields:
             raise EvidenceError(f"unexpected shared-readonly manifest field: {directory}")
         completed_text = manifest["completed_at"]
@@ -323,6 +324,10 @@ def _check_shared_readonly(repo: Path, run: dict, selected: dict) -> None:
     reject_raw(manifest)
     if manifest.get("target_binding") != {"project_ref": PROJECT_REFS["shared-test"], "pooler_user": "postgres." + PROJECT_REFS["shared-test"]}:
         raise EvidenceError(f"shared-test project_ref mismatch: {directory}")
+    if (not isinstance(manifest.get("waived_fields"), list)
+            or any(field != "postgrest_major" for field in manifest["waived_fields"])
+            or len(manifest["waived_fields"]) != len(set(manifest["waived_fields"]))):
+        raise EvidenceError(f"invalid waived fields: {directory}")
     if set(manifest.get("artifacts", {})) != {"readonly.json"}:
         raise EvidenceError(f"shared-readonly artifact inventory mismatch: {directory}")
     try:
@@ -407,15 +412,22 @@ def _check_shared_readonly(repo: Path, run: dict, selected: dict) -> None:
         else:
             platform_keys = ("postgres_major", "postgrest_major", "gotrue_major")
             if (not isinstance(data, dict) or set(data) != {*platform_keys, "sha256"}
-                    or any(not isinstance(data[key], str) or not re.fullmatch(r"[0-9]+", data[key]) for key in platform_keys)):
+                    or any(not isinstance(data[key], str) or (not re.fullmatch(r"[0-9]+", data[key])
+                        and not (key == "postgrest_major" and data[key] == NOT_VERIFIED)) for key in platform_keys)):
                 raise EvidenceError(f"invalid consumed platform data: {directory}")
             # platform.mjs hashes JSON.stringify of these fields in this exact insertion order.
             canonical = {key: data[key] for key in platform_keys}
             digest = hashlib.sha256(json.dumps(canonical, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+            if manifest.get("waived_fields") not in ([], ["postgrest_major"]):
+                raise EvidenceError(f"waived fields mismatch: {directory}")
+            if data["postgrest_major"] == NOT_VERIFIED and manifest["waived_fields"] != ["postgrest_major"]:
+                raise EvidenceError(f"waived fields mismatch: {directory}")
+            observed_canonical = {**canonical, "postgrest_major": NOT_VERIFIED} if manifest["waived_fields"] else canonical
+            observed_digest = hashlib.sha256(json.dumps(observed_canonical, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
             if (not isinstance(data["sha256"], str) or not HASH.fullmatch(data["sha256"])
                     or data["sha256"] != digest
                     or output["comparisons"]["platform"].get("verdict") != "PASS"
-                    or output["comparisons"]["platform"].get("observed_sha256") != digest):
+                    or output["comparisons"]["platform"].get("observed_sha256") != observed_digest):
                 raise EvidenceError(f"platform mismatch: {directory}")
 
 

@@ -7,13 +7,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { sealSharedReadonly } from './seal-shared-readonly.mjs';
 import { CATALOG_SECTIONS } from '../outbox-db-contract/catalog-sections.mjs';
-import { platformFingerprint } from '../outbox-db-contract/platform.mjs';
+import { NOT_VERIFIED, platformFingerprint } from '../outbox-db-contract/platform.mjs';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const git = (repo, ...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
 async function producerPlatform() {
   return platformFingerprint('https://example.invalid', 'anon', '17', async url => url.endsWith('/rest/v1/')
     ? new Response('', { status: 200, headers: { 'x-postgrest-version': 'PostgREST/12.2.0' } })
-    : new Response(JSON.stringify({ version: '2.151.0' }), { status: 200 }));
+    : new Response(JSON.stringify({ version: '2.151.0' }), { status: 200 }), { postgrestMajor: '12' });
 }
 async function fixture() {
   const repo = mkdtempSync(path.join(os.tmpdir(), 'shared-seal-'));
@@ -49,6 +49,26 @@ test('seals only digest representation linked to committed inputs', async () => 
   const output = JSON.parse(readFileSync(path.join(f.repo, dir, 'readonly.json')));
   assert.deepEqual(Object.keys(output).sort(), ['catalog_indexes_sha256','comparisons', 'items', 'phase', 'plans', 'source_output_sha256', 'target', 'tls', 'verdict']);
   assert.equal(JSON.stringify(output).includes('platform_config'), false);
+});
+test('sealer records a PostgREST NOT_VERIFIED waiver and covers it in the digest', async () => {
+  const f = await fixture();
+  f.source.platform_config.postgrest_major = NOT_VERIFIED;
+  const majors = Object.fromEntries(['postgres_major', 'postgrest_major', 'gotrue_major'].map(key => [key, f.source.platform_config[key]]));
+  f.source.platform_config.sha256 = digest(JSON.stringify(majors));
+  f.source.comparisons.platform.observed_sha256 = f.source.platform_config.sha256;
+  f.save();
+  const dir = sealSharedReadonly(f.args);
+  const manifest = JSON.parse(readFileSync(path.join(f.repo, dir, 'manifest.json')));
+  assert.deepEqual(manifest.waived_fields, ['postgrest_major']);
+});
+test('sealer rejects a waiver-shaped but non-exact PostgREST value', async () => {
+  const f = await fixture();
+  f.source.platform_config.postgrest_major = 'unknown';
+  const majors = Object.fromEntries(['postgres_major', 'postgrest_major', 'gotrue_major'].map(key => [key, f.source.platform_config[key]]));
+  f.source.platform_config.sha256 = digest(JSON.stringify(majors));
+  f.source.comparisons.platform.observed_sha256 = f.source.platform_config.sha256;
+  f.save();
+  assert.throws(() => sealSharedReadonly(f.args), /Platform comparison mismatch/);
 });
 test('sealer refuses an operator omitted from the working manifest', async () => {
   const f = await fixture();
