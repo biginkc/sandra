@@ -2,6 +2,7 @@ const API = "https://api.github.com/repos/biginkc/sandra";
 const WORKFLOW = "canary-sequences.yml";
 const FULL_TITLE = "Sequences V1 Prod Canary full";
 const PREFLIGHT_TITLE = "Sequences V1 Prod Canary preflight-only";
+const FULL_JOB = "Sequences V1 Prod Canary";
 
 type WorkflowRun = {
   id: number;
@@ -18,6 +19,19 @@ async function githubJson(url: string, token: string): Promise<unknown> {
   });
   if (!response.ok) throw new Error("GitHub read failed");
   return response.json();
+}
+
+async function fullJobWasSkipped(runId: number, token: string): Promise<boolean> {
+  const body = await githubJson(`${API}/actions/runs/${runId}/jobs?per_page=100`, token) as {
+    total_count?: number;
+    jobs?: { name?: string; status?: string; conclusion?: string | null; started_at?: string | null }[];
+  };
+  if (!Array.isArray(body.jobs) || body.total_count !== 1 || body.jobs.length !== 1) {
+    throw new Error("Ambiguous full job history");
+  }
+  const job = body.jobs[0];
+  return job.name === FULL_JOB && job.status === "completed" &&
+    job.conclusion === "skipped" && job.started_at === null;
 }
 
 /** Read only. Unknown run metadata is ambiguous and stops the canary. */
@@ -40,6 +54,7 @@ export async function assertNoUnacknowledgedCanaryFailure(currentRunId: string, 
           if (ack.value === String(run.id)) return;
           throw new Error(`Canary prior full run ${run.id} is not acknowledged (ambiguous mode)`);
         }
+        if (run.event === "schedule" && run.conclusion === "skipped" && await fullJobWasSkipped(run.id, token)) continue;
         if (run.conclusion === "success") return;
         const ack = await githubJson(`${API}/actions/variables/SEQUENCE_CANARY_FAILURE_ACK_RUN_ID`, token) as { value?: string };
         if (ack.value === String(run.id)) return;
