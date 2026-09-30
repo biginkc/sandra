@@ -205,7 +205,7 @@ test("R6a runs against the real J5a schema and proves source, projection, filter
       for (const threadId of duplicateThreadIds) {
         await client.query(
           "INSERT INTO public.message_threads(id,org_id,channel,contact_id,property_id,conversation_id) VALUES($1,$2,'sms',$3,$4,$5)",
-          [threadId, ids.org, ids.contact, ids.property, duplicateConversation],
+          [threadId, ids.org, null, null, duplicateConversation],
         );
       }
     } finally {
