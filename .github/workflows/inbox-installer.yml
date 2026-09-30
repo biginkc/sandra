@@ -20,6 +20,7 @@ on:
       - '.github/workflows/inbox-installer.yml'
 permissions:
   contents: read
+  packages: read
 jobs:
   installer:
     runs-on: ubuntu-latest
