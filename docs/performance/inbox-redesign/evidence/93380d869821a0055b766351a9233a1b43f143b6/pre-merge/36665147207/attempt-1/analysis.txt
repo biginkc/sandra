@@ -1,0 +1,95 @@
+{
+  "final_db": {
+    "inbound": 2400,
+    "unknown": 240,
+    "total": 149400
+  },
+  "pg_stat_calls": {
+    "update": 10200,
+    "inbound": 2400
+  },
+  "counts": {
+    "scheduled": {
+      "update": 10200,
+      "inbound": 2400
+    },
+    "completed": {
+      "update": 10200,
+      "inbound": 2400
+    },
+    "failed": {
+      "update": 0,
+      "inbound": 0
+    },
+    "worker": {
+      "parent": 60,
+      "parent_sources": 60,
+      "claim": 12309,
+      "finish": 12309,
+      "stale": 0,
+      "errors": 0
+    }
+  },
+  "error_count": 0,
+  "error_codes": {},
+  "server": {
+    "update": {
+      "n": 10200,
+      "p50_ms": 1.961,
+      "p95_ms": 2.97,
+      "p99_ms": 4.486
+    },
+    "inbound": {
+      "n": 2400,
+      "p50_ms": 2.343,
+      "p95_ms": 3.546,
+      "p99_ms": 6.007
+    }
+  },
+  "client": {
+    "update": {
+      "n": 10200,
+      "p50_ms": 3.0,
+      "p95_ms": 5.0,
+      "p99_ms": 8.0
+    },
+    "inbound": {
+      "n": 2400,
+      "p50_ms": 3.0,
+      "p95_ms": 6.0,
+      "p99_ms": 10.0
+    }
+  },
+  "backlog": {
+    "at_end": {
+      "elapsed_s": 180.015,
+      "dirty_pending": 0.0,
+      "maintained_queue": 0.0,
+      "parent_pending": 0.0,
+      "deadlocks": 0.0,
+      "xact_rollback": 2.0,
+      "n_dead_tup": 9676.0
+    },
+    "coverage": {
+      "start_s": 0.001,
+      "end_s": 181.016,
+      "max_gap_s": 1.0020000000000024
+    },
+    "drain_first_zero_s": 1.0079999999999956
+  },
+  "deadlocks_delta": 0.0,
+  "lock_logging": {
+    "log_lock_waits": "on",
+    "deadlock_timeout": "10ms"
+  },
+  "max_lock_wait_log_ms": 218.862,
+  "lock_log_events": 4,
+  "paired_gaps": {
+    "n": 360,
+    "max_ms": 27.0,
+    "over_50ms": 0
+  },
+  "writer_distribution_match": true,
+  "failures": [],
+  "verdict": "PASS"
+}
