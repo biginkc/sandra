@@ -119,6 +119,7 @@ export function createInboxReadRepository(client: InboxReadClient) {
           direction: message.direction, readAtRaw: nullableTimestamp(message.read_at_raw), inboundRevision: revision(message.inbound_revision),
           status: historyStatus(message.status), delivery: delivery(message.delivery) };
       });
+      const historyDirections = new Map(history.map(message => [message.id, message.direction]));
       const { data: labelsData, error: labelsError } = await client.rpc("inbox_drip_label_inputs_v1", {
         org_id: orgId, conversation_id: conversationId, message_ids: history.map(message => message.id),
       }).abortSignal(signal);
@@ -128,6 +129,8 @@ export function createInboxReadRepository(client: InboxReadClient) {
       for (const value of labelsRow.messages) {
         const label = record(value), messageId = id(label.id);
         if (label.is_page !== true) continue;
+        const direction = historyDirections.get(messageId);
+        requireValue(direction === "inbound" || direction === "outbound");
         const dripName = label.drip_name === undefined || label.drip_name === null ? null : text(label.drip_name);
         const dripStep = label.drip_step === undefined || label.drip_step === null ? null : label.drip_step;
         const dripStepsTotal = label.drip_steps_total === undefined || label.drip_steps_total === null ? null : label.drip_steps_total;
@@ -140,7 +143,7 @@ export function createInboxReadRepository(client: InboxReadClient) {
           dripStep: dripStep as number | null,
           dripStepsTotal: dripStepsTotal as number | null,
           previousDripStep: previousDripStep as number | null,
-        }, message.direction));
+        }, direction));
       }
       const labeledHistory = history.map(message => {
         const label = labels.get(message.id);

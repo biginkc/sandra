@@ -4,7 +4,7 @@ const mocks = vi.hoisted(() => ({ create: vi.fn(), rpc: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.create }));
 const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const authority = { user_id: id, session_id: id, org_id: id, access_epoch: "1", expires_at: "2030-01-01T00:00:00Z", session_active: true, active_membership_count: 1 };
-const counts = { all: 3, mine: 1, unassigned: 2, unread: 1, escalated: 0, dispo: 0, needs_outcome: 0, unknown: 0, dismissed: 0 };
+const counts = { all: 3, mine: 1, unassigned: 2, unread: 1, escalated: 0, dispo: 0, needs_outcome: 0, in_drip: 0, drip_replied: 0, unknown: 0, dismissed: 0 };
 beforeEach(() => { vi.clearAllMocks(); mocks.create.mockResolvedValue({ rpc: mocks.rpc }); });
 afterEach(() => vi.unstubAllEnvs());
 const request = (query = `orgId=${id}&view=all`) => new Request(`https://example.com/api/inbox/counts?${query}`);

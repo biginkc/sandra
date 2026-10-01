@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { Database } from "@/lib/supabase/types";
 import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
+import { dripHeaderLabel, dripReplyPillLabel } from "@/lib/inbox/drip-context";
 
 import { DRIP_REPLY_CLEAR_WORKFLOW_OPERATIONS, fetchInboxDetail } from "./inbox-detail-data";
 
@@ -455,6 +456,80 @@ describe("fetchInboxDetail", () => {
       sourceInboundMessageId: "older-reviewed-source",
       sourceMessageBody: "hello",
     });
+  });
+
+  it("pins the legacy Messages header to the review-first property choice", async () => {
+    const reviewProperty = OLDER_PROPERTY_ID;
+    const maintainedProperty = RECENT_PROPERTY_ID;
+    const outbound = makeMessage({
+      id: "legacy-review-drip-text",
+      contact_id: CONTACT_ID,
+      property_id: maintainedProperty,
+      conversation_id: CONVERSATION_ID,
+      direction: "outbound",
+      status: "sent",
+      created_at: "2026-06-09T12:00:00.000Z",
+    });
+    const inbound = makeMessage({
+      id: "legacy-review-reply",
+      contact_id: CONTACT_ID,
+      property_id: maintainedProperty,
+      conversation_id: CONVERSATION_ID,
+      direction: "inbound",
+      created_at: "2026-06-09T12:01:00.000Z",
+    });
+    const detail = await fetchInboxDetail(
+      makeSupabaseStub({
+        messages: [outbound, inbound],
+        contacts: [makeContact({ id: CONTACT_ID })],
+        properties: [
+          makeProperty({ id: reviewProperty, address: "Review-first Ave" }),
+          makeProperty({ id: maintainedProperty, address: "Maintained-row Ave" }),
+        ],
+        ai_disposition_reviews: [{
+          id: "legacy-review",
+          org_id: "org-1",
+          property_id: reviewProperty,
+          conversation_id: CONVERSATION_ID,
+          source_inbound_message_id: inbound.id,
+          disposition: "nurture",
+          ai_reason: "Review property is authoritative for legacy Messages",
+          status: "pending",
+          created_at: "2026-06-09T12:01:01.000Z",
+        }],
+        sequence_enrollments: [{
+          id: "legacy-review-enrollment",
+          org_id: "org-1",
+          property_id: reviewProperty,
+          sequence_id: "legacy-review-drip",
+          status: "paused",
+          pause_reason: "inbound_reply",
+          current_step_index: 1,
+          enrolled_at: "2026-06-09T11:00:00.000Z",
+        }],
+        sequence_step_runs: [{
+          message_id: outbound.id,
+          enrollment_id: "legacy-review-enrollment",
+          sequence_enrollments: { org_id: "org-1", sequence_id: "legacy-review-drip" },
+          sequence_steps: { sequence_id: "legacy-review-drip", step_index: 1 },
+        }],
+        sequences: [{ id: "legacy-review-drip", org_id: "org-1", name: "Legacy Review Drip" }],
+        sequence_steps: [
+          { id: "legacy-review-step-1", sequence_id: "legacy-review-drip" },
+          { id: "legacy-review-step-2", sequence_id: "legacy-review-drip" },
+          { id: "legacy-review-step-3", sequence_id: "legacy-review-drip" },
+        ],
+      }) as never,
+      CONVERSATION_ID,
+    );
+
+    expect(detail?.propertyId).toBe(reviewProperty);
+    expect(detail?.propertyAddress).toBe("Review-first Ave, Albany, NY");
+    expect(dripHeaderLabel(detail?.drip ?? null)).toBe(
+      "Was in Legacy Review Drip · stopped Jun 9 when they replied",
+    );
+    expect(dripReplyPillLabel(detail?.drip ?? null)).toBe("Replied to drip");
+    expect(detail?.dripReplyLabels).toEqual({ [inbound.id]: "Reply to drip text 2" });
   });
 
   it("returns null when the conversation has no messages", async () => {

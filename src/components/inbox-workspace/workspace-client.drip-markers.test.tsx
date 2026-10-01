@@ -13,6 +13,7 @@ vi.mock("@/lib/inbox/workspace-sync", () => ({
     state.callbacks = callbacks;
     return {
       replace: (value: unknown) => { state.replacements.push(value); },
+      getSnapshot: () => ({ state: "live", rows: [row] }),
       reset: () => callbacks?.onChange({ state: "resync_required", rows: [] }),
       revoke: () => callbacks?.onChange({ state: "permission_lost", rows: [] }),
     };
@@ -96,14 +97,15 @@ it("re-derives the displayed page cursor during drip reconciliation", async () =
 it("fences an older marker response after a newer snapshot publishes", async () => {
   deferMarkers = true;
   markerResolvers = [];
+  vi.spyOn(AbortSignal.prototype, "throwIfAborted").mockImplementation(() => {});
   await loaded({ view: "all" });
-  await waitFor(() => expect(markerResolvers).toHaveLength(1));
-  act(() => state.callbacks!.onProbe!());
   await waitFor(() => expect(markerResolvers).toHaveLength(2));
-  await act(async () => markerResolvers[1](Response.json({ orgId, asOf: "2026-10-01T00:00:02Z", rows: [] })));
+  act(() => state.callbacks!.onProbe!());
+  await waitFor(() => expect(markerResolvers).toHaveLength(3));
+  await act(async () => markerResolvers[2](Response.json({ orgId, asOf: "2026-10-01T00:00:02Z", rows: [] })));
   await waitFor(() => expect(screen.queryByRole("img", { name: "In a drip" })).not.toBeInTheDocument());
-  await act(async () => markerResolvers[0](Response.json({ orgId, asOf: "2026-10-01T00:00:01Z", rows: [{ conversationId, propertyId: null, inDrip: true, dripReplied: false, dripName: "Old" }] })));
-  expect(screen.queryByRole("img", { name: "In a drip" })).not.toBeInTheDocument();
+  await act(async () => markerResolvers[0](Response.json({ orgId, asOf: "2026-10-01T00:00:03Z", rows: [{ conversationId, propertyId: null, inDrip: true, dripReplied: false, dripName: "Old" }] })));
+  await waitFor(() => expect(screen.queryByRole("img", { name: "In a drip" })).not.toBeInTheDocument());
 });
 
 it("refreshes markers and the open detail after a completed workspace action", async () => {

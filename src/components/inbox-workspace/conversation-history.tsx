@@ -158,7 +158,7 @@ export function ConversationHistory(props: ConversationHistoryProps) {
   if (!data || !visible) return null;
   const status = readState?.boundary === data.readBoundary ? readState.status : "pending";
   if (status === "permission_lost" || revokedBoundary === data.readBoundary) return null;
-  const dripLine = dripHeaderLabel(data.drip);
+  const dripLine = dripHeaderLabel(data.drip ?? null);
   const deliveryLabel = (message: (typeof data.history)[number]) => {
     if (message.direction === "inbound") return "Received";
     if (message.delivery === "not_confirmed") return "Not confirmed";
@@ -168,7 +168,7 @@ export function ConversationHistory(props: ConversationHistoryProps) {
     return "Sent";
   };
   return <section aria-label="Conversation history">
-    {dripReplyPillLabel(data.drip) && <span className="self-start rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800">{dripReplyPillLabel(data.drip)}</span>}
+    {dripReplyPillLabel(data.drip ?? null) && <span className="self-start rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800">{dripReplyPillLabel(data.drip ?? null)}</span>}
     {dripLine && <p className="mt-1 flex items-center gap-1.5 text-xs font-medium text-teal-800" data-testid="inbox-detail-drip-line">{dripLine}</p>}
     <div className="mb-3 flex flex-wrap items-center gap-3 text-sm">
       {nextCursor && <button type="button" className="underline" disabled={pageState?.busy} onClick={() => void older()}>{pageState?.busy ? "Loading older messages…" : "Load older messages"}</button>}
