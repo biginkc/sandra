@@ -3,7 +3,7 @@
   "status": "BLOCKED_UNBUILT_CURRENT_SOURCE",
   "owner": "release-infra",
   "source_repository": ".",
-  "source_commit": "a18092714821f3805923007a885da4327b596a7e",
+  "source_commit": "8738ae37550e3b170ea3f4650fe0c5f5219cee21",
   "services": {
     "operation-worker": {
       "Dockerfile": "253488776860278dd5abd1eb2a2f6babb4f6760d706f37ea837262948913afaf",
@@ -13,14 +13,14 @@
       "server.mjs": "71e431b96d5306d89837aef0a94dc6775ed455b38363fa0070835daa00cbbbd0",
       "release_http_fixture_profile_overlay": {
         "core.mjs": "0a1743d94c687d1321ffabaebd53074e5adf1329290835c466fc5b2c6eb4c82a",
-        "core.test.mjs": "3ee13f83fca984c86259ed183857c7d42db3576c5f4e005adec83bd0b7f4c2a8",
+        "core.test.mjs": "514d84ebea13ac2af13dc003fbeff05233f9558c15ab8376dae8d3db9f9440af",
         "target": "127.0.0.1:54322/postgres",
         "database_marker": "sandra-inbox-http-owned-synthetic-20260917",
         "container_label_marker": "sandra-inbox-release-http-owned-20260917",
         "login": "inbox_action_worker",
         "status": "SOURCE_ONLY_UNBUILT"
       },
-      "source_commit": "a18092714821f3805923007a885da4327b596a7e"
+      "source_commit": "8738ae37550e3b170ea3f4650fe0c5f5219cee21"
     },
     "reply-send-worker": {
       "Dockerfile": "98ec0bc8335b2db7b5ef40eb1237a37fc3350896a385c7762d06ee0c6fd04c66",
@@ -35,23 +35,23 @@
       "worker.sql": "a4c4a5229a74a538addeec29e153e4633c1c3dbf2bd5e91cc5fa1f28a475486c",
       "release_http_fixture_profile_overlay": {
         "core.mjs": "d21ac3db09649ea793c1969a53d031698152610dd30159183ea9d286a9265c5e",
-        "core.test.mjs": "af88ea494d50ddeb1c2ee9b85922866e143f10a472ceff730083f935d5e58173",
+        "core.test.mjs": "6df8f56f018209d46c303dde4ea4ecf6125fb6f81bcf868ed6369ff97d2e3530",
         "target": "127.0.0.1:54322/postgres",
         "database_marker": "sandra-inbox-http-owned-synthetic-20260917",
         "container_label_marker": "sandra-inbox-release-http-owned-20260917",
         "login": "inbox_reply_send_worker",
         "status": "SOURCE_ONLY_UNBUILT"
       },
-      "source_commit": "a18092714821f3805923007a885da4327b596a7e"
+      "source_commit": "8738ae37550e3b170ea3f4650fe0c5f5219cee21"
     },
     "sync-relay": {
       "Dockerfile": "1e33ec793747bee85f0e390017074658da88b027a273c944faeda6625b0e5bbe",
       "server.mjs": "7c8e7d73dd69045676bce17aaad6479739ef129b89157a02b144b7207c9f5e2b",
       "railway.json": "b551f369a14ae01cb3c2b0ebaed8946ad939cb40c4981ab9d4c7abe901a5e221",
-      "source_commit": "a18092714821f3805923007a885da4327b596a7e"
+      "source_commit": "8738ae37550e3b170ea3f4650fe0c5f5219cee21"
     },
     "projection-worker": {
-      "source_commit": "a18092714821f3805923007a885da4327b596a7e",
+      "source_commit": "8738ae37550e3b170ea3f4650fe0c5f5219cee21",
       "Dockerfile": "f30e4fe8a1db80724fb8355c2f1eebe9a6ef40dc55fcc4fcbdc1af3cbd083091",
       "package.json": "93c75a66175e33248b6c6869d3b7881a3c23064168c532bdfd063a3c866a6050",
       "package-lock.json": "ce33cf8eabdd72dd596204ecad3612df265bf471766f478aa806123acec1c2da",
@@ -190,8 +190,8 @@
         "status": "PINNED_REFERENCE_UNRAN_COMPATIBILITY_UNPROVEN"
       },
       "operation-worker": {
-        "image": "sandra-inbox-action-worker:release-a180927",
-        "source_commit": "a18092714821f3805923007a885da4327b596a7e",
+        "image": "sandra-inbox-action-worker:release-8738ae3",
+        "source_commit": "8738ae37550e3b170ea3f4650fe0c5f5219cee21",
         "build_context": "experiments/inbox-operation-worker",
         "current_image_digest": null,
         "role_packet": "experiments/inbox-release/generated/backend-operation-reply.sql",
@@ -201,8 +201,8 @@
         "status": "SOURCE_ONLY_UNBUILT"
       },
       "reply-send-worker": {
-        "image": "sandra-inbox-reply-send-worker:release-a180927",
-        "source_commit": "a18092714821f3805923007a885da4327b596a7e",
+        "image": "sandra-inbox-reply-send-worker:release-8738ae3",
+        "source_commit": "8738ae37550e3b170ea3f4650fe0c5f5219cee21",
         "build_context": "experiments/inbox-reply-send-worker",
         "current_image_digest": null,
         "role_packet": "experiments/inbox-release/generated/backend-operation-reply.sql",
@@ -213,8 +213,8 @@
         "status": "SOURCE_ONLY_UNBUILT"
       },
       "projection-worker": {
-        "image": "sandra-inbox-projection-worker:release-a180927",
-        "source_commit": "a18092714821f3805923007a885da4327b596a7e",
+        "image": "sandra-inbox-projection-worker:release-8738ae3",
+        "source_commit": "8738ae37550e3b170ea3f4650fe0c5f5219cee21",
         "build_context": "services/inbox-projection-worker",
         "current_image_digest": null,
         "role_packet": "experiments/inbox-release/generated/projection-worker-role.sql",
@@ -234,8 +234,8 @@
         "memory_bytes": 536870912,
         "cpus": 0.5,
         "status": "SOURCE_PACKAGED_UNRUN",
-        "source_commit": "a18092714821f3805923007a885da4327b596a7e",
-        "image": "sandra-inbox-sync-relay:release-a180927"
+        "source_commit": "8738ae37550e3b170ea3f4650fe0c5f5219cee21",
+        "image": "sandra-inbox-sync-relay:release-8738ae3"
       }
     },
     "preflight_order": [
