@@ -37,6 +37,9 @@ export function StartDripPicker({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const visibleChoices = needle ? choices.filter((choice) => choice.name.toLowerCase().includes(needle)) : choices;
 
   // Dialogs can embed the same choice and preview surface without a second popup.
   useEffect(() => {
@@ -47,6 +50,7 @@ export function StartDripPicker({
   async function openPicker() {
     setOpen(true);
     setMessage("");
+    setQuery("");
     if (previewChoices) { setChoices(previewChoices); return; }
     setLoading(true);
     try {
@@ -98,7 +102,11 @@ export function StartDripPicker({
       </button>}
       {(inline || open) && <div className={inline ? "space-y-2" : "absolute left-0 top-full z-50 mt-1 w-80 rounded-md border bg-white p-3 shadow-lg"} role={inline ? undefined : "dialog"} aria-label="Start follow-up drip">
         {!inline && <p className="mb-2 text-sm font-semibold">Start follow-up drip</p>}
-        {loading ? <p className="text-xs">Loading drips…</p> : choices.length === 0 ? <p className="text-xs">No active drips with steps are available.</p> : choices.map((choice) => (
+        {!loading && choices.length > 0 && <input type="search" value={query} onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search drips" aria-label="Search drips" className="mb-2 w-full rounded-md border px-2 py-1 text-sm" />}
+        {/* The popup can outgrow the viewport once an org has several drips, so its list scrolls. */}
+        <div className={inline ? undefined : "max-h-[min(50vh,22rem)] overflow-y-auto pr-1"} data-testid="drip-choice-list">
+        {loading ? <p className="text-xs">Loading drips…</p> : choices.length === 0 ? <p className="text-xs">No active drips with steps are available.</p> : visibleChoices.length === 0 ? <p className="text-xs">No drips match “{query.trim()}”.</p> : visibleChoices.map((choice) => (
           <button key={choice.id} type="button" disabled={busy} onClick={() => void choose(choice.id)}
             aria-pressed={selectionOnly ? (selectedSequenceId === undefined ? selectedId : selectedSequenceId) === choice.id : undefined}
             className={`mb-2 block w-full rounded-md border p-2 text-left hover:bg-stone-50 ${(selectedSequenceId === undefined ? selectedId : selectedSequenceId) === choice.id ? 'border-teal-600 bg-teal-50' : ''}`}>
@@ -108,6 +116,7 @@ export function StartDripPicker({
             <span className="block text-xs text-stone-600">Stops when they reply</span>
           </button>
         ))}
+        </div>
         {onLeave && <button type="button" disabled={busy} onClick={() => void leave()} className="text-xs underline">Leave it to the follow-up owner</button>}
       </div>}
       {message && <p role="status" className="mt-1 text-xs">{message}</p>}

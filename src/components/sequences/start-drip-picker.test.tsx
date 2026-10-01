@@ -50,3 +50,21 @@ it("selectionOnly selects without enrolling or reporting an enrollment result", 
   expect(onChoose).not.toHaveBeenCalled();
   expect(onResult).not.toHaveBeenCalled();
 });
+
+it("filters drips by name and scrolls the popup list", async () => {
+  listDripChoices.mockResolvedValue({ ok: true, data: [
+    { id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null },
+    { id: "c", name: "C — Not interested", textCount: 3, days: 366, firstSend: null },
+  ] });
+  const user = userEvent.setup();
+  render(<StartDripPicker onChoose={vi.fn()} />);
+  await user.click(screen.getByRole("button", { name: "Start follow-up drip" }));
+  await screen.findByRole("button", { name: /Confirmed owner/ });
+  expect(screen.getByTestId("drip-choice-list")).toHaveClass("overflow-y-auto");
+  await user.type(screen.getByRole("searchbox", { name: "Search drips" }), "not int");
+  expect(screen.getByRole("button", { name: /Not interested/ })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Confirmed owner/ })).not.toBeInTheDocument();
+  await user.clear(screen.getByRole("searchbox", { name: "Search drips" }));
+  await user.type(screen.getByRole("searchbox", { name: "Search drips" }), "zzz");
+  expect(screen.getByText(/No drips match/)).toBeInTheDocument();
+});
