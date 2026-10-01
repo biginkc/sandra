@@ -190,7 +190,10 @@ python3 "$ASSERT" catalog-unchanged "$WORK/catalog-post.json" "$WORK/catalog-pos
 # The checkout's offline production-install suite is the reviewed 64-test
 # baseline. The pre-existing scratch-mode unit tests use a Colima example
 # target, so run only this offline suite with the runner flag unset.
-env -u GITHUB_ACTIONS -u CATALOG_FINGERPRINT_SCRATCH python3 scripts/inbox-ci/run-offline-suite.py "$INSTALL" > "$WORK/production-install-unit.txt" 2>&1
+# The Electric role tests need PostgreSQL 17 binaries; install them so those
+# tests execute here, and set CI=true so they fail rather than skip if missing.
+PG17_BIN="$(bash scripts/inbox-ci/install-pg17.sh)"
+env -u GITHUB_ACTIONS -u CATALOG_FINGERPRINT_SCRATCH CI=true PG17_BIN="$PG17_BIN" LC_ALL=C python3 scripts/inbox-ci/run-offline-suite.py "$INSTALL" > "$WORK/production-install-unit.txt" 2>&1
 python3 "$ASSERT" offline-suite "$WORK/production-install-unit.txt"
 # Live catalog mutation tests require their own blank postgres:17 database:
 # Supabase already owns supabase_migrations.schema_migrations.
