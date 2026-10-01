@@ -379,6 +379,24 @@ describe("authenticated Jitter softphone server boundary", () => {
     );
   });
 
+  it("binds the selected follow-up script and rejects unknown script IDs", async () => {
+    const invalid = await startAuthenticatedJitterCall(callTarget({ coachScriptSlug: "unknown-script" }));
+    expect(invalid.ok).toBe(false);
+    expect(mocks.requestStart).not.toHaveBeenCalled();
+
+    mocks.coachDefaultMaybeSingle.mockResolvedValueOnce({
+      data: { digest: "b".repeat(64), coach_script_revisions: { slug: "bmh-follow-up", revision: 1 } },
+      error: null,
+    });
+    const result = await startAuthenticatedJitterCall(callTarget({ propertyId: "property-1", contactId: "contact-1", coachScriptSlug: "bmh-follow-up" }));
+    expect(result.ok).toBe(true);
+    await mocks.after.mock.calls[0][0]();
+    expect(mocks.coachCallIndexUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({ script_slug: "bmh-follow-up", script_revision: 1, script_digest: "b".repeat(64) }),
+      { onConflict: "client_call_id" },
+    );
+  });
+
   it("still records coach channel ownership when the cached default lookup rejects", async () => {
     mocks.coachDefaultMaybeSingle.mockRejectedValueOnce(new Error("default cache unavailable"));
     const result = await startAuthenticatedJitterCall(callTarget({ propertyId: "property-1", contactId: "contact-1" }));

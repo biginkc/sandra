@@ -111,8 +111,8 @@ const TEARDOWN_WARNING =
 const AUDIO_RECONNECT_WARNING =
   "The homeowner call is still live, but browser audio needs to reconnect.";
 const COACH_STORAGE_KEY = "sandra.softphone.coach.v1";
-type CoachPreference = { enabled: boolean };
-const DEFAULT_COACH_PREFERENCE: CoachPreference = { enabled: false };
+type CoachPreference = { enabled: boolean; scriptId: "closr-outbound" | "closr-inbound" | "bmh-follow-up" | "bmh-cold-call-objections" };
+const DEFAULT_COACH_PREFERENCE: CoachPreference = { enabled: false, scriptId: "closr-outbound" };
 
 function readCoachPreference(): CoachPreference {
   if (typeof window === "undefined") return DEFAULT_COACH_PREFERENCE;
@@ -127,7 +127,10 @@ function readCoachPreference(): CoachPreference {
       typeof saved.enabled !== "boolean"
     )
       return DEFAULT_COACH_PREFERENCE;
-    return { enabled: saved.enabled };
+    const scriptId = "scriptId" in saved &&
+      (saved.scriptId === "closr-inbound" || saved.scriptId === "bmh-follow-up" || saved.scriptId === "bmh-cold-call-objections")
+      ? saved.scriptId : "closr-outbound";
+    return { enabled: saved.enabled, scriptId };
   } catch {
     return DEFAULT_COACH_PREFERENCE;
   }
@@ -1009,6 +1012,7 @@ export function SoftphoneProvider({
           callToken,
           ...(intentCapability ? { intentCapability } : {}),
           callerIdE164,
+          coachScriptSlug: coachPreference.scriptId,
         });
         if (attemptGenerationRef.current !== myAttempt) {
           // Superseded while transport.start() was in flight — the rep
@@ -1048,6 +1052,7 @@ export function SoftphoneProvider({
     [
       callingEnabled,
       coachPreference.enabled,
+      coachPreference.scriptId,
       loadCallerIds,
       showToast,
       transition,
@@ -1885,6 +1890,23 @@ function CoachPreferenceControl({
             />
           </button>
         </div>
+        {preference.enabled ? (
+          <label className="mt-2 block text-[11px] font-semibold text-[#a9b6cf]">
+            Call script
+            <select
+              aria-label="Call script"
+              data-testid="dialer-coach-script-picker"
+              value={preference.scriptId}
+              onChange={(event) => onChange({ ...preference, scriptId: event.target.value as CoachPreference["scriptId"] })}
+              className="mt-1 w-full rounded-md border border-[#7184a8] bg-[#0c1426] px-2 py-1.5 text-xs font-semibold text-white"
+            >
+              <option value="closr-outbound">CLOSR outbound</option>
+              <option value="closr-inbound">CLOSR inbound</option>
+              <option value="bmh-follow-up">BMH follow-up and Maria handoff</option>
+              <option value="bmh-cold-call-objections">BMH cold call and objections</option>
+            </select>
+          </label>
+        ) : null}
       </div>
     </Collapsible.Root>
   );
