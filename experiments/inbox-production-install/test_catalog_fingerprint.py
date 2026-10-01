@@ -74,6 +74,20 @@ class CatalogScope(unittest.TestCase):
         self.assertNotIn('baseline_digest', fixture)
         self.assertNotIn('candidate_sha', fixture)
 
+    def test_platform_index_drift_is_recordable(self):
+        # Regression: 'indexes'[:-1] is 'indexe', so every index drift item failed validation
+        # with 'drift classification mismatch' (the first TEST/PROD generator run).
+        sections = {name: [] for name in f.CATALOG_SECTIONS}
+        sections['relations'] = [{'identity': 'auth.users', 'owner': 'supabase_auth_admin', 'columns': [], 'indexes': [], 'constraints': [], 'triggers': [], 'policies': []}]
+        baseline = f.fingerprint(sections)
+        observed_sections = copy.deepcopy(sections)
+        observed_sections['relations'][0]['indexes'].append({'name': 'platform_users_test_idx', 'definition': 'CREATE INDEX platform_users_test_idx ON auth.users USING btree (id)', 'unique': False, 'primary': False, 'constraint': False, 'valid': True, 'ready': True, 'live': True, 'predicate': None, 'expression': False, 'owner': 'supabase_auth_admin'})
+        observed = f.fingerprint(observed_sections)
+        fixture = f.generate_drift_items_fixture(baseline, observed, 'copflsklaefwzipsrjqz')
+        self.assertEqual([(i['attribute'], i['classification']['class'], i['origin']) for i in fixture['items']], [('indexes', 'index', 'platform')])
+        record = f.generate_drift_record_from_fixture(baseline, observed, fixture, 'copflsklaefwzipsrjqz', 'a' * 40)
+        self.assertEqual(f.record_bindings(record), f.fixture_bindings(fixture))
+
     def test_no_drift_is_an_explicit_empty_fixture_and_sql_is_safe(self):
         sections = {name: [] for name in f.CATALOG_SECTIONS}
         sections['relations'] = [{'identity': 'public.message_threads', 'owner': 'postgres', 'columns': [], 'indexes': [], 'constraints': [], 'triggers': [], 'policies': []}]

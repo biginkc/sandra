@@ -176,7 +176,7 @@ def _validate_drift_record(record, baseline=None, target_ref=None, candidate_sha
         if item['definition_sha256'] != _definition_digest(item['canonical_definition']):
             raise ValueError('drift definition digest mismatch')
         classification = item['classification']
-        if not isinstance(classification, dict) or classification.get('class') != item['attribute'][:-1]:
+        if not isinstance(classification, dict) or classification.get('class') != {'columns': 'column', 'indexes': 'index'}[item['attribute']]:
             raise ValueError('drift classification mismatch')
         if item['origin'] not in {'unknown', 'platform'}:
             raise ValueError('unknown drift origin')
