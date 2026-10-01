@@ -32,6 +32,13 @@ function openQuietHoursFixture() {
   return `CREATE OR REPLACE FUNCTION inbox_reply_preparation.quiet_hours(state text,at_time timestamptz) RETURNS jsonb LANGUAGE sql IMMUTABLE SET search_path='' AS $qh$ SELECT jsonb_build_object('ok',true,'zone','America/Chicago','local_time','${fixtureLocalTime()}') $qh$;`;
 }
 
+async function quietHoursDefinition() {
+  const source = await readFile(MIGRATION, 'utf8');
+  const match = source.match(/CREATE FUNCTION inbox_reply_preparation\.quiet_hours\(.*?AS \$\$(.*?)\$\$;/s);
+  assert.ok(match, 'quiet_hours 040200 source body was not found');
+  return match[0].replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION');
+}
+
 function itemValue(n, offset = 0) {
   const x = ids(n + offset);
   const owner = ids(n);
@@ -245,8 +252,9 @@ async function runT12(pool) {
   const handler = createRunHandler({ runner, pool });
   const ctx = new JournalingContext();
   const input = { orgId: x.o, operationId: x.op };
-  await seed(pool, n, { validUntilSeconds: 30, markerFault: true });
+  const originalQuietHours = await quietHoursDefinition();
   try {
+    await seed(pool, n, { validUntilSeconds: 30, markerFault: true });
     await expectPlainNotSettled(() => handler(ctx, input), 'INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER');
     const first = await ledger(pool, n);
     assert.equal(first.state, 'claimed');
@@ -274,6 +282,7 @@ async function runT12(pool) {
     assert.equal(ack.leaseLive, true);
     return 'T-R12 PASS not_sent retried; H2 deferred inside g1; g2 skipped expired item; H3 lease live and ack true';
   } finally {
+    await pool.query(originalQuietHours);
     await cleanup(pool, n);
   }
 }
@@ -287,7 +296,7 @@ async function runT12b(pool) {
   const handler = createRunHandler({ runner, pool });
   const ctx = new JournalingContext();
   const input = { orgId: x.o, operationId: x.op };
-  await seed(pool, n, { validUntilSeconds: 5, markerSleep: true });
+  const originalQuietHours = await quietHoursDefinition();
   const source = await readFile(MIGRATION, 'utf8');
   const match = source.match(/CREATE FUNCTION inbox_reply_send\.start_dispatch\(.*?END \$\$;/s);
   assert.ok(match, 'start_dispatch fixture copy was not found');
@@ -296,6 +305,7 @@ async function runT12b(pool) {
   assert.notEqual(replacement, original);
   const fixtureMutation = process.env.RESTATE_LOCAL_DB_FIXTURE_VARIANT === 'T-R12b-drop-post-marker';
   try {
+    await seed(pool, n, { validUntilSeconds: 5, markerSleep: true });
     if (fixtureMutation) await pool.query(replacement);
     const result = await handler(ctx, input);
     assert.equal(result.attempts[0].state, 'skipped_ineligible');
@@ -310,6 +320,7 @@ async function runT12b(pool) {
     return 'T-R12b PASS post-marker expiry rechecked with no transport; H3 lease live and ack true';
   } finally {
     if (fixtureMutation) await pool.query(original);
+    await pool.query(originalQuietHours);
     await cleanup(pool, n);
   }
 }

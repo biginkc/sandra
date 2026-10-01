@@ -325,5 +325,6 @@ try {
     await new Promise((resolve) => postgrest.once("exit", resolve));
   }
   if (mutation === "T23") await runPsql(projectionFunction(false));
+  await runPsql("drop function if exists public.r10_local_pre_request();");
   await cleanupLocalOrganizations();
 }

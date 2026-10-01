@@ -62,13 +62,17 @@ def merged_drips_migration() -> str:
     return result.stdout
 
 
-def fn_body(name: str) -> str:
+def migration_fn_body(path: Path, name: str) -> str:
     """Return a function definition solely for installing a test mutation."""
-    source = MIGRATION.read_text()
-    match = re.search(rf"CREATE(?: OR REPLACE)? FUNCTION {re.escape(name)}\(.*?END \$\$;", source, re.S)
+    source = path.read_text()
+    match = re.search(rf"CREATE(?: OR REPLACE)? FUNCTION {re.escape(name)}\(.*?\$\$;", source, re.S)
     if not match:
         raise RuntimeError(f"could not extract mutation target {name}")
     return re.sub(r"^CREATE(?: OR REPLACE)? ", "CREATE OR REPLACE ", match.group(0))
+
+
+def fn_body(name: str) -> str:
+    return migration_fn_body(MIGRATION, name)
 
 
 def install_mutated_function(name: str, old: str, new: str) -> str:
@@ -132,10 +136,10 @@ def fixture_local_time() -> str:
 
 
 def open_quiet_hours_fixture() -> str:
-    # These proofs exercise persistence and projection, not quiet-hours
-    # policy. Pin their eligibility input in the fixture while retaining the
-    # effective local time in the clock-independence evidence. The production
-    # quiet-hours rule has its own blocked-path integration assertion.
+    # Most proofs exercise persistence and projection, not quiet-hours policy.
+    # Pin their eligibility input in the fixture while retaining the effective
+    # local time in the clock-independence evidence. T23 covers the legacy
+    # blocked path and T28-QH covers the Inbox SQL blocked path directly.
     return f"""CREATE OR REPLACE FUNCTION inbox_reply_preparation.quiet_hours(state text,at_time timestamptz) RETURNS jsonb LANGUAGE sql IMMUTABLE SET search_path='' AS $qh$ SELECT jsonb_build_object('ok',true,'zone','America/Chicago','local_time','{fixture_local_time()}') $qh$;"""
 
 
@@ -449,6 +453,63 @@ END $$;"""
 {started(n)} DO $$ DECLARE m jsonb; BEGIN SELECT metadata INTO m FROM public.messages WHERE idempotency_key='{x['a']}'; IF m IS DISTINCT FROM jsonb_build_object('inboxReply',jsonb_build_object('attemptId','{x['a']}','operationId','{x['op']}')) THEN RAISE EXCEPTION 'T23 pending metadata parity mismatch'; END IF; END $$;
 {accepted(n,'ext-23')} DO $$ DECLARE m jsonb; BEGIN SELECT metadata INTO m FROM public.messages WHERE idempotency_key='{x['a']}'; IF m IS DISTINCT FROM jsonb_build_object('inboxReply',jsonb_build_object('attemptId','{x['a']}','operationId','{x['op']}'),'providerStatus','sent') THEN RAISE EXCEPTION 'T23 accepted metadata parity mismatch'; END IF; END $$;"""
         return assert_case(n, body, install_mutated_function("inbox_reply_send.project_message", "jsonb_build_object('inboxReply',marker)", "jsonb_build_object('inboxReply',marker,'generated_by','reply')"))
+    if n == 28:
+        quiet_hours = migration_fn_body(
+            ROOT / "supabase/migrations/20260930040200_inbox_backend_operation_reply.sql",
+            "inbox_reply_preparation.quiet_hours",
+        )
+        shifted_quiet_hours = quiet_hours.replace(
+            "extract(hour FROM timezone(zone,at_time))>=8",
+            "extract(hour FROM timezone(zone,at_time))>=18",
+            1,
+        )
+        if shifted_quiet_hours == quiet_hours:
+            raise RuntimeError("T28 quiet_hours window mutation target not found")
+        item_current = migration_fn_body(
+            ROOT / "supabase/migrations/20260930040200_inbox_backend_operation_reply.sql",
+            "inbox_reply_send.item_current",
+        )
+        quiet_hours_gate = """ qh:=inbox_reply_preparation.quiet_hours(item->>'state',clock_timestamp());
+ IF qh->>'ok' IS DISTINCT FROM 'true' THEN
+  IF qh->>'reason'='unknown_state' THEN RETURN 'unknown_state';ELSE RETURN 'outside_window';END IF;
+ END IF;
+"""
+        dropped_quiet_hours = item_current.replace(quiet_hours_gate, "", 1)
+        if dropped_quiet_hours == item_current:
+            raise RuntimeError("T28 item_current quiet_hours gate mutation target not found")
+        body = f"""
+INSERT INTO auth.users(id,email) VALUES('{x['c']}','projection-{n}@example.test');
+INSERT INTO memberships(user_id,org_id,role,access_status) VALUES('{x['c']}','{x['o']}','owner','active');
+INSERT INTO provider_sender_numbers(id,org_id,provider,phone_e164,provider_number_id,status,messaging_status) VALUES('{x['token']}','{x['o']}','sendillo','+12025550001','projection-t28','active','active');
+INSERT INTO inbox_inbound_heads(org_id,conversation_id,revision) VALUES('{x['o']}','{x['conv']}',1);
+UPDATE inbox_reply_review.admission SET enabled=true;
+DO $$ DECLARE outside_window jsonb; inside_window jsonb;
+BEGIN
+ SELECT inbox_reply_preparation.quiet_hours('MO','2026-06-15T04:00:00Z') INTO outside_window;
+ SELECT inbox_reply_preparation.quiet_hours('MO','2026-06-15T17:00:00Z') INTO inside_window;
+ -- 040200's pure helper returns ok/zone/local_time; item_current maps a
+ -- false result other than unknown_state to the durable outside_window code.
+ IF outside_window->>'ok' IS DISTINCT FROM 'false' OR (CASE WHEN outside_window->>'ok'='false' THEN 'outside_window' ELSE outside_window->>'reason' END) IS DISTINCT FROM 'outside_window' THEN RAISE EXCEPTION 'T28-QH real outside-window mismatch: %',outside_window; END IF;
+ IF inside_window->>'ok' IS DISTINCT FROM 'true' THEN RAISE EXCEPTION 'T28-QH real inside-window mismatch: %',inside_window; END IF;
+END $$;
+CREATE OR REPLACE FUNCTION inbox_reply_preparation.quiet_hours(state text,at_time timestamptz) RETURNS jsonb LANGUAGE sql IMMUTABLE SET search_path='' AS $$ SELECT jsonb_build_object('ok',false,'reason','outside_window') $$;
+DO $$ DECLARE claim jsonb; dispatch jsonb; state text; evidence text; token uuid; message_count integer;
+BEGIN
+ SELECT inbox_reply_send.worker_claim('{x['o']}','{x['a']}',60) INTO claim;
+ SELECT inbox_reply_send.worker_start_dispatch('{x['o']}','{x['a']}',(claim->>'generation')::bigint) INTO dispatch;
+ SELECT a.state,a.evidence,a.dispatch_token INTO state,evidence,token FROM inbox_reply_send.attempts a WHERE a.org_id='{x['o']}' AND a.id='{x['a']}';
+ SELECT count(*) INTO message_count FROM public.messages WHERE org_id='{x['o']}';
+ IF claim->>'kind' IS DISTINCT FROM 'claimed' OR dispatch->>'kind' IS DISTINCT FROM 'skipped' OR dispatch->>'reason' IS DISTINCT FROM 'outside_window' OR state IS DISTINCT FROM 'skipped_ineligible' OR evidence IS DISTINCT FROM 'outside_window' OR token IS NOT NULL OR message_count<>0 THEN
+  RAISE EXCEPTION 'T28-QH Inbox SQL blocked-path mismatch: claim=% dispatch=% state=% evidence=% token=% messages=%',claim,dispatch,state,evidence,token,message_count;
+ END IF;
+END $$;"""
+        if MUTATION_VARIANT == "quiet-hours-window":
+            mutation = shifted_quiet_hours
+        elif MUTATION_VARIANT == "drop-item-current-quiet-hours":
+            mutation = dropped_quiet_hours
+        else:
+            mutation = shifted_quiet_hours
+        return assert_case(n, body, mutation)
     if n in {24,25,26,27}:
         return drip_case(n)
     raise KeyError(n)

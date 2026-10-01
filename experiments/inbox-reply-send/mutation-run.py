@@ -9,6 +9,7 @@ failure text, then derives the evidence markdown from that raw log.
 from __future__ import annotations
 
 import os
+import hashlib
 import re
 import shutil
 import subprocess
@@ -19,10 +20,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PROOF = ROOT / "experiments/inbox-reply-send/projection-proof.py"
+QUIET_HOURS_MIGRATION = ROOT / "supabase/migrations/20260930040200_inbox_backend_operation_reply.sql"
 STATUS_EVENTS = ROOT / "src/lib/messaging/status-events.ts"
 HANDLER = ROOT / "experiments/inbox-reply-send-worker/handler.mjs"
 T18_INTEGRATION = ROOT / "src/app/api/cron/sequence-tick/route.queue.integration.test.ts"
 LOCAL_INTEGRATION = ROOT / "experiments/inbox-reply-send/run-local-integration.mjs"
+SEND_MODULE = ROOT / "src/lib/messaging/send.ts"
 REPLY_STATUS_ROUTE = ROOT / "src/app/api/webhooks/sendillo/reply-status/route.ts"
 PROJECTION_MIGRATION = ROOT / "supabase/migrations/20260930040250_inbox_reply_message_projection.sql"
 WORKER_TEST = ROOT / "experiments/inbox-reply-send-worker/restate-retry.test.mjs"
@@ -35,7 +38,7 @@ WORKER_TRANSPORT = ROOT / "experiments/inbox-reply-send-worker/vendor/test-trans
 LOCAL_DB_RETRY = ROOT / "experiments/inbox-reply-send-worker/restate-retry-local-db.py"
 PROVIDER_FIX = ROOT / "experiments/inbox-reply-send/provider-fix-proof.py"
 PROVIDER_FIX_MINIMAL = ROOT / "experiments/inbox-reply-send/provider-fix-minimal.py"
-LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r12.log")
+LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r13.log")
 EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-evidence.md")
 CLOCK_PROOF_POINTS = (
     ("previously-failed", "23:00:00", "2026-06-15T04:00:00Z"),
@@ -55,6 +58,49 @@ def record(handle, label: str, result: subprocess.CompletedProcess[str]) -> None
     handle.flush()
 
 
+def quiet_hours_source() -> tuple[str, str]:
+    source = QUIET_HOURS_MIGRATION.read_text(encoding="utf-8")
+    match = re.search(
+        r"CREATE FUNCTION inbox_reply_preparation\.quiet_hours\(.*?AS \$\$(.*?)\$\$;",
+        source,
+        re.DOTALL,
+    )
+    if not match:
+        raise RuntimeError("ENV FAIL: 040200 quiet_hours source body is missing")
+    body = match.group(1)
+    return body, hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def quiet_hours_preflight(label: str, handle=None) -> None:
+    body, digest = quiet_hours_source()
+    result = execute([
+        "psql", "-XqAt", "-v", "ON_ERROR_STOP=1",
+        "-h", os.environ["PROJECTION_PGHOST"],
+        "-p", os.environ["PROJECTION_PGPORT"],
+        "-U", os.environ.get("PROJECTION_PGUSER", "postgres"),
+        "-d", os.environ.get("PROJECTION_PGDATABASE", "postgres"),
+        "-c", """
+SELECT encode(convert_to(p.prosrc,'UTF8'),'hex') || '|' || p.provolatile::text || '|' || l.lanname::text
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid=p.pronamespace
+JOIN pg_language l ON l.oid=p.prolang
+WHERE n.nspname='inbox_reply_preparation'
+  AND p.proname='quiet_hours'
+  AND pg_get_function_identity_arguments(p.oid)='state text, at_time timestamp with time zone';
+""",
+    ], {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+    observed = result.stdout.strip()
+    expected = f"{body.encode('utf-8').hex()}|i|sql"
+    if result.returncode != 0 or observed != expected:
+        detail = (result.stderr + result.stdout).strip().replace("\n", " ")
+        raise RuntimeError(f"ENV FAIL: quiet_hours {label} preflight mismatch: {detail[:400]}")
+    line = f"QUIET_HOURS_PREFLIGHT {label}=PASS source_sha256={digest}"
+    print(line, flush=True)
+    if handle is not None:
+        handle.write(line + "\n")
+        handle.flush()
+
+
 def run_sql_cases(handle, n: int) -> None:
     base_env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PROJECTION_VERBOSE_FAILURES": "1"}
     if n == 10:
@@ -70,7 +116,8 @@ def run_sql_cases(handle, n: int) -> None:
             record(handle, f"T10 mutation SKIP PostgreSQL major {major}", skipped)
             return
     command = [sys.executable, str(PROOF), f"T{n}"]
-    record(handle, f"T{n} baseline", execute(command, base_env))
+    case_label = "T28-QH" if n == 28 else f"T{n}"
+    record(handle, f"{case_label} baseline", execute(command, base_env))
     if n == 17:
         return
     if n == 4:
@@ -83,6 +130,10 @@ def run_sql_cases(handle, n: int) -> None:
         for variant in ("channel", "org", "direction"):
             mutated_env = {**base_env, "PROJECTION_MUTATION_VARIANT": variant}
             record(handle, f"T15 mutation {variant}", execute([sys.executable, str(PROOF), "--mutated", "T15"], mutated_env))
+    elif n == 28:
+        for variant in ("quiet-hours-window", "drop-item-current-quiet-hours"):
+            mutated_env = {**base_env, "PROJECTION_MUTATION_VARIANT": variant}
+            record(handle, f"T28-QH mutation {variant}", execute([sys.executable, str(PROOF), "--mutated", "T28"], mutated_env))
     else:
         record(handle, f"T{n} mutation", execute([sys.executable, str(PROOF), "--mutated", f"T{n}"], base_env))
     if n in {18, 23}:
@@ -120,6 +171,28 @@ def run_local_integration(handle, n: int) -> None:
             T18_INTEGRATION.write_bytes(original)
     else:
         record(handle, "T23 integration mutation", execute(command + ["--mutated", "T23"], env))
+        quiet_command = ["node", str(LOCAL_INTEGRATION), "--test", "T23-quiet"]
+        record(handle, "T23 quiet-hours integration baseline", execute(quiet_command, env))
+        original = SEND_MODULE.read_bytes()
+        needle = b'''  // 4. Quiet hours.
+  const quiet = checkQuietHours(propertyResult.data.state);
+  if (!quiet.ok) {
+    return preserveRepSmsPreDispatchFailure(input, {
+      status: "blocked_quiet_hours",
+      reason: quietMessage(quiet),
+      check: quiet,
+    });
+  }
+'''
+        replacement = b'''  // mutation: remove the legacy quiet-hours gate
+'''
+        if original.count(needle) != 1:
+            raise RuntimeError("T23 quiet-hours mutation target is not unique")
+        SEND_MODULE.write_bytes(original.replace(needle, replacement, 1))
+        try:
+            record(handle, "T23 quiet-hours integration mutation", execute(quiet_command, env))
+        finally:
+            SEND_MODULE.write_bytes(original)
 
 
 def run_t4_application(handle) -> None:
@@ -223,6 +296,7 @@ def run_worker_locals(handle) -> None:
         ("T-R6 Number mutation", WORKER_CORE, b"const loggedGeneration = generation;", b"const loggedGeneration = Number(generation);", "T-R6"),
         ("T-R6 modulo-boundary mutation", WORKER_CORE, b"body.status === 'PreviouslyAccepted' && generation >= 150n", b"body.status === 'PreviouslyAccepted' && generation % 150n === 0n", "T-R6"),
         ("T-R14 production logger mutation", WORKER_CORE, b"  const stallLogger = createStallLogger(clock, write);\n  return (pool, fetcher, ingress) => dispatchBatchWithStalls(pool, fetcher, ingress, { stallLogger });", b"  return (pool, fetcher, ingress) => dispatchBatchWithStalls(pool, fetcher, ingress, { stallLogger: createStallLogger(clock, write) });", "T-R14"),
+        ("T-R14 exported dispatchBatch direct-call mutation", WORKER_CORE, b"export async function dispatchBatch(pool, fetcher, ingress) {\n  return processDispatchBatch(pool, fetcher, ingress);\n}", b"export async function dispatchBatch(pool, fetcher, ingress) {\n  return dispatchBatchWithStalls(pool, fetcher, ingress);\n}", "T-R14"),
         ("T-R7 mutation", WORKER_DOCKERFILE, b"core.mjs runner.mjs server.mjs handler.mjs service.mjs", b"core.mjs runner.mjs server.mjs service.mjs", "T-R7"),
         ("T-R8 RunOptions mutation", WORKER_HANDLER, b"await ctx.run(`persist:${attemptId}`, async () => runner.persistAttempt(orgId, operationId, attemptId, dispatch));", b"await ctx.run(`persist:${attemptId}`, { maxRetryAttempts: 3 }, async () => runner.persistAttempt(orgId, operationId, attemptId, dispatch));", "T-R8"),
         ("T-R8 source TerminalError mutation", WORKER_CORE, b"export async function dispatchBatch(pool, fetcher, ingress) {\n  return processDispatchBatch(pool, fetcher, ingress);\n", b"export async function dispatchBatch(pool, fetcher, ingress) {\n  void new TerminalError('mutation: source scan');\n  return processDispatchBatch(pool, fetcher, ingress);\n", "T-R8"),
@@ -387,7 +461,7 @@ REAL_NOT_RUN = {
 
 
 SECTION_RE = re.compile(r"^===== (.+?) =====\n(.*?)^===== END \1 =====\n?", re.MULTILINE | re.DOTALL)
-TEST_ID_RE = re.compile(r"(?:T-R\d+[a-z]?|T\d+|B\d+)")
+TEST_ID_RE = re.compile(r"(?:T-R\d+[a-z]?|T\d+(?:-QH)?|B\d+)")
 ENV_FAIL_MARKERS = (
     "could not connect",
     "No such file or directory",
@@ -468,9 +542,9 @@ def failure_excerpt(body: str) -> str:
 def derive_evidence(raw: str) -> str:
     sections = captured_sections(raw)
     rows: list[str] = [
-        "# Reply-persistence v12 mutation evidence (generated)",
+        "# Reply-persistence v13 mutation evidence (generated)",
         "",
-        "This file is generated from `replypersist-mutation-run-r12.log`. EXECUTED requires a passing baseline and a natural non-zero mutation result; baseline failures are never counted as executed. A passing mutation is SURVIVED and fails the runner. Any BASELINE FAIL also fails the runner.",
+        "This file is generated from `replypersist-mutation-run-r13.log`. EXECUTED requires a passing baseline and a natural non-zero mutation result; baseline failures are never counted as executed. A passing mutation is SURVIVED and fails the runner. Any BASELINE FAIL also fails the runner.",
         "",
         "| Test | Status | Baseline result | Mechanism | Natural mutated failure |",
         "|---|---|---|---|---|",
@@ -513,9 +587,9 @@ def derive_evidence(raw: str) -> str:
         rows.append(
             f"| {test} | {status} | `{baseline_result}` | {mechanism} | `{mutated_failure}` |"
         )
-    for n in range(1, 28):
+    for n in range(1, 29):
         test = f"T{n}"
-        if test not in seen:
+        if test not in seen and not (n == 28 and "T28-QH" in seen):
             rows.append(f"| {test} | NOT RUN | `no captured baseline` | no mutation record | `no captured run` |")
     for test, reason in REAL_NOT_RUN.items():
         rows.append(f"| {test} | NOT RUN | `ruling row not run` | REAL ruling row | `{reason}` |")
@@ -640,17 +714,31 @@ def main() -> int:
         print(str(error), file=sys.stderr)
         return 2
     LOG.parent.mkdir(parents=True, exist_ok=True)
+    harness_error: Exception | None = None
     with LOG.open("w", encoding="utf-8") as handle:
-        handle.write("reply-persistence v12 round-12 mutation run; machine-produced raw child output\n")
-        for n in range(1, 28):
-            run_sql_cases(handle, n)
-        run_t17_application(handle)
-        run_worker_locals(handle)
-        run_provider_fixes(handle)
-        run_restate_local_db(handle)
-        run_clock_independence_proof(handle)
+        handle.write("reply-persistence v13 round-13 mutation run; machine-produced raw child output\n")
+        try:
+            quiet_hours_preflight("before", handle)
+            for n in range(1, 29):
+                run_sql_cases(handle, n)
+            run_t17_application(handle)
+            run_worker_locals(handle)
+            run_provider_fixes(handle)
+            run_restate_local_db(handle)
+            run_clock_independence_proof(handle)
+        except Exception as error:
+            harness_error = error
+            print(f"ENV FAIL: mutation harness failed: {error}", file=sys.stderr)
+        finally:
+            try:
+                quiet_hours_preflight("after", handle)
+            except Exception as error:
+                harness_error = harness_error or error
+                print(str(error), file=sys.stderr)
     raw = LOG.read_text(encoding="utf-8")
     EVIDENCE.write_text(derive_evidence(raw), encoding="utf-8")
+    if harness_error is not None:
+        return 2
     unexpected = unexpected_not_run_headers(raw)
     if unexpected:
         print("ENV FAIL: unexpected NOT RUN rows:", file=sys.stderr)

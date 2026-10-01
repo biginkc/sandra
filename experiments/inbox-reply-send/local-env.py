@@ -38,6 +38,7 @@ FROZEN_MIGRATIONS = {
     "supabase/migrations/20260930040200_inbox_backend_operation_reply.sql": "2a4b49d43e67963805d547221d04c84c3f7823f430fd9c0cc9b3f22b36844aad",
 }
 MIGRATION = ROOT / "supabase/migrations/20260930040250_inbox_reply_message_projection.sql"
+QUIET_HOURS_MIGRATION = ROOT / "supabase/migrations/20260930040200_inbox_backend_operation_reply.sql"
 VENDOR_DIR = ROOT / "experiments/inbox-projection/fixture/vendor"
 VENDOR_MANIFEST = VENDOR_DIR / "manifest.json"
 
@@ -161,6 +162,37 @@ def verify_frozen_hashes() -> None:
         print(f"FROZEN_HASH {path.name} {actual}", flush=True)
         if actual != expected:
             fail(f"frozen migration hash mismatch for {relative}: expected {expected}, got {actual}")
+
+
+def quiet_hours_source() -> tuple[str, str]:
+    source = QUIET_HOURS_MIGRATION.read_text(encoding="utf-8")
+    match = re.search(
+        r"CREATE FUNCTION inbox_reply_preparation\.quiet_hours\(.*?AS \$\$(.*?)\$\$;",
+        source,
+        re.DOTALL,
+    )
+    if not match:
+        fail("040200 quiet_hours source body is missing")
+    body = match.group(1)
+    return body, hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def check_quiet_hours(state: dict[str, object], label: str) -> None:
+    body, digest = quiet_hours_source()
+    expected_hex = body.encode("utf-8").hex()
+    observed = sql_output(state, """
+SELECT encode(convert_to(p.prosrc,'UTF8'),'hex') || '|' || p.provolatile::text || '|' || l.lanname::text
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid=p.pronamespace
+JOIN pg_language l ON l.oid=p.prolang
+WHERE n.nspname='inbox_reply_preparation'
+  AND p.proname='quiet_hours'
+  AND pg_get_function_identity_arguments(p.oid)='state text, at_time timestamp with time zone';
+""")
+    parts = observed.split("|")
+    if parts != [expected_hex, "i", "sql"]:
+        fail(f"quiet_hours {label} preflight failed: expected 040200 body/immutable/sql, observed {observed[:160]}")
+    print(f"LOCAL_ENV_CHECK quiet_hours={label}:040200_body_match source_sha256={digest}", flush=True)
 
 
 def bootstrap_sql() -> str:
@@ -384,7 +416,7 @@ def projection_function_signatures() -> list[str]:
     return signatures
 
 
-def check_state(state: dict[str, object]) -> None:
+def check_state(state: dict[str, object], *, require_pre_request: bool = True) -> None:
     verify_frozen_hashes()
     data = Path(str(state["data"]))
     if not data.is_dir():
@@ -396,6 +428,7 @@ def check_state(state: dict[str, object]) -> None:
     )
     if ready.returncode:
         fail(f"PostgreSQL is not ready at {state['socket']}:{state['port']}: {(ready.stderr + ready.stdout).strip()}")
+    check_quiet_hours(state, "preflight")
     if not shutil.which("postgrest"):
         fail("postgrest is not on PATH")
     version = command([POSTGREST, "--version"], check=False, timeout=20)
@@ -456,9 +489,10 @@ ORDER BY signature;
         fail(f"040250 function preflight failed; missing: {', '.join(missing)}")
     print(f"LOCAL_ENV_CHECK 040250_functions={len(present)}/{len(signatures)}", flush=True)
 
-    if sql_output(state, "SELECT to_regprocedure('public.r10_local_pre_request()') IS NOT NULL;").lower() != "t":
+    pre_request_present = sql_output(state, "SELECT to_regprocedure('public.r10_local_pre_request()') IS NOT NULL;").lower() == "t"
+    if require_pre_request and not pre_request_present:
         fail("public.r10_local_pre_request is missing")
-    print("LOCAL_ENV_CHECK r10_local_pre_request=present", flush=True)
+    print(f"LOCAL_ENV_CHECK r10_local_pre_request={'present' if pre_request_present else 'absent_allowed'}", flush=True)
     print("LOCAL_ENV_CHECK frozen_hashes=3/3", flush=True)
     print(f"LOCAL_ENV_READY host={state['socket']} port={state['port']}", flush=True)
 
@@ -539,6 +573,11 @@ def run_runner() -> int:
         cwd=ROOT,
         env=environment,
     )
+    try:
+        check_state(state, require_pre_request=False)
+    except LocalEnvError as error:
+        print(f"LOCAL_ENV_FAIL: post-run preflight: {error}", file=sys.stderr)
+        return 2
     print(f"LOCAL_ENV_RUN exit={result.returncode}", flush=True)
     return result.returncode
 
