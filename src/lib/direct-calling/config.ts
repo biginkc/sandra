@@ -4,6 +4,10 @@ import type { CallingConfig } from "./contract";
 
 export type DirectCallEnv = Record<string, string | undefined>;
 
+export const NORMAL_CALL_TIME_LIMIT_SECS = 7200;
+export const PILOT_CALL_TIME_LIMIT_MIN_SECS = 30;
+export const PILOT_CALL_TIME_LIMIT_MAX_SECS = 180;
+
 export type TelnyxDirectSettings = {
   apiKey: string;
   connectionId: string;
@@ -47,8 +51,25 @@ export function isContainmentVerified(env: DirectCallEnv = process.env): boolean
   return env.DIRECT_CALL_CONTAINMENT_VERIFIED?.trim() === "true";
 }
 
+/**
+ * The normal direct-call limit remains 7,200 seconds. A bounded pilot limit is an explicit opt-in:
+ * when configured it must be an integer in the provider-safe 30..180 second range. Invalid values
+ * return null so the direct transport fails closed instead of silently widening the call window.
+ */
+export function readDirectCallTimeLimitSecs(env: DirectCallEnv = process.env): number | null {
+  if (env.DIRECT_CALL_TIME_LIMIT_SECS === undefined) return NORMAL_CALL_TIME_LIMIT_SECS;
+  const raw = env.DIRECT_CALL_TIME_LIMIT_SECS.trim();
+  if (!raw) return null;
+  if (!/^\d+$/.test(raw)) return null;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < PILOT_CALL_TIME_LIMIT_MIN_SECS || value > PILOT_CALL_TIME_LIMIT_MAX_SECS) return null;
+  return value;
+}
+
 /** "telnyx_direct" only for an allow-listed pilot user with every env var set and containment verified. */
 export function resolveCallingConfig(userId: string | null | undefined, env: DirectCallEnv = process.env): CallingConfig {
-  if (!userId || !isContainmentVerified(env) || !isPilotUser(userId, env) || !readTelnyxDirectSettings(env)) return { transport: "default" };
+  if (!userId || !isContainmentVerified(env) || !isPilotUser(userId, env) || !readTelnyxDirectSettings(env) || readDirectCallTimeLimitSecs(env) === null) {
+    return { transport: "default" };
+  }
   return { transport: "telnyx_direct" };
 }

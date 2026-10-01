@@ -1,7 +1,7 @@
 // Test-only helpers: an in-memory DirectCallStore. Never imported by production code.
 import type { DirectCallStatus } from "./contract";
 import type { BeginOutcome, CleanupUpdate, DirectCallCleanupRow, DirectCallFullRow, DirectCallOperatorRow, DirectCallStore, EventInsertResult, NewDirectCall } from "./store";
-import type { CleanupSpec, RowPatch } from "./transitions";
+import { DISPATCH_MARKER_RESPONSE_ALLOWANCE_SECS, type CleanupSpec, type RowPatch } from "./transitions";
 
 export function makeRow(overrides: Partial<DirectCallFullRow> = {}): DirectCallFullRow {
   return {
@@ -12,6 +12,8 @@ export function makeRow(overrides: Partial<DirectCallFullRow> = {}): DirectCallF
     contact_id: null,
     destination_e164: "+15550001111",
     caller_id_e164: "+15550002222",
+    time_limit_secs: 7200,
+    browser_dial_started_at: null,
     status: "browser_connecting",
     browser_leg_id: "browser-leg",
     seller_leg_id: null,
@@ -55,6 +57,7 @@ export class FakeStore implements DirectCallStore {
       operator_user_id: call?.operator_user_id ?? "user-1",
       leg_id: null,
       dial_role: null,
+      dial_started_at: null,
       resolve_after: null,
       backstop_at: null,
       attempts: 0,
@@ -84,15 +87,15 @@ export class FakeStore implements DirectCallStore {
       }
     }
   }
-  private addDialRow(callId: string, role: "browser" | "seller", timeoutSecs: number, timeLimitSecs: number) {
-    const at = (secs: number) => new Date(this.clock().getTime() + secs * 1000).toISOString();
+  private addDialRow(callId: string, role: "browser" | "seller", _timeoutSecs: number, _timeLimitSecs: number) {
     return this.addCleanup({
       direct_call_id: callId,
       kind: "unresolved_dial",
       dial_role: role,
-      resolve_after: at(timeoutSecs + 15),
-      backstop_at: at(timeLimitSecs + 60),
-      next_attempt_at: at(timeoutSecs + 15),
+      dial_started_at: null,
+      resolve_after: null,
+      backstop_at: null,
+      next_attempt_at: this.clock().toISOString(),
     });
   }
   private resolveDial(callId: string, role: "browser" | "seller") {
@@ -149,7 +152,7 @@ export class FakeStore implements DirectCallStore {
       updated_at: this.clock().toISOString(),
     });
     this.calls.set(row.id, row);
-    this.addDialRow(row.id, "browser", 30, 7200);
+    this.addDialRow(row.id, "browser", 30, row.time_limit_secs);
     return { outcome: "created", row };
   }
   async cancelRequest(userId: string, orgId: string, requestId: string) {
@@ -247,6 +250,23 @@ export class FakeStore implements DirectCallStore {
   }
   async dialRejected(id: string, role: "browser" | "seller") {
     this.resolveDial(id, role);
+  }
+  async markDialStarted(id: string, role: "browser" | "seller", startedAt: string, timeoutSecs: number, timeLimitSecs: number) {
+    const call = this.calls.get(id);
+    const row = [...this.cleanups.values()].find((c) => c.direct_call_id === id && c.kind === "unresolved_dial" && c.dial_role === role && !c.confirmed_at);
+    if (!call || !row || row.dial_started_at || call.failure_reason === "teardown_pending" ||
+      (role === "browser" && call.status !== "browser_connecting") ||
+      (role === "seller" && (call.status !== "seller_dialing" || call.seller_dial_state !== "pending")) ||
+      !Number.isSafeInteger(timeoutSecs) || timeoutSecs < 0 || !Number.isSafeInteger(timeLimitSecs) || timeLimitSecs < 30 || timeLimitSecs > call.time_limit_secs) return false;
+    const atMs = new Date(startedAt).getTime();
+    row.dial_started_at = startedAt;
+    row.resolve_after = new Date(atMs + (timeoutSecs + DISPATCH_MARKER_RESPONSE_ALLOWANCE_SECS + 15) * 1000).toISOString();
+    // Telnyx's time_limit_secs is the active leg window after answer. Include the 30s ring window,
+    // the marker-response allowance, and the fixed 60s reconciliation grace before time resolution.
+    row.backstop_at = new Date(atMs + (timeoutSecs + DISPATCH_MARKER_RESPONSE_ALLOWANCE_SECS + timeLimitSecs + 60) * 1000).toISOString();
+    row.next_attempt_at = row.resolve_after;
+    if (role === "browser") this.calls.set(id, { ...call, browser_dial_started_at: startedAt, updated_at: startedAt });
+    return true;
   }
   async hasActiveCallForProperty(propertyId: string, excludeId: string | null) {
     return [...this.calls.values()].some((r) => r.property_id === propertyId && r.id !== excludeId && !["ended", "failed"].includes(r.status));

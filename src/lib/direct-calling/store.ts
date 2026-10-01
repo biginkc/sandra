@@ -22,6 +22,7 @@ export type NewDirectCall = {
   contact_id: string | null;
   destination_e164: string;
   caller_id_e164: string;
+  time_limit_secs: number;
   client_request_id: string;
 };
 
@@ -65,7 +66,9 @@ export interface DirectCallStore {
   discardReservation(id: string): Promise<void>;
   /** A Dial returned a leg: stores it when free, resolves that Dial's unresolved-dial row, queues a leg row when it must not live. */
   dialSucceeded(id: string, legId: string, role: "browser" | "seller"): Promise<boolean>;
-  /** Provider definitively refused the Dial: its unresolved-dial obligation is resolved. */
+  /** Durably marks the provider-dispatch boundary and anchors cleanup timing to it. */
+  markDialStarted(id: string, role: "browser" | "seller", startedAt: string, timeoutSecs: number, timeLimitSecs: number): Promise<boolean>;
+  /** Provider definitively refused, or dispatch was proven never sent: resolve the obligation. */
   dialRejected(id: string, role: "browser" | "seller"): Promise<void>;
   /** Another non-terminal direct call (any operator) exists for this property. */
   hasActiveCallForProperty(propertyId: string, excludeId: string | null): Promise<boolean>;
@@ -169,6 +172,7 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
         p_destination: call.destination_e164,
         p_caller: call.caller_id_e164,
         p_request: call.client_request_id,
+        p_time_limit_secs: call.time_limit_secs,
       });
       if (error) {
         // A uniqueness violation here means a concurrent writer beat the advisory lock's snapshot.
@@ -219,6 +223,17 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
     },
     async dialSucceeded(id, legId, role) {
       const { data, error } = await admin.rpc("direct_call_dial_succeeded", { p_id: id, p_leg: legId, p_role: role });
+      if (error) fail(error);
+      return data === true;
+    },
+    async markDialStarted(id, role, startedAt, timeoutSecs, timeLimitSecs) {
+      const { data, error } = await admin.rpc("direct_call_dial_started", {
+        p_id: id,
+        p_role: role,
+        p_started_at: startedAt,
+        p_timeout_secs: timeoutSecs,
+        p_time_limit_secs: timeLimitSecs,
+      });
       if (error) fail(error);
       return data === true;
     },

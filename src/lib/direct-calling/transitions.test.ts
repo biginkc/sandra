@@ -13,6 +13,8 @@ function row(overrides: Partial<DirectCallRow> = {}): DirectCallRow {
     seller_leg_id: null,
     destination_e164: "+15550001111",
     caller_id_e164: "+15550002222",
+    time_limit_secs: 7200,
+    browser_dial_started_at: null,
     created_at: CREATED,
     connected_at: null,
     updated_at: CREATED,
@@ -51,7 +53,7 @@ describe("nextDirectCallState", () => {
   });
 
   it("refuses a stale browser answer and hangs the leg up without dialing the seller", () => {
-    const r = nextDirectCallState(row(), ev("call.answered", "B", "browser"), at(61));
+    const r = nextDirectCallState(row(), ev("call.answered", "B", "browser"), at(71));
     expect(r.patch).toMatchObject({ status: "failed", failure_reason: "browser_answer_stale" });
     expect(r.cleanups).toEqual([{ kind: "leg", legId: "B" }]);
     expect(r.commands).toEqual([]);
@@ -174,9 +176,12 @@ describe("nextDirectCallState", () => {
 
   it("reports stale outcomes without ever treating time as teardown", () => {
     expect(staleOutcome(row(), at(100))).toBeNull();
-    expect(staleOutcome(row(), at(151))).toBe("failed");
+    // Preparation has no provider-facing setup clock until the browser Dial is marked started.
+    expect(staleOutcome(row(), at(151))).toBeNull();
+    expect(staleOutcome(row({ time_limit_secs: 180 }), at(491))).toBe("failed");
+    expect(staleOutcome(row({ browser_dial_started_at: at(200).toISOString() }), at(361))).toBe("failed");
     expect(staleOutcome(row({ status: "ending", updated_at: CREATED }), at(61))).toBe("ended");
-    expect(staleOutcome(row({ status: "connected", seller_leg_id: "S" }), at(7201 + 300))).toBe("ended");
+    expect(staleOutcome(row({ status: "connected", seller_leg_id: "S" }), at(7201 + 300 + 10))).toBe("ended");
     expect(staleOutcome(row({ status: "connected", failure_reason: "teardown_pending" }), at(5))).toBe("ended");
     expect(staleOutcome(row({ status: "ended" }), at(99999))).toBeNull();
   });

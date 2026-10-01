@@ -93,6 +93,71 @@ describe("direct call service", () => {
     expect(store.openFor(row.id)).toEqual([]);
   });
 
+  it("anchors bounded cleanup to actual browser dispatch after delayed prepare and credential work", async () => {
+    const ctx = setup({ env: { ...ENV, DIRECT_CALL_TIME_LIMIT_SECS: "180" } });
+    const startMs = ctx.clock.now.getTime();
+    ctx.prepareManualCall.mockImplementationOnce(async () => {
+      ctx.clock.now = new Date(startMs + 70_000);
+      return { ok: true as const, data: target({}) };
+    });
+    ctx.telnyx.createCredential.mockImplementationOnce(async () => {
+      ctx.clock.now = new Date(startMs + 75_000);
+      return { id: "cred-delayed", sipUsername: "gencred-delayed" };
+    });
+    let providerLatestEnd = 0;
+    ctx.telnyx.dial.mockImplementationOnce(async (_settings, params) => {
+      providerLatestEnd = ctx.clock.now.getTime() + Number(params.timeLimitSecs) * 1000;
+      throw new Error("unknown provider outcome");
+    });
+
+    const result = await ctx.service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ });
+    expect(result).toMatchObject({ ok: false, errorCode: "start_failed", reserved: true });
+    const row = [...ctx.store.calls.values()][0];
+    const cleanup = [...ctx.store.cleanups.values()].find((c) => c.kind === "unresolved_dial" && c.dial_role === "browser")!;
+    expect(row.time_limit_secs).toBe(180);
+    expect(ctx.telnyx.dial.mock.calls[0][1]).toMatchObject({ timeLimitSecs: 180 });
+    expect(new Date(cleanup.resolve_after!).getTime()).toBe(startMs + 75_000 + 55_000);
+    expect(new Date(cleanup.backstop_at!).getTime()).toBeGreaterThanOrEqual(providerLatestEnd);
+    expect(new Date(cleanup.next_attempt_at!).getTime()).toBeGreaterThan(startMs + 45_000);
+  });
+
+  it("refuses a browser Dial when the dispatch marker response exceeds its allowance", async () => {
+    const ctx = setup({ env: { ...ENV, DIRECT_CALL_TIME_LIMIT_SECS: "180" } });
+    const mark = ctx.store.markDialStarted.bind(ctx.store);
+    vi.spyOn(ctx.store, "markDialStarted").mockImplementation(async (...args) => {
+      ctx.clock.now = new Date(ctx.clock.now.getTime() + 120_000);
+      return mark(...args);
+    });
+
+    const result = await ctx.service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ });
+    const row = [...ctx.store.calls.values()][0];
+    expect(result).toMatchObject({ ok: false, errorCode: "start_failed", reserved: true });
+    expect(ctx.telnyx.dial).not.toHaveBeenCalled();
+    expect(row).toMatchObject({ status: "failed", failure_reason: "browser_dial_dispatch_window_expired" });
+    expect(ctx.store.openFor(row.id)).toEqual([]);
+  });
+
+  it("does not Dial when cancellation wins while the dispatch marker write is in flight", async () => {
+    const ctx = setup({ env: { ...ENV, DIRECT_CALL_TIME_LIMIT_SECS: "180" } });
+    const mark = ctx.store.markDialStarted.bind(ctx.store);
+    let release!: () => void;
+    const response = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(ctx.store, "markDialStarted").mockImplementation(async (...args) => {
+      const result = await mark(...args);
+      await response;
+      return result;
+    });
+
+    const starting = ctx.service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ });
+    await vi.waitFor(() => expect(ctx.store.markDialStarted).toHaveBeenCalled());
+    expect(await ctx.service.cancelByRequest("user-1", REQ)).toMatchObject({ ok: true, data: { tombstoned: false } });
+    release();
+    await expect(starting).resolves.toMatchObject({ ok: false, errorCode: "cancelled", reserved: true });
+    expect(ctx.telnyx.dial).not.toHaveBeenCalled();
+    const row = [...ctx.store.calls.values()][0];
+    expect(ctx.store.openFor(row.id)).toEqual([]);
+  });
+
   it("ignores a PSTN destination smuggled into the input", async () => {
     const { service, store, prepareLeadCall } = setup();
     await service.startCall("user-1", { kind: "lead", propertyId: "prop-1", clientRequestId: REQ, phoneE164: "+19998887777", destination: "+19998887777" } as never);

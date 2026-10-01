@@ -75,11 +75,15 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
   const pg = new Client({ connectionString: url });
   await pg.connect();
   const migration = stripTx(fs.readFileSync("supabase/migrations/20261001200000_direct_calls.sql", "utf8"));
+  const timingMigration = stripTx(fs.readFileSync("supabase/migrations/20261001210000_direct_call_duration_dispatch.sql", "utf8"));
+  const timingRollback = stripTx(fs.readFileSync("supabase/rollbacks/20261001210000_direct_call_duration_dispatch.sql", "utf8"));
   const rollback = stripTx(fs.readFileSync("supabase/rollbacks/20261001200000_direct_calls.sql", "utf8"));
   await pg.query("begin");
   try {
     await pg.query(migration);
     await pg.query(migration);
+    await pg.query(timingMigration);
+    await pg.query(timingMigration);
     await pg.query("insert into public.organizations(id,name) values ($1,'Direct calls test') on conflict do nothing", [ORG]);
     for (const id of [USER_A, USER_B, USER_C]) {
       await pg.query("insert into auth.users (id) values ($1) on conflict do nothing", [id]);
@@ -91,8 +95,8 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
        values ($1, $2, '+15550000001', '+15550000002', $3, $4) returning id`,
       [ORG, user, status, requestId],
     );
-    const begin = async (user: string, requestId: string) =>
-      (await pg.query("select * from public.direct_call_begin($1, $2, null, null, '', '+15550000002', $3)", [ORG, user, requestId])).rows[0];
+    const begin = async (user: string, requestId: string, limit = 7200) =>
+      (await pg.query("select * from public.direct_call_begin($1, $2, null, null, '', '+15550000002', $3, $4)", [ORG, user, requestId, limit])).rows[0];
     const open = async (callId: string) =>
       (await pg.query("select kind, dial_role, leg_id from public.direct_call_cleanups where direct_call_id=$1 and confirmed_at is null order by kind, leg_id", [callId])).rows;
 
@@ -133,9 +137,18 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     expect(begun.outcome).toBe("created");
     const callId = begun.call_id;
     expect(await open(callId)).toEqual([{ kind: "unresolved_dial", dial_role: "browser", leg_id: null }]);
-    expect((await begin(USER_B, "00000000-0000-0000-0000-00000000bb02")).outcome).toBe("created");
-    const timing = (await pg.query("select extract(epoch from resolve_after - created_at)::int as ra, extract(epoch from backstop_at - created_at)::int as bk from public.direct_call_cleanups where direct_call_id=$1", [callId])).rows[0];
-    expect(timing).toEqual({ ra: 45, bk: 7260 });
+    const bounded = await begin(USER_B, "00000000-0000-0000-0000-00000000bb02", 180);
+    expect(bounded.outcome).toBe("created");
+    expect((await pg.query("select time_limit_secs from public.direct_calls where operator_user_id=$1", [USER_B])).rows[0].time_limit_secs).toBe(180);
+    await pg.query("update public.direct_calls set failure_reason='teardown_pending' where id=$1", [bounded.call_id]);
+    expect(await store.markDialStarted(bounded.call_id, "browser", "2026-10-01T12:00:01.000Z", 30, 180)).toBe(false);
+    expect((await pg.query("select dial_started_at from public.direct_call_cleanups where direct_call_id=$1", [bounded.call_id])).rows[0].dial_started_at).toBeNull();
+    const timing = (await pg.query("select resolve_after, backstop_at, dial_started_at from public.direct_call_cleanups where direct_call_id=$1", [callId])).rows[0];
+    expect(timing).toEqual({ resolve_after: null, backstop_at: null, dial_started_at: null });
+    const browserDispatch = new Date("2026-10-01T12:00:40.000Z");
+    expect(await store.markDialStarted(callId, "browser", browserDispatch.toISOString(), 30, 7200)).toBe(true);
+    const browserTiming = (await pg.query("select extract(epoch from resolve_after - dial_started_at)::int as ra, extract(epoch from backstop_at - dial_started_at)::int as bk from public.direct_call_cleanups where direct_call_id=$1", [callId])).rows[0];
+    expect(browserTiming).toEqual({ ra: 55, bk: 7300 }); // 10s marker allowance + 30s ring + 7200s active leg + 60s grace
 
     // apply, driven through the REAL store (its serializer builds the payloads): CAS on status, resolves the
     // Dial for a learned leg, and writes every cleanup row kind WITH its role and timings in the same statement.
@@ -146,8 +159,12 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     );
     expect(applied).toMatchObject({ status: "seller_dialing", browser_leg_id: "b-1", seller_dial_state: "pending" });
     expect(await open(callId)).toEqual([{ kind: "unresolved_dial", dial_role: "seller", leg_id: null }]); // browser resolved, seller open
-    const sellerTiming = (await pg.query("select extract(epoch from resolve_after - created_at)::int as ra, extract(epoch from backstop_at - created_at)::int as bk from public.direct_call_cleanups where direct_call_id=$1 and dial_role='seller'", [callId])).rows[0];
-    expect(sellerTiming).toEqual({ ra: 45, bk: 7255 }); // timeout_secs + 15, time_limit_secs + 60 survived the serializer
+    const sellerTiming = (await pg.query("select resolve_after, backstop_at, dial_started_at from public.direct_call_cleanups where direct_call_id=$1 and dial_role='seller'", [callId])).rows[0];
+    expect(sellerTiming).toEqual({ resolve_after: null, backstop_at: null, dial_started_at: null });
+    const sellerDispatch = new Date("2026-10-01T12:00:45.000Z");
+    expect(await store.markDialStarted(callId, "seller", sellerDispatch.toISOString(), 30, 7195)).toBe(true);
+    const sellerBound = (await pg.query("select extract(epoch from resolve_after - dial_started_at)::int as ra, extract(epoch from backstop_at - dial_started_at)::int as bk from public.direct_call_cleanups where direct_call_id=$1 and dial_role='seller'", [callId])).rows[0];
+    expect(sellerBound).toEqual({ ra: 55, bk: 7295 }); // allowance + ring + seller active leg + grace begin at seller dispatch
     expect(await store.updateIfStatus(callId, ["browser_connecting"], { status: "failed" })).toBeNull(); // status moved: no write, no rows
     // failure_reason may be explicitly nulled; hangup of the browser ends it and queues the other leg.
     const ended = await store.updateIfStatus(callId, ["seller_dialing"], { status: "failed", failure_reason: null }, [{ kind: "leg", legId: "b-1" }]);
@@ -261,7 +278,7 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     const PROP = "00000000-0000-0000-0000-0000000d1b01";
     await pg.query("insert into public.properties (id, org_id, address, state) values ($1, $2, '1 Test St', 'MO')", [PROP, ORG]);
     const NOW = new Date("2026-10-01T12:00:00.000Z");
-    const begunC = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: PROP, contact_id: null, destination_e164: "+15550000010", caller_id_e164: "+15550000002", client_request_id: "00000000-0000-0000-0000-00000000cc01" });
+    const begunC = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: PROP, contact_id: null, destination_e164: "+15550000010", caller_id_e164: "+15550000002", time_limit_secs: 7200, client_request_id: "00000000-0000-0000-0000-00000000cc01" });
     expect(begunC.outcome).toBe("created");
     const idC = (begunC as { row: { id: string } }).row.id;
     const answered = nextDirectCallState({ ...(begunC as unknown as { row: Record<string, unknown> }).row, browser_leg_id: null, created_at: NOW.toISOString() } as never, { type: "call.answered", callControlId: "b-race", role: "browser", occurredAt: null, hangupCause: null }, NOW);
@@ -294,7 +311,7 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     const PROP2 = "00000000-0000-0000-0000-0000000d1b02";
     await pg.query("insert into public.properties (id, org_id, address, state) values ($1, $2, '2 Test St', 'MO')", [PROP2, ORG]);
     await pg.query("update public.direct_call_cleanups set confirmed_at = now() where operator_user_id = $1", [USER_C]);
-    const second = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: PROP2, contact_id: null, destination_e164: "+15550000011", caller_id_e164: "+15550000002", client_request_id: "00000000-0000-0000-0000-00000000cc02" });
+    const second = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: PROP2, contact_id: null, destination_e164: "+15550000011", caller_id_e164: "+15550000002", time_limit_secs: 7200, client_request_id: "00000000-0000-0000-0000-00000000cc02" });
     const idC2 = (second as { row: { id: string } }).row.id;
     await pg.query("update public.direct_calls set property_id = $1 where operator_user_id = $2 and status not in ('ended','failed') and id <> $3", [PROP2, USER_B, idC2]);
     const firstOfTwo = await store.updateIfStatus(idC2, ["browser_connecting"], { status: "failed", failure_reason: "browser_dial_rejected", ended_at: NOW.toISOString() });
@@ -308,7 +325,7 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     const PROP3 = "00000000-0000-0000-0000-0000000d1b03";
     await pg.query("insert into public.properties (id, org_id, address, state) values ($1, $2, '3 Test St', 'MO')", [PROP3, ORG]);
     await pg.query("update public.direct_call_cleanups set confirmed_at = now() where operator_user_id = $1", [USER_C]);
-    const third = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: null, contact_id: null, destination_e164: "", caller_id_e164: "+15550000002", client_request_id: "00000000-0000-0000-0000-00000000cc03" });
+    const third = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: null, contact_id: null, destination_e164: "", caller_id_e164: "+15550000002", time_limit_secs: 7200, client_request_id: "00000000-0000-0000-0000-00000000cc03" });
     const idC3 = (third as { row: { id: string } }).row.id;
     await store.updateIfStatus(idC3, ["browser_connecting"], { status: "ending" }); // cancelled during prepare
     await store.setTarget(idC3, { property_id: PROP3, contact_id: null, destination_e164: "+15550000033" });
@@ -318,6 +335,7 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     await store.setTarget(idC3, { property_id: null, contact_id: null, destination_e164: "+15559999999" });
     expect(await store.findById(idC3)).toMatchObject({ property_id: PROP3, destination_e164: "+15550000033" });
 
+    await pg.query(timingRollback);
     await pg.query(rollback);
     const gone = await pg.query("select to_regclass('public.direct_calls') as t");
     expect(gone.rows[0].t).toBeNull();

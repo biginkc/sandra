@@ -2,7 +2,7 @@ import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 
 import { processDueCleanups, type CleanupResult } from "./cleanup";
 import { processPendingResumes } from "./lead-resume";
-import { readTelnyxDirectSettings, resolveCallingConfig, type DirectCallEnv, type TelnyxDirectSettings } from "./config";
+import { readDirectCallTimeLimitSecs, readTelnyxDirectSettings, resolveCallingConfig, type DirectCallEnv, type TelnyxDirectSettings } from "./config";
 import {
   DIRECT_CALL_TERMINAL_STATUSES,
   type CancelDirectCallResult,
@@ -17,7 +17,7 @@ import {
 } from "./contract";
 import type { DirectCallCleanupRow, DirectCallFullRow, DirectCallStore } from "./store";
 import { TelnyxApiError, type ActiveCall, type DialParams } from "./telnyx";
-import { MAX_CALL_SECS, TEARDOWN_PENDING, staleOutcome, teardownBegun, type CleanupSpec } from "./transitions";
+import { dispatchMarkerStillValid, TEARDOWN_PENDING, staleOutcome, teardownBegun, type CleanupSpec } from "./transitions";
 
 type PrepareResult = { ok: true; data: DirectCallTarget } | { ok: false; error: string };
 
@@ -58,12 +58,13 @@ function err(error: string, errorCode?: string, reserved?: boolean): { ok: false
 export function createDirectCallService(deps: DirectCallServiceDeps) {
   const { store, env } = deps;
 
-  function gate(userId: string): { ok: true; settings: TelnyxDirectSettings } | ReturnType<typeof err> {
+  function gate(userId: string): { ok: true; settings: TelnyxDirectSettings; timeLimitSecs: number } | ReturnType<typeof err> {
     const settings = readTelnyxDirectSettings(env);
-    if (resolveCallingConfig(userId, env).transport !== "telnyx_direct" || !settings) {
+    const timeLimitSecs = readDirectCallTimeLimitSecs(env);
+    if (resolveCallingConfig(userId, env).transport !== "telnyx_direct" || !settings || timeLimitSecs === null) {
       return err("Direct calling is not enabled for this account.", "not_enabled");
     }
-    return { ok: true, settings };
+    return { ok: true, settings, timeLimitSecs };
   }
 
   async function ensureOperator(userId: string, settings: TelnyxDirectSettings) {
@@ -173,7 +174,7 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
   async function startCall(userId: string, input: StartDirectCallInput): Promise<DirectActionResult<StartDirectCallResult>> {
     const allowed = gate(userId);
     if (!allowed.ok) return { ...allowed, reserved: false };
-    const { settings } = allowed;
+    const { settings, timeLimitSecs } = allowed;
 
     if (!input || typeof input.clientRequestId !== "string" || !UUID.test(input.clientRequestId)) {
       return err("A valid call request id is required.", "invalid_request", false);
@@ -222,6 +223,7 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
         contact_id: null,
         destination_e164: "",
         caller_id_e164: settings.callerIdE164,
+        time_limit_secs: timeLimitSecs,
         client_request_id: clientRequestId,
       });
       if (begun.outcome === "duplicate_request") {
@@ -283,13 +285,41 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
         await resumes(userId);
         return err("This call was cancelled.", "cancelled", true);
       }
+      // Reserve the provider-dispatch boundary before issuing the request. A crash after this write
+      // is treated as an unknown Dial and reconciled; a cancellation before it wins without dialing.
+      const dispatchMarkedAt = deps.now().toISOString();
+      const marked = await store.markDialStarted(row.id, "browser", dispatchMarkedAt, 30, row.time_limit_secs);
+      if (!marked) {
+        const current = await store.findById(row.id);
+        if (current && !DIRECT_CALL_TERMINAL_STATUSES.has(current.status)) {
+          await store.updateIfStatus(row.id, LIVE, { status: "failed", failure_reason: CANCELLED_BEFORE_START, ended_at: deps.now().toISOString() });
+        }
+        await store.dialRejected(row.id, "browser"); // no provider request was sent
+        await resumes(userId);
+        return err("This call was cancelled.", "cancelled", true);
+      }
+      // The marker write is itself network/database work. Allow only the named dispatch-response
+      // window before the provider request; otherwise the cleanup clock would begin too early.
+      const dispatchable = await store.findById(row.id);
+      const markerExpired = !dispatchMarkerStillValid(dispatchMarkedAt, deps.now());
+      if (!dispatchable || dispatchable.status !== "browser_connecting" || teardownBegun(dispatchable) || markerExpired) {
+        if (dispatchable?.status === "browser_connecting" && markerExpired) {
+          await store.updateIfStatus(row.id, LIVE, { status: "failed", failure_reason: "browser_dial_dispatch_window_expired", ended_at: deps.now().toISOString() });
+        } else if (dispatchable && !DIRECT_CALL_TERMINAL_STATUSES.has(dispatchable.status)) {
+          await store.updateIfStatus(row.id, LIVE, { status: "failed", failure_reason: CANCELLED_BEFORE_START, ended_at: deps.now().toISOString() });
+        }
+        await store.dialRejected(row.id, "browser"); // marker persisted, but the provider request was never sent
+        await resumes(userId);
+        return err(markerExpired ? "Could not start the call. Try again." : "This call was cancelled.", markerExpired ? "start_failed" : "cancelled", true);
+      }
       const dialed = await deps.telnyx.dial(settings, {
         to: `sip:${operator.sip_username}@sip.telnyx.com`,
         from: settings.callerIdE164,
         clientState: { directCallId: row.id, role: "browser" },
         commandId: row.browser_command_id,
         timeoutSecs: 30,
-        timeLimitSecs: MAX_CALL_SECS,
+        timeLimitSecs: row.time_limit_secs,
+        retryOnTimeout: false,
         customHeaders: [{ name: "X-Sandra-Direct-Call-Id", value: row.id }],
       });
       dialedLeg = dialed.callControlId;

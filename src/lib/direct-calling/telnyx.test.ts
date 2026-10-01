@@ -10,20 +10,20 @@ describe("telnyx client", () => {
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ data: { call_control_id: "cc-1" } }), { status: 200 }));
     const out = await telnyxDial(settings, {
       to: "+15550001111", from: "+15550002222", clientState: { directCallId: "x", role: "seller" }, commandId: "cmd",
-      timeoutSecs: 30, timeLimitSecs: 100, linkTo: "B", bridgeOnAnswer: true, bridgeIntent: false,
+      timeoutSecs: 30, timeLimitSecs: 100, retryOnTimeout: false, linkTo: "B", bridgeOnAnswer: true, bridgeIntent: false,
     }, { fetchImpl: fetchImpl as never });
     expect(out.callControlId).toBe("cc-1");
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("https://api.telnyx.com/v2/calls");
     const sent = JSON.parse(init.body as string);
-    expect(sent).toMatchObject({ connection_id: "app", link_to: "B", bridge_on_answer: true, bridge_intent: false, command_id: "cmd" });
+    expect(sent).toMatchObject({ connection_id: "app", link_to: "B", bridge_on_answer: true, bridge_intent: false, command_id: "cmd", timeout_secs: 30, time_limit_secs: 100, retry_on_timeout: false });
     expect(sent).not.toHaveProperty("park_after_unbridge");
     expect(decodeClientState(sent.client_state)).toEqual({ directCallId: "x", role: "seller" });
   });
 
   it("classifies failures and redacts the key", async () => {
     const rejected = vi.fn(async () => new Response(JSON.stringify({ errors: [{ detail: "bad token SECRET-KEY-123" }] }), { status: 422 }));
-    const err = await telnyxDial(settings, { to: "a", from: "b", clientState: {}, commandId: "c", timeoutSecs: 30, timeLimitSecs: 60 }, { fetchImpl: rejected as never }).catch((e) => e);
+  const err = await telnyxDial(settings, { to: "a", from: "b", clientState: {}, commandId: "c", timeoutSecs: 30, timeLimitSecs: 60, retryOnTimeout: false }, { fetchImpl: rejected as never }).catch((e) => e);
     expect(err).toBeInstanceOf(TelnyxApiError);
     expect(err.kind).toBe("rejected");
     expect(err.message).not.toContain("SECRET-KEY-123");
@@ -68,7 +68,7 @@ describe("telnyx client", () => {
       status: 200,
       text: () => new Promise<string>((_resolve, reject) => init.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })))),
     }));
-    const err = await telnyxDial(settings, { to: "a", from: "b", clientState: {}, commandId: "c", timeoutSecs: 30, timeLimitSecs: 60 }, { fetchImpl: stalled as never, timeoutMs: 20 }).catch((e) => e);
+  const err = await telnyxDial(settings, { to: "a", from: "b", clientState: {}, commandId: "c", timeoutSecs: 30, timeLimitSecs: 60, retryOnTimeout: false }, { fetchImpl: stalled as never, timeoutMs: 20 }).catch((e) => e);
     expect(err).toBeInstanceOf(TelnyxApiError);
     expect(err.kind).toBe("unknown");
     expect(err.message).toMatch(/timed out/);

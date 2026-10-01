@@ -10,6 +10,15 @@ import { DIRECT_CALL_TERMINAL_STATUSES, type DirectCallStatus } from "./contract
 export const MAX_CALL_SECS = 7200;
 export const SELLER_RING_SECS = 30;
 export const STALE_BROWSER_ANSWER_MS = 60_000;
+/** Maximum time allowed for the durable dispatch marker write to return before a provider request. */
+export const DISPATCH_MARKER_RESPONSE_ALLOWANCE_SECS = 10;
+export const DISPATCH_MARKER_RESPONSE_ALLOWANCE_MS = DISPATCH_MARKER_RESPONSE_ALLOWANCE_SECS * 1000;
+
+export function dispatchMarkerStillValid(markedAt: string, now: Date): boolean {
+  const markerMs = new Date(markedAt).getTime();
+  const elapsedMs = now.getTime() - markerMs;
+  return Number.isFinite(markerMs) && elapsedMs >= 0 && elapsedMs <= DISPATCH_MARKER_RESPONSE_ALLOWANCE_MS;
+}
 
 export type LegRole = "browser" | "seller";
 
@@ -20,6 +29,10 @@ export type DirectCallRow = {
   seller_leg_id: string | null;
   destination_e164: string;
   caller_id_e164: string;
+  /** Frozen at reservation time; never re-read from environment for an in-flight call. */
+  time_limit_secs: number;
+  /** Durable provider-dispatch anchor for the browser leg. */
+  browser_dial_started_at?: string | null;
   created_at: string;
   connected_at: string | null;
   updated_at?: string;
@@ -102,7 +115,8 @@ const leg = (id: string | null | undefined): CleanupSpec[] => (id ? [{ kind: "le
 const SETUP: DirectCallStatus[] = ["browser_connecting", "seller_dialing"];
 const STALE_SETUP_MS = 150_000; // ring timeouts: 30s + <=60s + 30s
 const STALE_ENDING_MS = 60_000;
-const STALE_ANY_MS = (MAX_CALL_SECS + 300) * 1000;
+const callLimitSecs = (row: DirectCallRow) => (Number.isSafeInteger(row.time_limit_secs) && row.time_limit_secs > 0 ? row.time_limit_secs : MAX_CALL_SECS);
+const callAgeAnchor = (row: DirectCallRow) => row.browser_dial_started_at ?? row.created_at;
 
 /**
  * Terminal status a non-terminal row should be driven to once its legs are torn down,
@@ -112,10 +126,19 @@ const STALE_ANY_MS = (MAX_CALL_SECS + 300) * 1000;
 export function staleOutcome(row: DirectCallRow, now: Date): DirectCallStatus | null {
   if (DIRECT_CALL_TERMINAL_STATUSES.has(row.status)) return null;
   const age = (iso: string | undefined) => (iso ? now.getTime() - new Date(iso).getTime() : 0);
+  const staleAnyMs = (callLimitSecs(row) + 300 + DISPATCH_MARKER_RESPONSE_ALLOWANCE_SECS) * 1000;
+  // A reservation can spend an unbounded (but still operator-owned) amount of time in
+  // preparation before the browser request is actually dispatched. Do not apply the
+  // provider-facing setup timeout to that pre-dispatch interval; once the marker exists,
+  // the normal 150s setup guard plus the marker-response allowance protects an unanswered leg.
+  const staleSetup =
+    SETUP.includes(row.status) &&
+    (row.status !== "browser_connecting" || Boolean(row.browser_dial_started_at)) &&
+    age(callAgeAnchor(row)) > STALE_SETUP_MS + DISPATCH_MARKER_RESPONSE_ALLOWANCE_MS;
   const stale =
     row.failure_reason === TEARDOWN_PENDING ||
-    age(row.created_at) > STALE_ANY_MS ||
-    (SETUP.includes(row.status) && age(row.created_at) > STALE_SETUP_MS) ||
+    age(callAgeAnchor(row)) > staleAnyMs ||
+    staleSetup ||
     (row.status === "ending" && age(row.updated_at) > STALE_ENDING_MS);
   if (!stale) return null;
   return SETUP.includes(row.status) ? "failed" : "ended";
@@ -176,8 +199,10 @@ export function nextDirectCallState(row: DirectCallRow, event: DirectCallEvent, 
         }
       }
       if (row.status !== "browser_connecting") return Object.keys(assignPatch).length ? done(assignPatch) : NOOP;
-      const elapsedMs = now.getTime() - new Date(row.created_at).getTime();
-      if (!(elapsedMs <= STALE_BROWSER_ANSWER_MS)) {
+      // Preparation and credential work can delay the actual browser Dial. The durable dispatch
+      // anchor keeps a valid answer from being rejected merely because reservation was early.
+      const elapsedMs = now.getTime() - new Date(callAgeAnchor(row)).getTime();
+      if (!(elapsedMs <= STALE_BROWSER_ANSWER_MS + DISPATCH_MARKER_RESPONSE_ALLOWANCE_MS)) {
         return done({ ...assignPatch, status: "failed", failure_reason: "browser_answer_stale", ended_at: nowIso }, leg(legId));
       }
       return {
@@ -204,7 +229,7 @@ export function nextDirectCallState(row: DirectCallRow, event: DirectCallEvent, 
 }
 
 function sellerDial(row: DirectCallRow, browserLegId: string, now: Date): SellerDialCommand {
-  const elapsedMs = now.getTime() - new Date(row.created_at).getTime();
+  const elapsedMs = now.getTime() - new Date(callAgeAnchor(row)).getTime();
   return {
     kind: "dial_seller",
     to: row.destination_e164,
@@ -212,7 +237,7 @@ function sellerDial(row: DirectCallRow, browserLegId: string, now: Date): Seller
     linkTo: browserLegId,
     commandId: deterministicCommandId(`${row.id}:seller-dial`),
     timeoutSecs: SELLER_RING_SECS,
-    timeLimitSecs: Math.max(30, MAX_CALL_SECS - Math.floor(elapsedMs / 1000)),
+    timeLimitSecs: Math.max(30, callLimitSecs(row) - Math.floor(elapsedMs / 1000)),
     clientState: { directCallId: row.id, role: "seller" },
     bridgeOnAnswer: true,
     bridgeIntent: false,
