@@ -4,6 +4,7 @@ import { useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent }
 import { Dialog } from "@base-ui/react/dialog";
 import { HomeIcon, UserIcon, MessageSquareIcon, SearchIcon, XIcon, TriangleAlertIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { formatPhoneDisplay } from "@/lib/phone-format";
 import { useGlobalSearchContext } from "./global-search-provider";
 import type { SearchResult } from "./use-global-search";
 import styles from "./global-search.module.css";
@@ -98,7 +99,7 @@ export function GlobalSearchLayer() {
                 <div className={styles.heading}><Icon size={13} aria-hidden="true" /><span id={`${id}-${type}`}>{label}</span><span className={styles.count}>{items.length}</span></div>
                 {items.map(row => <div key={row.key} id={optionId(row.key)} ref={element => { if (element) rowRefs.current.set(row.key, element); else rowRefs.current.delete(row.key); }} role="option" aria-selected={selected === row.key} className={styles.row}
                   onMouseDown={event => event.preventDefault()} onMouseEnter={() => setSelection({ results, key: row.key })} onClick={() => activate(row)}>
-                  <div className={styles.text}><div className={styles.primary}>{row.title}</div>{row.subtitle && <div className={styles.secondary} data-message={type === "thread" || undefined}>{row.subtitle}</div>}</div>
+                  <div className={styles.text}><div className={styles.primary}>{type === "property" ? row.title : formatPhoneDisplay(row.title)}</div>{row.subtitle && <div className={styles.secondary} data-message={type === "thread" || undefined}>{type === "owner" ? formatPhoneDisplay(row.subtitle) : row.subtitle}</div>}</div>
                   {(row.matchedField === "phone" || row.matchedField === "email") && <span className={styles.badge}>{row.matchedField}</span>}
                   {selected === row.key && <span className={styles.open}>Open <kbd>↵</kbd></span>}
                 </div>)}

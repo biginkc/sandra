@@ -1,6 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import { formatPhoneDisplay } from "@/lib/phone-format";
 import { useEffect, useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -111,7 +112,7 @@ export function MergePropertyDialog({
           },
         }),
         {
-          successMessage: `Merged ${fromAddress} with ${selectedProperty.address}.`,
+          successMessage: `Merged ${formatPhoneDisplay(fromAddress)} with ${selectedProperty.address}.`,
           fallbackMessage: "Merge failed",
         },
       );
@@ -129,7 +130,7 @@ export function MergePropertyDialog({
           <DialogTitle>Merge with existing property</DialogTitle>
           <DialogDescription>
             Attach all messages from{" "}
-            <span className="font-mono">{fromAddress}</span> to a property in
+            <span className="font-mono">{formatPhoneDisplay(fromAddress)}</span> to a property in
             Sandra. A new contact is created with this number as{" "}
             <code>phone_1</code> and linked to the property as either the
             homeowner or the agent.

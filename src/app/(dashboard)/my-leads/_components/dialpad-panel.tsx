@@ -1,5 +1,6 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { formatPhoneDisplay } from '@/lib/phone-format';
 
 import { Button } from '@/components/ui/button';
 import type { DialpadCallStatus } from '@/lib/dialpad-cti/contracts';
@@ -794,7 +795,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
                   <select className="ml-2 rounded border p-1" value={chooser.grantId} disabled={chooser.busy}
                     onChange={(event) => setChooser({ ...chooser, grantId: event.target.value })}>
                     {chooser.targets.grants.map((grant) => (
-                      <option key={grant.id} value={grant.id}>{grant.callerNumberE164}{grant.identityType ? ` (${grant.identityType})` : ''}</option>
+                      <option key={grant.id} value={grant.id}>{formatPhoneDisplay(grant.callerNumberE164)}{grant.identityType ? ` (${grant.identityType})` : ''}</option>
                     ))}
                   </select>
                 </label>

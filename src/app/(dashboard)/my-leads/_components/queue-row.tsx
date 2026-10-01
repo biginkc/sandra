@@ -1,3 +1,4 @@
+import { formatPhoneDisplay } from "@/lib/phone-format";
 import {
   AlertTriangle,
   ArrowRight,
@@ -246,7 +247,7 @@ export function MyLeadQueueRow({
       {/* Retain loaded detail state through collapse without mounting unopened details. */}
       {(detailsOpen || detailState?.status === "ready") && <>
       <div className="border-t border-[#f0eeec] pl-[33px] pr-[18px] pt-2 pb-[18px] dark:border-border">
-        <p className="flex items-center gap-2 pt-2 text-sm text-muted-foreground"><Phone className="size-3.5" aria-hidden="true" />{row.phone || "Phone unavailable"}</p>
+        <p className="flex items-center gap-2 pt-2 text-sm text-muted-foreground"><Phone className="size-3.5" aria-hidden="true" />{formatPhoneDisplay(row.phone) || "Phone unavailable"}</p>
 
         <div className="flex flex-wrap gap-2 pt-4">
           <span

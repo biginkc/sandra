@@ -145,7 +145,7 @@ describe("RepSmsComposer obligation resume", () => {
     const sender = await screen.findByLabelText("Send from")
     expect(sender).toHaveValue("sender-1")
     expect(sender).toBeDisabled()
-    expect(screen.getByText("From:").parentElement).toHaveTextContent("+1 (816) 370-6846")
+    expect(screen.getByText("From:").parentElement).toHaveTextContent("(816) 370-6846")
   })
 
   it("persists a generic submission key and reconciles it after a response-loss reload", async () => {
@@ -248,7 +248,7 @@ describe("RepSmsComposer obligation resume", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Reconcile saved send" })).toBeInTheDocument())
     expect(screen.getByLabelText("Editable message remainder")).toHaveValue(savedComposition.remainder)
     expect(screen.getByLabelText("Editable message remainder")).toBeDisabled()
-    expect(screen.getByText("From:").parentElement).toHaveTextContent("+1 (816) 370-6846")
+    expect(screen.getByText("From:").parentElement).toHaveTextContent("(816) 370-6846")
     await user.click(screen.getByRole("button", { name: "Reconcile saved send" }))
     await waitFor(() => expect(mocks.send).toHaveBeenCalledTimes(2))
     expect(mocks.send.mock.calls[1][0]).toEqual(expect.objectContaining({

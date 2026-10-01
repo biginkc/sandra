@@ -1,6 +1,7 @@
 "use client";
 
 import { MessageSquareIcon } from "lucide-react";
+import { formatPhoneDisplay } from "@/lib/phone-format";
 import { useRouter } from "next/navigation";
 import { useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
@@ -132,7 +133,7 @@ export function SmsComposer({
         switch (outcome.status) {
           case "sent":
             toast.success("Message sent", {
-              description: `Delivered to ${homeownerPhone}.`,
+              description: `Delivered to ${formatPhoneDisplay(homeownerPhone)}.`,
             });
             setBody("");
             setOpen(false);
@@ -209,8 +210,8 @@ export function SmsComposer({
               disabledReason
             ) : (
               <>
-                To <span className="font-medium">{homeownerName ?? homeownerPhone}</span>{" "}
-                at <span className="font-mono text-xs">{homeownerPhone}</span>
+                To <span className="font-medium">{homeownerName ?? formatPhoneDisplay(homeownerPhone)}</span>{" "}
+                at <span className="font-mono text-xs">{formatPhoneDisplay(homeownerPhone)}</span>
               </>
             )}
           </DialogDescription>
@@ -231,7 +232,7 @@ export function SmsComposer({
             )}
             {fromOptions.map((o) => (
               <option key={o.number} value={o.number}>
-                {o.number} · {o.ownerName}
+                {formatPhoneDisplay(o.number)} · {o.ownerName}
                 {o.status !== "user" && o.status !== "office"
                   ? ` (${o.status})`
                   : ""}

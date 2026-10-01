@@ -9,6 +9,7 @@ import {
 } from "./fixtures";
 import { checkQuietHours, STATE_TO_TZ } from "../src/lib/messaging/quiet-hours";
 import { ensureConversationIdForThread } from "../src/lib/messages/threading";
+import { formatPhoneDisplay } from "../src/lib/phone-format";
 
 type Admin = ReturnType<typeof adminClient>;
 type SendSwitchProbe = {
@@ -201,7 +202,7 @@ test.describe("send then switch conversation", () => {
         if (order === "send-first") {
           allowActionResponse();
           await (await aSendResponse).finished();
-          await expect(page.getByText(`Sent to ${aPhone}.`, { exact: true })).toBeVisible();
+          await expect(page.getByText(`Sent to ${formatPhoneDisplay(aPhone)}.`, { exact: true })).toBeVisible();
           await expect(page.getByTestId("inbox-detail-panel")).toContainText(reply);
         }
 
@@ -257,7 +258,7 @@ test.describe("send then switch conversation", () => {
           actionResponseReleased = true;
           allowActionResponse();
           await (await aSendResponse).finished();
-          await expect(page.getByText(`Sent to ${aPhone}.`, { exact: true })).toBeVisible();
+          await expect(page.getByText(`Sent to ${formatPhoneDisplay(aPhone)}.`, { exact: true })).toBeVisible();
           await page.evaluate(
             () => new Promise<void>((resolve) => {
               requestAnimationFrame(() => requestAnimationFrame(() => resolve()));

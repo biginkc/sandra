@@ -140,7 +140,7 @@ describe("<InlineReply /> disabled explanations", () => {
     });
     expect(composer).toHaveValue("");
     expect(toast.success).toHaveBeenCalledWith("Message sent", {
-      description: "Sent to +18165550123.",
+      description: "Sent to (816) 555-0123.",
     });
     expect(routerRefreshMock).toHaveBeenCalledOnce();
   });

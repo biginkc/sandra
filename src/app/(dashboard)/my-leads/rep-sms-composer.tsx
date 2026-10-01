@@ -1,10 +1,10 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
+import { formatPhoneDisplay } from "@/lib/phone-format";
 
 import { Button } from "@/components/ui/button"
 import type { SendSmsOutcome } from "@/lib/messaging/send"
-import { formatPhoneE164 } from "@/lib/phone-format"
 import {
   DEFAULT_REP_SMS_INTRODUCTION,
   REP_SMS_INTRODUCTIONS,
@@ -583,12 +583,12 @@ export function RepSmsComposer({
             <span className="font-medium">Send from</span>
             <select id={`rep-sms-sender-${propertyId}`} className="rounded border p-2" disabled={pending || obligationOwnsSender || submissionLocked} value={senderId} onChange={(event) => setSenderId(event.target.value)}>
               <option value="">Choose your number</option>
-              {context.senders.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.label} · {obligationOwnsSender && candidate.id === senderId ? (obligation?.fromNumber ?? candidate.number) : candidate.number}{candidate.isDefault ? " (default)" : ""}</option>)}
+              {context.senders.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.label} · {obligationOwnsSender && candidate.id === senderId ? formatPhoneDisplay(obligation?.fromNumber ?? candidate.number) : formatPhoneDisplay(candidate.number)}{candidate.isDefault ? " (default)" : ""}</option>)}
             </select>
           </label>
           <div className="flex flex-col justify-end text-sm text-muted-foreground">
-            <span><span className="font-medium text-foreground">From:</span> {formatPhoneE164(senderDisplayNumber) ?? "No selected texting number"}</span>
-            <span><span className="font-medium text-foreground">To:</span> {formatPhoneE164(recipient) ?? "No usable mobile number"}</span>
+            <span><span className="font-medium text-foreground">From:</span> {formatPhoneDisplay(senderDisplayNumber) ?? "No selected texting number"}</span>
+            <span><span className="font-medium text-foreground">To:</span> {formatPhoneDisplay(recipient) ?? "No usable mobile number"}</span>
             <span className="text-xs">Replies use the saved phone in this thread.</span>
           </div>
         </div>
@@ -652,7 +652,7 @@ export function RepSmsComposer({
         </div>
 
         <div className="space-y-2 rounded-md border bg-muted/20 p-3">
-          <div className="flex items-center justify-between gap-2 text-sm font-medium"><span>Complete preview</span><span className="text-xs text-muted-foreground">Mel → {formatPhoneE164(recipient) ?? "—"}</span></div>
+          <div className="flex items-center justify-between gap-2 text-sm font-medium"><span>Complete preview</span><span className="text-xs text-muted-foreground">Mel → {formatPhoneDisplay(recipient) ?? "—"}</span></div>
           <p className="whitespace-pre-wrap break-words rounded bg-background p-3 text-sm">{fullBody}</p>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
             <span>{smsInfo.length} characters</span>
