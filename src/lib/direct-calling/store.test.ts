@@ -9,17 +9,19 @@ import { FakeStore, makeRow } from "./test-support";
 import type { CleanupSpec } from "./transitions";
 
 type Call = { fn: string; args: Record<string, unknown> };
+type RpcError = { code: string; message: string };
 
-function stub(responses: Record<string, unknown> = {}) {
+function stub(responses: Record<string, unknown> = {}, errors: Record<string, RpcError> = {}) {
   const calls: Call[] = [];
   const row = makeRow();
   const chain: Record<string, unknown> = {};
-  for (const name of ["select", "eq", "neq", "is", "not", "limit"]) chain[name] = () => chain;
+  for (const name of ["select", "eq", "neq", "is", "not", "or", "limit"]) chain[name] = () => chain;
   chain.single = async () => ({ data: row, error: null });
   chain.maybeSingle = async () => ({ data: row, error: null });
   const admin = {
     rpc: async (fn: string, args: Record<string, unknown>) => {
       calls.push({ fn, args });
+      if (fn in errors) return { data: null, error: errors[fn] };
       return { data: fn in responses ? responses[fn] : null, error: null };
     },
     from: () => chain,
@@ -108,5 +110,16 @@ describe("createSupabaseDirectCallStore RPC payloads", () => {
     expect(await store.markDialStarted(row.id, "browser", "2026-10-01T12:00:00.000Z", 30, 7200)).toBe(false);
     expect(store.openFor(row.id)).toHaveLength(1);
     expect(store.openFor(row.id)[0].dial_started_at).toBeNull();
+  });
+
+  it("maps only definite begin validation failures to an unreserved refusal", async () => {
+    const call = { org_id: "o", operator_user_id: "u", property_id: null, preparation_property_id: "p", contact_id: null, destination_e164: "", caller_id_e164: "+1666", time_limit_secs: 180, client_request_id: "r" };
+    for (const code of ["22P02", "23503"]) {
+      const { store } = stub({}, { direct_call_begin: { code, message: "invalid preparation target" } });
+      await expect(store.beginCall(call)).resolves.toEqual({ outcome: "invalid_target" });
+    }
+
+    const { store } = stub({}, { direct_call_begin: { code: "08006", message: "connection lost" } });
+    await expect(store.beginCall(call)).rejects.toThrow("connection lost");
   });
 });

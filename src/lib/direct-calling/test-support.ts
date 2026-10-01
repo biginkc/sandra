@@ -195,7 +195,7 @@ export class FakeStore implements DirectCallStore {
     const terminal = (status: string) => ["ended", "failed"].includes(status);
     if (
       terminal(next.status) && !terminal(row.status) && !next.connected_at && next.property_id &&
-      ![...this.calls.values()].some((o) => o.property_id === next.property_id && o.id !== next.id && !terminal(o.status))
+      ![...this.calls.values()].some((o) => (o.property_id ?? o.preparation_property_id) === next.property_id && o.id !== next.id && !terminal(o.status))
     ) {
       next = { ...next, resume_pending: true };
       this.calls.set(id, next);
@@ -284,7 +284,7 @@ export class FakeStore implements DirectCallStore {
     return true;
   }
   async hasActiveCallForProperty(propertyId: string, excludeId: string | null) {
-    return [...this.calls.values()].some((r) => r.property_id === propertyId && r.id !== excludeId && !["ended", "failed"].includes(r.status));
+    return [...this.calls.values()].some((r) => (r.property_id ?? r.preparation_property_id) === propertyId && r.id !== excludeId && !["ended", "failed"].includes(r.status));
   }
   async addLegCleanup(callId: string, legId: string) {
     const row = this.calls.get(callId);

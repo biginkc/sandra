@@ -558,6 +558,14 @@ describe("start errors say whether anything was reserved (#744-1)", () => {
     expect(await start(ctx)).toMatchObject({ ok: false, errorCode: "start_failed", reserved: true });
   });
 
+  it("keeps a definite invalid preparation target unreserved", async () => {
+    const ctx = setup();
+    vi.spyOn(ctx.store, "beginCall").mockResolvedValueOnce({ outcome: "invalid_target" });
+    expect(await start(ctx)).toEqual({ ok: false, error: "A valid lead is required.", errorCode: "invalid_request", reserved: false });
+    expect(ctx.prepareLeadCall).not.toHaveBeenCalled();
+    expect(ctx.telnyx.dial).not.toHaveBeenCalled();
+  });
+
   it("a request cancelled during prepare still records the prepared target, so the terminal move carries resume_pending", async () => {
     const ctx = setup();
     ctx.prepareLeadCall.mockImplementation(async (propertyId: string) => {
@@ -602,21 +610,40 @@ describe("start errors say whether anything was reserved (#744-1)", () => {
   it("does not resume a late prepared lead over a newer live call on that property", async () => {
     const ctx = setup();
     const preparedTarget = target({ propertyId: "prop-1", contactId: "contact-1", phoneE164: "+15550009999", name: "Pat Seller" });
-    let release!: (value: { ok: true; data: DirectCallTarget }) => void;
-    ctx.prepareLeadCall.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
+    let releaseA!: (value: { ok: true; data: DirectCallTarget }) => void;
+    let releaseB!: (value: { ok: true; data: DirectCallTarget }) => void;
+    let preparationCount = 0;
+    ctx.prepareLeadCall.mockImplementation(() => new Promise((resolve) => {
+      preparationCount += 1;
+      if (preparationCount === 1) releaseA = resolve;
+      else releaseB = resolve;
+    }));
 
-    const starting = ctx.service.startCall("user-1", { kind: "lead", propertyId: "prop-1", clientRequestId: REQ });
+    const startingA = ctx.service.startCall("user-1", { kind: "lead", propertyId: "prop-1", clientRequestId: REQ });
     await vi.waitFor(() => expect(ctx.store.calls.size).toBe(1));
-    const id = [...ctx.store.calls.keys()][0];
     await ctx.service.cancelByRequest("user-1", REQ);
     ctx.clock.now = new Date(ctx.clock.now.getTime() + 61_000);
     await ctx.service.getStatusByRequest("user-1", REQ);
-    ctx.store.add(makeRow({ id: "newer-live-call", operator_user_id: "user-2", property_id: "prop-1", status: "seller_dialing", browser_leg_id: "newer-browser" }));
 
-    release({ ok: true, data: preparedTarget });
-    await expect(starting).resolves.toMatchObject({ ok: false, errorCode: "cancelled", reserved: true });
+    // B has paused the same property but is still preparing, so its property_id is null and only
+    // preparation_property_id carries the ownership that must block A's late resume.
+    const startingB = ctx.service.startCall("user-1", { kind: "lead", propertyId: "prop-1", clientRequestId: REQ2 });
+    await vi.waitFor(() => expect(ctx.store.calls.size).toBe(2));
+    const rows = [...ctx.store.calls.values()];
+    const idA = rows.find((row) => row.client_request_id === REQ)!.id;
+    const idB = rows.find((row) => row.client_request_id === REQ2)!.id;
+    expect(ctx.store.calls.get(idB)).toMatchObject({ status: "browser_connecting", property_id: null, preparation_property_id: "prop-1" });
+
+    releaseA({ ok: true, data: preparedTarget });
+    await expect(startingA).resolves.toMatchObject({ ok: false, errorCode: "cancelled", reserved: true });
     expect(ctx.telnyx.dial).not.toHaveBeenCalled();
     expect(ctx.resumeFailedSoftphoneCall).not.toHaveBeenCalled();
-    expect(ctx.store.calls.get(id)).toMatchObject({ property_id: "prop-1", preparation_property_id: null, resume_pending: false });
+    expect(ctx.store.calls.get(idA)).toMatchObject({ property_id: "prop-1", preparation_property_id: null, resume_pending: false });
+    expect(ctx.store.calls.get(idB)).toMatchObject({ property_id: null, preparation_property_id: "prop-1" });
+
+    releaseB({ ok: true, data: preparedTarget });
+    await expect(startingB).resolves.toMatchObject({ ok: true });
+    expect(ctx.telnyx.dial).toHaveBeenCalledTimes(1);
+    expect(ctx.resumeFailedSoftphoneCall).not.toHaveBeenCalled();
   });
 });

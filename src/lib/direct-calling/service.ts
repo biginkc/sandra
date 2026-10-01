@@ -234,6 +234,7 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
       }
       if (begun.outcome === "busy_cleanup") return err("Your previous call is still hanging up. Try again in a moment.", "teardown_pending", false);
       if (begun.outcome === "busy_call") return err("You already have a call in progress.", "call_in_progress", false);
+      if (begun.outcome === "invalid_target") return err("A valid lead is required.", "invalid_request", false);
       row = (begun as Extract<typeof begun, { outcome: "created" }>).row;
     } catch (error) {
       // Whether the reservation committed is unknown: the browser reconciles by request id.

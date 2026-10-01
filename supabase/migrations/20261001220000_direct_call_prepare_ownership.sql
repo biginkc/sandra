@@ -54,6 +54,62 @@ begin
 end;
 $$;
 
+-- Rebuild the duration-era transition with preparation ownership included in the property lock.
+-- A newer browser_connecting reservation has property_id null until prepare returns, so its
+-- preparation_property_id must prevent an older late resume from reopening enrollments underneath it.
+create or replace function public.direct_call_apply(p_id uuid, p_statuses text[], p_patch jsonb, p_cleanups jsonb)
+returns setof public.direct_calls language plpgsql security invoker set search_path = public as $$
+declare
+  prev public.direct_calls;
+  r public.direct_calls;
+begin
+  select * into prev from public.direct_calls where id = p_id for update;
+  if not found or not (prev.status = any(p_statuses)) then return; end if;
+  update public.direct_calls set
+    status = case when p_patch ? 'status' then p_patch->>'status' else status end,
+    browser_leg_id = case when p_patch ? 'browser_leg_id' then p_patch->>'browser_leg_id' else browser_leg_id end,
+    seller_leg_id = case when p_patch ? 'seller_leg_id' then p_patch->>'seller_leg_id' else seller_leg_id end,
+    hangup_cause = case when p_patch ? 'hangup_cause' then p_patch->>'hangup_cause' else hangup_cause end,
+    failure_reason = case when p_patch ? 'failure_reason' then p_patch->>'failure_reason' else failure_reason end,
+    connected_at = case when p_patch ? 'connected_at' then (p_patch->>'connected_at')::timestamptz else connected_at end,
+    ended_at = case when p_patch ? 'ended_at' then (p_patch->>'ended_at')::timestamptz else ended_at end,
+    seller_dial_state = case when p_patch ? 'seller_dial_state' then p_patch->>'seller_dial_state' else seller_dial_state end,
+    updated_at = now()
+  where id = p_id returning * into r;
+  if p_patch ? 'browser_leg_id' then
+    update public.direct_call_cleanups set confirmed_at = now()
+     where direct_call_id = p_id and kind = 'unresolved_dial' and dial_role = 'browser' and confirmed_at is null;
+  end if;
+  if p_patch ? 'seller_leg_id' or p_patch->>'seller_dial_state' = 'sent' then
+    update public.direct_call_cleanups set confirmed_at = now()
+     where direct_call_id = p_id and kind = 'unresolved_dial' and dial_role = 'seller' and confirmed_at is null;
+  end if;
+  insert into public.direct_call_cleanups (org_id, operator_user_id, direct_call_id, kind, leg_id, dial_role, next_attempt_at)
+  select r.org_id, r.operator_user_id, r.id, e->>'kind', e->>'leg_id', e->>'role', now()
+    from jsonb_array_elements(coalesce(p_cleanups, '[]'::jsonb)) e
+  on conflict do nothing;
+  if r.status in ('ending', 'ended', 'failed') and prev.status <> r.status then
+    insert into public.direct_call_cleanups (org_id, operator_user_id, direct_call_id, kind, leg_id)
+    select r.org_id, r.operator_user_id, r.id, 'leg', l.leg_id
+      from (values (r.browser_leg_id), (r.seller_leg_id)) as l(leg_id)
+     where l.leg_id is not null
+       and not exists (
+         select 1 from public.direct_call_events ev
+          where ev.event_type = 'call.hangup' and ev.payload->'data'->'payload'->>'call_control_id' = l.leg_id)
+    on conflict do nothing;
+  end if;
+  if r.status in ('ended', 'failed') and prev.status not in ('ended', 'failed')
+     and r.connected_at is null and r.property_id is not null
+     and not exists (
+       select 1 from public.direct_calls o
+        where coalesce(o.property_id, o.preparation_property_id) = r.property_id
+          and o.id <> r.id and o.status not in ('ended', 'failed')) then
+    update public.direct_calls set resume_pending = true where id = r.id returning * into r;
+  end if;
+  return next r;
+end;
+$$;
+
 -- A late prepare result can fill only the untouched reservation it owns. The boolean return lets the
 -- service fail closed before provider dispatch if cancellation or a conflicting target won the race.
 drop function if exists public.direct_call_set_target(uuid, uuid, uuid, text);

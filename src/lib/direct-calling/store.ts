@@ -30,6 +30,7 @@ export type NewDirectCall = {
 export type BeginOutcome =
   | { outcome: "created"; row: DirectCallFullRow }
   | { outcome: "duplicate_request"; row: DirectCallFullRow }
+  | { outcome: "invalid_target" }
   | { outcome: "busy_call" | "busy_cleanup" };
 
 export type EventInsertResult = "inserted" | "duplicate_processed" | "duplicate_unprocessed";
@@ -94,6 +95,7 @@ export interface DirectCallStore {
 }
 
 const UNIQUE_VIOLATION = "23505";
+const DEFINITE_BEGIN_REFUSALS = new Set(["22P02", "23503"]);
 
 function fail(error: { message: string } | null): never {
   throw new Error(error?.message ?? "Direct call database error.");
@@ -179,6 +181,10 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
       if (error) {
         // A uniqueness violation here means a concurrent writer beat the advisory lock's snapshot.
         if (error.code === UNIQUE_VIOLATION) return { outcome: "busy_call" };
+        // The preparation owner is a UUID with a property FK. These errors prove that the request
+        // was rejected before the reservation insert; ambiguous/database transport failures remain
+        // thrown so callers keep reserved:true and reconcile by request id.
+        if (call.preparation_property_id !== null && DEFINITE_BEGIN_REFUSALS.has(error.code ?? "")) return { outcome: "invalid_target" };
         fail(error);
       }
       const result = (data as Array<{ outcome: string; call_id: string | null }> | null)?.[0];
@@ -245,7 +251,11 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
       if (error) fail(error);
     },
     async hasActiveCallForProperty(propertyId, excludeId) {
-      let query = calls().select("id").eq("property_id", propertyId).not("status", "in", "(ended,failed)").limit(1);
+      let query = calls()
+        .select("id, property_id, preparation_property_id")
+        .not("status", "in", "(ended,failed)")
+        .or(`property_id.eq.${propertyId},preparation_property_id.eq.${propertyId}`)
+        .limit(1);
       if (excludeId) query = query.neq("id", excludeId);
       const { data, error } = await query;
       if (error) fail(error);

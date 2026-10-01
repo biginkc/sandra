@@ -141,6 +141,17 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     expect(begun.outcome).toBe("created");
     const callId = begun.call_id;
     expect(await open(callId)).toEqual([{ kind: "unresolved_dial", dial_role: "browser", leg_id: null }]);
+
+    // Preparation ownership is a UUID/FK boundary. These failures happen before a row can be
+    // inserted, while transport/database errors must remain ambiguous to the service.
+    await pg.query("savepoint invalid_preparation_uuid");
+    await expect(pg.query("select * from public.direct_call_begin($1, $2, null, null, '', '+15550000002', $3, $4, $5)", [ORG, USER_C, "00000000-0000-0000-0000-00000000bb03", 7200, "not-a-uuid"])).rejects.toMatchObject({ code: "22P02" });
+    await pg.query("rollback to savepoint invalid_preparation_uuid");
+    await pg.query("savepoint missing_preparation_property");
+    await expect(pg.query("select * from public.direct_call_begin($1, $2, null, null, '', '+15550000002', $3, $4, $5)", [ORG, USER_C, "00000000-0000-0000-0000-00000000bb04", 7200, "00000000-0000-0000-0000-0000000d1cff"])).rejects.toMatchObject({ code: "23503" });
+    await pg.query("rollback to savepoint missing_preparation_property");
+    expect((await pg.query("select count(*)::int as n from public.direct_calls where operator_user_id=$1 and client_request_id in ($2,$3)", [USER_C, "00000000-0000-0000-0000-00000000bb03", "00000000-0000-0000-0000-00000000bb04"])).rows[0].n).toBe(0);
+
     const bounded = await begin(USER_B, "00000000-0000-0000-0000-00000000bb02", 180);
     expect(bounded.outcome).toBe("created");
     expect((await pg.query("select time_limit_secs from public.direct_calls where operator_user_id=$1", [USER_B])).rows[0].time_limit_secs).toBe(180);
@@ -352,6 +363,15 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     expect(await store.setTarget(lateId, { property_id: PROP3, contact_id: null, destination_e164: "+15550000044" })).toBe(true);
     expect(await store.findById(lateId)).toMatchObject({ property_id: PROP3, preparation_property_id: null, resume_pending: true });
     expect((await store.claimPendingResumes(USER_C, NOW.toISOString(), 30)).map((r) => r.id)).toEqual([lateId]);
+
+    // A newer reservation can own the same property while its preparation is still pending. The
+    // older terminal call must not set resume_pending while that preparation owner is live.
+    await pg.query("update public.direct_call_cleanups set confirmed_at = now() where operator_user_id = $1", [USER_C]);
+    const older = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: PROP3, preparation_property_id: null, contact_id: null, destination_e164: "+15550000055", caller_id_e164: "+15550000002", time_limit_secs: 7200, client_request_id: "00000000-0000-0000-0000-00000000cc05" });
+    const olderId = (older as { row: { id: string } }).row.id;
+    const newerPreparing = await store.beginCall({ org_id: ORG, operator_user_id: USER_A, property_id: null, preparation_property_id: PROP3, contact_id: null, destination_e164: "", caller_id_e164: "+15550000002", time_limit_secs: 7200, client_request_id: "00000000-0000-0000-0000-00000000cc06" });
+    expect(newerPreparing.outcome).toBe("created");
+    expect(await store.updateIfStatus(olderId, ["browser_connecting"], { status: "failed", ended_at: NOW.toISOString() })).toMatchObject({ resume_pending: false });
 
     await pg.query(ownershipRollback);
     await pg.query(timingRollback);
