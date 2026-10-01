@@ -11,11 +11,12 @@ import { ConversationHistory, type InboxDetailSnapshot } from "./conversation-hi
 import { useInboxMetadataActions } from "./use-metadata-actions";
 import { InboxReplyComposer } from "./reply-composer";
 import type { InboxReplyTarget } from "@/lib/inbox/reply-api-contract";
-import type { InboxDripMarker } from "@/lib/inbox/drip-markers";
+import type { InboxDripCounts, InboxDripMarker } from "@/lib/inbox/drip-markers";
 
 const labels: Record<InboxFilter["view"], string> = { active: "All", all: "All", mine: "Assigned to me", unassigned: "Unassigned", unread: "Unread", escalated: "Needs review", dispo: "Has outcome", needs_outcome: "Needs outcome", in_drip: "In a drip", drip_replied: "Replied to drip", unknown: "Unknown senders", dismissed: "Dismissed" };
 const isDripView = (view: InboxFilter["view"]) => view === "in_drip" || view === "drip_replied";
-type Scope = WorkspaceScope & { nextCursor: string | null; refreshed: boolean };
+type Scope = WorkspaceScope & { nextCursor: string | null; refreshed: boolean; sourceCursor: string | null };
+type WorkspaceCounts = InboxCounts | InboxDripCounts;
 type Open = { id: WorkspaceId; generation: number; row?: WorkspaceRow; data?: InboxDetailSnapshot; error?: string };
 function replyTargetFromWorkspaceId(value: WorkspaceId, orgId: string): InboxReplyTarget {
   const parsed: unknown = JSON.parse(value);
@@ -42,7 +43,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   const [opened, setOpened] = useState<Open | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string>();
-  const [counts, setCounts] = useState<InboxCounts>();
+  const [counts, setCounts] = useState<WorkspaceCounts>();
   const [countsError, setCountsError] = useState(false);
   const [dripMarkers, setDripMarkers] = useState(new Map<string, InboxDripMarker>());
   const markerAsOf = useRef(0);
@@ -93,7 +94,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     invalidateTarget({ kind: "conversation", orgId: identity.orgId, conversationId }), [invalidateTarget, identity.orgId]);
   const unavailableSenderGroup = useCallback((senderGroupId: string) =>
     invalidateTarget({ kind: "unknown_sender_group", orgId: identity.orgId, senderGroupId }), [invalidateTarget, identity.orgId]);
-  const metadata = useInboxMetadataActions({ enabled: actionsEnabled, selectionCount: selected.length, identity, orgId: identity.orgId, names: selectionNames, cache, onAccessLost: accessLost, onCompleted: () => { void load(filter); } });
+  const metadata = useInboxMetadataActions({ enabled: actionsEnabled, selectionCount: selected.length, identity, orgId: identity.orgId, names: selectionNames, cache, onAccessLost: accessLost, onCompleted: () => { void refreshAfterAction(); } });
   useEffect(() => { clearActions.current = metadata.clear; }, [metadata.clear]);
   async function json<T>(url: string, init: RequestInit, signal: AbortSignal, notFound?: () => void): Promise<T> {
     const response = await fetch(url, { ...init, signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]), credentials: "same-origin", cache: "no-store", redirect: "error" });
@@ -140,7 +141,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     setCounts(undefined); setCountsError(false);
     const key = JSON.stringify(next);
     try {
-      const value = await cache.read<InboxCounts>("counts", key, signal => {
+      const value = await cache.read<WorkspaceCounts>("counts", key, signal => {
         const params = new URLSearchParams({ orgId: identity.orgId, view: next.view, hide_noise: String(next.hide_noise ?? true), search: next.search ?? "" });
         return json(`/api/inbox/counts?${params}`, {}, signal);
       }, fresh);
@@ -159,7 +160,8 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
       if (controller.signal.aborted) return;
       if (value.orgId !== identity.orgId || value.requesterId !== identity.userId || value.sessionId !== identity.sessionId || value.accessEpoch !== identity.accessEpoch) { accessLost(); return; }
       if (!(value.nextCursor === null || typeof value.nextCursor === "string") || typeof value.refreshed !== "boolean") throw Error("Invalid workspace response");
-      setInvalidatedIds([]); setDripMarkers(new Map()); sync.current!.replace(value); scope.current = value; setNextCursor(value.nextCursor); setFilter(next);
+      const nextScope: Scope = { ...value, sourceCursor: cursor };
+      setInvalidatedIds([]); setDripMarkers(new Map()); sync.current!.replace(nextScope); scope.current = nextScope; setNextCursor(value.nextCursor); setFilter(next);
       void refreshDripMarkers(markerIds(value.orderedIds));
     } catch (failure) {
       if (!controller.signal.aborted && !denied.current) setError(failure instanceof Error ? failure.message : "Could not load conversations.");
@@ -174,10 +176,11 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     try {
       const value = await json<Scope>("/api/inbox/worksets", {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ orgId: identity.orgId, filter: next, cursor: null, limit: 500, replacesScopeId: current.scopeId }),
+        body: JSON.stringify({ orgId: identity.orgId, filter: next, cursor: current.sourceCursor, limit: 500, replacesScopeId: current.scopeId }),
       }, controller.signal);
       if (controller.signal.aborted || value.orgId !== identity.orgId || value.requesterId !== identity.userId || value.sessionId !== identity.sessionId || value.accessEpoch !== identity.accessEpoch || !(value.nextCursor === null || typeof value.nextCursor === "string") || typeof value.refreshed !== "boolean") return;
-      scope.current = value; setNextCursor(value.nextCursor); sync.current?.replace(value); void refreshDripMarkers(markerIds(value.orderedIds));
+      const nextScope: Scope = { ...value, sourceCursor: current.sourceCursor };
+      scope.current = nextScope; setNextCursor(value.nextCursor); sync.current?.replace(nextScope); void refreshDripMarkers(markerIds(value.orderedIds));
     } catch { /* the next probe retries a rate-limited or transient reconciliation */ }
     finally { reconciliationInFlight.current = false; if (reconciliationRequest.current === controller) reconciliationRequest.current = null; }
   }
@@ -206,6 +209,16 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     // The server mounts a new component for a different authenticated identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  async function refreshAfterAction() {
+    const openId = activeOpen.current;
+    const next = filterRef.current;
+    const cursor = scope.current?.sourceCursor ?? null;
+    await load(next, cursor);
+    if (denied.current) return;
+    const ids = markerIds(scope.current?.orderedIds ?? []);
+    await refreshDripMarkers(ids);
+    if (openId && activeOpen.current === openId) await open(openId, true);
+  }
   function select(ids: readonly WorkspaceId[]) {
     if (ids.length > 500) { setError("Select up to 500 conversations at a time."); return; }
     const names = new Map<WorkspaceId, string>();
@@ -252,7 +265,12 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
       toolbar={<><form onSubmit={event => { event.preventDefault(); void load({ ...filter, search }); }}><label>Search <input aria-label="Search conversations" maxLength={100} value={search} onChange={event => setSearch(event.target.value)} disabled={busy} /></label><button disabled={busy}>Search</button></form>
         <label>View <select value={filter.view} disabled={busy} onChange={event => void load({ ...filter, view: event.target.value as InboxFilter["view"] })}>{inboxViews.filter(view => view !== "active").map(view => <option key={view} value={view}>{labels[view]}</option>)}</select></label>
         <label><input type="checkbox" checked={filter.hide_noise ?? true} disabled={busy} onChange={event => void load({ ...filter, hide_noise: event.target.checked })} /> Hide DNC and test conversations</label>
-        <span role="status">{counts ? `${counts.counts[filter.view === "active" ? "all" : filter.view]} matching · counted ${new Date(counts.asOf).toLocaleTimeString()}` : countsError ? "Counts unavailable" : "Loading counts…"}</span>{countsError && <button type="button" onClick={() => void loadCounts(filter, true)}>Retry counts</button>}</>}
+        <span role="status">{(() => {
+          const matching = counts && (isDripView(filter.view)
+            ? (filter.view === "in_drip" ? ("inDrip" in counts ? counts.inDrip : undefined) : ("dripReplied" in counts ? counts.dripReplied : undefined))
+            : ("counts" in counts ? counts.counts[filter.view === "active" ? "all" : filter.view] : undefined));
+          return matching === undefined ? (countsError ? "Counts unavailable" : "Loading counts…") : `${matching} matching · counted ${new Date(counts.asOf).toLocaleTimeString()}`;
+        })()}</span>{countsError && <button type="button" onClick={() => void loadCounts(filter, true)}>Retry counts</button>}</>}
       pageControl={<><span>{snapshot.rows.length} loaded</span><button disabled={busy} onClick={() => void load(filter)}>Refresh view</button><button disabled={busy || !nextCursor} onClick={() => void load(filter, nextCursor)}>Next 500</button></>}
       detail={opened ? { targetId: opened.id, title: opened.row?.name ?? "Conversation", context: opened.row?.context, state: opened.error ? "error" : opened.data ? "ready" : "loading", error: opened.error, onRetry: () => void open(opened.id, true), content: opened.data ? <><ConversationHistory orgId={identity.orgId} conversationId={opened.data.conversationId} requestGeneration={opened.generation} snapshot={{ requestGeneration: opened.generation, data: opened.data }} visible onRefresh={() => void open(opened.id, true)} onAccessLost={accessLost} onUnavailable={unavailable} />{repliesEnabled && <InboxReplyComposer key={opened.data.conversationId} targets={[{ kind: "conversation", id: opened.data.conversationId }]} names={openReplyNames} routeKey={opened.data.captureGeneration} enabled />}</> : undefined } : undefined}
       activity={metadata.activity ?? (repliesEnabled ? undefined : <p>{actionsEnabled ? "Select an action to review eligible records. Replies and remaining individual tools are being connected." : "Bulk actions and remaining individual tools are being connected."}</p>)} />

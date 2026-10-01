@@ -22,6 +22,20 @@ describe("independent Inbox counts route", () => {
     expect(mocks.rpc).toHaveBeenCalledWith("inbox_counts_v2", { org_id: id, filter: { view: "all", hide_noise: false, search: "Smith" } });
     expect(mocks.rpc.mock.calls.every(([name]) => !String(name).includes("workset"))).toBe(true);
   });
+  it("uses only the drip counts RPC for drip views", async () => {
+    vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1");
+    mocks.rpc.mockImplementation((name: string) => ({ abortSignal: () => Promise.resolve({
+      data: name === "inbox_drip_counts_v1"
+        ? { org_id: id, counts: { in_drip: 4, drip_replied: 3 }, as_of: "2026-09-13T00:00:00Z", access_epoch: "1" }
+        : authority,
+      error: null,
+    }) }));
+    const response = await GET(request(`orgId=${id}&view=in_drip&hide_noise=false`));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ inDrip: 4, dripReplied: 3, asOf: "2026-09-13T00:00:00Z", accessEpoch: "1" });
+    expect(mocks.rpc).toHaveBeenCalledWith("inbox_drip_counts_v1", { org_id: id, filter: { view: "in_drip", hide_noise: false } });
+    expect(mocks.rpc).not.toHaveBeenCalledWith("inbox_counts_v2", expect.anything());
+  });
   it.each([`orgId=${id}&view=all&view=mine`, `orgId=${id}&view=all&hide_noise=no`, `orgId=${id}&view=all&userId=other`, "orgId=invalid&view=all"])("denies malformed filter %s before RPC", async query => {
     vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1");
     expect((await GET(request(query))).status).toBe(400); expect(mocks.rpc).not.toHaveBeenCalled();
