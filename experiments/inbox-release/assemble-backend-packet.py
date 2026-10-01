@@ -29,7 +29,7 @@ from transaction_envelope import normalize
 # different identity and must not be accepted by this packet.
 RELEASE_DATABASE = "postgres"
 RELEASE_MARKER = "sandra-inbox-http-owned-synthetic-20260917"
-SOURCE_COMMIT = "a18092714821f3805923007a885da4327b596a7e"  # runtime guards over the trim-parity P3 source snapshot
+SOURCE_COMMIT = "8738ae37550e3b170ea3f4650fe0c5f5219cee21"  # runtime guards over the trim-parity P3 source snapshot
 GRANT_FIX_SHA256 = "a935905bb86e545684f6414c4cced8d02d659b6fc60604537195b2a776534128"  # reviewed correction source bytes
 REPLY_CONTEXT_RLS_SHA256 = "942c9e7b117e73b941eeb0874d5928f37b670df264ba59114d8bf9c0838b8e3f"
 
