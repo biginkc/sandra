@@ -29,6 +29,7 @@ test.beforeAll(async () => {
     jsxImportSource: "react",
     alias: {
       "@/lib/coach/recommendation-action": path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-recommendation-action-stub.ts"),
+      "@/lib/direct-calling/client-actions": path.resolve(process.cwd(), "e2e/synthetic/fixtures/direct-calling-actions-browser-stub.ts"),
       "@": path.resolve(process.cwd(), "src"),
     },
     plugins: [{
