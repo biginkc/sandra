@@ -23,8 +23,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "supabase/migrations/20260930040250_inbox_reply_message_projection.sql"
-PGHOST = os.environ.get("PROJECTION_PGHOST", "/tmp/sandra-reply-persist-pg.pPmk5e/socket")
-PGPORT = os.environ.get("PROJECTION_PGPORT", "55436")
+PGHOST = os.environ.get("PROJECTION_PGHOST")
+PGPORT = os.environ.get("PROJECTION_PGPORT")
+if not PGHOST or not PGPORT:
+    raise RuntimeError("PROJECTION_PGHOST and PROJECTION_PGPORT are required")
 MUTATION_VARIANT = os.environ.get("PROJECTION_MUTATION_VARIANT", "")
 
 

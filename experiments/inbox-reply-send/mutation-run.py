@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -34,9 +35,8 @@ WORKER_TRANSPORT = ROOT / "experiments/inbox-reply-send-worker/vendor/test-trans
 LOCAL_DB_RETRY = ROOT / "experiments/inbox-reply-send-worker/restate-retry-local-db.py"
 PROVIDER_FIX = ROOT / "experiments/inbox-reply-send/provider-fix-proof.py"
 PROVIDER_FIX_MINIMAL = ROOT / "experiments/inbox-reply-send/provider-fix-minimal.py"
-LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r10.log")
-EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-evidence.md")
-NO_DOCKER = os.environ.get("REPLY_PERSIST_NO_DOCKER") == "1"
+LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r11.log")
+EVIDENCE = Path("/Users/jarradhenry/Sandra-inbox-tmp/notes/replypersist-mutation-evidence.md")
 
 
 def execute(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -53,30 +53,10 @@ def record(handle, label: str, result: subprocess.CompletedProcess[str]) -> None
 
 def run_sql_cases(handle, n: int) -> None:
     base_env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PROJECTION_VERBOSE_FAILURES": "1"}
-    if NO_DOCKER:
-        reason = subprocess.CompletedProcess(
-            [f"T{n}", "NOT RUN"],
-            2,
-            f"T{n} NOT RUN: projection-proof.py requires Docker; Docker is forbidden by Round 4\n",
-            "",
-        )
-        record(handle, f"T{n} baseline NOT RUN Docker forbidden", reason)
-        if n == 15:
-            for variant in ("channel", "org", "direction"):
-                record(handle, f"T15 mutation {variant} NOT RUN Docker forbidden", reason)
-        elif n != 17:
-            record(handle, f"T{n} mutation NOT RUN Docker forbidden", reason)
-        if n == 4:
-            run_t4_application(handle)
-        elif n == 16:
-            run_t16_application(handle)
-        elif n in {18, 23}:
-            run_local_integration(handle, n)
-        return
     if n == 10:
         major_probe = execute([
-            "psql", "-XqAt", "-h", base_env.get("PROJECTION_PGHOST", "/tmp/sandra-reply-persist-pg.pPmk5e/socket"),
-            "-p", base_env.get("PROJECTION_PGPORT", "55436"), "-U", base_env.get("PROJECTION_PGUSER", "postgres"),
+            "psql", "-XqAt", "-h", base_env["PROJECTION_PGHOST"],
+            "-p", base_env["PROJECTION_PGPORT"], "-U", base_env.get("PROJECTION_PGUSER", "postgres"),
             "-d", base_env.get("PROJECTION_PGDATABASE", "postgres"), "-c", "SELECT current_setting('server_version_num')::int/10000;",
         ], base_env)
         if major_probe.returncode == 0 and major_probe.stdout.strip() != "17":
@@ -365,8 +345,7 @@ REAL_NOT_RUN = {
 
 SECTION_RE = re.compile(r"^===== (.+?) =====\n(.*?)^===== END \1 =====\n?", re.MULTILINE | re.DOTALL)
 TEST_ID_RE = re.compile(r"(?:T-R\d+[a-z]?|T\d+|B\d+)")
-NOT_RUN_MARKERS = (
-    "NOT RUN",
+ENV_FAIL_MARKERS = (
     "could not connect",
     "No such file or directory",
     "PROJECTION_PGHOST is required",
@@ -374,6 +353,7 @@ NOT_RUN_MARKERS = (
     "Cannot find package",
     "reply-worker fixture is unavailable",
 )
+NOT_RUN_MARKERS = ("NOT RUN",)
 HARNESS_FAILURE_MARKERS = ("syntax error at or near", "scanner_yyerror")
 
 
@@ -384,6 +364,14 @@ def captured_sections(raw: str) -> list[tuple[str, str]]:
 def test_id(header: str) -> str:
     match = TEST_ID_RE.search(header)
     return match.group(0) if match else header.split()[0]
+
+
+def real_not_run_id(header: str) -> str:
+    match = re.search(r"\b(T-R\d+[a-z]? REAL)\b", header)
+    if not match:
+        return test_id(header)
+    full = match.group(1)
+    return full if full in REAL_NOT_RUN else full.split()[0]
 
 
 def baseline_for(mutation_header: str, sections: list[tuple[str, str]]) -> tuple[str, str] | None:
@@ -402,10 +390,13 @@ def baseline_for(mutation_header: str, sections: list[tuple[str, str]]) -> tuple
 
 
 def result_kind(header: str, body: str, *, baseline: bool = False) -> str:
-    upper = f"{header}\n{body}".upper()
+    combined = f"{header}\n{body}"
+    upper = combined.upper()
+    if any(marker.lower() in combined.lower() for marker in ENV_FAIL_MARKERS):
+        return "ENV FAIL"
     if re.search(r"\bSKIP\b", upper):
         return "SKIP"
-    if any(marker.lower() in f"{header}\n{body}".lower() for marker in NOT_RUN_MARKERS):
+    if any(marker.lower() in combined.lower() for marker in NOT_RUN_MARKERS):
         return "NOT RUN"
     exit_match = re.search(r"^exit=(-?\d+)$", body, re.MULTILINE)
     if exit_match and int(exit_match.group(1)) == 0:
@@ -453,6 +444,8 @@ def derive_evidence(raw: str) -> str:
         mutated_kind = result_kind(header, body)
         if baseline_kind == "SKIP":
             status = "SKIP"
+        elif baseline_kind == "ENV FAIL":
+            status = "ENV FAIL"
         elif baseline_kind == "NOT RUN":
             status = "NOT RUN"
         elif baseline_kind != "PASS":
@@ -463,6 +456,8 @@ def derive_evidence(raw: str) -> str:
             status = "SURVIVED"
         elif mutated_kind == "SKIP":
             status = "SKIP"
+        elif mutated_kind == "ENV FAIL":
+            status = "ENV FAIL"
         else:
             status = "NOT RUN"
         mechanism = header.replace("|", "\\|")
@@ -506,6 +501,22 @@ def has_baseline_failure(raw: str) -> bool:
     return False
 
 
+def has_environment_failure(raw: str) -> bool:
+    return any(result_kind(header, body) == "ENV FAIL" for header, body in captured_sections(raw))
+
+
+def unexpected_not_run_headers(raw: str) -> list[str]:
+    unexpected: list[str] = []
+    for header, body in captured_sections(raw):
+        if result_kind(header, body) == "NOT RUN" and real_not_run_id(header) not in REAL_NOT_RUN:
+            unexpected.append(header)
+    return unexpected
+
+
+def has_unexpected_not_run(raw: str) -> bool:
+    return bool(unexpected_not_run_headers(raw))
+
+
 def self_test() -> None:
     raw = """===== T-R8 self-test baseline =====
 exit=0
@@ -528,13 +539,66 @@ exit=1
 """
     assert has_baseline_failure(baseline_failure_raw)
     assert "| T-R99 | BASELINE FAIL |" in derive_evidence(baseline_failure_raw)
+    unexpected_not_run_raw = """===== T99 self-test baseline =====
+exit=2
+--- stderr ---
+T99 NOT RUN: missing test environment
+===== END T99 self-test baseline =====
+===== T99 self-test mutation =====
+exit=2
+--- stderr ---
+T99 NOT RUN: missing test environment
+===== END T99 self-test mutation =====
+"""
+    assert result_kind("T99 self-test mutation", "exit=2\nT99 NOT RUN: missing test environment\n") == "NOT RUN"
+    assert has_unexpected_not_run(unexpected_not_run_raw)
+    real_not_run_raw = """===== T-R2 REAL self-test =====
+exit=2
+--- stderr ---
+T-R2 NOT RUN: Restate engine requires Docker; Docker is forbidden by Round 4
+===== END T-R2 REAL self-test =====
+"""
+    assert not has_unexpected_not_run(real_not_run_raw)
+    assert result_kind("T99 connection self-test", "exit=1\npsql: could not connect to server\n") == "ENV FAIL"
+    assert result_kind("T99 missing-file self-test", "exit=1\nError: No such file or directory\n") == "ENV FAIL"
+    assert has_environment_failure("===== T99 env self-test =====\nexit=1\nNo such file or directory\n===== END T99 env self-test =====\n")
+
+
+def preflight() -> None:
+    required = ("PROJECTION_PGHOST", "PROJECTION_PGPORT")
+    missing = [name for name in required if not os.environ.get(name)]
+    if missing:
+        raise RuntimeError(f"ENV FAIL: required environment missing: {', '.join(missing)}")
+    if shutil.which("psql") is None:
+        raise RuntimeError("ENV FAIL: psql is not on PATH")
+    if shutil.which("postgrest") is None:
+        raise RuntimeError("ENV FAIL: postgrest is not on PATH")
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    result = execute([
+        "psql", "-XqAt", "-v", "ON_ERROR_STOP=1",
+        "-h", os.environ["PROJECTION_PGHOST"],
+        "-p", os.environ["PROJECTION_PGPORT"],
+        "-U", os.environ.get("PROJECTION_PGUSER", "postgres"),
+        "-d", os.environ.get("PROJECTION_PGDATABASE", "postgres"),
+        "-c", "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='messages' AND column_name='idempotency_key');",
+    ], env)
+    if result.returncode != 0:
+        detail = (result.stderr + result.stdout).strip().replace("\n", " ")
+        raise RuntimeError(f"ENV FAIL: PostgreSQL schema preflight failed: {detail}")
+    if result.stdout.strip().lower() not in {"t", "true"}:
+        raise RuntimeError("ENV FAIL: public.messages.idempotency_key is missing")
 
 
 def main() -> int:
     self_test()
+    try:
+        preflight()
+    except RuntimeError as error:
+        print(str(error), file=sys.stderr)
+        return 2
     LOG.parent.mkdir(parents=True, exist_ok=True)
     with LOG.open("w", encoding="utf-8") as handle:
-        handle.write("reply-persistence v10 round-10 mutation run; machine-produced raw child output\n")
+        handle.write("reply-persistence v11 round-11 mutation run; machine-produced raw child output\n")
         for n in range(1, 28):
             run_sql_cases(handle, n)
         run_t17_application(handle)
@@ -543,7 +607,17 @@ def main() -> int:
         run_restate_local_db(handle)
     raw = LOG.read_text(encoding="utf-8")
     EVIDENCE.write_text(derive_evidence(raw), encoding="utf-8")
-    return 1 if has_survived_mutation(raw) or has_baseline_failure(raw) else 0
+    unexpected = unexpected_not_run_headers(raw)
+    if unexpected:
+        print("ENV FAIL: unexpected NOT RUN rows:", file=sys.stderr)
+        for header in unexpected:
+            print(f"  {header}", file=sys.stderr)
+    return 1 if (
+        has_survived_mutation(raw)
+        or has_baseline_failure(raw)
+        or has_environment_failure(raw)
+        or has_unexpected_not_run(raw)
+    ) else 0
 
 
 if __name__ == "__main__":
