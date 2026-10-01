@@ -46,6 +46,7 @@ export { openCallCapability } from "./call-capability";
 const E164 = /^\+[1-9]\d{7,14}$/;
 const MAX_REF_LENGTH = 200;
 const MAX_CAPABILITY_LENGTH = 1_024;
+const VALID_COACH_SCRIPT_SLUGS = new Set(["closr-outbound", "closr-inbound", "bmh-follow-up", "bmh-cold-call-objections"]);
 
 type AuthenticatedOperator = { ok: true; userId: string };
 type StartIntent = { idempotencyKey: string; userId: string };
@@ -160,6 +161,7 @@ async function indexCoachCall(input: {
   clientCallId: string;
   operatorUserId: string;
   propertyId: string | null;
+  scriptSlug: string;
 }): Promise<void> {
   try {
     const admin = createAdminClient() as unknown as CoachCallIndexAdminClient;
@@ -167,7 +169,7 @@ async function indexCoachCall(input: {
     // There is no "latest" fallback: this call either records the exact
     // revision available at start, or coaching is unavailable for the call.
     const script = await Promise.race([
-      loadCachedCoachDefault("closr-outbound", admin as never),
+      loadCachedCoachDefault(input.scriptSlug, admin as never),
       timeout(COACH_INDEX_TIMEOUT_MS),
     ]).catch((error) => {
       // Index ownership is required for the live coach channel even when
@@ -239,6 +241,9 @@ export async function startAuthenticatedJitterCall(
     return startLocalError("A stable call token is required.");
   if (!validRef(target.intentCapability, MAX_CAPABILITY_LENGTH))
     return startLocalError("A valid start intent is required.");
+  const scriptSlug = target.coachScriptSlug ?? "closr-outbound";
+  if (!VALID_COACH_SCRIPT_SLUGS.has(scriptSlug))
+    return startLocalError("Unknown coach script.");
 
   // Server Actions are public mutation boundaries. Authorize and validate the
   // sealed intent before the eligibility path, which can pause a lead.
@@ -340,7 +345,7 @@ export async function startAuthenticatedJitterCall(
     const clientCallId = intent.idempotencyKey;
     const operatorUserId = operator.userId;
     const propertyId = prepared.data.propertyId;
-    after(() => indexCoachCall({ clientCallId, operatorUserId, propertyId }));
+    after(() => indexCoachCall({ clientCallId, operatorUserId, propertyId, scriptSlug }));
   }
 
   let acquisition: AcquisitionCallBinding = { tracked: false };
@@ -574,7 +579,8 @@ function isCallTarget(value: unknown): value is CallTarget {
     (target.contactId === undefined || typeof target.contactId === "string") &&
     typeof target.callToken === "string" &&
     (target.intentCapability === undefined ||
-      typeof target.intentCapability === "string")
+      typeof target.intentCapability === "string") &&
+    (target.coachScriptSlug === undefined || typeof target.coachScriptSlug === "string")
   );
 }
 

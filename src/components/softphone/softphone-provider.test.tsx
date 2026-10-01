@@ -1851,7 +1851,7 @@ describe("SoftphoneProvider coach UI flag", () => {
     expect(screen.queryByTestId("dialer-coach-script")).not.toBeInTheDocument();
     expect(
       JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!),
-    ).toEqual({ enabled: true });
+    ).toEqual({ enabled: true, scriptId: "closr-outbound" });
     first.unmount();
     const second = render(
       <SoftphoneProvider>
@@ -1880,6 +1880,20 @@ describe("SoftphoneProvider coach UI flag", () => {
       "aria-checked",
       "false",
     );
+  });
+
+  it("lets the rep select and retain the follow-up script before a call", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const user = userEvent.setup();
+    const first = render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("header-dialer-button"));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Call script" }), "bmh-follow-up");
+    expect(JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!)).toMatchObject({ scriptId: "bmh-follow-up" });
+    first.unmount();
+    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("header-dialer-button"));
+    expect(screen.getByRole("combobox", { name: "Call script" })).toHaveValue("bmh-follow-up");
   });
 
   it.each([undefined, "0", "true"])(
@@ -2069,7 +2083,7 @@ describe("SoftphoneProvider coach UI flag", () => {
       );
       expect(
         JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!),
-      ).toEqual({ enabled: true });
+      ).toEqual({ enabled: true, scriptId: "closr-outbound" });
       await user.click(screen.getByTestId("coach-collapse"));
       expect(
         JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!)

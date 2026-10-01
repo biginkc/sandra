@@ -8,6 +8,8 @@ export type CallTarget = {
   callToken?: string;
   /** Server-sealed start intent used only by the real Jitter transport. */
   intentCapability?: string;
+  /** Published coach script chosen before the call. Server verifies its cached default. */
+  coachScriptSlug?: string;
 };
 
 export type CallHandle = { id: string };
