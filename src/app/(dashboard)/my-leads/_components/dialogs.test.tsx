@@ -165,9 +165,14 @@ describe("My Leads workflow dialogs", () => {
     expect(screen.getByText("Choose a curated follow-up template.")).toBeInTheDocument()
 
     await user.selectOptions(screen.getByLabelText("Curated follow-up template"), "no-answer-callback-time")
+    await user.click(screen.getByRole("button", { name: "Save attempt" }))
+    expect(screen.getByText("Enter the acquisitions manager.")).toBeInTheDocument()
+    expect(onSubmit).not.toHaveBeenCalled()
+    await user.type(screen.getByLabelText("Acquisitions manager"), "Jordan")
     const remainder = screen.getByLabelText("Editable follow-up remainder")
     await user.clear(remainder)
-    await user.type(remainder, "Please text Maria a time that works.")
+    await user.type(remainder, "Please text Jordan a time that works.")
+    expect(screen.getAllByText("Hey, this is Mel with BMH, Jordan's assistant.", { exact: false }).length).toBeGreaterThan(0)
     await user.click(screen.getByRole("button", { name: "Save attempt" }))
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
@@ -179,12 +184,13 @@ describe("My Leads workflow dialogs", () => {
       note: null,
       recordingUrl: null,
       callActivityId: null,
-      smsBody: "Hey, this is Mel with BMH, Maria's assistant.\n\nPlease text Maria a time that works.",
+      smsBody: "Hey, this is Mel with BMH, Jordan's assistant.\n\nPlease text Jordan a time that works.",
       followUp: expect.objectContaining({
+        acquisitionsManager: "Jordan",
         policyVersion: 1,
         introId: "mel-maria-assistant-1",
         templateId: "no-answer-callback-time",
-        remainder: "Please text Maria a time that works.",
+        remainder: "Please text Jordan a time that works.",
       }),
     }))
   })
@@ -200,12 +206,13 @@ describe("My Leads workflow dialogs", () => {
       })
     render(<AcquisitionAttemptDialog {...baseProps} onOpenChange={onOpenChange} onSubmit={onSubmit} />)
     await user.selectOptions(screen.getByLabelText("External outcome"), "no_answer")
+    await user.type(screen.getByLabelText("Acquisitions manager"), "Jordan")
     await user.selectOptions(screen.getByLabelText("Curated follow-up template"), "no-answer-availability")
     fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-12T09:00" } })
     const saveButton = screen.getByRole("button", { name: "Save attempt" })
     await user.click(saveButton)
     expect(screen.getByText("Follow-up blocked")).toBeInTheDocument()
-    expect(screen.getByLabelText("Editable follow-up remainder")).toHaveValue("When would be a good time for you and Maria to connect about the property?")
+    expect(screen.getByLabelText("Editable follow-up remainder")).toHaveValue("When would be a good time for you and Jordan to connect about the property?")
     expect(onOpenChange).not.toHaveBeenCalledWith(false)
     expect(screen.getByLabelText("External outcome")).toBeDisabled()
     expect(screen.getByLabelText("Editable follow-up remainder")).toBeDisabled()
@@ -283,6 +290,7 @@ describe("My Leads workflow dialogs", () => {
     await user.selectOptions(screen.getByLabelText("Source"), "manual")
     expect(screen.getByLabelText("Kind")).toHaveValue("outreach")
     await user.selectOptions(screen.getByLabelText("External outcome"), "no_answer")
+    await user.type(screen.getByLabelText("Acquisitions manager"), "Jordan")
     await user.selectOptions(screen.getByLabelText("Curated follow-up template"), "no-answer-availability")
     fireEvent.change(screen.getByLabelText("When did the outreach occur?"), {
       target: { value: "2026-09-12T09:00" },

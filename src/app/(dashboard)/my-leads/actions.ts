@@ -73,6 +73,17 @@ export async function submitMyLeadCommand(command:keyof typeof commands,input:Re
       // The no-answer path requires curated copy. This check runs before the
       // attempt RPC, so malformed or unapproved copy can never create work.
       if (!supplied.templateId) throw new Error('Choose a curated follow-up template.');
+      if (typeof supplied.acquisitionsManager !== 'string' || !supplied.acquisitionsManager.trim()) {
+        // A pre-release request may be replayed after its attempt was saved.
+        // Accept that exact key only when the durable command already exists;
+        // never create a new Maria follow-up from an omitted name.
+        const key = typeof input.idempotencyKey === 'string' ? input.idempotencyKey : '';
+        const operation = input.source === 'sandra' ? 'finalize_acquisition_attempt' : 'log_acquisition_attempt';
+        const receipt = key ? await createAdminClient().from('acquisition_commands').select('id')
+          .eq('org_id', viewer.orgId).eq('actor_user_id', viewer.userId)
+          .eq('operation', operation).eq('idempotency_key', key).maybeSingle() : null;
+        if (!receipt?.data) throw new Error('Enter the acquisitions manager.');
+      }
       composition = composeRepSms(supplied);
       input = {
         ...input,

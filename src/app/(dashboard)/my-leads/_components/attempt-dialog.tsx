@@ -41,6 +41,8 @@ import {
   REP_SMS_COMPOSITION_POLICY_VERSION,
   REP_SMS_INTRODUCTIONS,
   REP_SMS_TEMPLATES,
+  REP_SMS_ASSISTANT,
+  personalizeRepSmsApprovedCopy,
 } from "@/lib/messaging/rep-sms-composition"
 
 const GSM7_EXTENDED = new Set(["^", "{", "}", "\\", "[", "~", "]", "|", "€"])
@@ -101,6 +103,7 @@ export function AcquisitionAttemptDialog({
   const [recordingUrl, setRecordingUrl] = useState("")
   const [callActivityId, setCallActivityId] = useState(initialCallActivityId || "")
   const [introId, setIntroId] = useState(DEFAULT_REP_SMS_INTRODUCTION.id)
+  const [acquisitionsManager, setAcquisitionsManager] = useState("")
   const [templateId, setTemplateId] = useState("")
   const [remainder, setRemainder] = useState("")
   const [followUpState, setFollowUpState] = useState<FollowUpState | null>(null)
@@ -138,10 +141,12 @@ export function AcquisitionAttemptDialog({
       ? payload.followUp as Record<string, unknown>
       : null
     if (followUp) {
+      setAcquisitionsManager(typeof followUp.acquisitionsManager === "string" ? followUp.acquisitionsManager : REP_SMS_ASSISTANT)
       if (typeof followUp.introId === "string") setIntroId(followUp.introId)
       if (typeof followUp.templateId === "string") setTemplateId(followUp.templateId)
       if (typeof followUp.remainder === "string") setRemainder(followUp.remainder)
     } else {
+      setAcquisitionsManager("")
       setIntroId(DEFAULT_REP_SMS_INTRODUCTION.id)
       setTemplateId("")
       setRemainder("")
@@ -159,6 +164,7 @@ export function AcquisitionAttemptDialog({
     setRecordingUrl("")
     setCallActivityId(initialCallActivityId || "")
     setIntroId(DEFAULT_REP_SMS_INTRODUCTION.id)
+    setAcquisitionsManager("")
     setTemplateId("")
     setRemainder("")
     setFollowUpState(null)
@@ -198,23 +204,27 @@ export function AcquisitionAttemptDialog({
   }
 
   const selectedIntroduction = REP_SMS_INTRODUCTIONS.find((candidate) => candidate.id === introId) ?? DEFAULT_REP_SMS_INTRODUCTION
+  const introductionBody = acquisitionsManager.trim()
+    ? personalizeRepSmsApprovedCopy(selectedIntroduction.body, acquisitionsManager)
+    : "Enter the acquisitions manager to preview the introduction."
   const selectedTemplate = REP_SMS_TEMPLATES.find((candidate) => candidate.id === templateId)
   const followUpComposition = useMemo(() => {
     if (outcome !== "no_answer" || !selectedTemplate || !remainder.trim()) return null
     try {
       return composeRepSms({
+        acquisitionsManager,
         introId: selectedIntroduction.id,
         introVersion: selectedIntroduction.version,
         templateId: selectedTemplate.id,
         templateVersion: selectedTemplate.version,
-        initialRemainder: selectedTemplate.remainder,
+        initialRemainder: personalizeRepSmsApprovedCopy(selectedTemplate.remainder, acquisitionsManager),
         remainder,
       })
     } catch {
       return null
     }
-  }, [outcome, remainder, selectedIntroduction.id, selectedIntroduction.version, selectedTemplate])
-  const followUpPreview = followUpComposition?.finalBody ?? `${selectedIntroduction.body}${remainder.trim() ? `\n\n${remainder.trim()}` : ""}`
+  }, [acquisitionsManager, outcome, remainder, selectedIntroduction.id, selectedIntroduction.version, selectedTemplate])
+  const followUpPreview = followUpComposition?.finalBody ?? `${introductionBody}${remainder.trim() ? `\n\n${remainder.trim()}` : ""}`
   const followUpSmsInfo = smsInfo(followUpPreview)
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -229,15 +239,17 @@ export function AcquisitionAttemptDialog({
     }
     const followUp = outcome === "no_answer"
       ? (() => {
+          if (!acquisitionsManager.trim()) nextFieldErrors.acquisitionsManager = "Enter the acquisitions manager."
           if (!selectedTemplate) nextFieldErrors.followUpTemplate = "Choose a curated follow-up template."
           if (!remainder.trim()) nextFieldErrors.followUpRemainder = "Add the editable follow-up remainder."
           try {
             return composeRepSms({
+              acquisitionsManager,
               introId: selectedIntroduction.id,
               introVersion: selectedIntroduction.version,
               templateId: selectedTemplate?.id ?? null,
               templateVersion: selectedTemplate?.version ?? null,
-              initialRemainder: selectedTemplate?.remainder ?? null,
+              initialRemainder: selectedTemplate ? personalizeRepSmsApprovedCopy(selectedTemplate.remainder, acquisitionsManager) : null,
               remainder,
             })
           } catch {
@@ -269,6 +281,7 @@ export function AcquisitionAttemptDialog({
         smsBody: followUp.finalBody,
         followUp: {
           policyVersion: REP_SMS_COMPOSITION_POLICY_VERSION,
+          acquisitionsManager: followUp.acquisitionsManager,
           introId: followUp.introId,
           introVersion: followUp.introVersion,
           templateId: followUp.templateId ?? selectedTemplate!.id,
@@ -436,6 +449,18 @@ export function AcquisitionAttemptDialog({
                   <p className="mt-1 text-xs text-muted-foreground">The no-answer result stays recorded. Choose approved copy for the follow-up that will be sent by the rep SMS workflow.</p>
                 </div>
                 <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="acquisition-follow-up-manager">Acquisitions manager <RequiredHint /></Label>
+                  <Input id="acquisition-follow-up-manager" aria-label="Acquisitions manager" value={acquisitionsManager} maxLength={80} disabled={attemptRecorded || reconciliationLocked} aria-required="true" aria-invalid={Boolean(clientFieldErrors.acquisitionsManager)} aria-describedby={clientFieldErrors.acquisitionsManager ? "acquisition-follow-up-manager-error" : undefined} onChange={(event) => {
+                    const next = event.target.value
+                    setRemainder((current) => current === personalizeRepSmsApprovedCopy(selectedTemplate?.remainder ?? "", acquisitionsManager.trim() || "[manager]")
+                      ? personalizeRepSmsApprovedCopy(selectedTemplate?.remainder ?? "", next || "[manager]")
+                      : current)
+                    setAcquisitionsManager(next)
+                    clearClientErrors()
+                  }} placeholder="Name of the person reaching out" className={TEXT_FIELD_CLASS} />
+                  <FieldError id="acquisition-follow-up-manager-error" message={clientFieldErrors.acquisitionsManager} />
+                </div>
+                <div className="flex flex-col gap-1.5">
                   <div className="flex items-center">
                     <Label htmlFor="acquisition-follow-up-intro">Assistant introduction</Label>
                   </div>
@@ -451,10 +476,10 @@ export function AcquisitionAttemptDialog({
                     className={SELECT_FIELD_CLASS}
                   >
                     {REP_SMS_INTRODUCTIONS.map((introduction) => (
-                      <option key={introduction.id} value={introduction.id}>{introduction.body}</option>
+                      <option key={introduction.id} value={introduction.id}>{acquisitionsManager.trim() ? personalizeRepSmsApprovedCopy(introduction.body, acquisitionsManager) : introduction.body.replaceAll("Maria", "[manager]")}</option>
                     ))}
                   </select>
-                  <p className="text-xs text-muted-foreground">Fixed approved introduction: {selectedIntroduction.body}</p>
+                  <p className="text-xs text-muted-foreground">Fixed approved introduction: {introductionBody}</p>
                 </div>
                 <div className="flex flex-col gap-1.5">
                   <div className="flex items-center">
@@ -470,7 +495,7 @@ export function AcquisitionAttemptDialog({
                       const nextId = event.target.value
                       setTemplateId(nextId)
                       const template = REP_SMS_TEMPLATES.find((candidate) => candidate.id === nextId)
-                      if (template) setRemainder(template.remainder)
+                      if (template) setRemainder(acquisitionsManager.trim() ? personalizeRepSmsApprovedCopy(template.remainder, acquisitionsManager) : template.remainder.replaceAll("Maria", "[manager]"))
                       clearClientErrors()
                     }}
                     aria-required="true"

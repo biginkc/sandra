@@ -15,9 +15,9 @@ import { assertSendilloOrganizationScope } from "./rep-sms-scope";
 import type { DialpadFromOption, MessagingProvider, ProviderSenderNumber } from "./types";
 import {
   composeRepSms,
-  REP_SMS_ASSISTANT,
   REP_SMS_COMPOSITION_POLICY_VERSION,
   REP_SMS_PERSONA,
+  REP_SMS_ASSISTANT,
   type RepSmsComposition,
   type RepSmsCompositionInput,
 } from "./rep-sms-composition";
@@ -442,6 +442,7 @@ export function repSmsCompositionFingerprint(composition: RepSmsComposition): st
   return JSON.stringify({
     policyVersion: composition.policyVersion,
     introId: composition.introId,
+    ...(composition.acquisitionsManager === REP_SMS_ASSISTANT ? {} : { acquisitionsManager: composition.acquisitionsManager }),
     introVersion: composition.introVersion,
     templateId: composition.templateId,
     templateVersion: composition.templateVersion,
@@ -525,6 +526,9 @@ async function claimRepSmsDeliveryLedger(input: {
   const admin = createAdminClient() as unknown as {
     rpc(name: string, args: Record<string, unknown>): Promise<RepSmsDeliveryLedgerRpc>;
   };
+  const persistedComposition: Record<string, unknown> = { ...input.composition };
+  // Match the exact JSON shape of pre-manager drafts during reconciliation.
+  if (input.composition.acquisitionsManager === REP_SMS_ASSISTANT) delete persistedComposition.acquisitionsManager;
   const result = await admin.rpc("fn_claim_rep_sms_delivery_with_composition", {
     p_org_id: input.context.orgId,
     p_actor_id: input.context.actorId,
@@ -538,7 +542,7 @@ async function claimRepSmsDeliveryLedger(input: {
     p_from_number: normalizePhone(input.sender.number) ?? input.sender.number.trim(),
     p_to_number: input.toNumber,
     p_body: input.body,
-    p_composition: input.composition,
+    p_composition: persistedComposition,
   });
   if (result.error) throw new Error(result.error.message ?? "SMS reservation could not be confirmed.");
   const record = ledgerRecord(result.data);
@@ -612,8 +616,13 @@ export type DispatchRepSmsInput = {
  * persistence/suppression/provider pipeline.
  */
 export async function dispatchRepSms(input: DispatchRepSmsInput): Promise<SendSmsOutcome> {
-  const composition = compositionFromInput(input);
   const context = await readRepSmsContext(input.propertyId);
+  const manager = input.composition?.acquisitionsManager;
+  const replayingSavedSubmission = Boolean(context.submission && context.submission.key === input.idempotencyKey);
+  if (!input.obligationFence && !replayingSavedSubmission && (typeof manager !== "string" || !manager.trim())) {
+    throw new Error("Enter the acquisitions manager before sending.");
+  }
+  const composition = compositionFromInput(input);
   if (context.obligation && !input.obligationFence) {
     throw new Error(
       "This lead has a saved SMS follow-up. Resume the exact saved follow-up before sending another message.",
@@ -666,10 +675,11 @@ export async function dispatchRepSms(input: DispatchRepSmsInput): Promise<SendSm
   }
   const metadata = {
     repSms: {
-      workflow: "maria-through-mel",
+      workflow: composition.acquisitionsManager === REP_SMS_ASSISTANT ? "maria-through-mel" : "manager-through-mel",
       policyVersion: composition.policyVersion,
       persona: REP_SMS_PERSONA,
-      assistant: REP_SMS_ASSISTANT,
+      assistant: composition.acquisitionsManager,
+      acquisitionsManager: composition.acquisitionsManager,
       actorUserId: context.actorId,
       senderAssignmentId: sender.id,
       provider: provider.providerId,

@@ -8,6 +8,21 @@ import {
 } from "./rep-sms-composition";
 
 describe("rep SMS composition", () => {
+  it("uses the chosen manager in approved copy without rewriting an edited remainder", () => {
+    const result = composeRepSms({
+      acquisitionsManager: "Jordan",
+      introId: REP_SMS_INTRODUCTIONS[0].id,
+      introVersion: REP_SMS_INTRODUCTIONS[0].version,
+      templateId: REP_SMS_TEMPLATES[0].id,
+      templateVersion: REP_SMS_TEMPLATES[0].version,
+      remainder: "Please tell Maria that Jordan will call back.",
+    });
+    expect(result.acquisitionsManager).toBe("Jordan");
+    expect(result.initialBody).toContain("Jordan wasn't able to reach you. What time would work for them to call you back?");
+    expect(result.finalBody).toBe("Hey, this is Mel with BMH, Jordan's assistant.\n\nPlease tell Maria that Jordan will call back.");
+    expect(() => composeRepSms({ acquisitionsManager: " ", remainder: "Call me" })).toThrow("acquisitions manager");
+    expect(() => composeRepSms({ acquisitionsManager: "Jordan", remainder: "Please call [manager]" })).toThrow("placeholder");
+  });
   it("builds the complete body from an approved introduction and curated remainder", () => {
     const template = REP_SMS_TEMPLATES[0];
     const result = composeRepSms({

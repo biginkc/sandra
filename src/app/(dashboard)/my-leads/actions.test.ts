@@ -64,7 +64,7 @@ it('records a no-answer attempt, claims the exact obligation, and persists provi
     .mockResolvedValueOnce({data:{ok:true,state:'accepted'},error:null});
   const result=await submitMyLeadCommand('log-attempt',{
     propertyId:'lead',source:'manual',kind:'outreach',outcome:'no_answer',occurredAt:'2026-09-17T15:00:00.000Z',
-    followUp:{policyVersion:1,introId:'mel-maria-assistant-1',introVersion:2,templateId:'no-answer-callback-time',templateVersion:1,
+    followUp:{acquisitionsManager:'Maria',policyVersion:1,introId:'mel-maria-assistant-1',introVersion:2,templateId:'no-answer-callback-time',templateVersion:1,
       initialRemainder:"Maria wasn't able to reach you. What time would work for her to call you back?",
       remainder:"Maria wasn't able to reach you. What time would work for her to call you back?",
       body:'forged body'},
@@ -90,7 +90,7 @@ it('does not dispatch a second SMS when concurrent submissions observe the exact
     return {data:{ok:true,state:'accepted'},error:null};
   });
   const input={propertyId:'lead',source:'manual',kind:'outreach',outcome:'no_answer',occurredAt:'2026-09-17T15:00:00.000Z',
-    followUp:{policyVersion:1,introId:'mel-maria-assistant-1',introVersion:2,templateId:'no-answer-callback-time',templateVersion:1,
+    followUp:{acquisitionsManager:'Maria',policyVersion:1,introId:'mel-maria-assistant-1',introVersion:2,templateId:'no-answer-callback-time',templateVersion:1,
       initialRemainder:"Maria wasn't able to reach you. What time would work for her to call you back?",
       remainder:"Maria wasn't able to reach you. What time would work for her to call you back?",body:'ignored'}} as const;
   const [first,second]=await Promise.all([submitMyLeadCommand('log-attempt',input),submitMyLeadCommand('log-attempt',input)]);
@@ -110,7 +110,7 @@ it('records a stale dispatch fence as failed_not_dispatched', async()=>{
   mocks.dispatch.mockResolvedValue({status:'provider_failed',messageId:'message',error:'stale dispatch fence',providerAttempted:false});
   const result=await submitMyLeadCommand('log-attempt',{
     propertyId:'lead',source:'manual',kind:'outreach',outcome:'no_answer',occurredAt:'2026-09-17T15:00:00.000Z',
-    followUp:{policyVersion:1,introId:'mel-maria-assistant-1',introVersion:2,templateId:'no-answer-callback-time',templateVersion:1,
+    followUp:{acquisitionsManager:'Maria',policyVersion:1,introId:'mel-maria-assistant-1',introVersion:2,templateId:'no-answer-callback-time',templateVersion:1,
       initialRemainder:"Maria wasn't able to reach you. What time would work for her to call you back?",
       remainder:"Maria wasn't able to reach you. What time would work for her to call you back?",body:'ignored'},
   });
@@ -126,7 +126,7 @@ it('returns an early delivery callback result truthfully instead of reporting ac
   mocks.dispatch.mockResolvedValue({status:'sent',messageId:'message-early',externalId:'provider-early'});
   const result=await submitMyLeadCommand('log-attempt',{
     propertyId:'lead',source:'manual',kind:'outreach',outcome:'no_answer',occurredAt:'2026-09-17T15:00:00.000Z',
-    followUp:{policyVersion:1,introId:'mel-maria-assistant-1',introVersion:2,templateId:'no-answer-callback-time',templateVersion:1,
+    followUp:{acquisitionsManager:'Maria',policyVersion:1,introId:'mel-maria-assistant-1',introVersion:2,templateId:'no-answer-callback-time',templateVersion:1,
       initialRemainder:"Maria wasn't able to reach you. What time would work for her to call you back?",
       remainder:"Maria wasn't able to reach you. What time would work for her to call you back?",body:'ignored'},
   });
