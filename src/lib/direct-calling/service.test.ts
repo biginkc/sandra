@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { DirectCallTarget } from "./contract";
 import { createDirectCallService, type DirectCallServiceDeps } from "./service";
-import { FakeStore } from "./test-support";
+import { FakeStore, makeRow } from "./test-support";
 import { TelnyxApiError } from "./telnyx";
 
 const ENDED_422 = () => new TelnyxApiError("Telnyx returned 422: Call has already ended", "rejected", 422, { code: "90018" });
@@ -104,7 +104,7 @@ describe("direct call service", () => {
     const prepareLeadCall = vi.fn(async () => ({ ok: false as const, error: "Calling is unavailable during quiet hours." }));
     const { service, telnyx, store, resumeFailedSoftphoneCall } = setup({ prepareLeadCall });
     const result = await service.startCall("user-1", { kind: "lead", propertyId: "p", clientRequestId: REQ });
-    expect(result).toEqual({ ok: false, error: "Calling is unavailable during quiet hours." });
+    expect(result).toEqual({ ok: false, error: "Calling is unavailable during quiet hours.", reserved: false });
     expect(store.calls.size).toBe(0);
     expect(telnyx.dial).not.toHaveBeenCalled();
     expect(resumeFailedSoftphoneCall).not.toHaveBeenCalled();
@@ -378,5 +378,118 @@ describe("direct call service", () => {
       await ctx.service.startCall("user-1", { kind: "lead", propertyId: "p", clientRequestId: REQ });
       expect(ctx.telnyx.createCredential).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("lead resume obligations (resume_pending), worked only from the operator's session (#743-2)", () => {
+  const PENDING = "99999999-9999-4999-8999-999999999999";
+  const seedPending = (store: FakeStore, over: Record<string, unknown> = {}) =>
+    store.add(makeRow({ id: PENDING, status: "failed", ended_at: "2026-10-01T12:00:00.000Z", property_id: "prop-1", resume_pending: true, ...over }));
+
+  it("a status poll resumes the lead once and clears the obligation", async () => {
+    const { service, store, resumeFailedSoftphoneCall } = setup();
+    seedPending(store);
+    await service.getStatus("user-1", PENDING);
+    await service.getStatus("user-1", PENDING);
+    expect(resumeFailedSoftphoneCall).toHaveBeenCalledTimes(1);
+    expect(resumeFailedSoftphoneCall).toHaveBeenCalledWith("prop-1");
+    expect(store.calls.get(PENDING)?.resume_pending).toBe(false);
+  });
+
+  it("keeps the obligation when the resume throws, does not hammer it inside the lease, and retries after", async () => {
+    const { service, store, resumeFailedSoftphoneCall, report, clock } = setup();
+    resumeFailedSoftphoneCall.mockRejectedValueOnce(new Error("not_authorized"));
+    seedPending(store);
+    await service.getStatus("user-1", PENDING);
+    expect(store.calls.get(PENDING)?.resume_pending).toBe(true);
+    expect(report).toHaveBeenCalledWith(expect.any(Error), "direct_call_resume");
+    await service.getStatus("user-1", PENDING);
+    expect(resumeFailedSoftphoneCall).toHaveBeenCalledTimes(1); // leased
+    clock.now = new Date(clock.now.getTime() + 31_000);
+    await service.getStatus("user-1", PENDING);
+    expect(resumeFailedSoftphoneCall).toHaveBeenCalledTimes(2);
+    expect(store.calls.get(PENDING)?.resume_pending).toBe(false);
+  });
+
+  it("clears the obligation without resuming when another direct call has taken the property since", async () => {
+    const { service, store, resumeFailedSoftphoneCall } = setup();
+    seedPending(store);
+    store.add(makeRow({ id: "88888888-8888-4888-8888-888888888888", operator_user_id: "user-2", property_id: "prop-1", status: "seller_dialing", browser_leg_id: "other" }));
+    await service.getStatus("user-1", PENDING);
+    expect(resumeFailedSoftphoneCall).not.toHaveBeenCalled();
+    expect(store.calls.get(PENDING)?.resume_pending).toBe(false);
+  });
+
+  it("never works another operator's obligation", async () => {
+    const { service, store, resumeFailedSoftphoneCall } = setup();
+    seedPending(store, { operator_user_id: "user-2" });
+    store.add(makeRow({ id: "77777777-7777-4777-8777-777777777777", status: "ended", operator_user_id: "user-1" }));
+    await service.getStatus("user-1", "77777777-7777-4777-8777-777777777777");
+    expect(resumeFailedSoftphoneCall).not.toHaveBeenCalled();
+    expect(store.calls.get(PENDING)?.resume_pending).toBe(true);
+  });
+
+  it("start resumes a pending lead BEFORE reserving or preparing the next call", async () => {
+    const { service, store, resumeFailedSoftphoneCall, prepareLeadCall } = setup();
+    seedPending(store);
+    const result = await service.startCall("user-1", { kind: "lead", propertyId: "prop-1", clientRequestId: REQ });
+    expect(result.ok).toBe(true);
+    expect(resumeFailedSoftphoneCall).toHaveBeenCalledTimes(1);
+    expect(resumeFailedSoftphoneCall.mock.invocationCallOrder[0]).toBeLessThan(prepareLeadCall.mock.invocationCallOrder[0]);
+  });
+
+  it("an owned hangup control works pending resumes too", async () => {
+    const { service, store, resumeFailedSoftphoneCall } = setup();
+    seedPending(store);
+    await service.control("user-1", PENDING, { action: "hangup" });
+    expect(resumeFailedSoftphoneCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the call's open cleanup rows once per poll even when the call is stale", async () => {
+    const { service, store } = setup();
+    store.add(makeRow({ id: PENDING, status: "browser_connecting", created_at: "2026-10-01T11:00:00.000Z", browser_leg_id: null }));
+    const spy = vi.spyOn(store, "openCleanupsForCall");
+    await service.getStatus("user-1", PENDING);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("start errors say whether anything was reserved (#744-1)", () => {
+  const start = (ctx: ReturnType<typeof setup>, input: Record<string, unknown> = { kind: "lead", propertyId: "prop-1" }, user = "user-1") =>
+    ctx.service.startCall(user, { ...input, clientRequestId: REQ } as never);
+
+  it("proven pre-reservation refusals carry reserved:false", async () => {
+    expect(await start(setup(), undefined, "user-2")).toMatchObject({ ok: false, errorCode: "not_enabled", reserved: false });
+    expect(await start(setup(), { kind: "lead" })).toMatchObject({ ok: false, errorCode: "invalid_request", reserved: false });
+    const busy = setup();
+    await busy.service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ2 });
+    expect(await start(busy)).toMatchObject({ ok: false, errorCode: "call_in_progress", reserved: false });
+    const cleanup = setup();
+    cleanup.store.add(makeRow({ id: "66666666-6666-4666-8666-666666666666", status: "ended" }));
+    cleanup.store.addCleanup({ direct_call_id: "66666666-6666-4666-8666-666666666666", kind: "leg", leg_id: "held", next_attempt_at: "2099-01-01T00:00:00.000Z" });
+    expect(await start(cleanup)).toMatchObject({ ok: false, errorCode: "teardown_pending", reserved: false });
+    const refused = setup({ prepareLeadCall: vi.fn(async () => ({ ok: false as const, error: "Quiet hours." })) });
+    expect(await start(refused)).toEqual({ ok: false, error: "Quiet hours.", reserved: false });
+  });
+
+  it("a prepare refusal whose reservation could not be discarded is reserved:true", async () => {
+    const ctx = setup({ prepareLeadCall: vi.fn(async () => ({ ok: false as const, error: "Quiet hours." })) });
+    vi.spyOn(ctx.store, "discardReservation").mockRejectedValueOnce(new Error("db"));
+    expect(await start(ctx)).toEqual({ ok: false, error: "Quiet hours.", reserved: true });
+  });
+
+  it("an unknown or refused browser Dial is reserved:true (the reservation and its cleanup exist)", async () => {
+    const unknown = setup();
+    unknown.telnyx.dial.mockRejectedValueOnce(new TelnyxApiError("Telnyx request timed out.", "unknown", null));
+    expect(await start(unknown)).toMatchObject({ ok: false, errorCode: "start_failed", reserved: true });
+    const refused = setup();
+    refused.telnyx.dial.mockRejectedValueOnce(new TelnyxApiError("Telnyx returned 422", "rejected", 422));
+    expect(await start(refused)).toMatchObject({ ok: false, errorCode: "start_failed", reserved: true });
+  });
+
+  it("a reserve failure of unknown outcome is reserved:true", async () => {
+    const ctx = setup();
+    vi.spyOn(ctx.store, "beginCall").mockRejectedValueOnce(new Error("db"));
+    expect(await start(ctx)).toMatchObject({ ok: false, errorCode: "start_failed", reserved: true });
   });
 });

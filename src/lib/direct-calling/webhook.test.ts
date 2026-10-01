@@ -31,10 +31,9 @@ function setup(rowOverrides = {}) {
   // Default: a leg we ask about is already dead (so a status re-check confirms it).
   const getCall = vi.fn(async (_leg: string) => ({ isAlive: false }));
   const listActiveCalls = vi.fn(async () => ({ calls: [] as Array<{ callControlId: string; clientState: Record<string, unknown> | null }>, complete: true }));
-  const resumeLead = vi.fn(async (_p: string, _u: string) => undefined);
-  const deps: WebhookDeps = { store, dial, hangup, getCall, listActiveCalls, resumeLead, now: () => clock.now, report: vi.fn(), };
+  const deps: WebhookDeps = { store, dial, hangup, getCall, listActiveCalls, now: () => clock.now, report: vi.fn(), };
   const advance = (secs: number) => (clock.now = new Date(clock.now.getTime() + secs * 1000));
-  return { store, dial, hangup, getCall, listActiveCalls, resumeLead, deps, advance };
+  return { store, dial, hangup, getCall, listActiveCalls, deps, advance };
 }
 
 const answerBrowser = (id = "evt-answer-browser") => body("call.answered", "browser-leg", { directCallId: CALL, role: "browser" }, id);
@@ -108,16 +107,15 @@ describe("processDirectCallWebhook", () => {
   });
 
   it("fails the call and drops the browser leg when the seller dial times out (never re-dials); the Dial stays unresolved", async () => {
-    const { store, dial, hangup, resumeLead, deps } = setup({ property_id: "prop-1" });
+    const { store, dial, hangup, deps } = setup({ property_id: "prop-1" });
     dial.mockRejectedValueOnce(new TelnyxApiError("Telnyx request timed out.", "unknown", null));
     await processDirectCallWebhook(answerBrowser(), deps);
     expect(dial).toHaveBeenCalledTimes(1);
     expect(store.calls.get(CALL)).toMatchObject({ status: "failed", failure_reason: "dial_outcome_unknown" });
     expect(hangup).toHaveBeenCalledWith("browser-leg", expect.any(String));
     expect(store.openFor(CALL).some((c) => c.kind === "unresolved_dial" && c.dial_role === "seller")).toBe(true);
-    // The lead never connected: its enrollments are resumed by the server (once).
-    expect(resumeLead).toHaveBeenCalledTimes(1);
-    expect(resumeLead).toHaveBeenCalledWith("prop-1", "user-1");
+    // The lead never connected: the obligation to resume is recorded (a webhook cannot resume itself).
+    expect(store.calls.get(CALL)?.resume_pending).toBe(true);
   });
 
   it("a definitive seller Dial refusal resolves the unresolved row", async () => {
@@ -194,6 +192,35 @@ describe("processDirectCallWebhook", () => {
       ).resolves.toMatchObject({ result: "processed" });
       expect(store.legRow("ORPHAN")?.confirmed_at).not.toBeNull();
       expect(hangup).not.toHaveBeenCalled();
+    });
+
+    it("a hangup handler working from a stale snapshot still tears down a seller leg stored concurrently (#743-3)", async () => {
+      const { store, hangup, deps } = setup({ status: "seller_dialing", seller_dial_state: "pending", seller_leg_id: null });
+      // The seller Dial's unresolved row (written with the pending transition).
+      store.addCleanup({ direct_call_id: CALL, kind: "unresolved_dial", dial_role: "seller" });
+      // The handler reads the row (seller_leg_id null); THEN the concurrent Dial response stores the leg and
+      // resolves its unresolved row; THEN the handler's status-only compare-and-set lands.
+      const realFind = store.findByLeg.bind(store);
+      store.findByLeg = async (leg: string) => {
+        const snapshot = await realFind(leg);
+        await store.dialSucceeded(CALL, "SELLER", "seller");
+        expect(store.openFor(CALL)).toEqual([]); // nothing left to remind anyone of the live seller leg
+        return snapshot;
+      };
+      await processDirectCallWebhook(body("call.hangup", "browser-leg", { directCallId: CALL, role: "browser" }, "h-race"), deps);
+      expect(store.calls.get(CALL)).toMatchObject({ status: "failed", seller_leg_id: "SELLER" });
+      expect(store.legRow("SELLER")).toBeDefined();
+      expect(hangup).toHaveBeenCalledWith("SELLER", expect.any(String));
+      // The browser leg's own hangup was received: no cleanup is queued for it.
+      expect(store.legRow("browser-leg")).toBeUndefined();
+    });
+
+    it("an open unresolved Dial row survives the move to a terminal status (#743-3)", async () => {
+      const { store, deps } = setup({ status: "seller_dialing", seller_dial_state: "pending", seller_leg_id: null });
+      store.addCleanup({ direct_call_id: CALL, kind: "unresolved_dial", dial_role: "seller" });
+      await processDirectCallWebhook(body("call.hangup", "browser-leg", { directCallId: CALL, role: "browser" }, "h-keep"), deps);
+      expect(store.calls.get(CALL)?.status).toBe("failed");
+      expect(store.openFor(CALL).map((c) => `${c.kind}:${c.dial_role}`)).toEqual(["unresolved_dial:seller"]);
     });
 
     it("a failed hangup is a durable, backed-off row: the webhook still answers 200 and the event is processed (#743-2)", async () => {

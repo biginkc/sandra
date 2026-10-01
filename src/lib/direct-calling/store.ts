@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database } from "@/lib/supabase/types";
 
 import type { DirectCallStatus } from "./contract";
+import { cleanupSpecToJson } from "./serialize";
 import type { CleanupSpec, RowPatch, SellerDialState } from "./transitions";
 
 type RawRow = Database["public"]["Tables"]["direct_calls"]["Row"];
@@ -72,11 +73,18 @@ export interface DirectCallStore {
   addLegCleanup(callId: string, legId: string): Promise<void>;
   /** A provider hangup webhook (or equivalent) confirmed this leg ended. */
   confirmLegCleanup(legId: string, at: string): Promise<void>;
-  /** Claims due, actionable cleanup rows for the operator (lease pushes next_attempt_at out). */
-  claimDueCleanups(userId: string, now: string, leaseSecs: number): Promise<DirectCallCleanupRow[]>;
+  /** Claims up to `limit` due, actionable cleanup rows for the operator (lease pushes next_attempt_at out). unresolved_dial rows come first. */
+  claimDueCleanups(userId: string, now: string, leaseSecs: number, limit: number): Promise<DirectCallCleanupRow[]>;
   updateCleanup(id: string, patch: CleanupUpdate): Promise<void>;
   /** Unconfirmed cleanup rows of one call. */
   openCleanupsForCall(callId: string): Promise<DirectCallCleanupRow[]>;
+  /**
+   * Claims the operator's calls with a pending lead resume (resume_pending set by direct_call_apply),
+   * with a short lease so concurrent sessions do not both resume.
+   */
+  claimPendingResumes(userId: string, now: string, leaseSecs: number): Promise<DirectCallFullRow[]>;
+  /** Clears a call's resume obligation. Called only after the resume function returned without throwing. */
+  clearResumePending(callId: string): Promise<void>;
   getOperator(userId: string): Promise<DirectCallOperatorRow | null>;
   insertOperator(row: { user_id: string; org_id: string; telnyx_credential_id: string; sip_username: string }): Promise<DirectCallOperatorRow>;
 }
@@ -188,7 +196,7 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
         p_id: id,
         p_statuses: statuses,
         p_patch: patch as never,
-        p_cleanups: cleanups.map((c) => (c.kind === "leg" ? { kind: "leg", leg_id: c.legId } : { kind: "unresolved_dial" })) as never,
+        p_cleanups: cleanups.map(cleanupSpecToJson) as never,
       });
       if (error) {
         if (error.code === UNIQUE_VIOLATION) return null; // a leg id already belongs to another call
@@ -233,8 +241,8 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
       const { error } = await admin.from("direct_call_cleanups").update({ confirmed_at: at }).eq("leg_id", legId).is("confirmed_at", null);
       if (error) fail(error);
     },
-    async claimDueCleanups(userId, now, leaseSecs) {
-      const { data, error } = await admin.rpc("direct_call_cleanup_claim", { p_user: userId, p_now: now, p_lease_secs: leaseSecs });
+    async claimDueCleanups(userId, now, leaseSecs, limit) {
+      const { data, error } = await admin.rpc("direct_call_cleanup_claim", { p_user: userId, p_now: now, p_lease_secs: leaseSecs, p_limit: limit });
       if (error) fail(error);
       return (data ?? []) as DirectCallCleanupRow[];
     },
@@ -246,6 +254,15 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
       const { data, error } = await admin.from("direct_call_cleanups").select("*").eq("direct_call_id", callId).is("confirmed_at", null);
       if (error) fail(error);
       return (data ?? []) as DirectCallCleanupRow[];
+    },
+    async claimPendingResumes(userId, now, leaseSecs) {
+      const { data, error } = await admin.rpc("direct_call_resume_claim", { p_user: userId, p_now: now, p_lease_secs: leaseSecs });
+      if (error) fail(error);
+      return ((data ?? []) as RawRow[]).map((row) => typed(row)!);
+    },
+    async clearResumePending(callId) {
+      const { error } = await admin.rpc("direct_call_resume_done", { p_id: callId });
+      if (error) fail(error);
     },
     async getOperator(userId) {
       const { data, error } = await admin.from("direct_call_operators").select("*").eq("user_id", userId).maybeSingle();

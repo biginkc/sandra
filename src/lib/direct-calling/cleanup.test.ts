@@ -1,0 +1,82 @@
+import { describe, expect, it, vi } from "vitest";
+
+import { CLAIM_LEASE_SECS, processDueCleanups, STATUS_CHECK_EVERY_FAILED_HANGUPS, type CleanupDeps } from "./cleanup";
+import { FakeStore, makeRow } from "./test-support";
+import { TelnyxApiError } from "./telnyx";
+
+const CALL = "11111111-1111-4111-8111-111111111111";
+const clock = { now: new Date("2026-10-01T12:00:00.000Z") };
+
+function setup(legs: string[] = ["leg-1"], rowOver: Record<string, unknown> = {}) {
+  clock.now = new Date("2026-10-01T12:00:00.000Z");
+  const store = new FakeStore();
+  store.clock = () => clock.now;
+  store.add(makeRow({ status: "failed", ended_at: clock.now.toISOString() }));
+  for (const leg of legs) store.addCleanup({ direct_call_id: CALL, kind: "leg", leg_id: leg, ...rowOver });
+  const log: string[] = [];
+  const hangup = vi.fn(async (leg: string, _cmd: string) => { log.push(`hangup:${leg}`); });
+  const getCall = vi.fn(async (leg: string) => { log.push(`get:${leg}`); return { isAlive: true }; });
+  const claim = store.claimDueCleanups.bind(store);
+  const limits: number[] = [];
+  store.claimDueCleanups = async (u, n, l, limit) => { limits.push(limit); log.push("claim"); return claim(u, n, l, limit); };
+  const deps: CleanupDeps = { store, hangup, getCall, listActiveCalls: async () => ({ calls: [], complete: true }), now: () => clock.now, report: vi.fn(), random: () => 0 };
+  return { store, hangup, getCall, deps, log, limits };
+}
+
+describe("processDueCleanups", () => {
+  it("claims one row immediately before working it, so a slow batch cannot let a later row's lease lapse", async () => {
+    const { deps, log, limits } = setup(["leg-1", "leg-2", "leg-3"]);
+    await processDueCleanups(deps, "user-1");
+    expect(limits.every((l) => l === 1)).toBe(true);
+    expect(log.filter((entry) => entry !== "claim")).toEqual(["hangup:leg-1", "hangup:leg-2", "hangup:leg-3"]);
+    // Strict alternation: claim, work, claim, work, ..., then the final empty claim.
+    expect(log).toEqual(["claim", "hangup:leg-1", "claim", "hangup:leg-2", "claim", "hangup:leg-3", "claim"]);
+  });
+
+  it("never hangs a leg up twice when another processor runs while a slow hangup is in flight", async () => {
+    const { deps, store, hangup } = setup(["leg-1", "leg-2", "leg-3"]);
+    let reentered = false;
+    hangup.mockImplementation(async () => {
+      if (reentered) return;
+      reentered = true;
+      // The first hangup takes longer than a short lease would last; a second processor (another tab or a
+      // webhook) runs meanwhile and must find only the rows nobody holds.
+      clock.now = new Date(clock.now.getTime() + (CLAIM_LEASE_SECS - 5) * 1000);
+      await processDueCleanups(deps, "user-1");
+    });
+    await processDueCleanups(deps, "user-1");
+    const sent = hangup.mock.calls.map((c) => c[0]);
+    expect(new Set(sent).size).toBe(sent.length);
+    expect([...store.cleanups.values()].every((c) => c.acked_at)).toBe(true);
+  });
+
+  it("after repeated failed hangups also asks the provider for the leg's status; is_alive:false confirms", async () => {
+    const { deps, store, hangup, getCall } = setup(["leg-1"], { attempts: STATUS_CHECK_EVERY_FAILED_HANGUPS - 1 });
+    hangup.mockRejectedValue(new TelnyxApiError("Telnyx returned 404", "rejected", 404));
+    getCall.mockResolvedValue({ isAlive: false });
+    const result = await processDueCleanups(deps, "user-1");
+    expect(getCall).toHaveBeenCalledTimes(1);
+    expect(result.confirmed).toBe(1);
+    expect(store.legRow("leg-1")?.confirmed_at).toBeTruthy();
+  });
+
+  it("does not ask for status on early failures, and an alive or failing status check confirms nothing", async () => {
+    const early = setup(["leg-1"], { attempts: 0 });
+    early.hangup.mockRejectedValue(new TelnyxApiError("down", "unknown", 503));
+    await processDueCleanups(early.deps, "user-1");
+    expect(early.getCall).not.toHaveBeenCalled();
+
+    const alive = setup(["leg-1"], { attempts: STATUS_CHECK_EVERY_FAILED_HANGUPS - 1 });
+    alive.hangup.mockRejectedValue(new TelnyxApiError("down", "unknown", 503));
+    await processDueCleanups(alive.deps, "user-1");
+    expect(alive.getCall).toHaveBeenCalledTimes(1);
+    expect(alive.store.legRow("leg-1")?.confirmed_at).toBeNull();
+
+    const broken = setup(["leg-1"], { attempts: STATUS_CHECK_EVERY_FAILED_HANGUPS - 1 });
+    broken.hangup.mockRejectedValue(new TelnyxApiError("down", "unknown", 503));
+    broken.getCall.mockRejectedValue(new TelnyxApiError("down", "unknown", 503));
+    await processDueCleanups(broken.deps, "user-1");
+    expect(broken.store.legRow("leg-1")?.confirmed_at).toBeNull();
+    expect(broken.store.legRow("leg-1")?.attempts).toBe(STATUS_CHECK_EVERY_FAILED_HANGUPS);
+  });
+});

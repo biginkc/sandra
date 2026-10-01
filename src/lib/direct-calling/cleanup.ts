@@ -9,8 +9,20 @@ export const BACKOFF_CAP_MS = 60_000;
 export const BACKOFF_JITTER = 0.2;
 /** After the provider accepts a hangup (2xx) the leg is not re-checked sooner than this. */
 export const ACK_RECHECK_MS = 10_000;
-/** A claimed row is invisible to other processors for this long if the claimer dies mid-attempt. */
-export const CLAIM_LEASE_SECS = 20;
+/**
+ * A claimed row is invisible to other processors for this long if the claimer dies mid-attempt. Rows are
+ * claimed one at a time, immediately before being worked, and one row costs at most two provider requests
+ * (hangup + status, 10s timeout each), so a lease can never expire under a slow batch.
+ */
+export const CLAIM_LEASE_SECS = 45;
+/** Upper bound on rows worked by one pass (one operator never has more than a handful). */
+export const MAX_ROWS_PER_PASS = 50;
+/**
+ * Every Nth consecutive unsuccessful hangup attempt on a leg (any non-2xx other than "already ended") also
+ * asks the provider for the leg's status, so is_alive:false can confirm a leg whose hangup keeps failing.
+ * Sparse on purpose: it rides the row's own backoff and keeps total requests per row inside the E1 budget.
+ */
+export const STATUS_CHECK_EVERY_FAILED_HANGUPS = 4;
 /** An unresolved Dial is resolved by emptiness only after this many consecutive complete empty listings. */
 export const EMPTY_MATCHES_TO_RESOLVE = 2;
 /** Marker stored/logged when an unresolved Dial was resolved by its time-limit backstop alone. */
@@ -47,9 +59,10 @@ export type CleanupResult = {
 
 /**
  * The one place cleanup obligations are worked. Every trigger (webhook, status poll, start, explicit
- * hangup) just calls this for the operator. Rows are claimed atomically (store.claimDueCleanups pushes
- * next_attempt_at out by a lease), and every attempt then sets next_attempt_at by the backoff, so the
- * number of provider requests per row does not depend on how many callers trigger processing.
+ * hangup) just calls this for the operator. Rows are claimed atomically ONE AT A TIME, immediately before
+ * each is worked (store.claimDueCleanups pushes next_attempt_at out by a lease), and every attempt then sets
+ * next_attempt_at by the backoff, so the number of provider requests per row does not depend on how many
+ * callers trigger processing and a slow earlier row cannot let a later row's lease lapse.
  *
  *  leg:             hangup (2xx = acked, NOT confirmed). Confirmed only by the leg's hangup webhook
  *                   (store.confirmLegCleanup), a 422/90018 "already ended" refusal, or GET is_alive:false.
@@ -61,22 +74,14 @@ export type CleanupResult = {
 export async function processDueCleanups(deps: CleanupDeps, operatorUserId: string): Promise<CleanupResult> {
   const result: CleanupResult = { processed: 0, confirmed: 0, acknowledged: 0, failed: 0 };
   const { store } = deps;
-  const claimed = await store.claimDueCleanups(operatorUserId, deps.now().toISOString(), CLAIM_LEASE_SECS);
-  const dials = claimed.filter((r) => r.kind === "unresolved_dial");
-  let legs = claimed.filter((r) => r.kind === "leg");
-
-  // unresolved_dial first: a discovered leg becomes a leg row that is hung up in this same pass.
-  for (const row of dials) {
+  // unresolved_dial rows sort first (store order): a discovered leg becomes a leg row that is claimed and
+  // hung up later in this same pass.
+  for (let i = 0; i < MAX_ROWS_PER_PASS; i += 1) {
+    const [row] = await store.claimDueCleanups(operatorUserId, deps.now().toISOString(), CLAIM_LEASE_SECS, 1);
+    if (!row) break;
     result.processed += 1;
-    await reconcileDial(deps, row, result);
-  }
-  if (dials.length > 0) {
-    const fresh = await store.claimDueCleanups(operatorUserId, deps.now().toISOString(), CLAIM_LEASE_SECS);
-    legs = [...legs, ...fresh.filter((r) => r.kind === "leg")];
-  }
-  for (const row of legs) {
-    result.processed += 1;
-    await cleanLeg(deps, row, result);
+    if (row.kind === "unresolved_dial") await reconcileDial(deps, row, result);
+    else await cleanLeg(deps, row, result);
   }
   return result;
 }
@@ -127,6 +132,15 @@ async function cleanLeg(deps: CleanupDeps, row: DirectCallCleanupRow, result: Cl
       return settle(deps, row, { acked_at: deps.now().toISOString(), last_error: null }, { minDelayMs: ACK_RECHECK_MS });
     }
     result.failed += 1;
+    // Repeated unsuccessful hangups must not leave the leg unconfirmable: periodically also ask for its
+    // status (once per backed-off attempt at most). Only is_alive:false confirms.
+    if ((row.attempts + 1) % STATUS_CHECK_EVERY_FAILED_HANGUPS === 0) {
+      try {
+        if (!(await deps.getCall(legId)).isAlive) return confirm(deps, row, result);
+      } catch (error) {
+        deps.report(error, "direct_call_leg_status");
+      }
+    }
     return settle(deps, row, { last_error: message(outcome.failed) }, { error: outcome.failed });
   };
   try {

@@ -93,7 +93,6 @@ function world(opts: { lead?: boolean } = {}) {
   });
   const whDeps: WebhookDeps = {
     store, dial, hangup, getCall, listActiveCalls, now: () => clock.now, report,
-    resumeLead: async (propertyId) => { resumes.push({ via: "webhook", propertyId }); },
   };
   const cleanupDeps: CleanupDeps = { store, hangup, getCall, listActiveCalls, now: () => clock.now, report, random: () => 0 };
   let evt = 0;
@@ -106,8 +105,10 @@ function world(opts: { lead?: boolean } = {}) {
   const start = (n: number, input: Record<string, unknown> = { kind: "manual", phone: "5550009999" }, user = "user-1") =>
     service.startCall(user, { ...input, clientRequestId: req(n) } as never);
   const provider = (leg: string) => legs.get(leg)!;
+  /** The operator's own session polling: the only place a resume can run. */
+  const poll = (callId: string, user = "user-1") => service.getStatus(user, callId);
   const open = () => [...store.cleanups.values()].filter((c) => !c.confirmed_at);
-  return { clock, store, legs, p, resumes, service, whDeps, cleanupDeps, hook, advance, start, provider, open, report, prepare };
+  return { clock, store, legs, p, resumes, service, whDeps, cleanupDeps, hook, advance, start, poll, provider, open, report, prepare };
 }
 
 async function startedCall(w: ReturnType<typeof world>, n = 1, input?: Record<string, unknown>, user = "user-1") {
@@ -177,15 +178,18 @@ describe("acceptance: telephony", () => {
       expect(w.store.legRow(call.browserLegId)?.confirmed_at !== null).toBe(confirmed);
       if (confirmed) continue;
       expect(await w.store.operatorBusy("user-1")).toBe("call");
-      // Only a status check showing is_alive:false confirms it.
+      // Hangup keeps being refused: still pending, and no status check yet (it rides every 4th failed attempt).
       w.provider(call.browserLegId).alive = false;
-      w.p.hangupError = new TelnyxApiError("x", "rejected", 404); // still refusing
-      w.advance(30);
+      w.p.hangupError = new TelnyxApiError("x", "rejected", 404);
+      for (let attempt = 2; attempt <= 3; attempt += 1) {
+        w.advance(120);
+        await w.service.getStatus("user-1", call.directCallId);
+        expect(w.store.legRow(call.browserLegId)?.confirmed_at ?? null).toBeNull();
+      }
+      // The 4th failed attempt also asks the provider: is_alive:false confirms (hangup is still refusing).
+      w.advance(120);
       await w.service.getStatus("user-1", call.directCallId);
-      expect(w.store.legRow(call.browserLegId)?.confirmed_at !== null).toBe(false); // unacked row: hangup first, still refused
-      w.p.hangupError = null;
-      w.advance(60);
-      await w.service.getStatus("user-1", call.directCallId); // hangup now 2xx-or-already-ended path
+      expect(w.store.legRow(call.browserLegId)?.confirmed_at).toBeTruthy();
     }
   });
 
@@ -374,17 +378,21 @@ describe("acceptance: lead pause ownership", () => {
     }
   });
 
-  it("D3 the seller never connects and the call fails by webhook: resume is called once", async () => {
+  it("D3 the seller never connects and the call fails by webhook: nothing resumes in the webhook; the operator's next poll resumes once", async () => {
     const w = world();
     const call = await startedCall(w, 1, { kind: "lead", propertyId: "prop-1" });
     await w.hook("call.answered", call.browserLegId, "browser", call.directCallId);
     const seller = w.store.calls.get(call.directCallId)!.seller_leg_id!;
     w.provider(seller).alive = false;
     await w.hook("call.hangup", seller, "seller", call.directCallId, { hangup_cause: "no_answer" });
-    expect(w.store.calls.get(call.directCallId)).toMatchObject({ status: "failed", failure_reason: "seller_not_answered" });
-    expect(w.resumes).toEqual([{ via: "webhook", propertyId: "prop-1" }]);
-    // A redelivered hangup does not resume again.
+    expect(w.store.calls.get(call.directCallId)).toMatchObject({ status: "failed", failure_reason: "seller_not_answered", resume_pending: true });
+    expect(w.resumes).toEqual([]); // the webhook has no operator session: it only records the obligation
+    await w.poll(call.directCallId);
+    expect(w.resumes).toEqual([{ via: "service", propertyId: "prop-1" }]);
+    expect(w.store.calls.get(call.directCallId)?.resume_pending).toBe(false);
+    // A redelivered hangup, and more polls, do not resume again.
     await w.hook("call.hangup", seller, "seller", call.directCallId, {}, "again");
+    await w.poll(call.directCallId);
     expect(w.resumes).toHaveLength(1);
   });
 
@@ -393,8 +401,9 @@ describe("acceptance: lead pause ownership", () => {
     const call = await startedCall(w, 1, { kind: "lead", propertyId: "prop-1" });
     w.p.dialMode = "timeout_noleg";
     await w.hook("call.answered", call.browserLegId, "browser", call.directCallId);
-    expect(w.store.calls.get(call.directCallId)).toMatchObject({ status: "failed", failure_reason: "dial_outcome_unknown" });
-    expect(w.resumes).toEqual([{ via: "webhook", propertyId: "prop-1" }]);
+    expect(w.store.calls.get(call.directCallId)).toMatchObject({ status: "failed", failure_reason: "dial_outcome_unknown", resume_pending: true });
+    await w.poll(call.directCallId);
+    expect(w.resumes).toEqual([{ via: "service", propertyId: "prop-1" }]);
   });
 
   it("D3 a connected call is not resumed by the server (wrap-up owns that)", async () => {
@@ -404,7 +413,8 @@ describe("acceptance: lead pause ownership", () => {
     const seller = w.store.calls.get(call.directCallId)!.seller_leg_id!;
     await w.hook("call.answered", seller, "seller", call.directCallId);
     await w.hook("call.hangup", seller, "seller", call.directCallId);
-    expect(w.store.calls.get(call.directCallId)?.status).toBe("ended");
+    expect(w.store.calls.get(call.directCallId)).toMatchObject({ status: "ended", resume_pending: false });
+    await w.poll(call.directCallId);
     expect(w.resumes).toEqual([]);
   });
 
@@ -414,21 +424,27 @@ describe("acceptance: lead pause ownership", () => {
     const two = await startedCall(w, 2, { kind: "lead", propertyId: "prop-1" }, "user-2");
     w.store.calls.set(one.directCallId, { ...w.store.calls.get(one.directCallId)!, operator_user_id: "user-1" });
     await w.hook("call.hangup", one.browserLegId, "browser", one.directCallId);
-    expect(w.store.calls.get(one.directCallId)?.status).toBe("failed");
+    expect(w.store.calls.get(one.directCallId)).toMatchObject({ status: "failed", resume_pending: false });
+    await w.poll(one.directCallId);
     expect(w.resumes).toEqual([]);
     await w.hook("call.hangup", two.browserLegId, "browser", two.directCallId);
-    expect(w.resumes).toEqual([{ via: "webhook", propertyId: "prop-1" }]);
+    expect(w.store.calls.get(two.directCallId)?.resume_pending).toBe(true);
+    await w.poll(two.directCallId, "user-2");
+    expect(w.resumes).toEqual([{ via: "service", propertyId: "prop-1" }]);
   });
 
   it("D8 an unlinked manual call that fails resumes nothing; a linked one resumes once", async () => {
     const unlinked = world({ lead: false });
     const a = await startedCall(unlinked, 1, { kind: "manual", phone: "5550009999" });
     await unlinked.hook("call.hangup", a.browserLegId, "browser", a.directCallId);
+    await unlinked.poll(a.directCallId);
+    expect(unlinked.store.calls.get(a.directCallId)?.resume_pending).toBe(false);
     expect(unlinked.resumes).toEqual([]);
     const linked = world();
     const b = await startedCall(linked, 1, { kind: "lead", propertyId: "prop-9" });
     await linked.hook("call.hangup", b.browserLegId, "browser", b.directCallId);
-    expect(linked.resumes).toEqual([{ via: "webhook", propertyId: "prop-9" }]);
+    await linked.poll(b.directCallId);
+    expect(linked.resumes).toEqual([{ via: "service", propertyId: "prop-9" }]);
   });
 
   it("D9 a training call that fails never pauses or resumes anything", async () => {

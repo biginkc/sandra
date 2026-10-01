@@ -35,6 +35,13 @@ create table if not exists public.direct_calls (
   hangup_cause text,
   failure_reason text,
   client_request_id uuid not null,
+  -- Lead-resume obligation. Set inside direct_call_apply, atomically with the transition that makes a lead
+  -- call terminal without it having connected, when no other non-terminal direct call is on the property.
+  -- Worked ONLY from the operator's own authenticated session (the resume RPC refuses service-role actors);
+  -- cleared once the resume function returned without throwing. resume_claimed_at is a short lease so two
+  -- concurrent sessions do not both resume.
+  resume_pending boolean not null default false,
+  resume_claimed_at timestamptz,
   created_at timestamptz not null default now(),
   connected_at timestamptz,
   ended_at timestamptz,
@@ -169,13 +176,24 @@ $$;
 
 -- Conditional update of a call (status compare-and-set) plus the cleanup rows that update obliges,
 -- in one statement. p_patch keys: status, browser_leg_id, seller_leg_id, hangup_cause, failure_reason
--- (null allowed), connected_at, ended_at, seller_dial_state. p_cleanups: [{kind, leg_id?}].
+-- (null allowed), connected_at, ended_at, seller_dial_state. p_cleanups: [{kind, leg_id?}] for a leg, or
+-- [{kind:'unresolved_dial', role, timeout_secs, time_limit_secs}].
+-- Under the row lock, a MOVE to ending/ended/failed (status changes) ALSO queues a leg cleanup for every leg id on the
+-- CURRENT row that has no evidence of having ended (a cleanup row, or a received call.hangup event), so a
+-- leg stored by a concurrent Dial response is never left alive by a caller that read a stale snapshot. Open
+-- unresolved_dial rows are never touched by that move. A lead call that becomes terminal without having
+-- connected sets resume_pending when no other non-terminal direct call is on the property.
 -- Returns the updated row, or nothing when the status no longer matched.
 create or replace function public.direct_call_apply(p_id uuid, p_statuses text[], p_patch jsonb, p_cleanups jsonb)
 returns setof public.direct_calls language plpgsql security invoker set search_path = public as $$
 declare
+  prev public.direct_calls;
   r public.direct_calls;
 begin
+  select * into prev from public.direct_calls where id = p_id for update;
+  if not found or not (prev.status = any(p_statuses)) then
+    return;
+  end if;
   update public.direct_calls set
     status = case when p_patch ? 'status' then p_patch->>'status' else status end,
     browser_leg_id = case when p_patch ? 'browser_leg_id' then p_patch->>'browser_leg_id' else browser_leg_id end,
@@ -186,11 +204,8 @@ begin
     ended_at = case when p_patch ? 'ended_at' then (p_patch->>'ended_at')::timestamptz else ended_at end,
     seller_dial_state = case when p_patch ? 'seller_dial_state' then p_patch->>'seller_dial_state' else seller_dial_state end,
     updated_at = now()
-  where id = p_id and status = any(p_statuses)
+  where id = p_id
   returning * into r;
-  if not found then
-    return;
-  end if;
   -- A leg learned (or the seller Dial confirmed sent) resolves that Dial's unresolved obligation.
   if p_patch ? 'browser_leg_id' then
     update public.direct_call_cleanups set confirmed_at = now()
@@ -207,6 +222,23 @@ begin
          case when e->>'kind' = 'unresolved_dial' then now() + make_interval(secs => (e->>'timeout_secs')::int + 15) else now() end
     from jsonb_array_elements(coalesce(p_cleanups, '[]'::jsonb)) e
   on conflict do nothing;
+  if r.status in ('ending', 'ended', 'failed') and prev.status <> r.status then
+    insert into public.direct_call_cleanups (org_id, operator_user_id, direct_call_id, kind, leg_id)
+    select r.org_id, r.operator_user_id, r.id, 'leg', l.leg_id
+      from (values (r.browser_leg_id), (r.seller_leg_id)) as l(leg_id)
+     where l.leg_id is not null
+       and not exists (
+         select 1 from public.direct_call_events ev
+          where ev.event_type = 'call.hangup' and ev.payload->'data'->'payload'->>'call_control_id' = l.leg_id)
+    on conflict do nothing;
+  end if;
+  if r.status in ('ended', 'failed') and prev.status not in ('ended', 'failed')
+     and r.connected_at is null and r.property_id is not null
+     and not exists (
+       select 1 from public.direct_calls o
+        where o.property_id = r.property_id and o.id <> r.id and o.status not in ('ended', 'failed')) then
+    update public.direct_calls set resume_pending = true where id = r.id returning * into r;
+  end if;
   return next r;
 end;
 $$;
@@ -280,10 +312,10 @@ returns void language sql security invoker set search_path = public as $$
   on conflict do nothing;
 $$;
 
--- Claims due, actionable cleanup rows for an operator by pushing next_attempt_at out by a lease, so
--- concurrent processors do not double-act. unresolved_dial rows are actionable only once the call's
+-- Claims up to p_limit due, actionable cleanup rows for an operator (unresolved dials first) by pushing
+-- next_attempt_at out by a lease, so concurrent processors do not double-act. unresolved_dial rows are actionable only once the call's
 -- teardown has begun (a live call's in-flight Dial is not an orphan).
-create or replace function public.direct_call_cleanup_claim(p_user uuid, p_now timestamptz, p_lease_secs integer)
+create or replace function public.direct_call_cleanup_claim(p_user uuid, p_now timestamptz, p_lease_secs integer, p_limit integer)
 returns setof public.direct_call_cleanups language sql security invoker set search_path = public as $$
   update public.direct_call_cleanups k
      set next_attempt_at = p_now + make_interval(secs => p_lease_secs)
@@ -294,9 +326,30 @@ returns setof public.direct_call_cleanups language sql security invoker set sear
           select 1 from public.direct_calls d
            where d.id = c.direct_call_id
              and (d.status in ('ending', 'ended', 'failed') or d.failure_reason = 'teardown_pending')))
-      order by c.created_at
+      order by (c.kind = 'leg'), c.created_at
+      limit p_limit
       for update skip locked)
   returning k.*;
+$$;
+
+-- Claims this operator's pending lead resumes with a short lease (so concurrent sessions do not both
+-- resume), and marks one done once the resume function returned without throwing.
+create or replace function public.direct_call_resume_claim(p_user uuid, p_now timestamptz, p_lease_secs integer)
+returns setof public.direct_calls language sql security invoker set search_path = public as $$
+  update public.direct_calls k
+     set resume_claimed_at = p_now
+   where k.id in (
+     select c.id from public.direct_calls c
+      where c.operator_user_id = p_user and c.resume_pending
+        and (c.resume_claimed_at is null or c.resume_claimed_at <= p_now - make_interval(secs => p_lease_secs))
+      order by c.ended_at
+      for update skip locked)
+  returning k.*;
+$$;
+
+create or replace function public.direct_call_resume_done(p_id uuid)
+returns void language sql security invoker set search_path = public as $$
+  update public.direct_calls set resume_pending = false, resume_claimed_at = null where id = p_id;
 $$;
 
 create table if not exists public.direct_call_events (
@@ -311,6 +364,10 @@ create table if not exists public.direct_call_events (
 
 create index if not exists direct_call_events_call_idx
   on public.direct_call_events (direct_call_id, received_at);
+-- Evidence that a leg ended (read by direct_call_apply under the row lock).
+create index if not exists direct_call_events_hangup_leg_idx
+  on public.direct_call_events ((payload->'data'->'payload'->>'call_control_id'))
+  where event_type = 'call.hangup';
 
 alter table public.direct_call_operators enable row level security;
 alter table public.direct_calls enable row level security;
@@ -340,7 +397,9 @@ revoke all on function public.direct_call_dial_rejected(uuid, text) from public,
 revoke all on function public.direct_call_set_target(uuid, uuid, uuid, text) from public, anon, authenticated;
 revoke all on function public.direct_call_discard_reservation(uuid) from public, anon, authenticated;
 revoke all on function public.direct_call_cleanup_add_leg(uuid, text) from public, anon, authenticated;
-revoke all on function public.direct_call_cleanup_claim(uuid, timestamptz, integer) from public, anon, authenticated;
+revoke all on function public.direct_call_cleanup_claim(uuid, timestamptz, integer, integer) from public, anon, authenticated;
+revoke all on function public.direct_call_resume_claim(uuid, timestamptz, integer) from public, anon, authenticated;
+revoke all on function public.direct_call_resume_done(uuid) from public, anon, authenticated;
 grant execute on function public.direct_call_operator_busy(uuid) to service_role;
 grant execute on function public.direct_call_active_for_operator(uuid) to service_role;
 grant execute on function public.direct_call_begin(uuid, uuid, uuid, uuid, text, text, uuid) to service_role;
@@ -351,7 +410,9 @@ grant execute on function public.direct_call_dial_rejected(uuid, text) to servic
 grant execute on function public.direct_call_set_target(uuid, uuid, uuid, text) to service_role;
 grant execute on function public.direct_call_discard_reservation(uuid) to service_role;
 grant execute on function public.direct_call_cleanup_add_leg(uuid, text) to service_role;
-grant execute on function public.direct_call_cleanup_claim(uuid, timestamptz, integer) to service_role;
+grant execute on function public.direct_call_cleanup_claim(uuid, timestamptz, integer, integer) to service_role;
+grant execute on function public.direct_call_resume_claim(uuid, timestamptz, integer) to service_role;
+grant execute on function public.direct_call_resume_done(uuid) to service_role;
 
 drop policy if exists direct_call_operators_own_select on public.direct_call_operators;
 create policy direct_call_operators_own_select on public.direct_call_operators

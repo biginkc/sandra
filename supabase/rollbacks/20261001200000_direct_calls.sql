@@ -1,6 +1,8 @@
 begin;
 
-drop function if exists public.direct_call_cleanup_claim(uuid, timestamptz, integer);
+drop function if exists public.direct_call_resume_done(uuid);
+drop function if exists public.direct_call_resume_claim(uuid, timestamptz, integer);
+drop function if exists public.direct_call_cleanup_claim(uuid, timestamptz, integer, integer);
 drop function if exists public.direct_call_cleanup_add_leg(uuid, text);
 drop function if exists public.direct_call_discard_reservation(uuid);
 drop function if exists public.direct_call_set_target(uuid, uuid, uuid, text);

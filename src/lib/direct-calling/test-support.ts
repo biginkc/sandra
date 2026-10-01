@@ -24,6 +24,8 @@ export function makeRow(overrides: Partial<DirectCallFullRow> = {}): DirectCallF
     connected_at: null,
     ended_at: null,
     updated_at: "2026-10-01T12:00:00.000Z",
+    resume_pending: false,
+    resume_claimed_at: null,
     ...overrides,
   };
 }
@@ -31,7 +33,7 @@ export function makeRow(overrides: Partial<DirectCallFullRow> = {}): DirectCallF
 export class FakeStore implements DirectCallStore {
   calls = new Map<string, DirectCallFullRow>();
   cleanups = new Map<string, DirectCallCleanupRow>();
-  events = new Map<string, { directCallId: string | null; processed: boolean; type: string }>();
+  events = new Map<string, { directCallId: string | null; processed: boolean; type: string; legId?: string | null }>();
   operators = new Map<string, DirectCallOperatorRow>();
   failEventInsert = false;
   /** Injected clock (mirrors the app clock used for next_attempt_at / created_at of cleanup rows). */
@@ -98,11 +100,12 @@ export class FakeStore implements DirectCallStore {
       if (c.direct_call_id === callId && c.kind === "unresolved_dial" && c.dial_role === role && !c.confirmed_at) c.confirmed_at = this.clock().toISOString();
     }
   }
-  async insertEvent(e: { provider_event_id: string; direct_call_id: string | null; event_type: string }): Promise<EventInsertResult> {
+  async insertEvent(e: { provider_event_id: string; direct_call_id: string | null; event_type: string; payload?: unknown }): Promise<EventInsertResult> {
     if (this.failEventInsert) throw new Error("db down");
     const existing = this.events.get(e.provider_event_id);
     if (existing) return existing.processed ? "duplicate_processed" : "duplicate_unprocessed";
-    this.events.set(e.provider_event_id, { directCallId: e.direct_call_id, processed: false, type: e.event_type });
+    const legId = (e.payload as { data?: { payload?: { call_control_id?: unknown } } } | undefined)?.data?.payload?.call_control_id;
+    this.events.set(e.provider_event_id, { directCallId: e.direct_call_id, processed: false, type: e.event_type, legId: typeof legId === "string" ? legId : null });
     return "inserted";
   }
   async markEventProcessed(id: string) {
@@ -167,16 +170,46 @@ export class FakeStore implements DirectCallStore {
     this.calls.set(row.id, row);
     return { outcome: "tombstoned" as const, row };
   }
-  /** Mirrors direct_call_apply: CAS on status, resolve rule, then the cleanup rows. */
+  /**
+   * Mirrors direct_call_apply: CAS on status, resolve rule, the cleanup rows, then (for a move to
+   * ending/ended/failed) a leg row for every leg on the CURRENT row with no ended evidence, and the
+   * resume_pending flag.
+   */
   async updateIfStatus(id: string, statuses: string[], patch: RowPatch, cleanups: CleanupSpec[] = []) {
     const row = this.calls.get(id);
     if (!row || !statuses.includes(row.status)) return null;
-    const next = { ...row, ...patch, updated_at: this.clock().toISOString() } as DirectCallFullRow;
+    let next = { ...row, ...patch, updated_at: this.clock().toISOString() } as DirectCallFullRow;
     this.calls.set(id, next);
     if ("browser_leg_id" in patch) this.resolveDial(id, "browser");
     if ("seller_leg_id" in patch || patch.seller_dial_state === "sent") this.resolveDial(id, "seller");
     this.insertSpecs(next, cleanups);
+    if (["ending", "ended", "failed"].includes(next.status) && next.status !== row.status) {
+      const hungUp = new Set([...this.events.values()].filter((e) => e.type === "call.hangup" && e.legId).map((e) => e.legId as string));
+      const live = [next.browser_leg_id, next.seller_leg_id].filter((leg): leg is string => Boolean(leg) && !hungUp.has(leg as string));
+      this.insertSpecs(next, live.map((legId) => ({ kind: "leg", legId }) as CleanupSpec));
+    }
+    const terminal = (status: string) => ["ended", "failed"].includes(status);
+    if (
+      terminal(next.status) && !terminal(row.status) && !next.connected_at && next.property_id &&
+      ![...this.calls.values()].some((o) => o.property_id === next.property_id && o.id !== next.id && !terminal(o.status))
+    ) {
+      next = { ...next, resume_pending: true };
+      this.calls.set(id, next);
+    }
     return next;
+  }
+  /** Mirrors direct_call_resume_claim. */
+  async claimPendingResumes(userId: string, now: string, leaseSecs: number) {
+    const cutoff = new Date(now).getTime() - leaseSecs * 1000;
+    const due = [...this.calls.values()].filter(
+      (r) => r.operator_user_id === userId && r.resume_pending && (!r.resume_claimed_at || new Date(r.resume_claimed_at).getTime() <= cutoff),
+    );
+    for (const r of due) this.calls.set(r.id, { ...r, resume_claimed_at: now });
+    return due.map((r) => this.calls.get(r.id)!);
+  }
+  async clearResumePending(callId: string) {
+    const r = this.calls.get(callId);
+    if (r) this.calls.set(callId, { ...r, resume_pending: false, resume_claimed_at: null });
   }
   async setTarget(id: string, target: { property_id: string | null; contact_id: string | null; destination_e164: string }) {
     const row = this.calls.get(id);
@@ -225,13 +258,15 @@ export class FakeStore implements DirectCallStore {
     if (c && !c.confirmed_at) c.confirmed_at = at;
   }
   /** Mirrors direct_call_cleanup_claim (lease pushes next_attempt_at out). */
-  async claimDueCleanups(userId: string, now: string, leaseSecs: number) {
+  async claimDueCleanups(userId: string, now: string, leaseSecs: number, limit: number) {
     const due = [...this.cleanups.values()].filter((c) => {
       if (c.operator_user_id !== userId || c.confirmed_at || c.next_attempt_at > now) return false;
       if (c.kind === "leg") return true;
       const d = this.calls.get(c.direct_call_id);
       return Boolean(d && (["ending", "ended", "failed"].includes(d.status) || d.failure_reason === "teardown_pending"));
-    });
+    })
+      .sort((a, b) => Number(a.kind === "leg") - Number(b.kind === "leg") || a.created_at.localeCompare(b.created_at))
+      .slice(0, limit);
     for (const c of due) c.next_attempt_at = new Date(new Date(now).getTime() + leaseSecs * 1000).toISOString();
     return due.map((c) => ({ ...c }));
   }

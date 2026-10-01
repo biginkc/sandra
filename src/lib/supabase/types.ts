@@ -21,8 +21,8 @@ export type Database = {
         Relationships: []
       }
       direct_calls: {
-        Row: { id: string; org_id: string; operator_user_id: string; property_id: string | null; contact_id: string | null; destination_e164: string; caller_id_e164: string; status: string; browser_leg_id: string | null; seller_leg_id: string | null; browser_command_id: string; seller_dial_state: string | null; hangup_cause: string | null; failure_reason: string | null; client_request_id: string; created_at: string; connected_at: string | null; ended_at: string | null; updated_at: string }
-        Insert: { id?: string; org_id: string; operator_user_id: string; property_id?: string | null; contact_id?: string | null; destination_e164: string; caller_id_e164: string; status?: string; browser_leg_id?: string | null; seller_leg_id?: string | null; browser_command_id?: string; seller_dial_state?: string | null; hangup_cause?: string | null; failure_reason?: string | null; client_request_id: string; created_at?: string; connected_at?: string | null; ended_at?: string | null; updated_at?: string }
+        Row: { id: string; org_id: string; operator_user_id: string; property_id: string | null; contact_id: string | null; destination_e164: string; caller_id_e164: string; status: string; browser_leg_id: string | null; seller_leg_id: string | null; browser_command_id: string; seller_dial_state: string | null; hangup_cause: string | null; failure_reason: string | null; client_request_id: string; created_at: string; connected_at: string | null; ended_at: string | null; updated_at: string; resume_pending: boolean; resume_claimed_at: string | null }
+        Insert: { id?: string; org_id: string; operator_user_id: string; property_id?: string | null; contact_id?: string | null; destination_e164: string; caller_id_e164: string; status?: string; browser_leg_id?: string | null; seller_leg_id?: string | null; browser_command_id?: string; seller_dial_state?: string | null; hangup_cause?: string | null; failure_reason?: string | null; client_request_id: string; created_at?: string; connected_at?: string | null; ended_at?: string | null; updated_at?: string; resume_pending?: boolean; resume_claimed_at?: string | null }
         Update: { status?: string; browser_leg_id?: string | null; seller_leg_id?: string | null; seller_dial_state?: string | null; hangup_cause?: string | null; failure_reason?: string | null; connected_at?: string | null; ended_at?: string | null; updated_at?: string }
         Relationships: []
       }
@@ -5863,7 +5863,9 @@ export type Database = {
       direct_call_set_target: { Args: { p_id: string; p_property: string | null; p_contact: string | null; p_destination: string }; Returns: undefined }
       direct_call_discard_reservation: { Args: { p_id: string }; Returns: undefined }
       direct_call_cleanup_add_leg: { Args: { p_id: string; p_leg: string }; Returns: undefined }
-      direct_call_cleanup_claim: { Args: { p_user: string; p_now: string; p_lease_secs: number }; Returns: Database["public"]["Tables"]["direct_call_cleanups"]["Row"][] }
+      direct_call_cleanup_claim: { Args: { p_user: string; p_now: string; p_lease_secs: number; p_limit: number }; Returns: Database["public"]["Tables"]["direct_call_cleanups"]["Row"][] }
+      direct_call_resume_claim: { Args: { p_user: string; p_now: string; p_lease_secs: number }; Returns: Database["public"]["Tables"]["direct_calls"]["Row"][] }
+      direct_call_resume_done: { Args: { p_id: string }; Returns: undefined }
       sequence_replace_steps: { Args: { p_sequence: string; p_steps: Json; p_name: string; p_description: string | null }; Returns: Json }
       sequence_step_stats: { Args: { p_org: string; p_sequence: string }; Returns: Array<{
         step_id: string; sent: number; replied: number; waiting: number;

@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 
 import { processDueCleanups } from "./cleanup";
-import { resumeAfterTransition } from "./lead-resume";
 import type { DirectCallStatus } from "./contract";
 import type { DirectCallFullRow, DirectCallStore } from "./store";
 import {
@@ -25,11 +24,6 @@ export type WebhookDeps = {
   hangup: (callControlId: string, commandId: string) => Promise<void>;
   /** GET call status for one leg (`isAlive:false` or 404 means gone). */
   getCall: (callControlId: string) => Promise<{ isAlive: boolean }>;
-  /**
-   * Resumes a lead's paused enrollments with the existing resume logic (no user session exists in a
-   * webhook, so the operator is passed as the actor).
-   */
-  resumeLead: (propertyId: string, operatorUserId: string) => Promise<void>;
   /** Active calls on the Voice API app (reconciles unresolved Dials). */
   listActiveCalls: () => Promise<{ calls: ActiveCall[]; complete: boolean }>;
   now: () => Date;
@@ -92,8 +86,6 @@ async function resolveRow(store: DirectCallStore, event: DirectCallEvent, claime
   return null;
 }
 
-const resumeDeps = (deps: WebhookDeps) => ({ store: deps.store, resume: deps.resumeLead, report: deps.report });
-
 async function failCall(deps: WebhookDeps, row: DirectCallFullRow, patch: { failure_reason: string; seller_dial_state?: "unknown" }) {
   return deps.store.updateIfStatus(
     row.id,
@@ -126,12 +118,12 @@ async function runSellerDial(deps: WebhookDeps, row: DirectCallFullRow, command:
     // Never re-send a Dial whose result is unknown. End the call and drop the browser leg (a durable
     // cleanup row). The unresolved_dial row written with the 'pending' transition stays open, holding
     // the operator lock until the provider has been reconciled for a leg this Dial may have created.
-    const failed = await failCall(
+    // resume_pending (when due) is set atomically by this write; the operator's own session works it.
+    await failCall(
       deps,
       fresh,
       unknown ? { failure_reason: "dial_outcome_unknown", seller_dial_state: "unknown" } : { failure_reason: "seller_dial_rejected" },
     );
-    await resumeAfterTransition(resumeDeps(deps), fresh, failed);
     // The provider definitively refused it: no leg can exist, nothing to reconcile.
     if (!unknown) await deps.store.dialRejected(row.id, "seller");
     return;
@@ -200,7 +192,6 @@ export async function processDirectCallWebhook(rawBody: string, deps: WebhookDep
     }
     const updated = await store.updateIfStatus(row.id, [row.status], transition.patch, transition.cleanups);
     if (updated) {
-      await resumeAfterTransition(resumeDeps(deps), row, updated);
       await runCommands(deps, updated, transition.commands);
       break;
     }

@@ -5,7 +5,6 @@ import { verifyTelnyxSignature } from "@/lib/direct-calling/signature";
 import { createSupabaseDirectCallStore } from "@/lib/direct-calling/store";
 import { telnyxDial, telnyxGetCallAlive, telnyxHangup, telnyxListActiveCalls } from "@/lib/direct-calling/telnyx";
 import { processDirectCallWebhook } from "@/lib/direct-calling/webhook";
-import { resumeLeadForOperator } from "@/lib/direct-calling/resume-server";
 import { reportError } from "@/lib/errors/report";
 
 export const runtime = "nodejs";
@@ -37,7 +36,6 @@ export async function POST(request: Request): Promise<Response> {
       hangup: (callControlId, commandId) => telnyxHangup(settings, callControlId, commandId),
       getCall: (callControlId) => telnyxGetCallAlive(settings, callControlId),
       listActiveCalls: () => telnyxListActiveCalls(settings),
-      resumeLead: resumeLeadForOperator,
       now: () => new Date(),
       report: (error, tag) => reportError(error, { tags: { surface: tag } }),
     });

@@ -13,7 +13,20 @@ export const DIRECT_CALL_TERMINAL_STATUSES: ReadonlySet<DirectCallStatus> = new 
 
 export type CallingConfig = { transport: "telnyx_direct" | "default" };
 
-export type DirectActionResult<T> = { ok: true; data: T } | { ok: false; error: string; errorCode?: string };
+export type DirectActionResult<T> =
+  | { ok: true; data: T }
+  | {
+      ok: false;
+      error: string;
+      errorCode?: string;
+      /**
+       * startDirectCall only. `false` = the server refused BEFORE reserving anything (not enabled, invalid
+       * request, operator busy, prepare refused and its reservation discarded): no call, Dial or cleanup
+       * obligation exists for the request id. Anything else (`true`, absent) means a reservation exists or
+       * may exist, so the browser must reconcile by request id and wait for terminal + cleanupPending:false.
+       */
+      reserved?: boolean;
+    };
 
 export type DirectRtcToken = {
   /** Telnyx WebRTC login JWT for this operator's credential. */

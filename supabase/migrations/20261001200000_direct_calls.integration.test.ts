@@ -2,10 +2,70 @@ import fs from "node:fs";
 import { Client } from "pg";
 import { expect, it } from "vitest";
 import { requireLoopbackPostgresUrl } from "../../src/lib/testing/loopback-postgres-url";
+import { createSupabaseDirectCallStore } from "../../src/lib/direct-calling/store";
+import { nextDirectCallState } from "../../src/lib/direct-calling/transitions";
 
 const ORG = "00000000-0000-0000-0000-0000000d1c01";
 const USER_A = "00000000-0000-0000-0000-0000000d1a01";
 const USER_B = "00000000-0000-0000-0000-0000000d1a02";
+const USER_C = "00000000-0000-0000-0000-0000000d1a03";
+const JSONB_PARAMS = new Set(["p_patch", "p_cleanups"]);
+
+/**
+ * A Supabase-admin-shaped client backed by the test's own Postgres connection, so the REAL
+ * createSupabaseDirectCallStore runs against the REAL SQL functions: every payload the store sends
+ * (the TS serializer's output) is what direct_call_apply receives. rpc() is PostgREST's shape: a
+ * scalar for scalar/void functions, rows otherwise; from() supports select(*).eq(col, v).single().
+ */
+function pgAdmin(pg: Client) {
+  const rpc = async (fn: string, args: Record<string, unknown>) => {
+    const keys = Object.keys(args);
+    const values = keys.map((k) => (JSONB_PARAMS.has(k) ? JSON.stringify(args[k]) : args[k]));
+    const named = keys.map((k, i) => `${k} => $${i + 1}${JSONB_PARAMS.has(k) ? "::jsonb" : ""}`).join(", ");
+    try {
+      const res = await pg.query(`select * from public.${fn}(${named})`, values);
+      const scalar = res.fields.length === 1 && res.fields[0].name === fn;
+      const data = scalar ? (res.rows[0]?.[fn] === "" ? null : (res.rows[0]?.[fn] ?? null)) : res.rows;
+      return { data, error: null };
+    } catch (error) {
+      const e = error as { message: string; code?: string };
+      return { data: null, error: { message: e.message, code: e.code } };
+    }
+  };
+  const from = (table: string) => {
+    const filters: Array<[string, unknown]> = [];
+    const read = async () => {
+      const where = filters.map(([c], i) => `${c} = $${i + 1}`).join(" and ");
+      const res = await pg.query(`select * from public.${table} where ${where}`, filters.map(([, v]) => v));
+      return res.rows[0] ?? null;
+    };
+    const builder = {
+      select: () => builder,
+      eq: (column: string, value: unknown) => (filters.push([column, value]), builder),
+      single: async () => {
+        const data = await read();
+        return { data, error: data ? null : { message: "no row" } };
+      },
+      maybeSingle: async () => ({ data: await read(), error: null }),
+      insert: async (values: Record<string, unknown>) => {
+        const keys = Object.keys(values);
+        try {
+          await pg.query(
+            `insert into public.${table} (${keys.join(", ")}) values (${keys.map((_, i) => `$${i + 1}`).join(", ")})`,
+            keys.map((k) => (values[k] !== null && typeof values[k] === "object" ? JSON.stringify(values[k]) : values[k])),
+          );
+          return { error: null };
+        } catch (error) {
+          const e = error as { message: string; code?: string };
+          return { error: { message: e.message, code: e.code } };
+        }
+      },
+    };
+    return builder;
+  };
+  return { rpc, from } as never;
+}
+
 // The files wrap themselves in begin/commit; strip that so the test's own
 // transaction can roll everything back.
 const stripTx = (sql: string) => sql.replace(/^\s*(begin|commit);\s*$/gim, "");
@@ -21,10 +81,11 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     await pg.query(migration);
     await pg.query(migration);
     await pg.query("insert into public.organizations(id,name) values ($1,'Direct calls test') on conflict do nothing", [ORG]);
-    for (const id of [USER_A, USER_B]) {
+    for (const id of [USER_A, USER_B, USER_C]) {
       await pg.query("insert into auth.users (id) values ($1) on conflict do nothing", [id]);
       await pg.query("insert into public.memberships (user_id, org_id, role) values ($1, $2, 'owner')", [id, ORG]);
     }
+    const store = createSupabaseDirectCallStore(pgAdmin(pg));
     const insertCall = (user: string, status: string, requestId: string) => pg.query(
       `insert into public.direct_calls (org_id, operator_user_id, destination_e164, caller_id_e164, status, client_request_id)
        values ($1, $2, '+15550000001', '+15550000002', $3, $4) returning id`,
@@ -76,22 +137,21 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     const timing = (await pg.query("select extract(epoch from resolve_after - created_at)::int as ra, extract(epoch from backstop_at - created_at)::int as bk from public.direct_call_cleanups where direct_call_id=$1", [callId])).rows[0];
     expect(timing).toEqual({ ra: 45, bk: 7260 });
 
-    // apply: CAS on status, resolves the Dial for a learned leg, writes the cleanup rows in the same statement.
-    const applied = await pg.query(
-      "select * from public.direct_call_apply($1, array['browser_connecting'], $2::jsonb, $3::jsonb)",
-      [callId, JSON.stringify({ status: "seller_dialing", browser_leg_id: "b-1", seller_dial_state: "pending" }),
-       JSON.stringify([{ kind: "unresolved_dial", role: "seller", timeout_secs: 30, time_limit_secs: 7195 }])],
+    // apply, driven through the REAL store (its serializer builds the payloads): CAS on status, resolves the
+    // Dial for a learned leg, and writes every cleanup row kind WITH its role and timings in the same statement.
+    const applied = await store.updateIfStatus(
+      callId, ["browser_connecting"],
+      { status: "seller_dialing", browser_leg_id: "b-1", seller_dial_state: "pending" },
+      [{ kind: "unresolved_dial", role: "seller", timeoutSecs: 30, timeLimitSecs: 7195 }],
     );
-    expect(applied.rows[0]).toMatchObject({ status: "seller_dialing", browser_leg_id: "b-1", seller_dial_state: "pending" });
+    expect(applied).toMatchObject({ status: "seller_dialing", browser_leg_id: "b-1", seller_dial_state: "pending" });
     expect(await open(callId)).toEqual([{ kind: "unresolved_dial", dial_role: "seller", leg_id: null }]); // browser resolved, seller open
-    const stale = await pg.query("select * from public.direct_call_apply($1, array['browser_connecting'], '{\"status\":\"failed\"}'::jsonb, '[]'::jsonb)", [callId]);
-    expect(stale.rows).toEqual([]); // status moved: no write, no rows
+    const sellerTiming = (await pg.query("select extract(epoch from resolve_after - created_at)::int as ra, extract(epoch from backstop_at - created_at)::int as bk from public.direct_call_cleanups where direct_call_id=$1 and dial_role='seller'", [callId])).rows[0];
+    expect(sellerTiming).toEqual({ ra: 45, bk: 7255 }); // timeout_secs + 15, time_limit_secs + 60 survived the serializer
+    expect(await store.updateIfStatus(callId, ["browser_connecting"], { status: "failed" })).toBeNull(); // status moved: no write, no rows
     // failure_reason may be explicitly nulled; hangup of the browser ends it and queues the other leg.
-    const ended = await pg.query(
-      "select * from public.direct_call_apply($1, array['seller_dialing'], $2::jsonb, $3::jsonb)",
-      [callId, JSON.stringify({ status: "failed", failure_reason: null }), JSON.stringify([{ kind: "leg", leg_id: "b-1" }])],
-    );
-    expect(ended.rows[0]).toMatchObject({ status: "failed", failure_reason: null });
+    const ended = await store.updateIfStatus(callId, ["seller_dialing"], { status: "failed", failure_reason: null }, [{ kind: "leg", legId: "b-1" }]);
+    expect(ended).toMatchObject({ status: "failed", failure_reason: null });
     expect(await open(callId)).toEqual([{ kind: "leg", dial_role: null, leg_id: "b-1" }, { kind: "unresolved_dial", dial_role: "seller", leg_id: null }]);
     // The seller Dial's leg arrives after the call ended: stored, Dial resolved, leg queued for hangup.
     expect((await pg.query("select public.direct_call_dial_succeeded($1, 's-1', 'seller') as stored", [callId])).rows[0].stored).toBe(true);
@@ -102,8 +162,10 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     expect((await open(callId)).map((r) => r.leg_id)).toEqual(["b-1", "s-1", "s-2"]);
 
     // claim: due rows only, lease pushes next_attempt_at out; unresolved rows only once teardown has begun.
-    const claim = async (now: string) => (await pg.query("select leg_id, kind from public.direct_call_cleanup_claim($1, $2::timestamptz, 20) order by leg_id", [USER_A, now])).rows;
-    expect((await claim(new Date(Date.now() + 1000).toISOString())).map((r) => r.leg_id)).toEqual(["b-1", "s-1", "s-2"]);
+    const claim = async (now: string, limit = 50) => (await store.claimDueCleanups(USER_A, now, 20, limit)).map((r) => ({ leg_id: r.leg_id, kind: r.kind })).sort((x, y) => String(x.leg_id).localeCompare(String(y.leg_id)));
+    const claimOne = async (now: string) => (await store.claimDueCleanups(USER_A, now, 20, 1)).map((r) => r.leg_id);
+    expect((await claimOne(new Date(Date.now() + 1000).toISOString())).length).toBe(1); // one row at a time
+    expect((await claim(new Date(Date.now() + 1000).toISOString())).length).toBe(2); // the other two
     expect(await claim(new Date(Date.now() + 2000).toISOString())).toEqual([]); // leased
     expect((await claim(new Date(Date.now() + 60_000).toISOString())).length).toBe(3); // lease expired
     await pg.query("update public.direct_call_cleanups set confirmed_at = now() where direct_call_id=$1", [callId]);
@@ -194,6 +256,51 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
       await pg.query("set local role anon");
       await expect(pg.query("select * from public.direct_calls")).rejects.toMatchObject({ code: "42501" });
     } finally { await pg.query("rollback to savepoint anon"); }
+
+    // ---- #743-3: a hangup handler working from a stale snapshot must not leave a live seller leg -----------
+    const PROP = "00000000-0000-0000-0000-0000000d1b01";
+    await pg.query("insert into public.properties (id, org_id, address, state) values ($1, $2, '1 Test St', 'MO')", [PROP, ORG]);
+    const NOW = new Date("2026-10-01T12:00:00.000Z");
+    const begunC = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: PROP, contact_id: null, destination_e164: "+15550000010", caller_id_e164: "+15550000002", client_request_id: "00000000-0000-0000-0000-00000000cc01" });
+    expect(begunC.outcome).toBe("created");
+    const idC = (begunC as { row: { id: string } }).row.id;
+    const answered = nextDirectCallState({ ...(begunC as unknown as { row: Record<string, unknown> }).row, browser_leg_id: null, created_at: NOW.toISOString() } as never, { type: "call.answered", callControlId: "b-race", role: "browser", occurredAt: null, hangupCause: null }, NOW);
+    await store.updateIfStatus(idC, ["browser_connecting"], answered.patch!, answered.cleanups);
+    // The hangup handler reads the row now: seller_leg_id is still null.
+    const snapshot = (await store.findById(idC))!;
+    expect(snapshot).toMatchObject({ status: "seller_dialing", seller_leg_id: null });
+    // The call.hangup webhook of the browser leg was recorded first (as the route does), then the concurrent
+    // seller Dial response stores its leg and resolves its unresolved row...
+    await store.insertEvent({ provider_event_id: "evt-b-race-hangup", direct_call_id: idC, event_type: "call.hangup", occurred_at: null, payload: { data: { event_type: "call.hangup", payload: { call_control_id: "b-race" } } } });
+    expect(await store.dialSucceeded(idC, "s-race", "seller")).toBe(true);
+    expect(await open(idC)).toEqual([]);
+    // ...and only then the handler's status-only compare-and-set lands, from the stale snapshot.
+    const stale = nextDirectCallState(snapshot, { type: "call.hangup", callControlId: "b-race", role: "browser", occurredAt: null, hangupCause: null }, NOW);
+    expect(stale.cleanups).toEqual([]); // the TS side knows nothing of the seller leg
+    const failed = await store.updateIfStatus(idC, [snapshot.status], stale.patch!, stale.cleanups);
+    expect(failed).toMatchObject({ status: "failed", seller_leg_id: "s-race" });
+    // SQL queued the seller leg under the row lock (and not the browser leg, whose hangup was received).
+    expect(await open(idC)).toEqual([{ kind: "leg", dial_role: null, leg_id: "s-race" }]);
+
+    // ---- resume_pending: set atomically with the unconnected terminal transition ----------------------
+    expect(failed).toMatchObject({ resume_pending: true });
+    const t0 = new Date(Date.now() + 5000).toISOString();
+    expect((await store.claimPendingResumes(USER_C, t0, 30)).map((r) => r.id)).toEqual([idC]);
+    expect(await store.claimPendingResumes(USER_C, t0, 30)).toEqual([]); // leased: a second session does not also resume
+    expect((await store.claimPendingResumes(USER_C, new Date(Date.now() + 60_000).toISOString(), 30)).length).toBe(1); // lease expired
+    await store.clearResumePending(idC);
+    expect(await store.claimPendingResumes(USER_C, new Date(Date.now() + 120_000).toISOString(), 30)).toEqual([]);
+    // Ownership rule: two live calls on one property; the first to fail does not flag, the last does.
+    const PROP2 = "00000000-0000-0000-0000-0000000d1b02";
+    await pg.query("insert into public.properties (id, org_id, address, state) values ($1, $2, '2 Test St', 'MO')", [PROP2, ORG]);
+    await pg.query("update public.direct_call_cleanups set confirmed_at = now() where operator_user_id = $1", [USER_C]);
+    const second = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: PROP2, contact_id: null, destination_e164: "+15550000011", caller_id_e164: "+15550000002", client_request_id: "00000000-0000-0000-0000-00000000cc02" });
+    const idC2 = (second as { row: { id: string } }).row.id;
+    await pg.query("update public.direct_calls set property_id = $1 where operator_user_id = $2 and status not in ('ended','failed') and id <> $3", [PROP2, USER_B, idC2]);
+    const firstOfTwo = await store.updateIfStatus(idC2, ["browser_connecting"], { status: "failed", failure_reason: "browser_dial_rejected", ended_at: NOW.toISOString() });
+    expect(firstOfTwo).toMatchObject({ resume_pending: false }); // USER_B's live call still owns PROP2
+    const connectedCall = await store.updateIfStatus((await pg.query("select id from public.direct_calls where operator_user_id=$1 and status not in ('ended','failed')", [USER_B])).rows[0].id, ["browser_connecting"], { status: "failed", ended_at: NOW.toISOString() });
+    expect(connectedCall).toMatchObject({ resume_pending: true });
 
     await pg.query(rollback);
     const gone = await pg.query("select to_regclass('public.direct_calls') as t");
