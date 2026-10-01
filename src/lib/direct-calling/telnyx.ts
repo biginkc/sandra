@@ -32,7 +32,7 @@ function redact(text: string, apiKey: string): string {
 
 async function request(
   settings: Pick<TelnyxDirectSettings, "apiKey">,
-  method: "POST",
+  method: "POST" | "GET",
   path: string,
   body: unknown,
   accept: "json" | "text",
@@ -171,6 +171,27 @@ export async function telnyxHangup(
     "json",
     options,
   );
+}
+
+/**
+ * GET /v2/calls/{call_control_id} ("Retrieve a call status"; data.is_alive; available for 10 minutes
+ * after the call ended, so a 404 means the leg is long gone). Never throws for 404: that is "not alive".
+ */
+export async function telnyxGetCallAlive(
+  settings: Pick<TelnyxDirectSettings, "apiKey">,
+  callControlId: string,
+  options: TelnyxClientOptions = {},
+): Promise<{ isAlive: boolean }> {
+  let text: string;
+  try {
+    text = await request(settings, "GET", `/calls/${encodeURIComponent(callControlId)}`, undefined, "json", options);
+  } catch (error) {
+    if (error instanceof TelnyxApiError && error.kind === "rejected" && error.status === 404) return { isAlive: false };
+    throw error;
+  }
+  const alive = parseJson<{ data?: { is_alive?: unknown } }>(text).data?.is_alive;
+  // Anything but an explicit false is "still alive": never confirm a teardown on ambiguity.
+  return { isAlive: alive !== false };
 }
 
 export async function telnyxSendDtmf(

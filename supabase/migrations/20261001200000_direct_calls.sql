@@ -34,6 +34,13 @@ create table if not exists public.direct_calls (
   -- can still have cleanup outstanding (retried until the provider confirms).
   browser_hangup_pending boolean not null default false,
   seller_hangup_pending boolean not null default false,
+  -- Set when the provider accepted (2xx) the hangup: stops blind resends. The leg is only
+  -- confirmed ended (flag cleared) by the hangup webhook, a 404, or a status check showing it dead.
+  -- Doubles as the last-checked time for the 10s status re-check throttle.
+  browser_hangup_acked_at timestamptz,
+  seller_hangup_acked_at timestamptz,
+  -- Provider legs we dialed that conflict with the stored seller leg: hung up until confirmed ended.
+  orphan_hangup_leg_ids text[] not null default '{}',
   -- Seller Dial command state, persisted with the transition: pending -> sent | unknown.
   seller_dial_state text check (seller_dial_state in ('pending', 'sent', 'unknown')),
   hangup_cause text,
@@ -46,10 +53,47 @@ create table if not exists public.direct_calls (
   unique (operator_user_id, client_request_id)
 );
 
--- One non-terminal direct call per operator.
+-- One live direct call per operator. The lock covers pending leg/orphan teardown, so a new call
+-- cannot start while a leg of the previous one may still be up.
 create unique index if not exists direct_calls_one_active_per_operator_idx
   on public.direct_calls (operator_user_id)
-  where status in ('browser_connecting', 'seller_dialing', 'connected', 'ending');
+  where status not in ('ended', 'failed')
+     or browser_hangup_pending
+     or seller_hangup_pending
+     or cardinality(orphan_hangup_leg_ids) > 0;
+
+-- Same predicate as the index above (single source of truth for the service's active-call lookup).
+create or replace function public.direct_call_active_for_operator(p_user uuid)
+returns setof public.direct_calls language sql stable security invoker set search_path = public as $$
+  select * from public.direct_calls
+   where operator_user_id = p_user
+     and (status not in ('ended', 'failed')
+          or browser_hangup_pending
+          or seller_hangup_pending
+          or cardinality(orphan_hangup_leg_ids) > 0)
+   limit 1;
+$$;
+
+create or replace function public.direct_call_orphan_add(p_id uuid, p_leg text)
+returns void language sql security invoker set search_path = public as $$
+  update public.direct_calls
+     set orphan_hangup_leg_ids = array(select distinct unnest(orphan_hangup_leg_ids || p_leg))
+   where id = p_id;
+$$;
+
+create or replace function public.direct_call_orphan_remove(p_id uuid, p_leg text)
+returns void language sql security invoker set search_path = public as $$
+  update public.direct_calls
+     set orphan_hangup_leg_ids = array_remove(orphan_hangup_leg_ids, p_leg)
+   where id = p_id;
+$$;
+
+revoke all on function public.direct_call_active_for_operator(uuid) from public, anon, authenticated;
+grant execute on function public.direct_call_active_for_operator(uuid) to service_role;
+revoke all on function public.direct_call_orphan_add(uuid, text) from public, anon, authenticated;
+revoke all on function public.direct_call_orphan_remove(uuid, text) from public, anon, authenticated;
+grant execute on function public.direct_call_orphan_add(uuid, text) to service_role;
+grant execute on function public.direct_call_orphan_remove(uuid, text) to service_role;
 
 create table if not exists public.direct_call_events (
   provider_event_id text primary key,

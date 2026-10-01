@@ -19,7 +19,7 @@ Scope is deliberately small. **In:** pilot gate, browser registration, server-di
 5. `call.answered` seller → status `connected`. `call.bridged` recorded.
 6. `call.hangup` on either leg → hang up the other if live; status `ended` (or `failed` if the seller never answered) with `hangup_cause` saved.
 7. Browser polls `getDirectCallStatus(directCallId)` every 1s while active.
-8. Wrap-up uses the existing `completeSoftphoneCall` **unchanged**, capability-less path: it writes `provider='sandra_softphone'`, `jitter_attempt_id='sandra-<wrapToken>'`. No change to `call_activities`, reconciliation, training checks or recording routes.
+8. Wrap-up uses the existing `completeSoftphoneCall` **unchanged**, through the sealed capability: the same call capability the Jitter path mints, bound to `directCallId`, so it writes `provider='sandra_softphone'`, `jitter_attempt_id='sandra-<directCallId>'`. No change to `call_activities`, reconciliation, training checks or recording routes.
 
 ## Contract (`src/lib/direct-calling/contract.ts` — both halves build against this)
 
@@ -50,3 +50,14 @@ See the file. Server actions live in `src/lib/direct-calling/actions.ts` (`"use 
 - Repo is public: no keys, phone numbers, user IDs or tokens committed.
 - Read `node_modules/next/dist/docs/` for any Next.js API you use (Next 16.3.5; `AGENTS.md`).
 - PRs: draft, `Depends on:` stated, children based on the parent branch. Do not merge, do not request review.
+
+## Teardown and operator lock
+
+- A leg hangup has two states: *accepted* (provider 2xx; stops blind resends) and *confirmed ended* (hangup webhook, 404/already-ended, or a `GET /v2/calls/{id}` showing `is_alive:false`). An accepted-but-unconfirmed leg is re-checked at most every 10s; if still alive the hangup is sent again.
+- The one-call-per-operator lock covers pending teardown: a row holds it while `status` is not terminal, OR either leg hangup is pending, OR an orphan leg is unconfirmed. A new start during that time is refused (`call_in_progress` / `teardown_pending`) after the start path first retries the cleanup.
+- `DirectCallStatusView.cleanupPending` is true while any leg or orphan leg is unconfirmed. A terminal status with `cleanupPending=true` is not authoritative for the browser.
+- No seller Dial is issued once teardown has begun, and a persisted `seller_dial_state='pending'` with no seller leg is treated as an unknown outcome (call fails `dial_outcome_unknown`; never re-sent).
+
+## Rollback
+
+Removing the pilot env vars (`DIRECT_CALL_PILOT_USER_IDS` and the `TELNYX_DIRECT_*` set) disables new calls. Before removing `TELNYX_DIRECT_API_KEY`, drain live calls: without the key the server cannot hang up legs, so confirm no direct call is live (and no `direct_calls` row has a pending hangup) first.

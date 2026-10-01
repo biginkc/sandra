@@ -25,6 +25,7 @@ import {
   telnyxCreateCredential,
   telnyxCreateToken,
   telnyxDial,
+  telnyxGetCallAlive,
   telnyxHangup,
   telnyxSendDtmf,
 } from "./telnyx";
@@ -73,6 +74,7 @@ function service() {
     telnyx: {
       dial: telnyxDial,
       hangup: telnyxHangup,
+      getCall: telnyxGetCallAlive,
       sendDtmf: telnyxSendDtmf,
       createCredential: telnyxCreateCredential,
       createToken: telnyxCreateToken,

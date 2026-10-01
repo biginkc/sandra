@@ -47,14 +47,33 @@ export interface DirectCallStore {
   setSellerLegIfNull(id: string, legId: string): Promise<boolean>;
   /** pending -> sent only; never overwrites unknown. */
   markSellerDialSent(id: string): Promise<void>;
-  /** Unconditional (any status): set/clear the pending-teardown flag for one leg. */
+  /**
+   * Unconditional (any status): set/clear the pending-teardown flag for one leg. Clears the ack.
+   * Throws DirectCallLockConflictError when setting it would collide with the operator's other live call.
+   */
   setLegCleanup(id: string, role: "browser" | "seller", pending: boolean): Promise<void>;
+  /** Provider accepted (2xx) the hangup for this leg at `at`; the leg is still pending until confirmed. */
+  markLegHangupAcked(id: string, role: "browser" | "seller", at: string): Promise<void>;
+  /** Atomically add/remove an orphan leg id (a dialed leg that must be hung up until confirmed). */
+  addOrphanLeg(id: string, legId: string): Promise<void>;
+  removeOrphanLeg(id: string, legId: string): Promise<void>;
   getOperator(userId: string): Promise<DirectCallOperatorRow | null>;
   insertOperator(row: { user_id: string; org_id: string; telnyx_credential_id: string; sip_username: string }): Promise<DirectCallOperatorRow>;
 }
 
-const ACTIVE: DirectCallStatus[] = ["browser_connecting", "seller_dialing", "connected", "ending"];
 const UNIQUE_VIOLATION = "23505";
+
+/**
+ * The one-live-call-per-operator lock now also covers pending leg/orphan teardown, so flagging a
+ * lingering leg on an already-terminal row can collide with the operator's newer call. The caller
+ * must then hang that leg up directly instead of losing the flag.
+ */
+export class DirectCallLockConflictError extends Error {
+  constructor() {
+    super("Operator already holds a live direct call; the cleanup flag could not be persisted.");
+    this.name = "DirectCallLockConflictError";
+  }
+}
 
 function fail(error: { message: string } | null): never {
   throw new Error(error?.message ?? "Direct call database error.");
@@ -116,9 +135,9 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
       return typed(data);
     },
     async findActiveForUser(userId) {
-      const { data, error } = await calls().select("*").eq("operator_user_id", userId).in("status", ACTIVE).maybeSingle();
+      const { data, error } = await admin.rpc("direct_call_active_for_operator", { p_user: userId });
       if (error) fail(error);
-      return typed(data);
+      return typed((data as RawRow[] | null)?.[0] ?? null);
     },
     async insertCall(call) {
       const { data, error } = await calls().insert({ ...call, status: "browser_connecting" }).select("*").single();
@@ -136,7 +155,11 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
         .select("*")
         .maybeSingle();
       if (error) {
-        if (error.code === UNIQUE_VIOLATION) return null;
+        if (error.code === UNIQUE_VIOLATION) {
+          // Setting a cleanup flag on a terminal row can collide with the operator's newer call.
+          if (patch.browser_hangup_pending || patch.seller_hangup_pending) throw new DirectCallLockConflictError();
+          return null;
+        }
         fail(error);
       }
       return typed(data);
@@ -166,8 +189,34 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
     },
     async setLegCleanup(id, role, pending) {
       const { error } = await calls()
-        .update({ ...(role === "browser" ? { browser_hangup_pending: pending } : { seller_hangup_pending: pending }), updated_at: new Date().toISOString() })
+        .update({
+          ...(role === "browser"
+            ? { browser_hangup_pending: pending, ...(pending ? {} : { browser_hangup_acked_at: null }) }
+            : { seller_hangup_pending: pending, ...(pending ? {} : { seller_hangup_acked_at: null }) }),
+          updated_at: new Date().toISOString(),
+        })
         .eq("id", id);
+      if (error) {
+        if (error.code === UNIQUE_VIOLATION) throw new DirectCallLockConflictError();
+        fail(error);
+      }
+    },
+    async markLegHangupAcked(id, role, at) {
+      // updated_at is deliberately untouched: the stale-ending timer must not be reset by re-checks.
+      const { error } = await calls()
+        .update(role === "browser" ? { browser_hangup_acked_at: at } : { seller_hangup_acked_at: at })
+        .eq("id", id);
+      if (error) fail(error);
+    },
+    async addOrphanLeg(id, legId) {
+      const { error } = await admin.rpc("direct_call_orphan_add", { p_id: id, p_leg: legId });
+      if (error) {
+        if (error.code === UNIQUE_VIOLATION) throw new DirectCallLockConflictError();
+        fail(error);
+      }
+    },
+    async removeOrphanLeg(id, legId) {
+      const { error } = await admin.rpc("direct_call_orphan_remove", { p_id: id, p_leg: legId });
       if (error) fail(error);
     },
     async getOperator(userId) {

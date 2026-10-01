@@ -2,10 +2,11 @@ import { createHash } from "node:crypto";
 
 import { runLegCleanup } from "./cleanup";
 import { DIRECT_CALL_TERMINAL_STATUSES, type DirectCallStatus } from "./contract";
-import type { DirectCallFullRow, DirectCallStore } from "./store";
+import { DirectCallLockConflictError, type DirectCallFullRow, type DirectCallStore } from "./store";
 import {
   hangupCommandId,
   nextDirectCallState,
+  teardownBegun,
   type DirectCallEvent,
   type DirectCommand,
   type LegRole,
@@ -21,6 +22,8 @@ export type WebhookDeps = {
   store: DirectCallStore;
   dial: (params: DialParams) => Promise<{ callControlId: string }>;
   hangup: (callControlId: string, commandId: string) => Promise<void>;
+  /** GET call status for one leg (`isAlive:false` or 404 means gone). */
+  getCall: (callControlId: string) => Promise<{ isAlive: boolean }>;
   now: () => Date;
   report: (error: unknown, tag: string) => void;
 };
@@ -98,7 +101,32 @@ async function failCall(deps: WebhookDeps, rowId: string, patch: { failure_reaso
   });
 }
 
+/**
+ * Persists "this leg must be hung up". If the operator's lock is already held by a newer call the
+ * flag cannot be stored (see DirectCallLockConflictError): hang the leg up directly and report.
+ * Returns false when that direct hangup also failed.
+ */
+async function flagLegOrHangUp(deps: WebhookDeps, row: DirectCallFullRow, role: LegRole, legId: string): Promise<boolean> {
+  try {
+    await deps.store.setLegCleanup(row.id, role, true);
+    return true;
+  } catch (error) {
+    if (!(error instanceof DirectCallLockConflictError)) throw error;
+    deps.report(error, "direct_call_cleanup_lock_conflict");
+    try {
+      await deps.hangup(legId, hangupId(row.id, legId));
+      return true;
+    } catch (hangupError) {
+      deps.report(hangupError, "direct_call_hangup");
+      return false;
+    }
+  }
+}
+
 async function runSellerDial(deps: WebhookDeps, row: DirectCallFullRow, command: SellerDialCommand) {
+  // No Dial may ever be issued once teardown has begun (ending/terminal/any hangup pending).
+  const fresh = await deps.store.findById(row.id);
+  if (!fresh || fresh.status !== "seller_dialing" || fresh.seller_dial_state !== "pending" || teardownBegun(fresh)) return;
   let dialed: { callControlId: string };
   try {
     dialed = await deps.dial({
@@ -128,15 +156,22 @@ async function runSellerDial(deps: WebhookDeps, row: DirectCallFullRow, command:
   await deps.store.setSellerLegIfNull(row.id, dialed.callControlId);
   const current = await deps.store.findById(row.id);
   if (current?.seller_leg_id !== dialed.callControlId) {
-    // A different seller leg id is already stored (it cannot be this Dial's leg): this one is an orphan.
-    await safeHangup(deps, dialed.callControlId, hangupId(row.id, dialed.callControlId));
+    // A different seller leg id is already stored (it cannot be this Dial's leg): this one is an
+    // orphan. Persist it so its hangup is retried until the provider confirms it is gone.
+    try {
+      await deps.store.addOrphanLeg(row.id, dialed.callControlId);
+    } catch (error) {
+      if (!(error instanceof DirectCallLockConflictError)) throw error;
+      deps.report(error, "direct_call_cleanup_lock_conflict");
+      await safeHangup(deps, dialed.callControlId, hangupId(row.id, dialed.callControlId));
+    }
     return;
   }
   // A call.initiated that stored the same id first is success, not a conflict.
   await deps.store.markSellerDialSent(row.id);
   // The call ended while the Dial was in flight: the new leg must not linger.
   if (DIRECT_CALL_TERMINAL_STATUSES.has(current.status) || current.status === "ending") {
-    await deps.store.setLegCleanup(row.id, "seller", true);
+    await flagLegOrHangUp(deps, row, "seller", dialed.callControlId);
   }
 }
 
@@ -156,11 +191,19 @@ export class LegCleanupPendingError extends Error {
   }
 }
 
+/**
+ * Runs pending teardown. Returns false only when a hangup/status call errored (so the event is
+ * redelivered). A hangup the provider accepted but has not yet confirmed does not fail the event:
+ * the leg's own hangup webhook (or the next status check) confirms it.
+ */
 async function settleCleanup(deps: WebhookDeps, rowId: string): Promise<boolean> {
   const fresh = await deps.store.findById(rowId);
   if (!fresh) return true;
-  const result = await runLegCleanup({ store: deps.store, hangup: deps.hangup, report: deps.report }, fresh);
-  return !result.pending;
+  const result = await runLegCleanup(
+    { store: deps.store, hangup: deps.hangup, getCall: deps.getCall, now: deps.now, report: deps.report },
+    fresh,
+  );
+  return result.failed === 0;
 }
 
 /** Persist-then-act. Throws on database failure so the route can answer 500 and Telnyx retries. */
@@ -190,11 +233,35 @@ export async function processDirectCallWebhook(rawBody: string, deps: WebhookDep
 
   for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS && row; attempt++) {
     const transition = nextDirectCallState(row, parsed.event, deps.now());
+    if (transition.orphanConfirmed) await store.removeOrphanLeg(row.id, transition.orphanConfirmed);
     if (!transition.patch) {
       await runCommands(deps, row, transition.commands);
       break;
     }
-    const updated = await store.updateIfStatus(row.id, [row.status], transition.patch);
+    let updated: DirectCallFullRow | null;
+    try {
+      updated = await store.updateIfStatus(row.id, [row.status], transition.patch);
+    } catch (error) {
+      if (!(error instanceof DirectCallLockConflictError)) throw error;
+      // A late event for an old call that wants a leg hung up, while the operator already has a
+      // newer live call: the flag cannot be stored, so hang the leg up directly; on failure the
+      // event stays unprocessed (500) and is redelivered.
+      deps.report(error, "direct_call_cleanup_lock_conflict");
+      const wanted: Array<string | null> = [
+        transition.patch.browser_hangup_pending ? (transition.patch.browser_leg_id ?? row.browser_leg_id) : null,
+        transition.patch.seller_hangup_pending ? (transition.patch.seller_leg_id ?? row.seller_leg_id) : null,
+      ];
+      for (const legId of wanted) {
+        if (!legId) continue;
+        try {
+          await deps.hangup(legId, hangupId(row.id, legId));
+        } catch (hangupError) {
+          deps.report(hangupError, "direct_call_hangup");
+          throw new LegCleanupPendingError();
+        }
+      }
+      break;
+    }
     if (updated) {
       await runCommands(deps, updated, transition.commands);
       break;

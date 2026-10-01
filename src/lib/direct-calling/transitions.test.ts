@@ -114,28 +114,46 @@ describe("nextDirectCallState", () => {
 
   it("clears a leg's pending teardown when the provider confirms it hung up", () => {
     const r = nextDirectCallState(row({ status: "ended", seller_leg_id: "S", seller_hangup_pending: true }), ev("call.hangup", "S", "seller"), at(30));
-    expect(r.patch).toEqual({ seller_hangup_pending: false });
+    expect(r.patch).toEqual({ seller_hangup_pending: false, seller_hangup_acked_at: null });
   });
 
-  it("re-sends the same seller Dial only while the persisted pending state is inside the dedupe window", () => {
-    const pending = row({ status: "seller_dialing", seller_dial_state: "pending", updated_at: new Date(at(5)).toISOString() });
-    const r = nextDirectCallState(pending, ev("call.answered", "B", "browser"), at(20));
-    expect(r.commands).toHaveLength(1);
-    expect(r.commands[0]).toMatchObject({ kind: "dial_seller", commandId: expect.any(String) });
-    const first = nextDirectCallState(row(), ev("call.answered", "B", "browser"), at(5)).commands[0];
-    expect(r.commands[0]).toMatchObject({ commandId: (first as { commandId: string }).commandId });
-    expect(r.patch).toBeNull();
+  it("never replays a pending Dial, however fresh: it is an unknown outcome and the call fails (blocker 2)", () => {
+    for (const updated of [at(19).toISOString(), at(5).toISOString(), CREATED]) {
+      const r = nextDirectCallState(
+        row({ status: "seller_dialing", seller_dial_state: "pending", updated_at: updated }),
+        ev("call.answered", "B", "browser"),
+        at(20),
+      );
+      expect(r.commands).toEqual([]);
+      expect(r.patch).toMatchObject({ status: "failed", failure_reason: "dial_outcome_unknown", seller_dial_state: "unknown", browser_hangup_pending: true });
+    }
   });
 
-  it("never re-sends a Dial whose outcome is unknown or outside the dedupe window", () => {
+  it("never re-sends an unknown Dial, and a sent Dial is a no-op", () => {
     const unknown = nextDirectCallState(row({ status: "seller_dialing", seller_dial_state: "unknown" }), ev("call.answered", "B", "browser"), at(20));
     expect(unknown.commands).toEqual([]);
     expect(unknown.patch).toMatchObject({ status: "failed", failure_reason: "dial_outcome_unknown", browser_hangup_pending: true });
-    const old = nextDirectCallState(row({ status: "seller_dialing", seller_dial_state: "pending", updated_at: CREATED }), ev("call.answered", "B", "browser"), at(500));
-    expect(old.commands).toEqual([]);
-    expect(old.patch).toMatchObject({ status: "failed", failure_reason: "dial_outcome_unknown" });
     const sent = nextDirectCallState(row({ status: "seller_dialing", seller_dial_state: "sent" }), ev("call.answered", "B", "browser"), at(20));
     expect(sent).toEqual({ patch: null, commands: [] });
+  });
+
+  it("issues no Dial once teardown has begun (ending, pending hangup, teardown_pending, orphan)", () => {
+    for (const over of [
+      { status: "ending" as const },
+      { browser_hangup_pending: true },
+      { seller_hangup_pending: true },
+      { failure_reason: "teardown_pending" },
+      { orphan_hangup_leg_ids: ["X"] },
+    ]) {
+      const r = nextDirectCallState(row(over), ev("call.answered", "B", "browser"), at(5));
+      expect(r.commands).toEqual([]);
+      expect(r.patch).toEqual({ browser_hangup_pending: true });
+    }
+  });
+
+  it("confirms an orphan leg when its hangup webhook arrives", () => {
+    const r = nextDirectCallState(row({ status: "failed", orphan_hangup_leg_ids: ["ORPHAN"] }), ev("call.hangup", "ORPHAN", "seller"), at(30));
+    expect(r).toEqual({ patch: null, commands: [], orphanConfirmed: "ORPHAN" });
   });
 
   it("flags a seller leg first seen on a failed call (after an unknown dial) for teardown", () => {

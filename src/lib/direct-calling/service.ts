@@ -33,6 +33,7 @@ export type DirectCallServiceDeps = {
   telnyx: {
     dial: (settings: TelnyxDirectSettings, params: DialParams) => Promise<{ callControlId: string }>;
     hangup: (settings: TelnyxDirectSettings, callControlId: string, commandId: string) => Promise<void>;
+    getCall: (settings: TelnyxDirectSettings, callControlId: string) => Promise<{ isAlive: boolean }>;
     sendDtmf: (settings: TelnyxDirectSettings, callControlId: string, digit: string) => Promise<void>;
     createCredential: (settings: TelnyxDirectSettings, name: string) => Promise<{ id: string; sipUsername: string }>;
     createToken: (settings: TelnyxDirectSettings, credentialId: string) => Promise<string>;
@@ -108,6 +109,8 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
   const cleanupDeps = (settings: TelnyxDirectSettings) => ({
     store,
     hangup: (callControlId: string, commandId: string) => deps.telnyx.hangup(settings, callControlId, commandId),
+    getCall: (callControlId: string) => deps.telnyx.getCall(settings, callControlId),
+    now: deps.now,
     report: deps.report,
   });
 
@@ -189,6 +192,8 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
         // A stuck row is torn down (legs hung up) before it may release the operator.
         const settled = await settle(existing, settings);
         if (!DIRECT_CALL_TERMINAL_STATUSES.has(settled.status)) return err("You already have a call in progress.", "call_in_progress");
+        // The call is over but a leg is not yet confirmed ended: the operator lock still holds.
+        if (hasPendingCleanup(settled)) return err("Your previous call is still hanging up. Try again in a moment.", "teardown_pending");
       }
     } catch (error) {
       deps.report(error, "direct_call_start_precheck");
@@ -216,6 +221,9 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
         const active = await store.findActiveForUser(userId);
         // The winning call owns the enrollment pause when it is for the same lead.
         if (!active || active.property_id !== target.propertyId) await resume(target.propertyId);
+        if (active && DIRECT_CALL_TERMINAL_STATUSES.has(active.status)) {
+          return err("Your previous call is still hanging up. Try again in a moment.", "teardown_pending");
+        }
         return err("You already have a call in progress.", "call_in_progress");
       }
       row = inserted.row;
@@ -273,6 +281,7 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
       hangupCause: row.hangup_cause,
       // A call can be over while a leg is still being torn down; say so rather than hide it.
       failureReason: terminal && hasPendingCleanup(row) && !row.failure_reason ? TEARDOWN_PENDING : row.failure_reason,
+      cleanupPending: hasPendingCleanup(row),
     };
   }
 
@@ -321,7 +330,7 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
       }
       if (!hasPendingCleanup(current)) return { ok: true, data: { accepted: true } };
       const result = await runLegCleanup(cleanupDeps(settings), current);
-      if (result.attempted > 0 && result.confirmed === 0) return err("Could not hang up. Try again.", "hangup_failed");
+      if (result.failed > 0 && result.confirmed === 0 && result.acknowledged === 0) return err("Could not hang up. Try again.", "hangup_failed");
       return { ok: true, data: { accepted: true } };
     } catch (error) {
       deps.report(error, "direct_call_control");

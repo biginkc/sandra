@@ -3,8 +3,8 @@ import { NextResponse } from "next/server";
 import { readTelnyxDirectSettings } from "@/lib/direct-calling/config";
 import { verifyTelnyxSignature } from "@/lib/direct-calling/signature";
 import { createSupabaseDirectCallStore } from "@/lib/direct-calling/store";
-import { telnyxDial, telnyxHangup } from "@/lib/direct-calling/telnyx";
-import { processDirectCallWebhook } from "@/lib/direct-calling/webhook";
+import { telnyxDial, telnyxGetCallAlive, telnyxHangup } from "@/lib/direct-calling/telnyx";
+import { LegCleanupPendingError, processDirectCallWebhook } from "@/lib/direct-calling/webhook";
 import { reportError } from "@/lib/errors/report";
 
 export const runtime = "nodejs";
@@ -34,13 +34,20 @@ export async function POST(request: Request): Promise<Response> {
       store: createSupabaseDirectCallStore(),
       dial: (params) => telnyxDial(settings, params),
       hangup: (callControlId, commandId) => telnyxHangup(settings, callControlId, commandId),
+      getCall: (callControlId) => telnyxGetCallAlive(settings, callControlId),
       now: () => new Date(),
       report: (error, tag) => reportError(error, { tags: { surface: tag } }),
     });
     return NextResponse.json({ ok: true, result: outcome.result }, { status: outcome.status });
   } catch (error) {
-    // Database failure: answer 500 so Telnyx redelivers; the event is not marked processed.
-    reportError(error, { tags: { surface: "direct_call_webhook" } });
+    // Answer 500 so Telnyx redelivers; the event is not marked processed. A leg that could not be
+    // hung up yet is an expected retry (warning); anything else is a real failure (error).
+    reportError(
+      error,
+      error instanceof LegCleanupPendingError
+        ? { tags: { surface: "direct_call_webhook" }, level: "warning" }
+        : { tags: { surface: "direct_call_webhook" } },
+    );
     return NextResponse.json({ error: "internal" }, { status: 500 });
   }
 }

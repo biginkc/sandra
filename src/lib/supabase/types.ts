@@ -21,9 +21,9 @@ export type Database = {
         Relationships: []
       }
       direct_calls: {
-        Row: { id: string; org_id: string; operator_user_id: string; property_id: string | null; contact_id: string | null; destination_e164: string; caller_id_e164: string; status: string; browser_leg_id: string | null; seller_leg_id: string | null; browser_command_id: string; browser_hangup_pending: boolean; seller_hangup_pending: boolean; seller_dial_state: string | null; hangup_cause: string | null; failure_reason: string | null; client_request_id: string; created_at: string; connected_at: string | null; ended_at: string | null; updated_at: string }
-        Insert: { id?: string; org_id: string; operator_user_id: string; property_id?: string | null; contact_id?: string | null; destination_e164: string; caller_id_e164: string; status?: string; browser_leg_id?: string | null; seller_leg_id?: string | null; browser_command_id?: string; browser_hangup_pending?: boolean; seller_hangup_pending?: boolean; seller_dial_state?: string | null; hangup_cause?: string | null; failure_reason?: string | null; client_request_id: string; created_at?: string; connected_at?: string | null; ended_at?: string | null; updated_at?: string }
-        Update: { status?: string; browser_leg_id?: string | null; seller_leg_id?: string | null; browser_hangup_pending?: boolean; seller_hangup_pending?: boolean; seller_dial_state?: string | null; hangup_cause?: string | null; failure_reason?: string | null; connected_at?: string | null; ended_at?: string | null; updated_at?: string }
+        Row: { id: string; org_id: string; operator_user_id: string; property_id: string | null; contact_id: string | null; destination_e164: string; caller_id_e164: string; status: string; browser_leg_id: string | null; seller_leg_id: string | null; browser_command_id: string; browser_hangup_pending: boolean; seller_hangup_pending: boolean; browser_hangup_acked_at: string | null; seller_hangup_acked_at: string | null; orphan_hangup_leg_ids: string[]; seller_dial_state: string | null; hangup_cause: string | null; failure_reason: string | null; client_request_id: string; created_at: string; connected_at: string | null; ended_at: string | null; updated_at: string }
+        Insert: { id?: string; org_id: string; operator_user_id: string; property_id?: string | null; contact_id?: string | null; destination_e164: string; caller_id_e164: string; status?: string; browser_leg_id?: string | null; seller_leg_id?: string | null; browser_command_id?: string; browser_hangup_pending?: boolean; seller_hangup_pending?: boolean; browser_hangup_acked_at?: string | null; seller_hangup_acked_at?: string | null; orphan_hangup_leg_ids?: string[]; seller_dial_state?: string | null; hangup_cause?: string | null; failure_reason?: string | null; client_request_id: string; created_at?: string; connected_at?: string | null; ended_at?: string | null; updated_at?: string }
+        Update: { status?: string; browser_leg_id?: string | null; seller_leg_id?: string | null; browser_hangup_pending?: boolean; seller_hangup_pending?: boolean; browser_hangup_acked_at?: string | null; seller_hangup_acked_at?: string | null; seller_dial_state?: string | null; hangup_cause?: string | null; failure_reason?: string | null; connected_at?: string | null; ended_at?: string | null; updated_at?: string }
         Relationships: []
       }
       direct_call_events: {
@@ -5847,6 +5847,9 @@ export type Database = {
       }
     }
     Functions: {
+      direct_call_active_for_operator: { Args: { p_user: string }; Returns: Database["public"]["Tables"]["direct_calls"]["Row"][] }
+      direct_call_orphan_add: { Args: { p_id: string; p_leg: string }; Returns: undefined }
+      direct_call_orphan_remove: { Args: { p_id: string; p_leg: string }; Returns: undefined }
       sequence_replace_steps: { Args: { p_sequence: string; p_steps: Json; p_name: string; p_description: string | null }; Returns: Json }
       sequence_step_stats: { Args: { p_org: string; p_sequence: string }; Returns: Array<{
         step_id: string; sent: number; replied: number; waiting: number;

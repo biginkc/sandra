@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { TelnyxDirectSettings } from "./config";
-import { TelnyxApiError, decodeClientState, encodeClientState, isLegAlreadyEnded, telnyxCreateToken, telnyxDial, telnyxHangup } from "./telnyx";
+import { TelnyxApiError, decodeClientState, encodeClientState, isLegAlreadyEnded, telnyxCreateToken, telnyxDial, telnyxGetCallAlive, telnyxHangup } from "./telnyx";
 
 const settings: TelnyxDirectSettings = { apiKey: "SECRET-KEY-123", connectionId: "conn", appId: "app", webhookPublicKey: "pub", callerIdE164: "+15550002222" };
 
@@ -31,6 +31,23 @@ describe("telnyx client", () => {
     const timeout = await telnyxCreateToken(settings, "cred", { fetchImpl: boom as never }).catch((e) => e);
     expect(timeout.kind).toBe("unknown");
     expect(timeout.message).not.toMatch(/SECRET|Bearer/);
+  });
+
+  it("reads call liveness with GET /calls/{id}; 404 and is_alive=false are gone, anything ambiguous is alive", async () => {
+    const alive = vi.fn(async () => new Response(JSON.stringify({ data: { is_alive: true } }), { status: 200 }));
+    expect(await telnyxGetCallAlive(settings, "cc 1", { fetchImpl: alive as never })).toEqual({ isAlive: true });
+    const [url, init] = alive.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://api.telnyx.com/v2/calls/cc%201");
+    expect(init.method).toBe("GET");
+    expect(init.body).toBeUndefined();
+    const dead = vi.fn(async () => new Response(JSON.stringify({ data: { is_alive: false } }), { status: 200 }));
+    expect(await telnyxGetCallAlive(settings, "cc", { fetchImpl: dead as never })).toEqual({ isAlive: false });
+    const missing = vi.fn(async () => new Response("{}", { status: 404 }));
+    expect(await telnyxGetCallAlive(settings, "cc", { fetchImpl: missing as never })).toEqual({ isAlive: false });
+    const odd = vi.fn(async () => new Response(JSON.stringify({ data: {} }), { status: 200 }));
+    expect(await telnyxGetCallAlive(settings, "cc", { fetchImpl: odd as never })).toEqual({ isAlive: true });
+    const down = vi.fn(async () => new Response("{}", { status: 503 }));
+    await expect(telnyxGetCallAlive(settings, "cc", { fetchImpl: down as never })).rejects.toBeInstanceOf(TelnyxApiError);
   });
 
   it("reads the plain-text token", async () => {

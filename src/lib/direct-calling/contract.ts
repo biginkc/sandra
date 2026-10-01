@@ -47,6 +47,11 @@ export type DirectCallStatusView = {
   endedAt: string | null;
   hangupCause: string | null;
   failureReason: string | null;
+  /**
+   * True while any leg (or orphan leg) of this call is not yet confirmed ended by the provider.
+   * A terminal status with cleanupPending=true is NOT authoritative: the browser keeps polling.
+   */
+  cleanupPending: boolean;
 };
 
 export type DirectCallControl =

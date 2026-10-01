@@ -46,6 +46,25 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
 
     // A terminal call frees the operator for a new one.
     await pg.query("update public.direct_calls set status='ended' where id=$1", [first.rows[0].id]);
+    // The lock also covers pending leg teardown and orphan legs: a terminal row holds it until confirmed.
+    const id = first.rows[0].id;
+    for (const [hold, release] of [
+      ["browser_hangup_pending = true", "browser_hangup_pending = false"],
+      ["seller_hangup_pending = true", "seller_hangup_pending = false"],
+    ]) {
+      await pg.query(`update public.direct_calls set ${hold} where id=$1`, [id]);
+      await pg.query("savepoint held");
+      await expect(insertCall(USER_A, "browser_connecting", "00000000-0000-0000-0000-00000000aa04")).rejects.toMatchObject({ code: "23505" });
+      await pg.query("rollback to savepoint held");
+      await pg.query(`update public.direct_calls set ${release} where id=$1`, [id]);
+    }
+    await pg.query("select public.direct_call_orphan_add($1, 'orphan-1')", [id]);
+    await pg.query("select public.direct_call_orphan_add($1, 'orphan-1')", [id]);
+    expect((await pg.query("select orphan_hangup_leg_ids from public.direct_calls where id=$1", [id])).rows[0].orphan_hangup_leg_ids).toEqual(["orphan-1"]);
+    await pg.query("savepoint orphan_held");
+    await expect(insertCall(USER_A, "browser_connecting", "00000000-0000-0000-0000-00000000aa05")).rejects.toMatchObject({ code: "23505" });
+    await pg.query("rollback to savepoint orphan_held");
+    await pg.query("select public.direct_call_orphan_remove($1, 'orphan-1')", [id]);
     await insertCall(USER_A, "browser_connecting", "00000000-0000-0000-0000-00000000aa03");
     await insertCall(USER_B, "browser_connecting", "00000000-0000-0000-0000-00000000bb02");
 

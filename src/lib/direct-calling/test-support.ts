@@ -1,9 +1,12 @@
 // Test-only helpers: an in-memory DirectCallStore. Never imported by production code.
 import type { DirectCallStatus } from "./contract";
-import type { DirectCallFullRow, DirectCallOperatorRow, DirectCallStore, EventInsertResult, NewDirectCall } from "./store";
+import { DirectCallLockConflictError, type DirectCallFullRow, type DirectCallOperatorRow, type DirectCallStore, type EventInsertResult, type NewDirectCall } from "./store";
 import type { RowPatch } from "./transitions";
 
-const LIVE = new Set<DirectCallStatus>(["browser_connecting", "seller_dialing", "connected", "ending"]);
+/** Mirrors the migration's lock predicate: not terminal, or any teardown still pending. */
+export function holdsLock(r: DirectCallFullRow): boolean {
+  return !["ended", "failed"].includes(r.status) || r.browser_hangup_pending || r.seller_hangup_pending || r.orphan_hangup_leg_ids.length > 0;
+}
 
 export function makeRow(overrides: Partial<DirectCallFullRow> = {}): DirectCallFullRow {
   return {
@@ -20,6 +23,9 @@ export function makeRow(overrides: Partial<DirectCallFullRow> = {}): DirectCallF
     browser_command_id: "22222222-2222-4222-8222-222222222222",
     browser_hangup_pending: false,
     seller_hangup_pending: false,
+    browser_hangup_acked_at: null,
+    seller_hangup_acked_at: null,
+    orphan_hangup_leg_ids: [],
     seller_dial_state: null,
     hangup_cause: null,
     failure_reason: null,
@@ -68,7 +74,7 @@ export class FakeStore implements DirectCallStore {
     return [...this.calls.values()].find((r) => r.operator_user_id === userId && r.client_request_id === requestId) ?? null;
   }
   async findActiveForUser(userId: string) {
-    return [...this.calls.values()].find((r) => r.operator_user_id === userId && LIVE.has(r.status)) ?? null;
+    return [...this.calls.values()].find((r) => r.operator_user_id === userId && holdsLock(r)) ?? null;
   }
   async insertCall(call: NewDirectCall) {
     if (await this.findActiveForUser(call.operator_user_id)) return "conflict" as const;
@@ -85,6 +91,7 @@ export class FakeStore implements DirectCallStore {
     const row = this.calls.get(id);
     if (!row || !statuses.includes(row.status)) return null;
     const next = { ...row, ...patch } as DirectCallFullRow;
+    this.assertLock(next);
     this.calls.set(id, next);
     return next;
   }
@@ -102,9 +109,37 @@ export class FakeStore implements DirectCallStore {
     const row = this.calls.get(id);
     if (row?.seller_dial_state === "pending") this.calls.set(id, { ...row, seller_dial_state: "sent" });
   }
+  /** Emulates the partial unique index: a row entering the lock set while another holds it is rejected. */
+  private assertLock(next: DirectCallFullRow) {
+    if (!holdsLock(next)) return;
+    const other = [...this.calls.values()].find((r) => r.id !== next.id && r.operator_user_id === next.operator_user_id && holdsLock(r));
+    if (other) throw new DirectCallLockConflictError();
+  }
   async setLegCleanup(id: string, role: "browser" | "seller", pending: boolean) {
     const row = this.calls.get(id);
-    if (row) this.calls.set(id, { ...row, [role === "browser" ? "browser_hangup_pending" : "seller_hangup_pending"]: pending });
+    if (!row) return;
+    const next = {
+      ...row,
+      [role === "browser" ? "browser_hangup_pending" : "seller_hangup_pending"]: pending,
+      ...(pending ? {} : { [role === "browser" ? "browser_hangup_acked_at" : "seller_hangup_acked_at"]: null }),
+    } as DirectCallFullRow;
+    this.assertLock(next);
+    this.calls.set(id, next);
+  }
+  async markLegHangupAcked(id: string, role: "browser" | "seller", at: string) {
+    const row = this.calls.get(id);
+    if (row) this.calls.set(id, { ...row, [role === "browser" ? "browser_hangup_acked_at" : "seller_hangup_acked_at"]: at });
+  }
+  async addOrphanLeg(id: string, legId: string) {
+    const row = this.calls.get(id);
+    if (!row || row.orphan_hangup_leg_ids.includes(legId)) return;
+    const next = { ...row, orphan_hangup_leg_ids: [...row.orphan_hangup_leg_ids, legId] };
+    this.assertLock(next);
+    this.calls.set(id, next);
+  }
+  async removeOrphanLeg(id: string, legId: string) {
+    const row = this.calls.get(id);
+    if (row) this.calls.set(id, { ...row, orphan_hangup_leg_ids: row.orphan_hangup_leg_ids.filter((l) => l !== legId) });
   }
   async getOperator(userId: string) {
     return this.operators.get(userId) ?? null;
