@@ -1,0 +1,25 @@
+{
+  "markerRows": {
+    "80000000-0000-4000-8000-000000000001": {"property_id": "40000000-0000-4000-8000-000000000001", "in_drip": true, "drip_replied": false, "drip_name": "Fixture Drip"},
+    "80000000-0000-4000-8000-000000000002": {"property_id": "40000000-0000-4000-8000-000000000002", "in_drip": true, "drip_replied": true, "drip_name": "Fixture Drip"},
+    "80000000-0000-4000-8000-000000000003": {"property_id": "40000000-0000-4000-8000-000000000003", "in_drip": true, "drip_replied": true, "drip_name": "Fixture Drip"},
+    "80000000-0000-4000-8000-000000000004": {"property_id": "40000000-0000-4000-8000-000000000004", "in_drip": false, "drip_replied": false, "drip_name": null},
+    "80000000-0000-4000-8000-000000000005": {"property_id": "40000000-0000-4000-8000-000000000005", "in_drip": false, "drip_replied": true, "drip_name": "Fixture Drip"},
+    "80000000-0000-4000-8000-000000000007": {"property_id": "40000000-0000-4000-8000-000000000007", "in_drip": true, "drip_replied": false, "drip_name": "Archived Fixture Drip"},
+    "80000000-0000-4000-8000-000000000008": {"property_id": null, "in_drip": false, "drip_replied": false, "drip_name": null}
+  },
+  "labels": {
+    "80000000-0000-4000-8000-000000000002": {
+      "drip_label": null,
+      "drip_reply_label": "Reply to drip text 1"
+    },
+    "70000000-0000-4000-8000-000000000002": {
+      "drip_label": "Drip · Fixture Drip · text 1 of 3",
+      "drip_reply_label": null
+    }
+  },
+  "threadContext": {
+    "80000000-0000-4000-8000-000000000001": {"header": "In Fixture Drip · text 2 of 3", "pill": null},
+    "80000000-0000-4000-8000-000000000002": {"header": "Was in Fixture Drip · stopped Sep 2 when they replied", "pill": "Replied to drip"}
+  }
+}
