@@ -28,14 +28,14 @@ async function producerPlatform() {
     ? new Response('', { status: 200, headers: { 'x-postgrest-version': 'PostgREST/12.2.0' } })
     : new Response(JSON.stringify({ version: '2.151.0' }), { status: 200 }), { postgrestMajor: '12' });
 }
-async function fixture() {
+async function fixture({ fixtureItems = [], replayItems = fixtureItems } = {}) {
   const repo = mkdtempSync(path.join(os.tmpdir(), 'shared-seal-'));
   git(repo, 'init', '-q'); git(repo, 'config', 'user.name', 'Test'); git(repo, 'config', 'user.email', 'test@example.invalid');
   for (const file of JSON.parse(readFileSync('scripts/inbox-ci/shared-readonly-operators.json')).operator_scripts) {
     mkdirSync(path.dirname(path.join(repo, file)), { recursive: true }); copyFileSync(file, path.join(repo, file));
   }
   mkdirSync(path.join(repo, 'experiments/inbox-production-install/drift'), { recursive: true });
-  for (const ref of ['ncsngxlcyxylaeskiteu', 'copflsklaefwzipsrjqz']) writeFileSync(path.join(repo, `experiments/inbox-production-install/drift/${ref}.items.json`), JSON.stringify({ fixture_version: 1, items: [] }));
+  for (const ref of ['ncsngxlcyxylaeskiteu', 'copflsklaefwzipsrjqz']) writeFileSync(path.join(repo, `experiments/inbox-production-install/drift/${ref}.items.json`), JSON.stringify({ fixture_version: 1, items: ref === 'ncsngxlcyxylaeskiteu' ? fixtureItems : [] }));
   git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'base');
   const sha = git(repo, 'rev-parse', 'HEAD');
   const root = `docs/performance/inbox-redesign/evidence/${sha}/pre-merge`;
@@ -52,7 +52,7 @@ async function fixture() {
   }
   const catalogRecord = input('catalog', 'catalog-fingerprint', 'n/a', 'catalog-pre.json', catalog);
   const platformRecord = input('platform', 'db-contract', 'pre', 'platform-config.json', platform);
-  const driftPayload = { record_version: 1, target_ref: 'ncsngxlcyxylaeskiteu', candidate_sha: sha, baseline_digest: catalog.sha256, catalog_format_version: 2, items: [] };
+  const driftPayload = { record_version: 1, target_ref: 'ncsngxlcyxylaeskiteu', candidate_sha: sha, baseline_digest: catalog.sha256, catalog_format_version: 2, items: replayItems };
   const drift = { ...driftPayload, sha256: digest(Buffer.from(stable(driftPayload))) };
   const driftRecord = input('drift', 'drift-replay', 'n/a', 'drift-record-ncsngxlcyxylaeskiteu.json', drift);
   const output = path.join(os.tmpdir(), `shared-output-${sha}.json`);
@@ -132,6 +132,12 @@ test('sealer mutation matrix rejects every catalog-drift guard', () => {
   const approved = h.index('idx_message_threads_ai_responder_status', { predicate: '(ai_responder_status IS NOT NULL)' });
   approved.approval_sha256 = 'e419f623f1922466db14dba7aa091cdd4720924e2b97901088af2dc5719b108a';
   assert.throws(() => reconstructCatalog(h.baseline, h.record([approved])), /Drift record approval mismatch/, 'approval definition digest');
+});
+test('sealer rejects a fixture/replay definition digest mismatch', async () => {
+  const item = { object: 'public.message_threads', attribute: 'columns', name: 'new_column', canonical_definition: 'uuid', definition_sha256: digest(Buffer.from('uuid')), classification: { class: 'column', nullable: true, default: null, attidentity: '', attgenerated: '', column_acl: null, owner: 'postgres' }, origin: 'unknown', approval_sha256: null };
+  const replayItem = { ...item, definition_sha256: '0'.repeat(64) };
+  const f = await fixture({ fixtureItems: [item], replayItems: [replayItem] });
+  assert.throws(() => sealSharedReadonly(f.args), /Drift fixture\/replay definition mismatch/);
 });
 test('seals only digest representation linked to committed inputs', async () => {
   const f = await fixture(); const dir = sealSharedReadonly(f.args);

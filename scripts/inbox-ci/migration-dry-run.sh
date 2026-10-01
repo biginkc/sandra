@@ -193,6 +193,7 @@ python3 "$ASSERT" catalog-unchanged "$WORK/catalog-post.json" "$WORK/catalog-pos
 # The Electric role tests need PostgreSQL 17 binaries; install them so those
 # tests execute here, and set CI=true so they fail rather than skip if missing.
 PG17_BIN="$(bash scripts/inbox-ci/install-pg17.sh)"
+# LC_ALL=C mirrors the Electric test step in .github/workflows/inbox-installer.yml (env: LC_ALL: C).
 env -u GITHUB_ACTIONS -u CATALOG_FINGERPRINT_SCRATCH CI=true PG17_BIN="$PG17_BIN" LC_ALL=C python3 scripts/inbox-ci/run-offline-suite.py "$INSTALL" > "$WORK/production-install-unit.txt" 2>&1
 python3 "$ASSERT" offline-suite "$WORK/production-install-unit.txt"
 # Live catalog mutation tests require their own blank postgres:17 database:
