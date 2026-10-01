@@ -143,7 +143,6 @@ const exportedRefKeys = Object.entries(process.env).filter(([, value]) => ['ncsn
 const record = { script, args, githubEnv: process.env.GITHUB_ENV, exportedRefKeys, exitStatus: result.status, stderr: result.stderr?.slice(-4000) };
 appendFileSync(process.env.PROVISION_RECORD, JSON.stringify(record) + '\\n');
 const count = readFileSync(process.env.PROVISION_RECORD, 'utf8').trim().split('\\n').filter(Boolean).length;
-if (result.status === 0 && count === 3) process.exit(77);
 process.exit(result.status ?? 1);`;
 }
 
@@ -167,6 +166,7 @@ test('drift replay exports only neutral provision environment values', async () 
   const runnerTemp = path.join(work, 'runner-temp');
   const originalEnvFile = path.join(work, 'original.env');
   const provisionRecord = path.join(work, 'provision-record.ndjson');
+  const consumerRecord = path.join(work, 'consumer-record.txt');
   const provisionRecorder = path.join(work, 'provision-recorder.mjs');
   const pythonRecorder = path.join(work, 'python-recorder.mjs');
   const basePath = process.env.PATH ?? '';
@@ -220,6 +220,7 @@ case "\${1:-}" in
     printf '%s\\n' fake-org
     ;;
   scripts/inbox-ci/rehearse-readonly.mjs)
+    printf 'rehearse %s\\n' "\${TEST_SUPABASE_URL:-}" >> "$CONSUMER_RECORD"
     output=''
     phase=''
     previous=''
@@ -232,7 +233,10 @@ case "\${1:-}" in
     if [ "$phase" = pre ]; then printf '%s\\n' '{"org":"fake-org"}'; else printf '%s\\n' post; fi
     ;;
   scripts/outbox-db-contract-mutations.mjs)
+    printf 'mutations %s\\n' "\${TEST_SUPABASE_URL:-}" >> "$CONSUMER_RECORD"
     printf '%s\\n' '{}' > "$2"
+    # Stop after target 2's POST contract suite: both targets' consumers have run.
+    if [ "$(grep -c '^mutations ' "$CONSUMER_RECORD")" -eq 4 ]; then exit 77; fi
     ;;
   scripts/inbox-ci/write-failure-record.mjs)
     ;;
@@ -266,6 +270,7 @@ esac
       GITHUB_ENV: originalEnvFile,
       REPO_ROOT: repo,
       PROVISION_RECORD: provisionRecord,
+      CONSUMER_RECORD: consumerRecord,
       PROVISION_RECORDER: provisionRecorder,
       PYTHON_RECORDER: pythonRecorder,
       PYTHONDONTWRITEBYTECODE: '1',
@@ -282,6 +287,10 @@ esac
     assert.match(records[2].githubEnv, /\/target-2\.env$/);
     for (const [index, record] of records.entries()) assert.deepEqual(record.exportedRefKeys, [], `provision ${index + 1} exported a hosted project ref`);
     for (const ref of REFS) assert(!readFileSync(originalEnvFile, 'utf8').includes(ref), `runner environment contains ${ref}`);
+    // Each target's rehearsal and contract suites must still see their own local stack.
+    const consumers = readFileSync(consumerRecord, 'utf8').trim().split('\n');
+    assert.deepEqual(consumers.map(line => line.split(' ')[0]), ['rehearse', 'mutations', 'rehearse', 'mutations', 'rehearse', 'mutations', 'rehearse', 'mutations']);
+    for (const line of consumers) assert.equal(line.split(' ')[1], 'http://127.0.0.1:55421', `consumer saw ${line}`);
   } finally {
     await close(postgres);
     await close(supabaseHttp);

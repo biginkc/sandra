@@ -37,16 +37,22 @@ done
 
 lane_env="$(mktemp "${RUNNER_TEMP}/inbox-drift-replay-env.XXXXXX")"
 replay_work="$(mktemp -d "${RUNNER_TEMP}/inbox-drift-replay.XXXXXX")"
+stack_sourced=''
 
 start_stack() {
   local env_file=$1 api_port=$2 db_port=$3
+  # The previous stack's local TEST_SUPABASE_* values would trip the provisioner's
+  # hosted-credential guard (key-name match), so clear them only once a stack of
+  # ours has been sourced. Never clear before the first provision: the guard must
+  # still see anything inherited from the runner.
+  if [[ -n "$stack_sourced" ]]; then unset TEST_SUPABASE_URL TEST_SUPABASE_ANON_KEY TEST_SUPABASE_SERVICE_ROLE_KEY; fi
   : > "$env_file"
   export GITHUB_ENV="$env_file"
   node scripts/ci/provision-disposable-stack.mjs --api-port "$api_port" --db-port "$db_port" --exclude-migrations '2026093004*'
   set -a
   source "$env_file"
   set +a
-  unset TEST_SUPABASE_URL TEST_SUPABASE_ANON_KEY TEST_SUPABASE_SERVICE_ROLE_KEY
+  stack_sourced=1
   if [[ -n "$original_github_env" ]]; then cat "$env_file" >> "$original_github_env"; fi
   export GITHUB_ENV="$original_github_env"
   current_workdir="${E2E_LOCAL_WORKDIR:-}"
