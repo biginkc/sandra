@@ -11,8 +11,10 @@ import { ConversationHistory, type InboxDetailSnapshot } from "./conversation-hi
 import { useInboxMetadataActions } from "./use-metadata-actions";
 import { InboxReplyComposer } from "./reply-composer";
 import type { InboxReplyTarget } from "@/lib/inbox/reply-api-contract";
+import type { InboxDripMarker } from "@/lib/inbox/drip-markers";
 
-const labels: Record<InboxFilter["view"], string> = { active: "All", all: "All", mine: "Assigned to me", unassigned: "Unassigned", unread: "Unread", escalated: "Needs review", dispo: "Has outcome", needs_outcome: "Needs outcome", unknown: "Unknown senders", dismissed: "Dismissed" };
+const labels: Record<InboxFilter["view"], string> = { active: "All", all: "All", mine: "Assigned to me", unassigned: "Unassigned", unread: "Unread", escalated: "Needs review", dispo: "Has outcome", needs_outcome: "Needs outcome", in_drip: "In a drip", drip_replied: "Replied to drip", unknown: "Unknown senders", dismissed: "Dismissed" };
+const isDripView = (view: InboxFilter["view"]) => view === "in_drip" || view === "drip_replied";
 type Scope = WorkspaceScope & { nextCursor: string | null; refreshed: boolean };
 type Open = { id: WorkspaceId; generation: number; row?: WorkspaceRow; data?: InboxDetailSnapshot; error?: string };
 function replyTargetFromWorkspaceId(value: WorkspaceId, orgId: string): InboxReplyTarget {
@@ -42,6 +44,14 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   const [error, setError] = useState<string>();
   const [counts, setCounts] = useState<InboxCounts>();
   const [countsError, setCountsError] = useState(false);
+  const [dripMarkers, setDripMarkers] = useState(new Map<string, InboxDripMarker>());
+  const markerAsOf = useRef(0);
+  const markerGeneration = useRef(0);
+  const markerRequest = useRef<AbortController | null>(null);
+  const reconciliationRequest = useRef<AbortController | null>(null);
+  const reconciliationInFlight = useRef(false);
+  const filterRef = useRef(initialFilter);
+  const busyRef = useRef(true);
   const scope = useRef<Scope | null>(null);
   const sync = useRef<ReturnType<typeof createWorkspaceSync> | null>(null);
   const request = useRef<AbortController | null>(null);
@@ -60,8 +70,8 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   const accessLost = useCallback(() => {
     if (denied.current) return;
     denied.current = true; sequence.current++;
-    request.current?.abort(); clearActions.current(); cache.close();
-    setSelectionNames(new Map()); replaceSelected([]); activeOpen.current = null; setOpened(null); setCounts(undefined); setReview(false);
+    request.current?.abort(); markerRequest.current?.abort(); reconciliationRequest.current?.abort(); clearActions.current(); cache.close();
+    setSelectionNames(new Map()); replaceSelected([]); activeOpen.current = null; setOpened(null); setCounts(undefined); setDripMarkers(new Map()); setReview(false);
     sync.current?.revoke(); setSnapshot({ state: "permission_lost", rows: [] }); setBusy(false);
   }, [cache, replaceSelected]);
   /** A single item-scoped denial (404): only this target is affected. Invalidate its
@@ -97,6 +107,34 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     if (denied.current) throw new DOMException("Access ended", "AbortError");
     return value as T;
   }
+  function markerIds(ids: readonly WorkspaceId[]): string[] {
+    const result: string[] = [];
+    for (const value of ids) {
+      try {
+        const parts: unknown = JSON.parse(value);
+        if (Array.isArray(parts) && parts[0] === identity.orgId && parts[1] === "conversation" && typeof parts[2] === "string") result.push(parts[2]);
+      } catch { /* invalid workset identities are rejected by the sync adapter */ }
+    }
+    return [...new Set(result)];
+  }
+  async function refreshDripMarkers(ids: readonly string[]) {
+    const token = ++markerGeneration.current;
+    markerRequest.current?.abort();
+    if (!ids.length) { setDripMarkers(new Map()); return; }
+    const controller = new AbortController(); markerRequest.current = controller;
+    try {
+      const value = await json<{ orgId: string; asOf: string; rows: InboxDripMarker[] }>("/api/inbox/drip-markers", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orgId: identity.orgId, conversationIds: ids }),
+      }, controller.signal);
+      const asOf = Date.parse(value.asOf);
+      if (value.orgId !== identity.orgId || !Number.isFinite(asOf) || asOf < markerAsOf.current || token !== markerGeneration.current || denied.current) return;
+      const next = new Map<string, InboxDripMarker>();
+      for (const marker of value.rows) {
+        if (marker.inDrip || marker.dripReplied) next.set(marker.conversationId, marker);
+      }
+      markerAsOf.current = asOf; setDripMarkers(next);
+    } catch { /* marker decoration is fail-closed; the authenticated list remains usable */ }
+  }
   async function loadCounts(next: InboxFilter, fresh = false) {
     const token = ++countsGeneration.current;
     setCounts(undefined); setCountsError(false);
@@ -112,24 +150,41 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   }
   async function load(next: InboxFilter, cursor: string | null = null) {
     if (denied.current) return;
-    request.current?.abort();
+    request.current?.abort(); markerRequest.current?.abort(); reconciliationRequest.current?.abort();
     const controller = new AbortController(); request.current = controller;
-    setBusy(true); setError(undefined); sync.current?.reset();
+    busyRef.current = true; filterRef.current = next; setBusy(true); setError(undefined); sync.current?.reset();
     void loadCounts(next);
     try {
       const value = await json<Scope>("/api/inbox/worksets", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orgId: identity.orgId, filter: next, cursor, limit: 500, ...(scope.current ? { replacesScopeId: scope.current.scopeId } : {}) }) }, controller.signal);
       if (controller.signal.aborted) return;
       if (value.orgId !== identity.orgId || value.requesterId !== identity.userId || value.sessionId !== identity.sessionId || value.accessEpoch !== identity.accessEpoch) { accessLost(); return; }
       if (!(value.nextCursor === null || typeof value.nextCursor === "string") || typeof value.refreshed !== "boolean") throw Error("Invalid workspace response");
-      setInvalidatedIds([]); sync.current!.replace(value); scope.current = value; setNextCursor(value.nextCursor); setFilter(next);
+      setInvalidatedIds([]); setDripMarkers(new Map()); sync.current!.replace(value); scope.current = value; setNextCursor(value.nextCursor); setFilter(next);
+      void refreshDripMarkers(markerIds(value.orderedIds));
     } catch (failure) {
       if (!controller.signal.aborted && !denied.current) setError(failure instanceof Error ? failure.message : "Could not load conversations.");
-    } finally { if (!controller.signal.aborted) setBusy(false); }
+    } finally { if (!controller.signal.aborted) { busyRef.current = false; setBusy(false); } }
+  }
+  async function reconcileDripView() {
+    const next = filterRef.current;
+    const current = scope.current;
+    if (denied.current || !isDripView(next.view) || busyRef.current || !current || reconciliationInFlight.current) return;
+    reconciliationInFlight.current = true;
+    const controller = new AbortController(); reconciliationRequest.current = controller;
+    try {
+      const value = await json<Scope>("/api/inbox/worksets", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ orgId: identity.orgId, filter: next, cursor: null, limit: 500, replacesScopeId: current.scopeId }),
+      }, controller.signal);
+      if (controller.signal.aborted || value.orgId !== identity.orgId || value.requesterId !== identity.userId || value.sessionId !== identity.sessionId || value.accessEpoch !== identity.accessEpoch || !(value.nextCursor === null || typeof value.nextCursor === "string") || typeof value.refreshed !== "boolean") return;
+      scope.current = value; setNextCursor(value.nextCursor); sync.current?.replace(value); void refreshDripMarkers(markerIds(value.orderedIds));
+    } catch { /* the next probe retries a rate-limited or transient reconciliation */ }
+    finally { reconciliationInFlight.current = false; if (reconciliationRequest.current === controller) reconciliationRequest.current = null; }
   }
   useEffect(() => {
     // Each mount owns its transport and no browser persistence. A stale request
     // cannot publish after unmount even when the server completed its scope.
-    const adapter = createWorkspaceSync({ origin: window.location.origin, onChange: setSnapshot, onAccessBoundary: accessLost,
+    const adapter = createWorkspaceSync({ origin: window.location.origin, onChange: next => { setSnapshot(next); void refreshDripMarkers(markerIds(next.rows.map(row => workspaceId(row.target)))); }, onProbe: () => { const ids = markerIds(sync.current?.getSnapshot().rows.map(row => workspaceId(row.target)) ?? []); void refreshDripMarkers(ids); void loadCounts(filterRef.current, true); void reconcileDripView(); }, onAccessBoundary: accessLost,
       onInvalidated: ids => {
         setInvalidatedIds(previous => [...new Set([...previous, ...ids])]);
         replaceSelected(selectedRef.current.filter(id => !ids.includes(id)));
@@ -143,7 +198,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     void load(initialFilter);
     const expiry = setTimeout(accessLost, Math.max(0, identity.expiresAt - Date.now()));
     return () => {
-      invalidateViews(); request.current?.abort(); clearTimeout(expiry); adapter.reset(); sync.current = null;
+      invalidateViews(); request.current?.abort(); markerRequest.current?.abort(); reconciliationRequest.current?.abort(); clearTimeout(expiry); adapter.reset(); sync.current = null;
       // React Strict Mode immediately installs another owned adapter; a real
       // unmount closes the cache once that synchronous replay is complete.
       queueMicrotask(() => { if (sync.current === null) cache.close(); });
@@ -183,8 +238,12 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   function workspaceIdForReplyTarget(target: InboxReplyTarget): WorkspaceId {
     return JSON.stringify([identity.orgId, target.kind, target.id]) as WorkspaceId;
   }
+  const displayRows = snapshot.rows.map(row => {
+    const marker = row.target.kind === "conversation" ? dripMarkers.get(row.target.conversationId) : undefined;
+    return marker && marker.dripName ? { ...row, drip: { state: marker.dripReplied ? "replied" as const : "in_drip" as const, name: marker.dripName } } : row;
+  });
   return <QueryClientProvider client={cache.client}>
-    <InboxWorkspace scopeLabel={labels[filter.view]} rows={snapshot.rows} invalidatedIds={invalidatedIds} selectedIds={selected} openId={opened?.id ?? null}
+    <InboxWorkspace scopeLabel={labels[filter.view]} rows={displayRows} invalidatedIds={invalidatedIds} selectedIds={selected} openId={opened?.id ?? null}
       onSelectionChange={select} onOpen={id => void open(id)} onCloseDetail={() => { sequence.current++; activeOpen.current = null; setOpened(null); }}
       onBack={() => { window.location.href = "/inbox/overview"; }} onReviewSelection={() => setReview(true)}
       replyUiEnabled={repliesEnabled} onBulkReply={() => setBulkReplyOpen(true)}

@@ -39,6 +39,8 @@ export interface WorkspaceSyncOptions {
   onInvalidated?: (ids: readonly WorkspaceId[]) => void;
   /** Synchronously clear detail/query caches and selection on an auth boundary. */
   onAccessBoundary: () => void;
+  /** Successful upstream probes are a freshness boundary for live marker reads. */
+  onProbe?: () => void;
 }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export function summaryRow(r: WorkspaceSummary): WorkspaceRow {
@@ -157,6 +159,7 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
         }
         if (removed.length && authorizedNow()) options.onInvalidated?.([...new Set(removed)]);
       }
+      if (authorizedNow()) options.onProbe?.();
       return response;
     };
     const collection = createCollection(electricCollectionOptions<WorkspaceSummary>({

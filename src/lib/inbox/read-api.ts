@@ -2,12 +2,14 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/supabase/types";
 import { retryReceiptTransaction } from "@/lib/messaging/receipt-persistence";
+import type { InboxDripContext } from "./drip-context";
 
 type ReadDatabase = Omit<Database, "public"> & { public: Omit<Database["public"], "Functions"> & { Functions: Database["public"]["Functions"] & {
   inbox_unknown_history_page: { Args: { org_id: string; sender_group_id: string; before_cursor?: string }; Returns: Json };
   inbox_history_page: { Args: { org_id: string; conversation_id: string; before_cursor?: string }; Returns: Json };
   inbox_read_detail: { Args: { org_id: string; conversation_id: string }; Returns: Json };
   inbox_acknowledge_read: { Args: { boundary_id: string; batch_number: number }; Returns: Json };
+  inbox_drip_label_inputs_v1: { Args: { org_id: string; conversation_id: string; message_ids: string[] }; Returns: Json };
 } } };
 export type InboxReadClient = Pick<SupabaseClient<ReadDatabase>, "rpc">;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -28,9 +30,34 @@ function revision(value: unknown): string {
 function timestamp(value: unknown): string { requireValue(typeof value === "string" && Number.isFinite(Date.parse(value))); return value; }
 function nullableTimestamp(value: unknown): string | null { return value === null ? null : timestamp(value); }
 function historyStatus(value: unknown): string { requireValue(typeof value === "string" && value.length > 0); return value; }
+function text(value: unknown): string { requireValue(typeof value === "string" && value.length > 0); return value; }
 function delivery(value: unknown): "sending" | "sent" | "delivered" | "failed" | "not_confirmed" {
   requireValue(typeof value === "string" && ["sending", "sent", "delivered", "failed", "not_confirmed"].includes(value));
   return value as "sending" | "sent" | "delivered" | "failed" | "not_confirmed";
+}
+function dripContext(value: unknown): InboxDripContext["drip"] {
+  if (value === undefined || value === null) return null;
+  const row = record(value);
+  requireValue(typeof row.enrollmentId === "string" && UUID.test(row.enrollmentId));
+  requireValue(typeof row.sequenceId === "string" && UUID.test(row.sequenceId));
+  requireValue(typeof row.name === "string" && row.name.length > 0);
+  requireValue(Number.isSafeInteger(row.step) && (row.step as number) >= 0);
+  requireValue(Number.isSafeInteger(row.total) && (row.total as number) >= 0);
+  requireValue(typeof row.replied === "boolean");
+  requireValue(row.status === undefined || row.status === "active" || row.status === "paused" || row.status === "completed");
+  requireValue(row.timeZone === undefined || typeof row.timeZone === "string");
+  requireValue(row.stoppedAt === null || row.stoppedAt === undefined || typeof row.stoppedAt === "string");
+  return {
+    enrollmentId: row.enrollmentId as string,
+    sequenceId: row.sequenceId as string,
+    name: row.name as string,
+    step: row.step as number,
+    total: row.total as number,
+    replied: row.replied as boolean,
+    ...(row.status === undefined ? {} : { status: row.status as "active" | "paused" | "completed" }),
+    ...(row.timeZone === undefined ? {} : { timeZone: row.timeZone as string }),
+    stoppedAt: row.stoppedAt === undefined ? null : row.stoppedAt as string | null,
+  };
 }
 function fail(error: { code?: string; message?: string } | null): void {
   if (!error) return;
@@ -42,7 +69,8 @@ function fail(error: { code?: string; message?: string } | null): void {
   // conflated with them — matches the same 401/403 split in http-error.ts:11-12 once
   // INBOX_ACCESS_BASELINE_MISSING (a provisioning/backfill gap for an authorized user,
   // not a denial) is excluded and left to fall through to 503 below, same as list/counts.
-  if (error.code === "42501" && ["INBOX_ORG_DENIED", "INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING"].includes(message ?? "")) throw new InboxReadError(403);
+  if (error.code === "42501" && ["INBOX_ORG_DENIED", "INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING", "INBOX_ACCESS_CHANGED"].includes(message ?? "")) throw new InboxReadError(403);
+  if (error.code === "22023" && message === "INBOX_INVALID_LABEL_INPUTS") throw new InboxReadError(400);
   if (error.code === "42501" && ["INBOX_READ_NOT_FOUND", "INBOX_ACCESS_DENIED"].includes(message ?? "")) throw new InboxReadError(404);
   if (error.code === "55000" && message === "INBOX_READ_EXPIRED") throw new InboxReadError(410);
   if (error.code === "55000" && ["INBOX_READ_BATCH_CONFLICT", "INBOX_READ_COVERAGE_CHANGED"].includes(message ?? "")) throw new InboxReadError(409);
@@ -88,8 +116,26 @@ export function createInboxReadRepository(client: InboxReadClient) {
           direction: message.direction, readAtRaw: nullableTimestamp(message.read_at_raw), inboundRevision: revision(message.inbound_revision),
           status: historyStatus(message.status), delivery: delivery(message.delivery) };
       });
+      const { data: labelsData, error: labelsError } = await client.rpc("inbox_drip_label_inputs_v1", {
+        org_id: orgId, conversation_id: conversationId, message_ids: history.map(message => message.id),
+      }).abortSignal(signal);
+      signal.throwIfAborted(); fail(labelsError);
+      const labelsRow = record(labelsData), labels = new Map<string, { dripLabel: string | null; dripReplyLabel: string | null }>();
+      requireValue(labelsRow.org_id === orgId && labelsRow.conversation_id === conversationId && Array.isArray(labelsRow.messages) && labelsRow.messages.length <= history.length + 1);
+      for (const value of labelsRow.messages) {
+        const label = record(value), messageId = id(label.id);
+        if (label.is_page !== true) continue;
+        const dripLabel = label.drip_label === undefined || label.drip_label === null ? null : text(label.drip_label);
+        const dripReplyLabel = label.drip_reply_label === undefined || label.drip_reply_label === null ? null : text(label.drip_reply_label);
+        labels.set(messageId, { dripLabel, dripReplyLabel });
+      }
+      const labeledHistory = history.map(message => {
+        const label = labels.get(message.id);
+        return { ...message, ...(label?.dripLabel ? { dripLabel: label.dripLabel } : {}), ...(label?.dripReplyLabel ? { dripReplyLabel: label.dripReplyLabel } : {}) };
+      });
       return { requesterId: id(row.requester_id), orgId, conversationId, headRevision: revision(row.head_revision),
-        readBoundary: id(row.read_boundary), boundaryExpiresAt: timestamp(row.boundary_expires_at), captureGeneration: id(row.capture_generation), history, nextCursor: row.next_cursor === null ? null : id(row.next_cursor) };
+        readBoundary: id(row.read_boundary), boundaryExpiresAt: timestamp(row.boundary_expires_at), captureGeneration: id(row.capture_generation), history: labeledHistory,
+        ...(row.drip === undefined ? {} : { drip: dripContext(row.drip) }), nextCursor: row.next_cursor === null ? null : id(row.next_cursor) };
     },
     async acknowledge(boundaryId: string, batch: number, signal: AbortSignal) {
       requireValue(UUID.test(boundaryId) && Number.isSafeInteger(batch) && batch >= 0 && batch <= 2147483647, 400);

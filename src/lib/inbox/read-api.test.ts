@@ -7,7 +7,8 @@ const conversation = "22222222-2222-2222-2222-222222222222";
 const boundary = "33333333-3333-3333-3333-333333333333";
 const signal = () => new AbortController().signal;
 function client(responses: unknown[]) {
-  const rpc = vi.fn(() => ({ abortSignal: vi.fn(async () => {
+  const rpc = vi.fn((name: string, args: Record<string, unknown>) => ({ abortSignal: vi.fn(async () => {
+    if (name === "inbox_drip_label_inputs_v1") return { data: { org_id: args.org_id, conversation_id: args.conversation_id, messages: (args.message_ids as string[]).map(id => ({ id, is_page: true, drip_label: null, drip_reply_label: null })) }, error: null };
     const response = responses.shift();
     if (response instanceof Error) throw response;
     return response;
@@ -35,7 +36,7 @@ describe("canonical Inbox read RPC repository", () => {
     const result = await repository.detail(org, conversation, signal());
     expect(result.history[0].createdAtRaw).toBe(snapshot.history[0].created_at_raw);
     expect(result.headRevision).toBe("9007199254740993");
-    expect(rpc).toHaveBeenCalledOnce();
+    expect(rpc).toHaveBeenCalledTimes(2);
     expect(rpc).toHaveBeenCalledWith("inbox_history_page", { org_id: org, conversation_id: conversation });
   });
   it("sends only an opaque cursor and validates the next cursor", async () => {

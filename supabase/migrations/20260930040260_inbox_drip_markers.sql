@@ -159,9 +159,9 @@ CREATE OR REPLACE FUNCTION inbox_bridge.matching(o uuid,u uuid,f jsonb)
 RETURNS TABLE(target_kind text,target_id uuid,latest_at timestamptz)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path='' AS $$
  WITH p AS (SELECT f->>'view' AS view, (f->>'hide_noise')::boolean AS hide_noise,f->>'search' AS q),
- candidates AS MATERIALIZED (
-  SELECT r.target_kind,r.target_id,r.summary s,CASE WHEN r.target_kind='unknown_sender' THEN (r.summary->>'latest_at')::timestamptz ELSE (r.summary->>'last_message_at')::timestamptz END latest_at
-  FROM inbox_maintained.rows r WHERE r.org_id=o AND (r.summary->>'exists')::boolean
+ candidates AS (
+ SELECT r.target_kind,r.target_id,r.summary s,CASE WHEN r.target_kind='unknown_sender' THEN (r.summary->>'latest_at')::timestamptz ELSE (r.summary->>'last_message_at')::timestamptz END latest_at
+ FROM inbox_maintained.rows r WHERE r.org_id=o AND (r.summary->>'exists')::boolean
  ), flagged AS (
   SELECT c.*,flags.in_drip,flags.drip_replied
   FROM candidates c
@@ -169,6 +169,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path='' AS $$
  )
  SELECT c.target_kind,c.target_id,c.latest_at FROM flagged c CROSS JOIN p
  WHERE CASE WHEN c.target_kind='unknown_sender' THEN
+  -- Existing unknown loader does not consume known-conversation search input.
   CASE p.view WHEN 'active' THEN coalesce((c.s->>'visible_unknown')::boolean,false) WHEN 'unknown' THEN coalesce((c.s->>'visible_unknown')::boolean,false) WHEN 'dismissed' THEN coalesce((c.s->>'visible_dismissed')::boolean,false) ELSE false END
  ELSE
   CASE p.view WHEN 'unknown' THEN false WHEN 'dismissed' THEN false
@@ -189,49 +190,41 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path='' AS $$
  END;
 $$;
 
-CREATE OR REPLACE FUNCTION inbox_bridge.counts_typed(o uuid,u uuid,f jsonb) RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path='' AS $$
- WITH scoped AS (
-  SELECT r.*,r.target_kind='known_conversation' AS known,r.has_recent AND (NOT (f->>'hide_noise')::boolean OR NOT r.is_noise) AS visible,
-    coalesce(flags.in_drip,false) AS in_drip,coalesce(flags.drip_replied,false) AS drip_replied
-  FROM inbox_bridge.filter_rows r
-  LEFT JOIN inbox_maintained.rows maintained ON maintained.org_id=o AND maintained.target_kind=r.target_kind AND maintained.target_id=r.target_id
-  LEFT JOIN LATERAL inbox_bridge.drip_flags(o,(maintained.summary->>'property_id')::uuid) flags ON r.target_kind='known_conversation'
-  WHERE r.org_id=o
-  AND (f->>'search' IS NULL OR r.target_kind='unknown_sender'
-  OR EXISTS(SELECT 1 FROM public.contacts ct WHERE ct.org_id=o AND ct.id=r.contact_id AND
-   (ct.search_text ILIKE '%'||replace(replace(replace(lower(f->>'search'),E'\\',E'\\\\'),'%',E'\\%'),'_',E'\\_')||'%' ESCAPE E'\\'
-   OR (length(regexp_replace(f->>'search','[^0-9]','','g'))>=3 AND ct.phone_digits ILIKE '%'||regexp_replace(f->>'search','[^0-9]','','g')||'%')))
-  OR EXISTS(SELECT 1 FROM public.messages m WHERE m.org_id=o AND m.conversation_id=r.target_id AND m.channel='sms' AND m.fts @@ public.search_prefix_tsquery(f->>'search')))
- ) SELECT jsonb_build_object(
-  'all',count(*) FILTER(WHERE known AND visible),
-  'mine',count(*) FILTER(WHERE known AND visible AND assignable AND assigned_user_id=u),
-  'unassigned',count(*) FILTER(WHERE known AND visible AND assignable AND assigned_user_id IS NULL),
-  'unread',count(*) FILTER(WHERE known AND visible AND unread),
-  'escalated',count(*) FILTER(WHERE known AND visible AND escalated),
-  'dispo',count(*) FILTER(WHERE known AND review),
-  'needs_outcome',count(*) FILTER(WHERE known AND visible AND needs_outcome),
-  'in_drip',count(*) FILTER(WHERE known AND visible AND in_drip),
-  'drip_replied',count(*) FILTER(WHERE known AND visible AND drip_replied),
-  'unknown',count(*) FILTER(WHERE NOT known AND unknown_active),
-  'dismissed',count(*) FILTER(WHERE NOT known AND unknown_dismissed)) FROM scoped;
-$$;
-
 CREATE FUNCTION public.inbox_drip_counts_v1(org_id uuid,filter jsonb) RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=''
 SET lock_timeout='3s' SET statement_timeout='15s' AS $$
-DECLARE a jsonb; after_access jsonb; f jsonb; typed jsonb;
+DECLARE a jsonb; after_access jsonb; f jsonb; result jsonb;
 BEGIN
  a:=inbox_bridge.authorize_serving($1);f:=inbox_bridge.normalize_filter($2);
- SELECT inbox_bridge.counts_typed($1,(a->>'user_id')::uuid,f) INTO typed;
+ WITH scoped AS (
+  SELECT r.target_kind='known_conversation' AS known,
+   r.has_recent,
+   r.is_noise,
+   coalesce(flags.in_drip,false) AS in_drip,
+   coalesce(flags.drip_replied,false) AS drip_replied
+  FROM inbox_bridge.filter_rows r
+  LEFT JOIN inbox_maintained.rows maintained
+    ON maintained.org_id=$1
+   AND maintained.target_kind=r.target_kind
+   AND maintained.target_id=r.target_id
+  LEFT JOIN LATERAL inbox_bridge.drip_flags($1,(maintained.summary->>'property_id')::uuid) flags
+    ON r.target_kind='known_conversation'
+  WHERE r.org_id=$1
+    AND (f->>'search' IS NULL OR r.target_kind='unknown_sender'
+      OR EXISTS(SELECT 1 FROM public.contacts ct WHERE ct.org_id=$1 AND ct.id=r.contact_id AND
+        (ct.search_text ILIKE '%'||replace(replace(replace(lower(f->>'search'),E'\\',E'\\\\'),'%',E'\\%'),'_',E'\\_')||'%' ESCAPE E'\\'
+         OR (length(regexp_replace(f->>'search','[^0-9]','','g'))>=3 AND ct.phone_digits ILIKE '%'||regexp_replace(f->>'search','[^0-9]','','g')||'%')))
+      OR EXISTS(SELECT 1 FROM public.messages m WHERE m.org_id=$1 AND m.conversation_id=r.target_id AND m.channel='sms' AND m.fts @@ public.search_prefix_tsquery(f->>'search')))
+ )
+ SELECT jsonb_build_object(
+   'in_drip',count(*) FILTER (WHERE known AND has_recent AND (NOT (f->>'hide_noise')::boolean OR NOT is_noise) AND in_drip),
+   'drip_replied',count(*) FILTER (WHERE known AND has_recent AND (NOT (f->>'hide_noise')::boolean OR NOT is_noise) AND drip_replied)
+ ) INTO result FROM scoped;
  after_access:=inbox_bridge.authorize_serving($1);
  IF (after_access->>'user_id',after_access->>'session_id',after_access->>'org_id',after_access->>'access_epoch') IS DISTINCT FROM
     (a->>'user_id',a->>'session_id',a->>'org_id',a->>'access_epoch') THEN
    RAISE EXCEPTION 'INBOX_ACCESS_CHANGED' USING ERRCODE='42501';
  END IF;
- RETURN jsonb_build_object(
-   'org_id',$1,
-   'counts',jsonb_build_object('in_drip',typed->'in_drip','drip_replied',typed->'drip_replied'),
-   'as_of',statement_timestamp(),'access_epoch',a->>'access_epoch'
- );
+ RETURN jsonb_build_object('org_id',$1,'counts',result,'as_of',statement_timestamp(),'access_epoch',a->>'access_epoch');
 END $$;
 
 REVOKE ALL ON FUNCTION public.inbox_drip_counts_v1(uuid,jsonb) FROM PUBLIC,anon,service_role;
@@ -311,12 +304,12 @@ BEGIN
   'status',CASE WHEN c.target_id IS NULL THEN 'unavailable' WHEN m.target_id IS NULL THEN 'outside_filter' ELSE 'matching' END,
   'name',CASE WHEN c.target_id IS NULL THEN NULL ELSE left(coalesce(nullif(c.s->>'contact_name',''),nullif(c.s->>'thread_customer_phone',''),nullif(c.s->>'raw_sender_key',''),'Conversation'),2000) END)
   ORDER BY t.ordinal),'[]'::jsonb) INTO result
- FROM requested t LEFT JOIN flagged c ON c.target_kind=t.target_kind AND c.target_id=t.id
+ FROM requested t LEFT JOIN candidates c ON c.target_kind=t.target_kind AND c.target_id=t.id
  LEFT JOIN matching m ON m.target_kind=t.target_kind AND m.target_id=t.id;
  after_access:=inbox_bridge.authorize_serving(o);
  IF (after_access->>'user_id',after_access->>'session_id',after_access->>'access_epoch') IS DISTINCT FROM
   (a->>'user_id',a->>'session_id',a->>'access_epoch') THEN
-  RAISE EXCEPTION 'INBOX_ACCESS_CHANGED' USING ERRCODE='42501';
+  RAISE EXCEPTION 'INBOX_ORG_DENIED' USING ERRCODE='42501';
  END IF;
  RETURN jsonb_build_object('org_id',o,'requester_id',a->>'user_id','session_id',a->>'session_id',
   'access_epoch',a->>'access_epoch','items',result);
@@ -328,6 +321,7 @@ SET lock_timeout='3s' SET statement_timeout='10s' AS $$
 DECLARE a jsonb; after_access jsonb; result jsonb;
 BEGIN
  a:=public.inbox_authorize_sync($1);
+ -- Label inputs intentionally accept at most 50 message ids, matching the canonical history page.
  IF $1 IS NULL OR $2 IS NULL OR $3 IS NULL OR cardinality($3)>50 OR
     EXISTS(SELECT 1 FROM unnest($3) id WHERE id IS NULL) THEN
    RAISE EXCEPTION 'INBOX_INVALID_LABEL_INPUTS' USING ERRCODE='22023';
@@ -386,8 +380,10 @@ BEGIN
    'messages',coalesce((SELECT jsonb_agg(jsonb_build_object(
      'id',id,'created_at_raw',created_at::text,'body',body,'direction',direction,'status',status,
      'is_page',is_page,
-     'drip_label',CASE WHEN is_page AND drip_name IS NOT NULL THEN 'Drip · '||drip_name||' · text '||drip_step||' of '||drip_steps_total END,
-     'drip_reply_label',CASE WHEN is_page AND direction='inbound' AND previous_drip_step IS NOT NULL THEN 'Reply to drip text '||previous_drip_step END
+     'drip_name',CASE WHEN is_page THEN drip_name END,
+     'drip_step',CASE WHEN is_page THEN drip_step END,
+     'drip_steps_total',CASE WHEN is_page THEN drip_steps_total END,
+     'previous_drip_step',CASE WHEN is_page THEN previous_drip_step END
    ) ORDER BY created_at,id) FROM labeled),'[]'::jsonb)
  ) INTO result;
  after_access:=public.inbox_authorize_sync($1);

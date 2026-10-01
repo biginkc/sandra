@@ -9,6 +9,7 @@ export interface WorkspaceRow {
   target: WorkspaceTarget; name: string; context: string; preview: string;
   timeLabel: string; outcomeLabel: string; assignedLabel: string;
   unread?: boolean; pendingLabel?: string; error?: string;
+  drip?: { state: "in_drip" | "replied"; name: string };
 }
 export interface WorkspaceAction {
   id: string; label: string; description?: string; prominent?: boolean;
@@ -156,13 +157,13 @@ export function InboxWorkspace(props: InboxWorkspaceProps) {
             {replyLayout ? <>
               <input type="checkbox" checked={selected} aria-label={`Select ${row.name}`} onChange={()=>select(toggleSelection(selectedIds,id))}/>
               <div className={styles.compactContent}>
-                <div className={styles.compactTop}><div className={styles.compactName}><strong>{row.name}</strong>{opened&&<span className={styles.openBadge}>Open</span>}{row.unread&&<span className={styles.unread}>Unread</span>}</div><span className={styles.compactTime}>{row.timeLabel}</span></div>
+                <div className={styles.compactTop}><div className={styles.compactName}><strong>{row.name}</strong>{opened&&<span className={styles.openBadge}>Open</span>}{row.unread&&<span className={styles.unread}>Unread</span>}{row.drip&&<span className={styles.drip} role="img" aria-label={row.drip.state === "replied" ? "Replied to drip" : "In a drip"} title={`${row.drip.state === "replied" ? "Replied to drip" : "In a drip"} · ${row.drip.name}`}>◈</span>}</div><span className={styles.compactTime}>{row.timeLabel}</span></div>
                 <div className={styles.compactBottom}><span className={styles.compactProperty}>{row.context}</span><span className={styles.compactPreview}>{row.preview}{row.pendingLabel&&<small role="status">{row.pendingLabel}</small>}{row.error&&<small className={styles.error}>{row.error}</small>}</span><span className={styles.outcome}>{row.outcomeLabel}</span>{row.assignedLabel.trim() && row.assignedLabel.trim() !== "—" && <span className={styles.assignee}>{row.assignedLabel}</span>}</div>
               </div>
               <button ref={(node)=>{if(node)openButtons.current.set(id,node);else openButtons.current.delete(id);}} type="button" onClick={()=>props.onOpen(id)} aria-label={`Open ${row.name}`}>Open ›</button>
             </> : <>
               <input type="checkbox" checked={selected} aria-label={`Select ${row.name}`} onChange={()=>select(toggleSelection(selectedIds,id))}/>
-              <div className={styles.person}><strong>{row.name}</strong>{opened&&<span className={styles.openBadge}>Open</span>}{row.unread&&<span className={styles.unread}>Unread</span>}<small>{row.context}</small></div>
+              <div className={styles.person}><strong>{row.name}</strong>{opened&&<span className={styles.openBadge}>Open</span>}{row.unread&&<span className={styles.unread}>Unread</span>}{row.drip&&<span className={styles.drip} role="img" aria-label={row.drip.state === "replied" ? "Replied to drip" : "In a drip"} title={`${row.drip.state === "replied" ? "Replied to drip" : "In a drip"} · ${row.drip.name}`}>◈</span>}<small>{row.context}</small></div>
               <div className={styles.preview}>{row.preview}{row.pendingLabel&&<small role="status">{row.pendingLabel}</small>}{row.error&&<small className={styles.error}>{row.error}</small>}</div>
               <span className={styles.outcome}>{row.outcomeLabel}</span><span className={styles.assignee}>{row.assignedLabel}</span><span className={styles.time}>{row.timeLabel}</span>
               <button ref={(node)=>{if(node)openButtons.current.set(id,node);else openButtons.current.delete(id);}} type="button" onClick={()=>props.onOpen(id)} aria-label={`Open ${row.name}`}>Open ›</button>

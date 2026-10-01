@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
 import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { createInboxReadRepository, InboxReadError, type InboxReadClient } from "@/lib/inbox/read-api";
+import { loadConversationDripContext } from "@/lib/inbox/drip-context";
 const headers = { "cache-control": "private, no-store", vary: "Cookie, Authorization" };
 export async function GET(request: Request, { params }: { params: Promise<{ conversationId: string }> }) {
   if (process.env.INBOX_WORKSPACE_SERVER_ENABLED !== "1") return Response.json({ error: "Not found" }, { status: 404, headers });
@@ -14,8 +15,10 @@ export async function GET(request: Request, { params }: { params: Promise<{ conv
     const { conversationId } = await params;
     const client = await createClient();
     if (!canAccessMessagesAndLeadsBoard(await getCallerMembershipsOrThrow())) throw new InboxReadError(404);
-    const data = await createInboxReadRepository(client as unknown as InboxReadClient).detail(query.get("orgId")!, conversationId, AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]), query.get("before") ?? undefined);
-    return Response.json(data, { headers });
+    const orgId = query.get("orgId")!;
+    const data = await createInboxReadRepository(client as unknown as InboxReadClient).detail(orgId, conversationId, AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]), query.get("before") ?? undefined);
+    const dripContext = await loadConversationDripContext(client, orgId, conversationId);
+    return Response.json({ ...data, drip: dripContext.drip }, { headers });
   } catch (error) {
     return Response.json({ error: "Inbox detail unavailable" }, { status: error instanceof InboxReadError ? error.status : 503, headers });
   }

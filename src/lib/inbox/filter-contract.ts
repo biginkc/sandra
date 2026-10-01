@@ -1,4 +1,4 @@
-export const inboxViews = ["active", "all", "mine", "unassigned", "unread", "escalated", "dispo", "needs_outcome", "unknown", "dismissed"] as const;
+export const inboxViews = ["active", "all", "mine", "unassigned", "unread", "escalated", "dispo", "needs_outcome", "in_drip", "drip_replied", "unknown", "dismissed"] as const;
 export type InboxFilter = { view: typeof inboxViews[number]; hide_noise?: boolean; search?: string };
 /** SQL owns normalization and matching semantics, including short search and unknown groups. */
 export function parseInboxFilter(value: unknown): InboxFilter | null {
@@ -10,5 +10,5 @@ export function parseInboxFilter(value: unknown): InboxFilter | null {
   if (Object.hasOwn(filter, "search") && typeof filter.search !== "string") return null;
   return { view: filter.view as InboxFilter["view"], ...(typeof filter.hide_noise === "boolean" ? { hide_noise: filter.hide_noise } : {}), ...(typeof filter.search === "string" ? { search: filter.search } : {}) };
 }
-export const inboxCountNames = ["all", "mine", "unassigned", "unread", "escalated", "dispo", "needs_outcome", "unknown", "dismissed"] as const;
+export const inboxCountNames = ["all", "mine", "unassigned", "unread", "escalated", "dispo", "needs_outcome", "in_drip", "drip_replied", "unknown", "dismissed"] as const;
 export type InboxCounts = { counts: Record<typeof inboxCountNames[number], number>; asOf: string; accessEpoch: string };

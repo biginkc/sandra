@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { InboxWorkspaceClient } from "./workspace-client";
 import { workspaceId } from "./selection";
 import type { WorkspaceRow } from "./inbox-workspace";
-const state = vi.hoisted(() => ({ callbacks: null as null | { onChange: (value: unknown) => void; onAccessBoundary: () => void; onInvalidated: (ids: readonly string[]) => void }, replacements: [] as unknown[], deny: false, itemUnavailable: false, detailUnavailable: false }));
+const state = vi.hoisted(() => ({ callbacks: null as null | { onChange: (value: unknown) => void; onProbe?: () => void; onAccessBoundary: () => void; onInvalidated: (ids: readonly string[]) => void }, replacements: [] as unknown[], deny: false, itemUnavailable: false, detailUnavailable: false }));
 vi.mock("@/lib/inbox/workspace-sync", () => ({ createWorkspaceSync: (callbacks: typeof state.callbacks) => {
   state.callbacks = callbacks;
   return { replace: (value: unknown) => { state.replacements.push(value); }, reset: () => callbacks?.onChange({ state: "resync_required", rows: [] }), revoke: () => callbacks?.onChange({ state: "permission_lost", rows: [] }) };
@@ -36,6 +36,7 @@ beforeEach(() => {
     }
     if (url.endsWith("/replies/accept")) return Response.json({ operationId: "00000000-0000-4000-8000-000000000013" });
     if (url.includes("/replies/")) return Response.json({ operationId: "00000000-0000-4000-8000-000000000013", preparationId: "00000000-0000-4000-8000-000000000012", dispatchComplete: true, items: [], receipts: [] });
+    if (url.includes("/drip-markers")) return Response.json({ orgId, asOf: new Date().toISOString(), rows: [{ conversationId, propertyId: null, inDrip: true, dripReplied: false, dripName: "Fixture Drip" }] });
     if (url.includes("/counts")) return Response.json({ accessEpoch: "1", asOf: new Date().toISOString(), counts: { all: 1000, unread: 10 } });
     if (url.includes("read-acknowledgments")) return state.itemUnavailable ? Response.json({}, { status: 404 }) : Response.json({ boundaryId: "boundary", batch: 0, changed: 1, completed: true });
     if (state.deny) return Response.json({}, { status: 403 });
@@ -65,6 +66,10 @@ it("does not show the legacy connected-activity placeholder when replies are ena
   await waitFor(() => expect(state.replacements).toHaveLength(1));
   act(() => state.callbacks!.onChange({ state: "live", rows: [row] }));
   expect(screen.queryByText(/Replies .*being connected/)).not.toBeInTheDocument();
+});
+it("decorates resident conversations from a fenced marker snapshot", async () => {
+  await loaded();
+  await waitFor(() => expect(screen.getByRole("img", { name: "In a drip" })).toHaveAttribute("title", "In a drip · Fixture Drip"));
 });
 it("keeps selected identities across a view change and permits removing hidden selections", async () => {
   await loaded();

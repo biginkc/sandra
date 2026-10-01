@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   create: vi.fn(),
   memberships: vi.fn(),
   detail: vi.fn(),
+  dripContext: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.create }));
@@ -18,6 +19,7 @@ vi.mock("@/lib/inbox/read-api", () => ({
   },
   createInboxReadRepository: () => ({ detail: mocks.detail }),
 }));
+vi.mock("@/lib/inbox/drip-context", () => ({ loadConversationDripContext: mocks.dripContext }));
 
 import { GET } from "./route";
 
@@ -40,6 +42,7 @@ beforeEach(() => {
     },
   ]);
   mocks.detail.mockResolvedValue({ conversationId, history: [] });
+  mocks.dripContext.mockResolvedValue({ drip: null });
 });
 
 afterEach(() => {
@@ -48,12 +51,14 @@ afterEach(() => {
 
 describe("workspace inbox conversation detail", () => {
   it("reads detail for an allowed member", async () => {
+    mocks.dripContext.mockResolvedValue({ drip: { enrollmentId: orgId, sequenceId: orgId, name: "Fixture Drip", step: 1, total: 3, replied: false, status: "active", timeZone: "America/Chicago", stoppedAt: null } });
     const response = await GET(request, {
       params: Promise.resolve({ conversationId }),
     });
 
     expect(response.status).toBe(200);
     expect(mocks.detail).toHaveBeenCalled();
+    expect((await response.json()).drip.name).toBe("Fixture Drip");
   });
 
   it("denies an active Acquisitions member before reading detail", async () => {

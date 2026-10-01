@@ -8,9 +8,9 @@ const summary = { org_id: org, target_kind: "known_conversation" as const, targe
 const cleaners: (()=>void)[] = [];
 afterEach(()=> { cleaners.splice(0).forEach(fn=>fn()); vi.useRealTimers(); });
 function setup(fetcher: typeof fetch) {
-  const boundary = vi.fn(); const change = vi.fn(); const invalidated = vi.fn();
-  const sync = createWorkspaceSync({origin:"https://sandra.example",fetch:fetcher,onAccessBoundary:boundary,onChange:change,onInvalidated:invalidated});
-  cleaners.push(sync.close); return {sync,boundary,change,invalidated};
+  const boundary = vi.fn(); const change = vi.fn(); const invalidated = vi.fn(); const probe = vi.fn();
+  const sync = createWorkspaceSync({origin:"https://sandra.example",fetch:fetcher,onAccessBoundary:boundary,onChange:change,onInvalidated:invalidated,onProbe:probe});
+  cleaners.push(sync.close); return {sync,boundary,change,invalidated,probe};
 }
 const tick = () => new Promise(resolve=>setTimeout(resolve,20));
 describe("bounded workspace synchronization lifecycle",()=> {
@@ -31,12 +31,13 @@ describe("bounded workspace synchronization lifecycle",()=> {
       const response = () => new Response(JSON.stringify([...rows.slice(partition*100, (partition+1)*100).map(value => ({ key: value.target_id, headers: { operation: "insert" }, value })), { headers: { control: "up-to-date", global_last_seen_lsn: "0" } }]), { headers: { "content-type": "application/json", "electric-handle": `partition-${partition}`, "electric-offset": "0_0", "electric-schema": JSON.stringify({ unread: { type: "bool" } }), "electric-cursor": "1" } });
       return partition === 4 ? new Promise<Response>(resolve => { finishLast = () => resolve(response()); }) : Promise.resolve(response());
     });
-    const { sync } = setup(fetcher);
+    const { sync, probe } = setup(fetcher);
     sync.replace({ ...scope, scopeId: "99999999-9999-4999-8999-999999999999", orderedIds: rows.map(row => workspaceId({ kind: "conversation", orgId: org, conversationId: row.target_id })) });
     await vi.waitFor(() => expect(sync.getSnapshot().rows).toHaveLength(400));
     expect(sync.getSnapshot().state).toBe("loading"); expect(calls.size).toBe(5);
     finishLast!(); await vi.waitFor(() => expect(sync.getSnapshot().state).toBe("live"));
     expect(sync.getSnapshot().rows).toHaveLength(500);
+    expect(probe).toHaveBeenCalled();
     sync.revoke(); expect(sync.getSnapshot()).toEqual({ state: "permission_lost", rows: [] });
     expect(signals.every(signal => signal.aborted)).toBe(true);
   });
