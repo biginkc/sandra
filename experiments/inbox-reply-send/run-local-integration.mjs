@@ -251,6 +251,12 @@ function testCommand(test) {
       "T23 uses the real sendSmsFromLead path for pending and accepted default-sender stages",
     ];
   }
+  if (test === "T23-quiet") {
+    return [
+      "src/app/(dashboard)/leads/actions.integration.test.ts",
+      "pins now inside quiet hours and blocks the reply before provider dispatch",
+    ];
+  }
   throw new Error(`unknown local integration test ${test}`);
 }
 
@@ -272,6 +278,7 @@ const requested = process.argv.slice(2).flatMap((arg, index, args) =>
   arg === "--test" ? [args[index + 1]] : [],
 ).filter(Boolean);
 const tests = requested.length > 0 ? requested : ["T18", "T23"];
+const replyPersistT23Now = process.env.REPLY_PERSIST_T23_NOW ?? "2026-06-15T17:00:00Z";
 const mutationIndex = process.argv.indexOf("--mutated");
 const mutation = mutationIndex >= 0 ? process.argv[mutationIndex + 1] : null;
 await seedLocalOrganizations();
@@ -307,6 +314,8 @@ try {
     TEST_SUPABASE_ANON_KEY: jwt,
     TEST_SUPABASE_SERVICE_ROLE_KEY: jwt,
     TEST_SUPABASE_DB_URL: directDbUrl(),
+    E2E_QUIET_HOURS_NOW: replyPersistT23Now,
+    ...(tests.includes("T23") ? { REPLY_PERSIST_T23_FIXTURE_OPEN: "1" } : {}),
   };
   for (const test of tests) await runTest(test, env);
 } finally {

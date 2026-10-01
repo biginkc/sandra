@@ -35,8 +35,12 @@ WORKER_TRANSPORT = ROOT / "experiments/inbox-reply-send-worker/vendor/test-trans
 LOCAL_DB_RETRY = ROOT / "experiments/inbox-reply-send-worker/restate-retry-local-db.py"
 PROVIDER_FIX = ROOT / "experiments/inbox-reply-send/provider-fix-proof.py"
 PROVIDER_FIX_MINIMAL = ROOT / "experiments/inbox-reply-send/provider-fix-minimal.py"
-LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r11.log")
+LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r12.log")
 EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-evidence.md")
+CLOCK_PROOF_POINTS = (
+    ("previously-failed", "23:00:00", "2026-06-15T04:00:00Z"),
+    ("previously-passed", "12:00:00", "2026-06-15T17:00:00Z"),
+)
 
 
 def execute(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -87,7 +91,11 @@ def run_sql_cases(handle, n: int) -> None:
 
 def run_local_integration(handle, n: int) -> None:
     command = ["node", str(LOCAL_INTEGRATION), "--test", f"T{n}"]
-    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    env = {
+        **os.environ,
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "REPLY_PERSIST_T23_NOW": os.environ.get("REPLY_PERSIST_T23_NOW", "2026-06-15T17:00:00Z"),
+    }
     record(handle, f"T{n} integration baseline", execute(command, env))
     if n == 18:
         original = T18_INTEGRATION.read_bytes()
@@ -329,6 +337,41 @@ def run_restate_local_db(handle) -> None:
             record(handle, f"{name} local-db mutation", execute([sys.executable, str(LOCAL_DB_RETRY), name], {**env, "RESTATE_LOCAL_DB_FIXTURE_VARIANT": "T-R12b-drop-post-marker"}))
 
 
+def run_clock_independence_proof(handle) -> None:
+    """Re-run every wall-clock-affected baseline at two fixture times."""
+    for label, local_time, t23_now in CLOCK_PROOF_POINTS:
+        env = {
+            **os.environ,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PROJECTION_VERBOSE_FAILURES": "1",
+            "REPLY_PERSIST_FIXTURE_LOCAL_TIME": local_time,
+            "REPLY_PERSIST_T23_NOW": t23_now,
+        }
+        for n in (21, 24, 27):
+            record(
+                handle,
+                f"CLOCK PROOF point={label} effective_local={local_time} T{n} baseline",
+                execute([sys.executable, str(PROOF), f"T{n}"], env),
+            )
+        record(
+            handle,
+            f"CLOCK PROOF point={label} effective_local={local_time} T23 integration baseline",
+            execute(["node", str(LOCAL_INTEGRATION), "--test", "T23"], env),
+        )
+        if label == "previously-failed":
+            record(
+                handle,
+                "QUIET-HOURS RULE TEST T23 integration baseline",
+                execute(["node", str(LOCAL_INTEGRATION), "--test", "T23-quiet"], env),
+            )
+        for name in ("T-R12", "T-R12b"):
+            record(
+                handle,
+                f"CLOCK PROOF point={label} effective_local={local_time} {name} baseline",
+                execute([sys.executable, str(LOCAL_DB_RETRY), name], env),
+            )
+
+
 REAL_NOT_RUN = {
     "T-R2": "Restate engine requires Docker; Docker is forbidden by Round 4",
     "T-R3": "Restate engine requires Docker; Docker is forbidden by Round 4",
@@ -425,9 +468,9 @@ def failure_excerpt(body: str) -> str:
 def derive_evidence(raw: str) -> str:
     sections = captured_sections(raw)
     rows: list[str] = [
-        "# Reply-persistence v11 mutation evidence (generated)",
+        "# Reply-persistence v12 mutation evidence (generated)",
         "",
-        "This file is generated from `replypersist-mutation-run-r11.log`. EXECUTED requires a passing baseline and a natural non-zero mutation result; baseline failures are never counted as executed. A passing mutation is SURVIVED and fails the runner. Any BASELINE FAIL also fails the runner.",
+        "This file is generated from `replypersist-mutation-run-r12.log`. EXECUTED requires a passing baseline and a natural non-zero mutation result; baseline failures are never counted as executed. A passing mutation is SURVIVED and fails the runner. Any BASELINE FAIL also fails the runner.",
         "",
         "| Test | Status | Baseline result | Mechanism | Natural mutated failure |",
         "|---|---|---|---|---|",
@@ -598,13 +641,14 @@ def main() -> int:
         return 2
     LOG.parent.mkdir(parents=True, exist_ok=True)
     with LOG.open("w", encoding="utf-8") as handle:
-        handle.write("reply-persistence v11 round-11 mutation run; machine-produced raw child output\n")
+        handle.write("reply-persistence v12 round-12 mutation run; machine-produced raw child output\n")
         for n in range(1, 28):
             run_sql_cases(handle, n)
         run_t17_application(handle)
         run_worker_locals(handle)
         run_provider_fixes(handle)
         run_restate_local_db(handle)
+        run_clock_independence_proof(handle)
     raw = LOG.read_text(encoding="utf-8")
     EVIDENCE.write_text(derive_evidence(raw), encoding="utf-8")
     unexpected = unexpected_not_run_headers(raw)

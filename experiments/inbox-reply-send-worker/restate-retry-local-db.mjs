@@ -20,6 +20,18 @@ function secondIds(n) {
   return { ...x, i: y.i, a: y.a, conv: y.conv, token: y.token };
 }
 
+function fixtureLocalTime() {
+  const value = process.env.REPLY_PERSIST_FIXTURE_LOCAL_TIME ?? '12:00:00';
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(value)) {
+    throw Error(`invalid REPLY_PERSIST_FIXTURE_LOCAL_TIME: ${value}`);
+  }
+  return value;
+}
+
+function openQuietHoursFixture() {
+  return `CREATE OR REPLACE FUNCTION inbox_reply_preparation.quiet_hours(state text,at_time timestamptz) RETURNS jsonb LANGUAGE sql IMMUTABLE SET search_path='' AS $qh$ SELECT jsonb_build_object('ok',true,'zone','America/Chicago','local_time','${fixtureLocalTime()}') $qh$;`;
+}
+
 function itemValue(n, offset = 0) {
   const x = ids(n + offset);
   const owner = ids(n);
@@ -109,6 +121,7 @@ END $$;
 CREATE TRIGGER zzz_restate_r12b_marker_sleep BEFORE UPDATE OF state ON inbox_reply_send.attempts FOR EACH ROW EXECUTE FUNCTION inbox_reply_test.restate_r12b_marker_sleep();` : '';
   const itemCount = secondAttempt ? Math.max(items, 2) : items;
   const itemList = Array.from({ length: itemCount }, (_, offset) => itemValue(n, offset)).join(',');
+  const eligibilityFixture = n === 12 || n === 120 ? openQuietHoursFixture() : '';
   const secondOwner = secondAttempt ? `
 INSERT INTO auth.users(id,email) VALUES('${y.c}','restate-local-db-${n}-second-owner@example.invalid');
 INSERT INTO memberships(user_id,org_id,role,access_status) VALUES('${y.c}','${x.o}','owner','active');` : '';
@@ -134,6 +147,7 @@ INSERT INTO inbox_reply_send.operations(org_id,id,requester_id,preparation_id,id
 INSERT INTO provider_sender_numbers(id,org_id,provider,phone_e164,provider_number_id,status,messaging_status) VALUES('${x.token}','${x.o}','sendillo','+12025550001','restate-local-db-${n}','active','active');
 INSERT INTO inbox_inbound_heads(org_id,conversation_id,revision) VALUES('${x.o}','${x.conv}',1);
 CREATE SCHEMA IF NOT EXISTS inbox_reply_test;
+${eligibilityFixture}
 UPDATE inbox_reply_review.admission SET enabled=true;
 ${trigger}
 ${sleepTrigger}

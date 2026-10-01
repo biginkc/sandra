@@ -124,13 +124,37 @@ def item_values(n: int, items: int) -> str:
     return "jsonb_build_array(" + ",".join(values) + ")"
 
 
-def fixture(n: int, body: str, *, items: int = 1, seed_attempt: bool = True) -> str:
+def fixture_local_time() -> str:
+    value = os.environ.get("REPLY_PERSIST_FIXTURE_LOCAL_TIME", "12:00:00")
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d", value):
+        raise ValueError(f"invalid REPLY_PERSIST_FIXTURE_LOCAL_TIME: {value!r}")
+    return value
+
+
+def open_quiet_hours_fixture() -> str:
+    # These proofs exercise persistence and projection, not quiet-hours
+    # policy. Pin their eligibility input in the fixture while retaining the
+    # effective local time in the clock-independence evidence. The production
+    # quiet-hours rule has its own blocked-path integration assertion.
+    return f"""CREATE OR REPLACE FUNCTION inbox_reply_preparation.quiet_hours(state text,at_time timestamptz) RETURNS jsonb LANGUAGE sql IMMUTABLE SET search_path='' AS $qh$ SELECT jsonb_build_object('ok',true,'zone','America/Chicago','local_time','{fixture_local_time()}') $qh$;"""
+
+
+def fixture(
+    n: int,
+    body: str,
+    *,
+    items: int = 1,
+    seed_attempt: bool = True,
+    open_quiet_hours: bool = False,
+) -> str:
     x = ids(n)
     operation = f"INSERT INTO inbox_reply_send.operations(org_id,id,requester_id,preparation_id,idempotency_key) VALUES('{x['o']}','{x['op']}','{x['c']}','{x['prep']}',gen_random_uuid());" if seed_attempt else ""
     attempt = f"INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state) VALUES('{x['o']}','{x['a']}','{x['op']}','{x['prep']}','{x['i']}',1,'{x['c']}','+12025550001','+12025550101',inbox_reply_send.body_hash('hello-{n}','+12025550001','+12025550101'),'approved');" if seed_attempt else ""
+    eligibility = open_quiet_hours and open_quiet_hours_fixture() or ""
     return f"""
 BEGIN;
 SET LOCAL client_min_messages='warning';
+{eligibility}
 INSERT INTO organizations(id,name) VALUES('{x['o']}','projection-test-{n}');
 INSERT INTO contacts(id,org_id,first_name,phone_1,phone_1_type) VALUES('{x['c']}','{x['o']}','Projection','+12025550101','mobile');
 INSERT INTO consent_events(org_id,contact_id,channel,event_type,source) VALUES('{x['o']}','{x['c']}','sms','opt_in_marketing_written','projection-test');
@@ -200,8 +224,15 @@ VALUES('{inbound}','{x['o']}','{x['c']}','{x['p']}','{x['conv']}','sms','inbound
 """
 
 
-def assert_case(n: int, body: str, mutation: str = "", *, items: int = 1) -> tuple[str, str]:
-    return fixture(n, body, items=items), mutation
+def assert_case(
+    n: int,
+    body: str,
+    mutation: str = "",
+    *,
+    items: int = 1,
+    open_quiet_hours: bool = False,
+) -> tuple[str, str]:
+    return fixture(n, body, items=items, open_quiet_hours=open_quiet_hours), mutation
 
 
 def test_sql(n: int) -> tuple[str, str]:
@@ -389,7 +420,7 @@ DROP TRIGGER zzz_t21_disable_sender_after_marker ON inbox_reply_send.attempts;
 DO $$ DECLARE s text; e text; BEGIN SELECT state,evidence INTO s,e FROM inbox_reply_send.attempts WHERE id='{y['a']}'; IF s<>'skipped_ineligible' OR e<>'sender_unavailable' OR EXISTS(SELECT 1 FROM public.messages WHERE idempotency_key='{y['a']}') THEN RAISE EXCEPTION 'T21 IR001 recheck mismatch: %/%',s,e; END IF; END $$;"""
         mutation = mutate_chain("inbox_reply_send.project_message_trigger", [("IF NEW.state='dispatch_started' THEN", "IF NEW.state IN ('dispatch_started','claimed') THEN")])
         mutation += f""" DROP TRIGGER inbox_reply_message_projection ON inbox_reply_send.attempts; CREATE TRIGGER inbox_reply_message_projection AFTER UPDATE OF state ON inbox_reply_send.attempts FOR EACH ROW WHEN (NEW.state IS DISTINCT FROM OLD.state AND NEW.state IN ('dispatch_started','claimed','provider_accepted','uncertain','confirmed_not_submitted','rejected_unsent','delivered','delivery_failed')) EXECUTE FUNCTION inbox_reply_send.project_message_trigger();"""
-        return assert_case(n, body, mutation, items=2)
+        return assert_case(n, body, mutation, items=2, open_quiet_hours=True)
     if n == 22:
         older = ids(n + 1)
         body = f"""
@@ -472,7 +503,7 @@ def drip_case(n: int) -> tuple[str, str]:
     x = ids(n)
     if n == 24:
         body = drip_fixture(n) + workspace_send(n, 'ext-24') + drip_flag_assert(n,x,'false','T24 pending send did not clear drip flag') + """SELECT public.inbox_reply_reconcile_callback('sendillo','ext-24','delivery_failed',jsonb_build_object('kind','failed')); DO $$ DECLARE flag boolean; BEGIN SELECT (public.sms_inbox_thread_page_snapshot(now()-interval '90 days','all',null,null,false,500,0,null)->'rows'->0->>'drip_replied')::boolean INTO flag; IF flag IS DISTINCT FROM true THEN RAISE EXCEPTION 'T24 failure did not restore drip flag'; END IF; END $$;"""
-        return fixture(n, body, seed_attempt=False), install_mutated_function("inbox_reply_send.project_message", "WHEN 'delivery_failed' THEN 'failed'", "WHEN 'delivery_failed' THEN 'sent'")
+        return fixture(n, body, seed_attempt=False, open_quiet_hours=True), install_mutated_function("inbox_reply_send.project_message", "WHEN 'delivery_failed' THEN 'failed'", "WHEN 'delivery_failed' THEN 'sent'")
     if n == 25:
         body = drip_fixture(n) + common_project_state(n,'uncertain') + f"""SELECT set_config('request.jwt.claim.role','authenticated',true); SELECT set_config('request.jwt.claim.sub','{x['c']}',true); SELECT public.inbox_reply_reconcile_callback('sendillo','unknown-25','delivered',jsonb_build_object('kind','delivered')); DO $$ DECLARE s text; flag boolean; BEGIN SELECT state INTO s FROM inbox_reply_send.attempts WHERE id='{x['a']}'; SELECT (public.sms_inbox_thread_page_snapshot(now()-interval '90 days','all',null,null,false,500,0,null)->'rows'->0->>'drip_replied')::boolean INTO flag; IF s<>'uncertain' OR flag IS DISTINCT FROM true THEN RAISE EXCEPTION 'T25 uncertain callback promoted'; END IF; END $$;"""
         return assert_case(n, body, install_mutated_function("inbox_reply_send.project_message", "WHEN 'uncertain' THEN 'failed'", "WHEN 'uncertain' THEN 'pending'"))
@@ -480,7 +511,7 @@ def drip_case(n: int) -> tuple[str, str]:
         body = drip_fixture(n) + common_project_state(n,'uncertain') + f"""SELECT set_config('request.jwt.claim.role','authenticated',true); SELECT set_config('request.jwt.claim.sub','{x['c']}',true); SELECT inbox_reply_send.worker_persist_result('{x['o']}','{x['a']}','{x['token']}',jsonb_build_object('kind','accepted','externalId','ext-26','status','sent')); SELECT public.inbox_reply_reconcile_callback('sendillo','ext-26','delivered',jsonb_build_object('kind','delivered')); DO $$ DECLARE s text; flag boolean; BEGIN SELECT state INTO s FROM inbox_reply_send.attempts WHERE id='{x['a']}'; SELECT (public.sms_inbox_thread_page_snapshot(now()-interval '90 days','all',null,null,false,500,0,null)->'rows'->0->>'drip_replied')::boolean INTO flag; IF s<>'delivered' OR flag IS DISTINCT FROM false THEN RAISE EXCEPTION 'T26 accepted callback mismatch'; END IF; END $$;"""
         return assert_case(n, body, install_mutated_function("inbox_reply_send.worker_persist_result", "ELSIF row.state='uncertain' AND kind='not_attempted' THEN", "ELSIF row.state='uncertain' AND kind IN ('not_attempted','accepted') THEN"))
     body = drip_fixture(n) + workspace_send(n, 'ext-27') + f"""DO $$ DECLARE flag boolean; c integer; BEGIN SELECT (public.sms_inbox_thread_page_snapshot(now()-interval '90 days','all',null,null,false,500,0,null)->'rows'->0->>'drip_replied')::boolean INTO flag; SELECT count(*) INTO c FROM public.messages WHERE org_id='{x['o']}' AND metadata->'inboxReply'->>'attemptId' IS NOT NULL; IF c<>1 OR flag IS NOT FALSE THEN RAISE EXCEPTION 'T27 workspace-send gate mismatch'; END IF; END $$;"""
-    return fixture(n, body, seed_attempt=False), "DROP TRIGGER inbox_reply_message_projection ON inbox_reply_send.attempts;"
+    return fixture(n, body, seed_attempt=False, open_quiet_hours=True), "DROP TRIGGER inbox_reply_message_projection ON inbox_reply_send.attempts;"
 
 
 def concurrency_setup(n: int) -> str:

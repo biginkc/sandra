@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 
@@ -8,6 +8,26 @@ const authMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/auth/memberships", () => authMocks);
+
+vi.mock("@/lib/messaging/quiet-hours", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/messaging/quiet-hours")>();
+  return {
+    ...actual,
+    checkQuietHours: (
+      state: string | null | undefined,
+      now?: Date,
+    ): ReturnType<typeof actual.checkQuietHours> => {
+      if (process.env.REPLY_PERSIST_T23_FIXTURE_OPEN === "1") {
+        return {
+          ok: true,
+          localTime: (process.env.REPLY_PERSIST_FIXTURE_LOCAL_TIME ?? "12:00:00").slice(0, 5),
+          zone: "America/Chicago",
+        };
+      }
+      return actual.checkQuietHours(state, now);
+    },
+  };
+});
 
 import { createTestClient } from "@tests/integration/client";
 import { resetTenantTables } from "@tests/integration/reset";
@@ -27,6 +47,8 @@ import {
   updatePropertyStatus,
 } from "@/app/(dashboard)/leads/actions";
 import { getMockMessageLog, resetMockState } from "@/lib/messaging/providers/mock";
+
+afterEach(() => vi.unstubAllEnvs());
 
 type CaptureSnapshot = {
   dirty: Array<Record<string, unknown>>;
@@ -109,6 +131,10 @@ describe("updatePropertyStatus (integration)", () => {
   }
 
   it("T23 uses the real sendSmsFromLead path for pending and accepted default-sender stages", async () => {
+    vi.stubEnv(
+      "E2E_QUIET_HOURS_NOW",
+      process.env.E2E_QUIET_HOURS_NOW ?? "2026-06-15T17:00:00Z",
+    );
     const { error: accessSeedError } = await testClient.from("memberships").upsert({
       user_id: "00000000-0000-0000-0000-000000000001",
       org_id: "00000000-0000-0000-0000-000000000bbb",
@@ -375,6 +401,32 @@ describe("updatePropertyStatus (integration)", () => {
       `);
       await db.end();
     }
+  });
+
+  it("pins now inside quiet hours and blocks the reply before provider dispatch", async () => {
+    vi.stubEnv("E2E_QUIET_HOURS_NOW", "2026-06-15T04:00:00Z");
+    const { propertyId } = await seedSmsLead("+18165550124");
+
+    const result = await sendSmsFromLead(
+      propertyId,
+      "Quiet-hours fixture reply",
+      null,
+      false,
+      null,
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("quiet-hours fixture send unexpectedly failed");
+    expect(result.data.outcome).toMatchObject({
+      status: "blocked_quiet_hours",
+      check: {
+        ok: false,
+        reason: "outside_window",
+        localTime: "23:00",
+        zone: "America/Chicago",
+      },
+    });
+    expect(getMockMessageLog()).toHaveLength(0);
   });
 
   it("updates status for a valid transition", async () => {
