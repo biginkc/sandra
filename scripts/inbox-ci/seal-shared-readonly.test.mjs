@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { catalogFingerprint, reconstructCatalog, sealSharedReadonly } from './seal-shared-readonly.mjs';
+import { J5A_CATALOG_DRIFT_SUMMARY, catalogFingerprint, reconstructCatalog, sealSharedReadonly } from './seal-shared-readonly.mjs';
 import { CATALOG_SECTIONS } from '../outbox-db-contract/catalog-sections.mjs';
 import { NOT_VERIFIED, platformDigest, platformFingerprint } from '../outbox-db-contract/platform.mjs';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -28,14 +28,21 @@ async function producerPlatform() {
     ? new Response('', { status: 200, headers: { 'x-postgrest-version': 'PostgREST/12.2.0' } })
     : new Response(JSON.stringify({ version: '2.151.0' }), { status: 200 }), { postgrestMajor: '12' });
 }
-async function fixture({ fixtureItems = [], replayItems = fixtureItems } = {}) {
+async function fixture({ fixtureItems = [], replayItems = fixtureItems, mutateFixture = null } = {}) {
   const repo = mkdtempSync(path.join(os.tmpdir(), 'shared-seal-'));
   git(repo, 'init', '-q'); git(repo, 'config', 'user.name', 'Test'); git(repo, 'config', 'user.email', 'test@example.invalid');
   for (const file of JSON.parse(readFileSync('scripts/inbox-ci/shared-readonly-operators.json')).operator_scripts) {
     mkdirSync(path.dirname(path.join(repo, file)), { recursive: true }); copyFileSync(file, path.join(repo, file));
   }
   mkdirSync(path.join(repo, 'experiments/inbox-production-install/drift'), { recursive: true });
-  for (const ref of ['ncsngxlcyxylaeskiteu', 'copflsklaefwzipsrjqz']) writeFileSync(path.join(repo, `experiments/inbox-production-install/drift/${ref}.items.json`), JSON.stringify({ fixture_version: 1, items: ref === 'ncsngxlcyxylaeskiteu' ? fixtureItems : [] }));
+  let testFixtureBytes;
+  for (const ref of ['ncsngxlcyxylaeskiteu', 'copflsklaefwzipsrjqz']) {
+    const bytes = Buffer.from(JSON.stringify({ fixture_version: 1, items: ref === 'ncsngxlcyxylaeskiteu' ? fixtureItems : [] }));
+    if (ref === 'ncsngxlcyxylaeskiteu') {
+      testFixtureBytes = bytes;
+      writeFileSync(path.join(repo, `experiments/inbox-production-install/drift/${ref}.items.json`), mutateFixture ? mutateFixture(bytes) : bytes);
+    } else writeFileSync(path.join(repo, `experiments/inbox-production-install/drift/${ref}.items.json`), bytes);
+  }
   git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'base');
   const sha = git(repo, 'rev-parse', 'HEAD');
   const root = `docs/performance/inbox-redesign/evidence/${sha}/pre-merge`;
@@ -43,10 +50,10 @@ async function fixture({ fixtureItems = [], replayItems = fixtureItems } = {}) {
   const sections = Object.fromEntries(CATALOG_SECTIONS.slice().sort().map(section => [section, digest(Buffer.from(stable(rawSections[section])))]));
   const catalog = { catalog_format_version: 2, sections: rawSections, section_sha256: sections, sha256: digest(Buffer.from(stable({catalog_format_version:2,section_sha256:sections}))) };
   const platform = await producerPlatform();
-  function input(id, kind, phase, artifact, data) {
+  function input(id, kind, phase, artifact, data, manifestExtra = {}) {
     const directory = `${root}/${id}`; const full = path.join(repo, directory); mkdirSync(full, { recursive: true });
     const bytes = Buffer.from(JSON.stringify(data)); writeFileSync(path.join(full, artifact), bytes);
-    writeFileSync(path.join(full, 'manifest.json'), JSON.stringify({ tested_sha: sha, tier: 'pre-merge', kind, phase, target: 'disposable', verdict: 'PASS', exit_status: 0, artifacts: { [artifact]: digest(bytes) } }));
+    writeFileSync(path.join(full, 'manifest.json'), JSON.stringify({ tested_sha: sha, tier: 'pre-merge', kind, phase, target: 'disposable', verdict: 'PASS', exit_status: 0, artifacts: { [artifact]: digest(bytes) }, ...manifestExtra }));
     git(repo, 'add', '.'); git(repo, 'commit', '-qm', id);
     return directory;
   }
@@ -54,7 +61,8 @@ async function fixture({ fixtureItems = [], replayItems = fixtureItems } = {}) {
   const platformRecord = input('platform', 'db-contract', 'pre', 'platform-config.json', platform);
   const driftPayload = { record_version: 1, target_ref: 'ncsngxlcyxylaeskiteu', candidate_sha: sha, baseline_digest: catalog.sha256, catalog_format_version: 2, items: replayItems };
   const drift = { ...driftPayload, sha256: digest(Buffer.from(stable(driftPayload))) };
-  const driftRecord = input('drift', 'drift-replay', 'n/a', 'drift-record-ncsngxlcyxylaeskiteu.json', drift);
+  const driftSummary = { j5a: J5A_CATALOG_DRIFT_SUMMARY, j5a_fixture_sha256: digest(testFixtureBytes), j5a_item_count: fixtureItems.length };
+  const driftRecord = input('drift', 'drift-replay', 'n/a', 'drift-record-ncsngxlcyxylaeskiteu.json', drift, { summary: driftSummary });
   const output = path.join(os.tmpdir(), `shared-output-${sha}.json`);
   const plans = Object.fromEntries(['privileged','member'].map(role => [role, Object.fromEntries(['first','keyset','null_tail'].map(shape => [shape,{sha256:'a'.repeat(64),messages_scan:'Seq Scan',total_cost:10}]))]));
   const source = { verdict: 'PASS', target: 'shared-readonly', phase: 'pre', summary: 'Auth health returned 200 with the publishable key; GoTrue major matched. Our publishable-key PostgREST request was rejected. PostgREST major was observed from its connection name and matched. On TEST the name carries no version, so this check is waived there in practice; Production is expected to be the same. Connection names are diagnostic labels, not attestations. Release may proceed with hosted PostgREST compatibility unverified. Hosted app/SSR/PostgREST behaviour is inferred from same-SHA disposable runs plus catalog and claim-plumbing equality, which cannot establish hosted runtime/configuration equality; a GoTrue major match does not prove identical hosted claim configuration.', plans, tls:{protocol:'TLSv1.3',cipher:'test',leaf_fingerprint:'AA:'.repeat(31)+'AA',pinned_ca_fingerprint:'80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA',root_in_peer_chain:false,upstream_hop_ssl:{ssl:false,version:null,cipher:null}}, catalog_indexes:{}, items: {}, platform_config: platform, comparisons: { catalog: { verdict: 'PASS', input_sha256: digest(Buffer.from(JSON.stringify(catalog))), observed_section_sha256: sections, observed_catalog_sha256: catalog.sha256, drift_record_sha256: drift.sha256 }, platform: { verdict: 'PASS', waived_fields: [], waiver_reasons: {}, input_sha256: digest(Buffer.from(JSON.stringify(platform))), observed_sha256: platform.sha256 } } };
@@ -138,6 +146,25 @@ test('sealer rejects a fixture/replay definition digest mismatch', async () => {
   const replayItem = { ...item, definition_sha256: '0'.repeat(64) };
   const f = await fixture({ fixtureItems: [item], replayItems: [replayItem] });
   assert.throws(() => sealSharedReadonly(f.args), /Drift fixture\/replay definition mismatch/);
+});
+test('sealer rejects a one-character TEST fixture mutation', async () => {
+  const f = await fixture({ mutateFixture: bytes => Buffer.from(bytes.toString('utf8').replace('"items":[', '"items":[ ')) });
+  assert.throws(() => sealSharedReadonly(f.args), /Drift replay summary metadata mismatch/);
+});
+test('sealer rejects mutated replay sentence, fixture hash, or item count', async () => {
+  for (const [label, mutate] of [
+    ['sentence', summary => { summary.j5a = `${summary.j5a.slice(0, -1)}!`; }],
+    ['fixture hash', summary => { summary.j5a_fixture_sha256 = '0'.repeat(64); }],
+    ['item count', summary => { summary.j5a_item_count += 1; }],
+  ]) {
+    const f = await fixture();
+    const manifestPath = path.join(f.repo, f.args.driftRecord, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath));
+    mutate(manifest.summary);
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    git(f.repo, 'add', '.'); git(f.repo, 'commit', '-qm', `mutate ${label}`);
+    assert.throws(() => sealSharedReadonly(f.args), /Drift replay summary metadata mismatch/);
+  }
 });
 test('seals only digest representation linked to committed inputs', async () => {
   const f = await fixture(); const dir = sealSharedReadonly(f.args);

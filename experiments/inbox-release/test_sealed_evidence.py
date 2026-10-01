@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -333,7 +334,9 @@ class SealedEvidenceTests(unittest.TestCase):
                 target = directory / filename
                 target.write_text(json.dumps(value) if not isinstance(value, str) else value)
                 manifest["artifacts"][filename] = hashlib.sha256(target.read_bytes()).hexdigest()
-            manifest["summary"] = {"replayed_items": {ref: len(record["items"]) for ref, record in records.items()}, "drift_record_sha256": {ref: record["sha256"] for ref, record in records.items()}, "definition_sha256": {ref: [item["definition_sha256"] for item in record["items"]] for ref, record in records.items()}, "j5a": evidence.J5A_CATALOG_DRIFT_SUMMARY}
+            fixture_path = self.repo / evidence.DRIFT_FIXTURE_ROOT / "ncsngxlcyxylaeskiteu.items.json"
+            fixture = json.loads(fixture_path.read_bytes())
+            manifest["summary"] = {"replayed_items": {ref: len(record["items"]) for ref, record in records.items()}, "drift_record_sha256": {ref: record["sha256"] for ref, record in records.items()}, "definition_sha256": {ref: [item["definition_sha256"] for item in record["items"]] for ref, record in records.items()}, "j5a": evidence.J5A_CATALOG_DRIFT_SUMMARY, "j5a_fixture_sha256": hashlib.sha256(fixture_path.read_bytes()).hexdigest(), "j5a_item_count": len(fixture["items"])}
         if kind == "shared-readonly":
             manifest.pop("runner_script_sha256")
             manifest.pop("fault_proxy_script_sha256")
@@ -549,7 +552,7 @@ class SealedEvidenceTests(unittest.TestCase):
         self.assert_fails("ambiguous")
 
 
-    def j5a_records(self, omit=None, bad=None):
+    def j5a_records(self, omit=None, bad=None, drift_mutation=None):
         for i, key in enumerate(J5A):
             if key == omit:
                 continue
@@ -563,8 +566,53 @@ class SealedEvidenceTests(unittest.TestCase):
                           if target == "disposable" else None)
             completed = f"2026-09-28T12:{i:02}:00Z"
             name = (f"shared-readonly-{phase}-20260928T12{i:02}00000Z" if kind == "shared-readonly" else str(1000 + i))
-            self.record(name, tier=tier, kind=kind, phase=phase, target=target,
-                        verdict="FAIL" if failed else "PASS", completed=completed, extra=provenance)
+            directory = self.record(name, tier=tier, kind=kind, phase=phase, target=target,
+                                    verdict="FAIL" if failed else "PASS", completed=completed, extra=provenance, commit=False)
+            if kind == "drift-replay" and drift_mutation is not None:
+                manifest_path = directory / "manifest.json"
+                manifest = json.loads(manifest_path.read_text())
+                drift_mutation(manifest["summary"])
+                manifest_path.write_text(json.dumps(manifest))
+            self.commit(name)
+
+    def test_c3_j5a_sentences_are_byte_identical(self):
+        source = Path(__file__).resolve().parents[2]
+        pattern = re.compile(rb'J5A_CATALOG_DRIFT_SUMMARY\s*=\s*"([^"]+)"')
+        sealed = pattern.search((source / "experiments/inbox-release/sealed_evidence.py").read_bytes())
+        replay = pattern.search((source / "scripts/inbox-ci/write-drift-replay-record.mjs").read_bytes())
+        self.assertIsNotNone(sealed)
+        self.assertIsNotNone(replay)
+        self.assertEqual(sealed.group(1), replay.group(1))
+        self.assertEqual(sealed.group(1).decode(), evidence.J5A_CATALOG_DRIFT_SUMMARY)
+
+    def test_c3_j5a_summary_binds_committed_test_fixture(self):
+        self.j5a_records()
+        manifest = json.loads((self.repo / ROOT / self.sha / "pre-merge" / "1002" / "manifest.json").read_text())
+        fixture_path = self.repo / evidence.DRIFT_FIXTURE_ROOT / "ncsngxlcyxylaeskiteu.items.json"
+        fixture = json.loads(fixture_path.read_bytes())
+        self.assertEqual(manifest["summary"]["j5a_fixture_sha256"], hashlib.sha256(fixture_path.read_bytes()).hexdigest())
+        self.assertEqual(manifest["summary"]["j5a_item_count"], len(fixture["items"]))
+        self.assertEqual(evaluate(self.repo, "j5a", self.sha)["status"], "PASS")
+
+    def test_c3_j5a_mutated_sentence_fails_naturally(self):
+        self.j5a_records(drift_mutation=lambda summary: summary.__setitem__("j5a", summary["j5a"][:-1] + "!"))
+        with self.assertRaisesRegex(EvidenceError, "drift replay J5a wording mismatch"):
+            evaluate(self.repo, "j5a", self.sha)
+
+    def test_c3_j5a_mutated_fixture_metadata_fails_naturally(self):
+        for field, mutate in (
+            ("j5a_fixture_sha256", lambda summary: summary.__setitem__("j5a_fixture_sha256", "0" * 64)),
+            ("j5a_item_count", lambda summary: summary.__setitem__("j5a_item_count", summary["j5a_item_count"] + 1)),
+        ):
+            with self.subTest(field=field):
+                case = SealedEvidenceTests(methodName="test_valid_sealed_record")
+                case.setUp()
+                try:
+                    case.j5a_records(drift_mutation=mutate)
+                    with case.assertRaisesRegex(EvidenceError, "drift replay J5a fixture metadata mismatch"):
+                        evaluate(case.repo, "j5a", case.sha)
+                finally:
+                    case.doCleanups()
 
     def test_j5a_required_key_missing_negative(self):
         self.j5a_records(omit=J5A[3])

@@ -17,6 +17,7 @@ const git = (repo, ...args) => execFileSync('git', args, { cwd: repo });
 const CATALOG_FORMAT_VERSION = 2;
 const DRIFT_APPROVALS = { idx_message_threads_ai_responder_status: 'e419f623f1922466db14dba7aa091cdd4720924e2b97901088af2dc5719b108a', idx_users_name: '4dbc01feffae5acf04236e5aa3611151cc43e1467f84588e05b025dd9fbc7402' };
 const OPERATOR_INDEX_NAMES = new Set(['inbox_parent_message_property','inbox_parent_message_contact','inbox_parent_review_property','inbox_backfill_messages','inbox_backfill_reviews','inbox_backfill_threads','inbox_backfill_thread_identity','inbox_unknown_history_page']);
+export const J5A_CATALOG_DRIFT_SUMMARY = "TEST matched the disposable baseline except the pre-existing items listed in the committed TEST drift fixture, none of which is in any migration. They are recorded and replayed, not explained; owners unknown. Production's drift is not yet observed.";
 const codepointCompare = (a, b) => { const left = Array.from(a, char => char.codePointAt(0)); const right = Array.from(b, char => char.codePointAt(0)); for (let i = 0; i < Math.min(left.length, right.length); i++) if (left[i] !== right[i]) return left[i] - right[i]; return left.length - right.length; };
 const stable = value => Array.isArray(value) ? `[${value.map(stable).join(',')}]` : value && typeof value === 'object' ? `{${Object.keys(value).sort(codepointCompare).map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}` : JSON.stringify(value);
 export const catalogFingerprint = sections => { const section_sha256 = Object.fromEntries(Object.entries(sections).sort(([a],[b]) => codepointCompare(a, b)).map(([name,value]) => [name,hash(Buffer.from(stable(value)))])); return { catalog_format_version: CATALOG_FORMAT_VERSION, sections, section_sha256, sha256: hash(Buffer.from(stable({catalog_format_version:CATALOG_FORMAT_VERSION,section_sha256}))) }; };
@@ -103,7 +104,7 @@ function record(repo, sha, directory, kind, phase, artifact, ref) {
   const bytes = git(repo, 'show', `${ref}:${directory}/${artifact}`);
   const digest = hash(bytes);
   if (manifest.artifacts?.[artifact] !== digest) throw new Error('Input artifact hash mismatch');
-  return { directory, artifact, sha256: digest, data: JSON.parse(bytes) };
+  return { directory, artifact, sha256: digest, data: JSON.parse(bytes), manifest };
 }
 function driftFixture(repo, sha, targetRef) {
   if (!['ncsngxlcyxylaeskiteu', 'copflsklaefwzipsrjqz'].includes(targetRef)) throw new Error(`Unknown drift target ref ${targetRef}`);
@@ -115,6 +116,15 @@ function driftFixture(repo, sha, targetRef) {
     if (!item || !hasExactKeys(item, ['object','attribute','name','canonical_definition','definition_sha256','classification','origin','approval_sha256']) || typeof item.canonical_definition !== 'string' || !item.canonical_definition || item.canonical_definition.endsWith('\n') || !HEX.test(item.definition_sha256) || hash(Buffer.from(item.canonical_definition, 'utf8')) !== item.definition_sha256) throw new Error(`Malformed drift fixture item for ${targetRef}`);
   }
   return fixture;
+}
+function validateReplaySummary(repo, sha, manifest) {
+  const fixtureBytes = git(repo, 'show', `${sha}:${DRIFT_FIXTURE_ROOT}/${REF}.items.json`);
+  let fixture;
+  try { fixture = JSON.parse(fixtureBytes.toString('utf8')); }
+  catch { throw new Error('Malformed committed TEST drift fixture'); }
+  if (!fixture || fixture.fixture_version !== 1 || !Array.isArray(fixture.items)) throw new Error('Malformed committed TEST drift fixture');
+  const summary = manifest.summary;
+  if (!summary || summary.j5a !== J5A_CATALOG_DRIFT_SUMMARY || summary.j5a_fixture_sha256 !== hash(fixtureBytes) || !Number.isInteger(summary.j5a_item_count) || summary.j5a_item_count !== fixture.items.length) throw new Error('Drift replay summary metadata mismatch');
 }
 const driftBindings = value => value.items.map(item => [item.object, item.attribute, item.name, item.definition_sha256].join('\0')).sort(codepointCompare);
 function rowtypeTablesAt(repo, sha) {
@@ -134,6 +144,7 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   const driftArtifact = `drift-record-${REF}.json`;
   const drift = driftRecord ? record(repo, inputSha, driftRecord, 'drift-replay', 'n/a', driftArtifact, inputRef) : null;
   if (!drift) throw new Error('Drift replay record required');
+  validateReplaySummary(repo, inputSha, drift.manifest);
   const source = JSON.parse(readFileSync(output));
   inspect(source);
   if (source.target !== 'shared-readonly' || source.phase !== phase || source.verdict !== 'PASS') throw new Error('Readonly output identity mismatch');

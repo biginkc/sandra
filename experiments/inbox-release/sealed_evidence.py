@@ -88,7 +88,7 @@ def derive_rowtype_tables(sources: list[str]) -> frozenset[str]:
 
 _migration_dir = Path(__file__).resolve().parents[2] / "supabase/migrations"
 ROWTYPE_TABLES = derive_rowtype_tables([p.read_text() for p in _migration_dir.glob("2026093004*.sql")])
-J5A_CATALOG_DRIFT_SUMMARY = "TEST matched the disposable baseline except eight pre-existing items not in any migration, listed here. They are recorded and replayed, not explained; owners unknown. Production's drift is not yet observed."
+J5A_CATALOG_DRIFT_SUMMARY = "TEST matched the disposable baseline except the pre-existing items listed in the committed TEST drift fixture, none of which is in any migration. They are recorded and replayed, not explained; owners unknown. Production's drift is not yet observed."
 
 
 class EvidenceError(RuntimeError):
@@ -254,6 +254,12 @@ def read_drift_fixture(repo: Path, commit: str, target_ref: str) -> dict:
                 or hashlib.sha256(item["canonical_definition"].encode("utf-8")).hexdigest() != item["definition_sha256"]):
             raise EvidenceError(f"malformed drift fixture item for {target_ref}")
     return fixture
+
+
+def drift_fixture_metadata(repo: Path, commit: str, target_ref: str, fixture: dict | None = None) -> tuple[str, int]:
+    raw = blob(repo, commit, drift_fixture_path(target_ref))
+    fixture = fixture or read_drift_fixture(repo, commit, target_ref)
+    return hashlib.sha256(raw).hexdigest(), len(fixture["items"])
 
 
 def validate_drift_lane(kind: str, artifacts: object) -> None:
@@ -684,6 +690,13 @@ def _check_drift_replay(repo: Path, run: dict, selected: dict) -> None:
     manifest = run["manifest"]
     if not isinstance(manifest.get("summary"), dict) or manifest["summary"].get("j5a") != J5A_CATALOG_DRIFT_SUMMARY:
         raise EvidenceError(f"drift replay J5a wording mismatch: {directory}")
+    test_fixture = read_drift_fixture(repo, run["commit"], PROJECT_REFS["shared-test"])
+    fixture_sha256, fixture_item_count = drift_fixture_metadata(repo, run["commit"], PROJECT_REFS["shared-test"], test_fixture)
+    summary = manifest["summary"]
+    if (summary.get("j5a_fixture_sha256") != fixture_sha256
+            or type(summary.get("j5a_item_count")) is not int
+            or summary["j5a_item_count"] != fixture_item_count):
+        raise EvidenceError(f"drift replay J5a fixture metadata mismatch: {directory}")
     refs = tuple(sorted(KNOWN_TARGET_REFS))
     expected_artifacts = {"catalog-pre.json", "catalog-post.json"}
     for target_ref in refs:
