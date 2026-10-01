@@ -91,6 +91,30 @@ describe('loadDialpadPanelBootstrap', () => {
     await expect(loadDialpadPanelBootstrap(fakeDb({ loadConnection: async () => connection }), actor)).resolves.toMatchObject({ recording: { ingestEndpoint: connection.recordingIngestEndpoint, timingEnabled: true } });
     vi.unstubAllEnvs();
   });
+
+  it('does not reuse a verified binding stored for another authenticated actor', async () => {
+    const jarrad = { orgId: ORG, userId: 'jarrad-user' };
+    const gretchen = { orgId: ORG, userId: 'gretchen-user' };
+    const loadLiveBinding = vi.fn(async (_orgId: string, userId: string) => userId === jarrad.userId
+      ? { id: BINDING, status: 'verified' as const, dialpadUserId: '5551234' }
+      : null);
+    const prepareIntent = vi.fn(async () => prepared());
+    const authorizeDispatch = vi.fn(async () => authorized());
+    const db = fakeDb({ loadLiveBinding, prepareIntent, authorizeDispatch });
+
+    await expect(loadDialpadPanelBootstrap(db, gretchen)).resolves.toMatchObject({
+      binding: { status: 'none' },
+    });
+    await expect(loadDialpadPanelBootstrap(db, jarrad)).resolves.toMatchObject({
+      binding: { status: 'verified', dialpadUserId: '5551234' },
+    });
+
+    const result = await startDialpadCall(db, gretchen, startInput);
+    expect(result).toMatchObject({ ok: false, code: 'not_bound' });
+    expect(prepareIntent).not.toHaveBeenCalled();
+    expect(authorizeDispatch).not.toHaveBeenCalled();
+    expect(loadLiveBinding).toHaveBeenCalledWith(ORG, gretchen.userId);
+  });
 });
 
 describe('verifyDialpadBinding (trusted path)', () => {
