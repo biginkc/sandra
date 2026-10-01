@@ -228,6 +228,7 @@ export async function telnyxListActiveCalls(
 ): Promise<{ calls: ActiveCall[]; complete: boolean }> {
   const calls: ActiveCall[] = [];
   let after: string | null = null;
+  const seen = new Set<string>();
   for (let page = 0; page < ACTIVE_CALLS_MAX_PAGES; page += 1) {
     const query = `page%5Blimit%5D=${ACTIVE_CALLS_PAGE}${after ? `&page%5Bafter%5D=${encodeURIComponent(after)}` : ""}`;
     const text = await request(settings, "GET", `/connections/${encodeURIComponent(settings.appId)}/active_calls?${query}`, undefined, "json", options);
@@ -239,7 +240,11 @@ export async function telnyxListActiveCalls(
       }
     }
     const next: unknown = parsed.meta?.cursors?.after;
-    if (typeof next !== "string" || !next || parsed.data.length === 0) return { calls, complete: true };
+    // Follow the cursor whatever the page length (an empty page can still have a next page); only an
+    // absent cursor ends the listing. A repeated cursor can never finish, so it is incomplete.
+    if (typeof next !== "string" || !next) return { calls, complete: true };
+    if (seen.has(next)) return { calls, complete: false };
+    seen.add(next);
     after = next;
   }
   return { calls, complete: false };

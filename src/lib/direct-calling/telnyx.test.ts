@@ -113,4 +113,20 @@ describe("telnyx client", () => {
     const endless = vi.fn(async () => new Response(JSON.stringify({ data: [{ call_control_id: "X", client_state: null }], meta: { cursors: { after: "more" } } }), { status: 200 }));
     expect((await telnyxListActiveCalls(settings, { fetchImpl: endless as never })).complete).toBe(false);
   });
+
+  it("follows a continuation cursor even from an empty page, and flags a repeated cursor as incomplete", async () => {
+    const pages = [
+      { data: [], meta: { cursors: { after: "c1" } } },
+      { data: [{ call_control_id: "L9", client_state: null }], meta: { cursors: {} } },
+    ];
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(pages.shift()), { status: 200 }));
+    const out = await telnyxListActiveCalls(settings, { fetchImpl: fetchImpl as never });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(out).toEqual({ calls: [{ callControlId: "L9", clientState: null }], complete: true });
+
+    const repeating = vi.fn(async () => new Response(JSON.stringify({ data: [], meta: { cursors: { after: "same" } } }), { status: 200 }));
+    const stuck = await telnyxListActiveCalls(settings, { fetchImpl: repeating as never });
+    expect(stuck.complete).toBe(false);
+    expect(repeating).toHaveBeenCalledTimes(2);
+  });
 });
