@@ -72,10 +72,11 @@ async function main(): Promise<void> {
     // Refuse before anything is served or dialed unless setup's read-back passed and still holds.
     await ensureReady();
     const sourceLegs: string[] = []; // owned transfer-source call(s); not probe legs
-    const legReconciler = makeLegReconciler(client, inv);
+    const legReconciler = makeLegReconciler(client, inv, log);
     const probeGate = new ProbeGate({
       budget, log,
       protectedLegs: () => sourceLegs,
+      ringTimeoutSecs: cfg.limits.ringTimeoutSecs,
       ...legReconciler,
       targets: () => [
         { label: "owned phone (PSTN)", target: cfg.testPhones[0] },

@@ -9,6 +9,7 @@ import type { Inventory } from "./inventory";
 import type { TelnyxClient } from "./telnyx-client";
 import type { StreamStats } from "./stream-server";
 import type { ProbeGate } from "./probe-gate";
+import { listActiveCalls } from "./leg-reconcile";
 
 export interface FlowCtx {
   client: TelnyxClient;
@@ -121,7 +122,7 @@ export async function f2(ctx: FlowCtx): Promise<void> {
       // The server (not the page) decides when the probe is over: wait for the gate to confirm no probe leg is alive.
       for (let w = 0; w < 60 && ctx.probeGate.status().busy && !ctx.probeGate.status().locked; w++) await new Promise((r) => setTimeout(r, 1000));
       await ctx.ensureReady();
-      const legs = ((await ctx.client.request("GET", `/connections/${conn}/active_calls`)).data as any[]) ?? [];
+      const legs = await listActiveCalls(ctx.client, conn);
       for (const l of legs) { ctx.inv.add("call_leg", l.call_control_id); ctx.inv.addCallRef(l.call_control_id); ctx.inv.addCallRef(l.call_leg_id); ctx.inv.addCallRef(l.call_session_id); }
       await endLegs(ctx, legs.map((l) => l.call_control_id).filter((id) => !ctx.sourceLegs.includes(id)));
       const events = ctx.log.all().slice(since);

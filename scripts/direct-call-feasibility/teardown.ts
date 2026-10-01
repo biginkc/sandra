@@ -5,6 +5,8 @@ import type { EventLog } from "./event-log";
 import type { Inventory } from "./inventory";
 import type { Budget } from "./budget";
 import type { TelnyxClient } from "./telnyx-client";
+import { listActiveCalls } from "./leg-reconcile";
+import { confirmLegEnded, isAlreadyEnded } from "./leg-confirm";
 import { SNAPSHOT_FILE, type Snapshot } from "./preflight";
 
 export interface TeardownDeps {
@@ -43,14 +45,14 @@ export async function runTeardown(d: TeardownDeps): Promise<TeardownReport> {
   const scopes = [inv.getRole("connectionId"), inv.getRole("appId")].filter((x): x is string => !!x);
   const found: { ccid: string; scope: string }[] = [];
   for (const scope of scopes) {
-    const r = await client.request("GET", `/connections/${scope}/active_calls?page[size]=250`);
-    for (const c of (r.data as any[]) ?? []) found.push({ ccid: c.call_control_id, scope });
+    for (const c of await listActiveCalls(client, scope)) found.push({ ccid: c.call_control_id, scope });
   }
   // Legs already inventoried (dialed by us) are also candidates.
   for (const id of inv.idsOf("call_leg")) if (!found.some((f) => f.ccid === id)) found.push({ ccid: id, scope: "" });
 
   // 3. Re-check each leg's connection/app ID equals an inventoried ID, then hang up.
   const toConfirm: string[] = [];
+  const endedByHangup = new Set<string>(); // hangup 422 + code 90018
   for (const f of found) {
     let ownerOk = f.scope !== "" && inv.has(f.scope);
     if (!inv.has(f.ccid, ["call_leg"])) {
@@ -69,26 +71,34 @@ export async function runTeardown(d: TeardownDeps): Promise<TeardownReport> {
       await client.request("POST", `/calls/${f.ccid}/actions/hangup`, {});
       report.hungUp.push(f.ccid);
     } catch (e) {
-      // 404/422 usually means already ended; confirmation below decides.
+      // Only 422 + code 90018 is confirmation; every other error keeps the obligation.
+      if (isAlreadyEnded(e)) { endedByHangup.add(f.ccid); report.hungUp.push(f.ccid); continue; }
       say(`   hangup for ${f.ccid} returned an error; will confirm state: ${(e as Error).message.slice(0, 120)}`);
     }
   }
 
-  // 4. Confirm terminal by provider evidence (hangup webhook or is_alive false).
+  // 4. Confirm terminal ONLY by hangup webhook, hangup 422/90018, or GET is_alive:false (see leg-confirm.ts).
+  // Anything else (404, other errors, 2xx hangup) keeps the obligation: retry with backoff for a bounded
+  // time, then stop with teardown.incomplete and leave every resource in place for a later teardown run.
   const attempts = d.confirmAttempts ?? 10;
+  const unconfirmed: string[] = [];
   for (const ccid of toConfirm) {
     let ended = false;
     for (let i = 0; i < attempts && !ended; i++) {
-      if (log.hasHangup(ccid)) { ended = true; break; }
-      try {
-        const st = (await client.request("GET", `/calls/${ccid}`)).data;
-        if (st?.is_alive === false) ended = true;
-      } catch (e: any) {
-        if (e?.status === 404) ended = true;
+      ended = await confirmLegEnded(client, log, ccid, endedByHangup);
+      if (ended) break;
+      if (i > 0) {
+        // still not confirmed: re-send hangup (a prior one may have been only acknowledged)
+        try { await client.request("POST", `/calls/${ccid}/actions/hangup`, {}); } catch (e) { if (isAlreadyEnded(e)) { ended = true; break; } }
       }
-      if (!ended) await sleep(1000);
+      await sleep(Math.min(1000 * 2 ** i, 30000));
     }
-    if (!ended) throw new TeardownError(`leg ${ccid} not confirmed ended; resources NOT deleted`);
+    if (!ended) unconfirmed.push(ccid);
+  }
+  if (unconfirmed.length) {
+    log.append({ source: "harness", type: "teardown.incomplete", data: { unconfirmedLegs: unconfirmed } });
+    say(`   teardown.incomplete: ${unconfirmed.join(", ")} not confirmed ended; resources left in place; re-run teardown later`);
+    throw new TeardownError(`leg(s) ${unconfirmed.join(", ")} not confirmed ended; resources NOT deleted`);
   }
   say("2-4. active legs listed, owner re-checked, hung up, confirmed terminal");
 

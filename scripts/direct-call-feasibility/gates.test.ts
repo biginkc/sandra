@@ -13,8 +13,12 @@ function gate(limits?: Partial<{ maxAttempts: number }>, extra: Partial<Construc
   const config = cfg(limits ? { DIRECT_CALL_MAX_ATTEMPTS: String(limits.maxAttempts) } : {});
   const budget = new Budget(config.limits);
   const log = new EventLog();
-  const g = new ProbeGate({ budget, log, targets: () => [{ label: "owned phone (PSTN)", target: "+15555550101" }], listAliveLegs: async () => [], sleep: async () => {}, ...extra });
-  return { g, budget, log };
+  const clock = { t: 1_000_000 };
+  const g = new ProbeGate({
+    budget, log, targets: () => [{ label: "owned phone (PSTN)", target: "+15555550101" }], listAliveLegs: async () => [],
+    now: () => clock.t, sleep: async (ms) => { clock.t += ms; }, ringTimeoutSecs: 30, confirmLegEnded: async () => true, ...extra,
+  });
+  return { g, budget, log, clock };
 }
 
 describe("probe gate", () => {
@@ -47,6 +51,7 @@ describe("probe gate", () => {
       const { g } = gate(undefined, {
         listAliveLegs: async () => [...alive],
         hangupLeg: async (id) => { hung.push(id); alive = alive.filter((x) => x !== id); },
+        confirmLegEnded: async (id) => hung.includes(id),
       });
       g.arm();
       const p = g.start("owned phone (PSTN)");
@@ -102,7 +107,48 @@ describe("probe gate", () => {
       expect(n).toBe(3);
     });
 
-    it("ignores finish for an unknown probe id and does not release", async () => {
+    describe("per-leg confirmation and unknown legs", () => {
+    it("a known leg whose end is not confirmed keeps the gate locked even with empty listings", async () => {
+      let n = 0;
+      const { g, log } = gate(undefined, { listAliveLegs: async () => (n++ === 0 ? ["probeleg"] : []), hangupLeg: async () => {}, confirmLegEnded: async () => false, confirmWaitMs: 4000 });
+      g.arm();
+      const p = g.start("owned phone (PSTN)");
+      expect((await g.finish(p.probeId)).released).toBe(false);
+      expect(g.status().locked).toBe(true);
+      expect(log.all().find((e) => e.type === "escape.probe.cleanup_uncertain")).toBeTruthy();
+    });
+
+    it("a leg learned only from a webhook must be confirmed ended", async () => {
+      const { g, log } = gate(undefined, { confirmLegEnded: async () => false, confirmWaitMs: 4000 });
+      g.arm();
+      const p = g.start("owned phone (PSTN)");
+      log.append({ source: "webhook", type: "call.initiated", callControlId: "ringing1" });
+      expect((await g.finish(p.probeId)).released).toBe(false);
+      expect(g.status().locked).toBe(true);
+    });
+
+    it("a never-learned leg: two empty listings before ring timeout + 15s do NOT release (UD2)", async () => {
+      const { g, clock } = gate(undefined, { confirmWaitMs: 4000 });
+      g.arm();
+      const p = g.start("owned phone (PSTN)");
+      const t0 = clock.t;
+      const r = await g.finish(p.probeId);
+      expect(r.released).toBe(true); // released only once the clock passed the gate...
+      expect(clock.t - t0).toBeGreaterThanOrEqual((30 + 15) * 1000); // ...never earlier
+    });
+
+    it("a never-learned leg with a wait too short for ring timeout + 15s stays locked", async () => {
+      const { g, clock } = gate(undefined, { ringTimeoutSecs: 600, confirmWaitMs: 0, now: undefined });
+      void clock;
+      g.arm();
+      const p = g.start("owned phone (PSTN)");
+      // real clock, no-op sleep: the 615s gate cannot have elapsed
+      expect((await g.finish(p.probeId)).released).toBe(false);
+      expect(g.status().locked).toBe(true);
+    });
+  });
+
+  it("ignores finish for an unknown probe id and does not release", async () => {
       const { g } = gate();
       g.arm();
       g.start("owned phone (PSTN)");

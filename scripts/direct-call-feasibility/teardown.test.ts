@@ -59,6 +59,37 @@ describe("teardown", () => {
     expect(t.calls.some((c) => c.startsWith("DELETE"))).toBe(false);
   });
 
+  it("a GET 404 never confirms a leg ended: nothing deleted, teardown.incomplete logged", async () => {
+    const t = setup((m, p) => {
+      if (p.startsWith("/connections/conn1/active_calls")) return { data: [{ call_control_id: "leg1" }] };
+      if (p === "/calls/leg1" && m === "GET") return jsonRes({ errors: [{ code: "10005" }] }, 404);
+    });
+    await expect(runTeardown({ client: t.client, inv: t.inv, cfg: t.config, log: t.log, say: () => {}, sleep: async () => {}, confirmAttempts: 3 })).rejects.toThrow(/NOT deleted/);
+    expect(t.calls.some((c) => c.startsWith("DELETE"))).toBe(false);
+    const ev = t.log.all().find((e) => e.type === "teardown.incomplete");
+    expect((ev?.data as any).unconfirmedLegs).toEqual(["leg1"]);
+  });
+
+  it("hangup 422 with code 90018 confirms the leg ended without any GET", async () => {
+    const t = setup((m, p) => {
+      if (p.startsWith("/connections/conn1/active_calls")) return { data: [{ call_control_id: "leg1" }] };
+      if (m === "POST" && p === "/calls/leg1/actions/hangup") return jsonRes({ errors: [{ code: "90018" }] }, 422);
+      if (p === "/calls/leg1" && m === "GET") return jsonRes({}, 404);
+    });
+    await runTeardown({ client: t.client, inv: t.inv, cfg: t.config, log: t.log, say: () => {}, sleep: async () => {}, confirmAttempts: 1 });
+    expect(t.calls).toContain("DELETE /call_control_applications/app1");
+  });
+
+  it("a different 422 on hangup does not confirm", async () => {
+    const t = setup((m, p) => {
+      if (p.startsWith("/connections/conn1/active_calls")) return { data: [{ call_control_id: "leg1" }] };
+      if (m === "POST") return jsonRes({ errors: [{ code: "90041" }] }, 422);
+      if (p === "/calls/leg1" && m === "GET") return jsonRes({}, 404);
+    });
+    await expect(runTeardown({ client: t.client, inv: t.inv, cfg: t.config, log: t.log, say: () => {}, sleep: async () => {}, confirmAttempts: 2 })).rejects.toThrow(/NOT deleted/);
+    expect(t.calls.some((c) => c.startsWith("DELETE"))).toBe(false);
+  });
+
   describe("recording deletion", () => {
     const base = (recs: any[]) => (m: string, p: string) => {
       if (p.includes("/active_calls")) return { data: [] };

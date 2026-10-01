@@ -5,16 +5,42 @@
 // inventoried test resource; anything unprovable is refused and never touched.
 import type { Inventory } from "./inventory";
 import type { TelnyxClient } from "./telnyx-client";
+import type { EventLog } from "./event-log";
+import { confirmLegEnded, isAlreadyEnded } from "./leg-confirm";
 
-export function makeLegReconciler(client: Pick<TelnyxClient, "request">, inv: Inventory) {
+const MAX_LISTING_PAGES = 100;
+
+/**
+ * Lists EVERY active call for a connection/app using cursor pagination (page[limit] <= 250,
+ * page[after]). If the listing cannot be exhausted (repeated cursor or page cap) it throws:
+ * an incomplete listing must never be read as "empty".
+ */
+export async function listActiveCalls(client: Pick<TelnyxClient, "request">, scope: string): Promise<any[]> {
+  const out: any[] = [];
+  const seen = new Set<string>();
+  let after: string | undefined;
+  for (let page = 0; page < MAX_LISTING_PAGES; page++) {
+    const q = `page[limit]=250${after ? `&page[after]=${encodeURIComponent(after)}` : ""}`;
+    const r: any = await client.request("GET", `/connections/${scope}/active_calls?${q}`);
+    out.push(...((r?.data as any[]) ?? []));
+    const next: string | undefined = r?.meta?.cursors?.after ?? undefined;
+    if (!next) return out;
+    if (seen.has(next)) throw new Error(`active_calls listing for ${scope} returned a repeating cursor; listing incomplete`);
+    seen.add(next);
+    after = next;
+  }
+  throw new Error(`active_calls listing for ${scope} exceeded ${MAX_LISTING_PAGES} pages; listing incomplete`);
+}
+
+export function makeLegReconciler(client: Pick<TelnyxClient, "request">, inv: Inventory, log?: Pick<EventLog, "hasHangup">) {
+  const endedByHangup = new Set<string>(); // hangup 422 + code 90018
   const owners = new Map<string, string | undefined>(); // ccid -> connection/app id seen in the listing
   const scopes = () => [inv.getRole("connectionId"), inv.getRole("appId")].filter((x): x is string => !!x);
 
   async function listAliveLegs(): Promise<string[]> {
     const ids: string[] = [];
     for (const scope of scopes()) {
-      const r = await client.request("GET", `/connections/${scope}/active_calls?page[size]=250`);
-      for (const c of (r.data as any[]) ?? []) {
+      for (const c of await listActiveCalls(client, scope)) {
         if (!c.call_control_id) continue;
         ids.push(c.call_control_id);
         owners.set(c.call_control_id, c.connection_id ?? c.application_id);
@@ -35,8 +61,15 @@ export function makeLegReconciler(client: Pick<TelnyxClient, "request">, inv: In
       }
       inv.add("call_leg", id);
     }
-    await client.request("POST", `/calls/${id}/actions/hangup`, {});
+    try {
+      await client.request("POST", `/calls/${id}/actions/hangup`, {});
+    } catch (e) {
+      if (isAlreadyEnded(e)) { endedByHangup.add(id); return; }
+      throw e;
+    }
   }
 
-  return { listAliveLegs, hangupLeg };
+  const confirmEnded = (id: string) => confirmLegEnded(client, log, id, endedByHangup);
+
+  return { listAliveLegs, hangupLeg, confirmLegEnded: confirmEnded };
 }
