@@ -1,6 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import { formatPhoneDisplay } from "@/lib/phone-format";
 import { useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -96,7 +97,7 @@ export function CreateContactDialog({
         <DialogHeader>
           <DialogTitle>Create new lead</DialogTitle>
           <DialogDescription>
-            Phone <span className="font-mono">{fromAddress}</span> will be saved
+            Phone <span className="font-mono">{formatPhoneDisplay(fromAddress)}</span> will be saved
             as the contact's <code>phone_1</code>. All inbound messages from
             this number get attached to the new lead automatically.
           </DialogDescription>

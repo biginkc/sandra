@@ -1,5 +1,6 @@
 "use client";
 
+import { formatPhoneDisplay } from "@/lib/phone-format";
 import {
   ArrowLeftIcon,
   ChevronDownIcon,
@@ -27,7 +28,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { copyToClipboard } from "@/lib/csv/export";
 import { normalizePhone } from "@/lib/csv/normalize";
-import { formatPhoneE164 } from "@/lib/phone-format";
 import {
   deriveSmsParties,
   isSmsRouteAuthoritative,
@@ -752,7 +752,7 @@ export function InboxDetail({
             <div className="flex flex-col min-w-0">
               <div className="flex items-center gap-2">
                 <h2 className="truncate text-[18px] font-bold leading-tight text-[#1c1917]">
-                  {data.contactName ?? data.contactPhone ?? "Unknown contact"}
+                  {data.contactName ?? formatPhoneDisplay(data.contactPhone) ?? "Unknown contact"}
                 </h2>
                 <MessageStageChip
                   status={data.propertyStatus}
@@ -789,10 +789,10 @@ export function InboxDetail({
                 className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[12px] text-[#78716c]"
                 title={[
                   data.threadCustomerPhone
-                    ? `Customer: ${data.threadCustomerPhone}`
+                    ? `Customer: ${formatPhoneDisplay(data.threadCustomerPhone)}`
                     : null,
                   data.threadBusinessPhone
-                    ? `Sandra: ${data.threadBusinessPhone}`
+                    ? `Sandra: ${formatPhoneDisplay(data.threadBusinessPhone)}`
                     : null,
                 ]
                   .filter(Boolean)
@@ -802,7 +802,7 @@ export function InboxDetail({
                   <>
                     <span className="shrink-0">Texting</span>
                     <span className="truncate font-bold tabular-nums text-[#1c1917]">
-                      {formatPhoneE164(data.threadCustomerPhone)}
+                      {formatPhoneDisplay(data.threadCustomerPhone)}
                     </span>
                   </>
                 ) : (
@@ -814,7 +814,7 @@ export function InboxDetail({
                       via
                     </span>
                     <span className="truncate tabular-nums">
-                      {formatPhoneE164(data.threadBusinessPhone)}
+                      {formatPhoneDisplay(data.threadBusinessPhone)}
                     </span>
                   </>
                 ) : null}
@@ -899,11 +899,11 @@ export function InboxDetail({
                   render={
                     <a
                       href={phoneHref!}
-                      aria-label={`Open phone app to call ${formatPhoneE164(data.threadCustomerPhone!)}`}
+                      aria-label={`Open phone app to call ${formatPhoneDisplay(data.threadCustomerPhone!)}`}
                       data-testid="inbox-detail-phone"
                     >
                       <PhoneIcon className="h-4 w-4" />
-                      Call {formatPhoneE164(data.threadCustomerPhone!)}
+                      Call {formatPhoneDisplay(data.threadCustomerPhone!)}
                     </a>
                   }
                 />

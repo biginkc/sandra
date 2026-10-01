@@ -1,4 +1,5 @@
 import { Badge } from "@/components/ui/badge";
+import { formatPhoneDisplay } from '@/lib/phone-format';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export type CampaignDeliveryCardProps = {
@@ -49,7 +50,7 @@ export function CampaignDeliveryCard({
             Sending number
           </div>
           <div className="mt-1 text-sm font-medium">
-            {senderNumber ?? (
+            {formatPhoneDisplay(senderNumber) ?? (
               <span className="text-destructive">Not set</span>
             )}
           </div>

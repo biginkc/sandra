@@ -20,6 +20,18 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 describe("§12 global search regression", () => {
+  it("formats contact phones without rewriting message previews", async () => {
+    vi.mocked(fetch).mockResolvedValue(response([
+      { ...row("+19135484567", "owner"), subtitle: "+19135484567" },
+      { ...row("+19135484567", "thread"), subtitle: "9135484567" },
+    ]) as unknown as Response);
+    open(); type("9135484567");
+    const options = await screen.findAllByRole("option");
+    expect(options[0]).toHaveTextContent("(913) 548-4567");
+    expect(within(options[0]).getAllByText("(913) 548-4567")).toHaveLength(2);
+    expect(within(options[1]).getByText("9135484567")).toHaveAttribute("data-message", "true");
+  });
+
   it("fills the viewport and renders all fifteen results in ordered groups", async () => {
     const results = ["property", "owner", "thread"].flatMap(kind =>
       Array.from({ length: 5 }, (_, i) => row(`${kind} ${i + 1}`, kind)));

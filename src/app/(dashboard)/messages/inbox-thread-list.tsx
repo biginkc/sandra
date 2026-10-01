@@ -1,6 +1,7 @@
 "use client";
 
 import { formatDistance } from "date-fns/formatDistance";
+import { formatPhoneDisplay } from "@/lib/phone-format";
 import { Droplet } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -8,7 +9,6 @@ import { Badge } from "@/components/ui/badge";
 import { EscalationBadge } from "@/components/escalation-badge";
 import { deriveSmsParties } from "@/lib/messages/sms-parties";
 import type { Thread } from "@/lib/messages/list-threads";
-import { formatPhoneE164 } from "@/lib/phone-format";
 import { createClient } from "@/lib/supabase/client";
 import type { Database } from "@/lib/supabase/types";
 
@@ -187,7 +187,7 @@ export function InboxThreadList({
                     />
                   ) : null}
                   <span className="min-w-0 truncate text-sm font-bold text-[#1c1917]">
-                    {t.contactName ?? t.contactPhone ?? "Unknown contact"}
+                    {t.contactName ?? formatPhoneDisplay(t.contactPhone) ?? "Unknown contact"}
                   </span>
                   {t.aiDispositionReview ? (
                     <SandraDispoReviewMarker threadId={t.threadId} />
@@ -234,10 +234,10 @@ export function InboxThreadList({
                 {t.threadCustomerPhone ? (
                   <span
                     className="max-w-[9rem] shrink-0 truncate rounded-full border border-[#e5e1df] bg-white px-1.5 py-0.5 text-[10px] font-bold tabular-nums text-[#57534e]"
-                    title={`Texting ${t.threadCustomerPhone}`}
+                    title={`Texting ${formatPhoneDisplay(t.threadCustomerPhone)}`}
                     data-testid={`inbox-thread-${t.threadId}-phone`}
                   >
-                    {formatPhoneE164(t.threadCustomerPhone)}
+                    {formatPhoneDisplay(t.threadCustomerPhone)}
                   </span>
                 ) : null}
               </div>
@@ -409,8 +409,8 @@ function ContactAvatar({
     <span
       title={[
         contactName ?? "Unknown contact",
-        contactPhone ? `Texting ${contactPhone}` : null,
-        businessPhone ? `via ${businessPhone}` : null,
+        contactPhone ? `Texting ${formatPhoneDisplay(contactPhone)}` : null,
+        businessPhone ? `via ${formatPhoneDisplay(businessPhone)}` : null,
       ]
         .filter(Boolean)
         .join(" · ")}

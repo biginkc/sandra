@@ -28,7 +28,7 @@ export function LeadFixture({ inDrip }: { inDrip: boolean }) {
         <DripCard propertyId="brand-lead" initialProgress={inDrip ? activeLeadDrip : null} />
         <section className="rounded-xl border bg-card p-3 text-xs"><h2 className="mb-2 font-bold">Files</h2><p className="text-muted-foreground">Documents saved for this lead.</p><p className="mt-2 text-muted-foreground">No files yet.</p></section>
         <section className="rounded-xl border bg-card p-3 text-xs"><div className="flex items-center justify-between"><h2 className="font-bold">Calculations</h2><Button variant="outline" size="sm">New calculation</Button></div><p className="mt-2 text-muted-foreground">No saved calculations yet.</p></section>
-        <section className="rounded-xl border bg-card p-3 text-xs"><h2 className="mb-3 font-bold uppercase tracking-wider text-muted-foreground">Homeowner</h2><div className="flex justify-between"><span>Name</span><span>Kaylem Quinn</span></div><div className="mt-2 flex justify-between"><span>Phone</span><span>+1 (555) 010-4477</span></div><p className="mt-3 text-muted-foreground">SMS consent · Informational only</p></section>
+        <section className="rounded-xl border bg-card p-3 text-xs"><h2 className="mb-3 font-bold uppercase tracking-wider text-muted-foreground">Homeowner</h2><div className="flex justify-between"><span>Name</span><span>Kaylem Quinn</span></div><div className="mt-2 flex justify-between"><span>Phone</span><span>(555) 010-4477</span></div><p className="mt-3 text-muted-foreground">SMS consent · Informational only</p></section>
       </div>
     </div>
   </DripPreviewShell>;

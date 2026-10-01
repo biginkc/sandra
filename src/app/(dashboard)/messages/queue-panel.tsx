@@ -1,6 +1,7 @@
 "use client";
 
 import { formatDistance } from "date-fns/formatDistance";
+import { formatPhoneDisplay } from "@/lib/phone-format";
 import {
   AlertCircleIcon,
   PauseIcon,
@@ -280,7 +281,7 @@ export function QueuePanel({
     const { outcome } = result.data;
     switch (outcome.status) {
       case "sent":
-        toast.success("Sent", { description: row.toAddress ?? undefined });
+        toast.success("Sent", { description: formatPhoneDisplay(row.toAddress) ?? undefined });
         setRows((prev) => prev.filter((r) => r.id !== row.id));
         return true;
       case "blocked_no_consent":
@@ -535,7 +536,7 @@ export function QueuePanel({
                   </div>
                   <div className="text-muted-foreground mt-1 text-xs">
                     {r.contactName ?? "(no contact)"} ·{" "}
-                    <span className="font-mono">{r.toAddress}</span>
+                    <span className="font-mono">{formatPhoneDisplay(r.toAddress)}</span>
                   </div>
                   {editingId === r.id ? (
                     <div className="mt-3 flex flex-col gap-2">
@@ -576,7 +577,7 @@ export function QueuePanel({
                   <div className="text-muted-foreground mt-2 text-xs">
                     From{" "}
                     <span className="font-mono">
-                      {r.fromAddress ?? "(default)"}
+                      {formatPhoneDisplay(r.fromAddress) ?? "(default)"}
                     </span>
                     {" · "}
                     queued{" "}
