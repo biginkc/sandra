@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { listDripChoices, type DripChoice } from "@/app/(dashboard)/sequences/actions";
 
@@ -38,6 +38,8 @@ export function StartDripPicker({
   const [message, setMessage] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [openUp, setOpenUp] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
   const needle = query.trim().toLowerCase();
   const visibleChoices = needle ? choices.filter((choice) => choice.name.toLowerCase().includes(needle)) : choices;
 
@@ -48,6 +50,9 @@ export function StartDripPicker({
   }, [inline]);
 
   async function openPicker() {
+    // Triggers near the bottom of the screen open the popup upward so it isn't cut off.
+    const rect = rootRef.current?.getBoundingClientRect();
+    setOpenUp(!!rect && window.innerHeight - rect.bottom < 360 && rect.top > window.innerHeight - rect.bottom);
     setOpen(true);
     setMessage("");
     setQuery("");
@@ -95,17 +100,17 @@ export function StartDripPicker({
   }
 
   return (
-    <div className={inline ? "relative" : "relative inline-block"}>
+    <div ref={rootRef} className={inline ? "relative" : "relative inline-block"}>
       {!inline && <button type="button" onClick={() => open ? setOpen(false) : void openPicker()} disabled={disabled || busy}
         className={`rounded-md border px-3 py-1 text-[11px] font-medium ${triggerTone === "primary" ? "min-h-9 border-primary bg-primary text-primary-foreground" : triggerTone === "outline" ? "min-h-9 border-border bg-card text-foreground" : "min-h-11 border-teal-200 bg-teal-50 text-teal-800"}`}>
         {triggerLabel}
       </button>}
-      {(inline || open) && <div className={inline ? "space-y-2" : "absolute left-0 top-full z-50 mt-1 w-80 rounded-md border bg-white p-3 shadow-lg"} role={inline ? undefined : "dialog"} aria-label="Start follow-up drip">
+      {(inline || open) && <div className={inline ? "space-y-2" : `absolute left-0 z-50 w-80 rounded-md border bg-white p-3 shadow-lg ${openUp ? "bottom-full mb-1" : "top-full mt-1"}`} role={inline ? undefined : "dialog"} aria-label="Start follow-up drip">
         {!inline && <p className="mb-2 text-sm font-semibold">Start follow-up drip</p>}
         {!loading && choices.length > 0 && <input type="search" value={query} onChange={(event) => setQuery(event.target.value)}
           placeholder="Search drips" aria-label="Search drips" className="mb-2 w-full rounded-md border px-2 py-1 text-sm" />}
         {/* The popup can outgrow the viewport once an org has several drips, so its list scrolls. */}
-        <div className={inline ? undefined : "max-h-[min(50vh,22rem)] overflow-y-auto pr-1"} data-testid="drip-choice-list">
+        <div className={inline ? undefined : "max-h-[min(40vh,20rem)] overflow-y-auto pr-1"} data-testid="drip-choice-list">
         {loading ? <p className="text-xs">Loading drips…</p> : choices.length === 0 ? <p className="text-xs">No active drips with steps are available.</p> : visibleChoices.length === 0 ? <p className="text-xs">No drips match “{query.trim()}”.</p> : visibleChoices.map((choice) => (
           <button key={choice.id} type="button" disabled={busy} onClick={() => void choose(choice.id)}
             aria-pressed={selectionOnly ? (selectedSequenceId === undefined ? selectedId : selectedSequenceId) === choice.id : undefined}

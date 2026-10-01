@@ -68,3 +68,13 @@ it("filters drips by name and scrolls the popup list", async () => {
   await user.type(screen.getByRole("searchbox", { name: "Search drips" }), "zzz");
   expect(screen.getByText(/No drips match/)).toBeInTheDocument();
 });
+
+it("opens upward when the trigger sits near the bottom of the screen", async () => {
+  listDripChoices.mockResolvedValue({ ok: true, data: [{ id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null }] });
+  const user = userEvent.setup();
+  const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ top: window.innerHeight - 40, bottom: window.innerHeight - 4 } as DOMRect);
+  render(<StartDripPicker onChoose={vi.fn()} />);
+  await user.click(screen.getByRole("button", { name: "Start follow-up drip" }));
+  expect(screen.getByRole("dialog", { name: "Start follow-up drip" })).toHaveClass("bottom-full");
+  rect.mockRestore();
+});
