@@ -123,7 +123,7 @@ def save_state(state: dict[str, object]) -> None:
 
 def validate_owned_root(state: dict[str, object]) -> Path:
     root = Path(str(state["root"])).resolve()
-    if root.parent != Path("/tmp") or not root.name.startswith(DATA_PREFIX):
+    if root.parent != Path("/tmp").resolve() or not root.name.startswith(DATA_PREFIX):
         fail(f"refusing to remove an unrecognized fixture root: {root}")
     return root
 
