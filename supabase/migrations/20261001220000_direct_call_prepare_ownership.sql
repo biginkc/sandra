@@ -137,8 +137,9 @@ begin
        )
        or (
          status in ('ending', 'ended', 'failed')
-         and (preparation_property_id is not null or p_property is null)
-         and (p_property is null or p_property = preparation_property_id)
+        -- Manual preparation has no preparation_property_id. It may still attach the resolved
+        -- property after cleanup, but a known lead preparation must match its owned property.
+        and (preparation_property_id is null or p_property is null or p_property = preparation_property_id)
          and property_id is null
          and contact_id is null
          and destination_e164 = ''
