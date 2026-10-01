@@ -25,7 +25,7 @@ const DOWN = () => new TelnyxApiError("Telnyx returned 503", "unknown", 503);
 
 type Leg = { alive: boolean; clientState: Record<string, unknown> | null };
 
-function world(opts: { lead?: boolean } = {}) {
+function world(opts: { lead?: boolean; timeLimitSecs?: number } = {}) {
   const clock = { now: T0 };
   const store = new FakeStore();
   store.clock = () => clock.now;
@@ -39,10 +39,12 @@ function world(opts: { lead?: boolean } = {}) {
     n: 0,
     counts: { dial: 0, hangup: 0, get: 0, list: 0 },
     hangupIds: [] as string[],
+    dialParams: [] as DialParams[],
   };
   const resumes: Array<{ via: string; propertyId: string }> = [];
   const dial = async (params: DialParams) => {
     p.counts.dial += 1;
+    p.dialParams.push(params);
     if (p.dialMode === "reject") throw new TelnyxApiError("Telnyx returned 422", "rejected", 422);
     if (p.dialMode === "http5xx") throw new TelnyxApiError("Telnyx returned 503", "unknown", 503);
     if (p.dialMode === "hang") return new Promise<{ callControlId: string }>(() => undefined);
@@ -74,12 +76,13 @@ function world(opts: { lead?: boolean } = {}) {
     return { calls: [...legs.entries()].filter(([, l]) => l.alive).map(([id, l]) => ({ callControlId: id, clientState: l.clientState })), complete: true };
   };
   const report = vi.fn();
+  const env = { ...ENV, ...(opts.timeLimitSecs ? { DIRECT_CALL_TIME_LIMIT_SECS: String(opts.timeLimitSecs) } : {}) };
   const prepare = vi.fn();
   const targetFor = (propertyId: string | null, phone = "+15550009999"): DirectCallTarget => ({
     propertyId, contactId: propertyId ? "contact-1" : null, phoneE164: phone, maskedPhone: "(555) 000-9999", name: "Seller", address: null, state: null, startedAt: T0.toISOString(),
   });
   const service = createDirectCallService({
-    store, env: ENV, now: () => clock.now,
+    store, env, now: () => clock.now,
     prepareLeadCall: async (propertyId) => { prepare(propertyId); return { ok: true, data: targetFor(opts.lead === false ? null : propertyId) }; },
     prepareManualCall: async (phone) => { prepare(phone); return { ok: true, data: targetFor(null, phone === "training" ? "+15550007777" : "+15550009999") }; },
     resumeFailedSoftphoneCall: async (propertyId) => { resumes.push({ via: "service", propertyId }); },
@@ -108,7 +111,7 @@ function world(opts: { lead?: boolean } = {}) {
   /** The operator's own session polling: the only place a resume can run. */
   const poll = (callId: string, user = "user-1") => service.getStatus(user, callId);
   const open = () => [...store.cleanups.values()].filter((c) => !c.confirmed_at);
-  return { clock, store, legs, p, resumes, service, whDeps, cleanupDeps, hook, advance, start, poll, provider, open, report, prepare };
+  return { clock, store, legs, p, env, resumes, service, whDeps, cleanupDeps, hook, advance, start, poll, provider, open, report, prepare };
 }
 
 async function startedCall(w: ReturnType<typeof world>, n = 1, input?: Record<string, unknown>, user = "user-1") {
@@ -118,6 +121,34 @@ async function startedCall(w: ReturnType<typeof world>, n = 1, input?: Record<st
 }
 
 describe("acceptance: telephony", () => {
+  it("freezes a bounded pilot limit across both Dials even if configuration changes mid-call", async () => {
+    const w = world({ timeLimitSecs: 30 });
+    const call = await startedCall(w);
+    expect(w.p.dialParams[0]).toMatchObject({ timeLimitSecs: 30, retryOnTimeout: false });
+    expect(w.store.calls.get(call.directCallId)?.time_limit_secs).toBe(30);
+    // Attempt both an expansion and an unset configuration after reservation; neither can widen this call.
+    w.env.DIRECT_CALL_TIME_LIMIT_SECS = "180";
+    w.env.DIRECT_CALL_TIME_LIMIT_SECS = undefined;
+    w.p.dialMode = "timeout_noleg";
+    await w.hook("call.answered", call.browserLegId, "browser", call.directCallId);
+    expect(w.p.dialParams[1]).toMatchObject({ timeLimitSecs: 30, retryOnTimeout: false });
+    expect(w.p.dialParams.every((params) => params.timeLimitSecs <= 30)).toBe(true);
+    const sellerCleanup = w.open().find((c) => c.kind === "unresolved_dial" && c.dial_role === "seller")!;
+    expect(new Date(sellerCleanup.backstop_at!).getTime() - w.clock.now.getTime()).toBe(30_000 + 30_000 + 10_000 + 60_000);
+  });
+
+  it("cancellation during a browser Dial keeps the dispatch obligation and never re-Dials", async () => {
+    const w = world({ timeLimitSecs: 180 });
+    w.p.dialMode = "hang";
+    void w.start(1);
+    await vi.waitFor(() => expect(w.p.counts.dial).toBe(1));
+    expect(await w.service.cancelByRequest("user-1", req(1))).toMatchObject({ ok: true, data: { tombstoned: false } });
+    expect(w.store.calls.get([...w.store.calls.keys()][0])).toMatchObject({ status: "ending", browser_dial_started_at: expect.any(String) });
+    expect(w.open().map((c) => `${c.kind}:${c.dial_role}`)).toEqual(["unresolved_dial:browser"]);
+    expect(w.p.counts.dial).toBe(1);
+    expect((await w.start(2)).ok).toBe(false);
+  });
+
   it("A1 normal call: both legs' hangup webhooks leave zero unconfirmed rows and the operator free", async () => {
     const w = world();
     const call = await startedCall(w);
@@ -277,7 +308,7 @@ describe("acceptance: unresolved Dial reconciliation", () => {
 
   it("UD1 an active-calls match by client_state becomes a leg row and is hung up", async () => {
     const { w, dialRow } = await unresolvedWorld();
-    w.advance(46);
+    w.advance(56);
     await processDueCleanups(w.cleanupDeps, "user-1");
     expect(w.store.legRow("LEG-1")).toBeDefined();
     expect(w.p.counts.hangup).toBe(1);
@@ -286,14 +317,14 @@ describe("acceptance: unresolved Dial reconciliation", () => {
     expect(await w.store.operatorBusy("user-1")).toBe("cleanup");
   });
 
-  it("UD2 two empty listings before timeout+15s still leave the Dial unresolved; two after resolve it", async () => {
+  it("UD2 two empty listings before timeout+allowance+15s still leave the Dial unresolved; two after resolve it", async () => {
     const w = world();
     w.p.dialMode = "timeout_noleg";
     await w.start(1);
     const dialRow = w.open().find((c) => c.kind === "unresolved_dial")!;
     for (let i = 0; i < 2; i += 1) {
       dialRow.next_attempt_at = w.clock.now.toISOString();
-      w.advance(10); // 10s, 20s: both before 30+15
+      w.advance(10); // 10s, 20s: both before 30+10+15
       await processDueCleanups(w.cleanupDeps, "user-1");
     }
     expect(w.store.cleanups.get(dialRow.id)).toMatchObject({ confirmed_at: null, empty_matches: 0 });
@@ -305,7 +336,7 @@ describe("acceptance: unresolved Dial reconciliation", () => {
     expect(await w.store.operatorBusy("user-1")).toBeNull();
   });
 
-  it("UD3 with no listing possible the Dial is resolved only at attempt + time_limit + 60s, and that is logged", async () => {
+  it("UD3 with no listing possible the Dial is resolved only at attempt + allowance + time_limit + 60s, and that is logged", async () => {
     const w = world();
     w.p.dialMode = "timeout_noleg";
     await w.start(1);
@@ -350,8 +381,9 @@ describe("acceptance: browser and lock", () => {
     const w = world();
     const original = w.store.setTarget.bind(w.store);
     w.store.setTarget = async (id, target) => {
-      await original(id, target);
+      const stored = await original(id, target);
       await w.service.cancelByRequest("user-1", req(1)); // the browser gave up while prepare was running
+      return stored;
     };
     expect(await w.start(1, { kind: "lead", propertyId: "prop-1" })).toMatchObject({ ok: false, errorCode: "cancelled" });
     expect(w.p.counts.dial).toBe(0);

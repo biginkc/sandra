@@ -4,6 +4,7 @@ import { processDueCleanups } from "./cleanup";
 import type { DirectCallStatus } from "./contract";
 import type { DirectCallFullRow, DirectCallStore } from "./store";
 import {
+  dispatchMarkerStillValid,
   nextDirectCallState,
   teardownBegun,
   type DirectCallEvent,
@@ -99,6 +100,25 @@ async function runSellerDial(deps: WebhookDeps, row: DirectCallFullRow, command:
   // No Dial may ever be issued once teardown has begun (ending/terminal/teardown_pending).
   const fresh = await deps.store.findById(row.id);
   if (!fresh || fresh.status !== "seller_dialing" || fresh.seller_dial_state !== "pending" || teardownBegun(fresh)) return;
+  // Persist the dispatch boundary before the provider request. A lost response is then an unknown
+  // Dial that reconciliation can safely resolve; a retry never sends the command twice.
+  const dispatchMarkedAt = deps.now().toISOString();
+  const marked = await deps.store.markDialStarted(fresh.id, "seller", dispatchMarkedAt, command.timeoutSecs, command.timeLimitSecs);
+  if (!marked) {
+    await deps.store.dialRejected(fresh.id, "seller"); // no provider request was sent
+    return;
+  }
+  // The marker write is itself network/database work. Allow only the named dispatch-response
+  // window before the provider request; otherwise cleanup could resolve it before it was sent.
+  const dispatchable = await deps.store.findById(fresh.id);
+  const markerExpired = !dispatchMarkerStillValid(dispatchMarkedAt, deps.now());
+  if (!dispatchable || dispatchable.status !== "seller_dialing" || dispatchable.seller_dial_state !== "pending" || teardownBegun(dispatchable) || markerExpired) {
+    if (dispatchable?.status === "seller_dialing" && dispatchable.seller_dial_state === "pending" && markerExpired) {
+      await failCall(deps, dispatchable, { failure_reason: "seller_dial_dispatch_window_expired", seller_dial_state: "unknown" });
+    }
+    await deps.store.dialRejected(fresh.id, "seller"); // marker persisted, but the provider request was never sent
+    return;
+  }
   let dialed: { callControlId: string };
   try {
     dialed = await deps.dial({
@@ -108,6 +128,7 @@ async function runSellerDial(deps: WebhookDeps, row: DirectCallFullRow, command:
       commandId: command.commandId,
       timeoutSecs: command.timeoutSecs,
       timeLimitSecs: command.timeLimitSecs,
+      retryOnTimeout: false,
       clientState: command.clientState,
       bridgeOnAnswer: command.bridgeOnAnswer,
       bridgeIntent: command.bridgeIntent,

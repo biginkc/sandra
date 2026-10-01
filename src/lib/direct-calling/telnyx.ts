@@ -134,6 +134,8 @@ export type DialParams = {
   commandId: string;
   timeoutSecs: number;
   timeLimitSecs: number;
+  /** A timeout must end the whole Dial attempt; provider retry paths would outlive the cleanup bound. */
+  retryOnTimeout: false;
   customHeaders?: Array<{ name: string; value: string }>;
   linkTo?: string;
   bridgeOnAnswer?: boolean;
@@ -167,6 +169,7 @@ export async function telnyxDial(
     command_id: params.commandId,
     timeout_secs: params.timeoutSecs,
     time_limit_secs: params.timeLimitSecs,
+    retry_on_timeout: params.retryOnTimeout,
   };
   if (params.customHeaders) body.custom_headers = params.customHeaders;
   if (params.linkTo) body.link_to = params.linkTo;

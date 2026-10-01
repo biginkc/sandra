@@ -19,15 +19,18 @@ export type NewDirectCall = {
   org_id: string;
   operator_user_id: string;
   property_id: string | null;
+  preparation_property_id: string | null;
   contact_id: string | null;
   destination_e164: string;
   caller_id_e164: string;
+  time_limit_secs: number;
   client_request_id: string;
 };
 
 export type BeginOutcome =
   | { outcome: "created"; row: DirectCallFullRow }
   | { outcome: "duplicate_request"; row: DirectCallFullRow }
+  | { outcome: "invalid_target" }
   | { outcome: "busy_call" | "busy_cleanup" };
 
 export type EventInsertResult = "inserted" | "duplicate_processed" | "duplicate_unprocessed";
@@ -59,13 +62,15 @@ export interface DirectCallStore {
    * Returns the updated row, or null if the status no longer matched.
    */
   updateIfStatus(id: string, statuses: DirectCallStatus[], patch: RowPatch, cleanups?: CleanupSpec[]): Promise<DirectCallFullRow | null>;
-  /** Fills in the prepared target on a reservation still in browser_connecting. */
-  setTarget(id: string, target: { property_id: string | null; contact_id: string | null; destination_e164: string }): Promise<void>;
+  /** Fills in the prepared target, including a still-owned terminal reservation after delayed preparation. */
+  setTarget(id: string, target: { property_id: string | null; contact_id: string | null; destination_e164: string }): Promise<boolean>;
   /** Drops a reservation whose prepare was refused (nothing was dialed). */
   discardReservation(id: string): Promise<void>;
   /** A Dial returned a leg: stores it when free, resolves that Dial's unresolved-dial row, queues a leg row when it must not live. */
   dialSucceeded(id: string, legId: string, role: "browser" | "seller"): Promise<boolean>;
-  /** Provider definitively refused the Dial: its unresolved-dial obligation is resolved. */
+  /** Durably marks the provider-dispatch boundary and anchors cleanup timing to it. */
+  markDialStarted(id: string, role: "browser" | "seller", startedAt: string, timeoutSecs: number, timeLimitSecs: number): Promise<boolean>;
+  /** Provider definitively refused, or dispatch was proven never sent: resolve the obligation. */
   dialRejected(id: string, role: "browser" | "seller"): Promise<void>;
   /** Another non-terminal direct call (any operator) exists for this property. */
   hasActiveCallForProperty(propertyId: string, excludeId: string | null): Promise<boolean>;
@@ -90,6 +95,7 @@ export interface DirectCallStore {
 }
 
 const UNIQUE_VIOLATION = "23505";
+const DEFINITE_BEGIN_REFUSALS = new Set(["22P02", "23503"]);
 
 function fail(error: { message: string } | null): never {
   throw new Error(error?.message ?? "Direct call database error.");
@@ -169,10 +175,16 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
         p_destination: call.destination_e164,
         p_caller: call.caller_id_e164,
         p_request: call.client_request_id,
+        p_time_limit_secs: call.time_limit_secs,
+        p_preparation_property: call.preparation_property_id,
       });
       if (error) {
         // A uniqueness violation here means a concurrent writer beat the advisory lock's snapshot.
         if (error.code === UNIQUE_VIOLATION) return { outcome: "busy_call" };
+        // The preparation owner is a UUID with a property FK. These errors prove that the request
+        // was rejected before the reservation insert; ambiguous/database transport failures remain
+        // thrown so callers keep reserved:true and reconcile by request id.
+        if (call.preparation_property_id !== null && DEFINITE_BEGIN_REFUSALS.has(error.code ?? "")) return { outcome: "invalid_target" };
         fail(error);
       }
       const result = (data as Array<{ outcome: string; call_id: string | null }> | null)?.[0];
@@ -205,13 +217,14 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
       return typed((data as RawRow[] | null)?.[0] ?? null);
     },
     async setTarget(id, target) {
-      const { error } = await admin.rpc("direct_call_set_target", {
+      const { data, error } = await admin.rpc("direct_call_set_target", {
         p_id: id,
         p_property: target.property_id,
         p_contact: target.contact_id,
         p_destination: target.destination_e164,
       });
       if (error) fail(error);
+      return data === true;
     },
     async discardReservation(id) {
       const { error } = await admin.rpc("direct_call_discard_reservation", { p_id: id });
@@ -222,12 +235,27 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
       if (error) fail(error);
       return data === true;
     },
+    async markDialStarted(id, role, startedAt, timeoutSecs, timeLimitSecs) {
+      const { data, error } = await admin.rpc("direct_call_dial_started", {
+        p_id: id,
+        p_role: role,
+        p_started_at: startedAt,
+        p_timeout_secs: timeoutSecs,
+        p_time_limit_secs: timeLimitSecs,
+      });
+      if (error) fail(error);
+      return data === true;
+    },
     async dialRejected(id, role) {
       const { error } = await admin.rpc("direct_call_dial_rejected", { p_id: id, p_role: role });
       if (error) fail(error);
     },
     async hasActiveCallForProperty(propertyId, excludeId) {
-      let query = calls().select("id").eq("property_id", propertyId).not("status", "in", "(ended,failed)").limit(1);
+      let query = calls()
+        .select("id, property_id, preparation_property_id")
+        .not("status", "in", "(ended,failed)")
+        .or(`property_id.eq.${propertyId},preparation_property_id.eq.${propertyId}`)
+        .limit(1);
       if (excludeId) query = query.neq("id", excludeId);
       const { data, error } = await query;
       if (error) fail(error);

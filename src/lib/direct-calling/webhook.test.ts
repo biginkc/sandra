@@ -62,6 +62,20 @@ describe("processDirectCallWebhook", () => {
     expect(during).toEqual({ state: "pending", open: ["unresolved_dial:seller"] });
   });
 
+  it("refuses a seller Dial when the dispatch marker response exceeds its allowance", async () => {
+    const { store, dial, deps } = setup();
+    const mark = store.markDialStarted.bind(store);
+    vi.spyOn(store, "markDialStarted").mockImplementation(async (...args) => {
+      clock.now = new Date(clock.now.getTime() + 120_000);
+      return mark(...args);
+    });
+
+    await processDirectCallWebhook(answerBrowser(), deps);
+    expect(dial).not.toHaveBeenCalled();
+    expect(store.calls.get(CALL)).toMatchObject({ status: "failed", failure_reason: "seller_dial_dispatch_window_expired", seller_dial_state: "unknown" });
+    expect(store.openFor(CALL).some((c) => c.kind === "unresolved_dial")).toBe(false);
+  });
+
   it("does no work for a duplicate event", async () => {
     const { dial, deps } = setup();
     const raw = body("call.answered", "browser-leg", { directCallId: CALL, role: "browser" }, "same-id");
@@ -217,7 +231,7 @@ describe("processDirectCallWebhook", () => {
 
     it("an open unresolved Dial row survives the move to a terminal status (#743-3)", async () => {
       const { store, deps } = setup({ status: "seller_dialing", seller_dial_state: "pending", seller_leg_id: null });
-      store.addCleanup({ direct_call_id: CALL, kind: "unresolved_dial", dial_role: "seller" });
+      store.addCleanup({ direct_call_id: CALL, kind: "unresolved_dial", dial_role: "seller", dial_started_at: "2026-10-01T12:00:00.000Z" });
       await processDirectCallWebhook(body("call.hangup", "browser-leg", { directCallId: CALL, role: "browser" }, "h-keep"), deps);
       expect(store.calls.get(CALL)?.status).toBe("failed");
       expect(store.openFor(CALL).map((c) => `${c.kind}:${c.dial_role}`)).toEqual(["unresolved_dial:seller"]);

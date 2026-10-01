@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveCallingConfig } from "./config";
+import { readDirectCallTimeLimitSecs, resolveCallingConfig } from "./config";
 
 const FULL = {
   DIRECT_CALL_PILOT_USER_IDS: "pilot-1, Pilot-2",
@@ -32,5 +32,17 @@ describe("resolveCallingConfig", () => {
     expect(resolveCallingConfig("pilot-1", { ...FULL, DIRECT_CALL_CONTAINMENT_VERIFIED: undefined })).toEqual({ transport: "default" });
     expect(resolveCallingConfig("pilot-1", { ...FULL, DIRECT_CALL_CONTAINMENT_VERIFIED: "false" })).toEqual({ transport: "default" });
     expect(resolveCallingConfig("pilot-1", { ...FULL, DIRECT_CALL_CONTAINMENT_VERIFIED: "TRUE" })).toEqual({ transport: "default" });
+  });
+
+  it("accepts only explicit bounded pilot limits and keeps the default at 7200 when absent", () => {
+    expect(readDirectCallTimeLimitSecs(FULL)).toBe(7200);
+    for (const value of ["30", "60", "120", "180"]) {
+      expect(readDirectCallTimeLimitSecs({ ...FULL, DIRECT_CALL_TIME_LIMIT_SECS: value })).toBe(Number(value));
+    }
+    for (const value of ["0", "29", "181", "7200", "1.5", "abc", "  "]) {
+      const env = { ...FULL, DIRECT_CALL_TIME_LIMIT_SECS: value };
+      expect(readDirectCallTimeLimitSecs(env)).toBeNull();
+      expect(resolveCallingConfig("pilot-1", env)).toEqual({ transport: "default" });
+    }
   });
 });

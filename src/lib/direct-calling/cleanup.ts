@@ -68,8 +68,9 @@ export type CleanupResult = {
  *                   (store.confirmLegCleanup), a 422/90018 "already ended" refusal, or GET is_alive:false.
  *  unresolved_dial: list active calls on the Voice API app and match this call's client_state; every match
  *                   becomes a leg row (hung up in the same pass). Resolved by emptiness only at/after
- *                   resolve_after (attempt + timeout + 15s) once two consecutive complete listings are empty,
- *                   and by time alone at backstop_at (attempt + time_limit + 60s).
+ *                   resolve_after (attempt + timeout + 10s marker allowance + 15s) once two consecutive complete listings are empty,
+ *                   and by time alone at backstop_at (dispatch marker + 10s response allowance + ring
+ *                   timeout + active time limit + 60s).
  */
 export async function processDueCleanups(deps: CleanupDeps, operatorUserId: string): Promise<CleanupResult> {
   const result: CleanupResult = { processed: 0, confirmed: 0, acknowledged: 0, failed: 0 };
@@ -165,6 +166,10 @@ async function cleanLeg(deps: CleanupDeps, row: DirectCallCleanupRow, result: Cl
 
 async function reconcileDial(deps: CleanupDeps, row: DirectCallCleanupRow, result: CleanupResult) {
   try {
+    // A cleanup row is reserved before a provider Dial, but the dispatch boundary is marked in a
+    // separate durable write immediately before the request. If teardown finds a row with no marker,
+    // the provider was never called and there is nothing to list or wait out.
+    if (!row.dial_started_at) return await confirm(deps, row, result, "dial_not_dispatched");
     const now = deps.now().getTime();
     if (row.backstop_at && now >= new Date(row.backstop_at).getTime()) {
       deps.report(new Error(`Direct call ${row.dial_role} dial ${RESOLVED_BY_TIME_LIMIT}`), "direct_call_dial_backstop");

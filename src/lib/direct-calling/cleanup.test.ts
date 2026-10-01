@@ -86,7 +86,8 @@ describe("unresolved Dial reconciliation matches call id AND role", () => {
   function dialWorld(listings: Array<Listing | Error>) {
     const w = setup([]);
     const row = w.store.addCleanup({
-      direct_call_id: CALL, kind: "unresolved_dial", dial_role: "seller",
+    direct_call_id: CALL, kind: "unresolved_dial", dial_role: "seller",
+      dial_started_at: clock.now.toISOString(),
       resolve_after: new Date(clock.now.getTime() - 1000).toISOString(), backstop_at: new Date(clock.now.getTime() + 3_600_000).toISOString(),
     });
     let i = 0;

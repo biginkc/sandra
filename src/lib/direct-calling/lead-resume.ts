@@ -6,7 +6,9 @@ export const RESUME_LEASE_SECS = 30;
 /**
  * Lead enrollment pause ownership. Prepare pauses a lead's enrollments. When a lead call becomes terminal
  * without having connected, direct_call_apply sets `resume_pending` on the call (atomically, and only when
- * no other non-terminal direct call is on the property). The resume itself needs the operator's own
+ * no other non-terminal direct call is on the property). If preparation finishes after cancellation has
+ * already made the row terminal, the late target write sets the same obligation once it owns the row. The
+ * resume itself needs the operator's own
  * authenticated session (the resume RPC refuses a service-role caller), so it is worked ONLY here, from
  * the operator's own server actions: status polls, start, and control. A connected call's resume stays
  * with wrap-up, and the flag is never set for it.
