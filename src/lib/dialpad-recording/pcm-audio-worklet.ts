@@ -208,14 +208,18 @@ class SandraDialpadPcm16Processor extends AudioWorkletProcessor {
     this.nextPeriodicContextFrame = sampleRate * 10;
     this.gapPending = false;
     this.initialized = false;
+    this.diagnostics = false;
+    this.diag = { emptyInputQuanta: 0, inputFrames: 0, channelNonzero: [0, 0], channelPeak: [0, 0], downmixNonzero: 0, downmixPeak: 0, framesCreated: 0 };
     this.port.onmessage = (event) => {
       if (event.data?.type === "init") {
         this.contextId = event.data.contextId;
+        this.diagnostics = event.data.diagnostics === true;
         return;
       }
       if (event.data?.type !== "flush") return;
       if (this.flushing || this.unsupported) return;
       this.flushing = true;
+      if (this.diagnostics) this.port.postMessage({ type: "diagnostic", summary: this.diag });
       this.emitAnchor("final", this.lastContextEnd, this.totalInput, 0, this.gapPending ? "empty_input_gap" : "continuous", Math.max(0, Math.floor(this.totalInput * TARGET_RATE / sampleRate) - this.frameIndex * FRAME_SAMPLES));
       this.port.postMessage({ type: "tail", totalInputSamples: this.totalInput, creditedSamples: this.frameIndex * FRAME_SAMPLES, uncreditedTailSamples: Math.max(0, Math.floor(this.totalInput * TARGET_RATE / sampleRate) - this.frameIndex * FRAME_SAMPLES) });
     };
@@ -234,9 +238,10 @@ class SandraDialpadPcm16Processor extends AudioWorkletProcessor {
     }
     if (this.flushing) return false;
     const contextFrame = typeof currentFrame === "number" ? currentFrame : this.lastContextEnd;
-      const channels = inputs[0] ?? [];
+    const channels = inputs[0] ?? [];
     if (!this.contextId) return true;
     if (channels.length === 0 || channels[0].length === 0) {
+      if (this.diagnostics) this.diag.emptyInputQuanta++;
       this.gapPending = true;
       return true;
     }
@@ -266,9 +271,22 @@ class SandraDialpadPcm16Processor extends AudioWorkletProcessor {
     joined.set(this.pending);
     for (let index = 0; index < length; index += 1) {
       let sum = 0;
-      for (const channel of channels) sum += channel[index] ?? 0;
-      joined[this.pending.length + index] = sum / channels.length;
+      for (let channelIndex = 0; channelIndex < channels.length; channelIndex++) {
+        const value = channels[channelIndex][index] ?? 0;
+        sum += value;
+        if (this.diagnostics) {
+          if (value !== 0) this.diag.channelNonzero[channelIndex]++;
+          this.diag.channelPeak[channelIndex] = Math.max(this.diag.channelPeak[channelIndex], Math.abs(value));
+        }
+      }
+      const mono = sum / channels.length;
+      joined[this.pending.length + index] = mono;
+      if (this.diagnostics) {
+        if (mono !== 0) this.diag.downmixNonzero++;
+        this.diag.downmixPeak = Math.max(this.diag.downmixPeak, Math.abs(mono));
+      }
     }
+    if (this.diagnostics) this.diag.inputFrames += length;
     this.pending = joined;
     this.totalInput += length;
     const ratio = sampleRate / TARGET_RATE;
@@ -284,6 +302,7 @@ class SandraDialpadPcm16Processor extends AudioWorkletProcessor {
       this.frame[this.frameLength++] = clamped < 0 ? Math.round(clamped * 32768) : Math.round(clamped * 32767);
       this.nextOutput += 1;
       if (this.frameLength === FRAME_SAMPLES) {
+        if (this.diagnostics) this.diag.framesCreated++;
         const copy = this.frame;
         this.port.postMessage({ type: "frame", frameIndex: this.frameIndex++, samples: copy.buffer }, [copy.buffer]);
         this.frame = new Int16Array(FRAME_SAMPLES);
@@ -319,6 +338,17 @@ export type PcmWorkletSession = {
   stop(): Promise<PcmTailReport>;
 };
 
+export type PcmWorkletDiagnostic = {
+  readonly track: PcmTrack;
+  readonly epoch: number;
+  readonly worklet: { readonly emptyInputQuanta: number; readonly inputFrames: number; readonly channelNonzero: readonly [number, number]; readonly channelPeak: readonly [number, number]; readonly downmixNonzero: number; readonly downmixPeak: number; readonly framesCreated: number } | null;
+  readonly framesAccepted: number;
+  readonly framesDelivered: number;
+  readonly contextStateChanges: number;
+  readonly finalContextState: 'running' | 'suspended' | 'closed';
+  readonly tailReceived: boolean;
+};
+
 export type PcmWorkletRuntime = {
   readonly createAudioContext: () => AudioContext;
   readonly createObjectURL: (blob: Blob) => string;
@@ -328,6 +358,7 @@ export type PcmWorkletRuntime = {
 };
 
 export type PcmWorkletStartOptions = {
+  readonly onDiagnostic?: (summary: PcmWorkletDiagnostic) => void;
   readonly timeoutMs?: number;
   /** Optional separate deadline for accepted frame/tail callbacks after the worklet reports its tail. */
   readonly deliveryTimeoutMs?: number;
@@ -425,6 +456,10 @@ export async function startPcmWorkletSession(
   let pendingDeliveries = 0;
   let failureNotified = false;
   let deliveryFailure: Error | null = null;
+  let workletDiagnostic: PcmWorkletDiagnostic['worklet'] = null;
+  let framesAccepted = 0;
+  let framesDelivered = 0;
+  let contextStateChanges = 0;
   const notifyFailure = (error: Error) => {
     if (failureNotified) return;
     failureNotified = true;
@@ -445,6 +480,7 @@ export async function startPcmWorkletSession(
     timingQueue = timingQueue.then(() => options.onTiming!(record)).catch(() => undefined);
   };
   const emitContextClock = (observation: DialpadTimingContextClock['observation'], state: DialpadTimingContextClock['state']) => {
+    if (options.onDiagnostic && observation === 'state_change') contextStateChanges += 1;
     const perf = typeof performance !== 'undefined' ? performance : null;
     const before = perf?.now() ?? 0;
     const contextTime = typeof context.currentTime === 'number' ? context.currentTime * 1000 : 0;
@@ -475,7 +511,8 @@ export async function startPcmWorkletSession(
     let resolveInputFormat!: (channels: number) => void;
     const inputFormatPromise = new Promise<number>((resolve) => { resolveInputFormat = resolve; });
     node.port.onmessage = (event: MessageEvent) => {
-      const message = event.data as { type?: string; frameIndex?: number; samples?: ArrayBuffer; totalInputSamples?: number; creditedSamples?: number; uncreditedTailSamples?: number; sourceSampleRateHz?: number; inputChannels?: number; record?: PcmTimingRecord };
+      const message = event.data as { type?: string; frameIndex?: number; samples?: ArrayBuffer; totalInputSamples?: number; creditedSamples?: number; uncreditedTailSamples?: number; sourceSampleRateHz?: number; inputChannels?: number; record?: PcmTimingRecord; summary?: PcmWorkletDiagnostic['worklet'] };
+      if (message.type === 'diagnostic') { if (options.onDiagnostic) workletDiagnostic = message.summary ?? null; return; }
       if (message.type === 'anchor' && message.record) {
         enqueueTiming({ ...message.record, track });
         if (message.record.kind === 'anchor' && message.record.anchor === 'periodic') emitContextClock('periodic', context.state === 'suspended' ? 'suspended' : 'running');
@@ -515,16 +552,18 @@ export async function startPcmWorkletSession(
         return;
       }
       pendingDeliveries += 1;
+      if (options.onDiagnostic) framesAccepted += 1;
       enqueueDelivery(async () => {
         try {
           await onFrame({ track, epoch, frameIndex: message.frameIndex!, samples, bytes: pcm16LittleEndian(samples) });
+          if (options.onDiagnostic) framesDelivered += 1;
         } finally {
           pendingDeliveries -= 1;
         }
       });
     };
     source.connect(node);
-    node.port.postMessage({ type: 'init', contextId: { id: contextId, track } });
+    node.port.postMessage({ type: 'init', contextId: { id: contextId, track }, diagnostics: options.onDiagnostic !== undefined });
     context.addEventListener?.('statechange', onContextStateChange);
     emitContextClock('start', context.state === 'suspended' ? 'suspended' : 'running');
     const silent = context.createGain();
@@ -581,9 +620,13 @@ export async function startPcmWorkletSession(
         }
         deliveryActive = false;
         acceptingFrames = false;
-        emitContextClock('final', context.state === 'closed' ? 'closed' : context.state === 'suspended' ? 'suspended' : 'running');
+        const finalContextState = context.state === 'closed' ? 'closed' : context.state === 'suspended' ? 'suspended' : 'running';
+        emitContextClock('final', finalContextState);
         await Promise.race([timingQueue, wait(remaining())]);
         await cleanup();
+        if (options.onDiagnostic) {
+          try { options.onDiagnostic({ track, epoch, worklet: workletDiagnostic, framesAccepted, framesDelivered, contextStateChanges, finalContextState, tailReceived: !timedOut }) } catch { /* diagnostic sink cannot affect audio capture */ }
+        }
         return tail!;
       })();
       return stopPromise;

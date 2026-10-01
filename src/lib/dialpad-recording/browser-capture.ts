@@ -4,6 +4,7 @@ import {
   type PcmFrame,
   type PcmTailReport,
   type PcmTrack,
+  type PcmWorkletDiagnostic,
   type PcmWorkletStartOptions,
   startPcmWorkletSession,
   type PcmWorkletSession,
@@ -351,7 +352,7 @@ export type BrowserCaptureRuntime = {
   readonly createMediaStream: (tracks: readonly MediaStreamTrack[]) => MediaStream;
   readonly supportsMediaRecorder?: (mimeType: string) => boolean;
   readonly createRecorder: (stream: MediaStream, mimeType?: string) => MediaRecorderLike;
-  readonly createPcmSession?: (stream: MediaStream, track: PcmTrack, epoch: number, onFrame: (frame: PcmFrame) => void | Promise<void>, onTail: (tail: PcmTailReport) => void | Promise<void>, options?: Pick<PcmWorkletStartOptions, "signal" | "onFailure" | "onTiming" | "deliveryTimeoutMs">) => Promise<PcmWorkletSession>;
+  readonly createPcmSession?: (stream: MediaStream, track: PcmTrack, epoch: number, onFrame: (frame: PcmFrame) => void | Promise<void>, onTail: (tail: PcmTailReport) => void | Promise<void>, options?: Pick<PcmWorkletStartOptions, "signal" | "onFailure" | "onTiming" | "onDiagnostic" | "deliveryTimeoutMs">) => Promise<PcmWorkletSession>;
 };
 
 function browserRuntime(): BrowserCaptureRuntime {
@@ -514,6 +515,8 @@ export type PrepareDialpadCaptureOptions = {
   readonly microphoneConstraints?: MediaStreamConstraints;
   readonly localSpoolMaxBytes?: number;
   readonly localSpoolMaxMs?: number;
+  /** Optional aggregate callback; worklet emits one bounded receipt per track on stop. */
+  readonly onPcmDiagnostic?: (summary: PcmWorkletDiagnostic) => void;
 };
 
 function stopTracks(stream: MediaStream | null): void {
@@ -903,7 +906,7 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
           fail(new BrowserCaptureError(error.name === "TimeoutError" ? "timeout" : "sink_failure", error.message));
         };
         const startPcm = async (stream: MediaStream, pcmTrack: PcmTrack): Promise<PcmWorkletSession | null> => {
-          const session = await runtime.createPcmSession!(stream, pcmTrack, epoch, emitPcmFrame, emitPcmTail, { signal: startupAbort.signal, onFailure: pcmFailure, onTiming: deliverTiming, deliveryTimeoutMs: AUTHENTICATED_PCM_DELIVERY_TIMEOUT_MS });
+          const session = await runtime.createPcmSession!(stream, pcmTrack, epoch, emitPcmFrame, emitPcmTail, { signal: startupAbort.signal, onFailure: pcmFailure, onTiming: deliverTiming, ...(options.onPcmDiagnostic ? { onDiagnostic: options.onPcmDiagnostic } : {}), deliveryTimeoutMs: AUTHENTICATED_PCM_DELIVERY_TIMEOUT_MS });
           if (stopRequested || failed || disposed) {
             await session.stop();
             return null;

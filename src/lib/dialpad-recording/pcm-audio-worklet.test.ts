@@ -10,9 +10,9 @@ import {
   startPcmWorkletSession,
 } from "./pcm-audio-worklet";
 
-type HarnessMessage = { type?: string; frameIndex?: number; samples?: ArrayBuffer; totalInputSamples?: number; creditedSamples?: number; uncreditedTailSamples?: number; sourceSampleRateHz?: number; record?: Record<string, unknown> };
+type HarnessMessage = { type?: string; frameIndex?: number; samples?: ArrayBuffer; totalInputSamples?: number; creditedSamples?: number; uncreditedTailSamples?: number; sourceSampleRateHz?: number; record?: Record<string, unknown>; summary?: { emptyInputQuanta: number; inputFrames: number; channelNonzero: number[]; channelPeak: number[]; downmixNonzero: number; downmixPeak: number; framesCreated: number } };
 
-function generatedProcessor(sourceRateHz: number): { processor: { port: PcmWorkletPort; process(inputs: Float32Array[][]): boolean }; messages: HarnessMessage[] } {
+function generatedProcessor(sourceRateHz: number, diagnostics = false): { processor: { port: PcmWorkletPort; process(inputs: Float32Array[][]): boolean }; messages: HarnessMessage[] } {
   let Processor!: new () => { port: PcmWorkletPort; process(inputs: Float32Array[][]): boolean };
   const messages: HarnessMessage[] = [];
   class HarnessBase {
@@ -24,7 +24,7 @@ function generatedProcessor(sourceRateHz: number): { processor: { port: PcmWorkl
   const registerProcessor = (_name: string, constructor: new () => typeof HarnessBase) => { Processor = constructor as unknown as typeof Processor; };
   new Function("AudioWorkletProcessor", "registerProcessor", "sampleRate", PCM_AUDIO_WORKLET_SOURCE)(HarnessBase, registerProcessor, sourceRateHz);
   const processor = new Processor();
-  processor.port.onmessage?.({ data: { type: "init", contextId: { track: "tab", id: "00000000-0000-4000-8000-000000000001" } } } as MessageEvent);
+  processor.port.onmessage?.({ data: { type: "init", contextId: { track: "tab", id: "00000000-0000-4000-8000-000000000001" }, diagnostics } } as MessageEvent);
   return { processor, messages };
 }
 
@@ -50,6 +50,19 @@ function runGeneratedProcessor(sourceRateHz: number, chunks: readonly number[]):
 }
 
 describe("stateful Dialpad PCM capture", () => {
+  it("distinguishes true silence from stereo cancellation in opt-in aggregate receipts", () => {
+    const silent = generatedProcessor(48_000, true);
+    const cancelled = generatedProcessor(48_000, true);
+    const signal = new Float32Array(960).fill(0.5);
+    silent.processor.process([[new Float32Array(960), new Float32Array(960)]]);
+    cancelled.processor.process([[signal, signal.map((sample) => -sample)]]);
+    for (const harness of [silent, cancelled]) harness.processor.port.onmessage?.({ data: { type: 'flush' } } as MessageEvent);
+    const silentSummary = silent.messages.find((message) => message.type === 'diagnostic')?.summary;
+    const cancelledSummary = cancelled.messages.find((message) => message.type === 'diagnostic')?.summary;
+    expect(silentSummary).toMatchObject({ inputFrames: 960, channelNonzero: [0, 0], downmixNonzero: 0, framesCreated: 1 });
+    expect(cancelledSummary).toMatchObject({ inputFrames: 960, channelNonzero: [960, 960], channelPeak: [0.5, 0.5], downmixNonzero: 0, framesCreated: 1 });
+    expect(new Int16Array(cancelled.messages.find((message) => message.type === 'frame')!.samples!)).toEqual(new Int16Array(320));
+  });
   it("resamples 48 kHz input into exact 320-sample frames without padding", () => {
     const resampler = new StatefulPcmResampler({ sourceSampleRateHz: 48_000, track: "tab", epoch: 3 });
     const frames = [];
@@ -142,11 +155,13 @@ describe("stateful Dialpad PCM capture", () => {
   it("flushes, reports the actual context rate, and releases worklet resources", async () => {
     const tails: unknown[] = [];
     const frames: unknown[] = [];
+    const diagnostics: unknown[] = [];
     const portClose = vi.fn();
     const port: PcmWorkletPort = {
       onmessage: null,
       postMessage: (message) => {
         if ((message as { type?: string }).type === "flush") {
+          port.onmessage?.({ data: { type: "diagnostic", summary: { emptyInputQuanta: 0, inputFrames: 441, channelNonzero: [100, 0], channelPeak: [0.5, 0], downmixNonzero: 100, downmixPeak: 0.5, framesCreated: 0 } } } as MessageEvent);
           port.onmessage?.({ data: { type: "tail", totalInputSamples: 441, creditedSamples: 160, uncreditedTailSamples: 0 } } as MessageEvent);
         }
       },
@@ -170,13 +185,15 @@ describe("stateful Dialpad PCM capture", () => {
       createObjectURL: () => "blob:pcm",
       revokeObjectURL: (url) => revoked.push(url),
       createNode: () => { announceInputFormat(port); return node; },
-    }, {} as MediaStream, "mic", 4, (frame) => { frames.push(frame); }, (tail) => { tails.push(tail); });
+    }, {} as MediaStream, "mic", 4, (frame) => { frames.push(frame); }, (tail) => { tails.push(tail); }, { onDiagnostic: (summary) => diagnostics.push(summary) });
     const tail = await session.stop();
     expect(tail).toMatchObject({ track: "mic", epoch: 4, sourceSampleRateHz: 44_100, totalInputSamples: 441 });
     expect(tails).toHaveLength(1);
     expect(frames).toHaveLength(0);
     expect(revoked).toEqual(["blob:pcm"]);
     expect(portClose).toHaveBeenCalledTimes(1);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({ track: 'mic', epoch: 4, worklet: { inputFrames: 441, channelNonzero: [100, 0] }, framesAccepted: 0, framesDelivered: 0, tailReceived: true });
   });
 
   it("marks an unacknowledged flush as timed out instead of fabricating counters", async () => {

@@ -153,6 +153,7 @@ describe('Dialpad browser session', () => {
 
   it('binds the server-owned timing nonce and waits for timing batch and exchange ACKs', async () => {
     const socket = new FakeSocket();
+    const diagnostics: unknown[] = [];
     const timingAnchor = {
       kind: 'anchor', track: 'tab', seq: 0, contextId: '00000000-0000-4000-8000-000000000001', anchor: 'start',
       contextFrame: 0, sourceCursor: 0, blockLength: 128, sourceRateHz: 48_000, outputCursor: 0,
@@ -175,6 +176,7 @@ describe('Dialpad browser session', () => {
     };
     const session = createDialpadBrowserSession({
       endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, enableTiming: true, ackTimeoutMs: 100,
+      onDiagnostic: (summary) => diagnostics.push(summary),
       capture: fakeCapture((sinks) => { void sinks.onTiming?.(timingAnchor); }),
     });
     const started = session.start();
@@ -194,6 +196,10 @@ describe('Dialpad browser session', () => {
     expect(timingBatches.length).toBeGreaterThan(0);
     expect(timingBatches.flatMap((batch) => batch.records ?? []).every((record) => record.kind !== 'exchange')).toBe(true);
     expect(session.state()).toBe('stopped');
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({ timingEnabled: true, timingEndAck: 'collected', timingIncomplete: false, outcome: 'stopped' });
+    expect((diagnostics[0] as { timingBatchAcks: number }).timingBatchAcks).toBeGreaterThan(0);
+    expect((diagnostics[0] as { timingExchangeAcks: number }).timingExchangeAcks).toBeGreaterThan(0);
   });
 
   it('degrades timing when a confirm send fails and suppresses late replies after the timing barrier', async () => {
@@ -483,7 +489,8 @@ describe('Dialpad browser session', () => {
         },
         dispose: async () => undefined,
       };
-      const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 5_000, capture });
+      const diagnostics: unknown[] = [];
+      const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 5_000, capture, onDiagnostic: (summary) => diagnostics.push(summary) });
       const started = session.start();
       socket.open();
       serverHydrate(socket);
@@ -502,6 +509,8 @@ describe('Dialpad browser session', () => {
       expect(pcmIndex).toBe(1);
       expect(pcmIndex).toBeLessThan(binaryKinds.length - 1);
       expect(events.filter((event) => event === 'recording_eof')).toEqual(['recording_eof', 'recording_eof']);
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]).toMatchObject({ epoch: 1, pcm: { tab: { framesSent: 1, framesAcknowledged: 1, eofAcknowledged: true }, mic: { framesSent: 0, framesAcknowledged: 0, eofAcknowledged: true } }, timingEnabled: false, timingEndAck: null, outcome: 'stopped' });
     } finally {
       vi.useRealTimers();
     }
@@ -1368,8 +1377,10 @@ describe('Dialpad browser session', () => {
   it('times out a PCM receipt and settles the pending frame on abortive disposal', async () => {
     const socket = new FakeSocket();
     let frameSent!: Promise<void>;
+    const diagnostics: unknown[] = [];
     const session = createDialpadBrowserSession({
       endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 15,
+      onDiagnostic: (summary) => diagnostics.push(summary),
       capture: fakeCapture((sinks) => { frameSent = Promise.resolve(sinks.onPcmFrame(pcmFrame('tab', 0))); }),
     });
     const started = session.start();
@@ -1379,6 +1390,8 @@ describe('Dialpad browser session', () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     await frameSent;
     expect(session.state()).toBe('failed');
+    await waitUntil(() => diagnostics.length === 1, 200);
+    expect(diagnostics[0]).toMatchObject({ pcm: { tab: { framesSent: 1, framesAcknowledged: 0, eofAcknowledged: false } }, outcome: 'failed' });
 
     const secondSocket = new FakeSocket();
     let secondFrame!: Promise<void>;
