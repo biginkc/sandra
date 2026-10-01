@@ -104,7 +104,8 @@ export async function getDirectRtcToken(): Promise<DirectActionResult<DirectRtcT
 
 export async function startDirectCall(input: StartDirectCallInput): Promise<DirectActionResult<StartDirectCallResult>> {
   const operator = await authenticatedOperator();
-  if (!operator.ok) return operator;
+  // Refused before the service ran: nothing was reserved.
+  if (!operator.ok) return { ...operator, reserved: false };
   return service().startCall(operator.userId, input);
 }
 
