@@ -23,6 +23,7 @@ export interface TeardownReport {
   hungUp: string[];
   skippedForeignLegs: string[];
   deleted: string[];
+  skippedRecordings: string[];
   remainingNotInSnapshot: string[];
 }
 
@@ -32,7 +33,7 @@ export async function runTeardown(d: TeardownDeps): Promise<TeardownReport> {
   const { client, inv, log } = d;
   const say = d.say ?? ((s) => console.log(s));
   const sleep = d.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
-  const report: TeardownReport = { hungUp: [], skippedForeignLegs: [], deleted: [], remainingNotInSnapshot: [] };
+  const report: TeardownReport = { hungUp: [], skippedForeignLegs: [], deleted: [], skippedRecordings: [], remainingNotInSnapshot: [] };
 
   // 1. Stop new attempts.
   d.budget?.stop();
@@ -92,9 +93,28 @@ export async function runTeardown(d: TeardownDeps): Promise<TeardownReport> {
   say("2-4. active legs listed, owner re-checked, hung up, confirmed terminal");
 
   // 5. Delete credentials, connection, app, profiles, recordings (plan order).
+  // A recording is deleted ONLY if independently proven to belong to an inventoried test call:
+  // its call_control_id / call_leg_id / call_session_id must match one recorded when we dialed.
+  // A connection-filter listing alone is never enough. Ambiguous ones are skipped and logged.
+  const proves = (rec: any): boolean =>
+    !!rec && (inv.hasCallRef(rec.call_control_id) || inv.hasCallRef(rec.call_leg_id) || inv.hasCallRef(rec.call_session_id) || inv.has(String(rec.call_control_id ?? ""), ["call_leg"]));
+  const candidates = new Map<string, any>();
   for (const scope of scopes) {
-    for (const rec of await client.listAll<any>(`/recordings?filter[connection_id]=${scope}`)) {
-      if (rec.id && !inv.has(rec.id)) inv.add("recording", rec.id);
+    for (const rec of await client.listAll<any>(`/recordings?filter[connection_id]=${scope}`)) if (rec?.id) candidates.set(rec.id, rec);
+  }
+  for (const id of inv.idsOf("recording")) {
+    if (candidates.has(id)) continue;
+    try { candidates.set(id, (await client.request("GET", `/recordings/${id}`)).data); } catch { candidates.set(id, undefined); }
+  }
+  const provenRecordings = new Set<string>();
+  for (const [id, rec] of candidates) {
+    if (proves(rec)) {
+      provenRecordings.add(id);
+      if (!inv.has(id)) inv.add("recording", id);
+    } else {
+      report.skippedRecordings.push(id);
+      log.append({ source: "harness", type: "teardown.recording.skipped", data: { id, why: "not provably tied to an inventoried test call" } });
+      say(`   skipping recording ${id}: ownership not proven by call identifiers`);
     }
   }
   const order: [string, import("./inventory").ResourceType][] = [
@@ -106,6 +126,7 @@ export async function runTeardown(d: TeardownDeps): Promise<TeardownReport> {
   ];
   for (const [collection, type] of order) {
     for (const id of inv.idsOf(type)) {
+      if (type === "recording" && !provenRecordings.has(id)) continue;
       await client.request("DELETE", `/${collection}/${id}`);
       inv.markDeleted(id);
       report.deleted.push(id);

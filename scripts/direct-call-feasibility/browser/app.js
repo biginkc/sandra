@@ -1,7 +1,8 @@
 /* eslint-disable */
 // Local test page logic. Logs call IDs/options BEFORE answering. No secrets are stored.
 (async () => {
-  const out = document.getElementById("out");
+  const $ = (id) => document.getElementById(id);
+  const out = $("out");
   const say = (s) => { out.textContent += s + "\n"; out.scrollTop = out.scrollHeight; };
   const post = (type, data, callControlId) =>
     fetch("/browser-log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type, data, callControlId }) }).catch(() => {});
@@ -9,7 +10,48 @@
 
   const { token, sipUsername } = await (await fetch("/token")).json();
   const client = new TelnyxWebRTC.TelnyxRTC({ login_token: token });
+  // Remote audio MUST have an output element, or the rep hears nothing. Set before any call.
+  const audio = document.createElement("audio");
+  audio.id = "remoteAudio";
+  audio.autoplay = true;
+  audio.setAttribute("autoplay", "");
+  document.body.appendChild(audio);
+  client.remoteElement = audio;
   let current = null;
+  let statsTimer = null;
+
+  // Evidence for F1 two-way audio: WebRTC inbound/outbound audio counters, exposed on the page.
+  const audioStats = { inboundBytes: 0, inboundPackets: 0, audioLevel: 0, maxAudioLevel: 0, outboundBytes: 0, samples: 0 };
+  window.audioStats = audioStats;
+  async function collectAudioStats(call) {
+    const pc = call && ((call.peer && call.peer.instance) || (call.peer && call.peer.peerConnection));
+    if (!pc || typeof pc.getStats !== "function") return audioStats;
+    const report = await pc.getStats();
+    report.forEach((r) => {
+      if (r.kind !== "audio") return;
+      if (r.type === "inbound-rtp") {
+        audioStats.inboundBytes = r.bytesReceived || 0;
+        audioStats.inboundPackets = r.packetsReceived || 0;
+        if (typeof r.audioLevel === "number") { audioStats.audioLevel = r.audioLevel; audioStats.maxAudioLevel = Math.max(audioStats.maxAudioLevel, r.audioLevel); }
+      } else if (r.type === "outbound-rtp") audioStats.outboundBytes = r.bytesSent || 0;
+      else if (r.type === "media-source" && typeof r.audioLevel === "number") audioStats.maxAudioLevel = Math.max(audioStats.maxAudioLevel, r.audioLevel);
+    });
+    audioStats.samples++;
+    return audioStats;
+  }
+  window.collectAudioStats = () => collectAudioStats(current);
+  function startStats() {
+    if (statsTimer) return;
+    statsTimer = setInterval(async () => {
+      try {
+        await collectAudioStats(current);
+        const line = "audio in=" + audioStats.inboundBytes + "B level=" + audioStats.audioLevel.toFixed(3) + " out=" + audioStats.outboundBytes + "B";
+        $("stats") && ($("stats").textContent = line);
+        post("audio.stats", { ...audioStats });
+      } catch (e) {}
+    }, 2000);
+  }
+  function stopStats() { clearInterval(statsTimer); statsTimer = null; }
   const MAX_MS = 180000;
   let timer = null;
 
@@ -29,41 +71,61 @@
       post("call.state", { state: call.state });
       say("state: " + call.state);
     }
-    if (call.state === "active" && !timer) timer = setTimeout(() => call.hangup(), MAX_MS);
-    if (call.state === "destroy" || call.state === "hangup") { clearTimeout(timer); timer = null; current = null; }
+    if (call.state === "active") { startStats(); if (!timer) timer = setTimeout(() => call.hangup(), MAX_MS); }
+    if (call.state === "destroy" || call.state === "hangup") { clearTimeout(timer); timer = null; current = null; stopStats(); }
   });
   addEventListener("pagehide", () => { try { current && current.hangup(); } catch (e) {} });
   client.connect();
 
-  const $ = (id) => document.getElementById(id);
   $("answer").onclick = () => current && current.answer();
   $("hangup").onclick = () => current && current.hangup();
   $("hold").onclick = async () => { const r = await (current && current.hold()); say("hold() => " + r); post("hold.result", { r }); };
   $("unhold").onclick = async () => { const r = await (current && current.unhold()); say("unhold() => " + r); };
   $("sendDtmf").onclick = () => current && current.dtmf($("dtmf").value);
 
-  // F2 escape attempts. Targets are only those served by the local server (developer-owned).
-  const targets = await (await fetch("/escape-targets")).json();
+  // F2 escape probes. Buttons stay DISABLED until the local server says containment is confirmed
+  // for this run, and every probe is started through the server, which reserves budget and
+  // allows one outstanding probe at a time. The page never holds the target before the server grants it.
+  const labels = await (await fetch("/escape-targets")).json();
   const box = $("escapes");
-  for (const t of targets) {
-    const b = document.createElement("button");
-    b.textContent = "dial " + t.label;
-    b.onclick = () => {
-      post("escape.attempt", { label: t.label });
-      try {
-        const c = client.newCall({ destinationNumber: t.target, callerNumber: "" });
-        say("escape dial started: " + t.label);
-        setTimeout(() => { try { c.hangup(); } catch (e) {} }, 20000); // page hangs up its own call
-      } catch (e) { say("escape dial threw: " + e.message); post("escape.error", { label: t.label, message: e.message }); }
-    };
-    box.appendChild(b);
+  const buttons = [];
+  let busy = false;
+  const setEnabled = (ready, serverBusy) => buttons.forEach((b) => { b.disabled = !(ready && !serverBusy && !busy); });
+  async function refreshGate() {
+    try { const s = await (await fetch("/probe/status")).json(); setEnabled(!!s.ready, !!s.busy); } catch (e) { setEnabled(false, true); }
   }
-  const tr = document.createElement("button");
-  tr.textContent = "transfer attempt";
-  tr.onclick = () => {
-    const t = targets[0];
-    if (!current || typeof current.transfer !== "function") return say("transfer unavailable in this SDK or no call");
-    try { current.transfer(t.target); post("escape.attempt", { label: "transfer" }); } catch (e) { say("transfer threw: " + e.message); }
-  };
-  box.appendChild(tr);
+  async function runProbe(label, run) {
+    if (busy) return;
+    busy = true; setEnabled(false, true);
+    let grant = null;
+    try {
+      const r = await fetch("/probe/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label }) });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); say("probe refused: " + (e.error || r.status)); return; }
+      grant = await r.json();
+      post("escape.attempt", { label, probeId: grant.probeId });
+      try { await run(grant.target); } catch (e) { say("probe threw: " + e.message); post("escape.error", { label, message: e.message }); }
+    } finally {
+      if (grant) await fetch("/probe/finish", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ probeId: grant.probeId }) }).catch(() => {});
+      busy = false; refreshGate();
+    }
+  }
+  for (const label of labels) {
+    const b = document.createElement("button");
+    b.disabled = true;
+    b.textContent = (label === "transfer" ? "" : "dial ") + label;
+    b.onclick = () => runProbe(label, (target) => new Promise((resolve) => {
+      if (label === "transfer") {
+        if (!current || typeof current.transfer !== "function") { say("transfer unavailable in this SDK or no call"); return resolve(); }
+        current.transfer(target);
+        return setTimeout(resolve, 20000);
+      }
+      const c = client.newCall({ destinationNumber: target, callerNumber: "", remoteElement: audio });
+      say("escape dial started: " + label);
+      setTimeout(() => { try { c.hangup(); } catch (e) {} resolve(); }, 20000); // page hangs up its own call
+    }));
+    box.appendChild(b);
+    buttons.push(b);
+  }
+  refreshGate();
+  setInterval(refreshGate, 2000);
 })();

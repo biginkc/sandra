@@ -23,12 +23,14 @@ type Op =
   | { op: "add"; type: ResourceType; id: string; at: string }
   | { op: "deleted"; id: string; at: string }
   | { op: "role"; key: string; value: string }
-  | { op: "sip"; username: string };
+  | { op: "sip"; username: string }
+  | { op: "callref"; value: string };
 
 export class Inventory {
   private entries = new Map<string, Entry>();
   private roles = new Map<string, string>();
   private sip = new Set<string>();
+  private callRefs = new Set<string>();
   private file?: string;
 
   constructor(private dir?: string) {
@@ -49,6 +51,7 @@ export class Inventory {
       const e = this.entries.get(o.id);
       if (e) e.deletedAt = o.at;
     } else if (o.op === "role") this.roles.set(o.key, o.value);
+    else if (o.op === "callref") this.callRefs.add(o.value);
     else this.sip.add(o.username);
   }
 
@@ -92,6 +95,13 @@ export class Inventory {
 
   addSipUsername(username: string): void {
     if (!this.sip.has(username)) this.write({ op: "sip", username });
+  }
+  /** Records a call_control_id / call_leg_id / call_session_id of a call this harness placed. */
+  addCallRef(value: string | undefined): void {
+    if (value && !this.callRefs.has(value)) this.write({ op: "callref", value });
+  }
+  hasCallRef(value: unknown): boolean {
+    return typeof value === "string" && value !== "" && this.callRefs.has(value);
   }
   sipUsernames(): string[] {
     return [...this.sip];

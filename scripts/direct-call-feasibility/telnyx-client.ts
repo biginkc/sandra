@@ -219,6 +219,10 @@ export class TelnyxClient {
     const r = await this.request<any>("POST", "/calls", body);
     const id: string | undefined = r?.data?.call_control_id;
     if (id) inventory.add("call_leg", id);
+    // Remember every identifier of this call so teardown can prove recording ownership.
+    inventory.addCallRef(id);
+    inventory.addCallRef(r?.data?.call_leg_id);
+    inventory.addCallRef(r?.data?.call_session_id);
     return { opId, callControlId: id, callSessionId: r?.data?.call_session_id as string | undefined, raw: r };
   }
 }

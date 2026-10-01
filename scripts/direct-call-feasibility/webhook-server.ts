@@ -7,6 +7,7 @@ import path from "node:path";
 import { verifyTelnyxSignature } from "./webhook-verify";
 import { attachStreamServer, type StreamStats } from "./stream-server";
 import type { EventLog } from "./event-log";
+import type { ProbeGate } from "./probe-gate";
 
 export interface ServerDeps {
   publicKeyBase64: string;
@@ -14,8 +15,10 @@ export interface ServerDeps {
   stats: StreamStats;
   /** Returns the short-lived per-test credential token (never the API key). */
   getBrowserToken: () => Promise<{ token: string; sipUsername: string }>;
-  /** Targets the browser page may try for F2 escape probes (all developer-owned). */
-  escapeTargets: () => { label: string; target: string }[];
+  /** F2 escape probes are gated: armed per run, budget-reserved, one at a time. */
+  probeGate: ProbeGate;
+  /** Run-scoped random token required in the media stream URL path. */
+  streamToken: string;
   nowMs?: () => number;
 }
 
@@ -86,7 +89,24 @@ export function startServer(deps: ServerDeps, port: number): http.Server {
         return void res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(t));
       }
       if (req.method === "GET" && url === "/escape-targets") {
-        return void res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(deps.escapeTargets()));
+        return void res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(deps.probeGate.labels()));
+      }
+      if (req.method === "GET" && url === "/probe/status") {
+        return void res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(deps.probeGate.status()));
+      }
+      if (req.method === "POST" && url === "/probe/start") {
+        const body = JSON.parse((await readBody(req, 10_000)).toString("utf8"));
+        try {
+          const r = deps.probeGate.start(String(body.label ?? ""));
+          return void res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(r));
+        } catch (e) {
+          return void res.writeHead(409, { "Content-Type": "application/json" }).end(JSON.stringify({ error: (e as Error).message }));
+        }
+      }
+      if (req.method === "POST" && url === "/probe/finish") {
+        const body = JSON.parse((await readBody(req, 10_000)).toString("utf8"));
+        deps.probeGate.finish(String(body.probeId ?? ""), typeof body.outcome === "string" ? body.outcome.slice(0, 200) : undefined);
+        return void res.writeHead(204).end();
       }
       if (req.method === "POST" && url === "/browser-log") {
         const body = JSON.parse((await readBody(req, 100_000)).toString("utf8"));
@@ -98,7 +118,7 @@ export function startServer(deps: ServerDeps, port: number): http.Server {
       res.writeHead(500).end();
     }
   });
-  attachStreamServer(server, deps.log, deps.stats);
+  attachStreamServer(server, deps.log, deps.stats, { token: deps.streamToken });
   // Bind loopback only; the tunnel is started separately and points here.
   server.listen(port, "127.0.0.1");
   return server;

@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // Minimal receive-only WebSocket server (no dependency) for Telnyx media streams.
 // Logs the start-frame media format and per-track byte counts. Raw audio is never stored.
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
 import type { EventLog } from "./event-log";
@@ -11,8 +11,13 @@ export interface Frame {
   payload: Buffer;
 }
 
-/** Parses client (masked) frames; returns frames plus unconsumed remainder. */
-export function parseFrames(buf: Buffer): { frames: Frame[]; rest: Buffer } {
+export const MAX_FRAME_BYTES = 256 * 1024;
+export const MAX_BUFFER_BYTES = 1024 * 1024;
+
+export class OversizeError extends Error {}
+
+/** Parses client (masked) frames; throws OversizeError if a frame declares more than maxFrame bytes. */
+export function parseFrames(buf: Buffer, maxFrame = MAX_FRAME_BYTES): { frames: Frame[]; rest: Buffer } {
   const frames: Frame[] = [];
   let off = 0;
   while (buf.length - off >= 2) {
@@ -31,6 +36,7 @@ export function parseFrames(buf: Buffer): { frames: Frame[]; rest: Buffer } {
       len = Number(buf.readBigUInt64BE(p));
       p += 8;
     }
+    if (len > maxFrame) throw new OversizeError(`frame of ${len} bytes exceeds cap ${maxFrame}`);
     const maskLen = masked ? 4 : 0;
     if (buf.length - p < maskLen + len) break;
     const mask = masked ? buf.subarray(p, p + 4) : undefined;
@@ -68,9 +74,22 @@ export function handleStreamMessage(text: string, stats: StreamStats, log?: Even
   }
 }
 
-export function attachStreamServer(server: Server, log: EventLog, stats: StreamStats): void {
+/** True only for `/stream/<token>` (token also accepted as ?token=) with the exact run token. */
+export function streamTokenOk(url: string | undefined, token: string): boolean {
+  if (!url || !token) return false;
+  const u = new URL(url, "http://x");
+  const m = /^\/stream\/([^/]+)$/.exec(u.pathname);
+  const given = m ? decodeURIComponent(m[1]) : u.pathname === "/stream" ? (u.searchParams.get("token") ?? "") : "";
+  const a = Buffer.from(given);
+  const b = Buffer.from(token);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+export function attachStreamServer(server: Server, log: EventLog, stats: StreamStats, opts: { token: string; maxFrame?: number; maxBuffer?: number }): void {
+  const maxFrame = opts.maxFrame ?? MAX_FRAME_BYTES;
+  const maxBuffer = opts.maxBuffer ?? MAX_BUFFER_BYTES;
   server.on("upgrade", (req: IncomingMessage, socket: Duplex) => {
-    if (!req.url?.startsWith("/stream")) return void socket.destroy();
+    if (!streamTokenOk(req.url, opts.token)) return void socket.destroy();
     const key = req.headers["sec-websocket-key"];
     if (typeof key !== "string") return void socket.destroy();
     const accept = createHash("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
@@ -81,7 +100,13 @@ export function attachStreamServer(server: Server, log: EventLog, stats: StreamS
     let pending: Buffer = Buffer.alloc(0);
     let message: Buffer[] = [];
     socket.on("data", (chunk: Buffer) => {
-      const r = parseFrames(Buffer.concat([pending, chunk]));
+      if (pending.length + chunk.length > maxBuffer + maxFrame) return void socket.destroy();
+      let r: ReturnType<typeof parseFrames>;
+      try {
+        r = parseFrames(Buffer.concat([pending, chunk]), maxFrame);
+      } catch {
+        return void socket.destroy();
+      }
       pending = Buffer.from(r.rest);
       for (const f of r.frames) {
         if (f.opcode === 0x8) return void socket.end();

@@ -58,4 +58,39 @@ describe("teardown", () => {
     await expect(runTeardown({ client: t.client, inv: t.inv, cfg: t.config, log: t.log, say: () => {}, sleep: async () => {}, confirmAttempts: 2 })).rejects.toThrow(/NOT deleted/);
     expect(t.calls.some((c) => c.startsWith("DELETE"))).toBe(false);
   });
+
+  describe("recording deletion", () => {
+    const base = (recs: any[]) => (m: string, p: string) => {
+      if (p.includes("/active_calls")) return { data: [] };
+      if (p === "/calls/leg1") return { data: { is_alive: false } };
+      if (p.startsWith("/recordings?")) return { data: recs, meta: { total_pages: 1 } };
+    };
+    it("deletes only recordings whose call identifiers match an inventoried test call", async () => {
+      const t = setup(base([
+        { id: "recOK", call_session_id: "sess1" },
+        { id: "recLeg", call_leg_id: "legid1" },
+        { id: "recOther", call_session_id: "someone-elses" },
+        { id: "recNoIds" },
+      ]));
+      t.inv.addCallRef("sess1");
+      t.inv.addCallRef("legid1");
+      const rep = await runTeardown({ client: t.client, inv: t.inv, cfg: t.config, log: t.log, say: () => {}, sleep: async () => {}, confirmAttempts: 1 });
+      expect(t.calls).toContain("DELETE /recordings/recOK");
+      expect(t.calls).toContain("DELETE /recordings/recLeg");
+      expect(t.calls.some((c) => c.includes("recOther"))).toBe(false);
+      expect(t.calls.some((c) => c.includes("recNoIds"))).toBe(false);
+      expect(rep.skippedRecordings.sort()).toEqual(["recNoIds", "recOther"]);
+      expect(t.log.all().filter((e) => e.type === "teardown.recording.skipped")).toHaveLength(2);
+    });
+    it("does not delete an already-inventoried recording whose ownership cannot be proven", async () => {
+      const t = setup((m, p) => {
+        if (p.includes("/active_calls")) return { data: [] };
+        if (p === "/calls/leg1") return { data: { is_alive: false } };
+        if (p === "/recordings/recX") return { data: { id: "recX" } };
+      });
+      t.inv.add("recording", "recX");
+      await runTeardown({ client: t.client, inv: t.inv, cfg: t.config, log: t.log, say: () => {}, sleep: async () => {}, confirmAttempts: 1 });
+      expect(t.calls.some((c) => c === "DELETE /recordings/recX")).toBe(false);
+    });
+  });
 });

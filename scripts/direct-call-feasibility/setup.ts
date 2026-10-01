@@ -10,6 +10,7 @@ export class SetupError extends Error {}
 export async function runSetup(client: TelnyxClient, inv: Inventory, cfg: Config): Promise<void> {
   const tag = `dcf-test-${Date.now()}`;
   const { limits } = cfg;
+  inv.setRole(READY_ROLE, ""); // not ready until a read-back succeeds
 
   // Two profiles: disabled (on the browser connection), enabled + capped (on the Voice API app).
   const disabled = await client.request("POST", "/outbound_voice_profiles", {
@@ -64,11 +65,37 @@ export async function runSetup(client: TelnyxClient, inv: Inventory, cfg: Config
     }
   }
 
-  await verifyReadBack(client, inv, cfg);
+  await verifyAndMarkReady(client, inv, cfg);
+}
+
+export const READY_ROLE = "readyFingerprint";
+
+/** Read-back, and only on success persist the readiness flag (fingerprint of the verified settings). */
+export async function verifyAndMarkReady(client: TelnyxClient, inv: Inventory, cfg: Config): Promise<void> {
+  inv.setRole(READY_ROLE, "");
+  const fp = await verifyReadBack(client, inv, cfg);
+  inv.setRole(READY_ROLE, fp);
+}
+
+/**
+ * Called before every live flow and before token issuance. Re-reads the provider
+ * settings (GETs only) and refuses unless setup verified them AND they are unchanged.
+ */
+export async function assertReady(client: TelnyxClient, inv: Inventory, cfg: Config): Promise<void> {
+  const stored = inv.getRole(READY_ROLE);
+  if (!stored) throw new SetupError("not ready: setup has not completed a successful read-back; nothing will be dialed");
+  let fp: string;
+  try {
+    fp = await verifyReadBack(client, inv, cfg);
+  } catch (e) {
+    inv.setRole(READY_ROLE, "");
+    throw e;
+  }
+  if (fp !== stored) throw new SetupError("provider settings changed since setup verified them; nothing will be dialed (re-run setup review)");
 }
 
 /** Refuses to proceed unless cap, limit, enabled flags and attachments read back as set. */
-export async function verifyReadBack(client: TelnyxClient, inv: Inventory, cfg: Config): Promise<void> {
+export async function verifyReadBack(client: TelnyxClient, inv: Inventory, cfg: Config): Promise<string> {
   const need = (k: string) => {
     const v = inv.getRole(k);
     if (!v) throw new SetupError(`missing inventory role ${k}`);
@@ -87,4 +114,11 @@ export async function verifyReadBack(client: TelnyxClient, inv: Inventory, cfg: 
   if (conn.sip_uri_calling_preference !== "internal") problems.push("connection sip_uri_calling_preference is not internal");
   if (app.outbound?.outbound_voice_profile_id !== need("cappedProfileId")) problems.push("app is not on the capped profile");
   if (problems.length) throw new SetupError(`read-back mismatch, nothing will be dialed: ${problems.join("; ")}`);
+  // Stable fingerprint of exactly the safety-relevant settings that were verified.
+  return JSON.stringify({
+    disabled: [need("disabledProfileId"), dis.enabled],
+    capped: [need("cappedProfileId"), cap.enabled, Number(cap.daily_spend_limit), cap.daily_spend_limit_enabled, Number(cap.concurrent_call_limit)],
+    connection: [need("connectionId"), conn.outbound?.outbound_voice_profile_id, conn.sip_uri_calling_preference],
+    app: [need("appId"), app.outbound?.outbound_voice_profile_id],
+  });
 }

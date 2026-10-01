@@ -10,7 +10,9 @@ import { Budget } from "./budget";
 import { EventLog } from "./event-log";
 import { TelnyxClient } from "./telnyx-client";
 import { runPreflight } from "./preflight";
-import { runSetup } from "./setup";
+import { randomBytes } from "node:crypto";
+import { runSetup, assertReady } from "./setup";
+import { ProbeGate } from "./probe-gate";
 import { runTeardown } from "./teardown";
 import { startServer } from "./webhook-server";
 import { FLOWS } from "./flows";
@@ -64,23 +66,31 @@ async function main(): Promise<void> {
   else {
     if (!live) { console.log(`dry-run: would run ${cmd} (requires setup, a running tunnel and the browser page)`); return; }
     const stats = { startFrames: [] as unknown[], bytesByTrack: {} as Record<string, number> };
+    const streamToken = randomBytes(24).toString("base64url");
+    const ensureReady = () => assertReady(client, inv, cfg);
+    // Refuse before anything is served or dialed unless setup's read-back passed and still holds.
+    await ensureReady();
+    const probeGate = new ProbeGate({
+      budget, log,
+      targets: () => [
+        { label: "owned phone (PSTN)", target: cfg.testPhones[0] },
+        ...(inv.getRole("escapeSipUsername") ? [{ label: "on-account SIP", target: `sip:${inv.getRole("escapeSipUsername")}@sip.telnyx.com` }] : []),
+        ...cfg.devSipEndpoints.map((e) => ({ label: "external dev SIP", target: e })),
+      ],
+    });
     const server = startServer({
-      publicKeyBase64: cfg.publicKey, log, stats,
+      publicKeyBase64: cfg.publicKey, log, stats, probeGate, streamToken,
       getBrowserToken: async () => {
+        await ensureReady(); // re-verify provider settings before every token issuance
         const id = inv.getRole("browserCredentialId");
         if (!id) throw new Error("run setup first");
         const t = await client.request<string>("POST", `/telephony_credentials/${id}/token`);
         return { token: typeof t === "string" ? t : String((t as any).data ?? ""), sipUsername: inv.getRole("browserSipUsername") ?? "" };
       },
-      escapeTargets: () => [
-        { label: "owned phone (PSTN)", target: cfg.testPhones[0] },
-        ...(inv.getRole("escapeSipUsername") ? [{ label: "on-account SIP", target: `sip:${inv.getRole("escapeSipUsername")}@sip.telnyx.com` }] : []),
-        ...cfg.devSipEndpoints.map((e) => ({ label: "external dev SIP", target: e })),
-      ],
     }, Number(process.env.DIRECT_CALL_LOCAL_PORT ?? 8787));
     console.log("Local server on http://localhost:8787 (open this in the browser). Point your separately started tunnel at it.");
     try {
-      await FLOWS[cmd]({ client, inv, cfg, log, stats, ask, say: console.log });
+      await FLOWS[cmd]({ client, inv, cfg, log, stats, streamToken, probeGate, ensureReady, ask, say: console.log });
     } finally {
       server.close();
     }

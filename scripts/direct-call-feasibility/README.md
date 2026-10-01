@@ -20,6 +20,8 @@ Not imported by the app. Plain TypeScript run with `tsx`, Node built-ins only (t
 
 Inject the key into the run process only (for example from your secret manager in the same command line); do not export it into your shell profile. The harness never spawns child processes; if one is ever added it must use `childEnv()` in `run.ts`, which strips `TELNYX_API_KEY` and `OP_SERVICE_ACCOUNT_TOKEN`.
 
+**The tunnel must be the only ingress.** Point it at `localhost:8787` and expose nothing else; do not port-forward, bind other interfaces or add a second proxy. The server binds loopback only and treats any request carrying forwarded headers or a non-local Host as tunnelled (404 for everything but the signed `/webhook` and the token-guarded `/stream/<token>`).
+
 ## Run order
 
 Run from the repo root: `npx tsx scripts/direct-call-feasibility/run.ts <command> [--live]`
@@ -39,6 +41,11 @@ Run `teardown` after any failure or stop condition too.
 - Dial targets are only: `DIRECT_CALL_TEST_PHONES`, a test credential SIP username on the test connection, or a developer-owned SIP endpoint. Every Dial sets `time_limit_secs` (max leg duration) and a ring `timeout_secs`. Dial only from the configured caller ID. No real prospects or leads.
 - One test call at a time. A limit-style rejection is recorded as inconclusive and reported, not worked around. An uncertain Dial outcome is reconciled by lookup, never re-sent.
 - F2: each escape probe runs only after a provider-side duration bound at or below the max leg duration is shown. Untested probe = F2 not passed.
+- Readiness: `setup` persists a readiness flag only after the read-only read-back of cap, limit, enabled flags and attachments succeeds. Every live flow and every browser token issuance re-reads those settings (GETs only) and refuses if setup never passed or anything changed.
+- F2 probe buttons stay disabled until the F2 flow arms the local server for the current run (after the containment bound is shown). Each probe starts via the server, which reserves an attempt and estimated spend, allows one outstanding probe at a time, and logs `escape.probe.*` events.
+- Media stream: the stream URL carries a run-scoped random token (`/stream/<token>`); other paths/tokens are dropped, and frame/buffer sizes are capped.
+- Teardown deletes a recording only if its call_control_id / call_leg_id / call_session_id matches a call recorded in the inventory; anything ambiguous is skipped and logged (`teardown.recording.skipped`).
+- The browser page plays remote audio through an `<audio autoplay>` element and shows WebRTC inbound/outbound audio byte counts and audioLevel (also logged as `audio.stats`) as F1 two-way-audio evidence.
 - The webhook server verifies the Ed25519 signature (5-minute tolerance) and dedupes on event id. The page, token and config are served to localhost only.
 - Spend: the harness counts attempts and an ESTIMATED spend (configurable per-minute figure, reserved per Dial at full leg duration) and refuses past 60 attempts or $25. This is an estimate; the provider-side daily cap on the enabled profile is a backstop, and live legs are ended by `time_limit_secs`.
 - Recording only with the consenting owned test participants; test recordings are deleted at teardown.

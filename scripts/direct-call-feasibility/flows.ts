@@ -8,6 +8,7 @@ import type { EventLog, LoggedEvent } from "./event-log";
 import type { Inventory } from "./inventory";
 import type { TelnyxClient } from "./telnyx-client";
 import type { StreamStats } from "./stream-server";
+import type { ProbeGate } from "./probe-gate";
 
 export interface FlowCtx {
   client: TelnyxClient;
@@ -15,6 +16,10 @@ export interface FlowCtx {
   cfg: Config;
   log: EventLog;
   stats: StreamStats;
+  streamToken: string;
+  probeGate: ProbeGate;
+  /** Re-verifies provider settings (read-only GETs); throws if not ready or changed. */
+  ensureReady: () => Promise<void>;
   ask: (q: string) => Promise<string>;
   say: (s: string) => void;
 }
@@ -34,6 +39,7 @@ function phone(ctx: FlowCtx, i = 0): string {
 
 /** Server dials the browser SIP username, waits for answer, then dials the phone with link_to. */
 async function placeBridged(ctx: FlowCtx, clientState?: string) {
+  await ctx.ensureReady();
   const sip = ctx.inv.getRole("browserSipUsername");
   if (!sip) throw new Error("run setup first");
   const t0 = Date.now();
@@ -74,18 +80,26 @@ export async function f2(ctx: FlowCtx): Promise<void> {
   const bound = ctx.cfg.limits.maxLegSecs;
   const conn = ctx.inv.getRole("connectionId");
   if (!conn) throw new Error("run setup first");
+  await ctx.ensureReady(); // read-back of cap, limit, attachments, SIP preference must pass now
   const dis = (await ctx.client.request("GET", `/outbound_voice_profiles/${ctx.inv.getRole("disabledProfileId")}`)).data;
   record(ctx, "F2-bound", { disabledProfileEnabled: dis.enabled, requiredMaxLegSecs: bound });
   const proof = await ctx.ask(`A provider-side duration bound at or below ${bound}s must exist for browser-originated legs. Confirmed shown by read-back? (y/n; n = probes NOT run, F2 not passed) `);
   if (!yes(proof)) { record(ctx, "F2", { result: "NOT RUN: containment bound not shown; F2 not passed" }); return; }
-  for (const probe of ["pstn", "on-account-sip", "external-sip", "transfer"]) {
-    await ctx.ask(`In the browser page, run the "${probe}" escape attempt (registered, spare capacity), then press Enter. `);
-    const legs = ((await ctx.client.request("GET", `/connections/${conn}/active_calls`)).data as any[]) ?? [];
-    for (const l of legs) { ctx.inv.add("call_leg", l.call_control_id); }
-    await endLegs(ctx, legs.map((l) => l.call_control_id));
-    const code = await ctx.ask("Provider rejection code/reason shown in the page log (or 'none'): ");
-    const valid = await ctx.ask("Was it a valid request to a known-working owned destination from a registered browser? (y/n) ");
-    record(ctx, "F2", { probe, legsFoundAndEnded: legs.map((l) => l.call_control_id), code, validRequest: yes(valid), note: "inconclusive unless reason is attributable to the restriction" });
+  // Only now can the browser page start probes; each one reserves budget server-side, one at a time.
+  ctx.probeGate.arm();
+  try {
+    for (const probe of ["pstn", "on-account-sip", "external-sip", "transfer"]) {
+      await ctx.ask(`In the browser page, run the "${probe}" escape attempt (registered, spare capacity), then press Enter. `);
+      await ctx.ensureReady();
+      const legs = ((await ctx.client.request("GET", `/connections/${conn}/active_calls`)).data as any[]) ?? [];
+      for (const l of legs) { ctx.inv.add("call_leg", l.call_control_id); ctx.inv.addCallRef(l.call_control_id); ctx.inv.addCallRef(l.call_leg_id); ctx.inv.addCallRef(l.call_session_id); }
+      await endLegs(ctx, legs.map((l) => l.call_control_id));
+      const code = await ctx.ask("Provider rejection code/reason shown in the page log (or 'none'): ");
+      const valid = await ctx.ask("Was it a valid request to a known-working owned destination from a registered browser? (y/n) ");
+      record(ctx, "F2", { probe, legsFoundAndEnded: legs.map((l) => l.call_control_id), code, validRequest: yes(valid), note: "inconclusive unless reason is attributable to the restriction" });
+    }
+  } finally {
+    ctx.probeGate.disarm();
   }
 }
 
@@ -100,6 +114,7 @@ export async function f3(ctx: FlowCtx): Promise<void> {
 }
 
 async function placeBridgedBrowserOnly(ctx: FlowCtx): Promise<string | undefined> {
+  await ctx.ensureReady();
   const sip = ctx.inv.getRole("browserSipUsername");
   if (!sip) throw new Error("run setup first");
   const rep = await ctx.client.dial({ to: `sip:${sip}@sip.telnyx.com`, clientState: "f3-marker" });
@@ -111,7 +126,7 @@ async function placeBridgedBrowserOnly(ctx: FlowCtx): Promise<string | undefined
 export async function f4(ctx: FlowCtx): Promise<void> {
   const r = await placeBridged(ctx);
   if (!r.ok || !r.seller.callControlId) return record(ctx, "F4", { failed: r.reason });
-  const wsUrl = `${ctx.cfg.publicBaseUrl.replace(/^https/, "wss")}/stream`;
+  const wsUrl = `${ctx.cfg.publicBaseUrl.replace(/^https/, "wss")}/stream/${ctx.streamToken}`;
   await ctx.client.request("POST", `/calls/${r.seller.callControlId}/actions/streaming_start`, { stream_url: wsUrl, stream_track: "both_tracks" });
   await ctx.ask("Speak a marker on the rep (browser) side only for 5s, then the phone side only for 5s. Press Enter. ");
   record(ctx, "F4", { startFrames: ctx.stats.startFrames, bytesByTrack: ctx.stats.bytesByTrack });

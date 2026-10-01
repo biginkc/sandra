@@ -5,7 +5,7 @@ import { createPublicKey, verify } from "node:crypto";
 const SPKI_ED25519_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 export const TOLERANCE_SECS = 300;
 
-export type VerifyResult = { ok: true } | { ok: false; reason: "bad-key" | "missing-headers" | "expired" | "bad-signature" };
+export type VerifyResult = { ok: true } | { ok: false; reason: "bad-key" | "missing-headers" | "bad-timestamp" | "expired" | "bad-signature" };
 
 export function verifyTelnyxSignature(opts: {
   publicKeyBase64: string;
@@ -17,7 +17,8 @@ export function verifyTelnyxSignature(opts: {
   if (!opts.signatureBase64 || !opts.timestamp) return { ok: false, reason: "missing-headers" };
   const ts = Number(opts.timestamp);
   const now = Math.floor((opts.nowMs ?? Date.now()) / 1000);
-  if (!Number.isFinite(ts) || Math.abs(now - ts) > TOLERANCE_SECS) return { ok: false, reason: "expired" };
+  if (!/^\d+$/.test(opts.timestamp) || !Number.isFinite(ts)) return { ok: false, reason: "bad-timestamp" };
+  if (Math.abs(now - ts) > TOLERANCE_SECS) return { ok: false, reason: "expired" };
   let key;
   try {
     const raw = Buffer.from(opts.publicKeyBase64, "base64");
