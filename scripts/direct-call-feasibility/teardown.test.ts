@@ -5,6 +5,7 @@ import { TelnyxClient } from "./telnyx-client";
 import { EventLog } from "./event-log";
 import { Budget } from "./budget";
 import { cfg, inventory, jsonRes } from "./test-helpers";
+import { encodeDialClientState } from "./inventory";
 
 function setup(handler: (method: string, url: string) => any) {
   const calls: string[] = [];
@@ -127,7 +128,7 @@ describe("teardown", () => {
 });
 
 describe("unresolved Dial inventory", () => {
-  const CS = Buffer.from("cs-1").toString("base64");
+  const CS = encodeDialClientState("op1", "cs-1");
   const addUnresolved = (t: ReturnType<typeof setup>, at: number, over: Record<string, any> = {}) =>
     t.inv.addUnresolvedDial({ opId: "op1", clientState: CS, role: "seller", at, ringTimeoutSecs: 30, timeLimitSecs: 180, ...over });
   const empty = (m: string, p: string) => {
@@ -143,9 +144,11 @@ describe("unresolved Dial inventory", () => {
     const inv = lost.inv;
     const fetchLost = vi.fn(async () => { seen.push(inv.unresolvedDials().length); throw new Error("socket hang up"); });
     const c1 = new TelnyxClient({ config: lost.config, inventory: lost.inv, dryRun: false, fetchImpl: fetchLost as any, log: () => {} });
-    await expect(c1.dial({ to: lost.config.testPhones[0], role: "seller", clientState: "cs-1" })).rejects.toThrow();
+    await expect(c1.dial({ to: lost.config.testPhones[0], role: "seller", flow: "cs-1" })).rejects.toThrow();
     expect(seen).toEqual([1]); // record existed when the request was sent
-    expect(lost.inv.unresolvedDials()).toMatchObject([{ role: "seller", clientState: CS }]);
+    const rec = lost.inv.unresolvedDials()[0];
+    expect(rec.role).toBe("seller");
+    expect(JSON.parse(Buffer.from(rec.clientState, "base64").toString("utf8"))).toEqual({ op: rec.opId, flow: "cs-1" });
 
     const ok = setup(() => ({ data: { call_control_id: "newleg" } }));
     await ok.client.dial({ to: ok.config.testPhones[0] });
@@ -217,5 +220,38 @@ describe("unresolved Dial inventory", () => {
     await run(t, 1_000_000);
     expect(t.inv.unresolvedDials()).toHaveLength(0);
     expect(t.log.all().some((e) => (e.data as any)?.by === "empty_listings" || (e.data as any)?.by === "resolved_by_time_limit")).toBe(true);
+  });
+
+  it("the same flow label never makes an older leg resolve a newer lost Dial: matching is on the unique operation id", async () => {
+    const olderLeg = encodeDialClientState("older-op", "f3-marker");
+    const t = setup((m, p) => {
+      if (p.includes("/active_calls")) return { data: [{ call_control_id: "older", client_state: olderLeg }] };
+      if ((p === "/calls/older" || p === "/calls/leg1") && m === "GET") return { data: { is_alive: false } };
+    });
+    // Two real Dials with the same flow label carry distinct client_state values.
+    const ok = setup(() => ({ data: { call_control_id: "x" } }));
+    const bodies: any[] = [];
+    const c = new TelnyxClient({ config: ok.config, inventory: ok.inv, dryRun: false, fetchImpl: (async (_u: any, init: any) => { bodies.push(JSON.parse(init.body)); return jsonRes({ data: { call_control_id: "x" } }); }) as any, log: () => {} });
+    await c.dial({ to: ok.config.testPhones[0], flow: "f3-marker" });
+    await c.dial({ to: ok.config.testPhones[0], flow: "f3-marker" });
+    expect(bodies[0].client_state).not.toBe(bodies[1].client_state);
+
+    t.inv.addUnresolvedDial({ opId: "newer-op", clientState: encodeDialClientState("newer-op", "f3-marker"), role: "browser", at: 1_000_000 - 46_000, ringTimeoutSecs: 30, timeLimitSecs: 180 });
+    await run(t, 1_000_000);
+    // The listed older leg was not adopted as the newer Dial's leg; only the two empty-for-its-op rounds resolve it.
+    expect(t.log.all().some((e) => e.type === "teardown.unresolved_dial.adopted")).toBe(false);
+    expect(t.inv.unresolvedDials()).toHaveLength(0);
+  });
+
+  it("a listing failure still lets the time_limit_secs + 60s backstop resolve an expired record, and is then rethrown (never counted as empty)", async () => {
+    const t = setup((m, p) => (p.includes("/active_calls") ? jsonRes({ errors: [] }, 503) : undefined));
+    addUnresolved(t, 1_000_000 - 241_000);
+    await expect(run(t, 1_000_000)).rejects.toThrow();
+    expect(t.inv.unresolvedDials()).toHaveLength(0);
+    // A not-yet-expired record is NOT resolved by a failed listing.
+    const t2 = setup((m, p) => (p.includes("/active_calls") ? jsonRes({ errors: [] }, 503) : undefined));
+    addUnresolved(t2, 1_000_000 - 100_000);
+    await expect(run(t2, 1_000_000)).rejects.toThrow();
+    expect(t2.inv.unresolvedDials()).toHaveLength(1);
   });
 });

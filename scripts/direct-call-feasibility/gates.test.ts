@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ProbeGate } from "./probe-gate";
 import { Budget } from "./budget";
 import { EventLog } from "./event-log";
-import { assertReady, verifyAndMarkReady, READY_ROLE, BOUND_ROLE, readBrowserLegBound } from "./setup";
+import { assertReady, verifyAndMarkReady, READY_ROLE, BOUND_ROLE, readBrowserLegBound, DOCUMENTED_BROWSER_LEG_DURATION_FIELDS } from "./setup";
 import { f2 } from "./flows";
 import { attachStreamServer, parseFrames, streamTokenOk, OversizeError } from "./stream-server";
 import { verifyTelnyxSignature } from "./webhook-verify";
@@ -318,28 +318,36 @@ describe("browser-originated leg bound (F2 containment)", () => {
     expect(g.status().locked).toBe(true);
   });
 
-  it("readBrowserLegBound: nothing configured, missing, or above D2 max is not a bound", () => {
-    const res = { connection: { outbound: { max_secs: 120 } }, disabledProfile: { cap: "90" } };
+  it("readBrowserLegBound: the documented-field allowlist is empty, so no field ever yields a bound", () => {
+    const res = { connection: { outbound: { max_secs: 120, channel_limit: 5 }, max_secs: 120 }, disabledProfile: { cap: "90", concurrent_call_limit: 3 } };
+    expect(DOCUMENTED_BROWSER_LEG_DURATION_FIELDS).toEqual([]);
     expect(readBrowserLegBound(res, cfg())).toBeUndefined();
-    expect(readBrowserLegBound(res, cfg({ DIRECT_CALL_BROWSER_BOUND_FIELD: "connection:outbound.nope" }))).toBeUndefined();
-    expect(readBrowserLegBound({ ...res, connection: { outbound: { max_secs: 14400 } } }, cfg({ DIRECT_CALL_BROWSER_BOUND_FIELD: "connection:outbound.max_secs" }))).toBeUndefined();
-    expect(readBrowserLegBound(res, cfg({ DIRECT_CALL_BROWSER_BOUND_FIELD: "connection:outbound.max_secs" }))).toBe(120);
-    expect(readBrowserLegBound(res, cfg({ DIRECT_CALL_BROWSER_BOUND_FIELD: "disabledProfile:cap" }))).toBe(90);
+    // An arbitrary numeric field, even one named in the old env var, is never a bound.
+    expect(readBrowserLegBound(res, cfg({ DIRECT_CALL_BROWSER_BOUND_FIELD: "connection:outbound.max_secs" }))).toBeUndefined();
+    expect(readBrowserLegBound(res, cfg({ DIRECT_CALL_BROWSER_BOUND_FIELD: "disabledProfile:cap" }))).toBeUndefined();
   });
 
-  it("readiness records the bound from read-back (empty when unverifiable) and refuses if it changes", async () => {
+  it("readBrowserLegBound: the mechanism only reads an allowlisted field and still enforces the D2 maximum", () => {
+    const res = { connection: { outbound: { max_secs: 120 } }, disabledProfile: { cap: "90" } };
+    expect(readBrowserLegBound(res, cfg(), ["connection:outbound.nope"])).toBeUndefined();
+    expect(readBrowserLegBound({ ...res, connection: { outbound: { max_secs: 14400 } } }, cfg(), ["connection:outbound.max_secs"])).toBeUndefined();
+    expect(readBrowserLegBound(res, cfg(), ["connection:outbound.max_secs"])).toBe(120);
+    expect(readBrowserLegBound(res, cfg(), ["disabledProfile:cap"])).toBe(90);
+  });
+
+  it("readiness never records a bound from an arbitrary numeric field, and a changed field does not refuse readiness", async () => {
     const config = cfg({ DIRECT_CALL_BROWSER_BOUND_FIELD: "connection:max_secs" });
     const { inv } = readyInv(config);
     const { client, state } = provider();
     await verifyAndMarkReady(client, inv, config);
     expect(inv.getRole(BOUND_ROLE)).toBe("");
     state.conn.max_secs = 120;
-    await expect(assertReady(client, inv, config)).rejects.toThrow(/changed/);
+    await assertReady(client, inv, config);
     await verifyAndMarkReady(client, inv, config);
-    expect(inv.getRole(BOUND_ROLE)).toBe("120");
+    expect(inv.getRole(BOUND_ROLE)).toBe("");
   });
 
-  it("F2 records 'not executed - no verified duration bound', never arms the gate, never asks the operator", async () => {
+  it("F2 records 'not executed - no documented provider duration bound', never arms the gate, never asks the operator", async () => {
     const config = cfg();
     const { inv } = readyInv(config);
     const { client } = provider();
@@ -347,7 +355,7 @@ describe("browser-originated leg bound (F2 containment)", () => {
     const said: string[] = [];
     const ask = vi.fn(async () => "y");
     await f2({ client, inv, cfg: config, log, stats: {} as any, streamToken: "t", probeGate: g, sourceLegs: [], ensureReady: async () => {}, ask, say: (s) => said.push(s) });
-    expect(said.join("\n")).toMatch(/not executed - no verified duration bound/);
+    expect(said.join("\n")).toMatch(/not executed - no documented provider duration bound/);
     expect(ask).not.toHaveBeenCalled();
     expect(g.status().ready).toBe(false);
   });

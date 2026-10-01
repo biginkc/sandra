@@ -19,6 +19,24 @@ export interface Entry {
   deletedAt?: string;
 }
 
+/** Every Dial's client_state is base64(JSON {op, flow}); `op` is the unique operation id, `flow` a free label. */
+export function encodeDialClientState(op: string, flow?: string): string {
+  return Buffer.from(JSON.stringify({ op, flow: flow ?? "dial" })).toString("base64");
+}
+
+/** The operation id a provider-reported client_state (base64 or already decoded) carries, if any. */
+export function clientStateOpId(cs: unknown): string | undefined {
+  if (typeof cs !== "string" || !cs) return undefined;
+  for (const text of [Buffer.from(cs, "base64").toString("utf8"), cs]) {
+    try {
+      const v: unknown = JSON.parse(text);
+      const op = v && typeof v === "object" ? (v as { op?: unknown }).op : undefined;
+      if (typeof op === "string") return op;
+    } catch { /* not JSON: try the next form */ }
+  }
+  return undefined;
+}
+
 export interface UnresolvedDial {
   /** Operation id (also the Dial command_id). */
   opId: string;

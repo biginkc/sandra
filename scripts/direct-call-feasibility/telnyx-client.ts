@@ -5,7 +5,7 @@
 // network call. Authorization is redacted in every log and error.
 import { randomUUID } from "node:crypto";
 import type { Config } from "./env";
-import { Inventory } from "./inventory";
+import { Inventory, encodeDialClientState } from "./inventory";
 import { redactText } from "./redact";
 import { Budget } from "./budget";
 
@@ -195,7 +195,7 @@ export class TelnyxClient {
    * comes from a durable operation UUID; the same operation is never sent twice by
    * this process (an uncertain outcome is reconciled by lookup, not re-sent).
    */
-  async dial(params: { opId?: string; to: string; linkTo?: string; bridgeOnAnswer?: boolean; bridgeIntent?: boolean; clientState?: string; role?: string }) {
+  async dial(params: { opId?: string; to: string; linkTo?: string; bridgeOnAnswer?: boolean; bridgeIntent?: boolean; flow?: string; role?: string }) {
     const { config, inventory, budget } = this.opts;
     const opId = params.opId ?? randomUUID();
     if (this.sentOps.has(opId)) throw new GuardError("operation already sent; reconcile by lookup instead of re-dialing");
@@ -212,8 +212,9 @@ export class TelnyxClient {
       body.bridge_on_answer = params.bridgeOnAnswer ?? true;
       body.bridge_intent = params.bridgeIntent ?? false;
     }
-    // Every Dial carries a client_state so an unresolved Dial can later be matched to its leg.
-    const clientState = Buffer.from(params.clientState ?? `dcf-${opId}`).toString("base64");
+    // Every Dial carries a client_state embedding its UNIQUE operation id (flow is only a label), so an
+    // unresolved Dial can later be matched to its own leg and never to an older leg of the same flow.
+    const clientState = encodeDialClientState(opId, params.flow);
     body.client_state = clientState;
     assertAllowed("POST", "/calls", body, inventory, config); // validate before spending budget
     budget?.reserveAttempt();

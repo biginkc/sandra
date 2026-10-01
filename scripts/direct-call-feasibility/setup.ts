@@ -130,18 +130,35 @@ export async function verifyReadBack(client: TelnyxClient, inv: Inventory, cfg: 
 export const BOUND_ROLE = "browserLegBoundSecs";
 
 /**
- * A provider-enforced duration bound for browser-originated legs, read back from the configured field on the
- * test connection or disabled profile. Returns it only if numeric, positive and <= D2's maximum leg duration.
- * Nothing is assumed: no configured field, a missing value, or an out-of-range value means "no verified bound".
+ * Allowlist of DOCUMENTED provider fields that bound the duration of a browser-originated leg, as
+ * "connection:<dotted.path>" or "disabledProfile:<dotted.path>". Currently EMPTY on purpose: read-only
+ * research of the Telnyx OpenAPI spec and @telnyx/webrtc 2.27.1 (as of 2026-10-01) found no documented
+ * provider-enforced duration field for browser-originated legs on a credential connection or outbound
+ * voice profile. `outbound.channel_limit` / `concurrent_call_limit` bound concurrency, and `inbound.timeout_*`
+ * are ring/setup timers; neither is a duration bound. Add a path here only when Telnyx documents one.
+ * No environment variable or free-form field can extend it.
  */
-export function readBrowserLegBound(resources: { connection: any; disabledProfile: any }, cfg: Config): number | undefined {
-  const spec = cfg.browserBoundField;
-  if (!spec) return undefined;
-  const [src, ...rest] = spec.split(":");
-  const root = src === "connection" ? resources.connection : src === "disabledProfile" ? resources.disabledProfile : undefined;
-  if (!root || rest.length === 0) return undefined;
-  let v: any = root;
-  for (const k of rest.join(":").split(".")) v = v?.[k];
-  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
-  return Number.isFinite(n) && n > 0 && n <= cfg.limits.maxLegSecs ? n : undefined;
+export const DOCUMENTED_BROWSER_LEG_DURATION_FIELDS: readonly string[] = [];
+
+/**
+ * A provider-enforced duration bound for browser-originated legs, read back from a documented field on the
+ * test connection or disabled profile. Returns it only if numeric, positive and <= D2's maximum leg duration.
+ * Nothing is assumed: with the allowlist empty (today) this is always undefined, so escape probes stay
+ * disabled and F2 records "not executed - no documented provider duration bound".
+ */
+export function readBrowserLegBound(
+  resources: { connection: any; disabledProfile: any },
+  cfg: Config,
+  fields: readonly string[] = DOCUMENTED_BROWSER_LEG_DURATION_FIELDS,
+): number | undefined {
+  for (const spec of fields) {
+    const [src, ...rest] = spec.split(":");
+    const root = src === "connection" ? resources.connection : src === "disabledProfile" ? resources.disabledProfile : undefined;
+    if (!root || rest.length === 0) continue;
+    let v: any = root;
+    for (const k of rest.join(":").split(".")) v = v?.[k];
+    const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+    if (Number.isFinite(n) && n > 0 && n <= cfg.limits.maxLegSecs) return n;
+  }
+  return undefined;
 }

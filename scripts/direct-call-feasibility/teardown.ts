@@ -7,7 +7,7 @@ import type { Budget } from "./budget";
 import type { TelnyxClient } from "./telnyx-client";
 import { listActiveCalls } from "./leg-reconcile";
 import { confirmLegEnded, isAlreadyEnded } from "./leg-confirm";
-import type { UnresolvedDial } from "./inventory";
+import { clientStateOpId, type UnresolvedDial } from "./inventory";
 import { SNAPSHOT_FILE, type Snapshot } from "./preflight";
 
 export interface TeardownDeps {
@@ -48,8 +48,7 @@ export async function runTeardown(d: TeardownDeps): Promise<TeardownReport> {
   const found: { ccid: string; scope: string }[] = [];
   const clock = d.now ?? Date.now;
   const csMatches = (item: any, dial: UnresolvedDial): boolean => {
-    const cs = item?.client_state;
-    return typeof cs === "string" && (cs === dial.clientState || cs === Buffer.from(dial.clientState, "base64").toString("utf8"));
+    return clientStateOpId(item?.client_state) === dial.opId;
   };
   const adopt = (dial: UnresolvedDial, ccid: string, by: string) => {
     inv.add("call_leg", ccid);
@@ -71,14 +70,17 @@ export async function runTeardown(d: TeardownDeps): Promise<TeardownReport> {
     }
     return matched;
   };
-  const roundA = await listRound();
-  sweep(roundA);
+  // A listing failure must not stop the time_limit_secs + 60s backstop from resolving an expired record,
+  // but it never counts as an empty listing: it is rethrown after the backstop has run.
+  let listErr: unknown;
+  let roundA: { ccid: string; scope: string; item: any }[] = [];
+  try { roundA = await listRound(); sweep(roundA); } catch (e) { listErr = e; }
   // A webhook carrying an unresolved Dial's client_state reveals its leg.
   for (const e of log.all()) {
     if (e.source !== "webhook" || !e.callControlId) continue;
     const cs = (e.data as any)?.payload?.client_state;
     for (const dial of inv.unresolvedDials()) {
-      if (typeof cs === "string" && (cs === dial.clientState || cs === Buffer.from(dial.clientState, "base64").toString("utf8"))) adopt(dial, e.callControlId, "webhook");
+      if (clientStateOpId(cs) === dial.opId) adopt(dial, e.callControlId, "webhook");
     }
   }
   // Remaining unresolved Dials: resolved only by (a) ring timeout + 15s elapsed AND a second consecutive complete
@@ -86,15 +88,17 @@ export async function runTeardown(d: TeardownDeps): Promise<TeardownReport> {
   const remaining = inv.unresolvedDials();
   if (remaining.length) {
     const ringElapsed = remaining.filter((x) => clock() >= x.at + (x.ringTimeoutSecs + 15) * 1000);
-    if (ringElapsed.length) {
+    if (ringElapsed.length && listErr === undefined) {
       await sleep(2000);
-      const roundB = await listRound();
-      sweep(roundB);
+      let roundB: { ccid: string; scope: string; item: any }[] = [];
+      try { roundB = await listRound(); sweep(roundB); } catch (e) { listErr = e; }
+      if (listErr === undefined) {
       for (const dial of ringElapsed) {
         if (dial.resolvedAt || inv.unresolvedDials().every((u) => u.opId !== dial.opId)) continue;
         const inA = roundA.some((r) => csMatches(r.item, dial));
         const inB = roundB.some((r) => csMatches(r.item, dial));
         if (!inA && !inB) { inv.resolveDial(dial.opId, "empty_listings"); log.append({ source: "harness", type: "teardown.unresolved_dial.resolved", data: { opId: dial.opId, role: dial.role, by: "empty_listings" } }); }
+      }
       }
     }
     for (const dial of inv.unresolvedDials()) {
@@ -104,6 +108,7 @@ export async function runTeardown(d: TeardownDeps): Promise<TeardownReport> {
       }
     }
   }
+  if (listErr !== undefined) throw listErr;
   // Legs already inventoried (dialed by us) are also candidates.
   for (const id of inv.idsOf("call_leg")) if (!found.some((f) => f.ccid === id)) found.push({ ccid: id, scope: "" });
 

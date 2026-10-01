@@ -45,7 +45,8 @@ Profile read-back: enabled profile daily cap ____ , concurrent limit ____ ; disa
 
 ### F2 Disabled outbound profile: receive works, every escape rejected for the right reason
 
-Containment bound shown before each probe (setting read back, at or below 180 s): ____
+Documented provider duration bound read back before each probe (at or below 180 s): ____
+(As of 2026-10-01 no documented provider-enforced duration field exists for browser-originated legs on a credential connection or outbound voice profile, so the harness's allowlist is empty and the probes are recorded "not executed - no documented provider duration bound". If so, F2 is NOT passed.)
 
 | Probe | Valid request to known-working owned destination | Browser registered, spare capacity | Provider code / reason | Result (pass / fail / inconclusive) | Leg ended by (method) |
 |---|---|---|---|---|---|

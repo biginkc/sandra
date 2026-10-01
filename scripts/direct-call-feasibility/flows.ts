@@ -41,12 +41,12 @@ function phone(ctx: FlowCtx, i = 0): string {
 }
 
 /** Server dials the browser SIP username, waits for answer, then dials the phone with link_to. */
-async function placeBridged(ctx: FlowCtx, clientState?: string) {
+async function placeBridged(ctx: FlowCtx, flow?: string) {
   await ctx.ensureReady();
   const sip = ctx.inv.getRole("browserSipUsername");
   if (!sip) throw new Error("run setup first");
   const t0 = Date.now();
-  const rep = await ctx.client.dial({ to: `sip:${sip}@sip.telnyx.com`, clientState, role: "browser" });
+  const rep = await ctx.client.dial({ to: `sip:${sip}@sip.telnyx.com`, flow, role: "browser" });
   if (!rep.callControlId) throw new Error("no leg id returned for browser leg");
   ctx.say("Answer in the browser page now.");
   const answered = await ctx.log.waitFor(isEvt("call.answered", rep.callControlId), waitMs(ctx));
@@ -90,7 +90,7 @@ export async function f2(ctx: FlowCtx): Promise<void> {
   // taken from an operator answer, and never assumed.
   const verified = Number(ctx.inv.getRole("browserLegBoundSecs"));
   if (!(Number.isFinite(verified) && verified > 0 && verified <= bound)) {
-    record(ctx, "F2", { result: "not executed - no verified duration bound for browser-originated legs; probes NOT run; F2 not passed" });
+    record(ctx, "F2", { result: "not executed - no documented provider duration bound for browser-originated legs; probes NOT run; F2 not passed" });
     return;
   }
   // Only now can the browser page start probes; each one reserves budget server-side, one at a time.
@@ -105,7 +105,7 @@ export async function f2(ctx: FlowCtx): Promise<void> {
         // Transfer needs an active owned source call: an owned test call to the allowed far end (the browser) via the guarded Dial.
         const sip = ctx.inv.getRole("browserSipUsername");
         try {
-          const src = await ctx.client.dial({ to: `sip:${sip}@sip.telnyx.com`, clientState: "f2-transfer-source", role: "transfer-source" });
+          const src = await ctx.client.dial({ to: `sip:${sip}@sip.telnyx.com`, flow: "f2-transfer-source", role: "transfer-source" });
           sourceCall = src.callControlId;
           if (sourceCall) {
             ctx.sourceLegs.push(sourceCall);
@@ -167,7 +167,7 @@ async function placeBridgedBrowserOnly(ctx: FlowCtx): Promise<string | undefined
   await ctx.ensureReady();
   const sip = ctx.inv.getRole("browserSipUsername");
   if (!sip) throw new Error("run setup first");
-  const rep = await ctx.client.dial({ to: `sip:${sip}@sip.telnyx.com`, clientState: "f3-marker", role: "browser" });
+  const rep = await ctx.client.dial({ to: `sip:${sip}@sip.telnyx.com`, flow: "f3-marker", role: "browser" });
   ctx.say("Browser should log the incoming call BEFORE you press answer. Check, then answer or let it ring.");
   await ctx.log.waitFor(isEvt("call.answered", rep.callControlId ?? ""), waitMs(ctx));
   return rep.callControlId;
