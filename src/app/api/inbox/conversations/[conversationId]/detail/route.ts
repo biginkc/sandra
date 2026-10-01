@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
 import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { createInboxReadRepository, InboxReadError, type InboxReadClient } from "@/lib/inbox/read-api";
+import { createInboxDripRepository, type DripRpcClient } from "@/lib/inbox/drip-markers";
 import { loadConversationDripContext } from "@/lib/inbox/drip-context";
 const headers = { "cache-control": "private, no-store", vary: "Cookie, Authorization" };
 export async function GET(request: Request, { params }: { params: Promise<{ conversationId: string }> }) {
@@ -16,8 +17,13 @@ export async function GET(request: Request, { params }: { params: Promise<{ conv
     const client = await createClient();
     if (!canAccessMessagesAndLeadsBoard(await getCallerMembershipsOrThrow())) throw new InboxReadError(404);
     const orgId = query.get("orgId")!;
-    const data = await createInboxReadRepository(client as unknown as InboxReadClient).detail(orgId, conversationId, AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]), query.get("before") ?? undefined);
-    const dripContext = await loadConversationDripContext(client, orgId, conversationId, data.propertyId);
+    const signal = AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]);
+    const data = await createInboxReadRepository(client as unknown as InboxReadClient).detail(orgId, conversationId, signal, before ?? undefined);
+    // The maintained row is the authority shared with the workspace marker/pill.
+    // A missing row deliberately passes undefined so the loader applies its
+    // newest-message fallback; the legacy read RPC's propertyId is review-first.
+    const marker = (await createInboxDripRepository(client as unknown as DripRpcClient).markers(orgId, [conversationId], signal)).rows[0];
+    const dripContext = await loadConversationDripContext(client, orgId, conversationId, marker?.propertyId);
     return Response.json({ ...data, drip: dripContext.drip }, { headers });
   } catch (error) {
     return Response.json({ error: "Inbox detail unavailable" }, { status: error instanceof InboxReadError ? error.status : 503, headers });

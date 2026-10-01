@@ -4,7 +4,7 @@ const mocks = vi.hoisted(() => ({ create: vi.fn(), rpc: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.create }));
 const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const authority = { user_id: id, session_id: id, org_id: id, access_epoch: "1", expires_at: "2030-01-01T00:00:00Z", session_active: true, active_membership_count: 1 };
-const counts = { all: 3, mine: 1, unassigned: 2, unread: 1, escalated: 0, dispo: 0, needs_outcome: 0, in_drip: 0, drip_replied: 0, unknown: 0, dismissed: 0 };
+const counts = { all: 3, mine: 1, unassigned: 2, unread: 1, escalated: 0, dispo: 0, needs_outcome: 0, unknown: 0, dismissed: 0 };
 beforeEach(() => { vi.clearAllMocks(); mocks.create.mockResolvedValue({ rpc: mocks.rpc }); });
 afterEach(() => vi.unstubAllEnvs());
 const request = (query = `orgId=${id}&view=all`) => new Request(`https://example.com/api/inbox/counts?${query}`);
@@ -21,6 +21,13 @@ describe("independent Inbox counts route", () => {
     expect(await response.json()).toEqual({ counts, asOf: "2026-09-13T00:00:00Z", accessEpoch: "1", updating: null });
     expect(mocks.rpc).toHaveBeenCalledWith("inbox_counts_v2", { org_id: id, filter: { view: "all", hide_noise: false, search: "Smith" } });
     expect(mocks.rpc.mock.calls.every(([name]) => !String(name).includes("workset"))).toBe(true);
+  });
+  it("parses the real nine-key non-drip counts response", async () => {
+    vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1");
+    mocks.rpc.mockImplementation((name: string) => ({ abortSignal: () => Promise.resolve({ data: name === "inbox_counts_v2" ? { counts, as_of: "2026-09-13T00:00:00Z", access_epoch: "1" } : authority, error: null }) }));
+    const response = await GET(request("orgId=" + id + "&view=unknown&hide_noise=true"));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ counts, asOf: "2026-09-13T00:00:00Z", accessEpoch: "1", updating: null });
   });
   it("uses only the drip counts RPC for drip views", async () => {
     vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1");
