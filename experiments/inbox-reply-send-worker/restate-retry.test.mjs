@@ -121,7 +121,8 @@ test('T-R8 LOCAL invalid input is a plain retryable Error and every ctx.run call
   const ctx = { run(...args) { assert.equal(args.length, 2); runs += 1; return args[1](); } };
   const runner = {
     async operationAttempts() { return [ATTEMPT]; },
-    async dispatchAttempt() { return { kind: 'settled', state: 'skipped_ineligible' }; },
+    async dispatchAttempt() { return { kind: 'dispatched', token: TOKEN, result: { kind: 'accepted', externalId: 'ext-r8', status: 'sent' } }; },
+    async persistAttempt() { return { kind: 'settled', state: 'provider_accepted' }; },
   };
   const pool = { async query() { return { rows: [{ ready: true }] }; } };
   const createRunHandler = await loadRunHandler();
@@ -132,7 +133,31 @@ test('T-R8 LOCAL invalid input is a plain retryable Error and every ctx.run call
   assert.equal(runs, 0);
   const outcome = await handler(ctx, { orgId: ORG, operationId: OPERATION });
   assert.equal(outcome.complete, true);
-  assert.equal(runs, 3);
+  assert.equal(outcome.attempts[0].state, 'provider_accepted');
+  assert.equal(runs, 4);
+
+  const realRunner = createRunner({
+    async query(statement) {
+      assert.match(statement, /worker_persist_result/);
+      return { rows: [{ result: { state: 'provider_accepted' } }] };
+    },
+  }, async () => { throw Error('not used'); });
+  await assert.doesNotReject(async () => {
+    assert.deepEqual(await realRunner.persistAttempt(ORG, OPERATION, ATTEMPT, {
+      kind: 'dispatched',
+      token: TOKEN,
+      result: { kind: 'accepted', externalId: 'ext-r8', status: 'sent' },
+    }), { kind: 'settled', state: 'provider_accepted' });
+  });
+});
+
+test('T-R8 LOCAL worker source has no RunOptions-style ctx.run third argument or TerminalError', async () => {
+  const workerFiles = ['core.mjs', 'runner.mjs', 'handler.mjs', 'server.mjs', 'service.mjs'];
+  for (const name of workerFiles) {
+    const source = await readFile(new URL(`./${name}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /ctx\.run\s*\(\s*[^,]+,\s*\{[^}]*\}\s*,/s, `${name} has a RunOptions-style ctx.run call`);
+    assert.doesNotMatch(source, /\bTerminalError\b/, `${name} contains TerminalError`);
+  }
 });
 
 test('T-R5c LOCAL fixture deadline maps a 16-second provider sleep to uncertain', async () => {

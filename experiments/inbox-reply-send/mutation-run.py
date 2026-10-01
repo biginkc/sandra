@@ -34,7 +34,7 @@ WORKER_TRANSPORT = ROOT / "experiments/inbox-reply-send-worker/vendor/test-trans
 LOCAL_DB_RETRY = ROOT / "experiments/inbox-reply-send-worker/restate-retry-local-db.py"
 PROVIDER_FIX = ROOT / "experiments/inbox-reply-send/provider-fix-proof.py"
 PROVIDER_FIX_MINIMAL = ROOT / "experiments/inbox-reply-send/provider-fix-minimal.py"
-LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r7.log")
+LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r8.log")
 EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-evidence.md")
 
 
@@ -214,7 +214,8 @@ def run_worker_locals(handle) -> None:
         ("T-R6 Number mutation", WORKER_CORE, b"const loggedGeneration = generation;", b"const loggedGeneration = Number(generation);", "T-R6"),
         ("T-R6 modulo-boundary mutation", WORKER_CORE, b"body.status === 'PreviouslyAccepted' && generation >= 150n", b"body.status === 'PreviouslyAccepted' && generation % 150n === 0n", "T-R6"),
         ("T-R7 mutation", WORKER_DOCKERFILE, b"core.mjs runner.mjs server.mjs handler.mjs service.mjs", b"core.mjs runner.mjs server.mjs service.mjs", "T-R7"),
-        ("T-R8 RunOptions mutation", WORKER_HANDLER, b"const dispatch = await ctx.run(`dispatch:${attemptId}`, async () => {", b"const dispatch = await ctx.run(`dispatch:${attemptId}`, { maxRetryAttempts: 3 }, async () => {", "T-R8"),
+        ("T-R8 RunOptions mutation", WORKER_HANDLER, b"await ctx.run(`persist:${attemptId}`, async () => runner.persistAttempt(orgId, operationId, attemptId, dispatch));", b"await ctx.run(`persist:${attemptId}`, { maxRetryAttempts: 3 }, async () => runner.persistAttempt(orgId, operationId, attemptId, dispatch));", "T-R8"),
+        ("T-R8 source TerminalError mutation", WORKER_CORE, b"export async function dispatchBatch(pool, fetcher, ingress) {\n  return dispatchBatchWithStalls(pool, fetcher, ingress);\n", b"export async function dispatchBatch(pool, fetcher, ingress) {\n  void new TerminalError('mutation: source scan');\n  return dispatchBatchWithStalls(pool, fetcher, ingress);\n", "T-R8"),
     ]
     for label, path, needle, replacement, test_name in mutations:
         original = path.read_bytes()
@@ -226,17 +227,17 @@ def run_worker_locals(handle) -> None:
         finally:
             path.write_bytes(original)
 
-    original = WORKER_HANDLER.read_bytes()
-    import_needle = b"export function createRunHandler({ runner, pool }) {\n"
-    terminal_needle = b"throw Error('Invalid reply dispatch request');"
-    if original.count(import_needle) != 1 or original.count(terminal_needle) != 1:
+    original = WORKER_RUNNER.read_bytes()
+    import_needle = b"// Durable dispatch contract (Astra #4)."
+    persist_needle = b"    async persistAttempt(orgId, operationId, attemptId, dispatch) {\n"
+    if original.count(import_needle) != 1 or original.count(persist_needle) != 1:
         raise RuntimeError("T-R8 TerminalError mutation target is not unique")
-    terminal_mutation = original.replace(import_needle, b"import { TerminalError } from '@restatedev/restate-sdk';\n" + import_needle, 1).replace(terminal_needle, b"throw new TerminalError('Invalid reply dispatch request');", 1)
-    WORKER_HANDLER.write_bytes(terminal_mutation)
+    terminal_mutation = original.replace(import_needle, b"import { TerminalError } from '@restatedev/restate-sdk';\n" + import_needle, 1).replace(persist_needle, persist_needle + b"      throw new TerminalError('mutation: persist is terminal');\n", 1)
+    WORKER_RUNNER.write_bytes(terminal_mutation)
     try:
-        record(handle, "T-R8 TerminalError mutation", execute(["node", "--test", "--test-name-pattern", "T-R8", str(WORKER_TEST)], env))
+        record(handle, "T-R8 runner TerminalError mutation", execute(["node", "--test", "--test-name-pattern", "T-R8", str(WORKER_TEST)], env))
     finally:
-        WORKER_HANDLER.write_bytes(original)
+        WORKER_RUNNER.write_bytes(original)
 
     original = WORKER_TRANSPORT.read_bytes()
     transport_needle = b"    signal.throwIfAborted();\n"
@@ -386,7 +387,7 @@ def result_kind(header: str, body: str, *, baseline: bool = False) -> str:
         return "NOT RUN"
     exit_match = re.search(r"^exit=(-?\d+)$", body, re.MULTILINE)
     if exit_match and int(exit_match.group(1)) == 0:
-        return "PASS" if baseline else "NOT RUN"
+        return "PASS" if baseline else "SURVIVED"
     if baseline:
         return "FAIL"
     if any(marker.lower() in body.lower() for marker in HARNESS_FAILURE_MARKERS):
@@ -411,9 +412,9 @@ def failure_excerpt(body: str) -> str:
 def derive_evidence(raw: str) -> str:
     sections = captured_sections(raw)
     rows: list[str] = [
-        "# Reply-persistence v7 mutation evidence (generated)",
+        "# Reply-persistence v8 mutation evidence (generated)",
         "",
-        "This file is generated from `replypersist-mutation-run-r7.log`. EXECUTED requires a passing baseline and a natural non-zero mutation result; baseline failures are never counted as executed.",
+        "This file is generated from `replypersist-mutation-run-r8.log`. EXECUTED requires a passing baseline and a natural non-zero mutation result; baseline failures are never counted as executed. A passing mutation is SURVIVED and fails the runner.",
         "",
         "| Test | Status | Baseline result | Mechanism | Natural mutated failure |",
         "|---|---|---|---|---|",
@@ -436,6 +437,8 @@ def derive_evidence(raw: str) -> str:
             status = "BASELINE FAIL"
         elif mutated_kind == "FAILED":
             status = "EXECUTED"
+        elif mutated_kind == "SURVIVED":
+            status = "SURVIVED"
         elif mutated_kind == "SKIP":
             status = "SKIP"
         else:
@@ -443,7 +446,9 @@ def derive_evidence(raw: str) -> str:
         mechanism = header.replace("|", "\\|")
         baseline_result = f"{baseline_kind}: {failure_excerpt(baseline_body)}"
         mutated_failure = failure_excerpt(body) if status == "EXECUTED" else (
-            "not considered: baseline did not pass" if status == "BASELINE FAIL" else f"not naturally failed ({mutated_kind.lower()})"
+            "mutation exited 0" if status == "SURVIVED" else
+            "not considered: baseline did not pass" if status == "BASELINE FAIL" else
+            f"not naturally failed ({mutated_kind.lower()})"
         )
         rows.append(
             f"| {test} | {status} | `{baseline_result}` | {mechanism} | `{mutated_failure}` |"
@@ -457,18 +462,44 @@ def derive_evidence(raw: str) -> str:
     return "\n".join(rows) + "\n"
 
 
+def has_survived_mutation(raw: str) -> bool:
+    sections = captured_sections(raw)
+    for header, body in sections:
+        if " mutation" not in header.lower():
+            continue
+        baseline = baseline_for(header, sections)
+        if baseline and result_kind(*baseline, baseline=True) == "PASS" and result_kind(header, body) == "SURVIVED":
+            return True
+    return False
+
+
+def self_test() -> None:
+    raw = """===== T-R8 self-test baseline =====
+exit=0
+===== END T-R8 self-test baseline =====
+===== T-R8 deliberately surviving mutation =====
+exit=0
+===== END T-R8 deliberately surviving mutation =====
+"""
+    assert result_kind("T-R8 deliberately surviving mutation", "exit=0\n") == "SURVIVED"
+    assert has_survived_mutation(raw)
+    assert "| T-R8 | SURVIVED |" in derive_evidence(raw)
+
+
 def main() -> int:
+    self_test()
     LOG.parent.mkdir(parents=True, exist_ok=True)
     with LOG.open("w", encoding="utf-8") as handle:
-        handle.write("reply-persistence v7 round-7 mutation run; machine-produced raw child output\n")
+        handle.write("reply-persistence v8 round-8 mutation run; machine-produced raw child output\n")
         for n in range(1, 28):
             run_sql_cases(handle, n)
         run_t17_application(handle)
         run_worker_locals(handle)
         run_provider_fixes(handle)
         run_restate_local_db(handle)
-    EVIDENCE.write_text(derive_evidence(LOG.read_text(encoding="utf-8")), encoding="utf-8")
-    return 0
+    raw = LOG.read_text(encoding="utf-8")
+    EVIDENCE.write_text(derive_evidence(raw), encoding="utf-8")
+    return 1 if has_survived_mutation(raw) else 0
 
 
 if __name__ == "__main__":
