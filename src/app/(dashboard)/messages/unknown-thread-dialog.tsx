@@ -1,6 +1,7 @@
 "use client";
 
 import { formatDistance } from "date-fns/formatDistance";
+import { formatPhoneDisplay } from "@/lib/phone-format";
 import { useEffect, useState } from "react";
 
 import {
@@ -82,7 +83,7 @@ export function UnknownThreadDialog({
         data-testid="unknown-thread-dialog"
       >
         <DialogHeader>
-          <DialogTitle>Conversation with {fromAddress}</DialogTitle>
+          <DialogTitle>Conversation with {formatPhoneDisplay(fromAddress)}</DialogTitle>
           <DialogDescription>
             Read-only view. Close and use the row&apos;s Triage dropdown to merge,
             create, or dismiss.

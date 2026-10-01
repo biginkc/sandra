@@ -16,7 +16,7 @@ describe("<CampaignDeliveryCard />", () => {
     );
 
     expect(screen.getByText("sendillo")).toBeInTheDocument();
-    expect(screen.getByText("+18164876899")).toBeInTheDocument();
+    expect(screen.getByText("(816) 487-6899")).toBeInTheDocument();
     expect(screen.getByText("None")).toBeInTheDocument();
     expect(
       screen.getByText("Sender editable until first queue"),

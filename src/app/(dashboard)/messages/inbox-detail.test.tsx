@@ -478,10 +478,10 @@ describe("<InboxDetail />", () => {
     );
 
     expect(screen.getByTestId("inline-reply")).toHaveTextContent(
-      "+1 (555) 000-0002",
+      "(555) 000-0002",
     );
     expect(screen.getByTestId("inline-reply")).toHaveTextContent(
-      "+1 (816) 280-4181",
+      "(816) 280-4181",
     );
 
     await user.type(screen.getByLabelText("Reply to this lead"), "Thanks");
@@ -498,7 +498,7 @@ describe("<InboxDetail />", () => {
     });
     expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
     expect(toast.success).toHaveBeenCalledWith("Message sent", {
-      description: "Sent to +15550000002.",
+      description: "Sent to (555) 000-0002.",
     });
     expect(screen.getByRole("button", { name: "Insert template" })).toHaveClass(
       "min-h-11",
@@ -2000,7 +2000,7 @@ describe("<InboxDetail />", () => {
 
     await user.click(screen.getByTestId("inbox-detail-more"));
     expect(await screen.findByTestId("inbox-detail-phone")).toHaveTextContent(
-      "Call +1 (555) 000-0002",
+      "Call (555) 000-0002",
     );
 
     expect(clipboard).toHaveBeenCalledWith(

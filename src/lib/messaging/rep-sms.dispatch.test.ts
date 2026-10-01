@@ -15,6 +15,7 @@ vi.mock("./send", () => ({ sendSmsToContact: mocks.sendSmsToContact }));
 import { dispatchRepSms, readRepSmsContext } from "./rep-sms";
 
 const composition = {
+  acquisitionsManager: "Maria",
   introId: "mel-maria-assistant-1",
   introVersion: 2,
   templateId: "no-answer-callback-time",
@@ -85,6 +86,20 @@ beforeEach(() => {
 });
 
 describe("dispatchRepSms durable generic reservation", () => {
+  it("sends the selected manager's introduction and records that manager in metadata", async () => {
+    mocks.adminRpc
+      .mockResolvedValueOnce({ data: { ok: true, receiptId: "receipt-1", claimToken: "claim-1", claimGeneration: 1 }, error: null })
+      .mockResolvedValueOnce({ data: { ok: true, state: "accepted", providerMessageId: "provider-1" }, error: null });
+    await dispatchRepSms({
+      propertyId: "property-1",
+      assignmentId: "sender-1",
+      idempotencyKey: "11111111-1111-4111-8111-111111111111",
+      composition: { ...composition, acquisitionsManager: "Jordan", remainder: "Please text Jordan a time that works." },
+    });
+    const send = mocks.sendSmsToContact.mock.calls[0][1];
+    expect(send.body).toBe("Hey, this is Mel with BMH, Jordan's assistant.\n\nPlease text Jordan a time that works.");
+    expect(send.metadata.repSms).toMatchObject({ workflow: "manager-through-mel", assistant: "Jordan", acquisitionsManager: "Jordan" });
+  });
   it("recovers the server draft after storage loss and replays it under a fresh browser key", async () => {
     const originalKey = "11111111-1111-4111-8111-111111111111";
     const freshKey = "22222222-2222-4222-8222-222222222222";
@@ -189,6 +204,7 @@ describe("dispatchRepSms durable generic reservation", () => {
       p_body: "Hey, this is Mel with BMH, Maria's assistant.\n\nPlease text Maria a time that works.",
       p_composition: expect.objectContaining({ remainder: composition.remainder }),
     }));
+    expect(mocks.adminRpc.mock.calls[0][1].p_composition).not.toHaveProperty("acquisitionsManager");
     expect(mocks.adminRpc).toHaveBeenNthCalledWith(2, "fn_record_rep_sms_delivery_result", expect.objectContaining({
       p_receipt_id: "receipt-1",
       p_state: "accepted",

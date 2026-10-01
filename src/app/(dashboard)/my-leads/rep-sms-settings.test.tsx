@@ -62,19 +62,19 @@ describe("RepSmsSettings sender diagnostics", () => {
     fireEvent.click(screen.getByRole("button", { name: "Manage texting numbers" }));
 
     await waitFor(() => expect(screen.getByText("Sendillo numbers unavailable for rep assignment")).toBeInTheDocument());
-    expect(screen.getByText("+18162939379")).toBeInTheDocument();
+    expect(screen.getByText("(816) 293-9379")).toBeInTheDocument();
     expect(screen.getByText("Missing stable Sendillo account identity.")).toBeInTheDocument();
     expect(screen.getByText("Missing stable Sendillo number identity.")).toBeInTheDocument();
     expect(screen.getByText("Sendillo number status is absent.")).toBeInTheDocument();
     expect(screen.getByText("Sendillo messaging status is absent.")).toBeInTheDocument();
-    expect(screen.getByText("+18163780213")).toBeInTheDocument();
+    expect(screen.getByText("(816) 378-0213")).toBeInTheDocument();
     expect(screen.getByText("Sendillo number status is not active.")).toBeInTheDocument();
     expect(screen.getByText("Sendillo messaging status is not active.")).toBeInTheDocument();
 
     const numberSelect = screen.getByLabelText("Number");
-    expect(numberSelect).toHaveTextContent("Sendillo · +18164876883");
-    expect(numberSelect).not.toHaveTextContent("+18162939379");
-    expect(numberSelect).not.toHaveTextContent("+18163780213");
+    expect(numberSelect).toHaveTextContent("Sendillo · (816) 487-6883");
+    expect(numberSelect).not.toHaveTextContent("(816) 293-9379");
+    expect(numberSelect).not.toHaveTextContent("(816) 378-0213");
   });
 
   it("does not render provider IDs or raw payload fields from diagnostics", async () => {
@@ -89,7 +89,7 @@ describe("RepSmsSettings sender diagnostics", () => {
     render(<RepSmsSettings orgId="org-1" members={[] as never} />);
     fireEvent.click(screen.getByRole("button", { name: "Manage texting numbers" }));
 
-    await waitFor(() => expect(screen.getByText("+18162939379")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("(816) 293-9379")).toBeInTheDocument());
     expect(screen.queryByText(/account-\d|number-\d|secret|raw/i)).not.toBeInTheDocument();
   });
 });

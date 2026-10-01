@@ -1,0 +1,176 @@
+ 
+// Append-only inventory of resources this harness created or discovered on the
+// test connection/application. Records type + Telnyx ID only (no secrets).
+import fs from "node:fs";
+import path from "node:path";
+
+export type ResourceType =
+  | "credential_connection"
+  | "call_control_application"
+  | "outbound_voice_profile"
+  | "telephony_credential"
+  | "call_leg"
+  | "recording";
+
+export interface Entry {
+  type: ResourceType;
+  id: string;
+  createdAt: string;
+  deletedAt?: string;
+}
+
+/** Every Dial's client_state is base64(JSON {op, flow}); `op` is the unique operation id, `flow` a free label. */
+export function encodeDialClientState(op: string, flow?: string): string {
+  return Buffer.from(JSON.stringify({ op, flow: flow ?? "dial" })).toString("base64");
+}
+
+/** The operation id a provider-reported client_state (base64 or already decoded) carries, if any. */
+export function clientStateOpId(cs: unknown): string | undefined {
+  if (typeof cs !== "string" || !cs) return undefined;
+  for (const text of [Buffer.from(cs, "base64").toString("utf8"), cs]) {
+    try {
+      const v: unknown = JSON.parse(text);
+      const op = v && typeof v === "object" ? (v as { op?: unknown }).op : undefined;
+      if (typeof op === "string") return op;
+    } catch { /* not JSON: try the next form */ }
+  }
+  return undefined;
+}
+
+export interface UnresolvedDial {
+  /** Operation id (also the Dial command_id). */
+  opId: string;
+  /** client_state exactly as sent to the provider (base64). */
+  clientState: string;
+  role: string;
+  /** Epoch ms when the Dial was about to be sent. */
+  at: number;
+  ringTimeoutSecs: number;
+  timeLimitSecs: number;
+  resolvedAt?: string;
+  resolvedBy?: string;
+}
+
+type Op =
+  | { op: "unresolved"; dial: UnresolvedDial }
+  | { op: "resolved"; opId: string; by: string; at: string }
+  | { op: "add"; type: ResourceType; id: string; at: string }
+  | { op: "deleted"; id: string; at: string }
+  | { op: "role"; key: string; value: string }
+  | { op: "sip"; username: string }
+  | { op: "callref"; value: string };
+
+export class Inventory {
+  private entries = new Map<string, Entry>();
+  private roles = new Map<string, string>();
+  private sip = new Set<string>();
+  private callRefs = new Set<string>();
+  private dials = new Map<string, UnresolvedDial>();
+  private file?: string;
+
+  constructor(private dir?: string) {
+    if (dir) {
+      fs.mkdirSync(dir, { recursive: true });
+      this.file = path.join(dir, "inventory.jsonl");
+      if (fs.existsSync(this.file)) {
+        for (const line of fs.readFileSync(this.file, "utf8").split("\n").filter(Boolean)) {
+          this.apply(JSON.parse(line) as Op);
+        }
+      }
+    }
+  }
+
+  private apply(o: Op): void {
+    if (o.op === "unresolved") this.dials.set(o.dial.opId, { ...o.dial });
+    else if (o.op === "resolved") {
+      const d = this.dials.get(o.opId);
+      if (d) { d.resolvedAt = o.at; d.resolvedBy = o.by; }
+    } else if (o.op === "add") this.entries.set(o.id, { type: o.type, id: o.id, createdAt: o.at });
+    else if (o.op === "deleted") {
+      const e = this.entries.get(o.id);
+      if (e) e.deletedAt = o.at;
+    } else if (o.op === "role") this.roles.set(o.key, o.value);
+    else if (o.op === "callref") this.callRefs.add(o.value);
+    else this.sip.add(o.username);
+  }
+
+  private write(o: Op): void {
+    this.apply(o);
+    if (this.file) fs.appendFileSync(this.file, JSON.stringify(o) + "\n");
+  }
+
+  add(type: ResourceType, id: string): void {
+    if (!id) throw new Error("inventory: empty id");
+    if (this.entries.has(id)) return;
+    this.write({ op: "add", type, id, at: new Date().toISOString() });
+  }
+
+  /** Written BEFORE every Dial is sent. Stays until a response, a revealed leg, or a bounded-time rule resolves it. */
+  addUnresolvedDial(d: UnresolvedDial): void {
+    if (!d.opId) throw new Error("inventory: empty opId");
+    if (this.dials.has(d.opId)) return;
+    this.write({ op: "unresolved", dial: d });
+  }
+  resolveDial(opId: string, by: string): void {
+    const d = this.dials.get(opId);
+    if (d && !d.resolvedAt) this.write({ op: "resolved", opId, by, at: new Date().toISOString() });
+  }
+  unresolvedDials(): UnresolvedDial[] {
+    return [...this.dials.values()].filter((d) => !d.resolvedAt);
+  }
+
+  markDeleted(id: string): void {
+    if (this.entries.has(id)) this.write({ op: "deleted", id, at: new Date().toISOString() });
+  }
+
+  /** True if the ID is inventoried (and, when given, of one of the types). */
+  has(id: string, types?: ResourceType[]): boolean {
+    const e = this.entries.get(id);
+    return !!e && (!types || types.includes(e.type));
+  }
+
+  idsOf(type: ResourceType, opts: { includeDeleted?: boolean } = {}): string[] {
+    return [...this.entries.values()]
+      .filter((e) => e.type === type && (opts.includeDeleted || !e.deletedAt))
+      .map((e) => e.id);
+  }
+
+  list(): Entry[] {
+    return [...this.entries.values()];
+  }
+
+  setRole(key: string, value: string): void {
+    this.write({ op: "role", key, value });
+  }
+  getRole(key: string): string | undefined {
+    return this.roles.get(key);
+  }
+
+  addSipUsername(username: string): void {
+    if (!this.sip.has(username)) this.write({ op: "sip", username });
+  }
+  /** Records a call_control_id / call_leg_id / call_session_id of a call this harness placed. */
+  addCallRef(value: string | undefined): void {
+    if (value && !this.callRefs.has(value)) this.write({ op: "callref", value });
+  }
+  hasCallRef(value: unknown): boolean {
+    return typeof value === "string" && value !== "" && this.callRefs.has(value);
+  }
+  sipUsernames(): string[] {
+    return [...this.sip];
+  }
+
+  get runDir(): string | undefined {
+    return this.dir;
+  }
+
+  saveSnapshot(name: string, data: unknown): void {
+    if (!this.dir) return;
+    fs.writeFileSync(path.join(this.dir, name), JSON.stringify(data, null, 2));
+  }
+  loadSnapshot<T>(name: string): T | undefined {
+    if (!this.dir) return undefined;
+    const f = path.join(this.dir, name);
+    return fs.existsSync(f) ? (JSON.parse(fs.readFileSync(f, "utf8")) as T) : undefined;
+  }
+}

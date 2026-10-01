@@ -198,7 +198,7 @@ describe("<InboxThreadList /> realtime subscriptions", () => {
 
     expect(
       screen.getByTestId("inbox-thread-visible-phone-phone"),
-    ).toHaveTextContent("+1 (555) 000-0002");
+    ).toHaveTextContent("(555) 000-0002");
   });
 
   it("refreshes on thread and AI-review changes so Sandra state does not stay stale", async () => {

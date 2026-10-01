@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { getOutboundSmsMetrics } from "@/lib/messages/message-metrics";
+import { formatPhoneDisplay } from "@/lib/phone-format";
 import { createClient } from "@/lib/supabase/server";
 import type { Database, Json } from "@/lib/supabase/types";
 import {
@@ -155,7 +156,7 @@ export default async function JobDetailPage({
       contact.entity_name?.trim() ||
       [contact.first_name, contact.last_name].filter(Boolean).join(" ").trim();
     itemLabels[`contact:${contact.id}`] =
-      [name, contact.phone_1, contact.email].find(
+      [name, formatPhoneDisplay(contact.phone_1), contact.email].find(
         (value) => typeof value === "string" && value.trim(),
       ) ?? "Contact details unavailable";
   }

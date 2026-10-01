@@ -103,7 +103,7 @@ const deliveryCatalog = {
 
 async function selectSender(user: ReturnType<typeof userEvent.setup>) {
   await screen.findByRole("option", {
-    name: /Test Provider — \+15551234567/i,
+    name: /Test Provider — \(555\) 123-4567/i,
   });
   await user.selectOptions(
     screen.getByLabelText(/sending number/i),

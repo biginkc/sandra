@@ -27,6 +27,7 @@ import {
 } from "@/lib/messaging/consent";
 import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 import { getMessagingProvider } from "@/lib/messaging/registry";
+import { formatPhoneDisplay } from "@/lib/phone-format";
 import {
   selectBestSmsPhone,
   selectSmsPhoneByNumber,
@@ -927,12 +928,12 @@ export default async function LeadDetailPage({
                     data-slot="lead-detail-row"
                   >
                     <span className="min-w-0 break-all font-mono text-sm">
-                      {lead.homeowner.phone_1 || "No phone"}
+                      {formatPhoneDisplay(lead.homeowner.phone_1) || "No phone"}
                     </span>
                     <SoftphoneLeadButton lead={detailSoftphoneLead} compact />
                   </div>
-                  <Row label="Phone 2" value={lead.homeowner.phone_2} mono />
-                  <Row label="Phone 3" value={lead.homeowner.phone_3} mono />
+                  <Row label="Phone 2" value={formatPhoneDisplay(lead.homeowner.phone_2)} mono />
+                  <Row label="Phone 3" value={formatPhoneDisplay(lead.homeowner.phone_3)} mono />
                   <Row label="Email" value={lead.homeowner.email} />
                   <Row label="Mailing" value={homeownerMailingAddress} />
                   <Row
@@ -1124,9 +1125,9 @@ export default async function LeadDetailPage({
                   value={formatDate(lead.ncoa_verified_at)}
                 />
                 <Row label="Homeowner" value={homeownerName} />
-                <Row label="Phone 1" value={lead.homeowner?.phone_1} mono />
-                <Row label="Phone 2" value={lead.homeowner?.phone_2} mono />
-                <Row label="Phone 3" value={lead.homeowner?.phone_3} mono />
+                <Row label="Phone 1" value={formatPhoneDisplay(lead.homeowner?.phone_1)} mono />
+                <Row label="Phone 2" value={formatPhoneDisplay(lead.homeowner?.phone_2)} mono />
+                <Row label="Phone 3" value={formatPhoneDisplay(lead.homeowner?.phone_3)} mono />
                 <Row label="Homeowner email" value={lead.homeowner?.email} />
                 <Row label="Mailing address" value={homeownerMailingAddress} />
                 <Row
@@ -1155,7 +1156,7 @@ export default async function LeadDetailPage({
                       : "No listing agent linked"
                   }
                 />
-                <Row label="Agent phone" value={lead.agent?.phone_1} mono />
+                <Row label="Agent phone" value={formatPhoneDisplay(lead.agent?.phone_1)} mono />
                 <Row label="Agent email" value={lead.agent?.email} />
                 <Row
                   label="Brokerage"
@@ -1415,9 +1416,9 @@ function LockedDncPropertyDetail({
                         .join(" ")
                 }
               />
-              <Row label="Phone 1" value={lead.homeowner.phone_1} mono />
-              <Row label="Phone 2" value={lead.homeowner.phone_2} mono />
-              <Row label="Phone 3" value={lead.homeowner.phone_3} mono />
+              <Row label="Phone 1" value={formatPhoneDisplay(lead.homeowner.phone_1)} mono />
+              <Row label="Phone 2" value={formatPhoneDisplay(lead.homeowner.phone_2)} mono />
+              <Row label="Phone 3" value={formatPhoneDisplay(lead.homeowner.phone_3)} mono />
               <Row label="Email" value={lead.homeowner.email} />
               <Row label="Do not contact" value="Yes — permanent" />
             </>

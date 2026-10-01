@@ -1,6 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
+import { formatPhoneDisplay } from "@/lib/phone-format";
 import { Label } from "@/components/ui/label";
 import type { DeliveryCatalog } from "@/lib/messaging/delivery";
 
@@ -42,7 +43,7 @@ function titleCaseProvider(provider: string): string {
 }
 
 function senderLabel(provider: string, phoneE164: string): string {
-  return `${titleCaseProvider(provider)} — ${phoneE164}`;
+  return `${titleCaseProvider(provider)} — ${formatPhoneDisplay(phoneE164)}`;
 }
 
 function providerCampaignLabel(

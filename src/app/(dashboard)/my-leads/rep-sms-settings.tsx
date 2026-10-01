@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { formatPhoneDisplay } from "@/lib/phone-format";
 import { Button } from "@/components/ui/button";
 import type { AcquisitionRoster } from "@/lib/my-leads/queries";
 import type { DialpadFromOption } from "@/lib/messaging/types";
@@ -33,7 +34,7 @@ function IneligibleNumbers({ diagnostics }: { diagnostics: RepSmsCatalogDiagnost
     <p className="mt-1">Only numbers with confirmed Sendillo identities and active number and messaging status can be assigned.</p>
     <ul className="mt-2 space-y-2">
       {diagnostics.map((diagnostic) => <li key={diagnostic.number}>
-        <p className="font-medium">{diagnostic.number}</p>
+        <p className="font-medium">{formatPhoneDisplay(diagnostic.number)}</p>
         <ul className="ml-4 list-disc">
           {diagnostic.reasons.map((reason) => <li key={reason}>{diagnosticReasonLabel(reason)}</li>)}
         </ul>
@@ -79,12 +80,12 @@ export function RepSmsSettings({ orgId, members }: { orgId: string; members: Acq
     {loaded && <>
       <IneligibleNumbers diagnostics={ineligibleNumbers} />
       <ul className="space-y-2">{assignments.map(a => <li key={a.id} className="flex flex-wrap items-center gap-2 text-sm">
-        <span>{members.find(m => m.id === a.user_id)?.label ?? "Former member"}: {a.label} · {a.phone_e164}{a.is_default ? " (default)" : ""}</span>
+        <span>{members.find(m => m.id === a.user_id)?.label ?? "Former member"}: {a.label} · {formatPhoneDisplay(a.phone_e164)}{a.is_default ? " (default)" : ""}</span>
         <Button size="sm" variant="outline" disabled={busy} onClick={() => void save({ userId: a.user_id, number: a.phone_e164, label: a.label, isDefault: false, active: false })}>Remove</Button>
       </li>)}</ul>
       <fieldset disabled={busy} className="flex flex-wrap items-center gap-3">
         <label>Rep <select className="rounded border p-2" value={userId} onChange={e => setUserId(e.target.value)}><option value="">Choose rep</option>{members.filter(m => m.active && (m.acquisitionsEnabled || m.role === "owner")).map(m => <option key={m.id} value={m.id}>{m.label}</option>)}</select></label>
-        <label>Number <select className="rounded border p-2" value={number} onChange={e => setNumber(e.target.value)}><option value="">Choose number</option>{numbers.map(n => <option key={n.number} value={n.number}>{n.ownerName} · {n.number}</option>)}</select></label>
+        <label>Number <select className="rounded border p-2" value={number} onChange={e => setNumber(e.target.value)}><option value="">Choose number</option>{numbers.map(n => <option key={n.number} value={n.number}>{n.ownerName} · {formatPhoneDisplay(n.number)}</option>)}</select></label>
         <label><input type="checkbox" checked={isDefault} onChange={e => setIsDefault(e.target.checked)} /> Default for this rep</label>
         <Button disabled={!userId || !number} onClick={() => void save({ userId, number, label: numbers.find(n => n.number === number)?.ownerName ?? number, isDefault, active: true })}>Assign texting number</Button>
       </fieldset>

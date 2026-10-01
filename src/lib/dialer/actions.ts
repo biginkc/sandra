@@ -5,7 +5,7 @@ import { setOutreachDispo, type OutreachDispo } from "@/app/(dashboard)/messages
 import { pausePropertyEnrollments, resumeByProperty } from "@/lib/sequences/enrollment";
 import { classifyItem } from "@/lib/dialer/eligibility";
 import { checkQuietHours } from "@/lib/messaging/quiet-hours";
-import { formatPhoneE164, toPhoneE164 } from "@/lib/phone-format";
+import { formatPhoneDisplay, toPhoneE164 } from "@/lib/phone-format";
 import { createClient } from "@/lib/supabase/server";
 import type { Database } from "@/lib/supabase/types";
 import { loadHomeownerTrainingProfile } from "@/lib/leads/homeowner-training-profile";
@@ -66,7 +66,7 @@ function leadTarget(lead: LeadRow, preferredPhone?: string): SoftphoneTarget | n
     propertyId: lead.id,
     contactId: lead.homeowner_contact_id,
     phoneE164: phone,
-    maskedPhone: formatPhoneE164(phone) ?? phone,
+    maskedPhone: formatPhoneDisplay(phone) ?? phone,
     name: displayName(lead.homeowner),
     address: lead.address,
     state: lead.state,
@@ -159,7 +159,7 @@ export async function prepareManualCall(phone: string): Promise<SoftphoneActionR
         || [profile?.homeowner?.first_name, profile?.homeowner?.last_name].filter(Boolean).join(" ")
         || HOMEOWNER_TRAINING_LABEL;
       return { ok: true, data: { propertyId: null, contactId: null, phoneE164,
-        maskedPhone: formatPhoneE164(phoneE164) ?? phoneE164, name,
+        maskedPhone: formatPhoneDisplay(phoneE164) ?? phoneE164, name,
         address: profile?.address ?? null, state: profile?.state ?? "MO", startedAt: new Date().toISOString(), repName: repDisplayName(user) } };
     }
     const contactSelect = "id, first_name, last_name, entity_name, phone_1, phone_2, phone_3, do_not_contact, sms_opted_out";
@@ -224,8 +224,8 @@ export async function prepareManualCall(phone: string): Promise<SoftphoneActionR
         propertyId: null,
         contactId: null,
         phoneE164,
-        maskedPhone: formatPhoneE164(phoneE164) ?? phoneE164,
-        name: formatPhoneE164(phoneE164) ?? phoneE164,
+        maskedPhone: formatPhoneDisplay(phoneE164) ?? phoneE164,
+        name: formatPhoneDisplay(phoneE164) ?? phoneE164,
         address: null,
         state: "MO",
         startedAt: new Date().toISOString(),
@@ -321,7 +321,7 @@ export async function loadDialerRecents(): Promise<SoftphoneActionResult<DialerR
         propertyId: row.property_id ? String(row.property_id) : null,
         contactId: row.contact_id ? String(row.contact_id) : null,
         name: row.call_purpose === "internal_training" ? HOMEOWNER_TRAINING_LABEL : property ? name : "Manual dial",
-        detail: row.call_purpose === "internal_training" ? HOMEOWNER_TRAINING_LABEL : property ? `${property.address ?? "Lead"} · ${formatPhoneE164(phone) ?? phone}` : `Manual dial · ${formatPhoneE164(phone) ?? phone}`,
+        detail: row.call_purpose === "internal_training" ? HOMEOWNER_TRAINING_LABEL : property ? `${property.address ?? "Lead"} · ${formatPhoneDisplay(phone) ?? phone}` : `Manual dial · ${formatPhoneDisplay(phone) ?? phone}`,
         phoneE164: phone,
         when: row.started_at ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(String(row.started_at))) : "",
         missed: ["no_answer", "busy", "failed", "canceled"].includes(outcome),

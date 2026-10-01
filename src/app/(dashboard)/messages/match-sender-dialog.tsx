@@ -1,6 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import { formatPhoneDisplay } from "@/lib/phone-format";
 import { useEffect, useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -80,7 +81,7 @@ export function MatchSenderDialog({
       const result = await callAction(
         matchUnknownSenderAction(fromAddress, contactId),
         {
-          successMessage: `Matched ${fromAddress} to ${displayName}.`,
+          successMessage: `Matched ${formatPhoneDisplay(fromAddress)} to ${displayName}.`,
           fallbackMessage: "Match failed",
         },
       );
@@ -98,7 +99,7 @@ export function MatchSenderDialog({
           <DialogTitle>Merge with existing contact</DialogTitle>
           <DialogDescription>
             Attach all messages from{" "}
-            <span className="font-mono">{fromAddress}</span> to a contact in
+            <span className="font-mono">{formatPhoneDisplay(fromAddress)}</span> to a contact in
             Sandra. The number is added to <code>phone_2</code> (or{" "}
             <code>phone_3</code>) so future inbounds from this sender match
             automatically.
@@ -153,7 +154,7 @@ export function MatchSenderDialog({
               >
                 <span className="text-sm font-medium">{h.displayName}</span>
                 <span className="text-muted-foreground text-[11px]">
-                  {h.phone1 ?? "no phone_1"}
+                  {formatPhoneDisplay(h.phone1) ?? "no phone_1"}
                   {h.propertyAddress ? ` · ${h.propertyAddress}` : ""}
                 </span>
               </button>

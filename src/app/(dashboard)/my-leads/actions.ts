@@ -67,20 +67,32 @@ export async function submitMyLeadCommand(command:keyof typeof commands,input:Re
   let composition: RepSmsComposition | null = null;
   if (command === 'log-attempt' && input.outcome === 'no_answer') {
     try {
+      let legacyReplay = false;
       const supplied = input.followUp && typeof input.followUp === 'object' && !Array.isArray(input.followUp)
         ? input.followUp as RepSmsCompositionInput
         : { body: typeof input.smsBody === 'string' ? input.smsBody : null };
       // The no-answer path requires curated copy. This check runs before the
       // attempt RPC, so malformed or unapproved copy can never create work.
       if (!supplied.templateId) throw new Error('Choose a curated follow-up template.');
+      if (typeof supplied.acquisitionsManager !== 'string' || !supplied.acquisitionsManager.trim()) {
+        // A pre-release request may be replayed after its attempt was saved.
+        // Accept that exact key only when the durable command already exists;
+        // never create a new Maria follow-up from an omitted name.
+        const key = typeof input.idempotencyKey === 'string' ? input.idempotencyKey : '';
+        const operation = input.source === 'sandra' ? 'finalize_acquisition_attempt' : 'log_acquisition_attempt';
+        const receipt = key ? await createAdminClient().from('acquisition_commands').select('id')
+          .eq('org_id', viewer.orgId).eq('actor_user_id', viewer.userId)
+          .eq('operation', operation).eq('idempotency_key', key).maybeSingle() : null;
+        if (!receipt?.data) throw new Error('Enter the acquisitions manager.');
+        legacyReplay = true;
+      }
       composition = composeRepSms(supplied);
+      const followUpPayload: Record<string, unknown> = { ...composition, body: composition.finalBody };
+      if (legacyReplay) delete followUpPayload.acquisitionsManager;
       input = {
         ...input,
         smsBody: composition.finalBody,
-        followUp: {
-          ...composition,
-          body: composition.finalBody,
-        } as unknown as Json,
+        followUp: followUpPayload as Json,
       };
     } catch (error) {
       return {ok:false as const,message:error instanceof Error?error.message:'Choose a valid follow-up message.'};

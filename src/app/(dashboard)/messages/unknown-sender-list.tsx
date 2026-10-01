@@ -1,6 +1,7 @@
 "use client";
 
 import { formatDistance } from "date-fns/formatDistance";
+import { formatPhoneDisplay } from "@/lib/phone-format";
 import { MessageSquareTextIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
@@ -94,7 +95,7 @@ function UnknownRow({
   const [threadOpen, setThreadOpen] = useState(false);
 
   const dismiss = () => {
-    if (!window.confirm(`Dismiss all messages from ${sender.fromAddress}?`)) {
+    if (!window.confirm(`Dismiss all messages from ${formatPhoneDisplay(sender.fromAddress)}?`)) {
       return;
     }
     startTransition(async () => {
@@ -130,7 +131,7 @@ function UnknownRow({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="font-mono text-sm font-medium">
-            {sender.fromAddress}
+            {formatPhoneDisplay(sender.fromAddress)}
           </span>
           {sender.messageCount > 1 ? (
             <Badge variant="secondary" className="text-[10px]">

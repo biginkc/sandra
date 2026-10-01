@@ -1,15 +1,17 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
+import { formatPhoneDisplay } from "@/lib/phone-format";
 
 import { Button } from "@/components/ui/button"
 import type { SendSmsOutcome } from "@/lib/messaging/send"
-import { formatPhoneE164 } from "@/lib/phone-format"
 import {
   DEFAULT_REP_SMS_INTRODUCTION,
   REP_SMS_INTRODUCTIONS,
   REP_SMS_TEMPLATES,
+  REP_SMS_ASSISTANT,
   composeRepSms,
+  personalizeRepSmsApprovedCopy,
   type RepSmsIntroduction,
   type RepSmsTemplate,
   type RepSmsComposition,
@@ -271,6 +273,7 @@ export function RepSmsComposer({
   const [error, setError] = useState<string | null>(null)
   const [retry, setRetry] = useState(0)
   const [introId, setIntroId] = useState(DEFAULT_REP_SMS_INTRODUCTION.id)
+  const [acquisitionsManager, setAcquisitionsManager] = useState("")
   const [selectedTemplateId, setSelectedTemplateId] = useState("")
   const [remainder, setRemainder] = useState("")
   const [sendState, setSendState] = useState<SendState>(INITIAL_SEND_STATE)
@@ -288,6 +291,7 @@ export function RepSmsComposer({
     setContext(null)
     setSenderId("")
     setIntroId(DEFAULT_REP_SMS_INTRODUCTION.id)
+    setAcquisitionsManager("")
     setSelectedTemplateId("")
     setRemainder("")
     setSendState(INITIAL_SEND_STATE)
@@ -319,6 +323,7 @@ export function RepSmsComposer({
         setSenderId(obligationSenderId || (result.data.senders.find((sender) => sender.isDefault)?.id ?? result.data.senders[0]?.id ?? ""))
         const saved = obligation?.composition
         if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+          setAcquisitionsManager(typeof saved.acquisitionsManager === "string" ? saved.acquisitionsManager : REP_SMS_ASSISTANT)
           if (typeof saved.introId === "string") setIntroId(saved.introId)
           if (typeof saved.templateId === "string") setSelectedTemplateId(saved.templateId)
           if (typeof saved.remainder === "string") setRemainder(saved.remainder)
@@ -345,6 +350,7 @@ export function RepSmsComposer({
           submission.current = durable
           setSenderId(savedSender.id)
           setIntroId(durable.composition.introId)
+          setAcquisitionsManager(durable.composition.acquisitionsManager)
           setSelectedTemplateId(durable.composition.templateId ?? "")
           setRemainder(durable.composition.remainder)
           const stateMessage = result.data.submission.state === "accepted" || result.data.submission.state === "delivered"
@@ -369,6 +375,7 @@ export function RepSmsComposer({
             setSenderId(savedSender.id)
             const storedComposition = stored.composition
             if (typeof storedComposition.introId === "string") setIntroId(storedComposition.introId)
+            setAcquisitionsManager(typeof storedComposition.acquisitionsManager === "string" ? storedComposition.acquisitionsManager : REP_SMS_ASSISTANT)
             if (typeof storedComposition.templateId === "string") setSelectedTemplateId(storedComposition.templateId)
             if (typeof storedComposition.remainder === "string") setRemainder(storedComposition.remainder)
             setSendState({ status: "resume", message: "A previous send needs reconciliation. Review text history, then reconcile the saved request." })
@@ -400,18 +407,20 @@ export function RepSmsComposer({
   const composition = useMemo(() => {
     try {
       return composeRepSms({
+        acquisitionsManager,
         introId: introduction.id,
         introVersion: introduction.version,
         templateId: selectedTemplateId || null,
         templateVersion: selectedTemplate?.version ?? null,
-        initialRemainder: selectedTemplate?.remainder ?? remainder,
+        initialRemainder: selectedTemplate ? personalizeRepSmsApprovedCopy(selectedTemplate.remainder, acquisitionsManager) : remainder,
         remainder,
       })
     } catch {
       return null
     }
-  }, [introduction.id, introduction.version, remainder, selectedTemplate, selectedTemplateId])
-  const fullBody = composition?.finalBody ?? (remainder.trim() ? `${introduction.body}\n\n${remainder.trim()}` : introduction.body)
+  }, [acquisitionsManager, introduction.id, introduction.version, remainder, selectedTemplate, selectedTemplateId])
+  const displayIntroduction = acquisitionsManager.trim() ? personalizeRepSmsApprovedCopy(introduction.body, acquisitionsManager) : "Enter the acquisitions manager to preview the introduction."
+  const fullBody = composition?.finalBody ?? (remainder.trim() ? `${displayIntroduction}\n\n${remainder.trim()}` : displayIntroduction)
   const smsInfo = useMemo(() => getRepSmsInfo(fullBody), [fullBody])
   // The server context is the authority for whether this text is a required
   // no-answer follow-up. Do not infer a requirement from historical attempt
@@ -433,7 +442,7 @@ export function RepSmsComposer({
     // Curated follow-up copy contains a plain editable remainder. Keep the
     // request token so a rapid selection remains deterministic if a future
     // catalog becomes asynchronous.
-    if (requestId === templateRequest.current) setRemainder(template.remainder)
+    if (requestId === templateRequest.current) setRemainder(acquisitionsManager.trim() ? personalizeRepSmsApprovedCopy(template.remainder, acquisitionsManager) : template.remainder.replaceAll("Maria", "[manager]"))
   }
 
   const clearSubmission = () => {
@@ -472,6 +481,7 @@ export function RepSmsComposer({
       obligationId: resumableObligationId,
       idempotencyKey,
       composition: {
+        acquisitionsManager: submittedComposition.acquisitionsManager,
         introId: submittedComposition.introId,
         introVersion: submittedComposition.introVersion,
         templateId: submittedComposition.templateId,
@@ -573,25 +583,35 @@ export function RepSmsComposer({
             <span className="font-medium">Send from</span>
             <select id={`rep-sms-sender-${propertyId}`} className="rounded border p-2" disabled={pending || obligationOwnsSender || submissionLocked} value={senderId} onChange={(event) => setSenderId(event.target.value)}>
               <option value="">Choose your number</option>
-              {context.senders.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.label} · {obligationOwnsSender && candidate.id === senderId ? (obligation?.fromNumber ?? candidate.number) : candidate.number}{candidate.isDefault ? " (default)" : ""}</option>)}
+              {context.senders.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.label} · {obligationOwnsSender && candidate.id === senderId ? formatPhoneDisplay(obligation?.fromNumber ?? candidate.number) : formatPhoneDisplay(candidate.number)}{candidate.isDefault ? " (default)" : ""}</option>)}
             </select>
           </label>
           <div className="flex flex-col justify-end text-sm text-muted-foreground">
-            <span><span className="font-medium text-foreground">From:</span> {formatPhoneE164(senderDisplayNumber) ?? "No selected texting number"}</span>
-            <span><span className="font-medium text-foreground">To:</span> {formatPhoneE164(recipient) ?? "No usable mobile number"}</span>
+            <span><span className="font-medium text-foreground">From:</span> {formatPhoneDisplay(senderDisplayNumber) ?? "No selected texting number"}</span>
+            <span><span className="font-medium text-foreground">To:</span> {formatPhoneDisplay(recipient) ?? "No usable mobile number"}</span>
             <span className="text-xs">Replies use the saved phone in this thread.</span>
           </div>
         </div>
 
         <div className="rounded-md border border-blue-200 bg-blue-50/60 p-3 text-sm dark:border-blue-900 dark:bg-blue-950/30">
+          <label className="mb-2 flex flex-col gap-1" htmlFor={`rep-sms-manager-${propertyId}`}>
+            <span className="font-medium">Acquisitions manager <span className="text-destructive">— required</span></span>
+            <input id={`rep-sms-manager-${propertyId}`} aria-label="Acquisitions manager" className="rounded border bg-background p-2" value={acquisitionsManager} maxLength={80} required disabled={pending || submissionLocked} onChange={(event) => {
+              const next = event.target.value
+              setRemainder((current) => current === personalizeRepSmsApprovedCopy(selectedTemplate?.remainder ?? "", acquisitionsManager.trim() || "[manager]")
+                ? personalizeRepSmsApprovedCopy(selectedTemplate?.remainder ?? "", next || "[manager]")
+                : current)
+              setAcquisitionsManager(next)
+            }} placeholder="Name of the person reaching out" />
+          </label>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <label className="font-medium" htmlFor={`rep-sms-intro-${propertyId}`}>Assistant introduction</label>
             <select id={`rep-sms-intro-${propertyId}`} aria-label="Assistant introduction" className="rounded border bg-background px-2 py-1 text-xs font-medium" disabled={pending || submissionLocked} value={introId} onChange={(event) => setIntroId(event.target.value)}>
-              {REP_SMS_INTRODUCTIONS.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.body}</option>)}
+              {REP_SMS_INTRODUCTIONS.map((candidate) => <option key={candidate.id} value={candidate.id}>{acquisitionsManager.trim() ? personalizeRepSmsApprovedCopy(candidate.body, acquisitionsManager) : candidate.body.replaceAll("Maria", "[manager]")}</option>)}
             </select>
           </div>
-          <p className="mt-2 text-foreground">{introduction.body}</p>
-          <p className="mt-1 text-xs text-muted-foreground">Choose an approved Mel-with-BMH-as-Maria&apos;s-assistant introduction. It stays read-only in the final message; the follow-up remainder stays editable below.</p>
+          <p className="mt-2 text-foreground">{displayIntroduction}</p>
+          <p className="mt-1 text-xs text-muted-foreground">The approved introduction stays read-only in the final message; the follow-up remainder stays editable below.</p>
         </div>
 
         <div className="space-y-1.5">
@@ -632,7 +652,7 @@ export function RepSmsComposer({
         </div>
 
         <div className="space-y-2 rounded-md border bg-muted/20 p-3">
-          <div className="flex items-center justify-between gap-2 text-sm font-medium"><span>Complete preview</span><span className="text-xs text-muted-foreground">Mel → {formatPhoneE164(recipient) ?? "—"}</span></div>
+          <div className="flex items-center justify-between gap-2 text-sm font-medium"><span>Complete preview</span><span className="text-xs text-muted-foreground">Mel → {formatPhoneDisplay(recipient) ?? "—"}</span></div>
           <p className="whitespace-pre-wrap break-words rounded bg-background p-3 text-sm">{fullBody}</p>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
             <span>{smsInfo.length} characters</span>

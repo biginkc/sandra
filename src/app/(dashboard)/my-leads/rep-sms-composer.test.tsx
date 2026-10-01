@@ -8,6 +8,7 @@ vi.mock("./sms-actions", () => ({ loadRepSmsContext: mocks.load, sendRepSms: moc
 import { RepSmsComposer } from "./rep-sms-composer"
 
 const savedComposition = {
+  acquisitionsManager: "Maria",
   policyVersion: 1,
   introId: "mel-maria-assistant-1",
   introVersion: 2,
@@ -38,6 +39,17 @@ beforeEach(() => {
 })
 
 describe("RepSmsComposer obligation resume", () => {
+  it("restores the exact manager on a legacy saved follow-up", async () => {
+    const data = context("failed_not_dispatched") as any
+    data.obligation.composition = { ...savedComposition }
+    delete data.obligation.composition.acquisitionsManager
+    mocks.load.mockResolvedValue({ ok: true, data })
+    const user = userEvent.setup()
+    render(<RepSmsComposer propertyId="property-1" />)
+    await user.click(screen.getByRole("button", { name: "Text lead" }))
+    expect(await screen.findByLabelText("Acquisitions manager")).toHaveValue("Maria")
+    expect(screen.getByLabelText("Editable message remainder")).toHaveValue(savedComposition.remainder)
+  })
   it("uses the shared action-toolbar placement without changing the trigger behavior", async () => {
     const user = userEvent.setup()
     mocks.load.mockResolvedValue({ ok: true, data: genericContext() })
@@ -133,7 +145,7 @@ describe("RepSmsComposer obligation resume", () => {
     const sender = await screen.findByLabelText("Send from")
     expect(sender).toHaveValue("sender-1")
     expect(sender).toBeDisabled()
-    expect(screen.getByText("From:").parentElement).toHaveTextContent("+1 (816) 370-6846")
+    expect(screen.getByText("From:").parentElement).toHaveTextContent("(816) 370-6846")
   })
 
   it("persists a generic submission key and reconciles it after a response-loss reload", async () => {
@@ -147,6 +159,7 @@ describe("RepSmsComposer obligation resume", () => {
     await user.click(screen.getByRole("button", { name: "Text lead" }))
     const remainder = await screen.findByLabelText("Editable message remainder")
     await user.type(remainder, "Please text Maria a time that works.")
+    await user.type(screen.getByLabelText("Acquisitions manager"), "Jordan")
     await user.click(screen.getByRole("button", { name: "Send text" }))
     await waitFor(() => expect(screen.getByText("Pending reconciliation")).toBeInTheDocument())
     expect(remainder).toBeDisabled()
@@ -174,6 +187,7 @@ describe("RepSmsComposer obligation resume", () => {
     await user.click(screen.getByRole("button", { name: "Text lead" }))
     const remainder = await screen.findByLabelText("Editable message remainder")
     await user.type(remainder, "Please text Maria a time that works.")
+    await user.type(screen.getByLabelText("Acquisitions manager"), "Jordan")
     await user.click(screen.getByRole("button", { name: "Send text" }))
 
     await waitFor(() => expect(screen.getByText(/could not record the acknowledgement/)).toBeInTheDocument())
@@ -198,6 +212,7 @@ describe("RepSmsComposer obligation resume", () => {
     await user.click(screen.getByRole("button", { name: "Text lead" }))
     const remainder = await screen.findByLabelText("Editable message remainder")
     await user.type(remainder, "Please text Maria a time that works.")
+    await user.type(screen.getByLabelText("Acquisitions manager"), "Jordan")
     await user.click(screen.getByRole("button", { name: "Send text" }))
     await waitFor(() => expect(screen.getByText("Pending reconciliation")).toBeInTheDocument())
     const firstRequest = mocks.send.mock.calls[0][0]
@@ -233,7 +248,7 @@ describe("RepSmsComposer obligation resume", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Reconcile saved send" })).toBeInTheDocument())
     expect(screen.getByLabelText("Editable message remainder")).toHaveValue(savedComposition.remainder)
     expect(screen.getByLabelText("Editable message remainder")).toBeDisabled()
-    expect(screen.getByText("From:").parentElement).toHaveTextContent("+1 (816) 370-6846")
+    expect(screen.getByText("From:").parentElement).toHaveTextContent("(816) 370-6846")
     await user.click(screen.getByRole("button", { name: "Reconcile saved send" }))
     await waitFor(() => expect(mocks.send).toHaveBeenCalledTimes(2))
     expect(mocks.send.mock.calls[1][0]).toEqual(expect.objectContaining({
@@ -299,6 +314,7 @@ describe("RepSmsComposer obligation resume", () => {
     await waitFor(() => expect(mocks.load).toHaveBeenCalledTimes(2))
     const remainder = screen.getByLabelText("Editable message remainder")
     await user.type(remainder, "A new manual message after the saved follow-up.")
+    await user.type(screen.getByLabelText("Acquisitions manager"), "Jordan")
     await user.click(screen.getByRole("button", { name: "Send text" }))
     await waitFor(() => expect(mocks.send).toHaveBeenCalledTimes(2))
     expect(mocks.send.mock.calls[0][0].obligationId).toBe("obligation-1")

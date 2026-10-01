@@ -6,7 +6,7 @@ import { useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import { callAction } from "@/lib/errors/call-action";
-import { formatPhoneE164 } from "@/lib/phone-format";
+import { formatPhoneDisplay } from "@/lib/phone-format";
 import { renderTemplate } from "@/lib/templates/render";
 import { type TemplateRow } from "@/app/(dashboard)/templates/actions";
 import { TemplatePicker } from "@/app/(dashboard)/templates/template-picker";
@@ -116,7 +116,7 @@ export function InlineReply({
       switch (outcome.status) {
         case "sent":
           toast.success("Message sent", {
-            description: `Sent to ${effectiveToPhone}.`,
+            description: `Sent to ${formatPhoneDisplay(effectiveToPhone)}.`,
           });
           setBody(current => current === submittedBody ? "" : current);
           if (onSent) onSent(outcome.messageId);
@@ -227,8 +227,8 @@ export function InlineReply({
     });
   };
 
-  const formattedFrom = formatPhoneE164(fromNumber);
-  const formattedTo = formatPhoneE164(effectiveToPhone);
+  const formattedFrom = formatPhoneDisplay(fromNumber);
+  const formattedTo = formatPhoneDisplay(effectiveToPhone);
 
   return (
     <div className="flex flex-col gap-2" data-testid="inline-reply">

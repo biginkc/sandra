@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useRef, useState, useTransition } from 'react';
+import { formatPhoneDisplay } from '@/lib/phone-format';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
@@ -56,7 +57,7 @@ function CallCard({ call, scope }: { call: LibraryCall; scope: RecordingScope })
   const date = new Intl.DateTimeFormat('en-US', { timeZone: TIME_ZONE, dateStyle: 'medium', timeStyle: 'short' }).format(new Date(call.at));
   return <article className="rounded-xl border bg-card p-5 shadow-sm">
     <div className="flex flex-wrap items-start justify-between gap-3">
-      <div><h2 className="font-semibold">{call.contact}</h2><p className="text-sm text-muted-foreground">{call.address}</p>{call.phone && <p className="text-sm">{call.phone}</p>}</div>
+      <div><h2 className="font-semibold">{formatPhoneDisplay(call.contact)}</h2><p className="text-sm text-muted-foreground">{call.address}</p>{call.phone && <p className="text-sm">{formatPhoneDisplay(call.phone)}</p>}</div>
       <div className="text-sm md:text-right"><p>{date} CT</p><p className="text-muted-foreground">{scope === 'owner' ? `${call.actor_name} · ` : ''}{label(call.direction)} · {label(call.source)}</p></div>
     </div>
     <div className="my-3 flex flex-wrap gap-2 text-xs text-muted-foreground"><span>{label(call.outcome)}</span><span>· {labels[call.status]}</span><span>· {call.purpose.replaceAll('_',' ')}</span>{call.transcript && <span>· Transcript available</span>}{call.summary && <span>· Summary available</span>}</div>

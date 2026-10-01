@@ -96,6 +96,7 @@ export const REP_SMS_TEMPLATES: readonly RepSmsTemplate[] = [
 export const DEFAULT_REP_SMS_INTRODUCTION = REP_SMS_INTRODUCTIONS[0];
 
 export type RepSmsCompositionInput = {
+  acquisitionsManager?: string | null;
   introId?: string | null;
   introVersion?: number | string | null;
   templateId?: string | null;
@@ -111,6 +112,7 @@ export type RepSmsCompositionInput = {
 };
 
 export type RepSmsComposition = {
+  acquisitionsManager: string;
   policyVersion: typeof REP_SMS_COMPOSITION_POLICY_VERSION;
   introId: string;
   introVersion: number;
@@ -132,7 +134,8 @@ export class RepSmsCompositionError extends Error {
       | "stale_template"
       | "missing_remainder"
       | "duplicate_introduction"
-      | "invalid_body",
+      | "invalid_body"
+      | "invalid_manager",
     message: string,
   ) {
     super(message);
@@ -148,10 +151,11 @@ function cleanRemainder(value: string | null | undefined): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function hasApprovedIntroduction(value: string): boolean {
+function hasApprovedIntroduction(value: string, acquisitionsManager: string): boolean {
   const normalized = value.trim().toLocaleLowerCase();
   return [...REP_SMS_INTRODUCTIONS, ...LEGACY_REP_SMS_INTRODUCTIONS].some((intro) =>
-    normalized.includes(intro.body.toLocaleLowerCase()),
+    normalized.includes(intro.body.toLocaleLowerCase()) ||
+    normalized.includes(personalizeRepSmsApprovedCopy(intro.body, acquisitionsManager).toLocaleLowerCase()),
   );
 }
 
@@ -212,6 +216,12 @@ function joinBody(introduction: RepSmsIntroduction, remainder: string): string {
  * approved introduction and the editable remainder.
  */
 export function composeRepSms(input: RepSmsCompositionInput): RepSmsComposition {
+  // Older saved obligations did not carry a manager name. Retain their exact
+  // copy for reconciliation; new UI flows require a name before submission.
+  const acquisitionsManager = input.acquisitionsManager == null ? REP_SMS_ASSISTANT : input.acquisitionsManager.trim();
+  if (!acquisitionsManager || acquisitionsManager.length > 80 || /[\r\n<>]/.test(acquisitionsManager) || /\[manager\]/i.test(acquisitionsManager)) {
+    throw new RepSmsCompositionError("invalid_manager", "Enter an acquisitions manager name (up to 80 characters).");
+  }
   const legacyBody = cleanRemainder(input.remainder ?? input.body);
   const legacySplit = splitLegacyFullBody(legacyBody);
   const introduction = input.introId
@@ -255,24 +265,32 @@ export function composeRepSms(input: RepSmsCompositionInput): RepSmsComposition 
     : input.body && !splitRemainder
       ? input.body
       : splitRemainder ?? initialCandidate;
-  const initialRemainder = cleanRemainder(initialCandidate);
+  const personalizeApprovedCopy = (value: string) => personalizeRepSmsApprovedCopy(value, acquisitionsManager);
+  const initialRemainder = input.initialRemainder == null && template
+    ? personalizeApprovedCopy(cleanRemainder(initialCandidate))
+    : cleanRemainder(initialCandidate);
   const remainder = cleanRemainder(remainderCandidate);
+  if (/\[manager\]/i.test(remainder)) {
+    throw new RepSmsCompositionError("invalid_manager", "Replace the manager placeholder before sending.");
+  }
   if (!initialRemainder || !remainder) {
     throw new RepSmsCompositionError(
       "missing_remainder",
       "Add a message after the Mel introduction before sending.",
     );
   }
-  if (hasApprovedIntroduction(remainder)) {
+  if (hasApprovedIntroduction(remainder, acquisitionsManager)) {
     throw new RepSmsCompositionError(
       "duplicate_introduction",
       "Keep the approved introduction in its read-only section; remove the duplicate from the message.",
     );
   }
 
-  const initialBody = joinBody(introduction, initialRemainder);
-  const finalBody = joinBody(introduction, remainder);
+  const personalizedIntroduction = { ...introduction, body: personalizeApprovedCopy(introduction.body) };
+  const initialBody = joinBody(personalizedIntroduction, initialRemainder);
+  const finalBody = joinBody(personalizedIntroduction, remainder);
   return {
+    acquisitionsManager,
     policyVersion: REP_SMS_COMPOSITION_POLICY_VERSION,
     introId: introduction.id,
     introVersion: introduction.version,
@@ -295,4 +313,10 @@ export function getRepSmsIntroduction(id: string): RepSmsIntroduction | null {
 
 export function getRepSmsTemplate(id: string): RepSmsTemplate | null {
   return REP_SMS_TEMPLATES.find((template) => template.id === id) ?? null;
+}
+
+export function personalizeRepSmsApprovedCopy(copy: string, acquisitionsManager: string): string {
+  const name = acquisitionsManager.trim();
+  const withName = copy.replaceAll("Maria", () => name);
+  return name === REP_SMS_ASSISTANT ? withName : withName.replace("for her to call you back", "for them to call you back");
 }

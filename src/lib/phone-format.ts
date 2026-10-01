@@ -1,8 +1,11 @@
-export function formatPhoneE164(raw: string | null | undefined): string | null {
+/** Format a US phone number for display without changing its stored value. */
+export function formatPhoneDisplay(raw: string | null | undefined): string | null {
   if (!raw) return null;
-  const digits = raw.replace(/\D/g, "");
+  const value = raw.trim();
+  if (!/^[+\d().\s-]+$/.test(value)) return raw;
+  const digits = value.replace(/\D/g, "");
   if (digits.length === 11 && digits.startsWith("1")) {
-    return `+1 (${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
+    return `(${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
   }
   if (digits.length === 10) {
     return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;

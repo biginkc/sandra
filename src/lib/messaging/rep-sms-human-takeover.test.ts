@@ -160,6 +160,8 @@ beforeEach(() => {
 describe("Maria-through-Mel human SMS takeover", () => {
   it("recognizes only the server-created human rep metadata", () => {
     expect(isMariaThroughMelRepSms(mariaThroughMel)).toBe(true);
+    expect(isMariaThroughMelRepSms({ repSms: { ...mariaThroughMel.repSms, workflow: "manager-through-mel", assistant: "Jordan", acquisitionsManager: "Jordan" } })).toBe(true);
+    expect(isMariaThroughMelRepSms({ repSms: { ...mariaThroughMel.repSms, workflow: "manager-through-mel", assistant: "Jordan", acquisitionsManager: "Maria" } })).toBe(false);
     expect(
       isMariaThroughMelRepSms({
         repSms: { ...mariaThroughMel.repSms, workflow: "other-workflow" },

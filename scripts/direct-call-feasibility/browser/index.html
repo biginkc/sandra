@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Direct calling feasibility (local test page)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 16px; max-width: 760px; }
+    button { margin: 2px; padding: 6px 10px; }
+    pre { background: #f4f4f4; padding: 8px; height: 280px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>Direct calling feasibility</h1>
+  <p>Local test page. Served on localhost only. Uses a short-lived test credential token, never the API key.</p>
+  <div>
+    <button id="answer">Answer</button>
+    <button id="hangup">Hangup</button>
+    <button id="hold">Hold</button>
+    <button id="unhold">Unhold</button>
+    <input id="dtmf" size="4" value="1"><button id="sendDtmf">Send DTMF</button>
+  </div>
+  <h3>F2 escape attempts (targets come from the local server: owned phone, test credential, dev SIP only)</h3>
+  <div id="escapes"></div>
+  <div id="stats">audio: no call yet</div>
+  <pre id="out"></pre>
+  <script src="https://unpkg.com/@telnyx/webrtc@2.27.1/lib/bundle.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

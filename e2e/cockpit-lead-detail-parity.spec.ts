@@ -10,7 +10,7 @@ import {
 } from "./fixtures";
 import { checkQuietHours, STATE_TO_TZ } from "../src/lib/messaging/quiet-hours";
 import { ensureConversationIdForThread } from "../src/lib/messages/threading";
-import { formatPhoneE164 } from "../src/lib/phone-format";
+import { formatPhoneDisplay } from "../src/lib/phone-format";
 import { MOCK_SENDER_SECONDARY } from "../tests/integration/delivery";
 
 /**
@@ -333,9 +333,9 @@ test("lead detail replies on the newest paired customer and business route", asy
     page.getByTestId("sms-channel-restriction-header"),
   ).toBeVisible();
   const inlineReply = page.getByTestId("inline-reply");
-  await expect(inlineReply).toContainText(formatPhoneE164(secondPhone)!);
+  await expect(inlineReply).toContainText(formatPhoneDisplay(secondPhone)!);
   await expect(inlineReply).toContainText(
-    formatPhoneE164(MOCK_SENDER_SECONDARY)!,
+    formatPhoneDisplay(MOCK_SENDER_SECONDARY)!,
   );
 
   const reply = `paired route ${Date.now()}`;
