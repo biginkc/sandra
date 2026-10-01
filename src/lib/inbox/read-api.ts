@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/supabase/types";
 import { retryReceiptTransaction } from "@/lib/messaging/receipt-persistence";
 import type { InboxDripContext } from "./drip-context";
+import { labelsFromDripInput } from "./drip-context";
 
 type ReadDatabase = Omit<Database, "public"> & { public: Omit<Database["public"], "Functions"> & { Functions: Database["public"]["Functions"] & {
   inbox_unknown_history_page: { Args: { org_id: string; sender_group_id: string; before_cursor?: string }; Returns: Json };
@@ -14,6 +15,7 @@ type ReadDatabase = Omit<Database, "public"> & { public: Omit<Database["public"]
 export type InboxReadClient = Pick<SupabaseClient<ReadDatabase>, "rpc">;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const REVISION = /^(0|[1-9][0-9]{0,18})$/;
+// The label RPC deliberately caps input at 50 IDs; the canonical history page is also capped at 50.
 export class InboxReadError extends Error {
   constructor(readonly status: number) { super("Inbox read unavailable"); }
 }
@@ -23,6 +25,7 @@ function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 function id(value: unknown): string { requireValue(typeof value === "string" && UUID.test(value)); return value; }
+function nullableId(value: unknown): string | null { return value === null ? null : id(value); }
 function revision(value: unknown): string {
   requireValue(typeof value === "string" && REVISION.test(value) && BigInt(value) <= BigInt("9223372036854775807"));
   return value;
@@ -125,15 +128,25 @@ export function createInboxReadRepository(client: InboxReadClient) {
       for (const value of labelsRow.messages) {
         const label = record(value), messageId = id(label.id);
         if (label.is_page !== true) continue;
-        const dripLabel = label.drip_label === undefined || label.drip_label === null ? null : text(label.drip_label);
-        const dripReplyLabel = label.drip_reply_label === undefined || label.drip_reply_label === null ? null : text(label.drip_reply_label);
-        labels.set(messageId, { dripLabel, dripReplyLabel });
+        const dripName = label.drip_name === undefined || label.drip_name === null ? null : text(label.drip_name);
+        const dripStep = label.drip_step === undefined || label.drip_step === null ? null : label.drip_step;
+        const dripStepsTotal = label.drip_steps_total === undefined || label.drip_steps_total === null ? null : label.drip_steps_total;
+        const previousDripStep = label.previous_drip_step === undefined || label.previous_drip_step === null ? null : label.previous_drip_step;
+        for (const value of [dripStep, dripStepsTotal, previousDripStep]) {
+          if (value !== null) requireValue(Number.isSafeInteger(value) && (value as number) > 0);
+        }
+        labels.set(messageId, labelsFromDripInput({
+          dripName,
+          dripStep: dripStep as number | null,
+          dripStepsTotal: dripStepsTotal as number | null,
+          previousDripStep: previousDripStep as number | null,
+        }, message.direction));
       }
       const labeledHistory = history.map(message => {
         const label = labels.get(message.id);
         return { ...message, ...(label?.dripLabel ? { dripLabel: label.dripLabel } : {}), ...(label?.dripReplyLabel ? { dripReplyLabel: label.dripReplyLabel } : {}) };
       });
-      return { requesterId: id(row.requester_id), orgId, conversationId, headRevision: revision(row.head_revision),
+      return { requesterId: id(row.requester_id), orgId, conversationId, propertyId: row.property_id === undefined ? null : nullableId(row.property_id), headRevision: revision(row.head_revision),
         readBoundary: id(row.read_boundary), boundaryExpiresAt: timestamp(row.boundary_expires_at), captureGeneration: id(row.capture_generation), history: labeledHistory,
         ...(row.drip === undefined ? {} : { drip: dripContext(row.drip) }), nextCursor: row.next_cursor === null ? null : id(row.next_cursor) };
     },

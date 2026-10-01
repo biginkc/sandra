@@ -41,7 +41,7 @@ beforeEach(() => {
       acquisitions_enabled: false,
     },
   ]);
-  mocks.detail.mockResolvedValue({ conversationId, history: [] });
+  mocks.detail.mockResolvedValue({ conversationId, propertyId: orgId, history: [] });
   mocks.dripContext.mockResolvedValue({ drip: null });
 });
 
@@ -58,6 +58,7 @@ describe("workspace inbox conversation detail", () => {
 
     expect(response.status).toBe(200);
     expect(mocks.detail).toHaveBeenCalled();
+    expect(mocks.dripContext).toHaveBeenCalledWith(expect.anything(), orgId, conversationId, orgId);
     expect((await response.json()).drip.name).toBe("Fixture Drip");
   });
 

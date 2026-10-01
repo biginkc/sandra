@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { createInboxReadRepository } from "@/lib/inbox/read-api";
+import { dripHeaderLabel, dripReplyPillLabel } from "@/lib/inbox/drip-context";
 
 export type InboxDetailSnapshot = Awaited<ReturnType<ReturnType<typeof createInboxReadRepository>["detail"]>>;
 export interface ConversationHistoryProps {
@@ -157,15 +158,7 @@ export function ConversationHistory(props: ConversationHistoryProps) {
   if (!data || !visible) return null;
   const status = readState?.boundary === data.readBoundary ? readState.status : "pending";
   if (status === "permission_lost" || revokedBoundary === data.readBoundary) return null;
-  const dripLine = data.drip ? data.drip.status === "active"
-    ? `In ${data.drip.name} · text ${data.drip.step} of ${data.drip.total}`
-    : data.drip.status === "completed" && data.drip.stoppedAt
-    ? `Was in ${data.drip.name} · finished, then they replied`
-    : data.drip.status === "completed"
-    ? `Was in ${data.drip.name} · ended`
-    : data.drip.stoppedAt
-    ? `Was in ${data.drip.name} · stopped ${new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: data.drip.timeZone ?? "America/Chicago" }).format(new Date(data.drip.stoppedAt))} when they replied`
-    : `${data.drip.status === "paused" ? "Paused in" : "In"} ${data.drip.name} · text ${data.drip.step} of ${data.drip.total}` : null;
+  const dripLine = dripHeaderLabel(data.drip);
   const deliveryLabel = (message: (typeof data.history)[number]) => {
     if (message.direction === "inbound") return "Received";
     if (message.delivery === "not_confirmed") return "Not confirmed";
@@ -175,7 +168,7 @@ export function ConversationHistory(props: ConversationHistoryProps) {
     return "Sent";
   };
   return <section aria-label="Conversation history">
-    {data.drip?.replied && <span className="self-start rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800">Replied to drip</span>}
+    {dripReplyPillLabel(data.drip) && <span className="self-start rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800">{dripReplyPillLabel(data.drip)}</span>}
     {dripLine && <p className="mt-1 flex items-center gap-1.5 text-xs font-medium text-teal-800" data-testid="inbox-detail-drip-line">{dripLine}</p>}
     <div className="mb-3 flex flex-wrap items-center gap-3 text-sm">
       {nextCursor && <button type="button" className="underline" disabled={pageState?.busy} onClick={() => void older()}>{pageState?.busy ? "Loading older messages…" : "Load older messages"}</button>}

@@ -8,7 +8,7 @@ const boundary = "33333333-3333-3333-3333-333333333333";
 const signal = () => new AbortController().signal;
 function client(responses: unknown[]) {
   const rpc = vi.fn((name: string, args: Record<string, unknown>) => ({ abortSignal: vi.fn(async () => {
-    if (name === "inbox_drip_label_inputs_v1") return { data: { org_id: args.org_id, conversation_id: args.conversation_id, messages: (args.message_ids as string[]).map(id => ({ id, is_page: true, drip_label: null, drip_reply_label: null })) }, error: null };
+    if (name === "inbox_drip_label_inputs_v1") return { data: { org_id: args.org_id, conversation_id: args.conversation_id, messages: (args.message_ids as string[]).map(id => ({ id, is_page: true, drip_name: null, drip_step: null, drip_steps_total: null, previous_drip_step: null })) }, error: null };
     const response = responses.shift();
     if (response instanceof Error) throw response;
     return response;
@@ -17,7 +17,7 @@ function client(responses: unknown[]) {
 }
 const receipt = { boundary_id: boundary, batch: 0, changed: 200, completed: false };
 const snapshot = {
-  requester_id: boundary, org_id: org, conversation_id: conversation, head_revision: "9007199254740993",
+  requester_id: boundary, org_id: org, conversation_id: conversation, property_id: null, head_revision: "9007199254740993",
   read_boundary: boundary, boundary_expires_at: "2030-01-01T00:00:00Z", capture_generation: boundary, next_cursor: null,
   history: [{ id: boundary, created_at_raw: "2026-09-13 12:00:00.123456+00", body: "Owned test", direction: "inbound", read_at_raw: null, inbound_revision: "9007199254740993", status: "received", delivery: "delivered" }],
 };
@@ -79,7 +79,7 @@ describe("canonical Inbox read RPC repository", () => {
   it.each([
     ["42501", "INBOX_SESSION_REVOKED", 401], ["42501", "INBOX_READ_NOT_FOUND", 404],
     ["42501", "INBOX_ACCESS_DENIED", 404],
-    ["42501", "INBOX_ORG_DENIED", 403], ["42501", "INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING", 403],
+    ["42501", "INBOX_ORG_DENIED", 403], ["42501", "INBOX_ACCESS_CHANGED", 403], ["42501", "INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING", 403],
     ["42501", "INBOX_ACCESS_BASELINE_MISSING", 503],
     ["55000", "INBOX_READ_EXPIRED", 410], ["55000", "INBOX_READ_BATCH_CONFLICT", 409],
     ["42501", "permission denied for function", 503], ["PGRST202", "Missing schema", 503],

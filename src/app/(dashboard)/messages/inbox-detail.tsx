@@ -27,6 +27,7 @@ import {
   deriveSmsParties,
   isSmsRouteAuthoritative,
 } from "@/lib/messages/sms-parties";
+import { dripHeaderLabel, dripReplyPillLabel } from "@/lib/inbox/drip-context";
 
 import { InlineReply } from "../leads/[id]/inline-reply";
 import { deriveLeadSmsPresentation } from "../leads/[id]/lead-detail-state";
@@ -474,7 +475,7 @@ export function InboxDetail({
                   status={data.propertyStatus}
                   historical={isPermanentlyLocked}
                 />
-                {data.drip?.replied ? <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800">Replied to drip</span> : null}
+                {dripReplyPillLabel(data.drip) ? <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800">{dripReplyPillLabel(data.drip)}</span> : null}
               </div>
               <p className="text-[13px] text-[#78716c] flex items-center gap-2 min-w-0">
                 {data.propertyAddress ? (
@@ -489,17 +490,9 @@ export function InboxDetail({
                   Assigned: {assignedLabel}
                 </span>
               </p>
-              {data.drip ? <p className="mt-1 flex items-center gap-1.5 text-xs font-medium text-teal-800" data-testid="inbox-detail-drip-line">
+              {dripHeaderLabel(data.drip) ? <p className="mt-1 flex items-center gap-1.5 text-xs font-medium text-teal-800" data-testid="inbox-detail-drip-line">
                 <Droplet aria-hidden="true" className="h-3.5 w-3.5" />
-                {data.drip.status === "active"
-                  ? `In ${data.drip.name} · text ${data.drip.step} of ${data.drip.total}`
-                  : data.drip.status === "completed" && data.drip.stoppedAt
-                  ? `Was in ${data.drip.name} · finished, then they replied`
-                  : data.drip.status === "completed"
-                  ? `Was in ${data.drip.name} · ended`
-                  : data.drip.stoppedAt
-                  ? `Was in ${data.drip.name} · stopped ${new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: data.drip.timeZone ?? "America/Chicago" }).format(new Date(data.drip.stoppedAt))} when they replied`
-                  : `${data.drip.status === "paused" ? "Paused in" : "In"} ${data.drip.name} · text ${data.drip.step} of ${data.drip.total}`}
+                {dripHeaderLabel(data.drip)}
               </p> : null}
               <p
                 className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[12px] text-[#78716c]"

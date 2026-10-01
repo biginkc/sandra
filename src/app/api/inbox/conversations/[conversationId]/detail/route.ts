@@ -17,7 +17,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ conv
     if (!canAccessMessagesAndLeadsBoard(await getCallerMembershipsOrThrow())) throw new InboxReadError(404);
     const orgId = query.get("orgId")!;
     const data = await createInboxReadRepository(client as unknown as InboxReadClient).detail(orgId, conversationId, AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]), query.get("before") ?? undefined);
-    const dripContext = await loadConversationDripContext(client, orgId, conversationId);
+    const dripContext = await loadConversationDripContext(client, orgId, conversationId, data.propertyId);
     return Response.json({ ...data, drip: dripContext.drip }, { headers });
   } catch (error) {
     return Response.json({ error: "Inbox detail unavailable" }, { status: error instanceof InboxReadError ? error.status : 503, headers });

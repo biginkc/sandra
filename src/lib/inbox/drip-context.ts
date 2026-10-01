@@ -29,6 +29,53 @@ export type InboxDripContext = {
   dripReplyLabels: Record<string, string>;
 };
 
+export type InboxDripLabelInput = {
+  dripName: string | null;
+  dripStep: number | null;
+  dripStepsTotal: number | null;
+  previousDripStep: number | null;
+};
+
+/** The only owner of the user-facing drip label wording. */
+export function dripMessageLabel(name: string, step: number, total: number): string {
+  return `Drip · ${name} · text ${step} of ${total}`;
+}
+
+/** The only owner of the user-facing drip reply label wording. */
+export function dripReplyLabel(step: number): string {
+  return `Reply to drip text ${step}`;
+}
+
+export function dripHeaderLabel(drip: InboxDripContext["drip"]): string | null {
+  if (!drip) return null;
+  if (drip.status === "active") return `In ${drip.name} · text ${drip.step} of ${drip.total}`;
+  if (drip.status === "completed" && drip.stoppedAt) return `Was in ${drip.name} · finished, then they replied`;
+  if (drip.status === "completed") return `Was in ${drip.name} · ended`;
+  if (drip.stoppedAt) {
+    const day = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: drip.timeZone ?? OPERATOR_TIME_ZONE }).format(new Date(drip.stoppedAt));
+    return `Was in ${drip.name} · stopped ${day} when they replied`;
+  }
+  return `${drip.status === "paused" ? "Paused in" : "In"} ${drip.name} · text ${drip.step} of ${drip.total}`;
+}
+
+export function dripReplyPillLabel(drip: InboxDripContext["drip"]): string | null {
+  return drip?.replied ? "Replied to drip" : null;
+}
+
+export function labelsFromDripInput(input: InboxDripLabelInput, direction: string): {
+  dripLabel: string | null;
+  dripReplyLabel: string | null;
+} {
+  return {
+    dripLabel: input.dripName !== null && input.dripStep !== null && input.dripStepsTotal !== null
+      ? dripMessageLabel(input.dripName, input.dripStep, input.dripStepsTotal)
+      : null,
+    dripReplyLabel: direction === "inbound" && input.previousDripStep !== null
+      ? dripReplyLabel(input.previousDripStep)
+      : null,
+  };
+}
+
 /** Shared header/pill and history-label computation for the row's property. */
 export async function loadMessageDripContext(
   supabase: SupabaseClient<Database>,
@@ -88,7 +135,7 @@ export async function loadMessageDripContext(
     const sequenceId = run.sequence_steps.sequence_id;
     const name = names.get(sequenceId);
     if (!name) continue;
-    dripMessageLabels[run.message_id] = `Drip · ${name} · text ${run.sequence_steps.step_index + 1} of ${totals.get(sequenceId) ?? run.sequence_steps.step_index + 1}`;
+    dripMessageLabels[run.message_id] = dripMessageLabel(name, run.sequence_steps.step_index + 1, totals.get(sequenceId) ?? run.sequence_steps.step_index + 1);
     dripMessageEnrollmentIds[run.message_id] = run.enrollment_id;
   }
   const dripReplyLabels: Record<string, string> = {};
@@ -102,7 +149,7 @@ export async function loadMessageDripContext(
     } else if (message.direction === "inbound" && pendingDripText) {
       const match = pendingDripText.match(/text (\d+) of/);
       if (match) {
-        dripReplyLabels[message.id] = `Reply to drip text ${match[1]}`;
+        dripReplyLabels[message.id] = dripReplyLabel(Number(match[1]));
         if (pendingEnrollmentId) dripReplyEnrollmentIds[message.id] = pendingEnrollmentId;
       }
       pendingDripText = null;
@@ -166,12 +213,15 @@ export async function loadConversationDripContext(
   supabase: SupabaseClient<Database>,
   orgId: string,
   conversationId: string,
+  maintainedPropertyId?: string | null,
 ): Promise<InboxDripContext> {
   const result = await supabase.from("messages").select("*")
     .eq("org_id", orgId).eq("conversation_id", conversationId).eq("channel", "sms")
     .order("created_at", { ascending: false }).order("id", { ascending: false }).limit(100);
   if (result.error) throw new Error(`fetchInboxDetail messages: ${result.error.message}`);
   const ascending = [...(result.data ?? [])].reverse();
-  const propertyId = [...ascending].reverse().find((message) => message.property_id !== null)?.property_id ?? null;
+  const propertyId = maintainedPropertyId === undefined
+    ? [...ascending].reverse().find((message) => message.property_id !== null)?.property_id ?? null
+    : maintainedPropertyId;
   return loadMessageDripContext(supabase, orgId, propertyId, ascending);
 }

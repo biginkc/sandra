@@ -229,8 +229,7 @@ export async function fetchInboxDetail(
       : false;
   }
 
-  const dripPropertyId = [...messages].reverse().find((message) => message.property_id !== null)?.property_id ?? null;
-  const dripContext = await loadMessageDripContext(supabase, conversationOrgId, dripPropertyId, messages);
+  const dripContext = await loadMessageDripContext(supabase, conversationOrgId, propertyId, messages);
 
   return {
     threadId: conversationId,
