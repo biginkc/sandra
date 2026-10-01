@@ -425,9 +425,9 @@ def failure_excerpt(body: str) -> str:
 def derive_evidence(raw: str) -> str:
     sections = captured_sections(raw)
     rows: list[str] = [
-        "# Reply-persistence v10 mutation evidence (generated)",
+        "# Reply-persistence v11 mutation evidence (generated)",
         "",
-        "This file is generated from `replypersist-mutation-run-r10.log`. EXECUTED requires a passing baseline and a natural non-zero mutation result; baseline failures are never counted as executed. A passing mutation is SURVIVED and fails the runner. Any BASELINE FAIL also fails the runner.",
+        "This file is generated from `replypersist-mutation-run-r11.log`. EXECUTED requires a passing baseline and a natural non-zero mutation result; baseline failures are never counted as executed. A passing mutation is SURVIVED and fails the runner. Any BASELINE FAIL also fails the runner.",
         "",
         "| Test | Status | Baseline result | Mechanism | Natural mutated failure |",
         "|---|---|---|---|---|",
