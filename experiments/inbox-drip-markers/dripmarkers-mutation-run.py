@@ -12,6 +12,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import difflib
+import re
 import subprocess
 import sys
 import time
@@ -23,8 +25,8 @@ ROOT = Path(__file__).resolve().parents[2]
 LOCAL_ENV = ROOT / "experiments/inbox-reply-send/local-env.py"
 MIGRATION = ROOT / "supabase/migrations/20260930040260_inbox_drip_markers.sql"
 GOLDEN = ROOT / "experiments/inbox-drip-markers/golden-fixture.json"
-LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-mutation-run-r2.log")
-EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-evidence-r2.md")
+LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-mutation-run-r3.log")
+EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-evidence-r3.md")
 STATE = Path("/tmp/sandra-reply-persist-local-env.json")
 PSQL = "/opt/homebrew/bin/psql"
 
@@ -48,6 +50,8 @@ ORIGIN_MIGRATIONS = [
 golden: dict[str, Any] = json.loads(GOLDEN.read_text(encoding="utf-8"))
 evidence: list[dict[str, str]] = []
 mutation_results: list[dict[str, str]] = []
+vitest_mutation_results: list[dict[str, str]] = []
+function_diff_rows: list[dict[str, str]] = []
 log_lines: list[str] = []
 
 
@@ -56,12 +60,79 @@ def emit(line: str) -> None:
     log_lines.append(line)
 
 
+def markdown_cell(value: str) -> str:
+    return value.replace("|", "\\|")
+
+
 def verify_frozen_hashes() -> None:
     for name, expected in FROZEN.items():
         actual = hashlib.sha256((ROOT / "supabase/migrations" / name).read_bytes()).hexdigest()
         if actual != expected:
             raise RuntimeError(f"frozen hash mismatch {name}: {actual} != {expected}")
     emit("FROZEN_HASHES_OK 040000 040100 040200 040250")
+
+
+def function_source(path: Path, marker: str) -> str:
+    source = path.read_text(encoding="utf-8")
+    start = source.index(marker)
+    end = source.index("$$;", start) + 3
+    return source[start:end]
+
+
+def normalized_function_source(source: str) -> str:
+    return re.sub(r"^CREATE(?: OR REPLACE)? FUNCTION", "CREATE FUNCTION", source, count=1)
+
+
+def verify_marker_function_diffs() -> None:
+    comparisons = [
+        (
+            "matching",
+            ROOT / "supabase/migrations/20260930040000_inbox_control_foundation.sql",
+            "CREATE FUNCTION inbox_bridge.matching(",
+            MIGRATION,
+            "CREATE OR REPLACE FUNCTION inbox_bridge.matching(",
+        ),
+        (
+            "review_selection",
+            ROOT / "supabase/migrations/20260930040100_inbox_read_companion.sql",
+            "CREATE OR REPLACE FUNCTION inbox_read.review_selection(",
+            MIGRATION,
+            "CREATE OR REPLACE FUNCTION inbox_read.review_selection(",
+        ),
+    ]
+    for name, frozen_path, frozen_marker, current_path, current_marker in comparisons:
+        frozen = normalized_function_source(function_source(frozen_path, frozen_marker)).splitlines()
+        current = normalized_function_source(function_source(current_path, current_marker)).splitlines()
+        diff = list(difflib.unified_diff(frozen, current, fromfile=f"frozen:{name}", tofile=f"040260:{name}", lineterm=""))
+        changes = [line for line in diff if line and not line.startswith(("---", "+++", "@@")) and line[0] in "+-"]
+        if any("MATERIALIZED" in line or "ERRCODE" in line for line in changes):
+            raise RuntimeError(f"{name} diff changed MATERIALIZED or ERRCODE")
+        for line in changes:
+            if name == "matching":
+                classification = "marker join plumbing (§2)" if "flagged" in line or "candidates" in line or "drip_flags" in line else "marker branch (§2)"
+                allowed = any(token in line for token in ("flagged", "candidates", "drip_flags", "in_drip", "drip_replied"))
+            else:
+                classification = "marker join plumbing (§2)" if "flagged" in line or "candidates" in line or "drip_flags" in line else "marker branch (§2)"
+                allowed = any(token in line for token in ("flagged", "candidates", "drip_flags", "in_drip", "drip_replied"))
+            if not allowed:
+                raise RuntimeError(f"{name} has an unclassified diff line: {line}")
+            function_diff_rows.append({"function": name, "line": line, "classification": classification})
+            emit(f"FUNCTION_DIFF|{name}|{classification}|{line}")
+        emit(f"FUNCTION_DIFF_OK|{name}|changed_lines={len(changes)}|no_materialized=true|no_errcode_change=true")
+
+
+def verify_counts_typed_frozen() -> None:
+    installed = query("SELECT pg_get_functiondef('inbox_bridge.counts_typed(uuid,uuid,jsonb)'::regprocedure);")
+    frozen_source = function_source(
+        ROOT / "supabase/migrations/20260930040000_inbox_control_foundation.sql",
+        "CREATE FUNCTION inbox_bridge.counts_typed(",
+    )
+    psql(frozen_source.replace("CREATE FUNCTION inbox_bridge.counts_typed(", "CREATE OR REPLACE FUNCTION inbox_bridge.counts_typed(", 1))
+    absent_040260 = query("SELECT pg_get_functiondef('inbox_bridge.counts_typed(uuid,uuid,jsonb)'::regprocedure);")
+    if installed != absent_040260:
+        details = "\n".join(difflib.unified_diff(installed.splitlines(), absent_040260.splitlines(), fromfile="after-all-migrations", tofile="040260-absent", lineterm=""))
+        raise RuntimeError(f"counts_typed frozen equality failed:\n{details}")
+    emit("COUNTS_TYPED_FROZEN_EQUAL|pg_get_functiondef=byte-identical|040260_absent=true")
 
 
 def run(args: list[str], *, input_text: str | None = None, check: bool = True, timeout: int = 240) -> subprocess.CompletedProcess[str]:
@@ -78,6 +149,89 @@ def run(args: list[str], *, input_text: str | None = None, check: bool = True, t
         detail = (result.stderr + result.stdout).strip()
         raise RuntimeError(f"command failed ({result.returncode}): {' '.join(args)}\n{detail[-5000:]}")
     return result
+
+
+FOCUSED_VITEST_MUTATIONS = [
+    {
+        "name": "real-loader-golden-header-pill",
+        "path": ROOT / "src/lib/inbox/drip-context.ts",
+        "needle": 'return drip?.replied ? "Replied to drip" : null;',
+        "replacement": 'return drip?.replied ? "Reply to drip" : null;',
+        "test_file": "src/lib/inbox/drip-context.test.ts",
+        "test_name": "produces the golden header/pill and exact history wording from real loader inputs",
+    },
+    {
+        "name": "app-counts-route-drip-branch",
+        "path": ROOT / "src/app/api/inbox/counts/route.ts",
+        "needle": 'view === "in_drip"',
+        "replacement": 'view === "never_in_drip"',
+        "test_file": "src/app/api/inbox/counts/route.test.ts",
+        "test_name": "uses only the drip counts RPC for drip views",
+    },
+    {
+        "name": "stale-response-fencing",
+        "path": ROOT / "src/components/inbox-workspace/workspace-client.tsx",
+        "needle": "token !== markerGeneration.current",
+        "replacement": "false",
+        "test_file": "src/components/inbox-workspace/workspace-client.drip-markers.test.tsx",
+        "test_name": "fences an older marker response after a newer snapshot publishes",
+        "config": "vitest.rtl.config.ts",
+    },
+    {
+        "name": "post-reply-disposition-refresh",
+        "path": ROOT / "src/components/inbox-workspace/workspace-client.tsx",
+        "needle": "onCompleted: () => { void refreshAfterAction(); }",
+        "replacement": "onCompleted: () => {}",
+        "test_file": "src/components/inbox-workspace/workspace-client.drip-markers.test.tsx",
+        "test_name": "refreshes markers and the open detail after a completed workspace action",
+        "config": "vitest.rtl.config.ts",
+    },
+    {
+        "name": "legacy-header-maintained-property",
+        "path": ROOT / "src/app/(dashboard)/messages/inbox-detail-data.ts",
+        "needle": "const dripContext = await loadMessageDripContext(supabase, conversationOrgId, propertyId, messages);",
+        "replacement": "const maintainedPropertyId = [...messages].reverse().find((message) => message.property_id !== null)?.property_id ?? null;\n  const dripContext = await loadMessageDripContext(supabase, conversationOrgId, maintainedPropertyId, messages);",
+        "test_file": "src/app/(dashboard)/messages/inbox-detail-data.test.ts",
+        "test_name": "pins the legacy Messages header to the review-first property choice",
+    },
+]
+
+
+def focused_vitest(case: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    args = ["npx", "vitest", "run"]
+    if case.get("config"):
+        args.extend(["--config", case["config"]])
+    args.extend([case["test_file"], "-t", case["test_name"], "--reporter=dot"])
+    return run(args, check=False, timeout=240)
+
+
+def run_focused_vitest_mutations() -> None:
+    for case in FOCUSED_VITEST_MUTATIONS:
+        baseline = focused_vitest(case)
+        baseline_output = (baseline.stdout + baseline.stderr).strip()
+        emit(f"VITEST_BASELINE|{case['name']}|exit={baseline.returncode}")
+        if baseline.returncode:
+            emit(f"VITEST_BASELINE_OUTPUT|{case['name']}|{baseline_output[-1600:]}")
+            raise RuntimeError(f"focused vitest baseline failed: {case['name']}")
+        evidence.append({"run": "vitest:baseline", "test": case["name"], "Executed": "yes", "result": "PASS"})
+        path = Path(case["path"])
+        original = path.read_bytes()
+        source = original.decode("utf-8")
+        if source.count(case["needle"]) != 1:
+            raise RuntimeError(f"focused mutation needle count {case['name']}={source.count(case['needle'])}")
+        path.write_text(source.replace(case["needle"], case["replacement"], 1), encoding="utf-8")
+        try:
+            mutated = focused_vitest(case)
+            mutated_output = (mutated.stdout + mutated.stderr).strip()
+            emit(f"VITEST_MUTANT|{case['name']}|exit={mutated.returncode}")
+            if mutated.returncode == 0:
+                raise RuntimeError(f"focused mutation survived: {case['name']}")
+            excerpt = mutated_output[-1200:].replace("\n", " ")
+            emit(f"VITEST_MUTANT_FAILURE|{case['name']}|{excerpt}")
+            evidence.append({"run": "vitest:mutant", "test": case["name"], "Executed": "yes", "result": "FAIL (expected natural mutation)"})
+            vitest_mutation_results.append({"mutation": case["name"], "Executed": "yes", "failure": excerpt})
+        finally:
+            path.write_bytes(original)
 
 
 def state() -> dict[str, Any]:
@@ -131,6 +285,7 @@ def down() -> None:
 
 def up() -> None:
     run(["python3", str(LOCAL_ENV), "up"], timeout=240)
+    verify_counts_typed_frozen()
     for path in ORIGIN_MIGRATIONS:
         source = run(["git", "show", f"origin/main:{path}"], timeout=60).stdout
         psql(source)
@@ -599,7 +754,7 @@ MUTATIONS = [
     ("failed-send-clearing-predicate", "and action.status is distinct from 'failed'", "and true"),
     ("page-in-drip-branch", " WHEN 'in_drip' THEN predicate:=known||' AND EXISTS(SELECT 1 FROM inbox_maintained.rows maintained LEFT JOIN LATERAL inbox_bridge.drip_flags($1,(maintained.summary->>''property_id'')::uuid) flags ON true WHERE maintained.org_id=$1 AND maintained.target_kind=r.target_kind AND maintained.target_id=r.target_id AND coalesce(flags.in_drip,false))';\n", " WHEN 'in_drip' THEN predicate:='FALSE';\n"),
     ("review-selection-else-true", "   WHEN 'in_drip' THEN coalesce(c.in_drip,false)\n", ""),
-    ("marker-tenant-qualification", "ON maintained.org_id=$1\n", "ON TRUE\n"),
+    ("marker-tenant-qualification", "JOIN inbox_maintained.rows maintained\n     ON maintained.org_id=$1\n", "JOIN inbox_maintained.rows maintained\n     ON TRUE\n"),
     ("marker-access-epoch-fence", ") INTO result;\n after_access:=inbox_bridge.authorize_serving($1);\n IF (after_access->>'user_id',after_access->>'session_id',after_access->>'org_id',after_access->>'access_epoch') IS DISTINCT FROM\n", ") INTO result;\n after_access:=a;\n IF (after_access->>'user_id',after_access->>'session_id',after_access->>'org_id',after_access->>'access_epoch') IS DISTINCT FROM\n"),
     ("label-raw-facts", "     'previous_drip_step',CASE WHEN is_page THEN previous_drip_step END\n", "     'previous_drip_step',NULL\n"),
     ("label-input-cap", " IF $1 IS NULL OR $2 IS NULL OR $3 IS NULL OR cardinality($3)>50 OR\n", " IF $1 IS NULL OR $2 IS NULL OR $3 IS NULL OR cardinality($3)>500 OR\n"),
@@ -616,6 +771,8 @@ def main() -> int:
     try:
         emit("RUNNER_START mutation-first=true origin_fixture=035000-038000")
         verify_frozen_hashes()
+        verify_marker_function_diffs()
+        run_focused_vitest_mutations()
         if len(MUTATIONS) != 7:
             raise RuntimeError("unexpected NOT RUN: mutation inventory changed")
         baseline_failures = run_one("baseline")
@@ -653,6 +810,10 @@ def main() -> int:
         lines.extend(f"| {row['run']} | {row['test']} | {row['Executed']} | {row['result']} |" for row in evidence)
         lines.extend(["", "## Natural mutation kills", "", "| Mutation | Executed | Natural mutated failure |", "|---|---:|---|"])
         lines.extend(f"| {row['mutation']} | {row['Executed']} | {row['failure']} |" for row in mutation_results)
+        lines.extend(["", "## Focused Vitest natural mutation kills", "", "| Mutation | Executed | Natural mutated failure |", "|---|---:|---|"])
+        lines.extend(f"| {row['mutation']} | {row['Executed']} | {row['failure']} |" for row in vitest_mutation_results)
+        lines.extend(["", "## Frozen function proof", "", "- counts_typed: `pg_get_functiondef` after all migrations equaled the 040260-absent simulation byte-for-byte.", "", "| Function | Differing line | Classification |", "|---|---|---|"])
+        lines.extend(f"| {row['function']} | `{markdown_cell(row['line'])}` | {row['classification']} |" for row in function_diff_rows)
         EVIDENCE.write_text("\n".join(lines) + "\n", encoding="utf-8")
         emit(f"EVIDENCE {EVIDENCE}")
         emit(f"RAW_LOG {LOG}")
