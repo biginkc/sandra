@@ -458,15 +458,16 @@ export function SoftphoneProvider({
   );
 
   useEffect(() => {
-    if (!["live", "held", "wrap"].includes(phone) || !target?.propertyId)
+    // Direct mode: the server owns enrollment resume (it resumes when a lead call ends without
+    // connecting), and the transport ends its own call on pagehide. No resume beacon from the browser.
+    if (
+      directMode ||
+      !["live", "held", "wrap"].includes(phone) ||
+      !target?.propertyId
+    )
       return;
     const propertyId = target.propertyId;
     const resumeOnPageHide = () => {
-      // Direct calls cannot survive the page: end the server call first (best effort) so the
-      // enrollment resume below only ever runs for a call that is actually ending.
-      if (directMode && (phone === "live" || phone === "held")) {
-        void transportRef.current?.hangup().catch(() => undefined);
-      }
       const body = JSON.stringify({ propertyId });
       const blob = new Blob([body], { type: "application/json" });
       if (
@@ -775,7 +776,13 @@ export function SoftphoneProvider({
         { ok: true; data: SoftphoneTarget } | { ok: false; error: string };
       try {
         reliabilityTiming.mark("preparation_started");
-        result = await prepare();
+        // Direct mode never prepares here: preparing pauses the lead's enrollments, and the server's
+        // startDirectCall does that itself, only after its own busy check allows the call. Until the
+        // server answers, the UI shows what it already knows about the target.
+        result =
+          directMode && provisionalTarget
+            ? { ok: true, data: provisionalTarget }
+            : await prepare();
       } catch {
         if (provisionalTarget?.propertyId) {
           await Promise.resolve(
@@ -879,7 +886,8 @@ export function SoftphoneProvider({
             );
             setFinalSeconds(terminalResult.durationSeconds);
             setWrapToken((value) => value ?? crypto.randomUUID());
-            if (kind === "failed" && result.data.propertyId) {
+            // Direct mode: the server resumes a lead call that ended without connecting.
+            if (kind === "failed" && result.data.propertyId && !directMode) {
               try {
                 await resumeFailedSoftphoneCall(result.data.propertyId);
               } catch {
@@ -929,8 +937,8 @@ export function SoftphoneProvider({
             try {
               // A direct-mode busy refusal means another call of this operator owns the
               // enrollment pause; resuming here would release the live call's pause.
-              const ownsNoPause = directMode && status === "operator_busy";
-              if (result.data.propertyId && !ownsNoPause) {
+              // In direct mode the server owns resume for every refusal (it never paused for a refused call).
+              if (result.data.propertyId && !directMode) {
                 await resumeFailedSoftphoneCall(result.data.propertyId);
               }
             } catch {
@@ -1064,6 +1072,10 @@ export function SoftphoneProvider({
           return;
         }
         callHandleRef.current = callHandle;
+        // Direct mode: show the target the server actually prepared (its display fields).
+        if (directMode && callHandle.target) {
+          setTarget(callHandle.target as SoftphoneTarget);
+        }
         if (!directMode) {
           retainActiveCall({
             handle: callHandle,
@@ -1488,7 +1500,18 @@ export function SoftphoneProvider({
                       reliabilityTiming.mark("ui_click");
                       void startTarget(
                         () => prepareLeadCall(suggestion.propertyId),
-                        undefined,
+                        directMode
+                          ? {
+                              propertyId: suggestion.propertyId,
+                              contactId: null,
+                              phoneE164: "",
+                              maskedPhone: "",
+                              name: suggestion.name,
+                              address: suggestion.detail || null,
+                              state: null,
+                              startedAt: new Date().toISOString(),
+                            }
+                          : undefined,
                         reliabilityTiming,
                         { kind: "lead", propertyId: suggestion.propertyId },
                       );
@@ -1502,7 +1525,18 @@ export function SoftphoneProvider({
                           recent.propertyId
                             ? prepareLeadCall(recent.propertyId)
                             : prepareManualCall(recent.phoneE164),
-                        undefined,
+                        directMode
+                          ? {
+                              propertyId: recent.propertyId,
+                              contactId: recent.contactId,
+                              phoneE164: recent.phoneE164,
+                              maskedPhone: maskPhone(recent.phoneE164),
+                              name: recent.name,
+                              address: recent.detail || null,
+                              state: null,
+                              startedAt: new Date().toISOString(),
+                            }
+                          : undefined,
                         reliabilityTiming,
                         recent.propertyId
                           ? { kind: "lead", propertyId: recent.propertyId }
@@ -1515,7 +1549,18 @@ export function SoftphoneProvider({
                       reliabilityTiming.mark("ui_click");
                       void startTarget(
                         () => prepareManualCall(manualDigits),
-                        undefined,
+                        directMode
+                          ? {
+                              propertyId: null,
+                              contactId: null,
+                              phoneE164: manualDigits,
+                              maskedPhone: maskPhone(manualDigits),
+                              name: maskPhone(manualDigits),
+                              address: null,
+                              state: null,
+                              startedAt: new Date().toISOString(),
+                            }
+                          : undefined,
                         reliabilityTiming,
                         { kind: "manual", phone: manualDigits },
                       );

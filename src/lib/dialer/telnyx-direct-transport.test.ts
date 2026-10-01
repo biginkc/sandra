@@ -6,8 +6,10 @@ import type {
 } from "@/lib/direct-calling/contract";
 
 vi.mock("@/lib/direct-calling/client-actions", () => ({
+  cancelDirectCallByRequest: vi.fn(),
   controlDirectCall: vi.fn(),
   getDirectCallStatus: vi.fn(),
+  getDirectCallStatusByRequest: vi.fn(),
   getDirectRtcToken: vi.fn(),
   startDirectCall: vi.fn(),
 }));
@@ -102,6 +104,14 @@ function harness(opts: { statuses?: DirectCallStatus[]; micError?: boolean } = {
       calls.push("status");
       const next = statuses.length > 1 ? statuses.shift()! : statuses[0];
       return view(next);
+    }),
+    getStatusByRequest: vi.fn(async (_requestId: string) => {
+      calls.push("status-by-request");
+      return view("failed");
+    }),
+    cancelByRequest: vi.fn(async (_requestId: string) => {
+      calls.push("cancel-by-request");
+      return { ok: true as const, data: { directCallId: null as string | null, tombstoned: true } };
     }),
     control: vi.fn(async (_id: string, c: { action: string }) => {
       calls.push(`control:${c.action}`);
@@ -570,5 +580,88 @@ describe("review blockers", () => {
       await flush();
       expect(h2.deps.control).toHaveBeenCalledWith(CALL_ID, { action: "hangup" });
     });
+  });
+});
+
+describe("lost start response (#744-1)", () => {
+  const lost = () => Object.assign(new Error("network error"), { name: "TypeError" });
+
+  it("a start that was never submitted makes no cancel or status-by-request call", async () => {
+    const mic = harness({ micError: true });
+    await expect(mic.transport.start(target)).rejects.toThrow(/Microphone/);
+    expect(mic.deps.cancelByRequest).not.toHaveBeenCalled();
+    const cancelled = harness();
+    const pending = cancelled.transport.start(target);
+    void cancelled.transport.hangup(); // before registration finishes: the start is never sent
+    await pending.catch(() => undefined);
+    expect(cancelled.deps.startCall).not.toHaveBeenCalled();
+    expect(cancelled.deps.cancelByRequest).not.toHaveBeenCalled();
+    expect(cancelled.deps.getStatusByRequest).not.toHaveBeenCalled();
+  });
+
+  it("a submitted start whose response is lost is cancelled by request id and watched to a confirmed terminal before the failure is surfaced", async () => {
+    const h = harness();
+    h.deps.startCall.mockRejectedValueOnce(lost());
+    h.deps.getStatusByRequest
+      .mockResolvedValueOnce(view("ending", { cleanupPending: true }))
+      .mockResolvedValueOnce(view("ended", { cleanupPending: true }))
+      .mockResolvedValue(view("ended", { cleanupPending: false }));
+    await expect(h.transport.start(target)).rejects.toThrow("network error");
+    expect(h.deps.cancelByRequest).toHaveBeenCalledWith(REQUEST_ID);
+    expect(h.deps.getStatusByRequest).toHaveBeenCalledTimes(3);
+    expect(h.deps.getStatusByRequest).toHaveBeenCalledWith(REQUEST_ID);
+    expect(h.states).not.toContain("teardown_unconfirmed");
+    // Never treated as confirmed teardown without reconciliation: the cancel came BEFORE any "nothing to confirm".
+    expect(h.deps.cancelByRequest.mock.invocationCallOrder[0]).toBeLessThan(h.deps.getStatusByRequest.mock.invocationCallOrder[0]);
+  });
+
+  it("retries a failing cancel with backoff, and an unconfirmed outcome warns, keeps watching, and later confirms", async () => {
+    const h = harness();
+    h.deps.startCall.mockRejectedValueOnce(lost());
+    h.deps.cancelByRequest
+      .mockRejectedValueOnce(lost())
+      .mockResolvedValueOnce({ ok: false as const, error: "down" } as never)
+      .mockResolvedValue({ ok: true as const, data: { directCallId: CALL_ID, tombstoned: false } });
+    let confirmed = false;
+    h.deps.getStatusByRequest.mockImplementation(async () => view("ended", { cleanupPending: !confirmed }));
+    const started = h.transport.start(target).catch((e: unknown) => e);
+    await vi.waitFor(() => expect(h.states).toContain("teardown_unconfirmed"));
+    expect(h.deps.cancelByRequest.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(h.transport.terminalIsAuthoritative()).toBe(false);
+    await started;
+    confirmed = true;
+    await vi.waitFor(() => expect(h.states).toContain("teardown_confirmed"));
+    expect(h.transport.terminalIsAuthoritative()).toBe(true);
+  });
+
+  it("hanging up while the start is in flight tells the server by request id immediately", async () => {
+    const h = harness();
+    let release!: () => void;
+    h.deps.startCall.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        release = () => resolve({ ok: true as const, data: { directCallId: CALL_ID, browserLegId: LEG, correlationHeader: { name: "X-Sandra-Direct-Call-Id" as const, value: CALL_ID } } });
+      }),
+    );
+    h.deps.cancelByRequest.mockResolvedValue({ ok: true as const, data: { directCallId: CALL_ID, tombstoned: false } });
+    h.deps.getStatus.mockResolvedValue(view("ended"));
+    const started = h.transport.start(target);
+    await vi.waitFor(() => expect(h.deps.startCall).toHaveBeenCalled());
+    const hung = h.transport.hangup();
+    expect(h.deps.cancelByRequest).toHaveBeenCalledWith(REQUEST_ID);
+    release();
+    await started;
+    await hung;
+    expect(h.deps.control).toHaveBeenCalledWith(CALL_ID, { action: "hangup" });
+  });
+
+  it("returns the server-prepared target on the call handle", async () => {
+    const h = harness();
+    const prepared = { propertyId: "prop-1", contactId: "c1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Pat", address: "1 Main", state: "MO", startedAt: "2026-10-01T12:00:00.000Z" };
+    h.deps.startCall.mockResolvedValueOnce({
+      ok: true as const,
+      data: { directCallId: CALL_ID, browserLegId: LEG, correlationHeader: { name: "X-Sandra-Direct-Call-Id" as const, value: CALL_ID }, target: prepared },
+    } as never);
+    const handle = await h.transport.start(target);
+    expect(handle.target).toEqual(prepared);
   });
 });

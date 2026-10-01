@@ -1,16 +1,20 @@
 import type {
+  CancelDirectCallResult,
   DirectActionResult,
   DirectCallControl,
   DirectCallStatus,
   DirectCallStatusView,
   DirectRtcToken,
   StartDirectCallInput,
+  DirectCallTarget,
   StartDirectCallResult,
 } from "@/lib/direct-calling/contract";
 import { DIRECT_CALL_TERMINAL_STATUSES } from "@/lib/direct-calling/contract";
 import {
+  cancelDirectCallByRequest,
   controlDirectCall,
   getDirectCallStatus,
+  getDirectCallStatusByRequest,
   getDirectRtcToken,
   startDirectCall,
 } from "@/lib/direct-calling/client-actions";
@@ -30,6 +34,10 @@ const STATUS_POLL_MS = 1_000;
 // Teardown: hangup (retried with backoff until the server accepts it) + status polling until the
 // server reports a terminal status with every leg confirmed ended.
 const TEARDOWN_BACKOFF_MS = [500, 500, 1_000, 2_000, 4_000, 4_000, 4_000, 4_000];
+// A start whose response never arrived: cancel by request id (retried), then watch by request id.
+const UNKNOWN_START_BACKOFF_MS = [500, 500, 1_000, 2_000, 4_000, 4_000, 4_000, 4_000];
+const UNKNOWN_START_POLLS = 20;
+const UNKNOWN_START_BACKGROUND_POLLS = 600;
 const CORRELATION_HEADER = "x-sandra-direct-call-id";
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -68,6 +76,12 @@ export type DirectTransportDependencies = {
     input: StartDirectCallInput,
   ): Promise<DirectActionResult<StartDirectCallResult>>;
   getStatus(id: string): Promise<DirectActionResult<DirectCallStatusView>>;
+  getStatusByRequest(
+    clientRequestId: string,
+  ): Promise<DirectActionResult<DirectCallStatusView>>;
+  cancelByRequest(
+    clientRequestId: string,
+  ): Promise<DirectActionResult<CancelDirectCallResult>>;
   control(
     id: string,
     control: DirectCallControl,
@@ -87,6 +101,8 @@ const defaultDependencies: DirectTransportDependencies = {
   getToken: getDirectRtcToken,
   startCall: startDirectCall,
   getStatus: getDirectCallStatus,
+  getStatusByRequest: getDirectCallStatusByRequest,
+  cancelByRequest: cancelDirectCallByRequest,
   control: controlDirectCall,
   createRtcClient: createTelnyxRtcClient,
   createRemoteAudio,
@@ -124,6 +140,10 @@ export class TelnyxDirectCallTransport implements CallTransport {
   private browserLegId: string | null = null;
   private correlationValue: string | null = null;
   private callCapability: string | null = null;
+  private serverTarget: DirectCallTarget | null = null;
+  // Set the instant a start request is submitted to the server (never for a start that was not sent).
+  private submittedRequestId: string | null = null;
+  private requestCancelSent = false;
   // Set the instant hangup() is requested: from then on nothing is started or answered.
   private cancelled = false;
   private startInFlight = false;
@@ -174,6 +194,7 @@ export class TelnyxDirectCallTransport implements CallTransport {
       ? {
           id: this.directCallId,
           ...(this.callCapability ? { callCapability: this.callCapability } : {}),
+          ...(this.serverTarget ? { target: this.serverTarget } : {}),
         }
       : null;
   }
@@ -221,7 +242,15 @@ export class TelnyxDirectCallTransport implements CallTransport {
             : target.propertyId
               ? { kind: "lead", propertyId: target.propertyId, clientRequestId }
               : { kind: "manual", phone: target.phoneE164, clientRequestId };
-      const started = await this.deps.startCall(input);
+      // From here the request may have reached the server: a lost response is "submitted, outcome unknown".
+      this.submittedRequestId = clientRequestId;
+      let started: DirectActionResult<StartDirectCallResult>;
+      try {
+        started = await this.deps.startCall(input);
+      } catch (error) {
+        await this.resolveUnknownStart(clientRequestId);
+        throw error;
+      }
       if (!started.ok) {
         const error = directError(started);
         this.releaseClient();
@@ -237,6 +266,7 @@ export class TelnyxDirectCallTransport implements CallTransport {
       this.browserLegId = started.data.browserLegId;
       this.correlationValue = started.data.correlationHeader.value;
       this.callCapability = started.data.callCapability ?? null;
+      this.serverTarget = started.data.target ?? null;
       // Hangup arrived while the start was in flight: the call now exists, so end it. Never answer.
       this.resolveIdentity?.();
       if (this.cancelled) cancelledStart = started.data.directCallId;
@@ -261,6 +291,70 @@ export class TelnyxDirectCallTransport implements CallTransport {
     for (const invite of buffered) this.decideInvite(invite);
     void this.pollLoop();
     return this.callHandle() as CallHandle;
+  }
+
+  /**
+   * A start request was sent but its response never arrived: the server may or may not have provisioned a
+   * call. Cancel by request id (a late start with that id then dials nothing; an existing call is hung up),
+   * retrying, then poll by request id until the server reports terminal with no cleanup pending. If that is
+   * not reached, surface the unconfirmed-teardown warning and keep watching in the background.
+   */
+  private async resolveUnknownStart(clientRequestId: string): Promise<void> {
+    let cancelled = false;
+    for (let attempt = 0; !cancelled; attempt += 1) {
+      cancelled = await this.deps
+        .cancelByRequest(clientRequestId)
+        .then((r) => r.ok)
+        .catch(() => false);
+      if (cancelled) break;
+      const delay = UNKNOWN_START_BACKOFF_MS[attempt];
+      if (delay === undefined) break;
+      await this.deps.sleep(delay);
+    }
+    if (cancelled && (await this.pollRequestUntilConfirmed(clientRequestId, UNKNOWN_START_POLLS))) return;
+    this.emitTeardownUnconfirmed();
+    void this.watchRequestInBackground(clientRequestId, cancelled);
+  }
+
+  private async pollRequestUntilConfirmed(clientRequestId: string, polls: number): Promise<boolean> {
+    for (let i = 0; i < polls; i += 1) {
+      const view = await this.deps.getStatusByRequest(clientRequestId).catch(() => null);
+      if (view?.ok && DIRECT_CALL_TERMINAL_STATUSES.has(view.data.status) && view.data.cleanupPending === false) return true;
+      await this.deps.sleep(STATUS_POLL_MS);
+    }
+    return false;
+  }
+
+  private async watchRequestInBackground(clientRequestId: string, cancelled: boolean): Promise<void> {
+    let sent = cancelled;
+    for (let i = 0; i < UNKNOWN_START_BACKGROUND_POLLS && !this.disposed; i += 1) {
+      if (!sent) {
+        sent = await this.deps
+          .cancelByRequest(clientRequestId)
+          .then((r) => r.ok)
+          .catch(() => false);
+      }
+      if (sent && (await this.pollRequestUntilConfirmed(clientRequestId, 1))) {
+        this.confirmed = true;
+        this.terminal = "failed";
+        this.stopListeningForPageHide();
+        if (this.teardownUnconfirmedEmitted) {
+          this.teardownUnconfirmedEmitted = false;
+          this.emit("teardown_confirmed");
+        }
+        this.emit("failed");
+        return;
+      }
+      if (!sent) await this.deps.sleep(STATUS_POLL_MS);
+    }
+  }
+
+  /** Hangup/cancel while a start is in flight: tell the server by request id so it cannot be left dialing. */
+  private cancelSubmittedStart(): void {
+    const id = this.submittedRequestId;
+    if (!id || this.directCallId || this.requestCancelSent) return;
+    this.requestCancelSent = true;
+    void this.deps.cancelByRequest(id).catch(() => undefined);
   }
 
   private throwIfCancelled(): void {
@@ -289,6 +383,7 @@ export class TelnyxDirectCallTransport implements CallTransport {
   private cancelCall(): void {
     if (this.confirmed || this.disposed) return;
     this.cancelled = true;
+    this.cancelSubmittedStart();
     void this.teardown().catch(() => undefined);
   }
 
@@ -523,6 +618,7 @@ export class TelnyxDirectCallTransport implements CallTransport {
 
   hangup(): Promise<CallResult> {
     this.cancelled = true;
+    this.cancelSubmittedStart();
     return this.teardown();
   }
 
@@ -547,6 +643,10 @@ export class TelnyxDirectCallTransport implements CallTransport {
     // so the right call is ended.
     if (this.startInFlight || (this.startPromise && !this.directCallId)) await this.identity;
     const id = this.directCallId;
+    if (!id && this.submittedRequestId && this.teardownUnconfirmedEmitted && !this.confirmed) {
+      // A start of unknown outcome is still being reconciled by request id: not confirmed yet.
+      return this.result();
+    }
     if (!id) {
       // Nothing was provisioned on the server; there is nothing to confirm.
       this.terminal = "failed";

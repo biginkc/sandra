@@ -6,8 +6,10 @@
 // without loading server-only code. It never needs to change when the
 // backend lands.
 export {
+  cancelDirectCallByRequest,
   controlDirectCall,
   getDirectCallStatus,
+  getDirectCallStatusByRequest,
   getDirectRtcToken,
   startDirectCall,
 } from "./actions";

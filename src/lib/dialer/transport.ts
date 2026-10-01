@@ -1,3 +1,5 @@
+import type { DirectCallTarget } from "@/lib/direct-calling/contract";
+
 export type CallTarget = {
   phoneE164: string;
   /** Telnyx-owned caller ID selected from Jitter's authenticated inventory. */
@@ -22,6 +24,11 @@ export type CallHandle = {
   id: string;
   /** Direct (Telnyx) transport only: sealed call identity to pass to wrap-up. */
   callCapability?: string;
+  /**
+   * Direct (Telnyx) transport only: the target the server prepared for this call, so the UI shows the
+   * server's own display fields instead of preparing (and pausing enrollments) itself.
+   */
+  target?: DirectCallTarget;
 };
 export type CallResult = { durationSeconds: number; outcome: "connected_human" | "failed" };
 /** A non-authoritative provider-status poll failure. It never ends a call. */

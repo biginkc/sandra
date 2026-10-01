@@ -265,9 +265,10 @@ describe("SoftphoneProvider pilot review blockers", () => {
     await user.type(await screen.findByTestId("dialer-input"), "8165550123");
     await user.click(screen.getByTestId("dialer-call-manual"));
     await waitFor(() => expect(m.start).toHaveBeenCalled());
-    expect(m.prepareManualCall).toHaveBeenCalledWith("8165550123");
+    // Direct mode never prepares in the browser: the server does, after its own busy check.
+    expect(m.prepareManualCall).not.toHaveBeenCalled();
     expect(m.start).toHaveBeenCalledWith(
-      expect.objectContaining({ propertyId: "property-1", directRequest: { kind: "manual", phone: "8165550123" } }),
+      expect.objectContaining({ directRequest: { kind: "manual", phone: "8165550123" } }),
     );
   });
 
@@ -316,12 +317,62 @@ describe("SoftphoneProvider pilot review blockers", () => {
     await waitFor(() => expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live"));
   }
 
-  it("on pagehide a live direct call is hung up server-side before enrollments are resumed", async () => {
+  it("D6 on pagehide a live direct call fires no resume beacon (the server owns resume; the transport ends the call itself)", async () => {
+    const beacon = vi.fn(() => true);
+    Object.defineProperty(window.navigator, "sendBeacon", { value: beacon, configurable: true });
     await liveDirect(direct);
-    const transport = m.transports[0];
     window.dispatchEvent(new Event("pagehide"));
-    expect(transport.hangup).toHaveBeenCalledTimes(1);
-    expect(fetch).toHaveBeenCalledWith("/api/softphone/resume", expect.anything());
+    expect(beacon).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalledWith("/api/softphone/resume", expect.anything());
+  });
+
+  it("on the default path pagehide still resumes enrollments via the beacon (unchanged)", async () => {
+    const beacon = vi.fn(() => true);
+    Object.defineProperty(window.navigator, "sendBeacon", { value: beacon, configurable: true });
+    await liveDirect({ transport: "default" });
+    window.dispatchEvent(new Event("pagehide"));
+    expect(beacon).toHaveBeenCalledWith("/api/softphone/resume", expect.anything());
+  });
+
+  it("#744-2 never prepares before the server allows the call: tab 2 refused as busy pauses nothing and resumes nothing", async () => {
+    m.directTransport.mockImplementation(() => fakeTransport("x", {}, "operator_busy"));
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider callingConfig={direct}>
+        <SoftphoneHeaderButton />
+        <SoftphoneLeadButton lead={lead} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByText("You already have a call in progress.");
+    expect(m.prepareLeadCall).not.toHaveBeenCalled();
+    expect(m.prepareManualCall).not.toHaveBeenCalled();
+    expect(m.resumeFailed).not.toHaveBeenCalled();
+    // The start request itself carried the lead, so the server prepares (and pauses) only if it allows the call.
+    expect(m.start).toHaveBeenCalledWith(expect.objectContaining({ directRequest: { kind: "lead", propertyId: "property-1" } }));
+  });
+
+  it("#744-2 the Jitter path still prepares before starting (unchanged)", async () => {
+    await placeAndWrap({ transport: "default" });
+    expect(m.prepareLeadCall).toHaveBeenCalledWith("property-1");
+  });
+
+  it("direct mode shows the server-prepared target once the start returns, and never resumes from the browser when a call fails", async () => {
+    const serverTarget = {
+      propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123",
+      name: "Server Prepared Name", address: "1 Main St", state: "MO", startedAt: "2026-10-01T12:00:00.000Z",
+    };
+    m.directTransport.mockImplementation(() => fakeTransport("direct-call-id", { target: serverTarget }));
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider callingConfig={direct}>
+        <SoftphoneHeaderButton />
+        <SoftphoneLeadButton lead={lead} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByText("Server Prepared Name");
+    expect(m.prepareLeadCall).not.toHaveBeenCalled();
   });
 
   it("pagehide on the default path does not hang the call up", async () => {
