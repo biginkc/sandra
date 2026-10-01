@@ -34,7 +34,7 @@ WORKER_TRANSPORT = ROOT / "experiments/inbox-reply-send-worker/vendor/test-trans
 LOCAL_DB_RETRY = ROOT / "experiments/inbox-reply-send-worker/restate-retry-local-db.py"
 PROVIDER_FIX = ROOT / "experiments/inbox-reply-send/provider-fix-proof.py"
 PROVIDER_FIX_MINIMAL = ROOT / "experiments/inbox-reply-send/provider-fix-minimal.py"
-LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r8.log")
+LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r9.log")
 EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-evidence.md")
 
 
@@ -412,9 +412,9 @@ def failure_excerpt(body: str) -> str:
 def derive_evidence(raw: str) -> str:
     sections = captured_sections(raw)
     rows: list[str] = [
-        "# Reply-persistence v8 mutation evidence (generated)",
+        "# Reply-persistence v9 mutation evidence (generated)",
         "",
-        "This file is generated from `replypersist-mutation-run-r8.log`. EXECUTED requires a passing baseline and a natural non-zero mutation result; baseline failures are never counted as executed. A passing mutation is SURVIVED and fails the runner.",
+        "This file is generated from `replypersist-mutation-run-r9.log`. EXECUTED requires a passing baseline and a natural non-zero mutation result; baseline failures are never counted as executed. A passing mutation is SURVIVED and fails the runner. Any BASELINE FAIL also fails the runner.",
         "",
         "| Test | Status | Baseline result | Mechanism | Natural mutated failure |",
         "|---|---|---|---|---|",
@@ -473,6 +473,17 @@ def has_survived_mutation(raw: str) -> bool:
     return False
 
 
+def has_baseline_failure(raw: str) -> bool:
+    sections = captured_sections(raw)
+    for header, _body in sections:
+        if " mutation" not in header.lower():
+            continue
+        baseline = baseline_for(header, sections)
+        if baseline and result_kind(*baseline, baseline=True) == "FAIL":
+            return True
+    return False
+
+
 def self_test() -> None:
     raw = """===== T-R8 self-test baseline =====
 exit=0
@@ -484,13 +495,24 @@ exit=0
     assert result_kind("T-R8 deliberately surviving mutation", "exit=0\n") == "SURVIVED"
     assert has_survived_mutation(raw)
     assert "| T-R8 | SURVIVED |" in derive_evidence(raw)
+    baseline_failure_raw = """===== T-R99 self-test baseline =====
+exit=1
+--- stderr ---
+real baseline failure
+===== END T-R99 self-test baseline =====
+===== T-R99 deliberately failing mutation =====
+exit=1
+===== END T-R99 deliberately failing mutation =====
+"""
+    assert has_baseline_failure(baseline_failure_raw)
+    assert "| T-R99 | BASELINE FAIL |" in derive_evidence(baseline_failure_raw)
 
 
 def main() -> int:
     self_test()
     LOG.parent.mkdir(parents=True, exist_ok=True)
     with LOG.open("w", encoding="utf-8") as handle:
-        handle.write("reply-persistence v8 round-8 mutation run; machine-produced raw child output\n")
+        handle.write("reply-persistence v9 round-9 mutation run; machine-produced raw child output\n")
         for n in range(1, 28):
             run_sql_cases(handle, n)
         run_t17_application(handle)
@@ -499,7 +521,7 @@ def main() -> int:
         run_restate_local_db(handle)
     raw = LOG.read_text(encoding="utf-8")
     EVIDENCE.write_text(derive_evidence(raw), encoding="utf-8")
-    return 1 if has_survived_mutation(raw) else 0
+    return 1 if has_survived_mutation(raw) or has_baseline_failure(raw) else 0
 
 
 if __name__ == "__main__":
