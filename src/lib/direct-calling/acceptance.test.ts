@@ -11,7 +11,6 @@ import { processDirectCallWebhook, type WebhookDeps } from "./webhook";
 
 const T0 = new Date("2026-10-01T12:00:00.000Z");
 const ENV = {
-  DIRECT_CALL_PILOT_USER_IDS: "user-1,user-2",
   TELNYX_DIRECT_API_KEY: "SECRET-KEY-123",
   TELNYX_DIRECT_CONNECTION_ID: "conn",
   TELNYX_DIRECT_APP_ID: "app",
@@ -83,6 +82,7 @@ function world(opts: { lead?: boolean; timeLimitSecs?: number } = {}) {
   });
   const service = createDirectCallService({
     store, env, now: () => clock.now,
+    isEligible: () => true,
     prepareLeadCall: async (propertyId) => { prepare(propertyId); return { ok: true, data: targetFor(opts.lead === false ? null : propertyId) }; },
     prepareManualCall: async (phone) => { prepare(phone); return { ok: true, data: targetFor(null, phone === "training" ? "+15550007777" : "+15550009999") }; },
     resumeFailedSoftphoneCall: async (propertyId) => { resumes.push({ via: "service", propertyId }); },
