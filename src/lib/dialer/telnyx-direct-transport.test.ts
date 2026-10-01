@@ -33,6 +33,7 @@ function view(status: DirectCallStatus, extra: Partial<DirectCallStatusView> = {
       endedAt: null,
       hangupCause: null,
       failureReason: null,
+      cleanupPending: false,
       ...extra,
     },
   };
@@ -463,5 +464,111 @@ describe("review blockers", () => {
     await expect(h.transport.start(target)).rejects.toThrow("bad login");
     expect(h.deps.control).not.toHaveBeenCalled();
     expect(h.deps.startCall).not.toHaveBeenCalled();
+  });
+
+  describe("teardown confirmation (cleanupPending)", () => {
+    it("does not accept a terminal status while cleanup is pending: warns, keeps polling, then confirms and ends", async () => {
+      const h = harness({ statuses: ["connected"] });
+      await h.transport.start(target);
+      h.deps.getStatus.mockImplementation(async () => view("ended", { cleanupPending: true, failureReason: "teardown_pending" }));
+      await vi.waitFor(() => expect(h.states).toContain("teardown_unconfirmed"));
+      expect(h.states).not.toContain("ended");
+      expect(h.transport.terminalIsAuthoritative()).toBe(false);
+      const polls = h.deps.getStatus.mock.calls.length;
+      await vi.waitFor(() => expect(h.deps.getStatus.mock.calls.length).toBeGreaterThan(polls)); // still polling
+      expect(h.client.disconnect).not.toHaveBeenCalled();
+      h.deps.getStatus.mockImplementation(async () => view("ended", { cleanupPending: false }));
+      await vi.waitFor(() => expect(h.transport.terminalIsAuthoritative()).toBe(true));
+      expect(h.states.slice(-3)).toEqual(["teardown_unconfirmed", "teardown_confirmed", "ended"]);
+      expect(h.client.disconnect).toHaveBeenCalled();
+    });
+
+    it("fails closed when the server omits cleanupPending", async () => {
+      const h = harness({ statuses: ["connected"] });
+      await h.transport.start(target);
+      h.deps.getStatus.mockImplementation(async () => view("failed", { cleanupPending: undefined as never }));
+      await vi.waitFor(() => expect(h.states).toContain("teardown_unconfirmed"));
+      expect(h.transport.terminalIsAuthoritative()).toBe(false);
+    });
+  });
+
+  describe("shared teardown-and-confirm path", () => {
+    it("socket loss while startDirectCall is in flight hangs the new call up with retries, polls, and publishes the final state", async () => {
+      const h = harness({ statuses: ["connected"] });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const original = h.deps.startCall.getMockImplementation()!;
+      h.deps.startCall.mockImplementation(async (i: unknown) => {
+        await gate;
+        return original(i);
+      });
+      let attempts = 0;
+      h.deps.control.mockImplementation(async (_id: string, c: { action: string }) => {
+        if (c.action !== "hangup") return { ok: true as const, data: { accepted: true as const } };
+        attempts += 1;
+        if (attempts <= 2) throw new Error("network");
+        return { ok: true as const, data: { accepted: true as const } };
+      });
+      h.deps.getStatus.mockImplementation(async () => view(attempts >= 3 ? "ended" : "connected", { cleanupPending: attempts < 3 }));
+      const starting = h.transport.start(target);
+      await flush();
+      h.emit("telnyx.socket.close");
+      release();
+      await starting;
+      await vi.waitFor(() => expect(h.transport.terminalIsAuthoritative()).toBe(true));
+      expect(attempts).toBe(3); // retried after failures, stopped once accepted
+      expect(h.states[h.states.length - 1]).toBe("ended");
+    });
+
+    it("user hangup retries a failed server hangup with backoff and only then confirms", async () => {
+      const h = harness({ statuses: ["connected"] });
+      const call = fakeCall();
+      await h.transport.start(target);
+      h.notify(call);
+      await flush();
+      let attempts = 0;
+      h.deps.control.mockImplementation(async () => {
+        attempts += 1;
+        return attempts < 3 ? ({ ok: false as const, error: "x", errorCode: "hangup_failed" } as never) : { ok: true as const, data: { accepted: true as const } };
+      });
+      h.deps.getStatus.mockImplementation(async () => (attempts >= 3 ? view("ended") : view("connected")));
+      const result = await h.transport.hangup();
+      expect(attempts).toBe(3);
+      expect(h.transport.terminalIsAuthoritative()).toBe(true);
+      expect(result.outcome).toBe("connected_human");
+      expect(call.hangup).toHaveBeenCalledTimes(1);
+    });
+
+    it("an unconfirmed teardown publishes teardown_unconfirmed, keeps watching, and a retry hangup can still confirm", async () => {
+      const h = harness({ statuses: ["connected"] });
+      await h.transport.start(target);
+      h.deps.getStatus.mockImplementation(async () => view("ending", { cleanupPending: true }));
+      await h.transport.hangup();
+      expect(h.states).toContain("teardown_unconfirmed");
+      expect(h.transport.terminalIsAuthoritative()).toBe(false);
+      h.deps.control.mockClear();
+      h.deps.getStatus.mockImplementation(async () => view("ended"));
+      await h.transport.hangup(); // provider's retryTeardown
+      expect(h.deps.control).toHaveBeenCalledWith(CALL_ID, { action: "hangup" });
+      expect(h.transport.terminalIsAuthoritative()).toBe(true);
+    });
+
+    it("pagehide and a failed answer use the same path", async () => {
+      const fakeWindow = new EventTarget();
+      vi.stubGlobal("window", fakeWindow);
+      const h = harness({ statuses: ["connected"] });
+      await h.transport.start(target);
+      h.deps.control.mockClear();
+      fakeWindow.dispatchEvent(new Event("pagehide"));
+      await flush();
+      vi.unstubAllGlobals();
+      expect(h.deps.control).toHaveBeenCalledWith(CALL_ID, { action: "hangup" });
+      const h2 = harness({ statuses: ["connected"] });
+      await h2.transport.start(target);
+      h2.deps.control.mockClear();
+      h2.notify(fakeCall({ answer: vi.fn(async () => { throw new Error("answer failed"); }) }));
+      await flush();
+      expect(h2.deps.control).toHaveBeenCalledWith(CALL_ID, { action: "hangup" });
+    });
   });
 });

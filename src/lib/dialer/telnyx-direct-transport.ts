@@ -27,8 +27,9 @@ import type {
 
 const REGISTER_TIMEOUT_MS = 25_000;
 const STATUS_POLL_MS = 1_000;
-const HANGUP_CONFIRM_ATTEMPTS = 8;
-const HANGUP_CONFIRM_MS = 500;
+// Teardown: hangup (retried with backoff until the server accepts it) + status polling until the
+// server reports a terminal status with every leg confirmed ended.
+const TEARDOWN_BACKOFF_MS = [500, 500, 1_000, 2_000, 4_000, 4_000, 4_000, 4_000];
 const CORRELATION_HEADER = "x-sandra-direct-call-id";
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -135,13 +136,22 @@ export class TelnyxDirectCallTransport implements CallTransport {
   private currentCall: TelnyxCallLike | null = null;
   private client: TelnyxRtcLike | null = null;
   private audio: HTMLAudioElement | null = null;
+  // Last terminal status the server reported (may still have cleanup pending).
   private terminal: "ended" | "failed" | null = null;
+  // Terminal AND every leg confirmed ended by the server: the only authoritative end.
+  private confirmed = false;
+  private teardownUnconfirmedEmitted = false;
+  private teardownPromise: Promise<CallResult> | null = null;
+  private resolveIdentity: (() => void) | null = null;
+  private identity: Promise<void> = new Promise<void>((resolve) => {
+    this.resolveIdentity = resolve;
+  });
+  private pageHideHandler: (() => void) | null = null;
   private connectedAtMs: number | null = null;
   private serverConnectedAt: string | null = null;
   private serverEndedAt: string | null = null;
   private polling = false;
   private disposed = false;
-  private hangupPromise: Promise<CallResult> | null = null;
   private registration: {
     resolve: () => void;
     reject: (error: unknown) => void;
@@ -169,12 +179,12 @@ export class TelnyxDirectCallTransport implements CallTransport {
   }
 
   terminalIsAuthoritative(): boolean {
-    return this.terminal !== null;
+    return this.confirmed;
   }
 
   start(target: CallTarget): Promise<CallHandle> {
     if (this.startPromise) return this.startPromise;
-    this.startPromise = this.runStart(target);
+    this.startPromise = this.runStart(target).finally(() => this.resolveIdentity?.());
     return this.startPromise;
   }
 
@@ -188,6 +198,7 @@ export class TelnyxDirectCallTransport implements CallTransport {
     this.throwIfCancelled();
 
     this.startInFlight = true;
+    this.listenForPageHide();
     let cancelledStart: string | null = null;
     try {
       const audio = this.deps.createRemoteAudio();
@@ -214,6 +225,7 @@ export class TelnyxDirectCallTransport implements CallTransport {
       if (!started.ok) {
         const error = directError(started);
         this.releaseClient();
+        this.resolveIdentity?.();
         const refusal = refusalState(started.errorCode);
         if (refusal) {
           this.emit(refusal);
@@ -226,18 +238,21 @@ export class TelnyxDirectCallTransport implements CallTransport {
       this.correlationValue = started.data.correlationHeader.value;
       this.callCapability = started.data.callCapability ?? null;
       // Hangup arrived while the start was in flight: the call now exists, so end it. Never answer.
+      this.resolveIdentity?.();
       if (this.cancelled) cancelledStart = started.data.directCallId;
     } catch (error) {
       this.startInFlight = false;
       this.bufferedInvites = [];
       this.releaseClient();
+      this.resolveIdentity?.();
       throw error;
     }
     this.startInFlight = false;
     if (cancelledStart) {
       for (const invite of this.bufferedInvites) this.decidedInvites.add(invite);
       this.bufferedInvites = [];
-      await this.deps.control(cancelledStart, { action: "hangup" }).catch(() => undefined);
+      // Same shared teardown-and-confirm path as every other cancellation.
+      await this.teardown();
       return { id: cancelledStart };
     }
     this.emit("connecting");
@@ -252,7 +267,29 @@ export class TelnyxDirectCallTransport implements CallTransport {
     if (!this.cancelled) return;
     this.bufferedInvites = [];
     this.releaseClient();
+    this.resolveIdentity?.();
     throw new Error("Call cancelled.");
+  }
+
+  /** Page unload: best-effort start of the shared teardown (the server sweep covers a lost request). */
+  private listenForPageHide(): void {
+    if (this.pageHideHandler || typeof window === "undefined") return;
+    this.pageHideHandler = () => this.cancelCall();
+    window.addEventListener("pagehide", this.pageHideHandler);
+  }
+
+  private stopListeningForPageHide(): void {
+    if (this.pageHideHandler && typeof window !== "undefined") {
+      window.removeEventListener("pagehide", this.pageHideHandler);
+    }
+    this.pageHideHandler = null;
+  }
+
+  /** Every non-user cancellation (socket loss, SDK error, failed answer, pagehide) goes through here. */
+  private cancelCall(): void {
+    if (this.confirmed || this.disposed) return;
+    this.cancelled = true;
+    void this.teardown().catch(() => undefined);
   }
 
   private bindEvents(client: TelnyxRtcLike): void {
@@ -291,10 +328,7 @@ export class TelnyxDirectCallTransport implements CallTransport {
 
   /** Pilot has no mid-call recovery: signalling loss during a call tears the server call down. */
   private onClientLost(): void {
-    if (this.terminal || this.disposed) return;
-    this.cancelled = true;
-    const id = this.directCallId;
-    if (id) void this.deps.control(id, { action: "hangup" }).catch(() => undefined);
+    this.cancelCall();
   }
 
   private register(client: TelnyxRtcLike): Promise<void> {
@@ -354,8 +388,7 @@ export class TelnyxDirectCallTransport implements CallTransport {
       .then(() => call.answer())
       .catch(() => {
         // Answer failed: end the server call rather than leave it ringing.
-        const id = this.directCallId;
-        if (id) void this.deps.control(id, { action: "hangup" }).catch(() => undefined);
+        this.cancelCall();
       });
   }
 
@@ -374,9 +407,9 @@ export class TelnyxDirectCallTransport implements CallTransport {
     if (this.polling) return;
     this.polling = true;
     try {
-      while (!this.terminal && !this.disposed) {
+      while (!this.confirmed && !this.disposed) {
         await this.pollOnce();
-        if (this.terminal || this.disposed) break;
+        if (this.confirmed || this.disposed) break;
         await this.deps.sleep(STATUS_POLL_MS);
       }
     } finally {
@@ -406,7 +439,7 @@ export class TelnyxDirectCallTransport implements CallTransport {
   }
 
   private applyStatus(view: DirectCallStatusView): void {
-    if (this.terminal) return;
+    if (this.confirmed) return;
     this.serverConnectedAt = view.connectedAt ?? this.serverConnectedAt;
     this.serverEndedAt = view.endedAt ?? this.serverEndedAt;
     const mapped = mapDirectStatus(view.status);
@@ -415,11 +448,31 @@ export class TelnyxDirectCallTransport implements CallTransport {
     }
     if (DIRECT_CALL_TERMINAL_STATUSES.has(view.status)) {
       this.terminal = view.status === "ended" ? "ended" : "failed";
-      this.emit(mapped as CallTransportState);
+      // Fail closed: a server that does not say cleanup is finished has not confirmed it.
+      if (view.cleanupPending !== false) {
+        // Over, but a leg may still be up: not authoritative. Keep polling and let the
+        // provider surface the unconfirmed-teardown warning (and its retry control).
+        this.emitTeardownUnconfirmed();
+        return;
+      }
+      this.confirmed = true;
+      this.stopListeningForPageHide();
+      if (this.teardownUnconfirmedEmitted) {
+        this.teardownUnconfirmedEmitted = false;
+        this.emit("teardown_confirmed");
+      }
       this.releaseClient();
+      this.emit(mapped as CallTransportState);
       return;
     }
     if (mapped) this.emit(mapped);
+  }
+
+  private emitTeardownUnconfirmed(): void {
+    if (this.teardownUnconfirmedEmitted) return;
+    this.teardownUnconfirmedEmitted = true;
+    this.state = "teardown_unconfirmed";
+    this.listener?.("teardown_unconfirmed");
   }
 
   private emit(state: CallTransportState): void {
@@ -470,44 +523,62 @@ export class TelnyxDirectCallTransport implements CallTransport {
 
   hangup(): Promise<CallResult> {
     this.cancelled = true;
-    if (this.hangupPromise && !this.terminal) return this.hangupPromise;
-    this.hangupPromise = this.runHangup().finally(() => {
-      // Allow a retry when terminal proof did not arrive.
-      if (!this.terminal) this.hangupPromise = null;
-    });
-    return this.hangupPromise;
+    return this.teardown();
   }
 
-  private async runHangup(): Promise<CallResult> {
-    // A hangup issued while start() is still resolving waits for the server
-    // identity so the right call is ended.
-    if (this.startPromise && !this.directCallId) {
-      await this.startPromise.catch(() => undefined);
-    }
+  /**
+   * The single teardown-and-confirm path (user hangup, socket loss, SDK error, failed answer,
+   * pagehide). Sends the server hangup (retrying with backoff until accepted), keeps polling the
+   * status, and publishes the final state: teardown_confirmed + ended/failed once the server says
+   * terminal with every leg confirmed, teardown_unconfirmed if that did not happen in time.
+   * Memoized while in flight; after an unconfirmed outcome a new call starts a fresh attempt.
+   */
+  private teardown(): Promise<CallResult> {
+    if (this.teardownPromise) return this.teardownPromise;
+    const attempt = this.runTeardown().finally(() => {
+      if (this.teardownPromise === attempt && !this.confirmed) this.teardownPromise = null;
+    });
+    this.teardownPromise = attempt;
+    return attempt;
+  }
+
+  private async runTeardown(): Promise<CallResult> {
+    // A cancellation issued while start() is still resolving waits for the server identity
+    // so the right call is ended.
+    if (this.startInFlight || (this.startPromise && !this.directCallId)) await this.identity;
     const id = this.directCallId;
-    if (id && !this.terminal) {
-      await this.deps.control(id, { action: "hangup" }).catch(() => undefined);
-    }
-    const call = this.currentCall;
-    if (call) {
-      await Promise.resolve()
-        .then(() => call.hangup())
-        .catch(() => undefined);
-    }
-    if (id) {
-      for (
-        let attempt = 0;
-        !this.terminal && attempt < HANGUP_CONFIRM_ATTEMPTS;
-        attempt += 1
-      ) {
-        await this.pollOnce();
-        if (this.terminal) break;
-        await this.deps.sleep(HANGUP_CONFIRM_MS);
-      }
-    } else {
+    if (!id) {
       // Nothing was provisioned on the server; there is nothing to confirm.
       this.terminal = "failed";
+      this.confirmed = true;
+      this.stopListeningForPageHide();
       this.releaseClient();
+      return this.result();
+    }
+    const call = this.currentCall;
+    let accepted = false;
+    for (let attempt = 0; !this.confirmed; attempt += 1) {
+      if (!accepted) {
+        accepted = await this.deps
+          .control(id, { action: "hangup" })
+          .then((r) => r.ok)
+          .catch(() => false);
+        if (attempt === 0 && call) {
+          await Promise.resolve()
+            .then(() => call.hangup())
+            .catch(() => undefined);
+        }
+      }
+      await this.pollOnce();
+      if (this.confirmed) break;
+      const delay = TEARDOWN_BACKOFF_MS[attempt];
+      if (delay === undefined) break;
+      await this.deps.sleep(delay);
+    }
+    if (!this.confirmed) {
+      this.emitTeardownUnconfirmed();
+      // Keep watching in the background: a late confirmation still publishes the final state.
+      void this.pollLoop();
     }
     return this.result();
   }
@@ -534,7 +605,7 @@ export class TelnyxDirectCallTransport implements CallTransport {
     const audio = this.audio;
     this.client = null;
     this.audio = null;
-    this.disposed = this.terminal !== null;
+    this.disposed = this.confirmed;
     try {
       void Promise.resolve(client?.disconnect()).catch(() => undefined);
     } catch {
