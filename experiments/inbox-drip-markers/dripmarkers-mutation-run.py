@@ -130,7 +130,11 @@ INSERT INTO public.properties(id,org_id,address,state,status) SELECT x.id::uuid,
  ('40000000-0000-4000-8000-000000000001','1 Active Way'),('40000000-0000-4000-8000-000000000002','2 Reply Lane'),
  ('40000000-0000-4000-8000-000000000003','3 Failed Lane'),('40000000-0000-4000-8000-000000000004','4 Empty Street'),
  ('40000000-0000-4000-8000-000000000005','5 Completed Lane'),('40000000-0000-4000-8000-000000000007','7 Archived Lane'),
- ('40000000-0000-4000-8000-000000000099','99 Other Lane')) x(id,address) ON CONFLICT(id) DO NOTHING;
+ ('40000000-0000-4000-8000-000000000009','9 Sibling Lane'),('40000000-0000-4000-8000-000000000010','10 Review Lane'),
+ ('40000000-0000-4000-8000-000000000011','11 Manual Pause Lane'),('40000000-0000-4000-8000-000000000099','99 Other Lane')) x(id,address) ON CONFLICT(id) DO NOTHING;
+INSERT INTO public.campaigns(id,org_id,name,created_by) VALUES
+ ('90000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000001','Fixture Campaign','20000000-0000-4000-8000-000000000002')
+ON CONFLICT(id) DO NOTHING;
 INSERT INTO public.sequences(id,org_id,name,created_by,archived_at) VALUES
  ('60000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000001','Fixture Drip','20000000-0000-4000-8000-000000000002',NULL),
  ('60000000-0000-4000-8000-000000000007','10000000-0000-4000-8000-000000000001','Archived Fixture Drip','20000000-0000-4000-8000-000000000002','2026-08-01') ON CONFLICT(id) DO NOTHING;
@@ -141,7 +145,8 @@ INSERT INTO public.sequence_enrollments(id,org_id,sequence_id,property_id,status
  ('62000000-0000-4000-8000-000000000002','10000000-0000-4000-8000-000000000001','60000000-0000-4000-8000-000000000001','40000000-0000-4000-8000-000000000002','paused',0,'2026-08-21 10:00+00','inbound_reply'),
  ('62000000-0000-4000-8000-000000000003','10000000-0000-4000-8000-000000000001','60000000-0000-4000-8000-000000000001','40000000-0000-4000-8000-000000000003','paused',0,'2026-08-22 10:00+00','rep_sms_human_takeover'),
  ('62000000-0000-4000-8000-000000000005','10000000-0000-4000-8000-000000000001','60000000-0000-4000-8000-000000000001','40000000-0000-4000-8000-000000000005','completed',0,'2026-08-23 10:00+00',NULL),
- ('62000000-0000-4000-8000-000000000007','10000000-0000-4000-8000-000000000001','60000000-0000-4000-8000-000000000007','40000000-0000-4000-8000-000000000007','active',0,'2026-08-24 10:00+00',NULL)
+ ('62000000-0000-4000-8000-000000000007','10000000-0000-4000-8000-000000000001','60000000-0000-4000-8000-000000000007','40000000-0000-4000-8000-000000000007','active',0,'2026-08-24 10:00+00',NULL),
+ ('62000000-0000-4000-8000-000000000011','10000000-0000-4000-8000-000000000001','60000000-0000-4000-8000-000000000001','40000000-0000-4000-8000-000000000011','paused',0,'2026-08-25 10:00+00','manual')
 ON CONFLICT(id) DO NOTHING;
 INSERT INTO public.messages(id,org_id,created_at,channel,direction,property_id,contact_id,conversation_id,from_address,to_address,body,status,metadata,campaign_id) VALUES
  ('70000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000001','2026-09-01 10:00+00','sms','outbound','40000000-0000-4000-8000-000000000001','50000000-0000-4000-8000-000000000001','80000000-0000-4000-8000-000000000001','+15550000099','+15550000001','Active drip text','sent','{}',NULL),
@@ -156,6 +161,9 @@ INSERT INTO public.messages(id,org_id,created_at,channel,direction,property_id,c
  ('70000000-0000-4000-8000-000000000009','10000000-0000-4000-8000-000000000001','2026-09-02 10:00+00','email','inbound','40000000-0000-4000-8000-000000000005','50000000-0000-4000-8000-000000000001','80000000-0000-4000-8000-000000000005','owner@example.test','drip@example.test','Email reply','received','{}',NULL),
  ('70000000-0000-4000-8000-000000000010','10000000-0000-4000-8000-000000000001','2026-09-01 10:00+00','sms','outbound','40000000-0000-4000-8000-000000000007','50000000-0000-4000-8000-000000000001','80000000-0000-4000-8000-000000000007','+15550000099','+15550000001','Archived drip','sent','{}',NULL),
  ('70000000-0000-4000-8000-000000000011','10000000-0000-4000-8000-000000000001','2026-09-01 09:00+00','sms','inbound',NULL,'50000000-0000-4000-8000-000000000001','80000000-0000-4000-8000-000000000008','+15550000001','+15550000099','No property','received','{}',NULL),
+ ('70000000-0000-4000-8000-000000000013','10000000-0000-4000-8000-000000000001','2026-01-01 09:00+00','sms','outbound','40000000-0000-4000-8000-000000000009','50000000-0000-4000-8000-000000000001','80000000-0000-4000-8000-000000000009','+15550000099','+15550000001','Sibling property conversation','sent','{}',NULL),
+ ('70000000-0000-4000-8000-000000000014','10000000-0000-4000-8000-000000000001','2026-01-01 09:00+00','sms','inbound','40000000-0000-4000-8000-000000000010','50000000-0000-4000-8000-000000000001','80000000-0000-4000-8000-000000000010','+15550000001','+15550000099','Review property differs from newest message','received','{}',NULL),
+ ('70000000-0000-4000-8000-000000000015','10000000-0000-4000-8000-000000000001','2026-01-01 09:00+00','sms','outbound','40000000-0000-4000-8000-000000000011','50000000-0000-4000-8000-000000000001','80000000-0000-4000-8000-000000000011','+15550000099','+15550000001','Manual pause drip text','sent','{}',NULL),
  ('70000000-0000-4000-8000-000000000099','10000000-0000-4000-8000-000000000099','2026-09-01 10:00+00','sms','outbound','40000000-0000-4000-8000-000000000099',NULL,'80000000-0000-4000-8000-000000000001','+15550000099','+15550000001','Foreign collision','sent','{}',NULL)
 ON CONFLICT(id) DO NOTHING;
 INSERT INTO public.messages(id,org_id,created_at,channel,direction,property_id,contact_id,conversation_id,from_address,to_address,body,status,metadata,campaign_id)
@@ -165,7 +173,11 @@ INSERT INTO public.sequence_step_runs(id,enrollment_id,step_id,message_id,schedu
  ('63000000-0000-4000-8000-000000000002','62000000-0000-4000-8000-000000000002','61000000-0000-4000-8000-000000000001','70000000-0000-4000-8000-000000000002','2026-09-01 09:59+00','2026-09-01 10:00+00'),
  ('63000000-0000-4000-8000-000000000003','62000000-0000-4000-8000-000000000003','61000000-0000-4000-8000-000000000001','70000000-0000-4000-8000-000000000004','2026-09-01 09:59+00','2026-09-01 10:00+00'),
  ('63000000-0000-4000-8000-000000000005','62000000-0000-4000-8000-000000000005','61000000-0000-4000-8000-000000000001','70000000-0000-4000-8000-000000000008','2026-09-01 09:59+00','2026-09-01 10:00+00'),
- ('63000000-0000-4000-8000-000000000007','62000000-0000-4000-8000-000000000007','61000000-0000-4000-8000-000000000007','70000000-0000-4000-8000-000000000010','2026-09-01 09:59+00','2026-09-01 10:00+00') ON CONFLICT(id) DO NOTHING;
+ ('63000000-0000-4000-8000-000000000007','62000000-0000-4000-8000-000000000007','61000000-0000-4000-8000-000000000007','70000000-0000-4000-8000-000000000010','2026-09-01 09:59+00','2026-09-01 10:00+00'),
+ ('63000000-0000-4000-8000-000000000011','62000000-0000-4000-8000-000000000011','61000000-0000-4000-8000-000000000001','70000000-0000-4000-8000-000000000015','2026-01-01 08:59+00','2026-01-01 09:00+00') ON CONFLICT(id) DO NOTHING;
+INSERT INTO public.ai_disposition_reviews(id,org_id,property_id,conversation_id,source_inbound_message_id,disposition,ai_reason)
+VALUES ('91000000-0000-4000-8000-000000000010','10000000-0000-4000-8000-000000000001','40000000-0000-4000-8000-000000000002','80000000-0000-4000-8000-000000000010','70000000-0000-4000-8000-000000000014','not_interested','fixture review property')
+ON CONFLICT(id) DO NOTHING;
 INSERT INTO inbox_maintained.rows(org_id,target_kind,target_id,revision,source_generation,summary)
 SELECT v.org_id,'known_conversation',v.id,1,1,jsonb_build_object('target_kind','known_conversation','target_id',v.id,'exists',true,'property_id',v.property_id,'last_message_at',v.latest_at,'has_recent',true,'is_noise',false,'contact_id','50000000-0000-4000-8000-000000000001','property_status','new_lead','assigned_user_id',NULL,'unread_count',1,'ai_responder_status',NULL,'needs_outcome',false,'ai_disposition_review_id',NULL,'is_test_traffic',false)
 FROM (VALUES
@@ -176,11 +188,18 @@ FROM (VALUES
  ('10000000-0000-4000-8000-000000000001'::uuid,'80000000-0000-4000-8000-000000000005'::uuid,'40000000-0000-4000-8000-000000000005'::uuid,'2026-09-02 10:00+00'::timestamptz),
  ('10000000-0000-4000-8000-000000000001'::uuid,'80000000-0000-4000-8000-000000000007'::uuid,'40000000-0000-4000-8000-000000000007'::uuid,'2026-09-01 10:00+00'::timestamptz),
  ('10000000-0000-4000-8000-000000000001'::uuid,'80000000-0000-4000-8000-000000000008'::uuid,NULL,'2026-09-01 09:00+00'::timestamptz),
+ ('10000000-0000-4000-8000-000000000001'::uuid,'80000000-0000-4000-8000-000000000009'::uuid,'40000000-0000-4000-8000-000000000002'::uuid,'2026-01-01 09:00+00'::timestamptz),
+ ('10000000-0000-4000-8000-000000000001'::uuid,'80000000-0000-4000-8000-000000000010'::uuid,'40000000-0000-4000-8000-000000000004'::uuid,'2026-01-01 09:00+00'::timestamptz),
+ ('10000000-0000-4000-8000-000000000001'::uuid,'80000000-0000-4000-8000-000000000011'::uuid,'40000000-0000-4000-8000-000000000011'::uuid,'2026-01-01 09:00+00'::timestamptz),
  ('10000000-0000-4000-8000-000000000099'::uuid,'80000000-0000-4000-8000-000000000001'::uuid,'40000000-0000-4000-8000-000000000099'::uuid,'2026-09-01 10:00+00'::timestamptz)
 ) v(org_id,id,property_id,latest_at) ON CONFLICT(org_id,target_kind,target_id) DO UPDATE SET summary=excluded.summary,revision=excluded.revision;
+UPDATE inbox_maintained.rows SET summary=summary||jsonb_build_object('has_recent',false)
+WHERE target_kind='known_conversation' AND target_id IN ('80000000-0000-4000-8000-000000000009','80000000-0000-4000-8000-000000000010','80000000-0000-4000-8000-000000000011');
 INSERT INTO inbox_bridge.filter_rows(org_id,target_kind,target_id,revision,latest_at,contact_id,has_recent,is_noise,assignable,assigned_user_id,unread,escalated,needs_outcome,review,unknown_active,unknown_dismissed)
-SELECT r.org_id,'known_conversation',r.target_id,1,(r.summary->>'last_message_at')::timestamptz,(r.summary->>'contact_id')::uuid,true,false,true,NULL,true,false,false,false,false,false FROM inbox_maintained.rows r WHERE r.target_kind='known_conversation'
+SELECT r.org_id,'known_conversation',r.target_id,1,(r.summary->>'last_message_at')::timestamptz,(r.summary->>'contact_id')::uuid,coalesce((r.summary->>'has_recent')::boolean,false),coalesce((r.summary->>'is_noise')::boolean,false),true,NULL,true,false,false,coalesce((r.summary->>'ai_disposition_review_id') IS NOT NULL,false),false,false FROM inbox_maintained.rows r WHERE r.target_kind='known_conversation'
 ON CONFLICT(org_id,target_kind,target_id) DO UPDATE SET latest_at=excluded.latest_at,revision=excluded.revision;
+UPDATE inbox_bridge.filter_rows SET has_recent=false
+WHERE target_id IN ('80000000-0000-4000-8000-000000000009','80000000-0000-4000-8000-000000000010','80000000-0000-4000-8000-000000000011');
 COMMIT;
 """)
 
@@ -195,6 +214,35 @@ def marker_json() -> dict[str, Any]:
     ids = list(golden["markerRows"])
     literal = ",".join(f"'{value}'::uuid" for value in ids)
     return json_query(f"SELECT public.inbox_drip_markers_v1('{ORG}'::uuid, ARRAY[{literal}]);", role="authenticated")
+
+
+def marker_for(conversation_id: str) -> dict[str, Any]:
+    return json_query(f"SELECT public.inbox_drip_markers_v1('{ORG}'::uuid, ARRAY['{conversation_id}'::uuid]);", role="authenticated")["rows"][0]
+
+
+def reset_workset_fixture() -> None:
+    psql("""
+UPDATE public.sequence_enrollments SET status='active',pause_reason=NULL,completed_at=NULL
+WHERE id='62000000-0000-4000-8000-000000000001';
+UPDATE public.sequence_enrollments SET status='completed',pause_reason=NULL,completed_at='2026-09-03 00:00+00'
+WHERE id='62000000-0000-4000-8000-000000000005';
+UPDATE inbox_bridge.filter_rows SET latest_at=CASE target_id
+ WHEN '80000000-0000-4000-8000-000000000001' THEN '2026-09-01 10:00+00'::timestamptz
+ WHEN '80000000-0000-4000-8000-000000000005' THEN '2026-09-02 10:00+00'::timestamptz
+ ELSE latest_at END;
+DELETE FROM inbox_bridge.cursors;
+DELETE FROM inbox_bridge.worksets;
+""")
+
+
+def permit_next_workset() -> None:
+    psql("UPDATE inbox_bridge.worksets SET created_at=clock_timestamp()-interval '2 seconds';")
+
+
+def workset(view: str, limit: int, *, cursor: str | None = None, replaces: str | None = None) -> dict[str, Any]:
+    cursor_sql = "NULL" if cursor is None else f"'{cursor}'::uuid"
+    replaces_sql = "NULL" if replaces is None else f"'{replaces}'::uuid"
+    return json_query(f"SELECT public.inbox_create_workset_v2('{ORG}'::uuid,'{{\"view\":\"{view}\",\"hide_noise\":false}}'::jsonb,{limit},{replaces_sql},{cursor_sql});", role="authenticated")
 
 
 def expect_error(statement: str, message: str, *, role: str = "authenticated") -> None:
@@ -268,6 +316,18 @@ def test_filter_counts_page_and_review() -> None:
         raise AssertionError(f"review selection admitted non-match: {statuses}")
 
 
+def test_fixture_case_matrix() -> None:
+    sibling = marker_for("80000000-0000-4000-8000-000000000009")
+    review_property = marker_for("80000000-0000-4000-8000-000000000010")
+    manual_pause = marker_for("80000000-0000-4000-8000-000000000011")
+    if sibling["property_id"] != "40000000-0000-4000-8000-000000000002" or not sibling["in_drip"] or not sibling["drip_replied"]:
+        raise AssertionError(f"two-conversations-per-property case diverged: {sibling}")
+    if review_property["property_id"] != "40000000-0000-4000-8000-000000000004" or review_property["in_drip"] or review_property["drip_replied"]:
+        raise AssertionError(f"review property overrode newest message property: {review_property}")
+    if not manual_pause["in_drip"] or manual_pause["drip_replied"]:
+        raise AssertionError(f"non-reply pause reason changed marker semantics: {manual_pause}")
+
+
 def test_labels_and_long_skip() -> None:
     inbound = "70000000-0000-4000-8000-000000000003"
     label = json_query(f"SELECT public.inbox_drip_label_inputs_v1('{ORG}'::uuid,'80000000-0000-4000-8000-000000000002'::uuid,ARRAY['{inbound}'::uuid]);", role="authenticated")
@@ -290,6 +350,48 @@ def test_labels_and_long_skip() -> None:
     tied_page = [row for row in tied["messages"] if row["is_page"]]
     if [row["id"] for row in tied_page] != [inbound, "70000000-0000-4000-8000-000000000012"] or tied_page[1].get("drip_reply_label") is not None:
         raise AssertionError(f"tied/consecutive inbound attribution mismatch: {tied_page}")
+
+
+def test_clearing_events_and_campaign_exemption() -> None:
+    conversation = "80000000-0000-4000-8000-000000000002"
+    if marker_for(conversation)["drip_replied"] is not True:
+        raise AssertionError("fixture reply was not initially pending")
+    psql("""
+INSERT INTO public.messages(id,org_id,created_at,channel,direction,property_id,contact_id,conversation_id,from_address,to_address,body,status,metadata,campaign_id)
+VALUES ('70000000-0000-4000-8000-000000000020','10000000-0000-4000-8000-000000000001','2026-09-03 10:00+00','sms','outbound','40000000-0000-4000-8000-000000000002','50000000-0000-4000-8000-000000000001','80000000-0000-4000-8000-000000000002','+15550000099','+15550000001','Campaign follow-up','sent','{}','90000000-0000-4000-8000-000000000001');
+""")
+    if marker_for(conversation)["drip_replied"] is not True:
+        raise AssertionError("campaign outbound incorrectly cleared drip reply")
+    psql("DELETE FROM public.messages WHERE id='70000000-0000-4000-8000-000000000020';")
+    psql("""
+INSERT INTO public.messages(id,org_id,created_at,channel,direction,property_id,contact_id,conversation_id,from_address,to_address,body,status,metadata,campaign_id)
+VALUES ('70000000-0000-4000-8000-000000000021','10000000-0000-4000-8000-000000000001','2026-09-03 10:00+00','sms','outbound','40000000-0000-4000-8000-000000000002','50000000-0000-4000-8000-000000000001','80000000-0000-4000-8000-000000000002','+15550000099','+15550000001','Failed follow-up','failed','{}',NULL);
+""")
+    if marker_for(conversation)["drip_replied"] is not True:
+        raise AssertionError("failed outbound incorrectly cleared drip reply")
+    psql("DELETE FROM public.messages WHERE id='70000000-0000-4000-8000-000000000021';")
+    psql("""
+INSERT INTO public.messages(id,org_id,created_at,channel,direction,property_id,contact_id,conversation_id,from_address,to_address,body,status,metadata,campaign_id)
+VALUES ('70000000-0000-4000-8000-000000000022','10000000-0000-4000-8000-000000000001','2026-09-03 10:00+00','sms','outbound','40000000-0000-4000-8000-000000000002','50000000-0000-4000-8000-000000000001','80000000-0000-4000-8000-000000000002','+15550000099','+15550000001','Human follow-up','sent','{}',NULL);
+""")
+    if marker_for(conversation)["drip_replied"] is not False:
+        raise AssertionError("human outbound did not clear drip reply")
+    psql("DELETE FROM public.messages WHERE id='70000000-0000-4000-8000-000000000022';")
+    for event_id, event_type, payload in [
+        ("92000000-0000-4000-8000-000000000001", "dispo_set", "{}"),
+        ("92000000-0000-4000-8000-000000000002", "my_leads_workflow", '{"operation":"log_acquisition_attempt"}'),
+    ]:
+        psql(f"INSERT INTO public.lead_events(id,org_id,property_id,actor_type,actor_id,event_type,payload,created_at) VALUES ('{event_id}','{ORG}','40000000-0000-4000-8000-000000000002','user','{USER}','{event_type}','{payload}'::jsonb,'2026-09-03 10:00+00');")
+        if marker_for(conversation)["drip_replied"] is not False:
+            raise AssertionError(f"{event_type} did not clear drip reply")
+        psql(f"DELETE FROM public.lead_events WHERE id='{event_id}';")
+    psql(f"""
+INSERT INTO public.acquisition_attempts(id,org_id,property_id,actor_user_id,attempt_kind,source,outcome,occurred_at,recorded_at,idempotency_key)
+VALUES ('93000000-0000-4000-8000-000000000001','{ORG}','40000000-0000-4000-8000-000000000002','{USER}','outreach','manual','reached','2026-09-03 10:00+00','2026-09-03 10:00+00','94000000-0000-4000-8000-000000000001');
+""")
+    if marker_for(conversation)["drip_replied"] is not False:
+        raise AssertionError("acquisition attempt did not clear drip reply")
+    psql("DELETE FROM public.acquisition_attempts WHERE id='93000000-0000-4000-8000-000000000001';")
 
 
 def test_authorization_and_grants() -> None:
@@ -336,12 +438,48 @@ def test_consistency_and_rate_limit() -> None:
     second = json_query(f"SELECT public.inbox_create_workset_v2('{ORG}'::uuid,'{{\"view\":\"all\",\"hide_noise\":false}}'::jsonb,500,NULL,NULL);", role="authenticated")
     if first["generation"] == second["generation"]:
         raise AssertionError("cursor-free workset did not advance after rate-limit window")
+    # Count-preserving swap: the first page is retained, one unloaded row stops
+    # matching, and another unloaded row starts matching before page two reads.
+    reset_workset_fixture()
+    first = workset("in_drip", 2)
+    first_ids = {target["id"] for target in first["targets"]}
+    if first_ids != {"80000000-0000-4000-8000-000000000003", "80000000-0000-4000-8000-000000000002"}:
+        raise AssertionError(f"unexpected first cursor page: {first_ids}")
+    psql("""
+UPDATE public.sequence_enrollments SET status='completed',completed_at='2026-09-04 00:00+00' WHERE id='62000000-0000-4000-8000-000000000001';
+UPDATE public.sequence_enrollments SET status='active',completed_at=NULL WHERE id='62000000-0000-4000-8000-000000000005';
+""")
+    permit_next_workset()
+    swapped = workset("in_drip", 2, cursor=first["next_cursor"], replaces=first["id"])
+    swapped_ids = {target["id"] for target in swapped["targets"]}
+    if swapped_ids != {"80000000-0000-4000-8000-000000000005", "80000000-0000-4000-8000-000000000007"}:
+        raise AssertionError(f"count-preserving cursor swap missed a row: {swapped_ids}")
+    if json_query(f"SELECT public.inbox_drip_counts_v1('{ORG}'::uuid,'{{\"view\":\"all\",\"hide_noise\":false}}'::jsonb);", role="authenticated")["counts"]["in_drip"] != 4:
+        raise AssertionError("count-preserving swap changed population count")
+    # Unloaded match moves ahead of page one. The old cursor must not reveal it;
+    # the cursor-free replacement must re-derive page one and include it.
+    reset_workset_fixture()
+    first = workset("in_drip", 2)
+    psql("""
+UPDATE public.sequence_enrollments SET status='active',completed_at=NULL WHERE id='62000000-0000-4000-8000-000000000005';
+UPDATE inbox_bridge.filter_rows SET latest_at='2026-09-04 12:00+00' WHERE target_id='80000000-0000-4000-8000-000000000005';
+""")
+    permit_next_workset()
+    stale = workset("in_drip", 2, cursor=first["next_cursor"], replaces=first["id"])
+    if "80000000-0000-4000-8000-000000000005" in {target["id"] for target in stale["targets"]}:
+        raise AssertionError("stale cursor incorrectly surfaced a match moved ahead of page one")
+    permit_next_workset()
+    fresh = workset("in_drip", 2, replaces=stale["id"])
+    if fresh["targets"][0]["id"] != "80000000-0000-4000-8000-000000000005":
+        raise AssertionError(f"cursor-free reconciliation did not recover moved match: {fresh['targets']}")
 
 
 TESTS: list[tuple[str, Callable[[], None]]] = [
     ("golden fixture + legacy 035000 oracle parity", test_golden_marker_and_oracle),
     ("filters, counts, page and review_selection", test_filter_counts_page_and_review),
+    ("fixture matrix: sibling property, review-property divergence and pause reasons", test_fixture_case_matrix),
     ("labels, nearest lookbehind, skipped AI and concatenation", test_labels_and_long_skip),
+    ("clearing events, failed sends and campaign exemption", test_clearing_events_and_campaign_exemption),
     ("authorization denial, revocation and grants", test_authorization_and_grants),
     ("convergence and workset rate-limit acceptance", test_consistency_and_rate_limit),
 ]
@@ -360,7 +498,7 @@ def run_suite(label: str) -> list[str]:
             failures.append(name)
             emit(f"TEST_FAIL|{label}|{name}|{error}")
         evidence.append({"run": label, "test": name, "Executed": executed, "result": result})
-    if len(TESTS) != 5:
+    if len(TESTS) != 7:
         raise RuntimeError("unexpected NOT RUN: test inventory changed")
     return failures
 
