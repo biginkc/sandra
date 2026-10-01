@@ -1,3 +1,7 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "@/lib/supabase/types";
+import { readCanaryControl } from "./canary-controls";
+
 const API = "https://api.github.com/repos/biginkc/sandra";
 const WORKFLOW = "canary-sequences.yml";
 const FULL_TITLE = "Sequences V1 Prod Canary full";
@@ -60,7 +64,7 @@ async function fullJobWasSkipped(run: WorkflowRun, token: string, attempt: numbe
 }
 
 /** Read only. Unknown run metadata is ambiguous and stops the canary. */
-export async function assertNoUnacknowledgedCanaryFailure(currentRunId: string, token: string): Promise<void> {
+export async function assertNoUnacknowledgedCanaryFailure(currentRunId: string, token: string, client: SupabaseClient<Database>): Promise<void> {
   if (!/^\d+$/.test(currentRunId) || !token) throw new Error("Canary history unavailable");
   try {
     const runs: WorkflowRun[] = [];
@@ -112,8 +116,8 @@ export async function assertNoUnacknowledgedCanaryFailure(currentRunId: string, 
       failures.push({ id: run.id, ambiguousMode });
     }
     if (failures.length > 0) {
-      const ack = await githubJson(`${API}/actions/variables/SEQUENCE_CANARY_FAILURE_ACK_RUN_ID`, token) as { value?: string };
-      const acknowledged = new Set((ack.value ?? "").split(",").map(id => id.trim()).filter(id => /^\d+$/.test(id)));
+      const ack = await readCanaryControl(client, "SEQUENCE_CANARY_FAILURE_ACK_RUN_ID");
+      const acknowledged = new Set(ack.split(",").map(id => id.trim()).filter(id => /^\d+$/.test(id)));
       const missing = failures.find(failure => !acknowledged.has(String(failure.id)));
       if (missing) throw new Error(`Canary prior full run ${missing.id} is not acknowledged${missing.ambiguousMode ? " (ambiguous mode)" : ""}`);
     }

@@ -14,6 +14,12 @@ export type Database = {
   }
   public: {
     Tables: {
+      sequence_canary_controls: {
+        Row: { key: string; value: string; changed_by: string; changed_at: string }
+        Insert: { key: string; value: string; changed_by: string; changed_at?: string }
+        Update: { value?: string; changed_by?: string; changed_at?: string }
+        Relationships: []
+      }
       dialpad_org_connections: {
         Row: { id: string; org_id: string; status: string; cti_client_id: string; allowed_origins: string[]; webhook_secret_ref: string; webhook_secret_version: number; dialpad_company_id: string | null; directory_api_key_ref: string | null; recording_ingest_endpoint: string | null; created_at: string; updated_at: string }
         Insert: { id?: string; org_id: string; status?: string; cti_client_id: string; allowed_origins?: string[]; webhook_secret_ref: string; webhook_secret_version?: number; dialpad_company_id?: string | null; directory_api_key_ref?: string | null; recording_ingest_endpoint?: string | null; created_at?: string; updated_at?: string }

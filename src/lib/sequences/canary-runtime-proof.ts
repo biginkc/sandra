@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/types";
 import { assertNoUnacknowledgedCanaryFailure } from "./canary-failure-latch";
+import { readCanaryControl } from "./canary-controls";
 
 export const CANARY_PROOF_PREFIX = "CANARY_RUNTIME_PROOF_V1:";
 export const CANARY_PROOF_TTL_MS = 20 * 60_000;
@@ -129,35 +130,29 @@ export async function assertCanaryAlias(proof: CanaryProof): Promise<void> {
   }
 }
 
-export async function assertCanaryStopState(proof: CanaryProof): Promise<void> {
+export async function assertCanaryStopState(proof: CanaryProof, client: SupabaseClient<Database>): Promise<void> {
   const token = process.env.CANARY_GITHUB_READ_TOKEN;
   if (!token) throw new Error("Canary stop-state read token missing");
-  const headers = {
-    Accept: "application/vnd.github+json",
-    Authorization: `Bearer ${token}`,
-  };
+  const headers = { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}` };
   const variable = proof.runMode === "scheduled"
     ? "SEQUENCE_CANARY_SCHEDULE_ENABLED"
     : "SEQUENCE_CANARY_MANUAL_RUN_ID";
   try {
     const [flag, run] = await Promise.all([
-      fetch(`https://api.github.com/repos/biginkc/sandra/actions/variables/${variable}`, {
-        headers, cache: "no-store", signal: AbortSignal.timeout(5000),
-      }),
+      readCanaryControl(client, variable),
       fetch(`https://api.github.com/repos/biginkc/sandra/actions/runs/${proof.runId}`, {
         headers, cache: "no-store", signal: AbortSignal.timeout(5000),
       }),
     ]);
-    if (!flag.ok || !run.ok) throw new Error("GitHub state unavailable");
-    const flagBody = await flag.json() as { value?: string };
+    if (!run.ok) throw new Error("GitHub state unavailable");
     const runBody = await run.json() as { status?: string; run_attempt?: number; event?: string };
     const expectedValue = proof.runMode === "scheduled" ? "true" : proof.runId;
     const expectedEvent = proof.runMode === "scheduled" ? "schedule" : "workflow_dispatch";
-    if (flagBody.value !== expectedValue || runBody.status !== "in_progress" ||
+    if (flag !== expectedValue || runBody.status !== "in_progress" ||
         runBody.run_attempt !== 1 || runBody.event !== expectedEvent) {
       throw new Error("Canary stopped or unauthorized");
     }
-    await assertNoUnacknowledgedCanaryFailure(proof.runId, token);
+    await assertNoUnacknowledgedCanaryFailure(proof.runId, token, client);
   } catch {
     throw new Error("Canary stop state could not be verified");
   }
@@ -198,7 +193,7 @@ export async function assertCanarySendBinding(
   if (proof.sequenceId !== enrollment.sequence_id) {
     throw new Error("Canary runtime proof sequence mismatch");
   }
-  await assertCanaryStopState(proof);
+  await assertCanaryStopState(proof, client);
   await assertCanaryAlias(proof);
   // Re-read process configuration after the network checks, directly at the
   // provider boundary. A changed key, sender, DB target, or deployment fails.

@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { assertNoUnacknowledgedCanaryFailure } from "./canary-failure-latch";
 
-afterEach(() => vi.unstubAllGlobals());
+let ackValue = "";
+const controlClient = { from: () => ({ select: () => ({ eq: () => ({ single: async () => ({ data: { value: ackValue }, error: null }) }) }) }) } as never;
+afterEach(() => { vi.unstubAllGlobals(); ackValue = ""; });
 
 function mockHistory(conclusion: string, ack = "") {
+  ackValue = ack;
   const fetchMock = vi.fn(async (url: string) => new Response(JSON.stringify(
     url.includes("FAILURE_ACK_RUN_ID") ? { value: ack } : {
       workflow_runs: [{ id: 99, run_number: 99, run_attempt: 1, event: "schedule", status: "completed", conclusion }],
@@ -21,6 +24,7 @@ describe("canary failure latch", () => {
   });
 
   function mockRuns(runs: ReturnType<typeof run>[], ack = "", attempts: Record<number, string> = {}) {
+    ackValue = ack;
     const fetchMock = vi.fn(async (url: string) => {
       if (url.includes("FAILURE_ACK_RUN_ID")) return new Response(JSON.stringify({ value: ack }));
       const attempt = url.match(/\/attempts\/(\d+)$/);
@@ -36,28 +40,28 @@ describe("canary failure latch", () => {
 
   it("blocks run 100 while failed run 99 is queued for rerun after success 98", async () => {
     const fetchMock = mockRuns([run(98, "completed", "success"), run(99, "queued", null, 2)]);
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient))
       .rejects.toThrow(/prior full run unresolved/);
     expect(fetchMock.mock.calls[0][0]).not.toContain("status=completed");
   });
   it("blocks a prior in-progress full run", async () => {
     mockRuns([run(99, "in_progress", null)]);
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient))
       .rejects.toThrow(/prior full run unresolved/);
   });
   it("excludes the current run and checks the newest other run", async () => {
     mockRuns([run(100, "in_progress", null), run(99, "completed", "success")]);
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient))
       .resolves.toBeUndefined();
   });
   it("blocks a successful rerun after a failed earlier attempt", async () => {
     mockRuns([run(99, "completed", "success", 2)], "", { 1: "failure" });
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient))
       .rejects.toThrow(/prior full run 99/);
   });
   it("allows an acknowledged failed earlier attempt", async () => {
     mockRuns([run(99, "completed", "success", 2)], "99", { 1: "failure" });
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient))
       .resolves.toBeUndefined();
   });
   it("fails closed when an earlier attempt lookup fails", async () => {
@@ -66,19 +70,19 @@ describe("canary failure latch", () => {
       url.includes("/attempts/1") ? { message: "error" } :
         { workflow_runs: [run(99, "completed", "success", 2)], total_count: 1 },
     ), { status: url.includes("/attempts/1") ? 500 : 200 }));
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient))
       .rejects.toThrow(/history unavailable/);
   });
   it("fails closed on incomplete pagination", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
       workflow_runs: [run(99, "completed", "success")], total_count: 101,
     }))));
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient))
       .rejects.toThrow(/history unavailable/);
   });
   it.each(["failure", "cancelled", "timed_out"])("blocks after a %s full run", async conclusion => {
     mockHistory(conclusion);
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient))
       .rejects.toThrow(/prior full run/);
   });
   it("ignores a skipped schedule whose full job never started", async () => {
@@ -92,10 +96,11 @@ describe("canary failure latch", () => {
       ] },
     )));
     vi.stubGlobal("fetch", fetchMock);
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token")).resolves.toBeUndefined();
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient)).resolves.toBeUndefined();
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
   function mockSkippedRerun(firstConclusion: "failure" | "skipped", ack = "") {
+    ackValue = ack;
     const fetchMock = vi.fn(async (url: string) => {
       if (url.includes("FAILURE_ACK_RUN_ID")) return new Response(JSON.stringify({ value: ack }));
       if (url.includes("/attempts/1/jobs") || url.includes("/attempts/2/jobs")) return new Response(JSON.stringify({ total_count: 1, jobs: [
@@ -119,13 +124,13 @@ describe("canary failure latch", () => {
   }
   it("blocks a skipped second attempt when its first attempt failed", async () => {
     const fetchMock = mockSkippedRerun("failure");
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient))
       .rejects.toThrow(/prior full run 99/);
     expect(fetchMock.mock.calls.some(([url]) => url.includes("/attempts/1"))).toBe(true);
   });
   it("allows a skipped second attempt only after verifying its first never-started skip", async () => {
     const fetchMock = mockSkippedRerun("skipped");
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token")).resolves.toBeUndefined();
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient)).resolves.toBeUndefined();
     expect(fetchMock.mock.calls.some(([url]) => url.includes("/attempts/1/jobs"))).toBe(true);
     expect(fetchMock.mock.calls.some(([url]) => url.includes("/attempts/2/jobs"))).toBe(true);
   });
@@ -136,17 +141,17 @@ describe("canary failure latch", () => {
       ? new Response(JSON.stringify({ total_count: 1, jobs: [
         { name: "Sequences V1 Prod Canary", status: "completed", conclusion: "skipped", started_at: "2026-09-30T01:00:00Z" },
       ] })) : originalFetch(url));
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient))
       .rejects.toThrow(/prior full run 99/);
   });
   it("allows an acknowledged failure before a skipped second attempt", async () => {
     const fetchMock = mockSkippedRerun("failure", "99");
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token")).resolves.toBeUndefined();
-    expect(fetchMock.mock.calls.some(([url]) => url.includes("FAILURE_ACK_RUN_ID"))).toBe(true);
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient)).resolves.toBeUndefined();
+    expect(ackValue).toBe("99");
   });
   it("blocks a cancelled full run even if its job never started", async () => {
     mockHistory("cancelled");
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient))
       .rejects.toThrow(/prior full run 99/);
   });
   it("blocks a skipped full run whose job started", async () => {
@@ -159,23 +164,23 @@ describe("canary failure latch", () => {
         { id: 99, run_number: 99, run_attempt: 1, event: "schedule", status: "completed", conclusion: "skipped" },
       ] },
     ))));
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient))
       .rejects.toThrow(/prior full run 99/);
   });
   it("allows a matching operator acknowledgement", async () => {
     mockHistory("failure", "99");
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token")).resolves.toBeUndefined();
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient)).resolves.toBeUndefined();
   });
   it("allows a prior success", async () => {
     mockHistory("success");
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token")).resolves.toBeUndefined();
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient)).resolves.toBeUndefined();
   });
   it("skips a completed preflight and checks the preceding full run", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ workflow_runs: [
       { id: 101, run_number: 101, run_attempt: 1, event: "workflow_dispatch", display_title: "Sequences V1 Prod Canary preflight-only", status: "completed", conclusion: "success" },
       { id: 99, run_number: 99, run_attempt: 1, event: "schedule", status: "completed", conclusion: "failure" },
     ], total_count: 2 }))));
-    await expect(assertNoUnacknowledgedCanaryFailure("102", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("102", "token", controlClient))
       .rejects.toThrow(/prior full run/);
   });
   it("blocks an ambiguous legacy manual run until its ID is acknowledged", async () => {
@@ -184,12 +189,12 @@ describe("canary failure latch", () => {
         { id: 99, run_number: 99, run_attempt: 1, event: "workflow_dispatch", display_title: "old title", status: "completed", conclusion: "success" },
       ], total_count: 1 },
     ))));
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient))
       .rejects.toThrow(/ambiguous mode/);
   });
   it("reports a pending full run as unresolved", async () => {
     mockRuns([run(99, "pending", null)]);
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient))
       .rejects.toThrow(/unresolved/);
   });
   it("blocks when attempt 1 changes to attempt 2 after its jobs read", async () => {
@@ -200,7 +205,7 @@ describe("canary failure latch", () => {
         { workflow_runs: [run(99, "completed", "skipped"), run(98, "completed", "success")], total_count: 2 },
     )));
     vi.stubGlobal("fetch", fetchMock);
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient))
       .rejects.toThrow(/history unavailable|ambiguous/);
     expect(fetchMock.mock.calls.some(([url]) => url.includes("/attempts/1/jobs"))).toBe(true);
     expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/actions/runs/99"))).toBe(true);
@@ -216,26 +221,38 @@ describe("canary failure latch", () => {
       }
       return new Response(JSON.stringify({ workflow_runs: [run(100, "completed", "success")], total_count: 101 }));
     }));
-    await expect(assertNoUnacknowledgedCanaryFailure("300", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("300", "token", controlClient))
       .rejects.toThrow(/history unavailable|ambiguous/);
     expect(pageOneReads).toBe(2);
   });
   it("requires every failure since the most recent clean success", async () => {
     mockRuns([run(11, "completed", "failure"), run(10, "completed", "failure"), run(9, "completed", "success")], "11");
-    await expect(assertNoUnacknowledgedCanaryFailure("12", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("12", "token", controlClient))
       .rejects.toThrow(/prior full run 10/);
   });
   it("accepts comma-separated acknowledgements for every failure", async () => {
     mockRuns([run(11, "completed", "failure"), run(10, "completed", "failure"), run(9, "completed", "success")], "10,11");
-    await expect(assertNoUnacknowledgedCanaryFailure("12", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("12", "token", controlClient))
+      .resolves.toBeUndefined();
+    mockRuns([run(11, "completed", "failure"), run(10, "completed", "failure"), run(9, "completed", "success")], "10, 11");
+    await expect(assertNoUnacknowledgedCanaryFailure("12", "token", controlClient))
       .resolves.toBeUndefined();
     mockRuns([run(12, "completed", "success"), run(11, "completed", "failure"), run(10, "completed", "failure")]);
-    await expect(assertNoUnacknowledgedCanaryFailure("13", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("13", "token", controlClient))
       .resolves.toBeUndefined();
+  });
+  it("fails closed when acknowledgement control is missing or the DB read fails", async () => {
+    mockHistory("failure");
+    const missingClient = { from: () => ({ select: () => ({ eq: () => ({ single: async () => ({ data: null, error: null }) }) }) }) } as never;
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", missingClient))
+      .rejects.toThrow(/history unavailable/);
+    const errorClient = { from: () => ({ select: () => ({ eq: () => ({ single: async () => ({ data: null, error: new Error("offline") }) }) }) }) } as never;
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", errorClient))
+      .rejects.toThrow(/history unavailable/);
   });
   it("fails closed on lookup error", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network")));
-    await expect(assertNoUnacknowledgedCanaryFailure("100", "token"))
+    await expect(assertNoUnacknowledgedCanaryFailure("100", "token", controlClient))
       .rejects.toThrow(/history unavailable/);
   });
 });

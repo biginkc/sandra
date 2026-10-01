@@ -22,13 +22,12 @@ permissions:
 # Dispatch guard requires SEQUENCE_CANARY_USER_ID, SEQUENCE_CANARY_PROPERTY_ID,
 # and SEQUENCE_CANARY_CONTACT_ID in BOTH GitHub secrets and Vercel production env.
 # Every non-successful full run since the last clean success, including earlier
-# attempts, needs acknowledgement. Find IDs with:
-# gh run list --workflow canary-sequences.yml
-# Set the comma-separated repository variable with:
-# gh variable set SEQUENCE_CANARY_FAILURE_ACK_RUN_ID --body "<id>[,<id>]" -R biginkc/sandra
-# UI: Settings > Secrets and variables > Actions > Variables.
-# CANARY_GITHUB_READ_TOKEN: fine-grained PAT for this repository only,
-# Actions: read and Variables: read. This workflow and app only READ the variable.
+# attempts, needs acknowledgement in public.sequence_canary_controls.
+# Operators use the service-role-only setter documented in the runbook.
+# CANARY_GITHUB_READ_TOKEN is for the deployed Vercel app only: fine-grained
+# PAT for this repository, Actions: read. The runner uses github.token.
+# The repository schedule variable remains a coarse job-level skip gate.
+# The DB flag is authoritative and is checked fresh before enrollment and send.
 # A skipped or cancelled wrong-block needs acknowledgement until live samples
 # confirm the run conclusion and job started_at field values.
 
@@ -81,8 +80,7 @@ jobs:
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-      CANARY_GITHUB_READ_TOKEN: ${{ secrets.CANARY_GITHUB_READ_TOKEN }}
-      GH_TOKEN: ${{ secrets.CANARY_GITHUB_READ_TOKEN }}
+      GITHUB_TOKEN: ${{ github.token }}
       SENDILLO_FROM_NUMBER: "+18164876899"
       CANARY_SUMMARY_DIR: canary-run-summary
       CI: "1"
@@ -91,11 +89,10 @@ jobs:
       - name: Check required inputs and send window
         env:
           RUN_MODE: ${{ github.event_name == 'schedule' && 'full' || inputs.mode }}
-          SCHEDULE_ENABLED: ${{ vars.SEQUENCE_CANARY_SCHEDULE_ENABLED }}
         run: |
           required=(PROD_SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY)
           if [[ "$RUN_MODE" == "full" ]]; then
-            required+=(SEQUENCE_CANARY_USER_ID SEQUENCE_CANARY_PROPERTY_ID SEQUENCE_CANARY_CONTACT_ID CANARY_APPROVED_SENDILLO_API_KEY CANARY_ADMIN_ACCESS_TOKEN CANARY_PRODUCTION_DEPLOYMENT_URL CANARY_PRODUCTION_ALIAS_HOST CANARY_GITHUB_READ_TOKEN VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID)
+            required+=(SEQUENCE_CANARY_USER_ID SEQUENCE_CANARY_PROPERTY_ID SEQUENCE_CANARY_CONTACT_ID CANARY_APPROVED_SENDILLO_API_KEY CANARY_ADMIN_ACCESS_TOKEN CANARY_PRODUCTION_DEPLOYMENT_URL CANARY_PRODUCTION_ALIAS_HOST VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID)
           fi
           missing=()
           for name in "${required[@]}"; do
@@ -106,7 +103,6 @@ jobs:
             exit 1
           fi
           if [[ "$RUN_MODE" == "full" && "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
-            [[ "$SCHEDULE_ENABLED" == "true" ]] || { echo "Schedule disabled"; exit 1; }
             # Do not turn delayed or queued schedules into catch-up sends.
             now=$(date -u +%s)
             today=$(date -u +%Y-%m-%d)
@@ -128,20 +124,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check fresh canary authorization
+        if: github.event_name == 'schedule' || inputs.mode == 'full'
+        run: npx tsx scripts/check-sequence-canary-control.ts
+
       - name: Install Vercel CLI
         if: github.event_name == 'schedule' || inputs.mode == 'full'
         run: npm install --global vercel@62.0.0
 
       - name: Recheck current canary authorization
         if: github.event_name == 'schedule' || inputs.mode == 'full'
-        run: |
-          if [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
-            enabled=$(gh api "repos/$GITHUB_REPOSITORY/actions/variables/SEQUENCE_CANARY_SCHEDULE_ENABLED" --jq .value)
-            [[ "$enabled" == "true" ]] || { echo "Current schedule stop state is disabled"; exit 1; }
-          else
-            allowed=$(gh api "repos/$GITHUB_REPOSITORY/actions/variables/SEQUENCE_CANARY_MANUAL_RUN_ID" --jq .value)
-            [[ "$allowed" == "$GITHUB_RUN_ID" ]] || { echo "Manual run is not the authorized attempt"; exit 1; }
-          fi
+        run: npx tsx scripts/check-sequence-canary-control.ts
 
       - name: Check prior full-run failure latch before enrollment
         if: github.event_name == 'schedule' || inputs.mode == 'full'
