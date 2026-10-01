@@ -34,8 +34,9 @@ WORKER_TRANSPORT = ROOT / "experiments/inbox-reply-send-worker/vendor/test-trans
 LOCAL_DB_RETRY = ROOT / "experiments/inbox-reply-send-worker/restate-retry-local-db.py"
 PROVIDER_FIX = ROOT / "experiments/inbox-reply-send/provider-fix-proof.py"
 PROVIDER_FIX_MINIMAL = ROOT / "experiments/inbox-reply-send/provider-fix-minimal.py"
-LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r9.log")
+LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r10.log")
 EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-evidence.md")
+NO_DOCKER = os.environ.get("REPLY_PERSIST_NO_DOCKER") == "1"
 
 
 def execute(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -52,6 +53,26 @@ def record(handle, label: str, result: subprocess.CompletedProcess[str]) -> None
 
 def run_sql_cases(handle, n: int) -> None:
     base_env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PROJECTION_VERBOSE_FAILURES": "1"}
+    if NO_DOCKER:
+        reason = subprocess.CompletedProcess(
+            [f"T{n}", "NOT RUN"],
+            2,
+            f"T{n} NOT RUN: projection-proof.py requires Docker; Docker is forbidden by Round 4\n",
+            "",
+        )
+        record(handle, f"T{n} baseline NOT RUN Docker forbidden", reason)
+        if n == 15:
+            for variant in ("channel", "org", "direction"):
+                record(handle, f"T15 mutation {variant} NOT RUN Docker forbidden", reason)
+        elif n != 17:
+            record(handle, f"T{n} mutation NOT RUN Docker forbidden", reason)
+        if n == 4:
+            run_t4_application(handle)
+        elif n == 16:
+            run_t16_application(handle)
+        elif n in {18, 23}:
+            run_local_integration(handle, n)
+        return
     if n == 10:
         major_probe = execute([
             "psql", "-XqAt", "-h", base_env.get("PROJECTION_PGHOST", "/tmp/sandra-reply-persist-pg.pPmk5e/socket"),
@@ -208,14 +229,15 @@ def run_t17_application(handle) -> None:
 def run_worker_locals(handle) -> None:
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     baseline = ["node", "--test", str(WORKER_TEST)]
-    record(handle, "T-R1/T-R5c/T-R6/T-R7/T-R8 local baseline", execute(baseline, env))
+    record(handle, "T-R1/T-R5c/T-R6/T-R7/T-R8/T-R14 local baseline", execute(baseline, env))
     mutations = [
         ("T-R1 mutation", WORKER_SERVICE, b"    options: inboxReplySendServiceOptions,\n", b"    // mutation: omit service options\n", "T-R1"),
         ("T-R6 Number mutation", WORKER_CORE, b"const loggedGeneration = generation;", b"const loggedGeneration = Number(generation);", "T-R6"),
         ("T-R6 modulo-boundary mutation", WORKER_CORE, b"body.status === 'PreviouslyAccepted' && generation >= 150n", b"body.status === 'PreviouslyAccepted' && generation % 150n === 0n", "T-R6"),
+        ("T-R14 production logger mutation", WORKER_CORE, b"  const stallLogger = createStallLogger(clock, write);\n  return (pool, fetcher, ingress) => dispatchBatchWithStalls(pool, fetcher, ingress, { stallLogger });", b"  return (pool, fetcher, ingress) => dispatchBatchWithStalls(pool, fetcher, ingress, { stallLogger: createStallLogger(clock, write) });", "T-R14"),
         ("T-R7 mutation", WORKER_DOCKERFILE, b"core.mjs runner.mjs server.mjs handler.mjs service.mjs", b"core.mjs runner.mjs server.mjs service.mjs", "T-R7"),
         ("T-R8 RunOptions mutation", WORKER_HANDLER, b"await ctx.run(`persist:${attemptId}`, async () => runner.persistAttempt(orgId, operationId, attemptId, dispatch));", b"await ctx.run(`persist:${attemptId}`, { maxRetryAttempts: 3 }, async () => runner.persistAttempt(orgId, operationId, attemptId, dispatch));", "T-R8"),
-        ("T-R8 source TerminalError mutation", WORKER_CORE, b"export async function dispatchBatch(pool, fetcher, ingress) {\n  return dispatchBatchWithStalls(pool, fetcher, ingress);\n", b"export async function dispatchBatch(pool, fetcher, ingress) {\n  void new TerminalError('mutation: source scan');\n  return dispatchBatchWithStalls(pool, fetcher, ingress);\n", "T-R8"),
+        ("T-R8 source TerminalError mutation", WORKER_CORE, b"export async function dispatchBatch(pool, fetcher, ingress) {\n  return processDispatchBatch(pool, fetcher, ingress);\n", b"export async function dispatchBatch(pool, fetcher, ingress) {\n  void new TerminalError('mutation: source scan');\n  return processDispatchBatch(pool, fetcher, ingress);\n", "T-R8"),
     ]
     for label, path, needle, replacement, test_name in mutations:
         original = path.read_bytes()
@@ -412,9 +434,9 @@ def failure_excerpt(body: str) -> str:
 def derive_evidence(raw: str) -> str:
     sections = captured_sections(raw)
     rows: list[str] = [
-        "# Reply-persistence v9 mutation evidence (generated)",
+        "# Reply-persistence v10 mutation evidence (generated)",
         "",
-        "This file is generated from `replypersist-mutation-run-r9.log`. EXECUTED requires a passing baseline and a natural non-zero mutation result; baseline failures are never counted as executed. A passing mutation is SURVIVED and fails the runner. Any BASELINE FAIL also fails the runner.",
+        "This file is generated from `replypersist-mutation-run-r10.log`. EXECUTED requires a passing baseline and a natural non-zero mutation result; baseline failures are never counted as executed. A passing mutation is SURVIVED and fails the runner. Any BASELINE FAIL also fails the runner.",
         "",
         "| Test | Status | Baseline result | Mechanism | Natural mutated failure |",
         "|---|---|---|---|---|",
@@ -512,7 +534,7 @@ def main() -> int:
     self_test()
     LOG.parent.mkdir(parents=True, exist_ok=True)
     with LOG.open("w", encoding="utf-8") as handle:
-        handle.write("reply-persistence v9 round-9 mutation run; machine-produced raw child output\n")
+        handle.write("reply-persistence v10 round-10 mutation run; machine-produced raw child output\n")
         for n in range(1, 28):
             run_sql_cases(handle, n)
         run_t17_application(handle)

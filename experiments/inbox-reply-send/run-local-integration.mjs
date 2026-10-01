@@ -22,7 +22,9 @@ function base64url(value) {
 function serviceRoleJwt() {
   const header = base64url({ alg: "HS256", typ: "JWT" });
   const payload = base64url({
-    role: "postgres",
+    // The local fixture uses the real service-role path. Claiming postgres
+    // bypasses the access identity expected by hugo_has_active_org_access.
+    role: "service_role",
     sub: "00000000-0000-0000-0000-000000000001",
     iss: "supabase",
     iat: Math.floor(Date.now() / 1000),
@@ -121,6 +123,15 @@ async function seedLocalOrganizations() {
        set session_replication_role = 'replica';
        delete from memberships where user_id = '00000000-0000-0000-0000-000000000001';
        set session_replication_role = 'origin';
+       create or replace function public.r10_local_pre_request() returns void
+       language plpgsql security definer set search_path = pg_catalog, public as $r10$
+       declare claims jsonb;
+       begin
+         claims := nullif(current_setting('request.jwt.claims', true), '')::jsonb;
+         perform set_config('request.jwt.claim.role', coalesce(claims->>'role', ''), true);
+         perform set_config('request.jwt.claim.sub', coalesce(claims->>'sub', ''), true);
+       end
+       $r10$;
        `,
     ],
     { cwd: root, stdio: "inherit" },
@@ -144,6 +155,47 @@ async function runPsql(sql) {
     child.once("close", resolve);
   });
   if (status !== 0) throw new Error(`local SQL mutation failed (${status})`);
+}
+
+async function cleanupLocalOrganizations() {
+  await runPsql(`
+    set session_replication_role = 'replica';
+    do $r10$
+    declare
+      orgs uuid[] := array[
+        '00000000-0000-0000-0000-000000000001'::uuid,
+        '00000000-0000-0000-0000-000000000bbb'::uuid
+      ];
+      users uuid[] := array['00000000-0000-0000-0000-000000000001'::uuid];
+      r record;
+    begin
+      for r in
+        select distinct table_schema, table_name
+        from information_schema.columns
+        where column_name = 'org_id'
+          and udt_name = 'uuid'
+          and table_schema not in ('pg_catalog', 'information_schema')
+      loop
+        execute format('delete from %I.%I where org_id = any($1)', r.table_schema, r.table_name) using orgs;
+      end loop;
+      for r in
+        select distinct table_schema, table_name
+        from information_schema.columns
+        where column_name = 'user_id'
+          and udt_name = 'uuid'
+          and table_schema not in ('pg_catalog', 'information_schema')
+      loop
+        execute format('delete from %I.%I where user_id = any($1)', r.table_schema, r.table_name) using users;
+      end loop;
+    end
+    $r10$;
+    delete from organizations where id = any(array[
+      '00000000-0000-0000-0000-000000000001'::uuid,
+      '00000000-0000-0000-0000-000000000bbb'::uuid
+    ]);
+    delete from auth.users where id = '00000000-0000-0000-0000-000000000001';
+    set session_replication_role = 'origin';
+  `);
 }
 
 async function queryPsql(sql) {
@@ -237,6 +289,7 @@ const postgrest = spawn("postgrest", [], {
     ...process.env,
     PGRST_DB_URI: directDbUrl(),
     PGRST_DB_ANON_ROLE: "postgres",
+    PGRST_DB_PRE_REQUEST: "public.r10_local_pre_request",
     PGRST_DB_SCHEMAS: "public",
     PGRST_DB_EXTRA_SEARCH_PATH: "public,extensions",
     PGRST_JWT_SECRET: jwtSecret,
@@ -258,6 +311,10 @@ try {
   for (const test of tests) await runTest(test, env);
 } finally {
   await new Promise((resolve) => proxy.close(resolve));
-  if (postgrest.exitCode === null) postgrest.kill("SIGTERM");
+  if (postgrest.exitCode === null) {
+    postgrest.kill("SIGTERM");
+    await new Promise((resolve) => postgrest.once("exit", resolve));
+  }
   if (mutation === "T23") await runPsql(projectionFunction(false));
+  await cleanupLocalOrganizations();
 }
