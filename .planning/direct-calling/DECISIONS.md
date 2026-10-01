@@ -12,7 +12,9 @@ Decisions made by Jarrad on 2026-10-01. Source plan: `PLAN-rev5.4.md`. Phone num
   - 30 s F7 leg-end deadline
 - **D3.** Caller ID is any existing Telnyx number on the account, chosen at run time by the orchestrator; its routing is unchanged. Test phones are Jarrad's mobile (primary) and his Dialpad line (secondary). The numbers are supplied at run time via `DIRECT_CALL_TEST_PHONES` and are not written anywhere in the repo.
 - **D4.** No mid-call recovery in the first release. F7 runs. R1 to R3 are skipped and recorded as intentionally skipped.
-- **API key.** Sandra's existing Telnyx API key, supplied through the `TELNYX_API_KEY` environment variable at run time and never stored. A leak would force a rotation that interrupts the app's Telnyx features; if the key is ever exposed, stop and tell Jarrad immediately.
+- **API key.** Jarrad chose (in chat, 2026-10-01) the Telnyx key stored in the team password manager under the "Jitter Dialer" item, read through the service account at run time into the `TELNYX_API_KEY` environment variable of the run process only, never stored. This overrides the plan's "Jitter's own Telnyx keys are not used" line. A leak would force rotating that key, which Jitter also uses; if the key is ever exposed, stop and tell Jarrad immediately.
+- **Test far end.** Jarrad confirmed the existing AI responder (the fictional "Jordan" training homeowner run by Switchboard) may be used for test calls instead of a human phone. Its number is supplied at run time, not recorded here. Calls to it create Switchboard administrative records but no lead or customer data.
+- **Morning goal.** Jarrad (2026-10-01): have the direct integration working in production for him by morning so he can check the audio. Pilot-only; everyone else unchanged.
 
 ## Still open
 
