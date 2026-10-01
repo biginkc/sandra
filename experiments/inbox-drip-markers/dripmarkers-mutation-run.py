@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parents[2]
 LOCAL_ENV = ROOT / "experiments/inbox-reply-send/local-env.py"
 MIGRATION = ROOT / "supabase/migrations/20260930040260_inbox_drip_markers.sql"
 GOLDEN = ROOT / "experiments/inbox-drip-markers/golden-fixture.json"
-LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-mutation-run-r1.log")
-EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-evidence-r1.md")
+LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-mutation-run-r2.log")
+EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-evidence-r2.md")
 STATE = Path("/tmp/sandra-reply-persist-local-env.json")
 PSQL = "/opt/homebrew/bin/psql"
 
@@ -36,6 +36,7 @@ FROZEN = {
     "20260930040000_inbox_control_foundation.sql": "a31799ba96e6f7264f062019cc8113a6401719a686cc31e569b10d21064bfbf6",
     "20260930040100_inbox_read_companion.sql": "7a2c5f49fc8fcf58c7f37585c3c347869816912e47e504ec47f9cdac198d3dd7",
     "20260930040200_inbox_backend_operation_reply.sql": "2a4b49d43e67963805d547221d04c84c3f7823f430fd9c0cc9b3f22b36844aad",
+    "20260930040250_inbox_reply_message_projection.sql": "2a097587ad59aa913a386ce59b513fcbac8452b0b770477bde16533cb2672112",
 }
 ORIGIN_MIGRATIONS = [
     "supabase/migrations/20260930035000_drip_reply_failed_send_keeps_flag.sql",
@@ -46,12 +47,21 @@ ORIGIN_MIGRATIONS = [
 
 golden: dict[str, Any] = json.loads(GOLDEN.read_text(encoding="utf-8"))
 evidence: list[dict[str, str]] = []
+mutation_results: list[dict[str, str]] = []
 log_lines: list[str] = []
 
 
 def emit(line: str) -> None:
     print(line, flush=True)
     log_lines.append(line)
+
+
+def verify_frozen_hashes() -> None:
+    for name, expected in FROZEN.items():
+        actual = hashlib.sha256((ROOT / "supabase/migrations" / name).read_bytes()).hexdigest()
+        if actual != expected:
+            raise RuntimeError(f"frozen hash mismatch {name}: {actual} != {expected}")
+    emit("FROZEN_HASHES_OK 040000 040100 040200 040250")
 
 
 def run(args: list[str], *, input_text: str | None = None, check: bool = True, timeout: int = 240) -> subprocess.CompletedProcess[str]:
@@ -84,6 +94,23 @@ def psql(statement: str, *, role: str | None = None, check: bool = True) -> subp
         PSQL, "-XqAt", "-v", "ON_ERROR_STOP=1", "-h", str(s["socket"]), "-p", str(s["port"]),
         "-U", "postgres", "-d", "postgres",
     ], input_text=prefix + statement, check=check)
+
+
+def psql_process(statement: str, *, role: str | None = None) -> subprocess.Popen[str]:
+    s = state()
+    prefix = ""
+    if role == "authenticated":
+        claims = json.dumps({"sub": USER, "role": "authenticated", "session_id": SESSION, "exp": 4102444800}, separators=(",", ":"))
+        prefix = f"SET ROLE authenticated; SET request.jwt.claim.sub='{USER}'; SET request.jwt.claim.role='authenticated'; SET request.jwt.claims='{claims}';\n"
+    process = subprocess.Popen([
+        PSQL, "-XqAt", "-v", "ON_ERROR_STOP=1", "-h", str(s["socket"]), "-p", str(s["port"]),
+        "-U", "postgres", "-d", "postgres",
+    ], cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+       env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+    assert process.stdin is not None
+    process.stdin.write(prefix + statement)
+    process.stdin.close()
+    return process
 
 
 def query(statement: str, *, role: str | None = None) -> str:
@@ -332,23 +359,23 @@ def test_labels_and_long_skip() -> None:
     inbound = "70000000-0000-4000-8000-000000000003"
     label = json_query(f"SELECT public.inbox_drip_label_inputs_v1('{ORG}'::uuid,'80000000-0000-4000-8000-000000000002'::uuid,ARRAY['{inbound}'::uuid]);", role="authenticated")
     page = next(row for row in label["messages"] if row["id"] == inbound)
-    if page.get("drip_reply_label") != golden["labels"]["80000000-0000-4000-8000-000000000002"]["drip_reply_label"]:
-        raise AssertionError(f"nearest lookbehind label mismatch: {page}")
+    if page.get("drip_name") is not None or page.get("drip_step") is not None or page.get("drip_steps_total") is not None or page.get("previous_drip_step") != 1:
+        raise AssertionError(f"nearest lookbehind facts mismatch: {page}")
     if not any(row["id"] == "70000000-0000-4000-8000-000000000002" and row["is_page"] is False for row in label["messages"]):
         raise AssertionError("label response omitted the nearest lookbehind row")
     out = json_query(f"SELECT public.inbox_drip_label_inputs_v1('{ORG}'::uuid,'80000000-0000-4000-8000-000000000002'::uuid,ARRAY['70000000-0000-4000-8000-000000000002'::uuid]);", role="authenticated")
     out_page = next(row for row in out["messages"] if row["id"] == "70000000-0000-4000-8000-000000000002")
-    if out_page.get("drip_label") != golden["labels"]["70000000-0000-4000-8000-000000000002"]["drip_label"]:
-        raise AssertionError(f"drip label mismatch: {out_page}")
+    if (out_page.get("drip_name"), out_page.get("drip_step"), out_page.get("drip_steps_total"), out_page.get("previous_drip_step")) != ("Fixture Drip", 1, 3, None):
+        raise AssertionError(f"drip label facts mismatch: {out_page}")
     if any(row["is_page"] is False for row in out["messages"]):
         raise AssertionError("oldest page did not avoid an unnecessary lookbehind")
     combined = json_query(f"SELECT public.inbox_drip_label_inputs_v1('{ORG}'::uuid,'80000000-0000-4000-8000-000000000002'::uuid,ARRAY['70000000-0000-4000-8000-000000000002'::uuid,'{inbound}'::uuid]);", role="authenticated")
     combined_page = {row["id"]: row for row in combined["messages"] if row["is_page"]}
-    if combined_page[inbound].get("drip_reply_label") != page.get("drip_reply_label") or combined_page["70000000-0000-4000-8000-000000000002"].get("drip_label") != out_page.get("drip_label"):
+    if combined_page[inbound].get("previous_drip_step") != page.get("previous_drip_step") or combined_page["70000000-0000-4000-8000-000000000002"].get("drip_name") != out_page.get("drip_name"):
         raise AssertionError("concatenated page labels changed attribution")
     tied = json_query(f"SELECT public.inbox_drip_label_inputs_v1('{ORG}'::uuid,'80000000-0000-4000-8000-000000000002'::uuid,ARRAY['{inbound}'::uuid,'70000000-0000-4000-8000-000000000012'::uuid]);", role="authenticated")
     tied_page = [row for row in tied["messages"] if row["is_page"]]
-    if [row["id"] for row in tied_page] != [inbound, "70000000-0000-4000-8000-000000000012"] or tied_page[1].get("drip_reply_label") is not None:
+    if [row["id"] for row in tied_page] != [inbound, "70000000-0000-4000-8000-000000000012"] or tied_page[1].get("previous_drip_step") is not None:
         raise AssertionError(f"tied/consecutive inbound attribution mismatch: {tied_page}")
 
 
@@ -411,7 +438,7 @@ VALUES ('{run_id}','62000000-0000-4000-8000-000000000002','61000000-0000-4000-80
 """)
     after = json_query(f"SELECT public.inbox_drip_label_inputs_v1('{ORG}'::uuid,'{conversation}'::uuid,ARRAY['{inbound}'::uuid]);", role="authenticated")
     row = next(row for row in after["messages"] if row["id"] == inbound)
-    if row.get("drip_reply_label") != "Reply to drip text 2":
+    if row.get("previous_drip_step") != 2:
         raise AssertionError(f"label inputs did not converge after write: {row}")
     psql(f"DELETE FROM public.sequence_step_runs WHERE id='{run_id}'; DELETE FROM public.messages WHERE id IN ('{outbound}','{inbound}');")
 
@@ -433,11 +460,52 @@ SELECT has_function_privilege('authenticated','public.inbox_drip_markers_v1(uuid
     if grants != "t":
         raise AssertionError(f"grant boundary mismatch: {grants}")
     expect_error(f"SELECT public.inbox_drip_markers_v1('{ORG}'::uuid,ARRAY(SELECT gen_random_uuid() FROM generate_series(1,501)));", "INBOX_INVALID_MARKER_IDS")
+    expect_error(f"SELECT public.inbox_drip_label_inputs_v1('{ORG}'::uuid,'80000000-0000-4000-8000-000000000002'::uuid,ARRAY(SELECT gen_random_uuid() FROM generate_series(1,51)));", "INBOX_INVALID_LABEL_INPUTS")
     psql("UPDATE inbox_control.rollout SET serving_enabled=false WHERE singleton;")
     expect_error(f"SELECT public.inbox_drip_label_inputs_v1('{ORG}'::uuid,'80000000-0000-4000-8000-000000000002'::uuid,ARRAY['70000000-0000-4000-8000-000000000003'::uuid]);", "INBOX_NOT_READY")
     psql("UPDATE inbox_control.rollout SET serving_enabled=true WHERE singleton;")
     psql("UPDATE auth.sessions SET not_after=clock_timestamp()-interval '1 second' WHERE id='" + SESSION + "';")
     expect_error(f"SELECT public.inbox_drip_markers_v1('{ORG}'::uuid,ARRAY['80000000-0000-4000-8000-000000000001'::uuid]);", "INBOX_SESSION_REVOKED")
+    expect_error(f"SELECT public.inbox_drip_label_inputs_v1('{ORG}'::uuid,'80000000-0000-4000-8000-000000000002'::uuid,ARRAY['70000000-0000-4000-8000-000000000003'::uuid]);", "INBOX_SESSION_REVOKED")
+
+
+def test_mid_request_access_epoch_fence() -> None:
+    # Add only a disposable-fixture delay to the live drip query so the access
+    # epoch writer overlaps the real marker RPC; this does not alter the marker
+    # result or its authorization state.
+    psql("UPDATE auth.sessions SET not_after='2099-01-01' WHERE id='" + SESSION + "';")
+    source = MIGRATION.read_text(encoding="utf-8")
+    start = source.index("CREATE FUNCTION inbox_bridge.drip_flags")
+    end = source.index("$$;", start) + 3
+    slow_flags = source[start:end].replace("CREATE FUNCTION inbox_bridge.drip_flags", "CREATE OR REPLACE FUNCTION inbox_bridge.drip_flags", 1)
+    if slow_flags.count("from public.sequence_enrollments enrollment") != 1:
+        raise AssertionError("test delay anchor changed")
+    slow_flags = slow_flags.replace(
+        "from public.sequence_enrollments enrollment",
+        "from public.sequence_enrollments enrollment cross join lateral (select pg_sleep(0.001)) delay",
+        1,
+    )
+    psql(slow_flags)
+    psql(f"""
+INSERT INTO inbox_maintained.rows(org_id,target_kind,target_id,revision,source_generation,summary)
+SELECT '{ORG}'::uuid,'known_conversation',('81000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,1,1,
+ jsonb_build_object('target_kind','known_conversation','target_id',('81000000-0000-4000-8000-'||lpad(n::text,12,'0')),'exists',true,'property_id','40000000-0000-4000-8000-000000000001','last_message_at','2026-09-01 00:00:00+00','has_recent',false)
+FROM generate_series(1,500) n
+ON CONFLICT(org_id,target_kind,target_id) DO NOTHING;
+""")
+    marker_ids = ",".join(f"'81000000-0000-4000-8000-{n:012d}'::uuid" for n in range(1, 501))
+    marker = psql_process(f"SELECT public.inbox_drip_markers_v1('{ORG}'::uuid,ARRAY[{marker_ids}]);", role="authenticated")
+    time.sleep(0.02)
+    writer = psql_process("SELECT pg_sleep(0.05); UPDATE inbox_bridge.access_epochs SET revision=revision+1 WHERE user_id='" + USER + "'::uuid;")
+    stdout, stderr = marker.communicate(timeout=30)
+    try:
+        writer.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        writer.terminate()
+        writer.wait(timeout=10)
+    combined = stdout + stderr
+    if marker.returncode == 0 or "INBOX_ACCESS_CHANGED" not in combined:
+        raise AssertionError(f"mid-request revocation was not fenced: rc={marker.returncode} output={combined[-1000:]}")
 
 
 def test_consistency_and_rate_limit() -> None:
@@ -500,11 +568,12 @@ TESTS: list[tuple[str, Callable[[], None]]] = [
     ("golden fixture + legacy 035000 oracle parity", test_golden_marker_and_oracle),
     ("filters, counts, page and review_selection", test_filter_counts_page_and_review),
     ("fixture matrix: sibling property, review-property divergence and pause reasons", test_fixture_case_matrix),
-    ("labels, nearest lookbehind, skipped AI and concatenation", test_labels_and_long_skip),
+    ("label facts, nearest lookbehind, skipped AI and concatenation", test_labels_and_long_skip),
     ("clearing events, failed sends and campaign exemption", test_clearing_events_and_campaign_exemption),
     ("label convergence after a write boundary", test_label_convergence_after_write),
-    ("authorization denial, revocation and grants", test_authorization_and_grants),
-    ("convergence and workset rate-limit acceptance", test_consistency_and_rate_limit),
+    ("authorization denial, foreign IDs, revoked-session labels, cap and grants", test_authorization_and_grants),
+    ("mid-request revocation is fenced with INBOX_ACCESS_CHANGED", test_mid_request_access_epoch_fence),
+    ("freshness with projection worker stopped and workset reconciliation", test_consistency_and_rate_limit),
 ]
 
 
@@ -521,7 +590,7 @@ def run_suite(label: str) -> list[str]:
             failures.append(name)
             emit(f"TEST_FAIL|{label}|{name}|{error}")
         evidence.append({"run": label, "test": name, "Executed": executed, "result": result})
-    if len(TESTS) != 8:
+    if len(TESTS) != 9:
         raise RuntimeError("unexpected NOT RUN: test inventory changed")
     return failures
 
@@ -531,6 +600,9 @@ MUTATIONS = [
     ("page-in-drip-branch", " WHEN 'in_drip' THEN predicate:=known||' AND EXISTS(SELECT 1 FROM inbox_maintained.rows maintained LEFT JOIN LATERAL inbox_bridge.drip_flags($1,(maintained.summary->>''property_id'')::uuid) flags ON true WHERE maintained.org_id=$1 AND maintained.target_kind=r.target_kind AND maintained.target_id=r.target_id AND coalesce(flags.in_drip,false))';\n", " WHEN 'in_drip' THEN predicate:='FALSE';\n"),
     ("review-selection-else-true", "   WHEN 'in_drip' THEN coalesce(c.in_drip,false)\n", ""),
     ("marker-tenant-qualification", "ON maintained.org_id=$1\n", "ON TRUE\n"),
+    ("marker-access-epoch-fence", ") INTO result;\n after_access:=inbox_bridge.authorize_serving($1);\n IF (after_access->>'user_id',after_access->>'session_id',after_access->>'org_id',after_access->>'access_epoch') IS DISTINCT FROM\n", ") INTO result;\n after_access:=a;\n IF (after_access->>'user_id',after_access->>'session_id',after_access->>'org_id',after_access->>'access_epoch') IS DISTINCT FROM\n"),
+    ("label-raw-facts", "     'previous_drip_step',CASE WHEN is_page THEN previous_drip_step END\n", "     'previous_drip_step',NULL\n"),
+    ("label-input-cap", " IF $1 IS NULL OR $2 IS NULL OR $3 IS NULL OR cardinality($3)>50 OR\n", " IF $1 IS NULL OR $2 IS NULL OR $3 IS NULL OR cardinality($3)>500 OR\n"),
 ]
 
 
@@ -543,11 +615,15 @@ def main() -> int:
     original = MIGRATION.read_bytes()
     try:
         emit("RUNNER_START mutation-first=true origin_fixture=035000-038000")
+        verify_frozen_hashes()
+        if len(MUTATIONS) != 7:
+            raise RuntimeError("unexpected NOT RUN: mutation inventory changed")
         baseline_failures = run_one("baseline")
         if baseline_failures:
             emit(f"BASELINE_FAIL {baseline_failures}")
             return 2
         for name, needle, replacement in MUTATIONS:
+            verify_frozen_hashes()
             source = original.decode("utf-8")
             if source.count(needle) != 1:
                 emit(f"ENV_FAIL mutation needle count {name}={source.count(needle)}")
@@ -559,8 +635,10 @@ def main() -> int:
                     emit(f"SURVIVED|{name}")
                     return 4
                 emit(f"MUTANT_KILLED|{name}|{failures}")
+                mutation_results.append({"mutation": name, "Executed": "yes", "failure": "; ".join(failures)})
             finally:
                 MIGRATION.write_bytes(original)
+                verify_frozen_hashes()
         emit("RUNNER_RESULT PASS")
         return 0
     except Exception as error:  # noqa: BLE001 - top-level evidence must report environment failures.
@@ -573,6 +651,8 @@ def main() -> int:
         LOG.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
         lines = ["# Drip markers mutation evidence", "", "| Run | Test | Executed | Result |", "|---|---|---:|---|"]
         lines.extend(f"| {row['run']} | {row['test']} | {row['Executed']} | {row['result']} |" for row in evidence)
+        lines.extend(["", "## Natural mutation kills", "", "| Mutation | Executed | Natural mutated failure |", "|---|---:|---|"])
+        lines.extend(f"| {row['mutation']} | {row['Executed']} | {row['failure']} |" for row in mutation_results)
         EVIDENCE.write_text("\n".join(lines) + "\n", encoding="utf-8")
         emit(f"EVIDENCE {EVIDENCE}")
         emit(f"RAW_LOG {LOG}")
