@@ -93,7 +93,15 @@ for (const width of [1440, 375]) {
     await toggle.press("Space");
     await expect(toggle).toBeChecked();
     await expect(page.getByTestId("dialer-coach-script")).toHaveCount(0);
-    await expect.poll(async () => (await page.getByTestId("dialer-input").boundingBox())!.y - off!.y).toBeLessThan(25);
+    const picker = page.getByTestId("dialer-coach-script-picker");
+    await expect(picker).toBeVisible();
+    await expect(picker).toHaveValue("closr-outbound");
+    await picker.selectOption("bmh-follow-up");
+    await expect(picker).toHaveValue("bmh-follow-up");
+    const pickerBox = (await picker.boundingBox())!;
+    const inputBox = (await page.getByTestId("dialer-input").boundingBox())!;
+    expect(inputBox.y).toBeGreaterThan(off!.y);
+    expect(inputBox.y).toBeGreaterThanOrEqual(pickerBox.y + pickerBox.height);
     const mascot = (await page.getByTestId("dialer-coach-mascot").boundingBox())!;
     const headline = (await page.getByText("Want some help? Enable live coach.", { exact: true }).boundingBox())!;
     expect(mascot.y).toBeLessThanOrEqual(headline.y);
@@ -112,6 +120,6 @@ for (const width of [1440, 375]) {
     expect(Math.min(...contrast)).toBeGreaterThanOrEqual(4.5);
     await toggle.click();
     await page.screenshot({ path: `tmp/dialer-switch-preview/off-${width}.png` });
-    expect(await page.evaluate(() => JSON.parse(localStorage.getItem("sandra.softphone.coach.v1")!))).toEqual({ enabled: false });
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem("sandra.softphone.coach.v1")!))).toEqual({ enabled: false, scriptId: "bmh-follow-up" });
   });
 }
