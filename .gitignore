@@ -62,3 +62,6 @@ next-env.d.ts
 /playwright/.cache/
 .env*.local
 supabase/.temp/
+
+# direct-calling feasibility harness local run state (inventory, event logs) - never committed
+/scripts/direct-call-feasibility/.run/
