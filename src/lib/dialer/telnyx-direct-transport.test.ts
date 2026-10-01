@@ -14,6 +14,7 @@ vi.mock("@/lib/direct-calling/client-actions", () => ({
 
 import {
   TelnyxDirectCallTransport,
+  createTelnyxRtcClient,
   mapDirectStatus,
   type DirectTransportDependencies,
 } from "./telnyx-direct-transport";
@@ -117,7 +118,8 @@ function harness(opts: { statuses?: DirectCallStatus[]; micError?: boolean } = {
   transport.onStateChange((s) => states.push(s));
   const notify = (call: unknown) =>
     handlers.get("telnyx.notification")?.({ type: "callUpdate", call });
-  return { transport, deps, client, states, calls, notify };
+  const emit = (name: string, payload?: unknown) => handlers.get(name)?.(payload);
+  return { transport, deps, client, states, calls, notify, emit };
 }
 
 const target = { phoneE164: "+18165550123", propertyId: "prop-1", callToken: REQUEST_ID };
@@ -340,9 +342,9 @@ describe("TelnyxDirectCallTransport", () => {
     expect(await h.transport.reconnectAudio()).toBe(false);
   });
 
-  it("surfaces an operator_busy refusal as a state and releases the client", async () => {
+  it("maps the backend's call_in_progress refusal to the operator_busy state and releases the client", async () => {
     const h = harness();
-    h.deps.startCall.mockResolvedValue({ ok: false, error: "busy", errorCode: "operator_busy" } as never);
+    h.deps.startCall.mockResolvedValue({ ok: false, error: "busy", errorCode: "call_in_progress" } as never);
     await h.transport.start(target);
     expect(h.states).toEqual(["operator_busy"]);
     expect(h.client.disconnect).toHaveBeenCalled();
@@ -352,5 +354,114 @@ describe("TelnyxDirectCallTransport", () => {
     const h = harness();
     h.deps.startCall.mockResolvedValue({ ok: false, error: "Calling is unavailable during quiet hours." } as never);
     await expect(h.transport.start(target)).rejects.toThrow(/quiet hours/);
+  });
+
+  it("does not map codes the backend never emits to refusal states", async () => {
+    for (const errorCode of ["operator_busy", "not_callable"]) {
+      const h = harness();
+      h.deps.startCall.mockResolvedValue({ ok: false, error: "x", errorCode } as never);
+      await expect(h.transport.start(target)).rejects.toThrow("x");
+      expect(h.states).toEqual([]);
+    }
+  });
+});
+
+describe("review blockers", () => {
+  it("preserves a manual request that the UI prepared against a lead (propertyId present)", async () => {
+    const h = harness();
+    await h.transport.start({ ...target, directRequest: { kind: "manual", phone: "8165550123" } });
+    expect(h.deps.startCall).toHaveBeenCalledWith({ kind: "manual", phone: "8165550123", clientRequestId: REQUEST_ID });
+  });
+
+  it("preserves a lead request", async () => {
+    const h = harness();
+    await h.transport.start({ phoneE164: "+18165550123", callToken: REQUEST_ID, directRequest: { kind: "lead", propertyId: "prop-9" } });
+    expect(h.deps.startCall).toHaveBeenCalledWith({ kind: "lead", propertyId: "prop-9", clientRequestId: REQUEST_ID });
+  });
+
+  it("exposes the sealed call capability from the start result on the handle", async () => {
+    const h = harness();
+    const original = h.deps.startCall.getMockImplementation()!;
+    h.deps.startCall.mockImplementation(async (i: unknown) => {
+      const r = await original(i);
+      return { ...r, data: { ...r.data, callCapability: "sealed-cap" } };
+    });
+    expect(await h.transport.start(target)).toEqual({ id: CALL_ID, callCapability: "sealed-cap" });
+    expect(h.transport.callHandle()).toEqual({ id: CALL_ID, callCapability: "sealed-cap" });
+  });
+
+  it("creates the SDK client with no recovery: hangs up on unload and does not keep the socket alive", async () => {
+    const ctor = vi.fn();
+    vi.doMock("@telnyx/webrtc", () => ({
+      TelnyxRTC: class {
+        static webRTCInfo = () => ({ supportWebRTCAudio: true });
+        constructor(options: unknown) {
+          ctor(options);
+        }
+      },
+    }));
+    await createTelnyxRtcClient("jwt", null);
+    expect(ctor).toHaveBeenCalledWith(expect.objectContaining({ hangupOnBeforeUnload: true, keepConnectionAliveOnSocketClose: false }));
+    vi.doUnmock("@telnyx/webrtc");
+  });
+
+  it("a hangup during setup never reaches startDirectCall and never answers", async () => {
+    const h = harness();
+    let releaseMic!: () => void;
+    h.deps.prepareMicrophone.mockImplementation(() => new Promise<void>((r) => (releaseMic = r)));
+    const starting = h.transport.start(target);
+    const startRejected = starting.catch((e: Error) => e.message);
+    const hanging = h.transport.hangup();
+    releaseMic();
+    expect(await startRejected).toMatch(/cancelled/i);
+    await hanging;
+    expect(h.deps.startCall).not.toHaveBeenCalled();
+    expect(h.deps.control).not.toHaveBeenCalled();
+  });
+
+  it("a hangup while startDirectCall is in flight ends the new call and never answers its invite", async () => {
+    const h = harness({ statuses: ["connected", "ended"] });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const original = h.deps.startCall.getMockImplementation()!;
+    h.deps.startCall.mockImplementation(async (i: unknown) => {
+      await gate;
+      return original(i);
+    });
+    const starting = h.transport.start(target);
+    await flush();
+    const early = fakeCall();
+    h.notify(early);
+    const hanging = h.transport.hangup();
+    release();
+    await starting;
+    await hanging;
+    expect(h.deps.control).toHaveBeenCalledWith(CALL_ID, { action: "hangup" });
+    expect(early.answer).not.toHaveBeenCalled();
+    const late = fakeCall({ id: "late" });
+    h.notify(late);
+    await flush();
+    expect(late.answer).not.toHaveBeenCalled();
+  });
+
+  it("tears the call down when the browser connection errors or closes after registration", async () => {
+    for (const event of ["telnyx.error", "telnyx.socket.close", "telnyx.socket.error"]) {
+      const h = harness({ statuses: ["connected"] });
+      await h.transport.start(target);
+      h.deps.control.mockClear();
+      h.emit(event, { error: new Error("lost") });
+      await flush();
+      expect(h.deps.control).toHaveBeenCalledWith(CALL_ID, { action: "hangup" });
+    }
+  });
+
+  it("does not treat a pre-registration error as a call teardown", async () => {
+    const h = harness();
+    h.client.connect.mockImplementation(async () => {
+      queueMicrotask(() => h.emit("telnyx.error", { error: new Error("bad login") }));
+    });
+    await expect(h.transport.start(target)).rejects.toThrow("bad login");
+    expect(h.deps.control).not.toHaveBeenCalled();
+    expect(h.deps.startCall).not.toHaveBeenCalled();
   });
 });

@@ -5,6 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const m = vi.hoisted(() => ({
   completeSoftphoneCall: vi.fn(),
   prepareLeadCall: vi.fn(),
+  prepareManualCall: vi.fn(),
+  resumeFailed: vi.fn(),
+  transports: [] as Array<{ hangup: ReturnType<typeof vi.fn> }>,
   loadCallerIds: vi.fn(),
   mintStartIntent: vi.fn(),
   jitterTransport: vi.fn(),
@@ -16,8 +19,8 @@ vi.mock("@/lib/dialer/actions", () => ({
   completeSoftphoneCall: m.completeSoftphoneCall,
   loadDialerRecents: async () => ({ ok: true, data: [] }),
   prepareLeadCall: m.prepareLeadCall,
-  prepareManualCall: vi.fn(),
-  resumeFailedSoftphoneCall: vi.fn(),
+  prepareManualCall: m.prepareManualCall,
+  resumeFailedSoftphoneCall: m.resumeFailed,
   searchDialerLeads: async () => ({ ok: true, data: [] }),
 }));
 vi.mock("@/lib/dialer/jitter-actions", () => ({
@@ -67,31 +70,42 @@ const lead = {
   callable: true,
 };
 
-function fakeTransport(handle: string) {
+function fakeTransport(handle: string, extra: Record<string, unknown> = {}, refusal?: string) {
   let listener: ((state: string) => void) | null = null;
-  return {
+  let ended = false;
+  const transport = {
+    terminalIsAuthoritative: () => ended,
     onStateChange: vi.fn((cb) => {
       listener = cb;
     }),
     start: m.start.mockImplementation(async () => {
+      if (refusal) {
+        listener?.(refusal);
+        return { id: "" };
+      }
       listener?.("connecting");
       listener?.("live");
-      return { id: handle };
+      return { id: handle, ...extra };
     }),
-    callHandle: () => ({ id: handle }),
+    callHandle: () => ({ id: handle, ...extra }),
     mute: vi.fn(async () => true),
     hold: vi.fn(async () => true),
     reconnectAudio: vi.fn(async () => false),
     sendDigit: vi.fn(async () => true),
     hangup: vi.fn(async () => {
+      ended = true;
       listener?.("ended");
       return { durationSeconds: 1, outcome: "connected_human" as const };
     }),
   };
+  m.transports.push(transport);
+  return transport;
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  m.transports.length = 0;
+  vi.stubGlobal("fetch", vi.fn(async () => new Response("{}")));
   window.localStorage.clear();
   window.sessionStorage.clear();
   m.prepareLeadCall.mockResolvedValue({
@@ -116,14 +130,31 @@ beforeEach(() => {
     data: { callToken: "server-call-token", intentCapability: "cap" },
   });
   m.jitterTransport.mockImplementation(() => fakeTransport("jitter-handle"));
-  m.directTransport.mockImplementation(() => fakeTransport("direct-call-id"));
+  m.directTransport.mockImplementation(() => fakeTransport("direct-call-id", { callCapability: "sealed-direct-cap" }));
+  m.resumeFailed.mockResolvedValue(undefined);
+  m.prepareManualCall.mockResolvedValue({
+    ok: true,
+    data: {
+      propertyId: "property-1",
+      contactId: "contact-1",
+      phoneE164: "+18165550123",
+      maskedPhone: "(816) 555-0123",
+      name: "Softphone Lead",
+      address: "1 Main St",
+      state: "MO",
+      startedAt: "2026-08-21T15:00:00.000Z",
+    },
+  });
   m.completeSoftphoneCall.mockResolvedValue({
     ok: true,
     data: { activityId: "a", callbackTaskId: null },
   });
 });
 
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+});
 
 async function placeAndWrap(config?: { transport: "telnyx_direct" | "default" }) {
   const user = userEvent.setup();
@@ -144,7 +175,7 @@ async function placeAndWrap(config?: { transport: "telnyx_direct" | "default" })
 }
 
 describe("SoftphoneProvider pilot (telnyx_direct) mode", () => {
-  it("never touches a Jitter action, uses the direct transport, and wraps up capability-less", async () => {
+  it("never touches a Jitter action, uses the direct transport, and wraps up with the server-sealed identity", async () => {
     await placeAndWrap({ transport: "telnyx_direct" });
     expect(m.loadCallerIds).not.toHaveBeenCalled();
     expect(m.mintStartIntent).not.toHaveBeenCalled();
@@ -156,7 +187,7 @@ describe("SoftphoneProvider pilot (telnyx_direct) mode", () => {
         intentCapability: expect.anything(),
       }),
     );
-    expect(m.completeSoftphoneCall.mock.calls[0][0].callCapability).toBeUndefined();
+    expect(m.completeSoftphoneCall.mock.calls[0][0].callCapability).toBe("sealed-direct-cap");
   });
 
   it("replaces the caller-ID picker with the Sandra direct line label", async () => {
@@ -213,4 +244,120 @@ describe("SoftphoneProvider default mode", () => {
       );
     },
   );
+});
+
+describe("SoftphoneProvider pilot review blockers", () => {
+  const direct = { transport: "telnyx_direct" as const };
+
+  it("sends the lead request kind the UI prepared", async () => {
+    await placeAndWrap(direct);
+    expect(m.start).toHaveBeenCalledWith(expect.objectContaining({ directRequest: { kind: "lead", propertyId: "property-1" } }));
+  });
+
+  it("keeps a manual dial manual even when it was linked to a property", async () => {
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider callingConfig={direct}>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("header-dialer-button"));
+    await user.type(await screen.findByTestId("dialer-input"), "8165550123");
+    await user.click(screen.getByTestId("dialer-call-manual"));
+    await waitFor(() => expect(m.start).toHaveBeenCalled());
+    expect(m.prepareManualCall).toHaveBeenCalledWith("8165550123");
+    expect(m.start).toHaveBeenCalledWith(
+      expect.objectContaining({ propertyId: "property-1", directRequest: { kind: "manual", phone: "8165550123" } }),
+    );
+  });
+
+  it("does not send a direct request to the Jitter transport", async () => {
+    await placeAndWrap({ transport: "default" });
+    expect(m.start.mock.calls[0][0]).not.toHaveProperty("directRequest");
+  });
+
+  it("a refused second attempt in direct mode does not resume the first call's enrollments", async () => {
+    m.directTransport.mockImplementation(() => fakeTransport("x", {}, "operator_busy"));
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider callingConfig={direct}>
+        <SoftphoneHeaderButton />
+        <SoftphoneLeadButton lead={lead} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(m.start).toHaveBeenCalled());
+    await screen.findByText("You already have a call in progress.");
+    expect(m.resumeFailed).not.toHaveBeenCalled();
+  });
+
+  it("still resumes enrollments for a refused attempt on the Jitter path (unchanged)", async () => {
+    m.jitterTransport.mockImplementation(() => fakeTransport("x", {}, "operator_busy"));
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneHeaderButton />
+        <SoftphoneLeadButton lead={lead} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(m.resumeFailed).toHaveBeenCalledWith("property-1"));
+  });
+
+  async function liveDirect(config: { transport: "telnyx_direct" | "default" }) {
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider callingConfig={config}>
+        <SoftphoneHeaderButton />
+        <SoftphoneLeadButton lead={lead} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live"));
+  }
+
+  it("on pagehide a live direct call is hung up server-side before enrollments are resumed", async () => {
+    await liveDirect(direct);
+    const transport = m.transports[0];
+    window.dispatchEvent(new Event("pagehide"));
+    expect(transport.hangup).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith("/api/softphone/resume", expect.anything());
+  });
+
+  it("pagehide on the default path does not hang the call up", async () => {
+    await liveDirect({ transport: "default" });
+    window.dispatchEvent(new Event("pagehide"));
+    expect(m.transports[0].hangup).not.toHaveBeenCalled();
+  });
+
+  it("does not retain the active call for reload recovery in direct mode (it is retained on the default path)", async () => {
+    await liveDirect(direct);
+    expect(window.sessionStorage.getItem("sandra.softphone.active-call.v1")).toBeNull();
+  });
+
+  it("retains the active call on the default path", async () => {
+    await liveDirect({ transport: "default" });
+    expect(window.sessionStorage.getItem("sandra.softphone.active-call.v1")).not.toBeNull();
+  });
+
+  it("hides the live-coach toggle in direct mode even when the coach UI flag is on", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    const user = userEvent.setup();
+    const { unmount } = render(
+      <SoftphoneProvider callingConfig={direct}>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("header-dialer-button"));
+    await screen.findByTestId("direct-line-label");
+    expect(screen.queryByTestId("dialer-coach-toggle")).not.toBeInTheDocument();
+    unmount();
+    render(
+      <SoftphoneProvider callingConfig={{ transport: "default" }}>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("header-dialer-button"));
+    expect(await screen.findByTestId("dialer-coach-toggle")).toBeInTheDocument();
+  });
 });

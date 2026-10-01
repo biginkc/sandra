@@ -50,6 +50,7 @@ import { playDtmfTone } from "@/lib/dialer/dtmf-tone";
 import { TelnyxDirectCallTransport } from "@/lib/dialer/telnyx-direct-transport";
 import {
   type CallHandle,
+  type CallTarget,
   type CallTransport,
   type DtmfDigit,
   type ProviderStatusPollError,
@@ -322,7 +323,8 @@ export function SoftphoneProvider({
   const [callingEnabled] = useState(
     () => directMode || isSoftphoneTransportEnabled(),
   );
-  const [coachUiEnabled] = useState(() => isCoachUiEnabled());
+  // Direct (pilot) calling has no coaching: no subscription, no coach UI.
+  const [coachUiEnabled] = useState(() => isCoachUiEnabled() && !directMode);
   const [coachPreference, setCoachPreference] =
     useState<CoachPreference>(readCoachPreference);
   const updateCoachPreference = useCallback((preference: CoachPreference) => {
@@ -460,6 +462,11 @@ export function SoftphoneProvider({
       return;
     const propertyId = target.propertyId;
     const resumeOnPageHide = () => {
+      // Direct calls cannot survive the page: end the server call first (best effort) so the
+      // enrollment resume below only ever runs for a call that is actually ending.
+      if (directMode && (phone === "live" || phone === "held")) {
+        void transportRef.current?.hangup().catch(() => undefined);
+      }
       const body = JSON.stringify({ propertyId });
       const blob = new Blob([body], { type: "application/json" });
       if (
@@ -477,7 +484,7 @@ export function SoftphoneProvider({
     };
     window.addEventListener("pagehide", resumeOnPageHide);
     return () => window.removeEventListener("pagehide", resumeOnPageHide);
-  }, [phone, target?.propertyId]);
+  }, [directMode, phone, target?.propertyId]);
 
   useEffect(() => {
     if (phone !== "live" || held || !isConnectedCallStatus(callStatus)) return;
@@ -693,6 +700,7 @@ export function SoftphoneProvider({
       >,
       provisionalTarget?: SoftphoneTarget,
       suppliedTiming?: ReliabilityTimingSession,
+      directRequest?: CallTarget["directRequest"],
     ) => {
       if (!callingEnabled) {
         setError("Calling not yet enabled");
@@ -826,12 +834,15 @@ export function SoftphoneProvider({
         const handle = transport.callHandle?.();
         if (!handle) return;
         callHandleRef.current = handle;
-        retainActiveCall({
-          handle,
-          target: result.data,
-          startedAt: result.data.startedAt,
-          wrapToken: callToken,
-        });
+        // Direct calls have no recovery, so there is nothing to retain across a reload.
+        if (!directMode) {
+          retainActiveCall({
+            handle,
+            target: result.data,
+            startedAt: result.data.startedAt,
+            wrapToken: callToken,
+          });
+        }
         setCoachCallId(callToken);
       };
       const finishTerminal = (kind: "ended" | "failed") => {
@@ -916,7 +927,10 @@ export function SoftphoneProvider({
           setCoachCallId(null);
           void (async () => {
             try {
-              if (result.data.propertyId) {
+              // A direct-mode busy refusal means another call of this operator owns the
+              // enrollment pause; resuming here would release the live call's pause.
+              const ownsNoPause = directMode && status === "operator_busy";
+              if (result.data.propertyId && !ownsNoPause) {
                 await resumeFailedSoftphoneCall(result.data.propertyId);
               }
             } catch {
@@ -949,7 +963,9 @@ export function SoftphoneProvider({
               } else {
                 setError(
                   status === "operator_busy"
-                    ? "You already have an active Jitter call."
+                    ? directMode
+                      ? "You already have a call in progress."
+                      : "You already have an active Jitter call."
                     : "This number is no longer callable.",
                 );
               }
@@ -1036,6 +1052,7 @@ export function SoftphoneProvider({
           ...(intentCapability ? { intentCapability } : {}),
           ...(callerIdE164 ? { callerIdE164 } : {}),
           coachScriptSlug: coachPreference.scriptId,
+          ...(directMode && directRequest ? { directRequest } : {}),
         });
         if (attemptGenerationRef.current !== myAttempt) {
           // Superseded while transport.start() was in flight — the rep
@@ -1047,12 +1064,14 @@ export function SoftphoneProvider({
           return;
         }
         callHandleRef.current = callHandle;
-        retainActiveCall({
-          handle: callHandle,
-          target: result.data,
-          startedAt: result.data.startedAt,
-          wrapToken: callToken,
-        });
+        if (!directMode) {
+          retainActiveCall({
+            handle: callHandle,
+            target: result.data,
+            startedAt: result.data.startedAt,
+            wrapToken: callToken,
+          });
+        }
         // Only now — transport.start() actually succeeded — does the coach
         // hook get a callId to subscribe with. Subscribing any earlier would
         // race the server's coach_call_index write (fired via after(), so
@@ -1103,6 +1122,7 @@ export function SoftphoneProvider({
           startedAt: new Date().toISOString(),
         },
         reliabilityTiming,
+        { kind: "lead", propertyId: lead.id },
       );
     },
     [callingEnabled, startTarget],
@@ -1196,7 +1216,10 @@ export function SoftphoneProvider({
           disposition,
           notes,
           wrapToken,
-          callCapability: directMode ? undefined : callHandleRef.current?.id,
+          // Direct calls carry the server-sealed identity minted at start; Jitter's handle id is its own.
+          callCapability: directMode
+            ? callHandleRef.current?.callCapability
+            : callHandleRef.current?.id,
           callback,
         });
         if (!result.ok) {
@@ -1467,6 +1490,7 @@ export function SoftphoneProvider({
                         () => prepareLeadCall(suggestion.propertyId),
                         undefined,
                         reliabilityTiming,
+                        { kind: "lead", propertyId: suggestion.propertyId },
                       );
                     }}
                     onRecent={(recent) => {
@@ -1480,6 +1504,9 @@ export function SoftphoneProvider({
                             : prepareManualCall(recent.phoneE164),
                         undefined,
                         reliabilityTiming,
+                        recent.propertyId
+                          ? { kind: "lead", propertyId: recent.propertyId }
+                          : { kind: "manual", phone: recent.phoneE164 },
                       );
                     }}
                     onManual={() => {
@@ -1490,6 +1517,7 @@ export function SoftphoneProvider({
                         () => prepareManualCall(manualDigits),
                         undefined,
                         reliabilityTiming,
+                        { kind: "manual", phone: manualDigits },
                       );
                     }}
                     onDigit={enterManualDigit}

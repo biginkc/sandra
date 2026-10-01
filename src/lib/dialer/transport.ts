@@ -10,9 +10,19 @@ export type CallTarget = {
   intentCapability?: string;
   /** Published coach script chosen before the call. Server verifies its cached default. */
   coachScriptSlug?: string;
+  /**
+   * Direct (Telnyx) transport only: the request kind the UI already prepared, so the
+   * server re-runs the same prepare function the UI ran (a manual dial that happened to
+   * match a lead stays a manual dial).
+   */
+  directRequest?: { kind: "lead"; propertyId: string } | { kind: "manual"; phone: string };
 };
 
-export type CallHandle = { id: string };
+export type CallHandle = {
+  id: string;
+  /** Direct (Telnyx) transport only: sealed call identity to pass to wrap-up. */
+  callCapability?: string;
+};
 export type CallResult = { durationSeconds: number; outcome: "connected_human" | "failed" };
 /** A non-authoritative provider-status poll failure. It never ends a call. */
 export type ProviderStatusPollError = { status: number; errorCode: string };

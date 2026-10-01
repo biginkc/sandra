@@ -122,6 +122,9 @@ export class TelnyxDirectCallTransport implements CallTransport {
   private directCallId: string | null = null;
   private browserLegId: string | null = null;
   private correlationValue: string | null = null;
+  private callCapability: string | null = null;
+  // Set the instant hangup() is requested: from then on nothing is started or answered.
+  private cancelled = false;
   private startInFlight = false;
   private startPromise: Promise<CallHandle> | null = null;
   // Invites that arrive while startDirectCall is still resolving: the server
@@ -157,7 +160,12 @@ export class TelnyxDirectCallTransport implements CallTransport {
   }
 
   callHandle(): CallHandle | null {
-    return this.directCallId ? { id: this.directCallId } : null;
+    return this.directCallId
+      ? {
+          id: this.directCallId,
+          ...(this.callCapability ? { callCapability: this.callCapability } : {}),
+        }
+      : null;
   }
 
   terminalIsAuthoritative(): boolean {
@@ -173,11 +181,14 @@ export class TelnyxDirectCallTransport implements CallTransport {
   private async runStart(target: CallTarget): Promise<CallHandle> {
     // Mic first: on denial nothing has been requested from the server.
     await this.deps.prepareMicrophone();
+    this.throwIfCancelled();
 
     const token = await this.deps.getToken();
     if (!token.ok) throw directError(token);
+    this.throwIfCancelled();
 
     this.startInFlight = true;
+    let cancelledStart: string | null = null;
     try {
       const audio = this.deps.createRemoteAudio();
       this.audio = audio;
@@ -185,18 +196,20 @@ export class TelnyxDirectCallTransport implements CallTransport {
       this.client = client;
       this.bindEvents(client);
       await this.register(client);
+      // A hangup during setup must never reach the server's start.
+      this.throwIfCancelled();
 
-      const input: StartDirectCallInput = target.propertyId
-        ? {
-            kind: "lead",
-            propertyId: target.propertyId,
-            clientRequestId: requestId(target.callToken),
-          }
-        : {
-            kind: "manual",
-            phone: target.phoneE164,
-            clientRequestId: requestId(target.callToken),
-          };
+      const clientRequestId = requestId(target.callToken);
+      // Preserve the request kind the UI prepared; never re-derive it from the prepared target.
+      const request = target.directRequest;
+      const input: StartDirectCallInput =
+        request?.kind === "manual"
+          ? { kind: "manual", phone: request.phone, clientRequestId }
+          : request?.kind === "lead"
+            ? { kind: "lead", propertyId: request.propertyId, clientRequestId }
+            : target.propertyId
+              ? { kind: "lead", propertyId: target.propertyId, clientRequestId }
+              : { kind: "manual", phone: target.phoneE164, clientRequestId };
       const started = await this.deps.startCall(input);
       if (!started.ok) {
         const error = directError(started);
@@ -211,6 +224,9 @@ export class TelnyxDirectCallTransport implements CallTransport {
       this.directCallId = started.data.directCallId;
       this.browserLegId = started.data.browserLegId;
       this.correlationValue = started.data.correlationHeader.value;
+      this.callCapability = started.data.callCapability ?? null;
+      // Hangup arrived while the start was in flight: the call now exists, so end it. Never answer.
+      if (this.cancelled) cancelledStart = started.data.directCallId;
     } catch (error) {
       this.startInFlight = false;
       this.bufferedInvites = [];
@@ -218,12 +234,25 @@ export class TelnyxDirectCallTransport implements CallTransport {
       throw error;
     }
     this.startInFlight = false;
+    if (cancelledStart) {
+      for (const invite of this.bufferedInvites) this.decidedInvites.add(invite);
+      this.bufferedInvites = [];
+      await this.deps.control(cancelledStart, { action: "hangup" }).catch(() => undefined);
+      return { id: cancelledStart };
+    }
     this.emit("connecting");
     const buffered = this.bufferedInvites;
     this.bufferedInvites = [];
     for (const invite of buffered) this.decideInvite(invite);
     void this.pollLoop();
-    return { id: this.directCallId };
+    return this.callHandle() as CallHandle;
+  }
+
+  private throwIfCancelled(): void {
+    if (!this.cancelled) return;
+    this.bufferedInvites = [];
+    this.releaseClient();
+    throw new Error("Call cancelled.");
   }
 
   private bindEvents(client: TelnyxRtcLike): void {
@@ -236,14 +265,36 @@ export class TelnyxDirectCallTransport implements CallTransport {
       .on("telnyx.error", (event) => {
         if (this.client !== client) return;
         // Before registration completes a signaling error is fatal to start.
-        // Afterwards the server-side status stays the source of truth.
-        this.registration?.reject(eventError(event));
-        this.registration = null;
+        if (this.registration) {
+          this.registration.reject(eventError(event));
+          this.registration = null;
+          return;
+        }
+        // Afterwards there is no recovery: a lost browser connection ends the call.
+        this.onClientLost();
+      })
+      .on("telnyx.socket.close", () => {
+        if (this.client !== client) return;
+        if (this.registration) return; // reported through the registration timeout/error
+        this.onClientLost();
+      })
+      .on("telnyx.socket.error", () => {
+        if (this.client !== client) return;
+        if (this.registration) return;
+        this.onClientLost();
       })
       .on("telnyx.notification", (notification) => {
         if (this.client !== client) return;
         this.handleNotification(notification as TelnyxNotificationLike);
       });
+  }
+
+  /** Pilot has no mid-call recovery: signalling loss during a call tears the server call down. */
+  private onClientLost(): void {
+    if (this.terminal || this.disposed) return;
+    this.cancelled = true;
+    const id = this.directCallId;
+    if (id) void this.deps.control(id, { action: "hangup" }).catch(() => undefined);
   }
 
   private register(client: TelnyxRtcLike): Promise<void> {
@@ -291,7 +342,7 @@ export class TelnyxDirectCallTransport implements CallTransport {
   private decideInvite(call: TelnyxCallLike): void {
     if (this.decidedInvites.has(call)) return;
     this.decidedInvites.add(call);
-    if (!this.matches(call) || this.currentCall || this.terminal) {
+    if (this.cancelled || !this.matches(call) || this.currentCall || this.terminal) {
       // Never answer anything that is not this operator's pending call.
       void Promise.resolve()
         .then(() => call.hangup())
@@ -418,6 +469,7 @@ export class TelnyxDirectCallTransport implements CallTransport {
   }
 
   hangup(): Promise<CallResult> {
+    this.cancelled = true;
     if (this.hangupPromise && !this.terminal) return this.hangupPromise;
     this.hangupPromise = this.runHangup().finally(() => {
       // Allow a retry when terminal proof did not arrive.
@@ -503,12 +555,10 @@ function directError(result: { error: string; errorCode?: string }): Error {
   return error;
 }
 
-function refusalState(
-  errorCode: string | undefined,
-): "operator_busy" | "not_callable" | null {
-  if (errorCode === "operator_busy") return "operator_busy";
-  if (errorCode === "not_callable") return "not_callable";
-  return null;
+// The backend refuses a second concurrent call with `call_in_progress`; that is the only
+// refusal it reports as a code (eligibility failures come back as plain error text).
+function refusalState(errorCode: string | undefined): "operator_busy" | null {
+  return errorCode === "call_in_progress" ? "operator_busy" : null;
 }
 
 function eventError(event: unknown): unknown {
@@ -533,7 +583,7 @@ async function prepareMicrophone(): Promise<void> {
   for (const track of stream.getTracks()) track.stop();
 }
 
-async function createTelnyxRtcClient(
+export async function createTelnyxRtcClient(
   token: string,
   remoteAudio: HTMLAudioElement | null,
 ): Promise<TelnyxRtcLike> {
@@ -553,8 +603,9 @@ async function createTelnyxRtcClient(
   }
   const client = new sdk.TelnyxRTC({
     login_token: token,
-    keepConnectionAliveOnSocketClose: true,
-    hangupOnBeforeUnload: false,
+    // No recovery in the pilot: a lost socket or unloaded page ends the call.
+    keepConnectionAliveOnSocketClose: false,
+    hangupOnBeforeUnload: true,
   });
   if (remoteAudio) client.remoteElement = remoteAudio;
   return client;
