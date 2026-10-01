@@ -10,6 +10,7 @@ import { redactText } from "./redact";
 import { Budget } from "./budget";
 
 export const BASE_URL = "https://api.telnyx.com/v2";
+export const PROVIDER_REQUEST_TIMEOUT_MS = 10_000;
 
 export class GuardError extends Error {}
 export class TelnyxError extends Error {
@@ -145,6 +146,36 @@ export class TelnyxClient {
     return redactText(s, [this.opts.config.apiKey]);
   }
 
+  /**
+   * Bound both the provider request and response-body read. Aborting the signal
+   * asks fetch/provider plumbing to stop; the race also bounds this harness if a
+   * custom fetch implementation ignores the signal. A timeout is always uncertain.
+   */
+  private async fetchBodyWithDeadline(url: string, init: RequestInit): Promise<{ response: Response; text: string }> {
+    const controller = new AbortController();
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const operation = (async () => {
+      const response = await this.fetchImpl(url, { ...init, signal: controller.signal });
+      return { response, text: await response.text() };
+    })();
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+        reject(new Error("provider request deadline"));
+      }, PROVIDER_REQUEST_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([operation, deadline]);
+    } catch (e) {
+      if (timedOut) throw new TelnyxError(this.redact(`provider request timed out after ${PROVIDER_REQUEST_TIMEOUT_MS / 1000}s`));
+      throw new TelnyxError(this.redact(`network error: ${(e as Error).message}`));
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
   async request<T = any>(method: string, pathAndQuery: string, body?: unknown): Promise<T> {
     assertAllowed(method, pathAndQuery, body, this.opts.inventory, this.opts.config); // throws before any network call
     this.log(this.redact(`-> ${method} ${pathAndQuery}`));
@@ -153,21 +184,15 @@ export class TelnyxClient {
       this.log(`   (dry-run: not sent)`);
       return { data: {}, meta: { total_pages: 1 } } as T;
     }
-    let res: Response;
-    try {
-      res = await this.fetchImpl(`${BASE_URL}${pathAndQuery}`, {
-        method,
-        headers: {
-          Authorization: `Bearer ${this.opts.config.apiKey}`,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-    } catch (e) {
-      throw new TelnyxError(this.redact(`network error: ${(e as Error).message}`));
-    }
-    const text = await res.text();
+    const { response: res, text } = await this.fetchBodyWithDeadline(`${BASE_URL}${pathAndQuery}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${this.opts.config.apiKey}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
     let parsed: unknown = text;
     try {
       parsed = text ? JSON.parse(text) : {};

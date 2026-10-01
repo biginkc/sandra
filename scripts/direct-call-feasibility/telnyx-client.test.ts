@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, expect, it, vi } from "vitest";
-import { TelnyxClient, GuardError, TelnyxError } from "./telnyx-client";
+import { TelnyxClient, GuardError, TelnyxError, PROVIDER_REQUEST_TIMEOUT_MS } from "./telnyx-client";
 import { Budget, BudgetError } from "./budget";
 import { cfg, inventory, jsonRes, PHONE, SECRET } from "./test-helpers";
 
@@ -97,6 +97,66 @@ describe("redaction", () => {
     const { client } = make({ fetchImpl });
     await expect(client.request("GET", "/x")).rejects.toThrow(/\[REDACTED\]/);
   });
+
+  it("bounds a stalled fetch, aborts it, and keeps an uncertain Dial unresolved", async () => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | null | undefined;
+      const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        signal = init?.signal;
+        return new Promise<Response>(() => {});
+      });
+      const inv = inventory();
+      const client = new TelnyxClient({ config: cfg(), inventory: inv, dryRun: false, fetchImpl, log: () => {} });
+      let err: unknown;
+      const pending = client.dial({ to: PHONE, opId: "stalled-fetch" }).catch((e) => { err = e; });
+      await vi.advanceTimersByTimeAsync(PROVIDER_REQUEST_TIMEOUT_MS);
+      await pending;
+      expect(err).toBeInstanceOf(TelnyxError);
+      expect((err as Error).message).toContain("timed out after 10s");
+      expect((err as Error).message).not.toContain(SECRET);
+      expect(signal?.aborted).toBe(true);
+      expect(inv.unresolvedDials()).toHaveLength(1);
+      await expect(client.dial({ to: PHONE, opId: "stalled-fetch" })).rejects.toThrow(/already sent/);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds a stalled response body and aborts it", async () => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | null | undefined;
+      const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        signal = init?.signal;
+        return { ok: true, status: 200, text: () => new Promise<string>(() => {}) } as Response;
+      });
+      const { client } = make({ fetchImpl });
+      let err: unknown;
+      const pending = client.request("GET", "/phone_numbers").catch((e) => { err = e; });
+      await vi.advanceTimersByTimeAsync(PROVIDER_REQUEST_TIMEOUT_MS);
+      await pending;
+      expect(err).toBeInstanceOf(TelnyxError);
+      expect((err as Error).message).toContain("timed out after 10s");
+      expect(signal?.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the provider deadline after a successful response", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client } = make();
+      await client.request("GET", "/phone_numbers");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("budget", () => {
@@ -132,11 +192,17 @@ describe("budget", () => {
 
 describe("dry run", () => {
   it("makes no fetch calls at all, even for reads and dials", async () => {
-    const { client, fetchImpl } = make({ dryRun: true });
-    await client.request("GET", "/phone_numbers");
-    await client.dial({ to: PHONE });
-    await client.request("DELETE", "/credential_connections/conn1");
-    expect(fetchImpl).not.toHaveBeenCalled();
-    expect(client.dryRunRequests.length).toBe(3);
+    vi.useFakeTimers();
+    try {
+      const { client, fetchImpl } = make({ dryRun: true });
+      await client.request("GET", "/phone_numbers");
+      await client.dial({ to: PHONE });
+      await client.request("DELETE", "/credential_connections/conn1");
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(client.dryRunRequests.length).toBe(3);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
