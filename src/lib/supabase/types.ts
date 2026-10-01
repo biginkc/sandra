@@ -14,6 +14,24 @@ export type Database = {
   }
   public: {
     Tables: {
+      direct_call_operators: {
+        Row: { user_id: string; org_id: string; telnyx_credential_id: string; sip_username: string; created_at: string }
+        Insert: { user_id: string; org_id: string; telnyx_credential_id: string; sip_username: string; created_at?: string }
+        Update: { telnyx_credential_id?: string; sip_username?: string }
+        Relationships: []
+      }
+      direct_calls: {
+        Row: { id: string; org_id: string; operator_user_id: string; property_id: string | null; contact_id: string | null; destination_e164: string; caller_id_e164: string; status: string; browser_leg_id: string | null; seller_leg_id: string | null; browser_command_id: string; hangup_cause: string | null; failure_reason: string | null; client_request_id: string; created_at: string; connected_at: string | null; ended_at: string | null; updated_at: string }
+        Insert: { id?: string; org_id: string; operator_user_id: string; property_id?: string | null; contact_id?: string | null; destination_e164: string; caller_id_e164: string; status?: string; browser_leg_id?: string | null; seller_leg_id?: string | null; browser_command_id?: string; hangup_cause?: string | null; failure_reason?: string | null; client_request_id: string; created_at?: string; connected_at?: string | null; ended_at?: string | null; updated_at?: string }
+        Update: { status?: string; browser_leg_id?: string | null; seller_leg_id?: string | null; hangup_cause?: string | null; failure_reason?: string | null; connected_at?: string | null; ended_at?: string | null; updated_at?: string }
+        Relationships: []
+      }
+      direct_call_events: {
+        Row: { provider_event_id: string; direct_call_id: string | null; event_type: string; occurred_at: string | null; received_at: string; processed_at: string | null; payload: Json }
+        Insert: { provider_event_id: string; direct_call_id?: string | null; event_type: string; occurred_at?: string | null; received_at?: string; processed_at?: string | null; payload: Json }
+        Update: { direct_call_id?: string | null; processed_at?: string | null }
+        Relationships: []
+      }
       sequence_canary_controls: {
         Row: { key: string; value: string; changed_by: string; changed_at: string }
         Insert: { key: string; value: string; changed_by: string; changed_at?: string }
