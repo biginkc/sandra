@@ -1,0 +1,15 @@
+{
+  "target_ref": "copflsklaefwzipsrjqz",
+  "provenance": "connector, transport not attested",
+  "connector_tool": "Supabase connector execute_sql",
+  "statement_sha256": "c654f826d74517aa0765eb3f133397ad53ed3bab9a628c70339f324324bfdca5",
+  "statement": "catalog adapter read-only SELECT (catalog_fingerprint.read_catalog body, without BEGIN/SHOW/COMMIT) at the repo head below; full text in prod-statement.sql",
+  "repo_head": "c0d867cc8f2d789101c96869f13b6648da5720eb",
+  "raw_output_sha256": "3e4b6da73169dfcfa91da4b16d67923d1dc12e4f3a4ed4be40b8e82fe20dd640",
+  "observation_sha256": "01ac1f089481779b03813f463a4d7818d8ac7825c4f905483b433ccd928b20e3",
+  "catalog_sha256": "d8d10a4870e824ab110d6b2f85f1f3f6d8e340309a699650b1c29cdddadf1ca8",
+  "not_j5b_evidence": true,
+  "ruling": "CATALOG-DRIFT v3 clarification C2",
+  "observed_at": "2026-10-01T07:00:36.315196Z",
+  "note": "prior statement_sha256 0f15f73c... was recorded over an unrecoverable description string and cannot be re-verified; this one hashes the exact SQL sent"
+}
