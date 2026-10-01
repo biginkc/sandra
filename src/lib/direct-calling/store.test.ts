@@ -66,12 +66,13 @@ describe("createSupabaseDirectCallStore RPC payloads", () => {
       direct_call_cancel_request: [{ outcome: "tombstoned", call_id: "c1" }],
       direct_call_dial_succeeded: true,
       direct_call_dial_started: true,
+      direct_call_set_target: true,
       direct_call_cleanup_claim: [],
       direct_call_resume_claim: [],
     });
-    await store.beginCall({ org_id: "o", operator_user_id: "u", property_id: "p", contact_id: "k", destination_e164: "+1555", caller_id_e164: "+1666", time_limit_secs: 180, client_request_id: "r" });
+    await store.beginCall({ org_id: "o", operator_user_id: "u", property_id: "p", preparation_property_id: null, contact_id: "k", destination_e164: "+1555", caller_id_e164: "+1666", time_limit_secs: 180, client_request_id: "r" });
     await store.cancelRequest("u", "o", "r");
-    await store.setTarget("c1", { property_id: "p", contact_id: "k", destination_e164: "+1555" });
+    expect(await store.setTarget("c1", { property_id: "p", contact_id: "k", destination_e164: "+1555" })).toBe(true);
     await store.discardReservation("c1");
     await store.dialSucceeded("c1", "leg", "seller");
     await store.markDialStarted("c1", "seller", "2026-10-01T12:00:00.000Z", 30, 180);
@@ -83,7 +84,7 @@ describe("createSupabaseDirectCallStore RPC payloads", () => {
     await store.operatorBusy("u");
     await store.findActiveForUser("u");
     expect(calls).toEqual([
-      { fn: "direct_call_begin", args: { p_org: "o", p_operator: "u", p_property: "p", p_contact: "k", p_destination: "+1555", p_caller: "+1666", p_request: "r", p_time_limit_secs: 180 } },
+      { fn: "direct_call_begin", args: { p_org: "o", p_operator: "u", p_property: "p", p_preparation_property: null, p_contact: "k", p_destination: "+1555", p_caller: "+1666", p_request: "r", p_time_limit_secs: 180 } },
       { fn: "direct_call_cancel_request", args: { p_org: "o", p_operator: "u", p_request: "r" } },
       { fn: "direct_call_set_target", args: { p_id: "c1", p_property: "p", p_contact: "k", p_destination: "+1555" } },
       { fn: "direct_call_discard_reservation", args: { p_id: "c1" } },

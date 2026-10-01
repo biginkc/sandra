@@ -9,6 +9,7 @@ export function makeRow(overrides: Partial<DirectCallFullRow> = {}): DirectCallF
     org_id: "org",
     operator_user_id: "user-1",
     property_id: null,
+    preparation_property_id: null,
     contact_id: null,
     destination_e164: "+15550001111",
     caller_id_e164: "+15550002222",
@@ -205,7 +206,7 @@ export class FakeStore implements DirectCallStore {
   async claimPendingResumes(userId: string, now: string, leaseSecs: number) {
     const cutoff = new Date(now).getTime() - leaseSecs * 1000;
     const due = [...this.calls.values()].filter(
-      (r) => r.operator_user_id === userId && r.resume_pending && (!r.resume_claimed_at || new Date(r.resume_claimed_at).getTime() <= cutoff),
+      (r) => r.operator_user_id === userId && r.resume_pending && r.preparation_property_id === null && r.property_id !== null && r.destination_e164 !== "" && (!r.resume_claimed_at || new Date(r.resume_claimed_at).getTime() <= cutoff),
     );
     for (const r of due) this.calls.set(r.id, { ...r, resume_claimed_at: now });
     return due.map((r) => this.calls.get(r.id)!);
@@ -216,9 +217,23 @@ export class FakeStore implements DirectCallStore {
   }
   async setTarget(id: string, target: { property_id: string | null; contact_id: string | null; destination_e164: string }) {
     const row = this.calls.get(id);
-    // Mirrors direct_call_set_target: also the untouched reservation of a request cancelled during prepare.
-    const untouched = row && row.status === "ending" && !row.property_id && !row.contact_id && row.destination_e164 === "" && !row.connected_at;
-    if (row && (row.status === "browser_connecting" || untouched)) this.calls.set(id, { ...row, ...target });
+    // Mirrors direct_call_set_target: a late result may attach only to its own untouched reservation,
+    // including one that already became terminal after its unmarked Dial obligation was settled.
+    const untouched = row && ["ending", "ended", "failed"].includes(row.status)
+      && (row.preparation_property_id !== null || target.property_id === null)
+      && (target.property_id === null || target.property_id === row.preparation_property_id)
+      && row.property_id === null && row.contact_id === null && row.destination_e164 === ""
+      && !row.browser_leg_id && !row.seller_leg_id && !row.connected_at;
+    const browser = row && row.status === "browser_connecting"
+      && (row.preparation_property_id === null || target.property_id === null || target.property_id === row.preparation_property_id);
+    if (!row || (!browser && !untouched)) return false;
+    this.calls.set(id, {
+      ...row,
+      ...target,
+      preparation_property_id: null,
+      resume_pending: ["ended", "failed"].includes(row.status) && target.property_id !== null,
+    });
+    return true;
   }
   async discardReservation(id: string) {
     const row = this.calls.get(id);

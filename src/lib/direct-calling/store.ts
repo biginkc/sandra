@@ -19,6 +19,7 @@ export type NewDirectCall = {
   org_id: string;
   operator_user_id: string;
   property_id: string | null;
+  preparation_property_id: string | null;
   contact_id: string | null;
   destination_e164: string;
   caller_id_e164: string;
@@ -60,8 +61,8 @@ export interface DirectCallStore {
    * Returns the updated row, or null if the status no longer matched.
    */
   updateIfStatus(id: string, statuses: DirectCallStatus[], patch: RowPatch, cleanups?: CleanupSpec[]): Promise<DirectCallFullRow | null>;
-  /** Fills in the prepared target on a reservation still in browser_connecting. */
-  setTarget(id: string, target: { property_id: string | null; contact_id: string | null; destination_e164: string }): Promise<void>;
+  /** Fills in the prepared target, including a still-owned terminal reservation after delayed preparation. */
+  setTarget(id: string, target: { property_id: string | null; contact_id: string | null; destination_e164: string }): Promise<boolean>;
   /** Drops a reservation whose prepare was refused (nothing was dialed). */
   discardReservation(id: string): Promise<void>;
   /** A Dial returned a leg: stores it when free, resolves that Dial's unresolved-dial row, queues a leg row when it must not live. */
@@ -173,6 +174,7 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
         p_caller: call.caller_id_e164,
         p_request: call.client_request_id,
         p_time_limit_secs: call.time_limit_secs,
+        p_preparation_property: call.preparation_property_id,
       });
       if (error) {
         // A uniqueness violation here means a concurrent writer beat the advisory lock's snapshot.
@@ -209,13 +211,14 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
       return typed((data as RawRow[] | null)?.[0] ?? null);
     },
     async setTarget(id, target) {
-      const { error } = await admin.rpc("direct_call_set_target", {
+      const { data, error } = await admin.rpc("direct_call_set_target", {
         p_id: id,
         p_property: target.property_id,
         p_contact: target.contact_id,
         p_destination: target.destination_e164,
       });
       if (error) fail(error);
+      return data === true;
     },
     async discardReservation(id) {
       const { error } = await admin.rpc("direct_call_discard_reservation", { p_id: id });

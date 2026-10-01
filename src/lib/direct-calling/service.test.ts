@@ -573,4 +573,50 @@ describe("start errors say whether anything was reserved (#744-1)", () => {
     expect(ctx.resumeFailedSoftphoneCall).toHaveBeenCalledTimes(1);
     expect(ctx.resumeFailedSoftphoneCall).toHaveBeenCalledWith("prop-1");
   });
+
+  it("retains preparation ownership when cleanup ends a cancelled lead before prepare returns", async () => {
+    const ctx = setup();
+    const preparedTarget = target({ propertyId: "prop-1", contactId: "contact-1", phoneE164: "+15550009999", name: "Pat Seller" });
+    let release!: (value: { ok: true; data: DirectCallTarget }) => void;
+    ctx.prepareLeadCall.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
+
+    const starting = ctx.service.startCall("user-1", { kind: "lead", propertyId: "prop-1", clientRequestId: REQ });
+    await vi.waitFor(() => expect(ctx.store.calls.size).toBe(1));
+    const id = [...ctx.store.calls.keys()][0];
+    expect(ctx.store.calls.get(id)).toMatchObject({ preparation_property_id: "prop-1", property_id: null });
+    expect(await ctx.service.cancelByRequest("user-1", REQ)).toMatchObject({ ok: true, data: { tombstoned: false } });
+
+    ctx.clock.now = new Date(ctx.clock.now.getTime() + 61_000);
+    await expect(ctx.service.getStatusByRequest("user-1", REQ)).resolves.toMatchObject({ ok: true, data: { status: "ended", cleanupPending: false } });
+    expect(ctx.store.calls.get(id)).toMatchObject({ status: "ended", property_id: null, preparation_property_id: "prop-1", resume_pending: false });
+    expect(await ctx.store.operatorBusy("user-1")).toBeNull();
+
+    release({ ok: true, data: preparedTarget });
+    await expect(starting).resolves.toMatchObject({ ok: false, errorCode: "cancelled", reserved: true });
+    expect(ctx.telnyx.dial).not.toHaveBeenCalled();
+    expect(ctx.store.calls.get(id)).toMatchObject({ status: "ended", property_id: "prop-1", preparation_property_id: null, resume_pending: false });
+    expect(ctx.resumeFailedSoftphoneCall).toHaveBeenCalledTimes(1);
+    expect(ctx.resumeFailedSoftphoneCall).toHaveBeenCalledWith("prop-1");
+  });
+
+  it("does not resume a late prepared lead over a newer live call on that property", async () => {
+    const ctx = setup();
+    const preparedTarget = target({ propertyId: "prop-1", contactId: "contact-1", phoneE164: "+15550009999", name: "Pat Seller" });
+    let release!: (value: { ok: true; data: DirectCallTarget }) => void;
+    ctx.prepareLeadCall.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
+
+    const starting = ctx.service.startCall("user-1", { kind: "lead", propertyId: "prop-1", clientRequestId: REQ });
+    await vi.waitFor(() => expect(ctx.store.calls.size).toBe(1));
+    const id = [...ctx.store.calls.keys()][0];
+    await ctx.service.cancelByRequest("user-1", REQ);
+    ctx.clock.now = new Date(ctx.clock.now.getTime() + 61_000);
+    await ctx.service.getStatusByRequest("user-1", REQ);
+    ctx.store.add(makeRow({ id: "newer-live-call", operator_user_id: "user-2", property_id: "prop-1", status: "seller_dialing", browser_leg_id: "newer-browser" }));
+
+    release({ ok: true, data: preparedTarget });
+    await expect(starting).resolves.toMatchObject({ ok: false, errorCode: "cancelled", reserved: true });
+    expect(ctx.telnyx.dial).not.toHaveBeenCalled();
+    expect(ctx.resumeFailedSoftphoneCall).not.toHaveBeenCalled();
+    expect(ctx.store.calls.get(id)).toMatchObject({ property_id: "prop-1", preparation_property_id: null, resume_pending: false });
+  });
 });

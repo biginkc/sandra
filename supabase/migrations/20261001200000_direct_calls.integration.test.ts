@@ -77,6 +77,8 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
   const migration = stripTx(fs.readFileSync("supabase/migrations/20261001200000_direct_calls.sql", "utf8"));
   const timingMigration = stripTx(fs.readFileSync("supabase/migrations/20261001210000_direct_call_duration_dispatch.sql", "utf8"));
   const timingRollback = stripTx(fs.readFileSync("supabase/rollbacks/20261001210000_direct_call_duration_dispatch.sql", "utf8"));
+  const ownershipMigration = stripTx(fs.readFileSync("supabase/migrations/20261001220000_direct_call_prepare_ownership.sql", "utf8"));
+  const ownershipRollback = stripTx(fs.readFileSync("supabase/rollbacks/20261001220000_direct_call_prepare_ownership.sql", "utf8"));
   const rollback = stripTx(fs.readFileSync("supabase/rollbacks/20261001200000_direct_calls.sql", "utf8"));
   await pg.query("begin");
   try {
@@ -84,6 +86,8 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     await pg.query(migration);
     await pg.query(timingMigration);
     await pg.query(timingMigration);
+    await pg.query(ownershipMigration);
+    await pg.query(ownershipMigration);
     await pg.query("insert into public.organizations(id,name) values ($1,'Direct calls test') on conflict do nothing", [ORG]);
     for (const id of [USER_A, USER_B, USER_C]) {
       await pg.query("insert into auth.users (id) values ($1) on conflict do nothing", [id]);
@@ -95,8 +99,8 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
        values ($1, $2, '+15550000001', '+15550000002', $3, $4) returning id`,
       [ORG, user, status, requestId],
     );
-    const begin = async (user: string, requestId: string, limit = 7200) =>
-      (await pg.query("select * from public.direct_call_begin($1, $2, null, null, '', '+15550000002', $3, $4)", [ORG, user, requestId, limit])).rows[0];
+    const begin = async (user: string, requestId: string, limit = 7200, preparationProperty: string | null = null) =>
+      (await pg.query("select * from public.direct_call_begin($1, $2, null, null, '', '+15550000002', $3, $4, $5)", [ORG, user, requestId, limit, preparationProperty])).rows[0];
     const open = async (callId: string) =>
       (await pg.query("select kind, dial_role, leg_id from public.direct_call_cleanups where direct_call_id=$1 and confirmed_at is null order by kind, leg_id", [callId])).rows;
 
@@ -278,7 +282,7 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     const PROP = "00000000-0000-0000-0000-0000000d1b01";
     await pg.query("insert into public.properties (id, org_id, address, state) values ($1, $2, '1 Test St', 'MO')", [PROP, ORG]);
     const NOW = new Date("2026-10-01T12:00:00.000Z");
-    const begunC = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: PROP, contact_id: null, destination_e164: "+15550000010", caller_id_e164: "+15550000002", time_limit_secs: 7200, client_request_id: "00000000-0000-0000-0000-00000000cc01" });
+    const begunC = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: PROP, preparation_property_id: null, contact_id: null, destination_e164: "+15550000010", caller_id_e164: "+15550000002", time_limit_secs: 7200, client_request_id: "00000000-0000-0000-0000-00000000cc01" });
     expect(begunC.outcome).toBe("created");
     const idC = (begunC as { row: { id: string } }).row.id;
     const answered = nextDirectCallState({ ...(begunC as unknown as { row: Record<string, unknown> }).row, browser_leg_id: null, created_at: NOW.toISOString() } as never, { type: "call.answered", callControlId: "b-race", role: "browser", occurredAt: null, hangupCause: null }, NOW);
@@ -311,7 +315,7 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     const PROP2 = "00000000-0000-0000-0000-0000000d1b02";
     await pg.query("insert into public.properties (id, org_id, address, state) values ($1, $2, '2 Test St', 'MO')", [PROP2, ORG]);
     await pg.query("update public.direct_call_cleanups set confirmed_at = now() where operator_user_id = $1", [USER_C]);
-    const second = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: PROP2, contact_id: null, destination_e164: "+15550000011", caller_id_e164: "+15550000002", time_limit_secs: 7200, client_request_id: "00000000-0000-0000-0000-00000000cc02" });
+    const second = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: PROP2, preparation_property_id: null, contact_id: null, destination_e164: "+15550000011", caller_id_e164: "+15550000002", time_limit_secs: 7200, client_request_id: "00000000-0000-0000-0000-00000000cc02" });
     const idC2 = (second as { row: { id: string } }).row.id;
     await pg.query("update public.direct_calls set property_id = $1 where operator_user_id = $2 and status not in ('ended','failed') and id <> $3", [PROP2, USER_B, idC2]);
     const firstOfTwo = await store.updateIfStatus(idC2, ["browser_connecting"], { status: "failed", failure_reason: "browser_dial_rejected", ended_at: NOW.toISOString() });
@@ -325,16 +329,31 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     const PROP3 = "00000000-0000-0000-0000-0000000d1b03";
     await pg.query("insert into public.properties (id, org_id, address, state) values ($1, $2, '3 Test St', 'MO')", [PROP3, ORG]);
     await pg.query("update public.direct_call_cleanups set confirmed_at = now() where operator_user_id = $1", [USER_C]);
-    const third = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: null, contact_id: null, destination_e164: "", caller_id_e164: "+15550000002", time_limit_secs: 7200, client_request_id: "00000000-0000-0000-0000-00000000cc03" });
+    const third = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: null, preparation_property_id: PROP3, contact_id: null, destination_e164: "", caller_id_e164: "+15550000002", time_limit_secs: 7200, client_request_id: "00000000-0000-0000-0000-00000000cc03" });
     const idC3 = (third as { row: { id: string } }).row.id;
     await store.updateIfStatus(idC3, ["browser_connecting"], { status: "ending" }); // cancelled during prepare
-    await store.setTarget(idC3, { property_id: PROP3, contact_id: null, destination_e164: "+15550000033" });
+    expect(await store.setTarget(idC3, { property_id: PROP3, contact_id: null, destination_e164: "+15550000033" })).toBe(true);
     expect(await store.findById(idC3)).toMatchObject({ status: "ending", property_id: PROP3, destination_e164: "+15550000033" });
     expect(await store.updateIfStatus(idC3, ["ending"], { status: "failed", ended_at: NOW.toISOString() })).toMatchObject({ resume_pending: true });
     // A target is never rewritten once the row is terminal or already has one.
-    await store.setTarget(idC3, { property_id: null, contact_id: null, destination_e164: "+15559999999" });
+    expect(await store.setTarget(idC3, { property_id: null, contact_id: null, destination_e164: "+15559999999" })).toBe(false);
     expect(await store.findById(idC3)).toMatchObject({ property_id: PROP3, destination_e164: "+15550000033" });
+    await store.clearResumePending(idC3);
+    await pg.query("update public.direct_call_cleanups set confirmed_at = now() where operator_user_id = $1", [USER_C]);
 
+    // Preparation ownership survives cleanup racing a delayed prepare; resume waits for the late target,
+    // then remains subject to the normal newer-call property ownership check.
+    const late = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: null, preparation_property_id: PROP3, contact_id: null, destination_e164: "", caller_id_e164: "+15550000002", time_limit_secs: 7200, client_request_id: "00000000-0000-0000-0000-00000000cc04" });
+    const lateId = (late as { row: { id: string } }).row.id;
+    await store.updateIfStatus(lateId, ["browser_connecting"], { status: "ending" });
+    await store.updateIfStatus(lateId, ["ending"], { status: "ended", ended_at: NOW.toISOString() });
+    expect(await store.claimPendingResumes(USER_C, NOW.toISOString(), 30)).toEqual([]);
+    expect(await store.setTarget(lateId, { property_id: "00000000-0000-0000-0000-0000000d1b04", contact_id: null, destination_e164: "+15550000044" })).toBe(false);
+    expect(await store.setTarget(lateId, { property_id: PROP3, contact_id: null, destination_e164: "+15550000044" })).toBe(true);
+    expect(await store.findById(lateId)).toMatchObject({ property_id: PROP3, preparation_property_id: null, resume_pending: true });
+    expect((await store.claimPendingResumes(USER_C, NOW.toISOString(), 30)).map((r) => r.id)).toEqual([lateId]);
+
+    await pg.query(ownershipRollback);
     await pg.query(timingRollback);
     await pg.query(rollback);
     const gone = await pg.query("select to_regclass('public.direct_calls') as t");

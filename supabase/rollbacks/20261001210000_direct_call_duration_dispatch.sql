@@ -3,6 +3,8 @@
 -- disabled/drained. This is not remote deployment authorization or an independent old/new
 -- compatibility rollback: the forward migration replaces the historical 7-argument
 -- direct_call_begin signature and the old app cannot coexist with this schema.
+-- Roll back 20261001220000_direct_call_prepare_ownership.sql first; then use this only immediately
+-- before the whole-feature rollback, never as independent baseline restoration.
 -- Rollback requires a coordinated app+schema change and disabled/drained direct calling; a local
 -- loopback rollback rehearsal does not prove that the remote rollback is safe.
 begin;

@@ -381,8 +381,9 @@ describe("acceptance: browser and lock", () => {
     const w = world();
     const original = w.store.setTarget.bind(w.store);
     w.store.setTarget = async (id, target) => {
-      await original(id, target);
+      const stored = await original(id, target);
       await w.service.cancelByRequest("user-1", req(1)); // the browser gave up while prepare was running
+      return stored;
     };
     expect(await w.start(1, { kind: "lead", propertyId: "prop-1" })).toMatchObject({ ok: false, errorCode: "cancelled" });
     expect(w.p.counts.dial).toBe(0);

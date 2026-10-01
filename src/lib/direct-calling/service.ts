@@ -220,6 +220,7 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
         org_id: SANDRA_ORG_ID,
         operator_user_id: userId,
         property_id: null,
+        preparation_property_id: input.kind === "lead" ? input.propertyId : null,
         contact_id: null,
         destination_e164: "",
         caller_id_e164: settings.callerIdE164,
@@ -265,7 +266,16 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
     try {
       // The target (and so the lead whose enrollments prepare paused) is stored before anything else can
       // fail, so any terminal move below carries resume_pending.
-      await store.setTarget(row.id, { property_id: target.propertyId, contact_id: target.contactId, destination_e164: target.phoneE164 });
+      const targetStored = await store.setTarget(row.id, { property_id: target.propertyId, contact_id: target.contactId, destination_e164: target.phoneE164 });
+      if (!targetStored) {
+        const current = await store.findById(row.id);
+        if (current && !DIRECT_CALL_TERMINAL_STATUSES.has(current.status)) {
+          await store.updateIfStatus(row.id, LIVE, { status: "failed", failure_reason: "prepared_target_unavailable", ended_at: deps.now().toISOString() });
+        }
+        await store.dialRejected(row.id, "browser");
+        await resumes(userId);
+        return err("This call was cancelled.", "cancelled", true);
+      }
       const operator = await ensureOperator(userId, settings);
       const identity = deps.sealCallIdentity({ callId: row.id, userId, phoneE164: target.phoneE164 });
       if (identity.training && !identity.capability) {
