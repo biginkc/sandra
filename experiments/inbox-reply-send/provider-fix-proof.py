@@ -29,7 +29,9 @@ def main() -> int:
             raise AssertionError("B4 drain-cancellation comment/record is missing")
         print("B4 PASS source record explicitly preserves WHEN others without query_canceled")
         return 0
-    mutated = "--mutated" in sys.argv[1:]
+    if "--mutated" in sys.argv[1:] and "--noop-mutated" in sys.argv[1:]:
+        raise AssertionError("B2 accepts only one mutation mode")
+    mode = "mutated" if "--mutated" in sys.argv[1:] else "noop" if "--noop-mutated" in sys.argv[1:] else "baseline"
     x = projection.ids(28)
     sessions = []
     original = projection.fn_body("inbox_reply_send.worker_persist_result")
@@ -38,11 +40,17 @@ def main() -> int:
         print("B2 NOT RUN: disposable fixture with inbox_reply_send.worker_persist_result is unavailable")
         return 2
     try:
-        if mutated:
+        if mode == "mutated":
             body = original.replace(" SET lock_timeout='3s'", "", 1)
             if body == original:
                 raise AssertionError("B2 mutation target SET lock_timeout='3s' not found")
             projection.psql(body, check=True)
+        elif mode == "noop":
+            # Install an identical fixture copy. The assertion below is shared
+            # with both the baseline and the real mutation; this demo proves
+            # that a mutation is only considered effective when behavior
+            # actually changes.
+            projection.psql(original, check=True)
         projection.psql(projection.fixture(28, projection.started(28)).replace("ROLLBACK;", "COMMIT;"), check=True)
         holder = projection.session("b2-attempt-holder", f"BEGIN; SELECT 1 FROM inbox_reply_send.attempts WHERE org_id='{x['o']}' AND id='{x['a']}' FOR UPDATE; SELECT pg_sleep(5); COMMIT;")
         sessions.append(holder)
@@ -66,14 +74,13 @@ END $$;
             projection.finish_session(proc)
         sessions.clear()
         text = projection.output(result)
-        if not mutated:
-            if result.returncode != 0 or "B2_SQLSTATE=55P03" not in text or elapsed >= 4.5:
-                raise AssertionError(f"B2 expected bounded 55P03, elapsed={elapsed:.2f}s output={text}")
-            print(f"B2 PASS unmutated B2_SQLSTATE=55P03 elapsed={elapsed:.2f}s")
-            return 0
-        if "B2_SQLSTATE=55P03" in text:
-            raise AssertionError(f"B2 mutation unexpectedly preserved lock timeout: {text}")
-        raise AssertionError(f"B2 mutated failure captured without 55P03 (expected): elapsed={elapsed:.2f}s output={text}")
+        if result.returncode != 0 or "B2_SQLSTATE=55P03" not in text or elapsed >= 4.5:
+            raise AssertionError(f"B2 expected bounded 55P03, elapsed={elapsed:.2f}s output={text}")
+        if mode == "noop":
+            print(f"B2 SELF-TEST/DEMO no-op mutation SURVIVED shared assertion B2_SQLSTATE=55P03 elapsed={elapsed:.2f}s")
+        else:
+            print(f"B2 PASS {mode} B2_SQLSTATE=55P03 elapsed={elapsed:.2f}s")
+        return 0
     finally:
         for proc in sessions:
             if proc.poll() is None:

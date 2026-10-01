@@ -281,13 +281,6 @@ END $$;"""
     if n == 5:
         body = f"{common_project_state(n,'uncertain')} DO $$ DECLARE r jsonb; BEGIN SELECT inbox_reply_send.worker_persist_result('{x['o']}','{x['a']}','{x['token']}',jsonb_build_object('kind','not_attempted','reason','cancelled_before_dispatch')) INTO r; IF r->>'state' IS DISTINCT FROM 'uncertain' THEN RAISE EXCEPTION 'T5 uncertain replay mismatch'; END IF; END $$;"
         return assert_case(n, body, install_mutated_function("inbox_reply_send.worker_persist_result", "ELSIF row.state='uncertain' AND kind='not_attempted' THEN", "ELSIF false THEN"))
-    if n == 6:
-        body = f"""
-CREATE SCHEMA inbox_reply_test; CREATE FUNCTION inbox_reply_test.cancel_projection() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'fixture cancel' USING ERRCODE='57014'; END$$;
-CREATE TRIGGER projection_cancel BEFORE UPDATE OF status ON public.messages FOR EACH ROW WHEN (NEW.metadata->'inboxReply'->>'attemptId' IS NOT NULL) EXECUTE FUNCTION inbox_reply_test.cancel_projection();
-{common_project_state(n,'provider_accepted',reference='ext-6')}
-DO $$ DECLARE s text; c integer; BEGIN SELECT state INTO s FROM inbox_reply_send.attempts WHERE id='{x['a']}'; SELECT count(*) INTO c FROM inbox_reply_send.message_projection_backlog WHERE attempt_id='{x['a']}'; IF s<>'provider_accepted' OR c<>1 THEN RAISE EXCEPTION 'T6 cancellation boundary mismatch'; END IF; END $$;"""
-        return assert_case(n, body, install_mutated_function("inbox_reply_send.project_message_trigger", "EXCEPTION WHEN query_canceled OR others THEN", "EXCEPTION WHEN others THEN"))
     if n == 7:
         body = f"""
 CREATE SCHEMA inbox_reply_test; CREATE FUNCTION inbox_reply_test.fail_backlog() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'fixture backlog failure'; END$$;
@@ -628,6 +621,11 @@ def finish_session(proc: subprocess.Popen[str], commit: bool = True) -> str:
 
 
 def wait_activity(app: str, *, wait_event: str | None = None) -> tuple[int, str]:
+    pid, xid, _ = wait_activity_detail(app, wait_event=wait_event)
+    return pid, xid
+
+
+def wait_activity_detail(app: str, *, wait_event: str | None = None) -> tuple[int, str, str]:
     deadline = time.time() + 5
     while time.time() < deadline:
         row = psql(f"SELECT pid || '|' || coalesce(backend_xid::text,'') || '|' || coalesce(wait_event_type,'') || '|' || coalesce(wait_event,'') FROM pg_stat_activity WHERE application_name='{app}' AND pid<>pg_backend_pid();")
@@ -636,7 +634,7 @@ def wait_activity(app: str, *, wait_event: str | None = None) -> tuple[int, str]
             parts = value.split("|", 3)
             observed = f"{parts[2]}/{parts[3]}"
             if wait_event is None or observed == wait_event or parts[2] == wait_event or parts[3] == wait_event:
-                return int(parts[0]), parts[1]
+                return int(parts[0]), parts[1], observed
         time.sleep(.05)
     raise AssertionError(f"session {app} did not reach activity state {wait_event!r}")
 
@@ -772,7 +770,89 @@ ROLLBACK;
         cleanup(n)
 
 
+def run_t6(mutated: bool) -> tuple[bool, str]:
+    """Cancel a real persist blocked on the reply message row lock."""
+    n = 6
+    x = ids(n)
+    original = fn_body("inbox_reply_send.project_message_trigger")
+    mutation = install_mutated_function(
+        "inbox_reply_send.project_message_trigger",
+        "EXCEPTION WHEN query_canceled OR others THEN",
+        "EXCEPTION WHEN others THEN",
+    )
+    sessions: list[subprocess.Popen[str]] = []
+    holder: subprocess.Popen[str] | None = None
+    persist: subprocess.Popen[str] | None = None
+    holder_pid: int | None = None
+    persist_pid: int | None = None
+    wait_event = ""
+    cancel_result = ""
+    persist_text = ""
+    try:
+        if mutated:
+            # The mutation is the only fixture change: remove query_canceled
+            # from the savepoint handler. Baseline and mutation share every
+            # assertion below.
+            psql("BEGIN;" + mutation + "COMMIT;", check=True)
+        psql(fixture(n, started(n)).replace("ROLLBACK;", "COMMIT;", 1), check=True)
+        holder = session(
+            "r14-t6-holder",
+            f"BEGIN; SELECT id FROM public.messages WHERE org_id='{x['o']}' AND idempotency_key='{x['a']}' FOR UPDATE; SELECT pg_sleep(30);",
+        )
+        sessions.append(holder)
+        holder_pid, _, holder_event = wait_activity_detail("r14-t6-holder", wait_event="PgSleep")
+        persist = session(
+            "r14-t6-persist",
+            f"BEGIN; SELECT inbox_reply_send.worker_persist_result('{x['o']}','{x['a']}','{x['token']}',jsonb_build_object('kind','accepted','externalId','ext-6','status','sent'));",
+        )
+        sessions.append(persist)
+        persist_pid, _, wait_event = wait_activity_detail("r14-t6-persist", wait_event="Lock")
+        cancel = psql(f"SELECT pg_cancel_backend({persist_pid});", check=True)
+        cancel_result = cancel.stdout.strip()
+        if cancel_result != "t":
+            raise AssertionError(f"T6 pg_cancel_backend returned {cancel_result!r}")
+        persist_text = finish_session(persist, commit=True).replace("\n", " ")
+        final_result = psql(
+            f"SELECT (SELECT state FROM inbox_reply_send.attempts WHERE org_id='{x['o']}' AND id='{x['a']}') || ':' || "
+            f"(SELECT count(*) FROM inbox_reply_send.message_projection_backlog WHERE org_id='{x['o']}' AND attempt_id='{x['a']}') || ':' || "
+            f"(SELECT status FROM public.messages WHERE org_id='{x['o']}' AND idempotency_key='{x['a']}');",
+            check=True,
+        )
+        final = final_result.stdout.strip()
+        expected = "provider_accepted:1:pending"
+        if final != expected:
+            raise AssertionError(
+                f"T6_PERSIST_BLOCKED pid={persist_pid} wait_event={wait_event} "
+                f"T6_CANCEL backend_pid={persist_pid} result={cancel_result} "
+                f"T6_AFTER_CANCEL observed={final!r} expected={expected!r} persist={persist_text!r}"
+            )
+        return True, (
+            f"T6_PERSIST_BLOCKED pid={persist_pid} wait_event={wait_event} "
+            f"T6_CANCEL backend_pid={persist_pid} result={cancel_result} "
+            f"T6_AFTER_CANCEL ledger_state=provider_accepted backlog_rows=1 message_status=pending "
+            f"tuple={final} holder_wait={holder_event} persist={persist_text!r}"
+        )
+    finally:
+        # Only signal sessions created by this proof. Cancellation makes the
+        # holder's pg_sleep return, releasing its row lock before cleanup.
+        for proc, pid in ((persist, persist_pid), (holder, holder_pid)):
+            if proc is not None and proc.poll() is None and pid is not None:
+                psql(f"SELECT pg_cancel_backend({pid});", check=False)
+        for proc in reversed(sessions):
+            if proc.poll() is None:
+                try:
+                    finish_session(proc, commit=False)
+                except Exception:
+                    proc.kill()
+                    proc.wait(timeout=5)
+        if mutated:
+            psql("BEGIN;" + original + "COMMIT;", check=True)
+        cleanup(n)
+
+
 def run_case(n: int, mutated: bool) -> tuple[bool, str]:
+    if n == 6:
+        return run_t6(mutated)
     if n == 17:
         return True, "T17 application status-events test is run by mutation-run.py"
     if n in {9,10,11,13}: return run_concurrency(n,mutated)

@@ -23,13 +23,13 @@ PG_BIN = Path("/opt/homebrew/opt/postgresql@17/bin")
 MIGRATION = ROOT / "supabase/migrations/20260930040250_inbox_reply_message_projection.sql"
 
 
-def candidate(mutated: bool) -> str:
+def candidate(mode: str) -> str:
     source = MIGRATION.read_text()
     match = re.search(r"CREATE FUNCTION inbox_reply_send\.worker_persist_result\(.*?END \$\$;", source, re.S)
     if not match:
         raise RuntimeError("B2 wrapper source not found")
     body = match.group(0)
-    if mutated:
+    if mode == "mutated":
         body = body.replace(" SET lock_timeout='3s'", "", 1)
     return body.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1)
 
@@ -52,7 +52,9 @@ def psql(socket: Path, port: int, sql: str, *, check: bool = False, application_
 
 
 def main() -> int:
-    mutated = "--mutated" in sys.argv[1:]
+    if "--mutated" in sys.argv[1:] and "--noop-mutated" in sys.argv[1:]:
+        raise AssertionError("B2 minimal accepts only one mutation mode")
+    mode = "mutated" if "--mutated" in sys.argv[1:] else "noop" if "--noop-mutated" in sys.argv[1:] else "baseline"
     data = Path(tempfile.mkdtemp(prefix="replypersist-b2-pg-"))
     socket = data / "socket"
     socket.mkdir(mode=0o700)
@@ -64,7 +66,7 @@ def main() -> int:
 CREATE SCHEMA inbox_reply_send;
 CREATE TABLE inbox_reply_send.attempts(org_id uuid NOT NULL,id uuid NOT NULL,dispatch_token uuid,state text,evidence text,receipt_version bigint NOT NULL DEFAULT 0);
 CREATE FUNCTION inbox_reply_send.persist(o uuid,attempt_id uuid,token uuid,result jsonb) RETURNS jsonb LANGUAGE sql AS $$ SELECT jsonb_build_object('state','provider_accepted') $$;
-{candidate(mutated)}
+{candidate(mode)}
 INSERT INTO inbox_reply_send.attempts(org_id,id,dispatch_token,state) VALUES('11111111-1111-1111-1111-111111111111','22222222-2222-2222-2222-222222222222','33333333-3333-3333-3333-333333333333','dispatch_started');
 """, check=True)
         holder = subprocess.Popen(["psql", "-XqAt", "-v", "ON_ERROR_STOP=1", "-h", str(socket), "-p", str(port), "-U", "postgres", "-d", "postgres"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env={**os.environ, "PGAPPNAME": "b2-minimal-holder"})
@@ -95,14 +97,13 @@ END $$;
         elapsed = time.monotonic() - started
         holder.communicate(timeout=8)
         output = result.stderr + result.stdout
-        if not mutated:
-            if result.returncode != 0 or "B2_SQLSTATE=55P03" not in output or elapsed >= 4.5:
-                raise AssertionError(f"B2 minimal expected bounded 55P03, elapsed={elapsed:.2f}s output={output}")
-            print(f"B2 PASS minimal disposable PostgreSQL SQLSTATE=55P03 elapsed={elapsed:.2f}s")
-            return 0
-        if "B2_SQLSTATE=55P03" in output:
-            raise AssertionError("B2 mutation unexpectedly retained lock timeout")
-        raise AssertionError(f"B2 mutated failure captured without 55P03 (expected): elapsed={elapsed:.2f}s output={output}")
+        if result.returncode != 0 or "B2_SQLSTATE=55P03" not in output or elapsed >= 4.5:
+            raise AssertionError(f"B2 minimal expected bounded 55P03, elapsed={elapsed:.2f}s output={output}")
+        if mode == "noop":
+            print(f"B2 SELF-TEST/DEMO minimal no-op mutation SURVIVED shared assertion B2_SQLSTATE=55P03 elapsed={elapsed:.2f}s")
+        else:
+            print(f"B2 PASS minimal {mode} SQLSTATE=55P03 elapsed={elapsed:.2f}s")
+        return 0
     finally:
         subprocess.run([str(PG_BIN / "pg_ctl"), "-D", str(data / "data"), "-m", "fast", "stop"], capture_output=True, text=True)
         shutil.rmtree(data, ignore_errors=True)

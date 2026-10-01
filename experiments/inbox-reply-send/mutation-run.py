@@ -38,7 +38,7 @@ WORKER_TRANSPORT = ROOT / "experiments/inbox-reply-send-worker/vendor/test-trans
 LOCAL_DB_RETRY = ROOT / "experiments/inbox-reply-send-worker/restate-retry-local-db.py"
 PROVIDER_FIX = ROOT / "experiments/inbox-reply-send/provider-fix-proof.py"
 PROVIDER_FIX_MINIMAL = ROOT / "experiments/inbox-reply-send/provider-fix-minimal.py"
-LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r13.log")
+LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r14.log")
 EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-evidence.md")
 CLOCK_PROOF_POINTS = (
     ("previously-failed", "23:00:00", "2026-06-15T04:00:00Z"),
@@ -359,6 +359,8 @@ def run_provider_fixes(handle) -> None:
         record(handle, "B1 route mutation", execute(route, env))
     finally:
         REPLY_STATUS_ROUTE.write_bytes(route_original)
+    record(handle, "B2 SELF-TEST/DEMO no-op baseline", execute([sys.executable, str(PROVIDER_FIX)], env))
+    record(handle, "B2 SELF-TEST/DEMO no-op mutation", execute([sys.executable, str(PROVIDER_FIX), "--noop-mutated"], env))
     record(handle, "B2 lock-timeout baseline", execute([sys.executable, str(PROVIDER_FIX)], env))
     record(handle, "B2 lock-timeout mutation", execute([sys.executable, str(PROVIDER_FIX), "--mutated"], env))
     record(handle, "B2 minimal disposable PostgreSQL baseline", execute([sys.executable, str(PROVIDER_FIX_MINIMAL)], env))
@@ -491,12 +493,17 @@ def real_not_run_id(header: str) -> str:
     return full if full in REAL_NOT_RUN else full.split()[0]
 
 
+def is_main_mutation(header: str) -> bool:
+    lower = header.lower()
+    return " mutation" in lower and "self-test/demo" not in lower
+
+
 def baseline_for(mutation_header: str, sections: list[tuple[str, str]]) -> tuple[str, str] | None:
     mutation_tokens = set(mutation_header.lower().split()) - {"mutation", "baseline"}
     candidates: list[tuple[int, str, str]] = []
     mutation_test = test_id(mutation_header)
     for header, body in sections:
-        if "baseline" not in header.lower() or not re.search(rf"(?<![A-Za-z0-9-]){re.escape(mutation_test)}(?![A-Za-z0-9-])", header):
+        if "baseline" not in header.lower() or "self-test/demo" in header.lower() or not re.search(rf"(?<![A-Za-z0-9-]){re.escape(mutation_test)}(?![A-Za-z0-9-])", header):
             continue
         candidate_tokens = set(header.lower().split()) - {"mutation", "baseline"}
         candidates.append((len(mutation_tokens & candidate_tokens), header, body))
@@ -542,16 +549,16 @@ def failure_excerpt(body: str) -> str:
 def derive_evidence(raw: str) -> str:
     sections = captured_sections(raw)
     rows: list[str] = [
-        "# Reply-persistence v13 mutation evidence (generated)",
+        "# Reply-persistence v14 mutation evidence (generated)",
         "",
-        "This file is generated from `replypersist-mutation-run-r13.log`. EXECUTED requires a passing baseline and a natural non-zero mutation result; baseline failures are never counted as executed. A passing mutation is SURVIVED and fails the runner. Any BASELINE FAIL also fails the runner.",
+        "This file is generated from `replypersist-mutation-run-r14.log`. EXECUTED requires a passing baseline and a natural non-zero mutation result; baseline failures are never counted as executed. A passing mutation is SURVIVED and fails the runner. Any BASELINE FAIL also fails the runner. The B2 SELF-TEST/DEMO no-op mutation is intentionally excluded from the main table and reported separately below.",
         "",
         "| Test | Status | Baseline result | Mechanism | Natural mutated failure |",
         "|---|---|---|---|---|",
     ]
     seen: set[str] = set()
     for header, body in sections:
-        if " mutation" not in header.lower():
+        if not is_main_mutation(header):
             continue
         test = test_id(header)
         seen.add(test)
@@ -593,13 +600,24 @@ def derive_evidence(raw: str) -> str:
             rows.append(f"| {test} | NOT RUN | `no captured baseline` | no mutation record | `no captured run` |")
     for test, reason in REAL_NOT_RUN.items():
         rows.append(f"| {test} | NOT RUN | `ruling row not run` | REAL ruling row | `{reason}` |")
+    demo = {header: body for header, body in sections if "self-test/demo" in header.lower()}
+    demo_baseline = next(((header, body) for header, body in demo.items() if "baseline" in header.lower()), None)
+    demo_mutation = next(((header, body) for header, body in demo.items() if "mutation" in header.lower()), None)
+    if demo_baseline and demo_mutation:
+        demo_status = result_kind(demo_mutation[0], demo_mutation[1])
+        rows.extend([
+            "",
+            "## Self-test/demo (excluded from main counts)",
+            "",
+            f"- B2 no-op mutation: `{demo_status}`; it installed an identical fixture function and passed the shared bounded-55P03 assertions. This deliberate SURVIVED result demonstrates that the mutation runner rejects a non-effective mutation, but it is not a production evidence row.",
+        ])
     return "\n".join(rows) + "\n"
 
 
 def has_survived_mutation(raw: str) -> bool:
     sections = captured_sections(raw)
     for header, body in sections:
-        if " mutation" not in header.lower():
+        if not is_main_mutation(header):
             continue
         baseline = baseline_for(header, sections)
         if baseline and result_kind(*baseline, baseline=True) == "PASS" and result_kind(header, body) == "SURVIVED":
@@ -610,7 +628,7 @@ def has_survived_mutation(raw: str) -> bool:
 def has_baseline_failure(raw: str) -> bool:
     sections = captured_sections(raw)
     for header, _body in sections:
-        if " mutation" not in header.lower():
+        if not is_main_mutation(header):
             continue
         baseline = baseline_for(header, sections)
         if baseline and result_kind(*baseline, baseline=True) == "FAIL":
@@ -716,7 +734,7 @@ def main() -> int:
     LOG.parent.mkdir(parents=True, exist_ok=True)
     harness_error: Exception | None = None
     with LOG.open("w", encoding="utf-8") as handle:
-        handle.write("reply-persistence v13 round-13 mutation run; machine-produced raw child output\n")
+        handle.write("reply-persistence v14 round-14 mutation run; machine-produced raw child output\n")
         try:
             quiet_hours_preflight("before", handle)
             for n in range(1, 29):
