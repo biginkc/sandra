@@ -9,6 +9,14 @@ const deploymentId = "dpl_test";
 const commitSha = "a".repeat(40);
 const key = "approved-key-with-entropy";
 const aliasHost = "sandra.example.test";
+let controlValue = "true";
+let controlError = false;
+function controlClient() {
+  return { from: () => ({ select: () => ({ eq: () => ({ single: async () => ({
+    data: controlError ? null : { value: controlValue }, error: controlError ? new Error("db") : null,
+  }) }) }) }) } as never;
+}
+
 
 function proof(overrides: Record<string, string | number> = {}) {
   return createCanaryProof({
@@ -22,6 +30,8 @@ function proof(overrides: Record<string, string | number> = {}) {
 }
 
 beforeEach(() => {
+  controlValue = "true";
+  controlError = false;
   vi.stubEnv("SENDILLO_API_KEY", key);
   vi.stubEnv("SENDILLO_FROM_NUMBER", CANARY_SENDER);
   vi.stubEnv("SENDILLO_WEBHOOK_SECRET", "webhook-secret");
@@ -73,7 +83,9 @@ describe("canary runtime proof", () => {
     const original = proof();
     vi.stubEnv("SENDILLO_API_KEY", "wrong-key");
     expect(() => verifyCanaryProof(original)).toThrow(/key mismatch/);
-    vi.stubEnv("SENDILLO_API_KEY", key);
+    controlValue = "true";
+  controlError = false;
+  vi.stubEnv("SENDILLO_API_KEY", key);
     expect(() => verifyCanaryProof(proof({ expiresAt: Date.now() - 1 }))).toThrow(/expired/);
   });
 
@@ -94,11 +106,11 @@ describe("canary runtime proof", () => {
   it("fails closed when the stop state or run authorization changed", async () => {
     vi.stubEnv("CANARY_GITHUB_READ_TOKEN", "read-token");
     vi.stubGlobal("fetch", vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ value: "false" }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
         status: "in_progress", run_attempt: 1, event: "schedule",
       }), { status: 200 })));
-    await expect(assertCanaryStopState(verifyCanaryProof(proof()))).rejects.toThrow(/stop state/);
+    controlValue = "false";
+    await expect(assertCanaryStopState(verifyCanaryProof(proof()), controlClient())).rejects.toThrow(/stop state/);
   });
 
   it("blocks dispatch after a prior failed full run", async () => {
@@ -112,7 +124,7 @@ describe("canary runtime proof", () => {
       return new Response(JSON.stringify({ value: "true" }));
     });
     vi.stubGlobal("fetch", fetchMock);
-    await expect(assertCanaryStopState(verifyCanaryProof(proof())))
+    await expect(assertCanaryStopState(verifyCanaryProof(proof()), controlClient()))
       .rejects.toThrow(/stop state/);
     expect(fetchMock.mock.calls.some(([url]) => url.includes("/workflows/"))).toBe(true);
   });
@@ -122,7 +134,6 @@ describe("canary runtime proof", () => {
     const sequenceId = "11111111-1111-4111-8111-111111111111";
     const description = proof();
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ value: "true" }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
         status: "in_progress", run_attempt: 1, event: "schedule",
       }), { status: 200 }))
@@ -137,6 +148,7 @@ describe("canary runtime proof", () => {
         select: () => ({ eq: () => ({ single: async () => ({
           data: table === "sequence_enrollments"
             ? { sequence_id: sequenceId, property_id: "fixture-property", contact_id: "fixture-contact" }
+            : table === "sequence_canary_controls" ? { value: controlValue }
             : { description, created_by: "fixture-user" },
           error: null,
         }) }) }),
@@ -145,7 +157,7 @@ describe("canary runtime proof", () => {
     await expect(assertCanarySendBinding(client as never, {
       propertyId: "fixture-property", body: "PROD-SMOKE", enrollmentId: "enr",
     })).resolves.toBeUndefined();
-    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it("rejects when the send deadline passes during network checks", async () => {
@@ -169,6 +181,7 @@ describe("canary runtime proof", () => {
       const client = { from: (table: string) => ({ select: () => ({ eq: () => ({ single: async () => ({
         data: table === "sequence_enrollments"
           ? { sequence_id: "11111111-1111-4111-8111-111111111111", property_id: "fixture-property", contact_id: "fixture-contact" }
+          : table === "sequence_canary_controls" ? { value: controlValue }
           : { description, created_by: "fixture-user" },
         error: null,
       }) }) }) }) };
