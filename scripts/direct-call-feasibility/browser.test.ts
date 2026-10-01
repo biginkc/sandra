@@ -34,7 +34,7 @@ async function boot(opts: { status: { ready: boolean; busy: boolean }; startOk?:
     if (url === "/token") return j({ token: "t", sipUsername: "u" });
     if (url === "/escape-targets") return j(["owned phone (PSTN)", "transfer"]);
     if (url === "/probe/status") return j(opts.status);
-    if (url === "/probe/start") return opts.startOk === false ? j({ error: "containment not confirmed for this run" }, false) : j({ probeId: "p1", target: "+15555550101" });
+    if (url === "/probe/start") return opts.startOk === false ? j({ error: "containment not confirmed for this run" }, false) : j({ probeId: "p1", target: "+15555550101", targetLabel: "owned phone (PSTN)" });
     return j({});
   };
   const ctx: any = {
@@ -106,5 +106,24 @@ describe("browser page: F2 escape probes", () => {
     for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
     expect(t.newCalls).toHaveLength(1);
     expect(t.newCalls[0].destinationNumber).toBe("+15555550101");
+  });
+
+  it("records the transfer probe as NOT EXECUTED (not 'unavailable') when there is no active source call", async () => {
+    const t = await boot({ status: { ready: true, busy: false } });
+    t.byId.escapes.children[1].onclick(); // transfer
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    expect(t.requests.some((r) => r.url === "/browser-log" && r.body.type === "escape.transfer.not_executed")).toBe(true);
+    expect(t.requests.some((r) => r.url === "/browser-log" && r.body.type === "escape.transfer")).toBe(false);
+  });
+
+  it("logs which target an executed transfer went to", async () => {
+    const t = await boot({ status: { ready: true, busy: false } });
+    const transferred: string[] = [];
+    t.clients[0].handlers["telnyx.notification"]({ type: "callUpdate", call: { state: "active", transfer: (x: string) => transferred.push(x), hangup() {} } });
+    t.byId.escapes.children[1].onclick();
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    expect(transferred).toEqual(["+15555550101"]);
+    const ev = t.requests.find((r) => r.url === "/browser-log" && r.body.type === "escape.transfer");
+    expect(ev!.body.data.targetLabel).toBe("owned phone (PSTN)");
   });
 });

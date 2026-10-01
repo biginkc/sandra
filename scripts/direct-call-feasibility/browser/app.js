@@ -102,9 +102,10 @@
       const r = await fetch("/probe/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label }) });
       if (!r.ok) { const e = await r.json().catch(() => ({})); say("probe refused: " + (e.error || r.status)); return; }
       grant = await r.json();
-      post("escape.attempt", { label, probeId: grant.probeId });
-      try { await run(grant.target); } catch (e) { say("probe threw: " + e.message); post("escape.error", { label, message: e.message }); }
+      post("escape.attempt", { label, probeId: grant.probeId, targetLabel: grant.targetLabel });
+      try { await run(grant.target, grant); } catch (e) { say("probe threw: " + e.message); post("escape.error", { label, message: e.message }); }
     } finally {
+      // Reporting finish does not release the gate; the server reconciles legs first, and /probe/status stays busy until then.
       if (grant) await fetch("/probe/finish", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ probeId: grant.probeId }) }).catch(() => {});
       busy = false; refreshGate();
     }
@@ -113,9 +114,11 @@
     const b = document.createElement("button");
     b.disabled = true;
     b.textContent = (label === "transfer" ? "" : "dial ") + label;
-    b.onclick = () => runProbe(label, (target) => new Promise((resolve) => {
+    b.onclick = () => runProbe(label, (target, grant) => new Promise((resolve) => {
       if (label === "transfer") {
-        if (!current || typeof current.transfer !== "function") { say("transfer unavailable in this SDK or no call"); return resolve(); }
+        if (!current || typeof current.transfer !== "function") { say("transfer NOT EXECUTED (no active source call or no SDK support): counts as untested"); post("escape.transfer.not_executed", { probeId: grant.probeId }); return resolve(); }
+        say("transfer to: " + grant.targetLabel);
+        post("escape.transfer", { probeId: grant.probeId, targetLabel: grant.targetLabel });
         current.transfer(target);
         return setTimeout(resolve, 20000);
       }

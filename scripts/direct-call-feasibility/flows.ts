@@ -18,6 +18,8 @@ export interface FlowCtx {
   stats: StreamStats;
   streamToken: string;
   probeGate: ProbeGate;
+  /** Owned transfer-source call legs; never treated as probe legs. */
+  sourceLegs: string[];
   /** Re-verifies provider settings (read-only GETs); throws if not ready or changed. */
   ensureReady: () => Promise<void>;
   ask: (q: string) => Promise<string>;
@@ -87,19 +89,61 @@ export async function f2(ctx: FlowCtx): Promise<void> {
   if (!yes(proof)) { record(ctx, "F2", { result: "NOT RUN: containment bound not shown; F2 not passed" }); return; }
   // Only now can the browser page start probes; each one reserves budget server-side, one at a time.
   ctx.probeGate.arm();
+  const untested: string[] = [];
   try {
-    for (const probe of ["pstn", "on-account-sip", "external-sip", "transfer"]) {
+    const probes = ["pstn", "on-account-sip", "external-sip", "transfer"];
+    for (const [i, probe] of probes.entries()) {
+      if (ctx.probeGate.status().locked) { untested.push(...probes.slice(i)); record(ctx, "F2", { probe, result: "NOT RUN: probe cleanup uncertain; gate closed; F2 not passed" }); break; }
+      let sourceCall: string | undefined;
+      if (probe === "transfer") {
+        // Transfer needs an active owned source call: an owned test call to the allowed far end (the browser) via the guarded Dial.
+        const sip = ctx.inv.getRole("browserSipUsername");
+        try {
+          const src = await ctx.client.dial({ to: `sip:${sip}@sip.telnyx.com`, clientState: "f2-transfer-source" });
+          sourceCall = src.callControlId;
+          if (sourceCall) {
+            ctx.sourceLegs.push(sourceCall);
+            ctx.say("Transfer source call placed to the browser. Answer it in the page, then run the transfer probe.");
+            if (!(await ctx.log.waitFor(isEvt("call.answered", sourceCall), waitMs(ctx)))) sourceCall = undefined;
+          }
+        } catch (e) {
+          ctx.say(`could not place transfer source call: ${(e as Error).message.slice(0, 120)}`);
+        }
+        if (!sourceCall) {
+          untested.push(probe);
+          record(ctx, "F2", { probe, result: "NOT EXECUTED: no active owned source call; counts as untested; F2 not passed" });
+          await endLegs(ctx, ctx.sourceLegs);
+          continue;
+        }
+      }
+      const since = ctx.log.all().length;
       await ctx.ask(`In the browser page, run the "${probe}" escape attempt (registered, spare capacity), then press Enter. `);
+      // The server (not the page) decides when the probe is over: wait for the gate to confirm no probe leg is alive.
+      for (let w = 0; w < 60 && ctx.probeGate.status().busy && !ctx.probeGate.status().locked; w++) await new Promise((r) => setTimeout(r, 1000));
       await ctx.ensureReady();
       const legs = ((await ctx.client.request("GET", `/connections/${conn}/active_calls`)).data as any[]) ?? [];
       for (const l of legs) { ctx.inv.add("call_leg", l.call_control_id); ctx.inv.addCallRef(l.call_control_id); ctx.inv.addCallRef(l.call_leg_id); ctx.inv.addCallRef(l.call_session_id); }
-      await endLegs(ctx, legs.map((l) => l.call_control_id));
+      await endLegs(ctx, legs.map((l) => l.call_control_id).filter((id) => !ctx.sourceLegs.includes(id)));
+      const events = ctx.log.all().slice(since);
+      const started = events.find((e) => e.type === "escape.probe.start");
+      const notExecuted = events.some((e) => e.source === "browser" && e.type === "escape.transfer.not_executed");
+      if (!started || notExecuted) {
+        untested.push(probe);
+        record(ctx, "F2", { probe, result: "NOT EXECUTED: probe did not run; counts as untested; F2 not passed" });
+        if (probe === "transfer") await endLegs(ctx, ctx.sourceLegs);
+        continue;
+      }
+      const targetLabel = (started.data as any)?.targetLabel;
       const code = await ctx.ask("Provider rejection code/reason shown in the page log (or 'none'): ");
       const valid = await ctx.ask("Was it a valid request to a known-working owned destination from a registered browser? (y/n) ");
-      record(ctx, "F2", { probe, legsFoundAndEnded: legs.map((l) => l.call_control_id), code, validRequest: yes(valid), note: "inconclusive unless reason is attributable to the restriction" });
+      record(ctx, "F2", { probe, ...(probe === "transfer" ? { transferTargetLabel: targetLabel, sourceCall } : {}), legsFoundAndEnded: legs.map((l) => l.call_control_id), code, validRequest: yes(valid), note: "inconclusive unless reason is attributable to the restriction" });
+      if (probe === "transfer") await endLegs(ctx, ctx.sourceLegs);
     }
+    if (ctx.probeGate.status().locked) record(ctx, "F2", { result: "probe cleanup uncertain (escape.probe.cleanup_uncertain); F2 not passed; run teardown" });
+    if (untested.length) record(ctx, "F2", { untested, result: "untested probes remain; F2 not passed" });
   } finally {
     ctx.probeGate.disarm();
+    await endLegs(ctx, ctx.sourceLegs);
   }
 }
 

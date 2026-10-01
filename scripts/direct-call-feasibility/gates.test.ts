@@ -9,11 +9,11 @@ import { verifyTelnyxSignature } from "./webhook-verify";
 import { cfg, inventory } from "./test-helpers";
 import { EventEmitter } from "node:events";
 
-function gate(limits?: Partial<{ maxAttempts: number }>) {
+function gate(limits?: Partial<{ maxAttempts: number }>, extra: Partial<ConstructorParameters<typeof ProbeGate>[0]> = {}) {
   const config = cfg(limits ? { DIRECT_CALL_MAX_ATTEMPTS: String(limits.maxAttempts) } : {});
   const budget = new Budget(config.limits);
   const log = new EventLog();
-  const g = new ProbeGate({ budget, log, targets: () => [{ label: "owned phone (PSTN)", target: "+15555550101" }] });
+  const g = new ProbeGate({ budget, log, targets: () => [{ label: "owned phone (PSTN)", target: "+15555550101" }], listAliveLegs: async () => [], sleep: async () => {}, ...extra });
   return { g, budget, log };
 }
 
@@ -25,19 +25,98 @@ describe("probe gate", () => {
     expect(log.all().some((e) => e.type === "escape.probe.refused")).toBe(true);
   });
 
-  it("reserves attempt + spend, allows one outstanding probe, and logs each", () => {
+  it("reserves attempt + spend, allows one outstanding probe, and logs each", async () => {
     const { g, budget, log } = gate();
     g.arm();
     const p = g.start("owned phone (PSTN)");
     expect(p.target).toBe("+15555550101");
     expect(budget.attempts).toBe(1);
     expect(budget.estSpendUsd).toBeGreaterThan(0);
-    expect(g.status()).toEqual({ ready: true, busy: true });
+    expect(g.status()).toEqual({ ready: true, busy: true, locked: false });
     expect(() => g.start("transfer")).toThrow(/outstanding/);
     expect(budget.attempts).toBe(1);
-    expect(g.finish(p.probeId)).toBe(true);
+    expect((await g.finish(p.probeId)).released).toBe(true);
     g.start("transfer");
     expect(log.all().filter((e) => e.type === "escape.probe.start")).toHaveLength(2);
+  });
+
+  describe("release requires server-side confirmation", () => {
+    it("keeps the gate held while a probe leg is still alive, hangs it up, and releases only after clean listings", async () => {
+      let alive = ["probeleg"];
+      const hung: string[] = [];
+      const { g } = gate(undefined, {
+        listAliveLegs: async () => [...alive],
+        hangupLeg: async (id) => { hung.push(id); alive = alive.filter((x) => x !== id); },
+      });
+      g.arm();
+      const p = g.start("owned phone (PSTN)");
+      expect((await g.finish(p.probeId)).released).toBe(true);
+      expect(hung).toEqual(["probeleg"]);
+      expect(g.status().busy).toBe(false);
+    });
+
+    it("a failed hangup never releases: stays busy, records cleanup_uncertain, refuses further probes", async () => {
+      const { g, log } = gate(undefined, {
+        listAliveLegs: async () => ["stuck"],
+        hangupLeg: async () => { throw new Error("hangup failed"); },
+        confirmWaitMs: 6000,
+        pollMs: 2000,
+      });
+      g.arm();
+      const p = g.start("owned phone (PSTN)");
+      expect((await g.finish(p.probeId)).released).toBe(false);
+      expect(g.status()).toEqual({ ready: false, busy: true, locked: true });
+      expect(log.all().some((e) => e.type === "escape.probe.cleanup_uncertain")).toBe(true);
+      expect(log.all().some((e) => e.type === "escape.probe.finish")).toBe(false);
+      expect(() => g.start("owned phone (PSTN)")).toThrow(/cleanup uncertain/);
+    });
+
+    it("a listing failure is uncertain, not clean", async () => {
+      const { g, log } = gate(undefined, { listAliveLegs: async () => { throw new Error("api down"); }, confirmWaitMs: 2000 });
+      g.arm();
+      const p = g.start("owned phone (PSTN)");
+      expect((await g.finish(p.probeId)).released).toBe(false);
+      expect(g.status().locked).toBe(true);
+      expect(log.all().find((e) => e.type === "escape.probe.cleanup_uncertain")).toBeTruthy();
+    });
+
+    it("with no reconciliation source the gate never releases", async () => {
+      const { g } = gate(undefined, { listAliveLegs: undefined });
+      g.arm();
+      const p = g.start("owned phone (PSTN)");
+      expect((await g.finish(p.probeId)).released).toBe(false);
+      expect(g.status().locked).toBe(true);
+    });
+
+    it("needs two consecutive clean listings and ignores protected source legs", async () => {
+      const lists = [["src", "probe"], [], ["src"]];
+      let n = 0;
+      const { g } = gate(undefined, {
+        listAliveLegs: async () => lists[Math.min(n++, lists.length - 1)],
+        protectedLegs: () => ["src"],
+        hangupLeg: async () => {},
+      });
+      g.arm();
+      const p = g.start("owned phone (PSTN)");
+      expect((await g.finish(p.probeId)).released).toBe(true);
+      expect(n).toBe(3);
+    });
+
+    it("ignores finish for an unknown probe id and does not release", async () => {
+      const { g } = gate();
+      g.arm();
+      g.start("owned phone (PSTN)");
+      expect((await g.finish("nope")).released).toBe(false);
+      expect(g.status().busy).toBe(true);
+    });
+  });
+
+  it("returns the target label so the transfer target is logged", () => {
+    const { g, log } = gate();
+    g.arm();
+    const p = g.start("transfer");
+    expect(p.targetLabel).toBe("owned phone (PSTN)");
+    expect((log.all().find((e) => e.type === "escape.probe.start")!.data as any).targetLabel).toBe("owned phone (PSTN)");
   });
 
   it("refuses when the budget is exhausted", () => {

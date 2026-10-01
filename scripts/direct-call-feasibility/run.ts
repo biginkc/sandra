@@ -70,8 +70,20 @@ async function main(): Promise<void> {
     const ensureReady = () => assertReady(client, inv, cfg);
     // Refuse before anything is served or dialed unless setup's read-back passed and still holds.
     await ensureReady();
+    const sourceLegs: string[] = []; // owned transfer-source call(s); not probe legs
+    const scopes = () => [inv.getRole("connectionId"), inv.getRole("appId")].filter((x): x is string => !!x);
     const probeGate = new ProbeGate({
       budget, log,
+      protectedLegs: () => sourceLegs,
+      listAliveLegs: async () => {
+        const ids: string[] = [];
+        for (const scope of scopes()) {
+          const r = await client.request("GET", `/connections/${scope}/active_calls?page[size]=250`);
+          for (const c of (r.data as any[]) ?? []) if (c.call_control_id) ids.push(c.call_control_id);
+        }
+        return ids;
+      },
+      hangupLeg: async (id) => { await client.request("POST", `/calls/${id}/actions/hangup`, {}); },
       targets: () => [
         { label: "owned phone (PSTN)", target: cfg.testPhones[0] },
         ...(inv.getRole("escapeSipUsername") ? [{ label: "on-account SIP", target: `sip:${inv.getRole("escapeSipUsername")}@sip.telnyx.com` }] : []),
@@ -90,7 +102,7 @@ async function main(): Promise<void> {
     }, Number(process.env.DIRECT_CALL_LOCAL_PORT ?? 8787));
     console.log("Local server on http://localhost:8787 (open this in the browser). Point your separately started tunnel at it.");
     try {
-      await FLOWS[cmd]({ client, inv, cfg, log, stats, streamToken, probeGate, ensureReady, ask, say: console.log });
+      await FLOWS[cmd]({ client, inv, cfg, log, stats, streamToken, probeGate, sourceLegs, ensureReady, ask, say: console.log });
     } finally {
       server.close();
     }

@@ -105,8 +105,9 @@ export function startServer(deps: ServerDeps, port: number): http.Server {
       }
       if (req.method === "POST" && url === "/probe/finish") {
         const body = JSON.parse((await readBody(req, 10_000)).toString("utf8"));
-        deps.probeGate.finish(String(body.probeId ?? ""), typeof body.outcome === "string" ? body.outcome.slice(0, 200) : undefined);
-        return void res.writeHead(204).end();
+        // Reporting "finished" never releases the gate; the server reconciles first.
+        const r = await deps.probeGate.finish(String(body.probeId ?? ""), typeof body.outcome === "string" ? body.outcome.slice(0, 200) : undefined);
+        return void res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(r));
       }
       if (req.method === "POST" && url === "/browser-log") {
         const body = JSON.parse((await readBody(req, 100_000)).toString("utf8"));
