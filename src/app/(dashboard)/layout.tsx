@@ -25,6 +25,8 @@ import { canViewCalculators } from "@/lib/calculators/access";
 import { getAcquisitionBadge, getAcquisitionRoster } from "@/lib/my-leads/queries";
 import { canAccessMessagesAndLeadsBoard, shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { createClient } from "@/lib/supabase/server";
+import { getCallingConfigForCurrentUser } from "@/lib/direct-calling/actions";
+import type { CallingConfig } from "@/lib/direct-calling/contract";
 import { refreshMyLeadsBadge } from "./my-leads/nav-actions";
 
 export default async function DashboardLayout({
@@ -41,6 +43,10 @@ export default async function DashboardLayout({
     process.env.COACH_OBJECTION_PROMPT_ENABLED,
   );
   const showAdmin = isAdminEmail(user.email);
+  // A failure here must never block the dashboard; fall back to Jitter.
+  const callingConfig: CallingConfig = await getCallingConfigForCurrentUser().catch(
+    () => ({ transport: "default" }),
+  );
   const recordingAccess = await recordingViewer().catch(() => null);
   const [rosterResult, badgeResult, surfaceMembershipsResult] = await Promise.allSettled([
     getAcquisitionRoster(),
@@ -69,7 +75,7 @@ export default async function DashboardLayout({
 
   return (
     <ObjectionPromptProvider enabled={objectionPromptEnabled}>
-    <SoftphoneProvider>
+    <SoftphoneProvider callingConfig={callingConfig}>
     <GlobalSearchProvider>
     <div className="bg-background min-h-screen">
       <ConnectionBanner />

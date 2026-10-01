@@ -1,7 +1,8 @@
 import { isValidElement, type ReactNode } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ memberships: vi.fn(), roster: vi.fn() }));
+const mocks = vi.hoisted(() => ({ memberships: vi.fn(), roster: vi.fn(), callingConfig: vi.fn() }));
+vi.mock("@/lib/direct-calling/actions", () => ({ getCallingConfigForCurrentUser: mocks.callingConfig }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: async () => ({ auth: { getUser: async () => ({ data: { user: { id: "rep", email: "rep@example.test" } } }) } }) }));
 vi.mock("@/lib/auth/memberships", () => ({ getCallerMemberships: mocks.memberships }));
 vi.mock("@/lib/my-leads/queries", () => ({ getAcquisitionRoster: mocks.roster, getAcquisitionBadge: async () => null }));
@@ -19,6 +20,7 @@ vi.mock("@/components/job-failure-notifier", () => ({ JobFailureNotifier: () => 
 vi.mock("@/components/notifications-bell", () => ({ NotificationsBell: () => null }));
 
 import { DashboardSidebar, DashboardMobileNav } from "@/components/dashboard-sidebar";
+import { SoftphoneProvider } from "@/components/softphone/softphone-provider";
 import DashboardLayout from "./layout";
 
 function navigationProps(node: ReactNode): Array<Record<string, unknown>> {
@@ -30,6 +32,7 @@ function navigationProps(node: ReactNode): Array<Record<string, unknown>> {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.callingConfig.mockResolvedValue({ transport: "default" });
   mocks.memberships.mockResolvedValue([{ user_id: "rep", org_id: "org", role: "member", acquisitions_enabled: true, access_status: "active" }]);
 });
 
@@ -47,4 +50,23 @@ it("does not infer Acquisitions access when both membership and roster lookups f
   const nav = navigationProps(await DashboardLayout({ children: <div>Page</div> }));
   expect(nav).toHaveLength(2);
   for (const props of nav) expect(props).toMatchObject({ showMyLeads: false, showMessagesAndLeads: false });
+});
+
+function softphoneConfig(node: ReactNode): unknown {
+  if (Array.isArray(node)) return node.map(softphoneConfig).find((value) => value !== undefined);
+  if (!isValidElement<{ children?: ReactNode; callingConfig?: unknown }>(node)) return undefined;
+  if (node.type === SoftphoneProvider) return node.props.callingConfig;
+  return softphoneConfig(node.props.children);
+}
+
+it("passes the server-resolved calling config to the softphone", async () => {
+  mocks.roster.mockResolvedValue(null);
+  mocks.callingConfig.mockResolvedValue({ transport: "telnyx_direct" });
+  expect(softphoneConfig(await DashboardLayout({ children: <div>Page</div> }))).toEqual({ transport: "telnyx_direct" });
+});
+
+it("falls back to the default calling config when resolution fails", async () => {
+  mocks.roster.mockResolvedValue(null);
+  mocks.callingConfig.mockRejectedValue(new Error("config unavailable"));
+  expect(softphoneConfig(await DashboardLayout({ children: <div>Page</div> }))).toEqual({ transport: "default" });
 });

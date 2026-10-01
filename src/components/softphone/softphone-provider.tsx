@@ -40,12 +40,14 @@ import {
   mintJitterStartIntent,
 } from "@/lib/dialer/jitter-actions";
 import type { JitterCallerId } from "@/lib/dialer/jitter-contract";
+import type { CallingConfig } from "@/lib/direct-calling/contract";
 import { maskPhone } from "@/lib/phone-format";
 import { KeyedCoachLiveView } from "@/components/coach/keyed-coach-live-view";
 import { PhoneKeypad } from "@/components/softphone/phone-keypad";
 import { isCoachUiEnabled } from "@/lib/coach/flags";
 import { useCoachSession } from "@/lib/coach/use-coach-session";
 import { playDtmfTone } from "@/lib/dialer/dtmf-tone";
+import { TelnyxDirectCallTransport } from "@/lib/dialer/telnyx-direct-transport";
 import {
   type CallHandle,
   type CallTransport,
@@ -104,6 +106,8 @@ type Props = {
   children: ReactNode;
   /** Non-shipping acceptance injection; production always uses the default. */
   transportFactory?: () => CallTransport;
+  /** Server-resolved calling mode; absent/default keeps the Jitter path. */
+  callingConfig?: CallingConfig;
 };
 
 const TEARDOWN_WARNING =
@@ -261,10 +265,20 @@ function callbackWallTime(kind: "today_pm" | "tomorrow_am"): {
   };
 }
 
+const createDirectCallTransport = (): CallTransport =>
+  new TelnyxDirectCallTransport();
+
 export function SoftphoneProvider({
   children,
-  transportFactory = createSoftphoneCallTransport,
+  transportFactory: suppliedTransportFactory,
+  callingConfig,
 }: Props) {
+  // Pilot users place calls straight through Telnyx: no Jitter caller-ID
+  // inventory, start intent, or recovery probe is touched in this mode.
+  const directMode = callingConfig?.transport === "telnyx_direct";
+  const transportFactory =
+    suppliedTransportFactory ??
+    (directMode ? createDirectCallTransport : createSoftphoneCallTransport);
   const [phone, setPhone] = useState<SoftphoneState>("closed");
   const [target, setTarget] = useState<SoftphoneTarget | null>(null);
   const [dialInput, setDialInput] = useState("");
@@ -305,7 +319,9 @@ export function SoftphoneProvider({
   const [callerIdState, setCallerIdState] = useState<CallerIdState>("loading");
   const [selectedCallerId, setSelectedCallerId] = useState<string | null>(null);
   const [callerIdError, setCallerIdError] = useState<string | null>(null);
-  const [callingEnabled] = useState(() => isSoftphoneTransportEnabled());
+  const [callingEnabled] = useState(
+    () => directMode || isSoftphoneTransportEnabled(),
+  );
   const [coachUiEnabled] = useState(() => isCoachUiEnabled());
   const [coachPreference, setCoachPreference] =
     useState<CoachPreference>(readCoachPreference);
@@ -423,8 +439,8 @@ export function SoftphoneProvider({
   }, []);
 
   useEffect(() => {
-    if (callingEnabled) void loadCallerIds();
-  }, [callingEnabled, loadCallerIds]);
+    if (callingEnabled && !directMode) void loadCallerIds();
+  }, [callingEnabled, directMode, loadCallerIds]);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -533,7 +549,12 @@ export function SoftphoneProvider({
   }, []);
 
   useEffect(() => {
-    if (!callingEnabled || !isJitterTransportEnabled() || transportRef.current)
+    if (
+      !callingEnabled ||
+      directMode ||
+      !isJitterTransportEnabled() ||
+      transportRef.current
+    )
       return;
     const retained = readRetainedActiveCall();
     if (!retained) return;
@@ -663,7 +684,7 @@ export function SoftphoneProvider({
     });
     void transport.recover(retained.handle, retained.startedAt);
     return () => clearTimeout(checkingTimer);
-  }, [callingEnabled, showToast, transition, transportFactory]);
+  }, [callingEnabled, directMode, showToast, transition, transportFactory]);
 
   const startTarget = useCallback(
     async (
@@ -701,7 +722,7 @@ export function SoftphoneProvider({
       transition({ type: "call_started" });
       setPending(true);
       setError(null);
-      const jitterTransport = isJitterTransportEnabled();
+      const jitterTransport = isJitterTransportEnabled() && !directMode;
       let startIntent: { callToken: string; intentCapability: string } | null =
         null;
       const abortStart = (message: string) => {
@@ -725,14 +746,16 @@ export function SoftphoneProvider({
         }
         startIntent = minted.data;
       }
-      const callerIdE164 =
-        selectedCallerIdRef.current &&
-        callerIdsRef.current.some(
-          (item) => item.phone_e164 === selectedCallerIdRef.current,
-        )
+      // Direct mode uses the server-frozen Sandra line; no inventory exists.
+      const callerIdE164 = directMode
+        ? undefined
+        : selectedCallerIdRef.current &&
+            callerIdsRef.current.some(
+              (item) => item.phone_e164 === selectedCallerIdRef.current,
+            )
           ? selectedCallerIdRef.current
           : await loadCallerIds();
-      if (!callerIdE164) {
+      if (!directMode && !callerIdE164) {
         startInFlightRef.current = false;
         setPending(false);
         setTarget(null);
@@ -1011,7 +1034,7 @@ export function SoftphoneProvider({
           contactId: result.data.contactId ?? undefined,
           callToken,
           ...(intentCapability ? { intentCapability } : {}),
-          callerIdE164,
+          ...(callerIdE164 ? { callerIdE164 } : {}),
           coachScriptSlug: coachPreference.scriptId,
         });
         if (attemptGenerationRef.current !== myAttempt) {
@@ -1053,6 +1076,7 @@ export function SoftphoneProvider({
       callingEnabled,
       coachPreference.enabled,
       coachPreference.scriptId,
+      directMode,
       loadCallerIds,
       showToast,
       transition,
@@ -1172,7 +1196,7 @@ export function SoftphoneProvider({
           disposition,
           notes,
           wrapToken,
-          callCapability: callHandleRef.current?.id,
+          callCapability: directMode ? undefined : callHandleRef.current?.id,
           callback,
         });
         if (!result.ok) {
@@ -1200,6 +1224,7 @@ export function SoftphoneProvider({
       startedAt,
       target,
       teardownUnconfirmed,
+      directMode,
       transition,
       wrapToken,
     ],
@@ -1212,7 +1237,8 @@ export function SoftphoneProvider({
     /^[\d\s()+.-]+$/.test(dialInput) && /^\d{10}$/.test(manualDigits);
   const callName = target?.name ?? "";
   const isOnCall = phone === "live" || phone === "held";
-  const callerIdReady = callerIdState === "ready" && Boolean(selectedCallerId);
+  const callerIdReady =
+    directMode || (callerIdState === "ready" && Boolean(selectedCallerId));
 
   const selectCallerId = useCallback((phoneE164: string) => {
     if (
@@ -1423,6 +1449,7 @@ export function SoftphoneProvider({
                     manualDigits={manualDigits}
                     pending={pending}
                     callingEnabled={callingEnabled}
+                    directLine={directMode}
                     callerIds={callerIds}
                     callerIdState={callerIdState}
                     callerIdError={callerIdError}
@@ -1610,6 +1637,7 @@ function IdleView({
   manualDigits,
   pending,
   callingEnabled,
+  directLine,
   callerIds,
   callerIdState,
   callerIdError,
@@ -1635,6 +1663,7 @@ function IdleView({
   manualDigits: string;
   pending: boolean;
   callingEnabled: boolean;
+  directLine: boolean;
   callerIds: JitterCallerId[];
   callerIdState: CallerIdState;
   callerIdError: string | null;
@@ -1659,7 +1688,17 @@ function IdleView({
           Calling not yet enabled
         </div>
       ) : null}
-      {callingEnabled ? (
+      {callingEnabled && directLine ? (
+        <div className="mb-3 rounded-[10px] border border-[#e5e1df] bg-[#fafaf9] px-3 py-2.5 text-left">
+          <div className="mb-1 text-[10px] font-extrabold uppercase tracking-[0.1em] text-[#78716c]">
+            Call from
+          </div>
+          <div data-testid="direct-line-label" className="text-sm font-bold">
+            Sandra direct line
+          </div>
+        </div>
+      ) : null}
+      {callingEnabled && !directLine ? (
         <CallerIdControl
           callerIds={callerIds}
           state={callerIdState}
