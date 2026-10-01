@@ -221,12 +221,14 @@ def _drift_bindings(record: dict) -> set[tuple[str, str, str, str]]:
             for item in record.get("items", []) if isinstance(item, dict)}
 
 
-def validate_replacement_drift_record(original: dict, replacement: dict, replay: dict | None = None) -> None:
+def validate_replacement_drift_record(original: dict, replacement: dict, replay_run: dict | None = None) -> None:
     original_items = _drift_bindings(original)
     replacement_items = _drift_bindings(replacement)
     if not replacement_items <= original_items:
         raise EvidenceError("replacement drift record item absent from sealed PRE or definition changed")
-    if replay is None or replay.get("sha256") != replacement.get("sha256"):
+    if (replay_run is None or replay_run.get("exit_status") != 0
+            or not isinstance(replay_run.get("manifest"), dict)
+            or replay_run["manifest"].get("verdict") != "PASS"):
         raise EvidenceError("replacement drift record is not linked to a passing sealed replay")
 
 
@@ -857,7 +859,7 @@ def evaluate_migration(repo: Path, m: str, target: str, head: str = "HEAD", x_mi
         replay_runs = [candidate for candidate in evidence_chain["runs"] if candidate["key"] == replay_key]
         if len(replay_runs) > 1:
             original = json.loads(blob(Path(repo), replay_runs[0]["commit"], f"{replay_runs[0]['directory']}/drift-record-{target_ref}.json"))
-            validate_replacement_drift_record(original, drift, replay=drift)
+            validate_replacement_drift_record(original, drift, replay_run=replay)
         fixture = read_drift_fixture(Path(repo), replay["commit"], target_ref)
         if _drift_bindings(drift) != {(item["object"], item["attribute"], item["name"], item["definition_sha256"]) for item in fixture["items"]}:
             raise EvidenceError("sealed fixture, replay record, and drift record differ")

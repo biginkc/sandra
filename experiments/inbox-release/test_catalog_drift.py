@@ -119,10 +119,11 @@ class CatalogDriftMutationTests(unittest.TestCase):
         replacement["items"][0]["canonical_definition"] = "text"
         replacement["items"][0]["definition_sha256"] = hashlib.sha256(b"text").hexdigest()
         self.refresh(replacement)
+        passing_replay = {"exit_status": 0, "manifest": {"verdict": "PASS"}}
         with self.assertRaisesRegex(evidence.EvidenceError, "absent from sealed PRE"):
-            evidence.validate_replacement_drift_record(original, replacement, replay=replacement)
+            evidence.validate_replacement_drift_record(original, replacement, replay_run=passing_replay)
         with self.assertRaisesRegex(evidence.EvidenceError, "not linked"):
-            evidence.validate_replacement_drift_record(original, original)
+            evidence.validate_replacement_drift_record(original, original, replay_run={"exit_status": 0, "manifest": {"verdict": "FAIL"}})
 
     def test_gate_rejects_record_in_ordinary_lane(self):
         for artifact in ("drift-record.json", "drift-record-ncsngxlcyxylaeskiteu.json"):
