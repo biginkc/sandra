@@ -220,8 +220,7 @@ export class FakeStore implements DirectCallStore {
     // Mirrors direct_call_set_target: a late result may attach only to its own untouched reservation,
     // including one that already became terminal after its unmarked Dial obligation was settled.
     const untouched = row && ["ending", "ended", "failed"].includes(row.status)
-      && (row.preparation_property_id !== null || target.property_id === null)
-      && (target.property_id === null || target.property_id === row.preparation_property_id)
+      && (row.preparation_property_id === null || target.property_id === null || target.property_id === row.preparation_property_id)
       && row.property_id === null && row.contact_id === null && row.destination_e164 === ""
       && !row.browser_leg_id && !row.seller_leg_id && !row.connected_at;
     const browser = row && row.status === "browser_connecting"

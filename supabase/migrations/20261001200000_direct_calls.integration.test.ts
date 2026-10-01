@@ -364,6 +364,27 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     expect(await store.findById(lateId)).toMatchObject({ property_id: PROP3, preparation_property_id: null, resume_pending: true });
     expect((await store.claimPendingResumes(USER_C, NOW.toISOString(), 30)).map((r) => r.id)).toEqual([lateId]);
 
+    // Manual preparation starts without a preparation owner. A late phone lookup may attach its
+    // resolved property only while this reservation is still untouched, even after cleanup made it
+    // terminal; a dispatched row must reject that same write.
+    const PROP4 = "00000000-0000-0000-0000-0000000d1b05";
+    await pg.query("insert into public.properties (id, org_id, address, state) values ($1, $2, '4 Test St', 'MO')", [PROP4, ORG]);
+    await pg.query("update public.direct_call_cleanups set confirmed_at = now() where operator_user_id = $1", [USER_C]);
+    const manualLate = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: null, preparation_property_id: null, contact_id: null, destination_e164: "", caller_id_e164: "+15550000002", time_limit_secs: 7200, client_request_id: "00000000-0000-0000-0000-00000000cc07" });
+    const manualLateId = (manualLate as { row: { id: string } }).row.id;
+    await store.updateIfStatus(manualLateId, ["browser_connecting"], { status: "ending" });
+    await store.updateIfStatus(manualLateId, ["ending"], { status: "ended", ended_at: NOW.toISOString() });
+    expect(await store.setTarget(manualLateId, { property_id: PROP4, contact_id: null, destination_e164: "+15550000077" })).toBe(true);
+    expect(await store.findById(manualLateId)).toMatchObject({ status: "ended", property_id: PROP4, preparation_property_id: null, resume_pending: true });
+
+    await pg.query("update public.direct_call_cleanups set confirmed_at = now() where operator_user_id = $1", [USER_C]);
+    const manualDispatched = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: null, preparation_property_id: null, contact_id: null, destination_e164: "", caller_id_e164: "+15550000002", time_limit_secs: 7200, client_request_id: "00000000-0000-0000-0000-00000000cc08" });
+    const manualDispatchedId = (manualDispatched as { row: { id: string } }).row.id;
+    await store.updateIfStatus(manualDispatchedId, ["browser_connecting"], { status: "ending", browser_leg_id: "manual-browser-dispatched" });
+    expect(await store.setTarget(manualDispatchedId, { property_id: PROP4, contact_id: null, destination_e164: "+15550000088" })).toBe(false);
+    expect(await store.findById(manualDispatchedId)).toMatchObject({ property_id: null, preparation_property_id: null, browser_leg_id: "manual-browser-dispatched" });
+    await store.updateIfStatus(manualDispatchedId, ["ending"], { status: "failed", ended_at: NOW.toISOString() });
+
     // A newer reservation can own the same property while its preparation is still pending. The
     // older terminal call must not set resume_pending while that preparation owner is live.
     await pg.query("update public.direct_call_cleanups set confirmed_at = now() where operator_user_id = $1", [USER_C]);

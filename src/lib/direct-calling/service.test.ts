@@ -646,4 +646,63 @@ describe("start errors say whether anything was reserved (#744-1)", () => {
     expect(ctx.telnyx.dial).toHaveBeenCalledTimes(1);
     expect(ctx.resumeFailedSoftphoneCall).not.toHaveBeenCalled();
   });
+
+  it("keeps a late manually resolved target after cleanup and resumes it once", async () => {
+    const ctx = setup();
+    const preparedTarget = target({ propertyId: "prop-1", contactId: "contact-1", phoneE164: "+15550009999", name: "Resolved manual seller" });
+    let release!: (value: { ok: true; data: DirectCallTarget }) => void;
+    ctx.prepareManualCall.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
+
+    const starting = ctx.service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ });
+    await vi.waitFor(() => expect(ctx.store.calls.size).toBe(1));
+    const id = [...ctx.store.calls.keys()][0];
+    expect(ctx.store.calls.get(id)).toMatchObject({ preparation_property_id: null, property_id: null });
+    await expect(ctx.service.cancelByRequest("user-1", REQ)).resolves.toMatchObject({ ok: true, data: { tombstoned: false } });
+
+    ctx.clock.now = new Date(ctx.clock.now.getTime() + 61_000);
+    await expect(ctx.service.getStatusByRequest("user-1", REQ)).resolves.toMatchObject({ ok: true, data: { status: "ended", cleanupPending: false } });
+    expect(ctx.store.calls.get(id)).toMatchObject({ status: "ended", preparation_property_id: null, property_id: null, resume_pending: false });
+    expect(ctx.resumeFailedSoftphoneCall).not.toHaveBeenCalled();
+
+    release({ ok: true, data: preparedTarget });
+    await expect(starting).resolves.toMatchObject({ ok: false, errorCode: "cancelled", reserved: true });
+    expect(ctx.telnyx.dial).not.toHaveBeenCalled();
+    expect(ctx.store.calls.get(id)).toMatchObject({ status: "ended", property_id: "prop-1", preparation_property_id: null, resume_pending: false });
+    expect(ctx.resumeFailedSoftphoneCall).toHaveBeenCalledTimes(1);
+    expect(ctx.resumeFailedSoftphoneCall).toHaveBeenCalledWith("prop-1");
+  });
+
+  it("does not resume a late manual target over a newer known-property preparation", async () => {
+    const ctx = setup();
+    const preparedTarget = target({ propertyId: "prop-1", contactId: "contact-1", phoneE164: "+15550009999", name: "Resolved manual seller" });
+    let releaseManual!: (value: { ok: true; data: DirectCallTarget }) => void;
+    let releaseLead!: (value: { ok: true; data: DirectCallTarget }) => void;
+    ctx.prepareManualCall.mockImplementation(() => new Promise((resolve) => { releaseManual = resolve; }));
+    ctx.prepareLeadCall.mockImplementation(() => new Promise((resolve) => { releaseLead = resolve; }));
+
+    const startingManual = ctx.service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ });
+    await vi.waitFor(() => expect(ctx.store.calls.size).toBe(1));
+    await ctx.service.cancelByRequest("user-1", REQ);
+    ctx.clock.now = new Date(ctx.clock.now.getTime() + 61_000);
+    await ctx.service.getStatusByRequest("user-1", REQ);
+
+    const startingLead = ctx.service.startCall("user-1", { kind: "lead", propertyId: "prop-1", clientRequestId: REQ2 });
+    await vi.waitFor(() => expect(ctx.store.calls.size).toBe(2));
+    const rows = [...ctx.store.calls.values()];
+    const manualId = rows.find((row) => row.client_request_id === REQ)!.id;
+    const leadId = rows.find((row) => row.client_request_id === REQ2)!.id;
+    expect(ctx.store.calls.get(leadId)).toMatchObject({ status: "browser_connecting", property_id: null, preparation_property_id: "prop-1" });
+
+    releaseManual({ ok: true, data: preparedTarget });
+    await expect(startingManual).resolves.toMatchObject({ ok: false, errorCode: "cancelled", reserved: true });
+    expect(ctx.telnyx.dial).not.toHaveBeenCalled();
+    expect(ctx.resumeFailedSoftphoneCall).not.toHaveBeenCalled();
+    expect(ctx.store.calls.get(manualId)).toMatchObject({ property_id: "prop-1", preparation_property_id: null, resume_pending: false });
+    expect(ctx.store.calls.get(leadId)).toMatchObject({ property_id: null, preparation_property_id: "prop-1" });
+
+    releaseLead({ ok: true, data: preparedTarget });
+    await expect(startingLead).resolves.toMatchObject({ ok: true });
+    expect(ctx.telnyx.dial).toHaveBeenCalledTimes(1);
+    expect(ctx.resumeFailedSoftphoneCall).not.toHaveBeenCalled();
+  });
 });
