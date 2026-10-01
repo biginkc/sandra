@@ -32,6 +32,8 @@ describe("nextDirectCallState", () => {
   it("dials the seller bridged to the browser leg when the browser answers", () => {
     const r = nextDirectCallState(row(), ev("call.answered", "B", "browser"), at(5));
     expect(r.patch).toEqual({ status: "seller_dialing", seller_dial_state: "pending" });
+    // The unresolved-dial obligation is produced WITH the pending transition (same write).
+    expect(r.cleanups).toEqual([{ kind: "unresolved_dial", role: "seller", timeoutSecs: 30, timeLimitSecs: 7195 }]);
     expect(r.commands).toHaveLength(1);
     const cmd = r.commands[0];
     expect(cmd).toMatchObject({
@@ -50,7 +52,8 @@ describe("nextDirectCallState", () => {
 
   it("refuses a stale browser answer and hangs the leg up without dialing the seller", () => {
     const r = nextDirectCallState(row(), ev("call.answered", "B", "browser"), at(61));
-    expect(r.patch).toMatchObject({ status: "failed", failure_reason: "browser_answer_stale", browser_hangup_pending: true });
+    expect(r.patch).toMatchObject({ status: "failed", failure_reason: "browser_answer_stale" });
+    expect(r.cleanups).toEqual([{ kind: "leg", legId: "B" }]);
     expect(r.commands).toEqual([]);
   });
 
@@ -66,18 +69,21 @@ describe("nextDirectCallState", () => {
       ev("call.hangup", "B", "browser", { hangupCause: "normal_clearing" }),
       at(30),
     );
-    expect(r.patch).toMatchObject({ status: "ended", hangup_cause: "normal_clearing", browser_hangup_pending: false, seller_hangup_pending: true });
+    expect(r.patch).toMatchObject({ status: "ended", hangup_cause: "normal_clearing" });
+    expect(r.cleanups).toEqual([{ kind: "leg", legId: "S" }]);
     expect(r.commands).toEqual([]);
   });
 
   it("hangs up the browser when the seller hangs up", () => {
     const r = nextDirectCallState(row({ status: "connected", seller_leg_id: "S", connected_at: CREATED }), ev("call.hangup", "S", "seller"), at(30));
-    expect(r.patch).toMatchObject({ status: "ended", browser_hangup_pending: true, seller_hangup_pending: false });
+    expect(r.patch).toMatchObject({ status: "ended" });
+    expect(r.cleanups).toEqual([{ kind: "leg", legId: "B" }]);
   });
 
   it("fails the call when the seller never answered", () => {
     const r = nextDirectCallState(row({ status: "seller_dialing", seller_leg_id: "S" }), ev("call.hangup", "S", "seller", { hangupCause: "no_answer" }), at(40));
-    expect(r.patch).toMatchObject({ status: "failed", failure_reason: "seller_not_answered", hangup_cause: "no_answer", browser_hangup_pending: true });
+    expect(r.patch).toMatchObject({ status: "failed", failure_reason: "seller_not_answered", hangup_cause: "no_answer" });
+    expect(r.cleanups).toEqual([{ kind: "leg", legId: "B" }]);
   });
 
   it("treats a hangup after an operator hangup request as a clean end", () => {
@@ -86,21 +92,22 @@ describe("nextDirectCallState", () => {
   });
 
   it("does nothing for duplicate events on a finished or already-advanced call", () => {
-    expect(nextDirectCallState(row({ status: "ended" }), ev("call.hangup", "B", "browser"), at(80))).toEqual({ patch: null, commands: [] });
-    expect(nextDirectCallState(row({ status: "seller_dialing" }), ev("call.answered", "B", "browser"), at(6))).toEqual({ patch: null, commands: [] });
-    expect(nextDirectCallState(row({ status: "connected", seller_leg_id: "S" }), ev("call.answered", "S", "seller"), at(6))).toEqual({ patch: null, commands: [] });
+    expect(nextDirectCallState(row({ status: "ended" }), ev("call.hangup", "B", "browser"), at(80))).toEqual({ patch: null, commands: [], cleanups: [] });
+    expect(nextDirectCallState(row({ status: "seller_dialing" }), ev("call.answered", "B", "browser"), at(6))).toEqual({ patch: null, commands: [], cleanups: [] });
+    expect(nextDirectCallState(row({ status: "connected", seller_leg_id: "S" }), ev("call.answered", "S", "seller"), at(6))).toEqual({ patch: null, commands: [], cleanups: [] });
   });
 
   it("hangs up a leg that answers after the call already ended", () => {
     const r = nextDirectCallState(row({ status: "failed" }), ev("call.answered", "B", "browser"), at(20));
-    expect(r.patch).toEqual({ browser_hangup_pending: true });
+    expect(r.patch).toEqual({});
+    expect(r.cleanups).toEqual([{ kind: "leg", legId: "B" }]);
     expect(r.commands).toEqual([]);
   });
 
   it("ignores events for legs that are not this call's", () => {
-    expect(nextDirectCallState(row(), ev("call.answered", "OTHER", null), at(2))).toEqual({ patch: null, commands: [] });
-    expect(nextDirectCallState(row(), ev("call.answered", "OTHER", "browser"), at(2))).toEqual({ patch: null, commands: [] });
-    expect(nextDirectCallState(row(), ev("call.answered", null, "browser"), at(2))).toEqual({ patch: null, commands: [] });
+    expect(nextDirectCallState(row(), ev("call.answered", "OTHER", null), at(2))).toEqual({ patch: null, commands: [], cleanups: [] });
+    expect(nextDirectCallState(row(), ev("call.answered", "OTHER", "browser"), at(2))).toEqual({ patch: null, commands: [], cleanups: [] });
+    expect(nextDirectCallState(row(), ev("call.answered", null, "browser"), at(2))).toEqual({ patch: null, commands: [], cleanups: [] });
   });
 
   it("adopts a leg id learned from client_state when the Dial response has not been stored yet", () => {
@@ -109,12 +116,18 @@ describe("nextDirectCallState", () => {
   });
 
   it("records bridged without changing state", () => {
-    expect(nextDirectCallState(row({ status: "connected", seller_leg_id: "S" }), ev("call.bridged", "S", "seller"), at(10))).toEqual({ patch: null, commands: [] });
+    expect(nextDirectCallState(row({ status: "connected", seller_leg_id: "S" }), ev("call.bridged", "S", "seller"), at(10))).toEqual({ patch: null, commands: [], cleanups: [] });
   });
 
-  it("clears a leg's pending teardown when the provider confirms it hung up", () => {
-    const r = nextDirectCallState(row({ status: "ended", seller_leg_id: "S", seller_hangup_pending: true }), ev("call.hangup", "S", "seller"), at(30));
-    expect(r.patch).toEqual({ seller_hangup_pending: false, seller_hangup_acked_at: null });
+  it("produces no row patch for a hangup on a finished call (the webhook confirms the leg's cleanup row)", () => {
+    const r = nextDirectCallState(row({ status: "ended", seller_leg_id: "S" }), ev("call.hangup", "S", "seller"), at(30));
+    expect(r).toEqual({ patch: null, commands: [], cleanups: [] });
+  });
+
+  it("an unresolved seller Dial leaves its obligation in place when the browser hangs up mid-dial (no leg id to hang up)", () => {
+    const r = nextDirectCallState(row({ status: "seller_dialing", seller_dial_state: "pending" }), ev("call.hangup", "B", "browser"), at(10));
+    expect(r.patch).toMatchObject({ status: "failed", failure_reason: "browser_hangup_before_connect" });
+    expect(r.cleanups).toEqual([]); // the unresolved_dial row written with the pending transition keeps the lock
   });
 
   it("never replays a pending Dial, however fresh: it is an unknown outcome and the call fails (blocker 2)", () => {
@@ -125,40 +138,38 @@ describe("nextDirectCallState", () => {
         at(20),
       );
       expect(r.commands).toEqual([]);
-      expect(r.patch).toMatchObject({ status: "failed", failure_reason: "dial_outcome_unknown", seller_dial_state: "unknown", browser_hangup_pending: true });
+      expect(r.patch).toMatchObject({ status: "failed", failure_reason: "dial_outcome_unknown", seller_dial_state: "unknown" });
+      expect(r.cleanups).toEqual([{ kind: "leg", legId: "B" }]);
     }
   });
 
   it("never re-sends an unknown Dial, and a sent Dial is a no-op", () => {
     const unknown = nextDirectCallState(row({ status: "seller_dialing", seller_dial_state: "unknown" }), ev("call.answered", "B", "browser"), at(20));
     expect(unknown.commands).toEqual([]);
-    expect(unknown.patch).toMatchObject({ status: "failed", failure_reason: "dial_outcome_unknown", browser_hangup_pending: true });
+    expect(unknown.patch).toMatchObject({ status: "failed", failure_reason: "dial_outcome_unknown" });
+    expect(unknown.cleanups).toEqual([{ kind: "leg", legId: "B" }]);
     const sent = nextDirectCallState(row({ status: "seller_dialing", seller_dial_state: "sent" }), ev("call.answered", "B", "browser"), at(20));
-    expect(sent).toEqual({ patch: null, commands: [] });
+    expect(sent).toEqual({ patch: null, commands: [], cleanups: [] });
   });
 
-  it("issues no Dial once teardown has begun (ending, pending hangup, teardown_pending, orphan)", () => {
-    for (const over of [
-      { status: "ending" as const },
-      { browser_hangup_pending: true },
-      { seller_hangup_pending: true },
-      { failure_reason: "teardown_pending" },
-      { orphan_hangup_leg_ids: ["X"] },
-    ]) {
+  it("issues no Dial once teardown has begun (ending, teardown_pending, terminal) and queues the late leg", () => {
+    for (const over of [{ status: "ending" as const }, { failure_reason: "teardown_pending" }, { status: "failed" as const }]) {
       const r = nextDirectCallState(row(over), ev("call.answered", "B", "browser"), at(5));
       expect(r.commands).toEqual([]);
-      expect(r.patch).toEqual({ browser_hangup_pending: true });
+      expect(r.cleanups).toEqual([{ kind: "leg", legId: "B" }]);
     }
   });
 
-  it("confirms an orphan leg when its hangup webhook arrives", () => {
-    const r = nextDirectCallState(row({ status: "failed", orphan_hangup_leg_ids: ["ORPHAN"] }), ev("call.hangup", "ORPHAN", "seller"), at(30));
-    expect(r).toEqual({ patch: null, commands: [], orphanConfirmed: "ORPHAN" });
+  it("a seller leg first seen during teardown is queued for hangup, and recorded", () => {
+    const r = nextDirectCallState(row({ status: "ending", seller_dial_state: "pending" }), ev("call.initiated", "LATE", "seller"), at(30));
+    expect(r.patch).toEqual({ seller_leg_id: "LATE" });
+    expect(r.cleanups).toEqual([{ kind: "leg", legId: "LATE" }]);
   });
 
   it("flags a seller leg first seen on a failed call (after an unknown dial) for teardown", () => {
     const r = nextDirectCallState(row({ status: "failed", seller_dial_state: "unknown" }), ev("call.initiated", "LATE", "seller"), at(30));
-    expect(r.patch).toEqual({ seller_leg_id: "LATE", seller_hangup_pending: true });
+    expect(r.patch).toEqual({ seller_leg_id: "LATE" });
+    expect(r.cleanups).toEqual([{ kind: "leg", legId: "LATE" }]);
   });
 
   it("reports stale outcomes without ever treating time as teardown", () => {

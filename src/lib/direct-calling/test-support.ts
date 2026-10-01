@@ -1,12 +1,7 @@
 // Test-only helpers: an in-memory DirectCallStore. Never imported by production code.
 import type { DirectCallStatus } from "./contract";
-import { DirectCallLockConflictError, type DirectCallFullRow, type DirectCallOperatorRow, type DirectCallStore, type EventInsertResult, type NewDirectCall } from "./store";
-import type { RowPatch } from "./transitions";
-
-/** Mirrors the migration's lock predicate: not terminal, or any teardown still pending. */
-export function holdsLock(r: DirectCallFullRow): boolean {
-  return !["ended", "failed"].includes(r.status) || r.browser_hangup_pending || r.seller_hangup_pending || r.orphan_hangup_leg_ids.length > 0;
-}
+import type { BeginOutcome, CleanupUpdate, DirectCallCleanupRow, DirectCallFullRow, DirectCallOperatorRow, DirectCallStore, EventInsertResult, NewDirectCall } from "./store";
+import type { CleanupSpec, RowPatch } from "./transitions";
 
 export function makeRow(overrides: Partial<DirectCallFullRow> = {}): DirectCallFullRow {
   return {
@@ -21,11 +16,6 @@ export function makeRow(overrides: Partial<DirectCallFullRow> = {}): DirectCallF
     browser_leg_id: "browser-leg",
     seller_leg_id: null,
     browser_command_id: "22222222-2222-4222-8222-222222222222",
-    browser_hangup_pending: false,
-    seller_hangup_pending: false,
-    browser_hangup_acked_at: null,
-    seller_hangup_acked_at: null,
-    orphan_hangup_leg_ids: [],
     seller_dial_state: null,
     hangup_cause: null,
     failure_reason: null,
@@ -40,14 +30,73 @@ export function makeRow(overrides: Partial<DirectCallFullRow> = {}): DirectCallF
 
 export class FakeStore implements DirectCallStore {
   calls = new Map<string, DirectCallFullRow>();
+  cleanups = new Map<string, DirectCallCleanupRow>();
   events = new Map<string, { directCallId: string | null; processed: boolean; type: string }>();
   operators = new Map<string, DirectCallOperatorRow>();
   failEventInsert = false;
+  /** Injected clock (mirrors the app clock used for next_attempt_at / created_at of cleanup rows). */
+  clock: () => Date = () => new Date("2026-10-01T12:00:00.000Z");
   private seq = 0;
+  private cseq = 0;
 
   add(row: DirectCallFullRow) {
     this.calls.set(row.id, row);
     return row;
+  }
+  /** Test helper: add an open cleanup row. */
+  addCleanup(over: Partial<DirectCallCleanupRow> & { direct_call_id: string; kind: "leg" | "unresolved_dial" }): DirectCallCleanupRow {
+    const call = this.calls.get(over.direct_call_id);
+    const now = this.clock().toISOString();
+    const row: DirectCallCleanupRow = {
+      id: `cleanup-${++this.cseq}`,
+      org_id: call?.org_id ?? "org",
+      operator_user_id: call?.operator_user_id ?? "user-1",
+      leg_id: null,
+      dial_role: null,
+      resolve_after: null,
+      backstop_at: null,
+      attempts: 0,
+      acked_at: null,
+      next_attempt_at: now,
+      confirmed_at: null,
+      empty_matches: 0,
+      last_error: null,
+      created_at: now,
+      ...over,
+    };
+    this.cleanups.set(row.id, row);
+    return row;
+  }
+  openFor(callId: string) {
+    return [...this.cleanups.values()].filter((c) => c.direct_call_id === callId && !c.confirmed_at);
+  }
+  legRow(legId: string) {
+    return [...this.cleanups.values()].find((c) => c.leg_id === legId);
+  }
+  private insertSpecs(row: DirectCallFullRow, specs: CleanupSpec[]) {
+    for (const spec of specs) {
+      if (spec.kind === "leg") {
+        if (!this.legRow(spec.legId)) this.addCleanup({ direct_call_id: row.id, kind: "leg", leg_id: spec.legId });
+      } else if (![...this.cleanups.values()].some((c) => c.direct_call_id === row.id && c.kind === "unresolved_dial" && c.dial_role === spec.role)) {
+        this.addDialRow(row.id, spec.role, spec.timeoutSecs, spec.timeLimitSecs);
+      }
+    }
+  }
+  private addDialRow(callId: string, role: "browser" | "seller", timeoutSecs: number, timeLimitSecs: number) {
+    const at = (secs: number) => new Date(this.clock().getTime() + secs * 1000).toISOString();
+    return this.addCleanup({
+      direct_call_id: callId,
+      kind: "unresolved_dial",
+      dial_role: role,
+      resolve_after: at(timeoutSecs + 15),
+      backstop_at: at(timeLimitSecs + 60),
+      next_attempt_at: at(timeoutSecs + 15),
+    });
+  }
+  private resolveDial(callId: string, role: "browser" | "seller") {
+    for (const c of this.cleanups.values()) {
+      if (c.direct_call_id === callId && c.kind === "unresolved_dial" && c.dial_role === role && !c.confirmed_at) c.confirmed_at = this.clock().toISOString();
+    }
   }
   async insertEvent(e: { provider_event_id: string; direct_call_id: string | null; event_type: string }): Promise<EventInsertResult> {
     if (this.failEventInsert) throw new Error("db down");
@@ -74,72 +123,124 @@ export class FakeStore implements DirectCallStore {
     return [...this.calls.values()].find((r) => r.operator_user_id === userId && r.client_request_id === requestId) ?? null;
   }
   async findActiveForUser(userId: string) {
-    return [...this.calls.values()].find((r) => r.operator_user_id === userId && holdsLock(r)) ?? null;
+    return [...this.calls.values()].find((r) => r.operator_user_id === userId && !["ended", "failed"].includes(r.status)) ?? null;
   }
-  async insertCall(call: NewDirectCall) {
-    if (await this.findActiveForUser(call.operator_user_id)) return "conflict" as const;
+  /** Mirrors direct_call_operator_busy. */
+  async operatorBusy(userId: string) {
+    if (await this.findActiveForUser(userId)) return "call" as const;
+    if ([...this.cleanups.values()].some((c) => c.operator_user_id === userId && !c.confirmed_at)) return "cleanup" as const;
+    return null;
+  }
+  /** Mirrors direct_call_begin. Synchronous body: emulates the advisory lock's serialisation. */
+  async beginCall(call: NewDirectCall): Promise<BeginOutcome> {
+    const dup = [...this.calls.values()].find((r) => r.operator_user_id === call.operator_user_id && r.client_request_id === call.client_request_id);
+    if (dup) return { outcome: "duplicate_request", row: dup };
+    if ([...this.calls.values()].some((r) => r.operator_user_id === call.operator_user_id && !["ended", "failed"].includes(r.status))) return { outcome: "busy_call" };
+    if ([...this.cleanups.values()].some((c) => c.operator_user_id === call.operator_user_id && !c.confirmed_at)) return { outcome: "busy_cleanup" };
     const row = makeRow({
       ...call,
       id: `00000000-0000-4000-8000-${String(++this.seq).padStart(12, "0")}`,
       status: "browser_connecting",
       browser_leg_id: null,
+      created_at: this.clock().toISOString(),
+      updated_at: this.clock().toISOString(),
     });
     this.calls.set(row.id, row);
-    return { row };
+    this.addDialRow(row.id, "browser", 30, 7200);
+    return { outcome: "created", row };
   }
-  async updateIfStatus(id: string, statuses: DirectCallStatus[], patch: RowPatch) {
+  async cancelRequest(userId: string, orgId: string, requestId: string) {
+    const dup = await this.findByRequest(userId, requestId);
+    if (dup) return { outcome: "existing" as const, row: dup };
+    const row = makeRow({
+      id: `00000000-0000-4000-8000-${String(++this.seq).padStart(12, "0")}`,
+      org_id: orgId,
+      operator_user_id: userId,
+      destination_e164: "",
+      caller_id_e164: "",
+      status: "failed",
+      failure_reason: "cancelled_before_start",
+      ended_at: this.clock().toISOString(),
+      browser_leg_id: null,
+      client_request_id: requestId,
+    });
+    this.calls.set(row.id, row);
+    return { outcome: "tombstoned" as const, row };
+  }
+  /** Mirrors direct_call_apply: CAS on status, resolve rule, then the cleanup rows. */
+  async updateIfStatus(id: string, statuses: string[], patch: RowPatch, cleanups: CleanupSpec[] = []) {
     const row = this.calls.get(id);
     if (!row || !statuses.includes(row.status)) return null;
-    const next = { ...row, ...patch } as DirectCallFullRow;
-    this.assertLock(next);
+    const next = { ...row, ...patch, updated_at: this.clock().toISOString() } as DirectCallFullRow;
     this.calls.set(id, next);
+    if ("browser_leg_id" in patch) this.resolveDial(id, "browser");
+    if ("seller_leg_id" in patch || patch.seller_dial_state === "sent") this.resolveDial(id, "seller");
+    this.insertSpecs(next, cleanups);
     return next;
   }
-  async setBrowserLeg(id: string, leg: string) {
+  async setTarget(id: string, target: { property_id: string | null; contact_id: string | null; destination_e164: string }) {
     const row = this.calls.get(id);
-    if (row && !row.browser_leg_id) this.calls.set(id, { ...row, browser_leg_id: leg });
+    if (row && row.status === "browser_connecting") this.calls.set(id, { ...row, ...target });
   }
-  async setSellerLegIfNull(id: string, leg: string) {
+  async discardReservation(id: string) {
     const row = this.calls.get(id);
-    if (!row || row.seller_leg_id) return false;
-    this.calls.set(id, { ...row, seller_leg_id: leg, seller_dial_state: "sent" });
-    return true;
+    if (row && row.status === "browser_connecting" && !row.browser_leg_id && !row.seller_leg_id) {
+      this.calls.delete(id);
+      for (const [k, c] of this.cleanups) if (c.direct_call_id === id) this.cleanups.delete(k);
+    }
   }
-  async markSellerDialSent(id: string) {
+  /** Mirrors direct_call_dial_succeeded. */
+  async dialSucceeded(id: string, leg: string, role: "browser" | "seller") {
     const row = this.calls.get(id);
-    if (row?.seller_dial_state === "pending") this.calls.set(id, { ...row, seller_dial_state: "sent" });
-  }
-  /** Emulates the partial unique index: a row entering the lock set while another holds it is rejected. */
-  private assertLock(next: DirectCallFullRow) {
-    if (!holdsLock(next)) return;
-    const other = [...this.calls.values()].find((r) => r.id !== next.id && r.operator_user_id === next.operator_user_id && holdsLock(r));
-    if (other) throw new DirectCallLockConflictError();
-  }
-  async setLegCleanup(id: string, role: "browser" | "seller", pending: boolean) {
-    const row = this.calls.get(id);
-    if (!row) return;
-    const next = {
-      ...row,
-      [role === "browser" ? "browser_hangup_pending" : "seller_hangup_pending"]: pending,
-      ...(pending ? {} : { [role === "browser" ? "browser_hangup_acked_at" : "seller_hangup_acked_at"]: null }),
-    } as DirectCallFullRow;
-    this.assertLock(next);
+    if (!row) return false;
+    const column = role === "browser" ? "browser_leg_id" : "seller_leg_id";
+    let stored = false;
+    let next = row;
+    if (!row[column]) {
+      next = { ...row, [column]: leg, ...(role === "seller" ? { seller_dial_state: "sent" as const } : {}) };
+      stored = true;
+    } else if (row[column] === leg) {
+      if (role === "seller" && row.seller_dial_state === "pending") next = { ...row, seller_dial_state: "sent" };
+      stored = true;
+    }
     this.calls.set(id, next);
+    this.resolveDial(id, role);
+    if (!stored || ["ending", "ended", "failed"].includes(row.status) || row.failure_reason === "teardown_pending") {
+      this.insertSpecs(next, [{ kind: "leg", legId: leg }]);
+    }
+    return stored;
   }
-  async markLegHangupAcked(id: string, role: "browser" | "seller", at: string) {
-    const row = this.calls.get(id);
-    if (row) this.calls.set(id, { ...row, [role === "browser" ? "browser_hangup_acked_at" : "seller_hangup_acked_at"]: at });
+  async dialRejected(id: string, role: "browser" | "seller") {
+    this.resolveDial(id, role);
   }
-  async addOrphanLeg(id: string, legId: string) {
-    const row = this.calls.get(id);
-    if (!row || row.orphan_hangup_leg_ids.includes(legId)) return;
-    const next = { ...row, orphan_hangup_leg_ids: [...row.orphan_hangup_leg_ids, legId] };
-    this.assertLock(next);
-    this.calls.set(id, next);
+  async hasActiveCallForProperty(propertyId: string, excludeId: string | null) {
+    return [...this.calls.values()].some((r) => r.property_id === propertyId && r.id !== excludeId && !["ended", "failed"].includes(r.status));
   }
-  async removeOrphanLeg(id: string, legId: string) {
-    const row = this.calls.get(id);
-    if (row) this.calls.set(id, { ...row, orphan_hangup_leg_ids: row.orphan_hangup_leg_ids.filter((l) => l !== legId) });
+  async addLegCleanup(callId: string, legId: string) {
+    const row = this.calls.get(callId);
+    if (row) this.insertSpecs(row, [{ kind: "leg", legId }]);
+  }
+  async confirmLegCleanup(legId: string, at: string) {
+    const c = this.legRow(legId);
+    if (c && !c.confirmed_at) c.confirmed_at = at;
+  }
+  /** Mirrors direct_call_cleanup_claim (lease pushes next_attempt_at out). */
+  async claimDueCleanups(userId: string, now: string, leaseSecs: number) {
+    const due = [...this.cleanups.values()].filter((c) => {
+      if (c.operator_user_id !== userId || c.confirmed_at || c.next_attempt_at > now) return false;
+      if (c.kind === "leg") return true;
+      const d = this.calls.get(c.direct_call_id);
+      return Boolean(d && (["ending", "ended", "failed"].includes(d.status) || d.failure_reason === "teardown_pending"));
+    });
+    for (const c of due) c.next_attempt_at = new Date(new Date(now).getTime() + leaseSecs * 1000).toISOString();
+    return due.map((c) => ({ ...c }));
+  }
+  async updateCleanup(id: string, patch: CleanupUpdate) {
+    const c = this.cleanups.get(id);
+    if (c) Object.assign(c, patch);
+  }
+  async openCleanupsForCall(callId: string) {
+    return this.openFor(callId).map((c) => ({ ...c }));
   }
   async getOperator(userId: string) {
     return this.operators.get(userId) ?? null;

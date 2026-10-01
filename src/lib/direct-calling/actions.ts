@@ -12,6 +12,7 @@ import { createClient } from "@/lib/supabase/server";
 import { resolveCallingConfig } from "./config";
 import type {
   CallingConfig,
+  CancelDirectCallResult,
   DirectActionResult,
   DirectCallControl,
   DirectCallStatusView,
@@ -27,6 +28,7 @@ import {
   telnyxDial,
   telnyxGetCallAlive,
   telnyxHangup,
+  telnyxListActiveCalls,
   telnyxSendDtmf,
 } from "./telnyx";
 
@@ -75,6 +77,7 @@ function service() {
       dial: telnyxDial,
       hangup: telnyxHangup,
       getCall: telnyxGetCallAlive,
+      listActiveCalls: telnyxListActiveCalls,
       sendDtmf: telnyxSendDtmf,
       createCredential: telnyxCreateCredential,
       createToken: telnyxCreateToken,
@@ -119,4 +122,18 @@ export async function controlDirectCall(
   const operator = control?.action === "hangup" ? await authenticatedUser() : await authenticatedOperator();
   if (!operator.ok) return operator;
   return service().control(operator.userId, directCallId, control);
+}
+
+export async function getDirectCallStatusByRequest(clientRequestId: string): Promise<DirectActionResult<DirectCallStatusView>> {
+  const operator = await authenticatedUser();
+  if (!operator.ok) return operator;
+  return service().getStatusByRequest(operator.userId, clientRequestId);
+}
+
+/** Cancels a start whose response was lost: hangs up the call if it exists, else tombstones the request id. */
+export async function cancelDirectCallByRequest(clientRequestId: string): Promise<DirectActionResult<CancelDirectCallResult>> {
+  // Like hangup, cancelling needs only authentication: removing a user from the pilot must not strand a call.
+  const operator = await authenticatedUser();
+  if (!operator.ok) return operator;
+  return service().cancelByRequest(operator.userId, clientRequestId);
 }

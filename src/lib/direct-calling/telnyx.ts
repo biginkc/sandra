@@ -14,9 +14,20 @@ export class TelnyxApiError extends Error {
     message: string,
     readonly kind: "rejected" | "unknown",
     readonly status: number | null,
+    readonly details: { code?: string | null; retryAfterMs?: number | null } = {},
   ) {
     super(message);
     this.name = "TelnyxApiError";
+  }
+
+  /** Telnyx error code of the first error in the response body (e.g. "90018"). */
+  get code(): string | null {
+    return this.details.code ?? null;
+  }
+
+  /** Server-requested wait (Retry-After), if any. */
+  get retryAfterMs(): number | null {
+    return this.details.retryAfterMs ?? null;
   }
 }
 
@@ -72,17 +83,22 @@ async function request(
     }
     if (!response.ok) {
       let detail = "";
+      let code: string | null = null;
       try {
-        const parsed = JSON.parse(text) as { errors?: Array<{ title?: string; detail?: string }> };
+        const parsed = JSON.parse(text) as { errors?: Array<{ code?: unknown; title?: string; detail?: string }> };
         detail = parsed.errors?.map((e) => e.detail ?? e.title ?? "").filter(Boolean).join("; ") ?? "";
+        const first = parsed.errors?.[0]?.code;
+        code = typeof first === "string" || typeof first === "number" ? String(first) : null;
       } catch {
         // not JSON
       }
+      const retryAfterSecs = Number(response.headers?.get?.("retry-after"));
       const kind = response.status >= 500 ? "unknown" : "rejected";
       throw new TelnyxApiError(
         `Telnyx ${path.replace(/\/[0-9a-f-]{8,}/gi, "/:id")} returned ${response.status}${detail ? `: ${redact(detail, settings.apiKey)}` : ""}`,
         kind,
         response.status,
+        { code, retryAfterMs: Number.isFinite(retryAfterSecs) && retryAfterSecs > 0 ? Math.min(retryAfterSecs, 300) * 1000 : null },
       );
     }
     return text;
@@ -91,11 +107,16 @@ async function request(
   }
 }
 
-/** True when a hangup was refused because the leg is already gone (404 / "already ended"). */
+/** Telnyx error code for "Call has already ended" on a hangup (OpenAPI HangupCall: 422 / 90018). */
+export const CALL_ALREADY_ENDED_CODE = "90018";
+
+/**
+ * True only for the documented already-ended refusal: 422 with code 90018. Any other 4xx (including
+ * an undocumented 404) is NOT a confirmation; the leg stays pending until a hangup webhook or a status
+ * check (is_alive:false) agrees.
+ */
 export function isLegAlreadyEnded(error: unknown): boolean {
-  if (!(error instanceof TelnyxApiError) || error.kind !== "rejected") return false;
-  if (error.status === 404) return true;
-  return error.status === 422 && /already|ended|no longer|not found|does not exist/i.test(error.message);
+  return error instanceof TelnyxApiError && error.kind === "rejected" && error.status === 422 && error.code === CALL_ALREADY_ENDED_CODE;
 }
 
 function parseJson<T>(text: string): T {
@@ -175,23 +196,53 @@ export async function telnyxHangup(
 
 /**
  * GET /v2/calls/{call_control_id} ("Retrieve a call status"; data.is_alive; available for 10 minutes
- * after the call ended, so a 404 means the leg is long gone). Never throws for 404: that is "not alive".
+ * after the call ended). Only an explicit is_alive:false is "gone": any error (including an expired or
+ * unknown id) is not a confirmation and throws.
  */
 export async function telnyxGetCallAlive(
   settings: Pick<TelnyxDirectSettings, "apiKey">,
   callControlId: string,
   options: TelnyxClientOptions = {},
 ): Promise<{ isAlive: boolean }> {
-  let text: string;
-  try {
-    text = await request(settings, "GET", `/calls/${encodeURIComponent(callControlId)}`, undefined, "json", options);
-  } catch (error) {
-    if (error instanceof TelnyxApiError && error.kind === "rejected" && error.status === 404) return { isAlive: false };
-    throw error;
-  }
+  const text = await request(settings, "GET", `/calls/${encodeURIComponent(callControlId)}`, undefined, "json", options);
   const alive = parseJson<{ data?: { is_alive?: unknown } }>(text).data?.is_alive;
   // Anything but an explicit false is "still alive": never confirm a teardown on ambiguity.
   return { isAlive: alive !== false };
+}
+
+export type ActiveCall = { callControlId: string; clientState: Record<string, unknown> | null };
+
+const ACTIVE_CALLS_PAGE = 250;
+const ACTIVE_CALLS_MAX_PAGES = 4;
+
+/**
+ * GET /v2/connections/{connection_id}/active_calls (Telnyx OpenAPI: "List all active calls for given
+ * connection"; cursor pagination via page[limit] and meta.cursors.after; each item carries
+ * call_control_id and the base64 client_state we sent). The connection is the Voice API app the
+ * server Dials on. `complete:false` means the listing was cut short: an absence of matches in it
+ * proves nothing.
+ */
+export async function telnyxListActiveCalls(
+  settings: Pick<TelnyxDirectSettings, "apiKey" | "appId">,
+  options: TelnyxClientOptions = {},
+): Promise<{ calls: ActiveCall[]; complete: boolean }> {
+  const calls: ActiveCall[] = [];
+  let after: string | null = null;
+  for (let page = 0; page < ACTIVE_CALLS_MAX_PAGES; page += 1) {
+    const query = `page%5Blimit%5D=${ACTIVE_CALLS_PAGE}${after ? `&page%5Bafter%5D=${encodeURIComponent(after)}` : ""}`;
+    const text = await request(settings, "GET", `/connections/${encodeURIComponent(settings.appId)}/active_calls?${query}`, undefined, "json", options);
+    const parsed: { data?: Array<{ call_control_id?: unknown; client_state?: unknown }>; meta?: { cursors?: { after?: unknown } } } = parseJson(text);
+    if (!Array.isArray(parsed.data)) throw new TelnyxApiError("Telnyx returned an unreadable response.", "unknown", null);
+    for (const item of parsed.data) {
+      if (typeof item.call_control_id === "string" && item.call_control_id) {
+        calls.push({ callControlId: item.call_control_id, clientState: decodeClientState(item.client_state) });
+      }
+    }
+    const next: unknown = parsed.meta?.cursors?.after;
+    if (typeof next !== "string" || !next || parsed.data.length === 0) return { calls, complete: true };
+    after = next;
+  }
+  return { calls, complete: false };
 }
 
 export async function telnyxSendDtmf(

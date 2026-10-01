@@ -26,6 +26,19 @@ export type StartDirectCallInput =
   | { kind: "lead"; propertyId: string; clientRequestId: string }
   | { kind: "manual"; phone: string; clientRequestId: string };
 
+/** Display/identity fields of the server-prepared call target (same shape as the dialer's SoftphoneTarget). */
+export type DirectCallTarget = {
+  propertyId: string | null;
+  contactId: string | null;
+  phoneE164: string;
+  maskedPhone: string;
+  name: string;
+  address: string | null;
+  state: string | null;
+  startedAt: string;
+  repName?: string | null;
+};
+
 export type StartDirectCallResult = {
   directCallId: string;
   /** Telnyx call_control_id of the leg the server dialed to this browser. */
@@ -38,6 +51,11 @@ export type StartDirectCallResult = {
    * server has no signing key and the call is not an internal training call.
    */
   callCapability?: string;
+  /**
+   * The target the server prepared (and, for a lead, paused enrollments for) after its busy check.
+   * Absent only on an idempotent replay of an in-flight request id.
+   */
+  target?: DirectCallTarget;
 };
 
 export type DirectCallStatusView = {
@@ -48,8 +66,9 @@ export type DirectCallStatusView = {
   hangupCause: string | null;
   failureReason: string | null;
   /**
-   * True while any leg (or orphan leg) of this call is not yet confirmed ended by the provider.
-   * A terminal status with cleanupPending=true is NOT authoritative: the browser keeps polling.
+   * True while any cleanup obligation of this call (a leg not yet confirmed ended, or a seller Dial
+   * whose outcome is still unresolved) is outstanding. A terminal status with cleanupPending=true is
+   * NOT authoritative: the browser keeps polling.
    */
   cleanupPending: boolean;
 };
@@ -58,6 +77,14 @@ export type DirectCallControl =
   | { action: "hangup" }
   | { action: "dtmf"; digit: "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "*" | "#" };
 
+/** Result of cancelling a request by its client request id. */
+export type CancelDirectCallResult = {
+  /** The call that exists for the request id, or null when none did (a tombstone now blocks it). */
+  directCallId: string | null;
+  /** True when no call existed and a tombstone was recorded, so a late start dials nothing. */
+  tombstoned: boolean;
+};
+
 /*
  * Server actions (implemented in ./actions.ts, "use server"):
  *   getCallingConfigForCurrentUser(): Promise<CallingConfig>
@@ -65,4 +92,9 @@ export type DirectCallControl =
  *   startDirectCall(input: StartDirectCallInput): Promise<DirectActionResult<StartDirectCallResult>>
  *   getDirectCallStatus(directCallId: string): Promise<DirectActionResult<DirectCallStatusView>>
  *   controlDirectCall(directCallId: string, control: DirectCallControl): Promise<DirectActionResult<{ accepted: true }>>
+ *   cancelDirectCallByRequest(clientRequestId: string): Promise<DirectActionResult<CancelDirectCallResult>>
+ *     call exists for the request id -> explicit hangup path; none -> terminal tombstone (failed,
+ *     cancelled_before_start) so a late startDirectCall with that id returns errorCode "cancelled".
+ *   getDirectCallStatusByRequest(clientRequestId: string): Promise<DirectActionResult<DirectCallStatusView>>
+ *     errorCode "not_found" when no call (and no tombstone) exists for the request id.
  */

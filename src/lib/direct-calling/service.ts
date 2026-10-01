@@ -1,22 +1,25 @@
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 
-import { runLegCleanup } from "./cleanup";
+import { processDueCleanups, type CleanupResult } from "./cleanup";
+import { resumeAfterTransition, resumeLeadIfUnowned } from "./lead-resume";
 import { readTelnyxDirectSettings, resolveCallingConfig, type DirectCallEnv, type TelnyxDirectSettings } from "./config";
 import {
   DIRECT_CALL_TERMINAL_STATUSES,
+  type CancelDirectCallResult,
   type DirectActionResult,
   type DirectCallControl,
   type DirectCallStatus,
   type DirectCallStatusView,
+  type DirectCallTarget,
   type DirectRtcToken,
   type StartDirectCallInput,
   type StartDirectCallResult,
 } from "./contract";
 import type { DirectCallFullRow, DirectCallStore } from "./store";
-import { TelnyxApiError, type DialParams } from "./telnyx";
-import { MAX_CALL_SECS, TEARDOWN_PENDING, hasPendingCleanup, staleOutcome } from "./transitions";
+import { TelnyxApiError, type ActiveCall, type DialParams } from "./telnyx";
+import { MAX_CALL_SECS, TEARDOWN_PENDING, staleOutcome, teardownBegun, type CleanupSpec } from "./transitions";
 
-type PrepareResult = { ok: true; data: { propertyId: string | null; contactId: string | null; phoneE164: string } } | { ok: false; error: string };
+type PrepareResult = { ok: true; data: DirectCallTarget } | { ok: false; error: string };
 
 export type DirectCallServiceDeps = {
   store: DirectCallStore;
@@ -34,6 +37,7 @@ export type DirectCallServiceDeps = {
     dial: (settings: TelnyxDirectSettings, params: DialParams) => Promise<{ callControlId: string }>;
     hangup: (settings: TelnyxDirectSettings, callControlId: string, commandId: string) => Promise<void>;
     getCall: (settings: TelnyxDirectSettings, callControlId: string) => Promise<{ isAlive: boolean }>;
+    listActiveCalls: (settings: TelnyxDirectSettings) => Promise<{ calls: ActiveCall[]; complete: boolean }>;
     sendDtmf: (settings: TelnyxDirectSettings, callControlId: string, digit: string) => Promise<void>;
     createCredential: (settings: TelnyxDirectSettings, name: string) => Promise<{ id: string; sipUsername: string }>;
     createToken: (settings: TelnyxDirectSettings, credentialId: string) => Promise<string>;
@@ -45,6 +49,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DTMF = /^[0-9*#]$/;
 const SETUP_STATUSES: DirectCallStatus[] = ["browser_connecting", "seller_dialing", "connected"];
 const LIVE: DirectCallStatus[] = [...SETUP_STATUSES, "ending"];
+const CANCELLED_BEFORE_START = "cancelled_before_start";
 
 function err(error: string, errorCode?: string): { ok: false; error: string; errorCode?: string } {
   return errorCode ? { ok: false, error, errorCode } : { ok: false, error };
@@ -86,13 +91,14 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
     }
   }
 
-  async function resume(propertyId: string | null) {
-    if (!propertyId) return;
-    try {
-      await deps.resumeFailedSoftphoneCall(propertyId);
-    } catch (error) {
-      deps.report(error, "direct_call_resume");
-    }
+  /** Resume a lead's enrollments (existing session-bound function), unless another direct call owns them. */
+  async function resume(propertyId: string | null, userId: string, excludeCallId: string | null) {
+    await resumeLeadIfUnowned(
+      { store, resume: (id) => deps.resumeFailedSoftphoneCall(id), report: deps.report },
+      propertyId,
+      userId,
+      excludeCallId,
+    );
   }
 
   function startResult(row: DirectCallFullRow, userId: string): StartDirectCallResult | null {
@@ -110,50 +116,50 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
     store,
     hangup: (callControlId: string, commandId: string) => deps.telnyx.hangup(settings, callControlId, commandId),
     getCall: (callControlId: string) => deps.telnyx.getCall(settings, callControlId),
+    listActiveCalls: () => deps.telnyx.listActiveCalls(settings),
     now: deps.now,
     report: deps.report,
   });
 
+  /** Work every cleanup obligation of the operator that is due. Never throws: the rows are durable. */
+  async function runCleanups(settings: TelnyxDirectSettings, userId: string): Promise<CleanupResult | null> {
+    try {
+      return await processDueCleanups(cleanupDeps(settings), userId);
+    } catch (error) {
+      deps.report(error, "direct_call_cleanup");
+      return null;
+    }
+  }
+
+  const legSpecs = (row: DirectCallFullRow): CleanupSpec[] =>
+    [row.browser_leg_id, row.seller_leg_id].filter((id): id is string => Boolean(id)).map((legId) => ({ kind: "leg", legId }));
+
   /**
-   * Drives a stale call's legs down before it is allowed to release the operator lock, and
-   * retries any leg teardown that is still pending. Never marks a call terminal while a known
-   * leg has not been confirmed ended.
+   * Drives a stale call down before it may release the operator lock, and works any due cleanup.
+   * Never marks a call terminal while a cleanup obligation of it is unconfirmed.
    */
   async function settle(row: DirectCallFullRow, settings: TelnyxDirectSettings | null): Promise<DirectCallFullRow> {
-    if (!settings) return row;
     try {
       let current = row;
-      const outcome = staleOutcome(current, deps.now());
-      if (outcome) {
-        if (current.failure_reason !== TEARDOWN_PENDING) {
-          current =
-            (await store.updateIfStatus(current.id, [current.status], {
-              failure_reason: TEARDOWN_PENDING,
-              browser_hangup_pending: Boolean(current.browser_leg_id),
-              seller_hangup_pending: Boolean(current.seller_leg_id),
-            })) ?? (await store.findById(current.id)) ?? current;
-        }
-        if (!DIRECT_CALL_TERMINAL_STATUSES.has(current.status)) {
-          await runLegCleanup(cleanupDeps(settings), current);
-          const fresh = (await store.findById(current.id)) ?? current;
-          if (!hasPendingCleanup(fresh) && !DIRECT_CALL_TERMINAL_STATUSES.has(fresh.status)) {
-            return (
-              (await store.updateIfStatus(fresh.id, [fresh.status], {
-                status: outcome,
-                ended_at: deps.now().toISOString(),
-                failure_reason: outcome === "failed" ? "stale_unresolved" : null,
-              })) ?? (await store.findById(fresh.id)) ?? fresh
-            );
-          }
-          return fresh;
-        }
-        return current;
+      if (staleOutcome(current, deps.now()) && current.failure_reason !== TEARDOWN_PENDING) {
+        current =
+          (await store.updateIfStatus(current.id, [current.status], { failure_reason: TEARDOWN_PENDING }, legSpecs(current))) ??
+          (await store.findById(current.id)) ??
+          current;
       }
-      if (hasPendingCleanup(current)) {
-        await runLegCleanup(cleanupDeps(settings), current);
-        return (await store.findById(current.id)) ?? current;
+      if (settings) await runCleanups(settings, current.operator_user_id);
+      const fresh = (await store.findById(current.id)) ?? current;
+      const outcome = staleOutcome(fresh, deps.now());
+      if (outcome && !DIRECT_CALL_TERMINAL_STATUSES.has(fresh.status) && (await store.openCleanupsForCall(fresh.id)).length === 0) {
+        const moved = await store.updateIfStatus(fresh.id, [fresh.status], {
+          status: outcome,
+          ended_at: deps.now().toISOString(),
+          failure_reason: outcome === "failed" ? "stale_unresolved" : null,
+        });
+        await resumeAfterTransition({ store, resume: (id) => deps.resumeFailedSoftphoneCall(id), report: deps.report }, fresh, moved);
+        return moved ?? (await store.findById(fresh.id)) ?? fresh;
       }
-      return current;
+      return fresh;
     } catch (error) {
       deps.report(error, "direct_call_settle");
       return row;
@@ -184,54 +190,78 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
     try {
       const prior = await store.findByRequest(userId, clientRequestId);
       if (prior) {
+        if (prior.failure_reason === CANCELLED_BEFORE_START) return err("This call was cancelled.", "cancelled");
         const replay = !DIRECT_CALL_TERMINAL_STATUSES.has(prior.status) ? startResult(prior, userId) : null;
         return replay ? { ok: true, data: replay } : err("This call request was already used.", "duplicate_request");
       }
+      // A stuck row is torn down (legs hung up) and due cleanups are worked before the operator may start.
       const existing = await store.findActiveForUser(userId);
-      if (existing) {
-        // A stuck row is torn down (legs hung up) before it may release the operator.
-        const settled = await settle(existing, settings);
-        if (!DIRECT_CALL_TERMINAL_STATUSES.has(settled.status)) return err("You already have a call in progress.", "call_in_progress");
-        // The call is over but a leg is not yet confirmed ended: the operator lock still holds.
-        if (hasPendingCleanup(settled)) return err("Your previous call is still hanging up. Try again in a moment.", "teardown_pending");
-      }
+      if (existing) await settle(existing, settings);
+      await runCleanups(settings, userId);
     } catch (error) {
       deps.report(error, "direct_call_start_precheck");
       return err("Could not start the call. Try again.", "start_failed");
     }
 
-    // Existing eligibility path, unchanged. Its error text is returned as-is.
-    const prepared = input.kind === "lead" ? await deps.prepareLeadCall(input.propertyId) : await deps.prepareManualCall(input.phone);
-    if (!prepared.ok) return { ok: false, error: prepared.error };
-    const target = prepared.data;
-
-    let row: DirectCallFullRow | null = null;
+    // RESERVE first: the atomic busy check (a non-terminal call or any unconfirmed cleanup row) happens
+    // here, before prepare, so prepare (which pauses lead enrollments) only ever runs for a call that is
+    // allowed to proceed. The call is only dialed once its prepared target is stored.
+    let row: DirectCallFullRow;
     try {
-      const operator = await ensureOperator(userId, settings);
-      const inserted = await store.insertCall({
+      const begun = await store.beginCall({
         org_id: SANDRA_ORG_ID,
         operator_user_id: userId,
-        property_id: target.propertyId,
-        contact_id: target.contactId,
-        destination_e164: target.phoneE164,
+        property_id: null,
+        contact_id: null,
+        destination_e164: "",
         caller_id_e164: settings.callerIdE164,
         client_request_id: clientRequestId,
       });
-      if (inserted === "conflict") {
-        const active = await store.findActiveForUser(userId);
-        // The winning call owns the enrollment pause when it is for the same lead.
-        if (!active || active.property_id !== target.propertyId) await resume(target.propertyId);
-        if (active && DIRECT_CALL_TERMINAL_STATUSES.has(active.status)) {
-          return err("Your previous call is still hanging up. Try again in a moment.", "teardown_pending");
-        }
-        return err("You already have a call in progress.", "call_in_progress");
+      if (begun.outcome === "duplicate_request") {
+        if (begun.row.failure_reason === CANCELLED_BEFORE_START) return err("This call was cancelled.", "cancelled");
+        const replay = !DIRECT_CALL_TERMINAL_STATUSES.has(begun.row.status) ? startResult(begun.row, userId) : null;
+        return replay ? { ok: true, data: replay } : err("This call request was already used.", "duplicate_request");
       }
-      row = inserted.row;
+      if (begun.outcome === "busy_cleanup") return err("Your previous call is still hanging up. Try again in a moment.", "teardown_pending");
+      if (begun.outcome === "busy_call") return err("You already have a call in progress.", "call_in_progress");
+      row = (begun as Extract<typeof begun, { outcome: "created" }>).row;
+    } catch (error) {
+      deps.report(error, "direct_call_start_reserve");
+      return err("Could not start the call. Try again.", "start_failed");
+    }
+
+    // Existing eligibility path, unchanged. Its error text is returned as-is.
+    let prepared: Awaited<ReturnType<typeof deps.prepareLeadCall>>;
+    try {
+      prepared = input.kind === "lead" ? await deps.prepareLeadCall(input.propertyId) : await deps.prepareManualCall(input.phone);
+    } catch (error) {
+      deps.report(error, "direct_call_prepare");
+      prepared = { ok: false, error: "Could not start the call. Try again." };
+    }
+    if (!prepared.ok) {
+      await store.discardReservation(row.id).catch((e) => deps.report(e, "direct_call_start_discard"));
+      return { ok: false, error: prepared.error };
+    }
+    const target = prepared.data;
+
+    let dialedLeg: string | null = null;
+    let dialRefused = false;
+    try {
+      const operator = await ensureOperator(userId, settings);
+      await store.setTarget(row.id, { property_id: target.propertyId, contact_id: target.contactId, destination_e164: target.phoneE164 });
       const identity = deps.sealCallIdentity({ callId: row.id, userId, phoneE164: target.phoneE164 });
       if (identity.training && !identity.capability) {
-        await store.updateIfStatus(row.id, LIVE, { status: "failed", failure_reason: "capability_unavailable", ended_at: deps.now().toISOString() });
-        await resume(target.propertyId);
+        const moved = await store.updateIfStatus(row.id, LIVE, { status: "failed", failure_reason: "capability_unavailable", ended_at: deps.now().toISOString() });
+        await store.dialRejected(row.id, "browser"); // nothing was dialed
+        if (moved) await resume(target.propertyId, userId, row.id);
         return err("Internal training is unavailable.", "start_failed");
+      }
+      // A cancel that raced ahead of this start (tombstone / hangup before the Dial) wins: dial nothing.
+      const latest = await store.findById(row.id);
+      if (!latest || latest.status !== "browser_connecting") {
+        if (latest) await store.dialRejected(row.id, "browser");
+        await resume(target.propertyId, userId, row.id);
+        return err("This call was cancelled.", "cancelled");
       }
       const dialed = await deps.telnyx.dial(settings, {
         to: `sip:${operator.sip_username}@sip.telnyx.com`,
@@ -242,7 +272,12 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
         timeLimitSecs: MAX_CALL_SECS,
         customHeaders: [{ name: "X-Sandra-Direct-Call-Id", value: row.id }],
       });
-      await store.setBrowserLeg(row.id, dialed.callControlId);
+      dialedLeg = dialed.callControlId;
+      // Stores the leg and resolves the browser Dial's unresolved row (or queues the leg for hangup if
+      // the call was already ended meanwhile).
+      await store.dialSucceeded(row.id, dialed.callControlId, "browser");
+      const current = await store.findById(row.id);
+      if (current && DIRECT_CALL_TERMINAL_STATUSES.has(current.status)) return err("Could not start the call. Try again.", "start_failed");
       return {
         ok: true,
         data: {
@@ -250,29 +285,38 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
           browserLegId: dialed.callControlId,
           correlationHeader: { name: "X-Sandra-Direct-Call-Id", value: row.id },
           ...(identity.capability ? { callCapability: identity.capability } : {}),
+          target,
         },
       };
     } catch (error) {
       deps.report(error, "direct_call_start");
-      if (row) {
-        const unknown = !(error instanceof TelnyxApiError) || error.kind === "unknown";
-        try {
-          await store.updateIfStatus(row.id, LIVE, {
-            status: "failed",
-            failure_reason: unknown ? "dial_outcome_unknown" : "browser_dial_rejected",
-            ended_at: deps.now().toISOString(),
-          });
-        } catch (markError) {
-          deps.report(markError, "direct_call_start_mark_failed");
-        }
+      dialRefused = !dialedLeg && error instanceof TelnyxApiError && error.kind === "rejected";
+      const unknown = !dialedLeg && !dialRefused;
+      try {
+        // The unresolved_dial row written with the reservation stays open when the outcome is unknown; a leg
+        // we know but could not store becomes a durable leg row; a definitive refusal resolves it.
+        const moved = await store.updateIfStatus(
+          row.id,
+          LIVE,
+          { status: "failed", failure_reason: dialRefused ? "browser_dial_rejected" : "dial_outcome_unknown", ended_at: deps.now().toISOString() },
+          dialedLeg ? [{ kind: "leg", legId: dialedLeg }] : [],
+        );
+        if (dialRefused) await store.dialRejected(row.id, "browser");
+        void moved;
+        if (unknown || dialedLeg) await runCleanups(settings, userId);
+      } catch (markError) {
+        deps.report(markError, "direct_call_start_mark_failed");
       }
-      await resume(target.propertyId);
+      await resume(target.propertyId, userId, row.id);
       return err("Could not start the call. Try again.", "start_failed");
     }
   }
 
-  function statusView(row: DirectCallFullRow): DirectCallStatusView {
+  async function statusView(row: DirectCallFullRow): Promise<DirectCallStatusView> {
     const terminal = DIRECT_CALL_TERMINAL_STATUSES.has(row.status);
+    // Derived from unconfirmed cleanup rows. An unresolved Dial of a still-live call is not "cleanup".
+    const open = await store.openCleanupsForCall(row.id);
+    const cleanupPending = open.some((r) => r.kind === "leg" || teardownBegun(row));
     return {
       directCallId: row.id,
       status: row.status as DirectCallStatus,
@@ -280,8 +324,8 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
       endedAt: row.ended_at,
       hangupCause: row.hangup_cause,
       // A call can be over while a leg is still being torn down; say so rather than hide it.
-      failureReason: terminal && hasPendingCleanup(row) && !row.failure_reason ? TEARDOWN_PENDING : row.failure_reason,
-      cleanupPending: hasPendingCleanup(row),
+      failureReason: terminal && cleanupPending && !row.failure_reason ? TEARDOWN_PENDING : row.failure_reason,
+      cleanupPending,
     };
   }
 
@@ -292,7 +336,20 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
     try {
       const row = await store.findOwned(directCallId.toLowerCase(), userId);
       if (!row) return err("Call not found.", "not_found");
-      return { ok: true, data: statusView(await settle(row, readTelnyxDirectSettings(env))) };
+      return { ok: true, data: await statusView(await settle(row, readTelnyxDirectSettings(env))) };
+    } catch (error) {
+      deps.report(error, "direct_call_status");
+      return err("Could not read the call status.", "status_failed");
+    }
+  }
+
+  /** Same as getStatus, keyed by the client request id (for a start whose response was lost). */
+  async function getStatusByRequest(userId: string, clientRequestId: string): Promise<DirectActionResult<DirectCallStatusView>> {
+    if (typeof clientRequestId !== "string" || !UUID.test(clientRequestId)) return err("Call not found.", "not_found");
+    try {
+      const row = await store.findByRequest(userId, clientRequestId.toLowerCase());
+      if (!row) return err("Call not found.", "not_found");
+      return { ok: true, data: await statusView(await settle(row, readTelnyxDirectSettings(env))) };
     } catch (error) {
       deps.report(error, "direct_call_status");
       return err("Could not read the call status.", "status_failed");
@@ -314,29 +371,45 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
         return { ok: true, data: { accepted: true } };
       }
       if (ctl?.action !== "hangup") return err("Unsupported control.", "invalid_request");
-
-      // Hangup of an owned call needs only authentication + ownership (not pilot membership).
-      const settings = readTelnyxDirectSettings(env);
-      if (!settings) return err("Could not hang up. Try again.", "hangup_failed");
-
-      let current = row;
-      if (!DIRECT_CALL_TERMINAL_STATUSES.has(current.status) && current.status !== "ending") {
-        const moved = await store.updateIfStatus(current.id, SETUP_STATUSES, {
-          status: "ending",
-          browser_hangup_pending: Boolean(current.browser_leg_id),
-          seller_hangup_pending: Boolean(current.seller_leg_id),
-        });
-        current = moved ?? (await store.findById(current.id)) ?? current;
-      }
-      if (!hasPendingCleanup(current)) return { ok: true, data: { accepted: true } };
-      const result = await runLegCleanup(cleanupDeps(settings), current);
-      if (result.failed > 0 && result.confirmed === 0 && result.acknowledged === 0) return err("Could not hang up. Try again.", "hangup_failed");
-      return { ok: true, data: { accepted: true } };
+      return await hangupRow(userId, row);
     } catch (error) {
       deps.report(error, "direct_call_control");
       return err("Could not control the call.", "control_failed");
     }
   }
 
-  return { getRtcToken, startCall, getStatus, control };
+  // Hangup of an owned call needs only authentication + ownership (not pilot membership).
+  async function hangupRow(userId: string, row: DirectCallFullRow): Promise<DirectActionResult<{ accepted: true }>> {
+    const settings = readTelnyxDirectSettings(env);
+    if (!DIRECT_CALL_TERMINAL_STATUSES.has(row.status) && row.status !== "ending") {
+      // Moves to ending and persists a cleanup row per known leg in one write. A seller Dial still in
+      // flight already has its unresolved_dial row, which becomes actionable now.
+      await store.updateIfStatus(row.id, SETUP_STATUSES, { status: "ending" }, legSpecs(row));
+    }
+    // Without provider credentials the obligation is recorded (the operator stays locked) but cannot be worked.
+    if (!settings) return err("Could not hang up. Try again.", "hangup_failed");
+    const result = await runCleanups(settings, userId);
+    if (result && result.failed > 0 && result.confirmed === 0 && result.acknowledged === 0) return err("Could not hang up. Try again.", "hangup_failed");
+    return { ok: true, data: { accepted: true } };
+  }
+
+  /**
+   * Cancels a start whose outcome the browser does not know. A call that exists goes through the normal
+   * hangup path; if none exists a terminal tombstone is recorded so a late start with that id dials nothing.
+   */
+  async function cancelByRequest(userId: string, clientRequestId: string): Promise<DirectActionResult<CancelDirectCallResult>> {
+    if (typeof clientRequestId !== "string" || !UUID.test(clientRequestId)) return err("A valid call request id is required.", "invalid_request");
+    try {
+      const cancelled = await store.cancelRequest(userId, SANDRA_ORG_ID, clientRequestId.toLowerCase());
+      if (cancelled.outcome === "tombstoned") return { ok: true, data: { directCallId: null, tombstoned: true } };
+      const hung = await hangupRow(userId, cancelled.row);
+      if (!hung.ok) return hung;
+      return { ok: true, data: { directCallId: cancelled.row.id, tombstoned: false } };
+    } catch (error) {
+      deps.report(error, "direct_call_cancel");
+      return err("Could not cancel the call.", "cancel_failed");
+    }
+  }
+
+  return { getRtcToken, startCall, getStatus, getStatusByRequest, control, cancelByRequest };
 }

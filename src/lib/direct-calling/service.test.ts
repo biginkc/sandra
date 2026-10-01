@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
+import type { DirectCallTarget } from "./contract";
 import { createDirectCallService, type DirectCallServiceDeps } from "./service";
 import { FakeStore } from "./test-support";
 import { TelnyxApiError } from "./telnyx";
+
+const ENDED_422 = () => new TelnyxApiError("Telnyx returned 422: Call has already ended", "rejected", 422, { code: "90018" });
 
 const ENV = {
   DIRECT_CALL_PILOT_USER_IDS: "user-1",
@@ -16,18 +19,24 @@ const ENV = {
 const REQ = "44444444-4444-4444-8444-444444444444";
 const REQ2 = "55555555-5555-4555-8555-555555555555";
 
+const target = (over: Partial<DirectCallTarget>): DirectCallTarget => ({
+  propertyId: null, contactId: null, phoneE164: "+15550008888", maskedPhone: "(555) 000-8888", name: "Manual call", address: null, state: null,
+  startedAt: "2026-10-01T12:00:00.000Z", ...over,
+});
+
 function setup(overrides: Partial<DirectCallServiceDeps> = {}) {
   const store = new FakeStore();
   const telnyx = {
     dial: vi.fn(async (_s: unknown, _p: Record<string, unknown>) => ({ callControlId: "BROWSER-LEG" })),
     hangup: vi.fn(async (_s: unknown, _leg: string, _cmd: string) => undefined),
     getCall: vi.fn(async (_s: unknown, _leg: string) => ({ isAlive: false })),
+    listActiveCalls: vi.fn(async (_s: unknown) => ({ calls: [] as Array<{ callControlId: string; clientState: Record<string, unknown> | null }>, complete: true })),
     sendDtmf: vi.fn(async (_s: unknown, _leg: string, _d: string) => undefined),
     createCredential: vi.fn(async () => ({ id: "cred-1", sipUsername: "gencred123" })),
     createToken: vi.fn(async () => "jwt-token"),
   };
-  const prepareLeadCall = vi.fn(async (propertyId: string) => ({ ok: true as const, data: { propertyId, contactId: "contact-1", phoneE164: "+15550009999" } }));
-  const prepareManualCall = vi.fn(async () => ({ ok: true as const, data: { propertyId: null, contactId: null, phoneE164: "+15550008888" } }));
+  const prepareLeadCall = vi.fn(async (propertyId: string) => ({ ok: true as const, data: target({ propertyId, contactId: "contact-1", phoneE164: "+15550009999", name: "Pat Seller" }) }));
+  const prepareManualCall = vi.fn(async () => ({ ok: true as const, data: target({ propertyId: null, contactId: null, phoneE164: "+15550008888" }) }));
   const resumeFailedSoftphoneCall = vi.fn(async () => undefined);
   const report = vi.fn();
   const sealCallIdentity = vi.fn((a: { callId: string; userId: string; phoneE164: string }) => ({
@@ -35,6 +44,7 @@ function setup(overrides: Partial<DirectCallServiceDeps> = {}) {
     training: a.phoneE164 === "+15550007777",
   }));
   const clock = { now: new Date("2026-10-01T12:00:00.000Z") };
+  store.clock = () => clock.now;
   const service = createDirectCallService({
     store, env: ENV, now: () => clock.now,
     prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall, sealCallIdentity, telnyx, report, ...overrides,
@@ -74,7 +84,13 @@ describe("direct call service", () => {
     });
     const row = [...store.calls.values()][0];
     expect(row).toMatchObject({ destination_e164: "+15550009999", caller_id_e164: "+15550002222", status: "browser_connecting", browser_leg_id: "BROWSER-LEG" });
-    if (result.ok) expect(result.data).toMatchObject({ directCallId: row.id, browserLegId: "BROWSER-LEG", correlationHeader: { name: "X-Sandra-Direct-Call-Id", value: row.id } });
+    if (result.ok) {
+      expect(result.data).toMatchObject({ directCallId: row.id, browserLegId: "BROWSER-LEG", correlationHeader: { name: "X-Sandra-Direct-Call-Id", value: row.id } });
+      // The server-prepared target's display fields travel back so the UI never has to prepare itself.
+      expect(result.data.target).toMatchObject({ propertyId: "prop-1", name: "Pat Seller", maskedPhone: "(555) 000-8888" });
+    }
+    // The browser Dial's unresolved row existed before the Dial and is resolved by the stored leg.
+    expect(store.openFor(row.id)).toEqual([]);
   });
 
   it("ignores a PSTN destination smuggled into the input", async () => {
@@ -109,7 +125,11 @@ describe("direct call service", () => {
     telnyx.dial.mockRejectedValueOnce(new TelnyxApiError("Telnyx request timed out.", "unknown", null));
     const result = await service.startCall("user-1", { kind: "lead", propertyId: "prop-1", clientRequestId: REQ });
     expect(result).toMatchObject({ ok: false, errorCode: "start_failed" });
-    expect([...store.calls.values()][0]).toMatchObject({ status: "failed", failure_reason: "dial_outcome_unknown" });
+    const failedRow = [...store.calls.values()][0];
+    expect(failedRow).toMatchObject({ status: "failed", failure_reason: "dial_outcome_unknown" });
+    // The unknown Dial stays an open obligation (a leg may exist) and holds the operator lock.
+    expect(store.openFor(failedRow.id).map((c) => `${c.kind}:${c.dial_role}`)).toEqual(["unresolved_dial:browser"]);
+    expect(resumeFailedSoftphoneCall).toHaveBeenCalledTimes(1);
     expect(resumeFailedSoftphoneCall).toHaveBeenCalledWith("prop-1");
     expect(telnyx.dial).toHaveBeenCalledTimes(1);
     expect(report).toHaveBeenCalled();
@@ -128,7 +148,8 @@ describe("direct call service", () => {
     const { service, telnyx } = setup();
     const a = await service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ });
     const b = await service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ });
-    expect(b).toEqual(a);
+    // The replay carries the same call identity (the target is only returned by the original start).
+    expect(b).toEqual({ ok: true, data: { ...(a as { data: object }).data, target: undefined } });
     expect(telnyx.dial).toHaveBeenCalledTimes(1);
   });
 
@@ -150,10 +171,10 @@ describe("direct call service", () => {
     store.calls.set(id, { ...store.calls.get(id)!, status: "connected", seller_leg_id: "SELLER-LEG" });
     expect(await service.control("user-1", id, { action: "hangup" })).toEqual({ ok: true, data: { accepted: true } });
     expect(telnyx.hangup.mock.calls.map((c) => c[1]).sort()).toEqual(["BROWSER-LEG", "SELLER-LEG"]);
-    // 2xx = accepted, not confirmed: the flags stay up until the hangup webhook / a status check says the legs are gone.
-    expect(store.calls.get(id)).toMatchObject({ status: "ending", browser_hangup_pending: true, seller_hangup_pending: true });
-    expect(store.calls.get(id)?.browser_hangup_acked_at).not.toBeNull();
-    expect(store.calls.get(id)?.seller_hangup_acked_at).not.toBeNull();
+    // 2xx = accepted, not confirmed: the rows stay open until the hangup webhook / a status check says the legs are gone.
+    expect(store.calls.get(id)).toMatchObject({ status: "ending" });
+    expect(store.legRow("BROWSER-LEG")).toMatchObject({ confirmed_at: null, acked_at: expect.any(String) });
+    expect(store.legRow("SELLER-LEG")).toMatchObject({ confirmed_at: null, acked_at: expect.any(String) });
   });
 
   it("sends DTMF to the seller leg only while connected, and validates the digit", async () => {
@@ -199,36 +220,39 @@ describe("direct call service", () => {
       expect(await removed.control("user-1", id, { action: "dtmf", digit: "1" })).toMatchObject({ ok: false, errorCode: "not_enabled" });
     });
 
-    it("keeps a failed hangup pending, separates accepted from confirmed, and only reports cleanupPending=false once confirmed", async () => {
+    it("keeps a failed hangup as a backed-off row, separates accepted from confirmed, and only reports cleanupPending=false once confirmed", async () => {
       const ctx = setup();
       const id = await started(ctx);
       ctx.store.calls.set(id, { ...ctx.store.calls.get(id)!, status: "connected", seller_leg_id: "SELLER-LEG" });
       ctx.telnyx.hangup.mockRejectedValueOnce(new TelnyxApiError("down", "unknown", null)).mockRejectedValueOnce(new TelnyxApiError("down", "unknown", null));
       expect(await ctx.service.control("user-1", id, { action: "hangup" })).toMatchObject({ ok: false, errorCode: "hangup_failed" });
-      expect(ctx.store.calls.get(id)).toMatchObject({ status: "ending", browser_hangup_pending: true, seller_hangup_pending: true });
-      // Polling retries: the browser hangup fails again, the seller hangup is accepted (2xx).
+      expect(ctx.store.calls.get(id)).toMatchObject({ status: "ending" });
+      expect(ctx.store.legRow("BROWSER-LEG")).toMatchObject({ confirmed_at: null, attempts: 1 });
+      expect(ctx.store.legRow("SELLER-LEG")).toMatchObject({ confirmed_at: null, attempts: 1 });
+      // Polling inside the backoff window makes no provider request at all.
+      const before = ctx.telnyx.hangup.mock.calls.length;
+      await ctx.service.getStatus("user-1", id);
+      expect(ctx.telnyx.hangup.mock.calls.length).toBe(before);
+      // After the backoff the browser hangup fails again, the seller hangup is accepted (2xx).
+      ctx.clock.now = new Date("2026-10-01T12:00:11.000Z");
       ctx.telnyx.hangup.mockRejectedValueOnce(new TelnyxApiError("down", "unknown", null));
       await ctx.service.getStatus("user-1", id);
-      expect(ctx.store.calls.get(id)).toMatchObject({ browser_hangup_pending: true, browser_hangup_acked_at: null, seller_hangup_pending: true });
-      expect(ctx.store.calls.get(id)?.seller_hangup_acked_at).not.toBeNull();
+      expect(ctx.store.legRow("BROWSER-LEG")).toMatchObject({ acked_at: null, attempts: 2 });
+      expect(ctx.store.legRow("SELLER-LEG")?.acked_at).not.toBeNull();
       // The call goes terminal while legs are unconfirmed: not authoritative yet.
       ctx.store.calls.set(id, { ...ctx.store.calls.get(id)!, status: "ended" });
       const during = await ctx.service.getStatus("user-1", id);
       expect(during).toMatchObject({ ok: true, data: { status: "ended", failureReason: "teardown_pending", cleanupPending: true } });
-      // Within 10s an acknowledged leg is not hit again (no blind resend, no status GET).
-      const hangups = ctx.telnyx.hangup.mock.calls.length;
+      // Both legs eventually check out dead / are hung up: confirmed.
+      ctx.clock.now = new Date("2026-10-01T12:01:00.000Z");
       await ctx.service.getStatus("user-1", id);
-      expect(ctx.telnyx.hangup.mock.calls.length).toBe(hangups);
-      expect(ctx.telnyx.getCall).not.toHaveBeenCalled();
-      // After 10s the status check shows both legs dead: confirmed.
-      ctx.clock.now = new Date("2026-10-01T12:00:11.000Z");
+      ctx.clock.now = new Date("2026-10-01T12:02:00.000Z");
       const after = await ctx.service.getStatus("user-1", id);
       expect(after).toMatchObject({ ok: true, data: { status: "ended", cleanupPending: false } });
-      expect(ctx.store.calls.get(id)).toMatchObject({ browser_hangup_pending: false, seller_hangup_pending: false, seller_hangup_acked_at: null });
       expect(ctx.telnyx.getCall).toHaveBeenCalled();
     });
 
-    it("re-sends the hangup when an acknowledged leg is still alive at the 10s check", async () => {
+    it("re-sends the hangup (with a fresh command id) when an acknowledged leg is still alive at the re-check", async () => {
       const ctx = setup();
       const id = await started(ctx);
       await ctx.service.control("user-1", id, { action: "hangup" });
@@ -237,6 +261,8 @@ describe("direct call service", () => {
       ctx.clock.now = new Date("2026-10-01T12:00:11.000Z");
       const view = await ctx.service.getStatus("user-1", id);
       expect(ctx.telnyx.hangup.mock.calls.length).toBe(first + 1);
+      const ids = ctx.telnyx.hangup.mock.calls.map((c) => c[2]);
+      expect(new Set(ids).size).toBe(ids.length);
       expect(view).toMatchObject({ ok: true, data: { cleanupPending: true } });
     });
 
@@ -254,52 +280,78 @@ describe("direct call service", () => {
       // Provider accepts the hangups: accepted is not confirmed, so the lock still holds.
       ctx.telnyx.hangup.mockReset();
       ctx.telnyx.hangup.mockResolvedValue(undefined);
+      ctx.clock.now = new Date("2026-10-01T12:05:20.000Z");
       expect(await ctx.service.getStatus("user-1", id)).toMatchObject({ ok: true, data: { status: "seller_dialing" } });
-      // Ten seconds later the legs check out dead and the lock is released.
-      ctx.clock.now = new Date("2026-10-01T12:05:11.000Z");
+      // Later the legs check out dead and the lock is released.
+      ctx.clock.now = new Date("2026-10-01T12:06:00.000Z");
       const released = await ctx.service.getStatus("user-1", id);
       expect(released).toMatchObject({ ok: true, data: { status: "failed", failureReason: "stale_unresolved", cleanupPending: false } });
-      expect(ctx.store.calls.get(id)).toMatchObject({ browser_hangup_pending: false, seller_hangup_pending: false });
     });
 
-    it("refuses a new call while a terminal call still has leg teardown pending, retrying that teardown first (blocker 1)", async () => {
+    it("refuses a new call while a terminal call still has cleanup unconfirmed, retrying it first and preparing nothing (blocker 1, C1)", async () => {
       const ctx = setup();
       const id = await started(ctx);
       // Hangup webhook made the row terminal, opposite-leg cleanup not yet confirmed.
-      ctx.store.calls.set(id, { ...ctx.store.calls.get(id)!, status: "ended", seller_leg_id: "SELLER-LEG", seller_hangup_pending: true });
+      ctx.store.calls.set(id, { ...ctx.store.calls.get(id)!, status: "ended", seller_leg_id: "SELLER-LEG" });
+      ctx.store.addCleanup({ direct_call_id: id, kind: "leg", leg_id: "SELLER-LEG" });
       ctx.prepareManualCall.mockClear();
       ctx.telnyx.hangup.mockRejectedValueOnce(new TelnyxApiError("down", "unknown", null));
       const refused = await ctx.service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ2 });
       expect(refused).toMatchObject({ ok: false, errorCode: "teardown_pending" });
-      expect(ctx.telnyx.hangup).toHaveBeenCalledWith(expect.anything(), "SELLER-LEG", expect.any(String)); // sweep retried it
+      expect(ctx.telnyx.hangup).toHaveBeenCalledWith(expect.anything(), "SELLER-LEG", expect.any(String)); // retried first
       expect(ctx.prepareManualCall).not.toHaveBeenCalled();
-      // Accepted but unconfirmed: still locked.
+      // Inside the backoff window: still locked, no provider traffic.
+      const calls = ctx.telnyx.hangup.mock.calls.length;
       expect(await ctx.service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ2 })).toMatchObject({ ok: false, errorCode: "teardown_pending" });
-      // Confirmed ended: the operator is released and the new call starts.
-      ctx.clock.now = new Date("2026-10-01T12:00:11.000Z");
+      expect(ctx.telnyx.hangup.mock.calls.length).toBe(calls);
+      // Confirmed ended (hangup accepted, then status shows it dead): the operator is released.
+      ctx.clock.now = new Date("2026-10-01T12:00:10.000Z");
+      await ctx.service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ2 });
+      ctx.clock.now = new Date("2026-10-01T12:00:40.000Z");
       expect(await ctx.service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ2 })).toMatchObject({ ok: true });
     });
 
-    it("keeps the operator locked while an orphan leg is unconfirmed, then releases it (blocker 3)", async () => {
+    it("keeps the operator locked while a late/orphan leg row is unconfirmed, then releases it (blocker 3)", async () => {
       const ctx = setup();
       const id = await started(ctx);
-      ctx.store.calls.set(id, { ...ctx.store.calls.get(id)!, status: "failed", orphan_hangup_leg_ids: ["ORPHAN"] });
+      ctx.store.calls.set(id, { ...ctx.store.calls.get(id)!, status: "failed" });
+      ctx.store.addCleanup({ direct_call_id: id, kind: "leg", leg_id: "ORPHAN" });
       ctx.telnyx.getCall.mockResolvedValue({ isAlive: true });
       expect(await ctx.service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ2 })).toMatchObject({ ok: false, errorCode: "teardown_pending" });
       expect(ctx.telnyx.hangup).toHaveBeenCalledWith(expect.anything(), "ORPHAN", expect.any(String));
-      expect(ctx.store.calls.get(id)?.orphan_hangup_leg_ids).toEqual(["ORPHAN"]);
+      expect(ctx.store.legRow("ORPHAN")?.confirmed_at).toBeNull();
       expect(await ctx.service.getStatus("user-1", id)).toMatchObject({ ok: true, data: { status: "failed", cleanupPending: true } });
       ctx.telnyx.getCall.mockResolvedValue({ isAlive: false });
+      ctx.clock.now = new Date("2026-10-01T12:01:00.000Z");
       expect(await ctx.service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ2 })).toMatchObject({ ok: true });
-      expect(ctx.store.calls.get(id)?.orphan_hangup_leg_ids).toEqual([]);
+      expect(ctx.store.legRow("ORPHAN")?.confirmed_at).not.toBeNull();
     });
 
-    it("treats a leg the provider says is already gone as torn down when sweeping", async () => {
+    it("treats a 422/90018 'already ended' hangup refusal as confirmation, but not a 404, when sweeping", async () => {
       const ctx = setup();
       const id = await started(ctx);
       ctx.clock.now = new Date("2026-10-01T12:05:00.000Z");
       ctx.telnyx.hangup.mockRejectedValue(new TelnyxApiError("Telnyx returned 404", "rejected", 404));
+      expect(await ctx.service.getStatus("user-1", id)).toMatchObject({ ok: true, data: { status: "browser_connecting", cleanupPending: true } });
+      ctx.telnyx.hangup.mockReset();
+      ctx.telnyx.hangup.mockRejectedValue(ENDED_422());
+      ctx.clock.now = new Date("2026-10-01T12:05:20.000Z");
       expect(await ctx.service.getStatus("user-1", id)).toMatchObject({ ok: true, data: { status: "failed", failureReason: "stale_unresolved" } });
+    });
+
+    it("lets the operator hang up even when the provider key is gone: the obligation is recorded and the lock holds (B6)", async () => {
+      const ctx = setup();
+      const id = await started(ctx);
+      const keyless = createDirectCallService({
+        store: ctx.store, env: { ...ENV, TELNYX_DIRECT_API_KEY: undefined }, now: () => ctx.clock.now,
+        prepareLeadCall: ctx.prepareLeadCall, prepareManualCall: ctx.prepareManualCall, resumeFailedSoftphoneCall: ctx.resumeFailedSoftphoneCall,
+        sealCallIdentity: ctx.sealCallIdentity, telnyx: ctx.telnyx, report: ctx.report,
+      });
+      expect(await keyless.control("user-1", id, { action: "hangup" })).toMatchObject({ ok: false, errorCode: "hangup_failed" });
+      expect(ctx.store.legRow("BROWSER-LEG")).toMatchObject({ confirmed_at: null });
+      expect(await keyless.getStatus("user-1", id)).toMatchObject({ ok: true, data: { status: "ending", cleanupPending: true } });
+      expect(await ctx.store.operatorBusy("user-1")).toBe("call");
+      expect(ctx.telnyx.hangup).not.toHaveBeenCalled();
     });
 
     it("returns a sealed call identity from the same sealer for the prepared target, on start and on replay", async () => {
@@ -309,11 +361,11 @@ describe("direct call service", () => {
       expect(a.data.callCapability).toBe(`sealed:${a.data.directCallId}:user-1:+15550008888`);
       expect(ctx.sealCallIdentity).toHaveBeenCalledWith({ callId: a.data.directCallId, userId: "user-1", phoneE164: "+15550008888" });
       const b = await ctx.service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ });
-      expect(b).toEqual(a);
+      expect(b).toEqual({ ok: true, data: { ...a.data, target: undefined } });
     });
 
     it("refuses to start an internal-training call it cannot seal, without dialing", async () => {
-      const prepareManualCall = vi.fn(async () => ({ ok: true as const, data: { propertyId: null, contactId: null, phoneE164: "+15550007777" } }));
+      const prepareManualCall = vi.fn(async () => ({ ok: true as const, data: target({ phoneE164: "+15550007777" }) }));
       const sealCallIdentity = vi.fn(() => ({ capability: null, training: true }));
       const ctx = setup({ prepareManualCall, sealCallIdentity });
       expect(await ctx.service.startCall("user-1", { kind: "manual", phone: "5550007777", clientRequestId: REQ })).toMatchObject({ ok: false, errorCode: "start_failed" });

@@ -1,18 +1,19 @@
 import { createHash } from "node:crypto";
 
-import { runLegCleanup } from "./cleanup";
-import { DIRECT_CALL_TERMINAL_STATUSES, type DirectCallStatus } from "./contract";
-import { DirectCallLockConflictError, type DirectCallFullRow, type DirectCallStore } from "./store";
+import { processDueCleanups } from "./cleanup";
+import { resumeAfterTransition } from "./lead-resume";
+import type { DirectCallStatus } from "./contract";
+import type { DirectCallFullRow, DirectCallStore } from "./store";
 import {
-  hangupCommandId,
   nextDirectCallState,
   teardownBegun,
   type DirectCallEvent,
+  type CleanupSpec,
   type DirectCommand,
   type LegRole,
   type SellerDialCommand,
 } from "./transitions";
-import { TelnyxApiError, decodeClientState, type DialParams } from "./telnyx";
+import { TelnyxApiError, decodeClientState, type ActiveCall, type DialParams } from "./telnyx";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_CAS_ATTEMPTS = 3;
@@ -24,6 +25,13 @@ export type WebhookDeps = {
   hangup: (callControlId: string, commandId: string) => Promise<void>;
   /** GET call status for one leg (`isAlive:false` or 404 means gone). */
   getCall: (callControlId: string) => Promise<{ isAlive: boolean }>;
+  /**
+   * Resumes a lead's paused enrollments with the existing resume logic (no user session exists in a
+   * webhook, so the operator is passed as the actor).
+   */
+  resumeLead: (propertyId: string, operatorUserId: string) => Promise<void>;
+  /** Active calls on the Voice API app (reconciles unresolved Dials). */
+  listActiveCalls: () => Promise<{ calls: ActiveCall[]; complete: boolean }>;
   now: () => Date;
   report: (error: unknown, tag: string) => void;
 };
@@ -84,47 +92,19 @@ async function resolveRow(store: DirectCallStore, event: DirectCallEvent, claime
   return null;
 }
 
-async function safeHangup(deps: WebhookDeps, callControlId: string, commandId: string) {
-  try {
-    await deps.hangup(callControlId, commandId);
-  } catch (error) {
-    deps.report(error, "direct_call_hangup");
-  }
-}
+const resumeDeps = (deps: WebhookDeps) => ({ store: deps.store, resume: deps.resumeLead, report: deps.report });
 
-async function failCall(deps: WebhookDeps, rowId: string, patch: { failure_reason: string; seller_dial_state?: "unknown" }) {
-  return deps.store.updateIfStatus(rowId, LIVE, {
-    status: "failed",
-    ended_at: deps.now().toISOString(),
-    browser_hangup_pending: true,
-    ...patch,
-  });
-}
-
-/**
- * Persists "this leg must be hung up". If the operator's lock is already held by a newer call the
- * flag cannot be stored (see DirectCallLockConflictError): hang the leg up directly and report.
- * Returns false when that direct hangup also failed.
- */
-async function flagLegOrHangUp(deps: WebhookDeps, row: DirectCallFullRow, role: LegRole, legId: string): Promise<boolean> {
-  try {
-    await deps.store.setLegCleanup(row.id, role, true);
-    return true;
-  } catch (error) {
-    if (!(error instanceof DirectCallLockConflictError)) throw error;
-    deps.report(error, "direct_call_cleanup_lock_conflict");
-    try {
-      await deps.hangup(legId, hangupId(row.id, legId));
-      return true;
-    } catch (hangupError) {
-      deps.report(hangupError, "direct_call_hangup");
-      return false;
-    }
-  }
+async function failCall(deps: WebhookDeps, row: DirectCallFullRow, patch: { failure_reason: string; seller_dial_state?: "unknown" }) {
+  return deps.store.updateIfStatus(
+    row.id,
+    LIVE,
+    { status: "failed", ended_at: deps.now().toISOString(), ...patch },
+    row.browser_leg_id ? [{ kind: "leg", legId: row.browser_leg_id } satisfies CleanupSpec] : [],
+  );
 }
 
 async function runSellerDial(deps: WebhookDeps, row: DirectCallFullRow, command: SellerDialCommand) {
-  // No Dial may ever be issued once teardown has begun (ending/terminal/any hangup pending).
+  // No Dial may ever be issued once teardown has begun (ending/terminal/teardown_pending).
   const fresh = await deps.store.findById(row.id);
   if (!fresh || fresh.status !== "seller_dialing" || fresh.seller_dial_state !== "pending" || teardownBegun(fresh)) return;
   let dialed: { callControlId: string };
@@ -143,70 +123,47 @@ async function runSellerDial(deps: WebhookDeps, row: DirectCallFullRow, command:
   } catch (error) {
     deps.report(error, "direct_call_seller_dial");
     const unknown = !(error instanceof TelnyxApiError) || error.kind === "unknown";
-    // Never re-send a Dial whose result is unknown; end the call and drop the browser leg
-    // (persisted as pending teardown, retried until the provider confirms).
+    // Never re-send a Dial whose result is unknown. End the call and drop the browser leg (a durable
+    // cleanup row). The unresolved_dial row written with the 'pending' transition stays open, holding
+    // the operator lock until the provider has been reconciled for a leg this Dial may have created.
     const failed = await failCall(
       deps,
-      row.id,
+      fresh,
       unknown ? { failure_reason: "dial_outcome_unknown", seller_dial_state: "unknown" } : { failure_reason: "seller_dial_rejected" },
     );
-    if (!failed) await deps.store.setLegCleanup(row.id, "browser", true);
+    await resumeAfterTransition(resumeDeps(deps), fresh, failed);
+    // The provider definitively refused it: no leg can exist, nothing to reconcile.
+    if (!unknown) await deps.store.dialRejected(row.id, "seller");
     return;
   }
-  await deps.store.setSellerLegIfNull(row.id, dialed.callControlId);
-  const current = await deps.store.findById(row.id);
-  if (current?.seller_leg_id !== dialed.callControlId) {
-    // A different seller leg id is already stored (it cannot be this Dial's leg): this one is an
-    // orphan. Persist it so its hangup is retried until the provider confirms it is gone.
-    try {
-      await deps.store.addOrphanLeg(row.id, dialed.callControlId);
-    } catch (error) {
-      if (!(error instanceof DirectCallLockConflictError)) throw error;
-      deps.report(error, "direct_call_cleanup_lock_conflict");
-      await safeHangup(deps, dialed.callControlId, hangupId(row.id, dialed.callControlId));
-    }
-    return;
-  }
-  // A call.initiated that stored the same id first is success, not a conflict.
-  await deps.store.markSellerDialSent(row.id);
-  // The call ended while the Dial was in flight: the new leg must not linger.
-  if (DIRECT_CALL_TERMINAL_STATUSES.has(current.status) || current.status === "ending") {
-    await flagLegOrHangUp(deps, row, "seller", dialed.callControlId);
-  }
-}
-
-function hangupId(rowId: string, legId: string) {
-  return hangupCommandId(rowId, legId);
+  // Stores the leg (or queues it for hangup if the call is over / another seller leg is stored),
+  // resolving the unresolved_dial row, in one write.
+  await deps.store.dialSucceeded(row.id, dialed.callControlId, "seller");
 }
 
 async function runCommands(deps: WebhookDeps, row: DirectCallFullRow, commands: DirectCommand[]) {
   for (const command of commands) await runSellerDial(deps, row, command);
 }
 
-/** Thrown after the event is stored when a leg is still not confirmed ended, so the route answers 500 and Telnyx redelivers. */
-export class LegCleanupPendingError extends Error {
-  constructor() {
-    super("Direct call leg teardown is not confirmed yet.");
-    this.name = "LegCleanupPendingError";
+/**
+ * Works the operator's due cleanup obligations. Never throws and never decides the webhook's HTTP
+ * status: the obligations are durable rows, so redelivery is not needed for them to be retried.
+ */
+async function triggerCleanup(deps: WebhookDeps, operatorUserId: string) {
+  try {
+    await processDueCleanups(
+      { store: deps.store, hangup: deps.hangup, getCall: deps.getCall, listActiveCalls: deps.listActiveCalls, now: deps.now, report: deps.report },
+      operatorUserId,
+    );
+  } catch (error) {
+    deps.report(error, "direct_call_cleanup");
   }
 }
 
 /**
- * Runs pending teardown. Returns false only when a hangup/status call errored (so the event is
- * redelivered). A hangup the provider accepted but has not yet confirmed does not fail the event:
- * the leg's own hangup webhook (or the next status check) confirms it.
+ * Persist-then-act. Throws on database failure of the event or its transition so the route answers
+ * 500 and Telnyx redelivers. Pending cleanup never causes a 500.
  */
-async function settleCleanup(deps: WebhookDeps, rowId: string): Promise<boolean> {
-  const fresh = await deps.store.findById(rowId);
-  if (!fresh) return true;
-  const result = await runLegCleanup(
-    { store: deps.store, hangup: deps.hangup, getCall: deps.getCall, now: deps.now, report: deps.report },
-    fresh,
-  );
-  return result.failed === 0;
-}
-
-/** Persist-then-act. Throws on database failure so the route can answer 500 and Telnyx retries. */
 export async function processDirectCallWebhook(rawBody: string, deps: WebhookDeps): Promise<WebhookOutcome> {
   const parsed = parseDirectEvent(rawBody);
   if (!parsed) return { status: 200, result: "stored_only" };
@@ -220,9 +177,13 @@ export async function processDirectCallWebhook(rawBody: string, deps: WebhookDep
     occurred_at: parsed.occurredAt,
     payload: parsed.raw,
   });
+  // A provider hangup is the confirmation of any cleanup row for that leg, whichever call it is on.
+  if (parsed.event.type === "call.hangup" && parsed.event.callControlId) {
+    await store.confirmLegCleanup(parsed.event.callControlId, deps.now().toISOString());
+  }
   if (inserted === "duplicate_processed") {
-    // No new transition, but retry any teardown that was left pending.
-    if (row) await settleCleanup(deps, row.id).catch((error) => deps.report(error, "direct_call_cleanup"));
+    // No new transition, but retry any cleanup that is due.
+    if (row) await triggerCleanup(deps, row.operator_user_id);
     return { status: 200, result: "duplicate" };
   }
 
@@ -233,42 +194,19 @@ export async function processDirectCallWebhook(rawBody: string, deps: WebhookDep
 
   for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS && row; attempt++) {
     const transition = nextDirectCallState(row, parsed.event, deps.now());
-    if (transition.orphanConfirmed) await store.removeOrphanLeg(row.id, transition.orphanConfirmed);
     if (!transition.patch) {
       await runCommands(deps, row, transition.commands);
       break;
     }
-    let updated: DirectCallFullRow | null;
-    try {
-      updated = await store.updateIfStatus(row.id, [row.status], transition.patch);
-    } catch (error) {
-      if (!(error instanceof DirectCallLockConflictError)) throw error;
-      // A late event for an old call that wants a leg hung up, while the operator already has a
-      // newer live call: the flag cannot be stored, so hang the leg up directly; on failure the
-      // event stays unprocessed (500) and is redelivered.
-      deps.report(error, "direct_call_cleanup_lock_conflict");
-      const wanted: Array<string | null> = [
-        transition.patch.browser_hangup_pending ? (transition.patch.browser_leg_id ?? row.browser_leg_id) : null,
-        transition.patch.seller_hangup_pending ? (transition.patch.seller_leg_id ?? row.seller_leg_id) : null,
-      ];
-      for (const legId of wanted) {
-        if (!legId) continue;
-        try {
-          await deps.hangup(legId, hangupId(row.id, legId));
-        } catch (hangupError) {
-          deps.report(hangupError, "direct_call_hangup");
-          throw new LegCleanupPendingError();
-        }
-      }
-      break;
-    }
+    const updated = await store.updateIfStatus(row.id, [row.status], transition.patch, transition.cleanups);
     if (updated) {
+      await resumeAfterTransition(resumeDeps(deps), row, updated);
       await runCommands(deps, updated, transition.commands);
       break;
     }
     row = await store.findById(row.id); // status moved under us; re-evaluate against fresh state
   }
-  if (row && !(await settleCleanup(deps, row.id))) throw new LegCleanupPendingError();
+  if (row) await triggerCleanup(deps, row.operator_user_id);
   await store.markEventProcessed(parsed.eventId, row?.id ?? null);
   return { status: 200, result: "processed" };
 }

@@ -4,11 +4,14 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database } from "@/lib/supabase/types";
 
 import type { DirectCallStatus } from "./contract";
-import type { RowPatch, SellerDialState } from "./transitions";
+import type { CleanupSpec, RowPatch, SellerDialState } from "./transitions";
 
 type RawRow = Database["public"]["Tables"]["direct_calls"]["Row"];
 export type DirectCallFullRow = Omit<RawRow, "status" | "seller_dial_state"> & { status: DirectCallStatus; seller_dial_state: SellerDialState | null };
 const typed = (row: RawRow | null): DirectCallFullRow | null => row as DirectCallFullRow | null;
+type RawCleanup = Database["public"]["Tables"]["direct_call_cleanups"]["Row"];
+export type DirectCallCleanupRow = Omit<RawCleanup, "kind"> & { kind: "leg" | "unresolved_dial" };
+export type CleanupUpdate = Partial<Pick<DirectCallCleanupRow, "attempts" | "acked_at" | "next_attempt_at" | "confirmed_at" | "empty_matches" | "last_error">>;
 export type DirectCallOperatorRow = Database["public"]["Tables"]["direct_call_operators"]["Row"];
 
 export type NewDirectCall = {
@@ -20,6 +23,11 @@ export type NewDirectCall = {
   caller_id_e164: string;
   client_request_id: string;
 };
+
+export type BeginOutcome =
+  | { outcome: "created"; row: DirectCallFullRow }
+  | { outcome: "duplicate_request"; row: DirectCallFullRow }
+  | { outcome: "busy_call" | "busy_cleanup" };
 
 export type EventInsertResult = "inserted" | "duplicate_processed" | "duplicate_unprocessed";
 
@@ -37,43 +45,43 @@ export interface DirectCallStore {
   findById(id: string): Promise<DirectCallFullRow | null>;
   findOwned(id: string, userId: string): Promise<DirectCallFullRow | null>;
   findByRequest(userId: string, clientRequestId: string): Promise<DirectCallFullRow | null>;
+  /** The operator's non-terminal call, if any. */
   findActiveForUser(userId: string): Promise<DirectCallFullRow | null>;
-  /** Returns "conflict" when the one-active-call index or request-id uniqueness rejects it. */
-  insertCall(call: NewDirectCall): Promise<{ row: DirectCallFullRow } | "conflict">;
-  /** Compare-and-set on status. Returns the updated row, or null if the status no longer matched. */
-  updateIfStatus(id: string, statuses: DirectCallStatus[], patch: RowPatch): Promise<DirectCallFullRow | null>;
-  setBrowserLeg(id: string, legId: string): Promise<void>;
-  /** Stores the seller leg id and marks the Dial as sent. False when a seller leg id is already stored. */
-  setSellerLegIfNull(id: string, legId: string): Promise<boolean>;
-  /** pending -> sent only; never overwrites unknown. */
-  markSellerDialSent(id: string): Promise<void>;
+  /** Operator busy = a non-terminal call OR any unconfirmed cleanup row (one SQL predicate). */
+  operatorBusy(userId: string): Promise<"call" | "cleanup" | null>;
+  /** Atomic start (advisory-locked, SQL direct_call_begin): replays a request id, refuses while busy, else inserts. */
+  beginCall(call: NewDirectCall): Promise<BeginOutcome>;
+  /** Cancel by request id: an existing call is returned, otherwise a terminal tombstone is recorded. */
+  cancelRequest(userId: string, orgId: string, clientRequestId: string): Promise<{ outcome: "existing" | "tombstoned"; row: DirectCallFullRow }>;
   /**
-   * Unconditional (any status): set/clear the pending-teardown flag for one leg. Clears the ack.
-   * Throws DirectCallLockConflictError when setting it would collide with the operator's other live call.
+   * Compare-and-set on status, plus the cleanup rows the update obliges, in one SQL write.
+   * Returns the updated row, or null if the status no longer matched.
    */
-  setLegCleanup(id: string, role: "browser" | "seller", pending: boolean): Promise<void>;
-  /** Provider accepted (2xx) the hangup for this leg at `at`; the leg is still pending until confirmed. */
-  markLegHangupAcked(id: string, role: "browser" | "seller", at: string): Promise<void>;
-  /** Atomically add/remove an orphan leg id (a dialed leg that must be hung up until confirmed). */
-  addOrphanLeg(id: string, legId: string): Promise<void>;
-  removeOrphanLeg(id: string, legId: string): Promise<void>;
+  updateIfStatus(id: string, statuses: DirectCallStatus[], patch: RowPatch, cleanups?: CleanupSpec[]): Promise<DirectCallFullRow | null>;
+  /** Fills in the prepared target on a reservation still in browser_connecting. */
+  setTarget(id: string, target: { property_id: string | null; contact_id: string | null; destination_e164: string }): Promise<void>;
+  /** Drops a reservation whose prepare was refused (nothing was dialed). */
+  discardReservation(id: string): Promise<void>;
+  /** A Dial returned a leg: stores it when free, resolves that Dial's unresolved-dial row, queues a leg row when it must not live. */
+  dialSucceeded(id: string, legId: string, role: "browser" | "seller"): Promise<boolean>;
+  /** Provider definitively refused the Dial: its unresolved-dial obligation is resolved. */
+  dialRejected(id: string, role: "browser" | "seller"): Promise<void>;
+  /** Another non-terminal direct call (any operator) exists for this property. */
+  hasActiveCallForProperty(propertyId: string, excludeId: string | null): Promise<boolean>;
+  /** Queue a leg for hangup (idempotent per leg id). */
+  addLegCleanup(callId: string, legId: string): Promise<void>;
+  /** A provider hangup webhook (or equivalent) confirmed this leg ended. */
+  confirmLegCleanup(legId: string, at: string): Promise<void>;
+  /** Claims due, actionable cleanup rows for the operator (lease pushes next_attempt_at out). */
+  claimDueCleanups(userId: string, now: string, leaseSecs: number): Promise<DirectCallCleanupRow[]>;
+  updateCleanup(id: string, patch: CleanupUpdate): Promise<void>;
+  /** Unconfirmed cleanup rows of one call. */
+  openCleanupsForCall(callId: string): Promise<DirectCallCleanupRow[]>;
   getOperator(userId: string): Promise<DirectCallOperatorRow | null>;
   insertOperator(row: { user_id: string; org_id: string; telnyx_credential_id: string; sip_username: string }): Promise<DirectCallOperatorRow>;
 }
 
 const UNIQUE_VIOLATION = "23505";
-
-/**
- * The one-live-call-per-operator lock now also covers pending leg/orphan teardown, so flagging a
- * lingering leg on an already-terminal row can collide with the operator's newer call. The caller
- * must then hang that leg up directly instead of losing the flag.
- */
-export class DirectCallLockConflictError extends Error {
-  constructor() {
-    super("Operator already holds a live direct call; the cleanup flag could not be persisted.");
-    this.name = "DirectCallLockConflictError";
-  }
-}
 
 function fail(error: { message: string } | null): never {
   throw new Error(error?.message ?? "Direct call database error.");
@@ -139,85 +147,105 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
       if (error) fail(error);
       return typed((data as RawRow[] | null)?.[0] ?? null);
     },
-    async insertCall(call) {
-      const { data, error } = await calls().insert({ ...call, status: "browser_connecting" }).select("*").single();
+    async operatorBusy(userId) {
+      const { data, error } = await admin.rpc("direct_call_operator_busy", { p_user: userId });
+      if (error) fail(error);
+      return data === "call" || data === "cleanup" ? data : null;
+    },
+    async beginCall(call) {
+      const { data, error } = await admin.rpc("direct_call_begin", {
+        p_org: call.org_id,
+        p_operator: call.operator_user_id,
+        p_property: call.property_id,
+        p_contact: call.contact_id,
+        p_destination: call.destination_e164,
+        p_caller: call.caller_id_e164,
+        p_request: call.client_request_id,
+      });
       if (error) {
-        if (error.code === UNIQUE_VIOLATION) return "conflict";
+        // A uniqueness violation here means a concurrent writer beat the advisory lock's snapshot.
+        if (error.code === UNIQUE_VIOLATION) return { outcome: "busy_call" };
         fail(error);
       }
-      return { row: typed(data)! };
+      const result = (data as Array<{ outcome: string; call_id: string | null }> | null)?.[0];
+      if (!result) fail(null);
+      if (result.outcome === "busy_call" || result.outcome === "busy_cleanup") return { outcome: result.outcome };
+      const { data: row, error: readError } = await calls().select("*").eq("id", result.call_id!).single();
+      if (readError) fail(readError);
+      return { outcome: result.outcome === "created" ? "created" : "duplicate_request", row: typed(row)! };
     },
-    async updateIfStatus(id, statuses, patch) {
-      const { data, error } = await calls()
-        .update({ ...patch, updated_at: new Date().toISOString() })
-        .eq("id", id)
-        .in("status", statuses)
-        .select("*")
-        .maybeSingle();
+    async cancelRequest(userId, orgId, clientRequestId) {
+      const { data, error } = await admin.rpc("direct_call_cancel_request", { p_org: orgId, p_operator: userId, p_request: clientRequestId });
+      if (error) fail(error);
+      const result = (data as Array<{ outcome: string; call_id: string }> | null)?.[0];
+      if (!result) fail(null);
+      const { data: row, error: readError } = await calls().select("*").eq("id", result.call_id).single();
+      if (readError) fail(readError);
+      return { outcome: result.outcome === "existing" ? "existing" : "tombstoned", row: typed(row)! };
+    },
+    async updateIfStatus(id, statuses, patch, cleanups = []) {
+      const { data, error } = await admin.rpc("direct_call_apply", {
+        p_id: id,
+        p_statuses: statuses,
+        p_patch: patch as never,
+        p_cleanups: cleanups.map((c) => (c.kind === "leg" ? { kind: "leg", leg_id: c.legId } : { kind: "unresolved_dial" })) as never,
+      });
       if (error) {
-        if (error.code === UNIQUE_VIOLATION) {
-          // Setting a cleanup flag on a terminal row can collide with the operator's newer call.
-          if (patch.browser_hangup_pending || patch.seller_hangup_pending) throw new DirectCallLockConflictError();
-          return null;
-        }
+        if (error.code === UNIQUE_VIOLATION) return null; // a leg id already belongs to another call
         fail(error);
       }
-      return typed(data);
+      return typed((data as RawRow[] | null)?.[0] ?? null);
     },
-    async setBrowserLeg(id, legId) {
-      const { error } = await calls().update({ browser_leg_id: legId, updated_at: new Date().toISOString() }).eq("id", id).is("browser_leg_id", null);
-      if (error && error.code !== UNIQUE_VIOLATION) fail(error);
+    async setTarget(id, target) {
+      const { error } = await admin.rpc("direct_call_set_target", {
+        p_id: id,
+        p_property: target.property_id,
+        p_contact: target.contact_id,
+        p_destination: target.destination_e164,
+      });
+      if (error) fail(error);
     },
-    async setSellerLegIfNull(id, legId) {
-      const { data, error } = await calls()
-        .update({ seller_leg_id: legId, seller_dial_state: "sent", updated_at: new Date().toISOString() })
-        .eq("id", id)
-        .is("seller_leg_id", null)
-        .select("id");
-      if (error) {
-        if (error.code === UNIQUE_VIOLATION) return false;
-        fail(error);
-      }
+    async discardReservation(id) {
+      const { error } = await admin.rpc("direct_call_discard_reservation", { p_id: id });
+      if (error) fail(error);
+    },
+    async dialSucceeded(id, legId, role) {
+      const { data, error } = await admin.rpc("direct_call_dial_succeeded", { p_id: id, p_leg: legId, p_role: role });
+      if (error) fail(error);
+      return data === true;
+    },
+    async dialRejected(id, role) {
+      const { error } = await admin.rpc("direct_call_dial_rejected", { p_id: id, p_role: role });
+      if (error) fail(error);
+    },
+    async hasActiveCallForProperty(propertyId, excludeId) {
+      let query = calls().select("id").eq("property_id", propertyId).not("status", "in", "(ended,failed)").limit(1);
+      if (excludeId) query = query.neq("id", excludeId);
+      const { data, error } = await query;
+      if (error) fail(error);
       return (data?.length ?? 0) > 0;
     },
-    async markSellerDialSent(id) {
-      const { error } = await calls()
-        .update({ seller_dial_state: "sent", updated_at: new Date().toISOString() })
-        .eq("id", id)
-        .eq("seller_dial_state", "pending");
+    async addLegCleanup(callId, legId) {
+      const { error } = await admin.rpc("direct_call_cleanup_add_leg", { p_id: callId, p_leg: legId });
       if (error) fail(error);
     },
-    async setLegCleanup(id, role, pending) {
-      const { error } = await calls()
-        .update({
-          ...(role === "browser"
-            ? { browser_hangup_pending: pending, ...(pending ? {} : { browser_hangup_acked_at: null }) }
-            : { seller_hangup_pending: pending, ...(pending ? {} : { seller_hangup_acked_at: null }) }),
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", id);
-      if (error) {
-        if (error.code === UNIQUE_VIOLATION) throw new DirectCallLockConflictError();
-        fail(error);
-      }
-    },
-    async markLegHangupAcked(id, role, at) {
-      // updated_at is deliberately untouched: the stale-ending timer must not be reset by re-checks.
-      const { error } = await calls()
-        .update(role === "browser" ? { browser_hangup_acked_at: at } : { seller_hangup_acked_at: at })
-        .eq("id", id);
+    async confirmLegCleanup(legId, at) {
+      const { error } = await admin.from("direct_call_cleanups").update({ confirmed_at: at }).eq("leg_id", legId).is("confirmed_at", null);
       if (error) fail(error);
     },
-    async addOrphanLeg(id, legId) {
-      const { error } = await admin.rpc("direct_call_orphan_add", { p_id: id, p_leg: legId });
-      if (error) {
-        if (error.code === UNIQUE_VIOLATION) throw new DirectCallLockConflictError();
-        fail(error);
-      }
-    },
-    async removeOrphanLeg(id, legId) {
-      const { error } = await admin.rpc("direct_call_orphan_remove", { p_id: id, p_leg: legId });
+    async claimDueCleanups(userId, now, leaseSecs) {
+      const { data, error } = await admin.rpc("direct_call_cleanup_claim", { p_user: userId, p_now: now, p_lease_secs: leaseSecs });
       if (error) fail(error);
+      return (data ?? []) as DirectCallCleanupRow[];
+    },
+    async updateCleanup(id, patch) {
+      const { error } = await admin.from("direct_call_cleanups").update(patch).eq("id", id);
+      if (error) fail(error);
+    },
+    async openCleanupsForCall(callId) {
+      const { data, error } = await admin.from("direct_call_cleanups").select("*").eq("direct_call_id", callId).is("confirmed_at", null);
+      if (error) fail(error);
+      return (data ?? []) as DirectCallCleanupRow[];
     },
     async getOperator(userId) {
       const { data, error } = await admin.from("direct_call_operators").select("*").eq("user_id", userId).maybeSingle();

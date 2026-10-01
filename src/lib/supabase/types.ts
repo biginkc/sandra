@@ -21,9 +21,15 @@ export type Database = {
         Relationships: []
       }
       direct_calls: {
-        Row: { id: string; org_id: string; operator_user_id: string; property_id: string | null; contact_id: string | null; destination_e164: string; caller_id_e164: string; status: string; browser_leg_id: string | null; seller_leg_id: string | null; browser_command_id: string; browser_hangup_pending: boolean; seller_hangup_pending: boolean; browser_hangup_acked_at: string | null; seller_hangup_acked_at: string | null; orphan_hangup_leg_ids: string[]; seller_dial_state: string | null; hangup_cause: string | null; failure_reason: string | null; client_request_id: string; created_at: string; connected_at: string | null; ended_at: string | null; updated_at: string }
-        Insert: { id?: string; org_id: string; operator_user_id: string; property_id?: string | null; contact_id?: string | null; destination_e164: string; caller_id_e164: string; status?: string; browser_leg_id?: string | null; seller_leg_id?: string | null; browser_command_id?: string; browser_hangup_pending?: boolean; seller_hangup_pending?: boolean; browser_hangup_acked_at?: string | null; seller_hangup_acked_at?: string | null; orphan_hangup_leg_ids?: string[]; seller_dial_state?: string | null; hangup_cause?: string | null; failure_reason?: string | null; client_request_id: string; created_at?: string; connected_at?: string | null; ended_at?: string | null; updated_at?: string }
-        Update: { status?: string; browser_leg_id?: string | null; seller_leg_id?: string | null; browser_hangup_pending?: boolean; seller_hangup_pending?: boolean; browser_hangup_acked_at?: string | null; seller_hangup_acked_at?: string | null; seller_dial_state?: string | null; hangup_cause?: string | null; failure_reason?: string | null; connected_at?: string | null; ended_at?: string | null; updated_at?: string }
+        Row: { id: string; org_id: string; operator_user_id: string; property_id: string | null; contact_id: string | null; destination_e164: string; caller_id_e164: string; status: string; browser_leg_id: string | null; seller_leg_id: string | null; browser_command_id: string; seller_dial_state: string | null; hangup_cause: string | null; failure_reason: string | null; client_request_id: string; created_at: string; connected_at: string | null; ended_at: string | null; updated_at: string }
+        Insert: { id?: string; org_id: string; operator_user_id: string; property_id?: string | null; contact_id?: string | null; destination_e164: string; caller_id_e164: string; status?: string; browser_leg_id?: string | null; seller_leg_id?: string | null; browser_command_id?: string; seller_dial_state?: string | null; hangup_cause?: string | null; failure_reason?: string | null; client_request_id: string; created_at?: string; connected_at?: string | null; ended_at?: string | null; updated_at?: string }
+        Update: { status?: string; browser_leg_id?: string | null; seller_leg_id?: string | null; seller_dial_state?: string | null; hangup_cause?: string | null; failure_reason?: string | null; connected_at?: string | null; ended_at?: string | null; updated_at?: string }
+        Relationships: []
+      }
+      direct_call_cleanups: {
+        Row: { id: string; org_id: string; operator_user_id: string; direct_call_id: string; kind: string; leg_id: string | null; attempts: number; acked_at: string | null; next_attempt_at: string; confirmed_at: string | null; dial_role: string | null; resolve_after: string | null; backstop_at: string | null; empty_matches: number; last_error: string | null; created_at: string }
+        Insert: { id?: string; org_id: string; operator_user_id: string; direct_call_id: string; kind: string; leg_id?: string | null; attempts?: number; acked_at?: string | null; next_attempt_at?: string; confirmed_at?: string | null; dial_role?: string | null; resolve_after?: string | null; backstop_at?: string | null; empty_matches?: number; last_error?: string | null; created_at?: string }
+        Update: { attempts?: number; acked_at?: string | null; next_attempt_at?: string; confirmed_at?: string | null; empty_matches?: number; last_error?: string | null }
         Relationships: []
       }
       direct_call_events: {
@@ -5848,8 +5854,16 @@ export type Database = {
     }
     Functions: {
       direct_call_active_for_operator: { Args: { p_user: string }; Returns: Database["public"]["Tables"]["direct_calls"]["Row"][] }
-      direct_call_orphan_add: { Args: { p_id: string; p_leg: string }; Returns: undefined }
-      direct_call_orphan_remove: { Args: { p_id: string; p_leg: string }; Returns: undefined }
+      direct_call_operator_busy: { Args: { p_user: string }; Returns: string | null }
+      direct_call_begin: { Args: { p_org: string; p_operator: string; p_property: string | null; p_contact: string | null; p_destination: string; p_caller: string; p_request: string }; Returns: { outcome: string; call_id: string | null }[] }
+      direct_call_cancel_request: { Args: { p_org: string; p_operator: string; p_request: string }; Returns: { outcome: string; call_id: string | null }[] }
+      direct_call_apply: { Args: { p_id: string; p_statuses: string[]; p_patch: Json; p_cleanups: Json }; Returns: Database["public"]["Tables"]["direct_calls"]["Row"][] }
+      direct_call_dial_succeeded: { Args: { p_id: string; p_leg: string; p_role: string }; Returns: boolean }
+      direct_call_dial_rejected: { Args: { p_id: string; p_role: string }; Returns: undefined }
+      direct_call_set_target: { Args: { p_id: string; p_property: string | null; p_contact: string | null; p_destination: string }; Returns: undefined }
+      direct_call_discard_reservation: { Args: { p_id: string }; Returns: undefined }
+      direct_call_cleanup_add_leg: { Args: { p_id: string; p_leg: string }; Returns: undefined }
+      direct_call_cleanup_claim: { Args: { p_user: string; p_now: string; p_lease_secs: number }; Returns: Database["public"]["Tables"]["direct_call_cleanups"]["Row"][] }
       sequence_replace_steps: { Args: { p_sequence: string; p_steps: Json; p_name: string; p_description: string | null }; Returns: Json }
       sequence_step_stats: { Args: { p_org: string; p_sequence: string }; Returns: Array<{
         step_id: string; sent: number; replied: number; waiting: number;

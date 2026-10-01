@@ -3,8 +3,9 @@ import { NextResponse } from "next/server";
 import { readTelnyxDirectSettings } from "@/lib/direct-calling/config";
 import { verifyTelnyxSignature } from "@/lib/direct-calling/signature";
 import { createSupabaseDirectCallStore } from "@/lib/direct-calling/store";
-import { telnyxDial, telnyxGetCallAlive, telnyxHangup } from "@/lib/direct-calling/telnyx";
-import { LegCleanupPendingError, processDirectCallWebhook } from "@/lib/direct-calling/webhook";
+import { telnyxDial, telnyxGetCallAlive, telnyxHangup, telnyxListActiveCalls } from "@/lib/direct-calling/telnyx";
+import { processDirectCallWebhook } from "@/lib/direct-calling/webhook";
+import { resumeLeadForOperator } from "@/lib/direct-calling/resume-server";
 import { reportError } from "@/lib/errors/report";
 
 export const runtime = "nodejs";
@@ -35,19 +36,16 @@ export async function POST(request: Request): Promise<Response> {
       dial: (params) => telnyxDial(settings, params),
       hangup: (callControlId, commandId) => telnyxHangup(settings, callControlId, commandId),
       getCall: (callControlId) => telnyxGetCallAlive(settings, callControlId),
+      listActiveCalls: () => telnyxListActiveCalls(settings),
+      resumeLead: resumeLeadForOperator,
       now: () => new Date(),
       report: (error, tag) => reportError(error, { tags: { surface: tag } }),
     });
     return NextResponse.json({ ok: true, result: outcome.result }, { status: outcome.status });
   } catch (error) {
-    // Answer 500 so Telnyx redelivers; the event is not marked processed. A leg that could not be
-    // hung up yet is an expected retry (warning); anything else is a real failure (error).
-    reportError(
-      error,
-      error instanceof LegCleanupPendingError
-        ? { tags: { surface: "direct_call_webhook" }, level: "warning" }
-        : { tags: { surface: "direct_call_webhook" } },
-    );
+    // Only a failure to persist the event or its transition reaches here: answer 500 so Telnyx
+    // redelivers. Pending provider cleanup is durable and retried on its own, never a reason to 500.
+    reportError(error, { tags: { surface: "direct_call_webhook" } });
     return NextResponse.json({ error: "internal" }, { status: 500 });
   }
 }
