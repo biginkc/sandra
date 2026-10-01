@@ -13,6 +13,7 @@ import { runPreflight } from "./preflight";
 import { randomBytes } from "node:crypto";
 import { runSetup, assertReady } from "./setup";
 import { ProbeGate } from "./probe-gate";
+import { makeLegReconciler } from "./leg-reconcile";
 import { runTeardown } from "./teardown";
 import { startServer } from "./webhook-server";
 import { FLOWS } from "./flows";
@@ -71,19 +72,11 @@ async function main(): Promise<void> {
     // Refuse before anything is served or dialed unless setup's read-back passed and still holds.
     await ensureReady();
     const sourceLegs: string[] = []; // owned transfer-source call(s); not probe legs
-    const scopes = () => [inv.getRole("connectionId"), inv.getRole("appId")].filter((x): x is string => !!x);
+    const legReconciler = makeLegReconciler(client, inv);
     const probeGate = new ProbeGate({
       budget, log,
       protectedLegs: () => sourceLegs,
-      listAliveLegs: async () => {
-        const ids: string[] = [];
-        for (const scope of scopes()) {
-          const r = await client.request("GET", `/connections/${scope}/active_calls?page[size]=250`);
-          for (const c of (r.data as any[]) ?? []) if (c.call_control_id) ids.push(c.call_control_id);
-        }
-        return ids;
-      },
-      hangupLeg: async (id) => { await client.request("POST", `/calls/${id}/actions/hangup`, {}); },
+      ...legReconciler,
       targets: () => [
         { label: "owned phone (PSTN)", target: cfg.testPhones[0] },
         ...(inv.getRole("escapeSipUsername") ? [{ label: "on-account SIP", target: `sip:${inv.getRole("escapeSipUsername")}@sip.telnyx.com` }] : []),
