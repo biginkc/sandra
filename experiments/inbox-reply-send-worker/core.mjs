@@ -19,10 +19,12 @@ async function transaction(pool, statement, args) {
   }
 }
 export async function dispatchBatch(pool, fetcher, ingress) {
-  return dispatchBatchWithStalls(pool, fetcher, ingress);
+  return processDispatchBatch(pool, fetcher, ingress);
 }
 
-export function createStallLogger(clock = Date.now, write = (line) => process.stderr.write(line)) {
+const defaultStallLogWrite = (line) => process.stderr.write(line);
+
+export function createStallLogger(clock = Date.now, write = defaultStallLogWrite) {
   const lastLoggedByOperation = new Map();
   return (entry) => {
     const now = clock();
@@ -38,6 +40,16 @@ export function createStallLogger(clock = Date.now, write = (line) => process.st
     return true;
   };
 }
+
+// The production entry point creates this once per worker process. Tests can
+// supply a fake clock/output sink, but never a logger, so they exercise the
+// same persistent production wiring.
+export function createProductionDispatchBatch({ clock = Date.now, write = defaultStallLogWrite } = {}) {
+  const stallLogger = createStallLogger(clock, write);
+  return (pool, fetcher, ingress) => dispatchBatchWithStalls(pool, fetcher, ingress, { stallLogger });
+}
+
+const processDispatchBatch = createProductionDispatchBatch();
 
 export async function dispatchBatchWithStalls(pool, fetcher, ingress, { stallLogger = createStallLogger() } = {}) {
   const entries = (await transaction(pool, 'SELECT inbox_reply_send.claim_dispatch_batch(20) AS result', [])).rows[0]?.result;

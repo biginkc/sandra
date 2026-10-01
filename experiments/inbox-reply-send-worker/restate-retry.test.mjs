@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRunner } from './runner.mjs';
 import { createInboxReplySendService, inboxReplySendServiceOptions } from './service.mjs';
-import { createStallLogger, dispatchBatchWithStalls } from './core.mjs';
+import { createProductionDispatchBatch, createStallLogger, dispatchBatchWithStalls } from './core.mjs';
 import { createTestReplyTransport } from './vendor/test-transport.mjs';
 
 const ORG = '11111111-1111-1111-1111-111111111111';
@@ -92,6 +92,24 @@ test('T-R6 LOCAL stall logging uses the exact generation fence and 60-minute ope
   assert.equal(lines.length, 3);
   const huge = JSON.parse(lines[2].slice('inbox_reply_send_stalled '.length));
   assert.equal(huge.generation, '9223372036854775807');
+});
+
+test('T-R14 PRODUCTION wiring reuses one stall throttle across dispatch passes', async () => {
+  let now = 0;
+  const lines = [];
+  const dispatchBatch = createProductionDispatchBatch({ clock: () => now, write: (line) => lines.push(line) });
+  const fetcher = async () => acceptedResponse();
+  const entry = { org_id: ORG, operation_id: OPERATION, event_id: EVENT, generation: '150' };
+  const ingress = new URL('http://sandra-inbox-restate-owned:8080/');
+
+  await dispatchBatch(fakePool(entry), fetcher, ingress);
+  now = 59 * 60_000 + 59_999;
+  await dispatchBatch(fakePool(entry), fetcher, ingress);
+  assert.equal(lines.length, 1, 'production dispatch passes must share the 60-minute operation throttle');
+
+  now = 61 * 60_000;
+  await dispatchBatch(fakePool(entry), fetcher, ingress);
+  assert.equal(lines.length, 2, 'the same stalled operation may log again after 61 minutes');
 });
 
 test('T-R7 LOCAL every local worker import is included in the Docker image and bind is IPv6', async () => {
