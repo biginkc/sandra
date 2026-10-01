@@ -48,18 +48,21 @@ describe("dial target allowlist and limits", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("every Dial carries time_limit_secs and ring timeout_secs; bodies without them are refused", async () => {
+  it("every Dial carries retry_on_timeout=false, time_limit_secs and ring timeout_secs", async () => {
     const { client, fetchImpl } = make();
     await client.dial({ to: PHONE });
     const sent = JSON.parse(fetchImpl.mock.calls[0][1].body);
+    expect(sent.retry_on_timeout).toBe(false);
     expect(sent.time_limit_secs).toBe(180);
     expect(sent.timeout_secs).toBe(30);
     expect(sent.command_id).toMatch(/^[0-9a-f-]{36}$/);
     const base = { connection_id: "app1", to: PHONE, from: "+15555550199" };
-    await expect(client.request("POST", "/calls", base)).rejects.toThrow(GuardError);
-    await expect(client.request("POST", "/calls", { ...base, time_limit_secs: 180 })).rejects.toThrow(GuardError);
-    await expect(client.request("POST", "/calls", { ...base, time_limit_secs: 3600, timeout_secs: 30 })).rejects.toThrow(GuardError);
-    await expect(client.request("POST", "/calls", { ...base, time_limit_secs: 180, timeout_secs: 90 })).rejects.toThrow(GuardError);
+    const bounded = { ...base, time_limit_secs: 180, timeout_secs: 30 };
+    await expect(client.request("POST", "/calls", bounded)).rejects.toThrow(GuardError);
+    await expect(client.request("POST", "/calls", { ...bounded, retry_on_timeout: true })).rejects.toThrow(GuardError);
+    await expect(client.request("POST", "/calls", { ...bounded, retry_on_timeout: false, time_limit_secs: 3600 })).rejects.toThrow(GuardError);
+    await expect(client.request("POST", "/calls", { ...bounded, retry_on_timeout: false, timeout_secs: 90 })).rejects.toThrow(GuardError);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("never re-sends the same operation", async () => {

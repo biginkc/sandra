@@ -56,6 +56,9 @@ export function assertTargetAllowed(to: unknown, inv: Inventory, cfg: Config): v
 }
 
 export function assertLegLimits(body: Record<string, unknown>, cfg: Config): void {
+  if (body.retry_on_timeout !== false) {
+    throw new GuardError("Dial must set retry_on_timeout=false");
+  }
   const { limits } = cfg;
   const tl = body.time_limit_secs;
   if (typeof tl !== "number" || tl < 30 || tl > limits.maxLegSecs) {
@@ -191,9 +194,10 @@ export class TelnyxClient {
   }
 
   /**
-   * Dial. Every Dial carries time_limit_secs and a ring timeout_secs. The command_id
-   * comes from a durable operation UUID; the same operation is never sent twice by
-   * this process (an uncertain outcome is reconciled by lookup, not re-sent).
+   * Dial. Every Dial carries retry_on_timeout=false, time_limit_secs and a ring
+   * timeout_secs. The command_id comes from a durable operation UUID; the same
+   * operation is never sent twice by this process (an uncertain outcome is
+   * reconciled by lookup, not re-sent).
    */
   async dial(params: { opId?: string; to: string; linkTo?: string; bridgeOnAnswer?: boolean; bridgeIntent?: boolean; flow?: string; role?: string }) {
     const { config, inventory, budget } = this.opts;
@@ -205,6 +209,7 @@ export class TelnyxClient {
       from: config.callerId,
       timeout_secs: config.limits.ringTimeoutSecs,
       time_limit_secs: config.limits.maxLegSecs,
+      retry_on_timeout: false,
       command_id: opId,
     };
     if (params.linkTo) {
