@@ -1,0 +1,9 @@
+{
+  "target_ref": "ncsngxlcyxylaeskiteu",
+  "method": "repo read-only catalog collector via scratch SDK runner over the pooler with pinned CA",
+  "repo_head": "c0d867cc8f2d789101c96869f13b6648da5720eb",
+  "observation_path": "/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/catalog-obs-20261001/test-observation.json",
+  "observation_sha256": "54b70ffdfd362a9980916080f7f2467cfe2e203b19e1a925d41df1f75ff825c6",
+  "catalog_sha256": "00a7b26ab8d914e1f40653f9b14a92b1d0c0c383da6cfc5a6f399115ed84b53c",
+  "date": "2026-10-01"
+}
