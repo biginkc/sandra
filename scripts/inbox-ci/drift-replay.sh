@@ -46,6 +46,7 @@ start_stack() {
   set -a
   source "$env_file"
   set +a
+  unset TEST_SUPABASE_URL TEST_SUPABASE_ANON_KEY TEST_SUPABASE_SERVICE_ROLE_KEY
   if [[ -n "$original_github_env" ]]; then cat "$env_file" >> "$original_github_env"; fi
   export GITHUB_ENV="$original_github_env"
   current_workdir="${E2E_LOCAL_WORKDIR:-}"
@@ -92,11 +93,16 @@ cp "$baseline_dir/catalog-pre.json" "$replay_work/catalog-pre.json"
 cp "$baseline_dir/catalog-post.json" "$replay_work/catalog-post.json"
 stop_stack
 
+# Per-target scratch paths use a neutral index, never the project ref: start_stack
+# exports GITHUB_ENV=<env file>, and provision-disposable-stack.mjs rightly refuses
+# any environment value containing a hosted project ref.
+target_index=0
 for target_ref in "${TARGET_REFS[@]}"; do
-  target_dir="$replay_work/$target_ref"
+  target_index=$((target_index + 1))
+  target_dir="$replay_work/target-$target_index"
   mkdir -p "$target_dir"
   fixture="experiments/inbox-production-install/drift/${target_ref}.items.json"
-  start_stack "$replay_work/$target_ref.env" 55421 55422
+  start_stack "$replay_work/target-$target_index.env" 55421 55422
   python3 experiments/inbox-production-install/catalog_fingerprint.py --preflight > "$target_dir/catalog-clean.json"
   python3 - "$replay_work/catalog-pre.json" "$target_dir/catalog-clean.json" <<'PY'
 import json
