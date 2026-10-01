@@ -174,7 +174,7 @@ END $$;
 -- creates it once so the worker proof exercises the same worker-facing API
 -- without granting the raw persist function.
 CREATE FUNCTION inbox_reply_send.worker_persist_result(o uuid,attempt_id uuid,token uuid,result jsonb) RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' AS $$
 DECLARE row inbox_reply_send.attempts;kind text;reason text;reference text;
 BEGIN
  SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
@@ -204,5 +204,5 @@ END $$;
 -- handler (server.mjs) to decide whether to ack — it is NOT merely an
 -- internal helper for ack_dispatch, and must be granted. The worker's
 -- reachable surface is SEVEN functions.
-REVOKE ALL ON FUNCTION inbox_reply_send.claim_dispatch_batch(integer),inbox_reply_send.ack_dispatch(uuid,uuid,bigint),inbox_reply_send.operation_dispatch_complete(uuid,uuid),inbox_reply_send.operation_attempts(uuid,uuid),inbox_reply_send.worker_claim(uuid,uuid,integer),inbox_reply_send.worker_start_dispatch(uuid,uuid,bigint),inbox_reply_send.worker_persist(uuid,uuid,uuid,jsonb),inbox_reply_send.worker_persist_result(uuid,uuid,uuid,jsonb) FROM PUBLIC,anon,authenticated,service_role;
+REVOKE ALL ON FUNCTION inbox_reply_send.claim_dispatch_batch(integer),inbox_reply_send.ack_dispatch(uuid,uuid,bigint),inbox_reply_send.operation_dispatch_complete(uuid,uuid),inbox_reply_send.operation_attempts(uuid,uuid),inbox_reply_send.worker_claim(uuid,uuid,integer),inbox_reply_send.worker_start_dispatch(uuid,uuid,bigint),inbox_reply_send.worker_persist_result(uuid,uuid,uuid,jsonb) FROM PUBLIC,anon,authenticated,service_role;
 COMMIT;

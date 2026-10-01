@@ -3,7 +3,7 @@
 surface (worker.sql/worker-role.sql): claim_dispatch_batch/ack_dispatch,
 operation_attempts, worker_claim/worker_start_dispatch (which folds the
 Astra #3 requester re-authorization check into the SAME transaction as the
-ledger marker write, per Astra B1)/worker_persist, and
+ledger marker write, per Astra B1)/worker_persist_result, and
 operation_dispatch_complete (Astra #4 ack-readiness, and Astra B3 — granted
 directly since server.mjs calls it). Owned fixture only; installs its own
 schemas (committed, not rollback-only — several proofs need the worker
@@ -169,7 +169,7 @@ try:
     print('Installed attempts.sql + accept.sql + public-api.sql + worker.sql + worker-role.sql')
 
     # === 0. Grant-boundary ground truth [Astra B3]: the worker role reaches
-    # EXACTLY the EIGHT SECURITY DEFINER entry points (including
+    # EXACTLY the SEVEN SECURITY DEFINER entry points (including
     # operation_dispatch_complete, which server.mjs calls directly — not
     # merely an internal helper) and nothing else. worker-role.sql's own
     # install-time DO block already asserts this (it would have refused to
@@ -190,7 +190,7 @@ try:
     # Restate handler calls it (not only ack_dispatch, internally).
     ok_complete = sql(f"SET LOCAL ROLE inbox_reply_send_worker; SELECT inbox_reply_send.operation_dispatch_complete('{o}','{op}')::text;")
     need(ok_complete in ('true', 'false'), f'worker role could not call operation_dispatch_complete() despite the grant: {ok_complete}')
-    record('grant boundary: inbox_reply_send_worker reaches all EIGHT granted functions (including operation_dispatch_complete, Astra B3), and is refused on attempts.claim()/direct table SELECT/accept()')
+    record('grant boundary: inbox_reply_send_worker reaches all SEVEN granted functions (including operation_dispatch_complete, Astra B3), and is refused on attempts.claim()/direct table SELECT/accept()')
 
     # === 0b. [Astra round-2 B2] MUTATION of the grant boundary itself: widen
     # the ACTUAL installed grant (GRANT EXECUTE on attempts.sql's frozen
@@ -242,7 +242,7 @@ try:
     claim1b = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{o1b}','{pred1b}')::text"))
     dispatch1b = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{o1b}','{pred1b}',{claim1b['generation']})::text"))
     need(dispatch1b['kind'] == 'dispatch', f'unexpected dispatch1b: {dispatch1b}')
-    sql(f"SELECT inbox_reply_send.worker_persist('{o1b}','{pred1b}','{dispatch1b['token']}',jsonb_build_object('kind','not_attempted','reason','invalid_input'))")
+    sql(f"SELECT inbox_reply_send.worker_persist_result('{o1b}','{pred1b}','{dispatch1b['token']}',jsonb_build_object('kind','not_attempted','reason','invalid_input'))")
     need(sql(f"SELECT state FROM inbox_reply_send.attempts WHERE org_id='{o1b}' AND id='{pred1b}'") == 'confirmed_not_submitted', 'predecessor did not reach confirmed_not_submitted')
     item_id1b = sql(f"SELECT item_id FROM inbox_reply_send.attempts WHERE org_id='{o1b}' AND id='{pred1b}'")
     contact_id1b = sql(f"SELECT contact_id FROM inbox_reply_send.attempts WHERE org_id='{o1b}' AND id='{pred1b}'")
@@ -268,9 +268,9 @@ try:
     need(claim1['kind'] == 'claimed' and claim1['generation'] == '1', f'worker_claim mismatch: {claim1}')
     dispatch1 = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{o}','{att_a}',{claim1['generation']})::text"))
     need(dispatch1['kind'] == 'dispatch', f'worker_start_dispatch mismatch: {dispatch1}')
-    persist1 = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{o}','{att_a}','{dispatch1['token']}',jsonb_build_object('kind','accepted','externalId','PROV-A'))::text"))
-    need(persist1['state'] == 'provider_accepted', f'worker_persist mismatch: {persist1}')
-    record('happy path via worker_claim -> worker_start_dispatch (folded requester re-auth) -> worker_persist reaches provider_accepted')
+    persist1 = json.loads(sql(f"SELECT inbox_reply_send.worker_persist_result('{o}','{att_a}','{dispatch1['token']}',jsonb_build_object('kind','accepted','externalId','PROV-A'))::text"))
+    need(persist1['state'] == 'provider_accepted', f'worker_persist_result mismatch: {persist1}')
+    record('happy path via worker_claim -> worker_start_dispatch (folded requester re-auth) -> worker_persist_result reaches provider_accepted')
 
     # === 3. Ack-readiness (Astra #4): item B still claimed -> NOT complete, NOT acked ===
     claimB_initial = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{o}','{att_b}')::text"))  # leave in 'claimed'
@@ -303,7 +303,7 @@ try:
     # Resolve item B (still claimed from earlier, generation=1 — no need to
     # reclaim; its lease is still live), then ack succeeds.
     dispatchB = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{o}','{att_b}',{claimB_initial['generation']})::text"))
-    sql(f"SELECT inbox_reply_send.worker_persist('{o}','{att_b}','{dispatchB['token']}',jsonb_build_object('kind','accepted','externalId','PROV-B'))")
+    sql(f"SELECT inbox_reply_send.worker_persist_result('{o}','{att_b}','{dispatchB['token']}',jsonb_build_object('kind','accepted','externalId','PROV-B'))")
     complete_after = sql(f"SELECT inbox_reply_send.operation_dispatch_complete('{o}','{op}')")
     need(complete_after == 't', 'operation still not complete after both attempts settled')
     acked2 = sql(f"SELECT inbox_reply_send.ack_dispatch('{o}','{op}',{outbox_gen})")
@@ -338,7 +338,7 @@ try:
     sql(f"UPDATE memberships SET access_status='active' WHERE org_id='{o2}' AND user_id='{u2}'")
     dispatch2 = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{o2}','{att2}',{claim2['generation']})::text"))
     need(dispatch2['kind'] == 'dispatch', f'restored membership still rejected: {dispatch2}')
-    sql(f"SELECT inbox_reply_send.worker_persist('{o2}','{att2}','{dispatch2['token']}',jsonb_build_object('kind','accepted','externalId','PROV-2'))")
+    sql(f"SELECT inbox_reply_send.worker_persist_result('{o2}','{att2}','{dispatch2['token']}',jsonb_build_object('kind','accepted','externalId','PROV-2'))")
     record('positive control: restoring the membership makes worker_start_dispatch succeed again')
 
     # === 4b. [Astra B1] MUTATION proving the ORIGINAL defect this redesign
@@ -380,7 +380,7 @@ try:
     need(mutant_result['kind'] == 'dispatch', f'mutation did not actually let a mid-flight-revoked requester reach the marker: {mutant_result}')
     need(sql(f"SELECT state FROM inbox_reply_send.attempts WHERE org_id='{o6}' AND id='{att6}'") == 'dispatch_started', 'mutation did not actually issue a token against a since-revoked membership')
     # Undo: reconcile the wrongly-issued token to uncertain (never send), restore the guard.
-    sql(f"SELECT inbox_reply_send.worker_persist('{o6}','{att6}','{mutant_result['token']}',jsonb_build_object('kind','uncertain','reason','proof_cleanup'))")
+    sql(f"SELECT inbox_reply_send.worker_persist_result('{o6}','{att6}','{mutant_result['token']}',jsonb_build_object('kind','uncertain','reason','proof_cleanup'))")
     restore_and_verify('inbox_reply_send.worker_start_dispatch')
     sql(f"UPDATE memberships SET access_status='active' WHERE org_id='{o6}' AND user_id='{u6}'")
     record('mutation: worker_start_dispatch without the access-epoch lock (and an artificial gap standing in for the original narrower race) lets a mid-flight-revoked requester reach the marker; restored (byte-exact) guard is re-verified against a REAL two-connection race in 4c below')
@@ -427,7 +427,7 @@ try:
     need(sql(f"SELECT access_status FROM memberships WHERE org_id='{o7}' AND user_id='{u7}'") == 'revoked', 'B\'s revoke did not eventually commit')
     sql("ALTER TABLE memberships ENABLE TRIGGER trg_hugo_membership_owner_guard;")
     # Cleanup: reconcile the (legitimately issued, pre-revoke) token.
-    sql(f"SELECT inbox_reply_send.worker_persist('{o7}','{att7}',(SELECT dispatch_token FROM inbox_reply_send.attempts WHERE org_id='{o7}' AND id='{att7}'),jsonb_build_object('kind','uncertain','reason','proof_cleanup'))")
+    sql(f"SELECT inbox_reply_send.worker_persist_result('{o7}','{att7}',(SELECT dispatch_token FROM inbox_reply_send.attempts WHERE org_id='{o7}' AND id='{att7}'),jsonb_build_object('kind','uncertain','reason','proof_cleanup'))")
     sql(f"UPDATE memberships SET access_status='active' WHERE org_id='{o7}' AND user_id='{u7}'")
     record('Astra B1 concurrency proof: two REAL connections — a revoke targeting the access-epoch row genuinely blocks (observed lock-wait) behind a still-open worker_start_dispatch transaction, and only proceeds after that transaction fully commits — no interleaved window exists')
 
@@ -471,7 +471,7 @@ try:
             need(result.get('kind') == 'dispatch', f'mutant did not actually let the marker persist past expiry: {result}')
             need(sql(f"SELECT state FROM inbox_reply_send.attempts WHERE org_id='{o9}' AND id='{att9}'") == 'dispatch_started', 'mutant did not actually write the marker')
             token = sql(f"SELECT dispatch_token FROM inbox_reply_send.attempts WHERE org_id='{o9}' AND id='{att9}'")
-            sql(f"SELECT inbox_reply_send.worker_persist('{o9}','{att9}','{token}',jsonb_build_object('kind','uncertain','reason','proof_cleanup'))")
+            sql(f"SELECT inbox_reply_send.worker_persist_result('{o9}','{att9}','{token}',jsonb_build_object('kind','uncertain','reason','proof_cleanup'))")
         else:
             err_a = finish(conn_a, 'Connection A did not fail as expected', expect_ok=False)
             need('REQUESTER_UNAUTHORIZED' in err_a, f'post-marker expiry recheck did not reject: {err_a}')
@@ -518,12 +518,12 @@ try:
     need(sql(f"SELECT dispatch_token IS NULL FROM inbox_reply_send.attempts WHERE org_id='{o3}' AND id='{att3}'") == 't', 'a token exists despite a rejected (stale) start_dispatch call')
     # A subsequent persist with ANY token now raises STALE_TOKEN — proving no
     # legitimate provider result could ever be reconciled from that failed call.
-    err_persist = sql_fail(f"SELECT inbox_reply_send.worker_persist('{o3}','{att3}',gen_random_uuid(),jsonb_build_object('kind','accepted','externalId','SHOULD-NEVER-EXIST'))")
+    err_persist = sql_fail(f"SELECT inbox_reply_send.worker_persist_result('{o3}','{att3}',gen_random_uuid(),jsonb_build_object('kind','accepted','externalId','SHOULD-NEVER-EXIST'))")
     need('STALE_TOKEN' in err_persist, f'persist with a fabricated token after a failed start_dispatch was not rejected: {err_persist}')
     record('Astra #4: a rejected (stale-generation) start_dispatch issues no token; persist with any token then raises STALE_TOKEN — no provider result can ever be reconciled from an unknown/failed commit')
 
     # === 6b. [Astra round-2 B2] MUTATION of the stale-token guard's own
-    # wrapper: worker_persist is supposed to be a pure, faithful pass-through
+    # wrapper: worker_persist_result is the replay-safe worker-facing wrapper
     # to attempts.sql's frozen (untouched) persist() — the ONLY thing that
     # actually enforces STALE_TOKEN. Replace the wrapper with one that
     # bypasses persist() entirely and fabricates a success regardless of the
@@ -531,13 +531,13 @@ try:
     # "optimized" to skip the real call, the STALE_TOKEN protection would be
     # silently lost — then restore the byte-exact wrapper and reverify a
     # fabricated token is rejected again.
-    sql("CREATE OR REPLACE FUNCTION inbox_reply_send.worker_persist(o uuid,attempt_id uuid,token uuid,result jsonb) RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT jsonb_build_object('state','provider_accepted','receipt_version','999') $$;")
-    wrongly_reconciled = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{o3}','{att3}',gen_random_uuid(),jsonb_build_object('kind','accepted','externalId','SHOULD-NEVER-EXIST-2'))::text"))
+    sql("CREATE OR REPLACE FUNCTION inbox_reply_send.worker_persist_result(o uuid,attempt_id uuid,token uuid,result jsonb) RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT jsonb_build_object('state','provider_accepted','receipt_version','999') $$;")
+    wrongly_reconciled = json.loads(sql(f"SELECT inbox_reply_send.worker_persist_result('{o3}','{att3}',gen_random_uuid(),jsonb_build_object('kind','accepted','externalId','SHOULD-NEVER-EXIST-2'))::text"))
     need(wrongly_reconciled.get('state') == 'provider_accepted', f'mutation did not actually bypass the stale-token guard: {wrongly_reconciled}')
-    restore_and_verify('inbox_reply_send.worker_persist')
-    err_persist_restored = sql_fail(f"SELECT inbox_reply_send.worker_persist('{o3}','{att3}',gen_random_uuid(),jsonb_build_object('kind','accepted','externalId','SHOULD-NEVER-EXIST-3'))")
+    restore_and_verify('inbox_reply_send.worker_persist_result')
+    err_persist_restored = sql_fail(f"SELECT inbox_reply_send.worker_persist_result('{o3}','{att3}',gen_random_uuid(),jsonb_build_object('kind','accepted','externalId','SHOULD-NEVER-EXIST-3'))")
     need('STALE_TOKEN' in err_persist_restored, f'stale-token guard not actually restored: {err_persist_restored}')
-    record('mutation: worker_persist stubbed to bypass the real persist() call wrongly reconciles a fabricated token; restored (byte-exact) wrapper rejects it with STALE_TOKEN again')
+    record('mutation: worker_persist_result stubbed to bypass the real persist() call wrongly reconciles a fabricated token; restored (byte-exact) wrapper rejects it with STALE_TOKEN again')
 
     # === 7. No-double-send: crash between marker and result, re-entry via claim ===
     # Reuse claim3_initial's still-live lease/generation (section 6's stale
@@ -557,7 +557,7 @@ try:
     need('STALE_CLAIM' in err_second, f'a second start_dispatch after crash re-entry was not rejected: {err_second}')
     # The ORIGINAL token still reconciles idempotently (durable replay of a
     # provider result that really was sent before the crash).
-    persist3 = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{o3}','{att3}','{tok3}',jsonb_build_object('kind','accepted','externalId','PROV-3'))::text"))
+    persist3 = json.loads(sql(f"SELECT inbox_reply_send.worker_persist_result('{o3}','{att3}','{tok3}',jsonb_build_object('kind','accepted','externalId','PROV-3'))::text"))
     need(persist3['state'] == 'provider_accepted', f'idempotent recovery persist mismatch: {persist3}')
     record('no-double-send: crash between marker and result relabels the attempt uncertain on re-entry; a second start_dispatch is impossible; the ORIGINAL token still reconciles idempotently')
 
@@ -586,11 +586,11 @@ try:
     restored_reentry7b = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{o1b}','{successor1b}')::text"))
     need(restored_reentry7b == {'kind': 'existing', 'state': 'uncertain'}, 'crash-recovery re-entry guard not actually restored')
     record('mutation: worker_claim stubbed to fabricate a fresh claimed result on re-entry instead of faithfully reporting existing/uncertain; restored (byte-exact) wrapper reports re-entry correctly again')
-    sql(f"SELECT inbox_reply_send.worker_persist('{o1b}','{successor1b}','{dispatch7b['token']}',jsonb_build_object('kind','uncertain','reason','proof_cleanup'))")
+    sql(f"SELECT inbox_reply_send.worker_persist_result('{o1b}','{successor1b}','{dispatch7b['token']}',jsonb_build_object('kind','uncertain','reason','proof_cleanup'))")
 
     for fn in ['inbox_reply_send.claim_dispatch_batch', 'inbox_reply_send.ack_dispatch', 'inbox_reply_send.operation_dispatch_complete',
                'inbox_reply_send.operation_attempts', 'inbox_reply_send.worker_claim',
-               'inbox_reply_send.worker_start_dispatch', 'inbox_reply_send.worker_persist']:
+               'inbox_reply_send.worker_start_dispatch', 'inbox_reply_send.worker_persist_result']:
         assert_body_matches(fn)
     record('final state: every worker.sql function is byte-exact against its source definition')
 
