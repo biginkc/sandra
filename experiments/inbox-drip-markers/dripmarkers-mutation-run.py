@@ -25,8 +25,8 @@ ROOT = Path(__file__).resolve().parents[2]
 LOCAL_ENV = ROOT / "experiments/inbox-reply-send/local-env.py"
 MIGRATION = ROOT / "supabase/migrations/20260930040260_inbox_drip_markers.sql"
 GOLDEN = ROOT / "experiments/inbox-drip-markers/golden-fixture.json"
-LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-mutation-run-r5.log")
-EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-evidence-r5.md")
+LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-mutation-run-r6.log")
+EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-evidence-r6.md")
 STATE = Path("/tmp/sandra-reply-persist-local-env.json")
 PSQL = "/opt/homebrew/bin/psql"
 
@@ -264,11 +264,20 @@ FOCUSED_VITEST_MUTATIONS = [
         "test_name": "keeps the scope created by a deferred walk step and lets a following filter load succeed",
         "config": "vitest.rtl.config.ts",
     },
+    {
+        "name": "pending-load-reconciliation-gate",
+        "path": ROOT / "src/components/inbox-workspace/workspace-client.tsx",
+        "needle": "function reconciliationBlocked() { return loadPending.current || denied.current; }",
+        "replacement": "function reconciliationBlocked() { return denied.current; }",
+        "test_file": "src/components/inbox-workspace/workspace-client.drip-markers.test.tsx",
+        "test_name": "does not let probe ticks starve a pending filter load",
+        "config": "vitest.rtl.config.ts",
+    },
 ]
 
 
 def focused_vitest(case: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    args = ["npx", "vitest", "run"]
+    args = [str(ROOT / "node_modules/.bin/vitest"), "run", "--no-file-parallelism", "--maxWorkers=1"]
     if case.get("config"):
         args.extend(["--config", case["config"]])
     args.extend([case["test_file"], "-t", case["test_name"], "--reporter=dot"])

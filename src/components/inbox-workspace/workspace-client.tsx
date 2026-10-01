@@ -55,6 +55,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   const reconciliationPromise = useRef<Promise<void> | null>(null);
   const reconciliationAgain = useRef(false);
   const walkGeneration = useRef(0);
+  const loadPending = useRef(false);
   const pagesShown = useRef(1);
   const liveScopeId = useRef<string | null>(null);
   const lastWorksetAt = useRef(0);
@@ -206,29 +207,40 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
 
   async function load(next: InboxFilter, cursor: string | null = null) {
     if (denied.current) return;
-    const currentReconciliation = reconciliationPromise.current;
-    if (currentReconciliation) await currentReconciliation;
-    if (denied.current) return;
-    cancelReconciliation();
-    request.current?.abort(); markerRequest.current?.abort();
-    const controller = new AbortController(); request.current = controller;
-    busyRef.current = true; filterRef.current = next; setBusy(true); setError(undefined); sync.current?.reset();
-    void loadCounts(next);
     try {
-      const value = await postWorkset(next, cursor, liveScopeId.current ?? scope.current?.scopeId ?? null, controller.signal);
-      if (controller.signal.aborted) return;
-      liveScopeId.current = value.scopeId;
-      pagesShown.current = cursor === null ? 1 : pagesShown.current + 1;
-      const nextScope: Scope = value;
-      setInvalidatedIds([]); setDripMarkers(new Map()); sync.current!.replace(nextScope); scope.current = nextScope; setNextCursor(value.nextCursor); setFilter(next);
-      void refreshDripMarkers(markerIds(value.orderedIds));
-    } catch (failure) {
-      if (!controller.signal.aborted && !denied.current) setError(failure instanceof Error ? failure.message : "Could not load conversations.");
-    } finally { if (!controller.signal.aborted) { busyRef.current = false; setBusy(false); } }
+      // A pending load owns the next workset anchor. Invalidate the current walk
+      // before waiting so its single in-flight POST can finish without starting a
+      // follow-up walk that would starve the filter request.
+      loadPending.current = true;
+      walkGeneration.current++;
+      reconciliationAgain.current = false;
+      const currentReconciliation = reconciliationPromise.current;
+      if (currentReconciliation) await currentReconciliation;
+      if (denied.current) return;
+      cancelReconciliation();
+      request.current?.abort(); markerRequest.current?.abort();
+      const controller = new AbortController(); request.current = controller;
+      busyRef.current = true; filterRef.current = next; setBusy(true); setError(undefined); sync.current?.reset();
+      void loadCounts(next);
+      try {
+        const value = await postWorkset(next, cursor, liveScopeId.current ?? scope.current?.scopeId ?? null, controller.signal);
+        if (controller.signal.aborted) return;
+        liveScopeId.current = value.scopeId;
+        pagesShown.current = cursor === null ? 1 : pagesShown.current + 1;
+        const nextScope: Scope = value;
+        setInvalidatedIds([]); setDripMarkers(new Map()); sync.current!.replace(nextScope); scope.current = nextScope; setNextCursor(value.nextCursor); setFilter(next);
+        void refreshDripMarkers(markerIds(value.orderedIds));
+      } catch (failure) {
+        if (!controller.signal.aborted && !denied.current) setError(failure instanceof Error ? failure.message : "Could not load conversations.");
+      } finally { if (!controller.signal.aborted) { busyRef.current = false; setBusy(false); } }
+    } finally {
+      loadPending.current = false;
+    }
   }
+  function reconciliationBlocked() { return loadPending.current || denied.current; }
   async function reconcileWorkspace() {
     const next = filterRef.current;
-    if (denied.current || !scope.current || !liveScopeId.current) return;
+    if (reconciliationBlocked() || !scope.current || !liveScopeId.current) return;
     if (reconciliationPromise.current) {
       reconciliationAgain.current = true;
       // Keep the POST alive so its newly created scope remains the next anchor;
@@ -278,7 +290,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
         } finally {
           if (reconciliationRequest.current === controller) reconciliationRequest.current = null;
         }
-      } while (reconciliationAgain.current && !denied.current);
+      } while (!reconciliationBlocked() && reconciliationAgain.current);
     })();
     const settled = promise.finally(() => { if (reconciliationPromise.current === settled) reconciliationPromise.current = null; });
     reconciliationPromise.current = settled;

@@ -225,6 +225,36 @@ it("T5 fences a stale walk generation when the displayed page changes mid-walk",
   expect(state.publishedNames).not.toContain("STALE");
 });
 
+it("does not let probe ticks starve a pending filter load", async () => {
+  await moveToPageTwo({ view: "in_drip" });
+  state.deferNext = true;
+  act(() => state.callbacks!.onProbe!());
+  await advance(1100);
+  expect(state.deferred).toBeTypeOf("function");
+
+  fireEvent.change(screen.getByRole("combobox"), { target: { value: "all" } });
+  const createdScope = "00000000-0000-0000-0000-999999999998";
+  state.scopes.set(createdScope, { revoked: false });
+  state.cursors.set("cursor-pending", createdScope);
+  for (let tick = 0; tick < 3; tick++) {
+    act(() => state.callbacks!.onProbe!());
+    await advance(1100);
+  }
+
+  state.deferred!(responseFor({}, createdScope, "cursor-pending"));
+  await flush();
+  for (let tick = 0; tick < 3 && !state.worksetBodies.some(body => (body.filter as { view?: string }).view === "all"); tick++) {
+    act(() => state.callbacks!.onProbe!());
+    await advance(1100);
+  }
+
+  const filterRequests = state.worksetBodies.filter(body => (body.filter as { view?: string }).view === "all");
+  expect(filterRequests).toHaveLength(1);
+  expect(state.worksetBodies.indexOf(filterRequests[0])).toBe(3);
+  expect(state.maxConcurrent).toBe(1);
+  expect(screen.getByRole("combobox")).toHaveValue("all");
+});
+
 it("keeps the scope created by a deferred walk step and lets a following filter load succeed", async () => {
   await moveToPageTwo({ view: "in_drip" });
   state.deferNext = true;
