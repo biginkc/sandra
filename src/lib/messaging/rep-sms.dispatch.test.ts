@@ -204,6 +204,7 @@ describe("dispatchRepSms durable generic reservation", () => {
       p_body: "Hey, this is Mel with BMH, Maria's assistant.\n\nPlease text Maria a time that works.",
       p_composition: expect.objectContaining({ remainder: composition.remainder }),
     }));
+    expect(mocks.adminRpc.mock.calls[0][1].p_composition).not.toHaveProperty("acquisitionsManager");
     expect(mocks.adminRpc).toHaveBeenNthCalledWith(2, "fn_record_rep_sms_delivery_result", expect.objectContaining({
       p_receipt_id: "receipt-1",
       p_state: "accepted",

@@ -1,8 +1,8 @@
 import { beforeEach,describe,expect,it,vi } from 'vitest';
-const mocks=vi.hoisted(()=>({viewer:vi.fn(),rpc:vi.fn(),adminRpc:vi.fn(),dispatch:vi.fn(),revalidate:vi.fn(),report:vi.fn()}));
+const mocks=vi.hoisted(()=>({viewer:vi.fn(),rpc:vi.fn(),adminRpc:vi.fn(),adminFrom:vi.fn(),dispatch:vi.fn(),revalidate:vi.fn(),report:vi.fn()}));
 vi.mock('next/cache',()=>({revalidatePath:mocks.revalidate}));
 vi.mock('@/lib/errors/report',()=>({reportError:mocks.report}));
-vi.mock('@/lib/supabase/admin',()=>({createAdminClient:()=>({rpc:mocks.adminRpc})}));
+vi.mock('@/lib/supabase/admin',()=>({createAdminClient:()=>({rpc:mocks.adminRpc,from:mocks.adminFrom})}));
 vi.mock('@/lib/messaging/rep-sms',()=>({
   dispatchRepSms:mocks.dispatch,
   createRepSmsObligationFence:(input:{obligationId:string;claimToken:string;claimGeneration:number;actorId:string;propertyId:string;assignmentId:string;toNumber:string;composition:unknown})=>({
@@ -75,6 +75,22 @@ it('records a no-answer attempt, claims the exact obligation, and persists provi
   expect(mocks.adminRpc).toHaveBeenNthCalledWith(1,'fn_claim_authorize_rep_sms_obligation',expect.objectContaining({p_obligation_id:'obligation-1',p_actor_id:'actor'}));
   expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({propertyId:'lead',assignmentId:'sender-1',to:'+18165550123',obligationFence:expect.objectContaining({obligationId:'obligation-1',claimToken:'claim-1',claimGeneration:1,actorId:'actor',propertyId:'lead',assignmentId:'sender-1',toNumber:'+18165550123'})}));
   expect(mocks.adminRpc).toHaveBeenNthCalledWith(2,'fn_record_rep_sms_obligation_result',expect.objectContaining({p_obligation_id:'obligation-1',p_claim_token:'claim-1',p_state:'accepted',p_provider_message_id:'provider-message'}));
+});
+
+it('preserves the original RPC payload when reconciling an existing managerless attempt',async()=>{
+  const lookup={select:vi.fn().mockReturnThis(),eq:vi.fn().mockReturnThis(),maybeSingle:vi.fn().mockResolvedValue({data:{id:'receipt-1'},error:null})};
+  mocks.adminFrom.mockReturnValue(lookup);
+  const result=await submitMyLeadCommand('log-attempt',{
+    propertyId:'lead',source:'manual',outcome:'no_answer',idempotencyKey:'11111111-1111-4111-8111-111111111111',
+    followUp:{policyVersion:1,introId:'mel-maria-assistant-1',introVersion:2,templateId:'no-answer-callback-time',templateVersion:1,
+      initialRemainder:"Maria wasn't able to reach you. What time would work for her to call you back?",
+      remainder:"Maria wasn't able to reach you. What time would work for her to call you back?",body:'old body'},
+  });
+  expect(result.ok).toBe(true);
+  const payload=mocks.rpc.mock.calls[0][1].p_input;
+  expect(payload.followUp).not.toHaveProperty('acquisitionsManager');
+  expect(payload.smsBody).toContain("Maria's assistant");
+  expect(mocks.adminFrom).toHaveBeenCalledWith('acquisition_commands');
 });
 
 it('does not dispatch a second SMS when concurrent submissions observe the exact obligation already sending',async()=>{

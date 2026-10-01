@@ -67,6 +67,7 @@ export async function submitMyLeadCommand(command:keyof typeof commands,input:Re
   let composition: RepSmsComposition | null = null;
   if (command === 'log-attempt' && input.outcome === 'no_answer') {
     try {
+      let legacyReplay = false;
       const supplied = input.followUp && typeof input.followUp === 'object' && !Array.isArray(input.followUp)
         ? input.followUp as RepSmsCompositionInput
         : { body: typeof input.smsBody === 'string' ? input.smsBody : null };
@@ -83,15 +84,15 @@ export async function submitMyLeadCommand(command:keyof typeof commands,input:Re
           .eq('org_id', viewer.orgId).eq('actor_user_id', viewer.userId)
           .eq('operation', operation).eq('idempotency_key', key).maybeSingle() : null;
         if (!receipt?.data) throw new Error('Enter the acquisitions manager.');
+        legacyReplay = true;
       }
       composition = composeRepSms(supplied);
+      const followUpPayload: Record<string, unknown> = { ...composition, body: composition.finalBody };
+      if (legacyReplay) delete followUpPayload.acquisitionsManager;
       input = {
         ...input,
         smsBody: composition.finalBody,
-        followUp: {
-          ...composition,
-          body: composition.finalBody,
-        } as unknown as Json,
+        followUp: followUpPayload as Json,
       };
     } catch (error) {
       return {ok:false as const,message:error instanceof Error?error.message:'Choose a valid follow-up message.'};
