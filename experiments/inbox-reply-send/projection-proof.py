@@ -613,9 +613,13 @@ def session(app: str, sql: str) -> subprocess.Popen[str]:
 
 
 def finish_session(proc: subprocess.Popen[str], commit: bool = True) -> str:
-    assert proc.stdin
-    proc.stdin.write(("COMMIT;" if commit else "ROLLBACK;") + "\n\\q\n")
-    proc.stdin.flush()
+    if proc.poll() is None:
+        assert proc.stdin
+        try:
+            proc.stdin.write(("COMMIT;" if commit else "ROLLBACK;") + "\n\\q\n")
+            proc.stdin.flush()
+        except BrokenPipeError:
+            pass
     stdout, stderr = proc.communicate(timeout=30)
     return (stderr + stdout).strip()
 
@@ -626,15 +630,20 @@ def wait_activity(app: str, *, wait_event: str | None = None) -> tuple[int, str]
 
 
 def wait_activity_detail(app: str, *, wait_event: str | None = None) -> tuple[int, str, str]:
+    pid, xid, observed, _ = wait_activity_timing_detail(app, wait_event=wait_event)
+    return pid, xid, observed
+
+
+def wait_activity_timing_detail(app: str, *, wait_event: str | None = None) -> tuple[int, str, str, float]:
     deadline = time.time() + 5
     while time.time() < deadline:
-        row = psql(f"SELECT pid || '|' || coalesce(backend_xid::text,'') || '|' || coalesce(wait_event_type,'') || '|' || coalesce(wait_event,'') FROM pg_stat_activity WHERE application_name='{app}' AND pid<>pg_backend_pid();")
+        row = psql(f"SELECT pid || '|' || coalesce(backend_xid::text,'') || '|' || coalesce(wait_event_type,'') || '|' || coalesce(wait_event,'') || '|' || extract(epoch FROM query_start)::text FROM pg_stat_activity WHERE application_name='{app}' AND pid<>pg_backend_pid();")
         value = row.stdout.strip()
         if value:
-            parts = value.split("|", 3)
+            parts = value.split("|", 4)
             observed = f"{parts[2]}/{parts[3]}"
             if wait_event is None or observed == wait_event or parts[2] == wait_event or parts[3] == wait_event:
-                return int(parts[0]), parts[1], observed
+                return int(parts[0]), parts[1], observed, float(parts[4])
         time.sleep(.05)
     raise AssertionError(f"session {app} did not reach activity state {wait_event!r}")
 
@@ -775,10 +784,21 @@ def run_t6(mutated: bool) -> tuple[bool, str]:
     n = 6
     x = ids(n)
     original = fn_body("inbox_reply_send.project_message_trigger")
-    mutation = install_mutated_function(
-        "inbox_reply_send.project_message_trigger",
+    instrumented = original.replace(
+        "LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$\nBEGIN",
+        "LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$\nDECLARE\n t6_sqlstate text;\n t6_message text;\nBEGIN",
+        1,
+    ).replace(
+        "EXCEPTION WHEN query_canceled OR others THEN\n  -- The savepoint is projection-only. Its handler writes nothing and cannot\n  -- swallow the ledger update or the backlog upsert above.\n  NULL;",
+        "EXCEPTION WHEN query_canceled OR others THEN\n  GET STACKED DIAGNOSTICS t6_sqlstate=RETURNED_SQLSTATE, t6_message=MESSAGE_TEXT;\n  RAISE NOTICE 'T6_PERSIST_DIAGNOSTICS sqlstate=% message=%', t6_sqlstate, t6_message;\n  NULL;",
+        1,
+    )
+    if instrumented == original:
+        raise RuntimeError("ENV FAIL: T6 diagnostics instrumentation target was not unique")
+    mutation = instrumented.replace(
         "EXCEPTION WHEN query_canceled OR others THEN",
         "EXCEPTION WHEN others THEN",
+        1,
     )
     sessions: list[subprocess.Popen[str]] = []
     holder: subprocess.Popen[str] | None = None
@@ -787,13 +807,13 @@ def run_t6(mutated: bool) -> tuple[bool, str]:
     persist_pid: int | None = None
     wait_event = ""
     cancel_result = ""
+    cancel_elapsed = ""
+    observed_sqlstate = ""
     persist_text = ""
     try:
-        if mutated:
-            # The mutation is the only fixture change: remove query_canceled
-            # from the savepoint handler. Baseline and mutation share every
-            # assertion below.
-            psql("BEGIN;" + mutation + "COMMIT;", check=True)
+        # Instrumentation is shared by baseline and mutation; the only
+        # behavioral mutation is removal of query_canceled from the handler.
+        psql("BEGIN;" + (mutation if mutated else instrumented) + "COMMIT;", check=True)
         psql(fixture(n, started(n)).replace("ROLLBACK;", "COMMIT;", 1), check=True)
         holder = session(
             "r14-t6-holder",
@@ -806,12 +826,41 @@ def run_t6(mutated: bool) -> tuple[bool, str]:
             f"BEGIN; SELECT inbox_reply_send.worker_persist_result('{x['o']}','{x['a']}','{x['token']}',jsonb_build_object('kind','accepted','externalId','ext-6','status','sent'));",
         )
         sessions.append(persist)
-        persist_pid, _, wait_event = wait_activity_detail("r14-t6-persist", wait_event="Lock")
-        cancel = psql(f"SELECT pg_cancel_backend({persist_pid});", check=True)
-        cancel_result = cancel.stdout.strip()
+        persist_pid, _, wait_event, _ = wait_activity_timing_detail("r14-t6-persist", wait_event="Lock")
+        cancel = psql(
+            f"SELECT extract(epoch FROM clock_timestamp()-query_start), pg_cancel_backend(pid) FROM pg_stat_activity WHERE pid={persist_pid};",
+            check=True,
+        )
+        cancel_fields = cancel.stdout.strip().split("|")
+        if len(cancel_fields) != 2 or not cancel_fields[0] or not cancel_fields[1]:
+            raise RuntimeError(f"ENV FAIL: T6 cancel timing query returned {cancel.stdout.strip()!r}")
+        cancel_elapsed = cancel_fields[0]
+        cancel_result = cancel_fields[1]
         if cancel_result != "t":
             raise AssertionError(f"T6 pg_cancel_backend returned {cancel_result!r}")
+        try:
+            if float(cancel_elapsed) >= 3:
+                raise RuntimeError(f"ENV FAIL: T6 cancel issued {cancel_elapsed}s after B query_start; bound is <3s")
+        except ValueError as error:
+            raise RuntimeError(f"ENV FAIL: T6 cancel timing was not numeric: {cancel_elapsed!r}") from error
         persist_text = finish_session(persist, commit=True).replace("\n", " ")
+        diagnostics = re.search(r"T6_PERSIST_DIAGNOSTICS sqlstate=(\S+) message=(.*?)(?:\s+NOTICE:|$)", persist_text)
+        if diagnostics is not None:
+            observed_sqlstate = diagnostics.group(1)
+            diagnostic_message = diagnostics.group(2)
+        else:
+            diagnostic_message = "canceling statement due to user request" if "canceling statement due to user request" in persist_text else ""
+            observed_sqlstate = "57014" if diagnostic_message else ""
+        if (
+            observed_sqlstate != "57014"
+            or "canceling statement due to user request" not in diagnostic_message
+            or "55P03" in persist_text
+            or "canceling statement due to lock timeout" in persist_text
+        ):
+            raise AssertionError(
+                f"T6 B diagnostics mismatch: cancel_elapsed={cancel_elapsed}s "
+                f"observed_sqlstate={observed_sqlstate!r} message={diagnostic_message!r} persist={persist_text!r}"
+            )
         final_result = psql(
             f"SELECT (SELECT state FROM inbox_reply_send.attempts WHERE org_id='{x['o']}' AND id='{x['a']}') || ':' || "
             f"(SELECT count(*) FROM inbox_reply_send.message_projection_backlog WHERE org_id='{x['o']}' AND attempt_id='{x['a']}') || ':' || "
@@ -823,12 +872,14 @@ def run_t6(mutated: bool) -> tuple[bool, str]:
         if final != expected:
             raise AssertionError(
                 f"T6_PERSIST_BLOCKED pid={persist_pid} wait_event={wait_event} "
-                f"T6_CANCEL backend_pid={persist_pid} result={cancel_result} "
+                f"T6_CANCEL backend_pid={persist_pid} result={cancel_result} elapsed_to_cancel={cancel_elapsed}s "
+                f"observed_sqlstate={observed_sqlstate} "
                 f"T6_AFTER_CANCEL observed={final!r} expected={expected!r} persist={persist_text!r}"
             )
         return True, (
             f"T6_PERSIST_BLOCKED pid={persist_pid} wait_event={wait_event} "
-            f"T6_CANCEL backend_pid={persist_pid} result={cancel_result} "
+            f"T6_CANCEL backend_pid={persist_pid} result={cancel_result} elapsed_to_cancel={cancel_elapsed}s "
+            f"observed_sqlstate={observed_sqlstate} "
             f"T6_AFTER_CANCEL ledger_state=provider_accepted backlog_rows=1 message_status=pending "
             f"tuple={final} holder_wait={holder_event} persist={persist_text!r}"
         )
@@ -845,8 +896,7 @@ def run_t6(mutated: bool) -> tuple[bool, str]:
                 except Exception:
                     proc.kill()
                     proc.wait(timeout=5)
-        if mutated:
-            psql("BEGIN;" + original + "COMMIT;", check=True)
+        psql("BEGIN;" + original + "COMMIT;", check=True)
         cleanup(n)
 
 
