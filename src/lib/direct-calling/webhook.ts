@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 
+import { runLegCleanup } from "./cleanup";
 import { DIRECT_CALL_TERMINAL_STATUSES, type DirectCallStatus } from "./contract";
 import type { DirectCallFullRow, DirectCallStore } from "./store";
 import {
-  deterministicCommandId,
+  hangupCommandId,
   nextDirectCallState,
   type DirectCallEvent,
   type DirectCommand,
@@ -88,8 +89,13 @@ async function safeHangup(deps: WebhookDeps, callControlId: string, commandId: s
   }
 }
 
-async function failCall(deps: WebhookDeps, rowId: string, reason: string) {
-  return deps.store.updateIfStatus(rowId, LIVE, { status: "failed", failure_reason: reason, ended_at: deps.now().toISOString() });
+async function failCall(deps: WebhookDeps, rowId: string, patch: { failure_reason: string; seller_dial_state?: "unknown" }) {
+  return deps.store.updateIfStatus(rowId, LIVE, {
+    status: "failed",
+    ended_at: deps.now().toISOString(),
+    browser_hangup_pending: true,
+    ...patch,
+  });
 }
 
 async function runSellerDial(deps: WebhookDeps, row: DirectCallFullRow, command: SellerDialCommand) {
@@ -109,28 +115,52 @@ async function runSellerDial(deps: WebhookDeps, row: DirectCallFullRow, command:
   } catch (error) {
     deps.report(error, "direct_call_seller_dial");
     const unknown = !(error instanceof TelnyxApiError) || error.kind === "unknown";
-    // Never re-send a Dial whose result is unknown; end the call and drop the browser leg.
-    await failCall(deps, row.id, unknown ? "dial_outcome_unknown" : "seller_dial_rejected");
-    await safeHangup(deps, command.linkTo, hangupId(row.id, command.linkTo));
+    // Never re-send a Dial whose result is unknown; end the call and drop the browser leg
+    // (persisted as pending teardown, retried until the provider confirms).
+    const failed = await failCall(
+      deps,
+      row.id,
+      unknown ? { failure_reason: "dial_outcome_unknown", seller_dial_state: "unknown" } : { failure_reason: "seller_dial_rejected" },
+    );
+    if (!failed) await deps.store.setLegCleanup(row.id, "browser", true);
     return;
   }
-  const stored = await deps.store.setSellerLegIfNull(row.id, dialed.callControlId);
+  await deps.store.setSellerLegIfNull(row.id, dialed.callControlId);
   const current = await deps.store.findById(row.id);
-  // The call ended while the Dial was in flight: the new leg must not linger.
-  if (!stored || !current || DIRECT_CALL_TERMINAL_STATUSES.has(current.status) || current.status === "ending") {
+  if (current?.seller_leg_id !== dialed.callControlId) {
+    // A different seller leg id is already stored (it cannot be this Dial's leg): this one is an orphan.
     await safeHangup(deps, dialed.callControlId, hangupId(row.id, dialed.callControlId));
+    return;
+  }
+  // A call.initiated that stored the same id first is success, not a conflict.
+  await deps.store.markSellerDialSent(row.id);
+  // The call ended while the Dial was in flight: the new leg must not linger.
+  if (DIRECT_CALL_TERMINAL_STATUSES.has(current.status) || current.status === "ending") {
+    await deps.store.setLegCleanup(row.id, "seller", true);
   }
 }
 
 function hangupId(rowId: string, legId: string) {
-  return deterministicCommandId(`${rowId}:${legId}:hangup`);
+  return hangupCommandId(rowId, legId);
 }
 
 async function runCommands(deps: WebhookDeps, row: DirectCallFullRow, commands: DirectCommand[]) {
-  for (const command of commands) {
-    if (command.kind === "hangup") await safeHangup(deps, command.callControlId, command.commandId);
-    else await runSellerDial(deps, row, command);
+  for (const command of commands) await runSellerDial(deps, row, command);
+}
+
+/** Thrown after the event is stored when a leg is still not confirmed ended, so the route answers 500 and Telnyx redelivers. */
+export class LegCleanupPendingError extends Error {
+  constructor() {
+    super("Direct call leg teardown is not confirmed yet.");
+    this.name = "LegCleanupPendingError";
   }
+}
+
+async function settleCleanup(deps: WebhookDeps, rowId: string): Promise<boolean> {
+  const fresh = await deps.store.findById(rowId);
+  if (!fresh) return true;
+  const result = await runLegCleanup({ store: deps.store, hangup: deps.hangup, report: deps.report }, fresh);
+  return !result.pending;
 }
 
 /** Persist-then-act. Throws on database failure so the route can answer 500 and Telnyx retries. */
@@ -147,7 +177,11 @@ export async function processDirectCallWebhook(rawBody: string, deps: WebhookDep
     occurred_at: parsed.occurredAt,
     payload: parsed.raw,
   });
-  if (inserted === "duplicate_processed") return { status: 200, result: "duplicate" };
+  if (inserted === "duplicate_processed") {
+    // No new transition, but retry any teardown that was left pending.
+    if (row) await settleCleanup(deps, row.id).catch((error) => deps.report(error, "direct_call_cleanup"));
+    return { status: 200, result: "duplicate" };
+  }
 
   if (!row) {
     await store.markEventProcessed(parsed.eventId, null);
@@ -167,6 +201,7 @@ export async function processDirectCallWebhook(rawBody: string, deps: WebhookDep
     }
     row = await store.findById(row.id); // status moved under us; re-evaluate against fresh state
   }
+  if (row && !(await settleCleanup(deps, row.id))) throw new LegCleanupPendingError();
   await store.markEventProcessed(parsed.eventId, row?.id ?? null);
   return { status: 200, result: "processed" };
 }

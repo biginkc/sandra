@@ -58,6 +58,31 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     )).rejects.toMatchObject({ code: "23505" });
     await pg.query("rollback to savepoint dup_event");
 
+    // Teardown/dial-state columns exist with sane defaults and a checked dial state.
+    const defaults = await pg.query("select browser_hangup_pending, seller_hangup_pending, seller_dial_state from public.direct_calls where operator_user_id=$1", [USER_B]);
+    expect(defaults.rows[0]).toEqual({ browser_hangup_pending: false, seller_hangup_pending: false, seller_dial_state: null });
+    await pg.query("savepoint bad_dial_state");
+    await expect(pg.query("update public.direct_calls set seller_dial_state='bogus' where operator_user_id=$1", [USER_B])).rejects.toMatchObject({ code: "23514" });
+    await pg.query("rollback to savepoint bad_dial_state");
+
+    // Event reads need active org membership as well as ownership of the call.
+    const callB = await pg.query("select id from public.direct_calls where operator_user_id=$1", [USER_B]);
+    await pg.query("insert into public.direct_call_events (provider_event_id, direct_call_id, event_type, payload) values ('evt-b','"+callB.rows[0].id+"','call.answered','{}')");
+    await pg.query("savepoint events_member");
+    try {
+      await pg.query("set local role authenticated");
+      await pg.query("select set_config('request.jwt.claim.sub', $1, true)", [USER_B]);
+      expect((await pg.query("select provider_event_id from public.direct_call_events")).rows.map((r) => r.provider_event_id)).toEqual(["evt-b"]);
+    } finally { await pg.query("rollback to savepoint events_member"); }
+    await pg.query("update public.memberships set access_status='suspended' where user_id=$1", [USER_B]);
+    await pg.query("savepoint events_removed");
+    try {
+      await pg.query("set local role authenticated");
+      await pg.query("select set_config('request.jwt.claim.sub', $1, true)", [USER_B]);
+      expect((await pg.query("select provider_event_id from public.direct_call_events")).rows).toEqual([]);
+    } finally { await pg.query("rollback to savepoint events_removed"); }
+    await pg.query("update public.memberships set access_status='active' where user_id=$1", [USER_B]);
+
     // Authenticated: sees only own rows, cannot write.
     await pg.query("savepoint authed");
     try {

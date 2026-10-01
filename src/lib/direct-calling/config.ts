@@ -39,8 +39,16 @@ export function isPilotUser(userId: string, env: DirectCallEnv = process.env): b
   return pilotUserIds(env).has(userId.trim().toLowerCase());
 }
 
-/** "telnyx_direct" only for an allow-listed pilot user with every env var set. */
+/**
+ * Set only after the live test proves the browser connection cannot place outbound calls.
+ * Without it no browser token is issued and no direct call can start.
+ */
+export function isContainmentVerified(env: DirectCallEnv = process.env): boolean {
+  return env.DIRECT_CALL_CONTAINMENT_VERIFIED?.trim() === "true";
+}
+
+/** "telnyx_direct" only for an allow-listed pilot user with every env var set and containment verified. */
 export function resolveCallingConfig(userId: string | null | undefined, env: DirectCallEnv = process.env): CallingConfig {
-  if (!userId || !isPilotUser(userId, env) || !readTelnyxDirectSettings(env)) return { transport: "default" };
+  if (!userId || !isContainmentVerified(env) || !isPilotUser(userId, env) || !readTelnyxDirectSettings(env)) return { transport: "default" };
   return { transport: "telnyx_direct" };
 }

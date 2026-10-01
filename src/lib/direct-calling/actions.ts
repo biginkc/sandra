@@ -3,6 +3,9 @@
 import { getCallerMemberships } from "@/lib/auth/memberships";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 import { prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall } from "@/lib/dialer/actions";
+import { capabilityKey } from "@/lib/dialer/call-capability";
+import { isHomeownerTrainingNumber } from "@/lib/dialer/homeowner-training";
+import { sealCallCapability } from "@/lib/dialer/jitter-server";
 import { reportError } from "@/lib/errors/report";
 import { createClient } from "@/lib/supabase/server";
 
@@ -25,6 +28,14 @@ import {
   telnyxHangup,
   telnyxSendDtmf,
 } from "./telnyx";
+
+/** Authentication only: used to end or read a call the caller already owns. */
+async function authenticatedUser(): Promise<{ ok: true; userId: string } | { ok: false; error: string; errorCode: string }> {
+  const supabase = await createClient();
+  const { data: { user }, error } = await supabase.auth.getUser();
+  if (error || !user) return { ok: false, error: "Not signed in.", errorCode: "unauthorized" };
+  return { ok: true, userId: user.id };
+}
 
 async function authenticatedOperator(): Promise<{ ok: true; userId: string } | { ok: false; error: string; errorCode: string }> {
   const supabase = await createClient();
@@ -50,6 +61,15 @@ function service() {
     prepareLeadCall,
     prepareManualCall,
     resumeFailedSoftphoneCall,
+    // The existing Jitter-path sealer, unchanged: same payload, key and purpose rule.
+    sealCallIdentity: ({ callId, userId, phoneE164 }) => {
+      const training = isHomeownerTrainingNumber(phoneE164);
+      const key = capabilityKey(process.env.SOFTPHONE_CAPABILITY_KEY);
+      return {
+        training,
+        capability: key ? sealCallCapability(callId, userId, key, phoneE164, training ? "internal_training" : "customer") : null,
+      };
+    },
     telnyx: {
       dial: telnyxDial,
       hangup: telnyxHangup,
@@ -84,7 +104,7 @@ export async function startDirectCall(input: StartDirectCallInput): Promise<Dire
 }
 
 export async function getDirectCallStatus(directCallId: string): Promise<DirectActionResult<DirectCallStatusView>> {
-  const operator = await authenticatedOperator();
+  const operator = await authenticatedUser();
   if (!operator.ok) return operator;
   return service().getStatus(operator.userId, directCallId);
 }
@@ -93,7 +113,8 @@ export async function controlDirectCall(
   directCallId: string,
   control: DirectCallControl,
 ): Promise<DirectActionResult<{ accepted: true }>> {
-  const operator = await authenticatedOperator();
+  // Hanging up an owned call needs only authentication + ownership; DTMF also needs active access.
+  const operator = control?.action === "hangup" ? await authenticatedUser() : await authenticatedOperator();
   if (!operator.ok) return operator;
   return service().control(operator.userId, directCallId, control);
 }

@@ -18,6 +18,9 @@ export function makeRow(overrides: Partial<DirectCallFullRow> = {}): DirectCallF
     browser_leg_id: "browser-leg",
     seller_leg_id: null,
     browser_command_id: "22222222-2222-4222-8222-222222222222",
+    browser_hangup_pending: false,
+    seller_hangup_pending: false,
+    seller_dial_state: null,
     hangup_cause: null,
     failure_reason: null,
     client_request_id: "33333333-3333-4333-8333-333333333333",
@@ -67,7 +70,6 @@ export class FakeStore implements DirectCallStore {
   async findActiveForUser(userId: string) {
     return [...this.calls.values()].find((r) => r.operator_user_id === userId && LIVE.has(r.status)) ?? null;
   }
-  async expireStale() {}
   async insertCall(call: NewDirectCall) {
     if (await this.findActiveForUser(call.operator_user_id)) return "conflict" as const;
     const row = makeRow({
@@ -93,8 +95,16 @@ export class FakeStore implements DirectCallStore {
   async setSellerLegIfNull(id: string, leg: string) {
     const row = this.calls.get(id);
     if (!row || row.seller_leg_id) return false;
-    this.calls.set(id, { ...row, seller_leg_id: leg });
+    this.calls.set(id, { ...row, seller_leg_id: leg, seller_dial_state: "sent" });
     return true;
+  }
+  async markSellerDialSent(id: string) {
+    const row = this.calls.get(id);
+    if (row?.seller_dial_state === "pending") this.calls.set(id, { ...row, seller_dial_state: "sent" });
+  }
+  async setLegCleanup(id: string, role: "browser" | "seller", pending: boolean) {
+    const row = this.calls.get(id);
+    if (row) this.calls.set(id, { ...row, [role === "browser" ? "browser_hangup_pending" : "seller_hangup_pending"]: pending });
   }
   async getOperator(userId: string) {
     return this.operators.get(userId) ?? null;

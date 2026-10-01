@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { TelnyxDirectSettings } from "./config";
-import { TelnyxApiError, decodeClientState, encodeClientState, telnyxCreateToken, telnyxDial } from "./telnyx";
+import { TelnyxApiError, decodeClientState, encodeClientState, isLegAlreadyEnded, telnyxCreateToken, telnyxDial, telnyxHangup } from "./telnyx";
 
 const settings: TelnyxDirectSettings = { apiKey: "SECRET-KEY-123", connectionId: "conn", appId: "app", webhookPublicKey: "pub", callerIdE164: "+15550002222" };
 
@@ -43,5 +43,28 @@ describe("telnyx client", () => {
     expect(decodeClientState(encodeClientState({ a: "b" }))).toEqual({ a: "b" });
     expect(decodeClientState("%%%")).toBeNull();
     expect(decodeClientState(undefined)).toBeNull();
+  });
+
+  it("keeps the timeout armed while the response body is read", async () => {
+    const stalled = vi.fn(async (_url: string, init: RequestInit) => ({
+      ok: true,
+      status: 200,
+      text: () => new Promise<string>((_resolve, reject) => init.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })))),
+    }));
+    const err = await telnyxDial(settings, { to: "a", from: "b", clientState: {}, commandId: "c", timeoutSecs: 30, timeLimitSecs: 60 }, { fetchImpl: stalled as never, timeoutMs: 20 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TelnyxApiError);
+    expect(err.kind).toBe("unknown");
+    expect(err.message).toMatch(/timed out/);
+  });
+
+  it("recognises a hangup refused because the leg already ended", async () => {
+    const gone = vi.fn(async () => new Response(JSON.stringify({ errors: [{ detail: "Call has already ended" }] }), { status: 422 }));
+    const err = await telnyxHangup(settings, "leg", "cmd", { fetchImpl: gone as never }).catch((e) => e);
+    expect(isLegAlreadyEnded(err)).toBe(true);
+    const missing = await telnyxHangup(settings, "leg", "cmd", { fetchImpl: (async () => new Response("{}", { status: 404 })) as never }).catch((e) => e);
+    expect(isLegAlreadyEnded(missing)).toBe(true);
+    const down = await telnyxHangup(settings, "leg", "cmd", { fetchImpl: (async () => new Response("{}", { status: 503 })) as never }).catch((e) => e);
+    expect(isLegAlreadyEnded(down)).toBe(false);
+    expect(isLegAlreadyEnded(new Error("x"))).toBe(false);
   });
 });

@@ -22,7 +22,15 @@ export type DirectCallRow = {
   caller_id_e164: string;
   created_at: string;
   connected_at: string | null;
+  updated_at?: string;
+  failure_reason?: string | null;
+  browser_hangup_pending?: boolean;
+  seller_hangup_pending?: boolean;
+  seller_dial_state?: SellerDialState | null;
 };
+
+/** pending: transition persisted, Dial maybe not sent. sent: provider answered. unknown: outcome unknown, never resend. */
+export type SellerDialState = "pending" | "sent" | "unknown";
 
 export type DirectCallEvent = {
   /** Telnyx event_type, e.g. "call.answered". */
@@ -39,10 +47,15 @@ export type RowPatch = Partial<{
   browser_leg_id: string;
   seller_leg_id: string;
   hangup_cause: string;
-  failure_reason: string;
+  failure_reason: string | null;
   connected_at: string;
   ended_at: string;
+  browser_hangup_pending: boolean;
+  seller_hangup_pending: boolean;
+  seller_dial_state: SellerDialState;
 }>;
+
+export const TEARDOWN_PENDING = "teardown_pending";
 
 export type SellerDialCommand = {
   kind: "dial_seller";
@@ -56,8 +69,8 @@ export type SellerDialCommand = {
   bridgeOnAnswer: true;
   bridgeIntent: false;
 };
-export type HangupCommand = { kind: "hangup"; callControlId: string; commandId: string };
-export type DirectCommand = SellerDialCommand | HangupCommand;
+/** Leg teardown is not a command: it is persisted as per-leg pending flags and retried. */
+export type DirectCommand = SellerDialCommand;
 
 export type TransitionResult = { patch: RowPatch | null; commands: DirectCommand[] };
 
@@ -69,8 +82,39 @@ export function deterministicCommandId(seed: string): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
-function hangupCommand(rowId: string, callControlId: string): HangupCommand {
-  return { kind: "hangup", callControlId, commandId: deterministicCommandId(`${rowId}:${callControlId}:hangup`) };
+export function hangupCommandId(rowId: string, callControlId: string): string {
+  return deterministicCommandId(`${rowId}:${callControlId}:hangup`);
+}
+
+const pendingFlag = (role: LegRole) => (role === "browser" ? "browser_hangup_pending" : "seller_hangup_pending") as
+  | "browser_hangup_pending"
+  | "seller_hangup_pending";
+
+export function hasPendingCleanup(row: Pick<DirectCallRow, "browser_hangup_pending" | "seller_hangup_pending">): boolean {
+  return Boolean(row.browser_hangup_pending || row.seller_hangup_pending);
+}
+
+const SETUP: DirectCallStatus[] = ["browser_connecting", "seller_dialing"];
+const STALE_SETUP_MS = 150_000; // ring timeouts: 30s + <=60s + 30s
+const STALE_ENDING_MS = 60_000;
+const STALE_ANY_MS = (MAX_CALL_SECS + 300) * 1000;
+export const DIAL_REPLAY_WINDOW_MS = 60_000; // Telnyx command_id dedupe window
+
+/**
+ * Terminal status a non-terminal row should be driven to once its legs are torn down,
+ * or null if the row is not stale. Time never makes a call terminal by itself: the caller
+ * must end the legs first.
+ */
+export function staleOutcome(row: DirectCallRow, now: Date): DirectCallStatus | null {
+  if (DIRECT_CALL_TERMINAL_STATUSES.has(row.status)) return null;
+  const age = (iso: string | undefined) => (iso ? now.getTime() - new Date(iso).getTime() : 0);
+  const stale =
+    row.failure_reason === TEARDOWN_PENDING ||
+    age(row.created_at) > STALE_ANY_MS ||
+    (SETUP.includes(row.status) && age(row.created_at) > STALE_SETUP_MS) ||
+    (row.status === "ending" && age(row.updated_at) > STALE_ENDING_MS);
+  if (!stale) return null;
+  return SETUP.includes(row.status) ? "failed" : "ended";
 }
 
 /** Which leg of this row an event belongs to; null means the event is not ours to act on. */
@@ -96,8 +140,14 @@ export function nextDirectCallState(row: DirectCallRow, event: DirectCallEvent, 
   const terminal = DIRECT_CALL_TERMINAL_STATUSES.has(row.status);
 
   if (event.type === "call.hangup") {
-    if (terminal) return NOOP;
+    if (terminal) {
+      // The provider confirmed this leg is gone: stop retrying its teardown.
+      const flag = pendingFlag(leg.role);
+      const patch: RowPatch = { ...assignPatch, ...(row[flag] ? { [flag]: false } : {}) };
+      return { patch: Object.keys(patch).length ? patch : null, commands: [] };
+    }
     const other = leg.role === "browser" ? sellerLegId : browserLegId;
+    const otherFlag = pendingFlag(leg.role === "browser" ? "seller" : "browser");
     const connected = row.status === "connected" || row.connected_at !== null;
     const ended = connected || row.status === "ending";
     return {
@@ -107,54 +157,69 @@ export function nextDirectCallState(row: DirectCallRow, event: DirectCallEvent, 
         ended_at: nowIso,
         ...(event.hangupCause ? { hangup_cause: event.hangupCause } : {}),
         ...(ended ? {} : { failure_reason: leg.role === "seller" ? "seller_not_answered" : "browser_hangup_before_connect" }),
+        [pendingFlag(leg.role)]: false,
+        ...(other ? { [otherFlag]: true } : {}),
       },
-      commands: other ? [hangupCommand(row.id, other)] : [],
+      commands: [],
     };
   }
 
   if (event.type === "call.answered") {
     // A late answer on a call that is already over (or being torn down): kill that leg.
     if (terminal || row.status === "ending") {
-      return { patch: Object.keys(assignPatch).length ? assignPatch : null, commands: [hangupCommand(row.id, legId)] };
+      return { patch: { ...assignPatch, [pendingFlag(leg.role)]: true }, commands: [] };
     }
     if (leg.role === "browser") {
+      if (row.status === "seller_dialing" && row.seller_leg_id === null) {
+        // Redelivery after a crash between persisting the transition and the Dial.
+        const replayable = row.seller_dial_state === "pending" && now.getTime() - new Date(row.updated_at ?? row.created_at).getTime() <= DIAL_REPLAY_WINDOW_MS;
+        if (replayable) return { patch: Object.keys(assignPatch).length ? assignPatch : null, commands: [sellerDial(row, legId, now)] };
+        if (row.seller_dial_state === "pending" || row.seller_dial_state === "unknown") {
+          // Never resend a Dial whose outcome is unknown.
+          return {
+            patch: { ...assignPatch, status: "failed", failure_reason: "dial_outcome_unknown", seller_dial_state: "unknown", ended_at: nowIso, browser_hangup_pending: true },
+            commands: [],
+          };
+        }
+      }
       if (row.status !== "browser_connecting") return Object.keys(assignPatch).length ? { patch: assignPatch, commands: [] } : NOOP;
       const elapsedMs = now.getTime() - new Date(row.created_at).getTime();
       if (!(elapsedMs <= STALE_BROWSER_ANSWER_MS)) {
         return {
-          patch: { ...assignPatch, status: "failed", failure_reason: "browser_answer_stale", ended_at: nowIso },
-          commands: [hangupCommand(row.id, legId)],
+          patch: { ...assignPatch, status: "failed", failure_reason: "browser_answer_stale", ended_at: nowIso, browser_hangup_pending: true },
+          commands: [],
         };
       }
-      const timeLimitSecs = Math.max(30, MAX_CALL_SECS - Math.floor(elapsedMs / 1000));
-      return {
-        patch: { ...assignPatch, status: "seller_dialing" },
-        commands: [
-          {
-            kind: "dial_seller",
-            to: row.destination_e164,
-            from: row.caller_id_e164,
-            linkTo: legId,
-            commandId: deterministicCommandId(`${row.id}:seller-dial`),
-            timeoutSecs: SELLER_RING_SECS,
-            timeLimitSecs,
-            clientState: { directCallId: row.id, role: "seller" },
-            bridgeOnAnswer: true,
-            bridgeIntent: false,
-          },
-        ],
-      };
+      return { patch: { ...assignPatch, status: "seller_dialing", seller_dial_state: "pending" }, commands: [sellerDial(row, legId, now)] };
     }
     // seller answered
     if (row.status !== "seller_dialing") return Object.keys(assignPatch).length ? { patch: assignPatch, commands: [] } : NOOP;
     return { patch: { ...assignPatch, status: "connected", connected_at: event.occurredAt ?? nowIso }, commands: [] };
   }
 
-  // call.initiated on a finished call: make sure a leg we dialed does not linger.
-  if (terminal && event.type === "call.initiated") {
-    return { patch: null, commands: [hangupCommand(row.id, legId)] };
+  // Any other event for a leg on a finished call: make sure a leg we dialed does not linger.
+  if (terminal && (event.type === "call.initiated" || leg.assign)) {
+    return { patch: { ...assignPatch, [pendingFlag(leg.role)]: true }, commands: [] };
   }
 
   // call.bridged and everything else: recorded as an event only.
-  return Object.keys(assignPatch).length ? { patch: assignPatch, commands: [] } : NOOP;
+  const sentPatch: RowPatch = leg.assign && leg.role === "seller" && row.seller_dial_state === "pending" ? { seller_dial_state: "sent" } : {};
+  const patch: RowPatch = { ...assignPatch, ...sentPatch };
+  return Object.keys(patch).length ? { patch, commands: [] } : NOOP;
+}
+
+function sellerDial(row: DirectCallRow, browserLegId: string, now: Date): SellerDialCommand {
+  const elapsedMs = now.getTime() - new Date(row.created_at).getTime();
+  return {
+    kind: "dial_seller",
+    to: row.destination_e164,
+    from: row.caller_id_e164,
+    linkTo: browserLegId,
+    commandId: deterministicCommandId(`${row.id}:seller-dial`),
+    timeoutSecs: SELLER_RING_SECS,
+    timeLimitSecs: Math.max(30, MAX_CALL_SECS - Math.floor(elapsedMs / 1000)),
+    clientState: { directCallId: row.id, role: "seller" },
+    bridgeOnAnswer: true,
+    bridgeIntent: false,
+  };
 }

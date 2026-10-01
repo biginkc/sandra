@@ -40,43 +40,62 @@ async function request(
 ): Promise<string> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const controller = new AbortController();
+  // The timeout stays armed until the body is fully read, so a stalled body cannot hang the caller.
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? TIMEOUT_MS);
-  let response: Response;
   try {
-    response = await fetchImpl(`${TELNYX_API}${path}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${settings.apiKey}`,
-        "Content-Type": "application/json",
-        Accept: accept === "json" ? "application/json" : "text/plain",
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: controller.signal,
-      cache: "no-store",
-    });
-  } catch (error) {
-    const aborted = error instanceof Error && error.name === "AbortError";
-    throw new TelnyxApiError(aborted ? "Telnyx request timed out." : "Telnyx request failed.", "unknown", null);
+    let response: Response;
+    try {
+      response = await fetchImpl(`${TELNYX_API}${path}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${settings.apiKey}`,
+          "Content-Type": "application/json",
+          Accept: accept === "json" ? "application/json" : "text/plain",
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: controller.signal,
+        cache: "no-store",
+      });
+    } catch (error) {
+      const aborted = error instanceof Error && error.name === "AbortError";
+      throw new TelnyxApiError(aborted ? "Telnyx request timed out." : "Telnyx request failed.", "unknown", null);
+    }
+    let text = "";
+    try {
+      text = await response.text();
+    } catch (error) {
+      // A 2xx whose body never arrived may still have run the command.
+      if (response.ok) {
+        const aborted = error instanceof Error && error.name === "AbortError";
+        throw new TelnyxApiError(aborted ? "Telnyx request timed out." : "Telnyx response could not be read.", "unknown", null);
+      }
+    }
+    if (!response.ok) {
+      let detail = "";
+      try {
+        const parsed = JSON.parse(text) as { errors?: Array<{ title?: string; detail?: string }> };
+        detail = parsed.errors?.map((e) => e.detail ?? e.title ?? "").filter(Boolean).join("; ") ?? "";
+      } catch {
+        // not JSON
+      }
+      const kind = response.status >= 500 ? "unknown" : "rejected";
+      throw new TelnyxApiError(
+        `Telnyx ${path.replace(/\/[0-9a-f-]{8,}/gi, "/:id")} returned ${response.status}${detail ? `: ${redact(detail, settings.apiKey)}` : ""}`,
+        kind,
+        response.status,
+      );
+    }
+    return text;
   } finally {
     clearTimeout(timer);
   }
-  const text = await response.text().catch(() => "");
-  if (!response.ok) {
-    let detail = "";
-    try {
-      const parsed = JSON.parse(text) as { errors?: Array<{ title?: string; detail?: string }> };
-      detail = parsed.errors?.map((e) => e.detail ?? e.title ?? "").filter(Boolean).join("; ") ?? "";
-    } catch {
-      // not JSON
-    }
-    const kind = response.status >= 500 ? "unknown" : "rejected";
-    throw new TelnyxApiError(
-      `Telnyx ${path.replace(/\/[0-9a-f-]{8,}/gi, "/:id")} returned ${response.status}${detail ? `: ${redact(detail, settings.apiKey)}` : ""}`,
-      kind,
-      response.status,
-    );
-  }
-  return text;
+}
+
+/** True when a hangup was refused because the leg is already gone (404 / "already ended"). */
+export function isLegAlreadyEnded(error: unknown): boolean {
+  if (!(error instanceof TelnyxApiError) || error.kind !== "rejected") return false;
+  if (error.status === 404) return true;
+  return error.status === 422 && /already|ended|no longer|not found|does not exist/i.test(error.message);
 }
 
 function parseJson<T>(text: string): T {

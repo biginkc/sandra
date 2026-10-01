@@ -9,6 +9,7 @@ const FULL = {
   TELNYX_DIRECT_APP_ID: "a",
   TELNYX_DIRECT_WEBHOOK_PUBLIC_KEY: "p",
   DIRECT_CALL_CALLER_ID_E164: "+15550002222",
+  DIRECT_CALL_CONTAINMENT_VERIFIED: "true",
 };
 
 describe("resolveCallingConfig", () => {
@@ -26,5 +27,10 @@ describe("resolveCallingConfig", () => {
       expect(resolveCallingConfig("pilot-1", { ...FULL, [key]: undefined })).toEqual({ transport: "default" });
     }
     expect(resolveCallingConfig("pilot-1", { ...FULL, DIRECT_CALL_CALLER_ID_E164: "5550002222" })).toEqual({ transport: "default" });
+  });
+  it("fails closed unless containment is verified", () => {
+    expect(resolveCallingConfig("pilot-1", { ...FULL, DIRECT_CALL_CONTAINMENT_VERIFIED: undefined })).toEqual({ transport: "default" });
+    expect(resolveCallingConfig("pilot-1", { ...FULL, DIRECT_CALL_CONTAINMENT_VERIFIED: "false" })).toEqual({ transport: "default" });
+    expect(resolveCallingConfig("pilot-1", { ...FULL, DIRECT_CALL_CONTAINMENT_VERIFIED: "TRUE" })).toEqual({ transport: "default" });
   });
 });

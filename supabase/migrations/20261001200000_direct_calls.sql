@@ -30,6 +30,12 @@ create table if not exists public.direct_calls (
   browser_leg_id text unique,
   seller_leg_id text unique,
   browser_command_id uuid not null default gen_random_uuid(),
+  -- Provider-side leg teardown is tracked per leg so a terminal business status
+  -- can still have cleanup outstanding (retried until the provider confirms).
+  browser_hangup_pending boolean not null default false,
+  seller_hangup_pending boolean not null default false,
+  -- Seller Dial command state, persisted with the transition: pending -> sent | unknown.
+  seller_dial_state text check (seller_dial_state in ('pending', 'sent', 'unknown')),
   hangup_cause text,
   failure_reason text,
   client_request_id uuid not null,
@@ -97,7 +103,10 @@ create policy direct_call_events_own_select on public.direct_call_events
   for select to authenticated
   using (
     exists (select 1 from public.direct_calls c
-      where c.id = direct_call_events.direct_call_id and c.operator_user_id = auth.uid())
+      where c.id = direct_call_events.direct_call_id and c.operator_user_id = auth.uid()
+        and exists (select 1 from public.memberships m
+          where m.user_id = auth.uid() and m.org_id = c.org_id
+            and m.access_status = 'active' and m.deletion_prepared_at is null))
   );
 
 commit;

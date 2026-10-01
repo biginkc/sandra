@@ -32,6 +32,12 @@ export type StartDirectCallResult = {
   browserLegId: string;
   /** Header name/value the browser leg carries, for pre-answer matching. */
   correlationHeader: { name: "X-Sandra-Direct-Call-Id"; value: string };
+  /**
+   * Sealed call identity for wrap-up (the same capability the Jitter path mints),
+   * bound to this call id, operator, destination and purpose. Absent only when the
+   * server has no signing key and the call is not an internal training call.
+   */
+  callCapability?: string;
 };
 
 export type DirectCallStatusView = {

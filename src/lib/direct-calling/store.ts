@@ -4,10 +4,10 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database } from "@/lib/supabase/types";
 
 import type { DirectCallStatus } from "./contract";
-import type { RowPatch } from "./transitions";
+import type { RowPatch, SellerDialState } from "./transitions";
 
 type RawRow = Database["public"]["Tables"]["direct_calls"]["Row"];
-export type DirectCallFullRow = Omit<RawRow, "status"> & { status: DirectCallStatus };
+export type DirectCallFullRow = Omit<RawRow, "status" | "seller_dial_state"> & { status: DirectCallStatus; seller_dial_state: SellerDialState | null };
 const typed = (row: RawRow | null): DirectCallFullRow | null => row as DirectCallFullRow | null;
 export type DirectCallOperatorRow = Database["public"]["Tables"]["direct_call_operators"]["Row"];
 
@@ -38,14 +38,17 @@ export interface DirectCallStore {
   findOwned(id: string, userId: string): Promise<DirectCallFullRow | null>;
   findByRequest(userId: string, clientRequestId: string): Promise<DirectCallFullRow | null>;
   findActiveForUser(userId: string): Promise<DirectCallFullRow | null>;
-  /** Marks non-terminal calls that cannot still be live as finished, freeing the operator. */
-  expireStale(userId: string, now: Date): Promise<void>;
   /** Returns "conflict" when the one-active-call index or request-id uniqueness rejects it. */
   insertCall(call: NewDirectCall): Promise<{ row: DirectCallFullRow } | "conflict">;
   /** Compare-and-set on status. Returns the updated row, or null if the status no longer matched. */
   updateIfStatus(id: string, statuses: DirectCallStatus[], patch: RowPatch): Promise<DirectCallFullRow | null>;
   setBrowserLeg(id: string, legId: string): Promise<void>;
+  /** Stores the seller leg id and marks the Dial as sent. False when a seller leg id is already stored. */
   setSellerLegIfNull(id: string, legId: string): Promise<boolean>;
+  /** pending -> sent only; never overwrites unknown. */
+  markSellerDialSent(id: string): Promise<void>;
+  /** Unconditional (any status): set/clear the pending-teardown flag for one leg. */
+  setLegCleanup(id: string, role: "browser" | "seller", pending: boolean): Promise<void>;
   getOperator(userId: string): Promise<DirectCallOperatorRow | null>;
   insertOperator(row: { user_id: string; org_id: string; telnyx_credential_id: string; sip_username: string }): Promise<DirectCallOperatorRow>;
 }
@@ -117,29 +120,6 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
       if (error) fail(error);
       return typed(data);
     },
-    async expireStale(userId, now) {
-      const iso = (ms: number) => new Date(now.getTime() - ms).toISOString();
-      const nowIso = now.toISOString();
-      // Setup states cannot outlive ring timeouts (30s + <=60s + 30s); "ending" should resolve in seconds.
-      const rules: Array<[DirectCallStatus[], string, DirectCallStatus, string]> = [
-        [["browser_connecting", "seller_dialing"], "created_at", "failed", iso(150_000)],
-        [["ending"], "updated_at", "ended", iso(60_000)],
-        [ACTIVE, "created_at", "ended", iso((7200 + 300) * 1000)],
-      ];
-      for (const [statuses, column, status, cutoff] of rules) {
-        const { error } = await calls()
-          .update({
-            status,
-            ended_at: nowIso,
-            updated_at: nowIso,
-            ...(status === "failed" ? { failure_reason: "stale_unresolved" } : {}),
-          })
-          .eq("operator_user_id", userId)
-          .in("status", statuses)
-          .lt(column, cutoff);
-        if (error) fail(error);
-      }
-    },
     async insertCall(call) {
       const { data, error } = await calls().insert({ ...call, status: "browser_connecting" }).select("*").single();
       if (error) {
@@ -167,7 +147,7 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
     },
     async setSellerLegIfNull(id, legId) {
       const { data, error } = await calls()
-        .update({ seller_leg_id: legId, updated_at: new Date().toISOString() })
+        .update({ seller_leg_id: legId, seller_dial_state: "sent", updated_at: new Date().toISOString() })
         .eq("id", id)
         .is("seller_leg_id", null)
         .select("id");
@@ -176,6 +156,19 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
         fail(error);
       }
       return (data?.length ?? 0) > 0;
+    },
+    async markSellerDialSent(id) {
+      const { error } = await calls()
+        .update({ seller_dial_state: "sent", updated_at: new Date().toISOString() })
+        .eq("id", id)
+        .eq("seller_dial_state", "pending");
+      if (error) fail(error);
+    },
+    async setLegCleanup(id, role, pending) {
+      const { error } = await calls()
+        .update({ ...(role === "browser" ? { browser_hangup_pending: pending } : { seller_hangup_pending: pending }), updated_at: new Date().toISOString() })
+        .eq("id", id);
+      if (error) fail(error);
     },
     async getOperator(userId) {
       const { data, error } = await admin.from("direct_call_operators").select("*").eq("user_id", userId).maybeSingle();
