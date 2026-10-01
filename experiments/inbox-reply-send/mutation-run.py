@@ -36,7 +36,7 @@ LOCAL_DB_RETRY = ROOT / "experiments/inbox-reply-send-worker/restate-retry-local
 PROVIDER_FIX = ROOT / "experiments/inbox-reply-send/provider-fix-proof.py"
 PROVIDER_FIX_MINIMAL = ROOT / "experiments/inbox-reply-send/provider-fix-minimal.py"
 LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r11.log")
-EVIDENCE = Path("/Users/jarradhenry/Sandra-inbox-tmp/notes/replypersist-mutation-evidence.md")
+EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-evidence.md")
 
 
 def execute(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
