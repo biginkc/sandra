@@ -8,6 +8,8 @@ export type ReportContext = {
   tags?: Record<string, string | number | boolean>;
   user?: { id: string } | null;
   extra?: Record<string, unknown>;
+  /** Sentry severity; omitted means the default (error). */
+  level?: "warning" | "info";
 };
 
 export function reportError(err: unknown, context: ReportContext = {}): void {
@@ -38,6 +40,7 @@ export function reportError(err: unknown, context: ReportContext = {}): void {
     if (!(err instanceof Error)) normalized.name = "StructuredError";
     Sentry.withScope((scope) => {
       scope.setTag("surface", safeTags.surface ?? "handled");
+      if (context.level) scope.setLevel(context.level);
       for (const [key, value] of Object.entries(safeTags)) scope.setTag(key, value);
       Sentry.captureException(normalized);
     });

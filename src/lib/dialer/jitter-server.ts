@@ -614,7 +614,7 @@ function isAudioHealthSample(value: unknown): value is JitterAudioHealthSample {
   );
 }
 
-function sealCallCapability(
+export function sealCallCapability(
   callId: string,
   userId: string,
   key: string,
