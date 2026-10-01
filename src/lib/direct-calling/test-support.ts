@@ -213,7 +213,9 @@ export class FakeStore implements DirectCallStore {
   }
   async setTarget(id: string, target: { property_id: string | null; contact_id: string | null; destination_e164: string }) {
     const row = this.calls.get(id);
-    if (row && row.status === "browser_connecting") this.calls.set(id, { ...row, ...target });
+    // Mirrors direct_call_set_target: also the untouched reservation of a request cancelled during prepare.
+    const untouched = row && row.status === "ending" && !row.property_id && !row.contact_id && row.destination_e164 === "" && !row.connected_at;
+    if (row && (row.status === "browser_connecting" || untouched)) this.calls.set(id, { ...row, ...target });
   }
   async discardReservation(id: string) {
     const row = this.calls.get(id);

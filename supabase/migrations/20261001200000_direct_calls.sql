@@ -289,12 +289,17 @@ returns void language sql security invoker set search_path = public as $$
    where direct_call_id = p_id and kind = 'unresolved_dial' and dial_role = p_role and confirmed_at is null;
 $$;
 
--- Fills in the prepared target on a reservation that has not progressed past browser_connecting.
+-- Fills in the prepared target on a reservation that has not progressed past browser_connecting. A reservation
+-- cancelled DURING prepare has already moved to 'ending': it may still receive the target while it is the
+-- untouched reservation (no target yet, never connected), so its terminal transition carries resume_pending
+-- under the usual ownership rule. Nothing else about the row, eligibility or resume authorization changes.
 create or replace function public.direct_call_set_target(p_id uuid, p_property uuid, p_contact uuid, p_destination text)
 returns void language sql security invoker set search_path = public as $$
   update public.direct_calls
      set property_id = p_property, contact_id = p_contact, destination_e164 = p_destination, updated_at = now()
-   where id = p_id and status = 'browser_connecting';
+   where id = p_id
+     and (status = 'browser_connecting'
+          or (status = 'ending' and property_id is null and contact_id is null and destination_e164 = '' and connected_at is null));
 $$;
 
 -- Drops a reservation whose prepare was refused (no Dial was ever sent; cascades its cleanup rows).

@@ -302,6 +302,22 @@ it("applies twice, enforces one active call per operator, scopes reads, and roll
     const connectedCall = await store.updateIfStatus((await pg.query("select id from public.direct_calls where operator_user_id=$1 and status not in ('ended','failed')", [USER_B])).rows[0].id, ["browser_connecting"], { status: "failed", ended_at: NOW.toISOString() });
     expect(connectedCall).toMatchObject({ resume_pending: true });
 
+    // ---- set_target on a reservation cancelled during prepare (status 'ending') ----------------------------
+    await pg.query("update public.direct_call_cleanups set confirmed_at = now() where operator_user_id = $1", [USER_C]);
+    await pg.query("update public.direct_calls set status = 'failed' where operator_user_id = $1 and status not in ('ended','failed')", [USER_C]);
+    const PROP3 = "00000000-0000-0000-0000-0000000d1b03";
+    await pg.query("insert into public.properties (id, org_id, address, state) values ($1, $2, '3 Test St', 'MO')", [PROP3, ORG]);
+    await pg.query("update public.direct_call_cleanups set confirmed_at = now() where operator_user_id = $1", [USER_C]);
+    const third = await store.beginCall({ org_id: ORG, operator_user_id: USER_C, property_id: null, contact_id: null, destination_e164: "", caller_id_e164: "+15550000002", client_request_id: "00000000-0000-0000-0000-00000000cc03" });
+    const idC3 = (third as { row: { id: string } }).row.id;
+    await store.updateIfStatus(idC3, ["browser_connecting"], { status: "ending" }); // cancelled during prepare
+    await store.setTarget(idC3, { property_id: PROP3, contact_id: null, destination_e164: "+15550000033" });
+    expect(await store.findById(idC3)).toMatchObject({ status: "ending", property_id: PROP3, destination_e164: "+15550000033" });
+    expect(await store.updateIfStatus(idC3, ["ending"], { status: "failed", ended_at: NOW.toISOString() })).toMatchObject({ resume_pending: true });
+    // A target is never rewritten once the row is terminal or already has one.
+    await store.setTarget(idC3, { property_id: null, contact_id: null, destination_e164: "+15559999999" });
+    expect(await store.findById(idC3)).toMatchObject({ property_id: PROP3, destination_e164: "+15550000033" });
+
     await pg.query(rollback);
     const gone = await pg.query("select to_regclass('public.direct_calls') as t");
     expect(gone.rows[0].t).toBeNull();

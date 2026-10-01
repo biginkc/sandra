@@ -492,4 +492,20 @@ describe("start errors say whether anything was reserved (#744-1)", () => {
     vi.spyOn(ctx.store, "beginCall").mockRejectedValueOnce(new Error("db"));
     expect(await start(ctx)).toMatchObject({ ok: false, errorCode: "start_failed", reserved: true });
   });
+
+  it("a request cancelled during prepare still records the prepared target, so the terminal move carries resume_pending", async () => {
+    const ctx = setup();
+    ctx.prepareLeadCall.mockImplementation(async (propertyId: string) => {
+      const row = [...ctx.store.calls.values()][0];
+      await ctx.store.updateIfStatus(row.id, ["browser_connecting"], { status: "ending" }); // hangup raced the prepare
+      return { ok: true as const, data: target({ propertyId, contactId: "contact-1", phoneE164: "+15550009999" }) };
+    });
+    const result = await ctx.service.startCall("user-1", { kind: "lead", propertyId: "prop-1", clientRequestId: REQ });
+    expect(result).toMatchObject({ ok: false });
+    expect(ctx.telnyx.dial).not.toHaveBeenCalled();
+    expect([...ctx.store.calls.values()][0]).toMatchObject({ property_id: "prop-1", contact_id: "contact-1", destination_e164: "+15550009999", status: "failed" });
+    // resume_pending was set by the terminal move, then worked (and cleared) by the resume step of the same start.
+    expect(ctx.resumeFailedSoftphoneCall).toHaveBeenCalledTimes(1);
+    expect(ctx.resumeFailedSoftphoneCall).toHaveBeenCalledWith("prop-1");
+  });
 });

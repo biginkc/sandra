@@ -80,3 +80,66 @@ describe("processDueCleanups", () => {
     expect(broken.store.legRow("leg-1")?.attempts).toBe(STATUS_CHECK_EVERY_FAILED_HANGUPS);
   });
 });
+
+describe("unresolved Dial reconciliation matches call id AND role", () => {
+  type Listing = Awaited<ReturnType<CleanupDeps["listActiveCalls"]>>;
+  function dialWorld(listings: Array<Listing | Error>) {
+    const w = setup([]);
+    const row = w.store.addCleanup({
+      direct_call_id: CALL, kind: "unresolved_dial", dial_role: "seller",
+      resolve_after: new Date(clock.now.getTime() - 1000).toISOString(), backstop_at: new Date(clock.now.getTime() + 3_600_000).toISOString(),
+    });
+    let i = 0;
+    w.deps.listActiveCalls = async () => {
+      const next = listings[Math.min(i++, listings.length - 1)];
+      if (next instanceof Error) throw next;
+      return next;
+    };
+    const run = async () => {
+      const entry = w.store.cleanups.get(row.id)!;
+      entry.next_attempt_at = clock.now.toISOString();
+      await processDueCleanups(w.deps, "user-1");
+      return w.store.cleanups.get(row.id)!;
+    };
+    return { ...w, row, run };
+  }
+  const leg = (id: string, role: string, call = CALL) => ({ callControlId: id, clientState: { directCallId: call, role } });
+
+  it("a browser leg of the same call never resolves a seller obligation; it gets its own leg row", async () => {
+    const w = dialWorld([{ calls: [leg("BROWSER-1", "browser")], complete: true }]);
+    const after = await w.run();
+    expect(after.confirmed_at).toBeNull();
+    expect(after.empty_matches).toBe(1); // counts as an empty listing for the SELLER role, not a resolution
+    expect(w.store.legRow("BROWSER-1")).toBeDefined();
+    const second = await w.run();
+    expect(second.confirmed_at).not.toBeNull(); // two consecutive complete listings without a seller leg
+  });
+
+  it("an incomplete or failed listing never counts as empty", async () => {
+    const w = dialWorld([
+      { calls: [], complete: false },
+      new Error("listing down"),
+      { calls: [], complete: true },
+      { calls: [], complete: false },
+      { calls: [], complete: true },
+      { calls: [], complete: true },
+    ]);
+    expect((await w.run()).empty_matches).toBe(0);
+    expect((await w.run()).empty_matches).toBe(0);
+    expect((await w.run()).empty_matches).toBe(1);
+    const reset = await w.run(); // incomplete again: the consecutive count restarts
+    expect(reset).toMatchObject({ empty_matches: 0, confirmed_at: null });
+    expect((await w.run()).confirmed_at).toBeNull();
+    expect((await w.run()).confirmed_at).not.toBeNull();
+  });
+
+  it("a matching-role leg becomes a leg row, is hung up, and resolves the obligation", async () => {
+    const w = dialWorld([{ calls: [leg("SELLER-1", "seller"), leg("OTHER", "seller", "someone-else")], complete: true }]);
+    const after = await w.run();
+    expect(after.confirmed_at).not.toBeNull();
+    expect(w.store.legRow("SELLER-1")).toBeDefined();
+    expect(w.store.legRow("OTHER")).toBeUndefined();
+    await processDueCleanups(w.deps, "user-1");
+    expect(w.hangup).toHaveBeenCalledWith("SELLER-1", expect.any(String));
+  });
+});

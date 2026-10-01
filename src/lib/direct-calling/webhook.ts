@@ -22,7 +22,7 @@ export type WebhookDeps = {
   store: DirectCallStore;
   dial: (params: DialParams) => Promise<{ callControlId: string }>;
   hangup: (callControlId: string, commandId: string) => Promise<void>;
-  /** GET call status for one leg (`isAlive:false` or 404 means gone). */
+  /** GET call status for one leg (only an explicit `isAlive:false` means gone; a 404 or any error is not proof and is never treated as gone). */
   getCall: (callControlId: string) => Promise<{ isAlive: boolean }>;
   /** Active calls on the Voice API app (reconciles unresolved Dials). */
   listActiveCalls: () => Promise<{ calls: ActiveCall[]; complete: boolean }>;

@@ -178,11 +178,13 @@ async function reconcileDial(deps: CleanupDeps, row: DirectCallCleanupRow, resul
       result.failed += 1;
       return await settle(deps, row, { empty_matches: 0, last_error: message(error) }, { error });
     }
-    const matches = listing.calls.filter((call) => call.clientState?.directCallId === row.direct_call_id);
-    if (matches.length > 0) {
-      for (const match of matches) await deps.store.addLegCleanup(row.direct_call_id, match.callControlId);
-      return await confirm(deps, row, result);
-    }
+    // Only a leg carrying this call id AND this obligation's role can resolve it. A leg of the same call
+    // with the other role (e.g. the browser leg when the seller Dial is unresolved) is queued for hangup
+    // on its own but proves nothing about this Dial.
+    const ofThisCall = listing.calls.filter((call) => call.clientState?.directCallId === row.direct_call_id);
+    for (const call of ofThisCall) await deps.store.addLegCleanup(row.direct_call_id, call.callControlId);
+    const matches = ofThisCall.filter((call) => call.clientState?.role === row.dial_role);
+    if (matches.length > 0) return await confirm(deps, row, result);
     // An incomplete listing, or a look before resolve_after, proves nothing: not an empty match.
     if (!listing.complete || (row.resolve_after && now < new Date(row.resolve_after).getTime())) {
       return await settle(deps, row, { empty_matches: 0, last_error: listing.complete ? null : "active_calls_listing_truncated" });
