@@ -66,12 +66,25 @@ export type DialpadBrowserSessionOptions = {
   readonly maxBufferedBytes?: number;
   /** Opt in only after the compatible Jitter endpoint has been deployed. */
   readonly enableTiming?: boolean;
+  /** Opt-in, one aggregate receipt for this authenticated epoch. */
+  readonly onDiagnostic?: (summary: DialpadBrowserSessionDiagnostic) => void;
   readonly onSnapshot?: (snapshot: DialpadBrowserMeasurementSnapshotMessage) => void;
   readonly onCaptureState?: (state: DialpadBrowserCaptureStateMessage) => void;
   readonly onServerMessage?: (message: DialpadBrowserServerMessage) => void;
   readonly onFailure?: (error: DialpadBrowserSessionError) => void;
   /** Recording transport completed gracefully; this is not provider hangup proof. */
   readonly onStopped?: () => void;
+};
+
+export type DialpadBrowserSessionDiagnostic = {
+  readonly epoch: number;
+  readonly pcm: Record<Track, { readonly framesSent: number; readonly framesAcknowledged: number; readonly eofAcknowledged: boolean }>;
+  readonly timingEnabled: boolean;
+  readonly timingBatchAcks: number;
+  readonly timingExchangeAcks: number;
+  readonly timingEndAck: 'collected' | 'incomplete' | null;
+  readonly timingIncomplete: boolean;
+  readonly outcome: 'stopped' | 'failed';
 };
 
 export type DialpadBrowserSession = {
@@ -128,6 +141,13 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
   const maxPendingPackets = options.maxPendingPackets ?? 64;
   const maxBufferedBytes = options.maxBufferedBytes ?? DEFAULT_MAX_BUFFERED_BYTES;
   const enableTiming = options.enableTiming === true;
+  const diagnostic = options.onDiagnostic ? { pcm: { tab: { framesSent: 0, framesAcknowledged: 0 }, mic: { framesSent: 0, framesAcknowledged: 0 } }, timingBatchAcks: 0, timingExchangeAcks: 0, timingEndAck: null as 'collected' | 'incomplete' | null } : null;
+  let diagnosticEmitted = false;
+  const emitDiagnostic = () => {
+    if (!diagnostic || diagnosticEmitted) return;
+    diagnosticEmitted = true;
+    try { options.onDiagnostic?.({ epoch: options.epoch, pcm: { tab: { ...diagnostic.pcm.tab, eofAcknowledged: pcmDrainAcks.has('tab') }, mic: { ...diagnostic.pcm.mic, eofAcknowledged: pcmDrainAcks.has('mic') } }, timingEnabled: enableTiming, timingBatchAcks: diagnostic.timingBatchAcks, timingExchangeAcks: diagnostic.timingExchangeAcks, timingEndAck: diagnostic.timingEndAck, timingIncomplete, outcome: failed ? 'failed' : 'stopped' }); } catch { /* diagnostics cannot change transport state */ }
+  };
   if (!Number.isSafeInteger(options.epoch) || options.epoch < DIALPAD_BROWSER_PROTOCOL.minEpoch || options.epoch > DIALPAD_BROWSER_PROTOCOL.maxEpoch) {
     throw new DialpadBrowserSessionError('protocol', 'Invalid recording epoch.');
   }
@@ -432,7 +452,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
       detach();
       try { socket.close(1011, 'recording session failed'); } catch { /* socket is already failing */ }
     }
-    void disposeCapture();
+    void disposeCapture().then(emitDiagnostic, emitDiagnostic);
   }
 
   function enqueueSend(data: string | ArrayBuffer | Uint8Array, countsAsChunk = false, timingOnly = false, deadlineAt?: FinalizationDeadline): Promise<void> {
@@ -743,6 +763,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         clearTimeout(pending.timer);
         pendingPcmAcks.delete(ackKey);
         recordPcmAcknowledgement(message.track, message.seq);
+        if (diagnostic) diagnostic.pcm[message.track].framesAcknowledged += 1;
         if (failed) return;
         pending.resolve();
         drainPcmCreditWaiters();
@@ -772,6 +793,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
           else if (record.kind === 'context_clock') timingDurableLastSeq[record.track === 'tab' ? 'tabContext' : 'micContext'] = Math.max(timingDurableLastSeq[record.track === 'tab' ? 'tabContext' : 'micContext'], record.seq);
         }
         completed.resolve(); timingBatchInFlight = null;
+        if (diagnostic) diagnostic.timingBatchAcks += 1;
       } else if (message.type === 'timing_probe_reply') {
         if (timingIncomplete || timingBarrierSent) return;
         const replyFingerprint = JSON.stringify(message);
@@ -815,7 +837,9 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         if (timingIncomplete) return;
         if (!timingProbeInFlight || timingProbeInFlight.seq !== message.seq) return;
         clearTimeout(timingProbeInFlight.timer); timingDurableLastSeq.exchange = Math.max(timingDurableLastSeq.exchange, message.seq); timingProbeInFlight.resolve(); timingProbeInFlight = null;
+        if (diagnostic) diagnostic.timingExchangeAcks += 1;
       } else if (message.type === 'timing_end_ack') {
+        if (diagnostic) diagnostic.timingEndAck = message.status;
         if (message.status === 'incomplete') timingIncomplete = true;
         if (timingEndInFlight) { clearTimeout(timingEndInFlight.timer); timingEndInFlight.resolve(); timingEndInFlight = null; }
       }
@@ -923,6 +947,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     pendingPcmAcks.set(ackKey, { track: frame.track, seq: frame.frameIndex, resolve: resolveAck, reject: rejectAck, timer });
     try {
       await enqueueSend(encodeDialpadBrowserBinary({ kind: 'pcm', track: frame.track, epoch: options.epoch, sequence: frame.frameIndex, sampleClock: frame.frameIndex * 320, payload: frame.bytes }));
+      if (diagnostic) diagnostic.pcm[frame.track].framesSent += 1;
     } catch (error) {
       clearTimeout(timer);
       pendingPcmAcks.delete(ackKey);
@@ -1085,6 +1110,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         fail(error instanceof DialpadBrowserSessionError ? error : new DialpadBrowserSessionError('interrupted', 'Recording could not finish cleanly.'));
         await disposeCapture();
       } finally {
+        emitDiagnostic();
         clearFinalizationWatchdog();
         mediaAdmissionOpen = false;
         if (socket) {
@@ -1143,6 +1169,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     }
     await disposeCapture();
     if (state !== 'failed') state = 'stopped';
+    emitDiagnostic();
   }
 
   return { state: () => state, start, stop, dispose };

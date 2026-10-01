@@ -12,7 +12,8 @@ import {
   type ActiveDialpadCapture,
   type PreparedDialpadCapture,
 } from '@/lib/dialpad-recording/browser-capture';
-import { createDialpadBrowserSession, type DialpadBrowserSession } from '@/lib/dialpad-recording/browser-session';
+import { createDialpadBrowserSession, type DialpadBrowserSession, type DialpadBrowserSessionDiagnostic } from '@/lib/dialpad-recording/browser-session';
+import { createPcmDiagnosticBinding } from '@/lib/dialpad-recording/speech-diagnostic-binding';
 import {
   buildEnableCurrentTabMessage,
   buildInitiateCallMessage,
@@ -127,6 +128,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
   const [recording, setRecording] = useState<RecordingPanelState | null>(null);
   const [statusRetryNonce, setStatusRetryNonce] = useState(0);
   const recordingRef = useRef<RecordingPanelState | null>(null);
+  const pcmDiagnosticBindings = useRef(new WeakMap<ActiveDialpadCapture, ReturnType<typeof createPcmDiagnosticBinding>>());
   const mediaOwnerRef = useRef<ReturnType<typeof createDialpadCaptureSourceSession> | null>(null);
   const [sharingAudio, setSharingAudio] = useState(false);
   const releaseAudioSources = () => {
@@ -511,10 +513,17 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
       const sources = await owner.acquire();
       if (!mountedRef.current || mediaOwnerRef.current !== owner || generation !== recordingGenerationRef.current) { sources.invalidate(); sources.release(); return null; }
       setSharingAudio(true);
-      const prepared = await prepareDialpadBrowserCapture({ proof: owner.proof, sources });
+      const speechDiagnosticsEnabled = process.env.NEXT_PUBLIC_DIALPAD_PCM_DIAGNOSTICS === 'true';
+      const diagnosticBinding = speechDiagnosticsEnabled ? createPcmDiagnosticBinding((summary) => {
+        console.info('dialpad_browser_pcm_diagnostic', JSON.stringify(summary));
+      }) : null;
+      const prepared = await prepareDialpadBrowserCapture({ proof: owner.proof, sources,
+        ...(diagnosticBinding ? { onPcmDiagnostic: diagnosticBinding.onDiagnostic } : {}),
+      });
       if (!mountedRef.current || generation !== recordingGenerationRef.current || (ownerChooserGeneration !== undefined && ownerChooserGeneration !== chooserGenerationRef.current)) { await prepared.dispose(); clearOwnedPreparation(); return null; }
       if (!prepared.startLocal) throw new Error('This browser cannot start local capture before the call.');
       const active = await prepared.startLocal(1);
+      if (diagnosticBinding) pcmDiagnosticBindings.current.set(active, diagnosticBinding);
       if (!mountedRef.current || generation !== recordingGenerationRef.current || (ownerChooserGeneration !== undefined && ownerChooserGeneration !== chooserGenerationRef.current)) { await active.dispose(); await prepared.dispose(); clearOwnedPreparation(); return null; }
       const ready: RecordingPanelState = { intentId, prepared, active, captureId: null, session: null, busy: false, message, measuredSamples: null, measurementStatus: null, captureStatus: null, crossing: null, liveThresholdCrossing: null, finalResult: null, hydrated: false };
       recordingRef.current = ready;
@@ -559,6 +568,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
       if (!opened.ok || !('capture' in opened)) throw new Error(opened.message);
       const captureId = opened.capture.captureId;
       ownedCaptureId = captureId;
+      pcmDiagnosticBindings.current.get(ownedActive)?.bindCaptureId(captureId);
       if (!mountedRef.current || generation !== recordingGenerationRef.current) { await abandon(); return; }
       const status = await getDialpadRecordingBrowserStatusAction(captureId);
       if (!mountedRef.current || generation !== recordingGenerationRef.current) { await abandon(); return; }
@@ -574,6 +584,9 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
         epoch: grant.epoch,
         capture: ownedActive,
         enableTiming: bootstrap.recording?.timingEnabled === true,
+        ...(process.env.NEXT_PUBLIC_DIALPAD_PCM_DIAGNOSTICS === 'true' ? { onDiagnostic: (summary: DialpadBrowserSessionDiagnostic) => {
+          console.info('dialpad_browser_transport_diagnostic', JSON.stringify({ captureId, ...summary }));
+        } } : {}),
         onSnapshot: (snapshot) => setRecording((latest) => isOwned() && latest?.intentId === call.intentId ? {
           ...latest,
           measuredSamples: snapshot.totalSamples,
