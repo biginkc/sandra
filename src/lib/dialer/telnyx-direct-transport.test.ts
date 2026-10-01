@@ -355,22 +355,24 @@ describe("TelnyxDirectCallTransport", () => {
 
   it("maps the backend's call_in_progress refusal to the operator_busy state and releases the client", async () => {
     const h = harness();
-    h.deps.startCall.mockResolvedValue({ ok: false, error: "busy", errorCode: "call_in_progress" } as never);
+    h.deps.startCall.mockResolvedValue({ ok: false, error: "busy", errorCode: "call_in_progress", reserved: false } as never);
     await h.transport.start(target);
     expect(h.states).toEqual(["operator_busy"]);
     expect(h.client.disconnect).toHaveBeenCalled();
+    expect(h.deps.cancelByRequest).not.toHaveBeenCalled(); // proven pre-reservation: nothing to reconcile
   });
 
   it("throws other start refusals", async () => {
     const h = harness();
-    h.deps.startCall.mockResolvedValue({ ok: false, error: "Calling is unavailable during quiet hours." } as never);
+    h.deps.startCall.mockResolvedValue({ ok: false, error: "Calling is unavailable during quiet hours.", reserved: false } as never);
     await expect(h.transport.start(target)).rejects.toThrow(/quiet hours/);
+    expect(h.deps.cancelByRequest).not.toHaveBeenCalled();
   });
 
   it("does not map codes the backend never emits to refusal states", async () => {
     for (const errorCode of ["operator_busy", "not_callable"]) {
       const h = harness();
-      h.deps.startCall.mockResolvedValue({ ok: false, error: "x", errorCode } as never);
+      h.deps.startCall.mockResolvedValue({ ok: false, error: "x", errorCode, reserved: false } as never);
       await expect(h.transport.start(target)).rejects.toThrow("x");
       expect(h.states).toEqual([]);
     }
@@ -613,6 +615,44 @@ describe("lost start response (#744-1)", () => {
     expect(h.states).not.toContain("teardown_unconfirmed");
     // Never treated as confirmed teardown without reconciliation: the cancel came BEFORE any "nothing to confirm".
     expect(h.deps.cancelByRequest.mock.invocationCallOrder[0]).toBeLessThan(h.deps.getStatusByRequest.mock.invocationCallOrder[0]);
+  });
+
+  it("an explicit start_failed after an unknown Dial (reserved:true) is reconciled by request id, never treated as torn down (#744-1)", async () => {
+    const h = harness();
+    h.deps.startCall.mockResolvedValueOnce({ ok: false, error: "Could not start the call. Try again.", errorCode: "start_failed", reserved: true } as never);
+    h.deps.getStatusByRequest
+      .mockResolvedValueOnce(view("failed", { cleanupPending: true })) // unknown Dial still open
+      .mockResolvedValue(view("failed", { cleanupPending: false }));
+    await expect(h.transport.start(target)).rejects.toThrow("Could not start the call");
+    expect(h.deps.cancelByRequest).toHaveBeenCalledWith(REQUEST_ID);
+    expect(h.deps.getStatusByRequest).toHaveBeenCalledTimes(2);
+    expect(h.states).not.toContain("teardown_unconfirmed");
+    expect(h.deps.cancelByRequest.mock.invocationCallOrder[0]).toBeLessThan(h.deps.getStatusByRequest.mock.invocationCallOrder[0]);
+  });
+
+  it("an unconfirmed reconciliation after start_failed warns and is not authoritative until it confirms", async () => {
+    const h = harness();
+    h.deps.startCall.mockResolvedValueOnce({ ok: false, error: "x", errorCode: "start_failed", reserved: true } as never);
+    let confirmed = false;
+    h.deps.getStatusByRequest.mockImplementation(async () => view("failed", { cleanupPending: !confirmed }));
+    const started = h.transport.start(target).catch((e: unknown) => e);
+    await vi.waitFor(() => expect(h.states).toContain("teardown_unconfirmed"));
+    expect(h.transport.terminalIsAuthoritative()).toBe(false);
+    await started;
+    // The failed start's later hangup must not mark it confirmed while cleanup is still open.
+    await h.transport.hangup();
+    expect(h.transport.terminalIsAuthoritative()).toBe(false);
+    confirmed = true;
+    await vi.waitFor(() => expect(h.states).toContain("teardown_confirmed"));
+    expect(h.transport.terminalIsAuthoritative()).toBe(true);
+  });
+
+  it("a start error without the reserved flag is reconciled too (safe default)", async () => {
+    const h = harness();
+    h.deps.startCall.mockResolvedValueOnce({ ok: false, error: "x", errorCode: "start_failed" } as never);
+    h.deps.getStatusByRequest.mockResolvedValue(view("failed", { cleanupPending: false }));
+    await expect(h.transport.start(target)).rejects.toThrow("x");
+    expect(h.deps.cancelByRequest).toHaveBeenCalledWith(REQUEST_ID);
   });
 
   it("retries a failing cancel with backoff, and an unconfirmed outcome warns, keeps watching, and later confirms", async () => {

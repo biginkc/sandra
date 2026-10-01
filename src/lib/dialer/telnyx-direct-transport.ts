@@ -253,6 +253,12 @@ export class TelnyxDirectCallTransport implements CallTransport {
       }
       if (!started.ok) {
         const error = directError(started);
+        // Only a proven pre-reservation refusal (`reserved === false`: not enabled, invalid request, operator
+        // busy, prepare refused and its reservation discarded) means there is nothing to clean up. Any other
+        // start error (an unknown Dial with cleanup still open, a failure after the reservation, a missing
+        // flag) goes through the same request-id reconciliation as a lost response: cancel, then wait for
+        // terminal + cleanupPending:false before the start counts as torn down.
+        if (started.reserved !== false) await this.resolveUnknownStart(clientRequestId);
         this.releaseClient();
         this.resolveIdentity?.();
         const refusal = refusalState(started.errorCode);
