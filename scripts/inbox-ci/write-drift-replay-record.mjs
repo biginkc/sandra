@@ -7,6 +7,9 @@ import { assertOnlyRunDirDirty, runPath, writeManifest } from '../../scripts/out
 
 const repo = path.resolve(import.meta.dirname, '../..');
 const env = process.env;
+const TEST_REF = 'ncsngxlcyxylaeskiteu';
+const DRIFT_FIXTURE_ROOT = 'experiments/inbox-production-install/drift';
+const J5A_CATALOG_DRIFT_SUMMARY = "TEST matched the disposable baseline except the pre-existing items listed in the committed TEST drift fixture, none of which is in any migration. They are recorded and replayed, not explained; owners unknown. Production's drift is not yet observed.";
 if (env.DRIFT_REPLAY_LOCAL_EXECUTION === '1') throw new Error('Local diagnostic cannot seal a replay record');
 const work = process.argv[2];
 const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
@@ -29,6 +32,11 @@ for (const file of files) {
 }
 const hash = file => createHash('sha256').update(readFileSync(file)).digest('hex');
 const records = Object.fromEntries(targetRefs.map(ref => [ref, JSON.parse(readFileSync(path.join(absolute, `drift-record-${ref}.json`)))]));
+const fixturePath = `${DRIFT_FIXTURE_ROOT}/${TEST_REF}.items.json`;
+const fixtureBytes = execFileSync('git', ['show', `${sha}:${fixturePath}`], { cwd: repo });
+const fixture = JSON.parse(fixtureBytes.toString('utf8'));
+if (!fixture || fixture.fixture_version !== 1 || !Array.isArray(fixture.items)) throw new Error('Malformed committed TEST drift fixture');
+if (records[TEST_REF].items.length !== fixture.items.length) throw new Error('TEST drift replay item count differs from committed fixture');
 const endStatus = assertOnlyRunDirDirty(repo, relative);
 const artifacts = Object.fromEntries(files.map(file => [file, hash(path.join(absolute, file))]));
 writeManifest(repo, relative, {
@@ -38,5 +46,5 @@ writeManifest(repo, relative, {
   runner_script_sha256: hash(path.join(repo, 'scripts/inbox-ci/drift-replay.sh')),
   workflow_path: '.github/workflows/inbox-heavy-verification.yml', workflow_input_sha: sha, github_run_id: runId, github_run_attempt: attempt,
   artifact_name: `heavy-drift-replay-${sha}-${runId}-${attempt}`, event: env.GITHUB_EVENT_NAME, head_branch: env.GITHUB_REF_NAME, lane: 'drift-replay',
-  summary: { replayed_items: Object.fromEntries(targetRefs.map(ref => [ref, records[ref].items.length])), drift_record_sha256: Object.fromEntries(targetRefs.map(ref => [ref, records[ref].sha256])), definition_sha256: Object.fromEntries(targetRefs.map(ref => [ref, records[ref].items.map(item => item.definition_sha256)])), j5a: "TEST matched the disposable baseline except eight pre-existing items not in any migration, listed here. They are recorded and replayed, not explained; owners unknown. Production's drift is not yet observed." },
+  summary: { replayed_items: Object.fromEntries(targetRefs.map(ref => [ref, records[ref].items.length])), drift_record_sha256: Object.fromEntries(targetRefs.map(ref => [ref, records[ref].sha256])), definition_sha256: Object.fromEntries(targetRefs.map(ref => [ref, records[ref].items.map(item => item.definition_sha256)])), j5a: J5A_CATALOG_DRIFT_SUMMARY, j5a_fixture_sha256: createHash('sha256').update(fixtureBytes).digest('hex'), j5a_item_count: fixture.items.length },
 });
