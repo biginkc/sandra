@@ -280,6 +280,7 @@ export type AcquisitionFormSubmitResult =
   | { ok: false; message: string; fieldErrors?: Record<string, string> }
 
 export type AcquisitionAttemptFollowUp = {
+  acquisitionsManager: string
   policyVersion: number
   introId: string
   introVersion: number

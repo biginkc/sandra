@@ -146,6 +146,7 @@ async function persistResumedResult(
     p_provider_error: state === "accepted" ? null : value ?? `Follow-up ${state}.`,
     p_metadata: {
       policyVersion: composition.policyVersion,
+      acquisitionsManager: composition.acquisitionsManager,
       introId: composition.introId,
       introVersion: composition.introVersion,
       templateId: composition.templateId,

@@ -23,6 +23,7 @@ type RepSmsHumanMetadata = {
   workflow?: unknown;
   persona?: unknown;
   assistant?: unknown;
+  acquisitionsManager?: unknown;
   actorUserId?: unknown;
   senderAssignmentId?: unknown;
 };
@@ -112,9 +113,11 @@ function readRepSmsMetadata(metadata: Json | null): RepSmsHumanMetadata | null {
 export function isMariaThroughMelRepSms(metadata: Json | null): boolean {
   const repSms = readRepSmsMetadata(metadata);
   return (
-    repSms?.workflow === REP_SMS_WORKFLOW &&
+    (repSms?.workflow === REP_SMS_WORKFLOW || repSms?.workflow === "manager-through-mel") &&
     repSms.persona === REP_SMS_PERSONA &&
-    repSms.assistant === REP_SMS_ASSISTANT &&
+    (repSms.workflow === REP_SMS_WORKFLOW
+      ? repSms.assistant === REP_SMS_ASSISTANT
+      : typeof repSms.assistant === "string" && repSms.assistant.trim().length > 0 && repSms.assistant === repSms.acquisitionsManager) &&
     typeof repSms.actorUserId === "string" &&
     repSms.actorUserId.trim().length > 0
   );
