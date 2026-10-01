@@ -22,6 +22,12 @@ export interface Config {
   publicKey: string;
   devSipEndpoints: string[];
   limits: Limits;
+  /**
+   * Where the provider-side duration bound for browser-originated legs reads back, as
+   * "connection:<dotted.path>" or "disabledProfile:<dotted.path>". Unset = no bound can be verified
+   * (the harness never assumes one), so escape probes are not run.
+   */
+  browserBoundField?: string;
 }
 
 export const E164 = /^\+[1-9]\d{6,14}$/;
@@ -88,7 +94,7 @@ export function loadConfig(env: Env = process.env): Config {
   const publicKey = env.TELNYX_PUBLIC_KEY ?? "";
   if (!publicKey) throw new Error("TELNYX_PUBLIC_KEY is not set");
   const devSipEndpoints = (env.DIRECT_CALL_DEV_SIP_ENDPOINTS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-  return { apiKey, testPhones, callerId, publicBaseUrl, publicKey, devSipEndpoints, limits: loadLimits(env) };
+  return { apiKey, testPhones, callerId, publicBaseUrl, publicKey, devSipEndpoints, limits: loadLimits(env), browserBoundField: (env.DIRECT_CALL_BROWSER_BOUND_FIELD ?? "").trim() || undefined };
 }
 
 export function maskPhone(p: string): string {

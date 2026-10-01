@@ -46,12 +46,12 @@ async function placeBridged(ctx: FlowCtx, clientState?: string) {
   const sip = ctx.inv.getRole("browserSipUsername");
   if (!sip) throw new Error("run setup first");
   const t0 = Date.now();
-  const rep = await ctx.client.dial({ to: `sip:${sip}@sip.telnyx.com`, clientState });
+  const rep = await ctx.client.dial({ to: `sip:${sip}@sip.telnyx.com`, clientState, role: "browser" });
   if (!rep.callControlId) throw new Error("no leg id returned for browser leg");
   ctx.say("Answer in the browser page now.");
   const answered = await ctx.log.waitFor(isEvt("call.answered", rep.callControlId), waitMs(ctx));
   if (!answered) return { ok: false as const, reason: "browser leg not answered", rep };
-  const seller = await ctx.client.dial({ to: phone(ctx), linkTo: rep.callControlId, bridgeOnAnswer: true, bridgeIntent: false });
+  const seller = await ctx.client.dial({ to: phone(ctx), linkTo: rep.callControlId, bridgeOnAnswer: true, bridgeIntent: false, role: "seller" });
   if (!seller.callControlId) throw new Error("no leg id returned for seller leg");
   const ringing = await ctx.log.waitFor(isEvt("call.initiated", seller.callControlId), 5000);
   const sellerAnswered = await ctx.log.waitFor(isEvt("call.answered", seller.callControlId), waitMs(ctx));
@@ -86,8 +86,13 @@ export async function f2(ctx: FlowCtx): Promise<void> {
   await ctx.ensureReady(); // read-back of cap, limit, attachments, SIP preference must pass now
   const dis = (await ctx.client.request("GET", `/outbound_voice_profiles/${ctx.inv.getRole("disabledProfileId")}`)).data;
   record(ctx, "F2-bound", { disabledProfileEnabled: dis.enabled, requiredMaxLegSecs: bound });
-  const proof = await ctx.ask(`A provider-side duration bound at or below ${bound}s must exist for browser-originated legs. Confirmed shown by read-back? (y/n; n = probes NOT run, F2 not passed) `);
-  if (!yes(proof)) { record(ctx, "F2", { result: "NOT RUN: containment bound not shown; F2 not passed" }); return; }
+  // The bound must have been read back from the provider by the readiness check (ensureReady above). It is never
+  // taken from an operator answer, and never assumed.
+  const verified = Number(ctx.inv.getRole("browserLegBoundSecs"));
+  if (!(Number.isFinite(verified) && verified > 0 && verified <= bound)) {
+    record(ctx, "F2", { result: "not executed - no verified duration bound for browser-originated legs; probes NOT run; F2 not passed" });
+    return;
+  }
   // Only now can the browser page start probes; each one reserves budget server-side, one at a time.
   ctx.probeGate.arm();
   const untested: string[] = [];
@@ -100,7 +105,7 @@ export async function f2(ctx: FlowCtx): Promise<void> {
         // Transfer needs an active owned source call: an owned test call to the allowed far end (the browser) via the guarded Dial.
         const sip = ctx.inv.getRole("browserSipUsername");
         try {
-          const src = await ctx.client.dial({ to: `sip:${sip}@sip.telnyx.com`, clientState: "f2-transfer-source" });
+          const src = await ctx.client.dial({ to: `sip:${sip}@sip.telnyx.com`, clientState: "f2-transfer-source", role: "transfer-source" });
           sourceCall = src.callControlId;
           if (sourceCall) {
             ctx.sourceLegs.push(sourceCall);
@@ -162,7 +167,7 @@ async function placeBridgedBrowserOnly(ctx: FlowCtx): Promise<string | undefined
   await ctx.ensureReady();
   const sip = ctx.inv.getRole("browserSipUsername");
   if (!sip) throw new Error("run setup first");
-  const rep = await ctx.client.dial({ to: `sip:${sip}@sip.telnyx.com`, clientState: "f3-marker" });
+  const rep = await ctx.client.dial({ to: `sip:${sip}@sip.telnyx.com`, clientState: "f3-marker", role: "browser" });
   ctx.say("Browser should log the incoming call BEFORE you press answer. Check, then answer or let it ring.");
   await ctx.log.waitFor(isEvt("call.answered", rep.callControlId ?? ""), waitMs(ctx));
   return rep.callControlId;

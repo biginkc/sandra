@@ -76,7 +76,7 @@ async function main(): Promise<void> {
     const probeGate = new ProbeGate({
       budget, log,
       protectedLegs: () => sourceLegs,
-      ringTimeoutSecs: cfg.limits.ringTimeoutSecs,
+      browserLegBoundSecs: () => { const n = Number(inv.getRole("browserLegBoundSecs")); return Number.isFinite(n) && n > 0 ? n : undefined; },
       ...legReconciler,
       targets: () => [
         { label: "owned phone (PSTN)", target: cfg.testPhones[0] },

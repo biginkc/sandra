@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import { ProbeGate } from "./probe-gate";
 import { Budget } from "./budget";
 import { EventLog } from "./event-log";
-import { assertReady, verifyAndMarkReady, READY_ROLE } from "./setup";
+import { assertReady, verifyAndMarkReady, READY_ROLE, BOUND_ROLE, readBrowserLegBound } from "./setup";
+import { f2 } from "./flows";
 import { attachStreamServer, parseFrames, streamTokenOk, OversizeError } from "./stream-server";
 import { verifyTelnyxSignature } from "./webhook-verify";
 import { cfg, inventory } from "./test-helpers";
@@ -16,7 +17,7 @@ function gate(limits?: Partial<{ maxAttempts: number }>, extra: Partial<Construc
   const clock = { t: 1_000_000 };
   const g = new ProbeGate({
     budget, log, targets: () => [{ label: "owned phone (PSTN)", target: "+15555550101" }], listAliveLegs: async () => [],
-    now: () => clock.t, sleep: async (ms) => { clock.t += ms; }, ringTimeoutSecs: 30, confirmLegEnded: async () => true, ...extra,
+    now: () => clock.t, sleep: async (ms) => { clock.t += ms; }, browserLegBoundSecs: () => 30, confirmLegEnded: async () => true, ...extra,
   });
   return { g, budget, log, clock };
 }
@@ -138,7 +139,7 @@ describe("probe gate", () => {
     });
 
     it("a never-learned leg with a wait too short for ring timeout + 15s stays locked", async () => {
-      const { g, clock } = gate(undefined, { ringTimeoutSecs: 600, confirmWaitMs: 0, now: undefined });
+      const { g, clock } = gate(undefined, { browserLegBoundSecs: () => 600, confirmWaitMs: 0, now: undefined });
       void clock;
       g.arm();
       const p = g.start("owned phone (PSTN)");
@@ -287,5 +288,67 @@ describe("webhook timestamp reasons", () => {
     expect(verifyTelnyxSignature({ ...base, timestamp: "abc" })).toEqual({ ok: false, reason: "bad-timestamp" });
     expect(verifyTelnyxSignature({ ...base, timestamp: "1e9" })).toEqual({ ok: false, reason: "bad-timestamp" });
     expect(verifyTelnyxSignature({ ...base, timestamp: "1" })).toEqual({ ok: false, reason: "expired" });
+  });
+});
+
+describe("browser-originated leg bound (F2 containment)", () => {
+  it("with no verified bound the gate is never ready, refuses start, and reserves no budget", () => {
+    const { g, budget, log } = gate(undefined, { browserLegBoundSecs: () => undefined });
+    g.arm();
+    expect(g.status().ready).toBe(false);
+    expect(() => g.start("owned phone (PSTN)")).toThrow(/no verified provider duration bound/);
+    expect(budget.attempts).toBe(0);
+    expect(log.all().some((e) => e.type === "escape.probe.refused")).toBe(true);
+  });
+
+  it("a never-learned leg is released only after the verified bound + 15s, not the Dial ring timeout", async () => {
+    const { g, clock } = gate(undefined, { browserLegBoundSecs: () => 120, confirmWaitMs: 4000 });
+    g.arm();
+    const p = g.start("owned phone (PSTN)");
+    const t0 = clock.t;
+    expect((await g.finish(p.probeId)).released).toBe(true);
+    expect(clock.t - t0).toBeGreaterThanOrEqual((120 + 15) * 1000);
+  });
+
+  it("a never-learned leg stays locked when the wait cannot cover the verified bound", async () => {
+    const { g } = gate(undefined, { browserLegBoundSecs: () => 180, confirmWaitMs: 0, now: undefined, sleep: async () => {} });
+    g.arm();
+    const p = g.start("owned phone (PSTN)");
+    expect((await g.finish(p.probeId)).released).toBe(false);
+    expect(g.status().locked).toBe(true);
+  });
+
+  it("readBrowserLegBound: nothing configured, missing, or above D2 max is not a bound", () => {
+    const res = { connection: { outbound: { max_secs: 120 } }, disabledProfile: { cap: "90" } };
+    expect(readBrowserLegBound(res, cfg())).toBeUndefined();
+    expect(readBrowserLegBound(res, cfg({ DIRECT_CALL_BROWSER_BOUND_FIELD: "connection:outbound.nope" }))).toBeUndefined();
+    expect(readBrowserLegBound({ ...res, connection: { outbound: { max_secs: 14400 } } }, cfg({ DIRECT_CALL_BROWSER_BOUND_FIELD: "connection:outbound.max_secs" }))).toBeUndefined();
+    expect(readBrowserLegBound(res, cfg({ DIRECT_CALL_BROWSER_BOUND_FIELD: "connection:outbound.max_secs" }))).toBe(120);
+    expect(readBrowserLegBound(res, cfg({ DIRECT_CALL_BROWSER_BOUND_FIELD: "disabledProfile:cap" }))).toBe(90);
+  });
+
+  it("readiness records the bound from read-back (empty when unverifiable) and refuses if it changes", async () => {
+    const config = cfg({ DIRECT_CALL_BROWSER_BOUND_FIELD: "connection:max_secs" });
+    const { inv } = readyInv(config);
+    const { client, state } = provider();
+    await verifyAndMarkReady(client, inv, config);
+    expect(inv.getRole(BOUND_ROLE)).toBe("");
+    state.conn.max_secs = 120;
+    await expect(assertReady(client, inv, config)).rejects.toThrow(/changed/);
+    await verifyAndMarkReady(client, inv, config);
+    expect(inv.getRole(BOUND_ROLE)).toBe("120");
+  });
+
+  it("F2 records 'not executed - no verified duration bound', never arms the gate, never asks the operator", async () => {
+    const config = cfg();
+    const { inv } = readyInv(config);
+    const { client } = provider();
+    const { g, log } = gate(undefined, { browserLegBoundSecs: () => undefined });
+    const said: string[] = [];
+    const ask = vi.fn(async () => "y");
+    await f2({ client, inv, cfg: config, log, stats: {} as any, streamToken: "t", probeGate: g, sourceLegs: [], ensureReady: async () => {}, ask, say: (s) => said.push(s) });
+    expect(said.join("\n")).toMatch(/not executed - no verified duration bound/);
+    expect(ask).not.toHaveBeenCalled();
+    expect(g.status().ready).toBe(false);
   });
 });

@@ -19,7 +19,23 @@ export interface Entry {
   deletedAt?: string;
 }
 
+export interface UnresolvedDial {
+  /** Operation id (also the Dial command_id). */
+  opId: string;
+  /** client_state exactly as sent to the provider (base64). */
+  clientState: string;
+  role: string;
+  /** Epoch ms when the Dial was about to be sent. */
+  at: number;
+  ringTimeoutSecs: number;
+  timeLimitSecs: number;
+  resolvedAt?: string;
+  resolvedBy?: string;
+}
+
 type Op =
+  | { op: "unresolved"; dial: UnresolvedDial }
+  | { op: "resolved"; opId: string; by: string; at: string }
   | { op: "add"; type: ResourceType; id: string; at: string }
   | { op: "deleted"; id: string; at: string }
   | { op: "role"; key: string; value: string }
@@ -31,6 +47,7 @@ export class Inventory {
   private roles = new Map<string, string>();
   private sip = new Set<string>();
   private callRefs = new Set<string>();
+  private dials = new Map<string, UnresolvedDial>();
   private file?: string;
 
   constructor(private dir?: string) {
@@ -46,7 +63,11 @@ export class Inventory {
   }
 
   private apply(o: Op): void {
-    if (o.op === "add") this.entries.set(o.id, { type: o.type, id: o.id, createdAt: o.at });
+    if (o.op === "unresolved") this.dials.set(o.dial.opId, { ...o.dial });
+    else if (o.op === "resolved") {
+      const d = this.dials.get(o.opId);
+      if (d) { d.resolvedAt = o.at; d.resolvedBy = o.by; }
+    } else if (o.op === "add") this.entries.set(o.id, { type: o.type, id: o.id, createdAt: o.at });
     else if (o.op === "deleted") {
       const e = this.entries.get(o.id);
       if (e) e.deletedAt = o.at;
@@ -64,6 +85,20 @@ export class Inventory {
     if (!id) throw new Error("inventory: empty id");
     if (this.entries.has(id)) return;
     this.write({ op: "add", type, id, at: new Date().toISOString() });
+  }
+
+  /** Written BEFORE every Dial is sent. Stays until a response, a revealed leg, or a bounded-time rule resolves it. */
+  addUnresolvedDial(d: UnresolvedDial): void {
+    if (!d.opId) throw new Error("inventory: empty opId");
+    if (this.dials.has(d.opId)) return;
+    this.write({ op: "unresolved", dial: d });
+  }
+  resolveDial(opId: string, by: string): void {
+    const d = this.dials.get(opId);
+    if (d && !d.resolvedAt) this.write({ op: "resolved", opId, by, at: new Date().toISOString() });
+  }
+  unresolvedDials(): UnresolvedDial[] {
+    return [...this.dials.values()].filter((d) => !d.resolvedAt);
   }
 
   markDeleted(id: string): void {

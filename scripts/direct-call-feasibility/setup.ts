@@ -1,4 +1,5 @@
  
+/* eslint-disable @typescript-eslint/no-explicit-any */
 // Creates the plan's isolated test resources and reads back the safety settings.
 import { randomBytes } from "node:crypto";
 import type { Config } from "./env";
@@ -114,11 +115,33 @@ export async function verifyReadBack(client: TelnyxClient, inv: Inventory, cfg: 
   if (conn.sip_uri_calling_preference !== "internal") problems.push("connection sip_uri_calling_preference is not internal");
   if (app.outbound?.outbound_voice_profile_id !== need("cappedProfileId")) problems.push("app is not on the capped profile");
   if (problems.length) throw new SetupError(`read-back mismatch, nothing will be dialed: ${problems.join("; ")}`);
+  const bound = readBrowserLegBound({ connection: conn, disabledProfile: dis }, cfg);
+  inv.setRole(BOUND_ROLE, bound === undefined ? "" : String(bound));
   // Stable fingerprint of exactly the safety-relevant settings that were verified.
   return JSON.stringify({
     disabled: [need("disabledProfileId"), dis.enabled],
     capped: [need("cappedProfileId"), cap.enabled, Number(cap.daily_spend_limit), cap.daily_spend_limit_enabled, Number(cap.concurrent_call_limit)],
     connection: [need("connectionId"), conn.outbound?.outbound_voice_profile_id, conn.sip_uri_calling_preference],
     app: [need("appId"), app.outbound?.outbound_voice_profile_id],
+    browserLegBoundSecs: bound ?? null,
   });
+}
+
+export const BOUND_ROLE = "browserLegBoundSecs";
+
+/**
+ * A provider-enforced duration bound for browser-originated legs, read back from the configured field on the
+ * test connection or disabled profile. Returns it only if numeric, positive and <= D2's maximum leg duration.
+ * Nothing is assumed: no configured field, a missing value, or an out-of-range value means "no verified bound".
+ */
+export function readBrowserLegBound(resources: { connection: any; disabledProfile: any }, cfg: Config): number | undefined {
+  const spec = cfg.browserBoundField;
+  if (!spec) return undefined;
+  const [src, ...rest] = spec.split(":");
+  const root = src === "connection" ? resources.connection : src === "disabledProfile" ? resources.disabledProfile : undefined;
+  if (!root || rest.length === 0) return undefined;
+  let v: any = root;
+  for (const k of rest.join(":").split(".")) v = v?.[k];
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+  return Number.isFinite(n) && n > 0 && n <= cfg.limits.maxLegSecs ? n : undefined;
 }

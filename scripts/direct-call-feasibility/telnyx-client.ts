@@ -195,7 +195,7 @@ export class TelnyxClient {
    * comes from a durable operation UUID; the same operation is never sent twice by
    * this process (an uncertain outcome is reconciled by lookup, not re-sent).
    */
-  async dial(params: { opId?: string; to: string; linkTo?: string; bridgeOnAnswer?: boolean; bridgeIntent?: boolean; clientState?: string }) {
+  async dial(params: { opId?: string; to: string; linkTo?: string; bridgeOnAnswer?: boolean; bridgeIntent?: boolean; clientState?: string; role?: string }) {
     const { config, inventory, budget } = this.opts;
     const opId = params.opId ?? randomUUID();
     if (this.sentOps.has(opId)) throw new GuardError("operation already sent; reconcile by lookup instead of re-dialing");
@@ -212,17 +212,36 @@ export class TelnyxClient {
       body.bridge_on_answer = params.bridgeOnAnswer ?? true;
       body.bridge_intent = params.bridgeIntent ?? false;
     }
-    if (params.clientState) body.client_state = Buffer.from(params.clientState).toString("base64");
+    // Every Dial carries a client_state so an unresolved Dial can later be matched to its leg.
+    const clientState = Buffer.from(params.clientState ?? `dcf-${opId}`).toString("base64");
+    body.client_state = clientState;
     assertAllowed("POST", "/calls", body, inventory, config); // validate before spending budget
     budget?.reserveAttempt();
     this.sentOps.add(opId);
-    const r = await this.request<any>("POST", "/calls", body);
+    // Persist the obligation BEFORE the request: a lost response must leave a record teardown cannot ignore.
+    const record = !this.opts.dryRun;
+    if (record) {
+      inventory.addUnresolvedDial({
+        opId, clientState, role: params.role ?? (params.linkTo ? "seller" : "browser"),
+        at: Date.now(), ringTimeoutSecs: config.limits.ringTimeoutSecs, timeLimitSecs: config.limits.maxLegSecs,
+      });
+    }
+    let r: any;
+    try {
+      r = await this.request<any>("POST", "/calls", body);
+    } catch (e) {
+      // A definite provider rejection (4xx other than 408) created no call. Anything else (network, 5xx, 408) stays unresolved.
+      const st = (e as TelnyxError).status;
+      if (record && typeof st === "number" && st >= 400 && st < 500 && st !== 408) inventory.resolveDial(opId, `rejected_${st}`);
+      throw e;
+    }
     const id: string | undefined = r?.data?.call_control_id;
     if (id) inventory.add("call_leg", id);
     // Remember every identifier of this call so teardown can prove recording ownership.
     inventory.addCallRef(id);
     inventory.addCallRef(r?.data?.call_leg_id);
     inventory.addCallRef(r?.data?.call_session_id);
+    if (record && id) inventory.resolveDial(opId, "response");
     return { opId, callControlId: id, callSessionId: r?.data?.call_session_id as string | undefined, raw: r };
   }
 }

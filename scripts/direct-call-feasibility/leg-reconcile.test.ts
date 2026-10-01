@@ -95,7 +95,7 @@ describe("leg reconciler", () => {
     const t = setup((m, p) => (p.startsWith("/connections/conn1/active_calls") ? { data: [{ call_control_id: "foreign", connection_id: "other" }] } : { data: [] }));
     const r = makeLegReconciler(t.client, t.inv);
     const log = new EventLog();
-    const g = new ProbeGate({ budget: new Budget(t.config.limits), log, targets: () => [{ label: "owned phone (PSTN)", target: "+15555550101" }], ...r, sleep: async () => {}, confirmWaitMs: 4000, pollMs: 2000 });
+    const g = new ProbeGate({ budget: new Budget(t.config.limits), log, targets: () => [{ label: "owned phone (PSTN)", target: "+15555550101" }], ...r, browserLegBoundSecs: () => 30, sleep: async () => {}, confirmWaitMs: 4000, pollMs: 2000 });
     g.arm();
     const { probeId } = g.start("owned phone (PSTN)");
     expect((await g.finish(probeId)).released).toBe(false);

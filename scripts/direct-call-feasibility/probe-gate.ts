@@ -22,8 +22,12 @@ export interface ProbeGateDeps {
   protectedLegs?: () => string[];
   /** Per-leg end confirmation: hangup webhook, hangup 422/90018, or GET is_alive:false. Absent = nothing can be confirmed. */
   confirmLegEnded?: (id: string) => Promise<boolean>;
-  /** Ring timeout of the probe's Dial (seconds). Unknown legs are given this + 15s to appear. Default 600 (provider max). */
-  ringTimeoutSecs?: number;
+  /**
+   * Verified provider-enforced duration bound for browser-originated legs (seconds, <= D2 max leg duration), as
+   * recorded by the readiness read-back. Absent = nothing is verified: probes are disabled and never started.
+   * A never-learned probe leg is only given this bound + 15s to be gone. Nothing else bounds a browser-originated leg.
+   */
+  browserLegBoundSecs?: () => number | undefined;
   now?: () => number;
   /** Bounded wait for confirmation that no probe leg is alive. */
   confirmWaitMs?: number;
@@ -50,8 +54,13 @@ export class ProbeGate {
     this.armedRun = undefined;
   }
 
+  private bound(): number | undefined {
+    const b = this.deps.browserLegBoundSecs?.();
+    return typeof b === "number" && Number.isFinite(b) && b > 0 ? b : undefined;
+  }
+
   status(): { ready: boolean; busy: boolean; locked: boolean } {
-    return { ready: this.armedRun === this.runId && !this.cleanupUncertain, busy: this.outstanding !== undefined, locked: this.cleanupUncertain };
+    return { ready: this.armedRun === this.runId && !this.cleanupUncertain && this.bound() !== undefined, busy: this.outstanding !== undefined, locked: this.cleanupUncertain };
   }
 
   /** Labels only; targets are released per probe by start(). */
@@ -67,6 +76,7 @@ export class ProbeGate {
     };
     if (this.cleanupUncertain) refuse("probe cleanup uncertain; no further probes this run");
     if (this.armedRun !== this.runId) refuse("containment not confirmed for this run");
+    if (this.bound() === undefined) refuse("not executed: no verified provider duration bound for browser-originated legs");
     if (this.outstanding) refuse("another probe is still outstanding");
     const targets = this.deps.targets();
     const hit = label === "transfer" ? targets[0] : targets.find((t) => t.label === label);
@@ -98,10 +108,12 @@ export class ProbeGate {
     const now = this.deps.now ?? Date.now;
     const pollMs = this.deps.pollMs ?? 2000;
     const start = this.startedAt.get(probeId) ?? { at: now(), logIdx: 0 };
-    // A ringing leg may not appear in active_calls. A probe whose leg id is never learned is only
-    // considered gone after its ring timeout + 15s, plus two empty listings after that point.
-    const unknownLegMs = ((this.deps.ringTimeoutSecs ?? 600) + 15) * 1000;
-    const budgetMs = (this.deps.confirmWaitMs ?? 30000) + unknownLegMs;
+    // A ringing leg may not appear in active_calls, and a browser-originated leg carries no Dial timeout of ours.
+    // A probe whose leg id is never learned is only considered gone after the verified provider duration bound
+    // + 15s, plus two empty listings after that point. No verified bound: it can never be released this way.
+    const bound = this.bound();
+    const unknownLegMs = bound === undefined ? Number.POSITIVE_INFINITY : (bound + 15) * 1000;
+    const budgetMs = (this.deps.confirmWaitMs ?? 30000) + (Number.isFinite(unknownLegMs) ? unknownLegMs : 0);
     const known = new Set<string>();
     const confirmed = new Set<string>();
     let waited = 0;
@@ -137,10 +149,10 @@ export class ProbeGate {
           if (clean >= 2 && unconfirmed.length === 0 && gateOk) {
             this.outstanding = undefined;
             this.startedAt.delete(probeId);
-            this.deps.log.append({ source: "harness", type: "escape.probe.finish", data: { probeId, outcome, confirmed: known.size ? "every probe leg confirmed ended" : "no leg ever learned; ring timeout + 15s elapsed with two empty listings" } });
+            this.deps.log.append({ source: "harness", type: "escape.probe.finish", data: { probeId, outcome, confirmed: known.size ? "every probe leg confirmed ended" : "no leg ever learned; verified provider bound + 15s elapsed with two empty listings" } });
             return { released: true };
           }
-          pendingWhy = unconfirmed.length ? `legs not confirmed ended: ${unconfirmed.join(",")}` : clean < 2 ? "probe leg still alive after bounded wait" : "no probe leg id learned and ring timeout + 15s has not elapsed with two empty listings";
+          pendingWhy = unconfirmed.length ? `legs not confirmed ended: ${unconfirmed.join(",")}` : clean < 2 ? "probe leg still alive after bounded wait" : "no probe leg id learned and verified provider bound + 15s has not elapsed with two empty listings";
         } catch (e) {
           clean = 0;
           cleanAfterGate = 0;
