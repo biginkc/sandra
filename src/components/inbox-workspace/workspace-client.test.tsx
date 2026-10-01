@@ -75,7 +75,7 @@ it("keeps selected identities across a view change and permits removing hidden s
   await loaded();
   fireEvent.click(screen.getByRole("checkbox", { name: "Select Ada" }));
   fireEvent.change(screen.getByRole("combobox"), { target: { value: "unread" } });
-  await waitFor(() => expect(state.replacements).toHaveLength(2));
+  await waitFor(() => expect(state.replacements).toHaveLength(2), { timeout: 2000 });
   act(() => state.callbacks!.onChange({ state: "live", rows: [] }));
   expect(screen.getByText(/1 selected · 1 not loaded here/)).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
@@ -90,7 +90,7 @@ it("clears selection and visible history on a canonical access denial", async ()
   await screen.findByText("Hello from history");
   state.deny = true;
   fireEvent.click(screen.getByRole("button", { name: "Refresh view" }));
-  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Your access has changed"));
+  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Your access has changed"), { timeout: 2000 });
   expect(screen.queryByText("Hello from history")).not.toBeInTheDocument();
   expect(screen.queryByRole("checkbox", { name: "Select Ada" })).not.toBeInTheDocument();
 });
@@ -144,7 +144,7 @@ it("prunes selection (not just visibility) on item-scoped invalidation, so it ne
   // A later load() clears invalidatedIds; Ada's pruned selection must not resurrect.
   state.detailUnavailable = false;
   fireEvent.click(screen.getByRole("button", { name: "Refresh view" }));
-  await waitFor(() => expect(state.replacements).toHaveLength(2));
+  await waitFor(() => expect(state.replacements).toHaveLength(2), { timeout: 2000 });
   act(() => state.callbacks!.onChange({ state: "live", rows: [row, row2] }));
   expect(screen.getByRole("checkbox", { name: "Select Ada" })).not.toBeChecked();
   expect(screen.getByRole("checkbox", { name: "Select Bea" })).toBeChecked();
@@ -159,7 +159,7 @@ it("removes an authoritative tombstone from selection, detail and its revisit ca
   expect(screen.queryByRole("checkbox", { name: "Select Ada" })).not.toBeInTheDocument();
   expect(screen.getByText("0 selected")).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Refresh view" }));
-  await waitFor(() => expect(state.replacements).toHaveLength(2));
+  await waitFor(() => expect(state.replacements).toHaveLength(2), { timeout: 2000 });
   act(() => state.callbacks!.onChange({ state: "live", rows: [row] }));
   fireEvent.click(screen.getByRole("button", { name: "Open Ada" }));
   await screen.findByText("Hello from history");

@@ -25,8 +25,8 @@ ROOT = Path(__file__).resolve().parents[2]
 LOCAL_ENV = ROOT / "experiments/inbox-reply-send/local-env.py"
 MIGRATION = ROOT / "supabase/migrations/20260930040260_inbox_drip_markers.sql"
 GOLDEN = ROOT / "experiments/inbox-drip-markers/golden-fixture.json"
-LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-mutation-run-r3.log")
-EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-evidence-r3.md")
+LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-mutation-run-r4.log")
+EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-evidence-r4.md")
 STATE = Path("/tmp/sandra-reply-persist-local-env.json")
 PSQL = "/opt/homebrew/bin/psql"
 
@@ -169,6 +169,22 @@ FOCUSED_VITEST_MUTATIONS = [
         "test_name": "uses only the drip counts RPC for drip views",
     },
     {
+        "name": "non-drip-counts-nine-key-contract",
+        "path": ROOT / "src/lib/inbox/filter-contract.ts",
+        "needle": 'export const inboxCountNames = ["all", "mine", "unassigned", "unread", "escalated", "dispo", "needs_outcome", "unknown", "dismissed"] as const;',
+        "replacement": 'export const inboxCountNames = ["all", "mine", "unassigned", "unread", "escalated", "dispo", "needs_outcome", "missing", "dismissed"] as const;',
+        "test_file": "src/app/api/inbox/counts/route.test.ts",
+        "test_name": "parses the real nine-key non-drip counts response",
+    },
+    {
+        "name": "detail-route-maintained-property",
+        "path": ROOT / "src/app/api/inbox/conversations/[conversationId]/detail/route.ts",
+        "needle": "marker?.propertyId",
+        "replacement": "data.propertyId",
+        "test_file": "src/app/api/inbox/conversations/[conversationId]/detail/route.test.ts",
+        "test_name": "reads detail for an allowed member",
+    },
+    {
         "name": "stale-response-fencing",
         "path": ROOT / "src/components/inbox-workspace/workspace-client.tsx",
         "needle": "token !== markerGeneration.current",
@@ -183,7 +199,7 @@ FOCUSED_VITEST_MUTATIONS = [
         "needle": "onCompleted: () => { void refreshAfterAction(); }",
         "replacement": "onCompleted: () => {}",
         "test_file": "src/components/inbox-workspace/workspace-client.drip-markers.test.tsx",
-        "test_name": "refreshes markers and the open detail after a completed workspace action",
+        "test_name": "T2 uses the same re-walk after a workspace reply/disposition and rereads the open detail",
         "config": "vitest.rtl.config.ts",
     },
     {
@@ -193,6 +209,51 @@ FOCUSED_VITEST_MUTATIONS = [
         "replacement": "const maintainedPropertyId = [...messages].reverse().find((message) => message.property_id !== null)?.property_id ?? null;\n  const dripContext = await loadMessageDripContext(supabase, conversationOrgId, maintainedPropertyId, messages);",
         "test_file": "src/app/(dashboard)/messages/inbox-detail-data.test.ts",
         "test_name": "pins the legacy Messages header to the review-first property choice",
+    },
+    {
+        "name": "M1-reuse-revoked-cursor",
+        "path": ROOT / "src/components/inbox-workspace/workspace-client.tsx",
+        "needle": "let cursor: string | null = null;",
+        "replacement": "let cursor: string | null = scope.current?.nextCursor ?? null;",
+        "test_file": "src/components/inbox-workspace/workspace-client.drip-markers.test.tsx",
+        "test_name": "T1 re-derives the displayed page with fresh cursors and keeps page two visible",
+        "config": "vitest.rtl.config.ts",
+    },
+    {
+        "name": "M2-publish-stale-generation",
+        "path": ROOT / "src/components/inbox-workspace/workspace-client.tsx",
+        "needle": "const currentWalk = () => generation === walkGeneration.current;",
+        "replacement": "const currentWalk = () => true;",
+        "test_file": "src/components/inbox-workspace/workspace-client.drip-markers.test.tsx",
+        "test_name": "T5 fences a stale walk generation when the displayed page changes mid-walk",
+        "config": "vitest.rtl.config.ts",
+    },
+    {
+        "name": "M3-remove-rate-retry",
+        "path": ROOT / "src/components/inbox-workspace/workspace-client.tsx",
+        "needle": "if (statusOf(failure) !== 429 || attempt === WORKSET_RETRY_LIMIT - 1) throw failure;",
+        "replacement": "if (true) throw failure;",
+        "test_file": "src/components/inbox-workspace/workspace-client.drip-markers.test.tsx",
+        "test_name": "T3 paces workset creation and retries a 429 with identical inputs",
+        "config": "vitest.rtl.config.ts",
+    },
+    {
+        "name": "M4-always-restart-at-page-one",
+        "path": ROOT / "src/components/inbox-workspace/workspace-client.tsx",
+        "needle": "cursor = value.nextCursor;",
+        "replacement": "cursor = null;",
+        "test_file": "src/components/inbox-workspace/workspace-client.drip-markers.test.tsx",
+        "test_name": "T1 re-derives the displayed page with fresh cursors and keeps page two visible",
+        "config": "vitest.rtl.config.ts",
+    },
+    {
+        "name": "M5-stale-live-scope-anchor",
+        "path": ROOT / "src/components/inbox-workspace/workspace-client.tsx",
+        "needle": "liveScopeId.current = value.scopeId; // walk step anchor",
+        "replacement": "// live scope intentionally not advanced",
+        "test_file": "src/components/inbox-workspace/workspace-client.drip-markers.test.tsx",
+        "test_name": "T6 surfaces a partial-walk error and recovers from the step-one live scope",
+        "config": "vitest.rtl.config.ts",
     },
 ]
 
@@ -241,9 +302,10 @@ def state() -> dict[str, Any]:
 def psql(statement: str, *, role: str | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
     s = state()
     prefix = ""
-    if role == "authenticated":
+    if role in {"authenticated", "authenticated_bypass_rls"}:
         claims = json.dumps({"sub": USER, "role": "authenticated", "session_id": SESSION, "exp": 4102444800}, separators=(",", ":"))
-        prefix = f"SET ROLE authenticated; SET request.jwt.claim.sub='{USER}'; SET request.jwt.claim.role='authenticated'; SET request.jwt.claims='{claims}';\n"
+        set_role = "SET ROLE authenticated; " if role == "authenticated" else ""
+        prefix = f"{set_role}SET request.jwt.claim.sub='{USER}'; SET request.jwt.claim.role='authenticated'; SET request.jwt.claims='{claims}';\n"
     return run([
         PSQL, "-XqAt", "-v", "ON_ERROR_STOP=1", "-h", str(s["socket"]), "-p", str(s["port"]),
         "-U", "postgres", "-d", "postgres",
@@ -253,9 +315,10 @@ def psql(statement: str, *, role: str | None = None, check: bool = True) -> subp
 def psql_process(statement: str, *, role: str | None = None) -> subprocess.Popen[str]:
     s = state()
     prefix = ""
-    if role == "authenticated":
+    if role in {"authenticated", "authenticated_bypass_rls"}:
         claims = json.dumps({"sub": USER, "role": "authenticated", "session_id": SESSION, "exp": 4102444800}, separators=(",", ":"))
-        prefix = f"SET ROLE authenticated; SET request.jwt.claim.sub='{USER}'; SET request.jwt.claim.role='authenticated'; SET request.jwt.claims='{claims}';\n"
+        set_role = "SET ROLE authenticated; " if role == "authenticated" else ""
+        prefix = f"{set_role}SET request.jwt.claim.sub='{USER}'; SET request.jwt.claim.role='authenticated'; SET request.jwt.claims='{claims}';\n"
     process = subprocess.Popen([
         PSQL, "-XqAt", "-v", "ON_ERROR_STOP=1", "-h", str(s["socket"]), "-p", str(s["port"]),
         "-U", "postgres", "-d", "postgres",
@@ -462,8 +525,8 @@ def test_golden_marker_and_oracle() -> None:
         page_ids = json_query(f"SELECT coalesce(jsonb_agg(target_id ORDER BY latest_at DESC NULLS LAST,target_kind,target_id),'[]'::jsonb) FROM inbox_bridge.page('{ORG}'::uuid,NULL,'{{\"view\":\"{view}\",\"hide_noise\":false,\"search\":null}}'::jsonb,NULL,NULL,NULL,false,500);")
         if set(page_ids) != expected_ids:
             raise AssertionError(f"new {view} membership mismatch: {set(page_ids)}")
-    searched = json_query(f"SELECT public.inbox_drip_counts_v1('{ORG}'::uuid,'{{\"view\":\"in_drip\",\"hide_noise\":false,\"search\":\"drip\"}}'::jsonb);", role="authenticated")
-    if searched["counts"]["in_drip"] != 4:
+    searched = json_query(f"SELECT public.inbox_drip_counts_v1('{ORG}'::uuid,'{{\"view\":\"in_drip\",\"hide_noise\":false,\"search\":\"Active\"}}'::jsonb);", role="authenticated")
+    if searched["counts"]["in_drip"] != 1:
         raise AssertionError(f"search changed drip membership: {searched}")
     psql("UPDATE inbox_bridge.filter_rows SET is_noise=true WHERE org_id='" + ORG + "' AND target_id='80000000-0000-4000-8000-000000000001';")
     hidden = json_query(f"SELECT public.inbox_drip_counts_v1('{ORG}'::uuid,'{{\"view\":\"all\",\"hide_noise\":true}}'::jsonb);", role="authenticated")
@@ -496,6 +559,29 @@ def test_filter_counts_page_and_review() -> None:
     statuses = {item["id"]: item["status"] for item in review["items"]}
     if statuses != {"80000000-0000-4000-8000-000000000001": "matching", "80000000-0000-4000-8000-000000000004": "outside_filter"}:
         raise AssertionError(f"review selection admitted non-match: {statuses}")
+
+
+def test_loader_rpc_visibility_parity() -> None:
+    foreign_message = "70000000-0000-4000-8000-000000000098"
+    conversation = "80000000-0000-4000-8000-000000000002"
+    psql(f"""
+INSERT INTO public.messages(id,org_id,created_at,channel,direction,property_id,contact_id,conversation_id,from_address,to_address,body,status,metadata,campaign_id)
+VALUES ('{foreign_message}','{OTHER_ORG}','2026-09-02 11:00+00','sms','inbound','40000000-0000-4000-8000-000000000099',NULL,'{conversation}','+15550000001','+15550000099','Foreign visibility probe','received','{{}}',NULL)
+ON CONFLICT(id) DO NOTHING;
+""")
+    try:
+        requested = ["70000000-0000-4000-8000-000000000002", "70000000-0000-4000-8000-000000000003", "70000000-0000-4000-8000-000000000012", foreign_message]
+        literal = ",".join(f"'{value}'::uuid" for value in requested)
+        # Bypass table RLS in this disposable fixture while retaining the real JWT
+        # claims, so this parity check exercises the function's explicit tenant
+        # qualification rather than being vacuously protected by RLS.
+        loader_visible = set(json.loads(query(f"SELECT coalesce(jsonb_agg(id ORDER BY id),'[]'::jsonb) FROM public.messages WHERE org_id='{ORG}'::uuid AND conversation_id='{conversation}'::uuid AND channel='sms' AND id = ANY(ARRAY[{literal}]);", role="authenticated_bypass_rls")))
+        rpc = json_query(f"SELECT public.inbox_drip_label_inputs_v1('{ORG}'::uuid,'{conversation}'::uuid,ARRAY[{literal}]);", role="authenticated_bypass_rls")
+        rpc_visible = {row["id"] for row in rpc["messages"] if row["is_page"]}
+        if loader_visible != rpc_visible or foreign_message in rpc_visible:
+            raise AssertionError(f"loader/RPC visibility diverged: loader={loader_visible} rpc={rpc_visible}")
+    finally:
+        psql(f"DELETE FROM public.messages WHERE id='{foreign_message}';")
 
 
 def test_fixture_case_matrix() -> None:
@@ -599,9 +685,17 @@ VALUES ('{run_id}','62000000-0000-4000-8000-000000000002','61000000-0000-4000-80
 
 
 def test_authorization_and_grants() -> None:
+    # The collision is deliberately present in both tenant rows; a tenant-less
+    # join must therefore return two rows and fail this assertion directly.
+    psql(f"""
+INSERT INTO inbox_maintained.rows(org_id,target_kind,target_id,revision,source_generation,summary)
+VALUES ('{OTHER_ORG}'::uuid,'known_conversation','80000000-0000-4000-8000-000000000001'::uuid,1,1,
+ jsonb_build_object('target_kind','known_conversation','target_id','80000000-0000-4000-8000-000000000001','exists',true,'property_id','40000000-0000-4000-8000-000000000099'))
+ON CONFLICT(org_id,target_kind,target_id) DO NOTHING;
+""")
     expect_error(f"SELECT public.inbox_drip_markers_v1('{OTHER_ORG}'::uuid,ARRAY['80000000-0000-4000-8000-000000000001'::uuid]);", "INBOX_ORG_DENIED")
     foreign = json_query(f"SELECT public.inbox_drip_markers_v1('{ORG}'::uuid,ARRAY['80000000-0000-4000-8000-000000000001'::uuid]);", role="authenticated")
-    if foreign["rows"][0]["property_id"] != golden["markerRows"]["80000000-0000-4000-8000-000000000001"]["property_id"]:
+    if len(foreign["rows"]) != 1 or foreign["rows"][0]["property_id"] != golden["markerRows"]["80000000-0000-4000-8000-000000000001"]["property_id"]:
         raise AssertionError("same conversation id leaked across organizations")
     labels = json_query(f"SELECT public.inbox_drip_label_inputs_v1('{ORG}'::uuid,'80000000-0000-4000-8000-000000000002'::uuid,ARRAY['70000000-0000-4000-8000-000000000003'::uuid,'70000000-0000-4000-8000-000000000099'::uuid]);", role="authenticated")
     if {row["id"] for row in labels["messages"] if row["is_page"]} != {"70000000-0000-4000-8000-000000000003"}:
@@ -722,6 +816,7 @@ UPDATE inbox_bridge.filter_rows SET latest_at='2026-09-04 12:00+00' WHERE target
 TESTS: list[tuple[str, Callable[[], None]]] = [
     ("golden fixture + legacy 035000 oracle parity", test_golden_marker_and_oracle),
     ("filters, counts, page and review_selection", test_filter_counts_page_and_review),
+    ("loader and label-RPC visibility parity", test_loader_rpc_visibility_parity),
     ("fixture matrix: sibling property, review-property divergence and pause reasons", test_fixture_case_matrix),
     ("label facts, nearest lookbehind, skipped AI and concatenation", test_labels_and_long_skip),
     ("clearing events, failed sends and campaign exemption", test_clearing_events_and_campaign_exemption),
@@ -745,7 +840,7 @@ def run_suite(label: str) -> list[str]:
             failures.append(name)
             emit(f"TEST_FAIL|{label}|{name}|{error}")
         evidence.append({"run": label, "test": name, "Executed": executed, "result": result})
-    if len(TESTS) != 9:
+    if len(TESTS) != 10:
         raise RuntimeError("unexpected NOT RUN: test inventory changed")
     return failures
 
@@ -758,6 +853,9 @@ MUTATIONS = [
     ("marker-access-epoch-fence", ") INTO result;\n after_access:=inbox_bridge.authorize_serving($1);\n IF (after_access->>'user_id',after_access->>'session_id',after_access->>'org_id',after_access->>'access_epoch') IS DISTINCT FROM\n", ") INTO result;\n after_access:=a;\n IF (after_access->>'user_id',after_access->>'session_id',after_access->>'org_id',after_access->>'access_epoch') IS DISTINCT FROM\n"),
     ("label-raw-facts", "     'previous_drip_step',CASE WHEN is_page THEN previous_drip_step END\n", "     'previous_drip_step',NULL\n"),
     ("label-input-cap", " IF $1 IS NULL OR $2 IS NULL OR $3 IS NULL OR cardinality($3)>50 OR\n", " IF $1 IS NULL OR $2 IS NULL OR $3 IS NULL OR cardinality($3)>500 OR\n"),
+    ("counts-search-filter", "m.fts @@ public.search_prefix_tsquery(f->>'search')", "TRUE"),
+    ("counts-noise-filter", "AND (NOT (f->>'hide_noise')::boolean OR NOT is_noise) AND in_drip", "AND TRUE AND in_drip"),
+    ("label-input-org-qualification", "JOIN requested r ON r.id=m.id\n   WHERE m.org_id=$1 AND m.conversation_id=$2 AND m.channel='sms'", "JOIN requested r ON r.id=m.id\n   WHERE TRUE AND m.conversation_id=$2 AND m.channel='sms'"),
 ]
 
 
@@ -773,7 +871,7 @@ def main() -> int:
         verify_frozen_hashes()
         verify_marker_function_diffs()
         run_focused_vitest_mutations()
-        if len(MUTATIONS) != 7:
+        if len(MUTATIONS) != 10:
             raise RuntimeError("unexpected NOT RUN: mutation inventory changed")
         baseline_failures = run_one("baseline")
         if baseline_failures:

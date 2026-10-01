@@ -15,7 +15,9 @@ import type { InboxDripCounts, InboxDripMarker } from "@/lib/inbox/drip-markers"
 
 const labels: Record<InboxFilter["view"], string> = { active: "All", all: "All", mine: "Assigned to me", unassigned: "Unassigned", unread: "Unread", escalated: "Needs review", dispo: "Has outcome", needs_outcome: "Needs outcome", in_drip: "In a drip", drip_replied: "Replied to drip", unknown: "Unknown senders", dismissed: "Dismissed" };
 const isDripView = (view: InboxFilter["view"]) => view === "in_drip" || view === "drip_replied";
-type Scope = WorkspaceScope & { nextCursor: string | null; refreshed: boolean; sourceCursor: string | null };
+const WORKSET_MIN_INTERVAL_MS = 1100;
+const WORKSET_RETRY_LIMIT = 5;
+type Scope = WorkspaceScope & { nextCursor: string | null; refreshed: boolean };
 type WorkspaceCounts = InboxCounts | InboxDripCounts;
 type Open = { id: WorkspaceId; generation: number; row?: WorkspaceRow; data?: InboxDetailSnapshot; error?: string };
 function replyTargetFromWorkspaceId(value: WorkspaceId, orgId: string): InboxReplyTarget {
@@ -50,7 +52,12 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   const markerGeneration = useRef(0);
   const markerRequest = useRef<AbortController | null>(null);
   const reconciliationRequest = useRef<AbortController | null>(null);
-  const reconciliationInFlight = useRef(false);
+  const reconciliationPromise = useRef<Promise<void> | null>(null);
+  const reconciliationAgain = useRef(false);
+  const walkGeneration = useRef(0);
+  const pagesShown = useRef(1);
+  const liveScopeId = useRef<string | null>(null);
+  const lastWorksetAt = useRef(0);
   const filterRef = useRef(initialFilter);
   const busyRef = useRef(true);
   const scope = useRef<Scope | null>(null);
@@ -96,14 +103,18 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     invalidateTarget({ kind: "unknown_sender_group", orgId: identity.orgId, senderGroupId }), [invalidateTarget, identity.orgId]);
   const metadata = useInboxMetadataActions({ enabled: actionsEnabled, selectionCount: selected.length, identity, orgId: identity.orgId, names: selectionNames, cache, onAccessLost: accessLost, onCompleted: () => { void refreshAfterAction(); } });
   useEffect(() => { clearActions.current = metadata.clear; }, [metadata.clear]);
-  async function json<T>(url: string, init: RequestInit, signal: AbortSignal, notFound?: () => void): Promise<T> {
+  async function json<T>(url: string, init: RequestInit, signal: AbortSignal, notFound?: () => void, options?: { preserveAuthErrors?: boolean }): Promise<T> {
     const response = await fetch(url, { ...init, signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]), credentials: "same-origin", cache: "no-store", redirect: "error" });
-    if (response.status === 401 || response.status === 403) { accessLost(); throw Error("Your access has changed. Reload the workspace."); }
+    if ((response.status === 401 || response.status === 403) && !options?.preserveAuthErrors) { accessLost(); throw Error("Your access has changed. Reload the workspace."); }
     // A 404 here is item-scoped (see read-api.ts's fail()): only the caller-identified
     // target is unavailable, not the whole workspace. Only routes that resolve a single
     // item pass notFound; worksets/counts have no such case and fall through as before.
     if (response.status === 404 && notFound) { notFound(); throw new DOMException("This item is unavailable.", "AbortError"); }
-    if (!response.ok) throw Error(response.status === 429 ? "Please wait before refreshing this view." : "The request could not be completed. Try again.");
+    if (!response.ok) {
+      const failure = Error(response.status === 429 ? "Please wait before refreshing this view." : "The request could not be completed. Try again.");
+      Object.assign(failure, { status: response.status });
+      throw failure;
+    }
     const value = await response.json(); signal.throwIfAborted();
     if (denied.current) throw new DOMException("Access ended", "AbortError");
     return value as T;
@@ -149,40 +160,128 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
       if (!denied.current && token === countsGeneration.current) setCounts(value);
     } catch { if (!denied.current && token === countsGeneration.current) setCountsError(true); }
   }
+
+  function cancelReconciliation() {
+    walkGeneration.current++;
+    reconciliationAgain.current = false;
+    reconciliationRequest.current?.abort();
+  }
+
+  function wait(ms: number, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    if (ms <= 0) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, ms);
+      const abort = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); reject(new DOMException("Aborted", "AbortError")); };
+      signal.addEventListener("abort", abort, { once: true });
+    });
+  }
+
+  function statusOf(error: unknown): number | undefined {
+    return typeof error === "object" && error !== null && "status" in error && typeof error.status === "number" ? error.status : undefined;
+  }
+
+  async function waitForWorksetSlot(signal: AbortSignal) {
+    await wait(Math.max(0, lastWorksetAt.current + WORKSET_MIN_INTERVAL_MS - Date.now()), signal);
+  }
+
+  async function postWorkset(next: InboxFilter, cursor: string | null, replacesScopeId: string | null, signal: AbortSignal, preserveAuthErrors = false): Promise<Scope> {
+    const body = JSON.stringify({ orgId: identity.orgId, filter: next, cursor, limit: 500, replacesScopeId });
+    for (let attempt = 0; attempt < WORKSET_RETRY_LIMIT; attempt++) {
+      await waitForWorksetSlot(signal);
+      try {
+        const value = await json<Scope>("/api/inbox/worksets", { method: "POST", headers: { "content-type": "application/json" }, body }, signal, undefined, { preserveAuthErrors });
+        if (value.orgId !== identity.orgId || value.requesterId !== identity.userId || value.sessionId !== identity.sessionId || value.accessEpoch !== identity.accessEpoch || !(value.nextCursor === null || typeof value.nextCursor === "string") || typeof value.refreshed !== "boolean") throw Error("Invalid workspace response");
+        signal.throwIfAborted();
+        lastWorksetAt.current = Date.now();
+        return value;
+      } catch (failure) {
+        if (signal.aborted || (failure instanceof DOMException && failure.name === "AbortError")) throw failure;
+        if (statusOf(failure) !== 429 || attempt === WORKSET_RETRY_LIMIT - 1) throw failure;
+        await wait(WORKSET_MIN_INTERVAL_MS * 2 ** attempt, signal);
+      }
+    }
+    throw Error("Workset retry loop ended unexpectedly.");
+  }
+
   async function load(next: InboxFilter, cursor: string | null = null) {
     if (denied.current) return;
-    request.current?.abort(); markerRequest.current?.abort(); reconciliationRequest.current?.abort();
+    cancelReconciliation();
+    request.current?.abort(); markerRequest.current?.abort();
     const controller = new AbortController(); request.current = controller;
     busyRef.current = true; filterRef.current = next; setBusy(true); setError(undefined); sync.current?.reset();
     void loadCounts(next);
     try {
-      const value = await json<Scope>("/api/inbox/worksets", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orgId: identity.orgId, filter: next, cursor, limit: 500, ...(scope.current ? { replacesScopeId: scope.current.scopeId } : {}) }) }, controller.signal);
+      const value = await postWorkset(next, cursor, liveScopeId.current ?? scope.current?.scopeId ?? null, controller.signal);
       if (controller.signal.aborted) return;
-      if (value.orgId !== identity.orgId || value.requesterId !== identity.userId || value.sessionId !== identity.sessionId || value.accessEpoch !== identity.accessEpoch) { accessLost(); return; }
-      if (!(value.nextCursor === null || typeof value.nextCursor === "string") || typeof value.refreshed !== "boolean") throw Error("Invalid workspace response");
-      const nextScope: Scope = { ...value, sourceCursor: cursor };
+      liveScopeId.current = value.scopeId;
+      pagesShown.current = cursor === null ? 1 : pagesShown.current + 1;
+      const nextScope: Scope = value;
       setInvalidatedIds([]); setDripMarkers(new Map()); sync.current!.replace(nextScope); scope.current = nextScope; setNextCursor(value.nextCursor); setFilter(next);
       void refreshDripMarkers(markerIds(value.orderedIds));
     } catch (failure) {
       if (!controller.signal.aborted && !denied.current) setError(failure instanceof Error ? failure.message : "Could not load conversations.");
     } finally { if (!controller.signal.aborted) { busyRef.current = false; setBusy(false); } }
   }
-  async function reconcileDripView() {
+  async function reconcileWorkspace() {
     const next = filterRef.current;
-    const current = scope.current;
-    if (denied.current || !isDripView(next.view) || busyRef.current || !current || reconciliationInFlight.current) return;
-    reconciliationInFlight.current = true;
-    const controller = new AbortController(); reconciliationRequest.current = controller;
-    try {
-      const value = await json<Scope>("/api/inbox/worksets", {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ orgId: identity.orgId, filter: next, cursor: current.sourceCursor, limit: 500, replacesScopeId: current.scopeId }),
-      }, controller.signal);
-      if (controller.signal.aborted || value.orgId !== identity.orgId || value.requesterId !== identity.userId || value.sessionId !== identity.sessionId || value.accessEpoch !== identity.accessEpoch || !(value.nextCursor === null || typeof value.nextCursor === "string") || typeof value.refreshed !== "boolean") return;
-      const nextScope: Scope = { ...value, sourceCursor: current.sourceCursor };
-      scope.current = nextScope; setNextCursor(value.nextCursor); sync.current?.replace(nextScope); void refreshDripMarkers(markerIds(value.orderedIds));
-    } catch { /* the next probe retries a rate-limited or transient reconciliation */ }
-    finally { reconciliationInFlight.current = false; if (reconciliationRequest.current === controller) reconciliationRequest.current = null; }
+    if (denied.current || !scope.current || !liveScopeId.current) return;
+    if (reconciliationPromise.current) {
+      reconciliationAgain.current = true;
+      walkGeneration.current++;
+      reconciliationRequest.current?.abort();
+      return reconciliationPromise.current;
+    }
+    const promise = (async () => {
+      do {
+        reconciliationAgain.current = false;
+        const generation = ++walkGeneration.current;
+        const controller = new AbortController();
+        reconciliationRequest.current = controller;
+        try {
+          const depth = Math.max(1, pagesShown.current);
+          let cursor: string | null = null;
+          let replacesScopeId: string | null = liveScopeId.current;
+          let finalScope: Scope | null = null;
+          let reached = 0;
+          const currentWalk = () => generation === walkGeneration.current;
+          for (let page = 1; page <= depth; page++) {
+            const value = await postWorkset(next, cursor, replacesScopeId, controller.signal, true);
+            // The newest successful step is the only safe replacement anchor,
+            // including when a later step fails before the final page publishes.
+            liveScopeId.current = value.scopeId; // walk step anchor
+            replacesScopeId = value.scopeId;
+            if (!currentWalk()) {
+              if (reconciliationAgain.current) break;
+              return;
+            }
+            finalScope = value;
+            reached = page;
+            if (value.nextCursor === null || page === depth) break;
+            cursor = value.nextCursor;
+          }
+          if (!finalScope || !currentWalk()) {
+            if (reconciliationAgain.current) continue;
+            return;
+          }
+          if (reached < depth) pagesShown.current = reached;
+          setError(undefined);
+          scope.current = finalScope; setNextCursor(finalScope.nextCursor); sync.current?.replace(finalScope); void refreshDripMarkers(markerIds(finalScope.orderedIds));
+        } catch (failure) {
+          if (!controller.signal.aborted && generation === walkGeneration.current && !denied.current) setError(failure instanceof Error ? failure.message : "Could not refresh this view.");
+        } finally {
+          if (reconciliationRequest.current === controller) reconciliationRequest.current = null;
+        }
+      } while (reconciliationAgain.current && !denied.current);
+    })();
+    const settled = promise.finally(() => { if (reconciliationPromise.current === settled) reconciliationPromise.current = null; });
+    reconciliationPromise.current = settled;
+    return settled;
+  }
+
+  async function reconcileDripView() {
+    if (denied.current || !isDripView(filterRef.current.view) || busyRef.current) return;
+    await reconcileWorkspace();
   }
   useEffect(() => {
     // Each mount owns its transport and no browser persistence. A stale request
@@ -201,7 +300,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     void load(initialFilter);
     const expiry = setTimeout(accessLost, Math.max(0, identity.expiresAt - Date.now()));
     return () => {
-      invalidateViews(); request.current?.abort(); markerRequest.current?.abort(); reconciliationRequest.current?.abort(); clearTimeout(expiry); adapter.reset(); sync.current = null;
+      invalidateViews(); cancelReconciliation(); request.current?.abort(); markerRequest.current?.abort(); clearTimeout(expiry); adapter.reset(); sync.current = null;
       // React Strict Mode immediately installs another owned adapter; a real
       // unmount closes the cache once that synchronous replay is complete.
       queueMicrotask(() => { if (sync.current === null) cache.close(); });
@@ -211,9 +310,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   }, []);
   async function refreshAfterAction() {
     const openId = activeOpen.current;
-    const next = filterRef.current;
-    const cursor = scope.current?.sourceCursor ?? null;
-    await load(next, cursor);
+    await reconcileWorkspace();
     if (denied.current) return;
     const ids = markerIds(scope.current?.orderedIds ?? []);
     await refreshDripMarkers(ids);
