@@ -25,8 +25,8 @@ ROOT = Path(__file__).resolve().parents[2]
 LOCAL_ENV = ROOT / "experiments/inbox-reply-send/local-env.py"
 MIGRATION = ROOT / "supabase/migrations/20260930040260_inbox_drip_markers.sql"
 GOLDEN = ROOT / "experiments/inbox-drip-markers/golden-fixture.json"
-LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-mutation-run-r4.log")
-EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-evidence-r4.md")
+LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-mutation-run-r5.log")
+EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-evidence-r5.md")
 STATE = Path("/tmp/sandra-reply-persist-local-env.json")
 PSQL = "/opt/homebrew/bin/psql"
 
@@ -253,6 +253,15 @@ FOCUSED_VITEST_MUTATIONS = [
         "replacement": "// live scope intentionally not advanced",
         "test_file": "src/components/inbox-workspace/workspace-client.drip-markers.test.tsx",
         "test_name": "T6 surfaces a partial-walk error and recovers from the step-one live scope",
+        "config": "vitest.rtl.config.ts",
+    },
+    {
+        "name": "M6-abort-coalesced-walk",
+        "path": ROOT / "src/components/inbox-workspace/workspace-client.tsx",
+        "needle": "      walkGeneration.current++;\n      return reconciliationPromise.current;",
+        "replacement": "      walkGeneration.current++;\n      reconciliationRequest.current?.abort();\n      return reconciliationPromise.current;",
+        "test_file": "src/components/inbox-workspace/workspace-client.drip-markers.test.tsx",
+        "test_name": "keeps the scope created by a deferred walk step and lets a following filter load succeed",
         "config": "vitest.rtl.config.ts",
     },
 ]

@@ -15,6 +15,7 @@ const state = vi.hoisted(() => ({
   cursors: new Map<string, string>(),
   worksetBodies: [] as Array<Record<string, unknown>>,
   requestTimes: [] as number[],
+  worksetFailures: [] as number[],
   queuedStatuses: [] as number[],
   deferred: null as null | ((response: Response) => void),
   markerResolvers: [] as Array<(response: Response) => void>,
@@ -71,6 +72,7 @@ beforeEach(() => {
   state.cursors.clear();
   state.worksetBodies = [];
   state.requestTimes = [];
+  state.worksetFailures = [];
   state.queuedStatuses = [];
   state.deferred = null;
   state.markerResolvers = [];
@@ -94,9 +96,9 @@ beforeEach(() => {
       const status = state.queuedStatuses.shift();
       if (status) return finish(Response.json({ error: status === 429 ? "Please wait" : "Unavailable" }, { status }));
       const replaces = typeof body.replacesScopeId === "string" ? body.replacesScopeId : null;
-      if (replaces && state.scopes.get(replaces)?.revoked) return finish(Response.json({ error: "Cursor denied" }, { status: 403 }));
+      if (replaces && state.scopes.get(replaces)?.revoked) { state.worksetFailures.push(403); return finish(Response.json({ error: "Cursor denied" }, { status: 403 })); }
       const cursor = typeof body.cursor === "string" ? body.cursor : null;
-      if (cursor && (!state.cursors.has(cursor) || state.scopes.get(state.cursors.get(cursor)!)?.revoked)) return finish(Response.json({ error: "Cursor denied" }, { status: 403 }));
+      if (cursor && (!state.cursors.has(cursor) || state.scopes.get(state.cursors.get(cursor)!)?.revoked)) { state.worksetFailures.push(403); return finish(Response.json({ error: "Cursor denied" }, { status: 403 })); }
       if (state.failCursorPage && cursor) return finish(Response.json({ error: "Unavailable" }, { status: 503 }));
       if (replaces) state.scopes.get(replaces)!.revoked = true;
       const scopeId = `00000000-0000-0000-0000-${String(++state.scopeNumber).padStart(12, "0")}`;
@@ -199,15 +201,15 @@ it("T4 coalesces probes into one serialized follow-up walk", async () => {
   act(() => { state.callbacks!.onProbe!(); state.callbacks!.onProbe!(); });
   await advance(1100);
   await advance(1100);
+  await advance(1100);
   expect(state.maxConcurrent).toBe(1);
-  expect(state.worksetBodies).toHaveLength(4);
+  expect(state.worksetBodies).toHaveLength(5);
   expect(state.publishedNames.at(-1)).toBe("B'");
 });
 
 it("T5 fences a stale walk generation when the displayed page changes mid-walk", async () => {
   await moveToPageTwo({ view: "in_drip" });
   state.deferNext = true;
-  const throwIfAborted = vi.spyOn(AbortSignal.prototype, "throwIfAborted").mockImplementation(() => {});
   act(() => state.callbacks!.onProbe!());
   await advance(1100);
   expect(state.deferred).toBeTypeOf("function");
@@ -221,7 +223,30 @@ it("T5 fences a stale walk generation when the displayed page changes mid-walk",
   await advance(1100);
   expect(state.replacements).toHaveLength(3);
   expect(state.publishedNames).not.toContain("STALE");
-  throwIfAborted.mockRestore();
+});
+
+it("keeps the scope created by a deferred walk step and lets a following filter load succeed", async () => {
+  await moveToPageTwo({ view: "in_drip" });
+  state.deferNext = true;
+  act(() => state.callbacks!.onProbe!());
+  await advance(1100);
+  expect(state.deferred).toBeTypeOf("function");
+
+  const createdScope = [...state.scopes.keys()].at(-1)!;
+  state.cursors.set("cursor-created", createdScope);
+  act(() => state.callbacks!.onProbe!());
+  state.deferred!(responseFor({}, createdScope, "cursor-created"));
+  await flush();
+
+  fireEvent.change(screen.getByRole("combobox"), { target: { value: "all" } });
+  for (let step = 0; step < 3; step++) await advance(1100);
+
+  expect(state.worksetBodies[3].replacesScopeId).toBe(createdScope);
+  expect(state.worksetBodies.at(-1)?.filter).toMatchObject({ view: "all" });
+  expect(state.worksetFailures).not.toContain(403);
+  expect(state.lastSnapshot).not.toMatchObject({ state: "permission_lost" });
+  expect(screen.getByRole("combobox")).toHaveValue("all");
+  expect(screen.queryByText("The request could not be completed. Try again.")).not.toBeInTheDocument();
 });
 
 it("T6 surfaces a partial-walk error and recovers from the step-one live scope", async () => {

@@ -206,6 +206,9 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
 
   async function load(next: InboxFilter, cursor: string | null = null) {
     if (denied.current) return;
+    const currentReconciliation = reconciliationPromise.current;
+    if (currentReconciliation) await currentReconciliation;
+    if (denied.current) return;
     cancelReconciliation();
     request.current?.abort(); markerRequest.current?.abort();
     const controller = new AbortController(); request.current = controller;
@@ -228,8 +231,9 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     if (denied.current || !scope.current || !liveScopeId.current) return;
     if (reconciliationPromise.current) {
       reconciliationAgain.current = true;
+      // Keep the POST alive so its newly created scope remains the next anchor;
+      // only its rows are stale under the new generation.
       walkGeneration.current++;
-      reconciliationRequest.current?.abort();
       return reconciliationPromise.current;
     }
     const promise = (async () => {
@@ -268,6 +272,8 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
           setError(undefined);
           scope.current = finalScope; setNextCursor(finalScope.nextCursor); sync.current?.replace(finalScope); void refreshDripMarkers(markerIds(finalScope.orderedIds));
         } catch (failure) {
+          // A real access revocation during a walk may surface as a generic refresh
+          // error; the next counts or markers 403 still flips the workspace to permission_lost.
           if (!controller.signal.aborted && generation === walkGeneration.current && !denied.current) setError(failure instanceof Error ? failure.message : "Could not refresh this view.");
         } finally {
           if (reconciliationRequest.current === controller) reconciliationRequest.current = null;
