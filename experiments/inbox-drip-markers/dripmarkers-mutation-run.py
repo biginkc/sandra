@@ -394,6 +394,28 @@ VALUES ('93000000-0000-4000-8000-000000000001','{ORG}','40000000-0000-4000-8000-
     psql("DELETE FROM public.acquisition_attempts WHERE id='93000000-0000-4000-8000-000000000001';")
 
 
+def test_label_convergence_after_write() -> None:
+    conversation = "80000000-0000-4000-8000-000000000002"
+    inbound = "70000000-0000-4000-8000-000000000031"
+    outbound = "70000000-0000-4000-8000-000000000030"
+    run_id = "63000000-0000-4000-8000-000000000030"
+    before = json_query(f"SELECT public.inbox_drip_label_inputs_v1('{ORG}'::uuid,'{conversation}'::uuid,ARRAY['{inbound}'::uuid]);", role="authenticated")
+    if before["messages"]:
+        raise AssertionError("label RPC returned a message before the write")
+    psql(f"""
+INSERT INTO public.messages(id,org_id,created_at,channel,direction,property_id,contact_id,conversation_id,from_address,to_address,body,status,metadata,campaign_id)
+VALUES ('{outbound}','{ORG}','2026-09-04 10:00+00','sms','outbound','40000000-0000-4000-8000-000000000002','50000000-0000-4000-8000-000000000001','{conversation}','+15550000099','+15550000001','New drip text','sent','{{}}',NULL),
+ ('{inbound}','{ORG}','2026-09-04 10:01+00','sms','inbound','40000000-0000-4000-8000-000000000002','50000000-0000-4000-8000-000000000001','{conversation}','+15550000001','+15550000099','New reply','received','{{}}',NULL);
+INSERT INTO public.sequence_step_runs(id,enrollment_id,step_id,message_id,scheduled_for,run_at)
+VALUES ('{run_id}','62000000-0000-4000-8000-000000000002','61000000-0000-4000-8000-000000000002','{outbound}','2026-09-04 09:59+00','2026-09-04 10:00+00');
+""")
+    after = json_query(f"SELECT public.inbox_drip_label_inputs_v1('{ORG}'::uuid,'{conversation}'::uuid,ARRAY['{inbound}'::uuid]);", role="authenticated")
+    row = next(row for row in after["messages"] if row["id"] == inbound)
+    if row.get("drip_reply_label") != "Reply to drip text 2":
+        raise AssertionError(f"label inputs did not converge after write: {row}")
+    psql(f"DELETE FROM public.sequence_step_runs WHERE id='{run_id}'; DELETE FROM public.messages WHERE id IN ('{outbound}','{inbound}');")
+
+
 def test_authorization_and_grants() -> None:
     expect_error(f"SELECT public.inbox_drip_markers_v1('{OTHER_ORG}'::uuid,ARRAY['80000000-0000-4000-8000-000000000001'::uuid]);", "INBOX_ORG_DENIED")
     foreign = json_query(f"SELECT public.inbox_drip_markers_v1('{ORG}'::uuid,ARRAY['80000000-0000-4000-8000-000000000001'::uuid]);", role="authenticated")
@@ -480,6 +502,7 @@ TESTS: list[tuple[str, Callable[[], None]]] = [
     ("fixture matrix: sibling property, review-property divergence and pause reasons", test_fixture_case_matrix),
     ("labels, nearest lookbehind, skipped AI and concatenation", test_labels_and_long_skip),
     ("clearing events, failed sends and campaign exemption", test_clearing_events_and_campaign_exemption),
+    ("label convergence after a write boundary", test_label_convergence_after_write),
     ("authorization denial, revocation and grants", test_authorization_and_grants),
     ("convergence and workset rate-limit acceptance", test_consistency_and_rate_limit),
 ]
@@ -498,7 +521,7 @@ def run_suite(label: str) -> list[str]:
             failures.append(name)
             emit(f"TEST_FAIL|{label}|{name}|{error}")
         evidence.append({"run": label, "test": name, "Executed": executed, "result": result})
-    if len(TESTS) != 7:
+    if len(TESTS) != 8:
         raise RuntimeError("unexpected NOT RUN: test inventory changed")
     return failures
 
