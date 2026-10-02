@@ -90,9 +90,14 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
   restart recovery, not high availability. Test volume recovery and application
   receipt reconciliation; do not promise zero data loss for volume destruction.
 - Electric production connects directly to `db.<project-ref>.supabase.co:5432` with
-  `sslmode=verify-full`, the committed Supabase CA, TLS 1.2 minimum, and
-  `gssencmode=disable`. The relay receives only its own bearer token; it never
-  receives or forwards the Electric database secret. The local
+  the Electric TLS verifier, the committed Supabase CA, and TLS 1.2 minimum.
+  Electric's `sslmode=require` DSN is paired with
+  `ELECTRIC_DATABASE_CA_CERTIFICATE_FILE`; do not copy libpq's
+  `sslrootcert`, `gssencmode`, or `PG*` catalog settings into the Electric
+  container. The relay receives its own bearer token and holds the separate
+  `INBOX_ELECTRIC_SECRET` shape secret, appending it only to upstream Electric
+  shape URLs. It never receives or forwards the Electric database credential,
+  and neither secret is client-visible. The local
   `execution-stack-compose.yml` exception is fixture-only.
 - Store DB credentials and relay secret only in the named services' secret
   variables. Scope the DB role to the required projection or operation wrappers.
@@ -114,7 +119,8 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
   ```
   Also export `PGSSLMODE=verify-full` and
   `PGSSLROOTCERT=$PWD/experiments/inbox-production-install/supabase-prod-ca-2021.crt`.
-  The runner rejects `PGHOSTADDR`, `PGSERVICE`, and `PGSERVICEFILE`, and checks
+  The runner rejects `PGHOSTADDR`, `PGSERVICE`, `PGSERVICEFILE`, `PGPORT`,
+  `PGOPTIONS`, `PGSSLMINPROTOCOLVERSION`, and `PGGSSENCMODE`, and checks
   the CA file's exact SHA-256 pin before invoking psql. The committed CA is the
   public Supabase Root 2021 certificate; it is not a credential.
   The runner emits `\set` directives followed by `\i`, so the verifier is

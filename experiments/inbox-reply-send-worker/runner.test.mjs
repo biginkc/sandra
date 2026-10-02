@@ -7,6 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRunner } from './runner.mjs';
+import { createSendilloReplyTransport } from './vendor/reply-provider.mjs';
 
 const orgId = '11111111-1111-1111-1111-111111111111';
 const opId = '22222222-2222-2222-2222-222222222222';
@@ -131,4 +132,23 @@ test('operationAttempts maps the SETOF uuid rows to a plain array', async () => 
   const runner = createRunner(pool, async () => { throw Error('not used'); });
   const ids = await runner.operationAttempts(orgId, opId);
   assert.deepEqual(ids, [attemptId]);
+});
+
+test('owned dispatch fixture turns a non-owned recipient into confirmed_not_submitted without provider HTTP', async () => {
+  let providerCalls = 0;
+  const pool = fakePool({
+    worker_claim: () => ({ kind: 'claimed', generation: '1' }),
+    worker_start_dispatch: () => ({ kind: 'dispatch', token, from: '+18165550001', to: '+18165550003', body: 'pilot fixture reply' }),
+    worker_persist: params => {
+      assert.deepEqual(JSON.parse(params[3]), { kind: 'not_attempted', reason: 'invalid_input' });
+      return { state: 'confirmed_not_submitted' };
+    },
+  });
+  const transport = createSendilloReplyTransport('synthetic-key', async () => {
+    providerCalls += 1;
+    return Response.json({ data: { messageId: 'must-not-exist' } });
+  }, { INBOX_REPLY_OWNED_RECIPIENTS: '+18165550002' });
+  const result = await createRunner(pool, transport).dispatchAttempt(orgId, opId, attemptId);
+  assert.deepEqual(result, { kind: 'settled', state: 'confirmed_not_submitted' });
+  assert.equal(providerCalls, 0);
 });

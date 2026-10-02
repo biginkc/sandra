@@ -165,4 +165,14 @@ describe("authoritative receipt policy truth table", () => {
     const states: InboxReplyReceipt["state"][] = ["pending", "dispatch_started", "provider_accepted", "delivered", "delivery_failed", "uncertain", "blocked", "confirmed_not_submitted", "rejected_unsent"];
     expect(states.every(state => classifyReceiptRow(receipt(1, state), false).canResend === false)).toBe(true);
   });
+
+  it("19 maps a local invalid-input refusal to the approved not-sent copy without exposing evidence", () => {
+    expect(classifyReceiptRow(receipt(1, "confirmed_not_submitted", "local_not_attempted:invalid_input"))).toEqual({
+      label: "Not sent. This number is not on the pilot allowed list (or the message was invalid). Nothing went out.",
+      className: "failed",
+      keepPolling: false,
+      canResend: false,
+    });
+    expect(classifyReceiptRow(receipt(1, "confirmed_not_submitted", "local_not_attempted:cancelled_before_dispatch"))).toMatchObject({ label: "Not sent", reason: "Local not attempted:cancelled before dispatch" });
+  });
 });

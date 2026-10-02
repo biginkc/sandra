@@ -5,11 +5,16 @@ export const columns = 'org_id,target_kind,target_id,name,context,preview,time_l
 const responseHeaders = ['content-type','electric-handle','electric-offset','electric-schema','electric-cursor','electric-up-to-date'];
 const allowedQuery = new Set(['offset','handle','live','cursor','log','table','columns','replica','where']);
 const digest = value => createHash('sha256').update(value).digest();
+function validateSecret(value, label) {
+  if (typeof value !== 'string' || value.length < 32 || value.length > 256 || /\s/.test(value)) throw Error(`${label} must be a nonempty high-entropy secret`);
+}
 /** A server-to-server boundary. Browser authorization stays in the Next gateway. */
-export function createRelayServer({ upstream, token, projectionTable, transport = fetch, maxConcurrent = 32 }) {
+export function createRelayServer({ upstream, token, electricSecret, projectionTable, transport = fetch, maxConcurrent = 32 }) {
   const target = new URL(upstream);
   if (!['http:','https:'].includes(target.protocol) || target.username || target.password || target.search || target.hash || target.pathname !== '/') throw Error('Invalid relay upstream');
-  if (typeof token !== 'string' || token.length < 32 || token.length > 256 || /\s/.test(token)) throw Error('Relay token must be a nonempty high-entropy secret');
+  validateSecret(token, 'Relay token');
+  validateSecret(electricSecret, 'Electric secret');
+  if (token === electricSecret) throw Error('Relay token and Electric secret must be distinct');
   if (!/^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$/.test(projectionTable)) throw Error('Invalid projection table');
   if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1 || maxConcurrent > 32) throw Error("Invalid relay concurrency");
   let active = 0, healthProbe, healthResult;
@@ -44,7 +49,7 @@ export function createRelayServer({ upstream, token, projectionTable, transport 
         if ((!allowedQuery.has(key) && !/^params\[[1-9][0-9]{0,2}\]$/.test(key)) || url.searchParams.getAll(key).length !== 1) { finish(400); return; }
       }
       if (url.searchParams.get('table') !== projectionTable || url.searchParams.get('columns') !== columns || url.searchParams.get('replica') !== 'default') { finish(400); return; }
-      const endpoint = new URL('/v1/shape',target); endpoint.search = url.search;
+      const endpoint = new URL('/v1/shape',target); endpoint.search = url.search; endpoint.searchParams.set('secret', electricSecret);
       const response = await transport(endpoint, { signal: AbortSignal.any([controller.signal,AbortSignal.timeout(14000)]), redirect:'error', cache:'no-store' });
       const chunks = []; let bytes = 0;
       const reader = response.body?.getReader();
@@ -68,7 +73,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const upstream = new URL(process.env.INBOX_RELAY_UPSTREAM ?? '');
   // Public Railway ingress terminates TLS. Electric remains private to this project.
   if (!upstream.hostname.endsWith('.railway.internal')) throw Error('Production relay requires private Railway upstream');
-  const server = createRelayServer({ upstream:upstream.href, token:process.env.INBOX_RELAY_TOKEN, projectionTable:process.env.INBOX_RELAY_PROJECTION_TABLE });
+  const server = createRelayServer({ upstream:upstream.href, token:process.env.INBOX_RELAY_TOKEN, electricSecret:process.env.INBOX_ELECTRIC_SECRET, projectionTable:process.env.INBOX_RELAY_PROJECTION_TABLE });
   const port = Number(process.env.PORT ?? 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw Error('Invalid port');
   server.listen(port,'::');

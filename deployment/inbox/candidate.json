@@ -38,7 +38,7 @@
         "database": "postgres",
         "sslmode": "require",
         "caCertificateFile": "/etc/sandra-inbox/supabase-prod-ca-2021.crt",
-        "secretForwarding": "none"
+        "secretForwarding": "relay-held-shape-secret"
       }
     },
     {
@@ -104,7 +104,14 @@
       "volumeGiBLimit": 0,
       "public": true,
       "port": 3000,
-      "authentication": "server-only high-entropy Bearer token"
+      "authentication": "server-only high-entropy Bearer token",
+      "env": {
+        "INBOX_RELAY_UPSTREAM": "${INBOX_ELECTRIC_SHAPE_URL}",
+        "INBOX_RELAY_PROJECTION_TABLE": "inbox_bridge.summaries",
+        "INBOX_RELAY_TOKEN": "${INBOX_RELAY_TOKEN}",
+        "INBOX_ELECTRIC_SECRET": "${INBOX_ELECTRIC_SECRET}"
+      },
+      "secretEnv": ["INBOX_RELAY_TOKEN", "INBOX_ELECTRIC_SECRET"]
     }
   ],
   "resourcePrices": {

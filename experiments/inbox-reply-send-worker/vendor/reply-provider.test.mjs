@@ -10,7 +10,7 @@ test("fails closed for an unowned recipient before the injected transport is cal
   let calls = 0;
   const transport = async () => { calls += 1; return Response.json({ data: { messageId: "should-not-exist" } }); };
   const send = createSendilloReplyTransport("synthetic-key", transport, env);
-  await assert.rejects(send({ ...reply, to: "+18165550003" }, signal()), /not owned/);
+  assert.deepEqual(await send({ ...reply, to: "+18165550003" }, signal()), { kind: "not_attempted", reason: "invalid_input" });
   assert.equal(calls, 0);
 });
 

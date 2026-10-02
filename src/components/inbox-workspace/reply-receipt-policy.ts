@@ -171,6 +171,9 @@ export function classifyReceiptRow(
         statusLabel: "Blocked",
       };
     case "confirmed_not_submitted":
+      if (receipt.reason === "local_not_attempted:invalid_input") {
+        return { label: "Not sent. This number is not on the pilot allowed list (or the message was invalid). Nothing went out.", className: "failed", keepPolling: false, canResend: false };
+      }
       return { label: "Not sent", className: "failed", keepPolling: false, canResend: false, reason };
     case "rejected_unsent":
       return { label: "Not sent (rejected)", className: "failed", keepPolling: false, canResend: false, reason };

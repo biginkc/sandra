@@ -1,8 +1,9 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { createSendilloReplyTransport } from "./reply-provider";
+import { createSendilloReplyTransport as createVendoredSendilloReplyTransport } from "../../../experiments/inbox-reply-send-worker/vendor/reply-provider.mjs";
 const reply = { from: "+18165550001", to: "+18165550002", body: "Exact approved text" };
 const signal = () => new AbortController().signal;
-const env = { INBOX_REPLY_OWNED_RECIPIENTS: reply.to };
+const env = { NODE_ENV: "test", INBOX_REPLY_OWNED_RECIPIENTS: reply.to } as const;
 afterEach(() => vi.useRealTimers());
 it("makes one fixed-endpoint request with exact reviewed text and minimal acceptance", async () => {
   const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ data: { messageId: "owned-reference", status: "queued", private: "discarded" } }));
@@ -48,11 +49,23 @@ it.each([{ id: "owned-reference", status: "failed" }, { id: "owned-reference", s
 it("fails closed for an unowned recipient before the injected transport is called", async () => {
   const fetcher = vi.fn<typeof fetch>();
   const send = createSendilloReplyTransport("synthetic-key", fetcher, env);
-  await expect(send({ ...reply, to: "+18165550003" }, signal())).rejects.toThrow("not owned");
+  await expect(send({ ...reply, to: "+18165550003" }, signal())).resolves.toEqual({ kind: "not_attempted", reason: "invalid_input" });
   expect(fetcher).not.toHaveBeenCalled();
 });
 it.each([undefined, "", "not-a-phone"]) ("rejects a missing or invalid owned-recipient list: %s", raw => {
   const fetcher = vi.fn<typeof fetch>();
-  expect(() => createSendilloReplyTransport("synthetic-key", fetcher, { INBOX_REPLY_OWNED_RECIPIENTS: raw })).toThrow(/allowlist/);
+  expect(() => createSendilloReplyTransport("synthetic-key", fetcher, { NODE_ENV: "test" as const, INBOX_REPLY_OWNED_RECIPIENTS: raw })).toThrow(/allowlist/);
   expect(fetcher).not.toHaveBeenCalled();
+});
+
+it("keeps TypeScript and vendored transports behaviorally identical for guard cases", async () => {
+  const implementations = [createSendilloReplyTransport, createVendoredSendilloReplyTransport];
+  for (const create of implementations) {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ data: { messageId: "owned-reference", status: "queued" } }));
+    const send = create("synthetic-key", fetcher, env);
+    await expect(send({ ...reply, to: "+18165550003" }, signal())).resolves.toEqual({ kind: "not_attempted", reason: "invalid_input" });
+    await expect(send(reply, signal())).resolves.toEqual({ kind: "accepted", provider: "sendillo", externalId: "owned-reference", providerStatus: "queued" });
+    expect(fetcher).toHaveBeenCalledOnce();
+    for (const raw of [undefined, "", "not-a-phone"]) expect(() => create("synthetic-key", fetcher, { NODE_ENV: "test" as const, INBOX_REPLY_OWNED_RECIPIENTS: raw })).toThrow(/allowlist/);
+  }
 });

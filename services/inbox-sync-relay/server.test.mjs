@@ -8,16 +8,17 @@ import { createRelayServer, columns } from './server.mjs';
 const fixturePath = fileURLToPath(new URL('../../deployment/inbox/relay-token-fixtures.json', import.meta.url));
 const tokenFixtures = JSON.parse(readFileSync(fixturePath, 'utf8'));
 const token = 'synthetic-test-token-with-more-than-32-characters';
+const electricSecret = 'synthetic-electric-shape-secret-more-than-32-characters';
 const params = new URLSearchParams({table:'inbox_bridge.projection',columns,replica:'default',offset:'-1',where:'org_id=$1','params[1]':'synthetic-org'});
 async function fixture(transport, run, maxConcurrent = 32) {
- const server=createRelayServer({upstream:'http://electric.invalid/',token,projectionTable:'inbox_bridge.projection',transport,maxConcurrent});
+ const server=createRelayServer({upstream:'http://electric.invalid/',token,electricSecret,projectionTable:'inbox_bridge.projection',transport,maxConcurrent});
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
  try { await run(`http://127.0.0.1:${server.address().port}`); }
  finally { await new Promise(resolve=>server.close(resolve)); }
 }
-test('secret protects shape requests and is never forwarded upstream',async()=>{
+test('bearer protects shape requests and the relay-held Electric secret is added only upstream',async()=>{
  let calls=0;
- await fixture(async(url,init)=>{calls++;assert.equal(url.hostname,'electric.invalid');assert.equal(init.headers,undefined);return new Response('[]',{headers:{'electric-offset':'0_0','x-private':'secret','set-cookie':'bad'}});},async base=>{
+ await fixture(async(url,init)=>{calls++;assert.equal(url.hostname,'electric.invalid');assert.equal(params.has('secret'),false);assert.equal(url.searchParams.get('secret'),electricSecret);assert.equal(init.headers,undefined);return new Response('[]',{headers:{'electric-offset':'0_0','x-private':'secret','set-cookie':'bad'}});},async base=>{
   assert.equal((await fetch(`${base}/v1/shape?${params}`)).status,401);
   const r=await fetch(`${base}/v1/shape?${params}`,{headers:{authorization:`Bearer ${token}`,cookie:'private-browser-cookie'}});
   assert.equal(r.status,200);assert.equal(await r.text(),'[]');assert.equal(r.headers.get('electric-offset'),'0_0');assert.equal(r.headers.get('x-private'),null);assert.equal(r.headers.get('set-cookie'),null);assert.equal(calls,1);
@@ -33,7 +34,7 @@ test('rejects other tables, duplicate predicates, arbitrary controls and mutatio
 });
 test('readiness requires upstream200; oversize and upstream failures stay bounded',async()=>{
  let count=0;
- await fixture(async url=>{if(url.pathname==='/v1/health')return new Response('',{status:++count===1?202:200});return new Response('x'.repeat(2_000_001));},async base=>{
+ await fixture(async url=>{if(url.pathname==='/v1/health'){assert.equal(url.search,'');return new Response('',{status:++count===1?202:200});}return new Response('x'.repeat(2_000_001));},async base=>{
   assert.equal((await fetch(`${base}/health`)).status,503);
   await new Promise(resolve=>setTimeout(resolve,1050));
   assert.equal((await fetch(`${base}/health`)).status,200);
@@ -105,7 +106,7 @@ test('an idle upstream cannot exceed the relay deadline or retain its admission 
 });
 
 async function fixtureWithToken(transport, run, maxConcurrent, tokenOverride) {
- const server=createRelayServer({upstream:'http://electric.invalid/',token:tokenOverride,projectionTable:'inbox_bridge.projection',transport,maxConcurrent});
+ const server=createRelayServer({upstream:'http://electric.invalid/',token:tokenOverride,electricSecret,projectionTable:'inbox_bridge.projection',transport,maxConcurrent});
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
  try { await run(`http://127.0.0.1:${server.address().port}`); }
  finally { await new Promise(resolve=>server.close(resolve)); }
@@ -118,4 +119,11 @@ test('accepts every Next-valid relay token from the shared parity fixture (G4 / 
    assert.equal(r.status,200,`relay must accept Next-valid fixture token: ${JSON.stringify(fixtureToken)}`);
   },32,fixtureToken);
  }
+});
+
+test('boot refuses a missing, short, whitespace-containing, or reused Electric secret', () => {
+ for (const value of [undefined, '', 'short', 'secret with whitespace']) {
+  assert.throws(() => createRelayServer({upstream:'http://electric.invalid/', token, electricSecret:value, projectionTable:'inbox_bridge.projection'}), /Electric secret/);
+ }
+ assert.throws(() => createRelayServer({upstream:'http://electric.invalid/', token, electricSecret:token, projectionTable:'inbox_bridge.projection'}), /distinct/);
 });

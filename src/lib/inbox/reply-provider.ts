@@ -35,7 +35,7 @@ export function createSendilloReplyTransport(apiKey: string, transport: typeof f
   if (!apiKey || /[\r\n]/.test(apiKey)) throw Error("Reply provider configuration missing");
   const recipients = ownedRecipients(env);
   return async (input: FrozenReply, cancellation: AbortSignal): Promise<ReplyProviderResult> => {
-    if (!input || !recipients.has(input.to)) throw Error("Reply recipient is not owned");
+    if (!input || !recipients.has(input.to)) return { kind: "not_attempted", reason: "invalid_input" };
     if (!input || typeof input.body !== "string" || !input.body.trim() || input.body.length > 1600 || !PHONE.test(input.from) || !PHONE.test(input.to)) return { kind: "not_attempted", reason: "invalid_input" };
     if (cancellation.aborted) return { kind: "not_attempted", reason: "cancelled_before_dispatch" };
     const deadline = AbortSignal.any([cancellation, AbortSignal.timeout(10_000)]);
