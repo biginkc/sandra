@@ -36,7 +36,7 @@ import {
   parseSelection,
   type SearchSelection,
 } from "@/lib/prospects/search-selection-input";
-import { isSelectionTokenShape, mintSelectionToken, readSelectionToken } from "@/lib/prospects/selection-token";
+import { mintSelectionToken, readSelectionToken } from "@/lib/prospects/selection-token";
 import { selectAllSearch, type SelectionFilters } from "@/lib/prospects/select-all";
 import {
   preflightSkipTrace as preflightSkipTraceWorker,
