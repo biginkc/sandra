@@ -7,8 +7,6 @@ export interface MatchOptions {
   now?: Date;
   /** Plan section 1 has no is_training filter (stress #1 says training "never"). Default false = section 1 literal. */
   excludeTraining?: boolean;
-  /** Plan section 1 says "every non-deleted property" of the contact, no same-org rule. Default false = plan literal. */
-  requireContactPropertySameOrg?: boolean;
 }
 
 const MAX_TOKENS = 6;
@@ -72,7 +70,8 @@ export function referenceMatch(
   if (Array.from(q).length < 3 || orgs.size === 0) return result;
 
   const qLower = q.toLowerCase();
-  const qd = digitsOnly(q);
+  let qd = digitsOnly(q);
+  if (qd.length === 11 && qd.startsWith("1")) qd = qd.slice(1); // coordinator ruling: drop US country code
   const live = (p: OracleProperty) =>
     p.deleted_at === null && orgs.has(p.org_id) && !(opts.excludeTraining && p.is_training);
   const propsById = new Map(fixture.properties.map((p) => [p.id, p]));
@@ -93,7 +92,7 @@ export function referenceMatch(
     for (const cid of [p.homeowner_contact_id, p.agent_contact_id]) {
       const c = cid ? matchedContacts.get(cid) : undefined;
       if (!c) continue;
-      if (opts.requireContactPropertySameOrg && c.org_id !== p.org_id) continue;
+      if (c.org_id !== p.org_id) continue; // coordinator ruling: same-org only
       candidates.add(p.id);
     }
   }

@@ -42,14 +42,18 @@ describe("reference matcher", () => {
     expect(run(f, "jane doe")).toEqual(["p1", "p2"]);
     expect(run(f, "agentson")).toEqual(["p3"]);
   });
+  it("contact in another org does not link to property", () => {
+    const f = fx({ memberships: [mem(), mem({ org_id: "B" })], contacts: [contact({ id: "c1", org_id: "B", last_name: "Crossorg" })], properties: [prop({ id: "p1", homeowner_contact_id: "c1" })] });
+    expect(run(f, "crossorg")).toEqual([]);
+  });
   it("phones by digits", () => {
     const f = fx({
       contacts: [contact({ id: "c1", phone_2: "(555) 123-4567" })],
       properties: [prop({ id: "p1", homeowner_contact_id: "c1" })],
     });
     for (const q of ["555.123.4567", "4567", "123-45"]) expect(run(f, q), q).toEqual(["p1"]);
-    // literal digit substring: an 11-digit "+1" query does not match a stored 10-digit phone
-    expect(run(f, "+1 555 123 4567")).toEqual([]);
+    expect(run(f, "+1 555 123 4567")).toEqual(["p1"]); // leading 1 dropped from 11-digit query
+    expect(run(f, "1 555 123 4568")).toEqual([]);
     expect(run(f, "45")).toEqual([]);
     expect(run(f, "5551234568")).toEqual([]);
   });
