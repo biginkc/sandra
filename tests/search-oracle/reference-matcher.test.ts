@@ -70,7 +70,7 @@ describe("reference matcher", () => {
     });
     for (const q of ["555.123.4567", "4567", "123-45"]) expect(run(f, q), q).toEqual(["p1"]);
     expect(run(f, "+15551234567")).toEqual(["p1"]); // leading 1 dropped from 11-digit query
-    expect(run(f, "+1 555 123 4567")).toEqual([]); // literal ruling: 10 digits vs 15-char query is under 70%
+    expect(run(f, "+1 555 123 4567")).toEqual(["p1"]); // 11 raw digits / 12 non-space chars
     expect(run(f, "1 555 123 4568")).toEqual([]);
     expect(run(f, "45")).toEqual([]);
     expect(run(f, "5551234568")).toEqual([]);
