@@ -107,7 +107,7 @@ test.describe("Search page", () => {
 
   async function sideEffectCounts() {
     const admin = adminClient();
-    const count = async (table: string) => {
+    const count = async (table: "campaigns" | "messages" | "dialer_batches" | "dialer_batch_items") => {
       const { count: c, error } = await admin.from(table).select("id", { count: "exact", head: true });
       if (error) throw error;
       return c ?? 0;
@@ -133,10 +133,6 @@ test.describe("Search page", () => {
     await seed(2, { surname: term, status: "new_lead" });
     await seed(1, { surname: term, dnc: true });
     const before = await sideEffectCounts();
-    // The Bulk SMS dialog is taller than a 720px viewport and its Cancel button
-    // cannot be scrolled into view there, so use a tall viewport for this spec.
-    await page.setViewportSize({ width: 1280, height: 1600 });
-
     await openFrom(page, term);
     await expect(page.getByTestId("prospects-result-count")).toContainText("of 55");
 
@@ -201,5 +197,28 @@ test.describe("Search page", () => {
     await batchDialog.getByRole("button", { name: "Cancel" }).click();
 
     expect(await sideEffectCounts()).toEqual(before);
+  });
+
+  test("Bulk SMS and dialer dialogs stay usable at 1280x720 (Cancel reachable, body scrolls)", async ({ page }) => {
+    const term = `Skipvp${Date.now().toString(36)}`;
+    await seed(2, { surname: term });
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await openFrom(page, term);
+    await page.getByRole("checkbox", { name: "Select all prospects on this page" }).click();
+
+    for (const item of ["Bulk SMS", "Create dialer batch"]) {
+      await page.getByRole("button", { name: /Actions for/ }).click();
+      await page.getByRole("menuitem", { name: item }).click();
+      const dialog = page.getByRole("dialog");
+      await expect(dialog).toBeVisible();
+      const box = await dialog.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.y).toBeGreaterThanOrEqual(0);
+      expect(box!.y + box!.height).toBeLessThanOrEqual(720);
+      const cancel = dialog.getByRole("button", { name: "Cancel" });
+      await expect(cancel).toBeInViewport();
+      await cancel.click();
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+    }
   });
 });

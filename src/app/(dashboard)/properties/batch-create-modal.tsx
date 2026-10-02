@@ -172,12 +172,12 @@ export function BatchCreateModal({
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => { if (!nextOpen) onClose(); }}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] max-w-lg grid-rows-[auto_minmax(0,1fr)_auto]">
         <DialogHeader>
           <DialogTitle>Create dialer batch</DialogTitle>
         </DialogHeader>
 
-        <div className="space-y-5 py-2">
+        <div className="min-h-0 space-y-5 overflow-y-auto py-2">
           <div className="rounded-md border bg-muted/30 p-3">
             <div className="flex items-center justify-between gap-3">
               <div>
