@@ -61,10 +61,10 @@ alter table public.properties
   add column if not exists filter_list_count integer not null default 0;
 
 -- True only when OLD and NEW differ and every difference is a cache column.
--- Stored generated columns (search_text, equity_pct) are not yet computed in
--- BEFORE triggers, so they are ignored; they derive from other columns that
--- ARE compared. A newly added generated column makes this return false
--- (fail-safe: the normal guard path runs).
+-- Stored generated columns (search_text, equity_pct, and any added later) are not yet
+-- computed in BEFORE triggers, so they are ignored; the list is DERIVED from the catalog
+-- (pg_attribute.attgenerated), never hard-coded, so a future generated column cannot make
+-- STOP replies on DNC-locked rows fail. They derive from other columns that ARE compared.
 create or replace function public.properties_filter_cache_only_change(old_row public.properties, new_row public.properties)
 returns boolean
 language sql
@@ -74,10 +74,16 @@ as $$
   select (j.n - j.ign) = (j.o - j.ign)
      and (j.n - j.gen) <> (j.o - j.gen)
     from (
-      select pg_catalog.to_jsonb(new_row) as n,
-             pg_catalog.to_jsonb(old_row) as o,
-             array['search_text','equity_pct']::text[] as gen,
-             array['search_text','equity_pct','has_inbound_message','has_outbound_message','has_unread_inbound','has_open_tasks','filter_list_ids','filter_tag_ids','filter_list_count']::text[] as ign
+      select g.n, g.o, g.gen,
+             g.gen || array['has_inbound_message','has_outbound_message','has_unread_inbound','has_open_tasks','filter_list_ids','filter_tag_ids','filter_list_count']::text[] as ign
+        from (
+          select pg_catalog.to_jsonb(new_row) as n,
+                 pg_catalog.to_jsonb(old_row) as o,
+                 coalesce((select pg_catalog.array_agg(a.attname::text)
+                             from pg_catalog.pg_attribute a
+                            where a.attrelid = 'public.properties'::pg_catalog.regclass
+                              and a.attnum > 0 and not a.attisdropped and a.attgenerated <> ''), '{}'::text[]) as gen
+        ) g
     ) j
 $$;
 
@@ -214,6 +220,9 @@ end;
 $function$;
 
 -- Recompute the cache for the given properties.
+-- NOTE: properties_filter_cache_pin trusts the writer GUC only when current_user equals the OWNER of
+-- this exact function (looked up by regprocedure 'public.refresh_property_filter_cache(uuid[])'); renaming
+-- or changing the signature/owner of this function requires updating the pin trigger in the same migration.
 create or replace function public.refresh_property_filter_cache(p_ids uuid[])
 returns void
 language plpgsql
@@ -276,13 +285,13 @@ begin
     perform public.refresh_property_filter_cache(array(select distinct o.property_id from old_rows o where o.property_id is not null));
   else
     perform public.refresh_property_filter_cache(array(
-      select o.property_id from old_rows o join new_rows n on n.id = o.id
-       where (o.property_id, o.org_id, o.direction, o.read_at) is distinct from (n.property_id, n.org_id, n.direction, n.read_at)
-         and o.property_id is not null
+      select x.property_id from (
+        select property_id, org_id, direction, read_at from old_rows except all select property_id, org_id, direction, read_at from new_rows
+      ) x where x.property_id is not null
       union
-      select n.property_id from old_rows o join new_rows n on n.id = o.id
-       where (o.property_id, o.org_id, o.direction, o.read_at) is distinct from (n.property_id, n.org_id, n.direction, n.read_at)
-         and n.property_id is not null));
+      select y.property_id from (
+        select property_id, org_id, direction, read_at from new_rows except all select property_id, org_id, direction, read_at from old_rows
+      ) y where y.property_id is not null));
   end if;
   return null;
 end;
@@ -301,11 +310,13 @@ begin
     perform public.refresh_property_filter_cache(array(select distinct o.related_property_id from old_rows o));
   else
     perform public.refresh_property_filter_cache(array(
-      select o.related_property_id from old_rows o join new_rows n on n.id = o.id
-       where (o.related_property_id, o.org_id, o.status) is distinct from (n.related_property_id, n.org_id, n.status)
+      select x.related_property_id from (
+        select related_property_id, org_id, status from old_rows except all select related_property_id, org_id, status from new_rows
+      ) x where x.related_property_id is not null
       union
-      select n.related_property_id from old_rows o join new_rows n on n.id = o.id
-       where (o.related_property_id, o.org_id, o.status) is distinct from (n.related_property_id, n.org_id, n.status)));
+      select y.related_property_id from (
+        select related_property_id, org_id, status from new_rows except all select related_property_id, org_id, status from old_rows
+      ) y where y.related_property_id is not null));
   end if;
   return null;
 end;
@@ -324,11 +335,13 @@ begin
     perform public.refresh_property_filter_cache(array(select distinct o.property_id from old_rows o));
   else
     perform public.refresh_property_filter_cache(array(
-      select o.property_id from old_rows o join new_rows n on n.id = o.id
-       where (o.property_id, o.org_id, o.list_id) is distinct from (n.property_id, n.org_id, n.list_id)
+      select x.property_id from (
+        select property_id, org_id, list_id from old_rows except all select property_id, org_id, list_id from new_rows
+      ) x where x.property_id is not null
       union
-      select n.property_id from old_rows o join new_rows n on n.id = o.id
-       where (o.property_id, o.org_id, o.list_id) is distinct from (n.property_id, n.org_id, n.list_id)));
+      select y.property_id from (
+        select property_id, org_id, list_id from new_rows except all select property_id, org_id, list_id from old_rows
+      ) y where y.property_id is not null));
   end if;
   return null;
 end;
@@ -347,15 +360,38 @@ begin
     perform public.refresh_property_filter_cache(array(select distinct o.property_id from old_rows o));
   else
     perform public.refresh_property_filter_cache(array(
-      select o.property_id from old_rows o join new_rows n on n.id = o.id
-       where (o.property_id, o.org_id, o.tag_id) is distinct from (n.property_id, n.org_id, n.tag_id)
+      select x.property_id from (
+        select property_id, org_id, tag_id from old_rows except all select property_id, org_id, tag_id from new_rows
+      ) x where x.property_id is not null
       union
-      select n.property_id from old_rows o join new_rows n on n.id = o.id
-       where (o.property_id, o.org_id, o.tag_id) is distinct from (n.property_id, n.org_id, n.tag_id)));
+      select y.property_id from (
+        select property_id, org_id, tag_id from new_rows except all select property_id, org_id, tag_id from old_rows
+      ) y where y.property_id is not null));
   end if;
   return null;
 end;
 $$;
+
+-- A property moving to another org changes which child rows count (children are
+-- matched on org_id). The pin trigger preserves the old cache values, so refresh here.
+create or replace function public.trg_properties_org_change_refresh_filter_cache()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  perform public.refresh_property_filter_cache(array[new.id]);
+  return null;
+end;
+$$;
+
+drop trigger if exists zz_properties_filter_cache_org_change on public.properties;
+create trigger zz_properties_filter_cache_org_change
+  after update of org_id on public.properties
+  for each row
+  when (old.org_id is distinct from new.org_id)
+  execute function public.trg_properties_org_change_refresh_filter_cache();
 
 drop trigger if exists zz_messages_filter_cache_insert on public.messages;
 create trigger zz_messages_filter_cache_insert
@@ -431,12 +467,12 @@ create trigger zz_property_tags_filter_cache_delete
 
 revoke all on function public.refresh_property_filter_cache(uuid[]) from public, anon, authenticated;
 grant execute on function public.refresh_property_filter_cache(uuid[]) to service_role;
+revoke all on function public.trg_properties_org_change_refresh_filter_cache() from public, anon, authenticated;
 revoke all on function public.trg_messages_refresh_filter_cache() from public, anon, authenticated;
 revoke all on function public.trg_tasks_refresh_filter_cache() from public, anon, authenticated;
 revoke all on function public.trg_property_lists_refresh_filter_cache() from public, anon, authenticated;
 revoke all on function public.trg_property_tags_refresh_filter_cache() from public, anon, authenticated;
-revoke all on function public.properties_filter_cache_only_change(public.properties, public.properties) from public, anon;
-grant execute on function public.properties_filter_cache_only_change(public.properties, public.properties) to authenticated, service_role;
+-- properties_filter_cache_only_change is a pure comparator: default PUBLIC execute is kept on purpose.
 
 -- Indexes for org-wide filters (no market predicate): partial btrees keep the
 -- selective boolean states cheap; GIN serves the uuid[] overlap/contains.
