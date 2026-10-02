@@ -2,8 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { BlockStack } from "@/lib/prospects/filter-schema";
-import type { QueryOrigin } from "@/lib/prospects/search-scope";
-import { countProspectsForFilter } from "@/app/(dashboard)/properties/_actions/count";
+import { searchPageCountProspects } from "@/app/(dashboard)/properties/_actions/count";
 
 export type CountState = {
   status: "idle" | "loading" | "ready" | "error";
@@ -15,7 +14,6 @@ export type DebouncedFilterScope = {
   /** Page `?search=`; the count must match the rows the page shows. */
   search?: string | null;
   imported?: "today" | null;
-  origin?: QueryOrigin;
 };
 
 export function useDebouncedFilters(
@@ -34,7 +32,6 @@ export function useDebouncedFilters(
   const blocksKey = JSON.stringify(blocks);
   const search = scope.search ?? null;
   const imported = scope.imported ?? null;
-  const origin = scope.origin;
 
   useEffect(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
@@ -44,12 +41,11 @@ export function useDebouncedFilters(
       setState((s) => ({ status: "loading", count: s.count }));
 
       try {
-        const result = await countProspectsForFilter({
+        const result = await searchPageCountProspects({
           orgId,
           blocks,
           search,
           imported,
-          origin,
         });
         if (reqId !== reqIdRef.current) return; // stale — drop
 
@@ -72,7 +68,7 @@ export function useDebouncedFilters(
       if (timerRef.current) clearTimeout(timerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orgId, blocksKey, ms, search, imported, origin]);
+  }, [orgId, blocksKey, ms, search, imported]);
 
   return state;
 }

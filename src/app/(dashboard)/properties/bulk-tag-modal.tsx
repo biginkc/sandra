@@ -13,11 +13,10 @@ import {
 import { callAction } from "@/lib/errors/call-action";
 
 import {
-  createAndApplyCustomTagBulk,
-  createAndApplyCustomTagBulkFromFilters,
+  searchPageCreateAndApplyCustomTagBulk,
+  searchPageCreateAndApplyCustomTagBulkFromFilters,
   type BulkOutcome,
 } from "./dnc-safe-actions";
-import type { QueryOrigin } from "@/lib/prospects/search-scope";
 import type { FilterBlock } from "./prospects-query";
 import type { TagOption } from "./prospects-table";
 
@@ -28,7 +27,6 @@ type Props = {
     search?: string | null;
     blockStack: FilterBlock[];
     imported?: "today" | null;
-    origin?: QueryOrigin;
   };
   tags: TagOption[];
   allMatching: boolean;
@@ -94,15 +92,16 @@ export function BulkTagModal({
     setError(null);
     startTransition(async () => {
       const action = allMatching
-        ? createAndApplyCustomTagBulkFromFilters({
+        ? searchPageCreateAndApplyCustomTagBulkFromFilters({
             name: cleanName,
             color: null,
-            search: filterArgs?.search ?? null,
-            blockStack: filterArgs?.blockStack ?? [],
-            imported: filterArgs?.imported ?? null,
-            origin: filterArgs?.origin,
+            filters: {
+              search: filterArgs?.search ?? null,
+              blockStack: filterArgs?.blockStack ?? [],
+              imported: filterArgs?.imported ?? null,
+            },
           })
-        : createAndApplyCustomTagBulk({
+        : searchPageCreateAndApplyCustomTagBulk({
             name: cleanName,
             color: null,
             propertyIds,

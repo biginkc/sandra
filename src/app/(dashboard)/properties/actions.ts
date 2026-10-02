@@ -50,13 +50,12 @@ import {
   AD_HOC_BULK_SMS_SOURCE,
   filterToProspectIds,
 } from "@/lib/messaging/prospect-only-guard";
-import { parseQueryOrigin, type QueryOrigin } from "@/lib/prospects/search-scope";
 import {
   resolveSelection,
   selectAllMatching,
-  selectionFilters,
   type PropertySelection,
   type SelectAllResult,
+  type SelectionFilters,
 } from "@/lib/prospects/select-all";
 
 export async function listSmsTemplateCategories(): Promise<
@@ -103,12 +102,25 @@ export async function listSmsTemplateCategories(): Promise<
 async function resolveSelectionIds(
   selection: PropertySelection,
 ): Promise<Result<{ ids: string[]; skippedLeads: number }>> {
-  const resolved = await resolveSelection(selection);
+  const resolved = await resolveSelection(selection, "search");
   if (!resolved.ok) return resolved;
   return ok({ ids: resolved.data.ids, skippedLeads: resolved.data.skippedLeads });
 }
 
 export async function assessBulkSmsAudience(
+  propertyIds: string[],
+): Promise<Result<AudienceLineTypeAssessment>> {
+  try {
+    const supabase = await createClient();
+    return ok(await assessAudienceLineTypes(supabase, propertyIds));
+  } catch (e) {
+    reportError(e, { tags: { surface: "assess_bulk_sms_audience" } });
+    return errFromUnknown(e, "AUDIENCE_ASSESSMENT_FAILED");
+  }
+}
+
+/** Search page entry point: always Search semantics (cap, prospect-only guard, lead-skip reporting). */
+export async function searchPageAssessBulkSmsAudience(
   selection: PropertySelection,
 ): Promise<Result<AudienceLineTypeAssessment & { skippedLeads: number }>> {
   try {
@@ -445,27 +457,41 @@ async function markDeferredBulkSmsStartFailed(args: {
 }
 
 export async function bulkQueueSms(
+  propertyIds: string[],
+  opts: BulkSmsQueueOpts,
+): Promise<Result<BulkSmsOutcome>> {
+  return queueSmsInternal(propertyIds, opts, 0);
+}
+
+/**
+ * Search page entry point. A select-all-matching selection is re-resolved on the server with
+ * Search semantics and the select-all cap (ad-hoc only: saved campaigns send explicit frozen ids).
+ */
+export async function searchPageBulkQueueSms(
   selection: PropertySelection,
   opts: BulkSmsQueueOpts,
 ): Promise<Result<BulkSmsOutcome>> {
+  if (resolveProvidedCampaignId(opts) && !Array.isArray(selection)) {
+    return {
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message: "Saved campaigns send their frozen audience, not a filter selection.",
+      },
+    };
+  }
+  const resolved = await resolveSelectionIds(selection);
+  if (!resolved.ok) return resolved;
+  return queueSmsInternal(resolved.data.ids, opts, resolved.data.skippedLeads);
+}
+
+async function queueSmsInternal(
+  propertyIds: string[],
+  opts: BulkSmsQueueOpts,
+  filterSkippedLeads: number,
+): Promise<Result<BulkSmsOutcome>> {
   try {
     const supabase = await createClient();
-    const providedFor = resolveProvidedCampaignId(opts);
-    // A select-all-matching selection is ad-hoc only: saved campaigns send
-    // their frozen audience as explicit ids.
-    if (providedFor && !Array.isArray(selection)) {
-      return {
-        ok: false,
-        error: {
-          code: "VALIDATION",
-          message: "Saved campaigns send their frozen audience, not a filter selection.",
-        },
-      };
-    }
-    const resolvedSelection = await resolveSelectionIds(selection);
-    if (!resolvedSelection.ok) return resolvedSelection;
-    const propertyIds = resolvedSelection.data.ids;
-    const filterSkippedLeads = resolvedSelection.data.skippedLeads;
 
     // Resolve the current session user for audit/job ownership only.
     // `{{my_first_name}}` is a fixed outbound sender persona now.
@@ -703,8 +729,6 @@ type RawDialerPropertyRow = Omit<DialerPropertyRow, "homeowner"> & {
 };
 
 type CreateDialerBatchOptions = {
-  /** 'search_page' reports leads in the selection as `skippedLeads`; legacy callers get nothing new. */
-  origin?: QueryOrigin;
   title?: string;
   sourceKind?: "selected_ids" | "filters" | "list";
   sourceMeta?: Record<string, unknown>;
@@ -811,11 +835,17 @@ async function fetchEligibleDialerPropertyRows(
   });
 }
 
-export async function previewBatchEligibilityAction(
-  selection: PropertySelection,
+async function previewDialerInternal(
+  resolved: { ids: string[]; skippedLeads: number; dncLockedCount: number },
+  reportLeads: boolean,
 ): Promise<Result<BatchEligibilityCounts & { skippedLeads?: number }>> {
-  if (Array.isArray(selection) && selection.length === 0) {
-    return ok({ callable: 0, blocked: {}, missing: 0 });
+  if (resolved.ids.length === 0) {
+    return ok({
+      callable: 0,
+      blocked: {},
+      missing: 0,
+      ...(reportLeads ? { skippedLeads: resolved.skippedLeads } : {}),
+    });
   }
 
   try {
@@ -830,34 +860,21 @@ export async function previewBatchEligibilityAction(
       };
     }
 
-    // A select-all-matching is re-resolved on the server (no client id list).
-    const resolved = await resolveSelection(selection);
-    if (!resolved.ok) return resolved;
-    const searchOrigin = resolved.data.origin === "search_page";
-    if (resolved.data.ids.length === 0) {
-      return ok({
-        callable: 0,
-        blocked: {},
-        missing: 0,
-        ...(searchOrigin ? { skippedLeads: resolved.data.skippedLeads } : {}),
-      });
-    }
-
     const rowsResult = await fetchEligibleDialerPropertyRows(
       supabase,
-      resolved.data.ids,
+      resolved.ids,
     );
     if (!rowsResult.ok) return rowsResult;
 
     const counts = classifyForPreview(toClassifyInputs(rowsResult.data.rows));
-    const dncLocked = rowsResult.data.dncLockedCount + resolved.data.dncLockedCount;
+    const dncLocked = rowsResult.data.dncLockedCount + resolved.dncLockedCount;
     if (dncLocked > 0) {
       counts.blocked.dnc_locked = dncLocked;
     }
-    if (!searchOrigin) return ok(counts);
+    if (!reportLeads) return ok(counts);
     return ok({
       ...counts,
-      skippedLeads: resolved.data.skippedLeads + rowsResult.data.skippedLeadCount,
+      skippedLeads: resolved.skippedLeads + rowsResult.data.skippedLeadCount,
     });
   } catch (e) {
     reportError(e, { tags: { surface: "preview_batch_eligibility_action" } });
@@ -865,9 +882,46 @@ export async function previewBatchEligibilityAction(
   }
 }
 
+export async function previewBatchEligibilityAction(
+  propertyIds: string[],
+): Promise<Result<BatchEligibilityCounts>> {
+  return previewDialerInternal(
+    { ids: propertyIds, skippedLeads: 0, dncLockedCount: 0 },
+    false,
+  );
+}
+
+/**
+ * Search page entry point: always Search semantics. A select-all-matching is
+ * re-resolved server-side (capped); lead counts are reported for every selection.
+ */
+export async function searchPagePreviewBatchEligibility(
+  selection: PropertySelection,
+): Promise<Result<BatchEligibilityCounts & { skippedLeads?: number }>> {
+  const resolved = await resolveSelection(selection, "search");
+  if (!resolved.ok) return resolved;
+  return previewDialerInternal(resolved.data, true);
+}
+
 export async function createDialerBatchFromPropertyIds(
   propertyIds: string[],
   opts: CreateDialerBatchOptions = {},
+): Promise<Result<CreateDialerBatchResult>> {
+  return createDialerBatchInternal(propertyIds, opts, false);
+}
+
+/** Search page entry point: reports leads in the selection as server-derived `skippedLeads`. */
+export async function searchPageCreateDialerBatchFromPropertyIds(
+  propertyIds: string[],
+  opts: CreateDialerBatchOptions = {},
+): Promise<Result<CreateDialerBatchResult>> {
+  return createDialerBatchInternal(propertyIds, opts, true);
+}
+
+async function createDialerBatchInternal(
+  propertyIds: string[],
+  opts: CreateDialerBatchOptions,
+  reportLeads: boolean,
 ): Promise<Result<CreateDialerBatchResult>> {
   if (propertyIds.length === 0) {
     return {
@@ -1008,9 +1062,7 @@ export async function createDialerBatchFromPropertyIds(
       counts,
       // Search checkbox selections report leads server-side; legacy callers get
       // exactly the old result shape.
-      ...(parseQueryOrigin(opts.origin) === "search_page"
-        ? { skippedLeads: rowsResult.data.skippedLeadCount }
-        : {}),
+      ...(reportLeads ? { skippedLeads: rowsResult.data.skippedLeadCount } : {}),
     });
   } catch (e) {
     reportError(e, {
@@ -1025,15 +1077,15 @@ export async function createDialerBatchFromFilters(args: {
   blockStack: FilterBlock[];
   imported?: "today" | null;
   title?: string;
-  origin?: QueryOrigin;
-}): Promise<Result<CreateDialerBatchResult & { skippedLeads: number }>> {
-  const origin = parseQueryOrigin(args.origin);
-  const selectionResult = await getAllMatchingProspectSelection({
-    search: args.search ?? null,
-    blockStack: args.blockStack,
-    imported: args.imported ?? null,
-    origin,
-  });
+}): Promise<Result<CreateDialerBatchResult>> {
+  const selectionResult = await selectAllMatching(
+    {
+      search: args.search ?? null,
+      blockStack: args.blockStack,
+      imported: args.imported ?? null,
+    },
+    "legacy",
+  );
   if (!selectionResult.ok) return selectionResult;
 
   const result = await createDialerBatchFromPropertyIds(
@@ -1045,20 +1097,13 @@ export async function createDialerBatchFromFilters(args: {
         search: args.search ?? null,
         blockStack: args.blockStack,
         imported: args.imported ?? null,
-        // Legacy batches keep their exact historical source_meta shape.
-        ...(origin === "search_page" ? { origin } : {}),
       },
     },
   );
-  const skippedLeads = selectionResult.data.skippedLeads;
-  if (!result.ok) return result;
-  if (selectionResult.data.dncLockedCount === 0) {
-    return ok({ ...result.data, skippedLeads });
-  }
+  if (!result.ok || selectionResult.data.dncLockedCount === 0) return result;
 
   return ok({
     ...result.data,
-    skippedLeads,
     counts: {
       ...result.data.counts,
       blocked: {
@@ -1068,6 +1113,51 @@ export async function createDialerBatchFromFilters(args: {
           selectionResult.data.dncLockedCount,
       },
     },
+  });
+}
+
+/**
+ * Search page entry point: the filters are re-resolved with Search semantics and
+ * ALWAYS capped (an over-cap selection is an error, never a batch).
+ */
+export async function searchPageCreateDialerBatchFromFilters(args: {
+  filters: SelectionFilters;
+  title?: string;
+}): Promise<Result<CreateDialerBatchResult & { skippedLeads: number }>> {
+  const selectionResult = await selectAllMatching(args.filters, "search");
+  if (!selectionResult.ok) return selectionResult;
+
+  const result = await createDialerBatchInternal(
+    selectionResult.data.eligibleIds,
+    {
+      title: args.title,
+      sourceKind: "filters",
+      sourceMeta: {
+        search: args.filters.search ?? null,
+        blockStack: args.filters.blockStack,
+        imported: args.filters.imported ?? null,
+        origin: "search_page",
+      },
+    },
+    true,
+  );
+  if (!result.ok) return result;
+  const skippedLeads =
+    selectionResult.data.skippedLeads + (result.data.skippedLeads ?? 0);
+  const dncLocked = selectionResult.data.dncLockedCount;
+  return ok({
+    ...result.data,
+    skippedLeads,
+    counts:
+      dncLocked === 0
+        ? result.data.counts
+        : {
+            ...result.data.counts,
+            blocked: {
+              ...result.data.counts.blocked,
+              dnc_locked: (result.data.counts.blocked.dnc_locked ?? 0) + dncLocked,
+            },
+          },
   });
 }
 
@@ -1097,20 +1187,32 @@ export async function getAllMatchingProspectSelection(args: {
   search: string | null;
   blockStack: FilterBlock[];
   imported?: "today" | null;
-  /** Defaults to 'legacy'. Anything but the literal 'search_page' is legacy. */
-  origin?: QueryOrigin;
 }): Promise<Result<SelectAllResult>> {
-  return selectAllMatching(args);
+  // Legacy resolver: prospect-or-DNC status, unescaped address ilike, never capped.
+  return selectAllMatching(
+    { search: args.search, blockStack: args.blockStack, imported: args.imported ?? null },
+    "legacy",
+  );
 }
 
 export async function getAllMatchingProspectIds(args: {
   search: string | null;
   blockStack: FilterBlock[];
   imported?: "today" | null;
-  origin?: QueryOrigin;
 }): Promise<Result<string[]>> {
   const result = await getAllMatchingProspectSelection(args);
   return result.ok ? ok(result.data.eligibleIds) : result;
+}
+
+/**
+ * Search page entry point for "select all matching": always Search semantics (every status,
+ * training hidden, search_properties) and ALWAYS capped at SEARCH_SELECT_ALL_CAP. There is no
+ * origin or cap option; the client cannot downgrade it.
+ */
+export async function searchPageSelectAll(
+  filters: SelectionFilters,
+): Promise<Result<SelectAllResult>> {
+  return selectAllMatching(filters, "search");
 }
 
 /**
@@ -1124,7 +1226,49 @@ export async function getAllMatchingProspectIds(args: {
  *
  * Empty input short-circuits to ok(0) without a DB roundtrip.
  */
+async function countContactedAmong(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  propertyIds: string[],
+): Promise<Result<number>> {
+  const CHUNK = 250;
+  const distinct = new Set<string>();
+  for (let i = 0; i < propertyIds.length; i += CHUNK) {
+    const chunk = propertyIds.slice(i, i + CHUNK);
+    const { data, error } = await supabase
+      .from("messages")
+      .select("property_id")
+      .in("property_id", chunk)
+      .eq("direction", "outbound")
+      .in("status", CONTACTED_MESSAGE_STATUSES);
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "COUNT_CONTACTED_FAILED", message: error.message },
+      };
+    }
+    (data ?? [])
+      .map((r) => r.property_id)
+      .filter((v): v is string => typeof v === "string")
+      .forEach((v) => distinct.add(v));
+  }
+  return ok(distinct.size);
+}
+
 export async function countAlreadyContacted(
+  propertyIds: string[],
+): Promise<Result<number>> {
+  if (propertyIds.length === 0) return ok(0);
+  try {
+    const supabase = await createClient();
+    return await countContactedAmong(supabase, propertyIds);
+  } catch (e) {
+    reportError(e, { tags: { surface: "count_already_contacted" } });
+    return errFromUnknown(e, "COUNT_CONTACTED_FAILED");
+  }
+}
+
+/** Search page entry point: Search semantics, cap and the same prospect-only guard as the send. */
+export async function searchPageCountAlreadyContacted(
   selection: PropertySelection,
 ): Promise<Result<number>> {
   if (Array.isArray(selection) && selection.length === 0) return ok(0);
@@ -1132,31 +1276,8 @@ export async function countAlreadyContacted(
     const supabase = await createClient();
     const resolved = await resolveSelectionIds(selection);
     if (!resolved.ok) return resolved;
-    const propertyIds = resolved.data.ids;
-    // Same prospect-only guard as bulkQueueSms (counts match the real send).
-    const { prospectIds } = await filterToProspectIds(supabase, propertyIds);
-    const CHUNK = 250;
-    const distinct = new Set<string>();
-    for (let i = 0; i < prospectIds.length; i += CHUNK) {
-      const chunk = prospectIds.slice(i, i + CHUNK);
-      const { data, error } = await supabase
-        .from("messages")
-        .select("property_id")
-        .in("property_id", chunk)
-        .eq("direction", "outbound")
-        .in("status", CONTACTED_MESSAGE_STATUSES);
-      if (error) {
-        return {
-          ok: false,
-          error: { code: "COUNT_CONTACTED_FAILED", message: error.message },
-        };
-      }
-      (data ?? [])
-        .map((r) => r.property_id)
-        .filter((v): v is string => typeof v === "string")
-        .forEach((v) => distinct.add(v));
-    }
-    return ok(distinct.size);
+    const { prospectIds } = await filterToProspectIds(supabase, resolved.data.ids);
+    return await countContactedAmong(supabase, prospectIds);
   } catch (e) {
     reportError(e, { tags: { surface: "count_already_contacted" } });
     return errFromUnknown(e, "COUNT_CONTACTED_FAILED");

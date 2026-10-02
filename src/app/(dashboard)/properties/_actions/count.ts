@@ -3,16 +3,17 @@
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { requireOrgMembership } from "@/lib/auth/require-org-membership";
-import { filterSelectFragment } from "@/lib/prospects/filter-to-supabase";
+import {
+  applyFilters,
+  filterSelectFragment,
+} from "@/lib/prospects/filter-to-supabase";
+import type { BlockStack } from "@/lib/prospects/filter-schema";
 import {
   buildScopedQuery,
   mapSearchError,
-  parseQueryOrigin,
   resolveIncludeMessages,
   runWithSearchFallback,
-  type QueryOrigin,
 } from "@/lib/prospects/search-scope";
-import type { BlockStack } from "@/lib/prospects/filter-schema";
 import { createClient } from "@/lib/supabase/server";
 
 export type CountResult = { count: number };
@@ -28,10 +29,15 @@ export type CountResult = { count: number };
  * Debounce (250 ms) is applied CLIENT-side by Plan 06's drawer hook —
  * `useDebouncedFilters(filters, 250)`. This action runs on every call.
  *
- * Base predicates come from `buildScopedQuery` (search-scope.ts): origin
- * 'legacy' keeps `status = 'prospect' OR is_dnc_locked` (dropped when a
- * pipeline_status block is present); origin 'search_page' counts every
- * status, hides training rows and applies the page's search.
+ * Base predicates:
+ *   - `deleted_at IS NULL` (soft-delete; matches `idx_properties_active`)
+ *   - `status = 'prospect' OR is_dnc_locked = true` (locked history stays visible)
+ *
+ * The `pipeline_status` block (D-12 in 05-CONTEXT) is the only block that
+ * can broaden status beyond `prospect`. When a `pipeline_status` block is
+ * present in the stack, the base `status = 'prospect'` predicate is dropped
+ * and the block's translator (Plan 04) is responsible for emitting the
+ * appropriate IN/NOT IN clause.
  *
  * @returns Result<{ count: number }> — `count` is exact (not estimated)
  *          because R9 needs an authoritative number for "select all matching"
@@ -40,41 +46,72 @@ export type CountResult = { count: number };
 export async function countProspectsForFilter(input: {
   orgId: string;
   blocks: BlockStack;
-  /** Page `?search=`. Previously ignored (count drifted from the page). */
-  search?: string | null;
-  /** Page `?imported=today`. Previously ignored. */
-  imported?: "today" | null;
-  /** Defaults to 'legacy'; the Search page passes 'search_page'. */
-  origin?: QueryOrigin;
 }): Promise<Result<CountResult>> {
   try {
     await requireOrgMembership(input.orgId);
     const sb = await createClient();
-    const origin = parseQueryOrigin(input.origin);
 
-    let includeMessages = false;
-    if (origin === "search_page") {
-      try {
-        includeMessages = await resolveIncludeMessages();
-      } catch {
-        return {
-          ok: false,
-          error: {
-            code: "SEARCH_ACCESS_UNAVAILABLE",
-            message: "Membership access could not be verified. Please retry.",
-          },
-        };
-      }
+    // Base predicates: soft-delete + prospect default. The pipeline_status
+    // block (if present in the stack) replaces the prospect filter via the
+    // translator's contract (Plan 04 §case 16).
+    const hasPipelineBlock = input.blocks.some(
+      (b) => b.kind === "pipeline_status",
+    );
+
+    const propertyListSelect = filterSelectFragment(input.blocks);
+    const select = ["id", propertyListSelect].filter(Boolean).join(", ");
+
+    let q = sb
+      .from("properties")
+      .select(select, { count: "exact", head: true })
+      .is("deleted_at", null);
+    if (!hasPipelineBlock) q = q.or("status.eq.prospect,is_dnc_locked.eq.true");
+
+    q = (await applyFilters(q, input.blocks, sb)).builder;
+
+    const { count, error } = await q;
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "COUNT_FILTER_FAILED", message: error.message },
+      };
     }
+    return ok({ count: count ?? 0 });
+  } catch (e) {
+    reportError(e, { tags: { surface: "count_prospects_for_filter" } });
+    return errFromUnknown(e, "COUNT_FILTER_FAILED");
+  }
+}
 
-    // Base predicates (deleted_at, scope, training, search) come from the
-    // shared query context so this count can never drift from the page.
-    const select = ["id", filterSelectFragment(input.blocks)]
-      .filter(Boolean)
-      .join(", ");
+/**
+ * Search page live count (rows the page would show): always Search semantics
+ * (all statuses, training hidden, search_properties, `imported`), no origin option.
+ */
+export async function searchPageCountProspects(input: {
+  orgId: string;
+  blocks: BlockStack;
+  search?: string | null;
+  imported?: "today" | null;
+}): Promise<Result<CountResult>> {
+  try {
+    await requireOrgMembership(input.orgId);
+    const sb = await createClient();
+    let includeMessages = false;
+    try {
+      includeMessages = await resolveIncludeMessages();
+    } catch {
+      return {
+        ok: false,
+        error: {
+          code: "SEARCH_ACCESS_UNAVAILABLE",
+          message: "Membership access could not be verified. Please retry.",
+        },
+      };
+    }
+    const select = ["id", filterSelectFragment(input.blocks)].filter(Boolean).join(", ");
     const { result } = await runWithSearchFallback(async (opts) => {
       const { builder } = await buildScopedQuery(sb, {
-        origin,
+        origin: "search_page",
         select,
         selectOpts: { count: "exact", head: true },
         search: input.search ?? null,
@@ -89,7 +126,7 @@ export async function countProspectsForFilter(input: {
       };
     });
     if (result.error) {
-      const mapped = origin === "search_page" ? mapSearchError(result.error) : null;
+      const mapped = mapSearchError(result.error);
       return {
         ok: false,
         error: {
@@ -100,7 +137,7 @@ export async function countProspectsForFilter(input: {
     }
     return ok({ count: result.count ?? 0 });
   } catch (e) {
-    reportError(e, { tags: { surface: "count_prospects_for_filter" } });
+    reportError(e, { tags: { surface: "search_page_count_prospects" } });
     return errFromUnknown(e, "COUNT_FILTER_FAILED");
   }
 }

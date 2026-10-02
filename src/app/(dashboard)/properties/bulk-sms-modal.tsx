@@ -24,9 +24,9 @@ import {
 } from "../campaigns/actions";
 import { DeliverySelect } from "../campaigns/delivery-select";
 import {
-  assessBulkSmsAudience,
-  bulkQueueSms,
-  countAlreadyContacted,
+  searchPageAssessBulkSmsAudience,
+  searchPageBulkQueueSms,
+  searchPageCountAlreadyContacted,
   listSmsTemplateCategories,
 } from "./actions";
 import {
@@ -247,10 +247,10 @@ export function BulkSmsModal({
         setSelectedCategory(result.data[0]?.category ?? "");
       }
     });
-    countAlreadyContacted(selection).then((result) => {
+    searchPageCountAlreadyContacted(selection).then((result) => {
       if (result.ok) setContactedCount(result.data);
     });
-    assessBulkSmsAudience(selection).then((result) => {
+    searchPageAssessBulkSmsAudience(selection).then((result) => {
       if (result.ok) setAssessment(result.data);
     });
     listDeliveryOptions().then((result) => {
@@ -331,7 +331,7 @@ export function BulkSmsModal({
         : { ...baseOpts, body: customBody.trim() };
 
     startTransition(async () => {
-      const result = await callAction(bulkQueueSms(selection, opts), {
+      const result = await callAction(searchPageBulkQueueSms(selection, opts), {
         fallbackMessage: "Bulk SMS failed",
       });
       if (!result.ok) {

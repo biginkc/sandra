@@ -16,8 +16,8 @@ import {
 } from "@/components/ui/dialog";
 
 import {
-  createPromoteLeadsJob,
-  preflightPromoteLeads,
+  searchPageCreatePromoteLeadsJob,
+  searchPagePreflightPromoteLeads,
   type PromoteLeadsPreflight,
 } from "./promote-leads-actions";
 
@@ -53,7 +53,7 @@ export function PromoteLeadsDialog({
   useEffect(() => {
     if (!open) return;
     let canceled = false;
-    void callAction(preflightPromoteLeads({ orgId, propertyIds: filters ? [] : propertyIds, filters }), {
+    void callAction(searchPagePreflightPromoteLeads({ orgId, propertyIds: filters ? [] : propertyIds, filters }), {
       fallbackMessage: "Could not check these prospects",
     }).then((result) => {
       if (canceled) return;
@@ -71,7 +71,7 @@ export function PromoteLeadsDialog({
     setError(null);
     startTransition(async () => {
       const result = await callAction(
-        createPromoteLeadsJob({
+        searchPageCreatePromoteLeadsJob({
           orgId,
           propertyIds: filters ? [] : propertyIds,
           filters,

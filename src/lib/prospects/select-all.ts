@@ -12,7 +12,6 @@ import {
   SEARCH_SELECT_ALL_CAP,
   buildScopedQuery,
   mapSearchError,
-  parseQueryOrigin,
   resolveIncludeMessages,
   runWithSearchFallback,
   type QueryOrigin,
@@ -24,37 +23,27 @@ export type SelectionFilters = {
   search: string | null;
   blockStack: FilterBlock[];
   imported?: "today" | null;
-  origin?: QueryOrigin;
 };
 
 /**
- * A selection handed to a bulk action:
- *  - `string[]`: explicit ids with LEGACY semantics (byte-for-byte what the
- *    Prospects actions always did);
- *  - `{ ids, origin }`: explicit checkbox ids from a given origin (the Search
- *    page passes 'search_page', which turns on lead-skip reporting);
- *  - `{ filters }`: a select-all-matching, re-resolved on the server.
+ * How a filter selection is resolved. Chosen by the SERVER entry point, never by the client:
+ *  - 'legacy': byte-for-byte the pre-Search resolver (prospect-or-DNC status, unescaped address
+ *    ilike, uncapped). Used by the existing Prospects/campaign actions.
+ *  - 'search': Search-page semantics (all statuses, training hidden, search_properties, lead-skip
+ *    reporting) and ALWAYS capped at SEARCH_SELECT_ALL_CAP.
  */
-export type PropertySelection =
-  | string[]
-  | { ids: string[]; origin?: QueryOrigin }
-  | { filters: SelectionFilters };
+export type SelectMode = "legacy" | "search";
+
+/** Explicit checkbox ids, or the filters of a select-all-matching. */
+export type PropertySelection = string[] | { filters: SelectionFilters };
 
 export function selectionFilters(s: PropertySelection): SelectionFilters | null {
-  return !Array.isArray(s) && "filters" in s ? s.filters : null;
+  return Array.isArray(s) ? null : s.filters;
 }
 
 /** The explicit ids of a selection (empty for a filter selection). */
 export function selectionIds(s: PropertySelection): string[] {
-  if (Array.isArray(s)) return s;
-  return "ids" in s ? s.ids : [];
-}
-
-/** Anything but an explicit 'search_page' origin is legacy. */
-export function selectionOrigin(s: PropertySelection): QueryOrigin {
-  if (Array.isArray(s)) return "legacy";
-  if ("filters" in s) return parseQueryOrigin(s.filters.origin);
-  return parseQueryOrigin(s.origin);
+  return Array.isArray(s) ? s : [];
 }
 
 export type SelectAllResult = {
@@ -71,11 +60,11 @@ export type SelectAllResult = {
 
 export async function selectAllMatching(
   args: SelectionFilters,
-  opts: { enforceCap?: boolean } = {},
+  mode: SelectMode,
 ): Promise<Result<SelectAllResult>> {
   try {
     const supabase = await createClient();
-    const origin = parseQueryOrigin(args.origin);
+    const origin: QueryOrigin = mode === "search" ? "search_page" : "legacy";
 
     let includeMessages = false;
     if (origin === "search_page") {
@@ -100,10 +89,8 @@ export async function selectAllMatching(
       .filter(Boolean)
       .join(", ");
     const searchOrigin = origin === "search_page";
-    // The cap always applies to the search origin. Search-page actions also enforce it for a
-    // forged `legacy` origin (`enforceCap`); the legacy resolver itself (campaign audiences via
-    // getAllMatchingProspectIds) stays uncapped.
-    const capOn = searchOrigin || opts.enforceCap === true;
+    // Search mode is ALWAYS capped; legacy mode (campaign audiences) never was.
+    const capOn = mode === "search";
     let addressFallback = false;
 
     const failure = (error: { code?: string | null; message?: string }) => {
@@ -234,24 +221,23 @@ export type ResolvedSelection = {
   /** Filter selections only: every matched row. */
   matchedCount: number;
   fromFilters: boolean;
-  origin: QueryOrigin;
 };
 
 /**
- * Resolve any selection to ids on the server. A filter selection is re-resolved
- * (capped at SEARCH_SELECT_ALL_CAP whatever the claimed origin) and never trusts client ids; explicit ids pass
- * through so the per-action guards (eligibility, DNC) re-check them.
+ * Resolve any selection to ids on the server. A filter selection is re-resolved in the given mode
+ * ('search' is always capped) and never trusts client ids; explicit ids pass through so the
+ * per-action guards (eligibility, DNC) re-check them. The mode is chosen by the entry point.
  */
 export async function resolveSelection(
   selection: PropertySelection,
+  mode: SelectMode,
 ): Promise<Result<ResolvedSelection>> {
   const filters = selectionFilters(selection);
-  const origin = selectionOrigin(selection);
   if (!filters) {
     const ids = selectionIds(selection);
-    return ok({ ids, skippedLeads: 0, dncLockedCount: 0, dncLockedIds: [], matchedCount: ids.length, fromFilters: false, origin });
+    return ok({ ids, skippedLeads: 0, dncLockedCount: 0, dncLockedIds: [], matchedCount: ids.length, fromFilters: false });
   }
-  const resolved = await selectAllMatching(filters, { enforceCap: true });
+  const resolved = await selectAllMatching(filters, mode);
   if (!resolved.ok) return resolved;
   return ok({
     ids: resolved.data.eligibleIds,
@@ -260,6 +246,5 @@ export async function resolveSelection(
     dncLockedIds: resolved.data.dncLockedIds ?? [],
     matchedCount: resolved.data.matchedCount,
     fromFilters: true,
-    origin,
   });
 }
