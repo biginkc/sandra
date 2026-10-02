@@ -126,7 +126,13 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
     if (lock === null || !dncLocked(r.property_id)) return false;
     const settled = audit.find((a) => a.tbl === "norma_call_requests" && a.row_id === r.id && ["completed", "dispatch_rejected"].includes(String(a.new_row?.status)));
     if (!settled || lock > Number(settled.seq)) return false;
-    return open.every((t) => /needs review/i.test(String(t.title)));
+    // Each open task must be a review task that was created BEFORE the lock (its insert is
+    // recorded earlier in the audit trail); a task opened after the lock should never exist.
+    return open.every((t) => {
+      if (!/needs review/i.test(String(t.title))) return false;
+      const created = audit.find((a) => a.tbl === "tasks" && a.op === "INSERT" && a.row_id === t.id);
+      return created !== undefined && Number(created.seq) < lock;
+    });
   };
   const whyNotExcused = (r: Req, open: Record<string, unknown>[]) => {
     const prop = properties.get(r.property_id);
