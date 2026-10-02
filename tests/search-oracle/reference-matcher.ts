@@ -18,7 +18,7 @@ function btrimSpaces(s: string): string {
 
 /** left(btrim(q),100); codepoint-based like Postgres. */
 export function normalizeQuery(q: string | null | undefined): string {
-  return Array.from(btrimSpaces(q ?? "")).slice(0, 100).join("");
+  return Array.from(btrimSpaces(q ?? "").replace(/\s+/g, " ")).slice(0, 100).join("");
 }
 
 const digitsOnly = (s: string | null) => (s ?? "").replace(/[^0-9]/g, "");

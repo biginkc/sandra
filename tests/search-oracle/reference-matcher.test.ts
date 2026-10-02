@@ -28,6 +28,11 @@ describe("reference matcher", () => {
     expect(run(f, "ma")).toEqual([]); // <3 chars
     expect(run(f, "  ma  ")).toEqual([]); // trimmed first
   });
+  it("collapses internal whitespace runs", () => {
+    const f = fx({ contacts: [contact({ id: "c1", entity_name: "Doe Family Trust" })], properties: [prop({ id: "p1", homeowner_contact_id: "c1" })] });
+    expect(run(f, "doe   family")).toEqual(["p1"]);
+    expect(run(f, "doe\t \nfamily")).toEqual(["p1"]);
+  });
   it("hostile chars are literal", () => {
     const f = fx({ properties: [prop({ id: "p1", address: "50% off_x" }), prop({ id: "p2", address: "abcdef" })] });
     expect(run(f, "%")).toEqual([]);
