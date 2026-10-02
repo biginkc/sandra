@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { Client, type Pool } from "pg";
@@ -23,14 +23,11 @@ const SOURCE_URL = requireLoopbackPostgresUrl(
   process.env.NORMA_STRESS_SOURCE_DB_URL ?? process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
 
-const ALL_MIGRATIONS = [
-  "20261002020000_norma_call_requests.sql",
-  "20261002030000_norma_m2_hardening.sql",
-  "20261002040000_norma_m2_review_fixes.sql",
-  "20261002050000_norma_dnc_lock_task_writes.sql",
-  "20261002060000_norma_create_request_serialize.sql",
-  "20261002070000_norma_lock_order.sql",
-];
+// Every Norma migration, in version order, found by name so a new one can never be forgotten.
+const MIGRATIONS_DIR = path.join(process.cwd(), "supabase/migrations");
+const ALL_MIGRATIONS = readdirSync(MIGRATIONS_DIR)
+  .filter((file) => /^\d{14}_norma_.+\.sql$/.test(file))
+  .sort();
 
 // NORMA_STRESS_EXCLUDE_MIGRATIONS (comma-separated file names) leaves later fix
 // migrations out, to prove a regression test fails without its fix.
@@ -168,7 +165,7 @@ export async function createScratchDb(): Promise<Scratch> {
   await setup.connect();
   try {
     for (const file of MIGRATIONS) {
-      await setup.query(readFileSync(path.join(process.cwd(), "supabase/migrations", file), "utf8"));
+      await setup.query(readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"));
     }
     await setup.query(AUDIT_SQL);
   } catch (error) {
