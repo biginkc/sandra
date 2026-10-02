@@ -44,7 +44,7 @@ async function expectProspectTotal(
 ) {
   if (expected === 0) {
     await expect(
-      page.getByText(/No prospects\. Import a CSV to fill the data lake\./i),
+      page.getByText(/No leads or prospects yet\. Import a CSV to fill the data lake\./i),
     ).toBeVisible();
     return;
   }
@@ -53,7 +53,7 @@ async function expectProspectTotal(
   await expect(
     page.getByText(
       new RegExp(
-        `Showing 1[–-]${pageEnd} of ${expected.toLocaleString()} prospects?`,
+        `Showing 1[–-]${pageEnd} of ${expected.toLocaleString()} results?`,
       ),
     ),
   ).toBeVisible();
@@ -161,7 +161,7 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
       );
 
       await expect(
-        page.getByText(/Failed to load prospects: Bad Request/i),
+        page.getByText(/Failed to load results: Bad Request/i),
       ).not.toBeVisible({ timeout: 10_000 });
       await expect(page.getByText(prefix).first()).toBeVisible({
         timeout: 10_000,
@@ -182,7 +182,7 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
         ])}`,
       );
       await expect(
-        page.getByText(/Failed to load prospects: Bad Request/i),
+        page.getByText(/Failed to load results: Bad Request/i),
       ).not.toBeVisible({ timeout: 10_000 });
       await expectProspectTotal(page, expectedNotCount ?? 0);
       expect(errors.filter((error) => error.includes("/properties"))).toEqual(

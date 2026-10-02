@@ -43,7 +43,7 @@ function renderModal(
     open: boolean;
     onClose: () => void;
     selectedIds?: string[];
-    filterArgs?: { search?: string | null; blockStack: FilterBlock[] };
+    filterArgs?: { search?: string | null; blockStack: FilterBlock[]; origin?: "legacy" | "search_page" };
     totalCount: number;
   }> = {},
 ) {
@@ -194,6 +194,34 @@ describe("<BatchCreateModal />", () => {
         imported: null,
         title: undefined,
       }),
+    );
+  });
+
+  it("filter mode shows how many leads were skipped and forwards the search origin", async () => {
+    const user = userEvent.setup();
+    getAllMatchingProspectSelection.mockResolvedValue({
+      ok: true,
+      data: { eligibleIds: ["p1", "p2"], eligibleCount: 2, dncLockedCount: 0, matchedCount: 5, skippedLeads: 3 },
+    });
+    createDialerBatchFromFilters.mockResolvedValue({
+      ok: true,
+      data: { batchId: "batch-s", counts: { callable: 1, blocked: {}, missing: 0 }, skippedLeads: 3 },
+    });
+    renderModal({
+      filterArgs: { search: "foo", blockStack: defaultBlockStack, origin: "search_page" },
+      totalCount: 2,
+    });
+    expect(await screen.findByTestId("batch-skipped-leads")).toHaveTextContent(/3 leads skipped/);
+    expect(getAllMatchingProspectSelection).toHaveBeenCalledWith(
+      expect.objectContaining({ origin: "search_page" }),
+    );
+
+    await screen.findByText("5 callable");
+    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+    expect(toastSuccess.mock.calls[0][0]).toContain("3 leads skipped");
+    expect(createDialerBatchFromFilters).toHaveBeenCalledWith(
+      expect.objectContaining({ origin: "search_page" }),
     );
   });
 

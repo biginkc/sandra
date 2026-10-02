@@ -20,8 +20,8 @@ function filterUrl(blocks: Array<Record<string, unknown>>) {
 }
 
 function parseProspectCount(header: string) {
-  if (/No prospects/i.test(header)) return 0;
-  const match = header.match(/of\s+([\d,]+)\s+prospect/i);
+  if (/No results/i.test(header)) return 0;
+  const match = header.match(/of\s+([\d,]+)\s+result/i);
   if (!match) throw new Error(`Could not parse prospect count from: ${header}`);
   return Number(match[1].replace(/,/g, ""));
 }
@@ -31,9 +31,9 @@ async function readFilteredPage(
   blocks: Array<Record<string, unknown>> = [],
 ) {
   await page.goto(blocks.length > 0 ? filterUrl(blocks) : "/properties");
-  await page.getByRole("heading", { name: "Prospects" }).waitFor();
+  await page.getByRole("heading", { name: "Search" }).waitFor();
   await expect(
-    page.getByText(/Failed to load prospects: Bad Request/i),
+    page.getByText(/Failed to load results: Bad Request/i),
   ).not.toBeVisible({ timeout: 5_000 });
 
   const header = (await page.locator("main p").first().textContent()) ?? "";

@@ -77,7 +77,7 @@ test("production canary applies and clears the High Equity quick preset", async 
     });
     await expect(page.getByText(lowEquity.address)).toBeVisible();
     await expect(page.getByText(noEquity.address)).toBeVisible();
-    await expect(page.getByText(/Showing 1.*of 3 prospects/i)).toBeVisible();
+    await expect(page.getByText(/Showing 1.*of 3 results/i)).toBeVisible();
 
     const highEquityChip = page
       .locator("[data-quick-filters-bar]")
@@ -98,7 +98,7 @@ test("production canary applies and clears the High Equity quick preset", async 
     });
     await expect(page.getByText(lowEquity.address)).not.toBeVisible();
     await expect(page.getByText(noEquity.address)).not.toBeVisible();
-    await expect(page.getByText(/Showing 1.*of 1 prospect/i)).toBeVisible();
+    await expect(page.getByText(/Showing 1.*of 1 result/i)).toBeVisible();
 
     await page.evaluate(() => {
       (window as unknown as { __saveFilterNoReloadMarker?: string })
@@ -161,7 +161,7 @@ test("production canary applies and clears the High Equity quick preset", async 
     });
     await expect(page.getByText(lowEquity.address)).toBeVisible();
     await expect(page.getByText(noEquity.address)).toBeVisible();
-    await expect(page.getByText(/Showing 1.*of 3 prospects/i)).toBeVisible();
+    await expect(page.getByText(/Showing 1.*of 3 results/i)).toBeVisible();
   } finally {
     await deleteCanarySavedFiltersByName(supabase, savedFilterName);
     await deleteCanaryPropertiesByAddressPrefix(supabase, prefix);

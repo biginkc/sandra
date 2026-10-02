@@ -25,14 +25,14 @@ async function openFilteredProperties(
   expectedAddresses: string[] = [],
 ) {
   await page.goto(`/properties?filters=${encodedFilters(blocks)}`);
-  await expect(page.getByText(/Failed to load prospects/i)).not.toBeVisible({
+  await expect(page.getByText(/Failed to load results/i)).not.toBeVisible({
     timeout: 10_000,
   });
 
   if (expectedCount === 0) {
     await expect(
       page.getByRole("cell", {
-        name: /No prospects\. Import a CSV to fill the data lake\./i,
+        name: /No leads or prospects yet\. Import a CSV to fill the data lake\./i,
       }),
     ).toBeVisible({ timeout: 10_000 });
     return;
@@ -41,7 +41,7 @@ async function openFilteredProperties(
   await expect(
     page
       .getByText(
-        new RegExp(`Showing 1.* of ${expectedCount.toLocaleString()} prospect`),
+        new RegExp(`Showing 1.* of ${expectedCount.toLocaleString()} result`),
       )
       .first(),
   ).toBeVisible({ timeout: 10_000 });

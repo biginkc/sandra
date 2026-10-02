@@ -50,4 +50,12 @@ describe("Search page permanent DNC display contract", () => {
     expect(source).toContain('searchModeFor("search_page", search) === "rpc"');
     expect(source).toContain("if (total === 0 || globalSearchActive) return null;");
   });
+
+  it("message previews and the engagement pill are gated by the server-derived include_messages flag", () => {
+    expect(source).toContain("includeMessages = await resolveIncludeMessages()");
+    expect(source).toContain("if (includeMessages && pageIds.length > 0)");
+    // A lookup failure keeps message search OFF and is surfaced, never ignored.
+    expect(source).toContain("membershipError");
+    expect(source).not.toMatch(/includeMessages\s*=\s*true/);
+  });
 });

@@ -385,7 +385,7 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
       { label: /^Overview$/, href: "/dashboard" },
       { label: /^Calendar$/, href: "/calendar" },
       { label: /^Leads$/, href: "/leads" },
-      { label: /^Prospects$/, href: "/properties" },
+      { label: /^Search$/, href: "/properties" },
       { label: /^Lists$/, href: "/lists" },
       { label: /^Campaigns$/, href: "/campaigns" },
       { label: /^Drips$/, href: "/sequences" },

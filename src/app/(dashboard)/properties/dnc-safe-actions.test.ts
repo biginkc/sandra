@@ -3,10 +3,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   assignUnsafe,
   createClientMock,
+  createTagUnsafe,
   preflightUnsafe,
   requestUnsafe,
+  selectionMock,
   verifyUnsafe,
 } = vi.hoisted(() => ({
+  createTagUnsafe: vi.fn(),
+  selectionMock: vi.fn(),
   assignUnsafe: vi.fn(),
   createClientMock: vi.fn(),
   preflightUnsafe: vi.fn(),
@@ -18,7 +22,7 @@ vi.mock("../leads/actions", () => ({
   addPropertiesToListBulk: vi.fn(),
   applyTagBulk: vi.fn(),
   assignLeadsBulk: assignUnsafe,
-  createAndApplyCustomTagBulk: vi.fn(),
+  createAndApplyCustomTagBulk: createTagUnsafe,
   deletePropertiesBulk: vi.fn(),
   qualifyLeadsBulk: vi.fn(),
   removePropertiesFromListBulk: vi.fn(),
@@ -31,10 +35,14 @@ vi.mock("@/lib/skip-trace/actions", () => ({
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient: createClientMock }));
-vi.mock("./actions", () => ({ getAllMatchingProspectIds: vi.fn() }));
+vi.mock("./actions", () => ({
+  getAllMatchingProspectIds: vi.fn(),
+  getAllMatchingProspectSelection: selectionMock,
+}));
 
 import {
   assignLeadsBulk,
+  createAndApplyCustomTagBulkFromFilters,
   preflightProspectSkipTrace,
   requestProspectSkipTrace,
   verifyPropertiesBulk,
@@ -159,5 +167,60 @@ describe("Prospects DNC-safe bulk actions", () => {
     expect(requestUnsafe).not.toHaveBeenCalled();
     expect(result.ok && result.data.status).toBe("none_eligible");
     expect(result.ok && result.data.dncLockedSkipped).toBe(1);
+  });
+
+  it("reports leads in a selection as skipped instead of silently dropping them", async () => {
+    const result = await assignLeadsBulk(["lead-not-in-prospect-set", "eligible"], "user-1");
+
+    expect(assignUnsafe).toHaveBeenCalledWith(["eligible"], "user-1");
+    expect(result.ok && result.data.skippedLeads).toBe(1);
+  });
+
+  it("omits skippedLeads when nothing was skipped", async () => {
+    const result = await assignLeadsBulk(["eligible"], "user-1");
+    expect(result.ok && "skippedLeads" in result.data).toBe(false);
+  });
+
+  it("tag-from-filters forwards the origin and adds the matched-lead skip count", async () => {
+    selectionMock.mockResolvedValue({
+      ok: true,
+      data: { eligibleIds: ["eligible"], eligibleCount: 1, dncLockedCount: 0, matchedCount: 4, skippedLeads: 3 },
+    });
+    createTagUnsafe.mockResolvedValue({
+      ok: true,
+      data: { tag: { id: "t" }, outcome: { succeeded: 1, skipped: 0, failed: [] } },
+    });
+
+    const result = await createAndApplyCustomTagBulkFromFilters({
+      name: "wave",
+      search: "jane",
+      blockStack: [],
+      origin: "search_page",
+    });
+
+    expect(selectionMock).toHaveBeenCalledWith({
+      search: "jane",
+      blockStack: [],
+      imported: null,
+      origin: "search_page",
+    });
+    expect(createTagUnsafe).toHaveBeenCalledWith(
+      expect.objectContaining({ propertyIds: ["eligible"] }),
+    );
+    expect(result.ok && result.data.outcome.skippedLeads).toBe(3);
+  });
+
+  it("tag-from-filters without an origin stays legacy (origin undefined is forwarded as-is)", async () => {
+    selectionMock.mockResolvedValue({
+      ok: true,
+      data: { eligibleIds: ["eligible"], eligibleCount: 1, dncLockedCount: 0, matchedCount: 1, skippedLeads: 0 },
+    });
+    createTagUnsafe.mockResolvedValue({
+      ok: true,
+      data: { tag: { id: "t" }, outcome: { succeeded: 1, skipped: 0, failed: [] } },
+    });
+    const result = await createAndApplyCustomTagBulkFromFilters({ name: "w", search: null, blockStack: [] });
+    expect(selectionMock.mock.calls[0][0].origin).toBeUndefined();
+    expect(result.ok && "skippedLeads" in result.data.outcome).toBe(false);
   });
 });
