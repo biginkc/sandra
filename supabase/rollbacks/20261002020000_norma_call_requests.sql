@@ -2,6 +2,9 @@
 -- resume_sequence_enrollment from 20260919090000_sequence_runtime_recovery and
 -- removes the Norma tables, functions and tasks.source_key. Run only when no
 -- enrollment is paused with pause_reason = 'norma_call' (resume them first).
+-- MUST ship together with a code revert: the stale-call sweep, the sequence
+-- tick, resumeByProperty and the inbound reply path call the objects dropped
+-- here (sweep_resume_call_in_progress, norma_call_requests, fn_norma_*).
 begin;
 
 drop function if exists public.sweep_resume_call_in_progress(uuid[], timestamptz);

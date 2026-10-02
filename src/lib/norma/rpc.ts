@@ -2,13 +2,14 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database, Json } from "@/lib/supabase/types";
 
-import type {
-  NormaBindResult,
-  NormaCompleteResult,
-  NormaCompletionPayload,
-  NormaCreateResult,
-  NormaEligibility,
-  NormaOutcome,
+import {
+  NORMA_OPEN_STATUSES,
+  type NormaBindResult,
+  type NormaCompleteResult,
+  type NormaCompletionPayload,
+  type NormaCreateResult,
+  type NormaEligibility,
+  type NormaOutcome,
 } from "./types";
 
 /**
@@ -20,7 +21,13 @@ import type {
  */
 type Client = SupabaseClient<Database>;
 
-function fail(name: string, error: { message: string }): never {
+/** Thrown when an RPC is missing because the migration has not been applied. */
+export class NormaMissingFunctionError extends Error {}
+
+function fail(name: string, error: { message: string; code?: string }): never {
+  if (error.code === "PGRST202" || error.code === "42883") {
+    throw new NormaMissingFunctionError(`${name}: ${error.message}`);
+  }
   throw new Error(`${name}: ${error.message}`);
 }
 
@@ -181,3 +188,27 @@ export async function sweepResumeCallInProgress(
   if (error) fail("sweep_resume_call_in_progress", error);
   return data ?? 0;
 }
+
+/**
+ * Session-readable check for an open Norma request on a lead (RLS lets any
+ * active member read requests). Used by user-facing enrol/change paths, which
+ * cannot call the service-role-only hold function. A missing table (code
+ * deployed before the migration) means no hold; any other error throws so the
+ * caller fails closed.
+ */
+export async function hasOpenNormaRequest(client: Client, propertyId: string): Promise<boolean> {
+  const { data, error } = await client
+    .from("norma_call_requests")
+    .select("id")
+    .eq("property_id", propertyId)
+    .in("status", [...NORMA_OPEN_STATUSES])
+    .limit(1);
+  if (error) {
+    if (error.code === "PGRST205" || error.code === "42P01") return false;
+    fail("hasOpenNormaRequest", error);
+  }
+  return (data?.length ?? 0) > 0;
+}
+
+export const NORMA_HOLD_MESSAGE =
+  "A Norma call is open for this lead, so its drip can't be started or changed until that call is resolved.";

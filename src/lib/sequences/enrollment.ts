@@ -5,6 +5,7 @@ import { getConsentState } from "@/lib/messaging/consent";
 import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
 import { evaluateSuppression, HUMAN_OWNED_DISPOS } from "@/lib/messaging/suppression";
 import { reportError } from "@/lib/errors/report";
+import { hasOpenNormaRequest, NORMA_HOLD_MESSAGE } from "@/lib/norma";
 import type { Database } from "@/lib/supabase/types";
 import {
   LEAD_EVENT_TYPES,
@@ -49,6 +50,15 @@ export async function enrollLead(
   },
 ): Promise<EnrollmentOutcome> {
   await assertNotTrainingTarget(client, { propertyId: params.propertyId });
+  // An open Norma request holds the lead: a new active enrollment would run
+  // while she is calling.
+  try {
+    if (await hasOpenNormaRequest(client, params.propertyId)) {
+      return { status: "suppressed", message: NORMA_HOLD_MESSAGE };
+    }
+  } catch (error) {
+    return { status: "failed", message: error instanceof Error ? error.message : "Could not check for an open Norma call." };
+  }
   // Load sequence + first step (one round-trip via nested select).
   const { data: seq, error: seqErr } = await client
     .from("sequences")

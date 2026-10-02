@@ -826,15 +826,19 @@ export async function handleInboundWebhook(
       );
       if (!propertyEnrollmentsPauseCompleted) {
         try {
-          await pausePropertyEnrollments(supabase, {
-            propertyId: effectivePropertyId,
-            reason: "inbound_reply",
-          });
           // pausePropertyEnrollments only touches active rows. While a Norma
           // call holds this lead, enrollments already paused as `norma_call`
           // or a held `call_in_progress` must also record the reply, or a
           // later Norma no-answer / softphone cleanup could resume them.
+          // This runs BEFORE the pause: if a Norma no-answer completed between
+          // the two steps, the release would reactivate the row and the
+          // upgrade would then see no hold. In this order the pause that
+          // follows catches anything the release reactivated.
           await upgradeNormaHoldPauses(supabase, {
+            propertyId: effectivePropertyId,
+            reason: "inbound_reply",
+          });
+          await pausePropertyEnrollments(supabase, {
             propertyId: effectivePropertyId,
             reason: "inbound_reply",
           });
@@ -916,6 +920,12 @@ export async function handleInboundWebhook(
           // Cover both states and only then acknowledge the takeover so the
           // exact reason is durable even across retries or concurrent
           // deliveries.
+          // Upgrade Norma-held pauses first (see the reply path above), then
+          // pause and promote whatever remains.
+          await upgradeNormaHoldPauses(supabase, {
+            propertyId: effectivePropertyId,
+            reason: REP_SMS_HUMAN_TAKEOVER_REASON,
+          });
           await pausePropertyEnrollments(supabase, {
             propertyId: effectivePropertyId,
             reason: REP_SMS_HUMAN_TAKEOVER_REASON,
@@ -923,10 +933,6 @@ export async function handleInboundWebhook(
           await promotePropertyEnrollmentPauseReason(supabase, {
             propertyId: effectivePropertyId,
             fromReason: "inbound_reply",
-            reason: REP_SMS_HUMAN_TAKEOVER_REASON,
-          });
-          await upgradeNormaHoldPauses(supabase, {
-            propertyId: effectivePropertyId,
             reason: REP_SMS_HUMAN_TAKEOVER_REASON,
           });
           if (!propertyEnrollmentsPauseCompleted) {

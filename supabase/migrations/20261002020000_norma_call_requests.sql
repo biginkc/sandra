@@ -305,9 +305,15 @@ begin
     eligible := false; block_reason := 'dnc_contact';
     return next; return;
   end if;
-  if p_phone_e164 not in (
-       coalesce(v_contact.phone_1, ''), coalesce(v_contact.phone_2, ''), coalesce(v_contact.phone_3, '')
-     ) then
+  -- contacts.phone_1..3 have no format constraint. CSV import writes +1XXXXXXXXXX
+  -- (normalizePhone) but other writers may store "(816) 555-0142", so compare
+  -- the last 10 digits of each side (US numbers only).
+  if not exists (
+    select 1
+      from unnest(array[v_contact.phone_1, v_contact.phone_2, v_contact.phone_3]) as t(ph)
+     where length(regexp_replace(coalesce(ph, ''), '\D', '', 'g')) >= 10
+       and right(regexp_replace(ph, '\D', '', 'g'), 10) = right(p_phone_e164, 10)
+  ) then
     eligible := false; block_reason := 'phone_not_on_contact';
     return next; return;
   end if;
@@ -1021,8 +1027,11 @@ begin
        v_task_due, coalesce(r.requested_by, r.callback_assignee_id), v_task_desc, v_task_key)
     on conflict (org_id, source_key) where source_key is not null do update
        set type = excluded.type, title = excluded.title, due_at = excluded.due_at,
-           description = excluded.description, updated_at = now()
-     where public.tasks.status in ('open', 'snoozed')
+           description = excluded.description, updated_at = now(),
+           -- A human may already have closed the review task. The real outcome
+           -- still needs follow-up, so it is reopened. Replays never reach here
+           -- (a completed request returns early).
+           status = 'open', snoozed_until = null, completed_at = null, completed_by = null
     returning id into v_task_id;
 
     if v_task_id is not null then

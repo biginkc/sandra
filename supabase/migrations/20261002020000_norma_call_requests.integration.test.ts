@@ -137,6 +137,10 @@ async function enrollmentState(db: Client, id: string) {
   );
 }
 
+// NOTE: these tests run on one connection inside one transaction, so the
+// "interleaving" / "race" cases are ORDERING tests: they replay a specific
+// sequence of events deterministically. They are not concurrency proof; real
+// two-connection barrier tests belong to the stress-gate milestone.
 describe("norma_call_requests data layer", () => {
   it("eligibility: allows a clean lead and blocks DNC lock, contact DNC, global registry, ownership, not_interested", async () => {
     await withDb(async (db, ctx) => {
@@ -417,6 +421,37 @@ describe("norma_call_requests data layer", () => {
     });
   });
 
+  it("a late real outcome reopens a review task a human already closed", async () => {
+    await withDb(async (db, ctx) => {
+      for (const closed of ["completed", "cancelled"]) {
+        const l = await lead(db, ctx);
+        const id = (await create(db, ctx, l)).request_id!;
+        const callId = await dispatched(db, id);
+        await svc(db, "select public.fn_norma_mark_needs_review($1,'stuck')", [id]);
+        await db.query("update public.tasks set status=$2, completed_at=case when $2='completed' then now() end where related_property_id=$1", [l.property, closed]);
+        expect(await complete(db, id, callId, "callback_requested", { callback_requested_for: "2026-10-06T14:00:00Z" })).toMatchObject({ result: "applied" });
+        const rows = (await db.query("select status,type,due_at,completed_at,title from public.tasks where related_property_id=$1", [l.property])).rows;
+        expect(rows, closed).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ status: "open", type: "callback", completed_at: null });
+        expect(new Date(rows[0].due_at).toISOString()).toBe("2026-10-06T14:00:00.000Z");
+        expect(rows[0].title).not.toMatch(/needs review/i);
+      }
+    });
+  });
+
+  it("phone ownership compares the last 10 digits, so stored formatting does not matter", async () => {
+    await withDb(async (db, ctx) => {
+      const l = await lead(db, ctx);
+      await db.query("update public.contacts set phone_1=$2 where id=$1", [l.contact, "(816) 555-0142"]);
+      const el = (phone: string) =>
+        svc<{ eligible: boolean; block_reason: string | null }>(db, "select * from public.fn_norma_eligibility($1,$2,$3)", [l.property, l.contact, phone]).then((r) => r.rows[0]!);
+      expect(await el("+18165550142")).toEqual({ eligible: true, block_reason: null });
+      expect(await el("+18165550143")).toEqual({ eligible: false, block_reason: "phone_not_on_contact" });
+      await db.query("update public.contacts set phone_1=$2 where id=$1", [l.contact, "555-0142"]);
+      expect((await el("+18165550142")).block_reason).toBe("phone_not_on_contact");
+    });
+  });
+
   it("an unmapped result parks the request in needs_review with a task, keeps the hold, and a later real outcome still applies once", async () => {
     await withDb(async (db, ctx) => {
       const l = await lead(db, ctx);
@@ -582,7 +617,7 @@ describe("norma_call_requests data layer", () => {
     });
   });
 
-  it("softphone pause under a Norma hold: cleanup and the stale sweep do not resume; no_answer lets the sweep resume; reached keeps it paused", async () => {
+  it("softphone pause under a Norma hold (ordering test): cleanup and the stale sweep do not resume; no_answer lets the sweep resume; reached keeps it paused", async () => {
     await withDb(async (db, ctx) => {
       const sweepIds = (l: Lead) => [l.enrollment];
       const resume = async (l: Lead, expected: string | null) =>
@@ -635,7 +670,7 @@ describe("norma_call_requests data layer", () => {
     });
   });
 
-  it("[I1] cleanup selects -> reply upgrades -> Norma no-answer -> cleanup RPC: the reply pause survives", async () => {
+  it("[I1] ordering test: cleanup selects -> reply upgrades -> Norma no-answer -> cleanup RPC: the reply pause survives", async () => {
     await withDb(async (db, ctx) => {
       for (const reason of ["inbound_reply", "rep_sms_human_takeover"] as const) {
         // existing softphone pause, then a Norma request

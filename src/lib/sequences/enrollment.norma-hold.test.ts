@@ -79,3 +79,33 @@ describe("Norma hold in the TypeScript resume paths", () => {
     expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 });
+
+describe("enrolling while a Norma request holds the lead", () => {
+  it("enrollLead refuses with a clear message and reads nothing else", async () => {
+    const from = vi.fn((table: string) => {
+      if (table === "norma_call_requests") {
+        const b: Record<string, unknown> = {};
+        for (const m of ["select", "eq", "in"]) b[m] = () => b;
+        b.limit = () => Promise.resolve({ data: [{ id: "r" }], error: null });
+        return b;
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+    const { enrollLead } = await import("./enrollment");
+    const outcome = await enrollLead({ from } as unknown as SupabaseClient<Database>, { sequenceId: "s", propertyId: "p" });
+    expect(outcome).toMatchObject({ status: "suppressed", message: expect.stringContaining("Norma call is open") });
+    expect(from).toHaveBeenCalledTimes(1);
+  });
+
+  it("enrollLead fails closed if the hold cannot be read", async () => {
+    const from = vi.fn(() => {
+      const b: Record<string, unknown> = {};
+      for (const m of ["select", "eq", "in"]) b[m] = () => b;
+      b.limit = () => Promise.resolve({ data: null, error: { code: "XX000", message: "db down" } });
+      return b;
+    });
+    const { enrollLead } = await import("./enrollment");
+    await expect(enrollLead({ from } as unknown as SupabaseClient<Database>, { sequenceId: "s", propertyId: "p" }))
+      .resolves.toMatchObject({ status: "failed" });
+  });
+});

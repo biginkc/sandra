@@ -85,4 +85,26 @@ describe("stuck call-in-progress sweep route", () => {
     }));
     await expect(response.json()).resolves.toEqual({ ok: true, candidates: 1, resumed: 0, skippedCompletedWrapups: 0 });
   });
+
+  it("falls back to the original activation when deployed before the migration", async () => {
+    const updates: unknown[] = [];
+    from.mockImplementation((table: string) => {
+      const builder: Record<string, unknown> = {};
+      for (const method of ["select", "eq", "lt", "order", "limit", "in", "not"]) builder[method] = () => builder;
+      builder.update = (patch: unknown) => { updates.push(patch); return builder; };
+      builder.then = (resolve: (value: unknown) => unknown) =>
+        Promise.resolve(
+          table === "sequence_enrollments" && updates.length === 0
+            ? { data: [{ id: "e", property_id: "p", updated_at: "2026-08-21T14:00:00.000Z" }], error: null }
+            : table === "call_activities" ? { data: [], error: null } : { count: 1, error: null },
+        ).then(resolve);
+      return builder;
+    });
+    rpc.mockResolvedValue({ data: null, error: { code: "PGRST202", message: "Could not find the function" } });
+    const response = await POST(new Request("http://localhost/api/cron/sweep-stuck-call-in-progress", {
+      headers: { authorization: "Bearer test-secret" },
+    }));
+    await expect(response.json()).resolves.toMatchObject({ ok: true, candidates: 1, resumed: 1 });
+    expect(updates).toHaveLength(1);
+  });
 });

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
-import { sweepResumeCallInProgress } from "@/lib/norma";
+import { NormaMissingFunctionError, sweepResumeCallInProgress } from "@/lib/norma";
 import type { Database } from "@/lib/supabase/types";
 
 /**
@@ -77,10 +77,23 @@ async function runSoftphoneSweep(
   // The activation re-checks everything under each enrollment lock: the row is
   // still paused as call_in_progress, and no Norma call request holds the lead.
   // A softphone pause under a Norma hold is left for a later sweep.
-  const resumed = await sweepResumeCallInProgress(supabase, {
-    enrollmentIds: resumableIds,
-    resumeAt: new Date(now).toISOString(),
-  });
+  const resumeAt = new Date(now).toISOString();
+  let resumed: number;
+  try {
+    resumed = await sweepResumeCallInProgress(supabase, { enrollmentIds: resumableIds, resumeAt });
+  } catch (error) {
+    if (!(error instanceof NormaMissingFunctionError)) throw error;
+    // Deployed ahead of the Norma migration: no hold exists yet, so use the
+    // original activation.
+    const { count, error: resumeError } = await supabase
+      .from("sequence_enrollments")
+      .update({ status: "active", pause_reason: null, next_run_at: resumeAt, updated_at: resumeAt }, { count: "exact" })
+      .in("id", resumableIds)
+      .eq("status", "paused")
+      .eq("pause_reason", "call_in_progress");
+    if (resumeError) throw new Error(`resume stale call pauses failed: ${resumeError.message}`);
+    resumed = count ?? 0;
+  }
   return { candidates: stale.length, resumed, skippedCompletedWrapups };
 }
 
