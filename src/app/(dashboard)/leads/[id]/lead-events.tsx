@@ -11,7 +11,7 @@ import { validateTemplateTitle } from "@/lib/esign/template-contract";
 import { createClient } from "@/lib/supabase/client";
 import type { Database, Json } from "@/lib/supabase/types";
 import { normaOutcomeLabel } from "@/lib/norma/outcome-labels";
-import type { NormaRequestView } from "@/lib/norma/view";
+import { formatNormaCallbackTime, type NormaRequestView } from "@/lib/norma/view";
 
 type LeadEventRow = Database["public"]["Tables"]["lead_events"]["Row"];
 export type LeadEvent = Pick<
@@ -178,6 +178,11 @@ export function LeadEventPill({
             {detail.callbackPreference}
           </p>
         ) : null}
+        {detail.callbackTime ? (
+          <p data-testid="norma-event-callback-time">
+            <span className="font-medium">Converted callback time (unconfirmed):</span> {detail.callbackTime}
+          </p>
+        ) : null}
       </div>
     </div>
   );
@@ -187,13 +192,14 @@ export function LeadEventPill({
 export function formatNormaEventDetail(
   event: LeadEvent,
   normaRequests?: readonly NormaRequestView[],
-): { summary: string | null; callbackPreference: string | null } | null {
+): { summary: string | null; callbackPreference: string | null; callbackTime: string | null } | null {
   if (event.event_type !== "norma_call_completed") return null;
   const payload = readPayload(event.payload);
   const request = normaRequests?.find((row) => row.id === payload.request_id) ?? null;
   const summary = (readString(payload, "summary") ?? request?.summary ?? "").trim() || null;
   const callbackPreference = request?.callback_raw?.trim() || null;
-  return summary || callbackPreference ? { summary, callbackPreference } : null;
+  const callbackTime = formatNormaCallbackTime(request?.callback_requested_for, request?.callback_timezone);
+  return summary || callbackPreference || callbackTime ? { summary, callbackPreference, callbackTime } : null;
 }
 
 export function formatLeadEventSentence(

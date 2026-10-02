@@ -15,6 +15,8 @@ export type NormaSlackSummaryInput = {
   summary: string | null;
   qualification: Record<string, unknown>;
   callbackPreference: string | null;
+  /** Converted time, already formatted in the seller's zone (see `formatNormaCallbackTime`). Still unconfirmed. */
+  callbackTime?: string | null;
   deepLink: string;
 };
 
@@ -78,6 +80,13 @@ export function buildNormaSummaryBlocks(input: NormaSlackSummaryInput): KnownBlo
         type: "mrkdwn",
         text: clip(`*Seller's stated callback preference (unconfirmed):* ${escapeSlackText(input.callbackPreference.trim())}`),
       },
+    });
+  }
+
+  if (input.callbackTime?.trim()) {
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: clip(`*Converted callback time (unconfirmed):* ${escapeSlackText(input.callbackTime.trim())}`) },
     });
   }
 

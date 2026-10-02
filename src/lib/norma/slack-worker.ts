@@ -11,6 +11,7 @@ import {
   buildNormaSummaryBlocks,
   buildNormaSummaryFallbackText,
 } from "./slack-blocks";
+import { formatNormaCallbackTime } from "./view";
 
 type Client = SupabaseClient<Database>;
 
@@ -198,7 +199,7 @@ async function markFailed(client: Client, id: string, attempts: number, giveUp: 
 async function buildMessage(client: Client, requestId: string, env?: NormaEnv): Promise<{ blocks: KnownBlock[]; text: string }> {
   const { data: request, error } = await client
     .from("norma_call_requests")
-    .select("id, property_id, contact_id, outcome, summary, qualification, callback_raw")
+    .select("id, property_id, contact_id, outcome, summary, qualification, callback_raw, callback_requested_for, callback_timezone")
     .eq("id", requestId)
     .maybeSingle();
   if (error || !request) throw new Error("norma notification: request not readable");
@@ -240,6 +241,7 @@ async function buildMessage(client: Client, requestId: string, env?: NormaEnv): 
     summary: request.summary,
     qualification,
     callbackPreference,
+    callbackTime: request.outcome === "callback_requested" ? formatNormaCallbackTime(request.callback_requested_for, request.callback_timezone) : null,
     deepLink: buildNormaLeadDeepLink(request.property_id, env),
   };
   return { blocks: buildNormaSummaryBlocks(input), text: buildNormaSummaryFallbackText(input) };

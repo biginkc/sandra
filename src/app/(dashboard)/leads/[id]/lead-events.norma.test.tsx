@@ -51,6 +51,20 @@ describe("Norma lead timeline events", () => {
     expect(detail).toHaveTextContent("after 5pm Central");
   });
 
+  it("shows the converted time, in the seller's zone and marked unconfirmed, beside the seller's words", () => {
+    render(
+      <LeadEventPill
+        event={event("norma_call_completed", { outcome: "callback_requested", request_id: REQUEST_ID })}
+        authorEmails={{}}
+        currentUserId={null}
+        normaRequests={[{ ...request, callback_requested_for: "2026-10-06T20:00:00.000Z", callback_timezone: "America/Chicago" }]}
+      />,
+    );
+    const detail = screen.getByTestId("norma-event-detail");
+    expect(detail).toHaveTextContent("after 5pm Central");
+    expect(screen.getByTestId("norma-event-callback-time")).toHaveTextContent("Converted callback time (unconfirmed): Tue, Oct 6, 3:00 PM CDT");
+  });
+
   it("falls back to the stored request summary and omits the preference when there is none", () => {
     render(
       <LeadEventPill

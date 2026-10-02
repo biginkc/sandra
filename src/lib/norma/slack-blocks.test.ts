@@ -77,6 +77,17 @@ describe("buildNormaLeadDeepLink", () => {
   });
 });
 
+describe("converted callback time", () => {
+  it("is shown, marked unconfirmed, next to the seller's own words", () => {
+    const out = text(buildNormaSummaryBlocks({ ...base, callbackTime: "Tue, Oct 6, 3:00 PM CDT" }));
+    expect(out).toContain("Converted callback time (unconfirmed):* Tue, Oct 6, 3:00 PM CDT");
+    expect(out).toContain("after 5pm Central");
+  });
+  it("is omitted when there is none", () => {
+    expect(text(buildNormaSummaryBlocks(base))).not.toContain("Converted callback time");
+  });
+});
+
 describe("buildNormaSummaryFallbackText", () => {
   it("escapes the address like the blocks do", () => {
     const text = buildNormaSummaryFallbackText({ outcome: "callback_requested", propertyAddress: "1 <!channel> & <http://x|y>" });

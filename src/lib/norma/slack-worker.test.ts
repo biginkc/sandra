@@ -92,6 +92,14 @@ describe("drainNormaNotifications", () => {
     expect(f.tables.norma_notifications[0]).toMatchObject({ status: "sent", slack_ts: "1700000000.000100", attempts: 1 });
   });
 
+  it("includes the converted callback time for a callback", async () => {
+    const f = fixture();
+    Object.assign(f.tables.norma_call_requests[0]!, { callback_requested_for: "2026-10-06T20:00:00.000Z", callback_timezone: "America/Chicago" });
+    const post = vi.fn().mockResolvedValue({ ts: "6.6" });
+    await drainNormaNotifications({ client: f.client, post, now: NOW });
+    expect(JSON.stringify(post.mock.calls[0][0].blocks)).toContain("Converted callback time (unconfirmed):* Tue, Oct 6, 3:00 PM CDT");
+  });
+
   it("does not post again for a sent row, and posts once per pending row", async () => {
     const f = fixture([{}, { status: "sent", slack_ts: "x" }, {}]);
     const post = vi.fn().mockResolvedValue({ ts: "1.1" });
