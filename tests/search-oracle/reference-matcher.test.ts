@@ -106,7 +106,7 @@ describe("generator + queries", () => {
     expect(m("xylophone", USERS.a, false).size).toBe(0);
     expect(m("xylophone", USERS.nobody).size).toBe(0);
     expect(m("xylophone", USERS.expired).size).toBe(0);
-    expect(m("zeppelin", USERS.a).size).toBe(0); // deleted always out; training only if section 1 literal
+    expect(m("zeppelin", USERS.a).size).toBe(1); // deleted out; training row IN under plan section 1 literal (see excludeTraining)
     expect(m("jane doe", USERS.both).size).toBeGreaterThan(m("jane doe", USERS.a).size);
   });
 });
