@@ -32,7 +32,7 @@ export const FIXTURE_EMAILS = Object.freeze([
 
 function uuidV5(namespace, name) {
   const namespaceBytes = Buffer.from(namespace.replaceAll("-", ""), "hex");
-  const digest = createHash("sha1")["up" + "date"](Buffer.concat([namespaceBytes, Buffer.from(name)])).digest();
+  const digest = createHash("sha1").update(Buffer.concat([namespaceBytes, Buffer.from(name)])).digest();
   digest[6] = (digest[6] & 0x0f) | 0x50;
   digest[8] = (digest[8] & 0x3f) | 0x80;
   const hex = digest.subarray(0, 16).toString("hex");
@@ -84,7 +84,7 @@ function assert(condition, code, message = code) {
 }
 
 function sha256(value) {
-  return createHash("sha256")["up" + "date"](value).digest("hex");
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function canonicalJson(value) {
@@ -285,9 +285,10 @@ function assertSourceGuards() {
 }
 
 export async function q(db, statement, values = []) {
+  assert(!String(statement).includes(";"), "SQL_STATEMENT_REFUSED", "SQL statement terminators are not allowed");
   const keyword = String(statement).trim().match(/^([a-z]+)/i)?.[1]?.toLowerCase();
   assert(["select", "insert", "begin", "commit", "rollback", "set"].includes(keyword), "SQL_STATEMENT_REFUSED", "SQL statement keyword is not allowed");
-  if (keyword === "insert" && new RegExp("\\bdo\\s+" + "up" + "date\\b", "i").test(statement)) {
+  if (keyword === "insert" && /\bdo\s+update\b/i.test(statement)) {
     fail("SQL_STATEMENT_REFUSED", "insert conflict action is not allowed");
   }
   return db.query(statement, values);
@@ -345,7 +346,7 @@ async function schemaPreflight(db) {
   const columns = (await q(db, `
     select table_schema, table_name, column_name
     from information_schema.columns
-    where (table_schema, table_name) in (('public','organizations'),('public','memberships'),('public','messages'),('auth','users'))
+    where (table_schema, table_name) in (('public','organizations'),('public','memberships'),('public','messages'),('auth','users'),('auth','identities'))
   `)).rows;
   const byTable = new Map();
   for (const row of columns) {
@@ -357,7 +358,8 @@ async function schemaPreflight(db) {
     "public.organizations": ["id", "name"],
     "public.memberships": ["id", "user_id", "org_id", "role", "access_status", "access_expires_at", "deletion_prepared_at"],
     "public.messages": EXPECTED_MESSAGE_COLUMNS,
-    "auth.users": ["id", "email", "email_confirmed_at", "encrypted_password", "banned_until", "raw_app_meta_data"],
+    "auth.users": ["id", "email", "email_confirmed_at", "banned_until", "last_sign_in_at", "raw_app_meta_data"],
+    "auth.identities": ["user_id", "provider"],
   })) {
     assert(byTable.has(table), "SCHEMA_PRECONDITION_FAILED", `${table} is missing`);
     for (const column of required) assert(byTable.get(table).has(column), "SCHEMA_PRECONDITION_FAILED", `${table}.${column} is missing`);
@@ -443,26 +445,36 @@ export async function verifyFixture(db, {
     if (org.name !== FIXTURE_ORG_NAME) failures.push("organization marker changed");
   }
 
-  const user = (await q(db, "select id::text,email,email_confirmed_at,encrypted_password,banned_until,raw_app_meta_data from auth.users where id=$1", [FIXTURE_IDS.user])).rows[0];
+  const user = (await q(db, "select id::text,email,email_confirmed_at,banned_until,last_sign_in_at,raw_app_meta_data from auth.users where id=$1", [FIXTURE_IDS.user])).rows[0];
   if (!user) missing.push("user");
   else {
     if (!isFixtureEmail(user.email)) failures.push("auth email marker changed");
     if (user.email_confirmed_at !== null) failures.push("auth user is email-confirmed");
-    if (user.encrypted_password !== null && user.encrypted_password !== "") failures.push(`auth user does not have an empty password field (${JSON.stringify(user.encrypted_password)})`);
+    if (user.last_sign_in_at !== null) failures.push("auth user has signed in");
     if (!user.banned_until || Date.parse(user.banned_until) <= Date.parse("2100-01-01T00:00:00.000Z")) failures.push("auth user is not banned past 2100");
-    if (jsonHash(user.raw_app_meta_data) !== jsonHash(expectedAuthMetadata())) failures.push(`auth app metadata stamp changed (${JSON.stringify(user.raw_app_meta_data)})`);
+    if (canonicalJson(user.raw_app_meta_data?.inbox_ro_fixture) !== canonicalJson(expectedAuthMetadata().inbox_ro_fixture)) failures.push("auth app metadata stamp changed");
+    if (user.raw_app_meta_data?.provider !== "email") failures.push("auth provider marker changed");
+    if (canonicalJson(user.raw_app_meta_data?.providers) !== canonicalJson(["email"])) failures.push("auth providers marker changed");
   }
+
+  const identities = (await q(db, "select provider from auth.identities where user_id=$1 order by provider", [FIXTURE_IDS.user])).rows;
+  if (identities.length > 1) failures.push("auth user has more than one identity");
+  if (identities.some(identity => identity.provider !== "email")) failures.push("auth user has a non-email identity");
 
   const memberships = (await q(db, `
     select id::text,user_id::text,org_id::text,role,access_status,access_expires_at,deletion_prepared_at
     from public.memberships
-    where org_id=$1 or user_id=$2
+    where id=$1 or org_id=$2 or user_id=$3
     order by id
-  `, [FIXTURE_IDS.organization, FIXTURE_IDS.user])).rows;
-  if (memberships.length === 0) missing.push("membership");
+  `, [FIXTURE_IDS.membership, FIXTURE_IDS.organization, FIXTURE_IDS.user])).rows;
+  if (!memberships.some(membership => membership.id === FIXTURE_IDS.membership)) missing.push("membership");
   if (memberships.length > 1) failures.push("fixture org or user has more than one membership");
   for (const membership of memberships) {
     const wanted = expectedMembership();
+    if (membership.id === FIXTURE_IDS.membership && (membership.user_id !== wanted.user_id || membership.org_id !== wanted.org_id)) {
+      failures.push("fixed membership id belongs to another user or organization");
+      continue;
+    }
     if (membership.id !== FIXTURE_IDS.membership || membership.user_id !== wanted.user_id || membership.org_id !== wanted.org_id || membership.role !== wanted.role || membership.access_status !== wanted.access_status || membership.access_expires_at !== wanted.access_expires_at || membership.deletion_prepared_at !== wanted.deletion_prepared_at) {
       failures.push("membership is not exactly one active owner membership");
     }
@@ -470,14 +482,18 @@ export async function verifyFixture(db, {
 
   const messages = (await q(db, `
     select id::text,org_id::text,channel,direction,status,provider,contact_id::text,property_id::text,campaign_id::text,conversation_id::text,from_address,to_address,body,metadata,scheduled_for as scheduled,external_id
-    from public.messages where org_id=$1 order by id
-  `, [FIXTURE_IDS.organization])).rows;
-  if (messages.length === 0) missing.push("messages");
+    from public.messages where id=any($1::uuid[]) or org_id=$2 order by id
+  `, [[FIXTURE_IDS.messages.scheduled, FIXTURE_IDS.messages.unscheduled], FIXTURE_IDS.organization])).rows;
+  for (const id of [FIXTURE_IDS.messages.scheduled, FIXTURE_IDS.messages.unscheduled]) if (!messages.some(message => message.id === id)) missing.push(`message:${id}`);
   if (messages.length > 2) failures.push(`expected only the two fixed fixture messages, found ${messages.length}`);
   for (const row of messages) {
     const wanted = MESSAGE_SHAPES[row.id];
     if (!wanted) {
       failures.push(`unexpected message id ${row.id}`);
+      continue;
+    }
+    if (row.org_id !== FIXTURE_IDS.organization) {
+      failures.push(`fixed message ${row.id} belongs to another organization`);
       continue;
     }
     if (row.channel !== "sms" || row.direction !== "outbound" || row.status !== "queued" || row.provider !== "mock") failures.push(`message ${row.id} is not inert queued mock SMS`);

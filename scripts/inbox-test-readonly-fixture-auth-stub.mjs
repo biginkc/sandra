@@ -32,26 +32,35 @@ async function main() {
       if (request.method === "POST" && pathname === "/auth/v1/admin/users") {
         const body = JSON.parse(await readBody(request));
         const allowed = new Set(["app_metadata", "ban_duration", "email", "email_confirm", "id"]);
-        if (Object.keys(body).some(key => !allowed.has(key)) || body.email_confirm !== false || body.ban_duration !== "876000h" || body.email !== `inbox-ro-fixture@${emailDomain}`) {
+        if (Object.keys(body).some(key => !allowed.has(key)) || body.email_confirm !== false || body.ban_duration !== "876000h" || typeof body.email !== "string" || !body.email.endsWith(`@${emailDomain}`)) {
           send(response, 400, { error: "password or unexpected fields supplied" });
           return;
         }
+        const appMetadata = { ...(body.app_metadata ?? {}), provider: "email", providers: ["email"] };
+        const passwordHash = (await db.query("select crypt(gen_random_uuid()::text, gen_salt('bf', 10)) as value")).rows[0].value;
         await db.query(
-          "insert into auth.users(id,email,email_confirmed_at,encrypted_password,banned_until,raw_app_meta_data) values ($1,$2,null,'',timestamptz '2101-01-01', $3::jsonb)",
-          [body.id, body.email, JSON.stringify(body.app_metadata)],
+          "insert into auth.users(id,email,email_confirmed_at,last_sign_in_at,encrypted_password,banned_until,raw_app_meta_data) values ($1,$2,null,null,$3,now() + interval '876000 hours',$4::jsonb)",
+          [body.id, body.email, passwordHash, JSON.stringify(appMetadata)],
         );
-        send(response, 200, { user: { id: body.id, email: body.email, email_confirmed_at: null, banned_until: "2101-01-01T00:00:00.000Z", app_metadata: body.app_metadata } });
+        await db.query(
+          "insert into auth.identities(id,provider_id,user_id,identity_data,provider,last_sign_in_at,created_at,updated_at) values (gen_random_uuid(),$1::text,$2::uuid,$3::jsonb,'email',null,now(),now())",
+          [body.id, body.id, JSON.stringify({ sub: body.id, email: body.email })],
+        );
+        const created = (await db.query("select id::text,email,email_confirmed_at,last_sign_in_at,banned_until,raw_app_meta_data from auth.users where id=$1", [body.id])).rows[0];
+        const { raw_app_meta_data: rawAppMetadata, ...user } = created;
+        send(response, 200, { user: { ...user, app_metadata: rawAppMetadata, provider: "email", providers: ["email"], identities: [{ provider: "email", identity_data: { sub: body.id, email: body.email } }] } });
         return;
       }
       if (request.method === "GET" && pathname.startsWith("/auth/v1/admin/users/")) {
         const userId = decodeURIComponent(pathname.slice("/auth/v1/admin/users/".length));
-        const result = await db.query("select id,email,email_confirmed_at,encrypted_password,banned_until,raw_app_meta_data from auth.users where id=$1", [userId]);
+        const result = await db.query("select id,email,email_confirmed_at,last_sign_in_at,banned_until,raw_app_meta_data from auth.users where id=$1", [userId]);
         if (!result.rowCount) {
           send(response, 404, { error: "user not found" });
           return;
         }
         const user = result.rows[0];
-        send(response, 200, { user: { id: user.id, email: user.email, email_confirmed_at: user.email_confirmed_at, encrypted_password: user.encrypted_password, banned_until: user.banned_until, app_metadata: user.raw_app_meta_data } });
+        const identities = (await db.query("select provider,identity_data from auth.identities where user_id=$1 order by provider", [userId])).rows;
+        send(response, 200, { user: { id: user.id, email: user.email, email_confirmed_at: user.email_confirmed_at, last_sign_in_at: user.last_sign_in_at, banned_until: user.banned_until, app_metadata: user.raw_app_meta_data, provider: "email", providers: ["email"], identities } });
         return;
       }
       send(response, 404, { error: "not found" });
