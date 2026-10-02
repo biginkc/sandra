@@ -45,12 +45,20 @@ describe("processDueCleanups", () => {
     });
     store.addCleanup({ direct_call_id: CALL, kind: "leg", leg_id: "browser-leg" });
     store.addCleanup({ direct_call_id: CALL, kind: "leg", leg_id: "seller-leg" });
-    const hangup = vi.fn(async () => {});
+    const startedAt = clock.now.getTime();
+    // Model the route's bounded provider calls: one four-page active-call
+    // listing (2s per page), followed by two known-leg hangups (2s each).
+    const hangup = vi.fn(async () => {
+      clock.now = new Date(clock.now.getTime() + 2_000);
+    });
     const deps: CleanupDeps = {
       store,
       hangup,
       getCall: async () => ({ isAlive: true }),
-      listActiveCalls: async () => ({ calls: [], complete: true }),
+      listActiveCalls: async () => {
+        clock.now = new Date(clock.now.getTime() + 8_000);
+        return { calls: [], complete: true };
+      },
       now: () => clock.now,
       report: vi.fn(),
       random: () => 0,
@@ -63,6 +71,8 @@ describe("processDueCleanups", () => {
     expect(store.legRow("browser-leg")?.acked_at).toBeTruthy();
     expect(store.legRow("seller-leg")?.acked_at).toBeTruthy();
     expect(store.cleanups.get(unresolved.id)?.confirmed_at).toBeNull();
+    expect(clock.now.getTime() - startedAt).toBe(12_000);
+    expect(clock.now.getTime() - startedAt).toBeLessThan(15_000);
   });
 
   it("claims one row immediately before working it, so a slow batch cannot let a later row's lease lapse", async () => {
