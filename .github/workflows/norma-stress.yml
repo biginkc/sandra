@@ -25,7 +25,7 @@ on:
       - "src/lib/messaging/inbound.ts"
       - "src/app/api/webhooks/bland/**"
       - "src/app/api/cron/**"
-      - "supabase/migrations/202610020*"
+      - "supabase/migrations/*_norma_*"
       - "vitest.norma-stress.config.ts"
       - "scripts/ci/provision-disposable-stack.mjs"
       - ".github/workflows/norma-stress.yml"

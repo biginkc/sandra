@@ -11,7 +11,7 @@
 -- advisory lock taken before any row lock, so the losers simply see the open
 -- request and answer already_open. The one-open-request index still decides
 -- correctness. Signature, grants and behaviour are otherwise unchanged.
--- Rollback: re-apply the previous fn_norma_create_request (20261002020000; no later migration redefined it before this one); no schema objects are added here.
+-- Rollback: re-apply the previous fn_norma_create_request (20261002120000; no later migration redefined it before this one); no schema objects are added here.
 -- ============================================================================
 
 begin;

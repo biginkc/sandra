@@ -17,9 +17,9 @@ const load = (name: string) =>
     .replace(/^\s*begin;\s*$/gim, "")
     .replace(/^\s*commit;\s*$/gim, "");
 const migration = [
-  "20261002020000_norma_call_requests.sql",
-  "20261002030000_norma_m2_hardening.sql",
-  "20261002040000_norma_m2_review_fixes.sql",
+  "20261002120000_norma_call_requests.sql",
+  "20261002120100_norma_m2_hardening.sql",
+  "20261002120200_norma_m2_review_fixes.sql",
 ].map(load).join("\n");
 
 type Ctx = { org: string; rep: string; assignee: string; sequence: string };

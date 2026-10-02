@@ -16,7 +16,7 @@ const load = (name: string) =>
   readFileSync(new URL(`./${name}`, import.meta.url), "utf8")
     .replace(/^\s*begin;\s*$/gim, "")
     .replace(/^\s*commit;\s*$/gim, "");
-const migration = `${load("20261002020000_norma_call_requests.sql")}\n${load("20261002030000_norma_m2_hardening.sql")}`;
+const migration = `${load("20261002120000_norma_call_requests.sql")}\n${load("20261002120100_norma_m2_hardening.sql")}`;
 
 type Ctx = { org: string; rep: string; assignee: string; sequence: string };
 type Lead = { property: string; contact: string; phone: string; enrollment: string | null };

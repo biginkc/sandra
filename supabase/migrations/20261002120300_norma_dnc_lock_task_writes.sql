@@ -11,7 +11,7 @@
 -- Re-creates fn_norma_complete_call, fn_norma_mark_needs_review and
 -- fn_norma_mark_dispatch_rejected; signatures, grants and every other
 -- behaviour are unchanged. Service-role only.
--- Rollback: re-apply the previous function versions (fn_norma_complete_call from 20261002030000, fn_norma_mark_needs_review from 20261002020000, fn_norma_mark_dispatch_rejected from 20261002040000); no schema objects are added here.
+-- Rollback: re-apply the previous function versions (fn_norma_complete_call from 20261002120100, fn_norma_mark_needs_review from 20261002120000, fn_norma_mark_dispatch_rejected from 20261002120200); no schema objects are added here.
 -- ============================================================================
 
 begin;

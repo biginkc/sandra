@@ -12,7 +12,7 @@ import { requireLoopbackPostgresUrl } from "../../src/lib/testing/loopback-postg
 const url = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
-const migration = readFileSync(new URL("./20261002020000_norma_call_requests.sql", import.meta.url), "utf8")
+const migration = readFileSync(new URL("./20261002120000_norma_call_requests.sql", import.meta.url), "utf8")
   .replace(/^\s*begin;\s*$/gim, "")
   .replace(/^\s*commit;\s*$/gim, "");
 
