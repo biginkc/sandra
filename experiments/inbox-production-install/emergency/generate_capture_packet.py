@@ -271,15 +271,15 @@ def build() -> None:
 DECLARE approved_count integer; no_op_count integer; total_count integer; attached_count integer;
 BEGIN
   -- EMERGENCY_TARGET_IDENTITY_GUARD_BEGIN
-  IF current_setting('inbox.emergency_target_ref', true) = {sql_literal(PRODUCTION_TARGET_REF)} THEN
-    IF current_setting('inbox.emergency_local_test', true) = 'on' THEN
+  IF coalesce(current_setting('inbox.emergency_target_ref', true), '') = {sql_literal(PRODUCTION_TARGET_REF)} THEN
+    IF coalesce(current_setting('inbox.emergency_local_test', true), '') <> 'off' THEN
       RAISE EXCEPTION 'INBOX_EMERGENCY_PRODUCTION_LOCAL_TEST_REFUSED';
     END IF;
     IF current_database() <> 'postgres' THEN
       RAISE EXCEPTION 'INBOX_EMERGENCY_DATABASE_NAME_REFUSED';
     END IF;
-  ELSIF current_setting('inbox.emergency_target_ref', true) = {sql_literal(LOCAL_TEST_TARGET_REF)} THEN
-    IF current_setting('inbox.emergency_local_test', true) <> 'on'
+  ELSIF coalesce(current_setting('inbox.emergency_target_ref', true), '') = {sql_literal(LOCAL_TEST_TARGET_REF)} THEN
+    IF coalesce(current_setting('inbox.emergency_local_test', true), '') <> 'on'
        OR current_database() <> 'postgres'
        OR inet_server_addr() IS NULL
        OR inet_server_addr() NOT IN ('127.0.0.1'::inet, '::1'::inet) THEN
