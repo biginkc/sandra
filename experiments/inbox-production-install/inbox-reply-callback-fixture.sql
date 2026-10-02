@@ -12,6 +12,11 @@
   \echo 'fixture_marker is required'
   \quit 3
 \endif
+\if :fixture_create
+  \set fixture_action create
+\else
+  \set fixture_action remove
+\endif
 
 BEGIN;
 SET LOCAL lock_timeout='2s';
