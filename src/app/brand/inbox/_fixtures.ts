@@ -23,8 +23,8 @@ export const fixture = {
   body: "Hi Dana, thanks for getting back about Larkspur Ct. When is a good time for a quick call this week?",
   secondBody: "Hi Marcus, thanks for getting back about Pinehurst Dr. When is a good time for a quick call this week?",
   history: [
-    { id: "77777777-7777-4777-8777-777777777777", createdAtRaw: "2026-09-29T14:05:00Z", body: "I might be. What would a call involve?", direction: "inbound" as const, readAtRaw: null, inboundRevision: "2" },
-    { id: "66666666-6666-4666-8666-666666666666", createdAtRaw: "2026-09-29T14:02:00Z", body: "Hi Dana, are you still considering an offer for Larkspur Ct?", direction: "outbound" as const, readAtRaw: null, inboundRevision: "1" },
+    { id: "77777777-7777-4777-8777-777777777777", createdAtRaw: "2026-09-29T14:05:00Z", body: "I might be. What would a call involve?", direction: "inbound" as const, readAtRaw: null, inboundRevision: "2", status: "received", delivery: "delivered" as const },
+    { id: "66666666-6666-4666-8666-666666666666", createdAtRaw: "2026-09-29T14:02:00Z", body: "Hi Dana, are you still considering an offer for Larkspur Ct?", direction: "outbound" as const, readAtRaw: null, inboundRevision: "1", status: "sent", delivery: "delivered" as const },
   ],
 } as const;
 
