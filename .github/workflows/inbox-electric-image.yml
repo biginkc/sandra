@@ -91,7 +91,7 @@ jobs:
             org.opencontainers.image.revision=0f404200402f918a4b1596bc5c8a53479a435349
             org.opencontainers.image.source=https://github.com/electric-sql/electric
             org.opencontainers.image.licenses=Apache-2.0
-            org.opencontainers.image.description=Unofficial BMH rebuild of ElectricSQL sync-service 1.8.1 from upstream commit 0f40420. Not published or endorsed by ElectricSQL.
+            org.opencontainers.image.description=Unofficial BMH rebuild of Electric sync-service 1.8.1 from upstream source. Not published or endorsed by ElectricSQL.
 
       - name: Validate pushed image digest
         env:
