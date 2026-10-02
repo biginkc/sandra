@@ -18,8 +18,23 @@
 -- List/tag merges are unguarded (always row-locking). A (c) upgrade from share to no-key-update can theoretically
 -- deadlock with another upgrader on the same property (retryable 40P01).
 -- Variant E additionally: HOT-eligible flips (drop boolean partial indexes, fillfactor 90), a cheaper cache-only comparator,
--- id-ordered row locks before incremental updates, and the writer GUC is restored to its prior value (not forced off).
+-- id-ordered row locks before incremental updates (a multi-property statement locks its WHOLE affected set in one id order and
+-- skips the share/skip phase; the share-skip fast path is single-property only), and the writer GUC is restored to its prior value (not forced off).
 -- Additive create-or-replace plus the index drops; trigger definitions themselves are unchanged.
+
+-- Notes (comparator / rollback):
+--  * properties_filter_cache_only_change fast path compares composite rows with IS NOT DISTINCT FROM semantics
+--    (e.g. numeric 10 equals 10.0). Unreachable here: the compared columns are copies of one another except the cache
+--    columns. NOTE: a composite comparison raises for column types without an equality operator (json, xml, point...), so
+--    a future column of such a type makes this function error until it is handled; the regression test
+--    "a generated column added later ..." (filter-cache-triggers.integration.test.ts) and a type-without-equality
+--    column would surface it immediately.
+--  * Rollback of the index drops: recreate the four partial indexes exactly as in 20261002110000 (lines ~479-482):
+--      create index idx_properties_has_unread_inbound on public.properties (org_id) where has_unread_inbound;
+--      create index idx_properties_has_open_tasks on public.properties (org_id) where has_open_tasks;
+--      create index idx_properties_has_inbound_message on public.properties (org_id) where has_inbound_message;
+--      create index idx_properties_attempted on public.properties (org_id) where has_outbound_message and not has_inbound_message;
+--    and `alter table public.properties reset (fillfactor)`. The trigger changes roll back by re-applying the 20261002110000 bodies.
 
 set lock_timeout = '5s';
 
@@ -146,8 +161,32 @@ set search_path = ''
 as $$
 declare
   v_prev text;
+  v_n integer;
 begin
   if tg_op = 'INSERT' then
+    -- Multi-property statement: take the ENTIRE affected set in ONE consistent id order before any
+    -- update (no share/skip phase), so two overlapping batches (or a batch and a full refresh, which also
+    -- locks in id order) can never wait on each other in opposite orders.
+    select count(distinct n.property_id) into v_n from new_rows n join public.properties q on q.id = n.property_id where n.property_id is not null and n.org_id = q.org_id;
+    if v_n > 1 then
+      perform pg_catalog.pg_advisory_xact_lock_shared(
+        pg_catalog.hashtextextended('switchboard-global-dnc-write-barrier-v1', 0));
+      perform 1 from public.properties p where p.id in (select n.property_id from new_rows n where n.property_id is not null and n.org_id = p.org_id) order by p.id for no key update;
+      v_prev := coalesce(pg_catalog.current_setting('sandra.filter_cache_writer', true), 'off');
+      perform pg_catalog.set_config('sandra.filter_cache_writer', 'on', true);
+      update public.properties p
+         set has_inbound_message  = p.has_inbound_message  or a.hi,
+             has_outbound_message = p.has_outbound_message or a.ho,
+             has_unread_inbound   = p.has_unread_inbound   or a.hu
+        from (select n.property_id as id, n.org_id,
+                     pg_catalog.bool_or(n.direction = 'inbound') as hi,
+                     pg_catalog.bool_or(n.direction = 'outbound') as ho,
+                     pg_catalog.bool_or(n.direction = 'inbound' and n.read_at is null) as hu
+                from new_rows n where n.property_id is not null group by n.property_id, n.org_id) a
+       where p.id = a.id and p.org_id = a.org_id
+         and ((a.hi and not p.has_inbound_message) or (a.ho and not p.has_outbound_message) or (a.hu and not p.has_unread_inbound));
+      perform pg_catalog.set_config('sandra.filter_cache_writer', v_prev, true);
+    else
     perform pg_catalog.pg_advisory_xact_lock_shared(
       pg_catalog.hashtextextended('switchboard-global-dnc-write-barrier-v1', 0));
     v_prev := coalesce(pg_catalog.current_setting('sandra.filter_cache_writer', true), 'off');
@@ -200,6 +239,7 @@ begin
      where p.id = a.id and p.org_id = a.org_id
        and ((a.hi and not p.has_inbound_message) or (a.ho and not p.has_outbound_message) or (a.hu and not p.has_unread_inbound));
     perform pg_catalog.set_config('sandra.filter_cache_writer', v_prev, true);
+    end if;
   elsif tg_op = 'DELETE' then
     perform public.refresh_property_filter_cache(array(select distinct o.property_id from old_rows o where o.property_id is not null));
   else
@@ -224,8 +264,24 @@ set search_path = ''
 as $$
 declare
   v_prev text;
+  v_n integer;
 begin
   if tg_op = 'INSERT' then
+    -- Multi-property statement: take the ENTIRE affected set in ONE consistent id order before any
+    -- update (no share/skip phase), so two overlapping batches (or a batch and a full refresh, which also
+    -- locks in id order) can never wait on each other in opposite orders.
+    select count(distinct n.related_property_id) into v_n from new_rows n join public.properties q on q.id = n.related_property_id where n.status = 'open' and n.org_id = q.org_id;
+    if v_n > 1 then
+      perform pg_catalog.pg_advisory_xact_lock_shared(
+        pg_catalog.hashtextextended('switchboard-global-dnc-write-barrier-v1', 0));
+      perform 1 from public.properties p where p.id in (select n.related_property_id from new_rows n where n.status = 'open' and n.org_id = p.org_id) order by p.id for no key update;
+      v_prev := coalesce(pg_catalog.current_setting('sandra.filter_cache_writer', true), 'off');
+      perform pg_catalog.set_config('sandra.filter_cache_writer', 'on', true);
+      update public.properties p set has_open_tasks = true
+       where p.id in (select n.related_property_id from new_rows n where n.status = 'open' and n.org_id = p.org_id)
+         and not p.has_open_tasks;
+      perform pg_catalog.set_config('sandra.filter_cache_writer', v_prev, true);
+    else
     perform pg_catalog.pg_advisory_xact_lock_shared(
       pg_catalog.hashtextextended('switchboard-global-dnc-write-barrier-v1', 0));
     v_prev := coalesce(pg_catalog.current_setting('sandra.filter_cache_writer', true), 'off');
@@ -248,6 +304,7 @@ begin
      where p.id in (select n.related_property_id from new_rows n where n.status = 'open' and n.org_id = p.org_id)
        and not p.has_open_tasks;
     perform pg_catalog.set_config('sandra.filter_cache_writer', v_prev, true);
+    end if;
   elsif tg_op = 'DELETE' then
     perform public.refresh_property_filter_cache(array(select distinct o.related_property_id from old_rows o));
   else
