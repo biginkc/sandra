@@ -20,4 +20,3 @@ export function mutate(sql: string, name: string | undefined): string {
     default: return sql;
   }
 }
-

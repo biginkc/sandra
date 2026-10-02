@@ -616,7 +616,7 @@ export async function searchCassForSkipTrace(input: { selection?: SearchSelectio
     const userId = await requireUser();
     let selection: SearchSelection;
     if (raw.selectionToken !== undefined) {
-      if (!isSelectionTokenShape(raw.selectionToken)) throw new SearchInputError("selectionToken is malformed.");
+      if (typeof raw.selectionToken !== "string") throw new SearchInputError("selectionToken is malformed.");
       const read = readSelectionToken(raw.selectionToken, userId);
       if (!read.ok) throw new SearchInputError("Selection expired. Re-open the skip-trace preflight.");
       selection = { kind: "filters", filters: parseFilters(read.filters) };
