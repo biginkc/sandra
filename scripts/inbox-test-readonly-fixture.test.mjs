@@ -523,12 +523,14 @@ test("AT5 drift is refused without changing the mutated rows", async () => {
     {
       name: "squatter at fixed m1 id in another org",
       expectation: "drift",
+      failure: `fixed message ${FIXTURE_IDS.messages.scheduled} belongs to another organization`,
       mutate: () => db.query("update public.messages set org_id=$1 where id=$2", [UNRELATED_IDS.organization, FIXTURE_IDS.messages.scheduled]),
       restore: () => db.query("update public.messages set org_id=$1 where id=$2", [FIXTURE_IDS.organization, FIXTURE_IDS.messages.scheduled]),
     },
     {
       name: "squatter at fixed membership id in another org and user",
       expectation: "drift",
+      failure: "fixed membership id belongs to another user or organization",
       mutate: async () => {
         await db.query("set session_replication_role='replica'");
         try {
@@ -609,6 +611,7 @@ test("AT5 drift is refused without changing the mutated rows", async () => {
       if (current.expectation === "drift") {
         assert.notEqual(result.status, 0, current.name);
         assert.match(result.stderr, /FIXTURE_DRIFT/, current.name);
+        if (current.failure) assert.ok(result.stderr.includes(current.failure), `${current.name}: specific refusal missing`);
       } else {
         assert.equal(result.status, 0, result.stderr || result.stdout);
       }
