@@ -137,8 +137,10 @@ BEGIN
 END $$;
 
 -- R11-2 precondition: do not create or remove this live-ledger fixture while
--- reply admission is open. This check is before any trigger disable or
--- fixture write.
+-- reply admission is open and a reply worker has a database session. A
+-- disabled admission row is sufficient; otherwise every deployed reply
+-- worker must be absent. This check is before any trigger disable or fixture
+-- write.
 DO $$
 DECLARE
   admission_enabled boolean;
@@ -151,7 +153,7 @@ BEGIN
     RAISE EXCEPTION 'R11 admission precondition row is missing';
   END IF;
   IF admission_enabled THEN
-    RAISE EXCEPTION 'R11 requires reply admission disabled';
+    RAISE EXCEPTION 'R11 requires reply admission disabled or reply workers absent';
   END IF;
 END $$;
 
