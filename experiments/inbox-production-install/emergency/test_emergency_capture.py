@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -31,6 +32,42 @@ TARGET_MIGRATIONS = [
     ROOT / "supabase/migrations/20261002130200_inbox_backend_operation_reply.sql",
 ]
 TARGET_NAMES = {p.name for p in TARGET_MIGRATIONS}
+RECONCILE_CATALOG_SOURCE = ROOT.parent / "rt-reconcile/scripts/inbox-reconcile-completion.mjs"
+
+CAPTURE_TARGET_TABLES = (
+    "public.inbox_inbound_heads",
+    "inbox_message_capture.sender_buckets",
+    "inbox_message_capture.sender_groups",
+    "inbox_message_capture.dirty",
+    "inbox_message_capture.versions",
+    "inbox_message_capture.route_edges",
+    "inbox_maintained.rows",
+    "inbox_maintained.queue",
+    "inbox_parent.work",
+    "inbox_safety.routes",
+    "inbox_backfill.collisions",
+    "inbox_policy.versions",
+    "inbox_bridge.access_epochs",
+    "inbox_bridge.summaries",
+    "inbox_bridge.filter_rows",
+    "inbox_operation_domain.target_versions",
+    "inbox_operation_domain.sms_scopes",
+    "inbox_reply_context.versions",
+)
+
+
+def reconcile_catalog_schemas() -> list[str]:
+    source = RECONCILE_CATALOG_SOURCE.read_text()
+    match = re.search(r"const CATALOG_SCHEMAS = Object\.freeze\(\[(.*?)\]\);", source, flags=re.DOTALL)
+    if not match:
+        raise RuntimeError(f"could not read CATALOG_SCHEMAS from {RECONCILE_CATALOG_SOURCE}")
+    schemas = re.findall(r'"([^"]+)"', match.group(1))
+    if not schemas:
+        raise RuntimeError("CATALOG_SCHEMAS was empty")
+    return schemas
+
+
+CATALOG_SCHEMAS = reconcile_catalog_schemas()
 
 
 def run(argv: list[str], *, cwd: Path | None = None, input_text: str | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -43,6 +80,10 @@ def run(argv: list[str], *, cwd: Path | None = None, input_text: str | None = No
 def psql(database_url: str, sql: str, *, check: bool = True) -> str:
     result = run(["psql", database_url, "-X", "-v", "ON_ERROR_STOP=1", "-v", "VERBOSITY=verbose", "-At", "-c", sql], check=check)
     return result.stdout.strip()
+
+
+def psql_result(database_url: str, sql: str) -> subprocess.CompletedProcess[str]:
+    return run(["psql", database_url, "-X", "-v", "ON_ERROR_STOP=1", "-v", "VERBOSITY=verbose", "-At", "-c", sql], check=False)
 
 
 def apply_file(database_url: str, path: Path, *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -95,36 +136,80 @@ def body_statement(packet: str, function_name: str) -> str:
 
 
 def inbox_counts(database_url: str) -> dict[str, int]:
-    tables = [
-        "public.inbox_inbound_heads",
-        "inbox_message_capture.sender_buckets",
-        "inbox_message_capture.sender_groups",
-        "inbox_message_capture.dirty",
-        "inbox_message_capture.versions",
-        "inbox_message_capture.route_edges",
-        "inbox_maintained.rows",
-        "inbox_maintained.queue",
-        "inbox_parent.work",
-        "inbox_safety.routes",
-        "inbox_backfill.collisions",
-        "inbox_policy.versions",
-        "inbox_bridge.access_epochs",
-        "inbox_bridge.summaries",
-        "inbox_bridge.filter_rows",
-        "inbox_operation_domain.target_versions",
-        "inbox_operation_domain.sms_scopes",
-        "inbox_reply_context.versions",
-    ]
     result: dict[str, int] = {}
-    for table in tables:
+    for table in CAPTURE_TARGET_TABLES:
         result[table] = int(psql(database_url, f"SELECT count(*) FROM {table}"))
     return result
+
+
+def quote_ident(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def inbox_content_digests(database_url: str) -> dict[str, str]:
+    """Digest every capture target's content, ordered by its primary key."""
+    result: dict[str, str] = {}
+    for table in CAPTURE_TARGET_TABLES:
+        schema, relation = table.split(".", 1)
+        pk_sql = f"""SELECT a.attname
+  FROM pg_index i
+  CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ordinal)
+  JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum
+ WHERE i.indrelid='{schema}.{relation}'::regclass AND i.indisprimary
+ ORDER BY k.ordinal"""
+        pk_columns = psql(database_url, pk_sql).splitlines()
+        if not pk_columns:
+            raise RuntimeError(f"capture target has no primary key: {table}")
+        order_by = ", ".join(f"t.{quote_ident(column)}" for column in pk_columns)
+        result[table] = psql(
+            database_url,
+            f"SELECT md5(coalesce(string_agg(row_to_json(t)::text, E'\\n' ORDER BY {order_by}), '')) FROM {quote_ident(schema)}.{quote_ident(relation)} AS t",
+        )
+    return result
+
+
+def catalog_fingerprint(database_url: str) -> dict[str, object]:
+    schemas_sql = ",".join("'" + schema.replace("'", "''") + "'" for schema in CATALOG_SCHEMAS)
+    schema_array = f"ARRAY[{schemas_sql}]::text[]"
+    queries = {
+        "relations": f"""SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'name',c.relname,'kind',c.relkind) ORDER BY n.nspname,c.oid), '[]'::jsonb)
+FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+WHERE n.nspname=ANY({schema_array})""",
+        "functions": f"""SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'name',p.oid::regprocedure::text) ORDER BY n.nspname,p.oid), '[]'::jsonb)
+FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+WHERE n.nspname=ANY({schema_array})""",
+        "types": f"""SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'name',t.typname,'kind',t.typtype) ORDER BY n.nspname,t.oid), '[]'::jsonb)
+FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+WHERE n.nspname=ANY({schema_array})""",
+    }
+    return {key: json.loads(psql(database_url, query)) for key, query in queries.items()}
+
+
+def apply_packet_text(database_url: str, packet: str, *, prefix: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    descriptor, path_string = tempfile.mkstemp(prefix=prefix, suffix=".sql")
+    os.close(descriptor)
+    path = Path(path_string)
+    try:
+        path.write_text(packet)
+        return apply_file(database_url, path, check=check)
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def migration_function_statement(function_name: str) -> str:
+    for migration in TARGET_MIGRATIONS:
+        text = migration.read_text()
+        match = re.search(rf"CREATE FUNCTION {re.escape(function_name)}\(\).*?END \$\$;", text, flags=re.DOTALL)
+        if match:
+            return match.group(0).replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1)
+    raise RuntimeError(f"migration function not found: {function_name}")
 
 
 def fixture_sql() -> tuple[str, dict[str, str]]:
     ids = {key: str(uuid.uuid4()) for key in (
         "org", "org_delete", "user", "user_delete", "session", "session_off", "contact", "contact_delete",
         "property", "property_delete", "conversation", "conversation_delete", "message", "message_delete",
+        "window_message", "window_conversation",
         "sequence", "sequence_delete", "enrollment", "enrollment_delete", "thread", "thread_delete",
         "consent", "consent_delete", "suppression", "suppression_delete", "review",
         "review_delete", "sender", "sender_delete",
@@ -145,16 +230,6 @@ INSERT INTO ai_disposition_reviews(id,org_id,property_id,conversation_id,source_
 INSERT INTO provider_sender_numbers(id,org_id,provider,phone_e164,status) VALUES ('{ids['sender']}','{ids['org']}','sendillo','+18165550105','active'),('{ids['sender_delete']}','{ids['org_delete']}','sendillo','+18165550106','active');
 COMMIT;"""
     return sql, ids
-
-
-def mutate_before_return_null(database_url: str) -> bool:
-    statement = body_statement(OFF.read_text(), "public.inbox_guard_inbound_revision")
-    mutant = statement.replace("RETURN NEW;", "RETURN NULL;", 1)
-    psql(database_url, mutant)
-    message_id = str(uuid.uuid4())
-    org_id = str(uuid.uuid4())
-    psql(database_url, f"INSERT INTO organizations(id,name) VALUES ('{org_id}','before mutant'); INSERT INTO messages(id,org_id,channel,direction,status,body,inbox_inbound_revision) VALUES ('{message_id}','{org_id}','sms','inbound','received','mutant',0)")
-    return psql(database_url, f"SELECT count(*) FROM messages WHERE id='{message_id}'") == "0"
 
 
 def main() -> None:
@@ -180,6 +255,25 @@ def main() -> None:
         expected_catalog = [{"identity": t["identity"], "function": t["function"], "tgtype": t["tgtype"]} for t in INVENTORY["triggers"]]
         if sorted(trigger_catalog, key=lambda row: row["identity"]) != sorted(expected_catalog, key=lambda row: row["identity"]):
             raise RuntimeError(f"disposable catalog trigger inventory mismatch: {trigger_catalog}")
+        expected_md5 = {f["name"]: f["approved_md5_prosrc"] for f in INVENTORY["functions"]}
+        guard_md5_query = "SELECT md5(p.prosrc) FROM pg_proc p WHERE p.oid=to_regprocedure('public.inbox_guard_inbound_revision()')"
+        guard_enabled_query = """SELECT coalesce(string_agg(t.tgenabled, ',' ORDER BY t.tgname),'')
+FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+WHERE n.nspname='public' AND c.relname='messages' AND t.tgname LIKE 'zzz_inbox_guard_inbound_revision%'"""
+        guard_md5_before = psql(database_url, guard_md5_query)
+        guard_enabled_before = psql(database_url, guard_enabled_query)
+        baseline_catalog = catalog_fingerprint(database_url)
+        mutants: dict[str, str] = {}
+
+        catalog_mutant_packet = OFF.read_text().replace("inbox_emergency", "inbox_control")
+        apply_packet_text(database_url, catalog_mutant_packet, prefix="capture-catalog-mutant-")
+        apply_file(database_url, RESTORE)
+        if catalog_fingerprint(database_url) == baseline_catalog:
+            raise RuntimeError("CATALOG_SCHEMAS fingerprint did not kill the in-catalog receipt mutant")
+        mutants["receipt-schema-catalog-boundary"] = "KILLED (inbox_control relation detected)"
+        psql(database_url, "DROP TABLE inbox_control.capture_off_receipts")
+        if catalog_fingerprint(database_url) != baseline_catalog:
+            raise RuntimeError("catalog mutant cleanup changed the PR #725 fingerprint")
 
         source_fixture, ids = fixture_sql()
         psql(database_url, source_fixture)
@@ -188,9 +282,12 @@ def main() -> None:
             raise RuntimeError("positive capture control did not produce Inbox rows before capture-off")
 
         apply_file(database_url, OFF)
-        if psql(database_url, "SELECT count(*) FROM inbox_control.capture_off_receipts WHERE action='capture_off'") != "1":
-            raise RuntimeError("capture-off did not write exactly one capture-off receipt")
-        off_counts = inbox_counts(database_url)
+        receipt_actions = psql(database_url, "SELECT coalesce(string_agg(action||':'||count::text, ',' ORDER BY action),'') FROM (SELECT action,count(*) FROM inbox_emergency.capture_off_receipts GROUP BY action) AS counts(action,count)")
+        if receipt_actions != "capture_off:1":
+            raise RuntimeError(f"capture-off receipt classification mismatch: {receipt_actions}")
+        if psql(database_url, guard_md5_query) != guard_md5_before or psql(database_url, guard_enabled_query) != guard_enabled_before:
+            raise RuntimeError("capture-off altered the live inbound-revision integrity guard")
+        off_digests = inbox_content_digests(database_url)
         mutation_sql = f"""BEGIN;
 UPDATE ai_disposition_reviews SET ai_reason='updated' WHERE id='{ids['review_delete']}';
 DELETE FROM ai_disposition_reviews WHERE id='{ids['review_delete']}';
@@ -200,6 +297,7 @@ UPDATE message_threads SET ai_responder_status='escalated' WHERE org_id='{ids['o
 DELETE FROM message_threads WHERE org_id='{ids['org_delete']}' AND property_id='{ids['property_delete']}';
 UPDATE messages SET body=body||' updated' WHERE id='{ids['message_delete']}';
 DELETE FROM messages WHERE id='{ids['message_delete']}';
+INSERT INTO messages(id,org_id,conversation_id,channel,direction,status,body) VALUES ('{ids['window_message']}','{ids['org']}','{ids['window_conversation']}','sms','inbound','received','window inbound');
 UPDATE properties SET address=address||' updated' WHERE id='{ids['property_delete']}';
 DELETE FROM properties WHERE id='{ids['property_delete']}';
 UPDATE contacts SET first_name='updated' WHERE id='{ids['contact_delete']}';
@@ -221,25 +319,44 @@ UPDATE auth.sessions SET not_after=clock_timestamp()+interval '2 hours' WHERE id
 DELETE FROM auth.sessions WHERE id='{ids['session']}';
 COMMIT;"""
         psql(database_url, mutation_sql)
-        if inbox_counts(database_url) != off_counts:
-            raise RuntimeError("capture-off source writes changed Inbox capture rows")
+        if inbox_content_digests(database_url) != off_digests:
+            raise RuntimeError("capture-off source writes changed Inbox capture-target content")
         if psql(database_url, f"SELECT count(*) FROM messages WHERE id='{ids['message_delete']}'") != "0":
             raise RuntimeError("capture-off message delete did not persist")
+        if psql(database_url, f"SELECT inbox_inbound_revision FROM messages WHERE id='{ids['window_message']}'") != "0":
+            raise RuntimeError("window inbound message did not retain permanent revision zero")
 
-        guard_probe = str(uuid.uuid4())
-        guard_message = str(uuid.uuid4())
-        psql(database_url, f"INSERT INTO organizations(id,name) VALUES ('{guard_probe}','guard probe'); INSERT INTO messages(id,org_id,channel,direction,status,body,inbox_inbound_revision) VALUES ('{guard_message}','{guard_probe}','sms','inbound','received','guard probe',0)")
-        if psql(database_url, f"SELECT count(*) FROM messages WHERE org_id='{guard_probe}'") != "1":
-            raise RuntimeError("BEFORE-row no-op did not return NEW")
+        invalid_guard_org = str(uuid.uuid4())
+        invalid_guard_message = str(uuid.uuid4())
+        guard_result = psql_result(database_url, f"INSERT INTO organizations(id,name) VALUES ('{invalid_guard_org}','guard probe'); INSERT INTO messages(id,org_id,channel,direction,status,body,inbox_inbound_revision) VALUES ('{invalid_guard_message}','{invalid_guard_org}','sms','inbound','received','guard probe',7)")
+        if guard_result.returncode == 0 or "INBOX_REVISION_SERVER_OWNED" not in (guard_result.stdout + guard_result.stderr):
+            raise RuntimeError("live inbound-revision guard did not reject a fabricated revision")
+        guard_original_statement = migration_function_statement("public.inbox_guard_inbound_revision")
+        guard_noop_statement = """CREATE OR REPLACE FUNCTION public.inbox_guard_inbound_revision()
+RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path = '' AS $$
+BEGIN
+  RETURN NEW;
+END $$;"""
+        psql(database_url, guard_noop_statement)
+        mutant_guard_org = str(uuid.uuid4())
+        mutant_guard_message = str(uuid.uuid4())
+        guard_mutant_result = psql_result(database_url, f"INSERT INTO organizations(id,name) VALUES ('{mutant_guard_org}','guard mutant'); INSERT INTO messages(id,org_id,channel,direction,status,body,inbox_inbound_revision) VALUES ('{mutant_guard_message}','{mutant_guard_org}','sms','inbound','received','guard mutant',7)")
+        if guard_mutant_result.returncode != 0:
+            raise RuntimeError("guard-neutralization mutant did not bypass the guard")
+        mutants["integrity-guard-exclusion"] = "KILLED (fabricated revision accepted only by live-guard mutant)"
+        psql(database_url, guard_original_statement)
 
         apply_file(database_url, RESTORE)
-        if psql(database_url, "SELECT count(*) FROM inbox_control.capture_off_receipts WHERE action='capture_restore'") != "1":
+        if psql(database_url, "SELECT count(*) FROM inbox_emergency.capture_off_receipts WHERE action='capture_restore'") != "1":
             raise RuntimeError("capture-restore did not write exactly one restore receipt")
         names_sql = ",".join("'" + f["name"] + "'" for f in INVENTORY["functions"])
         restored_body_md5 = json.loads(psql(database_url, f"SELECT jsonb_object_agg(n.nspname||'.'||p.proname,md5(p.prosrc)) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE (n.nspname||'.'||p.proname) = ANY(ARRAY[{names_sql}])"))
-        expected_md5 = {f["name"]: f["approved_md5_prosrc"] for f in INVENTORY["functions"]}
         if restored_body_md5 != expected_md5:
             raise RuntimeError(f"restore body MD5 mismatch: {restored_body_md5}")
+        if catalog_fingerprint(database_url) != baseline_catalog:
+            raise RuntimeError("capture-off plus restore changed a PR #725 CATALOG_SCHEMAS relation/function/type")
+        if psql(database_url, guard_md5_query) != guard_md5_before or psql(database_url, guard_enabled_query) != guard_enabled_before:
+            raise RuntimeError("restore altered the live inbound-revision integrity guard")
         resume_org = str(uuid.uuid4())
         resume_message = str(uuid.uuid4())
         resume_conversation = str(uuid.uuid4())
@@ -247,8 +364,45 @@ COMMIT;"""
         if int(psql(database_url, f"SELECT count(*) FROM inbox_message_capture.dirty WHERE org_id='{resume_org}'")) == 0:
             raise RuntimeError("capture did not resume after restore")
 
+        # A count would miss a live capture_access update to an existing row.
+        apply_file(database_url, OFF)
+        access_off_statement = body_statement(OFF.read_text(), "inbox_bridge.capture_access")
+        access_restore_statement = body_statement(RESTORE.read_text(), "inbox_bridge.capture_access")
+        psql(database_url, access_restore_statement)
+        access_before = inbox_content_digests(database_url)
+        psql(database_url, f"UPDATE memberships SET hugo_config='{{\"digest_mutant\":true}}'::jsonb WHERE org_id='{ids['org']}' AND user_id='{ids['user']}'")
+        if inbox_content_digests(database_url) == access_before:
+            raise RuntimeError("per-table content digest did not kill the live capture_access mutant")
+        mutants["live-capture_access-digest"] = "KILLED (existing access_epochs content changed)"
+        psql(database_url, access_off_statement)
+        apply_file(database_url, RESTORE)
+
+        idempotent_before = int(psql(database_url, "SELECT count(*) FROM inbox_emergency.capture_off_receipts WHERE action='capture_off_idempotent'"))
         apply_file(database_url, OFF)
         apply_file(database_url, OFF)
+        idempotent_after = int(psql(database_url, "SELECT count(*) FROM inbox_emergency.capture_off_receipts WHERE action='capture_off_idempotent'"))
+        capture_off_count = int(psql(database_url, "SELECT count(*) FROM inbox_emergency.capture_off_receipts WHERE action='capture_off'"))
+        if capture_off_count != 3 or idempotent_after != idempotent_before + 1:
+            raise RuntimeError(f"capture-off re-run receipt mismatch: capture_off={capture_off_count}, idempotent_before={idempotent_before}, idempotent_after={idempotent_after}")
+        idempotent_action_mutant = OFF.read_text().replace("THEN 'capture_off_idempotent' ELSE 'capture_off'", "THEN 'capture_off' ELSE 'capture_off'", 1)
+        apply_packet_text(database_url, idempotent_action_mutant, prefix="capture-off-idempotent-action-mutant-")
+        if psql(database_url, "SELECT count(*) FROM inbox_emergency.capture_off_receipts WHERE action='capture_off'") != "4":
+            raise RuntimeError("idempotent action mutant was not detected")
+        mutants["idempotent-receipt-action"] = "KILLED (re-run action mutant recorded capture_off)"
+
+        apply_file(database_url, RESTORE)
+        psql(database_url, "ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct")
+        disabled_restore_result = apply_file(database_url, RESTORE, check=False)
+        if disabled_restore_result.returncode == 0 or "INBOX_CAPTURE_OFF_TRIGGER_CATALOG_DRIFT" not in (disabled_restore_result.stdout + disabled_restore_result.stderr):
+            raise RuntimeError("capture-restore did not refuse a DISABLE TRIGGER drift")
+        disabled_check_mutant = RESTORE.read_text().replace(" AND t.tgenabled='O'", "", 1)
+        disabled_check_result = apply_packet_text(database_url, disabled_check_mutant, prefix="capture-restore-disabled-check-mutant-", check=False)
+        if disabled_check_result.returncode != 0:
+            raise RuntimeError("tgenabled mutant did not bypass the disabled-trigger refusal")
+        mutants["restore-tgenabled-check"] = "KILLED (disabled trigger would restore only with check removed)"
+        psql(database_url, "ALTER TABLE public.messages ENABLE TRIGGER zzzzz_inbox_message_direct")
+        apply_file(database_url, RESTORE)
+
         off_statement = body_statement(OFF.read_text(), "inbox_message_capture.capture")
         drift_statement = off_statement.replace("RETURN NULL;", "RETURN NEW;", 1)
         if drift_statement == off_statement:
@@ -259,24 +413,29 @@ COMMIT;"""
             raise RuntimeError(f"capture-off did not refuse a function-body drift mutant (rc={drift_result.returncode}):\n{drift_result.stdout}\n{drift_result.stderr}")
 
         restore_statement = body_statement(RESTORE.read_text(), "inbox_message_capture.capture")
-        psql(database_url, off_statement.replace("RETURN NEW;", "RETURN NULL;", 1))
+        psql(database_url, restore_statement)
         apply_file(database_url, OFF)
         restore_mutant = restore_statement.replace("RETURN NULL;", "RETURN NEW;", 1)
         if restore_mutant == restore_statement:
             raise RuntimeError("could not construct restore body mutant")
         restore_mutant_packet = RESTORE.read_text().replace(restore_statement, restore_mutant, 1)
-        restore_mutant_path = Path(tempfile.mkstemp(prefix="capture-restore-mutant-", suffix=".sql")[1])
-        restore_mutant_path.write_text(restore_mutant_packet)
-        restore_mutant_result = apply_file(database_url, restore_mutant_path, check=False)
-        restore_mutant_path.unlink(missing_ok=True)
+        restore_mutant_result = apply_packet_text(database_url, restore_mutant_packet, prefix="capture-restore-mutant-", check=False)
         if restore_mutant_result.returncode == 0 or "INBOX_CAPTURE_RESTORE_POSTCONDITION_FAILED" not in (restore_mutant_result.stdout + restore_mutant_result.stderr):
             raise RuntimeError("capture-restore did not kill the body-mutant postcondition")
-
         apply_file(database_url, RESTORE)
-        apply_file(database_url, OFF)
-        mutant_killed = mutate_before_return_null(database_url)
-        if not mutant_killed:
-            raise RuntimeError("BEFORE-return-NULL mutant was not killed")
+
+        missing_function = "inbox_operation_domain.capture_target()"
+        psql(database_url, f"DROP FUNCTION {missing_function} CASCADE")
+        regprocedure_mutant_packet = OFF.read_text().replace("to_regprocedure(e.name)", "e.name::regprocedure")
+        regprocedure_mutant_result = apply_packet_text(database_url, regprocedure_mutant_packet, prefix="capture-missing-regprocedure-mutant-", check=False)
+        regprocedure_mutant_output = regprocedure_mutant_result.stdout + regprocedure_mutant_result.stderr
+        if regprocedure_mutant_result.returncode == 0 or "INBOX_CAPTURE_OFF_FUNCTION_MISSING" in regprocedure_mutant_output:
+            raise RuntimeError("regprocedure mutant was not killed before the named missing-function refusal")
+        mutants["missing-function-to_regprocedure"] = "KILLED (cast mutant raises instead of reaching named refusal)"
+        missing_result = apply_file(database_url, OFF, check=False)
+        missing_output = missing_result.stdout + missing_result.stderr
+        if missing_result.returncode == 0 or "INBOX_CAPTURE_OFF_FUNCTION_MISSING" not in missing_output:
+            raise RuntimeError("capture-off did not refuse a dropped function with INBOX_CAPTURE_OFF_FUNCTION_MISSING")
 
         print(json.dumps({
             "status": "PASS",
@@ -285,20 +444,20 @@ COMMIT;"""
             "main_ancestor": "538d81ed",
             "triggers_verified": len(expected_catalog),
             "functions_verified": len(expected_md5),
+            "catalog_schemas_source": str(RECONCILE_CATALOG_SOURCE),
             "checks": [
-                "all 27 canonical source capture triggers matched disposable catalog",
-                "capture-off and capture-restore wrote receipts",
-                "all affected source-table writes including auth.sessions insert/update/delete persisted with no Inbox capture deltas",
-                "BEFORE-row no-op returned NEW and retained user write",
+                "all 25 canonical source capture triggers matched disposable catalog; the two revision guards stayed live",
+                "capture-off and capture-restore wrote receipts in inbox_emergency",
+                "all affected source-table writes including auth.sessions insert/update/delete persisted with unchanged per-table Inbox content digests",
+                "window inbound messages retained permanent inbox_inbound_revision zero and fabricated revisions were refused",
+                "capture-off plus restore changed no relation/function/type in the PR #725 CATALOG_SCHEMAS list",
                 "restore MD5 matched migration-extracted bodies and capture resumed",
-                "capture-off reapplication was idempotent",
+                "capture-off reapplication emitted capture_off_idempotent",
+                "restore refused a DISABLE TRIGGER tgenabled drift",
+                "dropped function reached INBOX_CAPTURE_OFF_FUNCTION_MISSING via to_regprocedure",
                 "mixed function-body drift was refused",
             ],
-            "mutants": {
-                "before-return-NULL": "KILLED (source row disappears)",
-                "function-body-drift": "KILLED (precondition refuses)",
-                "restore-body": "KILLED (postcondition refuses)",
-            },
+            "mutants": {**mutants, "function-body-drift": "KILLED (precondition refuses)", "restore-body": "KILLED (postcondition refuses)"},
         }, indent=2))
     finally:
         if project is not None:
