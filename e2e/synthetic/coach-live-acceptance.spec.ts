@@ -77,6 +77,9 @@ function boundaryPlugins() {
       build.onResolve({ filter: /dialer\/actions$/ }, () => ({
         path: path.resolve(process.cwd(), "e2e/synthetic/fixtures/dialer-actions-browser-stub.ts"),
       }));
+      build.onResolve({ filter: /direct-calling\/client-actions$/ }, () => ({
+        path: path.resolve(process.cwd(), "e2e/synthetic/fixtures/direct-calling-actions-browser-stub.ts"),
+      }));
       build.onResolve({ filter: /^@telnyx\/webrtc$/ }, () => ({
         path: path.resolve(process.cwd(), "e2e/synthetic/fixtures/telnyx-webrtc-browser-stub.ts"),
       }));
@@ -99,6 +102,7 @@ test.beforeAll(async () => {
     jsxImportSource: "react",
     alias: {
       "@/lib/coach/recommendation-action": path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-recommendation-action-stub.ts"),
+      "@/lib/direct-calling/client-actions": path.resolve(process.cwd(), "e2e/synthetic/fixtures/direct-calling-actions-browser-stub.ts"),
       "@": path.resolve(process.cwd(), "src"),
     },
     plugins: boundaryPlugins(),

@@ -12,9 +12,13 @@ import { loadHomeownerTrainingProfile } from "@/lib/leads/homeowner-training-pro
 import { repDisplayName } from "@/lib/coach/rep-display-name";
 import { getMemberTimezone } from "@/components/appointments/book-appointment-action";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
+import { reportError } from "@/lib/errors/report";
 import { openCallCapability, openCallIdentity } from "./call-capability";
+import { attachPendingDirectRecording } from "@/lib/direct-calling/recording";
 
 import { isHomeownerTrainingNumber, canCallHomeownerTraining, HOMEOWNER_TRAINING_LABEL } from "./homeowner-training";
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type Contact = Pick<
   Database["public"]["Tables"]["contacts"]["Row"],
@@ -371,6 +375,25 @@ export async function completeSoftphoneCall(input: {
     // Bound targets prevent a customer call from being relabeled using browser data.
     if (identity?.phoneE164 && identity.phoneE164 !== input.target.phoneE164) return { ok: false, error: "The call target does not match this call." };
     const rawJitterCallId = openCallCapability(input.callCapability, user.id);
+    // Direct capabilities contain our durable direct_calls id; Jitter
+    // capabilities contain a provider id and simply produce no match here.
+    let directCallId: string | null = null;
+    // A sealed Jitter capability can carry a provider-shaped id. Validate the
+    // direct UUID before sending it to PostgREST; otherwise a non-direct wrap
+    // can fail with Postgres 22P02 before its activity is saved. The target
+    // phone fence also prevents a coincidental provider UUID from attaching a
+    // training/Jitter wrap to an unrelated direct call.
+    if (identity?.callId && UUID.test(identity.callId)) {
+      const { data: directCall, error: directCallError } = await supabase
+        .from("direct_calls")
+        .select("id")
+        .eq("id", identity.callId)
+        .eq("operator_user_id", user.id)
+        .eq("destination_e164", input.target.phoneE164)
+        .maybeSingle();
+      if (directCallError) return { ok: false, error: directCallError.message };
+      directCallId = (directCall as { id?: string } | null)?.id ?? null;
+    }
     // Capability-less calls use the wrap token as their Sandra-side attempt
     // identity, while capability-backed calls use Jitter's call UUID. That
     // divergence is an accepted residual only for capability-less calls.
@@ -459,6 +482,7 @@ export async function completeSoftphoneCall(input: {
       phone_e164: input.target.phoneE164,
       do_not_call_requested: !training && input.disposition === "dnc",
       wrap_token: input.wrapToken,
+      ...(directCallId ? { direct_call_id: directCallId } : {}),
     };
     let callbackTaskId: string | undefined;
     let dispositionSucceeded = false;
@@ -476,7 +500,7 @@ export async function completeSoftphoneCall(input: {
 
         const { data: updatedActivity, error: activityError } = await supabase
           .from("call_activities")
-          .update(activityValues)
+          .update(activityValues as never)
           .eq("id", activity.id)
           .or(activityMatchFilter)
           .select("id")
@@ -513,7 +537,7 @@ export async function completeSoftphoneCall(input: {
         }
         const { data: insertedActivity, error: activityError } = await supabase
           .from("call_activities")
-          .insert(activityValues)
+          .insert(activityValues as never)
           .select("id")
           .maybeSingle();
         if (activityError && activityError.code !== "23505") {
@@ -554,7 +578,7 @@ export async function completeSoftphoneCall(input: {
           };
           const { data: updatedActivity, error: updateActivityError } = await supabase
             .from("call_activities")
-            .update(activityValues)
+            .update(activityValues as never)
             .eq("id", existingActivity.id)
             .or(activityMatchFilter)
             .select("id")
@@ -610,6 +634,18 @@ export async function completeSoftphoneCall(input: {
           if (restoreBookedDispositionError) {
             return { ok: false, error: restoreBookedDispositionError.message };
           }
+        }
+      }
+
+      // Recording capture is retryable and must not prevent a valid wrap-up,
+      // disposition, or appointment from being committed. The webhook and
+      // recording sweep will retry this association after saved-before-wrapup
+      // or transient storage/database failures.
+      if (directCallId) {
+        try {
+          await attachPendingDirectRecording(directCallId, activity.id);
+        } catch (error) {
+          reportError(error, { tags: { surface: "direct_recording_attach" }, extra: { directCallId, activityId: activity.id } });
         }
       }
 

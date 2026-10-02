@@ -33,6 +33,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify standalone direct coaching service
+        working-directory: services/direct-coach
+        run: npm ci --ignore-scripts && npm run typecheck && npm test && npm run build
+
       - name: Rehearse My Leads metrics and signed call evidence
         run: node scripts/verify-my-leads-metrics.mjs && node scripts/rehearse-call-metrics-writeback.mjs
 

@@ -105,6 +105,7 @@ export function useCoachSession(
   livenessActive = true,
   preparedTarget: PreparedCoachTarget | null = null,
   sessionKey: string | null = callId,
+  bindingReady = true,
 ) {
   const [scriptBinding, setScriptBinding] = useState<CoachScriptBinding | null>(null);
   const [scriptBindingStatus, setScriptBindingStatus] = useState<"loading" | "ready">("loading");
@@ -167,7 +168,7 @@ export function useCoachSession(
   useEffect(() => {
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
-    if (!callId) {
+    if (!callId || !bindingReady) {
       return () => { cancelled = true; };
     }
     let retryIndex = 0;
@@ -207,7 +208,7 @@ export function useCoachSession(
       cancelled = true;
       if (retryTimer) clearTimeout(retryTimer);
     };
-  }, [callId]);
+  }, [callId, bindingReady]);
 
   useEffect(() => {
     if (!sessionKey) return;

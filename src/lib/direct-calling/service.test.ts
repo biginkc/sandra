@@ -8,7 +8,6 @@ import { TelnyxApiError } from "./telnyx";
 const ENDED_422 = () => new TelnyxApiError("Telnyx returned 422: Call has already ended", "rejected", 422, { code: "90018" });
 
 const ENV = {
-  DIRECT_CALL_PILOT_USER_IDS: "user-1",
   TELNYX_DIRECT_API_KEY: "SECRET-KEY-123",
   TELNYX_DIRECT_CONNECTION_ID: "conn",
   TELNYX_DIRECT_APP_ID: "app",
@@ -47,6 +46,7 @@ function setup(overrides: Partial<DirectCallServiceDeps> = {}) {
   store.clock = () => clock.now;
   const service = createDirectCallService({
     store, env: ENV, now: () => clock.now,
+    isEligible: (userId) => userId === "user-1",
     prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall, sealCallIdentity, telnyx, report, ...overrides,
   });
   return { store, telnyx, prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall, sealCallIdentity, report, service, clock };
@@ -274,7 +274,7 @@ describe("direct call service", () => {
       const ctx = setup();
       const id = await started(ctx);
       const removed = createDirectCallService({
-        store: ctx.store, env: { ...ENV, DIRECT_CALL_PILOT_USER_IDS: "someone-else" }, now: () => ctx.clock.now,
+        store: ctx.store, env: ENV, now: () => ctx.clock.now, isEligible: () => false,
         prepareLeadCall: ctx.prepareLeadCall, prepareManualCall: ctx.prepareManualCall, resumeFailedSoftphoneCall: ctx.resumeFailedSoftphoneCall,
         sealCallIdentity: ctx.sealCallIdentity, telnyx: ctx.telnyx, report: ctx.report,
       });
@@ -408,7 +408,7 @@ describe("direct call service", () => {
       const ctx = setup();
       const id = await started(ctx);
       const keyless = createDirectCallService({
-        store: ctx.store, env: { ...ENV, TELNYX_DIRECT_API_KEY: undefined }, now: () => ctx.clock.now,
+        store: ctx.store, env: { ...ENV, TELNYX_DIRECT_API_KEY: undefined }, now: () => ctx.clock.now, isEligible: () => true,
         prepareLeadCall: ctx.prepareLeadCall, prepareManualCall: ctx.prepareManualCall, resumeFailedSoftphoneCall: ctx.resumeFailedSoftphoneCall,
         sealCallIdentity: ctx.sealCallIdentity, telnyx: ctx.telnyx, report: ctx.report,
       });

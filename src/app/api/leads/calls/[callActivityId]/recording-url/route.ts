@@ -1,4 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { DIRECT_RECORDINGS_BUCKET } from "@/lib/direct-calling/recording";
 
 const NO_STORE_HEADERS = {
   "cache-control": "no-store",
@@ -7,10 +9,19 @@ const NO_STORE_HEADERS = {
 
 type RecordingLookup = {
   id: string;
+  org_id?: string;
   provider: string;
   jitter_attempt_id: string;
   jitter_session_id: string | null;
-  call_recordings: Array<{ status: string }> | { status: string } | null;
+  operator_user_id?: string | null;
+  direct_call_id?: string | null;
+  call_recordings: Array<{ status: string; storage_bucket?: string | null; storage_path?: string | null }> | { status: string; storage_bucket?: string | null; storage_path?: string | null } | null;
+};
+
+type DirectCallLookup = {
+  id: string;
+  org_id: string;
+  operator_user_id: string;
 };
 
 function json(body: unknown, status = 200): Response {
@@ -55,7 +66,7 @@ export async function GET(
 
   const { data, error } = await supabase
     .from("call_activities")
-    .select("id, provider, jitter_attempt_id, jitter_session_id, call_recordings(status)")
+    .select("id, org_id, provider, jitter_attempt_id, jitter_session_id, operator_user_id, direct_call_id, call_recordings(status,storage_bucket,storage_path)")
     .eq("id", callActivityId)
     .maybeSingle();
 
@@ -67,9 +78,34 @@ export async function GET(
   }
 
   const call = data as unknown as RecordingLookup;
+  // Existing Jitter playback is authorized by its established broker/RLS
+  // boundary, which includes manager/coach access. Direct recordings are
+  // private to the authenticated operator who owns the direct call. The
+  // activity operator is mutable CRM metadata, so never use it as the
+  // ownership authority for a direct recording.
+  let directCall: DirectCallLookup | null = null;
+  if (call.direct_call_id) {
+    const { data: directCallData, error: directCallError } = await supabase
+      .from("direct_calls")
+      .select("id, org_id, operator_user_id")
+      .eq("id", call.direct_call_id)
+      .maybeSingle();
+    if (directCallError) {
+      return json({ error: "Could not load recording", error_code: "lookup_failed" }, 500);
+    }
+    directCall = directCallData as DirectCallLookup | null;
+    if (
+      !directCall ||
+      directCall.id !== call.direct_call_id ||
+      (call.org_id && directCall.org_id !== call.org_id) ||
+      directCall.operator_user_id !== user.id
+    ) {
+      return json({ error: "Call recording not found", error_code: "not_found" }, 404);
+    }
+  }
   // Batch calls and embedded-softphone calls both store their audio in
   // Jitter; playback resolves through the same internal endpoint.
-  if (call.provider !== "jitter" && call.provider !== "sandra_softphone") {
+  if (!call.direct_call_id && call.provider !== "jitter" && call.provider !== "sandra_softphone") {
     return json(
       { error: "Recording playback is unavailable for this provider", error_code: "unsupported_provider" },
       409,
@@ -86,6 +122,25 @@ export async function GET(
       },
       409,
     );
+  }
+
+  if (call.direct_call_id && directCall) {
+    const recording = (Array.isArray(call.call_recordings) ? call.call_recordings : call.call_recordings ? [call.call_recordings] : [])
+      .find((item) => item.status === "available");
+    if (!recording?.storage_path || recording.storage_bucket !== DIRECT_RECORDINGS_BUCKET) {
+      return json({ error: "Direct recording identity is incomplete", error_code: "missing_direct_recording" }, 409);
+    }
+    const pathParts = recording.storage_path.split("/");
+    if (pathParts.length < 3 || pathParts[1] !== directCall.id || pathParts[0] !== directCall.org_id || recording.storage_path.includes("..") || recording.storage_path.startsWith("/")) {
+      return json({ error: "Direct recording identity is invalid", error_code: "invalid_direct_recording" }, 409);
+    }
+    const { data: signed, error: signError } = await createAdminClient().storage
+      .from(DIRECT_RECORDINGS_BUCKET)
+      .createSignedUrl(recording.storage_path, 60);
+    if (signError || !signed?.signedUrl) {
+      return json({ error: "Recording playback is unavailable", error_code: "playback_unavailable" }, 502);
+    }
+    return json({ signedUrl: signed.signedUrl, expiresAt: new Date(Date.now() + 60_000).toISOString() });
   }
 
   const attemptId = call.jitter_attempt_id.trim();

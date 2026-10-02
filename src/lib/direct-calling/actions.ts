@@ -1,7 +1,6 @@
 "use server";
 
-import { getCallerMemberships } from "@/lib/auth/memberships";
-import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
 import { prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall } from "@/lib/dialer/actions";
 import { capabilityKey } from "@/lib/dialer/call-capability";
 import { isHomeownerTrainingNumber } from "@/lib/dialer/homeowner-training";
@@ -9,7 +8,7 @@ import { sealCallCapability } from "@/lib/dialer/jitter-server";
 import { reportError } from "@/lib/errors/report";
 import { createClient } from "@/lib/supabase/server";
 
-import { resolveCallingConfig } from "./config";
+import { isDirectCallEligibleMembership, resolveCallingConfig } from "./config";
 import type {
   CallingConfig,
   CancelDirectCallResult,
@@ -44,23 +43,23 @@ async function authenticatedOperator(): Promise<{ ok: true; userId: string } | {
   const supabase = await createClient();
   const { data: { user }, error } = await supabase.auth.getUser();
   if (error || !user) return { ok: false, error: "Not signed in.", errorCode: "unauthorized" };
-  let memberships: Awaited<ReturnType<typeof getCallerMemberships>> = [];
   try {
-    memberships = await getCallerMemberships();
+    const memberships = await getCallerMembershipsOrThrow();
+    if (!isDirectCallEligibleMembership(user.id, memberships)) {
+      return { ok: false, error: "Active Acquisitions access is required.", errorCode: "forbidden" };
+    }
   } catch {
-    memberships = [];
-  }
-  if (!memberships.some((m) => m.user_id === user.id && m.org_id === SANDRA_ORG_ID)) {
-    return { ok: false, error: "Active Sandra access is required.", errorCode: "forbidden" };
+    return { ok: false, error: "Active Acquisitions access is required.", errorCode: "forbidden" };
   }
   return { ok: true, userId: user.id };
 }
 
-function service() {
+function service(authorizedUserId: string) {
   return createDirectCallService({
     store: createSupabaseDirectCallStore(),
     env: process.env,
     now: () => new Date(),
+    isEligible: (userId) => userId === authorizedUserId,
     prepareLeadCall,
     prepareManualCall,
     resumeFailedSoftphoneCall,
@@ -88,9 +87,8 @@ function service() {
 
 export async function getCallingConfigForCurrentUser(): Promise<CallingConfig> {
   try {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    return resolveCallingConfig(user?.id);
+    const operator = await authenticatedOperator();
+    return operator.ok ? resolveCallingConfig(operator.userId, process.env, true) : { transport: "default" };
   } catch {
     return { transport: "default" };
   }
@@ -99,20 +97,20 @@ export async function getCallingConfigForCurrentUser(): Promise<CallingConfig> {
 export async function getDirectRtcToken(): Promise<DirectActionResult<DirectRtcToken>> {
   const operator = await authenticatedOperator();
   if (!operator.ok) return operator;
-  return service().getRtcToken(operator.userId);
+  return service(operator.userId).getRtcToken(operator.userId);
 }
 
 export async function startDirectCall(input: StartDirectCallInput): Promise<DirectActionResult<StartDirectCallResult>> {
   const operator = await authenticatedOperator();
   // Refused before the service ran: nothing was reserved.
   if (!operator.ok) return { ...operator, reserved: false };
-  return service().startCall(operator.userId, input);
+  return service(operator.userId).startCall(operator.userId, input);
 }
 
 export async function getDirectCallStatus(directCallId: string): Promise<DirectActionResult<DirectCallStatusView>> {
   const operator = await authenticatedUser();
   if (!operator.ok) return operator;
-  return service().getStatus(operator.userId, directCallId);
+  return service(operator.userId).getStatus(operator.userId, directCallId);
 }
 
 export async function controlDirectCall(
@@ -122,13 +120,13 @@ export async function controlDirectCall(
   // Hanging up an owned call needs only authentication + ownership; DTMF also needs active access.
   const operator = control?.action === "hangup" ? await authenticatedUser() : await authenticatedOperator();
   if (!operator.ok) return operator;
-  return service().control(operator.userId, directCallId, control);
+  return service(operator.userId).control(operator.userId, directCallId, control);
 }
 
 export async function getDirectCallStatusByRequest(clientRequestId: string): Promise<DirectActionResult<DirectCallStatusView>> {
   const operator = await authenticatedUser();
   if (!operator.ok) return operator;
-  return service().getStatusByRequest(operator.userId, clientRequestId);
+  return service(operator.userId).getStatusByRequest(operator.userId, clientRequestId);
 }
 
 /** Cancels a start whose response was lost: hangs up the call if it exists, else tombstones the request id. */
@@ -136,5 +134,5 @@ export async function cancelDirectCallByRequest(clientRequestId: string): Promis
   // Like hangup, cancelling needs only authentication: removing a user from the pilot must not strand a call.
   const operator = await authenticatedUser();
   if (!operator.ok) return operator;
-  return service().cancelByRequest(operator.userId, clientRequestId);
+  return service(operator.userId).cancelByRequest(operator.userId, clientRequestId);
 }

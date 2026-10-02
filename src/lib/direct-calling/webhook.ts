@@ -14,6 +14,7 @@ import {
   type SellerDialCommand,
 } from "./transitions";
 import { TelnyxApiError, decodeClientState, type ActiveCall, type DialParams } from "./telnyx";
+import { parseDirectRecordingSaved, type DirectRecordingSaved } from "./recording";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_CAS_ATTEMPTS = 3;
@@ -29,6 +30,10 @@ export type WebhookDeps = {
   listActiveCalls: () => Promise<{ calls: ActiveCall[]; complete: boolean }>;
   now: () => Date;
   report: (error: unknown, tag: string) => void;
+  /** Persists and captures call.recording.saved before the event is acknowledged. */
+  recordingSaved?: (row: DirectCallFullRow, recording: DirectRecordingSaved) => Promise<void>;
+  /** Starts the bound live Coach stream only after the owned seller is connected. */
+  coachConnected?: (row: DirectCallFullRow) => Promise<void>;
 };
 
 export type WebhookOutcome = { status: 200; result: "duplicate" | "stored_only" | "processed" };
@@ -73,7 +78,11 @@ export function parseDirectEvent(rawBody: string): { eventId: string; event: Dir
     },
     claimedCallId: claimed && UUID.test(claimed) ? claimed.toLowerCase() : null,
     occurredAt,
-    raw: parsed,
+    // Streaming webhooks echo the capability URL. Lifecycle reconciliation
+    // needs identities, never the short-lived admission secret.
+    raw: typeof payload.stream_url === "string"
+      ? { ...parsed, data: { ...data, payload: { ...payload, stream_url: "[redacted]" } } }
+      : parsed,
   };
 }
 
@@ -132,6 +141,13 @@ async function runSellerDial(deps: WebhookDeps, row: DirectCallFullRow, command:
       clientState: command.clientState,
       bridgeOnAnswer: command.bridgeOnAnswer,
       bridgeIntent: command.bridgeIntent,
+      recording: {
+        record: "record-from-answer",
+        recordChannels: "dual",
+        recordTrack: "both",
+        recordFormat: "wav",
+        recordMaxLength: command.timeLimitSecs,
+      },
     });
   } catch (error) {
     deps.report(error, "direct_call_seller_dial");
@@ -201,8 +217,19 @@ export async function processDirectCallWebhook(rawBody: string, deps: WebhookDep
   }
 
   if (!row) {
+    if (parsed.event.type === "call.recording.saved" && deps.recordingSaved) {
+      // A recording without its direct-call owner must remain unprocessed so
+      // the provider can redeliver after the seller leg is visible.
+      throw new Error("recording_call_unresolved");
+    }
     await store.markEventProcessed(parsed.eventId, null);
     return { status: 200, result: "stored_only" };
+  }
+
+  if (parsed.event.type === "call.recording.saved" && deps.recordingSaved) {
+    const recording = parseDirectRecordingSaved(rawBody);
+    if (!recording) throw new Error("recording_event_invalid");
+    await deps.recordingSaved(row, recording);
   }
 
   for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS && row; attempt++) {
@@ -219,6 +246,14 @@ export async function processDirectCallWebhook(rawBody: string, deps: WebhookDep
     row = await store.findById(row.id); // status moved under us; re-evaluate against fresh state
   }
   if (row) await triggerCleanup(deps, row.operator_user_id);
+  if (row && deps.coachConnected && (parsed.event.type === "call.answered" || parsed.event.type === "call.bridged")) {
+    const fresh = await store.findById(row.id);
+    if (fresh?.status === "connected" && fresh.seller_leg_id === parsed.event.callControlId) {
+      // Leave this event unprocessed on failure so signed provider redelivery
+      // retries the same deterministic streaming command without redialing.
+      await deps.coachConnected(fresh);
+    }
+  }
   await store.markEventProcessed(parsed.eventId, row?.id ?? null);
   return { status: 200, result: "processed" };
 }

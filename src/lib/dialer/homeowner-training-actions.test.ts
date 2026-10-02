@@ -74,7 +74,13 @@ describe("real training server actions", () => {
       return chain;
     } });
     expect(await completeSoftphoneCall(input())).toMatchObject({ ok: true });
-    expect(update).toHaveBeenCalledWith(expect.objectContaining({ disposition: null, do_not_call_requested: false, property_id: null, contact_id: null }));
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: null,
+      do_not_call_requested: false,
+      property_id: null,
+      contact_id: null,
+      direct_call_id: callId,
+    }));
     expect(mocks.disposition).not.toHaveBeenCalled(); expect(mocks.appointment).not.toHaveBeenCalled(); expect(mocks.resume).not.toHaveBeenCalled();
   });
   it("reads old-schema recents while training is disabled without naming the new column", async () => {

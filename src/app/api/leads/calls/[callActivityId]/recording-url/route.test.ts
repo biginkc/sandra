@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { authGetUser, eq, maybeSingle, select } = vi.hoisted(() => ({
+const { authGetUser, eq, maybeSingle, directMaybeSingle, select, createSignedUrl, from } = vi.hoisted(() => ({
   authGetUser: vi.fn(),
   eq: vi.fn(),
   maybeSingle: vi.fn(),
+  directMaybeSingle: vi.fn(),
   select: vi.fn(),
+  createSignedUrl: vi.fn(),
+  from: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -14,11 +17,21 @@ vi.mock("@/lib/supabase/server", () => ({
       eq: eq.mockImplementation(() => query),
       maybeSingle,
     };
+    const directQuery = {
+      select: vi.fn(() => directQuery),
+      eq: vi.fn(() => directQuery),
+      maybeSingle: directMaybeSingle,
+    };
+    from.mockImplementation((table: string) => table === "direct_calls" ? directQuery : query);
     return {
       auth: { getUser: authGetUser },
-      from: vi.fn(() => query),
+      from,
     };
   }),
+}));
+
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: vi.fn(() => ({ storage: { from: vi.fn(() => ({ createSignedUrl })) } })),
 }));
 
 import { GET } from "./route";
@@ -50,6 +63,7 @@ beforeEach(() => {
   vi.stubEnv("JITTER_SANDRA_PLAYBACK_TOKEN", "playback-secret");
   authGetUser.mockResolvedValue({ data: { user: { id: "user-1" } }, error: null });
   maybeSingle.mockResolvedValue({ data: call(), error: null });
+  directMaybeSingle.mockResolvedValue({ data: null, error: null });
   fetchMock.mockResolvedValue(
     new Response(
       JSON.stringify({
@@ -59,6 +73,7 @@ beforeEach(() => {
       { status: 200, headers: { "content-type": "application/json" } },
     ),
   );
+  createSignedUrl.mockResolvedValue({ data: { signedUrl: "https://storage.example.test/direct.wav" }, error: null });
 });
 
 afterEach(() => {
@@ -96,6 +111,51 @@ describe("GET /api/leads/calls/[callActivityId]/recording-url", () => {
 
     expect(response.status).not.toBe(409);
     expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it("preserves authorized Jitter playback for a different operator", async () => {
+    maybeSingle.mockResolvedValueOnce({ data: call({ operator_user_id: "other-user", provider: "jitter" }), error: null });
+    const response = await request();
+    expect(response.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it("signs the private direct recording for its owned call activity without contacting Jitter", async () => {
+    maybeSingle.mockResolvedValueOnce({ data: call({ provider: "sandra_softphone", org_id: "org-1", operator_user_id: "user-1", direct_call_id: "direct-1", call_recordings: [{ status: "available", storage_bucket: "sandra-direct-recordings", storage_path: "org-1/direct-1/rec-1.wav" }] }), error: null });
+    directMaybeSingle.mockResolvedValueOnce({ data: { id: "direct-1", org_id: "org-1", operator_user_id: "user-1" }, error: null });
+    const response = await request();
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ signedUrl: "https://storage.example.test/direct.wav" });
+    expect(createSignedUrl).toHaveBeenCalledWith("org-1/direct-1/rec-1.wav", 60);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not expose a direct recording for a different owner", async () => {
+    maybeSingle.mockResolvedValueOnce({ data: call({ provider: "sandra_softphone", org_id: "org-1", operator_user_id: "user-1", direct_call_id: "direct-2", call_recordings: [{ status: "available", storage_bucket: "sandra-direct-recordings", storage_path: "org-1/direct-2/rec-1.wav" }] }), error: null });
+    directMaybeSingle.mockResolvedValueOnce({ data: { id: "direct-2", org_id: "org-1", operator_user_id: "other-user" }, error: null });
+    const response = await request("other-owner-call");
+    expect(response.status).toBe(404);
+    expect(createSignedUrl).not.toHaveBeenCalled();
+  });
+
+  it("keeps a direct recording on its private path when mutable provider metadata is stale", async () => {
+    maybeSingle.mockResolvedValueOnce({ data: call({ provider: "jitter", org_id: "org-1", operator_user_id: "user-1", direct_call_id: "direct-stale-provider", call_recordings: [{ status: "available", storage_bucket: "sandra-direct-recordings", storage_path: "org-1/direct-stale-provider/rec-1.wav" }] }), error: null });
+    directMaybeSingle.mockResolvedValueOnce({ data: { id: "direct-stale-provider", org_id: "org-1", operator_user_id: "user-1" }, error: null });
+    const response = await request("stale-provider-call");
+
+    expect(response.status).toBe(200);
+    expect(createSignedUrl).toHaveBeenCalledWith("org-1/direct-stale-provider/rec-1.wav", 60);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("uses direct_calls ownership when mutable activity metadata names a second rep", async () => {
+    maybeSingle.mockResolvedValueOnce({ data: call({ provider: "sandra_softphone", org_id: "org-1", operator_user_id: "user-1", direct_call_id: "direct-3", call_recordings: [{ status: "available", storage_bucket: "sandra-direct-recordings", storage_path: "org-1/direct-3/rec-1.wav" }] }), error: null });
+    directMaybeSingle.mockResolvedValueOnce({ data: { id: "direct-3", org_id: "org-1", operator_user_id: "user-2" }, error: null });
+    const response = await request("second-rep-call");
+
+    expect(response.status).toBe(404);
+    expect(createSignedUrl).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("rejects non-Jitter calls before contacting Jitter", async () => {

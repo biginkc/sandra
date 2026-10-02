@@ -1,0 +1,16 @@
+{
+  "motivation.behind_on_payments": { "question": "Did the seller say they are behind on mortgage payments?", "approvedAt": "2026-09-30" },
+  "motivation.facing_auction": { "question": "Did the seller say the property has a foreclosure sale or auction date set?", "approvedAt": "2026-09-30" },
+  "motivation.back_taxes": { "question": "Did the seller say they owe unpaid property taxes on the property?", "approvedAt": "2026-09-30" },
+  "motivation.bankruptcy": { "question": "Did the seller say they have filed or are filing for bankruptcy?", "approvedAt": "2026-09-30" },
+  "motivation.liens": { "question": "Did the seller say there is a lien or judgment against the property?", "approvedAt": "2026-09-30" },
+  "motivation.underwater": { "question": "Did the seller say they owe more on the property than it is worth?", "approvedAt": "2026-09-30" },
+  "motivation.inherited": { "question": "Did the seller say they inherited the property or are handling it for an estate?", "approvedAt": "2026-09-30" },
+  "motivation.divorce": { "question": "Did the seller say they are selling because of a divorce or separation?", "approvedAt": "2026-09-30" },
+  "motivation.downsizing_health": { "question": "Did the seller say the property is a burden and/or has become too much to keep up with?", "approvedAt": "2026-09-30" },
+  "motivation.tired_landlord": { "question": "Did the seller say they are tired of dealing with tenants or being a landlord?", "approvedAt": "2026-09-30" },
+  "motivation.vacant": { "question": "Did the seller say no one is living in the property?", "approvedAt": "2026-09-30" },
+  "motivation.failed_listing": { "question": "Did the seller say the property was listed for sale and did not sell?", "approvedAt": "2026-09-30" },
+  "motivation.moving_away": { "question": "Did the seller say they have moved or have the desire to move?", "approvedAt": "2026-10-01" },
+  "motivation.major_repairs": { "question": "Did the seller say the property needs major repairs they cannot or will not do?", "approvedAt": "2026-09-30" }
+}

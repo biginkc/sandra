@@ -43,6 +43,8 @@ export type DirectCallServiceDeps = {
     createToken: (settings: TelnyxDirectSettings, credentialId: string) => Promise<string>;
   };
   report: (error: unknown, tag: string) => void;
+  /** The server action supplies the result of its authoritative Acquisitions membership check. */
+  isEligible: (userId: string) => boolean;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -61,7 +63,7 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
   function gate(userId: string): { ok: true; settings: TelnyxDirectSettings; timeLimitSecs: number } | ReturnType<typeof err> {
     const settings = readTelnyxDirectSettings(env);
     const timeLimitSecs = readDirectCallTimeLimitSecs(env);
-    if (resolveCallingConfig(userId, env).transport !== "telnyx_direct" || !settings || timeLimitSecs === null) {
+    if (resolveCallingConfig(userId, env, deps.isEligible(userId)).transport !== "telnyx_direct" || !settings || timeLimitSecs === null) {
       return err("Direct calling is not enabled for this account.", "not_enabled");
     }
     return { ok: true, settings, timeLimitSecs };

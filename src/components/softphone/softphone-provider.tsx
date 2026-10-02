@@ -40,14 +40,17 @@ import {
   mintJitterStartIntent,
 } from "@/lib/dialer/jitter-actions";
 import type { JitterCallerId } from "@/lib/dialer/jitter-contract";
+import type { CallingConfig } from "@/lib/direct-calling/contract";
 import { maskPhone } from "@/lib/phone-format";
 import { KeyedCoachLiveView } from "@/components/coach/keyed-coach-live-view";
 import { PhoneKeypad } from "@/components/softphone/phone-keypad";
 import { isCoachUiEnabled } from "@/lib/coach/flags";
 import { useCoachSession } from "@/lib/coach/use-coach-session";
 import { playDtmfTone } from "@/lib/dialer/dtmf-tone";
+import { TelnyxDirectCallTransport } from "@/lib/dialer/telnyx-direct-transport";
 import {
   type CallHandle,
+  type CallTarget,
   type CallTransport,
   type DtmfDigit,
   type ProviderStatusPollError,
@@ -104,6 +107,8 @@ type Props = {
   children: ReactNode;
   /** Non-shipping acceptance injection; production always uses the default. */
   transportFactory?: () => CallTransport;
+  /** Server-resolved calling mode; absent/default keeps the Jitter path. */
+  callingConfig?: CallingConfig;
 };
 
 const TEARDOWN_WARNING =
@@ -261,10 +266,20 @@ function callbackWallTime(kind: "today_pm" | "tomorrow_am"): {
   };
 }
 
+const createDirectCallTransport = (): CallTransport =>
+  new TelnyxDirectCallTransport();
+
 export function SoftphoneProvider({
   children,
-  transportFactory = createSoftphoneCallTransport,
+  transportFactory: suppliedTransportFactory,
+  callingConfig,
 }: Props) {
+  // Pilot users place calls straight through Telnyx: no Jitter caller-ID
+  // inventory, start intent, or recovery probe is touched in this mode.
+  const directMode = callingConfig?.transport === "telnyx_direct";
+  const transportFactory =
+    suppliedTransportFactory ??
+    (directMode ? createDirectCallTransport : createSoftphoneCallTransport);
   const [phone, setPhone] = useState<SoftphoneState>("closed");
   const [target, setTarget] = useState<SoftphoneTarget | null>(null);
   const [dialInput, setDialInput] = useState("");
@@ -305,8 +320,11 @@ export function SoftphoneProvider({
   const [callerIdState, setCallerIdState] = useState<CallerIdState>("loading");
   const [selectedCallerId, setSelectedCallerId] = useState<string | null>(null);
   const [callerIdError, setCallerIdError] = useState<string | null>(null);
-  const [callingEnabled] = useState(() => isSoftphoneTransportEnabled());
-  const [coachUiEnabled] = useState(() => isCoachUiEnabled());
+  const [callingEnabled] = useState(
+    () => directMode || isSoftphoneTransportEnabled(),
+  );
+  // Enable direct coaching only when its separately deployed producer is ready.
+  const [coachUiEnabled] = useState(() => isCoachUiEnabled() && (!directMode || process.env.NEXT_PUBLIC_DIRECT_COACH_ENABLED === "1"));
   const [coachPreference, setCoachPreference] =
     useState<CoachPreference>(readCoachPreference);
   const updateCoachPreference = useCallback((preference: CoachPreference) => {
@@ -343,6 +361,9 @@ export function SoftphoneProvider({
         }
       : null,
     coachUiEnabled ? wrapToken : null,
+    // Direct script binding is created on seller answer. Ringing must not
+    // consume the bounded lookup retries before that write can occur.
+    !directMode || isConnectedCallStatus(callStatus),
   );
   const transportRef = useRef<CallTransport | null>(null);
   const callHandleRef = useRef<CallHandle | null>(null);
@@ -423,8 +444,8 @@ export function SoftphoneProvider({
   }, []);
 
   useEffect(() => {
-    if (callingEnabled) void loadCallerIds();
-  }, [callingEnabled, loadCallerIds]);
+    if (callingEnabled && !directMode) void loadCallerIds();
+  }, [callingEnabled, directMode, loadCallerIds]);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -440,7 +461,13 @@ export function SoftphoneProvider({
   );
 
   useEffect(() => {
-    if (!["live", "held", "wrap"].includes(phone) || !target?.propertyId)
+    // Direct mode: the server owns enrollment resume (it resumes when a lead call ends without
+    // connecting), and the transport ends its own call on pagehide. No resume beacon from the browser.
+    if (
+      directMode ||
+      !["live", "held", "wrap"].includes(phone) ||
+      !target?.propertyId
+    )
       return;
     const propertyId = target.propertyId;
     const resumeOnPageHide = () => {
@@ -461,7 +488,7 @@ export function SoftphoneProvider({
     };
     window.addEventListener("pagehide", resumeOnPageHide);
     return () => window.removeEventListener("pagehide", resumeOnPageHide);
-  }, [phone, target?.propertyId]);
+  }, [directMode, phone, target?.propertyId]);
 
   useEffect(() => {
     if (phone !== "live" || held || !isConnectedCallStatus(callStatus)) return;
@@ -533,7 +560,12 @@ export function SoftphoneProvider({
   }, []);
 
   useEffect(() => {
-    if (!callingEnabled || !isJitterTransportEnabled() || transportRef.current)
+    if (
+      !callingEnabled ||
+      directMode ||
+      !isJitterTransportEnabled() ||
+      transportRef.current
+    )
       return;
     const retained = readRetainedActiveCall();
     if (!retained) return;
@@ -663,7 +695,7 @@ export function SoftphoneProvider({
     });
     void transport.recover(retained.handle, retained.startedAt);
     return () => clearTimeout(checkingTimer);
-  }, [callingEnabled, showToast, transition, transportFactory]);
+  }, [callingEnabled, directMode, showToast, transition, transportFactory]);
 
   const startTarget = useCallback(
     async (
@@ -672,6 +704,7 @@ export function SoftphoneProvider({
       >,
       provisionalTarget?: SoftphoneTarget,
       suppliedTiming?: ReliabilityTimingSession,
+      directRequest?: CallTarget["directRequest"],
     ) => {
       if (!callingEnabled) {
         setError("Calling not yet enabled");
@@ -701,7 +734,7 @@ export function SoftphoneProvider({
       transition({ type: "call_started" });
       setPending(true);
       setError(null);
-      const jitterTransport = isJitterTransportEnabled();
+      const jitterTransport = isJitterTransportEnabled() && !directMode;
       let startIntent: { callToken: string; intentCapability: string } | null =
         null;
       const abortStart = (message: string) => {
@@ -725,14 +758,16 @@ export function SoftphoneProvider({
         }
         startIntent = minted.data;
       }
-      const callerIdE164 =
-        selectedCallerIdRef.current &&
-        callerIdsRef.current.some(
-          (item) => item.phone_e164 === selectedCallerIdRef.current,
-        )
+      // Direct mode uses the server-frozen Sandra line; no inventory exists.
+      const callerIdE164 = directMode
+        ? undefined
+        : selectedCallerIdRef.current &&
+            callerIdsRef.current.some(
+              (item) => item.phone_e164 === selectedCallerIdRef.current,
+            )
           ? selectedCallerIdRef.current
           : await loadCallerIds();
-      if (!callerIdE164) {
+      if (!directMode && !callerIdE164) {
         startInFlightRef.current = false;
         setPending(false);
         setTarget(null);
@@ -744,7 +779,13 @@ export function SoftphoneProvider({
         { ok: true; data: SoftphoneTarget } | { ok: false; error: string };
       try {
         reliabilityTiming.mark("preparation_started");
-        result = await prepare();
+        // Direct mode never prepares here: preparing pauses the lead's enrollments, and the server's
+        // startDirectCall does that itself, only after its own busy check allows the call. Until the
+        // server answers, the UI shows what it already knows about the target.
+        result =
+          directMode && provisionalTarget
+            ? { ok: true, data: provisionalTarget }
+            : await prepare();
       } catch {
         if (provisionalTarget?.propertyId) {
           await Promise.resolve(
@@ -803,13 +844,16 @@ export function SoftphoneProvider({
         const handle = transport.callHandle?.();
         if (!handle) return;
         callHandleRef.current = handle;
-        retainActiveCall({
-          handle,
-          target: result.data,
-          startedAt: result.data.startedAt,
-          wrapToken: callToken,
-        });
-        setCoachCallId(callToken);
+        // Direct calls have no recovery, so there is nothing to retain across a reload.
+        if (!directMode) {
+          retainActiveCall({
+            handle,
+            target: result.data,
+            startedAt: result.data.startedAt,
+            wrapToken: callToken,
+          });
+        }
+        setCoachCallId(directMode ? handle.id : callToken);
       };
       const finishTerminal = (kind: "ended" | "failed") => {
         if (terminalPromise) return terminalPromise;
@@ -845,7 +889,8 @@ export function SoftphoneProvider({
             );
             setFinalSeconds(terminalResult.durationSeconds);
             setWrapToken((value) => value ?? crypto.randomUUID());
-            if (kind === "failed" && result.data.propertyId) {
+            // Direct mode: the server resumes a lead call that ended without connecting.
+            if (kind === "failed" && result.data.propertyId && !directMode) {
               try {
                 await resumeFailedSoftphoneCall(result.data.propertyId);
               } catch {
@@ -893,7 +938,10 @@ export function SoftphoneProvider({
           setCoachCallId(null);
           void (async () => {
             try {
-              if (result.data.propertyId) {
+              // A direct-mode busy refusal means another call of this operator owns the
+              // enrollment pause; resuming here would release the live call's pause.
+              // In direct mode the server owns resume for every refusal (it never paused for a refused call).
+              if (result.data.propertyId && !directMode) {
                 await resumeFailedSoftphoneCall(result.data.propertyId);
               }
             } catch {
@@ -926,7 +974,9 @@ export function SoftphoneProvider({
               } else {
                 setError(
                   status === "operator_busy"
-                    ? "You already have an active Jitter call."
+                    ? directMode
+                      ? "You already have a call in progress."
+                      : "You already have an active Jitter call."
                     : "This number is no longer callable.",
                 );
               }
@@ -1011,8 +1061,9 @@ export function SoftphoneProvider({
           contactId: result.data.contactId ?? undefined,
           callToken,
           ...(intentCapability ? { intentCapability } : {}),
-          callerIdE164,
+          ...(callerIdE164 ? { callerIdE164 } : {}),
           coachScriptSlug: coachPreference.scriptId,
+          ...(directMode && directRequest ? { directRequest } : {}),
         });
         if (attemptGenerationRef.current !== myAttempt) {
           // Superseded while transport.start() was in flight — the rep
@@ -1024,19 +1075,25 @@ export function SoftphoneProvider({
           return;
         }
         callHandleRef.current = callHandle;
-        retainActiveCall({
-          handle: callHandle,
-          target: result.data,
-          startedAt: result.data.startedAt,
-          wrapToken: callToken,
-        });
+        // Direct mode: show the target the server actually prepared (its display fields).
+        if (directMode && callHandle.target) {
+          setTarget(callHandle.target as SoftphoneTarget);
+        }
+        if (!directMode) {
+          retainActiveCall({
+            handle: callHandle,
+            target: result.data,
+            startedAt: result.data.startedAt,
+            wrapToken: callToken,
+          });
+        }
         // Only now — transport.start() actually succeeded — does the coach
         // hook get a callId to subscribe with. Subscribing any earlier would
         // race the server's coach_call_index write (fired via after(), so
         // it isn't even guaranteed to have started yet at this point,
         // let alone landed); the client-side retry-with-backoff on
         // CHANNEL_ERROR (use-coach-channel.ts) absorbs whatever gap remains.
-        setCoachCallId(callToken);
+        setCoachCallId(directMode ? callHandle.id : callToken);
       } catch (error) {
         // A provisioned call can fail during RTC setup after start-call
         // succeeded; keep its handle so wrap-up uses the real call identity.
@@ -1053,6 +1110,7 @@ export function SoftphoneProvider({
       callingEnabled,
       coachPreference.enabled,
       coachPreference.scriptId,
+      directMode,
       loadCallerIds,
       showToast,
       transition,
@@ -1079,6 +1137,7 @@ export function SoftphoneProvider({
           startedAt: new Date().toISOString(),
         },
         reliabilityTiming,
+        { kind: "lead", propertyId: lead.id },
       );
     },
     [callingEnabled, startTarget],
@@ -1172,7 +1231,10 @@ export function SoftphoneProvider({
           disposition,
           notes,
           wrapToken,
-          callCapability: callHandleRef.current?.id,
+          // Direct calls carry the server-sealed identity minted at start; Jitter's handle id is its own.
+          callCapability: directMode
+            ? callHandleRef.current?.callCapability
+            : callHandleRef.current?.id,
           callback,
         });
         if (!result.ok) {
@@ -1200,6 +1262,7 @@ export function SoftphoneProvider({
       startedAt,
       target,
       teardownUnconfirmed,
+      directMode,
       transition,
       wrapToken,
     ],
@@ -1212,7 +1275,8 @@ export function SoftphoneProvider({
     /^[\d\s()+.-]+$/.test(dialInput) && /^\d{10}$/.test(manualDigits);
   const callName = target?.name ?? "";
   const isOnCall = phone === "live" || phone === "held";
-  const callerIdReady = callerIdState === "ready" && Boolean(selectedCallerId);
+  const callerIdReady =
+    directMode || (callerIdState === "ready" && Boolean(selectedCallerId));
 
   const selectCallerId = useCallback((phoneE164: string) => {
     if (
@@ -1423,6 +1487,7 @@ export function SoftphoneProvider({
                     manualDigits={manualDigits}
                     pending={pending}
                     callingEnabled={callingEnabled}
+                    directLine={directMode}
                     callerIds={callerIds}
                     callerIdState={callerIdState}
                     callerIdError={callerIdError}
@@ -1438,8 +1503,20 @@ export function SoftphoneProvider({
                       reliabilityTiming.mark("ui_click");
                       void startTarget(
                         () => prepareLeadCall(suggestion.propertyId),
-                        undefined,
+                        directMode
+                          ? {
+                              propertyId: suggestion.propertyId,
+                              contactId: null,
+                              phoneE164: "",
+                              maskedPhone: "",
+                              name: suggestion.name,
+                              address: suggestion.detail || null,
+                              state: null,
+                              startedAt: new Date().toISOString(),
+                            }
+                          : undefined,
                         reliabilityTiming,
+                        { kind: "lead", propertyId: suggestion.propertyId },
                       );
                     }}
                     onRecent={(recent) => {
@@ -1451,8 +1528,22 @@ export function SoftphoneProvider({
                           recent.propertyId
                             ? prepareLeadCall(recent.propertyId)
                             : prepareManualCall(recent.phoneE164),
-                        undefined,
+                        directMode
+                          ? {
+                              propertyId: recent.propertyId,
+                              contactId: recent.contactId,
+                              phoneE164: recent.phoneE164,
+                              maskedPhone: maskPhone(recent.phoneE164),
+                              name: recent.name,
+                              address: recent.detail || null,
+                              state: null,
+                              startedAt: new Date().toISOString(),
+                            }
+                          : undefined,
                         reliabilityTiming,
+                        recent.propertyId
+                          ? { kind: "lead", propertyId: recent.propertyId }
+                          : { kind: "manual", phone: recent.phoneE164 },
                       );
                     }}
                     onManual={() => {
@@ -1461,8 +1552,20 @@ export function SoftphoneProvider({
                       reliabilityTiming.mark("ui_click");
                       void startTarget(
                         () => prepareManualCall(manualDigits),
-                        undefined,
+                        directMode
+                          ? {
+                              propertyId: null,
+                              contactId: null,
+                              phoneE164: manualDigits,
+                              maskedPhone: maskPhone(manualDigits),
+                              name: maskPhone(manualDigits),
+                              address: null,
+                              state: null,
+                              startedAt: new Date().toISOString(),
+                            }
+                          : undefined,
                         reliabilityTiming,
+                        { kind: "manual", phone: manualDigits },
                       );
                     }}
                     onDigit={enterManualDigit}
@@ -1610,6 +1713,7 @@ function IdleView({
   manualDigits,
   pending,
   callingEnabled,
+  directLine,
   callerIds,
   callerIdState,
   callerIdError,
@@ -1635,6 +1739,7 @@ function IdleView({
   manualDigits: string;
   pending: boolean;
   callingEnabled: boolean;
+  directLine: boolean;
   callerIds: JitterCallerId[];
   callerIdState: CallerIdState;
   callerIdError: string | null;
@@ -1659,7 +1764,17 @@ function IdleView({
           Calling not yet enabled
         </div>
       ) : null}
-      {callingEnabled ? (
+      {callingEnabled && directLine ? (
+        <div className="mb-3 rounded-[10px] border border-[#e5e1df] bg-[#fafaf9] px-3 py-2.5 text-left">
+          <div className="mb-1 text-[10px] font-extrabold uppercase tracking-[0.1em] text-[#78716c]">
+            Call from
+          </div>
+          <div data-testid="direct-line-label" className="text-sm font-bold">
+            Sandra direct line
+          </div>
+        </div>
+      ) : null}
+      {callingEnabled && !directLine ? (
         <CallerIdControl
           callerIds={callerIds}
           state={callerIdState}
@@ -1673,6 +1788,7 @@ function IdleView({
         <CoachPreferenceControl
           preference={coachPreference}
           onChange={onCoachPreferenceChange}
+          assignedScript={directLine}
         />
       ) : null}
       <input
@@ -1820,9 +1936,11 @@ function IdleView({
 function CoachPreferenceControl({
   preference,
   onChange,
+  assignedScript = false,
 }: {
   preference: CoachPreference;
   onChange: (preference: CoachPreference) => void;
+  assignedScript?: boolean;
 }) {
   return (
     <Collapsible.Root
@@ -1890,7 +2008,9 @@ function CoachPreferenceControl({
             />
           </button>
         </div>
-        {preference.enabled ? (
+        {preference.enabled && assignedScript ? (
+          <p className="mt-2 text-[11px] text-[#a9b6cf]">Uses the coaching script assigned to this line.</p>
+        ) : preference.enabled ? (
           <label className="mt-2 block text-[11px] font-semibold text-[#a9b6cf]">
             Call script
             <select

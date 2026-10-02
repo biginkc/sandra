@@ -3,7 +3,9 @@ import { NextResponse } from "next/server";
 import { readTelnyxDirectSettings } from "@/lib/direct-calling/config";
 import { verifyTelnyxSignature } from "@/lib/direct-calling/signature";
 import { createSupabaseDirectCallStore } from "@/lib/direct-calling/store";
-import { telnyxDial, telnyxGetCallAlive, telnyxHangup, telnyxListActiveCalls } from "@/lib/direct-calling/telnyx";
+import { createDirectRecordingHandler } from "@/lib/direct-calling/recording";
+import { createDirectCoachStarter } from "@/lib/direct-calling/coach";
+import { telnyxDial, telnyxGetCallAlive, telnyxGetRecording, telnyxHangup, telnyxListActiveCalls } from "@/lib/direct-calling/telnyx";
 import { processDirectCallWebhook } from "@/lib/direct-calling/webhook";
 import { reportError } from "@/lib/errors/report";
 
@@ -30,6 +32,7 @@ export async function POST(request: Request): Promise<Response> {
   if (!verified.ok) return NextResponse.json({ error: "invalid_signature" }, { status: 401 });
 
   try {
+    const recordingSaved = createDirectRecordingHandler({ getRecording: (recordingId) => telnyxGetRecording(settings, recordingId) });
     const outcome = await processDirectCallWebhook(rawBody, {
       store: createSupabaseDirectCallStore(),
       dial: (params) => telnyxDial(settings, params),
@@ -38,6 +41,8 @@ export async function POST(request: Request): Promise<Response> {
       listActiveCalls: () => telnyxListActiveCalls(settings),
       now: () => new Date(),
       report: (error, tag) => reportError(error, { tags: { surface: tag } }),
+      recordingSaved,
+      coachConnected: createDirectCoachStarter({ settings }),
     });
     return NextResponse.json({ ok: true, result: outcome.result }, { status: outcome.status });
   } catch (error) {
