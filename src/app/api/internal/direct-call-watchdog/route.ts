@@ -12,10 +12,10 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// One claimed row is worked per callback. Four-page active-call reconciliation
-// therefore stays below the fifteen-second claim lease even when every provider
-// request reaches its deadline.
-const WATCHDOG_PROVIDER_TIMEOUT_MS = 3_000;
+// Keep one callback bounded while still working an unresolved-Dial row and both
+// known legs before the next durable claim. Four listing pages plus two legs at
+// this deadline stays below the fifteen-second claim lease.
+const WATCHDOG_PROVIDER_TIMEOUT_MS = 2_000;
 
 export async function POST(request: Request): Promise<NextResponse> {
   const secret = (process.env.DIRECT_WATCHDOG_CLEANUP_SECRET ?? process.env.DIRECT_WATCHDOG_SECRET)?.trim();
@@ -49,7 +49,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     listActiveCalls: () => telnyxListActiveCalls(settings, { timeoutMs: WATCHDOG_PROVIDER_TIMEOUT_MS }),
     now: () => new Date(),
     report: () => undefined,
-  }, row.operator_user_id, 1);
+  }, row.operator_user_id, 3);
   // A resolved unresolved-Dial or the final confirmed leg has no webhook left to
   // move an ending row terminal. Reuse the same CAS transition after the shared
   // cleanup core confirms every obligation; an open row leaves ending durable for

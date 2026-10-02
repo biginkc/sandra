@@ -24,6 +24,47 @@ function setup(legs: string[] = ["leg-1"], rowOver: Record<string, unknown> = {}
 }
 
 describe("processDueCleanups", () => {
+  it("works an unresolved Dial and both known legs in one watchdog pass", async () => {
+    clock.now = new Date("2026-10-01T12:00:00.000Z");
+    const store = new FakeStore();
+    store.clock = () => clock.now;
+    store.add(makeRow({
+      id: CALL,
+      operator_user_id: "user-1",
+      status: "ending",
+      browser_leg_id: "browser-leg",
+      seller_leg_id: "seller-leg",
+    }));
+    const unresolved = store.addCleanup({
+      direct_call_id: CALL,
+      kind: "unresolved_dial",
+      dial_role: "seller",
+      dial_started_at: new Date(clock.now.getTime() - 60_000).toISOString(),
+      resolve_after: new Date(clock.now.getTime() - 30_000).toISOString(),
+      backstop_at: new Date(clock.now.getTime() + 60_000).toISOString(),
+    });
+    store.addCleanup({ direct_call_id: CALL, kind: "leg", leg_id: "browser-leg" });
+    store.addCleanup({ direct_call_id: CALL, kind: "leg", leg_id: "seller-leg" });
+    const hangup = vi.fn(async () => {});
+    const deps: CleanupDeps = {
+      store,
+      hangup,
+      getCall: async () => ({ isAlive: true }),
+      listActiveCalls: async () => ({ calls: [], complete: true }),
+      now: () => clock.now,
+      report: vi.fn(),
+      random: () => 0,
+    };
+
+    const result = await processDueCleanups(deps, "user-1", 3);
+
+    expect(result.processed).toBe(3);
+    expect(hangup.mock.calls.map(([leg]) => leg)).toEqual(["browser-leg", "seller-leg"]);
+    expect(store.legRow("browser-leg")?.acked_at).toBeTruthy();
+    expect(store.legRow("seller-leg")?.acked_at).toBeTruthy();
+    expect(store.cleanups.get(unresolved.id)?.confirmed_at).toBeNull();
+  });
+
   it("claims one row immediately before working it, so a slow batch cannot let a later row's lease lapse", async () => {
     const { deps, log, limits } = setup(["leg-1", "leg-2", "leg-3"]);
     await processDueCleanups(deps, "user-1");

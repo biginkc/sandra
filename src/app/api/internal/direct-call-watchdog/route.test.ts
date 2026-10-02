@@ -90,7 +90,7 @@ describe("direct-call watchdog cleanup callback", () => {
     store.openCleanupsForCall.mockResolvedValue([]);
     const response = await POST(signedRequest(JSON.stringify({ callId: CALL_ID, sessionId: SESSION_ID })));
     expect(response.status).toBe(200);
-    expect(processDueCleanups).toHaveBeenCalledWith(expect.objectContaining({}), activeRow().operator_user_id, 1);
+    expect(processDueCleanups).toHaveBeenCalledWith(expect.objectContaining({}), activeRow().operator_user_id, 3);
     expect(store.updateIfStatus).toHaveBeenNthCalledWith(1, CALL_ID, ["browser_connecting", "seller_dialing", "connected"], { status: "ending", failure_reason: "browser_watchdog_expired" }, [{ kind: "leg", legId: "browser-leg" }, { kind: "leg", legId: "seller-leg" }]);
     expect(store.updateIfStatus).toHaveBeenNthCalledWith(2, CALL_ID, ["ending"], expect.objectContaining({ status: "ended", ended_at: expect.any(String) }));
   });

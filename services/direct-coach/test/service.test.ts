@@ -401,7 +401,9 @@ test('watchdog cleanup stays single-flight while two real media sessions and pre
   const callB: CoachClaims = { callId: 'load-call-b', sellerLegId: 'load-seller-b', expiresAtMs: Date.now() + 100_000 }
   const bindingFor = (value: CoachClaims): DirectCoachBinding => ({ ...binding, ...value })
   let heartbeats = 0
+  let renewals = 0
   let claimCalls = 0
+  let audioFrames = 0
   let cleanupStarted!: () => void
   let releaseCleanup!: () => void
   const cleanupBegan = new Promise<void>((resolve) => { cleanupStarted = resolve })
@@ -411,7 +413,7 @@ test('watchdog cleanup stays single-flight while two real media sessions and pre
     isActive: async () => true,
     watchdogHeartbeat: async () => { heartbeats += 1 },
     watchdogAttach: async () => true,
-    watchdogRenew: async () => true,
+    watchdogRenew: async () => { renewals += 1; return true },
     watchdogDisconnect: async () => true,
     watchdogClaimExpired: async () => {
       claimCalls += 1
@@ -428,7 +430,7 @@ test('watchdog cleanup stays single-flight while two real media sessions and pre
     secret: SECRET, db, publisher, deepgramApiKey: 'disabled', jevApiKey: 'disabled', logger,
     sessionFactory: (ws, value, admitted, onEnd) => new CoachSession(ws, value, admitted, {
       db, publisher, deepgramApiKey: 'disabled', jevApiKey: 'disabled', logger,
-      bridgeFactory: () => ({ send() {}, close: async () => {} }),
+      bridgeFactory: () => ({ send() { audioFrames += 1 }, close: async () => {} }),
       objectionFactory: () => ({ close() {}, onFinal() {}, onInterim() {} } as unknown as ObjectionPromptCall),
       onEnd,
     }),
@@ -459,11 +461,26 @@ test('watchdog cleanup stays single-flight while two real media sessions and pre
   await waitForWebSocketOpen(presenceB)
   presenceB.send(createWatchdogToken({ callId: callB.callId, browserLegId: 'browser-b', operatorUserId: 'owner', sessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', expiresAtMs: Date.now() + 100_000 }, SECRET))
   await waitForWebSocketMessage(presenceB)
-  await new Promise((resolve) => setTimeout(resolve, 2_200))
-  assert.equal(heartbeats >= 3, true)
-  assert.equal(claimCalls, 2)
+  // Keep the expiry callback blocked for ten seconds. Native pong renewals and
+  // the liveness row must continue while cleanup is slow, and a second cleanup
+  // claim must not overlap the in-flight callback.
+  setTimeout(() => releaseCleanup(), 10_000)
+  const pcmu = Buffer.alloc(160, 0x7f).toString('base64')
+  for (let chunk = 1; chunk <= 750; chunk += 1) {
+    const media = JSON.stringify({ event: 'media', media: { chunk: String(chunk), track: 'inbound', payload: pcmu } })
+    mediaA.send(media)
+    mediaB.send(media)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    if (chunk === 400) {
+      assert.equal(claimCalls, 2)
+      assert.equal(service.activeCalls.size, 2)
+    }
+  }
+  assert.equal(audioFrames >= 1_000, true)
+  assert.equal(heartbeats >= 8, true)
+  assert.equal(renewals >= 6, true)
+  assert.equal(claimCalls >= 2, true)
   assert.equal(service.activeCalls.size, 2)
-  releaseCleanup()
   await Promise.all([waitForWebSocketTerminal(mediaA), waitForWebSocketTerminal(mediaB), waitForWebSocketTerminal(presenceA), waitForWebSocketTerminal(presenceB), service.close()])
 })
 
