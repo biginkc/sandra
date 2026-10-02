@@ -4,10 +4,10 @@ Proposed, not provisioned. This package does not authorize spending, set product
 variables, create a logical slot, or enable the redesigned Inbox. The worker image
 and migration release remain explicit incomplete dependencies in candidate.json.
 
-Use a new Sandra Inbox project in the existing biginkc Railway workspace. Four
-single-replica pilot services run in Railway Virginia, near the verified Supabase
-us-east-1 database: private Electric, private Restate, private operation/projection
-worker, and an authenticated public sync relay. Sandra's existing Next deployment
+Use a new Sandra Inbox project in the existing biginkc Railway workspace. Seven
+single-replica/one-shot pilot services run in Railway Virginia, near the verified Supabase
+us-east-1 database: private Electric, private Restate, private operation, reply-send,
+projection, and registration services, plus an authenticated public sync relay. Sandra's existing Next deployment
 calls the relay after its own canonical user/workset authorization; browsers never
 receive the relay secret. Electric and Restate receive no public domain. No new
 PostgreSQL server or unrelated Railway project is reused.
@@ -89,6 +89,11 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
   Restate's durable volume is required. A single node is a pilot choice with
   restart recovery, not high availability. Test volume recovery and application
   receipt reconciliation; do not promise zero data loss for volume destruction.
+- Electric production connects directly to `db.<project-ref>.supabase.co:5432` with
+  `sslmode=verify-full`, the committed Supabase CA, TLS 1.2 minimum, and
+  `gssencmode=disable`. The relay receives only its own bearer token; it never
+  receives or forwards the Electric database secret. The local
+  `execution-stack-compose.yml` exception is fixture-only.
 - Store DB credentials and relay secret only in the named services' secret
   variables. Scope the DB role to the required projection or operation wrappers.
   Require verified TLS to Supabase. No administrator database fallback.

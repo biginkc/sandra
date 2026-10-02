@@ -23,7 +23,20 @@
       "public": false,
       "port": 3000,
       "env": {
-        "ELECTRIC_LONG_POLL_TIMEOUT": "8000"
+        "ELECTRIC_LONG_POLL_TIMEOUT": "8000",
+        "ELECTRIC_MANUAL_TABLE_PUBLISHING": "true",
+        "ELECTRIC_REPLICATION_STREAM_ID": "inbox_copflsklaefwzipsrjqz",
+        "ELECTRIC_TELEMETRY": "false"
+      },
+      "connection": {
+        "host": "db.copflsklaefwzipsrjqz.supabase.co",
+        "port": 5432,
+        "database": "postgres",
+        "sslmode": "verify-full",
+        "sslrootcert": "experiments/inbox-production-install/supabase-prod-ca-2021.crt",
+        "ssl_min_protocol_version": "TLSv1.2",
+        "gssencmode": "disable",
+        "secretForwarding": "none"
       }
     },
     {
@@ -39,13 +52,42 @@
       "privateAdminPort": 9070
     },
     {
-      "name": "inbox-worker",
+      "name": "inbox-operation-worker",
       "image": null,
-      "releasePrerequisite": "reviewed authoritative-operation and projection worker image",
+      "releasePrerequisite": "reviewed authoritative-operation worker image",
       "replicas": 1,
       "cpuLimit": 1,
       "memoryGiBLimit": 1,
       "volumeGiBLimit": 0,
+      "public": false
+    },
+    {
+      "name": "inbox-reply-send-worker",
+      "image": null,
+      "releasePrerequisite": "reviewed reply-send worker image",
+      "replicas": 1,
+      "cpuLimit": 1,
+      "memoryGiBLimit": 1,
+      "volumeGiBLimit": 0,
+      "public": false,
+      "port": 9081
+    },
+    {
+      "name": "inbox-projection-worker",
+      "image": null,
+      "releasePrerequisite": "reviewed projection worker image",
+      "replicas": 1,
+      "cpuLimit": 1,
+      "memoryGiBLimit": 1,
+      "volumeGiBLimit": 0,
+      "public": false
+    },
+    {
+      "name": "inbox-restate-register",
+      "sourceDirectory": "experiments/inbox-release",
+      "entrypoint": "register-restate-services.py",
+      "runMode": "one-shot",
+      "releasePrerequisite": "worker liveness and private-network registration receipt",
       "public": false
     },
     {

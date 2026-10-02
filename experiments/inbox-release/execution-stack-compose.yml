@@ -41,6 +41,9 @@ services:
         aliases: [electric]
     environment:
       DATABASE_URL: ${INBOX_ELECTRIC_DATABASE_URL:?set INBOX_ELECTRIC_DATABASE_URL in the ignored runtime env}
+      # FIXTURE ONLY: this compose stack uses its disposable local database.
+      # Never copy this setting into the hosted candidate; production requires
+      # verify-full with the pinned Supabase CA.
       ELECTRIC_INSECURE: "true"
       ELECTRIC_DB_POOL_SIZE: "2"
       # These must match the release packet's manual publication. The

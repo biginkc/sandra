@@ -51,6 +51,10 @@
     {
       "path": "/api/cron/dialpad-call-events-sweep",
       "schedule": "*/1 * * * *"
+    },
+    {
+      "path": "/api/cron/inbox-reply-callback-sweep",
+      "schedule": "*/1 * * * *"
     }
   ],
   "git": {
