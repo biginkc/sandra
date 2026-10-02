@@ -1,46 +1,37 @@
-# Inbound persist burst: A/B/C (local 55329 sandbox only)
+# Inbound persist burst: A/B/C/D (local 55329 sandbox only)
 
-Same machine, same seed (50k properties / 250k messages), 5 reps with rotated state order. **A** = filter-cache migrations reverted (origin/main
-before 1088ac0c). **B** = 20261002110000 + 110050 (cache triggers, full refresh on every insert). **C** = B + 20261002110055 (insert fast path).
-Workload (`scripts/filter-volume/inbox-burst.mjs`): the `insertInboundMessage` path of `src/lib/messaging/inbound.ts` as one transaction per message:
-dedupe lookup, `messages` insert (thread minted by trigger), `message_threads` AI-state clear. Not included: `sms_inbound_intents`/`webhook_events`
-writes and the PostgREST hop. Laptop + Docker disk, pool of 70, so read the deltas. Latency = begin->commit per message (ms), 5 reps pooled.
+Same machine, same seed (50k properties / 250k messages), two independent runs (r1, r2; 4 reps each, state order rotated per rep). **A** = filter-cache
+migrations reverted (origin/main before 1088ac0c). **B** = 20261002110000 + 110050 (cache triggers, full refresh on every insert). **C** = B + 110055 variant C
+(share-lock skip when flags already cover the row). **D** = B + 110055 variant D (incremental guarded UPDATE for INSERTs; full refresh kept for anything that can clear).
+Workload (`scripts/filter-volume/inbox-burst.mjs`): the `insertInboundMessage` path of `src/lib/messaging/inbound.ts` as one transaction per message (dedupe lookup, `messages`
+insert with thread minted by trigger, `message_threads` AI-state clear). Not included: `sms_inbound_intents`/`webhook_events` writes, the PostgREST hop. Laptop + Docker disk,
+pool of 70, so read the deltas and the r1-vs-r2 noise band. Cells are p50 / p99 in ms (4 reps pooled per run). No errors or deadlocks in any run.
 
-| burst | state | n | p50 | p95 | p99 | max | median per-run p99 | errors |
-|---|---|---|---|---|---|---|---|---|
-| 50 concurrent, SAME property | A | 250 | 144.3 | 232.6 | 249.3 | 260.4 | 234.9 | 0 |
-| 50 concurrent, SAME property | B | 250 | 332.5 | 597.6 | 681.4 | 699.7 | 518.2 | 0 |
-| 50 concurrent, SAME property | C | 250 | 193.6 | 327 | 394 | 402.8 | 324.4 | 0 |
-| 50 concurrent, 50 different properties | A | 250 | 23.2 | 33.8 | 34.6 | 34.9 | 30.8 | 0 |
-| 50 concurrent, 50 different properties | B | 250 | 89.6 | 128 | 130.8 | 131.1 | 107.4 | 0 |
-| 50 concurrent, 50 different properties | C | 250 | 100.4 | 163 | 179 | 180.5 | 127.7 | 0 |
-| 200 msgs / 10 s, 20% same property | A | 1000 | 7.7 | 18.3 | 23.1 | 38.3 | 21.8 | 0 |
-| 200 msgs / 10 s, 20% same property | B | 1000 | 9.1 | 22.8 | 29 | 36.8 | 28.5 | 0 |
-| 200 msgs / 10 s, 20% same property | C | 1000 | 10.6 | 26.7 | 31.9 | 94.6 | 30.8 | 0 |
+| burst | state | r1 p50 / p99 | r2 p50 / p99 |
+|---|---|---|---|
+| 50 concurrent, SAME property | A | 160.6 / 450.6 | 177.6 / 415.5 |
+| 50 concurrent, SAME property | B | 294.5 / 672.6 | 311.2 / 552.6 |
+| 50 concurrent, SAME property | C | 226.7 / 582.1 | 262.6 / 466.7 |
+| 50 concurrent, SAME property | D | 213.4 / 363.4 | 237.5 / 426.5 |
+| 50 concurrent, 50 different properties | A | 27 / 69.9 | 26 / 42.9 |
+| 50 concurrent, 50 different properties | B | 90.8 / 149.7 | 105.1 / 152.4 |
+| 50 concurrent, 50 different properties | C | 112.2 / 193.3 | 173.3 / 311.6 |
+| 50 concurrent, 50 different properties | D | 69 / 98.4 | 74.9 / 126.9 |
+| 200 msgs / 10 s, 20% same property | A | 9.4 / 33.9 | 5.5 / 25.1 |
+| 200 msgs / 10 s, 20% same property | B | 12.3 / 35.3 | 7.9 / 23.2 |
+| 200 msgs / 10 s, 20% same property | C | 12.1 / 31.2 | 8.1 / 25.4 |
+| 200 msgs / 10 s, 20% same property | D | 10.4 / 28 | 6.6 / 23 |
 
-Lock-wait samples (10 ms `pg_stat_activity` sampling of `wait_event_type='Lock'`, summed over reps):
-* A/same50: {"samples": 107, "transactionid": 1348, "tuple": 54}
-* A/diff50: {"samples": 14}
-* A/mixed200: {"samples": 3645, "transactionid": 1}
-* B/same50: {"samples": 223, "transactionid": 4163, "tuple": 253}
-* B/diff50: {"samples": 43, "extend": 4}
-* B/mixed200: {"samples": 3857, "transactionid": 4}
-* C/same50: {"samples": 150, "transactionid": 2475, "tuple": 105}
-* C/diff50: {"samples": 55}
-* C/mixed200: {"samples": 3708, "transactionid": 1}
+## Decision: D
+D has the lowest p99 of B/C/D in both runs on every burst and the lowest p50 on the first-reply (distinct-property) case: diff50 p99 B 150/152, C 193/312, **D 98/127**
+(A 70/43); same50 p99 B 673/553, C 582/467, **D 363/427** (A 451/416, noise band about +-100). C was worse than B on diff50 because it adds a lock phase without removing the
+refresh work for first-reply rows; D replaces the 7-lookup recompute with one indexed guarded UPDATE. D is still above A on p50 (inherent: a denormalised cache must update
+the property row on the first reply, and the global-DNC shared barrier and row lock remain).
 
-## Reading
-* Same-property burst (the serialisation case): p99 A 249.3 -> B 681.4 -> C 394 ms; lock-wait samples B 4416 -> C 2580.
-  The fast path removes about 40% of B's added latency, not all of it (C is still above A).
-* 50 distinct properties: B 130.8 / C 179 ms vs A 34.6 ms. Not improved by the fast path, by design: each run starts from deleted probe
-  messages, so every message is the FIRST for its property and must flip a flag (a real properties UPDATE). The fast path only skips properties whose flags already cover the row (the steady
-  state for existing threads), which this burst does not exercise.
-* Mixed sustained 200/10 s: p99 A 23.1 / B 29 / C 31.9 ms; medians within a few ms. No errors or deadlocks in any run.
-* Remaining cost in C: flag-flip UPDATEs (inherent to a denormalised cache) and the FOR SHARE lock + extra property reads per insert.
-
-## Correctness of the fast path (migration 20261002110055)
-Skip only while holding a SHARED row lock on the property taken after the global-DNC barrier, with the coverage check re-run under a fresh snapshot after the lock; clearing
-writers refresh with FOR NO KEY UPDATE, which conflicts with FOR SHARE, so a flag cannot be cleared between our check and our commit. Tests: trigger suite 33/33 incl. a
-both-orders clearer-vs-skipper race (12 runs) and a randomised 6-worker concurrent workload (cache == truth afterwards). Mutation check: removing the `FOR SHARE` statement makes the race test fail.
-Also: 45-case fixture exact; volume gate 22 cases, 0 count mismatches, max valid-baseline ratio 1.38; 5 cold lock-probe runs of the new migration: 5/5 clean, 0 errors, max blocked ~0.8 s.
-Residual: a skipped insert that finds its flag newly cleared upgrades share -> no-key-update, which could deadlock with another upgrader on the same property (retryable 40P01).
+## Correctness of D (migration 20261002110055)
+Monotonic OR-only flag updates computed from the new rows (never from a snapshot read); order = shared global-DNC barrier -> row locks. (a) guarded UPDATE, (b) SHARE lock rows that look
+covered, (c) guarded UPDATE re-applied under a fresh snapshot. Lists/tags: unguarded sorted-deduplicated merge + count (unique (property_id, list_id|tag_id) makes it identical to the
+full refresh). Clearing changes keep the full refresh. Tests: trigger suite 18/18 (+33 total local) incl. both-orders clearer-vs-inserter race and a randomised 6-worker concurrent
+workload with cache == truth afterwards; mutation check: removing the SHARE lock makes the race test fail. 45-case fixture exact; volume gate 22 cases, 0 count mismatches, worst
+valid-baseline ratio 1.22; 5 cold lock-probe runs of the migration: 5/5 clean, 0 errors, max blocked ~1.0 s.
+Residual: (c) can upgrade share -> no-key-update, which can theoretically deadlock with another upgrader on the same property (retryable 40P01).
