@@ -3233,6 +3233,13 @@ export type Database = {
           notes: string | null
           org_id: string
           outreach_dispo: string | null
+          has_inbound_message: boolean
+          has_outbound_message: boolean
+          has_unread_inbound: boolean
+          has_open_tasks: boolean
+          filter_list_ids: string[]
+          filter_tag_ids: string[]
+          filter_list_count: number
           owner_moved_at: string | null
           qualified_at: string | null
           qualified_by: string | null
@@ -3298,6 +3305,13 @@ export type Database = {
           notes?: string | null
           org_id?: string
           outreach_dispo?: string | null
+          has_inbound_message?: boolean
+          has_outbound_message?: boolean
+          has_unread_inbound?: boolean
+          has_open_tasks?: boolean
+          filter_list_ids?: string[]
+          filter_tag_ids?: string[]
+          filter_list_count?: number
           owner_moved_at?: string | null
           qualified_at?: string | null
           qualified_by?: string | null
@@ -3363,6 +3377,13 @@ export type Database = {
           notes?: string | null
           org_id?: string
           outreach_dispo?: string | null
+          has_inbound_message?: boolean
+          has_outbound_message?: boolean
+          has_unread_inbound?: boolean
+          has_open_tasks?: boolean
+          filter_list_ids?: string[]
+          filter_tag_ids?: string[]
+          filter_list_count?: number
           owner_moved_at?: string | null
           qualified_at?: string | null
           qualified_by?: string | null

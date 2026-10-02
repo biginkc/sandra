@@ -164,18 +164,55 @@ async function propertyIdsInEveryTag(
     .map(([propertyId]) => propertyId);
 }
 
+/**
+ * Own-org property_lists rows per property, counted directly from the table
+ * (independent of the filter_list_count cache and of the owner-rights
+ * property_stack_counts view, which a fresh DB does not grant).
+ */
+async function stackCountsByProperty(
+  admin: SupabaseClient<Database>,
+  propertyIds?: string[],
+): Promise<Map<string, number>> {
+  // Page with .range() until a short page so the 1000-row cap cannot undercount.
+  const rows: Array<{ property_id: string; org_id: string }> = [];
+  for (let from = 0; ; from += 1000) {
+    let q = admin
+      .from("property_lists")
+      .select("property_id, org_id")
+      .order("id")
+      .range(from, from + 999);
+    if (propertyIds) q = q.in("property_id", propertyIds);
+    const { data: page, error } = await q;
+    expect(error).toBeNull();
+    rows.push(...(page ?? []));
+    if (!page || page.length < 1000) break;
+  }
+  const ids = Array.from(new Set(rows.map((r) => r.property_id)));
+  const orgOf = new Map<string, string>();
+  for (let i = 0; i < ids.length; i += 200) {
+    const { data: props, error: pErr } = await admin
+      .from("properties")
+      .select("id, org_id")
+      .in("id", ids.slice(i, i + 200));
+    expect(pErr).toBeNull();
+    for (const p of props ?? []) orgOf.set(p.id, p.org_id);
+  }
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    if (orgOf.get(r.property_id) !== r.org_id) continue;
+    counts.set(r.property_id, (counts.get(r.property_id) ?? 0) + 1);
+  }
+  return counts;
+}
+
 async function propertyIdsWithStackCountAtLeast(
   admin: SupabaseClient<Database>,
   min: number,
 ) {
-  const { data, error } = await admin
-    .from("property_stack_counts")
-    .select("property_id")
-    .gte("stack_count", min);
-  expect(error).toBeNull();
-  return (data ?? [])
-    .map((row) => row.property_id)
-    .filter((propertyId): propertyId is string => propertyId != null);
+  const counts = await stackCountsByProperty(admin);
+  return Array.from(counts.entries())
+    .filter(([, count]) => count >= min)
+    .map(([propertyId]) => propertyId);
 }
 
 async function listMemberAddresses(
