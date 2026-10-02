@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { Harness } from "./harness";
+import { checkInvariants } from "./invariants";
 import { rng } from "./trace";
 
 /**
@@ -73,5 +74,39 @@ describe("pending decision: a review task opened before a DNC lock stays open af
     const after = await tasksOf(parked.id);
     expect(after).toHaveLength(1);
     expect(after[0]).toMatchObject({ id: before[0]!.id, status: "open" });
+  });
+
+  it("the invariant excuse covers exactly this case: a review task opened before the lock", async () => {
+    const ctx = await h.lead({ enrollments: ["active"] }, { kind: "no_answer_status", send: "accept_timeout" });
+    await h.requestCall(ctx, h.world.rep1);
+    await h.advance(11 * 60_000);
+    await h.reconcile();
+    const parked = await requestOf(ctx.lead.property);
+    expect(parked.status).toBe("needs_review");
+    const [task] = await tasksOf(parked.id);
+    await h.dnc(ctx, "lock");
+    expect((await h.bland.webhook(h.bland.callForNumber(ctx.lead.phone)!, "good")).status).toBe(200);
+    expect((await requestOf(ctx.lead.property)).status).toBe("completed");
+    expect(await tasksOf(parked.id)).toEqual([expect.objectContaining({ id: task!.id, status: "open" })]);
+
+    // (a) The recorded trace passes, and only because of the excuse (outbox-delivery checks are out of scope: no Slack worker runs here).
+    const flagged = (r: { violations: string[] }) => r.violations.filter((x) => x.startsWith("[3]") && x.includes(parked.id));
+    expect(flagged(await checkInvariants(h, { settled: true }))).toEqual([]);
+
+    const client = await h.scratch.pool.connect();
+    try {
+      await client.query("set session_replication_role = replica"); // bypass the DNC task guard for the fixtures below
+      // (b1) Same trace, but the task is recorded as created AFTER the lock: no longer excused.
+      await client.query("update stress.audit set seq = seq + 1000000 where tbl = 'tasks' and op = 'INSERT' and row_id = $1", [task!.id]);
+      expect(flagged(await checkInvariants(h, { settled: true })).join("\n")).toMatch(/a task is open but this outcome needs none/);
+      await client.query("update stress.audit set seq = seq - 1000000 where tbl = 'tasks' and op = 'INSERT' and row_id = $1", [task!.id]);
+      expect(flagged(await checkInvariants(h, { settled: true }))).toEqual([]);
+      // (b2) Same trace, but the open task is not the review task: not excused.
+      await client.query("update public.tasks set title = 'Call the seller back' where id = $1", [task!.id]);
+      expect(flagged(await checkInvariants(h, { settled: true })).join("\n")).toMatch(/a task is open but this outcome needs none/);
+    } finally {
+      await client.query("reset session_replication_role");
+      client.release();
+    }
   });
 });
