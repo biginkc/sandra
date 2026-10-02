@@ -95,6 +95,15 @@ describe("reconciliation", () => {
     }
   });
 
+  it("a call that keeps not matching is escalated after the window, not left open forever", async () => {
+    for (const bad of [finished({ to: "+18165550000" }), finished({ metadata: { idempotency_key: "other" } }), finished({ call_id: "different" })]) {
+      const t = setup({ status: "dispatched", bland_call_id: "call-1", updated_at: ago(T.escalateAfter + MIN) }, bad);
+      expect(await t.run()).toMatchObject({ errors: 1, completed: 0, escalated: 1 });
+      expect(t.rpcs.fn_norma_complete_call).not.toHaveBeenCalled();
+      expect(t.rpcs.fn_norma_mark_needs_review).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it("dispatch_unknown with no id: waits, then escalates to needs_review (Bland has no metadata lookup)", async () => {
     const early = setup({ status: "dispatch_unknown", updated_at: ago(MIN) });
     expect(await early.run()).toMatchObject({ waiting: 1 });

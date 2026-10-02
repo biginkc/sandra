@@ -151,13 +151,17 @@ async function reconcileRow(row: Row, deps: ReconcileDeps, now: number, summary:
       !metadata || typeof metadata.idempotency_key !== "string" || metadata.idempotency_key.toLowerCase() === row.idempotency_key.toLowerCase();
     const idMatches = !call.call_id || call.call_id === row.bland_call_id;
     const numberMatches = toUsVoiceE164(typeof call.to === "string" ? call.to : null) === row.phone_e164;
-    if (!keyMatches || !idMatches || !numberMatches) {
+    const matches = keyMatches && idMatches && numberMatches;
+    if (!matches) {
       reportError(new Error("norma reconcile: Bland call does not match request"), {
         tags: { surface: "norma_reconcile" }, extra: { requestId: row.id },
       });
-      return void (summary.errors += 1);
+      summary.errors += 1;
+      // Never applied, but never a dead end either: a lookup that keeps
+      // disagreeing is as ambiguous as one that never answers, so it falls
+      // through to the same escalation and the request cannot be stuck open.
     }
-    if (call.completed === true) {
+    if (matches && call.completed === true) {
       const mapping = await withConvertedCallbackTime(mapBlandCallToOutcome(call, now), {
         client: deps.client,
         propertyId: row.property_id,
