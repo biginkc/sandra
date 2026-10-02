@@ -635,10 +635,13 @@ async function assertReceiptIdentity(db, receipt) {
   const userId = receipt?.ids?.user;
   assert(String(orgId).toLowerCase() !== BBB_ORG_ID, "BBB_REFUSED", "the BMH organization is not a fixture target");
   const org = (await db.query("select name from public.organizations where id=$1", [orgId])).rows[0];
+  const user = (await db.query("select email from auth.users where id=$1", [userId])).rows[0];
+  if (Boolean(org) !== Boolean(user)) {
+    fail("REMOVE_IDENTITY_MISMATCH", "fixture organization and auth user must both exist or both be absent");
+  }
   if (org && org.name !== receipt.marker?.org_name) {
     fail("REMOVE_IDENTITY_MISMATCH", "organization identity does not match the fixture marker");
   }
-  const user = (await db.query("select email from auth.users where id=$1", [userId])).rows[0];
   if (user && user.email !== receipt.marker?.email) {
     fail("REMOVE_IDENTITY_MISMATCH", "auth user identity does not match the fixture marker");
   }
