@@ -11,6 +11,8 @@ export const CALLBACK_CONVERSION_TIMEOUT_MS = 6_000;
 
 const MAX_CALL_SECONDS = 24 * 60 * 60;
 const CLOCK_SKEW_MS = 5 * 60_000;
+/** A start older than this is not a live call; it must not anchor relative words in the past. */
+const MAX_START_AGE_MS = 7 * 24 * 60 * 60_000;
 
 /** A positive, finite number from a number or numeric string (Bland sends both); else null. */
 function positiveNumber(value: unknown): number | null {
@@ -25,14 +27,14 @@ function positiveNumber(value: unknown): number | null {
  *   1. `started_at` + `corrected_duration` (seconds)
  *   2. `started_at` + `call_length` (minutes) x 60
  *   3. now
- * A missing or malformed input, or an end that would be in the future, skips
- * that step. Never throws.
+ * A missing or malformed input, a start more than 7 days old, or an end that
+ * would be in the future, skips that step. Never throws.
  */
 export function callEndedAtMs(call: NormaCallInput, nowMs: number): number {
   const record = call as Record<string, unknown>;
   const startedText = record.started_at;
   const started = typeof startedText === "string" ? Date.parse(startedText) : NaN;
-  if (Number.isFinite(started) && started <= nowMs + CLOCK_SKEW_MS) {
+  if (Number.isFinite(started) && started <= nowMs + CLOCK_SKEW_MS && started >= nowMs - MAX_START_AGE_MS) {
     const seconds = positiveNumber(record.corrected_duration);
     const minutes = positiveNumber(record.call_length);
     const candidates = [seconds !== null ? seconds * 1000 : null, minutes !== null ? minutes * 60_000 : null];

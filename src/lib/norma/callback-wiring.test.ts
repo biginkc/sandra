@@ -94,6 +94,13 @@ describe("withConvertedCallbackTime", () => {
       expect(callEndedAtMs(tomorrow({ started_at: "2026-10-02T21:50:00Z", corrected_duration: "540" }), LATE)).toBe(Date.parse("2026-10-02T21:59:00Z"));
     });
 
+    it("a started_at older than 7 days is ignored (falls through to now); just inside 7 days still counts", () => {
+      const stale = tomorrow({ started_at: "2026-09-20T21:50:00Z", corrected_duration: 540 });
+      expect(callEndedAtMs(stale, LATE)).toBe(LATE);
+      const justInside = new Date(LATE - 7 * 24 * 60 * 60_000 + 60_000).toISOString();
+      expect(callEndedAtMs(tomorrow({ started_at: justInside, corrected_duration: 540 }), LATE)).toBe(Date.parse(justInside) + 540_000);
+    });
+
     it("missing or malformed inputs mean now", () => {
       expect(callEndedAtMs(tomorrow({}), LATE)).toBe(LATE);
       expect(callEndedAtMs(tomorrow({ started_at: "2026-10-02T21:50:00Z" }), LATE)).toBe(LATE);
