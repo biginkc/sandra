@@ -118,7 +118,7 @@ describe("generator + queries", () => {
     const a = generateFixture(), b = generateFixture();
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
     expect(a.properties.length).toBe(300);
-    expect(CI_QUERIES.length).toBe(30);
+    expect(CI_QUERIES.length).toBe(32); // 30 + 2 planted deleted/training queries
     expect(localQueries(a).length).toBe(200);
   });
   it("planted targets behave as designed", () => {

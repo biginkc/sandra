@@ -143,6 +143,18 @@ describe("search_properties RPC", () => {
       const { error } = await service.from("properties").insert(hundredOne.slice(i, i + 51));
       if (error) throw new Error(error.message);
     }
+    // phone_3 only (no phone_1/phone_2): must still match by digits.
+    const phone3 = await contact(BMH_ORG_ID, { first_name: "Thirdslot", last_name: "Lineowner", phone_3: "(913) 444-5555" });
+    P.phone3 = await property(BMH_ORG_ID, { address: "207 Kestrel Court", homeowner_contact_id: phone3 });
+    // An org-A property whose homeowner contact belongs to ORG B must not match through that contact.
+    const foreign = await contact(TEST_ORG_B_ID, { first_name: "Foreignowner", last_name: "Crosslinkname", phone_1: "(913) 222-6666" });
+    P.crossLinked = await property(BMH_ORG_ID, { address: "208 Kestrel Court" });
+    await db.query("begin");
+    try {
+      await db.query("set local session_replication_role = replica");
+      await db.query("update public.properties set homeowner_contact_id = $1 where id = $2", [foreign, P.crossLinked]);
+      await db.query("commit");
+    } catch (error) { await db.query("rollback"); throw error; }
     P.plain = await property(BMH_ORG_ID, { address: "300 Nothingmatches Road", city: "Dayton", state: "OH", zip: "45402" });
     // SMS vs non-SMS text.
     P.smsHit = await property(BMH_ORG_ID, { address: "400 Quillfeather Way" });
@@ -218,6 +230,25 @@ describe("search_properties RPC", () => {
       expect(await ids("101 Zephyr")).toEqual([P.main]);
       expect(await ids("101 Zephyr Lane")).toEqual([P.main]);
       expect(await ids("555 101 0000")).toEqual([P.phone101]);
+    });
+    it("matches a contact that only has phone_3", async () => {
+      expect(await ids("913-444-5555")).toEqual([P.phone3]);
+      expect(await ids("(913) 444 5555")).toEqual([P.phone3]);
+      expect(await ids("Thirdslot")).toEqual([P.phone3]);
+    });
+    it("never matches an org-A property through a contact that belongs to another org", async () => {
+      expect(await ids("Crosslinkname")).toEqual([]);
+      expect(await ids("913-222-6666")).toEqual([]);
+      expect(await ids("Crosslinkname", b)).toEqual([]); // org B cannot reach the org-A property either
+    });
+    it("tsquery metacharacters next to a real term still match (or not) correctly", async () => {
+      expect(await ids("wombatplan:*")).toEqual([P.smsHit]);
+      expect(await ids("wombatplan & offer")).toEqual([P.smsHit]);
+      expect(await ids("!wombatplan")).toEqual([P.smsHit]);
+      expect(await ids("(wombatplan)")).toEqual([P.smsHit]);
+      expect(await ids("wombatplan | nothingelse")).toEqual([]); // sanitized to an AND of prefixes
+      expect(await ids("wombat & plan")).toEqual([]); // 'plan' is not a prefix of any message token
+      expect(await ids("wombat:* plan:*")).toEqual([]);
     });
     it("does not phone-match under 3 digits", async () => {
       expect(await ids("x12")).toEqual([]);

@@ -25,3 +25,12 @@ tsc clean; unit 5,988; RTL 1,803; search_properties + oracle 91/91 (0 disagreeme
 Harness fix: the volume seed's per-batch `refresh_property_filter_cache` crawls (31 min, one transaction) once 110055
 drops the flag partial indexes; the seed now sets the message flags with one set-based UPDATE. Production maintains
 flags incrementally, so this is a harness-only issue.
+
+## RC test-review pass (Fable + Astra), sandbox with main's migrations (110000, 110050, 110100)
+Mutation harness (`SEARCH_PROPS_MUTATION`, each must fail >=1 test; baseline 93/93 green):
+drop-org-gate 24 fail, drop-agent-join 10, drop-deleted-at 17, drop-like-escape 4, add-limit-100 2,
+drop-sms-channel 4, auth-uid-null 63, drop-length-cap 1, drop-structured 2.
+New coverage: org B + cross-org anomalies (both builders), nullable-sort pagination (market/address/created_at/id,
+both directions, 37-row pages), >1000-row match set, phone_3, cross-org linked contact, tsquery metachars next to
+real terms, page-loader-shaped evaluation budget (2), legacy DNC regression vs main, filter selections for every
+select-all action, server-derived dialer skip counts. Playwright 49/49, volume 3/3 (select-all 20k in 2.1 s).

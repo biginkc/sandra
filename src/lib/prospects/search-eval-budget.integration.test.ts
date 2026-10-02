@@ -22,6 +22,7 @@ const svc = createTestClient() as any;
 let userA: any;
 let admin: Client;
 const authUsers: string[] = [];
+let priorTrackFunctions: string | null = null;
 
 function adminUrl(): string {
   const u = new URL(process.env.TEST_SUPABASE_DB_URL!);
@@ -39,6 +40,8 @@ async function calls(): Promise<number> {
 beforeAll(async () => {
   admin = new Client({ connectionString: adminUrl() });
   await admin.connect();
+  const { rows: prior } = await admin.query("show track_functions");
+  priorTrackFunctions = prior[0].track_functions;
   await admin.query("alter system set track_functions = 'all'");
   await admin.query("select pg_reload_conf()");
   await resetTenantTables(svc);
@@ -53,6 +56,10 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  // Leave the stack as we found it.
+  if (priorTrackFunctions === "none") await admin?.query("alter system reset track_functions");
+  else if (priorTrackFunctions) await admin?.query(`alter system set track_functions = '${priorTrackFunctions}'`);
+  await admin?.query("select pg_reload_conf()");
   for (const id of authUsers) await svc.auth.admin.deleteUser(id).catch(() => undefined);
   await resetTenantTables(svc);
   await admin?.end();
@@ -68,7 +75,33 @@ async function pageLoad(): Promise<void> {
   expect(count).toBe(120);
 }
 
+// The page loader's exact shape: the full row select with the homeowner embed, filter-block embeds
+// and order/range, plus a filter block. The CASS breakdown loop is skipped for a global search
+// (asserted statically in page.dnc-org-contract.test.ts: `if (total === 0 || globalSearchActive) return null`).
+async function pageShapedLoad(): Promise<void> {
+  const { filterSelectFragment } = await import("./filter-to-supabase");
+  const blocks = [{ id: randomUUID(), kind: "vacancy", tri: "any" }, { id: randomUUID(), kind: "engagement", combinator: "not", values: ["opted_out"] }] as never;
+  const frag = filterSelectFragment(blocks);
+  const select = ["id, org_id, address, city, state, zip, market, cass_status, is_vacant, created_at, status, is_dnc_locked, outreach_dispo, source_import_id, source_imported_at, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)", frag].filter(Boolean).join(", ");
+  const { builder } = await buildScopedQuery(userA, {
+    origin: "search_page", select, selectOpts: { count: "exact" }, search: "Budgetville", blockStack: blocks, includeMessages: true,
+  });
+  const { error, count } = await builder.order("created_at", { ascending: false }).order("id", { ascending: true }).range(0, 49);
+  expect(error).toBeNull();
+  expect(count).toBe(120);
+}
+
 describe("search_properties evaluation budget", () => {
+  it("the real page-loader shape (embed + filters + sort + range) evaluates the function at most twice", async () => {
+    await pageShapedLoad(); // warm
+    const before = await calls();
+    await pageShapedLoad();
+    const delta = (await calls()) - before;
+    console.log(`EVAL_BUDGET page-loader shape: ${delta} evaluation(s)`);
+    expect(delta).toBeGreaterThan(0);
+    expect(delta).toBeLessThanOrEqual(2);
+  });
+
   it("track_functions is on for new sessions", async () => {
     const { rows } = await admin.query("show track_functions");
     expect(rows[0].track_functions).toBe("all");

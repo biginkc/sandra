@@ -5,11 +5,10 @@ import { defineConfig } from "vitest/config";
 import { assertLocalOnlyEnvironment } from "./src/lib/testing/local-only-guard";
 
 /**
- * Opt-in runner for the filter-translator VOLUME gate (stress plan #9, PR A) against
+ * Opt-in runner for the SEARCH volume gate (stress plan #9, Search page) against
  * a DISPOSABLE local Supabase stack (never the shared hosted test project).
  * The ports/keys default to the throwaway stack described in
- * scripts/filter-volume/README.md (`supabase start` with project_id
- * sandra-filter-vol). Keys below are the public Supabase local-dev demo keys.
+ * scripts/search-volume (a private `supabase start` stack, never 54329/hosted). Keys below are the public Supabase local-dev demo keys.
  *
  *   SEARCH_VOLUME=1 npx vitest run --config vitest.search-volume.config.ts
  */

@@ -14,7 +14,8 @@ export const CI_QUERIES: OracleCase[] = [
   c("phone last4", "4567"), c("phone area", "816"), c("short phone", "55"),
   c("zip", "64112"), c("street number", "4821"), c("street", "wornall"), c("unit", "#2b"), c("apn-ish", "00"),
   c("mls", "mls24"), c("msg word", "xylophone"), c("msg word no msgs", "xylophone", false), c("msg two words", "xylophone appraisal"),
-  c("msg prefix", "xyloph"), c("pct hostile", "%"), c("underscore hostile", "___"), c("tsquery hostile", "a:* & !b | (c)"),
+  c("msg prefix", "xyloph"),
+  c("planted deleted+training rows", "zeppelin"), c("planted deleted address", "zenith way"), c("pct hostile", "%"), c("underscore hostile", "___"), c("tsquery hostile", "a:* & !b | (c)"),
 ];
 
 const HOSTILE = ["%", "_", "\\", "'", '"', ",", "()", "or(", ":*", "&|!", "'; drop table properties;--", "😀😀😀", "   ", "a".repeat(500), "%%%", "\\\\\\", "x:*y", "((", "a,b,c", "é́é"];

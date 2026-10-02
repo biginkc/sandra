@@ -1,3 +1,6 @@
+// AUTHORSHIP: written by the `search-oracle` agent, deliberately separate from the agents that wrote
+// and edited the SQL (`pr-b-sql`, `search-builder`). Disagreements with search_properties are investigated and reported, never reconciled by editing
+// this matcher to match the SQL.
 // Naive reference for Search matching semantics (PLAN.md section 1). Written from the plan's
 // stated semantics plus the tokenization/linkage SQL only; deliberately unoptimised.
 import type { OracleFixture, OracleMembership, OracleProperty, OracleContact } from "./types";

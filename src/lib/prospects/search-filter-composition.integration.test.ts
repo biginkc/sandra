@@ -33,6 +33,9 @@ import { buildScopedQuery } from "./search-scope";
 assertLocalOnlyEnvironment();
 const svc = createTestClient() as any;
 let userA: any;
+let userB: any;
+const orgBIds: string[] = [];
+const anomalyIds: string[] = [];
 let userAId = "";
 const authUsers: string[] = [];
 const TERM = "Zorbaxian";
@@ -40,7 +43,7 @@ const MKT = "COMPMKT";
 const N = 480;
 
 type P = {
-  id: string; hit: boolean; status: string; dispo: string | null; vac: boolean; cass: string; state: string;
+  id: string; market: string | null; hit: boolean; status: string; dispo: string | null; vac: boolean; cass: string; state: string;
   beds: number; motiv: string | null; absentee: boolean; inb: number; outb: number; unread: number;
   tags: string[]; lists: string[]; openTask: boolean;
 };
@@ -62,6 +65,7 @@ beforeAll(async () => {
   authUsers.push(a.userId, b.userId);
   userAId = a.userId;
   userA = clientForUser(a.jwt);
+  userB = clientForUser(b.jwt);
   const mk = async (table: string, row: any) => (await svc.from(table).insert(row).select("id").single()).data.id as string;
   T1 = await mk("tags", { org_id: BMH_ORG_ID, name: `t1-${randomUUID()}`, category: "custom" });
   T2 = await mk("tags", { org_id: BMH_ORG_ID, name: `t2-${randomUUID()}`, category: "custom" });
@@ -89,13 +93,13 @@ beforeAll(async () => {
       phone_1: `+1816777${String(1000 + i).padStart(4, "0")}`, phone_1_type: "mobile",
     });
     const p: P = {
-      id, hit: surnameHit || addressHit, status: statuses[i % 5], dispo: dispos[i % 7], vac: i % 2 === 0, cass: cass[i % 4],
+      id, market: i % 8 === 0 ? null : MKT, hit: surnameHit || addressHit, status: statuses[i % 5], dispo: dispos[i % 7], vac: i % 2 === 0, cass: cass[i % 4],
       state: i % 2 === 0 ? "MO" : "KS", beds: i % 6, motiv: motiv[i % 4], absentee: i % 5 < 2,
       inb: 0, outb: 0, unread: 0, tags: [], lists: [], openTask: false,
     };
     props.push({
       id, org_id: BMH_ORG_ID, address: addressHit ? `${i} ${TERM} Way` : `${i} Comp St`, city: "Kansas City", state: p.state,
-      status: p.status, market: MKT, is_vacant: p.vac, cass_status: p.cass, beds: p.beds, motivation_level: p.motiv,
+      status: p.status, market: p.market, is_vacant: p.vac, cass_status: p.cass, beds: p.beds, motivation_level: p.motiv,
       absentee_flag: p.absentee, homeowner_contact_id: contactId,
     });
     const mkm = (direction: string, read: boolean) =>
@@ -121,6 +125,43 @@ beforeAll(async () => {
   await insertChunked("property_tags", ptags);
   await insertChunked("property_lists", plists);
   await insertChunked("tasks", tasks);
+
+  // ---- org B: the same search term, tags, lists, tasks, messages (must never leak into org A) ----
+  const bTag = await mk("tags", { org_id: TEST_ORG_B_ID, name: `bt-${randomUUID()}`, category: "custom" });
+  const bList = await mk("lists", { org_id: TEST_ORG_B_ID, name: `bl-${randomUUID()}` });
+  const bContacts: any[] = [];
+  const bProps: any[] = [];
+  const bMsgs: any[] = [];
+  for (let i = 0; i < 40; i++) {
+    const cid = randomUUID();
+    const pid = randomUUID();
+    orgBIds.push(pid);
+    bContacts.push({ id: cid, org_id: TEST_ORG_B_ID, first_name: "Bee", last_name: TERM, phone_1: `+1913888${String(1000 + i).padStart(4, "0")}`, phone_1_type: "mobile" });
+    bProps.push({ id: pid, org_id: TEST_ORG_B_ID, address: `${i} ${TERM} Orgb Way`, city: "Olathe", state: "KS", status: "prospect", market: MKT, homeowner_contact_id: cid });
+    bMsgs.push({ org_id: TEST_ORG_B_ID, property_id: pid, channel: "sms", direction: "inbound", body: "m", read_at: null });
+  }
+  await insertChunked("contacts", bContacts);
+  await insertChunked("properties", bProps);
+  await insertChunked("messages", bMsgs);
+  await insertChunked("property_tags", orgBIds.slice(0, 20).map((id) => ({ org_id: TEST_ORG_B_ID, property_id: id, tag_id: bTag })));
+  await insertChunked("property_lists", orgBIds.slice(0, 20).map((id) => ({ org_id: TEST_ORG_B_ID, property_id: id, list_id: bList })));
+  await insertChunked("tasks", orgBIds.slice(0, 10).map((id) => ({ org_id: TEST_ORG_B_ID, assignee_id: b.userId, created_by: b.userId, related_property_id: id, type: "follow_up", status: "open", title: "t", due_at: now })));
+  // Cross-org anomalies on ORG A properties that RLS must neutralise: an org-B message on an org-A
+  // property (the DB only forbids cross-org tag/list/task rows, not messages), and an org-A property
+  // whose homeowner contact belongs to org B (seeded as superuser, triggers off).
+  const anomalyProps = Array.from({ length: 3 }, (_, i) => ({ id: randomUUID(), org_id: BMH_ORG_ID, address: `${i} Anomaly Way`, city: "Kansas City", state: "MO", status: "prospect", market: MKT }));
+  anomalyProps.forEach((a2) => anomalyIds.push(a2.id));
+  await insertChunked("properties", anomalyProps);
+  await insertChunked("messages", [{ org_id: TEST_ORG_B_ID, property_id: anomalyProps[0].id, channel: "sms", direction: "inbound", body: `${TERM} crossorg`, read_at: null }]);
+  // anomalyProps[1] links to an org-B contact whose surname is the term: it must NOT match for org A.
+  const pg2 = new (await import("pg")).Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
+  await pg2.connect();
+  try {
+    await pg2.query("begin");
+    await pg2.query("set local session_replication_role = replica");
+    await pg2.query("update public.properties set homeowner_contact_id = $1 where id = $2", [bContacts[0].id, anomalyProps[1].id]);
+    await pg2.query("commit");
+  } finally { await pg2.end(); }
   // DNC-style dispositions lock child tables, so they are applied last.
   const byDispo = new Map<string, string[]>();
   for (const p of model) if (p.dispo) byDispo.set(p.dispo, [...(byDispo.get(p.dispo) ?? []), p.id]);
@@ -158,7 +199,7 @@ function matches(p: P, b: any): boolean {
     case "pipeline_status": return setOracle([p.status], b.combinator, b.values);
     case "cass": return setOracle([p.cass], b.combinator, b.values);
     case "state": return setOracle([p.state], b.combinator, b.values);
-    case "market": return setOracle([MKT], b.combinator, b.values);
+    case "market": return p.market !== null && setOracle([p.market], b.combinator, b.values);
     case "motivation_level": return p.motiv !== null && setOracle([p.motiv], b.combinator, b.values);
     case "vacancy": return b.tri === "any" || p.vac === (b.tri === "yes");
     case "absentee": return b.tri === "any" || p.absentee === (b.tri === "yes");
@@ -180,16 +221,18 @@ const expected = (blocks: any[], search: boolean) =>
 
 const blk = (b: Record<string, unknown>): FilterBlock => ({ id: randomUUID(), ...b }) as any;
 
-async function run(blocks: FilterBlock[], search: string | null) {
+async function run(blocks: FilterBlock[], search: string | null, client: any = userA, excludeAnomalies = true) {
   const frag = filterSelectFragment(blocks);
   const select = frag ? `id, address, ${frag}` : "id, address";
   const ids: string[] = [];
   let count: number | null = null;
   for (let from = 0; ; from += 1000) {
-    const { builder } = await buildScopedQuery(userA, {
+    const { builder } = await buildScopedQuery(client, {
       origin: "search_page", select, selectOpts: { count: "exact" }, search, blockStack: blocks, includeMessages: true,
     });
-    const { data, error, count: c } = await builder.order("address").order("id").range(from, from + 999);
+    // The anomaly rows (cross-org children) are modelled by their own tests, not by the oracle model.
+    const q = excludeAnomalies && anomalyIds.length ? builder.not("id", "in", `(${anomalyIds.join(",")})`) : builder;
+    const { data, error, count: c } = await q.order("address").order("id").range(from, from + 999);
     if (error) throw new Error(`${error.code}: ${error.message}`);
     count = c;
     ids.push(...(data ?? []).map((r: any) => r.id));
@@ -319,4 +362,83 @@ describe("Search x filters on the real search_properties rpc builder", () => {
     }
     expect(seen.size).toBe(total);
   });
+
+  it("org A results are unaffected by org B rows, org B children and cross-org anomalies", async () => {
+    const withTerm = await run([], TERM);
+    for (const id of orgBIds) expect(withTerm.ids).not.toContain(id);
+    // The org-A property linked to an org-B contact named with the term must not match through the contact.
+    const anomalyHits = await run([], TERM, userA, false);
+    expect(anomalyHits.ids).not.toContain(anomalyIds[1]);
+    // The org-A property carrying only an org-B message "<term> crossorg" must not match through messages.
+    expect(anomalyHits.ids).not.toContain(anomalyIds[0]);
+    const crossMsg = await run([], "crossorg", userA, false);
+    expect(crossMsg.ids).toEqual([]);
+    // No-search browse keeps showing the anomaly property, as never contacted / no unread.
+    const browse = await run([blk({ kind: "engagement", combinator: "any", values: ["never_contacted"] })], null, userA, false);
+    expect(browse.ids).toContain(anomalyIds[0]);
+    const unread = await run([blk({ kind: "has_unread_inbound", tri: "yes" })], null, userA, false);
+    expect(unread.ids).not.toContain(anomalyIds[0]);
+    for (const id of orgBIds) expect(unread.ids).not.toContain(id);
+  });
+
+  it("org B sees only its own rows through both builders, with the same search and filters", async () => {
+    const search = await run([], TERM, userB, false); // rpc builder
+    expect(search.ids).toEqual([...orgBIds].sort());
+    const taggedList = await run([blk({ kind: "outreach_dispo", combinator: "not", values: ["dnc"] })], TERM, userB, false);
+    expect(taggedList.ids).toEqual([...orgBIds].sort());
+    const browse = await run([], null, userB, false); // table builder
+    expect(browse.ids).toEqual([...orgBIds].sort());
+    const unread = await run([blk({ kind: "has_unread_inbound", tri: "yes" })], null, userB, false);
+    expect(unread.ids).toEqual([...orgBIds].sort());
+  });
+
+  describe("nullable and non-nullable sort columns paginate completely", () => {
+    const SORTS: Array<[string, boolean]> = [];
+    for (const col of ["market", "address", "created_at", "id"]) for (const asc of [true, false]) SORTS.push([col, asc]);
+
+    async function walk(search: string | null, col: string, asc: boolean, pageSize: number) {
+      const rows: Array<{ id: string; v: unknown }> = [];
+      let total = 0;
+      for (let from = 0; from === 0 || from < total; from += pageSize) {
+        const { builder } = await buildScopedQuery(userA, {
+          origin: "search_page", select: `id, address, created_at, market`, selectOpts: { count: "exact" },
+          search, blockStack: [], includeMessages: true,
+        });
+        const { data, count, error } = await builder.not("id", "in", `(${anomalyIds.join(",")})`)
+          .order(col, { ascending: asc }).order("id", { ascending: true }).range(from, from + pageSize - 1);
+        if (error) throw new Error(`${error.code}: ${error.message}`);
+        total = count ?? 0;
+        for (const r of data ?? []) rows.push({ id: r.id, v: (r as any)[col] });
+      }
+      return { rows, total };
+    }
+
+    it.each(SORTS)("sort by %s asc=%s (search + browse): count == rows walked, no dupes, none missing", async (col, asc) => {
+      for (const search of [TERM, null]) {
+        const want = expected([], search !== null);
+        const { rows, total } = await walk(search, col, asc, 37);
+        expect(total, `${col} count`).toBe(want.length);
+        expect(rows.map((r) => r.id).sort(), `${col} ids`).toEqual(want);
+        expect(new Set(rows.map((r) => r.id)).size).toBe(rows.length);
+        if (col === "market") {
+          // NULL markets form one contiguous block at one end of the list.
+          const flags = rows.map((r) => r.v === null);
+          const switches = flags.filter((f, i) => i > 0 && f !== flags[i - 1]).length;
+          expect(switches).toBeLessThanOrEqual(1);
+          expect(flags.some(Boolean)).toBe(true); // nulls really are present
+        }
+      }
+    }, 120_000);
+  });
+
+  it("a match set larger than 1000 rows is walked completely with an exact count (runs last)", async () => {
+    const big = Array.from({ length: 1100 }, (_, i) => ({
+      org_id: BMH_ORG_ID, address: `${i} Bigmatchzone Ave`, city: "Kansas City", state: "MO", status: "prospect", market: "BIGMKT",
+    }));
+    await insertChunked("properties", big, 300);
+    const got = await run([], "Bigmatchzone", userA, false);
+    expect(got.count).toBe(1100);
+    expect(got.ids).toHaveLength(1100);
+    expect(new Set(got.ids).size).toBe(1100);
+  }, 180_000);
 });
