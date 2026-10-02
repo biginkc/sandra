@@ -1,4 +1,4 @@
-import { EXPECTED_OUTCOME } from "./fake-bland";
+import { EXPECTED_OUTCOME, NON_CONNECT_KINDS } from "./fake-bland";
 import type { Harness } from "./harness";
 
 /**
@@ -21,6 +21,8 @@ export type CheckStats = {
   /** DNC / not_interested writes that landed after the dispatch recheck began but before the send (the inherent check-then-act window). */
   windowRaces: number;
   slackPosts: number;
+  /** Requests whose first call was not answered and that placed (or were refused) a second call. */
+  retried: number;
 };
 
 type Req = {
@@ -30,6 +32,9 @@ type Req = {
   status: string;
   outcome: string | null;
   bland_call_id: string | null;
+  attempt: number;
+  first_bland_call_id: string | null;
+  first_attempt_outcome: string | null;
   callback_assignee_id: string;
   callback_requested_for: string | null;
   completed_at: string | null;
@@ -92,6 +97,7 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
     auditRows: audit.length,
     windowRaces: 0,
     slackPosts: h.slack.posts.length,
+    retried: requests.filter((r) => r.attempt === 2).length,
   };
   for (const r of requests) {
     stats.byStatus[r.status] = (stats.byStatus[r.status] ?? 0) + 1;
@@ -162,15 +168,32 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
   for (const r of requests) {
     const sends = h.bland.sendsFor(r.id);
     const placed = h.bland.callsFor(r.id);
-    if (sends.length > 1) v("1", `request ${r.id}: ${sends.length} send-call requests were issued (at most one allowed)`);
-    if (placed.length > 1) v("1", `request ${r.id}: ${placed.length} Bland calls were created`);
-    if (r.status === "dispatch_rejected" && placed.length > 0) v("1", `request ${r.id}: dispatch_rejected although Bland placed a call (a redial would now be possible)`);
+    // Call twice: at most TWO calls per request, the second only after a confirmed non-connect of the first.
+    if (sends.length > 2) v("1", `request ${r.id}: ${sends.length} send-call requests were issued (at most two allowed)`);
+    if (placed.length > 2) v("1", `request ${r.id}: ${placed.length} Bland calls were created`);
+    if (sends.length === 2 || placed.length === 2 || r.attempt === 2 && placed.length > 1) {
+      const first = placed[0];
+      if (r.attempt !== 2 || r.first_attempt_outcome !== "no_answer") {
+        v("1", `request ${r.id}: a second call exists but the request never recorded attempt 1 as no_answer (attempt ${r.attempt}, first outcome ${r.first_attempt_outcome})`);
+      }
+      if (!first || !NON_CONNECT_KINDS.includes(first.kind)) {
+        v("1", `request ${r.id}: a second call was placed although the first was ${first?.kind} (not a confirmed non-connect)`);
+      }
+      if (!first || r.first_bland_call_id !== first.callId) v("1", `request ${r.id}: first_bland_call_id ${r.first_bland_call_id} is not the first call Bland placed (${first?.callId})`);
+    }
+    if (r.attempt === 1 && (r.first_bland_call_id || r.first_attempt_outcome)) v("1", `request ${r.id}: attempt 1 carries a first-attempt record`);
+    // A rejected retry (gate closed, seller became ineligible) leaves exactly the first call behind.
+    const allowedCalls = r.status === "dispatch_rejected" ? (r.attempt === 2 ? 1 : 0) : 2;
+    if (r.status === "dispatch_rejected" && placed.length > allowedCalls) v("1", `request ${r.id}: dispatch_rejected although Bland placed ${placed.length} call(s) (a redial would now be possible)`);
     if (r.bland_call_id && !placed.some((c) => c.callId === r.bland_call_id)) v("1", `request ${r.id}: bound call id ${r.bland_call_id} is not a call Bland placed for it`);
+    if (r.bland_call_id && r.bland_call_id === r.first_bland_call_id) v("1", `request ${r.id}: the current call id equals the first attempt's`);
   }
   for (const [property, list] of reqsByProperty) {
     const withCalls = list.filter((r) => h.bland.callsFor(r.id).length > 0);
     for (const earlier of withCalls.slice(0, -1)) {
-      if (earlier.status !== "completed") v("1", `property ${property}: a later request placed a call while request ${earlier.id} was ${earlier.status} (redial fence broken)`);
+      // A retry that was refused after a confirmed unanswered first call leaves no call in flight.
+      const retryRefused = earlier.status === "dispatch_rejected" && earlier.attempt === 2 && earlier.first_attempt_outcome === "no_answer";
+      if (earlier.status !== "completed" && !retryRefused) v("1", `property ${property}: a later request placed a call while request ${earlier.id} was ${earlier.status} (redial fence broken)`);
     }
   }
 
@@ -211,6 +234,8 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
     const requestedEvents = ev.filter((e) => e.event_type === "norma_call_requested");
     const rowsForTask = tasksByKey.get(`norma_call:${r.id}`) ?? [];
     const everReviewed = audit.some((a) => a.tbl === "norma_call_requests" && a.row_id === r.id && a.new_row?.status === "needs_review");
+    const attemptEvents = ev.filter((e) => e.event_type === "norma_call_attempt_no_answer");
+    if (attemptEvents.length !== (r.attempt === 2 ? 1 : 0)) v("3", `request ${r.id}: ${attemptEvents.length} first-attempt events for attempt ${r.attempt} (expected ${r.attempt === 2 ? 1 : 0})`);
     if (requestedEvents.length !== 1) v("3", `request ${r.id}: ${requestedEvents.length} norma_call_requested events (expected 1)`);
     if (completedEvents.length !== (r.status === "completed" ? 1 : 0)) {
       v("3", `request ${r.id} (${r.status}): ${completedEvents.length} norma_call_completed events`);
@@ -218,11 +243,19 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
 
     if (r.status === "completed") {
       if (!r.completed_at) v("3", `request ${r.id}: completed without completed_at`);
-      if (ctx && r.outcome !== EXPECTED_OUTCOME[ctx.plan.kind]) {
-        v("3", `request ${r.id}: outcome ${r.outcome} but the call was a ${ctx.plan.kind} (expected ${EXPECTED_OUTCOME[ctx.plan.kind]})`);
-      }
       const calls = h.bland.callsFor(r.id);
-      if (calls.length !== 1 || r.bland_call_id !== calls[0]?.callId) v("3", `request ${r.id}: completed with call id ${r.bland_call_id}, Bland placed ${calls.map((c) => c.callId).join(",") || "none"}`);
+      // The outcome is that of the FINAL call (the retry when there was one).
+      const finalCall = calls.find((c) => c.callId === r.bland_call_id);
+      if (ctx && finalCall && r.outcome !== EXPECTED_OUTCOME[finalCall.kind]) {
+        v("3", `request ${r.id}: outcome ${r.outcome} but the final call was a ${finalCall.kind} (expected ${EXPECTED_OUTCOME[finalCall.kind]})`);
+      }
+      if (calls.length !== r.attempt || r.bland_call_id !== calls[calls.length - 1]?.callId) v("3", `request ${r.id}: completed at attempt ${r.attempt} with call id ${r.bland_call_id}, Bland placed ${calls.map((c) => c.callId).join(",") || "none"}`);
+      // A no_answer on attempt 1 may only complete a request whose first call was never confirmed in time
+      // (late result on dispatch_unknown / needs_review); a normal confirmed miss must have retried.
+      if (r.outcome === "no_answer" && r.attempt === 1) {
+        const done = audit.find((a) => a.tbl === "norma_call_requests" && a.row_id === r.id && a.new_row?.status === "completed");
+        if (!["dispatch_unknown", "needs_review"].includes(String(done?.old_row?.status))) v("3", `request ${r.id}: no_answer completed on attempt 1 from ${done?.old_row?.status} without the retry`);
+      }
       if (r.outcome && ["callback_requested", "reached_no_callback", "wrong_number"].includes(r.outcome)) {
         if (rowsForTask.length > 1 || (rowsForTask.length === 0 && !dncLocked(r.property_id))) {
           v("3", `request ${r.id} (${r.outcome}): ${rowsForTask.length} tasks (expected exactly 1)`);

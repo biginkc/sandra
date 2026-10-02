@@ -231,7 +231,7 @@ export function formatLeadEventSentence(
     case "norma_call_requested":
       return `${actor} asked Norma to call${payload.has_context === true ? " (with context)" : ""}`;
     case "norma_call_attempt_no_answer":
-      return "Norma call 1 was not answered — trying once more";
+      return "Norma's first call was not answered";
     case "norma_call_completed":
       return `Norma call finished — ${normaOutcomeLabel(readString(payload, "outcome"))}`;
     case "lead_created":

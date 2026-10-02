@@ -15,7 +15,7 @@ import { sweepResumeCallInProgress, upgradeNormaHoldPauses } from "../rpc";
 import { drainNormaNotifications, type NormaNotificationSummary, type NormaSlackPost } from "../slack-worker";
 import { handleBlandCallWebhook } from "../webhook";
 import { createScratchDb, seedWorld, type Lead, type LeadOptions, type Scratch, type World } from "./db";
-import { FakeBland, WEBHOOK_SECRET, type Plan } from "./fake-bland";
+import { FakeBland, WEBHOOK_SECRET, type Plan, type WebhookResult } from "./fake-bland";
 import { createPgSupabase, type OpHook, type OpInfo } from "./pg-client";
 import { Trace, type Rng } from "./trace";
 
@@ -101,6 +101,8 @@ export class Harness {
   readonly slack: FakeSlack;
   readonly reports = (globalThis as { __normaStressReports?: { message: string; surface: string | null }[] }).__normaStressReports ?? [];
   private readonly clients = new Map<string, Client>();
+  /** Makes the next webhook-triggered retry dispatch fail (a crash between scheduling and dialling). */
+  skipRetryDispatchOnce = false;
   /** Set per run so the random AI stand-in is reproducible. */
   provider: CallbackTimeProvider | null = null;
   /** The database clock can drift from this process's (Docker); workers use DB-aligned time. */
@@ -120,6 +122,15 @@ export class Harness {
           client: this.client("webhook"),
           secret: WEBHOOK_SECRET,
           callbackTimeProvider: this.provider,
+          // The route's call-twice retry: the ordinary dispatch path, gate and recheck included.
+          dispatch: (id) => {
+            // Test seam: the process "dies" after the retry was scheduled, before it was dialled.
+            if (this.skipRetryDispatchOnce) {
+              this.skipRetryDispatchOnce = false;
+              return Promise.reject(new Error("simulated crash before the retry dispatch"));
+            }
+            return this.dispatch(id, "webhook-retry");
+          },
         });
         if (response.status === 500) {
           const last = [...this.reports].reverse().find((x) => x.surface === "norma_webhook");
@@ -250,6 +261,23 @@ export class Harness {
     } finally {
       inflight.splice(inflight.indexOf(open), 1);
     }
+  }
+
+  /**
+   * Deliver the (good) webhook of every call a lead's request places, in order:
+   * a no-answer first call places the retry, whose own webhook is then delivered.
+   * Stops when a delivery places no further call (at most two calls exist).
+   */
+  async finish(ctx: LeadCtx, flavor: "good" = "good"): Promise<WebhookResult[]> {
+    const results: WebhookResult[] = [];
+    const seen = new Set<string>();
+    for (let i = 0; i < 3; i += 1) {
+      const call = this.bland.callsForNumber(ctx.lead.phone).find((c) => !seen.has(c.callId));
+      if (!call) break;
+      seen.add(call.callId);
+      results.push(await this.bland.webhook(call, flavor));
+    }
+    return results;
   }
 
   async reconcile(opts: { includeNeedsReview?: boolean; actor?: string } = {}): Promise<ReconcileSummary> {

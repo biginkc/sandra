@@ -125,9 +125,9 @@ describe("Norma timeline colours and the second call", () => {
     expect(screen.getByTestId("lead-event-row")).not.toHaveAttribute("data-tone");
   });
 
-  it("says plainly that the first call was not answered and Norma is trying once more", () => {
+  it("says plainly that the first call was not answered", () => {
     expect(formatLeadEventSentence(event("norma_call_attempt_no_answer", { attempt: 1 }), {}, null)).toBe(
-      "Norma call 1 was not answered — trying once more",
+      "Norma's first call was not answered",
     );
   });
 });
