@@ -2,7 +2,7 @@
   "schema_version": 2,
   "status": "PENDING_REVIEW_NO_INSTALL",
   "source_repository": ".",
-  "source_commit": "01089423981beb862883dfe1a9274896875447c5",
+  "source_commit": "7ae7331023ba55269ec455cb43af2d69690c30fd",
   "source_commit_role": "coordinator integration exact snapshot; read with git show; no branch import",
   "sql_packet": {
     "path": "experiments/inbox-release/generated/backend-operation-reply.sql",
@@ -65,7 +65,7 @@
       "bytes": 31653,
       "transformed_sha256": "0bd1096eef2dacf1cd9c640efff62f2c142292796c5cf827162d3f1ad935cecf",
       "reviewed_correction": {
-        "base_commit": "01089423981beb862883dfe1a9274896875447c5",
+        "base_commit": "7ae7331023ba55269ec455cb43af2d69690c30fd",
         "sha256": "a935905bb86e545684f6414c4cced8d02d659b6fc60604537195b2a776534128",
         "bytes": 31653
       }
@@ -134,7 +134,7 @@
       "bytes": 6014,
       "transformed_sha256": "477b32e6d174b2d4719ed9479befdbddfb864c31e941a6b7cb01e09b393a5bd5",
       "reviewed_correction": {
-        "base_commit": "01089423981beb862883dfe1a9274896875447c5",
+        "base_commit": "7ae7331023ba55269ec455cb43af2d69690c30fd",
         "sha256": "942c9e7b117e73b941eeb0874d5928f37b670df264ba59114d8bf9c0838b8e3f",
         "bytes": 6014
       }
