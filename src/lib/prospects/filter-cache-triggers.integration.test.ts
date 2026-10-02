@@ -19,6 +19,7 @@ import { resetTenantTables } from "@tests/integration/reset";
 import { assertLocalOnlyEnvironment } from "@/lib/testing/local-only-guard";
 
 assertLocalOnlyEnvironment();
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const svc = createTestClient();
 let pg: Client;
 let userA: any;
@@ -328,5 +329,93 @@ describe("generated columns are derived from the catalog", () => {
     } finally {
       await pg.query(`alter table public.properties drop column zz_gen_probe`);
     }
+  });
+});
+
+describe("insert fast path (skip when cached flags already cover the row)", () => {
+  const truth = async (id: string) => {
+    const { rows } = await pg.query(
+      `select exists(select 1 from public.messages where property_id=$1 and org_id=$2 and direction='inbound') hi,
+              exists(select 1 from public.messages where property_id=$1 and org_id=$2 and direction='outbound') ho,
+              exists(select 1 from public.messages where property_id=$1 and org_id=$2 and direction='inbound' and read_at is null) hu,
+              exists(select 1 from public.tasks where related_property_id=$1 and org_id=$2 and status='open') ot`,
+      [id, BMH_ORG_ID],
+    );
+    return rows[0];
+  };
+  const cacheTruth = async (id: string) => {
+    const c = await cache(id);
+    return { hi: c.hi, ho: c.ho, hu: c.hu, ot: c.ot };
+  };
+  const conn = async () => { const c = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL! }); await c.connect(); return c; };
+
+  it("a covered insert skips (no property update) while an uncovered one still flips the flag", async () => {
+    const p = await prop();
+    await msg(p, "inbound");
+    const before = (await pg.query(`select xmin::text x from public.properties where id=$1`, [p])).rows[0].x;
+    await msg(p, "inbound", { read: true }); // covered: has_inbound already true and read
+    await msg(p, "outbound"); // not covered: has_outbound false -> refresh flips it
+    expect(await cache(p)).toMatchObject({ hi: true, ho: true, hu: true });
+    const afterSkipOnly = (await pg.query(`select xmin::text x from public.properties where id=$1`, [p])).rows[0].x;
+    expect(afterSkipOnly).not.toBe(before); // outbound flip updated the row
+    const x1 = afterSkipOnly;
+    await msg(p, "outbound"); // covered now -> skip: row version must not change
+    await msg(p, "inbound", { read: true });
+    const x2 = (await pg.query(`select xmin::text x from public.properties where id=$1`, [p])).rows[0].x;
+    expect(x2).toBe(x1);
+    await task(p, "completed"); // non-open task never changes the cache
+    expect((await pg.query(`select xmin::text x from public.properties where id=$1`, [p])).rows[0].x).toBe(x1);
+  });
+
+  it("race: a clearing tx (delete the only inbound) vs a skipping insert -> final cache equals truth (both orders)", async () => {
+    for (const order of ["clearer-first", "inserter-first"]) {
+      for (let i = 0; i < 6; i++) {
+        const p = await prop();
+        const m = await msg(p, "inbound", { read: true });
+        const a = await conn(); // clearer
+        const b = await conn(); // inserter (looks covered)
+        try {
+          const clear = async () => { await a.query("begin"); await a.query(`delete from public.messages where id=$1`, [m]); await sleep(150); await a.query("commit"); };
+          const ins = async () => { await b.query("begin"); await b.query(`insert into public.messages (org_id, property_id, channel, direction, body, read_at) values ('${BMH_ORG_ID}', $1, 'sms', 'inbound', 'r', now())`, [p]); await sleep(150); await b.query("commit"); };
+          if (order === "clearer-first") { const c = clear(); await sleep(40 + i * 20); await Promise.all([c, ins()]); }
+          else { const t = ins(); await sleep(40 + i * 20); await Promise.all([t, clear()]); }
+        } finally { await a.end(); await b.end(); }
+        expect(await cacheTruth(p), `${order} #${i}`).toEqual(await truth(p));
+      }
+    }
+  });
+
+  it("randomised concurrent workload on a few hot properties: cache == truth afterwards", async () => {
+    const props = [await prop(), await prop(), await prop()];
+    const workers = await Promise.all([1, 2, 3, 4, 5, 6].map(() => conn()));
+    const opts = ["inbound-read", "inbound-unread", "outbound"] as const;
+    try {
+      await Promise.all(workers.map(async (c, w) => {
+        for (let i = 0; i < 40; i++) {
+          const p = props[(w + i) % 3];
+          const r = (w * 7 + i * 13) % 10;
+          try {
+            await c.query("begin");
+            if (r < 5) {
+              const o = opts[(w + i) % 3];
+              await c.query(`insert into public.messages (org_id, property_id, channel, direction, body, read_at) values ('${BMH_ORG_ID}', $1, 'sms', $2, 'w', $3)`, [p, o.startsWith("inbound") ? "inbound" : "outbound", o === "inbound-read" ? new Date().toISOString() : null]);
+            } else if (r < 7) {
+              await c.query(`delete from public.messages where id in (select id from public.messages where property_id=$1 order by created_at limit 2)`, [p]);
+            } else if (r < 8) {
+              await c.query(`update public.messages set read_at = now() where property_id=$1 and direction='inbound' and read_at is null`, [p]);
+            } else if (r < 9) {
+              await c.query(`insert into public.tasks (org_id, assignee_id, created_by, related_property_id, type, status, title, due_at) values ($1,$2,$2,$3,'follow_up','open','t',now())`, [BMH_ORG_ID, userAId, p]);
+            } else {
+              await c.query(`update public.tasks set status='completed' where related_property_id=$1 and status='open'`, [p]);
+            }
+            await c.query("commit");
+          } catch (e: any) {
+            await c.query("rollback").catch(() => {});
+            if (e.code !== "40P01") throw e; // deadlock is the documented, retryable outcome
+          }
+        }
+      }));
+    } finally { await Promise.all(workers.map((c) => c.end())); }
+    for (const p of props) expect(await cacheTruth(p)).toEqual(await truth(p));
   });
 });
