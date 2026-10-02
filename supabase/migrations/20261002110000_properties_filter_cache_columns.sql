@@ -1,0 +1,438 @@
+-- Denormalised filter-cache columns on public.properties, maintained by
+-- triggers, so the Prospects/Search filter translator can filter plain
+-- columns (works on from('properties') AND on `setof properties` rpc builders,
+-- no embedded-resource filters, no pre-fetched id lists, no unbounded reads).
+--
+-- Why not computed fields: stable SQL functions over a properties row cannot
+-- inline on PostgreSQL 17 (subquery bodies), so they execute once per
+-- candidate row. Measured on a 50k-property / 250k-message stack they were
+-- 10x-460x slower than the legacy translator (see PR A volume gate), far over
+-- the 2x budget. This is the plan's mandatory set-based fallback.
+--
+-- Columns (never NULL):
+--   has_inbound_message / has_outbound_message  any message (any channel) with property_id
+--   has_unread_inbound                          inbound message with read_at IS NULL
+--   has_open_tasks                              task with status = 'open'
+--   filter_list_ids / filter_tag_ids            property_lists.list_id / property_tags.tag_id
+--   filter_list_count                           number of property_lists rows
+-- Only child rows whose org_id equals the property's org_id count (this
+-- matches what a correctly-scoped RLS viewer sees).
+--
+-- Maintenance: statement-level triggers (transition tables) on messages,
+-- tasks, property_lists and property_tags call refresh_property_filter_cache
+-- with the DISTINCT affected property ids (bulk imports cost one set-based
+-- refresh per statement, not one per row). The refresh row-locks the affected
+-- properties (FOR NO KEY UPDATE, id order) before recomputing in a fresh
+-- statement, so concurrent writers serialise instead of overwriting each
+-- other with stale snapshots. UPDATEs only happen when a value changes.
+--
+-- Safety interplay (reviewed): properties are read-only once DNC-locked and
+-- some BEFORE UPDATE triggers take advisory locks. Child writes to a locked
+-- property (e.g. an inbound STOP reply) must still refresh the cache, so
+-- properties_true_dnc_lock_guard and serialize_property_safety_before_csv_
+-- consent now return early ONLY for an UPDATE that changes nothing except
+-- these cache columns (properties_filter_cache_only_change). Every other
+-- update path is byte-for-byte unchanged. A pin trigger resets the cache
+-- columns for any writer other than the refresh function, so clients cannot
+-- forge them through PostgREST.
+--
+-- Additive; apply BEFORE the app code that filters these columns is deployed.
+-- Backfill runs at the end of this migration (batched, through the same
+-- refresh function).
+
+set lock_timeout = '5s';
+
+begin;
+
+alter table public.properties
+  add column if not exists has_inbound_message boolean not null default false,
+  add column if not exists has_outbound_message boolean not null default false,
+  add column if not exists has_unread_inbound boolean not null default false,
+  add column if not exists has_open_tasks boolean not null default false,
+  add column if not exists filter_list_ids uuid[] not null default '{}'::uuid[],
+  add column if not exists filter_tag_ids uuid[] not null default '{}'::uuid[],
+  add column if not exists filter_list_count integer not null default 0;
+
+-- True only when OLD and NEW differ and every difference is a cache column.
+-- Stored generated columns (search_text, equity_pct) are not yet computed in
+-- BEFORE triggers, so they are ignored; they derive from other columns that
+-- ARE compared. A newly added generated column makes this return false
+-- (fail-safe: the normal guard path runs).
+create or replace function public.properties_filter_cache_only_change(old_row public.properties, new_row public.properties)
+returns boolean
+language sql
+stable
+set search_path = ''
+as $$
+  select (j.n - j.ign) = (j.o - j.ign)
+     and (j.n - j.gen) <> (j.o - j.gen)
+    from (
+      select pg_catalog.to_jsonb(new_row) as n,
+             pg_catalog.to_jsonb(old_row) as o,
+             array['search_text','equity_pct']::text[] as gen,
+             array['search_text','equity_pct','has_inbound_message','has_outbound_message','has_unread_inbound','has_open_tasks','filter_list_ids','filter_tag_ids','filter_list_count']::text[] as ign
+    ) j
+$$;
+
+-- Forged writes to the cache columns are discarded; only the refresh function
+-- (which sets sandra.filter_cache_writer for its own statement) may change them.
+create or replace function public.properties_filter_cache_pin()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+begin
+  if coalesce(pg_catalog.current_setting('sandra.filter_cache_writer', true), 'off') = 'on' then
+    return new;
+  end if;
+  if tg_op = 'INSERT' then
+    new.has_inbound_message := false;
+    new.has_outbound_message := false;
+    new.has_unread_inbound := false;
+    new.has_open_tasks := false;
+    new.filter_list_ids := '{}'::uuid[];
+    new.filter_tag_ids := '{}'::uuid[];
+    new.filter_list_count := 0;
+  else
+    new.has_inbound_message := old.has_inbound_message;
+    new.has_outbound_message := old.has_outbound_message;
+    new.has_unread_inbound := old.has_unread_inbound;
+    new.has_open_tasks := old.has_open_tasks;
+    new.filter_list_ids := old.filter_list_ids;
+    new.filter_tag_ids := old.filter_tag_ids;
+    new.filter_list_count := old.filter_list_count;
+  end if;
+  return new;
+end;
+$$;
+
+-- Sorts before guard_training_property / properties_true_dnc_lock_guard.
+drop trigger if exists a_properties_filter_cache_pin on public.properties;
+create trigger a_properties_filter_cache_pin
+  before insert or update on public.properties
+  for each row execute function public.properties_filter_cache_pin();
+
+-- Cache-only updates must not trip the DNC read-only guard or take the
+-- consent advisory lock. Bodies are the live definitions plus one early return.
+CREATE OR REPLACE FUNCTION public.properties_true_dnc_lock_guard()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+declare
+  linked_contact_is_dnc boolean := false;
+  authoritative_dnc boolean := false;
+begin
+  if tg_op = 'UPDATE' and public.properties_filter_cache_only_change(old, new) then
+    return new;
+  end if;
+  if tg_op = 'DELETE' then
+    if old.is_dnc_locked then
+      raise exception using
+        errcode = 'P0001',
+        message = 'DNC_LOCKED: permanently locked properties cannot be deleted';
+    end if;
+    return old;
+  end if;
+
+  if tg_op = 'UPDATE' and old.is_dnc_locked and not new.is_dnc_locked then
+    raise exception using
+      errcode = 'P0001',
+      message = 'DNC_LOCKED: permanent lock cannot be cleared';
+  end if;
+
+  if tg_op = 'UPDATE' and old.is_dnc_locked and new is distinct from old then
+    raise exception using
+      errcode = 'P0001',
+      message = 'DNC_LOCKED: permanently locked properties are read-only';
+  end if;
+
+  if new.homeowner_contact_id is not null then
+    select coalesce(c.do_not_contact, false)
+      into linked_contact_is_dnc
+    from public.contacts c
+    where c.id = new.homeowner_contact_id
+      and c.org_id = new.org_id;
+  end if;
+
+  authoritative_dnc := new.outreach_dispo = 'dnc' or linked_contact_is_dnc;
+
+  if new.is_dnc_locked and not authoritative_dnc then
+    raise exception using
+      errcode = 'P0001',
+      message = 'DNC_LOCK_INVALID: lock requires an authoritative DNC signal';
+  end if;
+
+  if authoritative_dnc then
+    new.is_dnc_locked := true;
+    -- A concurrent promotion or disposition write must not move a property as
+    -- it becomes DNC.  The last historical status remains its audit trail.
+    if tg_op = 'UPDATE' then
+      new.status := old.status;
+    end if;
+  end if;
+
+  return new;
+end;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.serialize_property_safety_before_csv_consent()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+begin
+  if tg_op = 'UPDATE' and public.properties_filter_cache_only_change(old, new) then
+    return new;
+  end if;
+  if new.homeowner_contact_id is not null
+    and (
+      (new.is_dnc_locked and not old.is_dnc_locked)
+      or new.outreach_dispo in ('wrong_number', 'bad_number', 'dnc', 'opted_out')
+    )
+  then
+    perform public.lock_csv_import_consent_org(new.org_id);
+  end if;
+  return new;
+end;
+$function$;
+
+-- Recompute the cache for the given properties.
+create or replace function public.refresh_property_filter_cache(p_ids uuid[])
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if p_ids is null or pg_catalog.cardinality(p_ids) = 0 then
+    return;
+  end if;
+  -- Serialise writers per property (NO KEY UPDATE does not conflict with the
+  -- FOR KEY SHARE an FK insert holds, so no deadlock with child inserts).
+  perform 1 from public.properties p where p.id = any (p_ids) order by p.id for no key update;
+  -- Fresh statement => fresh snapshot: sees rows committed by writers we waited on.
+  perform pg_catalog.set_config('sandra.filter_cache_writer', 'on', true);
+  update public.properties p
+     set has_inbound_message = c.hi,
+         has_outbound_message = c.ho,
+         has_unread_inbound = c.hu,
+         has_open_tasks = c.ot,
+         filter_list_ids = c.lids,
+         filter_tag_ids = c.tids,
+         filter_list_count = pg_catalog.cardinality(c.lids)
+    from (
+      select q.id, q.org_id,
+        exists (select 1 from public.messages m where m.property_id = q.id and m.org_id = q.org_id and m.direction = 'inbound') as hi,
+        exists (select 1 from public.messages m where m.property_id = q.id and m.org_id = q.org_id and m.direction = 'outbound') as ho,
+        exists (select 1 from public.messages m where m.property_id = q.id and m.org_id = q.org_id and m.direction = 'inbound' and m.read_at is null) as hu,
+        exists (select 1 from public.tasks t where t.related_property_id = q.id and t.org_id = q.org_id and t.status = 'open') as ot,
+        coalesce((select pg_catalog.array_agg(pl.list_id order by pl.list_id) from public.property_lists pl where pl.property_id = q.id and pl.org_id = q.org_id), '{}'::uuid[]) as lids,
+        coalesce((select pg_catalog.array_agg(pt.tag_id order by pt.tag_id) from public.property_tags pt where pt.property_id = q.id and pt.org_id = q.org_id), '{}'::uuid[]) as tids
+      from public.properties q
+      where q.id = any (p_ids)
+    ) c
+   where p.id = c.id
+     and (p.has_inbound_message, p.has_outbound_message, p.has_unread_inbound, p.has_open_tasks, p.filter_list_ids, p.filter_tag_ids, p.filter_list_count)
+         is distinct from (c.hi, c.ho, c.hu, c.ot, c.lids, c.tids, pg_catalog.cardinality(c.lids));
+  perform pg_catalog.set_config('sandra.filter_cache_writer', 'off', true);
+end;
+$$;
+
+-- One statement-level trigger function per child table. Transition tables
+-- exist only for the matching event, so each branch references only its own.
+create or replace function public.trg_messages_refresh_filter_cache()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if tg_op = 'INSERT' then
+    perform public.refresh_property_filter_cache(array(select distinct n.property_id from new_rows n where n.property_id is not null));
+  elsif tg_op = 'DELETE' then
+    perform public.refresh_property_filter_cache(array(select distinct o.property_id from old_rows o where o.property_id is not null));
+  else
+    perform public.refresh_property_filter_cache(array(
+      select o.property_id from old_rows o join new_rows n on n.id = o.id
+       where (o.property_id, o.org_id, o.direction, o.read_at) is distinct from (n.property_id, n.org_id, n.direction, n.read_at)
+         and o.property_id is not null
+      union
+      select n.property_id from old_rows o join new_rows n on n.id = o.id
+       where (o.property_id, o.org_id, o.direction, o.read_at) is distinct from (n.property_id, n.org_id, n.direction, n.read_at)
+         and n.property_id is not null));
+  end if;
+  return null;
+end;
+$$;
+
+create or replace function public.trg_tasks_refresh_filter_cache()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if tg_op = 'INSERT' then
+    perform public.refresh_property_filter_cache(array(select distinct n.related_property_id from new_rows n));
+  elsif tg_op = 'DELETE' then
+    perform public.refresh_property_filter_cache(array(select distinct o.related_property_id from old_rows o));
+  else
+    perform public.refresh_property_filter_cache(array(
+      select o.related_property_id from old_rows o join new_rows n on n.id = o.id
+       where (o.related_property_id, o.org_id, o.status) is distinct from (n.related_property_id, n.org_id, n.status)
+      union
+      select n.related_property_id from old_rows o join new_rows n on n.id = o.id
+       where (o.related_property_id, o.org_id, o.status) is distinct from (n.related_property_id, n.org_id, n.status)));
+  end if;
+  return null;
+end;
+$$;
+
+create or replace function public.trg_property_lists_refresh_filter_cache()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if tg_op = 'INSERT' then
+    perform public.refresh_property_filter_cache(array(select distinct n.property_id from new_rows n));
+  elsif tg_op = 'DELETE' then
+    perform public.refresh_property_filter_cache(array(select distinct o.property_id from old_rows o));
+  else
+    perform public.refresh_property_filter_cache(array(
+      select o.property_id from old_rows o join new_rows n on n.id = o.id
+       where (o.property_id, o.org_id, o.list_id) is distinct from (n.property_id, n.org_id, n.list_id)
+      union
+      select n.property_id from old_rows o join new_rows n on n.id = o.id
+       where (o.property_id, o.org_id, o.list_id) is distinct from (n.property_id, n.org_id, n.list_id)));
+  end if;
+  return null;
+end;
+$$;
+
+create or replace function public.trg_property_tags_refresh_filter_cache()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if tg_op = 'INSERT' then
+    perform public.refresh_property_filter_cache(array(select distinct n.property_id from new_rows n));
+  elsif tg_op = 'DELETE' then
+    perform public.refresh_property_filter_cache(array(select distinct o.property_id from old_rows o));
+  else
+    perform public.refresh_property_filter_cache(array(
+      select o.property_id from old_rows o join new_rows n on n.id = o.id
+       where (o.property_id, o.org_id, o.tag_id) is distinct from (n.property_id, n.org_id, n.tag_id)
+      union
+      select n.property_id from old_rows o join new_rows n on n.id = o.id
+       where (o.property_id, o.org_id, o.tag_id) is distinct from (n.property_id, n.org_id, n.tag_id)));
+  end if;
+  return null;
+end;
+$$;
+
+drop trigger if exists zz_messages_filter_cache_insert on public.messages;
+create trigger zz_messages_filter_cache_insert
+  after insert on public.messages
+  referencing new table as new_rows
+  for each statement execute function public.trg_messages_refresh_filter_cache();
+
+drop trigger if exists zz_messages_filter_cache_update on public.messages;
+create trigger zz_messages_filter_cache_update
+  after update on public.messages
+  referencing old table as old_rows new table as new_rows
+  for each statement execute function public.trg_messages_refresh_filter_cache();
+
+drop trigger if exists zz_messages_filter_cache_delete on public.messages;
+create trigger zz_messages_filter_cache_delete
+  after delete on public.messages
+  referencing old table as old_rows
+  for each statement execute function public.trg_messages_refresh_filter_cache();
+
+drop trigger if exists zz_tasks_filter_cache_insert on public.tasks;
+create trigger zz_tasks_filter_cache_insert
+  after insert on public.tasks
+  referencing new table as new_rows
+  for each statement execute function public.trg_tasks_refresh_filter_cache();
+
+drop trigger if exists zz_tasks_filter_cache_update on public.tasks;
+create trigger zz_tasks_filter_cache_update
+  after update on public.tasks
+  referencing old table as old_rows new table as new_rows
+  for each statement execute function public.trg_tasks_refresh_filter_cache();
+
+drop trigger if exists zz_tasks_filter_cache_delete on public.tasks;
+create trigger zz_tasks_filter_cache_delete
+  after delete on public.tasks
+  referencing old table as old_rows
+  for each statement execute function public.trg_tasks_refresh_filter_cache();
+
+drop trigger if exists zz_property_lists_filter_cache_insert on public.property_lists;
+create trigger zz_property_lists_filter_cache_insert
+  after insert on public.property_lists
+  referencing new table as new_rows
+  for each statement execute function public.trg_property_lists_refresh_filter_cache();
+
+drop trigger if exists zz_property_lists_filter_cache_update on public.property_lists;
+create trigger zz_property_lists_filter_cache_update
+  after update on public.property_lists
+  referencing old table as old_rows new table as new_rows
+  for each statement execute function public.trg_property_lists_refresh_filter_cache();
+
+drop trigger if exists zz_property_lists_filter_cache_delete on public.property_lists;
+create trigger zz_property_lists_filter_cache_delete
+  after delete on public.property_lists
+  referencing old table as old_rows
+  for each statement execute function public.trg_property_lists_refresh_filter_cache();
+
+drop trigger if exists zz_property_tags_filter_cache_insert on public.property_tags;
+create trigger zz_property_tags_filter_cache_insert
+  after insert on public.property_tags
+  referencing new table as new_rows
+  for each statement execute function public.trg_property_tags_refresh_filter_cache();
+
+drop trigger if exists zz_property_tags_filter_cache_update on public.property_tags;
+create trigger zz_property_tags_filter_cache_update
+  after update on public.property_tags
+  referencing old table as old_rows new table as new_rows
+  for each statement execute function public.trg_property_tags_refresh_filter_cache();
+
+drop trigger if exists zz_property_tags_filter_cache_delete on public.property_tags;
+create trigger zz_property_tags_filter_cache_delete
+  after delete on public.property_tags
+  referencing old table as old_rows
+  for each statement execute function public.trg_property_tags_refresh_filter_cache();
+
+revoke all on function public.refresh_property_filter_cache(uuid[]) from public, anon, authenticated;
+grant execute on function public.refresh_property_filter_cache(uuid[]) to service_role;
+revoke all on function public.trg_messages_refresh_filter_cache() from public, anon, authenticated;
+revoke all on function public.trg_tasks_refresh_filter_cache() from public, anon, authenticated;
+revoke all on function public.trg_property_lists_refresh_filter_cache() from public, anon, authenticated;
+revoke all on function public.trg_property_tags_refresh_filter_cache() from public, anon, authenticated;
+revoke all on function public.properties_filter_cache_only_change(public.properties, public.properties) from public, anon;
+grant execute on function public.properties_filter_cache_only_change(public.properties, public.properties) to authenticated, service_role;
+
+-- Backfill (batched through the same refresh function the triggers use).
+do $backfill$
+declare
+  batch uuid[];
+begin
+  for batch in
+    select pg_catalog.array_agg(s.id)
+      from (select id, (pg_catalog.row_number() over (order by id) - 1) / 5000 as g from public.properties) s
+     group by s.g
+     order by s.g
+  loop
+    perform public.refresh_property_filter_cache(batch);
+  end loop;
+end
+$backfill$;
+
+commit;
+
+notify pgrst, 'reload schema';
