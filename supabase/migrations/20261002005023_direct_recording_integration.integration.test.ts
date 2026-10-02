@@ -15,6 +15,8 @@ it("installs the direct recording ledger, private bucket, and rollback atomicall
   const migration = stripTx(fs.readFileSync("supabase/migrations/20261002005023_direct_recording_integration.sql", "utf8"));
   const retryMigration = stripTx(fs.readFileSync("supabase/migrations/20261002011737_direct_recording_monotonic_retry.sql", "utf8"));
   const retryRollback = stripTx(fs.readFileSync("supabase/rollbacks/20261002011737_direct_recording_monotonic_retry.sql", "utf8"));
+  const linkMigration = stripTx(fs.readFileSync("supabase/migrations/20261002013151_direct_recording_link_repair.sql", "utf8"));
+  const linkRollback = stripTx(fs.readFileSync("supabase/rollbacks/20261002013151_direct_recording_link_repair.sql", "utf8"));
   const directCalls = stripTx(fs.readFileSync("supabase/migrations/20261001200000_direct_calls.sql", "utf8"));
   const rollback = stripTx(fs.readFileSync("supabase/rollbacks/20261002005023_direct_recording_integration.sql", "utf8"));
   await pg.query("begin");
@@ -24,6 +26,8 @@ it("installs the direct recording ledger, private bucket, and rollback atomicall
     await pg.query(migration);
     await pg.query(retryMigration);
     await pg.query(retryMigration);
+    await pg.query(linkMigration);
+    await pg.query(linkMigration);
     const columns = await pg.query(`select table_name, column_name from information_schema.columns where table_schema='public' and ((table_name='call_activities' and column_name='direct_call_id') or (table_name='call_recordings' and column_name='provider_recording_id')) order by table_name, column_name`);
     expect(columns.rows).toEqual([
       { table_name: "call_activities", column_name: "direct_call_id" },
@@ -54,15 +58,23 @@ it("installs the direct recording ledger, private bucket, and rollback atomicall
       [recordingCall, "provider-recording-1", "seller-control", "seller-leg", "seller-session", "2026-10-01T12:00:01Z"],
     )).rows[0];
     expect(leasedClaim).toMatchObject({ should_capture: false, status: "pending", attempt_count: 1 });
-    expect((await pg.query(
-      "select public.direct_call_recording_mark_available($1,$2,$3,$4,$5,$6)",
-      ["provider-recording-1", recordingCall, "sandra-direct-recordings", `${ORG}/${recordingCall}/provider-recording-1.wav`, 7, "2026-10-01T12:01:00Z"],
-    )).rows[0].direct_call_recording_mark_available).toBe(true);
     await pg.query(
       "insert into public.call_activities(id,org_id,property_id,contact_id,jitter_attempt_id,provider,operator_user_id,direct_call_id) values ($1,$2,$3,$4,$5,'sandra_softphone',$6,$7)",
       [recordingActivity, ORG, recordingProperty, recordingContact, "sandra-recording-test", USER_C, recordingCall],
     );
-    await pg.query("select public.direct_call_recording_sync_activity($1,$2,$3)", [recordingCall, recordingActivity, "provider-recording-1"]);
+    await pg.query("select public.direct_call_recording_sync_activity($1,$2,$3,$4)", [recordingCall, recordingActivity, "provider-recording-1", "2026-10-01T12:00:30Z"]);
+    expect((await pg.query("select status from public.call_recordings where call_activity_id=$1", [recordingActivity])).rows[0].status).toBe("pending");
+    expect((await pg.query(
+      "select public.direct_call_recording_mark_failed($1,$2,'capture_failed','temporary provider failure','2026-10-01T12:01:00Z')",
+      ["provider-recording-1", recordingCall],
+    )).rows[0].direct_call_recording_mark_failed).toBe(true);
+    await pg.query("select public.direct_call_recording_sync_activity($1,$2,$3,$4)", [recordingCall, recordingActivity, "provider-recording-1", "2026-10-01T12:01:01Z"]);
+    expect((await pg.query("select status from public.call_recordings where call_activity_id=$1", [recordingActivity])).rows[0].status).toBe("failed");
+    expect((await pg.query(
+      "select public.direct_call_recording_mark_available($1,$2,$3,$4,$5,$6)",
+      ["provider-recording-1", recordingCall, "sandra-direct-recordings", `${ORG}/${recordingCall}/provider-recording-1.wav`, 7, "2026-10-01T12:02:00Z"],
+    )).rows[0].direct_call_recording_mark_available).toBe(true);
+    await pg.query("select public.direct_call_recording_sync_activity($1,$2,$3,$4)", [recordingCall, recordingActivity, "provider-recording-1", "2026-10-01T12:02:01Z"]);
     expect((await pg.query("select status,storage_path,provider_recording_id from public.call_recordings where call_activity_id=$1", [recordingActivity])).rows[0]).toEqual({
       status: "available",
       storage_path: `${ORG}/${recordingCall}/provider-recording-1.wav`,
@@ -74,6 +86,7 @@ it("installs the direct recording ledger, private bucket, and rollback atomicall
     )).rows[0].direct_call_recording_mark_failed).toBe(false);
     expect((await pg.query("select status from public.direct_call_recordings where provider_recording_id='provider-recording-1'")).rows[0].status).toBe("available");
 
+    await pg.query(linkRollback);
     await pg.query(retryRollback);
     await pg.query(rollback);
     expect((await pg.query("select to_regclass('public.direct_call_recordings') as table_name")).rows[0].table_name).toBeNull();

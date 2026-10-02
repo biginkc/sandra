@@ -134,7 +134,7 @@ export function createDirectRecordingHandler(options: {
     if (!claimRow?.should_capture) {
       // An available capture may have won a concurrent webhook while its activity
       // row was still absent. Re-sync that row, but never start a second download.
-      if (claimRow?.status === "available" && claimRow.storage_path) await syncActivityRecording(admin, row.id, recording.recordingId);
+      if (claimRow?.status === "available" && claimRow.storage_path) await syncActivityRecording(admin, row.id, recording.recordingId, now);
       return;
     }
     try {
@@ -158,7 +158,7 @@ export function createDirectRecordingHandler(options: {
       if (marked.error) throw new Error(marked.error.message ?? "recording_available_failed");
       const markedAvailable = marked.data === true || (Array.isArray(marked.data) && marked.data[0] === true);
       if (!markedAvailable) throw new Error("recording_available_not_persisted");
-      await syncActivityRecording(admin, row.id, recording.recordingId);
+      await syncActivityRecording(admin, row.id, recording.recordingId, now);
     } catch (error) {
       const message = error instanceof Error ? error.message.slice(0, 500) : "recording_capture_failed";
       const failed = await admin.rpc("direct_call_recording_mark_failed", {
@@ -172,23 +172,27 @@ export function createDirectRecordingHandler(options: {
       // A concurrent capture can complete after this attempt started. Its
       // available state is protected by the SQL transition; sync is best effort
       // here and the durable sweep retries it without downgrading the ledger.
-      try { await syncActivityRecording(admin, row.id, recording.recordingId); } catch { /* retry on sweep */ }
+      try { await syncActivityRecording(admin, row.id, recording.recordingId, now); } catch { /* retry on sweep */ }
       throw error;
     }
   };
 }
 
-async function syncActivityRecording(adminValue: unknown, directCallId: string, providerRecordingId: string) {
+export async function syncDirectRecordingActivity(adminValue: unknown, directCallId: string, providerRecordingId: string, now = () => new Date()) {
   const admin = asDb(adminValue);
   const activity = await admin.from("call_activities").select("id").eq("direct_call_id", directCallId).maybeSingle();
   if (activity.error) throw new Error(activity.error.message ?? "recording_activity_lookup_failed");
-  if (!activity.data?.id) return;
   const result = await admin.rpc("direct_call_recording_sync_activity", {
     p_direct_call_id: directCallId,
-    p_call_activity_id: activity.data.id,
+    p_call_activity_id: activity.data?.id ?? null,
     p_provider_recording_id: providerRecordingId,
+    p_now: now().toISOString(),
   });
   if (result.error) throw new Error(result.error.message ?? "recording_activity_sync_failed");
+}
+
+async function syncActivityRecording(adminValue: unknown, directCallId: string, providerRecordingId: string, now = () => new Date()) {
+  return syncDirectRecordingActivity(adminValue, directCallId, providerRecordingId, now);
 }
 
 /** Copies a saved-before-wrapup ledger row into the existing activity child table. */
@@ -201,6 +205,7 @@ export async function attachPendingDirectRecording(directCallId: string, activit
     p_direct_call_id: directCallId,
     p_call_activity_id: activityId,
     p_provider_recording_id: stage.data.provider_recording_id,
+    p_now: new Date().toISOString(),
   });
   if (result.error) throw new Error(result.error.message ?? "recording_activity_sync_failed");
 }

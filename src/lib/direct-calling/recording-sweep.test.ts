@@ -16,19 +16,22 @@ function wav(): Uint8Array {
 describe("direct recording retry sweep", () => {
   it("replays due rows through the same leased capture handler", async () => {
     const ledger = {
+      status: "failed" as const,
       direct_call_id: CALL.id,
       provider_recording_id: "rec-1",
       provider_call_control_id: "seller-leg",
       provider_call_leg_id: "leg-1",
       provider_call_session_id: "session-1",
     };
+    const linkLedger = { ...ledger, status: "available" as const, provider_recording_id: "rec-available" };
     const admin = {
       from: vi.fn((table: string) => {
         if (table === "direct_call_recordings") {
-          const query: any = { select: () => query, in: () => query, lt: () => query, lte: () => query, order: () => query, limit: async () => ({ data: [ledger], error: null }) };
+          let mode: "capture" | "link" = "capture";
+          const query = { select: () => query, in: () => (mode = "capture", query), eq: () => (mode = "link", query), lt: () => query, lte: () => query, order: () => query, limit: async () => ({ data: mode === "capture" ? [ledger] : [linkLedger], error: null }) };
           return query;
         }
-        const query: any = { select: () => query, eq: () => query, maybeSingle: async () => ({ data: CALL, error: null }) };
+        const query = { select: () => query, eq: () => query, maybeSingle: async () => ({ data: CALL, error: null }) };
         return query;
       }),
       rpc: vi.fn(async (name: string) => {
@@ -46,7 +49,8 @@ describe("direct recording retry sweep", () => {
       fetchImpl: vi.fn(async () => new Response(new Blob([wav().buffer as ArrayBuffer]), { status: 200 })) as never,
       now: () => new Date("2026-10-01T12:00:00Z"),
     });
-    expect(summary).toEqual({ candidates: 1, attempted: 1, succeeded: 1, failed: 0 });
+    expect(summary).toEqual({ candidates: 2, attempted: 2, succeeded: 2, failed: 0 });
     expect(getRecording).toHaveBeenCalledWith("rec-1");
+    expect(getRecording).toHaveBeenCalledTimes(1);
   });
 });
