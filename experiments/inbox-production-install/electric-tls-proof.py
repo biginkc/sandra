@@ -164,7 +164,7 @@ def verify_workflow_at_commit(attestation: dict[str, object], workflow_text: str
             if result.returncode:
                 raise ProofError(f"EIMG_WORKFLOW_FAILED: workflow at S was not found: {redact((result.stderr + result.stdout)[-4000:])}")
             try:
-                workflow_text = base64.b64decode(result.stdout.strip(), validate=True)
+                workflow_text = base64.b64decode("".join(result.stdout.split()), validate=True)
                 workflow_text.decode("utf-8")
                 workflow_source = "gh api"
             except (ValueError, UnicodeDecodeError) as exc:

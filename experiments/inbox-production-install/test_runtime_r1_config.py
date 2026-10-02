@@ -317,7 +317,8 @@ class RuntimeR1ConfigTests(unittest.TestCase):
                         return SimpleNamespace(stdout="", stderr="not found", returncode=1)
                     self.assertEqual(args[:2], ["gh", "api"])
                     return SimpleNamespace(
-                        stdout=base64.b64encode(workflow_fixture()).decode(),
+                        # GitHub contents API wraps base64 at 60 chars; feed it wrapped.
+                        stdout=base64.encodebytes(workflow_fixture()).decode(),
                         stderr="",
                         returncode=0,
                     )
