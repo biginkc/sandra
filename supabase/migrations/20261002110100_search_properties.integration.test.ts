@@ -11,7 +11,8 @@ import {
   seedTwoOrgs,
 } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "@/lib/supabase/types";
 import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
 
 // Calls public.search_properties directly through authenticated user clients.
@@ -47,7 +48,7 @@ let b: ReturnType<typeof clientForUser>;
 let userA = "";
 let userA2 = "";
 let userB = "";
-let anon: ReturnType<typeof createClient>;
+let anon: SupabaseClient<Database>;
 
 type Ids = Record<string, string>;
 const P: Ids = {};
@@ -60,7 +61,7 @@ async function contact(org: string, v: Record<string, unknown>) {
   return data.id as string;
 }
 async function property(org: string, v: Record<string, unknown>) {
-  const { data, error } = await service.from("properties").insert({ org_id: org, city: "Springfield", state: "MO", zip: "65801", ...v }).select("id").single();
+  const { data, error } = await service.from("properties").insert({ org_id: org, city: "Springfield", state: "MO", zip: "65801", ...v } as Database["public"]["Tables"]["properties"]["Insert"]).select("id").single();
   if (error || !data) throw new Error(error?.message ?? "property seed failed");
   return data.id as string;
 }
@@ -106,7 +107,7 @@ describe("search_properties RPC", () => {
     const ua = await mk(BMH_ORG_ID, "a"); userA = ua.userId; a = clientForUser(ua.jwt);
     const ua2 = await mk(BMH_ORG_ID, "a2"); userA2 = ua2.userId; a2 = clientForUser(ua2.jwt);
     const ub = await mk(TEST_ORG_B_ID, "b"); userB = ub.userId; b = clientForUser(ub.jwt);
-    anon = createClient(process.env.TEST_SUPABASE_URL!, process.env.TEST_SUPABASE_ANON_KEY!, { auth: { persistSession: false, autoRefreshToken: false } });
+    anon = createClient<Database>(process.env.TEST_SUPABASE_URL!, process.env.TEST_SUPABASE_ANON_KEY!, { auth: { persistSession: false, autoRefreshToken: false } });
     // The designation is trigger-guarded; set the same marker the guard expects.
     await db.query("begin");
     try {

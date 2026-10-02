@@ -14,7 +14,7 @@ import {
   Megaphone,
   MessageSquare,
   Droplet,
-  Target,
+  Search,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -48,7 +48,7 @@ type Item = {
 // Calendar is the secondary appointment overview (Today/Overdue queue on
 // Overview stays primary) — placed right after Overview since both are
 // viewer-scoped "what's on my plate" surfaces. Below them, the workflow
-// ladder: data arrives (Import) → sits in the raw pool (Prospects) → gets
+// ladder: data arrives (Import) → sits in the raw pool (Search) → gets
 // segmented into outreach targets (Lists) → drips run against them
 // (Sequences) → replies land in the cockpit (Messages) → engaged records
 // become qualified pipeline (Leads). Jobs is the system plumbing footer.
@@ -56,7 +56,7 @@ const ITEMS: readonly Item[] = [
   { href: "/dashboard", label: "Overview", icon: Gauge },
   { href: "/calendar", label: "Calendar", icon: Calendar },
   { href: "/import", label: "Import", icon: Download },
-  { href: "/properties", label: "Prospects", icon: Target },
+  { href: "/properties", label: "Search", icon: Search },
   { href: "/lists", label: "Lists", icon: List },
   { href: "/campaigns", label: "Campaigns", icon: Megaphone },
   { href: "/sequences", label: "Drips", icon: Droplet },

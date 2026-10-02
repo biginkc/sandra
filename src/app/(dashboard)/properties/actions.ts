@@ -44,13 +44,22 @@ import {
   type ClassifyInput,
 } from "@/lib/dialer/eligibility";
 
-import {
-  applyFilters,
-  filterSelectFragment,
-} from "@/lib/prospects/filter-to-supabase";
+import { filterSelectFragment } from "@/lib/prospects/filter-to-supabase";
 import type { FilterBlock } from "@/lib/prospects/filter-schema";
 import { resolveProspectEligibility } from "@/lib/prospects/eligibility";
-import { getDayBoundsInZone } from "@/lib/time/zoned";
+import {
+  AD_HOC_BULK_SMS_SOURCE,
+  filterToProspectIds,
+} from "@/lib/messaging/prospect-only-guard";
+import {
+  SEARCH_SELECT_ALL_CAP,
+  buildScopedQuery,
+  mapSearchError,
+  parseQueryOrigin,
+  resolveIncludeMessages,
+  runWithSearchFallback,
+  type QueryOrigin,
+} from "@/lib/prospects/search-scope";
 
 export async function listSmsTemplateCategories(): Promise<
   Result<{ category: string; count: number }[]>
@@ -90,10 +99,16 @@ export async function listSmsTemplateCategories(): Promise<
  */
 export async function assessBulkSmsAudience(
   propertyIds: string[],
-): Promise<Result<AudienceLineTypeAssessment>> {
+): Promise<Result<AudienceLineTypeAssessment & { skippedLeads: number }>> {
   try {
     const supabase = await createClient();
-    return ok(await assessAudienceLineTypes(supabase, propertyIds));
+    // Same prospect-only guard as bulkQueueSms so the modal counts match what
+    // will actually queue; leads in the selection are reported, not assessed.
+    const guard = await filterToProspectIds(supabase, propertyIds);
+    return ok({
+      ...(await assessAudienceLineTypes(supabase, guard.prospectIds)),
+      skippedLeads: guard.skippedLeads,
+    });
   } catch (e) {
     reportError(e, { tags: { surface: "assess_bulk_sms_audience" } });
     return errFromUnknown(e, "AUDIENCE_ASSESSMENT_FAILED");
@@ -104,6 +119,9 @@ export type BulkSmsOutcome = {
   succeeded: number;
   skipped: number;
   failed: { propertyId: string; message: string }[];
+  /** Ad-hoc sends only: selected rows that are not prospects (leads etc.)
+   *  and were skipped before queueing. Absent for saved-campaign sends. */
+  skippedLeads?: number;
   /** Set when the batch was too large for the synchronous path and was
    *  handed to the bulk-sms workflow instead. Counts above are zero;
    *  real counts land on the job row as the workflow progresses. */
@@ -199,7 +217,7 @@ async function validateProvidedCampaignForBulkSms(
 ): Promise<Result<null>> {
   const { data: campaign, error: campaignError } = await supabase
     .from("campaigns")
-    .select("org_id, status")
+    .select("org_id, status, audience_snapshot")
     .eq("id", campaignId)
     .maybeSingle();
 
@@ -221,6 +239,21 @@ async function validateProvidedCampaignForBulkSms(
       error: {
         code: "CAMPAIGN_STATE_CONFLICT",
         message: "Campaign must be launching before bulk SMS can queue it.",
+      },
+    };
+  }
+  // An ad-hoc bulk-SMS campaign id must not be presented as a saved campaign:
+  // that would skip the ad-hoc prospect-only guard. Provenance comes from the
+  // stored campaign row.
+  if (
+    (campaign.audience_snapshot as { source?: unknown } | null)?.source ===
+    AD_HOC_BULK_SMS_SOURCE
+  ) {
+    return {
+      ok: false,
+      error: {
+        code: "CAMPAIGN_SOURCE_MISMATCH",
+        message: "This campaign was created by Bulk SMS and cannot be launched as a saved campaign.",
       },
     };
   }
@@ -253,6 +286,38 @@ async function validateProvidedCampaignForBulkSms(
 
   const requestedIds = uniqueIds(propertyIds);
   if (requestedIds.length === 0) return ok(null);
+
+  // The saved-campaign exemption from the prospect-only guard is bound to the
+  // campaign's FROZEN audience: any id outside campaign_recipients is rejected.
+  const frozen = new Set<string>();
+  for (let i = 0; i < requestedIds.length; i += VALIDATION_CHUNK) {
+    const chunk = requestedIds.slice(i, i + VALIDATION_CHUNK);
+    const { data, error } = await supabase
+      .from("campaign_recipients")
+      .select("property_id")
+      .eq("campaign_id", campaignId)
+      .in("property_id", chunk);
+    if (error) {
+      return {
+        ok: false,
+        error: {
+          code: "CAMPAIGN_AUDIENCE_LOOKUP_FAILED",
+          message: error.message,
+        },
+      };
+    }
+    for (const row of data ?? []) frozen.add(row.property_id);
+  }
+  if (requestedIds.some((id) => !frozen.has(id))) {
+    return {
+      ok: false,
+      error: {
+        code: "CAMPAIGN_AUDIENCE_MISMATCH",
+        message:
+          "Selected properties are not part of this campaign's frozen audience.",
+      },
+    };
+  }
 
   const propertyOrgIds = new Set<string>();
   let readableCount = 0;
@@ -404,6 +469,9 @@ export async function bulkQueueSms(
 
     let resolvedPropertyIds = Array.from(new Set(propertyIds));
     let resolvedOpts: ResolvedBulkSmsQueueOpts;
+    let adHocSkippedLeads: number | undefined;
+    const leadsField = () =>
+      adHocSkippedLeads === undefined ? {} : { skippedLeads: adHocSkippedLeads };
 
     if (providedCampaignId) {
       const paceValidation = validateBulkSmsQueuePace(opts, "saved_campaign");
@@ -431,11 +499,23 @@ export async function bulkQueueSms(
         ...baseBulkSmsOpts(opts),
         paceSeconds: paceValidation.data,
       };
+      // Ad-hoc sends act on prospects only; the freeze below receives the
+      // FILTERED ids (not the original selection).
+      const guard = await filterToProspectIds(supabase, propertyIds);
+      adHocSkippedLeads = guard.skippedLeads;
+      if (guard.prospectIds.length === 0) {
+        return ok({
+          succeeded: 0,
+          skipped: 0,
+          failed: [],
+          skippedLeads: guard.skippedLeads,
+        });
+      }
       const campaignResult = await resolveAdHocBulkSmsCampaign(supabase, {
         campaignName: opts.campaignName,
         createdByUserId: enrolledByUserId,
         opts: baseOpts,
-        propertyIds,
+        propertyIds: guard.prospectIds,
       });
       if (!campaignResult.ok) return campaignResult;
       resolvedPropertyIds = campaignResult.data.propertyIds;
@@ -482,6 +562,7 @@ export async function bulkQueueSms(
         succeeded: state.succeeded,
         skipped: state.skipped,
         failed: state.failed,
+        ...leadsField(),
       });
     }
 
@@ -565,6 +646,7 @@ export async function bulkQueueSms(
       succeeded: 0,
       skipped: 0,
       failed: [],
+      ...leadsField(),
       deferred: { jobId: jobRow.id, total: resolvedPropertyIds.length },
     });
   } catch (e) {
@@ -882,11 +964,14 @@ export async function createDialerBatchFromFilters(args: {
   blockStack: FilterBlock[];
   imported?: "today" | null;
   title?: string;
-}): Promise<Result<CreateDialerBatchResult>> {
+  origin?: QueryOrigin;
+}): Promise<Result<CreateDialerBatchResult & { skippedLeads: number }>> {
+  const origin = parseQueryOrigin(args.origin);
   const selectionResult = await getAllMatchingProspectSelection({
     search: args.search ?? null,
     blockStack: args.blockStack,
     imported: args.imported ?? null,
+    origin,
   });
   if (!selectionResult.ok) return selectionResult;
 
@@ -899,13 +984,20 @@ export async function createDialerBatchFromFilters(args: {
         search: args.search ?? null,
         blockStack: args.blockStack,
         imported: args.imported ?? null,
+        // Legacy batches keep their exact historical source_meta shape.
+        ...(origin === "search_page" ? { origin } : {}),
       },
     },
   );
-  if (!result.ok || selectionResult.data.dncLockedCount === 0) return result;
+  const skippedLeads = selectionResult.data.skippedLeads;
+  if (!result.ok) return result;
+  if (selectionResult.data.dncLockedCount === 0) {
+    return ok({ ...result.data, skippedLeads });
+  }
 
   return ok({
     ...result.data,
+    skippedLeads,
     counts: {
       ...result.data.counts,
       blocked: {
@@ -920,42 +1012,60 @@ export async function createDialerBatchFromFilters(args: {
 
 /**
  * Return every property_id matching the current filter set on the
- * prospects page. Used by the "Select all N prospects across all pages"
+ * prospects/search page. Used by the "Select all N across all pages"
  * affordance (R9) — the table fetches the full ID set once, expands its
  * client-side selection Set, and existing bulk actions (which already
  * accept arrays of IDs) work unchanged.
  *
- * Plan 09: signature migrated to accept the v1 block stack instead of the
- * legacy 5-chip ParsedProspectsFilters. Filter chain mirrors page.tsx:
- *   - .is("deleted_at", null)                            (always)
- *   - .or("status.eq.prospect,is_dnc_locked.eq.true") UNLESS the stack contains a
- *     pipeline_status block (in which case that block's values fully
- *     define the active status set — same rule as page.tsx)
- *   - search → ILIKE on address
- *   - applyFilters(query, blockStack, supabase)          (Plan 04 translator)
+ * The predicate chain comes from `buildScopedQuery` (src/lib/prospects/
+ * search-scope.ts). Origin 'legacy' (the default; campaigns and DNC-safe
+ * callers) is byte-for-byte the old chain: prospect-or-DNC status unless a
+ * pipeline_status block, unescaped address ilike, uncapped. Origin
+ * 'search_page' shows every status, hides training rows, searches via
+ * `search_properties`, and is CAPPED (SEARCH_SELECT_ALL_CAP): over the cap is
+ * an error and NO partial selection is returned.
  *
- * Returns every matching row. Credit-spending bulk actions carry their own
- * guards (skip-trace: MAX_PROPERTIES_PER_JOB server-side + CASS-unverified
- * filtering), so select-all itself is unbounded.
+ * Two distinct sets come back: MATCHED (what the page lists; `matchedCount`)
+ * and ELIGIBLE (matched ∩ prospect ∩ not DNC; `eligibleIds`), with the
+ * exclusions broken out (`dncLockedCount`, `skippedLeads`).
+ *
+ * Credit-spending bulk actions carry their own guards (skip-trace:
+ * MAX_PROPERTIES_PER_JOB server-side + CASS-unverified filtering).
  */
 export async function getAllMatchingProspectSelection(args: {
   search: string | null;
   blockStack: FilterBlock[];
   imported?: "today" | null;
+  /** Defaults to 'legacy'. Anything but the literal 'search_page' is legacy. */
+  origin?: QueryOrigin;
 }): Promise<
   Result<{
     eligibleIds: string[];
     eligibleCount: number;
     dncLockedCount: number;
     matchedCount: number;
+    /** Matched rows that are not prospects (leads etc.) and so were skipped. */
+    skippedLeads: number;
   }>
 > {
   try {
     const supabase = await createClient();
+    const origin = parseQueryOrigin(args.origin);
 
-    const hasPipelineStatusBlock = args.blockStack.some(
-      (b) => b.kind === "pipeline_status",
-    );
+    let includeMessages = false;
+    if (origin === "search_page") {
+      try {
+        includeMessages = await resolveIncludeMessages();
+      } catch {
+        return {
+          ok: false,
+          error: {
+            code: "SEARCH_ACCESS_UNAVAILABLE",
+            message: "Membership access could not be verified. Please retry.",
+          },
+        };
+      }
+    }
 
     const filterSelect = filterSelectFragment(args.blockStack);
     const propertiesSelect = [
@@ -964,6 +1074,51 @@ export async function getAllMatchingProspectSelection(args: {
     ]
       .filter(Boolean)
       .join(", ");
+    const searchOrigin = origin === "search_page";
+    let addressFallback = false;
+
+    const failure = (error: { code?: string | null; message?: string }) => {
+      const mapped = searchOrigin ? mapSearchError(error) : null;
+      return {
+        ok: false as const,
+        error: {
+          code: mapped?.code ?? "SELECT_ALL_FAILED",
+          message: mapped?.message ?? error.message ?? "Select all failed",
+        },
+      };
+    };
+
+    // Search origin: one exact head count first so an over-cap selection is
+    // rejected before paging (each 1k keyset page is one RPC evaluation).
+    if (searchOrigin) {
+      const counted = await runWithSearchFallback(async (opts) => {
+        const { builder } = await buildScopedQuery(supabase, {
+          origin,
+          select: propertiesSelect,
+          selectOpts: { count: "exact", head: true },
+          search: args.search,
+          blockStack: args.blockStack,
+          imported: args.imported ?? null,
+          includeMessages,
+          addressFallback: opts.addressFallback,
+        });
+        return (await builder) as {
+          count: number | null;
+          error: { code?: string | null; message?: string } | null;
+        };
+      });
+      addressFallback = counted.degraded;
+      if (counted.result.error) return failure(counted.result.error);
+      if ((counted.result.count ?? 0) > SEARCH_SELECT_ALL_CAP) {
+        return {
+          ok: false,
+          error: {
+            code: "SELECT_ALL_TOO_LARGE",
+            message: `That is ${(counted.result.count ?? 0).toLocaleString()} results, over the ${SEARCH_SELECT_ALL_CAP.toLocaleString()} limit for selecting everything. Narrow the search or filters, or select rows on the page.`,
+          },
+        };
+      }
+    }
 
     // PostgREST silently caps results at 1 000 rows (db-max-rows default).
     // Use a deterministic ID keyset. Offset pagination can skip or duplicate
@@ -972,37 +1127,32 @@ export async function getAllMatchingProspectSelection(args: {
     const allIds: string[] = [];
     let cursor: string | null = null;
     for (;;) {
-      let query = supabase
-        .from("properties")
-        .select(propertiesSelect)
-        .is("deleted_at", null);
-      if (!hasPipelineStatusBlock) {
-        query = query.or("status.eq.prospect,is_dnc_locked.eq.true");
-      }
-      if (args.search) query = query.ilike("address", `%${args.search}%`);
-      if (args.imported === "today") {
-        const { dayStart, dayEnd } = getDayBoundsInZone(
-          new Date(),
-          "America/Chicago",
-        );
-        query = query
-          .not("source_import_id", "is", null)
-          .gte("source_imported_at", dayStart.toISOString())
-          .lt("source_imported_at", dayEnd.toISOString());
-      }
-      query = (await applyFilters(query, args.blockStack, supabase)).builder;
+      const { builder } = await buildScopedQuery(supabase, {
+        origin,
+        select: propertiesSelect,
+        search: args.search,
+        blockStack: args.blockStack,
+        imported: args.imported ?? null,
+        includeMessages,
+        addressFallback,
+      });
+      let query = builder;
       if (cursor) query = query.gt("id", cursor);
       const { data, error } = await query
         .order("id", { ascending: true })
         .limit(PAGE);
-      if (error) {
-        return {
-          ok: false,
-          error: { code: "SELECT_ALL_FAILED", message: error.message },
-        };
-      }
+      if (error) return failure(error);
       const rows = (data ?? []) as unknown as Array<{ id: string }>;
       allIds.push(...rows.map((row) => row.id));
+      if (searchOrigin && allIds.length > SEARCH_SELECT_ALL_CAP) {
+        return {
+          ok: false,
+          error: {
+            code: "SELECT_ALL_TOO_LARGE",
+            message: `More than ${SEARCH_SELECT_ALL_CAP.toLocaleString()} results. Narrow the search or filters, or select rows on the page.`,
+          },
+        };
+      }
       if (rows.length < PAGE) break;
       const nextCursor = rows.at(-1)?.id ?? null;
       if (!nextCursor || nextCursor === cursor) {
@@ -1027,6 +1177,9 @@ export async function getAllMatchingProspectSelection(args: {
       eligibleCount: resolved.eligibleIds.length,
       dncLockedCount: resolved.dncLockedCount,
       matchedCount: allIds.length,
+      skippedLeads: resolved.exclusions.filter(
+        (item) => item.reason === "not_found_or_not_prospect",
+      ).length,
     });
   } catch (e) {
     reportError(e, { tags: { surface: "get_all_matching_prospect_ids" } });
@@ -1038,6 +1191,7 @@ export async function getAllMatchingProspectIds(args: {
   search: string | null;
   blockStack: FilterBlock[];
   imported?: "today" | null;
+  origin?: QueryOrigin;
 }): Promise<Result<string[]>> {
   const result = await getAllMatchingProspectSelection(args);
   return result.ok ? ok(result.data.eligibleIds) : result;
@@ -1060,10 +1214,12 @@ export async function countAlreadyContacted(
   if (propertyIds.length === 0) return ok(0);
   try {
     const supabase = await createClient();
+    // Same prospect-only guard as bulkQueueSms (counts match the real send).
+    const { prospectIds } = await filterToProspectIds(supabase, propertyIds);
     const CHUNK = 250;
     const distinct = new Set<string>();
-    for (let i = 0; i < propertyIds.length; i += CHUNK) {
-      const chunk = propertyIds.slice(i, i + CHUNK);
+    for (let i = 0; i < prospectIds.length; i += CHUNK) {
+      const chunk = prospectIds.slice(i, i + CHUNK);
       const { data, error } = await supabase
         .from("messages")
         .select("property_id")

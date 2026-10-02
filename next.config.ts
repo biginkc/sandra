@@ -12,6 +12,14 @@ const nextConfig: NextConfig = {
       bodySizeLimit: "1mb",
     },
   },
+  // /search is the friendly entry point; the page itself stays at /properties
+  // so saved links keep working. Temporary (307) on purpose: a permanent 308
+  // would be cached by browsers forever. The query string is forwarded.
+  async redirects() {
+    return [
+      { source: "/search", destination: "/properties", permanent: false },
+    ];
+  },
 };
 
 // withWorkflow wires the "use workflow" / "use step" directives into the

@@ -386,7 +386,7 @@ export function CreateCampaignForm({
 
           {blocks.length === 0 ? (
             <div className="text-muted-foreground rounded border border-dashed p-4 text-sm">
-              No audience filters yet. Add the same block filters operators use on Prospects.
+              No audience filters yet. Add the same block filters operators use on Search.
             </div>
           ) : (
             <div className="space-y-3">

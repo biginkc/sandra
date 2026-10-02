@@ -8,10 +8,15 @@ import {
   loadTeamMembersForOrgs,
 } from "@/lib/auth/team-roster";
 import { createClient } from "@/lib/supabase/server";
+import { filterSelectFragment } from "@/lib/prospects/filter-to-supabase";
 import {
-  applyFilters,
-  filterSelectFragment,
-} from "@/lib/prospects/filter-to-supabase";
+  buildScopedQuery,
+  mapSearchError,
+  resolveIncludeMessages,
+  runWithSearchFallback,
+  searchModeFor,
+  SEARCH_DEGRADED_NOTICE,
+} from "@/lib/prospects/search-scope";
 
 import {
   ProspectsTable,
@@ -34,7 +39,6 @@ import { type BlockOptions } from "./_components/blocks/_block-shell";
 import { BlockOptionsProvider } from "./_components/block-options-provider";
 import { renderBlock } from "./_components/blocks/registry";
 import type { Preset } from "./_components/quick-filter-chip";
-import { getDayBoundsInZone } from "@/lib/time/zoned";
 import { LEAD_SOURCES } from "@/lib/leads/sources";
 
 const PAGE_SIZE = 50;
@@ -107,7 +111,7 @@ const CASS_STATUSES = ["verified", "unverified", "invalid", "ambiguous"];
 const SOURCES = [...LEAD_SOURCES];
 
 export const metadata = {
-  title: "Prospects · Sandra CRM",
+  title: "Search · Sandra CRM",
 };
 
 export default async function PropertiesPage({
@@ -153,15 +157,22 @@ export default async function PropertiesPage({
   const orgIds = memberships.map((membership) => membership.org_id);
   const orgId = orgIds[0] ?? "";
 
-  // Plan 09 — base properties query. Per the gotchas in 05-09-PLAN.md, when
-  // the block stack contains a pipeline_status block we DROP the hardcoded
-  // .eq("status","prospect") so that block's values fully define the active
-  // status set (e.g., a saved preset that filters to "lead | contract | closed"
-  // shouldn't be ANDed with "prospect" → empty).
+  // Search page query (origin 'search_page'): every status, training rows
+  // hidden, a 3+ char search runs through public.search_properties (names,
+  // phones, emails, address parts, SMS text) ANDed with every filter block.
+  // include_messages is derived server-side and FAIL-CLOSED: a membership
+  // lookup failure turns message matching off and surfaces an error; it never
+  // degrades to "unrestricted". Restricted Acquisitions members get the same
+  // rule as the top-bar search (all statuses, no message matches/previews).
   const propertiesPromise = (async () => {
-    const hasPipelineStatusBlock = blockStack.some(
-      (b) => b.kind === "pipeline_status",
-    );
+    let includeMessages = false;
+    let membershipError: string | null = null;
+    try {
+      includeMessages = await resolveIncludeMessages();
+    } catch {
+      membershipError =
+        "Membership access could not be verified, so message search is off. Please retry.";
+    }
     const propertyListSelect = filterSelectFragment(blockStack);
     const propertiesSelect = [
       "id, org_id, address, city, state, zip, market, cass_status, is_vacant, created_at, status, is_dnc_locked, outreach_dispo, source_import_id, source_imported_at, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)",
@@ -169,44 +180,28 @@ export default async function PropertiesPage({
     ]
       .filter(Boolean)
       .join(", ");
+    const imported = rawSearchParams.imported === "today" ? "today" : null;
 
-    let query = supabase
-      .from("properties")
-      .select(propertiesSelect, { count: "exact" })
-      .is("deleted_at", null);
-    if (!hasPipelineStatusBlock) {
-      query = query.or("status.eq.prospect,is_dnc_locked.eq.true");
-    }
-    if (search) {
-      query = query.ilike("address", `%${search}%`);
-    }
-    if (rawSearchParams.imported === "today") {
-      const { dayStart, dayEnd } = getDayBoundsInZone(
-        new Date(),
-        "America/Chicago",
-      );
-      query = query
-        .not("source_import_id", "is", null)
-        .gte("source_imported_at", dayStart.toISOString())
-        .lt("source_imported_at", dayEnd.toISOString());
-    }
-    // Plan 04 translator — applies all 23 block kinds (vacancy / cass /
-    // engagement / market / assignee / source / state / motivation_level /
-    // pipeline_status / outreach_dispo / list / tag / list_count / beds /
-    // baths / year_built / estimated_value / equity_pct / absentee /
-    // created_date / has_unread_inbound / needs_human_attention /
-    // has_open_tasks). Single source of truth for the Supabase filter
-    // chain — the page no longer hand-rolls per-chip predicates.
-    query = (await applyFilters(query, blockStack, supabase)).builder;
-
-    // Stable secondary order on id breaks ties so pagination doesn't skip
-    // or repeat rows when many rows share the primary sort value.
-    return {
-      query: query
+    const { result, degraded } = await runWithSearchFallback(async (opts) => {
+      const { builder } = await buildScopedQuery(supabase, {
+        origin: "search_page",
+        select: propertiesSelect,
+        selectOpts: { count: "exact" },
+        search,
+        blockStack,
+        imported,
+        includeMessages,
+        addressFallback: opts.addressFallback,
+      });
+      // Stable secondary order on id breaks ties so pagination doesn't skip
+      // or repeat rows when many rows share the primary sort value. Both
+      // order columns are in the select list (required on rpc builders).
+      return await builder
         .order(sort, { ascending: dir === "asc" })
         .order("id", { ascending: true })
-        .range(from, to),
-    };
+        .range(from, to);
+    });
+    return { result, degraded, includeMessages, membershipError, imported };
   })();
 
   // These option reads do not depend on the paginated property rows. Keep
@@ -250,7 +245,7 @@ export default async function PropertiesPage({
   ]);
 
   const [
-    { query: propertyQuery },
+    { result: propertyResult, degraded, includeMessages, membershipError },
     [
       countyResult,
       stateResult,
@@ -261,7 +256,8 @@ export default async function PropertiesPage({
       presetResult,
     ],
   ] = await Promise.all([propertiesPromise, optionsPromise]);
-  const { data: propertyRows, count, error } = await propertyQuery;
+  const { data: propertyRows, count, error } = propertyResult;
+  const mappedError = mapSearchError(error);
   // Relationship embeds above are select-only filter helpers; the table
   // consumes only property columns, but the optional fields remain typed so
   // future readers can see why the select may include list_filter/list_exclusion.
@@ -281,7 +277,9 @@ export default async function PropertiesPage({
     string,
     { direction: "inbound" | "outbound"; body: string | null }
   >();
-  if (pageIds.length > 0) {
+  // Previews (and the engagement pill derived from them) are message content:
+  // withheld from restricted Acquisitions members and on membership failure.
+  if (includeMessages && pageIds.length > 0) {
     const { data: msgRows } = await supabase
       .from("messages")
       .select("property_id, direction, body, created_at")
@@ -316,6 +314,7 @@ export default async function PropertiesPage({
       engagement: computeEngagement(latest),
       last_message_preview: truncateMessagePreview(latest?.body ?? null),
       outreach_dispo: p.outreach_dispo ?? null,
+      status: p.status,
       imported_at: p.source_imported_at,
       dnc_reason: p.is_dnc_locked
         ? "Permanent Do Not Contact lock. This record is read-only."
@@ -411,43 +410,26 @@ export default async function PropertiesPage({
   // operator can see at a glance how many prospects are skip-trace
   // ready (verified) vs blocked behind address verification. Per-row
   // dots in the table show the same on individual rows.
+  // Hidden while a global (3+ char) search is active: each count would
+  // re-evaluate search_properties, and the breakdown of a text match is noise.
+  const globalSearchActive = searchModeFor("search_page", search) === "rpc";
   const cassStats = await (async () => {
-    if (total === 0) return null;
+    if (total === 0 || globalSearchActive) return null;
+    const imported = rawSearchParams.imported === "today" ? "today" : null;
+    const propertyListSelect = filterSelectFragment(blockStack);
+    const countSelect = ["id", propertyListSelect].filter(Boolean).join(", ");
     const counts = await Promise.all(
       ["verified", "unverified", "invalid", "ambiguous"].map(async (s) => {
-        const hasPipelineStatusBlock = blockStack.some(
-          (block) => block.kind === "pipeline_status",
-        );
-        const propertyListSelect = filterSelectFragment(blockStack);
-        const countSelect = ["id", propertyListSelect]
-          .filter(Boolean)
-          .join(", ");
-        let countQuery = supabase
-          .from("properties")
-          .select(countSelect, { count: "exact", head: true })
-          .is("deleted_at", null)
-          .eq("cass_status", s);
-        if (!hasPipelineStatusBlock) {
-          countQuery = countQuery.or(
-            "status.eq.prospect,is_dnc_locked.eq.true",
-          );
-        }
-        if (search) {
-          countQuery = countQuery.ilike("address", `%${search}%`);
-        }
-        if (rawSearchParams.imported === "today") {
-          const { dayStart, dayEnd } = getDayBoundsInZone(
-            new Date(),
-            "America/Chicago",
-          );
-          countQuery = countQuery
-            .not("source_import_id", "is", null)
-            .gte("source_imported_at", dayStart.toISOString())
-            .lt("source_imported_at", dayEnd.toISOString());
-        }
-        countQuery = (await applyFilters(countQuery, blockStack, supabase))
-          .builder;
-        const { count: c } = await countQuery;
+        const { builder } = await buildScopedQuery(supabase, {
+          origin: "search_page",
+          select: countSelect,
+          selectOpts: { count: "exact", head: true },
+          search,
+          blockStack,
+          imported,
+          includeMessages,
+        });
+        const { count: c } = await builder.eq("cass_status", s);
         return [s, c ?? 0] as const;
       }),
     );
@@ -463,14 +445,26 @@ export default async function PropertiesPage({
 
   const headerCount =
     total === 0
-      ? "Imported properties appear in Prospects for review before promotion to Leads. No prospects yet."
-      : `Imported properties appear in Prospects for review before promotion to Leads. Showing ${showingFrom}–${showingTo} of ${total} prospect${total === 1 ? "" : "s"}${cassBreakdown}.`;
+      ? "Find any lead or prospect by name, phone, email, address or message. No results."
+      : `Leads and prospects. Showing ${showingFrom}–${showingTo} of ${total} result${total === 1 ? "" : "s"}${cassBreakdown}.`;
 
   return (
     <Page>
       {error ? (
-        <div className="text-destructive text-sm">
-          Failed to load prospects: {error.message}
+        <div className="text-destructive text-sm" role="alert">
+          {mappedError?.code === "SEARCH_TOO_BROAD"
+            ? mappedError.message
+            : `Failed to load results: ${error.message}`}
+        </div>
+      ) : null}
+      {membershipError ? (
+        <div className="text-destructive text-sm" role="alert">
+          {membershipError}
+        </div>
+      ) : null}
+      {degraded ? (
+        <div className="text-muted-foreground text-sm" role="status">
+          {SEARCH_DEGRADED_NOTICE}
         </div>
       ) : null}
 

@@ -16,9 +16,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import {
   createDialerBatchFromFilters,
   createDialerBatchFromPropertyIds,
-  getAllMatchingProspectIds,
+  getAllMatchingProspectSelection,
   previewBatchEligibilityAction,
 } from "./actions";
+import type { QueryOrigin } from "@/lib/prospects/search-scope";
 import type { FilterBlock } from "./prospects-query";
 
 type Counts = {
@@ -35,6 +36,7 @@ export type BatchCreateModalProps = {
     search?: string | null;
     blockStack: FilterBlock[];
     imported?: "today" | null;
+    origin?: QueryOrigin;
   };
   totalCount: number;
   lockedExcludedCount?: number;
@@ -83,6 +85,8 @@ export function BatchCreateModal({
   const filterSearch = filterArgs?.search ?? null;
   const filterBlockStack = filterArgs?.blockStack ?? EMPTY_BLOCK_STACK;
   const filterImported = filterArgs?.imported ?? null;
+  const filterOrigin = filterArgs?.origin;
+  const [skippedLeads, setSkippedLeads] = useState(0);
   const callabilityCounts = previewLoading || counts === null ? null : counts;
   const createDisabled =
     mode === "error" ||
@@ -107,12 +111,20 @@ export function BatchCreateModal({
     async function loadPreview() {
       const idsResult =
         mode === "ids"
-          ? { ok: true as const, data: selectedIds ?? [] }
-          : await getAllMatchingProspectIds({
+          ? { ok: true as const, data: { ids: selectedIds ?? [], skippedLeads: 0 } }
+          : await getAllMatchingProspectSelection({
               search: filterSearch,
               blockStack: filterBlockStack,
               imported: filterImported,
-            });
+              origin: filterOrigin,
+            }).then((r) =>
+              r.ok
+                ? {
+                    ok: true as const,
+                    data: { ids: r.data.eligibleIds, skippedLeads: r.data.skippedLeads },
+                  }
+                : r,
+            );
 
       if (cancelled) return;
       if (!idsResult.ok) {
@@ -120,8 +132,9 @@ export function BatchCreateModal({
         setPreviewLoading(false);
         return;
       }
+      setSkippedLeads(idsResult.data.skippedLeads);
 
-      const preview = await previewBatchEligibilityAction(idsResult.data);
+      const preview = await previewBatchEligibilityAction(idsResult.data.ids);
       if (cancelled) return;
 
       if (preview.ok) {
@@ -136,7 +149,7 @@ export function BatchCreateModal({
     return () => {
       cancelled = true;
     };
-  }, [filterBlockStack, filterImported, filterSearch, mode, open, selectedIds, selectedIdsKey]);
+  }, [filterBlockStack, filterImported, filterOrigin, filterSearch, mode, open, selectedIds, selectedIdsKey]);
 
   const handleCreate = () => {
     if (createDisabled) return;
@@ -155,10 +168,14 @@ export function BatchCreateModal({
               blockStack: filterBlockStack,
               imported: filterImported,
               title: cleanTitle,
+              origin: filterOrigin,
             });
 
       if (result.ok) {
-        toast.success(successMessage(result.data.batchId, result.data.counts));
+        const skipped = (result.data as { skippedLeads?: number }).skippedLeads ?? 0;
+        toast.success(
+          `${successMessage(result.data.batchId, result.data.counts)}${skipped > 0 ? ` · ${skipped} lead${skipped === 1 ? "" : "s"} skipped` : ""}`,
+        );
         onClose();
       } else {
         setError(result.error.message);
@@ -185,6 +202,11 @@ export function BatchCreateModal({
                     ? `${totalCount.toLocaleString()} eligible from current filters`
                     : `${(selectedIds?.length ?? 0).toLocaleString()} selected`}
                 </p>
+                {skippedLeads > 0 && (
+                  <p className="text-muted-foreground text-xs" data-testid="batch-skipped-leads">
+                    {skippedLeads.toLocaleString()} lead{skippedLeads === 1 ? "" : "s"} skipped (dialer batches use prospects only)
+                  </p>
+                )}
                 {lockedExcludedCount > 0 && (
                   <p className="text-muted-foreground text-xs">
                     {lockedExcludedCount.toLocaleString()} DNC locked and excluded

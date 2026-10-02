@@ -17,6 +17,7 @@ import {
   createAndApplyCustomTagBulkFromFilters,
   type BulkOutcome,
 } from "./dnc-safe-actions";
+import type { QueryOrigin } from "@/lib/prospects/search-scope";
 import type { FilterBlock } from "./prospects-query";
 import type { TagOption } from "./prospects-table";
 
@@ -27,6 +28,7 @@ type Props = {
     search?: string | null;
     blockStack: FilterBlock[];
     imported?: "today" | null;
+    origin?: QueryOrigin;
   };
   tags: TagOption[];
   allMatching: boolean;
@@ -98,6 +100,7 @@ export function BulkTagModal({
             search: filterArgs?.search ?? null,
             blockStack: filterArgs?.blockStack ?? [],
             imported: filterArgs?.imported ?? null,
+            origin: filterArgs?.origin,
           })
         : createAndApplyCustomTagBulk({
             name: cleanName,
