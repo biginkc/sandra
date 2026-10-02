@@ -398,7 +398,7 @@ export function BulkSmsModal({
 
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) handleClose(); }}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] max-w-md grid-rows-[auto_minmax(0,1fr)_auto]">
         <DialogHeader>
           <DialogTitle>
             Bulk SMS — {selectionSize} prospect
@@ -406,7 +406,7 @@ export function BulkSmsModal({
           </DialogTitle>
         </DialogHeader>
 
-        <div className="space-y-4 py-2">
+        <div className="min-h-0 space-y-4 overflow-y-auto py-2">
           <div className="space-y-1.5">
             <label htmlFor="bulk-sms-campaign-name" className="text-sm font-medium">
               Campaign name

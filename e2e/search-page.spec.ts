@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { assertLocalOnlyTestEnv } from "../src/lib/testing/local-only-test-env";
 import { adminClient, DEFAULT_ORG_ID, ensureTestUser, resetTenantTables } from "./fixtures";
 
 // Search page (formerly Prospects). Three specs only, per the stress plan:
@@ -12,7 +13,10 @@ import { adminClient, DEFAULT_ORG_ID, ensureTestUser, resetTenantTables } from "
 let phoneSeq = 0;
 const SURNAME = `Zyxqwerty${Date.now().toString(36)}`;
 
-async function seed(count: number, opts: { dispo?: string | null; status?: string } = {}) {
+async function seed(
+  count: number,
+  opts: { dispo?: string | null; status?: string; surname?: string; dnc?: boolean } = {},
+) {
   const admin = adminClient();
   const rows = [];
   for (let i = 0; i < count; i += 1) {
@@ -21,7 +25,8 @@ async function seed(count: number, opts: { dispo?: string | null; status?: strin
       .insert({
         org_id: DEFAULT_ORG_ID,
         first_name: "Pat",
-        last_name: SURNAME,
+        last_name: opts.surname ?? SURNAME,
+        do_not_contact: opts.dnc ?? false,
         phone_1: `+1816555${String(1000 + phoneSeq++).padStart(4, "0")}`,
         phone_1_type: "mobile",
       })
@@ -30,7 +35,7 @@ async function seed(count: number, opts: { dispo?: string | null; status?: strin
     if (contactError || !contact) throw contactError ?? new Error("contact insert failed");
     rows.push({
       org_id: DEFAULT_ORG_ID,
-      address: `${100 + i} Search E2E Ln`,
+      address: `${100 + i} ${opts.status ?? "prospect"}${opts.dnc ? "-dnc" : ""} ${opts.surname ?? "Search"} E2E Ln`,
       city: "Kansas City",
       state: "MO",
       zip: "64151",
@@ -46,6 +51,16 @@ async function seed(count: number, opts: { dispo?: string | null; status?: strin
 
 test.describe("Search page", () => {
   test.beforeEach(async () => {
+    // Fail closed BEFORE any reset/seed: these specs destroy tenant rows, so they
+    // may only run against a disposable loopback stack (never hosted TEST).
+    // CI's provision script exports E2E_CI_SUPABASE_DB_URL; local runs export TEST_SUPABASE_DB_URL.
+    // Every DB URL that is set must be loopback, and at least one must be set.
+    const dbUrls = [process.env.E2E_CI_SUPABASE_DB_URL, process.env.TEST_SUPABASE_DB_URL].filter(
+      (u): u is string => Boolean(u),
+    );
+    for (const url of dbUrls.length > 0 ? dbUrls : [undefined]) {
+      assertLocalOnlyTestEnv(url, process.env.TEST_SUPABASE_URL);
+    }
     const admin = adminClient();
     await resetTenantTables(admin);
     await ensureTestUser(admin);
@@ -99,5 +114,133 @@ test.describe("Search page", () => {
     await expect(page).toHaveURL(new RegExp(`/properties\\?search=${SURNAME}`));
     await expect(page.getByRole("heading", { name: "Search" })).toBeVisible();
     await expect(page.getByTestId("prospects-result-count")).toContainText("of 1");
+  });
+
+  async function sideEffectCounts() {
+    const admin = adminClient();
+    const count = async (table: "campaigns" | "messages" | "dialer_batches" | "dialer_batch_items") => {
+      const { count: c, error } = await admin.from(table).select("id", { count: "exact", head: true });
+      if (error) throw error;
+      return c ?? 0;
+    };
+    return {
+      campaigns: await count("campaigns"),
+      messages: await count("messages"),
+      dialer_batches: await count("dialer_batches"),
+      dialer_batch_items: await count("dialer_batch_items"),
+    };
+  }
+
+  async function openFrom(page: import("@playwright/test").Page, term: string) {
+    await page.goto(`/properties?search=${term}`);
+    await expect(page.getByTestId("prospects-result-count")).toBeVisible();
+  }
+
+  test("select-all-matching modals report skipped leads and exclude leads and DNC from eligible", async ({
+    page,
+  }) => {
+    const term = `Skipmodal${Date.now().toString(36)}`;
+    await seed(52, { surname: term });
+    await seed(2, { surname: term, status: "new_lead" });
+    await seed(1, { surname: term, dnc: true });
+    const before = await sideEffectCounts();
+    await openFrom(page, term);
+    await expect(page.getByTestId("prospects-result-count")).toContainText("of 55");
+
+    await page.getByRole("checkbox", { name: "Select all prospects on this page" }).click();
+    await page.getByTestId("select-all-across-pages").click();
+    const banner = page.getByTestId("select-all-banner");
+    await expect(banner).toContainText(/(^|\D)2 leads skipped/);
+    await expect(banner).toContainText("DNC locked and excluded");
+
+    await page.getByRole("button", { name: /Actions for/ }).click();
+    await page.getByRole("menuitem", { name: "Bulk SMS" }).click();
+    const smsDialog = page.getByRole("dialog");
+    await expect(smsDialog.getByRole("heading")).toHaveText(/^Bulk SMS — 52 prospects$/);
+    const assessment = smsDialog.getByTestId("line-type-assessment");
+    await assessment.scrollIntoViewIfNeeded();
+    await expect(assessment).toContainText("Who gets texted");
+    await expect(smsDialog.getByTestId("bulk-sms-skipped-leads")).toBeVisible();
+    await expect(smsDialog.getByTestId("bulk-sms-skipped-leads")).toHaveText("2 leads skipped (bulk texting is for prospects only)");
+    await smsDialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    await page.getByRole("button", { name: /Actions for/ }).click();
+    await page.getByRole("menuitem", { name: "Create dialer batch" }).click();
+    const batchDialog = page.getByRole("dialog");
+    await expect(batchDialog.getByTestId("batch-skipped-leads")).toBeVisible();
+    await expect(batchDialog.getByTestId("batch-skipped-leads")).toHaveText("2 leads skipped (dialer batches use prospects only)");
+    await expect(batchDialog.getByText(/^52 eligible from current filters$/)).toBeVisible();
+    await expect(batchDialog.getByText(/^1 DNC locked and excluded$/)).toBeVisible();
+    await batchDialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    expect(await sideEffectCounts()).toEqual(before);
+  });
+
+  test("checkbox selection of one lead and one prospect reports one skipped lead in both modals", async ({
+    page,
+  }) => {
+    const term = `Skipbox${Date.now().toString(36)}`;
+    await seed(1, { surname: term });
+    await seed(1, { surname: term, status: "new_lead" });
+    const before = await sideEffectCounts();
+
+    await openFrom(page, term);
+    await expect(page.getByTestId("prospects-result-count")).toContainText("of 2");
+    await page.getByRole("checkbox", { name: /^Select 100 prospect / }).click();
+    await page.getByRole("checkbox", { name: /^Select 100 new_lead / }).click();
+
+    await page.getByRole("button", { name: /Actions for 2 selected/ }).click();
+    await page.getByRole("menuitem", { name: "Bulk SMS" }).click();
+    const smsDialog = page.getByRole("dialog");
+    await expect(smsDialog.getByTestId("bulk-sms-skipped-leads")).toHaveText("1 lead skipped (bulk texting is for prospects only)");
+    await smsDialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    await page.getByRole("button", { name: /Actions for 2 selected/ }).click();
+    await page.getByRole("menuitem", { name: "Create dialer batch" }).click();
+    const batchDialog = page.getByRole("dialog");
+    await expect(batchDialog.getByTestId("batch-skipped-leads")).toHaveText("1 lead skipped (dialer batches use prospects only)");
+    await batchDialog.getByRole("button", { name: "Cancel" }).click();
+
+    expect(await sideEffectCounts()).toEqual(before);
+  });
+
+  test("Bulk SMS and dialer dialogs stay usable at 1280x720 (Cancel reachable, body scrolls)", async ({ page }) => {
+    const term = `Skipvp${Date.now().toString(36)}`;
+    await seed(2, { surname: term });
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await openFrom(page, term);
+    await page.getByRole("checkbox", { name: "Select all prospects on this page" }).click();
+
+    for (const item of ["Bulk SMS", "Create dialer batch"]) {
+      await page.getByRole("button", { name: /Actions for/ }).click();
+      await page.getByRole("menuitem", { name: item }).click();
+      const dialog = page.getByRole("dialog");
+      await expect(dialog).toBeVisible();
+      const box = await dialog.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.y).toBeGreaterThanOrEqual(0);
+      expect(box!.y + box!.height).toBeLessThanOrEqual(720);
+      const cancel = dialog.getByRole("button", { name: "Cancel" });
+      await expect(cancel).toBeInViewport();
+      await expect(
+        dialog.getByRole("button", { name: item === "Bulk SMS" ? /^Queue \d+ messages?$/ : /^Create batch$/ }),
+      ).toBeInViewport();
+      if (item === "Bulk SMS") {
+        // The long Bulk SMS form must scroll inside the dialog rather than clip.
+        const body = dialog.locator("div.overflow-y-auto");
+        const { scrollHeight, clientHeight } = await body.evaluate((el) => ({
+          scrollHeight: el.scrollHeight,
+          clientHeight: el.clientHeight,
+        }));
+        expect(scrollHeight).toBeGreaterThan(clientHeight);
+        await body.evaluate((el) => el.scrollTo(0, el.scrollHeight));
+        expect(await body.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+      }
+      await cancel.click();
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+    }
   });
 });
