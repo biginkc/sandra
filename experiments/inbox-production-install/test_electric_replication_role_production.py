@@ -307,7 +307,7 @@ class ProductionElectricPacketTests(unittest.TestCase):
 
     def test_host_routing_and_tls_overrides_are_refused(self):
         base = {**os.environ, "PGHOST": f"db.{PROJECT_REF}.supabase.co", "PGSSLMODE": "verify-full", "PGSSLROOTCERT": str(PINNED_CA), "INBOX_ELECTRIC_PSQL_BIN": "/definitely/missing/psql"}
-        for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
+        for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE", "PGPORT", "PGOPTIONS", "PGSSLMINPROTOCOLVERSION", "PGGSSENCMODE"):
             env = {**base, name: "attacker-controlled"}
             rejected = subprocess.run(["python3", str(RUNNER), "--packet", "teardown", "--project-ref", PROJECT_REF, "--prior-replica-identity", "d", "--replication-slot", REPLICATION_SLOT], text=True, capture_output=True, env=env, check=False)
             self.assertNotEqual(rejected.returncode, 0)

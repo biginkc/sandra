@@ -119,7 +119,31 @@ class ReplyCallbackFixtureTests(unittest.TestCase):
         result = subprocess.run(args, text=True, capture_output=True, check=False, timeout=120)
         if check and result.returncode:
             self.fail(result.stderr)
+        if result.returncode == 0:
+            self._assert_triggers_from_fresh_connection(receipt)
         return result
+
+    def _assert_triggers_from_fresh_connection(self, receipt: Path) -> None:
+        rows = self._sql(
+            "SELECT n.nspname||'.'||c.relname||'.'||t.tgname||'|'||t.tgenabled::text "
+            "FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid "
+            "JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "WHERE (n.nspname,c.relname,t.tgname) IN "
+            "(('inbox_reply_send','attempts','guard_reply_send_attempt'),"
+            "('inbox_reply_send','operations','immutable_reply_send_operation'),"
+            "('inbox_reply_review','preparations','immutable_reply_preparation')) "
+            "ORDER BY 1;",
+        ).stdout.splitlines()
+        self.assertEqual(rows, [
+            "inbox_reply_review.preparations.immutable_reply_preparation|O",
+            "inbox_reply_send.attempts.guard_reply_send_attempt|O",
+            "inbox_reply_send.operations.immutable_reply_send_operation|O",
+        ])
+        values = json.loads(receipt.read_text(encoding="utf-8"))
+        values["trigger_check_connection"] = "fresh"
+        values["triggers_after_commit"] = [{"trigger": row.split("|", 1)[0], "tgenabled": "O"} for row in rows]
+        receipt.write_text(json.dumps(values, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        receipt.chmod(0o600)
 
     def _callback(self, reference: str, marker: str) -> dict[str, object]:
         payload = json.dumps({"__sandra_fixture_marker": marker, "fixture": "r1_callback_gate"})
@@ -197,6 +221,32 @@ class ReplyCallbackFixtureTests(unittest.TestCase):
     def _sql_text(self, statement: str, check: bool = True) -> str:
         result = self._sql(statement, check=check)
         return result.stdout.strip()
+
+    def test_open_admission_with_a_live_reply_worker_is_refused_before_fixture_writes(self):
+        receipt = self._receipt("sandra-inbox-r1-callback-gate-admission")
+        try:
+            self._sql("UPDATE inbox_reply_review.admission SET enabled=true WHERE singleton;")
+            bindir = postgres_bin()
+            assert bindir is not None
+            worker_env = {**os.environ, "PGHOST": str(self.state["socket"]), "PGPORT": str(self.state["port"]), "PGUSER": "postgres", "PGDATABASE": "postgres", "PGAPPNAME": "sandra-inbox-reply-send-worker"}
+            worker = subprocess.Popen([bindir / "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-c", "SELECT pg_sleep(5);"], env=worker_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                import time
+                for _ in range(20):
+                    if self._sql("SELECT count(*) FROM pg_stat_activity WHERE application_name='sandra-inbox-reply-send-worker';").stdout.strip() == "1":
+                        break
+                    time.sleep(0.05)
+                refused = self._packet(receipt, create=True, check=False)
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertIn("reply workers absent", refused.stderr)
+                values = json.loads(receipt.read_text(encoding="utf-8"))
+                self.assertEqual(self._sql(f"SELECT count(*) FROM inbox_reply_send.attempts WHERE org_id='{values['org_id']}';").stdout.strip(), "0")
+            finally:
+                worker.terminate()
+                worker.wait(timeout=10)
+                self._sql("UPDATE inbox_reply_review.admission SET enabled=false WHERE singleton;")
+        finally:
+            receipt.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

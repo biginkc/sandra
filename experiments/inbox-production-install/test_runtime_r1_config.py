@@ -41,9 +41,12 @@ class RuntimeR1ConfigTests(unittest.TestCase):
             "database": "postgres",
             "sslmode": "require",
             "caCertificateFile": "/etc/sandra-inbox/supabase-prod-ca-2021.crt",
-            "secretForwarding": "none",
+            "secretForwarding": "relay-held-shape-secret",
         })
         self.assertEqual(reply_worker["env"]["INBOX_REPLY_OWNED_RECIPIENTS"], "${INBOX_REPLY_OWNED_RECIPIENTS}")
+        relay = next(service for service in candidate["services"] if service["name"] == "inbox-sync-relay")
+        self.assertEqual(relay["secretEnv"], ["INBOX_RELAY_TOKEN", "INBOX_ELECTRIC_SECRET"])
+        self.assertEqual(relay["env"]["INBOX_ELECTRIC_SECRET"], "${INBOX_ELECTRIC_SECRET}")
         production_env = (ROOT / "deployment/inbox/electric.production.env.example").read_text()
         self.assertNotIn("ELECTRIC_INSECURE", production_env)
         self.assertIn("?sslmode=require", production_env)
@@ -52,7 +55,7 @@ class RuntimeR1ConfigTests(unittest.TestCase):
         self.assertNotIn("PGPASSFILE", production_env)
         self.assertNotIn("sslrootcert=", production_env)
         self.assertIn("INBOX_ELECTRIC_DATABASE_URL=postgresql://inbox_electric_replication@", production_env)
-        self.assertIn("no Electric secret is forwarded", production_env)
+        self.assertIn("INBOX_ELECTRIC_SECRET name", production_env)
 
     def test_local_fixture_keeps_insecure_mode_explicitly_scoped(self):
         compose = (ROOT / "experiments/inbox-release/execution-stack-compose.yml").read_text()
@@ -64,6 +67,15 @@ class RuntimeR1ConfigTests(unittest.TestCase):
         config = json.loads((ROOT / "vercel.json").read_text())
         matching = [cron for cron in config["crons"] if cron["path"] == "/api/cron/inbox-reply-callback-sweep"]
         self.assertEqual(matching, [{"path": "/api/cron/inbox-reply-callback-sweep", "schedule": "*/1 * * * *"}])
+
+    def test_real_electric_proofs_use_the_candidate_pin_and_fail_closed(self):
+        candidate = json.loads((ROOT / "deployment/inbox/candidate.json").read_text())
+        pinned_image = next(service for service in candidate["services"] if service["name"] == "inbox-electric")["image"]
+        for name in ("electric-tls-proof.py", "electric-secret-proof.py"):
+            proof = (ROOT / "experiments/inbox-production-install" / name).read_text()
+            self.assertIn(pinned_image, proof)
+            self.assertIn("PINNED_PULL_DENIED", proof)
+            self.assertIn("UNSEALED", proof)
 
 
 if __name__ == "__main__":

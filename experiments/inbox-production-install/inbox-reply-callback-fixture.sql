@@ -4,13 +4,11 @@
 -- receipt. This packet never creates a schema object and never discovers a
 -- row by a broad marker-only predicate.
 --
--- ============================================================================
--- REQUIRES ARCHITECT SIGN-OFF: trigger disable on live ledger
--- This packet does not claim sign-off. The trigger disable is retained only
--- because this fixture represents an already-persisted provider_accepted row
--- and removal must delete immutable ledger rows. Each disable/enable pair is
--- inside this fixture transaction and is restored before COMMIT.
--- ============================================================================
+-- RULING R11-1/R11-2: trigger disable is approved only under the conditions
+-- enforced below. The trigger disable is retained because this fixture
+-- represents an already-persisted provider_accepted row and removal must
+-- delete immutable ledger rows. Each disable/enable pair is inside this one
+-- transaction and is restored before COMMIT.
 \if :{?fixture_create}
 \else
   \echo 'fixture_create is required (true or false)'
@@ -93,7 +91,7 @@
 
 BEGIN;
 SET LOCAL lock_timeout='2s';
-SET LOCAL statement_timeout='20s';
+SET LOCAL statement_timeout='10s';
 SELECT set_config('sandra.inbox_fixture_marker', :'fixture_marker', true),
        set_config('sandra.inbox_fixture_action', :'fixture_action', true),
        set_config('sandra.inbox_fixture_org_id', :'fixture_org_id', true),
@@ -135,6 +133,34 @@ BEGIN
   IF current_setting('sandra.inbox_fixture_reference_a') !~ '^sandra-r1-callback-a-[a-z0-9-]+$'
      OR current_setting('sandra.inbox_fixture_reference_b') !~ '^sandra-r1-callback-b-[a-z0-9-]+$' THEN
     RAISE EXCEPTION 'fixture receipt contains an invalid provider reference';
+  END IF;
+END $$;
+
+-- R11-2 precondition: do not create or remove this live-ledger fixture while
+-- reply admission is open and a reply worker has a database session. A
+-- disabled admission row is sufficient; otherwise every deployed reply
+-- worker must be absent. This check is before any trigger disable or fixture
+-- write.
+DO $$
+DECLARE
+  admission_enabled boolean;
+  reply_worker_sessions integer;
+BEGIN
+  SELECT enabled INTO admission_enabled
+  FROM inbox_reply_review.admission
+  WHERE singleton
+  FOR SHARE;
+  IF admission_enabled IS NULL THEN
+    RAISE EXCEPTION 'R11 admission precondition row is missing';
+  END IF;
+  IF admission_enabled THEN
+    SELECT count(*) INTO reply_worker_sessions
+    FROM pg_stat_activity
+    WHERE pid <> pg_backend_pid()
+      AND application_name = 'sandra-inbox-reply-send-worker';
+    IF reply_worker_sessions > 0 THEN
+      RAISE EXCEPTION 'R11 requires reply admission disabled or reply workers absent';
+    END IF;
   END IF;
 END $$;
 

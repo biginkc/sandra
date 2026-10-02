@@ -99,7 +99,7 @@ class RuntimeWorkerLoginTests(unittest.TestCase):
         )
         self.assertEqual(wrong_ca.returncode, 3)
         self.assertIn("pinned Supabase CA", wrong_ca.stderr)
-        for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
+        for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE", "PGPORT", "PGOPTIONS", "PGSSLMINPROTOCOLVERSION", "PGGSSENCMODE"):
             rejected = subprocess.run(
                 ["python3", str(RUNNER), "--project-ref", PROJECT_REF], input="\n".join(SCRAM) + "\n",
                 text=True, capture_output=True, env={**base, name: "attacker-controlled"}, check=False,

@@ -28,7 +28,10 @@ SCRAM_VERIFIER = re.compile(
 )
 PINNED_CA_FILE = HERE / "supabase-prod-ca-2021.crt"
 PINNED_CA_SHA256 = "700723581420dd1ac98fd7e9ac529f0ef210eadcaf87fc868a3ad7d114c2f3b7"
-HOSTED_PG_OVERRIDE_VARS = ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")
+HOSTED_PG_OVERRIDE_VARS = (
+    "PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE", "PGPORT", "PGOPTIONS",
+    "PGSSLMINPROTOCOLVERSION", "PGGSSENCMODE",
+)
 
 
 class PacketError(RuntimeError):
@@ -103,13 +106,6 @@ def redacted(value: str, verifier: str | None) -> str:
     return value.replace(verifier, "<redacted-scram-verifier>") if verifier else value
 
 
-def hosted_child_environment() -> dict[str, str]:
-    environment = os.environ.copy()
-    for name in HOSTED_PG_OVERRIDE_VARS:
-        environment.pop(name, None)
-    return environment
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--packet", choices=("install", "teardown"), required=True)
@@ -160,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         text=True,
         capture_output=True,
-        env=hosted_child_environment(),
+        env=os.environ.copy(),
         check=False,
     )
     sys.stdout.write(redacted(result.stdout, verifier))

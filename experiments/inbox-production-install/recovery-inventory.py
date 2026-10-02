@@ -29,7 +29,10 @@ PROJECT_REFS = {"ncsngxlcyxylaeskiteu", "copflsklaefwzipsrjqz"}
 DIRECT_HOST = re.compile(r"^db\.([a-z0-9]{20})\.supabase\.co$")
 PINNED_CA_FILE = HERE / "supabase-prod-ca-2021.crt"
 PINNED_CA_SHA256 = "700723581420dd1ac98fd7e9ac529f0ef210eadcaf87fc868a3ad7d114c2f3b7"
-HOSTED_PG_OVERRIDE_VARS = ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")
+HOSTED_PG_OVERRIDE_VARS = (
+    "PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE", "PGPORT", "PGOPTIONS",
+    "PGSSLMINPROTOCOLVERSION", "PGGSSENCMODE",
+)
 REPLY_STATES = ("approved", "claimed", "dispatch_started", "provider_accepted", "uncertain")
 TERMINAL_STEP_STATES = ("succeeded", "failed", "conflicted", "blocked", "cancelled")
 
@@ -102,13 +105,9 @@ def database_inventory(local: bool) -> dict[str, object]:
     if local:
         validate_local_environment()
     binary = os.environ.get("INBOX_RECOVERY_PSQL_BIN", "psql")
-    environment = os.environ.copy()
-    if not local:
-        for name in HOSTED_PG_OVERRIDE_VARS:
-            environment.pop(name, None)
     result = subprocess.run(
         [binary, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-At", "-c", RECOVERY_SQL],
-        env=environment,
+        env=os.environ.copy(),
         text=True,
         capture_output=True,
         check=False,
