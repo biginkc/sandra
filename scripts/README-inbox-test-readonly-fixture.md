@@ -53,6 +53,12 @@ zero. Cleanup's `ALTER TABLE public.memberships` temporarily disables the
 owner-guard trigger inside one transaction, so it takes an exclusive lock on
 memberships briefly.
 
+Known limit (NB4): cleanup permits a foreign-key cascade caused by deleting a
+fixture-owned row to appear in the cleanup delta. If that cascade removes a
+non-owned shared row, the current `failUnownedChanges=false` residue check
+reports the change but does not fail the cleanup proof; this limit is
+intentionally unchanged.
+
 Run the local mutation-first suite with:
 
 ```sh
