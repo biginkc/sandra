@@ -695,7 +695,7 @@ REVOKE ALL ON FUNCTION inbox_operation_domain.apply_sms_opt_out(uuid,uuid,uuid,u
 
 
 -- Pinned operation_domain_apply: experiments/inbox-operation-domain/restrictive-apply.sql
--- source_sha256=79dec51b3a2e8ed0cd87fc6f4e545a02c0550e539aebaf2edb4d33d152b24ab5
+-- source_sha256=a935905bb86e545684f6414c4cced8d02d659b6fc60604537195b2a776534128
 -- Source-only candidate. Replace the private adapter only after reviewed scope/helper installation.
 CREATE OR REPLACE FUNCTION inbox_operation_domain.apply_property_step(o uuid,op uuid,s uuid,g bigint) RETURNS jsonb
 LANGUAGE plpgsql SET search_path='' AS $$
@@ -933,6 +933,7 @@ BEGIN
  PERFORM inbox_operations.finish_step(o,op,s,g,result);
  RETURN result;
 END $$;
+
 REVOKE ALL ON FUNCTION inbox_operation_domain.apply_promotion_step(uuid,uuid,uuid,bigint) FROM PUBLIC,anon,authenticated;
 
 -- Unknown sender actions consume only the frozen message IDs in the
@@ -1808,7 +1809,7 @@ END $$;
 
 
 -- Pinned reply_context: experiments/inbox-reply-boundary/context.sql
--- source_sha256=f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb
+-- source_sha256=942c9e7b117e73b941eeb0874d5928f37b670df264ba59114d8bf9c0838b8e3f
 -- Additional dependencies required by reviewed reply personalization and route
 -- inventory. Fixture-only; install through the reviewed production migration.
 

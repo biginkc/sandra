@@ -2,11 +2,11 @@
   "schema_version": 2,
   "status": "PENDING_REVIEW_NO_INSTALL",
   "source_repository": ".",
-  "source_commit": "8738ae37550e3b170ea3f4650fe0c5f5219cee21",
+  "source_commit": "01089423981beb862883dfe1a9274896875447c5",
   "source_commit_role": "coordinator integration exact snapshot; read with git show; no branch import",
   "sql_packet": {
     "path": "experiments/inbox-release/generated/backend-operation-reply.sql",
-    "sha256": "3ac5b47555ef66079fbfc18d297d2ed972056b9f4698ca87e50d92cb5f9ce1f2"
+    "sha256": "c1b978941edfa736db51509bf93af908a8baa71462a3c33a82b79acc35d3425d"
   },
   "sql_sources": [
     {
@@ -61,11 +61,11 @@
       "name": "operation_domain_apply",
       "kind": "sql",
       "path": "experiments/inbox-operation-domain/restrictive-apply.sql",
-      "sha256": "79dec51b3a2e8ed0cd87fc6f4e545a02c0550e539aebaf2edb4d33d152b24ab5",
-      "bytes": 31410,
-      "transformed_sha256": "76809064a2e1debf10e89afe0d4d697adad432d5b8d0aeb390ac0bc99a1a055d",
+      "sha256": "a935905bb86e545684f6414c4cced8d02d659b6fc60604537195b2a776534128",
+      "bytes": 31653,
+      "transformed_sha256": "0bd1096eef2dacf1cd9c640efff62f2c142292796c5cf827162d3f1ad935cecf",
       "reviewed_correction": {
-        "base_commit": "8738ae37550e3b170ea3f4650fe0c5f5219cee21",
+        "base_commit": "01089423981beb862883dfe1a9274896875447c5",
         "sha256": "a935905bb86e545684f6414c4cced8d02d659b6fc60604537195b2a776534128",
         "bytes": 31653
       }
@@ -130,11 +130,11 @@
       "name": "reply_context",
       "kind": "sql",
       "path": "experiments/inbox-reply-boundary/context.sql",
-      "sha256": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
-      "bytes": 5946,
+      "sha256": "942c9e7b117e73b941eeb0874d5928f37b670df264ba59114d8bf9c0838b8e3f",
+      "bytes": 6014,
       "transformed_sha256": "477b32e6d174b2d4719ed9479befdbddfb864c31e941a6b7cb01e09b393a5bd5",
       "reviewed_correction": {
-        "base_commit": "8738ae37550e3b170ea3f4650fe0c5f5219cee21",
+        "base_commit": "01089423981beb862883dfe1a9274896875447c5",
         "sha256": "942c9e7b117e73b941eeb0874d5928f37b670df264ba59114d8bf9c0838b8e3f",
         "bytes": 6014
       }
@@ -275,8 +275,8 @@
       "name": "reply_worker_package",
       "kind": "runtime",
       "path": "experiments/inbox-reply-send-worker/package.json",
-      "sha256": "d1b67cc34e2ffc6250407aa145d5f63666b6ec89c9deb99bbf417533831d8286",
-      "bytes": 228
+      "sha256": "27366f0d213e3e642b4393c85ed227517f09f75d4ec297641396b7da7914f9a6",
+      "bytes": 259
     },
     {
       "name": "reply_worker_lock",
@@ -310,8 +310,8 @@
       "name": "reply_provider_adapter",
       "kind": "runtime",
       "path": "experiments/inbox-reply-send-worker/vendor/reply-provider.mjs",
-      "sha256": "2847add8a5d1e87e671c04949f13487e10f6af81209635fb622ea253c659b75f",
-      "bytes": 4497
+      "sha256": "4fb33715bed28ee7ab977b3ff51d8d2f51f8fd88832deb8683426c1bbfad1199",
+      "bytes": 5037
     },
     {
       "name": "sync_relay_Dockerfile",
