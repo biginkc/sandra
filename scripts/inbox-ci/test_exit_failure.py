@@ -18,6 +18,7 @@ INBOX_FILE_LINES = '\n'.join(
     f"    printf '%s\\n' supabase/migrations/{entry['version']}_{entry['name']}.sql"
     for entry in INBOX_MANIFEST
 )
+INBOX_COUNT_LINE = f"    printf '%s\\n' {len(INBOX_MANIFEST)}"
 
 
 class ExitFailureTest(unittest.TestCase):
@@ -32,6 +33,9 @@ if [[ "$1" == *scripts/inbox-ci/inbox-migrations.mjs ]]; then
   case "$2" in
     --exclude-args)
 {INBOX_EXCLUDE_LINES}
+      ;;
+    --count)
+{INBOX_COUNT_LINE}
       ;;
     --files)
 {INBOX_FILE_LINES}

@@ -352,7 +352,11 @@ def stale_owned_paths() -> list[Path]:
     # when its full filename is no longer emitted, regardless of timestamp.
     owned = set(owned_filenames())
     suffixes = tuple(name.split("_", 1)[1] for name in owned)
-    candidates = set(MIGRATIONS_DIR.glob("2026091912*.sql"))
+    candidates = {
+        MIGRATIONS_DIR / name
+        for name in DROPPED_BY_R1_AMENDMENT
+        if (MIGRATIONS_DIR / name).exists()
+    }
     manifest_names = {inbox_filename(name) for name in ("inbox_control_foundation", "inbox_read_companion", "inbox_backend_operation_reply")}
     candidates.update(MIGRATIONS_DIR / name for name in manifest_names if (MIGRATIONS_DIR / name).exists())
     candidates.update(p for p in MIGRATIONS_DIR.glob("*.sql") if p.name.endswith(suffixes))

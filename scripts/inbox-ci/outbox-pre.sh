@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(dirname "$0")/failure-exit.sh"
+source "$(dirname "$0")/mapfile-compat.sh"
 export HEAVY_ORIGINAL_GITHUB_ENV="${GITHUB_ENV:-}"
 cleanup_lane_env() { if [[ -n "${lane_env:-}" ]]; then rm -f "$lane_env"; fi; }
 trap 'heavy_lane_exit "$?" cleanup_lane_env' EXIT
@@ -12,12 +13,12 @@ lane_env="$(mktemp)"
 original_env="${GITHUB_ENV:-}"
 export GITHUB_ENV="$lane_env"
 inbox_exclude_args=()
-while IFS= read -r arg; do inbox_exclude_args+=("$arg"); done < <(node scripts/inbox-ci/inbox-migrations.mjs --exclude-args)
-if ((${#inbox_exclude_args[@]})); then
-  node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 "${inbox_exclude_args[@]}"
-else
-  node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422
-fi
+inbox_exclude_output="$(node scripts/inbox-ci/inbox-migrations.mjs --exclude-args)"
+mapfile -t inbox_exclude_args <<<"$inbox_exclude_output"
+inbox_migration_count="$(node scripts/inbox-ci/inbox-migrations.mjs --count)"
+[[ "$inbox_migration_count" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid Inbox migration manifest count' >&2; exit 1; }
+[[ "${#inbox_exclude_args[@]}" -eq $((2 * inbox_migration_count)) ]] || { echo "Expected $((2 * inbox_migration_count)) Inbox migration exclude arguments, received ${#inbox_exclude_args[@]}" >&2; exit 1; }
+node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 "${inbox_exclude_args[@]}"
 set -a
 source "$lane_env"
 set +a

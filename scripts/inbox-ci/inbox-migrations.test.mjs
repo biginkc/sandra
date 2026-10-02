@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
-import { files, readManifest, relativePath, repoRoot, sqlInList, versions } from './inbox-migrations.mjs';
+import { count, files, readManifest, relativePath, RESERVED_BLOCK_END, repoRoot, sqlInList, versions } from './inbox-migrations.mjs';
 
 const legacyPrefix = ['2026', '09', '3004'].join('');
 const legacyPattern = new RegExp(`${legacyPrefix}|${legacyPrefix}0[0-9]{3}`);
@@ -30,7 +30,7 @@ export function assertManifestIntegrity(root = repoRoot) {
     const name = path.basename(full);
     const version = name.split('_', 1)[0];
     const isInboxName = /^\d+_inbox_[a-z0-9_]+\.sql$/.test(name);
-    const inReservedBlock = /^\d{14}$/.test(version) && version >= entries[0].version && version <= '20261002100260';
+    const inReservedBlock = /^\d{14}$/.test(version) && version >= entries[0].version && version <= RESERVED_BLOCK_END;
     if ((isInboxName || inReservedBlock) && !expected.has(path.relative(root, full))) throw new Error(`Unlisted Inbox migration: ${name}`);
   }
   assert.deepEqual(entries.map(relativePath), files(root));
@@ -44,6 +44,9 @@ test('literal sweep has no legacy Inbox migration reference', () => {
 
 test('manifest entries are ordered, hashed, and exhaustive', () => {
   const entries = assertManifestIntegrity();
+  assert.equal(count(), entries.length);
+  assert.match(RESERVED_BLOCK_END, /^\d{14}$/);
+  assert.equal(execFileSync('node', ['scripts/inbox-ci/inbox-migrations.mjs', '--reserved-block-end'], { encoding: 'utf8' }).trim(), RESERVED_BLOCK_END);
   assert.deepEqual(entries.map(entry => entry.version), versions());
   assert.match(sqlInList(), /^'20261002100000','20261002100100','20261002100200'$/);
 });

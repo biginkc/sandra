@@ -11,8 +11,11 @@ MANIFEST_PATH = Path(__file__).with_name('inbox-migrations.json')
 MANIFEST = json.loads(MANIFEST_PATH.read_text())
 VERSIONS = tuple(entry['version'] for entry in MANIFEST)
 NAMES = tuple(entry['name'] for entry in MANIFEST)
+MIGRATION_HELPER = Path(__file__).with_name('inbox-migrations.mjs')
 RESERVED_START = min(VERSIONS)
-RESERVED_END = '20261002100260'
+RESERVED_END = subprocess.check_output(
+    ['node', str(MIGRATION_HELPER), '--reserved-block-end'], text=True
+).strip()
 REFUSAL = 'Existing candidate: use validated forward upgrade, never reset'
 
 

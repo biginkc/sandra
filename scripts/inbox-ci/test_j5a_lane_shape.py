@@ -31,7 +31,9 @@ if sys.argv[1] == 'scripts/ci/provision-disposable-stack.mjs':
 elif sys.argv[1] == 'scripts/inbox-ci/inbox-migrations.mjs':
     manifest = json.loads(Path('scripts/inbox-ci/inbox-migrations.json').read_text())
     mode = sys.argv[2]
-    if mode == '--exclude-args':
+    if mode == '--count':
+        print(len(manifest))
+    elif mode == '--exclude-args':
         for entry in manifest:
             print('--exclude-migrations')
             print(f"{entry['version']}_{entry['name']}.sql")
@@ -59,6 +61,7 @@ else:
             lane = directory / "lane.sh"
             lane.write_text(source)
             (directory / "failure-exit.sh").write_text((HERE / "failure-exit.sh").read_text())
+            (directory / "mapfile-compat.sh").write_text((HERE / "mapfile-compat.sh").read_text())
             env = dict(os.environ, PATH=f"{directory}:{os.environ['PATH']}", HEAVY_LANE=f"outbox-{phase}", CI="", HEAVY_TESTED_SHA=SHA, GITHUB_RUN_ID="123", GITHUB_ENV=str(directory / "github-env"), PROVISION_ARGS=str(directory / "provision-args"), RUNNER_ENV=str(directory / "runner-env"))
             env.pop("E2E_DISPOSABLE_DATABASE", None)
             result = subprocess.run(["bash", str(lane)], cwd=ROOT, env=env, text=True, capture_output=True)

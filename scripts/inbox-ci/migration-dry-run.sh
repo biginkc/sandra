@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+source "$(dirname "$0")/mapfile-compat.sh"
 cd "$(dirname "$0")/../.."
 ROOT=$PWD
 ASSERT=scripts/inbox-ci/migration-assertions.py
@@ -100,12 +101,12 @@ if [[ "${1:-}" == --preflight-only ]]; then exit 0; fi
 # It must leave the disposable stack running; no hosted URL is accepted.
 export GITHUB_ENV="$WORK/provision.env"
 inbox_exclude_args=()
-while IFS= read -r arg; do inbox_exclude_args+=("$arg"); done < <(node scripts/inbox-ci/inbox-migrations.mjs --exclude-args)
-if ((${#inbox_exclude_args[@]})); then
-  node scripts/ci/provision-disposable-stack.mjs --api-port "$API_PORT" --db-port "$DB_PORT" "${inbox_exclude_args[@]}" --no-baseline-owner
-else
-  node scripts/ci/provision-disposable-stack.mjs --api-port "$API_PORT" --db-port "$DB_PORT" --no-baseline-owner
-fi
+inbox_exclude_output="$(node scripts/inbox-ci/inbox-migrations.mjs --exclude-args)"
+mapfile -t inbox_exclude_args <<<"$inbox_exclude_output"
+inbox_migration_count="$(node scripts/inbox-ci/inbox-migrations.mjs --count)"
+[[ "$inbox_migration_count" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid Inbox migration manifest count' >&2; exit 1; }
+[[ "${#inbox_exclude_args[@]}" -eq $((2 * inbox_migration_count)) ]] || { echo "Expected $((2 * inbox_migration_count)) Inbox migration exclude arguments, received ${#inbox_exclude_args[@]}" >&2; exit 1; }
+node scripts/ci/provision-disposable-stack.mjs --api-port "$API_PORT" --db-port "$DB_PORT" "${inbox_exclude_args[@]}" --no-baseline-owner
 if [[ -f "$GITHUB_ENV" ]]; then
   while IFS='=' read -r key value; do
     if [[ "$key" == E2E_LOCAL_WORKDIR ]]; then export E2E_LOCAL_WORKDIR="$value"; fi
@@ -143,14 +144,17 @@ SQL
 python3 -c 'import sys; sys.path.insert(0,"experiments/inbox-production-install"); from fixture_db import guard; guard()'
 python3 "$INSTALL/catalog_fingerprint.py" --check-manifest > "$WORK/catalog-manifest-check.txt"
 python3 "$INSTALL/catalog_fingerprint.py" --preflight > "$WORK/catalog-pre.json"
-while IFS= read -r file; do
+inbox_files_output="$(node scripts/inbox-ci/inbox-migrations.mjs --files)"
+mapfile -t inbox_migration_files <<<"$inbox_files_output"
+[[ "${#inbox_migration_files[@]}" -eq "$inbox_migration_count" ]] || { echo "Expected $inbox_migration_count Inbox migration files, received ${#inbox_migration_files[@]}" >&2; exit 1; }
+for file in "${inbox_migration_files[@]}"; do
   version=$(basename "$file" | cut -d_ -f1)
   name=$(basename "$file" .sql | cut -d_ -f2-)
   docker --host "$DOCKER_SOCKET" exec -i "$CONTAINER" psql -X -U postgres -d postgres -v ON_ERROR_STOP=1 < "$file" > "$WORK/apply-$version.txt"
   psql -X -v ON_ERROR_STOP=1 -v version="$version" -v name="$name" > /dev/null <<'SQL'
 INSERT INTO supabase_migrations.schema_migrations(version,name,statements) VALUES (:'version',:'name',ARRAY['W2 scratch manual apply']);
 SQL
-done < <(node scripts/inbox-ci/inbox-migrations.mjs --files)
+done
 python3 "$ASSERT" indexes > "$WORK/indexes.txt"
 psql -X -At -v ON_ERROR_STOP=1 -f "$INSTALL/operator/precondition-check.sql" > "$WORK/index-preconditions.txt"
 python3 "$ASSERT" index-preconditions "$WORK/index-preconditions.txt"

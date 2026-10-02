@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 cd "$(dirname "$0")/../.."
 source scripts/inbox-ci/failure-exit.sh
+source scripts/inbox-ci/mapfile-compat.sh
 
 lane_env=''
 replay_work=''
@@ -50,12 +51,13 @@ start_stack() {
   export GITHUB_ENV="$env_file"
   local -a inbox_exclude_args
   inbox_exclude_args=()
-  while IFS= read -r arg; do inbox_exclude_args+=("$arg"); done < <(node scripts/inbox-ci/inbox-migrations.mjs --exclude-args)
-  if ((${#inbox_exclude_args[@]})); then
-    node scripts/ci/provision-disposable-stack.mjs --api-port "$api_port" --db-port "$db_port" "${inbox_exclude_args[@]}"
-  else
-    node scripts/ci/provision-disposable-stack.mjs --api-port "$api_port" --db-port "$db_port"
-  fi
+  local inbox_exclude_output inbox_migration_count
+  inbox_exclude_output="$(node scripts/inbox-ci/inbox-migrations.mjs --exclude-args)"
+  mapfile -t inbox_exclude_args <<<"$inbox_exclude_output"
+  inbox_migration_count="$(node scripts/inbox-ci/inbox-migrations.mjs --count)"
+  [[ "$inbox_migration_count" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid Inbox migration manifest count' >&2; return 1; }
+  [[ "${#inbox_exclude_args[@]}" -eq $((2 * inbox_migration_count)) ]] || { echo "Expected $((2 * inbox_migration_count)) Inbox migration exclude arguments, received ${#inbox_exclude_args[@]}" >&2; return 1; }
+  node scripts/ci/provision-disposable-stack.mjs --api-port "$api_port" --db-port "$db_port" "${inbox_exclude_args[@]}"
   set -a
   source "$env_file"
   set +a
@@ -77,7 +79,14 @@ stop_stack() {
 
 apply_inbox_migrations() {
   local dir=$1
-  while IFS= read -r migration; do
+  local inbox_files_output inbox_migration_count
+  local -a inbox_migration_files
+  inbox_files_output="$(node scripts/inbox-ci/inbox-migrations.mjs --files)"
+  mapfile -t inbox_migration_files <<<"$inbox_files_output"
+  inbox_migration_count="$(node scripts/inbox-ci/inbox-migrations.mjs --count)"
+  [[ "$inbox_migration_count" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid Inbox migration manifest count' >&2; return 1; }
+  [[ "${#inbox_migration_files[@]}" -eq "$inbox_migration_count" ]] || { echo "Expected $inbox_migration_count Inbox migration files, received ${#inbox_migration_files[@]}" >&2; return 1; }
+  for migration in "${inbox_migration_files[@]}"; do
     local version name
     version="$(basename "$migration" | cut -d_ -f1)"
     name="$(basename "$migration" .sql | cut -d_ -f2-)"
@@ -85,7 +94,7 @@ apply_inbox_migrations() {
     psql "$E2E_CI_SUPABASE_DB_URL" -X -v ON_ERROR_STOP=1 -v version="$version" -v name="$name" >/dev/null <<'SQL'
 INSERT INTO supabase_migrations.schema_migrations(version,name,statements) VALUES (:'version',:'name',ARRAY['drift replay']);
 SQL
-  done < <(node scripts/inbox-ci/inbox-migrations.mjs --files)
+  done
 }
 
 materialize_fixture() {

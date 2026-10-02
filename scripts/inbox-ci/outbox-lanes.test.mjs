@@ -21,7 +21,11 @@ for (const phase of ['pre', 'post']) {
       stub('uname', '#!/bin/sh\necho Linux\n');
       stub('node', `#!/bin/sh
 if [ "$1" = scripts/inbox-ci/inbox-migrations.mjs ]; then
-  printf '%s\\n' ${inboxExcludeArgs}
+  if [ "$2" = --count ]; then
+    printf '%s\\n' 3
+  else
+    printf '%s\\n' ${inboxExcludeArgs}
+  fi
   exit 0
 fi
 printf "%s\\n" "$*" >> "$PROVISION_MARKER"
@@ -35,7 +39,16 @@ exit 47
       assert.equal(result.status, 47, result.stderr);
       assert.match(readFileSync(marker, 'utf8'), /^scripts\/ci\/provision-disposable-stack\.mjs --api-port 55421 --db-port 55422/m);
 
-      stub('node', '#!/bin/sh\nexit 0\n');
+      stub('node', `#!/bin/sh
+if [ "$1" = scripts/inbox-ci/inbox-migrations.mjs ]; then
+  if [ "$2" = --count ]; then
+    printf '%s\\n' 3
+  else
+    printf '%s\\n' ${inboxExcludeArgs}
+  fi
+fi
+exit 0
+`);
       const missingFlag = spawnSync('bash', [`scripts/inbox-ci/outbox-${phase}.sh`], { env, encoding: 'utf8' });
       assert.equal(missingFlag.status, 1, missingFlag.stderr);
       assert.match(missingFlag.stderr, /Provisioner did not publish E2E_DISPOSABLE_DATABASE=1/);

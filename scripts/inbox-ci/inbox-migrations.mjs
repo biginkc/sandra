@@ -4,6 +4,7 @@ import path from 'node:path';
 
 export const repoRoot = path.resolve(import.meta.dirname, '../..');
 export const manifestPath = root => path.join(root, 'scripts/inbox-ci/inbox-migrations.json');
+export const RESERVED_BLOCK_END = '20261002100260';
 
 export function readManifest(root = repoRoot) {
   const entries = JSON.parse(readFileSync(manifestPath(root), 'utf8'));
@@ -20,6 +21,7 @@ export function readManifest(root = repoRoot) {
 
 export const filename = entry => `${entry.version}_${entry.name}.sql`;
 export const relativePath = entry => path.posix.join('supabase/migrations', filename(entry));
+export const count = (root = repoRoot) => readManifest(root).length;
 export const versions = (root = repoRoot) => readManifest(root).map(entry => entry.version);
 export const files = (root = repoRoot) => readManifest(root).map(relativePath);
 export const excludeArgs = (root = repoRoot) => readManifest(root).flatMap(entry => ['--exclude-migrations', filename(entry)]);
@@ -32,12 +34,14 @@ export const byName = (name, root = repoRoot) => {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
   const mode = process.argv[2];
-  const values = mode === '--versions' ? versions()
-    : mode === '--files' ? files()
-      : mode === '--exclude-args' ? excludeArgs()
-        : mode === '--sql-in-list' ? [sqlInList()]
-          : mode === '--file-by-name' ? [relativePath(byName(process.argv[3]))]
-          : null;
-  if (!values) throw new Error('Usage: inbox-migrations.mjs --versions|--files|--exclude-args|--sql-in-list|--file-by-name <name>');
+  const values = mode === '--count' ? [String(count())]
+    : mode === '--reserved-block-end' ? [RESERVED_BLOCK_END]
+      : mode === '--versions' ? versions()
+        : mode === '--files' ? files()
+          : mode === '--exclude-args' ? excludeArgs()
+            : mode === '--sql-in-list' ? [sqlInList()]
+              : mode === '--file-by-name' ? [relativePath(byName(process.argv[3]))]
+              : null;
+  if (!values) throw new Error('Usage: inbox-migrations.mjs --count|--reserved-block-end|--versions|--files|--exclude-args|--sql-in-list|--file-by-name <name>');
   process.stdout.write(`${values.join('\n')}\n`);
 }

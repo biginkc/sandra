@@ -105,6 +105,12 @@ class EmitMigrationsTests(unittest.TestCase):
         for name in emit_migrations.DROPPED_BY_R1_AMENDMENT:
             self.assertNotIn(name, emitted)
 
+    def test_write_does_not_delete_unlisted_legacy_timestamp(self) -> None:
+        other_owner = emit_migrations.MIGRATIONS_DIR / "20260919120200_other_owner.sql"
+        other_owner.write_text("SELECT 1;\n")
+        self.assertEqual(emit_migrations.write_mode(), 0)
+        self.assertTrue(other_owner.exists())
+
     def test_emitted_files_contain_no_guard_or_forbidden_text(self) -> None:
         emitted = emit_migrations.compute_emitted()
         for name, text in emitted.items():
