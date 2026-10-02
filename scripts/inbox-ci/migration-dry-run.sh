@@ -200,10 +200,15 @@ python3 "$ASSERT" offline-suite "$WORK/production-install-unit.txt"
 # Supabase already owns supabase_migrations.schema_migrations.
 docker --host "$DOCKER_SOCKET" run -d --name "$CATALOG_CONTAINER" -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1::5432 postgres:17 > /dev/null
 CATALOG_PORT=$(docker --host "$DOCKER_SOCKET" inspect --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' "$CATALOG_CONTAINER")
-for _ in {1..30}; do
+for _ in {1..60}; do
   if docker --host "$DOCKER_SOCKET" exec "$CATALOG_CONTAINER" pg_isready -U postgres -d postgres >/dev/null 2>&1; then break; fi
   sleep 1
 done
+if ! docker --host "$DOCKER_SOCKET" exec "$CATALOG_CONTAINER" pg_isready -U postgres -d postgres >/dev/null 2>&1; then
+  # Surface why the blank catalog database never became ready (run 36958547185 failed here with no evidence).
+  docker --host "$DOCKER_SOCKET" inspect --format 'catalog container state={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' "$CATALOG_CONTAINER" >&2 || true
+  docker --host "$DOCKER_SOCKET" logs --tail 80 "$CATALOG_CONTAINER" >&2 || true
+fi
 docker --host "$DOCKER_SOCKET" exec "$CATALOG_CONTAINER" pg_isready -U postgres -d postgres >/dev/null
 export PGPORT="$CATALOG_PORT" CATALOG_FINGERPRINT_SCRATCH=sandra-mig-r7
 python3 -m unittest "$INSTALL/test_catalog_fingerprint_live.py" > "$WORK/catalog-live.txt" 2>&1
