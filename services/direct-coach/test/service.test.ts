@@ -128,6 +128,30 @@ test('disconnect during binding read does not allocate paid bridges', async () =
   assert.equal(bridgeCount, 0)
 })
 
+test('pre-start buffering retains 320 real frames while authorization exceeds three seconds', async () => {
+  let resolveBinding!: (value: DirectCoachBinding) => void
+  const db: DirectCoachDb = { readBinding: () => new Promise((resolve) => { resolveBinding = resolve }), isActive: async () => true, close: async () => {} }
+  const sent: number[] = []
+  const publisher: CoachPublisher = { publish: async () => {}, close: async () => {}, closeAll: async () => {} }
+  const session = new CoachSession({} as never, { ...claims, expiresAtMs: Date.now() + 100_000 }, binding, {
+    db, publisher, deepgramApiKey: 'deepgram-test-key', jevApiKey: 'jev-test-key', logger,
+    bridgeFactory: () => ({ send: (payload: Buffer) => { sent.push(payload.length) }, close: async () => {} }),
+    objectionFactory: () => ({ close() {}, onFinal() {}, onInterim() {} } as unknown as ObjectionPromptCall),
+  })
+  session.handle(Buffer.from(JSON.stringify({ event: 'start', start: { call_control_id: 'seller-leg-1', media_format: { encoding: 'PCMU', sample_rate: 8000, channels: 1 } } })))
+  await tick()
+  const payload = Buffer.alloc(160, 0x7f).toString('base64')
+  for (let chunk = 1; chunk <= 320; chunk += 1) session.handle(Buffer.from(JSON.stringify({ event: 'media', media: { chunk: String(chunk), track: 'inbound', payload } })))
+  await new Promise((resolve) => setTimeout(resolve, 3_050))
+  assert.deepEqual(sent, [])
+  resolveBinding(binding)
+  await tick()
+  await tick()
+  assert.equal(sent.length, 320)
+  assert.equal(sent.every((size) => size === 160), true)
+  await session.finish('test')
+})
+
 test('graceful close drains a real final transcript before output closes', async () => {
   const db: DirectCoachDb = { readBinding: async () => binding, isActive: async () => true, close: async () => {} }
   const published: CoachWireMessage[] = []
@@ -251,6 +275,7 @@ test('publisher close fences a retry after an in-flight send and never recreates
   const publishing = publisher.publish(claims.callId, { scriptVersion: '1.2.3', scriptDigest: 'a'.repeat(64), matcherVersion: 'poc-approved-classifier', type: 'transcript', speaker: 'seller', text: 'x', isFinal: true, ts: new Date().toISOString() })
   await started
   await publisher.close(claims.callId)
+  assert.equal((publisher as unknown as { states: Map<string, unknown> }).states.size, 0)
   rejectSend(new Error('send interrupted'))
   await assert.rejects(publishing)
   assert.equal(channelCount, 1)

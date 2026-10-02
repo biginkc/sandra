@@ -112,6 +112,7 @@ export class SupabaseCoachPublisher implements CoachPublisher {
     state.rejectPending?.(new Error('realtime channel closed'))
     state.rejectPending = undefined
     await Promise.all(channels.map((channel) => withTimeout(this.client.removeChannel(channel), this.operationTimeoutMs).catch(() => undefined)))
+    if (state.closed && this.states.get(callId) === state) this.states.delete(callId)
   }
 }
 
