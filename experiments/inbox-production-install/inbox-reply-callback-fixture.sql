@@ -137,14 +137,11 @@ BEGIN
 END $$;
 
 -- R11-2 precondition: do not create or remove this live-ledger fixture while
--- reply admission is open and a reply worker has a database session. A
--- disabled admission row is sufficient; otherwise every deployed reply
--- worker must be absent. This check is before any trigger disable or fixture
--- write.
+-- reply admission is open. This check is before any trigger disable or
+-- fixture write.
 DO $$
 DECLARE
   admission_enabled boolean;
-  reply_worker_sessions integer;
 BEGIN
   SELECT enabled INTO admission_enabled
   FROM inbox_reply_review.admission
@@ -154,13 +151,7 @@ BEGIN
     RAISE EXCEPTION 'R11 admission precondition row is missing';
   END IF;
   IF admission_enabled THEN
-    SELECT count(*) INTO reply_worker_sessions
-    FROM pg_stat_activity
-    WHERE pid <> pg_backend_pid()
-      AND application_name = 'sandra-inbox-reply-send-worker';
-    IF reply_worker_sessions > 0 THEN
-      RAISE EXCEPTION 'R11 requires reply admission disabled or reply workers absent';
-    END IF;
+    RAISE EXCEPTION 'R11 requires reply admission disabled';
   END IF;
 END $$;
 

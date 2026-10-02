@@ -222,30 +222,24 @@ class ReplyCallbackFixtureTests(unittest.TestCase):
         result = self._sql(statement, check=check)
         return result.stdout.strip()
 
-    def test_open_admission_with_a_live_reply_worker_is_refused_before_fixture_writes(self):
+    def test_open_admission_without_reply_worker_is_refused_before_fixture_writes(self):
         receipt = self._receipt("sandra-inbox-r1-callback-gate-admission")
+        created = False
         try:
             self._sql("UPDATE inbox_reply_review.admission SET enabled=true WHERE singleton;")
-            bindir = postgres_bin()
-            assert bindir is not None
-            worker_env = {**os.environ, "PGHOST": str(self.state["socket"]), "PGPORT": str(self.state["port"]), "PGUSER": "postgres", "PGDATABASE": "postgres", "PGAPPNAME": "sandra-inbox-reply-send-worker"}
-            worker = subprocess.Popen([bindir / "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-c", "SELECT pg_sleep(5);"], env=worker_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            try:
-                import time
-                for _ in range(20):
-                    if self._sql("SELECT count(*) FROM pg_stat_activity WHERE application_name='sandra-inbox-reply-send-worker';").stdout.strip() == "1":
-                        break
-                    time.sleep(0.05)
-                refused = self._packet(receipt, create=True, check=False)
-                self.assertNotEqual(refused.returncode, 0)
-                self.assertIn("reply workers absent", refused.stderr)
-                values = json.loads(receipt.read_text(encoding="utf-8"))
-                self.assertEqual(self._sql(f"SELECT count(*) FROM inbox_reply_send.attempts WHERE org_id='{values['org_id']}';").stdout.strip(), "0")
-            finally:
-                worker.terminate()
-                worker.wait(timeout=10)
-                self._sql("UPDATE inbox_reply_review.admission SET enabled=false WHERE singleton;")
+            self.assertEqual(self._sql("SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND application_name='sandra-inbox-reply-send-worker';").stdout.strip(), "0")
+            refused = self._packet(receipt, create=True, check=False)
+            created = refused.returncode == 0
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("R11 requires reply admission disabled", refused.stderr)
+            values = json.loads(receipt.read_text(encoding="utf-8"))
+            self.assertEqual(self._sql(f"SELECT count(*) FROM inbox_reply_send.attempts WHERE org_id='{values['org_id']}';").stdout.strip(), "0")
         finally:
+            if created:
+                self._sql("UPDATE inbox_reply_review.admission SET enabled=false WHERE singleton;")
+                self._packet(receipt, create=False, check=False)
+            else:
+                self._sql("UPDATE inbox_reply_review.admission SET enabled=false WHERE singleton;")
             receipt.unlink(missing_ok=True)
 
 

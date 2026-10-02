@@ -25,3 +25,20 @@ test('only the configured versioned Restate path reaches the reply endpoint', as
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('a worker with no successful dispatch reports not-ready', async () => {
+  const digest = 'e'.repeat(64);
+  const server = createServer(createWorkerRequestHandler({
+    registrationPath: `/runtime/${digest}`,
+    endpoint: async (_req, res) => { res.writeHead(200); res.end('handled'); },
+  }));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/readyz`);
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { ready: false });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

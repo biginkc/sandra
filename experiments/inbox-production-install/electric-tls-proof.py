@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import sys
@@ -191,16 +190,17 @@ def slots(container: str) -> list[dict[str, str]]:
     return result
 
 
-def ssl_backend_count(container: str, application_name: str) -> int:
-    return int(psql(container, f"SELECT count(*) FROM pg_stat_activity a JOIN pg_stat_ssl s USING (pid) WHERE a.application_name='{application_name}' AND s.ssl;") or "0")
+def ssl_backend_count(container: str, stream: str) -> int:
+    slot_name = "electric_slot_" + stream
+    return int(psql(container, f"SELECT count(*) FROM pg_replication_slots r JOIN pg_stat_ssl s ON s.pid = r.active_pid WHERE r.slot_name='{slot_name}' AND r.active_pid IS NOT NULL AND s.ssl = true;") or "0")
 
 
-def tls_error(logs: str) -> bool:
-    return bool(re.search(r"tls|ssl|certificate|unknown ca|hostname|verify", logs, re.IGNORECASE))
+def tls_error(logs: str, expected_token: str) -> bool:
+    return expected_token in logs
 
 
-def start_electric(container: str, image: str, network: str, ca: Path, database_host: str, stream: str, application_name: str) -> int:
-    database_url = f"postgresql://postgres:{POSTGRES_PASSWORD}@{database_host}:5432/postgres?sslmode=verify-full&application_name={application_name}"
+def start_electric(container: str, image: str, network: str, ca: Path, database_host: str, stream: str) -> int:
+    database_url = f"postgresql://postgres:{POSTGRES_PASSWORD}@{database_host}:5432/postgres?sslmode=require"
     docker("run", "-d", "--name", container, "--network", network, "-p", "127.0.0.1::3000", "-e", "DATABASE_URL=" + database_url, "-e", "ELECTRIC_DATABASE_CA_CERTIFICATE_FILE=" + CA_CONTAINER_PATH, "-e", "ELECTRIC_SECRET=" + ELECTRIC_SECRET, "-e", "ELECTRIC_MANUAL_TABLE_PUBLISHING=true", "-e", "ELECTRIC_REPLICATION_STREAM_ID=" + stream, "-e", "ELECTRIC_TELEMETRY=false", "-e", "ELECTRIC_LONG_POLL_TIMEOUT=8000", "-v", f"{ca}:{CA_CONTAINER_PATH}:ro", image, timeout=180)
     return electric_port(container)
 
@@ -224,13 +224,15 @@ def run_contract(image: str, ca_crt: Path, wrong_ca: Path, network: str, postgre
     for stream in streams:
         psql(postgres, f"CREATE PUBLICATION electric_publication_{stream} FOR TABLE inbox_bridge.projection;")
 
-    right, right_stream, right_app = names[0], streams[0], "electric_tls_proof_right"
+    right, right_stream = names[0], streams[0]
     before = slots(postgres)
-    port = start_electric(right, image, network, ca_crt, "postgres", right_stream, right_app)
+    port = start_electric(right, image, network, ca_crt, "postgres", right_stream)
     right_health = wait_active(port)
+    # Capture the log while the backend/slot are still observable. The log is
+    # the proof that the negative cases failed in TLS, not merely in startup.
     right_logs = redact(docker_text("logs", right, check=False)[-5000:])
     right_slot = assert_new_slot(before, slots(postgres), right_stream)
-    right_ssl = ssl_backend_count(postgres, right_app)
+    right_ssl = ssl_backend_count(postgres, right_stream)
     status["right_ca"] = {"health": right_health, "slot": right_slot, "pg_stat_ssl_backend_count": right_ssl, "logs_tail": right_logs}
     if right_health.get("status_code") != 200 or not isinstance(right_health.get("json"), dict) or right_health["json"].get("status") != "active":
         raise ProofError(f"right-CA health did not reach 200 active: {right_health}")
@@ -239,35 +241,36 @@ def run_contract(image: str, ca_crt: Path, wrong_ca: Path, network: str, postgre
     stop_container(right)
 
     negative_cases = [
-        (names[1], streams[1], wrong_ca, "postgres", "electric_tls_proof_wrong_ca", "wrong_ca"),
-        (names[2], streams[2], ca_crt, "electric-dsn-mismatch", "electric_tls_proof_wrong_hostname", "wrong_hostname"),
+        (names[1], streams[1], wrong_ca, "postgres", "unknown_ca", "wrong_ca"),
+        (names[2], streams[2], ca_crt, "electric-dsn-mismatch", "hostname_check_failed", "wrong_hostname"),
     ]
-    for container, stream, ca, host, app, key in negative_cases:
-        port = start_electric(container, image, network, ca, host, stream, app)
+    for container, stream, ca, host, expected_tls_token, key in negative_cases:
+        port = start_electric(container, image, network, ca, host, stream)
         result = wait_active(port, seconds=20)
         logs = redact(docker_text("logs", container, check=False)[-5000:])
         running = docker_text("inspect", "-f", "{{.State.Running}}", container, check=False) == "true"
         expected_name = "electric_slot_" + stream
         present = any(row["slot_name"] == expected_name for row in slots(postgres))
-        status[key] = {"health": result, "running_after_timeout": running, "slot_present": present, "tls_error_in_logs": tls_error(logs), "logs_tail": logs}
+        has_tls_error = tls_error(logs, expected_tls_token)
+        status[key] = {"health": result, "running_after_timeout": running, "slot_present": present, "tls_error_token": expected_tls_token, "tls_error_in_logs": has_tls_error, "logs_tail": logs}
         if result.get("status_code") == 200 and isinstance(result.get("json"), dict) and result["json"].get("status") == "active":
             raise ProofError(f"{key} unexpectedly reached active")
-        if present or not tls_error(logs):
+        if present or not has_tls_error:
             raise ProofError(f"{key} did not fail as a TLS negative")
         stop_container(container)
 
     # Natural negative mutations: replacing the wrong CA/hostname with the
     # reviewed value must make the corresponding control pass.
     controls = [
-        (names[3], streams[3], ca_crt, "postgres", "electric_tls_proof_wrong_ca_fixed", "wrong_ca_mutation_fixed"),
-        (names[4], streams[4], ca_crt, "postgres", "electric_tls_proof_wrong_hostname_fixed", "wrong_hostname_mutation_fixed"),
+        (names[3], streams[3], ca_crt, "postgres", "wrong_ca_mutation_fixed"),
+        (names[4], streams[4], ca_crt, "postgres", "wrong_hostname_mutation_fixed"),
     ]
-    for container, stream, ca, host, app, key in controls:
+    for container, stream, ca, host, key in controls:
         before = slots(postgres)
-        port = start_electric(container, image, network, ca, host, stream, app)
+        port = start_electric(container, image, network, ca, host, stream)
         result = wait_active(port)
         slot = assert_new_slot(before, slots(postgres), stream)
-        ssl_count = ssl_backend_count(postgres, app)
+        ssl_count = ssl_backend_count(postgres, stream)
         status[key] = {"health": result, "slot": slot, "pg_stat_ssl_backend_count": ssl_count}
         if result.get("status_code") != 200 or not isinstance(result.get("json"), dict) or result["json"].get("status") != "active" or ssl_count < 1:
             raise ProofError(f"mutation control {key} did not pass: {result}")
