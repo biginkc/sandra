@@ -23,7 +23,18 @@ from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[2]
 LOCAL_ENV = ROOT / "experiments/inbox-reply-send/local-env.py"
-MIGRATION = ROOT / "supabase/migrations/20260930040260_inbox_drip_markers.sql"
+INBOX_MANIFEST = json.loads((ROOT / "scripts/inbox-ci/inbox-migrations.json").read_text(encoding="utf-8"))
+INBOX_ENTRIES = {entry["name"]: entry for entry in INBOX_MANIFEST}
+
+
+def inbox_migration(name: str) -> Path:
+    entry = INBOX_ENTRIES.get(name)
+    if entry is None:
+        raise RuntimeError(f"Inbox migration is not in the manifest: {name}")
+    return ROOT / "supabase/migrations" / f"{entry['version']}_{entry['name']}.sql"
+
+
+MIGRATION = inbox_migration("inbox_drip_markers")
 GOLDEN = ROOT / "experiments/inbox-drip-markers/golden-fixture.json"
 LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-mutation-run-r6.log")
 EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/dripmarkers-evidence-r6.md")
@@ -34,11 +45,15 @@ ORG = "10000000-0000-4000-8000-000000000001"
 OTHER_ORG = "10000000-0000-4000-8000-000000000099"
 USER = "20000000-0000-4000-8000-000000000002"
 SESSION = "30000000-0000-4000-8000-000000000003"
+FROZEN_NAMES = (
+    "inbox_control_foundation",
+    "inbox_read_companion",
+    "inbox_backend_operation_reply",
+    "inbox_reply_message_projection",
+)
 FROZEN = {
-    "20260930040000_inbox_control_foundation.sql": "a31799ba96e6f7264f062019cc8113a6401719a686cc31e569b10d21064bfbf6",
-    "20260930040100_inbox_read_companion.sql": "7a2c5f49fc8fcf58c7f37585c3c347869816912e47e504ec47f9cdac198d3dd7",
-    "20260930040200_inbox_backend_operation_reply.sql": "2a4b49d43e67963805d547221d04c84c3f7823f430fd9c0cc9b3f22b36844aad",
-    "20260930040250_inbox_reply_message_projection.sql": "2a097587ad59aa913a386ce59b513fcbac8452b0b770477bde16533cb2672112",
+    f"{INBOX_ENTRIES[name]['version']}_{INBOX_ENTRIES[name]['name']}.sql": INBOX_ENTRIES[name]["sha256"]
+    for name in FROZEN_NAMES
 }
 ORIGIN_MIGRATIONS = [
     "supabase/migrations/20260930035000_drip_reply_failed_send_keeps_flag.sql",
@@ -69,7 +84,7 @@ def verify_frozen_hashes() -> None:
         actual = hashlib.sha256((ROOT / "supabase/migrations" / name).read_bytes()).hexdigest()
         if actual != expected:
             raise RuntimeError(f"frozen hash mismatch {name}: {actual} != {expected}")
-    emit("FROZEN_HASHES_OK 040000 040100 040200 040250")
+    emit(f"FROZEN_HASHES_OK manifest={len(FROZEN)}")
 
 
 def function_source(path: Path, marker: str) -> str:
@@ -87,14 +102,14 @@ def verify_marker_function_diffs() -> None:
     comparisons = [
         (
             "matching",
-            ROOT / "supabase/migrations/20260930040000_inbox_control_foundation.sql",
+            inbox_migration("inbox_control_foundation"),
             "CREATE FUNCTION inbox_bridge.matching(",
             MIGRATION,
             "CREATE OR REPLACE FUNCTION inbox_bridge.matching(",
         ),
         (
             "review_selection",
-            ROOT / "supabase/migrations/20260930040100_inbox_read_companion.sql",
+            inbox_migration("inbox_read_companion"),
             "CREATE OR REPLACE FUNCTION inbox_read.review_selection(",
             MIGRATION,
             "CREATE OR REPLACE FUNCTION inbox_read.review_selection(",
@@ -103,7 +118,7 @@ def verify_marker_function_diffs() -> None:
     for name, frozen_path, frozen_marker, current_path, current_marker in comparisons:
         frozen = normalized_function_source(function_source(frozen_path, frozen_marker)).splitlines()
         current = normalized_function_source(function_source(current_path, current_marker)).splitlines()
-        diff = list(difflib.unified_diff(frozen, current, fromfile=f"frozen:{name}", tofile=f"040260:{name}", lineterm=""))
+        diff = list(difflib.unified_diff(frozen, current, fromfile=f"frozen:{name}", tofile=f"inbox_drip_markers:{name}", lineterm=""))
         changes = [line for line in diff if line and not line.startswith(("---", "+++", "@@")) and line[0] in "+-"]
         if any("MATERIALIZED" in line or "ERRCODE" in line for line in changes):
             raise RuntimeError(f"{name} diff changed MATERIALIZED or ERRCODE")
@@ -124,15 +139,15 @@ def verify_marker_function_diffs() -> None:
 def verify_counts_typed_frozen() -> None:
     installed = query("SELECT pg_get_functiondef('inbox_bridge.counts_typed(uuid,uuid,jsonb)'::regprocedure);")
     frozen_source = function_source(
-        ROOT / "supabase/migrations/20260930040000_inbox_control_foundation.sql",
+        inbox_migration("inbox_control_foundation"),
         "CREATE FUNCTION inbox_bridge.counts_typed(",
     )
     psql(frozen_source.replace("CREATE FUNCTION inbox_bridge.counts_typed(", "CREATE OR REPLACE FUNCTION inbox_bridge.counts_typed(", 1))
-    absent_040260 = query("SELECT pg_get_functiondef('inbox_bridge.counts_typed(uuid,uuid,jsonb)'::regprocedure);")
-    if installed != absent_040260:
-        details = "\n".join(difflib.unified_diff(installed.splitlines(), absent_040260.splitlines(), fromfile="after-all-migrations", tofile="040260-absent", lineterm=""))
+    absent_marker_migration = query("SELECT pg_get_functiondef('inbox_bridge.counts_typed(uuid,uuid,jsonb)'::regprocedure);")
+    if installed != absent_marker_migration:
+        details = "\n".join(difflib.unified_diff(installed.splitlines(), absent_marker_migration.splitlines(), fromfile="after-all-migrations", tofile="inbox_drip_markers-absent", lineterm=""))
         raise RuntimeError(f"counts_typed frozen equality failed:\n{details}")
-    emit("COUNTS_TYPED_FROZEN_EQUAL|pg_get_functiondef=byte-identical|040260_absent=true")
+    emit("COUNTS_TYPED_FROZEN_EQUAL|pg_get_functiondef=byte-identical|inbox_drip_markers_absent=true")
 
 
 def run(args: list[str], *, input_text: str | None = None, check: bool = True, timeout: int = 240) -> subprocess.CompletedProcess[str]:
@@ -368,7 +383,11 @@ def up() -> None:
     run(["python3", str(LOCAL_ENV), "up"], timeout=240)
     verify_counts_typed_frozen()
     for path in ORIGIN_MIGRATIONS:
-        source = run(["git", "show", f"origin/main:{path}"], timeout=60).stdout
+        source = (
+            (ROOT / path).read_text(encoding="utf-8")
+            if path == "supabase/migrations/20260930035000_drip_reply_failed_send_keeps_flag.sql"
+            else run(["git", "show", f"origin/main:{path}"], timeout=60).stdout
+        )
         psql(source)
         emit(f"ORIGIN_FIXTURE_OK {path}")
 
@@ -928,7 +947,7 @@ def main() -> int:
         lines.extend(f"| {row['mutation']} | {row['Executed']} | {row['failure']} |" for row in mutation_results)
         lines.extend(["", "## Focused Vitest natural mutation kills", "", "| Mutation | Executed | Natural mutated failure |", "|---|---:|---|"])
         lines.extend(f"| {row['mutation']} | {row['Executed']} | {row['failure']} |" for row in vitest_mutation_results)
-        lines.extend(["", "## Frozen function proof", "", "- counts_typed: `pg_get_functiondef` after all migrations equaled the 040260-absent simulation byte-for-byte.", "", "| Function | Differing line | Classification |", "|---|---|---|"])
+        lines.extend(["", "## Frozen function proof", "", "- counts_typed: `pg_get_functiondef` after all migrations equaled the inbox_drip_markers-absent simulation byte-for-byte.", "", "| Function | Differing line | Classification |", "|---|---|---|"])
         lines.extend(f"| {row['function']} | `{markdown_cell(row['line'])}` | {row['classification']} |" for row in function_diff_rows)
         EVIDENCE.write_text("\n".join(lines) + "\n", encoding="utf-8")
         emit(f"EVIDENCE {EVIDENCE}")
