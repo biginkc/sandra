@@ -2186,7 +2186,18 @@ export async function sendSmsFromLead(
         .select("id, org_id")
         .eq("id", threadContactId)
         .maybeSingle();
-      if (threadContact && threadContact.org_id === property.org_id) {
+      const { data: thread } = await supabase
+        .from("message_threads")
+        .select("id")
+        .eq("property_id", propertyId)
+        .eq("contact_id", threadContactId)
+        .limit(1)
+        .maybeSingle();
+      if (
+        threadContact &&
+        thread &&
+        threadContact.org_id === property.org_id
+      ) {
         targetContactId = threadContact.id;
       }
     } else if (
