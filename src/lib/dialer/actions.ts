@@ -475,6 +475,7 @@ export async function completeSoftphoneCall(input: {
       ended_at: input.endedAt,
       duration_seconds: Math.max(0, Math.floor(input.durationSeconds)),
       outcome: input.outcome,
+      call_purpose: training ? "internal_training" : "customer",
       disposition: training ? null : input.disposition,
       notes: input.notes.trim(),
       direction: "outbound",
