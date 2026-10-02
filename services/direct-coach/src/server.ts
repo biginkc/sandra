@@ -1,0 +1,86 @@
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { WebSocketServer, type WebSocket } from 'ws'
+import { verifyCoachToken } from './auth.js'
+import { CoachSession } from './session.js'
+import type { CoachClaims, CoachLogger, CoachPublisher, DirectCoachBinding, DirectCoachDb } from './types.js'
+
+const MAX_SESSIONS = 2
+const MAX_WS_PAYLOAD = 1_048_576
+
+export interface CoachServerOptions {
+  readonly secret: string
+  readonly db: DirectCoachDb
+  readonly publisher: CoachPublisher
+  readonly deepgramApiKey: string
+  readonly jevApiKey: string
+  readonly logger: CoachLogger
+  readonly now?: () => number
+  readonly sessionFactory?: (ws: WebSocket, claims: CoachClaims, binding: DirectCoachBinding, onEnd: () => void) => CoachSession
+}
+
+export interface CoachServer {
+  readonly server: Server
+  readonly wss: WebSocketServer
+  readonly activeCalls: Readonly<{ readonly size: number; has(callId: string): boolean }>
+  listen(port: number, host?: string): Promise<void>
+  close(): Promise<void>
+}
+
+export function createCoachServer(options: CoachServerOptions): CoachServer {
+  const sessions = new Map<string, CoachSession>()
+  const admitting = new Set<string>()
+  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WS_PAYLOAD, clientTracking: true })
+  const server = createServer((request, response) => handleHealth(request, response, sessions.size))
+  server.on('upgrade', (request, socket, head) => {
+    let disconnected = false
+    socket.on('error', () => { disconnected = true; socket.destroy() })
+    socket.on('close', () => { disconnected = true })
+    void admit(request).catch(() => { if (!socket.destroyed) socket.destroy() })
+    async function admit(req: IncomingMessage): Promise<void> {
+      const url = new URL(req.url ?? '/', 'http://localhost')
+      if (url.pathname !== '/media') throw new Error('unknown websocket path')
+      const rawToken = url.searchParams.get('token')
+      if (!rawToken) throw new Error('missing token')
+      const claims = verifyCoachToken(rawToken, options.secret, options.now?.() ?? Date.now())
+      if (sessions.has(claims.callId) || admitting.has(claims.callId)) throw new Error('duplicate call session')
+      if (sessions.size + admitting.size >= MAX_SESSIONS) throw new Error('session capacity reached')
+      admitting.add(claims.callId)
+      try {
+        // This is the admission fence. No paid ASR bridge is constructed before this exact
+        // call/leg/owner/script/membership binding is freshly read from the database.
+        const binding = await options.db.readBinding(claims)
+        if (!binding) throw new Error('call binding unavailable')
+        if (disconnected || socket.destroyed) throw new Error('upgrade socket closed')
+        wss.handleUpgrade(req, socket, head, (ws) => {
+          const remove = () => { sessions.delete(claims.callId) }
+          const session = options.sessionFactory
+            ? options.sessionFactory(ws, claims, binding, remove)
+            : new CoachSession(ws, claims, binding, { db: options.db, publisher: options.publisher, deepgramApiKey: options.deepgramApiKey, jevApiKey: options.jevApiKey, logger: options.logger, now: options.now, onEnd: remove })
+          sessions.set(claims.callId, session)
+          ws.on('message', (message) => session.handle(message))
+          ws.on('close', () => { session.disconnected() })
+          ws.on('error', () => { session.disconnected() })
+        })
+      } finally { admitting.delete(claims.callId) }
+    }
+  })
+
+  return {
+    server,
+    wss,
+    activeCalls: { get size() { return sessions.size }, has: (callId: string) => sessions.has(callId) },
+    listen: (port, host = '0.0.0.0') => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, () => { server.removeListener('error', reject); resolve() }) }),
+    close: async () => {
+      await Promise.all([...sessions.values()].map((session) => session.finish('server_shutdown')))
+      await options.publisher.closeAll().catch(() => undefined)
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      wss.close()
+    },
+  }
+}
+
+function handleHealth(_request: IncomingMessage, response: ServerResponse, active: number): void {
+  response.statusCode = 200
+  response.setHeader('content-type', 'application/json')
+  response.end(JSON.stringify({ ok: true, activeSessions: active }))
+}

@@ -1,0 +1,259 @@
+import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import test from 'node:test'
+import { assertSecret, createCoachToken, verifyCoachToken } from '../src/auth.js'
+import { parseMedia, parseStart } from '../src/media.js'
+import { MediaIntegrityError, MediaOrderBuffer } from '../src/order.js'
+import { computeScriptDigest, type ScriptBundle } from '../src/script-bundle.js'
+import { CoachSession } from '../src/session.js'
+import { SupabaseDirectCoachDb } from '../src/db.js'
+import { SupabaseCoachPublisher } from '../src/publisher.js'
+import type { CoachClaims, CoachLogger, CoachPublisher, DirectCoachBinding, DirectCoachDb } from '../src/types.js'
+import type { DeepgramLiveBridge, DeepgramLiveBridgeOptions } from '../src/approved/deepgram-live.js'
+import type { ObjectionPromptCall } from '../src/approved/objection-prompt/index.js'
+import type { CoachWireMessage } from '../src/approved/wire-contract.js'
+
+const SECRET = '01234567890123456789012345678901'
+const claims: CoachClaims = { callId: 'call-1', sellerLegId: 'seller-leg-1', expiresAtMs: 1_000_000 }
+const bundle: ScriptBundle = { schema_version: 3, script: { version: '1.2.3' }, sections: { sections: [] } }
+const binding: DirectCoachBinding = { ...claims, ownerUserId: 'owner', orgId: 'org', scriptSlug: 'closr-outbound', scriptRevision: 1, scriptDigest: 'a'.repeat(64), bundle }
+const logger: CoachLogger = { info() {}, warn() {}, error() {} }
+
+test('capability token verifies with exact timing-safe claims and rejects tampering/expiry', () => {
+  const token = createCoachToken(claims, SECRET)
+  assert.deepEqual(verifyCoachToken(token, SECRET, 900_000), claims)
+  assert.throws(() => verifyCoachToken(`${token.slice(0, -1)}x`, SECRET, 900_000))
+  assert.throws(() => verifyCoachToken(createCoachToken({ ...claims, expiresAtMs: 899_999 }, SECRET), SECRET, 900_000))
+  assert.throws(() => verifyCoachToken(createCoachToken({ ...claims, expiresAtMs: 1_110_001 }, SECRET), SECRET, 900_000))
+  assert.throws(() => assertSecret('short'))
+})
+
+test('media format and call-control binding fail closed before a bridge is created', () => {
+  assert.deepEqual(parseStart({ call_control_id: 'seller-leg-1', media_format: { encoding: 'PCMU', sample_rate: 8000, channels: 1 } }), { callControlId: 'seller-leg-1', encoding: 'pcmu', sampleRate: 8000, channels: 1 })
+  assert.throws(() => parseStart({ call_control_id: 'seller-leg-1', media_format: { encoding: 'L16', sample_rate: 16000, channels: 1 } }))
+  assert.deepEqual(parseMedia({ media: { chunk: '1', track: 'inbound', payload: Buffer.from([0x7f]).toString('base64') } }, 123).payload, Buffer.from([0x7f]))
+})
+
+test('global media chunks reorder across tracks and persistent gaps are errors', () => {
+  const delivered: number[] = []
+  const order = new MediaOrderBuffer((media) => delivered.push(media.chunk), { maxGapMs: 10 })
+  order.push({ chunk: 2, track: 'outbound', payload: Buffer.from([2]), receivedAtMs: 100 }, 100)
+  order.push({ chunk: 1, track: 'inbound', payload: Buffer.from([1]), receivedAtMs: 101 }, 101)
+  assert.deepEqual(delivered, [1, 2])
+  const gap = new MediaOrderBuffer(() => {}, { maxGapMs: 1 })
+  gap.push({ chunk: 1, track: 'inbound', payload: Buffer.from([1]), receivedAtMs: 0 }, 0)
+  gap.push({ chunk: 3, track: 'outbound', payload: Buffer.from([3]), receivedAtMs: 2 }, 2)
+  assert.throws(() => gap.push({ chunk: 4, track: 'outbound', payload: Buffer.from([4]), receivedAtMs: 4 }, 4), MediaIntegrityError)
+  assert.throws(() => gap.finish(), MediaIntegrityError)
+})
+
+test('session admits only a matching start and routes seller/rep tracks with seller-only interim coaching', async () => {
+  let now = Date.now()
+  let readCount = 0
+  const db: DirectCoachDb = { readBinding: async () => { readCount += 1; return binding }, isActive: async () => true, close: async () => {} }
+  const published: CoachWireMessage[] = []
+  const publisher: CoachPublisher = { publish: async (_callId, message) => { published.push(message) }, close: async () => {}, closeAll: async () => {} }
+  const bridges: DeepgramLiveBridgeOptions[] = []
+  const bridge: DeepgramLiveBridge = { send() {}, close: async () => {} }
+  const interim: string[] = []
+  const finals: string[] = []
+  const finalAnchors: Array<number | undefined> = []
+  const fakeObjection = { onInterim: (text: string) => interim.push(text), onFinal: (_speaker: string, text: string, _receivedAt: number, _words: unknown, anchor?: number) => { finals.push(text); finalAnchors.push(anchor) }, close() {} } as unknown as ObjectionPromptCall
+  const session = new CoachSession({} as never, { ...claims, expiresAtMs: Date.now() + 100_000 }, binding, {
+    db, publisher, deepgramApiKey: 'deepgram-test-key', jevApiKey: 'jev-test-key', logger,
+    bridgeFactory: (options) => { bridges.push(options); return bridge },
+    objectionFactory: () => fakeObjection,
+  })
+  session.handle(Buffer.from(JSON.stringify({ event: 'start', start: { call_control_id: 'wrong-leg', media_format: { encoding: 'PCMU', sample_rate: 8000, channels: 1 } } })))
+  await tick()
+  assert.equal(bridges.length, 0)
+  const valid = new CoachSession({} as never, { ...claims, expiresAtMs: Date.now() + 100_000 }, binding, {
+    db, publisher, deepgramApiKey: 'deepgram-test-key', jevApiKey: 'jev-test-key', logger,
+    now: () => now++,
+    bridgeFactory: (options) => { bridges.push(options); return bridge }, objectionFactory: () => fakeObjection,
+  })
+  try {
+    valid.handle(Buffer.from(JSON.stringify({ event: 'start', start: { call_control_id: 'seller-leg-1', media_format: { encoding: 'PCMU', sample_rate: 8000, channels: 1 } } })))
+    await tick()
+    await tick()
+    assert.equal(readCount >= 1, true)
+    assert.equal(bridges.length, 2)
+    bridges[0]!.onOpen?.(111)
+    bridges[1]!.onOpen?.(222)
+    bridges[0]!.onTranscript?.({ isFinal: false, text: 'seller interim phrase', words: [], confidence: 1 })
+    bridges[1]!.onTranscript?.({ isFinal: false, text: 'rep interim phrase', words: [], confidence: 1 })
+    bridges[0]!.onTranscript?.({ isFinal: true, text: 'seller final', words: [], confidence: 1 })
+    bridges[1]!.onTranscript?.({ isFinal: true, text: 'rep final', words: [], confidence: 1 })
+    await tick()
+    await tick()
+    assert.deepEqual(interim, ['seller interim phrase'])
+    assert.deepEqual(finals, ['seller final', 'rep final'])
+    assert.deepEqual(finalAnchors, [111, 222])
+    assert.deepEqual(published.map((message) => message.type), ['transcript', 'transcript'])
+    assert.equal(published.some((message) => message.type === 'transcript' && message.text === 'seller final'), true)
+    assert.equal(published.some((message) => message.type === 'transcript' && message.text === 'rep final'), true)
+  } finally { await valid.finish('test') }
+})
+
+test('connected preamble is ignored and a prestart timeout releases the session', async () => {
+  let closed = 0
+  const db: DirectCoachDb = { readBinding: async () => binding, isActive: async () => true, close: async () => {} }
+  const publisher: CoachPublisher = { publish: async () => {}, close: async () => { closed += 1 }, closeAll: async () => {} }
+  const session = new CoachSession({} as never, { ...claims, expiresAtMs: Date.now() + 100_000 }, binding, {
+    db, publisher, deepgramApiKey: 'deepgram-test-key', jevApiKey: 'jev-test-key', logger, preStartTimeoutMs: 5,
+    bridgeFactory: () => ({ send() {}, close: async () => {} }), objectionFactory: () => ({ close() {}, onFinal() {}, onInterim() {} } as unknown as ObjectionPromptCall),
+  })
+  session.handle(Buffer.from(JSON.stringify({ event: 'connected' })))
+  await tick()
+  assert.equal(closed, 0)
+  await new Promise((resolve) => setTimeout(resolve, 15))
+  assert.equal(closed, 1)
+})
+
+test('disconnect during binding read does not allocate paid bridges', async () => {
+  let resolveBinding: ((value: DirectCoachBinding) => void) | undefined
+  const db: DirectCoachDb = { readBinding: () => new Promise((resolve) => { resolveBinding = resolve }), isActive: async () => true, close: async () => {} }
+  let bridgeCount = 0
+  const publisher: CoachPublisher = { publish: async () => {}, close: async () => {}, closeAll: async () => {} }
+  const session = new CoachSession({} as never, { ...claims, expiresAtMs: Date.now() + 100_000 }, binding, {
+    db, publisher, deepgramApiKey: 'deepgram-test-key', jevApiKey: 'jev-test-key', logger,
+    bridgeFactory: () => { bridgeCount += 1; return { send() {}, close: async () => {} } }, objectionFactory: () => ({ close() {}, onFinal() {}, onInterim() {} } as unknown as ObjectionPromptCall),
+  })
+  session.handle(Buffer.from(JSON.stringify({ event: 'start', start: { call_control_id: 'seller-leg-1', media_format: { encoding: 'PCMU', sample_rate: 8000, channels: 1 } } })))
+  await tick()
+  const finishing = session.finish('disconnect')
+  resolveBinding?.(binding)
+  await finishing
+  assert.equal(bridgeCount, 0)
+})
+
+test('graceful close drains a real final transcript before output closes', async () => {
+  const db: DirectCoachDb = { readBinding: async () => binding, isActive: async () => true, close: async () => {} }
+  const published: CoachWireMessage[] = []
+  const publisher: CoachPublisher = { publish: async (_id, message) => { published.push(message) }, close: async () => {}, closeAll: async () => {} }
+  const bridgeOptions: DeepgramLiveBridgeOptions[] = []
+  const session = new CoachSession({} as never, { ...claims, expiresAtMs: Date.now() + 100_000 }, binding, {
+    db, publisher, deepgramApiKey: 'deepgram-test-key', jevApiKey: 'jev-test-key', logger,
+    bridgeFactory: (options) => { bridgeOptions.push(options); return { send() {}, close: async () => { options.onTranscript?.({ isFinal: true, text: 'final seller statement', words: [], confidence: 1 }) } } },
+    objectionFactory: () => ({ close() {}, onFinal() {}, onInterim() {} } as unknown as ObjectionPromptCall),
+  })
+  session.handle(Buffer.from(JSON.stringify({ event: 'start', start: { call_control_id: 'seller-leg-1', media_format: { encoding: 'PCMU', sample_rate: 8000, channels: 1 } } })))
+  await tick()
+  await session.finish('provider_stop')
+  assert.equal(bridgeOptions.length, 2)
+  assert.equal(published.some((message) => message.type === 'transcript' && message.isFinal), true)
+})
+
+test('session closes on stream limits and never sends more after closure', async () => {
+  const db: DirectCoachDb = { readBinding: async () => binding, isActive: async () => true, close: async () => {} }
+  const publisher: CoachPublisher = { publish: async () => {}, close: async () => {}, closeAll: async () => {} }
+  let closed = false
+  const bridge: DeepgramLiveBridge = { send() {}, close: async () => { closed = true } }
+  const session = new CoachSession({} as never, { ...claims, expiresAtMs: Date.now() + 100_000 }, binding, {
+    db, publisher, deepgramApiKey: 'deepgram-test-key', jevApiKey: 'jev-test-key', logger,
+    bridgeFactory: () => bridge, objectionFactory: () => ({ close() {}, onFinal() {}, onInterim() {} } as unknown as ObjectionPromptCall),
+  })
+  session.handle(Buffer.from(JSON.stringify({ event: 'start', start: { call_control_id: 'seller-leg-1', media_format: { encoding: 'PCMU', sample_rate: 8000, channels: 1 } } })))
+  await tick()
+  const payload = Buffer.alloc(64_000, 0x7f).toString('base64')
+  for (let chunk = 1; chunk <= 50; chunk += 1) session.handle(Buffer.from(JSON.stringify({ event: 'media', media: { chunk: String(chunk), track: chunk % 2 ? 'inbound' : 'outbound', payload } })))
+  await tick()
+  assert.equal(closed, true)
+})
+
+test('approved digest canonicalization remains deterministic', () => {
+  const expected = createHash('sha256').update(JSON.stringify({ a: 1, schema_version: 3, script: { version: '1.2.3' }, sections: { sections: [] }, z: { a: 2, b: 3 } })).digest('hex')
+  assert.equal(computeScriptDigest({ ...bundle, z: { b: 3, a: 2 }, a: 1 }), expected)
+})
+
+test('digest matches the installed approved closr-outbound fixture and captured chunks prove global interleave', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/closr-outbound-123.bundle.json', import.meta.url), 'utf8')) as ScriptBundle
+  assert.equal(computeScriptDigest(fixture), 'a01ff92373c6da03906a788badd84567dd35d69c084b75b235cc0eca2429a6d6')
+  const prefix = readFileSync(new URL('./fixtures/media-prefix.jsonl', import.meta.url), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { track: string; chunk: number; sequence: number })
+  assert.deepEqual(prefix.slice(0, 6), [
+    { track: 'inbound', chunk: 1, sequence: 0 }, { track: 'outbound', chunk: 2, sequence: 1 },
+    { track: 'inbound', chunk: 3, sequence: 2 }, { track: 'outbound', chunk: 4, sequence: 3 },
+    { track: 'inbound', chunk: 5, sequence: 4 }, { track: 'outbound', chunk: 6, sequence: 5 },
+  ])
+  assert.equal(new Set(prefix.map((row) => row.chunk)).size, prefix.length)
+  assert.deepEqual(prefix.map((row) => row.sequence), [...prefix.keys()])
+})
+
+test('Supabase binding fails closed on membership/query timeout and accepts the exact reviewed tuple', async () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/closr-outbound-123.bundle.json', import.meta.url), 'utf8')) as ScriptBundle
+  const digest = computeScriptDigest(fixture)
+  const rows: Record<string, unknown> = {
+    direct_calls: { id: claims.callId, seller_leg_id: claims.sellerLegId, operator_user_id: 'owner', org_id: 'org', status: 'connected' },
+    memberships: { user_id: 'owner', org_id: 'org', acquisitions_enabled: true, access_status: 'active', access_expires_at: null, deletion_prepared_at: null },
+    coach_call_index: { client_call_id: claims.callId, operator_user_id: 'owner', script_slug: 'closr-outbound', script_revision: 1, script_digest: digest },
+    coach_script_revisions: { slug: 'closr-outbound', revision: 1, digest, bundle: fixture, import_status: 'reviewed' },
+  }
+  const client = { from(table: string) { const row = rows[table]; return { select() { return this }, eq() { return this }, in() { return this }, abortSignal() { return this }, maybeSingle: async () => ({ data: row, error: null }) } } }
+  const db = new SupabaseDirectCoachDb(client as never, 20)
+  const result = await db.readBinding(claims)
+  assert.equal(result?.scriptDigest, digest)
+  ;(rows.memberships as Record<string, unknown>).acquisitions_enabled = false
+  assert.equal(await db.readBinding(claims), null)
+  const hangingSignals: AbortSignal[] = []
+  const hanging = { from() { return { select() { return this }, eq() { return this }, in() { return this }, abortSignal(signal: AbortSignal) { hangingSignals.push(signal); return this }, maybeSingle: () => new Promise<never>(() => {}) } } }
+  assert.equal(await new SupabaseDirectCoachDb(hanging as never, 5).readBinding(claims), null)
+  assert.equal(hangingSignals.length, 1)
+  assert.equal(hangingSignals[0]?.aborted, true)
+})
+
+test('active-state auth errors fail closed on the first recheck', async () => {
+  let activeChecks = 0
+  let publisherClosed = 0
+  const db: DirectCoachDb = { readBinding: async () => binding, isActive: async () => { activeChecks += 1; throw new Error('membership unavailable') }, close: async () => {} }
+  const publisher: CoachPublisher = { publish: async () => {}, close: async () => { publisherClosed += 1 }, closeAll: async () => {} }
+  const session = new CoachSession({} as never, { ...claims, expiresAtMs: Date.now() + 100_000 }, binding, {
+    db, publisher, deepgramApiKey: 'deepgram-test-key', jevApiKey: 'jev-test-key', logger,
+    bridgeFactory: () => ({ send() {}, close: async () => {} }), objectionFactory: () => ({ close() {}, onFinal() {}, onInterim() {} } as unknown as ObjectionPromptCall),
+  })
+  session.handle(Buffer.from(JSON.stringify({ event: 'start', start: { call_control_id: 'seller-leg-1', media_format: { encoding: 'PCMU', sample_rate: 8000, channels: 1 } } })))
+  await tick()
+  await tick()
+  await (session as unknown as { recheckActive(): Promise<void> }).recheckActive()
+  await (session as unknown as { recheckActive(): Promise<void> }).recheckActive()
+  assert.equal(activeChecks, 1)
+  assert.equal(publisherClosed, 1)
+})
+
+test('publisher removes a wedged subscription and does not retain a pending call', async () => {
+  const removed: unknown[] = []
+  const client = {
+    channel() { return { subscribe() {}, send: async () => 'ok', } },
+    removeChannel(channel: unknown) { removed.push(channel); return Promise.resolve('ok') },
+  }
+  const publisher = new SupabaseCoachPublisher(client as never, 5)
+  await assert.rejects(() => publisher.publish(claims.callId, { scriptVersion: '1.2.3', scriptDigest: 'a'.repeat(64), matcherVersion: 'poc-approved-classifier', type: 'transcript', speaker: 'seller', text: 'x', isFinal: true, ts: new Date().toISOString() }))
+  await publisher.closeAll()
+  assert.equal(removed.length >= 1, true)
+})
+
+test('publisher close fences a retry after an in-flight send and never recreates the channel', async () => {
+  let channelCount = 0
+  let sendStarted!: () => void
+  let rejectSend!: (error: Error) => void
+  const started = new Promise<void>((resolve) => { sendStarted = resolve })
+  const client = {
+    channel() {
+      channelCount += 1
+      return {
+        subscribe(callback: (status: string) => void) { callback('SUBSCRIBED') },
+        send: () => { sendStarted(); return new Promise<'ok'>((_, reject) => { rejectSend = reject as (error: Error) => void }) },
+      }
+    },
+    removeChannel() { return Promise.resolve('ok') },
+  }
+  const publisher = new SupabaseCoachPublisher(client as never, 100)
+  const publishing = publisher.publish(claims.callId, { scriptVersion: '1.2.3', scriptDigest: 'a'.repeat(64), matcherVersion: 'poc-approved-classifier', type: 'transcript', speaker: 'seller', text: 'x', isFinal: true, ts: new Date().toISOString() })
+  await started
+  await publisher.close(claims.callId)
+  rejectSend(new Error('send interrupted'))
+  await assert.rejects(publishing)
+  assert.equal(channelCount, 1)
+})
+
+function tick(): Promise<void> { return new Promise((resolve) => setImmediate(resolve)) }

@@ -1,0 +1,32 @@
+{
+  "approvedSourceCommit": "287a1b36fbadd6ac90d77db01fe83e12b273cce1",
+  "approvedSource": {
+    "deepgramLive": {
+      "path": "src/coach/deepgram-live.ts",
+      "sourceSha256": "a77ea659d4b8fd1df0c4ae2f7a3bfa9f560cdf1e5d6a3aecbb79a8758a9ee6bd",
+      "adaptedSha256": "3398131b65b7b4ac60931f30dd8ac7598d1221ddcd304de8d19acbc95154ebd2"
+    },
+    "objectionPrompt": {
+      "path": "src/coach/objection-prompt/index.ts",
+      "sourceSha256": "0f7479494118f78b16fb5b27b5e9c9310334130aaea448e0642cf2f77b85e051",
+      "adaptedSha256": "af637d4049587e669cdc1e7f239fdf8ffbb48b447739d65b73db956585c81859"
+    },
+    "jevQuestions": "54082c78d9275d1d8cf4bbca815f91e41e70acccf4f753103e2110fe68722f7e",
+    "motivationQuestions": "da656551f9589a3746fd5337517969a120cfba07628341e288e58057ef770a07"
+  },
+  "verifiedFixture": {
+    "source": "@biginkc/coach@0.3.2 fixtures/closrOutbound123Bundle",
+    "bundleSha256": "0cbeeb42ab09c58ec0eeee4ec89d4436d0d9f8110c5c3bc96400d81a31e8fd14",
+    "expectedDigest": "a01ff92373c6da03906a788badd84567dd35d69c084b75b235cc0eca2429a6d6"
+  },
+  "capturedFixture": {
+    "source": "work/poc-capture-841762bb9ebc7982/{inbound,outbound}.jsonl",
+    "sanitized": "test/fixtures/media-prefix.jsonl",
+    "fields": ["track", "chunk", "sequence"]
+  },
+  "adaptation": [
+    "Only standalone relative import extensions, JSON module attributes, and logger/type seams were changed.",
+    "No Jitter runtime or live provider code was imported. Script digest canonicalization mirrors the approved bundle digest algorithm.",
+    "Track mapping is Telnyx inbound=seller and outbound=rep; only seller interim text reaches the classifier."
+  ]
+}
