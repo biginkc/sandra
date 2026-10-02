@@ -13,7 +13,10 @@ interface QueryBuilder<T> {
   abortSignal(signal: AbortSignal): QueryBuilder<T>
   maybeSingle(): PromiseLike<QueryResult<T>>
 }
-interface CoachDbClient { from<T = unknown>(table: string): QueryBuilder<T> }
+interface CoachDbClient {
+  from<T = unknown>(table: string): QueryBuilder<T>
+  rpc<T = unknown>(fn: string, args?: Record<string, unknown>): PromiseLike<QueryResult<T>>
+}
 interface DirectCallRow { id: string; seller_leg_id: string | null; operator_user_id: string; org_id: string; status: string }
 interface MembershipRow { user_id: string; org_id: string; acquisitions_enabled: boolean; access_status: string; access_expires_at: string | null; deletion_prepared_at: string | null }
 interface IndexRow { client_call_id?: string; operator_user_id?: string; script_slug: string | null; script_revision: number | null; script_digest: string | null }
@@ -56,6 +59,27 @@ export class SupabaseDirectCoachDb implements DirectCoachDb {
     return Boolean(membership && eligibleMembership(membership, call))
   }
 
+  async watchdogHeartbeat(instanceId: string): Promise<void> {
+    await this.rpc('direct_watchdog_heartbeat', { p_instance: instanceId })
+  }
+
+  async watchdogAttach(args: { callId: string; operatorUserId: string; browserLegId: string; sessionId: string }): Promise<boolean> {
+    return this.rpc<boolean>('direct_call_watchdog_attach', { p_id: args.callId, p_operator: args.operatorUserId, p_browser_leg: args.browserLegId, p_session: args.sessionId })
+  }
+
+  async watchdogRenew(args: { callId: string; operatorUserId: string; browserLegId: string; sessionId: string }): Promise<boolean> {
+    return this.rpc<boolean>('direct_call_watchdog_renew', { p_id: args.callId, p_operator: args.operatorUserId, p_browser_leg: args.browserLegId, p_session: args.sessionId })
+  }
+
+  async watchdogDisconnect(args: { callId: string; operatorUserId: string; browserLegId: string; sessionId: string; abnormal: boolean }): Promise<boolean> {
+    return this.rpc<boolean>('direct_call_watchdog_disconnect', { p_id: args.callId, p_operator: args.operatorUserId, p_browser_leg: args.browserLegId, p_session: args.sessionId, p_abnormal: args.abnormal })
+  }
+
+  async watchdogClaimExpired(limit: number): Promise<Array<{ callId: string; operatorUserId: string; sessionId: string }>> {
+    const rows = await this.rpc<Array<{ call_id: string; operator_user_id: string; browser_watchdog_session_id: string }>>('direct_call_watchdog_claim_expired', { p_limit: limit })
+    return (rows ?? []).map((row) => ({ callId: row.call_id, operatorUserId: row.operator_user_id, sessionId: row.browser_watchdog_session_id }))
+  }
+
   async close(): Promise<void> {}
 
   private async one<T>(build: (signal: AbortSignal) => PromiseLike<QueryResult<T>>): Promise<T | null> {
@@ -63,6 +87,12 @@ export class SupabaseDirectCoachDb implements DirectCoachDb {
     const result = await withTimeout(Promise.resolve().then(() => build(controller.signal)), this.queryTimeoutMs, controller)
     if (result.error) throw new Error('bounded Supabase query failed')
     return result.data
+  }
+
+  private async rpc<T>(fn: string, args: Record<string, unknown>): Promise<T> {
+    const result = await withTimeout(Promise.resolve(this.client.rpc<T>(fn, args)), this.queryTimeoutMs)
+    if (result.error) throw new Error('bounded watchdog RPC failed')
+    return result.data as T
   }
 }
 

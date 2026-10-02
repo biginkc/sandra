@@ -1,5 +1,7 @@
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 
+import { randomUUID } from "node:crypto";
+
 import { processDueCleanups, type CleanupResult } from "./cleanup";
 import { processPendingResumes } from "./lead-resume";
 import { readDirectCallTimeLimitSecs, readTelnyxDirectSettings, resolveCallingConfig, type DirectCallEnv, type TelnyxDirectSettings } from "./config";
@@ -16,6 +18,7 @@ import {
   type StartDirectCallResult,
 } from "./contract";
 import type { DirectCallCleanupRow, DirectCallFullRow, DirectCallStore } from "./store";
+import { createDirectWatchdogToken, type DirectWatchdogConfig } from "./watchdog";
 import { TelnyxApiError, type ActiveCall, type DialParams } from "./telnyx";
 import { dispatchMarkerStillValid, TEARDOWN_PENDING, staleOutcome, teardownBegun, type CleanupSpec } from "./transitions";
 
@@ -47,6 +50,8 @@ export type DirectCallServiceDeps = {
   report: (error: unknown, tag: string) => void;
   /** The server action supplies the result of its authoritative Acquisitions membership check. */
   isEligible: (userId: string) => boolean;
+  /** Production actions pass null when the independent watchdog is unavailable. Legacy unit fakes may omit it. */
+  watchdog?: DirectWatchdogConfig | null;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -65,7 +70,7 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
   function gate(userId: string): { ok: true; settings: TelnyxDirectSettings; timeLimitSecs: number } | ReturnType<typeof err> {
     const settings = readTelnyxDirectSettings(env);
     const timeLimitSecs = readDirectCallTimeLimitSecs(env);
-    if (resolveCallingConfig(userId, env, deps.isEligible(userId)).transport !== "telnyx_direct" || !settings || timeLimitSecs === null) {
+    if (resolveCallingConfig(userId, env, deps.isEligible(userId)).transport !== "telnyx_direct" || !settings || timeLimitSecs === null || ("watchdog" in deps && !deps.watchdog)) {
       return err("Direct calling is not enabled for this account.", "not_enabled");
     }
     return { ok: true, settings, timeLimitSecs };
@@ -111,11 +116,13 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
   function startResult(row: DirectCallFullRow, userId: string): StartDirectCallResult | null {
     if (!row.browser_leg_id) return null;
     const { capability } = deps.sealCallIdentity({ callId: row.id, userId, phoneE164: row.destination_e164 });
+    const watchdogToken = deps.watchdog ? createDirectWatchdogToken(row, userId, deps.watchdog) : null;
     return {
       directCallId: row.id,
       browserLegId: row.browser_leg_id,
       correlationHeader: { name: "X-Sandra-Direct-Call-Id", value: row.id },
       ...(capability ? { callCapability: capability } : {}),
+      ...(watchdogToken && deps.watchdog ? { browserWatchdog: { url: deps.watchdog.presenceUrl, token: watchdogToken } } : {}),
     };
   }
 
@@ -230,6 +237,7 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
         caller_id_e164: settings.callerIdE164,
         time_limit_secs: timeLimitSecs,
         client_request_id: clientRequestId,
+        browser_watchdog_session_id: randomUUID(),
       });
       if (begun.outcome === "duplicate_request") {
         if (begun.row.failure_reason === CANCELLED_BEFORE_START) return err("This call was cancelled.", "cancelled", false);
@@ -239,6 +247,7 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
       if (begun.outcome === "busy_cleanup") return err("Your previous call is still hanging up. Try again in a moment.", "teardown_pending", false);
       if (begun.outcome === "busy_call") return err("You already have a call in progress.", "call_in_progress", false);
       if (begun.outcome === "invalid_target") return err("A valid lead is required.", "invalid_request", false);
+      if (begun.outcome === "watchdog_unavailable") return err("Calling is unavailable while call safety monitoring is offline.", "watchdog_unavailable", false);
       row = (begun as Extract<typeof begun, { outcome: "created" }>).row;
     } catch (error) {
       // Whether the reservation committed is unknown: the browser reconciles by request id.
@@ -308,6 +317,16 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
         if (!deps.recordTrainingActivity) throw new Error("Training activity recorder unavailable");
         await deps.recordTrainingActivity({ directCallId: row.id, operatorUserId: userId, target });
       }
+      if (deps.watchdog) {
+        const sessionId = (await store.findById(row.id))?.browser_watchdog_session_id;
+        const armed = sessionId ? await store.armWatchdog(row.id, userId, sessionId) : false;
+        if (!armed) {
+          await store.updateIfStatus(row.id, LIVE, { status: "failed", failure_reason: "watchdog_unavailable", ended_at: deps.now().toISOString() });
+          await store.dialRejected(row.id, "browser");
+          await resumes(userId);
+          return err("Calling is unavailable while call safety monitoring is offline.", "watchdog_unavailable", true);
+        }
+      }
       // Reserve the provider-dispatch boundary before issuing the request. A crash after this write
       // is treated as an unknown Dial and reconciled; a cancellation before it wins without dialing.
       const dispatchMarkedAt = deps.now().toISOString();
@@ -352,6 +371,13 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
       await store.dialSucceeded(row.id, dialed.callControlId, "browser");
       const current = await store.findById(row.id);
       if (current && DIRECT_CALL_TERMINAL_STATUSES.has(current.status)) return err("Could not start the call. Try again.", "start_failed", true);
+      const watchdogToken = deps.watchdog ? createDirectWatchdogToken((await store.findById(row.id)) ?? row, userId, deps.watchdog) : null;
+      if (deps.watchdog && !watchdogToken) {
+        await store.updateIfStatus(row.id, LIVE, { status: "failed", failure_reason: "watchdog_token_unavailable", ended_at: deps.now().toISOString() });
+        await store.dialRejected(row.id, "browser");
+        await resumes(userId);
+        return err("Calling is unavailable while call safety monitoring is offline.", "watchdog_unavailable", true);
+      }
       return {
         ok: true,
         data: {
@@ -359,6 +385,7 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
           browserLegId: dialed.callControlId,
           correlationHeader: { name: "X-Sandra-Direct-Call-Id", value: row.id },
           ...(identity.capability ? { callCapability: identity.capability } : {}),
+          ...(watchdogToken && deps.watchdog ? { browserWatchdog: { url: deps.watchdog.presenceUrl, token: watchdogToken } } : {}),
           target,
         },
       };

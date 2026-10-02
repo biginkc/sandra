@@ -8,7 +8,13 @@ import { cleanupSpecToJson } from "./serialize";
 import type { CleanupSpec, RowPatch, SellerDialState } from "./transitions";
 
 type RawRow = Database["public"]["Tables"]["direct_calls"]["Row"];
-export type DirectCallFullRow = Omit<RawRow, "status" | "seller_dial_state"> & { status: DirectCallStatus; seller_dial_state: SellerDialState | null };
+export type DirectWatchdogRow = {
+  browser_watchdog_session_id: string | null;
+  browser_watchdog_seen_at: string | null;
+  browser_watchdog_expires_at: string | null;
+  browser_watchdog_claimed_at: string | null;
+};
+export type DirectCallFullRow = Omit<RawRow, "status" | "seller_dial_state"> & DirectWatchdogRow & { status: DirectCallStatus; seller_dial_state: SellerDialState | null };
 const typed = (row: RawRow | null): DirectCallFullRow | null => row as DirectCallFullRow | null;
 type RawCleanup = Database["public"]["Tables"]["direct_call_cleanups"]["Row"];
 export type DirectCallCleanupRow = Omit<RawCleanup, "kind"> & { kind: "leg" | "unresolved_dial" };
@@ -25,12 +31,14 @@ export type NewDirectCall = {
   caller_id_e164: string;
   time_limit_secs: number;
   client_request_id: string;
+  browser_watchdog_session_id?: string;
 };
 
 export type BeginOutcome =
   | { outcome: "created"; row: DirectCallFullRow }
   | { outcome: "duplicate_request"; row: DirectCallFullRow }
   | { outcome: "invalid_target" }
+  | { outcome: "watchdog_unavailable" }
   | { outcome: "busy_call" | "busy_cleanup" };
 
 export type EventInsertResult = "inserted" | "duplicate_processed" | "duplicate_unprocessed";
@@ -70,6 +78,8 @@ export interface DirectCallStore {
   dialSucceeded(id: string, legId: string, role: "browser" | "seller"): Promise<boolean>;
   /** Durably marks the provider-dispatch boundary and anchors cleanup timing to it. */
   markDialStarted(id: string, role: "browser" | "seller", startedAt: string, timeoutSecs: number, timeLimitSecs: number): Promise<boolean>;
+  /** Arms the browser-loss lease after preparation, immediately before dispatch. */
+  armWatchdog(id: string, operatorUserId: string, sessionId: string): Promise<boolean>;
   /** Provider definitively refused, or dispatch was proven never sent: resolve the obligation. */
   dialRejected(id: string, role: "browser" | "seller"): Promise<void>;
   /** Another non-terminal direct call (any operator) exists for this property. */
@@ -103,6 +113,9 @@ function fail(error: { message: string } | null): never {
 
 export function createSupabaseDirectCallStore(admin = createAdminClient()): DirectCallStore {
   const calls = () => admin.from("direct_calls");
+  // Generated Supabase types intentionally lag unapplied additive migrations. Keep the new
+  // watchdog RPC names behind this narrow typed boundary until the schema types are regenerated.
+  const watchdogRpc = admin.rpc.bind(admin) as unknown as (fn: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: { message: string; code?: string } | null }>;
   return {
     async insertEvent(event) {
       const { error } = await admin.from("direct_call_events").insert({
@@ -167,7 +180,10 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
       return data === "call" || data === "cleanup" ? data : null;
     },
     async beginCall(call) {
-      const { data, error } = await admin.rpc("direct_call_begin", {
+      // The service always supplies a session nonce and therefore always uses the watchdog-era
+      // signature. The old call is retained only for historical loopback migration tests that
+      // intentionally exercise the pre-watchdog schema; no production caller omits the nonce.
+      const args = {
         p_org: call.org_id,
         p_operator: call.operator_user_id,
         p_property: call.property_id,
@@ -177,7 +193,11 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
         p_request: call.client_request_id,
         p_time_limit_secs: call.time_limit_secs,
         p_preparation_property: call.preparation_property_id,
-      });
+      };
+      const response = call.browser_watchdog_session_id
+        ? await watchdogRpc("direct_call_begin", { ...args, p_watchdog_session: call.browser_watchdog_session_id })
+        : await admin.rpc("direct_call_begin", args);
+      const { data, error } = response as { data: unknown; error: { message: string; code?: string } | null };
       if (error) {
         // A uniqueness violation here means a concurrent writer beat the advisory lock's snapshot.
         if (error.code === UNIQUE_VIOLATION) return { outcome: "busy_call" };
@@ -189,7 +209,7 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
       }
       const result = (data as Array<{ outcome: string; call_id: string | null }> | null)?.[0];
       if (!result) fail(null);
-      if (result.outcome === "busy_call" || result.outcome === "busy_cleanup") return { outcome: result.outcome };
+      if (result.outcome === "busy_call" || result.outcome === "busy_cleanup" || result.outcome === "watchdog_unavailable") return { outcome: result.outcome };
       const { data: row, error: readError } = await calls().select("*").eq("id", result.call_id!).single();
       if (readError) fail(readError);
       return { outcome: result.outcome === "created" ? "created" : "duplicate_request", row: typed(row)! };
@@ -243,6 +263,11 @@ export function createSupabaseDirectCallStore(admin = createAdminClient()): Dire
         p_timeout_secs: timeoutSecs,
         p_time_limit_secs: timeLimitSecs,
       });
+      if (error) fail(error);
+      return data === true;
+    },
+    async armWatchdog(id, operatorUserId, sessionId) {
+      const { data, error } = await watchdogRpc("direct_call_watchdog_arm", { p_id: id, p_operator: operatorUserId, p_session: sessionId });
       if (error) fail(error);
       return data === true;
     },

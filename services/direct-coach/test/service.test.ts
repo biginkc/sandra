@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import WebSocket from 'ws'
-import { assertSecret, createCoachToken, verifyCoachToken } from '../src/auth.js'
+import { assertSecret, createCoachToken, createWatchdogToken, verifyCoachToken } from '../src/auth.js'
 import { parseMedia, parseStart } from '../src/media.js'
 import { MediaIntegrityError, MediaOrderBuffer } from '../src/order.js'
 import { computeScriptDigest, type ScriptBundle } from '../src/script-bundle.js'
@@ -350,11 +350,64 @@ test('shutdown fences pending upgrades before draining accepted sessions', async
   assert.equal(publisherCloses, 1)
 })
 
+test('browser presence requires origin and first-frame admission, renews the lease, and distinguishes loss from server shutdown', async () => {
+  const presenceClaims = { callId: 'watchdog-call', browserLegId: 'browser-leg', operatorUserId: 'owner', sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', expiresAtMs: Date.now() + 100_000 }
+  const disconnects: boolean[] = []
+  let heartbeats = 0
+  let renewals = 0
+  const db: DirectCoachDb = {
+    readBinding: async () => null,
+    isActive: async () => true,
+    watchdogHeartbeat: async () => { heartbeats += 1 },
+    watchdogAttach: async () => true,
+    watchdogRenew: async () => { renewals += 1; return true },
+    watchdogDisconnect: async ({ abnormal }) => { disconnects.push(abnormal); return true },
+    watchdogClaimExpired: async () => [],
+    close: async () => {},
+  }
+  const publisher: CoachPublisher = { publish: async () => {}, close: async () => {}, closeAll: async () => {} }
+  const service = createCoachServer({
+    secret: SECRET, db, publisher, deepgramApiKey: 'disabled', jevApiKey: 'disabled', logger,
+    watchdog: { secret: SECRET, origins: new Set(['http://localhost']), onExpired: async () => {} },
+  })
+  await service.listen(0, '127.0.0.1')
+  const address = service.server.address()
+  assert.ok(address && typeof address === 'object')
+  const ws = new WebSocket(`ws://127.0.0.1:${address.port}/presence`, { headers: { Origin: 'http://localhost' } })
+  await waitForWebSocketOpen(ws)
+  ws.send(createWatchdogToken(presenceClaims, SECRET))
+  assert.deepEqual(JSON.parse((await waitForWebSocketMessage(ws)) as string), { type: 'presence_ack', callId: presenceClaims.callId })
+  ws.send(JSON.stringify({ type: 'heartbeat' }))
+  assert.deepEqual(JSON.parse((await waitForWebSocketMessage(ws)) as string), { type: 'heartbeat_ack' })
+  await new Promise((resolve) => setTimeout(resolve, 2_200))
+  assert.equal(renewals >= 1, true)
+  ws.terminate()
+  await waitForWebSocketTerminal(ws)
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.deepEqual(disconnects, [true])
+  const replacement = new WebSocket(`ws://127.0.0.1:${address.port}/presence`, { headers: { Origin: 'http://localhost' } })
+  await waitForWebSocketOpen(replacement)
+  replacement.send(JSON.stringify({ type: 'auth', token: createWatchdogToken(presenceClaims, SECRET) }))
+  await waitForWebSocketMessage(replacement)
+  const closing = service.close()
+  await waitForWebSocketTerminal(replacement)
+  await closing
+  assert.equal(heartbeats >= 1, true)
+  assert.equal(disconnects.at(-1), false)
+})
+
 function tick(): Promise<void> { return new Promise((resolve) => setImmediate(resolve)) }
 
 function waitForWebSocketOpen(ws: WebSocket): Promise<void> {
   return new Promise((resolve, reject) => {
     ws.once('open', () => resolve())
+    ws.once('error', reject)
+  })
+}
+
+function waitForWebSocketMessage(ws: WebSocket): Promise<string> {
+  return new Promise((resolve, reject) => {
+    ws.once('message', (message) => resolve(message.toString()))
     ws.once('error', reject)
   })
 }

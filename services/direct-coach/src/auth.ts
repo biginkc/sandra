@@ -1,6 +1,14 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import type { CoachClaims } from './types.js'
 
+export interface WatchdogClaims {
+  readonly callId: string
+  readonly browserLegId: string
+  readonly operatorUserId: string
+  readonly sessionId: string
+  readonly expiresAtMs: number
+}
+
 export const MAX_TOKEN_FUTURE_MS = 210_000
 
 function b64url(value: Buffer | string): string {
@@ -32,6 +40,33 @@ export function verifyCoachToken(token: string, secret: string, nowMs = Date.now
   if (keys.join(',') !== 'callId,expiresAtMs,sellerLegId' || typeof record.callId !== 'string' || !record.callId || typeof record.sellerLegId !== 'string' || !record.sellerLegId || typeof record.expiresAtMs !== 'number' || !Number.isSafeInteger(record.expiresAtMs)) throw new Error('invalid claims')
   if (record.expiresAtMs <= nowMs || record.expiresAtMs > nowMs + MAX_TOKEN_FUTURE_MS) throw new Error('invalid expiry')
   return { callId: record.callId, sellerLegId: record.sellerLegId, expiresAtMs: record.expiresAtMs }
+}
+
+export function createWatchdogToken(claims: WatchdogClaims, secret: string): string {
+  assertSecret(secret)
+  const body = b64url(JSON.stringify(claims))
+  return `${body}.${b64url(createHmac('sha256', secret).update(body).digest())}`
+}
+
+export function verifyWatchdogToken(token: string, secret: string, nowMs = Date.now()): WatchdogClaims {
+  assertSecret(secret)
+  const parts = token.split('.')
+  if (parts.length !== 2 || !parts[0] || !parts[1]) throw new Error('invalid watchdog token')
+  const expected = createHmac('sha256', secret).update(parts[0]).digest()
+  const provided = Buffer.from(parts[1], 'base64url')
+  if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) throw new Error('invalid watchdog token')
+  const value = parseBase64Json(parts[0])
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid watchdog claims')
+  const record = value as Record<string, unknown>
+  const keys = Object.keys(record).sort()
+  if (keys.join(',') !== 'browserLegId,callId,expiresAtMs,operatorUserId,sessionId' ||
+      typeof record.callId !== 'string' || !record.callId ||
+      typeof record.browserLegId !== 'string' || !record.browserLegId ||
+      typeof record.operatorUserId !== 'string' || !record.operatorUserId ||
+      typeof record.sessionId !== 'string' || !record.sessionId ||
+      typeof record.expiresAtMs !== 'number' || !Number.isSafeInteger(record.expiresAtMs)) throw new Error('invalid watchdog claims')
+  if (record.expiresAtMs <= nowMs || record.expiresAtMs > nowMs + MAX_TOKEN_FUTURE_MS + 7_200_000) throw new Error('invalid watchdog expiry')
+  return { callId: record.callId, browserLegId: record.browserLegId, operatorUserId: record.operatorUserId, sessionId: record.sessionId, expiresAtMs: record.expiresAtMs }
 }
 
 export function assertSecret(secret: string): void {

@@ -29,6 +29,10 @@ export function makeRow(overrides: Partial<DirectCallFullRow> = {}): DirectCallF
     updated_at: "2026-10-01T12:00:00.000Z",
     resume_pending: false,
     resume_claimed_at: null,
+    browser_watchdog_session_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    browser_watchdog_seen_at: null,
+    browser_watchdog_expires_at: null,
+    browser_watchdog_claimed_at: null,
     ...overrides,
   };
 }
@@ -280,6 +284,13 @@ export class FakeStore implements DirectCallStore {
     row.backstop_at = new Date(atMs + (timeoutSecs + DISPATCH_MARKER_RESPONSE_ALLOWANCE_SECS + timeLimitSecs + 60) * 1000).toISOString();
     row.next_attempt_at = row.resolve_after;
     if (role === "browser") this.calls.set(id, { ...call, browser_dial_started_at: startedAt, updated_at: startedAt });
+    return true;
+  }
+  async armWatchdog(id: string, operatorUserId: string, sessionId: string) {
+    const row = this.calls.get(id);
+    if (!row || row.operator_user_id !== operatorUserId || row.browser_watchdog_session_id !== sessionId || row.status !== "browser_connecting" || row.browser_watchdog_claimed_at) return false;
+    const now = this.clock().toISOString();
+    this.calls.set(id, { ...row, browser_watchdog_seen_at: now, browser_watchdog_expires_at: new Date(this.clock().getTime() + 20_000).toISOString(), updated_at: now });
     return true;
   }
   async hasActiveCallForProperty(propertyId: string, excludeId: string | null) {
