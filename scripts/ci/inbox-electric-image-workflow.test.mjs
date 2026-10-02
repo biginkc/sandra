@@ -1,7 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import yaml from 'js-yaml';
 
 const WORKFLOW_PATH = '.github/workflows/inbox-electric-image.yml';
@@ -75,6 +84,8 @@ function assertWorkflow(source) {
   const parsed = parseWorkflow(source);
   const approval = stepNamed(parsed, 'Require recorded EIMG-R1 public-publish approval');
   const setupBuildx = stepNamed(parsed, 'Set up Docker Buildx');
+  const repoCheckout = stepNamed(parsed, 'Check out this Sandra repository at the workflow SHA');
+  const upstreamCheckout = stepNamed(parsed, 'Check out pinned upstream Electric source');
   const stageLicenses = stepNamed(parsed, 'Stage upstream license files');
   const upstreamBuild = stepNamed(parsed, 'Build upstream Electric sync-service');
   const build = stepNamed(parsed, 'Build and push Electric sync-service');
@@ -89,6 +100,26 @@ function assertWorkflow(source) {
   assert.match(approval.run, new RegExp(`\\[\\[ "\\$publish_ok" != '${EXPECTED_PUBLISH_TOKEN}' \\]\\]`));
   assert.match(approval.run, /\[\[ -n "\$visibility" && "\$visibility" != 'public' \]\]/);
   assert.match(source, /if \[\[ "\$\{GITHUB_REF\}" != 'refs\/heads\/main' \]\]; then[\s\S]*?exit 1/);
+  assert.equal(repoCheckout.uses, EXPECTED_BUILDER_ACTIONS.checkout);
+  assert.equal(repoCheckout.with.ref, '${{ github.sha }}');
+  assert.equal(repoCheckout.with['persist-credentials'], false);
+  assert.equal(repoCheckout.with.path, '.');
+  assert.equal(repoCheckout.with.repository, undefined, 'root checkout must use the current repository');
+  assert.equal(upstreamCheckout.with.path, 'electric');
+  assert.equal(upstreamCheckout.with['persist-credentials'], false);
+  assert.notEqual(repoCheckout.with.path, upstreamCheckout.with.path, 'the two checkouts must not share a path');
+  assert.ok(
+    stepIndex(parsed, 'Require dispatch from main') < stepIndex(parsed, 'Check out this Sandra repository at the workflow SHA'),
+    'Sandra checkout must follow the main-ref guard',
+  );
+  assert.ok(
+    stepIndex(parsed, 'Require recorded EIMG-R1 public-publish approval') < stepIndex(parsed, 'Check out this Sandra repository at the workflow SHA'),
+    'Sandra checkout must follow the publish-approval guard',
+  );
+  assert.ok(
+    stepIndex(parsed, 'Check out this Sandra repository at the workflow SHA') < stepIndex(parsed, 'Check out pinned upstream Electric source'),
+    'Sandra checkout must precede the upstream checkout',
+  );
   assert.match(source, /repository:\s+electric-sql\/electric/);
   assert.match(source, new RegExp(`ref:\\s+${EXPECTED_COMMIT}`));
   assert.doesNotMatch(source, /inputs\./, 'the upstream commit must not be an input');
@@ -139,6 +170,20 @@ function assertWorkflow(source) {
   assert.match(source, /'\/LICENSE': process\.env\.UPSTREAM_LICENSE/);
   assert.match(source, /'\/NOTICE': process\.env\.UPSTREAM_NOTICE/);
 
+  const repoCheckoutIndex = stepIndex(parsed, 'Check out this Sandra repository at the workflow SHA');
+  const wrapperBuildIndex = stepIndex(parsed, 'Build and push Electric sync-service');
+  const stepsThatReferenceRootCheckoutPaths = buildSteps(parsed)
+    .map((step, index) => [step, index])
+    .filter(([step]) => {
+      const serialized = JSON.stringify(step);
+      return serialized.includes(LICENSE_WRAPPER_PATH) || serialized.includes('.inbox-electric-licenses/');
+    });
+  assert.ok(stepsThatReferenceRootCheckoutPaths.length > 0, 'workflow must reference the wrapper and staged license paths');
+  for (const [, index] of stepsThatReferenceRootCheckoutPaths) {
+    assert.ok(repoCheckoutIndex < index, 'Sandra checkout must precede every wrapper or staged-license path reference');
+  }
+  assert.ok(repoCheckoutIndex < wrapperBuildIndex, 'Sandra checkout must precede the wrapper build');
+
   assert.match(licenseWrapper, /^FROM upstream-electric$/m);
   assert.deepEqual(
     licenseWrapper.match(/^COPY\s+.*\s+\/licenses\/.*$/gm),
@@ -150,6 +195,54 @@ function assertWorkflow(source) {
   assert.equal(attestation.uses, EXPECTED_BUILDER_ACTIONS.attest);
   assert.equal(attestation.with['push-to-registry'], true);
 }
+
+test('both checkout trees provide every workflow-referenced build path', () => {
+  const parsed = parseWorkflow(workflow);
+  const stageLicenses = stepNamed(parsed, 'Stage upstream license files');
+  const upstreamBuild = stepNamed(parsed, 'Build upstream Electric sync-service');
+  const build = stepNamed(parsed, 'Build and push Electric sync-service');
+  const workspace = mkdtempSync(join(tmpdir(), 'inbox-electric-image-workspace-'));
+
+  try {
+    mkdirSync(join(workspace, '.github/docker'), { recursive: true });
+    writeFileSync(join(workspace, build.with.file), licenseWrapper);
+
+    const upstreamRoot = join(workspace, 'electric');
+    mkdirSync(join(upstreamRoot, 'packages/sync-service'), { recursive: true });
+    mkdirSync(join(upstreamRoot, 'packages/electric-telemetry'), { recursive: true });
+    writeFileSync(join(upstreamRoot, 'packages/sync-service/Dockerfile'), 'FROM scratch\n');
+    writeFileSync(join(upstreamRoot, 'LICENSE'), 'upstream license\n');
+    writeFileSync(join(upstreamRoot, 'NOTICE'), 'upstream notice\n');
+    mkdirSync(join(upstreamRoot, '.inbox-electric-licenses'));
+    writeFileSync(join(upstreamRoot, '.inbox-electric-licenses/LICENSE'), 'upstream license\n');
+    writeFileSync(join(upstreamRoot, '.inbox-electric-licenses/NOTICE'), 'upstream notice\n');
+
+    const referencedPaths = [
+      resolve(workspace, stageLicenses['working-directory']),
+      resolve(workspace, upstreamBuild.with.context),
+      resolve(workspace, upstreamBuild.with.file),
+      resolve(workspace, 'electric/packages/electric-telemetry'),
+      resolve(workspace, build.with.context),
+      resolve(workspace, build.with.file),
+      resolve(workspace, 'electric/.inbox-electric-licenses'),
+    ];
+
+    for (const path of referencedPaths) {
+      assert.ok(existsSync(path), `workflow-referenced path must exist in simulated workspace: ${path}`);
+    }
+
+    assert.ok(
+      existsSync(resolve(workspace, 'electric/.inbox-electric-licenses/LICENSE')),
+      'staged upstream LICENSE must remain inside the upstream checkout',
+    );
+    assert.ok(
+      existsSync(resolve(workspace, '.github/docker/inbox-electric-license.Dockerfile')),
+      'wrapper Dockerfile must remain inside the root checkout',
+    );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
 
 test('Electric image workflow baseline passes all source, supply-chain, and build guards', () => {
   assert.doesNotThrow(() => assertWorkflow(workflow));
@@ -202,6 +295,34 @@ function movePublishGuardAfterPush(source) {
   return withoutGuard.replace('      - name: Validate pushed image digest\n', `${guardBlock}      - name: Validate pushed image digest\n`);
 }
 
+function findSandraCheckoutBlock(source) {
+  const block = source.match(
+    /      - name: Check out this Sandra repository at the workflow SHA\n[\s\S]*?(?=      - name: Check out pinned upstream Electric source\n)/,
+  )?.[0];
+  assert.ok(block, 'Sandra checkout block must be present');
+  return block;
+}
+
+function removeSandraCheckout(source) {
+  return source.replace(findSandraCheckoutBlock(source), '');
+}
+
+function moveSandraCheckoutAfterWrapperBuild(source) {
+  const block = findSandraCheckoutBlock(source);
+  const withoutCheckout = source.replace(block, '');
+  return withoutCheckout.replace(
+    '      - name: Validate pushed image digest\n',
+    `${block}      - name: Validate pushed image digest\n`,
+  );
+}
+
+function dropSandraPersistCredentials(source) {
+  const block = findSandraCheckoutBlock(source);
+  const withoutPersistCredentials = block.replace('          persist-credentials: false\n', '');
+  assert.notEqual(withoutPersistCredentials, block, 'Sandra checkout persist-credentials mutator must change the block');
+  return source.replace(block, withoutPersistCredentials);
+}
+
 const mutations = [
   ['fixed source commit', (source) => source.replaceAll(EXPECTED_COMMIT, 'd'.repeat(40))],
   ['local release tag check', (source) => source.replace(
@@ -233,6 +354,9 @@ const mutations = [
     '      - name: Require recorded EIMG-R1 public-publish approval\n',
     '      - name: Require recorded EIMG-R1 public-publish approval\n        continue-on-error: true\n',
   )],
+  ['Sandra repository checkout', removeSandraCheckout],
+  ['Sandra repository checkout after wrapper build', moveSandraCheckoutAfterWrapperBuild],
+  ['Sandra repository checkout credentials', dropSandraPersistCredentials],
 ];
 
 for (const [label, mutate] of mutations) {

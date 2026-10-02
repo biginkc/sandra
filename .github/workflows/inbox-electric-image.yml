@@ -46,6 +46,14 @@ jobs:
             exit 1
           fi
 
+      - name: Check out this Sandra repository at the workflow SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: .
+
       - name: Check out pinned upstream Electric source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
