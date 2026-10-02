@@ -1,11 +1,18 @@
 # Emergency capture-off gap and recovery
 
 This packet is a tooling-only emergency control for the three Inbox migrations
-at `4ee23fcb`. It does not drop or disable a trigger. It replaces the 22
-function bodies used by the 27 canonical source-table capture triggers with
-no-ops, so the trigger objects stay attached. The two message revision guards
-are BEFORE-row triggers and return `NEW` (or `OLD` for a DELETE); all other
-covered triggers are AFTER-row and return `NULL`.
+at `4ee23fcb`. It does not drop or disable a trigger. It replaces the 21
+function bodies used by the 25 canonical source-table capture triggers with
+no-ops, so the trigger objects stay attached. The two
+`public.inbox_guard_inbound_revision` triggers are deliberately excluded: they
+are integrity guards, not capture, and remain live to reject fabricated
+server-owned revisions. The covered triggers are AFTER-row and return `NULL`.
+
+The receipt table is created in `inbox_emergency`, which is intentionally
+outside PR #725's `CATALOG_SCHEMAS` fingerprint list. The schema and table
+revoke privileges from `PUBLIC`, `anon`, `authenticated`, and `service_role`.
+That placement is required so the reviewed reconciliation completion/recovery
+tool does not reject its own capture-off receipt as catalog drift.
 
 ## What the no-op window loses
 
@@ -35,17 +42,26 @@ Rows and counters already committed before capture-off are not rolled back.
 Rows inserted, changed, or deleted during the window are not captured merely
 because the functions are restored. A deletion can leave a source-missing
 tombstone or stale derived state; do not infer coverage from an empty queue.
+New inbound messages written during the window keep
+`messages.inbox_inbound_revision = 0` permanently: the integrity guard remains
+on, while the inbound-head capture function is a no-op, and restore does not
+retroactively allocate revisions.
 
 ## Required recovery after restore
 
-1. Apply `capture-restore.sql`. Its postcondition aborts unless every covered
+1. Before applying `capture-restore.sql`, verify operators have not left any
+   covered trigger disabled with `DISABLE TRIGGER`. The restore precondition
+   requires every covered trigger to have `tgenabled = 'O'` and refuses with
+   `INBOX_CAPTURE_OFF_TRIGGER_CATALOG_DRIFT` otherwise. Re-enable the trigger
+   and retry only after inspecting that drift.
+2. Apply `capture-restore.sql`. Its postcondition aborts unless every covered
    function's `prosrc` MD5 equals the exact body extracted from the approved
    migration files.
-2. Keep `inbox_control.rollout.serving_enabled = false` and run the existing
+3. Keep `inbox_control.rollout.serving_enabled = false` and run the existing
    Inbox reconciliation tool from reconciliation PR **#725**:
    `scripts/inbox-reconcile-completion.mjs --recover-capture-bypass
    --apply-capture-recovery`.
-3. Use the tool's own bounded recovery, route-edge repair, generation/boundary
+4. Use the tool's own bounded recovery, route-edge repair, generation/boundary
    gates, collision checks, and receipt. Then wait for the normal projection
    worker to drain and run its completion/read-only evidence checks. Do not
    invent a second repair algorithm or enable serving as part of this packet.

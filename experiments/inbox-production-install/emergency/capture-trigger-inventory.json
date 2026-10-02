@@ -233,17 +233,6 @@
       "trigger_identities": [
         "public.messages.inbox_capture_inbound_head"
       ]
-    },
-    {
-      "name": "public.inbox_guard_inbound_revision",
-      "migration": "20261002130000_inbox_control_foundation.sql",
-      "line": 69,
-      "approved_md5_prosrc": "fd59b3084d7fcf38f44ca04b0b355a3a",
-      "no_op_md5_prosrc": "f9164225ab82cc0ba308295e4f9de052",
-      "trigger_identities": [
-        "public.messages.zzz_inbox_guard_inbound_revision_insert",
-        "public.messages.zzz_inbox_guard_inbound_revision_update"
-      ]
     }
   ],
   "triggers": [
@@ -469,34 +458,6 @@
       "tgtype": 21,
       "migration": "20261002130000_inbox_control_foundation.sql",
       "line": 95
-    },
-    {
-      "identity": "public.messages.zzz_inbox_guard_inbound_revision_insert",
-      "table": "public.messages",
-      "name": "zzz_inbox_guard_inbound_revision_insert",
-      "function": "public.inbox_guard_inbound_revision",
-      "timing": "BEFORE",
-      "level": "ROW",
-      "events": [
-        "INSERT"
-      ],
-      "tgtype": 7,
-      "migration": "20261002130000_inbox_control_foundation.sql",
-      "line": 91
-    },
-    {
-      "identity": "public.messages.zzz_inbox_guard_inbound_revision_update",
-      "table": "public.messages",
-      "name": "zzz_inbox_guard_inbound_revision_update",
-      "function": "public.inbox_guard_inbound_revision",
-      "timing": "BEFORE",
-      "level": "ROW",
-      "events": [
-        "UPDATE"
-      ],
-      "tgtype": 19,
-      "migration": "20261002130000_inbox_control_foundation.sql",
-      "line": 93
     },
     {
       "identity": "public.messages.zzzzz_inbox_message_direct",

@@ -42,17 +42,16 @@ BEGIN
       ('inbox_safety.consent_capture()', '80f52a0718eedb03f177516b20ab3c4d', '8ab64bae8d78de0c4333d9b2820a4168'),
       ('inbox_safety.suppression_capture()', 'c70a2d52b000a4dad46ccfa137e44680', '8ab64bae8d78de0c4333d9b2820a4168'),
       ('inbox_safety.thread_capture()', '0e284768a7315bbbb1adb8730bd42cc2', '8ab64bae8d78de0c4333d9b2820a4168'),
-      ('public.inbox_capture_inbound_head()', '06d8dd4070ff5b45032f44033dea0053', '8ab64bae8d78de0c4333d9b2820a4168'),
-      ('public.inbox_guard_inbound_revision()', 'fd59b3084d7fcf38f44ca04b0b355a3a', 'f9164225ab82cc0ba308295e4f9de052')
+      ('public.inbox_capture_inbound_head()', '06d8dd4070ff5b45032f44033dea0053', '8ab64bae8d78de0c4333d9b2820a4168')
   )
   SELECT count(*) FILTER (WHERE p.oid IS NULL),
          count(*) FILTER (WHERE p.oid IS NOT NULL AND md5(p.prosrc)=e.approved_md5),
          count(*) FILTER (WHERE p.oid IS NOT NULL AND md5(p.prosrc)=e.no_op_md5),
          count(*)
     INTO total_count, approved_count, no_op_count, attached_count
-    FROM expected e LEFT JOIN pg_proc p ON p.oid=e.name::regprocedure;
+    FROM expected e LEFT JOIN pg_proc p ON p.oid=to_regprocedure(e.name);
   IF total_count <> 0 THEN RAISE EXCEPTION 'INBOX_CAPTURE_OFF_FUNCTION_MISSING'; END IF;
-  IF approved_count <> 22 AND no_op_count <> 22 THEN
+  IF approved_count <> 21 AND no_op_count <> 21 THEN
     RAISE EXCEPTION 'INBOX_CAPTURE_OFF_FUNCTION_BODY_DRIFT';
   END IF;
   WITH expected(identity, function_name, tgtype) AS (VALUES
@@ -70,8 +69,6 @@ BEGIN
       ('public.message_threads.zzzzz_inbox_safety_thread', 'inbox_safety.thread_capture()', 29),
       ('public.message_threads.zzzzzz_inbox_policy', 'inbox_policy.capture_message_threads()', 29),
       ('public.messages.inbox_capture_inbound_head', 'public.inbox_capture_inbound_head()', 21),
-      ('public.messages.zzz_inbox_guard_inbound_revision_insert', 'public.inbox_guard_inbound_revision()', 7),
-      ('public.messages.zzz_inbox_guard_inbound_revision_update', 'public.inbox_guard_inbound_revision()', 19),
       ('public.messages.zzzzz_inbox_message_direct', 'inbox_message_capture.capture()', 29),
       ('public.messages.zzzzzzzz_inbox_operation_target', 'inbox_operation_domain.capture_target()', 29),
       ('public.organizations.zzzzzzz_inbox_reply_context', 'inbox_reply_context.capture_organization()', 29),
@@ -90,11 +87,13 @@ BEGIN
     JOIN pg_class c ON c.oid=t.tgrelid
     JOIN pg_namespace cn ON cn.oid=c.relnamespace
       AND cn.nspname||'.'||c.relname = split_part(e.identity, '.', 1)||'.'||split_part(e.identity, '.', 2)
-    WHERE t.tgfoid=e.function_name::regprocedure AND t.tgtype=e.tgtype AND t.tgenabled='O';
-  IF attached_count <> 27 THEN RAISE EXCEPTION 'INBOX_CAPTURE_OFF_TRIGGER_CATALOG_DRIFT'; END IF;
+    WHERE t.tgfoid=to_regprocedure(e.function_name) AND t.tgtype=e.tgtype AND t.tgenabled='O';
+  IF attached_count <> 25 THEN RAISE EXCEPTION 'INBOX_CAPTURE_OFF_TRIGGER_CATALOG_DRIFT'; END IF;
 END $$;
 
-CREATE TABLE IF NOT EXISTS inbox_control.capture_off_receipts (
+CREATE SCHEMA IF NOT EXISTS inbox_emergency AUTHORIZATION postgres;
+REVOKE ALL ON SCHEMA inbox_emergency FROM PUBLIC, anon, authenticated, service_role;
+CREATE TABLE IF NOT EXISTS inbox_emergency.capture_off_receipts (
   receipt_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   action text NOT NULL CHECK (action IN ('capture_off', 'capture_off_idempotent', 'capture_restore')),
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -103,7 +102,36 @@ CREATE TABLE IF NOT EXISTS inbox_control.capture_off_receipts (
   function_bodies_md5 jsonb NOT NULL,
   trigger_inventory jsonb NOT NULL
 );
-REVOKE ALL ON inbox_control.capture_off_receipts FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON inbox_emergency.capture_off_receipts FROM PUBLIC, anon, authenticated, service_role;
+
+WITH expected(name, no_op_md5) AS (VALUES
+      ('inbox_backfill.capture_collision()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_bridge.capture_access()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_message_capture.capture()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_operation_domain.capture_sms_scope()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_operation_domain.capture_target()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_parent.capture_parent()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_parent.capture_review()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_policy.capture_ai_disposition_reviews()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_policy.capture_consent_events()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_policy.capture_contacts()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_policy.capture_memberships()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_policy.capture_message_threads()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_policy.capture_properties()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_policy.capture_sms_phone_suppressions()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_reply_context.capture_organization()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_reply_context.capture_property()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_reply_context.capture_sender()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_safety.consent_capture()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_safety.suppression_capture()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('inbox_safety.thread_capture()', '8ab64bae8d78de0c4333d9b2820a4168'),
+      ('public.inbox_capture_inbound_head()', '8ab64bae8d78de0c4333d9b2820a4168')
+  )
+INSERT INTO inbox_emergency.capture_off_receipts(action, approved_migration_commit, trigger_count, function_bodies_md5, trigger_inventory)
+SELECT CASE WHEN count(*) FILTER (WHERE p.oid IS NOT NULL AND md5(p.prosrc)=e.no_op_md5) = 21
+            THEN 'capture_off_idempotent' ELSE 'capture_off' END,
+       '4ee23fcb25d05bad77e2cf74189c24bb1f9ea4c2', 25, '{"inbox_backfill.capture_collision":"8ab64bae8d78de0c4333d9b2820a4168","inbox_bridge.capture_access":"8ab64bae8d78de0c4333d9b2820a4168","inbox_message_capture.capture":"8ab64bae8d78de0c4333d9b2820a4168","inbox_operation_domain.capture_sms_scope":"8ab64bae8d78de0c4333d9b2820a4168","inbox_operation_domain.capture_target":"8ab64bae8d78de0c4333d9b2820a4168","inbox_parent.capture_parent":"8ab64bae8d78de0c4333d9b2820a4168","inbox_parent.capture_review":"8ab64bae8d78de0c4333d9b2820a4168","inbox_policy.capture_ai_disposition_reviews":"8ab64bae8d78de0c4333d9b2820a4168","inbox_policy.capture_consent_events":"8ab64bae8d78de0c4333d9b2820a4168","inbox_policy.capture_contacts":"8ab64bae8d78de0c4333d9b2820a4168","inbox_policy.capture_memberships":"8ab64bae8d78de0c4333d9b2820a4168","inbox_policy.capture_message_threads":"8ab64bae8d78de0c4333d9b2820a4168","inbox_policy.capture_properties":"8ab64bae8d78de0c4333d9b2820a4168","inbox_policy.capture_sms_phone_suppressions":"8ab64bae8d78de0c4333d9b2820a4168","inbox_reply_context.capture_organization":"8ab64bae8d78de0c4333d9b2820a4168","inbox_reply_context.capture_property":"8ab64bae8d78de0c4333d9b2820a4168","inbox_reply_context.capture_sender":"8ab64bae8d78de0c4333d9b2820a4168","inbox_safety.consent_capture":"8ab64bae8d78de0c4333d9b2820a4168","inbox_safety.suppression_capture":"8ab64bae8d78de0c4333d9b2820a4168","inbox_safety.thread_capture":"8ab64bae8d78de0c4333d9b2820a4168","public.inbox_capture_inbound_head":"8ab64bae8d78de0c4333d9b2820a4168"}'::jsonb, '[{"identity":"auth.sessions.zzzzzzz_inbox_access","function":"inbox_bridge.capture_access"},{"identity":"public.ai_disposition_reviews.zzzzz_inbox_parent_review","function":"inbox_parent.capture_review"},{"identity":"public.ai_disposition_reviews.zzzzzz_inbox_policy","function":"inbox_policy.capture_ai_disposition_reviews"},{"identity":"public.ai_disposition_reviews.zzzzzzzz_inbox_operation_target","function":"inbox_operation_domain.capture_target"},{"identity":"public.consent_events.zzzzz_inbox_safety_consent","function":"inbox_safety.consent_capture"},{"identity":"public.consent_events.zzzzzz_inbox_policy","function":"inbox_policy.capture_consent_events"},{"identity":"public.contacts.zzzzz_inbox_parent","function":"inbox_parent.capture_parent"},{"identity":"public.contacts.zzzzzz_inbox_policy","function":"inbox_policy.capture_contacts"},{"identity":"public.memberships.zzzzzz_inbox_policy","function":"inbox_policy.capture_memberships"},{"identity":"public.memberships.zzzzzzz_inbox_access","function":"inbox_bridge.capture_access"},{"identity":"public.message_threads.zzzzz_inbox_backfill_collision","function":"inbox_backfill.capture_collision"},{"identity":"public.message_threads.zzzzz_inbox_safety_thread","function":"inbox_safety.thread_capture"},{"identity":"public.message_threads.zzzzzz_inbox_policy","function":"inbox_policy.capture_message_threads"},{"identity":"public.messages.inbox_capture_inbound_head","function":"public.inbox_capture_inbound_head"},{"identity":"public.messages.zzzzz_inbox_message_direct","function":"inbox_message_capture.capture"},{"identity":"public.messages.zzzzzzzz_inbox_operation_target","function":"inbox_operation_domain.capture_target"},{"identity":"public.organizations.zzzzzzz_inbox_reply_context","function":"inbox_reply_context.capture_organization"},{"identity":"public.properties.zzzzz_inbox_parent","function":"inbox_parent.capture_parent"},{"identity":"public.properties.zzzzzz_inbox_policy","function":"inbox_policy.capture_properties"},{"identity":"public.properties.zzzzzzz_inbox_reply_context","function":"inbox_reply_context.capture_property"},{"identity":"public.properties.zzzzzzzzz_inbox_sms_scope","function":"inbox_operation_domain.capture_sms_scope"},{"identity":"public.provider_sender_numbers.zzzzzzz_inbox_reply_context","function":"inbox_reply_context.capture_sender"},{"identity":"public.sequence_enrollments.zzzzzzzzz_inbox_sms_scope","function":"inbox_operation_domain.capture_sms_scope"},{"identity":"public.sms_phone_suppressions.zzzzz_inbox_safety_suppression","function":"inbox_safety.suppression_capture"},{"identity":"public.sms_phone_suppressions.zzzzzz_inbox_policy","function":"inbox_policy.capture_sms_phone_suppressions"}]'::jsonb
+  FROM expected e LEFT JOIN pg_proc p ON p.oid=to_regprocedure(e.name);
 
 CREATE OR REPLACE FUNCTION inbox_backfill.capture_collision() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
 BEGIN
@@ -234,16 +262,6 @@ BEGIN
 END
 $$;
 
-CREATE OR REPLACE FUNCTION public.inbox_guard_inbound_revision()
-RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path = '' AS $$
-BEGIN
-  IF TG_OP = 'DELETE' THEN
-    RETURN OLD;
-  END IF;
-  RETURN NEW;
-END
-$$;
-
 DO $$
 DECLARE bad text;
 BEGIN
@@ -268,12 +286,9 @@ BEGIN
       ('inbox_safety.consent_capture()', '8ab64bae8d78de0c4333d9b2820a4168'),
       ('inbox_safety.suppression_capture()', '8ab64bae8d78de0c4333d9b2820a4168'),
       ('inbox_safety.thread_capture()', '8ab64bae8d78de0c4333d9b2820a4168'),
-      ('public.inbox_capture_inbound_head()', '8ab64bae8d78de0c4333d9b2820a4168'),
-      ('public.inbox_guard_inbound_revision()', 'f9164225ab82cc0ba308295e4f9de052')
+      ('public.inbox_capture_inbound_head()', '8ab64bae8d78de0c4333d9b2820a4168')
   )
-  SELECT e.name INTO bad FROM expected e JOIN pg_proc p ON p.oid=e.name::regprocedure WHERE md5(p.prosrc)<>e.expected_md5 LIMIT 1;
+  SELECT e.name INTO bad FROM expected e JOIN pg_proc p ON p.oid=to_regprocedure(e.name) WHERE md5(p.prosrc)<>e.expected_md5 LIMIT 1;
   IF bad IS NOT NULL THEN RAISE EXCEPTION 'INBOX_CAPTURE_OFF_POSTCONDITION_FAILED: %', bad; END IF;
 END $$;
-INSERT INTO inbox_control.capture_off_receipts(action, approved_migration_commit, trigger_count, function_bodies_md5, trigger_inventory)
-VALUES ('capture_off', '4ee23fcb25d05bad77e2cf74189c24bb1f9ea4c2', 27, '{"inbox_backfill.capture_collision":"8ab64bae8d78de0c4333d9b2820a4168","inbox_bridge.capture_access":"8ab64bae8d78de0c4333d9b2820a4168","inbox_message_capture.capture":"8ab64bae8d78de0c4333d9b2820a4168","inbox_operation_domain.capture_sms_scope":"8ab64bae8d78de0c4333d9b2820a4168","inbox_operation_domain.capture_target":"8ab64bae8d78de0c4333d9b2820a4168","inbox_parent.capture_parent":"8ab64bae8d78de0c4333d9b2820a4168","inbox_parent.capture_review":"8ab64bae8d78de0c4333d9b2820a4168","inbox_policy.capture_ai_disposition_reviews":"8ab64bae8d78de0c4333d9b2820a4168","inbox_policy.capture_consent_events":"8ab64bae8d78de0c4333d9b2820a4168","inbox_policy.capture_contacts":"8ab64bae8d78de0c4333d9b2820a4168","inbox_policy.capture_memberships":"8ab64bae8d78de0c4333d9b2820a4168","inbox_policy.capture_message_threads":"8ab64bae8d78de0c4333d9b2820a4168","inbox_policy.capture_properties":"8ab64bae8d78de0c4333d9b2820a4168","inbox_policy.capture_sms_phone_suppressions":"8ab64bae8d78de0c4333d9b2820a4168","inbox_reply_context.capture_organization":"8ab64bae8d78de0c4333d9b2820a4168","inbox_reply_context.capture_property":"8ab64bae8d78de0c4333d9b2820a4168","inbox_reply_context.capture_sender":"8ab64bae8d78de0c4333d9b2820a4168","inbox_safety.consent_capture":"8ab64bae8d78de0c4333d9b2820a4168","inbox_safety.suppression_capture":"8ab64bae8d78de0c4333d9b2820a4168","inbox_safety.thread_capture":"8ab64bae8d78de0c4333d9b2820a4168","public.inbox_capture_inbound_head":"8ab64bae8d78de0c4333d9b2820a4168","public.inbox_guard_inbound_revision":"f9164225ab82cc0ba308295e4f9de052"}'::jsonb, '[{"identity":"auth.sessions.zzzzzzz_inbox_access","function":"inbox_bridge.capture_access"},{"identity":"public.ai_disposition_reviews.zzzzz_inbox_parent_review","function":"inbox_parent.capture_review"},{"identity":"public.ai_disposition_reviews.zzzzzz_inbox_policy","function":"inbox_policy.capture_ai_disposition_reviews"},{"identity":"public.ai_disposition_reviews.zzzzzzzz_inbox_operation_target","function":"inbox_operation_domain.capture_target"},{"identity":"public.consent_events.zzzzz_inbox_safety_consent","function":"inbox_safety.consent_capture"},{"identity":"public.consent_events.zzzzzz_inbox_policy","function":"inbox_policy.capture_consent_events"},{"identity":"public.contacts.zzzzz_inbox_parent","function":"inbox_parent.capture_parent"},{"identity":"public.contacts.zzzzzz_inbox_policy","function":"inbox_policy.capture_contacts"},{"identity":"public.memberships.zzzzzz_inbox_policy","function":"inbox_policy.capture_memberships"},{"identity":"public.memberships.zzzzzzz_inbox_access","function":"inbox_bridge.capture_access"},{"identity":"public.message_threads.zzzzz_inbox_backfill_collision","function":"inbox_backfill.capture_collision"},{"identity":"public.message_threads.zzzzz_inbox_safety_thread","function":"inbox_safety.thread_capture"},{"identity":"public.message_threads.zzzzzz_inbox_policy","function":"inbox_policy.capture_message_threads"},{"identity":"public.messages.inbox_capture_inbound_head","function":"public.inbox_capture_inbound_head"},{"identity":"public.messages.zzz_inbox_guard_inbound_revision_insert","function":"public.inbox_guard_inbound_revision"},{"identity":"public.messages.zzz_inbox_guard_inbound_revision_update","function":"public.inbox_guard_inbound_revision"},{"identity":"public.messages.zzzzz_inbox_message_direct","function":"inbox_message_capture.capture"},{"identity":"public.messages.zzzzzzzz_inbox_operation_target","function":"inbox_operation_domain.capture_target"},{"identity":"public.organizations.zzzzzzz_inbox_reply_context","function":"inbox_reply_context.capture_organization"},{"identity":"public.properties.zzzzz_inbox_parent","function":"inbox_parent.capture_parent"},{"identity":"public.properties.zzzzzz_inbox_policy","function":"inbox_policy.capture_properties"},{"identity":"public.properties.zzzzzzz_inbox_reply_context","function":"inbox_reply_context.capture_property"},{"identity":"public.properties.zzzzzzzzz_inbox_sms_scope","function":"inbox_operation_domain.capture_sms_scope"},{"identity":"public.provider_sender_numbers.zzzzzzz_inbox_reply_context","function":"inbox_reply_context.capture_sender"},{"identity":"public.sequence_enrollments.zzzzzzzzz_inbox_sms_scope","function":"inbox_operation_domain.capture_sms_scope"},{"identity":"public.sms_phone_suppressions.zzzzz_inbox_safety_suppression","function":"inbox_safety.suppression_capture"},{"identity":"public.sms_phone_suppressions.zzzzzz_inbox_policy","function":"inbox_policy.capture_sms_phone_suppressions"}]'::jsonb);
 COMMIT;

@@ -43,6 +43,11 @@ SOURCE_RELATIONS = {
     "auth.sessions",
 }
 
+# These BEFORE-row triggers protect the server-owned inbound revision column;
+# they are integrity guards, not Inbox capture and must remain live during the
+# emergency window.
+EXCLUDED_FUNCTIONS = {"public.inbox_guard_inbound_revision"}
+
 FUNCTION_START = re.compile(
     r"\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+"
     r"(?P<name>[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?)\s*\(\s*\)\s*"
@@ -148,13 +153,14 @@ def parse_triggers(path: Path) -> list[Trigger]:
     result: list[Trigger] = []
     for match in TRIGGER_STATEMENT.finditer(text):
         table = match.group("table")
-        if table not in SOURCE_RELATIONS:
+        function = match.group("function")
+        if table not in SOURCE_RELATIONS or function in EXCLUDED_FUNCTIONS:
             continue
         result.append(
             Trigger(
                 name=match.group("name"),
                 table=table,
-                function=match.group("function"),
+                function=function,
                 timing=re.sub(r"\s+", " ", match.group("timing").upper()),
                 level="ROW" if match.group("for_each").upper().endswith("ROW") else "STATEMENT",
                 events=parse_events(match.group("events")),
@@ -191,8 +197,8 @@ def no_op_body(trigger: Trigger) -> str:
 def build() -> None:
     sources = {path.name: parse_function_sources(path) for path in MIGRATIONS}
     triggers = [trigger for path in MIGRATIONS for trigger in parse_triggers(path)]
-    if len(triggers) != 27:
-        raise RuntimeError(f"expected 27 canonical Inbox capture triggers, parsed {len(triggers)}")
+    if len(triggers) != 25:
+        raise RuntimeError(f"expected 25 canonical Inbox capture triggers, parsed {len(triggers)}")
     if {trigger.table for trigger in triggers} != SOURCE_RELATIONS:
         raise RuntimeError("parsed trigger relation boundary does not cover the approved source relation set")
     if any(trigger.level != "ROW" for trigger in triggers):
@@ -282,7 +288,7 @@ BEGIN
          count(*) FILTER (WHERE p.oid IS NOT NULL AND md5(p.prosrc)=e.no_op_md5),
          count(*)
     INTO total_count, approved_count, no_op_count, attached_count
-    FROM expected e LEFT JOIN pg_proc p ON p.oid=e.name::regprocedure;
+    FROM expected e LEFT JOIN pg_proc p ON p.oid=to_regprocedure(e.name);
   IF total_count <> 0 THEN RAISE EXCEPTION 'INBOX_CAPTURE_OFF_FUNCTION_MISSING'; END IF;
   IF approved_count <> {len(function_records)} AND no_op_count <> {len(function_records)} THEN
     RAISE EXCEPTION 'INBOX_CAPTURE_OFF_FUNCTION_BODY_DRIFT';
@@ -296,7 +302,7 @@ BEGIN
     JOIN pg_class c ON c.oid=t.tgrelid
     JOIN pg_namespace cn ON cn.oid=c.relnamespace
       AND cn.nspname||'.'||c.relname = split_part(e.identity, '.', 1)||'.'||split_part(e.identity, '.', 2)
-    WHERE t.tgfoid=e.function_name::regprocedure AND t.tgtype=e.tgtype AND t.tgenabled='O';
+    WHERE t.tgfoid=to_regprocedure(e.function_name) AND t.tgtype=e.tgtype AND t.tgenabled='O';
   IF attached_count <> {len(triggers)} THEN RAISE EXCEPTION 'INBOX_CAPTURE_OFF_TRIGGER_CATALOG_DRIFT'; END IF;
 END $$;"""
 
@@ -314,7 +320,7 @@ BEGIN
   WITH expected(name, expected_md5) AS (VALUES
       {',\n      '.join(f"({sql_literal(record['name'] + '()')}, {sql_literal(record['no_op_md5_prosrc'])})" for record in function_records)}
   )
-  SELECT e.name INTO bad FROM expected e JOIN pg_proc p ON p.oid=e.name::regprocedure WHERE md5(p.prosrc)<>e.expected_md5 LIMIT 1;
+  SELECT e.name INTO bad FROM expected e JOIN pg_proc p ON p.oid=to_regprocedure(e.name) WHERE md5(p.prosrc)<>e.expected_md5 LIMIT 1;
   IF bad IS NOT NULL THEN RAISE EXCEPTION 'INBOX_CAPTURE_OFF_POSTCONDITION_FAILED: %', bad; END IF;
 END $$;"""
     restore_post_assert = f"""DO $$
@@ -323,11 +329,13 @@ BEGIN
   WITH expected(name, expected_md5) AS (VALUES
       {',\n      '.join(f"({sql_literal(record['name'] + '()')}, {sql_literal(record['approved_md5_prosrc'])})" for record in function_records)}
   )
-  SELECT e.name INTO bad FROM expected e JOIN pg_proc p ON p.oid=e.name::regprocedure WHERE md5(p.prosrc)<>e.expected_md5 LIMIT 1;
+  SELECT e.name INTO bad FROM expected e JOIN pg_proc p ON p.oid=to_regprocedure(e.name) WHERE md5(p.prosrc)<>e.expected_md5 LIMIT 1;
   IF bad IS NOT NULL THEN RAISE EXCEPTION 'INBOX_CAPTURE_RESTORE_POSTCONDITION_FAILED: %', bad; END IF;
 END $$;"""
 
-    receipt_ddl = """CREATE TABLE IF NOT EXISTS inbox_control.capture_off_receipts (
+    receipt_ddl = """CREATE SCHEMA IF NOT EXISTS inbox_emergency AUTHORIZATION postgres;
+REVOKE ALL ON SCHEMA inbox_emergency FROM PUBLIC, anon, authenticated, service_role;
+CREATE TABLE IF NOT EXISTS inbox_emergency.capture_off_receipts (
   receipt_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   action text NOT NULL CHECK (action IN ('capture_off', 'capture_off_idempotent', 'capture_restore')),
   applied_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -336,12 +344,18 @@ END $$;"""
   function_bodies_md5 jsonb NOT NULL,
   trigger_inventory jsonb NOT NULL
 );
-REVOKE ALL ON inbox_control.capture_off_receipts FROM PUBLIC, anon, authenticated, service_role;"""
-    receipt_insert = f"""INSERT INTO inbox_control.capture_off_receipts(action, approved_migration_commit, trigger_count, function_bodies_md5, trigger_inventory)
-VALUES ('capture_off', {sql_literal(APPROVED_COMMIT)}, {len(triggers)}, {sql_literal(digest_json)}::jsonb, {sql_literal(trigger_json)}::jsonb);"""
+REVOKE ALL ON inbox_emergency.capture_off_receipts FROM PUBLIC, anon, authenticated, service_role;"""
+    receipt_insert = f"""WITH expected(name, no_op_md5) AS (VALUES
+      {',\n      '.join(f"({sql_literal(record['name'] + '()')}, {sql_literal(record['no_op_md5_prosrc'])})" for record in function_records)}
+  )
+INSERT INTO inbox_emergency.capture_off_receipts(action, approved_migration_commit, trigger_count, function_bodies_md5, trigger_inventory)
+SELECT CASE WHEN count(*) FILTER (WHERE p.oid IS NOT NULL AND md5(p.prosrc)=e.no_op_md5) = {len(function_records)}
+            THEN 'capture_off_idempotent' ELSE 'capture_off' END,
+       {sql_literal(APPROVED_COMMIT)}, {len(triggers)}, {sql_literal(digest_json)}::jsonb, {sql_literal(trigger_json)}::jsonb
+  FROM expected e LEFT JOIN pg_proc p ON p.oid=to_regprocedure(e.name);"""
     restore_receipt_insert = f"""DO $$ BEGIN
-  IF to_regclass('inbox_control.capture_off_receipts') IS NOT NULL THEN
-    INSERT INTO inbox_control.capture_off_receipts(action, approved_migration_commit, trigger_count, function_bodies_md5, trigger_inventory)
+  IF to_regclass('inbox_emergency.capture_off_receipts') IS NOT NULL THEN
+    INSERT INTO inbox_emergency.capture_off_receipts(action, approved_migration_commit, trigger_count, function_bodies_md5, trigger_inventory)
     VALUES ('capture_restore', {sql_literal(APPROVED_COMMIT)}, {len(triggers)}, {sql_literal(json.dumps({record['name']: record['approved_md5_prosrc'] for record in function_records}, separators=(',', ':')))}::jsonb, {sql_literal(trigger_json)}::jsonb);
   END IF;
 END $$;"""
@@ -358,10 +372,11 @@ SET LOCAL statement_timeout='10s';
 
 {receipt_ddl}
 
+{receipt_insert}
+
 {replacements_off}
 
 {post_assert}
-{receipt_insert}
 COMMIT;
 """
     capture_restore = f"""-- GENERATED FILE. Source: {', '.join(path.name for path in MIGRATIONS)} at {APPROVED_COMMIT}.
