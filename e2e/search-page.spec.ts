@@ -53,7 +53,14 @@ test.describe("Search page", () => {
   test.beforeEach(async () => {
     // Fail closed BEFORE any reset/seed: these specs destroy tenant rows, so they
     // may only run against a disposable loopback stack (never hosted TEST).
-    assertLocalOnlyTestEnv(process.env.TEST_SUPABASE_DB_URL, process.env.TEST_SUPABASE_URL);
+    // CI's provision script exports E2E_CI_SUPABASE_DB_URL; local runs export TEST_SUPABASE_DB_URL.
+    // Every DB URL that is set must be loopback, and at least one must be set.
+    const dbUrls = [process.env.E2E_CI_SUPABASE_DB_URL, process.env.TEST_SUPABASE_DB_URL].filter(
+      (u): u is string => Boolean(u),
+    );
+    for (const url of dbUrls.length > 0 ? dbUrls : [undefined]) {
+      assertLocalOnlyTestEnv(url, process.env.TEST_SUPABASE_URL);
+    }
     const admin = adminClient();
     await resetTenantTables(admin);
     await ensureTestUser(admin);
