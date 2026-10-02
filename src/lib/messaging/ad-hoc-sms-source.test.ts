@@ -8,6 +8,13 @@ import { AD_HOC_BULK_SMS_SOURCE } from "./ad-hoc-sms-source";
 
 const root = path.resolve(__dirname, "../../..");
 const read = (rel: string) => readFileSync(path.join(root, rel), "utf8");
+function fromMainText(file: string): string | null {
+  try {
+    return execFileSync("git", ["show", `origin/main:${file}`], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return null;
+  }
+}
 
 describe("ad-hoc bulk SMS source literal", () => {
   it("equals the literal the campaign creator stamps and the legacy workflow reads", () => {
@@ -23,17 +30,12 @@ describe("ad-hoc bulk SMS source literal", () => {
     expect(search).not.toMatch(/"bulk_sms_modal"/);
   });
 
-  it("also matches origin/main's text (not just this branch's files)", () => {
-    const fromMain = (file: string): string | null => {
-      try {
-        return execFileSync("git", ["show", `origin/main:${file}`], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-      } catch {
-        return null; // no origin/main in this checkout: the branch-file assertions above still apply
-      }
-    };
-    const creator = fromMain("src/lib/campaigns/ad-hoc-bulk-sms.ts");
-    const workflow = fromMain("src/workflows/bulk-sms.ts");
-    if (creator === null || workflow === null) return;
+  const hasMain = fromMainText("src/workflows/bulk-sms.ts") !== null;
+  it.skipIf(!hasMain)("also matches origin/main's text (SKIPPED when origin/main is not fetched in this checkout)", () => {
+    const creator = fromMainText("src/lib/campaigns/ad-hoc-bulk-sms.ts");
+    const workflow = fromMainText("src/workflows/bulk-sms.ts");
+    expect(creator).not.toBeNull();
+    expect(workflow).not.toBeNull();
     expect(creator).toContain(`source: "${AD_HOC_BULK_SMS_SOURCE}"`);
     expect(workflow).toContain(`"${AD_HOC_BULK_SMS_SOURCE}"`);
   });

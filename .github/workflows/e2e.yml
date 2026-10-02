@@ -208,7 +208,7 @@ jobs:
         run: |
           # No-op mutations (a regex that stopped matching) fail here, before any suite run.
           npx tsx scripts/check-search-mutations.ts
-          names="$(npx tsx -e 'console.log(require("./tests/search-oracle/sql-mutations").MUTATION_NAMES.join(" "))' 2>/dev/null)"
+          names="$(npx tsx -e 'console.log(require("./tests/search-oracle/sql-mutations").MUTATION_NAMES.join(" "))')"
           test -n "$names" || { echo "::error::no mutations listed"; exit 1; }
           for m in $names; do
             if SEARCH_PROPS_MUTATION="$m" npx vitest run --config vitest.local-integration.config.ts \
