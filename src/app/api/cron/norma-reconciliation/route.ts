@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { reportError } from "@/lib/errors/report";
+import { createCallbackTimeProviderFromEnv } from "@/lib/norma/callback-time-ai";
 import { createBlandClient } from "@/lib/norma/bland";
 import { readNormaBlandConfig } from "@/lib/norma/config";
 import { dispatchNormaCall } from "@/lib/norma/dispatch";
@@ -31,6 +32,7 @@ async function handle(request: Request) {
       bland: blandConfig ? createBlandClient(blandConfig) : null,
       dispatch: (requestId) => dispatchNormaCall(requestId, { client: admin }),
       includeNeedsReview: new Date().getUTCMinutes() < 5,
+      callbackTimeProvider: createCallbackTimeProviderFromEnv(),
     });
     return NextResponse.json({ ok: summary.errors === 0, ...summary }, { status: summary.errors === 0 ? 200 : 500 });
   } catch (error) {

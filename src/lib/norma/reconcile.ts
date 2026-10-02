@@ -5,6 +5,8 @@ import type { Database } from "@/lib/supabase/types";
 
 import type { BlandClient } from "./bland";
 import type { DispatchResult } from "./dispatch";
+import { withConvertedCallbackTime } from "./callback-wiring";
+import type { CallbackTimeProvider } from "./callback-time";
 import { mapBlandCallToOutcome } from "./outcome";
 import { completeNormaCall, markNormaDispatchRejected, markNormaDispatchUnknown, markNormaNeedsReview } from "./rpc";
 import { toUsVoiceE164 } from "./voice-phone";
@@ -44,7 +46,7 @@ export type ReconcileSummary = {
 
 type Row = Pick<
   Database["public"]["Tables"]["norma_call_requests"]["Row"],
-  "id" | "status" | "phone_e164" | "idempotency_key" | "bland_call_id" | "created_at" | "updated_at" | "outcome"
+  "id" | "status" | "property_id" | "phone_e164" | "idempotency_key" | "bland_call_id" | "created_at" | "updated_at" | "outcome"
 >;
 
 export type ReconcileDeps = {
@@ -54,6 +56,8 @@ export type ReconcileDeps = {
   now?: number;
   /** needs_review rows are rechecked on a slower cadence; the cron sets this hourly. */
   includeNeedsReview?: boolean;
+  /** Optional AI step for the seller's callback words; the deterministic parser runs without it. */
+  callbackTimeProvider?: CallbackTimeProvider | null;
 };
 
 const BATCH = 50;
@@ -66,7 +70,7 @@ export async function reconcileNormaCalls(deps: ReconcileDeps): Promise<Reconcil
   const statuses = ["requested", "dispatching", "dispatched", "dispatch_unknown", ...(deps.includeNeedsReview ? ["needs_review"] : [])];
   const { data, error } = await deps.client
     .from("norma_call_requests")
-    .select("id, status, phone_e164, idempotency_key, bland_call_id, created_at, updated_at, outcome")
+    .select("id, status, property_id, phone_e164, idempotency_key, bland_call_id, created_at, updated_at, outcome")
     .in("status", statuses)
     .lte("next_check_at", new Date(now).toISOString())
     .order("next_check_at", { ascending: true })
@@ -154,7 +158,13 @@ async function reconcileRow(row: Row, deps: ReconcileDeps, now: number, summary:
       return void (summary.errors += 1);
     }
     if (call.completed === true) {
-      const mapping = mapBlandCallToOutcome(call, now);
+      const mapping = await withConvertedCallbackTime(mapBlandCallToOutcome(call, now), {
+        client: deps.client,
+        propertyId: row.property_id,
+        call,
+        provider: deps.callbackTimeProvider,
+        nowMs: deps.now,
+      });
       // A needs_review row already holding an unknown result gains nothing.
       if (!(row.status === "needs_review" && mapping.outcome === "unknown")) {
         const result = await completeNormaCall(deps.client, {

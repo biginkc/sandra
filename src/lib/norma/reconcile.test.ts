@@ -159,3 +159,29 @@ describe("reconciliation", () => {
     expect(rpcs.fn_norma_mark_dispatch_rejected).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_reason: "gate:dispatch_disabled", p_expected_status: "requested" });
   });
 });
+
+describe("callback time conversion in reconciliation", () => {
+  it("converts the seller's words before completing a callback", async () => {
+    const rpcs = { fn_norma_complete_call: vi.fn().mockReturnValue({ result: "applied", status: "completed", outcome: "callback_requested" }) };
+    const { client } = fakeClient(
+      { norma_call_requests: [requestRow({ status: "dispatched", bland_call_id: "call-1", updated_at: ago(10 * MIN) })], properties: [{ id: "p1", state: "OH" }] },
+      rpcs,
+    );
+    const getCall = vi.fn().mockResolvedValue({
+      kind: "found",
+      call: {
+        call_id: "call-1", to: PHONE, completed: true, status: "completed", answered_by: "human",
+        end_at: ago(10 * MIN), metadata: { request_id: REQUEST_ID, idempotency_key: KEY },
+        variables: { call_outcome: "callback_requested", follow_up_preference: "tomorrow afternoon" },
+      },
+    });
+    const bland: BlandClient = { sendCall: vi.fn(), getCall };
+    const summary = await reconcileNormaCalls({ client, bland, dispatch: vi.fn(), now: NOW });
+    expect(summary.completed).toBe(1);
+    // 2026-10-02 12:00Z is Friday 08:00 New York; tomorrow 14:00 EDT = 18:00Z.
+    expect(rpcs.fn_norma_complete_call.mock.calls[0]![0].p_payload).toMatchObject({
+      callback_requested_for: "2026-10-03T18:00:00.000Z", callback_timezone: "America/New_York",
+    });
+  });
+});
+

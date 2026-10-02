@@ -56,10 +56,12 @@ export const CALL_OUTCOME_TOKEN_MAP: Record<string, NormaOutcome> = {
 };
 
 /**
- * The seller's callback preference is free text with no ISO time, so the
- * callback task is due NOW and the raw text is shown in its description. Flip
- * this to false only if a parseable time is ever supplied (then a strict ISO
- * value in the text is used for the due time).
+ * Fallback when no callback time could be worked out (see `callback-time.ts`,
+ * which converts the seller's words, or an exact `callback_time`, before the
+ * completion): the callback task is due NOW and the raw text is shown in its
+ * description. A converted time, when there is one, always wins over this.
+ * Flip to false only if a strict ISO value in the free text should be used for
+ * the due time instead.
  */
 export const CALLBACK_TASK_DUE_NOW = true;
 

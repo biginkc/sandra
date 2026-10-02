@@ -5,6 +5,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { reportError } from "@/lib/errors/report";
 import type { Database } from "@/lib/supabase/types";
 
+import { withConvertedCallbackTime } from "./callback-wiring";
+import type { CallbackTimeProvider } from "./callback-time";
 import { mapBlandCallToOutcome } from "./outcome";
 import { completeNormaCall } from "./rpc";
 import { toUsVoiceE164 } from "./voice-phone";
@@ -71,7 +73,7 @@ function str(value: unknown): string | null {
  */
 export async function handleBlandCallWebhook(
   request: Request,
-  deps: { client: SupabaseClient<Database>; secret: string | undefined },
+  deps: { client: SupabaseClient<Database>; secret: string | undefined; callbackTimeProvider?: CallbackTimeProvider | null },
 ): Promise<WebhookResponse> {
   if (!deps.secret) return respond(500, { error: "not_configured" });
 
@@ -101,7 +103,7 @@ export async function handleBlandCallWebhook(
   try {
     const { data: row, error } = await deps.client
       .from("norma_call_requests")
-      .select("id, phone_e164, idempotency_key")
+      .select("id, property_id, phone_e164, idempotency_key")
       .eq("id", requestId)
       .maybeSingle();
     if (error) throw new Error(`norma webhook lookup failed: ${error.message}`);
@@ -115,7 +117,14 @@ export async function handleBlandCallWebhook(
       return respond(200, { status: "ignored", reason: "number_mismatch" });
     }
 
-    const mapping = mapBlandCallToOutcome(payload);
+    // The seller's callback words become a time here, before the one CRM write.
+    // Never fails or delays the completion: any problem leaves the raw words.
+    const mapping = await withConvertedCallbackTime(mapBlandCallToOutcome(payload), {
+      client: deps.client,
+      propertyId: row.property_id,
+      call: payload,
+      provider: deps.callbackTimeProvider,
+    });
     const result = await completeNormaCall(deps.client, {
       requestId: row.id,
       callId,

@@ -172,3 +172,47 @@ describe("bland webhook route core", () => {
     expect(calls.map((c) => c.name)).toContain("fn_norma_bind_call_id");
   });
 });
+
+describe("callback time conversion in the webhook", () => {
+  const callbackCall = (follow: string, extra: Record<string, unknown> = {}) =>
+    call({ variables: { call_outcome: "callback_requested - asked", follow_up_preference: follow }, ...extra });
+  function setupWithProperty(state = "MO") {
+    const complete = vi.fn().mockReturnValue({ result: "applied", status: "completed", outcome: "callback_requested" });
+    const { client } = fakeClient(
+      { norma_call_requests: [requestRow({ status: "dispatched" })], properties: [{ id: "p1", state }] },
+      { fn_norma_complete_call: complete },
+    );
+    return { client, complete };
+  }
+
+  it("passes a converted time to the completion RPC", async () => {
+    const { client, complete } = setupWithProperty();
+    const future = new Date(Date.now() + 3 * 24 * 3_600_000);
+    const body = JSON.stringify(callbackCall("tomorrow morning", { end_at: new Date().toISOString() }));
+    const result = await handleBlandCallWebhook(req(body, sign(body)), { client, secret: SECRET });
+    expect(result.status).toBe(200);
+    const payload = complete.mock.calls[0]![0].p_payload;
+    expect(payload.callback_raw).toBe("tomorrow morning");
+    expect(payload.callback_timezone).toBe("America/Chicago");
+    expect(Date.parse(payload.callback_requested_for)).toBeGreaterThan(Date.now());
+    expect(Date.parse(payload.callback_requested_for)).toBeLessThan(future.getTime());
+  });
+
+  it("still completes with the raw words when the AI step throws or the text is unusable", async () => {
+    const { client, complete } = setupWithProperty();
+    const body = JSON.stringify(callbackCall("a week from Monday"));
+    const provider = vi.fn().mockRejectedValue(new Error("model down"));
+    const result = await handleBlandCallWebhook(req(body, sign(body)), { client, secret: SECRET, callbackTimeProvider: provider });
+    expect(result).toMatchObject({ status: 200, body: { status: "applied" } });
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(complete.mock.calls[0]![0].p_payload).toMatchObject({ callback_requested_for: null, callback_raw: "a week from Monday" });
+  });
+
+  it("does not convert anything for a non-callback outcome", async () => {
+    const { client, complete } = setupWithProperty();
+    const body = JSON.stringify(call({ variables: { call_outcome: "not_interested", follow_up_preference: "tomorrow" } }));
+    await handleBlandCallWebhook(req(body, sign(body)), { client, secret: SECRET });
+    expect(complete.mock.calls[0]![0].p_payload.callback_requested_for).toBeUndefined();
+  });
+});
+
