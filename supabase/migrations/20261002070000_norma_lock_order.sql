@@ -29,6 +29,7 @@
 -- between a read and the enrollment/task write that depends on it (that raised
 -- DNC_LOCKED and failed the webhook). Signatures, grants and behaviour are unchanged.
 -- Service-role only.
+-- Rollback: re-apply the previous function versions (fn_norma_create_request from 20261002060000; fn_norma_complete_call, fn_norma_mark_needs_review and fn_norma_mark_dispatch_rejected from 20261002050000; fn_norma_release_pauses from 20261002020000) and drop fn_norma_lock_lead.
 -- ============================================================================
 
 begin;
