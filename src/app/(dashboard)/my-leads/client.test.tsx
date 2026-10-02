@@ -476,6 +476,30 @@ describe("MyLeadsClient", () => {
     }))
   })
 
+  it("starts on the owner's own profile and allows switching to another rep", async () => {
+    const user = userEvent.setup()
+    const ownerViewer = { ...viewer, userId: "owner-1", isOwner: true }
+    const ownerRoster: AcquisitionRoster = {
+      ...roster,
+      isOwner: true,
+      members: [
+        ...roster.members,
+        { id: "owner-1", label: "Owner", role: "owner", acquisitionsEnabled: false, active: true, hasHistory: false },
+      ],
+    }
+    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snapshot("Other rep Lane"), kpis })
+    render(<MyLeadsClient viewer={ownerViewer} roster={ownerRoster} initialMemberId="owner-1"
+      initialSnapshot={snapshot("Owner Lane")} initialKpis={kpis} />)
+
+    const picker = screen.getByRole("combobox", { name: "Acquisitions member" })
+    expect(picker).toHaveValue("owner-1")
+    expect(screen.getByTestId("queue-address")).toHaveTextContent("Owner Lane")
+    await user.selectOptions(picker, "rep-1")
+    await waitFor(() => expect(mocks.loadMyLeads).toHaveBeenCalledWith({ memberId: "rep-1", search: "", period: "today" }))
+    await waitFor(() => expect(screen.getByTestId("queue-address")).toHaveTextContent("Other rep Lane"))
+    expect(picker).toHaveValue("rep-1")
+  })
+
   it("clears the prior rep queue before loading a changed rep scope", async () => {
     const user = userEvent.setup()
     const ownerViewer = { ...viewer, userId: "owner-1", isOwner: true }

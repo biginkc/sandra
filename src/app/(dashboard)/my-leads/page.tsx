@@ -114,10 +114,8 @@ export default async function MyLeadsPage() {
       }
     | null = null;
   try {
-    const memberId = viewer.isOwner
-      ? roster.members.find((member) => member.active && member.acquisitionsEnabled)
-          ?.id ?? viewer.userId
-      : viewer.userId;
+    // Owners can switch reps, but every viewer starts on their own profile.
+    const memberId = viewer.userId;
     const [snapshot, kpis, drips] = roster.settings.enabled
       ? await Promise.all([
           getAcquisitionQueue({ memberId }),

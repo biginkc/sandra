@@ -189,6 +189,30 @@ describe("MyLeadsPage availability boundary", () => {
     expect(html).toContain("my-leads-client");
   });
 
+  it.each([true, false])("defaults an owner to their own profile when Acquisitions enabled is %s", async (acquisitionsEnabled) => {
+    const ownerViewer = { ...viewer, userId: "owner-1", isOwner: true };
+    const ownerRoster: AcquisitionRoster = {
+      ...baseRoster,
+      isOwner: true,
+      members: [
+        ...baseRoster.members,
+        { id: "owner-1", label: "Owner", role: "owner", acquisitionsEnabled, active: true, hasHistory: false },
+      ],
+    };
+    mocks.getCallerMembershipsOrThrow.mockResolvedValue([
+      { ...activeAcquisitionsMembership, user_id: "owner-1", role: "owner", acquisitions_enabled: acquisitionsEnabled },
+    ]);
+    mocks.getAcquisitionRoster.mockResolvedValue({ viewer: ownerViewer, roster: ownerRoster });
+
+    expect(renderPage(await MyLeadsPage())).toContain("my-leads-client");
+
+    expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({ memberId: "owner-1" });
+    expect(mocks.getAcquisitionKpis).toHaveBeenCalledWith({ memberId: "owner-1", period: "today" });
+    expect(mocks.listMyLeadsInDrip).toHaveBeenCalledWith("owner-1");
+    expect((mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0])
+      .toMatchObject({ initialMemberId: "owner-1", viewer: ownerViewer });
+  });
+
   it("passes the Dialpad panel bootstrap to the client only for the session's own org and rep", async () => {
     const bootstrap = {
       connectionId: "c-1",
