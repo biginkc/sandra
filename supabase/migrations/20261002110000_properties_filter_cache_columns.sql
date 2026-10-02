@@ -37,8 +37,8 @@
 -- forge them through PostgREST.
 --
 -- Additive; apply BEFORE the app code that filters these columns is deployed.
--- Backfill runs at the end of this migration (batched, through the same
--- refresh function).
+-- Backfill is deliberately NOT here (it would hold the DDL transaction's locks
+-- for its whole runtime): see 20261002110050_properties_filter_cache_backfill.sql.
 
 set lock_timeout = '5s';
 
@@ -82,7 +82,15 @@ language plpgsql
 set search_path = ''
 as $$
 begin
-  if coalesce(pg_catalog.current_setting('sandra.filter_cache_writer', true), 'off') = 'on' then
+  -- The GUC alone is not trusted: the writer must also be running as the
+  -- owner of refresh_property_filter_cache (inside its SECURITY DEFINER body).
+  if coalesce(pg_catalog.current_setting('sandra.filter_cache_writer', true), 'off') = 'on'
+     and current_user = (
+       select pg_catalog.pg_get_userbyid(p.proowner)
+         from pg_catalog.pg_proc p
+        where p.oid = 'public.refresh_property_filter_cache(uuid[])'::pg_catalog.regprocedure
+     )
+  then
     return new;
   end if;
   if tg_op = 'INSERT' then
@@ -209,6 +217,12 @@ begin
   if p_ids is null or pg_catalog.cardinality(p_ids) = 0 then
     return;
   end if;
+  -- Same lock order as the global DNC write barrier (acquire_global_dnc_write_
+  -- barrier): the shared barrier FIRST, then row locks, so a cache refresh can
+  -- never invert against the exclusive global-DNC writer.
+  perform pg_catalog.pg_advisory_xact_lock_shared(
+    pg_catalog.hashtextextended('switchboard-global-dnc-write-barrier-v1', 0)
+  );
   -- Serialise writers per property (NO KEY UPDATE does not conflict with the
   -- FOR KEY SHARE an FK insert holds, so no deadlock with child inserts).
   perform 1 from public.properties p where p.id = any (p_ids) order by p.id for no key update;
@@ -417,21 +431,14 @@ revoke all on function public.trg_property_tags_refresh_filter_cache() from publ
 revoke all on function public.properties_filter_cache_only_change(public.properties, public.properties) from public, anon;
 grant execute on function public.properties_filter_cache_only_change(public.properties, public.properties) to authenticated, service_role;
 
--- Backfill (batched through the same refresh function the triggers use).
-do $backfill$
-declare
-  batch uuid[];
-begin
-  for batch in
-    select pg_catalog.array_agg(s.id)
-      from (select id, (pg_catalog.row_number() over (order by id) - 1) / 5000 as g from public.properties) s
-     group by s.g
-     order by s.g
-  loop
-    perform public.refresh_property_filter_cache(batch);
-  end loop;
-end
-$backfill$;
+-- Indexes for org-wide filters (no market predicate): partial btrees keep the
+-- selective boolean states cheap; GIN serves the uuid[] overlap/contains.
+create index if not exists idx_properties_has_unread_inbound on public.properties (org_id) where has_unread_inbound;
+create index if not exists idx_properties_has_open_tasks on public.properties (org_id) where has_open_tasks;
+create index if not exists idx_properties_has_inbound_message on public.properties (org_id) where has_inbound_message;
+create index if not exists idx_properties_attempted on public.properties (org_id) where has_outbound_message and not has_inbound_message;
+create index if not exists idx_properties_filter_list_ids on public.properties using gin (filter_list_ids);
+create index if not exists idx_properties_filter_tag_ids on public.properties using gin (filter_tag_ids);
 
 commit;
 
