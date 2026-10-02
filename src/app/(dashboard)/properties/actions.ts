@@ -126,6 +126,7 @@ export type BulkSmsOutcome = {
  */
 const SYNC_BULK_SMS_LIMIT = 500;
 const VALIDATION_CHUNK = 250;
+const RECIPIENT_PAGE = 1000;
 
 function resolveProvidedCampaignId(opts: BulkSmsQueueOpts): string | null {
   return "campaignId" in opts &&
@@ -299,21 +300,28 @@ async function validateProvidedCampaignForBulkSms(
   const frozenIds = new Set<string>();
   for (let i = 0; i < requestedIds.length; i += VALIDATION_CHUNK) {
     const chunk = requestedIds.slice(i, i + VALIDATION_CHUNK);
-    const { data, error } = await supabase
-      .from("campaign_recipients")
-      .select("property_id")
-      .eq("campaign_id", campaignId)
-      .in("property_id", chunk);
-    if (error) {
-      return {
-        ok: false,
-        error: {
-          code: "CAMPAIGN_AUDIENCE_LOOKUP_FAILED",
-          message: error.message,
-        },
-      };
+    // A property can have several recipient rows (one per contact), so page
+    // deterministically until a short page to stay under the API row cap.
+    for (let from = 0; ; from += RECIPIENT_PAGE) {
+      const { data, error } = await supabase
+        .from("campaign_recipients")
+        .select("property_id")
+        .eq("campaign_id", campaignId)
+        .in("property_id", chunk)
+        .order("id")
+        .range(from, from + RECIPIENT_PAGE - 1);
+      if (error) {
+        return {
+          ok: false,
+          error: {
+            code: "CAMPAIGN_AUDIENCE_LOOKUP_FAILED",
+            message: error.message,
+          },
+        };
+      }
+      data?.forEach((row) => frozenIds.add(row.property_id));
+      if ((data?.length ?? 0) < RECIPIENT_PAGE) break;
     }
-    data?.forEach((row) => frozenIds.add(row.property_id));
   }
   if (requestedIds.some((id) => !frozenIds.has(id))) {
     return {

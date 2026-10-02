@@ -237,4 +237,16 @@ describe("loadBulkSmsJob campaign provenance", () => {
     const loaded = await loadBulkSmsJob("job-1");
     expect(loaded.opts.campaignSource).toBe("ad_hoc_bulk_sms");
   });
+
+  it.each([
+    ["null snapshot", null],
+    ["unknown source", { source: "something_else" }],
+  ])("falls back to saved_campaign for %s", async (_label, snapshot) => {
+    adminClient.current = loadClient({
+      claimedSource: "ad_hoc_bulk_sms",
+      audienceSnapshot: snapshot,
+    });
+    const loaded = await loadBulkSmsJob("job-1");
+    expect(loaded.opts.campaignSource).toBe("saved_campaign");
+  });
 });
