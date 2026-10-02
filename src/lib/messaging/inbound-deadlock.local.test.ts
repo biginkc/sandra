@@ -1,11 +1,10 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Client } from "pg";
 
 import { insertInboundMessage } from "./inbound";
 
 const dbUrl = process.env.TEST_SUPABASE_DB_URL ?? "";
 const localDb = /^postgresql:\/\/postgres:[^@]+@127\.0\.0\.1:\d+\//.test(dbUrl);
-const describeLocal = localDb ? describe : describe.skip;
 const ORG = "00000000-0000-0000-0000-000000000bbb";
 const CONTACT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PROPERTY = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -26,8 +25,17 @@ const rawInsertSql = `
   returning id, metadata, contact_id, property_id, conversation_id`;
 
 type ErrorResult = { ok: false; code?: string; message?: string };
+type DeadlockCounters = {
+  insertAttempts: number;
+  threadUpdates: number;
+  intentUpdates: number;
+  deadlockErrors: number;
+};
 
-async function controlHandlerWithoutRetry(client: Client) {
+async function controlHandlerWithoutRetry(
+  client: Client,
+  counters: Pick<DeadlockCounters, "deadlockErrors">,
+) {
   try {
     await client.query(rawInsertSql, [
       ORG,
@@ -41,7 +49,10 @@ async function controlHandlerWithoutRetry(client: Client) {
     ]);
     return { status: 200 };
   } catch (error) {
-    if ((error as { code?: string }).code === "40P01") return { status: 500 };
+    if ((error as { code?: string }).code === "40P01") {
+      counters.deadlockErrors += 1;
+      return { status: 500 };
+    }
     throw error;
   }
 }
@@ -114,6 +125,19 @@ async function cleanupFixture(admin: Client) {
   await admin.query("delete from public.contacts where id=$1", [CONTACT]);
 }
 
+async function dirtyGeneration(client: Client) {
+  const { rows } = await client.query(
+    `select generation
+       from inbox_message_capture.dirty
+      where org_id=$1 and target_kind='known_conversation' and target_id=$2`,
+    [ORG, CONVERSATION],
+  );
+  if (rows.length !== 1) {
+    throw new Error("expected exactly one dirty(C) row");
+  }
+  return Number(rows[0].generation);
+}
+
 async function runCycle(
   admin: Client,
   operation: (client: Client) => Promise<unknown>,
@@ -132,6 +156,7 @@ async function runCycle(
   const readerPid = (await reader.query("select pg_backend_pid() pid")).rows[0]
     .pid as number;
   try {
+    const beforeGeneration = await dirtyGeneration(admin);
     await reader.query("begin");
     await reader.query("set local deadlock_timeout='30s'");
     await reader.query(
@@ -157,9 +182,19 @@ async function runCycle(
     );
     await waitForLock(admin, readerPid);
     const readOutcome = await readResult;
+    const afterReadGeneration = await dirtyGeneration(reader);
     await reader.query("commit");
     const insertOutcome = await insertResult;
-    return { insertOutcome, readOutcome };
+    const afterInboundGeneration = await dirtyGeneration(admin);
+    return {
+      insertOutcome,
+      readOutcome,
+      dirtyGeneration: {
+        before: beforeGeneration,
+        afterRead: afterReadGeneration,
+        afterInbound: afterInboundGeneration,
+      },
+    };
   } finally {
     await reader.query("rollback").catch(() => undefined);
     await Promise.all([inbound.end(), reader.end()]);
@@ -168,11 +203,7 @@ async function runCycle(
 
 function pgSupabaseClient(
   client: Client,
-  counters: {
-    insertAttempts: number;
-    threadUpdates: number;
-    intentUpdates: number;
-  },
+  counters: DeadlockCounters,
 ) {
   const messageLookup = () => {
     const filters: Record<string, unknown> = {};
@@ -272,6 +303,7 @@ function pgSupabaseClient(
           return { data: rows[0] ?? null, error: null };
         } catch (error) {
           const typed = error as { code?: string; message?: string };
+          if (typed.code === "40P01") counters.deadlockErrors += 1;
           return {
             data: null,
             error: { code: typed.code, message: typed.message },
@@ -297,13 +329,45 @@ function pgSupabaseClient(
   };
 }
 
-let admin: Client;
+let admin: Client | undefined;
 
-describeLocal("inbound deadlock local proof", () => {
+describe("inbound deadlock local proof", () => {
+  beforeEach(async ({ skip }) => {
+    if (!localDb) {
+      skip(
+        "TEST_SUPABASE_DB_URL must point to a local PostgreSQL database on 127.0.0.1",
+      );
+      return;
+    }
+
+    const probe = new Client({
+      connectionString: dbUrl,
+      application_name: "local-deadlock-schema-probe",
+    });
+    let skipReason: string | null = null;
+    try {
+      await probe.connect();
+      const { rows } = await probe.query(
+        "select to_regclass('inbox_message_capture.dirty') is not null as inbox_schema_present",
+      );
+      if (rows[0]?.inbox_schema_present !== true) {
+        skipReason =
+          "target database is missing inbox_message_capture.dirty; apply the Inbox migrations to run this proof";
+      }
+    } catch {
+      skipReason =
+        "could not verify inbox_message_capture.dirty; refusing to run the local proof without the Inbox schema";
+    } finally {
+      await probe.end().catch(() => undefined);
+    }
+    if (skipReason) skip(skipReason);
+  });
+
   afterEach(async () => {
     if (!admin) return;
     await cleanupFixture(admin);
     await admin.end();
+    admin = undefined;
   });
 
   it("control: one raw insert gets 40P01 and saves no row", async () => {
@@ -313,8 +377,9 @@ describeLocal("inbound deadlock local proof", () => {
     });
     await admin.connect();
     await setupFixture(admin);
+    const counters = { deadlockErrors: 0 };
     const result = await runCycle(admin, (client) =>
-      controlHandlerWithoutRetry(client),
+      controlHandlerWithoutRetry(client, counters),
     );
     const count = await admin.query(
       "select count(*)::int as count from public.messages where external_id=$1",
@@ -325,6 +390,13 @@ describeLocal("inbound deadlock local proof", () => {
       value: { status: 500 },
     });
     expect(result.readOutcome.rowCount).toBe(1);
+    expect(counters.deadlockErrors).toBe(1);
+    expect(result.dirtyGeneration.afterRead).toBe(
+      result.dirtyGeneration.before + 1,
+    );
+    expect(result.dirtyGeneration.afterInbound).toBe(
+      result.dirtyGeneration.afterRead,
+    );
     expect(count.rows[0].count).toBe(0);
   });
 
@@ -335,7 +407,12 @@ describeLocal("inbound deadlock local proof", () => {
     });
     await admin.connect();
     await setupFixture(admin);
-    const counters = { insertAttempts: 0, threadUpdates: 0, intentUpdates: 0 };
+    const counters = {
+      insertAttempts: 0,
+      threadUpdates: 0,
+      intentUpdates: 0,
+      deadlockErrors: 0,
+    };
     const result = await runCycle(admin, (client) =>
       insertInboundMessage(pgSupabaseClient(client, counters) as never, {
         providerId: "sendillo",
@@ -358,8 +435,15 @@ describeLocal("inbound deadlock local proof", () => {
     expect(result.insertOutcome).toMatchObject({ ok: true });
     expect(result.readOutcome.rowCount).toBe(1);
     expect(counters.insertAttempts).toBe(2);
+    expect(counters.deadlockErrors).toBe(1);
     expect(counters.threadUpdates).toBe(1);
     expect(counters.intentUpdates).toBe(1);
+    expect(result.dirtyGeneration.afterRead).toBe(
+      result.dirtyGeneration.before + 1,
+    );
+    expect(result.dirtyGeneration.afterInbound).toBe(
+      result.dirtyGeneration.afterRead + 1,
+    );
     expect(count.rows[0].count).toBe(1);
   });
 });
