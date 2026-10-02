@@ -1,7 +1,16 @@
 \set ON_ERROR_STOP on
 -- Owned R11 callback-gate fixture packet. Runtime tooling only; never a
--- migration. It writes the reply ledger directly under one marker, never
--- calls admission or Sendillo, and removes only rows anchored by that marker.
+-- migration. The marker -> ID mapping lives in the caller's local 0600
+-- receipt. This packet never creates a schema object and never discovers a
+-- row by a broad marker-only predicate.
+--
+-- ============================================================================
+-- REQUIRES ARCHITECT SIGN-OFF: trigger disable on live ledger
+-- This packet does not claim sign-off. The trigger disable is retained only
+-- because this fixture represents an already-persisted provider_accepted row
+-- and removal must delete immutable ledger rows. Each disable/enable pair is
+-- inside this fixture transaction and is restored before COMMIT.
+-- ============================================================================
 \if :{?fixture_create}
 \else
   \echo 'fixture_create is required (true or false)'
@@ -12,8 +21,72 @@
   \echo 'fixture_marker is required'
   \quit 3
 \endif
-\if :fixture_create
-  \set fixture_action create
+\if :{?fixture_org_id}
+\else
+  \echo 'fixture receipt IDs are required'
+  \quit 3
+\endif
+\if :{?fixture_requester_id}
+\else
+  \echo 'fixture receipt IDs are required'
+  \quit 3
+\endif
+\if :{?fixture_preparation_id}
+\else
+  \echo 'fixture receipt IDs are required'
+  \quit 3
+\endif
+\if :{?fixture_operation_id}
+\else
+  \echo 'fixture receipt IDs are required'
+  \quit 3
+\endif
+\if :{?fixture_idempotency_key}
+\else
+  \echo 'fixture receipt IDs are required'
+  \quit 3
+\endif
+\if :{?fixture_item_a}
+\else
+  \echo 'fixture receipt IDs are required'
+  \quit 3
+\endif
+\if :{?fixture_item_b}
+\else
+  \echo 'fixture receipt IDs are required'
+  \quit 3
+\endif
+\if :{?fixture_attempt_a}
+\else
+  \echo 'fixture receipt IDs are required'
+  \quit 3
+\endif
+\if :{?fixture_attempt_b}
+\else
+  \echo 'fixture receipt IDs are required'
+  \quit 3
+\endif
+\if :{?fixture_contact_a}
+\else
+  \echo 'fixture receipt IDs are required'
+  \quit 3
+\endif
+\if :{?fixture_contact_b}
+\else
+  \echo 'fixture receipt IDs are required'
+  \quit 3
+\endif
+\if :{?fixture_reference_a}
+\else
+  \echo 'fixture receipt references are required'
+  \quit 3
+\endif
+\if :{?fixture_reference_b}
+\else
+  \echo 'fixture receipt references are required'
+  \quit 3
+\endif
+\if :{?fixture_action}
 \else
   \set fixture_action remove
 \endif
@@ -21,10 +94,25 @@
 BEGIN;
 SET LOCAL lock_timeout='2s';
 SET LOCAL statement_timeout='20s';
-SELECT set_config('sandra.inbox_fixture_marker', :'fixture_marker', false) AS _set_fixture_marker \gset
-SELECT set_config('sandra.inbox_fixture_action', :'fixture_action', false) AS _set_fixture_action \gset
+SELECT set_config('sandra.inbox_fixture_marker', :'fixture_marker', true),
+       set_config('sandra.inbox_fixture_action', :'fixture_action', true),
+       set_config('sandra.inbox_fixture_org_id', :'fixture_org_id', true),
+       set_config('sandra.inbox_fixture_requester_id', :'fixture_requester_id', true),
+       set_config('sandra.inbox_fixture_preparation_id', :'fixture_preparation_id', true),
+       set_config('sandra.inbox_fixture_operation_id', :'fixture_operation_id', true),
+       set_config('sandra.inbox_fixture_idempotency_key', :'fixture_idempotency_key', true),
+       set_config('sandra.inbox_fixture_item_a', :'fixture_item_a', true),
+       set_config('sandra.inbox_fixture_item_b', :'fixture_item_b', true),
+       set_config('sandra.inbox_fixture_attempt_a', :'fixture_attempt_a', true),
+       set_config('sandra.inbox_fixture_attempt_b', :'fixture_attempt_b', true),
+       set_config('sandra.inbox_fixture_contact_a', :'fixture_contact_a', true),
+       set_config('sandra.inbox_fixture_contact_b', :'fixture_contact_b', true),
+       set_config('sandra.inbox_fixture_reference_a', :'fixture_reference_a', true),
+       set_config('sandra.inbox_fixture_reference_b', :'fixture_reference_b', true)
+;
 
 DO $$
+DECLARE name text;
 BEGIN
   IF current_setting('sandra.inbox_fixture_marker') !~ '^sandra-inbox-r1-callback-gate-[a-z0-9-]+$' THEN
     RAISE EXCEPTION 'fixture marker is not owned by the R1 callback gate';
@@ -32,103 +120,147 @@ BEGIN
   IF current_setting('sandra.inbox_fixture_action') NOT IN ('create', 'remove') THEN
     RAISE EXCEPTION 'fixture_action must be create or remove';
   END IF;
+  FOREACH name IN ARRAY ARRAY[
+    'sandra.inbox_fixture_org_id','sandra.inbox_fixture_requester_id',
+    'sandra.inbox_fixture_preparation_id','sandra.inbox_fixture_operation_id',
+    'sandra.inbox_fixture_idempotency_key','sandra.inbox_fixture_item_a',
+    'sandra.inbox_fixture_item_b','sandra.inbox_fixture_attempt_a',
+    'sandra.inbox_fixture_attempt_b','sandra.inbox_fixture_contact_a',
+    'sandra.inbox_fixture_contact_b'
+  ] LOOP
+    IF current_setting(name) !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' THEN
+      RAISE EXCEPTION 'fixture receipt contains an invalid UUID: %', name;
+    END IF;
+  END LOOP;
+  IF current_setting('sandra.inbox_fixture_reference_a') !~ '^sandra-r1-callback-a-[a-z0-9-]+$'
+     OR current_setting('sandra.inbox_fixture_reference_b') !~ '^sandra-r1-callback-b-[a-z0-9-]+$' THEN
+    RAISE EXCEPTION 'fixture receipt contains an invalid provider reference';
+  END IF;
 END $$;
-
-CREATE SCHEMA IF NOT EXISTS inbox_reply_send;
-CREATE TABLE IF NOT EXISTS inbox_reply_send.r1_callback_gate_fixtures(
- marker text PRIMARY KEY CHECK(marker ~ '^sandra-inbox-r1-callback-gate-[a-z0-9-]+$'),
- org_id uuid NOT NULL,
- requester_id uuid NOT NULL,
- preparation_id uuid NOT NULL,
- operation_id uuid NOT NULL,
- item_a uuid NOT NULL,
- item_b uuid NOT NULL,
- contact_a uuid NOT NULL,
- contact_b uuid NOT NULL,
- reference_a text NOT NULL,
- reference_b text NOT NULL,
- created_at timestamptz NOT NULL DEFAULT clock_timestamp()
-);
 
 \if :fixture_create
   DO $$
   BEGIN
-    IF EXISTS (SELECT 1 FROM inbox_reply_send.r1_callback_gate_fixtures WHERE marker = current_setting('sandra.inbox_fixture_marker')) THEN
-      RAISE EXCEPTION 'callback fixture marker already exists';
+    IF EXISTS (
+      SELECT 1 FROM inbox_reply_send.attempts
+      WHERE org_id=current_setting('sandra.inbox_fixture_org_id')::uuid
+         OR id IN (current_setting('sandra.inbox_fixture_attempt_a')::uuid,current_setting('sandra.inbox_fixture_attempt_b')::uuid)
+         OR provider_reference IN (current_setting('sandra.inbox_fixture_reference_a'),current_setting('sandra.inbox_fixture_reference_b'))
+    ) THEN
+      RAISE EXCEPTION 'callback fixture receipt IDs or references already exist';
     END IF;
   END $$;
 
-  INSERT INTO inbox_reply_send.r1_callback_gate_fixtures(
-    marker,org_id,requester_id,preparation_id,operation_id,item_a,item_b,contact_a,contact_b,reference_a,reference_b
+  INSERT INTO inbox_reply_review.preparations(
+    id,org_id,requester_id,request_key,input_hash,canonical_input,items,expires_at
   ) VALUES (
-    :'fixture_marker',gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),
-    gen_random_uuid(),gen_random_uuid(),
-    'sandra-r1-callback-a-' || :'fixture_marker',
-    'sandra-r1-callback-b-' || :'fixture_marker'
+    current_setting('sandra.inbox_fixture_preparation_id')::uuid,
+    current_setting('sandra.inbox_fixture_org_id')::uuid,
+    current_setting('sandra.inbox_fixture_requester_id')::uuid,
+    current_setting('sandra.inbox_fixture_idempotency_key')::uuid,
+    encode(sha256(convert_to(current_setting('sandra.inbox_fixture_marker'),'utf8')),'hex'),
+    '{}',
+    jsonb_build_array(
+      jsonb_build_object(
+        'id',current_setting('sandra.inbox_fixture_item_a')::uuid,
+        'recipient',jsonb_build_object('contactId',current_setting('sandra.inbox_fixture_contact_a')::uuid,'from','+18165550001','to','+18165550002','renderedBody','R1 callback gate A'),
+        'validUntil',clock_timestamp()+interval '1 day','state','ready',
+        'target',jsonb_build_object('id',gen_random_uuid(),'kind','conversation'),
+        'dependencies',jsonb_build_object('head','1')
+      ),
+      jsonb_build_object(
+        'id',current_setting('sandra.inbox_fixture_item_b')::uuid,
+        'recipient',jsonb_build_object('contactId',current_setting('sandra.inbox_fixture_contact_b')::uuid,'from','+18165550001','to','+18165550003','renderedBody','R1 callback gate B'),
+        'validUntil',clock_timestamp()+interval '1 day','state','ready',
+        'target',jsonb_build_object('id',gen_random_uuid(),'kind','conversation'),
+        'dependencies',jsonb_build_object('head','1')
+      )
+    ),
+    clock_timestamp()+interval '1 day'
   );
 
-  INSERT INTO inbox_reply_review.preparations(id,org_id,requester_id,request_key,input_hash,canonical_input,items,expires_at)
-  SELECT preparation_id,org_id,requester_id,gen_random_uuid(),
-    encode(sha256(convert_to(marker,'utf8')),'hex'), '{}',
-    jsonb_build_array(
-      jsonb_build_object('id',item_a,'recipient',jsonb_build_object('contactId',contact_a,'from','+18165550001','to','+18165550002','renderedBody','R1 callback gate A'),'validUntil',clock_timestamp()+interval '1 day','state','ready','target',jsonb_build_object('id',gen_random_uuid(),'kind','conversation'),'dependencies',jsonb_build_object('head','1')),
-      jsonb_build_object('id',item_b,'recipient',jsonb_build_object('contactId',contact_b,'from','+18165550001','to','+18165550003','renderedBody','R1 callback gate B'),'validUntil',clock_timestamp()+interval '1 day','state','ready','target',jsonb_build_object('id',gen_random_uuid(),'kind','conversation'),'dependencies',jsonb_build_object('head','1'))
-    ),clock_timestamp()+interval '1 day'
-  FROM inbox_reply_send.r1_callback_gate_fixtures WHERE marker=:'fixture_marker';
-
   INSERT INTO inbox_reply_send.operations(org_id,id,requester_id,preparation_id,idempotency_key)
-  SELECT org_id,operation_id,requester_id,preparation_id,gen_random_uuid()
-  FROM inbox_reply_send.r1_callback_gate_fixtures WHERE marker=:'fixture_marker';
+  VALUES (
+    current_setting('sandra.inbox_fixture_org_id')::uuid,
+    current_setting('sandra.inbox_fixture_operation_id')::uuid,
+    current_setting('sandra.inbox_fixture_requester_id')::uuid,
+    current_setting('sandra.inbox_fixture_preparation_id')::uuid,
+    current_setting('sandra.inbox_fixture_idempotency_key')::uuid
+  );
 
-  -- The canonical INSERT guard is deliberately disabled only around these two
-  -- owned fixture rows: their provider_accepted state represents the already
-  -- persisted post-send boundary required by R11. DDL is transactional and the
-  -- guard is restored before commit.
+  -- The canonical INSERT guard is deliberately disabled only around these
+  -- two receipt-owned rows: provider_accepted is the already-persisted
+  -- post-send boundary required by R11.
   ALTER TABLE inbox_reply_send.attempts DISABLE TRIGGER guard_reply_send_attempt;
   INSERT INTO inbox_reply_send.attempts(
-    org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,prior_attempt_id,contact_id,from_e164,to_e164,body_hash,state,generation,lease_until,dispatch_started_at,dispatch_token,receipt_version,provider_reference,provider_status,evidence
-  )
-  SELECT f.org_id,gen_random_uuid(),f.operation_id,f.preparation_id,f.item_a,1,NULL,f.contact_a,'+18165550001','+18165550002',
+    org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,prior_attempt_id,
+    contact_id,from_e164,to_e164,body_hash,state,generation,lease_until,
+    dispatch_started_at,dispatch_token,receipt_version,provider_reference,
+    provider_status,evidence
+  ) VALUES
+  (
+    current_setting('sandra.inbox_fixture_org_id')::uuid,
+    current_setting('sandra.inbox_fixture_attempt_a')::uuid,
+    current_setting('sandra.inbox_fixture_operation_id')::uuid,
+    current_setting('sandra.inbox_fixture_preparation_id')::uuid,
+    current_setting('sandra.inbox_fixture_item_a')::uuid,1,NULL,
+    current_setting('sandra.inbox_fixture_contact_a')::uuid,'+18165550001','+18165550002',
     encode(sha256(convert_to('R1 callback gate A','utf8')||decode('00','hex')||convert_to('+18165550001','utf8')||decode('00','hex')||convert_to('+18165550002','utf8')),'hex'),
-    'provider_accepted',1,NULL,clock_timestamp()-interval '1 minute',gen_random_uuid(),1,f.reference_a,'sent','sandra_r1_callback_gate'
-  FROM inbox_reply_send.r1_callback_gate_fixtures f WHERE f.marker=:'fixture_marker';
-  INSERT INTO inbox_reply_send.attempts(
-    org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,prior_attempt_id,contact_id,from_e164,to_e164,body_hash,state,generation,lease_until,dispatch_started_at,dispatch_token,receipt_version,provider_reference,provider_status,evidence
-  )
-  SELECT f.org_id,gen_random_uuid(),f.operation_id,f.preparation_id,f.item_b,1,NULL,f.contact_b,'+18165550001','+18165550003',
+    'provider_accepted',1,NULL,clock_timestamp()-interval '1 minute',gen_random_uuid(),1,
+    current_setting('sandra.inbox_fixture_reference_a'),'sent','sandra_r1_callback_gate'
+  ),
+  (
+    current_setting('sandra.inbox_fixture_org_id')::uuid,
+    current_setting('sandra.inbox_fixture_attempt_b')::uuid,
+    current_setting('sandra.inbox_fixture_operation_id')::uuid,
+    current_setting('sandra.inbox_fixture_preparation_id')::uuid,
+    current_setting('sandra.inbox_fixture_item_b')::uuid,1,NULL,
+    current_setting('sandra.inbox_fixture_contact_b')::uuid,'+18165550001','+18165550003',
     encode(sha256(convert_to('R1 callback gate B','utf8')||decode('00','hex')||convert_to('+18165550001','utf8')||decode('00','hex')||convert_to('+18165550003','utf8')),'hex'),
-    'provider_accepted',1,NULL,clock_timestamp()-interval '1 minute',gen_random_uuid(),1,f.reference_b,'sent','sandra_r1_callback_gate'
-  FROM inbox_reply_send.r1_callback_gate_fixtures f WHERE f.marker=:'fixture_marker';
+    'provider_accepted',1,NULL,clock_timestamp()-interval '1 minute',gen_random_uuid(),1,
+    current_setting('sandra.inbox_fixture_reference_b'),'sent','sandra_r1_callback_gate'
+  );
   ALTER TABLE inbox_reply_send.attempts ENABLE TRIGGER guard_reply_send_attempt;
 
   INSERT INTO inbox_reply_send.unmatched_callbacks(provider,provider_reference,terminal_status,payload)
-  SELECT 'sendillo',reference_b,'delivered',jsonb_build_object('__sandra_fixture_marker',marker,'fixture','r1_callback_gate')
-  FROM inbox_reply_send.r1_callback_gate_fixtures WHERE marker=:'fixture_marker';
+  VALUES (
+    'sendillo',current_setting('sandra.inbox_fixture_reference_b'),'delivered',
+    jsonb_build_object('__sandra_fixture_marker',current_setting('sandra.inbox_fixture_marker'),'fixture','r1_callback_gate')
+  );
 \else
-  -- Delete only IDs and provider references read from the owned marker row.
-  -- Admission, callback processing, and provider tables are not consulted.
+  -- Remove only IDs, references, and marker payloads from the receipt. The
+  -- receipt itself is never written to the database and is deleted by the
+  -- caller after this command succeeds.
+  DELETE FROM inbox_reply_send.callback_receipts
+  WHERE provider='sendillo'
+    AND event_type IN ('inbox_reply_status_delivered','inbox_reply_status_delivery_failed')
+    AND external_id IN (current_setting('sandra.inbox_fixture_reference_a'),current_setting('sandra.inbox_fixture_reference_b'))
+    AND org_id=current_setting('sandra.inbox_fixture_org_id')::uuid;
+  DELETE FROM inbox_reply_send.unmatched_callbacks
+  WHERE provider='sendillo'
+    AND provider_reference=current_setting('sandra.inbox_fixture_reference_b')
+    AND payload->>'__sandra_fixture_marker'=current_setting('sandra.inbox_fixture_marker');
+
   ALTER TABLE inbox_reply_send.attempts DISABLE TRIGGER guard_reply_send_attempt;
-  DELETE FROM inbox_reply_send.unmatched_callbacks u
-  USING inbox_reply_send.r1_callback_gate_fixtures f
-  WHERE f.marker=:'fixture_marker' AND u.provider='sendillo'
-    AND u.provider_reference IN (f.reference_a,f.reference_b)
-    AND u.payload->>'__sandra_fixture_marker'=f.marker;
-  DELETE FROM inbox_reply_send.attempts a
-  USING inbox_reply_send.r1_callback_gate_fixtures f
-  WHERE f.marker=:'fixture_marker' AND a.org_id=f.org_id AND a.operation_id=f.operation_id
-    AND a.preparation_id=f.preparation_id AND a.item_id IN (f.item_a,f.item_b);
+  DELETE FROM inbox_reply_send.attempts
+  WHERE org_id=current_setting('sandra.inbox_fixture_org_id')::uuid
+    AND id IN (current_setting('sandra.inbox_fixture_attempt_a')::uuid,current_setting('sandra.inbox_fixture_attempt_b')::uuid)
+    AND operation_id=current_setting('sandra.inbox_fixture_operation_id')::uuid
+    AND preparation_id=current_setting('sandra.inbox_fixture_preparation_id')::uuid;
   ALTER TABLE inbox_reply_send.attempts ENABLE TRIGGER guard_reply_send_attempt;
+
   ALTER TABLE inbox_reply_send.operations DISABLE TRIGGER immutable_reply_send_operation;
-  DELETE FROM inbox_reply_send.operations o
-  USING inbox_reply_send.r1_callback_gate_fixtures f
-  WHERE f.marker=:'fixture_marker' AND o.org_id=f.org_id AND o.id=f.operation_id AND o.preparation_id=f.preparation_id;
+  DELETE FROM inbox_reply_send.operations
+  WHERE org_id=current_setting('sandra.inbox_fixture_org_id')::uuid
+    AND id=current_setting('sandra.inbox_fixture_operation_id')::uuid
+    AND preparation_id=current_setting('sandra.inbox_fixture_preparation_id')::uuid;
   ALTER TABLE inbox_reply_send.operations ENABLE TRIGGER immutable_reply_send_operation;
+
   ALTER TABLE inbox_reply_review.preparations DISABLE TRIGGER immutable_reply_preparation;
-  DELETE FROM inbox_reply_review.preparations p
-  USING inbox_reply_send.r1_callback_gate_fixtures f
-  WHERE f.marker=:'fixture_marker' AND p.org_id=f.org_id AND p.id=f.preparation_id;
+  DELETE FROM inbox_reply_review.preparations
+  WHERE org_id=current_setting('sandra.inbox_fixture_org_id')::uuid
+    AND id=current_setting('sandra.inbox_fixture_preparation_id')::uuid;
   ALTER TABLE inbox_reply_review.preparations ENABLE TRIGGER immutable_reply_preparation;
-  DELETE FROM inbox_reply_send.r1_callback_gate_fixtures WHERE marker=:'fixture_marker';
 \endif
 
 COMMIT;
