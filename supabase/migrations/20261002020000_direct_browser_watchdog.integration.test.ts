@@ -56,6 +56,9 @@ it("arms, renews, fences, and claims a browser lease with database-clock timing"
     const claimed = (await pg.query("select * from public.direct_call_watchdog_claim_expired(5)")).rows;
     expect(claimed).toEqual([{ call_id: callId, operator_user_id: USER, browser_watchdog_session_id: SESSION }]);
     expect((await pg.query("select browser_watchdog_claimed_at is not null as claimed from public.direct_calls where id=$1", [callId])).rows[0].claimed).toBe(true);
+    await pg.query("update public.direct_calls set status='ending', browser_watchdog_expires_at=now()-interval '1 second', browser_watchdog_claimed_at=now()-interval '16 seconds' where id=$1", [callId]);
+    const retriedEnding = (await pg.query("select * from public.direct_call_watchdog_claim_expired(5)")).rows;
+    expect(retriedEnding).toEqual([{ call_id: callId, operator_user_id: USER, browser_watchdog_session_id: SESSION }]);
     await pg.query("update public.direct_calls set status='ended' where id=$1", [callId]);
     await pg.query("delete from public.direct_call_cleanups where direct_call_id=$1", [callId]);
     await pg.query("delete from public.direct_watchdog_liveness");

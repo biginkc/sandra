@@ -8,6 +8,7 @@ import type { CoachLogger, DirectCoachDb } from './types.js'
 const PING_MS = 2_000
 const HEARTBEAT_GRACE_MS = 6_000
 const AUTH_TIMEOUT_MS = 2_000
+const CLOSE_TIMEOUT_MS = 1_000
 const MAX_PRESENCE_PAYLOAD = 16_384
 
 export type WatchdogExpiryClaim = { callId: string; operatorUserId: string; sessionId: string }
@@ -47,6 +48,24 @@ export function createPresenceManager(options: PresenceManagerOptions): Presence
   const instanceId = options.instanceId ?? `watchdog-${randomUUID()}`
   let timer: ReturnType<typeof setInterval> | undefined
   let draining = false
+  let cleanupInFlight = false
+
+  function closeSocket(ws: WebSocket, code: number, reason: string): void {
+    if (ws.readyState === WebSocket.CLOSED) return
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      ws.removeListener('close', finish)
+    }
+    const timeout = setTimeout(() => {
+      if (ws.readyState !== WebSocket.CLOSED) ws.terminate()
+      finish()
+    }, CLOSE_TIMEOUT_MS)
+    ws.once('close', finish)
+    try { ws.close(code, reason) } catch { ws.terminate(); finish() }
+  }
 
   async function admit(request: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     const origin = request.headers.origin
@@ -55,7 +74,7 @@ export function createPresenceManager(options: PresenceManagerOptions): Presence
     const admission = new Promise<void>((resolve) => {
       wss.handleUpgrade(request, socket, head, (ws) => {
         const state: SocketState = { ws, claims: undefined as never, authenticated: false, lastPongAt: now(), graceful: false, renewing: false }
-        const authTimer = setTimeout(() => { if (!state.authenticated) ws.close(4401, 'presence authentication timeout') }, AUTH_TIMEOUT_MS)
+        const authTimer = setTimeout(() => { if (!state.authenticated) closeSocket(ws, 4401, 'presence authentication timeout') }, AUTH_TIMEOUT_MS)
         state.authTimer = authTimer
         const finish = () => {
           clearTimeout(authTimer)
@@ -77,12 +96,12 @@ export function createPresenceManager(options: PresenceManagerOptions): Presence
             .catch((error) => options.logger.warn('watchdog.renew_failed', { reason: error instanceof Error ? error.message : 'unknown' }))
             .finally(() => { state.renewing = false })
         })
-        ws.on('error', () => { if (!state.graceful) ws.close() })
+        ws.on('error', () => { if (!state.graceful) closeSocket(ws, 4403, 'presence socket error') })
         ws.on('close', () => finish())
         ws.on('message', (message) => {
           void handleMessage(state, message).catch((error) => {
             options.logger.warn('watchdog.message_rejected', { reason: error instanceof Error ? error.message : 'unknown' })
-            if (ws.readyState === WebSocket.OPEN) ws.close(4403, 'presence rejected')
+            if (ws.readyState === WebSocket.OPEN) closeSocket(ws, 4403, 'presence rejected')
           })
         })
         resolve()
@@ -102,7 +121,7 @@ export function createPresenceManager(options: PresenceManagerOptions): Presence
       const previous = sockets.get(claims.callId)
       if (previous && previous !== state) {
         previous.graceful = true
-        previous.ws.close(4001, 'presence superseded')
+        closeSocket(previous.ws, 4001, 'presence superseded')
       }
       state.claims = claims
       state.authenticated = true
@@ -122,6 +141,18 @@ export function createPresenceManager(options: PresenceManagerOptions): Presence
   }
 
   let tickInFlight = false
+  async function runExpirySweep(): Promise<void> {
+    if (draining || cleanupInFlight) return
+    cleanupInFlight = true
+    try {
+      const claims = await options.db.watchdogClaimExpired?.(2) ?? []
+      await Promise.all(claims.map(async (claim) => {
+        try { await options.onExpired(claim) } catch (error) { options.logger.error('watchdog.expiry_cleanup_failed', { callId: claim.callId, reason: error instanceof Error ? error.message : 'unknown' }) }
+      }))
+    } catch (error) { options.logger.error('watchdog.expiry_claim_failed', { reason: error instanceof Error ? error.message : 'unknown' }) }
+    finally { cleanupInFlight = false }
+  }
+
   async function tick(): Promise<void> {
     if (tickInFlight) return
     tickInFlight = true
@@ -131,18 +162,15 @@ export function createPresenceManager(options: PresenceManagerOptions): Presence
         if (state.ws.readyState !== WebSocket.OPEN) continue
         if (now() - state.lastPongAt > HEARTBEAT_GRACE_MS) {
           state.graceful = false
-          state.ws.close(4002, 'presence heartbeat stale')
+          closeSocket(state.ws, 4002, 'presence heartbeat stale')
         } else state.ws.ping()
       }
-      try {
-        const claims = await options.db.watchdogClaimExpired?.(2) ?? []
-        await Promise.all(claims.map(async (claim) => {
-          try { await options.onExpired(claim) } catch (error) { options.logger.error('watchdog.expiry_cleanup_failed', { callId: claim.callId, reason: error instanceof Error ? error.message : 'unknown' }) }
-        }))
-      } catch (error) { options.logger.error('watchdog.expiry_claim_failed', { reason: error instanceof Error ? error.message : 'unknown' }) }
     } finally {
       tickInFlight = false
     }
+    // Cleanup may involve several bounded provider requests. Keep it single-flight,
+    // but never let it delay the DB liveness row or the next ping.
+    void runExpirySweep()
   }
 
   return {
@@ -156,7 +184,7 @@ export function createPresenceManager(options: PresenceManagerOptions): Presence
     close: async () => {
       draining = true
       if (timer) clearInterval(timer)
-      for (const state of sockets.values()) { state.graceful = true; state.ws.close(1001, 'server shutdown') }
+      for (const state of sockets.values()) { state.graceful = true; closeSocket(state.ws, 1001, 'server shutdown') }
       await Promise.allSettled([...pending])
       await new Promise<void>((resolve) => { try { wss.close(() => resolve()) } catch { resolve() } })
     },

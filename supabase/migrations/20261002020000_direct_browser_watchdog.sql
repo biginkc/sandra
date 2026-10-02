@@ -178,7 +178,7 @@ end;
 $$;
 
 -- Claims are short durable leases. If the cleanup callback is unavailable, a restarted watchdog
--- can claim the row again after thirty seconds; no live call is marked ended without the app's
+-- can claim the row again after fifteen seconds; no live call is marked ended without the app's
 -- existing cleanup core confirming provider leg work.
 drop function if exists public.direct_call_watchdog_claim_expired(integer);
 create or replace function public.direct_call_watchdog_claim_expired(p_limit integer)
@@ -190,16 +190,18 @@ begin
   for r in
     select * from public.direct_calls c
      where c.browser_watchdog_expires_at <= now()
-       and c.status in ('browser_connecting', 'seller_dialing', 'connected')
+       -- An expired claim is first moved to ending by the callback. Keep ending rows
+       -- claimable so a callback/provider failure can return through the same cleanup core.
+       and c.status in ('browser_connecting', 'seller_dialing', 'connected', 'ending')
        and c.browser_watchdog_session_id is not null
-       and (c.browser_watchdog_claimed_at is null or c.browser_watchdog_claimed_at <= now() - interval '30 seconds')
+       and (c.browser_watchdog_claimed_at is null or c.browser_watchdog_claimed_at <= now() - interval '15 seconds')
      order by c.browser_watchdog_expires_at
      limit p_limit
      for update skip locked
   loop
     update public.direct_calls
        set browser_watchdog_claimed_at = now(),
-           browser_watchdog_expires_at = now() + interval '30 seconds',
+           browser_watchdog_expires_at = now() + interval '15 seconds',
            updated_at = now()
      where id = r.id;
     call_id := r.id;

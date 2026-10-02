@@ -396,6 +396,104 @@ test('browser presence requires origin and first-frame admission, renews the lea
   assert.equal(disconnects.at(-1), false)
 })
 
+test('watchdog cleanup stays single-flight while two real media sessions and presence pings continue', async () => {
+  const callA: CoachClaims = { callId: 'load-call-a', sellerLegId: 'load-seller-a', expiresAtMs: Date.now() + 100_000 }
+  const callB: CoachClaims = { callId: 'load-call-b', sellerLegId: 'load-seller-b', expiresAtMs: Date.now() + 100_000 }
+  const bindingFor = (value: CoachClaims): DirectCoachBinding => ({ ...binding, ...value })
+  let heartbeats = 0
+  let claimCalls = 0
+  let cleanupStarted!: () => void
+  let releaseCleanup!: () => void
+  const cleanupBegan = new Promise<void>((resolve) => { cleanupStarted = resolve })
+  const cleanupReleased = new Promise<void>((resolve) => { releaseCleanup = resolve })
+  const db: DirectCoachDb = {
+    readBinding: async (value) => bindingFor(value),
+    isActive: async () => true,
+    watchdogHeartbeat: async () => { heartbeats += 1 },
+    watchdogAttach: async () => true,
+    watchdogRenew: async () => true,
+    watchdogDisconnect: async () => true,
+    watchdogClaimExpired: async () => {
+      claimCalls += 1
+      if (claimCalls === 2) {
+        cleanupStarted()
+        return [{ callId: callA.callId, operatorUserId: 'owner', sessionId: 'session-a' }]
+      }
+      return []
+    },
+    close: async () => {},
+  }
+  const publisher: CoachPublisher = { publish: async () => {}, close: async () => {}, closeAll: async () => {} }
+  const service = createCoachServer({
+    secret: SECRET, db, publisher, deepgramApiKey: 'disabled', jevApiKey: 'disabled', logger,
+    sessionFactory: (ws, value, admitted, onEnd) => new CoachSession(ws, value, admitted, {
+      db, publisher, deepgramApiKey: 'disabled', jevApiKey: 'disabled', logger,
+      bridgeFactory: () => ({ send() {}, close: async () => {} }),
+      objectionFactory: () => ({ close() {}, onFinal() {}, onInterim() {} } as unknown as ObjectionPromptCall),
+      onEnd,
+    }),
+    watchdog: {
+      secret: SECRET,
+      origins: new Set(['http://localhost']),
+      onExpired: async () => { await cleanupReleased },
+    },
+  })
+  await service.listen(0, '127.0.0.1')
+  const address = service.server.address()
+  assert.ok(address && typeof address === 'object')
+  const mediaBase = `ws://127.0.0.1:${address.port}/media`
+  const presenceBase = `ws://127.0.0.1:${address.port}/presence`
+  const mediaA = new WebSocket(`${mediaBase}?token=${encodeURIComponent(createCoachToken(callA, SECRET))}`)
+  const mediaB = new WebSocket(`${mediaBase}?token=${encodeURIComponent(createCoachToken(callB, SECRET))}`)
+  await Promise.all([waitForWebSocketOpen(mediaA), waitForWebSocketOpen(mediaB)])
+  const start = (leg: string) => JSON.stringify({ event: 'start', start: { call_control_id: leg, media_format: { encoding: 'PCMU', sample_rate: 8000, channels: 1 } } })
+  mediaA.send(start(callA.sellerLegId))
+  mediaB.send(start(callB.sellerLegId))
+  await waitUntil(() => service.activeCalls.size === 2)
+  const presenceA = new WebSocket(presenceBase, { headers: { Origin: 'http://localhost' } })
+  await waitForWebSocketOpen(presenceA)
+  presenceA.send(createWatchdogToken({ callId: callA.callId, browserLegId: 'browser-a', operatorUserId: 'owner', sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', expiresAtMs: Date.now() + 100_000 }, SECRET))
+  await waitForWebSocketMessage(presenceA)
+  await cleanupBegan
+  const presenceB = new WebSocket(presenceBase, { headers: { Origin: 'http://localhost' } })
+  await waitForWebSocketOpen(presenceB)
+  presenceB.send(createWatchdogToken({ callId: callB.callId, browserLegId: 'browser-b', operatorUserId: 'owner', sessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', expiresAtMs: Date.now() + 100_000 }, SECRET))
+  await waitForWebSocketMessage(presenceB)
+  await new Promise((resolve) => setTimeout(resolve, 2_200))
+  assert.equal(heartbeats >= 3, true)
+  assert.equal(claimCalls, 2)
+  assert.equal(service.activeCalls.size, 2)
+  releaseCleanup()
+  await Promise.all([waitForWebSocketTerminal(mediaA), waitForWebSocketTerminal(mediaB), waitForWebSocketTerminal(presenceA), waitForWebSocketTerminal(presenceB), service.close()])
+})
+
+test('unauthenticated presence sockets are terminated within the bounded auth-close window', async () => {
+  const db: DirectCoachDb = {
+    readBinding: async () => null,
+    isActive: async () => true,
+    watchdogHeartbeat: async () => {},
+    watchdogAttach: async () => false,
+    watchdogRenew: async () => false,
+    watchdogDisconnect: async () => true,
+    watchdogClaimExpired: async () => [],
+    close: async () => {},
+  }
+  const publisher: CoachPublisher = { publish: async () => {}, close: async () => {}, closeAll: async () => {} }
+  const service = createCoachServer({
+    secret: SECRET, db, publisher, deepgramApiKey: 'disabled', jevApiKey: 'disabled', logger,
+    watchdog: { secret: SECRET, origins: new Set(['http://localhost']), onExpired: async () => {} },
+  })
+  await service.listen(0, '127.0.0.1')
+  const address = service.server.address()
+  assert.ok(address && typeof address === 'object')
+  const ws = new WebSocket(`ws://127.0.0.1:${address.port}/presence`, { headers: { Origin: 'http://localhost' } })
+  await waitForWebSocketOpen(ws)
+  const terminal = waitForWebSocketTerminal(ws)
+  await new Promise((resolve) => setTimeout(resolve, 3_200))
+  await terminal
+  await service.close()
+})
+
 function tick(): Promise<void> { return new Promise((resolve) => setImmediate(resolve)) }
 
 function waitForWebSocketOpen(ws: WebSocket): Promise<void> {
@@ -410,6 +508,14 @@ function waitForWebSocketMessage(ws: WebSocket): Promise<string> {
     ws.once('message', (message) => resolve(message.toString()))
     ws.once('error', reject)
   })
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('condition did not become true')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
 }
 
 function waitForWebSocketTerminal(ws: WebSocket): Promise<void> {

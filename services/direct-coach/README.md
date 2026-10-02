@@ -18,8 +18,8 @@ digest, same-org Acquisitions membership, and unexpired active access.
 The presence token is a separate HMAC capability delivered as the first
 WebSocket frame, never in the URL. The request Origin must match the explicit
 allowlist. Admission locks the exact direct-call id, browser leg, owner, and
-session nonce in Postgres before returning `presence_ack`; application
-Native WebSocket pongs renew a twelve-second lease, while abnormal socket loss
+session nonce in Postgres before returning `presence_ack`. Native WebSocket
+pongs renew a twelve-second lease, while abnormal socket loss
 receives a five-second reconnect grace. Application heartbeat frames are
 acknowledgement-only compatibility messages. A two-second server sweep claims expired leases
 and calls the Sandra cleanup endpoint with a fenced, bounded request. Server
@@ -47,10 +47,12 @@ Native WebSocket pong empirically closes within a few seconds after a Chrome
 renderer crash and remains healthy during a frozen page, so the watchdog covers
 renderer crash and network loss without treating a background timer pause as
 loss. It does not claim to detect a frozen main thread. The thirty-second
-cleanup target is a healthy-service/provider timing bound; provider outage
-requests remain durable and truthful under the normal 180-second call
-backstop. Before release, the single process must pass a two-call media plus
-watchdog event-loop load check.
+cleanup target is a healthy-service/provider timing bound; the provider
+duration cap alone never confirms that a leg is gone. Provider outage requests
+remain durable and truthful under the normal 180-second call backstop, and the
+callback retries the shared cleanup core until every obligation is confirmed.
+Before release, the single process must pass a two-call media plus watchdog
+event-loop load check.
 
 `npm test`, `npm run typecheck`, and `npm run build` are local checks. Provider
 calls, deployments, and live acceptance are outside this service package.
