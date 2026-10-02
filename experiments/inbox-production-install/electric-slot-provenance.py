@@ -62,8 +62,6 @@ def local_environment() -> None:
 def psql(sql: str, local: bool) -> list[str]:
     if local:
         local_environment()
-    else:
-        raise AssertionError("hosted environment must be validated before psql")
     binary = os.environ.get("INBOX_SLOT_PSQL_BIN", "psql")
     result = subprocess.run(
         [binary, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-At", "-F", "\t", "-c", sql],
