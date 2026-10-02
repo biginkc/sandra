@@ -87,6 +87,7 @@ function world(opts: { lead?: boolean; timeLimitSecs?: number } = {}) {
     prepareManualCall: async (phone) => { prepare(phone); return { ok: true, data: targetFor(null, phone === "training" ? "+15550007777" : "+15550009999") }; },
     resumeFailedSoftphoneCall: async (propertyId) => { resumes.push({ via: "service", propertyId }); },
     sealCallIdentity: ({ callId }) => ({ capability: `sealed:${callId}`, training: false }),
+    recordTrainingActivity: async () => undefined,
     telnyx: {
       dial: (_s, params) => dial(params), hangup: (_s, leg, cmd) => hangup(leg, cmd), getCall: (_s, leg) => getCall(leg),
       listActiveCalls: () => listActiveCalls(), sendDtmf: async () => undefined,

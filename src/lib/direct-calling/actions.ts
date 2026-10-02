@@ -3,10 +3,12 @@
 import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
 import { prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall } from "@/lib/dialer/actions";
 import { capabilityKey } from "@/lib/dialer/call-capability";
-import { isHomeownerTrainingNumber } from "@/lib/dialer/homeowner-training";
+import { HOMEOWNER_TRAINING_LABEL, isHomeownerTrainingNumber } from "@/lib/dialer/homeowner-training";
 import { sealCallCapability } from "@/lib/dialer/jitter-server";
 import { reportError } from "@/lib/errors/report";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 
 import { isDirectCallEligibleMembership, resolveCallingConfig } from "./config";
 import type {
@@ -14,6 +16,7 @@ import type {
   CancelDirectCallResult,
   DirectActionResult,
   DirectCallControl,
+  DirectCallTarget,
   DirectCallStatusView,
   DirectRtcToken,
   StartDirectCallInput,
@@ -63,6 +66,7 @@ function service(authorizedUserId: string) {
     prepareLeadCall,
     prepareManualCall,
     resumeFailedSoftphoneCall,
+    recordTrainingActivity,
     // The existing Jitter-path sealer, unchanged: same payload, key and purpose rule.
     sealCallIdentity: ({ callId, userId, phoneE164 }) => {
       const training = isHomeownerTrainingNumber(phoneE164);
@@ -83,6 +87,64 @@ function service(authorizedUserId: string) {
     },
     report: (error, tag) => reportError(error, { tags: { surface: tag } }),
   });
+}
+
+/**
+ * Training purpose is an immutable, server-assigned property of a call activity.
+ * Create the row with the service role before returning a browser capability so a
+ * crashed browser or missing wrap-up cannot turn a training call into an untyped
+ * customer activity. The direct call id is also the activity id, making replay
+ * idempotent without depending on PostgREST inference for the partial direct-id
+ * unique index.
+ */
+async function recordTrainingActivity(args: {
+  directCallId: string;
+  operatorUserId: string;
+  target: DirectCallTarget;
+}): Promise<void> {
+  const admin = createAdminClient();
+  const values = {
+    id: args.directCallId,
+    org_id: SANDRA_ORG_ID,
+    direct_call_id: args.directCallId,
+    provider: "sandra_softphone",
+    jitter_attempt_id: `sandra-${args.directCallId}`,
+    operator_user_id: args.operatorUserId,
+    property_id: null,
+    contact_id: null,
+    phone_e164: args.target.phoneE164,
+    call_purpose: "internal_training",
+    direction: "outbound",
+    notes: HOMEOWNER_TRAINING_LABEL,
+    started_at: args.target.startedAt,
+  };
+  const { error } = await admin.from("call_activities").insert(values as never);
+  if (error && error.code !== "23505") throw error;
+
+  // Select by id because generated Supabase types predate direct_call_id. The
+  // inserted identity is still checked through the id, direct linkage, and all
+  // immutable fences.
+  const { data: recorded, error: readError } = await admin
+    .from("call_activities")
+    .select("*")
+    .eq("id", args.directCallId)
+    .maybeSingle();
+  const directCallId = (recorded as unknown as { direct_call_id?: string | null } | null)?.direct_call_id;
+  if (
+    readError ||
+    !recorded ||
+    recorded.id !== args.directCallId ||
+    directCallId !== args.directCallId ||
+    recorded.call_purpose !== "internal_training" ||
+    recorded.phone_e164 !== args.target.phoneE164 ||
+    recorded.org_id !== SANDRA_ORG_ID ||
+    recorded.operator_user_id !== args.operatorUserId ||
+    recorded.provider !== "sandra_softphone" ||
+    recorded.property_id !== null ||
+    recorded.contact_id !== null
+  ) {
+    throw new Error("Training activity identity conflict");
+  }
 }
 
 export async function getCallingConfigForCurrentUser(): Promise<CallingConfig> {

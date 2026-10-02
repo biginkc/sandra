@@ -80,8 +80,37 @@ describe("real training server actions", () => {
       property_id: null,
       contact_id: null,
       direct_call_id: callId,
+      call_purpose: "internal_training",
     }));
     expect(mocks.disposition).not.toHaveBeenCalled(); expect(mocks.appointment).not.toHaveBeenCalled(); expect(mocks.resume).not.toHaveBeenCalled();
+  });
+  it("creates a wrap-up-first training activity with the immutable training purpose", async () => {
+    const insert = vi.fn();
+    mocks.client.mockResolvedValue({ auth: auth(), from: (table: string) => {
+      let inserting = false;
+      const chain = {
+        select: () => chain,
+        eq: () => chain,
+        limit: () => chain,
+        or: () => chain,
+        insert: (values: unknown) => { insert(values); inserting = true; return chain; },
+        maybeSingle: async () => ({
+          data: table === "memberships" ? { org_id: "org" } : table === "direct_calls" ? { id: callId } : inserting ? { id: callId } : null,
+          error: null,
+        }),
+      };
+      return chain;
+    } });
+    expect(await completeSoftphoneCall(input())).toMatchObject({ ok: true, data: { activityId: callId } });
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({
+      call_purpose: "internal_training",
+      direct_call_id: callId,
+      property_id: null,
+      contact_id: null,
+      disposition: null,
+    }));
+    expect(mocks.disposition).not.toHaveBeenCalled();
+    expect(mocks.resume).not.toHaveBeenCalled();
   });
   it("reads old-schema recents while training is disabled without naming the new column", async () => {
     vi.stubEnv("HOMEOWNER_TRAINING_ENABLED", "false");
