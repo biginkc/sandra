@@ -27,9 +27,16 @@ export function readNormaSlackConfig(env: NormaEnv = process.env): NormaSlackCon
 
 /** One bounded attempt per call: backoff lives in the outbox, not in the SDK. */
 export function createNormaSlackPoster(config: NormaSlackConfig): NormaSlackPost {
-  const slack = new WebClient(config.botToken, { timeout: 10_000, retryConfig: { retries: 0 } });
+  const slack = new WebClient(config.botToken, { timeout: SLACK_POST_TIMEOUT_MS, retryConfig: { retries: 0 } });
   return async ({ blocks, text }) => {
-    const posted = await slack.chat.postMessage({ channel: config.channelId, blocks, text });
+    const posted = await slack.chat.postMessage({
+      channel: config.channelId,
+      blocks,
+      text,
+      // Seller-supplied text can contain links; never let Slack fetch or expand them.
+      unfurl_links: false,
+      unfurl_media: false,
+    });
     if (!posted.ok || !posted.ts) throw new Error(`slack_post_failed:${posted.error ?? "no_ts"}`);
     return { ts: posted.ts };
   };
@@ -45,7 +52,13 @@ export const NORMA_NOTIFICATION_MAX_ATTEMPTS = 10;
  * after the lease expires.
  */
 export const NORMA_NOTIFICATION_LEASE_MS = 5 * MIN;
-const BATCH = 25;
+/** Rows per run. Small on purpose: each post can take up to the Slack timeout. */
+const BATCH = 10;
+const SLACK_POST_TIMEOUT_MS = 10_000;
+/** The cron route's maxDuration is 60s; stay well inside it. */
+export const NORMA_NOTIFICATION_RUN_BUDGET_MS = 45_000;
+/** No new row is started unless a worst-case post (timeout + message reads) still fits the budget. */
+export const NORMA_NOTIFICATION_ROW_RESERVE_MS = SLACK_POST_TIMEOUT_MS + 3_000;
 
 export function normaNotificationBackoffMs(attempts: number): number {
   const index = Math.min(Math.max(attempts, 1), NORMA_NOTIFICATION_BACKOFF_MS.length) - 1;
@@ -59,6 +72,10 @@ export type NormaNotificationSummary = {
   failed: number;
   gaveUp: number;
   skipped: number;
+  /** Posted, but the sent-write failed: the lease is kept, nothing is re-posted this run. */
+  unrecorded: number;
+  /** Left untouched (still pending) because the run budget was spent. */
+  deferred: number;
 };
 
 export type NormaNotificationDeps = {
@@ -67,6 +84,9 @@ export type NormaNotificationDeps = {
   post: NormaSlackPost | null;
   now?: number;
   env?: NormaEnv;
+  /** Wall clock for the run budget (tests inject one). Distinct from `now`, which dates the rows. */
+  clock?: () => number;
+  budgetMs?: number;
 };
 
 type NotificationRow = Pick<
@@ -79,9 +99,12 @@ type NotificationRow = Pick<
  * never writes CRM state. One post per notification row.
  */
 export async function drainNormaNotifications(deps: NormaNotificationDeps): Promise<NormaNotificationSummary> {
-  const summary: NormaNotificationSummary = { configured: deps.post !== null, scanned: 0, sent: 0, failed: 0, gaveUp: 0, skipped: 0 };
+  const summary: NormaNotificationSummary = { configured: deps.post !== null, scanned: 0, sent: 0, failed: 0, gaveUp: 0, skipped: 0, unrecorded: 0, deferred: 0 };
   if (!deps.post) return summary;
   const now = deps.now ?? Date.now();
+  const clock = deps.clock ?? Date.now;
+  const startedAt = clock();
+  const budgetMs = deps.budgetMs ?? NORMA_NOTIFICATION_RUN_BUDGET_MS;
 
   const { data, error } = await deps.client
     .from("norma_notifications")
@@ -92,18 +115,23 @@ export async function drainNormaNotifications(deps: NormaNotificationDeps): Prom
     .limit(BATCH);
   if (error) throw new Error(`norma notifications scan failed: ${error.message}`);
 
-  for (const row of (data ?? []) as NotificationRow[]) {
+  const rows = (data ?? []) as NotificationRow[];
+  for (const [index, row] of rows.entries()) {
+    // Never begin a post the 60s function limit could kill half way through.
+    if (clock() - startedAt > budgetMs - NORMA_NOTIFICATION_ROW_RESERVE_MS) {
+      summary.deferred = rows.length - index;
+      break;
+    }
     summary.scanned += 1;
     const claimed = await claim(deps.client, row, now);
     if (!claimed) {
       summary.skipped += 1;
       continue;
     }
+    let ts: string;
     try {
       const message = await buildMessage(deps.client, row.request_id, deps.env);
-      const { ts } = await deps.post(message);
-      await markSent(deps.client, row.id, ts, row.attempts + 1, now);
-      summary.sent += 1;
+      ({ ts } = await deps.post(message));
     } catch (failure) {
       const attempts = row.attempts + 1;
       const giveUp = attempts >= NORMA_NOTIFICATION_MAX_ATTEMPTS;
@@ -111,6 +139,16 @@ export async function drainNormaNotifications(deps: NormaNotificationDeps): Prom
       await markFailed(deps.client, row.id, attempts, giveUp, now, failure);
       if (giveUp) summary.gaveUp += 1;
       else summary.failed += 1;
+      continue;
+    }
+    // Only a failed POST is a failure. Once Slack has the message, a bookkeeping
+    // error must not back the row off into a re-post: keep the lease, report it.
+    try {
+      await markSent(deps.client, row.id, ts, row.attempts + 1, now);
+      summary.sent += 1;
+    } catch (bookkeeping) {
+      summary.unrecorded += 1;
+      reportError(bookkeeping, { tags: { surface: "norma_slack_notification_sent_write" }, extra: { notificationId: row.id, slackTs: ts } });
     }
   }
   return summary;

@@ -16,7 +16,7 @@ vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 type Row = Record<string, unknown>;
 
 /** In-memory double: records every write so tests can prove only the outbox is touched. */
-function makeClient(tables: Record<string, Row[]>) {
+function makeClient(tables: Record<string, Row[]>, failWrite?: (values: Row) => boolean) {
   const writes: { table: string; values: Row }[] = [];
   function from(table: string) {
     let rows = tables[table] ?? [];
@@ -30,6 +30,7 @@ function makeClient(tables: Record<string, Row[]>) {
       update: (values: Row) => ((pending = values), api),
       maybeSingle: async () => ({ data: rows[0] ?? null, error: null }),
       then: (resolve: (v: unknown) => unknown) => {
+        if (pending && failWrite?.(pending)) return resolve({ data: null, error: { message: "db down" } });
         if (pending) {
           writes.push({ table, values: pending });
           for (const row of rows) Object.assign(row, pending);
@@ -46,7 +47,7 @@ function makeClient(tables: Record<string, Row[]>) {
 const NOW = Date.parse("2026-10-02T12:00:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
 
-function fixture(notificationOverrides: Row[] = [{}]) {
+function fixture(notificationOverrides: Row[] = [{}], failWrite?: (values: Row) => boolean) {
   return makeClient({
     norma_notifications: notificationOverrides.map((o, i) => ({
       id: `n${i}`, request_id: `r${i}`, kind: "call_completed", status: "pending", attempts: 0,
@@ -58,7 +59,7 @@ function fixture(notificationOverrides: Row[] = [{}]) {
     })),
     properties: [{ id: "p1", address: "12 Oak St", city: "KC", state: "MO" }],
     contacts: [{ id: "c1", contact_type: "person", first_name: "Pat", last_name: "Seller", entity_name: null }],
-  });
+  }, failWrite);
 }
 
 describe("readNormaSlackConfig", () => {
@@ -147,6 +148,49 @@ describe("drainNormaNotifications", () => {
     });
     await drainNormaNotifications({ client: f.client, post, now: NOW });
     expect(Date.parse(String(leasedDuringPost))).toBe(NOW + NORMA_NOTIFICATION_LEASE_MS);
+  });
+
+  it("does not back a posted row off into a re-post when the sent-write fails", async () => {
+    const f = fixture([{}], (values) => values.status === "sent");
+    const post = vi.fn().mockResolvedValue({ ts: "4.4" });
+    const summary = await drainNormaNotifications({ client: f.client, post, now: NOW });
+    expect(summary).toMatchObject({ sent: 0, failed: 0, unrecorded: 1 });
+    const row = f.tables.norma_notifications[0];
+    // Still pending, still leased, no backoff write, no attempt recorded as a failure.
+    expect(row).toMatchObject({ status: "pending", attempts: 0 });
+    expect(Date.parse(String(row.next_attempt_at))).toBe(NOW + NORMA_NOTIFICATION_LEASE_MS);
+    expect(f.writes.some((w) => w.values.last_error !== undefined)).toBe(false);
+    const again = await drainNormaNotifications({ client: f.client, post, now: NOW + 1000 });
+    expect(again.scanned).toBe(0);
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops starting posts when the run budget is spent and leaves the rest pending", async () => {
+    const f = fixture([{}, {}, {}, {}]);
+    let t = 0;
+    const post = vi.fn().mockImplementation(async () => {
+      t += 15_000; // each post is slow
+      return { ts: "5.5" };
+    });
+    const summary = await drainNormaNotifications({ client: f.client, post, now: NOW, clock: () => t, budgetMs: 45_000 });
+    // 45s budget minus the 13s per-row reserve: rows start at t=0, 15s, 30s; the 4th (t=45s) is deferred.
+    expect(summary).toMatchObject({ sent: 3, deferred: 1 });
+    expect(f.tables.norma_notifications[3]).toMatchObject({ status: "pending", attempts: 0 });
+    expect(Date.parse(String(f.tables.norma_notifications[3].next_attempt_at))).toBe(NOW - 1000);
+    // The next run picks the deferred row up.
+    const next = await drainNormaNotifications({ client: f.client, post, now: NOW + 1000, clock: () => 0 });
+    expect(next.sent).toBe(1);
+  });
+
+  it("never exceeds the 60s function limit even when every post hits its timeout", async () => {
+    const f = fixture(Array.from({ length: 10 }, () => ({})));
+    let t = 0;
+    const post = vi.fn().mockImplementation(async () => {
+      t += 10_000;
+      throw new Error("timeout");
+    });
+    await drainNormaNotifications({ client: f.client, post, now: NOW, clock: () => t });
+    expect(t).toBeLessThanOrEqual(60_000 - 10_000);
   });
 
   it("treats an unreadable request as a failure, not a post", async () => {
