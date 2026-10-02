@@ -44,6 +44,11 @@ class ExecutionStackComposeTests(unittest.TestCase):
         node = shutil.which("node")
         if node is None:
             self.fail("node is required for the compose worker-start proof")
+        candidate_image = next(
+            service["image"]
+            for service in json.loads((HERE.parent.parent / "deployment/inbox/candidate.json").read_text())["services"]
+            if service["name"] == "inbox-electric"
+        )
         with tempfile.TemporaryDirectory(prefix="sandra-inbox-compose-test-") as temp:
             root = Path(temp)
             key = root / "restate-key.pem"
@@ -66,6 +71,7 @@ class ExecutionStackComposeTests(unittest.TestCase):
                 "\n".join(
                     [
                         f"INBOX_RESTATE_PRIVATE_KEY_FILE={key}",
+                        f"INBOX_ELECTRIC_IMAGE={candidate_image}",
                         "INBOX_ELECTRIC_DATABASE_URL=postgresql://fixture:fixture@127.0.0.1:54322/postgres",
                         "ELECTRIC_MANUAL_TABLE_PUBLISHING=true",
                         f"INBOX_RELEASE_RUNTIME_ENV_FILE={runtime_env}",
@@ -97,6 +103,7 @@ class ExecutionStackComposeTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr[-2000:])
                 resolved = json.loads(result.stdout)
                 resolved_services = {
+                    "electric": resolved["services"]["electric"]["image"],
                     "operation-worker": resolved["services"]["operation-worker"]["environment"],
                     "reply-send-worker": resolved["services"]["reply-send-worker"]["environment"],
                 }
@@ -115,6 +122,8 @@ class ExecutionStackComposeTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(proof.returncode, 0, proof.stderr[-4000:])
+            if resolved_services is not None:
+                self.assertEqual(resolved_services["electric"], candidate_image)
             self.assertIn('"configurationAccepted":true', proof.stdout)
             self.assertIn('"databaseAccepted":true', proof.stdout)
             self.assertIn('"routingAccepted":true', proof.stdout)

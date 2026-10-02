@@ -32,9 +32,9 @@ services:
 
   electric:
     profiles: [full-runtime]
-    # EIMG-7 placeholder: this fixture must refuse to start until candidate.json
-    # receives the reviewed GHCR digest and attestation URL.
-    image: ghcr.io/biginkc/inbox-electric:1.8.1-0f40420@sha256:PENDING_EIMG_BUILD
+    # The image is supplied from deployment/inbox/candidate.json by the
+    # release command; this template has no second Electric-image source.
+    image: ${INBOX_ELECTRIC_IMAGE:?set INBOX_ELECTRIC_IMAGE from deployment/inbox/candidate.json}
     pull_policy: never
     container_name: sandra-inbox-release-electric-20260917
     restart: unless-stopped
