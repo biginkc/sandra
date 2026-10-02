@@ -1151,7 +1151,7 @@ export async function handleInboundWebhook(
   }
 }
 
-async function insertInboundMessage(
+export async function insertInboundMessage(
   supabase: SupabaseClient<Database>,
   input: {
     providerId: string;
@@ -1188,26 +1188,32 @@ async function insertInboundMessage(
     };
   }
 
-  const { data: inserted, error } = await supabase
-    .from("messages")
-    .insert({
-      channel: "sms",
-      direction: "inbound",
-      status: "received",
-      provider: input.providerId,
-      external_id: input.externalId,
-      from_address: normalizePhone(input.from) ?? input.from,
-      to_address: normalizePhone(input.to) ?? input.to,
-      body: input.body,
-      contact_id: input.contactId,
-      property_id: input.propertyId,
-      conversation_id: input.conversationId,
-      inbound_intent_id: input.inboundIntentId,
-      attributed_outbound_message_id: input.attributedOutboundMessageId,
-      metadata: input.metadata,
-    })
-    .select("id, metadata, contact_id, property_id, conversation_id")
-    .maybeSingle();
+  const messageInsert = {
+    channel: "sms" as const,
+    direction: "inbound" as const,
+    status: "received" as const,
+    provider: input.providerId,
+    external_id: input.externalId,
+    from_address: normalizePhone(input.from) ?? input.from,
+    to_address: normalizePhone(input.to) ?? input.to,
+    body: input.body,
+    contact_id: input.contactId,
+    property_id: input.propertyId,
+    conversation_id: input.conversationId,
+    inbound_intent_id: input.inboundIntentId,
+    attributed_outbound_message_id: input.attributedOutboundMessageId,
+    metadata: input.metadata,
+  };
+  const insert = () =>
+    supabase
+      .from("messages")
+      .insert(messageInsert)
+      .select("id, metadata, contact_id, property_id, conversation_id")
+      .maybeSingle();
+  let { data: inserted, error } = await insert();
+  if (error?.code === "40P01") {
+    ({ data: inserted, error } = await insert());
+  }
   if (!error) {
     await clearAiResponderThreadState(supabase, inserted?.conversation_id ?? null);
     await markInboundSmsIntentMessageInserted(
