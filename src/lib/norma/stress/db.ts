@@ -27,6 +27,7 @@ const MIGRATIONS = [
   "20261002020000_norma_call_requests.sql",
   "20261002030000_norma_m2_hardening.sql",
   "20261002040000_norma_m2_review_fixes.sql",
+  "20261002050000_norma_dnc_lock_task_writes.sql",
 ];
 
 const withDb = (url: string, name: string) => {
@@ -155,38 +156,46 @@ export async function createScratchDb(): Promise<Scratch> {
   const pool = createStressPool(url);
   const advance = async (ms: number) => {
     const iv = `${Math.floor(ms)} milliseconds`;
-    const c = await pool.connect();
-    try {
-      await c.query("begin");
-      // Triggers off for the shift only: it must not look like a state change.
-      await c.query("set local session_replication_role = replica");
-      await c.query(
-        `update public.norma_call_requests set created_at = created_at - $1::interval, updated_at = updated_at - $1::interval,
-           next_check_at = next_check_at - $1::interval, dispatch_started_at = dispatch_started_at - $1::interval,
-           dispatched_at = dispatched_at - $1::interval, completed_at = completed_at - $1::interval,
-           callback_requested_for = callback_requested_for - $1::interval`,
-        [iv],
-      );
-      await c.query(
-        `update public.norma_notifications set created_at = created_at - $1::interval, updated_at = updated_at - $1::interval,
-           next_attempt_at = next_attempt_at - $1::interval`,
-        [iv],
-      );
-      await c.query(
-        `update public.norma_enrollment_pauses set created_at = created_at - $1::interval, released_at = released_at - $1::interval`,
-        [iv],
-      );
-      await c.query(
-        `update public.sequence_enrollments set updated_at = updated_at - $1::interval, enrolled_at = enrolled_at - $1::interval`,
-        [iv],
-      );
-      await c.query(`update public.tasks set due_at = due_at - $1::interval where source_key like 'norma_call:%'`, [iv]);
-      await c.query("commit");
-    } catch (error) {
-      await c.query("rollback").catch(() => undefined);
-      throw error;
-    } finally {
-      c.release();
+    // REPEATABLE READ: every table is shifted from ONE snapshot, so a request and
+    // its task (written in one transaction) can never be shifted by different
+    // amounts. A concurrent writer makes this fail with 40001; just retry.
+    for (let attempt = 0; ; attempt += 1) {
+      const c = await pool.connect();
+      try {
+        await c.query("begin isolation level repeatable read");
+        // Triggers off for the shift only: it must not look like a state change.
+        await c.query("set local session_replication_role = replica");
+        await c.query(
+          `update public.norma_call_requests set created_at = created_at - $1::interval, updated_at = updated_at - $1::interval,
+             next_check_at = next_check_at - $1::interval, dispatch_started_at = dispatch_started_at - $1::interval,
+             dispatched_at = dispatched_at - $1::interval, completed_at = completed_at - $1::interval,
+             callback_requested_for = callback_requested_for - $1::interval`,
+          [iv],
+        );
+        await c.query(
+          `update public.norma_notifications set created_at = created_at - $1::interval, updated_at = updated_at - $1::interval,
+             next_attempt_at = next_attempt_at - $1::interval`,
+          [iv],
+        );
+        await c.query(
+          `update public.norma_enrollment_pauses set created_at = created_at - $1::interval, released_at = released_at - $1::interval`,
+          [iv],
+        );
+        await c.query(
+          `update public.sequence_enrollments set updated_at = updated_at - $1::interval, enrolled_at = enrolled_at - $1::interval`,
+          [iv],
+        );
+        await c.query(`update public.tasks set due_at = due_at - $1::interval where source_key like 'norma_call:%'`, [iv]);
+        await c.query("commit");
+        return;
+      } catch (error) {
+        await c.query("rollback").catch(() => undefined);
+        const code = (error as { code?: string }).code;
+        if ((code === "40001" || code === "40P01") && attempt < 50) continue;
+        throw error;
+      } finally {
+        c.release();
+      }
     }
   };
 

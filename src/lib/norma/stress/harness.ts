@@ -293,9 +293,9 @@ export class Harness {
     if (how === "registry") {
       await pool.query(
         `insert into public.global_phone_dnc_registry (org_id, phone_e164, first_consumer_id, first_source_event_id, first_evidence_sha256)
-         values ($1, $2, gen_random_uuid(), 'stress', 'stress') on conflict do nothing`,
+         values ($1, $2, gen_random_uuid(), 'stress', repeat('a', 64)) on conflict do nothing`,
         [org, ctx.lead.phone],
-      ).catch(() => undefined);
+      );
     } else if (how === "contact") {
       await pool.query("update public.contacts set do_not_contact = true where id = $1", [ctx.lead.contact]);
     } else {
@@ -364,7 +364,9 @@ export class Harness {
       await this.reconcile({ includeNeedsReview: rounds % 12 === 0 });
       await this.staleSweep();
       await this.slackDrain();
-      if (await this.allSettled()) break;
+      // Never stop before the 30-minute stale-call window has passed once, so a
+      // softphone pause made just before the end is still swept.
+      if (elapsed >= 45 * 60_000 && (await this.allSettled())) break;
     }
     return { elapsed, rounds };
   }
