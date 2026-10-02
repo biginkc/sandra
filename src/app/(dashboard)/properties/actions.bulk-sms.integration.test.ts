@@ -1542,4 +1542,136 @@ describe("bulkQueueSms (integration)", () => {
     ).toBe(true);
     expect(messages?.every((row) => row.status === "queued")).toBe(true);
   });
+
+  it("rejects a supplied property id that is not in the campaign's frozen recipients", async () => {
+    const orgId = await getOrgId();
+    const frozen = await seedLead({ phone: "+18165552060", address: "1 Frozen St" });
+    const outsider = await seedLead({ phone: "+18165552061", address: "2 Outsider St" });
+    const { data: campaign } = await testClient
+      .from("campaigns")
+      .insert({
+        org_id: orgId,
+        name: "Frozen Audience Campaign",
+        channel: "sms",
+        status: "launching",
+        sender_provider: "mock",
+        sender_number: MOCK_SENDER_SECONDARY,
+      })
+      .select("id")
+      .single();
+    if (!campaign) throw new Error("campaign seed failed");
+    await testClient.from("campaign_recipients").insert({
+      campaign_id: campaign.id,
+      property_id: frozen.propertyId,
+      contact_id: frozen.contactId,
+    });
+
+    const result = await bulkQueueSms([frozen.propertyId, outsider.propertyId], {
+      body: "Injected hello",
+      campaignId: campaign.id,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("CAMPAIGN_AUDIENCE_NOT_FROZEN");
+
+    const { data: messages } = await testClient
+      .from("messages")
+      .select("id")
+      .eq("campaign_id", campaign.id);
+    expect(messages).toHaveLength(0);
+  });
+
+  it("still sends a frozen recipient that was promoted to a lead after the freeze", async () => {
+    const orgId = await getOrgId();
+    const promoted = await seedLead({ phone: "+18165552062", address: "3 Promoted St" });
+    const { data: campaign } = await testClient
+      .from("campaigns")
+      .insert({
+        org_id: orgId,
+        name: "Promoted After Freeze Campaign",
+        channel: "sms",
+        status: "launching",
+        sender_provider: "mock",
+        sender_number: MOCK_SENDER_SECONDARY,
+      })
+      .select("id")
+      .single();
+    if (!campaign) throw new Error("campaign seed failed");
+    await testClient.from("campaign_recipients").insert({
+      campaign_id: campaign.id,
+      property_id: promoted.propertyId,
+      contact_id: promoted.contactId,
+    });
+    await testClient
+      .from("properties")
+      .update({ status: "lead" })
+      .eq("id", promoted.propertyId);
+
+    const result = await bulkQueueSms([promoted.propertyId], {
+      body: "Hi, this is Mel with BMH. Promoted hello",
+      campaignId: campaign.id,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.succeeded).toBe(1);
+  });
+
+  it("accepts a 150-property saved audience with 8 recipient rows per property (1200 rows, beyond one API page; local gateway caps the id URL near 150 ids)", async () => {
+    const orgId = await getOrgId();
+    const { data: campaign } = await testClient
+      .from("campaigns")
+      .insert({
+        org_id: orgId,
+        name: "Wide Frozen Audience Campaign",
+        channel: "sms",
+        status: "launching",
+        sender_provider: "mock",
+        sender_number: MOCK_SENDER_SECONDARY,
+      })
+      .select("id")
+      .single();
+    if (!campaign) throw new Error("campaign seed failed");
+    const { data: props, error: pErr } = await testClient
+      .from("properties")
+      .insert(
+        Array.from({ length: 150 }, (_, i) => ({
+          org_id: orgId,
+          address: `${i} Wide Audience St`,
+          state: "MO",
+          status: "prospect",
+        })),
+      )
+      .select("id");
+    if (pErr || !props) throw new Error(`property seed failed: ${pErr?.message}`);
+    const { data: contacts, error: cErr } = await testClient
+      .from("contacts")
+      .insert(
+        Array.from({ length: 8 }, (_, i) => ({
+          org_id: orgId,
+          first_name: "Wide",
+          last_name: `C${i}`,
+        })),
+      )
+      .select("id");
+    if (cErr || !contacts) throw new Error(`contact seed failed: ${cErr?.message}`);
+    const rows = props.flatMap((p) =>
+      contacts.map((c) => ({
+        campaign_id: campaign.id,
+        property_id: p.id,
+        contact_id: c.id,
+      })),
+    );
+    for (let i = 0; i < rows.length; i += 500) {
+      const { error } = await testClient
+        .from("campaign_recipients")
+        .insert(rows.slice(i, i + 500));
+      if (error) throw new Error(`recipient seed failed: ${error.message}`);
+    }
+
+    const result = await bulkQueueSms(
+      props.map((p) => p.id),
+      { body: "Wide hello", campaignId: campaign.id },
+    );
+    expect(result.ok ? "ok" : result.error).toBe("ok");
+  });
 });
