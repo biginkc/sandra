@@ -48,7 +48,11 @@ describe("processDueCleanups", () => {
     const startedAt = clock.now.getTime();
     // Model the route's bounded provider calls: one four-page active-call
     // listing (2s per page), followed by two known-leg hangups (2s each).
-    const hangup = vi.fn(async () => {
+    const sentLegs: string[] = [];
+    const hangup = vi.fn<CleanupDeps["hangup"]>();
+    hangup.mockImplementation(async (leg, commandId) => {
+      expect(commandId).toEqual(expect.any(String));
+      sentLegs.push(leg);
       clock.now = new Date(clock.now.getTime() + 2_000);
     });
     const deps: CleanupDeps = {
@@ -67,7 +71,7 @@ describe("processDueCleanups", () => {
     const result = await processDueCleanups(deps, "user-1", 3);
 
     expect(result.processed).toBe(3);
-    expect(hangup.mock.calls.map(([leg]) => leg)).toEqual(["browser-leg", "seller-leg"]);
+    expect(sentLegs).toEqual(["browser-leg", "seller-leg"]);
     expect(store.legRow("browser-leg")?.acked_at).toBeTruthy();
     expect(store.legRow("seller-leg")?.acked_at).toBeTruthy();
     expect(store.cleanups.get(unresolved.id)?.confirmed_at).toBeNull();
