@@ -1,20 +1,20 @@
 {
   "artifact_version": 1,
-  "catalog_fingerprint": "67724ac8f610a7aa32424b2329760276dec8406076bc4eac2571f3834b848704",
+  "catalog_fingerprint": "fddb87756846528576419c95255aee3b67aec847173453822d7bc2aa2d7dd0eb",
   "source": {
     "kind": "independent-committed-catalog-artifact",
-    "migration_commit": "93380d869821a0055b766351a9233a1b43f143b6",
+    "migration_commit": "c48891297abc880a11fa56c2367c10c2165ca6da",
     "migration_files": [
       {
-        "path": "20260930040000_inbox_control_foundation.sql",
+        "path": "20261002130000_inbox_control_foundation.sql",
         "sha256": "a31799ba96e6f7264f062019cc8113a6401719a686cc31e569b10d21064bfbf6"
       },
       {
-        "path": "20260930040100_inbox_read_companion.sql",
+        "path": "20261002130100_inbox_read_companion.sql",
         "sha256": "7a2c5f49fc8fcf58c7f37585c3c347869816912e47e504ec47f9cdac198d3dd7"
       },
       {
-        "path": "20260930040200_inbox_backend_operation_reply.sql",
+        "path": "20261002130200_inbox_backend_operation_reply.sql",
         "sha256": "2a4b49d43e67963805d547221d04c84c3f7823f430fd9c0cc9b3f22b36844aad"
       }
     ]

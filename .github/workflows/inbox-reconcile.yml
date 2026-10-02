@@ -13,9 +13,9 @@ on:
       - "scripts/inbox-reconcile-completion.mjs"
       - "scripts/inbox-reconcile-catalog.expected.json"
       - "supabase/config.toml"
-      - "supabase/migrations/20260930040000_inbox_control_foundation.sql"
-      - "supabase/migrations/20260930040100_inbox_read_companion.sql"
-      - "supabase/migrations/20260930040200_inbox_backend_operation_reply.sql"
+      - "supabase/migrations/20261002130000_inbox_control_foundation.sql"
+      - "supabase/migrations/20261002130100_inbox_read_companion.sql"
+      - "supabase/migrations/20261002130200_inbox_backend_operation_reply.sql"
   workflow_dispatch:
 
 permissions:
