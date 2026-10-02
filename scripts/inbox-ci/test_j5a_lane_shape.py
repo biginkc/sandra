@@ -28,7 +28,7 @@ from pathlib import Path
 if sys.argv[1] == 'scripts/ci/provision-disposable-stack.mjs':
     Path(os.environ['GITHUB_ENV']).write_text('E2E_DISPOSABLE_DATABASE=1\\nTEST_SUPABASE_URL=http://127.0.0.1:55421\\nE2E_CI_SUPABASE_DB_URL=postgresql://postgres:postgres@127.0.0.1:55422/postgres\\n')
     Path(os.environ['PROVISION_ARGS']).write_text(' '.join(sys.argv[2:]))
-elif sys.argv[1] == 'scripts/inbox-ci/inbox-migrations.mjs':
+elif sys.argv[1].endswith('scripts/inbox-ci/inbox-migrations.mjs'):
     manifest = json.loads(Path('scripts/inbox-ci/inbox-migrations.json').read_text())
     mode = sys.argv[2]
     if mode == '--count':
@@ -40,6 +40,8 @@ elif sys.argv[1] == 'scripts/inbox-ci/inbox-migrations.mjs':
     elif mode == '--files':
         for entry in manifest:
             print(f"supabase/migrations/{entry['version']}_{entry['name']}.sql")
+    elif mode == '--reserved-block-end':
+        print('20261002130500')
     else:
         sys.exit('unexpected migration helper mode')
 elif sys.argv[1] == 'scripts/outbox-run-record.mjs':
