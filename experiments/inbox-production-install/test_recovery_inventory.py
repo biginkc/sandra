@@ -82,7 +82,7 @@ class RecoveryInventoryTests(unittest.TestCase):
                 report = json.loads(result.stdout)
                 self.assertTrue(report["read_only"])
                 self.assertEqual(len(report["restate"]), 2)
-                self.assertEqual([item["invocations"][0][0] for item in report["restate"]], ["inv-dep-a", "inv-dep-b"])
+                self.assertEqual([item["invocations"][0]["id"] for item in report["restate"]], ["inv-dep-a", "inv-dep-b"])
                 sql = captured_sql.read_text().upper()
                 self.assertIn("BEGIN TRANSACTION READ ONLY", sql)
                 self.assertIn("INBOX_REPLY_SEND.ATTEMPTS", sql)

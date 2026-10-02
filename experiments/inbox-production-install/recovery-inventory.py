@@ -171,6 +171,11 @@ def restate_inventory(admin_url: str) -> list[dict[str, object]]:
         response = http_json(restate_url(admin_url, "/query"), method="POST", payload={"query": query})
         if isinstance(response, dict) and isinstance(response.get("rows"), list):
             invocations = response["rows"]
+            columns = response.get("columns")
+            if isinstance(columns, list) and all(isinstance(column, (str, dict)) for column in columns):
+                names = [column if isinstance(column, str) else column.get("name") for column in columns]
+                if all(isinstance(name, str) and name for name in names) and all(isinstance(row, list) for row in invocations):
+                    invocations = [dict(zip(names, row)) for row in invocations]
         elif isinstance(response, list):
             invocations = response
         else:
