@@ -45,6 +45,32 @@ function stepNamed(parsed, name) {
   return step;
 }
 
+function stepIndex(parsed, name) {
+  const index = buildSteps(parsed).findIndex((candidate) => candidate.name === name);
+  assert.notEqual(index, -1, `missing step: ${name}`);
+  return index;
+}
+
+function assertPublishGuardFailClosed(parsed) {
+  const approvalIndex = stepIndex(parsed, 'Require recorded EIMG-R1 public-publish approval');
+  for (const name of [
+    'Check out pinned upstream Electric source',
+    'Log in to GHCR with the workflow token',
+    'Build upstream Electric sync-service',
+    'Build and push Electric sync-service',
+  ]) {
+    assert.ok(approvalIndex < stepIndex(parsed, name), `publish guard must precede ${name}`);
+  }
+
+  const approval = stepNamed(parsed, 'Require recorded EIMG-R1 public-publish approval');
+  const push = stepNamed(parsed, 'Build and push Electric sync-service');
+  assert.equal(approval.if, undefined, 'publish guard must use GitHub\'s default success condition');
+  assert.equal(approval['continue-on-error'], undefined, 'publish guard failure must stop the job');
+  assert.equal(push.if, undefined, 'push must not override the default success condition');
+  assert.equal(push['continue-on-error'], undefined, 'push must not ignore an earlier guard failure');
+  assert.match(approval.run, /\bexit 1\b/, 'publish guard must have a failing exit path');
+}
+
 function assertWorkflow(source) {
   const parsed = parseWorkflow(source);
   const approval = stepNamed(parsed, 'Require recorded EIMG-R1 public-publish approval');
@@ -52,6 +78,9 @@ function assertWorkflow(source) {
   const stageLicenses = stepNamed(parsed, 'Stage upstream license files');
   const upstreamBuild = stepNamed(parsed, 'Build upstream Electric sync-service');
   const build = stepNamed(parsed, 'Build and push Electric sync-service');
+  const upstreamLicenseFiles = stepNamed(parsed, 'Record upstream image license paths before wrapper COPY');
+
+  assertPublishGuardFailClosed(parsed);
 
   assert.deepEqual(parsed.on ?? parsed.true, { workflow_dispatch: {} }, 'workflow must be dispatch-only');
   assert.equal(approval.env.INBOX_ELECTRIC_PUBLISH_OK, '${{ vars.INBOX_ELECTRIC_PUBLISH_OK }}');
@@ -90,6 +119,13 @@ function assertWorkflow(source) {
   assert.equal(upstreamBuild.with.load, true);
   assert.equal(upstreamBuild.with.platforms, 'linux/amd64');
   assert.equal(upstreamBuild.with.tags, 'inbox-electric-upstream:1.8.1-0f40420');
+  assert.equal(upstreamLicenseFiles.id, 'upstream-license-files');
+  assert.ok(stepIndex(parsed, 'Build upstream Electric sync-service') < stepIndex(parsed, 'Record upstream image license paths before wrapper COPY'));
+  assert.ok(stepIndex(parsed, 'Record upstream image license paths before wrapper COPY') < stepIndex(parsed, 'Build and push Electric sync-service'));
+  assert.match(upstreamLicenseFiles.run, /docker export/);
+  assert.match(upstreamLicenseFiles.run, /tar -tf/);
+  assert.match(upstreamLicenseFiles.run, /grep -Fxq "\$path"/);
+  assert.match(upstreamLicenseFiles.run, /echo "\$\{output_name\}=\$\{status\}" >> "\$GITHUB_OUTPUT"/);
 
   assert.equal(build.with.context, './electric');
   assert.equal(build.with.file, '.github/docker/inbox-electric-license.Dockerfile');
@@ -97,6 +133,11 @@ function assertWorkflow(source) {
   assert.equal(build.with.platforms, 'linux/amd64');
   assert.equal(build.with.push, true);
   assert.equal(build.with.tags, 'ghcr.io/biginkc/inbox-electric:1.8.1-0f40420');
+  assert.match(source, /UPSTREAM_LICENSE: \$\{\{ steps\.upstream-license-files\.outputs\.license \}\}/);
+  assert.match(source, /UPSTREAM_NOTICE: \$\{\{ steps\.upstream-license-files\.outputs\.notice \}\}/);
+  assert.match(source, /upstream_image_files_before_wrapper_copy/);
+  assert.match(source, /'\/LICENSE': process\.env\.UPSTREAM_LICENSE/);
+  assert.match(source, /'\/NOTICE': process\.env\.UPSTREAM_NOTICE/);
 
   assert.match(licenseWrapper, /^FROM upstream-electric$/m);
   assert.deepEqual(
@@ -146,6 +187,21 @@ test('recorded public-publish guard accepts the exact token and public visibilit
   }).status, 0);
 });
 
+test('a failed publish guard cannot reach the image push step', () => {
+  const parsed = parseWorkflow(workflow);
+  assertPublishGuardFailClosed(parsed);
+  assert.notEqual(runApprovalGuard().status, 0, 'missing approval must fail before any downstream step can run');
+});
+
+function movePublishGuardAfterPush(source) {
+  const guardBlock = source.match(
+    /      # Set INBOX_ELECTRIC_PUBLISH_OK[\s\S]*?(?=      - name: Check out pinned upstream Electric source\n)/,
+  )?.[0];
+  assert.ok(guardBlock, 'publish guard block must be present');
+  const withoutGuard = source.replace(guardBlock, '');
+  return withoutGuard.replace('      - name: Validate pushed image digest\n', `${guardBlock}      - name: Validate pushed image digest\n`);
+}
+
 const mutations = [
   ['fixed source commit', (source) => source.replaceAll(EXPECTED_COMMIT, 'd'.repeat(40))],
   ['local release tag check', (source) => source.replace(
@@ -167,6 +223,15 @@ const mutations = [
   ['recorded publish guard', (source) => source.replace(
     /      # Set INBOX_ELECTRIC_PUBLISH_OK[\s\S]*?(?=      - name: Check out pinned upstream Electric source\n)/,
     '',
+  )],
+  ['publish guard after push', movePublishGuardAfterPush],
+  ['publish guard with if condition', (source) => source.replace(
+    '      - name: Require recorded EIMG-R1 public-publish approval\n',
+    '      - name: Require recorded EIMG-R1 public-publish approval\n        if: always()\n',
+  )],
+  ['publish guard with continue-on-error', (source) => source.replace(
+    '      - name: Require recorded EIMG-R1 public-publish approval\n',
+    '      - name: Require recorded EIMG-R1 public-publish approval\n        continue-on-error: true\n',
   )],
 ];
 

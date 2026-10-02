@@ -127,6 +127,35 @@ jobs:
           load: true
           tags: inbox-electric-upstream:1.8.1-0f40420
 
+      - name: Record upstream image license paths before wrapper COPY
+        id: upstream-license-files
+        env:
+          UPSTREAM_IMAGE: inbox-electric-upstream:1.8.1-0f40420
+        shell: bash
+        run: |
+          set -euo pipefail
+          container_id="$(docker create "$UPSTREAM_IMAGE")"
+          cleanup() {
+            docker rm "$container_id" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          archive="${RUNNER_TEMP}/inbox-electric-upstream-files.tar"
+          file_list="${RUNNER_TEMP}/inbox-electric-upstream-files.txt"
+          docker export "$container_id" > "$archive"
+          tar -tf "$archive" > "$file_list"
+
+          for path in LICENSE NOTICE; do
+            if grep -Fxq "$path" "$file_list"; then
+              status=present
+            else
+              status=absent
+            fi
+            output_name="$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')"
+            echo "${output_name}=${status}" >> "$GITHUB_OUTPUT"
+            echo "/$path before wrapper COPY: $status" >> "$GITHUB_STEP_SUMMARY"
+          done
+
       - name: Build and push Electric sync-service
         id: build-electric
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -170,6 +199,8 @@ jobs:
           EVIDENCE_PATH: ${{ runner.temp }}/inbox-electric-image-evidence.json
           IMAGE_REFERENCE: ghcr.io/biginkc/inbox-electric@${{ steps.build-electric.outputs.digest }}
           UPSTREAM_COMMIT: 0f404200402f918a4b1596bc5c8a53479a435349
+          UPSTREAM_LICENSE: ${{ steps.upstream-license-files.outputs.license }}
+          UPSTREAM_NOTICE: ${{ steps.upstream-license-files.outputs.notice }}
           TAG_COMMIT: ${{ steps.verify-source.outputs.tag_commit }}
           TAG_CHECK_RESULT: ${{ steps.verify-source.outputs.tag_check }}
           WORKFLOW_RUN_ID: ${{ github.run_id }}
@@ -180,11 +211,22 @@ jobs:
           node <<'NODE'
           const { writeFileSync } = require('node:fs');
 
+          const upstreamImageFilesBeforeWrapperCopy = {
+            '/LICENSE': process.env.UPSTREAM_LICENSE,
+            '/NOTICE': process.env.UPSTREAM_NOTICE,
+          };
+          for (const [path, status] of Object.entries(upstreamImageFilesBeforeWrapperCopy)) {
+            if (!['present', 'absent'].includes(status)) {
+              throw new Error(`${path} status must be present or absent, got ${status}`);
+            }
+          }
+
           const evidence = {
             schema_version: 1,
             image: process.env.IMAGE_REFERENCE,
             upstream_commit: process.env.UPSTREAM_COMMIT,
             upstream_tag: '@core/sync-service@1.8.1',
+            upstream_image_files_before_wrapper_copy: upstreamImageFilesBeforeWrapperCopy,
             tag_check_result: process.env.TAG_CHECK_RESULT,
             tag_check: {
               resolved_commit: process.env.TAG_COMMIT,
