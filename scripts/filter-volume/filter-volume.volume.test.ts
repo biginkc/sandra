@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- builders are duck-typed */
 /**
- * PR A volume gate (stress plan #9): the computed-field filter translator vs a
+ * PR A volume gate (stress plan #9): the cache-column filter translator vs a
  * frozen copy of the legacy translator, measured as complete authenticated
  * PostgREST requests (rows + exact count + filters + sort) on the unsearched
  * page of a ~50k-property dataset, in the SAME run on the SAME stack.
@@ -196,7 +196,7 @@ beforeAll(async () => {
 
 afterAll(async () => { await pg?.end(); });
 
-describe.runIf(RUN)("PR A volume gate: computed fields vs frozen legacy translator", () => {
+describe.runIf(RUN)("PR A volume gate: cache columns vs frozen legacy translator", () => {
   it("measures every case, same run, same stack", async () => {
     const rows: any[] = [];
     for (const c of cases()) {

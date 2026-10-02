@@ -284,3 +284,49 @@ describe("lock order and pin hardening", () => {
   });
 });
 
+
+describe("rows whose id changes, and property org moves", () => {
+  it("UPDATE that changes a child's id together with its property/direction refreshes BOTH properties", async () => {
+    const p = await prop();
+    const q = await prop();
+    const [l1] = [await mkList()];
+    const t1 = await mkTag();
+    const m = await msg(p, "inbound");
+    const tk = await task(p);
+    await pg.query(`insert into public.property_lists (org_id, property_id, list_id) values ('${BMH_ORG_ID}', $1, $2)`, [p, l1]);
+    await pg.query(`insert into public.property_tags (org_id, property_id, tag_id) values ('${BMH_ORG_ID}', $1, $2)`, [p, t1]);
+    expect(await cache(p)).toMatchObject({ hi: true, hu: true, ot: true, lc: 1 });
+    await pg.query(`update public.messages set id = gen_random_uuid(), property_id = $2, direction = 'outbound' where id = $1`, [m, q]);
+    await pg.query(`update public.tasks set id = gen_random_uuid(), related_property_id = $2 where id = $1`, [tk, q]);
+    await pg.query(`update public.property_lists set id = gen_random_uuid(), property_id = $2 where property_id = $1`, [p, q]);
+    await pg.query(`update public.property_tags set id = gen_random_uuid(), property_id = $2 where property_id = $1`, [p, q]);
+    expect(await cache(p)).toMatchObject({ hi: false, ho: false, hu: false, ot: false, lc: 0, lids: [], tids: [] });
+    expect(await cache(q)).toMatchObject({ hi: false, ho: true, hu: false, ot: true, lc: 1, lids: [l1], tids: [t1] });
+  });
+
+  it("moving a property to another org drops old-org children and counts new-org children", async () => {
+    const p = await prop();
+    await msg(p, "inbound");
+    expect(await cache(p)).toMatchObject({ hi: true, hu: true });
+    await pg.query(`update public.properties set org_id = $2 where id = $1`, [p, TEST_ORG_B_ID]);
+    expect(await cache(p)).toMatchObject({ hi: false, hu: false });
+    await msg(p, "outbound", { org: TEST_ORG_B_ID });
+    expect(await cache(p)).toMatchObject({ hi: false, ho: true });
+    await pg.query(`update public.properties set org_id = $2 where id = $1`, [p, BMH_ORG_ID]);
+    expect(await cache(p)).toMatchObject({ hi: true, ho: false, hu: true });
+  });
+});
+
+describe("generated columns are derived from the catalog", () => {
+  it("a generated column added later does not break cache refresh on a DNC-locked property", async () => {
+    const p = await prop();
+    await pg.query(`update public.properties set outreach_dispo = 'dnc' where id = $1`, [p]);
+    await pg.query(`alter table public.properties add column zz_gen_probe text generated always as (lower(coalesce(address, ''))) stored`);
+    try {
+      await msg(p, "inbound"); // would raise DNC_LOCKED if the generated column were not ignored
+      expect(await cache(p)).toMatchObject({ hi: true, hu: true });
+    } finally {
+      await pg.query(`alter table public.properties drop column zz_gen_probe`);
+    }
+  });
+});

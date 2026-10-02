@@ -94,3 +94,23 @@ Identity: container `supabase_db_sandra` id c67fbfb17ba8, database postgres, por
 whitespace-normalised, plus LANGUAGE / SECURITY DEFINER / search_path attributes) with the latest CREATE OR REPLACE in
 origin/main migrations (`20260815190000_true_dnc_property_lock.sql`, `20260816020000_csv_import_recovery_safety.sql`):
 **both match exactly**; nothing to fix.
+
+## Release runbook (PR A: #752 migrations, then #753 code)
+Binding order: **merge #752 -> wait until `db-migrate-prod` shows BOTH versions (`20261002110000`, `20261002110050`) in
+`supabase_migrations.schema_migrations` and the backfill counts are sane -> only then merge #753** (the app must not deploy
+before the cache columns exist and are backfilled).
+1. Apply outside dialing hours (quiet window); no manual duplicate merge during apply.
+2. Immediately before the apply, run and abort/wait if it returns any row:
+   `select pid, state, xact_start, query from pg_stat_activity where state = 'idle in transaction' or xact_start < now() - interval '2 seconds';`
+3. If `db push` fails with SQLSTATE 40P01 (deadlock) or 55P03 (lock timeout): nothing is recorded or half-applied; re-run once.
+4. After apply, in prod verify: the 7 cache columns exist on `properties`; the 4 child-table triggers x 3 events, the pin trigger
+   and the org-change trigger exist; backfill sanity, e.g. `select count(*) filter (where has_inbound_message), count(*) filter
+   (where has_unread_inbound), count(*) filter (where has_open_tasks) from properties` against direct counts from `messages`/`tasks`.
+5. Steady-state deadlock pair to expect (both retryable, not specific to the migration): a transaction doing `SELECT ... FOR UPDATE`
+   on a property and then writing `messages` can deadlock with the exclusive global-DNC writer, because cache refresh takes the
+   shared global-DNC barrier first and then property row locks. Re-run the failed statement.
+
+## Round-2 verification (after id-change / org-move / catalog-derived-generated-columns fixes)
+Local integration + triggers: 31 passed (incl. id-change and org-move regressions, a future generated column), 45-case fixture
+still exact. Volume gate: 22 cases, 0 count mismatches, 0 over budget (valid-baseline ratios <= 1.35). 5 cold runs of the changed
+110000 (pinned CLI, 5 concurrent writers): 5/5 clean, 0 errors, max blocked 674 ms.
