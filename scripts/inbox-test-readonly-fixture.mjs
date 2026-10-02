@@ -890,6 +890,7 @@ export async function residueCheck(db, receipt, { preDeleteSnapshot, preDeleteOw
     snapshot: current,
     cleanup_delta: cleanupDelta,
     managed_append_only_tables_changed: cleanupDelta.managed_append_only_tables_changed,
+    owned_tables_scanned: Object.keys(counts).length,
   };
 }
 
@@ -1018,12 +1019,12 @@ async function runRemove(args, env) {
     receipt.updated_at = receipt.removed_at;
     receipt.cleanup = {
       pre_verify_failures: preVerify.failures,
-      residue: "zero",
+      residue: `zero owned rows across ${residue.owned_tables_scanned} org/user tables; unrelated shared-TEST activity not asserted`,
       cleanup_delta: residue.cleanup_delta,
       managed_append_only_tables_changed: residue.managed_append_only_tables_changed,
     };
     writeReceipt(file, receipt);
-    console.log(JSON.stringify({ mode: "remove", pass: true, run_id: receipt.run_id, receipt: file, residue: "zero", pre_verify_failures: preVerify.failures, managed_append_only_tables_changed: residue.managed_append_only_tables_changed }));
+    console.log(JSON.stringify({ mode: "remove", pass: true, run_id: receipt.run_id, receipt: file, residue: receipt.cleanup.residue, pre_verify_failures: preVerify.failures, managed_append_only_tables_changed: residue.managed_append_only_tables_changed }));
   } finally { await db.end(); }
 }
 
