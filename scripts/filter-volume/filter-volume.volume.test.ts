@@ -114,6 +114,16 @@ async function seedInner() {
   fs.writeFileSync(path.join(RESULTS, "user.json"), JSON.stringify({ userId }));
 }
 
+// Cases where the LEGACY translator is known to return a wrong (truncated)
+// result, so its latency is not a valid baseline. Each entry names the reason.
+const KNOWN_LEGACY_TRUNCATIONS: Record<string, string> = {
+  "engagement not replied (negative)": "legacy pre-fetch reads only the first 1000 message rows, so the NOT IN id list is truncated",
+  "has_unread_inbound yes": "legacy pre-fetch of unread messages is truncated at 1000 rows",
+  "has_unread_inbound no (negative)": "same truncated unread pre-fetch",
+  "tag all two": "legacy multi-value all pre-fetch of property_tags is truncated at 1000 rows",
+  "list all three": "legacy multi-value all pre-fetch of property_lists is truncated at 1000 rows",
+};
+
 const blk = (b: Record<string, unknown>): FilterBlock => ({ id: randomUUID(), ...b }) as any;
 type Case = { name: string; blocks: () => FilterBlock[] };
 function cases(): Case[] {
@@ -204,11 +214,14 @@ describe.runIf(RUN)("PR A volume gate: computed fields vs frozen legacy translat
         out[label] = last.error ? { error: last.error } : { p95: Math.round(p95(times)), median: Math.round(times.sort((a, b) => a - b)[Math.floor(times.length / 2)]), count: last.count };
       }
       out.ratio = out.new.p95 != null && out.legacy.p95 != null ? +(out.new.p95 / out.legacy.p95).toFixed(2) : null;
-      // Strict: new p95 <= 2x legacy p95. If legacy errors (414 URI too long) or
-      // returns a DIFFERENT (i.e. wrong, truncated) count than the correct
-      // result, it is not a valid baseline: those cases are reported as
-      // baselineInvalid and held to an absolute bound instead.
-      out.baselineInvalid = Boolean(out.legacy.error) || out.legacy.count !== out.new.count;
+      // Strict: new p95 <= 2x legacy p95, and the counts MUST be equal. A case is
+      // baselineInvalid only if legacy errored (414 URI too long) or it is on
+      // the explicit allowlist of known legacy truncations below; anywhere else
+      // a count mismatch is a failure.
+      const known = KNOWN_LEGACY_TRUNCATIONS[c.name];
+      out.baselineInvalid = Boolean(out.legacy.error) || Boolean(known);
+      if (known) out.baselineInvalidReason = known;
+      else if (!out.legacy.error && out.legacy.count !== out.new.count) out.countMismatch = true;
       out.withinBudget = out.new.error ? false : out.baselineInvalid ? null : out.new.p95 <= 2 * out.legacy.p95;
       out.absoluteOk = out.new.error ? false : out.new.p95 <= 250;
       rows.push(out);
@@ -216,6 +229,7 @@ describe.runIf(RUN)("PR A volume gate: computed fields vs frozen legacy translat
     }
     fs.writeFileSync(path.join(RESULTS, "latest.json"), JSON.stringify(rows, null, 2));
     expect(rows.filter((r) => r.new.error)).toEqual([]);
+    expect(rows.filter((r) => r.countMismatch).map((r) => r.name)).toEqual([]);
     expect(rows.filter((r) => r.withinBudget === false).map((r) => r.name)).toEqual([]);
     expect(rows.filter((r) => !r.absoluteOk).map((r) => r.name)).toEqual([]);
   }, 3_600_000);

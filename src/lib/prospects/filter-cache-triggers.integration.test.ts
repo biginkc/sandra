@@ -236,3 +236,51 @@ describe("bulk statements, concurrency and backfill", () => {
     expect(error).toBeTruthy();
   });
 });
+
+describe("lock order and pin hardening", () => {
+  const BARRIER = `pg_catalog.hashtextextended('switchboard-global-dnc-write-barrier-v1', 0)`;
+
+  it("a cache refresh waits for the exclusive global-DNC barrier BEFORE taking row locks (no inversion/deadlock)", async () => {
+    const p = await prop();
+    const x = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL! });
+    const y = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL! });
+    await x.connect();
+    await y.connect();
+    try {
+      await x.query("begin");
+      await x.query(`select pg_catalog.pg_advisory_xact_lock(${BARRIER})`); // global DNC writer path
+      await y.query("begin");
+      let yDone = false;
+      const yInsert = y
+        .query(`insert into public.messages (org_id, property_id, channel, direction, body) values ('${BMH_ORG_ID}', $1, 'sms', 'inbound', 'z')`, [p])
+        .then(() => { yDone = true; });
+      await new Promise((r) => setTimeout(r, 500));
+      expect(yDone).toBe(false); // blocked on the barrier, holding no property row lock
+      // The DNC writer now touches the same property row: would deadlock if y held the row lock.
+      await x.query(`update public.properties set address = address || '' where id = $1`, [p]);
+      await x.query("commit");
+      await yInsert;
+      await y.query("commit");
+    } finally {
+      await x.end();
+      await y.end();
+    }
+    expect(await cache(p)).toMatchObject({ hi: true, hu: true });
+  });
+
+  it("the writer GUC alone does not unpin: a non-owner role setting it still cannot forge the cache", async () => {
+    const p = await prop();
+    await pg.query("begin");
+    await pg.query("set local role service_role");
+    await pg.query(`select set_config('sandra.filter_cache_writer', 'on', true)`);
+    await pg.query(`update public.properties set has_open_tasks = true, filter_list_count = 7 where id = $1`, [p]);
+    await pg.query("rollback");
+    await pg.query("begin");
+    await pg.query("set local role service_role");
+    await pg.query(`select set_config('sandra.filter_cache_writer', 'on', true)`);
+    await pg.query(`update public.properties set has_open_tasks = true, filter_list_count = 7 where id = $1`, [p]);
+    await pg.query("commit");
+    expect(await cache(p)).toMatchObject({ ot: false, lc: 0 });
+  });
+});
+
