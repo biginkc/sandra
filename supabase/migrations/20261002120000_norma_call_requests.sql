@@ -1210,11 +1210,19 @@ begin
   if coalesce(v_locked, true) then
     return 0;
   end if;
-  update public.sequence_enrollments e
-     set pause_reason = p_reason, updated_at = now()
-   where e.property_id = p_property_id and e.status = 'paused'
-     and e.pause_reason in ('norma_call', 'call_in_progress');
-  get diagnostics v_n = row_count;
+  begin
+    update public.sequence_enrollments e
+       set pause_reason = p_reason, updated_at = now()
+     where e.property_id = p_property_id and e.status = 'paused'
+       and e.pause_reason in ('norma_call', 'call_in_progress');
+    get diagnostics v_n = row_count;
+  exception when others then
+    -- A DNC lock that lands between the check above and this write makes the
+    -- enrollment guard raise DNC_LOCKED. The lead is then permanently opted
+    -- out anyway, so there is nothing to upgrade. Anything else is real.
+    if not (sqlstate = 'P0001' and split_part(sqlerrm, ':', 1) = 'DNC_LOCKED') then raise; end if;
+    return 0;
+  end;
   return v_n;
 end;
 $$;

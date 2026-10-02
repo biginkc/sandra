@@ -220,7 +220,7 @@ begin
              status = 'open', snoozed_until = null, completed_at = null, completed_by = null
       returning id into v_task_id;
     exception when others then
-      if sqlerrm not like 'DNC_LOCKED%' then raise; end if;
+      if not (sqlstate = 'P0001' and split_part(sqlerrm, ':', 1) = 'DNC_LOCKED') then raise; end if;
       v_task_id := null;
     end;
     if v_task_id is not null then
@@ -238,7 +238,7 @@ begin
          set status = 'cancelled', updated_at = now()
        where org_id = r.org_id and source_key = v_task_key and status in ('open', 'snoozed');
     exception when others then
-      if sqlerrm not like 'DNC_LOCKED%' then raise; end if;
+      if not (sqlstate = 'P0001' and split_part(sqlerrm, ':', 1) = 'DNC_LOCKED') then raise; end if;
     end;
   end if;
 
@@ -298,7 +298,7 @@ begin
     on conflict (org_id, source_key) where source_key is not null do nothing
     returning id into v_task;
   exception when others then
-    if sqlerrm not like 'DNC_LOCKED%' then raise; end if;
+    if not (sqlstate = 'P0001' and split_part(sqlerrm, ':', 1) = 'DNC_LOCKED') then raise; end if;
     v_task := null;
   end;
   if v_task is not null then
@@ -347,7 +347,7 @@ begin
      where org_id = r.org_id and source_key = 'norma_call:' || r.id::text
        and status in ('open', 'snoozed');
   exception when others then
-    if sqlerrm not like 'DNC_LOCKED%' then raise; end if;
+    if not (sqlstate = 'P0001' and split_part(sqlerrm, ':', 1) = 'DNC_LOCKED') then raise; end if;
   end;
   perform public.fn_norma_release_pauses(r.id);
   return 'dispatch_rejected';
