@@ -16,6 +16,10 @@ EIMG_TAG = "1.8.1-0f40420"
 EIMG_SOURCE_COMMIT = "0f404200402f918a4b1596bc5c8a53479a435349"
 EIMG_ATTESTATION_PLACEHOLDER = "PENDING_EIMG_BUILD"
 EIMG_DIGEST_PLACEHOLDER = "PENDING_EIMG_BUILD"
+EIMG_WORKFLOW_PATH = ".github/workflows/inbox-electric-image.yml"
+EIMG_SIGNER_WORKFLOW = f"biginkc/sandra/{EIMG_WORKFLOW_PATH}"
+EIMG_SOURCE_REF = "refs/heads/main"
+EIMG_PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
 EIMG_LABELS = {
     "org.opencontainers.image.title": "inbox-electric",
     "org.opencontainers.image.version": "1.8.1",
@@ -28,12 +32,16 @@ _IMAGE_PATTERN = re.compile(
     rf"^{re.escape(EIMG_REPOSITORY)}:{re.escape(EIMG_TAG)}@sha256:(?P<digest>[a-f0-9]{{64}}|{re.escape(EIMG_DIGEST_PLACEHOLDER)})$"
 )
 _ATTESTATION_URL_PATTERN = re.compile(
-    r"^https://github\.com/biginkc/sandra/actions/runs/[1-9][0-9]*(?:/attempt/[1-9][0-9]*)?$"
+    r"^https://github\.com/biginkc/sandra/actions/runs/[1-9][0-9]*(?:/attempts/[1-9][0-9]*)?$"
 )
+_RUN_INVOCATION_PATTERN = re.compile(
+    r"^https://github\.com/biginkc/sandra/actions/runs/([1-9][0-9]*)/attempts/[1-9][0-9]*$"
+)
+_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
 
 class CandidateError(ValueError):
-    """The candidate is malformed or is not eligible for a sealed path."""
+    """The candidate or its provenance evidence is not eligible to seal."""
 
 
 @dataclass(frozen=True)
@@ -109,16 +117,22 @@ def load_electric_pin(path: Path = DEFAULT_CANDIDATE_PATH, *, require_ready: boo
     return pin
 
 
-def verify_attestation_json(pin: ElectricImagePin, payload: Any) -> dict[str, str]:
-    """Check the cryptographically verified identity and upstream source pin.
+def _text_field(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
 
-    The CLI performs signature verification and owner scoping.  This second
-    check constrains the verified certificate to the Sandra main workflow and
-    the SLSA dependency to the exact upstream Electric commit.
+
+def verify_attestation_json(pin: ElectricImagePin, payload: Any) -> dict[str, Any]:
+    """Verify the real ``gh attestation verify --format json`` certificate shape.
+
+    The CLI verifies the signature, owner, signer workflow, source ref, and
+    runner policy.  This check independently constrains the certificate and
+    subject digest.  ``statement.predicate`` is intentionally never read:
+    workflow-controlled predicate data is not evidence of the upstream commit.
     """
 
-    if not isinstance(payload, list):
-        raise CandidateError("gh attestation verify returned a non-array JSON payload")
+    if not isinstance(payload, list) or not payload:
+        raise CandidateError("EIMG_ATTESTATION_IDENTITY_FAILED: gh attestation verify returned no attestations")
+
     for item in payload:
         if not isinstance(item, dict):
             continue
@@ -131,41 +145,160 @@ def verify_attestation_json(pin: ElectricImagePin, payload: Any) -> dict[str, st
         if not isinstance(certificate, dict) or not isinstance(statement, dict):
             continue
 
-        source_repository = certificate.get("sourceRepository") or certificate.get("sourceRepositoryUri")
-        source_owner = certificate.get("sourceRepositoryOwner")
-        san = certificate.get("subjectAlternativeName") or certificate.get("subjectAltName")
-        if source_repository not in {"https://github.com/biginkc/sandra", "https://github.com/biginkc/sandra/"}:
-            continue
-        if source_owner not in {None, "biginkc"}:
-            continue
-        if not isinstance(san, str) or not re.fullmatch(
-            r"https://github\.com/biginkc/sandra/\.github/workflows/[^@]+@refs/heads/main", san
+        issuer = _text_field(certificate.get("issuer"))
+        source_repository_uri = _text_field(certificate.get("sourceRepositoryURI"))
+        source_repository_ref = _text_field(certificate.get("sourceRepositoryRef"))
+        build_signer_uri = _text_field(certificate.get("buildSignerURI"))
+        runner_environment = _text_field(certificate.get("runnerEnvironment"))
+        workflow_trigger = _text_field(certificate.get("githubWorkflowTrigger"))
+        source_repository_digest = _text_field(certificate.get("sourceRepositoryDigest"))
+        build_signer_digest = _text_field(certificate.get("buildSignerDigest"))
+        run_invocation_uri = _text_field(certificate.get("runInvocationURI"))
+        if (
+            issuer != "https://token.actions.githubusercontent.com"
+            or source_repository_uri != "https://github.com/biginkc/sandra"
+            or source_repository_ref != EIMG_SOURCE_REF
+            or build_signer_uri != f"https://github.com/{EIMG_SIGNER_WORKFLOW}@{EIMG_SOURCE_REF}"
+            or runner_environment != "github-hosted"
+            or workflow_trigger != "workflow_dispatch"
+            or source_repository_digest is None
+            or not _COMMIT_PATTERN.fullmatch(source_repository_digest)
+            or build_signer_digest != source_repository_digest
+            or run_invocation_uri is None
         ):
             continue
 
-        predicate = statement.get("predicate")
-        build_definition = predicate.get("buildDefinition") if isinstance(predicate, dict) else None
-        dependencies = build_definition.get("resolvedDependencies") if isinstance(build_definition, dict) else None
-        if not isinstance(dependencies, list):
+        run_match = _RUN_INVOCATION_PATTERN.fullmatch(run_invocation_uri)
+        if run_match is None:
             continue
-        for dependency in dependencies:
-            if not isinstance(dependency, dict):
-                continue
-            uri = dependency.get("uri")
-            digest = dependency.get("digest")
-            if (
-                isinstance(uri, str)
-                and re.fullmatch(r"git\+https://github\.com/electric-sql/electric@[0-9a-f]{40}", uri)
-                and isinstance(digest, dict)
-                and digest.get("sha1") == pin.source_commit
-            ):
-                return {
-                    "source_commit": pin.source_commit,
-                    "source_repository": "biginkc/sandra",
-                    "source_ref": "refs/heads/main",
-                    "signer_workflow": san,
-                }
-    raise CandidateError("attestation identity/source commit does not match EIMG-3..5")
+
+        if statement.get("predicateType") != EIMG_PREDICATE_TYPE:
+            continue
+        subjects = statement.get("subject")
+        if not isinstance(subjects, list):
+            continue
+        subject_matches = any(
+            isinstance(subject, dict)
+            and isinstance(subject.get("digest"), dict)
+            and subject["digest"].get("sha256") == pin.digest
+            for subject in subjects
+        )
+        if not subject_matches:
+            continue
+
+        return {
+            "source_repository_digest": source_repository_digest,
+            "source_commit": source_repository_digest,
+            "run_id": int(run_match.group(1)),
+            "run_invocation_uri": run_invocation_uri,
+            "predicate_type": EIMG_PREDICATE_TYPE,
+            "subject_digest": pin.digest,
+            "certificate": {
+                "issuer": issuer,
+                "sourceRepositoryURI": source_repository_uri,
+                "sourceRepositoryRef": source_repository_ref,
+                "buildSignerURI": build_signer_uri,
+                "runnerEnvironment": runner_environment,
+                "githubWorkflowTrigger": workflow_trigger,
+                "sourceRepositoryDigest": source_repository_digest,
+                "buildSignerDigest": build_signer_digest,
+                "runInvocationURI": run_invocation_uri,
+            },
+        }
+
+    raise CandidateError("EIMG_ATTESTATION_IDENTITY_FAILED: certificate or subject does not match ELEC-5-A2")
+
+
+def verify_workflow_text(workflow_text: str) -> dict[str, str]:
+    """Require the fail-closed upstream source guard in the workflow at S."""
+
+    if not isinstance(workflow_text, str):
+        raise CandidateError("EIMG_WORKFLOW_FAILED: workflow contents are not text")
+    if not re.search(rf"(?m)^\s+ref:\s*{re.escape(EIMG_SOURCE_COMMIT)}\s*$", workflow_text):
+        raise CandidateError("EIMG_WORKFLOW_FAILED: checkout ref is not the required upstream commit")
+
+    step_match = re.search(
+        r"(?ms)^\s{6}- name: Verify pinned upstream source and release tag\s*$.*?(?=^\s{6}- name:|\Z)",
+        workflow_text,
+    )
+    if step_match is None:
+        raise CandidateError("EIMG_WORKFLOW_FAILED: pinned source/tag check step is missing")
+    step = step_match.group(0)
+    if re.search(r"(?m)^\s{8}(?:if|continue-on-error)\s*:", step):
+        raise CandidateError("EIMG_WORKFLOW_FAILED: source/tag check step is not fail-closed")
+
+    required_fragments = (
+        "set -euo pipefail",
+        f"EXPECTED_COMMIT: {EIMG_SOURCE_COMMIT}",
+        'checked_out="$(git rev-parse HEAD)"',
+        '[[ "$checked_out" == "$EXPECTED_COMMIT" ]] || {',
+        "local_tag_commit=\"$(git rev-parse '@core/sync-service@1.8.1^{commit}')\"",
+        '[[ "$local_tag_commit" == "$EXPECTED_COMMIT" ]] || {',
+        "git ls-remote \"$UPSTREAM_REPO\" 'refs/tags/@core/sync-service@1.8.1^{}'",
+        '[[ "$tag_commit" == "$EXPECTED_COMMIT" ]] || {',
+    )
+    missing = [fragment for fragment in required_fragments if fragment not in step]
+    if missing:
+        raise CandidateError(f"EIMG_WORKFLOW_FAILED: source/tag guard is incomplete: {missing}")
+    return {
+        "workflow_path": EIMG_WORKFLOW_PATH,
+        "source_commit": EIMG_SOURCE_COMMIT,
+        "upstream_commit": EIMG_SOURCE_COMMIT,
+        "guard": "head/local-tag/ls-remote-tag all fail closed",
+    }
+
+
+def verify_run_evidence_json(
+    pin: ElectricImagePin,
+    attestation: dict[str, Any],
+    run_payload: Any,
+    artifact_payload: Any,
+) -> dict[str, Any]:
+    """Verify run R and the retained workflow evidence artifact."""
+
+    run_id = attestation.get("run_id")
+    source_commit = attestation.get("source_repository_digest")
+    if not isinstance(run_id, int) or isinstance(run_id, bool) or not isinstance(source_commit, str):
+        raise CandidateError("EIMG_RUN_EVIDENCE_FAILED: attestation did not provide S and R")
+    if not isinstance(run_payload, dict):
+        raise CandidateError("EIMG_RUN_EVIDENCE_FAILED: workflow run response is not an object")
+    if run_payload.get("conclusion") != "success":
+        raise CandidateError("EIMG_RUN_EVIDENCE_FAILED: workflow run conclusion is not success")
+    if run_payload.get("head_sha") != source_commit:
+        raise CandidateError("EIMG_RUN_EVIDENCE_FAILED: workflow run head_sha does not equal S")
+    if run_payload.get("head_branch") != "main":
+        raise CandidateError("EIMG_RUN_EVIDENCE_FAILED: workflow run head_branch is not main")
+    if run_payload.get("path") != EIMG_WORKFLOW_PATH:
+        raise CandidateError("EIMG_RUN_EVIDENCE_FAILED: workflow run path is not the pinned workflow")
+    if not isinstance(artifact_payload, dict):
+        raise CandidateError("EIMG_RUN_EVIDENCE_FAILED: workflow evidence artifact is absent or invalid")
+
+    expected_artifact_name = f"inbox-electric-image-evidence-{run_id}"
+    if artifact_payload.get("name") not in {None, expected_artifact_name}:
+        raise CandidateError("EIMG_RUN_EVIDENCE_FAILED: workflow evidence artifact name does not match R")
+    if artifact_payload.get("image") != pin.repository_digest:
+        raise CandidateError("EIMG_RUN_EVIDENCE_FAILED: workflow evidence image does not match the pinned reference")
+    if artifact_payload.get("upstream_commit") != EIMG_SOURCE_COMMIT:
+        raise CandidateError("EIMG_RUN_EVIDENCE_FAILED: workflow evidence upstream_commit does not match")
+    tag_check = artifact_payload.get("tag_check")
+    if not isinstance(tag_check, dict) or tag_check.get("resolved_commit") != EIMG_SOURCE_COMMIT:
+        raise CandidateError("EIMG_RUN_EVIDENCE_FAILED: workflow evidence tag_check.resolved_commit does not match")
+    if artifact_payload.get("tag_check_result") != "passed":
+        raise CandidateError("EIMG_RUN_EVIDENCE_FAILED: workflow evidence tag_check_result is not passed")
+    if artifact_payload.get("workflow_run_id") != run_id:
+        raise CandidateError("EIMG_RUN_EVIDENCE_FAILED: workflow evidence workflow_run_id does not match R")
+
+    return {
+        "run": {
+            "id": run_id,
+            "conclusion": run_payload["conclusion"],
+            "head_sha": run_payload["head_sha"],
+            "head_branch": run_payload["head_branch"],
+            "path": run_payload["path"],
+        },
+        "artifact_name": expected_artifact_name,
+        "artifact": artifact_payload,
+    }
 
 
 def verify_labels_json(payload: Any) -> dict[str, str]:

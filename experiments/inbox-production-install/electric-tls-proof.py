@@ -11,6 +11,7 @@ touched.
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 import shutil
@@ -29,8 +30,14 @@ if str(HERE) not in sys.path:
 from electric_image_contract import (  # noqa: E402
     CandidateError,
     ElectricImagePin,
+    EIMG_SIGNER_WORKFLOW,
+    EIMG_SOURCE_REF,
+    EIMG_WORKFLOW_PATH,
+    ROOT,
     verify_attestation_json,
     verify_labels_json,
+    verify_run_evidence_json,
+    verify_workflow_text,
     load_electric_pin,
 )
 
@@ -41,6 +48,7 @@ POSTGRES_IMAGE = "postgres:17"
 CA_CONTAINER_PATH = "/etc/sandra-inbox/supabase-prod-ca-2021.crt"
 ELECTRIC_SECRET = "sandra-electric-proof-shape-secret"
 POSTGRES_PASSWORD = "sandra-electric-proof-password"
+EVIDENCE_PATH = HERE / "electric-tls-evidence.json"
 
 
 class ProofError(RuntimeError):
@@ -99,7 +107,7 @@ def ensure_pinned_image(pin: ElectricImagePin) -> tuple[str | None, bool, str | 
     return pin.image, not existed, digest
 
 
-def verify_attestation(pin: ElectricImagePin) -> dict[str, str]:
+def verify_attestation(pin: ElectricImagePin) -> dict[str, object]:
     result = run(
         [
             "gh",
@@ -108,8 +116,11 @@ def verify_attestation(pin: ElectricImagePin) -> dict[str, str]:
             pin.oci_uri,
             "--owner",
             "biginkc",
-            "--signer-repo",
-            "biginkc/sandra",
+            "--signer-workflow",
+            EIMG_SIGNER_WORKFLOW,
+            "--source-ref",
+            EIMG_SOURCE_REF,
+            "--deny-self-hosted-runners",
             "--format",
             "json",
         ],
@@ -124,6 +135,102 @@ def verify_attestation(pin: ElectricImagePin) -> dict[str, str]:
         raise ProofError(f"EIMG_ATTESTATION_INVALID_JSON: {exc}") from exc
     try:
         return verify_attestation_json(pin, payload)
+    except CandidateError as exc:
+        raise ProofError(str(exc)) from exc
+
+
+def verify_workflow_at_commit(attestation: dict[str, object], workflow_text: str | None = None) -> dict[str, str]:
+    source_commit = attestation.get("source_repository_digest")
+    if not isinstance(source_commit, str):
+        raise ProofError("EIMG_WORKFLOW_FAILED: attestation did not provide source commit S")
+    if workflow_text is None:
+        result = run(["git", "-C", str(ROOT), "show", f"{source_commit}:{EIMG_WORKFLOW_PATH}"], check=False, timeout=30)
+        if result.returncode == 0:
+            workflow_text = result.stdout
+        else:
+            result = run(
+                [
+                    "gh",
+                    "api",
+                    f"repos/biginkc/sandra/contents/{EIMG_WORKFLOW_PATH}?ref={source_commit}",
+                    "--jq",
+                    ".content",
+                ],
+                check=False,
+                timeout=60,
+            )
+            if result.returncode:
+                raise ProofError(f"EIMG_WORKFLOW_FAILED: workflow at S was not found: {redact((result.stderr + result.stdout)[-4000:])}")
+            try:
+                workflow_text = base64.b64decode(result.stdout.strip()).decode("utf-8")
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise ProofError(f"EIMG_WORKFLOW_FAILED: workflow contents at S are not valid base64 text: {exc}") from exc
+    try:
+        return verify_workflow_text(workflow_text)
+    except CandidateError as exc:
+        raise ProofError(str(exc)) from exc
+
+
+def _gh_json(args: list[str], *, timeout: int = 60) -> object:
+    result = run(args, check=False, timeout=timeout)
+    if result.returncode:
+        raise ProofError(f"EIMG_RUN_EVIDENCE_FAILED: gh query failed: {redact((result.stderr + result.stdout)[-4000:])}")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ProofError(f"EIMG_RUN_EVIDENCE_FAILED: gh query returned invalid JSON: {exc}") from exc
+
+
+def _download_evidence_artifact(run_id: int, artifact_name: str) -> dict[str, object]:
+    with tempfile.TemporaryDirectory(prefix=".sandra-r1-electric-evidence-") as temp:
+        result = run(
+            [
+                "gh",
+                "run",
+                "download",
+                str(run_id),
+                "--repo",
+                "biginkc/sandra",
+                "--name",
+                artifact_name,
+                "--dir",
+                temp,
+            ],
+            check=False,
+            timeout=120,
+        )
+        if result.returncode:
+            raise ProofError(f"EIMG_RUN_EVIDENCE_FAILED: evidence artifact download failed: {redact((result.stderr + result.stdout)[-4000:])}")
+        files = sorted(path for path in Path(temp).rglob("*") if path.is_file())
+        if len(files) != 1:
+            raise ProofError("EIMG_RUN_EVIDENCE_FAILED: evidence artifact did not contain exactly one file")
+        try:
+            value = json.loads(files[0].read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ProofError(f"EIMG_RUN_EVIDENCE_FAILED: evidence artifact is not valid JSON: {exc}") from exc
+        if not isinstance(value, dict):
+            raise ProofError("EIMG_RUN_EVIDENCE_FAILED: evidence artifact JSON is not an object")
+        value = dict(value)
+        value["name"] = artifact_name
+        return value
+
+
+def verify_run_evidence(pin: ElectricImagePin, attestation: dict[str, object], *, run_payload: object | None = None, artifact_payload: object | None = None) -> dict[str, object]:
+    run_id = attestation.get("run_id")
+    if not isinstance(run_id, int) or isinstance(run_id, bool):
+        raise ProofError("EIMG_RUN_EVIDENCE_FAILED: attestation did not provide run R")
+    if run_payload is None:
+        run_payload = _gh_json(["gh", "api", f"repos/biginkc/sandra/actions/runs/{run_id}"])
+    if artifact_payload is None:
+        artifacts_payload = _gh_json(["gh", "api", f"repos/biginkc/sandra/actions/runs/{run_id}/artifacts"])
+        artifacts = artifacts_payload.get("artifacts") if isinstance(artifacts_payload, dict) else None
+        artifact_name = f"inbox-electric-image-evidence-{run_id}"
+        matching = next((item for item in artifacts or [] if isinstance(item, dict) and item.get("name") == artifact_name), None)
+        if matching is None:
+            raise ProofError("EIMG_RUN_EVIDENCE_FAILED: workflow evidence artifact is absent")
+        artifact_payload = _download_evidence_artifact(run_id, artifact_name)
+    try:
+        return verify_run_evidence_json(pin, attestation, run_payload, artifact_payload)
     except CandidateError as exc:
         raise ProofError(str(exc)) from exc
 
@@ -338,7 +445,7 @@ def main() -> int:
         f"sandra-r1-electric-tls-electric-wrong-ca-fixed-{suffix}",
         f"sandra-r1-electric-tls-electric-wrong-hostname-fixed-{suffix}",
     ]
-    evidence_path = HERE / "electric-tls-evidence.json"
+    evidence_path = EVIDENCE_PATH
     pin = load_electric_pin()
     status: dict[str, object] = {"published_electric_image": pin.image, "pinned_repo_digest": pin.repository_digest, "source_commit": pin.source_commit, "attestation": pin.attestation, "electric_source_ref": ELECTRIC_SOURCE_REF, "postgres_image": POSTGRES_IMAGE, "ca_env": "ELECTRIC_DATABASE_CA_CERTIFICATE_FILE", "ca_container_path": CA_CONTAINER_PATH, "network": network, "seal_status": "UNSEALED"}
     created_network = False
@@ -379,7 +486,10 @@ def main() -> int:
                 print(json.dumps(status, indent=2, sort_keys=True))
                 raise ProofError(f"PINNED_PULL_DENIED: {pull_error}")
 
-            status["attestation"] = verify_attestation(pin)
+            attestation = verify_attestation(pin)
+            status["attestation"] = attestation
+            status["workflow"] = verify_workflow_at_commit(attestation)
+            status["run_evidence"] = verify_run_evidence(pin, attestation)
             status["oci_labels"] = verify_labels(pin, active_image)
             status["source_harness"] = "not-used"
             docker("network", "create", network)
