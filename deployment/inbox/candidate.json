@@ -23,11 +23,14 @@
       "public": false,
       "port": 3000,
       "env": {
+        "DATABASE_URL": "${INBOX_ELECTRIC_DATABASE_URL}",
+        "PGPASSFILE": "${INBOX_ELECTRIC_PGPASSFILE}",
         "ELECTRIC_LONG_POLL_TIMEOUT": "8000",
         "ELECTRIC_MANUAL_TABLE_PUBLISHING": "true",
         "ELECTRIC_REPLICATION_STREAM_ID": "inbox_copflsklaefwzipsrjqz",
         "ELECTRIC_TELEMETRY": "false"
       },
+      "secretEnv": ["INBOX_ELECTRIC_DATABASE_URL", "INBOX_ELECTRIC_PGPASSFILE"],
       "connection": {
         "host": "db.copflsklaefwzipsrjqz.supabase.co",
         "port": 5432,

@@ -30,6 +30,9 @@ class RuntimeR1ConfigTests(unittest.TestCase):
         candidate = json.loads(candidate_text)
         electric = next(service for service in candidate["services"] if service["name"] == "inbox-electric")
         self.assertNotIn("ELECTRIC_INSECURE", candidate_text)
+        self.assertEqual(electric["env"]["DATABASE_URL"], "${INBOX_ELECTRIC_DATABASE_URL}")
+        self.assertEqual(electric["env"]["PGPASSFILE"], "${INBOX_ELECTRIC_PGPASSFILE}")
+        self.assertEqual(electric["secretEnv"], ["INBOX_ELECTRIC_DATABASE_URL", "INBOX_ELECTRIC_PGPASSFILE"])
         self.assertEqual(electric["connection"], {
             "host": "db.copflsklaefwzipsrjqz.supabase.co",
             "port": 5432,
@@ -44,6 +47,8 @@ class RuntimeR1ConfigTests(unittest.TestCase):
         self.assertNotIn("ELECTRIC_INSECURE", production_env)
         self.assertIn("INBOX_ELECTRIC_DATABASE_SSLMODE=verify-full", production_env)
         self.assertIn("INBOX_ELECTRIC_DATABASE_SSLROOTCERT=", production_env)
+        self.assertIn("INBOX_ELECTRIC_DATABASE_URL=postgresql://inbox_electric_replication@", production_env)
+        self.assertIn("INBOX_ELECTRIC_PGPASSFILE=/run/secrets/", production_env)
         self.assertIn("no Electric secret is forwarded", production_env)
 
     def test_local_fixture_keeps_insecure_mode_explicitly_scoped(self):
