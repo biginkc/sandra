@@ -145,6 +145,10 @@ def runner_input(packet: Path, *, local_test: bool, inline_packet: bool = False)
     local_flag = "on" if local_test else "off"
     lines = [
         "\\set ON_ERROR_STOP on",
+        # The outer transaction intentionally wraps the generated packet so
+        # SET LOCAL target identity is established before the packet's own
+        # BEGIN. PostgreSQL treats that inner BEGIN as a warning/no-op and
+        # the packet COMMIT closes this same transaction.
         "BEGIN;",
         f"SET LOCAL inbox.emergency_target_ref = '{target_ref}';",
         f"SET LOCAL inbox.emergency_local_test = '{local_flag}';",
