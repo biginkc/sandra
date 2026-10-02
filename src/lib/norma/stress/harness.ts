@@ -44,6 +44,8 @@ export const BLAND_CONFIG: NormaBlandConfig = {
   fromNumber: "+18165550000",
   webhookUrl: "https://sandra.stress.invalid/api/webhooks/bland/call",
   timeoutMs: 10_000,
+  waitForGreeting: true,
+  backgroundTrack: "office",
 };
 
 /** A deterministic stand-in for the callback-time AI fallback (never a real model call). */

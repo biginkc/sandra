@@ -168,7 +168,7 @@ describe("reconciliation", () => {
       dispatch: (id) =>
         dispatchNormaCall(id, {
           client, bland,
-          blandConfig: { apiKey: "k", baseUrl: "https://bland.test", pathwayId: "p", pathwayVersion: 3, voice: "v", fromNumber: "+12135550100", webhookUrl: "https://x.test/h", timeoutMs: 1000 },
+          blandConfig: { apiKey: "k", baseUrl: "https://bland.test", pathwayId: "p", pathwayVersion: 3, voice: "v", fromNumber: "+12135550100", webhookUrl: "https://x.test/h", timeoutMs: 1000, waitForGreeting: true, backgroundTrack: "office" },
           gate: { dispatchEnabled: false, sellerRelease: true, allowedNumbers: [PHONE] },
         }),
     });

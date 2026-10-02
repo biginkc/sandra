@@ -85,6 +85,9 @@ export function buildSendCallBody(config: NormaBlandConfig, params: BlandSendCal
     // No voicemail message, no retry: a no-answer ends the attempt.
     voicemail: { action: "hangup" },
     request_data: params.variables,
+    // Let the person say hello first; play office background instead of static.
+    wait_for_greeting: config.waitForGreeting,
+    background_track: config.backgroundTrack,
   };
 }
 
