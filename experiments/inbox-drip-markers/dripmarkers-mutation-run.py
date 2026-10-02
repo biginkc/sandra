@@ -51,8 +51,15 @@ FROZEN_NAMES = (
     "inbox_backend_operation_reply",
     "inbox_reply_message_projection",
 )
+# Hashes are pinned literally so a migration edit paired with a matching manifest edit still fails.
+FROZEN_SHA256 = {
+    "inbox_control_foundation": "a31799ba96e6f7264f062019cc8113a6401719a686cc31e569b10d21064bfbf6",
+    "inbox_read_companion": "7a2c5f49fc8fcf58c7f37585c3c347869816912e47e504ec47f9cdac198d3dd7",
+    "inbox_backend_operation_reply": "2a4b49d43e67963805d547221d04c84c3f7823f430fd9c0cc9b3f22b36844aad",
+    "inbox_reply_message_projection": "2a097587ad59aa913a386ce59b513fcbac8452b0b770477bde16533cb2672112",
+}
 FROZEN = {
-    f"{INBOX_ENTRIES[name]['version']}_{INBOX_ENTRIES[name]['name']}.sql": INBOX_ENTRIES[name]["sha256"]
+    f"{INBOX_ENTRIES[name]['version']}_{INBOX_ENTRIES[name]['name']}.sql": FROZEN_SHA256[name]
     for name in FROZEN_NAMES
 }
 ORIGIN_MIGRATIONS = [
