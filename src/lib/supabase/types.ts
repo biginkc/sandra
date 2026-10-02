@@ -3120,6 +3120,24 @@ export type Database = {
           },
         ]
       }
+      norma_call_requests: {
+        Row: { id: string; org_id: string; property_id: string; contact_id: string | null; phone_e164: string; requested_by: string | null; rep_context: string | null; callback_assignee_id: string; status: string; idempotency_key: string; bland_call_id: string | null; outcome: string | null; callback_requested_for: string | null; callback_timezone: string | null; callback_raw: string | null; qualification: Json; summary: string | null; dispatch_error: string | null; dispatch_started_at: string | null; dispatched_at: string | null; completed_at: string | null; created_at: string; updated_at: string; next_check_at: string }
+        Insert: { id?: string; org_id: string; property_id: string; contact_id?: string | null; phone_e164: string; requested_by?: string | null; rep_context?: string | null; callback_assignee_id: string; status?: string; idempotency_key?: string; bland_call_id?: string | null; outcome?: string | null; callback_requested_for?: string | null; callback_timezone?: string | null; callback_raw?: string | null; qualification?: Json; summary?: string | null; dispatch_error?: string | null; dispatch_started_at?: string | null; dispatched_at?: string | null; completed_at?: string | null; created_at?: string; updated_at?: string; next_check_at?: string }
+        Update: { id?: string; org_id?: string; property_id?: string; contact_id?: string | null; phone_e164?: string; requested_by?: string | null; rep_context?: string | null; callback_assignee_id?: string; status?: string; idempotency_key?: string; bland_call_id?: string | null; outcome?: string | null; callback_requested_for?: string | null; callback_timezone?: string | null; callback_raw?: string | null; qualification?: Json; summary?: string | null; dispatch_error?: string | null; dispatch_started_at?: string | null; dispatched_at?: string | null; completed_at?: string | null; created_at?: string; updated_at?: string; next_check_at?: string }
+        Relationships: []
+      }
+      norma_enrollment_pauses: {
+        Row: { request_id: string; enrollment_id: string; created_at: string; released_at: string | null; release_result: string | null }
+        Insert: { request_id: string; enrollment_id: string; created_at?: string; released_at?: string | null; release_result?: string | null }
+        Update: { request_id?: string; enrollment_id?: string; created_at?: string; released_at?: string | null; release_result?: string | null }
+        Relationships: []
+      }
+      norma_notifications: {
+        Row: { id: string; request_id: string; kind: string; status: string; attempts: number; next_attempt_at: string; slack_ts: string | null; last_error: string | null; created_at: string; updated_at: string }
+        Insert: { id?: string; request_id: string; kind?: string; status?: string; attempts?: number; next_attempt_at?: string; slack_ts?: string | null; last_error?: string | null; created_at?: string; updated_at?: string }
+        Update: { id?: string; request_id?: string; kind?: string; status?: string; attempts?: number; next_attempt_at?: string; slack_ts?: string | null; last_error?: string | null; created_at?: string; updated_at?: string }
+        Relationships: []
+      }
       notifications: {
         Row: {
           body: string | null
@@ -4506,6 +4524,7 @@ export type Database = {
           slack_channel_id: string | null
           slack_message_ts: string | null
           snoozed_until: string | null
+          source_key: string | null
           status: string
           title: string
           type: string
@@ -4533,6 +4552,7 @@ export type Database = {
           slack_channel_id?: string | null
           slack_message_ts?: string | null
           snoozed_until?: string | null
+          source_key?: string | null
           status?: string
           title: string
           type: string
@@ -4560,6 +4580,7 @@ export type Database = {
           slack_channel_id?: string | null
           slack_message_ts?: string | null
           snoozed_until?: string | null
+          source_key?: string | null
           status?: string
           title?: string
           type?: string
@@ -5888,6 +5909,19 @@ export type Database = {
       direct_call_cleanup_claim: { Args: { p_user: string; p_now: string; p_lease_secs: number; p_limit: number }; Returns: Database["public"]["Tables"]["direct_call_cleanups"]["Row"][] }
       direct_call_resume_claim: { Args: { p_user: string; p_now: string; p_lease_secs: number }; Returns: Database["public"]["Tables"]["direct_calls"]["Row"][] }
       direct_call_resume_done: { Args: { p_id: string }; Returns: undefined }
+      fn_norma_hold_active: { Args: { p_property_id: string }; Returns: boolean }
+      fn_norma_eligibility: { Args: { p_property_id: string; p_contact_id: string; p_phone_e164: string }; Returns: { eligible: boolean; block_reason: string | null }[] }
+      fn_norma_pause_for_request: { Args: { p_request_id: string }; Returns: number }
+      fn_norma_release_pauses: { Args: { p_request_id: string }; Returns: number }
+      fn_norma_create_request: { Args: { p_property_id: string; p_contact_id: string; p_phone_e164: string; p_requested_by: string; p_rep_context: string | null; p_callback_assignee_id: string }; Returns: { outcome: string; request_id: string | null; idempotency_key: string | null; block_reason: string | null }[] }
+      fn_norma_claim_dispatch: { Args: { p_request_id: string }; Returns: boolean }
+      fn_norma_bind_call_id: { Args: { p_request_id: string; p_call_id: string }; Returns: string }
+      fn_norma_mark_dispatch_rejected: { Args: { p_request_id: string; p_reason: string; p_expected_status?: string }; Returns: string }
+      fn_norma_mark_dispatch_unknown: { Args: { p_request_id: string; p_reason: string }; Returns: string }
+      fn_norma_mark_needs_review: { Args: { p_request_id: string; p_reason: string }; Returns: string }
+      fn_norma_complete_call: { Args: { p_request_id: string; p_call_id: string; p_outcome: string; p_payload?: Json }; Returns: Json }
+      fn_norma_upgrade_pauses_for_reply: { Args: { p_property_id: string; p_reason: string }; Returns: number }
+      sweep_resume_call_in_progress: { Args: { p_enrollment_ids: string[]; p_resume_at: string }; Returns: number }
       sequence_replace_steps: { Args: { p_sequence: string; p_steps: Json; p_name: string; p_description: string | null }; Returns: Json }
       sequence_step_stats: { Args: { p_org: string; p_sequence: string }; Returns: Array<{
         step_id: string; sent: number; replied: number; waiting: number;
@@ -5992,7 +6026,7 @@ export type Database = {
         }[]
       }
       resume_sequence_enrollment: {
-        Args: { p_actor_user_id?: string | null; p_enrollment_id: string }
+        Args: { p_actor_user_id?: string | null; p_enrollment_id: string; p_expected_pause_reason?: string | null }
         Returns: {
           next_run_at: string | null
           outcome: string

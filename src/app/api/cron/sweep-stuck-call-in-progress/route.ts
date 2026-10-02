@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
+import { NormaMissingFunctionError, sweepResumeCallInProgress } from "@/lib/norma";
 import type { Database } from "@/lib/supabase/types";
 
 /**
@@ -73,14 +74,33 @@ async function runSoftphoneSweep(
   const skippedCompletedWrapups = stale.length - resumableIds.length;
   if (!resumableIds.length) return { candidates: stale.length, resumed: 0, skippedCompletedWrapups };
 
-  const { count, error: resumeError } = await supabase
-    .from("sequence_enrollments")
-    .update({ status: "active", pause_reason: null, next_run_at: new Date(now).toISOString(), updated_at: new Date(now).toISOString() }, { count: "exact" })
-    .in("id", resumableIds)
-    .eq("status", "paused")
-    .eq("pause_reason", "call_in_progress");
-  if (resumeError) throw new Error(`resume stale call pauses failed: ${resumeError.message}`);
-  return { candidates: stale.length, resumed: count ?? 0, skippedCompletedWrapups };
+  // The activation re-checks everything under each enrollment lock: the row is
+  // still paused as call_in_progress, and no Norma call request holds the lead.
+  // A softphone pause under a Norma hold is left for a later sweep.
+  const resumeAt = new Date(now).toISOString();
+  let resumed: number;
+  try {
+    resumed = await sweepResumeCallInProgress(supabase, { enrollmentIds: resumableIds, resumeAt });
+  } catch (error) {
+    if (!(error instanceof NormaMissingFunctionError)) throw error;
+    // Only treat this as "deployed ahead of the migration" if the requests
+    // table is missing too. Otherwise holds may exist: fail safe, leave the
+    // pauses for the next sweep, and say so.
+    const { error: probeError } = await supabase.from("norma_call_requests").select("id").limit(1);
+    if (!(probeError && (probeError.code === "PGRST205" || probeError.code === "42P01"))) {
+      reportError(error, { tags: { surface: "cron_sweep_stuck_call_in_progress_missing_rpc" } });
+      return { candidates: stale.length, resumed: 0, skippedCompletedWrapups };
+    }
+    const { count, error: resumeError } = await supabase
+      .from("sequence_enrollments")
+      .update({ status: "active", pause_reason: null, next_run_at: resumeAt, updated_at: resumeAt }, { count: "exact" })
+      .in("id", resumableIds)
+      .eq("status", "paused")
+      .eq("pause_reason", "call_in_progress");
+    if (resumeError) throw new Error(`resume stale call pauses failed: ${resumeError.message}`);
+    resumed = count ?? 0;
+  }
+  return { candidates: stale.length, resumed, skippedCompletedWrapups };
 }
 
 export { handle as POST };

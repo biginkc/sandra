@@ -1,5 +1,6 @@
 "use server";
 
+import { hasOpenNormaRequest, NORMA_HOLD_MESSAGE } from "@/lib/norma";
 import { revalidatePath } from "next/cache";
 
 import { createClient } from "@/lib/supabase/server";
@@ -666,6 +667,10 @@ export async function changeDripAction(enrollmentId: string, sequenceId: string)
     if (loadError) return { ok: false, error: { code: "CHANGE_FAILED", message: loadError.message } };
     if (!old || !["active", "paused"].includes(old.status)) return { ok: false, error: { code: "NOT_ACTIVE", message: "Enrollment is no longer active." } };
     if (old.sequence_id === sequenceId) return { ok: false, error: { code: "SAME_DRIP", message: "Choose a different drip." } };
+    // Refuse before stopping the old drip, or the lead would end up with none.
+    if (await hasOpenNormaRequest(supabase, old.property_id)) {
+      return { ok: false, error: { code: "NORMA_HOLD", message: NORMA_HOLD_MESSAGE } };
+    }
     const { data: canceled, error: cancelError } = await supabase.rpc("cancel_sequence_enrollment", {
       p_enrollment_id: enrollmentId, p_actor_user_id: user.id,
     });
@@ -723,6 +728,16 @@ export async function resumeEnrollmentAction(
         },
       };
     }
+    if (outcome.status === "norma_hold") {
+      return {
+        ok: false,
+        error: {
+          code: "NORMA_HOLD",
+          message:
+            "A Norma call is open for this lead, so its drip stays paused until that call is resolved.",
+        },
+      };
+    }
     return ok(null);
   } catch (e) {
     reportError(e, { tags: { surface: "resume_enrollment" } });
@@ -755,6 +770,9 @@ export async function retrySequenceStepAction(
         ok: false,
         error: { code: "RETRY_FAILED", message: outcome.message },
       };
+    }
+    if (outcome.status === "norma_hold") {
+      return { ok: false, error: { code: "NORMA_HOLD", message: NORMA_HOLD_MESSAGE } };
     }
     if (outcome.status !== "retried") {
       return {

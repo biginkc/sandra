@@ -7,7 +7,9 @@ const {
   resumeEnrollment,
   revalidatePath,
   recordLeadEvent,
+  hasOpenNormaRequest,
 } = vi.hoisted(() => ({
+  hasOpenNormaRequest: vi.fn(),
   createClient: vi.fn(),
   enrollLead: vi.fn(),
   resumeEnrollment: vi.fn(),
@@ -15,6 +17,7 @@ const {
   recordLeadEvent: vi.fn(),
 }));
 
+vi.mock("@/lib/norma", () => ({ hasOpenNormaRequest, NORMA_HOLD_MESSAGE: "Norma hold" }));
 vi.mock("@/lib/supabase/server", () => ({
   createClient,
 }));
@@ -308,6 +311,20 @@ describe("archive and restore sequence", () => {
 });
 
 describe("lead sequence lifecycle actions", () => {
+  beforeEach(() => hasOpenNormaRequest.mockResolvedValue(false));
+
+  it("refuses to change a drip while a Norma request holds the lead, before cancelling the old one", async () => {
+    const rpc = vi.fn();
+    const client = { auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "u1" } } }) },
+      from: vi.fn(() => ({ select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: { property_id: "p1", sequence_id: "old", status: "active" }, error: null }) }) }) })),
+      rpc };
+    createClient.mockResolvedValue(client);
+    hasOpenNormaRequest.mockResolvedValue(true);
+    expect(await changeDripAction("e1", "new")).toEqual({ ok: false, error: { code: "NORMA_HOLD", message: "Norma hold" } });
+    expect(rpc).not.toHaveBeenCalled();
+    expect(enrollLead).not.toHaveBeenCalled();
+  });
+
   it("pauses only the targeted active enrollment with manual reason", async () => {
     const select = vi.fn().mockResolvedValue({ data: [{ property_id: "p1", sequence_id: "s1" }], error: null });
     const status = vi.fn(() => ({ select }));

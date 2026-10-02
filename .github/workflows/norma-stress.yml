@@ -1,0 +1,73 @@
+name: Norma stress gate
+
+# PLAN.md section 9: the Have Norma call stress gate (misbehaving fake Bland,
+# seeded randomised lifecycles with concurrent events, barrier-forced races,
+# the 20-press button hammer). No real Bland, Slack or AI; nobody is dialled.
+#
+# It needs a real Postgres with the Sandra schema, because its whole point is
+# many separate connections racing for real. It provisions the same disposable
+# local Supabase stack the other heavy lanes use (scripts/ci/provision-
+# disposable-stack.mjs; hosted credentials are refused there), WITHOUT the Norma
+# migrations, then clones that schema into a scratch database, replays the Norma
+# migrations there and drops it afterwards.
+#
+# pg_dump/psql 17 come from ankane/setup-postgres (the runner's own client is
+# older than the server and pg_dump refuses to run against a newer server).
+#
+# A failing seed is printed; replay it with
+#   NORMA_STRESS_SEED=<seed> npm run test:norma-stress
+
+on:
+  pull_request:
+    paths:
+      - "src/lib/norma/**"
+      - "src/lib/sequences/enrollment.ts"
+      - "src/lib/messaging/inbound.ts"
+      - "src/app/api/webhooks/bland/**"
+      - "src/app/api/cron/**"
+      - "supabase/migrations/*_norma_*"
+      - "vitest.norma-stress.config.ts"
+      - "scripts/ci/provision-disposable-stack.mjs"
+      - ".github/workflows/norma-stress.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  norma-stress:
+    name: Norma stress gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+
+      - uses: ankane/setup-postgres@e9cd5bc1babecb0e441a640646d782056dbb67f5
+        with:
+          postgres-version: 17
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.116.0
+
+      - run: npm ci
+
+      - name: Provision disposable stack (schema without the Norma migrations)
+        run: node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 --no-baseline-owner --exclude-migrations '*_norma_*'
+
+      - name: Run the stress gate
+        env:
+          NORMA_STRESS_SOURCE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+        run: npm run test:norma-stress
+
+      - name: Stop disposable stack
+        if: always() && env.E2E_LOCAL_WORKDIR != ''
+        run: supabase stop --workdir "$E2E_LOCAL_WORKDIR" --no-backup

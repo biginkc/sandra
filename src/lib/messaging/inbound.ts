@@ -58,6 +58,7 @@ import {
   REP_SMS_HUMAN_TAKEOVER_REASON,
 } from "./rep-sms-human-takeover";
 import { aiReplyDelayWorkflow } from "@/workflows/ai-reply-delay";
+import { upgradeNormaHoldPauses } from "@/lib/norma";
 import { applyPhoneLevelOptOut } from "./opt-out-phone";
 import type { MessagingProvider } from "./types";
 
@@ -825,6 +826,27 @@ export async function handleInboundWebhook(
       );
       if (!propertyEnrollmentsPauseCompleted) {
         try {
+          // pausePropertyEnrollments only touches active rows. While a Norma
+          // call holds this lead, enrollments already paused as `norma_call`
+          // or a held `call_in_progress` must also record the reply, or a
+          // later Norma no-answer / softphone cleanup could resume them.
+          // This runs BEFORE the pause: if a Norma no-answer completed between
+          // the two steps, the release would reactivate the row and the
+          // upgrade would then see no hold. In this order the pause that
+          // follows catches anything the release reactivated.
+          // Its own try/catch: a failed upgrade must never skip the fail-safe
+          // pause below.
+          try {
+            await upgradeNormaHoldPauses(supabase, {
+              propertyId: effectivePropertyId,
+              reason: "inbound_reply",
+            });
+          } catch (upgradeError) {
+            reportError(upgradeError, {
+              tags: { surface: "inbound_norma_hold_upgrade" },
+              extra: { propertyId: effectivePropertyId },
+            });
+          }
           await pausePropertyEnrollments(supabase, {
             propertyId: effectivePropertyId,
             reason: "inbound_reply",
@@ -907,6 +929,20 @@ export async function handleInboundWebhook(
           // Cover both states and only then acknowledge the takeover so the
           // exact reason is durable even across retries or concurrent
           // deliveries.
+          // Upgrade Norma-held pauses first (see the reply path above), then
+          // pause and promote whatever remains.
+          try {
+            await upgradeNormaHoldPauses(supabase, {
+              propertyId: effectivePropertyId,
+              reason: REP_SMS_HUMAN_TAKEOVER_REASON,
+            });
+          } catch (upgradeError) {
+            // Never let this skip the fail-safe pause below.
+            reportError(upgradeError, {
+              tags: { surface: "inbound_norma_hold_upgrade" },
+              extra: { propertyId: effectivePropertyId },
+            });
+          }
           await pausePropertyEnrollments(supabase, {
             propertyId: effectivePropertyId,
             reason: REP_SMS_HUMAN_TAKEOVER_REASON,

@@ -30,6 +30,7 @@ import {
   type LeadEvent,
   useLeadEvents,
 } from "./lead-events";
+import type { NormaRequestView } from "@/lib/norma/view";
 
 import {
   AcquisitionHistoryCard,
@@ -77,6 +78,8 @@ type Props = {
   noteError: string | null;
   callError: string | null;
   eventError: string | null;
+  /** Norma call requests for this lead (callback preference and call detail). */
+  normaRequests?: NormaRequestView[];
   authorEmails: Record<string, string>;
   currentUserId: string | null;
   currentUserEmail: string | null;
@@ -439,6 +442,7 @@ export function LeadActivityTimeline(props: Props) {
                       event={event.row}
                       authorEmails={liveAuthorEmails}
                       currentUserId={currentUserId}
+                      normaRequests={props.normaRequests}
                     />
                   </div>
                 </Fragment>

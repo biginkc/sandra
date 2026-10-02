@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
+import { NORMA_OPEN_STATUSES } from "@/lib/norma";
 import { processEnrollmentTick } from "@/lib/sequences/tick";
 import {
   failQueuedMessage,
@@ -136,7 +137,47 @@ export async function runSequenceTick(
   };
   type DueCursor = Pick<DueEnrollment, "next_run_at" | "id">;
 
+  /**
+   * Defence in depth for the Norma hold: a lead with an open Norma call
+   * request must not send, whatever its enrollment says. The request already
+   * pauses the enrollment, so a held row here is an anomaly. If the hold read
+   * fails (including the brief new-code/old-schema window before the
+   * migration lands) this reports and does not block the tick: the pause is
+   * the primary control and the schedule must keep running.
+   */
+  const heldPropertyIds = async (rows: DueEnrollment[]): Promise<Set<string>> => {
+    const ids = [...new Set(rows.map((row) => row.property_id).filter(Boolean))];
+    if (ids.length === 0) return new Set();
+    const { data, error } = await supabase
+      .from("norma_call_requests")
+      .select("property_id")
+      .in("property_id", ids)
+      .in("status", [...NORMA_OPEN_STATUSES]);
+    if (error) {
+      // Table missing (deployed ahead of the migration): there are no holds.
+      if (error.code === "PGRST205" || error.code === "42P01") return new Set();
+      reportError(new Error(`norma hold lookup failed: ${error.message}`), {
+        tags: { surface: "cron_sequence_tick_norma_hold" },
+      });
+      return new Set();
+    }
+    return new Set((data ?? []).map((row) => row.property_id));
+  };
+
   const fetchDuePage = async (cursor: DueCursor | null): Promise<DueEnrollment[]> => {
+    let pageCursor = cursor;
+    for (;;) {
+      const rows = await fetchRawDuePage(pageCursor);
+      const held = await heldPropertyIds(rows);
+      const runnable = held.size === 0 ? rows : rows.filter((row) => !held.has(row.property_id));
+      if (runnable.length > 0 || rows.length < BATCH_SIZE || !withinBudget()) return runnable;
+      // A whole page was held: look at the next one rather than ending the tick.
+      const last = rows[rows.length - 1]!;
+      pageCursor = { next_run_at: last.next_run_at, id: last.id };
+    }
+  };
+
+  const fetchRawDuePage = async (cursor: DueCursor | null): Promise<DueEnrollment[]> => {
     let query = supabase
       .from("sequence_enrollments")
       .select(

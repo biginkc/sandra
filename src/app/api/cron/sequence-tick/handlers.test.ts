@@ -24,7 +24,7 @@ function resultBuilder(
   onCall?: (method: string, args: unknown[]) => void,
 ) {
   const builder: Record<string, unknown> = {};
-  for (const method of ["select", "eq", "not", "lte", "or", "order", "limit", "update"]) {
+  for (const method of ["select", "eq", "in", "not", "lte", "or", "order", "limit", "update"]) {
     builder[method] = (...args: unknown[]) => {
       onCall?.(method, args);
       return builder;
@@ -155,5 +155,63 @@ describe("runSequenceTick enrollment isolation", () => {
     expect(summary.processed).toBe(100);
     expect(enrollmentQueries).toEqual([0]);
     expect(summary.outcomes).toEqual({ sent: 1, skipped_already_claimed: 99 });
+  });
+
+  it("skips enrollments whose lead has an open Norma call request, and carries on with the rest", async () => {
+    const dueAt = "2026-09-17T12:00:00.000Z";
+    const due = [
+      { id: "held", property_id: "property-held", next_run_at: dueAt },
+      { id: "free", property_id: "property-free", next_run_at: dueAt },
+    ];
+    processEnrollmentTick.mockResolvedValue({ status: "sent", enrollmentId: "free", stepIndex: 0, messageId: "m" });
+    const client = {
+      from: vi.fn((table: string) => {
+        if (table === "sequence_enrollments") return resultBuilder(due);
+        if (table === "norma_call_requests") return resultBuilder([{ property_id: "property-held" }]);
+        return resultBuilder([]);
+      }),
+    } as never;
+
+    const summary = await runSequenceTick(client, { budgetMs: 10_000 });
+
+    expect(processEnrollmentTick).toHaveBeenCalledTimes(1);
+    expect(processEnrollmentTick).toHaveBeenCalledWith(expect.anything(), due[1]);
+    expect(summary.processed).toBe(1);
+  });
+
+  it.each(["PGRST205", "42P01"])("treats a missing Norma table (%s) as no holds, silently", async (code) => {
+    const due = [{ id: "free", property_id: "property-free", next_run_at: "2026-09-17T12:00:00.000Z" }];
+    processEnrollmentTick.mockResolvedValue({ status: "sent", enrollmentId: "free", stepIndex: 0, messageId: "m" });
+    reportError.mockClear();
+    const client = {
+      from: vi.fn((table: string) => {
+        if (table === "sequence_enrollments") return resultBuilder(due);
+        if (table === "norma_call_requests") return resultBuilder(null, { code, message: "missing" });
+        return resultBuilder([]);
+      }),
+    } as never;
+    const summary = await runSequenceTick(client, { budgetMs: 10_000 });
+    expect(summary.processed).toBe(1);
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it("does not stop the tick when the Norma hold lookup fails (the pause is the primary control)", async () => {
+    const due = [{ id: "free", property_id: "property-free", next_run_at: "2026-09-17T12:00:00.000Z" }];
+    processEnrollmentTick.mockResolvedValue({ status: "sent", enrollmentId: "free", stepIndex: 0, messageId: "m" });
+    const client = {
+      from: vi.fn((table: string) => {
+        if (table === "sequence_enrollments") return resultBuilder(due);
+        if (table === "norma_call_requests") return resultBuilder(null, { message: "relation does not exist" });
+        return resultBuilder([]);
+      }),
+    } as never;
+
+    const summary = await runSequenceTick(client, { budgetMs: 10_000 });
+
+    expect(summary.processed).toBe(1);
+    expect(reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "cron_sequence_tick_norma_hold" } }),
+    );
   });
 });
