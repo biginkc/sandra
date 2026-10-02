@@ -29,26 +29,29 @@ class RuntimeR1ConfigTests(unittest.TestCase):
         candidate_text = candidate_path.read_text()
         candidate = json.loads(candidate_text)
         electric = next(service for service in candidate["services"] if service["name"] == "inbox-electric")
+        reply_worker = next(service for service in candidate["services"] if service["name"] == "inbox-reply-send-worker")
         self.assertNotIn("ELECTRIC_INSECURE", candidate_text)
         self.assertEqual(electric["env"]["DATABASE_URL"], "${INBOX_ELECTRIC_DATABASE_URL}")
-        self.assertEqual(electric["env"]["PGPASSFILE"], "${INBOX_ELECTRIC_PGPASSFILE}")
-        self.assertEqual(electric["secretEnv"], ["INBOX_ELECTRIC_DATABASE_URL", "INBOX_ELECTRIC_PGPASSFILE"])
+        self.assertEqual(electric["env"]["ELECTRIC_DATABASE_CA_CERTIFICATE_FILE"], "${INBOX_ELECTRIC_DATABASE_CA_CERTIFICATE_FILE}")
+        self.assertEqual(electric["env"]["ELECTRIC_SECRET"], "${INBOX_ELECTRIC_SECRET}")
+        self.assertEqual(electric["secretEnv"], ["INBOX_ELECTRIC_DATABASE_URL", "INBOX_ELECTRIC_SECRET"])
         self.assertEqual(electric["connection"], {
             "host": "db.copflsklaefwzipsrjqz.supabase.co",
             "port": 5432,
             "database": "postgres",
-            "sslmode": "verify-full",
-            "sslrootcert": "experiments/inbox-production-install/supabase-prod-ca-2021.crt",
-            "ssl_min_protocol_version": "TLSv1.2",
-            "gssencmode": "disable",
+            "sslmode": "require",
+            "caCertificateFile": "/etc/sandra-inbox/supabase-prod-ca-2021.crt",
             "secretForwarding": "none",
         })
+        self.assertEqual(reply_worker["env"]["INBOX_REPLY_OWNED_RECIPIENTS"], "${INBOX_REPLY_OWNED_RECIPIENTS}")
         production_env = (ROOT / "deployment/inbox/electric.production.env.example").read_text()
         self.assertNotIn("ELECTRIC_INSECURE", production_env)
-        self.assertIn("INBOX_ELECTRIC_DATABASE_SSLMODE=verify-full", production_env)
-        self.assertIn("INBOX_ELECTRIC_DATABASE_SSLROOTCERT=", production_env)
+        self.assertIn("?sslmode=require", production_env)
+        self.assertIn("INBOX_ELECTRIC_DATABASE_CA_CERTIFICATE_FILE=/etc/sandra-inbox/supabase-prod-ca-2021.crt", production_env)
+        self.assertIn("INBOX_ELECTRIC_SECRET=", production_env)
+        self.assertNotIn("PGPASSFILE", production_env)
+        self.assertNotIn("sslrootcert=", production_env)
         self.assertIn("INBOX_ELECTRIC_DATABASE_URL=postgresql://inbox_electric_replication@", production_env)
-        self.assertIn("INBOX_ELECTRIC_PGPASSFILE=/run/secrets/", production_env)
         self.assertIn("no Electric secret is forwarded", production_env)
 
     def test_local_fixture_keeps_insecure_mode_explicitly_scoped(self):

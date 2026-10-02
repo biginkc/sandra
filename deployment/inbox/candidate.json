@@ -24,21 +24,20 @@
       "port": 3000,
       "env": {
         "DATABASE_URL": "${INBOX_ELECTRIC_DATABASE_URL}",
-        "PGPASSFILE": "${INBOX_ELECTRIC_PGPASSFILE}",
+        "ELECTRIC_DATABASE_CA_CERTIFICATE_FILE": "${INBOX_ELECTRIC_DATABASE_CA_CERTIFICATE_FILE}",
+        "ELECTRIC_SECRET": "${INBOX_ELECTRIC_SECRET}",
         "ELECTRIC_LONG_POLL_TIMEOUT": "8000",
         "ELECTRIC_MANUAL_TABLE_PUBLISHING": "true",
         "ELECTRIC_REPLICATION_STREAM_ID": "inbox_copflsklaefwzipsrjqz",
         "ELECTRIC_TELEMETRY": "false"
       },
-      "secretEnv": ["INBOX_ELECTRIC_DATABASE_URL", "INBOX_ELECTRIC_PGPASSFILE"],
+      "secretEnv": ["INBOX_ELECTRIC_DATABASE_URL", "INBOX_ELECTRIC_SECRET"],
       "connection": {
         "host": "db.copflsklaefwzipsrjqz.supabase.co",
         "port": 5432,
         "database": "postgres",
-        "sslmode": "verify-full",
-        "sslrootcert": "experiments/inbox-production-install/supabase-prod-ca-2021.crt",
-        "ssl_min_protocol_version": "TLSv1.2",
-        "gssencmode": "disable",
+        "sslmode": "require",
+        "caCertificateFile": "/etc/sandra-inbox/supabase-prod-ca-2021.crt",
         "secretForwarding": "none"
       }
     },
@@ -73,7 +72,10 @@
       "memoryGiBLimit": 1,
       "volumeGiBLimit": 0,
       "public": false,
-      "port": 9081
+      "port": 9081,
+      "env": {
+        "INBOX_REPLY_OWNED_RECIPIENTS": "${INBOX_REPLY_OWNED_RECIPIENTS}"
+      }
     },
     {
       "name": "inbox-projection-worker",
