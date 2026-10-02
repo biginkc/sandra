@@ -27,7 +27,7 @@ const t0 = Date.now();
 
 async function timed(c, sql, params, bucket) {
   const s = performance.now();
-  try { await c.query(sql, params); } catch (e) { out.insertErrors++; (out.errs ??= []).push(String(e.message)); }
+  try { await c.query(sql, params); } catch (e) { out.insertErrors++; (out.errs ??= []).push({ sqlstate: e.code, severity: e.severity, message: String(e.message), where: e.where ?? null, routine: e.routine ?? null, statement: sql.slice(0, 60), atMs: Date.now() - t0 }); }
   out[bucket].push(performance.now() - s);
 }
 const writerLoop = (async () => { while (!done) { await timed(writer, "insert into public.messages (org_id, property_id, channel, direction, body) values ($1,$2,'sms','outbound','probe')", [ORG, pid0], "insertMs"); await sleep(50); } })();
