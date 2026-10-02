@@ -106,6 +106,12 @@ describe("isPublicPath", () => {
     expect(isPublicPath("/api/internal/other")).toBe(false);
   });
 
+  it("exempts only the signed direct-call watchdog callback endpoint", () => {
+    expect(isPublicPath("/api/internal/direct-call-watchdog")).toBe(true);
+    expect(isPublicPath("/api/internal/direct-call-watchdog/child")).toBe(false);
+    expect(isPublicPath("/api/internal/direct-call-watchdog/")).toBe(false);
+  });
+
   it("allows signed Jitter internal API routes to handle their own auth", () => {
     expect(
       isPublicPath(
@@ -144,6 +150,31 @@ describe("isPublicPath", () => {
 });
 
 describe("updateSession membership authorization", () => {
+  it("lets the watchdog callback reach its HMAC route without a browser session", async () => {
+    const { getUser, from } = mockProtectedSession();
+    getUser.mockResolvedValue({ data: { user: null } });
+
+    const response = await updateSession(
+      new NextRequest("https://sandra.test/api/internal/direct-call-watchdog"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("location")).toBeNull();
+    expect(from).not.toHaveBeenCalled();
+  });
+
+  it("keeps watchdog sibling paths behind the browser session gate", async () => {
+    const { getUser } = mockProtectedSession();
+    getUser.mockResolvedValue({ data: { user: null } });
+
+    const response = await updateSession(
+      new NextRequest("https://sandra.test/api/internal/direct-call-watchdog/child"),
+    );
+
+    expect(response.status).toBe(307);
+    expect(response.headers.get("location")).toContain("/login?next=");
+  });
+
   it("allows a protected request only when the signed-in UID has a membership", async () => {
     const { signOut, eq } = mockProtectedSession({
       memberships: [{ user_id: "seeded-auth-user" }],
