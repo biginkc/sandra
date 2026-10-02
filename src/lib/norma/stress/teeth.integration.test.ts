@@ -33,12 +33,6 @@ const MUTANTS: Mutant[] = [
       mutateFunction(q, "public.retry_sequence_step(uuid, uuid)", "if public.fn_norma_hold_active(e.property_id) then", "if false then"),
   },
   {
-    name: "releasing a request's pauses ignores why the pause is held (a reply pause is released like our own)",
-    invariant: "5",
-    apply: (q) =>
-      mutateFunction(q, "public.fn_norma_release_pauses(uuid)", "elsif e.status <> 'paused' or e.pause_reason is distinct from 'norma_call' then", "elsif e.status <> 'paused' then"),
-  },
-  {
     name: "the one-open-request index is gone (a second request can open)",
     invariant: "1",
     apply: async (q) => {
@@ -99,6 +93,24 @@ const SCENE_MUTANTS: SceneMutant[] = [
       const problems: string[] = [];
       if (hook.status !== 200 || request?.status !== "completed") problems.push(`the completion failed (${hook.status}, request ${request?.status})`);
       if (enrollment?.status !== "paused") problems.push(`a do-not-contact lead's drip was ${enrollment?.status} after the call ended`);
+      return problems;
+    },
+  },
+  {
+    name: "releasing a request's pauses ignores why the pause is held (a reply pause is released like our own)",
+    apply: (q) =>
+      mutateFunction(q, "public.fn_norma_release_pauses(uuid)", "elsif e.status <> 'paused' or e.pause_reason is distinct from 'norma_call' then", "elsif e.status <> 'paused' then"),
+    scene: async (h) => {
+      const ctx = await h.lead({ enrollments: ["active"] }, { kind: "no_answer_status" });
+      await h.requestCall(ctx, h.world.rep1);
+      await h.inboundReply(ctx);
+      const hook = await h.bland.webhook(h.bland.callForNumber(ctx.lead.phone)!, "good");
+      const pause = (await h.scratch.pool.query("select release_result from public.norma_enrollment_pauses where enrollment_id = $1", [ctx.lead.enrollments[0]])).rows[0];
+      const enrollment = (await h.scratch.pool.query("select status, pause_reason from public.sequence_enrollments where id = $1", [ctx.lead.enrollments[0]])).rows[0];
+      const problems: string[] = [];
+      if (hook.status !== 200) problems.push(`the completion answered ${hook.status}`);
+      if (pause?.release_result !== "reason_changed") problems.push(`release_result was ${pause?.release_result}, expected reason_changed`);
+      if (enrollment?.status !== "paused" || enrollment?.pause_reason !== "inbound_reply") problems.push(`the reply pause became ${enrollment?.status}/${enrollment?.pause_reason}`);
       return problems;
     },
   },

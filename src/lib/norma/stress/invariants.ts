@@ -348,6 +348,13 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
     for (const r of requests) {
       if (r.status === "completed" && r.outcome !== "no_answer" && reqsByProperty.get(r.property_id)!.length === 1) {
         for (const e of enrollments.filter((x) => x.property_id === r.property_id && x.status === "active")) {
+          // A rep's explicit Retry of a provider_failed drip after the call ended is a deliberate
+          // human action (the same as a manual resume of a norma_call pause). Retry DURING the hold
+          // is still caught by the per-transition rule above.
+          const retriedByRep = audit.some(
+            (a) => a.tbl === "sequence_enrollments" && a.row_id === e.id && a.op === "UPDATE" && a.old_row?.pause_reason === "provider_failed" && a.new_row?.status === "active" && !a.hold_open,
+          );
+          if (retriedByRep) continue;
           v("5", `request ${r.id} (${r.outcome}) kept no hold but enrollment ${e.id} is active (the drip must stay paused)`);
         }
       }
