@@ -22,6 +22,7 @@ import { createClient } from "@supabase/supabase-js";
 import { Client as PgClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { PAGE_PROPERTIES_SELECT } from "@/app/(dashboard)/properties/page-select";
 import type { FilterBlock } from "@/lib/prospects/filter-schema";
 import { filterSelectFragment } from "@/lib/prospects/filter-to-supabase";
 import { SEARCH_SELECT_ALL_CAP, buildScopedQuery } from "@/lib/prospects/search-scope";
@@ -106,7 +107,7 @@ async function seed() {
 }
 
 const blk = (b: Record<string, unknown>): FilterBlock => ({ id: randomUUID(), ...b }) as any;
-const SELECT = "id, org_id, address, city, state, zip, market, cass_status, is_vacant, created_at, status, is_dnc_locked, outreach_dispo, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)";
+const SELECT = PAGE_PROPERTIES_SELECT;
 
 async function page(search: string | null, blocks: FilterBlock[]) {
   const frag = filterSelectFragment(blocks);

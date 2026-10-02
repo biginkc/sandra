@@ -48,7 +48,9 @@ type P = {
   tags: string[]; lists: string[]; openTask: boolean;
 };
 const model: P[] = [];
-let T1 = "", T2 = "", L1 = "", L2 = "";
+let T1 = "", T2 = "", T3 = "", L1 = "", L2 = "";
+const trainingIds: string[] = [];
+let heavyMessagesId = "";
 
 async function insertChunked(table: string, rows: any[], size = 200) {
   for (let i = 0; i < rows.length; i += size) {
@@ -69,6 +71,7 @@ beforeAll(async () => {
   const mk = async (table: string, row: any) => (await svc.from(table).insert(row).select("id").single()).data.id as string;
   T1 = await mk("tags", { org_id: BMH_ORG_ID, name: `t1-${randomUUID()}`, category: "custom" });
   T2 = await mk("tags", { org_id: BMH_ORG_ID, name: `t2-${randomUUID()}`, category: "custom" });
+  T3 = await mk("tags", { org_id: BMH_ORG_ID, name: `t3-${randomUUID()}`, category: "custom" });
   L1 = await mk("lists", { org_id: BMH_ORG_ID, name: `l1-${randomUUID()}` });
   L2 = await mk("lists", { org_id: BMH_ORG_ID, name: `l2-${randomUUID()}` });
 
@@ -104,12 +107,20 @@ beforeAll(async () => {
     });
     const mkm = (direction: string, read: boolean) =>
       msgs.push({ org_id: BMH_ORG_ID, property_id: id, channel: "sms", direction, body: "m", read_at: direction === "inbound" && read ? now : null });
+    if (i === 7) {
+      // One property with >1000 messages (beyond PostgREST's 1000-row cap on its own).
+      heavyMessagesId = id;
+      for (let k = 0; k < 1100; k++) mkm("outbound", false);
+      p.outb += 1100;
+    }
     switch (i % 4) {
-      case 1: mkm("inbound", false); p.inb = 1; p.unread = 1; break;
-      case 2: mkm("outbound", false); p.outb = 1; break;
-      case 3: mkm("inbound", true); mkm("outbound", false); p.inb = 1; p.outb = 1; break;
+      case 1: mkm("inbound", false); p.inb += 1; p.unread += 1; break;
+      case 2: mkm("outbound", false); p.outb += 1; break;
+      case 3: mkm("inbound", true); mkm("outbound", false); p.inb += 1; p.outb += 1; break;
     }
     if (i % 2 === 0) { p.tags.push(T1); ptags.push({ org_id: BMH_ORG_ID, property_id: id, tag_id: T1 }); }
+    // >400 distinct ids in one block (the legacy id-list translator would 414 here).
+    if (i < 450) { p.tags.push(T3); ptags.push({ org_id: BMH_ORG_ID, property_id: id, tag_id: T3 }); }
     if (i % 5 === 0) { p.tags.push(T2); ptags.push({ org_id: BMH_ORG_ID, property_id: id, tag_id: T2 }); }
     if (i % 3 === 0) { p.lists.push(L1); plists.push({ org_id: BMH_ORG_ID, property_id: id, list_id: L1 }); }
     if (i % 4 === 0) { p.lists.push(L2); plists.push({ org_id: BMH_ORG_ID, property_id: id, list_id: L2 }); }
@@ -162,6 +173,22 @@ beforeAll(async () => {
     await pg2.query("update public.properties set homeowner_contact_id = $1 where id = $2", [bContacts[0].id, anomalyProps[1].id]);
     await pg2.query("commit");
   } finally { await pg2.end(); }
+  // Training rows: a dedicated contact named with the term and a term-bearing address. Training
+  // seeds need the guard bypass (triggers off); Search must never return them on either builder.
+  const tpg = new (await import("pg")).Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
+  await tpg.connect();
+  try {
+    for (let i = 0; i < 3; i++) {
+      const tcid = randomUUID();
+      const tpid = randomUUID();
+      trainingIds.push(tpid);
+      await tpg.query("begin");
+      await tpg.query("set local session_replication_role = replica");
+      await tpg.query("insert into public.contacts (id, org_id, first_name, last_name, phone_1, phone_1_type) values ($1,$2,'Train',$3,$4,'mobile')", [tcid, BMH_ORG_ID, TERM, `+1913999${String(1000 + i).padStart(4, "0")}`]);
+      await tpg.query("insert into public.properties (id, org_id, address, city, state, status, market, is_training, homeowner_contact_id) values ($1,$2,$3,'Kansas City','MO','new_lead',$4,true,$5)", [tpid, BMH_ORG_ID, `${i} ${TERM} Training Way`, MKT, tcid]);
+      await tpg.query("commit");
+    }
+  } finally { await tpg.end(); }
   // DNC-style dispositions lock child tables, so they are applied last.
   const byDispo = new Map<string, string[]>();
   for (const p of model) if (p.dispo) byDispo.set(p.dispo, [...(byDispo.get(p.dispo) ?? []), p.id]);
@@ -430,6 +457,36 @@ describe("Search x filters on the real search_properties rpc builder", () => {
       }
     }, 120_000);
   });
+
+  it("training properties are never returned (search, browse, filters) on either builder", async () => {
+    expect(trainingIds).toHaveLength(3);
+    for (const search of [TERM, "Training Way", null]) {
+      const got = await run([], search, userA, false);
+      for (const id of trainingIds) expect(got.ids, `search=${search}`).not.toContain(id);
+    }
+    const filtered = await run([blk({ kind: "pipeline_status", combinator: "any", values: ["new_lead"] })], TERM, userA, false);
+    for (const id of trainingIds) expect(filtered.ids).not.toContain(id);
+  });
+
+  it("literal % and _ (1-2 character fallback) match nothing instead of everything", async () => {
+    for (const q of ["%", "_", "%%", "_%", "a%"]) {
+      const got = await run([], q, userA, false);
+      expect(got.ids, JSON.stringify(q)).toEqual([]);
+      expect(got.count).toBe(0);
+    }
+  });
+
+  it("merge-gate fixtures exist: one property with >1000 messages and a block with >400 distinct ids", async () => {
+    expect(heavyMessagesId).not.toBe("");
+    const heavy = model.find((p) => p.id === heavyMessagesId)!;
+    expect(heavy.outb).toBeGreaterThan(1000);
+    await parity([blk({ kind: "engagement", combinator: "any", values: ["attempted", "replied"] })]);
+    await parity([blk({ kind: "engagement", combinator: "not", values: ["replied"] })]);
+    expect(model.filter((p) => p.tags.includes(T3)).length).toBeGreaterThan(400);
+    await parity([blk({ kind: "tag", combinator: "any", values: [T3] })]);
+    await parity([blk({ kind: "tag", combinator: "not", values: [T3] })]);
+    await parity([blk({ kind: "tag", combinator: "all", values: [T1, T3] })]);
+  }, 120_000);
 
   it("a match set larger than 1000 rows is walked completely with an exact count (runs last)", async () => {
     const big = Array.from({ length: 1100 }, (_, i) => ({

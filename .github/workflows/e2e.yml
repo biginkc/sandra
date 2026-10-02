@@ -165,7 +165,7 @@ jobs:
 
       - uses: supabase/setup-cli@v1
         with:
-          version: 2.116.0
+          version: 2.109.1
 
       # Owns its own disposable database on this runner (loopback only). The
       # suites below call the local-only guard and refuse any other target.
@@ -197,6 +197,26 @@ jobs:
           LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npm run test:search-local
+
+      # Every SQL mutation must be caught by the RPC suite: a surviving mutation means a test gap.
+      - name: search_properties mutation harness (each mutation must fail the suite)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          for m in drop-org-gate drop-agent-join drop-deleted-at drop-like-escape add-limit-100 drop-sms-channel auth-uid-null drop-length-cap drop-structured; do
+            if SEARCH_PROPS_MUTATION="$m" npx vitest run --config vitest.local-integration.config.ts \
+                 supabase/migrations/20261002110100_search_properties.integration.test.ts > "mutation-$m.log" 2>&1; then
+              echo "::error::mutation $m SURVIVED (the suite passed against broken SQL)"; tail -20 "mutation-$m.log"; exit 1
+            fi
+            # A harness/setup crash is not a kill: require real failing assertions.
+            if ! grep -qE "Tests +[0-9]+ failed" "mutation-$m.log"; then
+              echo "::error::mutation $m crashed the harness instead of failing tests"; tail -30 "mutation-$m.log"; exit 1
+            fi
+            echo "mutation $m killed: $(grep -E 'Tests ' "mutation-$m.log" | head -1)"
+          done
 
       - name: Search x filter composition and evaluation budget
         env:

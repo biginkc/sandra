@@ -15,6 +15,8 @@ import { BMH_ORG_ID, TEST_ORG_B_ID, clientForUser, createOrgUser, seedTwoOrgs } 
 import { resetTenantTables } from "@tests/integration/reset";
 import { assertLocalOnlyEnvironment } from "@/lib/testing/local-only-guard";
 
+import { PAGE_PROPERTIES_SELECT } from "@/app/(dashboard)/properties/page-select";
+
 import { buildScopedQuery } from "./search-scope";
 
 assertLocalOnlyEnvironment();
@@ -82,7 +84,7 @@ async function pageShapedLoad(): Promise<void> {
   const { filterSelectFragment } = await import("./filter-to-supabase");
   const blocks = [{ id: randomUUID(), kind: "vacancy", tri: "any" }, { id: randomUUID(), kind: "engagement", combinator: "not", values: ["opted_out"] }] as never;
   const frag = filterSelectFragment(blocks);
-  const select = ["id, org_id, address, city, state, zip, market, cass_status, is_vacant, created_at, status, is_dnc_locked, outreach_dispo, source_import_id, source_imported_at, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)", frag].filter(Boolean).join(", ");
+  const select = [PAGE_PROPERTIES_SELECT, frag].filter(Boolean).join(", ");
   const { builder } = await buildScopedQuery(userA, {
     select, selectOpts: { count: "exact" }, search: "Budgetville", blockStack: blocks, includeMessages: true,
   });

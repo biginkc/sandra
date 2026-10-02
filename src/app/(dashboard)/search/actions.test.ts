@@ -22,6 +22,7 @@ const h = vi.hoisted(() => {
       ok: true,
       data: { requested: ids.length, eligible: ids.length, cassVerified: 0, cassUnverified: ids.length, notEligible: 0, killSwitchSkipped: 0, tracefyCreditsRequired: 0, tracefyCreditsAvailable: 1, tracefyCreditStatus: "sufficient", canLaunchSkipTrace: true, estimatedCassVerificationCostUsd: 0, cassVerificationPropertyIds: ids },
     })),
+    deferred: vi.fn(async (_c: unknown, ids: string[]) => ({ ok: true, data: { succeeded: 0, skipped: 0, failed: [], deferred: { jobId: "dj", total: ids.length } } })),
     stRequest: vi.fn(async (ids: string[]) => ({ ok: true, data: { jobId: "sj", status: "queued", requested: ids.length, eligible: ids.length, cassSkipped: 0, killSwitchSkipped: 0 } })),
   };
 });
@@ -58,6 +59,10 @@ vi.mock("../properties/actions", () => ({
 }));
 vi.mock("../properties/promote-leads-actions", () => ({ createPromoteLeadsJob: h.promote }));
 vi.mock("../campaigns/actions", () => ({ listDeliveryOptions: async () => ({ ok: true, data: {} }), refreshDeliveryCatalog: async () => ({ ok: true, data: {} }) }));
+vi.mock("@/lib/messaging/search-bulk-sms", async (importActual) => ({
+  ...(await importActual<typeof import("@/lib/messaging/search-bulk-sms")>()),
+  queueSearchSmsDeferred: h.deferred,
+}));
 vi.mock("@/lib/skip-trace/actions", () => ({ preflightSkipTrace: h.stPreflight, requestSkipTrace: h.stRequest }));
 
 import * as actions from "./actions";
@@ -251,5 +256,47 @@ describe("nothing eligible", () => {
   it("matchedCount for explicit ids counts distinct ids (duplicates collapse)", async () => {
     const out = await actions.searchSelectAllCount({ selection: { kind: "ids", ids: [P1, P1, P2, LEAD] } } as never);
     expect(out).toMatchObject({ ok: true, data: { matchedCount: 3, eligibleCount: 2, skippedLeads: 1 } });
+  });
+});
+
+describe("CASS token round trip with realistic filters", () => {
+  const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  it("a token for a long search and many filter blocks (well over 200 chars) is accepted and re-resolved", async () => {
+    process.env.SUPABASE_SERVICE_ROLE_KEY = "test-secret";
+    const filters = {
+      search: "y".repeat(180),
+      blockStack: Array.from({ length: 12 }, (_, i) => ({
+        id: uuid(i), kind: "tag", combinator: "any", values: [uuid(100 + i), uuid(200 + i), uuid(300 + i)],
+      })),
+    };
+    const pre = await actions.searchSkipTracePreflight({ selection: { kind: "filters", filters } } as never);
+    expect(pre.ok).toBe(true);
+    if (!pre.ok) return;
+    const token = pre.data.selectionToken!;
+    expect(token.length).toBeGreaterThan(214);
+    h.verify.mockClear();
+    const out = await actions.searchCassForSkipTrace({ selectionToken: token, requestKey: key });
+    expect(out, JSON.stringify(out)).toMatchObject({ ok: true });
+    expect(h.verify).toHaveBeenCalled();
+    expect(h.selectAll.mock.calls.at(-1)![0]).toMatchObject({ search: "y".repeat(180) });
+  });
+});
+
+describe("bulk SMS deferral", () => {
+  const opts = { campaignName: "c", paceSeconds: 8, body: "hi" };
+  it("up to 500 prospects queue synchronously through the legacy worker", async () => {
+    h.selectAll.mockResolvedValue({ ok: true, data: { eligibleIds: Array.from({ length: 500 }, (_, i) => U(1000 + i)), eligibleCount: 500, dncLockedCount: 0, dncLockedIds: [], matchedCount: 500, skippedLeads: 0 } });
+    await actions.searchBulkSms({ selection: { kind: "filters", filters: SPEC }, opts } as never);
+    expect(h.sms).toHaveBeenCalledTimes(1);
+    expect(h.deferred).not.toHaveBeenCalled();
+  });
+
+  it("more than 500 go through the Search-owned deferred path (never the legacy workflow)", async () => {
+    const ids = Array.from({ length: 501 }, (_, i) => U(1000 + i));
+    h.selectAll.mockResolvedValue({ ok: true, data: { eligibleIds: ids, eligibleCount: 501, dncLockedCount: 0, dncLockedIds: [], matchedCount: 520, skippedLeads: 19 } });
+    const out = await actions.searchBulkSms({ selection: { kind: "filters", filters: SPEC }, opts } as never);
+    expect(h.sms).not.toHaveBeenCalled();
+    expect(h.deferred.mock.calls[0][1]).toEqual(ids);
+    expect(out).toMatchObject({ ok: true, data: { deferred: { total: 501 }, skippedLeads: 19 } });
   });
 });

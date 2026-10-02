@@ -6,6 +6,13 @@ import { createHmac, timingSafeEqual } from "node:crypto";
  * is bound to the user, and is re-resolved server-side on use.
  */
 const TTL_MS = 10 * 60 * 1000;
+/** Tokens grow with the filters they carry (long searches, many blocks): validate by FORMAT and a generous bound. */
+export const MAX_SELECTION_TOKEN_LENGTH = 32_768;
+const TOKEN_FORMAT = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+
+export function isSelectionTokenShape(value: unknown): value is string {
+  return typeof value === "string" && value.length <= MAX_SELECTION_TOKEN_LENGTH && TOKEN_FORMAT.test(value);
+}
 
 function secret(): string {
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -21,7 +28,9 @@ export function mintSelectionToken(args: { userId: string; filters: unknown; now
   const payload = Buffer.from(
     JSON.stringify({ u: args.userId, f: args.filters, e: (args.now ?? Date.now()) + TTL_MS }),
   ).toString("base64url");
-  return `${payload}.${sign(payload)}`;
+  const token = `${payload}.${sign(payload)}`;
+  if (token.length > MAX_SELECTION_TOKEN_LENGTH) throw new Error("Selection is too large to hold in a token.");
+  return token;
 }
 
 export function readSelectionToken(

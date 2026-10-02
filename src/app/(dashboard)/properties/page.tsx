@@ -30,6 +30,7 @@ import {
   parseProspectsSearch,
   truncateMessagePreview,
 } from "./prospects-query";
+import { PAGE_PROPERTIES_SELECT } from "./page-select";
 import { FilterDrawer } from "./_components/filter-drawer";
 import QuickFiltersBar from "./_components/quick-filters-bar";
 import { ActiveFiltersChips } from "./_components/active-filters-chips";
@@ -175,7 +176,7 @@ export default async function PropertiesPage({
     }
     const propertyListSelect = filterSelectFragment(blockStack);
     const propertiesSelect = [
-      "id, org_id, address, city, state, zip, market, cass_status, is_vacant, created_at, status, is_dnc_locked, outreach_dispo, source_import_id, source_imported_at, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)",
+      PAGE_PROPERTIES_SELECT,
       propertyListSelect,
     ]
       .filter(Boolean)

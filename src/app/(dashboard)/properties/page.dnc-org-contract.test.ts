@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const source = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
+const pageSelect = readFileSync(new URL("./page-select.ts", import.meta.url), "utf8");
 const selectAllSource = readFileSync(
   new URL("../../../lib/prospects/select-all.ts", import.meta.url),
   "utf8",
@@ -13,7 +14,8 @@ const scopeSource = readFileSync(
 
 describe("Search page permanent DNC display contract", () => {
   it("keeps DNC-locked rows read-only and channel suppression separate", () => {
-    expect(source).toContain("status, is_dnc_locked, outreach_dispo");
+    expect(pageSelect).toContain("status, is_dnc_locked, outreach_dispo");
+    expect(source).toContain("PAGE_PROPERTIES_SELECT");
     expect(source).toContain("dnc_reason: p.is_dnc_locked");
     expect(source).toContain("homeowner?.sms_opted_out");
     expect(source).not.toContain('from("sms_phone_suppressions")');

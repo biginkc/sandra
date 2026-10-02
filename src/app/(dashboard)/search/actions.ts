@@ -36,7 +36,7 @@ import {
   parseSelection,
   type SearchSelection,
 } from "@/lib/prospects/search-selection-input";
-import { mintSelectionToken, readSelectionToken } from "@/lib/prospects/selection-token";
+import { isSelectionTokenShape, mintSelectionToken, readSelectionToken } from "@/lib/prospects/selection-token";
 import { selectAllSearch, type SelectionFilters } from "@/lib/prospects/select-all";
 import {
   preflightSkipTrace as preflightSkipTraceWorker,
@@ -69,6 +69,7 @@ import {
   type BulkSmsOutcome,
 } from "../properties/actions";
 import type { BulkSmsQueueOpts } from "@/lib/messaging/bulk-queue";
+import { SEARCH_SYNC_BULK_SMS_LIMIT, queueSearchSmsDeferred } from "@/lib/messaging/search-bulk-sms";
 
 const DNC_LOCK_MESSAGE = "Prospect is locked Do Not Contact and cannot be changed in bulk.";
 
@@ -369,14 +370,21 @@ export async function searchBulkSms(input: { selection: SearchSelection; opts: B
     if (typeof opts !== "object" || opts === null || Array.isArray(opts)) throw new SearchInputError("opts must be an object.");
     // Ad-hoc only: saved campaigns send their frozen audience through the campaigns flow.
     if ("campaignId" in opts) throw new SearchInputError("Search bulk SMS is ad-hoc only.");
+    if (typeof opts.campaignName !== "string" || opts.campaignName.trim() === "") {
+      throw new SearchInputError("A campaign name is required.");
+    }
     const r = await resolve(selection);
     if (!r.ok) return r;
     if (r.data.prospectIds.length === 0) {
       return ok({ succeeded: 0, skipped: 0, failed: [], skippedLeads: r.data.skippedLeads });
     }
-    // Only prospects reach the freeze. (The >500 workflow cannot re-check promotions per chunk
-    // without modifying the legacy workflow; see PR notes.)
-    const sent = await bulkQueueSms(r.data.prospectIds, opts as unknown as BulkSmsQueueOpts);
+    const smsOpts = opts as unknown as BulkSmsQueueOpts;
+    // Up to 500 prospects queue right now (they were partitioned a moment ago). Larger sends are
+    // deferred through the Search-owned workflow, which re-validates every chunk to current prospects.
+    const sent =
+      r.data.prospectIds.length > SEARCH_SYNC_BULK_SMS_LIMIT
+        ? await queueSearchSmsDeferred(await createClient(), r.data.prospectIds, smsOpts as BulkSmsQueueOpts & { campaignName: string })
+        : await bulkQueueSms(r.data.prospectIds, smsOpts);
     return sent.ok ? ok({ ...sent.data, skippedLeads: r.data.skippedLeads }) : sent;
   } catch (e) {
     const b = bad(e);
@@ -608,7 +616,8 @@ export async function searchCassForSkipTrace(input: { selection?: SearchSelectio
     const userId = await requireUser();
     let selection: SearchSelection;
     if (raw.selectionToken !== undefined) {
-      const read = readSelectionToken(str(raw.selectionToken, "selectionToken"), userId);
+      if (!isSelectionTokenShape(raw.selectionToken)) throw new SearchInputError("selectionToken is malformed.");
+      const read = readSelectionToken(raw.selectionToken, userId);
       if (!read.ok) throw new SearchInputError("Selection expired. Re-open the skip-trace preflight.");
       selection = { kind: "filters", filters: parseFilters(read.filters) };
     } else {

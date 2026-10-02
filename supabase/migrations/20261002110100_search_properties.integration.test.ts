@@ -155,6 +155,9 @@ describe("search_properties RPC", () => {
       await db.query("update public.properties set homeowner_contact_id = $1 where id = $2", [foreign, P.crossLinked]);
       await db.query("commit");
     } catch (error) { await db.query("rollback"); throw error; }
+    // Every status is returned: an `interested` row (the matrix above covers prospect/new_lead/dead/closed).
+    const interestedOwner = await contact(BMH_ORG_ID, { first_name: "Interestedowner", last_name: "Lineup" });
+    P.interested = await property(BMH_ORG_ID, { address: "209 Kestrel Court", status: "interested", homeowner_contact_id: interestedOwner });
     P.plain = await property(BMH_ORG_ID, { address: "300 Nothingmatches Road", city: "Dayton", state: "OH", zip: "45402" });
     // SMS vs non-SMS text.
     P.smsHit = await property(BMH_ORG_ID, { address: "400 Quillfeather Way" });
@@ -230,6 +233,10 @@ describe("search_properties RPC", () => {
       expect(await ids("101 Zephyr")).toEqual([P.main]);
       expect(await ids("101 Zephyr Lane")).toEqual([P.main]);
       expect(await ids("555 101 0000")).toEqual([P.phone101]);
+    });
+    it("returns interested (and every other status) rows", async () => {
+      expect(await ids("Interestedowner")).toEqual([P.interested]);
+      expect(await ids("Lineup")).toEqual([P.interested]);
     });
     it("matches a contact that only has phone_3", async () => {
       expect(await ids("913-444-5555")).toEqual([P.phone3]);
