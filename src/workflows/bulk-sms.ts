@@ -27,6 +27,10 @@ import type {
   BulkSmsScheduleState,
 } from "@/lib/messaging/bulk-queue";
 import { createAdminClient } from "@/lib/supabase/admin";
+import {
+  campaignSourceFromSnapshot,
+  filterToProspectIds,
+} from "@/lib/messaging/prospect-only-guard";
 
 /* The queueing library's import graph reaches node:crypto (template-pool
  * hashing, provider HMAC verification) — Node built-ins are banned in the
@@ -154,7 +158,7 @@ async function loadBulkSmsJob(jobId: string): Promise<LoadedBulkSmsJob> {
 
   const { data: campaign, error: campaignError } = await supabase
     .from("campaigns")
-    .select("org_id, status")
+    .select("org_id, status, audience_snapshot")
     .eq("id", campaignId)
     .maybeSingle();
   if (campaignError || !campaign) {
@@ -199,7 +203,9 @@ async function loadBulkSmsJob(jobId: string): Promise<LoadedBulkSmsJob> {
       jitterPct: rawOpts.jitterPct,
       includeUnknown: rawOpts.includeUnknown,
       campaignId,
-      campaignSource: rawOpts.campaignSource,
+      // Provenance is derived from the stored campaign row, never from the
+      // job's input_params (which a forged job could set).
+      campaignSource: campaignSourceFromSnapshot(campaign.audience_snapshot),
     },
     initialState: freshScheduleState(params?.anchor_ms ?? Date.now()),
   };
@@ -396,18 +402,32 @@ async function bulkSmsChunkStep(args: {
 
   const adminClient = createAdminClient();
   const { queueSmsBatch } = await import("@/lib/messaging/bulk-queue");
+  // Ad-hoc sends only: re-check prospect status per chunk so a recipient
+  // promoted to a lead after the freeze (but before this chunk) is skipped.
+  // Saved campaigns are exempt: they send their frozen audience as-is.
+  let chunkIds = args.propertyIds;
+  let skippedLeads = 0;
+  if (args.opts.campaignSource === "ad_hoc_bulk_sms") {
+    const guard = await filterToProspectIds(adminClient, args.propertyIds);
+    chunkIds = guard.prospectIds;
+    skippedLeads = args.propertyIds.length - guard.prospectIds.length;
+  }
   const refreshed = await refreshCampaignScheduleForChunk(
     adminClient,
     args.jobId,
-    args.propertyIds,
+    chunkIds,
     args.opts,
     args.state,
   );
-  const state = await queueSmsBatch(adminClient, {
-    propertyIds: args.propertyIds,
+  const batchState = await queueSmsBatch(adminClient, {
+    propertyIds: chunkIds,
     opts: refreshed.opts,
     state: refreshed.state,
   });
+  const state: BulkSmsScheduleState = {
+    ...batchState,
+    skipped: batchState.skipped + skippedLeads,
+  };
   await repairCampaignQueueCadenceAfterChunk(
     adminClient,
     args.jobId,

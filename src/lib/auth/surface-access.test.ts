@@ -102,6 +102,6 @@ describe("lead detail navigation", () => {
 
   it("keeps the existing collections for other roles", () => {
     expect(leadDetailCollection(false)).toEqual({ href: "/leads", label: "Leads" });
-    expect(leadDetailCollection(false, "prospect")).toEqual({ href: "/properties", label: "Prospects" });
+    expect(leadDetailCollection(false, "prospect")).toEqual({ href: "/properties", label: "Search" });
   });
 });

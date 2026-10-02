@@ -209,8 +209,9 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
   // text. Landlines are always excluded server-side; unknowns need the
   // opt-in toggle below. Re-defaults to OFF per selection, same pattern
   // as skipContacted.
-  const [assessment, setAssessment] =
-    useState<AudienceLineTypeAssessment | null>(null);
+  const [assessment, setAssessment] = useState<
+    (AudienceLineTypeAssessment & { skippedLeads?: number }) | null
+  >(null);
   const [includeUnknown, setIncludeUnknown] = useState(false);
   const [assessmentKey, setAssessmentKey] = useState(propertyIdsKey);
   if (assessmentKey !== propertyIdsKey) {
@@ -334,7 +335,7 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
       if (result.ok) {
         if (result.data.deferred) {
           toast.success(
-            `Queueing ${result.data.deferred.total.toLocaleString()} messages in the background`,
+            `Queueing ${result.data.deferred.total.toLocaleString()} messages in the background${result.data.skippedLeads ? ` · ${result.data.skippedLeads} lead${result.data.skippedLeads === 1 ? "" : "s"} skipped` : ""}`,
             {
               description:
                 "Track progress on /jobs — messages appear in the Outbox as they're scheduled.",
@@ -345,11 +346,13 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
           router.push(`/jobs/${result.data.deferred.jobId}`);
           return;
         }
-        const { succeeded, skipped, failed } = result.data;
+        const { succeeded, skipped, failed, skippedLeads } = result.data;
         const parts: string[] = [];
         if (succeeded > 0)
           parts.push(`${succeeded} message${succeeded === 1 ? "" : "s"} queued`);
         if (skipped > 0) parts.push(`${skipped} skipped`);
+        if (skippedLeads && skippedLeads > 0)
+          parts.push(`${skippedLeads} lead${skippedLeads === 1 ? "" : "s"} skipped`);
         if (failed.length > 0) parts.push(`${failed.length} failed`);
         if (failed.length > 0) {
           toast.warning(parts.join(" · "), {
@@ -637,6 +640,16 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
                     ? ` · ${assessment.noPhone.toLocaleString()} no phone`
                     : ""}
                 </p>
+                {assessment.skippedLeads && assessment.skippedLeads > 0 ? (
+                  <p
+                    className="text-muted-foreground"
+                    data-testid="bulk-sms-skipped-leads"
+                  >
+                    {assessment.skippedLeads.toLocaleString()} lead
+                    {assessment.skippedLeads === 1 ? "" : "s"} skipped (bulk
+                    texting is for prospects only)
+                  </p>
+                ) : null}
                 {assessment.unknown > 0 ? (
                   <label className="flex items-center gap-2">
                     <input

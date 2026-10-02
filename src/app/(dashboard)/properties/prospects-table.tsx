@@ -99,6 +99,8 @@ export type ProspectRow = {
   last_message_preview: string | null;
   /** Outreach disposition, if manually set or auto-detected. */
   outreach_dispo: string | null;
+  /** Pipeline stage (`properties.status`). Search lists leads and prospects. */
+  status?: string;
   imported_at?: string | null;
   dnc_reason?: string | null;
   channel_restriction?: string | null;
@@ -147,6 +149,26 @@ type Props = {
   totalPages: number;
 };
 
+const STAGE_LABELS: Record<string, string> = {
+  prospect: "Prospect",
+  new_lead: "New lead",
+  contacted: "Contacted",
+  interested: "Interested",
+  offer_sent: "Offer sent",
+  offer_declined: "Offer declined",
+  under_contract: "Under contract",
+  closed: "Closed",
+  dead: "Dead",
+};
+
+export function stageLabel(status: string | undefined): string {
+  if (!status) return "—";
+  return (
+    STAGE_LABELS[status] ??
+    status.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase())
+  );
+}
+
 function summarize(outcome: BulkOutcome, noun = "prospect"): string {
   const parts: string[] = [];
   if (outcome.succeeded > 0)
@@ -154,6 +176,10 @@ function summarize(outcome: BulkOutcome, noun = "prospect"): string {
       `${outcome.succeeded} ${noun}${outcome.succeeded === 1 ? "" : "s"}`,
     );
   if (outcome.skipped > 0) parts.push(`${outcome.skipped} skipped`);
+  if (outcome.skippedLeads && outcome.skippedLeads > 0)
+    parts.push(
+      `${outcome.skippedLeads} lead${outcome.skippedLeads === 1 ? "" : "s"} skipped`,
+    );
   if (outcome.failed.length > 0) parts.push(`${outcome.failed.length} failed`);
   return parts.join(" · ") || "Done";
 }
@@ -222,6 +248,7 @@ export function ProspectsTable({
     string | null
   >(null);
   const [selectAllDncLockedCount, setSelectAllDncLockedCount] = useState(0);
+  const [selectAllSkippedLeads, setSelectAllSkippedLeads] = useState(0);
   const selectAllMatching = selectAllMatchingKey === selectionScopeKey;
   const selectionScopeStale =
     selectAllMatchingKey !== null && selectAllMatchingKey !== selectionScopeKey;
@@ -355,12 +382,14 @@ export function ProspectsTable({
           search: search.length === 0 ? null : search,
           blockStack,
           imported: importedParam,
+          origin: "search_page",
         }),
-        { fallbackMessage: "Could not select all matching prospects" },
+        { fallbackMessage: "Could not select all matching results" },
       );
       if (result.ok) {
         setSelected(new Set(result.data.eligibleIds));
         setSelectAllDncLockedCount(result.data.dncLockedCount);
+        setSelectAllSkippedLeads(result.data.skippedLeads);
         setSelectAllMatchingKey(selectionScopeKey);
       }
     });
@@ -369,6 +398,7 @@ export function ProspectsTable({
   const onClearAllSelection = () => {
     setSelected(new Set());
     setSelectAllDncLockedCount(0);
+    setSelectAllSkippedLeads(0);
     setSelectAllMatchingKey(null);
   };
 
@@ -396,6 +426,7 @@ export function ProspectsTable({
   const toggleOne = (id: string) => {
     setSelectAllMatchingKey(null);
     setSelectAllDncLockedCount(0);
+    setSelectAllSkippedLeads(0);
     setSelected((prev) => {
       const next = selectionScopeStale ? new Set<string>() : new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -540,8 +571,8 @@ export function ProspectsTable({
   return (
     <>
       <PageHeader
-        breadcrumb={[{ label: "Workspace" }, { label: "Prospects" }]}
-        title="Prospects"
+        breadcrumb={[{ label: "Workspace" }, { label: "Search" }]}
+        title="Search"
         description={headerCount}
         actions={
           <>
@@ -759,8 +790,8 @@ export function ProspectsTable({
         state={ts as unknown as UseTableUrlStateReturn<Record<string, unknown>>}
       >
         <TableToolbarSearch
-          ariaLabel="Search prospects by address"
-          placeholder="Search address…"
+          ariaLabel="Search leads and prospects by name, phone, email, address or message"
+          placeholder="Search name, phone, email, address or message…"
           testId="prospects-search"
         />
       </TableToolbar>
@@ -787,6 +818,13 @@ export function ProspectsTable({
           selectAllMatching
             ? selectAllDncLockedCount
             : prospects.length - selectableProspects.length
+        }
+        skippedLeads={
+          selectAllMatching
+            ? selectAllSkippedLeads
+            : selectableProspects.filter(
+                (p) => p.status !== undefined && p.status !== "prospect",
+              ).length
         }
         onSelectAllAcrossPages={onSelectAllAcrossPages}
         onClear={onClearAllSelection}
@@ -824,6 +862,7 @@ export function ProspectsTable({
                 search: search.length === 0 ? null : search,
                 blockStack,
                 imported: importedParam,
+                origin: "search_page" as const,
               }
             : undefined
         }
@@ -843,6 +882,7 @@ export function ProspectsTable({
                 search: search.length === 0 ? null : search,
                 blockStack,
                 imported: importedParam,
+                origin: "search_page" as const,
               }
             : undefined
         }
@@ -904,8 +944,9 @@ export function ProspectsTable({
               >
                 Market
               </SortableHeader>
-              {/* Status column header is intentionally blank — pills speak for themselves. */}
-              <TableHead aria-label="Status" />
+              <TableHead>Status</TableHead>
+              {/* Signals header is intentionally blank — pills speak for themselves. */}
+              <TableHead aria-label="Signals" />
               <TableHead>Last message</TableHead>
             </TableRow>
           </TableHeader>
@@ -930,6 +971,9 @@ export function ProspectsTable({
                       <Skeleton className="h-4 w-24" />
                     </TableCell>
                     <TableCell>
+                      <Skeleton className="h-4 w-20" />
+                    </TableCell>
+                    <TableCell>
                       <div className="flex gap-1">
                         <Skeleton className="h-5 w-16 rounded-full" />
                         <Skeleton className="h-5 w-16 rounded-full" />
@@ -944,12 +988,14 @@ export function ProspectsTable({
             ) : prospects.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={5}
+                  colSpan={6}
                   className="text-muted-foreground py-8 text-center"
                 >
                   {search.length > 0
-                    ? `No prospects match "${search}". Try a different address.`
-                    : "No prospects. Import a CSV to fill the data lake."}
+                    ? search.trim().length < 3
+                      ? `No results for "${search}". Searches need 3+ characters to match names, phones and messages.`
+                      : `No leads or prospects match "${search}". Try a name, phone, email or address.`
+                    : "No leads or prospects yet. Import a CSV to fill the data lake."}
                 </TableCell>
               </TableRow>
             ) : (
@@ -996,6 +1042,9 @@ export function ProspectsTable({
                       </Link>
                     </TableCell>
                     <TableCell>{p.market ?? "—"}</TableCell>
+                    <TableCell data-testid={`prospects-status-${p.id}`}>
+                      {stageLabel(p.status)}
+                    </TableCell>
                     <TableCell>
                       <div className="flex flex-col items-start gap-1">
                         {p.dnc_reason ? (
@@ -1043,7 +1092,7 @@ export function ProspectsTable({
             data-testid="prospects-result-count"
           >
             {total === 0
-              ? "No prospects"
+              ? "No results"
               : `Showing ${showingFrom.toLocaleString()}–${showingTo.toLocaleString()} of ${total.toLocaleString()}`}
           </span>
           {totalPages > 1 && (
@@ -1240,6 +1289,7 @@ function SelectAllBanner({
   total,
   selectedCount,
   dncLockedCount,
+  skippedLeads = 0,
   onSelectAllAcrossPages,
   onClear,
 }: {
@@ -1250,6 +1300,8 @@ function SelectAllBanner({
   total: number;
   selectedCount: number;
   dncLockedCount: number;
+  /** Selected/matched leads that bulk actions will skip (prospects only). */
+  skippedLeads?: number;
   onSelectAllAcrossPages: () => void;
   onClear: () => void;
 }) {
@@ -1274,6 +1326,14 @@ function SelectAllBanner({
             <>
               {" "}
               <strong>{fmt(dncLockedCount)}</strong> DNC locked and excluded.
+            </>
+          )}
+          {skippedLeads > 0 && (
+            <>
+              {" "}
+              <strong>{fmt(skippedLeads)}</strong> lead
+              {skippedLeads === 1 ? "" : "s"} skipped (bulk actions apply to
+              prospects only).
             </>
           )}
         </span>
@@ -1304,6 +1364,14 @@ function SelectAllBanner({
             <strong>{fmt(dncLockedCount)}</strong> DNC locked and excluded.
           </>
         )}
+        {skippedLeads > 0 && (
+          <>
+            {" "}
+            <strong>{fmt(skippedLeads)}</strong> lead
+            {skippedLeads === 1 ? "" : "s"} skipped (bulk actions apply to
+            prospects only).
+          </>
+        )}
       </span>
       <button
         type="button"
@@ -1311,7 +1379,7 @@ function SelectAllBanner({
         data-testid="select-all-across-pages"
         className="text-foreground font-medium underline-offset-2 hover:underline"
       >
-        Select all eligible matching prospects →
+        Select all eligible matching results →
       </button>
     </div>
   );

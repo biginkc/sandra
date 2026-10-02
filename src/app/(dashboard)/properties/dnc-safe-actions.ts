@@ -22,7 +22,9 @@ import {
 } from "@/lib/skip-trace/actions";
 import { createClient } from "@/lib/supabase/server";
 
-import { getAllMatchingProspectIds } from "./actions";
+import type { QueryOrigin } from "@/lib/prospects/search-scope";
+
+import { getAllMatchingProspectSelection } from "./actions";
 
 export type { BulkOutcome } from "../leads/actions";
 
@@ -36,6 +38,8 @@ const DNC_LOCK_MESSAGE =
 async function partitionDncLockedPropertyIds(propertyIds: string[]): Promise<{
   eligible: string[];
   locked: string[];
+  /** Rows that are not prospects (leads etc.), skipped, never actioned. */
+  skippedLeads: number;
 }> {
   const supabase = await createClient();
   const resolved = await resolveProspectEligibility(
@@ -48,16 +52,24 @@ async function partitionDncLockedPropertyIds(propertyIds: string[]): Promise<{
     locked: resolved.exclusions
       .filter((item) => item.reason === "dnc")
       .map((item) => item.propertyId),
+    skippedLeads: resolved.exclusions.filter(
+      (item) => item.reason === "not_found_or_not_prospect",
+    ).length,
   };
 }
 
-function addLockedFailures(outcome: BulkOutcome, locked: string[]): BulkOutcome {
+function addLockedFailures(
+  outcome: BulkOutcome,
+  locked: string[],
+  skippedLeads = 0,
+): BulkOutcome {
   return {
     ...outcome,
     failed: [
       ...outcome.failed,
       ...locked.map((propertyId) => ({ propertyId, message: DNC_LOCK_MESSAGE })),
     ],
+    ...(skippedLeads > 0 ? { skippedLeads } : {}),
   };
 }
 
@@ -65,12 +77,21 @@ async function runBulkOutcome(
   propertyIds: string[],
   action: (eligible: string[]) => Promise<Result<BulkOutcome>>,
 ): Promise<Result<BulkOutcome>> {
-  const { eligible, locked } = await partitionDncLockedPropertyIds(propertyIds);
+  const { eligible, locked, skippedLeads } =
+    await partitionDncLockedPropertyIds(propertyIds);
   if (eligible.length === 0) {
-    return ok(addLockedFailures({ succeeded: 0, skipped: 0, failed: [] }, locked));
+    return ok(
+      addLockedFailures(
+        { succeeded: 0, skipped: 0, failed: [] },
+        locked,
+        skippedLeads,
+      ),
+    );
   }
   const result = await action(eligible);
-  return result.ok ? ok(addLockedFailures(result.data, locked)) : result;
+  return result.ok
+    ? ok(addLockedFailures(result.data, locked, skippedLeads))
+    : result;
 }
 
 export async function assignLeadsBulk(propertyIds: string[], userId: string | null) {
@@ -213,7 +234,7 @@ export async function createAndApplyCustomTagBulk(params: {
   color?: string | null;
   propertyIds: string[];
 }) {
-  const { eligible, locked } = await partitionDncLockedPropertyIds(
+  const { eligible, locked, skippedLeads } = await partitionDncLockedPropertyIds(
     params.propertyIds,
   );
   const result = await createAndApplyCustomTagBulkUnsafe({
@@ -223,7 +244,7 @@ export async function createAndApplyCustomTagBulk(params: {
   if (!result.ok) return result;
   return ok({
     ...result.data,
-    outcome: addLockedFailures(result.data.outcome, locked),
+    outcome: addLockedFailures(result.data.outcome, locked, skippedLeads),
   });
 }
 
@@ -233,16 +254,29 @@ export async function createAndApplyCustomTagBulkFromFilters(params: {
   search: string | null;
   blockStack: FilterBlock[];
   imported?: "today" | null;
+  /** Defaults to 'legacy'; the Search page passes 'search_page'. */
+  origin?: QueryOrigin;
 }) {
-  const ids = await getAllMatchingProspectIds({
+  const ids = await getAllMatchingProspectSelection({
     search: params.search,
     blockStack: params.blockStack,
     imported: params.imported ?? null,
+    origin: params.origin,
   });
   if (!ids.ok) return ids;
-  return createAndApplyCustomTagBulk({
+  // Matched leads never reach the tag action; surface them as a skip count.
+  const tagged = await createAndApplyCustomTagBulk({
     name: params.name,
     color: params.color ?? null,
-    propertyIds: ids.data,
+    propertyIds: ids.data.eligibleIds,
+  });
+  if (!tagged.ok || ids.data.skippedLeads === 0) return tagged;
+  return ok({
+    ...tagged.data,
+    outcome: {
+      ...tagged.data.outcome,
+      skippedLeads:
+        (tagged.data.outcome.skippedLeads ?? 0) + ids.data.skippedLeads,
+    },
   });
 }

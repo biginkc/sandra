@@ -25,7 +25,7 @@ export default async function ImportPage() {
       <PageHeader
         breadcrumb={[{ label: "Workspace" }, { label: "Import" }]}
         title="Import prospects"
-        description="Imported properties appear in Prospects for review before promotion to Leads."
+        description="Imported properties appear in Search as Prospects for review before promotion to Leads."
       />
       <Wizard counties={counties ?? []} />
     </Page>

@@ -6145,6 +6145,16 @@ export type Database = {
         }[]
       }
       search_prefix_tsquery: { Args: { q: string }; Returns: unknown }
+      search_properties: {
+        Args: { include_messages?: boolean; q: string }
+        Returns: Database["public"]["Tables"]["properties"]["Row"][]
+        SetofOptions: {
+          from: "*"
+          to: "properties"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
       abandon_esign_template_draft: {
         Args: { p_actor_id: string; p_org_id: string; p_template_id: string }
         Returns: string

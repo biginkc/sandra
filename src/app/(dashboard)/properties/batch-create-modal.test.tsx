@@ -6,13 +6,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   createDialerBatchFromFilters,
   createDialerBatchFromPropertyIds,
-  getAllMatchingProspectIds,
+  getAllMatchingProspectSelection,
   previewBatchEligibilityAction,
   toastSuccess,
 } = vi.hoisted(() => ({
   createDialerBatchFromFilters: vi.fn(),
   createDialerBatchFromPropertyIds: vi.fn(),
-  getAllMatchingProspectIds: vi.fn(),
+  getAllMatchingProspectSelection: vi.fn(),
   previewBatchEligibilityAction: vi.fn(),
   toastSuccess: vi.fn(),
 }));
@@ -20,7 +20,7 @@ const {
 vi.mock("./actions", () => ({
   createDialerBatchFromFilters,
   createDialerBatchFromPropertyIds,
-  getAllMatchingProspectIds,
+  getAllMatchingProspectSelection,
   previewBatchEligibilityAction,
 }));
 
@@ -63,13 +63,19 @@ function renderModal(
 beforeEach(() => {
   createDialerBatchFromFilters.mockReset();
   createDialerBatchFromPropertyIds.mockReset();
-  getAllMatchingProspectIds.mockReset();
+  getAllMatchingProspectSelection.mockReset();
   previewBatchEligibilityAction.mockReset();
   toastSuccess.mockReset();
 
-  getAllMatchingProspectIds.mockResolvedValue({
+  getAllMatchingProspectSelection.mockResolvedValue({
     ok: true,
-    data: ["p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8"],
+    data: {
+      eligibleIds: ["p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8"],
+      eligibleCount: 8,
+      dncLockedCount: 0,
+      matchedCount: 8,
+      skippedLeads: 0,
+    },
   });
   previewBatchEligibilityAction.mockResolvedValue({
     ok: true,
@@ -221,7 +227,7 @@ describe("<BatchCreateModal />", () => {
   });
 
   it("shows dashes instead of skeletons when loading matching prospects fails", async () => {
-    getAllMatchingProspectIds.mockResolvedValue({
+    getAllMatchingProspectSelection.mockResolvedValue({
       ok: false,
       error: {
         code: "MATCHING_PROSPECTS_FAILED",

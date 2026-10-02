@@ -224,7 +224,7 @@ describe("<ProspectsTable />", () => {
 
     // Page renders the heading — we never hit the error boundary.
     expect(
-      screen.getByRole("heading", { level: 1, name: "Prospects" }),
+      screen.getByRole("heading", { level: 1, name: "Search" }),
     ).toBeInTheDocument();
 
     // Actions button is present, disabled, and reads exactly "Actions".
@@ -1032,7 +1032,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     expect(banner.dataset.mode).toBe("per-page");
     expect(banner.textContent).toMatch(/All 2 eligible prospects on this page selected/);
     const link = screen.getByTestId("select-all-across-pages");
-    expect(link.textContent).toMatch(/Select all eligible matching prospects/);
+    expect(link.textContent).toMatch(/Select all eligible matching results/);
   });
 
   it("clicking 'Select all N' calls the action with search + an empty blockStack and switches the banner to all-matching mode", async () => {
@@ -1069,6 +1069,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
       search: "oak",
       blockStack: EMPTY_BLOCK_STACK,
       imported: null,
+      origin: "search_page",
     });
     const banner = await screen.findByTestId("select-all-banner");
     expect(banner.dataset.mode).toBe("all-matching");
@@ -1171,6 +1172,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         search: "oak",
         blockStack: EMPTY_BLOCK_STACK,
         imported: null,
+        origin: "search_page",
       });
     });
     expect(createAndApplyCustomTagBulk).not.toHaveBeenCalled();
@@ -1451,6 +1453,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     expect(getAllMatchingProspectSelection).toHaveBeenCalledWith({
       search: null,
       imported: null,
+      origin: "search_page",
       blockStack: expect.arrayContaining([
         expect.objectContaining({ kind: "vacancy", tri: "yes" }),
         expect.objectContaining({

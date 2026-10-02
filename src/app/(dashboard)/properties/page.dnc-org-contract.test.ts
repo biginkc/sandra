@@ -4,25 +4,50 @@ import { describe, expect, it } from "vitest";
 const source = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
 const selectAllSource = readFileSync(new URL("./actions.ts", import.meta.url), "utf8");
 const countSource = readFileSync(new URL("./_actions/count.ts", import.meta.url), "utf8");
+const scopeSource = readFileSync(
+  new URL("../../../lib/prospects/search-scope.ts", import.meta.url),
+  "utf8",
+);
 
-describe("Prospects permanent DNC display contract", () => {
-  it("includes advanced locked rows without promoting channel suppression", () => {
-    expect(source).toContain('status, is_dnc_locked, outreach_dispo');
-    expect(source).toContain('.or("status.eq.prospect,is_dnc_locked.eq.true")');
-    expect(source).toContain('dnc_reason: p.is_dnc_locked');
-    expect(source).toContain('homeowner?.sms_opted_out');
+const LEGACY_STATUS_OR = '.or("status.eq.prospect,is_dnc_locked.eq.true")';
+
+describe("Search page permanent DNC display contract", () => {
+  it("keeps DNC-locked rows read-only and channel suppression separate", () => {
+    expect(source).toContain("status, is_dnc_locked, outreach_dispo");
+    expect(source).toContain("dnc_reason: p.is_dnc_locked");
+    expect(source).toContain("homeowner?.sms_opted_out");
     expect(source).not.toContain('from("sms_phone_suppressions")');
     expect(source).not.toContain("evaluateSuppression");
-    expect(selectAllSource).toContain('.or("status.eq.prospect,is_dnc_locked.eq.true")');
-    expect(countSource).toContain('.or("status.eq.prospect,is_dnc_locked.eq.true")');
   });
 
-  it("scopes the CASS header counts with the same visible filters", () => {
-    expect(source.match(/await applyFilters\(/g)).toHaveLength(2);
-    expect(source.match(/\.ilike\("address"/g)).toHaveLength(2);
-    expect(
-      source.match(/rawSearchParams\.imported === "today"/g)?.length ?? 0,
-    ).toBeGreaterThanOrEqual(2);
-    expect(source.match(/status\.eq\.prospect,is_dnc_locked\.eq\.true/g)).toHaveLength(2);
+  it("the legacy origin keeps today's exact predicates, in ONE place", () => {
+    // The legacy branch owns the prospect-or-DNC status literal and the
+    // unescaped address ilike; no caller inlines them any more.
+    expect(scopeSource.split(LEGACY_STATUS_OR)).toHaveLength(2);
+    expect(scopeSource).toContain('query.ilike("address", `%${args.search}%`)');
+    for (const caller of [source, selectAllSource, countSource]) {
+      expect(caller).not.toContain("status.eq.prospect,is_dnc_locked.eq.true");
+    }
+  });
+
+  it("the search origin shows all statuses and hides training rows", () => {
+    const searchBranch = scopeSource.slice(scopeSource.indexOf("let mode = searchModeFor"));
+    expect(searchBranch).toContain('.eq("is_training", false)');
+    expect(searchBranch).not.toContain("status.eq.prospect");
+    expect(searchBranch).toContain("escapeLikePattern(q)");
+  });
+
+  it("every list/count/select-all path goes through the shared query context", () => {
+    expect(source).not.toContain("applyFilters(");
+    expect(source.match(/buildScopedQuery\(/g)).toHaveLength(2); // rows + CASS counts
+    expect(source.match(/origin: "search_page"/g)).toHaveLength(2);
+    expect(selectAllSource).toContain("buildScopedQuery(");
+    expect(countSource).toContain("buildScopedQuery(");
+    expect(source.match(/rawSearchParams\.imported === "today"/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+  });
+
+  it("hides the CASS breakdown while a global search is active", () => {
+    expect(source).toContain('searchModeFor("search_page", search) === "rpc"');
+    expect(source).toContain("if (total === 0 || globalSearchActive) return null;");
   });
 });

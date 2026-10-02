@@ -3,7 +3,7 @@ import type { Membership } from "./memberships";
 
 export type LeadDetailCollection = {
   href: "/leads" | "/properties" | "/my-leads";
-  label: "Leads" | "Prospects" | "My Leads";
+  label: "Leads" | "Search" | "My Leads";
 };
 
 /**
@@ -65,6 +65,6 @@ export function leadDetailCollection(
 ): LeadDetailCollection {
   if (isAcquisitionMember) return { href: "/my-leads", label: "My Leads" };
   return mode === "prospect"
-    ? { href: "/properties", label: "Prospects" }
+    ? { href: "/properties", label: "Search" }
     : { href: "/leads", label: "Leads" };
 }

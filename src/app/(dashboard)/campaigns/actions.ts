@@ -1345,6 +1345,8 @@ async function resolvePreviewRecipientRows(
   const idsResult = await getAllMatchingProspectIds({
     search: snapshotResult.data.search,
     blockStack: snapshotResult.data.blockStack,
+    // Campaign audiences always resolve with the legacy predicates.
+    origin: "legacy",
   });
   if (!idsResult.ok) return idsResult;
 
@@ -1999,6 +2001,8 @@ export async function launchCampaign(
       const idsResult = await getAllMatchingProspectIds({
         search: snapshotResult.data.search,
         blockStack: snapshotResult.data.blockStack,
+        // Campaign audiences always resolve with the legacy predicates.
+        origin: "legacy",
       });
       if (!idsResult.ok) return idsResult;
 
