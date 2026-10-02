@@ -4,7 +4,7 @@ import path from 'node:path';
 
 export const repoRoot = path.resolve(import.meta.dirname, '../..');
 export const manifestPath = root => path.join(root, 'scripts/inbox-ci/inbox-migrations.json');
-export const RESERVED_BLOCK_END = '20261002100260';
+export const RESERVED_BLOCK_END = '20261002130500';
 
 export function readManifest(root = repoRoot) {
   const entries = JSON.parse(readFileSync(manifestPath(root), 'utf8'));

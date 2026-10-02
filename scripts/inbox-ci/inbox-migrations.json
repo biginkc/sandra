@@ -1,16 +1,16 @@
 [
   {
-    "version": "20261002100000",
+    "version": "20261002130000",
     "name": "inbox_control_foundation",
     "sha256": "a31799ba96e6f7264f062019cc8113a6401719a686cc31e569b10d21064bfbf6"
   },
   {
-    "version": "20261002100100",
+    "version": "20261002130100",
     "name": "inbox_read_companion",
     "sha256": "7a2c5f49fc8fcf58c7f37585c3c347869816912e47e504ec47f9cdac198d3dd7"
   },
   {
-    "version": "20261002100200",
+    "version": "20261002130200",
     "name": "inbox_backend_operation_reply",
     "sha256": "2a4b49d43e67963805d547221d04c84c3f7823f430fd9c0cc9b3f22b36844aad"
   }

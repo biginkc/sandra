@@ -39,7 +39,7 @@ export function assertManifestIntegrity(root = repoRoot) {
 
 test('literal sweep has no legacy Inbox migration reference', () => {
   assertNoLegacyReferences();
-  assert.equal(legacyPattern.test('20261002100000_inbox_control_foundation.sql'), false);
+  assert.equal(legacyPattern.test('20261002130000_inbox_control_foundation.sql'), false);
 });
 
 test('manifest entries are ordered, hashed, and exhaustive', () => {
@@ -48,7 +48,7 @@ test('manifest entries are ordered, hashed, and exhaustive', () => {
   assert.match(RESERVED_BLOCK_END, /^\d{14}$/);
   assert.equal(execFileSync('node', ['scripts/inbox-ci/inbox-migrations.mjs', '--reserved-block-end'], { encoding: 'utf8' }).trim(), RESERVED_BLOCK_END);
   assert.deepEqual(entries.map(entry => entry.version), versions());
-  assert.match(sqlInList(), /^'20261002100000','20261002100100','20261002100200'$/);
+  assert.match(sqlInList(), /^'20261002130000','20261002130100','20261002130200'$/);
 });
 
 test('literal sweep mutation fails naturally', () => {
@@ -72,7 +72,7 @@ test('manifest byte and unlisted-file mutations fail naturally', () => {
     writeFileSync(first, `${readFileSync(first, 'utf8')}\n`);
     assert.throws(() => assertManifestIntegrity(root), /sha256 mismatch/);
     cpSync(path.join(repoRoot, files()[0]), first);
-    writeFileSync(path.join(root, 'supabase/migrations/20261002100250_inbox_unlisted.sql'), 'select 1;\n');
+    writeFileSync(path.join(root, 'supabase/migrations/20261002130400_inbox_unlisted.sql'), 'select 1;\n');
     assert.throws(() => assertManifestIntegrity(root), /Unlisted Inbox migration/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
