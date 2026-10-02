@@ -14,6 +14,7 @@
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:integration:local": "vitest run --config vitest.local-integration.config.ts",
+    "test:inbox-ro-fixture": "node --test --test-concurrency=1 scripts/inbox-test-readonly-fixture.test.mjs",
     "test:outbox-unit": "vitest run --config vitest.outbox.config.ts scripts/outbox-owned-rows.test.ts --maxWorkers=1 --no-file-parallelism && node --test scripts/outbox-run-record.test.mjs",
     "test:outbox-regression": "node scripts/outbox-run-record.mjs",
     "test:rtl": "vitest run --config vitest.rtl.config.ts",

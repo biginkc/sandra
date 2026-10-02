@@ -1,0 +1,768 @@
+#!/usr/bin/env node
+
+import { createHash, randomUUID } from "node:crypto";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import pg from "pg";
+
+const { Client } = pg;
+
+export const TEST_REF = "ncsngxlcyxylaeskiteu";
+export const PROD_REF = "copflsklaefwzipsrjqz";
+export const LOCK_KEY = "sandra-integration-suite";
+export const ACK_ENV = "INBOX_RO_FIXTURE_ACK";
+export const DB_ENV = "TEST_SUPABASE_DB_URL";
+export const TEST_MODE_ENV = "INBOX_RO_FIXTURE_TEST_MODE";
+export const PURPOSE = "J5a shared-readonly PRE->POST queued-set baseline on TEST";
+export const MAX_LEASE_MS = 6 * 60 * 60 * 1000;
+
+const scriptPath = fileURLToPath(import.meta.url);
+const repoRoot = path.resolve(path.dirname(scriptPath), "..");
+const sendSourcePath = path.join(repoRoot, "src/lib/messaging/send.ts");
+const tickSourcePath = path.join(repoRoot, "src/app/api/cron/sequence-tick/handlers.ts");
+const repSmsScopeSourcePath = path.join(repoRoot, "src/lib/messaging/rep-sms-scope.ts");
+const EXPECTED_MESSAGE_COLUMNS = [
+  "id", "org_id", "channel", "direction", "status", "provider", "contact_id",
+  "property_id", "campaign_id", "conversation_id", "from_address", "to_address",
+  "body", "metadata", "scheduled_for", "external_id",
+];
+const COUNTER_ALLOWLIST = new Set([
+  "public.memberships.my_leads_revision",
+  "public.messages.inbox_inbound_revision",
+]);
+const ANCHOR_TABLES = new Map([
+  ["public.organizations", "org"],
+  ["auth.users", "user"],
+]);
+
+class FixtureError extends Error {
+  constructor(code, message = code) {
+    super(message);
+    this.name = "FixtureError";
+    this.code = code;
+  }
+}
+
+function fail(code, message = code) {
+  throw new FixtureError(code, message);
+}
+
+function assert(condition, code, message = code) {
+  if (!condition) fail(code, message);
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function jsonHash(value) {
+  return sha256(canonicalJson(value));
+}
+
+function quoteIdent(value) {
+  return `"${String(value).replaceAll('"', '""')}"`;
+}
+
+function quoteTable(schema, name) {
+  return `${quoteIdent(schema)}.${quoteIdent(name)}`;
+}
+
+function safeRunId(value) {
+  assert(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value ?? ""), "INVALID_RUN_ID", "run id must be 1-64 ASCII letters, digits, '.', '_' or '-'");
+  return value;
+}
+
+function parseArgs(argv) {
+  const result = { mode: null, runId: null, owner: null, receipt: null, leaseSeconds: null, readyFile: null, leaseExpiresAt: null, lease_seconds: null, lease_expires_at: null };
+  const modes = new Map([
+    ["--create", "create"],
+    ["--status", "status"],
+    ["--verify", "status"],
+    ["--remove", "remove"],
+    ["--cleanup", "remove"],
+    ["--hold-lock", "hold-lock"],
+  ]);
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (modes.has(arg)) {
+      assert(result.mode === null, "MULTIPLE_MODES");
+      result.mode = modes.get(arg);
+      continue;
+    }
+    if (["--run-id", "--owner", "--receipt", "--lease-seconds", "--ready-file", "--lease-expires-at"].includes(arg)) {
+      const value = argv[++i];
+      assert(value !== undefined && value !== "", "MISSING_OPTION_VALUE", `missing value for ${arg}`);
+      const key = {
+        "--run-id": "runId",
+        "--owner": "owner",
+        "--receipt": "receipt",
+        "--lease-seconds": "lease_seconds",
+        "--ready-file": "readyFile",
+        "--lease-expires-at": "lease_expires_at",
+      }[arg];
+      result[key] = value;
+      continue;
+    }
+    if (arg === "--db-url" || arg === "--database-url" || arg === "--url") {
+      fail("DB_URL_ARG_REFUSED", "the database URL is accepted only from TEST_SUPABASE_DB_URL");
+    }
+    fail("UNKNOWN_OPTION", `unknown option ${arg}`);
+  }
+  assert(result.mode !== null, "MODE_REQUIRED", "choose --create, --status, or --remove");
+  if (result.mode !== "hold-lock") safeRunId(result.runId);
+  if (result.mode === "create") {
+    assert(result.owner, "OWNER_REQUIRED", "--owner is required for --create");
+    assert(/^[^\r\n]{1,160}$/.test(result.owner), "INVALID_OWNER");
+  }
+  if (result.lease_seconds !== null) {
+    const seconds = Number(result.lease_seconds);
+    assert(Number.isInteger(seconds) && seconds >= 1 && seconds <= MAX_LEASE_MS / 1000, "INVALID_LEASE", "lease must be an integer between 1 and 21600 seconds");
+    result.leaseSeconds = seconds;
+  }
+  if (result.lease_expires_at !== null) {
+    assert(!Number.isNaN(Date.parse(result.lease_expires_at)), "INVALID_LEASE_EXPIRY");
+    result.leaseExpiresAt = result.lease_expires_at;
+  }
+  return result;
+}
+
+function isLoopbackTarget(url) {
+  return ["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname)
+    && Number(url.port) >= 55000
+    && Number(url.port) <= 59999;
+}
+
+function isHostedTestTarget(url) {
+  return url.hostname.endsWith(".pooler.supabase.com")
+    && decodeURIComponent(url.username) === `postgres.${TEST_REF}`
+    && (url.port === "" || url.port === "5432");
+}
+
+export function assertSafeTarget(env = process.env) {
+  assert(env[ACK_ENV] === TEST_REF, "ACK_REQUIRED", `${ACK_ENV} must equal the TEST project ref`);
+  assert(Object.prototype.hasOwnProperty.call(env, "MESSAGING_PROVIDER") === false, "MESSAGING_PROVIDER_REFUSED", "MESSAGING_PROVIDER must be unset");
+  assert(!env.CI && !env.GITHUB_ACTIONS, "CI_REFUSED", "CI targets are refused");
+  const raw = env[DB_ENV];
+  assert(raw, "DB_URL_REQUIRED", `${DB_ENV} is required and must not be read from a file or argument`);
+  assert(!String(raw).includes(PROD_REF), "PRODUCTION_REFUSED", "Production project ref is refused");
+  let url;
+  try { url = new URL(raw); } catch { fail("DB_URL_INVALID", "database URL is invalid"); }
+  assert(["postgres:", "postgresql:"].includes(url.protocol), "DB_URL_INVALID", "database URL must use postgres:// or postgresql://");
+  assert(url.pathname === "/postgres" && !url.search && !url.hash, "DB_URL_INVALID", "database URL must target the postgres database without query options");
+  if (isLoopbackTarget(url)) {
+    assert(env[TEST_MODE_ENV] === "1" && env.NODE_ENV === "test", "LOCAL_TARGET_REFUSED", "loopback targets are allowed only by this tool's NODE_ENV=test local tests");
+    return { kind: "local-test", url };
+  }
+  assert(isHostedTestTarget(url), "TARGET_REFUSED", "only the TEST session-pooler project target is allowed");
+  assert(!env[TEST_MODE_ENV], "HOSTED_TEST_MODE_REFUSED", "local-test mode cannot target a hosted database");
+  return { kind: "shared-test", url };
+}
+
+function receiptPathFor(runId, env = process.env, explicit = null) {
+  const dir = explicit
+    ? path.dirname(explicit)
+    : path.resolve(env.INBOX_RO_FIXTURE_RECEIPT_DIR ?? path.join(repoRoot, "notes"));
+  mkdirSync(dir, { recursive: true });
+  return explicit ? path.resolve(explicit) : path.join(dir, `lease-test-ro-fixture-${runId}.json`);
+}
+
+function readReceipt(file) {
+  assert(existsSync(file), "RECEIPT_MISSING", `receipt not found: ${file}`);
+  let receipt;
+  try { receipt = JSON.parse(readFileSync(file, "utf8")); } catch { fail("RECEIPT_INVALID", "receipt is not valid JSON"); }
+  assert(receipt?.redacted === true, "RECEIPT_INVALID", "receipt is not a redacted fixture receipt");
+  safeRunId(receipt.run_id);
+  assert(receipt.target_ref === TEST_REF, "RECEIPT_TARGET_INVALID");
+  return receipt;
+}
+
+function writeReceipt(file, receipt) {
+  const temp = `${file}.tmp-${process.pid}`;
+  writeFileSync(temp, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
+  renameSync(temp, file);
+}
+
+function currentScriptBinding() {
+  let commit = "unknown";
+  try { commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim(); } catch {}
+  return { commit, sha256: sha256(readFileSync(scriptPath)) };
+}
+
+function assertSourceGuards() {
+  const send = readFileSync(sendSourcePath, "utf8");
+  const tick = readFileSync(tickSourcePath, "utf8");
+  const repSmsScope = readFileSync(repSmsScopeSourcePath, "utf8");
+  assert(send.includes("queued message missing contact/property/to_address"), "SEND_GUARD_NOT_PRESENT", "the checked-out send guard is not present");
+  assert(send.includes("if (!msg.contact_id || !msg.property_id || !msg.to_address)"), "SEND_GUARD_NOT_PRESENT", "the checked-out send guard shape is not present");
+  assert(send.includes("if (msg.provider !== provider.providerId)"), "PROVIDER_GUARD_NOT_PRESENT", "the checked-out provider identity guard is not present");
+  assert(tick.includes(".lte(\"scheduled_for\", nowIso)") && tick.includes(".not(\"scheduled_for\", \"is\", null)"), "SCHEDULER_GUARD_NOT_PRESENT", "the checked-out scheduler due-row guard is not present");
+  assert(repSmsScope.includes("SENDILLO_ORG_SCOPE_DENIED_MESSAGE") && repSmsScope.includes("assertSendilloOrganizationScope"), "SENDILLO_SCOPE_GUARD_NOT_PRESENT", "the checked-out Sendillo organization fence is not present");
+}
+
+async function openDb(env = process.env) {
+  const db = new Client({ connectionString: env[DB_ENV], options: "-c extra_float_digits=3" });
+  await db.connect();
+  return db;
+}
+
+async function schemaPreflight(db) {
+  const columns = (await db.query(`
+    select table_schema, table_name, column_name
+    from information_schema.columns
+    where (table_schema, table_name) in (('public','organizations'),('public','memberships'),('public','messages'),('auth','users'))
+  `)).rows;
+  const byTable = new Map();
+  for (const row of columns) {
+    const key = `${row.table_schema}.${row.table_name}`;
+    if (!byTable.has(key)) byTable.set(key, new Set());
+    byTable.get(key).add(row.column_name);
+  }
+  for (const [table, required] of Object.entries({
+    "public.organizations": ["id", "name"],
+    "public.memberships": ["id", "user_id", "org_id", "role", "access_status", "access_expires_at", "deletion_prepared_at"],
+    "public.messages": EXPECTED_MESSAGE_COLUMNS,
+    "auth.users": ["id", "email", "email_confirmed_at", "encrypted_password"],
+  })) {
+    assert(byTable.has(table), "SCHEMA_PRECONDITION_FAILED", `${table} is missing`);
+    for (const column of required) assert(byTable.get(table).has(column), "SCHEMA_PRECONDITION_FAILED", `${table}.${column} is missing`);
+  }
+  const providerCheck = (await db.query(`
+    select exists (
+      select 1 from pg_constraint
+      where conrelid='public.messages'::regclass and pg_get_constraintdef(oid) like '%mock%'
+    ) as present
+  `)).rows[0].present;
+  assert(providerCheck, "SCHEMA_PRECONDITION_FAILED", "messages.provider does not allow mock");
+}
+
+function fixtureIds(runId) {
+  return {
+    organization: randomUUID(),
+    user: randomUUID(),
+    membership: randomUUID(),
+    messages: { scheduled: randomUUID(), unscheduled: randomUUID() },
+    runId,
+  };
+}
+
+function buildFixtureRecord({ runId, owner, leaseExpiresAt, ids, baseline, diagnostics, binding, receiptFile }) {
+  const marker = {
+    org_name: `Inbox RO fixture ${runId}`,
+    email: `e2e-ro-fixture+${runId}@bmhgroupkc.com`,
+    message_prefix: `inbox-ro-fixture ${runId}`,
+  };
+  return {
+    redacted: true,
+    version: 1,
+    target_ref: TEST_REF,
+    run_id: runId,
+    owner,
+    purpose: PURPOSE,
+    marker,
+    ids,
+    created_at: new Date().toISOString(),
+    lease_expires_at: leaseExpiresAt,
+    script: binding,
+    receipt_file: receiptFile,
+    diagnostics,
+    baseline,
+    state: "creating",
+  };
+}
+
+function expectedMetadata(receipt) {
+  return {
+    inbox_ro_fixture: {
+      run_id: receipt.run_id,
+      owner: receipt.owner,
+      purpose: PURPOSE,
+      lease_expires_at: receipt.lease_expires_at,
+      script_sha256: receipt.script.sha256,
+    },
+  };
+}
+
+async function relationDiagnostics(db) {
+  await db.query("select pg_stat_clear_snapshot()");
+  const { rows } = await db.query(`
+    select
+      pg_relation_filenode('public.messages'::regclass)::text as messages_filenode,
+      coalesce((select n_tup_ins::text from pg_stat_all_tables where relid='public.memberships'::regclass), '0') as memberships_n_tup_ins
+  `);
+  return rows[0];
+}
+
+async function settledRelationDiagnostics(db, minimumMembershipInserts) {
+  let latest = await relationDiagnostics(db);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (Number(latest.memberships_n_tup_ins) >= minimumMembershipInserts) {
+      const confirmed = await relationDiagnostics(db);
+      if (confirmed.memberships_n_tup_ins === latest.memberships_n_tup_ins) return confirmed;
+      latest = confirmed;
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+    latest = await relationDiagnostics(db);
+  }
+  return latest;
+}
+
+async function discoverTables(db) {
+  const pgArray = value => Array.isArray(value)
+    ? value
+    : (typeof value === "string" && value.startsWith("{") && value.endsWith("}")
+      ? value.slice(1, -1).split(",").filter(Boolean).map(item => item.replace(/^"|"$/g, ""))
+      : []);
+  return (await db.query(`
+    select n.nspname as schema_name, c.relname as table_name,
+      array_agg(a.attname order by a.attnum) filter (where a.attnum > 0 and not a.attisdropped) as columns,
+      array_agg(a.attname order by array_position(i.indkey, a.attnum)) filter (where i.indisprimary and a.attnum = any(i.indkey)) as primary_key
+    from pg_class c
+    join pg_namespace n on n.oid=c.relnamespace
+    left join pg_attribute a on a.attrelid=c.oid
+    left join pg_index i on i.indrelid=c.oid and i.indisprimary
+    where c.relkind in ('r','p')
+      and n.nspname not like 'pg\\_%' escape '\\'
+      and n.nspname <> 'information_schema'
+    group by n.nspname,c.relname
+    order by n.nspname,c.relname
+  `)).rows.map(row => ({
+    key: `${row.schema_name}.${row.table_name}`,
+    schema: row.schema_name,
+    name: row.table_name,
+    columns: pgArray(row.columns).filter(Boolean),
+    primaryKey: pgArray(row.primary_key).filter(Boolean),
+  }));
+}
+
+function encodeColumn(ref) {
+  return `case when ${ref} is null then 'N' else length(${ref}::text)::text || ':' || ${ref}::text end`;
+}
+
+function rowKeyExpression(table, columns) {
+  const keyColumns = table.primaryKey.length ? table.primaryKey : columns;
+  if (!keyColumns.length) return "md5('')";
+  return `md5(array_to_string(array[${keyColumns.map(column => encodeColumn(`t.${quoteIdent(column)}`)).join(",")}], ''))`;
+}
+
+function rowHashExpression(table, columns) {
+  const counter = columns.find(column => COUNTER_ALLOWLIST.has(`${table.key}.${column}`));
+  const hashColumns = columns.filter(column => column !== counter);
+  if (!hashColumns.length) return "md5('')";
+  return `md5(array_to_string(array[${hashColumns.map(column => encodeColumn(`t.${quoteIdent(column)}`)).join(",")}], ''))`;
+}
+
+async function snapshotTable(db, table) {
+  const qualified = quoteTable(table.schema, table.name);
+  const key = rowKeyExpression(table, table.columns);
+  const hash = rowHashExpression(table, table.columns);
+  const counter = table.columns.find(column => COUNTER_ALLOWLIST.has(`${table.key}.${column}`)) ?? null;
+  const counterExpr = counter ? `t.${quoteIdent(counter)}::text` : "null::text";
+  const rows = (await db.query(`select ${key} as row_key, ${hash} as row_hash, ${counterExpr} as counter_value from ${qualified} t order by row_key`)).rows;
+  const byKey = {};
+  for (const row of rows) {
+    if (!byKey[row.row_key]) byKey[row.row_key] = [];
+    byKey[row.row_key].push({ hash: row.row_hash, counter: row.counter_value });
+  }
+  return { columns: table.columns, primary_key: table.primaryKey, counter, rows: byKey };
+}
+
+export async function snapshotDatabase(db) {
+  const tables = await discoverTables(db);
+  const snapshot = {};
+  for (const table of tables) snapshot[table.key] = await snapshotTable(db, table);
+  return { tables: snapshot };
+}
+
+function ownedPredicate(table) {
+  const predicates = [];
+  const anchor = ANCHOR_TABLES.get(table.key);
+  if (anchor === "org" && table.columns.includes("id")) predicates.push(`t.${quoteIdent("id")}::text = any($1::text[])`);
+  if (anchor === "user" && table.columns.includes("id")) predicates.push(`t.${quoteIdent("id")}::text = any($2::text[])`);
+  if (table.columns.includes("org_id")) predicates.push(`t.${quoteIdent("org_id")}::text = any($1::text[])`);
+  if (table.columns.includes("user_id")) predicates.push(`t.${quoteIdent("user_id")}::text = any($2::text[])`);
+  return predicates.length
+    ? `(\$1::text[] is not null and \$2::text[] is not null and (${predicates.join(" or ")}))`
+    : null;
+}
+
+async function ownedCounts(db, orgId, userId) {
+  const tables = await discoverTables(db);
+  const counts = {};
+  for (const table of tables) {
+    const predicate = ownedPredicate(table);
+    if (!predicate) continue;
+    const result = await db.query(`select count(*)::int as count from ${quoteTable(table.schema, table.name)} t where ${predicate}`, [[orgId], [userId]]);
+    if (result.rows[0].count > 0) counts[table.key] = result.rows[0].count;
+  }
+  return counts;
+}
+
+function compareSnapshots(baseline, current) {
+  const failures = [];
+  const beforeTables = new Set(Object.keys(baseline.tables));
+  const afterTables = new Set(Object.keys(current.tables));
+  for (const key of beforeTables) if (!afterTables.has(key)) failures.push(`table vanished: ${key}`);
+  for (const key of afterTables) if (!beforeTables.has(key)) failures.push(`new table: ${key}`);
+  for (const [key, before] of Object.entries(baseline.tables)) {
+    const after = current.tables[key];
+    if (!after) continue;
+    if (JSON.stringify(before.columns) !== JSON.stringify(after.columns)) failures.push(`columns changed: ${key}`);
+    const beforeRows = Object.entries(before.rows);
+    const afterRows = Object.entries(after.rows);
+    if (beforeRows.length !== afterRows.length) failures.push(`row count changed: ${key}`);
+    const afterMap = new Map(afterRows);
+    for (const [rowKey, values] of beforeRows) {
+      const next = afterMap.get(rowKey);
+      if (!next || JSON.stringify(values.map(value => value.hash)) !== JSON.stringify(next.map(value => value.hash))) failures.push(`content hash changed: ${key}:${rowKey}`);
+      if (before.counter) {
+        const oldCounters = values.map(value => value.counter).sort();
+        const newCounters = (next ?? []).map(value => value.counter).sort();
+        if (oldCounters.length !== newCounters.length) failures.push(`counter row count changed: ${key}:${rowKey}`);
+        for (let i = 0; i < Math.min(oldCounters.length, newCounters.length); i += 1) {
+          const oldValue = oldCounters[i] === null ? null : Number(oldCounters[i]);
+          const newValue = newCounters[i] === null ? null : Number(newCounters[i]);
+          if (oldValue === null || newValue === null) {
+            if (oldValue !== newValue) failures.push(`counter became null/non-null: ${key}:${rowKey}`);
+          } else if (newValue < oldValue) failures.push(`counter decreased: ${key}:${rowKey}`);
+        }
+      }
+    }
+  }
+  return failures;
+}
+
+async function messageReferences(db, messageIds) {
+  const refs = [];
+  const columns = (await db.query(`
+    select table_schema, table_name, column_name
+    from information_schema.columns
+    where table_schema not in ('pg_catalog','information_schema')
+      and column_name ilike '%message_id%'
+  `)).rows;
+  for (const column of columns) {
+    const qualified = quoteTable(column.table_schema, column.table_name);
+    const result = await db.query(`select count(*)::int as count from ${qualified} where ${quoteIdent(column.column_name)}::text = any($1::text[])`, [messageIds]);
+    if (result.rows[0].count > 0) refs.push(`${column.table_schema}.${column.table_name}.${column.column_name}:${result.rows[0].count}`);
+  }
+  return refs;
+}
+
+async function verifyFixture(db, receipt, { checkLock = false } = {}) {
+  const failures = [];
+  const { ids, marker } = receipt;
+  const expected = expectedMetadata(receipt);
+  const org = (await db.query("select id::text,name from public.organizations where id=$1", [ids.organization])).rows[0];
+  if (!org) failures.push("organization missing");
+  else {
+    if (org.id === "00000000-0000-0000-0000-000000000bbb") failures.push("fixture organization is the BMH org");
+    if (org.name !== marker.org_name) failures.push("organization marker changed");
+  }
+  const user = (await db.query("select id::text,email,email_confirmed_at,encrypted_password from auth.users where id=$1", [ids.user])).rows[0];
+  if (!user) failures.push("passwordless auth user missing");
+  else {
+    if (user.email !== marker.email) failures.push("auth email marker changed");
+    if (user.email_confirmed_at !== null) failures.push("auth user is email-confirmed");
+    if (user.encrypted_password !== null && user.encrypted_password !== "") failures.push("auth user unexpectedly has a password");
+  }
+  const membership = (await db.query("select id::text,user_id::text,org_id::text,role,access_status,access_expires_at,deletion_prepared_at from public.memberships where id=$1", [ids.membership])).rows[0];
+  if (!membership) failures.push("membership missing");
+  else if (membership.user_id !== ids.user || membership.org_id !== ids.organization || membership.role !== "owner" || membership.access_status !== "active" || membership.access_expires_at !== null || membership.deletion_prepared_at !== null) failures.push("membership is not exactly one active owner membership");
+  const messages = (await db.query(`
+    select id::text,org_id::text,channel,direction,status,provider,contact_id::text,property_id::text,campaign_id::text,conversation_id::text,from_address,to_address,body,metadata,scheduled_for as scheduled,external_id
+    from public.messages where org_id=$1 order by id
+  `, [ids.organization])).rows;
+  if (messages.length !== 2) failures.push(`expected exactly two fixture messages, found ${messages.length}`);
+  const expectedRows = new Map([
+    [ids.messages.scheduled, { body: `${marker.message_prefix} m1 not deliverable`, scheduled: "2099-12-31T00:00:00.000Z" }],
+    [ids.messages.unscheduled, { body: `${marker.message_prefix} m2 not deliverable`, scheduled: null }],
+  ]);
+  for (const row of messages) {
+    const wanted = expectedRows.get(row.id);
+    if (!wanted) { failures.push(`unexpected message id ${row.id}`); continue; }
+    if (row.channel !== "sms" || row.direction !== "outbound" || row.status !== "queued" || row.provider !== "mock") failures.push(`message ${row.id} is not inert queued mock SMS`);
+    for (const column of ["contact_id", "property_id", "campaign_id", "conversation_id", "from_address", "to_address", "external_id"]) if (row[column] !== null) failures.push(`message ${row.id}.${column} is not null`);
+    if (row.body !== wanted.body || (row.scheduled?.toISOString?.() ?? row.scheduled) !== wanted.scheduled) failures.push(`message ${row.id} body/schedule changed`);
+    if (jsonHash(row.metadata) !== jsonHash(expected)) failures.push(`message ${row.id} metadata changed`);
+  }
+  const refs = await messageReferences(db, [ids.messages.scheduled, ids.messages.unscheduled]);
+  if (refs.length) failures.push(`provider-attempt/webhook references present: ${refs.join(",")}`);
+  const counts = await ownedCounts(db, ids.organization, ids.user);
+  const allowed = new Set(["public.organizations", "auth.users", "public.memberships", "public.messages"]);
+  for (const [table, count] of Object.entries(counts)) if (!allowed.has(table)) failures.push(`unexpected owned row(s) in ${table}: ${count}`);
+  if ((counts["public.organizations"] ?? 0) !== 1) failures.push("owned organization count is not one");
+  if ((counts["auth.users"] ?? 0) !== 1) failures.push("owned auth user count is not one");
+  if ((counts["public.memberships"] ?? 0) !== 1) failures.push("owned membership count is not one");
+  if ((counts["public.messages"] ?? 0) !== 2) failures.push("owned message count is not two");
+  const diagnostics = await relationDiagnostics(db);
+  if (receipt.diagnostics.messages_filenode !== diagnostics.messages_filenode) failures.push("messages filenode changed (reset detected)");
+  if (receipt.diagnostics.memberships_n_tup_ins !== diagnostics.memberships_n_tup_ins) failures.push("memberships n_tup_ins changed (reset diagnostic)");
+  if (checkLock) {
+    const lock = await lockHeld(db, receipt.lock?.backend_pid);
+    if (!lock) failures.push("integration lock is not held by the recorded holder");
+    if (Date.parse(receipt.lease_expires_at) <= Date.now()) failures.push("fixture lease expired");
+  }
+  return { pass: failures.length === 0, failures, counts, diagnostics };
+}
+
+async function lockHeld(db, backendPid) {
+  if (!backendPid) return false;
+  return (await db.query(`select exists(select 1 from pg_locks where pid=$1 and locktype='advisory' and granted) as held`, [backendPid])).rows[0].held;
+}
+
+async function waitForFile(file, child, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(file)) return JSON.parse(readFileSync(file, "utf8"));
+    if (child.exitCode !== null) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  fail("LOCK_START_FAILED", "lock holder did not report readiness");
+}
+
+async function startLockHolder({ env, runId, leaseExpiresAt }) {
+  const readyDir = path.join(tmpdir(), `sandra-ro-fixture-lock-${process.pid}-${randomUUID()}`);
+  mkdirSync(readyDir, { recursive: true });
+  const readyFile = path.join(readyDir, "ready.json");
+  const child = spawn(process.execPath, [scriptPath, "--hold-lock", "--run-id", runId, "--lease-expires-at", leaseExpiresAt, "--ready-file", readyFile], {
+    env: { ...env }, detached: true, stdio: "ignore",
+  });
+  child.unref();
+  const ready = await waitForFile(readyFile, child);
+  try { unlinkSync(readyFile); } catch {}
+  try { rmdirSync(readyDir); } catch {}
+  return { pid: child.pid, ...ready, readyDir };
+}
+
+function holderCommand(pid) {
+  try { return execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" }).trim(); } catch { return ""; }
+}
+
+function stopOwnedHolder(holder, runId) {
+  if (!holder?.pid) return false;
+  const command = holderCommand(holder.pid);
+  if (!command) return false;
+  if (!command || !command.includes(scriptPath) || !command.includes("--hold-lock") || !command.includes(`--run-id ${runId}`)) fail("LOCK_OWNER_MISMATCH", "recorded holder is not this tool's holder; refusing to signal it");
+  process.kill(holder.pid, "SIGTERM");
+  return true;
+}
+
+async function holdLock({ env, leaseExpiresAt, readyFile }) {
+  assertSafeTarget(env);
+  const leaseMs = Date.parse(leaseExpiresAt) - Date.now();
+  assert(Number.isFinite(leaseMs) && leaseMs > 0 && leaseMs <= MAX_LEASE_MS, "INVALID_LEASE", "lock lease must be in the future and no longer than six hours");
+  const db = await openDb(env);
+  let closed = false;
+  const close = async (code = 0) => {
+    if (closed) return;
+    closed = true;
+    clearInterval(heartbeat);
+    clearTimeout(expiry);
+    await db.end().catch(() => {});
+    process.exitCode = code;
+  };
+  await db.query("set statement_timeout=0");
+  await db.query("select pg_advisory_lock(hashtext($1))", [LOCK_KEY]);
+  const backendPid = (await db.query("select pg_backend_pid()::int as pid")).rows[0].pid;
+  const readyTemp = `${readyFile}.tmp-${process.pid}`;
+  writeFileSync(readyTemp, `${JSON.stringify({ backend_pid: backendPid, acquired_at: new Date().toISOString() })}\n`, { mode: 0o600 });
+  renameSync(readyTemp, readyFile);
+  const heartbeat = setInterval(() => { db.query("select 1").catch(() => close(1)); }, 30_000);
+  heartbeat.unref();
+  const expiry = setTimeout(() => close(0), Math.max(0, Date.parse(leaseExpiresAt) - Date.now()));
+  expiry.unref();
+  process.on("SIGTERM", () => { close(0); });
+  process.on("SIGINT", () => { close(0); });
+  await new Promise(resolve => { process.once("beforeExit", resolve); });
+}
+
+async function insertFixture(db, receipt) {
+  const { ids, marker } = receipt;
+  const metadata = expectedMetadata(receipt);
+  await db.query("begin");
+  try {
+    await db.query("insert into public.organizations(id,name) values ($1,$2)", [ids.organization, marker.org_name]);
+    await db.query("insert into auth.users(id,email,email_confirmed_at,encrypted_password) values ($1,$2,null,null)", [ids.user, marker.email]);
+    await db.query(`insert into public.memberships(id,user_id,org_id,role,access_status,access_expires_at,deletion_prepared_at) values ($1,$2,$3,'owner','active',null,null)`, [ids.membership, ids.user, ids.organization]);
+    await db.query(`
+      insert into public.messages(id,org_id,channel,direction,status,provider,contact_id,property_id,campaign_id,conversation_id,from_address,to_address,body,metadata,scheduled_for,external_id)
+      values ($1,$2,'sms','outbound','queued','mock',null,null,null,null,null,null,$3,$4,'2099-12-31T00:00:00Z',null),
+             ($5,$2,'sms','outbound','queued','mock',null,null,null,null,null,null,$6,$4,null,null)
+    `, [ids.messages.scheduled, ids.organization, `${marker.message_prefix} m1 not deliverable`, metadata, ids.messages.unscheduled, `${marker.message_prefix} m2 not deliverable`]);
+    await db.query("commit");
+  } catch (error) {
+    await db.query("rollback").catch(() => {});
+    throw error;
+  }
+}
+
+async function deleteOwnedRows(db, receipt, { skipMessageId = null } = {}) {
+  const orgId = receipt.ids.organization;
+  const userId = receipt.ids.user;
+  const messageIds = Object.values(receipt.ids.messages);
+  await db.query("begin");
+  try {
+    const idsToDelete = messageIds.filter(id => id !== skipMessageId);
+    if (idsToDelete.length) {
+      await db.query(`delete from public.messages where id=any($1::uuid[]) and org_id=$2 and metadata->'inbox_ro_fixture'->>'run_id'=$3`, [idsToDelete, orgId, receipt.run_id]);
+    }
+    const tables = await discoverTables(db);
+    for (let pass = 0; pass < 5; pass += 1) {
+      for (const table of tables) {
+        if (table.key === "public.organizations" || table.key === "auth.users" || table.key === "public.messages" || table.key === "public.memberships") continue;
+        const predicate = ownedPredicate(table);
+        if (!predicate) continue;
+        await db.query("savepoint delete_owned_row");
+        try {
+          await db.query(`delete from ${quoteTable(table.schema, table.name)} t where ${predicate}`, [[orgId], [userId]]);
+          await db.query("release savepoint delete_owned_row");
+        } catch (error) {
+          await db.query("rollback to savepoint delete_owned_row");
+          if (error?.code !== "23503") throw error;
+        }
+      }
+    }
+    await db.query("delete from public.memberships where org_id=$1 and user_id=$2", [orgId, userId]);
+    await db.query("delete from auth.users where id=$1 and email=$2", [userId, receipt.marker.email]);
+    if (!skipMessageId) await db.query("delete from public.organizations where id=$1 and name=$2", [orgId, receipt.marker.org_name]);
+    await db.query("commit");
+  } catch (error) {
+    await db.query("rollback").catch(() => {});
+    throw error;
+  }
+}
+
+export async function residueCheck(db, receipt) {
+  const current = await snapshotDatabase(db);
+  const failures = compareSnapshots(receipt.baseline, current);
+  const counts = await ownedCounts(db, receipt.ids.organization, receipt.ids.user);
+  for (const [table, count] of Object.entries(counts)) if (count > 0) failures.push(`owned rows remain: ${table}:${count}`);
+  return { pass: failures.length === 0, failures, snapshot: current };
+}
+
+async function runCreate(args, env) {
+  assertSafeTarget(env);
+  assertSourceGuards();
+  await usingDb(async db => schemaPreflight(db));
+  const receiptFile = receiptPathFor(args.runId, env, args.receipt);
+  if (existsSync(receiptFile)) {
+    const prior = readReceipt(receiptFile);
+    assert(prior.run_id === args.runId, "RECEIPT_RUN_ID_MISMATCH");
+    const db = await openDb(env);
+    try {
+      const result = await verifyFixture(db, prior, { checkLock: true });
+      if (!result.pass) fail("FIXTURE_INTEGRITY_FAILED", result.failures.join("; "));
+      console.log(JSON.stringify({ mode: "create", idempotent: true, run_id: prior.run_id, receipt: receiptFile, ids: prior.ids, lease_expires_at: prior.lease_expires_at }));
+      return;
+    } finally { await db.end(); }
+  }
+  const leaseSeconds = args.leaseSeconds ?? 6 * 60 * 60;
+  if (env[TEST_MODE_ENV] !== "1") assert(args.leaseSeconds === null, "LEASE_OVERRIDE_REFUSED", "short leases are available only to local tests");
+  const startedAt = new Date();
+  const leaseExpiresAt = new Date(startedAt.getTime() + leaseSeconds * 1000).toISOString();
+  assert(Date.parse(leaseExpiresAt) - startedAt.getTime() <= MAX_LEASE_MS, "INVALID_LEASE");
+  const ids = fixtureIds(args.runId);
+  const binding = currentScriptBinding();
+  const holder = await startLockHolder({ env, runId: args.runId, leaseExpiresAt });
+  let db;
+  try {
+    db = await openDb(env);
+    await schemaPreflight(db);
+    const baseline = await snapshotDatabase(db);
+    const diagnostics = await relationDiagnostics(db);
+    const receipt = buildFixtureRecord({ runId: args.runId, owner: args.owner, leaseExpiresAt, ids, baseline, diagnostics, binding, receiptFile });
+    receipt.lock = { pid: holder.pid, backend_pid: holder.backend_pid, acquired_at: holder.acquired_at };
+    writeReceipt(receiptFile, receipt);
+    await insertFixture(db, receipt);
+    receipt.diagnostics = await settledRelationDiagnostics(
+      db,
+      Number(diagnostics.memberships_n_tup_ins) + 1,
+    ).then(current => ({ ...receipt.diagnostics, ...current }));
+    const verified = await verifyFixture(db, receipt, { checkLock: true });
+    if (!verified.pass) fail("FIXTURE_INTEGRITY_FAILED", verified.failures.join("; "));
+    receipt.state = "active";
+    receipt.updated_at = new Date().toISOString();
+    writeReceipt(receiptFile, receipt);
+    console.log(JSON.stringify({ mode: "create", idempotent: false, run_id: args.runId, receipt: receiptFile, ids: receipt.ids, lease_expires_at: receipt.lease_expires_at, lock: receipt.lock }));
+  } catch (error) {
+    if (db) await db.end().catch(() => {});
+    try { stopOwnedHolder(holder, args.runId); } catch {}
+    throw error;
+  }
+  await db.end();
+}
+
+async function runStatus(args, env) {
+  assertSafeTarget(env);
+  const file = receiptPathFor(args.runId, env, args.receipt);
+  const receipt = readReceipt(file);
+  assert(receipt.run_id === args.runId, "RECEIPT_RUN_ID_MISMATCH");
+  const db = await openDb(env);
+  try {
+    const result = await verifyFixture(db, receipt, { checkLock: receipt.state === "active" });
+    if (!result.pass) fail("FIXTURE_INTEGRITY_FAILED", result.failures.join("; "));
+    console.log(JSON.stringify({ mode: "status", pass: true, run_id: receipt.run_id, ids: receipt.ids, state: receipt.state, lease_expires_at: receipt.lease_expires_at }));
+  } finally { await db.end(); }
+}
+
+async function runRemove(args, env) {
+  assertSafeTarget(env);
+  const file = receiptPathFor(args.runId, env, args.receipt);
+  const receipt = readReceipt(file);
+  assert(receipt.run_id === args.runId, "RECEIPT_RUN_ID_MISMATCH");
+  const db = await openDb(env);
+  let preVerify;
+  try {
+    preVerify = await verifyFixture(db, receipt, { checkLock: false });
+    await deleteOwnedRows(db, receipt);
+    const residue = await residueCheck(db, receipt);
+    if (!residue.pass) {
+      receipt.state = "cleanup_failed";
+      receipt.updated_at = new Date().toISOString();
+      receipt.cleanup = { pre_verify_failures: preVerify.failures, residue_failures: residue.failures };
+      writeReceipt(file, receipt);
+      fail("RESIDUE_REMAINED", residue.failures.join("; "));
+    }
+    const holder = receipt.lock;
+    if (holder?.pid) stopOwnedHolder(holder, receipt.run_id);
+    receipt.state = "removed";
+    receipt.removed_at = new Date().toISOString();
+    receipt.updated_at = receipt.removed_at;
+    receipt.cleanup = { pre_verify_failures: preVerify.failures, residue: "zero" };
+    writeReceipt(file, receipt);
+    console.log(JSON.stringify({ mode: "remove", pass: true, run_id: receipt.run_id, receipt: file, residue: "zero", pre_verify_failures: preVerify.failures }));
+  } finally { await db.end(); }
+}
+
+async function usingDb(fn) {
+  const db = await openDb(process.env);
+  try { return await fn(db); } finally { await db.end(); }
+}
+
+async function run(args = parseArgs(process.argv.slice(2)), env = process.env) {
+  if (args.mode === "hold-lock") return holdLock({ env, runId: args.runId, leaseExpiresAt: args.leaseExpiresAt, readyFile: args.readyFile });
+  if (args.mode === "create") return runCreate(args, env);
+  if (args.mode === "status") return runStatus(args, env);
+  if (args.mode === "remove") return runRemove(args, env);
+  fail("MODE_REQUIRED");
+}
+
+export { FixtureError, compareSnapshots, deleteOwnedRows, expectedMetadata, parseArgs, run, verifyFixture };
+
+if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) {
+  run().catch(error => {
+    const code = error?.code ?? "FIXTURE_FAILED";
+    console.error(`INBOX_RO_FIXTURE_ERROR ${code}: ${error?.message ?? error}`);
+    process.exitCode = 1;
+  });
+}
