@@ -143,10 +143,12 @@ def verify_workflow_at_commit(attestation: dict[str, object], workflow_text: str
     source_commit = attestation.get("source_repository_digest")
     if not isinstance(source_commit, str):
         raise ProofError("EIMG_WORKFLOW_FAILED: attestation did not provide source commit S")
+    workflow_source = "provided workflow text"
     if workflow_text is None:
         result = run(["git", "-C", str(ROOT), "show", f"{source_commit}:{EIMG_WORKFLOW_PATH}"], check=False, timeout=30)
         if result.returncode == 0:
             workflow_text = result.stdout
+            workflow_source = "local git show"
         else:
             result = run(
                 [
@@ -163,12 +165,14 @@ def verify_workflow_at_commit(attestation: dict[str, object], workflow_text: str
                 raise ProofError(f"EIMG_WORKFLOW_FAILED: workflow at S was not found: {redact((result.stderr + result.stdout)[-4000:])}")
             try:
                 workflow_text = base64.b64decode(result.stdout.strip()).decode("utf-8")
+                workflow_source = "gh api"
             except (ValueError, UnicodeDecodeError) as exc:
                 raise ProofError(f"EIMG_WORKFLOW_FAILED: workflow contents at S are not valid base64 text: {exc}") from exc
     try:
-        return verify_workflow_text(workflow_text)
+        verified = verify_workflow_text(workflow_text)
     except CandidateError as exc:
         raise ProofError(str(exc)) from exc
+    return {**verified, "workflow_source": workflow_source}
 
 
 def _gh_json(args: list[str], *, timeout: int = 60) -> object:

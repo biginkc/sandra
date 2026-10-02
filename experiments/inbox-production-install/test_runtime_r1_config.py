@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import copy
 import importlib.util
 import json
@@ -15,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PROOF_DIR = ROOT / "experiments/inbox-production-install"
 TLS_PROOF = PROOF_DIR / "electric-tls-proof.py"
 SECRET_PROOF = PROOF_DIR / "electric-secret-proof.py"
+SANDRA_COMMIT = "d309bec7fcc9a1cf493ae22434d3f891d6989138"
 if str(PROOF_DIR) not in sys.path:
     sys.path.insert(0, str(PROOF_DIR))
 from electric_image_contract import (  # noqa: E402
@@ -114,12 +116,12 @@ def workflow_fixture() -> str:
     )
 
 
-def run_payload(*, conclusion: str = "success", head_sha: str = EIMG_SOURCE_COMMIT) -> dict:
+def run_payload(*, conclusion: str = "success", head_sha: str = SANDRA_COMMIT, head_branch: str = "main", path: str = EIMG_WORKFLOW_PATH) -> dict:
     return {
         "conclusion": conclusion,
         "head_sha": head_sha,
-        "head_branch": "main",
-        "path": EIMG_WORKFLOW_PATH,
+        "head_branch": head_branch,
+        "path": path,
     }
 
 
@@ -242,7 +244,7 @@ class RuntimeR1ConfigTests(unittest.TestCase):
         pin = ready_pin()
         payload = attestation_payload()
         result = verify_attestation_json(pin, payload)
-        self.assertEqual(result["source_repository_digest"], EIMG_SOURCE_COMMIT)
+        self.assertEqual(result["source_repository_digest"], SANDRA_COMMIT)
         self.assertEqual(result["run_id"], 756)
         old_schema = [{
             "verificationResult": {
@@ -258,6 +260,19 @@ class RuntimeR1ConfigTests(unittest.TestCase):
         }]
         with self.assertRaisesRegex(CandidateError, "EIMG_ATTESTATION_IDENTITY_FAILED"):
             verify_attestation_json(pin, old_schema)
+
+    def test_sandra_source_commit_is_distinct_and_never_confused_with_upstream(self):
+        self.assertNotEqual(SANDRA_COMMIT, EIMG_SOURCE_COMMIT)
+        certificate = attestation_payload()[0]["verificationResult"]["signature"]["certificate"]
+        self.assertEqual(certificate["sourceRepositoryDigest"], SANDRA_COMMIT)
+        self.assertEqual(certificate["buildSignerDigest"], SANDRA_COMMIT)
+        with self.assertRaisesRegex(CandidateError, "EIMG_RUN_EVIDENCE_FAILED"):
+            verify_run_evidence_json(
+                ready_pin(),
+                {"source_repository_digest": EIMG_SOURCE_COMMIT, "run_id": 756},
+                run_payload(),
+                evidence_payload(ready_pin()),
+            )
 
     def test_attestation_one_field_negatives_and_predicate_tamper(self):
         pin = ready_pin()
@@ -299,7 +314,7 @@ class RuntimeR1ConfigTests(unittest.TestCase):
 
                 proof.run = fake_run
                 result = proof.verify_attestation(ready_pin())
-                self.assertEqual(result["source_commit"], EIMG_SOURCE_COMMIT)
+                self.assertEqual(result["source_commit"], SANDRA_COMMIT)
                 self.assertEqual(commands[0], [
                     "gh", "attestation", "verify", ready_pin().oci_uri,
                     "--owner", "biginkc",
@@ -323,6 +338,10 @@ class RuntimeR1ConfigTests(unittest.TestCase):
             "expected commit": workflow_fixture().replace(f"EXPECTED_COMMIT: {EIMG_SOURCE_COMMIT}", "EXPECTED_COMMIT: " + "b" * 40),
             "checkout ref": workflow_fixture().replace(f"ref: {EIMG_SOURCE_COMMIT}", "ref: " + "b" * 40),
             "tag compare removed": workflow_fixture().replace('[[ "$tag_commit" == "$EXPECTED_COMMIT" ]] || {', '[[ "$tag_commit" == "$EXPECTED_COMMIT" ]]'),
+            "guard exits replaced": workflow_fixture().replace("exit 1", "true"),
+            "set +e": workflow_fixture().replace("set -euo pipefail", "set -euo pipefail\n                  set +e"),
+            "|| true": workflow_fixture().replace('[[ "$tag_commit" == "$EXPECTED_COMMIT" ]] || {', '[[ "$tag_commit" == "$EXPECTED_COMMIT" ]] || true'),
+            "exit 0": workflow_fixture().replace("exit 1", "exit 0", 1),
             "continue on error": workflow_fixture().replace("        run: |", "        continue-on-error: true\n        run: |"),
             "file missing": workflow_fixture().replace("- name: Verify pinned upstream source and release tag", "- name: Other step"),
         }
@@ -335,10 +354,26 @@ class RuntimeR1ConfigTests(unittest.TestCase):
             with self.subTest(proof=proof.__name__, name="workflow file 404"):
                 proof.run = lambda *args, **kwargs: SimpleNamespace(stdout="", stderr="not found", returncode=1)
                 with self.assertRaisesRegex(proof.ProofError, "EIMG_WORKFLOW_FAILED"):
-                    proof.verify_workflow_at_commit({"source_repository_digest": EIMG_SOURCE_COMMIT})
+                    proof.verify_workflow_at_commit({"source_repository_digest": SANDRA_COMMIT})
+            with self.subTest(proof=proof.__name__, name="workflow gh api fallback source"):
+                def fake_workflow_lookup(args, **kwargs):
+                    if args[:2] == ["git", "-C"]:
+                        return SimpleNamespace(stdout="", stderr="not found", returncode=1)
+                    self.assertEqual(args[:2], ["gh", "api"])
+                    return SimpleNamespace(
+                        stdout=base64.b64encode(workflow_fixture().encode()).decode(),
+                        stderr="",
+                        returncode=0,
+                    )
+
+                proof.run = fake_workflow_lookup
+                self.assertEqual(
+                    proof.verify_workflow_at_commit({"source_repository_digest": SANDRA_COMMIT})["workflow_source"],
+                    "gh api",
+                )
 
         pin = ready_pin()
-        attestation = {"source_repository_digest": EIMG_SOURCE_COMMIT, "run_id": 756}
+        attestation = {"source_repository_digest": SANDRA_COMMIT, "run_id": 756}
         self.assertEqual(verify_run_evidence_json(pin, attestation, run_payload(), evidence_payload(pin))["artifact"]["tag_check_result"], "passed")
         negative_runs = {
             "tag result": (run_payload(), {**evidence_payload(pin), "tag_check_result": "failed"}),
@@ -346,6 +381,8 @@ class RuntimeR1ConfigTests(unittest.TestCase):
             "image": (run_payload(), {**evidence_payload(pin), "image": "ghcr.io/biginkc/inbox-electric@sha256:" + "b" * 64}),
             "conclusion": (run_payload(conclusion="failure"), evidence_payload(pin)),
             "head sha": (run_payload(head_sha="b" * 40), evidence_payload(pin)),
+            "head branch": (run_payload(head_branch="feature"), evidence_payload(pin)),
+            "path": (run_payload(path=".github/workflows/other.yml"), evidence_payload(pin)),
             "artifact absent": (run_payload(), None),
         }
         for name, (run_value, artifact_value) in negative_runs.items():
@@ -366,7 +403,12 @@ class RuntimeR1ConfigTests(unittest.TestCase):
                 if args[:3] == ["gh", "attestation", "verify"]:
                     if failure == "attestation":
                         return SimpleNamespace(stdout="", stderr="signature rejected", returncode=1)
-                    return SimpleNamespace(stdout=json.dumps(attestation_payload()), stderr="", returncode=0)
+                    if failure == "empty attestation":
+                        return SimpleNamespace(stdout=json.dumps([]), stderr="", returncode=0)
+                    payload = attestation_payload()
+                    if failure == "wrong buildSignerURI":
+                        payload[0]["verificationResult"]["signature"]["certificate"]["buildSignerURI"] = "https://github.com/biginkc/sandra/.github/workflows/other.yml@refs/heads/main"
+                    return SimpleNamespace(stdout=json.dumps(payload), stderr="", returncode=0)
                 if args[:2] == ["git", "-C"] and args[2] == str(ROOT) and args[3] == "show":
                     workflow = workflow_fixture()
                     if failure == "workflow":
@@ -432,9 +474,12 @@ class RuntimeR1ConfigTests(unittest.TestCase):
             with self.subTest(proof=proof.__name__, failure="none"):
                 status, commands = self._run_fake_main(proof, None)
                 self.assertEqual(status["seal_status"], "SEALED")
+                self.assertEqual(status["workflow"]["workflow_source"], "local git show")
                 self.assertTrue(any(command[:3] == ["gh", "attestation", "verify"] for command in commands))
             for failure, token in (
                 ("attestation", "EIMG_ATTESTATION_FAILED"),
+                ("empty attestation", "EIMG_ATTESTATION_IDENTITY_FAILED"),
+                ("wrong buildSignerURI", "EIMG_ATTESTATION_IDENTITY_FAILED"),
                 ("workflow", "EIMG_WORKFLOW_FAILED"),
                 ("evidence", "EIMG_RUN_EVIDENCE_FAILED"),
             ):

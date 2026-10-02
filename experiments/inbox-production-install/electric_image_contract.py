@@ -226,6 +226,14 @@ def verify_workflow_text(workflow_text: str) -> dict[str, str]:
     step = step_match.group(0)
     if re.search(r"(?m)^\s{8}(?:if|continue-on-error)\s*:", step):
         raise CandidateError("EIMG_WORKFLOW_FAILED: source/tag check step is not fail-closed")
+    forbidden = {
+        "set +e": r"\bset\s+\+e\b",
+        "|| true": r"\|\|\s*true\b",
+        "exit 0": r"\bexit\s+0\b",
+    }
+    forbidden_found = [name for name, pattern in forbidden.items() if re.search(pattern, step)]
+    if forbidden_found:
+        raise CandidateError(f"EIMG_WORKFLOW_FAILED: source/tag check step contains forbidden constructs: {forbidden_found}")
 
     required_fragments = (
         "set -euo pipefail",
@@ -235,11 +243,15 @@ def verify_workflow_text(workflow_text: str) -> dict[str, str]:
         "local_tag_commit=\"$(git rev-parse '@core/sync-service@1.8.1^{commit}')\"",
         '[[ "$local_tag_commit" == "$EXPECTED_COMMIT" ]] || {',
         "git ls-remote \"$UPSTREAM_REPO\" 'refs/tags/@core/sync-service@1.8.1^{}'",
+        '[[ "$tag_commit" =~ ^[a-f0-9]{40}$ ]] || {',
         '[[ "$tag_commit" == "$EXPECTED_COMMIT" ]] || {',
     )
     missing = [fragment for fragment in required_fragments if fragment not in step]
     if missing:
         raise CandidateError(f"EIMG_WORKFLOW_FAILED: source/tag guard is incomplete: {missing}")
+    guard_bodies = re.findall(r"(?ms)^\s*\[\[.*?\]\]\s*\|\|\s*\{\s*(.*?)^\s*}\s*$", step)
+    if len(guard_bodies) != 4 or any(not re.search(r"(?m)^\s*exit\s+1\s*$", body) for body in guard_bodies):
+        raise CandidateError("EIMG_WORKFLOW_FAILED: all four source/tag guards must exit 1 inside their bodies")
     return {
         "workflow_path": EIMG_WORKFLOW_PATH,
         "source_commit": EIMG_SOURCE_COMMIT,

@@ -22,8 +22,8 @@
           "buildSignerURI": "https://github.com/biginkc/sandra/.github/workflows/inbox-electric-image.yml@refs/heads/main",
           "runnerEnvironment": "github-hosted",
           "githubWorkflowTrigger": "workflow_dispatch",
-          "sourceRepositoryDigest": "0f404200402f918a4b1596bc5c8a53479a435349",
-          "buildSignerDigest": "0f404200402f918a4b1596bc5c8a53479a435349",
+          "sourceRepositoryDigest": "d309bec7fcc9a1cf493ae22434d3f891d6989138",
+          "buildSignerDigest": "d309bec7fcc9a1cf493ae22434d3f891d6989138",
           "runInvocationURI": "https://github.com/biginkc/sandra/actions/runs/756/attempts/1"
         }
       },
@@ -43,7 +43,7 @@
               {
                 "uri": "git+https://github.com/biginkc/sandra@refs/heads/main",
                 "digest": {
-                  "gitCommit": "0f404200402f918a4b1596bc5c8a53479a435349"
+                  "gitCommit": "d309bec7fcc9a1cf493ae22434d3f891d6989138"
                 }
               }
             ]
