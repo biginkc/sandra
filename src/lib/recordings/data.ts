@@ -6,6 +6,7 @@ import { SANDRA_ORG_ID } from '@/lib/auth/sandra-org';
 import { hasActiveSandraAccess } from '@/lib/auth/access-state';
 import type { RecordingFilters, RecordingScope } from './filters';
 import { getDialpadPlaybackFile, signDialpadPlaybackFile } from '@/lib/dialpad-recording/playback';
+import { DIRECT_RECORDINGS_BUCKET } from '@/lib/direct-calling/recording';
 
 export class RecordingAccessError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -28,8 +29,8 @@ export interface LibraryResult {
 }
 interface SourceCall {
   id: string; attemptId?: string | null; scopeId?: string | null; summaryPath?: string | null;
-  source?: string; actorId?: string | null; recordingStatus?: string;
-  files?: Array<{ id: string; duration: number | null; status: string; kind: string; source: string; track: 'tab' | 'mic'; epoch: number; completeness: 'complete' | 'partial'; partialReason: string | null; recordingStatus: string }>;
+  source?: string; actorId?: string | null; directCallId?: string | null; recordingStatus?: string;
+  files?: Array<{ id: string; duration: number | null; status: string; kind: string; source: string; track?: 'tab' | 'mic'; epoch?: number; completeness?: 'complete' | 'partial'; partialReason?: string | null; recordingStatus?: string; directCallId?: string; storageBucket?: string; storagePath?: string }>;
 }
 interface AudioCall {
   id: string; actorId: string | null;
@@ -83,12 +84,24 @@ async function audioCatalog(userId: string, scope: RecordingScope, callId?: stri
   const allowedSources = await rpc<SourceCall[]>('fn_recording_library_sources', { p_actor: userId, p_scope: scope });
   const dialpadSources = await rpc<SourceCall[]>('fn_dialpad_recording_library_sources', { p_actor: userId, p_scope: scope });
   const sources = (callId ? allowedSources.filter(c => c.id === callId) : allowedSources).filter(c => c.source !== 'dialpad');
-  const audio: AudioCall[] = [];
+  const directSources = sources.filter(c => c.source === 'sandra_direct');
+  for (const source of directSources) {
+    if (!source.directCallId || !/^[0-9a-f-]{36}$/i.test(source.directCallId) || source.files?.some(file => file.source !== 'sandra_direct' || !/^recording:[0-9a-f-]{36}$/i.test(file.id) || file.status !== 'available' || file.kind !== 'stored' || (file.duration !== null && (!Number.isFinite(file.duration) || file.duration < 0)) || file.directCallId !== source.directCallId || file.storageBucket !== DIRECT_RECORDINGS_BUCKET || typeof file.storagePath !== 'string')) {
+      throw new RecordingAccessError(503, 'Invalid direct recording inventory');
+    }
+  }
+  const audio: AudioCall[] = directSources.map(source => ({
+    id: source.id,
+    actorId: source.actorId ?? null,
+    recordingStatus: source.recordingStatus,
+    files: source.files ?? [],
+  }));
+  const brokerSources = sources.filter(c => c.source !== 'sandra_direct');
   // Each batch is tenant-scoped by the database; the broker independently
   // attests caller identity before the database applies self scope. No credentials or
   // cross-project calls reach the browser. Fail closed rather than return partial counts.
-  for (let i = 0; i < sources.length; i += 100) {
-    const calls = sources.slice(i, i + 100).map(c => ({ ...c, summaryPath: c.summaryPath ?? undefined }));
+  for (let i = 0; i < brokerSources.length; i += 100) {
+    const calls = brokerSources.slice(i, i + 100).map(c => ({ ...c, summaryPath: c.summaryPath ?? undefined }));
     const body = await broker({ calls });
     if (!Array.isArray(body.calls) || body.calls.length !== calls.length) throw new RecordingAccessError(503, 'Recording inventory is incomplete');
     const expected = new Set(calls.map(c => c.id));
@@ -103,7 +116,7 @@ async function audioCatalog(userId: string, scope: RecordingScope, callId?: stri
     recordingStatus: source.recordingStatus,
     files: source.files ?? [],
   }));
-  if (dialpad.some(item => item.files.some(file => file.source !== 'dialpad' || !/^dpf_[0-9a-f]{64}$/.test(file.id) || !['tab', 'mic'].includes(file.track) || !Number.isInteger(file.epoch) || !['complete', 'partial'].includes(file.completeness) || file.status !== 'available'))) {
+  if (dialpad.some(item => item.files.some(file => file.source !== 'dialpad' || !/^dpf_[0-9a-f]{64}$/.test(file.id) || !['tab', 'mic'].includes(file.track ?? '') || !Number.isInteger(file.epoch) || !['complete', 'partial'].includes(file.completeness ?? '') || file.status !== 'available'))) {
     throw new RecordingAccessError(503, 'Invalid recording inventory');
   }
   return [...audio, ...dialpad];
@@ -118,7 +131,7 @@ export async function listRecordings(scope: RecordingScope, filters: RecordingFi
   const last = rows.at(-1);
   return { ...result, rows, nextCursor: hasMore && last ? JSON.stringify({ at: last.at, id: last.id }) : null, viewerId: viewer.userId };
 }
-interface PrivateFile { callId: string; source: string; file: LibraryFile & { url?: string; recordingId?: string; attemptKey?: string; scopeKey?: string } }
+interface PrivateFile { callId: string; source: string; file: LibraryFile & { url?: string; recordingId?: string; attemptKey?: string; scopeKey?: string; directCallId?: string; storageBucket?: string; storagePath?: string } }
 async function getFile(scope: RecordingScope, id: string) {
   if (!id || id.length > 500) throw new RecordingAccessError(400, 'Invalid recording');
   const viewer = await requireRecordingViewer(scope);
@@ -156,6 +169,23 @@ export async function recordingPlayback(scope: RecordingScope, id: string) {
   }
   const legacy = found as PrivateFile;
   const legacyFile = legacy.file;
+  if (legacyFile.source === 'sandra_direct') {
+    const directCallId = legacyFile.directCallId;
+    const storagePath = legacyFile.storagePath;
+    const expectedPrefix = directCallId ? `${SANDRA_ORG_ID}/${directCallId}/` : '';
+    if (legacyFile.status !== 'available' || legacyFile.kind !== 'stored' || legacyFile.storageBucket !== DIRECT_RECORDINGS_BUCKET
+      || !directCallId || !/^[0-9a-f-]{36}$/i.test(directCallId) || !storagePath || !storagePath.startsWith(expectedPrefix)
+      || !/^[A-Za-z0-9._-]{1,200}\.wav$/.test(storagePath.slice(expectedPrefix.length))) {
+      throw new RecordingAccessError(409, 'This recording reference is not available for playback');
+    }
+    const { data, error } = await createAdminClient().storage.from(DIRECT_RECORDINGS_BUCKET).createSignedUrl(storagePath, 60);
+    if (error || typeof data?.signedUrl !== 'string') throw new RecordingAccessError(503, 'Recording service is unavailable');
+    let signed: URL;
+    try { signed = new URL(data.signedUrl); } catch { throw new RecordingAccessError(503, 'Invalid playback response'); }
+    if (signed.protocol !== 'https:' || signed.username || signed.password) throw new RecordingAccessError(503, 'Invalid playback response');
+    await requireRecordingViewer(scope);
+    return { signedUrl: data.signedUrl, expiresAt: new Date(Date.now() + 60_000).toISOString() };
+  }
   const { callId } = legacy;
   if (legacyFile.kind === 'reference' && legacyFile.url) {
     let external: URL;
