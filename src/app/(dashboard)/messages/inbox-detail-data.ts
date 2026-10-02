@@ -17,7 +17,7 @@ import {
 } from "@/lib/messaging/sms-phone";
 import type { Database } from "@/lib/supabase/types";
 
-export { DRIP_REPLY_CLEAR_WORKFLOW_OPERATIONS } from "@/lib/inbox/drip-context";
+export { DRIP_REPLY_CLEAR_WORKFLOW_OPERATIONS, outboundStatusClearsDripReply } from "@/lib/inbox/drip-context";
 
 export type InboxDetail = {
   /** The conversation UUID — same value as `conversationId`; kept as the
