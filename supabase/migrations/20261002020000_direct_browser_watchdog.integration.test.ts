@@ -21,6 +21,7 @@ it("arms, renews, fences, and claims a browser lease with database-clock timing"
     await pg.query(sql("20261001220000_direct_call_prepare_ownership.sql"));
     await pg.query(sql("20261002020000_direct_browser_watchdog.sql"));
     await pg.query(sql("20261002020000_direct_browser_watchdog.sql"));
+    await pg.query(sql("20261002022000_direct_browser_watchdog_terminal_retry.sql"));
     const privileges = (await pg.query(`select
       has_function_privilege('service_role','public.direct_watchdog_heartbeat(text)','execute') as service_can_heartbeat,
       has_function_privilege('authenticated','public.direct_watchdog_heartbeat(text)','execute') as user_can_heartbeat,
@@ -59,8 +60,26 @@ it("arms, renews, fences, and claims a browser lease with database-clock timing"
     await pg.query("update public.direct_calls set status='ending', browser_watchdog_expires_at=now()-interval '1 second', browser_watchdog_claimed_at=now()-interval '16 seconds' where id=$1", [callId]);
     const retriedEnding = (await pg.query("select * from public.direct_call_watchdog_claim_expired(5)")).rows;
     expect(retriedEnding).toEqual([{ call_id: callId, operator_user_id: USER, browser_watchdog_session_id: SESSION }]);
-    await pg.query("update public.direct_calls set status='ended' where id=$1", [callId]);
     await pg.query("delete from public.direct_call_cleanups where direct_call_id=$1", [callId]);
+    await pg.query("update public.direct_calls set status='ended', browser_watchdog_expires_at=now()-interval '1 second', browser_watchdog_claimed_at=null where id=$1", [callId]);
+    await pg.query(
+      "insert into public.direct_call_cleanups (org_id,operator_user_id,direct_call_id,kind,dial_role,next_attempt_at) values ($1,$2,$3,'unresolved_dial','seller',now())",
+      [ORG, USER, callId],
+    );
+    const terminalEnded = (await pg.query("select * from public.direct_call_watchdog_claim_expired(5)")).rows;
+    expect(terminalEnded).toEqual([{ call_id: callId, operator_user_id: USER, browser_watchdog_session_id: SESSION }]);
+    await pg.query("delete from public.direct_call_cleanups where direct_call_id=$1", [callId]);
+    await pg.query("update public.direct_calls set status='failed', browser_watchdog_expires_at=now()-interval '1 second', browser_watchdog_claimed_at=null where id=$1", [callId]);
+    await pg.query(
+      "insert into public.direct_call_cleanups (org_id,operator_user_id,direct_call_id,kind,leg_id,next_attempt_at) values ($1,$2,$3,'leg','terminal-leg',now())",
+      [ORG, USER, callId],
+    );
+    const terminalFailed = (await pg.query("select * from public.direct_call_watchdog_claim_expired(5)")).rows;
+    expect(terminalFailed).toEqual([{ call_id: callId, operator_user_id: USER, browser_watchdog_session_id: SESSION }]);
+    await pg.query("delete from public.direct_call_cleanups where direct_call_id=$1", [callId]);
+    await pg.query("update public.direct_calls set browser_watchdog_expires_at=now()-interval '1 second', browser_watchdog_claimed_at=null where id=$1", [callId]);
+    const terminalSettled = (await pg.query("select * from public.direct_call_watchdog_claim_expired(5)")).rows;
+    expect(terminalSettled).toEqual([]);
     await pg.query("delete from public.direct_watchdog_liveness");
     const refused = (await pg.query(
       "select * from public.direct_call_begin($1,$2,null,null,'','+15550002222',$3,180,null,$4)",

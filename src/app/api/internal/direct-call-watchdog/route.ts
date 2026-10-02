@@ -36,7 +36,13 @@ export async function POST(request: Request): Promise<NextResponse> {
   if (!settings) return NextResponse.json({ error: "watchdog_unavailable" }, { status: 503 });
   const store = createSupabaseDirectCallStore();
   const row = await store.findById(input.callId.toLowerCase());
-  if (!row || row.browser_watchdog_session_id !== input.sessionId || !row.browser_watchdog_claimed_at || ["ended", "failed"].includes(row.status)) return NextResponse.json({ ok: true, ignored: true });
+  if (!row || row.browser_watchdog_session_id !== input.sessionId || !row.browser_watchdog_claimed_at) return NextResponse.json({ ok: true, ignored: true });
+  // A terminal call is eligible only while a durable cleanup obligation remains. The
+  // watchdog claim function applies the same predicate; this second check keeps a stale
+  // callback from touching a fully settled terminal row and never reopens its status.
+  if (["ended", "failed"].includes(row.status) && (await store.openCleanupsForCall(row.id)).length === 0) {
+    return NextResponse.json({ ok: true, ignored: true });
+  }
   const legs = [row.browser_leg_id, row.seller_leg_id].filter((leg): leg is string => Boolean(leg)).map((legId) => ({ kind: "leg" as const, legId }));
   if (["browser_connecting", "seller_dialing", "connected"].includes(row.status)) {
     const moved = await store.updateIfStatus(row.id, ["browser_connecting", "seller_dialing", "connected"], { status: "ending", failure_reason: "browser_watchdog_expired" }, legs);

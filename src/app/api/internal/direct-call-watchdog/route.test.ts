@@ -86,6 +86,15 @@ describe("direct-call watchdog cleanup callback", () => {
     expect(processDueCleanups).not.toHaveBeenCalled();
   });
 
+  it("cleans a claimed terminal row with pending obligations without reopening its status", async () => {
+    store.findById.mockResolvedValue({ ...activeRow(), status: "ended" });
+    store.openCleanupsForCall.mockResolvedValueOnce([{ id: "still-open" }]).mockResolvedValueOnce([{ id: "still-open" }]);
+    const response = await POST(signedRequest(JSON.stringify({ callId: CALL_ID, sessionId: SESSION_ID })));
+    expect(response.status).toBe(200);
+    expect(processDueCleanups).toHaveBeenCalledWith(expect.objectContaining({}), activeRow().operator_user_id, 3);
+    expect(store.updateIfStatus).not.toHaveBeenCalled();
+  });
+
   it("moves an active row to ending, works one bounded cleanup row, and finalizes only after the core confirms all obligations", async () => {
     store.openCleanupsForCall.mockResolvedValue([]);
     const response = await POST(signedRequest(JSON.stringify({ callId: CALL_ID, sessionId: SESSION_ID })));

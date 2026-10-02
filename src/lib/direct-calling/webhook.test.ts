@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { processDueCleanups } from "./cleanup";
 import { FakeStore, makeRow } from "./test-support";
 import { TelnyxApiError, encodeClientState } from "./telnyx";
 import { processDirectCallWebhook, type WebhookDeps } from "./webhook";
@@ -281,6 +282,47 @@ describe("processDirectCallWebhook", () => {
       await processDirectCallWebhook(body("call.bridged", "browser-leg", { directCallId: CALL, role: "browser" }, "orphan-retry-2"), deps);
       expect(hangup).toHaveBeenCalledTimes(2);
       expect(store.legRow("ORPHAN")?.acked_at).not.toBeNull();
+    });
+
+    it("keeps a terminal call's other leg autonomous after one hangup webhook and a transient failure", async () => {
+      const { store, hangup, getCall, listActiveCalls, deps, advance } = setup({ status: "connected", seller_leg_id: "SELLER", connected_at: "2026-10-01T12:00:01.000Z" });
+      hangup.mockRejectedValueOnce(new TelnyxApiError("provider unavailable", "unknown", 503));
+
+      // The seller hangup webhook confirms that leg and transitions the call to
+      // ended. The shared cleanup trigger attempts the browser leg once, but its
+      // transient provider failure remains durable on the terminal call.
+      await expect(processDirectCallWebhook(body("call.hangup", "SELLER", { directCallId: CALL, role: "seller" }, "terminal-retry"), deps)).resolves.toMatchObject({ result: "processed" });
+      expect(store.calls.get(CALL)?.status).toBe("ended");
+      expect(store.legRow("browser-leg")).toMatchObject({ attempts: 1, confirmed_at: null });
+
+      // No event, browser poll, or manual action is needed: a later watchdog
+      // pass claims the terminal row's pending obligation and retries it.
+      advance(10);
+      await processDueCleanups({ store, hangup, getCall, listActiveCalls, now: () => clock.now, report: vi.fn(), random: () => 0 }, "user-1");
+      expect(hangup).toHaveBeenCalledTimes(2);
+      expect(store.legRow("browser-leg")?.acked_at).not.toBeNull();
+      expect(getCall).not.toHaveBeenCalled();
+    });
+
+    it("reconciles an unresolved Dial after its call is already terminal", async () => {
+      const { store, hangup, getCall, listActiveCalls, advance } = setup({ status: "failed" });
+      store.addCleanup({
+        direct_call_id: CALL,
+        kind: "unresolved_dial",
+        dial_role: "seller",
+        dial_started_at: T0.toISOString(),
+        resolve_after: new Date(T0.getTime() - 1_000).toISOString(),
+        backstop_at: new Date(T0.getTime() + 60_000).toISOString(),
+      });
+
+      await processDueCleanups({ store, hangup, getCall, listActiveCalls, now: () => clock.now, report: vi.fn(), random: () => 0 }, "user-1");
+      expect(store.openFor(CALL)[0]?.empty_matches).toBe(1);
+      advance(10);
+      await processDueCleanups({ store, hangup, getCall, listActiveCalls, now: () => clock.now, report: vi.fn(), random: () => 0 }, "user-1");
+      expect(store.openFor(CALL)).toEqual([]);
+      expect(store.calls.get(CALL)?.status).toBe("failed");
+      expect(hangup).not.toHaveBeenCalled();
+      expect(getCall).not.toHaveBeenCalled();
     });
 
     it("persists the opposite-leg cleanup, answers 200, retries after backoff, and confirms only by webhook/status (blocker 1)", async () => {
