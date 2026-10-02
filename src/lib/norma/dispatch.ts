@@ -48,7 +48,7 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
 
   const { data: row, error } = await client
     .from("norma_call_requests")
-    .select("id, status, phone_e164, property_id, contact_id, idempotency_key, rep_context")
+    .select("id, status, org_id, phone_e164, property_id, contact_id, idempotency_key, rep_context")
     .eq("id", requestId)
     .maybeSingle();
   if (error) throw new Error(`norma dispatch load failed: ${error.message}`);
@@ -152,9 +152,10 @@ const NOTES_SEPARATOR = " | ";
 
 /** Whole dollars, US formatting ("$160,000"); empty when there is no usable price. */
 function formatAskingPrice(value: number | string | null | undefined): string {
-  if (value === null || value === undefined || value === "") return "";
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string" && value.trim() === "") return "";
   const n = Number(value);
-  if (!Number.isFinite(n)) return "";
+  if (!Number.isFinite(n) || n < 0) return "";
   return `$${Math.round(n).toLocaleString("en-US")}`;
 }
 
@@ -177,7 +178,7 @@ function joinLatestNotes(bodies: Array<string | null | undefined>): string {
       out = next;
       continue;
     }
-    if (!out) out = note.slice(0, LATEST_NOTES_MAX_CHARS).trimEnd();
+    if (!out) out = Array.from(note).slice(0, LATEST_NOTES_MAX_CHARS).join("").trimEnd();
     break;
   }
   return out;
@@ -185,7 +186,7 @@ function joinLatestNotes(bodies: Array<string | null | undefined>): string {
 
 async function loadCallVariables(
   client: Client,
-  row: { property_id: string; contact_id: string | null; rep_context: string | null },
+  row: { org_id: string; property_id: string; contact_id: string | null; rep_context: string | null },
 ): Promise<Record<string, string>> {
   const [
     { data: property, error: propertyError },
@@ -193,7 +194,10 @@ async function loadCallVariables(
     { data: notes, error: notesError },
   ] = await Promise.all([
     // listing_price is the "Listing price" row on the lead page (CSV "asking price" imports into it).
-    client.from("properties").select("address, city, state, zip, listing_price").eq("id", row.property_id).maybeSingle(),
+    client.from("properties").select("address, city, state, zip, listing_price")
+      .eq("id", row.property_id)
+      .eq("org_id", row.org_id)
+      .maybeSingle(),
     row.contact_id
       ? client.from("contacts").select("first_name").eq("id", row.contact_id).maybeSingle()
       : Promise.resolve({ data: null, error: null }),
@@ -201,8 +205,10 @@ async function loadCallVariables(
     client
       .from("lead_notes")
       .select("body")
+      .eq("org_id", row.org_id)
       .eq("property_id", row.property_id)
       .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
       .limit(LATEST_NOTES_FETCH_LIMIT),
   ]);
   if (propertyError || contactError || notesError) throw new Error("norma dispatch lead facts failed");
