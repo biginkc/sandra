@@ -19,7 +19,9 @@ it("catalogs direct recordings in the Sandra library with owner and mine scope",
   const retry = stripTx(fs.readFileSync("supabase/migrations/20261002011737_direct_recording_monotonic_retry.sql", "utf8"));
   const link = stripTx(fs.readFileSync("supabase/migrations/20261002013151_direct_recording_link_repair.sql", "utf8"));
   const library = stripTx(fs.readFileSync("supabase/migrations/20261002015000_direct_recording_library.sql", "utf8"));
+  const guard = stripTx(fs.readFileSync("supabase/migrations/20261002016000_direct_recording_activity_guard.sql", "utf8"));
   const libraryRollback = stripTx(fs.readFileSync("supabase/rollbacks/20261002015000_direct_recording_library.sql", "utf8"));
+  const guardRollback = stripTx(fs.readFileSync("supabase/rollbacks/20261002016000_direct_recording_activity_guard.sql", "utf8"));
   await pg.query("begin");
   try {
     await pg.query(directCalls);
@@ -41,9 +43,12 @@ it("catalogs direct recordings in the Sandra library with owner and mine scope",
     }
     const callId = "00000000-0000-4000-8000-000000015011";
     const activityId = "00000000-0000-4000-8000-000000015012";
+    const forgedCallId = "00000000-0000-4000-8000-000000015017";
+    const forgedActivityId = "00000000-0000-4000-8000-000000015018";
     const propertyId = "00000000-0000-4000-8000-000000015013";
     const contactId = "00000000-0000-4000-8000-000000015014";
     const ledgerId = "00000000-0000-4000-8000-000000015015";
+    const forgedLedgerId = "00000000-0000-4000-8000-000000015020";
     await pg.query("insert into public.contacts(id,org_id,first_name) values ($1,$2,'Library seller')", [contactId, ORG]);
     await pg.query("insert into public.properties(id,org_id,address,state,homeowner_contact_id) values ($1,$2,'15 Direct Library Way','MO',$3)", [propertyId, ORG, contactId]);
     await pg.query(
@@ -54,17 +59,88 @@ it("catalogs direct recordings in the Sandra library with owner and mine scope",
       "insert into public.call_activities(id,org_id,property_id,contact_id,jitter_attempt_id,provider,operator_user_id,direct_call_id) values ($1,$2,$3,$4,$5,'sandra_softphone',$6,$7)",
       [activityId, ORG, propertyId, contactId, "direct-library-test", USER, callId],
     );
+    // Seed a legacy row whose mutable activity operator disagrees with the
+    // durable owner, then install the guard. Catalog queries must still
+    // attribute it to the direct call owner and keep it out of the second
+    // rep's mine scope.
+    await pg.query(
+      "insert into public.direct_calls(id,org_id,operator_user_id,destination_e164,caller_id_e164,status,seller_leg_id,client_request_id) values ($1,$2,$3,'+15550000021','+15550000022','ended','seller-library-forged',$4)",
+      [forgedCallId, ORG, USER, "00000000-0000-4000-8000-000000015019"],
+    );
+    await pg.query(
+      "insert into public.call_activities(id,org_id,jitter_attempt_id,provider,operator_user_id,direct_call_id,recording_status) values ($1,$2,$3,'sandra_softphone',$4,$5,'pending')",
+      [forgedActivityId, ORG, "direct-library-forged", OTHER_USER, forgedCallId],
+    );
+    await pg.query(guard);
+    await pg.query(guard);
+    await pg.query(
+      "insert into public.direct_call_recordings(id,direct_call_id,provider_recording_id,provider_call_control_id,status,storage_bucket,storage_path,duration_seconds) values ($1,$2,'telnyx-forged-recording','seller-library-forged','available','sandra-direct-recordings',$3,20)",
+      [forgedLedgerId, forgedCallId, `${ORG}/${forgedCallId}/telnyx-forged-recording.wav`],
+    );
     await pg.query(
       "insert into public.direct_call_recordings(id,direct_call_id,provider_recording_id,provider_call_control_id,status,storage_bucket,storage_path,duration_seconds) values ($1,$2,'telnyx-library-recording','seller-library','available','sandra-direct-recordings',$3,73)",
       [ledgerId, callId, `${ORG}/${callId}/telnyx-library-recording.wav`],
     );
     await pg.query(
+      "select public.direct_call_recording_sync_activity($1,$2,$3,now())",
+      [callId, forgedActivityId, "telnyx-library-recording"],
+    );
+    expect((await pg.query("select count(*)::int as count from public.call_recordings where provider_recording_id='telnyx-library-recording' and call_activity_id=$1", [forgedActivityId])).rows[0].count).toBe(0);
+    await pg.query(
+      "select public.direct_call_recording_sync_activity($1,$2,$3,now())",
+      [forgedCallId, forgedActivityId, "telnyx-forged-recording"],
+    );
+    expect((await pg.query("select count(*)::int as count from public.call_recordings where provider_recording_id='telnyx-forged-recording' and call_activity_id=$1", [forgedActivityId])).rows[0].count).toBe(0);
+    await pg.query(
       "insert into public.call_recordings(call_activity_id,status,provider_recording_id,provider_call_control_id,storage_bucket,storage_path,duration_seconds) values ($1,'available','telnyx-library-recording','seller-library','sandra-direct-recordings',$2,73)",
       [activityId, `${ORG}/${callId}/telnyx-library-recording.wav`],
     );
 
+    // A second authenticated rep must not be able to rewrite mutable activity
+    // metadata and thereby claim the first rep's private direct recording.
+    await pg.query("set local role authenticated");
+    await pg.query("select set_config('request.jwt.claim.role','authenticated',true)");
+    await pg.query("select set_config('request.jwt.claim.sub',$1,true)", [OTHER_USER]);
+
+    await pg.query("savepoint direct_activity_owner_matching_update");
+    await expect(
+      pg.query("update public.call_activities set operator_user_id=$1, notes='forged owner update' where id=$2", [USER, activityId]),
+    ).rejects.toMatchObject({ code: "42501" });
+    await pg.query("rollback to savepoint direct_activity_owner_matching_update");
+
+    await pg.query("savepoint direct_activity_owner_mismatch_update");
+    await expect(
+      pg.query("update public.call_activities set operator_user_id=$1 where id=$2", [OTHER_USER, activityId]),
+    ).rejects.toMatchObject({ code: expect.stringMatching(/^(23514|42501)$/) });
+    await pg.query("rollback to savepoint direct_activity_owner_mismatch_update");
+
+    await pg.query("savepoint direct_activity_owner_unlink");
+    await expect(
+      pg.query("update public.call_activities set direct_call_id=null where id=$1", [activityId]),
+    ).rejects.toMatchObject({ code: "42501" });
+    await pg.query("rollback to savepoint direct_activity_owner_unlink");
+
+    const authenticatedForgedActivityId = "00000000-0000-4000-8000-000000015021";
+    await pg.query("savepoint direct_activity_owner_insert");
+    await expect(
+      pg.query(
+        "insert into public.call_activities(id,org_id,jitter_attempt_id,provider,operator_user_id,direct_call_id) values ($1,$2,$3,'sandra_softphone',$4,$5)",
+        [authenticatedForgedActivityId, ORG, "direct-library-auth-forged", USER, callId],
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+    await pg.query("rollback to savepoint direct_activity_owner_insert");
+    await pg.query("reset role");
+    const ownerAfterRejectedRewrite = (await pg.query("select operator_user_id from public.call_activities where id=$1", [activityId])).rows[0].operator_user_id;
+    expect(ownerAfterRejectedRewrite).toBe(USER);
+
     const source = (await pg.query("select public.fn_recording_library_sources($1,'owner') as value", [USER])).rows[0].value as Array<Record<string, unknown>>;
     const direct = source.find(row => row.id === activityId);
+    expect(source.find(row => row.id === forgedActivityId)).toMatchObject({
+      id: forgedActivityId,
+      source: "sandra_direct",
+      actorId: USER,
+      directCallId: forgedCallId,
+    });
     const recordingId = (await pg.query("select id from public.call_recordings where call_activity_id=$1", [activityId])).rows[0].id as string;
     expect(direct).toMatchObject({ id: activityId, source: "sandra_direct", directCallId: callId, actorId: USER });
     expect((direct?.files as Array<Record<string, unknown>>)[0]).toMatchObject({
@@ -73,7 +149,10 @@ it("catalogs direct recordings in the Sandra library with owner and mine scope",
       storageBucket: "sandra-direct-recordings",
       storagePath: `${ORG}/${callId}/telnyx-library-recording.wav`,
     });
-    expect((await pg.query("select public.fn_recording_library_sources($1,'mine') as value", [OTHER_USER])).rows[0].value).toEqual([]);
+    const otherMineSource = (await pg.query("select public.fn_recording_library_sources($1,'mine') as value", [OTHER_USER])).rows[0].value as Array<Record<string, unknown>>;
+    expect(otherMineSource).toEqual([]);
+    const ownerRows = (await pg.query("select * from public.recording_library_rows($1,'owner',$2::jsonb)", [USER, JSON.stringify(source)])).rows as Array<Record<string, unknown>>;
+    expect(ownerRows.find(row => row.id === `call:${forgedActivityId}`)).toMatchObject({ actor_id: USER });
 
     await pg.query("delete from public.call_recordings where id=$1", [recordingId]);
     const pendingSource = (await pg.query("select public.fn_recording_library_sources($1,'owner') as value", [USER])).rows[0].value as Array<Record<string, unknown>>;
@@ -92,6 +171,7 @@ it("catalogs direct recordings in the Sandra library with owner and mine scope",
 
     const search = (await pg.query("select public.fn_recording_library_search($1,'owner',$2::jsonb,$3::jsonb) as value", [USER, JSON.stringify({ status: "available" }), audio])).rows[0].value as Record<string, unknown>;
     expect((search.rows as Array<Record<string, unknown>>).some(row => (row.files as Array<Record<string, unknown>>).some(fileRow => fileRow.source === "sandra_direct" && fileRow.status === "available"))).toBe(true);
+    await pg.query(guardRollback);
     await pg.query(libraryRollback);
     const restored = (await pg.query("select public.fn_recording_library_sources($1,'owner') as value", [USER])).rows[0].value as Array<Record<string, unknown>>;
     expect(restored.find(row => row.id === activityId)?.source).toBeUndefined();

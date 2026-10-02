@@ -380,13 +380,16 @@ export async function completeSoftphoneCall(input: {
     let directCallId: string | null = null;
     // A sealed Jitter capability can carry a provider-shaped id. Validate the
     // direct UUID before sending it to PostgREST; otherwise a non-direct wrap
-    // can fail with Postgres 22P02 before its activity is saved.
-    if (!training && identity?.callId && UUID.test(identity.callId)) {
+    // can fail with Postgres 22P02 before its activity is saved. The target
+    // phone fence also prevents a coincidental provider UUID from attaching a
+    // training/Jitter wrap to an unrelated direct call.
+    if (identity?.callId && UUID.test(identity.callId)) {
       const { data: directCall, error: directCallError } = await supabase
         .from("direct_calls")
         .select("id")
         .eq("id", identity.callId)
         .eq("operator_user_id", user.id)
+        .eq("destination_e164", input.target.phoneE164)
         .maybeSingle();
       if (directCallError) return { ok: false, error: directCallError.message };
       directCallId = (directCall as { id?: string } | null)?.id ?? null;
