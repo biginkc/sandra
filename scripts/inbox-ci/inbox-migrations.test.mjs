@@ -49,6 +49,7 @@ test('manifest entries are ordered, hashed, and exhaustive', () => {
   assert.equal(execFileSync('node', ['scripts/inbox-ci/inbox-migrations.mjs', '--reserved-block-end'], { encoding: 'utf8' }).trim(), RESERVED_BLOCK_END);
   assert.deepEqual(entries.map(entry => entry.version), versions());
   assert.match(sqlInList(), /^'20261004050000','20261004050100','20261004050200'$/);
+  assert.deepEqual(versions(), [...versions()].sort());
 });
 
 test('literal sweep mutation fails naturally', () => {
