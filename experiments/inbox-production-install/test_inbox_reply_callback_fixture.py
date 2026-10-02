@@ -231,7 +231,7 @@ class ReplyCallbackFixtureTests(unittest.TestCase):
             refused = self._packet(receipt, create=True, check=False)
             created = refused.returncode == 0
             self.assertNotEqual(refused.returncode, 0)
-            self.assertIn("R11 requires reply admission disabled or reply workers absent", refused.stderr)
+            self.assertIn("R11 requires inbox_reply_review.admission.enabled = false (worker absence alone is not accepted)", refused.stderr)
             values = json.loads(receipt.read_text(encoding="utf-8"))
             self.assertEqual(self._sql(f"SELECT count(*) FROM inbox_reply_send.attempts WHERE org_id='{values['org_id']}';").stdout.strip(), "0")
         finally:
