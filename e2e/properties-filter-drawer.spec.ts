@@ -224,18 +224,31 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
       { property_id: singleListId, list_id: listA },
     ]);
 
-    const { data: stackRows, error: stackError } = await admin
-      .from("property_stack_counts")
-      .select("property_id, stack_count")
+    // Own-org property_lists rows per property, counted from the table itself.
+    const { data: listRows, error: stackError } = await admin
+      .from("property_lists")
+      .select("property_id, org_id")
       .in(
         "property_id",
         seeded.map((property) => property.id),
-      )
-      .gte("stack_count", 2);
+      );
     expect(stackError).toBeNull();
-    const directDbCount =
-      stackRows?.filter((row) => stackedIds.includes(row.property_id ?? ""))
-        .length ?? 0;
+    const { data: seededProps } = await admin
+      .from("properties")
+      .select("id, org_id")
+      .in(
+        "id",
+        seeded.map((property) => property.id),
+      );
+    const orgOf = new Map((seededProps ?? []).map((p) => [p.id, p.org_id]));
+    const stackCounts = new Map<string, number>();
+    for (const row of listRows ?? []) {
+      if (orgOf.get(row.property_id) !== row.org_id) continue;
+      stackCounts.set(row.property_id, (stackCounts.get(row.property_id) ?? 0) + 1);
+    }
+    const directDbCount = stackedIds.filter(
+      (id) => (stackCounts.get(id) ?? 0) >= 2,
+    ).length;
     expect(directDbCount).toBe(2);
 
     try {

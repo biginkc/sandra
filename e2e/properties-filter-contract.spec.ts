@@ -164,18 +164,45 @@ async function propertyIdsInEveryTag(
     .map(([propertyId]) => propertyId);
 }
 
+/**
+ * Own-org property_lists rows per property, counted directly from the table
+ * (independent of the filter_list_count cache and of the owner-rights
+ * property_stack_counts view, which a fresh DB does not grant).
+ */
+async function stackCountsByProperty(
+  admin: SupabaseClient<Database>,
+  propertyIds?: string[],
+): Promise<Map<string, number>> {
+  let q = admin.from("property_lists").select("property_id, org_id");
+  if (propertyIds) q = q.in("property_id", propertyIds);
+  const { data: rows, error } = await q;
+  expect(error).toBeNull();
+  const ids = Array.from(new Set((rows ?? []).map((r) => r.property_id)));
+  const orgOf = new Map<string, string>();
+  for (let i = 0; i < ids.length; i += 200) {
+    const { data: props, error: pErr } = await admin
+      .from("properties")
+      .select("id, org_id")
+      .in("id", ids.slice(i, i + 200));
+    expect(pErr).toBeNull();
+    for (const p of props ?? []) orgOf.set(p.id, p.org_id);
+  }
+  const counts = new Map<string, number>();
+  for (const r of rows ?? []) {
+    if (orgOf.get(r.property_id) !== r.org_id) continue;
+    counts.set(r.property_id, (counts.get(r.property_id) ?? 0) + 1);
+  }
+  return counts;
+}
+
 async function propertyIdsWithStackCountAtLeast(
   admin: SupabaseClient<Database>,
   min: number,
 ) {
-  const { data, error } = await admin
-    .from("property_stack_counts")
-    .select("property_id")
-    .gte("stack_count", min);
-  expect(error).toBeNull();
-  return (data ?? [])
-    .map((row) => row.property_id)
-    .filter((propertyId): propertyId is string => propertyId != null);
+  const counts = await stackCountsByProperty(admin);
+  return Array.from(counts.entries())
+    .filter(([, count]) => count >= min)
+    .map(([propertyId]) => propertyId);
 }
 
 async function listMemberAddresses(

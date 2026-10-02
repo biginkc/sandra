@@ -1,8 +1,9 @@
 // Local-only: undo migrations 20261002110000/110050 on the disposable stack so
 // the real `supabase db push` can be re-run against a seeded 50k/250k dataset.
 import pg from "pg";
-const url = process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:55329/postgres";
-if (!/^postgres(ql)?:\/\/[^@]*@(127\.0\.0\.1|localhost):/.test(url)) throw new Error("local only");
+import { assertSandboxTarget, SANDBOX } from "./assert-sandbox-target.mjs";
+await assertSandboxTarget({ workdir: undefined });
+const url = SANDBOX.url; // never an env override
 const c = new pg.Client({ connectionString: url });
 await c.connect();
 const early = "  if tg_op = 'UPDATE' and public.properties_filter_cache_only_change(old, new) then\n    return new;\n  end if;\n";
