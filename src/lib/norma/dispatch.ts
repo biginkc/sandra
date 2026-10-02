@@ -6,6 +6,7 @@ import type { Database } from "@/lib/supabase/types";
 import { createBlandClient, type BlandClient } from "./bland";
 import { readNormaBlandConfig, readNormaGateConfig, type NormaBlandConfig, type NormaGateConfig } from "./config";
 import { evaluateNormaGate } from "./gate";
+import { sendNormaPrecallSms, type PrecallDeps } from "./precall-sms";
 import {
   bindNormaCallId,
   checkNormaEligibility,
@@ -31,6 +32,8 @@ export type DispatchDeps = {
   bland?: BlandClient;
   blandConfig?: NormaBlandConfig | null;
   gate?: NormaGateConfig;
+  /** Pre-call text overrides (tests); production reads NORMA_PRECALL_SMS_ENABLED and the template constant. */
+  precallSms?: PrecallDeps;
 };
 
 /**
@@ -48,7 +51,7 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
 
   const { data: row, error } = await client
     .from("norma_call_requests")
-    .select("id, status, org_id, phone_e164, property_id, contact_id, idempotency_key, rep_context")
+    .select("id, status, org_id, phone_e164, property_id, contact_id, idempotency_key, rep_context, attempt")
     .eq("id", requestId)
     .maybeSingle();
   if (error) throw new Error(`norma dispatch load failed: ${error.message}`);
@@ -80,11 +83,20 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
   let variables: Record<string, string>;
   try {
     variables = await loadCallVariables(client, row);
-    const eligibility = await checkNormaEligibility(client, {
-      propertyId: row.property_id,
-      contactId: row.contact_id ?? "",
-      phoneE164: row.phone_e164,
-    });
+    const recheck = () =>
+      checkNormaEligibility(client, { propertyId: row.property_id, contactId: row.contact_id ?? "", phoneE164: row.phone_e164 });
+    let eligibility = await recheck();
+    if (eligibility.eligible && (row.attempt ?? 1) === 1) {
+      // Call twice: the retry (attempt 2) never texts again. The text is a
+      // best-effort extra: refused, failed or slow, the call is still placed.
+      // After it, eligibility is read once more so the check stays the LAST
+      // thing before the send (the seller may have replied STOP meanwhile).
+      const sms = await sendNormaPrecallSms(client, row, deps.precallSms);
+      if (sms.status !== "disabled" && sms.status !== "empty_template") {
+        await recordPrecallSms(client, requestId, `${sms.status}:${sms.detail}`);
+        eligibility = await recheck();
+      }
+    }
     if (!eligibility.eligible) {
       await markNormaDispatchRejected(client, requestId, `ineligible:${eligibility.reason}`);
       return { status: "rejected", reason: `ineligible:${eligibility.reason}` };
@@ -132,6 +144,15 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
     // Left `dispatching`; reconciliation escalates it.
   }
   return { status: "unknown", reason: "bind_failed" };
+}
+
+/** Audit trail for the pre-call text. Best effort: it must never affect the call. */
+async function recordPrecallSms(client: Client, requestId: string, status: string): Promise<void> {
+  try {
+    await client.from("norma_call_requests").update({ precall_sms_status: status.slice(0, 120) }).eq("id", requestId);
+  } catch (error) {
+    reportError(error, { tags: { surface: "norma_precall_sms_record" }, extra: { requestId } });
+  }
 }
 
 /**
