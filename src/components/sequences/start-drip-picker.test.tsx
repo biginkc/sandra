@@ -130,3 +130,18 @@ it("enrolls the filtered choice and closes the popup on outside scroll", async (
   fireEvent.scroll(document.body);
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "Start follow-up drip" })).not.toBeInTheDocument());
 });
+
+it("moves focus into the portaled popup and back to the trigger on Escape", async () => {
+  listDripChoices.mockResolvedValue({ ok: true, data: [{ id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null }] });
+  const user = userEvent.setup();
+  render(<><StartDripPicker onChoose={vi.fn()} /><button type="button">After</button></>);
+  const trigger = screen.getByRole("button", { name: "Start follow-up drip" });
+  await user.click(trigger);
+  const dialog = screen.getByRole("dialog", { name: "Start follow-up drip" });
+  expect(dialog).toHaveFocus();
+  await user.tab();
+  expect(await screen.findByRole("searchbox", { name: "Search drips" })).toHaveFocus();
+  await user.keyboard("{Escape}");
+  expect(screen.queryByRole("dialog", { name: "Start follow-up drip" })).not.toBeInTheDocument();
+  expect(trigger).toHaveFocus();
+});
