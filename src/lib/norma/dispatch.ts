@@ -74,8 +74,12 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
   if (!(await claimNormaDispatch(client, requestId))) return { status: "not_claimed" };
 
   // ---- pre-send (a failure here means nothing was sent) --------------------
+  // The dial-time eligibility recheck is the LAST thing before the send: lead
+  // facts are loaded first, so the gap between "eligible" and "dialled" is a
+  // single function call, not a pair of database round trips.
   let variables: Record<string, string>;
   try {
+    variables = await loadCallVariables(client, row);
     const eligibility = await checkNormaEligibility(client, {
       propertyId: row.property_id,
       contactId: row.contact_id ?? "",
@@ -85,7 +89,6 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
       await markNormaDispatchRejected(client, requestId, `ineligible:${eligibility.reason}`);
       return { status: "rejected", reason: `ineligible:${eligibility.reason}` };
     }
-    variables = await loadCallVariables(client, row);
   } catch (preSendError) {
     reportError(preSendError, { tags: { surface: "norma_dispatch_pre_send" }, extra: { requestId } });
     try {

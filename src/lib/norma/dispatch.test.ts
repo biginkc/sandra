@@ -37,7 +37,7 @@ function setup(opts: { send?: BlandSendResult; gate?: typeof openGate; row?: Rec
       blandConfig: opts.blandConfig === undefined ? blandConfig : opts.blandConfig,
       gate: opts.gate ?? openGate,
     });
-  return { run, sendCall, rpcs, calls };
+  return { run, sendCall, rpcs, calls, client };
 }
 
 describe("dispatchNormaCall", () => {
@@ -102,6 +102,19 @@ describe("dispatchNormaCall", () => {
     await expect(t.run()).resolves.toEqual({ status: "rejected", reason: "ineligible:dnc_locked" });
     expect(t.sendCall).not.toHaveBeenCalled();
     expect(t.rpcs.fn_norma_mark_dispatch_rejected).toHaveBeenCalled();
+  });
+
+  it("the dial-time recheck is the last step before the send (after the lead facts are loaded)", async () => {
+    const t = setup();
+    const order: string[] = [];
+    const from = t.client.from.bind(t.client);
+    (t.client as unknown as { from: unknown }).from = (table: string) => (order.push(`read:${table}`), from(table as never));
+    t.rpcs.fn_norma_eligibility.mockImplementation(() => (order.push("recheck"), [{ eligible: true }]));
+    t.sendCall.mockImplementation(async () => (order.push("send"), { kind: "accepted", callId: "call-1" }));
+    await t.run();
+    expect(order.slice(-2)).toEqual(["recheck", "send"]);
+    expect(order.indexOf("read:properties")).toBeLessThan(order.indexOf("recheck"));
+    expect(order.indexOf("read:contacts")).toBeLessThan(order.indexOf("recheck"));
   });
 
   it("explicit Bland rejection: dispatch_rejected, not unknown", async () => {

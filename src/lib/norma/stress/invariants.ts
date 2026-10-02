@@ -157,9 +157,12 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
       v("2", `request ${request.id}: send-call without a dial-time eligibility recheck`);
       continue;
     }
+    // The recheck runs immediately before the send, so the only exposure left is a
+    // write that lands AFTER the recheck call has returned and before the send.
+    const recheckEnd = h.trace.events.find((e) => e.phase === "end" && e.actor === recheck.actor && e.what === recheck.what && e.tick > recheck.tick);
     for (const w of ctx?.writes ?? []) {
       if (w.doneTick < recheck.tick) v("2", `request ${request.id}: dialled although a ${w.kind} write had committed before the dial-time recheck`);
-      else if (w.doneTick < send.tick && w.startTick < send.tick) stats.windowRaces += 1;
+      else if (recheckEnd && w.doneTick > recheckEnd.tick && w.doneTick < send.tick && w.startTick < send.tick) stats.windowRaces += 1;
     }
   }
 
