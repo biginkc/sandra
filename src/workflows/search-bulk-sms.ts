@@ -17,6 +17,7 @@ import type {
   BulkSmsScheduleState,
   ResolvedBulkSmsQueueOpts,
 } from "@/lib/messaging/bulk-queue";
+import { AD_HOC_BULK_SMS_SOURCE as AD_HOC_SOURCE } from "@/lib/messaging/ad-hoc-sms-source";
 import { partitionSearchIds } from "@/lib/prospects/search-partition";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
@@ -25,8 +26,6 @@ import {
 } from "@/workflows/bulk-sms";
 
 const CHUNK_SIZE = 200;
-/** `audience_snapshot.source` written for ad-hoc bulk-SMS campaigns. */
-const AD_HOC_SOURCE = "bulk_sms_modal";
 /** Marks a job as Search-owned so only this workflow runs it. */
 export const SEARCH_SMS_JOB_SURFACE = "search";
 
