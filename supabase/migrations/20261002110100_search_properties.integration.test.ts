@@ -32,6 +32,8 @@ export function mutate(sql: string, name: string | undefined): string {
     case "drop-like-escape": return sql.replace("replace(replace(replace(lower(bounds.q), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') as q_like", "lower(bounds.q) as q_like");
     case "add-limit-100": return sql.replace("and p.deleted_at is null;\n  $search$", "and p.deleted_at is null limit 100;\n  $search$");
     case "drop-sms-channel": return sql.replace("m.channel = 'sms'", "true");
+    case "drop-length-cap": return sql.replace("rtrim(left(btrim(regexp_replace(coalesce($1,''), '\\s+', ' ', 'g')),100))", "btrim(regexp_replace(coalesce($1,''), '\\s+', ' ', 'g'))");
+    case "drop-structured": return sql.replace("(i.is_structured and length(i.qd) >= 3", "(length(i.qd) >= 3");
     case "auth-uid-null": return sql.replaceAll("auth.uid()", "null::uuid");
     default: return sql;
   }
@@ -132,6 +134,14 @@ describe("search_properties RPC", () => {
     P.entity = await property(BMH_ORG_ID, { address: "204 Kestrel Court", homeowner_contact_id: entity });
     const plus1 = await contact(BMH_ORG_ID, { first_name: "Plus", last_name: "Onecountry", phone_1: "+1 555 777 8888" });
     P.plus1 = await property(BMH_ORG_ID, { address: "205 Kestrel Court", homeowner_contact_id: plus1 });
+    const phone101 = await contact(BMH_ORG_ID, { first_name: "Digitsonly", last_name: "Hundredone", phone_1: "555 101 0000" });
+    P.phone101 = await property(BMH_ORG_ID, { address: "206 Kestrel Court", homeowner_contact_id: phone101 });
+    P.cap = await property(BMH_ORG_ID, { address: ("Capcheck " + "z".repeat(91)).slice(0, 100) });
+    const hundredOne = Array.from({ length: 101 }, (_, i) => ({ org_id: BMH_ORG_ID, address: `${2000 + i} Hundredone Heights`, city: "Springfield", state: "MO", zip: "65801" }));
+    for (let i = 0; i < hundredOne.length; i += 51) {
+      const { error } = await service.from("properties").insert(hundredOne.slice(i, i + 51));
+      if (error) throw new Error(error.message);
+    }
     P.plain = await property(BMH_ORG_ID, { address: "300 Nothingmatches Road", city: "Dayton", state: "OH", zip: "45402" });
     // SMS vs non-SMS text.
     P.smsHit = await property(BMH_ORG_ID, { address: "400 Quillfeather Way" });
@@ -186,8 +196,7 @@ describe("search_properties RPC", () => {
       ["(555) 123-4567"], ["555.123.4567"], ["5551234567"], ["555-123-4567"], ["123-4567"], ["4567"], ["555 222 3333"], ["2223333"],
     ])("matches homeowner phone_1/phone_2 typed as %s", async (q) => {
       const got = await ids(q);
-      expect(got).toEqual(expect.arrayContaining(sorted(P.main, P.lead, P.dead)));
-      expect(got).not.toContain(P.deleted);
+      expect(got).toEqual(sorted(P.main, P.lead, P.dead));
     });
     it.each([["+1 555 987 6543"], ["555 987 6543"], ["5559876543"], ["6543"]])("matches agent phone typed as %s", async (q) => {
       expect(await ids(q)).toEqual(sorted(P.main, P.closed));
@@ -195,10 +204,19 @@ describe("search_properties RPC", () => {
     it("normalizes a leading 1 on 11-digit queries so +1 matches both storage styles", async () => {
       expect(await ids("+1 555 777 8888")).toEqual([P.plus1]); // stored with +1
       expect(await ids("555 777 8888")).toEqual([P.plus1]);
-      expect(await ids("1-555-123-4567")).toEqual(expect.arrayContaining(sorted(P.main, P.lead, P.dead))); // stored without +1
-      expect(await ids("+1 (555) 123-4567")).toEqual(expect.arrayContaining(sorted(P.main, P.lead, P.dead)));
+      expect(await ids("1-555-123-4567")).toEqual(sorted(P.main, P.lead, P.dead)); // stored without +1
+      expect(await ids("+1 (555) 123-4567")).toEqual(sorted(P.main, P.lead, P.dead));
       // Only an exact 11-digit '1xxxxxxxxxx' is normalized; a 12-digit string is left alone.
       expect(await ids("1 555 123 4567 8")).toEqual([]);
+    });
+    it("phone-matches only structured queries (digit density like search_global)", async () => {
+      for (const q of ["+1 555 123 4567", "(555) 123-4567", "555.123.4567", "+1 (555) 123-4567"]) {
+        expect(await ids(q), q).toEqual(sorted(P.main, P.lead, P.dead));
+      }
+      // "101" is a phone fragment on the Hundredone contact, but "101 Zephyr" is text, not a phone.
+      expect(await ids("101 Zephyr")).toEqual([P.main]);
+      expect(await ids("101 Zephyr Lane")).toEqual([P.main]);
+      expect(await ids("555 101 0000")).toEqual([P.phone101]);
     });
     it("does not phone-match under 3 digits", async () => {
       expect(await ids("x12")).toEqual([]);
@@ -218,14 +236,14 @@ describe("search_properties RPC", () => {
       expect(await ids("Jane    Doe")).toEqual(sorted(P.main, P.lead, P.dead));
     });
     it("matches homeowner entity names alongside same-surname people", async () => {
-      expect(await ids("Doe")).toEqual(expect.arrayContaining(sorted(P.main, P.lead, P.dead, P.entity)));
+      expect(await ids("Doe")).toEqual(sorted(P.main, P.lead, P.dead, P.entity));
     });
     it("matches via the agent contact (not only the homeowner)", async () => {
       expect(await ids("Brokerwell")).toEqual(sorted(P.main, P.closed));
       expect(await ids("agnes@brokerage")).toEqual(sorted(P.main, P.closed));
     });
     it.each([["jane.doe@example"], ["EXAMPLE.COM"]])("matches partial email %s", async (q) => {
-      expect(await ids(q)).toEqual(expect.arrayContaining(sorted(P.main, P.lead, P.dead)));
+      expect(await ids(q)).toEqual(sorted(P.main, P.lead, P.dead));
     });
     it.each([
       ["101 zephyr lane", "main"], ["springfield", "main"], ["65801", "main"], ["ozarks", "main"],
@@ -250,20 +268,26 @@ describe("search_properties RPC", () => {
     it("guards length: <3 chars and whitespace return nothing; 100-char cap applies", async () => {
       expect(await ids("ab")).toEqual([]);
       expect(await ids("   ")).toEqual([]);
+      expect(await ids("\tab")).toEqual([]);
+      expect(await ids(" \t ab \n")).toEqual([]);
       expect(await ids("")).toEqual([]);
       const { data, error } = await a.rpc("search_properties", { q: null as unknown as string }).select("id");
       expect(error).toBeNull();
       expect(data).toEqual([]);
-      // 100-char cap: a long query that starts with a real address still truncates, never errors.
-      expect(await ids("101 zephyr lane #2b" + " ".repeat(5))).toContain(P.main);
+      // 100-char cap: the query is cut to 100 chars (then right-trimmed), never errors.
+      expect(await ids("101 zephyr lane #2b" + " ".repeat(5))).toEqual([P.main]);
+      const capAddr = ("Capcheck " + "z".repeat(91)).slice(0, 100);
+      expect(capAddr).toHaveLength(100);
+      expect(await ids(capAddr + "TAILBEYOND")).toEqual([P.cap]);
+      // A match term that only exists past char 100 must not match.
+      expect(await ids("x".repeat(100) + " zephyr")).toEqual([]);
       await ids("x".repeat(500));
     });
     it.each([
       ["%%%"], ["___"], ["\\\\\\"], ["a%b"], ["%"], ["_"], ["' or 1=1 --"], ["\"; drop table properties;--"], ["or(id.eq.1)"],
       ["foo:*"], ["a & b | !c"], ["(((((("], ["a,b,c"], ["😀😀😀"], ["\t\n \t\n x"], ["x".repeat(500)], ["\u0000ab".replace("\u0000", "")],
     ])("hostile input %j returns without error and without wildcard blow-up", async (q) => {
-      const got = await ids(q);
-      expect(got.length).toBeLessThan(5);
+      expect(await ids(q)).toEqual([]);
     });
     it("treats % _ and \\ literally", async () => {
       expect(await ids("50% Literal")).toEqual([P.literalPct]);
@@ -322,6 +346,12 @@ describe("search_properties RPC", () => {
       }
       expect(walked).toHaveLength(130);
       expect(new Set(walked).size).toBe(130);
+    });
+    it("exactly 101 matches: count and rows are both 101 (no cap at 100)", async () => {
+      const { count, error } = await a.rpc("search_properties", { q: "Hundredone Heights" }, { count: "exact", head: true }).select("id");
+      expect(error).toBeNull();
+      expect(count).toBe(101);
+      expect(await ids("Hundredone Heights")).toHaveLength(101);
     });
     it("paginates a mixed three-branch match set without duplicates", async () => {
       // "zephyr" hits property text, contact text (last_name none) and agent contact paths.

@@ -13,7 +13,13 @@
 --  4. message linkage: SMS only, with a conversation; the property must be in the
 --     same org as the message, visible, and not deleted; null property_id never
 --     matches.
---  5. whitespace: internal whitespace runs in the query collapse to one space.
+--  5. whitespace: internal whitespace runs collapse to one space BEFORE trim and
+--     the 100-char cut; trailing space left by the cut is trimmed.
+--  6. phone matching only when the query is "structured" like search_global:
+--     raw digit count >= 3 AND 10 * raw digits >= 7 * length(query without
+--     whitespace). So "101 Zephyr" never phone-matches contacts containing 101.
+--  7. contacts have no deleted_at column: a contact drops out of results when it
+--     has no live (non-deleted, visible-org) property linking to it.
 -- SECURITY DEFINER because RLS evaluation blocks index use (same reason as
 -- search_global); the explicit membership gate below is the security boundary.
 set lock_timeout = '5s';
@@ -36,9 +42,12 @@ begin
       and m.deletion_prepared_at is null
       and (m.access_expires_at is null or m.access_expires_at > now())
   ), bounds as not materialized (
-    select left(regexp_replace(btrim(coalesce($1,'')), '\s+', ' ', 'g'),100) as q
+    select rtrim(left(btrim(regexp_replace(coalesce($1,''), '\s+', ' ', 'g')),100)) as q
   ), input as not materialized (
     select bounds.q,
+      (length(regexp_replace(bounds.q,'[^0-9]','','g')) >= 3
+        and 10 * length(regexp_replace(bounds.q,'[^0-9]','','g'))
+            >= 7 * length(regexp_replace(bounds.q,'\s','','g'))) as is_structured,
       case when regexp_replace(bounds.q,'[^0-9]','','g') ~ '^1[0-9]{10}$'
         then substr(regexp_replace(bounds.q,'[^0-9]','','g'), 2)
         else regexp_replace(bounds.q,'[^0-9]','','g') end as qd,
@@ -55,7 +64,7 @@ begin
     from public.contacts c cross join input i
     where c.org_id in (select org_id from visible_orgs) and (
       c.search_text ilike '%' || i.q_like || '%' escape E'\\'
-      or (length(i.qd) >= 3 and c.phone_digits ilike '%' || i.qd || '%')
+      or (i.is_structured and length(i.qd) >= 3 and c.phone_digits ilike '%' || i.qd || '%')
     )
   ), contact_property_ids as (
     select p.id
@@ -66,8 +75,9 @@ begin
     where p.org_id in (select org_id from visible_orgs) and p.deleted_at is null
   ), message_property_ids as (
     select mp.id
-    from public.messages m cross join input i
+    from public.messages m
     join public.properties mp on mp.id = m.property_id and mp.org_id = m.org_id
+    cross join input i
     where $2 is true
       and mp.org_id in (select org_id from visible_orgs) and mp.deleted_at is null
       and m.org_id in (select org_id from visible_orgs)

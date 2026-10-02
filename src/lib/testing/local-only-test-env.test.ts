@@ -16,6 +16,8 @@ describe("assertLocalOnlyTestEnv", () => {
     ["hosted API", localDb, "https://ncsngxlcyxylaeskiteu.supabase.co"],
     ["lookalike API host", localDb, "http://127.0.0.1.evil.test"],
     ["garbage API", localDb, "not a url"],
+    ["fragment host trick", localDb, "http://evil.com#@127.0.0.1"],
+    ["userinfo host trick", localDb, "http://127.0.0.1@evil.com"],
     ["missing DB", undefined, localApi],
     ["missing API", localDb, undefined],
     ["empty", "", ""],

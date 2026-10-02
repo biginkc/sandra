@@ -18,7 +18,7 @@ const migrationsDir = path.join(root, "supabase/migrations");
  */
 const loopbackOnlySuites = readdirSync(migrationsDir)
   .filter((name) => name.endsWith(".integration.test.ts"))
-  .filter((name) => readFileSync(path.join(migrationsDir, name), "utf8").includes("requireLoopbackPostgresUrl"))
+  .filter((name) => readFileSync(path.join(migrationsDir, name), "utf8").includes("requireLoopbackPostgresUrl") || readFileSync(path.join(migrationsDir, name), "utf8").includes("assertLocalOnlyTestEnv"))
   .map((name) => `supabase/migrations/${name}`);
 
 describe("integration runner configuration boundary", () => {
