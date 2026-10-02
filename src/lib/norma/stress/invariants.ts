@@ -118,7 +118,8 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
   // TODO(pending decision: cancel review task on DNC-locked lead): tasks on a do-not-contact
   // lead are read-only by design, so a "needs review" task opened BEFORE the lock stays open
   // after the request settles. That is the only leftover excused here: it must be the review
-  // task, and the lock must have been recorded before the request settled. Any other open task,
+  // task, and the lock must have been recorded before the request settled. The case stays
+  // on record as a deterministic test (pending-dnc-stuck-review-task.integration.test.ts). Any other open task,
   // or a lock that arrived after settlement, is still a violation.
   const staleReviewExcused = (r: Req, open: Record<string, unknown>[]) => {
     const lock = lockSeq(r.property_id);
@@ -126,6 +127,11 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
     const settled = audit.find((a) => a.tbl === "norma_call_requests" && a.row_id === r.id && ["completed", "dispatch_rejected"].includes(String(a.new_row?.status)));
     if (!settled || lock > Number(settled.seq)) return false;
     return open.every((t) => /needs review/i.test(String(t.title)));
+  };
+  const whyNotExcused = (r: Req, open: Record<string, unknown>[]) => {
+    const prop = properties.get(r.property_id);
+    const settled = audit.find((a) => a.tbl === "norma_call_requests" && a.row_id === r.id && ["completed", "dispatch_rejected"].includes(String(a.new_row?.status)));
+    return ` [lock seq ${lockSeq(r.property_id)}, settled seq ${settled?.seq ?? "none"}, dncLocked ${dncLocked(r.property_id)}, property is_dnc_locked ${prop?.is_dnc_locked}, titles ${open.map((t) => `"${t.title}"/${t.status}`).join(",")}, lock audit rows ${JSON.stringify(audit.filter((a) => a.property_id === r.property_id && (a.tbl === "properties" || a.tbl === "contacts")).map((a) => [a.seq, a.tbl, a.new_row?.is_dnc_locked ?? a.new_row?.do_not_contact]))}]`;
   };
   const reqsByProperty = new Map<string, Req[]>();
   for (const r of requests) reqsByProperty.set(r.property_id, [...(reqsByProperty.get(r.property_id) ?? []), r]);
@@ -231,7 +237,7 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
       } else if (r.outcome === "no_answer" || r.outcome === "not_interested") {
         // A review task opened before a do-not-contact lock cannot be closed afterwards (tasks on a locked lead are read-only).
         const openTasks = rowsForTask.filter((t) => t.status === "open" || t.status === "snoozed");
-        if (openTasks.length > 0 && !staleReviewExcused(r, openTasks)) v("3", `request ${r.id} (${r.outcome}): a task is open but this outcome needs none`);
+        if (openTasks.length > 0 && !staleReviewExcused(r, openTasks)) v("3", `request ${r.id} (${r.outcome}): a task is open but this outcome needs none${whyNotExcused(r, openTasks)}`);
         if (!everReviewed && rowsForTask.length > 0) v("3", `request ${r.id} (${r.outcome}): a task exists but none was ever wanted`);
       }
       // Dispositions and wrong-number.
@@ -258,7 +264,7 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
       else if (!none && !/needs review/i.test(String(open[0]!.title))) v("3", `request ${r.id}: review task title "${open[0]!.title}"`);
     } else if (r.status === "dispatch_rejected") {
       const openTasks = rowsForTask.filter((t) => t.status === "open" || t.status === "snoozed");
-      if (openTasks.length > 0 && !staleReviewExcused(r, openTasks)) v("3", `request ${r.id}: dispatch_rejected but a task is still open`);
+      if (openTasks.length > 0 && !staleReviewExcused(r, openTasks)) v("3", `request ${r.id}: dispatch_rejected but a task is still open${whyNotExcused(r, openTasks)}`);
     } else if (rowsForTask.length > 0) {
       v("3", `request ${r.id} (${r.status}): has a task before any outcome`);
     }

@@ -68,6 +68,9 @@ begin
   if tg_table_name = 'norma_notifications' then
     select r.property_id into v_prop from public.norma_call_requests r where r.id = (v_row ->> 'request_id')::uuid;
   end if;
+  if tg_table_name = 'properties' then
+    v_prop := (v_row ->> 'id')::uuid;
+  end if;
   if tg_table_name = 'contacts' then
     select p.id into v_prop from public.properties p where p.homeowner_contact_id = (v_row ->> 'id')::uuid limit 1;
   end if;
