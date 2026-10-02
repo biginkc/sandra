@@ -410,7 +410,7 @@ async function bulkSmsChunkStep(args: {
   if (args.opts.campaignSource === "ad_hoc_bulk_sms") {
     const guard = await filterToProspectIds(adminClient, args.propertyIds);
     chunkIds = guard.prospectIds;
-    skippedLeads = args.propertyIds.length - guard.prospectIds.length;
+    skippedLeads = guard.skippedLeads;
   }
   const refreshed = await refreshCampaignScheduleForChunk(
     adminClient,
