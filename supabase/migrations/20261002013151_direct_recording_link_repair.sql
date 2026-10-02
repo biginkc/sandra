@@ -69,6 +69,13 @@ begin
      where id = p_call_activity_id and direct_call_id = p_direct_call_id
   );
   if not v_has_activity then
+    -- Capture retries can observe the provider recording before wrap-up has
+    -- created its activity. Do not spend the final-stage linkage budget while
+    -- the ledger is still pending or failed; only available rows belong to
+    -- this bounded reconciliation queue.
+    if v_stage.status is distinct from 'available' then
+      return;
+    end if;
     v_next_attempt := least(v_stage.link_attempt_count + 1, 100);
     update public.direct_call_recordings
        set link_attempt_count = v_next_attempt,

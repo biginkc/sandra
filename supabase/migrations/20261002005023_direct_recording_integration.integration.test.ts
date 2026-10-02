@@ -58,6 +58,12 @@ it("installs the direct recording ledger, private bucket, and rollback atomicall
       [recordingCall, "provider-recording-1", "seller-control", "seller-leg", "seller-session", "2026-10-01T12:00:01Z"],
     )).rows[0];
     expect(leasedClaim).toMatchObject({ should_capture: false, status: "pending", attempt_count: 1 });
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await pg.query("select public.direct_call_recording_sync_activity($1,$2,$3,$4)", [recordingCall, null, "provider-recording-1", `2026-10-01T12:00:${String(2 + attempt).padStart(2, "0")}Z`]);
+    }
+    expect((await pg.query(
+      "select status, link_attempt_count, link_next_attempt_at from public.direct_call_recordings where provider_recording_id='provider-recording-1'",
+    )).rows[0]).toMatchObject({ status: "pending", link_attempt_count: 0, link_next_attempt_at: null });
     await pg.query(
       "insert into public.call_activities(id,org_id,property_id,contact_id,jitter_attempt_id,provider,operator_user_id,direct_call_id) values ($1,$2,$3,$4,$5,'sandra_softphone',$6,$7)",
       [recordingActivity, ORG, recordingProperty, recordingContact, "sandra-recording-test", USER_C, recordingCall],
@@ -70,6 +76,12 @@ it("installs the direct recording ledger, private bucket, and rollback atomicall
     )).rows[0].direct_call_recording_mark_failed).toBe(true);
     await pg.query("select public.direct_call_recording_sync_activity($1,$2,$3,$4)", [recordingCall, recordingActivity, "provider-recording-1", "2026-10-01T12:01:01Z"]);
     expect((await pg.query("select status from public.call_recordings where call_activity_id=$1", [recordingActivity])).rows[0].status).toBe("failed");
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await pg.query("select public.direct_call_recording_sync_activity($1,$2,$3,$4)", [recordingCall, null, "provider-recording-1", `2026-10-01T12:01:${String(2 + attempt).padStart(2, "0")}Z`]);
+    }
+    expect((await pg.query(
+      "select status, link_attempt_count, link_next_attempt_at from public.direct_call_recordings where provider_recording_id='provider-recording-1'",
+    )).rows[0]).toMatchObject({ status: "failed", link_attempt_count: 0, link_next_attempt_at: null });
     expect((await pg.query(
       "select public.direct_call_recording_mark_available($1,$2,$3,$4,$5,$6)",
       ["provider-recording-1", recordingCall, "sandra-direct-recordings", `${ORG}/${recordingCall}/provider-recording-1.wav`, 7, "2026-10-01T12:02:00Z"],
