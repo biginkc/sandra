@@ -141,7 +141,7 @@ function hrefForBlocks(blocks: BlockStack): string {
 }
 
 function parseRenderedCount(text: string): number | null {
-  if (text.includes("No prospects")) return 0;
+  if (text.includes("No results")) return 0;
   const match = text.match(/Showing\s+[\d,]+(?:[\u2013-][\d,]+)?\s+of\s+([\d,]+)/);
   if (!match) return null;
   return Number(match[1].replaceAll(",", ""));

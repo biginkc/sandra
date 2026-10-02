@@ -581,6 +581,32 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
   });
 });
 
+describe("<BulkSmsModal /> skipped leads", () => {
+  it("tells the operator how many leads in the selection will be skipped", async () => {
+    assessBulkSmsAudience.mockResolvedValue({
+      ok: true,
+      data: { total: 6, mobile: 6, landline: 0, unknown: 0, noPhone: 0, skippedLeads: 4 },
+    });
+    renderModal(Array.from({ length: 10 }, (_, i) => `p${i}`));
+
+    expect(await screen.findByTestId("bulk-sms-skipped-leads")).toHaveTextContent(
+      /4 leads skipped/,
+    );
+  });
+
+  it("shows nothing about leads when none were skipped", async () => {
+    assessBulkSmsAudience.mockResolvedValue({
+      ok: true,
+      data: { total: 6, mobile: 6, landline: 0, unknown: 0, noPhone: 0, skippedLeads: 0 },
+    });
+    renderModal(["p1"]);
+    await waitFor(() =>
+      expect(screen.getByTestId("line-type-assessment")).toHaveTextContent(/6 mobile/),
+    );
+    expect(screen.queryByTestId("bulk-sms-skipped-leads")).toBeNull();
+  });
+});
+
 describe("<BulkSmsModal /> line-type assessment", () => {
   it("shows the mobile/landline/unknown breakdown from assessBulkSmsAudience", async () => {
     assessBulkSmsAudience.mockResolvedValue({

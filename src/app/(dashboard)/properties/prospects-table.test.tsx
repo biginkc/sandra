@@ -144,6 +144,7 @@ function makeRow(overrides: Partial<ProspectRow> & { id: string }): ProspectRow 
     engagement: overrides.engagement ?? "none",
     last_message_preview: overrides.last_message_preview ?? null,
     outreach_dispo: overrides.outreach_dispo ?? null,
+    status: overrides.status,
     imported_at: overrides.imported_at ?? null,
     dnc_reason: overrides.dnc_reason ?? null,
     channel_restriction: overrides.channel_restriction ?? null,
@@ -1465,5 +1466,77 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     });
     const banner = await screen.findByTestId("select-all-banner");
     expect(banner.dataset.mode).toBe("all-matching");
+  });
+});
+
+describe("<ProspectsTable /> Search page copy and mixed statuses", () => {
+  it("labels the search input for names, phones, emails, addresses and messages", () => {
+    renderTable([makeRow({ id: "p1" })]);
+    expect(
+      screen.getByRole("textbox", {
+        name: "Search leads and prospects by name, phone, email, address or message",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a Status column so leads and prospects are legible together", () => {
+    renderTable([
+      makeRow({ id: "p1", status: "prospect" }),
+      makeRow({ id: "l1", status: "new_lead" }),
+      makeRow({ id: "d1", status: "dead" }),
+      makeRow({ id: "o1", status: "under_contract" }),
+    ]);
+    expect(screen.getByRole("columnheader", { name: "Status" })).toBeInTheDocument();
+    expect(screen.getByTestId("prospects-status-p1")).toHaveTextContent("Prospect");
+    expect(screen.getByTestId("prospects-status-l1")).toHaveTextContent("New lead");
+    expect(screen.getByTestId("prospects-status-d1")).toHaveTextContent("Dead");
+    expect(screen.getByTestId("prospects-status-o1")).toHaveTextContent("Under contract");
+  });
+
+  it("explains the 3-character rule in the empty state for 1-2 character searches", () => {
+    renderTable([], [], { search: "ab" });
+    expect(
+      screen.getByText(/Searches need 3\+ characters to match names, phones and messages/),
+    ).toBeInTheDocument();
+  });
+
+  it("uses lead-aware empty-state copy for longer searches", () => {
+    renderTable([], [], { search: "nobody here" });
+    expect(screen.getByText(/No leads or prospects match "nobody here"/)).toBeInTheDocument();
+  });
+
+  it("select-all across pages reports skipped leads and carries the search origin", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    getAllMatchingProspectSelection.mockResolvedValue({
+      ok: true,
+      data: { eligibleIds: ["p1"], eligibleCount: 1, dncLockedCount: 0, matchedCount: 5, skippedLeads: 4 },
+    });
+    render(
+      <ProspectsTable
+        prospects={[makeRow({ id: "p1", status: "prospect" })]}
+        lists={[]}
+        tags={[]}
+        teamMembers={[]}
+        currentUserId={null}
+        blockStack={EMPTY_BLOCK_STACK}
+        filtersParam={null}
+        search="oak"
+        total={5}
+        pageSize={1}
+        page={1}
+        totalPages={5}
+        headerCount=""
+        sort="created_at"
+        dir="desc"
+        canDelete={false}
+      />,
+    );
+    await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
+    await user.click(screen.getByTestId("select-all-across-pages"));
+    const banner = await screen.findByTestId("select-all-banner");
+    expect(banner.textContent).toMatch(/4 leads skipped/);
+    expect(getAllMatchingProspectSelection).toHaveBeenCalledWith(
+      expect.objectContaining({ origin: "search_page" }),
+    );
   });
 });

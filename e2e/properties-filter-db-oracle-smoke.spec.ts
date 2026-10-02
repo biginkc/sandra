@@ -28,7 +28,7 @@ async function expectScenarioMatchesPage(page: Page, scenario: Scenario) {
   const summary = page
     .getByText(
       new RegExp(
-        `Showing 1.* of ${scenario.oracle.count.toLocaleString()} prospect`,
+        `Showing 1.* of ${scenario.oracle.count.toLocaleString()} result`,
       ),
     )
     .first();
@@ -36,8 +36,8 @@ async function expectScenarioMatchesPage(page: Page, scenario: Scenario) {
   let lastError: unknown;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     await page.goto(url);
-    await page.getByRole("heading", { name: "Prospects" }).waitFor();
-    await expect(page.getByText(/Failed to load prospects/i)).not.toBeVisible({
+    await page.getByRole("heading", { name: "Search" }).waitFor();
+    await expect(page.getByText(/Failed to load results/i)).not.toBeVisible({
       timeout: 10_000,
     });
     try {
@@ -79,12 +79,14 @@ async function listOracle(
       count: "exact",
     })
     .is("deleted_at", null)
-    .eq("status", extra.status ?? "prospect")
+    .eq("is_training", false)
     .eq("property_lists.list_id", listId)
     .order("created_at", { ascending: false })
     .order("id", { ascending: true })
     .range(0, 49);
 
+  // Search shows every status; only an explicit status narrows the oracle.
+  if (extra.status) query = query.eq("status", extra.status);
   if (extra.isVacant != null) query = query.eq("is_vacant", extra.isVacant);
   if (extra.cassStatuses?.length)
     query = query.in("cass_status", extra.cassStatuses);
@@ -107,6 +109,7 @@ async function pipelineOracle(
     .from("properties")
     .select("id, address, created_at", { count: "exact" })
     .is("deleted_at", null)
+    .eq("is_training", false)
     .eq("status", status)
     .order("created_at", { ascending: false })
     .order("id", { ascending: true })
@@ -170,7 +173,7 @@ async function propertyIdsWithEngagement(
     .from("properties")
     .select("id, property_lists!inner(list_id)")
     .is("deleted_at", null)
-    .eq("status", "prospect")
+    .eq("is_training", false)
     .eq("property_lists.list_id", listId);
   expect(error).toBeNull();
   const listIds = (data ?? []).map((row) => row.id);

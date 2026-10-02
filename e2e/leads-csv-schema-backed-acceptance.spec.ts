@@ -125,7 +125,7 @@ test("schema-backed Prospects safety and CSV review work at desktop and narrow w
   });
 
   await page.goto("/properties");
-  await expect(page.getByRole("heading", { name: "Prospects" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Search" })).toBeVisible();
   await expect(page.getByText("101 Permanent DNC Way")).toBeVisible();
   await expect(page.getByText("⊘ DO NOT CONTACT")).toBeVisible();
   await expect(

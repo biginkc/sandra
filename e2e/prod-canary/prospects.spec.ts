@@ -36,7 +36,7 @@ test("production canary finds a canary-owned prospect through UI search", async 
     });
 
     await expect(page.getByText(address)).toBeVisible({ timeout: 20_000 });
-    await expect(page.getByText(/Showing 1.*of 1 prospect/i)).toBeVisible();
+    await expect(page.getByText(/Showing 1.*of 1 result/i)).toBeVisible();
 
     const { data, error } = await supabase
       .from("properties")

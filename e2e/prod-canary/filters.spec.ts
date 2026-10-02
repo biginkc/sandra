@@ -112,7 +112,7 @@ test("production canary applies List + Equity + CASS filters to canary prospects
     await expect(page.getByText(lowEquity.address)).not.toBeVisible();
     await expect(page.getByText(unverified.address)).not.toBeVisible();
     await expect(page.getByText(unlisted.address)).not.toBeVisible();
-    await expect(page.getByText(/Showing 1.*of 1 prospect/i)).toBeVisible();
+    await expect(page.getByText(/Showing 1.*of 1 result/i)).toBeVisible();
 
     const filters = new URL(page.url()).searchParams.get("filters");
     expect(filters).toBeTruthy();

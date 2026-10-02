@@ -12,7 +12,7 @@ test("production canary auth shell loads core routes", async ({
   await expect(page).not.toHaveURL(/\/login/);
   await expect(page.locator("text=Sign out")).toBeVisible();
   await expect(page.getByRole("navigation", { name: "Primary" })).toContainText(
-    "Prospects",
+    "Search",
   );
 
   await page.getByRole("link", { name: /^leads$/i }).click();

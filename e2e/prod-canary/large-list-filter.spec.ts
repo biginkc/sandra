@@ -83,9 +83,9 @@ test("production canary filters a large canary-owned list without Bad Request", 
     await page.getByLabel(list.name).check();
 
     await expect(
-      page.getByText(/Failed to load prospects: Bad Request/i),
+      page.getByText(/Failed to load results: Bad Request/i),
     ).not.toBeVisible({ timeout: 20_000 });
-    await expect(page.getByText(new RegExp(`Showing 1.*50 of ${LARGE_LIST_SIZE} prospects`))).toBeVisible({
+    await expect(page.getByText(new RegExp(`Showing 1.*50 of ${LARGE_LIST_SIZE} results`))).toBeVisible({
       timeout: 20_000,
     });
     await expect(page.getByText(prefix).first()).toBeVisible();

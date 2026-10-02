@@ -147,7 +147,7 @@ test("production canary imports a canary CSV and renders the created prospects",
       timeout: 20_000,
     });
     await expect(page.getByText(addressPattern(prefix, "402 Maple ST"))).toBeVisible();
-    await expect(page.getByText(/Showing 1.*of 2 prospects/i)).toBeVisible();
+    await expect(page.getByText(/Showing 1.*of 2 results/i)).toBeVisible();
   } finally {
     await deleteCanaryPropertiesByAddressPrefix(supabase, prefix);
     await deleteCanaryImportArtifactsByFilename(supabase, filename);
