@@ -163,7 +163,7 @@ describe("bland webhook route core", () => {
     };
     const result = await dispatchNormaCall(REQUEST_ID, {
       client, bland,
-      blandConfig: { apiKey: "k", baseUrl: "x", pathwayId: "p", pathwayVersion: 1, fromNumber: "+12135550100", webhookUrl: "https://x.test", timeoutMs: 1000 },
+      blandConfig: { apiKey: "k", baseUrl: "x", pathwayId: "p", pathwayVersion: 1, voice: "v", fromNumber: "+12135550100", webhookUrl: "https://x.test", timeoutMs: 1000 },
       gate: { dispatchEnabled: true, sellerRelease: false, allowedNumbers: [PHONE] },
     });
     expect(result).toEqual({ status: "dispatched", callId: "call-1" });

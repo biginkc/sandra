@@ -32,12 +32,16 @@ describe("dispatch gate", () => {
   it("bland config is null unless every required value is valid", () => {
     const ok = {
       BLAND_API_KEY: "k", NORMA_BLAND_PATHWAY_ID: "p", NORMA_BLAND_PATHWAY_VERSION: "17",
-      NORMA_BLAND_FROM_NUMBER: "+12135550100", NORMA_BLAND_WEBHOOK_URL: "https://x.test/h",
+      NORMA_BLAND_FROM_NUMBER: "+12135550100", NORMA_BLAND_WEBHOOK_URL: "https://x.test/h", NORMA_BLAND_VOICE: "voice-1",
     };
     expect(readNormaBlandConfig(ok)).toMatchObject({ pathwayVersion: 17, timeoutMs: 10_000, baseUrl: "https://api.bland.ai" });
     expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_PATHWAY_VERSION: "0.0.17" })).toBeNull();
     expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_PATHWAY_VERSION: undefined })).toMatchObject({ pathwayVersion: 3 });
     expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_WEBHOOK_URL: "http://x.test" })).toBeNull();
     expect(readNormaBlandConfig({ ...ok, BLAND_API_KEY: "" })).toBeNull();
+    // The voice is required: unset or blank means no config, so nothing can be dialled.
+    expect(readNormaBlandConfig(ok)).toMatchObject({ voice: "voice-1" });
+    expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_VOICE: undefined })).toBeNull();
+    expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_VOICE: "  " })).toBeNull();
   });
 });

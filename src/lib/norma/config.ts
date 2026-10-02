@@ -34,6 +34,8 @@ export type NormaBlandConfig = {
   pathwayId: string;
   /** Bland's `pathway_version` is an integer, not the agent semver. */
   pathwayVersion: number;
+  /** Bland voice for the call (NORMA_BLAND_VOICE). Required: the pathway pin alone does not choose one. */
+  voice: string;
   fromNumber: string;
   webhookUrl: string;
   timeoutMs: number;
@@ -54,9 +56,11 @@ export function readNormaBlandConfig(env: NormaEnv = process.env): NormaBlandCon
   const pathwayId = env.NORMA_BLAND_PATHWAY_ID?.trim();
   const fromNumber = env.NORMA_BLAND_FROM_NUMBER?.trim();
   const webhookUrl = env.NORMA_BLAND_WEBHOOK_URL?.trim();
+  const voice = env.NORMA_BLAND_VOICE?.trim();
   const versionText = env.NORMA_BLAND_PATHWAY_VERSION?.trim();
   const version = versionText ? Number(versionText) : DEFAULT_NORMA_PATHWAY_VERSION;
-  if (!apiKey || !pathwayId || !fromNumber || !webhookUrl) return null;
+  // No voice, no call: dispatch refuses (closed as rejected before the claim) rather than let Bland pick.
+  if (!apiKey || !pathwayId || !fromNumber || !webhookUrl || !voice) return null;
   if (!Number.isInteger(version) || version < 0) return null;
   if (!/^https:\/\//.test(webhookUrl)) return null;
   const timeout = Number(env.NORMA_BLAND_TIMEOUT_MS);
@@ -65,6 +69,7 @@ export function readNormaBlandConfig(env: NormaEnv = process.env): NormaBlandCon
     baseUrl: (env.NORMA_BLAND_BASE_URL?.trim() || DEFAULT_BLAND_BASE_URL).replace(/\/+$/, ""),
     pathwayId,
     pathwayVersion: version,
+    voice,
     fromNumber,
     webhookUrl,
     timeoutMs: Number.isFinite(timeout) && timeout >= 1000 ? timeout : DEFAULT_BLAND_TIMEOUT_MS,

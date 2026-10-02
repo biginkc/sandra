@@ -1,14 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { BlandClient, BlandSendResult } from "./bland";
-import type { NormaBlandConfig } from "./config";
+import { readNormaBlandConfig, type NormaBlandConfig } from "./config";
 import { dispatchNormaCall } from "./dispatch";
 import { fakeClient, PHONE, REQUEST_ID, requestRow } from "./test-helpers";
 
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 
 const blandConfig: NormaBlandConfig = {
-  apiKey: "k", baseUrl: "https://bland.test", pathwayId: "pw", pathwayVersion: 17,
+  apiKey: "k", baseUrl: "https://bland.test", pathwayId: "pw", pathwayVersion: 17, voice: "voice-1",
   fromNumber: "+12135550100", webhookUrl: "https://sandra.test/h", timeoutMs: 1000,
 };
 const openGate = { dispatchEnabled: true, sellerRelease: false, allowedNumbers: [PHONE] };
@@ -73,6 +73,19 @@ describe("dispatchNormaCall", () => {
     const t = setup({ blandConfig: null });
     await expect(t.run()).resolves.toEqual({ status: "rejected", reason: "bland_not_configured" });
     expect(t.sendCall).not.toHaveBeenCalled();
+  });
+
+  it("no voice configured (the env value is unset): rejected before the claim, no call", async () => {
+    // The real reader returns null without NORMA_BLAND_VOICE, which is what dispatch sees.
+    const unset = readNormaBlandConfig({
+      BLAND_API_KEY: "k", NORMA_BLAND_PATHWAY_ID: "pw", NORMA_BLAND_FROM_NUMBER: "+12135550100", NORMA_BLAND_WEBHOOK_URL: "https://sandra.test/h",
+    });
+    expect(unset).toBeNull();
+    const t = setup({ blandConfig: unset });
+    await expect(t.run()).resolves.toEqual({ status: "rejected", reason: "bland_not_configured" });
+    expect(t.sendCall).not.toHaveBeenCalled();
+    expect(t.rpcs.fn_norma_claim_dispatch).not.toHaveBeenCalled();
+    expect(t.rpcs.fn_norma_mark_dispatch_rejected).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_reason: "bland_not_configured", p_expected_status: "requested" });
   });
 
   it("happy path: claim, eligibility, send with correlation, bind", async () => {

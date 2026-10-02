@@ -78,6 +78,7 @@ export function buildSendCallBody(config: NormaBlandConfig, params: BlandSendCal
     phone_number: params.phoneNumber,
     pathway_id: config.pathwayId,
     pathway_version: config.pathwayVersion,
+    voice: config.voice,
     from: config.fromNumber,
     metadata: { request_id: params.requestId, idempotency_key: params.idempotencyKey },
     webhook: config.webhookUrl,
