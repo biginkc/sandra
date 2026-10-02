@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import WebSocket from 'ws'
 import { assertSecret, createCoachToken, verifyCoachToken } from '../src/auth.js'
 import { parseMedia, parseStart } from '../src/media.js'
 import { MediaIntegrityError, MediaOrderBuffer } from '../src/order.js'
@@ -9,6 +10,7 @@ import { computeScriptDigest, type ScriptBundle } from '../src/script-bundle.js'
 import { CoachSession } from '../src/session.js'
 import { SupabaseDirectCoachDb } from '../src/db.js'
 import { SupabaseCoachPublisher } from '../src/publisher.js'
+import { createCoachServer } from '../src/server.js'
 import type { CoachClaims, CoachLogger, CoachPublisher, DirectCoachBinding, DirectCoachDb } from '../src/types.js'
 import type { DeepgramLiveBridge, DeepgramLiveBridgeOptions } from '../src/approved/deepgram-live.js'
 import type { ObjectionPromptCall } from '../src/approved/objection-prompt/index.js'
@@ -281,4 +283,91 @@ test('publisher close fences a retry after an in-flight send and never recreates
   assert.equal(channelCount, 1)
 })
 
+test('shutdown fences pending upgrades before draining accepted sessions', async () => {
+  const callA: CoachClaims = { callId: 'call-a', sellerLegId: 'seller-a', expiresAtMs: Date.now() + 100_000 }
+  const callB: CoachClaims = { callId: 'call-b', sellerLegId: 'seller-b', expiresAtMs: Date.now() + 100_000 }
+  const callC: CoachClaims = { callId: 'call-c', sellerLegId: 'seller-c', expiresAtMs: Date.now() + 100_000 }
+  const bindingFor = (value: CoachClaims): DirectCoachBinding => ({ ...binding, ...value })
+  let resolveB!: (value: DirectCoachBinding) => void
+  let signalBRead!: () => void
+  const bRead = new Promise<void>((resolve) => { signalBRead = resolve })
+  const readCalls: string[] = []
+  const db: DirectCoachDb = {
+    readBinding: async (value) => {
+      readCalls.push(value.callId)
+      if (value.callId === callA.callId) return bindingFor(callA)
+      if (value.callId === callB.callId) { signalBRead(); return new Promise((resolve) => { resolveB = resolve }) }
+      return null
+    },
+    isActive: async () => true,
+    close: async () => {},
+  }
+  const accepted: string[] = []
+  const finished: string[] = []
+  let signalAFinish!: () => void
+  const aFinishStarted = new Promise<void>((resolve) => { signalAFinish = resolve })
+  let publisherCloses = 0
+  const publisher: CoachPublisher = { publish: async () => {}, close: async () => {}, closeAll: async () => { publisherCloses += 1 } }
+  const service = createCoachServer({
+    secret: SECRET, db, publisher, deepgramApiKey: 'deepgram-test-key', jevApiKey: 'jev-test-key', logger,
+    sessionFactory: (ws, value, _admitted, onEnd) => {
+      accepted.push(value.callId)
+      const session = {
+        finish: async (reason: string) => {
+          finished.push(`${value.callId}:${reason}`)
+          if (value.callId === callA.callId) {
+            signalAFinish()
+            await new Promise<void>((resolve) => { signalAFinish = resolve })
+          }
+          onEnd()
+          ws.close()
+        },
+        disconnected: () => { onEnd() },
+      }
+      return session as unknown as CoachSession
+    },
+  })
+  await service.listen(0, '127.0.0.1')
+  const address = service.server.address()
+  assert.ok(address && typeof address === 'object')
+  const base = `ws://127.0.0.1:${address.port}/media`
+  const wsA = new WebSocket(`${base}?token=${encodeURIComponent(createCoachToken(callA, SECRET))}`)
+  await waitForWebSocketOpen(wsA)
+  const wsB = new WebSocket(`${base}?token=${encodeURIComponent(createCoachToken(callB, SECRET))}`)
+  const bTerminal = waitForWebSocketTerminal(wsB)
+  await bRead
+  const closing = service.close()
+  await aFinishStarted
+  const wsC = new WebSocket(`${base}?token=${encodeURIComponent(createCoachToken(callC, SECRET))}`)
+  const cTerminal = waitForWebSocketTerminal(wsC)
+  resolveB(bindingFor(callB))
+  signalAFinish()
+  await Promise.all([closing, bTerminal, cTerminal])
+  assert.deepEqual(readCalls, [callA.callId, callB.callId])
+  assert.deepEqual(accepted, [callA.callId])
+  assert.deepEqual(finished, [`${callA.callId}:server_shutdown`])
+  assert.equal(service.activeCalls.size, 0)
+  assert.equal(publisherCloses, 1)
+})
+
 function tick(): Promise<void> { return new Promise((resolve) => setImmediate(resolve)) }
+
+function waitForWebSocketOpen(ws: WebSocket): Promise<void> {
+  return new Promise((resolve, reject) => {
+    ws.once('open', () => resolve())
+    ws.once('error', reject)
+  })
+}
+
+function waitForWebSocketTerminal(ws: WebSocket): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+    ws.once('error', finish)
+    ws.once('close', finish)
+  })
+}

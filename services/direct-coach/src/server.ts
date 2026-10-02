@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import type { Duplex } from 'node:stream'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { verifyCoachToken } from './auth.js'
 import { CoachSession } from './session.js'
@@ -6,6 +7,7 @@ import type { CoachClaims, CoachLogger, CoachPublisher, DirectCoachBinding, Dire
 
 const MAX_SESSIONS = 2
 const MAX_WS_PAYLOAD = 1_048_576
+const CLOSE_GRACE_MS = 15_000
 
 export interface CoachServerOptions {
   readonly secret: string
@@ -29,19 +31,30 @@ export interface CoachServer {
 export function createCoachServer(options: CoachServerOptions): CoachServer {
   const sessions = new Map<string, CoachSession>()
   const admitting = new Set<string>()
+  const pendingAdmissions = new Set<Promise<void>>()
+  const pendingSockets = new Set<Duplex>()
+  let draining = false
+  let closePromise: Promise<void> | undefined
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WS_PAYLOAD, clientTracking: true })
   const server = createServer((request, response) => handleHealth(request, response, sessions.size))
   server.on('upgrade', (request, socket, head) => {
     let disconnected = false
     socket.on('error', () => { disconnected = true; socket.destroy() })
-    socket.on('close', () => { disconnected = true })
-    void admit(request).catch(() => { if (!socket.destroyed) socket.destroy() })
+    socket.on('close', () => { disconnected = true; pendingSockets.delete(socket) })
+    if (draining) { socket.destroy(); return }
+    pendingSockets.add(socket)
+    const admission = admit(request)
+      .catch(() => { if (!socket.destroyed) socket.destroy() })
+      .finally(() => { pendingAdmissions.delete(admission); pendingSockets.delete(socket) })
+    pendingAdmissions.add(admission)
+    void admission
     async function admit(req: IncomingMessage): Promise<void> {
       const url = new URL(req.url ?? '/', 'http://localhost')
       if (url.pathname !== '/media') throw new Error('unknown websocket path')
       const rawToken = url.searchParams.get('token')
       if (!rawToken) throw new Error('missing token')
       const claims = verifyCoachToken(rawToken, options.secret, options.now?.() ?? Date.now())
+      if (draining) throw new Error('server is draining')
       if (sessions.has(claims.callId) || admitting.has(claims.callId)) throw new Error('duplicate call session')
       if (sessions.size + admitting.size >= MAX_SESSIONS) throw new Error('session capacity reached')
       admitting.add(claims.callId)
@@ -50,8 +63,9 @@ export function createCoachServer(options: CoachServerOptions): CoachServer {
         // call/leg/owner/script/membership binding is freshly read from the database.
         const binding = await options.db.readBinding(claims)
         if (!binding) throw new Error('call binding unavailable')
-        if (disconnected || socket.destroyed) throw new Error('upgrade socket closed')
+        if (draining || disconnected || socket.destroyed) throw new Error('upgrade socket closed')
         wss.handleUpgrade(req, socket, head, (ws) => {
+          pendingSockets.delete(socket)
           const remove = () => { sessions.delete(claims.callId) }
           const session = options.sessionFactory
             ? options.sessionFactory(ws, claims, binding, remove)
@@ -71,11 +85,30 @@ export function createCoachServer(options: CoachServerOptions): CoachServer {
     activeCalls: { get size() { return sessions.size }, has: (callId: string) => sessions.has(callId) },
     listen: (port, host = '0.0.0.0') => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, () => { server.removeListener('error', reject); resolve() }) }),
     close: async () => {
-      await Promise.all([...sessions.values()].map((session) => session.finish('server_shutdown')))
-      await options.publisher.closeAll().catch(() => undefined)
-      await new Promise<void>((resolve) => server.close(() => resolve()))
-      wss.close()
+      if (closePromise) return closePromise
+      closePromise = closeInternal()
+      return closePromise
     },
+  }
+
+  async function closeInternal(): Promise<void> {
+    draining = true
+    const deadline = Date.now() + CLOSE_GRACE_MS
+    for (const socket of pendingSockets) socket.destroy()
+    const admissions = [...pendingAdmissions]
+    const acceptedSessions = [...sessions.values()]
+    const sessionDrains = acceptedSessions.map((session) => session.finish('server_shutdown'))
+    const pendingDrains = admissions.map((admission) => admission.catch(() => undefined))
+    await bounded(Promise.allSettled([...sessionDrains, ...pendingDrains]).then(() => undefined), remaining(deadline))
+    await bounded(options.publisher.closeAll().catch(() => undefined), remaining(deadline))
+    const closeServer = new Promise<void>((resolve) => {
+      try { server.close(() => resolve()) } catch { resolve() }
+    })
+    await bounded(closeServer, remaining(deadline))
+    const closeWebSockets = new Promise<void>((resolve) => {
+      try { wss.close(() => resolve()) } catch { resolve() }
+    })
+    await bounded(closeWebSockets, remaining(deadline))
   }
 }
 
@@ -84,3 +117,13 @@ function handleHealth(_request: IncomingMessage, response: ServerResponse, activ
   response.setHeader('content-type', 'application/json')
   response.end(JSON.stringify({ ok: true, activeSessions: active }))
 }
+
+async function bounded<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {
+  if (timeoutMs <= 0) return undefined
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([promise, new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), timeoutMs) })])
+  } finally { if (timer) clearTimeout(timer) }
+}
+
+function remaining(deadline: number): number { return Math.max(0, deadline - Date.now()) }
