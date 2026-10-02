@@ -74,12 +74,34 @@ it("installs the direct recording ledger, private bucket, and rollback atomicall
       "select public.direct_call_recording_mark_available($1,$2,$3,$4,$5,$6)",
       ["provider-recording-1", recordingCall, "sandra-direct-recordings", `${ORG}/${recordingCall}/provider-recording-1.wav`, 7, "2026-10-01T12:02:00Z"],
     )).rows[0].direct_call_recording_mark_available).toBe(true);
+    expect((await pg.query(
+      "select status, linked_at, link_next_attempt_at from public.direct_call_recordings where provider_recording_id='provider-recording-1'",
+    )).rows[0]).toMatchObject({ status: "available", linked_at: null });
+    expect((await pg.query(
+      `select count(*)::int as n
+         from public.direct_call_recordings
+        where status = 'available'
+          and linked_at is null
+          and link_attempt_count < 8
+          and link_next_attempt_at <= '2026-10-01T12:02:00Z'`,
+    )).rows[0].n).toBe(1);
+    // The final activity sync is deliberately skipped. The available row must
+    // remain a real sweep candidate so a transient handler failure is repaired.
+    expect((await pg.query("select status from public.call_recordings where call_activity_id=$1", [recordingActivity])).rows[0].status).toBe("failed");
     await pg.query("select public.direct_call_recording_sync_activity($1,$2,$3,$4)", [recordingCall, recordingActivity, "provider-recording-1", "2026-10-01T12:02:01Z"]);
     expect((await pg.query("select status,storage_path,provider_recording_id from public.call_recordings where call_activity_id=$1", [recordingActivity])).rows[0]).toEqual({
       status: "available",
       storage_path: `${ORG}/${recordingCall}/provider-recording-1.wav`,
       provider_recording_id: "provider-recording-1",
     });
+    expect((await pg.query(
+      `select count(*)::int as n
+         from public.direct_call_recordings
+        where status = 'available'
+          and linked_at is null
+          and link_attempt_count < 8
+          and link_next_attempt_at <= '2026-10-01T12:02:01Z'`,
+    )).rows[0].n).toBe(0);
     expect((await pg.query(
       "select public.direct_call_recording_mark_failed($1,$2,'capture_failed','stale failure','2026-10-01T12:02:00Z')",
       ["provider-recording-1", recordingCall],

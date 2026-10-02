@@ -101,8 +101,11 @@ begin
     error_message = case when public.call_recordings.status = 'available' then null else excluded.error_message end;
 
   update public.direct_call_recordings
-     set linked_at = p_now, link_next_attempt_at = null,
-         link_attempt_count = least(link_attempt_count + 1, 100), updated_at = p_now
+     set linked_at = case when v_stage.status = 'available' then p_now else null end,
+         link_next_attempt_at = case when v_stage.status = 'available' then null else link_next_attempt_at end,
+         link_attempt_count = case when v_stage.status = 'available'
+           then least(link_attempt_count + 1, 100) else link_attempt_count end,
+         updated_at = p_now
    where id = v_stage.id;
 end;
 $$;
@@ -131,7 +134,8 @@ begin
      set status = 'available', storage_bucket = p_storage_bucket, storage_path = p_storage_path,
          duration_seconds = p_duration_seconds, error_code = null, error_message = null,
          next_attempt_at = null,
-         link_next_attempt_at = case when linked_at is null then p_now else null end,
+         linked_at = case when status = 'available' then linked_at else null end,
+         link_next_attempt_at = case when status = 'available' and linked_at is not null then null else p_now end,
          updated_at = p_now
    where provider_recording_id = p_provider_recording_id
      and direct_call_id = p_direct_call_id;
