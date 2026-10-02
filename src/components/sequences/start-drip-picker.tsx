@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 
 import { listDripChoices, type DripChoice } from "@/app/(dashboard)/sequences/actions";
 
@@ -38,8 +39,10 @@ export function StartDripPicker({
   const [message, setMessage] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [openUp, setOpenUp] = useState(false);
+  // Popup placement is fixed to the viewport so overflow-clipping ancestors (tables, cards) cannot cut it off.
+  const [place, setPlace] = useState<{ left: number; top?: number; bottom?: number; listMax: number } | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
   const needle = query.trim().toLowerCase();
   const visibleChoices = needle ? choices.filter((choice) => choice.name.toLowerCase().includes(needle)) : choices;
 
@@ -50,9 +53,16 @@ export function StartDripPicker({
   }, [inline]);
 
   async function openPicker() {
-    // Triggers near the bottom of the screen open the popup upward so it isn't cut off.
+    // Triggers near the bottom of the screen open the popup upward; the list is sized to the room that is left.
     const rect = rootRef.current?.getBoundingClientRect();
-    setOpenUp(!!rect && window.innerHeight - rect.bottom < 360 && rect.top > window.innerHeight - rect.bottom);
+    if (rect && !inline) {
+      const below = window.innerHeight - rect.bottom;
+      const up = below < 360 && rect.top > below;
+      const room = (up ? rect.top : below) - 16;
+      const left = Math.max(8, Math.min(rect.left, window.innerWidth - 328));
+      const listMax = Math.max(96, Math.min(320, room - 130));
+      setPlace(up ? { left, bottom: window.innerHeight - rect.top + 4, listMax } : { left, top: rect.bottom + 4, listMax });
+    } else setPlace(null);
     setOpen(true);
     setMessage("");
     setQuery("");
@@ -68,6 +78,21 @@ export function StartDripPicker({
       setLoading(false);
     }
   }
+
+  // A fixed popup would drift from its trigger, so any outside scroll or resize closes it.
+  useEffect(() => {
+    if (inline || !open) return;
+    const close = (event: Event) => {
+      if (event.target instanceof Node && (rootRef.current?.contains(event.target) || popupRef.current?.contains(event.target))) return;
+      setOpen(false);
+    };
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [inline, open]);
 
   async function choose(id: string) {
     if (selectionOnly) { setSelectedId(id); onSelect?.(id); return; }
@@ -99,18 +124,21 @@ export function StartDripPicker({
     }
   }
 
+  // The popup renders on document.body so no overflow-hidden ancestor can clip it.
+  const wrap = (node: ReactNode) => (inline || typeof document === "undefined" ? node : createPortal(node, document.body));
+
   return (
     <div ref={rootRef} className={inline ? "relative" : "relative inline-block"}>
       {!inline && <button type="button" onClick={() => open ? setOpen(false) : void openPicker()} disabled={disabled || busy}
         className={`rounded-md border px-3 py-1 text-[11px] font-medium ${triggerTone === "primary" ? "min-h-9 border-primary bg-primary text-primary-foreground" : triggerTone === "outline" ? "min-h-9 border-border bg-card text-foreground" : "min-h-11 border-teal-200 bg-teal-50 text-teal-800"}`}>
         {triggerLabel}
       </button>}
-      {(inline || open) && <div className={inline ? "space-y-2" : `absolute left-0 z-50 w-80 rounded-md border bg-white p-3 shadow-lg ${openUp ? "bottom-full mb-1" : "top-full mt-1"}`} role={inline ? undefined : "dialog"} aria-label="Start follow-up drip">
+      {(inline || open) && wrap(<div ref={popupRef} className={inline ? "space-y-2" : "fixed z-50 w-80 rounded-md border bg-white p-3 shadow-lg"} style={inline || !place ? undefined : { left: place.left, top: place.top, bottom: place.bottom }} role={inline ? undefined : "dialog"} aria-label="Start follow-up drip">
         {!inline && <p className="mb-2 text-sm font-semibold">Start follow-up drip</p>}
         {!loading && choices.length > 0 && <input type="search" value={query} onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search drips" aria-label="Search drips" className="mb-2 w-full rounded-md border px-2 py-1 text-sm" />}
+          placeholder="Search drips" onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); } }} aria-label="Search drips" className="mb-2 w-full rounded-md border px-2 py-1 text-sm" />}
         {/* The popup can outgrow the viewport once an org has several drips, so its list scrolls. */}
-        <div className={inline ? undefined : "max-h-[min(40vh,20rem)] overflow-y-auto pr-1"} data-testid="drip-choice-list">
+        <div className={inline ? undefined : "overflow-y-auto pr-1"} style={inline ? undefined : { maxHeight: place?.listMax ?? 320 }} data-testid="drip-choice-list">
         {loading ? <p className="text-xs">Loading drips…</p> : choices.length === 0 ? <p className="text-xs">No active drips with steps are available.</p> : visibleChoices.length === 0 ? <p className="text-xs">No drips match “{query.trim()}”.</p> : visibleChoices.map((choice) => (
           <button key={choice.id} type="button" disabled={busy} onClick={() => void choose(choice.id)}
             aria-pressed={selectionOnly ? (selectedSequenceId === undefined ? selectedId : selectedSequenceId) === choice.id : undefined}
@@ -123,7 +151,7 @@ export function StartDripPicker({
         ))}
         </div>
         {onLeave && <button type="button" disabled={busy} onClick={() => void leave()} className="text-xs underline">Leave it to the follow-up owner</button>}
-      </div>}
+      </div>)}
       {message && <p role="status" className="mt-1 text-xs">{message}</p>}
     </div>
   );

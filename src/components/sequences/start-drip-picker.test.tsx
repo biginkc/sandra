@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 
@@ -75,6 +75,58 @@ it("opens upward when the trigger sits near the bottom of the screen", async () 
   const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ top: window.innerHeight - 40, bottom: window.innerHeight - 4 } as DOMRect);
   render(<StartDripPicker onChoose={vi.fn()} />);
   await user.click(screen.getByRole("button", { name: "Start follow-up drip" }));
-  expect(screen.getByRole("dialog", { name: "Start follow-up drip" })).toHaveClass("bottom-full");
+  const dialog = screen.getByRole("dialog", { name: "Start follow-up drip" });
+  expect(dialog).toHaveClass("fixed");
+  expect(dialog.style.bottom).not.toBe("");
+  expect(dialog.style.top).toBe("");
+  expect(Number.parseInt(screen.getByTestId("drip-choice-list").style.maxHeight, 10)).toBeLessThanOrEqual(320);
   rect.mockRestore();
+});
+
+it("opens downward with a fixed position when there is room below", async () => {
+  listDripChoices.mockResolvedValue({ ok: true, data: [{ id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null }] });
+  const user = userEvent.setup();
+  const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ top: 20, bottom: 50, left: 10 } as DOMRect);
+  render(<StartDripPicker onChoose={vi.fn()} />);
+  await user.click(screen.getByRole("button", { name: "Start follow-up drip" }));
+  const dialog = screen.getByRole("dialog", { name: "Start follow-up drip" });
+  expect(dialog.style.top).toBe("54px");
+  expect(dialog.style.bottom).toBe("");
+  rect.mockRestore();
+});
+
+it("pressing Enter in the search box does not submit an enclosing form", async () => {
+  listDripChoices.mockResolvedValue({ ok: true, data: [{ id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null }] });
+  const onSubmit = vi.fn((event: React.FormEvent) => event.preventDefault());
+  const user = userEvent.setup();
+  render(<form onSubmit={onSubmit}><StartDripPicker inline selectionOnly /></form>);
+  await user.type(await screen.findByRole("searchbox", { name: "Search drips" }), "conf{Enter}");
+  expect(onSubmit).not.toHaveBeenCalled();
+});
+
+it("renders the popup on document.body, outside clipping ancestors", async () => {
+  listDripChoices.mockResolvedValue({ ok: true, data: [{ id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null }] });
+  const user = userEvent.setup();
+  const { container } = render(<div style={{ overflow: "hidden" }}><StartDripPicker onChoose={vi.fn()} /></div>);
+  await user.click(screen.getByRole("button", { name: "Start follow-up drip" }));
+  const dialog = screen.getByRole("dialog", { name: "Start follow-up drip" });
+  expect(container.contains(dialog)).toBe(false);
+  expect(dialog.parentElement).toBe(document.body);
+});
+
+it("enrolls the filtered choice and closes the popup on outside scroll", async () => {
+  listDripChoices.mockResolvedValue({ ok: true, data: [
+    { id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null },
+    { id: "c", name: "C — Not interested", textCount: 3, days: 366, firstSend: null },
+  ] });
+  const onChoose = vi.fn().mockResolvedValue({ status: "enrolled", reason: "ok" });
+  const user = userEvent.setup();
+  render(<StartDripPicker onChoose={onChoose} />);
+  await user.click(screen.getByRole("button", { name: "Start follow-up drip" }));
+  await user.type(await screen.findByRole("searchbox", { name: "Search drips" }), "not int");
+  await user.click(screen.getByRole("button", { name: /Not interested/ }));
+  expect(onChoose).toHaveBeenCalledWith("c");
+  await user.click(screen.getByRole("button", { name: "Start follow-up drip" }));
+  fireEvent.scroll(document.body);
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Start follow-up drip" })).not.toBeInTheDocument());
 });
