@@ -22,7 +22,7 @@ for (const phase of ['pre', 'post']) {
       stub('node', `#!/bin/sh
 if [ "$1" = scripts/inbox-ci/inbox-migrations.mjs ]; then
   if [ "$2" = --count ]; then
-    printf '%s\\n' 3
+    printf '%s\\n' ${inboxManifest.length}
   else
     printf '%s\\n' ${inboxExcludeArgs}
   fi
@@ -42,7 +42,7 @@ exit 47
       stub('node', `#!/bin/sh
 if [ "$1" = scripts/inbox-ci/inbox-migrations.mjs ]; then
   if [ "$2" = --count ]; then
-    printf '%s\\n' 3
+    printf '%s\\n' ${inboxManifest.length}
   else
     printf '%s\\n' ${inboxExcludeArgs}
   fi
