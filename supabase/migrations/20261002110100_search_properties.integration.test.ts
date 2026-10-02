@@ -12,6 +12,7 @@ import {
 } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 import { createClient } from "@supabase/supabase-js";
+import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
 
 // Calls public.search_properties directly through authenticated user clients.
 // The suite replays the migration SQL under the integration advisory mutex
@@ -20,7 +21,7 @@ import { createClient } from "@supabase/supabase-js";
 // always restores the real SQL. Each mutation must make >=1 test fail.
 
 const service = createTestClient();
-const migrationSql = readFileSync(new URL("./20261002051000_search_properties.sql", import.meta.url), "utf8");
+const migrationSql = readFileSync(new URL("./20261002110100_search_properties.sql", import.meta.url), "utf8");
 const db = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
 
 export function mutate(sql: string, name: string | undefined): string {
@@ -77,6 +78,8 @@ const sorted = (...v: string[]) => [...v].sort();
 
 describe("search_properties RPC", () => {
   beforeAll(async () => {
+    // Destructive setup (resets, user deletes, migration replay): local stack only.
+    assertLocalOnlyTestEnv(process.env.TEST_SUPABASE_DB_URL, process.env.TEST_SUPABASE_URL);
     await db.connect();
     await db.query("begin");
     try {
@@ -162,6 +165,7 @@ describe("search_properties RPC", () => {
   }, 180000);
 
   afterAll(async () => {
+    assertLocalOnlyTestEnv(process.env.TEST_SUPABASE_DB_URL, process.env.TEST_SUPABASE_URL);
     try {
       await db.query("begin");
       try { await db.query(migrationSql); await db.query("commit"); }
@@ -208,8 +212,10 @@ describe("search_properties RPC", () => {
     ])("matches name %s -> %s", async (q, key) => {
       expect(await ids(q)).toContain(P[key]);
     });
-    it("treats internal double spaces literally (documented: no collapse)", async () => {
-      expect(await ids("doe  family")).toEqual([]);
+    it("collapses internal whitespace runs to one space", async () => {
+      expect(await ids("doe  family")).toEqual([P.entity]);
+      expect(await ids("doe \t\n  family   trust")).toEqual([P.entity]);
+      expect(await ids("Jane    Doe")).toEqual(sorted(P.main, P.lead, P.dead));
     });
     it("matches homeowner entity names alongside same-surname people", async () => {
       expect(await ids("Doe")).toEqual(expect.arrayContaining(sorted(P.main, P.lead, P.dead, P.entity)));

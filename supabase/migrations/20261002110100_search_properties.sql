@@ -13,6 +13,7 @@
 --  4. message linkage: SMS only, with a conversation; the property must be in the
 --     same org as the message, visible, and not deleted; null property_id never
 --     matches.
+--  5. whitespace: internal whitespace runs in the query collapse to one space.
 -- SECURITY DEFINER because RLS evaluation blocks index use (same reason as
 -- search_global); the explicit membership gate below is the security boundary.
 set lock_timeout = '5s';
@@ -35,7 +36,7 @@ begin
       and m.deletion_prepared_at is null
       and (m.access_expires_at is null or m.access_expires_at > now())
   ), bounds as not materialized (
-    select left(btrim(coalesce($1,'')),100) as q
+    select left(regexp_replace(btrim(coalesce($1,'')), '\s+', ' ', 'g'),100) as q
   ), input as not materialized (
     select bounds.q,
       case when regexp_replace(bounds.q,'[^0-9]','','g') ~ '^1[0-9]{10}$'
