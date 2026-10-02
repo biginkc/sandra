@@ -58,6 +58,8 @@ export default defineConfig({
       "supabase/migrations/20260930035000_drip_reply_failed_send_keeps_flag.integration.test.ts",
       "supabase/migrations/20260930001000_recording_endpoint_configuration.integration.test.ts",
       "supabase/migrations/20260930030000_dialpad_recording_timing.integration.test.ts",
+      "supabase/migrations/20261002110100_search_properties.integration.test.ts",
+      "tests/search-oracle/oracle-comparison.integration.test.ts",
     ],
     environment: "node",
     reporters: ["default"],
