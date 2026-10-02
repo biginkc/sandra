@@ -33,6 +33,8 @@ export type DirectCallServiceDeps = {
    * signing key is configured; `training` marks the dedicated internal-training number.
    */
   sealCallIdentity: (args: { callId: string; userId: string; phoneE164: string }) => { capability: string | null; training: boolean };
+  /** Server-owned precreation for training calls; authenticated wrap-up only updates this row. */
+  recordTrainingActivity?: (args: { directCallId: string; operatorUserId: string; target: DirectCallTarget }) => Promise<void>;
   telnyx: {
     dial: (settings: TelnyxDirectSettings, params: DialParams) => Promise<{ callControlId: string }>;
     hangup: (settings: TelnyxDirectSettings, callControlId: string, commandId: string) => Promise<void>;
@@ -341,6 +343,9 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
       await store.dialSucceeded(row.id, dialed.callControlId, "browser");
       const current = await store.findById(row.id);
       if (current && DIRECT_CALL_TERMINAL_STATUSES.has(current.status)) return err("Could not start the call. Try again.", "start_failed", true);
+      if (identity.training && deps.recordTrainingActivity) {
+        await deps.recordTrainingActivity({ directCallId: row.id, operatorUserId: userId, target });
+      }
       return {
         ok: true,
         data: {

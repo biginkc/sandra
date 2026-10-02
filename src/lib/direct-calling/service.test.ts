@@ -38,6 +38,7 @@ function setup(overrides: Partial<DirectCallServiceDeps> = {}) {
   const prepareManualCall = vi.fn(async () => ({ ok: true as const, data: target({ propertyId: null, contactId: null, phoneE164: "+15550008888" }) }));
   const resumeFailedSoftphoneCall = vi.fn(async () => undefined);
   const report = vi.fn();
+  const recordTrainingActivity = vi.fn(async () => undefined);
   const sealCallIdentity = vi.fn((a: { callId: string; userId: string; phoneE164: string }) => ({
     capability: `sealed:${a.callId}:${a.userId}:${a.phoneE164}`,
     training: a.phoneE164 === "+15550007777",
@@ -47,9 +48,9 @@ function setup(overrides: Partial<DirectCallServiceDeps> = {}) {
   const service = createDirectCallService({
     store, env: ENV, now: () => clock.now,
     isEligible: (userId) => userId === "user-1",
-    prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall, sealCallIdentity, telnyx, report, ...overrides,
+    prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall, sealCallIdentity, recordTrainingActivity, telnyx, report, ...overrides,
   });
-  return { store, telnyx, prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall, sealCallIdentity, report, service, clock };
+  return { store, telnyx, prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall, sealCallIdentity, recordTrainingActivity, report, service, clock };
 }
 
 describe("direct call service", () => {
@@ -435,6 +436,20 @@ describe("direct call service", () => {
       const ctx = setup({ prepareManualCall, sealCallIdentity });
       expect(await ctx.service.startCall("user-1", { kind: "manual", phone: "5550007777", clientRequestId: REQ })).toMatchObject({ ok: false, errorCode: "start_failed" });
       expect(ctx.telnyx.dial).not.toHaveBeenCalled();
+    });
+
+    it("precreates a server-owned training activity after the browser leg is durable", async () => {
+      const prepareManualCall = vi.fn(async () => ({ ok: true as const, data: target({ phoneE164: "+15550007777" }) }));
+      const ctx = setup({ prepareManualCall });
+      const result = await ctx.service.startCall("user-1", { kind: "manual", phone: "5550007777", clientRequestId: REQ });
+
+      expect(result).toMatchObject({ ok: true });
+      expect(ctx.recordTrainingActivity).toHaveBeenCalledTimes(1);
+      expect(ctx.recordTrainingActivity).toHaveBeenCalledWith({
+        directCallId: expect.any(String),
+        operatorUserId: "user-1",
+        target: expect.objectContaining({ phoneE164: "+15550007777" }),
+      });
     });
 
     it("prepares the call before creating a Telnyx credential", async () => {
