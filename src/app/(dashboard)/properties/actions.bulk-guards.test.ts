@@ -40,6 +40,18 @@ vi.mock("@/lib/messaging/delivery", () => ({
 vi.mock("@/lib/prospects/select-all", async (importActual) => ({
   ...(await importActual<typeof import("@/lib/prospects/select-all")>()),
   selectAllMatching: h.selectAll,
+  resolveSelection: async (s: any) => {
+    const actual = await importActual<typeof import("@/lib/prospects/select-all")>();
+    const filters = actual.selectionFilters(s);
+    const origin = actual.selectionOrigin(s);
+    if (!filters) {
+      const ids = actual.selectionIds(s);
+      return { ok: true, data: { ids, skippedLeads: 0, dncLockedCount: 0, dncLockedIds: [], matchedCount: ids.length, fromFilters: false, origin } };
+    }
+    const r: any = await h.selectAll(filters);
+    if (!r.ok) return r;
+    return { ok: true, data: { ids: r.data.eligibleIds, skippedLeads: r.data.skippedLeads, dncLockedCount: r.data.dncLockedCount, dncLockedIds: r.data.dncLockedIds ?? [], matchedCount: r.data.matchedCount, fromFilters: true, origin } };
+  },
 }));
 vi.mock("@/lib/prospects/eligibility", () => ({ resolveProspectEligibility: vi.fn() }));
 

@@ -1,5 +1,6 @@
 "use client";
 
+import type { SelectionFilters } from "@/lib/prospects/select-all";
 import Link from "next/link";
 import { useEffect, useMemo, useState, useTransition } from "react";
 
@@ -25,15 +26,21 @@ export function PromoteLeadsDialog({
   onOpenChange,
   orgId,
   propertyIds,
+  filters,
   onStarted,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   orgId: string;
   propertyIds: string[];
+  /** Select-all-matching: the server re-resolves these filters; `propertyIds` is not sent. */
+  filters?: SelectionFilters;
   onStarted: (jobId: string) => void;
 }) {
-  const propertyIdsKey = useMemo(() => [...propertyIds].sort().join(","), [propertyIds]);
+  const propertyIdsKey = useMemo(
+    () => (filters ? `filters:${JSON.stringify(filters)}` : [...propertyIds].sort().join(",")),
+    [filters, propertyIds],
+  );
   const [preflight, setPreflight] = useState<PromoteLeadsPreflight | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -46,7 +53,7 @@ export function PromoteLeadsDialog({
   useEffect(() => {
     if (!open) return;
     let canceled = false;
-    void callAction(preflightPromoteLeads({ orgId, propertyIds }), {
+    void callAction(preflightPromoteLeads({ orgId, propertyIds: filters ? [] : propertyIds, filters }), {
       fallbackMessage: "Could not check these prospects",
     }).then((result) => {
       if (canceled) return;
@@ -57,7 +64,7 @@ export function PromoteLeadsDialog({
     return () => {
       canceled = true;
     };
-  }, [open, orgId, propertyIds, propertyIdsKey, preflightAttempt]);
+  }, [open, orgId, propertyIds, filters, propertyIdsKey, preflightAttempt]);
 
   const confirm = () => {
     if (!preflight || preflight.eligible === 0 || !requestKey || pending) return;
@@ -66,7 +73,8 @@ export function PromoteLeadsDialog({
       const result = await callAction(
         createPromoteLeadsJob({
           orgId,
-          propertyIds,
+          propertyIds: filters ? [] : propertyIds,
+          filters,
           idempotencyKey: requestKey,
         }),
         { fallbackMessage: "Could not start promotion" },

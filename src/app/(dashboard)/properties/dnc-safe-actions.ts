@@ -24,8 +24,8 @@ import { createClient } from "@/lib/supabase/server";
 
 import type { QueryOrigin } from "@/lib/prospects/search-scope";
 import {
+  resolveSelection,
   selectAllMatching,
-  selectionFilters,
   type PropertySelection,
 } from "@/lib/prospects/select-all";
 
@@ -39,10 +39,13 @@ const DNC_LOCK_MESSAGE =
  * mutation. The missing checkbox is only the visual affordance; this is the
  * enforcement boundary for forged or stale client selections.
  */
-async function partitionDncLockedPropertyIds(propertyIds: string[]): Promise<{
+async function partitionDncLockedPropertyIds(
+  propertyIds: string[],
+  origin: QueryOrigin = "legacy",
+): Promise<{
   eligible: string[];
   locked: string[];
-  /** Rows that are not prospects (leads etc.), skipped, never actioned. */
+  /** Search page only: rows that are not prospects (leads etc.), skipped, never actioned. */
   skippedLeads: number;
 }> {
   const supabase = await createClient();
@@ -51,12 +54,23 @@ async function partitionDncLockedPropertyIds(propertyIds: string[]): Promise<{
     propertyIds,
     "selection",
   );
+  if (origin === "search_page") {
+    return {
+      eligible: resolved.eligibleIds,
+      // Search page: leads are counted BEFORE the DNC split, so a locked lead is
+      // a skipped lead and only locked prospects are reported as DNC failures.
+      locked: resolved.prospectDncLockedIds,
+      skippedLeads: resolved.skippedLeadCount,
+    };
+  }
+  // Legacy callers: every DNC-locked row (any status) is reported as locked and
+  // no lead count exists. Byte-for-byte the pre-Search behavior.
   return {
     eligible: resolved.eligibleIds,
-    // Leads are counted BEFORE the DNC split: a locked lead is a skipped
-    // lead, only locked prospects are reported as DNC failures.
-    locked: resolved.prospectDncLockedIds,
-    skippedLeads: resolved.skippedLeadCount,
+    locked: resolved.exclusions
+      .filter((item) => item.reason === "dnc")
+      .map((item) => item.propertyId),
+    skippedLeads: 0,
   };
 }
 
@@ -79,39 +93,30 @@ async function runBulkOutcome(
   selection: PropertySelection,
   action: (eligible: string[]) => Promise<Result<BulkOutcome>>,
 ): Promise<Result<BulkOutcome>> {
-  const filters = selectionFilters(selection);
-  if (filters) {
+  const resolved = await resolveSelection(selection);
+  if (!resolved.ok) return resolved;
+  if (resolved.data.fromFilters) {
     // Select-all-matching: re-resolved from the filters on the server. The
-    // resolver already keeps prospects that are not DNC-locked; leads and
-    // locked prospects are reported, never actioned.
-    const resolved = await selectAllMatching(filters);
-    if (!resolved.ok) return resolved;
-    const { eligibleIds, skippedLeads, dncLockedIds = [] } = resolved.data;
-    // Locked prospects are reported exactly like the checkbox path (failures
-    // with the DNC message), and leads as a skip count.
-    if (eligibleIds.length === 0) {
+    // resolver already keeps prospects that are not DNC-locked; locked
+    // prospects are reported like the checkbox path and leads as a skip count.
+    const { ids, skippedLeads, dncLockedIds } = resolved.data;
+    if (ids.length === 0) {
       return ok(
-        addLockedFailures(
-          { succeeded: 0, skipped: 0, failed: [] },
-          dncLockedIds,
-          skippedLeads,
-        ),
+        addLockedFailures({ succeeded: 0, skipped: 0, failed: [] }, dncLockedIds, skippedLeads),
       );
     }
-    const result = await action(eligibleIds);
+    const result = await action(ids);
     return result.ok
       ? ok(addLockedFailures(result.data, dncLockedIds, skippedLeads))
       : result;
   }
-  const { eligible, locked, skippedLeads } =
-    await partitionDncLockedPropertyIds(selection as string[]);
+  const { eligible, locked, skippedLeads } = await partitionDncLockedPropertyIds(
+    resolved.data.ids,
+    resolved.data.origin,
+  );
   if (eligible.length === 0) {
     return ok(
-      addLockedFailures(
-        { succeeded: 0, skipped: 0, failed: [] },
-        locked,
-        skippedLeads,
-      ),
+      addLockedFailures({ succeeded: 0, skipped: 0, failed: [] }, locked, skippedLeads),
     );
   }
   const result = await action(eligible);
@@ -170,8 +175,25 @@ export async function qualifyLeadsBulk(propertyIds: string[]) {
   });
 }
 
-export async function verifyPropertiesBulk(propertyIds: string[], requestKey: string) {
-  const { eligible, locked } = await partitionDncLockedPropertyIds(propertyIds);
+export async function verifyPropertiesBulk(
+  selection: PropertySelection | string[],
+  requestKey: string,
+) {
+  const resolved = await resolveSelection(selection);
+  if (!resolved.ok) return resolved;
+  let eligible: string[];
+  let lockedCount: number;
+  let skippedLeads = 0;
+  if (resolved.data.fromFilters) {
+    eligible = resolved.data.ids;
+    lockedCount = resolved.data.dncLockedCount;
+    skippedLeads = resolved.data.skippedLeads;
+  } else {
+    const part = await partitionDncLockedPropertyIds(resolved.data.ids, resolved.data.origin);
+    eligible = part.eligible;
+    lockedCount = part.locked.length;
+    skippedLeads = part.skippedLeads;
+  }
   if (eligible.length === 0) {
     return {
       ok: false as const,
@@ -180,7 +202,12 @@ export async function verifyPropertiesBulk(propertyIds: string[], requestKey: st
   }
   const result = await verifyPropertiesBulkUnsafe(eligible, requestKey);
   return result.ok
-    ? ok({ ...result.data, eligibleCount: eligible.length, lockedCount: locked.length })
+    ? ok({
+        ...result.data,
+        eligibleCount: eligible.length,
+        lockedCount,
+        ...(skippedLeads > 0 ? { skippedLeads } : {}),
+      })
     : result;
 }
 
@@ -189,8 +216,16 @@ export type ProspectSkipTracePreflight = SkipTracePreflight & {
 };
 
 export async function preflightProspectSkipTrace(
-  propertyIds: string[],
+  selection: PropertySelection,
 ): Promise<Result<ProspectSkipTracePreflight>> {
+  const sel = await resolveSelection(selection);
+  if (!sel.ok) return sel;
+  const propertyIds = sel.data.ids;
+  // Filter selections: requested counts every matched row; matched leads and
+  // locked prospects are reported through notEligible / dncLockedSkipped.
+  const requested = sel.data.fromFilters ? sel.data.matchedCount : new Set(propertyIds).size;
+  const extraDnc = sel.data.dncLockedCount;
+  const extraNotEligible = sel.data.skippedLeads + sel.data.dncLockedCount;
   const supabase = await createClient();
   const resolved = await resolveProspectEligibility(
     supabase,
@@ -199,13 +234,13 @@ export async function preflightProspectSkipTrace(
   );
   if (resolved.eligibleIds.length === 0) {
     return ok({
-      requested: new Set(propertyIds).size,
+      requested,
       eligible: 0,
       cassVerified: 0,
       cassUnverified: 0,
-      notEligible: new Set(propertyIds).size,
+      notEligible: requested,
       killSwitchSkipped: resolved.skipTraceDisabledCount,
-      dncLockedSkipped: resolved.dncLockedCount,
+      dncLockedSkipped: resolved.dncLockedCount + extraDnc,
       tracefyCreditsRequired: 0,
       tracefyCreditsAvailable: null,
       tracefyCreditStatus: "sufficient",
@@ -218,11 +253,11 @@ export async function preflightProspectSkipTrace(
   if (!result.ok) return result;
   return ok({
     ...result.data,
-    requested: new Set(propertyIds).size,
-    notEligible: result.data.notEligible + resolved.exclusions.length,
+    requested,
+    notEligible: result.data.notEligible + resolved.exclusions.length + extraNotEligible,
     killSwitchSkipped:
       result.data.killSwitchSkipped + resolved.skipTraceDisabledCount,
-    dncLockedSkipped: resolved.dncLockedCount,
+    dncLockedSkipped: resolved.dncLockedCount + extraDnc,
   });
 }
 
@@ -231,8 +266,13 @@ export type ProspectSkipTraceOutcome = SkipTraceOutcome & {
 };
 
 export async function requestProspectSkipTrace(
-  propertyIds: string[],
+  selection: PropertySelection,
 ): Promise<Result<ProspectSkipTraceOutcome>> {
+  const sel = await resolveSelection(selection);
+  if (!sel.ok) return sel;
+  const propertyIds = sel.data.ids;
+  const requested = sel.data.fromFilters ? sel.data.matchedCount : new Set(propertyIds).size;
+  const extraDnc = sel.data.dncLockedCount;
   const supabase = await createClient();
   const resolved = await resolveProspectEligibility(
     supabase,
@@ -243,21 +283,21 @@ export async function requestProspectSkipTrace(
     return ok({
       jobId: null,
       status: "none_eligible",
-      requested: new Set(propertyIds).size,
+      requested,
       eligible: 0,
       cassSkipped: 0,
       killSwitchSkipped: resolved.skipTraceDisabledCount,
-      dncLockedSkipped: resolved.dncLockedCount,
+      dncLockedSkipped: resolved.dncLockedCount + extraDnc,
     });
   }
   const result = await requestSkipTraceUnsafe(resolved.eligibleIds);
   if (!result.ok) return result;
   return ok({
     ...result.data,
-    requested: new Set(propertyIds).size,
+    requested,
     killSwitchSkipped:
       result.data.killSwitchSkipped + resolved.skipTraceDisabledCount,
-    dncLockedSkipped: resolved.dncLockedCount,
+    dncLockedSkipped: resolved.dncLockedCount + extraDnc,
   });
 }
 

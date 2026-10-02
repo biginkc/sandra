@@ -52,6 +52,7 @@ import {
 } from "@/lib/messaging/prospect-only-guard";
 import { parseQueryOrigin, type QueryOrigin } from "@/lib/prospects/search-scope";
 import {
+  resolveSelection,
   selectAllMatching,
   selectionFilters,
   type PropertySelection,
@@ -102,14 +103,9 @@ export async function listSmsTemplateCategories(): Promise<
 async function resolveSelectionIds(
   selection: PropertySelection,
 ): Promise<Result<{ ids: string[]; skippedLeads: number }>> {
-  const filters = selectionFilters(selection);
-  if (!filters) return ok({ ids: selection as string[], skippedLeads: 0 });
-  const resolved = await selectAllMatching(filters);
+  const resolved = await resolveSelection(selection);
   if (!resolved.ok) return resolved;
-  return ok({
-    ids: resolved.data.eligibleIds,
-    skippedLeads: resolved.data.skippedLeads,
-  });
+  return ok({ ids: resolved.data.ids, skippedLeads: resolved.data.skippedLeads });
 }
 
 export async function assessBulkSmsAudience(
@@ -707,6 +703,8 @@ type RawDialerPropertyRow = Omit<DialerPropertyRow, "homeowner"> & {
 };
 
 type CreateDialerBatchOptions = {
+  /** 'search_page' reports leads in the selection as `skippedLeads`; legacy callers get nothing new. */
+  origin?: QueryOrigin;
   title?: string;
   sourceKind?: "selected_ids" | "filters" | "list";
   sourceMeta?: Record<string, unknown>;
@@ -715,6 +713,8 @@ type CreateDialerBatchOptions = {
 type CreateDialerBatchResult = {
   batchId: string;
   counts: BatchEligibilityCounts;
+  /** Search page only: selected rows that are not prospects and were skipped. */
+  skippedLeads?: number;
 };
 
 type DialerInsertError = { message: string } | null;
@@ -790,6 +790,7 @@ async function fetchEligibleDialerPropertyRows(
     rows: DialerPropertyRow[];
     eligibleIds: string[];
     dncLockedCount: number;
+    skippedLeadCount: number;
   }>
 > {
   const eligibility = await resolveProspectEligibility(
@@ -806,13 +807,14 @@ async function fetchEligibleDialerPropertyRows(
     rows: rowsResult.data,
     eligibleIds: eligibility.eligibleIds,
     dncLockedCount: eligibility.dncLockedCount,
+    skippedLeadCount: eligibility.skippedLeadCount,
   });
 }
 
 export async function previewBatchEligibilityAction(
-  propertyIds: string[],
-): Promise<Result<BatchEligibilityCounts>> {
-  if (propertyIds.length === 0) {
+  selection: PropertySelection,
+): Promise<Result<BatchEligibilityCounts & { skippedLeads?: number }>> {
+  if (Array.isArray(selection) && selection.length === 0) {
     return ok({ callable: 0, blocked: {}, missing: 0 });
   }
 
@@ -828,17 +830,35 @@ export async function previewBatchEligibilityAction(
       };
     }
 
+    // A select-all-matching is re-resolved on the server (no client id list).
+    const resolved = await resolveSelection(selection);
+    if (!resolved.ok) return resolved;
+    const searchOrigin = resolved.data.origin === "search_page";
+    if (resolved.data.ids.length === 0) {
+      return ok({
+        callable: 0,
+        blocked: {},
+        missing: 0,
+        ...(searchOrigin ? { skippedLeads: resolved.data.skippedLeads } : {}),
+      });
+    }
+
     const rowsResult = await fetchEligibleDialerPropertyRows(
       supabase,
-      propertyIds,
+      resolved.data.ids,
     );
     if (!rowsResult.ok) return rowsResult;
 
     const counts = classifyForPreview(toClassifyInputs(rowsResult.data.rows));
-    if (rowsResult.data.dncLockedCount > 0) {
-      counts.blocked.dnc_locked = rowsResult.data.dncLockedCount;
+    const dncLocked = rowsResult.data.dncLockedCount + resolved.data.dncLockedCount;
+    if (dncLocked > 0) {
+      counts.blocked.dnc_locked = dncLocked;
     }
-    return ok(counts);
+    if (!searchOrigin) return ok(counts);
+    return ok({
+      ...counts,
+      skippedLeads: resolved.data.skippedLeads + rowsResult.data.skippedLeadCount,
+    });
   } catch (e) {
     reportError(e, { tags: { surface: "preview_batch_eligibility_action" } });
     return errFromUnknown(e, "PREVIEW_FAILED");
@@ -983,7 +1003,15 @@ export async function createDialerBatchFromPropertyIds(
       }
     }
 
-    return ok({ batchId: batch.id as string, counts });
+    return ok({
+      batchId: batch.id as string,
+      counts,
+      // Search checkbox selections report leads server-side; legacy callers get
+      // exactly the old result shape.
+      ...(parseQueryOrigin(opts.origin) === "search_page"
+        ? { skippedLeads: rowsResult.data.skippedLeadCount }
+        : {}),
+    });
   } catch (e) {
     reportError(e, {
       tags: { surface: "create_dialer_batch_from_property_ids" },

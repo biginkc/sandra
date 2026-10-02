@@ -9,6 +9,7 @@ import { reportError } from "@/lib/errors/report";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import type { Json } from "@/lib/supabase/types";
+import { selectAllMatching, type SelectionFilters } from "@/lib/prospects/select-all";
 import { promoteLeadsWorkflow } from "@/workflows/promote-leads";
 
 export type PromoteLeadsPreflight = {
@@ -115,8 +116,27 @@ function refreshPromotionSurfaces() {
 export async function preflightPromoteLeads(args: {
   orgId: string;
   propertyIds: string[];
+  /** Select-all-matching: re-resolved on the server (capped); `propertyIds` is ignored. */
+  filters?: SelectionFilters;
 }): Promise<Result<PromoteLeadsPreflight>> {
   try {
+    if (args.filters) {
+      const memberships = await getCallerMemberships();
+      if (!memberships.some((membership) => membership.org_id === args.orgId)) {
+        return {
+          ok: false,
+          error: { code: "PROMOTION_FORBIDDEN", message: "You no longer have access to this organization." },
+        };
+      }
+      const resolved = await selectAllMatching(args.filters);
+      if (!resolved.ok) return resolved;
+      return ok({
+        selected: resolved.data.matchedCount,
+        eligible: resolved.data.eligibleIds.length,
+        dncLocked: resolved.data.dncLockedCount,
+        staleOrNotProspect: resolved.data.skippedLeads,
+      });
+    }
     const ids = uniqueIds(args.propertyIds);
     const selected = new Set(args.propertyIds).size;
     if (ids.length === 0) {
@@ -162,10 +182,18 @@ export async function createPromoteLeadsJob(args: {
   orgId: string;
   propertyIds: string[];
   idempotencyKey: string;
+  /** Select-all-matching: the eligible ids are re-resolved on the server; `propertyIds` is ignored. */
+  filters?: SelectionFilters;
 }): Promise<Result<PromotionJobReceipt>> {
   try {
-    const requestedIds = [...new Set(args.propertyIds)];
-    const propertyIds = uniqueIds(args.propertyIds);
+    let sourceIds = args.propertyIds;
+    if (args.filters) {
+      const resolved = await selectAllMatching(args.filters);
+      if (!resolved.ok) return resolved;
+      sourceIds = resolved.data.eligibleIds;
+    }
+    const requestedIds = [...new Set(sourceIds)];
+    const propertyIds = uniqueIds(sourceIds);
     if (
       propertyIds.length === 0 ||
       propertyIds.length !== requestedIds.length ||

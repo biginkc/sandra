@@ -27,6 +27,12 @@ type Props = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   propertyIds: string[];
+  /**
+   * Select-all-matching: an opaque token stands in for the id list. The caller's
+   * onPreflight / onLaunchSkipTrace / onStartCassVerification callbacks resolve the
+   * real selection on the server; no id list is held or sent from here.
+   */
+  selectionToken?: string;
   approveJobId?: string;
   onFinished?: () => void;
   title?: string;
@@ -66,7 +72,8 @@ function creditCopy(preflight: SkipTracePreflight | null) {
 export function SkipTracePreflightDialog({
   open,
   onOpenChange,
-  propertyIds,
+  propertyIds: explicitPropertyIds,
+  selectionToken,
   approveJobId,
   onFinished,
   title,
@@ -86,6 +93,10 @@ export function SkipTracePreflightDialog({
   const [loadedIdsKey, setLoadedIdsKey] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
+  const propertyIds = useMemo(
+    () => (selectionToken ? [selectionToken] : explicitPropertyIds),
+    [selectionToken, explicitPropertyIds],
+  );
   const idsKey = useMemo(() => propertyIds.join("|"), [propertyIds]);
   const idsKeyRef = useRef(idsKey);
   const openRef = useRef(open);

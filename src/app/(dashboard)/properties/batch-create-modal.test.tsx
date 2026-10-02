@@ -44,6 +44,7 @@ function renderModal(
     onClose: () => void;
     selectedIds?: string[];
     filterArgs?: { search?: string | null; blockStack: FilterBlock[]; origin?: "legacy" | "search_page" };
+    origin?: "legacy" | "search_page";
     totalCount: number;
   }> = {},
 ) {
@@ -54,6 +55,7 @@ function renderModal(
       onClose={onClose}
       selectedIds={overrides.selectedIds}
       filterArgs={overrides.filterArgs}
+      origin={overrides.origin}
       totalCount={overrides.totalCount ?? overrides.selectedIds?.length ?? 0}
     />,
   );
@@ -111,11 +113,10 @@ describe("<BatchCreateModal />", () => {
     renderModal({ selectedIds: ["p1", "p2", "p3"] });
 
     await waitFor(() =>
-      expect(previewBatchEligibilityAction).toHaveBeenCalledWith([
-        "p1",
-        "p2",
-        "p3",
-      ]),
+      expect(previewBatchEligibilityAction).toHaveBeenCalledWith({
+        ids: ["p1", "p2", "p3"],
+        origin: undefined,
+      }),
     );
     expect(await screen.findByText("5 callable")).toBeInTheDocument();
     expect(screen.getByText("2 blocked")).toBeInTheDocument();
@@ -203,6 +204,10 @@ describe("<BatchCreateModal />", () => {
       ok: true,
       data: { eligibleIds: ["p1", "p2"], eligibleCount: 2, dncLockedCount: 0, matchedCount: 5, skippedLeads: 3 },
     });
+    previewBatchEligibilityAction.mockResolvedValue({
+      ok: true,
+      data: { callable: 5, blocked: { do_not_contact: 2 }, missing: 1, skippedLeads: 3 },
+    });
     createDialerBatchFromFilters.mockResolvedValue({
       ok: true,
       data: { batchId: "batch-s", counts: { callable: 1, blocked: {}, missing: 0 }, skippedLeads: 3 },
@@ -212,9 +217,11 @@ describe("<BatchCreateModal />", () => {
       totalCount: 2,
     });
     expect(await screen.findByTestId("batch-skipped-leads")).toHaveTextContent(/3 leads skipped/);
-    expect(getAllMatchingProspectSelection).toHaveBeenCalledWith(
-      expect.objectContaining({ origin: "search_page" }),
-    );
+    // The preview resolves the filters server-side: the modal sends the filters, never an id list.
+    expect(previewBatchEligibilityAction).toHaveBeenCalledWith({
+      filters: expect.objectContaining({ search: "foo", origin: "search_page" }),
+    });
+    expect(getAllMatchingProspectSelection).not.toHaveBeenCalled();
 
     await screen.findByText("5 callable");
     await user.click(screen.getByRole("button", { name: /Create batch/i }));
@@ -254,26 +261,31 @@ describe("<BatchCreateModal />", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("shows dashes instead of skeletons when loading matching prospects fails", async () => {
-    getAllMatchingProspectSelection.mockResolvedValue({
+  it("shows dashes instead of skeletons when the server-side filter preview fails", async () => {
+    previewBatchEligibilityAction.mockResolvedValue({
       ok: false,
-      error: {
-        code: "MATCHING_PROSPECTS_FAILED",
-        message: "Could not load prospects",
-      },
+      error: { code: "SELECT_ALL_TOO_LARGE", message: "Could not load prospects" },
     });
     renderModal({
       filterArgs: { blockStack: defaultBlockStack },
       totalCount: 8,
     });
 
-    expect(
-      await screen.findByText("Could not load prospects"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Could not load prospects")).toBeInTheDocument();
     expect(screen.getByText("— callable")).toBeInTheDocument();
     expect(screen.getByText("— blocked")).toBeInTheDocument();
     expect(screen.getByText("— missing phone")).toBeInTheDocument();
     expect(document.querySelectorAll('[data-slot="skeleton"]')).toHaveLength(0);
+  });
+
+  it("checkbox selection from the Search page reports server-derived skipped leads (no hardcoded zero)", async () => {
+    previewBatchEligibilityAction.mockResolvedValue({
+      ok: true,
+      data: { callable: 2, blocked: {}, missing: 0, skippedLeads: 4 },
+    });
+    renderModal({ selectedIds: ["p1", "p2"], origin: "search_page" });
+    expect(await screen.findByTestId("batch-skipped-leads")).toHaveTextContent(/4 leads skipped/);
+    expect(previewBatchEligibilityAction).toHaveBeenCalledWith({ ids: ["p1", "p2"], origin: "search_page" });
   });
 
   it("shows dashes instead of skeletons when callability preview fails", async () => {

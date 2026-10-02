@@ -16,7 +16,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import {
   createDialerBatchFromFilters,
   createDialerBatchFromPropertyIds,
-  getAllMatchingProspectSelection,
   previewBatchEligibilityAction,
 } from "./actions";
 import type { QueryOrigin } from "@/lib/prospects/search-scope";
@@ -38,6 +37,8 @@ export type BatchCreateModalProps = {
     imported?: "today" | null;
     origin?: QueryOrigin;
   };
+  /** 'search_page' makes the server report skipped leads for checkbox selections too. */
+  origin?: QueryOrigin;
   totalCount: number;
   lockedExcludedCount?: number;
 };
@@ -61,6 +62,7 @@ export function BatchCreateModal({
   onClose,
   selectedIds,
   filterArgs,
+  origin,
   totalCount,
   lockedExcludedCount = 0,
 }: BatchCreateModalProps) {
@@ -86,6 +88,7 @@ export function BatchCreateModal({
   const filterBlockStack = filterArgs?.blockStack ?? EMPTY_BLOCK_STACK;
   const filterImported = filterArgs?.imported ?? null;
   const filterOrigin = filterArgs?.origin;
+  const selectionOrigin = origin ?? filterArgs?.origin;
   const [skippedLeads, setSkippedLeads] = useState(0);
   const callabilityCounts = previewLoading || counts === null ? null : counts;
   const createDisabled =
@@ -109,36 +112,26 @@ export function BatchCreateModal({
     setPreviewLoading(true);
 
     async function loadPreview() {
-      const idsResult =
+      // Server-resolved preview: explicit ids are re-checked, a select-all-matching
+      // sends only its filters (no id list round-trips through the client).
+      const preview = await previewBatchEligibilityAction(
         mode === "ids"
-          ? { ok: true as const, data: { ids: selectedIds ?? [], skippedLeads: 0 } }
-          : await getAllMatchingProspectSelection({
-              search: filterSearch,
-              blockStack: filterBlockStack,
-              imported: filterImported,
-              origin: filterOrigin,
-            }).then((r) =>
-              r.ok
-                ? {
-                    ok: true as const,
-                    data: { ids: r.data.eligibleIds, skippedLeads: r.data.skippedLeads },
-                  }
-                : r,
-            );
-
-      if (cancelled) return;
-      if (!idsResult.ok) {
-        setError(idsResult.error.message);
-        setPreviewLoading(false);
-        return;
-      }
-      setSkippedLeads(idsResult.data.skippedLeads);
-
-      const preview = await previewBatchEligibilityAction(idsResult.data.ids);
+          ? { ids: selectedIds ?? [], origin: selectionOrigin }
+          : {
+              filters: {
+                search: filterSearch,
+                blockStack: filterBlockStack,
+                imported: filterImported,
+                origin: filterOrigin,
+              },
+            },
+      );
       if (cancelled) return;
 
       if (preview.ok) {
-        setCounts(preview.data);
+        const { skippedLeads: skipped = 0, ...rest } = preview.data;
+        setSkippedLeads(skipped);
+        setCounts(rest);
       } else {
         setError(preview.error.message);
       }
@@ -149,7 +142,7 @@ export function BatchCreateModal({
     return () => {
       cancelled = true;
     };
-  }, [filterBlockStack, filterImported, filterOrigin, filterSearch, mode, open, selectedIds, selectedIdsKey]);
+  }, [filterBlockStack, filterImported, filterOrigin, filterSearch, mode, open, selectedIds, selectedIdsKey, selectionOrigin]);
 
   const handleCreate = () => {
     if (createDisabled) return;
@@ -162,6 +155,7 @@ export function BatchCreateModal({
           ? await createDialerBatchFromPropertyIds(selectedIds ?? [], {
               sourceKind: "selected_ids",
               title: cleanTitle,
+              origin: selectionOrigin,
             })
           : await createDialerBatchFromFilters({
               search: filterSearch,

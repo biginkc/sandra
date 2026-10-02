@@ -38,6 +38,18 @@ vi.mock("@/lib/supabase/server", () => ({ createClient: createClientMock }));
 vi.mock("@/lib/prospects/select-all", async (importActual) => ({
   ...(await importActual<typeof import("@/lib/prospects/select-all")>()),
   selectAllMatching: selectionMock,
+  resolveSelection: async (s: any) => {
+    const actual = await importActual<typeof import("@/lib/prospects/select-all")>();
+    const filters = actual.selectionFilters(s);
+    const origin = actual.selectionOrigin(s);
+    if (!filters) {
+      const ids = actual.selectionIds(s);
+      return { ok: true, data: { ids, skippedLeads: 0, dncLockedCount: 0, dncLockedIds: [], matchedCount: ids.length, fromFilters: false, origin } };
+    }
+    const r: any = await selectionMock(filters);
+    if (!r.ok) return r;
+    return { ok: true, data: { ids: r.data.eligibleIds, skippedLeads: r.data.skippedLeads, dncLockedCount: r.data.dncLockedCount, dncLockedIds: r.data.dncLockedIds ?? [], matchedCount: r.data.matchedCount, fromFilters: true, origin } };
+  },
 }));
 
 import {
@@ -175,16 +187,31 @@ describe("Prospects DNC-safe bulk actions", () => {
     expect(result.ok && result.data.dncLockedSkipped).toBe(1);
   });
 
-  it("counts a DNC-locked LEAD as a skipped lead (leads before the DNC split), not a DNC failure", async () => {
+  it("LEGACY (plain id array): a DNC-locked lead is still reported as a locked failure, with no lead count (parity with main)", async () => {
     const result = await assignLeadsBulk(["locked-lead", "locked", "eligible"], "user-1");
+
+    expect(assignUnsafe).toHaveBeenCalledWith(["eligible"], "user-1");
+    // origin/main behavior: every DNC-locked row (any status) is a failure; no skippedLeads field.
+    expect(result.ok && result.data.failed.map((f) => f.propertyId)).toEqual(["locked-lead", "locked"]);
+    expect(result.ok && "skippedLeads" in result.data).toBe(false);
+  });
+
+  it("LEGACY CASS: lockedCount still counts a locked lead", async () => {
+    const result = await verifyPropertiesBulk(["locked-lead", "eligible"], "key");
+    expect(result.ok && result.data.lockedCount).toBe(1);
+    expect(result.ok && "skippedLeads" in result.data).toBe(false);
+  });
+
+  it("SEARCH checkbox ids: a DNC-locked LEAD is a skipped lead (leads before the DNC split), only locked prospects fail", async () => {
+    const result = await assignLeadsBulk({ ids: ["locked-lead", "locked", "eligible"], origin: "search_page" as const }, "user-1");
 
     expect(assignUnsafe).toHaveBeenCalledWith(["eligible"], "user-1");
     expect(result.ok && result.data.skippedLeads).toBe(1);
     expect(result.ok && result.data.failed.map((f) => f.propertyId)).toEqual(["locked"]);
   });
 
-  it("drops a forged lead id and an other-org id (invisible under RLS) before any mutation", async () => {
-    const result = await assignLeadsBulk(["some-lead", "other-org-id", "eligible"], "user-1");
+  it("SEARCH checkbox ids: a forged lead id and an other-org id are dropped before any mutation and counted", async () => {
+    const result = await assignLeadsBulk({ ids: ["some-lead", "other-org-id", "eligible"], origin: "search_page" as const }, "user-1");
 
     expect(assignUnsafe).toHaveBeenCalledWith(["eligible"], "user-1");
     expect(result.ok && result.data.skippedLeads).toBe(2);
@@ -196,7 +223,7 @@ describe("Prospects DNC-safe bulk actions", () => {
       data: { eligibleIds: ["eligible"], eligibleCount: 1, dncLockedCount: 1, dncLockedIds: ["locked"], matchedCount: 3, skippedLeads: 1 },
     });
     const viaFilters = await assignLeadsBulk({ filters: { search: "x", blockStack: [], origin: "search_page" } }, "user-1");
-    const viaIds = await assignLeadsBulk(["locked-lead", "locked", "eligible"], "user-1");
+    const viaIds = await assignLeadsBulk({ ids: ["locked-lead", "locked", "eligible"], origin: "search_page" as const }, "user-1");
     expect(viaFilters).toEqual(viaIds);
     expect(viaFilters.ok && viaFilters.data.failed.map((f) => f.propertyId)).toEqual(["locked"]);
   });
@@ -216,8 +243,8 @@ describe("Prospects DNC-safe bulk actions", () => {
     expect(result.ok && result.data.failed.map((f) => f.propertyId)).toEqual(["locked"]);
   });
 
-  it("reports leads in a selection as skipped instead of silently dropping them", async () => {
-    const result = await assignLeadsBulk(["lead-not-in-prospect-set", "eligible"], "user-1");
+  it("reports leads in a SEARCH selection as skipped instead of silently dropping them", async () => {
+    const result = await assignLeadsBulk({ ids: ["lead-not-in-prospect-set", "eligible"], origin: "search_page" as const }, "user-1");
 
     expect(assignUnsafe).toHaveBeenCalledWith(["eligible"], "user-1");
     expect(result.ok && result.data.skippedLeads).toBe(1);
@@ -269,5 +296,33 @@ describe("Prospects DNC-safe bulk actions", () => {
     const result = await createAndApplyCustomTagBulkFromFilters({ name: "w", search: null, blockStack: [] });
     expect(selectionMock.mock.calls[0][0].origin).toBeUndefined();
     expect(result.ok && "skippedLeads" in result.data.outcome).toBe(false);
+  });
+
+  it("CASS from a filter selection resolves server-side and reports locked prospects and skipped leads", async () => {
+    selectionMock.mockResolvedValue({
+      ok: true,
+      data: { eligibleIds: ["eligible"], eligibleCount: 1, dncLockedCount: 2, dncLockedIds: ["a", "b"], matchedCount: 6, skippedLeads: 3 },
+    });
+    const filters = { search: "x", blockStack: [], origin: "search_page" as const };
+    const result = await verifyPropertiesBulk({ filters }, "key");
+    expect(selectionMock).toHaveBeenCalledWith(filters);
+    expect(verifyUnsafe).toHaveBeenCalledWith(["eligible"], "key");
+    expect(result.ok && result.data.lockedCount).toBe(2);
+    expect(result.ok && result.data.skippedLeads).toBe(3);
+  });
+
+  it("skip-trace preflight/request from a filter selection use server-resolved ids and count every matched row", async () => {
+    selectionMock.mockResolvedValue({
+      ok: true,
+      data: { eligibleIds: ["eligible"], eligibleCount: 1, dncLockedCount: 1, dncLockedIds: ["locked"], matchedCount: 5, skippedLeads: 3 },
+    });
+    const filters = { search: "x", blockStack: [], origin: "search_page" as const };
+    const pre = await preflightProspectSkipTrace({ filters });
+    expect(preflightUnsafe).toHaveBeenCalledWith(["eligible"]);
+    expect(pre.ok && pre.data.requested).toBe(5);
+    expect(pre.ok && pre.data.dncLockedSkipped).toBe(1);
+    const req = await requestProspectSkipTrace({ filters });
+    expect(requestUnsafe).toHaveBeenCalledWith(["eligible"]);
+    expect(req.ok && req.data.requested).toBe(5);
   });
 });

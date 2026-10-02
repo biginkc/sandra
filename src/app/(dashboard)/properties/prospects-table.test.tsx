@@ -381,7 +381,7 @@ describe("<ProspectsTable />", () => {
 
     await waitFor(() => {
       expect(addPropertiesToListBulk).toHaveBeenCalledWith(
-        ["p1", "p2", "p3"],
+        { ids: ["p1", "p2", "p3"], origin: "search_page" },
         "list-pkc",
       );
     });
@@ -422,7 +422,10 @@ describe("<ProspectsTable />", () => {
     );
 
     await waitFor(() => {
-      expect(applyTagBulk).toHaveBeenCalledWith(["p1", "p2"], "tag-hot");
+      expect(applyTagBulk).toHaveBeenCalledWith(
+        { ids: ["p1", "p2"], origin: "search_page" },
+        "tag-hot",
+      );
     });
   });
 
@@ -657,7 +660,7 @@ describe("<ProspectsTable />", () => {
       await screen.findByRole("heading", { name: "Create dialer batch" }),
     ).toBeInTheDocument();
     await waitFor(() =>
-      expect(previewBatchEligibilityAction).toHaveBeenCalledWith(["p1"]),
+      expect(previewBatchEligibilityAction).toHaveBeenCalledWith({ ids: ["p1"], origin: "search_page" }),
     );
   });
 
@@ -683,9 +686,30 @@ describe("<ProspectsTable />", () => {
       }),
     ).toBeInTheDocument();
     await waitFor(() => {
-      expect(preflightProspectSkipTrace).toHaveBeenCalledWith(["p1"]);
+      expect(preflightProspectSkipTrace).toHaveBeenCalledWith({ ids: ["p1"], origin: "search_page" });
     });
     expect(requestProspectSkipTrace).not.toHaveBeenCalled();
+  });
+
+  it("select-all-matching skip-trace and CASS send filters to the server, never the cached id list", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const { preflightProspectSkipTrace, verifyPropertiesBulk } = await import("./dnc-safe-actions");
+    getAllMatchingProspectSelection.mockResolvedValue({
+      ok: true,
+      data: { eligibleIds: ["p1", "hidden-1", "hidden-2"], eligibleCount: 3, dncLockedCount: 0, matchedCount: 3, skippedLeads: 0 },
+    });
+    renderTable([makeRow({ id: "p1", address: "1 Tracefy Ave" })], [], { total: 3, pageSize: 1, totalPages: 3, search: "oak" });
+    await user.click(screen.getByRole("checkbox", { name: "Select 1 Tracefy Ave" }));
+    await user.click(screen.getByTestId("select-all-across-pages"));
+    await screen.findByTestId("select-all-banner");
+
+    await user.click(screen.getByRole("button", { name: /Actions for 3 selected/ }));
+    await user.click(await screen.findByRole("menuitem", { name: "Skip trace" }));
+    await waitFor(() => expect(preflightProspectSkipTrace).toHaveBeenCalled());
+    const arg = vi.mocked(preflightProspectSkipTrace).mock.calls[0][0] as { filters?: { search: string; origin: string } };
+    expect(arg.filters).toMatchObject({ search: "oak", origin: "search_page" });
+    expect(JSON.stringify(arg)).not.toContain("hidden-1");
+    expect(verifyPropertiesBulk).not.toHaveBeenCalledWith(expect.arrayContaining(["hidden-1"]), expect.anything());
   });
 
   it("shows table skeleton rows during FilterDrawer URL navigation", async () => {

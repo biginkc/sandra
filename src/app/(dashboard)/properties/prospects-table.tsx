@@ -231,6 +231,8 @@ export function ProspectsTable({
   const [showBulkSms, setShowBulkSms] = useState(false);
   const [showBulkTag, setShowBulkTag] = useState(false);
   const [promotionIds, setPromotionIds] = useState<string[]>([]);
+  const [promotionFilters, setPromotionFilters] = useState<SelectionFilters | null>(null);
+  const [skipTraceFilters, setSkipTraceFilters] = useState<SelectionFilters | null>(null);
   const [skipTracePreflightIds, setSkipTracePreflightIds] = useState<string[]>(
     [],
   );
@@ -445,7 +447,9 @@ export function ProspectsTable({
   };
   /** Select-all-matching sends the filters (re-resolved server-side), never the id list. */
   const selectionArg = (): PropertySelection =>
-    selectAllMatching ? { filters: allMatchingFilters } : selectedIds();
+    selectAllMatching
+      ? { filters: allMatchingFilters }
+      : { ids: selectedIds(), origin: "search_page" as const };
 
   /**
    * Shared post-action handler: show a toast, keep failed rows selected so
@@ -471,6 +475,11 @@ export function ProspectsTable({
   const handleQualify = () => {
     const ids = selectedIds();
     if (ids.length === 0) return;
+    // Select-all-matching: the dialog sends filters, the server re-resolves.
+    if (selectAllMatching) {
+      setPromotionFilters(allMatchingFilters);
+      return;
+    }
     setPromotionIds(ids);
   };
 
@@ -527,7 +536,7 @@ export function ProspectsTable({
     startTransition(async () => {
       const result = await callAction(
         verifyPropertiesBulk(
-          ids,
+          selectionArg(),
           (cassRequestKeyRef.current ??= crypto.randomUUID()),
         ),
         {
@@ -549,6 +558,11 @@ export function ProspectsTable({
   const handleSkipTrace = () => {
     const ids = selectedIds();
     if (ids.length === 0) return;
+    if (selectAllMatching) {
+      setSkipTraceFilters(allMatchingFilters);
+      setSkipTracePreflightIds([]);
+      return;
+    }
     setSkipTracePreflightIds(ids);
   };
 
@@ -851,14 +865,18 @@ export function ProspectsTable({
           router.refresh();
         }}
       />
-      {promotionIds.length > 0 ? (
+      {promotionIds.length > 0 || promotionFilters ? (
         <PromoteLeadsDialog
           open
           onOpenChange={(nextOpen) => {
-            if (!nextOpen) setPromotionIds([]);
+            if (!nextOpen) {
+              setPromotionIds([]);
+              setPromotionFilters(null);
+            }
           }}
           orgId={orgId}
-          propertyIds={promotionIds}
+          propertyIds={promotionFilters ? [] : promotionIds}
+          filters={promotionFilters ?? undefined}
           onStarted={() => {
             onClearAllSelection();
             router.refresh();
@@ -885,6 +903,7 @@ export function ProspectsTable({
         onApplied={(outcome) => finishBulk("Tagged", outcome)}
       />
       <BatchCreateModal
+        origin="search_page"
         open={showBatchCreate}
         onClose={() => setShowBatchCreate(false)}
         selectedIds={selectAllMatching ? undefined : selectedIds()}
@@ -902,14 +921,26 @@ export function ProspectsTable({
         lockedExcludedCount={selectAllMatching ? selectAllDncLockedCount : 0}
       />
       <SkipTracePreflightDialog
-        open={skipTracePreflightIds.length > 0}
+        open={skipTracePreflightIds.length > 0 || skipTraceFilters !== null}
         onOpenChange={(open) => {
-          if (!open) setSkipTracePreflightIds([]);
+          if (!open) {
+            setSkipTracePreflightIds([]);
+            setSkipTraceFilters(null);
+          }
         }}
         propertyIds={skipTracePreflightIds}
-        onPreflight={preflightProspectSkipTrace}
+        selectionToken={skipTraceFilters ? `filters:${JSON.stringify(skipTraceFilters)}` : undefined}
+        onPreflight={(ids) =>
+          preflightProspectSkipTrace(
+            skipTraceFilters ? { filters: skipTraceFilters } : { ids, origin: "search_page" },
+          )
+        }
         onLaunchSkipTrace={() =>
-          requestProspectSkipTrace(skipTracePreflightIds)
+          requestProspectSkipTrace(
+            skipTraceFilters
+              ? { filters: skipTraceFilters }
+              : { ids: skipTracePreflightIds, origin: "search_page" },
+          )
         }
         onStartCassVerification={verifyPropertiesBulk}
         onFinished={() => {
