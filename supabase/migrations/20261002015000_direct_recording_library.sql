@@ -6,7 +6,7 @@ create or replace function public.fn_recording_library_sources(p_actor uuid,p_sc
 returns jsonb language plpgsql stable security definer set search_path='' as $$
 begin
   perform public.recording_library_require(p_actor,p_scope);
-  return (select coalesce(jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+  return (select coalesce(jsonb_agg(jsonb_build_object(
     'id',c.id,
     'attemptId',c.jitter_attempt_id,
     'scopeId',c.jitter_session_id,
@@ -14,7 +14,12 @@ begin
     'actorId',case when c.direct_call_id is not null then c.operator_user_id end,
     'source',case when c.direct_call_id is not null then 'sandra_direct' end,
     'directCallId',case when c.direct_call_id is not null then c.direct_call_id end,
-    'recordingStatus',case when c.direct_call_id is not null then coalesce(d.status,c.recording_status) end,
+    'recordingStatus',case when c.direct_call_id is not null then case
+      when d.status='available' and not exists (
+        select 1 from public.call_recordings linked
+        where linked.call_activity_id=c.id and linked.provider_recording_id=d.provider_recording_id and linked.status='available'
+      ) then 'pending'
+      else coalesce(d.status,c.recording_status) end end,
     'files',case when c.direct_call_id is not null then coalesce((
       select jsonb_agg(jsonb_build_object(
         'id','recording:'||cr.id::text,
@@ -31,10 +36,11 @@ begin
       where cr.call_activity_id=c.id
         and cr.provider_recording_id=d.provider_recording_id
         and d.status='available'
+        and cr.status='available'
         and nullif(btrim(d.storage_bucket),'') is not null
         and nullif(btrim(d.storage_path),'') is not null
     ),'[]'::jsonb) end
-  )) order by c.id),'[]'::jsonb)
+  ) order by c.id),'[]'::jsonb)
     from public.call_activities c
     left join public.call_recordings r on r.call_activity_id=c.id
     left join public.acquisition_attempts a on a.call_activity_id=c.id and a.org_id=c.org_id

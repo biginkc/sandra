@@ -86,9 +86,11 @@ async function audioCatalog(userId: string, scope: RecordingScope, callId?: stri
   const sources = (callId ? allowedSources.filter(c => c.id === callId) : allowedSources).filter(c => c.source !== 'dialpad');
   const directSources = sources.filter(c => c.source === 'sandra_direct');
   for (const source of directSources) {
-    if (!source.directCallId || !/^[0-9a-f-]{36}$/i.test(source.directCallId) || source.files?.some(file => file.source !== 'sandra_direct' || !/^recording:[0-9a-f-]{36}$/i.test(file.id) || file.status !== 'available' || file.kind !== 'stored' || (file.duration !== null && (!Number.isFinite(file.duration) || file.duration < 0)) || file.directCallId !== source.directCallId || file.storageBucket !== DIRECT_RECORDINGS_BUCKET || typeof file.storagePath !== 'string')) {
+    const files = (source.files ?? []).map(file => ({ ...file, duration: file.duration ?? null }));
+    if (!source.directCallId || !/^[0-9a-f-]{36}$/i.test(source.directCallId) || files.some(file => file.source !== 'sandra_direct' || !/^recording:[0-9a-f-]{36}$/i.test(file.id) || file.status !== 'available' || file.kind !== 'stored' || (file.duration !== null && (!Number.isFinite(file.duration) || file.duration < 0)) || file.directCallId !== source.directCallId || file.storageBucket !== DIRECT_RECORDINGS_BUCKET || typeof file.storagePath !== 'string')) {
       throw new RecordingAccessError(503, 'Invalid direct recording inventory');
     }
+    source.files = files;
   }
   const audio: AudioCall[] = directSources.map(source => ({
     id: source.id,
@@ -101,7 +103,7 @@ async function audioCatalog(userId: string, scope: RecordingScope, callId?: stri
   // attests caller identity before the database applies self scope. No credentials or
   // cross-project calls reach the browser. Fail closed rather than return partial counts.
   for (let i = 0; i < brokerSources.length; i += 100) {
-    const calls = brokerSources.slice(i, i + 100).map(c => ({ ...c, summaryPath: c.summaryPath ?? undefined }));
+    const calls = brokerSources.slice(i, i + 100).map(c => ({ id: c.id, attemptId: c.attemptId, scopeId: c.scopeId, summaryPath: c.summaryPath ?? undefined }));
     const body = await broker({ calls });
     if (!Array.isArray(body.calls) || body.calls.length !== calls.length) throw new RecordingAccessError(503, 'Recording inventory is incomplete');
     const expected = new Set(calls.map(c => c.id));

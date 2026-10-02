@@ -65,17 +65,27 @@ it("catalogs direct recordings in the Sandra library with owner and mine scope",
 
     const source = (await pg.query("select public.fn_recording_library_sources($1,'owner') as value", [USER])).rows[0].value as Array<Record<string, unknown>>;
     const direct = source.find(row => row.id === activityId);
+    const recordingId = (await pg.query("select id from public.call_recordings where call_activity_id=$1", [activityId])).rows[0].id as string;
     expect(direct).toMatchObject({ id: activityId, source: "sandra_direct", directCallId: callId, actorId: USER });
     expect((direct?.files as Array<Record<string, unknown>>)[0]).toMatchObject({
-      id: `recording:${(await pg.query("select id from public.call_recordings where call_activity_id=$1", [activityId])).rows[0].id}`,
+      id: `recording:${recordingId}`,
       source: "sandra_direct",
       storageBucket: "sandra-direct-recordings",
       storagePath: `${ORG}/${callId}/telnyx-library-recording.wav`,
     });
     expect((await pg.query("select public.fn_recording_library_sources($1,'mine') as value", [OTHER_USER])).rows[0].value).toEqual([]);
 
+    await pg.query("delete from public.call_recordings where id=$1", [recordingId]);
+    const pendingSource = (await pg.query("select public.fn_recording_library_sources($1,'owner') as value", [USER])).rows[0].value as Array<Record<string, unknown>>;
+    expect(pendingSource.find(row => row.id === activityId)).toMatchObject({ recordingStatus: "pending", files: [] });
+    await pg.query(
+      "insert into public.call_recordings(id,call_activity_id,status,provider_recording_id,provider_call_control_id,storage_bucket,storage_path,duration_seconds) values ($1,$2,'available','telnyx-library-recording','seller-library','sandra-direct-recordings',$3,73)",
+      [recordingId, activityId, `${ORG}/${callId}/telnyx-library-recording.wav`],
+    );
+
     const audio = JSON.stringify([direct]);
-    const fileId = (direct?.files as Array<Record<string, unknown>>)[0].id;
+    const fileId = `recording:${recordingId}`;
+    expect((await pg.query("select public.fn_recording_library_file_parent($1,'owner',$2) as value", [USER, fileId])).rows[0].value).toBe(activityId);
     const file = (await pg.query("select public.fn_recording_library_file($1,'owner',$2,$3::jsonb) as value", [USER, fileId, audio])).rows[0].value as Record<string, unknown>;
     expect(file).toMatchObject({ callId: `call:${activityId}`, source: "sandra_softphone", file: { source: "sandra_direct", storagePath: `${ORG}/${callId}/telnyx-library-recording.wav` } });
     expect((await pg.query("select public.fn_recording_library_file($1,'mine',$2,$3::jsonb) as value", [OTHER_USER, fileId, "[]"])).rows[0].value).toBeNull();

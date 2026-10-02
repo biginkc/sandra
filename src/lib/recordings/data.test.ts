@@ -58,7 +58,7 @@ describe('server recording boundary',()=>{
  it('lists direct recordings without contacting the Jitter broker',async()=>{
    const activityId='10000000-0000-4000-8000-000000000011';
    const directCallId='10000000-0000-4000-8000-000000000012';
-   const file={id:'recording:10000000-0000-4000-8000-000000000013',duration:73,status:'available',kind:'stored',source:'sandra_direct',recordingStatus:'available',directCallId,storageBucket:'sandra-direct-recordings',storagePath:`00000000-0000-0000-0000-000000000bbb/${directCallId}/telnyx-recording.wav`};
+   const file={id:'recording:10000000-0000-4000-8000-000000000013',duration:null,status:'available',kind:'stored',source:'sandra_direct',recordingStatus:'available',directCallId,storageBucket:'sandra-direct-recordings',storagePath:`00000000-0000-0000-0000-000000000bbb/${directCallId}/telnyx-recording.wav`};
    mocks.rpc.mockImplementation(async(name:string,args:Record<string,unknown>)=>{
      if(name==='fn_recording_library_sources') return {data:[{id:activityId,actorId:mocks.user.id,directCallId,source:'sandra_direct',recordingStatus:'available',files:[file]}],error:null};
      if(name==='fn_dialpad_recording_library_sources') return {data:[],error:null};
