@@ -81,7 +81,7 @@ describe("coach realtime authorization CI security contract", () => {
     const provisioning = readFileSync(path.join(repoRoot, "scripts/provision-e2e-local-database.mjs"), "utf8");
     expect(e2eWorkflow).toContain("node scripts/provision-e2e-local-database.mjs");
     expect(
-      withoutComments(e2eWorkflow).replace(
+      withoutComments(e2eWorkflow).replaceAll(
         "NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
         "",
       ),
