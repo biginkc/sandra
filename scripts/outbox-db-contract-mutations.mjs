@@ -7,7 +7,7 @@ import pg from 'pg';
 import { assertWriteMode } from './outbox-db-contract/guards.mjs';
 import { makeRest } from './outbox-db-contract/postgrest.mjs';
 import { createFixture } from './outbox-db-contract/fixture.mjs';
-import { sealPhaseRecord } from './outbox-db-contract.mjs';
+import { completePhaseInventory, sealPhaseRecord } from './outbox-db-contract.mjs';
 import { platformFingerprint } from './outbox-db-contract/platform.mjs';
 import { readPostgrestMajor } from './outbox-db-contract/readonly.mjs';
 
@@ -44,6 +44,35 @@ export function fixtureChildEnv(baseEnv, fixture, scratch) {
 
 export function stagePhaseRunDir(runDir, repoRoot, githubEnv) {
   appendFileSync(githubEnv, `HEAVY_RUN_DIR=${path.relative(repoRoot, runDir)}\n`);
+}
+
+export function shouldSealPhaseRecord(env, phase) {
+  return env.HEAVY_LANE === `db-contract-${phase}`;
+}
+
+export function finalizeSubstep({ phase, checks, schemaState, mutations, fixtureRows, platformConfig, readonlyRehearsal, failure, env = process.env, runId, startedAt, seal = sealPhaseRecord, stage = stagePhaseRunDir }) {
+  if (!shouldSealPhaseRecord(env, phase)) {
+    if (!failure && !completePhaseInventory(phase, checks, schemaState, mutations)) failure = new Error('INCOMPLETE_PHASE_INVENTORY');
+    return { failure, sealed: null };
+  }
+
+  const sealed = seal({
+    phase,
+    checks,
+    schemaState,
+    mutations,
+    fixtureRows,
+    platformConfig,
+    readonlyRehearsal,
+    verdict: failure ? 'FAIL' : 'PASS',
+    errorText: failure ? String(failure.stack ?? failure) : '',
+    env,
+    runId,
+    startedAt,
+  });
+  if (env.GITHUB_ACTIONS === 'true') stage(sealed.runDir, process.cwd(), env.GITHUB_ENV);
+  if (sealed.verdict !== 'PASS' && !failure) failure = new Error('INCOMPLETE_PHASE_INVENTORY');
+  return { failure, sealed };
 }
 
 function runContract(phase, extra = [], fixture = null) {
@@ -154,7 +183,7 @@ export async function runMutations(output, phase) {
   } catch (error) { failure = error; }
   finally {
     let platformConfig;
-    if (!failure && phase === 'pre') {
+    if (shouldSealPhaseRecord(process.env, phase) && !failure && phase === 'pre') {
       try {
         const version = (await db.query('SHOW server_version_num')).rows[0].server_version_num;
         await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
@@ -169,9 +198,7 @@ export async function runMutations(output, phase) {
     await db.end();
     const checks = baseline?.contracts ?? [];
     const fixtureRows = baseline?.fixtureRows;
-    const sealed = sealPhaseRecord({ phase, checks, schemaState: baseline?.schemaState, mutations: results, fixtureRows, platformConfig, readonlyRehearsal, verdict: failure ? 'FAIL' : 'PASS', errorText: failure ? String(failure.stack ?? failure) : '' });
-    if (process.env.GITHUB_ACTIONS === 'true') stagePhaseRunDir(sealed.runDir, process.cwd(), process.env.GITHUB_ENV);
-    if (sealed.verdict !== 'PASS' && !failure) failure = new Error('INCOMPLETE_PHASE_INVENTORY');
+    ({ failure } = finalizeSubstep({ phase, checks, schemaState: baseline?.schemaState, mutations: results, fixtureRows, platformConfig, readonlyRehearsal, failure }));
   }
   if (failure) throw failure;
   return results;
