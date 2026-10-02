@@ -17,3 +17,11 @@ Never 54329 or hosted. Migration sha256 `1b138e5256b8b79f816a0e5aff6e300958465d6
 
 Note: the volume reseed leaves an owner membership without a user, so run the DB integration suites BEFORE it or
 clear `public.memberships` and `svol-*` auth users first (sandbox only).
+
+## Re-run on PR A fast-path base (68482492; migrations 110000/110050/110055/110100)
+tsc clean; unit 5,988; RTL 1,803; search_properties + oracle 91/91 (0 disagreements); filter-local 45 pass + 1 skipped
+(page load 2 evals, head count 1); Playwright 3 Search specs + filter contract/drawer 49/49; Search volume 3/3
+(baselines 168/26/83 ms, worst page p95 below budget, select-all at 20,000 = 2.50 s).
+Harness fix: the volume seed's per-batch `refresh_property_filter_cache` crawls (31 min, one transaction) once 110055
+drops the flag partial indexes; the seed now sets the message flags with one set-based UPDATE. Production maintains
+flags incrementally, so this is a harness-only issue.

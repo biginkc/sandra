@@ -90,9 +90,16 @@ async function seed() {
   await pg.query(`update public.properties set outreach_dispo = 'not_interested' from (select id, n from vp) v where properties.id = v.id and v.n % 29 = 0 and outreach_dispo is null`);
   await pg.query(`set session_replication_role = origin`);
   await pg.query("commit");
-  await pg.query(`do $b$ declare batch uuid[]; begin
-    for batch in select array_agg(s.id) from (select id, (row_number() over (order by id) - 1) / 5000 g from public.properties) s group by s.g order by s.g
-    loop perform public.refresh_property_filter_cache(batch); end loop; end $b$`);
+  // Seeded with triggers off: populate the message flags set-based. (Per-batch
+  // refresh_property_filter_cache() needs the flag partial indexes that the fast-path
+  // migration drops, so it crawls at this size; production maintains flags incrementally.)
+  await pg.query("begin");
+  await pg.query(`set local session_replication_role = replica`);
+  await pg.query(`update public.properties p set has_inbound_message = a.hi, has_outbound_message = a.ho, has_unread_inbound = a.hu
+    from (select property_id, bool_or(direction = 'inbound') hi, bool_or(direction = 'outbound') ho,
+                 bool_or(direction = 'inbound' and read_at is null) hu from public.messages group by property_id) a
+   where a.property_id = p.id`);
+  await pg.query("commit");
   for (const t of ["properties", "contacts", "messages"]) await pg.query(`analyze public.${t}`);
   fs.mkdirSync(RESULTS, { recursive: true });
   fs.writeFileSync(path.join(RESULTS, "user.json"), JSON.stringify({ userId }));
