@@ -156,7 +156,7 @@ export function StartDripPicker({
 
   return (
     <div ref={rootRef} className={inline ? "relative" : "relative inline-block"}>
-      {!inline && <button ref={triggerRef} type="button" onClick={() => open ? setOpen(false) : void openPicker()} disabled={disabled || busy}
+      {!inline && <button ref={triggerRef} type="button" onClick={() => { if (busy) return; if (open) setOpen(false); else void openPicker(); }} disabled={disabled} aria-disabled={busy || undefined}
         className={`rounded-md border px-3 py-1 text-[11px] font-medium ${triggerTone === "primary" ? "min-h-9 border-primary bg-primary text-primary-foreground" : triggerTone === "outline" ? "min-h-9 border-border bg-card text-foreground" : "min-h-11 border-teal-200 bg-teal-50 text-teal-800"}`}>
         {triggerLabel}
       </button>}

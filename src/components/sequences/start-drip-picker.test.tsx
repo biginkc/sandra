@@ -166,3 +166,18 @@ it("keeps Tab inside the portaled popup and does not leak Escape to outer listen
   expect(screen.queryByRole("dialog", { name: "Start follow-up drip" })).not.toBeInTheDocument();
   window.removeEventListener("keydown", listener);
 });
+
+it("keeps the trigger focusable so Escape during a pending enrollment restores focus", async () => {
+  listDripChoices.mockResolvedValue({ ok: true, data: [{ id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null }] });
+  let finish: (value: { status: "enrolled"; reason: string }) => void = () => {};
+  const onChoose = vi.fn(() => new Promise<{ status: "enrolled"; reason: string }>((resolve) => { finish = resolve; }));
+  const user = userEvent.setup();
+  render(<StartDripPicker onChoose={onChoose} />);
+  const trigger = screen.getByRole("button", { name: "Start follow-up drip" });
+  await user.click(trigger);
+  await user.click(await screen.findByRole("button", { name: /Confirmed owner/ }));
+  screen.getByRole("searchbox", { name: "Search drips" }).focus();
+  await user.keyboard("{Escape}");
+  expect(trigger).toHaveFocus();
+  finish({ status: "enrolled", reason: "ok" });
+});
