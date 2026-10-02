@@ -61,10 +61,10 @@ alter table public.properties
   add column if not exists filter_list_count integer not null default 0;
 
 -- True only when OLD and NEW differ and every difference is a cache column.
--- Stored generated columns (search_text, equity_pct) are not yet computed in
--- BEFORE triggers, so they are ignored; they derive from other columns that
--- ARE compared. A newly added generated column makes this return false
--- (fail-safe: the normal guard path runs).
+-- Stored generated columns (search_text, equity_pct, and any added later) are not yet
+-- computed in BEFORE triggers, so they are ignored; the list is DERIVED from the catalog
+-- (pg_attribute.attgenerated), never hard-coded, so a future generated column cannot make
+-- STOP replies on DNC-locked rows fail. They derive from other columns that ARE compared.
 create or replace function public.properties_filter_cache_only_change(old_row public.properties, new_row public.properties)
 returns boolean
 language sql
@@ -74,10 +74,16 @@ as $$
   select (j.n - j.ign) = (j.o - j.ign)
      and (j.n - j.gen) <> (j.o - j.gen)
     from (
-      select pg_catalog.to_jsonb(new_row) as n,
-             pg_catalog.to_jsonb(old_row) as o,
-             array['search_text','equity_pct']::text[] as gen,
-             array['search_text','equity_pct','has_inbound_message','has_outbound_message','has_unread_inbound','has_open_tasks','filter_list_ids','filter_tag_ids','filter_list_count']::text[] as ign
+      select g.n, g.o, g.gen,
+             g.gen || array['has_inbound_message','has_outbound_message','has_unread_inbound','has_open_tasks','filter_list_ids','filter_tag_ids','filter_list_count']::text[] as ign
+        from (
+          select pg_catalog.to_jsonb(new_row) as n,
+                 pg_catalog.to_jsonb(old_row) as o,
+                 coalesce((select pg_catalog.array_agg(a.attname::text)
+                             from pg_catalog.pg_attribute a
+                            where a.attrelid = 'public.properties'::pg_catalog.regclass
+                              and a.attnum > 0 and not a.attisdropped and a.attgenerated <> ''), '{}'::text[]) as gen
+        ) g
     ) j
 $$;
 
@@ -214,6 +220,9 @@ end;
 $function$;
 
 -- Recompute the cache for the given properties.
+-- NOTE: properties_filter_cache_pin trusts the writer GUC only when current_user equals the OWNER of
+-- this exact function (looked up by regprocedure 'public.refresh_property_filter_cache(uuid[])'); renaming
+-- or changing the signature/owner of this function requires updating the pin trigger in the same migration.
 create or replace function public.refresh_property_filter_cache(p_ids uuid[])
 returns void
 language plpgsql
@@ -463,8 +472,7 @@ revoke all on function public.trg_messages_refresh_filter_cache() from public, a
 revoke all on function public.trg_tasks_refresh_filter_cache() from public, anon, authenticated;
 revoke all on function public.trg_property_lists_refresh_filter_cache() from public, anon, authenticated;
 revoke all on function public.trg_property_tags_refresh_filter_cache() from public, anon, authenticated;
-revoke all on function public.properties_filter_cache_only_change(public.properties, public.properties) from public, anon;
-grant execute on function public.properties_filter_cache_only_change(public.properties, public.properties) to authenticated, service_role;
+-- properties_filter_cache_only_change is a pure comparator: default PUBLIC execute is kept on purpose.
 
 -- Indexes for org-wide filters (no market predicate): partial btrees keep the
 -- selective boolean states cheap; GIN serves the uuid[] overlap/contains.
