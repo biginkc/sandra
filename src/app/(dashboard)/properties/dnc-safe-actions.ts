@@ -23,8 +23,12 @@ import {
 import { createClient } from "@/lib/supabase/server";
 
 import type { QueryOrigin } from "@/lib/prospects/search-scope";
+import {
+  selectAllMatching,
+  selectionFilters,
+  type PropertySelection,
+} from "@/lib/prospects/select-all";
 
-import { getAllMatchingProspectSelection } from "./actions";
 
 export type { BulkOutcome } from "../leads/actions";
 
@@ -49,12 +53,10 @@ async function partitionDncLockedPropertyIds(propertyIds: string[]): Promise<{
   );
   return {
     eligible: resolved.eligibleIds,
-    locked: resolved.exclusions
-      .filter((item) => item.reason === "dnc")
-      .map((item) => item.propertyId),
-    skippedLeads: resolved.exclusions.filter(
-      (item) => item.reason === "not_found_or_not_prospect",
-    ).length,
+    // Leads are counted BEFORE the DNC split: a locked lead is a skipped
+    // lead, only locked prospects are reported as DNC failures.
+    locked: resolved.prospectDncLockedIds,
+    skippedLeads: resolved.skippedLeadCount,
   };
 }
 
@@ -74,11 +76,35 @@ function addLockedFailures(
 }
 
 async function runBulkOutcome(
-  propertyIds: string[],
+  selection: PropertySelection,
   action: (eligible: string[]) => Promise<Result<BulkOutcome>>,
 ): Promise<Result<BulkOutcome>> {
+  const filters = selectionFilters(selection);
+  if (filters) {
+    // Select-all-matching: re-resolved from the filters on the server. The
+    // resolver already keeps prospects that are not DNC-locked; leads and
+    // locked prospects are reported, never actioned.
+    const resolved = await selectAllMatching(filters);
+    if (!resolved.ok) return resolved;
+    const { eligibleIds, skippedLeads, dncLockedCount } = resolved.data;
+    const base: BulkOutcome = {
+      succeeded: 0,
+      skipped: dncLockedCount,
+      failed: [],
+    };
+    if (eligibleIds.length === 0) {
+      return ok({ ...base, ...(skippedLeads > 0 ? { skippedLeads } : {}) });
+    }
+    const result = await action(eligibleIds);
+    if (!result.ok) return result;
+    return ok({
+      ...result.data,
+      skipped: result.data.skipped + dncLockedCount,
+      ...(skippedLeads > 0 ? { skippedLeads } : {}),
+    });
+  }
   const { eligible, locked, skippedLeads } =
-    await partitionDncLockedPropertyIds(propertyIds);
+    await partitionDncLockedPropertyIds(selection as string[]);
   if (eligible.length === 0) {
     return ok(
       addLockedFailures(
@@ -94,35 +120,41 @@ async function runBulkOutcome(
     : result;
 }
 
-export async function assignLeadsBulk(propertyIds: string[], userId: string | null) {
-  return await runBulkOutcome(propertyIds, (eligible) =>
+export async function assignLeadsBulk(
+  selection: PropertySelection,
+  userId: string | null,
+) {
+  return await runBulkOutcome(selection, (eligible) =>
     assignLeadsBulkUnsafe(eligible, userId),
   );
 }
 
-export async function addPropertiesToListBulk(propertyIds: string[], listId: string) {
-  return await runBulkOutcome(propertyIds, (eligible) =>
+export async function addPropertiesToListBulk(
+  selection: PropertySelection,
+  listId: string,
+) {
+  return await runBulkOutcome(selection, (eligible) =>
     addPropertiesToListBulkUnsafe(eligible, listId),
   );
 }
 
 export async function removePropertiesFromListBulk(
-  propertyIds: string[],
+  selection: PropertySelection,
   listId: string,
 ) {
-  return await runBulkOutcome(propertyIds, (eligible) =>
+  return await runBulkOutcome(selection, (eligible) =>
     removePropertiesFromListBulkUnsafe(eligible, listId),
   );
 }
 
-export async function applyTagBulk(propertyIds: string[], tagId: string) {
-  return await runBulkOutcome(propertyIds, (eligible) =>
+export async function applyTagBulk(selection: PropertySelection, tagId: string) {
+  return await runBulkOutcome(selection, (eligible) =>
     applyTagBulkUnsafe(eligible, tagId),
   );
 }
 
-export async function deletePropertiesBulk(propertyIds: string[]) {
-  return await runBulkOutcome(propertyIds, deletePropertiesBulkUnsafe);
+export async function deletePropertiesBulk(selection: PropertySelection) {
+  return await runBulkOutcome(selection, deletePropertiesBulkUnsafe);
 }
 
 export async function qualifyLeadsBulk(propertyIds: string[]) {
@@ -257,7 +289,7 @@ export async function createAndApplyCustomTagBulkFromFilters(params: {
   /** Defaults to 'legacy'; the Search page passes 'search_page'. */
   origin?: QueryOrigin;
 }) {
-  const ids = await getAllMatchingProspectSelection({
+  const ids = await selectAllMatching({
     search: params.search,
     blockStack: params.blockStack,
     imported: params.imported ?? null,

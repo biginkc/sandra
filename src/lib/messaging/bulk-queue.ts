@@ -104,6 +104,9 @@ export type BulkSmsScheduleState = {
   succeeded: number;
   skipped: number;
   failed: { propertyId: string; message: string }[];
+  /** Ad-hoc workflow chunks: recipients promoted to leads after the freeze and
+   *  skipped before queueing. Tracked apart from `skipped` (queue-time skips). */
+  skippedLeads?: number;
 };
 
 export function freshScheduleState(anchorMs: number): BulkSmsScheduleState {

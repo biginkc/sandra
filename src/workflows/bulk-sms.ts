@@ -426,7 +426,7 @@ async function bulkSmsChunkStep(args: {
   });
   const state: BulkSmsScheduleState = {
     ...batchState,
-    skipped: batchState.skipped + skippedLeads,
+    skippedLeads: (args.state.skippedLeads ?? 0) + skippedLeads,
   };
   await repairCampaignQueueCadenceAfterChunk(
     adminClient,
@@ -480,6 +480,7 @@ async function finalizeBulkSmsStep(args: {
       result_summary: {
         queued: state.succeeded,
         skipped: state.skipped,
+        skipped_leads: state.skippedLeads ?? 0,
         failed: state.failed.length,
         failed_sample: state.failed.slice(0, 20),
       },
@@ -560,7 +561,12 @@ async function failBulkSmsJobStep(args: BulkSmsJobFailureArgs): Promise<void> {
 /** `start(bulkSmsWorkflow, [{ jobId }])` — load → chunk loop → finalize. */
 export async function bulkSmsWorkflow(
   params: BulkSmsWorkflowParams,
-): Promise<{ queued: number; skipped: number; failed: number }> {
+): Promise<{
+  queued: number;
+  skipped: number;
+  skippedLeads: number;
+  failed: number;
+}> {
   "use workflow";
 
   let loaded: LoadedBulkSmsJob;
@@ -611,6 +617,7 @@ export async function bulkSmsWorkflow(
   return {
     queued: state.succeeded,
     skipped: state.skipped,
+    skippedLeads: state.skippedLeads ?? 0,
     failed: state.failed.length,
   };
 }

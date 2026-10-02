@@ -35,9 +35,9 @@ vi.mock("@/lib/skip-trace/actions", () => ({
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient: createClientMock }));
-vi.mock("./actions", () => ({
-  getAllMatchingProspectIds: vi.fn(),
-  getAllMatchingProspectSelection: selectionMock,
+vi.mock("@/lib/prospects/select-all", async (importActual) => ({
+  ...(await importActual<typeof import("@/lib/prospects/select-all")>()),
+  selectAllMatching: selectionMock,
 }));
 
 import {
@@ -108,6 +108,12 @@ describe("Prospects DNC-safe bulk actions", () => {
           ? queryResult([
               {
                 id: "locked",
+                status: "prospect",
+                is_dnc_locked: true,
+                skip_trace_disabled: false,
+              },
+              {
+                id: "locked-lead",
                 status: "closed",
                 is_dnc_locked: true,
                 skip_trace_disabled: false,
@@ -167,6 +173,36 @@ describe("Prospects DNC-safe bulk actions", () => {
     expect(requestUnsafe).not.toHaveBeenCalled();
     expect(result.ok && result.data.status).toBe("none_eligible");
     expect(result.ok && result.data.dncLockedSkipped).toBe(1);
+  });
+
+  it("counts a DNC-locked LEAD as a skipped lead (leads before the DNC split), not a DNC failure", async () => {
+    const result = await assignLeadsBulk(["locked-lead", "locked", "eligible"], "user-1");
+
+    expect(assignUnsafe).toHaveBeenCalledWith(["eligible"], "user-1");
+    expect(result.ok && result.data.skippedLeads).toBe(1);
+    expect(result.ok && result.data.failed.map((f) => f.propertyId)).toEqual(["locked"]);
+  });
+
+  it("drops a forged lead id and an other-org id (invisible under RLS) before any mutation", async () => {
+    const result = await assignLeadsBulk(["some-lead", "other-org-id", "eligible"], "user-1");
+
+    expect(assignUnsafe).toHaveBeenCalledWith(["eligible"], "user-1");
+    expect(result.ok && result.data.skippedLeads).toBe(2);
+  });
+
+  it("select-all-matching re-resolves from filters server-side: no id list reaches the action from the client", async () => {
+    selectionMock.mockResolvedValue({
+      ok: true,
+      data: { eligibleIds: ["eligible"], eligibleCount: 1, dncLockedCount: 1, matchedCount: 5, skippedLeads: 3 },
+    });
+    const result = await assignLeadsBulk(
+      { filters: { search: "jane", blockStack: [], origin: "search_page" } },
+      "user-1",
+    );
+
+    expect(assignUnsafe).toHaveBeenCalledWith(["eligible"], "user-1");
+    expect(result.ok && result.data.skippedLeads).toBe(3);
+    expect(result.ok && result.data.skipped).toBe(1);
   });
 
   it("reports leads in a selection as skipped instead of silently dropping them", async () => {

@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
   createClientMock: vi.fn(),
   afterMock: vi.fn(),
   startMock: vi.fn(),
+  selectAll: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient: h.createClientMock }));
@@ -35,6 +36,10 @@ vi.mock("@/lib/messaging/audience-assessment", () => ({ assessAudienceLineTypes:
 vi.mock("@/lib/messaging/delivery", () => ({
   loadCampaignDeliverySettings: h.loadDelivery,
   normalizeSenderNumber: (v: string) => v.replace(/\D/g, ""),
+}));
+vi.mock("@/lib/prospects/select-all", async (importActual) => ({
+  ...(await importActual<typeof import("@/lib/prospects/select-all")>()),
+  selectAllMatching: h.selectAll,
 }));
 vi.mock("@/lib/prospects/eligibility", () => ({ resolveProspectEligibility: vi.fn() }));
 
@@ -117,6 +122,34 @@ describe("ad-hoc bulk SMS is prospect-only", () => {
     expect(out).toMatchObject({ ok: true, data: { succeeded: 2, skippedLeads: 3 } });
     expect(h.resolveAdHoc.mock.calls[0][1].propertyIds).toEqual(["p1", "p2"]);
     expect(h.queueSmsBatch.mock.calls[0][1].propertyIds).toEqual(["p1", "p2"]);
+  });
+
+  it("drops a forged lead id and an other-org id (not visible to the caller) before freezing or queueing", async () => {
+    const out = await bulkQueueSms(["p1", "l1", "other-org-property-id"], adHoc);
+    expect(out).toMatchObject({ ok: true, data: { skippedLeads: 2 } });
+    expect(h.resolveAdHoc.mock.calls[0][1].propertyIds).toEqual(["p1"]);
+    expect(h.queueSmsBatch.mock.calls[0][1].propertyIds).toEqual(["p1"]);
+  });
+
+  it("a select-all-matching selection is re-resolved on the server and adds its matched-lead count", async () => {
+    h.selectAll.mockResolvedValue({
+      ok: true,
+      data: { eligibleIds: ["p1", "p2"], eligibleCount: 2, dncLockedCount: 0, matchedCount: 6, skippedLeads: 4 },
+    });
+    const filters = { search: "jane", blockStack: [], origin: "search_page" as const };
+    const out = await bulkQueueSms({ filters }, adHoc);
+    expect(h.selectAll).toHaveBeenCalledWith(filters);
+    expect(out).toMatchObject({ ok: true, data: { succeeded: 2, skippedLeads: 4 } });
+    expect(h.resolveAdHoc.mock.calls[0][1].propertyIds).toEqual(["p1", "p2"]);
+  });
+
+  it("a filter selection can never be used for a saved campaign", async () => {
+    const out = await bulkQueueSms(
+      { filters: { search: null, blockStack: [] } },
+      { ...baseOpts, campaignId: "saved-1" },
+    );
+    expect(out).toMatchObject({ ok: false, error: { code: "VALIDATION" } });
+    expect(h.selectAll).not.toHaveBeenCalled();
   });
 
   it("an all-leads selection queues nothing and creates no campaign", async () => {

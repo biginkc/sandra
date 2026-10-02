@@ -90,6 +90,9 @@ beforeEach(() => {
     exclusions: all.filter((_x, i) => i % 2 === 1).map((propertyId) => ({ propertyId, reason: "not_found_or_not_prospect" })),
     dncLockedCount: 0,
     skipTraceDisabledCount: 0,
+    skippedLeadCount: Math.floor(all.length / 2),
+    prospectDncLockedCount: 0,
+    prospectDncLockedIds: [],
   }));
 });
 
