@@ -598,6 +598,11 @@ export function InboxDetail({
   const isSmsRestricted =
     data.contactDoNotContact || smsPresentation.smsRestricted;
   const isPermanentlyLocked = data.isDncLocked;
+  // Replies are allowed when no homeowner is recorded on the property or the
+  // homeowner is this thread contact. A DIFFERENT recorded homeowner locks it.
+  const canReplyToThreadContact =
+    data.homeownerContactId === null ||
+    data.homeownerContactId === data.contactId;
   const canCall =
     Boolean(phoneHref) &&
     !isPermanentlyLocked &&
@@ -1013,13 +1018,12 @@ export function InboxDetail({
                 className="rounded-xl border border-dashed border-[#e5e1df] bg-[#fafaf9] p-3 text-center text-xs text-[#57534e]"
                 data-testid="inline-reply-restricted"
               >
-                {data.homeownerContactId === data.contactId &&
-                !data.replyToPhone
+                {canReplyToThreadContact && !data.replyToPhone
                   ? replyPhoneUnavailableMessage
                   : "SMS reply unavailable for this restricted thread. Review the notice above before taking another safe action."}
               </div>
             ) : null}
-            {data.homeownerContactId === data.contactId ? (
+            {canReplyToThreadContact ? (
               <div
                 key="inline-reply-composer"
                 className="flex flex-col gap-3"
@@ -1035,7 +1039,8 @@ export function InboxDetail({
                 <InlineReply
                   key={`reply-${data.threadId}`}
                   propertyId={data.propertyId}
-                  homeownerContactId={data.homeownerContactId}
+                  homeownerContactId={data.homeownerContactId ?? data.contactId}
+                  threadContactId={data.contactId}
                   homeownerPhone={data.replyToPhone}
                   replyToPhone={data.replyToPhone}
                   preferredFromNumber={data.threadBusinessPhone}
