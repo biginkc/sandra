@@ -13,6 +13,7 @@ const DOWNLOAD_TIMEOUT_MS = 15_000;
 // this tiny service-role adapter keeps the new table out of client-facing
 // generated types until the next schema regeneration.
 type Db = {
+  rpc(name: string, args: Record<string, unknown>): Promise<{ data: unknown; error: { message?: string } | null }>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   from(table: string): any;
   storage: { from(bucket: string): { upload(path: string, body: Uint8Array, options: { contentType: string; upsert: boolean }): Promise<{ error: { message?: string } | null }> } };
@@ -118,26 +119,24 @@ export function createDirectRecordingHandler(options: {
   const now = options.now ?? (() => new Date());
   return async (row: DirectCallFullRow, recording: DirectRecordingSaved): Promise<void> => {
     if (!row.seller_leg_id || recording.callControlId !== row.seller_leg_id) throw new Error("recording_leg_mismatch");
-    const ledger = admin.from("direct_call_recordings");
-    const existingResult = await ledger.select("*").eq("provider_recording_id", recording.recordingId).maybeSingle();
-    if (existingResult.error) throw new Error(existingResult.error.message);
-    const existing = existingResult.data as { status?: string; storage_path?: string | null } | null;
-    if (existing?.status === "available" && existing.storage_path) return;
-    const base = {
-      direct_call_id: row.id,
-      provider_recording_id: recording.recordingId,
-      provider_call_control_id: recording.callControlId,
-      provider_call_leg_id: recording.callLegId,
-      provider_call_session_id: recording.callSessionId,
-      status: "pending",
-      error_code: null,
-      error_message: null,
-      attempt_count: (Number((existing as { attempt_count?: number } | null)?.attempt_count) || 0) + 1,
-      last_attempt_at: now().toISOString(),
-      updated_at: now().toISOString(),
-    };
-    const saved = await ledger.upsert(base, { onConflict: "provider_recording_id" }).select("*").single();
-    if (saved.error) throw new Error(saved.error.message);
+    const claimed = await admin.rpc("direct_call_recording_claim", {
+      p_direct_call_id: row.id,
+      p_provider_recording_id: recording.recordingId,
+      p_provider_call_control_id: recording.callControlId,
+      p_provider_call_leg_id: recording.callLegId,
+      p_provider_call_session_id: recording.callSessionId,
+      p_now: now().toISOString(),
+      p_attempt_cap: 8,
+      p_lease_secs: 900,
+    });
+    if (claimed.error) throw new Error(claimed.error.message ?? "recording_claim_failed");
+    const claimRow = Array.isArray(claimed.data) ? claimed.data[0] as { should_capture?: boolean; status?: string; storage_path?: string | null } | undefined : claimed.data as { should_capture?: boolean; status?: string; storage_path?: string | null } | null;
+    if (!claimRow?.should_capture) {
+      // An available capture may have won a concurrent webhook while its activity
+      // row was still absent. Re-sync that row, but never start a second download.
+      if (claimRow?.status === "available" && claimRow.storage_path) await syncActivityRecording(admin, row.id, recording.recordingId);
+      return;
+    }
     try {
       const provider = await options.getRecording(recording.recordingId);
       if (provider.status !== "completed" && provider.status !== "complete" && provider.status !== "available") throw new Error("recording_not_completed");
@@ -147,13 +146,33 @@ export function createDirectRecordingHandler(options: {
       const upload = await admin.storage.from(DIRECT_RECORDINGS_BUCKET).upload(path, bytes, { contentType: "audio/wav", upsert: true });
       if (upload.error) throw new Error(upload.error.message ?? "recording_storage_failed");
       const duration = wavDurationSeconds(bytes);
-      const update = await ledger.update({ status: "available", storage_bucket: DIRECT_RECORDINGS_BUCKET, storage_path: path, duration_seconds: duration, error_code: null, error_message: null, updated_at: now().toISOString() }).eq("provider_recording_id", recording.recordingId);
-      if (update.error) throw new Error(update.error.message);
+      if (duration === null) throw new Error("recording_wav_invalid");
+      const marked = await admin.rpc("direct_call_recording_mark_available", {
+        p_provider_recording_id: recording.recordingId,
+        p_direct_call_id: row.id,
+        p_storage_bucket: DIRECT_RECORDINGS_BUCKET,
+        p_storage_path: path,
+        p_duration_seconds: duration,
+        p_now: now().toISOString(),
+      });
+      if (marked.error) throw new Error(marked.error.message ?? "recording_available_failed");
+      const markedAvailable = marked.data === true || (Array.isArray(marked.data) && marked.data[0] === true);
+      if (!markedAvailable) throw new Error("recording_available_not_persisted");
       await syncActivityRecording(admin, row.id, recording.recordingId);
     } catch (error) {
       const message = error instanceof Error ? error.message.slice(0, 500) : "recording_capture_failed";
-      await ledger.update({ status: "failed", error_code: "capture_failed", error_message: message, updated_at: now().toISOString() }).eq("provider_recording_id", recording.recordingId);
-      await syncActivityRecording(admin, row.id, recording.recordingId);
+      const failed = await admin.rpc("direct_call_recording_mark_failed", {
+        p_provider_recording_id: recording.recordingId,
+        p_direct_call_id: row.id,
+        p_error_code: "capture_failed",
+        p_error_message: message,
+        p_now: now().toISOString(),
+      });
+      if (failed.error) throw new Error(failed.error.message ?? "recording_failure_persist_failed");
+      // A concurrent capture can complete after this attempt started. Its
+      // available state is protected by the SQL transition; sync is best effort
+      // here and the durable sweep retries it without downgrading the ledger.
+      try { await syncActivityRecording(admin, row.id, recording.recordingId); } catch { /* retry on sweep */ }
       throw error;
     }
   };
@@ -162,42 +181,26 @@ export function createDirectRecordingHandler(options: {
 async function syncActivityRecording(adminValue: unknown, directCallId: string, providerRecordingId: string) {
   const admin = asDb(adminValue);
   const activity = await admin.from("call_activities").select("id").eq("direct_call_id", directCallId).maybeSingle();
-  if (activity.error || !activity.data?.id) return;
-  const stage = await admin.from("direct_call_recordings").select("*").eq("provider_recording_id", providerRecordingId).single();
-  if (stage.error || !stage.data) return;
-  const result = await admin.from("call_recordings").upsert({
-    call_activity_id: activity.data.id,
-    status: stage.data.status,
-    provider_recording_id: stage.data.provider_recording_id,
-    provider_call_control_id: stage.data.provider_call_control_id,
-    provider_call_leg_id: stage.data.provider_call_leg_id,
-    provider_call_session_id: stage.data.provider_call_session_id,
-    storage_bucket: stage.data.storage_bucket,
-    storage_path: stage.data.storage_path,
-    duration_seconds: stage.data.duration_seconds,
-    error_code: stage.data.error_code,
-    error_message: stage.data.error_message,
-  }, { onConflict: "provider_recording_id" });
-  if (result.error) throw new Error(result.error.message);
+  if (activity.error) throw new Error(activity.error.message ?? "recording_activity_lookup_failed");
+  if (!activity.data?.id) return;
+  const result = await admin.rpc("direct_call_recording_sync_activity", {
+    p_direct_call_id: directCallId,
+    p_call_activity_id: activity.data.id,
+    p_provider_recording_id: providerRecordingId,
+  });
+  if (result.error) throw new Error(result.error.message ?? "recording_activity_sync_failed");
 }
 
 /** Copies a saved-before-wrapup ledger row into the existing activity child table. */
 export async function attachPendingDirectRecording(directCallId: string, activityId: string, adminValue?: unknown): Promise<void> {
   const admin = asDb(adminValue ?? createAdminClient());
-  const stage = await admin.from("direct_call_recordings").select("*").eq("direct_call_id", directCallId).maybeSingle();
-  if (stage.error || !stage.data) return;
-  const result = await admin.from("call_recordings").upsert({
-    call_activity_id: activityId,
-    status: stage.data.status,
-    provider_recording_id: stage.data.provider_recording_id,
-    provider_call_control_id: stage.data.provider_call_control_id,
-    provider_call_leg_id: stage.data.provider_call_leg_id,
-    provider_call_session_id: stage.data.provider_call_session_id,
-    storage_bucket: stage.data.storage_bucket,
-    storage_path: stage.data.storage_path,
-    duration_seconds: stage.data.duration_seconds,
-    error_code: stage.data.error_code,
-    error_message: stage.data.error_message,
-  }, { onConflict: "provider_recording_id" });
-  if (result.error) throw new Error(result.error.message);
+  const stage = await admin.from("direct_call_recordings").select("provider_recording_id").eq("direct_call_id", directCallId).maybeSingle();
+  if (stage.error) throw new Error(stage.error.message ?? "recording_lookup_failed");
+  if (!stage.data?.provider_recording_id) return;
+  const result = await admin.rpc("direct_call_recording_sync_activity", {
+    p_direct_call_id: directCallId,
+    p_call_activity_id: activityId,
+    p_provider_recording_id: stage.data.provider_recording_id,
+  });
+  if (result.error) throw new Error(result.error.message ?? "recording_activity_sync_failed");
 }

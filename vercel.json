@@ -51,6 +51,10 @@
     {
       "path": "/api/cron/dialpad-call-events-sweep",
       "schedule": "*/1 * * * *"
+    },
+    {
+      "path": "/api/cron/direct-recording-sweep",
+      "schedule": "*/1 * * * *"
     }
   ],
   "git": {

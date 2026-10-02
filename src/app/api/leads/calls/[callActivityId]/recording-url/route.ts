@@ -62,7 +62,6 @@ export async function GET(
     .from("call_activities")
     .select("id, org_id, provider, jitter_attempt_id, jitter_session_id, operator_user_id, direct_call_id, call_recordings(status,storage_bucket,storage_path)")
     .eq("id", callActivityId)
-    .eq("operator_user_id", user.id)
     .maybeSingle();
 
   if (error) {
@@ -73,6 +72,12 @@ export async function GET(
   }
 
   const call = data as unknown as RecordingLookup;
+  // Existing Jitter playback is authorized by its established broker/RLS
+  // boundary, which includes manager/coach access. Direct recordings are
+  // private to the authenticated operator who owns the direct call.
+  if (call.provider === "sandra_softphone" && call.direct_call_id && call.operator_user_id !== user.id) {
+    return json({ error: "Call recording not found", error_code: "not_found" }, 404);
+  }
   // Batch calls and embedded-softphone calls both store their audio in
   // Jitter; playback resolves through the same internal endpoint.
   if (call.provider !== "jitter" && call.provider !== "sandra_softphone") {

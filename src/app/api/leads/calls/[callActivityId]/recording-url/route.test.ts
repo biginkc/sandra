@@ -104,6 +104,13 @@ describe("GET /api/leads/calls/[callActivityId]/recording-url", () => {
     expect(fetchMock).toHaveBeenCalled();
   });
 
+  it("preserves authorized Jitter playback for a different operator", async () => {
+    maybeSingle.mockResolvedValueOnce({ data: call({ operator_user_id: "other-user", provider: "jitter" }), error: null });
+    const response = await request();
+    expect(response.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
   it("signs the private direct recording for its owned call activity without contacting Jitter", async () => {
     maybeSingle.mockResolvedValueOnce({ data: call({ provider: "sandra_softphone", org_id: "org-1", operator_user_id: "user-1", direct_call_id: "direct-1", call_recordings: [{ status: "available", storage_bucket: "sandra-direct-recordings", storage_path: "org-1/direct-1/rec-1.wav" }] }), error: null });
     const response = await request();
@@ -114,7 +121,7 @@ describe("GET /api/leads/calls/[callActivityId]/recording-url", () => {
   });
 
   it("does not expose a direct recording for a different owner", async () => {
-    maybeSingle.mockResolvedValueOnce({ data: null, error: null });
+    maybeSingle.mockResolvedValueOnce({ data: call({ provider: "sandra_softphone", operator_user_id: "other-user", direct_call_id: "direct-2" }), error: null });
     const response = await request("other-owner-call");
     expect(response.status).toBe(404);
     expect(createSignedUrl).not.toHaveBeenCalled();

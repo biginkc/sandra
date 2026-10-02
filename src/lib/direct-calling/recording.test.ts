@@ -15,14 +15,35 @@ function wav(): Uint8Array {
   return out;
 }
 
-function adminFixture() {
+function adminFixture(activityId: string | null = null) {
   const rows = new Map<string, Record<string, unknown>>();
   const upload = vi.fn(async () => ({ error: null }));
   const admin = {
+    rpc: vi.fn(async (name: string, args: Record<string, unknown>) => {
+      const id = String(args.p_provider_recording_id ?? "");
+      const current = rows.get(id);
+      if (name === "direct_call_recording_claim") {
+        if (current?.status === "available" && current.storage_path) return { data: [{ should_capture: false, ...current }], error: null };
+        if (current?.status === "pending" && current.next_attempt_at && new Date(String(current.next_attempt_at)).getTime() > Date.now()) return { data: [{ should_capture: false, ...current }], error: null };
+        const next = { ...(current ?? {}), direct_call_id: args.p_direct_call_id, provider_recording_id: id, provider_call_control_id: args.p_provider_call_control_id, provider_call_leg_id: args.p_provider_call_leg_id, provider_call_session_id: args.p_provider_call_session_id, status: "pending", attempt_count: Number(current?.attempt_count ?? 0) + 1, next_attempt_at: new Date(Date.now() + 900_000).toISOString() };
+        rows.set(id, next);
+        return { data: [{ should_capture: true, ...next }], error: null };
+      }
+      if (name === "direct_call_recording_mark_available") {
+        rows.set(id, { ...(current ?? {}), status: "available", storage_bucket: args.p_storage_bucket, storage_path: args.p_storage_path, duration_seconds: args.p_duration_seconds, next_attempt_at: null });
+        return { data: true, error: null };
+      }
+      if (name === "direct_call_recording_mark_failed") {
+        if (current?.status !== "available") rows.set(id, { ...(current ?? {}), status: "failed", error_code: args.p_error_code, error_message: args.p_error_message, next_attempt_at: new Date(Date.now() + 30_000).toISOString() });
+        return { data: true, error: null };
+      }
+      if (name === "direct_call_recording_sync_activity") return { data: null, error: null };
+      return { data: null, error: { message: `unexpected rpc ${name}` } };
+    }),
     from: vi.fn((table: string) => ({
       select: vi.fn(() => ({
         eq: vi.fn((_column: string, value: string) => ({
-          maybeSingle: vi.fn(async () => ({ data: table === "direct_call_recordings" ? rows.get(value) ?? null : null, error: null })),
+          maybeSingle: vi.fn(async () => ({ data: table === "direct_call_recordings" ? rows.get(value) ?? null : table === "call_activities" && activityId ? { id: activityId } : null, error: null })),
           single: vi.fn(async () => ({ data: rows.get(value) ?? null, error: null })),
         })),
       })),
@@ -54,6 +75,31 @@ describe("direct recording capture", () => {
     const parsed = parseDirectRecordingSaved(raw())!;
     await handler(ROW, parsed);
     await handler(ROW, parsed);
+    expect(getRecording).toHaveBeenCalledTimes(1);
+    expect(upload).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-syncs an already available ledger when a duplicate arrives after wrap-up", async () => {
+    const { admin } = adminFixture("activity-1");
+    const getRecording = vi.fn(async () => ({ recordingId: "rec-1", status: "completed", durationMillis: 74000, downloadUrlWav: "https://cdn.telnyx.test/rec.wav" }));
+    const handler = createDirectRecordingHandler({ admin, getRecording, fetchImpl: vi.fn(async () => new Response(new Blob([wav().buffer as ArrayBuffer]), { status: 200 })) as never });
+    const parsed = parseDirectRecordingSaved(raw())!;
+    await handler(ROW, parsed);
+    await handler(ROW, parsed);
+    expect(getRecording).toHaveBeenCalledTimes(1);
+    expect(admin.rpc).toHaveBeenCalledWith("direct_call_recording_sync_activity", expect.objectContaining({ p_call_activity_id: "activity-1" }));
+    expect(admin.rpc.mock.calls.filter(([name]) => name === "direct_call_recording_sync_activity")).toHaveLength(2);
+  });
+
+  it("leases concurrent duplicate deliveries so only one provider download runs", async () => {
+    const { admin, upload } = adminFixture();
+    const getRecording = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return { recordingId: "rec-1", status: "completed", durationMillis: 74000, downloadUrlWav: "https://cdn.telnyx.test/rec.wav" };
+    });
+    const handler = createDirectRecordingHandler({ admin, getRecording, fetchImpl: vi.fn(async () => new Response(new Blob([wav().buffer as ArrayBuffer]), { status: 200, headers: { "content-type": "audio/wav" } })) as never });
+    const parsed = parseDirectRecordingSaved(raw())!;
+    await Promise.all([handler(ROW, parsed), handler(ROW, parsed)]);
     expect(getRecording).toHaveBeenCalledTimes(1);
     expect(upload).toHaveBeenCalledTimes(1);
   });

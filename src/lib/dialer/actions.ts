@@ -12,10 +12,13 @@ import { loadHomeownerTrainingProfile } from "@/lib/leads/homeowner-training-pro
 import { repDisplayName } from "@/lib/coach/rep-display-name";
 import { getMemberTimezone } from "@/components/appointments/book-appointment-action";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
+import { reportError } from "@/lib/errors/report";
 import { openCallCapability, openCallIdentity } from "./call-capability";
 import { attachPendingDirectRecording } from "@/lib/direct-calling/recording";
 
 import { isHomeownerTrainingNumber, canCallHomeownerTraining, HOMEOWNER_TRAINING_LABEL } from "./homeowner-training";
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type Contact = Pick<
   Database["public"]["Tables"]["contacts"]["Row"],
@@ -375,7 +378,10 @@ export async function completeSoftphoneCall(input: {
     // Direct capabilities contain our durable direct_calls id; Jitter
     // capabilities contain a provider id and simply produce no match here.
     let directCallId: string | null = null;
-    if (!training && identity?.callId) {
+    // A sealed Jitter capability can carry a provider-shaped id. Validate the
+    // direct UUID before sending it to PostgREST; otherwise a non-direct wrap
+    // can fail with Postgres 22P02 before its activity is saved.
+    if (!training && identity?.callId && UUID.test(identity.callId)) {
       const { data: directCall, error: directCallError } = await supabase
         .from("direct_calls")
         .select("id")
@@ -583,8 +589,6 @@ export async function completeSoftphoneCall(input: {
 
       if (!activity) return { ok: false, error: "The call activity was not saved." };
 
-      if (directCallId) await attachPendingDirectRecording(directCallId, activity.id);
-
       // fn_book_appointment owns the booked_appointment write. Supplying the
       // stable wrap token makes a retry after a lost response replay the same
       // booking instead of creating a second appointment.
@@ -627,6 +631,18 @@ export async function completeSoftphoneCall(input: {
           if (restoreBookedDispositionError) {
             return { ok: false, error: restoreBookedDispositionError.message };
           }
+        }
+      }
+
+      // Recording capture is retryable and must not prevent a valid wrap-up,
+      // disposition, or appointment from being committed. The webhook and
+      // recording sweep will retry this association after saved-before-wrapup
+      // or transient storage/database failures.
+      if (directCallId) {
+        try {
+          await attachPendingDirectRecording(directCallId, activity.id);
+        } catch (error) {
+          reportError(error, { tags: { surface: "direct_recording_attach" }, extra: { directCallId, activityId: activity.id } });
         }
       }
 
