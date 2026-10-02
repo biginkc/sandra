@@ -112,8 +112,22 @@ export async function bindNormaCallId(
   return data as NormaBindResult;
 }
 
-export async function markNormaDispatchRejected(client: Client, requestId: string, reason: string): Promise<string> {
-  const { data, error } = await client.rpc("fn_norma_mark_dispatch_rejected", { p_request_id: requestId, p_reason: reason });
+/**
+ * Pass `expectedStatus: "requested"` when the caller only means to close a row
+ * that nobody has claimed yet (closed gate, stranded expiry): a row another
+ * worker already moved on is left alone and its current status returned.
+ */
+export async function markNormaDispatchRejected(
+  client: Client,
+  requestId: string,
+  reason: string,
+  expectedStatus?: string,
+): Promise<string> {
+  const { data, error } = await client.rpc("fn_norma_mark_dispatch_rejected", {
+    p_request_id: requestId,
+    p_reason: reason,
+    ...(expectedStatus ? { p_expected_status: expectedStatus } : {}),
+  });
   if (error) fail("fn_norma_mark_dispatch_rejected", error);
   return data;
 }

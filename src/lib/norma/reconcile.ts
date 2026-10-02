@@ -23,6 +23,10 @@ export const RECONCILE_THRESHOLDS = {
   dispatchedCheckAfter: 3 * MIN,
   /** A call with an id that is still unresolved this long is escalated. */
   escalateAfter: 60 * MIN,
+  /** After a row is examined its next_check_at moves out by this, so stuck rows cannot starve fresh ones. */
+  recheckAfter: 2 * MIN,
+  recheckAfterRequested: 1 * MIN,
+  recheckAfterNeedsReview: 55 * MIN,
   /** `dispatch_unknown` has no call id and Bland cannot be queried by metadata: escalate after this. */
   unknownNoIdEscalateAfter: 10 * MIN,
 } as const;
@@ -64,7 +68,8 @@ export async function reconcileNormaCalls(deps: ReconcileDeps): Promise<Reconcil
     .from("norma_call_requests")
     .select("id, status, phone_e164, idempotency_key, bland_call_id, created_at, updated_at, outcome")
     .in("status", statuses)
-    .order("updated_at", { ascending: true })
+    .lte("next_check_at", new Date(now).toISOString())
+    .order("next_check_at", { ascending: true })
     .limit(BATCH);
   if (error) throw new Error(`norma reconcile scan failed: ${error.message}`);
 
@@ -75,6 +80,19 @@ export async function reconcileNormaCalls(deps: ReconcileDeps): Promise<Reconcil
     } catch (rowError) {
       summary.errors += 1;
       reportError(rowError, { tags: { surface: "norma_reconcile" }, extra: { requestId: row.id, status: row.status } });
+    }
+    // Whatever happened, this row goes to the back of the line. A scheduling
+    // write failure must not abort the sweep (worst case: it is re-examined).
+    try {
+      const T = RECONCILE_THRESHOLDS;
+      const delay = row.status === "needs_review" ? T.recheckAfterNeedsReview : row.status === "requested" ? T.recheckAfterRequested : T.recheckAfter;
+      const { error: bumpError } = await deps.client
+        .from("norma_call_requests")
+        .update({ next_check_at: new Date(now + delay).toISOString() })
+        .eq("id", row.id);
+      if (bumpError) throw new Error(bumpError.message);
+    } catch (bumpError) {
+      reportError(bumpError, { tags: { surface: "norma_reconcile_schedule" }, extra: { requestId: row.id } });
     }
   }
   return summary;
@@ -88,8 +106,9 @@ async function reconcileRow(row: Row, deps: ReconcileDeps, now: number, summary:
   if (row.status === "requested") {
     if (createdAge < T.requestedGrace) return void (summary.waiting += 1);
     if (createdAge > T.requestedExpiry) {
-      await markNormaDispatchRejected(deps.client, row.id, "stranded_requested_expired");
-      return void (summary.rejected += 1);
+      const closed = await markNormaDispatchRejected(deps.client, row.id, "stranded_requested_expired", "requested");
+      // Claimed by a dispatcher in the meantime: not ours to close.
+      return void (closed === "dispatch_rejected" ? (summary.rejected += 1) : (summary.waiting += 1));
     }
     const result = await deps.dispatch(row.id);
     if (result.status === "dispatched") summary.dispatched += 1;

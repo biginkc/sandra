@@ -46,7 +46,14 @@ describe("dispatchNormaCall", () => {
     await expect(t.run()).resolves.toEqual({ status: "rejected", reason: "dispatch_disabled" });
     expect(t.sendCall).not.toHaveBeenCalled();
     expect(t.rpcs.fn_norma_claim_dispatch).not.toHaveBeenCalled();
-    expect(t.rpcs.fn_norma_mark_dispatch_rejected).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_reason: "gate:dispatch_disabled" });
+    expect(t.rpcs.fn_norma_mark_dispatch_rejected).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_reason: "gate:dispatch_disabled", p_expected_status: "requested" });
+  });
+
+  it("gate closed but the row was claimed meanwhile: left alone, nothing dialled", async () => {
+    const t = setup({ gate: { dispatchEnabled: false, sellerRelease: false, allowedNumbers: [] } });
+    t.rpcs.fn_norma_mark_dispatch_rejected.mockReturnValue("dispatching");
+    await expect(t.run()).resolves.toEqual({ status: "not_claimed" });
+    expect(t.sendCall).not.toHaveBeenCalled();
   });
 
   it("on but not allowlisted: never dials, closes as rejected", async () => {

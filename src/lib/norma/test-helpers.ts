@@ -12,6 +12,7 @@ type RpcHandler = (args: Record<string, unknown>) => unknown;
  */
 export function fakeClient(tables: Record<string, Rows>, rpcs: Record<string, RpcHandler> = {}) {
   const calls: { name: string; args: Record<string, unknown> }[] = [];
+  const updates: { table: string; values: Record<string, unknown>; id: unknown }[] = [];
   function builder(table: string) {
     let rows = [...(tables[table] ?? [])];
     const api = {
@@ -19,6 +20,13 @@ export function fakeClient(tables: Record<string, Rows>, rpcs: Record<string, Rp
       eq: (col: string, val: unknown) => ((rows = rows.filter((r) => r[col] === val)), api),
       in: (col: string, vals: unknown[]) => ((rows = rows.filter((r) => vals.includes(r[col]))), api),
       is: () => api,
+      lte: (col: string, val: string) => ((rows = rows.filter((r) => String(r[col]) <= val)), api),
+      update: (values: Record<string, unknown>) => ({
+        eq: async (_col: string, id: unknown) => {
+          updates.push({ table, values, id });
+          return { data: null, error: null };
+        },
+      }),
       order: () => api,
       limit: (n: number) => ((rows = rows.slice(0, n)), api),
       maybeSingle: async () => ({ data: rows[0] ?? null, error: null }),
@@ -35,7 +43,7 @@ export function fakeClient(tables: Record<string, Rows>, rpcs: Record<string, Rp
       return { data: handler(args), error: null };
     },
   };
-  return { client: client as unknown as SupabaseClient<Database>, calls };
+  return { client: client as unknown as SupabaseClient<Database>, calls, updates };
 }
 
 export const REQUEST_ID = "11111111-1111-4111-8111-111111111111";
@@ -55,6 +63,7 @@ export function requestRow(overrides: Record<string, unknown> = {}) {
     outcome: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
+    next_check_at: new Date(0).toISOString(),
     ...overrides,
   };
 }

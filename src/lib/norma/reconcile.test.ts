@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { BlandClient, BlandLookupResult } from "./bland";
+import { dispatchNormaCall } from "./dispatch";
 import { reconcileNormaCalls, RECONCILE_THRESHOLDS as T } from "./reconcile";
 import { fakeClient, KEY, PHONE, REQUEST_ID, requestRow } from "./test-helpers";
 
@@ -46,7 +47,13 @@ describe("reconciliation", () => {
     const t = setup({ status: "requested", created_at: ago(T.requestedExpiry + MIN) });
     expect(await t.run()).toMatchObject({ rejected: 1 });
     expect(t.dispatch).not.toHaveBeenCalled();
-    expect(t.rpcs.fn_norma_mark_dispatch_rejected).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_reason: "stranded_requested_expired" });
+    expect(t.rpcs.fn_norma_mark_dispatch_rejected).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_reason: "stranded_requested_expired", p_expected_status: "requested" });
+  });
+
+  it("expiry close loses the race to a claim: counted as waiting, not rejected", async () => {
+    const t = setup({ status: "requested", created_at: ago(T.requestedExpiry + MIN) });
+    t.rpcs.fn_norma_mark_dispatch_rejected.mockReturnValue("dispatching");
+    expect(await t.run()).toMatchObject({ rejected: 0, waiting: 1 });
   });
 
   it("dispatching with no id: stale -> dispatch_unknown (fence), fresh -> wait; never redials", async () => {
@@ -108,5 +115,47 @@ describe("reconciliation", () => {
     const t = setup({ status: "needs_review", bland_call_id: "call-1", outcome: "unknown", updated_at: ago(2 * T.escalateAfter) }, finished({ status: "failed", answered_by: null }), true);
     expect(await t.run()).toMatchObject({ waiting: 1, completed: 0, escalated: 0 });
     expect(t.rpcs.fn_norma_complete_call).not.toHaveBeenCalled();
+  });
+
+  it("every examined row is pushed out by next_check_at; rows not yet due are not scanned (no starvation)", async () => {
+    const t = setup({ status: "dispatched", bland_call_id: "call-1", updated_at: ago(10 * MIN) }, { kind: "unknown", reason: "http_500" });
+    const { client, updates } = fakeClient(
+      {
+        norma_call_requests: [
+          requestRow({ id: "stuck", status: "dispatched", bland_call_id: "c1", updated_at: ago(10 * MIN), next_check_at: new Date(NOW + 60_000).toISOString() }),
+          requestRow({ id: "fresh", status: "dispatched", bland_call_id: "c2", updated_at: ago(10 * MIN), next_check_at: new Date(NOW - 1000).toISOString() }),
+        ],
+      },
+      {},
+    );
+    const summary = await reconcileNormaCalls({ client, bland: t.bland, dispatch: t.dispatch, now: NOW });
+    expect(summary.scanned).toBe(1);
+    expect(t.getCall).toHaveBeenCalledTimes(1);
+    expect(updates).toEqual([{ table: "norma_call_requests", values: { next_check_at: new Date(NOW + T.recheckAfter).toISOString() }, id: "fresh" }]);
+  });
+
+  it("closed gate + REAL dispatchNormaCall: a stranded request is closed and Bland send-call is never called", async () => {
+    const sendCall = vi.fn();
+    const rpcs = {
+      fn_norma_claim_dispatch: vi.fn(),
+      fn_norma_eligibility: vi.fn(),
+      fn_norma_bind_call_id: vi.fn(),
+      fn_norma_mark_dispatch_rejected: vi.fn().mockReturnValue("dispatch_rejected"),
+    };
+    const { client } = fakeClient({ norma_call_requests: [requestRow({ status: "requested", created_at: ago(2 * MIN) })] }, rpcs);
+    const bland: BlandClient = { sendCall, getCall: vi.fn() };
+    const summary = await reconcileNormaCalls({
+      client, bland, now: NOW,
+      dispatch: (id) =>
+        dispatchNormaCall(id, {
+          client, bland,
+          blandConfig: { apiKey: "k", baseUrl: "https://bland.test", pathwayId: "p", pathwayVersion: 3, fromNumber: "+12135550100", webhookUrl: "https://x.test/h", timeoutMs: 1000 },
+          gate: { dispatchEnabled: false, sellerRelease: true, allowedNumbers: [PHONE] },
+        }),
+    });
+    expect(summary.rejected).toBe(1);
+    expect(sendCall).not.toHaveBeenCalled();
+    expect(rpcs.fn_norma_claim_dispatch).not.toHaveBeenCalled();
+    expect(rpcs.fn_norma_mark_dispatch_rejected).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_reason: "gate:dispatch_disabled", p_expected_status: "requested" });
   });
 });

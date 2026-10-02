@@ -35,7 +35,7 @@ async function handle(request: Request) {
     return NextResponse.json({ ok: summary.errors === 0, ...summary }, { status: summary.errors === 0 ? 200 : 500 });
   } catch (error) {
     reportError(error, { tags: { surface: "cron_norma_reconciliation" } });
-    return NextResponse.json({ error: error instanceof Error ? error.message : "unknown" }, { status: 500 });
+    return NextResponse.json({ error: "internal_error" }, { status: 500 });
   }
 }
 

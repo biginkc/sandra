@@ -58,12 +58,15 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
   // ---- gate (section 0), before the claim ---------------------------------
   const gate = evaluateNormaGate(row.phone_e164, deps.gate ?? readNormaGateConfig());
   if (!gate.open) {
-    await markNormaDispatchRejected(client, requestId, `gate:${gate.reason}`);
+    const closed = await markNormaDispatchRejected(client, requestId, `gate:${gate.reason}`, "requested");
+    // Another worker claimed it between our read and the close: it owns the row now.
+    if (closed !== "dispatch_rejected") return { status: "not_claimed" };
     return { status: "rejected", reason: gate.reason };
   }
   const blandConfig = deps.blandConfig === undefined ? readNormaBlandConfig() : deps.blandConfig;
   if (!blandConfig) {
-    await markNormaDispatchRejected(client, requestId, "bland_not_configured");
+    const closed = await markNormaDispatchRejected(client, requestId, "bland_not_configured", "requested");
+    if (closed !== "dispatch_rejected") return { status: "not_claimed" };
     return { status: "rejected", reason: "bland_not_configured" };
   }
 
