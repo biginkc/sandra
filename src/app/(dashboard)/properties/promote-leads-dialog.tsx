@@ -1,5 +1,6 @@
 "use client";
 
+import type { SearchSelection } from "@/lib/prospects/search-selection-input";
 import type { SelectionFilters } from "@/lib/prospects/select-all";
 import Link from "next/link";
 import { useEffect, useMemo, useState, useTransition } from "react";
@@ -16,10 +17,10 @@ import {
 } from "@/components/ui/dialog";
 
 import {
-  searchPageCreatePromoteLeadsJob,
-  searchPagePreflightPromoteLeads,
-  type PromoteLeadsPreflight,
-} from "./promote-leads-actions";
+  searchPromoteCreate,
+  searchPromotePreflight,
+  type SearchPromotePreflight as PromoteLeadsPreflight,
+} from "../search/actions";
 
 export function PromoteLeadsDialog({
   open,
@@ -37,6 +38,10 @@ export function PromoteLeadsDialog({
   filters?: SelectionFilters;
   onStarted: (jobId: string) => void;
 }) {
+  const selection: SearchSelection = useMemo(
+    () => (filters ? { kind: "filters", filters } : { kind: "ids", ids: propertyIds }),
+    [filters, propertyIds],
+  );
   const propertyIdsKey = useMemo(
     () => (filters ? `filters:${JSON.stringify(filters)}` : [...propertyIds].sort().join(",")),
     [filters, propertyIds],
@@ -53,7 +58,7 @@ export function PromoteLeadsDialog({
   useEffect(() => {
     if (!open) return;
     let canceled = false;
-    void callAction(searchPagePreflightPromoteLeads({ orgId, propertyIds: filters ? [] : propertyIds, filters }), {
+    void callAction(searchPromotePreflight({ orgId, selection }), {
       fallbackMessage: "Could not check these prospects",
     }).then((result) => {
       if (canceled) return;
@@ -64,17 +69,16 @@ export function PromoteLeadsDialog({
     return () => {
       canceled = true;
     };
-  }, [open, orgId, propertyIds, filters, propertyIdsKey, preflightAttempt]);
+  }, [open, orgId, selection, propertyIdsKey, preflightAttempt]);
 
   const confirm = () => {
     if (!preflight || preflight.eligible === 0 || !requestKey || pending) return;
     setError(null);
     startTransition(async () => {
       const result = await callAction(
-        searchPageCreatePromoteLeadsJob({
+        searchPromoteCreate({
           orgId,
-          propertyIds: filters ? [] : propertyIds,
-          filters,
+          selection,
           idempotencyKey: requestKey,
         }),
         { fallbackMessage: "Could not start promotion" },

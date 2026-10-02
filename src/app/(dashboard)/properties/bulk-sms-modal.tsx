@@ -1,6 +1,7 @@
 "use client";
 
-import type { PropertySelection, SelectionFilters } from "@/lib/prospects/select-all";
+import type { SearchSelection } from "@/lib/prospects/search-selection-input";
+import type { SelectionFilters } from "@/lib/prospects/select-all";
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -18,17 +19,14 @@ import type { DeliveryCatalog } from "@/lib/messaging/delivery";
 
 import type { AudienceLineTypeAssessment } from "@/lib/messaging/audience-assessment";
 
-import {
-  listDeliveryOptions,
-  refreshDeliveryCatalog,
-} from "../campaigns/actions";
 import { DeliverySelect } from "../campaigns/delivery-select";
 import {
-  searchPageAssessBulkSmsAudience,
-  searchPageBulkQueueSms,
-  searchPageCountAlreadyContacted,
-  listSmsTemplateCategories,
-} from "./actions";
+  searchBulkSms,
+  searchDeliveryOptions,
+  searchRefreshDeliveryCatalog,
+  searchSmsAudience,
+  searchSmsTemplateCategories,
+} from "../search/actions";
 import {
   SMS_PACING_JITTER_PCT,
   SMS_PACING_SECONDS,
@@ -150,9 +148,9 @@ export function BulkSmsModal({
   onClose,
   onQueued,
 }: Props) {
-  const selection: PropertySelection = filterArgs
-    ? { filters: filterArgs }
-    : propertyIds;
+  const selection: SearchSelection = filterArgs
+    ? { kind: "filters", filters: filterArgs }
+    : { kind: "ids", ids: propertyIds };
   const selectionSize = filterArgs ? (selectionCount ?? 0) : propertyIds.length;
   const router = useRouter();
   const [categories, setCategories] = useState<Category[]>([]);
@@ -181,11 +179,11 @@ export function BulkSmsModal({
     if (syncing) return;
     setSyncing(true);
     void (async () => {
-      const result = await callAction(refreshDeliveryCatalog(), {
+      const result = await callAction(searchRefreshDeliveryCatalog(), {
         fallbackMessage: "Could not sync the provider catalog",
       });
       if (result.ok) {
-        const reloaded = await listDeliveryOptions();
+        const reloaded = await searchDeliveryOptions();
         if (reloaded.ok) setCatalog(reloaded.data);
       }
       setSyncing(false);
@@ -241,19 +239,19 @@ export function BulkSmsModal({
 
   useEffect(() => {
     if (!open) return;
-    listSmsTemplateCategories().then((result) => {
+    searchSmsTemplateCategories().then((result) => {
       if (result.ok) {
         setCategories(result.data);
         setSelectedCategory(result.data[0]?.category ?? "");
       }
     });
-    searchPageCountAlreadyContacted(selection).then((result) => {
-      if (result.ok) setContactedCount(result.data);
+    searchSmsAudience({ selection }).then((result) => {
+      if (result.ok) {
+        setContactedCount(result.data.alreadyContacted);
+        setAssessment(result.data);
+      }
     });
-    searchPageAssessBulkSmsAudience(selection).then((result) => {
-      if (result.ok) setAssessment(result.data);
-    });
-    listDeliveryOptions().then((result) => {
+    searchDeliveryOptions().then((result) => {
       if (result.ok) setCatalog(result.data);
       setCatalogLoading(false);
     });
@@ -331,7 +329,7 @@ export function BulkSmsModal({
         : { ...baseOpts, body: customBody.trim() };
 
     startTransition(async () => {
-      const result = await callAction(searchPageBulkQueueSms(selection, opts), {
+      const result = await callAction(searchBulkSms({ selection, opts }), {
         fallbackMessage: "Bulk SMS failed",
       });
       if (!result.ok) {

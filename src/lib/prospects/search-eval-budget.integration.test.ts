@@ -67,7 +67,7 @@ afterAll(async () => {
 
 async function pageLoad(): Promise<void> {
   const { builder } = await buildScopedQuery(userA, {
-    origin: "search_page", select: "id, address, created_at", selectOpts: { count: "exact" },
+    select: "id, address, created_at", selectOpts: { count: "exact" },
     search: "Budgetville", blockStack: [], includeMessages: true,
   });
   const { error, count } = await builder.order("created_at", { ascending: false }).order("id").range(0, 49);
@@ -84,7 +84,7 @@ async function pageShapedLoad(): Promise<void> {
   const frag = filterSelectFragment(blocks);
   const select = ["id, org_id, address, city, state, zip, market, cass_status, is_vacant, created_at, status, is_dnc_locked, outreach_dispo, source_import_id, source_imported_at, homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)", frag].filter(Boolean).join(", ");
   const { builder } = await buildScopedQuery(userA, {
-    origin: "search_page", select, selectOpts: { count: "exact" }, search: "Budgetville", blockStack: blocks, includeMessages: true,
+    select, selectOpts: { count: "exact" }, search: "Budgetville", blockStack: blocks, includeMessages: true,
   });
   const { error, count } = await builder.order("created_at", { ascending: false }).order("id", { ascending: true }).range(0, 49);
   expect(error).toBeNull();
@@ -120,7 +120,7 @@ describe("search_properties evaluation budget", () => {
   it("the drawer count (head + exact) evaluates it at most once", async () => {
     const before = await calls();
     const { builder } = await buildScopedQuery(userA, {
-      origin: "search_page", select: "id", selectOpts: { count: "exact", head: true },
+      select: "id", selectOpts: { count: "exact", head: true },
       search: "Budgetville", blockStack: [], includeMessages: true,
     });
     const { count, error } = await builder;
@@ -135,7 +135,7 @@ describe("search_properties evaluation budget", () => {
     const before = await calls();
     for (const search of [null, "Bu"]) {
       const { builder } = await buildScopedQuery(userA, {
-        origin: "search_page", select: "id", selectOpts: { count: "exact", head: true },
+        select: "id", selectOpts: { count: "exact", head: true },
         search, blockStack: [], includeMessages: true,
       });
       const { error } = await builder;

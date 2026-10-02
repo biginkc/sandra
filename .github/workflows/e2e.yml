@@ -149,6 +149,9 @@ jobs:
       CI: "1"
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The legacy-isolation guard diffs against the merge-base with origin/main.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v5
         with:
@@ -168,6 +171,21 @@ jobs:
       # suites below call the local-only guard and refuse any other target.
       - name: Provision disposable database
         run: node scripts/provision-e2e-local-database.mjs
+
+      - name: Legacy Prospects actions are untouched (git diff vs merge-base)
+        run: |
+          git fetch origin main
+          base="$(git merge-base origin/main HEAD)"
+          git diff --exit-code "$base" -- \
+            "src/app/(dashboard)/properties/actions.ts" \
+            "src/app/(dashboard)/properties/dnc-safe-actions.ts" \
+            "src/app/(dashboard)/properties/promote-leads-actions.ts" \
+            "src/app/(dashboard)/properties/_actions/count.ts" \
+            "src/app/(dashboard)/leads/actions.ts" \
+            "src/app/(dashboard)/campaigns/actions.ts" \
+            src/lib/prospects/eligibility.ts \
+            src/lib/messaging/bulk-queue.ts \
+            src/workflows/bulk-sms.ts
 
       - name: Search oracle reference matcher (unit)
         run: npm run test:search-oracle

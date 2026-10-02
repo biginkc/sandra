@@ -26,11 +26,9 @@ vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
 vi.mock("@/lib/auth/memberships", () => ({
   getCallerMembershipsOrThrow: membershipsMock,
 }));
-vi.mock("@/lib/prospects/eligibility", () => ({
-  resolveProspectEligibility: eligibilityMock,
+vi.mock("@/lib/prospects/search-partition", () => ({
+  partitionSearchIds: eligibilityMock,
 }));
-vi.mock("workflow/api", () => ({ start: vi.fn() }));
-vi.mock("next/server", () => ({ after: vi.fn() }));
 
 function makeBuilder(head: boolean, viaRpc: boolean) {
   const q: Record<string, unknown> = {};
@@ -59,9 +57,7 @@ function makeBuilder(head: boolean, viaRpc: boolean) {
   return q;
 }
 
-import { resolveSelection } from "@/lib/prospects/select-all";
-
-import { getAllMatchingProspectIds, getAllMatchingProspectSelection } from "./actions";
+import { selectAllSearch } from "./select-all";
 
 const ids = (n: number, from = 0) => Array.from({ length: n }, (_, i) => ({ id: `p-${String(from + i).padStart(6, "0")}` }));
 
@@ -87,33 +83,26 @@ beforeEach(() => {
       return { select: (cols: string) => { state.log.push(`select(${cols})`); return makeBuilder(opts?.head === true, true); } };
     },
   });
+  // partitionSearchIds mock: even index = prospect, odd = lead.
   eligibilityMock.mockImplementation(async (_c: unknown, all: string[]) => ({
-    eligibleIds: all.filter((_x, i) => i % 2 === 0),
-    exclusions: all.filter((_x, i) => i % 2 === 1).map((propertyId) => ({ propertyId, reason: "not_found_or_not_prospect" })),
-    dncLockedCount: 0,
-    skipTraceDisabledCount: 0,
-    skippedLeadCount: Math.floor(all.length / 2),
-    prospectDncLockedCount: 0,
-    prospectDncLockedIds: [],
+    prospectIds: all.filter((_x, i) => i % 2 === 0),
+    skippedLeads: all.filter((_x, i) => i % 2 === 1).length,
+    dncLockedIds: [],
   }));
 });
 
-describe("getAllMatchingProspectSelection: search_page origin", () => {
+const FILTERS = (search: string | null) => ({ search, blockStack: [] });
+
+describe("selectAllSearch", () => {
   it("returns matched and eligible sets separately, with leads broken out", async () => {
     state.script.count = 4;
     state.script.pages = [ids(4)];
-    const out = await getAllMatchingProspectSelection({
-      search: "jane doe",
-      blockStack: [],
-      origin: "search_page",
-    });
+    const out = await selectAllSearch(FILTERS("jane doe"));
     expect(out.ok).toBe(true);
     if (!out.ok) return;
     expect(out.data.matchedCount).toBe(4);
     expect(out.data.eligibleIds).toHaveLength(2);
     expect(out.data.skippedLeads).toBe(2);
-    expect(out.data.dncLockedCount).toBe(0);
-    // Went through the RPC with include_messages derived from memberships.
     expect(state.log.find((l) => l.startsWith("rpc("))).toContain('"include_messages":true');
   });
 
@@ -123,15 +112,14 @@ describe("getAllMatchingProspectSelection: search_page origin", () => {
     ]);
     state.script.count = 1;
     state.script.pages = [ids(1)];
-    await getAllMatchingProspectSelection({ search: "jane", blockStack: [], origin: "search_page" });
+    await selectAllSearch(FILTERS("jane"));
     expect(state.log.find((l) => l.startsWith("rpc("))).toContain('"include_messages":false');
   });
 
-  it("over the cap: error, no ids, and no paging at all", async () => {
+  it("over the 20,000 cap by the head count: error, no ids, no paging", async () => {
     state.script.count = 20_001;
-    const out = await getAllMatchingProspectSelection({ search: "smith", blockStack: [], origin: "search_page" });
+    const out = await selectAllSearch(FILTERS("smith"));
     expect(out).toMatchObject({ ok: false, error: { code: "SELECT_ALL_TOO_LARGE" } });
-    expect(JSON.stringify(out)).not.toContain("eligibleIds");
     expect(state.log).not.toContain("limit");
     expect(eligibilityMock).not.toHaveBeenCalled();
   });
@@ -139,14 +127,14 @@ describe("getAllMatchingProspectSelection: search_page origin", () => {
   it("over the cap discovered while paging also errors with no partial selection", async () => {
     state.script.count = 19_000; // count lied (rows were added meanwhile)
     state.script.pages = Array.from({ length: 21 }, (_, p) => ids(1000, p * 1000));
-    const out = await getAllMatchingProspectSelection({ search: "smith", blockStack: [], origin: "search_page" });
+    const out = await selectAllSearch(FILTERS("smith"));
     expect(out).toMatchObject({ ok: false, error: { code: "SELECT_ALL_TOO_LARGE" } });
     expect(eligibilityMock).not.toHaveBeenCalled();
   });
 
   it("statement timeout (57014) becomes the friendly message", async () => {
     state.script.countError = { code: "57014", message: "canceling statement due to statement timeout" };
-    const out = await getAllMatchingProspectSelection({ search: "the", blockStack: [], origin: "search_page" });
+    const out = await selectAllSearch(FILTERS("the"));
     expect(out).toEqual({
       ok: false,
       error: { code: "SEARCH_TOO_BROAD", message: "Search too broad — try a more specific name, phone or address" },
@@ -157,69 +145,23 @@ describe("getAllMatchingProspectSelection: search_page origin", () => {
     state.script.rpcMissing = true;
     state.script.count = 2;
     state.script.pages = [ids(2)];
-    const out = await getAllMatchingProspectSelection({ search: "main street", blockStack: [], origin: "search_page" });
+    const out = await selectAllSearch(FILTERS("main street"));
     expect(out.ok).toBe(true);
     expect(state.log.some((l) => l.startsWith('ilike("address","%main street%")'))).toBe(true);
   });
 
   it("a membership lookup failure is an error, never an unrestricted search", async () => {
     membershipsMock.mockRejectedValue(new Error("down"));
-    const out = await getAllMatchingProspectSelection({ search: "jane", blockStack: [], origin: "search_page" });
+    const out = await selectAllSearch(FILTERS("jane"));
     expect(out).toMatchObject({ ok: false, error: { code: "SEARCH_ACCESS_UNAVAILABLE" } });
-    expect(createClientMock.mock.results.length).toBeGreaterThan(0);
     expect(state.log.some((l) => l.startsWith("rpc("))).toBe(false);
   });
-});
 
-describe("getAllMatchingProspectSelection: legacy origin is unchanged", () => {
-  it("is uncapped, never counts first, and never uses the RPC or membership lookup", async () => {
-    state.script.pages = [ids(1000), ids(1000, 1000), ids(500, 2000)];
-    const out = await getAllMatchingProspectSelection({ search: "jane doe", blockStack: [] });
-    expect(out.ok).toBe(true);
-    if (!out.ok) return;
-    expect(out.data.matchedCount).toBe(2500); // > any search cap would allow? stays uncapped
-    expect(state.log.some((l) => l.startsWith("rpc("))).toBe(false);
-    expect(membershipsMock).not.toHaveBeenCalled();
-    expect(state.log).toContain('or("status.eq.prospect,is_dnc_locked.eq.true")');
-    // Unescaped wildcard-capable address ilike, exactly as before.
-    expect(state.log).toContain('ilike("address","%jane doe%")');
-  });
-
-  it("a forged origin value is treated as legacy", async () => {
+  it("always applies Search scope: training hidden and no legacy status predicate", async () => {
+    state.script.count = 1;
     state.script.pages = [ids(1)];
-    await getAllMatchingProspectSelection({
-      search: "a%b",
-      blockStack: [],
-      origin: "SEARCH_PAGE" as never,
-    });
-    expect(state.log).toContain('ilike("address","%a%b%")');
-    expect(membershipsMock).not.toHaveBeenCalled();
-  });
-});
-
-describe("the 20,000 cap is enforced at the Search action boundary, not in the legacy resolver", () => {
-  const pages21 = () => Array.from({ length: 21 }, (_, p) => ids(1000, p * 1000));
-
-  it("a forged origin:'legacy' filter selection through the Search actions (resolveSelection) is still capped", async () => {
-    state.script.pages = pages21();
-    const out = await resolveSelection({ filters: { search: "smith", blockStack: [], origin: "legacy" } });
-    expect(out).toMatchObject({ ok: false, error: { code: "SELECT_ALL_TOO_LARGE" } });
-    expect(eligibilityMock).not.toHaveBeenCalled();
-  });
-
-  it("an omitted origin is capped too", async () => {
-    state.script.pages = pages21();
-    const out = await resolveSelection({ filters: { search: null, blockStack: [] } });
-    expect(out).toMatchObject({ ok: false, error: { code: "SELECT_ALL_TOO_LARGE" } });
-  });
-
-  it("the legacy resolver used by campaign audiences (getAllMatchingProspectIds) stays uncapped", async () => {
-    state.script.pages = pages21().concat([ids(5, 21000)]);
-    eligibilityMock.mockImplementation(async (_c: unknown, all: string[]) => ({
-      eligibleIds: all, exclusions: [], dncLockedCount: 0, skipTraceDisabledCount: 0,
-      skippedLeadCount: 0, prospectDncLockedCount: 0, prospectDncLockedIds: [],
-    }));
-    const out = await getAllMatchingProspectIds({ search: null, blockStack: [] });
-    expect(out.ok && out.data).toHaveLength(21_005);
+    await selectAllSearch(FILTERS(null));
+    expect(state.log).toContain('eq("is_training",false)');
+    expect(state.log).not.toContain('or("status.eq.prospect,is_dnc_locked.eq.true")');
   });
 });

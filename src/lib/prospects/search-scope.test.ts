@@ -19,7 +19,6 @@ import {
   escapeLikePattern,
   mapSearchError,
   normalizeSearchTerm,
-  parseQueryOrigin,
   resolveIncludeMessages,
   runWithSearchFallback,
   searchModeFor,
@@ -58,14 +57,7 @@ function recorder() {
 
 const NO_BLOCKS: BlockStack = [];
 
-describe("origin helpers", () => {
-  it("anything but the literal search_page is legacy", () => {
-    expect(parseQueryOrigin("search_page")).toBe("search_page");
-    for (const v of [undefined, null, "legacy", "SEARCH_PAGE", 1, {}]) {
-      expect(parseQueryOrigin(v)).toBe("legacy");
-    }
-  });
-
+describe("search helpers", () => {
   it("escapes ILIKE metacharacters", () => {
     expect(escapeLikePattern("a%b_c\\d")).toBe("a\\%b\\_c\\\\d");
     expect(escapeLikePattern("plain")).toBe("plain");
@@ -77,89 +69,22 @@ describe("origin helpers", () => {
   });
 
   it.each([
-    ["search_page", null, "none"],
-    ["search_page", "", "none"],
-    ["search_page", "   ", "none"],
-    ["search_page", "ab", "address_short"],
-    ["search_page", " a ", "address_short"],
-    ["search_page", "abc", "rpc"],
-    ["search_page", "a  b", "rpc"], // 3 chars after collapse
-    ["legacy", "x", "address_short"],
-    ["legacy", "abcdef", "address_short"],
-    ["legacy", null, "none"],
-  ] as const)("searchModeFor(%s, %j) = %s", (origin, search, mode) => {
-    expect(searchModeFor(origin, search)).toBe(mode);
+    [null, "none"],
+    ["", "none"],
+    ["   ", "none"],
+    ["ab", "address_short"],
+    [" a ", "address_short"],
+    ["abc", "rpc"],
+    ["a  b", "rpc"], // 3 chars after collapse
+  ] as const)("searchModeFor(%j) = %s", (search, mode) => {
+    expect(searchModeFor(search)).toBe(mode);
   });
 });
 
-describe("buildScopedQuery: legacy origin is byte-for-byte today's chain", () => {
-  it("applies deleted_at, prospect-or-DNC, unescaped address ilike; no training filter", async () => {
-    const { calls, client } = recorder();
-    await buildScopedQuery(client, {
-      origin: "legacy",
-      select: "id",
-      search: "50% off_",
-      blockStack: NO_BLOCKS,
-    });
-    expect(calls).toEqual([
-      "from(properties)",
-      'select("id")',
-      'is("deleted_at",null)',
-      'or("status.eq.prospect,is_dnc_locked.eq.true")',
-      'ilike("address","%50% off_%")', // wildcards deliberately NOT escaped
-    ]);
-  });
-
-  it("drops the status predicate when a pipeline_status block is present", async () => {
-    const { calls, client } = recorder();
-    await buildScopedQuery(client, {
-      origin: "legacy",
-      select: "id",
-      search: null,
-      blockStack: [
-        { id: "ps", kind: "pipeline_status", combinator: "any", values: ["dead"] },
-      ] as BlockStack,
-    });
-    expect(calls.some((c) => c.startsWith("or("))).toBe(false);
-    expect(calls).not.toContain('eq("is_training",false)');
-  });
-
-  it("never touches the RPC, even for a long search, and ignores addressFallback", async () => {
-    const { calls, client } = recorder();
-    const { mode } = await buildScopedQuery(client, {
-      origin: "legacy",
-      select: "id",
-      search: "jane doe",
-      blockStack: NO_BLOCKS,
-      includeMessages: true,
-      addressFallback: true,
-    });
-    expect(mode).toBe("address_short");
-    expect(calls.some((c) => c.startsWith("rpc("))).toBe(false);
-  });
-
-  it("passes select options through unchanged (count/head) and Imported Today predicates", async () => {
-    const { calls, client } = recorder();
-    await buildScopedQuery(client, {
-      origin: "legacy",
-      select: "id",
-      selectOpts: { count: "exact", head: true },
-      search: null,
-      blockStack: NO_BLOCKS,
-      imported: "today",
-    });
-    expect(calls[1]).toBe('select("id",{"count":"exact","head":true})');
-    expect(calls).toContain('not("source_import_id","is",null)');
-    expect(calls.some((c) => c.startsWith('gte("source_imported_at"'))).toBe(true);
-    expect(calls.some((c) => c.startsWith('lt("source_imported_at"'))).toBe(true);
-  });
-});
-
-describe("buildScopedQuery: search_page origin", () => {
+describe("buildScopedQuery: Search scope", () => {
   it("empty search: plain table, every status, training hidden", async () => {
     const { calls, client } = recorder();
     const { mode } = await buildScopedQuery(client, {
-      origin: "search_page",
       select: "id, status",
       search: null,
       blockStack: NO_BLOCKS,
@@ -176,7 +101,6 @@ describe("buildScopedQuery: search_page origin", () => {
   it("1-2 chars: escaped address ilike, no RPC", async () => {
     const { calls, client } = recorder();
     const { mode } = await buildScopedQuery(client, {
-      origin: "search_page",
       select: "id",
       search: "a%",
       blockStack: NO_BLOCKS,
@@ -189,7 +113,6 @@ describe("buildScopedQuery: search_page origin", () => {
   it("3+ chars: RPC with q, server-derived include_messages; count/head ride the rpc 3rd arg", async () => {
     const { calls, client } = recorder();
     const { mode } = await buildScopedQuery(client, {
-      origin: "search_page",
       select: "id, address",
       selectOpts: { count: "exact", head: true },
       search: "  Jane   Doe ",
@@ -207,7 +130,6 @@ describe("buildScopedQuery: search_page origin", () => {
   it("include_messages defaults to false (fail-closed) when the caller did not resolve it", async () => {
     const { calls, client } = recorder();
     await buildScopedQuery(client, {
-      origin: "search_page",
       select: "id",
       search: "jane",
       blockStack: NO_BLOCKS,
@@ -215,7 +137,6 @@ describe("buildScopedQuery: search_page origin", () => {
     expect(calls[0]).toContain('"include_messages":false');
     const withMessages = recorder();
     await buildScopedQuery(withMessages.client, {
-      origin: "search_page",
       select: "id",
       search: "jane",
       blockStack: NO_BLOCKS,
@@ -227,7 +148,6 @@ describe("buildScopedQuery: search_page origin", () => {
   it("RPC missing (addressFallback): escaped address search instead of the RPC", async () => {
     const { calls, client } = recorder();
     const { mode } = await buildScopedQuery(client, {
-      origin: "search_page",
       select: "id",
       search: "jane_doe",
       blockStack: NO_BLOCKS,
@@ -241,7 +161,6 @@ describe("buildScopedQuery: search_page origin", () => {
   it("does not add the legacy status predicate even with filter blocks", async () => {
     const { calls, client } = recorder();
     await buildScopedQuery(client, {
-      origin: "search_page",
       select: "id",
       search: null,
       blockStack: [

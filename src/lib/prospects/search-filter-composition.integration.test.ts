@@ -228,7 +228,7 @@ async function run(blocks: FilterBlock[], search: string | null, client: any = u
   let count: number | null = null;
   for (let from = 0; ; from += 1000) {
     const { builder } = await buildScopedQuery(client, {
-      origin: "search_page", select, selectOpts: { count: "exact" }, search, blockStack: blocks, includeMessages: true,
+      select, selectOpts: { count: "exact" }, search, blockStack: blocks, includeMessages: true,
     });
     // The anomaly rows (cross-org children) are modelled by their own tests, not by the oracle model.
     const q = excludeAnomalies && anomalyIds.length ? builder.not("id", "in", `(${anomalyIds.join(",")})`) : builder;
@@ -353,7 +353,7 @@ describe("Search x filters on the real search_properties rpc builder", () => {
     let total = 0;
     for (let from = 0; from === 0 || from < total; from += 50) {
       const { builder } = await buildScopedQuery(userA, {
-        origin: "search_page", select: "id, address, created_at, market", selectOpts: { count: "exact" }, search: TERM, blockStack: [], includeMessages: true,
+        select: "id, address, created_at, market", selectOpts: { count: "exact" }, search: TERM, blockStack: [], includeMessages: true,
       });
       const { data, count, error } = await builder.order("market").order("id").range(from, from + 49);
       expect(error).toBeNull();
@@ -401,7 +401,7 @@ describe("Search x filters on the real search_properties rpc builder", () => {
       let total = 0;
       for (let from = 0; from === 0 || from < total; from += pageSize) {
         const { builder } = await buildScopedQuery(userA, {
-          origin: "search_page", select: `id, address, created_at, market`, selectOpts: { count: "exact" },
+          select: `id, address, created_at, market`, selectOpts: { count: "exact" },
           search, blockStack: [], includeMessages: true,
         });
         const { data, count, error } = await builder.not("id", "in", `(${anomalyIds.join(",")})`)

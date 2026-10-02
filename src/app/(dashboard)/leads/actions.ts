@@ -589,9 +589,6 @@ export type BulkOutcome = {
   succeeded: number;
   skipped: number;
   failed: { propertyId: string; message: string }[];
-  /** Search page wrappers: selected rows that are not prospects and were
-   *  skipped before the action ran. Absent when nothing was skipped. */
-  skippedLeads?: number;
 };
 
 export type BulkTagRow = {

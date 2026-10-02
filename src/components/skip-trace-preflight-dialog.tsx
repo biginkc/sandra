@@ -28,11 +28,11 @@ type Props = {
   onOpenChange: (open: boolean) => void;
   propertyIds: string[];
   /**
-   * Select-all-matching: an opaque token stands in for the id list. The caller's
-   * onPreflight / onLaunchSkipTrace / onStartCassVerification callbacks resolve the
-   * real selection on the server; no id list is held or sent from here.
+   * Select-all-matching: an opaque identity key stands in for the id list (the dialog never
+   * holds ids in this mode). The caller's onPreflight / onLaunchSkipTrace / onLaunchCass
+   * callbacks resolve the real selection on the server.
    */
-  selectionToken?: string;
+  selectionKey?: string;
   approveJobId?: string;
   onFinished?: () => void;
   title?: string;
@@ -42,11 +42,21 @@ type Props = {
   onLaunchSkipTrace?: () => Promise<Result<unknown>>;
   onLaunchSuccess?: (data: unknown) => void;
   onPreflight?: (propertyIds: string[]) => Promise<Result<SkipTracePreflight>>;
+  /**
+   * Launch CASS without passing any id list: the caller's server action recomputes the
+   * CASS-unverified subset itself. When set it replaces onStartCassVerification.
+   */
+  onLaunchCass?: (requestKey: string) => Promise<Result<unknown>>;
   onStartCassVerification?: (
     propertyIds: string[],
     requestKey: string,
   ) => Promise<Result<unknown>>;
 };
+
+/** Search preflights withhold the id list and report only a count; legacy ones carry the ids. */
+function cassCandidateCount(preflight: SkipTracePreflight & { cassVerificationCount?: number }): number {
+  return preflight.cassVerificationCount ?? preflight.cassVerificationPropertyIds.length;
+}
 
 function plural(n: number, singular: string, pluralLabel = `${singular}s`) {
   return `${n.toLocaleString()} ${n === 1 ? singular : pluralLabel}`;
@@ -73,7 +83,7 @@ export function SkipTracePreflightDialog({
   open,
   onOpenChange,
   propertyIds: explicitPropertyIds,
-  selectionToken,
+  selectionKey,
   approveJobId,
   onFinished,
   title,
@@ -84,6 +94,7 @@ export function SkipTracePreflightDialog({
   onLaunchSuccess,
   onPreflight,
   onStartCassVerification,
+  onLaunchCass,
 }: Props) {
   const [preflight, setPreflight] = useState<SkipTracePreflight | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -94,8 +105,8 @@ export function SkipTracePreflightDialog({
   const [pending, startTransition] = useTransition();
 
   const propertyIds = useMemo(
-    () => (selectionToken ? [selectionToken] : explicitPropertyIds),
-    [selectionToken, explicitPropertyIds],
+    () => (selectionKey ? [selectionKey] : explicitPropertyIds),
+    [selectionKey, explicitPropertyIds],
   );
   const idsKey = useMemo(() => propertyIds.join("|"), [propertyIds]);
   const idsKeyRef = useRef(idsKey);
@@ -261,7 +272,7 @@ export function SkipTracePreflightDialog({
     if (
       !preflight ||
       !hasCurrentPreflight ||
-      preflight.cassVerificationPropertyIds.length === 0
+      cassCandidateCount(preflight) === 0
     ) {
       return;
     }
@@ -273,7 +284,9 @@ export function SkipTracePreflightDialog({
 
     startTransition(async () => {
       const result = await callAction(
-        onStartCassVerification
+        onLaunchCass
+          ? onLaunchCass((cassRequestKeyRef.current ??= crypto.randomUUID()))
+          : onStartCassVerification
           ? onStartCassVerification(
               preflight.cassVerificationPropertyIds,
               (cassRequestKeyRef.current ??= crypto.randomUUID()),
@@ -286,7 +299,7 @@ export function SkipTracePreflightDialog({
       );
       if (!result.ok) return;
       cassRequestKeyRef.current = null;
-      const verificationCount = preflight.cassVerificationPropertyIds.length;
+      const verificationCount = cassCandidateCount(preflight);
       toast.success(
         `CASS verification started for ${plural(verificationCount, "address", "addresses")}`,
         {
@@ -321,8 +334,7 @@ export function SkipTracePreflightDialog({
     hasCurrentPreflight &&
     preflight?.canLaunchSkipTrace === true &&
     launchDisabledReason === null;
-  const cassVerificationCount =
-    preflight?.cassVerificationPropertyIds.length ?? 0;
+  const cassVerificationCount = preflight ? cassCandidateCount(preflight) : 0;
   const hasCassCandidates = hasCurrentPreflight && cassVerificationCount > 0;
   const hasCassFirstAction = hasCassCandidates && !cassStarted;
 

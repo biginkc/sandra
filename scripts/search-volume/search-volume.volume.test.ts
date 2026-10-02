@@ -111,7 +111,7 @@ const SELECT = "id, org_id, address, city, state, zip, market, cass_status, is_v
 async function page(search: string | null, blocks: FilterBlock[]) {
   const frag = filterSelectFragment(blocks);
   const { builder } = await buildScopedQuery(client, {
-    origin: "search_page", select: frag ? `${SELECT}, ${frag}` : SELECT, selectOpts: { count: "exact" },
+    select: frag ? `${SELECT}, ${frag}` : SELECT, selectOpts: { count: "exact" },
     search, blockStack: blocks, includeMessages: true,
   });
   const t0 = performance.now();
@@ -209,7 +209,7 @@ describe.runIf(RUN)("Search volume gate", () => {
       const t0 = performance.now();
       let total = 0;
       for (let i = 0; i < pages; i++) {
-        const { builder } = await buildScopedQuery(client, { origin: "search_page", select: "id", search: "Vol St", blockStack: [], includeMessages: true });
+        const { builder } = await buildScopedQuery(client, { select: "id", search: "Vol St", blockStack: [], includeMessages: true });
         let q = builder;
         if (cursor) q = q.gt("id", cursor);
         const { data, error } = await q.order("id", { ascending: true }).limit(1000);

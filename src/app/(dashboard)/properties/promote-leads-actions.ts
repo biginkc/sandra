@@ -9,7 +9,6 @@ import { reportError } from "@/lib/errors/report";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import type { Json } from "@/lib/supabase/types";
-import { selectAllMatching, type SelectionFilters } from "@/lib/prospects/select-all";
 import { promoteLeadsWorkflow } from "@/workflows/promote-leads";
 
 export type PromoteLeadsPreflight = {
@@ -217,72 +216,5 @@ export async function retryPromoteLeadsJob(args: {
   } catch (error) {
     reportError(error, { tags: { surface: "promote_leads_retry" } });
     return errFromUnknown(error, "PROMOTION_RETRY_FAILED");
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Search page entry points. The legacy actions above are untouched; these always
-// apply Search semantics (select-all resolved on the server, capped, org
-// membership checked) and have no origin/cap options a client could change.
-// ---------------------------------------------------------------------------
-
-async function assertOrgMember(orgId: string): Promise<Result<null>> {
-  const memberships = await getCallerMemberships();
-  if (!memberships.some((membership) => membership.org_id === orgId)) {
-    return {
-      ok: false,
-      error: { code: "PROMOTION_FORBIDDEN", message: "You no longer have access to this organization." },
-    };
-  }
-  return ok(null);
-}
-
-export async function searchPagePreflightPromoteLeads(args: {
-  orgId: string;
-  propertyIds: string[];
-  filters?: SelectionFilters;
-}): Promise<Result<PromoteLeadsPreflight>> {
-  if (!args.filters) return preflightPromoteLeads({ orgId: args.orgId, propertyIds: args.propertyIds });
-  try {
-    const member = await assertOrgMember(args.orgId);
-    if (!member.ok) return member;
-    const resolved = await selectAllMatching(args.filters, "search");
-    if (!resolved.ok) return resolved;
-    return ok({
-      selected: resolved.data.matchedCount,
-      eligible: resolved.data.eligibleIds.length,
-      dncLocked: resolved.data.dncLockedCount,
-      staleOrNotProspect: resolved.data.skippedLeads,
-    });
-  } catch (error) {
-    reportError(error, { tags: { surface: "promote_leads_preflight" } });
-    return errFromUnknown(error, "PROMOTION_PREFLIGHT_FAILED");
-  }
-}
-
-export async function searchPageCreatePromoteLeadsJob(args: {
-  orgId: string;
-  propertyIds: string[];
-  idempotencyKey: string;
-  filters?: SelectionFilters;
-}): Promise<Result<PromotionJobReceipt>> {
-  try {
-    // Same org-membership check as preflight; do not rely only on the RPC.
-    const member = await assertOrgMember(args.orgId);
-    if (!member.ok) return member;
-    let propertyIds = args.propertyIds;
-    if (args.filters) {
-      const resolved = await selectAllMatching(args.filters, "search");
-      if (!resolved.ok) return resolved;
-      propertyIds = resolved.data.eligibleIds;
-    }
-    return await createPromoteLeadsJob({
-      orgId: args.orgId,
-      propertyIds,
-      idempotencyKey: args.idempotencyKey,
-    });
-  } catch (error) {
-    reportError(error, { tags: { surface: "promote_leads_create" } });
-    return errFromUnknown(error, "PROMOTION_CREATE_FAILED");
   }
 }

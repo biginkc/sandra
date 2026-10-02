@@ -8,12 +8,6 @@ import {
   filterSelectFragment,
 } from "@/lib/prospects/filter-to-supabase";
 import type { BlockStack } from "@/lib/prospects/filter-schema";
-import {
-  buildScopedQuery,
-  mapSearchError,
-  resolveIncludeMessages,
-  runWithSearchFallback,
-} from "@/lib/prospects/search-scope";
 import { createClient } from "@/lib/supabase/server";
 
 export type CountResult = { count: number };
@@ -79,65 +73,6 @@ export async function countProspectsForFilter(input: {
     return ok({ count: count ?? 0 });
   } catch (e) {
     reportError(e, { tags: { surface: "count_prospects_for_filter" } });
-    return errFromUnknown(e, "COUNT_FILTER_FAILED");
-  }
-}
-
-/**
- * Search page live count (rows the page would show): always Search semantics
- * (all statuses, training hidden, search_properties, `imported`), no origin option.
- */
-export async function searchPageCountProspects(input: {
-  orgId: string;
-  blocks: BlockStack;
-  search?: string | null;
-  imported?: "today" | null;
-}): Promise<Result<CountResult>> {
-  try {
-    await requireOrgMembership(input.orgId);
-    const sb = await createClient();
-    let includeMessages = false;
-    try {
-      includeMessages = await resolveIncludeMessages();
-    } catch {
-      return {
-        ok: false,
-        error: {
-          code: "SEARCH_ACCESS_UNAVAILABLE",
-          message: "Membership access could not be verified. Please retry.",
-        },
-      };
-    }
-    const select = ["id", filterSelectFragment(input.blocks)].filter(Boolean).join(", ");
-    const { result } = await runWithSearchFallback(async (opts) => {
-      const { builder } = await buildScopedQuery(sb, {
-        origin: "search_page",
-        select,
-        selectOpts: { count: "exact", head: true },
-        search: input.search ?? null,
-        blockStack: input.blocks,
-        imported: input.imported ?? null,
-        includeMessages,
-        addressFallback: opts.addressFallback,
-      });
-      return (await builder) as {
-        count: number | null;
-        error: { code?: string | null; message?: string } | null;
-      };
-    });
-    if (result.error) {
-      const mapped = mapSearchError(result.error);
-      return {
-        ok: false,
-        error: {
-          code: "COUNT_FILTER_FAILED",
-          message: mapped?.message ?? result.error.message ?? "Count failed",
-        },
-      };
-    }
-    return ok({ count: result.count ?? 0 });
-  } catch (e) {
-    reportError(e, { tags: { surface: "search_page_count_prospects" } });
     return errFromUnknown(e, "COUNT_FILTER_FAILED");
   }
 }

@@ -44,19 +44,13 @@ import {
   type ClassifyInput,
 } from "@/lib/dialer/eligibility";
 
+import {
+  applyFilters,
+  filterSelectFragment,
+} from "@/lib/prospects/filter-to-supabase";
 import type { FilterBlock } from "@/lib/prospects/filter-schema";
 import { resolveProspectEligibility } from "@/lib/prospects/eligibility";
-import {
-  AD_HOC_BULK_SMS_SOURCE,
-  filterToProspectIds,
-} from "@/lib/messaging/prospect-only-guard";
-import {
-  resolveSelection,
-  selectAllMatching,
-  type PropertySelection,
-  type SelectAllResult,
-  type SelectionFilters,
-} from "@/lib/prospects/select-all";
+import { getDayBoundsInZone } from "@/lib/time/zoned";
 
 export async function listSmsTemplateCategories(): Promise<
   Result<{ category: string; count: number }[]>
@@ -94,19 +88,6 @@ export async function listSmsTemplateCategories(): Promise<
  * (and who's excluded) before confirming. Landlines never queue;
  * unknowns queue only with the modal's opt-in toggle.
  */
-/**
- * Resolve a selection to ids on the server. Explicit checkbox ids pass through
- * (the per-action guards re-check them); a select-all-matching selection is
- * re-resolved from its filters, so no id list round-trips through the client.
- */
-async function resolveSelectionIds(
-  selection: PropertySelection,
-): Promise<Result<{ ids: string[]; skippedLeads: number }>> {
-  const resolved = await resolveSelection(selection, "search");
-  if (!resolved.ok) return resolved;
-  return ok({ ids: resolved.data.ids, skippedLeads: resolved.data.skippedLeads });
-}
-
 export async function assessBulkSmsAudience(
   propertyIds: string[],
 ): Promise<Result<AudienceLineTypeAssessment>> {
@@ -119,34 +100,10 @@ export async function assessBulkSmsAudience(
   }
 }
 
-/** Search page entry point: always Search semantics (cap, prospect-only guard, lead-skip reporting). */
-export async function searchPageAssessBulkSmsAudience(
-  selection: PropertySelection,
-): Promise<Result<AudienceLineTypeAssessment & { skippedLeads: number }>> {
-  try {
-    const supabase = await createClient();
-    const resolved = await resolveSelectionIds(selection);
-    if (!resolved.ok) return resolved;
-    // Same prospect-only guard as bulkQueueSms so the modal counts match what
-    // will actually queue; leads in the selection are reported, not assessed.
-    const guard = await filterToProspectIds(supabase, resolved.data.ids);
-    return ok({
-      ...(await assessAudienceLineTypes(supabase, guard.prospectIds)),
-      skippedLeads: guard.skippedLeads + resolved.data.skippedLeads,
-    });
-  } catch (e) {
-    reportError(e, { tags: { surface: "assess_bulk_sms_audience" } });
-    return errFromUnknown(e, "AUDIENCE_ASSESSMENT_FAILED");
-  }
-}
-
 export type BulkSmsOutcome = {
   succeeded: number;
   skipped: number;
   failed: { propertyId: string; message: string }[];
-  /** Ad-hoc sends only: selected rows that are not prospects (leads etc.)
-   *  and were skipped before queueing. Absent for saved-campaign sends. */
-  skippedLeads?: number;
   /** Set when the batch was too large for the synchronous path and was
    *  handed to the bulk-sms workflow instead. Counts above are zero;
    *  real counts land on the job row as the workflow progresses. */
@@ -242,7 +199,7 @@ async function validateProvidedCampaignForBulkSms(
 ): Promise<Result<null>> {
   const { data: campaign, error: campaignError } = await supabase
     .from("campaigns")
-    .select("org_id, status, audience_snapshot")
+    .select("org_id, status")
     .eq("id", campaignId)
     .maybeSingle();
 
@@ -264,21 +221,6 @@ async function validateProvidedCampaignForBulkSms(
       error: {
         code: "CAMPAIGN_STATE_CONFLICT",
         message: "Campaign must be launching before bulk SMS can queue it.",
-      },
-    };
-  }
-  // An ad-hoc bulk-SMS campaign id must not be presented as a saved campaign:
-  // that would skip the ad-hoc prospect-only guard. Provenance comes from the
-  // stored campaign row.
-  if (
-    (campaign.audience_snapshot as { source?: unknown } | null)?.source ===
-    AD_HOC_BULK_SMS_SOURCE
-  ) {
-    return {
-      ok: false,
-      error: {
-        code: "CAMPAIGN_SOURCE_MISMATCH",
-        message: "This campaign was created by Bulk SMS and cannot be launched as a saved campaign.",
       },
     };
   }
@@ -311,38 +253,6 @@ async function validateProvidedCampaignForBulkSms(
 
   const requestedIds = uniqueIds(propertyIds);
   if (requestedIds.length === 0) return ok(null);
-
-  // The saved-campaign exemption from the prospect-only guard is bound to the
-  // campaign's FROZEN audience: any id outside campaign_recipients is rejected.
-  const frozen = new Set<string>();
-  for (let i = 0; i < requestedIds.length; i += VALIDATION_CHUNK) {
-    const chunk = requestedIds.slice(i, i + VALIDATION_CHUNK);
-    const { data, error } = await supabase
-      .from("campaign_recipients")
-      .select("property_id")
-      .eq("campaign_id", campaignId)
-      .in("property_id", chunk);
-    if (error) {
-      return {
-        ok: false,
-        error: {
-          code: "CAMPAIGN_AUDIENCE_LOOKUP_FAILED",
-          message: error.message,
-        },
-      };
-    }
-    for (const row of data ?? []) frozen.add(row.property_id);
-  }
-  if (requestedIds.some((id) => !frozen.has(id))) {
-    return {
-      ok: false,
-      error: {
-        code: "CAMPAIGN_AUDIENCE_MISMATCH",
-        message:
-          "Selected properties are not part of this campaign's frozen audience.",
-      },
-    };
-  }
 
   const propertyOrgIds = new Set<string>();
   let readableCount = 0;
@@ -460,36 +370,6 @@ export async function bulkQueueSms(
   propertyIds: string[],
   opts: BulkSmsQueueOpts,
 ): Promise<Result<BulkSmsOutcome>> {
-  return queueSmsInternal(propertyIds, opts, 0);
-}
-
-/**
- * Search page entry point. A select-all-matching selection is re-resolved on the server with
- * Search semantics and the select-all cap (ad-hoc only: saved campaigns send explicit frozen ids).
- */
-export async function searchPageBulkQueueSms(
-  selection: PropertySelection,
-  opts: BulkSmsQueueOpts,
-): Promise<Result<BulkSmsOutcome>> {
-  if (resolveProvidedCampaignId(opts) && !Array.isArray(selection)) {
-    return {
-      ok: false,
-      error: {
-        code: "VALIDATION",
-        message: "Saved campaigns send their frozen audience, not a filter selection.",
-      },
-    };
-  }
-  const resolved = await resolveSelectionIds(selection);
-  if (!resolved.ok) return resolved;
-  return queueSmsInternal(resolved.data.ids, opts, resolved.data.skippedLeads);
-}
-
-async function queueSmsInternal(
-  propertyIds: string[],
-  opts: BulkSmsQueueOpts,
-  filterSkippedLeads: number,
-): Promise<Result<BulkSmsOutcome>> {
   try {
     const supabase = await createClient();
 
@@ -524,9 +404,6 @@ async function queueSmsInternal(
 
     let resolvedPropertyIds = Array.from(new Set(propertyIds));
     let resolvedOpts: ResolvedBulkSmsQueueOpts;
-    let adHocSkippedLeads: number | undefined;
-    const leadsField = () =>
-      adHocSkippedLeads === undefined ? {} : { skippedLeads: adHocSkippedLeads };
 
     if (providedCampaignId) {
       const paceValidation = validateBulkSmsQueuePace(opts, "saved_campaign");
@@ -554,23 +431,11 @@ async function queueSmsInternal(
         ...baseBulkSmsOpts(opts),
         paceSeconds: paceValidation.data,
       };
-      // Ad-hoc sends act on prospects only; the freeze below receives the
-      // FILTERED ids (not the original selection).
-      const guard = await filterToProspectIds(supabase, propertyIds);
-      adHocSkippedLeads = guard.skippedLeads + filterSkippedLeads;
-      if (guard.prospectIds.length === 0) {
-        return ok({
-          succeeded: 0,
-          skipped: 0,
-          failed: [],
-          skippedLeads: guard.skippedLeads + filterSkippedLeads,
-        });
-      }
       const campaignResult = await resolveAdHocBulkSmsCampaign(supabase, {
         campaignName: opts.campaignName,
         createdByUserId: enrolledByUserId,
         opts: baseOpts,
-        propertyIds: guard.prospectIds,
+        propertyIds,
       });
       if (!campaignResult.ok) return campaignResult;
       resolvedPropertyIds = campaignResult.data.propertyIds;
@@ -617,7 +482,6 @@ async function queueSmsInternal(
         succeeded: state.succeeded,
         skipped: state.skipped,
         failed: state.failed,
-        ...leadsField(),
       });
     }
 
@@ -701,7 +565,6 @@ async function queueSmsInternal(
       succeeded: 0,
       skipped: 0,
       failed: [],
-      ...leadsField(),
       deferred: { jobId: jobRow.id, total: resolvedPropertyIds.length },
     });
   } catch (e) {
@@ -737,8 +600,6 @@ type CreateDialerBatchOptions = {
 type CreateDialerBatchResult = {
   batchId: string;
   counts: BatchEligibilityCounts;
-  /** Search page only: selected rows that are not prospects and were skipped. */
-  skippedLeads?: number;
 };
 
 type DialerInsertError = { message: string } | null;
@@ -814,7 +675,6 @@ async function fetchEligibleDialerPropertyRows(
     rows: DialerPropertyRow[];
     eligibleIds: string[];
     dncLockedCount: number;
-    skippedLeadCount: number;
   }>
 > {
   const eligibility = await resolveProspectEligibility(
@@ -831,21 +691,14 @@ async function fetchEligibleDialerPropertyRows(
     rows: rowsResult.data,
     eligibleIds: eligibility.eligibleIds,
     dncLockedCount: eligibility.dncLockedCount,
-    skippedLeadCount: eligibility.skippedLeadCount,
   });
 }
 
-async function previewDialerInternal(
-  resolved: { ids: string[]; skippedLeads: number; dncLockedCount: number },
-  reportLeads: boolean,
-): Promise<Result<BatchEligibilityCounts & { skippedLeads?: number }>> {
-  if (resolved.ids.length === 0) {
-    return ok({
-      callable: 0,
-      blocked: {},
-      missing: 0,
-      ...(reportLeads ? { skippedLeads: resolved.skippedLeads } : {}),
-    });
+export async function previewBatchEligibilityAction(
+  propertyIds: string[],
+): Promise<Result<BatchEligibilityCounts>> {
+  if (propertyIds.length === 0) {
+    return ok({ callable: 0, blocked: {}, missing: 0 });
   }
 
   try {
@@ -862,66 +715,24 @@ async function previewDialerInternal(
 
     const rowsResult = await fetchEligibleDialerPropertyRows(
       supabase,
-      resolved.ids,
+      propertyIds,
     );
     if (!rowsResult.ok) return rowsResult;
 
     const counts = classifyForPreview(toClassifyInputs(rowsResult.data.rows));
-    const dncLocked = rowsResult.data.dncLockedCount + resolved.dncLockedCount;
-    if (dncLocked > 0) {
-      counts.blocked.dnc_locked = dncLocked;
+    if (rowsResult.data.dncLockedCount > 0) {
+      counts.blocked.dnc_locked = rowsResult.data.dncLockedCount;
     }
-    if (!reportLeads) return ok(counts);
-    return ok({
-      ...counts,
-      skippedLeads: resolved.skippedLeads + rowsResult.data.skippedLeadCount,
-    });
+    return ok(counts);
   } catch (e) {
     reportError(e, { tags: { surface: "preview_batch_eligibility_action" } });
     return errFromUnknown(e, "PREVIEW_FAILED");
   }
 }
 
-export async function previewBatchEligibilityAction(
-  propertyIds: string[],
-): Promise<Result<BatchEligibilityCounts>> {
-  return previewDialerInternal(
-    { ids: propertyIds, skippedLeads: 0, dncLockedCount: 0 },
-    false,
-  );
-}
-
-/**
- * Search page entry point: always Search semantics. A select-all-matching is
- * re-resolved server-side (capped); lead counts are reported for every selection.
- */
-export async function searchPagePreviewBatchEligibility(
-  selection: PropertySelection,
-): Promise<Result<BatchEligibilityCounts & { skippedLeads?: number }>> {
-  const resolved = await resolveSelection(selection, "search");
-  if (!resolved.ok) return resolved;
-  return previewDialerInternal(resolved.data, true);
-}
-
 export async function createDialerBatchFromPropertyIds(
   propertyIds: string[],
   opts: CreateDialerBatchOptions = {},
-): Promise<Result<CreateDialerBatchResult>> {
-  return createDialerBatchInternal(propertyIds, opts, false);
-}
-
-/** Search page entry point: reports leads in the selection as server-derived `skippedLeads`. */
-export async function searchPageCreateDialerBatchFromPropertyIds(
-  propertyIds: string[],
-  opts: CreateDialerBatchOptions = {},
-): Promise<Result<CreateDialerBatchResult>> {
-  return createDialerBatchInternal(propertyIds, opts, true);
-}
-
-async function createDialerBatchInternal(
-  propertyIds: string[],
-  opts: CreateDialerBatchOptions,
-  reportLeads: boolean,
 ): Promise<Result<CreateDialerBatchResult>> {
   if (propertyIds.length === 0) {
     return {
@@ -1057,13 +868,7 @@ async function createDialerBatchInternal(
       }
     }
 
-    return ok({
-      batchId: batch.id as string,
-      counts,
-      // Search checkbox selections report leads server-side; legacy callers get
-      // exactly the old result shape.
-      ...(reportLeads ? { skippedLeads: rowsResult.data.skippedLeadCount } : {}),
-    });
+    return ok({ batchId: batch.id as string, counts });
   } catch (e) {
     reportError(e, {
       tags: { surface: "create_dialer_batch_from_property_ids" },
@@ -1078,14 +883,11 @@ export async function createDialerBatchFromFilters(args: {
   imported?: "today" | null;
   title?: string;
 }): Promise<Result<CreateDialerBatchResult>> {
-  const selectionResult = await selectAllMatching(
-    {
-      search: args.search ?? null,
-      blockStack: args.blockStack,
-      imported: args.imported ?? null,
-    },
-    "legacy",
-  );
+  const selectionResult = await getAllMatchingProspectSelection({
+    search: args.search ?? null,
+    blockStack: args.blockStack,
+    imported: args.imported ?? null,
+  });
   if (!selectionResult.ok) return selectionResult;
 
   const result = await createDialerBatchFromPropertyIds(
@@ -1117,82 +919,119 @@ export async function createDialerBatchFromFilters(args: {
 }
 
 /**
- * Search page entry point: the filters are re-resolved with Search semantics and
- * ALWAYS capped (an over-cap selection is an error, never a batch).
- */
-export async function searchPageCreateDialerBatchFromFilters(args: {
-  filters: SelectionFilters;
-  title?: string;
-}): Promise<Result<CreateDialerBatchResult & { skippedLeads: number }>> {
-  const selectionResult = await selectAllMatching(args.filters, "search");
-  if (!selectionResult.ok) return selectionResult;
-
-  const result = await createDialerBatchInternal(
-    selectionResult.data.eligibleIds,
-    {
-      title: args.title,
-      sourceKind: "filters",
-      sourceMeta: {
-        search: args.filters.search ?? null,
-        blockStack: args.filters.blockStack,
-        imported: args.filters.imported ?? null,
-        origin: "search_page",
-      },
-    },
-    true,
-  );
-  if (!result.ok) return result;
-  const skippedLeads =
-    selectionResult.data.skippedLeads + (result.data.skippedLeads ?? 0);
-  const dncLocked = selectionResult.data.dncLockedCount;
-  return ok({
-    ...result.data,
-    skippedLeads,
-    counts:
-      dncLocked === 0
-        ? result.data.counts
-        : {
-            ...result.data.counts,
-            blocked: {
-              ...result.data.counts.blocked,
-              dnc_locked: (result.data.counts.blocked.dnc_locked ?? 0) + dncLocked,
-            },
-          },
-  });
-}
-
-/**
  * Return every property_id matching the current filter set on the
- * prospects/search page. Used by the "Select all N across all pages"
+ * prospects page. Used by the "Select all N prospects across all pages"
  * affordance (R9) — the table fetches the full ID set once, expands its
  * client-side selection Set, and existing bulk actions (which already
  * accept arrays of IDs) work unchanged.
  *
- * The predicate chain comes from `buildScopedQuery` (src/lib/prospects/
- * search-scope.ts). Origin 'legacy' (the default; campaigns and DNC-safe
- * callers) is byte-for-byte the old chain: prospect-or-DNC status unless a
- * pipeline_status block, unescaped address ilike, uncapped. Origin
- * 'search_page' shows every status, hides training rows, searches via
- * `search_properties`, and is CAPPED (SEARCH_SELECT_ALL_CAP): over the cap is
- * an error and NO partial selection is returned.
+ * Plan 09: signature migrated to accept the v1 block stack instead of the
+ * legacy 5-chip ParsedProspectsFilters. Filter chain mirrors page.tsx:
+ *   - .is("deleted_at", null)                            (always)
+ *   - .or("status.eq.prospect,is_dnc_locked.eq.true") UNLESS the stack contains a
+ *     pipeline_status block (in which case that block's values fully
+ *     define the active status set — same rule as page.tsx)
+ *   - search → ILIKE on address
+ *   - applyFilters(query, blockStack, supabase)          (Plan 04 translator)
  *
- * Two distinct sets come back: MATCHED (what the page lists; `matchedCount`)
- * and ELIGIBLE (matched ∩ prospect ∩ not DNC; `eligibleIds`), with the
- * exclusions broken out (`dncLockedCount`, `skippedLeads`).
- *
- * Credit-spending bulk actions carry their own guards (skip-trace:
- * MAX_PROPERTIES_PER_JOB server-side + CASS-unverified filtering).
+ * Returns every matching row. Credit-spending bulk actions carry their own
+ * guards (skip-trace: MAX_PROPERTIES_PER_JOB server-side + CASS-unverified
+ * filtering), so select-all itself is unbounded.
  */
 export async function getAllMatchingProspectSelection(args: {
   search: string | null;
   blockStack: FilterBlock[];
   imported?: "today" | null;
-}): Promise<Result<SelectAllResult>> {
-  // Legacy resolver: prospect-or-DNC status, unescaped address ilike, never capped.
-  return selectAllMatching(
-    { search: args.search, blockStack: args.blockStack, imported: args.imported ?? null },
-    "legacy",
-  );
+}): Promise<
+  Result<{
+    eligibleIds: string[];
+    eligibleCount: number;
+    dncLockedCount: number;
+    matchedCount: number;
+  }>
+> {
+  try {
+    const supabase = await createClient();
+
+    const hasPipelineStatusBlock = args.blockStack.some(
+      (b) => b.kind === "pipeline_status",
+    );
+
+    const filterSelect = filterSelectFragment(args.blockStack);
+    const propertiesSelect = [
+      "id, source_import_id, source_imported_at",
+      filterSelect,
+    ]
+      .filter(Boolean)
+      .join(", ");
+
+    // PostgREST silently caps results at 1 000 rows (db-max-rows default).
+    // Use a deterministic ID keyset. Offset pagination can skip or duplicate
+    // rows when a prospect changes state while a >1K selection is loading.
+    const PAGE = 1000;
+    const allIds: string[] = [];
+    let cursor: string | null = null;
+    for (;;) {
+      let query = supabase
+        .from("properties")
+        .select(propertiesSelect)
+        .is("deleted_at", null);
+      if (!hasPipelineStatusBlock) {
+        query = query.or("status.eq.prospect,is_dnc_locked.eq.true");
+      }
+      if (args.search) query = query.ilike("address", `%${args.search}%`);
+      if (args.imported === "today") {
+        const { dayStart, dayEnd } = getDayBoundsInZone(
+          new Date(),
+          "America/Chicago",
+        );
+        query = query
+          .not("source_import_id", "is", null)
+          .gte("source_imported_at", dayStart.toISOString())
+          .lt("source_imported_at", dayEnd.toISOString());
+      }
+      query = (await applyFilters(query, args.blockStack, supabase)).builder;
+      if (cursor) query = query.gt("id", cursor);
+      const { data, error } = await query
+        .order("id", { ascending: true })
+        .limit(PAGE);
+      if (error) {
+        return {
+          ok: false,
+          error: { code: "SELECT_ALL_FAILED", message: error.message },
+        };
+      }
+      const rows = (data ?? []) as unknown as Array<{ id: string }>;
+      allIds.push(...rows.map((row) => row.id));
+      if (rows.length < PAGE) break;
+      const nextCursor = rows.at(-1)?.id ?? null;
+      if (!nextCursor || nextCursor === cursor) {
+        return {
+          ok: false,
+          error: {
+            code: "SELECT_ALL_FAILED",
+            message: "Prospect selection did not advance safely.",
+          },
+        };
+      }
+      cursor = nextCursor;
+    }
+
+    const resolved = await resolveProspectEligibility(
+      supabase,
+      allIds,
+      "selection",
+    );
+    return ok({
+      eligibleIds: resolved.eligibleIds,
+      eligibleCount: resolved.eligibleIds.length,
+      dncLockedCount: resolved.dncLockedCount,
+      matchedCount: allIds.length,
+    });
+  } catch (e) {
+    reportError(e, { tags: { surface: "get_all_matching_prospect_ids" } });
+    return errFromUnknown(e, "SELECT_ALL_FAILED");
+  }
 }
 
 export async function getAllMatchingProspectIds(args: {
@@ -1202,17 +1041,6 @@ export async function getAllMatchingProspectIds(args: {
 }): Promise<Result<string[]>> {
   const result = await getAllMatchingProspectSelection(args);
   return result.ok ? ok(result.data.eligibleIds) : result;
-}
-
-/**
- * Search page entry point for "select all matching": always Search semantics (every status,
- * training hidden, search_properties) and ALWAYS capped at SEARCH_SELECT_ALL_CAP. There is no
- * origin or cap option; the client cannot downgrade it.
- */
-export async function searchPageSelectAll(
-  filters: SelectionFilters,
-): Promise<Result<SelectAllResult>> {
-  return selectAllMatching(filters, "search");
 }
 
 /**
@@ -1226,58 +1054,34 @@ export async function searchPageSelectAll(
  *
  * Empty input short-circuits to ok(0) without a DB roundtrip.
  */
-async function countContactedAmong(
-  supabase: Awaited<ReturnType<typeof createClient>>,
-  propertyIds: string[],
-): Promise<Result<number>> {
-  const CHUNK = 250;
-  const distinct = new Set<string>();
-  for (let i = 0; i < propertyIds.length; i += CHUNK) {
-    const chunk = propertyIds.slice(i, i + CHUNK);
-    const { data, error } = await supabase
-      .from("messages")
-      .select("property_id")
-      .in("property_id", chunk)
-      .eq("direction", "outbound")
-      .in("status", CONTACTED_MESSAGE_STATUSES);
-    if (error) {
-      return {
-        ok: false,
-        error: { code: "COUNT_CONTACTED_FAILED", message: error.message },
-      };
-    }
-    (data ?? [])
-      .map((r) => r.property_id)
-      .filter((v): v is string => typeof v === "string")
-      .forEach((v) => distinct.add(v));
-  }
-  return ok(distinct.size);
-}
-
 export async function countAlreadyContacted(
   propertyIds: string[],
 ): Promise<Result<number>> {
   if (propertyIds.length === 0) return ok(0);
   try {
     const supabase = await createClient();
-    return await countContactedAmong(supabase, propertyIds);
-  } catch (e) {
-    reportError(e, { tags: { surface: "count_already_contacted" } });
-    return errFromUnknown(e, "COUNT_CONTACTED_FAILED");
-  }
-}
-
-/** Search page entry point: Search semantics, cap and the same prospect-only guard as the send. */
-export async function searchPageCountAlreadyContacted(
-  selection: PropertySelection,
-): Promise<Result<number>> {
-  if (Array.isArray(selection) && selection.length === 0) return ok(0);
-  try {
-    const supabase = await createClient();
-    const resolved = await resolveSelectionIds(selection);
-    if (!resolved.ok) return resolved;
-    const { prospectIds } = await filterToProspectIds(supabase, resolved.data.ids);
-    return await countContactedAmong(supabase, prospectIds);
+    const CHUNK = 250;
+    const distinct = new Set<string>();
+    for (let i = 0; i < propertyIds.length; i += CHUNK) {
+      const chunk = propertyIds.slice(i, i + CHUNK);
+      const { data, error } = await supabase
+        .from("messages")
+        .select("property_id")
+        .in("property_id", chunk)
+        .eq("direction", "outbound")
+        .in("status", CONTACTED_MESSAGE_STATUSES);
+      if (error) {
+        return {
+          ok: false,
+          error: { code: "COUNT_CONTACTED_FAILED", message: error.message },
+        };
+      }
+      (data ?? [])
+        .map((r) => r.property_id)
+        .filter((v): v is string => typeof v === "string")
+        .forEach((v) => distinct.add(v));
+    }
+    return ok(distinct.size);
   } catch (e) {
     reportError(e, { tags: { surface: "count_already_contacted" } });
     return errFromUnknown(e, "COUNT_CONTACTED_FAILED");

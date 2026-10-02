@@ -13,10 +13,9 @@ import {
 import { callAction } from "@/lib/errors/call-action";
 
 import {
-  searchPageCreateAndApplyCustomTagBulk,
-  searchPageCreateAndApplyCustomTagBulkFromFilters,
-  type BulkOutcome,
-} from "./dnc-safe-actions";
+  searchCustomTag,
+  type SearchBulkOutcome as BulkOutcome,
+} from "../search/actions";
 import type { FilterBlock } from "./prospects-query";
 import type { TagOption } from "./prospects-table";
 
@@ -92,19 +91,22 @@ export function BulkTagModal({
     setError(null);
     startTransition(async () => {
       const action = allMatching
-        ? searchPageCreateAndApplyCustomTagBulkFromFilters({
+        ? searchCustomTag({
             name: cleanName,
             color: null,
-            filters: {
-              search: filterArgs?.search ?? null,
-              blockStack: filterArgs?.blockStack ?? [],
-              imported: filterArgs?.imported ?? null,
+            selection: {
+              kind: "filters",
+              filters: {
+                search: filterArgs?.search ?? null,
+                blockStack: filterArgs?.blockStack ?? [],
+                imported: filterArgs?.imported ?? null,
+              },
             },
           })
-        : searchPageCreateAndApplyCustomTagBulk({
+        : searchCustomTag({
             name: cleanName,
             color: null,
-            propertyIds,
+            selection: { kind: "ids", ids: propertyIds },
           });
       const result = await callAction(action, {
         fallbackMessage: "Could not apply tag",

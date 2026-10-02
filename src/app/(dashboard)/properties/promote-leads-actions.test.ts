@@ -19,8 +19,6 @@ vi.mock("@/lib/supabase/admin", () => ({
 vi.mock("workflow/api", () => ({ start: startWorkflow }));
 vi.mock("next/cache", () => ({ revalidatePath }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
-const { selectAllMatching } = vi.hoisted(() => ({ selectAllMatching: vi.fn() }));
-vi.mock("@/lib/prospects/select-all", () => ({ selectAllMatching }));
 
 import {
   createPromoteLeadsJob,
@@ -41,7 +39,6 @@ beforeEach(() => {
   startWorkflow.mockReset();
   revalidatePath.mockReset();
   getCallerMemberships.mockReset();
-  selectAllMatching.mockReset();
   getCallerMemberships.mockResolvedValue([{ org_id: request.orgId }]);
   startWorkflow.mockResolvedValue({ runId: "run-1" });
   adminRpc.mockResolvedValue({ data: { failed: 1, status: "failed" }, error: null });
@@ -184,60 +181,5 @@ describe("promotion server actions", () => {
       p_idempotency_key: request.idempotencyKey,
     });
     expect(startWorkflow).toHaveBeenCalledWith(expect.any(Function), [{ jobId: "child-1" }]);
-  });
-
-  it("a select-all-matching preflight re-resolves the filters server-side and reports leads as not-prospect", async () => {
-    selectAllMatching.mockResolvedValue({
-      ok: true,
-      data: { eligibleIds: ["a", "b"], eligibleCount: 2, dncLockedCount: 1, matchedCount: 7, skippedLeads: 4 },
-    });
-    const filters = { search: "x", blockStack: [], origin: "search_page" as const };
-    const result = await preflightPromoteLeads({ orgId: request.orgId, propertyIds: [], filters });
-    expect(selectAllMatching).toHaveBeenCalledWith(filters, { enforceCap: true });
-    expect(result).toEqual({ ok: true, data: { selected: 7, eligible: 2, dncLocked: 1, staleOrNotProspect: 4 } });
-    expect(sessionFrom).not.toHaveBeenCalled();
-  });
-
-  it("a select-all-matching create sends the SERVER-resolved ids to the RPC, never client ids", async () => {
-    const ids = ["10000000-0000-0000-0000-000000000009", "10000000-0000-0000-0000-00000000000a"];
-    selectAllMatching.mockResolvedValue({
-      ok: true,
-      data: { eligibleIds: ids, eligibleCount: 2, dncLockedCount: 0, matchedCount: 2, skippedLeads: 0 },
-    });
-    sessionRpc.mockResolvedValue({
-      data: { job_id: "job-9", duplicate: false, status: "queued", counts: {} },
-      error: null,
-    });
-    const result = await createPromoteLeadsJob({
-      orgId: request.orgId,
-      propertyIds: ["10000000-0000-0000-0000-0000000000ff"], // forged, must be ignored
-      idempotencyKey: request.idempotencyKey,
-      filters: { search: null, blockStack: [], origin: "search_page" },
-    });
-    expect(result.ok).toBe(true);
-    expect(sessionRpc).toHaveBeenCalledWith(
-      "create_promote_leads_job",
-      expect.objectContaining({ p_property_ids: ids }),
-    );
-  });
-
-  it("a select-all-matching create from a user without membership in that org is refused before any resolution or RPC", async () => {
-    getCallerMemberships.mockResolvedValue([{ org_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" }]); // not request.orgId
-    const result = await createPromoteLeadsJob({
-      orgId: request.orgId,
-      propertyIds: [],
-      idempotencyKey: request.idempotencyKey,
-      filters: { search: null, blockStack: [], origin: "search_page" },
-    });
-    expect(result).toMatchObject({ ok: false, error: { code: "PROMOTION_FORBIDDEN" } });
-    expect(selectAllMatching).not.toHaveBeenCalled();
-    expect(sessionRpc).not.toHaveBeenCalled();
-  });
-
-  it("the explicit-id create path checks membership too", async () => {
-    getCallerMemberships.mockResolvedValue([]);
-    const result = await createPromoteLeadsJob(request);
-    expect(result).toMatchObject({ ok: false, error: { code: "PROMOTION_FORBIDDEN" } });
-    expect(sessionRpc).not.toHaveBeenCalled();
   });
 });

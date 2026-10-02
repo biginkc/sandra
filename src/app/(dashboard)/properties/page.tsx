@@ -184,7 +184,6 @@ export default async function PropertiesPage({
 
     const { result, degraded } = await runWithSearchFallback(async (opts) => {
       const { builder } = await buildScopedQuery(supabase, {
-        origin: "search_page",
         select: propertiesSelect,
         selectOpts: { count: "exact" },
         search,
@@ -412,7 +411,7 @@ export default async function PropertiesPage({
   // dots in the table show the same on individual rows.
   // Hidden while a global (3+ char) search is active: each count would
   // re-evaluate search_properties, and the breakdown of a text match is noise.
-  const globalSearchActive = searchModeFor("search_page", search) === "rpc";
+  const globalSearchActive = searchModeFor(search) === "rpc";
   const cassStats = await (async () => {
     if (total === 0 || globalSearchActive) return null;
     const imported = rawSearchParams.imported === "today" ? "today" : null;
@@ -421,8 +420,7 @@ export default async function PropertiesPage({
     const counts = await Promise.all(
       ["verified", "unverified", "invalid", "ambiguous"].map(async (s) => {
         const { builder } = await buildScopedQuery(supabase, {
-          origin: "search_page",
-          select: countSelect,
+            select: countSelect,
           selectOpts: { count: "exact", head: true },
           search,
           blockStack,

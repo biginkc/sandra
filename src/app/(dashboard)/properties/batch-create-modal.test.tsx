@@ -17,11 +17,15 @@ const {
   toastSuccess: vi.fn(),
 }));
 
-vi.mock("./actions", () => ({
-  createDialerBatchFromFilters,
-  createDialerBatchFromPropertyIds,
-  getAllMatchingProspectSelection,
-  previewBatchEligibilityAction,
+// The modal talks to the Search entry points only; adapters map them onto the per-case mocks.
+type Sel = { kind: "ids"; ids: string[] } | { kind: "filters"; filters: { search: string | null; blockStack: unknown[]; imported: "today" | null } };
+vi.mock("../search/actions", () => ({
+  searchDialerPreview: ({ selection }: { selection: Sel }) =>
+    previewBatchEligibilityAction(selection.kind === "ids" ? selection.ids : selection),
+  searchDialerCreate: ({ selection, title }: { selection: Sel; title?: string }) =>
+    selection.kind === "ids"
+      ? createDialerBatchFromPropertyIds(selection.ids, { sourceKind: "selected_ids", title })
+      : createDialerBatchFromFilters({ ...selection.filters, title }),
 }));
 
 vi.mock("sonner", () => ({
@@ -43,8 +47,7 @@ function renderModal(
     open: boolean;
     onClose: () => void;
     selectedIds?: string[];
-    filterArgs?: { search?: string | null; blockStack: FilterBlock[]; origin?: "legacy" | "search_page" };
-    origin?: "legacy" | "search_page";
+    filterArgs?: { search?: string | null; blockStack: FilterBlock[] };
     totalCount: number;
   }> = {},
 ) {
@@ -55,7 +58,6 @@ function renderModal(
       onClose={onClose}
       selectedIds={overrides.selectedIds}
       filterArgs={overrides.filterArgs}
-      origin={overrides.origin}
       totalCount={overrides.totalCount ?? overrides.selectedIds?.length ?? 0}
     />,
   );
@@ -113,10 +115,11 @@ describe("<BatchCreateModal />", () => {
     renderModal({ selectedIds: ["p1", "p2", "p3"] });
 
     await waitFor(() =>
-      expect(previewBatchEligibilityAction).toHaveBeenCalledWith({
-        ids: ["p1", "p2", "p3"],
-        origin: undefined,
-      }),
+      expect(previewBatchEligibilityAction).toHaveBeenCalledWith([
+        "p1",
+        "p2",
+        "p3",
+      ]),
     );
     expect(await screen.findByText("5 callable")).toBeInTheDocument();
     expect(screen.getByText("2 blocked")).toBeInTheDocument();
@@ -198,7 +201,7 @@ describe("<BatchCreateModal />", () => {
     );
   });
 
-  it("filter mode shows how many leads were skipped and forwards the search origin", async () => {
+  it("filter mode shows how many leads were skipped and resolves the filters server-side", async () => {
     const user = userEvent.setup();
     getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
@@ -213,13 +216,14 @@ describe("<BatchCreateModal />", () => {
       data: { batchId: "batch-s", counts: { callable: 1, blocked: {}, missing: 0 }, skippedLeads: 3 },
     });
     renderModal({
-      filterArgs: { search: "foo", blockStack: defaultBlockStack, origin: "search_page" },
+      filterArgs: { search: "foo", blockStack: defaultBlockStack },
       totalCount: 2,
     });
     expect(await screen.findByTestId("batch-skipped-leads")).toHaveTextContent(/3 leads skipped/);
     // The preview resolves the filters server-side: the modal sends the filters, never an id list.
     expect(previewBatchEligibilityAction).toHaveBeenCalledWith({
-      filters: expect.objectContaining({ search: "foo", origin: "search_page" }),
+      kind: "filters",
+      filters: expect.objectContaining({ search: "foo" }),
     });
     expect(getAllMatchingProspectSelection).not.toHaveBeenCalled();
 
@@ -228,7 +232,7 @@ describe("<BatchCreateModal />", () => {
     await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
     expect(toastSuccess.mock.calls[0][0]).toContain("3 leads skipped");
     expect(createDialerBatchFromFilters).toHaveBeenCalledWith(
-      expect.objectContaining({ origin: "search_page" }),
+      expect.objectContaining({ search: "foo" }),
     );
   });
 
@@ -283,9 +287,9 @@ describe("<BatchCreateModal />", () => {
       ok: true,
       data: { callable: 2, blocked: {}, missing: 0, skippedLeads: 4 },
     });
-    renderModal({ selectedIds: ["p1", "p2"], origin: "search_page" });
+    renderModal({ selectedIds: ["p1", "p2"] });
     expect(await screen.findByTestId("batch-skipped-leads")).toHaveTextContent(/4 leads skipped/);
-    expect(previewBatchEligibilityAction).toHaveBeenCalledWith({ ids: ["p1", "p2"], origin: "search_page" });
+    expect(previewBatchEligibilityAction).toHaveBeenCalledWith(["p1", "p2"]);
   });
 
   it("shows dashes instead of skeletons when callability preview fails", async () => {

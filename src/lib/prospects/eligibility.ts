@@ -18,15 +18,6 @@ export type ProspectEligibilityResult = {
   exclusions: ProspectEligibilityExclusion[];
   dncLockedCount: number;
   skipTraceDisabledCount: number;
-  /**
-   * Search page counts: rows whose status is not 'prospect' (leads etc., found
-   * or not found), counted BEFORE the DNC split so a locked lead is reported
-   * as a skipped lead and never as a DNC prospect.
-   */
-  skippedLeadCount: number;
-  /** DNC-locked rows that are still prospects (the DNC split after leads). */
-  prospectDncLockedCount: number;
-  prospectDncLockedIds: string[];
 };
 
 type EligibilityRow = {
@@ -55,9 +46,6 @@ export async function resolveProspectEligibility(
       exclusions: [],
       dncLockedCount: 0,
       skipTraceDisabledCount: 0,
-      skippedLeadCount: 0,
-      prospectDncLockedCount: 0,
-      prospectDncLockedIds: [],
     };
   }
 
@@ -78,17 +66,9 @@ export async function resolveProspectEligibility(
   const exclusions: ProspectEligibilityExclusion[] = [];
   let dncLockedCount = 0;
   let skipTraceDisabledCount = 0;
-  let skippedLeadCount = 0;
-  let prospectDncLockedCount = 0;
-  const prospectDncLockedIds: string[] = [];
 
   for (const propertyId of uniqueIds) {
     const row = rowById.get(propertyId);
-    if (!row || row.status !== "prospect") skippedLeadCount += 1;
-    else if (row.is_dnc_locked) {
-      prospectDncLockedCount += 1;
-      prospectDncLockedIds.push(propertyId);
-    }
     if (!row) {
       exclusions.push({ propertyId, reason: "not_found_or_not_prospect" });
       continue;
@@ -106,13 +86,5 @@ export async function resolveProspectEligibility(
     eligibleIds.push(propertyId);
   }
 
-  return {
-    eligibleIds,
-    exclusions,
-    dncLockedCount,
-    skipTraceDisabledCount,
-    skippedLeadCount,
-    prospectDncLockedCount,
-    prospectDncLockedIds,
-  };
+  return { eligibleIds, exclusions, dncLockedCount, skipTraceDisabledCount };
 }

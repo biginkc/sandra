@@ -14,10 +14,9 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 
 import {
-  searchPageCreateDialerBatchFromFilters,
-  searchPageCreateDialerBatchFromPropertyIds,
-  searchPagePreviewBatchEligibility,
-} from "./actions";
+  searchDialerCreate,
+  searchDialerPreview,
+} from "../search/actions";
 import type { FilterBlock } from "./prospects-query";
 
 type Counts = {
@@ -107,17 +106,19 @@ export function BatchCreateModal({
     async function loadPreview() {
       // Server-resolved preview: explicit ids are re-checked, a select-all-matching
       // sends only its filters (no id list round-trips through the client).
-      const preview = await searchPagePreviewBatchEligibility(
-        mode === "ids"
-          ? (selectedIds ?? [])
-          : {
-              filters: {
-                search: filterSearch,
-                blockStack: filterBlockStack,
-                imported: filterImported,
+      const preview = await searchDialerPreview({
+        selection:
+          mode === "ids"
+            ? { kind: "ids", ids: selectedIds ?? [] }
+            : {
+                kind: "filters",
+                filters: {
+                  search: filterSearch,
+                  blockStack: filterBlockStack,
+                  imported: filterImported,
+                },
               },
-            },
-      );
+      });
       if (cancelled) return;
 
       if (preview.ok) {
@@ -142,20 +143,20 @@ export function BatchCreateModal({
     const cleanTitle = title.trim() || undefined;
     setError(null);
     startTransition(async () => {
-      const result =
-        mode === "ids"
-          ? await searchPageCreateDialerBatchFromPropertyIds(selectedIds ?? [], {
-              sourceKind: "selected_ids",
-              title: cleanTitle,
-            })
-          : await searchPageCreateDialerBatchFromFilters({
-              filters: {
-                search: filterSearch,
-                blockStack: filterBlockStack,
-                imported: filterImported,
+      const result = await searchDialerCreate({
+        selection:
+          mode === "ids"
+            ? { kind: "ids", ids: selectedIds ?? [] }
+            : {
+                kind: "filters",
+                filters: {
+                  search: filterSearch,
+                  blockStack: filterBlockStack,
+                  imported: filterImported,
+                },
               },
-              title: cleanTitle,
-            });
+        title: cleanTitle,
+      });
 
       if (result.ok) {
         const skipped = (result.data as { skippedLeads?: number }).skippedLeads ?? 0;

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { BlockStack } from "@/lib/prospects/filter-schema";
-import { searchPageCountProspects } from "@/app/(dashboard)/properties/_actions/count";
+import { searchCount } from "@/app/(dashboard)/search/actions";
 
 export type CountState = {
   status: "idle" | "loading" | "ready" | "error";
@@ -41,7 +41,7 @@ export function useDebouncedFilters(
       setState((s) => ({ status: "loading", count: s.count }));
 
       try {
-        const result = await searchPageCountProspects({
+        const result = await searchCount({
           orgId,
           blocks,
           search,

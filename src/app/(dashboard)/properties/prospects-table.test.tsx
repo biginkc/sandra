@@ -34,39 +34,25 @@ vi.mock("next/navigation", () => ({
 // server client at module load. Replace them with stubs — most tests
 // don't fire actions, but the bulk-add-to-list flow asserts the right
 // action is called with the right args.
-vi.mock("./dnc-safe-actions", () => ({
-  addPropertiesToListBulk: vi.fn(async () => ({
-    ok: true,
-    data: { succeeded: 0, skipped: 0, failed: [] },
-  })),
+const dnc = vi.hoisted(() => ({
+  addPropertiesToListBulk: vi.fn(async (..._a: unknown[]) => ({ ok: true, data: { succeeded: 0, skipped: 0, failed: [] } })),
   applyTagBulk: vi.fn(),
   assignLeadsBulk: vi.fn(),
   createAndApplyCustomTagBulk: vi.fn(),
   createAndApplyCustomTagBulkFromFilters: vi.fn(),
   deletePropertiesBulk: vi.fn(),
-  qualifyLeadsBulk: vi.fn(),
   removePropertiesFromListBulk: vi.fn(),
-  setMotivationBulk: vi.fn(),
   verifyPropertiesBulk: vi.fn(),
-  preflightProspectSkipTrace: vi.fn(async () => ({
+  preflightProspectSkipTrace: vi.fn(async (..._a: unknown[]) => ({
     ok: true,
     data: {
-      requested: 1,
-      eligible: 1,
-      cassVerified: 1,
-      cassUnverified: 0,
-      notEligible: 0,
-      killSwitchSkipped: 0,
-      tracefyCreditsRequired: 5,
-      tracefyCreditsAvailable: 100,
-      tracefyCreditStatus: "sufficient",
-      canLaunchSkipTrace: true,
-      estimatedCassVerificationCostUsd: 0,
-      cassVerificationPropertyIds: [],
-      dncLockedSkipped: 0,
+      requested: 1, eligible: 1, cassVerified: 1, cassUnverified: 0, notEligible: 0, killSwitchSkipped: 0,
+      tracefyCreditsRequired: 5, tracefyCreditsAvailable: 100, tracefyCreditStatus: "sufficient",
+      canLaunchSkipTrace: true, estimatedCassVerificationCostUsd: 0, cassVerificationPropertyIds: [], dncLockedSkipped: 0,
     },
   })),
   requestProspectSkipTrace: vi.fn(),
+  cassForSkipTrace: vi.fn(),
 }));
 
 vi.mock("@/lib/skip-trace/actions", () => ({
@@ -105,22 +91,47 @@ const {
   previewBatchEligibilityAction: vi.fn(),
 }));
 
-vi.mock("./actions", () => ({
-  createDialerBatchFromFilters,
-  createDialerBatchFromPropertyIds,
-  getAllMatchingProspectIds,
-  getAllMatchingProspectSelection,
-  previewBatchEligibilityAction,
-}));
-
 const { preflightPromoteLeads, createPromoteLeadsJob } = vi.hoisted(() => ({
   preflightPromoteLeads: vi.fn(),
   createPromoteLeadsJob: vi.fn(),
 }));
 
-vi.mock("./promote-leads-actions", () => ({
-  preflightPromoteLeads,
-  createPromoteLeadsJob,
+// The table talks to the Search entry points only. These adapters map them onto the per-case mocks
+// so the behavioural assertions (what ids / filters reach which action) stay meaningful.
+type Sel = { kind: "ids"; ids: string[] } | { kind: "filters"; filters: { search: string | null; blockStack: unknown[]; imported: "today" | null } };
+const idsOrFilters = (selection: Sel) => (selection.kind === "ids" ? selection.ids : selection.filters);
+vi.mock("../search/actions", () => ({
+  searchSelectAllCount: async ({ selection }: { selection: Sel }) => {
+    const r = await getAllMatchingProspectSelection((selection as Extract<Sel, { kind: "filters" }>).filters);
+    if (!r.ok) return r;
+    return { ok: true, data: { matchedCount: r.data.matchedCount, eligibleCount: r.data.eligibleCount ?? r.data.eligibleIds?.length ?? 0, dncLockedCount: r.data.dncLockedCount ?? 0, skippedLeads: r.data.skippedLeads ?? 0 } };
+  },
+  searchAssign: ({ selection, userId }: { selection: Sel; userId: string | null }) => dnc.assignLeadsBulk(idsOrFilters(selection), userId),
+  searchListAdd: ({ selection, listId }: { selection: Sel; listId: string }) => dnc.addPropertiesToListBulk(idsOrFilters(selection), listId),
+  searchListRemove: ({ selection, listId }: { selection: Sel; listId: string }) => dnc.removePropertiesFromListBulk(idsOrFilters(selection), listId),
+  searchTag: ({ selection, tagId }: { selection: Sel; tagId: string }) => dnc.applyTagBulk(idsOrFilters(selection), tagId),
+  searchDelete: ({ selection }: { selection: Sel }) => dnc.deletePropertiesBulk(idsOrFilters(selection)),
+  searchCass: ({ selection, requestKey }: { selection: Sel; requestKey: string }) => dnc.verifyPropertiesBulk(idsOrFilters(selection), requestKey),
+  searchCassForSkipTrace: (input: unknown) => dnc.cassForSkipTrace(input),
+  searchCustomTag: ({ selection, name, color }: { selection: Sel; name: string; color?: string | null }) =>
+    selection.kind === "ids"
+      ? dnc.createAndApplyCustomTagBulk({ name, color: color ?? null, propertyIds: selection.ids })
+      : dnc.createAndApplyCustomTagBulkFromFilters({ name, color: color ?? null, ...selection.filters }),
+  searchSkipTracePreflight: ({ selection }: { selection: Sel }) => dnc.preflightProspectSkipTrace(idsOrFilters(selection)),
+  searchSkipTraceRequest: ({ selection }: { selection: Sel }) => dnc.requestProspectSkipTrace(idsOrFilters(selection)),
+  searchDialerPreview: ({ selection }: { selection: Sel }) => previewBatchEligibilityAction(idsOrFilters(selection)),
+  searchDialerCreate: ({ selection, title }: { selection: Sel; title?: string }) =>
+    selection.kind === "ids"
+      ? createDialerBatchFromPropertyIds(selection.ids, { sourceKind: "selected_ids", title })
+      : createDialerBatchFromFilters({ ...selection.filters, title }),
+  searchPromotePreflight: (a: unknown) => preflightPromoteLeads(a),
+  searchPromoteCreate: (a: unknown) => createPromoteLeadsJob(a),
+  searchBulkSms: vi.fn(),
+  searchSmsAudience: vi.fn(),
+  searchSmsTemplateCategories: vi.fn(async (..._a: unknown[]) => ({ ok: true, data: [] })),
+  searchDeliveryOptions: vi.fn(async (..._a: unknown[]) => ({ ok: true, data: { provider: "x", senders: [], providerCampaigns: [], lastSyncedAt: null } })),
+  searchRefreshDeliveryCatalog: vi.fn(),
+  searchCount: vi.fn(),
 }));
 
 // Sonner's toast is fine in jsdom but the table's handlers don't fire
@@ -346,7 +357,7 @@ describe("<ProspectsTable />", () => {
       // to click through. Same shape Playwright defaults to anyway.
       pointerEventsCheck: 0,
     });
-    const { addPropertiesToListBulk } = await import("./dnc-safe-actions");
+    const { addPropertiesToListBulk } = dnc;
     const rows = [
       makeRow({ id: "p1", address: "1 Bulk Ave" }),
       makeRow({ id: "p2", address: "2 Bulk Ave" }),
@@ -381,7 +392,7 @@ describe("<ProspectsTable />", () => {
 
     await waitFor(() => {
       expect(addPropertiesToListBulk).toHaveBeenCalledWith(
-        { ids: ["p1", "p2", "p3"], origin: "search_page" },
+        ["p1", "p2", "p3"],
         "list-pkc",
       );
     });
@@ -389,7 +400,7 @@ describe("<ProspectsTable />", () => {
 
   it("bulk apply existing tag calls the action with selected ids and the chosen tag", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    const { applyTagBulk } = await import("./dnc-safe-actions");
+    const { applyTagBulk } = dnc;
     vi.mocked(applyTagBulk).mockResolvedValue({
       ok: true,
       data: { succeeded: 2, skipped: 0, failed: [] },
@@ -423,7 +434,7 @@ describe("<ProspectsTable />", () => {
 
     await waitFor(() => {
       expect(applyTagBulk).toHaveBeenCalledWith(
-        { ids: ["p1", "p2"], origin: "search_page" },
+        ["p1", "p2"],
         "tag-hot",
       );
     });
@@ -431,7 +442,7 @@ describe("<ProspectsTable />", () => {
 
   it("creates a new tag from the prospects page and applies it to selected ids", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    const { createAndApplyCustomTagBulk } = await import("./dnc-safe-actions");
+    const { createAndApplyCustomTagBulk } = dnc;
     vi.mocked(createAndApplyCustomTagBulk).mockResolvedValue({
       ok: true,
       data: {
@@ -486,7 +497,7 @@ describe("<ProspectsTable />", () => {
 
   it("keeps failed rows selected after create/apply tag partial failures", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    const { createAndApplyCustomTagBulk } = await import("./dnc-safe-actions");
+    const { createAndApplyCustomTagBulk } = dnc;
     vi.mocked(createAndApplyCustomTagBulk).mockResolvedValue({
       ok: true,
       data: {
@@ -541,7 +552,7 @@ describe("<ProspectsTable />", () => {
 
   it("does not submit an empty tag name or clear the current selection", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    const { createAndApplyCustomTagBulk } = await import("./dnc-safe-actions");
+    const { createAndApplyCustomTagBulk } = dnc;
     const rows = [makeRow({ id: "p1", address: "1 Empty Ave" })];
 
     renderTable(rows);
@@ -630,7 +641,7 @@ describe("<ProspectsTable />", () => {
     await waitFor(() => {
       expect(preflightPromoteLeads).toHaveBeenCalledWith({
         orgId: "org-1",
-        propertyIds: ["p1"],
+        selection: { kind: "ids", ids: ["p1"] },
       });
     });
     expect(createPromoteLeadsJob).not.toHaveBeenCalled();
@@ -660,15 +671,13 @@ describe("<ProspectsTable />", () => {
       await screen.findByRole("heading", { name: "Create dialer batch" }),
     ).toBeInTheDocument();
     await waitFor(() =>
-      expect(previewBatchEligibilityAction).toHaveBeenCalledWith({ ids: ["p1"], origin: "search_page" }),
+      expect(previewBatchEligibilityAction).toHaveBeenCalledWith(["p1"]),
     );
   });
 
   it("opens skip-trace preflight from the bulk Enrich action", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    const { preflightProspectSkipTrace, requestProspectSkipTrace } = await import(
-      "./dnc-safe-actions"
-    );
+    const { preflightProspectSkipTrace, requestProspectSkipTrace } = dnc;
     const rows = [makeRow({ id: "p1", address: "1 Tracefy Ave" })];
     renderTable(rows);
 
@@ -686,14 +695,14 @@ describe("<ProspectsTable />", () => {
       }),
     ).toBeInTheDocument();
     await waitFor(() => {
-      expect(preflightProspectSkipTrace).toHaveBeenCalledWith({ ids: ["p1"], origin: "search_page" });
+      expect(preflightProspectSkipTrace).toHaveBeenCalledWith(["p1"]);
     });
     expect(requestProspectSkipTrace).not.toHaveBeenCalled();
   });
 
   it("select-all-matching skip-trace and CASS send filters to the server, never the cached id list", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    const { preflightProspectSkipTrace, verifyPropertiesBulk } = await import("./dnc-safe-actions");
+    const { preflightProspectSkipTrace, verifyPropertiesBulk } = dnc;
     getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
       data: { eligibleIds: ["p1", "hidden-1", "hidden-2"], eligibleCount: 3, dncLockedCount: 0, matchedCount: 3, skippedLeads: 0 },
@@ -706,8 +715,10 @@ describe("<ProspectsTable />", () => {
     await user.click(screen.getByRole("button", { name: /Actions for 3 selected/ }));
     await user.click(await screen.findByRole("menuitem", { name: "Skip trace" }));
     await waitFor(() => expect(preflightProspectSkipTrace).toHaveBeenCalled());
-    const arg = vi.mocked(preflightProspectSkipTrace).mock.calls[0][0] as { filters?: { search: string; origin: string } };
-    expect(arg.filters).toMatchObject({ search: "oak", origin: "search_page" });
+    // The adapter passes the filters themselves for a filter selection: no id list exists client-side.
+    const arg = vi.mocked(preflightProspectSkipTrace).mock.calls[0][0] as unknown as { search: string };
+    expect(arg).toMatchObject({ search: "oak" });
+    expect(Array.isArray(arg)).toBe(false);
     expect(JSON.stringify(arg)).not.toContain("hidden-1");
     expect(verifyPropertiesBulk).not.toHaveBeenCalledWith(expect.arrayContaining(["hidden-1"]), expect.anything());
   });
@@ -1094,7 +1105,6 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
       search: "oak",
       blockStack: EMPTY_BLOCK_STACK,
       imported: null,
-      origin: "search_page",
     });
     const banner = await screen.findByTestId("select-all-banner");
     expect(banner.dataset.mode).toBe("all-matching");
@@ -1128,7 +1138,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
   it("create/apply tag after select-all-matching sends filters instead of every id", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     const { createAndApplyCustomTagBulk, createAndApplyCustomTagBulkFromFilters } =
-      await import("./dnc-safe-actions");
+      dnc;
     const allIds = Array.from({ length: 1382 }, (_, i) => `prop-${i}`);
     getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
@@ -1197,8 +1207,7 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         search: "oak",
         blockStack: EMPTY_BLOCK_STACK,
         imported: null,
-        origin: "search_page",
-      });
+        });
     });
     expect(createAndApplyCustomTagBulk).not.toHaveBeenCalled();
   });
@@ -1245,15 +1254,15 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
 
     await user.click(screen.getByRole("checkbox", { name: "Select p1 Main St" }));
 
+    // The matching ids never reach the client, so leaving select-all mode falls back to the manual
+    // checkbox selection (here p1 was unchecked, leaving nothing selected).
     expect(screen.queryByTestId("select-all-banner")).toBeNull();
-    expect(
-      screen.getByRole("button", { name: /Actions for 1381 selected/ }),
-    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: /Actions \(select/ })).toBeDisabled();
   });
 
   it("create/apply tag partial failure after select-all-matching clears all-matching mode", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    const { createAndApplyCustomTagBulkFromFilters } = await import("./dnc-safe-actions");
+    const { createAndApplyCustomTagBulkFromFilters } = dnc;
     const allIds = [
       "p1",
       ...Array.from({ length: 1381 }, (_, i) => `prop-${i}`),
@@ -1478,7 +1487,6 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
     expect(getAllMatchingProspectSelection).toHaveBeenCalledWith({
       search: null,
       imported: null,
-      origin: "search_page",
       blockStack: expect.arrayContaining([
         expect.objectContaining({ kind: "vacancy", tri: "yes" }),
         expect.objectContaining({
@@ -1529,7 +1537,7 @@ describe("<ProspectsTable /> Search page copy and mixed statuses", () => {
     expect(screen.getByText(/No leads or prospects match "nobody here"/)).toBeInTheDocument();
   });
 
-  it("select-all across pages reports skipped leads and carries the search origin", async () => {
+  it("select-all across pages reports skipped leads from the server", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     getAllMatchingProspectSelection.mockResolvedValue({
       ok: true,
@@ -1560,7 +1568,7 @@ describe("<ProspectsTable /> Search page copy and mixed statuses", () => {
     const banner = await screen.findByTestId("select-all-banner");
     expect(banner.textContent).toMatch(/4 leads skipped/);
     expect(getAllMatchingProspectSelection).toHaveBeenCalledWith(
-      expect.objectContaining({ origin: "search_page" }),
+      expect.objectContaining({}),
     );
   });
 });
