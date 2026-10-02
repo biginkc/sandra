@@ -591,6 +591,7 @@ export async function retrySequenceStep(
 ): Promise<
   | { status: "retried" }
   | { status: "reconciliation_required" }
+  | { status: "norma_hold" }
   | { status: "not_found" }
   | { status: "failed"; message: string }
 > {
@@ -604,6 +605,8 @@ export async function retrySequenceStep(
   if (result.outcome === "not_authorized") {
     return { status: "failed", message: "Enrollment retry was not authorized." };
   }
+  // An open Norma call request holds every enrollment on the lead.
+  if (result.outcome === "norma_hold") return { status: "norma_hold" };
   if (result.outcome !== "retried") return { status: "reconciliation_required" };
 
   const { data: enrollment, error: loadError } = await client

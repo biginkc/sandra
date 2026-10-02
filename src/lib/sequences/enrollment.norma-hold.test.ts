@@ -10,7 +10,7 @@ vi.mock("@/lib/events", async () => {
   return { ...actual, recordLeadEvent, recordLeadEvents: vi.fn().mockResolvedValue(undefined) };
 });
 
-import { resumeByProperty, resumeEnrollment } from "./enrollment";
+import { resumeByProperty, resumeEnrollment, retrySequenceStep } from "./enrollment";
 
 function selectBuilder(rows: unknown, single: unknown = null) {
   const b: Record<string, unknown> = {};
@@ -65,6 +65,13 @@ describe("Norma hold in the TypeScript resume paths", () => {
       rpc,
     } as unknown as SupabaseClient<Database>;
     await expect(resumeByProperty(client, { propertyId: "p" })).rejects.toThrow("resumeByProperty: boom");
+  });
+
+  it("Retry is refused while a Norma request holds the lead", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: [{ outcome: "norma_hold", new_claim_id: null, step_index: 0 }], error: null });
+    const client = { from: vi.fn(), rpc } as unknown as SupabaseClient<Database>;
+    await expect(retrySequenceStep(client, "e1")).resolves.toEqual({ status: "norma_hold" });
+    expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
   it("a manual resume is refused while a Norma request holds the lead", async () => {

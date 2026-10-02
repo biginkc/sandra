@@ -27,6 +27,12 @@ const MUTANTS: Mutant[] = [
       mutateFunction(q, "public.sweep_resume_call_in_progress(uuid[], timestamptz)", "if public.fn_norma_hold_active(e.property_id) then", "if false then"),
   },
   {
+    name: "Retry ignores an open Norma hold (a provider_failed drip restarts mid-call)",
+    invariant: "5",
+    apply: (q) =>
+      mutateFunction(q, "public.retry_sequence_step(uuid, uuid)", "if public.fn_norma_hold_active(e.property_id) then", "if false then"),
+  },
+  {
     name: "the one-open-request index is gone (a second request can open)",
     invariant: "1",
     apply: async (q) => {

@@ -432,6 +432,14 @@ $$;
 -- ([G2]). Both checks run under the enrollment lock and BEFORE any claim
 -- retirement or activation.
 -- ----------------------------------------------------------------------------
+-- ROLLBACK NOTE: this changes resume_sequence_enrollment's signature from
+-- (uuid, uuid) to (uuid, uuid, text). To roll back, drop the three-argument
+-- function and recreate the two-argument original from
+-- 20260919090000_sequence_runtime_recovery.sql (and its grants), and likewise
+-- restore that file's retry_sequence_step (section 7c redefines it), and only after
+-- deploying application code that calls it without p_expected_pause_reason.
+-- The original is NOT restored automatically: until it is, a two-argument call
+-- resolves to the three-argument function via its default.
 drop function if exists public.resume_sequence_enrollment(uuid, uuid);
 
 create or replace function public.resume_sequence_enrollment(
@@ -521,6 +529,88 @@ $$;
 
 revoke all on function public.resume_sequence_enrollment(uuid, uuid, text) from public, anon;
 grant execute on function public.resume_sequence_enrollment(uuid, uuid, text) to authenticated, service_role;
+
+-- ----------------------------------------------------------------------------
+-- 7c. retry_sequence_step — Norma hold. Body, signature, grants and outcomes are
+-- unchanged except for the new 'norma_hold' refusal, so the Retry action cannot
+-- restart a provider_failed enrollment while a Norma request is open.
+-- ----------------------------------------------------------------------------
+create or replace function public.retry_sequence_step(
+  p_enrollment_id uuid,
+  p_actor_user_id uuid default null
+)
+returns table (outcome text, new_claim_id uuid, step_index integer)
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  e public.sequence_enrollments%rowtype;
+  s public.sequence_steps%rowtype;
+  prior public.sequence_step_runs%rowtype;
+begin
+  select * into e from public.sequence_enrollments where id = p_enrollment_id for update;
+  if e.id is null then
+    return query select 'not_found', null::uuid, null::integer;
+    return;
+  end if;
+  if (coalesce(auth.role(), '') = 'service_role' and p_actor_user_id is not null)
+     or (coalesce(auth.role(), '') <> 'service_role' and (
+       auth.uid() is null
+       or (p_actor_user_id is not null and p_actor_user_id <> auth.uid())
+       or not exists (
+       select 1 from public.memberships m
+        where m.org_id = e.org_id and m.user_id = auth.uid()
+       )
+     )) then
+    return query select 'reconciliation_required', null::uuid, e.current_step_index;
+    return;
+  end if;
+  if e.status <> 'paused' or e.pause_reason is distinct from 'provider_failed' then
+    return query select 'reconciliation_required', null::uuid, e.current_step_index;
+    return;
+  end if;
+  -- [G2] An open Norma request holds every enrollment on the property. Checked
+  -- under the enrollment lock and before any claim retirement or activation.
+  if public.fn_norma_hold_active(e.property_id) then
+    return query select 'norma_hold', null::uuid, e.current_step_index;
+    return;
+  end if;
+  select ss.* into s from public.sequence_steps as ss
+   where ss.sequence_id = e.sequence_id and ss.step_index = e.current_step_index;
+  if s.id is null then
+    return query select 'reconciliation_required', null::uuid, e.current_step_index;
+    return;
+  end if;
+  select * into prior from public.sequence_step_runs
+   where enrollment_id = e.id and step_id = s.id and claim_active
+   order by created_at desc limit 1;
+  if prior.id is not null and (
+       prior.attempt_outcome not in ('not_attempted', 'definitively_rejected')
+     ) then
+    return query select 'reconciliation_required', null::uuid, e.current_step_index;
+    return;
+  end if;
+  if prior.id is not null then
+    update public.sequence_step_runs
+       set claim_active = false,
+           recovery_actor_user_id = coalesce(p_actor_user_id, auth.uid()),
+           recovery_action = 'explicit_retry',
+           recovery_evidence = 'provider outcome was proven not_attempted or definitively_rejected'
+     where id = prior.id and claim_active;
+  end if;
+  update public.sequence_enrollments
+     set status = 'active', pause_reason = null, next_run_at = now(), updated_at = now()
+   where id = e.id and status = 'paused';
+  -- Do not pre-create a new active claim. The next tick creates it, so this
+  -- explicit repair cannot be mistaken for a live worker that already owns
+  -- the step.
+  return query select 'retried', null::uuid, e.current_step_index;
+end;
+$$;
+
+revoke all on function public.retry_sequence_step(uuid, uuid) from public, anon, authenticated;
+grant execute on function public.retry_sequence_step(uuid, uuid) to authenticated, service_role;
 
 -- Release the pauses this request itself made. Safe to call more than once.
 -- Only call after the request has left the open states (the resume RPC

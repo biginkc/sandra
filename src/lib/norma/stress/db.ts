@@ -271,7 +271,7 @@ export type World = {
   sequences: string[];
   nextLead: (opts?: LeadOptions) => Promise<Lead>;
 };
-export type EnrollmentSeed = "active" | "paused:call_in_progress" | "paused:inbound_reply" | "paused:rep_sms_human_takeover";
+export type EnrollmentSeed = "active" | "paused:call_in_progress" | "paused:inbound_reply" | "paused:rep_sms_human_takeover" | "paused:provider_failed";
 export type LeadOptions = { enrollments?: EnrollmentSeed[]; dispo?: string | null; phone?: string };
 export type Lead = { property: string; contact: string; phone: string; address: string; enrollments: string[] };
 

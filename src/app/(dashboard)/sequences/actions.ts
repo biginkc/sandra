@@ -771,6 +771,9 @@ export async function retrySequenceStepAction(
         error: { code: "RETRY_FAILED", message: outcome.message },
       };
     }
+    if (outcome.status === "norma_hold") {
+      return { ok: false, error: { code: "NORMA_HOLD", message: NORMA_HOLD_MESSAGE } };
+    }
     if (outcome.status !== "retried") {
       return {
         ok: false,

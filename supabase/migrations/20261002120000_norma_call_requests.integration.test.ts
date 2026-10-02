@@ -716,6 +716,23 @@ describe("norma_call_requests data layer", () => {
     });
   });
 
+  it("Retry on a provider_failed pause is refused during a Norma hold (enrollment stays paused) and works once the hold ends", async () => {
+    await withDb(async (db, ctx) => {
+      const l = await lead(db, ctx, { enrollment: "paused:provider_failed" });
+      const retry = async () =>
+        (await svc<{ outcome: string }>(db, "select outcome from public.retry_sequence_step($1,null)", [l.enrollment])).rows[0]!.outcome;
+      const id = (await create(db, ctx, l)).request_id!;
+      expect(await retry()).toBe("norma_hold");
+      expect(await enrollmentState(db, l.enrollment!)).toEqual({ status: "paused", pause_reason: "provider_failed" });
+      const callId = await dispatched(db, id);
+      expect(await retry()).toBe("norma_hold");
+      expect(await enrollmentState(db, l.enrollment!)).toEqual({ status: "paused", pause_reason: "provider_failed" });
+      await complete(db, id, callId, "no_answer");
+      expect(await retry()).toBe("retried");
+      expect(await enrollmentState(db, l.enrollment!)).toEqual({ status: "active", pause_reason: null });
+    });
+  });
+
   it("[I1] ordering test: cleanup selects -> reply upgrades -> Norma no-answer -> cleanup RPC: the reply pause survives", async () => {
     await withDb(async (db, ctx) => {
       for (const reason of ["inbound_reply", "rep_sms_human_takeover"] as const) {

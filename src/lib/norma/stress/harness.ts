@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/types";
-import { promotePropertyEnrollmentPauseReason, pausePropertyEnrollments, resumeByProperty } from "@/lib/sequences/enrollment";
+import { promotePropertyEnrollmentPauseReason, pausePropertyEnrollments, resumeByProperty, retrySequenceStep } from "@/lib/sequences/enrollment";
 
 import { createBlandClient } from "../bland";
 import type { CallbackTimeProvider } from "../callback-time";
@@ -335,6 +335,11 @@ export class Harness {
   /** Softphone hangs up: the real cleanup path. */
   async softphoneCleanup(ctx: LeadCtx, actor = "softphone") {
     await resumeByProperty(this.client(actor), { propertyId: ctx.lead.property });
+  }
+
+  /** A rep presses Retry on a provider_failed drip (the retry_sequence_step RPC; refused under a Norma hold). */
+  async retryStep(ctx: LeadCtx, actor = "retry") {
+    for (const id of ctx.lead.enrollments) await retrySequenceStep(this.client(actor), id);
   }
 
   /**

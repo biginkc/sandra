@@ -47,6 +47,7 @@ const ENROLLMENTS: EnrollmentSeed[][] = [
   ["paused:call_in_progress"],
   ["paused:inbound_reply"],
   ["paused:rep_sms_human_takeover"],
+  ["paused:provider_failed"],
 ];
 const HOSTILE: WebhookFlavor[] = [
   "bad_signature",
@@ -97,9 +98,10 @@ async function runLifecycle(h: Harness, seed: number, index: number): Promise<Li
   const crash = r.chance(0.07);
   const dispatchGate: GateMode = crash && r.chance(0.5) ? "disabled" : requestGate;
   const preExisting = r.next();
+  const enrollmentSeed = r.pick(ENROLLMENTS);
   const ctx = await h.lead(
     {
-      enrollments: r.pick(ENROLLMENTS),
+      enrollments: enrollmentSeed,
       dispo: preExisting < 0.03 ? "not_interested" : null,
     },
     {
@@ -126,6 +128,21 @@ async function runLifecycle(h: Harness, seed: number, index: number): Promise<Li
         await h.requestCall(ctx, r.chance(0.5) ? h.world.rep1 : h.world.rep2, { actor: `press-${i}`, crashBeforeDispatch: crash && i === 0 });
       })(),
     );
+  }
+
+  // A provider_failed drip gets Retry pressed while the request is in flight (must be refused under the hold).
+  if (enrollmentSeed.includes("paused:provider_failed")) {
+    const retries = r.int(1, 3);
+    for (let i = 0; i < retries; i += 1) {
+      tasks.push(
+        (async () => {
+          await jitter(r, 70);
+          await h.retryStep(ctx, `retry-${i}`);
+        })().catch((error) => {
+          h.trace.add("event:retry", "mark", "failed", { message: (error as Error).message });
+        }),
+      );
+    }
   }
 
   // Webhook story: hostile noise, repeats, out-of-order progress, or silence.
