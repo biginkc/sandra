@@ -1,11 +1,26 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useRef, useState } from "react";
 
 import { listDripChoices, type DripChoice } from "@/app/(dashboard)/sequences/actions";
 
 export type PickResult = { status: "enrolled" | "skipped" | "failed"; reason: string; saved?: boolean };
+
+// Nearest ancestor that clips its overflow, intersected with the viewport; falls back to the viewport itself.
+function clippingBounds(el: HTMLElement | null) {
+  let top = 0;
+  let bottom = window.innerHeight;
+  for (let node = el?.parentElement ?? null; node; node = node.parentElement) {
+    const style = window.getComputedStyle(node);
+    if (/(hidden|auto|scroll|clip)/.test(`${style.overflow} ${style.overflowY}`)) {
+      const r = node.getBoundingClientRect();
+      top = Math.max(top, r.top);
+      bottom = Math.min(bottom, r.bottom);
+      break;
+    }
+  }
+  return { top, bottom };
+}
 
 export function StartDripPicker({
   triggerLabel = "Start follow-up drip",
@@ -39,11 +54,13 @@ export function StartDripPicker({
   const [message, setMessage] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  // Popup placement is fixed to the viewport so overflow-clipping ancestors (tables, cards) cannot cut it off.
-  const [place, setPlace] = useState<{ left: number; top?: number; bottom?: number; listMax: number } | null>(null);
+  // The popup flips upward, and its list is sized, against the nearest clipping ancestor so tables and cards cannot cut it off.
+  const [place, setPlace] = useState<{ up: boolean; listMax: number } | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const chromeRef = useRef(130);
   const needle = query.trim().toLowerCase();
   const visibleChoices = needle ? choices.filter((choice) => choice.name.toLowerCase().includes(needle)) : choices;
 
@@ -54,15 +71,14 @@ export function StartDripPicker({
   }, [inline]);
 
   async function openPicker() {
-    // Triggers near the bottom of the screen open the popup upward; the list is sized to the room that is left.
-    const rect = rootRef.current?.getBoundingClientRect();
+    const rect = triggerRef.current?.getBoundingClientRect();
     if (rect && !inline) {
-      const below = window.innerHeight - rect.bottom;
-      const up = below < 360 && rect.top > below;
-      const room = (up ? rect.top : below) - 16;
-      const left = Math.max(8, Math.min(rect.left, window.innerWidth - 328));
-      const listMax = Math.max(48, Math.min(320, room - 130));
-      setPlace(up ? { left, bottom: window.innerHeight - rect.top + 4, listMax } : { left, top: rect.bottom + 4, listMax });
+      const bounds = clippingBounds(triggerRef.current);
+      const below = bounds.bottom - rect.bottom;
+      const above = rect.top - bounds.top;
+      const up = below < 360 && above > below;
+      const room = (up ? above : below) - 16;
+      setPlace({ up, listMax: Math.max(48, Math.min(320, room - chromeRef.current)) });
     } else setPlace(null);
     setOpen(true);
     setMessage("");
@@ -80,46 +96,14 @@ export function StartDripPicker({
     }
   }
 
-  // The popup lives on document.body, so keyboard focus moves into it on open and returns to the trigger on close.
+  // Measure the popup's non-list height (title, search, padding, leave action) so the list can fill the rest.
   useEffect(() => {
-    if (inline || !open) return;
-    const trigger = triggerRef.current;
-    popupRef.current?.focus({ preventScroll: true });
-    return () => trigger?.focus({ preventScroll: true });
-  }, [inline, open]);
-
-  // Escape closes only the popup (not the surrounding inbox thread); Tab cycles inside it because it is detached from the page order.
-  function onPopupKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      setOpen(false);
-      return;
-    }
-    if (event.key !== "Tab") return;
-    const items = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("input, button:not([disabled])"));
-    if (items.length === 0) { event.preventDefault(); return; }
-    const first = items[0];
-    const last = items[items.length - 1];
-    const active = document.activeElement;
-    if (event.shiftKey && (active === first || active === event.currentTarget)) { event.preventDefault(); last.focus(); }
-    else if (!event.shiftKey && active === last) { event.preventDefault(); first.focus(); }
-  }
-
-  // A fixed popup would drift from its trigger, so any outside scroll or resize closes it.
-  useEffect(() => {
-    if (inline || !open) return;
-    const close = (event: Event) => {
-      if (event.target instanceof Node && (rootRef.current?.contains(event.target) || popupRef.current?.contains(event.target))) return;
-      setOpen(false);
-    };
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("resize", close);
-    return () => {
-      window.removeEventListener("scroll", close, true);
-      window.removeEventListener("resize", close);
-    };
-  }, [inline, open]);
+    const popup = popupRef.current;
+    const list = listRef.current;
+    if (inline || !open || !popup || !list) return;
+    const chrome = popup.offsetHeight - list.offsetHeight;
+    if (chrome > 0) chromeRef.current = chrome;
+  }, [inline, open, loading, choices.length]);
 
   async function choose(id: string) {
     if (selectionOnly) { setSelectedId(id); onSelect?.(id); return; }
@@ -151,21 +135,18 @@ export function StartDripPicker({
     }
   }
 
-  // The popup renders on document.body so no overflow-hidden ancestor can clip it.
-  const wrap = (node: ReactNode) => (inline || typeof document === "undefined" ? node : createPortal(node, document.body));
-
   return (
     <div ref={rootRef} className={inline ? "relative" : "relative inline-block"}>
-      {!inline && <button ref={triggerRef} type="button" onClick={() => { if (busy) return; if (open) setOpen(false); else void openPicker(); }} disabled={disabled} aria-disabled={busy || undefined}
+      {!inline && <button ref={triggerRef} type="button" onClick={() => open ? setOpen(false) : void openPicker()} disabled={disabled || busy}
         className={`rounded-md border px-3 py-1 text-[11px] font-medium ${triggerTone === "primary" ? "min-h-9 border-primary bg-primary text-primary-foreground" : triggerTone === "outline" ? "min-h-9 border-border bg-card text-foreground" : "min-h-11 border-teal-200 bg-teal-50 text-teal-800"}`}>
         {triggerLabel}
       </button>}
-      {(inline || open) && wrap(<div ref={popupRef} tabIndex={inline ? undefined : -1} onKeyDown={inline ? undefined : onPopupKeyDown} className={inline ? "space-y-2" : "fixed z-50 w-80 rounded-md border bg-white p-3 shadow-lg"} style={inline || !place ? undefined : { left: place.left, top: place.top, bottom: place.bottom }} role={inline ? undefined : "dialog"} aria-label="Start follow-up drip">
+      {(inline || open) && <div ref={popupRef} className={inline ? "space-y-2" : `absolute left-0 z-50 w-80 rounded-md border bg-white p-3 shadow-lg ${place?.up ? "bottom-full mb-1" : "top-full mt-1"}`} role={inline ? undefined : "dialog"} aria-label="Start follow-up drip">
         {!inline && <p className="mb-2 text-sm font-semibold">Start follow-up drip</p>}
         {!loading && choices.length > 0 && <input type="search" value={query} onChange={(event) => setQuery(event.target.value)}
           placeholder="Search drips" onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); } }} aria-label="Search drips" className="mb-2 w-full rounded-md border px-2 py-1 text-sm" />}
         {/* The popup can outgrow the viewport once an org has several drips, so its list scrolls. */}
-        <div className={inline ? undefined : "overflow-y-auto pr-1"} style={inline ? undefined : { maxHeight: place?.listMax ?? 320 }} data-testid="drip-choice-list">
+        <div ref={listRef} className={inline ? undefined : "overflow-y-auto pr-1"} style={inline ? undefined : { maxHeight: place?.listMax ?? 320 }} data-testid="drip-choice-list">
         {loading ? <p className="text-xs">Loading drips…</p> : choices.length === 0 ? <p className="text-xs">No active drips with steps are available.</p> : visibleChoices.length === 0 ? <p className="text-xs">No drips match “{query.trim()}”.</p> : visibleChoices.map((choice) => (
           <button key={choice.id} type="button" disabled={busy} onClick={() => void choose(choice.id)}
             aria-pressed={selectionOnly ? (selectedSequenceId === undefined ? selectedId : selectedSequenceId) === choice.id : undefined}
@@ -178,7 +159,7 @@ export function StartDripPicker({
         ))}
         </div>
         {onLeave && <button type="button" disabled={busy} onClick={() => void leave()} className="text-xs underline">Leave it to the follow-up owner</button>}
-      </div>)}
+      </div>}
       {message && <p role="status" className="mt-1 text-xs">{message}</p>}
     </div>
   );

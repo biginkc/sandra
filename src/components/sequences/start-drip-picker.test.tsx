@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 
@@ -69,34 +69,47 @@ it("filters drips by name and scrolls the popup list", async () => {
   expect(screen.getByText(/No drips match/)).toBeInTheDocument();
 });
 
+const oneDrip = [{ id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null }];
+
 it("opens upward when the trigger sits near the bottom of the screen", async () => {
-  listDripChoices.mockResolvedValue({ ok: true, data: [{ id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null }] });
+  listDripChoices.mockResolvedValue({ ok: true, data: oneDrip });
   const user = userEvent.setup();
   const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ top: window.innerHeight - 40, bottom: window.innerHeight - 4 } as DOMRect);
   render(<StartDripPicker onChoose={vi.fn()} />);
   await user.click(screen.getByRole("button", { name: "Start follow-up drip" }));
   const dialog = screen.getByRole("dialog", { name: "Start follow-up drip" });
-  expect(dialog).toHaveClass("fixed");
-  expect(dialog.style.bottom).not.toBe("");
-  expect(dialog.style.top).toBe("");
+  expect(dialog).toHaveClass("bottom-full");
   expect(Number.parseInt(screen.getByTestId("drip-choice-list").style.maxHeight, 10)).toBeLessThanOrEqual(320);
   rect.mockRestore();
 });
 
-it("opens downward with a fixed position when there is room below", async () => {
-  listDripChoices.mockResolvedValue({ ok: true, data: [{ id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null }] });
+it("opens downward when there is room below", async () => {
+  listDripChoices.mockResolvedValue({ ok: true, data: oneDrip });
   const user = userEvent.setup();
-  const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ top: 20, bottom: 50, left: 10 } as DOMRect);
+  const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ top: 20, bottom: 50 } as DOMRect);
   render(<StartDripPicker onChoose={vi.fn()} />);
   await user.click(screen.getByRole("button", { name: "Start follow-up drip" }));
-  const dialog = screen.getByRole("dialog", { name: "Start follow-up drip" });
-  expect(dialog.style.top).toBe("54px");
-  expect(dialog.style.bottom).toBe("");
+  expect(screen.getByRole("dialog", { name: "Start follow-up drip" })).toHaveClass("top-full");
+  rect.mockRestore();
+});
+
+it("flips upward against the nearest clipping container, not the viewport", async () => {
+  listDripChoices.mockResolvedValue({ ok: true, data: oneDrip });
+  const user = userEvent.setup();
+  const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    if (this.dataset.clip) return { top: 100, bottom: 300 } as DOMRect; // table shell ends at y=300, far above the viewport bottom
+    return { top: 250, bottom: 280 } as DOMRect; // trigger sits 20px above the shell bottom
+  });
+  render(<div data-clip="1" style={{ overflowX: "auto", overflow: "hidden" }}><StartDripPicker onChoose={vi.fn()} /></div>);
+  await user.click(screen.getByRole("button", { name: "Start follow-up drip" }));
+  expect(screen.getByRole("dialog", { name: "Start follow-up drip" })).toHaveClass("bottom-full");
+  const max = Number.parseInt(screen.getByTestId("drip-choice-list").style.maxHeight, 10);
+  expect(max).toBeLessThan(320);
   rect.mockRestore();
 });
 
 it("pressing Enter in the search box does not submit an enclosing form", async () => {
-  listDripChoices.mockResolvedValue({ ok: true, data: [{ id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null }] });
+  listDripChoices.mockResolvedValue({ ok: true, data: oneDrip });
   const onSubmit = vi.fn((event: React.FormEvent) => event.preventDefault());
   const user = userEvent.setup();
   render(<form onSubmit={onSubmit}><StartDripPicker inline selectionOnly /></form>);
@@ -104,17 +117,7 @@ it("pressing Enter in the search box does not submit an enclosing form", async (
   expect(onSubmit).not.toHaveBeenCalled();
 });
 
-it("renders the popup on document.body, outside clipping ancestors", async () => {
-  listDripChoices.mockResolvedValue({ ok: true, data: [{ id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null }] });
-  const user = userEvent.setup();
-  const { container } = render(<div style={{ overflow: "hidden" }}><StartDripPicker onChoose={vi.fn()} /></div>);
-  await user.click(screen.getByRole("button", { name: "Start follow-up drip" }));
-  const dialog = screen.getByRole("dialog", { name: "Start follow-up drip" });
-  expect(container.contains(dialog)).toBe(false);
-  expect(dialog.parentElement).toBe(document.body);
-});
-
-it("enrolls the filtered choice and closes the popup on outside scroll", async () => {
+it("enrolls the drip picked after filtering", async () => {
   listDripChoices.mockResolvedValue({ ok: true, data: [
     { id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null },
     { id: "c", name: "C — Not interested", textCount: 3, days: 366, firstSend: null },
@@ -126,58 +129,4 @@ it("enrolls the filtered choice and closes the popup on outside scroll", async (
   await user.type(await screen.findByRole("searchbox", { name: "Search drips" }), "not int");
   await user.click(screen.getByRole("button", { name: /Not interested/ }));
   expect(onChoose).toHaveBeenCalledWith("c");
-  await user.click(screen.getByRole("button", { name: "Start follow-up drip" }));
-  fireEvent.scroll(document.body);
-  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Start follow-up drip" })).not.toBeInTheDocument());
-});
-
-it("moves focus into the portaled popup and back to the trigger on Escape", async () => {
-  listDripChoices.mockResolvedValue({ ok: true, data: [{ id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null }] });
-  const user = userEvent.setup();
-  render(<><StartDripPicker onChoose={vi.fn()} /><button type="button">After</button></>);
-  const trigger = screen.getByRole("button", { name: "Start follow-up drip" });
-  await user.click(trigger);
-  const dialog = screen.getByRole("dialog", { name: "Start follow-up drip" });
-  expect(dialog).toHaveFocus();
-  await user.tab();
-  expect(await screen.findByRole("searchbox", { name: "Search drips" })).toHaveFocus();
-  await user.keyboard("{Escape}");
-  expect(screen.queryByRole("dialog", { name: "Start follow-up drip" })).not.toBeInTheDocument();
-  expect(trigger).toHaveFocus();
-});
-
-it("keeps Tab inside the portaled popup and does not leak Escape to outer listeners", async () => {
-  listDripChoices.mockResolvedValue({ ok: true, data: [{ id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null }] });
-  const outerEscape = vi.fn();
-  const listener = (event: KeyboardEvent) => { if (event.key === "Escape") outerEscape(); };
-  window.addEventListener("keydown", listener);
-  const user = userEvent.setup();
-  render(<><button type="button">Before</button><StartDripPicker onChoose={vi.fn()} /><button type="button">After</button></>);
-  await user.click(screen.getByRole("button", { name: "Start follow-up drip" }));
-  const search = await screen.findByRole("searchbox", { name: "Search drips" });
-  const choice = screen.getByRole("button", { name: /Confirmed owner/ });
-  choice.focus();
-  await user.tab();
-  expect(search).toHaveFocus();
-  await user.tab({ shift: true });
-  expect(choice).toHaveFocus();
-  await user.keyboard("{Escape}");
-  expect(outerEscape).not.toHaveBeenCalled();
-  expect(screen.queryByRole("dialog", { name: "Start follow-up drip" })).not.toBeInTheDocument();
-  window.removeEventListener("keydown", listener);
-});
-
-it("keeps the trigger focusable so Escape during a pending enrollment restores focus", async () => {
-  listDripChoices.mockResolvedValue({ ok: true, data: [{ id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null }] });
-  let finish: (value: { status: "enrolled"; reason: string }) => void = () => {};
-  const onChoose = vi.fn(() => new Promise<{ status: "enrolled"; reason: string }>((resolve) => { finish = resolve; }));
-  const user = userEvent.setup();
-  render(<StartDripPicker onChoose={onChoose} />);
-  const trigger = screen.getByRole("button", { name: "Start follow-up drip" });
-  await user.click(trigger);
-  await user.click(await screen.findByRole("button", { name: /Confirmed owner/ }));
-  screen.getByRole("searchbox", { name: "Search drips" }).focus();
-  await user.keyboard("{Escape}");
-  expect(trigger).toHaveFocus();
-  finish({ status: "enrolled", reason: "ok" });
 });
