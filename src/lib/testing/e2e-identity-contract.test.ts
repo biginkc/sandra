@@ -51,7 +51,7 @@ describe("E2E identity source contract", () => {
 
   it("provisions locally before identity checks and destroys after guarded cleanup", () => {
     const workflow = source(".github/workflows/e2e.yml");
-    const withoutPackageInstallToken = workflow.replace(
+    const withoutPackageInstallToken = workflow.replaceAll(
       "NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
       "",
     );

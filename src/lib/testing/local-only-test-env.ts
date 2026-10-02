@@ -13,6 +13,9 @@ export function assertLocalOnlyTestEnv(dbUrl: string | undefined, apiUrl: string
   requireLoopbackPostgresUrl(dbUrl);
   let api: URL;
   try { api = new URL(apiUrl); } catch { throw new Error("Local-only test guard: API URL is not a valid URL."); }
+  if (api.username || api.password) {
+    throw new Error("Local-only test guard: API URL must not carry credentials.");
+  }
   if (!["http:", "https:"].includes(api.protocol) || !loopbackApiHosts.has(api.hostname)) {
     throw new Error("Local-only test guard: API URL must be loopback.");
   }

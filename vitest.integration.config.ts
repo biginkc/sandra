@@ -60,6 +60,8 @@ export default defineConfig({
       "supabase/migrations/20260930030000_dialpad_recording_timing.integration.test.ts",
       "supabase/migrations/20261002110100_search_properties.integration.test.ts",
       "tests/search-oracle/oracle-comparison.integration.test.ts",
+      "src/lib/prospects/search-filter-composition.integration.test.ts",
+      "src/lib/prospects/search-eval-budget.integration.test.ts",
     ],
     environment: "node",
     reporters: ["default"],

@@ -140,3 +140,54 @@ jobs:
           name: playwright-report
           path: playwright-report/
           retention-days: 14
+
+  search-local-suites:
+    name: Search RPC, oracle and composition suites (disposable DB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CI: "1"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install dependencies
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm ci
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.116.0
+
+      # Owns its own disposable database on this runner (loopback only). The
+      # suites below call the local-only guard and refuse any other target.
+      - name: Provision disposable database
+        run: node scripts/provision-e2e-local-database.mjs
+
+      - name: Search oracle reference matcher (unit)
+        run: npm run test:search-oracle
+
+      - name: search_properties RPC and independent oracle comparison
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npm run test:search-local
+
+      - name: Search x filter composition and evaluation budget
+        env:
+          FILTER_LOCAL_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          FILTER_LOCAL_API_URL: ${{ env.TEST_SUPABASE_URL }}
+          FILTER_LOCAL_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          FILTER_LOCAL_SERVICE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npm run test:search-filter-local
+
+      - name: Destroy disposable database
+        if: always() && env.E2E_LOCAL_WORKDIR != ''
+        run: supabase stop --workdir "$E2E_LOCAL_WORKDIR" --no-backup
