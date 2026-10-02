@@ -9,6 +9,13 @@
 // INBOX_REPLY_SEND_TEST_TRANSPORT_MODULE instead (server.mjs's loadTransport).
 const PHONE = /^\+[1-9][0-9]{7,14}$/;
 const ENDPOINT = "https://www.sendillo.com/api/v1/messages";
+function ownedRecipients(env) {
+  const raw = env.INBOX_REPLY_OWNED_RECIPIENTS;
+  if (typeof raw !== "string" || raw.trim() === "") throw Error("Reply recipient allowlist missing");
+  const recipients = raw.split(",").map(value => value.trim());
+  if (recipients.some(recipient => !PHONE.test(recipient))) throw Error("Reply recipient allowlist invalid");
+  return new Set(recipients);
+}
 function stringAt(value, ...keys) {
   for (const key of keys) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -26,9 +33,11 @@ async function withAbort(promise, signal) {
     })]);
   } finally { if (listener) signal.removeEventListener("abort", listener); }
 }
-export function createSendilloReplyTransport(apiKey, transport = fetch) {
+export function createSendilloReplyTransport(apiKey, transport = fetch, env = process.env) {
   if (!apiKey || /[\r\n]/.test(apiKey)) throw Error("Reply provider configuration missing");
+  const recipients = ownedRecipients(env);
   return async (input, cancellation) => {
+    if (!input || !recipients.has(input.to)) throw Error("Reply recipient is not owned");
     if (!input || typeof input.body !== "string" || !input.body.trim() || input.body.length > 1600 || !PHONE.test(input.from) || !PHONE.test(input.to)) return { kind: "not_attempted", reason: "invalid_input" };
     if (cancellation.aborted) return { kind: "not_attempted", reason: "cancelled_before_dispatch" };
     const deadline = AbortSignal.any([cancellation, AbortSignal.timeout(10_000)]);
