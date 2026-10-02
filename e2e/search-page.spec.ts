@@ -9,6 +9,7 @@ import { adminClient, DEFAULT_ORG_ID, ensureTestUser, resetTenantTables } from "
 // Runs against the E2E target (resetTenantTables is guarded by the E2E safety
 // checks). Needs the migration with public.search_properties applied.
 
+let phoneSeq = 0;
 const SURNAME = `Zyxqwerty${Date.now().toString(36)}`;
 
 async function seed(count: number, opts: { dispo?: string | null; status?: string } = {}) {
@@ -21,7 +22,7 @@ async function seed(count: number, opts: { dispo?: string | null; status?: strin
         org_id: DEFAULT_ORG_ID,
         first_name: "Pat",
         last_name: SURNAME,
-        phone_1: `+1816555${String(1000 + i).padStart(4, "0")}`,
+        phone_1: `+1816555${String(1000 + phoneSeq++).padStart(4, "0")}`,
         phone_1_type: "mobile",
       })
       .select("id")
@@ -60,8 +61,13 @@ test.describe("Search page", () => {
     await expect(page.getByRole("heading", { name: "Search" })).toBeVisible();
 
     const box = page.getByTestId("prospects-search");
-    await box.fill(SURNAME);
-    await expect(page).toHaveURL(new RegExp(`search=${SURNAME}`), { timeout: 5_000 });
+    // The dev server may still be hydrating on the first compile: retry the
+    // type-and-debounce until the input is wired to the URL.
+    await expect(async () => {
+      await box.fill("");
+      await box.fill(SURNAME);
+      await expect(page).toHaveURL(new RegExp(`search=${SURNAME}`), { timeout: 2_000 });
+    }).toPass({ timeout: 25_000 });
 
     await expect(page.getByTestId("prospects-result-count")).toContainText("of 3");
     // Both a prospect and a lead are listed, and the Status column tells them apart.

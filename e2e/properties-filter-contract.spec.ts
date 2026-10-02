@@ -72,7 +72,8 @@ async function countListMembers(
     .is("deleted_at", null)
     .eq("property_lists.list_id", listId);
 
-  query = query.eq("status", extra?.status ?? "prospect");
+  // Search lists every status; only an explicit status narrows the oracle.
+  if (extra?.status) query = query.eq("status", extra.status);
 
   if (extra?.isVacant != null) query = query.eq("is_vacant", extra.isVacant);
   if (extra?.cassStatus) query = query.eq("cass_status", extra.cassStatus);
@@ -258,11 +259,11 @@ async function listMemberAddresses(
     .from("properties")
     .select("id, address, property_lists!inner(list_id)")
     .is("deleted_at", null)
-    .eq("status", extra?.status ?? "prospect")
     .eq("property_lists.list_id", listId)
     .order("created_at", { ascending: false })
     .order("id", { ascending: true });
 
+  if (extra?.status) query = query.eq("status", extra.status);
   if (extra?.isVacant != null) query = query.eq("is_vacant", extra.isVacant);
   if (extra?.vacancyNo)
     query = query.or("is_vacant.eq.false,is_vacant.is.null");
@@ -352,8 +353,7 @@ async function propertyIdsWithEngagement(
     let query = admin
       .from("properties")
       .select("id, property_lists!inner(list_id)")
-      .is("deleted_at", null)
-      .eq("status", "prospect");
+      .is("deleted_at", null);
 
     if (listIds?.length) query = query.in("property_lists.list_id", listIds);
 
