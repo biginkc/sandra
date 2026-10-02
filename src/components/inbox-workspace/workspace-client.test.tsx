@@ -187,7 +187,9 @@ it("keeps the single reply bound to open B when A is selected, names B in the co
   expect(screen.getByRole("heading", { name: "Reply to Bea" })).toBeVisible();
   expect(screen.queryByText(/characters · 1 selected/)).not.toBeInTheDocument();
 
-  fireEvent.change(screen.getByRole("textbox", { name: "Reply message" }), { target: { value: "Hello Bea" } });
+  const textarea = screen.getByRole("textbox", { name: "Reply message" });
+  fireEvent.change(textarea, { target: { value: "Hello Bea" } });
+  expect(textarea).toHaveValue("Hello Bea");
   fireEvent.click(screen.getByRole("button", { name: "Review reply" }));
   await screen.findByText("Review before sending");
   expect(screen.getAllByText("Bea").length).toBeGreaterThan(1);
@@ -202,7 +204,9 @@ it("discards B's review when C opens and never sends B", async () => {
 
   fireEvent.click(screen.getByRole("button", { name: "Open Bea" }));
   await screen.findByRole("heading", { name: "Reply to Bea" });
-  fireEvent.change(screen.getByRole("textbox", { name: "Reply message" }), { target: { value: "Hello Bea" } });
+  const textarea = screen.getByRole("textbox", { name: "Reply message" });
+  fireEvent.change(textarea, { target: { value: "Hello Bea" } });
+  expect(textarea).toHaveValue("Hello Bea");
   fireEvent.click(screen.getByRole("button", { name: "Review reply" }));
   await screen.findByText("Review before sending");
   fireEvent.click(screen.getByRole("button", { name: "Open Diana" }));
@@ -224,7 +228,9 @@ it("bulk reply prepares A and D from the selection even while B is open", async 
   fireEvent.click(screen.getByRole("button", { name: "Review reply to 2" }));
   const dialog = await screen.findByRole("dialog");
   const composer = within(dialog);
-  fireEvent.change(composer.getByRole("textbox", { name: "Reply message" }), { target: { value: "Hello selected owners" } });
+  const textarea = composer.getByRole("textbox", { name: "Reply message" });
+  fireEvent.change(textarea, { target: { value: "Hello selected owners" } });
+  expect(textarea).toHaveValue("Hello selected owners");
   fireEvent.click(composer.getByRole("button", { name: "Review reply" }));
   await composer.findByText("Review before sending");
   const prepare = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith("/replies/prepare"));

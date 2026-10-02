@@ -225,8 +225,12 @@ function ReplyComposer({ targets, names, enabled = false, routeKey = "route-unkn
   const bulk = targets.length > 1;
   const targetKeyValue = useMemo(() => targets.map(targetKey).sort().join("|"), [targets]);
   const requestFetch = fetcher ?? fetch;
+  const previousResetInputs = useRef({ initialDraft, initialState, targetKeyValue });
 
   useEffect(() => {
+    const previous = previousResetInputs.current;
+    previousResetInputs.current = { initialDraft, initialState, targetKeyValue };
+    if (previous.initialDraft === initialDraft && previous.initialState === initialState && previous.targetKeyValue === targetKeyValue) return;
     dispatch(initialState ? { type: "initialize", state: initialState } : { type: "reset", draft: initialDraft });
     request.current?.abort();
     if (pollTimer.current) clearTimeout(pollTimer.current);
