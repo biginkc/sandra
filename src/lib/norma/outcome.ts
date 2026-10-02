@@ -148,7 +148,7 @@ export function mapBlandCallToOutcome(call: NormaCallInput, now = Date.now()): N
   if (call.completed !== true) return unknown("call_not_completed", base);
 
   const token = parseCallOutcomeToken(variables[BLAND_VAR_CALL_OUTCOME]);
-  const mapped: NormaOutcome | null = token && token in CALL_OUTCOME_TOKEN_MAP ? CALL_OUTCOME_TOKEN_MAP[token]! : null;
+  const mapped: NormaOutcome | null = token && Object.hasOwn(CALL_OUTCOME_TOKEN_MAP, token) ? CALL_OUTCOME_TOKEN_MAP[token]! : null;
   if (token && !mapped) return unknown("unrecognised_call_outcome", base);
 
   // Bland-confirmed nobody reached. The pathway may not even have run, so a

@@ -25,6 +25,14 @@ describe("call_outcome token", () => {
   });
 });
 
+describe("inherited object keys are not outcomes", () => {
+  it.each(["constructor", "__proto__", "toString", "hasOwnProperty"])("%s maps to unknown", (token) => {
+    const mapped = map(human({ call_outcome: token }));
+    expect(mapped.outcome).toBe("unknown");
+    expect(mapped.reason).toBe("unrecognised_call_outcome");
+  });
+});
+
 describe("outcome mapping table (live pathway v3)", () => {
   it.each([
     ["do_not_contact", "not_interested"],
