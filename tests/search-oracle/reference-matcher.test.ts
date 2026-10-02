@@ -33,6 +33,18 @@ describe("reference matcher", () => {
     expect(run(f, "doe   family")).toEqual(["p1"]);
     expect(run(f, "doe\t \nfamily")).toEqual(["p1"]);
   });
+  it("whitespace: tabs/newlines collapse, trim, cut, trim", () => {
+    expect(normalizeQuery("\tab")).toBe("ab");
+    expect(normalizeQuery("a\n\n b")).toBe("a b");
+    expect(normalizeQuery("x".repeat(99) + "  y")).toBe("x".repeat(99));
+    expect(run(fx({ properties: [prop({ id: "p1", address: "ab" })] }), "\tab")).toEqual([]);
+  });
+  it("phone matching needs a structured query", () => {
+    const f = fx({ contacts: [contact({ id: "c1", phone_1: "816-555-0101" })], properties: [prop({ id: "p1", homeowner_contact_id: "c1" })] });
+    expect(run(f, "101 Zephyr")).toEqual([]);
+    expect(run(f, "555-0101")).toEqual(["p1"]);
+    expect(run(f, "x 555 0101")).toEqual([]);
+  });
   it("hostile chars are literal", () => {
     const f = fx({ properties: [prop({ id: "p1", address: "50% off_x" }), prop({ id: "p2", address: "abcdef" })] });
     expect(run(f, "%")).toEqual([]);
