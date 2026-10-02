@@ -38,6 +38,7 @@ export function readSelectionToken(
   userId: string,
   now = Date.now(),
 ): { ok: true; filters: unknown } | { ok: false } {
+  if (!isSelectionTokenShape(token)) return { ok: false };
   const [payload, signature, extra] = token.split(".");
   if (!payload || !signature || extra !== undefined) return { ok: false };
   const expected = sign(payload);

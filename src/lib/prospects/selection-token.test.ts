@@ -49,4 +49,38 @@ describe("selection token", () => {
   it("refuses to mint a token larger than the bound", () => {
     expect(() => mintSelectionToken({ userId: "u1", filters: { huge: "y".repeat(MAX_SELECTION_TOKEN_LENGTH) } })).toThrow(/too large/);
   });
+
+  it("a payload edited to another user/expiry but carrying the ORIGINAL signature is rejected", () => {
+    const token = mintSelectionToken({ userId: "u1", filters: { search: "a", blockStack: [] }, now: 1_000 });
+    const [payload, sig] = token.split(".");
+    const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    const forgedUser = Buffer.from(JSON.stringify({ ...decoded, u: "attacker" })).toString("base64url");
+    const forgedExpiry = Buffer.from(JSON.stringify({ ...decoded, e: decoded.e + 10 ** 12 })).toString("base64url");
+    const forgedFilters = Buffer.from(JSON.stringify({ ...decoded, f: { search: "everything", blockStack: [] } })).toString("base64url");
+    for (const forged of [forgedUser, forgedExpiry, forgedFilters]) {
+      expect(readSelectionToken(`${forged}.${sig}`, "attacker", 2_000)).toEqual({ ok: false });
+      expect(readSelectionToken(`${forged}.${sig}`, "u1", 2_000)).toEqual({ ok: false });
+    }
+    expect(readSelectionToken(token, "u1", 2_000)).toMatchObject({ ok: true });
+  });
+
+  it("readSelectionToken itself enforces the length bound (not only the shape helper)", () => {
+    const over = `${"a".repeat(MAX_SELECTION_TOKEN_LENGTH - 1)}.b`;
+    expect(over.length).toBe(MAX_SELECTION_TOKEN_LENGTH + 1);
+    expect(readSelectionToken(over, "u1")).toEqual({ ok: false });
+  });
+
+  it("the exact boundary: a token of exactly 32,768 characters is minted, shaped and read; one more is refused", () => {
+    // payload chars = MAX - 1 (dot) - 43 (sha256 base64url) = 32,724 = 4 * 8,181 => 24,543 payload bytes.
+    const bytesFor = (pad: number) => Buffer.byteLength(JSON.stringify({ u: "u1", f: { pad: "x".repeat(pad) }, e: Date.now() + 600_000 }));
+    let pad = 0;
+    while (bytesFor(pad) < 24_543) pad += 1;
+    expect(bytesFor(pad)).toBe(24_543);
+    const token = mintSelectionToken({ userId: "u1", filters: { pad: "x".repeat(pad) } });
+    expect(token.length).toBe(MAX_SELECTION_TOKEN_LENGTH);
+    expect(isSelectionTokenShape(token)).toBe(true);
+    expect(readSelectionToken(token, "u1")).toMatchObject({ ok: true });
+    expect(() => mintSelectionToken({ userId: "u1", filters: { pad: "x".repeat(pad + 3) } })).toThrow(/too large/);
+    expect(isSelectionTokenShape(`${token}a`)).toBe(false);
+  });
 });

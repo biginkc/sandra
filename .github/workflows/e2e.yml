@@ -206,7 +206,11 @@ jobs:
           LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          for m in drop-org-gate drop-agent-join drop-deleted-at drop-like-escape add-limit-100 drop-sms-channel auth-uid-null drop-length-cap drop-structured; do
+          # No-op mutations (a regex that stopped matching) fail here, before any suite run.
+          npx tsx scripts/check-search-mutations.ts
+          names="$(npx tsx -e 'console.log(require("./tests/search-oracle/sql-mutations").MUTATION_NAMES.join(" "))' 2>/dev/null)"
+          test -n "$names" || { echo "::error::no mutations listed"; exit 1; }
+          for m in $names; do
             if SEARCH_PROPS_MUTATION="$m" npx vitest run --config vitest.local-integration.config.ts \
                  supabase/migrations/20261002110100_search_properties.integration.test.ts > "mutation-$m.log" 2>&1; then
               echo "::error::mutation $m SURVIVED (the suite passed against broken SQL)"; tail -20 "mutation-$m.log"; exit 1

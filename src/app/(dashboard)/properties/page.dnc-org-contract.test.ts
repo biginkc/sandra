@@ -14,8 +14,16 @@ const scopeSource = readFileSync(
 
 describe("Search page permanent DNC display contract", () => {
   it("keeps DNC-locked rows read-only and channel suppression separate", () => {
-    expect(pageSelect).toContain("status, is_dnc_locked, outreach_dispo");
-    expect(source).toContain("PAGE_PROPERTIES_SELECT");
+    // Independent literals (not derived from the shared constant): the columns the DNC display needs.
+    for (const column of ["status", "is_dnc_locked", "outreach_dispo", "org_id", "cass_status", "is_vacant", "source_imported_at"]) {
+      expect(pageSelect, column).toMatch(new RegExp(`[ "]${column}[,"]`));
+    }
+    expect(pageSelect).toContain(
+      "homeowner:contacts!properties_homeowner_contact_id_fkey(phone_1, phone_2, phone_3, do_not_contact, sms_opted_out)",
+    );
+    // ...and the page really builds its main query from that constant.
+    expect(source).toMatch(/const propertiesSelect = \[\s*PAGE_PROPERTIES_SELECT,/);
+    expect(source).not.toContain("homeowner:contacts!properties_homeowner_contact_id_fkey");
     expect(source).toContain("dnc_reason: p.is_dnc_locked");
     expect(source).toContain("homeowner?.sms_opted_out");
     expect(source).not.toContain('from("sms_phone_suppressions")');

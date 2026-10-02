@@ -41,6 +41,8 @@ const opts = { campaignName: "Fall", body: "Hi", paceSeconds: 8, senderNumber: "
 
 beforeEach(() => {
   vi.clearAllMocks();
+  h.start.mockReset();
+  h.settle.mockReset();
   h.inserted.length = 0;
   h.afterCbs.length = 0;
   h.adminUpdates.length = 0;

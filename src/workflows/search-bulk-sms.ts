@@ -239,6 +239,7 @@ async function failSearchSmsStep(args: {
   state: BulkSmsScheduleState;
   total: number;
   skippedLeads: number;
+  skippedDnc: number;
 }): Promise<void> {
   "use step";
 
@@ -254,7 +255,10 @@ async function failSearchSmsStep(args: {
     stamped = count ?? state.succeeded;
   }
   const now = new Date().toISOString();
-  const failedItems = Math.max(state.failed.length, args.total - Math.min(args.total, state.succeeded + state.skipped + state.failed.length));
+  // Rows already excluded because they stopped being prospects (promoted/locked/deleted) are NOT
+  // failures: only the genuinely failed and the never-reached remainder count as failed.
+  const accountedFor = state.succeeded + state.skipped + state.failed.length + args.skippedLeads + args.skippedDnc;
+  const failedItems = Math.max(state.failed.length, args.total - Math.min(args.total, accountedFor));
   await supabase
     .from("jobs")
     .update({
@@ -267,6 +271,7 @@ async function failSearchSmsStep(args: {
         queued: state.succeeded,
         skipped: state.skipped,
         skipped_leads: args.skippedLeads,
+        skipped_dnc: args.skippedDnc,
         failed: failedItems,
         workflow_error: args.errorMessage,
       },
@@ -328,6 +333,7 @@ export async function searchBulkSmsWorkflow(
       state,
       total: loaded.propertyIds.length,
       skippedLeads,
+      skippedDnc,
     });
     throw e;
   }

@@ -13,6 +13,7 @@ import {
 import { resetTenantTables } from "@tests/integration/reset";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/types";
+import { mutate } from "@tests/search-oracle/sql-mutations";
 import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
 
 // Calls public.search_properties directly through authenticated user clients.
@@ -24,21 +25,6 @@ import { assertLocalOnlyTestEnv } from "@/lib/testing/local-only-test-env";
 const service = createTestClient();
 const migrationSql = readFileSync(new URL("./20261002110100_search_properties.sql", import.meta.url), "utf8");
 const db = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
-
-export function mutate(sql: string, name: string | undefined): string {
-  switch (name) {
-    case "drop-org-gate": return sql.replace(/\b\w+\.org_id in \(select org_id from visible_orgs\)/g, "true");
-    case "drop-agent-join": return sql.replace("(p.homeowner_contact_id = c.id or p.agent_contact_id = c.id)", "p.homeowner_contact_id = c.id");
-    case "drop-deleted-at": return sql.replace(/\s+and p\.deleted_at is null/g, "");
-    case "drop-like-escape": return sql.replace("replace(replace(replace(lower(bounds.q), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') as q_like", "lower(bounds.q) as q_like");
-    case "add-limit-100": return sql.replace("and p.deleted_at is null;\n  $search$", "and p.deleted_at is null limit 100;\n  $search$");
-    case "drop-sms-channel": return sql.replace("m.channel = 'sms'", "true");
-    case "drop-length-cap": return sql.replace("rtrim(left(btrim(regexp_replace(coalesce($1,''), '\\s+', ' ', 'g')),100))", "btrim(regexp_replace(coalesce($1,''), '\\s+', ' ', 'g'))");
-    case "drop-structured": return sql.replace("(i.is_structured and length(i.qd) >= 3", "(length(i.qd) >= 3");
-    case "auth-uid-null": return sql.replaceAll("auth.uid()", "null::uuid");
-    default: return sql;
-  }
-}
 
 const tag = randomUUID().slice(0, 6);
 const users: string[] = [];
