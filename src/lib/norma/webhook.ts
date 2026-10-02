@@ -6,6 +6,8 @@ import { reportError } from "@/lib/errors/report";
 import type { Database } from "@/lib/supabase/types";
 
 import { withConvertedCallbackTime } from "./callback-wiring";
+import type { DispatchResult } from "./dispatch";
+import { dispatchScheduledRetry } from "./retry";
 import type { CallbackTimeProvider } from "./callback-time";
 import { mapBlandCallToOutcome } from "./outcome";
 import { completeNormaCall } from "./rpc";
@@ -73,7 +75,13 @@ function str(value: unknown): string | null {
  */
 export async function handleBlandCallWebhook(
   request: Request,
-  deps: { client: SupabaseClient<Database>; secret: string | undefined; callbackTimeProvider?: CallbackTimeProvider | null },
+  deps: {
+    client: SupabaseClient<Database>;
+    secret: string | undefined;
+    callbackTimeProvider?: CallbackTimeProvider | null;
+    /** Runs the call-twice retry (the ordinary dispatchNormaCall). Without it the sweep dispatches the retry. */
+    dispatch?: (requestId: string) => Promise<DispatchResult>;
+  },
 ): Promise<WebhookResponse> {
   if (!deps.secret) return respond(500, { error: "not_configured" });
 
@@ -138,7 +146,9 @@ export async function handleBlandCallWebhook(
       payload: mapping.payload,
     });
     if (result.result === "applied" || result.result === "replayed") {
-      return respond(200, { status: result.result });
+      // Attempt 1 was confirmed not answered: place the one retry now.
+      const retry = await dispatchScheduledRetry(result, row.id, deps.dispatch);
+      return respond(200, { status: result.result, ...(retry ? { retry: retry.status } : {}) });
     }
     reportError(new Error(`norma webhook completion ${result.result}`), {
       tags: { surface: "norma_webhook" },

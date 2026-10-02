@@ -6,6 +6,7 @@ import type { Database } from "@/lib/supabase/types";
 import type { BlandClient } from "./bland";
 import type { DispatchResult } from "./dispatch";
 import { withConvertedCallbackTime } from "./callback-wiring";
+import { dispatchScheduledRetry } from "./retry";
 import type { CallbackTimeProvider } from "./callback-time";
 import { mapBlandCallToOutcome } from "./outcome";
 import { completeNormaCall, markNormaDispatchRejected, markNormaDispatchUnknown, markNormaNeedsReview } from "./rpc";
@@ -46,7 +47,7 @@ export type ReconcileSummary = {
 
 type Row = Pick<
   Database["public"]["Tables"]["norma_call_requests"]["Row"],
-  "id" | "status" | "property_id" | "phone_e164" | "idempotency_key" | "bland_call_id" | "created_at" | "updated_at" | "outcome"
+  "id" | "status" | "property_id" | "phone_e164" | "idempotency_key" | "bland_call_id" | "created_at" | "updated_at" | "outcome" | "attempt"
 >;
 
 export type ReconcileDeps = {
@@ -70,7 +71,7 @@ export async function reconcileNormaCalls(deps: ReconcileDeps): Promise<Reconcil
   const statuses = ["requested", "dispatching", "dispatched", "dispatch_unknown", ...(deps.includeNeedsReview ? ["needs_review"] : [])];
   const { data, error } = await deps.client
     .from("norma_call_requests")
-    .select("id, status, property_id, phone_e164, idempotency_key, bland_call_id, created_at, updated_at, outcome")
+    .select("id, status, property_id, phone_e164, idempotency_key, bland_call_id, created_at, updated_at, outcome, attempt")
     .in("status", statuses)
     .lte("next_check_at", new Date(now).toISOString())
     .order("next_check_at", { ascending: true })
@@ -108,8 +109,12 @@ async function reconcileRow(row: Row, deps: ReconcileDeps, now: number, summary:
   const idleAge = now - Date.parse(row.updated_at);
 
   if (row.status === "requested") {
-    if (createdAge < T.requestedGrace) return void (summary.waiting += 1);
-    if (createdAge > T.requestedExpiry) {
+    // A call-twice retry (attempt 2) waits in `requested` from the moment the
+    // first call ended, which can be long after the request was created: its
+    // clock is the last update, not the creation.
+    const requestedAge = row.attempt === 2 ? idleAge : createdAge;
+    if (requestedAge < T.requestedGrace) return void (summary.waiting += 1);
+    if (requestedAge > T.requestedExpiry) {
       const closed = await markNormaDispatchRejected(deps.client, row.id, "stranded_requested_expired", "requested");
       // Claimed by a dispatcher in the meantime: not ours to close.
       return void (closed === "dispatch_rejected" ? (summary.rejected += 1) : (summary.waiting += 1));
@@ -174,7 +179,12 @@ async function reconcileRow(row: Row, deps: ReconcileDeps, now: number, summary:
         const result = await completeNormaCall(deps.client, {
           requestId: row.id, callId: row.bland_call_id, outcome: mapping.outcome, payload: mapping.payload,
         });
-        if (result.result === "applied" || result.result === "replayed") return void (summary.completed += 1);
+        if (result.result === "applied" || result.result === "replayed") {
+          // Attempt 1 confirmed not answered: place the one retry now.
+          const retry = await dispatchScheduledRetry(result, row.id, deps.dispatch);
+          if (retry?.status === "dispatched") summary.dispatched += 1;
+          return void (summary.completed += 1);
+        }
         // Not applied (mismatch, rejected, ...): never a dead end. Report it and
         // fall through to the same escalate-after-window branch as any other
         // ambiguous lookup, so the request cannot be stuck open.

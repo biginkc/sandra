@@ -64,7 +64,17 @@ export type NormaCompletionPayload = {
 };
 
 export type NormaCompleteResult =
-  | { result: "applied"; status: "completed" | "needs_review"; outcome: NormaOutcome; taskId?: string | null; released?: number; converted?: number }
+  | {
+      result: "applied";
+      /** `requested`: attempt 1 was confirmed not answered and the retry (attempt 2) is waiting to be dialled. */
+      status: "completed" | "needs_review" | "requested";
+      outcome: NormaOutcome;
+      /** True exactly once per request: the caller must now run dispatchNormaCall for the second attempt. */
+      retry?: boolean;
+      taskId?: string | null;
+      released?: number;
+      converted?: number;
+    }
   | { result: "replayed"; status: string; outcome?: string | null }
   | { result: "call_id_mismatch" | "invalid_state" | "not_found" | "call_id_required" | "call_id_conflict"; status?: string };
 
