@@ -277,7 +277,7 @@ describe("direct call service", () => {
       const removed = createDirectCallService({
         store: ctx.store, env: ENV, now: () => ctx.clock.now, isEligible: () => false,
         prepareLeadCall: ctx.prepareLeadCall, prepareManualCall: ctx.prepareManualCall, resumeFailedSoftphoneCall: ctx.resumeFailedSoftphoneCall,
-        sealCallIdentity: ctx.sealCallIdentity, telnyx: ctx.telnyx, report: ctx.report,
+        sealCallIdentity: ctx.sealCallIdentity, recordTrainingActivity: ctx.recordTrainingActivity, telnyx: ctx.telnyx, report: ctx.report,
       });
       expect(await removed.getStatus("user-1", id)).toMatchObject({ ok: true });
       expect(await removed.control("user-1", id, { action: "hangup" })).toEqual({ ok: true, data: { accepted: true } });
@@ -411,7 +411,7 @@ describe("direct call service", () => {
       const keyless = createDirectCallService({
         store: ctx.store, env: { ...ENV, TELNYX_DIRECT_API_KEY: undefined }, now: () => ctx.clock.now, isEligible: () => true,
         prepareLeadCall: ctx.prepareLeadCall, prepareManualCall: ctx.prepareManualCall, resumeFailedSoftphoneCall: ctx.resumeFailedSoftphoneCall,
-        sealCallIdentity: ctx.sealCallIdentity, telnyx: ctx.telnyx, report: ctx.report,
+        sealCallIdentity: ctx.sealCallIdentity, recordTrainingActivity: ctx.recordTrainingActivity, telnyx: ctx.telnyx, report: ctx.report,
       });
       expect(await keyless.control("user-1", id, { action: "hangup" })).toMatchObject({ ok: false, errorCode: "hangup_failed" });
       expect(ctx.store.legRow("BROWSER-LEG")).toMatchObject({ confirmed_at: null });
@@ -438,18 +438,47 @@ describe("direct call service", () => {
       expect(ctx.telnyx.dial).not.toHaveBeenCalled();
     });
 
-    it("precreates a server-owned training activity after the browser leg is durable", async () => {
+    it("precreates a server-owned training activity before browser Dial", async () => {
       const prepareManualCall = vi.fn(async () => ({ ok: true as const, data: target({ phoneE164: "+15550007777" }) }));
       const ctx = setup({ prepareManualCall });
+      const events: string[] = [];
+      ctx.recordTrainingActivity.mockImplementationOnce(async () => { events.push("activity"); });
+      ctx.telnyx.dial.mockImplementationOnce(async () => { events.push("dial"); return { callControlId: "BROWSER-LEG" }; });
       const result = await ctx.service.startCall("user-1", { kind: "manual", phone: "5550007777", clientRequestId: REQ });
 
       expect(result).toMatchObject({ ok: true });
+      expect(events).toEqual(["activity", "dial"]);
       expect(ctx.recordTrainingActivity).toHaveBeenCalledTimes(1);
       expect(ctx.recordTrainingActivity).toHaveBeenCalledWith({
         directCallId: expect.any(String),
         operatorUserId: "user-1",
         target: expect.objectContaining({ phoneE164: "+15550007777" }),
       });
+    });
+
+    it("fails closed before Dial when server-owned training activity creation fails", async () => {
+      const prepareManualCall = vi.fn(async () => ({ ok: true as const, data: target({ phoneE164: "+15550007777" }) }));
+      const recordTrainingActivity = vi.fn(async () => { throw new Error("activity store unavailable"); });
+      const ctx = setup({ prepareManualCall, recordTrainingActivity });
+      const result = await ctx.service.startCall("user-1", { kind: "manual", phone: "5550007777", clientRequestId: REQ });
+
+      expect(result).toMatchObject({ ok: false, errorCode: "start_failed", reserved: true });
+      expect(ctx.telnyx.dial).not.toHaveBeenCalled();
+      const row = [...ctx.store.calls.values()][0];
+      expect(row).toMatchObject({ status: "failed", failure_reason: "browser_dial_not_started" });
+      expect(ctx.store.openFor(row.id)).toEqual([]);
+    });
+
+    it("fails closed before Dial when the training activity dependency is absent", async () => {
+      const prepareManualCall = vi.fn(async () => ({ ok: true as const, data: target({ phoneE164: "+15550007777" }) }));
+      const ctx = setup({ prepareManualCall, recordTrainingActivity: undefined as never });
+      const result = await ctx.service.startCall("user-1", { kind: "manual", phone: "5550007777", clientRequestId: REQ });
+
+      expect(result).toMatchObject({ ok: false, errorCode: "start_failed", reserved: true });
+      expect(ctx.telnyx.dial).not.toHaveBeenCalled();
+      const row = [...ctx.store.calls.values()][0];
+      expect(row).toMatchObject({ status: "failed", failure_reason: "browser_dial_not_started" });
+      expect(ctx.store.openFor(row.id)).toEqual([]);
     });
 
     it("prepares the call before creating a Telnyx credential", async () => {

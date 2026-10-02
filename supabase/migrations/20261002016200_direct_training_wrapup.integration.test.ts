@@ -27,6 +27,10 @@ it("precreates direct training activity with service auth and permits only immut
     // the loopback database is restored for the next integration file.
     await pg.query(stripTx(fs.readFileSync("supabase/migrations/20261001200000_direct_calls.sql", "utf8")));
     await pg.query(stripTx(fs.readFileSync("supabase/migrations/20261002005023_direct_recording_integration.sql", "utf8")));
+    await pg.query(stripTx(fs.readFileSync("supabase/migrations/20261002011737_direct_recording_monotonic_retry.sql", "utf8")));
+    await pg.query(stripTx(fs.readFileSync("supabase/migrations/20261002013151_direct_recording_link_repair.sql", "utf8")));
+    await pg.query(stripTx(fs.readFileSync("supabase/migrations/20261002015000_direct_recording_library.sql", "utf8")));
+    await pg.query(stripTx(fs.readFileSync("supabase/migrations/20261002016000_direct_recording_activity_guard.sql", "utf8")));
     const schema = await pg.query<{ has_purpose: boolean; has_direct_id: boolean }>(
       `select
          exists (select 1 from information_schema.columns where table_schema='public' and table_name='call_activities' and column_name='call_purpose') as has_purpose,
@@ -95,6 +99,12 @@ it("precreates direct training activity with service auth and permits only immut
     const wrapped = (await pg.query("select call_purpose,ended_at,duration_seconds from public.call_activities where id=$1", [ACTIVITY])).rows[0];
     expect(wrapped).toMatchObject({ call_purpose: "internal_training", duration_seconds: 60 });
     expect(wrapped.ended_at).not.toBeNull();
+
+    await pg.query("savepoint immutable_training_purpose");
+    await expect(
+      pg.query("update public.call_activities set call_purpose='customer' where id=$1", [ACTIVITY]),
+    ).rejects.toMatchObject({ code: "23514" });
+    await pg.query("rollback to savepoint immutable_training_purpose");
 
     await expect(
       pg.query(

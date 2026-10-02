@@ -34,7 +34,7 @@ export type DirectCallServiceDeps = {
    */
   sealCallIdentity: (args: { callId: string; userId: string; phoneE164: string }) => { capability: string | null; training: boolean };
   /** Server-owned precreation for training calls; authenticated wrap-up only updates this row. */
-  recordTrainingActivity?: (args: { directCallId: string; operatorUserId: string; target: DirectCallTarget }) => Promise<void>;
+  recordTrainingActivity: (args: { directCallId: string; operatorUserId: string; target: DirectCallTarget }) => Promise<void>;
   telnyx: {
     dial: (settings: TelnyxDirectSettings, params: DialParams) => Promise<{ callControlId: string }>;
     hangup: (settings: TelnyxDirectSettings, callControlId: string, commandId: string) => Promise<void>;
@@ -268,6 +268,7 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
 
     let dialedLeg: string | null = null;
     let dialRefused = false;
+    let providerDispatchStarted = false;
     try {
       // The target (and so the lead whose enrollments prepare paused) is stored before anything else can
       // fail, so any terminal move below carries resume_pending.
@@ -300,6 +301,13 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
         await resumes(userId);
         return err("This call was cancelled.", "cancelled", true);
       }
+      // Training purpose is immutable and must exist before any provider request
+      // can create a recording. A missing or failed server dependency fails
+      // closed; it is never treated as an optional logging enhancement.
+      if (identity.training) {
+        if (!deps.recordTrainingActivity) throw new Error("Training activity recorder unavailable");
+        await deps.recordTrainingActivity({ directCallId: row.id, operatorUserId: userId, target });
+      }
       // Reserve the provider-dispatch boundary before issuing the request. A crash after this write
       // is treated as an unknown Dial and reconciled; a cancellation before it wins without dialing.
       const dispatchMarkedAt = deps.now().toISOString();
@@ -327,6 +335,7 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
         await resumes(userId);
         return err(markerExpired ? "Could not start the call. Try again." : "This call was cancelled.", markerExpired ? "start_failed" : "cancelled", true);
       }
+      providerDispatchStarted = true;
       const dialed = await deps.telnyx.dial(settings, {
         to: `sip:${operator.sip_username}@sip.telnyx.com`,
         from: settings.callerIdE164,
@@ -343,9 +352,6 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
       await store.dialSucceeded(row.id, dialed.callControlId, "browser");
       const current = await store.findById(row.id);
       if (current && DIRECT_CALL_TERMINAL_STATUSES.has(current.status)) return err("Could not start the call. Try again.", "start_failed", true);
-      if (identity.training && deps.recordTrainingActivity) {
-        await deps.recordTrainingActivity({ directCallId: row.id, operatorUserId: userId, target });
-      }
       return {
         ok: true,
         data: {
@@ -359,7 +365,11 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
     } catch (error) {
       deps.report(error, "direct_call_start");
       dialRefused = !dialedLeg && error instanceof TelnyxApiError && error.kind === "rejected";
-      const unknown = !dialedLeg && !dialRefused;
+      // No provider request was entered when pre-dispatch preparation failed;
+      // resolve the reservation as a definitive no-Dial outcome. Once the
+      // request boundary was crossed, retain the unresolved obligation.
+      const preDispatchFailure = !providerDispatchStarted && !dialedLeg && !dialRefused;
+      const unknown = !preDispatchFailure && !dialedLeg && !dialRefused;
       try {
         // Best effort, in case the failure was the target write itself: the resume obligation needs the property.
         await store.setTarget(row.id, { property_id: target.propertyId, contact_id: target.contactId, destination_e164: target.phoneE164 }).catch(() => undefined);
@@ -368,10 +378,10 @@ export function createDirectCallService(deps: DirectCallServiceDeps) {
         await store.updateIfStatus(
           row.id,
           LIVE,
-          { status: "failed", failure_reason: dialRefused ? "browser_dial_rejected" : "dial_outcome_unknown", ended_at: deps.now().toISOString() },
+          { status: "failed", failure_reason: preDispatchFailure ? "browser_dial_not_started" : dialRefused ? "browser_dial_rejected" : "dial_outcome_unknown", ended_at: deps.now().toISOString() },
           dialedLeg ? [{ kind: "leg", legId: dialedLeg }] : [],
         );
-        if (dialRefused) await store.dialRejected(row.id, "browser");
+        if (dialRefused || preDispatchFailure) await store.dialRejected(row.id, "browser");
         if (unknown || dialedLeg) await runCleanups(settings, userId);
       } catch (markError) {
         deps.report(markError, "direct_call_start_mark_failed");
