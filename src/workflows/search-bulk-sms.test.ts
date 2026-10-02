@@ -120,6 +120,42 @@ describe("Search deferred bulk SMS workflow", () => {
     expect(summary("failed")).toBeTruthy();
   });
 
+  it("accepts the same campaign statuses as the legacy workflow (a replay after the campaign completed or paused)", async () => {
+    for (const status of ["completed", "paused"]) {
+      vi.clearAllMocks();
+      h.tables.properties = [prospect("p1")];
+      seedJob(["p1"]);
+      h.tables.campaigns[0].status = status;
+      await expect(searchBulkSmsWorkflow({ jobId: "job-1" })).resolves.toMatchObject({ queued: 1 });
+    }
+  });
+
+  it("a load failure fails the job and archives the Search-created campaign instead of stranding it in launching", async () => {
+    h.tables.properties = [prospect("p1")];
+    seedJob(["p1"], { source: "filters" }); // provenance check fails in the load step
+    await expect(searchBulkSmsWorkflow({ jobId: "job-1" })).rejects.toThrow(/not an ad-hoc/);
+    expect(summary("failed")).toBeTruthy();
+  });
+
+  it("a load failure on a genuine ad-hoc Search campaign (e.g. org mismatch) archives it", async () => {
+    h.tables.properties = [prospect("p1")];
+    seedJob(["p1"]);
+    h.tables.jobs[0].org_id = "other-org"; // campaign org differs from the job's org: load throws
+    h.tables.campaigns[0].org_id = "org";
+    await expect(searchBulkSmsWorkflow({ jobId: "job-1" })).rejects.toThrow(/does not match job org/);
+    // job org differs so the cleanup refuses to touch the campaign (org-bound), only fails the job
+    expect(h.updates.some((u) => u.table === "campaigns" && u.values.status === "archived")).toBe(false);
+    expect(summary("failed")).toBeTruthy();
+  });
+
+  it("a load failure that leaves a launching ad-hoc campaign of the SAME org archives it", async () => {
+    h.tables.properties = [prospect("p1")];
+    seedJob(["p1"]);
+    h.tables.jobs[0].input_params = { ...(h.tables.jobs[0].input_params as object), property_ids: [] }; // no ids: load throws
+    await expect(searchBulkSmsWorkflow({ jobId: "job-1" })).rejects.toThrow(/no property ids/);
+    expect(h.updates.some((u) => u.table === "campaigns" && u.values.status === "archived")).toBe(true);
+  });
+
   it("refuses when the stored campaign is not an ad-hoc bulk SMS campaign (provenance from the row, not job input)", async () => {
     h.tables.properties = [prospect("p1")];
     seedJob(["p1"], { source: "filters" });

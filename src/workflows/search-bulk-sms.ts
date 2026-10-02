@@ -74,7 +74,11 @@ async function loadSearchSmsJob(jobId: string): Promise<Loaded> {
     .maybeSingle();
   if (campaignError || !campaign) throw new Error(`search-bulk-sms: campaign ${campaignId} not found`);
   if (campaign.org_id !== job.org_id) throw new Error("search-bulk-sms: campaign does not match job org");
-  if (campaign.status !== "launching") throw new Error("search-bulk-sms: campaign is not launching");
+  // Same statuses as the legacy workflow accepts, so a step retry or replay of a job that already
+  // started (campaign completed/paused by an earlier attempt) is not rejected.
+  if (!["launching", "completed", "paused"].includes(campaign.status ?? "")) {
+    throw new Error("search-bulk-sms: campaign is not launchable");
+  }
   // Provenance comes from the stored campaign row, never from job input.
   const source = (campaign.audience_snapshot as { source?: unknown } | null)?.source;
   if (source !== AD_HOC_SOURCE) throw new Error("search-bulk-sms: campaign is not an ad-hoc bulk SMS campaign");
@@ -135,6 +139,8 @@ export async function searchSmsChunkStep(args: {
   await adminClient
     .from("jobs")
     .update({
+      // processed_items counts every frozen row the workflow has gone through, INCLUDING the ones
+      // skipped because they are no longer prospects (they are reported in skipped_leads/_dnc).
       processed_items: args.processedBefore + args.propertyIds.length,
       succeeded_items: state.succeeded,
       failed_items: state.failed.length,
@@ -142,6 +148,50 @@ export async function searchSmsChunkStep(args: {
     })
     .eq("id", args.jobId);
   return { state, skippedLeads: part.skippedLeads, skippedDnc: part.dncLockedIds.length };
+}
+
+/**
+ * The load step failed (bad provenance, missing campaign, ...). The Search action already created
+ * the ad-hoc campaign in `launching`; do not leave it stranded: fail the job and archive that
+ * campaign, but ONLY if the job is a Search-owned job and the campaign is an ad-hoc bulk-SMS
+ * campaign of the same org that is still `launching` and has queued nothing.
+ */
+async function failSearchSmsLoadStep(args: { jobId: string; errorMessage: string }): Promise<void> {
+  "use step";
+
+  const supabase = createAdminClient();
+  const now = new Date().toISOString();
+  const { data: job } = await supabase.from("jobs").select("org_id, type, input_params").eq("id", args.jobId).maybeSingle();
+  await supabase
+    .from("jobs")
+    .update({
+      status: "failed",
+      completed_at: now,
+      error_message: args.errorMessage,
+      result_summary: { queued: 0, skipped: 0, failed: 0, workflow_error: args.errorMessage },
+    })
+    .eq("id", args.jobId);
+  const params = job?.input_params as { surface?: string; opts?: { campaignId?: string } } | null;
+  const campaignId = params?.opts?.campaignId;
+  if (!job || job.type !== "bulk_sms" || params?.surface !== SEARCH_SMS_JOB_SURFACE || !campaignId) return;
+  const { data: campaign } = await supabase
+    .from("campaigns")
+    .select("org_id, status, audience_snapshot")
+    .eq("id", campaignId)
+    .maybeSingle();
+  const source = (campaign?.audience_snapshot as { source?: unknown } | null)?.source;
+  if (!campaign || campaign.org_id !== job.org_id || campaign.status !== "launching" || source !== AD_HOC_SOURCE) return;
+  const { count } = await supabase
+    .from("messages")
+    .select("*", { count: "exact", head: true })
+    .eq("campaign_id", campaignId)
+    .eq("direction", "outbound");
+  if ((count ?? 0) > 0) return;
+  await supabase
+    .from("campaigns")
+    .update({ status: "archived", archived_at: now, updated_at: now })
+    .eq("id", campaignId)
+    .eq("status", "launching");
 }
 
 async function finalizeSearchSmsStep(args: {
@@ -243,14 +293,7 @@ export async function searchBulkSmsWorkflow(
     loaded = await loadSearchSmsJob(params.jobId);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    await failSearchSmsStep({
-      campaignId: null,
-      errorMessage: message,
-      jobId: params.jobId,
-      state: { cumulativeOffsetMs: 0, dayBucketStartMs: 0, dayBucketCount: 0, succeeded: 0, skipped: 0, failed: [] },
-      total: 0,
-      skippedLeads: 0,
-    });
+    await failSearchSmsLoadStep({ jobId: params.jobId, errorMessage: message });
     throw e;
   }
   let state = loaded.initialState;
