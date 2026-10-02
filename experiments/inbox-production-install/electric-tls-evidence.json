@@ -4,13 +4,83 @@
   "docker_inspect_repo_digest": "Error response from daemon: pull access denied for electricsql/electric, repository does not exist or may require 'docker login'",
   "electric_source_ref": "@core/sync-service@1.8.1",
   "error": "PINNED_PULL_DENIED: Error response from daemon: pull access denied for electricsql/electric, repository does not exist or may require 'docker login'",
-  "network": "sandra-r1-electric-tls-fdb81e997a77",
+  "network": "sandra-r1-electric-tls-5490a10e8abe",
   "pinned_pull_error": "Error response from daemon: pull access denied for electricsql/electric, repository does not exist or may require 'docker login'",
   "pinned_pull_verdict": "PINNED_PULL_DENIED",
   "pinned_repo_digest": "electricsql/electric@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139",
   "postgres_image": "postgres:17",
   "published_electric_image": "electricsql/electric:1.8.1@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139",
+  "right_ca": {
+    "health": {
+      "body": "{\"status\":\"active\"}",
+      "json": {
+        "status": "active"
+      },
+      "status_code": 200
+    },
+    "logs_tail": "=ESOCK WARNING MSG==== 02-Oct-2026::11:56:27.756745 ===\n\n[UNIX-ESSIO] Failed open sctp dynamic library: libsctp.so.1\n\n=INFO REPORT==== 2-Oct-2026::11:56:29.216346 ===\nLoading 150 CA(s) from otp store\n\u001b[22m\n11:56:29.233 pid=<0.3077.0> [notice]     :alarm_handler: {:set, {:system_memory_high_watermark, []}}\u001b[0m\n\u001b[22m\n11:56:29.236 pid=<0.3281.0> [notice] Starting ElectricSQL 1.8.1\u001b[0m\n\u001b[22m\n11:56:29.237 pid=<0.3077.0> [notice]     :alarm_handler: {:set, {{:disk_almost_full, ~c\"/\"}, []}}\u001b[0m\n\u001b[22m\n11:56:29.237 pid=<0.3077.0> [notice]     :alarm_handler: {:set, {{:disk_almost_full, ~c\"/etc/hosts\"}, []}}\u001b[0m\n\u001b[22m\n11:56:29.238 pid=<0.3077.0> [notice]     :alarm_handler: {:set,\n {{:disk_almost_full, ~c\"/etc/sandra-inbox/supabase-prod-ca-2021.crt\"}, []}}\u001b[0m\n\u001b[22m\n11:56:29.249 pid=<0.3287.0> [notice] Admission control initialized with table: electric_admission_control\u001b[0m\n\u001b[22m\n11:56:29.255 pid=<0.3304.0> [notice] Removing 0 old storage directories\u001b[0m\n\u001b[22m\n11:56:29.255 pid=<0.3312.0> [notice] Shape database file: \"./persistent/meta/shape-db/v10_4@otp-29.sqlite\"\u001b[0m\n\u001b[22m\n11:56:29.256 pid=<0.3312.0> [notice] Migrating shape db to version 4\u001b[0m\n\u001b[22m\n11:56:29.295 pid=<0.3316.0> [notice] Found 0 existing valid shapes and 0 shapes in an invalid state\u001b[0m\n\u001b[22m\n11:56:29.295 pid=<0.3284.0> [info] Running Electric.Plug.Router with Bandit 1.12.0 at 0.0.0.0:3000 (http)\u001b[0m\n\u001b[22m\n11:56:29.296 pid=<0.3316.0> [notice] Shape metadata initialized, entering read-only mode\u001b[0m\n\u001b[22m\n11:56:29.406 pid=<0.3636.0> [notice] Connection pool [admin: postgres:5432] is ready with 4 connections\u001b[0m\n\u001b[22m\n11:56:29.456 pid=<0.3656.0> [notice] Acquiring lock from postgres with name electric_slot_inbox_tlsproof_right\u001b[0m\n\u001b[22m\n11:56:29.456 pid=<0.3321.0> [notice] Postgres server version = 170011, system identifier = 7692038117327298607, timeline_id = 1\u001b[0m\n\u001b[22m\n11:56:29.456 pid=<0.3656.0> [notice] Lock acquired from postgres with name electric_slot_inbox_tlsproof_right\u001b[0m\n\u001b[22m\n11:56:29.457 pid=<0.3316.0> [notice] Refreshing shape metadata: 0 valid shapes, 0 invalid\u001b[0m\n\u001b[22m\n11:56:29.589 pid=<0.3664.0> [notice] Connection pool [snapshot: postgres:5432] is ready with 16 connections\u001b[0m\n\u001b[22m\n11:56:29.590 pid=<0.3321.0> [notice] No previous timeline detected.\u001b[0m\n\u001b[22m\n11:56:29.590 pid=<0.3321.0> [notice] Connected to Postgres 7692038117327298607 and timeline 1\u001b[0m\n\u001b[22m\n11:56:29.590 pid=<0.3732.0> [notice] Starting shape replication pipeline\u001b[0m\n\u001b[22m\n11:56:29.591 pid=<0.3732.0> [info] Starting DynamicConsumerSupervisor with 4 partitions\u001b[0m\n\u001b[22m\n11:56:29.591 pid=<0.3321.0> [notice] Starting replication from postgres\u001b[0m\n\u001b[22m\n11:56:29.592 pid=<0.3735.0> [notice] Restored filters for 0 shapes in 1ms\u001b[0m\n\u001b[22m\n11:56:29.592 pid=<0.3738.0> [notice] Restored publication filters in 1ms\u001b[0m\n\u001b[22m\n11:56:29.592 pid=<0.3746.0> [notice] Consumers ready in 1ms (0 shapes)\u001b[0m\n\u001b[22m\n11:56:29.595 pid=<0.3740.0> [notice] Verified publication electric_publication_inbox_tlsproof_right to include [] tables with REPLICA IDENTITY FULL\u001b[0m",
+    "pg_stat_ssl_backend_count": 1,
+    "slot": {
+      "active": "true",
+      "database": "postgres",
+      "plugin": "pgoutput",
+      "slot_name": "electric_slot_inbox_tlsproof_right"
+    }
+  },
   "seal_status": "UNSEALED",
   "source_harness": "UNSEALED",
-  "source_harness_error": "expected exactly one new pgoutput slot electric_slot_inbox_tlsproof_right, found []"
+  "wrong_ca": {
+    "health": {
+      "body": "<urlopen error [Errno 61] Connection refused>",
+      "status_code": null
+    },
+    "logs_tail": "=ESOCK WARNING MSG==== 02-Oct-2026::11:56:30.117651 ===\n\n[UNIX-ESSIO] Failed open sctp dynamic library: libsctp.so.1\n\n=INFO REPORT==== 2-Oct-2026::11:56:31.230745 ===\nLoading 150 CA(s) from otp store\n\u001b[22m\n11:56:31.243 pid=<0.3077.0> [notice]     :alarm_handler: {:set, {{:disk_almost_full, ~c\"/\"}, []}}\u001b[0m\n\u001b[22m\n11:56:31.243 pid=<0.3077.0> [notice]     :alarm_handler: {:set, {{:disk_almost_full, ~c\"/etc/hosts\"}, []}}\u001b[0m\n\u001b[22m\n11:56:31.243 pid=<0.3077.0> [notice]     :alarm_handler: {:set,\n {{:disk_almost_full, ~c\"/etc/sandra-inbox/supabase-prod-ca-2021.crt\"}, []}}\u001b[0m\n\u001b[22m\n11:56:31.245 pid=<0.3077.0> [notice]     :alarm_handler: {:set, {:system_memory_high_watermark, []}}\u001b[0m\n\u001b[22m\n11:56:31.247 pid=<0.3281.0> [notice] Starting ElectricSQL 1.8.1\u001b[0m\n\u001b[22m\n11:56:31.258 pid=<0.3287.0> [notice] Admission control initialized with table: electric_admission_control\u001b[0m\n\u001b[22m\n11:56:31.262 pid=<0.3304.0> [notice] Removing 0 old storage directories\u001b[0m\n\u001b[22m\n11:56:31.263 pid=<0.3312.0> [notice] Shape database file: \"./persistent/meta/shape-db/v10_4@otp-29.sqlite\"\u001b[0m\n\u001b[22m\n11:56:31.264 pid=<0.3312.0> [notice] Migrating shape db to version 4\u001b[0m\n\u001b[22m\n11:56:31.272 pid=<0.3284.0> [info] Running Electric.Plug.Router with Bandit 1.12.0 at 0.0.0.0:3000 (http)\u001b[0m\n\u001b[22m\n11:56:31.305 pid=<0.3316.0> [notice] Found 0 existing valid shapes and 0 shapes in an invalid state\u001b[0m\n\u001b[22m\n11:56:31.306 pid=<0.3316.0> [notice] Shape metadata initialized, entering read-only mode\u001b[0m\n\u001b[22m\n11:56:31.309 pid=<0.3634.0> [notice] TLS :client: In state :wait_cert at ssl_handshake.erl:2252 generated CLIENT ALERT: Fatal - Unknown CA\n\u001b[0m\n\u001b[31m\n11:56:31.309 pid=<0.3323.0> [error] #PID<0.3323.0> (Electric.Connection.Manager.ConnectionResolver.Connection) failed to connect to Postgres: ** (DBConnection.ConnectionError) ssl connect: TLS client: In state wait_cert at ssl_handshake.erl:2252 generated CLIENT ALERT: Fatal - Unknown CA\n - {:tls_alert, {:unknown_ca, ~c\"TLS client: In state wait_cert at ssl_handshake.erl:2252 generated CLIENT ALERT: Fatal - Unknown CA\\n\"}}\u001b[0m\n\u001b[31m\n11:56:31.312 pid=<0.3635.0> [emergency] SSL connection failed to verify server certificate: TLS client: In state wait_cert at ssl_handshake.erl:2252 generated CLIENT ALERT: Fatal - Unknown CA\n - {:tls_alert, {:unknown_ca, ~c\"TLS client: In state wait_cert at ssl_handshake.erl:2252 generated CLIENT ALERT: Fatal - Unknown CA\\n\"}}\u001b[0m\n\u001b[33m\n11:56:31.313 pid=<0.3307.0> [warning] Electric.StatusMonitor condition failed: :shape_metadata_ready. Status %{conn: :waiting_on_lock, shape: :starting}\u001b[0m\n\u001b[22m\n11:56:31.315 pid=<0.3017.0> [notice] Application electric exited: shutdown\u001b[0m\n\u001b[22m\n11:56:31.326 pid=<0.3077.0> [notice]     :alarm_handler: {:clear, :system_memory_high_watermark}\u001b[0m\n\u001b[22m\n11:56:31.327 pid=<0.3077.0> [notice]     :alarm_handler: {:clear, {:disk_almost_full, ~c\"/etc/sandra-inbox/supabase-prod-ca-2021.crt\"}}\u001b[0m\n\u001b[22m\n11:56:31.327 pid=<0.3077.0> [notice]     :alarm_handler: {:clear, {:disk_almost_full, ~c\"/etc/hosts\"}}\u001b[0m\n\u001b[22m\n11:56:31.327 pid=<0.3077.0> [notice]     :alarm_handler: {:clear, {:disk_almost_full, ~c\"/\"}}\u001b[0m",
+    "running_after_timeout": false,
+    "slot_present": false,
+    "tls_error_in_logs": true,
+    "tls_error_token": "unknown_ca"
+  },
+  "wrong_ca_mutation_fixed": {
+    "health": {
+      "body": "{\"status\":\"active\"}",
+      "json": {
+        "status": "active"
+      },
+      "status_code": 200
+    },
+    "pg_stat_ssl_backend_count": 1,
+    "slot": {
+      "active": "true",
+      "database": "postgres",
+      "plugin": "pgoutput",
+      "slot_name": "electric_slot_inbox_tlsproof_wrong_ca_fixed"
+    }
+  },
+  "wrong_hostname": {
+    "health": {
+      "body": "<urlopen error [Errno 61] Connection refused>",
+      "status_code": null
+    },
+    "logs_tail": "=ESOCK WARNING MSG==== 02-Oct-2026::11:56:50.723017 ===\n\n[UNIX-ESSIO] Failed open sctp dynamic library: libsctp.so.1\n\n=INFO REPORT==== 2-Oct-2026::11:56:52.292331 ===\nLoading 150 CA(s) from otp store\n\u001b[22m\n11:56:52.325 pid=<0.3077.0> [notice]     :alarm_handler: {:set, {:system_memory_high_watermark, []}}\u001b[0m\n\u001b[22m\n11:56:52.349 pid=<0.3077.0> [notice]     :alarm_handler: {:set, {{:disk_almost_full, ~c\"/\"}, []}}\u001b[0m\n\u001b[22m\n11:56:52.349 pid=<0.3077.0> [notice]     :alarm_handler: {:set, {{:disk_almost_full, ~c\"/etc/hosts\"}, []}}\u001b[0m\n\u001b[22m\n11:56:52.350 pid=<0.3077.0> [notice]     :alarm_handler: {:set,\n {{:disk_almost_full, ~c\"/etc/sandra-inbox/supabase-prod-ca-2021.crt\"}, []}}\u001b[0m\n\u001b[22m\n11:56:52.357 pid=<0.3281.0> [notice] Starting ElectricSQL 1.8.1\u001b[0m\n\u001b[22m\n11:56:52.367 pid=<0.3287.0> [notice] Admission control initialized with table: electric_admission_control\u001b[0m\n\u001b[22m\n11:56:52.371 pid=<0.3304.0> [notice] Removing 0 old storage directories\u001b[0m\n\u001b[22m\n11:56:52.374 pid=<0.3312.0> [notice] Shape database file: \"./persistent/meta/shape-db/v10_4@otp-29.sqlite\"\u001b[0m\n\u001b[22m\n11:56:52.375 pid=<0.3312.0> [notice] Migrating shape db to version 4\u001b[0m\n\u001b[22m\n11:56:52.425 pid=<0.3284.0> [info] Running Electric.Plug.Router with Bandit 1.12.0 at 0.0.0.0:3000 (http)\u001b[0m\n\u001b[22m\n11:56:52.426 pid=<0.3316.0> [notice] Found 0 existing valid shapes and 0 shapes in an invalid state\u001b[0m\n\u001b[22m\n11:56:52.427 pid=<0.3316.0> [notice] Shape metadata initialized, entering read-only mode\u001b[0m\n\u001b[22m\n11:56:52.436 pid=<0.3634.0> [notice] TLS :client: In state :wait_cert at ssl_handshake.erl:2260 generated CLIENT ALERT: Fatal - Bad Certificate\n - {:bad_cert,\n {:hostname_check_failed, {:requested, ~c\"electric-dsn-mismatch\"},\n  {:received, [dNSName: ~c\"postgres\"]}}}\u001b[0m\n\u001b[31m\n11:56:52.437 pid=<0.3323.0> [error] #PID<0.3323.0> (Electric.Connection.Manager.ConnectionResolver.Connection) failed to connect to Postgres: ** (DBConnection.ConnectionError) ssl connect: TLS client: In state wait_cert at ssl_handshake.erl:2260 generated CLIENT ALERT: Fatal - Bad Certificate\n {bad_cert,{hostname_check_failed,{requested,\"electric-dsn-mismatch\"},\n                                  {received,[{dNSName,\"postgres\"}]}}} - {:tls_alert, {:bad_certificate, ~c\"TLS client: In state wait_cert at ssl_handshake.erl:2260 generated CLIENT ALERT: Fatal - Bad Certificate\\n {bad_cert,{hostname_check_failed,{requested,\\\"electric-dsn-mismatch\\\"},\\n                                  {received,[{dNSName,\\\"postgres\\\"}]}}}\"}}\u001b[0m\n\u001b[31m\n11:56:52.437 pid=<0.3635.0> [emergency] SSL connection failed to verify server certificate: TLS client: In state wait_cert at ssl_handshake.erl:2260 generated CLIENT ALERT: Fatal - Bad Certificate\n {bad_cert,{hostname_check_failed,{requested,\"electric-dsn-mismatch\"},\n                                  {received,[{dNSName,\"postgres\"}]}}} - {:tls_alert, {:bad_certificate, ~c\"TLS client: In state wait_cert at ssl_handshake.erl:2260 generated CLIENT ALERT: Fatal - Bad Certificate\\n {bad_cert,{hostname_check_failed,{requested,\\\"electric-dsn-mismatch\\\"},\\n                                  {received,[{dNSName,\\\"postgres\\\"}]}}}\"}}\u001b[0m\n\u001b[33m\n11:56:52.439 pid=<0.3307.0> [warning] Electric.StatusMonitor condition failed: :shape_metadata_ready. Status %{conn: :waiting_on_lock, shape: :starting}\u001b[0m\n\u001b[22m\n11:56:52.441 pid=<0.3017.0> [notice] Application electric exited: shutdown\u001b[0m\n\u001b[22m\n11:56:52.454 pid=<0.3077.0> [notice]     :alarm_handler: {:clear, :system_memory_high_watermark}\u001b[0m\n\u001b[22m\n11:56:52.455 pid=<0.3077.0> [notice]     :alarm_handler: {:clear, {:disk_almost_full, ~c\"/etc/sandra-inbox/supabase-prod-ca-2021.crt\"}}\u001b[0m\n\u001b[22m\n11:56:52.456 pid=<0.3077.0> [notice]     :alarm_handler: {:clear, {:disk_almost_full, ~c\"/etc/hosts\"}}\u001b[0m\n\u001b[22m\n11:56:52.456 pid=<0.3077.0> [notice]     :alarm_handler: {:clear, {:disk_almost_full, ~c\"/\"}}\u001b[0m",
+    "running_after_timeout": false,
+    "slot_present": false,
+    "tls_error_in_logs": true,
+    "tls_error_token": "hostname_check_failed"
+  },
+  "wrong_hostname_mutation_fixed": {
+    "health": {
+      "body": "{\"status\":\"active\"}",
+      "json": {
+        "status": "active"
+      },
+      "status_code": 200
+    },
+    "pg_stat_ssl_backend_count": 1,
+    "slot": {
+      "active": "true",
+      "database": "postgres",
+      "plugin": "pgoutput",
+      "slot_name": "electric_slot_inbox_tlsproof_wrong_hostname_fixed"
+    }
+  }
 }
