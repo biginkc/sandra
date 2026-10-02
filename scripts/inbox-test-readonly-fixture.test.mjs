@@ -1,26 +1,35 @@
 import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pg from "pg";
 import {
   ACK_ENV,
   DB_ENV,
+  SERVICE_ROLE_KEY_ENV,
+  SUPABASE_URL_ENV,
   PROD_REF,
   TEST_MODE_ENV,
   TEST_REF,
   assertSafeTarget,
-  deleteOwnedRows,
+  deleteOwnedRowsForTest,
   residueCheck,
+  snapshotDatabase,
 } from "./inbox-test-readonly-fixture.mjs";
 
 const { Client } = pg;
 const script = path.resolve("scripts/inbox-test-readonly-fixture.mjs");
 let workdir;
-let socketDir;
+let stackDir;
+let apiPort;
 let port;
+let authPort;
+let dataApiUrl;
+let dataServiceRoleKey;
+let authStubUrl;
+let authStubProcess;
 let dbUrl;
 let baseEnv;
 let db;
@@ -35,7 +44,7 @@ async function freePort() {
     });
     if (available) return candidate;
   }
-  throw new Error("no disposable PG17 port available in 55000-59999");
+  throw new Error("no disposable local port available in 55000-59999");
 }
 
 function run(command, args, options = {}) {
@@ -54,6 +63,102 @@ async function waitForDb() {
     }
   }
   throw new Error("local PG17 did not start");
+}
+
+async function waitForFile(file, child) {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    if (existsSync(file)) return;
+    if (child.exitCode !== null) throw new Error(`local auth stub exited with ${child.exitCode}`);
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  throw new Error("local auth stub did not start");
+}
+
+async function waitForSupabaseApi() {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    try {
+      const response = await fetch(`${dataApiUrl}/auth/v1/settings`, {
+        headers: { apikey: dataServiceRoleKey },
+      });
+      if (response.status < 500 && response.status !== 404) return;
+    } catch {}
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  throw new Error("local GoTrue API did not start");
+}
+
+async function startAuthStub() {
+  authPort = await freePort();
+  const readyFile = path.join(workdir, "auth-stub.ready");
+  authStubProcess = spawn(process.execPath, [path.resolve("scripts/inbox-test-readonly-fixture-auth-stub.mjs")], {
+    env: {
+      ...process.env,
+      INBOX_RO_FIXTURE_AUTH_STUB_DB_URL: dbUrl,
+      INBOX_RO_FIXTURE_AUTH_STUB_PORT: String(authPort),
+      INBOX_RO_FIXTURE_AUTH_STUB_READY_FILE: readyFile,
+    },
+    stdio: "ignore",
+  });
+  await waitForFile(readyFile, authStubProcess);
+  unlinkSync(readyFile);
+  authStubUrl = `http://127.0.0.1:${authPort}/`;
+}
+
+async function startDisposableSupabase() {
+  stackDir = mkdtempSync(path.join(tmpdir(), "sandra-inbox-ro-supabase-"));
+  const supabaseDir = path.join(stackDir, "supabase");
+  run("supabase", ["init", "--workdir", stackDir]);
+  const generatedConfig = readFileSync(path.join(supabaseDir, "config.toml"), "utf8");
+  const repoConfig = readFileSync(path.resolve("supabase/config.toml"), "utf8");
+  const majorVersion = repoConfig.match(/^major_version\s*=\s*(\d+)$/m)?.[1];
+  assert.equal(majorVersion, "17");
+  const usedPorts = new Set();
+  const nextPort = async () => {
+    let candidate;
+    do {
+      candidate = await freePort();
+    } while (usedPorts.has(candidate));
+    usedPorts.add(candidate);
+    return candidate;
+  };
+  apiPort = await nextPort();
+  port = await nextPort();
+  const shadowPort = await nextPort();
+  const poolerPort = await nextPort();
+  const studioPort = await nextPort();
+  const smtpPort = await nextPort();
+  const analyticsPort = await nextPort();
+  const config = generatedConfig
+    .replace(/^project_id\s*=.*$/m, `project_id = "sandra-ro-${Date.now()}-${process.pid}"`)
+    .replace(/(\[api\][\s\S]*?^port\s*=\s*)\d+/m, (_, prefix) => `${prefix}${apiPort}`)
+    .replace(/(\[db\][\s\S]*?^port\s*=\s*)\d+/m, (_, prefix) => `${prefix}${port}`)
+    .replace(/(\[db\][\s\S]*?^shadow_port\s*=\s*)\d+/m, (_, prefix) => `${prefix}${shadowPort}`)
+    .replace(/(\[db\.pooler\][\s\S]*?^port\s*=\s*)\d+/m, (_, prefix) => `${prefix}${poolerPort}`)
+    .replace(/(\[studio\][\s\S]*?^port\s*=\s*)\d+/m, (_, prefix) => `${prefix}${studioPort}`)
+    .replace(/(\[local_smtp\][\s\S]*?^port\s*=\s*)\d+/m, (_, prefix) => `${prefix}${smtpPort}`)
+    .replace(/(\[analytics\][\s\S]*?^port\s*=\s*)\d+/m, (_, prefix) => `${prefix}${analyticsPort}`)
+    .replace(/(\[db\][\s\S]*?^major_version\s*=\s*)\d+/m, (_, prefix) => `${prefix}${majorVersion}`);
+  writeFileSync(path.join(supabaseDir, "config.toml"), config);
+  mkdirSync(path.join(supabaseDir, "migrations"), { recursive: true });
+  for (const file of readdirSync(path.resolve("supabase/migrations")).filter(name => name.endsWith(".sql"))) {
+    cpSync(path.resolve("supabase/migrations", file), path.join(supabaseDir, "migrations", file));
+  }
+  run("supabase", [
+    "start", "--workdir", stackDir,
+    "--exclude", "studio,edge-runtime,logflare,vector,supavisor,storage-api,imgproxy,realtime,postgres-meta,mailpit",
+    "--ignore-health-check",
+  ], { timeout: 180_000 });
+  const status = JSON.parse(run("supabase", ["status", "--workdir", stackDir, "--output", "json"]));
+  assert.equal(status.DB_URL, `postgresql://postgres:postgres@127.0.0.1:${port}/postgres`);
+  assert.equal(status.API_URL, `http://127.0.0.1:${apiPort}`);
+  dataApiUrl = status.API_URL;
+  dataServiceRoleKey = status.SERVICE_ROLE_KEY;
+  dbUrl = status.DB_URL;
+  await waitForDb();
+  db = new Client({ connectionString: dbUrl });
+  await db.connect();
+  await waitForSupabaseApi();
+  await startAuthStub();
 }
 
 function childEnv(overrides = {}) {
@@ -98,80 +203,55 @@ function receipt(runId) {
 
 before(async () => {
   workdir = mkdtempSync(path.join(tmpdir(), "sandra-inbox-ro-fixture-test-"));
-  socketDir = mkdtempSync(path.join(tmpdir(), "sro-socket-"));
-  port = await freePort();
-  const dataDir = path.join(workdir, "data");
-  run("initdb", ["-D", dataDir, "-A", "trust", "-U", "postgres", "--no-locale"]);
-  try {
-    run("pg_ctl", ["-D", dataDir, "-l", path.join(workdir, "postgres.log"), "-o", `-p ${port} -h 127.0.0.1 -k ${socketDir} -c wal_level=logical`, "-w", "start"]);
-  } catch (error) {
-    error.message += `\n${readFileSync(path.join(workdir, "postgres.log"), "utf8")}`;
-    throw error;
-  }
-  dbUrl = `postgresql://postgres@127.0.0.1:${port}/postgres`;
+  await startDisposableSupabase();
   baseEnv = {
     ...process.env,
     [DB_ENV]: dbUrl,
+    [SUPABASE_URL_ENV]: authStubUrl,
+    [SERVICE_ROLE_KEY_ENV]: "local-test-service-role-key",
     [ACK_ENV]: TEST_REF,
     [TEST_MODE_ENV]: "1",
     NODE_ENV: "test",
     INBOX_RO_FIXTURE_RECEIPT_DIR: workdir,
+    INBOX_RO_FIXTURE_DATA_API_URL: dataApiUrl,
+    INBOX_RO_FIXTURE_DATA_SERVICE_ROLE_KEY: dataServiceRoleKey,
   };
   delete baseEnv.MESSAGING_PROVIDER;
-  await waitForDb();
-  db = new Client({ connectionString: dbUrl });
-  await db.connect();
-  await db.query("create role authenticated nologin; create role anon nologin; create role service_role nologin; create schema auth; create table auth.users(id uuid primary key, email text unique, email_confirmed_at timestamptz, encrypted_password text, created_at timestamptz default now(), updated_at timestamptz default now()); create function auth.uid() returns uuid language sql stable as $$select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid$$; create function auth.role() returns text language sql stable as $$select nullif(current_setting('request.jwt.claim.role',true),'')$$; create publication supabase_realtime;");
-  for (const file of ["001_initial.sql", "008_allow_mock_message_provider.sql"]) await db.query(readFileSync(path.resolve("supabase/migrations", file), "utf8"));
-  await db.query(`
-    create table public.memberships (
-      id uuid primary key default gen_random_uuid(),
-      user_id uuid not null references auth.users(id) on delete cascade,
-      org_id uuid not null references public.organizations(id) on delete cascade,
-      role text not null default 'member' check (role in ('owner','member')),
-      access_status text not null default 'active',
-      access_expires_at timestamptz,
-      deletion_prepared_at timestamptz,
-      created_at timestamptz not null default now(),
-      unique(user_id,org_id)
-    );
-    alter table public.messages add column campaign_id uuid;
-    alter table public.messages add column scheduled_for timestamptz;
-    create or replace function public.reset_tenant_tables() returns void language plpgsql as $$
-    declare snapshot_row record;
-    begin
-      create temp table fixture_memberships on commit drop as select * from public.memberships;
-      truncate public.job_items, public.messages, public.memberships;
-      insert into public.memberships select * from fixture_memberships;
-    end $$;
-  `);
 });
 
 after(async () => {
+  if (authStubProcess && authStubProcess.exitCode === null) {
+    await new Promise(resolve => {
+      authStubProcess.once("close", resolve);
+      authStubProcess.kill("SIGTERM");
+    });
+  }
   if (db) await db.end().catch(() => {});
+  if (stackDir) {
+    try { run("supabase", ["stop", "--workdir", stackDir, "--no-backup"], { timeout: 120_000 }); } catch {}
+    rmSync(stackDir, { recursive: true, force: true });
+  }
   if (workdir) {
-    try { run("pg_ctl", ["-D", path.join(workdir, "data"), "-m", "immediate", "-w", "stop"], { stdio: "ignore" }); } catch {}
     rmSync(workdir, { recursive: true, force: true });
   }
-  if (socketDir) rmSync(socketDir, { recursive: true, force: true });
 });
 
-test("T1 inertness: scheduler due selector is empty and the real send guard is present", async () => {
-  const run = await create("t1-inert");
-  const rows = await db.query("select id, scheduled_for from public.messages where org_id=$1 and status='queued' and scheduled_for <= now() and scheduled_for is not null", [run.ids.organization]);
-  assert.equal(rows.rowCount, 0);
-  const sendSource = readFileSync("src/lib/messaging/send.ts", "utf8");
-  assert.match(sendSource, /if \(!msg\.contact_id \|\| !msg\.property_id \|\| !msg\.to_address\)/);
-  assert.match(sendSource, /queued message missing contact\/property\/to_address/);
-  const status = cli(["--status", "--run-id", "t1-inert"]);
-  assert.equal(status.status, 0, status.stderr || status.stdout);
-  const remove = cli(["--remove", "--run-id", "t1-inert"]);
-  assert.equal(remove.status, 0, remove.stderr || remove.stdout);
+test("T1 inertness: the real Vitest sender and sequence-tick paths prove both rows are inert", async () => {
+  const result = cli(["--status", "--run-id", "does-not-exist"]);
+  assert.notEqual(result.status, 0);
+  const vitest = path.resolve("node_modules/vitest/vitest.mjs");
+  const t1 = run(process.execPath, [vitest, "run", "--config", path.resolve("vitest.inbox-ro-fixture.config.ts"), "scripts/inbox-test-readonly-fixture.t1.test.ts"], {
+    env: childEnv({ INBOX_RO_FIXTURE_T1_DATA_API_URL: dataApiUrl, INBOX_RO_FIXTURE_T1_DATA_SERVICE_ROLE_KEY: dataServiceRoleKey }),
+    timeout: 30_000,
+  });
+  assert.match(t1, /PASS|Test Files/);
 });
 
 test("T2 target guards: Production, other targets, CI, provider env, and missing ack fail before DB access", async () => {
   const unchangedBefore = await db.query("select count(*)::int as count from public.organizations");
   assert.throws(() => assertSafeTarget({ ...baseEnv, [DB_ENV]: `postgresql://postgres.${PROD_REF}@db.example.invalid:5432/postgres` }), error => error.code === "PRODUCTION_REFUSED");
+  assert.throws(() => assertSafeTarget({ ...baseEnv, [SUPABASE_URL_ENV]: `https://${PROD_REF}.supabase.co/` }), error => error.code === "PRODUCTION_REFUSED");
+  assert.throws(() => assertSafeTarget({ ...baseEnv, [SUPABASE_URL_ENV]: "https://other-project.supabase.co/" }), error => error.code === "TARGET_REFUSED");
   assert.throws(() => assertSafeTarget({ ...baseEnv, [DB_ENV]: "postgresql://postgres.other@aws-1-us-east-1.pooler.supabase.com:5432/postgres" }), error => error.code === "TARGET_REFUSED");
   assert.throws(() => assertSafeTarget({ ...baseEnv, [DB_ENV]: `postgresql://postgres.${TEST_REF}@db.${TEST_REF}.supabase.co:5432/postgres` }), error => error.code === "TARGET_REFUSED");
   assert.throws(() => assertSafeTarget({ ...baseEnv, [DB_ENV]: "postgresql://postgres@127.0.0.1:55400/postgres", [TEST_MODE_ENV]: undefined, NODE_ENV: "development" }), error => error.code === "LOCAL_TARGET_REFUSED");
@@ -228,6 +308,10 @@ test("T5 reset detection: filenode/stat diagnostics fail status, while the holde
   const status = cli(["--status", "--run-id", "t5-reset"]);
   assert.notEqual(status.status, 0);
   assert.match(status.stderr, /messages filenode changed|membership.*n_tup_ins changed/);
+  const resetReceipt = receipt("t5-reset");
+  resetReceipt.baseline = await snapshotDatabase(db);
+  resetReceipt.post_insert = resetReceipt.baseline;
+  writeFileSync(path.join(workdir, "lease-test-ro-fixture-t5-reset.json"), `${JSON.stringify(resetReceipt)}\n`);
   const remove = cli(["--remove", "--run-id", "t5-reset"]);
   assert.equal(remove.status, 0, remove.stderr || remove.stdout);
   assert.deepEqual(await ownedRows(created.ids.organization, created.ids.user), { orgs: "0", users: "0", memberships: "0", messages: "0" });
@@ -238,7 +322,7 @@ test("T6 cleanup: zero residue passes, but a mutation that skips one delete fail
   const rec = receipt("t6-cleanup");
   const mutationDb = new Client({ connectionString: dbUrl });
   await mutationDb.connect();
-  await deleteOwnedRows(mutationDb, rec, { skipMessageId: rec.ids.messages.scheduled });
+  await deleteOwnedRowsForTest(mutationDb, rec, { skipMessageId: rec.ids.messages.scheduled });
   const failed = await residueCheck(mutationDb, rec);
   assert.equal(failed.pass, false);
   assert.ok(failed.failures.some(value => value.includes("owned rows remain") || value.includes("non-owned row count changed")));

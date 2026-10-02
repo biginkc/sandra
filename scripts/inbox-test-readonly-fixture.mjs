@@ -2,10 +2,11 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createClient } from "@supabase/supabase-js";
 import pg from "pg";
 
 const { Client } = pg;
@@ -15,6 +16,8 @@ export const PROD_REF = "copflsklaefwzipsrjqz";
 export const LOCK_KEY = "sandra-integration-suite";
 export const ACK_ENV = "INBOX_RO_FIXTURE_ACK";
 export const DB_ENV = "TEST_SUPABASE_DB_URL";
+export const SUPABASE_URL_ENV = "TEST_SUPABASE_URL";
+export const SERVICE_ROLE_KEY_ENV = "TEST_SUPABASE_SERVICE_ROLE_KEY";
 export const TEST_MODE_ENV = "INBOX_RO_FIXTURE_TEST_MODE";
 export const PURPOSE = "J5a shared-readonly PRE->POST queued-set baseline on TEST";
 export const MAX_LEASE_MS = 6 * 60 * 60 * 1000;
@@ -32,10 +35,15 @@ const EXPECTED_MESSAGE_COLUMNS = [
 const COUNTER_ALLOWLIST = new Set([
   "public.memberships.my_leads_revision",
   "public.messages.inbox_inbound_revision",
+  "public.hugo_owner_guard_serialization.version",
 ]);
 const ANCHOR_TABLES = new Map([
   ["public.organizations", "org"],
   ["auth.users", "user"],
+]);
+const SUPABASE_MANAGED_APPEND_ONLY_TABLES = new Set([
+  "auth.audit_log_entries",
+  "realtime.messages",
 ]);
 
 class FixtureError extends Error {
@@ -143,10 +151,32 @@ function isLoopbackTarget(url) {
     && Number(url.port) <= 59999;
 }
 
+function isLoopbackSupabaseUrl(url) {
+  return ["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname)
+    && Number(url.port) >= 55000
+    && Number(url.port) <= 59999
+    && url.protocol === "http:"
+    && url.pathname === "/"
+    && !url.username
+    && !url.password
+    && !url.search
+    && !url.hash;
+}
+
 function isHostedTestTarget(url) {
   return url.hostname.endsWith(".pooler.supabase.com")
     && decodeURIComponent(url.username) === `postgres.${TEST_REF}`
     && (url.port === "" || url.port === "5432");
+}
+
+function isHostedTestSupabaseUrl(url) {
+  return url.protocol === "https:"
+    && url.hostname === `${TEST_REF}.supabase.co`
+    && url.pathname === "/"
+    && !url.username
+    && !url.password
+    && !url.search
+    && !url.hash;
 }
 
 export function assertSafeTarget(env = process.env) {
@@ -160,20 +190,33 @@ export function assertSafeTarget(env = process.env) {
   try { url = new URL(raw); } catch { fail("DB_URL_INVALID", "database URL is invalid"); }
   assert(["postgres:", "postgresql:"].includes(url.protocol), "DB_URL_INVALID", "database URL must use postgres:// or postgresql://");
   assert(url.pathname === "/postgres" && !url.search && !url.hash, "DB_URL_INVALID", "database URL must target the postgres database without query options");
+  const rawSupabaseUrl = env[SUPABASE_URL_ENV];
+  assert(rawSupabaseUrl, "SUPABASE_URL_REQUIRED", `${SUPABASE_URL_ENV} is required and must not be read from a file or argument`);
+  let supabaseUrl;
+  try { supabaseUrl = new URL(rawSupabaseUrl); } catch { fail("SUPABASE_URL_INVALID", "Supabase URL is invalid"); }
+  assert(!String(rawSupabaseUrl).includes(PROD_REF), "PRODUCTION_REFUSED", "Production project ref is refused");
+  const localApi = isLoopbackSupabaseUrl(supabaseUrl);
+  if (localApi) {
+    assert(env[TEST_MODE_ENV] === "1" && env.NODE_ENV === "test", "LOCAL_TARGET_REFUSED", "loopback Supabase URLs are allowed only by this tool's NODE_ENV=test local tests");
+  } else {
+    assert(isHostedTestSupabaseUrl(supabaseUrl), "TARGET_REFUSED", "only the TEST Supabase API project target is allowed");
+    assert(!env[TEST_MODE_ENV], "HOSTED_TEST_MODE_REFUSED", "local-test mode cannot target a hosted Supabase API");
+  }
   if (isLoopbackTarget(url)) {
     assert(env[TEST_MODE_ENV] === "1" && env.NODE_ENV === "test", "LOCAL_TARGET_REFUSED", "loopback targets are allowed only by this tool's NODE_ENV=test local tests");
-    return { kind: "local-test", url };
+    return { kind: "local-test", url, supabaseUrl };
   }
   assert(isHostedTestTarget(url), "TARGET_REFUSED", "only the TEST session-pooler project target is allowed");
   assert(!env[TEST_MODE_ENV], "HOSTED_TEST_MODE_REFUSED", "local-test mode cannot target a hosted database");
-  return { kind: "shared-test", url };
+  return { kind: "shared-test", url, supabaseUrl };
 }
 
 function receiptPathFor(runId, env = process.env, explicit = null) {
   const dir = explicit
     ? path.dirname(explicit)
-    : path.resolve(env.INBOX_RO_FIXTURE_RECEIPT_DIR ?? path.join(repoRoot, "notes"));
-  mkdirSync(dir, { recursive: true });
+    : path.resolve(env.INBOX_RO_FIXTURE_RECEIPT_DIR ?? path.join(env.HOME ?? tmpdir(), ".sandra-inbox-fixture"));
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (!explicit && !env.INBOX_RO_FIXTURE_RECEIPT_DIR) chmodSync(dir, 0o700);
   return explicit ? path.resolve(explicit) : path.join(dir, `lease-test-ro-fixture-${runId}.json`);
 }
 
@@ -190,7 +233,9 @@ function readReceipt(file) {
 function writeReceipt(file, receipt) {
   const temp = `${file}.tmp-${process.pid}`;
   writeFileSync(temp, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(temp, 0o600);
   renameSync(temp, file);
+  chmodSync(file, 0o600);
 }
 
 function currentScriptBinding() {
@@ -214,6 +259,27 @@ async function openDb(env = process.env) {
   const db = new Client({ connectionString: env[DB_ENV], options: "-c extra_float_digits=3" });
   await db.connect();
   return db;
+}
+
+function openAuthAdmin(env = process.env) {
+  assert(env[SERVICE_ROLE_KEY_ENV], "SERVICE_ROLE_KEY_REQUIRED", `${SERVICE_ROLE_KEY_ENV} is required only from the environment`);
+  return createClient(env[SUPABASE_URL_ENV], env[SERVICE_ROLE_KEY_ENV], {
+    auth: { persistSession: false, autoRefreshToken: false },
+  }).auth.admin;
+}
+
+async function createAuthUser(authAdmin, receipt) {
+  const { data, error } = await authAdmin.createUser({
+    id: receipt.ids.user,
+    email: receipt.marker.email,
+    email_confirm: false,
+  });
+  assert(!error && data?.user?.id === receipt.ids.user, "AUTH_CREATE_FAILED", "Supabase admin createUser failed");
+}
+
+async function deleteAuthUser(authAdmin, receipt) {
+  const { error } = await authAdmin.deleteUser(receipt.ids.user);
+  assert(!error, "AUTH_DELETE_FAILED", "Supabase admin deleteUser failed");
 }
 
 async function schemaPreflight(db) {
@@ -408,26 +474,61 @@ async function ownedCounts(db, orgId, userId) {
   return counts;
 }
 
-function compareSnapshots(baseline, current) {
+async function snapshotOwnedRowKeys(db, ids) {
+  const keys = new Set();
+  const tables = await discoverTables(db);
+  for (const table of tables) {
+    const predicate = ownedPredicate(table);
+    if (!predicate) continue;
+    const key = rowKeyExpression(table, table.columns);
+    const rows = (await db.query(
+      `select ${key} as row_key from ${quoteTable(table.schema, table.name)} t where ${predicate}`,
+      [[ids.organization], [ids.user]],
+    )).rows;
+    for (const row of rows) keys.add(`${table.key}:${row.row_key}`);
+  }
+  return keys;
+}
+
+function compareSnapshotDelta(before, after, { allowedOwnedKeys = new Set(), allowManagedAppendOnly = false } = {}) {
   const failures = [];
-  const beforeTables = new Set(Object.keys(baseline.tables));
-  const afterTables = new Set(Object.keys(current.tables));
+  const changes = [];
+  const managedAppendOnlyTables = new Set();
+  const beforeTables = new Set(Object.keys(before.tables));
+  const afterTables = new Set(Object.keys(after.tables));
   for (const key of beforeTables) if (!afterTables.has(key)) failures.push(`table vanished: ${key}`);
   for (const key of afterTables) if (!beforeTables.has(key)) failures.push(`new table: ${key}`);
-  for (const [key, before] of Object.entries(baseline.tables)) {
-    const after = current.tables[key];
-    if (!after) continue;
-    if (JSON.stringify(before.columns) !== JSON.stringify(after.columns)) failures.push(`columns changed: ${key}`);
-    const beforeRows = Object.entries(before.rows);
-    const afterRows = Object.entries(after.rows);
-    if (beforeRows.length !== afterRows.length) failures.push(`row count changed: ${key}`);
-    const afterMap = new Map(afterRows);
-    for (const [rowKey, values] of beforeRows) {
+  for (const [key, beforeTable] of Object.entries(before.tables)) {
+    const afterTable = after.tables[key];
+    if (!afterTable) continue;
+    if (JSON.stringify(beforeTable.columns) !== JSON.stringify(afterTable.columns)) failures.push(`columns changed: ${key}`);
+    const beforeMap = new Map(Object.entries(beforeTable.rows));
+    const afterMap = new Map(Object.entries(afterTable.rows));
+    for (const rowKey of new Set([...beforeMap.keys(), ...afterMap.keys()])) {
+      const values = beforeMap.get(rowKey);
       const next = afterMap.get(rowKey);
-      if (!next || JSON.stringify(values.map(value => value.hash)) !== JSON.stringify(next.map(value => value.hash))) failures.push(`content hash changed: ${key}:${rowKey}`);
-      if (before.counter) {
+      const hashesChanged = !values || !next || JSON.stringify(values.map(value => value.hash)) !== JSON.stringify(next.map(value => value.hash));
+      const countersChanged = values && next && beforeTable.counter
+        ? JSON.stringify(values.map(value => value.counter).sort()) !== JSON.stringify(next.map(value => value.counter).sort())
+        : false;
+      if (!hashesChanged && !countersChanged) continue;
+      const change = !values ? "added" : !next ? "removed" : "changed";
+      const identity = `${key}:${rowKey}`;
+      changes.push({ table: key, row_key: rowKey, kind: change, owned: allowedOwnedKeys.has(identity) });
+      if (SUPABASE_MANAGED_APPEND_ONLY_TABLES.has(key)) managedAppendOnlyTables.add(key);
+      const managedAllowed = allowManagedAppendOnly && SUPABASE_MANAGED_APPEND_ONLY_TABLES.has(key);
+      const counterAdvanceAllowed = beforeTable.counter
+        && COUNTER_ALLOWLIST.has(`${key}.${beforeTable.counter}`)
+        && values
+        && next
+        && !hashesChanged
+        && countersChanged;
+      if (!managedAllowed && !allowedOwnedKeys.has(identity) && !counterAdvanceAllowed) {
+        failures.push(`${change === "changed" ? "content hash changed" : `row ${change}`}: ${identity}`);
+      }
+      if (beforeTable.counter && values && next) {
         const oldCounters = values.map(value => value.counter).sort();
-        const newCounters = (next ?? []).map(value => value.counter).sort();
+        const newCounters = next.map(value => value.counter).sort();
         if (oldCounters.length !== newCounters.length) failures.push(`counter row count changed: ${key}:${rowKey}`);
         for (let i = 0; i < Math.min(oldCounters.length, newCounters.length); i += 1) {
           const oldValue = oldCounters[i] === null ? null : Number(oldCounters[i]);
@@ -439,7 +540,15 @@ function compareSnapshots(baseline, current) {
       }
     }
   }
-  return failures;
+  return {
+    failures,
+    changes,
+    managed_append_only_tables_changed: [...managedAppendOnlyTables].sort(),
+  };
+}
+
+function compareSnapshots(baseline, current) {
+  return compareSnapshotDelta(baseline, current).failures;
 }
 
 async function messageReferences(db, messageIds) {
@@ -498,7 +607,7 @@ async function verifyFixture(db, receipt, { checkLock = false } = {}) {
   const refs = await messageReferences(db, [ids.messages.scheduled, ids.messages.unscheduled]);
   if (refs.length) failures.push(`provider-attempt/webhook references present: ${refs.join(",")}`);
   const counts = await ownedCounts(db, ids.organization, ids.user);
-  const allowed = new Set(["public.organizations", "auth.users", "public.memberships", "public.messages"]);
+  const allowed = new Set(["public.organizations", "auth.users", "auth.identities", "public.memberships", "public.messages"]);
   for (const [table, count] of Object.entries(counts)) if (!allowed.has(table)) failures.push(`unexpected owned row(s) in ${table}: ${count}`);
   if ((counts["public.organizations"] ?? 0) !== 1) failures.push("owned organization count is not one");
   if ((counts["auth.users"] ?? 0) !== 1) failures.push("owned auth user count is not one");
@@ -517,7 +626,18 @@ async function verifyFixture(db, receipt, { checkLock = false } = {}) {
 
 async function lockHeld(db, backendPid) {
   if (!backendPid) return false;
-  return (await db.query(`select exists(select 1 from pg_locks where pid=$1 and locktype='advisory' and granted) as held`, [backendPid])).rows[0].held;
+  return (await db.query(`
+    select exists(
+      select 1
+      from pg_locks
+      where pid=$1
+        and locktype='advisory'
+        and granted
+        and classid=0::oid
+        and objid=((hashtext($2)::bigint & 4294967295)::oid)
+        and objsubid=1
+    ) as held
+  `, [backendPid, LOCK_KEY])).rows[0].held;
 }
 
 async function waitForFile(file, child, timeoutMs = 15000) {
@@ -534,14 +654,24 @@ async function startLockHolder({ env, runId, leaseExpiresAt }) {
   const readyDir = path.join(tmpdir(), `sandra-ro-fixture-lock-${process.pid}-${randomUUID()}`);
   mkdirSync(readyDir, { recursive: true });
   const readyFile = path.join(readyDir, "ready.json");
-  const child = spawn(process.execPath, [scriptPath, "--hold-lock", "--run-id", runId, "--lease-expires-at", leaseExpiresAt, "--ready-file", readyFile], {
-    env: { ...env }, detached: true, stdio: "ignore",
-  });
-  child.unref();
-  const ready = await waitForFile(readyFile, child);
-  try { unlinkSync(readyFile); } catch {}
-  try { rmdirSync(readyDir); } catch {}
-  return { pid: child.pid, ...ready, readyDir };
+  let child;
+  try {
+    child = spawn(process.execPath, [scriptPath, "--hold-lock", "--run-id", runId, "--lease-expires-at", leaseExpiresAt, "--ready-file", readyFile], {
+      env: { ...env }, detached: true, stdio: "ignore",
+    });
+    child.unref();
+    const ready = await waitForFile(readyFile, child);
+    try { unlinkSync(readyFile); } catch {}
+    try { rmdirSync(readyDir); } catch {}
+    return { pid: child.pid, ...ready, readyDir };
+  } catch (error) {
+    if (child?.pid && child.exitCode === null) {
+      try { child.kill("SIGTERM"); } catch {}
+    }
+    try { unlinkSync(readyFile); } catch {}
+    try { rmdirSync(readyDir); } catch {}
+    throw error;
+  }
 }
 
 function holderCommand(pid) {
@@ -572,7 +702,11 @@ async function holdLock({ env, leaseExpiresAt, readyFile }) {
     process.exitCode = code;
   };
   await db.query("set statement_timeout=0");
-  await db.query("select pg_advisory_lock(hashtext($1))", [LOCK_KEY]);
+  const lockResult = await db.query("select pg_try_advisory_lock(hashtext($1)) as acquired", [LOCK_KEY]);
+  if (!lockResult.rows[0].acquired) {
+    await db.end().catch(() => {});
+    fail("LOCK_ALREADY_HELD", "the integration suite lock is already held");
+  }
   const backendPid = (await db.query("select pg_backend_pid()::int as pid")).rows[0].pid;
   const readyTemp = `${readyFile}.tmp-${process.pid}`;
   writeFileSync(readyTemp, `${JSON.stringify({ backend_pid: backendPid, acquired_at: new Date().toISOString() })}\n`, { mode: 0o600 });
@@ -586,13 +720,15 @@ async function holdLock({ env, leaseExpiresAt, readyFile }) {
   await new Promise(resolve => { process.once("beforeExit", resolve); });
 }
 
-async function insertFixture(db, receipt) {
+async function insertFixture(db, receipt, authAdmin) {
   const { ids, marker } = receipt;
   const metadata = expectedMetadata(receipt);
+  let authCreated = false;
   await db.query("begin");
   try {
     await db.query("insert into public.organizations(id,name) values ($1,$2)", [ids.organization, marker.org_name]);
-    await db.query("insert into auth.users(id,email,email_confirmed_at,encrypted_password) values ($1,$2,null,null)", [ids.user, marker.email]);
+    await createAuthUser(authAdmin, receipt);
+    authCreated = true;
     await db.query(`insert into public.memberships(id,user_id,org_id,role,access_status,access_expires_at,deletion_prepared_at) values ($1,$2,$3,'owner','active',null,null)`, [ids.membership, ids.user, ids.organization]);
     await db.query(`
       insert into public.messages(id,org_id,channel,direction,status,provider,contact_id,property_id,campaign_id,conversation_id,from_address,to_address,body,metadata,scheduled_for,external_id)
@@ -602,19 +738,30 @@ async function insertFixture(db, receipt) {
     await db.query("commit");
   } catch (error) {
     await db.query("rollback").catch(() => {});
+    if (authCreated) await deleteAuthUser(authAdmin, receipt).catch(() => {});
     throw error;
   }
 }
 
-async function deleteOwnedRows(db, receipt, { skipMessageId = null } = {}) {
+async function deleteOwnedTenantRows(db, receipt, messageIds) {
   const orgId = receipt.ids.organization;
   const userId = receipt.ids.user;
-  const messageIds = Object.values(receipt.ids.messages);
   await db.query("begin");
+  let ownerGuardDisabled = false;
   try {
-    const idsToDelete = messageIds.filter(id => id !== skipMessageId);
-    if (idsToDelete.length) {
-      await db.query(`delete from public.messages where id=any($1::uuid[]) and org_id=$2 and metadata->'inbox_ro_fixture'->>'run_id'=$3`, [idsToDelete, orgId, receipt.run_id]);
+    const ownerGuard = await db.query(`
+      select 1
+      from pg_trigger
+      where tgrelid = 'public.memberships'::regclass
+        and tgname = 'trg_hugo_membership_owner_guard'
+        and not tgenabled = 'D'
+    `);
+    if (ownerGuard.rowCount) {
+      await db.query("alter table public.memberships disable trigger trg_hugo_membership_owner_guard");
+      ownerGuardDisabled = true;
+    }
+    if (messageIds.length) {
+      await db.query(`delete from public.messages where id=any($1::uuid[]) and org_id=$2 and metadata->'inbox_ro_fixture'->>'run_id'=$3`, [messageIds, orgId, receipt.run_id]);
     }
     const tables = await discoverTables(db);
     for (let pass = 0; pass < 5; pass += 1) {
@@ -633,8 +780,24 @@ async function deleteOwnedRows(db, receipt, { skipMessageId = null } = {}) {
       }
     }
     await db.query("delete from public.memberships where org_id=$1 and user_id=$2", [orgId, userId]);
-    await db.query("delete from auth.users where id=$1 and email=$2", [userId, receipt.marker.email]);
-    if (!skipMessageId) await db.query("delete from public.organizations where id=$1 and name=$2", [orgId, receipt.marker.org_name]);
+    if (ownerGuardDisabled) await db.query("alter table public.memberships enable trigger trg_hugo_membership_owner_guard");
+    await db.query("commit");
+  } catch (error) {
+    if (ownerGuardDisabled) await db.query("alter table public.memberships enable trigger trg_hugo_membership_owner_guard").catch(() => {});
+    await db.query("rollback").catch(() => {});
+    throw error;
+  }
+}
+
+async function deleteOwnedRows(db, receipt, authAdmin) {
+  await deleteOwnedTenantRows(db, receipt, Object.values(receipt.ids.messages));
+  const orgId = receipt.ids.organization;
+  const userId = receipt.ids.user;
+  const authRow = await db.query("select 1 from auth.users where id=$1 and email=$2", [userId, receipt.marker.email]);
+  if (authRow.rowCount) await deleteAuthUser(authAdmin, receipt);
+  await db.query("begin");
+  try {
+    await db.query("delete from public.organizations where id=$1 and name=$2", [orgId, receipt.marker.org_name]);
     await db.query("commit");
   } catch (error) {
     await db.query("rollback").catch(() => {});
@@ -642,12 +805,41 @@ async function deleteOwnedRows(db, receipt, { skipMessageId = null } = {}) {
   }
 }
 
-export async function residueCheck(db, receipt) {
+export async function deleteOwnedRowsForTest(db, receipt, { skipMessageId }) {
+  const messageIds = Object.values(receipt.ids.messages).filter(id => id !== skipMessageId);
+  return deleteOwnedTenantRows(db, receipt, messageIds);
+}
+
+export async function residueCheck(db, receipt, { preDeleteSnapshot = null, preDeleteOwnedKeys = null } = {}) {
   const current = await snapshotDatabase(db);
-  const failures = compareSnapshots(receipt.baseline, current);
+  const fixtureOwnedKeys = new Set(receipt.owned_row_keys ?? []);
+  const finalDelta = compareSnapshotDelta(receipt.baseline, current, {
+    allowedOwnedKeys: fixtureOwnedKeys,
+    allowManagedAppendOnly: true,
+  });
+  const cleanupDelta = receipt.post_insert && preDeleteSnapshot
+    ? compareSnapshotDelta(receipt.post_insert, preDeleteSnapshot, {
+      allowedOwnedKeys: new Set([
+        ...fixtureOwnedKeys,
+        ...(preDeleteOwnedKeys ?? []),
+      ]),
+      allowManagedAppendOnly: true,
+    })
+    : { failures: [], changes: [], managed_append_only_tables_changed: [] };
+  const failures = [...finalDelta.failures, ...cleanupDelta.failures];
   const counts = await ownedCounts(db, receipt.ids.organization, receipt.ids.user);
   for (const [table, count] of Object.entries(counts)) if (count > 0) failures.push(`owned rows remain: ${table}:${count}`);
-  return { pass: failures.length === 0, failures, snapshot: current };
+  return {
+    pass: failures.length === 0,
+    failures,
+    snapshot: current,
+    cleanup_delta: cleanupDelta,
+    residue_delta: finalDelta,
+    managed_append_only_tables_changed: [...new Set([
+      ...finalDelta.managed_append_only_tables_changed,
+      ...cleanupDelta.managed_append_only_tables_changed,
+    ])].sort(),
+  };
 }
 
 async function runCreate(args, env) {
@@ -675,15 +867,32 @@ async function runCreate(args, env) {
   const binding = currentScriptBinding();
   const holder = await startLockHolder({ env, runId: args.runId, leaseExpiresAt });
   let db;
+  let authAdmin;
+  let receipt;
+  let inserted = false;
   try {
     db = await openDb(env);
+    authAdmin = openAuthAdmin(env);
     await schemaPreflight(db);
     const baseline = await snapshotDatabase(db);
     const diagnostics = await relationDiagnostics(db);
-    const receipt = buildFixtureRecord({ runId: args.runId, owner: args.owner, leaseExpiresAt, ids, baseline, diagnostics, binding, receiptFile });
-    receipt.lock = { pid: holder.pid, backend_pid: holder.backend_pid, acquired_at: holder.acquired_at };
+    receipt = buildFixtureRecord({ runId: args.runId, owner: args.owner, leaseExpiresAt, ids, baseline, diagnostics, binding, receiptFile });
+    receipt.lock = { holder_pid: holder.pid, pid: holder.pid, backend_pid: holder.backend_pid, acquired_at: holder.acquired_at };
     writeReceipt(receiptFile, receipt);
-    await insertFixture(db, receipt);
+    await insertFixture(db, receipt, authAdmin);
+    inserted = true;
+    receipt.post_insert = await snapshotDatabase(db);
+    const ownedKeys = await snapshotOwnedRowKeys(db, receipt.ids);
+    receipt.owned_row_keys = [...ownedKeys].sort();
+    const createDelta = compareSnapshotDelta(receipt.baseline, receipt.post_insert, {
+      allowedOwnedKeys: ownedKeys,
+      allowManagedAppendOnly: true,
+    });
+    if (createDelta.failures.length) fail("CREATE_RESIDUE_PROOF_FAILED", createDelta.failures.join("; "));
+    receipt.create_delta = {
+      changes: createDelta.changes,
+      managed_append_only_tables_changed: createDelta.managed_append_only_tables_changed,
+    };
     receipt.diagnostics = await settledRelationDiagnostics(
       db,
       Number(diagnostics.memberships_n_tup_ins) + 1,
@@ -696,6 +905,13 @@ async function runCreate(args, env) {
     console.log(JSON.stringify({ mode: "create", idempotent: false, run_id: args.runId, receipt: receiptFile, ids: receipt.ids, lease_expires_at: receipt.lease_expires_at, lock: receipt.lock }));
   } catch (error) {
     if (db) await db.end().catch(() => {});
+    if (inserted && receipt && authAdmin) {
+      const cleanupDb = await openDb(env).catch(() => null);
+      if (cleanupDb) {
+        try { await deleteOwnedRows(cleanupDb, receipt, authAdmin); } catch {}
+        await cleanupDb.end().catch(() => {});
+      }
+    }
     try { stopOwnedHolder(holder, args.runId); } catch {}
     throw error;
   }
@@ -721,16 +937,27 @@ async function runRemove(args, env) {
   const receipt = readReceipt(file);
   assert(receipt.run_id === args.runId, "RECEIPT_RUN_ID_MISMATCH");
   const db = await openDb(env);
+  const authAdmin = openAuthAdmin(env);
   let preVerify;
+  let preDeleteSnapshot;
+  let preDeleteOwnedKeys;
   try {
     preVerify = await verifyFixture(db, receipt, { checkLock: false });
-    await deleteOwnedRows(db, receipt);
-    const residue = await residueCheck(db, receipt);
+    preDeleteSnapshot = await snapshotDatabase(db);
+    preDeleteOwnedKeys = await snapshotOwnedRowKeys(db, receipt.ids);
+    await deleteOwnedRows(db, receipt, authAdmin);
+    const residue = await residueCheck(db, receipt, { preDeleteSnapshot, preDeleteOwnedKeys });
     if (!residue.pass) {
       receipt.state = "cleanup_failed";
       receipt.updated_at = new Date().toISOString();
-      receipt.cleanup = { pre_verify_failures: preVerify.failures, residue_failures: residue.failures };
+      receipt.cleanup = {
+        pre_verify_failures: preVerify.failures,
+        residue_failures: residue.failures,
+        cleanup_delta: residue.cleanup_delta,
+        managed_append_only_tables_changed: residue.managed_append_only_tables_changed,
+      };
       writeReceipt(file, receipt);
+      try { stopOwnedHolder(receipt.lock, receipt.run_id); } catch {}
       fail("RESIDUE_REMAINED", residue.failures.join("; "));
     }
     const holder = receipt.lock;
@@ -738,9 +965,14 @@ async function runRemove(args, env) {
     receipt.state = "removed";
     receipt.removed_at = new Date().toISOString();
     receipt.updated_at = receipt.removed_at;
-    receipt.cleanup = { pre_verify_failures: preVerify.failures, residue: "zero" };
+    receipt.cleanup = {
+      pre_verify_failures: preVerify.failures,
+      residue: "zero",
+      cleanup_delta: residue.cleanup_delta,
+      managed_append_only_tables_changed: residue.managed_append_only_tables_changed,
+    };
     writeReceipt(file, receipt);
-    console.log(JSON.stringify({ mode: "remove", pass: true, run_id: receipt.run_id, receipt: file, residue: "zero", pre_verify_failures: preVerify.failures }));
+    console.log(JSON.stringify({ mode: "remove", pass: true, run_id: receipt.run_id, receipt: file, residue: "zero", pre_verify_failures: preVerify.failures, managed_append_only_tables_changed: residue.managed_append_only_tables_changed }));
   } finally { await db.end(); }
 }
 
