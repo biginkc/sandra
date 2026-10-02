@@ -59,6 +59,10 @@
     {
       "path": "/api/cron/norma-reconciliation",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/norma-notifications",
+      "schedule": "*/5 * * * *"
     }
   ],
   "git": {
