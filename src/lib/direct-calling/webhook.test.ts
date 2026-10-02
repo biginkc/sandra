@@ -44,7 +44,7 @@ describe("processDirectCallWebhook", () => {
     const out = await processDirectCallWebhook(answerBrowser(), deps);
     expect(out.result).toBe("processed");
     expect(dial).toHaveBeenCalledTimes(1);
-    expect(dial).toHaveBeenCalledWith(expect.objectContaining({ to: "+15550001111", linkTo: "browser-leg", bridgeOnAnswer: true, bridgeIntent: false }));
+    expect(dial).toHaveBeenCalledWith(expect.objectContaining({ to: "+15550001111", linkTo: "browser-leg", bridgeOnAnswer: true, bridgeIntent: false, recording: expect.objectContaining({ record: "record-from-answer", recordChannels: "dual", recordTrack: "both", recordFormat: "wav", recordMaxLength: expect.any(Number) }) }));
     expect(dial.mock.calls[0][0]).not.toHaveProperty("parkAfterUnbridge");
     expect(store.calls.get(CALL)).toMatchObject({ status: "seller_dialing", seller_leg_id: "SELLER", seller_dial_state: "sent" });
     // The seller Dial's unresolved row existed before the Dial and is resolved by the known leg.
@@ -83,6 +83,19 @@ describe("processDirectCallWebhook", () => {
     const second = await processDirectCallWebhook(raw, deps);
     expect(second.result).toBe("duplicate");
     expect(dial).toHaveBeenCalledTimes(1);
+  });
+
+  it("captures a saved seller recording before acknowledging it and ignores a processed duplicate", async () => {
+    const { deps } = setup({ status: "connected", seller_leg_id: "SELLER" });
+    const recordingSaved = vi.fn(async () => undefined);
+    deps.recordingSaved = recordingSaved;
+    const raw = body("call.recording.saved", "SELLER", { directCallId: CALL, role: "seller" }, "recording-event", {
+      recording_id: "rec-1", call_leg_id: "leg-1", call_session_id: "session-1",
+    });
+    await expect(processDirectCallWebhook(raw, deps)).resolves.toMatchObject({ result: "processed" });
+    await expect(processDirectCallWebhook(raw, deps)).resolves.toMatchObject({ result: "duplicate" });
+    expect(recordingSaved).toHaveBeenCalledTimes(1);
+    expect(recordingSaved).toHaveBeenCalledWith(expect.objectContaining({ id: CALL, seller_leg_id: "SELLER" }), expect.objectContaining({ recordingId: "rec-1", callControlId: "SELLER" }));
   });
 
   it("stores events for unknown calls and never controls them", async () => {

@@ -14,6 +14,7 @@ import {
   type SellerDialCommand,
 } from "./transitions";
 import { TelnyxApiError, decodeClientState, type ActiveCall, type DialParams } from "./telnyx";
+import { parseDirectRecordingSaved, type DirectRecordingSaved } from "./recording";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_CAS_ATTEMPTS = 3;
@@ -29,6 +30,8 @@ export type WebhookDeps = {
   listActiveCalls: () => Promise<{ calls: ActiveCall[]; complete: boolean }>;
   now: () => Date;
   report: (error: unknown, tag: string) => void;
+  /** Persists and captures call.recording.saved before the event is acknowledged. */
+  recordingSaved?: (row: DirectCallFullRow, recording: DirectRecordingSaved) => Promise<void>;
 };
 
 export type WebhookOutcome = { status: 200; result: "duplicate" | "stored_only" | "processed" };
@@ -132,6 +135,13 @@ async function runSellerDial(deps: WebhookDeps, row: DirectCallFullRow, command:
       clientState: command.clientState,
       bridgeOnAnswer: command.bridgeOnAnswer,
       bridgeIntent: command.bridgeIntent,
+      recording: {
+        record: "record-from-answer",
+        recordChannels: "dual",
+        recordTrack: "both",
+        recordFormat: "wav",
+        recordMaxLength: command.timeLimitSecs,
+      },
     });
   } catch (error) {
     deps.report(error, "direct_call_seller_dial");
@@ -201,8 +211,19 @@ export async function processDirectCallWebhook(rawBody: string, deps: WebhookDep
   }
 
   if (!row) {
+    if (parsed.event.type === "call.recording.saved" && deps.recordingSaved) {
+      // A recording without its direct-call owner must remain unprocessed so
+      // the provider can redeliver after the seller leg is visible.
+      throw new Error("recording_call_unresolved");
+    }
     await store.markEventProcessed(parsed.eventId, null);
     return { status: 200, result: "stored_only" };
+  }
+
+  if (parsed.event.type === "call.recording.saved" && deps.recordingSaved) {
+    const recording = parseDirectRecordingSaved(rawBody);
+    if (!recording) throw new Error("recording_event_invalid");
+    await deps.recordingSaved(row, recording);
   }
 
   for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS && row; attempt++) {

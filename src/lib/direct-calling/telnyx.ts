@@ -140,6 +140,13 @@ export type DialParams = {
   linkTo?: string;
   bridgeOnAnswer?: boolean;
   bridgeIntent?: boolean;
+  recording?: {
+    record: "record-from-answer";
+    recordChannels: "dual";
+    recordTrack: "both";
+    recordFormat: "wav";
+    recordMaxLength: number;
+  };
 };
 
 export function encodeClientState(state: Record<string, string>): string {
@@ -175,10 +182,50 @@ export async function telnyxDial(
   if (params.linkTo) body.link_to = params.linkTo;
   if (params.bridgeOnAnswer !== undefined) body.bridge_on_answer = params.bridgeOnAnswer;
   if (params.bridgeIntent !== undefined) body.bridge_intent = params.bridgeIntent;
+  if (params.recording) {
+    body.record = params.recording.record;
+    body.record_channels = params.recording.recordChannels;
+    body.record_track = params.recording.recordTrack;
+    body.record_format = params.recording.recordFormat;
+    body.record_max_length = params.recording.recordMaxLength;
+  }
   const text = await request(settings, "POST", "/calls", body, "json", options);
   const id = parseJson<{ data?: { call_control_id?: string } }>(text).data?.call_control_id;
   if (!id) throw new TelnyxApiError("Telnyx dial response had no call_control_id.", "unknown", null);
   return { callControlId: id };
+}
+
+export type TelnyxRecording = {
+  recordingId: string;
+  status: string;
+  durationMillis: number | null;
+  downloadUrlWav: string | null;
+};
+
+/** Reads the private recording locator returned after call.recording.saved. */
+export async function telnyxGetRecording(
+  settings: Pick<TelnyxDirectSettings, "apiKey">,
+  recordingId: string,
+  options: TelnyxClientOptions = {},
+): Promise<TelnyxRecording> {
+  const text = await request(settings, "GET", `/recordings/${encodeURIComponent(recordingId)}`, undefined, "json", options);
+  const data = parseJson<{
+    data?: {
+      id?: unknown;
+      status?: unknown;
+      duration_millis?: unknown;
+      download_urls?: { wav?: unknown };
+    };
+  }>(text).data;
+  const id = typeof data?.id === "string" && data.id ? data.id : recordingId;
+  const status = typeof data?.status === "string" ? data.status : "";
+  const durationMillis = typeof data?.duration_millis === "number" && Number.isFinite(data.duration_millis)
+    ? data.duration_millis
+    : null;
+  const downloadUrlWav = typeof data?.download_urls?.wav === "string" && data.download_urls.wav
+    ? data.download_urls.wav
+    : null;
+  return { recordingId: id, status, durationMillis, downloadUrlWav };
 }
 
 export async function telnyxHangup(

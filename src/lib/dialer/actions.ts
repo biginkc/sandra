@@ -13,6 +13,7 @@ import { repDisplayName } from "@/lib/coach/rep-display-name";
 import { getMemberTimezone } from "@/components/appointments/book-appointment-action";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 import { openCallCapability, openCallIdentity } from "./call-capability";
+import { attachPendingDirectRecording } from "@/lib/direct-calling/recording";
 
 import { isHomeownerTrainingNumber, canCallHomeownerTraining, HOMEOWNER_TRAINING_LABEL } from "./homeowner-training";
 
@@ -371,6 +372,19 @@ export async function completeSoftphoneCall(input: {
     // Bound targets prevent a customer call from being relabeled using browser data.
     if (identity?.phoneE164 && identity.phoneE164 !== input.target.phoneE164) return { ok: false, error: "The call target does not match this call." };
     const rawJitterCallId = openCallCapability(input.callCapability, user.id);
+    // Direct capabilities contain our durable direct_calls id; Jitter
+    // capabilities contain a provider id and simply produce no match here.
+    let directCallId: string | null = null;
+    if (!training && identity?.callId) {
+      const { data: directCall, error: directCallError } = await supabase
+        .from("direct_calls")
+        .select("id")
+        .eq("id", identity.callId)
+        .eq("operator_user_id", user.id)
+        .maybeSingle();
+      if (directCallError) return { ok: false, error: directCallError.message };
+      directCallId = (directCall as { id?: string } | null)?.id ?? null;
+    }
     // Capability-less calls use the wrap token as their Sandra-side attempt
     // identity, while capability-backed calls use Jitter's call UUID. That
     // divergence is an accepted residual only for capability-less calls.
@@ -459,6 +473,7 @@ export async function completeSoftphoneCall(input: {
       phone_e164: input.target.phoneE164,
       do_not_call_requested: !training && input.disposition === "dnc",
       wrap_token: input.wrapToken,
+      ...(directCallId ? { direct_call_id: directCallId } : {}),
     };
     let callbackTaskId: string | undefined;
     let dispositionSucceeded = false;
@@ -476,7 +491,7 @@ export async function completeSoftphoneCall(input: {
 
         const { data: updatedActivity, error: activityError } = await supabase
           .from("call_activities")
-          .update(activityValues)
+          .update(activityValues as never)
           .eq("id", activity.id)
           .or(activityMatchFilter)
           .select("id")
@@ -513,7 +528,7 @@ export async function completeSoftphoneCall(input: {
         }
         const { data: insertedActivity, error: activityError } = await supabase
           .from("call_activities")
-          .insert(activityValues)
+          .insert(activityValues as never)
           .select("id")
           .maybeSingle();
         if (activityError && activityError.code !== "23505") {
@@ -554,7 +569,7 @@ export async function completeSoftphoneCall(input: {
           };
           const { data: updatedActivity, error: updateActivityError } = await supabase
             .from("call_activities")
-            .update(activityValues)
+            .update(activityValues as never)
             .eq("id", existingActivity.id)
             .or(activityMatchFilter)
             .select("id")
@@ -567,6 +582,8 @@ export async function completeSoftphoneCall(input: {
       }
 
       if (!activity) return { ok: false, error: "The call activity was not saved." };
+
+      if (directCallId) await attachPendingDirectRecording(directCallId, activity.id);
 
       // fn_book_appointment owns the booked_appointment write. Supplying the
       // stable wrap token makes a retry after a lost response replay the same

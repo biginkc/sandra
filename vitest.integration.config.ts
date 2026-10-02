@@ -32,6 +32,7 @@ export default defineConfig({
       "supabase/migrations/20260929238000_sequence_replace_steps.integration.test.ts",
       "supabase/migrations/20260930038000_sequence_canary_controls.integration.test.ts",
       "supabase/migrations/20261001200000_direct_calls.integration.test.ts",
+      "supabase/migrations/20261002005023_direct_recording_integration.integration.test.ts",
       "supabase/migrations/20260927023443_dialpad_cti_kpi_seller_speech.integration.test.ts",
       "supabase/migrations/20260929034021_dialpad_cti_foundation.integration.test.ts",
       "supabase/migrations/20260929120000_dialpad_cti_call_projection.integration.test.ts",

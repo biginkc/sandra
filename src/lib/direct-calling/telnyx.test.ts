@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { TelnyxDirectSettings } from "./config";
-import { TelnyxApiError, decodeClientState, encodeClientState, isLegAlreadyEnded, telnyxCreateToken, telnyxDial, telnyxGetCallAlive, telnyxHangup, telnyxListActiveCalls } from "./telnyx";
+import { TelnyxApiError, decodeClientState, encodeClientState, isLegAlreadyEnded, telnyxCreateToken, telnyxDial, telnyxGetCallAlive, telnyxGetRecording, telnyxHangup, telnyxListActiveCalls } from "./telnyx";
 
 const settings: TelnyxDirectSettings = { apiKey: "SECRET-KEY-123", connectionId: "conn", appId: "app", webhookPublicKey: "pub", callerIdE164: "+15550002222" };
 
@@ -19,6 +19,22 @@ describe("telnyx client", () => {
     expect(sent).toMatchObject({ connection_id: "app", link_to: "B", bridge_on_answer: true, bridge_intent: false, command_id: "cmd", timeout_secs: 30, time_limit_secs: 100, retry_on_timeout: false });
     expect(sent).not.toHaveProperty("park_after_unbridge");
     expect(decodeClientState(sent.client_state)).toEqual({ directCallId: "x", role: "seller" });
+  });
+
+  it("sends dual WAV recording only when the seller Dial opts in", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ data: { call_control_id: "cc-record" } }), { status: 200 }));
+    await telnyxDial(settings, {
+      to: "+15550001111", from: "+15550002222", clientState: { directCallId: "x", role: "seller" }, commandId: "cmd",
+      timeoutSecs: 30, timeLimitSecs: 180, retryOnTimeout: false,
+      recording: { record: "record-from-answer", recordChannels: "dual", recordTrack: "both", recordFormat: "wav", recordMaxLength: 180 },
+    }, { fetchImpl: fetchImpl as never });
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toMatchObject({ record: "record-from-answer", record_channels: "dual", record_track: "both", record_format: "wav", record_max_length: 180, retry_on_timeout: false });
+  });
+
+  it("reads the completed private recording locator", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ data: { id: "rec-1", status: "completed", duration_millis: 72000, download_urls: { wav: "https://cdn.telnyx.test/rec.wav" } } }), { status: 200 }));
+    await expect(telnyxGetRecording(settings, "rec-1", { fetchImpl: fetchImpl as never })).resolves.toEqual({ recordingId: "rec-1", status: "completed", durationMillis: 72000, downloadUrlWav: "https://cdn.telnyx.test/rec.wav" });
   });
 
   it("classifies failures and redacts the key", async () => {
