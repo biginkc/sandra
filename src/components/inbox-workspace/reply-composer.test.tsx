@@ -1,4 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useLayoutEffect } from "react";
+import { flushSync } from "react-dom";
+import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { INBOX_REPLY_TERMINAL_RECEIPT_STATES, type InboxReplyStatus, type PreparedInboxReply } from "@/lib/inbox/reply-api-contract";
 import { InboxReplyComposer, MAX_POLL_DURATION_MS, PreviewInboxReplyComposer } from "./reply-composer";
@@ -38,6 +41,18 @@ function responseFor(url: string, init?: RequestInit, receiptState: InboxReplySt
   if (url.endsWith("/replies/prepare")) return Response.json(prepared(JSON.parse(String(init?.body)).idempotencyKey));
   if (url.endsWith("/replies/accept")) return Response.json({ operationId });
   return Response.json(status(receiptState));
+}
+
+function pendingPrepareFetcher() {
+  let signal: AbortSignal | undefined;
+  const fetcher = vi.fn<typeof fetch>((input, init) => {
+    if (!String(input).endsWith("/replies/prepare")) throw Error("unexpected request");
+    signal = init?.signal ?? undefined;
+    return new Promise<Response>((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+    });
+  });
+  return { fetcher, signal: () => signal };
 }
 
 beforeEach(() => {
@@ -189,6 +204,60 @@ describe("InboxReplyComposer", () => {
     expect(screen.getByRole("textbox", { name: "Reply message" })).toHaveValue("Keep this draft");
     expect(screen.queryByRole("button", { name: "Send reply" })).toBeNull();
     expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith("/replies/accept"))).toBe(false);
+  });
+
+  it("clears a mounted bulk draft and aborts prepare when targets change", async () => {
+    const { fetcher, signal } = pendingPrepareFetcher();
+    const view = render(<InboxReplyComposer targets={[target, targetFor(2)]} routeKey="route-a" enabled fetcher={fetcher} />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Reply message" }), { target: { value: "Draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Review reply" }));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      view.rerender(<InboxReplyComposer targets={[target, targetFor(3)]} routeKey="route-a" enabled fetcher={fetcher} />);
+    });
+
+    expect(screen.getByRole("textbox", { name: "Reply message" })).toHaveValue("");
+    expect(signal()?.aborted).toBe(true);
+  });
+
+  it("clears a mounted draft and aborts prepare when initialState changes", async () => {
+    const { fetcher, signal } = pendingPrepareFetcher();
+    const view = render(<PreviewInboxReplyComposer targets={[target, targetFor(2)]} routeKey="route-a" enabled initialDraft="Initial draft" initialState={{ phase: "ready", draft: "Initial draft" }} fetcher={fetcher} />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Reply message" }), { target: { value: "Draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Review reply" }));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      view.rerender(<PreviewInboxReplyComposer targets={[target, targetFor(2)]} routeKey="route-a" enabled initialDraft="Initial draft" initialState={{ phase: "ready", draft: "" }} fetcher={fetcher} />);
+    });
+
+    expect(screen.getByRole("textbox", { name: "Reply message" })).toHaveValue("");
+    expect(signal()?.aborted).toBe(true);
+  });
+
+  it("preserves a draft when a single composer mount effect is flushed after input", async () => {
+    const container = document.body.appendChild(document.createElement("div"));
+    const root = createRoot(container);
+    const testGlobal = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
+    const previousActEnvironment = testGlobal.IS_REACT_ACT_ENVIRONMENT;
+    try {
+      testGlobal.IS_REACT_ACT_ENVIRONMENT = false;
+      function Harness() {
+        useLayoutEffect(() => {
+          const textarea = container.querySelector("textarea");
+          if (!textarea) throw Error("composer did not commit");
+          fireEvent.change(textarea, { target: { value: "Draft" } });
+        }, []);
+        return <InboxReplyComposer targets={[target]} routeKey="route-a" enabled />;
+      }
+      flushSync(() => root.render(<Harness />));
+      expect(container.querySelector("textarea")).toHaveValue("Draft");
+    } finally {
+      testGlobal.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+      await act(async () => { root.unmount(); });
+      container.remove();
+    }
   });
 
   it("shows an explicit uncertain receipt immediately and stops automatic polling", async () => {
