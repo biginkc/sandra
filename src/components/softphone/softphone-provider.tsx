@@ -361,6 +361,9 @@ export function SoftphoneProvider({
         }
       : null,
     coachUiEnabled ? wrapToken : null,
+    // Direct script binding is created on seller answer. Ringing must not
+    // consume the bounded lookup retries before that write can occur.
+    !directMode || isConnectedCallStatus(callStatus),
   );
   const transportRef = useRef<CallTransport | null>(null);
   const callHandleRef = useRef<CallHandle | null>(null);

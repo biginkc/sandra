@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -186,6 +186,28 @@ describe("SoftphoneProvider pilot (telnyx_direct) mode", () => {
     await waitFor(() => expect(m.loadCoachCallScript).toHaveBeenCalledWith("direct-call-id"));
     expect(m.mintStartIntent).not.toHaveBeenCalled();
     expect(m.jitterTransport).not.toHaveBeenCalled();
+  });
+
+  it("waits for the direct seller answer before resolving the coaching script", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    vi.stubEnv("NEXT_PUBLIC_DIRECT_COACH_ENABLED", "1");
+    let notify: ((status: string) => void) | undefined;
+    m.directTransport.mockImplementation(() => {
+      const transport = fakeTransport("direct-call-id", { callCapability: "sealed-direct-cap" });
+      m.start.mockImplementation(async () => {
+        notify = transport.onStateChange.mock.calls[0][0];
+        notify?.("ringing");
+        return { id: "direct-call-id", callCapability: "sealed-direct-cap" };
+      });
+      return transport;
+    });
+    const user = userEvent.setup();
+    render(<SoftphoneProvider callingConfig={{ transport: "telnyx_direct" }}><SoftphoneLeadButton lead={lead} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(m.start).toHaveBeenCalled());
+    expect(m.loadCoachCallScript).not.toHaveBeenCalled();
+    await act(async () => { notify?.("live"); });
+    await waitFor(() => expect(m.loadCoachCallScript).toHaveBeenCalledWith("direct-call-id"));
   });
 
   it("never touches a Jitter action, uses the direct transport, and wraps up with the server-sealed identity", async () => {

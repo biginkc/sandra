@@ -75,6 +75,26 @@ describe("useCoachSession", () => {
     expect(result.current.scriptBindingStatus).toBe("ready");
   });
 
+  it("preserves binding retries through a 30-second direct ring and resolves after answer", async () => {
+    vi.useFakeTimers();
+    loadCoachCallScript
+      .mockResolvedValueOnce({ status: "pending" })
+      .mockResolvedValueOnce({ status: "bound", binding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle } });
+    const { result, rerender } = renderHook(
+      ({ answered }) => useCoachSession("direct-call", null, null, null, answered, null, "wrap-token", answered),
+      { initialProps: { answered: false } },
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(loadCoachCallScript).not.toHaveBeenCalled();
+    expect(result.current.scriptBindingStatus).toBe("loading");
+    rerender({ answered: true });
+    await act(async () => { await Promise.resolve(); });
+    expect(loadCoachCallScript).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(result.current.scriptBinding).toEqual({ ref: closrOutbound123Ref, bundle: closrOutbound123Bundle });
+    expect(result.current.scriptBindingStatus).toBe("ready");
+  });
+
   it("retries one transient binding-action error before declaring coaching unavailable", async () => {
     vi.useFakeTimers();
     loadCoachCallScript
