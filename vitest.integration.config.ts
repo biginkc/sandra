@@ -29,6 +29,10 @@ export default defineConfig({
     // rejects hosted URLs. It has its own local-only runner so this hosted
     // suite cannot accidentally select it.
     exclude: [
+      // Destructive + local-only (assertLocalOnlyEnvironment); runs via
+      // vitest.filter-local.config.ts against a disposable local stack.
+      "src/lib/prospects/filter-to-supabase.integration.test.ts",
+      "src/lib/prospects/filter-cache-triggers.integration.test.ts",
       "supabase/migrations/20260929238000_sequence_replace_steps.integration.test.ts",
       "supabase/migrations/20260930038000_sequence_canary_controls.integration.test.ts",
       "supabase/migrations/20261001200000_direct_calls.integration.test.ts",

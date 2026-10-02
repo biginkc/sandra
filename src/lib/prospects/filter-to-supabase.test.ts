@@ -839,804 +839,184 @@ describe("applyBlock: motivation_level", () => {
 // Pre-fetch blocks — list / tag / list_count / engagement / has_unread_inbound
 // / has_open_tasks. These need supabase client mocking.
 // ===========================================================================
+// Computed-field blocks (list, tag, list_count, engagement, unread, tasks).
+// None of these may issue a side query, embed a resource, or push ids.
+// ===========================================================================
 
-describe("applyBlock: list (pre-fetch via property_lists)", () => {
-  it("empty values → no pre-fetch, no predicate", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({
-        kind: "list",
-        combinator: "any",
-        values: [],
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(calls).toEqual([]);
-    expect(m.calls.length).toBe(0);
+async function run(blocks: FilterBlock[]) {
+  const { proxy, calls } = mockBuilder();
+  const m = mockSupabaseClient();
+  await applyFilters(proxy, blocks, m.sb);
+  expect(m.calls).toEqual([]); // no side queries, ever
+  return calls;
+}
+
+describe.each([
+  ["list", "filter_list_ids"],
+  ["tag", "filter_tag_ids"],
+] as const)("applyBlock: %s (uuid[] cache column)", (kind, field) => {
+  const mk = (combinator: string, values: string[]) =>
+    block({ kind, combinator, values }) as FilterBlock;
+
+  it("empty values → no predicate", async () => {
+    expect(await run([mk("any", [])])).toEqual([]);
   });
-  it("any combinator → filters through embedded property_lists instead of expanding IDs", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({
-        kind: "list",
-        combinator: "any",
-        values: ["L1", "L2"],
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.length).toBe(0);
-    expect(calls).toEqual(['in(list_filter.list_id,["L1","L2"])']);
+  it("any → overlaps", async () => {
+    expect(await run([mk("any", ["A", "B"])])).toEqual([`overlaps(${field},["A","B"])`]);
   });
-  it("single-value all combinator → filters through embedded property_lists", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({
-        kind: "list",
-        combinator: "all",
-        values: ["L1"],
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.length).toBe(0);
-    expect(calls).toEqual(['in(list_filter.list_id,["L1"])']);
+  it("all with one value → overlaps", async () => {
+    expect(await run([mk("all", ["A"])])).toEqual([`overlaps(${field},["A"])`]);
   });
-  it("all combinator → only properties on EVERY selected list", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    m.setReturn("property_lists", [
-      { property_id: "p1", list_id: "L1" },
-      { property_id: "p1", list_id: "L2" },
-      { property_id: "p2", list_id: "L1" },
-    ]);
-    await applyBlock(
-      proxy,
-      block({
-        kind: "list",
-        combinator: "all",
-        values: ["L1", "L2"],
-      }) as FilterBlock,
-      m.sb,
-    );
-    // p1 is on both; p2 is only on L1. Translator should pass ["p1"].
-    const inCall = calls.find((c) => c.startsWith("in(id,"));
-    expect(inCall).toBeTruthy();
-    expect(inCall).toContain("p1");
-    expect(inCall).not.toContain("p2");
+  it("all with several values → contains every value", async () => {
+    expect(await run([mk("all", ["A", "B"])])).toEqual([`contains(${field},["A","B"])`]);
   });
-  it("not combinator → uses anti-join instead of expanding matched property IDs", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    m.setReturn("property_lists", [{ property_id: "p1", list_id: "L1" }]);
-    await applyBlock(
-      proxy,
-      block({
-        kind: "list",
-        combinator: "not",
-        values: ["L1"],
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.length).toBe(0);
-    expect(calls).toEqual([
-      'in(list_exclusion.list_id,["L1"])',
-      "is(list_exclusion,null)",
-    ]);
+  it("not → NOT overlaps", async () => {
+    expect(await run([mk("not", ["A", "B"])])).toEqual([`not(${field},ov,{A,B})`]);
   });
-  it("empty multi-list all pre-fetch → 00000000-0000-0000-0000-000000000000 short-circuit so .in() never matches", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    m.setReturn("property_lists", []);
-    await applyBlock(
-      proxy,
-      block({
-        kind: "list",
-        combinator: "all",
-        values: ["L1", "L2"],
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(
-      calls.some((c) => c.includes("00000000-0000-0000-0000-000000000000")),
-    ).toBe(true);
-  });
-});
-
-describe("needsPropertyListsEmbed", () => {
-  it("returns true for list filters that use embedded relationship paths", () => {
-    expect(
-      needsPropertyListsEmbed([
-        block({
-          kind: "list",
-          combinator: "any",
-          values: ["L1"],
-        }) as FilterBlock,
-      ]),
-    ).toBe(true);
-    expect(
-      needsPropertyListsEmbed([
-        block({
-          kind: "list",
-          combinator: "all",
-          values: ["L1"],
-        }) as FilterBlock,
-      ]),
-    ).toBe(true);
-  });
-
-  it("returns false for list filters that still need pre-fetch set logic", () => {
-    expect(
-      needsPropertyListsEmbed([
-        block({
-          kind: "list",
-          combinator: "all",
-          values: ["L1", "L2"],
-        }) as FilterBlock,
-      ]),
-    ).toBe(false);
-    expect(
-      needsPropertyListsEmbed([
-        block({
-          kind: "list",
-          combinator: "not",
-          values: ["L1"],
-        }) as FilterBlock,
-      ]),
-    ).toBe(true);
-    expect(
-      needsPropertyListsEmbed([
-        block({
-          kind: "list",
-          combinator: "any",
-          values: ["L1"],
-        }) as FilterBlock,
-        block({
-          kind: "list",
-          combinator: "any",
-          values: ["L2"],
-        }) as FilterBlock,
-      ]),
-    ).toBe(false);
-    expect(
-      needsPropertyListsEmbed([
-        block({
-          kind: "list",
-          combinator: "not",
-          values: ["L1"],
-        }) as FilterBlock,
-        block({
-          kind: "list",
-          combinator: "not",
-          values: ["L2"],
-        }) as FilterBlock,
-      ]),
-    ).toBe(false);
-  });
-});
-
-describe("propertyListsSelectFragment", () => {
-  it("adds positive and anti-join aliases independently", () => {
-    expect(
-      propertyListsSelectFragment([
-        block({
-          kind: "list",
-          combinator: "any",
-          values: ["L1"],
-        }) as FilterBlock,
-        block({
-          kind: "list",
-          combinator: "not",
-          values: ["L2"],
-        }) as FilterBlock,
-      ]),
-    ).toBe(
-      "list_filter:property_lists!inner(list_id), list_exclusion:property_lists(list_id)",
-    );
-  });
-
-  it("omits the anti-join alias for repeated negative list blocks", () => {
-    expect(
-      propertyListsSelectFragment([
-        block({
-          kind: "list",
-          combinator: "not",
-          values: ["L1"],
-        }) as FilterBlock,
-        block({
-          kind: "list",
-          combinator: "not",
-          values: ["L2"],
-        }) as FilterBlock,
-      ]),
-    ).toBeNull();
-  });
-});
-
-describe("propertyTagsSelectFragment", () => {
-  it("adds positive and anti-join aliases independently", () => {
-    expect(
-      propertyTagsSelectFragment([
-        block({
-          kind: "tag",
-          combinator: "any",
-          values: ["T1"],
-        }) as FilterBlock,
-        block({
-          kind: "tag",
-          combinator: "not",
-          values: ["T2"],
-        }) as FilterBlock,
-      ]),
-    ).toBe(
-      "tag_filter:property_tags!inner(tag_id), tag_exclusion:property_tags(tag_id)",
-    );
-  });
-
-  it("omits the positive tag alias for repeated positive tag blocks", () => {
-    expect(
-      propertyTagsSelectFragment([
-        block({
-          kind: "tag",
-          combinator: "any",
-          values: ["T1"],
-        }) as FilterBlock,
-        block({
-          kind: "tag",
-          combinator: "any",
-          values: ["T2"],
-        }) as FilterBlock,
-      ]),
-    ).toBeNull();
-  });
-
-  it("omits the anti-join alias for repeated negative tag blocks", () => {
-    expect(
-      propertyTagsSelectFragment([
-        block({
-          kind: "tag",
-          combinator: "not",
-          values: ["T1"],
-        }) as FilterBlock,
-        block({
-          kind: "tag",
-          combinator: "not",
-          values: ["T2"],
-        }) as FilterBlock,
-      ]),
-    ).toBeNull();
-  });
-});
-
-describe("listCountSelectFragment", () => {
-  it("uses the positive stack join for min-bound list-count filters", () => {
-    expect(
-      listCountSelectFragment([
-        block({
-          kind: "list_count",
-          range: { min: 2, max: null },
-        }) as FilterBlock,
-      ]),
-    ).toBe("stack_filter:property_stack_counts!inner(stack_count)");
-  });
-
-  it("uses an anti-join for max-only list-count filters so zero-list properties can match", () => {
-    expect(
-      listCountSelectFragment([
-        block({
-          kind: "list_count",
-          range: { min: null, max: 1 },
-        }) as FilterBlock,
-      ]),
-    ).toBe("stack_exclusion:property_stack_counts(stack_count)");
-  });
-});
-
-describe("filterSelectFragment", () => {
-  it("adds relationship aliases for single-bucket engagement filters", () => {
-    expect(
-      filterSelectFragment([
-        block({
-          kind: "engagement",
-          combinator: "any",
-          values: ["never_contacted"],
-        }) as FilterBlock,
-        block({
-          kind: "engagement",
-          combinator: "any",
-          values: ["attempted"],
-        }) as FilterBlock,
-        block({
-          kind: "engagement",
-          combinator: "any",
-          values: ["replied"],
-        }) as FilterBlock,
-      ]),
-    ).toBe(
-      [
-        "contact_messages:messages()",
-        "attempted_outbound:messages!inner(direction)",
-        "attempted_inbound:messages(direction)",
-        "replied_messages:messages!inner(direction)",
-      ].join(", "),
-    );
-  });
-
-  it("adds a relationship alias for the contacted engagement preset", () => {
-    expect(
-      filterSelectFragment([
-        block({
-          kind: "engagement",
-          combinator: "any",
-          values: ["replied", "attempted"],
-        }) as FilterBlock,
-      ]),
-    ).toBe("contacted_messages:messages!inner(direction)");
-  });
-
-  it("adds relationship aliases for tag and list-count filters so production queries do not expand thousands of ids", () => {
-    expect(
-      filterSelectFragment([
-        block({
-          kind: "tag",
-          combinator: "any",
-          values: ["T1"],
-        }) as FilterBlock,
-        block({
-          kind: "list_count",
-          range: { min: 2, max: null },
-        }) as FilterBlock,
-      ]),
-    ).toBe(
-      "tag_filter:property_tags!inner(tag_id), stack_filter:property_stack_counts!inner(stack_count)",
-    );
-  });
-
-  it("adds no-inbound alias for never_contacted + attempted engagement without id expansion", () => {
-    expect(
-      filterSelectFragment([
-        block({
-          kind: "engagement",
-          combinator: "any",
-          values: ["never_contacted", "attempted"],
-        }) as FilterBlock,
-      ]),
-    ).toBe("inbound_messages:messages(direction)");
-  });
-
-  it("adds the list-count anti-join alias for max-only ranges", () => {
-    expect(
-      filterSelectFragment([
-        block({
-          kind: "list_count",
-          range: { min: null, max: 1 },
-        }) as FilterBlock,
-      ]),
-    ).toBe("stack_exclusion:property_stack_counts(stack_count)");
-  });
-});
-
-describe("applyBlock: tag (pre-fetch via property_tags)", () => {
-  it("any combinator → filters through embedded property_tags instead of expanding IDs", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({
-        kind: "tag",
-        combinator: "any",
-        values: ["T1", "T2"],
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.length).toBe(0);
-    expect(calls).toEqual(['in(tag_filter.tag_id,["T1","T2"])']);
-  });
-  it("not combinator → uses anti-join instead of expanding matched property IDs", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({
-        kind: "tag",
-        combinator: "not",
-        values: ["T1"],
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.length).toBe(0);
-    expect(calls).toEqual([
-      'in(tag_exclusion.tag_id,["T1"])',
-      "is(tag_exclusion,null)",
-    ]);
-  });
-  it("empty values → no pre-fetch, no predicate", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({
-        kind: "tag",
-        combinator: "any",
-        values: [],
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(calls).toEqual([]);
-    expect(m.calls.length).toBe(0);
-  });
-});
-
-describe("applyFilters: repeated relationship-backed blocks", () => {
-  it("repeated positive list blocks use parent-id intersection instead of one shared child alias", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    m.setReturn("property_lists", [
-      { property_id: "p1", list_id: "L1" },
-      { property_id: "p1", list_id: "L2" },
-    ]);
-
-    await applyFilters(
-      proxy,
-      [
-        block({
-          kind: "list",
-          combinator: "any",
-          values: ["L1"],
-        }) as FilterBlock,
-        block({
-          kind: "list",
-          combinator: "any",
-          values: ["L2"],
-        }) as FilterBlock,
-      ],
-      m.sb,
-    );
-
-    expect(m.calls.filter((c) => c === "from(property_lists)")).toHaveLength(2);
-    expect(calls).toEqual(['in(id,["p1"])', 'in(id,["p1"])']);
-  });
-
-  it("repeated positive tag blocks use parent-id intersection instead of one shared child alias", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    m.setReturn("property_tags", [
-      { property_id: "p1", tag_id: "T1" },
-      { property_id: "p1", tag_id: "T2" },
-    ]);
-
-    await applyFilters(
-      proxy,
-      [
-        block({
-          kind: "tag",
-          combinator: "any",
-          values: ["T1"],
-        }) as FilterBlock,
-        block({
-          kind: "tag",
-          combinator: "any",
-          values: ["T2"],
-        }) as FilterBlock,
-      ],
-      m.sb,
-    );
-
-    expect(m.calls.filter((c) => c === "from(property_tags)")).toHaveLength(2);
-    expect(calls).toEqual(['in(id,["p1"])', 'in(id,["p1"])']);
-  });
-
-  it("repeated negative list blocks use parent-id exclusion instead of one shared anti-join alias", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    m.setReturn("property_lists", [{ property_id: "p1", list_id: "L1" }]);
-
-    await applyFilters(
-      proxy,
-      [
-        block({
-          kind: "list",
-          combinator: "not",
-          values: ["L1"],
-        }) as FilterBlock,
-        block({
-          kind: "list",
-          combinator: "not",
-          values: ["L2"],
-        }) as FilterBlock,
-      ],
-      m.sb,
-    );
-
-    expect(m.calls.filter((c) => c === "from(property_lists)")).toHaveLength(2);
-    expect(calls).toEqual([
-      'not(id,in,("p1"))',
-      'not(id,in,("p1"))',
-    ]);
-  });
-
-  it("repeated negative tag blocks use parent-id exclusion instead of one shared anti-join alias", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    m.setReturn("property_tags", [{ property_id: "p1", tag_id: "T1" }]);
-
-    await applyFilters(
-      proxy,
-      [
-        block({
-          kind: "tag",
-          combinator: "not",
-          values: ["T1"],
-        }) as FilterBlock,
-        block({
-          kind: "tag",
-          combinator: "not",
-          values: ["T2"],
-        }) as FilterBlock,
-      ],
-      m.sb,
-    );
-
-    expect(m.calls.filter((c) => c === "from(property_tags)")).toHaveLength(2);
-    expect(calls).toEqual([
-      'not(id,in,("p1"))',
-      'not(id,in,("p1"))',
+  it("repeated blocks simply AND (no shared alias, no id intersection)", async () => {
+    expect(await run([mk("any", ["A"]), mk("any", ["B"])])).toEqual([
+      `overlaps(${field},["A"])`,
+      `overlaps(${field},["B"])`,
     ]);
   });
 });
 
-describe("applyBlock: list_count (pre-fetch via property_stack_counts)", () => {
-  it("min only → filters through embedded property_stack_counts instead of expanding IDs", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({
-        kind: "list_count",
-        range: { min: 2, max: null },
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.length).toBe(0);
-    expect(calls).toEqual(["gte(stack_filter.stack_count,2)"]);
+describe("select fragments (kept for caller compatibility)", () => {
+  it("are always null — no block needs an embedded resource", () => {
+    const stack = [
+      block({ kind: "list", combinator: "any", values: ["L"] }),
+      block({ kind: "tag", combinator: "not", values: ["T"] }),
+      block({ kind: "list_count", range: { min: 1, max: null } }),
+      block({ kind: "engagement", combinator: "any", values: ["replied"] }),
+      block({ kind: "engagement", combinator: "not", values: ["never_contacted"] }),
+    ] as FilterBlock[];
+    expect(filterSelectFragment(stack)).toBeNull();
+    expect(propertyListsSelectFragment(stack)).toBeNull();
+    expect(propertyTagsSelectFragment(stack)).toBeNull();
+    expect(listCountSelectFragment(stack)).toBeNull();
+    expect(needsPropertyListsEmbed(stack)).toBe(false);
   });
-  it("range bounds passed to .gte/.lte on the embedded view alias", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({
-        kind: "list_count",
-        range: { min: 2, max: 5 },
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.length).toBe(0);
-    expect(calls).toEqual([
-      "gte(stack_filter.stack_count,2)",
-      "lte(stack_filter.stack_count,5)",
-    ]);
+});
+
+describe("applyBlock: list_count (filter_list_count computed field)", () => {
+  const mk = (min: number | null, max: number | null) =>
+    block({ kind: "list_count", range: { min, max } }) as FilterBlock;
+  it("both null → no predicate", async () => {
+    expect(await run([mk(null, null)])).toEqual([]);
   });
-  it("max only → anti-joins rows above the max so properties with zero lists are included", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({
-        kind: "list_count",
-        range: { min: null, max: 1 },
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.length).toBe(0);
-    expect(calls).toEqual([
-      "gt(stack_exclusion.stack_count,1)",
-      "is(stack_exclusion,null)",
+  it("min only → gte (floored at 1: legacy inner join drops zero-list rows)", async () => {
+    expect(await run([mk(2, null)])).toEqual(["gte(filter_list_count,2)"]);
+    expect(await run([mk(0, null)])).toEqual(["gte(filter_list_count,1)"]);
+  });
+  it("max only → lte (zero-list properties match)", async () => {
+    expect(await run([mk(null, 3)])).toEqual(["lte(filter_list_count,3)"]);
+  });
+  it("min and max → both bounds", async () => {
+    expect(await run([mk(1, 4)])).toEqual([
+      "gte(filter_list_count,1)",
+      "lte(filter_list_count,4)",
     ]);
   });
 });
 
-describe("applyBlock: engagement (4-bucket pre-fetch)", () => {
-  it("'replied' bucket → filters through an inbound message relationship", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({
-        kind: "engagement",
-        combinator: "any",
-        values: ["replied"],
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
-    expect(calls).toEqual(["eq(replied_messages.direction,inbound)"]);
+describe("applyBlock: engagement (message cache booleans + outreach_dispo)", () => {
+  const mk = (combinator: string, values: string[]) =>
+    block({ kind: "engagement", combinator, values }) as FilterBlock;
+  const NONE = "in(id,[\"00000000-0000-0000-0000-000000000000\"])";
+  const ATT = "and(has_outbound_message.eq.true,has_inbound_message.eq.false)";
+  const NEV = "and(has_inbound_message.eq.false,has_outbound_message.eq.false)";
+  const OPT = "outreach_dispo.in.(opted_out,dnc)";
+  const NOT_OPT = "or(outreach_dispo.is.null,outreach_dispo.not.in.(opted_out,dnc))";
+
+  it("empty → no predicate", async () => {
+    expect(await run([mk("any", [])])).toEqual([]);
   });
-  it("'never_contacted' → anti-joins messages without pre-fetching ids", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({
-        kind: "engagement",
-        combinator: "any",
-        values: ["never_contacted"],
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
-    expect(calls).toEqual(["is(contact_messages,null)"]);
-  });
-  it("'attempted' → requires outbound messages and anti-joins inbound replies", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({
-        kind: "engagement",
-        combinator: "any",
-        values: ["attempted"],
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
-    expect(calls).toEqual([
-      "eq(attempted_outbound.direction,outbound)",
-      "eq(attempted_inbound.direction,inbound)",
-      "is(attempted_inbound,null)",
+  it("any single state → plain boolean eqs", async () => {
+    expect(await run([mk("any", ["replied"])])).toEqual(["eq(has_inbound_message,true)"]);
+    expect(await run([mk("any", ["attempted"])])).toEqual([
+      "eq(has_outbound_message,true)",
+      "eq(has_inbound_message,false)",
+    ]);
+    expect(await run([mk("any", ["never_contacted"])])).toEqual([
+      "eq(has_inbound_message,false)",
+      "eq(has_outbound_message,false)",
     ]);
   });
-  it("'opted_out' → checks outreach_dispo column for opted_out / dnc", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({
-        kind: "engagement",
-        combinator: "any",
-        values: ["opted_out"],
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
-    expect(calls).toEqual(['in(outreach_dispo,["opted_out","dnc"])']);
-  });
-  it("'attempted' + 'replied' → filters through any contacted message", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({
-        kind: "engagement",
-        combinator: "any",
-        values: ["replied", "attempted"],
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
-    expect(calls).toEqual([
-      'in(contacted_messages.direction,["inbound","outbound"])',
+  it("any opted_out only → outreach_dispo column predicate", async () => {
+    expect(await run([mk("any", ["opted_out"])])).toEqual([
+      'in(outreach_dispo,["opted_out","dnc"])',
     ]);
   });
-  it("'never_contacted' + 'attempted' → anti-joins inbound messages without id expansion", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({
-        kind: "engagement",
-        combinator: "any",
-        values: ["never_contacted", "attempted"],
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
-    expect(calls).toEqual([
-      "eq(inbound_messages.direction,inbound)",
-      "is(inbound_messages,null)",
+  it("any several states → single or()", async () => {
+    expect(await run([mk("any", ["attempted", "replied"])])).toEqual([
+      `or(${ATT},has_inbound_message.eq.true)`,
     ]);
   });
-  it("not never_contacted → filters through contacted messages without id expansion", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({
-        kind: "engagement",
-        combinator: "not",
-        values: ["never_contacted"],
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
-    expect(calls).toEqual([
-      'in(contacted_messages.direction,["inbound","outbound"])',
+  it("any states + opted_out → single or()", async () => {
+    expect(await run([mk("any", ["replied", "opted_out"])])).toEqual([
+      `or(has_inbound_message.eq.true,${OPT})`,
     ]);
   });
-  it("all never_contacted + attempted short-circuits to no matches", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({
-        kind: "engagement",
-        combinator: "all",
-        values: ["never_contacted", "attempted"],
-      }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(false);
-    expect(calls).toEqual([
-      'in(id,["00000000-0000-0000-0000-000000000000"])',
+  it("not states → each state negated, ANDed", async () => {
+    expect(await run([mk("not", ["never_contacted"])])).toEqual([
+      "or(has_inbound_message.eq.true,has_outbound_message.eq.true)",
     ]);
+    expect(await run([mk("not", ["replied", "attempted"])])).toEqual([
+      "eq(has_inbound_message,false)",
+      "or(has_outbound_message.eq.false,has_inbound_message.eq.true)",
+    ]);
+  });
+  it("not opted_out → NULL dispo stays visible", async () => {
+    expect(await run([mk("not", ["opted_out"])])).toEqual([NOT_OPT]);
+  });
+  it("not states + opted_out → both exclusions ANDed", async () => {
+    expect(await run([mk("not", ["replied", "opted_out"])])).toEqual([
+      "eq(has_inbound_message,false)",
+      NOT_OPT,
+    ]);
+  });
+  it("all containing never_contacted → matches nothing (legacy)", async () => {
+    expect(await run([mk("all", ["never_contacted"])])).toEqual([NONE]);
+    expect(await run([mk("all", ["never_contacted", "replied"])])).toEqual([NONE]);
+  });
+  it("all attempted+replied → matches nothing (legacy)", async () => {
+    expect(await run([mk("all", ["attempted", "replied"])])).toEqual([NONE]);
+    expect(await run([mk("all", ["attempted", "replied", "opted_out"])])).toEqual([NONE]);
+  });
+  it("all single (non-sentinel) → same as any single", async () => {
+    expect(await run([mk("all", ["replied"])])).toEqual(["eq(has_inbound_message,true)"]);
+  });
+  it("all other multi → UNION, not intersection (legacy quirk)", async () => {
+    expect(await run([mk("all", ["replied", "opted_out"])])).toEqual([
+      `or(has_inbound_message.eq.true,${OPT})`,
+    ]);
+  });
+  it("never_contacted term shape is stable", () => {
+    expect(NEV).toContain("has_outbound_message.eq.false");
   });
 });
 
-describe("applyBlock: has_unread_inbound (tri-state pre-fetch)", () => {
-  it("'yes' → pre-fetches messages where direction=inbound + read_at is null", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    m.setReturn("messages", [{ property_id: "pX" }]);
-    await applyBlock(
-      proxy,
-      block({ kind: "has_unread_inbound", tri: "yes" }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.some((c) => c.startsWith("from(messages)"))).toBe(true);
-    expect(calls.some((c) => c.startsWith("in(id,"))).toBe(true);
-  });
-  it("'any' → no pre-fetch, no predicate", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    await applyBlock(
-      proxy,
-      block({ kind: "has_unread_inbound", tri: "any" }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.length).toBe(0);
-    expect(calls).toEqual([]);
-  });
-  it("'no' empty pre-fetch → no predicate (everyone qualifies as 'no unread')", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    m.setReturn("messages", []);
-    await applyBlock(
-      proxy,
-      block({ kind: "has_unread_inbound", tri: "no" }) as FilterBlock,
-      m.sb,
-    );
-    // No predicate (empty negative set means nothing is excluded).
-    expect(calls).toEqual([]);
+describe("applyBlock: has_unread_inbound (cache boolean)", () => {
+  it("yes → eq true; no → eq false; any → none", async () => {
+    expect(await run([block({ kind: "has_unread_inbound", tri: "yes" }) as FilterBlock])).toEqual([
+      "eq(has_unread_inbound,true)",
+    ]);
+    expect(await run([block({ kind: "has_unread_inbound", tri: "no" }) as FilterBlock])).toEqual([
+      "eq(has_unread_inbound,false)",
+    ]);
+    expect(await run([block({ kind: "has_unread_inbound", tri: "any" }) as FilterBlock])).toEqual([]);
   });
 });
 
-describe("applyBlock: has_open_tasks (tri-state pre-fetch via tasks)", () => {
-  it("'yes' → pre-fetches tasks where status='open', applies .in('id', property_ids)", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    m.setReturn("tasks", [{ related_property_id: "pX" }]);
-    await applyBlock(
-      proxy,
-      block({ kind: "has_open_tasks", tri: "yes" }) as FilterBlock,
-      m.sb,
-    );
-    expect(m.calls.some((c) => c.startsWith("from(tasks)"))).toBe(true);
-    expect(calls.some((c) => c.startsWith("in(id,"))).toBe(true);
-  });
-  it("'no' with task rows → .not('id','in', ...)", async () => {
-    const { proxy, calls } = mockBuilder();
-    const m = mockSupabaseClient();
-    m.setReturn("tasks", [{ related_property_id: "pX" }]);
-    await applyBlock(
-      proxy,
-      block({ kind: "has_open_tasks", tri: "no" }) as FilterBlock,
-      m.sb,
-    );
-    expect(calls.some((c) => c.startsWith("not(id,in,"))).toBe(true);
+describe("applyBlock: has_open_tasks (cache boolean)", () => {
+  it("yes → eq true; no → eq false; any → none", async () => {
+    expect(await run([block({ kind: "has_open_tasks", tri: "yes" }) as FilterBlock])).toEqual([
+      "eq(has_open_tasks,true)",
+    ]);
+    expect(await run([block({ kind: "has_open_tasks", tri: "no" }) as FilterBlock])).toEqual([
+      "eq(has_open_tasks,false)",
+    ]);
+    expect(await run([block({ kind: "has_open_tasks", tri: "any" }) as FilterBlock])).toEqual([]);
   });
 });
 

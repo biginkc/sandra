@@ -69,6 +69,14 @@ const { createClientMock, recorded, resolveProspectEligibilityMock } =
         const data = recorded.pageRows?.shift() ?? recorded.rows;
         return Promise.resolve({ data, error: null });
       },
+      overlaps(column: string, values: unknown[]) {
+        recorded.calls.push(`overlaps(${column},${JSON.stringify(values)})`);
+        return this;
+      },
+      contains(column: string, values: unknown[]) {
+        recorded.calls.push(`contains(${column},${JSON.stringify(values)})`);
+        return this;
+      },
       not(column: string, operator: string, value: unknown) {
         recorded.calls.push(`not(${column},${operator},${String(value)})`);
         return this;
@@ -127,7 +135,7 @@ beforeEach(() => {
 });
 
 describe("getAllMatchingProspectIds", () => {
-  it("selects embedded filter fragments before applying relationship-backed filters", async () => {
+  it("filters child-table blocks through cache columns, with no embedded select fragments", async () => {
     const blockStack: FilterBlock[] = [
       {
         id: "tag-filter",
@@ -149,10 +157,10 @@ describe("getAllMatchingProspectIds", () => {
 
     expect(result.ok).toBe(true);
     expect(recorded.selectArg).toBe(
-      "id, source_import_id, source_imported_at, tag_filter:property_tags!inner(tag_id), stack_filter:property_stack_counts!inner(stack_count)",
+      "id, source_import_id, source_imported_at",
     );
-    expect(recorded.calls).toContain('in(tag_filter.tag_id,["tag-1"])');
-    expect(recorded.calls).toContain("gte(stack_filter.stack_count,1)");
+    expect(recorded.calls).toContain('overlaps(filter_tag_ids,["tag-1"])');
+    expect(recorded.calls).toContain("gte(filter_list_count,1)");
     expect(recorded.rangeCalls).toEqual([]);
     expect(recorded.calls).toContain('order(id,{"ascending":true})');
     expect(recorded.calls).toContain("limit(1000)");
