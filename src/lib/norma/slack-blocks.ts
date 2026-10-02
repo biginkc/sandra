@@ -90,7 +90,7 @@ export function buildNormaSummaryBlocks(input: NormaSlackSummaryInput): KnownBlo
 
 /** Plain-text fallback for notifications and clients that do not render blocks. */
 export function buildNormaSummaryFallbackText(input: Pick<NormaSlackSummaryInput, "outcome" | "propertyAddress">): string {
-  return `Norma call: ${normaOutcomeLabel(input.outcome)} (${input.propertyAddress})`;
+  return `Norma call: ${normaOutcomeLabel(input.outcome)} (${escapeSlackText(input.propertyAddress)})`;
 }
 
 /** Same base-URL resolution the existing Slack task links use. */

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildNormaLeadDeepLink, buildNormaSummaryBlocks, escapeSlackText } from "./slack-blocks";
+import { buildNormaLeadDeepLink, buildNormaSummaryBlocks, buildNormaSummaryFallbackText, escapeSlackText } from "./slack-blocks";
 
 const base = {
   sellerName: "Pat Seller",
@@ -74,5 +74,13 @@ describe("buildNormaLeadDeepLink", () => {
   it("builds the lead page URL from the configured base", () => {
     expect(buildNormaLeadDeepLink("p1", { NEXT_PUBLIC_APP_URL: "https://sandra.example/" })).toBe("https://sandra.example/leads/p1");
     expect(buildNormaLeadDeepLink("p1", { APP_URL: "sandra.example" })).toBe("https://sandra.example/leads/p1");
+  });
+});
+
+describe("buildNormaSummaryFallbackText", () => {
+  it("escapes the address like the blocks do", () => {
+    const text = buildNormaSummaryFallbackText({ outcome: "callback_requested", propertyAddress: "1 <!channel> & <http://x|y>" });
+    expect(text).toContain("&lt;!channel&gt; &amp; &lt;http://x|y&gt;");
+    expect(text).not.toContain("<!channel>");
   });
 });
