@@ -15,8 +15,10 @@ Fixture: `Inbox RO fixture (permanent, inert)`
 
 The only permitted fixture writes are fixed-ID `INSERT ... ON CONFLICT DO
 NOTHING` rows for the organization, membership, and two messages, plus one
-admin auth `createUser`. The user is passwordless, unconfirmed, banned for
-`876000h`, and stamped with the fixed `app_metadata.inbox_ro_fixture` object.
+admin auth `createUser`. No password is supplied; GoTrue owns its opaque
+bcrypt hash. The user is unconfirmed, has no sign-in timestamp, is banned past
+2100, carries the fixed nested `app_metadata.inbox_ro_fixture` object, has
+`providers: ["email"]`, and has at most one email identity.
 The email is `inbox-ro-fixture@fixtures.invalid`, falling back only to
 `inbox-ro-fixture@fixtures.test` if local GoTrue rejects `.invalid`.
 

@@ -42,11 +42,15 @@ the disposable local suite with `NODE_ENV=test` and
 
 ## Fixed permanent fixture
 
-The org name is `Inbox RO fixture (permanent, inert)`. The auth user has no
-password, `email_confirm:false`, `ban_duration:'876000h'`, the exact fixed
-`app_metadata.inbox_ro_fixture` stamp, and a reserved-TLD email:
-`inbox-ro-fixture@fixtures.invalid`. If local GoTrue rejects that syntax, the
-suite and fixture use `inbox-ro-fixture@fixtures.test` instead.
+The org name is `Inbox RO fixture (permanent, inert)`. The auth user is created
+without a supplied password; GoTrue owns the resulting opaque bcrypt hash. The
+fixture checks only that `banned_until` is after 2100, both
+`email_confirmed_at` and `last_sign_in_at` are NULL, the nested
+`app_metadata.inbox_ro_fixture` stamp is exact, `providers` is exactly
+`["email"]`, and there is at most one `email` identity. Other GoTrue metadata
+keys are ignored. The reserved-TLD email is `inbox-ro-fixture@fixtures.invalid`.
+If local GoTrue rejects that syntax, the suite and fixture use
+`inbox-ro-fixture@fixtures.test` instead.
 
 The org contains exactly two fixed queued `mock` SMS rows. Both have null
 contact, property, campaign, conversation, from, to, and external-id fields.
@@ -59,7 +63,8 @@ The receipt is informational: run id, owner, purpose, lease window, script
 binding, lock PIDs, diagnostics, and fixed-ID copies. No code path uses receipt
 IDs or markers as a target. The advisory lock holder spans the PRE→POST window,
 with a six-hour cap; expiry or abort releases the holder and never removes
-data.
+data. If an existing receipt points to a dead holder, use a new run-id instead
+of reusing that receipt.
 
 ```sh
 node scripts/inbox-test-readonly-fixture.mjs \
@@ -78,13 +83,15 @@ local suite.
 
 ## Verification
 
-Run the disposable PostgreSQL 17 + Supabase stack and all AT1–AT8 checks with:
+Run the disposable PostgreSQL 17 + Supabase stack and all AT1–AT9 checks with:
 
 ```sh
 npm run test:inbox-ro-fixture
 ```
 
-The suite also runs the T1 Vitest check. T1 proves m1 is not selected by the
+The suite also runs the T1 Vitest check. AT9 runs `--create`, `--verify`, and a
+second `--create` through real local GoTrue, and compares the stub's auth row
+shape with a real GoTrue row. T1 proves m1 is not selected by the
 sequence-tick clock at now+10y, no send-path status-only query selects m1, the
 real release guard leaves both rows unchanged, and the mock provider is not
 called until the deliberate local mutation of m2. The suite probes local
