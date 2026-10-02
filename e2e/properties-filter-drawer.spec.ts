@@ -233,13 +233,14 @@ test.describe("Phase 05 Plan 09 — full feature flow", () => {
         seeded.map((property) => property.id),
       );
     expect(stackError).toBeNull();
-    const { data: seededProps } = await admin
+    const { data: seededProps, error: seededPropsError } = await admin
       .from("properties")
       .select("id, org_id")
       .in(
         "id",
         seeded.map((property) => property.id),
       );
+    expect(seededPropsError).toBeNull();
     const orgOf = new Map((seededProps ?? []).map((p) => [p.id, p.org_id]));
     const stackCounts = new Map<string, number>();
     for (const row of listRows ?? []) {

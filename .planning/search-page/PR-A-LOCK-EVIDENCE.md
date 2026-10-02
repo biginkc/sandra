@@ -47,9 +47,7 @@ Fix (migration 110000): `lock table messages, tasks, property_lists, property_ta
 exclusive mode` as the first statement, children first and `properties` last (the order DML takes them), under the
 file's `lock_timeout = '5s'`. Re-run after the fix, 4 container-restart runs with the pinned CLI: 0 insert errors,
 max blocked insert 144-195 ms, max blocked read 68-150 ms, ACCESS EXCLUSIVE on properties 50-164 ms, 64-68 distinct
-migration transactions. Because the original failure was a 1-in-4 race, the fix is reasoned plus not-reproduced,
-not proven; the residual risk is a retry-able 40P01 for one in-flight insert during a ~100 ms window.
-
+migration transactions. 
 ## Statistical proof of the lock-order fix (valid runs, disposable 55329 sandbox only)
 Harness: `scripts/filter-volume/cold-runs.sh` = container restart (cold) + `revert-cache-migrations.mjs` + pinned CLI
 `supabase db push --include-all --local` with the probe running 5 concurrent writers (messages insert, tasks insert,
@@ -57,15 +55,12 @@ property_lists insert, property_tags insert, properties update) and a reader. A 
 (`assert-sandbox-target.mjs`: container `supabase_db_sandra-filter-vol` on 55329, postmaster start = container start,
 no `norma%` databases, workdir config port 55329) runs before every restart/revert/push.
 
-| variant | runs | migration failed (CLI exit != 0) | writer 40P01 deadlocks | runs affected |
-|---|---|---|---|---|
-| OLD 110000 (no up-front lock) | 5 | 3 | 6 | 3 |
-| OLD + 600 ms test-only `pg_sleep` inside the DDL | 8 | 8 | 11 | 8 |
-| FIXED 110000 (up-front LOCK) | 20 | 0 | 0 | 0 |
-| FIXED + same 600 ms `pg_sleep` | 8 | 0 | 0 | 0 |
+Clean comparison (no injected delay): OLD 110000 failed or deadlocked in **3/5** runs; FIXED 110000 in **0/20**.
 
-So the harness reproduces the deadlock (and shows the migration itself is often the victim, which rolls back and
-fails the push), and the fix removes it: 0/28 fixed runs affected, versus 11/13 old-variant runs. With the fix the
+Separate stress variant (test-only 600 ms `pg_sleep` inside the DDL window to widen the race): OLD 8/8 migration failures
+(11 writer deadlocks); FIXED 0/8.
+
+The harness reproduces the deadlock (the migration itself is often the victim, which rolls back and fails the push), and the fix removes it: 0/28 fixed runs affected. With the fix the
 worst blocked writer/reader across the 20 plain fixed runs was ~1.3 s (a one-off cold-run stall; typical 100-200 ms)
 and ACCESS EXCLUSIVE on `properties` up to ~1.0 s; in the widened runs writers wait the injected 0.6 s plus overhead
 (max ~0.9 s) and never error. Raw per-run JSON lines are in `scripts/filter-volume/results/` (gitignored; kept locally).
@@ -80,3 +75,8 @@ push applied 110000 and 110050 successfully (re-runnable).
 An earlier batch of 41 harness runs had an empty `SBX_WORKDIR` and pushed once to the shared dev stack on 54329
 (2026-10-02 09:30:38Z, one session; the 41 runs are void and their logs are preserved outside the repo). My objects were reverted there at
 09:37:19Z. The harness now fails closed (see above) and never targets 54329.
+
+## Residual risk
+The single `LOCK TABLE` statement acquires its tables sequentially (children first, `properties` last). A transaction that
+holds `properties` and then touches `messages` can still deadlock with it. The migration would be the victim: it rolls back
+cleanly and nothing is recorded. Runbook: on SQLSTATE 40P01 (or 55P03) from `db push`, re-run it once.

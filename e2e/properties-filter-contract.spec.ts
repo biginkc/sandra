@@ -173,11 +173,21 @@ async function stackCountsByProperty(
   admin: SupabaseClient<Database>,
   propertyIds?: string[],
 ): Promise<Map<string, number>> {
-  let q = admin.from("property_lists").select("property_id, org_id");
-  if (propertyIds) q = q.in("property_id", propertyIds);
-  const { data: rows, error } = await q;
-  expect(error).toBeNull();
-  const ids = Array.from(new Set((rows ?? []).map((r) => r.property_id)));
+  // Page with .range() until a short page so the 1000-row cap cannot undercount.
+  const rows: Array<{ property_id: string; org_id: string }> = [];
+  for (let from = 0; ; from += 1000) {
+    let q = admin
+      .from("property_lists")
+      .select("property_id, org_id")
+      .order("id")
+      .range(from, from + 999);
+    if (propertyIds) q = q.in("property_id", propertyIds);
+    const { data: page, error } = await q;
+    expect(error).toBeNull();
+    rows.push(...(page ?? []));
+    if (!page || page.length < 1000) break;
+  }
+  const ids = Array.from(new Set(rows.map((r) => r.property_id)));
   const orgOf = new Map<string, string>();
   for (let i = 0; i < ids.length; i += 200) {
     const { data: props, error: pErr } = await admin
@@ -188,7 +198,7 @@ async function stackCountsByProperty(
     for (const p of props ?? []) orgOf.set(p.id, p.org_id);
   }
   const counts = new Map<string, number>();
-  for (const r of rows ?? []) {
+  for (const r of rows) {
     if (orgOf.get(r.property_id) !== r.org_id) continue;
     counts.set(r.property_id, (counts.get(r.property_id) ?? 0) + 1);
   }
