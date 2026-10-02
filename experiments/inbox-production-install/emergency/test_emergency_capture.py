@@ -165,9 +165,11 @@ def apply_packet_text_with_local_identity(
     packet: str,
     *,
     prefix: str,
+    target_ref: str | None = "local-test",
+    local_test: str | None = "on",
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    """Test-only mutant executor; generated packets use runner_apply above."""
+    """Test-only packet executor; generated packets use runner_apply above."""
     descriptor, path_string = tempfile.mkstemp(prefix=prefix, suffix=".sql")
     os.close(descriptor)
     path = Path(path_string)
@@ -176,9 +178,11 @@ def apply_packet_text_with_local_identity(
         input_text = (
             "\\set ON_ERROR_STOP on\n"
             "BEGIN;\n"
-            "SET LOCAL inbox.emergency_target_ref = 'local-test';\n"
-            "SET LOCAL inbox.emergency_local_test = 'on';\n"
         )
+        if target_ref is not None:
+            input_text += f"SET LOCAL inbox.emergency_target_ref = '{target_ref}';\n"
+        if local_test is not None:
+            input_text += f"SET LOCAL inbox.emergency_local_test = '{local_test}';\n"
         command = ["psql", safe_url, "-X", "-v", "ON_ERROR_STOP=1", "-f", "-"]
         if LOCAL_TEST_CONTAINER is not None:
             command = [
@@ -424,9 +428,8 @@ WHERE n.nspname='public' AND c.relname='messages' AND t.tgname LIKE 'zzz_inbox_g
         baseline_function_bodies = function_body_digests(database_url)
         mutants: dict[str, str] = {}
 
-        # Both generated packets must refuse direct psql execution before any
-        # receipt DDL or function replacement.  This is the natural mutant
-        # boundary for the transaction-local target GUC.
+        # (b) With no GUCs at all, both generated packets must refuse before
+        # any receipt DDL or function replacement.
         for packet_path in (OFF, RESTORE):
             direct_result = apply_file(database_url, packet_path, check=False)
             direct_output = direct_result.stdout + direct_result.stderr
@@ -436,6 +439,56 @@ WHERE n.nspname='public' AND c.relname='messages' AND t.tgname LIKE 'zzz_inbox_g
                 raise RuntimeError(f"direct psql changed the database for {packet_path.name}")
             if psql(database_url, "SELECT to_regclass('inbox_emergency.capture_off_receipts')") != "":
                 raise RuntimeError(f"direct psql created a receipt for {packet_path.name}")
+
+        # (a) A local-test target without the second GUC must refuse before
+        # touching either the catalog or any capture function body.
+        single_guc_result = apply_packet_text_with_local_identity(
+            database_url,
+            OFF.read_text(),
+            prefix="capture-local-test-missing-flag-",
+            local_test=None,
+            check=False,
+        )
+        single_guc_output = single_guc_result.stdout + single_guc_result.stderr
+        if single_guc_result.returncode == 0 or "INBOX_EMERGENCY_LOCAL_TEST_IDENTITY_REFUSED" not in single_guc_output:
+            raise RuntimeError(f"local-test target without second GUC did not refuse:\n{single_guc_output}")
+        if catalog_fingerprint(database_url) != baseline_catalog or function_body_digests(database_url) != baseline_function_bodies:
+            raise RuntimeError("local-test target without second GUC changed the database")
+
+        # Production identity also requires an explicit non-local-test flag;
+        # an unset flag must not be treated as safe by NULL propagation.
+        production_unset_result = apply_packet_text_with_local_identity(
+            database_url,
+            OFF.read_text(),
+            prefix="capture-production-missing-flag-",
+            target_ref=PRODUCTION_TARGET_REF,
+            local_test=None,
+            check=False,
+        )
+        production_unset_output = production_unset_result.stdout + production_unset_result.stderr
+        if production_unset_result.returncode == 0 or "INBOX_EMERGENCY_PRODUCTION_LOCAL_TEST_REFUSED" not in production_unset_output:
+            raise RuntimeError(f"production target without second GUC did not refuse:\n{production_unset_output}")
+        if catalog_fingerprint(database_url) != baseline_catalog or function_body_digests(database_url) != baseline_function_bodies:
+            raise RuntimeError("production target without second GUC changed the database")
+
+        # Mutant: remove only the second-GUC clause. The preceding single-GUC
+        # case must then go red by changing the function bodies.
+        second_guc_clause = "IF coalesce(current_setting('inbox.emergency_local_test', true), '') <> 'on'"
+        second_guc_mutant = OFF.read_text().replace(second_guc_clause, "IF false", 1)
+        if second_guc_mutant == OFF.read_text():
+            raise RuntimeError("could not construct local-test second-GUC mutant")
+        second_guc_mutant_result = apply_packet_text_with_local_identity(
+            database_url,
+            second_guc_mutant,
+            prefix="capture-local-test-second-guc-mutant-",
+            local_test=None,
+            check=False,
+        )
+        if second_guc_mutant_result.returncode != 0 or function_body_digests(database_url) == baseline_function_bodies:
+            raise RuntimeError("removing the local-test second-GUC clause did not make case (a) go red")
+        mutants["local-test-second-guc"] = "KILLED (single-GUC case mutated without the clause)"
+        runner_apply(database_url, "capture-restore")
+        psql(database_url, "DROP SCHEMA inbox_emergency CASCADE")
 
         # Removing only the generated identity guard must make the direct-psql
         # test go red.  Restore and drop its out-of-band receipt afterward.
@@ -489,6 +542,58 @@ WHERE n.nspname='public' AND c.relname='messages' AND t.tgname LIKE 'zzz_inbox_g
             if result.returncode == 0 or "emergency capture packet blocked:" not in output or "connection to server" in output:
                 raise RuntimeError(f"runner {label} did not refuse before connect:\n{output}")
             mutants[f"runner-{label}"] = "KILLED (preflight refused before psql)"
+
+        production_url = f"postgresql://postgres@db.{PRODUCTION_TARGET_REF}.supabase.co:5432/postgres"
+        production_preflight_cases = [
+            ("wrong-host", runner_url),
+            ("password-in-url", production_url.replace("postgres@", "postgres:postgres@")),
+            ("query-option", f"{production_url}?sslmode=verify-full"),
+        ]
+        for label, value in production_preflight_cases:
+            result = run(
+                [
+                    "python3",
+                    str(RUNNER),
+                    "--packet",
+                    "capture-off",
+                    "--database-url",
+                    value,
+                    "--target-ref",
+                    PRODUCTION_TARGET_REF,
+                    "--i-understand-production",
+                ],
+                cwd=ROOT,
+                env={**os.environ, "INBOX_EMERGENCY_DB_PASSWORD": "postgres"},
+                check=False,
+            )
+            output = result.stdout + result.stderr
+            if result.returncode == 0 or "emergency capture packet blocked:" not in output or "connection to server" in output:
+                raise RuntimeError(f"production runner {label} did not refuse before connect:\n{output}")
+            mutants[f"runner-production-{label}"] = "KILLED (preflight refused before psql)"
+
+        missing_test_env = {key: value for key, value in os.environ.items() if key not in {"NODE_ENV", "CI"}}
+        missing_test_env["INBOX_EMERGENCY_DB_PASSWORD"] = "postgres"
+        missing_test_env_result = run(
+            [
+                "python3",
+                str(RUNNER),
+                "--packet",
+                "capture-off",
+                "--database-url",
+                runner_url,
+                "--target-ref",
+                PRODUCTION_TARGET_REF,
+                "--i-understand-production",
+                "--local-test",
+            ],
+            cwd=ROOT,
+            env=missing_test_env,
+            check=False,
+        )
+        missing_test_env_output = missing_test_env_result.stdout + missing_test_env_result.stderr
+        if missing_test_env_result.returncode == 0 or "local-test requires NODE_ENV=test or a CI-style test flag" not in missing_test_env_output:
+            raise RuntimeError(f"runner missing test/env flag did not refuse before connect:\n{missing_test_env_output}")
+        mutants["runner-missing-test-env"] = "KILLED (preflight refused before psql)"
 
         non_loopback_packet = OFF.read_text().replace(
             "inet_server_addr() NOT IN ('127.0.0.1'::inet, '::1'::inet)",
@@ -702,8 +807,11 @@ END $$;"""
             "functions_verified": len(expected_md5),
             "catalog_schemas_source": str(RECONCILE_CATALOG_SOURCE),
             "checks": [
-                "direct psql capture-off and capture-restore both refused before mutation; the removed-GUC mutant mutated and was killed",
+                "no-GUC direct psql refused for both packets; local-test target without its second GUC refused without catalog/function change",
+                "production target without an explicit off flag refused; replacing the local-test second-GUC clause with IF false made the single-GUC case mutate",
+                "direct-psql identity-guard removal mutated and was killed",
                 "runner rejected wrong ref, host, and user before opening psql; local-test runner execution succeeded on loopback",
+                "production runner rejected wrong host, password-in-URL, query-option, and missing test/env flag before opening psql",
                 "local-test refused the simulated non-loopback inet_server_addr and the receipt table enabled row-level security",
                 "all 25 canonical source capture triggers matched disposable catalog; the two revision guards stayed live",
                 "capture-off and capture-restore wrote receipts in inbox_emergency",
