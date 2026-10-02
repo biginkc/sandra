@@ -8,6 +8,9 @@ import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
 import { describeRequestResult, normaBlockText } from "@/lib/norma/block-copy";
+import { normaOutcomeLabel } from "@/lib/norma/outcome-labels";
+import { NORMA_TONE_CLASSES, normaOutcomeTone, normaRequestTone } from "@/lib/norma/tone";
+import { cn } from "@/lib/utils";
 import type { NormaCallPreview } from "@/lib/norma/preview";
 import { formatPhoneDisplay } from "@/lib/phone-format";
 
@@ -16,7 +19,10 @@ import { previewNormaCall, requestNormaCall } from "./norma-actions";
 const IN_FLIGHT_REFRESH_MS = 30_000;
 const POLLED_STATUSES: ReadonlySet<string> = new Set(["requested", "dispatching", "dispatched"]);
 
-export type NormaOpenRequest = { id: string; status: string };
+export type NormaOpenRequest = { id: string; status: string; attempt?: number | null };
+
+/** The lead's newest finished Norma call, shown as a coloured badge beside the button. */
+export type NormaLastResult = { id: string; outcome: string | null };
 
 type Props = {
   propertyId: string;
@@ -24,12 +30,13 @@ type Props = {
   propertyAddress: string;
   /** The lead's open Norma request (any non-terminal status), if there is one. */
   openRequest?: NormaOpenRequest | null;
+  lastResult?: NormaLastResult | null;
 };
 
 type Notice = { tone: "success" | "warning" | "error"; text: string };
 
 /** Plain state label and explanation for a request that is still open. */
-export function describeOpenNormaRequest(status: string): { label: string; detail: string } {
+export function describeOpenNormaRequest(status: string, attempt?: number | null): { label: string; detail: string } {
   switch (status) {
     case "needs_review":
       return {
@@ -42,6 +49,13 @@ export function describeOpenNormaRequest(status: string): { label: string; detai
         detail: "Sandra could not confirm this call went out. It is being checked automatically. No second call can be started meanwhile.",
       };
     default:
+      if (attempt === 2) {
+        return {
+          label: "Norma calling again",
+          detail:
+            "The first call was not answered, so Norma is calling once more. This is the last try. The summary will appear on this lead when the call ends.",
+        };
+      }
       return {
         label: "Norma call in progress",
         detail: "Norma has been asked to call this seller. The summary will appear on this lead when the call ends.",
@@ -49,7 +63,7 @@ export function describeOpenNormaRequest(status: string): { label: string; detai
   }
 }
 
-export function HaveNormaCallButton({ propertyId, sellerName, propertyAddress, openRequest = null }: Props) {
+export function HaveNormaCallButton({ propertyId, sellerName, propertyAddress, openRequest = null, lastResult = null }: Props) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [preview, setPreview] = useState<NormaCallPreview | "loading" | null>(null);
@@ -60,7 +74,8 @@ export function HaveNormaCallButton({ propertyId, sellerName, propertyAddress, o
   const previewSeq = useRef(0);
 
   const inFlight = openRequest;
-  const state = inFlight ? describeOpenNormaRequest(inFlight.status) : null;
+  const state = inFlight ? describeOpenNormaRequest(inFlight.status, inFlight.attempt) : null;
+  const inFlightTone = inFlight ? normaRequestTone(inFlight.status, null) : null;
 
   // While a request is open, re-read the lead now and then so the button
   // follows the call to its end without a manual reload.
@@ -121,6 +136,19 @@ export function HaveNormaCallButton({ propertyId, sellerName, propertyAddress, o
   const previewPhone = preview && preview !== "loading" ? (preview.phoneE164 ?? null) : null;
 
   return (
+    <>
+    {!inFlight && lastResult ? (
+      <span
+        className={cn(
+          "inline-flex h-8 items-center rounded-full border px-2.5 text-xs font-medium",
+          NORMA_TONE_CLASSES[normaOutcomeTone(lastResult.outcome)],
+        )}
+        data-testid="norma-last-result"
+        data-tone={normaOutcomeTone(lastResult.outcome)}
+      >
+        Norma: {normaOutcomeLabel(lastResult.outcome)}
+      </span>
+    ) : null}
     <Popover open={open} onOpenChange={onOpenChange}>
       <PopoverTrigger
         render={
@@ -130,6 +158,8 @@ export function HaveNormaCallButton({ propertyId, sellerName, propertyAddress, o
             size="sm"
             data-testid="have-norma-call-trigger"
             data-state-label={state?.label}
+            data-tone={inFlightTone ?? undefined}
+            className={inFlightTone === "amber" ? NORMA_TONE_CLASSES.amber : undefined}
           >
             <PhoneCall className="h-3.5 w-3.5" />
             {state ? state.label : "Have Norma call"}
@@ -205,5 +235,6 @@ export function HaveNormaCallButton({ propertyId, sellerName, propertyAddress, o
         ) : null}
       </PopoverContent>
     </Popover>
+    </>
   );
 }

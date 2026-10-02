@@ -88,3 +88,46 @@ describe("Norma lead timeline events", () => {
     expect(screen.queryByTestId("norma-event-detail")).toBeNull();
   });
 });
+
+describe("Norma timeline colours and the second call", () => {
+  const pill = (outcome: string) => {
+    const { unmount } = render(
+      <LeadEventPill
+        event={event("norma_call_completed", { outcome, request_id: REQUEST_ID })}
+        authorEmails={{}}
+        currentUserId={null}
+        normaRequests={[]}
+      />,
+    );
+    const row = screen.getByTestId("lead-event-row");
+    const result = { tone: row.getAttribute("data-tone"), className: row.className };
+    unmount();
+    return result;
+  };
+
+  it("green when the call reached a person", () => {
+    for (const outcome of ["reached_no_callback", "callback_requested", "not_interested", "wrong_number"]) {
+      const { tone, className } = pill(outcome);
+      expect(tone).toBe("green");
+      expect(className).toContain("#15803d");
+    }
+  });
+
+  it("grey for no answer, amber for needs review or an unknown outcome", () => {
+    expect(pill("no_answer").tone).toBe("neutral");
+    expect(pill("no_answer").className).not.toContain("#15803d");
+    expect(pill("unknown").tone).toBe("amber");
+    expect(pill("something_new").tone).toBe("amber");
+  });
+
+  it("other events keep the plain pill", () => {
+    render(<LeadEventPill event={event("norma_call_requested", {}, "user")} authorEmails={{}} currentUserId={null} />);
+    expect(screen.getByTestId("lead-event-row")).not.toHaveAttribute("data-tone");
+  });
+
+  it("says plainly that the first call was not answered and Norma is trying once more", () => {
+    expect(formatLeadEventSentence(event("norma_call_attempt_no_answer", { attempt: 1 }), {}, null)).toBe(
+      "Norma call 1 was not answered — trying once more",
+    );
+  });
+});

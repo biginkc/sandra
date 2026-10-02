@@ -86,6 +86,7 @@ import { AddNoteComposer } from "./notes-feed";
 import { HaveNormaCallButton } from "./have-norma-call-button";
 import {
   NORMA_REQUEST_VIEW_COLUMNS,
+  findLastCompletedNormaRequest,
   findOpenNormaRequest,
   type NormaRequestView,
 } from "@/lib/norma/view";
@@ -455,6 +456,7 @@ export default async function LeadDetailPage({
     .limit(20);
   const normaRequests = (normaRowsRaw ?? []) as NormaRequestView[];
   const openNormaRequest = findOpenNormaRequest(normaRequests);
+  const lastNormaResult = findLastCompletedNormaRequest(normaRequests);
 
   const usersPromise = loadOrgTeamMembers(lead.org_id, {
     includeInactiveMembers: true,
@@ -688,7 +690,12 @@ export default async function LeadDetailPage({
         propertyId={lead.id}
         sellerName={homeownerName}
         propertyAddress={lead.address}
-        openRequest={openNormaRequest ? { id: openNormaRequest.id, status: openNormaRequest.status } : null}
+        openRequest={
+          openNormaRequest
+            ? { id: openNormaRequest.id, status: openNormaRequest.status, attempt: openNormaRequest.attempt ?? null }
+            : null
+        }
+        lastResult={lastNormaResult ? { id: lastNormaResult.id, outcome: lastNormaResult.outcome } : null}
       /></fieldset>
       {zillowHref ? (
         <a
