@@ -105,6 +105,13 @@ const CASES: [string, string | null, Parameters<typeof run>[1]?][] = [
   ["  ", null],
   ["before 5", null],
   ["I'll call you", null],
+  // A date wording the parser does not understand is never read as "the other words".
+  ["the 15th at 2", null],
+  ["after the 20th", null],
+  ["the 15th", null],
+  ["on the 15 at 2pm", null],
+  ["2027-12-01 10:00", null],
+  ["2026-10-06 at 3pm", null],
 ];
 
 describe("callback time from the seller's words (table)", () => {
@@ -189,7 +196,7 @@ describe("AI fallback (provider mocked, no real calls)", () => {
 
   it("is not asked when the parser decided (ok, reject, ambiguous, vague)", async () => {
     const provider = vi.fn(ok);
-    for (const phrase of ["tomorrow morning", "Tuesday or Thursday", "whenever", "maybe Tuesday", "today at 2pm", "next Sunday"]) {
+    for (const phrase of ["tomorrow morning", "Tuesday or Thursday", "whenever", "maybe Tuesday", "today at 2pm", "next Sunday", "the 15th at 2", "2027-12-01 10:00"]) {
       await run(phrase, { provider });
     }
     expect(provider).not.toHaveBeenCalled();

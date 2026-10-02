@@ -208,6 +208,19 @@ describe("callback time conversion in the webhook", () => {
     expect(complete.mock.calls[0]![0].p_payload).toMatchObject({ callback_requested_for: null, callback_raw: "a week from Monday" });
   });
 
+  it("a replay of an already-completed request skips the conversion and the AI step", async () => {
+    const complete = vi.fn().mockReturnValue({ result: "replayed", status: "completed", outcome: "callback_requested" });
+    const { client } = fakeClient(
+      { norma_call_requests: [requestRow({ status: "completed" })], properties: [{ id: "p1", state: "MO" }] },
+      { fn_norma_complete_call: complete },
+    );
+    const body = JSON.stringify(callbackCall("a week from Monday"));
+    const provider = vi.fn().mockResolvedValue({ local_date: "2027-01-01", local_time: "09:00", confidence: 0.9 });
+    const result = await handleBlandCallWebhook(req(body, sign(body)), { client, secret: SECRET, callbackTimeProvider: provider });
+    expect(result).toMatchObject({ status: 200, body: { status: "replayed" } });
+    expect(provider).not.toHaveBeenCalled();
+  });
+
   it("does not convert anything for a non-callback outcome", async () => {
     const { client, complete } = setupWithProperty();
     const body = JSON.stringify(call({ variables: { call_outcome: "not_interested", follow_up_preference: "tomorrow" } }));

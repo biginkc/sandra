@@ -179,6 +179,9 @@ export function parseFollowUpText(rawText: string, referenceMs: number, notBefor
   ) {
     return { kind: "unrecognised" };
   }
+  // A date expression this parser does not understand ("the 15th", "2027-12-01",
+  // "after the 20th") must never be read as "the remaining words": null, no AI.
+  if (/\b\d{4}-\d{1,2}-\d{1,2}\b/.test(text)) return reject("unrecognised_date");
   // "3 or 5": two options, not a time.
   if (/\b\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s+or\s+(?:maybe\s+|around\s+)?\d{1,2}\b/.test(text)) return reject("multiple_times");
 
@@ -222,6 +225,14 @@ export function parseFollowUpText(rawText: string, referenceMs: number, notBefor
     dates.push({ y: base.y, m: MONTHS.indexOf(mo.slice(0, 3)) + 1, d: Number(day) });
     return " ";
   });
+
+  // Whatever date-like wording is left after the known forms were consumed.
+  if (
+    /\b\d{1,2}(?:st|nd|rd|th)\b/.test(text) ||
+    /\bthe \d{1,2}\b(?!\s*(?::|am\b|pm\b|a\.m|p\.m))/.test(text)
+  ) {
+    return reject("unrecognised_date");
+  }
 
   // ---- relative/named days
   type DayHit = { kind: "today" | "tomorrow" | "after_tomorrow" | "weekday" | "next_week"; weekday?: number; next?: boolean; nextWeek?: boolean };

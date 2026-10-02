@@ -103,7 +103,7 @@ export async function handleBlandCallWebhook(
   try {
     const { data: row, error } = await deps.client
       .from("norma_call_requests")
-      .select("id, property_id, phone_e164, idempotency_key")
+      .select("id, status, property_id, phone_e164, idempotency_key")
       .eq("id", requestId)
       .maybeSingle();
     if (error) throw new Error(`norma webhook lookup failed: ${error.message}`);
@@ -119,12 +119,18 @@ export async function handleBlandCallWebhook(
 
     // The seller's callback words become a time here, before the one CRM write.
     // Never fails or delays the completion: any problem leaves the raw words.
-    const mapping = await withConvertedCallbackTime(mapBlandCallToOutcome(payload), {
-      client: deps.client,
-      propertyId: row.property_id,
-      call: payload,
-      provider: deps.callbackTimeProvider,
-    });
+    // A replay of an already-completed request skips the conversion (and so
+    // the AI step) entirely: the completion RPC will just report `replayed`.
+    const baseMapping = mapBlandCallToOutcome(payload);
+    const mapping =
+      row.status === "completed"
+        ? baseMapping
+        : await withConvertedCallbackTime(baseMapping, {
+            client: deps.client,
+            propertyId: row.property_id,
+            call: payload,
+            provider: deps.callbackTimeProvider,
+          });
     const result = await completeNormaCall(deps.client, {
       requestId: row.id,
       callId,
