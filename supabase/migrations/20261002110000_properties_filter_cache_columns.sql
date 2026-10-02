@@ -44,6 +44,13 @@ set lock_timeout = '5s';
 
 begin;
 
+-- Acquire every table lock this migration needs UP FRONT, child tables first and
+-- properties last: concurrent DML (message insert -> training guard reads
+-- properties) takes locks in that order, so interleaving with piecemeal DDL
+-- locks produced a deadlock (40P01) for a concurrent insert in a cold-run probe.
+-- lock_timeout (5s, above) makes this fail cleanly instead of queueing forever.
+lock table public.messages, public.tasks, public.property_lists, public.property_tags, public.properties in access exclusive mode;
+
 alter table public.properties
   add column if not exists has_inbound_message boolean not null default false,
   add column if not exists has_outbound_message boolean not null default false,
