@@ -276,13 +276,13 @@ begin
     perform public.refresh_property_filter_cache(array(select distinct o.property_id from old_rows o where o.property_id is not null));
   else
     perform public.refresh_property_filter_cache(array(
-      select o.property_id from old_rows o join new_rows n on n.id = o.id
-       where (o.property_id, o.org_id, o.direction, o.read_at) is distinct from (n.property_id, n.org_id, n.direction, n.read_at)
-         and o.property_id is not null
+      select x.property_id from (
+        select property_id, org_id, direction, read_at from old_rows except all select property_id, org_id, direction, read_at from new_rows
+      ) x where x.property_id is not null
       union
-      select n.property_id from old_rows o join new_rows n on n.id = o.id
-       where (o.property_id, o.org_id, o.direction, o.read_at) is distinct from (n.property_id, n.org_id, n.direction, n.read_at)
-         and n.property_id is not null));
+      select y.property_id from (
+        select property_id, org_id, direction, read_at from new_rows except all select property_id, org_id, direction, read_at from old_rows
+      ) y where y.property_id is not null));
   end if;
   return null;
 end;
@@ -301,11 +301,13 @@ begin
     perform public.refresh_property_filter_cache(array(select distinct o.related_property_id from old_rows o));
   else
     perform public.refresh_property_filter_cache(array(
-      select o.related_property_id from old_rows o join new_rows n on n.id = o.id
-       where (o.related_property_id, o.org_id, o.status) is distinct from (n.related_property_id, n.org_id, n.status)
+      select x.related_property_id from (
+        select related_property_id, org_id, status from old_rows except all select related_property_id, org_id, status from new_rows
+      ) x where x.related_property_id is not null
       union
-      select n.related_property_id from old_rows o join new_rows n on n.id = o.id
-       where (o.related_property_id, o.org_id, o.status) is distinct from (n.related_property_id, n.org_id, n.status)));
+      select y.related_property_id from (
+        select related_property_id, org_id, status from new_rows except all select related_property_id, org_id, status from old_rows
+      ) y where y.related_property_id is not null));
   end if;
   return null;
 end;
@@ -324,11 +326,13 @@ begin
     perform public.refresh_property_filter_cache(array(select distinct o.property_id from old_rows o));
   else
     perform public.refresh_property_filter_cache(array(
-      select o.property_id from old_rows o join new_rows n on n.id = o.id
-       where (o.property_id, o.org_id, o.list_id) is distinct from (n.property_id, n.org_id, n.list_id)
+      select x.property_id from (
+        select property_id, org_id, list_id from old_rows except all select property_id, org_id, list_id from new_rows
+      ) x where x.property_id is not null
       union
-      select n.property_id from old_rows o join new_rows n on n.id = o.id
-       where (o.property_id, o.org_id, o.list_id) is distinct from (n.property_id, n.org_id, n.list_id)));
+      select y.property_id from (
+        select property_id, org_id, list_id from new_rows except all select property_id, org_id, list_id from old_rows
+      ) y where y.property_id is not null));
   end if;
   return null;
 end;
@@ -347,15 +351,38 @@ begin
     perform public.refresh_property_filter_cache(array(select distinct o.property_id from old_rows o));
   else
     perform public.refresh_property_filter_cache(array(
-      select o.property_id from old_rows o join new_rows n on n.id = o.id
-       where (o.property_id, o.org_id, o.tag_id) is distinct from (n.property_id, n.org_id, n.tag_id)
+      select x.property_id from (
+        select property_id, org_id, tag_id from old_rows except all select property_id, org_id, tag_id from new_rows
+      ) x where x.property_id is not null
       union
-      select n.property_id from old_rows o join new_rows n on n.id = o.id
-       where (o.property_id, o.org_id, o.tag_id) is distinct from (n.property_id, n.org_id, n.tag_id)));
+      select y.property_id from (
+        select property_id, org_id, tag_id from new_rows except all select property_id, org_id, tag_id from old_rows
+      ) y where y.property_id is not null));
   end if;
   return null;
 end;
 $$;
+
+-- A property moving to another org changes which child rows count (children are
+-- matched on org_id). The pin trigger preserves the old cache values, so refresh here.
+create or replace function public.trg_properties_org_change_refresh_filter_cache()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  perform public.refresh_property_filter_cache(array[new.id]);
+  return null;
+end;
+$$;
+
+drop trigger if exists zz_properties_filter_cache_org_change on public.properties;
+create trigger zz_properties_filter_cache_org_change
+  after update of org_id on public.properties
+  for each row
+  when (old.org_id is distinct from new.org_id)
+  execute function public.trg_properties_org_change_refresh_filter_cache();
 
 drop trigger if exists zz_messages_filter_cache_insert on public.messages;
 create trigger zz_messages_filter_cache_insert
@@ -431,6 +458,7 @@ create trigger zz_property_tags_filter_cache_delete
 
 revoke all on function public.refresh_property_filter_cache(uuid[]) from public, anon, authenticated;
 grant execute on function public.refresh_property_filter_cache(uuid[]) to service_role;
+revoke all on function public.trg_properties_org_change_refresh_filter_cache() from public, anon, authenticated;
 revoke all on function public.trg_messages_refresh_filter_cache() from public, anon, authenticated;
 revoke all on function public.trg_tasks_refresh_filter_cache() from public, anon, authenticated;
 revoke all on function public.trg_property_lists_refresh_filter_cache() from public, anon, authenticated;
