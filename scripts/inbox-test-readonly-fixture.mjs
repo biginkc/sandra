@@ -520,6 +520,28 @@ export async function verifyFixture(db, {
   return { pass: failures.length === 0, failures, missing };
 }
 
+function holderProcessMatchesRun(holder, runId) {
+  const command = holderCommand(holder?.pid);
+  if (!command || !command.includes(scriptPath)) return false;
+  if (!/(?:^|\s)--hold-lock(?:\s|$)/.test(command)) return false;
+  const escapedRunId = String(runId ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|\\s)--run-id\\s+${escapedRunId}(?:\\s|$)`).test(command);
+}
+
+async function exclusionFailures(db, { runId, lock, leaseExpiresAt }) {
+  const failures = [];
+  if (!holderProcessMatchesRun(lock, runId)) failures.push("recorded holder process is not alive for this run_id");
+  const leaseExpiryMs = Date.parse(leaseExpiresAt ?? "");
+  if (!Number.isFinite(leaseExpiryMs) || leaseExpiryMs <= Date.now()) failures.push("fixture lease expired");
+  if (!lock?.backend_pid || !(await lockHeld(db, lock.backend_pid))) failures.push("integration lock is not held by the recorded holder");
+  return failures;
+}
+
+export async function requireExclusion(db, { runId, lock, leaseExpiresAt }) {
+  const failures = await exclusionFailures(db, { runId, lock, leaseExpiresAt });
+  if (failures.length) fail("STALE_RECEIPT", `${failures.join("; ")}; start a new run-id`);
+}
+
 export async function lockHeld(db, backendPid, lockKey = LOCK_KEY) {
   if (!backendPid) return false;
   return (await q(db, `
@@ -618,22 +640,28 @@ async function holdLock({ env, leaseExpiresAt, readyFile, ClientConstructor }) {
   await new Promise(resolve => { process.once("beforeExit", resolve); });
 }
 
-async function insertFixture(db, authAdmin) {
+async function insertFixture(db, authAdmin, exclusion) {
+  await requireExclusion(db, exclusion);
   await createFixedAuthUser(authAdmin);
+  await requireExclusion(db, exclusion);
   const messageValues = [
     FIXTURE_IDS.messages.scheduled, FIXTURE_IDS.organization, MESSAGE_SHAPES[FIXTURE_IDS.messages.scheduled].body, JSON.stringify(EXPECTED_METADATA),
     FIXTURE_IDS.messages.unscheduled, MESSAGE_SHAPES[FIXTURE_IDS.messages.unscheduled].body,
   ];
   await q(db, "begin");
   try {
+    await requireExclusion(db, exclusion);
     await q(db, "insert into public.organizations(id,name) values ($1,$2) on conflict (id) do nothing", [FIXTURE_IDS.organization, FIXTURE_ORG_NAME]);
+    await requireExclusion(db, exclusion);
     await q(db, "insert into public.memberships(id,user_id,org_id,role,access_status,access_expires_at,deletion_prepared_at) values ($1,$2,$3,'owner','active',null,null) on conflict (id) do nothing", [FIXTURE_IDS.membership, FIXTURE_IDS.user, FIXTURE_IDS.organization]);
+    await requireExclusion(db, exclusion);
     await q(db, `
       insert into public.messages(id,org_id,channel,direction,status,provider,contact_id,property_id,campaign_id,conversation_id,from_address,to_address,body,metadata,scheduled_for,external_id)
       values ($1,$2,'sms','outbound','queued','mock',null,null,null,null,null,null,$3,$4::jsonb,'2099-12-31T00:00:00Z',null),
              ($5,$2,'sms','outbound','queued','mock',null,null,null,null,null,null,$6,$4::jsonb,null,null)
       on conflict (id) do nothing
     `, messageValues);
+    await requireExclusion(db, exclusion);
     await q(db, "commit");
   } catch (error) {
     await q(db, "rollback").catch(() => {});
@@ -678,6 +706,7 @@ async function runCreate(args, env, ClientConstructor) {
     assert(existing.run_id === args.runId, "RECEIPT_RUN_ID_MISMATCH");
     const db = await openDb(env, ClientConstructor);
     try {
+      await requireExclusion(db, { runId: existing.run_id, lock: existing.lock, leaseExpiresAt: existing.lease_expires_at });
       const pre = await verifyFixture(db, { allowMissing: true });
       drift(pre);
       const currentDiagnostics = await relationDiagnostics(db);
@@ -686,12 +715,13 @@ async function runCreate(args, env, ClientConstructor) {
         fail("FIXTURE_DRIFT", "fixture diagnostics changed while all fixed rows remained present");
       }
       if (missing) {
-        await insertFixture(db, openAuthAdmin(env));
+        await insertFixture(db, openAuthAdmin(env), { runId: existing.run_id, lock: existing.lock, leaseExpiresAt: existing.lease_expires_at });
         const membershipInsert = pre.missing.includes("membership") ? 1 : 0;
         existing.diagnostics = await settledRelationDiagnostics(db, Number(currentDiagnostics.memberships_n_tup_ins) + membershipInsert);
       }
-      const result = await verifyFixture(db, { expectedDiagnostics: existing.diagnostics, lock: existing.lock, leaseExpiresAt: existing.lease_expires_at, checkLock: existing.state === "active" });
+      const result = await verifyFixture(db, { expectedDiagnostics: existing.diagnostics });
       drift(result);
+      await requireExclusion(db, { runId: existing.run_id, lock: existing.lock, leaseExpiresAt: existing.lease_expires_at });
       existing.state = "active";
       writeReceipt(receiptFile, existing);
       console.log(JSON.stringify({ mode: "create", idempotent: true, run_id: existing.run_id, receipt: receiptFile, ids: FIXTURE_IDS, lease_expires_at: existing.lease_expires_at }));
@@ -708,15 +738,18 @@ async function runCreate(args, env, ClientConstructor) {
   try {
     db = await openDb(env, ClientConstructor);
     await schemaPreflight(db);
+    const exclusion = { runId: args.runId, lock: holder, leaseExpiresAt };
+    await requireExclusion(db, exclusion);
     const pre = await verifyFixture(db, { allowMissing: true });
     drift(pre);
     const diagnostics = await relationDiagnostics(db);
     const receipt = buildFixtureRecord({ runId: args.runId, owner: args.owner, leaseExpiresAt, diagnostics, binding: currentScriptBinding(), receiptFile, holder });
     writeReceipt(receiptFile, receipt);
-    await insertFixture(db, openAuthAdmin(env));
+    await insertFixture(db, openAuthAdmin(env), exclusion);
     receipt.diagnostics = await settledRelationDiagnostics(db, Number(diagnostics.memberships_n_tup_ins) + 1);
-    const result = await verifyFixture(db, { expectedDiagnostics: receipt.diagnostics, lock: receipt.lock, leaseExpiresAt, checkLock: true });
+    const result = await verifyFixture(db, { expectedDiagnostics: receipt.diagnostics });
     drift(result);
+    await requireExclusion(db, exclusion);
     receipt.state = "active";
     writeReceipt(receiptFile, receipt);
     console.log(JSON.stringify({ mode: "create", idempotent: false, run_id: args.runId, receipt: receiptFile, ids: FIXTURE_IDS, lease_expires_at: leaseExpiresAt, lock: receipt.lock }));
@@ -737,8 +770,11 @@ async function runVerify(args, env, ClientConstructor) {
   const db = await openDb(env, ClientConstructor);
   try {
     await schemaPreflight(db);
-    const result = await verifyFixture(db, { expectedDiagnostics: receipt.diagnostics, lock: receipt.lock, leaseExpiresAt: receipt.lease_expires_at, checkLock: receipt.state === "active" });
+    const exclusion = { runId: receipt.run_id, lock: receipt.lock, leaseExpiresAt: receipt.lease_expires_at };
+    await requireExclusion(db, exclusion);
+    const result = await verifyFixture(db, { expectedDiagnostics: receipt.diagnostics });
     drift(result);
+    await requireExclusion(db, exclusion);
     console.log(JSON.stringify({ mode: "verify", pass: true, run_id: receipt.run_id, ids: FIXTURE_IDS, lease_expires_at: receipt.lease_expires_at }));
   } finally { await db.end(); }
 }

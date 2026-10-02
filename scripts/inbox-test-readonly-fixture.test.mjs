@@ -16,6 +16,7 @@ import {
   TEST_MODE_ENV,
   TEST_REF,
   assertSafeTarget,
+  lockHeld,
   openDb,
   parseArgs,
   q,
@@ -313,6 +314,14 @@ async function stopDirectHolder(holder) {
   await new Promise(resolve => holder.child.once("close", resolve));
 }
 
+async function waitForHolderRelease(holder) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (!(await lockHeld(db, holder.backend_pid ?? holder.ready.backend_pid))) return;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error("holder did not release the integration lock");
+}
+
 before(async () => {
   await startDisposableSupabase();
 });
@@ -337,39 +346,45 @@ after(async () => {
 
 test("AT9 real local GoTrue: create, verify, recreate, and stub parity", async () => {
   const realEnv = { [SUPABASE_URL_ENV]: dataApiUrl, [SERVICE_ROLE_KEY_ENV]: dataServiceRoleKey };
-  const created = cli(["--create", "--run-id", "at9-real-gotrue", "--owner", "fixture-test", "--lease-seconds", "120"], realEnv);
-  assert.equal(created.status, 0, created.stderr || created.stdout);
-  const verified = cli(["--verify", "--run-id", "at9-real-gotrue"], realEnv);
-  assert.equal(verified.status, 0, verified.stderr || verified.stdout);
-  const recreated = cli(["--create", "--run-id", "at9-real-gotrue", "--owner", "fixture-test", "--lease-seconds", "120"], realEnv);
-  assert.equal(recreated.status, 0, recreated.stderr || recreated.stdout);
-  const at9Receipt = receipt("at9-real-gotrue");
-  stopOwnedHolder(at9Receipt.lock, at9Receipt.run_id);
+  let at9Receipt = null;
+  try {
+    const created = cli(["--create", "--run-id", "at9-real-gotrue", "--owner", "fixture-test", "--lease-seconds", "120"], realEnv);
+    if (existsSync(path.join(workdir, "lease-test-ro-fixture-at9-real-gotrue.json"))) at9Receipt = receipt("at9-real-gotrue");
+    assert.equal(created.status, 0, created.stderr || created.stdout);
+    const verified = cli(["--verify", "--run-id", "at9-real-gotrue"], realEnv);
+    assert.equal(verified.status, 0, verified.stderr || verified.stdout);
+    const recreated = cli(["--create", "--run-id", "at9-real-gotrue", "--owner", "fixture-test", "--lease-seconds", "120"], realEnv);
+    assert.equal(recreated.status, 0, recreated.stderr || recreated.stdout);
 
-  const realAdmin = createClient(dataApiUrl, dataServiceRoleKey, { auth: { persistSession: false, autoRefreshToken: false } }).auth.admin;
-  const stubAdmin = createClient(authStubUrl, dataServiceRoleKey, { auth: { persistSession: false, autoRefreshToken: false } }).auth.admin;
-  const parityMetadata = { inbox_ro_fixture: { parity: true } };
-  const realParity = await realAdmin.createUser({ id: UNRELATED_IDS.authParityReal, email: `parity-real@${goTrueEmailDomain}`, email_confirm: false, ban_duration: "876000h", app_metadata: parityMetadata });
-  const stubParity = await stubAdmin.createUser({ id: UNRELATED_IDS.authParityStub, email: `parity-stub@${goTrueEmailDomain}`, email_confirm: false, ban_duration: "876000h", app_metadata: parityMetadata });
-  assert.equal(realParity.error, null, realParity.error?.message);
-  assert.equal(stubParity.error, null, stubParity.error?.message);
-  const realRow = await authParityRow(UNRELATED_IDS.authParityReal);
-  const stubRow = await authParityRow(UNRELATED_IDS.authParityStub);
-  for (const row of [realRow, stubRow]) {
-    assert.match(row.user.encrypted_password, /^\$2[aby]\$10\$[./A-Za-z0-9]{53}$/);
-    assert.equal(row.user.email_confirmed_at, null);
-    assert.equal(row.user.last_sign_in_at, null);
-    assert.ok(Date.parse(row.user.banned_until) > Date.parse("2100-01-01T00:00:00.000Z"));
-    assert.deepEqual(row.user.raw_app_meta_data.inbox_ro_fixture, parityMetadata.inbox_ro_fixture);
-    assert.equal(row.user.raw_app_meta_data.provider, "email");
-    assert.deepEqual(row.user.raw_app_meta_data.providers, ["email"]);
-    assert.deepEqual(row.identities, ["email"]);
+    const realAdmin = createClient(dataApiUrl, dataServiceRoleKey, { auth: { persistSession: false, autoRefreshToken: false } }).auth.admin;
+    const stubAdmin = createClient(authStubUrl, dataServiceRoleKey, { auth: { persistSession: false, autoRefreshToken: false } }).auth.admin;
+    const parityMetadata = { inbox_ro_fixture: { parity: true } };
+    const realParity = await realAdmin.createUser({ id: UNRELATED_IDS.authParityReal, email: `parity-real@${goTrueEmailDomain}`, email_confirm: false, ban_duration: "876000h", app_metadata: parityMetadata });
+    const stubParity = await stubAdmin.createUser({ id: UNRELATED_IDS.authParityStub, email: `parity-stub@${goTrueEmailDomain}`, email_confirm: false, ban_duration: "876000h", app_metadata: parityMetadata });
+    assert.equal(realParity.error, null, realParity.error?.message);
+    assert.equal(stubParity.error, null, stubParity.error?.message);
+    const realRow = await authParityRow(UNRELATED_IDS.authParityReal);
+    const stubRow = await authParityRow(UNRELATED_IDS.authParityStub);
+    for (const row of [realRow, stubRow]) {
+      assert.match(row.user.encrypted_password, /^\$2[aby]\$10\$[./A-Za-z0-9]{53}$/);
+      assert.equal(row.user.email_confirmed_at, null);
+      assert.equal(row.user.last_sign_in_at, null);
+      assert.ok(Date.parse(row.user.banned_until) > Date.parse("2100-01-01T00:00:00.000Z"));
+      assert.deepEqual(row.user.raw_app_meta_data.inbox_ro_fixture, parityMetadata.inbox_ro_fixture);
+      assert.equal(row.user.raw_app_meta_data.provider, "email");
+      assert.deepEqual(row.user.raw_app_meta_data.providers, ["email"]);
+      assert.deepEqual(row.identities, ["email"]);
+    }
+    assert.deepEqual(
+      { email_confirmed_at: realRow.user.email_confirmed_at, last_sign_in_at: realRow.user.last_sign_in_at, metadata: realRow.user.raw_app_meta_data, identities: realRow.identities },
+      { email_confirmed_at: stubRow.user.email_confirmed_at, last_sign_in_at: stubRow.user.last_sign_in_at, metadata: stubRow.user.raw_app_meta_data, identities: stubRow.identities },
+    );
+    console.log("AT9 real-GoTrue: --create, --verify, second --create PASS; stub parity PASS (bcrypt-shaped opaque hash, provider/providers, one email identity)");
+  } finally {
+    if (at9Receipt) {
+      try { stopOwnedHolder(at9Receipt.lock, at9Receipt.run_id); } catch {}
+    }
   }
-  assert.deepEqual(
-    { email_confirmed_at: realRow.user.email_confirmed_at, last_sign_in_at: realRow.user.last_sign_in_at, metadata: realRow.user.raw_app_meta_data, identities: realRow.identities },
-    { email_confirmed_at: stubRow.user.email_confirmed_at, last_sign_in_at: stubRow.user.last_sign_in_at, metadata: stubRow.user.raw_app_meta_data, identities: stubRow.identities },
-  );
-  console.log("AT9 real-GoTrue: --create, --verify, second --create PASS; stub parity PASS (bcrypt-shaped opaque hash, provider/providers, one email identity)");
 });
 
 test("T1 real queued-message inertness stays green before the AT checks", async () => {
@@ -389,6 +404,7 @@ test("AT1 Astra target repro: parse effective fields and never pass a connection
     [`postgresql://postgres.${TEST_REF}:postgres@aws-1-us-east-1.pooler.supabase.com:5432/postgres?host=/tmp`, "database URL options are refused"],
     [`postgresql://postgres.${TEST_REF}:postgres@aws-1-us-east-1.pooler.supabase.com:5432/postgres?options=`, "database URL options are refused"],
     [`postgresql://postgres.${TEST_REF}:postgres@/tmp/postgres`, "socket paths are refused"],
+    [`postgresql://postgres.${TEST_REF}:postgres@evil-pooler.supabase.com:5432/postgres`, "only the TEST session-pooler host is allowed"],
     ["postgresql://postgres.ncsngxlcyxylaeskiteu:postgres@wrong.example.invalid:5432/postgres", "only the TEST session-pooler host is allowed"],
     [`postgresql://wrong-user:${TEST_REF}@aws-1-us-east-1.pooler.supabase.com:5432/postgres`, "only the TEST session-pooler credentials are allowed"],
     [`postgresql://postgres.${TEST_REF}:postgres@aws-1-us-east-1.pooler.supabase.com:5433/postgres`, "only the TEST session-pooler credentials are allowed"],
@@ -643,6 +659,50 @@ test("AT5 fixed-id completeness: verify refuses each missing fixed row and creat
   assert.match(missingMembership.stderr, /FIXTURE_DRIFT/);
   const restoredMembership = cli(["--create", "--run-id", runId, "--owner", "fixture-test"]);
   assert.equal(restoredMembership.status, 0, restoredMembership.stderr || restoredMembership.stdout);
+});
+
+test("TRP2-6 Astra lock reuse repro: stale receipt cannot reinsert m2 under a competing holder", async () => {
+  if (activeReceipt) {
+    const previous = activeReceipt;
+    activeReceipt = null;
+    stopOwnedHolder(previous.lock, previous.run_id);
+    await waitForHolderRelease(previous.lock);
+  }
+  await createFixture("trp2-6-lock-reuse");
+  const stale = receipt("trp2-6-lock-reuse");
+  stopOwnedHolder(stale.lock, stale.run_id);
+  activeReceipt = stale;
+  await waitForHolderRelease(stale.lock);
+
+  const competing = await startDirectHolder("trp2-6-competing", 30);
+  try {
+    assert.equal(await lockHeld(db, competing.ready.backend_pid), true);
+    await db.query("delete from public.messages where id=$1", [FIXTURE_IDS.messages.unscheduled]);
+    const afterSetup = await fixtureHashes();
+    const rerun = cli(["--create", "--run-id", "trp2-6-lock-reuse", "--owner", "fixture-test"]);
+    assert.notEqual(rerun.status, 0);
+    assert.match(rerun.stderr, /STALE_RECEIPT/);
+    assert.deepEqual(await fixtureHashes(), afterSetup);
+    assert.equal((await db.query("select count(*)::int as count from public.messages where id=$1", [FIXTURE_IDS.messages.unscheduled])).rows[0].count, 0);
+  } finally {
+    await stopDirectHolder(competing);
+  }
+});
+
+test("TRP2-6 Astra creating receipt repro: dead holder and expired lease cannot pass verify", async () => {
+  await createFixture("trp2-6-creating");
+  const stale = receipt("trp2-6-creating");
+  stopOwnedHolder(stale.lock, stale.run_id);
+  activeReceipt = stale;
+  await waitForHolderRelease(stale.lock);
+  stale.state = "creating";
+  stale.lease_expires_at = "2000-01-01T00:00:00Z";
+  writeFileSync(path.join(workdir, "lease-test-ro-fixture-trp2-6-creating.json"), `${JSON.stringify(stale)}\n`);
+  const before = await fixtureHashes();
+  const result = cli(["--verify", "--run-id", "trp2-6-creating"]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /STALE_RECEIPT/);
+  assert.deepEqual(await fixtureHashes(), before);
 });
 
 test("AT6 fixed-id re-create after reset restores the same five owned rows", async () => {
