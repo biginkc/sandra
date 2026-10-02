@@ -212,10 +212,11 @@ jobs:
               echo "::error::mutation $m SURVIVED (the suite passed against broken SQL)"; tail -20 "mutation-$m.log"; exit 1
             fi
             # A harness/setup crash is not a kill: require real failing assertions.
-            if ! grep -qE "Tests +[0-9]+ failed" "mutation-$m.log"; then
+            sed 's/\x1b\[[0-9;]*m//g' "mutation-$m.log" > "mutation-$m.plain.log"
+            if ! grep -qE "Tests +[0-9]+ failed" "mutation-$m.plain.log"; then
               echo "::error::mutation $m crashed the harness instead of failing tests"; tail -30 "mutation-$m.log"; exit 1
             fi
-            echo "mutation $m killed: $(grep -E 'Tests ' "mutation-$m.log" | head -1)"
+            echo "mutation $m killed: $(grep -E 'Tests ' "mutation-$m.plain.log" | head -1)"
           done
 
       - name: Search x filter composition and evaluation budget
