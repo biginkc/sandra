@@ -17,6 +17,7 @@ const ENV = {
 };
 const REQ = "44444444-4444-4444-8444-444444444444";
 const REQ2 = "55555555-5555-4555-8555-555555555555";
+const WATCHDOG = { presenceUrl: "wss://watchdog.example/presence", tokenSecret: "01234567890123456789012345678901", cleanupUrl: "https://app.example/api/internal/direct-call-watchdog", cleanupSecret: "abcdefghijklmnopqrstuvwxyz123456" };
 
 const target = (over: Partial<DirectCallTarget>): DirectCallTarget => ({
   propertyId: null, contactId: null, phoneE164: "+15550008888", maskedPhone: "(555) 000-8888", name: "Manual call", address: null, state: null,
@@ -59,6 +60,19 @@ describe("direct call service", () => {
     expect(await service.getRtcToken("user-2")).toMatchObject({ ok: false, errorCode: "not_enabled" });
     expect(await service.startCall("user-2", { kind: "manual", phone: "5550008888", clientRequestId: REQ })).toMatchObject({ ok: false, errorCode: "not_enabled" });
     expect(telnyx.createCredential).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before reservation when the production watchdog dependency is absent", async () => {
+    const { service, telnyx, store } = setup({ watchdog: null });
+    expect(await service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ })).toMatchObject({ ok: false, errorCode: "not_enabled", reserved: false });
+    expect(store.calls.size).toBe(0);
+    expect(telnyx.dial).not.toHaveBeenCalled();
+  });
+
+  it("returns an immutable signed watchdog capability with the browser leg", async () => {
+    const { service } = setup({ watchdog: WATCHDOG });
+    const result = await service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ });
+    expect(result).toMatchObject({ ok: true, data: { browserWatchdog: { url: WATCHDOG.presenceUrl, token: expect.stringMatching(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/) } } });
   });
 
   it("creates a credential once and mints a token", async () => {
@@ -120,6 +134,20 @@ describe("direct call service", () => {
     expect(new Date(cleanup.resolve_after!).getTime()).toBe(startMs + 75_000 + 55_000);
     expect(new Date(cleanup.backstop_at!).getTime()).toBeGreaterThanOrEqual(providerLatestEnd);
     expect(new Date(cleanup.next_attempt_at!).getTime()).toBeGreaterThan(startMs + 45_000);
+  });
+
+  it("keeps the watchdog unarmed during slow preparation and arms it immediately before Dial", async () => {
+    const ctx = setup({ env: { ...ENV, DIRECT_CALL_TIME_LIMIT_SECS: "180" }, watchdog: WATCHDOG });
+    ctx.prepareManualCall.mockImplementationOnce(async () => {
+      ctx.clock.now = new Date(ctx.clock.now.getTime() + 70_000);
+      return { ok: true as const, data: target({}) };
+    });
+    const result = await ctx.service.startCall("user-1", { kind: "manual", phone: "5550008888", clientRequestId: REQ });
+    expect(result).toMatchObject({ ok: true });
+    expect(ctx.telnyx.dial).toHaveBeenCalledTimes(1);
+    const row = [...ctx.store.calls.values()][0];
+    expect(row.browser_watchdog_seen_at).toBe(ctx.clock.now.toISOString());
+    expect(new Date(row.browser_watchdog_expires_at!).getTime()).toBe(ctx.clock.now.getTime() + 20_000);
   });
 
   it("refuses a browser Dial when the dispatch marker response exceeds its allowance", async () => {

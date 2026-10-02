@@ -18,6 +18,7 @@ import {
   getDirectRtcToken,
   startDirectCall,
 } from "@/lib/direct-calling/client-actions";
+import { openDirectWatchdogPresence, type DirectWatchdogPresence } from "./direct-watchdog-presence";
 
 import type {
   CallHandle,
@@ -94,6 +95,7 @@ export type DirectTransportDependencies = {
   sleep(ms: number): Promise<void>;
   now(): number;
   registrationTimeoutMs: number;
+  openWatchdogPresence?(config: { url: string; token: string }): Promise<DirectWatchdogPresence>;
 };
 
 const defaultDependencies: DirectTransportDependencies = {
@@ -109,6 +111,7 @@ const defaultDependencies: DirectTransportDependencies = {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now: () => Date.now(),
   registrationTimeoutMs: REGISTER_TIMEOUT_MS,
+  openWatchdogPresence: openDirectWatchdogPresence,
 };
 
 export function mapDirectStatus(
@@ -176,6 +179,7 @@ export class TelnyxDirectCallTransport implements CallTransport {
     resolve: () => void;
     reject: (error: unknown) => void;
   } | null = null;
+  private watchdogPresence: DirectWatchdogPresence | null = null;
 
   constructor(
     private readonly deps: DirectTransportDependencies = defaultDependencies,
@@ -273,6 +277,18 @@ export class TelnyxDirectCallTransport implements CallTransport {
       this.correlationValue = started.data.correlationHeader.value;
       this.callCapability = started.data.callCapability ?? null;
       this.serverTarget = started.data.target ?? null;
+      // The provider leg may ring while this admission runs, but decideInvite remains buffered
+      // until this ACK. A missing/failed presence session is a pre-answer failure and is reconciled
+      // through the existing request-id teardown path.
+      if (started.data.browserWatchdog) {
+        try {
+          this.watchdogPresence = await (this.deps.openWatchdogPresence ?? openDirectWatchdogPresence)(started.data.browserWatchdog);
+        } catch (error) {
+          this.cancelled = true;
+          await this.resolveUnknownStart(clientRequestId);
+          throw error;
+        }
+      }
       // Hangup arrived while the start was in flight: the call now exists, so end it. Never answer.
       this.resolveIdentity?.();
       if (this.cancelled) cancelledStart = started.data.directCallId;
@@ -661,6 +677,9 @@ export class TelnyxDirectCallTransport implements CallTransport {
       this.releaseClient();
       return this.result();
     }
+    const presence = this.watchdogPresence;
+    this.watchdogPresence = null;
+    if (presence) await presence.close(true).catch(() => undefined);
     const call = this.currentCall;
     let accepted = false;
     for (let attempt = 0; !this.confirmed; attempt += 1) {
@@ -711,6 +730,9 @@ export class TelnyxDirectCallTransport implements CallTransport {
     const audio = this.audio;
     this.client = null;
     this.audio = null;
+    const presence = this.watchdogPresence;
+    this.watchdogPresence = null;
+    if (presence) void presence.close(true).catch(() => undefined);
     this.disposed = this.confirmed;
     try {
       void Promise.resolve(client?.disconnect()).catch(() => undefined);

@@ -21,6 +21,12 @@ export interface DirectCoachBinding {
 export interface DirectCoachDb {
   readBinding(claims: CoachClaims): Promise<DirectCoachBinding | null>
   isActive(binding: Pick<DirectCoachBinding, 'callId' | 'sellerLegId'>): Promise<boolean>
+  /** Watchdog RPCs use DB time and exact call/leg/session fences. They are optional for media-only unit fakes. */
+  watchdogHeartbeat?(instanceId: string): Promise<void>
+  watchdogAttach?(args: { callId: string; operatorUserId: string; browserLegId: string; sessionId: string }): Promise<boolean>
+  watchdogRenew?(args: { callId: string; operatorUserId: string; browserLegId: string; sessionId: string }): Promise<boolean>
+  watchdogDisconnect?(args: { callId: string; operatorUserId: string; browserLegId: string; sessionId: string; abnormal: boolean }): Promise<boolean>
+  watchdogClaimExpired?(limit: number): Promise<Array<{ callId: string; operatorUserId: string; sessionId: string }>>
   close(): Promise<void>
 }
 

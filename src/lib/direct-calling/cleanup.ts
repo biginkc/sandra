@@ -72,12 +72,13 @@ export type CleanupResult = {
  *                   and by time alone at backstop_at (dispatch marker + 10s response allowance + ring
  *                   timeout + active time limit + 60s).
  */
-export async function processDueCleanups(deps: CleanupDeps, operatorUserId: string): Promise<CleanupResult> {
+/** `maxRows` lets the watchdog route bound one call's work; normal operator/status paths keep the 50-row pass. */
+export async function processDueCleanups(deps: CleanupDeps, operatorUserId: string, maxRows = MAX_ROWS_PER_PASS): Promise<CleanupResult> {
   const result: CleanupResult = { processed: 0, confirmed: 0, acknowledged: 0, failed: 0 };
   const { store } = deps;
   // unresolved_dial rows sort first (store order): a discovered leg becomes a leg row that is claimed and
   // hung up later in this same pass.
-  for (let i = 0; i < MAX_ROWS_PER_PASS; i += 1) {
+  for (let i = 0; i < Math.min(MAX_ROWS_PER_PASS, Math.max(1, maxRows)); i += 1) {
     const [row] = await store.claimDueCleanups(operatorUserId, deps.now().toISOString(), CLAIM_LEASE_SECS, 1);
     if (!row) break;
     result.processed += 1;

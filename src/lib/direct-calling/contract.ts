@@ -69,6 +69,8 @@ export type StartDirectCallResult = {
    * Absent only on an idempotent replay of an in-flight request id.
    */
   target?: DirectCallTarget;
+  /** Presence admission must be acknowledged before the browser answers its inbound leg. */
+  browserWatchdog?: { url: string; token: string };
 };
 
 export type DirectCallStatusView = {

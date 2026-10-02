@@ -3,6 +3,7 @@ import type { Duplex } from 'node:stream'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { verifyCoachToken } from './auth.js'
 import { CoachSession } from './session.js'
+import { createPresenceManager, type WatchdogExpiryClaim, type PresenceManager } from './presence.js'
 import type { CoachClaims, CoachLogger, CoachPublisher, DirectCoachBinding, DirectCoachDb } from './types.js'
 
 const MAX_SESSIONS = 2
@@ -18,6 +19,12 @@ export interface CoachServerOptions {
   readonly logger: CoachLogger
   readonly now?: () => number
   readonly sessionFactory?: (ws: WebSocket, claims: CoachClaims, binding: DirectCoachBinding, onEnd: () => void) => CoachSession
+  readonly watchdog?: {
+    readonly secret: string
+    readonly origins: ReadonlySet<string>
+    readonly onExpired: (claim: WatchdogExpiryClaim) => Promise<void>
+    readonly instanceId?: string
+  }
 }
 
 export interface CoachServer {
@@ -35,9 +42,16 @@ export function createCoachServer(options: CoachServerOptions): CoachServer {
   const pendingSockets = new Set<Duplex>()
   let draining = false
   let closePromise: Promise<void> | undefined
+  let watchdog: PresenceManager | undefined
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WS_PAYLOAD, clientTracking: true })
-  const server = createServer((request, response) => handleHealth(request, response, sessions.size))
+  if (options.watchdog) watchdog = createPresenceManager({ db: options.db, secret: options.watchdog.secret, origins: options.watchdog.origins, logger: options.logger, now: options.now, onExpired: options.watchdog.onExpired, instanceId: options.watchdog.instanceId })
+  const server = createServer((request, response) => handleHealth(request, response, sessions.size + (watchdog?.wss.clients.size ?? 0)))
   server.on('upgrade', (request, socket, head) => {
+    const path = new URL(request.url ?? '/', 'http://localhost').pathname
+    if (path === '/presence' && watchdog) {
+      void watchdog.admit(request, socket, head).catch(() => { if (!socket.destroyed) socket.destroy() })
+      return
+    }
     let disconnected = false
     socket.on('error', () => { disconnected = true; socket.destroy() })
     socket.on('close', () => { disconnected = true; pendingSockets.delete(socket) })
@@ -83,7 +97,10 @@ export function createCoachServer(options: CoachServerOptions): CoachServer {
     server,
     wss,
     activeCalls: { get size() { return sessions.size }, has: (callId: string) => sessions.has(callId) },
-    listen: (port, host = '0.0.0.0') => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, () => { server.removeListener('error', reject); resolve() }) }),
+    listen: async (port, host = '0.0.0.0') => {
+      if (watchdog) await watchdog.start()
+      await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, host, () => { server.removeListener('error', reject); resolve() }) })
+    },
     close: async () => {
       if (closePromise) return closePromise
       closePromise = closeInternal()
@@ -101,6 +118,7 @@ export function createCoachServer(options: CoachServerOptions): CoachServer {
     const pendingDrains = admissions.map((admission) => admission.catch(() => undefined))
     await bounded(Promise.allSettled([...sessionDrains, ...pendingDrains]).then(() => undefined), remaining(deadline))
     await bounded(options.publisher.closeAll().catch(() => undefined), remaining(deadline))
+    await bounded(watchdog?.close().catch(() => undefined) ?? Promise.resolve(), remaining(deadline))
     const closeServer = new Promise<void>((resolve) => {
       try { server.close(() => resolve()) } catch { resolve() }
     })

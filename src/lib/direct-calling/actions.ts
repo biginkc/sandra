@@ -24,6 +24,7 @@ import type {
 } from "./contract";
 import { createDirectCallService } from "./service";
 import { createSupabaseDirectCallStore } from "./store";
+import { readDirectWatchdogConfig } from "./watchdog";
 import {
   telnyxCreateCredential,
   telnyxCreateToken,
@@ -86,6 +87,9 @@ function service(authorizedUserId: string) {
       createToken: telnyxCreateToken,
     },
     report: (error, tag) => reportError(error, { tags: { surface: tag } }),
+    // A missing watchdog is a server-side fail-closed condition. The service gate runs before
+    // reservation, so no provider request can be issued while the monitor is unavailable.
+    watchdog: readDirectWatchdogConfig(process.env),
   });
 }
 

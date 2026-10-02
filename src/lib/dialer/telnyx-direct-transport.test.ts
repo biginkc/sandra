@@ -65,7 +65,7 @@ afterEach(async () => {
   await flush();
 });
 
-function harness(opts: { statuses?: DirectCallStatus[]; micError?: boolean } = {}) {
+function harness(opts: { statuses?: DirectCallStatus[]; micError?: boolean; watchdog?: boolean } = {}) {
   const handlers = new Map<string, (...a: unknown[]) => void>();
   const client = {
     connect: vi.fn(async () => {
@@ -97,6 +97,7 @@ function harness(opts: { statuses?: DirectCallStatus[]; micError?: boolean } = {
           directCallId: CALL_ID,
           browserLegId: LEG,
           correlationHeader: { name: "X-Sandra-Direct-Call-Id" as const, value: CALL_ID },
+          ...(opts.watchdog ? { browserWatchdog: { url: "wss://watchdog.example/presence", token: "signed-token" } } : {}),
         },
       };
     }),
@@ -122,6 +123,7 @@ function harness(opts: { statuses?: DirectCallStatus[]; micError?: boolean } = {
     sleep: vi.fn((ms: number) => new Promise<void>((r) => setTimeout(r, Math.min(ms, 2)))),
     now: () => 1_000_000,
     registrationTimeoutMs: 1_000,
+    openWatchdogPresence: vi.fn(async () => ({ close: vi.fn(async () => undefined) })),
   } satisfies DirectTransportDependencies;
   const transport = new TelnyxDirectCallTransport(deps as DirectTransportDependencies);
   harnesses.push(deps);
@@ -170,6 +172,24 @@ describe("TelnyxDirectCallTransport", () => {
       clientRequestId: REQUEST_ID,
     });
     expect(h.calls.slice(0, 3)).toEqual(["mic", "token", "start"]);
+  });
+
+  it("does not answer the browser invite until watchdog presence is acknowledged", async () => {
+    let release!: () => void;
+    const ack = new Promise<void>((resolve) => { release = resolve });
+    const h = harness({ watchdog: true });
+    h.deps.openWatchdogPresence!.mockImplementationOnce(async () => { await ack; return { close: vi.fn(async () => undefined) } });
+    const starting = h.transport.start(target);
+    await vi.waitFor(() => expect(h.deps.startCall).toHaveBeenCalled());
+    const invite = fakeCall();
+    h.notify(invite);
+    await flush();
+    expect(invite.answer).not.toHaveBeenCalled();
+    release();
+    await starting;
+    await flush();
+    expect(h.deps.openWatchdogPresence).toHaveBeenCalledWith({ url: "wss://watchdog.example/presence", token: "signed-token" });
+    expect(invite.answer).toHaveBeenCalledTimes(1);
   });
 
   it("uses a manual start when there is no property and a fresh id for a non-uuid token", async () => {
