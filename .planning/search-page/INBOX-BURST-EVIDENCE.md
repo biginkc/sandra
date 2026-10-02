@@ -83,3 +83,58 @@ properties briefly for the index drops).
 No in-process retry. `insertInboundMessage` (`src/lib/messaging/inbound.ts`) returns the Postgres error; the webhook route marks the event as errored
 (`markWebhookEventError`) and answers HTTP 500, and the provider's webhook redelivery (the reservation/lease logic allows re-processing errored events) is the retry. So a 40P01 costs one
 failed webhook delivery, not a lost message, provided the provider retries. No app code changed here.
+
+
+# Round 4 (clean private stack): production transaction boundaries, E vs E2
+Quarantine: everything above that ran on the shared 55329 stack is **quarantined pending Norma's exact interval** (foreign suite traffic hit 55329 at about 14:24:55-14:25:10Z and 14:30:37-14:31:29Z). Rounds 1-3 used the *synthetic single-transaction workload* (lookup + insert + thread update in ONE transaction).
+This round ran on a private stack (project `sandra-filter-vol3`, db 57329, nothing shared, guards have no defaults) with the **production boundaries** of `insertInboundMessage`
+(lookup, insert, thread update as three separate autocommit requests; `BURST_MODE=prod`). States: A = no cache triggers; B = 110000+110050; E = 110055 variant E; **E2 = E + Astra fix
+(multi-property statements lock the whole id-sorted set up front, no share/skip phase; share-skip fast path is single-property only)**. Two runs (p1, p2; 4 reps each, rotated). Cells p50 / p99 ms, 0 errors.
+
+| burst | state | p1 p50 / p99 | p2 p50 / p99 |
+|---|---|---|---|
+| 50 concurrent, SAME property | A | 204.8 / 293.9 | 232.2 / 343.7 |
+| 50 concurrent, SAME property | B | 363.9 / 707.9 | 405.5 / 562.2 |
+| 50 concurrent, SAME property | E | 255.6 / 331.5 | 303.1 / 511.7 |
+| 50 concurrent, SAME property | E2 | 307.1 / 464.2 | 307.8 / 396.5 |
+| 50 concurrent, 50 distinct properties | A | 21.8 / 43 | 20.5 / 33.5 |
+| 50 concurrent, 50 distinct properties | B | 103.4 / 228.3 | 78.8 / 123.1 |
+| 50 concurrent, 50 distinct properties | E | 46.8 / 76.6 | 48.9 / 85.2 |
+| 50 concurrent, 50 distinct properties | E2 | 54.2 / 98.4 | 47.3 / 80 |
+| 10 concurrent, distinct properties | A | 5.3 / 10.5 | 4.8 / 7.2 |
+| 10 concurrent, distinct properties | B | 15.1 / 22.9 | 12.8 / 25 |
+| 10 concurrent, distinct properties | E | 5.6 / 13.6 | 5.7 / 7.8 |
+| 10 concurrent, distinct properties | E2 | 7.8 / 11.8 | 5.3 / 8.3 |
+| 200 msgs / 10 s, 20% same property | A | 6.8 / 135.9 | 8 / 23.9 |
+| 200 msgs / 10 s, 20% same property | B | 10 / 24.5 | 11.1 / 27.7 |
+| 200 msgs / 10 s, 20% same property | E | 8.7 / 20.7 | 9.6 / 22.1 |
+| 200 msgs / 10 s, 20% same property | E2 | 7.5 / 19.5 | 9.6 / 26.3 |
+| mixed200 + concurrent clearers | A | 6.5 / 44.2 | 7.2 / 17.8 |
+| mixed200 + concurrent clearers | B | 9.3 / 23.1 | 11.1 / 62.3 |
+| mixed200 + concurrent clearers | E | 7.3 / 18 | 8.3 / 22.9 |
+| mixed200 + concurrent clearers | E2 | 7.5 / 21.9 | 8.5 / 26.9 |
+
+Reading: E2 ~= E (no regression from the lock-order fix). 10-way distinct: E2 p99 11.8 / 8.3 vs A 10.5 / 7.2 (met, <= 50 ms; within ~1-2 ms of A). 50-way distinct: E2 +55 / +46 ms over A (acceptance <= +10 ms NOT met; B was +185 / +90).
+50-way same property: E2 +170 / +53 ms over A (not met; noise band ~+-100 ms). Mixed and clear-mix: E2 equals A within noise. Production boundaries lower B's penalty slightly versus the synthetic workload.
+
+## Acceptance/tests on the clean stack
+Trigger suite + 45-case + generated-column + deterministic overlapping-batch regression (old E deadlocks, E2 passes) + global-DNC writer interleave (both orders, `apply_switchboard_contact_preferences` global DNC vs inbound insert) +
+bounded-retry randomized workload (every op completes, deadlocks counted and bounded, cache == truth): 35 passed, 1 skipped (fixture generator). Volume gate (no boolean partial indexes): 22 cases, 0 count mismatches, 0 over budget, worst valid-baseline ratio 0.76.
+5 cold lock-probe runs: 5/5 clean, 0 errors, max blocked 0.6 s.
+
+## Does 110055 make full-refresh paths slower? (Search-lane crawl report)
+Same seed (50k properties / 250k messages), B = without 110055, E2 = with; mean of 2 runs, ms (each in a rolled-back transaction):
+
+| operation | B | E2 |
+|---|---|---|
+| refresh 1 property (dirty cache) | 12.9 | 11.3 |
+| refresh 100 | 120.8 | 47.2 |
+| refresh 1000 | 1074.1 | 225.3 |
+| refresh 1000 (no-op) | 22.1 | 26.6 |
+| mark-read 1 message | 3.4 | 3.2 |
+| bulk mark-read 500 msgs / 100 props | 142.4 | 54.3 |
+| delete 100 messages | 17.0 | 12.7 |
+
+Seed pattern from the report (insert 20k properties + messages, then `refresh_property_filter_cache` in 5000-id batches IN THE SAME transaction): B 13.2 s, E2 1.9 s. Row-by-row message inserts with triggers on (6000): B 1.8 / 2.95 ms per insert (one-tx / autocommit), E2 0.67 / 1.7.
+Nested plans (auto_explain, `refresh-plan-B.txt` / `refresh-plan-E2.txt`) are identical (same index scans; the dropped indexes are not used by the refresh). **The crawl is not reproducible**: dropping the boolean indexes makes every full-refresh path faster, never slower. Need the Search lane's exact seed
+SQL, stack state (was `analyze` run? triggers on or off? which 110055 variant?) and its pg_stat_activity during the crawl to find the real cause.

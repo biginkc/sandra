@@ -16,3 +16,7 @@ both the API URL and DB URL are loopback (`assertLocalOnlyEnvironment`).
 Budget: per case, new p95 <= 2x the frozen legacy translator's p95 in the same
 run. If any case is over budget the gate fails; do not switch to the
 denormalised-column fallback without an Opus 5.5 review.
+
+
+## Isolation (no defaults)
+Every script requires an explicit private stack: `SBX_PROJECT` (supabase project_id), `SBX_DB_PORT`, `SBX_WORKDIR`, plus `FILTER_LOCAL_DB_URL` / `FILTER_LOCAL_API_URL` for vitest, and `SUPABASE_CLI` (pinned 2.109.1). Nothing falls back to a shared stack; the identity guard checks the container, port, postmaster start time and absence of other-agent databases before each restart/revert/push.

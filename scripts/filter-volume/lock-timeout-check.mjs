@@ -5,7 +5,8 @@ import fs from "node:fs";
 import pg from "pg";
 import { assertSandboxTarget, SANDBOX } from "./assert-sandbox-target.mjs";
 
-const CLI = process.env.SUPABASE_CLI ?? "/tmp/sb2109/node_modules/.bin/supabase";
+const CLI = process.env.SUPABASE_CLI;
+if (!CLI) throw new Error("Set SUPABASE_CLI to the pinned Supabase CLI binary (2.109.1, as in db-migrate-*.yml)");
 const push = async () => {
   await assertSandboxTarget();
   const t = Date.now();
