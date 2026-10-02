@@ -13,6 +13,7 @@ const { Client } = pg;
 
 export const TEST_REF = "ncsngxlcyxylaeskiteu";
 export const PROD_REF = "copflsklaefwzipsrjqz";
+export const BBB_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
 export const LOCK_KEY = "sandra-integration-suite";
 export const ACK_ENV = "INBOX_RO_FIXTURE_ACK";
 export const DB_ENV = "TEST_SUPABASE_DB_URL";
@@ -121,6 +122,9 @@ function parseArgs(argv) {
       }[arg];
       result[key] = value;
       continue;
+    }
+    if (arg.startsWith("--db-url=") || arg.startsWith("--database-url=") || arg.startsWith("--url=")) {
+      fail("DB_URL_ARG_REFUSED", "the database URL is accepted only from TEST_SUPABASE_DB_URL");
     }
     if (arg === "--db-url" || arg === "--database-url" || arg === "--url") {
       fail("DB_URL_ARG_REFUSED", "the database URL is accepted only from TEST_SUPABASE_DB_URL");
@@ -494,13 +498,15 @@ function ownedPredicate(table) {
 async function ownedCounts(db, orgId, userId) {
   const tables = await discoverTables(db);
   const counts = {};
+  let tablesScanned = 0;
   for (const table of tables) {
     const predicate = ownedPredicate(table);
     if (!predicate) continue;
+    tablesScanned += 1;
     const result = await db.query(`select count(*)::int as count from ${quoteTable(table.schema, table.name)} t where ${predicate}`, [[orgId], [userId]]);
     if (result.rows[0].count > 0) counts[table.key] = result.rows[0].count;
   }
-  return counts;
+  return { counts, tablesScanned };
 }
 
 export async function snapshotOwnedRowKeys(db, ids) {
@@ -624,6 +630,20 @@ async function messageReferences(db, messageIds) {
   return refs;
 }
 
+async function assertReceiptIdentity(db, receipt) {
+  const orgId = receipt?.ids?.organization;
+  const userId = receipt?.ids?.user;
+  assert(String(orgId).toLowerCase() !== BBB_ORG_ID, "BBB_REFUSED", "the BMH organization is not a fixture target");
+  const org = (await db.query("select name from public.organizations where id=$1", [orgId])).rows[0];
+  if (org && org.name !== receipt.marker?.org_name) {
+    fail("REMOVE_IDENTITY_MISMATCH", "organization identity does not match the fixture marker");
+  }
+  const user = (await db.query("select email from auth.users where id=$1", [userId])).rows[0];
+  if (user && user.email !== receipt.marker?.email) {
+    fail("REMOVE_IDENTITY_MISMATCH", "auth user identity does not match the fixture marker");
+  }
+}
+
 async function verifyFixture(db, receipt, { checkLock = false } = {}) {
   const failures = [];
   const { ids, marker } = receipt;
@@ -663,7 +683,7 @@ async function verifyFixture(db, receipt, { checkLock = false } = {}) {
   }
   const refs = await messageReferences(db, [ids.messages.scheduled, ids.messages.unscheduled]);
   if (refs.length) failures.push(`provider-attempt/webhook references present: ${refs.join(",")}`);
-  const counts = await ownedCounts(db, ids.organization, ids.user);
+  const { counts } = await ownedCounts(db, ids.organization, ids.user);
   const allowed = new Set(["public.organizations", "auth.users", "auth.identities", "public.memberships", "public.messages"]);
   for (const [table, count] of Object.entries(counts)) if (!allowed.has(table)) failures.push(`unexpected owned row(s) in ${table}: ${count}`);
   if ((counts["public.organizations"] ?? 0) !== 1) failures.push("owned organization count is not one");
@@ -681,7 +701,7 @@ async function verifyFixture(db, receipt, { checkLock = false } = {}) {
   return { pass: failures.length === 0, failures, counts, diagnostics };
 }
 
-async function lockHeld(db, backendPid) {
+async function lockHeld(db, backendPid, lockKey = LOCK_KEY) {
   if (!backendPid) return false;
   return (await db.query(`
     select exists(
@@ -690,11 +710,11 @@ async function lockHeld(db, backendPid) {
       where pid=$1
         and locktype='advisory'
         and granted
-        and classid=0::oid
+        and classid=(((hashtext($2)::bigint >> 32) & 4294967295)::oid)
         and objid=((hashtext($2)::bigint & 4294967295)::oid)
         and objsubid=1
     ) as held
-  `, [backendPid, LOCK_KEY])).rows[0].held;
+  `, [backendPid, lockKey])).rows[0].held;
 }
 
 async function waitForFile(file, child, timeoutMs = 15000) {
@@ -847,6 +867,7 @@ async function deleteOwnedTenantRows(db, receipt, messageIds) {
 }
 
 async function deleteOwnedRows(db, receipt, authAdmin) {
+  await assertReceiptIdentity(db, receipt);
   await deleteOwnedTenantRows(db, receipt, Object.values(receipt.ids.messages));
   const orgId = receipt.ids.organization;
   const userId = receipt.ids.user;
@@ -882,7 +903,7 @@ export async function residueCheck(db, receipt, { preDeleteSnapshot, preDeleteOw
     .filter(identity => snapshotContainsRow(current, identity))
     .map(identity => `owned row remains: ${identity}`);
   const failures = [...cleanupDelta.failures, ...missingOwnedRemovalFailures];
-  const counts = await ownedCounts(db, receipt.ids.organization, receipt.ids.user);
+  const { counts, tablesScanned } = await ownedCounts(db, receipt.ids.organization, receipt.ids.user);
   for (const [table, count] of Object.entries(counts)) if (count > 0) failures.push(`owned rows remain: ${table}:${count}`);
   return {
     pass: failures.length === 0,
@@ -890,7 +911,7 @@ export async function residueCheck(db, receipt, { preDeleteSnapshot, preDeleteOw
     snapshot: current,
     cleanup_delta: cleanupDelta,
     managed_append_only_tables_changed: cleanupDelta.managed_append_only_tables_changed,
-    owned_tables_scanned: Object.keys(counts).length,
+    owned_tables_scanned: tablesScanned,
   };
 }
 
@@ -904,6 +925,7 @@ async function runCreate(args, env) {
     assert(prior.run_id === args.runId, "RECEIPT_RUN_ID_MISMATCH");
     const db = await openDb(env);
     try {
+      await assertReceiptIdentity(db, prior);
       const result = await verifyFixture(db, prior, { checkLock: true });
       if (!result.pass) fail("FIXTURE_INTEGRITY_FAILED", result.failures.join("; "));
       console.log(JSON.stringify({ mode: "create", idempotent: true, run_id: prior.run_id, receipt: receiptFile, ids: prior.ids, lease_expires_at: prior.lease_expires_at }));
@@ -994,6 +1016,7 @@ async function runRemove(args, env) {
   let preDeleteSnapshot;
   let preDeleteOwnedKeys;
   try {
+    await assertReceiptIdentity(db, receipt);
     preVerify = await verifyFixture(db, receipt, { checkLock: false });
     preDeleteSnapshot = await snapshotDatabase(db, { ids: receipt.ids });
     preDeleteOwnedKeys = new Set(preDeleteSnapshot.owned_row_keys);
@@ -1024,7 +1047,7 @@ async function runRemove(args, env) {
       managed_append_only_tables_changed: residue.managed_append_only_tables_changed,
     };
     writeReceipt(file, receipt);
-    console.log(JSON.stringify({ mode: "remove", pass: true, run_id: receipt.run_id, receipt: file, residue: receipt.cleanup.residue, pre_verify_failures: preVerify.failures, managed_append_only_tables_changed: residue.managed_append_only_tables_changed }));
+    console.log(JSON.stringify({ mode: "remove", pass: true, run_id: receipt.run_id, receipt: file, residue: receipt.cleanup.residue, owned_tables_scanned: residue.owned_tables_scanned, pre_verify_failures: preVerify.failures, managed_append_only_tables_changed: residue.managed_append_only_tables_changed }));
   } finally { await db.end(); }
 }
 
@@ -1041,7 +1064,7 @@ async function run(args = parseArgs(process.argv.slice(2)), env = process.env) {
   fail("MODE_REQUIRED");
 }
 
-export { FixtureError, compareSnapshots, deleteOwnedRows, expectedMetadata, parseArgs, run, verifyFixture };
+export { FixtureError, assertReceiptIdentity, compareSnapshots, deleteOwnedRows, expectedMetadata, lockHeld, parseArgs, run, verifyFixture };
 
 if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) {
   run().catch(error => {

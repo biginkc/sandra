@@ -9,6 +9,7 @@ import { createClient } from "@supabase/supabase-js";
 import pg from "pg";
 import {
   ACK_ENV,
+  BBB_ORG_ID,
   DB_ENV,
   SERVICE_ROLE_KEY_ENV,
   SUPABASE_URL_ENV,
@@ -18,6 +19,7 @@ import {
   assertSafeTarget,
   deleteOwnedRows,
   deleteOwnedRowsForTest,
+  lockHeld,
   residueCheck,
   snapshotDatabase,
 } from "./inbox-test-readonly-fixture.mjs";
@@ -245,6 +247,18 @@ async function deleteUnrelatedMembership(unrelated) {
   await unrelated.admin.deleteUser(unrelated.ids.user);
 }
 
+async function identityRowHashes(ids) {
+  const queries = [
+    ["organization", "select coalesce(string_agg(row_to_json(t)::text, E'\\n' order by t.id), '') as hash from public.organizations t where t.id=$1", [ids.organization]],
+    ["user", "select coalesce(string_agg(row_to_json(t)::text, E'\\n' order by t.id), '') as hash from auth.users t where t.id=$1", [ids.user]],
+    ["memberships", "select coalesce(string_agg(row_to_json(t)::text, E'\\n' order by t.id), '') as hash from public.memberships t where t.org_id=$1 or t.user_id=$2", [ids.organization, ids.user]],
+    ["messages", "select coalesce(string_agg(row_to_json(t)::text, E'\\n' order by t.id), '') as hash from public.messages t where t.org_id=$1", [ids.organization]],
+  ];
+  const hashes = {};
+  for (const [name, sql, values] of queries) hashes[name] = (await db.query(sql, values)).rows[0].hash;
+  return hashes;
+}
+
 before(async () => {
   workdir = mkdtempSync(path.join(tmpdir(), "sandra-inbox-ro-fixture-test-"));
   await startDisposableSupabase();
@@ -305,6 +319,10 @@ test("T2 target guards: Production, other targets, CI, provider env, and missing
   const argUrl = cli(["--status", "--run-id", "does-not-connect", "--db-url", dbUrl]);
   assert.notEqual(argUrl.status, 0);
   assert.match(argUrl.stderr, /DB_URL_ARG_REFUSED/);
+  const passwordArg = cli(["--status", "--run-id", "does-not-connect", "--db-url=postgresql://user:super-secret@example.invalid:5432/postgres"]);
+  assert.notEqual(passwordArg.status, 0);
+  assert.match(passwordArg.stderr, /DB_URL_ARG_REFUSED/);
+  assert.doesNotMatch(passwordArg.stderr, /super-secret/);
   const refused = cli(["--status", "--run-id", "does-not-connect"], { [DB_ENV]: `postgresql://postgres.${PROD_REF}@db.example.invalid:5432/postgres` });
   assert.notEqual(refused.status, 0);
   assert.match(refused.stderr, /PRODUCTION_REFUSED/);
@@ -320,6 +338,114 @@ test("T3 idempotent create: same run id leaves exactly five owned rows", async (
   assert.deepEqual(await ownedRows(first.ids.organization, first.ids.user), { orgs: "1", users: "1", memberships: "1", messages: "2" });
   const remove = cli(["--remove", "--run-id", "t3-idempotent"]);
   assert.equal(remove.status, 0, remove.stderr || remove.stdout);
+  assert.ok(jsonOutput(remove).owned_tables_scanned > 0);
+});
+
+test("identity gate: unrelated organization tamper refuses remove without changing its rows", async () => {
+  const runId = "identity-org-tamper";
+  const created = await create(runId);
+  const original = receipt(runId);
+  const unrelated = await createUnrelatedMembership("identity-org");
+  const unrelatedMessageId = randomUUID();
+  await db.query(`
+    insert into public.messages(id,org_id,channel,direction,status,provider,body)
+    values ($1,$2,'sms','inbound','received','internal','unrelated identity gate row')
+  `, [unrelatedMessageId, unrelated.ids.organization]);
+  const before = await identityRowHashes(unrelated.ids);
+  try {
+    writeFileSync(path.join(workdir, `lease-test-ro-fixture-${runId}.json`), `${JSON.stringify({ ...original, ids: { ...original.ids, organization: unrelated.ids.organization } })}\n`);
+    const refused = cli(["--remove", "--run-id", runId]);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /REMOVE_IDENTITY_MISMATCH/);
+    assert.deepEqual(await identityRowHashes(unrelated.ids), before);
+  } finally {
+    writeFileSync(path.join(workdir, `lease-test-ro-fixture-${runId}.json`), `${JSON.stringify(original)}\n`);
+    const remove = cli(["--remove", "--run-id", runId]);
+    assert.equal(remove.status, 0, remove.stderr || remove.stdout);
+    await db.query("delete from public.messages where id=$1", [unrelatedMessageId]);
+    await deleteUnrelatedMembership(unrelated);
+  }
+  assert.deepEqual(await ownedRows(created.ids.organization, created.ids.user), { orgs: "0", users: "0", memberships: "0", messages: "0" });
+});
+
+test("identity gate: the bbb organization id is refused without deleting fixture rows", async () => {
+  const runId = "identity-bbb-tamper";
+  const created = await create(runId);
+  const original = receipt(runId);
+  const before = await identityRowHashes(created.ids);
+  try {
+    writeFileSync(path.join(workdir, `lease-test-ro-fixture-${runId}.json`), `${JSON.stringify({ ...original, ids: { ...original.ids, organization: BBB_ORG_ID } })}\n`);
+    const refused = cli(["--remove", "--run-id", runId]);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /BBB_REFUSED/);
+    assert.deepEqual(await identityRowHashes(created.ids), before);
+  } finally {
+    writeFileSync(path.join(workdir, `lease-test-ro-fixture-${runId}.json`), `${JSON.stringify(original)}\n`);
+    const remove = cli(["--remove", "--run-id", runId]);
+    assert.equal(remove.status, 0, remove.stderr || remove.stdout);
+  }
+});
+
+test("identity gate: unrelated auth user tamper refuses remove without changing either identity", async () => {
+  const runId = "identity-user-tamper";
+  const created = await create(runId);
+  const original = receipt(runId);
+  const unrelated = await createUnrelatedMembership("identity-user");
+  const beforeFixture = await identityRowHashes(created.ids);
+  const beforeUnrelated = await identityRowHashes(unrelated.ids);
+  try {
+    writeFileSync(path.join(workdir, `lease-test-ro-fixture-${runId}.json`), `${JSON.stringify({ ...original, ids: { ...original.ids, user: unrelated.ids.user } })}\n`);
+    const refused = cli(["--remove", "--run-id", runId]);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /REMOVE_IDENTITY_MISMATCH/);
+    assert.deepEqual(await identityRowHashes(created.ids), beforeFixture);
+    assert.deepEqual(await identityRowHashes(unrelated.ids), beforeUnrelated);
+  } finally {
+    writeFileSync(path.join(workdir, `lease-test-ro-fixture-${runId}.json`), `${JSON.stringify(original)}\n`);
+    const remove = cli(["--remove", "--run-id", runId]);
+    assert.equal(remove.status, 0, remove.stderr || remove.stdout);
+    await deleteUnrelatedMembership(unrelated);
+  }
+});
+
+test("identity gate: idempotent create refuses an unrelated organization receipt", async () => {
+  const runId = "identity-idempotent-tamper";
+  await create(runId);
+  const original = receipt(runId);
+  const unrelated = await createUnrelatedMembership("identity-idempotent");
+  const before = await identityRowHashes(unrelated.ids);
+  try {
+    writeFileSync(path.join(workdir, `lease-test-ro-fixture-${runId}.json`), `${JSON.stringify({ ...original, ids: { ...original.ids, organization: unrelated.ids.organization } })}\n`);
+    const refused = cli(["--create", "--run-id", runId, "--owner", "fixture-test"]);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /REMOVE_IDENTITY_MISMATCH/);
+    assert.deepEqual(await identityRowHashes(unrelated.ids), before);
+  } finally {
+    writeFileSync(path.join(workdir, `lease-test-ro-fixture-${runId}.json`), `${JSON.stringify(original)}\n`);
+    const remove = cli(["--remove", "--run-id", runId]);
+    assert.equal(remove.status, 0, remove.stderr || remove.stdout);
+    await deleteUnrelatedMembership(unrelated);
+  }
+});
+
+test("NB3 lockHeld recognizes a held advisory lock with a negative hashtext", async () => {
+  const key = (await db.query(`
+    select 'sandra-negative-lock-' || value::text as key
+    from generate_series(1,10000) as values(value)
+    where hashtext('sandra-negative-lock-' || value::text) < 0
+    limit 1
+  `)).rows[0].key;
+  const lockDb = new Client({ connectionString: dbUrl });
+  await lockDb.connect();
+  try {
+    const backendPid = (await lockDb.query("select pg_backend_pid() as pid")).rows[0].pid;
+    assert((await lockDb.query("select hashtext($1)::bigint as hash", [key])).rows[0].hash < 0);
+    await lockDb.query("select pg_advisory_lock(hashtext($1))", [key]);
+    assert.equal(await lockHeld(lockDb, backendPid, key), true);
+  } finally {
+    await lockDb.query("select pg_advisory_unlock(hashtext($1))", [key]).catch(() => {});
+    await lockDb.end();
+  }
 });
 
 test("T4 status verifies the exact marker, active owner, two rows, null tail, and passwordless user", async () => {
