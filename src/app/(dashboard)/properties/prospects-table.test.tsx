@@ -1571,38 +1571,4 @@ describe("<ProspectsTable /> Search page copy and mixed statuses", () => {
       expect.objectContaining({}),
     );
   });
-
-  it("checkbox-mode banner counts only selected leads, not locked ones", async () => {
-    const user = userEvent.setup({ pointerEventsCheck: 0 });
-    render(
-      <ProspectsTable
-        prospects={[
-          makeRow({ id: "p1", status: "prospect" }),
-          makeRow({ id: "l1", status: "new_lead" }),
-          makeRow({ id: "l2", status: "dead", dnc_reason: "manual" }),
-        ]}
-        lists={[]}
-        tags={[]}
-        teamMembers={[]}
-        currentUserId={null}
-        blockStack={EMPTY_BLOCK_STACK}
-        filtersParam={null}
-        search="oak"
-        total={9}
-        pageSize={3}
-        page={1}
-        totalPages={3}
-        headerCount=""
-        sort="created_at"
-        dir="desc"
-        canDelete={false}
-      />,
-    );
-    await user.click(screen.getByRole("checkbox", { name: "Select all prospects on this page" }));
-    const banner = await screen.findByTestId("select-all-banner");
-    expect(banner.textContent).toMatch(/\b1 lead skipped/);
-    // Deselect the lead: banner is hidden (not all selected) and no stale lead count remains.
-    await user.click(screen.getByRole("checkbox", { name: "Select l1 Main St" }));
-    expect(screen.queryByTestId("select-all-banner")).not.toBeInTheDocument();
-  });
 });

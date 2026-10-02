@@ -32,9 +32,8 @@ describe("ad-hoc bulk SMS source literal", () => {
 
   const hasMain = fromMainText("src/workflows/bulk-sms.ts") !== null;
   it.skipIf(!hasMain)("also matches origin/main's text (SKIPPED when origin/main is not fetched in this checkout)", () => {
-    const fromMain = fromMainText;
-    const creator = fromMain("src/lib/campaigns/ad-hoc-bulk-sms.ts");
-    const workflow = fromMain("src/workflows/bulk-sms.ts");
+    const creator = fromMainText("src/lib/campaigns/ad-hoc-bulk-sms.ts");
+    const workflow = fromMainText("src/workflows/bulk-sms.ts");
     expect(creator).not.toBeNull();
     expect(workflow).not.toBeNull();
     expect(creator).toContain(`source: "${AD_HOC_BULK_SMS_SOURCE}"`);

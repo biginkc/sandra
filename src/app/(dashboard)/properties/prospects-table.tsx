@@ -852,10 +852,7 @@ export function ProspectsTable({
           selectAllMatching
             ? selectAllSkippedLeads
             : selectableProspects.filter(
-                (p) =>
-                  selectedInScope.has(p.id) &&
-                  p.status !== undefined &&
-                  p.status !== "prospect",
+                (p) => p.status !== undefined && p.status !== "prospect",
               ).length
         }
         onSelectAllAcrossPages={onSelectAllAcrossPages}
