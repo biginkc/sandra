@@ -3,11 +3,27 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-TLS_PROOF = ROOT / "experiments/inbox-production-install/electric-tls-proof.py"
+PROOF_DIR = ROOT / "experiments/inbox-production-install"
+TLS_PROOF = PROOF_DIR / "electric-tls-proof.py"
+SECRET_PROOF = PROOF_DIR / "electric-secret-proof.py"
+if str(PROOF_DIR) not in sys.path:
+    sys.path.insert(0, str(PROOF_DIR))
+from electric_image_contract import (  # noqa: E402
+    CandidateError,
+    EIMG_ATTESTATION_PLACEHOLDER,
+    EIMG_DIGEST_PLACEHOLDER,
+    EIMG_LABELS,
+    EIMG_REPOSITORY,
+    EIMG_SOURCE_COMMIT,
+    ElectricImagePin,
+    load_electric_pin,
+)
 
 
 def load_tls_proof():
@@ -17,6 +33,42 @@ def load_tls_proof():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_secret_proof():
+    spec = importlib.util.spec_from_file_location("electric_secret_proof", SECRET_PROOF)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {SECRET_PROOF}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def ready_pin() -> ElectricImagePin:
+    digest = "a" * 64
+    return ElectricImagePin(
+        image=f"{EIMG_REPOSITORY}:1.8.1-0f40420@sha256:{digest}",
+        repository_digest=f"{EIMG_REPOSITORY}@sha256:{digest}",
+        digest=digest,
+        source_commit=EIMG_SOURCE_COMMIT,
+        attestation="https://github.com/biginkc/sandra/actions/runs/756",
+    )
+
+
+def attestation_payload(*, source_commit: str = EIMG_SOURCE_COMMIT, workflow: str = "https://github.com/biginkc/sandra/.github/workflows/inbox-electric.yml@refs/heads/main") -> list[dict]:
+    return [{
+        "verificationResult": {
+            "signature": {"certificate": {
+                "sourceRepository": "https://github.com/biginkc/sandra",
+                "sourceRepositoryOwner": "biginkc",
+                "subjectAlternativeName": workflow,
+            }},
+            "statement": {"predicate": {"buildDefinition": {"resolvedDependencies": [{
+                "uri": f"git+https://github.com/electric-sql/electric@{source_commit}",
+                "digest": {"sha1": source_commit},
+            }]}}},
+        },
+    }]
 
 
 class RuntimeR1ConfigTests(unittest.TestCase):
@@ -82,11 +134,77 @@ class RuntimeR1ConfigTests(unittest.TestCase):
     def test_real_electric_proofs_use_the_candidate_pin_and_fail_closed(self):
         candidate = json.loads((ROOT / "deployment/inbox/candidate.json").read_text())
         pinned_image = next(service for service in candidate["services"] if service["name"] == "inbox-electric")["image"]
+        self.assertEqual(pinned_image, f"{EIMG_REPOSITORY}:1.8.1-0f40420@sha256:{EIMG_DIGEST_PLACEHOLDER}")
+        self.assertEqual(next(service for service in candidate["services"] if service["name"] == "inbox-electric")["sourceCommit"], EIMG_SOURCE_COMMIT)
+        self.assertEqual(next(service for service in candidate["services"] if service["name"] == "inbox-electric")["attestation"], EIMG_ATTESTATION_PLACEHOLDER)
+        with self.assertRaises(CandidateError):
+            load_electric_pin(require_ready=True)
         for name in ("electric-tls-proof.py", "electric-secret-proof.py"):
             proof = (ROOT / "experiments/inbox-production-install" / name).read_text()
-            self.assertIn(pinned_image, proof)
+            self.assertNotIn("efb6fa43", proof)
+            self.assertIn("load_electric_pin", proof)
+            self.assertIn("gh", proof)
+            self.assertIn("verify_labels", proof)
             self.assertIn("PINNED_PULL_DENIED", proof)
             self.assertIn("UNSEALED", proof)
+
+    def test_candidate_contract_rejects_placeholder_for_a_sealed_consumer(self):
+        pin = load_electric_pin()
+        self.assertTrue(pin.pending)
+        self.assertEqual(pin.digest, EIMG_DIGEST_PLACEHOLDER)
+        self.assertEqual(pin.attestation, EIMG_ATTESTATION_PLACEHOLDER)
+        with self.assertRaisesRegex(CandidateError, "EIMG_BUILD_PENDING"):
+            pin.require_ready()
+
+    def test_each_proof_requires_repo_digest_match(self):
+        for proof in (load_tls_proof(), load_secret_proof()):
+            with self.subTest(proof=proof.__name__):
+                proof.docker = lambda *args, **kwargs: SimpleNamespace(stdout="ghcr.io/biginkc/inbox-electric@sha256:" + "b" * 64, stderr="", returncode=0)
+                with self.assertRaisesRegex(proof.ProofError, "PINNED_REPO_DIGEST_MISMATCH"):
+                    proof.inspect_repo_digest("image", ready_pin().repository_digest)
+
+    def test_each_proof_requires_a_passing_attestation_and_exact_identity(self):
+        for proof in (load_tls_proof(), load_secret_proof()):
+            with self.subTest(proof=proof.__name__):
+                commands = []
+
+                def fake_run(args, check=True, timeout=120):
+                    commands.append(args)
+                    return SimpleNamespace(stdout=json.dumps(attestation_payload()), stderr="", returncode=0)
+
+                proof.run = fake_run
+                result = proof.verify_attestation(ready_pin())
+                self.assertEqual(result["source_commit"], EIMG_SOURCE_COMMIT)
+                self.assertIn("--owner", commands[0])
+                self.assertIn("biginkc", commands[0])
+                self.assertIn("--signer-repo", commands[0])
+                self.assertIn("oci://ghcr.io/biginkc/inbox-electric@sha256:" + "a" * 64, commands[0])
+
+                for mutated in (
+                    attestation_payload(source_commit="b" * 40),
+                    attestation_payload(workflow="https://github.com/biginkc/sandra/.github/workflows/inbox-electric.yml@refs/heads/dev"),
+                ):
+                    proof.run = lambda args, check=True, timeout=120, payload=mutated: SimpleNamespace(stdout=json.dumps(payload), stderr="", returncode=0)
+                    with self.assertRaisesRegex(proof.ProofError, "attestation identity/source commit"):
+                        proof.verify_attestation(ready_pin())
+
+                proof.run = lambda *args, **kwargs: SimpleNamespace(stdout="", stderr="signature rejected", returncode=1)
+                with self.assertRaisesRegex(proof.ProofError, "EIMG_ATTESTATION_FAILED"):
+                    proof.verify_attestation(ready_pin())
+
+    def test_each_proof_requires_all_eimg6_labels(self):
+        for proof in (load_tls_proof(), load_secret_proof()):
+            for key in EIMG_LABELS:
+                with self.subTest(proof=proof.__name__, label=key):
+                    labels = dict(EIMG_LABELS)
+                    labels[key] = "mutated"
+
+                    def fake_docker(*args, labels=labels, **kwargs):
+                        return SimpleNamespace(stdout=json.dumps(labels), stderr="", returncode=0)
+
+                    proof.docker = fake_docker
+                    with self.assertRaisesRegex(proof.ProofError, "OCI labels do not match EIMG-6"):
+                        proof.verify_labels(ready_pin(), ready_pin().image)
 
     def test_electric_tls_harness_matches_candidate_dsn_and_ca_contract(self):
         proof = load_tls_proof()

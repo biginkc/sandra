@@ -14,7 +14,9 @@
   "services": [
     {
       "name": "inbox-electric",
-      "image": "electricsql/electric:1.8.1@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139",
+      "image": "ghcr.io/biginkc/inbox-electric:1.8.1-0f40420@sha256:PENDING_EIMG_BUILD",
+      "sourceCommit": "0f404200402f918a4b1596bc5c8a53479a435349",
+      "attestation": "PENDING_EIMG_BUILD",
       "replicas": 1,
       "cpuLimit": 1,
       "memoryGiBLimit": 1,

@@ -21,8 +21,17 @@ import uuid
 
 
 HERE = Path(__file__).resolve().parent
-PUBLISHED_ELECTRIC_IMAGE = "electricsql/electric:1.8.1@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139"
-PINNED_REPO_DIGEST = "electricsql/electric@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139"
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+from electric_image_contract import (  # noqa: E402
+    CandidateError,
+    ElectricImagePin,
+    load_electric_pin,
+    verify_attestation_json,
+    verify_labels_json,
+)
+
+
 POSTGRES_IMAGE = "postgres:17"
 POSTGRES_PASSWORD = "sandra-electric-secret-proof-password"
 RELAY_TOKEN = "sandra-electric-secret-proof-relay-token"
@@ -59,29 +68,65 @@ def image_exists(image: str) -> bool:
     return docker("image", "inspect", image, check=False, timeout=20).returncode == 0
 
 
-def inspect_repo_digest(image: str) -> str:
+def inspect_repo_digest(image: str, expected_repo_digest: str) -> str:
     result = docker("image", "inspect", "--format", "{{index .RepoDigests 0}}", image, check=False, timeout=20)
     if result.returncode:
         raise ProofError(f"docker inspect could not read RepoDigest for {image}: {(result.stderr + result.stdout).strip()}")
     digest = result.stdout.strip()
-    if digest != PINNED_REPO_DIGEST:
-        raise ProofError(f"PINNED_REPO_DIGEST_MISMATCH: docker inspect returned {digest!r}, expected {PINNED_REPO_DIGEST!r}")
+    if digest != expected_repo_digest:
+        raise ProofError(f"PINNED_REPO_DIGEST_MISMATCH: docker inspect returned {digest!r}, expected {expected_repo_digest!r}")
     return digest
 
 
-def ensure_pinned_image() -> tuple[str | None, bool, str | None]:
-    existed = image_exists(PUBLISHED_ELECTRIC_IMAGE)
+def ensure_pinned_image(pin: ElectricImagePin) -> tuple[str | None, bool, str | None]:
+    existed = image_exists(pin.image)
     if not existed:
-        pulled = docker("pull", PUBLISHED_ELECTRIC_IMAGE, check=False, timeout=900)
+        pulled = docker("pull", pin.image, check=False, timeout=900)
         if pulled.returncode:
             return None, False, (pulled.stderr + pulled.stdout).strip()
     try:
-        digest = inspect_repo_digest(PUBLISHED_ELECTRIC_IMAGE)
+        digest = inspect_repo_digest(pin.image, pin.repository_digest)
     except Exception:
         if not existed:
-            docker("image", "rm", PUBLISHED_ELECTRIC_IMAGE, check=False, timeout=120)
+            docker("image", "rm", pin.image, check=False, timeout=120)
         raise
-    return PUBLISHED_ELECTRIC_IMAGE, not existed, digest
+    return pin.image, not existed, digest
+
+
+def verify_attestation(pin: ElectricImagePin) -> dict[str, str]:
+    result = run(
+        [
+            "gh",
+            "attestation",
+            "verify",
+            pin.oci_uri,
+            "--owner",
+            "biginkc",
+            "--signer-repo",
+            "biginkc/sandra",
+            "--format",
+            "json",
+        ],
+        check=False,
+        timeout=120,
+    )
+    if result.returncode:
+        raise ProofError(f"EIMG_ATTESTATION_FAILED: {redact((result.stderr + result.stdout)[-4000:])}")
+    try:
+        payload = json.loads(result.stdout)
+        return verify_attestation_json(pin, payload)
+    except (json.JSONDecodeError, CandidateError) as exc:
+        raise ProofError(str(exc)) from exc
+
+
+def verify_labels(pin: ElectricImagePin, image: str) -> dict[str, str]:
+    result = docker("image", "inspect", "--format", "{{json .Config.Labels}}", image, check=False, timeout=20)
+    if result.returncode:
+        raise ProofError(f"EIMG_LABELS_UNREADABLE: {(result.stderr + result.stdout).strip()}")
+    try:
+        return verify_labels_json(json.loads(result.stdout))
+    except (json.JSONDecodeError, CandidateError) as exc:
+        raise ProofError(str(exc)) from exc
 
 
 def ensure_image(image: str) -> bool:
@@ -154,9 +199,12 @@ def main() -> int:
     wrong_relay = f"sandra-r1-electric-secret-wrong-relay-{suffix}"
     relay_image = f"sandra-r1-electric-secret-relay-image:{suffix}"
     evidence_path = HERE / "electric-secret-evidence.json"
+    pin = load_electric_pin()
     status: dict[str, object] = {
-        "published_electric_image": PUBLISHED_ELECTRIC_IMAGE,
-        "pinned_repo_digest": PINNED_REPO_DIGEST,
+        "published_electric_image": pin.image,
+        "pinned_repo_digest": pin.repository_digest,
+        "source_commit": pin.source_commit,
+        "attestation": pin.attestation,
         "stream": STREAM,
         "projection": PROJECTION,
         "seal_status": "UNSEALED",
@@ -167,7 +215,11 @@ def main() -> int:
     created_relay_image = False
     active_image: str | None = None
     try:
-        active_image, created_electric_image, repo_digest = ensure_pinned_image()
+        try:
+            pin.require_ready()
+        except CandidateError as exc:
+            raise ProofError(str(exc)) from exc
+        active_image, created_electric_image, repo_digest = ensure_pinned_image(pin)
         status["docker_inspect_repo_digest"] = repo_digest
         if active_image is None:
             error = repo_digest or "pinned Electric image pull was denied"
@@ -178,7 +230,9 @@ def main() -> int:
             print(json.dumps(status, indent=2, sort_keys=True))
             raise ProofError(f"PINNED_PULL_DENIED: {error}")
 
-        inspect_repo_digest(active_image)
+        inspect_repo_digest(active_image, pin.repository_digest)
+        status["attestation"] = verify_attestation(pin)
+        status["oci_labels"] = verify_labels(pin, active_image)
         created_postgres_image = ensure_image(POSTGRES_IMAGE)
         docker("network", "create", network)
         created_network = True
@@ -249,7 +303,6 @@ def main() -> int:
         if any(secret in relay_logs + wrong_relay_logs + electric_logs for secret in (RELAY_TOKEN, ELECTRIC_SECRET, WRONG_ELECTRIC_SECRET)):
             raise ProofError("secret appeared in relay or Electric logs")
         status.update({
-            "seal_status": "SEALED",
             "checks": {
                 "relay_bearer_and_electric_headers": True,
                 "direct_electric_without_secret_401": True,
@@ -260,20 +313,21 @@ def main() -> int:
             "client_secret_status": client_secret_status,
             "wrong_secret_status": wrong_status,
         })
+        status["seal_status"] = "SEALED"
         evidence_path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         evidence_path.chmod(0o600)
         print(json.dumps(status, indent=2, sort_keys=True))
         return 0
     except Exception as exc:
         status["error"] = redact(str(exc))
-        if status.get("pinned_pull_verdict") != "PINNED_PULL_DENIED":
-            status["seal_status"] = "FAILED"
+        status["seal_status"] = "UNSEALED"
         evidence_path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         evidence_path.chmod(0o600)
         raise
     finally:
-        for container in (wrong_relay, relay, electric, postgres):
-            docker("rm", "-f", container, check=False, timeout=60)
+        if created_network or active_image or created_postgres_image or created_electric_image or created_relay_image:
+            for container in (wrong_relay, relay, electric, postgres):
+                docker("rm", "-f", container, check=False, timeout=60)
         if created_network:
             docker("network", "rm", network, check=False, timeout=60)
         if created_relay_image:

@@ -160,6 +160,11 @@ class ReleaseGateStatusTests(unittest.TestCase):
         live = {"status": "BLOCKED", "detail": "release database probe not requested"}
         self.assertIs(gate.authoritative_rollback_gate(live), live)
 
+    def test_deploy_gate_rejects_pending_electric_digest(self) -> None:
+        result = gate.validate_electric_candidate_for_deploy()
+        self.assertEqual(result["status"], "FAIL")
+        self.assertIn("EIMG_BUILD_PENDING", result["detail"])
+
     def test_worker_recovery_requires_exact_head_dispatch_boundary_proof(self) -> None:
         sha = "d" * 40
         with tempfile.TemporaryDirectory() as directory:

@@ -30,6 +30,8 @@ from sealed_evidence import EvidenceError, evaluate as evaluate_sealed_evidence,
 DEFAULT_MANIFEST = HERE / "release-manifest.json"
 INSTALL = ROOT / "experiments" / "inbox-production-install"
 EVIDENCE_ROOT = "docs/performance/inbox-redesign/evidence"
+sys.path.insert(0, str(INSTALL))
+from electric_image_contract import CandidateError, load_electric_pin  # noqa: E402
 
 FORBIDDEN_MARKERS = re.compile(
     r"(?:placeholder|synthetic[-_ ]pass|not[-_ ]run|unknown|todo|fake|invented)",
@@ -59,6 +61,15 @@ def load_json(path: Path) -> dict[str, Any]:
 
 class GateError(RuntimeError):
     pass
+
+
+def validate_electric_candidate_for_deploy() -> dict[str, Any]:
+    """Require the reviewed Electric digest and provenance before deploy."""
+    try:
+        pin = load_electric_pin(require_ready=True)
+    except CandidateError as exc:
+        return result("FAIL", f"Electric deployment candidate is not sealable: {exc}")
+    return result("PASS", "Electric candidate has a concrete digest and attestation", image=pin.image, attestation=pin.attestation)
 
 
 def git_sha() -> str:
@@ -1099,6 +1110,10 @@ def main() -> int:
     if args.sealed_evidence_sha:
         try:
             if args.deploy_tier:
+                electric_result = validate_electric_candidate_for_deploy()
+                if electric_result["status"] != "PASS":
+                    print(json.dumps({"status": "FAIL", "detail": electric_result["detail"], "electric": electric_result}, indent=2))
+                    return 1
                 report = evaluate_deploy(args.repo, args.sealed_evidence_sha, args.deploy_tier, args.head)
             else:
                 report = evaluate_sealed_evidence(args.repo, args.approval, args.sealed_evidence_sha, m=args.main_sha, head=args.head)
