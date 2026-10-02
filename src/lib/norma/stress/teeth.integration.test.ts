@@ -33,6 +33,12 @@ const MUTANTS: Mutant[] = [
       mutateFunction(q, "public.retry_sequence_step(uuid, uuid)", "if public.fn_norma_hold_active(e.property_id) then", "if false then"),
   },
   {
+    name: "releasing a request's pauses ignores why the pause is held (a reply pause is released like our own)",
+    invariant: "5",
+    apply: (q) =>
+      mutateFunction(q, "public.fn_norma_release_pauses(uuid)", "elsif e.status <> 'paused' or e.pause_reason is distinct from 'norma_call' then", "elsif e.status <> 'paused' then"),
+  },
+  {
     name: "the one-open-request index is gone (a second request can open)",
     invariant: "1",
     apply: async (q) => {
@@ -67,6 +73,68 @@ const MUTANTS: Mutant[] = [
     },
   },
 ];
+
+/**
+ * Mutants the random invariants cannot see (the harness always opts a DNC lead's
+ * drips out before the release runs, and a replay changes only the result
+ * string), so each is proven by a deterministic scene instead.
+ */
+type SceneMutant = { name: string; apply: Mutant["apply"]; scene: (h: Harness) => Promise<string[]> };
+
+const SCENE_MUTANTS: SceneMutant[] = [
+  {
+    name: "releasing a request's pauses ignores do-not-contact (a DNC lead is resumed)",
+    apply: async (q) => {
+      await mutateFunction(q, "public.fn_norma_release_pauses(uuid)", "if coalesce(v_prop.is_dnc_locked, true)", "if false");
+      await mutateFunction(q, "public.fn_norma_release_pauses(uuid)", "or coalesce(v_contact.do_not_contact, false)", "or false");
+    },
+    scene: async (h) => {
+      const ctx = await h.lead({ enrollments: ["active"] }, { kind: "no_answer_status" });
+      await h.requestCall(ctx, h.world.rep1);
+      // Do-not-contact lands on the contact only, leaving the enrollment paused as norma_call.
+      await h.scratch.pool.query("update public.contacts set do_not_contact = true where id = $1", [ctx.lead.contact]);
+      const hook = await h.bland.webhook(h.bland.callForNumber(ctx.lead.phone)!, "good");
+      const enrollment = (await h.scratch.pool.query("select status from public.sequence_enrollments where id = $1", [ctx.lead.enrollments[0]])).rows[0];
+      const request = (await h.scratch.pool.query("select status from public.norma_call_requests where property_id = $1", [ctx.lead.property])).rows[0];
+      const problems: string[] = [];
+      if (hook.status !== 200 || request?.status !== "completed") problems.push(`the completion failed (${hook.status}, request ${request?.status})`);
+      if (enrollment?.status !== "paused") problems.push(`a do-not-contact lead's drip was ${enrollment?.status} after the call ended`);
+      return problems;
+    },
+  },
+  {
+    name: "a replayed completion is not short-circuited",
+    apply: (q) =>
+      mutateFunction(q, "public.fn_norma_complete_call(uuid, text, text, jsonb)", "if r.status = 'completed' then", "if false then"),
+    scene: async (h) => {
+      const ctx = await h.lead({ enrollments: ["active"] }, { kind: "reached" });
+      await h.requestCall(ctx, h.world.rep1);
+      const call = h.bland.callForNumber(ctx.lead.phone)!;
+      await h.bland.webhook(call, "good");
+      const again = await h.bland.webhook(call, "good");
+      return again.status === 200 && again.body.status === "replayed" ? [] : [`second delivery answered ${again.status} ${JSON.stringify(again.body)}, expected a replay`];
+    },
+  },
+];
+
+describe("the stress gate has teeth (deterministic scenes)", () => {
+  it.each(SCENE_MUTANTS)("catches: $name", async ({ apply, scene }) => {
+    const h = await Harness.create(rng(78));
+    try {
+      const clean = await scene(h);
+      expect(clean, "the scene must pass on the unmutated functions").toEqual([]);
+    } finally {
+      await h.close();
+    }
+    const m = await Harness.create(rng(78));
+    try {
+      await apply((sql) => m.scratch.pool.query(sql) as never);
+      expect((await scene(m)).length, "mutant not caught by its scene").toBeGreaterThan(0);
+    } finally {
+      await m.close();
+    }
+  });
+});
 
 describe("the stress gate has teeth", () => {
   it.each(MUTANTS)("catches: $name", async ({ invariant, apply }) => {
