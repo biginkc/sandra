@@ -28,7 +28,7 @@ const rows: WorkspaceRow[] = [
   { target: { kind: "conversation", orgId: fixture.orgId, conversationId: "99999999-9999-4999-8999-999999999999" }, name: "Sofia Andrade", context: "Juniper Ave", preview: "Thanks for following up.", timeLabel: "Mon", outcomeLabel: "Needs outcome", assignedLabel: "—" },
 ];
 
-const historySnapshot: InboxDetailSnapshot = { requesterId: fixture.requesterId, orgId: fixture.orgId, conversationId: fixture.conversationId, headRevision: "2", readBoundary: fixture.boundaryId, boundaryExpiresAt: "2099-01-01T00:00:00Z", captureGeneration: fixture.captureGeneration, history: [...fixture.history], nextCursor: null };
+const historySnapshot: InboxDetailSnapshot = { requesterId: fixture.requesterId, orgId: fixture.orgId, conversationId: fixture.conversationId, propertyId: "ffffffff-ffff-4fff-8fff-ffffffffffff", headRevision: "2", readBoundary: fixture.boundaryId, boundaryExpiresAt: "2099-01-01T00:00:00Z", captureGeneration: fixture.captureGeneration, history: [...fixture.history], nextCursor: null };
 const fixtureRead: typeof fetch = async () => Response.json({ boundaryId: fixture.boundaryId, batch: 0, changed: 0, completed: true });
 const href = (state: InboxReplyPreviewState) => `/brand/inbox/reply/${state}`;
 
