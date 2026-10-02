@@ -2,7 +2,8 @@
   "source_sha256": {
     "supabase/migrations/20261004050000_inbox_control_foundation.sql": "a31799ba96e6f7264f062019cc8113a6401719a686cc31e569b10d21064bfbf6",
     "supabase/migrations/20261004050100_inbox_read_companion.sql": "7a2c5f49fc8fcf58c7f37585c3c347869816912e47e504ec47f9cdac198d3dd7",
-    "supabase/migrations/20261004050200_inbox_backend_operation_reply.sql": "2a4b49d43e67963805d547221d04c84c3f7823f430fd9c0cc9b3f22b36844aad"
+    "supabase/migrations/20261004050200_inbox_backend_operation_reply.sql": "2a4b49d43e67963805d547221d04c84c3f7823f430fd9c0cc9b3f22b36844aad",
+    "supabase/migrations/20261002130250_inbox_reply_message_projection.sql": "2a097587ad59aa913a386ce59b513fcbac8452b0b770477bde16533cb2672112"
   },
   "functions": {
     "public.inbox_capture_inbound_head": {
@@ -39,13 +40,17 @@
       "secdef": true,
       "owner": "postgres",
       "search_path": "",
-      "execute": []
+      "execute": [
+        "authenticated"
+      ]
     },
     "inbox_authenticated_detail.detail_v2": {
       "secdef": true,
       "owner": "postgres",
       "search_path": "",
-      "execute": []
+      "execute": [
+        "authenticated"
+      ]
     },
     "inbox_capture_boundary.detail": {
       "secdef": true,
@@ -1216,6 +1221,38 @@
       "owner": "postgres",
       "search_path": "",
       "execute": []
+    },
+    "inbox_reply_send.project_message": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.project_message_trigger": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.drain_message_projection_one": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "public.inbox_reply_drain_message_projection_one": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "service_role"
+      ]
+    },
+    "inbox_reply_send.worker_persist_result": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
     }
   },
   "relation_owners": {
@@ -1286,6 +1323,7 @@
     "table:inbox_reply_send.attempts": "postgres",
     "table:inbox_reply_send.dispatch_outbox": "postgres",
     "table:inbox_reply_send.unmatched_callbacks": "postgres",
-    "table:inbox_reply_send.callback_receipts": "postgres"
+    "table:inbox_reply_send.callback_receipts": "postgres",
+    "table:inbox_reply_send.message_projection_backlog": "postgres"
   }
 }
