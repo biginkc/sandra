@@ -48,7 +48,7 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
 
   const { data: row, error } = await client
     .from("norma_call_requests")
-    .select("id, status, phone_e164, property_id, contact_id, idempotency_key, rep_context")
+    .select("id, status, org_id, phone_e164, property_id, contact_id, idempotency_key, rep_context")
     .eq("id", requestId)
     .maybeSingle();
   if (error) throw new Error(`norma dispatch load failed: ${error.message}`);
@@ -142,23 +142,82 @@ export const NORMA_DISPATCH_VARIABLES = {
   sellerFirstName: "seller_first_name",
   propertyAddress: "property_address",
   repContext: "rep_context",
+  askingPrice: "asking_price",
+  latestNotes: "latest_notes",
 } as const;
+
+const LATEST_NOTES_MAX_CHARS = 1000;
+const LATEST_NOTES_FETCH_LIMIT = 25;
+const NOTES_SEPARATOR = " | ";
+
+/** Whole dollars, US formatting ("$160,000"); empty when there is no usable price. */
+function formatAskingPrice(value: number | string | null | undefined): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string" && value.trim() === "") return "";
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return "";
+  return `$${Math.round(n).toLocaleString("en-US")}`;
+}
+
+/** Rep-written text, treated as data: control chars stripped, whitespace collapsed. */
+function cleanNote(body: string | null | undefined): string {
+  return (body ?? "")
+    .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Newest-first notes joined with " | ", capped at 1,000 chars (whole notes; a lone oversized note is cut). */
+function joinLatestNotes(bodies: Array<string | null | undefined>): string {
+  let out = "";
+  for (const body of bodies) {
+    const note = cleanNote(body);
+    if (!note) continue;
+    const next = out ? `${out}${NOTES_SEPARATOR}${note}` : note;
+    if (next.length <= LATEST_NOTES_MAX_CHARS) {
+      out = next;
+      continue;
+    }
+    if (!out) out = Array.from(note).slice(0, LATEST_NOTES_MAX_CHARS).join("").trimEnd();
+    break;
+  }
+  return out;
+}
 
 async function loadCallVariables(
   client: Client,
-  row: { property_id: string; contact_id: string | null; rep_context: string | null },
+  row: { org_id: string; property_id: string; contact_id: string | null; rep_context: string | null },
 ): Promise<Record<string, string>> {
-  const [{ data: property, error: propertyError }, { data: contact, error: contactError }] = await Promise.all([
-    client.from("properties").select("address, city, state, zip").eq("id", row.property_id).maybeSingle(),
+  const [
+    { data: property, error: propertyError },
+    { data: contact, error: contactError },
+    { data: notes, error: notesError },
+  ] = await Promise.all([
+    // listing_price is the "Listing price" row on the lead page (CSV "asking price" imports into it).
+    client.from("properties").select("address, city, state, zip, listing_price")
+      .eq("id", row.property_id)
+      .eq("org_id", row.org_id)
+      .maybeSingle(),
     row.contact_id
       ? client.from("contacts").select("first_name").eq("id", row.contact_id).maybeSingle()
       : Promise.resolve({ data: null, error: null }),
+    // lead_notes is the notes feed on the lead page, read there by property_id, newest first.
+    client
+      .from("lead_notes")
+      .select("body")
+      .eq("org_id", row.org_id)
+      .eq("property_id", row.property_id)
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(LATEST_NOTES_FETCH_LIMIT),
   ]);
-  if (propertyError || contactError) throw new Error("norma dispatch lead facts failed");
+  if (propertyError || contactError || notesError) throw new Error("norma dispatch lead facts failed");
   const address = [property?.address, property?.city, property?.state, property?.zip].filter(Boolean).join(", ");
   return {
     [NORMA_DISPATCH_VARIABLES.sellerFirstName]: contact?.first_name ?? "",
     [NORMA_DISPATCH_VARIABLES.propertyAddress]: address,
     [NORMA_DISPATCH_VARIABLES.repContext]: row.rep_context ?? "",
+    [NORMA_DISPATCH_VARIABLES.askingPrice]: formatAskingPrice(property?.listing_price),
+    [NORMA_DISPATCH_VARIABLES.latestNotes]: joinLatestNotes((notes ?? []).map((n) => n.body)),
   };
 }

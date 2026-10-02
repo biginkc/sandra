@@ -15,6 +15,17 @@ export function fakeClient(tables: Record<string, Rows>, rpcs: Record<string, Rp
   const updates: { table: string; values: Record<string, unknown>; id: unknown }[] = [];
   function builder(table: string) {
     let rows = [...(tables[table] ?? [])];
+    const sorts: { col: string; asc: boolean }[] = [];
+    const sorted = () =>
+      sorts.length
+        ? [...rows].sort((a, b) => {
+            for (const { col, asc } of sorts) {
+              const x = String(a[col] ?? ""), y = String(b[col] ?? "");
+              if (x !== y) return (x < y ? -1 : 1) * (asc ? 1 : -1);
+            }
+            return 0;
+          })
+        : rows;
     const api = {
       select: () => api,
       eq: (col: string, val: unknown) => ((rows = rows.filter((r) => r[col] === val)), api),
@@ -27,10 +38,10 @@ export function fakeClient(tables: Record<string, Rows>, rpcs: Record<string, Rp
           return { data: null, error: null };
         },
       }),
-      order: () => api,
-      limit: (n: number) => ((rows = rows.slice(0, n)), api),
-      maybeSingle: async () => ({ data: rows[0] ?? null, error: null }),
-      then: (resolve: (v: unknown) => unknown) => resolve({ data: rows, error: null }),
+      order: (col: string, opts?: { ascending?: boolean }) => (sorts.push({ col, asc: opts?.ascending !== false }), api),
+      limit: (n: number) => ((rows = sorted().slice(0, n)), sorts.length = 0, api),
+      maybeSingle: async () => ({ data: sorted()[0] ?? null, error: null }),
+      then: (resolve: (v: unknown) => unknown) => resolve({ data: sorted(), error: null }),
     };
     return api;
   }
@@ -54,6 +65,7 @@ export function requestRow(overrides: Record<string, unknown> = {}) {
   return {
     id: REQUEST_ID,
     status: "requested",
+    org_id: "org1",
     phone_e164: PHONE,
     property_id: "p1",
     contact_id: "c1",
