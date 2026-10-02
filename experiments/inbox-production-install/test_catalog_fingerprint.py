@@ -88,6 +88,46 @@ class CatalogScope(unittest.TestCase):
         record = f.generate_drift_record_from_fixture(baseline, observed, fixture, 'copflsklaefwzipsrjqz', 'a' * 40)
         self.assertEqual(f.record_bindings(record), f.fixture_bindings(fixture))
 
+    def test_drift_fixture_sql_is_partitioned_by_origin(self):
+        sections = {name: [] for name in f.CATALOG_SECTIONS}
+        sections['relations'] = [
+            {'identity': 'auth.users', 'owner': 'supabase_auth_admin', 'columns': [], 'indexes': [], 'constraints': [], 'triggers': [], 'policies': []},
+            {'identity': 'public.message_threads', 'owner': 'postgres', 'columns': [], 'indexes': [], 'constraints': [], 'triggers': [], 'policies': []},
+        ]
+        baseline = f.fingerprint(sections)
+        observed_sections = copy.deepcopy(sections)
+        observed_sections['relations'][0]['indexes'].append({
+            'name': 'platform_users_test_idx',
+            'definition': 'CREATE INDEX platform_users_test_idx ON auth.users USING btree (id)',
+            'unique': False, 'primary': False, 'constraint': False, 'valid': True, 'ready': True,
+            'live': True, 'predicate': None, 'expression': False, 'owner': 'supabase_auth_admin',
+        })
+        observed_sections['relations'][1]['columns'].append({
+            'name': 'new_column', 'type': 'uuid', 'not_null': False, 'default': None, 'acl': None,
+            'attgenerated': '', 'attidentity': '',
+        })
+        observed = f.fingerprint(observed_sections)
+        fixture = f.generate_drift_items_fixture(baseline, observed, 'copflsklaefwzipsrjqz')
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            fixture_path = directory / 'fixture.json'
+            nonplatform_path = directory / 'nonplatform.sql'
+            platform_path = directory / 'platform.sql'
+            fixture_path.write_text(json.dumps(fixture))
+            with patch('sys.argv', [
+                'catalog_fingerprint.py', '--write-drift-fixture-sql', '--fixture', str(fixture_path),
+                '--output', str(nonplatform_path), '--platform-output', str(platform_path),
+            ]):
+                f.main()
+
+            nonplatform_sql = nonplatform_path.read_text()
+            platform_sql = platform_path.read_text()
+        self.assertIn('ALTER TABLE "public"."message_threads" ADD COLUMN "new_column" uuid;', nonplatform_sql)
+        self.assertNotIn('CREATE INDEX platform_users_test_idx', nonplatform_sql)
+        self.assertIn('CREATE INDEX platform_users_test_idx ON auth.users USING btree (id);', platform_sql)
+        self.assertNotIn('ALTER TABLE', platform_sql)
+
     def test_no_drift_is_an_explicit_empty_fixture_and_sql_is_safe(self):
         sections = {name: [] for name in f.CATALOG_SECTIONS}
         sections['relations'] = [{'identity': 'public.message_threads', 'owner': 'postgres', 'columns': [], 'indexes': [], 'constraints': [], 'triggers': [], 'policies': []}]
