@@ -43,7 +43,7 @@ describe("reference matcher", () => {
     const f = fx({ contacts: [contact({ id: "c1", phone_1: "816-555-0101" })], properties: [prop({ id: "p1", homeowner_contact_id: "c1" })] });
     expect(run(f, "101 Zephyr")).toEqual([]);
     expect(run(f, "555-0101")).toEqual(["p1"]);
-    expect(run(f, "x 555 0101")).toEqual([]);
+    expect(run(f, "xxxxxx 555 0101")).toEqual([]);
   });
   it("hostile chars are literal", () => {
     const f = fx({ properties: [prop({ id: "p1", address: "50% off_x" }), prop({ id: "p2", address: "abcdef" })] });
@@ -69,7 +69,8 @@ describe("reference matcher", () => {
       properties: [prop({ id: "p1", homeowner_contact_id: "c1" })],
     });
     for (const q of ["555.123.4567", "4567", "123-45"]) expect(run(f, q), q).toEqual(["p1"]);
-    expect(run(f, "+1 555 123 4567")).toEqual(["p1"]); // leading 1 dropped from 11-digit query
+    expect(run(f, "+15551234567")).toEqual(["p1"]); // leading 1 dropped from 11-digit query
+    expect(run(f, "+1 555 123 4567")).toEqual([]); // literal ruling: 10 digits vs 15-char query is under 70%
     expect(run(f, "1 555 123 4568")).toEqual([]);
     expect(run(f, "45")).toEqual([]);
     expect(run(f, "5551234568")).toEqual([]);
