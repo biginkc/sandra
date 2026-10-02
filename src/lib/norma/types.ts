@@ -37,6 +37,7 @@ export type NormaBlockReason =
   | "dnc_locked"
   | "dnc_contact"
   | "global_dnc_registry"
+  | "wrong_number_flagged"
   | "contact_not_on_property"
   | "phone_not_on_contact"
   | "not_interested"

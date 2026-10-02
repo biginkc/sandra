@@ -439,15 +439,28 @@ describe("norma_call_requests data layer", () => {
     });
   });
 
-  it("phone ownership compares the last 10 digits, so stored formatting does not matter", async () => {
+  it("phone ownership: formatted US numbers match in full; non-US or ambiguous numbers never do", async () => {
     await withDb(async (db, ctx) => {
       const l = await lead(db, ctx);
-      await db.query("update public.contacts set phone_1=$2 where id=$1", [l.contact, "(816) 555-0142"]);
       const el = (phone: string) =>
         svc<{ eligible: boolean; block_reason: string | null }>(db, "select * from public.fn_norma_eligibility($1,$2,$3)", [l.property, l.contact, phone]).then((r) => r.rows[0]!);
-      expect(await el("+18165550142")).toEqual({ eligible: true, block_reason: null });
-      expect(await el("+18165550143")).toEqual({ eligible: false, block_reason: "phone_not_on_contact" });
-      await db.query("update public.contacts set phone_1=$2 where id=$1", [l.contact, "555-0142"]);
+      const store = (v: string) => db.query("update public.contacts set phone_1=$2 where id=$1", [l.contact, v]);
+      for (const stored of ["(816) 555-0142", "816-555-0142", "+18165550142", "1 (816) 555-0142", "18165550142"]) {
+        await store(stored);
+        expect(await el("+18165550142"), stored).toEqual({ eligible: true, block_reason: null });
+        expect((await el("+18165550143")).block_reason, stored).toBe("phone_not_on_contact");
+      }
+      // a non-US dialled number is refused outright, even if its last 10 digits match
+      await store("(207) 946-0958");
+      expect((await el("+442079460958")).block_reason).toBe("invalid_request");
+      expect((await el("+12079460958")).eligible).toBe(true);
+      // a contact storing a non-US number: the US look-alike is refused
+      await store("+442079460958");
+      expect((await el("+12079460958")).block_reason).toBe("phone_not_on_contact");
+      // short or odd stored values are ignored, not suffix-matched
+      await store("555-0142");
+      expect((await el("+18165550142")).block_reason).toBe("phone_not_on_contact");
+      await store("+1 816 555 0142 ext 9");
       expect((await el("+18165550142")).block_reason).toBe("phone_not_on_contact");
     });
   });
@@ -548,16 +561,49 @@ describe("norma_call_requests data layer", () => {
     });
   });
 
-  it("wrong_number marks the lead (property-level; no per-number column exists), keeps the pause and creates a task", async () => {
+  it("wrong_number flags only that number: no property disposition, drip stays held, task created, number never dialled again", async () => {
     await withDb(async (db, ctx) => {
       const l = await lead(db, ctx);
       const id = (await create(db, ctx, l)).request_id!;
       const callId = await dispatched(db, id);
       await complete(db, id, callId, "wrong_number", { summary: "not the owner" });
-      expect((await one<{ outreach_dispo: string }>(db, "select outreach_dispo from public.properties where id=$1", [l.property])).outreach_dispo).toBe("wrong_number");
+      expect((await one<{ outreach_dispo: string | null }>(db, "select outreach_dispo from public.properties where id=$1", [l.property])).outreach_dispo).toBeNull();
+      expect((await db.query("select 1 from public.lead_events where property_id=$1 and event_type='dispo_set'", [l.property])).rowCount).toBe(0);
       expect(await enrollmentState(db, l.enrollment!)).toEqual({ status: "paused", pause_reason: "norma_call" });
-      const task = await one<{ description: string }>(db, "select description from public.tasks where related_property_id=$1", [l.property]);
+      const task = await one<{ description: string; assignee_id: string }>(db, "select description,assignee_id from public.tasks where related_property_id=$1", [l.property]);
       expect(task.description).toContain(l.phone);
+      expect(task.assignee_id).toBe(ctx.assignee);
+      // the same number is refused afterwards, on this lead and on any other lead that holds it
+      expect((await create(db, ctx, l)).block_reason).toBe("wrong_number_flagged");
+      // another number on the same lead is still callable
+      const second = nextPhone();
+      await db.query("update public.contacts set phone_2=$2, phone_2_type='mobile' where id=$1", [l.contact, second]);
+      const r = await svc<{ outcome: string }>(db, "select * from public.fn_norma_create_request($1,$2,$3,$4,null,$5)", [l.property, l.contact, second, ctx.rep, ctx.assignee]);
+      expect(r.rows[0]!.outcome).toBe("created");
+    });
+  });
+
+  it("a hold-keeping outcome also pauses an enrollment created in the check-then-write gap", async () => {
+    await withDb(async (db, ctx) => {
+      for (const outcome of ["callback_requested", "reached_no_callback", "not_interested", "wrong_number"]) {
+        const l = await lead(db, ctx, { enrollment: null });
+        const id = (await create(db, ctx, l)).request_id!;
+        const callId = await dispatched(db, id);
+        // a drip sneaks in while the request is open
+        const sneaky = (await db.query<{ id: string }>(
+          "insert into public.sequence_enrollments(org_id,sequence_id,property_id,contact_id,status,next_run_at) values ($1,$2,$3,$4,'active',now()) returning id",
+          [ctx.org, ctx.sequence, l.property, l.contact],
+        )).rows[0]!.id;
+        await complete(db, id, callId, outcome);
+        expect(await enrollmentState(db, sneaky), outcome).toEqual({ status: "paused", pause_reason: "norma_call" });
+      }
+      // no_answer is different: nothing of ours to release, the new drip keeps running
+      const l = await lead(db, ctx, { enrollment: null });
+      const id = (await create(db, ctx, l)).request_id!;
+      const callId = await dispatched(db, id);
+      const e = (await db.query<{ id: string }>("insert into public.sequence_enrollments(org_id,sequence_id,property_id,contact_id,status,next_run_at) values ($1,$2,$3,$4,'active',now()) returning id", [ctx.org, ctx.sequence, l.property, l.contact])).rows[0]!.id;
+      await complete(db, id, callId, "no_answer");
+      expect(await enrollmentState(db, e)).toEqual({ status: "active", pause_reason: null });
     });
   });
 

@@ -83,8 +83,14 @@ async function runSoftphoneSweep(
     resumed = await sweepResumeCallInProgress(supabase, { enrollmentIds: resumableIds, resumeAt });
   } catch (error) {
     if (!(error instanceof NormaMissingFunctionError)) throw error;
-    // Deployed ahead of the Norma migration: no hold exists yet, so use the
-    // original activation.
+    // Only treat this as "deployed ahead of the migration" if the requests
+    // table is missing too. Otherwise holds may exist: fail safe, leave the
+    // pauses for the next sweep, and say so.
+    const { error: probeError } = await supabase.from("norma_call_requests").select("id").limit(1);
+    if (!(probeError && (probeError.code === "PGRST205" || probeError.code === "42P01"))) {
+      reportError(error, { tags: { surface: "cron_sweep_stuck_call_in_progress_missing_rpc" } });
+      return { candidates: stale.length, resumed: 0, skippedCompletedWrapups };
+    }
     const { count, error: resumeError } = await supabase
       .from("sequence_enrollments")
       .update({ status: "active", pause_reason: null, next_run_at: resumeAt, updated_at: resumeAt }, { count: "exact" })

@@ -96,7 +96,9 @@ describe("stuck call-in-progress sweep route", () => {
         Promise.resolve(
           table === "sequence_enrollments" && updates.length === 0
             ? { data: [{ id: "e", property_id: "p", updated_at: "2026-08-21T14:00:00.000Z" }], error: null }
-            : table === "call_activities" ? { data: [], error: null } : { count: 1, error: null },
+            : table === "call_activities" ? { data: [], error: null }
+            : table === "norma_call_requests" ? { data: null, error: { code: "PGRST205", message: "no table" } }
+            : { count: 1, error: null },
         ).then(resolve);
       return builder;
     });
@@ -106,5 +108,26 @@ describe("stuck call-in-progress sweep route", () => {
     }));
     await expect(response.json()).resolves.toMatchObject({ ok: true, candidates: 1, resumed: 1 });
     expect(updates).toHaveLength(1);
+  });
+
+  it("fails safe (leaves the pauses) when the RPC is missing but Norma holds may exist", async () => {
+    const updates: unknown[] = [];
+    from.mockImplementation((table: string) => {
+      const builder: Record<string, unknown> = {};
+      for (const method of ["select", "eq", "lt", "order", "limit", "in", "not"]) builder[method] = () => builder;
+      builder.update = (patch: unknown) => { updates.push(patch); return builder; };
+      builder.then = (resolve: (value: unknown) => unknown) =>
+        Promise.resolve(
+          table === "sequence_enrollments" ? { data: [{ id: "e", property_id: "p", updated_at: "2026-08-21T14:00:00.000Z" }], error: null }
+            : { data: [], error: null },
+        ).then(resolve);
+      return builder;
+    });
+    rpc.mockResolvedValue({ data: null, error: { code: "PGRST202", message: "Could not find the function" } });
+    const response = await POST(new Request("http://localhost/api/cron/sweep-stuck-call-in-progress", {
+      headers: { authorization: "Bearer test-secret" },
+    }));
+    await expect(response.json()).resolves.toMatchObject({ ok: true, candidates: 1, resumed: 0 });
+    expect(updates).toHaveLength(0);
   });
 });

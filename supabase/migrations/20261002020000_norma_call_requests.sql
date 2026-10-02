@@ -263,7 +263,7 @@ begin
   end if;
 
   if p_property_id is null or p_contact_id is null
-     or p_phone_e164 is null or p_phone_e164 !~ '^\+[1-9][0-9]{7,14}$' then
+     or p_phone_e164 is null or p_phone_e164 !~ '^\+1[2-9][0-9]{9}$' then
     eligible := false; block_reason := 'invalid_request';
     return next; return;
   end if;
@@ -306,13 +306,20 @@ begin
     return next; return;
   end if;
   -- contacts.phone_1..3 have no format constraint. CSV import writes +1XXXXXXXXXX
-  -- (normalizePhone) but other writers may store "(816) 555-0142", so compare
-  -- the last 10 digits of each side (US numbers only).
+  -- (normalizePhone) but other writers may store "(816) 555-0142". Normalise a
+  -- stored slot to +1XXXXXXXXXX only when it has exactly 10 digits, or 11
+  -- starting with 1 (the same rule as normalizePhone); any other slot is
+  -- ignored. The dialled number must equal a normalised slot in full, so a
+  -- non-US number can never match a US-looking contact number.
   if not exists (
     select 1
-      from unnest(array[v_contact.phone_1, v_contact.phone_2, v_contact.phone_3]) as t(ph)
-     where length(regexp_replace(coalesce(ph, ''), '\D', '', 'g')) >= 10
-       and right(regexp_replace(ph, '\D', '', 'g'), 10) = right(p_phone_e164, 10)
+      from unnest(array[v_contact.phone_1, v_contact.phone_2, v_contact.phone_3]) as t(ph),
+           lateral (select regexp_replace(coalesce(ph, ''), '\D', '', 'g') as d) x
+     where case
+             when length(x.d) = 10 then '+1' || x.d
+             when length(x.d) = 11 and x.d like '1%' then '+' || x.d
+             else null
+           end = p_phone_e164
   ) then
     eligible := false; block_reason := 'phone_not_on_contact';
     return next; return;
@@ -324,6 +331,17 @@ begin
      where g.org_id = v_prop.org_id and g.phone_e164 = p_phone_e164
   ) then
     eligible := false; block_reason := 'global_dnc_registry';
+    return next; return;
+  end if;
+
+  -- A number Norma already reached as wrong is never dialled again. (Sandra has
+  -- no per-number wrong-number flag on main; this is the only record of it.)
+  if exists (
+    select 1 from public.norma_call_requests w
+     where w.org_id = v_prop.org_id and w.phone_e164 = p_phone_e164
+       and w.status = 'completed' and w.outcome = 'wrong_number'
+  ) then
+    eligible := false; block_reason := 'wrong_number_flagged';
     return next; return;
   end if;
 
@@ -957,7 +975,9 @@ begin
 
   -- Disposition writes. Never touch a DNC-locked lead or downgrade a stronger
   -- terminal disposition.
-  if p_outcome in ('not_interested', 'wrong_number') and not coalesce(v_prop.is_dnc_locked, true) then
+  -- (wrong_number deliberately writes no property disposition: only that phone
+  -- number is wrong, not the lead.)
+  if p_outcome = 'not_interested' and not coalesce(v_prop.is_dnc_locked, true) then
     v_dispo_target := p_outcome;
     v_dispo_before := v_prop.outreach_dispo;
     update public.properties pr
@@ -965,10 +985,7 @@ begin
      where pr.id = r.property_id
        and not pr.is_dnc_locked
        and (pr.outreach_dispo is null
-            or pr.outreach_dispo <> all (
-                 case when v_dispo_target = 'not_interested'
-                      then array['dnc', 'opted_out', 'bad_number', 'wrong_number']
-                      else array['dnc', 'opted_out', 'bad_number', 'not_interested'] end))
+            or pr.outreach_dispo <> all (array['dnc', 'opted_out', 'bad_number', 'wrong_number']))
        and not exists (
          select 1 from public.contacts c
           where c.id = pr.homeowner_contact_id and c.do_not_contact);
@@ -995,6 +1012,11 @@ begin
      where e.property_id = r.property_id and e.status = 'paused'
        and e.pause_reason = 'call_in_progress';
     get diagnostics v_converted = row_count;
+    -- A drip created in the check-then-write gap (enrol after the request
+    -- opened) must not run later either.
+    update public.sequence_enrollments e
+       set status = 'paused', pause_reason = 'norma_call', updated_at = now()
+     where e.property_id = r.property_id and e.status = 'active';
   end if;
 
   -- Task: exactly one per request, only for outcomes that need one.
