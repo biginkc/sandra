@@ -19,12 +19,16 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 OFF = HERE / "capture-off.sql"
 RESTORE = HERE / "capture-restore.sql"
+RUNNER = HERE / "run_capture_packet.py"
+PRODUCTION_TARGET_REF = "copflsklaefwzipsrjqz"
+LOCAL_TEST_CONTAINER: str | None = None
 INVENTORY = json.loads((HERE / "capture-trigger-inventory.json").read_text())
 TARGET_MIGRATIONS = [
     ROOT / "supabase/migrations/20261002130000_inbox_control_foundation.sql",
@@ -32,7 +36,9 @@ TARGET_MIGRATIONS = [
     ROOT / "supabase/migrations/20261002130200_inbox_backend_operation_reply.sql",
 ]
 TARGET_NAMES = {p.name for p in TARGET_MIGRATIONS}
-RECONCILE_CATALOG_SOURCE = ROOT.parent / "rt-reconcile/scripts/inbox-reconcile-completion.mjs"
+RECONCILE_CATALOG_SOURCE = Path(
+    os.environ.get("INBOX_RECONCILE_SOURCE", ROOT.parent / "rt-reconcile/scripts/inbox-reconcile-completion.mjs")
+)
 
 CAPTURE_TARGET_TABLES = (
     "public.inbox_inbound_heads",
@@ -70,24 +76,143 @@ def reconcile_catalog_schemas() -> list[str]:
 CATALOG_SCHEMAS = reconcile_catalog_schemas()
 
 
-def run(argv: list[str], *, cwd: Path | None = None, input_text: str | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(argv, cwd=cwd, input=input_text, text=True, capture_output=True)
+def run(
+    argv: list[str],
+    *,
+    cwd: Path | None = None,
+    input_text: str | None = None,
+    env: dict[str, str] | None = None,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(argv, cwd=cwd, input=input_text, text=True, capture_output=True, env=env)
     if check and result.returncode:
         raise RuntimeError(f"command failed ({' '.join(argv)}):\n{result.stdout}\n{result.stderr}")
     return result
 
 
 def psql(database_url: str, sql: str, *, check: bool = True) -> str:
-    result = run(["psql", database_url, "-X", "-v", "ON_ERROR_STOP=1", "-v", "VERBOSITY=verbose", "-At", "-c", sql], check=check)
+    safe_url, password = passwordless_url(database_url)
+    result = run(
+        ["psql", safe_url, "-X", "-v", "ON_ERROR_STOP=1", "-v", "VERBOSITY=verbose", "-At", "-c", sql],
+        env={**os.environ, "PGPASSWORD": password},
+        check=check,
+    )
     return result.stdout.strip()
 
 
 def psql_result(database_url: str, sql: str) -> subprocess.CompletedProcess[str]:
-    return run(["psql", database_url, "-X", "-v", "ON_ERROR_STOP=1", "-v", "VERBOSITY=verbose", "-At", "-c", sql], check=False)
+    safe_url, password = passwordless_url(database_url)
+    return run(
+        ["psql", safe_url, "-X", "-v", "ON_ERROR_STOP=1", "-v", "VERBOSITY=verbose", "-At", "-c", sql],
+        env={**os.environ, "PGPASSWORD": password},
+        check=False,
+    )
 
 
 def apply_file(database_url: str, path: Path, *, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return run(["psql", database_url, "-X", "-v", "ON_ERROR_STOP=1", "-f", str(path)], check=check)
+    safe_url, password = passwordless_url(database_url)
+    return run(
+        ["psql", safe_url, "-X", "-v", "ON_ERROR_STOP=1", "-f", str(path)],
+        env={**os.environ, "PGPASSWORD": password},
+        check=check,
+    )
+
+
+def passwordless_url(database_url: str) -> tuple[str, str]:
+    parsed = urlsplit(database_url)
+    if parsed.password is None or parsed.username is None or parsed.hostname is None:
+        raise RuntimeError("disposable status URL did not include expected credentials")
+    password = unquote(parsed.password)
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    authority = f"{parsed.username}@{host}:{parsed.port or 5432}"
+    return urlunsplit((parsed.scheme, authority, parsed.path, "", "")), password
+
+
+def runner_apply(database_url: str, packet_name: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    global LOCAL_TEST_CONTAINER
+    runner_url, password = passwordless_url(database_url)
+    runner_env = {**os.environ, "NODE_ENV": "test", "INBOX_EMERGENCY_DB_PASSWORD": password}
+    if LOCAL_TEST_CONTAINER is not None:
+        runner_env["INBOX_EMERGENCY_LOCAL_TEST_CONTAINER"] = LOCAL_TEST_CONTAINER
+    result = run(
+        [
+            "python3",
+            str(RUNNER),
+            "--packet",
+            packet_name,
+            "--database-url",
+            runner_url,
+            "--target-ref",
+            PRODUCTION_TARGET_REF,
+            "--i-understand-production",
+            "--local-test",
+        ],
+        cwd=ROOT,
+        env=runner_env,
+        check=False,
+    )
+    # run() intentionally inherits the environment; the runner itself reads
+    # this password only from the child environment, never from argv.
+    if check and result.returncode:
+        raise RuntimeError(f"runner failed for {packet_name}:\n{result.stdout}\n{result.stderr}")
+    return result
+
+
+def apply_packet_text_with_local_identity(
+    database_url: str,
+    packet: str,
+    *,
+    prefix: str,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Test-only mutant executor; generated packets use runner_apply above."""
+    descriptor, path_string = tempfile.mkstemp(prefix=prefix, suffix=".sql")
+    os.close(descriptor)
+    path = Path(path_string)
+    try:
+        safe_url, password = passwordless_url(database_url)
+        input_text = (
+            "\\set ON_ERROR_STOP on\n"
+            "BEGIN;\n"
+            "SET LOCAL inbox.emergency_target_ref = 'local-test';\n"
+            "SET LOCAL inbox.emergency_local_test = 'on';\n"
+        )
+        command = ["psql", safe_url, "-X", "-v", "ON_ERROR_STOP=1", "-f", "-"]
+        if LOCAL_TEST_CONTAINER is not None:
+            command = [
+                "docker",
+                "exec",
+                "-i",
+                LOCAL_TEST_CONTAINER,
+                "psql",
+                "-h",
+                "127.0.0.1",
+                "-p",
+                "5432",
+                "-U",
+                "postgres",
+                "-d",
+                "postgres",
+                "-X",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-f",
+                "-",
+            ]
+            input_text += packet + "\n"
+        else:
+            escaped = str(path).replace("\\", "\\\\").replace("'", "''")
+            input_text += f"\\i '{escaped}'\n"
+        return run(
+            command,
+            input_text=input_text,
+            env={**os.environ, "PGPASSWORD": password},
+            check=check,
+        )
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def provision_stack() -> tuple[Path, str]:
@@ -168,6 +293,18 @@ def inbox_content_digests(database_url: str) -> dict[str, str]:
     return result
 
 
+def function_body_digests(database_url: str) -> dict[str, str]:
+    names_sql = ",".join("'" + f["name"] + "'" for f in INVENTORY["functions"])
+    return json.loads(
+        psql(
+            database_url,
+            f"SELECT jsonb_object_agg(n.nspname||'.'||p.proname,md5(p.prosrc)) "
+            f"FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+            f"WHERE (n.nspname||'.'||p.proname) = ANY(ARRAY[{names_sql}])",
+        )
+    )
+
+
 def catalog_fingerprint(database_url: str) -> dict[str, object]:
     schemas_sql = ",".join("'" + schema.replace("'", "''") + "'" for schema in CATALOG_SCHEMAS)
     schema_array = f"ARRAY[{schemas_sql}]::text[]"
@@ -205,6 +342,21 @@ def migration_function_statement(function_name: str) -> str:
     raise RuntimeError(f"migration function not found: {function_name}")
 
 
+def migration_trigger_statements(function_name: str) -> str:
+    statements: list[str] = []
+    for migration in TARGET_MIGRATIONS:
+        text = migration.read_text()
+        for match in re.finditer(
+            r"CREATE\s+TRIGGER\b[^;]*?EXECUTE\s+FUNCTION\s+" + re.escape(function_name) + r"\(\)\s*;",
+            text,
+            flags=re.DOTALL,
+        ):
+            statements.append(match.group(0))
+    if not statements:
+        raise RuntimeError(f"migration triggers not found: {function_name}")
+    return "\n".join(statements)
+
+
 def fixture_sql() -> tuple[str, dict[str, str]]:
     ids = {key: str(uuid.uuid4()) for key in (
         "org", "org_delete", "user", "user_delete", "session", "session_off", "contact", "contact_delete",
@@ -233,6 +385,7 @@ COMMIT;"""
 
 
 def main() -> None:
+    global LOCAL_TEST_CONTAINER
     parser = argparse.ArgumentParser()
     parser.add_argument("--database-url")
     args = parser.parse_args()
@@ -241,6 +394,11 @@ def main() -> None:
     try:
         if database_url is None:
             project, database_url = provision_stack()
+            project_config = (project / "supabase/config.toml").read_text()
+            project_match = re.search(r'^project_id\s*=\s*"([a-z0-9-]+)"$', project_config, flags=re.MULTILINE)
+            if not project_match:
+                raise RuntimeError("disposable project id was not found")
+            LOCAL_TEST_CONTAINER = f"supabase_db_{project_match.group(1)}"
         assert database_url is not None
         if "127.0.0.1:54329" in database_url:
             raise RuntimeError("shared 54329 is forbidden")
@@ -263,11 +421,96 @@ WHERE n.nspname='public' AND c.relname='messages' AND t.tgname LIKE 'zzz_inbox_g
         guard_md5_before = psql(database_url, guard_md5_query)
         guard_enabled_before = psql(database_url, guard_enabled_query)
         baseline_catalog = catalog_fingerprint(database_url)
+        baseline_function_bodies = function_body_digests(database_url)
         mutants: dict[str, str] = {}
 
+        # Both generated packets must refuse direct psql execution before any
+        # receipt DDL or function replacement.  This is the natural mutant
+        # boundary for the transaction-local target GUC.
+        for packet_path in (OFF, RESTORE):
+            direct_result = apply_file(database_url, packet_path, check=False)
+            direct_output = direct_result.stdout + direct_result.stderr
+            if direct_result.returncode == 0 or "INBOX_EMERGENCY_TARGET_REF_REQUIRED" not in direct_output:
+                raise RuntimeError(f"direct psql did not refuse {packet_path.name}:\n{direct_output}")
+            if catalog_fingerprint(database_url) != baseline_catalog or function_body_digests(database_url) != baseline_function_bodies:
+                raise RuntimeError(f"direct psql changed the database for {packet_path.name}")
+            if psql(database_url, "SELECT to_regclass('inbox_emergency.capture_off_receipts')") != "":
+                raise RuntimeError(f"direct psql created a receipt for {packet_path.name}")
+
+        # Removing only the generated identity guard must make the direct-psql
+        # test go red.  Restore and drop its out-of-band receipt afterward.
+        identity_start = "  -- EMERGENCY_TARGET_IDENTITY_GUARD_BEGIN\n"
+        identity_end = "  -- EMERGENCY_TARGET_IDENTITY_GUARD_END\n"
+        identity_mutant = re.sub(
+            re.escape(identity_start) + r".*?" + re.escape(identity_end),
+            "",
+            OFF.read_text(),
+            count=1,
+            flags=re.DOTALL,
+        )
+        if identity_mutant == OFF.read_text():
+            raise RuntimeError("could not construct target-GUC mutant")
+        identity_mutant_result = apply_packet_text(database_url, identity_mutant, prefix="capture-target-guc-mutant-", check=False)
+        if identity_mutant_result.returncode != 0 or function_body_digests(database_url) == baseline_function_bodies:
+            raise RuntimeError("removing the target-GUC guard did not make direct psql mutate")
+        mutants["transaction-local-target-guc"] = "KILLED (direct psql mutant mutated without the guard)"
+        runner_apply(database_url, "capture-restore")
+        psql(database_url, "DROP SCHEMA inbox_emergency CASCADE")
+
+        # The runner's operator checks must fail before psql is reached.
+        runner_url, _ = passwordless_url(database_url)
+        runner_cases = [
+            ("wrong-ref", {"--target-ref": "ncsngxlcyxylaeskiteu"}),
+            ("wrong-host", {"--database-url": runner_url.replace("127.0.0.1", "192.0.2.1")}),
+            ("wrong-user", {"--database-url": runner_url.replace("postgres@", "postgres.wrongref@")}),
+        ]
+        for label, overrides in runner_cases:
+            command = [
+                "python3",
+                str(RUNNER),
+                "--packet",
+                "capture-off",
+                "--database-url",
+                runner_url,
+                "--target-ref",
+                PRODUCTION_TARGET_REF,
+                "--i-understand-production",
+                "--local-test",
+            ]
+            for option, value in overrides.items():
+                command[command.index(option) + 1] = value
+            result = run(
+                command,
+                cwd=ROOT,
+                env={**os.environ, "NODE_ENV": "test", "INBOX_EMERGENCY_DB_PASSWORD": "postgres"},
+                check=False,
+            )
+            output = result.stdout + result.stderr
+            if result.returncode == 0 or "emergency capture packet blocked:" not in output or "connection to server" in output:
+                raise RuntimeError(f"runner {label} did not refuse before connect:\n{output}")
+            mutants[f"runner-{label}"] = "KILLED (preflight refused before psql)"
+
+        non_loopback_packet = OFF.read_text().replace(
+            "inet_server_addr() NOT IN ('127.0.0.1'::inet, '::1'::inet)",
+            "'203.0.113.10'::inet NOT IN ('127.0.0.1'::inet, '::1'::inet)",
+            1,
+        )
+        non_loopback_result = apply_packet_text_with_local_identity(
+            database_url,
+            non_loopback_packet,
+            prefix="capture-local-non-loopback-mutant-",
+            check=False,
+        )
+        non_loopback_output = non_loopback_result.stdout + non_loopback_result.stderr
+        if non_loopback_result.returncode == 0 or "INBOX_EMERGENCY_LOCAL_TEST_IDENTITY_REFUSED" not in non_loopback_output:
+            raise RuntimeError(f"local-test packet did not refuse the simulated non-loopback server:\n{non_loopback_output}")
+        if catalog_fingerprint(database_url) != baseline_catalog or function_body_digests(database_url) != baseline_function_bodies:
+            raise RuntimeError("simulated non-loopback local-test packet changed the database")
+        mutants["local-test-server-address"] = "KILLED (non-loopback inet_server_addr refused)"
+
         catalog_mutant_packet = OFF.read_text().replace("inbox_emergency", "inbox_control")
-        apply_packet_text(database_url, catalog_mutant_packet, prefix="capture-catalog-mutant-")
-        apply_file(database_url, RESTORE)
+        apply_packet_text_with_local_identity(database_url, catalog_mutant_packet, prefix="capture-catalog-mutant-")
+        runner_apply(database_url, "capture-restore")
         if catalog_fingerprint(database_url) == baseline_catalog:
             raise RuntimeError("CATALOG_SCHEMAS fingerprint did not kill the in-catalog receipt mutant")
         mutants["receipt-schema-catalog-boundary"] = "KILLED (inbox_control relation detected)"
@@ -281,10 +524,12 @@ WHERE n.nspname='public' AND c.relname='messages' AND t.tgname LIKE 'zzz_inbox_g
         if baseline_counts["inbox_message_capture.dirty"] == 0 or baseline_counts["inbox_bridge.access_epochs"] == 0:
             raise RuntimeError("positive capture control did not produce Inbox rows before capture-off")
 
-        apply_file(database_url, OFF)
+        runner_apply(database_url, "capture-off")
         receipt_actions = psql(database_url, "SELECT coalesce(string_agg(action||':'||count::text, ',' ORDER BY action),'') FROM (SELECT action,count(*) FROM inbox_emergency.capture_off_receipts GROUP BY action) AS counts(action,count)")
         if receipt_actions != "capture_off:1":
             raise RuntimeError(f"capture-off receipt classification mismatch: {receipt_actions}")
+        if psql(database_url, "SELECT relrowsecurity FROM pg_class WHERE oid='inbox_emergency.capture_off_receipts'::regclass") != "t":
+            raise RuntimeError("capture-off receipt table did not enable row-level security")
         if psql(database_url, guard_md5_query) != guard_md5_before or psql(database_url, guard_enabled_query) != guard_enabled_before:
             raise RuntimeError("capture-off altered the live inbound-revision integrity guard")
         off_digests = inbox_content_digests(database_url)
@@ -346,7 +591,7 @@ END $$;"""
         mutants["integrity-guard-exclusion"] = "KILLED (fabricated revision accepted only by live-guard mutant)"
         psql(database_url, guard_original_statement)
 
-        apply_file(database_url, RESTORE)
+        runner_apply(database_url, "capture-restore")
         if psql(database_url, "SELECT count(*) FROM inbox_emergency.capture_off_receipts WHERE action='capture_restore'") != "1":
             raise RuntimeError("capture-restore did not write exactly one restore receipt")
         names_sql = ",".join("'" + f["name"] + "'" for f in INVENTORY["functions"])
@@ -365,7 +610,7 @@ END $$;"""
             raise RuntimeError("capture did not resume after restore")
 
         # A count would miss a live capture_access update to an existing row.
-        apply_file(database_url, OFF)
+        runner_apply(database_url, "capture-off")
         access_off_statement = body_statement(OFF.read_text(), "inbox_bridge.capture_access")
         access_restore_statement = body_statement(RESTORE.read_text(), "inbox_bridge.capture_access")
         psql(database_url, access_restore_statement)
@@ -375,87 +620,102 @@ END $$;"""
             raise RuntimeError("per-table content digest did not kill the live capture_access mutant")
         mutants["live-capture_access-digest"] = "KILLED (existing access_epochs content changed)"
         psql(database_url, access_off_statement)
-        apply_file(database_url, RESTORE)
+        runner_apply(database_url, "capture-restore")
 
         idempotent_before = int(psql(database_url, "SELECT count(*) FROM inbox_emergency.capture_off_receipts WHERE action='capture_off_idempotent'"))
-        apply_file(database_url, OFF)
-        apply_file(database_url, OFF)
+        runner_apply(database_url, "capture-off")
+        runner_apply(database_url, "capture-off")
         idempotent_after = int(psql(database_url, "SELECT count(*) FROM inbox_emergency.capture_off_receipts WHERE action='capture_off_idempotent'"))
         capture_off_count = int(psql(database_url, "SELECT count(*) FROM inbox_emergency.capture_off_receipts WHERE action='capture_off'"))
         if capture_off_count != 3 or idempotent_after != idempotent_before + 1:
             raise RuntimeError(f"capture-off re-run receipt mismatch: capture_off={capture_off_count}, idempotent_before={idempotent_before}, idempotent_after={idempotent_after}")
         idempotent_action_mutant = OFF.read_text().replace("THEN 'capture_off_idempotent' ELSE 'capture_off'", "THEN 'capture_off' ELSE 'capture_off'", 1)
-        apply_packet_text(database_url, idempotent_action_mutant, prefix="capture-off-idempotent-action-mutant-")
+        apply_packet_text_with_local_identity(database_url, idempotent_action_mutant, prefix="capture-off-idempotent-action-mutant-")
         if psql(database_url, "SELECT count(*) FROM inbox_emergency.capture_off_receipts WHERE action='capture_off'") != "4":
             raise RuntimeError("idempotent action mutant was not detected")
         mutants["idempotent-receipt-action"] = "KILLED (re-run action mutant recorded capture_off)"
 
-        apply_file(database_url, RESTORE)
+        runner_apply(database_url, "capture-restore")
         psql(database_url, "ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct")
-        disabled_restore_result = apply_file(database_url, RESTORE, check=False)
+        disabled_restore_result = runner_apply(database_url, "capture-restore", check=False)
         if disabled_restore_result.returncode == 0 or "INBOX_CAPTURE_OFF_TRIGGER_CATALOG_DRIFT" not in (disabled_restore_result.stdout + disabled_restore_result.stderr):
             raise RuntimeError("capture-restore did not refuse a DISABLE TRIGGER drift")
         disabled_check_mutant = RESTORE.read_text().replace(" AND t.tgenabled='O'", "", 1)
-        disabled_check_result = apply_packet_text(database_url, disabled_check_mutant, prefix="capture-restore-disabled-check-mutant-", check=False)
+        disabled_check_result = apply_packet_text_with_local_identity(database_url, disabled_check_mutant, prefix="capture-restore-disabled-check-mutant-", check=False)
         if disabled_check_result.returncode != 0:
             raise RuntimeError("tgenabled mutant did not bypass the disabled-trigger refusal")
         mutants["restore-tgenabled-check"] = "KILLED (disabled trigger would restore only with check removed)"
         psql(database_url, "ALTER TABLE public.messages ENABLE TRIGGER zzzzz_inbox_message_direct")
-        apply_file(database_url, RESTORE)
+        runner_apply(database_url, "capture-restore")
 
         off_statement = body_statement(OFF.read_text(), "inbox_message_capture.capture")
         drift_statement = off_statement.replace("RETURN NULL;", "RETURN NEW;", 1)
         if drift_statement == off_statement:
             raise RuntimeError("could not construct capture-off body drift mutant")
         psql(database_url, drift_statement)
-        drift_result = apply_file(database_url, OFF, check=False)
+        drift_result = runner_apply(database_url, "capture-off", check=False)
         if drift_result.returncode == 0 or "INBOX_CAPTURE_OFF_FUNCTION_BODY_DRIFT" not in (drift_result.stdout + drift_result.stderr):
             raise RuntimeError(f"capture-off did not refuse a function-body drift mutant (rc={drift_result.returncode}):\n{drift_result.stdout}\n{drift_result.stderr}")
 
         restore_statement = body_statement(RESTORE.read_text(), "inbox_message_capture.capture")
         psql(database_url, restore_statement)
-        apply_file(database_url, OFF)
+        runner_apply(database_url, "capture-off")
         restore_mutant = restore_statement.replace("RETURN NULL;", "RETURN NEW;", 1)
         if restore_mutant == restore_statement:
             raise RuntimeError("could not construct restore body mutant")
         restore_mutant_packet = RESTORE.read_text().replace(restore_statement, restore_mutant, 1)
-        restore_mutant_result = apply_packet_text(database_url, restore_mutant_packet, prefix="capture-restore-mutant-", check=False)
+        restore_mutant_result = apply_packet_text_with_local_identity(database_url, restore_mutant_packet, prefix="capture-restore-mutant-", check=False)
         if restore_mutant_result.returncode == 0 or "INBOX_CAPTURE_RESTORE_POSTCONDITION_FAILED" not in (restore_mutant_result.stdout + restore_mutant_result.stderr):
             raise RuntimeError("capture-restore did not kill the body-mutant postcondition")
-        apply_file(database_url, RESTORE)
+        runner_apply(database_url, "capture-restore")
 
-        missing_function = "inbox_operation_domain.capture_target()"
+        missing_function_name = "inbox_operation_domain.capture_target"
+        missing_function = f"{missing_function_name}()"
         psql(database_url, f"DROP FUNCTION {missing_function} CASCADE")
         regprocedure_mutant_packet = OFF.read_text().replace("to_regprocedure(e.name)", "e.name::regprocedure")
-        regprocedure_mutant_result = apply_packet_text(database_url, regprocedure_mutant_packet, prefix="capture-missing-regprocedure-mutant-", check=False)
+        regprocedure_mutant_result = apply_packet_text_with_local_identity(database_url, regprocedure_mutant_packet, prefix="capture-missing-regprocedure-mutant-", check=False)
         regprocedure_mutant_output = regprocedure_mutant_result.stdout + regprocedure_mutant_result.stderr
         if regprocedure_mutant_result.returncode == 0 or "INBOX_CAPTURE_OFF_FUNCTION_MISSING" in regprocedure_mutant_output:
             raise RuntimeError("regprocedure mutant was not killed before the named missing-function refusal")
         mutants["missing-function-to_regprocedure"] = "KILLED (cast mutant raises instead of reaching named refusal)"
-        missing_result = apply_file(database_url, OFF, check=False)
+        missing_result = runner_apply(database_url, "capture-off", check=False)
         missing_output = missing_result.stdout + missing_result.stderr
         if missing_result.returncode == 0 or "INBOX_CAPTURE_OFF_FUNCTION_MISSING" not in missing_output:
             raise RuntimeError("capture-off did not refuse a dropped function with INBOX_CAPTURE_OFF_FUNCTION_MISSING")
 
+        # The dropped function cascades to its two source triggers. Recreate
+        # both from the approved migration before reporting PASS so even a
+        # database-url caller is not left with a broken disposable database.
+        psql(
+            database_url,
+            migration_function_statement(missing_function_name) + "\n" + migration_trigger_statements(missing_function_name),
+        )
+        if psql(database_url, f"SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgfoid=to_regprocedure('{missing_function}')") != "2":
+            raise RuntimeError("harness did not recreate capture_target() and its two triggers before PASS")
+
         print(json.dumps({
             "status": "PASS",
-            "database": database_url,
+            "database": passwordless_url(database_url)[0],
             "postgres": postgres_version,
             "main_ancestor": "538d81ed",
             "triggers_verified": len(expected_catalog),
             "functions_verified": len(expected_md5),
             "catalog_schemas_source": str(RECONCILE_CATALOG_SOURCE),
             "checks": [
+                "direct psql capture-off and capture-restore both refused before mutation; the removed-GUC mutant mutated and was killed",
+                "runner rejected wrong ref, host, and user before opening psql; local-test runner execution succeeded on loopback",
+                "local-test refused the simulated non-loopback inet_server_addr and the receipt table enabled row-level security",
                 "all 25 canonical source capture triggers matched disposable catalog; the two revision guards stayed live",
                 "capture-off and capture-restore wrote receipts in inbox_emergency",
                 "all affected source-table writes including auth.sessions insert/update/delete persisted with unchanged per-table Inbox content digests",
-                "window inbound messages retained permanent inbox_inbound_revision zero and fabricated revisions were refused",
+                "window inbound messages retained inbox_inbound_revision zero unless later re-routed, and fabricated revisions were refused",
                 "capture-off plus restore changed no relation/function/type in the PR #725 CATALOG_SCHEMAS list",
                 "restore MD5 matched migration-extracted bodies and capture resumed",
                 "capture-off reapplication emitted capture_off_idempotent",
                 "restore refused a DISABLE TRIGGER tgenabled drift",
                 "dropped function reached INBOX_CAPTURE_OFF_FUNCTION_MISSING via to_regprocedure",
                 "mixed function-body drift was refused",
+                "capture_target() and both source triggers were recreated before PASS",
             ],
             "mutants": {**mutants, "function-body-drift": "KILLED (precondition refuses)", "restore-body": "KILLED (postcondition refuses)"},
         }, indent=2))
