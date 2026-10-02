@@ -203,7 +203,8 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
           if (wantDue && Date.parse(String(t.due_at)) !== Date.parse(wantDue)) v("3", `request ${r.id}: task due ${t.due_at}, expected ${wantDue}`);
         }
       } else if (r.outcome === "no_answer" || r.outcome === "not_interested") {
-        if (rowsForTask.some((t) => t.status === "open" || t.status === "snoozed")) v("3", `request ${r.id} (${r.outcome}): a task is open but this outcome needs none`);
+        // A review task opened before a do-not-contact lock cannot be closed afterwards (tasks on a locked lead are read-only).
+        if (!dncLocked(r.property_id) && rowsForTask.some((t) => t.status === "open" || t.status === "snoozed")) v("3", `request ${r.id} (${r.outcome}): a task is open but this outcome needs none`);
         if (!everReviewed && rowsForTask.length > 0) v("3", `request ${r.id} (${r.outcome}): a task exists but none was ever wanted`);
       }
       // Dispositions and wrong-number.
