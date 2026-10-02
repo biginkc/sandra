@@ -9,7 +9,7 @@ vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 
 const blandConfig: NormaBlandConfig = {
   apiKey: "k", baseUrl: "https://bland.test", pathwayId: "pw", pathwayVersion: 17, voice: "voice-1",
-  fromNumber: "+12135550100", webhookUrl: "https://sandra.test/h", timeoutMs: 1000,
+  fromNumber: "+12135550100", webhookUrl: "https://sandra.test/h", timeoutMs: 1000, waitForGreeting: true, backgroundTrack: "office",
 };
 const openGate = { dispatchEnabled: true, sellerRelease: false, allowedNumbers: [PHONE] };
 

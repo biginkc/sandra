@@ -42,6 +42,16 @@ describe("dispatch gate", () => {
     // The voice is required: unset or blank means no config, so nothing can be dialled.
     expect(readNormaBlandConfig(ok)).toMatchObject({ voice: "voice-1" });
     expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_VOICE: undefined })).toBeNull();
+    // Greeting wait and background audio: safe defaults, explicit overrides, invalid track fails closed.
+    expect(readNormaBlandConfig(ok)).toMatchObject({ waitForGreeting: true, backgroundTrack: "office" });
+    expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_WAIT_FOR_GREETING: "false" })).toMatchObject({ waitForGreeting: false });
+    expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_WAIT_FOR_GREETING: "true" })).toMatchObject({ waitForGreeting: true });
+    expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_WAIT_FOR_GREETING: "" })).toMatchObject({ waitForGreeting: true });
+    for (const track of ["office", "cafe", "restaurant", "none"]) {
+      expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_BACKGROUND_TRACK: track })).toMatchObject({ backgroundTrack: track });
+    }
+    expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_BACKGROUND_TRACK: "" })).toMatchObject({ backgroundTrack: "office" });
+    expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_BACKGROUND_TRACK: "beach" })).toBeNull();
     expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_VOICE: "  " })).toBeNull();
   });
 });

@@ -12,6 +12,8 @@ const config: NormaBlandConfig = {
   fromNumber: "+12135550100",
   webhookUrl: "https://sandra.test/api/webhooks/bland/call",
   timeoutMs: 1000,
+  waitForGreeting: true,
+  backgroundTrack: "office",
 };
 const params = { phoneNumber: "+18165550142", requestId: "r1", idempotencyKey: "k1", variables: { a: "b" } };
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
@@ -29,9 +31,18 @@ describe("bland send-call classification", () => {
       webhook: "https://sandra.test/api/webhooks/bland/call",
       voicemail: { action: "hangup" },
       request_data: { a: "b" },
+      wait_for_greeting: true,
+      background_track: "office",
     });
+    expect(JSON.stringify(body)).not.toMatch(/"(task|prompt|first_sentence|script)"/);
     expect("retry" in body).toBe(false);
     expect(Number.isInteger(body.pathway_version)).toBe(true);
+  });
+
+  it("passes configured greeting wait and background track through", () => {
+    const body = buildSendCallBody({ ...config, waitForGreeting: false, backgroundTrack: "none" }, params);
+    expect(body.wait_for_greeting).toBe(false);
+    expect(body.background_track).toBe("none");
   });
 
   it("sends to /v1/calls with a bearer key", async () => {

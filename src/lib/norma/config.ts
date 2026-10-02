@@ -39,7 +39,17 @@ export type NormaBlandConfig = {
   fromNumber: string;
   webhookUrl: string;
   timeoutMs: number;
+  /** Bland `wait_for_greeting`: wait for the person to speak first (NORMA_BLAND_WAIT_FOR_GREETING, default true). */
+  waitForGreeting: boolean;
+  /** Bland `background_track` (NORMA_BLAND_BACKGROUND_TRACK, default "office"). */
+  backgroundTrack: NormaBackgroundTrack;
 };
+
+export const BACKGROUND_TRACKS = ["office", "cafe", "restaurant", "none"] as const;
+export type NormaBackgroundTrack = (typeof BACKGROUND_TRACKS)[number];
+export const DEFAULT_BACKGROUND_TRACK: NormaBackgroundTrack = "office";
+
+const FALSE_VALUES = new Set(["0", "false", "no", "off"]);
 
 /**
  * The LIVE pathway's integer version (agent snapshot 0.0.4). Staging 0.0.17 has
@@ -63,6 +73,12 @@ export function readNormaBlandConfig(env: NormaEnv = process.env): NormaBlandCon
   if (!apiKey || !pathwayId || !fromNumber || !webhookUrl || !voice) return null;
   if (!Number.isInteger(version) || version < 0) return null;
   if (!/^https:\/\//.test(webhookUrl)) return null;
+  const trackText = env.NORMA_BLAND_BACKGROUND_TRACK?.trim().toLowerCase();
+  const backgroundTrack = trackText ? BACKGROUND_TRACKS.find((t) => t === trackText) : DEFAULT_BACKGROUND_TRACK;
+  // An invalid track fails config like any other invalid value, so nothing dials.
+  if (!backgroundTrack) return null;
+  const greetingText = env.NORMA_BLAND_WAIT_FOR_GREETING?.trim().toLowerCase();
+  const waitForGreeting = !(greetingText && FALSE_VALUES.has(greetingText));
   const timeout = Number(env.NORMA_BLAND_TIMEOUT_MS);
   return {
     apiKey,
@@ -73,6 +89,8 @@ export function readNormaBlandConfig(env: NormaEnv = process.env): NormaBlandCon
     fromNumber,
     webhookUrl,
     timeoutMs: Number.isFinite(timeout) && timeout >= 1000 ? timeout : DEFAULT_BLAND_TIMEOUT_MS,
+    waitForGreeting,
+    backgroundTrack,
   };
 }
 
