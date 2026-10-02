@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
 import sys
 import tempfile
 from types import SimpleNamespace
-import textwrap
 import unittest
 
 
@@ -29,6 +29,7 @@ from electric_image_contract import (  # noqa: E402
     EIMG_SOURCE_COMMIT,
     EIMG_SOURCE_REF,
     EIMG_WORKFLOW_PATH,
+    EIMG_WORKFLOW_SHA256,
     ElectricImagePin,
     load_electric_pin,
     verify_attestation_json,
@@ -70,50 +71,8 @@ def attestation_payload() -> list[dict]:
     return json.loads((PROOF_DIR / "electric-attestation-fixture.json").read_text())
 
 
-def workflow_fixture() -> str:
-    return textwrap.dedent(
-        f"""
-        name: Build Sandra Inbox Electric image
-        on:
-          workflow_dispatch: {{}}
-        jobs:
-          build:
-            runs-on: ubuntu-24.04
-            steps:
-              - name: Check out pinned upstream Electric source
-                uses: actions/checkout@pinned
-                with:
-                  repository: electric-sql/electric
-                  ref: {EIMG_SOURCE_COMMIT}
-              - name: Verify pinned upstream source and release tag
-                working-directory: electric
-                shell: bash
-                env:
-                  EXPECTED_COMMIT: {EIMG_SOURCE_COMMIT}
-                  UPSTREAM_REPO: https://github.com/electric-sql/electric.git
-                run: |
-                  set -euo pipefail
-                  checked_out="$(git rev-parse HEAD)"
-                  [[ "$checked_out" == "$EXPECTED_COMMIT" ]] || {{
-                    echo "checked out $checked_out, expected $EXPECTED_COMMIT" >&2
-                    exit 1
-                  }}
-                  local_tag_commit="$(git rev-parse '@core/sync-service@1.8.1^{{commit}}')"
-                  [[ "$local_tag_commit" == "$EXPECTED_COMMIT" ]] || {{
-                    echo "local release tag resolved to $local_tag_commit, expected $EXPECTED_COMMIT" >&2
-                    exit 1
-                  }}
-                  tag_commit="$(git ls-remote "$UPSTREAM_REPO" 'refs/tags/@core/sync-service@1.8.1^{{}}' | awk 'NR == 1 {{ print $1 }}')"
-                  [[ "$tag_commit" =~ ^[a-f0-9]{{40}}$ ]] || {{
-                    echo "release tag did not resolve to one commit: $tag_commit" >&2
-                    exit 1
-                  }}
-                  [[ "$tag_commit" == "$EXPECTED_COMMIT" ]] || {{
-                    echo "release tag resolved to $tag_commit, expected $EXPECTED_COMMIT" >&2
-                    exit 1
-                  }}
-        """
-    )
+def workflow_fixture() -> bytes:
+    return (PROOF_DIR / "fixtures/inbox-electric-image-reviewed.yml").read_bytes()
 
 
 def run_payload(*, conclusion: str = "success", head_sha: str = SANDRA_COMMIT, head_branch: str = "main", path: str = EIMG_WORKFLOW_PATH) -> dict:
@@ -333,19 +292,16 @@ class RuntimeR1ConfigTests(unittest.TestCase):
                     proof.verify_attestation(ready_pin())
 
     def test_workflow_at_s_and_run_evidence_acceptance_matrix(self):
-        self.assertEqual(verify_workflow_text(workflow_fixture())["source_commit"], EIMG_SOURCE_COMMIT)
-        workflow_mutations = {
-            "expected commit": workflow_fixture().replace(f"EXPECTED_COMMIT: {EIMG_SOURCE_COMMIT}", "EXPECTED_COMMIT: " + "b" * 40),
-            "checkout ref": workflow_fixture().replace(f"ref: {EIMG_SOURCE_COMMIT}", "ref: " + "b" * 40),
-            "tag compare removed": workflow_fixture().replace('[[ "$tag_commit" == "$EXPECTED_COMMIT" ]] || {', '[[ "$tag_commit" == "$EXPECTED_COMMIT" ]]'),
-            "guard exits replaced": workflow_fixture().replace("exit 1", "true"),
-            "set +e": workflow_fixture().replace("set -euo pipefail", "set -euo pipefail\n                  set +e"),
-            "|| true": workflow_fixture().replace('[[ "$tag_commit" == "$EXPECTED_COMMIT" ]] || {', '[[ "$tag_commit" == "$EXPECTED_COMMIT" ]] || true'),
-            "exit 0": workflow_fixture().replace("exit 1", "exit 0", 1),
-            "continue on error": workflow_fixture().replace("        run: |", "        continue-on-error: true\n        run: |"),
-            "file missing": workflow_fixture().replace("- name: Verify pinned upstream source and release tag", "- name: Other step"),
+        reviewed_workflow = workflow_fixture()
+        self.assertEqual(hashlib.sha256(reviewed_workflow).hexdigest(), EIMG_WORKFLOW_SHA256)
+        self.assertEqual(verify_workflow_text(reviewed_workflow)["source_commit"], EIMG_SOURCE_COMMIT)
+        mutations = {
+            "one byte": reviewed_workflow[:-1] + bytes([reviewed_workflow[-1] ^ 1]),
+            "trailing newline added": reviewed_workflow + b"\n",
+            "trailing newline removed": reviewed_workflow[:-1],
+            "content not decodable": reviewed_workflow[:100] + b"\xff" + reviewed_workflow[101:],
         }
-        for name, mutated in workflow_mutations.items():
+        for name, mutated in mutations.items():
             with self.subTest(name=name):
                 with self.assertRaisesRegex(CandidateError, "EIMG_WORKFLOW_FAILED"):
                     verify_workflow_text(mutated)
@@ -361,7 +317,7 @@ class RuntimeR1ConfigTests(unittest.TestCase):
                         return SimpleNamespace(stdout="", stderr="not found", returncode=1)
                     self.assertEqual(args[:2], ["gh", "api"])
                     return SimpleNamespace(
-                        stdout=base64.b64encode(workflow_fixture().encode()).decode(),
+                        stdout=base64.b64encode(workflow_fixture()).decode(),
                         stderr="",
                         returncode=0,
                     )
@@ -371,6 +327,19 @@ class RuntimeR1ConfigTests(unittest.TestCase):
                     proof.verify_workflow_at_commit({"source_repository_digest": SANDRA_COMMIT})["workflow_source"],
                     "gh api",
                 )
+            with self.subTest(proof=proof.__name__, name="workflow content not decodable"):
+                def fake_invalid_workflow_lookup(args, **kwargs):
+                    if args[:2] == ["git", "-C"]:
+                        return SimpleNamespace(stdout="", stderr="not found", returncode=1)
+                    return SimpleNamespace(
+                        stdout=base64.b64encode(b"\xff").decode(),
+                        stderr="",
+                        returncode=0,
+                    )
+
+                proof.run = fake_invalid_workflow_lookup
+                with self.assertRaisesRegex(proof.ProofError, "not valid base64 or UTF-8 bytes"):
+                    proof.verify_workflow_at_commit({"source_repository_digest": SANDRA_COMMIT})
 
         pin = ready_pin()
         attestation = {"source_repository_digest": SANDRA_COMMIT, "run_id": 756}
@@ -398,7 +367,7 @@ class RuntimeR1ConfigTests(unittest.TestCase):
             evidence_path = Path(temp) / "receipt.json"
             proof.EVIDENCE_PATH = evidence_path
 
-            def fake_run(args, check=True, timeout=120):
+            def fake_run(args, check=True, timeout=120, **kwargs):
                 commands.append(args)
                 if args[:3] == ["gh", "attestation", "verify"]:
                     if failure == "attestation":
@@ -412,7 +381,7 @@ class RuntimeR1ConfigTests(unittest.TestCase):
                 if args[:2] == ["git", "-C"] and args[2] == str(ROOT) and args[3] == "show":
                     workflow = workflow_fixture()
                     if failure == "workflow":
-                        workflow = workflow.replace(f"ref: {EIMG_SOURCE_COMMIT}", "ref: " + "b" * 40)
+                        workflow = workflow.replace(f"ref: {EIMG_SOURCE_COMMIT}".encode(), ("ref: " + "b" * 40).encode(), 1)
                     return SimpleNamespace(stdout=workflow, stderr="", returncode=0)
                 if args[:2] == ["gh", "api"]:
                     path = args[2]

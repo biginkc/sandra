@@ -32,6 +32,19 @@ The image is an unofficial rebuild and is not published or endorsed by
 ElectricSQL; its eventual public visibility still requires the recorded owner
 decision in EIMG-R1.
 
+### Electric workflow re-pinning
+
+Any change to `.github/workflows/inbox-electric-image.yml` must ship in the same
+PR as the new `EIMG_WORKFLOW_SHA256` value. That PR must pass the Fable then Astra
+review gates; reviewers read the source-guard step and confirm that it fails
+closed. A workflow change requires a rebuild, a new digest and `candidate.json`
+update, and a full ELEC-5 rerun. Old digests are not kept valid under a new pin.
+
+Residual risk is accepted and remains open: the `main` branch lacks required
+independent review. Anyone who can push to `biginkc/sandra` `main` can change the
+workflow and the pin together and mint a valid attestation for a different image.
+Closing that risk requires a second independent approver on `main`.
+
 The four R2 first-party images built from this public repository are PUBLIC and
 need no GHCR pull token on Railway. The workflow's `GITHUB_TOKEN` is retained
 only for publishing. An Electric registry credential is an optional path for a

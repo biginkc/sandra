@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -17,6 +18,7 @@ EIMG_SOURCE_COMMIT = "0f404200402f918a4b1596bc5c8a53479a435349"
 EIMG_ATTESTATION_PLACEHOLDER = "PENDING_EIMG_BUILD"
 EIMG_DIGEST_PLACEHOLDER = "PENDING_EIMG_BUILD"
 EIMG_WORKFLOW_PATH = ".github/workflows/inbox-electric-image.yml"
+EIMG_WORKFLOW_SHA256 = "b1d34496d4875f132c8daf12244af5edcae1a10cf23192f08b0f6489af46febb"
 EIMG_SIGNER_WORKFLOW = f"biginkc/sandra/{EIMG_WORKFLOW_PATH}"
 EIMG_SOURCE_REF = "refs/heads/main"
 EIMG_PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
@@ -209,54 +211,31 @@ def verify_attestation_json(pin: ElectricImagePin, payload: Any) -> dict[str, An
     raise CandidateError("EIMG_ATTESTATION_IDENTITY_FAILED: certificate or subject does not match ELEC-5-A2")
 
 
-def verify_workflow_text(workflow_text: str) -> dict[str, str]:
-    """Require the fail-closed upstream source guard in the workflow at S."""
+def verify_workflow_text(workflow_text: str | bytes) -> dict[str, str]:
+    """Require the exact reviewed workflow bytes at attested commit S."""
 
-    if not isinstance(workflow_text, str):
+    if isinstance(workflow_text, str):
+        workflow_bytes = workflow_text.encode("utf-8")
+    elif isinstance(workflow_text, bytes):
+        workflow_bytes = workflow_text
+    else:
         raise CandidateError("EIMG_WORKFLOW_FAILED: workflow contents are not text")
-    if not re.search(rf"(?m)^\s+ref:\s*{re.escape(EIMG_SOURCE_COMMIT)}\s*$", workflow_text):
-        raise CandidateError("EIMG_WORKFLOW_FAILED: checkout ref is not the required upstream commit")
+    try:
+        workflow_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CandidateError(f"EIMG_WORKFLOW_FAILED: workflow contents are not valid UTF-8: {exc}") from exc
 
-    step_match = re.search(
-        r"(?ms)^\s{6}- name: Verify pinned upstream source and release tag\s*$.*?(?=^\s{6}- name:|\Z)",
-        workflow_text,
-    )
-    if step_match is None:
-        raise CandidateError("EIMG_WORKFLOW_FAILED: pinned source/tag check step is missing")
-    step = step_match.group(0)
-    if re.search(r"(?m)^\s{8}(?:if|continue-on-error)\s*:", step):
-        raise CandidateError("EIMG_WORKFLOW_FAILED: source/tag check step is not fail-closed")
-    forbidden = {
-        "set +e": r"\bset\s+\+e\b",
-        "|| true": r"\|\|\s*true\b",
-        "exit 0": r"\bexit\s+0\b",
-    }
-    forbidden_found = [name for name, pattern in forbidden.items() if re.search(pattern, step)]
-    if forbidden_found:
-        raise CandidateError(f"EIMG_WORKFLOW_FAILED: source/tag check step contains forbidden constructs: {forbidden_found}")
-
-    required_fragments = (
-        "set -euo pipefail",
-        f"EXPECTED_COMMIT: {EIMG_SOURCE_COMMIT}",
-        'checked_out="$(git rev-parse HEAD)"',
-        '[[ "$checked_out" == "$EXPECTED_COMMIT" ]] || {',
-        "local_tag_commit=\"$(git rev-parse '@core/sync-service@1.8.1^{commit}')\"",
-        '[[ "$local_tag_commit" == "$EXPECTED_COMMIT" ]] || {',
-        "git ls-remote \"$UPSTREAM_REPO\" 'refs/tags/@core/sync-service@1.8.1^{}'",
-        '[[ "$tag_commit" =~ ^[a-f0-9]{40}$ ]] || {',
-        '[[ "$tag_commit" == "$EXPECTED_COMMIT" ]] || {',
-    )
-    missing = [fragment for fragment in required_fragments if fragment not in step]
-    if missing:
-        raise CandidateError(f"EIMG_WORKFLOW_FAILED: source/tag guard is incomplete: {missing}")
-    guard_bodies = re.findall(r"(?ms)^\s*\[\[.*?\]\]\s*\|\|\s*\{\s*(.*?)^\s*}\s*$", step)
-    if len(guard_bodies) != 4 or any(not re.search(r"(?m)^\s*exit\s+1\s*$", body) for body in guard_bodies):
-        raise CandidateError("EIMG_WORKFLOW_FAILED: all four source/tag guards must exit 1 inside their bodies")
+    actual_sha256 = hashlib.sha256(workflow_bytes).hexdigest()
+    if actual_sha256 != EIMG_WORKFLOW_SHA256:
+        raise CandidateError(
+            "EIMG_WORKFLOW_FAILED: workflow SHA-256 mismatch "
+            f"(expected {EIMG_WORKFLOW_SHA256}, actual {actual_sha256}); re-pin requires review"
+        )
     return {
         "workflow_path": EIMG_WORKFLOW_PATH,
         "source_commit": EIMG_SOURCE_COMMIT,
         "upstream_commit": EIMG_SOURCE_COMMIT,
-        "guard": "head/local-tag/ls-remote-tag all fail closed",
+        "guard": "reviewed workflow byte hash",
     }
 
 
