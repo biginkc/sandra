@@ -18,7 +18,8 @@ function btrimSpaces(s: string): string {
 
 /** left(btrim(q),100); codepoint-based like Postgres. */
 export function normalizeQuery(q: string | null | undefined): string {
-  return Array.from(btrimSpaces(q ?? "").replace(/\s+/g, " ")).slice(0, 100).join("");
+  const collapsed = btrimSpaces((q ?? "").replace(/\s+/g, " "));
+  return btrimSpaces(Array.from(collapsed).slice(0, 100).join(""));
 }
 
 const digitsOnly = (s: string | null) => (s ?? "").replace(/[^0-9]/g, "");
@@ -72,6 +73,8 @@ export function referenceMatch(
   const qLower = q.toLowerCase();
   let qd = digitsOnly(q);
   if (qd.length === 11 && qd.startsWith("1")) qd = qd.slice(1); // coordinator ruling: drop US country code
+  // phone branch only for "structured" queries: >=3 digits and digits are >=70% of the normalized query
+  const structured = qd.length >= 3 && 10 * qd.length >= 7 * Array.from(q).length;
   const live = (p: OracleProperty) =>
     p.deleted_at === null && orgs.has(p.org_id) && !(opts.excludeTraining && p.is_training);
   const propsById = new Map(fixture.properties.map((p) => [p.id, p]));
@@ -85,7 +88,7 @@ export function referenceMatch(
   for (const c of fixture.contacts) {
     if (!orgs.has(c.org_id)) continue;
     const nameHit = contactSearchText(c).includes(qLower);
-    const phoneHit = qd.length >= 3 && [c.phone_1, c.phone_2, c.phone_3].some((ph) => digitsOnly(ph).includes(qd));
+    const phoneHit = structured && [c.phone_1, c.phone_2, c.phone_3].some((ph) => digitsOnly(ph).includes(qd));
     if (nameHit || phoneHit) matchedContacts.set(c.id, c);
   }
   for (const p of fixture.properties) {
