@@ -179,6 +179,22 @@ describe("runSequenceTick enrollment isolation", () => {
     expect(summary.processed).toBe(1);
   });
 
+  it.each(["PGRST205", "42P01"])("treats a missing Norma table (%s) as no holds, silently", async (code) => {
+    const due = [{ id: "free", property_id: "property-free", next_run_at: "2026-09-17T12:00:00.000Z" }];
+    processEnrollmentTick.mockResolvedValue({ status: "sent", enrollmentId: "free", stepIndex: 0, messageId: "m" });
+    reportError.mockClear();
+    const client = {
+      from: vi.fn((table: string) => {
+        if (table === "sequence_enrollments") return resultBuilder(due);
+        if (table === "norma_call_requests") return resultBuilder(null, { code, message: "missing" });
+        return resultBuilder([]);
+      }),
+    } as never;
+    const summary = await runSequenceTick(client, { budgetMs: 10_000 });
+    expect(summary.processed).toBe(1);
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
   it("does not stop the tick when the Norma hold lookup fails (the pause is the primary control)", async () => {
     const due = [{ id: "free", property_id: "property-free", next_run_at: "2026-09-17T12:00:00.000Z" }];
     processEnrollmentTick.mockResolvedValue({ status: "sent", enrollmentId: "free", stepIndex: 0, messageId: "m" });

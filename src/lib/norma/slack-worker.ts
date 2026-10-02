@@ -51,6 +51,11 @@ export const NORMA_NOTIFICATION_MAX_ATTEMPTS = 10;
  * A row is leased (next_attempt_at pushed out) before it is posted, so two
  * overlapping runs cannot both post it, and a run that dies mid-post is retried
  * after the lease expires.
+ *
+ * Delivery is at-least-once, not exactly-once: if a run posts to Slack but is
+ * slower than the lease (or dies before recording the post) the next run posts
+ * the same notification again, so Slack may show a duplicate. Accepted by
+ * PLAN.md section 9.8: a duplicate heads-up is cheaper than a lost one.
  */
 export const NORMA_NOTIFICATION_LEASE_MS = 5 * MIN;
 /** Rows per run. Small on purpose: each post can take up to the Slack timeout. */

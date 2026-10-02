@@ -834,10 +834,19 @@ export async function handleInboundWebhook(
           // the two steps, the release would reactivate the row and the
           // upgrade would then see no hold. In this order the pause that
           // follows catches anything the release reactivated.
-          await upgradeNormaHoldPauses(supabase, {
-            propertyId: effectivePropertyId,
-            reason: "inbound_reply",
-          });
+          // Its own try/catch: a failed upgrade must never skip the fail-safe
+          // pause below.
+          try {
+            await upgradeNormaHoldPauses(supabase, {
+              propertyId: effectivePropertyId,
+              reason: "inbound_reply",
+            });
+          } catch (upgradeError) {
+            reportError(upgradeError, {
+              tags: { surface: "inbound_norma_hold_upgrade" },
+              extra: { propertyId: effectivePropertyId },
+            });
+          }
           await pausePropertyEnrollments(supabase, {
             propertyId: effectivePropertyId,
             reason: "inbound_reply",
@@ -922,10 +931,18 @@ export async function handleInboundWebhook(
           // deliveries.
           // Upgrade Norma-held pauses first (see the reply path above), then
           // pause and promote whatever remains.
-          await upgradeNormaHoldPauses(supabase, {
-            propertyId: effectivePropertyId,
-            reason: REP_SMS_HUMAN_TAKEOVER_REASON,
-          });
+          try {
+            await upgradeNormaHoldPauses(supabase, {
+              propertyId: effectivePropertyId,
+              reason: REP_SMS_HUMAN_TAKEOVER_REASON,
+            });
+          } catch (upgradeError) {
+            // Never let this skip the fail-safe pause below.
+            reportError(upgradeError, {
+              tags: { surface: "inbound_norma_hold_upgrade" },
+              extra: { propertyId: effectivePropertyId },
+            });
+          }
           await pausePropertyEnrollments(supabase, {
             propertyId: effectivePropertyId,
             reason: REP_SMS_HUMAN_TAKEOVER_REASON,

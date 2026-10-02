@@ -175,9 +175,16 @@ async function reconcileRow(row: Row, deps: ReconcileDeps, now: number, summary:
           requestId: row.id, callId: row.bland_call_id, outcome: mapping.outcome, payload: mapping.payload,
         });
         if (result.result === "applied" || result.result === "replayed") return void (summary.completed += 1);
-        throw new Error(`norma reconcile completion ${result.result}`);
+        // Not applied (mismatch, rejected, ...): never a dead end. Report it and
+        // fall through to the same escalate-after-window branch as any other
+        // ambiguous lookup, so the request cannot be stuck open.
+        reportError(new Error(`norma reconcile completion ${result.result}`), {
+          tags: { surface: "norma_reconcile" }, extra: { requestId: row.id },
+        });
+        summary.errors += 1;
+      } else {
+        return void (summary.waiting += 1);
       }
-      return void (summary.waiting += 1);
     }
   }
   // Not found / not finished / lookup failed: ambiguous. Wait, then escalate.

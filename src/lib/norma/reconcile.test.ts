@@ -71,6 +71,16 @@ describe("reconciliation", () => {
     expect(t.rpcs.fn_norma_complete_call).toHaveBeenCalledWith(expect.objectContaining({ p_request_id: REQUEST_ID, p_call_id: "call-1", p_outcome: "no_answer" }));
   });
 
+  it("a completion the database does not apply is reported and escalates after the window instead of throwing", async () => {
+    const t = setup({ status: "dispatched", bland_call_id: "call-1", updated_at: ago(T.escalateAfter + MIN) }, finished());
+    t.rpcs.fn_norma_complete_call.mockReturnValue({ result: "mismatch" });
+    expect(await t.run()).toMatchObject({ completed: 0, errors: 1, escalated: 1 });
+    expect(t.rpcs.fn_norma_mark_needs_review).toHaveBeenCalled();
+    const fresh = setup({ status: "dispatched", bland_call_id: "call-1", updated_at: ago(5 * MIN) }, finished());
+    fresh.rpcs.fn_norma_complete_call.mockReturnValue({ result: "mismatch" });
+    expect(await fresh.run()).toMatchObject({ completed: 0, errors: 1, waiting: 1, escalated: 0 });
+  });
+
   it("dispatched shortly after dispatch: not looked up yet", async () => {
     const t = setup({ status: "dispatched", bland_call_id: "call-1", updated_at: ago(30_000) }, finished());
     expect(await t.run()).toMatchObject({ waiting: 1 });

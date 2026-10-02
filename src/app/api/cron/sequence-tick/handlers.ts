@@ -154,6 +154,8 @@ export async function runSequenceTick(
       .in("property_id", ids)
       .in("status", [...NORMA_OPEN_STATUSES]);
     if (error) {
+      // Table missing (deployed ahead of the migration): there are no holds.
+      if (error.code === "PGRST205" || error.code === "42P01") return new Set();
       reportError(new Error(`norma hold lookup failed: ${error.message}`), {
         tags: { surface: "cron_sequence_tick_norma_hold" },
       });
