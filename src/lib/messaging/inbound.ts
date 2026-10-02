@@ -58,6 +58,7 @@ import {
   REP_SMS_HUMAN_TAKEOVER_REASON,
 } from "./rep-sms-human-takeover";
 import { aiReplyDelayWorkflow } from "@/workflows/ai-reply-delay";
+import { upgradeNormaHoldPauses } from "@/lib/norma";
 import { applyPhoneLevelOptOut } from "./opt-out-phone";
 import type { MessagingProvider } from "./types";
 
@@ -829,6 +830,14 @@ export async function handleInboundWebhook(
             propertyId: effectivePropertyId,
             reason: "inbound_reply",
           });
+          // pausePropertyEnrollments only touches active rows. While a Norma
+          // call holds this lead, enrollments already paused as `norma_call`
+          // or a held `call_in_progress` must also record the reply, or a
+          // later Norma no-answer / softphone cleanup could resume them.
+          await upgradeNormaHoldPauses(supabase, {
+            propertyId: effectivePropertyId,
+            reason: "inbound_reply",
+          });
           propertyEnrollmentsPauseCompleted = true;
           await markInboundMessageState(supabase, insertOutcome.messageId, {
             propertyEnrollmentsPausedAt: new Date().toISOString(),
@@ -914,6 +923,10 @@ export async function handleInboundWebhook(
           await promotePropertyEnrollmentPauseReason(supabase, {
             propertyId: effectivePropertyId,
             fromReason: "inbound_reply",
+            reason: REP_SMS_HUMAN_TAKEOVER_REASON,
+          });
+          await upgradeNormaHoldPauses(supabase, {
+            propertyId: effectivePropertyId,
             reason: REP_SMS_HUMAN_TAKEOVER_REASON,
           });
           if (!propertyEnrollmentsPauseCompleted) {

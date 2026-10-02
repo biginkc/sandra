@@ -361,7 +361,14 @@ export async function promotePropertyEnrollmentPauseReason(
   return { promoted: promotedRows?.length ?? 0 };
 }
 
-/** Resume only the enrollments paused by the softphone's active call. */
+/**
+ * Resume only the enrollments paused by the softphone's active call.
+ *
+ * The candidate read below is not authoritative: a reply, a rep takeover or a
+ * Norma call may change the pause between the read and the resume. The RPC
+ * therefore re-validates the expected reason under the enrollment lock and
+ * refuses while a Norma hold is open, so those rows are simply not resumed.
+ */
 export async function resumeByProperty(
   client: SupabaseClient<Database>,
   params: { propertyId: string; actor?: SequenceEventActor },
@@ -377,13 +384,22 @@ export async function resumeByProperty(
   const actor = params.actor ?? SYSTEM_ACTOR;
   const resumedRows: Array<{ id: string; sequence_id: string }> = [];
   for (const row of pausedRows ?? []) {
-    const { data, error: resumeError } = await client.rpc(
+    const rpcArgs = {
+      p_enrollment_id: row.id,
+      p_actor_user_id: actor.actorType === "user" ? actor.actorId : null,
+    };
+    let { data, error: resumeError } = await client.rpc(
       "resume_sequence_enrollment",
-      {
-        p_enrollment_id: row.id,
-        p_actor_user_id: actor.actorType === "user" ? actor.actorId : null,
-      },
+      { ...rpcArgs, p_expected_pause_reason: "call_in_progress" },
     );
+    if (resumeError?.code === "PGRST202") {
+      // Deployed ahead of the Norma migration: the three-argument RPC does
+      // not exist yet, and neither does a Norma hold. Use the original call.
+      ({ data, error: resumeError } = await client.rpc(
+        "resume_sequence_enrollment",
+        rpcArgs,
+      ));
+    }
     if (resumeError) throw new Error(`resumeByProperty: ${resumeError.message}`);
     if (data?.[0]?.outcome === "resumed") resumedRows.push(row);
   }
@@ -490,6 +506,7 @@ export async function resumeEnrollment(
   | { status: "resumed" }
   | { status: "not_paused" }
   | { status: "reconciliation_required" }
+  | { status: "norma_hold" }
   | { status: "failed"; message: string }
 > {
   const { data: enrollment, error: loadErr } = await client
@@ -523,6 +540,8 @@ export async function resumeEnrollment(
     return { status: "failed", message: "Enrollment not found" };
   }
   if (resumeResult.outcome === "not_paused") return { status: "not_paused" };
+  // An open Norma call request holds every enrollment on the lead.
+  if (resumeResult.outcome === "norma_hold") return { status: "norma_hold" };
   if (
     resumeResult.outcome === "reconciliation_required" ||
     resumeResult.outcome === "retry_required"

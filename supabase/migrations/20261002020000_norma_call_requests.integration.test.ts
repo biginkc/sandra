@@ -695,6 +695,26 @@ describe("norma_call_requests data layer", () => {
     });
   });
 
+  it("a signed-in member's resume is refused under a hold, via the existing RPC grants", async () => {
+    await withDb(async (db, ctx) => {
+      const l = await lead(db, ctx);
+      const id = (await create(db, ctx, l)).request_id!;
+      const asMember = async () => {
+        await db.query("set local role authenticated");
+        await db.query("select set_config('request.jwt.claim.role','authenticated',true)");
+        await db.query("select set_config('request.jwt.claim.sub',$1,true)", [ctx.rep]);
+        try {
+          return (await db.query<{ outcome: string }>("select outcome from public.resume_sequence_enrollment($1,$2,null)", [l.enrollment, ctx.rep])).rows[0]!.outcome;
+        } finally {
+          await db.query("reset role");
+        }
+      };
+      expect(await asMember()).toBe("norma_hold");
+      await complete(db, id, await dispatched(db, id), "reached_no_callback");
+      expect(await asMember()).toBe("resumed");
+    });
+  });
+
   it("completion is one transaction: an injected failure rolls every effect back", async () => {
     await withDb(async (db, ctx) => {
       const l = await lead(db, ctx);

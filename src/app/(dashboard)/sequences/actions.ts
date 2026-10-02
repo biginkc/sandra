@@ -723,6 +723,16 @@ export async function resumeEnrollmentAction(
         },
       };
     }
+    if (outcome.status === "norma_hold") {
+      return {
+        ok: false,
+        error: {
+          code: "NORMA_HOLD",
+          message:
+            "A Norma call is open for this lead, so its drip stays paused until that call is resolved.",
+        },
+      };
+    }
     return ok(null);
   } catch (e) {
     reportError(e, { tags: { surface: "resume_enrollment" } });
