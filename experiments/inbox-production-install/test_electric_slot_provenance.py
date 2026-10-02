@@ -11,6 +11,7 @@ import unittest
 
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE / "electric-slot-provenance.py"
+PINNED_CA = HERE / "supabase-prod-ca-2021.crt"
 PROJECT_REF = "ncsngxlcyxylaeskiteu"
 STREAM = f"inbox_{PROJECT_REF}"
 EXPECTED_SLOT = f"electric_slot_{STREAM}"
@@ -36,6 +37,31 @@ def postgres_bin() -> Path | None:
 
 @unittest.skipUnless(postgres_bin() is not None, "PostgreSQL 17 local binaries are required")
 class ElectricSlotProvenanceTests(unittest.TestCase):
+    def test_host_ref_ca_and_libpq_override_inputs_fail_closed(self):
+        with tempfile.TemporaryDirectory(prefix="sandra-slot-hosted-refusal-") as temp:
+            receipt = Path(temp) / "receipt.json"
+            command = ["python3", str(SCRIPT), "before", "--project-ref", PROJECT_REF, "--stream-id", STREAM, "--receipt", str(receipt)]
+            base = {
+                **os.environ,
+                "PGHOST": f"db.{PROJECT_REF}.supabase.co",
+                "PGSSLMODE": "verify-full",
+                "PGSSLROOTCERT": str(PINNED_CA),
+                "INBOX_SLOT_PSQL_BIN": "/definitely/missing/psql",
+            }
+            wrong_host = subprocess.run(command, env={**base, "PGHOST": "db.example.supabase.co"}, capture_output=True, text=True)
+            self.assertEqual(wrong_host.returncode, 3)
+            self.assertIn("selected direct", wrong_host.stderr)
+            wrong_ref = subprocess.run([*command[:4], "copflsklaefwzipsrjqz", *command[5:]], env=base, capture_output=True, text=True)
+            self.assertEqual(wrong_ref.returncode, 3)
+            self.assertIn("selected direct", wrong_ref.stderr)
+            wrong_ca = subprocess.run(command, env={**base, "PGSSLROOTCERT": str(SCRIPT)}, capture_output=True, text=True)
+            self.assertEqual(wrong_ca.returncode, 3)
+            self.assertIn("pinned Supabase CA", wrong_ca.stderr)
+            for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
+                rejected = subprocess.run(command, env={**base, name: "attacker-controlled"}, capture_output=True, text=True)
+                self.assertEqual(rejected.returncode, 3)
+                self.assertIn(name, rejected.stderr)
+
     def test_before_after_cleanup_receipt_proves_one_slot_and_targets_only_it(self):
         bindir = postgres_bin()
         assert bindir is not None

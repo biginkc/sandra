@@ -26,6 +26,7 @@ SCRAM_VERIFIER = re.compile(
 )
 PINNED_CA_FILE = HERE / "supabase-prod-ca-2021.crt"
 PINNED_CA_SHA256 = "700723581420dd1ac98fd7e9ac529f0ef210eadcaf87fc868a3ad7d114c2f3b7"
+HOSTED_PG_OVERRIDE_VARS = ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")
 
 
 class PacketError(RuntimeError):
@@ -41,7 +42,7 @@ def connected_project_ref() -> str:
 
 
 def validate_hosted_environment() -> None:
-    for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
+    for name in HOSTED_PG_OVERRIDE_VARS:
         if name in os.environ:
             raise PacketError(f"{name} overrides the approved direct host")
     if os.environ.get("PGSSLMODE") != "verify-full":
@@ -82,6 +83,13 @@ def redacted(value: str, verifiers: list[str]) -> str:
     return value
 
 
+def hosted_child_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    for name in HOSTED_PG_OVERRIDE_VARS:
+        environment.pop(name, None)
+    return environment
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-ref", required=True)
@@ -108,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
         input=packet_input(verifiers),
         text=True,
         capture_output=True,
+        env=hosted_child_environment(),
         check=False,
     )
     sys.stdout.write(redacted(result.stdout, verifiers))

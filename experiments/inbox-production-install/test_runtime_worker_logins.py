@@ -45,9 +45,11 @@ class RuntimeWorkerLoginTests(unittest.TestCase):
             root = Path(temp)
             child = root / "fake-psql.py"
             captured = root / "captured.sql"
+            args_file = root / "args.txt"
             child.write_text(
                 "#!/usr/bin/env python3\n"
                 "import pathlib, sys\n"
+                f"pathlib.Path({str(args_file)!r}).write_text(' '.join(sys.argv[1:]))\n"
                 f"value = sys.stdin.read(); pathlib.Path({str(captured)!r}).write_text(value); print(value, end='')\n"
             )
             child.chmod(0o700)
@@ -66,9 +68,44 @@ class RuntimeWorkerLoginTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("SCRAM-SHA-256$", result.stdout + result.stderr)
+            self.assertNotIn("SCRAM-SHA-256$", args_file.read_text())
             packet_input = captured.read_text()
             self.assertIn("\\set action_verifier", packet_input)
             self.assertIn("runtime-worker-logins.sql", packet_input)
+
+    def test_host_ref_ca_and_libpq_override_inputs_fail_closed(self):
+        base = {
+            **os.environ,
+            "PGHOST": f"db.{PROJECT_REF}.supabase.co",
+            "PGSSLMODE": "verify-full",
+            "PGSSLROOTCERT": str(PINNED_CA),
+            "INBOX_RUNTIME_LOGINS_PSQL_BIN": "/definitely/missing/psql",
+        }
+        wrong_host = subprocess.run(
+            ["python3", str(RUNNER), "--project-ref", PROJECT_REF], input="\n".join(SCRAM) + "\n",
+            text=True, capture_output=True, env={**base, "PGHOST": "db.example.supabase.co"}, check=False,
+        )
+        self.assertEqual(wrong_host.returncode, 3)
+        self.assertIn("approved direct Supabase host", wrong_host.stderr)
+        wrong_ref = subprocess.run(
+            ["python3", str(RUNNER), "--project-ref", "copflsklaefwzipsrjqz"], input="\n".join(SCRAM) + "\n",
+            text=True, capture_output=True, env=base, check=False,
+        )
+        self.assertEqual(wrong_ref.returncode, 3)
+        self.assertIn("does not match", wrong_ref.stderr)
+        wrong_ca = subprocess.run(
+            ["python3", str(RUNNER), "--project-ref", PROJECT_REF], input="\n".join(SCRAM) + "\n",
+            text=True, capture_output=True, env={**base, "PGSSLROOTCERT": str(PACKET)}, check=False,
+        )
+        self.assertEqual(wrong_ca.returncode, 3)
+        self.assertIn("pinned Supabase CA", wrong_ca.stderr)
+        for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
+            rejected = subprocess.run(
+                ["python3", str(RUNNER), "--project-ref", PROJECT_REF], input="\n".join(SCRAM) + "\n",
+                text=True, capture_output=True, env={**base, name: "attacker-controlled"}, check=False,
+            )
+            self.assertEqual(rejected.returncode, 3)
+            self.assertIn(name, rejected.stderr)
 
     def test_runner_rejects_wrong_stdin_arity_before_invoking_psql(self):
         result = subprocess.run(

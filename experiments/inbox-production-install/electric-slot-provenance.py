@@ -27,6 +27,7 @@ STREAM_ID = re.compile(r"^inbox_[a-z0-9]{20}$")
 SLOT_NAME = re.compile(r"^electric_slot_inbox_[a-z0-9]{20}$")
 PINNED_CA_FILE = HERE / "supabase-prod-ca-2021.crt"
 PINNED_CA_SHA256 = "700723581420dd1ac98fd7e9ac529f0ef210eadcaf87fc868a3ad7d114c2f3b7"
+HOSTED_PG_OVERRIDE_VARS = ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")
 
 
 class ProvenanceError(RuntimeError):
@@ -37,7 +38,7 @@ def hosted_environment(project_ref: str) -> None:
     match = DIRECT_HOST.fullmatch(os.environ.get("PGHOST", ""))
     if not match or match.group(1) != project_ref:
         raise ProvenanceError("PGHOST must be the selected direct Supabase host")
-    for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
+    for name in HOSTED_PG_OVERRIDE_VARS:
         if name in os.environ:
             raise ProvenanceError(f"{name} overrides the approved direct host")
     if os.environ.get("PGSSLMODE") != "verify-full":
@@ -63,11 +64,15 @@ def psql(sql: str, local: bool) -> list[str]:
     if local:
         local_environment()
     binary = os.environ.get("INBOX_SLOT_PSQL_BIN", "psql")
+    environment = os.environ.copy()
+    if not local:
+        for name in HOSTED_PG_OVERRIDE_VARS:
+            environment.pop(name, None)
     result = subprocess.run(
         [binary, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-At", "-F", "\t", "-c", sql],
         text=True,
         capture_output=True,
-        env=os.environ.copy(),
+        env=environment,
         check=False,
     )
     if result.returncode != 0:

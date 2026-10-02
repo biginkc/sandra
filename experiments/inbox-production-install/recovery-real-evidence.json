@@ -1,0 +1,26 @@
+{
+  "restate_image": "docker.restate.dev/restatedev/restate:1.7.5@sha256:675b85e7bf674f9dfda04a391fa33e850650d57e464b694ca8df5866acad95cc",
+  "postgres_image": "postgres:17",
+  "database_migrations_applied": 296,
+  "admin_endpoint": "http://127.0.0.1:32786",
+  "read_only": true,
+  "database": {
+    "reply_attempts": [],
+    "metadata_operations": []
+  },
+  "restate": {
+    "registered_deployments": 0,
+    "pending_unpinned_invocations": 0,
+    "query_columns": [
+      "id",
+      "status",
+      "target_service_name",
+      "target_handler_name",
+      "target_service_key",
+      "pinned_deployment_id",
+      "created_at",
+      "modified_at"
+    ]
+  },
+  "outcome": "inventory query completed against the real local Restate admin API and real migrated local PostgreSQL schema; no writes observed"
+}
