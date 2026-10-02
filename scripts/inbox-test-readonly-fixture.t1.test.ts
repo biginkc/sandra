@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -8,6 +7,7 @@ import { createClient } from "@supabase/supabase-js";
 import { runSequenceTick } from "@/app/api/cron/sequence-tick/handlers";
 import { releaseQueuedMessage } from "@/lib/messaging/send";
 import { MockMessagingProvider } from "@/lib/messaging/providers/mock";
+import { stopOwnedHolder } from "./inbox-test-readonly-fixture.mjs";
 
 const { Client } = pg;
 const script = path.resolve("scripts/inbox-test-readonly-fixture.mjs");
@@ -57,7 +57,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   try {
-    runFixture(["--remove", "--run-id", runId]);
+    await db.query("select public.reset_tenant_tables()");
+    runFixture(["--create", "--run-id", runId, "--owner", "fixture-vitest", "--lease-seconds", "120"]);
+    const restored = JSON.parse(readFileSync(path.join(receiptDir, `lease-test-ro-fixture-${runId}.json`), "utf8"));
+    stopOwnedHolder(restored.lock, runId);
   } finally {
     await db.end();
   }
@@ -68,7 +71,7 @@ describe("T1 real queued-message inertness", () => {
     const ids = [receipt.ids.messages.scheduled, receipt.ids.messages.unscheduled];
     const before = await messageHashes(ids);
     vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date("2026-10-05T15:00:00.000Z"));
+    vi.setSystemTime(new Date("2036-10-05T15:00:00.000Z"));
     const senderInventoryDescriptor = Object.getOwnPropertyDescriptor(
       MockMessagingProvider.prototype,
       "listPurchasedNumbers",
@@ -87,13 +90,15 @@ describe("T1 real queued-message inertness", () => {
 
     const scheduled = await releaseQueuedMessage(supabase, receipt.ids.messages.scheduled);
     expect(scheduled).toMatchObject({ status: "blocked_not_due", messageId: receipt.ids.messages.scheduled });
+    const sendSource = readFileSync(path.resolve("src/lib/messaging/send.ts"), "utf8");
+    expect(sendSource).not.toMatch(/from\("messages"\)\s*\.select\("id"\)\s*\.eq\("status", "queued"\)\s*;/);
     const unscheduled = await releaseQueuedMessage(supabase, receipt.ids.messages.unscheduled);
     expect(unscheduled).toMatchObject({ status: "db_error", error: "queued message missing contact/property/to_address" });
     expect(providerSend).not.toHaveBeenCalled();
     expect(await messageHashes(ids)).toEqual(before);
 
-    const contactId = randomUUID();
-    const propertyId = randomUUID();
+    const contactId = "44444444-5555-4666-8777-888888888888";
+    const propertyId = "55555555-6666-4777-8888-999999999999";
     await db.query(
       "insert into public.contacts(id,org_id,first_name,last_name,phone_1,phone_1_type) values ($1,$2,'Fixture','Mutation','+15551234567','mobile')",
       [contactId, receipt.ids.organization],
