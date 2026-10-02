@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { withConvertedCallbackTime } from "./callback-wiring";
+import { callEndedAtMs, withConvertedCallbackTime } from "./callback-wiring";
 import type { CallbackTimeProvider } from "./callback-time";
 import { mapBlandCallToOutcome } from "./outcome";
 import { fakeClient } from "./test-helpers";
@@ -61,16 +61,59 @@ describe("withConvertedCallbackTime", () => {
     expect(select).not.toHaveBeenCalled();
   });
 
-  it("dates relative words from the call's completion, not from when it is processed", async () => {
-    // Call ended Friday 17:00 Chicago; processed Saturday 09:00 Chicago.
-    const call = callWith({ follow_up_preference: "tomorrow at 2pm" }, { end_at: "2026-10-02T22:00:00Z" });
-    const result = await run(call, { nowMs: Date.parse("2026-10-03T14:00:00Z") });
-    expect(result.payload.callback_requested_for).toBe("2026-10-03T19:00:00.000Z"); // Saturday, not Sunday
-  });
+  describe("the call's end time (reference for relative words)", () => {
+    // Call 17:00 Chicago Friday 2026-10-02; processed Saturday 09:00 Chicago. "tomorrow at 2pm" from the
+    // Friday call is Saturday 14:00 (19:00Z); from Saturday processing time it would be Sunday.
+    const LATE = Date.parse("2026-10-03T14:00:00Z");
+    const SATURDAY_2PM = "2026-10-03T19:00:00.000Z";
+    const tomorrow = (extra: Record<string, unknown>) => callWith({ follow_up_preference: "tomorrow at 2pm" }, extra);
 
-  it("ignores a completion time from the future", async () => {
-    const call = callWith({ follow_up_preference: "tomorrow morning" }, { end_at: "2030-01-01T00:00:00Z" });
-    expect((await run(call)).payload.callback_requested_for).toBe("2026-10-03T14:00:00.000Z");
+    it("started_at + corrected_duration (seconds) is the end", async () => {
+      const call = tomorrow({ started_at: "2026-10-02T21:50:00Z", corrected_duration: 540 }); // ends 21:59Z Friday
+      expect((await run(call, { nowMs: LATE })).payload.callback_requested_for).toBe(SATURDAY_2PM);
+    });
+
+    it("corrected_duration wins over call_length when both are present and valid", async () => {
+      const call = tomorrow({ started_at: "2026-10-02T21:50:00Z", corrected_duration: 540, call_length: 30000 });
+      expect((await run(call, { nowMs: LATE })).payload.callback_requested_for).toBe(SATURDAY_2PM);
+      expect(callEndedAtMs(call, LATE)).toBe(Date.parse("2026-10-02T21:59:00Z"));
+    });
+
+    it("falls back to started_at + call_length (minutes x 60)", async () => {
+      const call = tomorrow({ started_at: "2026-10-02T21:50:00Z", call_length: 9 });
+      expect(callEndedAtMs(call, LATE)).toBe(Date.parse("2026-10-02T21:59:00Z"));
+      expect((await run(call, { nowMs: LATE })).payload.callback_requested_for).toBe(SATURDAY_2PM);
+    });
+
+    it("an invalid corrected_duration falls through to call_length", () => {
+      for (const bad of [0, -5, "abc", null, Number.NaN, ""]) {
+        const call = tomorrow({ started_at: "2026-10-02T21:50:00Z", corrected_duration: bad, call_length: 9 });
+        expect(callEndedAtMs(call, LATE)).toBe(Date.parse("2026-10-02T21:59:00Z"));
+      }
+      // Numeric strings are what Bland sometimes sends.
+      expect(callEndedAtMs(tomorrow({ started_at: "2026-10-02T21:50:00Z", corrected_duration: "540" }), LATE)).toBe(Date.parse("2026-10-02T21:59:00Z"));
+    });
+
+    it("missing or malformed inputs mean now", () => {
+      expect(callEndedAtMs(tomorrow({}), LATE)).toBe(LATE);
+      expect(callEndedAtMs(tomorrow({ started_at: "2026-10-02T21:50:00Z" }), LATE)).toBe(LATE);
+      expect(callEndedAtMs(tomorrow({ corrected_duration: 540 }), LATE)).toBe(LATE);
+      expect(callEndedAtMs(tomorrow({ started_at: "not a date", corrected_duration: 540, call_length: 9 }), LATE)).toBe(LATE);
+      expect(callEndedAtMs(tomorrow({ started_at: "2026-10-02T21:50:00Z", corrected_duration: 0, call_length: "x" }), LATE)).toBe(LATE);
+    });
+
+    it("an end in the future is not trusted", () => {
+      expect(callEndedAtMs(tomorrow({ started_at: "2030-01-01T00:00:00Z", corrected_duration: 60 }), LATE)).toBe(LATE);
+      expect(callEndedAtMs(tomorrow({ started_at: "2026-10-03T13:59:00Z", corrected_duration: 3600 }), LATE)).toBe(LATE);
+      // An absurd duration (over a day) is dropped, not added.
+      expect(callEndedAtMs(tomorrow({ started_at: "2026-10-01T00:00:00Z", corrected_duration: 999_999 }), LATE)).toBe(LATE);
+    });
+
+    it("end_at is NOT used (it is the max-duration cutoff, not the real end)", async () => {
+      const call = tomorrow({ end_at: "2026-10-02T22:00:00Z" });
+      expect(callEndedAtMs(call, LATE)).toBe(LATE);
+      expect((await run(call, { nowMs: LATE })).payload.callback_requested_for).toBe("2026-10-04T19:00:00.000Z"); // from "now" (Saturday): Sunday
+    });
   });
 
   it("never fails: an unreadable property or a throwing client leaves the raw words", async () => {

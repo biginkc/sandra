@@ -180,7 +180,7 @@ describe("callback time conversion in reconciliation", () => {
       kind: "found",
       call: {
         call_id: "call-1", to: PHONE, completed: true, status: "completed", answered_by: "human",
-        end_at: ago(10 * MIN), metadata: { request_id: REQUEST_ID, idempotency_key: KEY },
+        started_at: ago(12 * MIN), corrected_duration: 120, metadata: { request_id: REQUEST_ID, idempotency_key: KEY },
         variables: { call_outcome: "callback_requested", follow_up_preference: "tomorrow afternoon" },
       },
     });

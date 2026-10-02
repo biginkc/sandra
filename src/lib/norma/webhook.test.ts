@@ -188,7 +188,7 @@ describe("callback time conversion in the webhook", () => {
   it("passes a converted time to the completion RPC", async () => {
     const { client, complete } = setupWithProperty();
     const future = new Date(Date.now() + 3 * 24 * 3_600_000);
-    const body = JSON.stringify(callbackCall("tomorrow morning", { end_at: new Date().toISOString() }));
+    const body = JSON.stringify(callbackCall("tomorrow morning", { started_at: new Date(Date.now() - 90_000).toISOString(), corrected_duration: 60 }));
     const result = await handleBlandCallWebhook(req(body, sign(body)), { client, secret: SECRET });
     expect(result.status).toBe(200);
     const payload = complete.mock.calls[0]![0].p_payload;

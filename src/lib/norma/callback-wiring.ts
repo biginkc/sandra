@@ -9,14 +9,37 @@ import type { NormaCallInput, NormaOutcomeMapping } from "./outcome";
 /** The whole conversion (state lookup + parse + optional AI) never delays a completion longer than this. */
 export const CALLBACK_CONVERSION_TIMEOUT_MS = 6_000;
 
-function completedAtMs(call: NormaCallInput, nowMs: number): number {
+const MAX_CALL_SECONDS = 24 * 60 * 60;
+const CLOCK_SKEW_MS = 5 * 60_000;
+
+/** A positive, finite number from a number or numeric string (Bland sends both); else null. */
+function positiveNumber(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * When the call actually ended, the reference for "tomorrow", "in 2 hours" and
+ * "never in the past". `end_at` is NOT used: Bland's `end_at` is the max-duration
+ * cutoff, not the real end. In order:
+ *   1. `started_at` + `corrected_duration` (seconds)
+ *   2. `started_at` + `call_length` (minutes) x 60
+ *   3. now
+ * A missing or malformed input, or an end that would be in the future, skips
+ * that step. Never throws.
+ */
+export function callEndedAtMs(call: NormaCallInput, nowMs: number): number {
   const record = call as Record<string, unknown>;
-  for (const key of ["end_at", "completed_at"]) {
-    const value = record[key];
-    if (typeof value === "string") {
-      const ms = Date.parse(value);
-      // A usable completion time is real and not in the future.
-      if (Number.isFinite(ms) && ms <= nowMs + 5 * 60_000) return ms;
+  const startedText = record.started_at;
+  const started = typeof startedText === "string" ? Date.parse(startedText) : NaN;
+  if (Number.isFinite(started) && started <= nowMs + CLOCK_SKEW_MS) {
+    const seconds = positiveNumber(record.corrected_duration);
+    const minutes = positiveNumber(record.call_length);
+    const candidates = [seconds !== null ? seconds * 1000 : null, minutes !== null ? minutes * 60_000 : null];
+    for (const duration of candidates) {
+      if (duration === null || duration > MAX_CALL_SECONDS * 1000) continue;
+      const end = started + duration;
+      if (end <= nowMs + CLOCK_SKEW_MS) return end;
     }
   }
   return nowMs;
@@ -54,7 +77,7 @@ export async function withConvertedCallbackTime(
           : {};
       const converted = await resolveCallbackTime({
         variables,
-        completedAtMs: completedAtMs(deps.call, nowMs),
+        completedAtMs: callEndedAtMs(deps.call, nowMs),
         nowMs,
         state: property?.state ?? null,
         provider: deps.provider ?? null,
