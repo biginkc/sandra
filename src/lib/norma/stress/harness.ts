@@ -90,6 +90,8 @@ export class Harness {
   readonly trace = new Trace();
   readonly leads = new Map<string, LeadCtx>();
   readonly dispatchEvals: DispatchEval[] = [];
+  /** The error behind each 500 a webhook answered, for diagnosis. */
+  readonly webhook500Causes: string[] = [];
   readonly inflightDispatch = new Map<string, boolean[]>();
   readonly hooks: OpHook[] = [];
   readonly bland: FakeBland;
@@ -116,6 +118,10 @@ export class Harness {
           secret: WEBHOOK_SECRET,
           callbackTimeProvider: this.provider,
         });
+        if (response.status === 500) {
+          const last = [...this.reports].reverse().find((x) => x.surface === "norma_webhook");
+          this.webhook500Causes.push(last?.message ?? "unknown");
+        }
         return response;
       },
     });
@@ -243,8 +249,9 @@ export class Harness {
     }
   }
 
-  reconcile(opts: { includeNeedsReview?: boolean; actor?: string } = {}): Promise<ReconcileSummary> {
+  async reconcile(opts: { includeNeedsReview?: boolean; actor?: string } = {}): Promise<ReconcileSummary> {
     const actor = opts.actor ?? "reconcile";
+    await this.syncClock();
     return reconcileNormaCalls({
       client: this.client(actor),
       bland: createBlandClient(BLAND_CONFIG, this.bland.fetch),
@@ -255,7 +262,8 @@ export class Harness {
     });
   }
 
-  slackDrain(): Promise<NormaNotificationSummary> {
+  async slackDrain(): Promise<NormaNotificationSummary> {
+    await this.syncClock();
     return drainNormaNotifications({
       client: this.client("slack"),
       post: this.slack.post,
@@ -334,6 +342,7 @@ export class Harness {
    * route's runSoftphoneSweep is not exported, so this is its SQL equivalent.
    */
   async staleSweep(actor = "stale-sweep"): Promise<number> {
+    await this.syncClock();
     const cutoff = new Date(this.nowMs() - 30 * 60 * 1000).toISOString();
     const { rows } = await this.scratch.pool.query<{ id: string }>(
       "select id from public.sequence_enrollments where status = 'paused' and pause_reason = 'call_in_progress' and updated_at < $1 order by updated_at limit 200",

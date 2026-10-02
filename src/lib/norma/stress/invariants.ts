@@ -107,6 +107,12 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
   const reqsByProperty = new Map<string, Req[]>();
   for (const r of requests) reqsByProperty.set(r.property_id, [...(reqsByProperty.get(r.property_id) ?? []), r]);
 
+  // ===== [db] no deadlocks anywhere (a victim's work is aborted: a lost webhook, a failed click) ====
+  for (const e of h.trace.events) {
+    const d = e.detail as { code?: string; detail?: string; where?: string } | undefined;
+    if (d?.code === "40P01") v("db", `deadlock in ${e.actor} ${e.what}: ${String(d.detail).replace(/\s+/g, " ")} @ ${String(d.where).replace(/\s+/g, " ").slice(0, 700)}`);
+  }
+
   // ===== [1] one call per request, one open request per lead =================
   const openByProperty = new Map<string, Set<string>>();
   for (const a of audit.filter((x) => x.tbl === "norma_call_requests")) {
@@ -184,7 +190,9 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
           v("3", `request ${r.id} (${r.outcome}): ${rowsForTask.length} tasks (expected exactly 1)`);
         }
         const t = rowsForTask[0];
-        if (t) {
+        // On a do-not-contact lead the task is read-only: a review task opened before the
+        // lock stays as it was, so its title/due are not those of the final outcome.
+        if (t && !dncLocked(r.property_id)) {
           if (t.status !== "open") v("3", `request ${r.id}: its follow-up task is ${t.status}, not open`);
           if (t.assignee_id !== r.callback_assignee_id || t.assignee_id !== h.world.assignee) v("3", `request ${r.id}: task assignee ${t.assignee_id}`);
           const title = String(t.title);
@@ -235,7 +243,10 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
     const want = wantStatus[w.flavor];
     if (want !== undefined && w.status !== want) v("4", `webhook ${w.flavor} answered ${w.status}, expected ${want}`);
     if (["no_metadata", "mismatch_request_id", "mismatch_key", "mismatch_number"].includes(w.flavor) && w.status !== 200) v("4", `webhook ${w.flavor} answered ${w.status}, expected an ignored 200`);
-    if (w.status === 500 && !opts.allowWebhook500) v("4", `webhook ${w.flavor} for ${w.requestId} answered 500 (infrastructure failure with no fault injected)`);
+    if (w.status === 500 && !opts.allowWebhook500) {
+      const why = [...new Set(h.webhook500Causes)].join(" | ");
+      v("4", `webhook ${w.flavor} for ${w.requestId} answered 500 (infrastructure failure with no fault injected): ${why}`);
+    }
   }
 
   // ===== [5] pause ownership and preservation (every transition) =============
@@ -309,7 +320,9 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
     for (const a of rows) {
       if (completed) {
         const n = a.new_row!;
-        if (n.status !== "completed" || n.outcome !== completed.outcome || n.completed_at !== completed.completed_at || n.bland_call_id !== completed.bland_call_id) {
+        // completed_at is not compared across rows: the virtual clock shifts stored times between audit rows
+        // (the guard trigger itself rejects any real change to it).
+        if (n.status !== "completed" || n.outcome !== completed.outcome || n.completed_at === null || n.bland_call_id !== completed.bland_call_id) {
           v("6", `request ${r.id}: a completed request changed (${completed.status}/${completed.outcome} -> ${n.status}/${n.outcome})`);
         }
       } else if (a.new_row?.status === "completed") completed = a.new_row;

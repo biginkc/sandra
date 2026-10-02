@@ -23,13 +23,19 @@ const SOURCE_URL = requireLoopbackPostgresUrl(
   process.env.NORMA_STRESS_SOURCE_DB_URL ?? process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
 
-const MIGRATIONS = [
+const ALL_MIGRATIONS = [
   "20261002020000_norma_call_requests.sql",
   "20261002030000_norma_m2_hardening.sql",
   "20261002040000_norma_m2_review_fixes.sql",
   "20261002050000_norma_dnc_lock_task_writes.sql",
   "20261002060000_norma_create_request_serialize.sql",
+  "20261002070000_norma_lock_order.sql",
 ];
+
+// NORMA_STRESS_EXCLUDE_MIGRATIONS (comma-separated file names) leaves later fix
+// migrations out, to prove a regression test fails without its fix.
+const excluded = new Set((process.env.NORMA_STRESS_EXCLUDE_MIGRATIONS ?? "").split(",").map((x) => x.trim()).filter(Boolean));
+const MIGRATIONS = ALL_MIGRATIONS.filter((m) => !excluded.has(m));
 
 const withDb = (url: string, name: string) => {
   const u = new URL(url);
@@ -104,6 +110,18 @@ begin
   end if;
   return new;
 end $$;
+-- Deterministic interleavings: a connection that sets stress.delay_request_ms (or
+-- stress.delay_enrollment_ms) sleeps
+-- inside its row update, AFTER the row is locked and before any later lock is
+-- taken (named a_* so it fires before the other BEFORE UPDATE triggers).
+create function stress.delay_fn() returns trigger language plpgsql as $$
+declare v text := current_setting('stress.delay_' || tg_argv[0] || '_ms', true);
+begin
+  if coalesce(v, '') <> '' then perform pg_sleep(v::numeric / 1000.0); end if;
+  return new;
+end $$;
+create trigger a_stress_delay before update on public.sequence_enrollments for each row execute function stress.delay_fn('enrollment');
+create trigger a_stress_delay before update on public.norma_call_requests for each row execute function stress.delay_fn('request');
 create trigger stress_fault before insert on public.norma_notifications for each row execute function stress.fault_fn();
 create trigger stress_fault before insert on public.tasks for each row when (new.source_key like 'norma_call:%') execute function stress.fault_fn();
 `;
@@ -182,13 +200,9 @@ export async function createScratchDb(): Promise<Scratch> {
           `update public.norma_enrollment_pauses set created_at = created_at - $1::interval, released_at = released_at - $1::interval`,
           [iv],
         );
-        await c.query(
-          `update public.sequence_enrollments set updated_at = updated_at - $1::interval, enrolled_at = enrolled_at - $1::interval`,
-          [iv],
-        );
         await c.query(`update public.tasks set due_at = due_at - $1::interval where source_key like 'norma_call:%'`, [iv]);
         await c.query("commit");
-        return;
+        break;
       } catch (error) {
         await c.query("rollback").catch(() => undefined);
         const code = (error as { code?: string }).code;
@@ -197,6 +211,23 @@ export async function createScratchDb(): Promise<Scratch> {
       } finally {
         c.release();
       }
+    }
+    // The stale-call sweep is the only reader of enrollment times, and only of
+    // call_in_progress pauses. They are shifted one row per statement: a bulk
+    // update would hold many enrollment locks at once and could itself deadlock
+    // with a multi-row worker, which is a harness artefact, not a Norma bug.
+    const c = await pool.connect();
+    try {
+      await c.query("set session_replication_role = replica");
+      const { rows } = await c.query<{ id: string }>(
+        "select id from public.sequence_enrollments where status = 'paused' and pause_reason = 'call_in_progress' order by id",
+      );
+      for (const row of rows) {
+        await c.query("update public.sequence_enrollments set updated_at = updated_at - $2::interval where id = $1 and status = 'paused' and pause_reason = 'call_in_progress'", [row.id, iv]);
+      }
+    } finally {
+      await c.query("set session_replication_role = origin").catch(() => undefined);
+      c.release();
     }
   };
 
