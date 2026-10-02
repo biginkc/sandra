@@ -1,5 +1,6 @@
 "use client";
 
+import type { PropertySelection, SelectionFilters } from "@/lib/prospects/select-all";
 import { ChevronDownIcon, LockKeyhole } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -436,6 +437,15 @@ export function ProspectsTable({
   };
 
   const selectedIds = () => Array.from(selectedInScope);
+  const allMatchingFilters: SelectionFilters = {
+    search: search.length === 0 ? null : search,
+    blockStack,
+    imported: importedParam,
+    origin: "search_page",
+  };
+  /** Select-all-matching sends the filters (re-resolved server-side), never the id list. */
+  const selectionArg = (): PropertySelection =>
+    selectAllMatching ? { filters: allMatchingFilters } : selectedIds();
 
   /**
    * Shared post-action handler: show a toast, keep failed rows selected so
@@ -468,7 +478,7 @@ export function ProspectsTable({
     const ids = selectedIds();
     if (ids.length === 0) return;
     startTransition(async () => {
-      const result = await callAction(assignLeadsBulk(ids, userId), {
+      const result = await callAction(assignLeadsBulk(selectionArg(), userId), {
         fallbackMessage: "Could not assign selected prospects",
       });
       if (result.ok) {
@@ -481,7 +491,7 @@ export function ProspectsTable({
     const ids = selectedIds();
     if (ids.length === 0) return;
     startTransition(async () => {
-      const result = await callAction(addPropertiesToListBulk(ids, listId), {
+      const result = await callAction(addPropertiesToListBulk(selectionArg(), listId), {
         fallbackMessage: "Could not add to list",
       });
       if (result.ok) finishBulk("Added", result.data);
@@ -493,7 +503,7 @@ export function ProspectsTable({
     if (ids.length === 0) return;
     startTransition(async () => {
       const result = await callAction(
-        removePropertiesFromListBulk(ids, listId),
+        removePropertiesFromListBulk(selectionArg(), listId),
         { fallbackMessage: "Could not remove from list" },
       );
       if (result.ok) finishBulk("Removed", result.data);
@@ -504,7 +514,7 @@ export function ProspectsTable({
     const ids = selectedIds();
     if (ids.length === 0) return;
     startTransition(async () => {
-      const result = await callAction(applyTagBulk(ids, tagId), {
+      const result = await callAction(applyTagBulk(selectionArg(), tagId), {
         fallbackMessage: "Could not apply tag",
       });
       if (result.ok) finishBulk("Tagged", result.data);
@@ -553,7 +563,7 @@ export function ProspectsTable({
       return;
     }
     startTransition(async () => {
-      const result = await callAction(deletePropertiesBulk(ids), {
+      const result = await callAction(deletePropertiesBulk(selectionArg()), {
         fallbackMessage: "Could not delete prospects",
       });
       if (result.ok) {
@@ -832,7 +842,9 @@ export function ProspectsTable({
 
       <BulkSmsModal
         open={showBulkSms}
-        propertyIds={selectedIds()}
+        propertyIds={selectAllMatching ? [] : selectedIds()}
+        filterArgs={selectAllMatching ? allMatchingFilters : undefined}
+        selectionCount={selectedInScope.size}
         onClose={() => setShowBulkSms(false)}
         onQueued={() => {
           onClearAllSelection();

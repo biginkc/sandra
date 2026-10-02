@@ -81,7 +81,7 @@ describe("bulk-sms workflow provenance and ad-hoc re-check", () => {
     job("adhoc-c", "ad_hoc_bulk_sms", ["p1", "lead-after-freeze", "p2"]);
     const out = await bulkSmsWorkflow({ jobId: "job-1" });
     expect(h.queueSmsBatch.mock.calls[0][1].propertyIds).toEqual(["p1", "p2"]);
-    expect(out).toMatchObject({ queued: 2, skipped: 1 });
+    expect(out).toMatchObject({ queued: 2, skipped: 0, skippedLeads: 1 });
   });
 
   it("saved campaign: the frozen audience is sent as-is, even with a promoted recipient (exempt)", async () => {
@@ -96,7 +96,7 @@ describe("bulk-sms workflow provenance and ad-hoc re-check", () => {
     const out = await bulkSmsWorkflow({ jobId: "job-1" });
     expect(h.queueSmsBatch.mock.calls[0][1].propertyIds).toEqual(["p1"]);
     expect(h.queueSmsBatch.mock.calls[0][1].opts.campaignSource).toBe("ad_hoc_bulk_sms");
-    expect(out.skipped).toBe(1);
+    expect(out).toMatchObject({ skipped: 0, skippedLeads: 1 });
   });
 
   it("provenance comes from the campaign row: a forged 'ad_hoc_bulk_sms' on a saved campaign does not change it", async () => {

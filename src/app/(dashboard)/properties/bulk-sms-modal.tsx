@@ -1,5 +1,6 @@
 "use client";
 
+import type { PropertySelection, SelectionFilters } from "@/lib/prospects/select-all";
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -39,6 +40,10 @@ type Category = { category: string; count: number };
 type Props = {
   open: boolean;
   propertyIds: string[];
+  /** Select-all-matching: the server re-resolves these filters; no id list is sent. */
+  filterArgs?: SelectionFilters;
+  /** Size of the selection when `filterArgs` is used (display and defaults only). */
+  selectionCount?: number;
   onClose: () => void;
   onQueued: (succeeded: number) => void;
 };
@@ -137,7 +142,18 @@ export function computeDrain(args: {
   };
 }
 
-export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
+export function BulkSmsModal({
+  open,
+  propertyIds,
+  filterArgs,
+  selectionCount,
+  onClose,
+  onQueued,
+}: Props) {
+  const selection: PropertySelection = filterArgs
+    ? { filters: filterArgs }
+    : propertyIds;
+  const selectionSize = filterArgs ? (selectionCount ?? 0) : propertyIds.length;
   const router = useRouter();
   const [categories, setCategories] = useState<Category[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>("");
@@ -185,19 +201,22 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
 
   // Stable key so the count-fetch effect doesn't re-run on every parent render
   // even if the parent passes a fresh array reference each time.
-  const propertyIdsKey = useMemo(() => propertyIds.join(","), [propertyIds]);
+  const propertyIdsKey = useMemo(
+    () => (filterArgs ? `filters:${JSON.stringify(filterArgs)}` : propertyIds.join(",")),
+    [filterArgs, propertyIds],
+  );
 
   // Skip-contacted defaults ON for >50 selections per the locked plan rule.
   // Re-derive the default whenever the selection identity changes — render
   // path, no synchronous setState-in-effect (which the project's lint rule
   // flags as cascading-render risk).
   const [skipContacted, setSkipContacted] = useState<boolean>(
-    propertyIds.length > SKIP_DEFAULT_THRESHOLD,
+    selectionSize > SKIP_DEFAULT_THRESHOLD,
   );
   const [skipContactedKey, setSkipContactedKey] = useState<string>(propertyIdsKey);
   if (skipContactedKey !== propertyIdsKey) {
     setSkipContactedKey(propertyIdsKey);
-    setSkipContacted(propertyIds.length > SKIP_DEFAULT_THRESHOLD);
+    setSkipContacted(selectionSize > SKIP_DEFAULT_THRESHOLD);
   }
 
   // Contacted-count: fetched on open. We reset to `null` inside the async
@@ -228,10 +247,10 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
         setSelectedCategory(result.data[0]?.category ?? "");
       }
     });
-    countAlreadyContacted(propertyIds).then((result) => {
+    countAlreadyContacted(selection).then((result) => {
       if (result.ok) setContactedCount(result.data);
     });
-    assessBulkSmsAudience(propertyIds).then((result) => {
+    assessBulkSmsAudience(selection).then((result) => {
       if (result.ok) setAssessment(result.data);
     });
     listDeliveryOptions().then((result) => {
@@ -260,7 +279,7 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
   // size so the button isn't disabled by a slow fetch.
   const textableCount =
     assessment === null
-      ? propertyIds.length
+      ? selectionSize
       : assessment.mobile + (includeUnknown ? assessment.unknown : 0);
 
   const drain = useMemo(
@@ -312,7 +331,7 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
         : { ...baseOpts, body: customBody.trim() };
 
     startTransition(async () => {
-      const result = await callAction(bulkQueueSms(propertyIds, opts), {
+      const result = await callAction(bulkQueueSms(selection, opts), {
         fallbackMessage: "Bulk SMS failed",
       });
       if (!result.ok) {
@@ -384,8 +403,8 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>
-            Bulk SMS — {propertyIds.length} prospect
-            {propertyIds.length === 1 ? "" : "s"}
+            Bulk SMS — {selectionSize} prospect
+            {selectionSize === 1 ? "" : "s"}
           </DialogTitle>
         </DialogHeader>
 

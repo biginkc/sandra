@@ -44,22 +44,19 @@ import {
   type ClassifyInput,
 } from "@/lib/dialer/eligibility";
 
-import { filterSelectFragment } from "@/lib/prospects/filter-to-supabase";
 import type { FilterBlock } from "@/lib/prospects/filter-schema";
 import { resolveProspectEligibility } from "@/lib/prospects/eligibility";
 import {
   AD_HOC_BULK_SMS_SOURCE,
   filterToProspectIds,
 } from "@/lib/messaging/prospect-only-guard";
+import { parseQueryOrigin, type QueryOrigin } from "@/lib/prospects/search-scope";
 import {
-  SEARCH_SELECT_ALL_CAP,
-  buildScopedQuery,
-  mapSearchError,
-  parseQueryOrigin,
-  resolveIncludeMessages,
-  runWithSearchFallback,
-  type QueryOrigin,
-} from "@/lib/prospects/search-scope";
+  selectAllMatching,
+  selectionFilters,
+  type PropertySelection,
+  type SelectAllResult,
+} from "@/lib/prospects/select-all";
 
 export async function listSmsTemplateCategories(): Promise<
   Result<{ category: string; count: number }[]>
@@ -97,17 +94,37 @@ export async function listSmsTemplateCategories(): Promise<
  * (and who's excluded) before confirming. Landlines never queue;
  * unknowns queue only with the modal's opt-in toggle.
  */
+/**
+ * Resolve a selection to ids on the server. Explicit checkbox ids pass through
+ * (the per-action guards re-check them); a select-all-matching selection is
+ * re-resolved from its filters, so no id list round-trips through the client.
+ */
+async function resolveSelectionIds(
+  selection: PropertySelection,
+): Promise<Result<{ ids: string[]; skippedLeads: number }>> {
+  const filters = selectionFilters(selection);
+  if (!filters) return ok({ ids: selection as string[], skippedLeads: 0 });
+  const resolved = await selectAllMatching(filters);
+  if (!resolved.ok) return resolved;
+  return ok({
+    ids: resolved.data.eligibleIds,
+    skippedLeads: resolved.data.skippedLeads,
+  });
+}
+
 export async function assessBulkSmsAudience(
-  propertyIds: string[],
+  selection: PropertySelection,
 ): Promise<Result<AudienceLineTypeAssessment & { skippedLeads: number }>> {
   try {
     const supabase = await createClient();
+    const resolved = await resolveSelectionIds(selection);
+    if (!resolved.ok) return resolved;
     // Same prospect-only guard as bulkQueueSms so the modal counts match what
     // will actually queue; leads in the selection are reported, not assessed.
-    const guard = await filterToProspectIds(supabase, propertyIds);
+    const guard = await filterToProspectIds(supabase, resolved.data.ids);
     return ok({
       ...(await assessAudienceLineTypes(supabase, guard.prospectIds)),
-      skippedLeads: guard.skippedLeads,
+      skippedLeads: guard.skippedLeads + resolved.data.skippedLeads,
     });
   } catch (e) {
     reportError(e, { tags: { surface: "assess_bulk_sms_audience" } });
@@ -432,11 +449,27 @@ async function markDeferredBulkSmsStartFailed(args: {
 }
 
 export async function bulkQueueSms(
-  propertyIds: string[],
+  selection: PropertySelection,
   opts: BulkSmsQueueOpts,
 ): Promise<Result<BulkSmsOutcome>> {
   try {
     const supabase = await createClient();
+    const providedFor = resolveProvidedCampaignId(opts);
+    // A select-all-matching selection is ad-hoc only: saved campaigns send
+    // their frozen audience as explicit ids.
+    if (providedFor && !Array.isArray(selection)) {
+      return {
+        ok: false,
+        error: {
+          code: "VALIDATION",
+          message: "Saved campaigns send their frozen audience, not a filter selection.",
+        },
+      };
+    }
+    const resolvedSelection = await resolveSelectionIds(selection);
+    if (!resolvedSelection.ok) return resolvedSelection;
+    const propertyIds = resolvedSelection.data.ids;
+    const filterSkippedLeads = resolvedSelection.data.skippedLeads;
 
     // Resolve the current session user for audit/job ownership only.
     // `{{my_first_name}}` is a fixed outbound sender persona now.
@@ -502,13 +535,13 @@ export async function bulkQueueSms(
       // Ad-hoc sends act on prospects only; the freeze below receives the
       // FILTERED ids (not the original selection).
       const guard = await filterToProspectIds(supabase, propertyIds);
-      adHocSkippedLeads = guard.skippedLeads;
+      adHocSkippedLeads = guard.skippedLeads + filterSkippedLeads;
       if (guard.prospectIds.length === 0) {
         return ok({
           succeeded: 0,
           skipped: 0,
           failed: [],
-          skippedLeads: guard.skippedLeads,
+          skippedLeads: guard.skippedLeads + filterSkippedLeads,
         });
       }
       const campaignResult = await resolveAdHocBulkSmsCampaign(supabase, {
@@ -1038,153 +1071,8 @@ export async function getAllMatchingProspectSelection(args: {
   imported?: "today" | null;
   /** Defaults to 'legacy'. Anything but the literal 'search_page' is legacy. */
   origin?: QueryOrigin;
-}): Promise<
-  Result<{
-    eligibleIds: string[];
-    eligibleCount: number;
-    dncLockedCount: number;
-    matchedCount: number;
-    /** Matched rows that are not prospects (leads etc.) and so were skipped. */
-    skippedLeads: number;
-  }>
-> {
-  try {
-    const supabase = await createClient();
-    const origin = parseQueryOrigin(args.origin);
-
-    let includeMessages = false;
-    if (origin === "search_page") {
-      try {
-        includeMessages = await resolveIncludeMessages();
-      } catch {
-        return {
-          ok: false,
-          error: {
-            code: "SEARCH_ACCESS_UNAVAILABLE",
-            message: "Membership access could not be verified. Please retry.",
-          },
-        };
-      }
-    }
-
-    const filterSelect = filterSelectFragment(args.blockStack);
-    const propertiesSelect = [
-      "id, source_import_id, source_imported_at",
-      filterSelect,
-    ]
-      .filter(Boolean)
-      .join(", ");
-    const searchOrigin = origin === "search_page";
-    let addressFallback = false;
-
-    const failure = (error: { code?: string | null; message?: string }) => {
-      const mapped = searchOrigin ? mapSearchError(error) : null;
-      return {
-        ok: false as const,
-        error: {
-          code: mapped?.code ?? "SELECT_ALL_FAILED",
-          message: mapped?.message ?? error.message ?? "Select all failed",
-        },
-      };
-    };
-
-    // Search origin: one exact head count first so an over-cap selection is
-    // rejected before paging (each 1k keyset page is one RPC evaluation).
-    if (searchOrigin) {
-      const counted = await runWithSearchFallback(async (opts) => {
-        const { builder } = await buildScopedQuery(supabase, {
-          origin,
-          select: propertiesSelect,
-          selectOpts: { count: "exact", head: true },
-          search: args.search,
-          blockStack: args.blockStack,
-          imported: args.imported ?? null,
-          includeMessages,
-          addressFallback: opts.addressFallback,
-        });
-        return (await builder) as {
-          count: number | null;
-          error: { code?: string | null; message?: string } | null;
-        };
-      });
-      addressFallback = counted.degraded;
-      if (counted.result.error) return failure(counted.result.error);
-      if ((counted.result.count ?? 0) > SEARCH_SELECT_ALL_CAP) {
-        return {
-          ok: false,
-          error: {
-            code: "SELECT_ALL_TOO_LARGE",
-            message: `That is ${(counted.result.count ?? 0).toLocaleString()} results, over the ${SEARCH_SELECT_ALL_CAP.toLocaleString()} limit for selecting everything. Narrow the search or filters, or select rows on the page.`,
-          },
-        };
-      }
-    }
-
-    // PostgREST silently caps results at 1 000 rows (db-max-rows default).
-    // Use a deterministic ID keyset. Offset pagination can skip or duplicate
-    // rows when a prospect changes state while a >1K selection is loading.
-    const PAGE = 1000;
-    const allIds: string[] = [];
-    let cursor: string | null = null;
-    for (;;) {
-      const { builder } = await buildScopedQuery(supabase, {
-        origin,
-        select: propertiesSelect,
-        search: args.search,
-        blockStack: args.blockStack,
-        imported: args.imported ?? null,
-        includeMessages,
-        addressFallback,
-      });
-      let query = builder;
-      if (cursor) query = query.gt("id", cursor);
-      const { data, error } = await query
-        .order("id", { ascending: true })
-        .limit(PAGE);
-      if (error) return failure(error);
-      const rows = (data ?? []) as unknown as Array<{ id: string }>;
-      allIds.push(...rows.map((row) => row.id));
-      if (searchOrigin && allIds.length > SEARCH_SELECT_ALL_CAP) {
-        return {
-          ok: false,
-          error: {
-            code: "SELECT_ALL_TOO_LARGE",
-            message: `More than ${SEARCH_SELECT_ALL_CAP.toLocaleString()} results. Narrow the search or filters, or select rows on the page.`,
-          },
-        };
-      }
-      if (rows.length < PAGE) break;
-      const nextCursor = rows.at(-1)?.id ?? null;
-      if (!nextCursor || nextCursor === cursor) {
-        return {
-          ok: false,
-          error: {
-            code: "SELECT_ALL_FAILED",
-            message: "Prospect selection did not advance safely.",
-          },
-        };
-      }
-      cursor = nextCursor;
-    }
-
-    const resolved = await resolveProspectEligibility(
-      supabase,
-      allIds,
-      "selection",
-    );
-    return ok({
-      eligibleIds: resolved.eligibleIds,
-      eligibleCount: resolved.eligibleIds.length,
-      dncLockedCount: resolved.dncLockedCount,
-      matchedCount: allIds.length,
-      skippedLeads: resolved.exclusions.filter(
-        (item) => item.reason === "not_found_or_not_prospect",
-      ).length,
-    });
-  } catch (e) {
-    reportError(e, { tags: { surface: "get_all_matching_prospect_ids" } });
-    return errFromUnknown(e, "SELECT_ALL_FAILED");
-  }
+}): Promise<Result<SelectAllResult>> {
+  return selectAllMatching(args);
 }
 
 export async function getAllMatchingProspectIds(args: {
@@ -1209,11 +1097,14 @@ export async function getAllMatchingProspectIds(args: {
  * Empty input short-circuits to ok(0) without a DB roundtrip.
  */
 export async function countAlreadyContacted(
-  propertyIds: string[],
+  selection: PropertySelection,
 ): Promise<Result<number>> {
-  if (propertyIds.length === 0) return ok(0);
+  if (Array.isArray(selection) && selection.length === 0) return ok(0);
   try {
     const supabase = await createClient();
+    const resolved = await resolveSelectionIds(selection);
+    if (!resolved.ok) return resolved;
+    const propertyIds = resolved.data.ids;
     // Same prospect-only guard as bulkQueueSms (counts match the real send).
     const { prospectIds } = await filterToProspectIds(supabase, propertyIds);
     const CHUNK = 250;

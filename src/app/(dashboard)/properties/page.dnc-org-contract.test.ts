@@ -2,7 +2,10 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const source = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
-const selectAllSource = readFileSync(new URL("./actions.ts", import.meta.url), "utf8");
+const selectAllSource = readFileSync(
+  new URL("../../../lib/prospects/select-all.ts", import.meta.url),
+  "utf8",
+);
 const countSource = readFileSync(new URL("./_actions/count.ts", import.meta.url), "utf8");
 const scopeSource = readFileSync(
   new URL("../../../lib/prospects/search-scope.ts", import.meta.url),
