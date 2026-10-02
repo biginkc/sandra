@@ -71,10 +71,11 @@ export function referenceMatch(
   if (Array.from(q).length < 3 || orgs.size === 0) return result;
 
   const qLower = q.toLowerCase();
+  const rawDigits = digitsOnly(q).length;
   let qd = digitsOnly(q);
   if (qd.length === 11 && qd.startsWith("1")) qd = qd.slice(1); // coordinator ruling: drop US country code
-  // phone branch only for "structured" queries: >=3 digits and digits are >=70% of the normalized query
-  const structured = qd.length >= 3 && 10 * qd.length >= 7 * Array.from(q).length;
+  // phone branch only for "structured" queries: >=3 digits and digits are >=70% of the whitespace-free normalized query (raw count, before leading-1 strip)
+  const structured = rawDigits >= 3 && 10 * rawDigits >= 7 * Array.from(q.replace(/\s+/g, "")).length && qd.length >= 3;
   const live = (p: OracleProperty) =>
     p.deleted_at === null && orgs.has(p.org_id) && !(opts.excludeTraining && p.is_training);
   const propsById = new Map(fixture.properties.map((p) => [p.id, p]));
