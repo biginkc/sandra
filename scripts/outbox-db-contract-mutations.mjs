@@ -60,6 +60,11 @@ function runContract(phase, extra = [], fixture = null) {
   } finally { rmSync(scratch, { recursive: true, force: true }); }
 }
 
+export async function platformConfigFor(db, transport, { apiUrl, anonKey, postgresMajor }) {
+  const { postgrest_major: postgrestMajor, postgrest_reason: postgrestReason, postgrest_observed_major: postgrestObservedMajor } = await readPostgrestMajor(db);
+  return platformFingerprint(apiUrl, anonKey, postgresMajor, transport, { postgrestMajor, postgrestReason, postgrestObservedMajor });
+}
+
 async function prepareFixture() {
   const runDir = mkdtempSync(path.join(os.tmpdir(), 'w4w-fixture-'));
   try {
@@ -153,9 +158,12 @@ export async function runMutations(output, phase) {
       try {
         const version = (await db.query('SHOW server_version_num')).rows[0].server_version_num;
         await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
-        const postgrestMajor = await readPostgrestMajor(db);
+        platformConfig = await platformConfigFor(db, undefined, {
+          apiUrl: process.env.TEST_SUPABASE_URL,
+          anonKey: process.env.TEST_SUPABASE_ANON_KEY,
+          postgresMajor: String(Math.floor(Number(version) / 10000)),
+        });
         await db.query('COMMIT');
-        platformConfig = await platformFingerprint(process.env.TEST_SUPABASE_URL, process.env.TEST_SUPABASE_ANON_KEY, String(Math.floor(Number(version) / 10000)), undefined, { postgrestMajor });
       } catch (error) { await db.query('ROLLBACK').catch(() => {}); failure = error; }
     }
     await db.end();
