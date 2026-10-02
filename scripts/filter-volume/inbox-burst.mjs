@@ -20,7 +20,7 @@ async function setState(state) {
   execFileSync("node", ["scripts/filter-volume/revert-cache-migrations.mjs"], { stdio: "ignore" });
   if (state !== "A") {
     await assertSandboxTarget();
-    const fp = "supabase/migrations/20261002110055_properties_filter_cache_fast_path.sql";
+    const fp = "supabase/migrations/20261002140000_properties_filter_cache_fast_path.sql";
     if (state === "B") fs.renameSync(fp, fp + ".off");
     if (state === "E") fs.copyFileSync(process.env.FP_E, fp);
     if (state === "E2") fs.copyFileSync(process.env.FP_E2, fp);

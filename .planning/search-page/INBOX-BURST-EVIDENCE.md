@@ -28,7 +28,7 @@ D has the lowest p99 of B/C/D in both runs on every burst and the lowest p50 on 
 refresh work for first-reply rows; D replaces the 7-lookup recompute with one indexed guarded UPDATE. D is still above A on p50 (inherent: a denormalised cache must update
 the property row on the first reply, and the global-DNC shared barrier and row lock remain).
 
-## Correctness of D (migration 20261002110055)
+## Correctness of D (migration 20261002140000)
 Monotonic OR-only flag updates computed from the new rows (never from a snapshot read); order = shared global-DNC barrier -> row locks. (a) guarded UPDATE, (b) SHARE lock rows that look
 covered, (c) guarded UPDATE re-applied under a fresh snapshot. Lists/tags: unguarded sorted-deduplicated merge + count (unique (property_id, list_id|tag_id) makes it identical to the
 full refresh). Clearing changes keep the full refresh. Tests: trigger suite 18/18 (+33 total local) incl. both-orders clearer-vs-inserter race and a randomised 6-worker concurrent

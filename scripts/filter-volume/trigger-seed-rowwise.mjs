@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import pg from "pg";
 import { assertSandboxTarget, SANDBOX } from "./assert-sandbox-target.mjs";
-const CLI = process.env.SUPABASE_CLI; const FP = "supabase/migrations/20261002110055_properties_filter_cache_fast_path.sql";
+const CLI = process.env.SUPABASE_CLI; const FP = "supabase/migrations/20261002140000_properties_filter_cache_fast_path.sql";
 async function setState(state) {
   await assertSandboxTarget(); execFileSync("node", ["scripts/filter-volume/revert-cache-migrations.mjs"], { stdio: "ignore" });
   if (state === "B") fs.renameSync(FP, FP + ".off");
