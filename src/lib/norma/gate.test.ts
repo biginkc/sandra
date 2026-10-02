@@ -36,6 +36,7 @@ describe("dispatch gate", () => {
     };
     expect(readNormaBlandConfig(ok)).toMatchObject({ pathwayVersion: 17, timeoutMs: 10_000, baseUrl: "https://api.bland.ai" });
     expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_PATHWAY_VERSION: "0.0.17" })).toBeNull();
+    expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_PATHWAY_VERSION: undefined })).toMatchObject({ pathwayVersion: 3 });
     expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_WEBHOOK_URL: "http://x.test" })).toBeNull();
     expect(readNormaBlandConfig({ ...ok, BLAND_API_KEY: "" })).toBeNull();
   });

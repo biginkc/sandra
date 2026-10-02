@@ -10,6 +10,8 @@ import { loadNormaWrongNumbers, selectVoicePhone, toUsVoiceE164 } from "./voice-
 
 type Client = SupabaseClient<Database>;
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /** Typed outcomes the (later) UI renders. `ok` is true only when a call is queued/placed. */
 export type RequestNormaCallResult =
   | { ok: true; code: "calling"; requestId: string }
@@ -42,6 +44,8 @@ export async function requestNormaCallCore(
   repContext: string | null,
   deps: RequestNormaCallDeps,
 ): Promise<RequestNormaCallResult> {
+  if (!UUID_PATTERN.test(propertyId)) return { ok: false, code: "lead_not_found" };
+
   const userId = await deps.getUserId();
   if (!userId) return { ok: false, code: "unauthenticated" };
 

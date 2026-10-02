@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { mapBlandCallToOutcome, parseCallbackTime } from "./outcome";
+import {
+  BLAND_EXTRACTION_VARIABLES,
+  CALL_OUTCOME_TOKEN_MAP,
+  composeSummary,
+  mapBlandCallToOutcome,
+  parseCallbackTime,
+  parseCallOutcomeToken,
+} from "./outcome";
 
 const NOW = Date.parse("2026-10-02T12:00:00Z");
 const human = (variables: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) => ({
@@ -8,31 +15,63 @@ const human = (variables: Record<string, unknown> = {}, extra: Record<string, un
 });
 const map = (call: Record<string, unknown>) => mapBlandCallToOutcome(call, NOW);
 
-describe("outcome mapping", () => {
+describe("call_outcome token", () => {
+  it("takes the leading token, case-insensitive, punctuation stripped", () => {
+    expect(parseCallOutcomeToken("callback_requested - seller asked for after 5")).toBe("callback_requested");
+    expect(parseCallOutcomeToken("  Not_Interested: said stop")).toBe("not_interested");
+    expect(parseCallOutcomeToken('"WRONG_PERSON."')).toBe("wrong_person");
+    expect(parseCallOutcomeToken("")).toBe("");
+    expect(parseCallOutcomeToken(42)).toBe("");
+  });
+});
+
+describe("outcome mapping table (live pathway v3)", () => {
   it.each([
-    ["no-answer status", { completed: true, status: "no-answer", answered_by: null, variables: {} }, "no_answer"],
-    ["no-answer answered_by", { completed: true, status: "completed", answered_by: "no-answer", variables: {} }, "no_answer"],
-    ["voicemail hung up on", { completed: true, status: "completed", answered_by: "voicemail", variables: {} }, "no_answer"],
-    ["callback", human({ call_outcome: "callback_requested" }), "callback_requested"],
-    ["reached no follow-up", human({ call_outcome: "reached", follow_up_preference: "none" }), "reached_no_callback"],
-    ["reached + follow-up", human({ call_outcome: "Reached", follow_up_preference: "tomorrow afternoon" }), "callback_requested"],
-    ["not interested", human({ call_outcome: "not_interested" }), "not_interested"],
-    ["stop calling -> not_interested", human({ call_outcome: "stop calling" }), "not_interested"],
-    ["wrong number", human({ call_outcome: "wrong_number" }), "wrong_number"],
-  ])("%s", (_name, call, expected) => {
-    expect(map(call).outcome).toBe(expected);
+    ["do_not_contact", "not_interested"],
+    ["not_interested", "not_interested"],
+    ["wrong_person", "wrong_number"],
+    ["callback_requested", "callback_requested"],
+    ["qualified_review_requested", "reached_no_callback"],
+    ["interested_incomplete", "reached_no_callback"],
+    ["human_requested", "reached_no_callback"],
+  ])("human answered, %s -> %s", (token, expected) => {
+    expect(map(human({ call_outcome: `${token}. seller said so` })).outcome).toBe(expected);
+  });
+
+  it("voicemail token with a voicemail-answered call -> no_answer", () => {
+    expect(map({ completed: true, status: "completed", answered_by: "voicemail", variables: { call_outcome: "voicemail" } }).outcome).toBe("no_answer");
   });
 
   it.each([
-    ["not completed", { ...human({ call_outcome: "reached" }), completed: false }],
+    ["no-answer status", { completed: true, status: "no-answer", answered_by: null, variables: {} }],
+    ["no-answer answered_by", { completed: true, status: "completed", answered_by: "no-answer", variables: {} }],
+  ])("Bland-confirmed %s -> no_answer even without a pathway outcome", (_n, call) => {
+    expect(map(call).outcome).toBe("no_answer");
+  });
+
+  it("the table is exactly the contract, no guessed values", () => {
+    expect(CALL_OUTCOME_TOKEN_MAP).toEqual({
+      do_not_contact: "not_interested", not_interested: "not_interested", wrong_person: "wrong_number",
+      voicemail: "no_answer", callback_requested: "callback_requested",
+      qualified_review_requested: "reached_no_callback", interested_incomplete: "reached_no_callback",
+      human_requested: "reached_no_callback", already_sold: "unknown", unclear: "unknown",
+    });
+    for (const guessed of ["declined", "stop", "qualified", "interested", "completed", "wrong_number", "reached"]) {
+      expect(map(human({ call_outcome: guessed })).outcome).toBe("unknown");
+    }
+  });
+
+  it.each([
+    ["already_sold", human({ call_outcome: "already_sold" })],
+    ["unclear", human({ call_outcome: "unclear" })],
+    ["unrecognised token", human({ call_outcome: "banana split" })],
+    ["missing outcome", human({})],
+    ["not completed", { ...human({ call_outcome: "callback_requested" }), completed: false }],
     ["busy", { completed: true, status: "busy", variables: {} }],
     ["failed", { completed: true, status: "failed", variables: {} }],
-    ["human but no call_outcome", human({})],
-    ["human, unrecognised outcome", human({ call_outcome: "banana" })],
-    ["answered_by unknown", { ...human({ call_outcome: "reached" }), answered_by: "unknown" }],
+    ["answered_by unknown", { ...human({ call_outcome: "human_requested" }), answered_by: "unknown" }],
     ["no-answer contradicts outcome", { completed: true, status: "no-answer", variables: { call_outcome: "callback_requested" } }],
-    ["human but outcome says no_answer", human({ call_outcome: "no_answer" })],
-    ["stop + follow-up conflict", human({ call_outcome: "not_interested", follow_up_preference: "call me monday" })],
+    ["human answered but outcome voicemail", human({ call_outcome: "voicemail" })],
     ["empty payload", {}],
   ])("unknown: %s", (_name, call) => {
     const mapped = map(call);
@@ -40,29 +79,54 @@ describe("outcome mapping", () => {
     expect(mapped.reason).toBeTruthy();
   });
 
-  it("callback payload carries raw text, validated time and timezone", () => {
-    const mapped = map(human({
-      call_outcome: "callback_requested", follow_up_preference: "after 5", callback_time_iso: "2026-10-03T15:00:00-05:00",
-      callback_timezone: "America/Chicago",
-    }));
+  it("callback: raw text kept, no ISO time, timezone left in the raw text", () => {
+    const mapped = map(human({ call_outcome: "callback_requested - asked", follow_up_preference: "Tomorrow after 5pm Central" }));
     expect(mapped.payload).toMatchObject({
-      callback_requested_for: "2026-10-03T20:00:00.000Z", callback_timezone: "America/Chicago", callback_raw: "after 5", summary: "s",
+      callback_requested_for: null, callback_timezone: null, callback_raw: "Tomorrow after 5pm Central",
     });
   });
 
-  it("an unparseable or past callback time is dropped, not guessed", () => {
-    expect(parseCallbackTime("tomorrow", NOW)).toBeNull();
-    expect(parseCallbackTime("2026-10-03T15:00:00", NOW)).toBeNull(); // no offset
-    expect(parseCallbackTime("2026-10-01T15:00:00Z", NOW)).toBeNull(); // past
-    expect(parseCallbackTime("2027-10-01T15:00:00Z", NOW)).toBeNull(); // too far
-    expect(map(human({ call_outcome: "callback", callback_time_iso: "soon" })).payload.callback_requested_for).toBeNull();
+  it("callback with no follow-up text stores no raw text", () => {
+    expect(map(human({ call_outcome: "callback_requested" })).payload.callback_raw).toBeNull();
   });
 
-  it("qualification keeps only capped scalars", () => {
-    const mapped = map(human({ call_outcome: "reached", a: "x".repeat(900), b: 3, c: true, d: { nested: 1 }, e: [1] }));
-    const q = mapped.payload.qualification as Record<string, unknown>;
-    expect((q.a as string).length).toBe(500);
-    expect(q).toMatchObject({ b: 3, c: true });
-    expect("d" in q || "e" in q).toBe(false);
+  it("only callbacks carry callback fields; reached outcomes keep follow_up_preference in qualification only", () => {
+    const mapped = map(human({ call_outcome: "human_requested", follow_up_preference: "call me monday" }));
+    expect(mapped.payload.callback_raw).toBeUndefined();
+    expect((mapped.payload.qualification as Record<string, string>).follow_up_preference).toBe("call me monday");
+  });
+
+  it("parseCallbackTime stays strict if the due-now constant is ever flipped", () => {
+    expect(parseCallbackTime("tomorrow", NOW)).toBeNull();
+    expect(parseCallbackTime("2026-10-03T15:00:00", NOW)).toBeNull();
+    expect(parseCallbackTime("2026-10-01T15:00:00Z", NOW)).toBeNull();
+    expect(parseCallbackTime("2026-10-03T15:00:00-05:00", NOW)).toBe("2026-10-03T20:00:00.000Z");
+  });
+});
+
+describe("qualification and summary", () => {
+  const all = Object.fromEntries(BLAND_EXTRACTION_VARIABLES.map((k) => [k, `${k} value`]));
+
+  it("stores every extraction variable in qualification", () => {
+    const q = map(human({ ...all, call_outcome: "human_requested ok" })).payload.qualification as Record<string, unknown>;
+    for (const key of BLAND_EXTRACTION_VARIABLES) expect(q).toHaveProperty(key);
+  });
+
+  it("summary = Bland summary + the four displayed answers", () => {
+    const summary = composeSummary("Bland says hi", all)!;
+    expect(summary.split("\n")).toEqual([
+      "Bland says hi",
+      "Motivation and timing: motivation_and_timeline value",
+      "Condition: condition_and_financing value",
+      "Asking price and flexibility: price_expectation value",
+      "Decision-makers: ownership_and_occupancy value",
+    ]);
+    expect(composeSummary(null, {})).toBeNull();
+  });
+
+  it("long values are capped and non-scalars dropped", () => {
+    const q = map(human({ call_outcome: "human_requested", a: "x".repeat(5000), n: { nested: 1 } })).payload.qualification as Record<string, unknown>;
+    expect((q.a as string).length).toBe(2000);
+    expect("n" in q).toBe(false);
   });
 });

@@ -5,6 +5,7 @@ import { fakeClient, PHONE } from "./test-helpers";
 
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 
+const PROPERTY_ID = "55555555-5555-4555-8555-555555555555";
 const ASSIGNEE = "44444444-4444-4444-8444-444444444444";
 const ENV = { NORMA_DISPATCH_ENABLED: "true", NORMA_ALLOWED_NUMBERS: PHONE, NORMA_CALLBACK_ASSIGNEE_ID: ASSIGNEE };
 
@@ -15,7 +16,7 @@ function setup(opts: {
 } = {}) {
   const createRpc = vi.fn().mockReturnValue([opts.create ?? { outcome: "created", request_id: "req-1", idempotency_key: "key-1", block_reason: null }]);
   const session = fakeClient({
-    properties: opts.property === null ? [] : [{ id: "p1", org_id: "o1", is_training: false, homeowner_contact_id: "c1", ...opts.property }],
+    properties: opts.property === null ? [] : [{ id: PROPERTY_ID, org_id: "o1", is_training: false, homeowner_contact_id: "c1", ...opts.property }],
     contacts: [{ id: "c1", phone_1: PHONE, phone_2: null, phone_3: null, ...opts.contact }],
   });
   const admin = fakeClient(
@@ -24,7 +25,7 @@ function setup(opts: {
   );
   const dispatch = opts.dispatch ?? vi.fn().mockResolvedValue({ status: "dispatched", callId: "c" });
   const run = () =>
-    requestNormaCallCore("p1", " hello ", {
+    requestNormaCallCore(PROPERTY_ID, " hello ", {
       getUserId: async () => (opts.userId === undefined ? "user-1" : opts.userId),
       sessionClient: session.client,
       adminClient: admin.client,
@@ -49,6 +50,16 @@ describe("requestNormaCall result codes", () => {
       expect(await t.run()).toEqual({ ok: false, code: "callback_assignee_not_configured" });
       expect(t.createRpc).not.toHaveBeenCalled();
     }
+  });
+
+  it("a non-UUID property id is refused before any lookup", async () => {
+    const t = setup();
+    for (const bad of ["p1", "", "../x", "5555555555554555855555555555555"]) {
+      expect(await requestNormaCallCore(bad, null, {
+        getUserId: async () => "user-1", sessionClient: fakeClient({}).client, adminClient: fakeClient({}).client, env: ENV, dispatch: t.dispatch,
+      })).toEqual({ ok: false, code: "lead_not_found" });
+    }
+    expect(t.createRpc).not.toHaveBeenCalled();
   });
 
   it("lead not found / invisible to the session", async () => {

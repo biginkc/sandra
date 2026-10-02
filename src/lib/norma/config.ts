@@ -39,6 +39,12 @@ export type NormaBlandConfig = {
   timeoutMs: number;
 };
 
+/**
+ * The LIVE pathway's integer version (agent snapshot 0.0.4). Staging 0.0.17 has
+ * no published integer version, so the pin defaults to 3 until a human changes
+ * NORMA_BLAND_PATHWAY_VERSION.
+ */
+export const DEFAULT_NORMA_PATHWAY_VERSION = 3;
 export const DEFAULT_BLAND_BASE_URL = "https://api.bland.ai";
 export const DEFAULT_BLAND_TIMEOUT_MS = 10_000;
 
@@ -48,7 +54,8 @@ export function readNormaBlandConfig(env: NormaEnv = process.env): NormaBlandCon
   const pathwayId = env.NORMA_BLAND_PATHWAY_ID?.trim();
   const fromNumber = env.NORMA_BLAND_FROM_NUMBER?.trim();
   const webhookUrl = env.NORMA_BLAND_WEBHOOK_URL?.trim();
-  const version = Number(env.NORMA_BLAND_PATHWAY_VERSION?.trim());
+  const versionText = env.NORMA_BLAND_PATHWAY_VERSION?.trim();
+  const version = versionText ? Number(versionText) : DEFAULT_NORMA_PATHWAY_VERSION;
   if (!apiKey || !pathwayId || !fromNumber || !webhookUrl) return null;
   if (!Number.isInteger(version) || version < 0) return null;
   if (!/^https:\/\//.test(webhookUrl)) return null;
