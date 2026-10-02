@@ -121,7 +121,8 @@ beforeEach(() => {
 describe("export table", () => {
   it("the module's exports are exactly the audited Search entry points (add one => add a table row)", () => {
     const exported = Object.keys(actions).sort();
-    const audited = [...TABLE.map((c) => c.name), ...NON_SELECTION, ...["searchCassForSkipTrace"]].filter((v, i, a) => a.indexOf(v) === i).sort();
+    const audited = [...TABLE.map((c) => c.name), ...NON_SELECTION].sort();
+    expect(new Set(audited).size).toBe(audited.length); // no duplicate rows
     expect(exported).toEqual(audited);
   });
 });
@@ -222,5 +223,33 @@ describe("bulk SMS is ad-hoc only and freezes prospects only", () => {
     const out = await actions.searchBulkSms({ selection: { kind: "ids", ids: [P1] }, opts: { campaignId: "c1", paceSeconds: 8 } } as never);
     expect(out).toMatchObject({ ok: false, error: { code: "INVALID_REQUEST" } });
     expect(h.sms).not.toHaveBeenCalled();
+  });
+});
+
+describe("nothing eligible", () => {
+  const onlyLead = { kind: "ids", ids: [LEAD] } as const;
+
+  it("CASS (menu and skip-trace dialog) reports leads, not DNC, when only leads were selected", async () => {
+    const menu = await actions.searchCass({ selection: onlyLead, requestKey: key } as never);
+    expect(menu).toMatchObject({ ok: false, error: { code: "ONLY_LEADS_SELECTED" } });
+    const dialog = await actions.searchCassForSkipTrace({ selection: onlyLead, requestKey: key } as never);
+    expect(dialog).toMatchObject({ ok: false, error: { code: "ONLY_LEADS_SELECTED" } });
+    expect(h.verify).not.toHaveBeenCalled();
+  });
+
+  it("CASS still reports DNC_LOCKED when the selection is only locked prospects", async () => {
+    const out = await actions.searchCass({ selection: { kind: "ids", ids: [LOCKED_PROSPECT] }, requestKey: key } as never);
+    expect(out).toMatchObject({ ok: false, error: { code: "DNC_LOCKED" } });
+  });
+
+  it("a custom tag is not created when no prospect is selected", async () => {
+    const out = await actions.searchCustomTag({ selection: onlyLead, name: "wave" } as never);
+    expect(out).toMatchObject({ ok: true, data: { tag: null, outcome: { succeeded: 0, skippedLeads: 1 } } });
+    expect(h.customTag).not.toHaveBeenCalled();
+  });
+
+  it("matchedCount for explicit ids counts distinct ids (duplicates collapse)", async () => {
+    const out = await actions.searchSelectAllCount({ selection: { kind: "ids", ids: [P1, P1, P2, LEAD] } } as never);
+    expect(out).toMatchObject({ ok: true, data: { matchedCount: 3, eligibleCount: 2, skippedLeads: 1 } });
   });
 });

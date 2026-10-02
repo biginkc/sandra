@@ -56,6 +56,7 @@ import {
   removePropertiesFromListBulk as removeFromListWorker,
   verifyPropertiesBulk as verifyWorker,
   type BulkOutcome,
+  type BulkTagRow,
 } from "../leads/actions";
 import { createPromoteLeadsJob } from "../properties/promote-leads-actions";
 import {
@@ -76,6 +77,7 @@ type Resolved = {
   prospectIds: string[];
   skippedLeads: number;
   dncLockedIds: string[];
+  /** Filters: every row the page lists. Ids: the number of DISTINCT ids submitted (after dedupe). */
   matchedCount: number;
   kind: SearchSelection["kind"];
 };
@@ -124,6 +126,23 @@ async function resolveSearchSelection(selection: SearchSelection): Promise<Resul
     matchedCount: all.data.matchedCount,
     kind: "filters",
   });
+}
+
+/** Why nothing is actionable, as an error a UI can tell apart: leads vs DNC-locked vs plain empty. */
+function nothingEligible(r: Resolved) {
+  if (r.dncLockedIds.length > 0 && r.prospectIds.length === 0) {
+    return { ok: false as const, error: { code: "DNC_LOCKED", message: DNC_LOCK_MESSAGE } };
+  }
+  if (r.skippedLeads > 0) {
+    return {
+      ok: false as const,
+      error: {
+        code: "ONLY_LEADS_SELECTED",
+        message: "The selected rows are leads, not prospects. This action applies to prospects only.",
+      },
+    };
+  }
+  return { ok: false as const, error: { code: "NO_ELIGIBLE_PROSPECTS", message: "No eligible prospects in the selection." } };
 }
 
 async function resolve(selection: SearchSelection): Promise<Result<Resolved>> {
@@ -274,13 +293,21 @@ export async function searchDelete(input: { selection: SearchSelection }) {
 }
 
 /** Create a custom tag and apply it to the selection's prospects. */
-export async function searchCustomTag(input: { selection: SearchSelection; name: string; color?: string | null }) {
+export async function searchCustomTag(input: {
+  selection: SearchSelection;
+  name: string;
+  color?: string | null;
+}): Promise<Result<{ tag: BulkTagRow | null; outcome: SearchBulkOutcome }>> {
   try {
     const { selection, rest } = parseInput(input, ["name", "color"]);
     const name = str(rest.name, "name");
     const color = rest.color === undefined || rest.color === null ? null : str(rest.color, "color");
     const r = await resolve(selection);
     if (!r.ok) return r;
+    // Never create a tag that would apply to nothing.
+    if (r.data.prospectIds.length === 0) {
+      return ok({ tag: null, outcome: report(r.data, { succeeded: 0, skipped: 0, failed: [] }) });
+    }
     const tagged = await customTagWorker({ name, color, propertyIds: r.data.prospectIds });
     if (!tagged.ok) return tagged;
     return ok({ ...tagged.data, outcome: report(r.data, tagged.data.outcome) });
@@ -552,9 +579,7 @@ export async function searchCass(input: { selection: SearchSelection; requestKey
     const requestKey = str(rest.requestKey, "requestKey");
     const r = await resolve(selection);
     if (!r.ok) return r;
-    if (r.data.prospectIds.length === 0) {
-      return { ok: false as const, error: { code: "DNC_LOCKED", message: DNC_LOCK_MESSAGE } };
-    }
+    if (r.data.prospectIds.length === 0) return nothingEligible(r.data);
     const out = await verifyWorker(r.data.prospectIds, requestKey);
     return out.ok
       ? ok({ ...out.data, eligibleCount: r.data.prospectIds.length, lockedCount: r.data.dncLockedIds.length, skippedLeads: r.data.skippedLeads })
@@ -593,9 +618,7 @@ export async function searchCassForSkipTrace(input: { selection?: SearchSelectio
     if (!r.ok) return r;
     const supabase = await createClient();
     const el = await resolveProspectEligibility(supabase, r.data.prospectIds, "skip_trace");
-    if (el.eligibleIds.length === 0) {
-      return { ok: false as const, error: { code: "DNC_LOCKED", message: DNC_LOCK_MESSAGE } };
-    }
+    if (el.eligibleIds.length === 0) return nothingEligible(r.data);
     const pre = await preflightSkipTraceWorker(el.eligibleIds);
     if (!pre.ok) return pre;
     const toVerify = pre.data.cassVerificationPropertyIds;
