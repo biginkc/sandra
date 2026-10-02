@@ -82,7 +82,7 @@ export function createPgSupabase(pool: Pool, options: PgClientOptions): Supabase
       return { data, error: null };
     } catch (error) {
       const code = (error as { code?: string }).code;
-      options.trace?.add(options.actor, "end", `${info.kind}:${info.name}`, { error: (error as Error).message, code });
+      options.trace?.add(options.actor, "end", `${info.kind}:${info.name}`, { error: (error as Error).message, code, detail: (error as { detail?: string }).detail, where: (error as { where?: string }).where });
       await options.after?.(info, { ok: false, code });
       return { data: null, error: { message: (error as Error).message, code } };
     }

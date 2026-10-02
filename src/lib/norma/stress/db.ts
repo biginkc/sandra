@@ -28,6 +28,7 @@ const MIGRATIONS = [
   "20261002030000_norma_m2_hardening.sql",
   "20261002040000_norma_m2_review_fixes.sql",
   "20261002050000_norma_dnc_lock_task_writes.sql",
+  "20261002060000_norma_create_request_serialize.sql",
 ];
 
 const withDb = (url: string, name: string) => {
