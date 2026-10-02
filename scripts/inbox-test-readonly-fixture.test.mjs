@@ -1,9 +1,11 @@
 import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createClient } from "@supabase/supabase-js";
 import pg from "pg";
 import {
   ACK_ENV,
@@ -14,6 +16,7 @@ import {
   TEST_MODE_ENV,
   TEST_REF,
   assertSafeTarget,
+  deleteOwnedRows,
   deleteOwnedRowsForTest,
   residueCheck,
   snapshotDatabase,
@@ -201,6 +204,47 @@ function receipt(runId) {
   return JSON.parse(readFileSync(path.join(workdir, `lease-test-ro-fixture-${runId}.json`), "utf8"));
 }
 
+function authAdmin() {
+  return createClient(authStubUrl, "local-test-service-role-key", {
+    auth: { persistSession: false, autoRefreshToken: false },
+  }).auth.admin;
+}
+
+async function createUnrelatedMembership(label) {
+  const ids = { organization: randomUUID(), user: randomUUID(), membership: randomUUID() };
+  const admin = authAdmin();
+  await db.query("insert into public.organizations(id,name) values ($1,$2)", [ids.organization, `Residue proof unrelated ${label}`]);
+  await admin.createUser({
+    id: ids.user,
+    email: `residue-proof-unrelated-${label}@bmhgroupkc.com`,
+    email_confirm: false,
+  });
+  await db.query(`
+    insert into public.memberships(
+      id,user_id,org_id,role,access_status,access_expires_at,deletion_prepared_at
+    ) values ($1,$2,$3,'owner','active',null,null)
+  `, [ids.membership, ids.user, ids.organization]);
+  return { ids, admin };
+}
+
+async function deleteUnrelatedMembership(unrelated) {
+  await db.query("begin");
+  let ownerGuardDisabled = false;
+  try {
+    await db.query("alter table public.memberships disable trigger trg_hugo_membership_owner_guard");
+    ownerGuardDisabled = true;
+    await db.query("delete from public.memberships where id=$1", [unrelated.ids.membership]);
+    if (ownerGuardDisabled) await db.query("alter table public.memberships enable trigger trg_hugo_membership_owner_guard");
+    await db.query("delete from public.organizations where id=$1", [unrelated.ids.organization]);
+    await db.query("commit");
+  } catch (error) {
+    if (ownerGuardDisabled) await db.query("alter table public.memberships enable trigger trg_hugo_membership_owner_guard").catch(() => {});
+    await db.query("rollback").catch(() => {});
+    throw error;
+  }
+  await unrelated.admin.deleteUser(unrelated.ids.user);
+}
+
 before(async () => {
   workdir = mkdtempSync(path.join(tmpdir(), "sandra-inbox-ro-fixture-test-"));
   await startDisposableSupabase();
@@ -317,18 +361,150 @@ test("T5 reset detection: filenode/stat diagnostics fail status, while the holde
   assert.deepEqual(await ownedRows(created.ids.organization, created.ids.user), { orgs: "0", users: "0", memberships: "0", messages: "0" });
 });
 
-test("T6 cleanup: zero residue passes, but a mutation that skips one delete fails the residue proof", async () => {
-  const created = await create("t6-cleanup");
-  const rec = receipt("t6-cleanup");
+test("A migration in the create-to-remove window does not fail cleanup", async () => {
+  const runId = "residue-window-a-migration";
+  const created = await create(runId);
+  const migrationTable = "public.zz_fixture_intervening";
+  const migrationVersion = "99990101000000";
+  await db.query(`create table ${migrationTable}(id int primary key)`);
+  await db.query(
+    "insert into supabase_migrations.schema_migrations(version,name,statements) values ($1,$2,$3::text[])",
+    [migrationVersion, "99990101000000_fixture_intervening", ["create table public.zz_fixture_intervening(id int primary key);"]],
+  );
+  try {
+    const remove = cli(["--remove", "--run-id", runId]);
+    assert.equal(remove.status, 0, remove.stderr || remove.stdout);
+    assert.deepEqual(await ownedRows(created.ids.organization, created.ids.user), { orgs: "0", users: "0", memberships: "0", messages: "0" });
+  } finally {
+    await db.query("delete from supabase_migrations.schema_migrations where version=$1", [migrationVersion]);
+    await db.query(`drop table if exists ${migrationTable}`);
+  }
+});
+
+test("B unrelated row churn in the create-to-remove window does not fail cleanup", async () => {
+  const runId = "residue-window-b-churn";
+  const created = await create(runId);
+  const unrelatedOrgId = randomUUID();
+  const unrelatedMessageId = randomUUID();
+  await db.query("insert into public.organizations(id,name) values ($1,$2)", [unrelatedOrgId, "Residue proof unrelated churn"]);
+  await db.query(`
+    insert into public.messages(id,org_id,channel,direction,status,provider,body)
+    values ($1,$2,'sms','inbound','received','internal','residue proof unrelated row')
+  `, [unrelatedMessageId, unrelatedOrgId]);
+  await db.query("update public.messages set body=$1 where id=$2", ["residue proof unrelated row updated", unrelatedMessageId]);
+  try {
+    const remove = cli(["--remove", "--run-id", runId]);
+    assert.equal(remove.status, 0, remove.stderr || remove.stdout);
+    assert.deepEqual(await ownedRows(created.ids.organization, created.ids.user), { orgs: "0", users: "0", memberships: "0", messages: "0" });
+  } finally {
+    await db.query("delete from public.messages where id=$1", [unrelatedMessageId]);
+    await db.query("delete from public.organizations where id=$1", [unrelatedOrgId]);
+  }
+});
+
+test("C a skipped owned delete fails both the owned-key and whole-DB residue guards", async () => {
+  const runId = "residue-window-c-skipped-delete";
+  const created = await create(runId);
+  const rec = receipt(runId);
   const mutationDb = new Client({ connectionString: dbUrl });
   await mutationDb.connect();
-  await deleteOwnedRowsForTest(mutationDb, rec, { skipMessageId: rec.ids.messages.scheduled });
-  const failed = await residueCheck(mutationDb, rec);
+  let failed;
+  try {
+    const preDeleteSnapshot = await snapshotDatabase(mutationDb, { ids: rec.ids });
+    const preDeleteOwnedKeys = new Set(preDeleteSnapshot.owned_row_keys);
+    await deleteOwnedRowsForTest(mutationDb, rec, { skipMessageId: rec.ids.messages.scheduled });
+    failed = await residueCheck(mutationDb, rec, { preDeleteSnapshot, preDeleteOwnedKeys });
+  } finally {
+    await mutationDb.end();
+  }
   assert.equal(failed.pass, false);
-  assert.ok(failed.failures.some(value => value.includes("owned rows remain") || value.includes("non-owned row count changed")));
-  await mutationDb.end();
-  const remove = cli(["--remove", "--run-id", "t6-cleanup"]);
+  assert.ok(failed.failures.some(value => value.startsWith("owned row remains: public.messages:")));
+  assert.ok(failed.failures.includes("owned rows remain: public.messages:1"));
+  const remove = cli(["--remove", "--run-id", runId]);
   assert.equal(remove.status, 0, remove.stderr || remove.stdout);
+  assert.deepEqual(await ownedRows(created.ids.organization, created.ids.user), { orgs: "0", users: "0", memberships: "0", messages: "0" });
+});
+
+test("D an owned-id row created after S_pre fails the whole-DB owned scan", async () => {
+  const runId = "residue-window-d-owned-churn";
+  const created = await create(runId);
+  const rec = receipt(runId);
+  const derivedMessageId = randomUUID();
+  const mutationDb = new Client({ connectionString: dbUrl });
+  await mutationDb.connect();
+  let failed;
+  try {
+    const preDeleteSnapshot = await snapshotDatabase(mutationDb, { ids: rec.ids });
+    const preDeleteOwnedKeys = new Set(preDeleteSnapshot.owned_row_keys);
+    await mutationDb.query(`
+      insert into public.messages(id,org_id,channel,direction,status,provider,body)
+      values ($1,$2,'sms','inbound','received','internal','derived during cleanup')
+    `, [derivedMessageId, rec.ids.organization]);
+    await deleteOwnedRowsForTest(mutationDb, rec, { skipMessageId: null });
+    failed = await residueCheck(mutationDb, rec, { preDeleteSnapshot, preDeleteOwnedKeys });
+  } finally {
+    await mutationDb.query("delete from public.messages where id=$1", [derivedMessageId]).catch(() => {});
+    await mutationDb.end();
+  }
+  assert.equal(failed.pass, false);
+  assert.ok(failed.failures.includes("owned rows remain: public.messages:1"));
+  const remove = cli(["--remove", "--run-id", runId]);
+  assert.equal(remove.status, 0, remove.stderr || remove.stdout);
+  assert.deepEqual(await ownedRows(created.ids.organization, created.ids.user), { orgs: "0", users: "0", memberships: "0", messages: "0" });
+});
+
+test("E an owned row changed instead of being removed fails the cleanup delta", async () => {
+  const runId = "residue-window-e-owned-change";
+  const created = await create(runId);
+  const rec = receipt(runId);
+  const mutationDb = new Client({ connectionString: dbUrl });
+  await mutationDb.connect();
+  let failed;
+  try {
+    const preDeleteSnapshot = await snapshotDatabase(mutationDb, { ids: rec.ids });
+    const preDeleteOwnedKeys = new Set(preDeleteSnapshot.owned_row_keys);
+    await mutationDb.query("update public.messages set body=$1 where id=$2", ["mutated after S_pre", rec.ids.messages.scheduled]);
+    await deleteOwnedRowsForTest(mutationDb, rec, { skipMessageId: rec.ids.messages.scheduled });
+    failed = await residueCheck(mutationDb, rec, { preDeleteSnapshot, preDeleteOwnedKeys });
+  } finally {
+    await mutationDb.end();
+  }
+  assert.equal(failed.pass, false);
+  assert.ok(failed.cleanup_delta.failures.some(value => value.startsWith("content hash changed: public.messages:")));
+  const remove = cli(["--remove", "--run-id", runId]);
+  assert.equal(remove.status, 0, remove.stderr || remove.stdout);
+  assert.deepEqual(await ownedRows(created.ids.organization, created.ids.user), { orgs: "0", users: "0", memberships: "0", messages: "0" });
+});
+
+test("F an allowlisted counter advance in the cleanup window passes", async () => {
+  const runId = "residue-window-f-counter";
+  const created = await create(runId);
+  const rec = receipt(runId);
+  const unrelated = await createUnrelatedMembership("counter");
+  const mutationDb = new Client({ connectionString: dbUrl });
+  await mutationDb.connect();
+  let residue;
+  try {
+    const preDeleteSnapshot = await snapshotDatabase(mutationDb, { ids: rec.ids });
+    const preDeleteOwnedKeys = new Set(preDeleteSnapshot.owned_row_keys);
+    await mutationDb.query("update public.memberships set my_leads_revision=my_leads_revision+1 where id=$1", [unrelated.ids.membership]);
+    await deleteOwnedRows(mutationDb, rec, authAdmin());
+    residue = await residueCheck(mutationDb, rec, { preDeleteSnapshot, preDeleteOwnedKeys });
+    assert.equal(residue.pass, true, residue.failures.join("; "));
+    assert.ok(residue.cleanup_delta.changes.some(change => change.table === "public.memberships" && change.kind === "changed"));
+    const preDecreaseSnapshot = await snapshotDatabase(mutationDb, { ids: rec.ids });
+    const preDecreaseOwnedKeys = new Set(preDecreaseSnapshot.owned_row_keys);
+    await mutationDb.query("update public.memberships set my_leads_revision=0 where id=$1", [unrelated.ids.membership]);
+    const decreased = await residueCheck(mutationDb, rec, { preDeleteSnapshot: preDecreaseSnapshot, preDeleteOwnedKeys: preDecreaseOwnedKeys });
+    assert.equal(decreased.pass, false);
+    assert.ok(decreased.failures.some(value => value.startsWith("counter decreased: public.memberships:")));
+    await mutationDb.query("update public.memberships set my_leads_revision=1 where id=$1", [unrelated.ids.membership]);
+  } finally {
+    await mutationDb.end();
+  }
+  const remove = cli(["--remove", "--run-id", runId]);
+  assert.equal(remove.status, 0, remove.stderr || remove.stdout);
+  await deleteUnrelatedMembership(unrelated);
   assert.deepEqual(await ownedRows(created.ids.organization, created.ids.user), { orgs: "0", users: "0", memberships: "0", messages: "0" });
 });
 

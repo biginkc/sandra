@@ -443,11 +443,40 @@ async function snapshotTable(db, table) {
   return { columns: table.columns, primary_key: table.primaryKey, counter, rows: byKey };
 }
 
-export async function snapshotDatabase(db) {
-  const tables = await discoverTables(db);
-  const snapshot = {};
-  for (const table of tables) snapshot[table.key] = await snapshotTable(db, table);
-  return { tables: snapshot };
+async function snapshotOwnedRowKeysFromTables(db, tables, ids) {
+  const keys = new Set();
+  for (const table of tables) {
+    const predicate = ownedPredicate(table);
+    if (!predicate) continue;
+    const key = rowKeyExpression(table, table.columns);
+    const rows = (await db.query(
+      `select ${key} as row_key from ${quoteTable(table.schema, table.name)} t where ${predicate}`,
+      [[ids.organization], [ids.user]],
+    )).rows;
+    for (const row of rows) keys.add(`${table.key}:${row.row_key}`);
+  }
+  return keys;
+}
+
+async function snapshotInReadOnlyTransaction(db, ids = null) {
+  await db.query("begin isolation level repeatable read read only");
+  try {
+    const tables = await discoverTables(db);
+    const snapshot = {};
+    for (const table of tables) snapshot[table.key] = await snapshotTable(db, table);
+    const ownedKeys = ids ? await snapshotOwnedRowKeysFromTables(db, tables, ids) : null;
+    await db.query("commit");
+    return { snapshot: { tables: snapshot }, ownedKeys };
+  } catch (error) {
+    await db.query("rollback").catch(() => {});
+    throw error;
+  }
+}
+
+export async function snapshotDatabase(db, { ids = null } = {}) {
+  const { snapshot, ownedKeys } = await snapshotInReadOnlyTransaction(db, ids);
+  if (ownedKeys) snapshot.owned_row_keys = [...ownedKeys].sort();
+  return snapshot;
 }
 
 function ownedPredicate(table) {
@@ -474,34 +503,53 @@ async function ownedCounts(db, orgId, userId) {
   return counts;
 }
 
-async function snapshotOwnedRowKeys(db, ids) {
-  const keys = new Set();
-  const tables = await discoverTables(db);
-  for (const table of tables) {
-    const predicate = ownedPredicate(table);
-    if (!predicate) continue;
-    const key = rowKeyExpression(table, table.columns);
-    const rows = (await db.query(
-      `select ${key} as row_key from ${quoteTable(table.schema, table.name)} t where ${predicate}`,
-      [[ids.organization], [ids.user]],
-    )).rows;
-    for (const row of rows) keys.add(`${table.key}:${row.row_key}`);
-  }
-  return keys;
+export async function snapshotOwnedRowKeys(db, ids) {
+  const { ownedKeys } = await snapshotInReadOnlyTransaction(db, ids);
+  return ownedKeys;
 }
 
-function compareSnapshotDelta(before, after, { allowedOwnedKeys = new Set(), allowManagedAppendOnly = false } = {}) {
+function isOwnedIdTable(table) {
+  return Boolean(table) && (
+    ANCHOR_TABLES.has(table.key)
+    || table.columns.includes("org_id")
+    || table.columns.includes("user_id")
+  );
+}
+
+function compareSnapshotDelta(
+  before,
+  after,
+  {
+    allowedOwnedKeys = new Set(),
+    allowedOwnedKinds = new Set(["added", "changed", "removed"]),
+    allowManagedAppendOnly = false,
+    failUnownedChanges = true,
+  } = {},
+) {
   const failures = [];
   const changes = [];
   const managedAppendOnlyTables = new Set();
   const beforeTables = new Set(Object.keys(before.tables));
   const afterTables = new Set(Object.keys(after.tables));
-  for (const key of beforeTables) if (!afterTables.has(key)) failures.push(`table vanished: ${key}`);
-  for (const key of afterTables) if (!beforeTables.has(key)) failures.push(`new table: ${key}`);
+  for (const key of beforeTables) {
+    if (afterTables.has(key)) continue;
+    const table = before.tables[key];
+    changes.push({ table: key, kind: "table_vanished", owned: isOwnedIdTable(table) });
+    if (failUnownedChanges || isOwnedIdTable(table)) failures.push(`table vanished: ${key}`);
+  }
+  for (const key of afterTables) {
+    if (beforeTables.has(key)) continue;
+    const table = after.tables[key];
+    changes.push({ table: key, kind: "table_added", owned: isOwnedIdTable(table) });
+    if (failUnownedChanges || isOwnedIdTable(table)) failures.push(`new table: ${key}`);
+  }
   for (const [key, beforeTable] of Object.entries(before.tables)) {
     const afterTable = after.tables[key];
     if (!afterTable) continue;
-    if (JSON.stringify(beforeTable.columns) !== JSON.stringify(afterTable.columns)) failures.push(`columns changed: ${key}`);
+    if (JSON.stringify(beforeTable.columns) !== JSON.stringify(afterTable.columns)) {
+      changes.push({ table: key, kind: "columns_changed", owned: isOwnedIdTable(beforeTable) || isOwnedIdTable(afterTable) });
+      if (failUnownedChanges || isOwnedIdTable(beforeTable) || isOwnedIdTable(afterTable)) failures.push(`columns changed: ${key}`);
+    }
     const beforeMap = new Map(Object.entries(beforeTable.rows));
     const afterMap = new Map(Object.entries(afterTable.rows));
     for (const rowKey of new Set([...beforeMap.keys(), ...afterMap.keys()])) {
@@ -517,13 +565,15 @@ function compareSnapshotDelta(before, after, { allowedOwnedKeys = new Set(), all
       changes.push({ table: key, row_key: rowKey, kind: change, owned: allowedOwnedKeys.has(identity) });
       if (SUPABASE_MANAGED_APPEND_ONLY_TABLES.has(key)) managedAppendOnlyTables.add(key);
       const managedAllowed = allowManagedAppendOnly && SUPABASE_MANAGED_APPEND_ONLY_TABLES.has(key);
+      const ownedChangeAllowed = allowedOwnedKeys.has(identity) && allowedOwnedKinds.has(change);
       const counterAdvanceAllowed = beforeTable.counter
         && COUNTER_ALLOWLIST.has(`${key}.${beforeTable.counter}`)
         && values
         && next
         && !hashesChanged
         && countersChanged;
-      if (!managedAllowed && !allowedOwnedKeys.has(identity) && !counterAdvanceAllowed) {
+      const ownedKeyMutation = allowedOwnedKeys.has(identity) && !ownedChangeAllowed;
+      if (ownedKeyMutation || (!managedAllowed && !ownedChangeAllowed && !counterAdvanceAllowed && failUnownedChanges)) {
         failures.push(`${change === "changed" ? "content hash changed" : `row ${change}`}: ${identity}`);
       }
       if (beforeTable.counter && values && next) {
@@ -545,6 +595,13 @@ function compareSnapshotDelta(before, after, { allowedOwnedKeys = new Set(), all
     changes,
     managed_append_only_tables_changed: [...managedAppendOnlyTables].sort(),
   };
+}
+
+function snapshotContainsRow(snapshot, identity) {
+  const separator = identity.indexOf(":");
+  if (separator < 0) return false;
+  const table = snapshot.tables[identity.slice(0, separator)];
+  return Boolean(table?.rows?.[identity.slice(separator + 1)]);
 }
 
 function compareSnapshots(baseline, current) {
@@ -810,23 +867,21 @@ export async function deleteOwnedRowsForTest(db, receipt, { skipMessageId }) {
   return deleteOwnedTenantRows(db, receipt, messageIds);
 }
 
-export async function residueCheck(db, receipt, { preDeleteSnapshot = null, preDeleteOwnedKeys = null } = {}) {
+export async function residueCheck(db, receipt, { preDeleteSnapshot, preDeleteOwnedKeys } = {}) {
   const current = await snapshotDatabase(db);
-  const fixtureOwnedKeys = new Set(receipt.owned_row_keys ?? []);
-  const finalDelta = compareSnapshotDelta(receipt.baseline, current, {
-    allowedOwnedKeys: fixtureOwnedKeys,
+  assert(preDeleteSnapshot?.tables, "RESIDUE_PRE_SNAPSHOT_REQUIRED", "cleanup requires a pre-delete database snapshot");
+  assert(preDeleteOwnedKeys, "RESIDUE_PRE_KEYS_REQUIRED", "cleanup requires pre-delete owned row keys");
+  const allowedOwnedKeys = new Set(preDeleteOwnedKeys);
+  const cleanupDelta = compareSnapshotDelta(preDeleteSnapshot, current, {
+    allowedOwnedKeys,
+    allowedOwnedKinds: new Set(["removed"]),
     allowManagedAppendOnly: true,
+    failUnownedChanges: false,
   });
-  const cleanupDelta = receipt.post_insert && preDeleteSnapshot
-    ? compareSnapshotDelta(receipt.post_insert, preDeleteSnapshot, {
-      allowedOwnedKeys: new Set([
-        ...fixtureOwnedKeys,
-        ...(preDeleteOwnedKeys ?? []),
-      ]),
-      allowManagedAppendOnly: true,
-    })
-    : { failures: [], changes: [], managed_append_only_tables_changed: [] };
-  const failures = [...finalDelta.failures, ...cleanupDelta.failures];
+  const missingOwnedRemovalFailures = [...allowedOwnedKeys]
+    .filter(identity => snapshotContainsRow(current, identity))
+    .map(identity => `owned row remains: ${identity}`);
+  const failures = [...cleanupDelta.failures, ...missingOwnedRemovalFailures];
   const counts = await ownedCounts(db, receipt.ids.organization, receipt.ids.user);
   for (const [table, count] of Object.entries(counts)) if (count > 0) failures.push(`owned rows remain: ${table}:${count}`);
   return {
@@ -834,11 +889,7 @@ export async function residueCheck(db, receipt, { preDeleteSnapshot = null, preD
     failures,
     snapshot: current,
     cleanup_delta: cleanupDelta,
-    residue_delta: finalDelta,
-    managed_append_only_tables_changed: [...new Set([
-      ...finalDelta.managed_append_only_tables_changed,
-      ...cleanupDelta.managed_append_only_tables_changed,
-    ])].sort(),
+    managed_append_only_tables_changed: cleanupDelta.managed_append_only_tables_changed,
   };
 }
 
@@ -943,8 +994,8 @@ async function runRemove(args, env) {
   let preDeleteOwnedKeys;
   try {
     preVerify = await verifyFixture(db, receipt, { checkLock: false });
-    preDeleteSnapshot = await snapshotDatabase(db);
-    preDeleteOwnedKeys = await snapshotOwnedRowKeys(db, receipt.ids);
+    preDeleteSnapshot = await snapshotDatabase(db, { ids: receipt.ids });
+    preDeleteOwnedKeys = new Set(preDeleteSnapshot.owned_row_keys);
     await deleteOwnedRows(db, receipt, authAdmin);
     const residue = await residueCheck(db, receipt, { preDeleteSnapshot, preDeleteOwnedKeys });
     if (!residue.pass) {

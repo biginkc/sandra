@@ -41,13 +41,17 @@ node scripts/inbox-test-readonly-fixture.mjs \
 
 `--verify` and `--cleanup` are retained as aliases for status and remove.
 Remove deletes only rows tied to the recorded marker org/user and then
-re-enumerates every non-system base table, comparing per-row collision-safe
-content hashes against the pre-create baseline. Creation and cleanup deltas
-are recorded separately. New/vanished tables, changed non-owned rows,
-remaining owned rows, and counter decreases fail the proof. Known monotonic
-owner-guard counters are checked for non-decreasing progress. Changes to
-Supabase-managed append-only tables are reported by table name rather than
-silently omitted.
+re-enumerates every non-system base table. The create proof compares the
+pre-create baseline with `post_insert`; cleanup compares a repeatable-read,
+read-only S_pre taken immediately before deletion with S_post taken
+immediately after deletion. Cleanup allows only removal of the owned keys
+present at S_pre, named Supabase-managed append-only tables, and allowlisted
+counter advances. Other shared-TEST changes are reported in the cleanup
+receipt without failing the proof; owned rows, owned-id catalog changes, and
+counter decreases still fail. The whole-database owned-id scan must return
+zero. Cleanup's `ALTER TABLE public.memberships` temporarily disables the
+owner-guard trigger inside one transaction, so it takes an exclusive lock on
+memberships briefly.
 
 Run the local mutation-first suite with:
 
@@ -57,9 +61,9 @@ npm run test:inbox-ro-fixture
 
 It creates and destroys its own disposable Supabase stack with PostgreSQL 17,
 copies and replays every repository migration, and never contacts a hosted
-database. The real local GoTrue API backs the T1 data-path client; a separate
-test-only loopback auth stub backs fixture user creation/deletion so the test
-can assert that `auth.admin.createUser({ id, email, email_confirm: false })`
-sends no password. Default receipts are outside the repository at
+database. Admin create/delete in the fixture suite is tested against a
+test-only loopback auth stub; the real GoTrue admin path is proven only by the
+TEST run. The real local GoTrue API backs the T1 data-path client. Default
+receipts are outside the repository at
 `$HOME/.sandra-inbox-fixture/` with mode 0700 (the suite uses a disposable
 0700 temp directory).
