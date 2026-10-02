@@ -12,8 +12,15 @@
 --   * a second request created while the first one's completion was in flight
 --     waited on the one-open-request index while holding locks the completion
 --     needed.
--- One order everywhere: request row -> enrollment rows -> contact -> property
--- (fn_norma_lock_lead).
+-- One order for every Norma function and the enrollment/task guard triggers:
+-- request row -> enrollment rows -> contact -> property (fn_norma_lock_lead).
+-- NOT covered: Switchboard's apply_switchboard_contact_preferences (a separate
+-- feature, not changed here) locks contact -> property -> enrollments, the
+-- reverse of this order for the enrollments. A deadlock between it and a Norma
+-- completion on the same lead is therefore possible; Postgres aborts one
+-- side (SQLSTATE 40P01) and the caller retries (a Bland webhook is redelivered
+-- and the reconciliation sweep re-runs; Switchboard resends). The stress gate
+-- proves both effects survive the retry (regress-switchboard-race).
 -- fn_norma_create_request waits out an in-flight completion first, then locks
 -- enrollments, then the property. fn_norma_complete_call locks the enrollments
 -- right after its request row. fn_norma_mark_dispatch_rejected releases the
