@@ -30,13 +30,14 @@ exit 47
       const marker = path.join(directory, 'provisioned');
       const env = { ...process.env, PATH: `${directory}:${process.env.PATH}`, HEAVY_LANE: `outbox-${phase}`, CI: '', PROVISION_MARKER: marker };
       delete env.E2E_DISPOSABLE_DATABASE;
+      delete env.GITHUB_ENV;
       const result = spawnSync('bash', [`scripts/inbox-ci/outbox-${phase}.sh`], { env, encoding: 'utf8' });
       assert.equal(result.status, 47, result.stderr);
       assert.match(readFileSync(marker, 'utf8'), /^scripts\/ci\/provision-disposable-stack\.mjs --api-port 55421 --db-port 55422/m);
 
       stub('node', '#!/bin/sh\nexit 0\n');
       const missingFlag = spawnSync('bash', [`scripts/inbox-ci/outbox-${phase}.sh`], { env, encoding: 'utf8' });
-      assert.equal(missingFlag.status, 1);
+      assert.equal(missingFlag.status, 1, missingFlag.stderr);
       assert.match(missingFlag.stderr, /Provisioner did not publish E2E_DISPOSABLE_DATABASE=1/);
     } finally {
       rmSync(directory, { recursive: true, force: true });

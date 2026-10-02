@@ -51,7 +51,11 @@ start_stack() {
   local -a inbox_exclude_args
   inbox_exclude_args=()
   while IFS= read -r arg; do inbox_exclude_args+=("$arg"); done < <(node scripts/inbox-ci/inbox-migrations.mjs --exclude-args)
-  node scripts/ci/provision-disposable-stack.mjs --api-port "$api_port" --db-port "$db_port" "${inbox_exclude_args[@]}"
+  if ((${#inbox_exclude_args[@]})); then
+    node scripts/ci/provision-disposable-stack.mjs --api-port "$api_port" --db-port "$db_port" "${inbox_exclude_args[@]}"
+  else
+    node scripts/ci/provision-disposable-stack.mjs --api-port "$api_port" --db-port "$db_port"
+  fi
   set -a
   source "$env_file"
   set +a

@@ -101,7 +101,11 @@ if [[ "${1:-}" == --preflight-only ]]; then exit 0; fi
 export GITHUB_ENV="$WORK/provision.env"
 inbox_exclude_args=()
 while IFS= read -r arg; do inbox_exclude_args+=("$arg"); done < <(node scripts/inbox-ci/inbox-migrations.mjs --exclude-args)
-node scripts/ci/provision-disposable-stack.mjs --api-port "$API_PORT" --db-port "$DB_PORT" "${inbox_exclude_args[@]}" --no-baseline-owner
+if ((${#inbox_exclude_args[@]})); then
+  node scripts/ci/provision-disposable-stack.mjs --api-port "$API_PORT" --db-port "$DB_PORT" "${inbox_exclude_args[@]}" --no-baseline-owner
+else
+  node scripts/ci/provision-disposable-stack.mjs --api-port "$API_PORT" --db-port "$DB_PORT" --no-baseline-owner
+fi
 if [[ -f "$GITHUB_ENV" ]]; then
   while IFS='=' read -r key value; do
     if [[ "$key" == E2E_LOCAL_WORKDIR ]]; then export E2E_LOCAL_WORKDIR="$value"; fi

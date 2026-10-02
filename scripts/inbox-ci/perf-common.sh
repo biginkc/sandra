@@ -32,10 +32,16 @@ perf_start() {
   local -a inbox_exclude_args
   inbox_exclude_args=()
   while IFS= read -r arg; do inbox_exclude_args+=("$arg"); done < <(node "$PERF_REPO/scripts/inbox-ci/inbox-migrations.mjs" --exclude-args)
-  node "$PERF_REPO/scripts/ci/provision-disposable-stack.mjs" \
-    --no-baseline-owner \
-    "${local_ports[@]+"${local_ports[@]}"}" \
-    "${inbox_exclude_args[@]}"
+  if ((${#inbox_exclude_args[@]})); then
+    node "$PERF_REPO/scripts/ci/provision-disposable-stack.mjs" \
+      --no-baseline-owner \
+      "${local_ports[@]+"${local_ports[@]}"}" \
+      "${inbox_exclude_args[@]}"
+  else
+    node "$PERF_REPO/scripts/ci/provision-disposable-stack.mjs" \
+      --no-baseline-owner \
+      "${local_ports[@]+"${local_ports[@]}"}"
+  fi
   while IFS='=' read -r key value; do
     case "$key" in
       E2E_LOCAL_WORKDIR|E2E_DISPOSABLE_DATABASE|TEST_SUPABASE_URL|TEST_SUPABASE_SERVICE_ROLE_KEY|E2E_CI_SUPABASE_DB_URL)

@@ -28,7 +28,7 @@ class ExitFailureTest(unittest.TestCase):
             bin_dir.mkdir()
             node = bin_dir / 'node'
             node.write_text(f'''#!/bin/bash
-if [[ "$1" == scripts/inbox-ci/inbox-migrations.mjs ]]; then
+if [[ "$1" == *scripts/inbox-ci/inbox-migrations.mjs ]]; then
   case "$2" in
     --exclude-args)
 {INBOX_EXCLUDE_LINES}

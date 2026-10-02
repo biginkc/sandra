@@ -13,7 +13,11 @@ original_env="${GITHUB_ENV:-}"
 export GITHUB_ENV="$lane_env"
 inbox_exclude_args=()
 while IFS= read -r arg; do inbox_exclude_args+=("$arg"); done < <(node scripts/inbox-ci/inbox-migrations.mjs --exclude-args)
-node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 "${inbox_exclude_args[@]}"
+if ((${#inbox_exclude_args[@]})); then
+  node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 "${inbox_exclude_args[@]}"
+else
+  node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422
+fi
 set -a
 source "$lane_env"
 set +a
