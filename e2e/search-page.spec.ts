@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { assertLocalOnlyTestEnv } from "../src/lib/testing/local-only-test-env";
 import { adminClient, DEFAULT_ORG_ID, ensureTestUser, resetTenantTables } from "./fixtures";
 
 // Search page (formerly Prospects). Three specs only, per the stress plan:
@@ -50,6 +51,9 @@ async function seed(
 
 test.describe("Search page", () => {
   test.beforeEach(async () => {
+    // Fail closed BEFORE any reset/seed: these specs destroy tenant rows, so they
+    // may only run against a disposable loopback stack (never hosted TEST).
+    assertLocalOnlyTestEnv(process.env.TEST_SUPABASE_DB_URL, process.env.TEST_SUPABASE_URL);
     const admin = adminClient();
     await resetTenantTables(admin);
     await ensureTestUser(admin);
@@ -139,18 +143,18 @@ test.describe("Search page", () => {
     await page.getByRole("checkbox", { name: "Select all prospects on this page" }).click();
     await page.getByTestId("select-all-across-pages").click();
     const banner = page.getByTestId("select-all-banner");
-    await expect(banner).toContainText("2 leads skipped");
+    await expect(banner).toContainText(/(^|\D)2 leads skipped/);
     await expect(banner).toContainText("DNC locked and excluded");
 
     await page.getByRole("button", { name: /Actions for/ }).click();
     await page.getByRole("menuitem", { name: "Bulk SMS" }).click();
     const smsDialog = page.getByRole("dialog");
-    await expect(smsDialog.getByRole("heading")).toContainText("Bulk SMS — 52 prospects");
+    await expect(smsDialog.getByRole("heading")).toHaveText(/^Bulk SMS — 52 prospects$/);
     const assessment = smsDialog.getByTestId("line-type-assessment");
     await assessment.scrollIntoViewIfNeeded();
     await expect(assessment).toContainText("Who gets texted");
     await expect(smsDialog.getByTestId("bulk-sms-skipped-leads")).toBeVisible();
-    await expect(smsDialog.getByTestId("bulk-sms-skipped-leads")).toContainText("2 leads skipped");
+    await expect(smsDialog.getByTestId("bulk-sms-skipped-leads")).toHaveText("2 leads skipped (bulk texting is for prospects only)");
     await smsDialog.getByRole("button", { name: "Cancel" }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
 
@@ -158,9 +162,9 @@ test.describe("Search page", () => {
     await page.getByRole("menuitem", { name: "Create dialer batch" }).click();
     const batchDialog = page.getByRole("dialog");
     await expect(batchDialog.getByTestId("batch-skipped-leads")).toBeVisible();
-    await expect(batchDialog.getByTestId("batch-skipped-leads")).toContainText("2 leads skipped");
-    await expect(batchDialog).toContainText("52 eligible from current filters");
-    await expect(batchDialog).toContainText("1 DNC locked and excluded");
+    await expect(batchDialog.getByTestId("batch-skipped-leads")).toHaveText("2 leads skipped (dialer batches use prospects only)");
+    await expect(batchDialog.getByText(/^52 eligible from current filters$/)).toBeVisible();
+    await expect(batchDialog.getByText(/^1 DNC locked and excluded$/)).toBeVisible();
     await batchDialog.getByRole("button", { name: "Cancel" }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
 
@@ -174,9 +178,6 @@ test.describe("Search page", () => {
     await seed(1, { surname: term });
     await seed(1, { surname: term, status: "new_lead" });
     const before = await sideEffectCounts();
-    // The Bulk SMS dialog is taller than a 720px viewport and its Cancel button
-    // cannot be scrolled into view there, so use a tall viewport for this spec.
-    await page.setViewportSize({ width: 1280, height: 1600 });
 
     await openFrom(page, term);
     await expect(page.getByTestId("prospects-result-count")).toContainText("of 2");
@@ -186,14 +187,14 @@ test.describe("Search page", () => {
     await page.getByRole("button", { name: /Actions for 2 selected/ }).click();
     await page.getByRole("menuitem", { name: "Bulk SMS" }).click();
     const smsDialog = page.getByRole("dialog");
-    await expect(smsDialog.getByTestId("bulk-sms-skipped-leads")).toContainText("1 lead skipped");
+    await expect(smsDialog.getByTestId("bulk-sms-skipped-leads")).toHaveText("1 lead skipped (bulk texting is for prospects only)");
     await smsDialog.getByRole("button", { name: "Cancel" }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
 
     await page.getByRole("button", { name: /Actions for 2 selected/ }).click();
     await page.getByRole("menuitem", { name: "Create dialer batch" }).click();
     const batchDialog = page.getByRole("dialog");
-    await expect(batchDialog.getByTestId("batch-skipped-leads")).toContainText("1 lead skipped");
+    await expect(batchDialog.getByTestId("batch-skipped-leads")).toHaveText("1 lead skipped (dialer batches use prospects only)");
     await batchDialog.getByRole("button", { name: "Cancel" }).click();
 
     expect(await sideEffectCounts()).toEqual(before);
@@ -217,6 +218,20 @@ test.describe("Search page", () => {
       expect(box!.y + box!.height).toBeLessThanOrEqual(720);
       const cancel = dialog.getByRole("button", { name: "Cancel" });
       await expect(cancel).toBeInViewport();
+      await expect(
+        dialog.getByRole("button", { name: item === "Bulk SMS" ? /^Queue \d+ messages?$/ : /^Create batch$/ }),
+      ).toBeInViewport();
+      if (item === "Bulk SMS") {
+        // The long Bulk SMS form must scroll inside the dialog rather than clip.
+        const body = dialog.locator("div.overflow-y-auto");
+        const { scrollHeight, clientHeight } = await body.evaluate((el) => ({
+          scrollHeight: el.scrollHeight,
+          clientHeight: el.clientHeight,
+        }));
+        expect(scrollHeight).toBeGreaterThan(clientHeight);
+        await body.evaluate((el) => el.scrollTo(0, el.scrollHeight));
+        expect(await body.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+      }
       await cancel.click();
       await expect(page.getByRole("dialog")).toHaveCount(0);
     }
