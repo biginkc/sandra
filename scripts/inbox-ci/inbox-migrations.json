@@ -18,5 +18,10 @@
     "version": "20261004050250",
     "name": "inbox_reply_message_projection",
     "sha256": "2a097587ad59aa913a386ce59b513fcbac8452b0b770477bde16533cb2672112"
+  },
+  {
+    "version": "20261002100260",
+    "name": "inbox_drip_markers",
+    "sha256": "bd1bc395cee49b1bd6daae3672267319bafba939ce71d66157e44bee26473382"
   }
 ]
