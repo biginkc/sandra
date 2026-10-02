@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 
+const adminClient = vi.hoisted(() => ({ current: null as unknown }));
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => adminClient.current,
+}));
+
 import type {
   BulkSmsScheduleState,
   ResolvedBulkSmsQueueOpts,
 } from "@/lib/messaging/bulk-queue";
 import {
+  loadBulkSmsJob,
   refreshCampaignScheduleForChunk,
   repairCampaignQueueCadenceAfterChunk,
 } from "@/workflows/bulk-sms";
@@ -162,5 +168,73 @@ describe("refreshCampaignScheduleForChunk", () => {
     );
 
     expect(client.rpc).not.toHaveBeenCalled();
+  });
+});
+
+describe("loadBulkSmsJob campaign provenance", () => {
+  function loadClient(args: {
+    claimedSource: string;
+    audienceSnapshot: unknown;
+  }) {
+    const updateEq = vi.fn().mockResolvedValue({ error: null });
+    return {
+      from: vi.fn((table: string) => {
+        if (table === "jobs") {
+          return {
+            select: () => ({
+              eq: () => ({
+                single: vi.fn().mockResolvedValue({
+                  data: {
+                    org_id: "org-1",
+                    input_params: {
+                      property_ids: ["p1"],
+                      opts: {
+                        campaignId: "campaign-1",
+                        body: "Hi",
+                        campaignSource: args.claimedSource,
+                      },
+                    },
+                  },
+                  error: null,
+                }),
+              }),
+            }),
+            update: () => ({ eq: updateEq }),
+          };
+        }
+        return {
+          select: () => ({
+            eq: () => ({
+              maybeSingle: vi.fn().mockResolvedValue({
+                data: {
+                  org_id: "org-1",
+                  status: "launching",
+                  audience_snapshot: args.audienceSnapshot,
+                },
+                error: null,
+              }),
+            }),
+          }),
+        };
+      }),
+    };
+  }
+
+  it("derives saved_campaign from the record even if the job claims ad hoc", async () => {
+    adminClient.current = loadClient({
+      claimedSource: "ad_hoc_bulk_sms",
+      audienceSnapshot: { blockStack: [] },
+    });
+    const loaded = await loadBulkSmsJob("job-1");
+    expect(loaded.opts.campaignSource).toBe("saved_campaign");
+  });
+
+  it("derives ad_hoc_bulk_sms from the record even if the job claims saved", async () => {
+    adminClient.current = loadClient({
+      claimedSource: "saved_campaign",
+      audienceSnapshot: { source: "bulk_sms_modal", selection: { count: 1 } },
+    });
+    const loaded = await loadBulkSmsJob("job-1");
+    expect(loaded.opts.campaignSource).toBe("ad_hoc_bulk_sms");
   });
 });

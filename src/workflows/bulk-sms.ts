@@ -104,8 +104,19 @@ async function completeCampaign(
   }
 }
 
+/** Ad-hoc bulk SMS campaigns are stamped `bulk_sms_modal` at creation. */
+function campaignSourceFromRecord(
+  audienceSnapshot: unknown,
+): "ad_hoc_bulk_sms" | "saved_campaign" {
+  return typeof audienceSnapshot === "object" &&
+    audienceSnapshot !== null &&
+    (audienceSnapshot as { source?: unknown }).source === "bulk_sms_modal"
+    ? "ad_hoc_bulk_sms"
+    : "saved_campaign";
+}
+
 /** STEP 1 — Read the batch off the job row and flip it to running. */
-async function loadBulkSmsJob(jobId: string): Promise<LoadedBulkSmsJob> {
+export async function loadBulkSmsJob(jobId: string): Promise<LoadedBulkSmsJob> {
   "use step";
 
   const supabase = createAdminClient();
@@ -154,7 +165,7 @@ async function loadBulkSmsJob(jobId: string): Promise<LoadedBulkSmsJob> {
 
   const { data: campaign, error: campaignError } = await supabase
     .from("campaigns")
-    .select("org_id, status")
+    .select("org_id, status, audience_snapshot")
     .eq("id", campaignId)
     .maybeSingle();
   if (campaignError || !campaign) {
@@ -199,7 +210,8 @@ async function loadBulkSmsJob(jobId: string): Promise<LoadedBulkSmsJob> {
       jitterPct: rawOpts.jitterPct,
       includeUnknown: rawOpts.includeUnknown,
       campaignId,
-      campaignSource: rawOpts.campaignSource,
+      // Provenance comes from the persisted campaign record, never job input.
+      campaignSource: campaignSourceFromRecord(campaign.audience_snapshot),
     },
     initialState: freshScheduleState(params?.anchor_ms ?? Date.now()),
   };

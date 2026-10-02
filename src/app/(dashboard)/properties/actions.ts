@@ -296,6 +296,36 @@ async function validateProvidedCampaignForBulkSms(
     };
   }
 
+  const frozenIds = new Set<string>();
+  for (let i = 0; i < requestedIds.length; i += VALIDATION_CHUNK) {
+    const chunk = requestedIds.slice(i, i + VALIDATION_CHUNK);
+    const { data, error } = await supabase
+      .from("campaign_recipients")
+      .select("property_id")
+      .eq("campaign_id", campaignId)
+      .in("property_id", chunk);
+    if (error) {
+      return {
+        ok: false,
+        error: {
+          code: "CAMPAIGN_AUDIENCE_LOOKUP_FAILED",
+          message: error.message,
+        },
+      };
+    }
+    data?.forEach((row) => frozenIds.add(row.property_id));
+  }
+  if (requestedIds.some((id) => !frozenIds.has(id))) {
+    return {
+      ok: false,
+      error: {
+        code: "CAMPAIGN_AUDIENCE_NOT_FROZEN",
+        message:
+          "Some selected prospects are not in this campaign's frozen audience.",
+      },
+    };
+  }
+
   return ok(null);
 }
 
