@@ -14,6 +14,7 @@ import { formatPhoneDisplay } from "@/lib/phone-format";
 import { previewNormaCall, requestNormaCall } from "./norma-actions";
 
 const IN_FLIGHT_REFRESH_MS = 30_000;
+const POLLED_STATUSES: ReadonlySet<string> = new Set(["requested", "dispatching", "dispatched"]);
 
 export type NormaOpenRequest = { id: string; status: string };
 
@@ -63,12 +64,13 @@ export function HaveNormaCallButton({ propertyId, sellerName, propertyAddress, o
 
   // While a request is open, re-read the lead now and then so the button
   // follows the call to its end without a manual reload.
-  const hasOpenRequest = inFlight !== null;
+  // needs_review waits for a person, so polling is pointless.
+  const shouldPoll = inFlight !== null && POLLED_STATUSES.has(inFlight.status);
   useEffect(() => {
-    if (!hasOpenRequest) return;
+    if (!shouldPoll) return;
     const timer = setInterval(() => router.refresh(), IN_FLIGHT_REFRESH_MS);
     return () => clearInterval(timer);
-  }, [hasOpenRequest, router]);
+  }, [shouldPoll, router]);
 
   function loadPreview() {
     const seq = ++previewSeq.current;

@@ -149,6 +149,13 @@ describe("HaveNormaCallButton", () => {
     expect(mocks.refresh).toHaveBeenCalledTimes(1);
   });
 
+  it("does not poll a request that is waiting for a person", () => {
+    vi.useFakeTimers();
+    renderButton({ id: "r1", status: "needs_review" });
+    vi.advanceTimersByTime(120_000);
+    expect(mocks.refresh).not.toHaveBeenCalled();
+  });
+
   it("labels the trigger Have Norma call when idle", () => {
     renderButton();
     expect(screen.getByTestId("have-norma-call-trigger")).toHaveTextContent("Have Norma call");
