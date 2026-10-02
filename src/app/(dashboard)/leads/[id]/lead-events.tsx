@@ -10,6 +10,8 @@ import { OPERATOR_TIME_ZONE } from "@/lib/messages/message-metrics";
 import { validateTemplateTitle } from "@/lib/esign/template-contract";
 import { createClient } from "@/lib/supabase/client";
 import type { Database, Json } from "@/lib/supabase/types";
+import { normaOutcomeLabel } from "@/lib/norma/outcome-labels";
+import type { NormaRequestView } from "@/lib/norma/view";
 
 type LeadEventRow = Database["public"]["Tables"]["lead_events"]["Row"];
 export type LeadEvent = Pick<
@@ -130,12 +132,15 @@ export function LeadEventPill({
   event,
   authorEmails,
   currentUserId,
+  normaRequests,
 }: {
   event: LeadEvent;
   authorEmails: Record<string, string>;
   currentUserId: string | null;
+  /** Norma call requests for this lead, used for the call detail under the pill. */
+  normaRequests?: readonly NormaRequestView[];
 }) {
-  return (
+  const pill = (
     <div
       className="border-border/80 bg-muted/80 text-muted-foreground inline-flex max-w-full flex-wrap items-center justify-center gap-x-1.5 gap-y-0.5 rounded-full border px-3 py-1.5 text-center text-[11px] shadow-sm"
       data-testid="lead-event-row"
@@ -157,6 +162,38 @@ export function LeadEventPill({
       </time>
     </div>
   );
+  const detail = formatNormaEventDetail(event, normaRequests);
+  if (!detail) return pill;
+  return (
+    <div className="flex max-w-full flex-col items-center gap-1.5">
+      {pill}
+      <div
+        className="border-border/80 bg-muted/50 text-foreground max-w-md space-y-1 rounded-lg border px-3 py-2 text-xs"
+        data-testid="norma-event-detail"
+      >
+        {detail.summary ? <p className="whitespace-pre-line">{detail.summary}</p> : null}
+        {detail.callbackPreference ? (
+          <p>
+            <span className="font-medium">Seller&apos;s stated callback preference (unconfirmed):</span>{" "}
+            {detail.callbackPreference}
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/** Summary and callback preference under a finished Norma call; null when there is nothing to show. */
+export function formatNormaEventDetail(
+  event: LeadEvent,
+  normaRequests?: readonly NormaRequestView[],
+): { summary: string | null; callbackPreference: string | null } | null {
+  if (event.event_type !== "norma_call_completed") return null;
+  const payload = readPayload(event.payload);
+  const request = normaRequests?.find((row) => row.id === payload.request_id) ?? null;
+  const summary = (readString(payload, "summary") ?? request?.summary ?? "").trim() || null;
+  const callbackPreference = request?.callback_raw?.trim() || null;
+  return summary || callbackPreference ? { summary, callbackPreference } : null;
 }
 
 export function formatLeadEventSentence(
@@ -179,6 +216,10 @@ export function formatLeadEventSentence(
       const version = typeof payload.version === 'number' ? ` v${payload.version}` : '';
       return `${actor} saved ${approach} calculation${version}${proposed}`;
     }
+    case "norma_call_requested":
+      return `${actor} asked Norma to call${payload.has_context === true ? " (with context)" : ""}`;
+    case "norma_call_completed":
+      return `Norma call finished — ${normaOutcomeLabel(readString(payload, "outcome"))}`;
     case "lead_created":
       return `${actor} created the lead`;
     case "qualified":
