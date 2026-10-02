@@ -93,12 +93,28 @@ it("precreates direct training activity with service auth and permits only immut
     await pg.query("select set_config('request.jwt.claim.role','authenticated',true)");
     await pg.query("select set_config('request.jwt.claim.sub',$1,true)", [USER]);
     await pg.query(
-      "update public.call_activities set ended_at='2026-10-01T12:01:00Z',duration_seconds=60,outcome='connected_human',notes='wrapped',wrap_token=$1 where id=$2",
-      ["00000000-0000-4000-8000-000000016014", ACTIVITY],
+      `update public.call_activities set ended_at='2026-10-01T12:01:00Z',
+        started_at='2026-10-01T12:00:00Z',duration_seconds=60,outcome='connected_human',
+        notes='wrapped',wrap_token=$1,org_id=$3,operator_user_id=$4,direct_call_id=$5,
+        jitter_attempt_id=$6,provider='sandra_softphone',phone_e164='+15550007777',
+        call_purpose='internal_training',property_id=null,contact_id=null,
+        disposition=null,direction='outbound',do_not_call_requested=false where id=$2`,
+      ["00000000-0000-4000-8000-000000016014", ACTIVITY, ORG, USER, CALL, `sandra-${CALL}`],
     );
     const wrapped = (await pg.query("select call_purpose,ended_at,duration_seconds from public.call_activities where id=$1", [ACTIVITY])).rows[0];
     expect(wrapped).toMatchObject({ call_purpose: "internal_training", duration_seconds: 60 });
     expect(wrapped.ended_at).not.toBeNull();
+
+    // Explicit customer purpose preserves the ordinary authenticated insert/update path.
+    const customerActivity = "00000000-0000-4000-8000-000000016015";
+    await pg.query(
+      `insert into public.call_activities
+        (id,org_id,provider,operator_user_id,jitter_attempt_id,phone_e164,call_purpose,direction)
+       values ($1,$2,'sandra_softphone',$3,$4,'+15550008888','customer','outbound')`,
+      [customerActivity, ORG, USER, `customer-${CALL}`],
+    );
+    await pg.query("update public.call_activities set call_purpose='customer',notes='customer wrap' where id=$1", [customerActivity]);
+    expect((await pg.query("select call_purpose from public.call_activities where id=$1", [customerActivity])).rows[0].call_purpose).toBe("customer");
 
     await pg.query("savepoint immutable_training_purpose");
     await expect(
