@@ -43,9 +43,35 @@ Rows inserted, changed, or deleted during the window are not captured merely
 because the functions are restored. A deletion can leave a source-missing
 tombstone or stale derived state; do not infer coverage from an empty queue.
 New inbound messages written during the window keep
-`messages.inbox_inbound_revision = 0` permanently: the integrity guard remains
-on, while the inbound-head capture function is a no-op, and restore does not
-retroactively allocate revisions.
+`messages.inbox_inbound_revision = 0` unless a later write re-routes the
+message: the integrity guard remains on, while the inbound-head capture
+function is a no-op, and restore does not retroactively allocate revisions.
+
+## Target identity and supported execution
+
+`capture-off.sql` and `capture-restore.sql` are generated packets and must be
+run only through `run_capture_packet.py`. Direct `psql -f` execution refuses
+before any receipt table or function replacement is created. The runner
+requires `--target-ref copflsklaefwzipsrjqz`,
+`--i-understand-production`, a passwordless connection URL, and the password
+in `INBOX_EMERGENCY_DB_PASSWORD` only. For Production it accepts only the
+approved direct or shared-pooler endpoint, database `postgres`, and
+`verify-full` with the pinned `supabase-prod-ca-2021.crt`; query options,
+socket paths, and percent-encoded authorities are refused.
+
+Disposable verification uses `--local-test` with `NODE_ENV=test` (or a CI
+test flag), `127.0.0.1`, and the runner's 55400–55599 port range. The runner
+sets a distinct transaction-local `local-test` target plus
+`inbox.emergency_local_test = 'on'`; the packets additionally require
+`inet_server_addr()` to be `127.0.0.1` or `::1`.
+
+Supabase's documented managed connection strings identify a project through
+the direct host or shared-pooler username. No reliable managed-Supabase
+PostgreSQL setting or catalog fact independently exposes the project ref to a
+SQL packet, so the packets deliberately do not pretend that
+`current_database()`, server version, or an IP address is a second project
+identity. `current_database() = 'postgres'` is checked only as the database
+name; the endpoint/project binding remains the runner's fail-closed check.
 
 ## Required recovery after restore
 

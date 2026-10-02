@@ -9,6 +9,25 @@ SET LOCAL statement_timeout='10s';
 DO $$
 DECLARE approved_count integer; no_op_count integer; total_count integer; attached_count integer;
 BEGIN
+  -- EMERGENCY_TARGET_IDENTITY_GUARD_BEGIN
+  IF current_setting('inbox.emergency_target_ref', true) = 'copflsklaefwzipsrjqz' THEN
+    IF current_setting('inbox.emergency_local_test', true) = 'on' THEN
+      RAISE EXCEPTION 'INBOX_EMERGENCY_PRODUCTION_LOCAL_TEST_REFUSED';
+    END IF;
+    IF current_database() <> 'postgres' THEN
+      RAISE EXCEPTION 'INBOX_EMERGENCY_DATABASE_NAME_REFUSED';
+    END IF;
+  ELSIF current_setting('inbox.emergency_target_ref', true) = 'local-test' THEN
+    IF current_setting('inbox.emergency_local_test', true) <> 'on'
+       OR current_database() <> 'postgres'
+       OR inet_server_addr() IS NULL
+       OR inet_server_addr() NOT IN ('127.0.0.1'::inet, '::1'::inet) THEN
+      RAISE EXCEPTION 'INBOX_EMERGENCY_LOCAL_TEST_IDENTITY_REFUSED';
+    END IF;
+  ELSE
+    RAISE EXCEPTION 'INBOX_EMERGENCY_TARGET_REF_REQUIRED';
+  END IF;
+  -- EMERGENCY_TARGET_IDENTITY_GUARD_END
   IF current_user <> 'postgres' THEN
     RAISE EXCEPTION 'INBOX_CAPTURE_OFF_ROLE_REQUIRED';
   END IF;
@@ -102,6 +121,7 @@ CREATE TABLE IF NOT EXISTS inbox_emergency.capture_off_receipts (
   function_bodies_md5 jsonb NOT NULL,
   trigger_inventory jsonb NOT NULL
 );
+ALTER TABLE inbox_emergency.capture_off_receipts ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON inbox_emergency.capture_off_receipts FROM PUBLIC, anon, authenticated, service_role;
 
 WITH expected(name, no_op_md5) AS (VALUES
