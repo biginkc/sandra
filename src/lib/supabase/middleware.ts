@@ -19,6 +19,7 @@ export function isPublicPath(path: string): boolean {
     path.startsWith("/api/cron") ||
     path.startsWith("/api/internal/canary/") ||
     path === "/api/internal/sentry-canary" ||
+    path === "/api/internal/direct-call-watchdog" ||
     path === "/sentry-canary" ||
     path.startsWith("/api/internal/jitter") ||
     path.startsWith("/api/internal/closer/practice-outcomes/") ||
