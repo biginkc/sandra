@@ -1,4 +1,4 @@
-import type { WebSocket } from 'ws'
+import type { RawData, WebSocket } from 'ws'
 import { createDeepgramLiveBridge, type DeepgramLiveBridge, type DeepgramLiveTranscript } from './approved/deepgram-live.js'
 import { ObjectionPromptCall } from './approved/objection-prompt/index.js'
 import { readCoachDeepgramOptions } from './approved/env.js'
@@ -10,6 +10,8 @@ import type { CoachClaims, CoachLogger, CoachPublisher, DirectCoachBinding, Dire
 const MAX_AUDIO_SECONDS = 180
 const MAX_AUDIO_BYTES = 2 * 8000 * MAX_AUDIO_SECONDS
 const MAX_MEDIA_MESSAGES = 24_000
+const MAX_PRESTART_MEDIA_MESSAGES = 1_024
+const MAX_PRESTART_MEDIA_BYTES = 256 * 1024
 const ACTIVE_CHECK_MS = 5_000
 const CLOSE_GRACE_MS = 15_000
 const PRESTART_DEADLINE_MS = 10_000
@@ -50,6 +52,7 @@ export class CoachSession {
   private closePromise?: Promise<void>
   private mediaMessages = 0
   private audioBytes = 0
+  private pendingMediaBytes = 0
   private readonly inFlightPublishes = new Set<Promise<unknown>>()
   private readonly pendingMedia: TelnyxMedia[] = []
   private readonly socketAnchors: { inbound?: number; outbound?: number } = {}
@@ -67,14 +70,16 @@ export class CoachSession {
     this.prestartTimer = setTimeout(() => { void this.finish('prestart_timeout') }, deps.preStartTimeoutMs ?? PRESTART_DEADLINE_MS)
   }
 
-  handle(raw: WebSocket.RawData): void {
+  handle(raw: RawData): void {
     if (this.inputClosed) return
     try {
       const value = JSON.parse(raw.toString()) as Record<string, unknown>
       const event = typeof value.event === 'string' ? value.event : ''
       if (!this.started && this.starting && event === 'media') {
-        if (this.pendingMedia.length >= 256) throw new MediaIntegrityError('media arrived before start authorization completed')
-        this.pendingMedia.push(parseMedia(value, this.now()))
+        const media = parseMedia(value, this.now())
+        if (this.pendingMedia.length >= MAX_PRESTART_MEDIA_MESSAGES || this.pendingMediaBytes + media.payload.length > MAX_PRESTART_MEDIA_BYTES) throw new SessionLimitError('pre-start media buffer limit exceeded')
+        this.pendingMedia.push(media)
+        this.pendingMediaBytes += media.payload.length
         return
       }
       if (!this.started && this.starting) {
@@ -146,7 +151,9 @@ export class CoachSession {
       this.started = true
       this.starting = false
       if (this.prestartTimer) clearTimeout(this.prestartTimer)
-      for (const media of this.pendingMedia.splice(0)) this.order.push(media, media.receivedAtMs)
+      const pendingMedia = this.pendingMedia.splice(0)
+      this.pendingMediaBytes = 0
+      for (const media of pendingMedia) this.order.push(media, media.receivedAtMs)
       this.sessionTimer = setTimeout(() => void this.finish('session_limit'), MAX_AUDIO_SECONDS * 1_000)
       this.activeTimer = setInterval(() => { void this.recheckActive() }, ACTIVE_CHECK_MS)
     } catch {
@@ -243,6 +250,8 @@ export class CoachSession {
     // If the DB admission was still pending, let its bounded operation settle before allocating
     // any Deepgram sockets. A disconnect cannot race this into a paid-bridge leak.
     if (this.startPromise) await bounded(this.startPromise, remaining(deadline, this.now()))
+    this.pendingMedia.length = 0
+    this.pendingMediaBytes = 0
     let finalReason = reason
     try { this.order?.finish() } catch {
       this.deps.logger.warn('direct_coach.media_integrity_failure')

@@ -4,7 +4,7 @@ import type { CoachClaims } from './types.js'
 export const MAX_TOKEN_FUTURE_MS = 210_000
 
 function b64url(value: Buffer | string): string {
-  return Buffer.from(value).toString('base64url')
+  return (typeof value === 'string' ? Buffer.from(value) : value).toString('base64url')
 }
 
 function parseBase64Json(value: string): unknown {
