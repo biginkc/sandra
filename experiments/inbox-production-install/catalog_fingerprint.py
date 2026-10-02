@@ -11,6 +11,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS = ROOT / 'supabase/migrations'
 MANIFEST = Path(__file__).with_name('catalog-scope.json')
+INBOX_MANIFEST = ROOT / 'scripts/inbox-ci/inbox-migrations.json'
 CATALOG_FORMAT_VERSION = 2
 DRIFT_FIXTURE_VERSION = 1
 KNOWN_TARGET_REFS = frozenset({'ncsngxlcyxylaeskiteu', 'copflsklaefwzipsrjqz'})
@@ -22,19 +23,35 @@ CREATED_TRIGGER = re.compile(r'\bCREATE\s+TRIGGER\s+([a-z_][a-z_0-9]*)\b(?:(?!;)
 CREATED_INDEX = re.compile(r'\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z_0-9]*)\s+ON\s+((?:public|inbox_[a-z_]+)\.[a-z_][a-z_0-9]*)\b', re.I)
 
 
+def inbox_manifest():
+    entries = json.loads(INBOX_MANIFEST.read_text())
+    if not isinstance(entries, list) or not entries:
+        raise ValueError('Inbox migration manifest must be a non-empty array')
+    return entries
+
+
+def migration_files():
+    entries = inbox_manifest()
+    expected = {f"{entry['version']}_{entry['name']}.sql" for entry in entries}
+    candidates = {
+        p.name for p in MIGRATIONS.iterdir()
+        if p.is_file() and re.fullmatch(r'\d{14}_inbox_[a-z0-9_]+\.sql', p.name)
+    }
+    if len(candidates) != len(expected) or candidates != expected:
+        raise ValueError(f'Inbox migration files do not match manifest: expected={sorted(expected)} found={sorted(candidates)}')
+    return [MIGRATIONS / name for name in sorted(expected)]
+
+
 def migration_identifiers():
-    files = sorted(MIGRATIONS.glob('2026093004*.sql'))
-    if len(files) != 3:
-        raise ValueError('Expected exactly three 2026093004 migrations')
-    return sorted({m.group().lower() for p in files for m in IDENT.finditer(p.read_text())})
+    return sorted({m.group().lower() for p in migration_files() for m in IDENT.finditer(p.read_text())})
 
 
 def created_identifiers():
-    return sorted({m.group(1).lower() for p in MIGRATIONS.glob('2026093004*.sql') for m in CREATED.finditer(p.read_text())})
+    return sorted({m.group(1).lower() for p in migration_files() for m in CREATED.finditer(p.read_text())})
 
 
 def created_name_scope():
-    sources = [p.read_text() for p in MIGRATIONS.glob('2026093004*.sql')]
+    sources = [p.read_text() for p in migration_files()]
     return {
         'created_schemas': sorted({m.group(1).lower() for source in sources for m in CREATED_SCHEMA.finditer(source)}),
         'created_triggers': sorted({f'{m.group(2).lower()}.{m.group(1).lower()}' for source in sources for m in CREATED_TRIGGER.finditer(source)}),
@@ -112,7 +129,7 @@ def derive_rowtype_tables(sources):
     return frozenset(tables)
 
 
-ROWTYPE_TABLES = derive_rowtype_tables([path.read_text() for path in MIGRATIONS.glob('2026093004*.sql')])
+ROWTYPE_TABLES = derive_rowtype_tables([path.read_text() for path in migration_files()])
 
 
 def _sha_text(value):

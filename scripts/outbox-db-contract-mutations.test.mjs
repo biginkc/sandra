@@ -7,6 +7,7 @@ import path from 'node:path';
 import { completePhaseInventory } from './outbox-db-contract.mjs';
 import { finalizeSubstep, fixtureChildEnv, platformConfigFor, stagePhaseRunDir } from './outbox-db-contract-mutations.mjs';
 import { runPath } from './outbox-run-record.mjs';
+import { readManifest } from './inbox-ci/inbox-migrations.mjs';
 
 const repo = process.cwd();
 const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
@@ -17,6 +18,7 @@ const REPLAY_ARTIFACTS = ['catalog-pre.json', 'catalog-post.json', ...REPLAY_REF
   `drift-record-${ref}.json`, `catalog-pre-${ref}.json`, `catalog-post-${ref}.json`,
   `pre-readonly-${ref}.json`, `post-readonly-${ref}.json`, `contract-pre-${ref}.txt`, `contract-post-${ref}.txt`,
 ])];
+const INBOX_VERSIONS = readManifest(repo).map(entry => entry.version);
 
 function phaseInventory(phase) {
   const checks = [...CONTRACT_IDS, 'PIN_BASE_GRANTS', ...(phase === 'post' ? ['PIN_FUNCTIONS', 'PIN_RELATIONS', 'PIN_SCHEMAS_ROLLOUT_ROLES'] : ['PIN_PRE_ABSENCE']), 'PIN_TRIGGERS']
@@ -25,7 +27,7 @@ function phaseInventory(phase) {
   const mutations = mutationIds.map(id => ({ id, observed_exit: 1, observed_fail: true, exact_fail: true, restored: 'PASS' }));
   return {
     checks,
-    schemaState: phase === 'post' ? { versions: ['20260930040000', '20260930040100', '20260930040200'], inboundHeadsPresent: true } : { versions: [], inboundHeadsPresent: false },
+    schemaState: phase === 'post' ? { versions: INBOX_VERSIONS, inboundHeadsPresent: true } : { versions: [], inboundHeadsPresent: false },
     mutations,
   };
 }

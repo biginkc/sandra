@@ -11,12 +11,13 @@ perf_preflight() {
   if [[ "${PERF_LOCAL_EXECUTION:-}" != 1 ]]; then
     [[ -z "$(git status --porcelain)" ]] || { echo 'Dirty checkout' >&2; return 1; }
   fi
-  for file in 20260930040000_inbox_control_foundation.sql 20260930040100_inbox_read_companion.sql 20260930040200_inbox_backend_operation_reply.sql; do
+  while IFS= read -r path; do
+    file="${path##*/}"
     test -s "$PERF_MIGRATIONS_DIR/$file" || { echo "Missing required checked-out migration: $file" >&2; return 1; }
     if [[ "${PERF_LOCAL_EXECUTION:-}" != 1 ]]; then
       git ls-files --error-unmatch "supabase/migrations/$file" >/dev/null || return 1
     fi
-  done
+  done < <(node "$PERF_REPO/scripts/inbox-ci/inbox-migrations.mjs" --files)
   [[ -n "${RUNNER_TEMP:-}" && -n "${GITHUB_ENV:-}" && "${GITHUB_ACTIONS:-}" == true ]] || { echo 'GitHub runner required' >&2; return 1; }
 }
 perf_start() {
@@ -28,12 +29,13 @@ perf_start() {
   fi
   PERF_STACK_ID="sandra-heavy-perf-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}"
   export PERF_STACK_ID
+  local -a inbox_exclude_args
+  inbox_exclude_args=()
+  while IFS= read -r arg; do inbox_exclude_args+=("$arg"); done < <(node "$PERF_REPO/scripts/inbox-ci/inbox-migrations.mjs" --exclude-args)
   node "$PERF_REPO/scripts/ci/provision-disposable-stack.mjs" \
     --no-baseline-owner \
     "${local_ports[@]+"${local_ports[@]}"}" \
-    --exclude-migrations 20260930040000_inbox_control_foundation.sql \
-    --exclude-migrations 20260930040100_inbox_read_companion.sql \
-    --exclude-migrations 20260930040200_inbox_backend_operation_reply.sql
+    "${inbox_exclude_args[@]}"
   while IFS='=' read -r key value; do
     case "$key" in
       E2E_LOCAL_WORKDIR|E2E_DISPOSABLE_DATABASE|TEST_SUPABASE_URL|TEST_SUPABASE_SERVICE_ROLE_KEY|E2E_CI_SUPABASE_DB_URL)

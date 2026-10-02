@@ -32,7 +32,8 @@ APPROVALS = {
                     ("test-env", "migration-apply", "post", "shared-test"),
                     ("test-env", "shared-readonly", "post", "shared-test")),
 }
-MIGRATION_VERSIONS = {"20260930040000", "20260930040100", "20260930040200"}
+INBOX_MANIFEST = json.loads((Path(__file__).resolve().parents[2] / "scripts/inbox-ci/inbox-migrations.json").read_text())
+MIGRATION_VERSIONS = {entry["version"] for entry in INBOX_MANIFEST}
 PROJECT_REFS = {"shared-test": "ncsngxlcyxylaeskiteu", "production": "copflsklaefwzipsrjqz"}
 MIGRATION_WORKFLOWS = {"shared-test": ".github/workflows/db-migrate-test.yml", "production": ".github/workflows/db-migrate-prod.yml"}
 MIGRATION_APPLY_JOBS = {"shared-test": "Apply migrations to test", "production": "Apply migrations to prod"}
@@ -87,7 +88,7 @@ def derive_rowtype_tables(sources: list[str]) -> frozenset[str]:
 
 
 _migration_dir = Path(__file__).resolve().parents[2] / "supabase/migrations"
-ROWTYPE_TABLES = derive_rowtype_tables([p.read_text() for p in _migration_dir.glob("2026093004*.sql")])
+ROWTYPE_TABLES = derive_rowtype_tables([(_migration_dir / f"{entry['version']}_{entry['name']}.sql").read_text() for entry in INBOX_MANIFEST])
 J5A_CATALOG_DRIFT_SUMMARY = "TEST matched the disposable baseline except the pre-existing items listed in the committed TEST drift fixture, none of which is in any migration. They are recorded and replayed, not explained; owners unknown. Production's drift is not yet observed."
 
 

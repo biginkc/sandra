@@ -89,6 +89,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import json
 import re
 import sys
 from pathlib import Path
@@ -98,6 +99,15 @@ INSTALL_GENERATED = REPO_ROOT / "experiments/inbox-production-install/generated"
 RELEASE_GENERATED = REPO_ROOT / "experiments/inbox-release/generated"
 MIGRATIONS_DIR = REPO_ROOT / "supabase/migrations"
 OPERATOR_DIR = REPO_ROOT / "experiments/inbox-production-install/operator"
+INBOX_MANIFEST_PATH = REPO_ROOT / "scripts/inbox-ci/inbox-migrations.json"
+
+
+def inbox_filename(name: str) -> str:
+    entries = json.loads(INBOX_MANIFEST_PATH.read_text())
+    for entry in entries:
+        if entry["name"] == name:
+            return f"{entry['version']}_{entry['name']}.sql"
+    raise KeyError(f"Inbox migration is not in manifest: {name}")
 
 # ---------------------------------------------------------------------------
 # Exact guard texts (hard-coded; extracted verbatim from the source files at
@@ -147,13 +157,13 @@ GUARD_HTTP = (
 BATCH_A = [
     dict(
         source=INSTALL_GENERATED / "install-candidate.sql",
-        output="20260930040000_inbox_control_foundation.sql",
+        output=inbox_filename("inbox_control_foundation"),
         guard=None,
         count=0,
     ),
     dict(
         source=INSTALL_GENERATED / "read-companion.sql",
-        output="20260930040100_inbox_read_companion.sql",
+        output=inbox_filename("inbox_read_companion"),
         guard=None,
         count=0,
     ),
@@ -162,7 +172,7 @@ BATCH_A = [
 BATCH_B = [
     dict(
         source=RELEASE_GENERATED / "backend-operation-reply.sql",
-        output="20260930040200_inbox_backend_operation_reply.sql",
+        output=inbox_filename("inbox_backend_operation_reply"),
         guard=GUARD_HTTP,
         count=10,
     ),
@@ -343,7 +353,8 @@ def stale_owned_paths() -> list[Path]:
     owned = set(owned_filenames())
     suffixes = tuple(name.split("_", 1)[1] for name in owned)
     candidates = set(MIGRATIONS_DIR.glob("2026091912*.sql"))
-    candidates.update(MIGRATIONS_DIR.glob("2026093004*.sql"))
+    manifest_names = {inbox_filename(name) for name in ("inbox_control_foundation", "inbox_read_companion", "inbox_backend_operation_reply")}
+    candidates.update(MIGRATIONS_DIR / name for name in manifest_names if (MIGRATIONS_DIR / name).exists())
     candidates.update(p for p in MIGRATIONS_DIR.glob("*.sql") if p.name.endswith(suffixes))
     return sorted(p for p in candidates if p.name not in owned)
 

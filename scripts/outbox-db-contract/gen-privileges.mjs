@@ -1,13 +1,11 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { readManifest, relativePath } from '../inbox-ci/inbox-migrations.mjs';
 
-const paths = [
-  'supabase/migrations/20260930040000_inbox_control_foundation.sql',
-  'supabase/migrations/20260930040100_inbox_read_companion.sql',
-  'supabase/migrations/20260930040200_inbox_backend_operation_reply.sql',
-];
-const read = file => readFileSync(file, 'utf8');
+const repo = path.resolve(import.meta.dirname, '../..');
+const paths = readManifest(repo).map(relativePath);
+const read = file => readFileSync(path.join(repo, file), 'utf8');
 const sha = text => createHash('sha256').update(text).digest('hex');
 const functions = {};
 const migrationSql = paths.map(read).join('\n');
@@ -52,6 +50,6 @@ const relations = {};
 for (const match of migrationSql.matchAll(/\bCREATE\s+SCHEMA\s+(?:IF\s+NOT\s+EXISTS\s+)?(inbox_[a-z_]+)/gi)) relations[`schema:${match[1].toLowerCase()}`] = 'postgres';
 for (const match of migrationSql.matchAll(/\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(inbox_[a-z_]+\.[a-z_][\w]*|public\.inbox_inbound_heads)/gi)) relations[`table:${match[1].toLowerCase()}`] = 'postgres';
 const expected = { source_sha256: Object.fromEntries(paths.map(file => [file, sha(read(file))])), functions, relation_owners: relations };
-const dir = path.join('scripts', 'outbox-db-contract', 'expected'); mkdirSync(dir, { recursive: true });
+const dir = path.join(repo, 'scripts', 'outbox-db-contract', 'expected'); mkdirSync(dir, { recursive: true });
 writeFileSync(path.join(dir, 'privileges.post.json'), `${JSON.stringify(expected, null, 2)}\n`);
 // The pre pin is generated from a live disposable-from-main catalog by gen-base-acl.mjs.

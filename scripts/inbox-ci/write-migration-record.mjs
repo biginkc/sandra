@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { assertOnlyRunDirDirty, writeManifest, runPath } from '../../scripts/outbox-run-record.mjs';
+import { readManifest } from './inbox-migrations.mjs';
 
 const repo = path.resolve(import.meta.dirname, '../..');
 if (process.env.MIGRATION_LOCAL_EXECUTION === '1') throw new Error('Local diagnostic cannot seal a run record');
@@ -19,6 +20,8 @@ const lane = process.env.HEAVY_LANE;
 if (!['migration-dry-run', 'catalog-fingerprint'].includes(lane) || process.env.HEAVY_TESTED_SHA !== sha || !/^\d+$/.test(runId) || !/^\d+$/.test(attempt)) throw new Error('Invalid heavy lane identity');
 const runner = path.join(repo, 'scripts/inbox-ci', `${lane}.sh`);
 const hash = file => createHash('sha256').update(readFileSync(file)).digest('hex');
+const inboxManifest = readManifest(repo);
+const inboxVersions = inboxManifest.map(entry => entry.version);
 const common = {
   tested_sha: sha, tier: 'pre-merge', phase: 'n/a', target: 'disposable',
   started_at: new Date(Number(process.env.INBOX_LANE_STARTED_MS || Date.now())).toISOString(),
@@ -71,11 +74,11 @@ const dryRunFiles = [
   'second-apply.stdout.txt', 'second-apply.stderr.txt', 'mutation-role.txt', 'mutation-harness.txt', 'mutation-cases.json',
   'catalog-post-harness.json',
   'production-install-unit.txt',
-  'apply-20260930040000.txt', 'apply-20260930040100.txt', 'apply-20260930040200.txt',
+  ...inboxVersions.map(version => `apply-${version}.txt`),
 ];
 const catalogFiles = [
   'catalog-manifest-check.txt', 'catalog-pre.json', 'catalog-post.json', 'catalog-live.txt',
 ];
-if (lane === 'migration-dry-run') record(lane, dryRunFiles, { migration_versions: ['20260930040000', '20260930040100', '20260930040200'], second_apply_refused: true, mutation_cases: 41, private_helper_exposure_count: 0 });
+if (lane === 'migration-dry-run') record(lane, dryRunFiles, { migration_versions: inboxVersions, second_apply_refused: true, mutation_cases: 41, private_helper_exposure_count: 0 });
 else record(lane, catalogFiles, { pre_sha256: pre.sha256, post_sha256: post.sha256, pre_section_sha256: pre.section_sha256, post_section_sha256: post.section_sha256, live_mutation_tests: 5 });
 }

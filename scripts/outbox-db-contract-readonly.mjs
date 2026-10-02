@@ -11,6 +11,7 @@ import { platformFingerprint, compareObservedPlatform, comparePlatform, platform
 import { CATALOG_SECTIONS, hasExactKeys } from './outbox-db-contract/catalog-sections.mjs';
 import { connectionConfig, connectionEvidence, pinnedCa } from './outbox-db-contract/connection.mjs';
 import { catalogIndexes, compareIndexes, comparePlans, planCostRatios } from './outbox-db-contract/plan-contract.mjs';
+import { readManifest, relativePath } from './inbox-ci/inbox-migrations.mjs';
 export { CATALOG_SECTIONS } from './outbox-db-contract/catalog-sections.mjs';
 
 export function parseArgs(argv) {
@@ -53,7 +54,8 @@ function deriveRowtypeTables(sources) {
   return tables;
 }
 const migrationDir = path.join(import.meta.dirname, '..', 'supabase', 'migrations');
-const ROWTYPE_TABLES = deriveRowtypeTables(readdirSync(migrationDir).filter(file => /^2026093004.*\\.sql$/.test(file)).sort(codepointCompare).map(file => readFileSync(path.join(migrationDir, file), 'utf8')));
+const repo = path.join(import.meta.dirname, '..');
+const ROWTYPE_TABLES = deriveRowtypeTables(readManifest(repo).map(entry => readFileSync(path.join(repo, relativePath(entry)), 'utf8')));
 const stable = value => {
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
   if (value && typeof value === 'object') return `{${Object.keys(value).sort(codepointCompare).map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}`;

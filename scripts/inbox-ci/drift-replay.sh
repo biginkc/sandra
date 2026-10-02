@@ -48,7 +48,10 @@ start_stack() {
   if [[ -n "$stack_sourced" ]]; then unset TEST_SUPABASE_URL TEST_SUPABASE_ANON_KEY TEST_SUPABASE_SERVICE_ROLE_KEY; fi
   : > "$env_file"
   export GITHUB_ENV="$env_file"
-  node scripts/ci/provision-disposable-stack.mjs --api-port "$api_port" --db-port "$db_port" --exclude-migrations '2026093004*'
+  local -a inbox_exclude_args
+  inbox_exclude_args=()
+  while IFS= read -r arg; do inbox_exclude_args+=("$arg"); done < <(node scripts/inbox-ci/inbox-migrations.mjs --exclude-args)
+  node scripts/ci/provision-disposable-stack.mjs --api-port "$api_port" --db-port "$db_port" "${inbox_exclude_args[@]}"
   set -a
   source "$env_file"
   set +a
@@ -70,7 +73,7 @@ stop_stack() {
 
 apply_inbox_migrations() {
   local dir=$1
-  for migration in supabase/migrations/2026093004*.sql; do
+  while IFS= read -r migration; do
     local version name
     version="$(basename "$migration" | cut -d_ -f1)"
     name="$(basename "$migration" .sql | cut -d_ -f2-)"
@@ -78,7 +81,7 @@ apply_inbox_migrations() {
     psql "$E2E_CI_SUPABASE_DB_URL" -X -v ON_ERROR_STOP=1 -v version="$version" -v name="$name" >/dev/null <<'SQL'
 INSERT INTO supabase_migrations.schema_migrations(version,name,statements) VALUES (:'version',:'name',ARRAY['drift replay']);
 SQL
-  done
+  done < <(node scripts/inbox-ci/inbox-migrations.mjs --files)
 }
 
 materialize_fixture() {

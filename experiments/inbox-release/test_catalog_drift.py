@@ -131,7 +131,8 @@ class CatalogDriftMutationTests(unittest.TestCase):
                 evidence.validate_drift_lane("browser", {artifact: "x"})
 
     def test_rowtype_table_guard_is_derived_from_migration_source(self):
-        sql = [path.read_text() for path in (Path(__file__).resolve().parents[2] / "supabase/migrations").glob("2026093004*.sql")]
+        manifest = json.loads((Path(__file__).resolve().parents[2] / "scripts/inbox-ci/inbox-migrations.json").read_text())
+        sql = [(Path(__file__).resolve().parents[2] / "supabase/migrations" / f"{entry['version']}_{entry['name']}.sql").read_text() for entry in manifest]
         self.assertEqual(evidence.derive_rowtype_tables(sql), evidence.ROWTYPE_TABLES)
 
     def test_rowtype_guard_detects_star_and_row_constructor_reads(self):

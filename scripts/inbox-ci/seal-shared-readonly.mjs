@@ -129,7 +129,10 @@ function validateReplaySummary(repo, sha, manifest) {
 const driftBindings = value => value.items.map(item => [item.object, item.attribute, item.name, item.definition_sha256].join('\0')).sort(codepointCompare);
 function rowtypeTablesAt(repo, sha) {
   try {
-    const paths = git(repo, 'ls-tree', '-r', '--name-only', sha, 'supabase/migrations').toString().trim().split('\n').filter(path => /^supabase\/migrations\/2026093004.*\.sql$/.test(path));
+    const manifest = JSON.parse(git(repo, 'show', `${sha}:scripts/inbox-ci/inbox-migrations.json`).toString());
+    const paths = manifest.map(entry => `supabase/migrations/${entry.version}_${entry.name}.sql`);
+    const listed = new Set(git(repo, 'ls-tree', '-r', '--name-only', sha, 'supabase/migrations').toString().trim().split('\n'));
+    if (paths.some(file => !listed.has(file))) throw new Error('Inbox migration manifest path missing at SHA');
     return deriveRowtypeTables(paths.map(file => git(repo, 'show', `${sha}:${file}`).toString()));
   } catch { return new Set(); }
 }

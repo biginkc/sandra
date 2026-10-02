@@ -70,13 +70,14 @@ class MigrationAssertionsTest(unittest.TestCase):
             for version, name in zip(a.VERSIONS, a.NAMES):
                 (directory / f'{version}_{name}.sql').write_text('SELECT 1;\n')
             self.assertEqual(len(a.migration_files(tmp)), 3)
-            (directory / '20260930040300_unreviewed.sql').write_text('SELECT 1;\n')
-            with self.assertRaisesRegex(ValueError, 'exactly the three'):
+            unreviewed = directory / f'{a.RESERVED_END[:-2]}50_inbox_unreviewed.sql'
+            unreviewed.write_text('SELECT 1;\n')
+            with self.assertRaisesRegex(ValueError, 'manifest Inbox'):
                 a.migration_files(tmp)
-            (directory / '20260930040300_unreviewed.sql').unlink()
+            unreviewed.unlink()
             stale = directory / ('20260929' + '000000_inbox_control_foundation.sql')
             stale.write_text('SELECT 1;\n')
-            with self.assertRaisesRegex(ValueError, 'exactly the three'):
+            with self.assertRaisesRegex(ValueError, 'manifest Inbox'):
                 a.migration_files(tmp)
 
     def test_missing_migration_fails_closed(self):

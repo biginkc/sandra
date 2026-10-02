@@ -224,6 +224,10 @@ exec "$REAL_NODE" "$PYTHON_RECORDER" "$@"
 `);
     executable(bin, 'node', `#!/bin/sh
 case "\${1:-}" in
+  scripts/inbox-ci/inbox-migrations.mjs)
+    shift
+    exec "$REAL_NODE" "$REPO_ROOT/scripts/inbox-ci/inbox-migrations.mjs" "$@"
+    ;;
   scripts/ci/provision-disposable-stack.mjs)
     exec "$REAL_NODE" "$PROVISION_RECORDER" "$@"
     ;;

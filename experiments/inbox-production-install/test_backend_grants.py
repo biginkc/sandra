@@ -2,8 +2,10 @@
 from pathlib import Path
 import re
 import unittest
+import json
 
-MIGRATION = Path(__file__).resolve().parents[2] / 'supabase/migrations/20260930040200_inbox_backend_operation_reply.sql'
+MANIFEST = json.loads((Path(__file__).resolve().parents[2] / 'scripts/inbox-ci/inbox-migrations.json').read_text())
+MIGRATION = Path(__file__).resolve().parents[2] / 'supabase/migrations' / f"{MANIFEST[2]['version']}_{MANIFEST[2]['name']}.sql"
 
 
 def assert_private_grants(sql):

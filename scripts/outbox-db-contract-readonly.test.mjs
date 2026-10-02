@@ -10,6 +10,7 @@ import { readonlyGet, compareObservedPlatform, comparePlatform, platformFingerpr
 import { assertTarget, main, parseArgs, compareCatalog, assertSealedPre, catalogChildEnv, platformSummary, catalogFingerprint } from './outbox-db-contract-readonly.mjs';
 import { connectionConfig, pinnedCa } from './outbox-db-contract/connection.mjs';
 import { describePlan, comparePlans, catalogIndexes, compareIndexes, OPERATOR_INDEXES, OPERATOR_RELATIONS } from './outbox-db-contract/plan-contract.mjs';
+import { readManifest, relativePath } from './inbox-ci/inbox-migrations.mjs';
 
 const row = (id, body='a') => ({ id, body, status:'queued', from_address:'x', to_address:'y', created_at:'2026-01-01', scheduled_for:null, property_id:null, contact_id:null });
 function fails(label, fn, pattern) { assert.throws(fn, pattern, label); }
@@ -28,13 +29,14 @@ test('catalog child env derives disposable mode and refuses missing hosted pin',
 });
 
 // Read the DDL, rather than treating the synthetic local tables as the schema.
-// The three 2026093004* files are the Inbox install and define the POST phase.
+// The manifest files are the Inbox install and define the POST phase.
 const tableNames = ['messages', 'memberships', 'organizations', 'properties', 'contacts'];
 const migrationsDir = new URL('../supabase/migrations/', import.meta.url);
+const inboxFiles = new Set(readManifest().map(relativePath));
 function migrationColumns(includeInbox) {
   const columns = Object.fromEntries(tableNames.map(name => [name, new Map()]));
   for (const file of readdirSync(migrationsDir).filter(name => name.endsWith('.sql')).sort()) {
-    if (!includeInbox && /^2026093004\d+_inbox_/.test(file)) continue;
+    if (!includeInbox && inboxFiles.has(`supabase/migrations/${file}`)) continue;
     const sql = readFileSync(new URL(file, migrationsDir), 'utf8').replace(/--[^\n]*/g, '');
     for (const name of tableNames) {
       const create = new RegExp(`\\bcreate\\s+table\\s+(?:if\\s+not\\s+exists\\s+)?(?:public\\.)?${name}\\s*\\(([\\s\\S]*?)^\\);`, 'gim');

@@ -9,8 +9,8 @@
 --
 -- Run this manually, once, by an operator with a direct (non-pooled)
 -- connection, during a low-traffic window, AFTER the Batch A migrations
--- (20260930040000_inbox_control_foundation.sql,
--- 20260930040100_inbox_read_companion.sql; the R1 amendment dropped the
+-- (inbox_control_foundation,
+-- inbox_read_companion from the manifest; the R1 amendment dropped the
 -- auth-upgrade/read-upgrade-* existing-schema files from the fresh-install
 -- set) have applied. Each statement is
 -- idempotent (IF NOT EXISTS) so it is safe to re-run after an interrupted

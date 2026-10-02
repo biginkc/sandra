@@ -10,9 +10,10 @@ import { createFixture } from './outbox-db-contract/fixture.mjs';
 import { runContracts } from './outbox-db-contract/contracts.mjs';
 import { checkPrivileges } from './outbox-db-contract/privileges.mjs';
 import { assertOnlyRunDirDirty, writeManifest, runPath, sha256 } from './outbox-run-record.mjs';
+import { readManifest } from './inbox-ci/inbox-migrations.mjs';
 
 const repo = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
-const MIGRATIONS = ['20260930040000', '20260930040100', '20260930040200'];
+const MIGRATIONS = readManifest(repo).map(entry => entry.version);
 const C_IDS = ['C00','C01','C02','C03','C04','C05','C06','C07','C08','C08b','C09','D01','D02','D03','D04','D05'];
 
 function options(args) {

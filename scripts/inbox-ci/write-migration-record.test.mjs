@@ -10,13 +10,13 @@ import { verifyDownload } from '../ci/pull-heavy-record.mjs';
 const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const git = (repo, ...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
 const copy = (repo, file) => { mkdirSync(path.dirname(path.join(repo, file)), { recursive: true }); cpSync(path.join(source, file), path.join(repo, file)); };
-const versions = ['20260930040000', '20260930040100', '20260930040200'];
+const versions = JSON.parse(readFileSync(path.join(source, 'scripts/inbox-ci/inbox-migrations.json'), 'utf8')).map(entry => entry.version);
 
 test('each W2 lane produces a pullable record and the W1 gate selects both keys', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'w2-record-'));
   const repo = path.join(root, 'repo'); mkdirSync(repo);
   try {
-    for (const file of ['scripts/outbox-run-record.mjs', 'src/lib/supabase/e2e-identity-guard.ts', 'scripts/inbox-ci/write-migration-record.mjs', 'scripts/inbox-ci/migration-dry-run.sh', 'scripts/inbox-ci/catalog-fingerprint.sh', 'scripts/ci/pull-heavy-record.mjs', '.github/workflows/inbox-heavy-verification.yml']) copy(repo, file);
+    for (const file of ['scripts/outbox-run-record.mjs', 'src/lib/supabase/e2e-identity-guard.ts', 'scripts/inbox-ci/write-migration-record.mjs', 'scripts/inbox-ci/inbox-migrations.mjs', 'scripts/inbox-ci/inbox-migrations.json', 'scripts/inbox-ci/migration-dry-run.sh', 'scripts/inbox-ci/catalog-fingerprint.sh', 'scripts/ci/pull-heavy-record.mjs', '.github/workflows/inbox-heavy-verification.yml']) copy(repo, file);
     mkdirSync(path.join(repo, 'e2e/inbox-acceptance'), { recursive: true });
     writeFileSync(path.join(repo, 'e2e/inbox-acceptance/fault-proxy.mjs'), '// synthetic proxy\n');
     writeFileSync(path.join(repo, 'package.json'), '{"type":"module"}\n');

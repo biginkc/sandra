@@ -8,6 +8,8 @@ import unittest
 
 
 SCRIPT = Path(__file__).with_name('analyze_120k.py')
+MANIFEST = json.loads((SCRIPT.resolve().parents[3] / 'scripts/inbox-ci/inbox-migrations.json').read_text())
+FOUNDATION_JSON = f"{MANIFEST[0]['version']}_{MANIFEST[0]['name']}.sql.json"
 
 
 class Analyze120kTests(unittest.TestCase):
@@ -22,7 +24,7 @@ class Analyze120kTests(unittest.TestCase):
             nodes = ''.join(f'table-{n},{n}\n' for n in range(11))
             (run / 'before-relfilenodes.csv').write_text(nodes)
             (run / 'after-relfilenodes.csv').write_text(nodes)
-            (run / '20260930040000_inbox_control_foundation.sql.json').write_text(json.dumps({
+            (run / FOUNDATION_JSON).write_text(json.dumps({
                 'exit': 0, 'wall_ms': wall_ms,
                 'access_exclusive_messages_observed_ms': observed_ms,
             }))

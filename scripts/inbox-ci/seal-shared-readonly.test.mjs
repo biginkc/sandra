@@ -6,6 +6,7 @@ import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } fro
 import os from 'node:os';
 import path from 'node:path';
 import { J5A_CATALOG_DRIFT_SUMMARY, catalogFingerprint, reconstructCatalog, sealSharedReadonly } from './seal-shared-readonly.mjs';
+import { files as inboxMigrationFiles } from './inbox-migrations.mjs';
 import { CATALOG_SECTIONS } from '../outbox-db-contract/catalog-sections.mjs';
 import { NOT_VERIFIED, platformDigest, platformFingerprint } from '../outbox-db-contract/platform.mjs';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -32,6 +33,9 @@ async function fixture({ fixtureItems = [], replayItems = fixtureItems, mutateFi
   const repo = mkdtempSync(path.join(os.tmpdir(), 'shared-seal-'));
   git(repo, 'init', '-q'); git(repo, 'config', 'user.name', 'Test'); git(repo, 'config', 'user.email', 'test@example.invalid');
   for (const file of JSON.parse(readFileSync('scripts/inbox-ci/shared-readonly-operators.json')).operator_scripts) {
+    mkdirSync(path.dirname(path.join(repo, file)), { recursive: true }); copyFileSync(file, path.join(repo, file));
+  }
+  for (const file of ['scripts/inbox-ci/inbox-migrations.json', ...inboxMigrationFiles()]) {
     mkdirSync(path.dirname(path.join(repo, file)), { recursive: true }); copyFileSync(file, path.join(repo, file));
   }
   mkdirSync(path.join(repo, 'experiments/inbox-production-install/drift'), { recursive: true });

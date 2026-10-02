@@ -7,8 +7,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSIONS = ('20260930040000', '20260930040100', '20260930040200')
-NAMES = ('inbox_control_foundation', 'inbox_read_companion', 'inbox_backend_operation_reply')
+MANIFEST_PATH = Path(__file__).with_name('inbox-migrations.json')
+MANIFEST = json.loads(MANIFEST_PATH.read_text())
+VERSIONS = tuple(entry['version'] for entry in MANIFEST)
+NAMES = tuple(entry['name'] for entry in MANIFEST)
+RESERVED_START = min(VERSIONS)
+RESERVED_END = '20261002100260'
 REFUSAL = 'Existing candidate: use validated forward upgrade, never reset'
 
 
@@ -25,19 +29,22 @@ def docker_socket(env):
 
 def migration_files(root):
     directory = Path(root) / 'supabase/migrations'
+    if not directory.is_dir():
+        raise ValueError('Checkout must contain exactly the manifest Inbox migrations; missing=migrations directory')
     expected = [directory / f'{version}_{name}.sql' for version, name in zip(VERSIONS, NAMES)]
-    candidate_suffixes = tuple(f'_{name}.sql' for name in NAMES)
-    actual = sorted(set(directory.glob('2026093004*.sql')) |
-                    {p for p in directory.glob('*.sql') if p.name.endswith(candidate_suffixes)})
+    def inbox_candidate(path):
+        return re.fullmatch(r'\d{14}_inbox_[a-z0-9_]+\.sql', path.name) is not None
+    actual = sorted(p for p in directory.iterdir() if p.is_file() and inbox_candidate(p))
     missing = [p.name for p in expected if not p.is_file()]
     if missing or actual != expected:
-        raise ValueError(f'Checkout must contain exactly the three reviewed 2026093004* migrations; missing={missing}; found={[p.name for p in actual]}')
+        raise ValueError(f'Checkout must contain exactly the manifest Inbox migrations; missing={missing}; found={[p.name for p in actual]}')
     return expected
 
 
 def assert_full_history(root, installed_versions):
+    manifest_files = {f'{version}_{name}.sql' for version, name in zip(VERSIONS, NAMES)}
     expected = {p.name.split('_', 1)[0] for p in (Path(root) / 'supabase/migrations').glob('*.sql')
-                if not p.name.startswith('2026093004')}
+                if p.name not in manifest_files}
     if not expected or set(installed_versions) != expected or len(installed_versions) != len(expected):
         raise ValueError(f'Pre-migration history incomplete: expected={len(expected)} installed={len(installed_versions)}')
 

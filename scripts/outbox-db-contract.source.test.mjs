@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { readManifest, relativePath } from './inbox-ci/inbox-migrations.mjs';
 
+const inboxFiles = new Set(readManifest().map(relativePath));
 const sources = {
   C00: ['supabase/migrations/054_memberships_and_rls_rewrite.sql', 'create policy messages_org_insert on public.messages for insert to authenticated'],
   C01: ['src/app/(dashboard)/messages/actions.ts', '.limit(QUEUE_PAGE_SIZE + 1)'],
@@ -19,15 +21,15 @@ const sources = {
   D01: ['supabase/migrations/054_memberships_and_rls_rewrite.sql', 'create policy messages_org_select on public.messages'],
   D02: ['supabase/migrations/054_memberships_and_rls_rewrite.sql', 'create policy messages_org_update on public.messages'],
   D03: ['supabase/migrations/054_memberships_and_rls_rewrite.sql', 'create policy memberships_self_select on public.memberships'],
-  D04: ['supabase/migrations/20260930040000_inbox_control_foundation.sql', 'CREATE FUNCTION public.inbox_guard_inbound_revision()'],
-  D05: ['supabase/migrations/20260930040000_inbox_control_foundation.sql', 'CREATE TABLE public.inbox_inbound_heads'],
+  D04: [relativePath(readManifest().find(entry => entry.name === 'inbox_control_foundation')), 'CREATE FUNCTION public.inbox_guard_inbound_revision()'],
+  D05: [relativePath(readManifest().find(entry => entry.name === 'inbox_control_foundation')), 'CREATE TABLE public.inbox_inbound_heads'],
 };
 
 test('every post-privilege source hash matches the checked-out migration', () => {
   const pins = JSON.parse(readFileSync('scripts/outbox-db-contract/expected/privileges.post.json', 'utf8'));
   assert.equal(Object.keys(pins.source_sha256).length, 3);
   for (const [file, expected] of Object.entries(pins.source_sha256)) {
-    assert.match(file, /^supabase\/migrations\/2026093004\d{4}_inbox_[a-z_]+\.sql$/);
+    assert(inboxFiles.has(file), `unlisted Inbox source: ${file}`);
     assert(existsSync(file), `post-privilege source missing: ${file}`);
     assert.equal(createHash('sha256').update(readFileSync(file)).digest('hex'), expected, `stale source hash: ${file}`);
   }
@@ -38,7 +40,7 @@ test('every executable contract has one anchored application or schema source', 
   for (const [id, [file, snippet]] of Object.entries(sources)) {
     assert(existsSync(file), `${id} reviewed source missing from checkout: ${file}`);
     const source = readFileSync(file, 'utf8');
-    if (file.startsWith('supabase/migrations/20260930')) assert.equal(createHash('sha256').update(source).digest('hex'), pins.source_sha256[file], `${id} migration source changed`);
+    if (inboxFiles.has(file)) assert.equal(createHash('sha256').update(source).digest('hex'), pins.source_sha256[file], `${id} migration source changed`);
     assert.equal(source.split(snippet).length - 1, 1, `${id} source drift: ${file}`);
   }
 });
