@@ -349,10 +349,14 @@ def generate_drift_record_from_fixture(baseline, observed, fixture, target_ref, 
     return record
 
 
-def drift_fixture_sql(fixture):
+def drift_fixture_sql(fixture, origin=None):
+    if origin not in (None, 'platform', 'nonplatform'):
+        raise ValueError('unknown drift SQL origin')
     validate_drift_items_fixture(fixture)
     statements = []
     for item in fixture['items']:
+        if origin is not None and (item['origin'] == 'platform') != (origin == 'platform'):
+            continue
         if ';' in item['canonical_definition'] or '\x00' in item['canonical_definition']:
             raise ValueError('drift definition contains SQL terminator')
         schema, table = item['object'].split('.', 1)
@@ -428,6 +432,7 @@ def main():
     parser.add_argument('--target-ref')
     parser.add_argument('--candidate-sha')
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--platform-output', type=Path, help='with --output, write platform-origin SQL separately')
     args = parser.parse_args()
     if args.write_drift_items_fixture:
         if not all((args.catalog_observation, args.baseline, args.target_ref, args.output)):
@@ -439,7 +444,14 @@ def main():
     if args.write_drift_fixture_sql:
         if not args.fixture:
             raise SystemExit('--write-drift-fixture-sql requires --fixture')
-        sql = drift_fixture_sql(json.loads(args.fixture.read_text()))
+        fixture = json.loads(args.fixture.read_text())
+        if args.platform_output:
+            if not args.output:
+                raise SystemExit('--platform-output requires --output')
+            args.output.write_text(drift_fixture_sql(fixture, origin='nonplatform'))
+            args.platform_output.write_text(drift_fixture_sql(fixture, origin='platform'))
+            return
+        sql = drift_fixture_sql(fixture)
         if args.output:
             args.output.write_text(sql)
         else:

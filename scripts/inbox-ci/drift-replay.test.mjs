@@ -154,7 +154,11 @@ if (args[0] === '-') process.exit(0);
 const outputIndex = args.indexOf('--output');
 if (outputIndex !== -1) {
   const output = args[outputIndex + 1];
-  if (args.includes('--write-drift-fixture-sql')) writeFileSync(output, '-- local runtime fixture stub\\n');
+  const platformOutputIndex = args.indexOf('--platform-output');
+  if (args.includes('--write-drift-fixture-sql')) {
+    writeFileSync(output, '-- non-platform fixture stub\\n');
+    if (platformOutputIndex !== -1) writeFileSync(args[platformOutputIndex + 1], '-- platform fixture stub\\n');
+  }
   if (args.includes('--write-drift-record')) writeFileSync(output, JSON.stringify({ items: [] }) + '\\n');
 }
 if (args.includes('--preflight') || args.includes('catalog_fingerprint.py')) console.log(JSON.stringify({ sha256: 'a', section_sha256: { all: 'b' } }));`;
@@ -203,7 +207,14 @@ case "\${1:-}" in
   *) echo "unexpected supabase invocation: $*" >&2; exit 90 ;;
 esac
 `);
-    executable(bin, 'psql', '#!/bin/sh\nexit 0\n');
+    executable(bin, 'psql', `#!/bin/sh
+    printf '%s\\n' "$*" >> "$PSQL_RECORD"
+    input="$(cat)"
+    case "$input" in
+      *pg_get_userbyid*) printf '4:4\\n' ;;
+    esac
+    exit 0
+    `);
     executable(bin, 'bash', `#!/bin/sh
 if [ "\${1:-}" = scripts/inbox-ci/build-operator-indexes.sh ]; then exit 0; fi
 exec "$REAL_BASH" "$@"
@@ -270,6 +281,7 @@ esac
       GITHUB_ENV: originalEnvFile,
       REPO_ROOT: repo,
       PROVISION_RECORD: provisionRecord,
+      PSQL_RECORD: path.join(work, 'psql-record.txt'),
       CONSUMER_RECORD: consumerRecord,
       PROVISION_RECORDER: provisionRecorder,
       PYTHON_RECORDER: pythonRecorder,
@@ -287,6 +299,25 @@ esac
     assert.match(records[2].githubEnv, /\/target-2\.env$/);
     for (const [index, record] of records.entries()) assert.deepEqual(record.exportedRefKeys, [], `provision ${index + 1} exported a hosted project ref`);
     for (const ref of REFS) assert(!readFileSync(originalEnvFile, 'utf8').includes(ref), `runner environment contains ${ref}`);
+    const psqlCalls = readFileSync(env.PSQL_RECORD, 'utf8').trim().split('\n');
+    const nonplatformApply = psqlCalls.find(call => call.includes('/fixture.sql'));
+    const platformApply = psqlCalls.find(call => call.includes('/platform-fixture.sql'));
+    const platformOwnerCheck = psqlCalls.find(call => call.includes(' -At ') && !call.includes(' -f '));
+    assert.match(nonplatformApply, /postgresql:\/\/postgres:postgres@127\.0\.0\.1:55422\/postgres/);
+    assert.match(platformApply, /postgresql:\/\/supabase_auth_admin:postgres@127\.0\.0\.1:55422\/postgres/);
+    assert.match(platformOwnerCheck, /postgresql:\/\/supabase_auth_admin:postgres@127\.0\.0\.1:55422\/postgres/);
+    assert.doesNotMatch(nonplatformApply, /supabase_auth_admin/);
+    assert.doesNotMatch(platformApply, /postgres:postgres@/);
+    const laneSource = readFileSync(lane, 'utf8');
+    assert.match(laneSource, /local platform_db_url=/);
+    assert.doesNotMatch(laneSource, /export platform_db_url/);
+    for (const guard of [
+      'HEAVY_LANE=drift-replay required',
+      'Checkout does not match HEAVY_TESTED_SHA',
+      'Checkout must start clean',
+      'Disposable database marker missing',
+      'Non-disposable database URL',
+    ]) assert.match(laneSource, new RegExp(guard));
     // Each target's rehearsal and contract suites must still see their own local stack.
     const consumers = readFileSync(consumerRecord, 'utf8').trim().split('\n');
     assert.deepEqual(consumers.map(line => line.split(' ')[0]), ['rehearse', 'mutations', 'rehearse', 'mutations', 'rehearse', 'mutations', 'rehearse', 'mutations']);
@@ -296,4 +327,16 @@ esac
     await close(supabaseHttp);
     rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
+});
+
+test('drift replay still rejects an invalid lane before touching a stack', async () => {
+  const result = await run('bash', [lane], {
+    cwd: repo,
+    env: {
+      PATH: process.env.PATH,
+      HEAVY_LANE: 'not-drift-replay',
+    },
+  }, 10_000);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /HEAVY_LANE=drift-replay required/);
 });

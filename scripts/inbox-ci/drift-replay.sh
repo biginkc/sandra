@@ -84,8 +84,38 @@ SQL
 materialize_fixture() {
   local fixture=$1 dir=$2
   python3 experiments/inbox-production-install/catalog_fingerprint.py \
-    --write-drift-fixture-sql --fixture "$fixture" --output "$dir/fixture.sql"
+    --write-drift-fixture-sql --fixture "$fixture" --output "$dir/fixture.sql" --platform-output "$dir/platform-fixture.sql"
   psql "$E2E_CI_SUPABASE_DB_URL" -X -v ON_ERROR_STOP=1 -f "$dir/fixture.sql" > "$dir/fixture-apply.txt"
+  local platform_db_url="postgresql://supabase_auth_admin:postgres@${E2E_CI_SUPABASE_DB_URL#postgresql://postgres:postgres@}"
+  [[ "$platform_db_url" == postgresql://supabase_auth_admin:postgres@127.0.0.1:*/* ]] || {
+    echo 'Derived platform fixture URL is not loopback-only' >&2
+    return 3
+  }
+  if ! psql "$platform_db_url" -X -v ON_ERROR_STOP=1 -f "$dir/platform-fixture.sql" > "$dir/platform-fixture-apply.txt"; then
+    echo 'supabase_auth_admin could not apply the platform fixture; refusing a supabase_admin fallback' >&2
+    return 3
+  fi
+  local platform_owner_summary
+  if ! platform_owner_summary="$(psql "$platform_db_url" -X -At -v ON_ERROR_STOP=1 <<'SQL'
+SELECT count(*)::text || ':' || count(*) FILTER (WHERE pg_catalog.pg_get_userbyid(c.relowner) = 'supabase_auth_admin')::text
+FROM pg_catalog.pg_index i
+JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
+WHERE i.indrelid = 'auth.users'::regclass
+  AND c.relname IN (
+    'idx_users_created_at_desc',
+    'idx_users_email',
+    'idx_users_last_sign_in_at_desc',
+    'idx_users_name'
+  );
+SQL
+)"; then
+    echo 'Could not verify platform fixture index ownership' >&2
+    return 3
+  fi
+  [[ "$platform_owner_summary" == '4:4' ]] || {
+    echo "Platform fixture index ownership mismatch: expected 4:4, got ${platform_owner_summary}" >&2
+    return 3
+  }
 }
 
 baseline_dir="$replay_work/baseline"
