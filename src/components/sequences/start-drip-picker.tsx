@@ -88,6 +88,24 @@ export function StartDripPicker({
     return () => trigger?.focus({ preventScroll: true });
   }, [inline, open]);
 
+  // Escape closes only the popup (not the surrounding inbox thread); Tab cycles inside it because it is detached from the page order.
+  function onPopupKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const items = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("input, button:not([disabled])"));
+    if (items.length === 0) { event.preventDefault(); return; }
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || active === event.currentTarget)) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && active === last) { event.preventDefault(); first.focus(); }
+  }
+
   // A fixed popup would drift from its trigger, so any outside scroll or resize closes it.
   useEffect(() => {
     if (inline || !open) return;
@@ -142,7 +160,7 @@ export function StartDripPicker({
         className={`rounded-md border px-3 py-1 text-[11px] font-medium ${triggerTone === "primary" ? "min-h-9 border-primary bg-primary text-primary-foreground" : triggerTone === "outline" ? "min-h-9 border-border bg-card text-foreground" : "min-h-11 border-teal-200 bg-teal-50 text-teal-800"}`}>
         {triggerLabel}
       </button>}
-      {(inline || open) && wrap(<div ref={popupRef} tabIndex={inline ? undefined : -1} onKeyDown={inline ? undefined : (event) => { if (event.key === "Escape") setOpen(false); }} className={inline ? "space-y-2" : "fixed z-50 w-80 rounded-md border bg-white p-3 shadow-lg"} style={inline || !place ? undefined : { left: place.left, top: place.top, bottom: place.bottom }} role={inline ? undefined : "dialog"} aria-label="Start follow-up drip">
+      {(inline || open) && wrap(<div ref={popupRef} tabIndex={inline ? undefined : -1} onKeyDown={inline ? undefined : onPopupKeyDown} className={inline ? "space-y-2" : "fixed z-50 w-80 rounded-md border bg-white p-3 shadow-lg"} style={inline || !place ? undefined : { left: place.left, top: place.top, bottom: place.bottom }} role={inline ? undefined : "dialog"} aria-label="Start follow-up drip">
         {!inline && <p className="mb-2 text-sm font-semibold">Start follow-up drip</p>}
         {!loading && choices.length > 0 && <input type="search" value={query} onChange={(event) => setQuery(event.target.value)}
           placeholder="Search drips" onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); } }} aria-label="Search drips" className="mb-2 w-full rounded-md border px-2 py-1 text-sm" />}

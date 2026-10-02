@@ -145,3 +145,24 @@ it("moves focus into the portaled popup and back to the trigger on Escape", asyn
   expect(screen.queryByRole("dialog", { name: "Start follow-up drip" })).not.toBeInTheDocument();
   expect(trigger).toHaveFocus();
 });
+
+it("keeps Tab inside the portaled popup and does not leak Escape to outer listeners", async () => {
+  listDripChoices.mockResolvedValue({ ok: true, data: [{ id: "a", name: "A — Confirmed owner", textCount: 11, days: 211, firstSend: null }] });
+  const outerEscape = vi.fn();
+  const listener = (event: KeyboardEvent) => { if (event.key === "Escape") outerEscape(); };
+  window.addEventListener("keydown", listener);
+  const user = userEvent.setup();
+  render(<><button type="button">Before</button><StartDripPicker onChoose={vi.fn()} /><button type="button">After</button></>);
+  await user.click(screen.getByRole("button", { name: "Start follow-up drip" }));
+  const search = await screen.findByRole("searchbox", { name: "Search drips" });
+  const choice = screen.getByRole("button", { name: /Confirmed owner/ });
+  choice.focus();
+  await user.tab();
+  expect(search).toHaveFocus();
+  await user.tab({ shift: true });
+  expect(choice).toHaveFocus();
+  await user.keyboard("{Escape}");
+  expect(outerEscape).not.toHaveBeenCalled();
+  expect(screen.queryByRole("dialog", { name: "Start follow-up drip" })).not.toBeInTheDocument();
+  window.removeEventListener("keydown", listener);
+});
