@@ -23,7 +23,7 @@ spec.loader.exec_module(projection)
 
 def main() -> int:
     if "--b4" in sys.argv[1:]:
-        source = (ROOT / "supabase/migrations/20260930040250_inbox_reply_message_projection.sql").read_text()
+        source = projection.MIGRATION.read_text()
         expected = "Deliberately omit query_canceled"
         if expected not in source or "a cancelled drain must not count as a retry" not in source:
             raise AssertionError("B4 drain-cancellation comment/record is missing")

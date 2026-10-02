@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import pg from 'pg';
+import { byName, relativePath } from '../../scripts/inbox-ci/inbox-migrations.mjs';
 
 const { Pool } = pg;
-const MIGRATION = new URL('../../supabase/migrations/20260930040200_inbox_backend_operation_reply.sql', import.meta.url);
+const MIGRATION = new URL(`../../${relativePath(byName('inbox_backend_operation_reply'))}`, import.meta.url);
 const DEFAULT_HOST = '/tmp/sandra-reply-persist-pg.pPmk5e/socket';
 const DEFAULT_PORT = '55436';
 
@@ -35,7 +36,7 @@ function openQuietHoursFixture() {
 async function quietHoursDefinition() {
   const source = await readFile(MIGRATION, 'utf8');
   const match = source.match(/CREATE FUNCTION inbox_reply_preparation\.quiet_hours\(.*?AS \$\$(.*?)\$\$;/s);
-  assert.ok(match, 'quiet_hours 040200 source body was not found');
+  assert.ok(match, 'quiet_hours inbox_backend_operation_reply source body was not found');
   return match[0].replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION');
 }
 

@@ -32,13 +32,28 @@ STATE_PATH = Path("/tmp/sandra-reply-persist-local-env.json")
 DATA_PREFIX = "sandra-reply-persist-local-env-"
 LOCAL_POSTGREST_PORT = 55438
 LOCAL_SUPABASE_PROXY_PORT = 55439
+INBOX_MANIFEST = json.loads((ROOT / "scripts/inbox-ci/inbox-migrations.json").read_text(encoding="utf-8"))
+INBOX_ENTRIES = {entry["name"]: entry for entry in INBOX_MANIFEST}
+
+
+def inbox_migration(name: str) -> Path:
+    entry = INBOX_ENTRIES.get(name)
+    if entry is None:
+        raise RuntimeError(f"Inbox migration is not in the manifest: {name}")
+    return ROOT / "supabase/migrations" / f"{entry['version']}_{entry['name']}.sql"
+
+
+FROZEN_NAMES = (
+    "inbox_control_foundation",
+    "inbox_read_companion",
+    "inbox_backend_operation_reply",
+)
 FROZEN_MIGRATIONS = {
-    "supabase/migrations/20260930040000_inbox_control_foundation.sql": "a31799ba96e6f7264f062019cc8113a6401719a686cc31e569b10d21064bfbf6",
-    "supabase/migrations/20260930040100_inbox_read_companion.sql": "7a2c5f49fc8fcf58c7f37585c3c347869816912e47e504ec47f9cdac198d3dd7",
-    "supabase/migrations/20260930040200_inbox_backend_operation_reply.sql": "2a4b49d43e67963805d547221d04c84c3f7823f430fd9c0cc9b3f22b36844aad",
+    str(inbox_migration(name).relative_to(ROOT)): INBOX_ENTRIES[name]["sha256"]
+    for name in FROZEN_NAMES
 }
-MIGRATION = ROOT / "supabase/migrations/20260930040250_inbox_reply_message_projection.sql"
-QUIET_HOURS_MIGRATION = ROOT / "supabase/migrations/20260930040200_inbox_backend_operation_reply.sql"
+MIGRATION = inbox_migration("inbox_reply_message_projection")
+QUIET_HOURS_MIGRATION = inbox_migration("inbox_backend_operation_reply")
 VENDOR_DIR = ROOT / "experiments/inbox-projection/fixture/vendor"
 VENDOR_MANIFEST = VENDOR_DIR / "manifest.json"
 
@@ -172,7 +187,7 @@ def quiet_hours_source() -> tuple[str, str]:
         re.DOTALL,
     )
     if not match:
-        fail("040200 quiet_hours source body is missing")
+        fail("inbox_backend_operation_reply quiet_hours source body is missing")
     body = match.group(1)
     return body, hashlib.sha256(body.encode("utf-8")).hexdigest()
 
@@ -191,8 +206,8 @@ WHERE n.nspname='inbox_reply_preparation'
 """)
     parts = observed.split("|")
     if parts != [expected_hex, "i", "sql"]:
-        fail(f"quiet_hours {label} preflight failed: expected 040200 body/immutable/sql, observed {observed[:160]}")
-    print(f"LOCAL_ENV_CHECK quiet_hours={label}:040200_body_match source_sha256={digest}", flush=True)
+        fail(f"quiet_hours {label} preflight failed: expected inbox_backend_operation_reply body/immutable/sql, observed {observed[:160]}")
+    print(f"LOCAL_ENV_CHECK quiet_hours={label}:inbox_backend_operation_reply_body_match source_sha256={digest}", flush=True)
 
 
 def bootstrap_sql() -> str:
@@ -412,7 +427,7 @@ def projection_function_signatures() -> list[str]:
             params.append(" ".join(words[1:]) if len(words) > 1 else words[0])
         signatures.append(f"{match.group(1)}({','.join(params)})")
     if len(signatures) != 7:
-        fail(f"040250 function signature scan found {len(signatures)} functions, expected 7")
+        fail(f"inbox_reply_message_projection function signature scan found {len(signatures)} functions, expected 7")
     return signatures
 
 
@@ -486,8 +501,8 @@ ORDER BY signature;
 """).splitlines()
     if sorted(present) != sorted(signatures):
         missing = sorted(set(signatures) - set(present))
-        fail(f"040250 function preflight failed; missing: {', '.join(missing)}")
-    print(f"LOCAL_ENV_CHECK 040250_functions={len(present)}/{len(signatures)}", flush=True)
+        fail(f"inbox_reply_message_projection function preflight failed; missing: {', '.join(missing)}")
+    print(f"LOCAL_ENV_CHECK inbox_reply_message_projection_functions={len(present)}/{len(signatures)}", flush=True)
 
     pre_request_present = sql_output(state, "SELECT to_regprocedure('public.r10_local_pre_request()') IS NOT NULL;").lower() == "t"
     if require_pre_request and not pre_request_present:

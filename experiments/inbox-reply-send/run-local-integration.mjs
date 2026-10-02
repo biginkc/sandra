@@ -5,8 +5,10 @@ import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import process from "node:process";
+import { byName, relativePath } from "../../scripts/inbox-ci/inbox-migrations.mjs";
 
 const root = decodeURIComponent(new URL("../..", import.meta.url).pathname);
+const PROJECTION_MIGRATION = `${root}/${relativePath(byName("inbox_reply_message_projection"))}`;
 const pgHost = process.env.PROJECTION_PGHOST ?? process.env.PGHOST;
 const pgPort = process.env.PROJECTION_PGPORT ?? process.env.PGPORT ?? "5432";
 if (!pgHost) throw new Error("PROJECTION_PGHOST is required");
@@ -218,7 +220,7 @@ async function queryPsql(sql) {
 
 function migrationFunction(name) {
   const migration = readFileSync(
-    `${root}/supabase/migrations/20260930040250_inbox_reply_message_projection.sql`,
+    PROJECTION_MIGRATION,
     "utf8",
   );
   const start = migration.indexOf(`CREATE FUNCTION ${name}(`);

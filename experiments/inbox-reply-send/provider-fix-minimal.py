@@ -9,6 +9,7 @@ state. This never connects to the Homebrew service.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -20,7 +21,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PG_BIN = Path("/opt/homebrew/opt/postgresql@17/bin")
-MIGRATION = ROOT / "supabase/migrations/20260930040250_inbox_reply_message_projection.sql"
+INBOX_MANIFEST = json.loads((ROOT / "scripts/inbox-ci/inbox-migrations.json").read_text(encoding="utf-8"))
+INBOX_ENTRIES = {entry["name"]: entry for entry in INBOX_MANIFEST}
+PROJECTION_ENTRY = INBOX_ENTRIES["inbox_reply_message_projection"]
+MIGRATION = ROOT / "supabase/migrations" / f"{PROJECTION_ENTRY['version']}_{PROJECTION_ENTRY['name']}.sql"
 
 
 def candidate(mode: str) -> str:

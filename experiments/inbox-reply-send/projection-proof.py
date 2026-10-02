@@ -22,7 +22,19 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-MIGRATION = ROOT / "supabase/migrations/20260930040250_inbox_reply_message_projection.sql"
+INBOX_MANIFEST = json.loads((ROOT / "scripts/inbox-ci/inbox-migrations.json").read_text(encoding="utf-8"))
+INBOX_ENTRIES = {entry["name"]: entry for entry in INBOX_MANIFEST}
+
+
+def inbox_migration(name: str) -> Path:
+    entry = INBOX_ENTRIES.get(name)
+    if entry is None:
+        raise RuntimeError(f"Inbox migration is not in the manifest: {name}")
+    return ROOT / "supabase/migrations" / f"{entry['version']}_{entry['name']}.sql"
+
+
+MIGRATION = inbox_migration("inbox_reply_message_projection")
+QUIET_HOURS_MIGRATION = inbox_migration("inbox_backend_operation_reply")
 PGHOST = os.environ.get("PROJECTION_PGHOST")
 PGPORT = os.environ.get("PROJECTION_PGPORT")
 if not PGHOST or not PGPORT:
@@ -49,17 +61,7 @@ def output(result: subprocess.CompletedProcess[str]) -> str:
 
 
 def merged_drips_migration() -> str:
-    result = subprocess.run(
-        [
-            "git",
-            "show",
-            "880c8dfd0de9168374e7ed23b04ce42a866c4e88:supabase/migrations/20260930035000_drip_reply_failed_send_keeps_flag.sql",
-        ],
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return result.stdout
+    return (ROOT / "supabase/migrations/20260930035000_drip_reply_failed_send_keeps_flag.sql").read_text(encoding="utf-8")
 
 
 def migration_fn_body(path: Path, name: str) -> str:
@@ -448,7 +450,7 @@ END $$;"""
         return assert_case(n, body, install_mutated_function("inbox_reply_send.project_message", "jsonb_build_object('inboxReply',marker)", "jsonb_build_object('inboxReply',marker,'generated_by','reply')"))
     if n == 28:
         quiet_hours = migration_fn_body(
-            ROOT / "supabase/migrations/20260930040200_inbox_backend_operation_reply.sql",
+            QUIET_HOURS_MIGRATION,
             "inbox_reply_preparation.quiet_hours",
         )
         shifted_quiet_hours = quiet_hours.replace(
@@ -459,7 +461,7 @@ END $$;"""
         if shifted_quiet_hours == quiet_hours:
             raise RuntimeError("T28 quiet_hours window mutation target not found")
         item_current = migration_fn_body(
-            ROOT / "supabase/migrations/20260930040200_inbox_backend_operation_reply.sql",
+            QUIET_HOURS_MIGRATION,
             "inbox_reply_send.item_current",
         )
         quiet_hours_gate = """ qh:=inbox_reply_preparation.quiet_hours(item->>'state',clock_timestamp());
@@ -480,7 +482,7 @@ DO $$ DECLARE outside_window jsonb; inside_window jsonb;
 BEGIN
  SELECT inbox_reply_preparation.quiet_hours('MO','2026-06-15T04:00:00Z') INTO outside_window;
  SELECT inbox_reply_preparation.quiet_hours('MO','2026-06-15T17:00:00Z') INTO inside_window;
- -- 040200's pure helper returns ok/zone/local_time; item_current maps a
+ -- inbox_backend_operation_reply's pure helper returns ok/zone/local_time; item_current maps a
  -- false result other than unknown_state to the durable outside_window code.
  IF outside_window->>'ok' IS DISTINCT FROM 'false' OR (CASE WHEN outside_window->>'ok'='false' THEN 'outside_window' ELSE outside_window->>'reason' END) IS DISTINCT FROM 'outside_window' THEN RAISE EXCEPTION 'T28-QH real outside-window mismatch: %',outside_window; END IF;
  IF inside_window->>'ok' IS DISTINCT FROM 'true' THEN RAISE EXCEPTION 'T28-QH real inside-window mismatch: %',inside_window; END IF;

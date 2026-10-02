@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -20,14 +21,25 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PROOF = ROOT / "experiments/inbox-reply-send/projection-proof.py"
-QUIET_HOURS_MIGRATION = ROOT / "supabase/migrations/20260930040200_inbox_backend_operation_reply.sql"
+INBOX_MANIFEST = json.loads((ROOT / "scripts/inbox-ci/inbox-migrations.json").read_text(encoding="utf-8"))
+INBOX_ENTRIES = {entry["name"]: entry for entry in INBOX_MANIFEST}
+
+
+def inbox_migration(name: str) -> Path:
+    entry = INBOX_ENTRIES.get(name)
+    if entry is None:
+        raise RuntimeError(f"Inbox migration is not in the manifest: {name}")
+    return ROOT / "supabase/migrations" / f"{entry['version']}_{entry['name']}.sql"
+
+
+QUIET_HOURS_MIGRATION = inbox_migration("inbox_backend_operation_reply")
 STATUS_EVENTS = ROOT / "src/lib/messaging/status-events.ts"
 HANDLER = ROOT / "experiments/inbox-reply-send-worker/handler.mjs"
 T18_INTEGRATION = ROOT / "src/app/api/cron/sequence-tick/route.queue.integration.test.ts"
 LOCAL_INTEGRATION = ROOT / "experiments/inbox-reply-send/run-local-integration.mjs"
 SEND_MODULE = ROOT / "src/lib/messaging/send.ts"
 REPLY_STATUS_ROUTE = ROOT / "src/app/api/webhooks/sendillo/reply-status/route.ts"
-PROJECTION_MIGRATION = ROOT / "supabase/migrations/20260930040250_inbox_reply_message_projection.sql"
+PROJECTION_MIGRATION = inbox_migration("inbox_reply_message_projection")
 WORKER_TEST = ROOT / "experiments/inbox-reply-send-worker/restate-retry.test.mjs"
 WORKER_CORE = ROOT / "experiments/inbox-reply-send-worker/core.mjs"
 WORKER_SERVICE = ROOT / "experiments/inbox-reply-send-worker/service.mjs"
@@ -66,7 +78,7 @@ def quiet_hours_source() -> tuple[str, str]:
         re.DOTALL,
     )
     if not match:
-        raise RuntimeError("ENV FAIL: 040200 quiet_hours source body is missing")
+        raise RuntimeError("ENV FAIL: inbox_backend_operation_reply quiet_hours source body is missing")
     body = match.group(1)
     return body, hashlib.sha256(body.encode("utf-8")).hexdigest()
 
