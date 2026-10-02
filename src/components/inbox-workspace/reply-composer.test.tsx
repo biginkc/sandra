@@ -244,6 +244,9 @@ describe("InboxReplyComposer", () => {
     try {
       testGlobal.IS_REACT_ACT_ENVIRONMENT = false;
       function Harness() {
+        // Stand-in for input arriving before the composer's mount effects run
+        // (the ordering seen in the CI failures): this layout effect fires inside
+        // flushSync, after commit but before passive mount effects flush.
         useLayoutEffect(() => {
           const textarea = container.querySelector("textarea");
           if (!textarea) throw Error("composer did not commit");
