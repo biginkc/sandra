@@ -1,7 +1,7 @@
 {
   "database": "sandra_inbox_install_20260913",
   "marker": "sandra-inbox-production-candidate-owned-synthetic",
-  "image": "electricsql/electric:1.8.1@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139",
+  "image": "ghcr.io/biginkc/inbox-electric:1.8.1-0f40420@sha256:PENDING_EIMG_BUILD",
   "container": "inbox_browser_1789338466867-electric",
   "role": "inbox_browser_repl_1789338466867",
   "publication": "electric_publication_inbox_browser_1789338466867",
@@ -12,5 +12,6 @@
   "nextPid": 20601,
   "processId": 20428,
   "longPollMs": 8000,
-  "note": "Real local password-test lane; production Hugo OAuth is not proven. Host namespace relay overhead included in timings."
+  "status": "UNSEALED_EIMG_REPIN_PENDING",
+  "note": "Historical local password-test lane invalidated by EIMG-7 repin; production Hugo OAuth is not proven. Host namespace relay overhead included in timings."
 }

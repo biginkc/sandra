@@ -6,7 +6,7 @@ and migration release remain explicit incomplete dependencies in candidate.json.
 
 Use a new Sandra Inbox project in the existing biginkc Railway workspace. Seven
 single-replica/one-shot pilot services run in Railway Virginia, near the verified Supabase
-us-east-1 database: private Electric, private Restate, private operation, reply-send,
+us-east-1 database: Electric, private Restate, private operation, reply-send,
 projection, and registration services, plus an authenticated public sync relay. Sandra's existing Next deployment
 calls the relay after its own canonical user/workset authorization; browsers never
 receive the relay secret. Electric and Restate receive no public domain. No new
@@ -19,6 +19,23 @@ browser cookies/credentials and non-allowlisted response headers, buffers at mos
 requires Electric200, not merely process-running202. Next route wiring must pass
 INBOX_ELECTRIC_RELAY_TOKEN through upstreamHeaders; that change is a separate
 reviewed application dependency. Missing credentials fail closed.
+
+## Electric image provenance
+
+`candidate.json` is prepared for the EIMG-7 image
+`ghcr.io/biginkc/inbox-electric:1.8.1-0f40420@sha256:PENDING_EIMG_BUILD`.
+The placeholder is deliberate: deploy and seal consumers refuse it until the
+workflow run URL, attested source commit
+`0f404200402f918a4b1596bc5c8a53479a435349`, RepoDigest, and EIMG-6 OCI labels
+are all verified. The old Docker Hub `electricsql/electric` pin is retired.
+The image is an unofficial rebuild and is not published or endorsed by
+ElectricSQL; its eventual public visibility still requires the recorded owner
+decision in EIMG-R1.
+
+The four R2 first-party images built from this public repository are PUBLIC and
+need no GHCR pull token on Railway. The workflow's `GITHUB_TOKEN` is retained
+only for publishing. An Electric registry credential is an optional path for a
+future private package and is unused by this candidate.
 
 ## Candidate resources and costs
 

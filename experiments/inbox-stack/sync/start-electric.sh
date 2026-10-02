@@ -2,12 +2,21 @@
 set -euo pipefail
 # Only the disposable Inbox T1 stack. Never changes the default Docker context.
 python3 - <<'PY'
-import json, subprocess, time
+import json, subprocess, sys, time
+from pathlib import Path
 HOST='unix:///Users/jarradhenry/.colima/inbox-redesign-20260913/docker.sock'
 NAME='sandra-inbox-stack-electric'
 NETWORK='sandra-inbox-stack-t1'
-IMAGE='electricsql/electric:1.8.1@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139'
-DIGEST=IMAGE.split('@')[1]
+root = next((candidate for candidate in (Path.cwd(), Path.cwd().parents[1]) if (candidate / 'deployment/inbox/candidate.json').is_file()), None)
+if root is None: raise SystemExit('Cannot locate deployment/inbox/candidate.json')
+sys.path.insert(0, str(root / 'experiments/inbox-production-install'))
+from electric_image_contract import CandidateError, load_electric_pin
+try:
+ pin=load_electric_pin(require_ready=True)
+except CandidateError as exc:
+ raise SystemExit(str(exc))
+IMAGE=pin.image
+DIGEST=pin.repository_digest.split('@',1)[1]
 LABEL='sandra-inbox-stack-t1-owned-synthetic'
 # Exact first owned instance predates labels. No other unlabeled container is reusable.
 LEGACY='ede8887c1b120d49bca326f3909af58af47b362f58ba9f7cae0f719bf898de8c'

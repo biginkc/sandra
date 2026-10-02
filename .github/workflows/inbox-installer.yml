@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - 'experiments/inbox-production-install/**'
+      - 'deployment/inbox/candidate.json'
+      - 'deployment/inbox/README.md'
       - 'experiments/inbox-release/execution-stack-compose.yml'
       - 'experiments/inbox-release/test_execution_stack_compose.py'
       - 'experiments/inbox-operation-worker/server.mjs'
@@ -13,6 +15,8 @@ on:
     branches: [main]
     paths:
       - 'experiments/inbox-production-install/**'
+      - 'deployment/inbox/candidate.json'
+      - 'deployment/inbox/README.md'
       - 'experiments/inbox-release/execution-stack-compose.yml'
       - 'experiments/inbox-release/test_execution_stack_compose.py'
       - 'experiments/inbox-operation-worker/server.mjs'

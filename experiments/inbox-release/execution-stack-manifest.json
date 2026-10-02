@@ -176,7 +176,7 @@
         "status": "PINNED_REFERENCE_UNRAN"
       },
       "electric": {
-        "image": "electricsql/electric:1.8.1@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139",
+        "image": "ghcr.io/biginkc/inbox-electric:1.8.1-0f40420@sha256:PENDING_EIMG_BUILD",
         "source": "experiments/inbox-stack/sync/start-electric.sh",
         "container_name": "sandra-inbox-release-electric-20260917",
         "upstream": "http://electric:3000/",
@@ -257,7 +257,7 @@
       "Current and three-times workload profiles/arrival rates remain coordinator-supplied and unmeasured."
     ],
     "production_mapping": {
-      "electric": "deployment/inbox/candidate.json service inbox-electric; private, pinned image, publication only inbox_bridge.summaries",
+      "electric": "deployment/inbox/candidate.json service inbox-electric; EIMG-7 pinned GHCR image, publication only inbox_bridge.summaries; pending digest refuses deploy/seal",
       "restate": "deployment/inbox/candidate.json service inbox-restate; private ingress 8080/admin 9070 with persistent volume",
       "workers": "operation/reply/projection source builds from this manifest; deployment/inbox/candidate.json worker image stays null until digest evidence",
       "relay": "services/inbox-sync-relay with private Railway upstream and server-only bearer token"

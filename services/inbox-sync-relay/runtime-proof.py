@@ -2,6 +2,9 @@
 import hashlib,http.client,json,secrets,subprocess,time,urllib.request,urllib.error,uuid
 from pathlib import Path
 P=Path(__file__).resolve().parent
+import sys
+sys.path.insert(0,str(P.parents[1]/'experiments/inbox-production-install'))
+from electric_image_contract import CandidateError,load_electric_pin
 D=['docker','--host','unix:///Users/jarradhenry/.colima/inbox-redesign-20260913/docker.sock']
 def docker(*args):return subprocess.check_output(D+list(args),text=True).strip()
 def need(value,label):
@@ -10,7 +13,11 @@ def sql(q):return docker('exec','sandra-inbox-stack-db','psql','-U','postgres','
 need(sql("SELECT current_database()||'|'||marker FROM inbox_t1.fixture_identity")=='sandra_inbox_t1|sandra-inbox-stack-t1-owned-synthetic','Wrong T1 database')
 electric=json.loads(docker('inspect','sandra-inbox-stack-electric'))[0]
 need(electric['Id']=='ede8887c1b120d49bca326f3909af58af47b362f58ba9f7cae0f719bf898de8c','Unexpected Electric owner')
-need(electric['Config']['Image']=='electricsql/electric:1.8.1@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139','Unexpected Electric image')
+try:
+ candidate_image=load_electric_pin(require_ready=True).image
+except CandidateError as exc:
+ raise RuntimeError(str(exc)) from exc
+need(electric['Config']['Image']==candidate_image,'Unexpected Electric image')
 need(electric['State']['Running'],'Electric stopped')
 net=electric['NetworkSettings']['Networks'];need(set(net)=={'sandra-inbox-stack-t1'},'Wrong Electric network')
 image=json.loads(docker('image','inspect','sandra-inbox-sync-relay:20260913'))[0]

@@ -6,13 +6,15 @@ import { execFileSync } from "node:child_process";
 import pg from "pg";
 import { createWorkspaceSync, type WorkspaceScope } from "../../src/lib/inbox/workspace-sync";
 import { workspaceId } from "../../src/components/inbox-workspace/selection";
+import { requireCandidateElectricImage } from "../inbox-production-install/electric-image-candidate.mjs";
 
 async function main() {
 if (!process.argv.includes("--run-owned-fixture")) throw Error("Explicit --run-owned-fixture required");
 const dockerHost = "unix:///Users/jarradhenry/.colima/inbox-redesign-20260913/docker.sock";
+const candidateImage = requireCandidateElectricImage();
 const inspected = JSON.parse(execFileSync("docker",["--host",dockerHost,"inspect","sandra-inbox-stack-electric"],{encoding:"utf8"}))[0];
 assert.equal(inspected.Id,"ede8887c1b120d49bca326f3909af58af47b362f58ba9f7cae0f719bf898de8c");
-assert.equal(inspected.Config.Image,"electricsql/electric:1.8.1@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139");
+assert.equal(inspected.Config.Image,candidateImage);
 assert.equal(inspected.State.Running,true);
 assert.deepEqual(inspected.HostConfig.PortBindings,{"3000/tcp":[{HostIp:"127.0.0.1",HostPort:"58783"}]});
 const env = Object.fromEntries(inspected.Config.Env.map((line:string)=>[line.slice(0,line.indexOf("=")),line.slice(line.indexOf("=")+1)]));

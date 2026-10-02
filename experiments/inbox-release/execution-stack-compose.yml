@@ -32,7 +32,9 @@ services:
 
   electric:
     profiles: [full-runtime]
-    image: electricsql/electric:1.8.1@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139
+    # EIMG-7 placeholder: this fixture must refuse to start until candidate.json
+    # receives the reviewed GHCR digest and attestation URL.
+    image: ghcr.io/biginkc/inbox-electric:1.8.1-0f40420@sha256:PENDING_EIMG_BUILD
     pull_policy: never
     container_name: sandra-inbox-release-electric-20260917
     restart: unless-stopped
