@@ -1,0 +1,154 @@
+name: Build Sandra Inbox Electric image
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    name: Build and publish pinned Electric sync-service image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Require dispatch from main
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" != 'refs/heads/main' ]]; then
+            echo "This workflow may only run from refs/heads/main" >&2
+            exit 1
+          fi
+
+      - name: Check out pinned upstream Electric source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: electric-sql/electric
+          ref: 0f404200402f918a4b1596bc5c8a53479a435349
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+          path: electric
+
+      - name: Verify pinned upstream source and release tag
+        id: verify-source
+        working-directory: electric
+        shell: bash
+        env:
+          EXPECTED_COMMIT: 0f404200402f918a4b1596bc5c8a53479a435349
+          UPSTREAM_REPO: https://github.com/electric-sql/electric.git
+        run: |
+          set -euo pipefail
+          checked_out="$(git rev-parse HEAD)"
+          [[ "$checked_out" == "$EXPECTED_COMMIT" ]] || {
+            echo "checked out $checked_out, expected $EXPECTED_COMMIT" >&2
+            exit 1
+          }
+
+          tag_commit="$(git ls-remote "$UPSTREAM_REPO" 'refs/tags/@core/sync-service@1.8.1^{}' | awk 'NR == 1 { print $1 }')"
+          [[ "$tag_commit" =~ ^[a-f0-9]{40}$ ]] || {
+            echo "release tag did not resolve to one commit: $tag_commit" >&2
+            exit 1
+          }
+          [[ "$tag_commit" == "$EXPECTED_COMMIT" ]] || {
+            echo "release tag resolved to $tag_commit, expected $EXPECTED_COMMIT" >&2
+            exit 1
+          }
+
+          echo "tag_commit=$tag_commit" >> "$GITHUB_OUTPUT"
+          echo "tag_check=passed" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR with the workflow token
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and push Electric sync-service
+        id: build-electric
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ./electric/packages/sync-service
+          file: ./electric/packages/sync-service/Dockerfile
+          build-contexts: |
+            electric-telemetry=./electric/packages/electric-telemetry
+          build-args: |
+            ELECTRIC_VERSION=1.8.1
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/biginkc/inbox-electric:1.8.1-0f40420
+          labels: |
+            org.opencontainers.image.title=inbox-electric
+            org.opencontainers.image.version=1.8.1
+            org.opencontainers.image.revision=0f404200402f918a4b1596bc5c8a53479a435349
+            org.opencontainers.image.source=https://github.com/electric-sql/electric
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.description=Unofficial BMH rebuild of ElectricSQL sync-service 1.8.1 from upstream commit 0f40420. Not published or endorsed by ElectricSQL.
+
+      - name: Validate pushed image digest
+        env:
+          DIGEST: ${{ steps.build-electric.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "build output is not an immutable image digest: $DIGEST" >&2
+            exit 1
+          }
+
+      - name: Attest image build provenance
+        uses: actions/attest-build-provenance@62fc1d596301d0ab9914e1fec14dc5c8d93f65cd # v3.2.0
+        with:
+          subject-name: ghcr.io/biginkc/inbox-electric
+          subject-digest: ${{ steps.build-electric.outputs.digest }}
+          push-to-registry: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Write digest evidence
+        env:
+          EVIDENCE_PATH: ${{ runner.temp }}/inbox-electric-image-evidence.json
+          IMAGE_REFERENCE: ghcr.io/biginkc/inbox-electric@${{ steps.build-electric.outputs.digest }}
+          UPSTREAM_COMMIT: 0f404200402f918a4b1596bc5c8a53479a435349
+          TAG_COMMIT: ${{ steps.verify-source.outputs.tag_commit }}
+          TAG_CHECK_RESULT: ${{ steps.verify-source.outputs.tag_check }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const { writeFileSync } = require('node:fs');
+
+          const evidence = {
+            schema_version: 1,
+            image: process.env.IMAGE_REFERENCE,
+            upstream_commit: process.env.UPSTREAM_COMMIT,
+            upstream_tag: '@core/sync-service@1.8.1',
+            tag_check_result: process.env.TAG_CHECK_RESULT,
+            tag_check: {
+              resolved_commit: process.env.TAG_COMMIT,
+              result: process.env.TAG_CHECK_RESULT,
+            },
+            workflow_run_id: Number(process.env.WORKFLOW_RUN_ID),
+            workflow_run_url: process.env.WORKFLOW_RUN_URL,
+          };
+
+          writeFileSync(process.env.EVIDENCE_PATH, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
+          NODE
+          cat "$EVIDENCE_PATH" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload digest evidence artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: inbox-electric-image-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/inbox-electric-image-evidence.json
+          if-no-files-found: error
+          retention-days: 90
