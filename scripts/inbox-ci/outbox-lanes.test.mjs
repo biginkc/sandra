@@ -5,6 +5,9 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+const inboxManifest = JSON.parse(readFileSync('scripts/inbox-ci/inbox-migrations.json', 'utf8'));
+const inboxExcludeArgs = inboxManifest.flatMap(entry => ['--exclude-migrations', `${entry.version}_${entry.name}.sql`]).join(' ');
+
 for (const phase of ['pre', 'post']) {
   test(`outbox-${phase} reaches provisioning without a preset disposable flag`, () => {
     const directory = mkdtempSync(path.join(tmpdir(), `outbox-${phase}-`));
@@ -16,7 +19,14 @@ for (const phase of ['pre', 'post']) {
       };
       stub('git', '#!/bin/sh\nexit 0\n');
       stub('uname', '#!/bin/sh\necho Linux\n');
-      stub('node', '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PROVISION_MARKER"\nexit 47\n');
+      stub('node', `#!/bin/sh
+if [ "$1" = scripts/inbox-ci/inbox-migrations.mjs ]; then
+  printf '%s\\n' ${inboxExcludeArgs}
+  exit 0
+fi
+printf "%s\\n" "$*" >> "$PROVISION_MARKER"
+exit 47
+`);
       const marker = path.join(directory, 'provisioned');
       const env = { ...process.env, PATH: `${directory}:${process.env.PATH}`, HEAVY_LANE: `outbox-${phase}`, CI: '', PROVISION_MARKER: marker };
       delete env.E2E_DISPOSABLE_DATABASE;

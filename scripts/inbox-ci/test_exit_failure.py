@@ -1,5 +1,6 @@
 """Stubbed post-provisioning failures must leave a stageable FAIL run."""
 import os
+import json
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LANES = Path(__file__).resolve().parent
+INBOX_MANIFEST = json.loads((LANES / 'inbox-migrations.json').read_text())
+INBOX_EXCLUDE_LINES = '\n'.join(
+    f"    printf '%s\\n' --exclude-migrations {entry['version']}_{entry['name']}.sql"
+    for entry in INBOX_MANIFEST
+)
+INBOX_FILE_LINES = '\n'.join(
+    f"    printf '%s\\n' supabase/migrations/{entry['version']}_{entry['name']}.sql"
+    for entry in INBOX_MANIFEST
+)
 
 
 class ExitFailureTest(unittest.TestCase):
@@ -17,7 +27,19 @@ class ExitFailureTest(unittest.TestCase):
             bin_dir = tmp / 'bin'
             bin_dir.mkdir()
             node = bin_dir / 'node'
-            node.write_text('#!/bin/bash\n' + node_script)
+            node.write_text(f'''#!/bin/bash
+if [[ "$1" == scripts/inbox-ci/inbox-migrations.mjs ]]; then
+  case "$2" in
+    --exclude-args)
+{INBOX_EXCLUDE_LINES}
+      ;;
+    --files)
+{INBOX_FILE_LINES}
+      ;;
+  esac
+  exit 0
+fi
+''' + node_script)
             node.chmod(0o755)
             docker = bin_dir / 'docker'
             docker.write_text('#!/bin/bash\necho supabase_db_sandra-heavy-test\n')
