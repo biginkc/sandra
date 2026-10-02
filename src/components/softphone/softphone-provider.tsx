@@ -323,8 +323,8 @@ export function SoftphoneProvider({
   const [callingEnabled] = useState(
     () => directMode || isSoftphoneTransportEnabled(),
   );
-  // Direct (pilot) calling has no coaching: no subscription, no coach UI.
-  const [coachUiEnabled] = useState(() => isCoachUiEnabled() && !directMode);
+  // Enable direct coaching only when its separately deployed producer is ready.
+  const [coachUiEnabled] = useState(() => isCoachUiEnabled() && (!directMode || process.env.NEXT_PUBLIC_DIRECT_COACH_ENABLED === "1"));
   const [coachPreference, setCoachPreference] =
     useState<CoachPreference>(readCoachPreference);
   const updateCoachPreference = useCallback((preference: CoachPreference) => {
@@ -850,7 +850,7 @@ export function SoftphoneProvider({
             wrapToken: callToken,
           });
         }
-        setCoachCallId(callToken);
+        setCoachCallId(directMode ? handle.id : callToken);
       };
       const finishTerminal = (kind: "ended" | "failed") => {
         if (terminalPromise) return terminalPromise;
@@ -1090,7 +1090,7 @@ export function SoftphoneProvider({
         // it isn't even guaranteed to have started yet at this point,
         // let alone landed); the client-side retry-with-backoff on
         // CHANNEL_ERROR (use-coach-channel.ts) absorbs whatever gap remains.
-        setCoachCallId(callToken);
+        setCoachCallId(directMode ? callHandle.id : callToken);
       } catch (error) {
         // A provisioned call can fail during RTC setup after start-call
         // succeeded; keep its handle so wrap-up uses the real call identity.
@@ -1785,6 +1785,7 @@ function IdleView({
         <CoachPreferenceControl
           preference={coachPreference}
           onChange={onCoachPreferenceChange}
+          assignedScript={directLine}
         />
       ) : null}
       <input
@@ -1932,9 +1933,11 @@ function IdleView({
 function CoachPreferenceControl({
   preference,
   onChange,
+  assignedScript = false,
 }: {
   preference: CoachPreference;
   onChange: (preference: CoachPreference) => void;
+  assignedScript?: boolean;
 }) {
   return (
     <Collapsible.Root
@@ -2002,7 +2005,9 @@ function CoachPreferenceControl({
             />
           </button>
         </div>
-        {preference.enabled ? (
+        {preference.enabled && assignedScript ? (
+          <p className="mt-2 text-[11px] text-[#a9b6cf]">Uses the coaching script assigned to this line.</p>
+        ) : preference.enabled ? (
           <label className="mt-2 block text-[11px] font-semibold text-[#a9b6cf]">
             Call script
             <select

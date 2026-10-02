@@ -39,6 +39,21 @@ function setup(rowOverrides = {}) {
 const answerBrowser = (id = "evt-answer-browser") => body("call.answered", "browser-leg", { directCallId: CALL, role: "browser" }, id);
 
 describe("processDirectCallWebhook", () => {
+  it("starts Coach only for the connected seller and retries a failed start without redialing", async () => {
+    const { deps, dial, store } = setup({ status: "connected", seller_leg_id: "SELLER", connected_at: T0.toISOString() });
+    const coachConnected = vi.fn().mockRejectedValueOnce(new Error("stream unavailable")).mockResolvedValue(undefined);
+    deps.coachConnected = coachConnected;
+    const event = body("call.bridged", "SELLER", { directCallId: CALL, role: "seller" }, "coach-bridge");
+    await expect(processDirectCallWebhook(event, deps)).rejects.toThrow("stream unavailable");
+    await processDirectCallWebhook(event, deps);
+    await processDirectCallWebhook(event, deps);
+    expect(coachConnected).toHaveBeenCalledTimes(2);
+    expect(dial).not.toHaveBeenCalled();
+    expect(store.calls.get(CALL)?.status).toBe("connected");
+    await processDirectCallWebhook(body("call.bridged", "browser-leg", { directCallId: CALL, role: "browser" }, "browser-coach-bridge"), deps);
+    expect(coachConnected).toHaveBeenCalledTimes(2);
+  });
+
   it("dials the seller once when the browser leg answers", async () => {
     const { store, dial, deps } = setup();
     const out = await processDirectCallWebhook(answerBrowser(), deps);

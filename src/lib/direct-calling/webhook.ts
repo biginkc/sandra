@@ -32,6 +32,8 @@ export type WebhookDeps = {
   report: (error: unknown, tag: string) => void;
   /** Persists and captures call.recording.saved before the event is acknowledged. */
   recordingSaved?: (row: DirectCallFullRow, recording: DirectRecordingSaved) => Promise<void>;
+  /** Starts the bound live Coach stream only after the owned seller is connected. */
+  coachConnected?: (row: DirectCallFullRow) => Promise<void>;
 };
 
 export type WebhookOutcome = { status: 200; result: "duplicate" | "stored_only" | "processed" };
@@ -76,7 +78,11 @@ export function parseDirectEvent(rawBody: string): { eventId: string; event: Dir
     },
     claimedCallId: claimed && UUID.test(claimed) ? claimed.toLowerCase() : null,
     occurredAt,
-    raw: parsed,
+    // Streaming webhooks echo the capability URL. Lifecycle reconciliation
+    // needs identities, never the short-lived admission secret.
+    raw: typeof payload.stream_url === "string"
+      ? { ...parsed, data: { ...data, payload: { ...payload, stream_url: "[redacted]" } } }
+      : parsed,
   };
 }
 
@@ -240,6 +246,14 @@ export async function processDirectCallWebhook(rawBody: string, deps: WebhookDep
     row = await store.findById(row.id); // status moved under us; re-evaluate against fresh state
   }
   if (row) await triggerCleanup(deps, row.operator_user_id);
+  if (row && deps.coachConnected && (parsed.event.type === "call.answered" || parsed.event.type === "call.bridged")) {
+    const fresh = await store.findById(row.id);
+    if (fresh?.status === "connected" && fresh.seller_leg_id === parsed.event.callControlId) {
+      // Leave this event unprocessed on failure so signed provider redelivery
+      // retries the same deterministic streaming command without redialing.
+      await deps.coachConnected(fresh);
+    }
+  }
   await store.markEventProcessed(parsed.eventId, row?.id ?? null);
   return { status: 200, result: "processed" };
 }

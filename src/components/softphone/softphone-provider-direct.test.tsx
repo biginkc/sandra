@@ -13,6 +13,7 @@ const m = vi.hoisted(() => ({
   jitterTransport: vi.fn(),
   directTransport: vi.fn(),
   start: vi.fn(),
+  loadCoachCallScript: vi.fn(),
 }));
 
 vi.mock("@/lib/dialer/actions", () => ({
@@ -40,8 +41,8 @@ vi.mock("@/lib/dialer/telnyx-direct-transport", () => ({
     }
   },
 }));
-vi.mock("@/lib/coach/coach-context-actions", () => ({ loadCoachCallContext: vi.fn() }));
-vi.mock("@/lib/coach/coach-script-actions", () => ({ loadCoachCallScript: vi.fn() }));
+vi.mock("@/lib/coach/coach-context-actions", () => ({ loadCoachCallContext: vi.fn(async () => { throw new Error("context unavailable in transport fixture"); }) }));
+vi.mock("@/lib/coach/coach-script-actions", () => ({ loadCoachCallScript: m.loadCoachCallScript }));
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
     auth: { getSession: () => Promise.resolve({ data: { session: null } }) },
@@ -132,6 +133,7 @@ beforeEach(() => {
   m.jitterTransport.mockImplementation(() => fakeTransport("jitter-handle"));
   m.directTransport.mockImplementation(() => fakeTransport("direct-call-id", { callCapability: "sealed-direct-cap" }));
   m.resumeFailed.mockResolvedValue(undefined);
+  m.loadCoachCallScript.mockResolvedValue({ status: "unavailable" });
   m.prepareManualCall.mockResolvedValue({
     ok: true,
     data: {
@@ -175,6 +177,17 @@ async function placeAndWrap(config?: { transport: "telnyx_direct" | "default" })
 }
 
 describe("SoftphoneProvider pilot (telnyx_direct) mode", () => {
+  it("uses the server-owned direct call identity for coaching when explicitly enabled", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    vi.stubEnv("NEXT_PUBLIC_DIRECT_COACH_ENABLED", "1");
+    const user = userEvent.setup();
+    render(<SoftphoneProvider callingConfig={{ transport: "telnyx_direct" }}><SoftphoneLeadButton lead={lead} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(m.loadCoachCallScript).toHaveBeenCalledWith("direct-call-id"));
+    expect(m.mintStartIntent).not.toHaveBeenCalled();
+    expect(m.jitterTransport).not.toHaveBeenCalled();
+  });
+
   it("never touches a Jitter action, uses the direct transport, and wraps up with the server-sealed identity", async () => {
     await placeAndWrap({ transport: "telnyx_direct" });
     expect(m.loadCallerIds).not.toHaveBeenCalled();
