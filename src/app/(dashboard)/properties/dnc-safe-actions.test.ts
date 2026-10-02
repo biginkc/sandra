@@ -190,10 +190,21 @@ describe("Prospects DNC-safe bulk actions", () => {
     expect(result.ok && result.data.skippedLeads).toBe(2);
   });
 
+  it("filter selection reports DNC-locked prospects exactly like the checkbox path (parity)", async () => {
+    selectionMock.mockResolvedValue({
+      ok: true,
+      data: { eligibleIds: ["eligible"], eligibleCount: 1, dncLockedCount: 1, dncLockedIds: ["locked"], matchedCount: 3, skippedLeads: 1 },
+    });
+    const viaFilters = await assignLeadsBulk({ filters: { search: "x", blockStack: [], origin: "search_page" } }, "user-1");
+    const viaIds = await assignLeadsBulk(["locked-lead", "locked", "eligible"], "user-1");
+    expect(viaFilters).toEqual(viaIds);
+    expect(viaFilters.ok && viaFilters.data.failed.map((f) => f.propertyId)).toEqual(["locked"]);
+  });
+
   it("select-all-matching re-resolves from filters server-side: no id list reaches the action from the client", async () => {
     selectionMock.mockResolvedValue({
       ok: true,
-      data: { eligibleIds: ["eligible"], eligibleCount: 1, dncLockedCount: 1, matchedCount: 5, skippedLeads: 3 },
+      data: { eligibleIds: ["eligible"], eligibleCount: 1, dncLockedCount: 1, dncLockedIds: ["locked"], matchedCount: 5, skippedLeads: 3 },
     });
     const result = await assignLeadsBulk(
       { filters: { search: "jane", blockStack: [], origin: "search_page" } },
@@ -202,7 +213,7 @@ describe("Prospects DNC-safe bulk actions", () => {
 
     expect(assignUnsafe).toHaveBeenCalledWith(["eligible"], "user-1");
     expect(result.ok && result.data.skippedLeads).toBe(3);
-    expect(result.ok && result.data.skipped).toBe(1);
+    expect(result.ok && result.data.failed.map((f) => f.propertyId)).toEqual(["locked"]);
   });
 
   it("reports leads in a selection as skipped instead of silently dropping them", async () => {

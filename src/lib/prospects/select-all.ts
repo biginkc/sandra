@@ -38,6 +38,9 @@ export type SelectAllResult = {
   eligibleIds: string[];
   eligibleCount: number;
   dncLockedCount: number;
+  /** The DNC-locked prospect ids behind `dncLockedCount` (search origin), so
+   *  wrappers can report them like the checkbox path does. */
+  dncLockedIds?: string[];
   matchedCount: number;
   /** Matched rows that are not prospects (leads etc.) and so were skipped. */
   skippedLeads: number;
@@ -178,6 +181,7 @@ export async function selectAllMatching(
       dncLockedCount: searchOrigin
         ? resolved.prospectDncLockedCount
         : resolved.dncLockedCount,
+      dncLockedIds: searchOrigin ? resolved.prospectDncLockedIds : undefined,
       matchedCount: allIds.length,
       skippedLeads: searchOrigin
         ? resolved.skippedLeadCount

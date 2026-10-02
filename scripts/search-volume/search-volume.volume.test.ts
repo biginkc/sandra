@@ -174,6 +174,8 @@ describe.runIf(RUN)("Search volume gate", () => {
     // 3x the same filters without search. Below a 50 ms baseline p95 the ratio is timer/network
     // noise (3x would be under 150 ms absolute), so those cells are asserted on the absolute
     // 1.5 s budget only; every ratio is still written to latest.json.
+    // A missing baseline must fail loudly, never silently skip the ratio check.
+    expect(rows.filter((r) => typeof r.noSearch?.p95 !== "number").map((r) => `${r.query}/${r.filters}: no baseline`)).toEqual([]);
     expect(
       rows.filter((r) => !r.within3x && r.noSearch.p95 >= 50).map((r) => `${r.query}/${r.filters} ratio=${r.ratio}`),
     ).toEqual([]);

@@ -86,22 +86,22 @@ async function runBulkOutcome(
     // locked prospects are reported, never actioned.
     const resolved = await selectAllMatching(filters);
     if (!resolved.ok) return resolved;
-    const { eligibleIds, skippedLeads, dncLockedCount } = resolved.data;
-    const base: BulkOutcome = {
-      succeeded: 0,
-      skipped: dncLockedCount,
-      failed: [],
-    };
+    const { eligibleIds, skippedLeads, dncLockedIds = [] } = resolved.data;
+    // Locked prospects are reported exactly like the checkbox path (failures
+    // with the DNC message), and leads as a skip count.
     if (eligibleIds.length === 0) {
-      return ok({ ...base, ...(skippedLeads > 0 ? { skippedLeads } : {}) });
+      return ok(
+        addLockedFailures(
+          { succeeded: 0, skipped: 0, failed: [] },
+          dncLockedIds,
+          skippedLeads,
+        ),
+      );
     }
     const result = await action(eligibleIds);
-    if (!result.ok) return result;
-    return ok({
-      ...result.data,
-      skipped: result.data.skipped + dncLockedCount,
-      ...(skippedLeads > 0 ? { skippedLeads } : {}),
-    });
+    return result.ok
+      ? ok(addLockedFailures(result.data, dncLockedIds, skippedLeads))
+      : result;
   }
   const { eligible, locked, skippedLeads } =
     await partitionDncLockedPropertyIds(selection as string[]);
