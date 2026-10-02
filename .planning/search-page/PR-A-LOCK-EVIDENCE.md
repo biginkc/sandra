@@ -76,7 +76,21 @@ An earlier batch of 41 harness runs had an empty `SBX_WORKDIR` and pushed once t
 (2026-10-02 09:30:38Z, one session; the 41 runs are void and their logs are preserved outside the repo). My objects were reverted there at
 09:37:19Z. The harness now fails closed (see above) and never targets 54329.
 
-## Residual risk
-The single `LOCK TABLE` statement acquires its tables sequentially (children first, `properties` last). A transaction that
-holds `properties` and then touches `messages` can still deadlock with it. The migration would be the victim: it rolls back
-cleanly and nothing is recorded. Runbook: on SQLSTATE 40P01 (or 55P03) from `db push`, re-run it once.
+## Residual risk (barrier-forced, `lock-order-forced.mjs`, 55329 sandbox, pinned CLI 2.109.1)
+The single `LOCK TABLE` statement acquires its tables sequentially (children first, `properties` last).
+* **Order X** - a writer already holds `properties` (FOR UPDATE), the migration's LOCK takes the child tables and waits on
+  `properties`, then the writer inserts into `messages` after a varied delay (12 runs, delays 0-3500 ms): a real deadlock every
+  time. Whoever has waited longer than `deadlock_timeout` (1 s) runs the detector first and is the victim:
+  delay <= 900 ms -> **migration got 40P01 in 6/6** (rolled back cleanly, push fails, re-run); delay >= 1100 ms -> **the WRITER got
+  40P01 in 6/6** and the migration succeeded. So a production writer CAN be aborted with 40P01 in this order.
+* **Order Y** - a writer holds `messages` first, the migration queues on `messages`, the writer then touches `properties`:
+  **0/12 deadlocks** (writer commits, migration then proceeds). This is the case the up-front LOCK order fixes.
+Runbook: schedule the migration in a quiet window; on 40P01/55P03 from `db push` re-run once; app writers already retry
+transient 40P01. The pattern (a transaction that locks `properties` before touching `messages`) is the only exposure.
+
+## Guard function parity on the shared 54329 stack (read-only select, no writes)
+Identity: container `supabase_db_sandra` id c67fbfb17ba8, database postgres, port 54329, postmaster start 2026-09-30 22:02:13Z.
+`pg_get_functiondef` of `properties_true_dnc_lock_guard` and `serialize_property_safety_before_csv_consent` compared (body,
+whitespace-normalised, plus LANGUAGE / SECURITY DEFINER / search_path attributes) with the latest CREATE OR REPLACE in
+origin/main migrations (`20260815190000_true_dnc_property_lock.sql`, `20260816020000_csv_import_recovery_safety.sql`):
+**both match exactly**; nothing to fix.
