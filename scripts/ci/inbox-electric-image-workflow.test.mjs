@@ -1,11 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import yaml from 'js-yaml';
 
 const WORKFLOW_PATH = '.github/workflows/inbox-electric-image.yml';
+const LICENSE_WRAPPER_PATH = '.github/docker/inbox-electric-license.Dockerfile';
 const EXPECTED_COMMIT = '0f404200402f918a4b1596bc5c8a53479a435349';
 const EXPECTED_TAG = '@core/sync-service@1.8.1';
+const EXPECTED_PUBLISH_TOKEN = 'EIMG-R1-PUBLIC-OK';
 const EXPECTED_BUILDER_ACTIONS = {
   checkout: 'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09',
   login: 'docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9',
@@ -16,6 +19,7 @@ const EXPECTED_BUILDER_ACTIONS = {
 };
 
 const workflow = readFileSync(WORKFLOW_PATH, 'utf8');
+const licenseWrapper = readFileSync(LICENSE_WRAPPER_PATH, 'utf8');
 
 function parseWorkflow(source) {
   return yaml.load(source);
@@ -43,18 +47,35 @@ function stepNamed(parsed, name) {
 
 function assertWorkflow(source) {
   const parsed = parseWorkflow(source);
+  const approval = stepNamed(parsed, 'Require recorded EIMG-R1 public-publish approval');
+  const setupBuildx = stepNamed(parsed, 'Set up Docker Buildx');
+  const stageLicenses = stepNamed(parsed, 'Stage upstream license files');
+  const upstreamBuild = stepNamed(parsed, 'Build upstream Electric sync-service');
   const build = stepNamed(parsed, 'Build and push Electric sync-service');
 
   assert.deepEqual(parsed.on ?? parsed.true, { workflow_dispatch: {} }, 'workflow must be dispatch-only');
+  assert.equal(approval.env.INBOX_ELECTRIC_PUBLISH_OK, '${{ vars.INBOX_ELECTRIC_PUBLISH_OK }}');
+  assert.equal(approval.env.INBOX_ELECTRIC_VISIBILITY, '${{ vars.INBOX_ELECTRIC_VISIBILITY }}');
+  assert.match(approval.run, /publish_ok="\$\{INBOX_ELECTRIC_PUBLISH_OK:-\}"/);
+  assert.match(approval.run, new RegExp(`\\[\\[ "\\$publish_ok" != '${EXPECTED_PUBLISH_TOKEN}' \\]\\]`));
+  assert.match(approval.run, /\[\[ -n "\$visibility" && "\$visibility" != 'public' \]\]/);
   assert.match(source, /if \[\[ "\$\{GITHUB_REF\}" != 'refs\/heads\/main' \]\]; then[\s\S]*?exit 1/);
   assert.match(source, /repository:\s+electric-sql\/electric/);
   assert.match(source, new RegExp(`ref:\\s+${EXPECTED_COMMIT}`));
   assert.doesNotMatch(source, /inputs\./, 'the upstream commit must not be an input');
 
   assert.match(source, /git rev-parse HEAD/);
+  assert.match(source, /git rev-parse '@core\/sync-service@1\.8\.1\^\{commit\}'/);
   assert.match(source, /git ls-remote "\$UPSTREAM_REPO" 'refs\/tags\/@core\/sync-service@1\.8\.1\^\{\}'/);
   assert.match(source, /\[\[ "\$tag_commit" == "\$EXPECTED_COMMIT" \]\]/);
   assert.match(source, /@core\/sync-service@1\.8\.1/);
+  assert.doesNotMatch(source, /^\s+result:\s+process\.env\.TAG_CHECK_RESULT$/m, 'tag_check_result must appear once in evidence');
+
+  assert.equal(stageLicenses['working-directory'], 'electric');
+  assert.match(stageLicenses.run, /cp LICENSE \.inbox-electric-licenses\/LICENSE/);
+  assert.match(stageLicenses.run, /if \[\[ -f NOTICE \]\]/);
+  assert.match(stageLicenses.run, /cp NOTICE \.inbox-electric-licenses\/NOTICE/);
+  assert.equal(setupBuildx.with.driver, 'docker', 'the local wrapper image must be reusable by the second build');
 
   const actionUses = collectUses(parsed);
   assert.ok(actionUses.length > 0, 'workflow must use actions');
@@ -62,13 +83,27 @@ function assertWorkflow(source) {
   for (const action of Object.values(EXPECTED_BUILDER_ACTIONS)) assert.ok(actionUses.includes(action), `missing expected pinned action: ${action}`);
 
   assert.doesNotMatch(source, /\blatest\b/i, 'mutable latest tag is forbidden');
-  assert.equal(build.with.context, './electric/packages/sync-service');
-  assert.equal(build.with.file, './electric/packages/sync-service/Dockerfile');
-  assert.match(build.with['build-contexts'], /^electric-telemetry=\.\/electric\/packages\/electric-telemetry$/m);
-  assert.match(build.with['build-args'], /^ELECTRIC_VERSION=1\.8\.1$/m);
+  assert.equal(upstreamBuild.with.context, './electric/packages/sync-service');
+  assert.equal(upstreamBuild.with.file, './electric/packages/sync-service/Dockerfile');
+  assert.match(upstreamBuild.with['build-contexts'], /^electric-telemetry=\.\/electric\/packages\/electric-telemetry$/m);
+  assert.match(upstreamBuild.with['build-args'], /^ELECTRIC_VERSION=1\.8\.1$/m);
+  assert.equal(upstreamBuild.with.load, true);
+  assert.equal(upstreamBuild.with.platforms, 'linux/amd64');
+  assert.equal(upstreamBuild.with.tags, 'inbox-electric-upstream:1.8.1-0f40420');
+
+  assert.equal(build.with.context, './electric');
+  assert.equal(build.with.file, '.github/docker/inbox-electric-license.Dockerfile');
+  assert.match(build.with['build-contexts'], /^upstream-electric=docker-image:\/\/inbox-electric-upstream:1\.8\.1-0f40420$/m);
   assert.equal(build.with.platforms, 'linux/amd64');
   assert.equal(build.with.push, true);
   assert.equal(build.with.tags, 'ghcr.io/biginkc/inbox-electric:1.8.1-0f40420');
+
+  assert.match(licenseWrapper, /^FROM upstream-electric$/m);
+  assert.deepEqual(
+    licenseWrapper.match(/^COPY\s+.*\s+\/licenses\/.*$/gm),
+    ['COPY .inbox-electric-licenses/ /licenses/'],
+    'the wrapper must have one final COPY into /licenses',
+  );
 
   const attestation = stepNamed(parsed, 'Attest image build provenance');
   assert.equal(attestation.uses, EXPECTED_BUILDER_ACTIONS.attest);
@@ -79,8 +114,44 @@ test('Electric image workflow baseline passes all source, supply-chain, and buil
   assert.doesNotThrow(() => assertWorkflow(workflow));
 });
 
+const approvalStep = stepNamed(parseWorkflow(workflow), 'Require recorded EIMG-R1 public-publish approval');
+
+function runApprovalGuard(overrides = {}) {
+  const env = { ...process.env };
+  delete env.INBOX_ELECTRIC_PUBLISH_OK;
+  delete env.INBOX_ELECTRIC_VISIBILITY;
+  for (const [name, value] of Object.entries(overrides)) {
+    if (value === undefined) delete env[name];
+    else env[name] = value;
+  }
+  return spawnSync('bash', ['-c', approvalStep.run], { env, encoding: 'utf8' });
+}
+
+test('recorded public-publish guard rejects missing and blank approval variables', () => {
+  for (const [label, env] of [['missing', {}], ['blank', { INBOX_ELECTRIC_PUBLISH_OK: '' }]]) {
+    const result = runApprovalGuard(env);
+    assert.notEqual(result.status, 0, `${label} approval variable must fail the guard`);
+  }
+});
+
+test('recorded public-publish guard accepts the exact token and public visibility', () => {
+  assert.equal(runApprovalGuard({ INBOX_ELECTRIC_PUBLISH_OK: EXPECTED_PUBLISH_TOKEN }).status, 0);
+  assert.equal(runApprovalGuard({
+    INBOX_ELECTRIC_PUBLISH_OK: EXPECTED_PUBLISH_TOKEN,
+    INBOX_ELECTRIC_VISIBILITY: 'public',
+  }).status, 0);
+  assert.notEqual(runApprovalGuard({
+    INBOX_ELECTRIC_PUBLISH_OK: EXPECTED_PUBLISH_TOKEN,
+    INBOX_ELECTRIC_VISIBILITY: 'private',
+  }).status, 0);
+});
+
 const mutations = [
   ['fixed source commit', (source) => source.replaceAll(EXPECTED_COMMIT, 'd'.repeat(40))],
+  ['local release tag check', (source) => source.replace(
+    `local_tag_commit="$(git rev-parse '${EXPECTED_TAG}^{commit}')"`,
+    'local_tag_commit="$EXPECTED_COMMIT"',
+  )],
   ['tag check', (source) => source.replace(
     `tag_commit="$(git ls-remote "$UPSTREAM_REPO" 'refs/tags/${EXPECTED_TAG}^{}' | awk 'NR == 1 { print $1 }')"`,
     "tag_commit='not-checked'",
@@ -92,6 +163,10 @@ const mutations = [
   ['main ref guard', (source) => source.replace(
     'if [[ "${GITHUB_REF}" != \'refs/heads/main\' ]]; then',
     'if false; then',
+  )],
+  ['recorded publish guard', (source) => source.replace(
+    /      # Set INBOX_ELECTRIC_PUBLISH_OK[\s\S]*?(?=      - name: Check out pinned upstream Electric source\n)/,
+    '',
   )],
 ];
 
