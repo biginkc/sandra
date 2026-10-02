@@ -83,6 +83,12 @@ import {loadLeadAcquisitionHistory} from "./acquisition-history-actions";
 import { LeadActivityTimeline } from "./lead-activity";
 import type { LeadEvent } from "./lead-events";
 import { AddNoteComposer } from "./notes-feed";
+import { HaveNormaCallButton } from "./have-norma-call-button";
+import {
+  NORMA_REQUEST_VIEW_COLUMNS,
+  findOpenNormaRequest,
+  type NormaRequestView,
+} from "@/lib/norma/view";
 import { SendForSignature } from "./send-for-signature";
 import { ContractsCard } from "./contracts-card";
 import { LeadFilesCard } from "./lead-files-card";
@@ -438,6 +444,18 @@ export default async function LeadDetailPage({
     .limit(200);
   const initialLeadEvents = (leadEventsRaw ?? []) as LeadEvent[];
 
+  // Norma call requests for this lead (members can read them). A read failure
+  // (for example the table not existing yet) just hides the in-flight state;
+  // the request action re-checks everything server-side.
+  const { data: normaRowsRaw } = await supabase
+    .from("norma_call_requests")
+    .select(NORMA_REQUEST_VIEW_COLUMNS)
+    .eq("property_id", lead.id)
+    .order("created_at", { ascending: false })
+    .limit(20);
+  const normaRequests = (normaRowsRaw ?? []) as NormaRequestView[];
+  const openNormaRequest = findOpenNormaRequest(normaRequests);
+
   const usersPromise = loadOrgTeamMembers(lead.org_id, {
     includeInactiveMembers: true,
     historicalAssigneeIds: lead.assigned_user_id
@@ -666,6 +684,12 @@ export default async function LeadDetailPage({
         currentUserId={sessionUser?.id ?? null}
         triggerLabel="Book appt"
       /></fieldset>
+      <fieldset disabled={training} inert={training || undefined} className="contents"><HaveNormaCallButton
+        propertyId={lead.id}
+        sellerName={homeownerName}
+        propertyAddress={lead.address}
+        openRequest={openNormaRequest ? { id: openNormaRequest.id, status: openNormaRequest.status } : null}
+      /></fieldset>
       {zillowHref ? (
         <a
           href={zillowHref}
@@ -862,6 +886,7 @@ export default async function LeadDetailPage({
               noteError={notesError?.message ?? null}
               callError={callRollupError?.message ?? null}
               eventError={leadEventsError?.message ?? null}
+              normaRequests={normaRequests}
               authorEmails={authorEmails}
               currentUserId={sessionUser?.id ?? null}
               currentUserEmail={sessionUser?.email ?? null}
