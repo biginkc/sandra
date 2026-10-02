@@ -116,6 +116,7 @@ SQL
     echo "Platform fixture index ownership mismatch: expected 4:4, got ${platform_owner_summary}" >&2
     return 3
   }
+  printf 'Platform fixture index ownership target=%s summary=%s\n' "$(basename "$dir")" "$platform_owner_summary"
 }
 
 baseline_dir="$replay_work/baseline"

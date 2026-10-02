@@ -290,6 +290,8 @@ esac
     const result = await run('bash', [lane], { cwd: repo, env }, 10_000);
     const provisionOutput = existsSync(provisionRecord) ? readFileSync(provisionRecord, 'utf8') : '<provision record missing>';
     assert.equal(result.status, 77, `${result.error?.message ?? ''}\n${result.stdout}\n${result.stderr}\n${provisionOutput}`);
+    assert.match(result.stdout, /Platform fixture index ownership target=target-1 summary=4:4/);
+    assert.match(result.stdout, /Platform fixture index ownership target=target-2 summary=4:4/);
 
     const records = readFileSync(provisionRecord, 'utf8').trim().split('\n').map(line => JSON.parse(line));
     assert.equal(records.length, 3, result.stderr);
