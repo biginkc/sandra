@@ -327,7 +327,7 @@ export function StepProgress({ jobId }: { jobId: string }) {
       {isTerminal && (
         <CardFooter className="flex flex-wrap gap-2">
           <Link href="/properties?imported=today" className={buttonVariants()}>
-            Review imported Prospects
+            Review imported in Search
           </Link>
           {canRetryRows && (
             <Button

@@ -40,7 +40,7 @@ test("production canary promotes a canary prospect into the leads pipeline", asy
       timeout: 10_000,
     });
     await expect(page.getByText(address)).toBeVisible({ timeout: 20_000 });
-    await expect(page.getByText(/Showing 1.*of 1 prospect/i)).toBeVisible();
+    await expect(page.getByText(/Showing 1.*of 1 result/i)).toBeVisible();
 
     await page
       .locator(`tbody input[type="checkbox"][aria-label="Select ${address}"]`)

@@ -3,8 +3,8 @@ import { renderHook, act } from "@testing-library/react";
 
 const countMock = vi.fn();
 
-vi.mock("@/app/(dashboard)/properties/_actions/count", () => ({
-  countProspectsForFilter: (...args: unknown[]) => countMock(...args),
+vi.mock("@/app/(dashboard)/search/actions", () => ({
+  searchCount: (...args: unknown[]) => countMock(...args),
 }));
 
 beforeEach(() => {

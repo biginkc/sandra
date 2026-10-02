@@ -6,22 +6,26 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   createDialerBatchFromFilters,
   createDialerBatchFromPropertyIds,
-  getAllMatchingProspectIds,
+  getAllMatchingProspectSelection,
   previewBatchEligibilityAction,
   toastSuccess,
 } = vi.hoisted(() => ({
   createDialerBatchFromFilters: vi.fn(),
   createDialerBatchFromPropertyIds: vi.fn(),
-  getAllMatchingProspectIds: vi.fn(),
+  getAllMatchingProspectSelection: vi.fn(),
   previewBatchEligibilityAction: vi.fn(),
   toastSuccess: vi.fn(),
 }));
 
-vi.mock("./actions", () => ({
-  createDialerBatchFromFilters,
-  createDialerBatchFromPropertyIds,
-  getAllMatchingProspectIds,
-  previewBatchEligibilityAction,
+// The modal talks to the Search entry points only; adapters map them onto the per-case mocks.
+type Sel = { kind: "ids"; ids: string[] } | { kind: "filters"; filters: { search: string | null; blockStack: unknown[]; imported: "today" | null } };
+vi.mock("../search/actions", () => ({
+  searchDialerPreview: ({ selection }: { selection: Sel }) =>
+    previewBatchEligibilityAction(selection.kind === "ids" ? selection.ids : selection),
+  searchDialerCreate: ({ selection, title }: { selection: Sel; title?: string }) =>
+    selection.kind === "ids"
+      ? createDialerBatchFromPropertyIds(selection.ids, { sourceKind: "selected_ids", title })
+      : createDialerBatchFromFilters({ ...selection.filters, title }),
 }));
 
 vi.mock("sonner", () => ({
@@ -63,13 +67,19 @@ function renderModal(
 beforeEach(() => {
   createDialerBatchFromFilters.mockReset();
   createDialerBatchFromPropertyIds.mockReset();
-  getAllMatchingProspectIds.mockReset();
+  getAllMatchingProspectSelection.mockReset();
   previewBatchEligibilityAction.mockReset();
   toastSuccess.mockReset();
 
-  getAllMatchingProspectIds.mockResolvedValue({
+  getAllMatchingProspectSelection.mockResolvedValue({
     ok: true,
-    data: ["p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8"],
+    data: {
+      eligibleIds: ["p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8"],
+      eligibleCount: 8,
+      dncLockedCount: 0,
+      matchedCount: 8,
+      skippedLeads: 0,
+    },
   });
   previewBatchEligibilityAction.mockResolvedValue({
     ok: true,
@@ -191,6 +201,41 @@ describe("<BatchCreateModal />", () => {
     );
   });
 
+  it("filter mode shows how many leads were skipped and resolves the filters server-side", async () => {
+    const user = userEvent.setup();
+    getAllMatchingProspectSelection.mockResolvedValue({
+      ok: true,
+      data: { eligibleIds: ["p1", "p2"], eligibleCount: 2, dncLockedCount: 0, matchedCount: 5, skippedLeads: 3 },
+    });
+    previewBatchEligibilityAction.mockResolvedValue({
+      ok: true,
+      data: { callable: 5, blocked: { do_not_contact: 2 }, missing: 1, skippedLeads: 3 },
+    });
+    createDialerBatchFromFilters.mockResolvedValue({
+      ok: true,
+      data: { batchId: "batch-s", counts: { callable: 1, blocked: {}, missing: 0 }, skippedLeads: 3 },
+    });
+    renderModal({
+      filterArgs: { search: "foo", blockStack: defaultBlockStack },
+      totalCount: 2,
+    });
+    expect(await screen.findByTestId("batch-skipped-leads")).toHaveTextContent(/3 leads skipped/);
+    // The preview resolves the filters server-side: the modal sends the filters, never an id list.
+    expect(previewBatchEligibilityAction).toHaveBeenCalledWith({
+      kind: "filters",
+      filters: expect.objectContaining({ search: "foo" }),
+    });
+    expect(getAllMatchingProspectSelection).not.toHaveBeenCalled();
+
+    await screen.findByText("5 callable");
+    await user.click(screen.getByRole("button", { name: /Create batch/i }));
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+    expect(toastSuccess.mock.calls[0][0]).toContain("3 leads skipped");
+    expect(createDialerBatchFromFilters).toHaveBeenCalledWith(
+      expect.objectContaining({ search: "foo" }),
+    );
+  });
+
   it("shows sonner toast on success and closes", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
@@ -220,26 +265,31 @@ describe("<BatchCreateModal />", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("shows dashes instead of skeletons when loading matching prospects fails", async () => {
-    getAllMatchingProspectIds.mockResolvedValue({
+  it("shows dashes instead of skeletons when the server-side filter preview fails", async () => {
+    previewBatchEligibilityAction.mockResolvedValue({
       ok: false,
-      error: {
-        code: "MATCHING_PROSPECTS_FAILED",
-        message: "Could not load prospects",
-      },
+      error: { code: "SELECT_ALL_TOO_LARGE", message: "Could not load prospects" },
     });
     renderModal({
       filterArgs: { blockStack: defaultBlockStack },
       totalCount: 8,
     });
 
-    expect(
-      await screen.findByText("Could not load prospects"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Could not load prospects")).toBeInTheDocument();
     expect(screen.getByText("— callable")).toBeInTheDocument();
     expect(screen.getByText("— blocked")).toBeInTheDocument();
     expect(screen.getByText("— missing phone")).toBeInTheDocument();
     expect(document.querySelectorAll('[data-slot="skeleton"]')).toHaveLength(0);
+  });
+
+  it("checkbox selection from the Search page reports server-derived skipped leads (no hardcoded zero)", async () => {
+    previewBatchEligibilityAction.mockResolvedValue({
+      ok: true,
+      data: { callable: 2, blocked: {}, missing: 0, skippedLeads: 4 },
+    });
+    renderModal({ selectedIds: ["p1", "p2"] });
+    expect(await screen.findByTestId("batch-skipped-leads")).toHaveTextContent(/4 leads skipped/);
+    expect(previewBatchEligibilityAction).toHaveBeenCalledWith(["p1", "p2"]);
   });
 
   it("shows dashes instead of skeletons when callability preview fails", async () => {

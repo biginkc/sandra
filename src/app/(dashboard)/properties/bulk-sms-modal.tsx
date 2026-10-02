@@ -1,5 +1,7 @@
 "use client";
 
+import type { SearchSelection } from "@/lib/prospects/search-selection-input";
+import type { SelectionFilters } from "@/lib/prospects/select-all";
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -17,17 +19,14 @@ import type { DeliveryCatalog } from "@/lib/messaging/delivery";
 
 import type { AudienceLineTypeAssessment } from "@/lib/messaging/audience-assessment";
 
-import {
-  listDeliveryOptions,
-  refreshDeliveryCatalog,
-} from "../campaigns/actions";
 import { DeliverySelect } from "../campaigns/delivery-select";
 import {
-  assessBulkSmsAudience,
-  bulkQueueSms,
-  countAlreadyContacted,
-  listSmsTemplateCategories,
-} from "./actions";
+  searchBulkSms,
+  searchDeliveryOptions,
+  searchRefreshDeliveryCatalog,
+  searchSmsAudience,
+  searchSmsTemplateCategories,
+} from "../search/actions";
 import {
   SMS_PACING_JITTER_PCT,
   SMS_PACING_SECONDS,
@@ -39,6 +38,10 @@ type Category = { category: string; count: number };
 type Props = {
   open: boolean;
   propertyIds: string[];
+  /** Select-all-matching: the server re-resolves these filters; no id list is sent. */
+  filterArgs?: SelectionFilters;
+  /** Size of the selection when `filterArgs` is used (display and defaults only). */
+  selectionCount?: number;
   onClose: () => void;
   onQueued: (succeeded: number) => void;
 };
@@ -137,7 +140,18 @@ export function computeDrain(args: {
   };
 }
 
-export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
+export function BulkSmsModal({
+  open,
+  propertyIds,
+  filterArgs,
+  selectionCount,
+  onClose,
+  onQueued,
+}: Props) {
+  const selection: SearchSelection = filterArgs
+    ? { kind: "filters", filters: filterArgs }
+    : { kind: "ids", ids: propertyIds };
+  const selectionSize = filterArgs ? (selectionCount ?? 0) : propertyIds.length;
   const router = useRouter();
   const [categories, setCategories] = useState<Category[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>("");
@@ -165,11 +179,11 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
     if (syncing) return;
     setSyncing(true);
     void (async () => {
-      const result = await callAction(refreshDeliveryCatalog(), {
+      const result = await callAction(searchRefreshDeliveryCatalog(), {
         fallbackMessage: "Could not sync the provider catalog",
       });
       if (result.ok) {
-        const reloaded = await listDeliveryOptions();
+        const reloaded = await searchDeliveryOptions();
         if (reloaded.ok) setCatalog(reloaded.data);
       }
       setSyncing(false);
@@ -185,19 +199,22 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
 
   // Stable key so the count-fetch effect doesn't re-run on every parent render
   // even if the parent passes a fresh array reference each time.
-  const propertyIdsKey = useMemo(() => propertyIds.join(","), [propertyIds]);
+  const propertyIdsKey = useMemo(
+    () => (filterArgs ? `filters:${JSON.stringify(filterArgs)}` : propertyIds.join(",")),
+    [filterArgs, propertyIds],
+  );
 
   // Skip-contacted defaults ON for >50 selections per the locked plan rule.
   // Re-derive the default whenever the selection identity changes — render
   // path, no synchronous setState-in-effect (which the project's lint rule
   // flags as cascading-render risk).
   const [skipContacted, setSkipContacted] = useState<boolean>(
-    propertyIds.length > SKIP_DEFAULT_THRESHOLD,
+    selectionSize > SKIP_DEFAULT_THRESHOLD,
   );
   const [skipContactedKey, setSkipContactedKey] = useState<string>(propertyIdsKey);
   if (skipContactedKey !== propertyIdsKey) {
     setSkipContactedKey(propertyIdsKey);
-    setSkipContacted(propertyIds.length > SKIP_DEFAULT_THRESHOLD);
+    setSkipContacted(selectionSize > SKIP_DEFAULT_THRESHOLD);
   }
 
   // Contacted-count: fetched on open. We reset to `null` inside the async
@@ -209,8 +226,9 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
   // text. Landlines are always excluded server-side; unknowns need the
   // opt-in toggle below. Re-defaults to OFF per selection, same pattern
   // as skipContacted.
-  const [assessment, setAssessment] =
-    useState<AudienceLineTypeAssessment | null>(null);
+  const [assessment, setAssessment] = useState<
+    (AudienceLineTypeAssessment & { skippedLeads?: number }) | null
+  >(null);
   const [includeUnknown, setIncludeUnknown] = useState(false);
   const [assessmentKey, setAssessmentKey] = useState(propertyIdsKey);
   if (assessmentKey !== propertyIdsKey) {
@@ -221,19 +239,19 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
 
   useEffect(() => {
     if (!open) return;
-    listSmsTemplateCategories().then((result) => {
+    searchSmsTemplateCategories().then((result) => {
       if (result.ok) {
         setCategories(result.data);
         setSelectedCategory(result.data[0]?.category ?? "");
       }
     });
-    countAlreadyContacted(propertyIds).then((result) => {
-      if (result.ok) setContactedCount(result.data);
+    searchSmsAudience({ selection }).then((result) => {
+      if (result.ok) {
+        setContactedCount(result.data.alreadyContacted);
+        setAssessment(result.data);
+      }
     });
-    assessBulkSmsAudience(propertyIds).then((result) => {
-      if (result.ok) setAssessment(result.data);
-    });
-    listDeliveryOptions().then((result) => {
+    searchDeliveryOptions().then((result) => {
       if (result.ok) setCatalog(result.data);
       setCatalogLoading(false);
     });
@@ -259,7 +277,7 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
   // size so the button isn't disabled by a slow fetch.
   const textableCount =
     assessment === null
-      ? propertyIds.length
+      ? selectionSize
       : assessment.mobile + (includeUnknown ? assessment.unknown : 0);
 
   const drain = useMemo(
@@ -311,7 +329,7 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
         : { ...baseOpts, body: customBody.trim() };
 
     startTransition(async () => {
-      const result = await callAction(bulkQueueSms(propertyIds, opts), {
+      const result = await callAction(searchBulkSms({ selection, opts }), {
         fallbackMessage: "Bulk SMS failed",
       });
       if (!result.ok) {
@@ -334,7 +352,7 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
       if (result.ok) {
         if (result.data.deferred) {
           toast.success(
-            `Queueing ${result.data.deferred.total.toLocaleString()} messages in the background`,
+            `Queueing ${result.data.deferred.total.toLocaleString()} messages in the background${result.data.skippedLeads ? ` · ${result.data.skippedLeads} lead${result.data.skippedLeads === 1 ? "" : "s"} skipped` : ""}`,
             {
               description:
                 "Track progress on /jobs — messages appear in the Outbox as they're scheduled.",
@@ -345,11 +363,13 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
           router.push(`/jobs/${result.data.deferred.jobId}`);
           return;
         }
-        const { succeeded, skipped, failed } = result.data;
+        const { succeeded, skipped, failed, skippedLeads } = result.data;
         const parts: string[] = [];
         if (succeeded > 0)
           parts.push(`${succeeded} message${succeeded === 1 ? "" : "s"} queued`);
         if (skipped > 0) parts.push(`${skipped} skipped`);
+        if (skippedLeads && skippedLeads > 0)
+          parts.push(`${skippedLeads} lead${skippedLeads === 1 ? "" : "s"} skipped`);
         if (failed.length > 0) parts.push(`${failed.length} failed`);
         if (failed.length > 0) {
           toast.warning(parts.join(" · "), {
@@ -381,8 +401,8 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>
-            Bulk SMS — {propertyIds.length} prospect
-            {propertyIds.length === 1 ? "" : "s"}
+            Bulk SMS — {selectionSize} prospect
+            {selectionSize === 1 ? "" : "s"}
           </DialogTitle>
         </DialogHeader>
 
@@ -637,6 +657,16 @@ export function BulkSmsModal({ open, propertyIds, onClose, onQueued }: Props) {
                     ? ` · ${assessment.noPhone.toLocaleString()} no phone`
                     : ""}
                 </p>
+                {assessment.skippedLeads && assessment.skippedLeads > 0 ? (
+                  <p
+                    className="text-muted-foreground"
+                    data-testid="bulk-sms-skipped-leads"
+                  >
+                    {assessment.skippedLeads.toLocaleString()} lead
+                    {assessment.skippedLeads === 1 ? "" : "s"} skipped (bulk
+                    texting is for prospects only)
+                  </p>
+                ) : null}
                 {assessment.unknown > 0 ? (
                   <label className="flex items-center gap-2">
                     <input

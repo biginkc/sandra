@@ -22,6 +22,8 @@ export default defineConfig({
     include: [
       "src/lib/prospects/filter-to-supabase.integration.test.ts",
       "src/lib/prospects/filter-cache-triggers.integration.test.ts",
+      "src/lib/prospects/search-filter-composition.integration.test.ts",
+      "src/lib/prospects/search-eval-budget.integration.test.ts",
     ],
     environment: "node",
     reporters: ["default"],

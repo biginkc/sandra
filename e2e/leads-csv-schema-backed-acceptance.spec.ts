@@ -125,7 +125,7 @@ test("schema-backed Prospects safety and CSV review work at desktop and narrow w
   });
 
   await page.goto("/properties");
-  await expect(page.getByRole("heading", { name: "Prospects" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Search" })).toBeVisible();
   await expect(page.getByText("101 Permanent DNC Way")).toBeVisible();
   await expect(page.getByText("⊘ DO NOT CONTACT")).toBeVisible();
   await expect(
@@ -134,11 +134,19 @@ test("schema-backed Prospects safety and CSV review work at desktop and narrow w
   await expect(
     page.getByRole("checkbox", { name: "Select 101 Permanent DNC Way" }),
   ).toHaveCount(0);
-  await expect(page.getByText("202 SMS Only Ave")).toBeVisible();
-  await expect(page.getByText("SMS opted out")).toBeVisible();
+  // Search lists leads and prospects together, so the SMS-suppressed LEAD renders the same badge:
+  // scope each assertion to its own row.
+  const prospectRow = page.getByRole("row", { name: /202 SMS Only Ave/ });
+  await expect(prospectRow).toBeVisible();
+  await expect(prospectRow.getByText("SMS opted out")).toBeVisible();
+  await expect(prospectRow.getByTestId(/^prospects-status-/)).toHaveText("Prospect");
   await expect(
     page.getByRole("checkbox", { name: "Select 202 SMS Only Ave" }),
   ).toBeVisible();
+  const leadRow = page.getByRole("row", { name: /303 SMS Only Lead Blvd/ });
+  await expect(leadRow).toBeVisible(); // leads appear by default
+  await expect(leadRow.getByText("SMS opted out")).toBeVisible();
+  await expect(leadRow.getByTestId(/^prospects-status-/)).toHaveText("New lead");
   await expect(
     page.getByRole("link", { name: "Import prospects" }),
   ).toBeVisible();

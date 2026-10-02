@@ -22,7 +22,7 @@ export function LeadMediaHero({
   locationLine: string;
   homeownerName: string | null;
   collectionHref?: "/leads" | "/properties" | "/my-leads";
-  collectionLabel?: "Leads" | "Prospects" | "My Leads";
+  collectionLabel?: "Leads" | "Search" | "My Leads";
   actions: React.ReactNode;
 }) {
   const description = [locationLine, homeownerName].filter(Boolean).join(" · ");

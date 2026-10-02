@@ -140,3 +140,97 @@ jobs:
           name: playwright-report
           path: playwright-report/
           retention-days: 14
+
+  search-local-suites:
+    name: Search RPC, oracle and composition suites (disposable DB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CI: "1"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The legacy-isolation guard diffs against the merge-base with origin/main.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install dependencies
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm ci
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.109.1
+
+      # Owns its own disposable database on this runner (loopback only). The
+      # suites below call the local-only guard and refuse any other target.
+      - name: Provision disposable database
+        run: node scripts/provision-e2e-local-database.mjs
+
+      - name: Legacy Prospects actions are untouched (git diff vs merge-base)
+        run: |
+          git fetch origin main
+          base="$(git merge-base origin/main HEAD)"
+          git diff --exit-code "$base" -- \
+            "src/app/(dashboard)/properties/actions.ts" \
+            "src/app/(dashboard)/properties/dnc-safe-actions.ts" \
+            "src/app/(dashboard)/properties/promote-leads-actions.ts" \
+            "src/app/(dashboard)/properties/_actions/count.ts" \
+            "src/app/(dashboard)/leads/actions.ts" \
+            "src/app/(dashboard)/campaigns/actions.ts" \
+            src/lib/prospects/eligibility.ts \
+            src/lib/messaging/bulk-queue.ts \
+            src/workflows/bulk-sms.ts
+
+      - name: Search oracle reference matcher (unit)
+        run: npm run test:search-oracle
+
+      - name: search_properties RPC and independent oracle comparison
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npm run test:search-local
+
+      # Every SQL mutation must be caught by the RPC suite: a surviving mutation means a test gap.
+      - name: search_properties mutation harness (each mutation must fail the suite)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          # No-op mutations (a regex that stopped matching) fail here, before any suite run.
+          npx tsx scripts/check-search-mutations.ts
+          names="$(npx tsx -e 'console.log(require("./tests/search-oracle/sql-mutations").MUTATION_NAMES.join(" "))' 2>/dev/null)"
+          test -n "$names" || { echo "::error::no mutations listed"; exit 1; }
+          for m in $names; do
+            if SEARCH_PROPS_MUTATION="$m" npx vitest run --config vitest.local-integration.config.ts \
+                 supabase/migrations/20261002110100_search_properties.integration.test.ts > "mutation-$m.log" 2>&1; then
+              echo "::error::mutation $m SURVIVED (the suite passed against broken SQL)"; tail -20 "mutation-$m.log"; exit 1
+            fi
+            # A harness/setup crash is not a kill: require real failing assertions.
+            sed 's/\x1b\[[0-9;]*m//g' "mutation-$m.log" > "mutation-$m.plain.log"
+            if ! grep -qE "Tests +[0-9]+ failed" "mutation-$m.plain.log"; then
+              echo "::error::mutation $m crashed the harness instead of failing tests"; tail -30 "mutation-$m.log"; exit 1
+            fi
+            echo "mutation $m killed: $(grep -E 'Tests ' "mutation-$m.plain.log" | head -1)"
+          done
+
+      - name: Search x filter composition and evaluation budget
+        env:
+          FILTER_LOCAL_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          FILTER_LOCAL_API_URL: ${{ env.TEST_SUPABASE_URL }}
+          FILTER_LOCAL_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          FILTER_LOCAL_SERVICE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npm run test:search-filter-local
+
+      - name: Destroy disposable database
+        if: always() && env.E2E_LOCAL_WORKDIR != ''
+        run: supabase stop --workdir "$E2E_LOCAL_WORKDIR" --no-backup

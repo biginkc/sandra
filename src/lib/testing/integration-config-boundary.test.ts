@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import localConfig from "../../../vitest.local-integration.config";
 import remoteConfig from "../../../vitest.integration.config";
+import filterLocalConfig from "../../../vitest.filter-local.config";
 
 const root = path.resolve(__dirname, "../../..");
 const migrationsDir = path.join(root, "supabase/migrations");
@@ -18,7 +19,7 @@ const migrationsDir = path.join(root, "supabase/migrations");
  */
 const loopbackOnlySuites = readdirSync(migrationsDir)
   .filter((name) => name.endsWith(".integration.test.ts"))
-  .filter((name) => readFileSync(path.join(migrationsDir, name), "utf8").includes("requireLoopbackPostgresUrl"))
+  .filter((name) => readFileSync(path.join(migrationsDir, name), "utf8").includes("requireLoopbackPostgresUrl") || readFileSync(path.join(migrationsDir, name), "utf8").includes("assertLocalOnlyTestEnv"))
   .map((name) => `supabase/migrations/${name}`);
 
 describe("integration runner configuration boundary", () => {
@@ -41,5 +42,37 @@ describe("integration runner configuration boundary", () => {
 
   it("keeps the remote config's generic migration glob (the boundary is the exclude list, not a narrower include)", () => {
     expect(remoteConfig.test?.include).toContain("supabase/migrations/**/*.integration.test.ts");
+  });
+
+  // The migrations dir is not the only place destructive suites live: scan the
+  // whole tree (src/** and tests/**) for loopback-guarded integration suites.
+  const GUARD = /assertLocalOnlyEnvironment|assertLocalOnlyTestEnv|requireLoopbackPostgresUrl/;
+  function walk(dir: string, out: string[] = []): string[] {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full, out);
+      else if (entry.name.endsWith(".integration.test.ts") && GUARD.test(readFileSync(full, "utf8"))) {
+        out.push(path.relative(root, full).split(path.sep).join("/"));
+      }
+    }
+    return out;
+  }
+  const guardedSuites = [...walk(path.join(root, "src")), ...walk(path.join(root, "tests"))];
+
+  it("finds the guarded suites outside supabase/migrations", () => {
+    expect(guardedSuites).toContain("src/lib/prospects/search-filter-composition.integration.test.ts");
+    expect(guardedSuites).toContain("src/lib/prospects/search-eval-budget.integration.test.ts");
+    expect(guardedSuites).toContain("tests/search-oracle/oracle-comparison.integration.test.ts");
+  });
+
+  it("excludes every guarded src/** and tests/** integration suite from the hosted config", () => {
+    const exclude = remoteConfig.test?.exclude ?? [];
+    for (const suite of guardedSuites) expect(exclude, suite).toContain(suite);
+  });
+
+  it("every guarded suite is selected by exactly one local runner", () => {
+    const included = new Set([...(localConfig.test?.include ?? []), ...(filterLocalConfig.test?.include ?? [])]);
+    for (const suite of guardedSuites) expect(included.has(suite), suite).toBe(true);
   });
 });

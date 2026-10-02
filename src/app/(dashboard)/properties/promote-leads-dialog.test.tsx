@@ -7,9 +7,9 @@ const { preflightPromoteLeads, createPromoteLeadsJob } = vi.hoisted(() => ({
   createPromoteLeadsJob: vi.fn(),
 }));
 
-vi.mock("./promote-leads-actions", () => ({
-  preflightPromoteLeads,
-  createPromoteLeadsJob,
+vi.mock("../search/actions", () => ({
+  searchPromotePreflight: preflightPromoteLeads,
+  searchPromoteCreate: createPromoteLeadsJob,
 }));
 
 import { PromoteLeadsDialog } from "./promote-leads-dialog";

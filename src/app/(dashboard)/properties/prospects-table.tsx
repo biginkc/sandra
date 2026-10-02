@@ -1,5 +1,7 @@
 "use client";
 
+import type { SearchSelection } from "@/lib/prospects/search-selection-input";
+import type { SelectionFilters } from "@/lib/prospects/select-all";
 import { ChevronDownIcon, LockKeyhole } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -65,17 +67,18 @@ import {
 } from "./_components/use-filter-state";
 
 import {
-  addPropertiesToListBulk,
-  applyTagBulk,
-  assignLeadsBulk,
-  deletePropertiesBulk,
-  removePropertiesFromListBulk,
-  preflightProspectSkipTrace,
-  requestProspectSkipTrace,
-  verifyPropertiesBulk,
-  type BulkOutcome,
-} from "./dnc-safe-actions";
-import { getAllMatchingProspectSelection } from "./actions";
+  searchAssign,
+  searchCass,
+  searchCassForSkipTrace,
+  searchDelete,
+  searchListAdd,
+  searchListRemove,
+  searchSelectAllCount,
+  searchSkipTracePreflight,
+  searchSkipTraceRequest,
+  searchTag,
+  type SearchBulkOutcome as BulkOutcome,
+} from "../search/actions";
 import { BatchCreateModal } from "./batch-create-modal";
 import { BulkSmsModal } from "./bulk-sms-modal";
 import { BulkTagModal } from "./bulk-tag-modal";
@@ -99,6 +102,8 @@ export type ProspectRow = {
   last_message_preview: string | null;
   /** Outreach disposition, if manually set or auto-detected. */
   outreach_dispo: string | null;
+  /** Pipeline stage (`properties.status`). Search lists leads and prospects. */
+  status?: string;
   imported_at?: string | null;
   dnc_reason?: string | null;
   channel_restriction?: string | null;
@@ -147,6 +152,26 @@ type Props = {
   totalPages: number;
 };
 
+const STAGE_LABELS: Record<string, string> = {
+  prospect: "Prospect",
+  new_lead: "New lead",
+  contacted: "Contacted",
+  interested: "Interested",
+  offer_sent: "Offer sent",
+  offer_declined: "Offer declined",
+  under_contract: "Under contract",
+  closed: "Closed",
+  dead: "Dead",
+};
+
+export function stageLabel(status: string | undefined): string {
+  if (!status) return "—";
+  return (
+    STAGE_LABELS[status] ??
+    status.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase())
+  );
+}
+
 function summarize(outcome: BulkOutcome, noun = "prospect"): string {
   const parts: string[] = [];
   if (outcome.succeeded > 0)
@@ -154,6 +179,10 @@ function summarize(outcome: BulkOutcome, noun = "prospect"): string {
       `${outcome.succeeded} ${noun}${outcome.succeeded === 1 ? "" : "s"}`,
     );
   if (outcome.skipped > 0) parts.push(`${outcome.skipped} skipped`);
+  if (outcome.skippedLeads && outcome.skippedLeads > 0)
+    parts.push(
+      `${outcome.skippedLeads} lead${outcome.skippedLeads === 1 ? "" : "s"} skipped`,
+    );
   if (outcome.failed.length > 0) parts.push(`${outcome.failed.length} failed`);
   return parts.join(" · ") || "Done";
 }
@@ -196,6 +225,7 @@ export function ProspectsTable({
 }: Props) {
   const router = useRouter();
   const cassRequestKeyRef = useRef<string | null>(null);
+  const cassTokenRef = useRef<string | null>(null);
   const blockStackKey = JSON.stringify(blockStack);
   const selectionScopeKey = `${search}\u0000${sort}\u0000${dir}\u0000${blockStackKey}\u0000${importedParam ?? ""}`;
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -204,6 +234,8 @@ export function ProspectsTable({
   const [showBulkSms, setShowBulkSms] = useState(false);
   const [showBulkTag, setShowBulkTag] = useState(false);
   const [promotionIds, setPromotionIds] = useState<string[]>([]);
+  const [promotionFilters, setPromotionFilters] = useState<SelectionFilters | null>(null);
+  const [skipTraceFilters, setSkipTraceFilters] = useState<SelectionFilters | null>(null);
   const [skipTracePreflightIds, setSkipTracePreflightIds] = useState<string[]>(
     [],
   );
@@ -222,6 +254,8 @@ export function ProspectsTable({
     string | null
   >(null);
   const [selectAllDncLockedCount, setSelectAllDncLockedCount] = useState(0);
+  const [selectAllSkippedLeads, setSelectAllSkippedLeads] = useState(0);
+  const [selectAllEligibleCount, setSelectAllEligibleCount] = useState(0);
   const selectAllMatching = selectAllMatchingKey === selectionScopeKey;
   const selectionScopeStale =
     selectAllMatchingKey !== null && selectAllMatchingKey !== selectionScopeKey;
@@ -351,16 +385,23 @@ export function ProspectsTable({
   const onSelectAllAcrossPages = () => {
     startTransition(async () => {
       const result = await callAction(
-        getAllMatchingProspectSelection({
-          search: search.length === 0 ? null : search,
-          blockStack,
-          imported: importedParam,
+        searchSelectAllCount({
+          selection: {
+            kind: "filters",
+            filters: {
+              search: search.length === 0 ? null : search,
+              blockStack,
+              imported: importedParam,
+            },
+          },
         }),
-        { fallbackMessage: "Could not select all matching prospects" },
+        { fallbackMessage: "Could not select all matching results" },
       );
       if (result.ok) {
-        setSelected(new Set(result.data.eligibleIds));
+        // Counts only: the matching ids stay on the server.
+        setSelectAllEligibleCount(result.data.eligibleCount);
         setSelectAllDncLockedCount(result.data.dncLockedCount);
+        setSelectAllSkippedLeads(result.data.skippedLeads);
         setSelectAllMatchingKey(selectionScopeKey);
       }
     });
@@ -369,6 +410,8 @@ export function ProspectsTable({
   const onClearAllSelection = () => {
     setSelected(new Set());
     setSelectAllDncLockedCount(0);
+    setSelectAllSkippedLeads(0);
+    setSelectAllEligibleCount(0);
     setSelectAllMatchingKey(null);
   };
 
@@ -396,6 +439,7 @@ export function ProspectsTable({
   const toggleOne = (id: string) => {
     setSelectAllMatchingKey(null);
     setSelectAllDncLockedCount(0);
+    setSelectAllSkippedLeads(0);
     setSelected((prev) => {
       const next = selectionScopeStale ? new Set<string>() : new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -404,7 +448,19 @@ export function ProspectsTable({
     });
   };
 
-  const selectedIds = () => Array.from(selectedInScope);
+  // In select-all mode the matching ids never reach the client; actions send the filters.
+  const selectedIds = () => (selectAllMatching ? [] : Array.from(selectedInScope));
+  const selectedCount = selectAllMatching ? selectAllEligibleCount : selectedInScope.size;
+  const allMatchingFilters: SelectionFilters = {
+    search: search.length === 0 ? null : search,
+    blockStack,
+    imported: importedParam,
+  };
+  /** Select-all-matching sends the filters (re-resolved server-side), never the id list. */
+  const selectionArg = (): SearchSelection =>
+    selectAllMatching
+      ? { kind: "filters", filters: allMatchingFilters }
+      : { kind: "ids", ids: selectedIds() };
 
   /**
    * Shared post-action handler: show a toast, keep failed rows selected so
@@ -429,15 +485,19 @@ export function ProspectsTable({
 
   const handleQualify = () => {
     const ids = selectedIds();
-    if (ids.length === 0) return;
+    if (selectedCount === 0) return;
+    // Select-all-matching: the dialog sends filters, the server re-resolves.
+    if (selectAllMatching) {
+      setPromotionFilters(allMatchingFilters);
+      return;
+    }
     setPromotionIds(ids);
   };
 
   const handleAssign = (userId: string | null) => {
-    const ids = selectedIds();
-    if (ids.length === 0) return;
+    if (selectedCount === 0) return;
     startTransition(async () => {
-      const result = await callAction(assignLeadsBulk(ids, userId), {
+      const result = await callAction(searchAssign({ selection: selectionArg(), userId }), {
         fallbackMessage: "Could not assign selected prospects",
       });
       if (result.ok) {
@@ -447,10 +507,9 @@ export function ProspectsTable({
   };
 
   const handleAddToList = (listId: string) => {
-    const ids = selectedIds();
-    if (ids.length === 0) return;
+    if (selectedCount === 0) return;
     startTransition(async () => {
-      const result = await callAction(addPropertiesToListBulk(ids, listId), {
+      const result = await callAction(searchListAdd({ selection: selectionArg(), listId }), {
         fallbackMessage: "Could not add to list",
       });
       if (result.ok) finishBulk("Added", result.data);
@@ -458,11 +517,10 @@ export function ProspectsTable({
   };
 
   const handleRemoveFromList = (listId: string) => {
-    const ids = selectedIds();
-    if (ids.length === 0) return;
+    if (selectedCount === 0) return;
     startTransition(async () => {
       const result = await callAction(
-        removePropertiesFromListBulk(ids, listId),
+        searchListRemove({ selection: selectionArg(), listId }),
         { fallbackMessage: "Could not remove from list" },
       );
       if (result.ok) finishBulk("Removed", result.data);
@@ -470,10 +528,9 @@ export function ProspectsTable({
   };
 
   const handleApplyTag = (tagId: string) => {
-    const ids = selectedIds();
-    if (ids.length === 0) return;
+    if (selectedCount === 0) return;
     startTransition(async () => {
-      const result = await callAction(applyTagBulk(ids, tagId), {
+      const result = await callAction(searchTag({ selection: selectionArg(), tagId }), {
         fallbackMessage: "Could not apply tag",
       });
       if (result.ok) finishBulk("Tagged", result.data);
@@ -481,14 +538,13 @@ export function ProspectsTable({
   };
 
   const handleVerifyAddress = () => {
-    const ids = selectedIds();
-    if (ids.length === 0) return;
+    if (selectedCount === 0) return;
     startTransition(async () => {
       const result = await callAction(
-        verifyPropertiesBulk(
-          ids,
-          (cassRequestKeyRef.current ??= crypto.randomUUID()),
-        ),
+        searchCass({
+          selection: selectionArg(),
+          requestKey: (cassRequestKeyRef.current ??= crypto.randomUUID()),
+        }),
         {
           fallbackMessage: "Could not start verify job",
         },
@@ -507,22 +563,26 @@ export function ProspectsTable({
 
   const handleSkipTrace = () => {
     const ids = selectedIds();
-    if (ids.length === 0) return;
+    if (selectedCount === 0) return;
+    if (selectAllMatching) {
+      setSkipTraceFilters(allMatchingFilters);
+      setSkipTracePreflightIds([]);
+      return;
+    }
     setSkipTracePreflightIds(ids);
   };
 
   const handleDelete = () => {
-    const ids = selectedIds();
-    if (ids.length === 0) return;
+    if (selectedCount === 0) return;
     if (
       !window.confirm(
-        `Delete ${ids.length} prospect${ids.length === 1 ? "" : "s"}? This is a soft-delete — an admin can recover from the database.`,
+        `Delete ${selectedCount} prospect${selectedCount === 1 ? "" : "s"}? This is a soft-delete — an admin can recover from the database.`,
       )
     ) {
       return;
     }
     startTransition(async () => {
-      const result = await callAction(deletePropertiesBulk(ids), {
+      const result = await callAction(searchDelete({ selection: selectionArg() }), {
         fallbackMessage: "Could not delete prospects",
       });
       if (result.ok) {
@@ -535,13 +595,13 @@ export function ProspectsTable({
   const hasTags = tags.length > 0;
   const hasTeam = eligibleTeamMembers.length > 0;
 
-  const hasSelection = selectedInScope.size > 0;
+  const hasSelection = selectedCount > 0;
 
   return (
     <>
       <PageHeader
-        breadcrumb={[{ label: "Workspace" }, { label: "Prospects" }]}
-        title="Prospects"
+        breadcrumb={[{ label: "Workspace" }, { label: "Search" }]}
+        title="Search"
         description={headerCount}
         actions={
           <>
@@ -563,12 +623,12 @@ export function ProspectsTable({
                     disabled={!hasSelection || pending}
                     aria-label={
                       hasSelection
-                        ? `Actions for ${selectedInScope.size} selected`
+                        ? `Actions for ${selectedCount} selected`
                         : "Actions (select prospects first)"
                     }
                   >
                     Actions
-                    {hasSelection ? ` (${selectedInScope.size})` : ""}
+                    {hasSelection ? ` (${selectedCount})` : ""}
                     <ChevronDownIcon className="ml-1 size-3.5" />
                   </Button>
                 }
@@ -759,8 +819,8 @@ export function ProspectsTable({
         state={ts as unknown as UseTableUrlStateReturn<Record<string, unknown>>}
       >
         <TableToolbarSearch
-          ariaLabel="Search prospects by address"
-          placeholder="Search address…"
+          ariaLabel="Search leads and prospects by name, phone, email, address or message"
+          placeholder="Search name, phone, email, address or message…"
           testId="prospects-search"
         />
       </TableToolbar>
@@ -782,11 +842,18 @@ export function ProspectsTable({
         pageSize={prospects.length}
         pageEligibleCount={selectableProspects.length}
         total={total}
-        selectedCount={selectedInScope.size}
+        selectedCount={selectedCount}
         dncLockedCount={
           selectAllMatching
             ? selectAllDncLockedCount
             : prospects.length - selectableProspects.length
+        }
+        skippedLeads={
+          selectAllMatching
+            ? selectAllSkippedLeads
+            : selectableProspects.filter(
+                (p) => p.status !== undefined && p.status !== "prospect",
+              ).length
         }
         onSelectAllAcrossPages={onSelectAllAcrossPages}
         onClear={onClearAllSelection}
@@ -794,21 +861,27 @@ export function ProspectsTable({
 
       <BulkSmsModal
         open={showBulkSms}
-        propertyIds={selectedIds()}
+        propertyIds={selectAllMatching ? [] : selectedIds()}
+        filterArgs={selectAllMatching ? allMatchingFilters : undefined}
+        selectionCount={selectedCount}
         onClose={() => setShowBulkSms(false)}
         onQueued={() => {
           onClearAllSelection();
           router.refresh();
         }}
       />
-      {promotionIds.length > 0 ? (
+      {promotionIds.length > 0 || promotionFilters ? (
         <PromoteLeadsDialog
           open
           onOpenChange={(nextOpen) => {
-            if (!nextOpen) setPromotionIds([]);
+            if (!nextOpen) {
+              setPromotionIds([]);
+              setPromotionFilters(null);
+            }
           }}
           orgId={orgId}
-          propertyIds={promotionIds}
+          propertyIds={promotionFilters ? [] : promotionIds}
+          filters={promotionFilters ?? undefined}
           onStarted={() => {
             onClearAllSelection();
             router.refresh();
@@ -829,7 +902,7 @@ export function ProspectsTable({
         }
         tags={tags}
         allMatching={selectAllMatching}
-        totalCount={selectedInScope.size}
+        totalCount={selectedCount}
         onClose={() => setShowBulkTag(false)}
         onApplied={(outcome) => finishBulk("Tagged", outcome)}
       />
@@ -846,20 +919,47 @@ export function ProspectsTable({
               }
             : undefined
         }
-        totalCount={selectedInScope.size}
+        totalCount={selectedCount}
         lockedExcludedCount={selectAllMatching ? selectAllDncLockedCount : 0}
       />
       <SkipTracePreflightDialog
-        open={skipTracePreflightIds.length > 0}
+        open={skipTracePreflightIds.length > 0 || skipTraceFilters !== null}
         onOpenChange={(open) => {
-          if (!open) setSkipTracePreflightIds([]);
+          if (!open) {
+            setSkipTracePreflightIds([]);
+            setSkipTraceFilters(null);
+          }
         }}
         propertyIds={skipTracePreflightIds}
-        onPreflight={preflightProspectSkipTrace}
+        selectionKey={skipTraceFilters ? `filters:${JSON.stringify(skipTraceFilters)}` : undefined}
+        onPreflight={async (ids) => {
+          const result = await searchSkipTracePreflight({
+            selection: skipTraceFilters ? { kind: "filters", filters: skipTraceFilters } : { kind: "ids", ids },
+          });
+          cassTokenRef.current = result.ok ? (result.data.selectionToken ?? null) : null;
+          return result;
+        }}
         onLaunchSkipTrace={() =>
-          requestProspectSkipTrace(skipTracePreflightIds)
+          searchSkipTraceRequest({
+            selection: skipTraceFilters
+              ? { kind: "filters", filters: skipTraceFilters }
+              : { kind: "ids", ids: skipTracePreflightIds },
+          })
         }
-        onStartCassVerification={verifyPropertiesBulk}
+        // The CASS-unverified subset is recomputed on the server (from the signed selection
+        // token for a select-all); no id list from the client or the preflight is used.
+        onLaunchCass={(requestKey) =>
+          searchCassForSkipTrace(
+            skipTraceFilters && cassTokenRef.current
+              ? { selectionToken: cassTokenRef.current, requestKey }
+              : {
+                  selection: skipTraceFilters
+                    ? { kind: "filters", filters: skipTraceFilters }
+                    : { kind: "ids", ids: skipTracePreflightIds },
+                  requestKey,
+                },
+          )
+        }
         onFinished={() => {
           onClearAllSelection();
           router.refresh();
@@ -904,8 +1004,9 @@ export function ProspectsTable({
               >
                 Market
               </SortableHeader>
-              {/* Status column header is intentionally blank — pills speak for themselves. */}
-              <TableHead aria-label="Status" />
+              <TableHead>Status</TableHead>
+              {/* Signals header is intentionally blank — pills speak for themselves. */}
+              <TableHead aria-label="Signals" />
               <TableHead>Last message</TableHead>
             </TableRow>
           </TableHeader>
@@ -930,6 +1031,9 @@ export function ProspectsTable({
                       <Skeleton className="h-4 w-24" />
                     </TableCell>
                     <TableCell>
+                      <Skeleton className="h-4 w-20" />
+                    </TableCell>
+                    <TableCell>
                       <div className="flex gap-1">
                         <Skeleton className="h-5 w-16 rounded-full" />
                         <Skeleton className="h-5 w-16 rounded-full" />
@@ -944,12 +1048,14 @@ export function ProspectsTable({
             ) : prospects.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={5}
+                  colSpan={6}
                   className="text-muted-foreground py-8 text-center"
                 >
                   {search.length > 0
-                    ? `No prospects match "${search}". Try a different address.`
-                    : "No prospects. Import a CSV to fill the data lake."}
+                    ? search.trim().length < 3
+                      ? `No results for "${search}". Searches need 3+ characters to match names, phones and messages.`
+                      : `No leads or prospects match "${search}". Try a name, phone, email or address.`
+                    : "No leads or prospects yet. Import a CSV to fill the data lake."}
                 </TableCell>
               </TableRow>
             ) : (
@@ -996,6 +1102,9 @@ export function ProspectsTable({
                       </Link>
                     </TableCell>
                     <TableCell>{p.market ?? "—"}</TableCell>
+                    <TableCell data-testid={`prospects-status-${p.id}`}>
+                      {stageLabel(p.status)}
+                    </TableCell>
                     <TableCell>
                       <div className="flex flex-col items-start gap-1">
                         {p.dnc_reason ? (
@@ -1043,7 +1152,7 @@ export function ProspectsTable({
             data-testid="prospects-result-count"
           >
             {total === 0
-              ? "No prospects"
+              ? "No results"
               : `Showing ${showingFrom.toLocaleString()}–${showingTo.toLocaleString()} of ${total.toLocaleString()}`}
           </span>
           {totalPages > 1 && (
@@ -1240,6 +1349,7 @@ function SelectAllBanner({
   total,
   selectedCount,
   dncLockedCount,
+  skippedLeads = 0,
   onSelectAllAcrossPages,
   onClear,
 }: {
@@ -1250,6 +1360,8 @@ function SelectAllBanner({
   total: number;
   selectedCount: number;
   dncLockedCount: number;
+  /** Selected/matched leads that bulk actions will skip (prospects only). */
+  skippedLeads?: number;
   onSelectAllAcrossPages: () => void;
   onClear: () => void;
 }) {
@@ -1274,6 +1386,14 @@ function SelectAllBanner({
             <>
               {" "}
               <strong>{fmt(dncLockedCount)}</strong> DNC locked and excluded.
+            </>
+          )}
+          {skippedLeads > 0 && (
+            <>
+              {" "}
+              <strong>{fmt(skippedLeads)}</strong> lead
+              {skippedLeads === 1 ? "" : "s"} skipped (bulk actions apply to
+              prospects only).
             </>
           )}
         </span>
@@ -1304,6 +1424,14 @@ function SelectAllBanner({
             <strong>{fmt(dncLockedCount)}</strong> DNC locked and excluded.
           </>
         )}
+        {skippedLeads > 0 && (
+          <>
+            {" "}
+            <strong>{fmt(skippedLeads)}</strong> lead
+            {skippedLeads === 1 ? "" : "s"} skipped (bulk actions apply to
+            prospects only).
+          </>
+        )}
       </span>
       <button
         type="button"
@@ -1311,7 +1439,7 @@ function SelectAllBanner({
         data-testid="select-all-across-pages"
         className="text-foreground font-medium underline-offset-2 hover:underline"
       >
-        Select all eligible matching prospects →
+        Select all eligible matching results →
       </button>
     </div>
   );

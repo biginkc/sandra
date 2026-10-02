@@ -14,11 +14,9 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 
 import {
-  createDialerBatchFromFilters,
-  createDialerBatchFromPropertyIds,
-  getAllMatchingProspectIds,
-  previewBatchEligibilityAction,
-} from "./actions";
+  searchDialerCreate,
+  searchDialerPreview,
+} from "../search/actions";
 import type { FilterBlock } from "./prospects-query";
 
 type Counts = {
@@ -83,6 +81,7 @@ export function BatchCreateModal({
   const filterSearch = filterArgs?.search ?? null;
   const filterBlockStack = filterArgs?.blockStack ?? EMPTY_BLOCK_STACK;
   const filterImported = filterArgs?.imported ?? null;
+  const [skippedLeads, setSkippedLeads] = useState(0);
   const callabilityCounts = previewLoading || counts === null ? null : counts;
   const createDisabled =
     mode === "error" ||
@@ -105,27 +104,27 @@ export function BatchCreateModal({
     setPreviewLoading(true);
 
     async function loadPreview() {
-      const idsResult =
-        mode === "ids"
-          ? { ok: true as const, data: selectedIds ?? [] }
-          : await getAllMatchingProspectIds({
-              search: filterSearch,
-              blockStack: filterBlockStack,
-              imported: filterImported,
-            });
-
-      if (cancelled) return;
-      if (!idsResult.ok) {
-        setError(idsResult.error.message);
-        setPreviewLoading(false);
-        return;
-      }
-
-      const preview = await previewBatchEligibilityAction(idsResult.data);
+      // Server-resolved preview: explicit ids are re-checked, a select-all-matching
+      // sends only its filters (no id list round-trips through the client).
+      const preview = await searchDialerPreview({
+        selection:
+          mode === "ids"
+            ? { kind: "ids", ids: selectedIds ?? [] }
+            : {
+                kind: "filters",
+                filters: {
+                  search: filterSearch,
+                  blockStack: filterBlockStack,
+                  imported: filterImported,
+                },
+              },
+      });
       if (cancelled) return;
 
       if (preview.ok) {
-        setCounts(preview.data);
+        const { skippedLeads: skipped = 0, ...rest } = preview.data;
+        setSkippedLeads(skipped);
+        setCounts(rest);
       } else {
         setError(preview.error.message);
       }
@@ -144,21 +143,26 @@ export function BatchCreateModal({
     const cleanTitle = title.trim() || undefined;
     setError(null);
     startTransition(async () => {
-      const result =
-        mode === "ids"
-          ? await createDialerBatchFromPropertyIds(selectedIds ?? [], {
-              sourceKind: "selected_ids",
-              title: cleanTitle,
-            })
-          : await createDialerBatchFromFilters({
-              search: filterSearch,
-              blockStack: filterBlockStack,
-              imported: filterImported,
-              title: cleanTitle,
-            });
+      const result = await searchDialerCreate({
+        selection:
+          mode === "ids"
+            ? { kind: "ids", ids: selectedIds ?? [] }
+            : {
+                kind: "filters",
+                filters: {
+                  search: filterSearch,
+                  blockStack: filterBlockStack,
+                  imported: filterImported,
+                },
+              },
+        title: cleanTitle,
+      });
 
       if (result.ok) {
-        toast.success(successMessage(result.data.batchId, result.data.counts));
+        const skipped = (result.data as { skippedLeads?: number }).skippedLeads ?? 0;
+        toast.success(
+          `${successMessage(result.data.batchId, result.data.counts)}${skipped > 0 ? ` · ${skipped} lead${skipped === 1 ? "" : "s"} skipped` : ""}`,
+        );
         onClose();
       } else {
         setError(result.error.message);
@@ -185,6 +189,11 @@ export function BatchCreateModal({
                     ? `${totalCount.toLocaleString()} eligible from current filters`
                     : `${(selectedIds?.length ?? 0).toLocaleString()} selected`}
                 </p>
+                {skippedLeads > 0 && (
+                  <p className="text-muted-foreground text-xs" data-testid="batch-skipped-leads">
+                    {skippedLeads.toLocaleString()} lead{skippedLeads === 1 ? "" : "s"} skipped (dialer batches use prospects only)
+                  </p>
+                )}
                 {lockedExcludedCount > 0 && (
                   <p className="text-muted-foreground text-xs">
                     {lockedExcludedCount.toLocaleString()} DNC locked and excluded

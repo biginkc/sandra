@@ -1,5 +1,7 @@
 "use client";
 
+import type { SearchSelection } from "@/lib/prospects/search-selection-input";
+import type { SelectionFilters } from "@/lib/prospects/select-all";
 import Link from "next/link";
 import { useEffect, useMemo, useState, useTransition } from "react";
 
@@ -15,25 +17,35 @@ import {
 } from "@/components/ui/dialog";
 
 import {
-  createPromoteLeadsJob,
-  preflightPromoteLeads,
-  type PromoteLeadsPreflight,
-} from "./promote-leads-actions";
+  searchPromoteCreate,
+  searchPromotePreflight,
+  type SearchPromotePreflight as PromoteLeadsPreflight,
+} from "../search/actions";
 
 export function PromoteLeadsDialog({
   open,
   onOpenChange,
   orgId,
   propertyIds,
+  filters,
   onStarted,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   orgId: string;
   propertyIds: string[];
+  /** Select-all-matching: the server re-resolves these filters; `propertyIds` is not sent. */
+  filters?: SelectionFilters;
   onStarted: (jobId: string) => void;
 }) {
-  const propertyIdsKey = useMemo(() => [...propertyIds].sort().join(","), [propertyIds]);
+  const selection: SearchSelection = useMemo(
+    () => (filters ? { kind: "filters", filters } : { kind: "ids", ids: propertyIds }),
+    [filters, propertyIds],
+  );
+  const propertyIdsKey = useMemo(
+    () => (filters ? `filters:${JSON.stringify(filters)}` : [...propertyIds].sort().join(",")),
+    [filters, propertyIds],
+  );
   const [preflight, setPreflight] = useState<PromoteLeadsPreflight | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -46,7 +58,7 @@ export function PromoteLeadsDialog({
   useEffect(() => {
     if (!open) return;
     let canceled = false;
-    void callAction(preflightPromoteLeads({ orgId, propertyIds }), {
+    void callAction(searchPromotePreflight({ orgId, selection }), {
       fallbackMessage: "Could not check these prospects",
     }).then((result) => {
       if (canceled) return;
@@ -57,16 +69,16 @@ export function PromoteLeadsDialog({
     return () => {
       canceled = true;
     };
-  }, [open, orgId, propertyIds, propertyIdsKey, preflightAttempt]);
+  }, [open, orgId, selection, propertyIdsKey, preflightAttempt]);
 
   const confirm = () => {
     if (!preflight || preflight.eligible === 0 || !requestKey || pending) return;
     setError(null);
     startTransition(async () => {
       const result = await callAction(
-        createPromoteLeadsJob({
+        searchPromoteCreate({
           orgId,
-          propertyIds,
+          selection,
           idempotencyKey: requestKey,
         }),
         { fallbackMessage: "Could not start promotion" },

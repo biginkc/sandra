@@ -20,11 +20,20 @@ const {
   routerPush: vi.fn(),
 }));
 
-vi.mock("./actions", () => ({
-  bulkQueueSms,
-  listSmsTemplateCategories,
-  countAlreadyContacted,
-  assessBulkSmsAudience,
+// The modal talks to the Search entry points only. These adapters map them onto the individual
+// mocks below so the existing behavioural assertions stay meaningful.
+vi.mock("../search/actions", () => ({
+  searchBulkSms: ({ selection, opts }: { selection: { kind: string; ids?: string[] }; opts: unknown }) =>
+    bulkQueueSms(selection.kind === "ids" ? selection.ids : selection, opts),
+  searchSmsTemplateCategories: () => listSmsTemplateCategories(),
+  searchDeliveryOptions: () => listDeliveryOptions(),
+  searchRefreshDeliveryCatalog: () => refreshDeliveryCatalog(),
+  searchSmsAudience: async ({ selection }: { selection: { kind: string; ids?: string[] } }) => {
+    const ids = selection.kind === "ids" ? selection.ids : selection;
+    const [assessed, contacted] = await Promise.all([assessBulkSmsAudience(ids), countAlreadyContacted(ids)]);
+    if (!assessed.ok) return assessed;
+    return { ok: true, data: { ...assessed.data, alreadyContacted: contacted.ok ? contacted.data : null } };
+  },
 }));
 
 vi.mock("../campaigns/actions", () => ({
@@ -578,6 +587,32 @@ describe("<BulkSmsModal /> presets + drain estimate (260506-m3a)", () => {
     expect(screen.getByRole("textbox", { name: /Campaign name/i })).toHaveValue(
       "Mode Stable",
     );
+  });
+});
+
+describe("<BulkSmsModal /> skipped leads", () => {
+  it("tells the operator how many leads in the selection will be skipped", async () => {
+    assessBulkSmsAudience.mockResolvedValue({
+      ok: true,
+      data: { total: 6, mobile: 6, landline: 0, unknown: 0, noPhone: 0, skippedLeads: 4 },
+    });
+    renderModal(Array.from({ length: 10 }, (_, i) => `p${i}`));
+
+    expect(await screen.findByTestId("bulk-sms-skipped-leads")).toHaveTextContent(
+      /4 leads skipped/,
+    );
+  });
+
+  it("shows nothing about leads when none were skipped", async () => {
+    assessBulkSmsAudience.mockResolvedValue({
+      ok: true,
+      data: { total: 6, mobile: 6, landline: 0, unknown: 0, noPhone: 0, skippedLeads: 0 },
+    });
+    renderModal(["p1"]);
+    await waitFor(() =>
+      expect(screen.getByTestId("line-type-assessment")).toHaveTextContent(/6 mobile/),
+    );
+    expect(screen.queryByTestId("bulk-sms-skipped-leads")).toBeNull();
   });
 });
 
