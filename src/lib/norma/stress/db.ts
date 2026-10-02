@@ -71,6 +71,9 @@ begin
   if tg_table_name = 'norma_notifications' then
     select r.property_id into v_prop from public.norma_call_requests r where r.id = (v_row ->> 'request_id')::uuid;
   end if;
+  if tg_table_name = 'contacts' then
+    select p.id into v_prop from public.properties p where p.homeowner_contact_id = (v_row ->> 'id')::uuid limit 1;
+  end if;
   if tg_table_name = 'sequence_enrollments' and v_prop is not null then
     v_hold := public.fn_norma_hold_active(v_prop);
   end if;
@@ -92,6 +95,9 @@ create trigger stress_audit after insert on public.lead_events
   for each row execute function stress.audit_fn();
 create trigger stress_audit after update on public.properties
   for each row when (old.outreach_dispo is distinct from new.outreach_dispo or old.is_dnc_locked is distinct from new.is_dnc_locked)
+  execute function stress.audit_fn();
+create trigger stress_audit after update on public.contacts
+  for each row when (old.do_not_contact is distinct from new.do_not_contact)
   execute function stress.audit_fn();
 
 -- Injected database failure: while a row exists for a property, the matching

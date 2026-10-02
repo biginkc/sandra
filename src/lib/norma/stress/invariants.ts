@@ -104,6 +104,29 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
     const prop = properties.get(propertyId);
     return Boolean(prop?.is_dnc_locked || contacts.get(prop?.homeowner_contact_id as string)?.do_not_contact);
   };
+  // Audit position (seq) at which a lead's do-not-contact lock was first recorded: the property
+  // lock flipping on, or its homeowner contact flagged do-not-contact. Null: never recorded.
+  const lockSeq = (propertyId: string): number | null => {
+    const hit = audit.find(
+      (a) =>
+        a.property_id === propertyId &&
+        ((a.tbl === "properties" && a.new_row?.is_dnc_locked === true && a.old_row?.is_dnc_locked !== true) ||
+          (a.tbl === "contacts" && a.new_row?.do_not_contact === true && a.old_row?.do_not_contact !== true)),
+    );
+    return hit ? Number(hit.seq) : null;
+  };
+  // TODO(pending decision: cancel review task on DNC-locked lead): tasks on a do-not-contact
+  // lead are read-only by design, so a "needs review" task opened BEFORE the lock stays open
+  // after the request settles. That is the only leftover excused here: it must be the review
+  // task, and the lock must have been recorded before the request settled. Any other open task,
+  // or a lock that arrived after settlement, is still a violation.
+  const staleReviewExcused = (r: Req, open: Record<string, unknown>[]) => {
+    const lock = lockSeq(r.property_id);
+    if (lock === null || !dncLocked(r.property_id)) return false;
+    const settled = audit.find((a) => a.tbl === "norma_call_requests" && a.row_id === r.id && ["completed", "dispatch_rejected"].includes(String(a.new_row?.status)));
+    if (!settled || lock > Number(settled.seq)) return false;
+    return open.every((t) => /needs review/i.test(String(t.title)));
+  };
   const reqsByProperty = new Map<string, Req[]>();
   for (const r of requests) reqsByProperty.set(r.property_id, [...(reqsByProperty.get(r.property_id) ?? []), r]);
 
@@ -207,7 +230,8 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
         }
       } else if (r.outcome === "no_answer" || r.outcome === "not_interested") {
         // A review task opened before a do-not-contact lock cannot be closed afterwards (tasks on a locked lead are read-only).
-        if (!dncLocked(r.property_id) && rowsForTask.some((t) => t.status === "open" || t.status === "snoozed")) v("3", `request ${r.id} (${r.outcome}): a task is open but this outcome needs none`);
+        const openTasks = rowsForTask.filter((t) => t.status === "open" || t.status === "snoozed");
+        if (openTasks.length > 0 && !staleReviewExcused(r, openTasks)) v("3", `request ${r.id} (${r.outcome}): a task is open but this outcome needs none`);
         if (!everReviewed && rowsForTask.length > 0) v("3", `request ${r.id} (${r.outcome}): a task exists but none was ever wanted`);
       }
       // Dispositions and wrong-number.
@@ -233,7 +257,8 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
       if (!none && (rowsForTask.length !== 1 || open.length !== 1)) v("3", `request ${r.id} (needs_review): ${rowsForTask.length} tasks / ${open.length} open (expected exactly one open review task)`);
       else if (!none && !/needs review/i.test(String(open[0]!.title))) v("3", `request ${r.id}: review task title "${open[0]!.title}"`);
     } else if (r.status === "dispatch_rejected") {
-      if (rowsForTask.some((t) => t.status === "open" || t.status === "snoozed")) v("3", `request ${r.id}: dispatch_rejected but a task is still open`);
+      const openTasks = rowsForTask.filter((t) => t.status === "open" || t.status === "snoozed");
+      if (openTasks.length > 0 && !staleReviewExcused(r, openTasks)) v("3", `request ${r.id}: dispatch_rejected but a task is still open`);
     } else if (rowsForTask.length > 0) {
       v("3", `request ${r.id} (${r.status}): has a task before any outcome`);
     }
