@@ -126,7 +126,7 @@ describe("getAllMatchingProspectSelection: search_page origin", () => {
   });
 
   it("over the cap: error, no ids, and no paging at all", async () => {
-    state.script.count = 10_001;
+    state.script.count = 20_001;
     const out = await getAllMatchingProspectSelection({ search: "smith", blockStack: [], origin: "search_page" });
     expect(out).toMatchObject({ ok: false, error: { code: "SELECT_ALL_TOO_LARGE" } });
     expect(JSON.stringify(out)).not.toContain("eligibleIds");
@@ -135,8 +135,8 @@ describe("getAllMatchingProspectSelection: search_page origin", () => {
   });
 
   it("over the cap discovered while paging also errors with no partial selection", async () => {
-    state.script.count = 9_000; // count lied (rows were added meanwhile)
-    state.script.pages = Array.from({ length: 11 }, (_, p) => ids(1000, p * 1000));
+    state.script.count = 19_000; // count lied (rows were added meanwhile)
+    state.script.pages = Array.from({ length: 21 }, (_, p) => ids(1000, p * 1000));
     const out = await getAllMatchingProspectSelection({ search: "smith", blockStack: [], origin: "search_page" });
     expect(out).toMatchObject({ ok: false, error: { code: "SELECT_ALL_TOO_LARGE" } });
     expect(eligibilityMock).not.toHaveBeenCalled();

@@ -66,3 +66,4 @@ supabase/.temp/
 # direct-calling feasibility harness local run state (inventory, event logs) - never committed
 /scripts/direct-call-feasibility/.run/
 scripts/filter-volume/results/
+scripts/search-volume/results/

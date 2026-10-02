@@ -41,12 +41,15 @@ export const SEARCH_MIN_CHARS = 3;
 
 /**
  * Maximum rows a Search-origin select-all may resolve. Each 1,000-row keyset
- * page is one `search_properties` evaluation, and the ids travel back to the
- * server in a Server Action body (1 MB limit), so this is deliberately
- * conservative. Over the cap is an error with NO partial selection.
- * TODO(volume-tuning): set from the local volume run (stress #9) before release.
+ * page is one `search_properties` evaluation. Measured on the local stack at
+ * 50k properties / 250k messages (scripts/search-volume): ~110 ms per page in
+ * the worst case (every property matches), so 20 pages (20,000 ids) walk in
+ * ~2.3 s against the 10 s budget (4x headroom). The ceiling is the Server
+ * Action body limit (1 MB), because the id-based actions (promote, CASS,
+ * skip-trace) still send explicit ids: 20,000 uuids is about 0.8 MB. Over the
+ * cap is an error with NO partial selection.
  */
-export const SEARCH_SELECT_ALL_CAP = 10_000;
+export const SEARCH_SELECT_ALL_CAP = 20_000;
 
 export const SEARCH_TOO_BROAD_MESSAGE =
   "Search too broad — try a more specific name, phone or address";

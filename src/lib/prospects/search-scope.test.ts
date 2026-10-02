@@ -341,12 +341,10 @@ describe("resolveIncludeMessages (server-derived, fail-closed)", () => {
 });
 
 describe("constants and static guards", () => {
-  it("select-all cap is a positive integer placeholder (TODO volume tuning)", () => {
-    expect(Number.isInteger(SEARCH_SELECT_ALL_CAP)).toBe(true);
-    expect(SEARCH_SELECT_ALL_CAP).toBeGreaterThan(1000);
-    expect(readFileSync(path.join(__dirname, "search-scope.ts"), "utf8")).toContain(
-      "TODO(volume-tuning)",
-    );
+  it("select-all cap is the measured value and stays under the 1 MB Server Action body (~39 bytes per id)", () => {
+    expect(SEARCH_SELECT_ALL_CAP).toBe(20_000);
+    expect(SEARCH_SELECT_ALL_CAP * 39).toBeLessThan(1_000_000);
+    expect(readFileSync(path.join(__dirname, "search-scope.ts"), "utf8")).not.toContain("TODO(volume-tuning)");
   });
 
   function sourceFiles(): string[] {

@@ -5,13 +5,13 @@ import { defineConfig } from "vitest/config";
 import { assertLocalOnlyEnvironment } from "./src/lib/testing/local-only-guard";
 
 /**
- * Opt-in runner for the filter-translator integration + volume suites against
+ * Opt-in runner for the filter-translator VOLUME gate (stress plan #9, PR A) against
  * a DISPOSABLE local Supabase stack (never the shared hosted test project).
  * The ports/keys default to the throwaway stack described in
  * scripts/filter-volume/README.md (`supabase start` with project_id
  * sandra-filter-vol). Keys below are the public Supabase local-dev demo keys.
  *
- *   npx vitest run --config vitest.filter-local.config.ts
+ *   SEARCH_VOLUME=1 npx vitest run --config vitest.search-volume.config.ts
  */
 const dbUrl = process.env.FILTER_LOCAL_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:55329/postgres";
 const apiUrl = process.env.FILTER_LOCAL_API_URL ?? "http://127.0.0.1:55331";
@@ -20,10 +20,7 @@ assertLocalOnlyEnvironment({ TEST_SUPABASE_URL: apiUrl, TEST_SUPABASE_DB_URL: db
 export default defineConfig({
   test: {
     include: [
-      "src/lib/prospects/filter-to-supabase.integration.test.ts",
-      "src/lib/prospects/filter-cache-triggers.integration.test.ts",
-      "src/lib/prospects/search-filter-composition.integration.test.ts",
-      "src/lib/prospects/search-eval-budget.integration.test.ts",
+      "scripts/search-volume/search-volume.volume.test.ts",
     ],
     environment: "node",
     reporters: ["default"],
