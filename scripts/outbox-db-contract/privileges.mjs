@@ -1,9 +1,19 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 const roles = ['anon', 'authenticated', 'service_role'];
 const ops = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'];
-const triggerPre = ['trg_messages_fill_sms_conversation_id', 'guard_training_messages', 'messages_reject_dnc_locked_read'];
+// There is no trigger-pin generator. These are the three Search filter-cache
+// triggers added by 20261002110000_properties_filter_cache_columns.sql; keep a
+// catalog definition hash alongside each name so this pin cannot silently
+// accept a same-name definition drift.
+export const triggerDefinitionSha256 = Object.freeze({
+  zz_messages_filter_cache_delete: '0ad96f6c877eebbe771642cc6a7d61c764861757612a119254287785d312a725',
+  zz_messages_filter_cache_insert: '7fdf270e241865d2716111dbf72494b94c57e3e4fa7e78ab8f43f314637033f8',
+  zz_messages_filter_cache_update: '62633fda29859804b1337834b21d55161538c0355dee0dafdacefe1d0547b7c9',
+});
+const triggerPre = ['trg_messages_fill_sms_conversation_id', 'guard_training_messages', 'messages_reject_dnc_locked_read', ...Object.keys(triggerDefinitionSha256)];
 const triggerPost = [...triggerPre, 'zzz_inbox_guard_inbound_revision_insert', 'zzz_inbox_guard_inbound_revision_update', 'inbox_capture_inbound_head', 'zzzzz_inbox_message_direct', 'zzzzzzzz_inbox_operation_target'];
 const pin = phase => JSON.parse(readFileSync(new URL(`./expected/privileges.${phase}.json`, import.meta.url), 'utf8'));
 export const normalizeSearchPath = value => value === null ? null : value.replaceAll(' ', '').replaceAll('"', '');
@@ -13,16 +23,24 @@ export function assertFunctionPin(actual, expected) {
   assert.equal(normalizeSearchPath(actual.search_path), normalizeSearchPath(expected.search_path), actual.name);
   assert.deepEqual([...actual.execute].sort(), expected.execute, actual.name);
 }
+export function assertTriggerPinRows(rows, phase) {
+  const expected = phase === 'post' ? triggerPost : triggerPre;
+  assert.deepEqual(rows.map(row => row.tgname).sort(), expected.sort());
+  assert(rows.every(row => row.tgenabled === 'O'));
+  for (const row of rows) {
+    const expectedHash = triggerDefinitionSha256[row.tgname];
+    if (expectedHash) assert.equal(createHash('sha256').update(row.definition).digest('hex'), expectedHash, row.tgname);
+  }
+  return rows;
+}
 
 export async function checkPrivileges(db, phase) {
   const checks = [];
   const check = async (id, fn) => { try { checks.push({ id, verdict: 'PASS', detail: await fn() }); } catch (error) { checks.push({ id, verdict: 'FAIL', error: String(error.message ?? error) }); } };
   const q = async (sql, params = []) => (await db.query(sql, params)).rows;
   await check('PIN_TRIGGERS', async () => {
-    const rows = await q("select t.tgname,t.tgenabled from pg_trigger t where t.tgrelid='public.messages'::regclass and not t.tgisinternal order by t.tgname");
-    assert.deepEqual(rows.map(r => r.tgname).sort(), (phase === 'post' ? triggerPost : triggerPre).sort());
-    assert(rows.every(r => r.tgenabled === 'O'));
-    return rows;
+    const rows = await q("select t.tgname,t.tgenabled,pg_get_triggerdef(t.oid,true) as definition from pg_trigger t where t.tgrelid='public.messages'::regclass and not t.tgisinternal order by t.tgname");
+    return assertTriggerPinRows(rows, phase);
   });
   await check('PIN_BASE_GRANTS', async () => {
     const names = ['messages', 'contacts', 'properties', 'memberships', 'lead_events'];
