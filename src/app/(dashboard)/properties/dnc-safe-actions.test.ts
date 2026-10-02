@@ -272,12 +272,10 @@ describe("Prospects DNC-safe bulk actions", () => {
       origin: "search_page",
     });
 
-    expect(selectionMock).toHaveBeenCalledWith({
-      search: "jane",
-      blockStack: [],
-      imported: null,
-      origin: "search_page",
-    });
+    expect(selectionMock).toHaveBeenCalledWith(
+      { search: "jane", blockStack: [], imported: null, origin: "search_page" },
+      { enforceCap: true },
+    );
     expect(createTagUnsafe).toHaveBeenCalledWith(
       expect.objectContaining({ propertyIds: ["eligible"] }),
     );
@@ -324,5 +322,26 @@ describe("Prospects DNC-safe bulk actions", () => {
     const req = await requestProspectSkipTrace({ filters });
     expect(requestUnsafe).toHaveBeenCalledWith(["eligible"]);
     expect(req.ok && req.data.requested).toBe(5);
+  });
+
+  it("skip-trace filter selection: requested == eligible + notEligible (every matched row is accounted for)", async () => {
+    selectionMock.mockResolvedValue({
+      ok: true,
+      data: { eligibleIds: ["eligible"], eligibleCount: 1, dncLockedCount: 2, dncLockedIds: ["l1", "l2"], matchedCount: 6, skippedLeads: 3 },
+    });
+    preflightUnsafe.mockResolvedValue({
+      ok: true,
+      data: {
+        requested: 1, eligible: 1, cassVerified: 1, cassUnverified: 0, notEligible: 0, killSwitchSkipped: 0,
+        tracefyCreditsRequired: 1, tracefyCreditsAvailable: 10, tracefyCreditStatus: "sufficient",
+        canLaunchSkipTrace: true, estimatedCassVerificationCostUsd: 0, cassVerificationPropertyIds: [],
+      },
+    });
+    const pre = await preflightProspectSkipTrace({ filters: { search: "x", blockStack: [], origin: "search_page" } });
+    expect(pre.ok).toBe(true);
+    if (!pre.ok) return;
+    expect(pre.data.requested).toBe(6);
+    expect(pre.data.eligible + pre.data.notEligible).toBe(pre.data.requested);
+    expect(pre.data.notEligible).toBe(5); // 3 leads + 2 DNC-locked prospects
   });
 });

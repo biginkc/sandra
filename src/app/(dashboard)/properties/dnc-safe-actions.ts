@@ -329,12 +329,15 @@ export async function createAndApplyCustomTagBulkFromFilters(params: {
   /** Defaults to 'legacy'; the Search page passes 'search_page'. */
   origin?: QueryOrigin;
 }) {
-  const ids = await selectAllMatching({
-    search: params.search,
-    blockStack: params.blockStack,
-    imported: params.imported ?? null,
-    origin: params.origin,
-  });
+  const ids = await selectAllMatching(
+    {
+      search: params.search,
+      blockStack: params.blockStack,
+      imported: params.imported ?? null,
+      origin: params.origin,
+    },
+    { enforceCap: true },
+  );
   if (!ids.ok) return ids;
   // Matched leads never reach the tag action; surface them as a skip count.
   const tagged = await createAndApplyCustomTagBulk({

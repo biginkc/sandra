@@ -71,6 +71,7 @@ export type SelectAllResult = {
 
 export async function selectAllMatching(
   args: SelectionFilters,
+  opts: { enforceCap?: boolean } = {},
 ): Promise<Result<SelectAllResult>> {
   try {
     const supabase = await createClient();
@@ -99,6 +100,10 @@ export async function selectAllMatching(
       .filter(Boolean)
       .join(", ");
     const searchOrigin = origin === "search_page";
+    // The cap always applies to the search origin. Search-page actions also enforce it for a
+    // forged `legacy` origin (`enforceCap`); the legacy resolver itself (campaign audiences via
+    // getAllMatchingProspectIds) stays uncapped.
+    const capOn = searchOrigin || opts.enforceCap === true;
     let addressFallback = false;
 
     const failure = (error: { code?: string | null; message?: string }) => {
@@ -168,7 +173,7 @@ export async function selectAllMatching(
       if (error) return failure(error);
       const rows = (data ?? []) as unknown as Array<{ id: string }>;
       allIds.push(...rows.map((row) => row.id));
-      if (searchOrigin && allIds.length > SEARCH_SELECT_ALL_CAP) {
+      if (capOn && allIds.length > SEARCH_SELECT_ALL_CAP) {
         return {
           ok: false,
           error: {
@@ -218,7 +223,6 @@ export async function selectAllMatching(
   }
 }
 
-
 export type ResolvedSelection = {
   /** For a filter selection: the server-resolved eligible ids. For explicit ids: the ids as given. */
   ids: string[];
@@ -235,7 +239,7 @@ export type ResolvedSelection = {
 
 /**
  * Resolve any selection to ids on the server. A filter selection is re-resolved
- * (capped, membership-checked) and never trusts client ids; explicit ids pass
+ * (capped at SEARCH_SELECT_ALL_CAP whatever the claimed origin) and never trusts client ids; explicit ids pass
  * through so the per-action guards (eligibility, DNC) re-check them.
  */
 export async function resolveSelection(
@@ -247,7 +251,7 @@ export async function resolveSelection(
     const ids = selectionIds(selection);
     return ok({ ids, skippedLeads: 0, dncLockedCount: 0, dncLockedIds: [], matchedCount: ids.length, fromFilters: false, origin });
   }
-  const resolved = await selectAllMatching(filters);
+  const resolved = await selectAllMatching(filters, { enforceCap: true });
   if (!resolved.ok) return resolved;
   return ok({
     ids: resolved.data.eligibleIds,

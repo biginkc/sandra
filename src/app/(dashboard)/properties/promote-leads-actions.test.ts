@@ -41,6 +41,7 @@ beforeEach(() => {
   startWorkflow.mockReset();
   revalidatePath.mockReset();
   getCallerMemberships.mockReset();
+  selectAllMatching.mockReset();
   getCallerMemberships.mockResolvedValue([{ org_id: request.orgId }]);
   startWorkflow.mockResolvedValue({ runId: "run-1" });
   adminRpc.mockResolvedValue({ data: { failed: 1, status: "failed" }, error: null });
@@ -192,7 +193,7 @@ describe("promotion server actions", () => {
     });
     const filters = { search: "x", blockStack: [], origin: "search_page" as const };
     const result = await preflightPromoteLeads({ orgId: request.orgId, propertyIds: [], filters });
-    expect(selectAllMatching).toHaveBeenCalledWith(filters);
+    expect(selectAllMatching).toHaveBeenCalledWith(filters, { enforceCap: true });
     expect(result).toEqual({ ok: true, data: { selected: 7, eligible: 2, dncLocked: 1, staleOrNotProspect: 4 } });
     expect(sessionFrom).not.toHaveBeenCalled();
   });
@@ -218,5 +219,25 @@ describe("promotion server actions", () => {
       "create_promote_leads_job",
       expect.objectContaining({ p_property_ids: ids }),
     );
+  });
+
+  it("a select-all-matching create from a user without membership in that org is refused before any resolution or RPC", async () => {
+    getCallerMemberships.mockResolvedValue([{ org_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" }]); // not request.orgId
+    const result = await createPromoteLeadsJob({
+      orgId: request.orgId,
+      propertyIds: [],
+      idempotencyKey: request.idempotencyKey,
+      filters: { search: null, blockStack: [], origin: "search_page" },
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: "PROMOTION_FORBIDDEN" } });
+    expect(selectAllMatching).not.toHaveBeenCalled();
+    expect(sessionRpc).not.toHaveBeenCalled();
+  });
+
+  it("the explicit-id create path checks membership too", async () => {
+    getCallerMemberships.mockResolvedValue([]);
+    const result = await createPromoteLeadsJob(request);
+    expect(result).toMatchObject({ ok: false, error: { code: "PROMOTION_FORBIDDEN" } });
+    expect(sessionRpc).not.toHaveBeenCalled();
   });
 });

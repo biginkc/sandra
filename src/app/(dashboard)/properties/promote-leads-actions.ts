@@ -128,7 +128,7 @@ export async function preflightPromoteLeads(args: {
           error: { code: "PROMOTION_FORBIDDEN", message: "You no longer have access to this organization." },
         };
       }
-      const resolved = await selectAllMatching(args.filters);
+      const resolved = await selectAllMatching(args.filters, { enforceCap: true });
       if (!resolved.ok) return resolved;
       return ok({
         selected: resolved.data.matchedCount,
@@ -186,9 +186,17 @@ export async function createPromoteLeadsJob(args: {
   filters?: SelectionFilters;
 }): Promise<Result<PromotionJobReceipt>> {
   try {
+    // Same org-membership check as preflight; do not rely only on the RPC.
+    const memberships = await getCallerMemberships();
+    if (!memberships.some((membership) => membership.org_id === args.orgId)) {
+      return {
+        ok: false,
+        error: { code: "PROMOTION_FORBIDDEN", message: "You no longer have access to this organization." },
+      };
+    }
     let sourceIds = args.propertyIds;
     if (args.filters) {
-      const resolved = await selectAllMatching(args.filters);
+      const resolved = await selectAllMatching(args.filters, { enforceCap: true });
       if (!resolved.ok) return resolved;
       sourceIds = resolved.data.eligibleIds;
     }

@@ -59,7 +59,9 @@ function makeBuilder(head: boolean, viaRpc: boolean) {
   return q;
 }
 
-import { getAllMatchingProspectSelection } from "./actions";
+import { resolveSelection } from "@/lib/prospects/select-all";
+
+import { getAllMatchingProspectIds, getAllMatchingProspectSelection } from "./actions";
 
 const ids = (n: number, from = 0) => Array.from({ length: n }, (_, i) => ({ id: `p-${String(from + i).padStart(6, "0")}` }));
 
@@ -192,5 +194,32 @@ describe("getAllMatchingProspectSelection: legacy origin is unchanged", () => {
     });
     expect(state.log).toContain('ilike("address","%a%b%")');
     expect(membershipsMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("the 20,000 cap is enforced at the Search action boundary, not in the legacy resolver", () => {
+  const pages21 = () => Array.from({ length: 21 }, (_, p) => ids(1000, p * 1000));
+
+  it("a forged origin:'legacy' filter selection through the Search actions (resolveSelection) is still capped", async () => {
+    state.script.pages = pages21();
+    const out = await resolveSelection({ filters: { search: "smith", blockStack: [], origin: "legacy" } });
+    expect(out).toMatchObject({ ok: false, error: { code: "SELECT_ALL_TOO_LARGE" } });
+    expect(eligibilityMock).not.toHaveBeenCalled();
+  });
+
+  it("an omitted origin is capped too", async () => {
+    state.script.pages = pages21();
+    const out = await resolveSelection({ filters: { search: null, blockStack: [] } });
+    expect(out).toMatchObject({ ok: false, error: { code: "SELECT_ALL_TOO_LARGE" } });
+  });
+
+  it("the legacy resolver used by campaign audiences (getAllMatchingProspectIds) stays uncapped", async () => {
+    state.script.pages = pages21().concat([ids(5, 21000)]);
+    eligibilityMock.mockImplementation(async (_c: unknown, all: string[]) => ({
+      eligibleIds: all, exclusions: [], dncLockedCount: 0, skipTraceDisabledCount: 0,
+      skippedLeadCount: 0, prospectDncLockedCount: 0, prospectDncLockedIds: [],
+    }));
+    const out = await getAllMatchingProspectIds({ search: null, blockStack: [] });
+    expect(out.ok && out.data).toHaveLength(21_005);
   });
 });
