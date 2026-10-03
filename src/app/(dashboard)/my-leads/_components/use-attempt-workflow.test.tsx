@@ -352,22 +352,27 @@ describe("useAttemptWorkflow", () => {
       expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, reconciliation: { payload: { note: "original" } } })
     })
 
-    it("a late ok after the timeout is a committed save, with no click", async () => {
+    it("a late answer after the timeout is ignored: nothing commits, the request stays frozen, and Reconcile replays it through the normal path", async () => {
       vi.useFakeTimers()
       try {
         let answer!: (value: unknown) => void
-        actions.submitMyLeadCommand.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve }))
-        const { hook, handlers } = setup(opening("log-attempt"))
+        actions.submitMyLeadCommand
+          .mockImplementationOnce(() => new Promise((resolve) => { answer = resolve }))
+          .mockResolvedValueOnce({ ok: true, duplicate: true, attemptRecorded: true })
+        const { hook, handlers } = setup(opening("log-attempt", row({ queueVersion: 1 })))
         await act(async () => {
-          const pending = hook.result.current.submit({ outcome: "reached" }).then(() => undefined, () => undefined)
+          const pending = hook.result.current.submit({ outcome: "reached", note: "original" }).then(() => undefined, () => undefined)
           await vi.advanceTimersByTimeAsync(25_001)
           await pending
         })
-        expect(handlers.onCommitted).not.toHaveBeenCalled()
         await act(async () => { answer({ ok: true, attemptRecorded: true }) })
+        expect(handlers.onCommitted).not.toHaveBeenCalled()
+        expect(hook.result.current.recoveryValue?.reconciliation).toMatchObject({ payload: { note: "original" } })
+        let replayed: unknown
+        await act(async () => { replayed = await hook.result.current.submit({ outcome: "reached", note: "edited" }) })
+        expect(replayed).toMatchObject({ ok: true, duplicate: true })
+        expect(sentInput(1)).toEqual(sentInput(0))
         expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
-        expect(hook.result.current.recoveryValue).toBeNull()
-        expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(1)
       } finally { vi.useRealTimers() }
     })
 
@@ -391,32 +396,6 @@ describe("useAttemptWorkflow", () => {
         expect(handlers.onCommitted).not.toHaveBeenCalled()
         await act(async () => { replay({ ok: true, duplicate: true, attemptRecorded: true }); await replayDone })
         expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
-      } finally { vi.useRealTimers() }
-    })
-
-    it("a late original after a sound STALE, then an edited save: already saved, one attempt", async () => {
-      vi.useFakeTimers()
-      try {
-        let answer!: (value: unknown) => void
-        actions.submitMyLeadCommand
-          .mockImplementationOnce(() => new Promise((resolve) => { answer = resolve }))
-          .mockResolvedValueOnce({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "stale" })
-          .mockResolvedValueOnce({ ok: false, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." })
-        const { hook, handlers } = setup(opening("log-attempt", row({ queueVersion: 1 })))
-        await act(async () => {
-          const pending = hook.result.current.submit({ outcome: "reached", note: "original" }).then(() => undefined, () => undefined)
-          await vi.advanceTimersByTimeAsync(25_001)
-          await pending
-        })
-        await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "original" }) }) // replay: STALE, released
-        await act(async () => { hook.result.current.recoveryValue?.refresh() })
-        await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "edited" }) }) // original committed meanwhile: conflict
-        expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, message: "This was already saved. Refresh to see it." })
-        expect(sentInput(2).idempotencyKey).toBe(sentInput(0).idempotencyKey)
-        expect(handlers.onCommitted).not.toHaveBeenCalled()
-        await act(async () => { answer({ ok: true, attemptRecorded: true }) }) // the original's answer finally arrives
-        expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
-        expect(hook.result.current.recoveryValue).toBeNull()
       } finally { vi.useRealTimers() }
     })
 

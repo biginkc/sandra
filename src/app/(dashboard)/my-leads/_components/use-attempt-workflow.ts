@@ -58,8 +58,6 @@ type Submission = {
    */
   route: string | null
   memberId: string | null
-  /** A request for this key is in flight, so late results from older requests are ignored. */
-  inFlight: boolean
   /** The save is confirmed committed: late answers from older requests must change nothing. */
   committed?: boolean
 }
@@ -141,7 +139,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     return state?.opening === current && state.uncertain && state.payload ? { command: current.action, payload: state.payload } : undefined
   }
 
-  /** The committed path shared by a normal answer, a late answer and an already-saved Refresh. */
+  /** The committed path shared by a normal answer and an already-saved Refresh. */
   const finishCommitted = async (current: O, input: Record<string, Json>, result: Extract<CommandResult, { ok: true }>) => {
     if (submission.current?.opening === current) submission.current.committed = true
     const dripFailure = "dripFailure" in result && result.dripFailure ? `Outcome saved. Drip not started: ${result.dripFailure}` : null
@@ -213,7 +211,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     // definite rejection may be retried with refreshed queue metadata. Once transport
     // or confirmation is uncertain, the original payload and key become one
     // immutable replay pair, so an edited draft cannot produce an idempotency conflict.
-    if (submission.current?.opening !== opening) submission.current = { opening, key: crypto.randomUUID(), payload: null, uncertain: false, route: null, memberId: null, inFlight: false }
+    if (submission.current?.opening !== opening) submission.current = { opening, key: crypto.randomUUID(), payload: null, uncertain: false, route: null, memberId: null }
     const state = submission.current
     const command = opening.action as Parameters<typeof submitMyLeadCommand>[0]
     const nextInput = JSON.parse(JSON.stringify({ ...payload, propertyId: row.propertyId, expectedEpisodeId: row.assignmentEpisodeId,
@@ -234,7 +232,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       state.uncertain = true
       if (activeOpening.current === opening) setRecovery({ opening, message: message ?? UNCONFIRMED_MESSAGE, blocked: false, busy: false, reconciliation: { command, payload: state.payload ?? input } })
     }
-    const applyFailure = (failure: Failure, late: boolean) => {
+    const applyFailure = (failure: Failure) => {
       // A save that is already confirmed committed is not changed by a late, older answer.
       if (state.committed) return
       if (failure.code === "IDEMPOTENCY_CONFLICT") {
@@ -254,7 +252,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
         if ((failure.code === "FORBIDDEN" || failure.code === "STALE_STATE") && activeOpening.current === opening)
           setRecovery({ opening, message: failure.message, blocked: true, busy: false })
         else setRecovery((current) => (current?.opening === opening && current.reconciliation ? null : current))
-      } else if (!late) {
+      } else {
         // Unknown outcome (transport/auth errors, missing confirmation, unexpected
         // exceptions): the request may have committed, so keep it frozen for replay.
         // Actionable guidance from the server (an expired session) is shown as is.
@@ -271,7 +269,6 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
           idempotencyKey: state.key })
       : submitMyLeadCommand(command, input))
     const call = send()
-    state.inFlight = true
     let result: CommandResult
     try {
       result = await withSaveTimeout(call, saveTimeoutMs)
@@ -280,20 +277,11 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       // response did not reach the browser. Retain the exact request so the
       // next click is a server-side replay instead of a second mutation.
       markUncertain()
-      if (error instanceof SaveTimeoutError) {
-        // The original may still answer later. With no replay in flight, a late ok is a
-        // committed save and a late definite rejection releases the request as usual.
-        void call.then((late) => {
-          if (submission.current !== state || state.committed || state.inFlight || activeOpening.current !== opening) return
-          if (late.ok) void finishCommitted(opening, input, late)
-          else applyFailure(late as Failure, true)
-        }, () => undefined)
-      }
+      // A late answer from this timed-out request is deliberately ignored: a Reconcile replay
+      // of the frozen request returns the stored result (duplicate) through the normal path.
       throw error
-    } finally {
-      state.inFlight = false
     }
-    if (!result.ok) applyFailure(result as Failure, false)
+    if (!result.ok) applyFailure(result as Failure)
     else await finishCommitted(opening, input, result)
     return result
     // finishCommitted only reads refs and state setters, so it is deliberately not a dependency.

@@ -184,5 +184,35 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
     expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({ idempotencyKey: (mocks.submitMyLeadCommand.mock.calls[0][1] as { idempotencyKey: string }).idempotencyKey })
     expect(await screen.findByRole("button", { name: "Done without a drip" })).toBeInTheDocument()
   })
+
+  it("timeout, then a late ok is ignored, fields stay locked, and Reconcile flows through the normal result path with one attempt", async () => {
+    const user = userEvent.setup({ delay: null })
+    let lateAnswer!: (value: unknown) => void
+    mocks.submitMyLeadCommand
+      .mockImplementationOnce(() => new Promise((resolve) => { lateAnswer = resolve }))
+      .mockResolvedValueOnce({ ok: true, duplicate: true, attemptRecorded: true })
+    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} />)
+    await user.click(screen.getByRole("button", { name: "Log follow-up" }))
+    await user.selectOptions(await screen.findByLabelText("External outcome"), "reached")
+    fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-11T09:00" } })
+    await user.type(screen.getByLabelText("Note (optional)"), "Original note")
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Save attempt" }))
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_001) })
+    } finally { vi.useRealTimers() }
+    // The original commits server-side and its late answer arrives: it is ignored.
+    await act(async () => { lateAnswer({ ok: true, attemptRecorded: true }) })
+    const note = await screen.findByLabelText("Note (optional)")
+    expect(note).toBeDisabled()
+    expect(note).toHaveValue("Original note")
+    expect(screen.queryByRole("button", { name: "Done without a drip" })).toBeNull()
+    await user.click(await screen.findByRole("button", { name: "Reconcile saved change" }))
+    expect(await screen.findByRole("button", { name: "Done without a drip" })).toBeInTheDocument()
+    expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2)
+    const calls = mocks.submitMyLeadCommand.mock.calls.map((call) => call[1] as { note?: string })
+    expect(calls[1]).toEqual(calls[0])
+    expect(calls[1].note).toBe("Original note")
+  })
 })
 
