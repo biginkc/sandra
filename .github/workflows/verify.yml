@@ -48,6 +48,11 @@ jobs:
           SANDRA_POSTGRES_BIN: /usr/lib/postgresql/17/bin
         run: node scripts/rehearse-recording-library.mjs
 
+      - name: Rehearse Slack preview authorization and durable delivery
+        env:
+          SANDRA_POSTGRES_BIN: /usr/lib/postgresql/17/bin
+        run: node scripts/rehearse-slack-unfurls.mjs
+
       - name: Run verify
         env:
           SUPABASE_LOCAL_DB_URL: postgresql://runner@localhost:5432/postgres
