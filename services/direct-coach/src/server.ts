@@ -51,12 +51,15 @@ export function createCoachServer(options: CoachServerOptions): CoachServer {
     if (path === '/presence' && watchdog) {
       socket.on('error', () => socket.destroy())
       void watchdog.admit(request, socket, head).catch((error: unknown) => {
-        const status = error instanceof PresenceAdmissionError ? error.status : 500
+        const status = error instanceof PresenceAdmissionError ? error.status : null
         const reason = error instanceof PresenceAdmissionError ? error.reason : 'upgrade_failed'
         // Never log the URL, cookies, capabilities, or untrusted exception text.
         options.logger.warn('watchdog.upgrade_rejected', { reason, status, originPresent: typeof request.headers.origin === 'string' })
+        // Unknown failures may occur after the 101 response; never write HTTP
+        // bytes onto a connection that could already be speaking WebSocket.
+        if (status === null) { socket.destroy(); return }
         if (!socket.destroyed) {
-          const label = status === 403 ? 'Forbidden' : status === 503 ? 'Service Unavailable' : 'Internal Server Error'
+          const label = status === 403 ? 'Forbidden' : 'Service Unavailable'
           socket.end(`HTTP/1.1 ${status} ${label}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`)
           const timer = setTimeout(() => socket.destroy(), 1_000)
           timer.unref()
