@@ -32,9 +32,12 @@ export type NormaBlandConfig = {
   apiKey: string;
   baseUrl: string;
   pathwayId: string;
-  /** Bland's `pathway_version` is an integer, not the agent semver. */
-  pathwayVersion: number;
-  /** Bland voice for the call (NORMA_BLAND_VOICE). Required: the pathway pin alone does not choose one. */
+  /**
+   * Optional integer pin for Bland's `pathway_version`. Null omits the field so
+   * Bland uses the published production version (docs: defaults to production).
+   */
+  pathwayVersion: number | null;
+  /** Bland voice for the call (NORMA_BLAND_VOICE). Required: the pathway id alone does not choose one. */
   voice: string;
   fromNumber: string;
   webhookUrl: string;
@@ -51,14 +54,23 @@ export const DEFAULT_BACKGROUND_TRACK: NormaBackgroundTrack = "office";
 
 const FALSE_VALUES = new Set(["0", "false", "no", "off"]);
 
-/**
- * The LIVE pathway's integer version (agent snapshot 0.0.4). Staging 0.0.17 has
- * no published integer version, so the pin defaults to 3 until a human changes
- * NORMA_BLAND_PATHWAY_VERSION.
- */
-export const DEFAULT_NORMA_PATHWAY_VERSION = 3;
+/** Env values that mean "do not send pathway_version" (Bland production). */
+const OMIT_PATHWAY_VERSION = new Set(["production", "latest"]);
+
 export const DEFAULT_BLAND_BASE_URL = "https://api.bland.ai";
 export const DEFAULT_BLAND_TIMEOUT_MS = 10_000;
+
+/**
+ * null omits `pathway_version`. "invalid" fails config so a bad pin never dials.
+ * Unset, blank, "production", and "latest" omit the field.
+ */
+function parsePathwayVersion(raw: string | undefined): number | null | "invalid" {
+  const text = (raw ?? "").trim();
+  if (!text || OMIT_PATHWAY_VERSION.has(text.toLowerCase())) return null;
+  const version = Number(text);
+  if (!Number.isInteger(version) || version < 0) return "invalid";
+  return version;
+}
 
 /** Returns null (never throws) when any required value is missing/invalid. */
 export function readNormaBlandConfig(env: NormaEnv = process.env): NormaBlandConfig | null {
@@ -67,11 +79,10 @@ export function readNormaBlandConfig(env: NormaEnv = process.env): NormaBlandCon
   const fromNumber = env.NORMA_BLAND_FROM_NUMBER?.trim();
   const webhookUrl = env.NORMA_BLAND_WEBHOOK_URL?.trim();
   const voice = env.NORMA_BLAND_VOICE?.trim();
-  const versionText = env.NORMA_BLAND_PATHWAY_VERSION?.trim();
-  const version = versionText ? Number(versionText) : DEFAULT_NORMA_PATHWAY_VERSION;
+  const pathwayVersion = parsePathwayVersion(env.NORMA_BLAND_PATHWAY_VERSION);
   // No voice, no call: dispatch refuses (closed as rejected before the claim) rather than let Bland pick.
   if (!apiKey || !pathwayId || !fromNumber || !webhookUrl || !voice) return null;
-  if (!Number.isInteger(version) || version < 0) return null;
+  if (pathwayVersion === "invalid") return null;
   if (!/^https:\/\//.test(webhookUrl)) return null;
   const trackText = env.NORMA_BLAND_BACKGROUND_TRACK?.trim().toLowerCase();
   const backgroundTrack = trackText ? BACKGROUND_TRACKS.find((t) => t === trackText) : DEFAULT_BACKGROUND_TRACK;
@@ -84,7 +95,7 @@ export function readNormaBlandConfig(env: NormaEnv = process.env): NormaBlandCon
     apiKey,
     baseUrl: (env.NORMA_BLAND_BASE_URL?.trim() || DEFAULT_BLAND_BASE_URL).replace(/\/+$/, ""),
     pathwayId,
-    pathwayVersion: version,
+    pathwayVersion,
     voice,
     fromNumber,
     webhookUrl,

@@ -72,18 +72,33 @@ async function readJson(response: Response): Promise<Record<string, unknown> | n
   }
 }
 
-/** Build the exact send-call body. Exported for tests; contains no script text. */
+/** Spoken after the beep. Digits are spaced so the voice reads them one by one. */
+export const NORMA_VOICEMAIL_MESSAGE =
+  "Hi, this is Norma with The BMH Group following up on your property. Please call us back at 8 1 6, 7 0 5, 3 5 0 1. Thank you.";
+
+/** Bland `max_duration` is minutes (https://docs.bland.ai/api-v1/post/calls). */
+export const NORMA_MAX_DURATION_MINUTES = 10;
+
+/** Build the exact send-call body. Exported for tests. No pathway script fields (`task`, `prompt`, `first_sentence`). */
 export function buildSendCallBody(config: NormaBlandConfig, params: BlandSendCallParams) {
   return {
     phone_number: params.phoneNumber,
     pathway_id: config.pathwayId,
-    pathway_version: config.pathwayVersion,
+    // Omit pathway_version unless explicitly pinned. Bland then uses the
+    // published production version (docs: "Defaults to the production version").
+    ...(config.pathwayVersion == null ? {} : { pathway_version: config.pathwayVersion }),
     voice: config.voice,
     from: config.fromNumber,
     metadata: { request_id: params.requestId, idempotency_key: params.idempotencyKey },
     webhook: config.webhookUrl,
-    // No voicemail message, no retry: a no-answer ends the attempt.
-    voicemail: { action: "hangup" },
+    // Leave a short neutral voicemail (Jarrad 2026-10-02). No Bland-side retry.
+    voicemail: {
+      action: "leave_message",
+      message: NORMA_VOICEMAIL_MESSAGE,
+    },
+    // Record for quality (the opening line discloses it) and cap call length.
+    record: true,
+    max_duration: NORMA_MAX_DURATION_MINUTES,
     request_data: params.variables,
     // Let the person say hello first; play office background instead of static.
     wait_for_greeting: config.waitForGreeting,
