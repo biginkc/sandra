@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { get } from 'node:http'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import WebSocket from 'ws'
@@ -21,6 +22,44 @@ const claims: CoachClaims = { callId: 'call-1', sellerLegId: 'seller-leg-1', exp
 const bundle: ScriptBundle = { schema_version: 3, script: { version: '1.2.3' }, sections: { sections: [] } }
 const binding: DirectCoachBinding = { ...claims, ownerUserId: 'owner', orgId: 'org', scriptSlug: 'closr-outbound', scriptRevision: 1, scriptDigest: 'a'.repeat(64), bundle }
 const logger: CoachLogger = { info() {}, warn() {}, error() {} }
+
+test('presence upgrade denies foreign and missing origins with explicit HTTP403 and sanitized diagnostics', async () => {
+  const events: unknown[] = []
+  let attachments = 0
+  const db: DirectCoachDb = {
+    readBinding: async () => null, isActive: async () => true, close: async () => {},
+    watchdogHeartbeat: async () => {}, watchdogClaimExpired: async () => [],
+    watchdogRenew: async () => false, watchdogDisconnect: async () => true,
+    watchdogAttach: async () => { attachments++; return false },
+  }
+  const service = createCoachServer({
+    secret: SECRET, db,
+    publisher: { publish: async () => {}, close: async () => {}, closeAll: async () => {} },
+    deepgramApiKey: 'disabled', jevApiKey: 'disabled',
+    logger: { ...logger, warn: (event, fields) => events.push({ event, ...fields }) },
+    watchdog: { secret: SECRET, origins: new Set(['http://localhost']), onExpired: async () => {} },
+  })
+  await service.listen(0, '127.0.0.1')
+  try {
+    const address = service.server.address()
+    assert.ok(address && typeof address === 'object')
+    for (const origin of ['https://untrusted.example', undefined]) {
+      const status = await new Promise<number | undefined>((resolve, reject) => {
+        const req = get(`http://127.0.0.1:${address.port}/presence?token=do-not-log`, {
+          headers: { Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==', Cookie: 'do-not-log', ...(origin ? { Origin: origin } : {}) },
+        }, (res) => { res.resume(); resolve(res.statusCode) })
+        req.setTimeout(2_000, () => req.destroy(new Error('upgrade response timeout')))
+        req.on('error', reject)
+      })
+      assert.equal(status, 403)
+    }
+    assert.equal(attachments, 0)
+    assert.deepEqual(events, [
+      { event: 'watchdog.upgrade_rejected', reason: 'origin_not_allowed', status: 403, originPresent: true },
+      { event: 'watchdog.upgrade_rejected', reason: 'origin_not_allowed', status: 403, originPresent: false },
+    ])
+  } finally { await service.close() }
+})
 
 test('capability token verifies with exact timing-safe claims and rejects tampering/expiry', () => {
   const token = createCoachToken(claims, SECRET)
