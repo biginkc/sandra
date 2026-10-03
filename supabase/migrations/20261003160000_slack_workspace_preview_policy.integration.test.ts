@@ -41,6 +41,13 @@ it("workspace policy allows verified internal channels and fences disable, tombs
     expect(missingTimestamp.accepted).toBe(false);
     expect(missingTimestamp.job_id).toBeNull();
     expect((await db.query("select denial_code from public.slack_event_receipts where event_id=$1", [missingTimestampEvent])).rows[0].denial_code).toBe("event_before_policy");
+    await db.query("update public.slack_preview_policies set acknowledged_at=null where installation_id=$1", [installation.installation_id]);
+    const missingAcknowledgementEvent = randomUUID();
+    const missingAcknowledgement = (await db.query("select * from public.enqueue_slack_unfurl_event($1,$2,$3,'link_shared',now(),$4,$5,1,'C_AUTO','1.0-missing-ack','U_POLICY',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null)", [team, app, missingAcknowledgementEvent, org, installation.installation_id])).rows[0];
+    expect(missingAcknowledgement.accepted).toBe(false);
+    expect(missingAcknowledgement.job_id).toBeNull();
+    expect((await db.query("select denial_code from public.slack_event_receipts where event_id=$1", [missingAcknowledgementEvent])).rows[0].denial_code).toBe("policy_not_acknowledged");
+    await db.query("update public.slack_preview_policies set acknowledged_at=now() where installation_id=$1", [installation.installation_id]);
     const event = randomUUID();
     const job = (await db.query("select * from public.enqueue_slack_unfurl_event($1,$2,$3,'link_shared',now(),$4,$5,1,'C_AUTO','1.1','U_POLICY',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null)", [team, app, event, org, installation.installation_id])).rows[0];
     expect(job.job_id).toBeTruthy();
@@ -76,6 +83,12 @@ it("workspace policy allows verified internal channels and fences disable, tombs
     const reconnectEvent = randomUUID();
     const reconnect = (await db.query("select * from public.enqueue_slack_unfurl_event($1,$2,$3,'link_shared',now(),$4,$5,2,'C_RECONNECT','1.5','U_POLICY',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null)", [team, app, reconnectEvent, org, installation.installation_id])).rows[0];
     expect(reconnect.job_id).toBeTruthy();
+    await db.query("delete from public.slack_preview_policies where installation_id=$1", [installation.installation_id]);
+    const missingPolicyEvent = randomUUID();
+    const missingPolicy = (await db.query("select * from public.enqueue_slack_unfurl_event($1,$2,$3,'link_shared',now(),$4,$5,2,'C_RECONNECT','1.6','U_POLICY',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null)", [team, app, missingPolicyEvent, org, installation.installation_id])).rows[0];
+    expect(missingPolicy.accepted).toBe(false);
+    expect(missingPolicy.job_id).toBeNull();
+    expect((await db.query("select denial_code from public.slack_event_receipts where event_id=$1", [missingPolicyEvent])).rows[0].denial_code).toBe("previews_disabled");
   } finally {
     await db.query("rollback").catch(() => undefined);
     await db.end();
@@ -98,10 +111,12 @@ it("backfills unknown revoked approvals as denials but leaves lifecycle revocati
     await db.query("insert into public.memberships(user_id,org_id,role,access_status) values($1,$2,'owner','active')", [user, org]);
     const unknown = (await db.query("select * from public.upsert_slack_installation($1,'T_BACKFILL_UNKNOWN','A_BACKFILL','Backfill','B_BACKFILL','xoxb-token',array['links:read'],$2,'backfill-key')", [org, user])).rows[0].installation_id;
     const lifecycle = (await db.query("select * from public.upsert_slack_installation($1,'T_BACKFILL_LIFECYCLE','A_BACKFILL','Backfill','B_BACKFILL','xoxb-token',array['links:read'],$2,'backfill-key')", [org, user])).rows[0].installation_id;
-    await db.query("insert into public.slack_channel_approvals(installation_id,org_id,channel_id,approved_by,sharing_policy_acknowledged,status,revoked_at,revoked_reason) values($1,$2,'C_UNKNOWN',$3,true,'revoked',now(),null),($4,$2,'C_LIFECYCLE',$3,true,'revoked',now(),'tokens_revoked')", [unknown, org, user, lifecycle]);
+    const identity = (await db.query("select * from public.upsert_slack_installation($1,'T_BACKFILL_IDENTITY','A_BACKFILL','Backfill','B_BACKFILL','xoxb-token',array['links:read'],$2,'backfill-key')", [org, user])).rows[0].installation_id;
+    await db.query("insert into public.slack_channel_approvals(installation_id,org_id,channel_id,approved_by,sharing_policy_acknowledged,status,revoked_at,revoked_reason) values($1,$2,'C_UNKNOWN',$3,true,'revoked',now(),null),($4,$2,'C_LIFECYCLE',$3,true,'revoked',now(),'tokens_revoked'),($5,$2,'C_IDENTITY',$3,true,'revoked',now(),'slack_identity_error')", [unknown, org, user, lifecycle, identity]);
     await db.query(migration);
     expect((await db.query("select denied_reason from public.slack_channel_denials where installation_id=$1 and channel_id='C_UNKNOWN'", [unknown])).rows[0].denied_reason).toBe("legacy_channel_revoked");
     expect((await db.query("select count(*)::int as count from public.slack_channel_denials where installation_id=$1 and channel_id='C_LIFECYCLE'", [lifecycle])).rows[0].count).toBe(0);
+    expect((await db.query("select count(*)::int as count from public.slack_channel_denials where installation_id=$1 and channel_id='C_IDENTITY'", [identity])).rows[0].count).toBe(0);
   } finally {
     await db.query("rollback").catch(() => undefined);
     await db.end();

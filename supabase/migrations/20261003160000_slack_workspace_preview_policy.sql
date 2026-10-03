@@ -45,7 +45,7 @@ insert into public.slack_channel_denials(installation_id,org_id,channel_id,denie
 select a.installation_id,a.org_id,a.channel_id,coalesce(a.revoked_reason,'legacy_channel_revoked'),coalesce(a.revoked_at,now()),now()
   from public.slack_channel_approvals a
  where a.status='revoked'
-   and (a.revoked_reason is null or a.revoked_reason not in ('app_uninstalled','tokens_revoked','invalid_auth','invalid_token','not_authed','token_revoked','token_expired','account_inactive','team_not_found','installation_revoked','installation_scope_missing'))
+   and (a.revoked_reason is null or a.revoked_reason not in ('app_uninstalled','tokens_revoked','invalid_auth','invalid_token','not_authed','token_revoked','token_expired','account_inactive','team_not_found','installation_revoked','installation_scope_missing','slack_identity_error'))
 on conflict (installation_id,channel_id) do nothing;
 
 insert into public.slack_preview_policies(installation_id, org_id)
@@ -132,15 +132,21 @@ begin
      for update;
     if v_current_installation_version is null or v_installation_status <> 'active' then raise exception 'INSTALLATION_NOT_ACTIVE' using errcode='22023'; end if;
     if v_current_installation_version <> p_installation_version then raise exception 'INSTALLATION_VERSION_MISMATCH' using errcode='22023'; end if;
-    select coalesce(p.mode,'legacy'), p.policy_revision, p.acknowledged_at into v_policy_mode, v_policy_revision, v_policy_acknowledged_at
+    select p.mode, p.policy_revision, p.acknowledged_at into v_policy_mode, v_policy_revision, v_policy_acknowledged_at
       from public.slack_preview_policies p where p.installation_id=p_installation_id and p.org_id=p_org_id;
-    if v_policy_mode='disabled' then
+    if not found then
+      v_policy_mode := 'disabled';
+      v_policy_revision := null;
+      v_policy_acknowledged_at := null;
+      v_terminal := true;
+      v_denial_code := coalesce(v_denial_code,'previews_disabled');
+    elsif v_policy_mode='disabled' then
       v_terminal := true;
       v_denial_code := coalesce(v_denial_code,'previews_disabled');
     elsif v_policy_mode='eligible_internal_channels' then
-      if v_policy_acknowledged_at is not null and (p_event_time is null or p_event_time < date_trunc('second', v_policy_acknowledged_at)) then
+      if v_policy_acknowledged_at is null or p_event_time is null or p_event_time < date_trunc('second', v_policy_acknowledged_at) then
         v_terminal := true;
-        v_denial_code := coalesce(v_denial_code,'event_before_policy');
+        v_denial_code := coalesce(v_denial_code,case when v_policy_acknowledged_at is null then 'policy_not_acknowledged' else 'event_before_policy' end);
       end if;
       select exists(
         select 1 from public.slack_channel_denials d
