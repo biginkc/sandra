@@ -287,6 +287,22 @@ describe("MyLeadsPage availability boundary", () => {
       .toMatchObject({ initialMemberId: "owner-1", selectedLead: { status: "unavailable" } });
   });
 
+  it("keeps an archived deep-linked lead in a neutral terminal state after reload", async () => {
+    mocks.getMyLeadsQueueRow.mockResolvedValue({ status: "unavailable", reason: "archived" });
+
+    renderPage(await MyLeadsPage({
+      searchParams: Promise.resolve({ lead: "aabbccdd-eeff-4011-8223-445566778899" }),
+    }));
+
+    expect((mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0])
+      .toMatchObject({
+        selectedLead: {
+          status: "terminal",
+          message: "This lead is archived and is unavailable in My Leads.",
+        },
+      });
+  });
+
   it.each([true, false])("defaults an owner to their own profile when Acquisitions enabled is %s", async (acquisitionsEnabled) => {
     const ownerViewer = { ...viewer, userId: "owner-1", isOwner: true };
     const ownerRoster: AcquisitionRoster = {

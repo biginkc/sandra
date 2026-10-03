@@ -358,6 +358,128 @@ describe("MyLeadsClient", () => {
     });
   });
 
+  it("refreshes the normal queue and KPIs when a linked lead is also in that queue", async () => {
+    const user = userEvent.setup();
+    const initial = snapshot("Linked queue lane");
+    const first = { ...initial.stages.not_contacted!.rows[0], stage: "contacted" as const };
+    const saved = { ...first, queueVersion: 2, sharedStatus: "interested", attemptsCount: 1 };
+    const refreshed = {
+      ...initial,
+      stages: {
+        ...initial.stages,
+        not_contacted: { ...initial.stages.not_contacted!, rows: [saved] },
+      },
+    };
+    mocks.loadMyLeadDetail.mockResolvedValue({ ok: true, detail: { groups: {} } });
+    mocks.loadMyLeadQueueRow
+      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: first, snapshotAt: initial.snapshotAt } })
+      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: saved, snapshotAt: "2026-09-11T14:01:00.000Z" } });
+    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: refreshed, kpis: { ...kpis, attempts: 2 } });
+    mocks.submitMyLeadCommand.mockResolvedValue({ ok: true });
+
+    renderClient(initial, kpis, null, undefined, {
+      status: "found",
+      propertyId: first.propertyId,
+      row: first,
+      snapshotAt: initial.snapshotAt,
+    });
+    const region = await screen.findByRole("region", { name: "Selected lead from link" });
+    await user.click(within(region).getByRole("button", { name: "Ready to make an offer" }));
+    fireEvent.change(screen.getByLabelText("Motivation"), { target: { value: "Seller plans to relocate." } });
+    await user.selectOptions(screen.getByLabelText("Temperature (optional)"), "warm");
+    await user.click(screen.getByRole("button", { name: "Save readiness" }));
+
+    await waitFor(() => expect(mocks.loadMyLeads).toHaveBeenCalledWith({ memberId: "rep-1", search: "", period: "today" }));
+    expect(screen.getByTestId("attempt-count")).toHaveTextContent("2");
+    expect(screen.getByTestId("queue-address")).toHaveTextContent("Linked queue lane");
+  });
+
+  it("keeps a linked lead active when a drip handoff retains its owner", async () => {
+    const user = userEvent.setup();
+    const initial = snapshot("Drip handoff lane");
+    const first = linkedRow("contacted");
+    const saved = { ...first, queueVersion: 2, sharedStatus: "needs_drip" };
+    mocks.loadMyLeadDetail.mockResolvedValue({ ok: true, detail: { groups: {} } });
+    mocks.loadMyLeadQueueRow
+      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: first, snapshotAt: initial.snapshotAt } })
+      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: saved, snapshotAt: "2026-09-11T14:01:00.000Z" } });
+    mocks.submitMyLeadHandoffDrip.mockResolvedValue({ ok: true });
+
+    renderClient(initial, kpis, null, undefined, {
+      status: "found",
+      propertyId: first.propertyId,
+      row: first,
+      snapshotAt: initial.snapshotAt,
+    });
+    const region = await screen.findByRole("region", { name: "Selected lead from link" });
+    await user.click(within(region).getByRole("button", { name: "Handoff" }));
+    await user.selectOptions(screen.getByLabelText("Handoff reason"), "not_interested");
+    await user.click(await screen.findByRole("button", { name: /Seller follow-up/ }));
+    await user.click(screen.getByRole("button", { name: "Hand off lead" }));
+
+    await waitFor(() => expect(mocks.submitMyLeadHandoffDrip).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("region", { name: "Selected lead from link" })).toBeInTheDocument();
+    expect(screen.queryByText("Lead handed off. It is no longer active in My Leads.")).not.toBeInTheDocument();
+  });
+
+  it("shows a neutral terminal state when a linked lead is actually archived", async () => {
+    const user = userEvent.setup();
+    const initial = snapshot("Archive lane");
+    const first = linkedRow("under_contract");
+    mocks.loadMyLeadDetail.mockResolvedValue({ ok: true, detail: { groups: {} } });
+    mocks.loadMyLeadQueueRow
+      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: first, snapshotAt: initial.snapshotAt } })
+      .mockResolvedValueOnce({ ok: true, lookup: { status: "unavailable", reason: "archived" } });
+    mocks.submitMyLeadCommand.mockResolvedValue({ ok: true });
+
+    renderClient(initial, kpis, null, undefined, {
+      status: "found",
+      propertyId: first.propertyId,
+      row: first,
+      snapshotAt: initial.snapshotAt,
+    });
+    const region = await screen.findByRole("region", { name: "Selected lead from link" });
+    await user.click(within(region).getByRole("button", { name: "Archive" }));
+    await user.click(screen.getByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: "Archive lead" }));
+
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("archived"));
+    expect(screen.queryByRole("region", { name: "Selected lead from link" })).not.toBeInTheDocument();
+  });
+
+  it("retains linked details while newer detail reads win over stale responses", async () => {
+    const user = userEvent.setup();
+    const initial = snapshot("Detail race lane");
+    const first = linkedRow("contacted");
+    let resolveSecond!: (value: unknown) => void;
+    let resolveThird!: (value: unknown) => void;
+    const detail = (body: string) => ({ ok: true, detail: { groups: { notes: { rows: [{ id: body, actorLabel: "Maria", body, at: "2026-09-11T14:00:00.000Z" }], cursor: null, hasMore: false } } } });
+    mocks.loadMyLeadDetail
+      .mockResolvedValueOnce(detail("old detail"))
+      .mockReturnValueOnce(new Promise(resolve => { resolveSecond = resolve; }))
+      .mockReturnValueOnce(new Promise(resolve => { resolveThird = resolve; }));
+
+    const view = renderClient(initial, kpis, null, undefined, {
+      status: "found",
+      propertyId: first.propertyId,
+      row: first,
+      snapshotAt: initial.snapshotAt,
+    });
+    expect(await screen.findByText("old detail")).toBeInTheDocument();
+
+    const changedRoster = { ...roster, members: [...roster.members] };
+    view.rerender(<MyLeadsClient viewer={viewer} roster={changedRoster} initialMemberId={viewer.userId} initialSnapshot={initial} initialKpis={kpis} selectedLead={{ status: "found", propertyId: first.propertyId, row: first, snapshotAt: initial.snapshotAt }} />);
+    await waitFor(() => expect(screen.queryByText("Loading details…")).not.toBeInTheDocument());
+    view.rerender(<MyLeadsClient viewer={viewer} roster={{ ...changedRoster, settings: { ...changedRoster.settings } }} initialMemberId={viewer.userId} initialSnapshot={initial} initialKpis={kpis} selectedLead={{ status: "found", propertyId: first.propertyId, row: first, snapshotAt: initial.snapshotAt }} />);
+    await act(async () => resolveThird(detail("new detail")));
+    await act(async () => resolveSecond(detail("stale detail")));
+
+    expect(screen.getByText("new detail")).toBeInTheDocument();
+    expect(screen.queryByText("stale detail")).not.toBeInTheDocument();
+    expect(screen.queryByText("Loading details…")).not.toBeInTheDocument();
+    await user.click(within(screen.getByRole("region", { name: "Selected lead from link" })).getByRole("button", { name: /Hide details/ }));
+  });
+
   it("uses the linked single-row read for stale recovery outside the loaded queue", async () => {
     const user = userEvent.setup();
     const initial = snapshot("Loaded queue lane");

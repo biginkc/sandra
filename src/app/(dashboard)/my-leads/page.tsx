@@ -168,7 +168,9 @@ export default async function MyLeadsPage({
         ? typeof lookup.row.propertyId === "string" && lookup.row.propertyId.toLowerCase() === selectedLeadLink.propertyId
           ? { status: "found", propertyId: selectedLeadLink.propertyId, row: lookup.row, snapshotAt: lookup.snapshotAt }
           : { status: "unavailable", message: "This lead is unavailable in your My Leads queue." }
-        : { status: "unavailable", message: selectedLeadUnavailableMessage(lookup.reason) };
+        : ["archived", "no_active_episode"].includes(lookup.reason)
+          ? { status: "terminal", message: selectedLeadUnavailableMessage(lookup.reason) }
+          : { status: "unavailable", message: selectedLeadUnavailableMessage(lookup.reason) };
     } catch (error) {
       if (error instanceof MyLeadsReadError && ["FORBIDDEN", "INVALID_INPUT", "NOT_FOUND", "UNAUTHENTICATED"].includes(error.code)) {
         selectedLead = { status: "unavailable", message: "This lead is unavailable in your My Leads queue." };

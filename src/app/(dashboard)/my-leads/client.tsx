@@ -21,7 +21,7 @@ import { detailView,kpiTiles,stagePages } from './adapter';
 import { loadMyLeadCallReferences,loadMyLeads,loadMyLeadsStage,loadMyLeadDetail,loadMyLeadQueueRow,submitMyLeadCommand,submitMyLeadHandoffDrip,changeAcquisitionDesignation,changeAcquisitionSettings } from './actions';
 import { MyLeadQueueRow } from './_components/queue-row';
 import { queueRow as queueRowView } from './adapter';
-import type { SelectedLeadResult } from './deep-link';
+import { selectedLeadUnavailableMessage, type SelectedLeadResult } from './deep-link';
 
 type Props={viewer:{userId:string;orgId:string;isOwner:boolean};roster:AcquisitionRoster;initialMemberId:string;initialSnapshot:QueueSnapshot|null;initialKpis:AcquisitionKpis|null;initialDrips?:MyLeadDripSnapshot|null;dialpad?:DialpadPanelBootstrap|null;selectedLead?:SelectedLeadResult};
 
@@ -56,6 +56,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   type Opening = {action:MyLeadAction;row:QueueRow;scope:string;callActivityId?:string|null};
   type QueueRead = Awaited<ReturnType<typeof loadMyLeads>>;
   type LinkedRead = Awaited<ReturnType<typeof loadMyLeadQueueRow>>;
+  type LinkedReadResult = LinkedRead | {ok:false;message:string;stale:true};
   type CurrentRead = QueueRead | LinkedRead | null;
   const openingScope=JSON.stringify([member,search]);
   const activeScope=useRef(openingScope);activeScope.current=openingScope;
@@ -65,15 +66,17 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const findRow=(readSnapshot:QueueSnapshot|null,readDrips:MyLeadDripSnapshot|null|undefined,id:string)=>
     Object.values(readSnapshot?.stages??{}).flatMap(page=>page?.rows??[]).find(row=>row.propertyId===id)??
     [...(readDrips?.replied??[]),...(readDrips?.active??[])].find(row=>row.propertyId===id)?.queueRow??null;
-  const linkedRow=(id:string)=>linkedLeadRef.current.status==='found'&&linkedLeadRef.current.propertyId===id&&member===initialMemberId?linkedLeadRef.current.row:null;
-  const refreshLinkedLead=useCallback(async(propertyId:string)=>{
+  const linkedRow=(id:string)=>linkedLeadRef.current.status==='found'&&linkedLeadRef.current.propertyId.toLowerCase()===id.toLowerCase()&&member===initialMemberId?linkedLeadRef.current.row:null;
+  const linkedReadRequest=useRef(0);
+  const refreshLinkedLead=useCallback(async(propertyId:string):Promise<LinkedReadResult>=>{
     if(member!==initialMemberId)return {ok:false as const,message:'Switch back to your own queue to continue.'};
+    const readRequest=++linkedReadRequest.current;
     const result=await loadMyLeadQueueRow({memberId:initialMemberId,propertyId});
+    if(readRequest!==linkedReadRequest.current)return {ok:false as const,message:'A newer lead refresh is in progress.',stale:true as const};
     if(!result.ok)return result;
     const lookup=result.lookup;
-    if(lookup.status!=='found'||lookup.row.propertyId.toLowerCase()!==propertyId.toLowerCase())
-      return {ok:false as const,message:'This lead is unavailable in your My Leads queue.'};
-    setLinkedLead(current=>current.status==='found'&&current.propertyId===propertyId
+    if(lookup.status!=='found'||lookup.row.propertyId.toLowerCase()!==propertyId.toLowerCase())return result;
+    setLinkedLead(current=>current.status==='found'&&current.propertyId.toLowerCase()===propertyId.toLowerCase()
       ? {...current,row:lookup.row,snapshotAt:lookup.snapshotAt}
       : current);
     return result;
@@ -138,6 +141,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const initialEffect=useRef(Boolean(initialSnapshot&&initialKpis));const request=useRef(0);const submission=useRef<OpeningSubmission|null>(null);
   useEffect(()=>{
     if(member===initialMemberId)return;
+    ++linkedReadRequest.current;
     cancelOpening();
     setDialog(null);setRecovery(null);setCallOptions(null);recoveredRow.current=null;submission.current=null;
   },[initialMemberId,member]);
@@ -317,20 +321,18 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       // Publish the refresh barrier before closing so a rapid next click is retained
       // and initialized from authorized post-command metadata, never the old row.
       const linkedTarget=linkedRow(dialog.row.propertyId);
-      const terminal=dialog.action==='archive'||dialog.action==='handoff';
-      if(linkedTarget&&terminal){
-        setLinkedLead({status:'terminal',message:dialog.action==='archive'?'Lead archived. It is no longer active in My Leads.':'Lead handed off. It is no longer active in My Leads.'});
-        setDialog(current=>current===dialog?null:current);
-        submission.current=null;
-      }
+      const queueRead=refresh();
       const read=linkedTarget
-        ? terminal
-          ? Promise.resolve(null)
-          : refreshLinkedLead(dialog.row.propertyId).then(linked=>{
-              if(!linked.ok)setError(linked.message);
-              return null;
-            })
-        : refresh();
+        ? Promise.all([refreshLinkedLead(dialog.row.propertyId),queueRead]).then(([linked,queue])=>{
+            if(!linked.ok){if(!('stale' in linked))setError(linked.message);return queue;}
+            if(linked.lookup.status==='unavailable'){
+              setLinkedLead({status:'terminal',message:selectedLeadUnavailableMessage(linked.lookup.reason)});
+              setDialog(current=>current===dialog?null:current);
+              submission.current=null;
+            }
+            return queue;
+          })
+        : queueRead;
       mutationReads.current.set(dialog.row.propertyId,{scope:openingScope,episodeId:dialog.row.assignmentEpisodeId,requestId:request.current,read});
       const followUpPending = dialog.action === 'log-attempt' && input.outcome === 'no_answer' &&
         (!result.followUp || !['accepted','delivered'].includes(result.followUp.status));
@@ -463,7 +465,7 @@ function SelectedLeadView({lead,active,onLoadDetail,onLoadDetailPage,onStageActi
   const load=useCallback(async()=>{
     const requestId=++detailRequest.current;
     if(!active){setDetailState({status:'error',message:'This lead is opened in your own My Leads queue. Switch back to your queue to continue.'});return;}
-    setDetailState({status:'loading'});
+    setDetailState(current=>current.status==='ready'?current:{status:'loading'});
     try{
       const result=await onLoadDetail(lead.propertyId);
       if(detailRequest.current!==requestId)return;
