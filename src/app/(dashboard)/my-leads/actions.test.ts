@@ -28,6 +28,13 @@ describe('My Leads command integration',()=>{
     mocks.viewer.mockRejectedValue(new Error('No membership'));
     expect((await submitMyLeadCommand('archive',{propertyId:'lead'})).ok).toBe(false);expect(mocks.rpc).not.toHaveBeenCalled();
   });
+  it.each(['STALE_STATE','STALE_ASSIGNMENT'])('treats %s as a definite answer: exactly one RPC call, returned immediately',async message=>{
+    mocks.rpc.mockResolvedValue({data:null,error:{message,code:'40001'}});
+    const result=await submitMyLeadCommand('log-attempt',{propertyId:'lead',outcome:'reached',expectedSharedStatus:'interested'});
+    expect(result).toMatchObject({ok:false,code:'STALE_STATE'});
+    expect(mocks.rpc).toHaveBeenCalledTimes(1);
+    expect(mocks.adminRpc).not.toHaveBeenCalled();
+  });
   it('does not revalidate or report success for a rejected stale command',async()=>{
     mocks.rpc.mockResolvedValue({data:null,error:{message:'STALE_ASSIGNMENT'}});
     expect(await submitMyLeadCommand('handoff',{propertyId:'lead'})).toEqual({ok:false,code:'STALE_STATE',message:'This lead changed. Refresh before trying again.'});

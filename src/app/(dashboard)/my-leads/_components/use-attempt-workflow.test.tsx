@@ -150,5 +150,14 @@ describe("useAttemptWorkflow", () => {
       expect(sentInput(1)).toEqual(sentInput(0))
     } finally { vi.useRealTimers() }
   })
+
+  it("a definite STALE_STATE answer makes exactly one server call and the client never resubmits on its own", async () => {
+    actions.submitMyLeadCommand.mockResolvedValue({ ok: false, code: "STALE_STATE", message: "This lead changed." })
+    const { hook } = setup(opening())
+    await act(async () => { await hook.result.current.submit({ outcome: "reached" }) })
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)) })
+    expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(1)
+    expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, busy: false })
+  })
 })
 
