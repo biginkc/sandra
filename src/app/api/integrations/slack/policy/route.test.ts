@@ -27,7 +27,7 @@ beforeEach(() => {
   mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser } });
   mocks.getUser.mockResolvedValue({ data: { user: { id: "owner-1" } } });
   mocks.memberships.mockResolvedValue([{ user_id: "owner-1", org_id: ORG_ID, role: "owner", access_status: "active" }]);
-  mocks.list.mockResolvedValue([{ id: INSTALLATION_ID, teamName: "BMH", appId: "A123", status: "active", currentVersion: 2, policyEnabled: false, accountLinked: true }]);
+  mocks.list.mockResolvedValue([{ id: INSTALLATION_ID, teamName: "BMH", appId: "A123", status: "active", currentVersion: 2, policyMode: "legacy", policyEnabled: false, accountLinked: true }]);
   mocks.set.mockResolvedValue({ mode: "eligible_internal_channels", policyRevision: 2 });
 });
 
@@ -36,7 +36,7 @@ describe("Slack preview policy route", () => {
     const response = await GET(request(undefined));
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body).toEqual({ orgId: ORG_ID, canManage: true, installations: [{ id: INSTALLATION_ID, teamName: "BMH", appId: "A123", status: "active", currentVersion: 2, policyEnabled: false, accountLinked: true }] });
+    expect(body).toEqual({ orgId: ORG_ID, canManage: true, installations: [{ id: INSTALLATION_ID, teamName: "BMH", appId: "A123", status: "active", currentVersion: 2, policyMode: "legacy", policyEnabled: false, accountLinked: true }] });
     expect(JSON.stringify(body)).not.toContain("token");
   });
 

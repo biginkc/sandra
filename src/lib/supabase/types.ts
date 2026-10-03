@@ -7533,7 +7533,7 @@ export type Database = {
         Returns: undefined
       }
       approve_slack_channel: { Args: { p_approved_by: string; p_channel_id: string; p_installation_id: string; p_org_id: string; p_sharing_policy_acknowledged: boolean }; Returns: string }
-      list_slack_preview_installations: { Args: { p_org_id: string; p_user_id: string }; Returns: { account_linked: boolean; app_id: string; installation_id: string; installation_version: number; org_id: string; policy_enabled: boolean; status: string; team_name: string | null }[] }
+      list_slack_preview_installations: { Args: { p_org_id: string; p_user_id: string }; Returns: { account_linked: boolean; app_id: string; installation_id: string; installation_version: number; org_id: string; policy_enabled: boolean; policy_mode: string; status: string; team_name: string | null }[] }
       set_slack_preview_policy: { Args: { p_enabled: boolean; p_installation_id: string; p_org_id: string; p_owner_id: string }; Returns: { mode: string; policy_revision: number }[] }
       claim_slack_unfurl_jobs: { Args: { p_claim_token: string; p_lease_seconds: number; p_limit: number; p_now: string }; Returns: Database["public"]["Tables"]["slack_unfurl_jobs"]["Row"][] }
       cleanup_slack_unfurl_data: { Args: { p_cutoff: string }; Returns: number }

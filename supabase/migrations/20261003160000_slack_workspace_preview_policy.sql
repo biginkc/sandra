@@ -144,7 +144,7 @@ begin
       v_terminal := true;
       v_denial_code := coalesce(v_denial_code,'previews_disabled');
     elsif v_policy_mode='eligible_internal_channels' then
-      if v_policy_acknowledged_at is null or p_event_time is null or p_event_time < date_trunc('second', v_policy_acknowledged_at) then
+      if v_policy_acknowledged_at is null or p_event_time is null or p_event_time < v_policy_acknowledged_at then
         v_terminal := true;
         v_denial_code := coalesce(v_denial_code,case when v_policy_acknowledged_at is null then 'policy_not_acknowledged' else 'event_before_policy' end);
       end if;
@@ -251,7 +251,7 @@ begin
           select 1 from public.slack_preview_policies p
            where p.installation_id=p_installation_id and p.org_id=p_org_id
              and p.mode='eligible_internal_channels' and p.policy_revision=j.policy_revision
-             and p.acknowledged_at is not null and j.event_time >= date_trunc('second', p.acknowledged_at)
+             and p.acknowledged_at is not null and j.event_time >= p.acknowledged_at
        ))
      )
    for update;
@@ -265,11 +265,12 @@ create or replace function public.list_slack_preview_installations(
   p_org_id uuid, p_user_id uuid
 ) returns table(
   installation_id uuid, org_id uuid, team_name text, app_id text,
-  status text, installation_version integer, policy_enabled boolean,
+  status text, installation_version integer, policy_mode text, policy_enabled boolean,
   account_linked boolean
 )
 language sql security definer set search_path = public, pg_temp as $$
   select i.id, i.org_id, i.team_name, i.app_id, i.status, i.installation_version,
+    coalesce(p.mode, 'disabled'),
     coalesce(p.mode = 'eligible_internal_channels', false),
     exists (
       select 1 from public.slack_account_links l

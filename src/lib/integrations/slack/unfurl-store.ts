@@ -64,12 +64,15 @@ export type SlackPreviewPolicy = {
   policyRevision: number;
 };
 
+export type SlackPreviewPolicyMode = SlackPreviewPolicy["mode"];
+
 export type SlackPreviewInstallation = {
   id: string;
   teamName: string | null;
   appId: string;
   status: "active" | "revoked";
   currentVersion: number;
+  policyMode: SlackPreviewPolicyMode;
   policyEnabled: boolean;
   accountLinked: boolean;
 };
@@ -192,8 +195,9 @@ export async function listSlackPreviewInstallations(input: { orgId: string; user
     const candidate = row as Record<string, unknown>;
     if (typeof candidate.installation_id !== "string" || (candidate.team_name !== null && typeof candidate.team_name !== "string") || typeof candidate.app_id !== "string" || typeof candidate.installation_version !== "number") return [];
     const status = candidate.status === "active" ? "active" : candidate.status === "revoked" ? "revoked" : null;
-    if (!status) return [];
-    return [{ id: candidate.installation_id, teamName: candidate.team_name, appId: candidate.app_id, status, currentVersion: candidate.installation_version, policyEnabled: candidate.policy_enabled === true, accountLinked: candidate.account_linked === true }];
+    const policyMode = candidate.policy_mode === "legacy" || candidate.policy_mode === "eligible_internal_channels" || candidate.policy_mode === "disabled" ? candidate.policy_mode : null;
+    if (!status || !policyMode) return [];
+    return [{ id: candidate.installation_id, teamName: candidate.team_name, appId: candidate.app_id, status, currentVersion: candidate.installation_version, policyMode, policyEnabled: candidate.policy_enabled === true, accountLinked: candidate.account_linked === true }];
   });
 }
 
