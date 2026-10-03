@@ -62,6 +62,13 @@ try {
   fs.mkdirSync(path.join(work, "supabase/migrations"), { recursive: true });
   fs.writeFileSync(path.join(work, "supabase/config.toml"), 'project_id = "norma-lockproof"\n');
   fs.copyFileSync(migration, path.join(work, "supabase/migrations", file));
+  // The CLI refuses a push if remote history names versions missing locally: mirror already-recorded ones.
+  if ((await obs.query("select to_regclass('supabase_migrations.schema_migrations') as t")).rows[0].t) {
+    const done = new Set((await obs.query("select version from supabase_migrations.schema_migrations")).rows.map((r) => r.version));
+    for (const f of fs.readdirSync(path.dirname(migration))) {
+      if (f.endsWith(".sql") && done.has(f.split("_")[0])) fs.copyFileSync(path.join(path.dirname(migration), f), path.join(work, "supabase/migrations", f));
+    }
+  }
 
   const push = () => new Promise((resolve) => {
     const t = Date.now();
