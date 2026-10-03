@@ -185,8 +185,8 @@ export async function runContracts({ fixture, db, phase, provider }) {
     assert.deepEqual(first.data, [{ id: row('m6a').id }]); assert.deepEqual(second.data, []);
     if (phase === 'post') {
       const after = await effects('m6a');
-      // 20261002130000:669-687: metadata changes both content and known_reply.
-      // 20261002130200:444 and :501-502: pending and sent are both ineligible targets.
+      // 20261004050000:669-687: metadata changes both content and known_reply.
+      // 20261004050200:444 and :501-502: pending and sent are both ineligible targets.
       assert.equal(after.target, state.target, 'target delta');
       for (const key of ['dirty','content','known']) increased(after, state, key);
     }
@@ -214,10 +214,10 @@ export async function runContracts({ fixture, db, phase, provider }) {
       assert(previous.scheduled_for <= current.scheduled_for || current.scheduled_for === null, 'deferred position wrong');
     }
     if (phase === 'post') {
-      // 20261002130000:669-687: failed metadata changes both content and known_reply.
-      // 20261002130200:444: pending and failed have the same target eligibility.
+      // 20261004050000:669-687: failed metadata changes both content and known_reply.
+      // 20261004050200:444: pending and failed have the same target eligibility.
       for (const key of ['dirty','content','known']) increased(failedAfter, failedState, key);
-      // 20261002130000:684-687,700-702: pending -> queued changes eligibility;
+      // 20261004050000:684-687,700-702: pending -> queued changes eligibility;
       // retry metadata changes content, and queue entry changes known_reply.
       increased(deferredAfter, deferredState, 'dirty'); increased(deferredAfter, deferredState, 'known');
       increased(deferredAfter, deferredState, 'content');
