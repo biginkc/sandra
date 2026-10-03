@@ -181,4 +181,49 @@ describe("SlackPreviewsClient", () => {
     expect(screen.queryByText("Could not save this setting.")).toBeNull();
     expect(enabled).not.toBeChecked();
   });
+
+  it("does not show enabled after the server returns disabled for an enable request", async () => {
+    const user = userEvent.setup();
+    fetchMock.mockResolvedValueOnce(response(policyResponse()));
+    fetchMock.mockResolvedValueOnce(response({ ok: true, mode: "disabled", policyRevision: 3 }));
+    render(<SlackPreviewsClient />);
+
+    const enabled = await screen.findByRole("switch", { name: "Enable Slack lead previews" });
+    await user.click(screen.getByRole("checkbox", { name: "Acknowledge Slack sharing" }));
+    await user.click(enabled);
+
+    expect(await screen.findByText("Could not update Slack preview settings. Please try again.")).toBeVisible();
+    expect(enabled).not.toBeChecked();
+    expect(screen.queryByText("Slack lead previews enabled.")).toBeNull();
+  });
+
+  it("does not show disabled after the server returns enabled for a disable request", async () => {
+    const user = userEvent.setup();
+    fetchMock.mockResolvedValueOnce(response(policyResponse({
+      installations: [installation({ policyEnabled: true })],
+    })));
+    fetchMock.mockResolvedValueOnce(response({ ok: true, mode: "eligible_internal_channels", policyRevision: 4 }));
+    render(<SlackPreviewsClient />);
+
+    const enabled = await screen.findByRole("switch", { name: "Enable Slack lead previews" });
+    await user.click(enabled);
+
+    expect(await screen.findByText("Could not update Slack preview settings. Please try again.")).toBeVisible();
+    expect(enabled).toBeChecked();
+    expect(screen.queryByText("Slack lead previews disabled.")).toBeNull();
+  });
+
+  it("keeps the current state when the server response has no valid mode", async () => {
+    const user = userEvent.setup();
+    fetchMock.mockResolvedValueOnce(response(policyResponse()));
+    fetchMock.mockResolvedValueOnce(response({ ok: true, policyRevision: 5 }));
+    render(<SlackPreviewsClient />);
+
+    const enabled = await screen.findByRole("switch", { name: "Enable Slack lead previews" });
+    await user.click(screen.getByRole("checkbox", { name: "Acknowledge Slack sharing" }));
+    await user.click(enabled);
+
+    expect(await screen.findByText("Could not update Slack preview settings. Please try again.")).toBeVisible();
+    expect(enabled).not.toBeChecked();
+  });
 });

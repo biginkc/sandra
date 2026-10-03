@@ -34,6 +34,8 @@ type SlackPreviewData = {
   installations: SlackPreviewInstallation[];
 };
 
+type PolicyMode = "eligible_internal_channels" | "disabled";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -79,6 +81,16 @@ async function readPolicy(orgId: string | null): Promise<SlackPreviewData> {
 function connectHref(orgId: string | null): string {
   const base = `/api/oauth/slack/start?preview=1&return_to=${encodeURIComponent(PREVIEW_RETURN_PATH)}`;
   return orgId ? `${base}&org_id=${encodeURIComponent(orgId)}` : base;
+}
+
+function parsePolicyMutationMode(body: unknown): PolicyMode {
+  if (!isRecord(body) || body.ok !== true) throw new Error(WRITE_ERROR);
+  const responseData = isRecord(body.data) ? body.data : body;
+  const mode = responseData.mode;
+  if (mode === "eligible_internal_channels" || mode === "disabled") {
+    return mode;
+  }
+  throw new Error(WRITE_ERROR);
 }
 
 export function SlackPreviewsClient({ orgId = null }: { orgId?: string | null }) {
@@ -146,8 +158,12 @@ export function SlackPreviewsClient({ orgId = null }: { orgId?: string | null })
       });
       const body = await response.json().catch(() => null);
       if (!response.ok || (isRecord(body) && body.ok === false)) throw new Error(WRITE_ERROR);
-      const responseData = isRecord(body) && isRecord(body.data) ? body.data : body;
-      const policyEnabled = isRecord(responseData) && responseData.mode === "eligible_internal_channels" ? true : nextEnabled;
+      const mode = parsePolicyMutationMode(body);
+      const expectedMode: PolicyMode = nextEnabled
+        ? "eligible_internal_channels"
+        : "disabled";
+      if (mode !== expectedMode) throw new Error(WRITE_ERROR);
+      const policyEnabled = mode === "eligible_internal_channels";
       setData((current) => current ? {
         ...current,
         installations: current.installations.map((candidate) => candidate.id === installation.id ? { ...candidate, policyEnabled } : candidate),
