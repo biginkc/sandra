@@ -332,6 +332,45 @@ describe("store epoch and per-record CAS", () => {
     expect(server.db.commits).toBe(1)
   })
 
+  it("claims compare-and-set: a stale instance cannot move already-saved back to uncertain; it is refused, re-reads, and a fresh read then claim succeeds", async () => {
+    actions.submitMyLeadCommand
+      .mockRejectedValueOnce(new Error("network")) // W: the original is lost, uncertain
+      .mockResolvedValueOnce({ ok: false, answered: true, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." }) // Y: conflict
+    const w = setup(opening())
+    await save(w.hook)
+    w.hook.unmount()
+    const x = setup(opening()) // reads the uncertain record at its current revision
+    const y = setup(opening()) // reads the same revision
+    await save(y.hook) // Y claims first and moves the record to already-saved
+    expect(getSubmission({ ...scope(), operation: "log_attempt" })).toMatchObject({ status: "already-saved" })
+    const calls = actions.submitMyLeadCommand.mock.calls.length
+    const out = await save(x.hook) // X's claim carries the revision it read: refused
+    expect(out.ok).toBe(false)
+    expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(calls) // nothing was sent
+    expect(getSubmission({ ...scope(), operation: "log_attempt" })).toMatchObject({ status: "already-saved" })
+    // X re-read the store and shows the current state; the user must act again.
+    expect(x.hook.result.current.recoveryValue).toMatchObject({ blocked: true, message: "This was already saved. Refresh to see it." })
+    await act(async () => { x.hook.result.current.recoveryValue?.refresh() }) // a fresh read, then a claim: succeeds
+    expect(x.handlers.onClose).toHaveBeenCalledTimes(1)
+    expect(listSubmissions(scope(), () => true)).toEqual([])
+  })
+
+  it("claims compare-and-set: an instance that reads the current revision AFTER another moved the record can claim it", async () => {
+    actions.submitMyLeadCommand
+      .mockRejectedValueOnce(new Error("network"))
+      .mockResolvedValueOnce({ ok: false, answered: true, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." })
+    const w = setup(opening())
+    await save(w.hook)
+    w.hook.unmount()
+    const y = setup(opening())
+    await save(y.hook) // moves the record to already-saved
+    const late = setup(opening()) // reads the current revision
+    expect(late.hook.result.current.recoveryValue).toMatchObject({ blocked: true, message: "This was already saved. Refresh to see it." })
+    await act(async () => { late.hook.result.current.recoveryValue?.refresh() })
+    expect(late.handlers.onClose).toHaveBeenCalledTimes(1)
+    expect(listSubmissions(scope(), () => true)).toEqual([])
+  })
+
   it("a record is never taken over under a DIFFERENT key: an unresolved record created elsewhere wins and this instance stands down", async () => {
     const server = fakeServer(3)
     actions.submitMyLeadCommand.mockImplementationOnce(async (_c: string, input: Record<string, unknown>) => { server.execute(input); throw new Error("network") })

@@ -210,10 +210,12 @@ const leaseFor = (id: string, tag: string): Lease => ({ epoch, rev: meta.get(id)
  * unresolved record unless `replaceKey` is set (an explicit "Save as a new update" or a proven
  * route change): taking over a record keeps its key, so a takeover can never mint a second commit.
  */
-export function claimSubmission(record: StoredSubmission, tag: string, options: { epoch: number; send?: boolean; replaceKey?: boolean }, now = Date.now()): Lease | null {
+export function claimSubmission(record: StoredSubmission, tag: string, options: { epoch: number; send?: boolean; replaceKey?: boolean; expectRev?: number }, now = Date.now()): Lease | null {
   if (options.epoch !== epoch) return null
   const id = submissionId(record)
   const existing = all(now).find((item) => submissionId(item) === id)
+  // Compare-and-set: the record must still be at the revision the caller last read.
+  if (options.expectRev !== undefined && (existing?.rev ?? 0) !== options.expectRev) return null
   if (existing && existing.key !== record.key && unresolved(existing) && !options.replaceKey) return null
   meta.set(id, { rev: (meta.get(id)?.rev ?? existing?.rev ?? 0) + 1, owner: tag })
   memory.set(id, { ...record, payload: record.payload, rev: undefined })
@@ -251,10 +253,11 @@ export function clearWithLease(lease: Lease, now = Date.now()): boolean {
 }
 
 /** Claimed clear (user action): removes the record when it still carries `expectKey` (or is gone). */
-export function claimClear(identity: SubmissionIdentity, options: { epoch: number; expectKey: string | null }, now = Date.now()): boolean {
+export function claimClear(identity: SubmissionIdentity, options: { epoch: number; expectKey: string | null; expectRev?: number }, now = Date.now()): boolean {
   if (options.epoch !== epoch) return false
   const id = submissionId(identity)
   const existing = all(now).find((item) => submissionId(item) === id)
+  if (options.expectRev !== undefined && (existing?.rev ?? 0) !== options.expectRev) return false
   if (existing && options.expectKey !== null && existing.key !== options.expectKey) return false
   memory.delete(id)
   meta.delete(id)

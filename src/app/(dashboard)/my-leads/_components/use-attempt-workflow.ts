@@ -99,6 +99,8 @@ type Submission = {
   /** The store epoch read when this state was created; a sign-out or viewer change makes it stale. */
   epoch: number
   lease: Lease | null
+  /** The record revision this state last read or wrote. User-action claims compare-and-set against it. Undefined: no record was read (a new submission). */
+  readRev?: number
   /** The queue version the original request carried. A request whose version no longer matches the row can never commit. */
   queueVersion: number | null
   createdAt: number
@@ -235,9 +237,10 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
   const claim = (state: Submission, current: O, options: { send?: boolean; replaceKey?: boolean } = {}): boolean => {
     const record = recordOf(state, current)
     if (!record) return true
-    const lease = claimSubmission(record, state.tag, { epoch: state.epoch, ...options })
+    const lease = claimSubmission(record, state.tag, { epoch: state.epoch, expectRev: state.lease?.rev ?? state.readRev, ...options })
     if (!lease) return false
     state.lease = lease
+    state.readRev = lease.rev
     return true
   }
   /** CONDITIONAL WRITE (an async result). False: this state was superseded and must not act. */
@@ -248,6 +251,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     const lease = writeSubmission(state.lease, record)
     if (!lease) return false
     state.lease = lease
+    state.readRev = lease.rev
     return true
   }
   /** Conditional clear of a record this state owns. */
@@ -255,7 +259,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
   /** Claimed clear (a user action): removes the record when it still carries this state's key. */
   const claimDrop = (state: Submission, current: O): boolean => {
     const record = recordOf(state, current)
-    return record ? claimClear(record, { epoch: state.epoch, expectKey: state.key }) : true
+    return record ? claimClear(record, { epoch: state.epoch, expectKey: state.key, expectRev: state.lease?.rev ?? state.readRev }) : true
   }
 
   // Identity change: another viewer's or organization's records are discarded, not just hidden.
@@ -312,7 +316,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       opening: current, key: record.key, payload, uncertain: record.status === "uncertain" && payload !== null,
       alreadySaved: record.status === "already-saved", route: record.route, memberId, atRisk: true,
       createdAt: record.createdAt, released: payload === null, owner: { ...viewerRef.current }, queueVersion: record.expectedQueueVersion ?? null,
-      tag: crypto.randomUUID(), epoch: getEpoch(), lease: null,
+      tag: crypto.randomUUID(), epoch: getEpoch(), lease: null, readRev: record.rev ?? 0,
     }
     submission.current = state
     // The only write on open: dropping a payload that no longer fits this row (a claim; a failure is harmless).
@@ -528,6 +532,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       if (!claimDrop(state, opening)) return superseded(state, opening)
       state.key = crypto.randomUUID()
       state.lease = null
+      state.readRev = undefined
       state.route = null
       state.memberId = null
       state.released = false
