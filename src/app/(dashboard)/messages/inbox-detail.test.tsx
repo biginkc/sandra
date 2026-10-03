@@ -2208,4 +2208,60 @@ describe("<InboxDetail />", () => {
     await user.click(screen.getByTestId("inbox-detail-more"));
     expect(screen.queryByTestId("inbox-detail-phone")).not.toBeInTheDocument();
   });
+
+  describe("outcome bar revalidation (no AI review)", () => {
+    function renderDetail(onRevalidate: () => void, outreachDispo: string | null = null) {
+      return render(
+        <InboxDetail
+          data={makeData({ contactId: "contact-revalidate", outreachDispo })}
+          assigneeEmails={{}}
+          currentUserId="user-1"
+          onRevalidate={onRevalidate}
+        />,
+      );
+    }
+
+    it("revalidates the conversation after a successful SMS opt-out", async () => {
+      const onRevalidate = vi.fn();
+      const user = userEvent.setup();
+      renderDetail(onRevalidate);
+      await user.click(screen.getByTestId("dispo-more"));
+      await user.click(await screen.findByTestId("dispo-opted-out"));
+      await waitFor(() => expect(onRevalidate).toHaveBeenCalled());
+    });
+
+    it("reconciles a committed failure: new label, error toast, revalidation", async () => {
+      setOutreachDispoMock.mockResolvedValueOnce({ ok: false, error: "Consent failed", committed: true });
+      const onRevalidate = vi.fn();
+      const user = userEvent.setup();
+      renderDetail(onRevalidate);
+      await user.click(screen.getByTestId("dispo-more"));
+      await user.click(await screen.findByTestId("dispo-opted-out"));
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Consent failed"));
+      expect(screen.getByText("SMS opted out")).toBeInTheDocument();
+      expect(onRevalidate).toHaveBeenCalled();
+    });
+
+    it("revalidates again on an unchanged-outcome retry without touching review navigation", async () => {
+      const onRevalidate = vi.fn();
+      const onBackToList = vi.fn();
+      const user = userEvent.setup();
+      render(
+        <InboxDetail
+          data={makeData({ contactId: "contact-retry", outreachDispo: "opted_out" })}
+          assigneeEmails={{}}
+          currentUserId="user-1"
+          onRevalidate={onRevalidate}
+          onBackToList={onBackToList}
+        />,
+      );
+      await user.click(screen.getByTestId("dispo-more"));
+      await user.click(await screen.findByTestId("dispo-opted-out"));
+      await waitFor(() => expect(onRevalidate).toHaveBeenCalledTimes(1));
+      await user.click(screen.getByTestId("dispo-more"));
+      await user.click(await screen.findByTestId("dispo-opted-out"));
+      await waitFor(() => expect(onRevalidate).toHaveBeenCalledTimes(2));
+      expect(onBackToList).not.toHaveBeenCalled();
+    });
+  });
 });
