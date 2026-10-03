@@ -30,6 +30,7 @@ export default defineConfig({
       "supabase/migrations/20260929200000_dialpad_cti_custom_data.integration.test.ts",
       "supabase/migrations/20260929236500_my_leads_drip_scope.integration.test.ts",
       "supabase/migrations/20261003120000_my_leads_queue_row_lookup.integration.test.ts",
+      "supabase/migrations/20261003130000_my_leads_conflicts_non_retryable.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
       "supabase/migrations/20260929239000_drips_snapshot_isolation.integration.test.ts",
