@@ -4,7 +4,7 @@ const mocks=vi.hoisted(()=>({rpc:vi.fn(),getUser:vi.fn(),memberships:vi.fn(),fro
 vi.mock('@/lib/supabase/server',()=>({createClient:async()=>({rpc:mocks.rpc,from:mocks.from,auth:{getUser:mocks.getUser}})}));
 vi.mock('@/lib/auth/team-roster',()=>({loadOrgTeamMembers:mocks.teamMembers}));
 vi.mock('@/lib/auth/memberships',()=>({getCallerMemberships:mocks.memberships}));
-import { getAcquisitionBadge,getAcquisitionDetail,getAcquisitionKpis,getAcquisitionQueue,getAcquisitionRoster } from './queries';
+import { getAcquisitionBadge,getAcquisitionDetail,getAcquisitionKpis,getAcquisitionQueue,getAcquisitionRoster,getMyLeadsQueueRow } from './queries';
 beforeEach(()=>{
   vi.resetAllMocks();
   mocks.teamMembers.mockResolvedValue([]);
@@ -226,4 +226,50 @@ it('keeps authorized history readable when a historical identity no longer has a
  const result=await getAcquisitionDetail({memberId:'rep',propertyId:'allowed',group:'notes'});
  expect(mocks.teamMembers).toHaveBeenCalledWith('org',{historicalAssigneeIds:['removed'],allowMissingIdentityLabels:true});
  expect(result.groups.notes?.rows).toEqual([{id:'retained',actorId:'removed',actorLabel:'Team member',at:'2026-09-13T12:00:00Z',body:'Preserved history'}]);
+});
+
+describe('single-lead queue row lookup',()=>{
+  const property='11111111-1111-4111-8111-111111111111';
+  it('returns a found row from the RPC with the viewer org',async()=>{
+    const row={propertyId:property,stage:'contacted'};
+    mocks.rpc.mockResolvedValue({data:{status:'found',row,snapshotAt:'2026-10-03T00:00:00Z'},error:null});
+    expect(await getMyLeadsQueueRow({memberId:'rep',propertyId:property})).toEqual({status:'found',row,snapshotAt:'2026-10-03T00:00:00Z'});
+    expect(mocks.rpc).toHaveBeenCalledWith('fn_get_my_leads_queue_row',{p_org_id:'org',p_member_id:'rep',p_property_id:property});
+  });
+  it('passes through every unavailable reason',async()=>{
+    for(const reason of ['not_found','unassigned','other_rep','closed_dead_dnc','archived','no_active_episode']) {
+      mocks.rpc.mockResolvedValue({data:{status:'unavailable',reason},error:null});
+      expect(await getMyLeadsQueueRow({memberId:'rep',propertyId:property})).toEqual({status:'unavailable',reason});
+    }
+  });
+  it('rejects a foreign member for non-owners and a non-UUID property before any RPC',async()=>{
+    await expect(getMyLeadsQueueRow({memberId:'other',propertyId:property})).rejects.toMatchObject({code:'FORBIDDEN'});
+    await expect(getMyLeadsQueueRow({memberId:'rep',propertyId:'not-a-uuid'})).rejects.toMatchObject({code:'INVALID_INPUT'});
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+  it('lets an owner look up a rep row',async()=>{
+    mocks.memberships.mockResolvedValue([{user_id:'rep',org_id:'org',role:'owner'}]);
+    mocks.rpc.mockResolvedValue({data:{status:'unavailable',reason:'other_rep'},error:null});
+    await getMyLeadsQueueRow({memberId:'other',propertyId:property});
+    expect(mocks.rpc.mock.calls[0][1].p_member_id).toBe('other');
+  });
+  it('fails closed on a malformed or null response',async()=>{
+    mocks.rpc.mockResolvedValue({data:{status:'unavailable',reason:'mystery'},error:null});
+    await expect(getMyLeadsQueueRow({memberId:'rep',propertyId:property})).rejects.toMatchObject({code:'READ_FAILED'});
+    mocks.rpc.mockResolvedValue({data:null,error:null});
+    await expect(getMyLeadsQueueRow({memberId:'rep',propertyId:property})).rejects.toMatchObject({code:'READ_FAILED'});
+  });
+  it('maps NOT_FOUND (P0002) to its own code and keeps the other mappings',async()=>{
+    mocks.rpc.mockResolvedValue({data:null,error:{code:'P0002',message:'NOT_FOUND'}});
+    await expect(getMyLeadsQueueRow({memberId:'rep',propertyId:property})).rejects.toMatchObject({code:'NOT_FOUND'});
+    await expect(getAcquisitionQueue({memberId:'rep'})).rejects.toMatchObject({code:'NOT_FOUND'});
+    mocks.rpc.mockResolvedValue({data:null,error:{code:'42501',message:'FORBIDDEN'}});
+    await expect(getMyLeadsQueueRow({memberId:'rep',propertyId:property})).rejects.toMatchObject({code:'FORBIDDEN'});
+    mocks.rpc.mockResolvedValue({data:null,error:{code:'42501',message:'FEATURE_DISABLED'}});
+    await expect(getMyLeadsQueueRow({memberId:'rep',propertyId:property})).rejects.toMatchObject({code:'FEATURE_DISABLED'});
+    mocks.rpc.mockResolvedValue({data:null,error:{code:'22023',message:'INVALID_INPUT'}});
+    await expect(getMyLeadsQueueRow({memberId:'rep',propertyId:property})).rejects.toMatchObject({code:'INVALID_INPUT'});
+    mocks.rpc.mockResolvedValue({data:null,error:{code:'08006'}});
+    await expect(getMyLeadsQueueRow({memberId:'rep',propertyId:property})).rejects.toMatchObject({code:'READ_FAILED'});
+  });
 });
