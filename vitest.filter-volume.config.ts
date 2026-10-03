@@ -14,9 +14,14 @@ import { assertLocalOnlyEnvironment } from "./src/lib/testing/local-only-guard";
  *   FILTER_VOLUME=1 npx vitest run --config vitest.filter-volume.config.ts
  */
 // No defaults (fail closed): name YOUR private disposable stack explicitly, so an inherited config can never hit a stack in use elsewhere.
-const dbUrl = process.env.FILTER_LOCAL_DB_URL;
-const apiUrl = process.env.FILTER_LOCAL_API_URL;
-if (!dbUrl || !apiUrl) throw new Error("Set FILTER_LOCAL_DB_URL and FILTER_LOCAL_API_URL to your private disposable stack (no defaults)");
+// Fail closed only when THIS config is the one being run; a plain import (e.g. the config-boundary unit test) gets inert
+// loopback placeholders that are never used to run anything.
+const selected = process.argv.some((a) => a.includes("filter-volume.config"));
+if (selected && (!process.env.FILTER_LOCAL_DB_URL || !process.env.FILTER_LOCAL_API_URL)) {
+  throw new Error("Set FILTER_LOCAL_DB_URL and FILTER_LOCAL_API_URL to your private disposable stack (no defaults)");
+}
+const dbUrl = process.env.FILTER_LOCAL_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:1/postgres";
+const apiUrl = process.env.FILTER_LOCAL_API_URL ?? "http://127.0.0.1:1";
 assertLocalOnlyEnvironment({ TEST_SUPABASE_URL: apiUrl, TEST_SUPABASE_DB_URL: dbUrl });
 
 export default defineConfig({

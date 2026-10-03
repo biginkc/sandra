@@ -1,3 +1,5 @@
+> Migration note: the fast-path migration is `20261004060000_properties_filter_cache_fast_path.sql` (renumbered from 20261002140000 / 110055; applies after 20261003130000 and Inbox 20261004050000-050500). SQL byte-identical, sha256 `7907e3cea2a9d4100ec12284f0ca4f17212557f2a6750dd35207598a66594664` (no header edit in the file, to keep the hash).
+
 # Inbound persist burst: A/B/C/D (local 55329 sandbox only)
 
 Same machine, same seed (50k properties / 250k messages), two independent runs (r1, r2; 4 reps each, state order rotated per rep). **A** = filter-cache
@@ -28,7 +30,7 @@ D has the lowest p99 of B/C/D in both runs on every burst and the lowest p50 on 
 refresh work for first-reply rows; D replaces the 7-lookup recompute with one indexed guarded UPDATE. D is still above A on p50 (inherent: a denormalised cache must update
 the property row on the first reply, and the global-DNC shared barrier and row lock remain).
 
-## Correctness of D (migration 20261002140000)
+## Correctness of D (migration 20261004060000)
 Monotonic OR-only flag updates computed from the new rows (never from a snapshot read); order = shared global-DNC barrier -> row locks. (a) guarded UPDATE, (b) SHARE lock rows that look
 covered, (c) guarded UPDATE re-applied under a fresh snapshot. Lists/tags: unguarded sorted-deduplicated merge + count (unique (property_id, list_id|tag_id) makes it identical to the
 full refresh). Clearing changes keep the full refresh. Tests: trigger suite 18/18 (+33 total local) incl. both-orders clearer-vs-inserter race and a randomised 6-worker concurrent
