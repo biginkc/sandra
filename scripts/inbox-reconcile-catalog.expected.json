@@ -1,0 +1,22 @@
+{
+  "artifact_version": 1,
+  "catalog_fingerprint": "fddb87756846528576419c95255aee3b67aec847173453822d7bc2aa2d7dd0eb",
+  "source": {
+    "kind": "independent-committed-catalog-artifact",
+    "migration_commit": "5785e6f32fd175fbe9e427d96db0ec1c9c75364b",
+    "migration_files": [
+      {
+        "path": "20261004050000_inbox_control_foundation.sql",
+        "sha256": "a31799ba96e6f7264f062019cc8113a6401719a686cc31e569b10d21064bfbf6"
+      },
+      {
+        "path": "20261004050100_inbox_read_companion.sql",
+        "sha256": "7a2c5f49fc8fcf58c7f37585c3c347869816912e47e504ec47f9cdac198d3dd7"
+      },
+      {
+        "path": "20261004050200_inbox_backend_operation_reply.sql",
+        "sha256": "2a4b49d43e67963805d547221d04c84c3f7823f430fd9c0cc9b3f22b36844aad"
+      }
+    ]
+  }
+}
