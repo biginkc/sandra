@@ -10,9 +10,9 @@ import { Client } from "pg";
 import { catalogFingerprint } from "./inbox-reconcile-completion.mjs";
 
 const MIGRATION_FILES = Object.freeze([
-  "20261002130000_inbox_control_foundation.sql",
-  "20261002130100_inbox_read_companion.sql",
-  "20261002130200_inbox_backend_operation_reply.sql",
+  "20261004050000_inbox_control_foundation.sql",
+  "20261004050100_inbox_read_companion.sql",
+  "20261004050200_inbox_backend_operation_reply.sql",
 ]);
 const OUTPUT = path.resolve("scripts/inbox-reconcile-catalog.expected.json");
 

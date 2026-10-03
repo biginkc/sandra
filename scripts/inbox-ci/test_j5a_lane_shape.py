@@ -41,7 +41,7 @@ elif sys.argv[1].endswith('scripts/inbox-ci/inbox-migrations.mjs'):
         for entry in manifest:
             print(f"supabase/migrations/{entry['version']}_{entry['name']}.sql")
     elif mode == '--reserved-block-end':
-        print('20261002130500')
+        print('20261004050500')
     else:
         sys.exit('unexpected migration helper mode')
 elif sys.argv[1] == 'scripts/outbox-run-record.mjs':
