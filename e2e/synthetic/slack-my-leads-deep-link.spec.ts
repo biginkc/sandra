@@ -9,6 +9,7 @@ let compiledCss = ""
 let harnessBundle = ""
 
 const linkedLeadId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+const secondaryLeadId = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
 const otherLeadId = "99999999-8888-4777-8666-555555555555"
 
 test.beforeAll(async () => {
@@ -28,6 +29,7 @@ test.beforeAll(async () => {
       export const loadMyLeadsStage=(input)=>backend().loadMyLeads(input);
       export const loadMyLeadDetail=(input)=>backend().loadMyLeadDetail(input);
       export const loadMyLeadQueueRow=(input)=>backend().loadMyLeadQueueRow(input);
+      export const loadMyLeadRow=(input)=>backend().loadMyLeadRow(input);
       export const loadMyLeadCallReferences=(propertyId,memberId)=>backend().loadMyLeadCallReferences(propertyId,memberId);
       export const submitMyLeadCommand=(command,input)=>backend().submitMyLeadCommand(command,input);
       export const submitMyLeadHandoffDrip=(input)=>backend().submitMyLeadHandoffDrip(input);
@@ -79,6 +81,9 @@ test.beforeAll(async () => {
             ? virtual("login-actions")
             : virtual("my-leads-actions")
         })
+        // useAttemptWorkflow imports the same server action through ../actions.
+        // Keep that production path inside the browser boundary too.
+        build.onResolve({ filter: /^(?:\.\.\/)+actions$/ }, () => virtual("my-leads-actions"))
         build.onLoad({ filter: /.*/, namespace: "slack-my-leads-virtual" }, (args) => ({
           contents: virtualModules.get(args.path) ?? "",
           loader: "tsx",
@@ -113,13 +118,14 @@ async function mount(page: Page, pathname: string, query = "") {
   await page.addScriptTag({ content: harnessBundle })
 }
 
-test("canonical linked lead remains visible outside the filtered page without switching owner queue", async ({ page }) => {
+test("canonical linked lead opens without switching owner queue and user filtering clears focus", async ({ page }) => {
   await mount(page, "/my-leads", `?lead=${linkedLeadId}`)
 
-  await expect(page.getByRole("region", { name: "Selected lead from link" })).toBeVisible()
-  await expect(page.getByTestId(`my-lead-row-${linkedLeadId}-linked`)).toContainText("44 Synthetic Link Lane")
-  await expect(page.getByRole("region", { name: "Text history" })).toContainText("Final check-in before the weekend")
-  await expect(page.getByRole("region", { name: "Text history" })).toContainText("Yes, Thursday works for me.")
+  const linkedRow = page.getByTestId(`my-lead-row-${linkedLeadId}`)
+  await expect(linkedRow).toContainText("44 Synthetic Link Lane")
+  await expect(linkedRow).toContainText("Opened from lead page")
+  await expect(page.getByText("Final check-in before the weekend", { exact: true })).toBeVisible()
+  await expect(page.getByText("Yes, Thursday works for me.", { exact: true })).toBeVisible()
 
   const ownerSelect = page.getByRole("combobox", { name: "Acquisitions member" })
   await expect(ownerSelect).toHaveValue("owner-a")
@@ -128,37 +134,66 @@ test("canonical linked lead remains visible outside the filtered page without sw
   const filter = page.getByRole("textbox", { name: "Search My Leads" })
   await filter.fill("current-only")
   await expect(filter).toHaveValue("current-only")
-  await expect(page.getByTestId(`my-lead-row-${linkedLeadId}-linked`)).toBeVisible()
+  await expect(page.getByTestId(`my-lead-row-${linkedLeadId}`)).toHaveCount(0)
   await expect(ownerSelect).toHaveValue("owner-a")
+})
+
+test("a new linked target cannot reuse the previous lead's detail while its own detail is pending", async ({ page }) => {
+  await mount(page, "/my-leads", `?lead=${linkedLeadId}`)
+  await expect(page.getByText("Final check-in before the weekend", { exact: true })).toBeVisible()
+
+  // A same-lead background refresh must leave the mounted detail readable.
+  const readsBeforeRefresh = await page.evaluate(() => ({
+    queueReads: window.__sandraSyntheticMyLeadsBackend.queueReads.length,
+    rowReads: window.__sandraSyntheticMyLeadsBackend.rowReads,
+  }))
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")))
+  await expect.poll(() => page.evaluate(() => window.__sandraSyntheticMyLeadsBackend.queueReads.length)).toBeGreaterThan(readsBeforeRefresh.queueReads)
+  await expect.poll(() => page.evaluate(() => window.__sandraSyntheticMyLeadsBackend.rowReads)).toBeGreaterThan(readsBeforeRefresh.rowReads)
+  await expect(page.getByText("Final check-in before the weekend", { exact: true })).toBeVisible()
+
+  await page.evaluate((propertyId) => {
+    history.pushState({}, "", `/my-leads?lead=${propertyId}`)
+    window.dispatchEvent(new PopStateEvent("popstate"))
+  }, secondaryLeadId)
+
+  await expect(page.getByTestId(`my-lead-row-${secondaryLeadId}`)).toContainText("99 Deferred Link Lane")
+  await expect.poll(() => page.evaluate(() => window.__sandraSyntheticMyLeadsBackend.secondaryDetailPending)).toBe(true)
+  await expect(page.getByText("Final check-in before the weekend", { exact: true })).toHaveCount(0)
+  await expect(page.getByText("B-only detail is ready.", { exact: true })).toHaveCount(0)
+  await expect(page.getByText("Loading details…", { exact: true })).toBeVisible()
+
+  await page.evaluate(() => window.__sandraSyntheticMyLeadsBackend.releaseSecondaryDetail())
+  await expect(page.getByText("B-only detail is ready.", { exact: true })).toBeVisible()
+  await expect(page.getByText("Final check-in before the weekend", { exact: true })).toHaveCount(0)
 })
 
 test("malformed and duplicate lead parameters are denied without selecting a lead", async ({ page }) => {
   await mount(page, "/my-leads", "?lead=not-a-uuid")
-  await expect(page.getByRole("alert")).toHaveText("This My Leads link is invalid. Open a link with a valid lead id.")
-  await expect(page.getByTestId(/my-lead-row-.*-linked/)).toHaveCount(0)
+  await expect(page.getByRole("status")).toHaveText("This My Leads link is invalid. Open a link with a valid lead id.")
+  await expect(page.getByText("Opened from lead page", { exact: true })).toHaveCount(0)
 
   await mount(page, "/my-leads", `?lead=${linkedLeadId}&lead=${otherLeadId}`)
-  await expect(page.getByRole("alert")).toHaveText("This My Leads link contains more than one lead. Open a link with exactly one lead.")
-  await expect(page.getByTestId(/my-lead-row-.*-linked/)).toHaveCount(0)
+  await expect(page.getByRole("status")).toHaveText("This My Leads link contains more than one lead. Open a link with exactly one lead.")
+  await expect(page.getByText("Opened from lead page", { exact: true })).toHaveCount(0)
 })
 
-test("unavailable link retry keeps the canonical lead query and can reopen that lead", async ({ page }) => {
+test("unavailable link keeps its canonical query and can reopen that lead", async ({ page }) => {
   await mount(page, "/my-leads", `?lead=${linkedLeadId}&state=unavailable`)
 
-  const retry = page.getByRole("link", { name: "Retry" })
-  await expect(page.getByRole("alert")).toContainText("This lead is unavailable in your My Leads queue.")
-  await expect(retry).toHaveAttribute("href", `/my-leads?lead=${linkedLeadId}`)
+  await expect(page.getByRole("status")).toContainText("This lead is unavailable in your My Leads queue.")
+  await expect(page).toHaveURL(`http://synthetic.local/my-leads?lead=${linkedLeadId}&state=unavailable`)
   await expect(page.getByRole("combobox", { name: "Acquisitions member" })).toHaveValue("owner-a")
 
-  await retry.click()
-  await page.addScriptTag({ content: harnessBundle })
-  await expect(page.getByRole("region", { name: "Selected lead from link" })).toBeVisible()
+  // The page keeps the safe relative lead query; reopening it is a fresh server render.
+  await mount(page, "/my-leads", `?lead=${linkedLeadId}`)
+  await expect(page.getByTestId(`my-lead-row-${linkedLeadId}`)).toContainText("44 Synthetic Link Lane")
   await expect(page).toHaveURL(`http://synthetic.local/my-leads?lead=${linkedLeadId}`)
 })
 
 test("linked lead call uses the selected linked row and readiness save recovers from stale state", async ({ page }) => {
   await mount(page, "/my-leads", `?lead=${linkedLeadId}`)
-  const linkedRow = page.getByTestId(`my-lead-row-${linkedLeadId}-linked`)
+  const linkedRow = page.getByTestId(`my-lead-row-${linkedLeadId}`)
 
   await linkedRow.getByRole("button", { name: "Ready to make an offer" }).click()
   const readinessDialog = page.getByRole("dialog", { name: "Ready to make an offer" })
