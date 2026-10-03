@@ -176,7 +176,7 @@
         "status": "PINNED_REFERENCE_UNRAN"
       },
       "electric": {
-        "image": "ghcr.io/biginkc/inbox-electric:1.8.1-0f40420@sha256:PENDING_EIMG_BUILD",
+        "image": "ghcr.io/biginkc/inbox-electric:1.8.1-0f40420@sha256:6a9064f4cbd103875e02eb9085bf5da478a7bafc5439f18868a7ccb2e9fc7ae2",
         "source": "experiments/inbox-stack/sync/start-electric.sh",
         "container_name": "sandra-inbox-release-electric-20260917",
         "upstream": "http://electric:3000/",

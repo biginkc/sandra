@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 
 HERE = Path(__file__).resolve().parent
@@ -161,7 +162,8 @@ class ReleaseGateStatusTests(unittest.TestCase):
         self.assertIs(gate.authoritative_rollback_gate(live), live)
 
     def test_deploy_gate_rejects_pending_electric_digest(self) -> None:
-        result = gate.validate_electric_candidate_for_deploy()
+        with mock.patch.object(gate, "load_electric_pin", side_effect=gate.CandidateError("EIMG_BUILD_PENDING: placeholder")):
+            result = gate.validate_electric_candidate_for_deploy()
         self.assertEqual(result["status"], "FAIL")
         self.assertIn("EIMG_BUILD_PENDING", result["detail"])
 

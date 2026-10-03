@@ -14,9 +14,9 @@
   "services": [
     {
       "name": "inbox-electric",
-      "image": "ghcr.io/biginkc/inbox-electric:1.8.1-0f40420@sha256:PENDING_EIMG_BUILD",
+      "image": "ghcr.io/biginkc/inbox-electric:1.8.1-0f40420@sha256:6a9064f4cbd103875e02eb9085bf5da478a7bafc5439f18868a7ccb2e9fc7ae2",
       "sourceCommit": "0f404200402f918a4b1596bc5c8a53479a435349",
-      "attestation": "PENDING_EIMG_BUILD",
+      "attestation": "https://github.com/biginkc/sandra/actions/runs/37112503355",
       "replicas": 1,
       "cpuLimit": 1,
       "memoryGiBLimit": 1,

@@ -22,15 +22,13 @@ reviewed application dependency. Missing credentials fail closed.
 
 ## Electric image provenance
 
-`candidate.json` is prepared for the EIMG-7 image
-`ghcr.io/biginkc/inbox-electric:1.8.1-0f40420@sha256:PENDING_EIMG_BUILD`.
-The placeholder is deliberate: deploy and seal consumers refuse it until the
-workflow run URL, attested source commit
+`candidate.json` pins the EIMG-7 image
+`ghcr.io/biginkc/inbox-electric:1.8.1-0f40420@sha256:6a9064f4cbd103875e02eb9085bf5da478a7bafc5439f18868a7ccb2e9fc7ae2`.
+The published digest, workflow run URL, attested source commit
 `0f404200402f918a4b1596bc5c8a53479a435349`, RepoDigest, and EIMG-6 OCI labels
-are all verified. The old Docker Hub `electricsql/electric` pin is retired.
-The image is an unofficial rebuild and is not published or endorsed by
-ElectricSQL; its eventual public visibility still requires the recorded owner
-decision in EIMG-R1.
+were verified by the sealed ELEC-5 proofs. The old Docker Hub
+`electricsql/electric` pin is retired. The image is an unofficial rebuild and
+is not published or endorsed by ElectricSQL.
 
 ### Electric workflow re-pinning
 

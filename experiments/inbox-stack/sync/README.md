@@ -38,9 +38,9 @@ Tests alter only synthetic preview text and the fixture user's membership access
 ## Container provenance
 
 The production candidate image is the EIMG-7 unofficial rebuild
-`ghcr.io/biginkc/inbox-electric:1.8.1-0f40420@sha256:PENDING_EIMG_BUILD`.
-The pending placeholder is intentionally refused by the fixture launcher until
-the build digest and attestation are recorded in `deployment/inbox/candidate.json`.
+`ghcr.io/biginkc/inbox-electric:1.8.1-0f40420@sha256:6a9064f4cbd103875e02eb9085bf5da478a7bafc5439f18868a7ccb2e9fc7ae2`.
+The digest and attestation are recorded in `deployment/inbox/candidate.json`;
+the fixture launcher still refuses any placeholder or mismatched candidate.
 The old Docker Hub pin is retired and is not valid evidence.
 
 Runtime cap:512MiB,1CPU; `ELECTRIC_DB_POOL_SIZE=2`, `ELECTRIC_MANUAL_TABLE_PUBLISHING=true`, `ELECTRIC_REPLICATION_STREAM_ID=inbox_t1`, `ELECTRIC_MAX_SHAPES=16`. Database URL is the owned Docker fixture, with dummy postgres password and sslmode=disable. Passwordless trust URL caused an Electric startup crash in password-obfuscation code; the dummy password fixed startup without changing fixture auth.

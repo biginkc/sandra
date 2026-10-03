@@ -169,12 +169,12 @@ class RuntimeR1ConfigTests(unittest.TestCase):
 
     def test_real_electric_proofs_use_the_candidate_pin_and_fail_closed(self):
         candidate = json.loads((ROOT / "deployment/inbox/candidate.json").read_text())
-        pinned_image = next(service for service in candidate["services"] if service["name"] == "inbox-electric")["image"]
-        self.assertEqual(pinned_image, f"{EIMG_REPOSITORY}:1.8.1-0f40420@sha256:{EIMG_DIGEST_PLACEHOLDER}")
-        self.assertEqual(next(service for service in candidate["services"] if service["name"] == "inbox-electric")["sourceCommit"], EIMG_SOURCE_COMMIT)
-        self.assertEqual(next(service for service in candidate["services"] if service["name"] == "inbox-electric")["attestation"], EIMG_ATTESTATION_PLACEHOLDER)
-        with self.assertRaises(CandidateError):
-            load_electric_pin(require_ready=True)
+        electric = next(service for service in candidate["services"] if service["name"] == "inbox-electric")
+        pinned_image = electric["image"]
+        self.assertNotIn(EIMG_DIGEST_PLACEHOLDER, pinned_image)
+        self.assertEqual(electric["sourceCommit"], EIMG_SOURCE_COMMIT)
+        self.assertNotEqual(electric["attestation"], EIMG_ATTESTATION_PLACEHOLDER)
+        self.assertEqual(load_electric_pin(require_ready=True).image, pinned_image)
         for name in ("electric-tls-proof.py", "electric-secret-proof.py"):
             proof = (ROOT / "experiments/inbox-production-install" / name).read_text()
             self.assertNotIn("efb6fa43", proof)
@@ -185,7 +185,14 @@ class RuntimeR1ConfigTests(unittest.TestCase):
             self.assertIn("UNSEALED", proof)
 
     def test_candidate_contract_rejects_placeholder_for_a_sealed_consumer(self):
-        pin = load_electric_pin()
+        candidate = json.loads((ROOT / "deployment/inbox/candidate.json").read_text())
+        electric = next(service for service in candidate["services"] if service["name"] == "inbox-electric")
+        electric["image"] = f"{EIMG_REPOSITORY}:1.8.1-0f40420@sha256:{EIMG_DIGEST_PLACEHOLDER}"
+        electric["attestation"] = EIMG_ATTESTATION_PLACEHOLDER
+        with tempfile.TemporaryDirectory(prefix="sandra-eimg-placeholder-") as temp:
+            candidate_path = Path(temp) / "candidate.json"
+            candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
+            pin = load_electric_pin(candidate_path)
         self.assertTrue(pin.pending)
         self.assertEqual(pin.digest, EIMG_DIGEST_PLACEHOLDER)
         self.assertEqual(pin.attestation, EIMG_ATTESTATION_PLACEHOLDER)
@@ -489,6 +496,30 @@ class RuntimeR1ConfigTests(unittest.TestCase):
         self.assertEqual(database_url, "DATABASE_URL=postgresql://postgres:sandra-electric-proof-password@postgres:5432/postgres?sslmode=require")
         self.assertIn("ELECTRIC_DATABASE_CA_CERTIFICATE_FILE=/etc/sandra-inbox/supabase-prod-ca-2021.crt", run)
         self.assertNotIn("sslmode=verify-full", " ".join(run))
+
+    def test_electric_secret_harness_retries_connection_level_readiness_misses(self):
+        proof = load_secret_proof()
+
+        class FailingUrlopen:
+            def __call__(self, *_args, **_kwargs):
+                raise ConnectionResetError("relay socket not ready")
+
+        original_urlopen = proof.urllib.request.urlopen
+        proof.urllib.request.urlopen = FailingUrlopen()
+        try:
+            status, headers, body = proof.request("http://127.0.0.1:1", "/health", None)
+        finally:
+            proof.urllib.request.urlopen = original_urlopen
+        self.assertIsNone(status)
+        self.assertEqual(headers, {})
+        self.assertIn(b"relay socket not ready", body)
+
+    def test_electric_secret_harness_retries_until_an_http_response(self):
+        proof = load_secret_proof()
+        responses = iter([(None, {}, b"socket not ready"), (400, {}, b"")])
+        proof.request = lambda *_args, **_kwargs: next(responses)
+        proof.time.sleep = lambda _seconds: None
+        self.assertEqual(proof.request_until_response("http://relay", "/health", None)[0], 400)
 
     def test_tls_negative_requires_the_case_specific_error_token(self):
         proof = load_tls_proof()
