@@ -6,7 +6,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { startDripForLeads } from '@/app/(dashboard)/sequences/actions';
 import { composeRepSms, type RepSmsComposition, type RepSmsCompositionInput } from '@/lib/messaging/rep-sms-composition';
 import { createRepSmsObligationFence, dispatchRepSms } from '@/lib/messaging/rep-sms';
-import { getAcquisitionQueue,getAcquisitionKpis,getAcquisitionDetail,myLeadsViewer,type DetailGroup } from '@/lib/my-leads/queries';
+import { getAcquisitionQueue,getAcquisitionKpis,getAcquisitionDetail,getMyLeadsQueueRow,myLeadsViewer,MyLeadsReadError,type DetailGroup } from '@/lib/my-leads/queries';
 import { listMyLeadsInDrip } from '@/lib/my-leads/drip-queries';
 import { setAcquisitionDesignation,setAcquisitionSettings } from '@/lib/my-leads/settings';
 import type { SetAcquisitionDesignationInput,SetAcquisitionSettingsInput } from '@/lib/my-leads/types';
@@ -43,6 +43,15 @@ export async function submitMyLeadHandoffDrip(input:{memberId:string;propertyId:
     const item=enrolled.data.results[0];
     return {ok:true as const,...(item?.status==='enrolled'?{}:{dripFailure:item?.reason??'Could not start drip.'})};
   } catch {return {ok:false as const,message:'Could not save the handoff outcome. Please retry.'};}
+}
+/** One lead's current queue row (or why it is unavailable), for the pinned deep link and lead-page logging. */
+export async function loadMyLeadRow(input:{memberId:string;propertyId:string}) {
+  try {return {ok:true as const,lookup:await getMyLeadsQueueRow(input)};}
+  catch(error){
+    const code=error instanceof MyLeadsReadError?error.code:'READ_FAILED';
+    if(code!=='NOT_FOUND'&&code!=='FORBIDDEN')reportMyLeadsReadFailure('my_leads_row');
+    return {ok:false as const,code,message:error instanceof Error?error.message:'Could not load this lead.'};
+  }
 }
 export async function loadMyLeadDetail(input:{memberId:string;propertyId:string;group?:DetailGroup;cursor?:string|null}) {
   try {return {ok:true as const,detail:await getAcquisitionDetail(input)};}

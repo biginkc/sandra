@@ -10,6 +10,7 @@ import { shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { reportError } from "@/lib/errors/report";
 import { createSupabaseDialpadDispatchDb, loadDialpadPanelBootstrap } from "@/lib/dialpad-cti/dispatch";
 import { canViewMyLeads } from "@/lib/my-leads/access";
+import { MY_LEAD_ROW_ERROR_COPY, MY_LEAD_ROW_FORBIDDEN_COPY, MY_LEAD_ROW_REASON_COPY } from "@/lib/my-leads/row-reasons";
 import { listMyLeadsInDrip } from "@/lib/my-leads/drip-queries";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
@@ -17,6 +18,7 @@ import {
   getAcquisitionKpis,
   getAcquisitionQueue,
   getAcquisitionRoster,
+  getMyLeadsQueueRow,
   MyLeadsReadError,
 } from "@/lib/my-leads/queries";
 
@@ -76,10 +78,10 @@ function firstParam(value: string | string[] | undefined): string | null {
 }
 
 /**
- * Resolves a `?lead=` deep link to the rep queue that holds it. The queue
- * itself stays unfiltered; the client pins the lead to the top of its section.
- * Reads go through the viewer's RLS-scoped client, so a lead outside the
- * viewer's org resolves to nothing.
+ * Resolves a `?lead=` deep link. The queue itself stays unfiltered; the lead's
+ * current row (or the reason it is not in the viewer's queue) comes from the
+ * RLS-scoped single-row lookup, never from a search prefill. Only an owner needs
+ * the assignee to pick which rep's queue to open.
  */
 async function resolveFocus(
   viewer: { userId: string; isOwner: boolean },
@@ -89,24 +91,36 @@ async function resolveFocus(
   const propertyId = firstParam(params.lead);
   if (!propertyId || !UUID.test(propertyId)) return null;
   const notInQueue = (notice: string) => ({
-    focus: { propertyId: null, memberId: viewer.userId, notice },
+    focus: { propertyId: null, memberId: viewer.userId, notice, pin: null },
     memberId: viewer.userId,
   });
-  const client = await createClient();
-  const { data, error } = await client
-    .from("properties")
-    .select("id,assigned_user_id")
-    .eq("id", propertyId)
-    .is("deleted_at", null)
-    .maybeSingle();
-  if (error || !data) return notInQueue("That lead could not be found.");
-  const assignee = data.assigned_user_id as string | null;
-  if (!assignee) return notInQueue("That lead is not assigned to a rep yet, so it is not in My Leads. Assign it from the lead page first.");
-  if (assignee !== viewer.userId && (!viewer.isOwner || !memberIds.has(assignee))) return notInQueue("That lead is assigned to another rep, so it is not in your My Leads queue.");
-  return {
-    focus: { propertyId, memberId: assignee, notice: null },
-    memberId: assignee,
-  };
+  let memberId = viewer.userId;
+  if (viewer.isOwner) {
+    try {
+      const client = await createClient();
+      const { data } = await client
+        .from("properties")
+        .select("assigned_user_id")
+        .eq("id", propertyId)
+        .is("deleted_at", null)
+        .maybeSingle();
+      const assignee = (data?.assigned_user_id as string | null | undefined) ?? null;
+      if (assignee && memberIds.has(assignee)) memberId = assignee;
+    } catch {
+      // Fall back to the owner's own queue; the lookup below still explains the result.
+    }
+  }
+  try {
+    const lookup = await getMyLeadsQueueRow({ memberId, propertyId });
+    if (lookup.status === "unavailable") return notInQueue(MY_LEAD_ROW_REASON_COPY[lookup.reason]);
+    return { focus: { propertyId, memberId, notice: null, pin: lookup.row }, memberId };
+  } catch (error) {
+    if (error instanceof MyLeadsReadError) {
+      if (error.code === "NOT_FOUND") return notInQueue(MY_LEAD_ROW_REASON_COPY.not_found);
+      if (error.code === "FORBIDDEN") return notInQueue(MY_LEAD_ROW_FORBIDDEN_COPY);
+    }
+    return notInQueue(MY_LEAD_ROW_ERROR_COPY);
+  }
 }
 
 export default async function MyLeadsPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
@@ -160,7 +174,9 @@ export default async function MyLeadsPage({ searchParams }: { searchParams: Prom
   try {
     // Owners can switch reps, but every viewer starts on their own profile
     // unless a deep link names a lead in another rep's queue.
-    const resolved = await resolveFocus(viewer, new Set(roster.members.map((m) => m.id)), await searchParams);
+    const resolved = roster.settings.enabled
+      ? await resolveFocus(viewer, new Set(roster.members.map((m) => m.id)), await searchParams)
+      : null;
     const memberId = resolved?.memberId ?? viewer.userId;
     focus = resolved?.focus ?? null;
     const [snapshot, kpis, drips] = roster.settings.enabled

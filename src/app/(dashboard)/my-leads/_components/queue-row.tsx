@@ -133,6 +133,8 @@ const ACTIONS_BY_STAGE: Record<
 export type MyLeadQueueRowProps = {
   row: MyLeadQueueRow
   sectionVisible?: boolean
+  /** Tags the lead the user arrived at from its lead page or Messages. */
+  openedFromLead?: boolean
   detailsOpen: boolean
   detailState?: MyLeadDetailState
   onToggleDetails: () => void
@@ -147,6 +149,7 @@ export type MyLeadQueueRowProps = {
 
 export function MyLeadQueueRow({
   row,
+  openedFromLead = false,
   detailsOpen,
   sectionVisible = true,
   detailState,
@@ -207,6 +210,7 @@ export function MyLeadQueueRow({
                 New
               </Badge>
             )}
+            {openedFromLead && <Badge variant="secondary" className="border-teal-300 bg-teal-50 text-teal-900">Opened from lead page</Badge>}
             {row.archived && <Badge variant="secondary">Archived</Badge>}
             {row.dripReply && <Badge variant="secondary" className="border-amber-300 bg-amber-50 text-amber-900">Replied to drip</Badge>}
           </span>

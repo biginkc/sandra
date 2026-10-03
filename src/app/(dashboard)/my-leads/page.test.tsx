@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   getAcquisitionRoster: vi.fn(),
   getAcquisitionQueue: vi.fn(),
   getAcquisitionKpis: vi.fn(),
+  getMyLeadsQueueRow: vi.fn(),
   listMyLeadsInDrip: vi.fn(),
   MyLeadsClient: vi.fn(() => <div data-testid="my-leads-client" />),
   loadDialpadPanelBootstrap: vi.fn(),
@@ -24,6 +25,7 @@ vi.mock("@/lib/my-leads/queries", () => ({
   getAcquisitionRoster: mocks.getAcquisitionRoster,
   getAcquisitionQueue: mocks.getAcquisitionQueue,
   getAcquisitionKpis: mocks.getAcquisitionKpis,
+  getMyLeadsQueueRow: mocks.getMyLeadsQueueRow,
   MyLeadsReadError: class MockMyLeadsReadError extends Error {
     code: string;
 
@@ -257,39 +259,76 @@ describe("MyLeadsPage availability boundary", () => {
   describe("lead deep link", () => {
     const leadId = "11111111-1111-4111-8111-111111111111";
     const clientProps = () => (mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0];
+    const row = { propertyId: leadId, assignmentEpisodeId: "ep-1", queueVersion: 2 };
+    const asOwner = () =>
+      mocks.getAcquisitionRoster.mockResolvedValue({
+        viewer: { ...viewer, userId: "owner-1", isOwner: true },
+        roster: { ...baseRoster, isOwner: true, members: [...baseRoster.members, { ...baseRoster.members[0], id: "owner-1", role: "owner" }] },
+      });
 
-    it("leaves the rep's queue unfiltered and focuses the lead", async () => {
-      mocks.property = { data: { id: leadId, address: " 12 Oak St ", assigned_user_id: "user-1" }, error: null };
+    it("leaves the rep's queue unfiltered and pins the looked-up row", async () => {
+      mocks.getMyLeadsQueueRow.mockResolvedValue({ status: "found", row, snapshotAt: "2026-10-01T00:00:00Z" });
 
       renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId }) }));
 
+      expect(mocks.getMyLeadsQueueRow).toHaveBeenCalledWith({ memberId: "user-1", propertyId: leadId });
       expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({ memberId: "user-1" });
       expect(clientProps()).toMatchObject({
         initialMemberId: "user-1",
-        focus: { propertyId: leadId, memberId: "user-1", notice: null },
+        focus: { propertyId: leadId, memberId: "user-1", notice: null, pin: row },
       });
       expect(clientProps()?.initialSearch).toBeUndefined();
     });
 
     it("opens an owner on the assigned rep's queue", async () => {
-      mocks.getAcquisitionRoster.mockResolvedValue({
-        viewer: { ...viewer, userId: "owner-1", isOwner: true },
-        roster: { ...baseRoster, isOwner: true, members: [...baseRoster.members, { ...baseRoster.members[0], id: "owner-1", role: "owner" }] },
-      });
-      mocks.property = { data: { id: leadId, address: "12 Oak St", assigned_user_id: "user-1" }, error: null };
+      asOwner();
+      mocks.property = { data: { assigned_user_id: "user-1" }, error: null };
+      mocks.getMyLeadsQueueRow.mockResolvedValue({ status: "found", row, snapshotAt: "x" });
 
       renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId }) }));
 
+      expect(mocks.getMyLeadsQueueRow).toHaveBeenCalledWith({ memberId: "user-1", propertyId: leadId });
       expect(clientProps()).toMatchObject({ initialMemberId: "user-1", focus: { propertyId: leadId, memberId: "user-1" } });
     });
 
-    it("explains when a rep opens a lead assigned to someone else", async () => {
-      mocks.property = { data: { id: leadId, address: "12 Oak St", assigned_user_id: "user-2" }, error: null };
+    it("keeps an owner on their own queue when the assignee is not an eligible member", async () => {
+      asOwner();
+      mocks.property = { data: { assigned_user_id: "stranger" }, error: null };
+      mocks.getMyLeadsQueueRow.mockResolvedValue({ status: "unavailable", reason: "other_rep" });
+
+      renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId }) }));
+
+      expect(mocks.getMyLeadsQueueRow).toHaveBeenCalledWith({ memberId: "owner-1", propertyId: leadId });
+    });
+
+    it.each([
+      ["not_found", "We couldn't find this lead."],
+      ["unassigned", "This lead isn't assigned to anyone yet."],
+      ["other_rep", "This lead is assigned to another rep."],
+      ["closed_dead_dnc", "This lead is closed, dead or marked do-not-contact."],
+      ["archived", "This lead was archived from My Leads."],
+      ["no_active_episode", "This lead isn't in an active My Leads queue right now."],
+    ])("explains the %s reason in plain English", async (reason, copy) => {
+      mocks.getMyLeadsQueueRow.mockResolvedValue({ status: "unavailable", reason });
 
       renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId }) }));
 
       expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({ memberId: "user-1" });
-      expect(clientProps()).toMatchObject({ focus: { propertyId: null, notice: expect.stringContaining("another rep") } });
+      expect(clientProps()).toMatchObject({ focus: { propertyId: null, notice: copy, pin: null } });
+    });
+
+    it.each([
+      ["NOT_FOUND", "We couldn't find this lead."],
+      ["FORBIDDEN", "You don't have access to this lead in My Leads."],
+      ["READ_FAILED", "We couldn't check this lead right now. Try opening it again."],
+    ])("turns a %s lookup error into a notice instead of the unavailable page", async (code, copy) => {
+      const { MyLeadsReadError } = await import("@/lib/my-leads/queries");
+      mocks.getMyLeadsQueueRow.mockRejectedValue(new MyLeadsReadError(code as never, "boom"));
+
+      const html = renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId }) }));
+
+      expect(html).toContain("my-leads-client");
+      expect(clientProps()).toMatchObject({ focus: { propertyId: null, notice: copy } });
     });
 
     it("ignores a malformed lead id", async () => {

@@ -5,7 +5,8 @@ import { RepSmsSettings } from './rep-sms-settings';
 import { Button } from '@/components/ui/button';
 import { useOptionalSoftphone } from '@/components/softphone/softphone-provider';
 import { BookAppointmentPopover } from '@/components/appointments/book-appointment-popover';
-import type { AcquisitionKpis,AcquisitionRoster,QueueSnapshot,QueueRow } from '@/lib/my-leads/queries';
+import type { AcquisitionKpis,AcquisitionRoster,QueueSnapshot,QueueRow,MyLeadRowLookup } from '@/lib/my-leads/queries';
+import { MY_LEAD_ROW_REASON_COPY } from '@/lib/my-leads/row-reasons';
 import type { MyLeadDripSnapshot } from '@/lib/my-leads/drip-queries';
 import { WorkflowRecoveryContext } from './_components/workflow-form';
 import { useAttemptWorkflow } from './_components/use-attempt-workflow';
@@ -17,12 +18,14 @@ import { AcquisitionLifecycleDialog } from './_components/lifecycle-dialog';
 import { DialpadPanel,type DialpadCallRequest } from './_components/dialpad-panel';
 import type { DialpadPanelBootstrap } from '@/lib/dialpad-cti/dispatch';
 import type { MyLeadAction,MyLeadStage,AcquisitionLifecycleMode } from './_components/types';
-import { detailView,kpiTiles,stagePages } from './adapter';
-import { loadMyLeadCallReferences,loadMyLeads,loadMyLeadsStage,loadMyLeadDetail,changeAcquisitionDesignation,changeAcquisitionSettings } from './actions';
+import { detailView,kpiTiles,queueRow as queueRowView,stagePages } from './adapter';
+import { loadMyLeadCallReferences,loadMyLeadRow,loadMyLeads,loadMyLeadsStage,loadMyLeadDetail,changeAcquisitionDesignation,changeAcquisitionSettings } from './actions';
 
 type Props={viewer:{userId:string;orgId:string;isOwner:boolean};roster:AcquisitionRoster;initialMemberId:string;initialSnapshot:QueueSnapshot|null;initialKpis:AcquisitionKpis|null;initialDrips?:MyLeadDripSnapshot|null;dialpad?:DialpadPanelBootstrap|null;initialSearch?:string;focus?:MyLeadsFocus|null};
 /** A lead opened from a deep link (lead page or Messages). */
-export type MyLeadsFocus={propertyId:string|null;memberId?:string|null;notice:string|null};
+export type MyLeadsFocus={propertyId:string|null;memberId?:string|null;notice:string|null;pin?:QueueRow|null};
+/** The latest single-row lookup for the deep-linked lead; part of the read model. */
+type PinRead={id:string;lookup:MyLeadRowLookup}|null;
 
 const REFRESH_INTERVAL_MS = 30_000;
 const refreshTime = new Intl.DateTimeFormat('en-US', {month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',timeZone:'America/Chicago',timeZoneName:'short'});
@@ -48,15 +51,50 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   },[]);
   const [dialog,setDialog]=useState<{action:MyLeadAction;row:QueueRow;callActivityId?:string|null}|null>(null);
   type Opening = {action:MyLeadAction;row:QueueRow;scope:string;callActivityId?:string|null};
-  type CurrentRead = Awaited<ReturnType<typeof loadMyLeads>> | null;
+  type CurrentRead = (Awaited<ReturnType<typeof loadMyLeads>> & {pin?:PinRead}) | null;
   const openingScope=JSON.stringify([member,search]);
   const activeScope=useRef(openingScope);activeScope.current=openingScope;
   const currentSnapshot=useRef(snapshot);currentSnapshot.current=snapshot;
   const currentDrips=useRef(drips);
   useEffect(()=>{currentDrips.current=drips;},[drips]);
-  const findRow=(readSnapshot:QueueSnapshot|null,readDrips:MyLeadDripSnapshot|null|undefined,id:string)=>
-    Object.values(readSnapshot?.stages??{}).flatMap(page=>page?.rows??[]).find(row=>row.propertyId===id)??
-    [...(readDrips?.replied??[]),...(readDrips?.active??[])].find(row=>row.propertyId===id)?.queueRow??null;
+  const [pinRead,setPinRead]=useState<PinRead>(()=>focus?.propertyId&&focus.pin?{id:focus.propertyId,lookup:{status:'found',row:focus.pin,snapshotAt:initialSnapshot?.snapshotAt??''}}:null);
+  const [pinNotice,setPinNotice]=useState<string|null>(null);
+  const currentPin=useRef(pinRead);
+  useEffect(()=>{currentPin.current=pinRead;},[pinRead]);
+  // The deep-linked lead whose single-row lookup rides along with every refresh.
+  const pinWanted=useRef<string|null>(focus?.propertyId??null);
+  const readPin=async(propertyId:string,memberId:string):Promise<PinRead|'error'>=>{
+    try {
+      const result=await loadMyLeadRow({memberId,propertyId});
+      if(result.ok)return {id:propertyId,lookup:result.lookup};
+      if(result.code==='NOT_FOUND')return {id:propertyId,lookup:{status:'unavailable',reason:'not_found'}};
+      return 'error';
+    } catch {return 'error';}
+  };
+  const applyPin=(pin:PinRead)=>{
+    setPinRead(pin);
+    setPinNotice(pin?.lookup.status==='unavailable'?MY_LEAD_ROW_REASON_COPY[pin.lookup.reason]:null);
+  };
+  /**
+   * The authoritative row for a lead: an unavailable single-row lookup removes it
+   * everywhere; otherwise the lookup's episode wins and a newer copy of that same
+   * episode (higher queueVersion) from the lists may replace it. Never a stale copy
+   * from another episode.
+   */
+  const findRow=(readSnapshot:QueueSnapshot|null,readDrips:MyLeadDripSnapshot|null|undefined,id:string,pin?:PinRead)=>{
+    const forLead=pin?.id===id?pin.lookup:null;
+    if(forLead?.status==='unavailable')return null;
+    const candidates=[
+      ...Object.values(readSnapshot?.stages??{}).flatMap(page=>page?.rows??[]).filter(row=>row.propertyId===id),
+      ...[...(readDrips?.replied??[]),...(readDrips?.active??[])].filter(row=>row.propertyId===id).flatMap(row=>row.queueRow?[row.queueRow]:[]),
+    ];
+    if(forLead?.status==='found'){
+      const pinned=forLead.row;
+      return candidates.filter(row=>row.assignmentEpisodeId===pinned.assignmentEpisodeId&&row.queueVersion>pinned.queueVersion)
+        .sort((a,b)=>b.queueVersion-a.queueVersion)[0]??pinned;
+    }
+    return candidates[0]??null;
+  };
   const mutationReads=useRef(new Map<string,{scope:string;episodeId:string|null;requestId:number;read:Promise<CurrentRead>}>());
   const renderedRead=useRef<{snapshot:QueueSnapshot;requestId:number;scope:string}|null>(null);
   useEffect(()=>{
@@ -79,9 +117,14 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     if(!roster.settings.enabled) return null;
     const id=++request.current;
     try {
-      const result=await loadMyLeads({memberId:member,search,period:'today'});
+      const pinId=pinWanted.current;
+      const [loaded,pinResult]=await Promise.all([loadMyLeads({memberId:member,search,period:'today'}),pinId?readPin(pinId,member):Promise.resolve(undefined)]);
+      // A newer refresh, or a cleared/changed deep-link target, supersedes this read.
       if(id!==request.current)return null;
+      const pin:PinRead|undefined=pinResult==='error'?(currentPin.current?.id===pinId?currentPin.current:null):pinResult;
+      const result=loaded.ok&&pin!==undefined?{...loaded,pin}:loaded;
       if(result.ok){
+        if(pinResult&&pinResult!=='error'&&pinWanted.current===pinId)applyPin(pinResult);
         // Replacing a paginated/reordered queue can unmount its recording player.
         // Background checks may update KPIs, but must leave open lead details alone.
         if(!background||!reviewingDetails.current){renderedRead.current={snapshot:result.snapshot,requestId:id,scope:JSON.stringify([member,search])};setSnapshot(result.snapshot);}
@@ -125,18 +168,18 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     document.addEventListener('visibilitychange',onVisible);window.addEventListener('focus',onVisible);
     return()=>{cancelled=true;clearTimeout(timer);document.removeEventListener('visibilitychange',onVisible);window.removeEventListener('focus',onVisible);};
   },[snapshot,refresh,roster.settings.enabled]);
-  const rawRow=(id:string)=>findRow(snapshot,drips,id);
+  const rawRow=(id:string)=>findRow(snapshot,drips,id,pinRead);
   const finishOpening=async(opening:Opening,read:Promise<CurrentRead>)=>{
     pendingOpening.current=opening;
     setOpeningStatus({opening,message:'Loading current lead…',busy:true});
     const result=await read;
     if(pendingOpening.current!==opening||activeScope.current!==opening.scope)return;
     if(!result?.ok){setOpeningStatus({opening,message:'Could not load current lead details. Retry to continue.',busy:false});return;}
-    const fresh=findRow(result.snapshot,result.drips,opening.row.propertyId);
+    const fresh=findRow(result.snapshot,result.drips,opening.row.propertyId,result.pin);
     if(!fresh||fresh.assignmentEpisodeId!==opening.row.assignmentEpisodeId){
       setOpeningStatus({opening,message:'This lead is unavailable or its assignment changed. Refresh the queue and reopen it.',busy:false});return;
     }
-    const latest=findRow(currentSnapshot.current,currentDrips.current,fresh.propertyId);
+    const latest=findRow(currentSnapshot.current,currentDrips.current,fresh.propertyId,currentPin.current);
     // Do not rewind an even newer rendered snapshot, or silently change episodes.
     if(!latest||latest.assignmentEpisodeId!==fresh.assignmentEpisodeId){setOpeningStatus({opening,message:'This lead assignment changed. Refresh the queue and reopen it.',busy:false});return;}
     const row=latest&&latest.queueVersion>=fresh.queueVersion?latest:fresh;
@@ -184,7 +227,12 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const readRecoveryRow=useCallback(async(opening:{row:QueueRow})=>{
     const result=await loadMyLeads({memberId:member,search,period:'today'});
     if(!result.ok)throw new Error('read failed');
-    return findRow(result.snapshot,result.drips,opening.row.propertyId);
+    const listed=findRow(result.snapshot,result.drips,opening.row.propertyId);
+    if(listed)return listed;
+    // A lead opened beyond the loaded pages is only reachable through its own lookup.
+    const pin=await readPin(opening.row.propertyId,member);
+    if(pin==='error')throw new Error('row read failed');
+    return findRow(result.snapshot,result.drips,opening.row.propertyId,pin);
   },[member,search]);
   const {submit,recoveryValue,onDripChanged}=useAttemptWorkflow({
     opening:dialog,memberId:member,readRow:readRecoveryRow,
@@ -201,12 +249,6 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     onClose:opening=>setDialog(current=>current===opening?null:current),
     onDripChanged:()=>{void refresh();router.refresh();},
   });
-  const pages=snapshot?stagePages(snapshot,drips):null;
-  if(pages)for(const stage of loadingStages)pages[stage].isLoadingMore=true;
-  const motivation=dialog?.row.motivationKind==='specified'?{kind:'specified' as const,text:dialog.row.motivationText??''}:dialog?.row.motivationKind==='no_motivation'?{kind:'no_motivation' as const,text:null}:null;
-  // Completion callbacks belong to one opening, even when the same lead is reopened.
-  // A previous form can finish after its post-save refresh and must not close a new form.
-  const common=dialog?{open:true,propertyId:dialog.row.propertyId,propertyLabel:dialog.row.address,onOpenChange:(open:boolean)=>{if(!open){setDialog(current=>current===dialog?null:current);}}}:null;
   // The deep-link target lives in client state, seeded from the URL. A user-driven
   // rep/search change clears it (and the URL, without adding history). A different
   // ?lead= value arriving later (new link, Back/Forward) is a new target; a refresh
@@ -217,16 +259,31 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   if(seenFocusKey!==focusKey){
     setSeenFocusKey(focusKey);setClearedForKey(null);
     setTarget(previous=>({propertyId:focus?.propertyId??null,notice:focus?.notice??null,nonce:previous.nonce+1}));
+    setPinNotice(null);
+    setPinRead(focus?.propertyId&&focus.pin?{id:focus.propertyId,lookup:{status:'found',row:focus.pin,snapshotAt:snapshot?.snapshotAt??''}}:null);
     if(focus?.propertyId){
       // A deep link always opens its rep's queue unfiltered.
       if(focus.memberId&&focus.memberId!==member)setMember(focus.memberId);
       setSearch('');
     }
   }
+  useEffect(()=>{pinWanted.current=target.propertyId;},[target.propertyId]);
   const clearFocus=()=>{
     if(target.propertyId||target.notice)setTarget(previous=>({propertyId:null,notice:null,nonce:previous.nonce}));
+    // Dropping the target drops the pin, and any in-flight pin read is ignored.
+    pinWanted.current=null;setPinRead(null);setPinNotice(null);
     if(focusKey!=='||'&&clearedForKey!==focusKey){setClearedForKey(focusKey);router.replace('/my-leads',{scroll:false});}
   };
+  const pages=snapshot?stagePages(snapshot,drips):null;
+  // Show the lead in place when a loaded page has it; otherwise pin it at the top of its section.
+  const pinnedLookup=target.propertyId&&pinRead?.id===target.propertyId&&pinRead.lookup.status==='found'?pinRead.lookup.row:null;
+  const pinnedView=pages&&snapshot&&pinnedLookup&&!(Object.values(pages).some(page=>page.rows.some(row=>row.propertyId===pinnedLookup.propertyId))||drips?.active.some(row=>row.propertyId===pinnedLookup.propertyId))
+    ?{...queueRowView(findRow(snapshot,drips,pinnedLookup.propertyId,pinRead)??pinnedLookup,snapshot.snapshotAt),dripReply:drips?.replied.find(row=>row.propertyId===pinnedLookup.propertyId)??null}:null;
+  if(pages)for(const stage of loadingStages)pages[stage].isLoadingMore=true;
+  const motivation=dialog?.row.motivationKind==='specified'?{kind:'specified' as const,text:dialog.row.motivationText??''}:dialog?.row.motivationKind==='no_motivation'?{kind:'no_motivation' as const,text:null}:null;
+  // Completion callbacks belong to one opening, even when the same lead is reopened.
+  // A previous form can finish after its post-save refresh and must not close a new form.
+  const common=dialog?{open:true,propertyId:dialog.row.propertyId,propertyLabel:dialog.row.address,onOpenChange:(open:boolean)=>{if(!open){setDialog(current=>current===dialog?null:current);}}}:null;
   return <>
     {openingStatus&&<div role="status" className="mb-4 rounded border p-3">
       {openingStatus.message}
@@ -240,7 +297,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       <Button disabled={!recipient||settingsBusy} onClick={async()=>{setSettingsBusy(true);try{const result=await changeAcquisitionSettings({orgId:viewer.orgId,needsSequenceOwnerId:recipient,expectedSettingsRevision:roster.settings.revision,idempotencyKey:crypto.randomUUID()});if(!result.ok)setError(result.message);else router.refresh();}finally{setSettingsBusy(false);}}}>Save recipient</Button></div>
     <RepSmsSettings orgId={viewer.orgId} members={roster.members} />
     </details>}
-    {target.notice&&<div role="status" className="mb-4 rounded border p-3 text-sm">{target.notice}</div>}
+    {(target.notice??pinNotice)&&<div role="status" className="mb-4 rounded border p-3 text-sm">{target.notice??pinNotice}</div>}
     {error&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{error} <Button variant="outline" onClick={()=>void refresh()}>Refresh</Button></div>}
     {refreshError&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{refreshError} Displayed counts may be out of date. Retrying automatically. <Button variant="outline" onClick={()=>void refresh()}>Retry now</Button> <Button variant="outline" onClick={()=>window.location.reload()}>Reload and reconnect</Button></div>}
     {dialpad&&roster.settings.enabled&&<DialpadPanel bootstrap={dialpad} callRequest={dialpadRequest}
@@ -250,7 +307,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis||!tiles?<p role="status">Loading My Leads…</p>:<>
       <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} drips={drips} kpis={tiles} search={search} selectedRepId={member}
         onReviewingChange={onReviewingChange}
-        detailRevision={detailRevision} focusPropertyId={target.propertyId} focusNonce={target.nonce}
+        detailRevision={detailRevision} focusPropertyId={target.propertyId} focusNonce={target.nonce} pinnedRow={pinnedView}
         repOptions={roster.members.filter(m=>m.acquisitionsEnabled||m.hasHistory||m.id===viewer.userId).map(m=>({id:m.id,label:m.label+(m.acquisitionsEnabled?'':' — Acquisitions disabled')}))}
         selectedRepLabel={roster.members.find(m=>m.id===member)?.label}
         onSearchChange={value=>{clearFocus();setSearch(value);}} onRepChange={value=>{clearFocus();setMember(value);}}
