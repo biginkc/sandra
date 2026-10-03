@@ -18,7 +18,7 @@ import {
   type SlackUrlVerification,
 } from "@/lib/integrations/slack/events";
 import { parseSlackLeadLinks } from "@/lib/integrations/slack/unfurl-policy";
-import { enqueueSlackUnfurlEvent, findSlackInstallations } from "@/lib/integrations/slack/unfurl-store";
+import { enqueueSlackUnfurlEvent, findSlackInstallations, isSlackUnfurlInstallationStaleError } from "@/lib/integrations/slack/unfurl-store";
 
 export const maxDuration = 10;
 
@@ -49,6 +49,7 @@ async function recordNoOp(body: SlackEventEnvelope, reason: string): Promise<Res
       eventTime: typeof body.event_time === "number" ? new Date(body.event_time * 1000).toISOString() : null,
       orgId: null,
       installationId: null,
+      installationVersion: null,
       channelId: eventChannel(body),
       messageTs: eventMessageTs(body),
       posterSlackUserId: eventPoster(body),
@@ -115,6 +116,7 @@ async function handleEnvelope(body: SlackEventEnvelope): Promise<Response> {
       eventTime: typeof body.event_time === "number" ? new Date(body.event_time * 1000).toISOString() : null,
       orgId: installation.orgId,
       installationId: installation.installationId,
+      installationVersion: installation.installationVersion,
       channelId,
       messageTs,
       posterSlackUserId: poster,
@@ -123,6 +125,7 @@ async function handleEnvelope(body: SlackEventEnvelope): Promise<Response> {
     if (!enqueued.jobId && !enqueued.duplicate) throw new Error("accepted Slack event did not receive durable job");
     return noOp();
   } catch (error) {
+    if (isSlackUnfurlInstallationStaleError(error)) return recordNoOp(body, "installation_stale");
     reportError(error, { tags: { surface: "slack_events_enqueue" }, extra: { teamId, eventId, installationId: installation.installationId } });
     return NextResponse.json({ error: "temporary_enqueue_failure" }, { status: 503 });
   }

@@ -4,13 +4,14 @@ const mocks = vi.hoisted(() => ({
   verify: vi.fn(),
   enqueue: vi.fn(),
   find: vi.fn(),
+  stale: vi.fn(),
   revoke: vi.fn(),
   revokeChannel: vi.fn(),
   revokeAccounts: vi.fn(),
 }));
 
 vi.mock("@/lib/integrations/slack/signature", () => ({ verifySlackSignature: mocks.verify }));
-vi.mock("@/lib/integrations/slack/unfurl-store", () => ({ enqueueSlackUnfurlEvent: mocks.enqueue, findSlackInstallations: mocks.find, revokeSlackInstallation: mocks.revoke, revokeSlackChannelApproval: mocks.revokeChannel, revokeSlackAccountLinks: mocks.revokeAccounts }));
+vi.mock("@/lib/integrations/slack/unfurl-store", () => ({ enqueueSlackUnfurlEvent: mocks.enqueue, findSlackInstallations: mocks.find, isSlackUnfurlInstallationStaleError: mocks.stale, revokeSlackInstallation: mocks.revoke, revokeSlackChannelApproval: mocks.revokeChannel, revokeSlackAccountLinks: mocks.revokeAccounts }));
 
 import { POST } from "./route";
 
@@ -39,6 +40,7 @@ describe("Slack events route", () => {
     vi.stubEnv("SLACK_CLIENT_ID", "12345.67890");
     vi.stubEnv("SLACK_APP_ID", "A123");
     mocks.verify.mockReturnValue(true);
+    mocks.stale.mockReturnValue(false);
     mocks.find.mockResolvedValue([{ installationId: "I1", orgId: "O1", teamId: "T123", appId: "A123", installationVersion: 1, status: "active", scopes: [] }]);
     mocks.enqueue.mockResolvedValue({ accepted: true, duplicate: false, jobId: "J1" });
     mocks.revoke.mockResolvedValue(undefined);
@@ -56,7 +58,16 @@ describe("Slack events route", () => {
     vi.stubEnv("SLACK_LEAD_UNFURL_ENABLED", "1");
     const response = await POST(request(base));
     expect(response.status).toBe(200);
-    expect(mocks.enqueue).toHaveBeenCalledWith(expect.objectContaining({ appId: "A123", eventId: "Ev123" }));
+    expect(mocks.enqueue).toHaveBeenCalledWith(expect.objectContaining({ appId: "A123", eventId: "Ev123", installationVersion: 1 }));
+  });
+
+  it("turns an installation version race into a durable terminal no-op", async () => {
+    vi.stubEnv("SLACK_LEAD_UNFURL_ENABLED", "1");
+    mocks.stale.mockReturnValueOnce(true);
+    mocks.enqueue.mockRejectedValueOnce(new Error("INSTALLATION_VERSION_MISMATCH"));
+    const response = await POST(request(base));
+    expect(response.status).toBe(200);
+    expect(mocks.enqueue).toHaveBeenNthCalledWith(2, expect.objectContaining({ denialCode: "installation_stale", installationVersion: null, orgId: null, installationId: null, urlKeys: [] }));
   });
 
   it("acknowledges denied/disabled events even if no-op receipt logging fails", async () => {

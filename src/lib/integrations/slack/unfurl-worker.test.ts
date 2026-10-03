@@ -114,6 +114,14 @@ describe("Slack unfurl worker", () => {
     expect(mocks.reschedule).toHaveBeenCalledWith(expect.objectContaining({ jobId: "job-1", claimToken: "claim-1", errorCode: "slack_unfurl_failed" }));
   });
 
+  it("finishes confirmed terminal chat.unfurl message errors without retry", async () => {
+    mocks.unfurl.mockRejectedValueOnce({ data: { error: "cannot_find_message" } });
+    const result = await runSlackUnfurlSweep();
+    expect(result.noops).toBe(1);
+    expect(mocks.reschedule).not.toHaveBeenCalled();
+    expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "noop", errorCode: "slack_cannot_find_message" });
+  });
+
   it("still cleans retention data while the feature flag is disabled", async () => {
     vi.stubEnv("SLACK_LEAD_UNFURL_ENABLED", "0");
     const result = await runSlackUnfurlSweep();

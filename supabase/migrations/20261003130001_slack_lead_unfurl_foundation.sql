@@ -293,22 +293,24 @@ $$;
 
 create or replace function public.enqueue_slack_unfurl_event(
   p_team_id text, p_app_id text, p_event_id text, p_event_type text, p_event_time timestamptz,
-  p_org_id uuid, p_installation_id uuid, p_channel_id text, p_message_ts text,
+  p_org_id uuid, p_installation_id uuid, p_installation_version integer, p_channel_id text, p_message_ts text,
   p_poster_slack_user_id text, p_url_keys text[], p_denial_code text default null
 ) returns table(accepted boolean, duplicate boolean, job_id uuid)
 language plpgsql security definer set search_path = public, pg_temp as $$
-declare v_receipt public.slack_event_receipts; v_job uuid; v_installation_version integer; v_terminal boolean := p_denial_code is not null or coalesce(array_length(p_url_keys,1),0)=0;
+declare v_receipt public.slack_event_receipts; v_job uuid; v_current_installation_version integer; v_installation_status text; v_terminal boolean := p_denial_code is not null or coalesce(array_length(p_url_keys,1),0)=0;
 begin
   -- Serialize accepted enqueue with revocation/reinstall. The job captures
   -- the exact installation generation that Slack delivered the event to;
   -- an event observed before revocation cannot resurrect after reinstall.
   if not v_terminal then
     if p_installation_id is null or p_org_id is null then raise exception 'INSTALLATION_REQUIRED' using errcode='22023'; end if;
-    select i.installation_version into v_installation_version
+    if p_installation_version is null then raise exception 'INSTALLATION_VERSION_REQUIRED' using errcode='22023'; end if;
+    select i.installation_version, i.status into v_current_installation_version, v_installation_status
       from public.slack_installations i
-     where i.id=p_installation_id and i.org_id=p_org_id and i.team_id=p_team_id and i.app_id=p_app_id and i.status='active'
+     where i.id=p_installation_id and i.org_id=p_org_id and i.team_id=p_team_id and i.app_id=p_app_id
      for update;
-    if v_installation_version is null then raise exception 'INSTALLATION_NOT_ACTIVE' using errcode='22023'; end if;
+    if v_current_installation_version is null or v_installation_status <> 'active' then raise exception 'INSTALLATION_NOT_ACTIVE' using errcode='22023'; end if;
+    if v_current_installation_version <> p_installation_version then raise exception 'INSTALLATION_VERSION_MISMATCH' using errcode='22023'; end if;
   end if;
   insert into public.slack_event_receipts(team_id,app_id,event_id,event_type,event_time,channel_id,message_ts,poster_slack_user_id,status,denial_code)
   values(p_team_id,p_app_id,p_event_id,p_event_type,p_event_time,p_channel_id,p_message_ts,p_poster_slack_user_id,case when v_terminal then 'noop' else 'accepted' end,p_denial_code)
@@ -323,7 +325,7 @@ begin
     -- response can never acknowledge an accepted receipt before this job
     -- exists, but this branch makes retries safe after a legacy partial row.
     insert into public.slack_unfurl_jobs(receipt_id,installation_id,installation_version,org_id,team_id,app_id,channel_id,message_ts,poster_slack_user_id,event_time,expires_at)
-    values(v_receipt.id,p_installation_id,v_installation_version,p_org_id,p_team_id,p_app_id,p_channel_id,p_message_ts,p_poster_slack_user_id,coalesce(p_event_time,now()),coalesce(p_event_time,now())+interval '15 minutes')
+    values(v_receipt.id,p_installation_id,p_installation_version,p_org_id,p_team_id,p_app_id,p_channel_id,p_message_ts,p_poster_slack_user_id,coalesce(p_event_time,now()),coalesce(p_event_time,now())+interval '15 minutes')
     returning id into v_job;
     insert into public.slack_unfurl_job_urls(job_id,url_key)
     select v_job,u from (select distinct unnest(p_url_keys) u) s where length(u) > 0;
@@ -331,7 +333,7 @@ begin
   end if;
   if v_terminal then return query select true,false,null::uuid; return; end if;
   insert into public.slack_unfurl_jobs(receipt_id,installation_id,installation_version,org_id,team_id,app_id,channel_id,message_ts,poster_slack_user_id,event_time,expires_at)
-  values(v_receipt.id,p_installation_id,v_installation_version,p_org_id,p_team_id,p_app_id,p_channel_id,p_message_ts,p_poster_slack_user_id,coalesce(p_event_time,now()),coalesce(p_event_time,now())+interval '15 minutes')
+  values(v_receipt.id,p_installation_id,p_installation_version,p_org_id,p_team_id,p_app_id,p_channel_id,p_message_ts,p_poster_slack_user_id,coalesce(p_event_time,now()),coalesce(p_event_time,now())+interval '15 minutes')
   returning id into v_job;
   insert into public.slack_unfurl_job_urls(job_id,url_key)
   select v_job,u from (select distinct unnest(p_url_keys) u) s where length(u) > 0;
@@ -379,6 +381,7 @@ create or replace function public.release_slack_unfurl_job_claim(
 ) returns boolean language sql security definer set search_path = public, pg_temp as $$
   update public.slack_unfurl_jobs
      set status='queued', claim_token=null, lease_expires_at=null,
+         attempts=greatest(attempts-1,0),
          next_attempt_at=now(), updated_at=now()
    where id=p_job_id and status='processing' and claim_token=p_claim_token
   returning true;
@@ -497,7 +500,7 @@ revoke all on function public.upsert_slack_account_link(uuid,uuid,uuid,text) fro
 revoke all on function public.upsert_slack_installation_and_account_link(uuid,text,text,text,text,text,text[],uuid,uuid,text,text) from public,anon,authenticated;
 revoke all on function public.get_slack_preview_attempt_facts(uuid,uuid) from public,anon,authenticated;
 revoke all on function public.approve_slack_channel(uuid,uuid,text,uuid,boolean) from public,anon,authenticated;
-revoke all on function public.enqueue_slack_unfurl_event(text,text,text,text,timestamptz,uuid,uuid,text,text,text,text[],text) from public,anon,authenticated;
+revoke all on function public.enqueue_slack_unfurl_event(text,text,text,text,timestamptz,uuid,uuid,integer,text,text,text,text[],text) from public,anon,authenticated;
 revoke all on function public.claim_slack_unfurl_jobs(timestamptz,uuid,integer,integer) from public,anon,authenticated;
 revoke all on function public.release_slack_unfurl_job_claim(uuid,uuid) from public,anon,authenticated;
 revoke all on function public.finish_slack_unfurl_job(uuid,uuid,text,text) from public,anon,authenticated;
@@ -514,7 +517,7 @@ grant execute on function public.upsert_slack_account_link(uuid,uuid,uuid,text) 
 grant execute on function public.upsert_slack_installation_and_account_link(uuid,text,text,text,text,text,text[],uuid,uuid,text,text) to service_role;
 grant execute on function public.get_slack_preview_attempt_facts(uuid,uuid) to service_role;
 grant execute on function public.approve_slack_channel(uuid,uuid,text,uuid,boolean) to service_role;
-grant execute on function public.enqueue_slack_unfurl_event(text,text,text,text,timestamptz,uuid,uuid,text,text,text,text[],text) to service_role;
+grant execute on function public.enqueue_slack_unfurl_event(text,text,text,text,timestamptz,uuid,uuid,integer,text,text,text,text[],text) to service_role;
 grant execute on function public.claim_slack_unfurl_jobs(timestamptz,uuid,integer,integer) to service_role;
 grant execute on function public.release_slack_unfurl_job_claim(uuid,uuid) to service_role;
 grant execute on function public.finish_slack_unfurl_job(uuid,uuid,text,text) to service_role;

@@ -46,7 +46,26 @@ export type SlackSweepSummary = {
 
 function isTerminalSlackIdentityError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /invalid_auth|token_revoked|account_inactive/i.test(message);
+  const code = slackApiErrorCode(error);
+  return /invalid_auth|token_revoked|token_expired|account_inactive/i.test(message) || code === "invalid_auth" || code === "token_revoked" || code === "token_expired" || code === "account_inactive";
+}
+
+const TERMINAL_SLACK_UNFURL_ERRORS = new Set([
+  "access_denied",
+  "cannot_find_channel",
+  "cannot_find_message",
+  "cannot_unfurl_message",
+  "cannot_unfurl_url",
+  "missing_scope",
+  "no_permission",
+  "not_allowed_token_type",
+  "team_access_not_granted",
+]);
+
+function slackApiErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const candidate = error as { data?: { error?: unknown } };
+  return typeof candidate.data?.error === "string" ? candidate.data.error : null;
 }
 
 function retryAfterSeconds(error: unknown): number | null {
@@ -167,6 +186,11 @@ async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Pro
   } catch (error) {
     if (isTerminalSlackIdentityError(error)) {
       await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "cancelled", errorCode: "installation_revoked" });
+      return "noop";
+    }
+    const terminalError = slackApiErrorCode(error);
+    if (terminalError && TERMINAL_SLACK_UNFURL_ERRORS.has(terminalError)) {
+      await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "noop", errorCode: `slack_${terminalError}` });
       return "noop";
     }
     const next = nextRetryAt(job, Date.now(), retryAfterSeconds(error));

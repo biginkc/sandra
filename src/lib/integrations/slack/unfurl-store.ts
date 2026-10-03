@@ -75,6 +75,12 @@ function rpcError(error: { message: string; code?: string } | null, operation: s
   throw new DatabaseError(`Slack ${operation} failed`, { code: error.code, message: error.message });
 }
 
+export function isSlackUnfurlInstallationStaleError(error: unknown): boolean {
+  if (!(error instanceof DatabaseError)) return false;
+  const detail = error.details?.message;
+  return /\bINSTALLATION_(?:NOT_ACTIVE|VERSION_MISMATCH)\b/.test(`${error.message} ${typeof detail === "string" ? detail : ""}`);
+}
+
 export async function findSlackInstallations(teamId: string, appId: string): Promise<SlackInstallationIdentity[]> {
   const { data, error } = await admin().from("slack_installations").select("id,org_id,team_id,app_id,installation_version,status,scopes").eq("team_id", teamId).eq("app_id", appId);
   if (error) throw new DatabaseError("Slack installation lookup failed", { message: error.message });
@@ -141,6 +147,7 @@ export async function enqueueSlackUnfurlEvent(input: {
   eventTime: string | null;
   orgId: string | null;
   installationId: string | null;
+  installationVersion: number | null;
   channelId: string | null;
   messageTs: string | null;
   posterSlackUserId: string | null;
@@ -155,6 +162,7 @@ export async function enqueueSlackUnfurlEvent(input: {
     p_event_time: input.eventTime,
     p_org_id: input.orgId,
     p_installation_id: input.installationId,
+    p_installation_version: input.installationVersion,
     p_channel_id: input.channelId,
     p_message_ts: input.messageTs,
     p_poster_slack_user_id: input.posterSlackUserId,

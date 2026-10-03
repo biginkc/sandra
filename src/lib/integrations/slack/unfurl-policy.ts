@@ -215,6 +215,7 @@ const PERMANENT_SLACK_ERRORS = new Set([
   "not_authed",
   "not_in_channel",
   "team_not_found",
+  "token_expired",
   "token_revoked",
   "user_not_found",
 ]);
@@ -228,7 +229,7 @@ function slackPlatformErrorCode(error: unknown): string | null {
 }
 
 function permanentSlackReason(code: string): string {
-  if (["account_inactive", "invalid_auth", "invalid_token", "not_authed", "team_not_found", "token_revoked"].includes(code)) return "installation_revoked";
+  if (["account_inactive", "invalid_auth", "invalid_token", "not_authed", "team_not_found", "token_expired", "token_revoked"].includes(code)) return "installation_revoked";
   if (code === "missing_scope") return "installation_scope_missing";
   return `slack_${code}`;
 }
