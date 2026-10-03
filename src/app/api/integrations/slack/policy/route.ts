@@ -10,6 +10,7 @@ import {
 import { createClient } from "@/lib/supabase/server";
 
 const MAX_BODY_BYTES = 8 * 1024;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type PolicyRequest = {
   installationId?: unknown;
@@ -49,7 +50,7 @@ export async function POST(request: Request) {
     const user = await signedInUser();
     if (!user) return Response.json({ error: "Sign in required." }, { status: 401 });
     const body = await readBody(request);
-    if (!isBoundedId(body.installationId) || !isBoundedId(body.orgId) || typeof body.enabled !== "boolean") {
+    if (!isUuid(body.installationId) || !isUuid(body.orgId) || typeof body.enabled !== "boolean") {
       return Response.json({ error: "Installation, organization, and enabled are required." }, { status: 400 });
     }
     if (body.enabled && body.sharingPolicyAcknowledged !== true) {
@@ -102,8 +103,8 @@ function selectOrgId(request: Request, memberships: readonly Membership[]): stri
   return active.length === 1 ? active[0].org_id : null;
 }
 
-function isBoundedId(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= 200;
+function isUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID_RE.test(value);
 }
 
 function isActiveMembership(membership: Pick<Membership, "access_status" | "access_expires_at" | "deletion_prepared_at">): boolean {

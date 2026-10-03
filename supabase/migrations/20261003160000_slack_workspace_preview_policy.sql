@@ -39,6 +39,15 @@ create index slack_channel_denials_lookup_idx
   on public.slack_channel_denials(installation_id, channel_id);
 alter table public.slack_channel_denials enable row level security;
 
+-- Preserve explicit channel denials from the foundation migration while
+-- leaving installation-wide revocations reconnectable after reinstallation.
+insert into public.slack_channel_denials(installation_id,org_id,channel_id,denied_reason,denied_at,updated_at)
+select a.installation_id,a.org_id,a.channel_id,coalesce(a.revoked_reason,'legacy_channel_revoked'),coalesce(a.revoked_at,now()),now()
+  from public.slack_channel_approvals a
+ where a.status='revoked'
+   and (a.revoked_reason is null or a.revoked_reason not in ('app_uninstalled','tokens_revoked','invalid_auth','invalid_token','not_authed','token_revoked','token_expired','account_inactive','team_not_found','installation_revoked','installation_scope_missing'))
+on conflict (installation_id,channel_id) do nothing;
+
 insert into public.slack_preview_policies(installation_id, org_id)
 select i.id, i.org_id
   from public.slack_installations i
@@ -129,16 +138,13 @@ begin
       v_terminal := true;
       v_denial_code := coalesce(v_denial_code,'previews_disabled');
     elsif v_policy_mode='eligible_internal_channels' then
-      if p_event_time is not null and v_policy_acknowledged_at is not null and p_event_time < date_trunc('second', v_policy_acknowledged_at) then
+      if v_policy_acknowledged_at is not null and (p_event_time is null or p_event_time < date_trunc('second', v_policy_acknowledged_at)) then
         v_terminal := true;
         v_denial_code := coalesce(v_denial_code,'event_before_policy');
       end if;
       select exists(
         select 1 from public.slack_channel_denials d
          where d.installation_id=p_installation_id and d.org_id=p_org_id and d.channel_id=p_channel_id
-      ) or exists(
-        select 1 from public.slack_channel_approvals a
-         where a.installation_id=p_installation_id and a.org_id=p_org_id and a.channel_id=p_channel_id and a.status='revoked'
       ) into v_channel_denied;
       if v_channel_denied then
         v_terminal := true;
@@ -154,8 +160,11 @@ begin
   if v_receipt.id is null then
     select r.* into v_receipt from public.slack_event_receipts r where r.team_id=p_team_id and r.event_id=p_event_id for update;
     select j.id into v_job from public.slack_unfurl_jobs j where j.receipt_id=v_receipt.id;
-    if v_job is not null or v_receipt.status <> 'accepted' or v_terminal then
+    if v_job is not null then
       return query select true,true,v_job; return;
+    end if;
+    if v_receipt.status <> 'accepted' or v_terminal then
+      return query select false,true,v_job; return;
     end if;
     insert into public.slack_unfurl_jobs(receipt_id,installation_id,installation_version,policy_revision,org_id,team_id,app_id,channel_id,message_ts,poster_slack_user_id,event_time,expires_at)
     values(v_receipt.id,p_installation_id,p_installation_version,case when v_policy_mode='eligible_internal_channels' then v_policy_revision else null end,p_org_id,p_team_id,p_app_id,p_channel_id,p_message_ts,p_poster_slack_user_id,coalesce(p_event_time,now()),coalesce(p_event_time,now())+interval '15 minutes')
@@ -164,7 +173,7 @@ begin
     select v_job,u from (select distinct unnest(p_url_keys) u) s where length(u) > 0;
     return query select true,true,v_job; return;
   end if;
-  if v_terminal then return query select true,false,null::uuid; return; end if;
+  if v_terminal then return query select false,false,null::uuid; return; end if;
   insert into public.slack_unfurl_jobs(receipt_id,installation_id,installation_version,policy_revision,org_id,team_id,app_id,channel_id,message_ts,poster_slack_user_id,event_time,expires_at)
   values(v_receipt.id,p_installation_id,p_installation_version,case when v_policy_mode='eligible_internal_channels' then v_policy_revision else null end,p_org_id,p_team_id,p_app_id,p_channel_id,p_message_ts,p_poster_slack_user_id,coalesce(p_event_time,now()),coalesce(p_event_time,now())+interval '15 minutes')
   returning id into v_job;
@@ -209,11 +218,6 @@ begin
     select 1 from public.slack_channel_denials d
      where d.installation_id=p_installation_id and d.org_id=p_org_id and d.channel_id=p_channel_id
   ) then return false; end if;
-  if exists (
-    select 1 from public.slack_channel_approvals a
-     where a.installation_id=p_installation_id and a.org_id=p_org_id and a.channel_id=p_channel_id and a.status='revoked'
-  ) then return false; end if;
-
   perform 1 from public.slack_channel_approvals a
    where a.installation_id=p_installation_id and a.org_id=p_org_id
      and a.channel_id=p_channel_id and a.status='active'
@@ -241,7 +245,7 @@ begin
           select 1 from public.slack_preview_policies p
            where p.installation_id=p_installation_id and p.org_id=p_org_id
              and p.mode='eligible_internal_channels' and p.policy_revision=j.policy_revision
-             and (p.acknowledged_at is null or j.event_time >= date_trunc('second', p.acknowledged_at))
+             and p.acknowledged_at is not null and j.event_time >= date_trunc('second', p.acknowledged_at)
        ))
      )
    for update;
@@ -279,7 +283,8 @@ language plpgsql security definer set search_path = public, pg_temp as $$
 declare
   v_installation public.slack_installations;
   v_mode text;
-  v_revision bigint;
+  v_existing_mode text;
+  v_existing_revision bigint;
 begin
   select i.* into v_installation from public.slack_installations i
    where i.id=p_installation_id and i.org_id=p_org_id
@@ -294,15 +299,32 @@ begin
       and m.deletion_prepared_at is null and (m.access_expires_at is null or m.access_expires_at > now())
   ) then raise exception 'OWNER_NOT_ACTIVE' using errcode='42501'; end if;
   v_mode := case when p_enabled then 'eligible_internal_channels' else 'disabled' end;
-  insert into public.slack_preview_policies(installation_id,org_id,mode,policy_revision,acknowledged_by,acknowledged_at,disabled_at,disabled_reason)
-  values(p_installation_id,p_org_id,v_mode,1,p_owner_id,case when p_enabled then now() else null end,case when p_enabled then null else now() end,case when p_enabled then null else 'owner_disabled' end)
-  on conflict (installation_id) do update set
-    org_id=excluded.org_id, mode=excluded.mode,
-    policy_revision=public.slack_preview_policies.policy_revision+1,
-    acknowledged_by=case when excluded.mode='eligible_internal_channels' then excluded.acknowledged_by else public.slack_preview_policies.acknowledged_by end,
-    acknowledged_at=case when excluded.mode='eligible_internal_channels' then excluded.acknowledged_at else public.slack_preview_policies.acknowledged_at end,
-    disabled_at=excluded.disabled_at, disabled_reason=excluded.disabled_reason, updated_at=now()
-  returning public.slack_preview_policies.mode, public.slack_preview_policies.policy_revision into mode, policy_revision;
+  select p.mode,p.policy_revision into v_existing_mode,v_existing_revision
+    from public.slack_preview_policies p
+   where p.installation_id=p_installation_id
+   for update;
+  if found and v_existing_mode=v_mode then
+    mode := v_existing_mode;
+    policy_revision := v_existing_revision;
+    return next;
+    return;
+  end if;
+  if found then
+    update public.slack_preview_policies p set
+      org_id=p_org_id, mode=v_mode,
+      policy_revision=p.policy_revision+1,
+      acknowledged_by=case when p_enabled then p_owner_id else p.acknowledged_by end,
+      acknowledged_at=case when p_enabled then now() else p.acknowledged_at end,
+      disabled_at=case when p_enabled then null else now() end,
+      disabled_reason=case when p_enabled then null else 'owner_disabled' end,
+      updated_at=now()
+     where p.installation_id=p_installation_id
+    returning p.mode,p.policy_revision into mode,policy_revision;
+  else
+    insert into public.slack_preview_policies(installation_id,org_id,mode,policy_revision,acknowledged_by,acknowledged_at,disabled_at,disabled_reason)
+    values(p_installation_id,p_org_id,v_mode,1,case when p_enabled then p_owner_id else null end,case when p_enabled then now() else null end,case when p_enabled then null else now() end,case when p_enabled then null else 'owner_disabled' end)
+    returning slack_preview_policies.mode,slack_preview_policies.policy_revision into mode,policy_revision;
+  end if;
   if v_mode='disabled' then
     with cancelled as (
       update public.slack_unfurl_jobs j set status='cancelled',claim_token=null,lease_expires_at=null,last_error_code='previews_disabled',updated_at=now()
@@ -330,6 +352,16 @@ begin
       from public.slack_installations i where j.installation_id=i.id and i.team_id=p_team_id and i.app_id=p_app_id and j.channel_id=p_channel_id and j.status in ('queued','processing') returning j.receipt_id
   ) update public.slack_event_receipts r set status='revoked',updated_at=now() from cancelled where r.id=cancelled.receipt_id;
   return v_count;
+end;
+$$;
+
+-- Preserve the foundation RPC used by internal callers while making an
+-- explicit channel revocation durable in workspace-wide mode.
+create or replace function public.revoke_slack_channel_approval(
+  p_team_id text, p_app_id text, p_channel_id text, p_reason text
+) returns integer language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  return public.deny_slack_channel(p_team_id,p_app_id,p_channel_id,p_reason,null);
 end;
 $$;
 

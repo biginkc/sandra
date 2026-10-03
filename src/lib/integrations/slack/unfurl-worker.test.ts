@@ -112,6 +112,34 @@ describe("Slack unfurl worker", () => {
     expect(mocks.unfurl).not.toHaveBeenCalled();
   });
 
+  it("finishes disabled-policy jobs without sending", async () => {
+    mocks.policy.mockResolvedValue({ installationId: "installation-1", orgId: "org-1", mode: "disabled", policyRevision: 2 });
+    const result = await runSlackUnfurlSweep();
+    expect(result.noops).toBe(1);
+    expect(mocks.unfurl).not.toHaveBeenCalled();
+    expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "noop", errorCode: "preview_policy_changed" });
+  });
+
+  it("fences a job whose captured workspace policy revision is stale", async () => {
+    mocks.claim.mockResolvedValue([{ ...job, policy_revision: 2 }]);
+    mocks.policy.mockResolvedValue({ installationId: "installation-1", orgId: "org-1", mode: "eligible_internal_channels", policyRevision: 3 });
+    const result = await runSlackUnfurlSweep();
+    expect(result.noops).toBe(1);
+    expect(mocks.unfurl).not.toHaveBeenCalled();
+  });
+
+  it("passes a null legacy approval through broad policy and carries channel denials to live verification", async () => {
+    mocks.claim.mockResolvedValue([{ ...job, policy_revision: 2 }]);
+    mocks.policy.mockResolvedValue({ installationId: "installation-1", orgId: "org-1", mode: "eligible_internal_channels", policyRevision: 2 });
+    mocks.approval.mockResolvedValue(null);
+    mocks.channelDenial.mockResolvedValue(true);
+    mocks.verify.mockResolvedValue({ allowed: false, reason: "channel_not_approved" });
+    const result = await runSlackUnfurlSweep();
+    expect(result.noops).toBe(1);
+    expect(mocks.verify).toHaveBeenCalledWith(expect.objectContaining({ approval: null, policyEnabled: true, channelDenied: true }));
+    expect(mocks.unfurl).not.toHaveBeenCalled();
+  });
+
   it("renders the complete eligible URL map in one chat.unfurl call", async () => {
     const result = await runSlackUnfurlSweep();
     expect(result.succeeded).toBe(1);

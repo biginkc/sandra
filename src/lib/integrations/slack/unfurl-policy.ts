@@ -117,9 +117,9 @@ export function authorizeSlackDestination(input: {
 }): SlackDestinationDecision {
   if (input.channelDenied) return { allowed: false, reason: "channel_not_approved" };
   if (!input.policyEnabled && (!input.approval || input.approval.status !== "active" || !input.approval.sharingPolicyAcknowledged)) return { allowed: false, reason: "channel_not_approved" };
-  if (input.approval?.status === "revoked") return { allowed: false, reason: "channel_not_approved" };
+  if (!input.policyEnabled && input.approval?.status === "revoked") return { allowed: false, reason: "channel_not_approved" };
   if (input.approval && (input.approval.installationId !== input.expectedInstallationId || input.approval.orgId !== input.expectedOrgId || input.approval.channelId !== input.expectedChannelId)) return { allowed: false, reason: "channel_binding_mismatch" };
-  if (input.approval && !input.approval.sharingPolicyAcknowledged) return { allowed: false, reason: "channel_not_approved" };
+  if (!input.policyEnabled && input.approval && !input.approval.sharingPolicyAcknowledged) return { allowed: false, reason: "channel_not_approved" };
   const channel = input.channel;
   const contextTeamId = channel?.context_team_id ?? channel?.team_id;
   if (!channel || channel.id !== input.expectedChannelId || contextTeamId !== input.expectedTeamId || hasForeignTeamId(channel.shared_team_ids, input.expectedTeamId) || hasForeignTeamId(channel.connected_team_ids, input.expectedTeamId) || hasForeignTeamId(channel.internal_team_ids, input.expectedTeamId)) return { allowed: false, reason: "channel_identity_unverified" };
@@ -192,7 +192,7 @@ export async function verifySlackChannelForApproval(input: {
     const contextTeamId = channel.context_team_id ?? channel.team_id;
     if (contextTeamId !== input.teamId || hasForeignTeamId(channel.shared_team_ids, input.teamId) || hasForeignTeamId(channel.connected_team_ids, input.teamId) || hasForeignTeamId(channel.internal_team_ids, input.teamId)) return { allowed: false, reason: "channel_identity_unverified" };
     if (!channel.is_channel && !channel.is_group) return { allowed: false, reason: "channel_type_denied" };
-    if (channel.is_im || channel.is_mpim || channel.is_archived || channel.is_shared || channel.is_ext_shared || channel.is_org_shared || channel.is_pending_ext_shared || hasPendingSharedTeams(channel.pending_shared) || (channel.is_member !== true)) {
+    if (channel.is_im || channel.is_mpim || channel.is_archived || channel.is_shared || channel.is_ext_shared || channel.is_org_shared || channel.is_pending_ext_shared || hasPendingSharedTeams(channel.pending_shared) || (channel.pending_connected_team_ids?.length ?? 0) > 0 || (channel.is_member !== true)) {
       return { allowed: false, reason: "channel_sharing_denied" };
     }
     return { allowed: true, channel };
@@ -257,9 +257,9 @@ function preflightSlackApproval(input: {
 }): Extract<SlackDestinationDecision, { allowed: false }> | null {
   if (input.channelDenied) return { allowed: false, reason: "channel_not_approved" };
   if (!input.policyEnabled && (!input.approval || input.approval.status !== "active" || !input.approval.sharingPolicyAcknowledged)) return { allowed: false, reason: "channel_not_approved" };
-  if (input.approval?.status === "revoked") return { allowed: false, reason: "channel_not_approved" };
+  if (!input.policyEnabled && input.approval?.status === "revoked") return { allowed: false, reason: "channel_not_approved" };
   if (input.approval && (input.approval.installationId !== input.installationId || input.approval.orgId !== input.orgId || input.approval.channelId !== input.channelId)) return { allowed: false, reason: "channel_binding_mismatch" };
-  if (input.approval && !input.approval.sharingPolicyAcknowledged) return { allowed: false, reason: "channel_not_approved" };
+  if (!input.policyEnabled && input.approval && !input.approval.sharingPolicyAcknowledged) return { allowed: false, reason: "channel_not_approved" };
   return null;
 }
 

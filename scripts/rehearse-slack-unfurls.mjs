@@ -196,7 +196,7 @@ try {
   if (psql(`set role service_role; select public.guard_slack_unfurl_dispatch(${guardArgs});`) !== "f") throw new Error("dispatch guard accepted expired event");
   psql(`update public.slack_unfurl_jobs set expires_at=now()+interval '15 minutes',lease_expires_at=now()+interval '1 minute' where id='${claim[0]}';`);
   psql(`update public.slack_channel_approvals set status='revoked',revoked_at=now() where installation_id='${install[0]}' and channel_id='C_REHEARSAL';`);
-  if (psql(`set role service_role; select public.guard_slack_unfurl_dispatch(${guardArgs});`) !== "f") throw new Error("dispatch guard accepted revoked approval");
+  if (psql(`set role service_role; select public.guard_slack_unfurl_dispatch(${guardArgs});`) !== "t") throw new Error("workspace policy treated a revoked legacy approval as a denial");
   psql(`update public.slack_channel_approvals set status='active',revoked_at=null where installation_id='${install[0]}' and channel_id='C_REHEARSAL';`);
   psql(`update public.memberships set access_status='revoked' where user_id='${member}' and org_id='${org}';`);
   if (psql(`set role service_role; select public.guard_slack_unfurl_dispatch(${guardArgs});`) !== "f") throw new Error("dispatch guard accepted revoked membership");
