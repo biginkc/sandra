@@ -106,6 +106,8 @@ export function StartDripPicker({
   }, [inline, open, loading, choices.length]);
 
   async function choose(id: string) {
+    // A parent can disable the picker while its popup is already open; the open popup must not act.
+    if (disabled) return;
     if (selectionOnly) { setSelectedId(id); onSelect?.(id); return; }
     if (!onChoose) return;
     setBusy(true);
@@ -122,7 +124,7 @@ export function StartDripPicker({
   }
 
   async function leave() {
-    if (!onLeave) return;
+    if (!onLeave || disabled) return;
     setBusy(true);
     try {
       await onLeave();
@@ -148,7 +150,7 @@ export function StartDripPicker({
         {/* The popup can outgrow the viewport once an org has several drips, so its list scrolls. */}
         <div ref={listRef} className={inline ? undefined : "overflow-y-auto pr-1"} style={inline ? undefined : { maxHeight: place?.listMax ?? 320 }} data-testid="drip-choice-list">
         {loading ? <p className="text-xs">Loading drips…</p> : choices.length === 0 ? <p className="text-xs">No active drips with steps are available.</p> : visibleChoices.length === 0 ? <p className="text-xs">No drips match “{query.trim()}”.</p> : visibleChoices.map((choice) => (
-          <button key={choice.id} type="button" disabled={busy} onClick={() => void choose(choice.id)}
+          <button key={choice.id} type="button" disabled={busy || disabled} onClick={() => void choose(choice.id)}
             aria-pressed={selectionOnly ? (selectedSequenceId === undefined ? selectedId : selectedSequenceId) === choice.id : undefined}
             className={`mb-2 block w-full rounded-md border p-2 text-left hover:bg-stone-50 ${(selectedSequenceId === undefined ? selectedId : selectedSequenceId) === choice.id ? 'border-teal-600 bg-teal-50' : ''}`}>
             <span className="block text-sm font-medium">{choice.name}</span>
@@ -158,7 +160,7 @@ export function StartDripPicker({
           </button>
         ))}
         </div>
-        {onLeave && <button type="button" disabled={busy} onClick={() => void leave()} className="text-xs underline">Leave it to the follow-up owner</button>}
+        {onLeave && <button type="button" disabled={busy || disabled} onClick={() => void leave()} className="text-xs underline">Leave it to the follow-up owner</button>}
       </div>}
       {message && <p role="status" className="mt-1 text-xs">{message}</p>}
     </div>

@@ -130,3 +130,20 @@ it("enrolls the drip picked after filtering", async () => {
   await user.click(screen.getByRole("button", { name: /Not interested/ }));
   expect(onChoose).toHaveBeenCalledWith("c");
 });
+
+it("disables an already-open popup when the parent disables the picker", async () => {
+  listDripChoices.mockResolvedValue({ ok: true, data: [{ id: "s1", name: "Seller follow-up", textCount: 3, days: 7, firstSend: null }] });
+  const user = userEvent.setup();
+  const onChoose = vi.fn();
+  const onLeave = vi.fn();
+  const { rerender } = render(<StartDripPicker onChoose={onChoose} onLeave={onLeave} />);
+  await user.click(screen.getByRole("button", { name: "Start follow-up drip" }));
+  const choice = await screen.findByRole("button", { name: /Seller follow-up/ });
+  rerender(<StartDripPicker onChoose={onChoose} onLeave={onLeave} disabled />);
+  expect(choice).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Leave it to the follow-up owner" })).toBeDisabled();
+  await user.click(choice);
+  await user.click(screen.getByRole("button", { name: "Leave it to the follow-up owner" }));
+  expect(onChoose).not.toHaveBeenCalled();
+  expect(onLeave).not.toHaveBeenCalled();
+});
