@@ -97,5 +97,5 @@ function isActiveMembership(membership: { access_status?: string | null; access_
 }
 
 function isApprovalOperator(membership: { role?: string | null }): boolean {
-  return membership.role === "owner" || membership.role === "admin";
+  return membership.role === "owner";
 }

@@ -7,6 +7,7 @@ import {
   eventLinks,
   eventMessageTs,
   eventPoster,
+  eventSource,
   eventType,
   handleLifecycleSlackEvent,
   isLifecycleSlackEvent,
@@ -85,6 +86,7 @@ async function handleEnvelope(body: SlackEventEnvelope): Promise<Response> {
   if (!isLinkSharedSlackEvent(type)) return recordNoOp(body, "unsupported_event");
   if (process.env.SLACK_LEAD_UNFURL_ENABLED !== FLAG_ENABLED) return recordNoOp(body, "feature_disabled");
   if (eventChannel(body)?.startsWith("D")) return recordNoOp(body, "private_channel_denied");
+  if (eventChannel(body) === "COMPOSER" || eventSource(body)?.toLowerCase() === "composer") return recordNoOp(body, "composer_denied");
 
   const rawLinks = eventLinks(body);
   const parsed = parseSlackLeadLinks(rawLinks);

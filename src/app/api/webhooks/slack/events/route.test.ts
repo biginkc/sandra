@@ -86,9 +86,17 @@ describe("Slack events route", () => {
   });
 
   it("revokes channel approval when Slack reports a newly shared channel", async () => {
-    const response = await POST(request({ ...base, event: { type: "channel_shared", channel_id: "C123" } }));
+    const response = await POST(request({ ...base, event: { type: "channel_shared", channel: "C123" } }));
     expect(response.status).toBe(200);
     expect(mocks.revokeChannel).toHaveBeenCalledWith("T123", "A123", "C123", "channel_shared");
+  });
+
+  it("denies composer link events before installation lookup or enqueue", async () => {
+    vi.stubEnv("SLACK_LEAD_UNFURL_ENABLED", "1");
+    const response = await POST(request({ ...base, event: { ...base.event, channel: "COMPOSER", source: "composer" } }));
+    expect(response.status).toBe(200);
+    expect(mocks.find).not.toHaveBeenCalled();
+    expect(mocks.enqueue).toHaveBeenCalledWith(expect.objectContaining({ denialCode: "composer_denied" }));
   });
 
   it("rejects invalid signatures, oversized bodies, and malformed envelopes", async () => {

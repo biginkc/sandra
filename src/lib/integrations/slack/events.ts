@@ -10,6 +10,7 @@ export type SlackLinkSharedEvent = {
   user?: string;
   message_ts?: string;
   links?: Array<{ url?: string; label?: string }>;
+  source?: string;
 };
 
 export type SlackEventEnvelope = {
@@ -83,6 +84,11 @@ export function eventPoster(body: SlackEventEnvelope): string | null {
 export function eventMessageTs(body: SlackEventEnvelope): string | null {
   const event = body.event as Record<string, unknown>;
   return typeof event.message_ts === "string" ? event.message_ts : null;
+}
+
+export function eventSource(body: SlackEventEnvelope): string | null {
+  const event = body.event as Record<string, unknown>;
+  return typeof event.source === "string" ? event.source : null;
 }
 
 export async function handleLifecycleSlackEvent(body: SlackEventEnvelope): Promise<void> {

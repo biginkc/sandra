@@ -36,6 +36,7 @@ export type SlackUnfurlJob = {
   id: string;
   receipt_id: string;
   installation_id: string | null;
+  installation_version: number | null;
   org_id: string | null;
   team_id: string;
   app_id: string;
@@ -107,7 +108,7 @@ export async function hasActiveSlackMembership(input: { userId: string; orgId: s
   const { data, error } = await admin().from("memberships").select("user_id,org_id,access_status,access_expires_at,deletion_prepared_at").eq("user_id", input.userId).eq("org_id", input.orgId).maybeSingle();
   if (error) throw new DatabaseError("Slack membership lookup failed", { message: error.message });
   if (!data || data.user_id !== input.userId || data.org_id !== input.orgId) return false;
-  if (typeof data.access_status === "string" && data.access_status !== "active") return false;
+  if (data.access_status !== "active") return false;
   if (data.deletion_prepared_at) return false;
   return typeof data.access_expires_at !== "string" || Date.parse(data.access_expires_at) > Date.now();
 }
@@ -198,6 +199,15 @@ export async function finishSlackUnfurlJob(input: { jobId: string; claimToken: s
 export async function rescheduleSlackUnfurlJob(input: { jobId: string; claimToken: string; nextAttemptAt: Date; errorCode: string }): Promise<boolean> {
   const { data, error } = await admin().rpc("reschedule_slack_unfurl_job", { p_job_id: input.jobId, p_claim_token: input.claimToken, p_next_attempt_at: input.nextAttemptAt.toISOString(), p_error_code: input.errorCode });
   rpcError(error, "job reschedule");
+  return data === true || (Array.isArray(data) && data[0] === true);
+}
+
+export async function releaseSlackUnfurlJobClaim(input: { jobId: string; claimToken: string }): Promise<boolean> {
+  const { data, error } = await admin().rpc("release_slack_unfurl_job_claim", {
+    p_job_id: input.jobId,
+    p_claim_token: input.claimToken,
+  });
+  rpcError(error, "job claim release");
   return data === true || (Array.isArray(data) && data[0] === true);
 }
 

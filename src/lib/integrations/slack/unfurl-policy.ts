@@ -85,7 +85,7 @@ export type SlackConversationInfo = {
   is_ext_shared?: boolean;
   is_org_shared?: boolean;
   is_pending_ext_shared?: boolean;
-  pending_shared?: boolean;
+  pending_shared?: string[] | boolean;
   pending_connected_team_ids?: string[];
   connected_team_ids?: string[];
   internal_team_ids?: string[];
@@ -119,7 +119,7 @@ export function authorizeSlackDestination(input: {
   const contextTeamId = channel?.context_team_id ?? channel?.team_id;
   if (!channel || channel.id !== input.expectedChannelId || contextTeamId !== input.expectedTeamId || hasForeignTeamId(channel.shared_team_ids, input.expectedTeamId) || hasForeignTeamId(channel.connected_team_ids, input.expectedTeamId) || hasForeignTeamId(channel.internal_team_ids, input.expectedTeamId)) return { allowed: false, reason: "channel_identity_unverified" };
   if (!channel.is_channel && !channel.is_group) return { allowed: false, reason: "channel_type_denied" };
-  if (channel.is_im || channel.is_mpim || channel.is_archived || channel.is_shared || channel.is_ext_shared || channel.is_org_shared || channel.is_pending_ext_shared || channel.pending_shared === true || (channel.pending_connected_team_ids?.length ?? 0) > 0 || channel.is_member !== true) return { allowed: false, reason: "channel_sharing_denied" };
+  if (channel.is_im || channel.is_mpim || channel.is_archived || channel.is_shared || channel.is_ext_shared || channel.is_org_shared || channel.is_pending_ext_shared || hasPendingSharedTeams(channel.pending_shared) || (channel.pending_connected_team_ids?.length ?? 0) > 0 || channel.is_member !== true) return { allowed: false, reason: "channel_sharing_denied" };
   const user = input.user;
   if (!user || user.id !== input.expectedPosterUserId || user.team_id !== input.expectedTeamId || user.deleted === true || user.is_bot === true) return { allowed: false, reason: "poster_identity_denied" };
   return { allowed: true, channel, user };
@@ -134,7 +134,9 @@ export async function verifySlackDestination(input: {
   channelId: string;
   posterUserId: string;
 }): Promise<SlackDestinationDecision> {
-  const slack = new WebClient(input.token, { timeout: 5000, retryConfig: { retries: 0 } });
+  const preflight = preflightSlackApproval(input);
+  if (preflight) return preflight;
+  const slack = new WebClient(input.token, { timeout: 5000, retryConfig: { retries: 0 }, rejectRateLimitedCalls: true });
   try {
     const [channelResponse, userResponse] = await Promise.all([
       slack.conversations.info({ channel: input.channelId }),
@@ -151,6 +153,10 @@ export async function verifySlackDestination(input: {
       user: (userResponse.user ?? null) as SlackUserInfo | null,
     });
   } catch (error) {
+    const code = slackPlatformErrorCode(error);
+    if (code && PERMANENT_SLACK_ERRORS.has(code)) {
+      return { allowed: false, reason: permanentSlackReason(code) };
+    }
     const retryAfterSeconds = getRetryAfterSeconds(error);
     return retryAfterSeconds === null
       ? { allowed: false, reason: "slack_authority_unavailable" }
@@ -169,7 +175,7 @@ export async function verifySlackChannelForApproval(input: {
   teamId: string;
   channelId: string;
 }): Promise<{ allowed: true; channel: SlackConversationInfo } | { allowed: false; reason: string }> {
-  const slack = new WebClient(input.token, { timeout: 5000, retryConfig: { retries: 0 } });
+  const slack = new WebClient(input.token, { timeout: 5000, retryConfig: { retries: 0 }, rejectRateLimitedCalls: true });
   try {
     const response = await slack.conversations.info({ channel: input.channelId });
     const channel = (response.channel ?? null) as SlackConversationInfo | null;
@@ -177,7 +183,7 @@ export async function verifySlackChannelForApproval(input: {
     const contextTeamId = channel.context_team_id ?? channel.team_id;
     if (contextTeamId !== input.teamId || hasForeignTeamId(channel.shared_team_ids, input.teamId) || hasForeignTeamId(channel.connected_team_ids, input.teamId) || hasForeignTeamId(channel.internal_team_ids, input.teamId)) return { allowed: false, reason: "channel_identity_unverified" };
     if (!channel.is_channel && !channel.is_group) return { allowed: false, reason: "channel_type_denied" };
-    if (channel.is_im || channel.is_mpim || channel.is_archived || channel.is_shared || channel.is_ext_shared || channel.is_org_shared || channel.is_pending_ext_shared || channel.pending_shared === true || (channel.pending_connected_team_ids?.length ?? 0) > 0 || channel.is_member !== true) {
+    if (channel.is_im || channel.is_mpim || channel.is_archived || channel.is_shared || channel.is_ext_shared || channel.is_org_shared || channel.is_pending_ext_shared || hasPendingSharedTeams(channel.pending_shared) || (channel.pending_connected_team_ids?.length ?? 0) > 0 || channel.is_member !== true) {
       return { allowed: false, reason: "channel_sharing_denied" };
     }
     return { allowed: true, channel };
@@ -192,9 +198,54 @@ function hasForeignTeamId(values: readonly string[] | undefined, expectedTeamId:
 
 function getRetryAfterSeconds(error: unknown): number | null {
   if (!error || typeof error !== "object") return null;
-  const candidate = error as { data?: { retry_after?: unknown }; retryAfter?: unknown };
-  const value = candidate.data?.retry_after ?? candidate.retryAfter;
+  const candidate = error as { code?: unknown; data?: { retry_after?: unknown; response_metadata?: { retryAfter?: unknown } }; retryAfter?: unknown };
+  const value = candidate.code === "slack_webapi_rate_limited_error"
+    ? candidate.retryAfter
+    : candidate.data?.retry_after ?? candidate.data?.response_metadata?.retryAfter;
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+const PERMANENT_SLACK_ERRORS = new Set([
+  "account_inactive",
+  "channel_not_found",
+  "invalid_auth",
+  "invalid_token",
+  "is_archived",
+  "missing_scope",
+  "not_authed",
+  "not_in_channel",
+  "team_not_found",
+  "token_revoked",
+  "user_not_found",
+]);
+
+function slackPlatformErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const candidate = error as { data?: { error?: unknown }; statusCode?: unknown };
+  if (candidate.statusCode === 401) return "invalid_auth";
+  if (candidate.statusCode === 404) return "channel_not_found";
+  return typeof candidate.data?.error === "string" ? candidate.data.error : null;
+}
+
+function permanentSlackReason(code: string): string {
+  if (["account_inactive", "invalid_auth", "invalid_token", "not_authed", "team_not_found", "token_revoked"].includes(code)) return "installation_revoked";
+  if (code === "missing_scope") return "installation_scope_missing";
+  return `slack_${code}`;
+}
+
+function hasPendingSharedTeams(value: string[] | boolean | undefined): boolean {
+  return value === true || (Array.isArray(value) && value.length > 0);
+}
+
+function preflightSlackApproval(input: {
+  approval: SlackChannelApproval | null;
+  installationId: string;
+  orgId: string;
+  channelId: string;
+}): Extract<SlackDestinationDecision, { allowed: false }> | null {
+  if (!input.approval || input.approval.status !== "active" || !input.approval.sharingPolicyAcknowledged) return { allowed: false, reason: "channel_not_approved" };
+  if (input.approval.installationId !== input.installationId || input.approval.orgId !== input.orgId || input.approval.channelId !== input.channelId) return { allowed: false, reason: "channel_binding_mismatch" };
+  return null;
 }
 
 export const SLACK_UNFURL_MAX_LINKS = MAX_LINKS_PER_EVENT;

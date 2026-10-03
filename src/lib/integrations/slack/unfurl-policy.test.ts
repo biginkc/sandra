@@ -62,7 +62,7 @@ describe("slack unfurl policy", () => {
     const pending = authorizeSlackDestination({
       approval: { installationId: "i", orgId: "o", channelId: "C", status: "active", sharingPolicyAcknowledged: true },
       expectedInstallationId: "i", expectedOrgId: "o", expectedTeamId: "T", expectedChannelId: "C", expectedPosterUserId: "U",
-      channel: { id: "C", context_team_id: "T", pending_shared: true, is_channel: true, is_member: true },
+      channel: { id: "C", context_team_id: "T", pending_shared: ["T2"], is_channel: true, is_member: true },
       user: { id: "U", team_id: "T", deleted: false, is_bot: false },
     });
     expect(pending.allowed).toBe(false);
@@ -74,12 +74,42 @@ describe("slack unfurl policy", () => {
 
     await expect(verifySlackDestination({
       token: "xoxb-test",
-      approval: null,
+      approval: { installationId: "i", orgId: "o", channelId: "C", status: "active", sharingPolicyAcknowledged: true },
       installationId: "i",
       orgId: "o",
       teamId: "T",
       channelId: "C",
       posterUserId: "U",
     })).resolves.toEqual({ allowed: false, reason: "slack_authority_unavailable", retryAfterSeconds: 600 });
+  });
+
+  it("rejects unapproved destinations before making Slack authority calls", async () => {
+    slack.channelInfo.mockClear();
+    slack.userInfo.mockClear();
+    await expect(verifySlackDestination({
+      token: "xoxb-test",
+      approval: null,
+      installationId: "i",
+      orgId: "o",
+      teamId: "T",
+      channelId: "C",
+      posterUserId: "U",
+    })).resolves.toEqual({ allowed: false, reason: "channel_not_approved" });
+    expect(slack.channelInfo).not.toHaveBeenCalled();
+    expect(slack.userInfo).not.toHaveBeenCalled();
+  });
+
+  it("turns permanent Slack channel errors into terminal denials", async () => {
+    slack.channelInfo.mockRejectedValueOnce({ data: { error: "channel_not_found" } });
+    slack.userInfo.mockResolvedValueOnce({ user: { id: "U" } });
+    await expect(verifySlackDestination({
+      token: "xoxb-test",
+      approval: { installationId: "i", orgId: "o", channelId: "C", status: "active", sharingPolicyAcknowledged: true },
+      installationId: "i",
+      orgId: "o",
+      teamId: "T",
+      channelId: "C",
+      posterUserId: "U",
+    })).resolves.toEqual({ allowed: false, reason: "slack_channel_not_found" });
   });
 });

@@ -83,12 +83,25 @@ describe("Slack channel approval route", () => {
     expect(mocks.verifyChannel).not.toHaveBeenCalled();
   });
 
+  it("denies an admin because only the owner may authorize channel-wide disclosure", async () => {
+    mocks.memberships.mockResolvedValue([{ user_id: "user-1", org_id: "org-1", role: "admin", access_status: "active" }]);
+    expect((await POST(request(validBody))).status).toBe(403);
+    expect(mocks.verifyChannel).not.toHaveBeenCalled();
+  });
+
   it("persists only after live Slack verification", async () => {
     const response = await POST(request(validBody));
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true, approvalId: "approval-1" });
     expect(mocks.verifyChannel).toHaveBeenCalledWith({ token: "xoxb-secret", teamId: "T123", channelId: "C123" });
     expect(mocks.approve).toHaveBeenCalledWith({ installationId: "installation-1", orgId: "org-1", channelId: "C123", approvedBy: "user-1", sharingPolicyAcknowledged: true });
+  });
+
+  it("denies an owner when live Slack authority rejects the channel", async () => {
+    mocks.verifyChannel.mockResolvedValue({ allowed: false, reason: "channel_sharing_denied" });
+    const response = await POST(request(validBody));
+    expect(response.status).toBe(403);
+    expect(mocks.approve).not.toHaveBeenCalled();
   });
 
   it("returns 503 without exposing provider or database details", async () => {

@@ -65,6 +65,7 @@ describe("oauth/slack/callback route", () => {
     vi.clearAllMocks();
     vi.stubEnv("OAUTH_STATE_SIGNING_SECRET", "state-secret");
     vi.stubEnv("SLACK_CLIENT_ID", "client-1");
+    vi.stubEnv("SLACK_APP_ID", "A123");
     vi.stubEnv("SLACK_CLIENT_SECRET", "secret-1");
     vi.stubEnv("APP_URL", "https://app.example.com");
     mockUser({ id: "user-1" });
@@ -113,6 +114,18 @@ describe("oauth/slack/callback route", () => {
     expect(response.headers.get("location")).toBe(
       "https://app.example.com/settings/integrations?error=state",
     );
+    expect(exchangeSlackCodeMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects an expired preview state before consuming its nonce", async () => {
+    const claims = { userId: "user-1", orgId: "org-1", nonce: "nonce-1", purpose: "slack_installation", issuedAt: 1 };
+    const state = `v2.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
+    verifyOAuthStateMock.mockReturnValueOnce(true).mockReturnValueOnce(false);
+
+    const response = await GET(request(`?code=code-1&state=${encodeURIComponent(state)}`));
+
+    expect(response.headers.get("location")).toBe("https://app.example.com/settings/integrations?error=state");
+    expect(slackInstallationMocks.consumeSlackOAuthNonce).not.toHaveBeenCalled();
     expect(exchangeSlackCodeMock).not.toHaveBeenCalled();
   });
 
@@ -247,5 +260,39 @@ describe("oauth/slack/callback route", () => {
     });
     expect(slackInstallationMocks.upsertSlackInstallation).not.toHaveBeenCalled();
     expect(slackInstallationMocks.upsertSlackAccountLink).not.toHaveBeenCalled();
+  });
+
+  it("rejects returned app identity that does not match the configured Slack app", async () => {
+    const claims = { userId: "user-1", orgId: "org-1", nonce: "nonce-1", purpose: "slack_installation", issuedAt: 1760000000 };
+    const state = `v2.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
+    const membershipBuilder = { select: vi.fn(), eq: vi.fn() };
+    membershipBuilder.select.mockReturnValue(membershipBuilder);
+    let eqCalls = 0;
+    membershipBuilder.eq.mockImplementation(() => {
+      eqCalls += 1;
+      return eqCalls === 2 ? Promise.resolve({ data: [{ org_id: "org-1", user_id: "user-1" }], error: null }) : membershipBuilder;
+    });
+    createClientMock.mockResolvedValue({ auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }) }, from: vi.fn(() => membershipBuilder) } as never);
+    exchangeSlackCodeMock.mockResolvedValueOnce({ botToken: "xoxb-token", botUserId: "B123", appId: "A_OTHER", teamId: "T123", teamName: "Test Team", scopes: [], userToken: null, userId: "U123", userScopes: [] });
+
+    const response = await GET(request(`?code=code-1&state=${encodeURIComponent(state)}`));
+    expect(response.headers.get("location")).toBe("https://app.example.com/settings/integrations?error=callback");
+    expect(slackInstallationMocks.upsertSlackInstallationAndAccountLink).not.toHaveBeenCalled();
+  });
+
+  it("does not follow control-character return paths after preview OAuth", async () => {
+    const claims = { userId: "user-1", orgId: "org-1", nonce: "nonce-1", purpose: "slack_installation", returnPath: "/\t/evil.com", issuedAt: 1760000000 };
+    const state = `v2.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
+    const membershipBuilder = { select: vi.fn(), eq: vi.fn() };
+    membershipBuilder.select.mockReturnValue(membershipBuilder);
+    let eqCalls = 0;
+    membershipBuilder.eq.mockImplementation(() => {
+      eqCalls += 1;
+      return eqCalls === 2 ? Promise.resolve({ data: [{ org_id: "org-1", user_id: "user-1" }], error: null }) : membershipBuilder;
+    });
+    createClientMock.mockResolvedValue({ auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }) }, from: vi.fn(() => membershipBuilder) } as never);
+
+    const response = await GET(request(`?code=code-1&state=${encodeURIComponent(state)}`));
+    expect(response.headers.get("location")).toBe("https://app.example.com/settings/integrations?connected=slack");
   });
 });

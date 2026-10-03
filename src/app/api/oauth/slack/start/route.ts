@@ -36,7 +36,7 @@ export async function GET(request: Request) {
 
     const requestedOrg = query.get("org_id") ?? query.get("orgId") ?? query.get("org");
     const requestedReturnPath = query.get("return_to");
-    const returnPath = requestedReturnPath && isSafeRelativePath(requestedReturnPath) ? requestedReturnPath : null;
+    const returnPath = requestedReturnPath && isSafeRelativePath(requestedReturnPath, appUrl) ? requestedReturnPath : null;
     const memberships = await readActiveMemberships(supabase, user.id);
     const orgId = requestedOrg ?? (memberships.length === 1 ? memberships[0] : null);
     if (!orgId || !memberships.includes(orgId)) throw new ConfigurationError("Slack OAuth start requires one authorized organization");
@@ -66,8 +66,13 @@ export async function GET(request: Request) {
   }
 }
 
-function isSafeRelativePath(value: string): boolean {
-  return value.startsWith("/") && !value.startsWith("//") && !value.includes("\\") && !/^https?:/i.test(value);
+function isSafeRelativePath(value: string, baseUrl: string): boolean {
+  if (!value.startsWith("/") || value.startsWith("//") || value.includes("\\") || /[\u0000-\u001f\u007f]/.test(value) || /%(?:0[0-9a-f]|1[0-9a-f]|7f)/i.test(value) || /^https?:/i.test(value)) return false;
+  try {
+    return new URL(value, baseUrl).origin === new URL(baseUrl).origin;
+  } catch {
+    return false;
+  }
 }
 
 async function readActiveMemberships(supabase: Awaited<ReturnType<typeof createClient>>, userId: string): Promise<string[]> {

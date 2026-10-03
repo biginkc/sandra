@@ -110,7 +110,7 @@ export async function GET(request: Request) {
       });
     }
 
-    const continuation = previewState && claims.returnPath && isSafeRelativePath(claims.returnPath) ? new URL(claims.returnPath, request.url) : settingsUrl("connected=slack");
+    const continuation = previewState && claims.returnPath && isSafeRelativePath(claims.returnPath, appUrl) ? new URL(claims.returnPath, appUrl) : settingsUrl("connected=slack");
     if (continuation.pathname === "/settings/integrations" && !continuation.searchParams.has("connected")) continuation.searchParams.set("connected", "slack");
     return NextResponse.redirect(continuation);
   } catch (error) {
@@ -127,6 +127,11 @@ async function isActiveOrgMember(supabase: Awaited<ReturnType<typeof createClien
   return !!row && row.user_id === userId && row.org_id === orgId && (row.access_status === undefined || row.access_status === null || row.access_status === "active") && !row.deletion_prepared_at && (typeof row.access_expires_at !== "string" || Date.parse(row.access_expires_at) > Date.now());
 }
 
-function isSafeRelativePath(value: string): boolean {
-  return value.startsWith("/") && !value.startsWith("//") && !value.includes("\\") && !/^https?:/i.test(value);
+function isSafeRelativePath(value: string, baseUrl: string): boolean {
+  if (!value.startsWith("/") || value.startsWith("//") || value.includes("\\") || /[\u0000-\u001f\u007f]/.test(value) || /%(?:0[0-9a-f]|1[0-9a-f]|7f)/i.test(value) || /^https?:/i.test(value)) return false;
+  try {
+    return new URL(value, baseUrl).origin === new URL(baseUrl).origin;
+  } catch {
+    return false;
+  }
 }

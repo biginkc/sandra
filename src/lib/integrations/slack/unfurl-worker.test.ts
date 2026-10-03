@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   updateUrl: vi.fn(),
   finish: vi.fn(),
   reschedule: vi.fn(),
+  release: vi.fn(),
   loadData: vi.fn(),
   blocks: vi.fn(),
   unfurl: vi.fn(),
@@ -30,6 +31,7 @@ vi.mock("./unfurl-store", () => ({
   updateSlackJobUrl: mocks.updateUrl,
   finishSlackUnfurlJob: mocks.finish,
   rescheduleSlackUnfurlJob: mocks.reschedule,
+  releaseSlackUnfurlJobClaim: mocks.release,
 }));
 vi.mock("./unfurl-policy", () => ({
   parseSlackLeadUrl: vi.fn((url: string) => ({ ok: true, link: { originalUrl: url, propertyId: "11111111-1111-4111-8111-111111111111", kind: "lead" } })),
@@ -45,6 +47,7 @@ const job = {
   id: "job-1",
   receipt_id: "receipt-1",
   installation_id: "installation-1",
+  installation_version: 1,
   org_id: "org-1",
   team_id: "T123",
   app_id: "A123",
@@ -85,6 +88,7 @@ beforeEach(() => {
   mocks.unfurl.mockResolvedValue({ ok: true });
   mocks.finish.mockResolvedValue(true);
   mocks.reschedule.mockResolvedValue(true);
+  mocks.release.mockResolvedValue(true);
 });
 
 describe("Slack unfurl worker", () => {
@@ -97,7 +101,7 @@ describe("Slack unfurl worker", () => {
   });
 
   it("respects Retry-After values above the exponential backoff cap", async () => {
-    mocks.unfurl.mockRejectedValueOnce({ data: { retry_after: 600 } });
+    mocks.unfurl.mockRejectedValueOnce({ code: "slack_webapi_rate_limited_error", retryAfter: 600 });
     await runSlackUnfurlSweep();
     const call = mocks.reschedule.mock.calls[0][0] as { nextAttemptAt: Date };
     expect(call.nextAttemptAt.getTime()).toBeGreaterThanOrEqual(now + 600_000 - 1_000);
@@ -138,6 +142,24 @@ describe("Slack unfurl worker", () => {
     expect(mocks.finish).toHaveBeenLastCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "noop", errorCode: "channel_sharing_denied" });
   });
 
+  it("cancels permanently revoked Slack identities without retrying", async () => {
+    mocks.verify.mockResolvedValue({ allowed: false, reason: "installation_revoked" });
+    const result = await runSlackUnfurlSweep();
+    expect(result.noops).toBe(1);
+    expect(mocks.reschedule).not.toHaveBeenCalled();
+    expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "cancelled", errorCode: "installation_revoked" });
+  });
+
+  it("cancels a job from an older installation generation", async () => {
+    mocks.installation.mockResolvedValue({
+      installationId: "installation-1", orgId: "org-1", teamId: "T123", appId: "A123", teamName: "BMH", botUserId: "B123", botToken: { reveal: () => "xoxb-secret" }, scopes: ["links:read", "links:write", "channels:read", "groups:read", "users:read"], installationVersion: 2, status: "active",
+    });
+    const result = await runSlackUnfurlSweep();
+    expect(result.noops).toBe(1);
+    expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "noop", errorCode: "installation_unavailable" });
+    expect(mocks.loadData).not.toHaveBeenCalled();
+  });
+
   it("retries transient Slack authority outages before reading private lead data", async () => {
     mocks.verify.mockResolvedValue({ allowed: false, reason: "slack_authority_unavailable", retryAfterSeconds: 600 });
     const result = await runSlackUnfurlSweep();
@@ -153,5 +175,24 @@ describe("Slack unfurl worker", () => {
     }));
     const retry = mocks.reschedule.mock.calls[0][0] as { nextAttemptAt: Date };
     expect(retry.nextAttemptAt.getTime()).toBeGreaterThanOrEqual(now + 600_000 - 1_000);
+  });
+
+  it("releases claims it cannot start before the worker deadline", async () => {
+    const second = { ...job, id: "job-2", claim_token: "claim-2" };
+    mocks.claim.mockResolvedValue([job, second]);
+    let clock = Date.now();
+    const clockSpy = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    mocks.finish.mockImplementationOnce(async () => {
+      clock += 46_000;
+      return true;
+    });
+
+    try {
+      const result = await runSlackUnfurlSweep();
+      expect(result.succeeded).toBe(1);
+      expect(mocks.release).toHaveBeenCalledWith({ jobId: "job-2", claimToken: "claim-2" });
+    } finally {
+      clockSpy.mockRestore();
+    }
   });
 });
