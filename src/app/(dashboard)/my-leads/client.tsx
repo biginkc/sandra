@@ -335,7 +335,7 @@ export function MyLeadsClient({
     action: MyLeadAction;
     row: QueueRow;
     scope: string;
-    focusKey: string;
+    focusGeneration: number;
     callActivityId?: string | null;
   };
   const openingScope = JSON.stringify([member, search]);
@@ -419,6 +419,8 @@ export function MyLeadsClient({
   const [settingsBusy, setSettingsBusy] = useState(false);
   const initialEffect = useRef(Boolean(initialSnapshot && initialKpis));
   const request = useRef(0);
+  const [focusGeneration, setFocusGeneration] = useState(0);
+  const latestFocusGeneration = useRef(0);
   const serverScopeKey = member;
   const previousServerScope = useRef(serverScopeKey);
   const refresh = useCallback(
@@ -458,6 +460,16 @@ export function MyLeadsClient({
                 : null
             : pinResult;
         const result = loaded;
+        // A denied authoritative row is sufficient to remove a stale cached
+        // lead even when the paginated list read failed in the same refresh.
+        if (
+          !result.ok &&
+          pinResult &&
+          pinResult !== "error" &&
+          pinResult.lookup.status === "unavailable" &&
+          pinWanted.current === pinId
+        )
+          applyPin(pinResult);
         if (result.ok) {
           const applied = !background || !reviewingDetails.current;
           if (pinWanted.current === pinId && pin !== undefined)
@@ -559,7 +571,7 @@ export function MyLeadsClient({
     if (
       pendingOpening.current !== opening ||
       activeScope.current !== opening.scope ||
-      latestFocusKey.current !== opening.focusKey
+      latestFocusGeneration.current !== opening.focusGeneration
     )
       return;
     if (lookup === "error") {
@@ -644,7 +656,7 @@ export function MyLeadsClient({
       action: kind,
       row,
       scope: openingScope,
-      focusKey,
+      focusGeneration,
       callActivityId,
     });
   };
@@ -714,7 +726,7 @@ export function MyLeadsClient({
   // that re-renders with the same value is not.
   const focusKey = `${focus?.propertyId ?? ""}|${focus?.notice ?? ""}|${focus?.memberId ?? ""}`;
   const focusPropertyId = focus?.propertyId;
-  const latestFocusKey = useRef(focusKey);
+  const focusNotice = focus?.notice;
   const [target, setTarget] = useState(() => ({
     propertyId: focus?.propertyId ?? null,
     notice: focus?.notice ?? null,
@@ -724,46 +736,57 @@ export function MyLeadsClient({
   const [seenFocusKey, setSeenFocusKey] = useState(focusKey);
   const [clearedForKey, setClearedForKey] = useState<string | null>(null);
   if (seenFocusKey !== focusKey) {
+    const clearAcknowledgement =
+      !focus?.propertyId &&
+      !focus?.notice &&
+      clearedForKey === seenFocusKey;
     setSeenFocusKey(focusKey);
-    setClearedForKey(null);
-    setTarget((previous) => ({
-      propertyId: focus?.propertyId ?? null,
-      notice: focus?.notice ?? null,
-      retryHref: focus?.retryHref,
-      nonce: previous.nonce + 1,
-    }));
-    setOpeningStatus(null);
-    setDialog(null);
-    setCallOptions(null);
-    setPinNotice(null);
-    {
-      const seeded = pinReadFromFocus(focus, snapshot?.snapshotAt ?? "");
-      setPinRead((previous) =>
-        seeded &&
-        previous?.id === seeded.id &&
-        previous.lookup.status === "unavailable" &&
-        seeded.lookup.status !== "found"
-          ? previous
-          : seeded,
-      );
-    }
-    if (focus?.propertyId) {
-      // A deep link always opens its rep's queue unfiltered.
-      if (focus.memberId && focus.memberId !== member)
-        setMember(focus.memberId);
-      setSearch("");
+    if (!clearAcknowledgement) setClearedForKey(null);
+    if (!clearAcknowledgement) {
+      setFocusGeneration((generation) => generation + 1);
+      setTarget((previous) => ({
+        propertyId: focus?.propertyId ?? null,
+        notice: focus?.notice ?? null,
+        retryHref: focus?.retryHref,
+        nonce: previous.nonce + 1,
+      }));
+      setOpeningStatus(null);
+      setDialog(null);
+      setCallOptions(null);
+      setPinNotice(null);
+      {
+        const seeded = pinReadFromFocus(focus, snapshot?.snapshotAt ?? "");
+        setPinRead((previous) =>
+          seeded &&
+          previous?.id === seeded.id &&
+          previous.lookup.status === "unavailable" &&
+          seeded.lookup.status !== "found"
+            ? previous
+            : seeded,
+        );
+      }
+      if (focus?.propertyId) {
+        // A deep link always opens its rep's queue unfiltered.
+        if (focus.memberId && focus.memberId !== member)
+          setMember(focus.memberId);
+        setSearch("");
+      }
     }
   }
   useLayoutEffect(() => {
-    latestFocusKey.current = focusKey;
+    const clearAcknowledgement =
+      !focusPropertyId &&
+      !focusNotice &&
+      clearedForKey !== null;
+    latestFocusGeneration.current = focusGeneration;
     // A focus transition invalidates every refresh that started for the prior
     // target, including same-member transitions where openingScope is unchanged.
     if (focusPropertyId) ++request.current;
-    pendingOpening.current = null;
-  }, [openingScope, focusKey, focusPropertyId]);
+    if (!clearAcknowledgement) pendingOpening.current = null;
+  }, [openingScope, focusKey, focusGeneration, focusPropertyId, focusNotice, clearedForKey]);
   useEffect(() => {
     setOpeningStatus(null);
-  }, [openingScope, focusKey]);
+  }, [openingScope, focusGeneration]);
   useEffect(() => {
     pinWanted.current = target.propertyId;
   }, [target.propertyId]);
@@ -773,6 +796,9 @@ export function MyLeadsClient({
     actionPin.current = pinRead;
   }, [seenFocusKey]);
   const clearFocus = () => {
+    cancelOpening();
+    setDialog(null);
+    setCallOptions(null);
     if (target.propertyId || target.notice)
       setTarget((previous) => ({
         propertyId: null,

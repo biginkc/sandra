@@ -328,6 +328,16 @@ describe("MyLeadsClient pinned deep-link row", () => {
     await waitFor(() => expect(leadEls("loaded-1")).toHaveLength(1))
   })
 
+  it("applies an authoritative denial even when the list refresh fails", async () => {
+    render(ui(focusOn(loaded), snap([loaded], 25)))
+    mocks.loadMyLeads.mockResolvedValue({ ok: false, message: "queue unavailable" })
+    mocks.loadMyLeadRow.mockResolvedValue(unavailable("other_rep"))
+    await refreshNow()
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("assigned to another rep"))
+    expect(leadEls("loaded-1")).toHaveLength(0)
+    expect(screen.queryByTestId("my-lead-actions-loaded-1")).not.toBeInTheDocument()
+  })
+
   it("cancels a pending workflow when a background lookup denies its property", async () => {
     const user = userEvent.setup()
     let releaseOpening!: (value: unknown) => void
@@ -380,6 +390,40 @@ describe("MyLeadsClient pinned deep-link row", () => {
     mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([loaded, other], 25), kpis, drips: noDrips() })
     await refreshNow()
     await waitFor(() => expect(screen.getByText("This lead is assigned to another rep.")).toBeInTheDocument())
+    expect(screen.getByRole("dialog", { name: "Ready to make an offer" })).toBeInTheDocument()
+  })
+
+  it("keeps a new-scope opening through the cleared deep-link acknowledgement", async () => {
+    const user = userEvent.setup()
+    const other = row("loaded-2", "2 Other Lane", { stage: "contacted", sharedStatus: "contacted" })
+    let releaseOpening!: (value: unknown) => void
+    mocks.loadMyLeadRow.mockImplementation(async ({ propertyId }: { propertyId: string }) => {
+      if (propertyId === "loaded-2") return new Promise((resolve) => { releaseOpening = resolve })
+      return found(loaded)
+    })
+    const { rerender } = render(ui(focusOn(loaded), snap([loaded, other], 25)))
+
+    fireEvent.change(screen.getByLabelText("Search My Leads"), { target: { value: "other" } })
+    await user.click(screen.getByRole("button", { name: "Show details for 2 Other Lane" }))
+    await user.click(within(screen.getByTestId("my-lead-actions-loaded-2")).getByRole("button", { name: "Ready to make an offer" }))
+    expect(screen.getByText("Loading current lead…")).toBeVisible()
+
+    rerender(ui(null, snap([loaded, other], 25)))
+    await act(async () => releaseOpening(found(other)))
+    await screen.findByRole("dialog", { name: "Ready to make an offer" })
+  })
+
+  it("keeps a new-scope dialog through the cleared deep-link acknowledgement", async () => {
+    const user = userEvent.setup()
+    const other = row("loaded-2", "2 Other Lane", { stage: "contacted", sharedStatus: "contacted" })
+    mocks.loadMyLeadRow.mockResolvedValue(found(other))
+    const { rerender } = render(ui(focusOn(loaded), snap([loaded, other], 25)))
+
+    fireEvent.change(screen.getByLabelText("Search My Leads"), { target: { value: "other" } })
+    await user.click(screen.getByRole("button", { name: "Show details for 2 Other Lane" }))
+    await user.click(within(screen.getByTestId("my-lead-actions-loaded-2")).getByRole("button", { name: "Ready to make an offer" }))
+    await screen.findByRole("dialog", { name: "Ready to make an offer" })
+    rerender(ui(null, snap([loaded, other], 25)))
     expect(screen.getByRole("dialog", { name: "Ready to make an offer" })).toBeInTheDocument()
   })
 
