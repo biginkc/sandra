@@ -2,7 +2,7 @@ import { LeadRepSmsComposer } from "./rep-sms-composer";
 import Link from "next/link";
 import { myLeadsHref } from "@/lib/my-leads/links";
 import { MY_LEAD_ROW_REASON_COPY } from "@/lib/my-leads/row-reasons";
-import { LogFollowUpButton } from "./log-follow-up-button";
+import { LogFollowUpProvider, LogFollowUpTrigger } from "./log-follow-up-button";
 import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import { ChevronLeft, ChevronRight, ExternalLink } from "lucide-react";
@@ -723,12 +723,7 @@ export default async function LeadDetailPage({
       >
         Open in My Leads
       </Link>
-      <fieldset disabled={training} inert={training || undefined} className="contents"><LogFollowUpButton
-        propertyId={lead.id}
-        propertyLabel={lead.address}
-        assigneeId={lead.assigned_user_id ?? null}
-        disabledReason={logFollowUpDisabledReason}
-      /></fieldset>
+      <fieldset disabled={training} inert={training || undefined} className="contents"><LogFollowUpTrigger /></fieldset>
       <fieldset disabled={training} inert={training || undefined} className="contents"><HaveNormaCallButton
         propertyId={lead.id}
         sellerName={homeownerName}
@@ -814,6 +809,13 @@ export default async function LeadDetailPage({
 
   return (
     <Page className="gap-0 p-0">
+      {/* Above the hero: the hero re-parents its actions when its image falls back, which remounts them. */}
+      <LogFollowUpProvider
+        propertyId={lead.id}
+        propertyLabel={lead.address}
+        assigneeId={lead.assigned_user_id ?? null}
+        disabledReason={logFollowUpDisabledReason}
+      >
       <LeadOutcomeProvider>
       <LeadMediaHero
         media={mediaPresentation}
@@ -1282,6 +1284,7 @@ export default async function LeadDetailPage({
         </div>
       </section>
       </LeadOutcomeProvider>
+      </LogFollowUpProvider>
     </Page>
   );
 }

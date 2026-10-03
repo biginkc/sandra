@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
+import { createContext, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
 import { useRouter } from "next/navigation"
 
 import { Button } from "@/components/ui/button"
@@ -20,12 +20,21 @@ type Props = {
   disabledReason: string | null
 }
 
+type LogFollowUp = { open: () => void; busy: boolean; message: string | null; disabledReason: string | null; hydrated: boolean }
+const LogFollowUpContext = createContext<LogFollowUp | null>(null)
+
 /**
- * Opens the My Leads attempt dialog in place. The dialog, idempotency and
- * recovery behaviour are the shared My Leads workflow, so a save here is the same
- * command a save there would be.
+ * Opens the My Leads attempt dialog in place.
+ *
+ * The state (opening, busy, message) and the dialog live in this PROVIDER, which sits ABOVE the
+ * lead hero. The hero re-parents its action buttons when its image falls back (Street View to
+ * aerial to flat), which remounts the button; state held in the button was lost with it, so a
+ * lookup that finished (or an open dialog) silently vanished. A remounted button now just
+ * re-reads this state.
+ * The dialog, idempotency and recovery behaviour are the shared My Leads workflow, so a save
+ * here is the same command a save there would be.
  */
-export function LogFollowUpButton({ propertyId, propertyLabel, assigneeId, disabledReason }: Props) {
+export function LogFollowUpProvider({ propertyId, propertyLabel, assigneeId, disabledReason, children }: Props & { children?: ReactNode }) {
   const router = useRouter()
   // Server markup and the pre-hydration client render are disabled, so a click that lands
   // before React attaches its handler can never be silently dropped. The label is unchanged.
@@ -96,16 +105,10 @@ export function LogFollowUpButton({ propertyId, propertyLabel, assigneeId, disab
     }
   }
 
+  const value: LogFollowUp = { open: () => void open(), busy, message, disabledReason, hydrated }
   return (
-    <>
-      <Button type="button" variant="outline" size="sm" data-testid="log-follow-up-attempt" disabled={Boolean(disabledReason) || busy || !hydrated} aria-busy={busy || undefined}
-        title={disabledReason ?? undefined} onClick={() => void open()}>
-        {busy ? "Opening…" : "Log follow-up"}
-      </Button>
-      {busy && <span role="status" data-testid="log-follow-up-loading" className="text-xs text-muted-foreground">Loading current lead…</span>}
-      {(disabledReason || message) && (
-        <span role="status" data-testid="log-follow-up-note" className="text-xs text-muted-foreground">{disabledReason ?? message}</span>
-      )}
+    <LogFollowUpContext.Provider value={value}>
+      {children}
       <WorkflowRecoveryContext.Provider value={workflow.recoveryValue}>
         {opening && (
           <AcquisitionAttemptDialog
@@ -123,6 +126,34 @@ export function LogFollowUpButton({ propertyId, propertyLabel, assigneeId, disab
           />
         )}
       </WorkflowRecoveryContext.Provider>
+    </LogFollowUpContext.Provider>
+  )
+}
+
+/** The button only reads the provider's state, so remounting it (a hero re-parent) loses nothing. */
+export function LogFollowUpTrigger() {
+  const state = useContext(LogFollowUpContext)
+  if (!state) throw new Error("LogFollowUpTrigger must render inside LogFollowUpProvider")
+  const { open, busy, message, disabledReason, hydrated } = state
+  return (
+    <>
+      <Button type="button" variant="outline" size="sm" data-testid="log-follow-up-attempt" disabled={Boolean(disabledReason) || busy || !hydrated} aria-busy={busy || undefined}
+        title={disabledReason ?? undefined} onClick={open}>
+        {busy ? "Opening…" : "Log follow-up"}
+      </Button>
+      {busy && <span role="status" data-testid="log-follow-up-loading" className="text-xs text-muted-foreground">Loading current lead…</span>}
+      {(disabledReason || message) && (
+        <span role="status" data-testid="log-follow-up-note" className="text-xs text-muted-foreground">{disabledReason ?? message}</span>
+      )}
     </>
+  )
+}
+
+/** Standalone form (own provider): fine anywhere the surrounding tree never re-parents it. */
+export function LogFollowUpButton(props: Props) {
+  return (
+    <LogFollowUpProvider {...props}>
+      <LogFollowUpTrigger />
+    </LogFollowUpProvider>
   )
 }
