@@ -522,6 +522,22 @@ describe("MyLeadsClient pinned deep-link row", () => {
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
     })
 
+    it("a first save the server rejects as invalid is not frozen: a corrected save succeeds", async () => {
+      const user = userEvent.setup()
+      mocks.submitMyLeadCommand
+        .mockResolvedValueOnce({ ok: false, answered: true, certainty: "unknown", message: "The update could not be saved. Check the fields and retry." })
+        .mockResolvedValueOnce({ ok: true })
+      render(ui(null, snap([loaded], 25)))
+      await openContract(user)
+      await user.click(screen.getByRole("button", { name: "Record contract" }))
+      expect(await screen.findByText("The update could not be saved. Check the fields and retry.")).toBeInTheDocument()
+      expect(screen.queryByRole("button", { name: "Reconcile saved change" })).toBeNull()
+      fireEvent.change(screen.getByLabelText("Signed at"), { target: { value: "2026-09-11T09:00" } })
+      await user.click(screen.getByRole("button", { name: "Record contract" }))
+      await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2))
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    })
+
     it("a server action that never answers ends in the reconcile state after the save timeout", async () => {
       const user = userEvent.setup({ delay: null })
       mocks.submitMyLeadCommand.mockImplementation(() => new Promise(() => undefined))

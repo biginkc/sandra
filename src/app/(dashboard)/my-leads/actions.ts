@@ -42,6 +42,8 @@ export async function loadMyLeadsStage(input:{memberId:string;search:string;stag
 const viewerFailure=(error:unknown)=>(error as {code?:string})?.code==='UNAUTHENTICATED'
   ? failure('unknown','Your session expired. Sign in again, then Reconcile.','UNAUTHENTICATED' as const)
   : failure('unknown','Sign in with an active organization before updating a lead.');
+/** Marks a failure built from an RPC error RESPONSE: the call reached Postgres and rolled back. Never set for transport failures, thrown calls or missing confirmation. */
+const ans=<T extends object>(failureResult:T)=>({...failureResult,answered:true as const});
 class ReceiptLookupError extends Error {}
 const ALREADY_SAVED='This was already saved. Refresh to see it.';
 type Certainty='rejected'|'unknown';
@@ -66,11 +68,11 @@ export async function submitMyLeadHandoffDrip(input:{memberId:string;propertyId:
   const {data,error}=rpc;
   if(error) {
     const message=error.message??'';
-    if(named(message,['IDEMPOTENCY_CONFLICT'])) return failure('unknown',ALREADY_SAVED,'IDEMPOTENCY_CONFLICT' as const);
-    if(named(message,['FORBIDDEN'])) return failure('unknown','This lead is unavailable. Refresh and try again.','FORBIDDEN' as const);
-    if(named(message,['STALE_STATE','STALE_ASSIGNMENT'])) return failure('rejected','This lead changed. Refresh before trying again.','STALE_STATE' as const);
-    if(named(message,REJECTED_AFTER_LOOKUP)) return failure('rejected','This lead is unavailable. Refresh and try again.');
-    return failure('unknown','Could not save the handoff outcome. Please retry.');
+    if(named(message,['IDEMPOTENCY_CONFLICT'])) return ans(failure('unknown',ALREADY_SAVED,'IDEMPOTENCY_CONFLICT' as const));
+    if(named(message,['FORBIDDEN'])) return ans(failure('unknown','This lead is unavailable. Refresh and try again.','FORBIDDEN' as const));
+    if(named(message,['STALE_STATE','STALE_ASSIGNMENT'])) return ans(failure('rejected','This lead changed. Refresh before trying again.','STALE_STATE' as const));
+    if(named(message,REJECTED_AFTER_LOOKUP)) return ans(failure('rejected','This lead is unavailable. Refresh and try again.'));
+    return ans(failure('unknown','Could not save the handoff outcome. Please retry.'));
   }
   if(data?.ok!==true) return failure('unknown','The update was not confirmed. Retry with the same form.');
   // The RPC committed. Nothing below may turn this into a failure.
@@ -159,12 +161,13 @@ export async function submitMyLeadCommand(command:keyof typeof commands,input:Re
   if(error) {
     const message=error.message??'';
     // A receipt exists for this key with a different request: the save already went through.
-    if(named(message,['IDEMPOTENCY_CONFLICT'])) return failure('unknown',ALREADY_SAVED,'IDEMPOTENCY_CONFLICT' as const);
-    if(named(message,['FORBIDDEN'])) return failure('unknown','This lead is unavailable or you no longer have access. Refresh to check access. Your draft is retained.','FORBIDDEN' as const);
-    if(named(message,['STALE_STATE','STALE_ASSIGNMENT'])||message.includes('STALE_')) return failure('rejected','This lead changed. Refresh before trying again.','STALE_STATE' as const);
+    if(named(message,['IDEMPOTENCY_CONFLICT'])) return ans(failure('unknown',ALREADY_SAVED,'IDEMPOTENCY_CONFLICT' as const));
+    if(named(message,['UNAUTHENTICATED'])) return ans(failure('unknown','Your session expired. Sign in again, then Reconcile.','UNAUTHENTICATED' as const));
+    if(named(message,['FORBIDDEN'])) return ans(failure('unknown','This lead is unavailable or you no longer have access. Refresh to check access. Your draft is retained.','FORBIDDEN' as const));
+    if(named(message,['STALE_STATE','STALE_ASSIGNMENT'])||message.includes('STALE_')) return ans(failure('rejected','This lead changed. Refresh before trying again.','STALE_STATE' as const));
     const certainty:Certainty=named(message,REJECTED_AFTER_LOOKUP)?'rejected':'unknown';
-    if(message.includes('RECORDING_REQUIRED')) return failure(certainty,'Attach the DialPad recording link before saving this call.');
-    return failure(certainty,message.includes('MOTIVATION')?'Specify motivation or choose No motivation provided.':message.includes('PENDING_OFFER')?'Resolve the current pending offer first.':message.includes('RECIPIENT')?'The handoff recipient is unavailable. Ask the owner to update settings.':'The update could not be saved. Check the fields and retry.');
+    if(message.includes('RECORDING_REQUIRED')) return ans(failure(certainty,'Attach the DialPad recording link before saving this call.'));
+    return ans(failure(certainty,message.includes('MOTIVATION')?'Specify motivation or choose No motivation provided.':message.includes('PENDING_OFFER')?'Resolve the current pending offer first.':message.includes('RECIPIENT')?'The handoff recipient is unavailable. Ask the owner to update settings.':'The update could not be saved. Check the fields and retry.'));
   }
   if(!data||typeof data!=='object'||Array.isArray(data)||data.ok!==true) return failure('unknown','The update was not confirmed. Retry with the same form.');
   // The RPC committed. Nothing below may turn this into a failure.

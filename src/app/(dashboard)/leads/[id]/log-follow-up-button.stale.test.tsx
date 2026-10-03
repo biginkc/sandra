@@ -166,5 +166,23 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
     await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2))
     expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toEqual(mocks.submitMyLeadCommand.mock.calls[0][1])
   })
+
+  it("a first save the server rejects as invalid shows its error, stays editable and unfrozen, and a corrected save succeeds", async () => {
+    const user = userEvent.setup()
+    mocks.submitMyLeadCommand
+      .mockResolvedValueOnce({ ok: false, answered: true, certainty: "unknown", message: "The update could not be saved. Check the fields and retry." })
+      .mockResolvedValueOnce({ ok: true, attemptRecorded: true })
+    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} />)
+    await user.click(screen.getByRole("button", { name: "Log follow-up" }))
+    await fillAndSave(user)
+    expect(await screen.findByText("The update could not be saved. Check the fields and retry.")).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Reconcile saved change" })).toBeNull()
+    expect(screen.getByLabelText("Note (optional)")).toBeEnabled()
+    fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-11T08:00" } })
+    await user.click(screen.getByRole("button", { name: "Save attempt" }))
+    await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2))
+    expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({ idempotencyKey: (mocks.submitMyLeadCommand.mock.calls[0][1] as { idempotencyKey: string }).idempotencyKey })
+    expect(await screen.findByRole("button", { name: "Done without a drip" })).toBeInTheDocument()
+  })
 })
 

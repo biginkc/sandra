@@ -29,7 +29,7 @@ it('guards and saves the outcome in one RPC before starting the drip',async()=>{
 
 it('does not enroll when reassignment wins the race at the write boundary',async()=>{
   mocks.rpc.mockResolvedValue({data:null,error:{message:'STALE_ASSIGNMENT'}});
-  expect(await submitMyLeadHandoffDrip(input)).toEqual({ok:false,certainty:'rejected',code:'STALE_STATE',message:'This lead changed. Refresh before trying again.'});
+  expect(await submitMyLeadHandoffDrip(input)).toEqual({ok:false,answered:true,certainty:'rejected',code:'STALE_STATE',message:'This lead changed. Refresh before trying again.'});
   expect(mocks.start).not.toHaveBeenCalled();
 });
 

@@ -60,6 +60,8 @@ type Submission = {
   memberId: string | null
   /** A request for this key is in flight, so late results from older requests are ignored. */
   inFlight: boolean
+  /** The save is confirmed committed: late answers from older requests must change nothing. */
+  committed?: boolean
 }
 
 /** Which server operation a command reaches; frozen with the key at the first send. */
@@ -92,7 +94,7 @@ const UNCONFIRMED_MESSAGE = "Sandra could not confirm this save. The original re
 const ROUTE_CHANGED_MESSAGE = "This change would save a different kind of update than the one already started. Cancel and start over to make it."
 const SAVED_EARLIER_MESSAGE = "Saved earlier. Your update is recorded."
 
-type Failure = { message: string; code?: string; certainty?: "rejected" | "unknown" }
+type Failure = { message: string; code?: string; certainty?: "rejected" | "unknown"; answered?: boolean }
 
 export type UseAttemptWorkflowOptions<O extends AttemptOpening> = {
   /** The currently open dialog, or null. */
@@ -141,6 +143,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
 
   /** The committed path shared by a normal answer, a late answer and an already-saved Refresh. */
   const finishCommitted = async (current: O, input: Record<string, Json>, result: Extract<CommandResult, { ok: true }>) => {
+    if (submission.current?.opening === current) submission.current.committed = true
     const dripFailure = "dripFailure" in result && result.dripFailure ? `Outcome saved. Drip not started: ${result.dripFailure}` : null
     setRecovery(null)
     const committed: AttemptCommitted<O> = { opening: current, input, result, dripFailure }
@@ -232,12 +235,16 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       if (activeOpening.current === opening) setRecovery({ opening, message: message ?? UNCONFIRMED_MESSAGE, blocked: false, busy: false, reconciliation: { command, payload: state.payload ?? input } })
     }
     const applyFailure = (failure: Failure, late: boolean) => {
+      // A save that is already confirmed committed is not changed by a late, older answer.
+      if (state.committed) return
       if (failure.code === "IDEMPOTENCY_CONFLICT") {
         // A receipt exists for this key, so the save already went through. Never loop,
         // never rotate the key: block with plain copy until a lookup succeeds.
         state.alreadySaved = true
         if (activeOpening.current === opening) setRecovery({ opening, message: failure.message, blocked: true, busy: false })
-      } else if (failure.certainty === "rejected") {
+      } else if (failure.certainty === "rejected" || (failure.answered && !state.uncertain)) {
+        // (An answered failure on a first send, with nothing frozen, could not have committed: no
+        // earlier send under this key exists. It is shown as the server's field error, not frozen.)
         // The server proved nothing committed under this key. An unresolved replay is
         // over: drop the frozen payload so refreshed preconditions build a NEW payload on
         // the next save. The key and route are KEPT: no receipt exists after a rollback, so
@@ -277,7 +284,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
         // The original may still answer later. With no replay in flight, a late ok is a
         // committed save and a late definite rejection releases the request as usual.
         void call.then((late) => {
-          if (submission.current !== state || state.inFlight || activeOpening.current !== opening) return
+          if (submission.current !== state || state.committed || state.inFlight || activeOpening.current !== opening) return
           if (late.ok) void finishCommitted(opening, input, late)
           else applyFailure(late as Failure, true)
         }, () => undefined)

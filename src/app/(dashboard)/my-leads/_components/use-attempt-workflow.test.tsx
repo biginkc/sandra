@@ -409,13 +409,14 @@ describe("useAttemptWorkflow", () => {
           await pending
         })
         await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "original" }) }) // replay: STALE, released
-        await act(async () => { answer({ ok: true, attemptRecorded: true }) }) // the original commits late
-        expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
         await act(async () => { hook.result.current.recoveryValue?.refresh() })
-        await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "edited" }) })
+        await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "edited" }) }) // original committed meanwhile: conflict
         expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, message: "This was already saved. Refresh to see it." })
-        expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
         expect(sentInput(2).idempotencyKey).toBe(sentInput(0).idempotencyKey)
+        expect(handlers.onCommitted).not.toHaveBeenCalled()
+        await act(async () => { answer({ ok: true, attemptRecorded: true }) }) // the original's answer finally arrives
+        expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
+        expect(hook.result.current.recoveryValue).toBeNull()
       } finally { vi.useRealTimers() }
     })
 
@@ -454,7 +455,7 @@ describe("useAttemptWorkflow", () => {
       expect(sentInput(1)).toEqual(sentInput(0))
     })
 
-    it("the frozen route and member stay with the key: a changed member prop does not redirect the replay", async () => {
+    it("a replay of a frozen handoff is the identical request (member, sequence, key); a changed member prop is not exercised here", async () => {
       actions.submitMyLeadHandoffDrip
         .mockRejectedValueOnce(new Error("network"))
         .mockResolvedValueOnce({ ok: true })
@@ -462,6 +463,70 @@ describe("useAttemptWorkflow", () => {
       await act(async () => { await hook.result.current.submit({ sequenceId: "seq-1" }).catch(() => undefined) })
       await act(async () => { await hook.result.current.submit({ sequenceId: "seq-1" }) })
       expect(actions.submitMyLeadHandoffDrip.mock.calls[1][0]).toEqual(actions.submitMyLeadHandoffDrip.mock.calls[0][0])
+    })
+
+    const invalid = { ok: false, answered: true, certainty: "unknown", message: "The update could not be saved. Check the fields and retry." }
+
+    it("a first save the server answers with a validation error is not frozen: the form stays editable and a corrected save succeeds", async () => {
+      actions.submitMyLeadCommand.mockResolvedValueOnce(invalid).mockResolvedValueOnce({ ok: true, attemptRecorded: true })
+      const { hook, handlers } = setup(opening("log-attempt", row({ queueVersion: 1 })))
+      let first: unknown
+      await act(async () => { first = await hook.result.current.submit({ outcome: "reached", occurredAt: "future" }) })
+      expect(first).toMatchObject({ ok: false, message: invalid.message })
+      expect(hook.result.current.recoveryValue?.reconciliation).toBeUndefined()
+      await act(async () => { await hook.result.current.submit({ outcome: "reached", occurredAt: "corrected" }) })
+      expect(sentInput(1).occurredAt).toBe("corrected")
+      expect(sentInput(1).idempotencyKey).toBe(sentInput(0).idempotencyKey)
+      expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
+    })
+
+    it("the same validation error during a frozen replay stays frozen (strict allow-list)", async () => {
+      actions.submitMyLeadCommand.mockRejectedValueOnce(new Error("network")).mockResolvedValueOnce(invalid)
+      const { hook } = setup(opening("log-attempt", row({ queueVersion: 1 })))
+      await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "original" }).catch(() => undefined) })
+      await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "edited" }) })
+      expect(hook.result.current.recoveryValue?.reconciliation).toMatchObject({ payload: { note: "original" } })
+    })
+
+    it("a late STALE after a replay committed changes nothing: no release, no block", async () => {
+      vi.useFakeTimers()
+      try {
+        let lateAnswer!: (value: unknown) => void
+        actions.submitMyLeadCommand
+          .mockImplementationOnce(() => new Promise((resolve) => { lateAnswer = resolve }))
+          .mockResolvedValueOnce({ ok: true, duplicate: true, attemptRecorded: true })
+        const { hook, handlers } = setup(opening("log-attempt", row({ queueVersion: 1 })))
+        await act(async () => {
+          const pending = hook.result.current.submit({ outcome: "reached", note: "original" }).then(() => undefined, () => undefined)
+          await vi.advanceTimersByTimeAsync(25_001)
+          await pending
+        })
+        await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "original" }) })
+        expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
+        await act(async () => { lateAnswer({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "stale" }) })
+        expect(hook.result.current.recoveryValue).toBeNull()
+        expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
+      } finally { vi.useRealTimers() }
+    })
+
+    it("a late ok after a replay committed does not run the committed path twice", async () => {
+      vi.useFakeTimers()
+      try {
+        let lateAnswer!: (value: unknown) => void
+        actions.submitMyLeadCommand
+          .mockImplementationOnce(() => new Promise((resolve) => { lateAnswer = resolve }))
+          .mockResolvedValueOnce({ ok: true, duplicate: true, attemptRecorded: true })
+        const { hook, handlers } = setup(opening("log-attempt", row({ queueVersion: 1 })))
+        await act(async () => {
+          const pending = hook.result.current.submit({ outcome: "reached" }).then(() => undefined, () => undefined)
+          await vi.advanceTimersByTimeAsync(25_001)
+          await pending
+        })
+        await act(async () => { await hook.result.current.submit({ outcome: "reached" }) })
+        await act(async () => { lateAnswer({ ok: true, attemptRecorded: true }) })
+        expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
+        await vi.waitFor(() => expect(handlers.onSettled).toHaveBeenCalledTimes(1))
+      } finally { vi.useRealTimers() }
     })
   })
 })
