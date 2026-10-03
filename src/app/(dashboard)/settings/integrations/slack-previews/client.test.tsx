@@ -22,6 +22,7 @@ function installation(overrides: Partial<{
   appId: string;
   status: "active" | "revoked";
   currentVersion: number;
+  policyMode: "legacy" | "eligible_internal_channels" | "disabled";
   policyEnabled: boolean;
   accountLinked: boolean;
 }> = {}) {
@@ -31,6 +32,7 @@ function installation(overrides: Partial<{
     appId: "A123456",
     status: "active" as const,
     currentVersion: 2,
+    policyMode: "disabled" as const,
     policyEnabled: false,
     accountLinked: true,
     ...overrides,
@@ -101,7 +103,7 @@ describe("SlackPreviewsClient", () => {
   it("renders an enabled policy and allows an owner to disable it", async () => {
     const user = userEvent.setup();
     fetchMock.mockResolvedValueOnce(response(policyResponse({
-      installations: [installation({ policyEnabled: true })],
+      installations: [installation({ policyMode: "eligible_internal_channels", policyEnabled: true })],
     })));
     fetchMock.mockResolvedValueOnce(response({ ok: true, mode: "disabled", policyRevision: 5 }));
 
@@ -109,6 +111,31 @@ describe("SlackPreviewsClient", () => {
     const enabled = await screen.findByRole("switch", { name: "Enable Slack lead previews" });
     expect(enabled).toBeChecked();
     await user.click(enabled);
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({
+      installationId: "installation-1",
+      orgId: "org-1",
+      enabled: false,
+      sharingPolicyAcknowledged: false,
+    });
+    expect(await screen.findByText("Slack lead previews disabled.")).toBeVisible();
+    expect(enabled).not.toBeChecked();
+  });
+
+  it("shows legacy previews as automatic sharing off and can disable them explicitly", async () => {
+    const user = userEvent.setup();
+    fetchMock.mockResolvedValueOnce(response(policyResponse({
+      installations: [installation({ policyMode: "legacy" })],
+    })));
+    fetchMock.mockResolvedValueOnce(response({ ok: true, mode: "disabled", policyRevision: 6 }));
+    render(<SlackPreviewsClient />);
+
+    const enabled = await screen.findByRole("switch", { name: "Enable Slack lead previews" });
+    expect(enabled).not.toBeChecked();
+    expect(screen.getByText(/Legacy previews remain limited to Slack channels that were previously approved/i)).toBeVisible();
+    expect(screen.getByText(/Automatic sharing is currently off/i)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Disable all previews" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({
@@ -200,7 +227,7 @@ describe("SlackPreviewsClient", () => {
   it("does not show disabled after the server returns enabled for a disable request", async () => {
     const user = userEvent.setup();
     fetchMock.mockResolvedValueOnce(response(policyResponse({
-      installations: [installation({ policyEnabled: true })],
+      installations: [installation({ policyMode: "eligible_internal_channels", policyEnabled: true })],
     })));
     fetchMock.mockResolvedValueOnce(response({ ok: true, mode: "eligible_internal_channels", policyRevision: 4 }));
     render(<SlackPreviewsClient />);

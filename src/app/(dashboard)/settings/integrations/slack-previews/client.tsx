@@ -24,6 +24,7 @@ type SlackPreviewInstallation = {
   appId: string;
   status: "active" | "revoked";
   currentVersion: number;
+  policyMode: "legacy" | "eligible_internal_channels" | "disabled";
   policyEnabled: boolean;
   accountLinked: boolean;
 };
@@ -49,13 +50,15 @@ function parsePolicyResponse(body: unknown): SlackPreviewData {
   const installations = envelope.installations.flatMap((candidate) => {
     if (!isRecord(candidate) || typeof candidate.id !== "string" || (candidate.teamName !== null && typeof candidate.teamName !== "string") || typeof candidate.appId !== "string" || typeof candidate.currentVersion !== "number" || typeof candidate.policyEnabled !== "boolean" || typeof candidate.accountLinked !== "boolean") return [];
     const status = candidate.status === "active" || candidate.status === "revoked" ? candidate.status : null;
-    if (!status) return [];
+    const policyMode = candidate.policyMode === "legacy" || candidate.policyMode === "eligible_internal_channels" || candidate.policyMode === "disabled" ? candidate.policyMode : null;
+    if (!status || !policyMode) return [];
     return [{
       id: candidate.id,
       teamName: candidate.teamName,
       appId: candidate.appId,
       status,
       currentVersion: candidate.currentVersion,
+      policyMode,
       policyEnabled: candidate.policyEnabled,
       accountLinked: candidate.accountLinked,
     } satisfies SlackPreviewInstallation];
@@ -133,7 +136,8 @@ export function SlackPreviewsClient({ orgId = null }: { orgId?: string | null })
 
   const installation = data.installations.find((candidate) => candidate.id === selectedInstallationId) ?? null;
   const connected = installation?.status === "active";
-  const enabled = installation?.policyEnabled === true;
+  const legacy = installation?.policyMode === "legacy";
+  const enabled = installation?.policyMode === "eligible_internal_channels";
   const acknowledged = installation ? acknowledgedByInstallation[installation.id] ?? installation.policyEnabled : false;
   const canChange = data.canManage && connected && !saving;
 
@@ -166,7 +170,7 @@ export function SlackPreviewsClient({ orgId = null }: { orgId?: string | null })
       const policyEnabled = mode === "eligible_internal_channels";
       setData((current) => current ? {
         ...current,
-        installations: current.installations.map((candidate) => candidate.id === installation.id ? { ...candidate, policyEnabled } : candidate),
+        installations: current.installations.map((candidate) => candidate.id === installation.id ? { ...candidate, policyMode: mode, policyEnabled } : candidate),
       } : current);
       if (nextEnabled) setAcknowledgedByInstallation((current) => ({ ...current, [installation.id]: true }));
       setNotice({ kind: "success", text: nextEnabled ? "Slack lead previews enabled." : "Slack lead previews disabled." });
@@ -214,16 +218,25 @@ export function SlackPreviewsClient({ orgId = null }: { orgId?: string | null })
       <Card>
         <CardHeader>
           <CardTitle>Workspace sharing</CardTitle>
-          <CardDescription>Enable previews wherever Slack can verify an eligible internal channel. Direct messages and channels with unverifiable sharing stay excluded.</CardDescription>
+          <CardDescription>{legacy ? "Legacy previews remain limited to Slack channels that were previously approved. Automatic sharing is off until you explicitly enable it." : "Enable previews wherever Slack can verify an eligible internal channel. Direct messages and channels with unverifiable sharing stay excluded."}</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-5">
           <label className="flex items-start gap-3 text-sm">
             <input type="checkbox" role="switch" aria-label="Enable Slack lead previews" className="mt-0.5" checked={enabled} disabled={!canChange} onChange={(event) => void updatePolicy(event.target.checked)} />
             <span>
-              <span className="font-medium">Enable lead previews for eligible internal channels</span>
-              <span className="text-muted-foreground block text-xs">{enabled ? "Lead links shared in eligible channels can show a preview." : "Lead previews are currently off for this organization."}</span>
+              <span className="font-medium">Enable automatic lead previews for eligible internal channels</span>
+              <span className="text-muted-foreground block text-xs">{legacy ? "Automatic sharing is currently off. Previously approved channels may continue using legacy previews." : enabled ? "Lead links shared in eligible channels can show a preview." : "Lead previews are currently off for this organization."}</span>
             </span>
           </label>
+
+          {legacy && data.canManage && connected && (
+            <div className="flex flex-col gap-2">
+              <Button type="button" variant="outline" size="sm" disabled={saving} onClick={() => void updatePolicy(false)}>
+                Disable all previews
+              </Button>
+              <p className="text-muted-foreground text-xs">This removes the legacy preview path and leaves automatic sharing off.</p>
+            </div>
+          )}
 
           <label className="flex items-start gap-3 rounded-md border p-3 text-sm">
             <input type="checkbox" aria-label="Acknowledge Slack sharing" className="mt-0.5" checked={acknowledged} disabled={!data.canManage || saving} onChange={(event) => { setAcknowledgedByInstallation((current) => installation ? { ...current, [installation.id]: event.target.checked } : current); setNotice(null); }} />
