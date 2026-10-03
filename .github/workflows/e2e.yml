@@ -108,6 +108,52 @@ jobs:
           npm run test:e2e -- --grep 'Leads board v2 foundation is usable at desktop and narrow widths'
           PLAYWRIGHT_WEBPACK_DEV_SERVER=1 npm run test:e2e -- --grep 'switching tabs preserves URL state|sidebar nav links all route correctly' --timeout=240000
 
+      # Next's CLI type checker reports only "Failed to type check" when its
+      # child exits unexpectedly. Preserve the original failure while making a
+      # same-run webpack build expose the child exit code/signal and runner
+      # cgroup memory state. This step never prints arguments or environment.
+      - name: Diagnose failed Webpack compiler process
+        if: ${{ failure() }}
+        env:
+          CI_DIAGNOSTIC_TYPESCRIPT_CHILD: "1"
+          NODE_OPTIONS: --require=${{ github.workspace }}/scripts/diagnose-typescript-child.cjs
+        run: |
+          set +e
+          node <<'NODE' > e2e-webpack-memory.log 2>&1 &
+          const fs = require("node:fs");
+          const os = require("node:os");
+          const paths = [
+            ["current", "/sys/fs/cgroup/memory.current"],
+            ["max", "/sys/fs/cgroup/memory.max"],
+            ["peak", "/sys/fs/cgroup/memory.peak"],
+            ["current", "/sys/fs/cgroup/memory/memory.usage_in_bytes"],
+            ["max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"],
+            ["peak", "/sys/fs/cgroup/memory/memory.max_usage_in_bytes"],
+          ];
+          const read = (file) => {
+            try { return fs.readFileSync(file, "utf8").trim(); } catch { return null; }
+          };
+          const report = () => {
+            const memory = paths.flatMap(([name, file]) => {
+              const value = read(file);
+              return value === null ? [] : [`${name}=${value}`];
+            });
+            const usage = process.memoryUsage();
+            console.error(`[e2e-diagnostic] runner rss=${usage.rss} heap=${usage.heapUsed}/${usage.heapTotal} free=${os.freemem()} total=${os.totalmem()} ${memory.join(" ")}`);
+          };
+          report();
+          setInterval(report, 5000);
+          process.on("SIGTERM", () => process.exit(0));
+          NODE
+          memory_pid=$!
+          npm run build -- --webpack
+          build_status=$?
+          kill "$memory_pid" 2>/dev/null || true
+          wait "$memory_pid" 2>/dev/null || true
+          cat e2e-webpack-memory.log
+          echo "Webpack diagnostic build exit code: $build_status"
+          exit 0
+
       - name: Clean up exact-run E2E identities and verify browser-QA isolation
         if: always()
         run: npx tsx scripts/e2e-identity-lifecycle.ts cleanup
