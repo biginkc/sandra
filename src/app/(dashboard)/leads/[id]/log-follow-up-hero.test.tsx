@@ -81,13 +81,47 @@ describe("Log follow-up survives the hero re-parenting its actions", () => {
     expect(screen.queryByRole("dialog")).toBeNull()
   })
 
-  it("a page re-render with new props (a fresh lead just got assigned) keeps the in-flight opening", async () => {
+  it("a page re-render that changes the assignee prop keeps the in-flight opening", async () => {
     let release!: (value: unknown) => void
     mocks.loadMyLeadRow.mockReturnValue(new Promise((resolve) => { release = resolve }))
     const view = render(page("rep-9"))
     await userEvent.setup().click(screen.getByRole("button", { name: "Log follow-up" }))
-    view.rerender(page("rep-9"))
+    view.rerender(page("rep-10")) // a prop really changes mid-lookup
+    expect(mocks.loadMyLeadRow).toHaveBeenCalledTimes(1)
+    expect(mocks.loadMyLeadRow).toHaveBeenCalledWith({ memberId: "rep-9", propertyId: "lead-1" })
     await act(async () => { release({ ok: true, lookup: { status: "found", row, snapshotAt: "x" } }) })
     expect(await screen.findByRole("dialog")).toBeInTheDocument()
   })
+
+  it("re-parenting mid-uncertain keeps the fields locked, the reconcile UI shown, and Reconcile replays the identical payload and key", async () => {
+    const user = userEvent.setup({ delay: null })
+    mocks.loadMyLeadRow.mockResolvedValue({ ok: true, lookup: { status: "found", row, snapshotAt: "x" } })
+    mocks.submitMyLeadCommand
+      .mockImplementationOnce(() => new Promise(() => undefined)) // the save never answers: frozen
+      .mockResolvedValueOnce({ ok: true, duplicate: true, attemptRecorded: true })
+    render(page())
+    await user.click(screen.getByRole("button", { name: "Log follow-up" }))
+    await user.selectOptions(await screen.findByLabelText("External outcome"), "reached")
+    fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-11T09:00" } })
+    await user.type(screen.getByLabelText("Note (optional)"), "Original note")
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Save attempt" }))
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_001) })
+    } finally { vi.useRealTimers() }
+    expect(await screen.findByRole("button", { name: "Reconcile saved change" })).toBeInTheDocument()
+    // The hero falls back to flat and re-parents its actions while the save is frozen.
+    failImage()
+    failImage()
+    expect(screen.getByTestId("lead-media-flat")).toBeInTheDocument()
+    expect(screen.getByLabelText("Note (optional)")).toBeDisabled()
+    expect(screen.getByLabelText("Note (optional)")).toHaveValue("Original note")
+    expect(screen.getByText(/original request is preserved for reconciliation/)).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Reconcile saved change" }))
+    expect(await screen.findByRole("button", { name: "Done without a drip" })).toBeInTheDocument()
+    expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2)
+    expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toEqual(mocks.submitMyLeadCommand.mock.calls[0][1])
+    expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({ note: "Original note", idempotencyKey: (mocks.submitMyLeadCommand.mock.calls[0][1] as { idempotencyKey: string }).idempotencyKey })
+  })
 })
+
