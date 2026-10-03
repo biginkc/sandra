@@ -1,5 +1,12 @@
 "use client";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useRouter } from "next/navigation";
 import { RepSmsSettings } from "./rep-sms-settings";
 import { Button } from "@/components/ui/button";
@@ -720,9 +727,14 @@ export function MyLeadsClient({
       setSearch("");
     }
   }
-  useEffect(() => {
+  useLayoutEffect(() => {
     latestFocusKey.current = focusKey;
+    // A focus transition invalidates every refresh that started for the prior
+    // target, including same-member transitions where openingScope is unchanged.
+    ++request.current;
     pendingOpening.current = null;
+  }, [openingScope, focusKey]);
+  useEffect(() => {
     setOpeningStatus(null);
   }, [openingScope, focusKey]);
   useEffect(() => {
