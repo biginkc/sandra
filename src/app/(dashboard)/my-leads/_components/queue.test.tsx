@@ -681,4 +681,20 @@ describe("MyLeadsQueue deep-link focus", () => {
     rerender(<MyLeadsQueue {...props} stages={{ ...props.stages }} focusPropertyId={target} focusNonce={0} />)
     expect(screen.getByRole("button", { name: "Show details for 2 Main Street" })).toBeInTheDocument()
   })
+
+  it("scrolls on a direct target change A to B with no null in between", async () => {
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+    const props = buildProps()
+    const a = props.stages.contacted.rows[0].propertyId
+    const b = props.stages.offer_sent.rows[0].propertyId
+    const { rerender } = render(<MyLeadsQueue {...props} focusPropertyId={a} focusNonce={0} />)
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1))
+    rerender(<MyLeadsQueue {...props} focusPropertyId={b} focusNonce={1} />)
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2))
+    expect(scrollIntoView.mock.contexts[1]).toBe(document.querySelector(`[data-lead-id="${b}"]`))
+    rerender(<MyLeadsQueue {...props} focusPropertyId={a} focusNonce={2} />)
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(3))
+  })
 })
+

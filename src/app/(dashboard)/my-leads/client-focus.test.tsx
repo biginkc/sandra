@@ -120,4 +120,14 @@ describe("MyLeadsClient deep-link lifecycle", () => {
     expect(screen.queryByText(/assigned to another rep/)).toBeNull()
     expect(mocks.replace).toHaveBeenCalledTimes(1)
   })
+
+  it("follows the same lead when a refresh reassigns it, without re-scrolling an unchanged refresh", async () => {
+    const { rerender } = render(ui(focus("lead-a", { memberId: "rep-1" })))
+    rerender(ui(focus("lead-a", { memberId: "rep-1" })))
+    expect(last()).toMatchObject({ focusNonce: 0, selectedRepId: "rep-1" })
+    rerender(ui(focus("lead-a", { memberId: "rep-2" })))
+    await waitFor(() => expect(last()).toMatchObject({ focusPropertyId: "lead-a", selectedRepId: "rep-2", search: "" }))
+    expect(last()?.focusNonce).toBe(1)
+  })
 })
+

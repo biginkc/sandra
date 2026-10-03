@@ -211,7 +211,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   // rep/search change clears it (and the URL, without adding history). A different
   // ?lead= value arriving later (new link, Back/Forward) is a new target; a refresh
   // that re-renders with the same value is not.
-  const focusKey=`${focus?.propertyId??''}|${focus?.notice??''}`;
+  const focusKey=`${focus?.propertyId??''}|${focus?.notice??''}|${focus?.memberId??''}`;
   const [target,setTarget]=useState(()=>({propertyId:focus?.propertyId??null,notice:focus?.notice??null,nonce:0}));
   const [seenFocusKey,setSeenFocusKey]=useState(focusKey);const [clearedForKey,setClearedForKey]=useState<string|null>(null);
   if(seenFocusKey!==focusKey){
@@ -225,7 +225,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   }
   const clearFocus=()=>{
     if(target.propertyId||target.notice)setTarget(previous=>({propertyId:null,notice:null,nonce:previous.nonce}));
-    if(focusKey!=='|'&&clearedForKey!==focusKey){setClearedForKey(focusKey);router.replace('/my-leads',{scroll:false});}
+    if(focusKey!=='||'&&clearedForKey!==focusKey){setClearedForKey(focusKey);router.replace('/my-leads',{scroll:false});}
   };
   return <>
     {openingStatus&&<div role="status" className="mb-4 rounded border p-3">

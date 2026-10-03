@@ -67,7 +67,8 @@ export function MyLeadsQueue({
   const [detailStates, setDetailStates] = useState<
     Readonly<Record<string, MyLeadDetailState>>
   >({})
-  const focusScrolled = useRef(false)
+  // Key (propertyId:nonce) of the navigation that was last scrolled to.
+  const focusScrolled = useRef<string | null>(null)
   const expandedIdsRef = useRef<ReadonlySet<string>>(new Set())
   expandedIdsRef.current = expandedIds
   const requestIds = useRef<Record<string, number>>({})
@@ -107,12 +108,13 @@ export function MyLeadsQueue({
   // Scroll once per deep-link navigation. Background refreshes re-render with the
   // same target and must not move the page again.
   useEffect(() => {
-    if (!focusPropertyId) { focusScrolled.current = false; return }
-    if (focusScrolled.current) return
+    if (!focusPropertyId) { focusScrolled.current = null; return }
+    const key = `${focusPropertyId}:${focusNonce}`
+    if (focusScrolled.current === key) return
     const element = document.querySelector(`[data-lead-id="${CSS.escape(focusPropertyId)}"]`)
     // A row inside a collapsed section is hidden; wait until its section opens.
     if (!element || element.closest("[hidden]")) return
-    focusScrolled.current = true
+    focusScrolled.current = key
     element.scrollIntoView?.({ block: "start", behavior: "smooth" })
   }, [focusPropertyId, focusNonce, stages, drips, collapsedSections])
 
@@ -148,7 +150,6 @@ export function MyLeadsQueue({
     const key = `${focusPropertyId}:${focusNonce}`
     if (handledFocus.current === key) return
     handledFocus.current = key
-    focusScrolled.current = false
     setExpandedIds((previous) => new Set(previous).add(focusPropertyId))
   }, [focusPropertyId, focusNonce])
 
