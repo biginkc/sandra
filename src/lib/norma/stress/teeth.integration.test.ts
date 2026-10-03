@@ -79,6 +79,29 @@ const MUTANTS: Mutant[] = [
       ),
   },
   {
+    name: "marking a call reviewed also resumes the lead's drip",
+    invariant: "9",
+    apply: (q) =>
+      mutateFunction(
+        q,
+        "public.fn_norma_mark_reviewed(uuid, uuid, uuid)",
+        "select count(*)::integer into v_kept",
+        "update public.sequence_enrollments set status = 'active', pause_reason = null where property_id = r.property_id and status = 'paused' and pause_reason = 'norma_call';\n  select count(*)::integer into v_kept",
+      ),
+  },
+  {
+    name: "marking a call reviewed does not check that the caller belongs to the org",
+    invariant: "9",
+    apply: (q) =>
+      mutateFunction(q, "public.fn_norma_mark_reviewed(uuid, uuid, uuid)", "if not exists (\n    select 1 from public.memberships m\n     where m.user_id = p_user_id", "if false and not exists (\n    select 1 from public.memberships m\n     where m.user_id = p_user_id"),
+  },
+  {
+    name: "marking a call reviewed leaves its review task open",
+    invariant: "9",
+    apply: (q) =>
+      mutateFunction(q, "public.fn_norma_mark_reviewed(uuid, uuid, uuid)", "and status in ('open', 'snoozed')\n    returning id into v_task;", "and false\n    returning id into v_task;"),
+  },
+  {
     name: "eligibility never blocks (DNC / not_interested leads get dialled)",
     invariant: "2",
     apply: async (q) => {

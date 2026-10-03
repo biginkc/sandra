@@ -25,6 +25,16 @@ describe("Norma lead timeline events", () => {
     expect(formatLeadEventSentence(event("norma_call_requested", { has_context: true }, "user"), {}, null)).toMatch(/asked Norma to call \(with context\)$/);
   });
 
+  it("renders a rep marking a stuck call reviewed", () => {
+    const e = event("norma_call_reviewed", { request_id: REQUEST_ID, previous_outcome: "unknown", task_closed: true }, "user");
+    e.actor_id = "u1";
+    expect(formatLeadEventSentence(e, {}, "u1")).toBe("You marked the Norma call reviewed");
+    expect(formatLeadEventSentence(e, { u1: "pat@example.com" }, "u2")).toMatch(/marked the Norma call reviewed$/);
+    render(<LeadEventPill event={e} authorEmails={{}} currentUserId="u1" />);
+    expect(screen.getByTestId("lead-event-row")).toHaveAttribute("data-event-type", "norma_call_reviewed");
+    expect(screen.queryByTestId("norma-event-detail")).toBeNull();
+  });
+
   it("renders the outcome of a finished call in plain words", () => {
     const sentence = (outcome: string) =>
       formatLeadEventSentence(event("norma_call_completed", { outcome, request_id: REQUEST_ID }), {}, null);

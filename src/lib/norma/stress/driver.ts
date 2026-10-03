@@ -71,8 +71,8 @@ function weighted<T>(r: Rng, table: readonly [T, number][]): T {
   return table[0]![0];
 }
 
-type EventName = "inbound" | "takeover" | "dnc" | "not_interested" | "softphone_pause" | "softphone_cleanup" | "stale_sweep" | "reconcile" | "slack";
-const EVENTS: EventName[] = ["inbound", "takeover", "dnc", "not_interested", "softphone_pause", "softphone_cleanup", "stale_sweep", "reconcile", "slack"];
+type EventName = "inbound" | "takeover" | "dnc" | "not_interested" | "softphone_pause" | "softphone_cleanup" | "stale_sweep" | "reconcile" | "slack" | "mark_reviewed";
+const EVENTS: EventName[] = ["inbound", "takeover", "dnc", "not_interested", "softphone_pause", "softphone_cleanup", "stale_sweep", "reconcile", "slack", "mark_reviewed"];
 
 export type LifecycleRecord = { ctx: LeadCtx; late: boolean; summary: string };
 
@@ -246,6 +246,15 @@ async function runLifecycle(h: Harness, seed: number, index: number): Promise<Li
             return h.reconcile({ actor: "reconcile-mid" });
           case "slack":
             return h.slackDrain();
+          case "mark_reviewed":
+            // A rep (or, now and then, a stranger) presses "Mark reviewed" at a random moment, double clicks included.
+            // Usually the call is not parked for review yet or ever, and the answer must be a refusal that changes nothing.
+            return Promise.all(
+              Array.from({ length: r.pick([1, 1, 2, 3]) }, async () => {
+                await jitter(r, 8);
+                return h.markReviewed(ctx, r.chance(0.12) ? h.world.outsider : r.pick([h.world.rep1, h.world.rep2]));
+              }),
+            );
         }
       })().catch((error) => {
         // An event that fails is data, not a crash; the invariants decide if it mattered.
@@ -305,6 +314,15 @@ export async function runRandomRun(h: Harness, seed: number, count: number, opts
     await h.staleSweep();
   }
   await h.recover({ horizonMs: 3 * 3600_000 });
+
+  // Reps work through some of the parked calls: a stranger tries first now and then (refused), then a member
+  // marks it reviewed, often with a double click. The late webhooks below then land on top of the result.
+  for (const rec of records) {
+    const status = (await h.scratch.pool.query("select status from public.norma_call_requests where property_id = $1", [rec.ctx.lead.property])).rows[0]?.status;
+    if (status !== "needs_review" || !r.chance(0.5)) continue;
+    if (r.chance(0.5)) await h.markReviewed(rec.ctx, h.world.outsider);
+    await Promise.all(Array.from({ length: r.pick([1, 1, 2, 3]) }, () => h.markReviewed(rec.ctx, r.pick([h.world.rep1, h.world.rep2]))));
+  }
 
   // Late webhooks: Bland finally delivers after the request was parked for review.
   for (const rec of records.filter((x) => x.late)) {

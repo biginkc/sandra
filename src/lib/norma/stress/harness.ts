@@ -10,6 +10,7 @@ import { readNormaGateConfig } from "../config";
 import type { PrecallDeps } from "../precall-sms";
 import { dispatchNormaCall, type DispatchResult } from "../dispatch";
 import { evaluateNormaGate } from "../gate";
+import { markNormaReviewedCore, type MarkNormaReviewedResult } from "../mark-reviewed";
 import { reconcileNormaCalls, type ReconcileSummary } from "../reconcile";
 import { requestNormaCallCore, type RequestNormaCallResult } from "../request-call";
 import { sweepResumeCallInProgress, upgradeNormaHoldPauses } from "../rpc";
@@ -32,6 +33,18 @@ export type LeadCtx = {
   dispatchGate: GateMode;
   /** Writes the driver made that the dispatch eligibility recheck must respect. */
   writes: { kind: "dnc" | "not_interested"; startTick: number; doneTick: number }[];
+};
+
+/** One "Mark reviewed" press and what the action answered. */
+export type ReviewRecord = {
+  requestId: string;
+  propertyId: string;
+  user: string;
+  /** The caller's own database connection: everything it did shows up in the trace under this name. */
+  actor: string;
+  startTick: number;
+  endTick: number;
+  result: MarkNormaReviewedResult;
 };
 
 export type DispatchEval = { requestId: string; tick: number; open: boolean };
@@ -94,6 +107,8 @@ export class Harness {
   readonly trace = new Trace();
   readonly leads = new Map<string, LeadCtx>();
   readonly dispatchEvals: DispatchEval[] = [];
+  readonly reviews: ReviewRecord[] = [];
+  private reviewCounter = 0;
   /** The error behind each 500 a webhook answered, for diagnosis. */
   readonly webhook500Causes: string[] = [];
   readonly inflightDispatch = new Map<string, boolean[]>();
@@ -241,6 +256,28 @@ export class Harness {
           }
         : (id) => this.dispatch(id, actor),
     });
+  }
+
+  /**
+   * A rep presses "Mark reviewed" on the lead's newest request (the one the page
+   * would show). The real action core runs; only auth and client plumbing is
+   * substituted. Returns null when the lead has no request yet.
+   */
+  async markReviewed(ctx: LeadCtx, userId: string, opts: { actor?: string } = {}): Promise<MarkNormaReviewedResult | null> {
+    const row = (
+      await this.scratch.pool.query<{ id: string }>(
+        "select id from public.norma_call_requests where property_id = $1 order by created_at desc limit 1",
+        [ctx.lead.property],
+      )
+    ).rows[0];
+    if (!row) return null;
+    const actor = opts.actor ?? `review-${++this.reviewCounter}`;
+    const startTick = this.trace.tick();
+    const result = await markNormaReviewedCore(ctx.lead.property, row.id, { getUserId: async () => userId, adminClient: this.client(actor) });
+    const endTick = this.trace.tick();
+    this.reviews.push({ requestId: row.id, propertyId: ctx.lead.property, user: userId, actor, startTick, endTick, result });
+    this.trace.add(actor, "mark", `mark_reviewed:${result.code}`, { property: ctx.lead.property });
+    return result;
   }
 
   async dispatch(requestId: string, actor = "dispatch"): Promise<DispatchResult> {
