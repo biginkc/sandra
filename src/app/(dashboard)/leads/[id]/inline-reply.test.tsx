@@ -136,6 +136,7 @@ describe("<InlineReply /> disabled explanations", () => {
         null,
         false,
         "+18165550123",
+        null,
       );
     });
     expect(composer).toHaveValue("");
@@ -307,6 +308,7 @@ describe("<InlineReply /> disabled explanations", () => {
       null,
       false,
       "+18165550123",
+      null,
     );
     expect(composer).toBeDisabled();
     expect(sendButton).toBeDisabled();

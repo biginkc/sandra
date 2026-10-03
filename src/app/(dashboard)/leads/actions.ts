@@ -2121,6 +2121,12 @@ export async function sendSmsFromLead(
   from?: string | null,
   queueOnly?: boolean,
   to?: string | null,
+  /**
+   * Inbox thread contact. Only used when the property has NO homeowner
+   * recorded; a recorded homeowner that differs from this contact still
+   * blocks the send.
+   */
+  threadContactId?: string | null,
 ): Promise<Result<SendSmsPayload>> {
   const trimmed = body.trim();
   if (!trimmed) {
@@ -2158,7 +2164,7 @@ export async function sendSmsFromLead(
 
     const { data: property, error } = await supabase
       .from("properties")
-      .select("id, homeowner_contact_id")
+      .select("id, org_id, homeowner_contact_id")
       .eq("id", propertyId)
       .maybeSingle();
     if (error) {
@@ -2173,7 +2179,42 @@ export async function sendSmsFromLead(
         error: { code: "LEAD_NOT_FOUND", message: "Lead not found." },
       };
     }
-    if (!property.homeowner_contact_id) {
+    let targetContactId = property.homeowner_contact_id;
+    if (!targetContactId && threadContactId) {
+      const { data: threadContact } = await supabase
+        .from("contacts")
+        .select("id, org_id")
+        .eq("id", threadContactId)
+        .maybeSingle();
+      const { data: thread } = await supabase
+        .from("message_threads")
+        .select("id")
+        .eq("property_id", propertyId)
+        .eq("contact_id", threadContactId)
+        .limit(1)
+        .maybeSingle();
+      if (
+        threadContact &&
+        thread &&
+        threadContact.org_id === property.org_id
+      ) {
+        targetContactId = threadContact.id;
+      }
+    } else if (
+      targetContactId &&
+      threadContactId &&
+      targetContactId !== threadContactId
+    ) {
+      return {
+        ok: false,
+        error: {
+          code: "THREAD_CONTACT_NOT_HOMEOWNER",
+          message:
+            "SMS replies from Messages are only available for the homeowner contact on this property.",
+        },
+      };
+    }
+    if (!targetContactId) {
       return {
         ok: false,
         error: {
@@ -2185,7 +2226,7 @@ export async function sendSmsFromLead(
 
     const outcome = await sendSmsToContact(supabase, {
       origin: "manual",
-      contactId: property.homeowner_contact_id,
+      contactId: targetContactId,
       propertyId,
       body: trimmed,
       from: from ?? undefined,

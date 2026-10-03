@@ -494,6 +494,7 @@ describe("<InboxDetail />", () => {
         "+18162804181",
         false,
         "+15550000002",
+        expect.any(String),
       );
     });
     expect(screen.getByLabelText("Reply to this lead")).toHaveValue("");
@@ -953,6 +954,7 @@ describe("<InboxDetail />", () => {
           fromAddress,
           false,
           toAddress,
+          expect.any(String),
         );
       });
     },
@@ -1051,6 +1053,7 @@ describe("<InboxDetail />", () => {
         data.threadBusinessPhone,
         false,
         data.replyToPhone,
+        expect.any(String),
       );
     });
   });
@@ -1150,6 +1153,7 @@ describe("<InboxDetail />", () => {
         priorRoute.to_address,
         false,
         priorRoute.from_address,
+        expect.any(String),
       );
     });
   });
@@ -1375,6 +1379,7 @@ describe("<InboxDetail />", () => {
         data.threadBusinessPhone,
         false,
         "+15550000002",
+        expect.any(String),
       );
     });
   });
@@ -1443,6 +1448,35 @@ describe("<InboxDetail />", () => {
       "thread contact is the homeowner",
     );
     expectSharedOutcomeControls({ moveToLeadDisabled: false });
+  });
+
+  it("shows the reply composer when the property has no homeowner set", () => {
+    const data = makeData({
+      contactId: "contact-no-homeowner",
+      homeownerContactId: null,
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    expect(screen.getByTestId("inline-reply")).toBeInTheDocument();
+    expect(screen.queryByTestId("inline-reply-unavailable")).not.toBeInTheDocument();
+  });
+
+  it("shows the reply composer when the homeowner is the thread contact", () => {
+    const data = makeData({
+      contactId: "contact-same",
+      homeownerContactId: "contact-same",
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+
+    expect(screen.getByTestId("inline-reply")).toBeInTheDocument();
   });
 
   it("renders message outcomes without the old Nurture scheduling popover", () => {
