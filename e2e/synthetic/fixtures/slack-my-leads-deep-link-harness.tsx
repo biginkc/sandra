@@ -244,12 +244,13 @@ function selectedLeadFromLocation(): SelectedLeadResult {
   if (params.get("state") === "unavailable") {
     return {
       status: "unavailable",
+      propertyId: parsed.propertyId,
       message: selectedLeadUnavailableMessage("access_denied"),
       retryHref: `/my-leads?lead=${encodeURIComponent(parsed.propertyId)}`,
     }
   }
   if (![LINKED_LEAD_ID, SECONDARY_LEAD_ID].includes(parsed.propertyId)) {
-    return { status: "unavailable", message: selectedLeadUnavailableMessage("not_found"), retryHref: `/my-leads?lead=${encodeURIComponent(parsed.propertyId)}` }
+    return { status: "unavailable", propertyId: parsed.propertyId, message: selectedLeadUnavailableMessage("not_found"), retryHref: `/my-leads?lead=${encodeURIComponent(parsed.propertyId)}` }
   }
   const row = parsed.propertyId === LINKED_LEAD_ID
     ? queueRow(LINKED_LEAD_ID, "44 Synthetic Link Lane", "Linked Synthetic Seller", "contacted")

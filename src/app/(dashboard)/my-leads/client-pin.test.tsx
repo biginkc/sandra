@@ -163,6 +163,8 @@ describe("MyLeadsClient pinned deep-link row", () => {
     mocks.loadMyLeadRow.mockResolvedValue({ ok: false, code: "READ_FAILED", message: "x" })
     await refreshNow()
     expect(leadEls("beyond-9")).toHaveLength(1)
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("We couldn't check this lead right now."))
+    expect(screen.getByRole("link", { name: "Retry" })).toHaveAttribute("href", "/my-leads?lead=beyond-9")
   })
 
   it("drops the pin when the user changes the search", async () => {
@@ -198,12 +200,27 @@ describe("MyLeadsClient pinned deep-link row", () => {
 
   it("removes an unavailable lead from every rendered section, leaving server counts alone", async () => {
     const dripRow = row("drip-3", "3 Drip Lane")
+    mocks.loadMyLeadDetail.mockResolvedValue({
+      ok: true,
+      detail: {
+        groups: {
+          messages: {
+            rows: [{ id: "loaded-detail", at: T0, actorId: null, body: "Loaded detail marker", direction: "inbound", deliveryStatus: "received", attachmentCount: 0 }],
+            cursor: null,
+            hasMore: false,
+          },
+        },
+      },
+    })
     const { rerender } = render(ui(focusOn(loaded), snap([loaded], 25), { ...noDrips(), active: [dripOf(dripRow)] }))
+    await waitFor(() => expect(screen.getByText("Loaded detail marker")).toBeInTheDocument())
+    expect(screen.getByTestId("my-lead-actions-loaded-1")).toBeInTheDocument()
     mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([loaded], 25), kpis, drips: { ...noDrips(), active: [dripOf(dripRow)] } })
     mocks.loadMyLeadRow.mockResolvedValue(unavailable("other_rep"))
     await refreshNow()
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("assigned to another rep"))
     expect(leadEls("loaded-1")).toHaveLength(0)
+    expect(screen.queryByTestId("my-lead-actions-loaded-1")).not.toBeInTheDocument()
     expect(screen.getByLabelText("25 leads")).toBeInTheDocument()
     rerender(ui(focusOn(dripRow), snap([loaded], 25), { ...noDrips(), active: [dripOf(dripRow)] }))
     mocks.loadMyLeadRow.mockResolvedValue(unavailable("archived"))
@@ -555,4 +572,3 @@ describe("MyLeadsClient pinned deep-link row", () => {
     })
   })
 })
-

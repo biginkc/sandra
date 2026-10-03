@@ -114,10 +114,12 @@ function focusForSelectedLead(
     };
   }
   return {
-    propertyId: null,
+    propertyId: result.propertyId,
     memberId: userId,
     notice: result.message,
     pin: null,
+    pinStatus: result.status === "error" ? "failed" : "unavailable",
+    retryHref: result.retryHref,
   };
 }
 
@@ -182,7 +184,9 @@ export default async function MyLeadsPage({
         ? selectedLeadLink
         : {
             status: "unavailable",
+            propertyId: selectedLeadLink.propertyId,
             message: "This lead is unavailable in your My Leads queue.",
+            retryHref,
           };
   let focus = focusForSelectedLead(selectedLead, viewer.userId);
 
@@ -215,17 +219,23 @@ export default async function MyLeadsPage({
         selectedLead = ["archived", "no_active_episode"].includes(lookup.reason)
           ? {
               status: "terminal",
+              propertyId: selectedLeadLink.propertyId,
               message: selectedLeadUnavailableMessage(lookup.reason),
+              retryHref,
             }
           : {
               status: "unavailable",
+              propertyId: selectedLeadLink.propertyId,
               message: selectedLeadUnavailableMessage(lookup.reason),
+              retryHref,
             };
         focus = {
-          propertyId: null,
+          propertyId: selectedLeadLink.propertyId,
           memberId: viewer.userId,
           notice: MY_LEAD_ROW_REASON_COPY[lookup.reason],
           pin: null,
+          pinStatus: "unavailable",
+          retryHref,
         };
       }
     } catch (error) {
@@ -237,34 +247,42 @@ export default async function MyLeadsPage({
       ) {
         selectedLead = {
           status: "unavailable",
+          propertyId: selectedLeadLink.propertyId,
           message: "This lead is unavailable in your My Leads queue.",
+          retryHref,
         };
         focus = {
-          propertyId: null,
+          propertyId: selectedLeadLink.propertyId,
           memberId: viewer.userId,
           notice:
             error.code === "FORBIDDEN"
               ? MY_LEAD_ROW_FORBIDDEN_COPY
               : MY_LEAD_ROW_REASON_COPY.not_found,
           pin: null,
+          pinStatus: "unavailable",
+          retryHref,
         };
       } else {
         selectedLead = {
           status: "error",
+          propertyId: selectedLeadLink.propertyId,
           message: "We couldn't check this lead right now.",
           retryHref,
         };
         focus = {
-          propertyId: null,
+          propertyId: selectedLeadLink.propertyId,
           memberId: viewer.userId,
           notice: MY_LEAD_ROW_ERROR_COPY,
           pin: null,
+          pinStatus: "failed",
+          retryHref,
         };
       }
     }
   } else if (selectedLeadLink.status === "requested") {
     selectedLead = {
       status: "unavailable",
+      propertyId: selectedLeadLink.propertyId,
       message: "My Leads is disabled for this organization.",
       retryHref,
     };

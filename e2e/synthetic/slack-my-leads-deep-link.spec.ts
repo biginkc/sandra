@@ -178,15 +178,16 @@ test("malformed and duplicate lead parameters are denied without selecting a lea
   await expect(page.getByText("Opened from lead page", { exact: true })).toHaveCount(0)
 })
 
-test("unavailable link keeps its canonical query and can reopen that lead", async ({ page }) => {
+test("unavailable link exposes a safe canonical retry and can reopen that lead", async ({ page }) => {
   await mount(page, "/my-leads", `?lead=${linkedLeadId}&state=unavailable`)
 
+  const retry = page.getByRole("link", { name: "Retry" })
   await expect(page.getByRole("status")).toContainText("This lead is unavailable in your My Leads queue.")
-  await expect(page).toHaveURL(`http://synthetic.local/my-leads?lead=${linkedLeadId}&state=unavailable`)
+  await expect(retry).toHaveAttribute("href", `/my-leads?lead=${linkedLeadId}`)
   await expect(page.getByRole("combobox", { name: "Acquisitions member" })).toHaveValue("owner-a")
 
-  // The page keeps the safe relative lead query; reopening it is a fresh server render.
-  await mount(page, "/my-leads", `?lead=${linkedLeadId}`)
+  await retry.click()
+  await page.addScriptTag({ content: harnessBundle })
   await expect(page.getByTestId(`my-lead-row-${linkedLeadId}`)).toContainText("44 Synthetic Link Lane")
   await expect(page).toHaveURL(`http://synthetic.local/my-leads?lead=${linkedLeadId}`)
 })

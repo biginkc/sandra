@@ -12,7 +12,10 @@ import type {
   QueueRow,
   MyLeadRowLookup,
 } from "@/lib/my-leads/queries";
-import { MY_LEAD_ROW_REASON_COPY } from "@/lib/my-leads/row-reasons";
+import {
+  MY_LEAD_ROW_ERROR_COPY,
+  MY_LEAD_ROW_REASON_COPY,
+} from "@/lib/my-leads/row-reasons";
 import {
   newestCopy,
   pickAuthoritative,
@@ -71,9 +74,37 @@ export type MyLeadsFocus = {
   memberId?: string | null;
   notice: string | null;
   pin?: QueueRow | null;
+  pinStatus?: "unavailable" | "failed";
+  retryHref?: string;
 };
 /** The latest single-row lookup for the deep-linked lead; part of the read model. */
-type PinRead = { id: string; lookup: MyLeadRowLookup } | null;
+type PinRead =
+  | { id: string; lookup: MyLeadRowLookup | { status: "failed" } }
+  | null;
+
+function pinReadFromFocus(
+  focus: MyLeadsFocus | null,
+  snapshotAt: string,
+): PinRead {
+  if (!focus?.propertyId) return null;
+  if (focus.pinStatus === "unavailable")
+    return {
+      id: focus.propertyId,
+      lookup: { status: "unavailable", reason: "not_found" },
+    };
+  if (focus.pinStatus === "failed")
+    return { id: focus.propertyId, lookup: { status: "failed" } };
+  return focus.pin
+    ? {
+        id: focus.propertyId,
+        lookup: {
+          status: "found",
+          row: focus.pin,
+          snapshotAt,
+        },
+      }
+    : null;
+}
 
 function focusFromSelectedLead(
   result: SelectedLeadResult,
@@ -102,10 +133,12 @@ function focusFromSelectedLead(
     };
   }
   return {
-    propertyId: null,
+    propertyId: result.propertyId,
     memberId: userId,
     notice: result.message,
     pin: null,
+    pinStatus: result.status === "error" ? "failed" : "unavailable",
+    retryHref: result.retryHref,
   };
 }
 
@@ -139,7 +172,9 @@ const lookupOf = (pin: PinRead | undefined, id: string): AuthoritativeLookup =>
     ? undefined
     : pin.lookup.status === "found"
       ? { status: "found", row: pin.lookup.row }
-      : { status: "unavailable" };
+      : pin.lookup.status === "unavailable"
+        ? { status: "unavailable" }
+        : { status: "failed" };
 
 /**
  * Reconciles competing copies into what is rendered, using pickAuthoritative as the
@@ -293,22 +328,14 @@ export function MyLeadsClient({
     action: MyLeadAction;
     row: QueueRow;
     scope: string;
+    focusKey: string;
     callActivityId?: string | null;
   };
   const openingScope = JSON.stringify([member, search]);
   const activeScope = useRef(openingScope);
   activeScope.current = openingScope;
   const [pinRead, setPinRead] = useState<PinRead>(() =>
-    focus?.propertyId && focus.pin
-      ? {
-          id: focus.propertyId,
-          lookup: {
-            status: "found",
-            row: focus.pin,
-            snapshotAt: initialSnapshot?.snapshotAt ?? "",
-          },
-        }
-      : null,
+    pinReadFromFocus(focus, initialSnapshot?.snapshotAt ?? ""),
   );
   const [pinNotice, setPinNotice] = useState<string | null>(null);
   // The latest pin outcome, for reconciling a failed lookup against the next list read.
@@ -367,10 +394,6 @@ export function MyLeadsClient({
     pendingOpening.current = null;
     setOpeningStatus(null);
   };
-  useEffect(() => {
-    pendingOpening.current = null;
-    setOpeningStatus(null);
-  }, [openingScope]);
   const [detailRevision, setDetailRevision] = useState(0);
   const [recipient, setRecipient] = useState(roster.settings.recipientId ?? "");
   const [settingsBusy, setSettingsBusy] = useState(false);
@@ -416,7 +439,10 @@ export function MyLeadsClient({
             actionPin.current = pin;
           if (pinResult && pinWanted.current === pinId) {
             if (pinResult !== "error") applyPin(pinResult);
-            else if (inList && applied) setPinRead(null);
+            else {
+              setPinNotice(MY_LEAD_ROW_ERROR_COPY);
+              if (inList && applied) setPinRead(null);
+            }
           }
           // Replacing a paginated/reordered queue can unmount its recording player.
           // Background checks may update KPIs, but must leave open lead details alone.
@@ -430,8 +456,10 @@ export function MyLeadsClient({
         } else setRefreshError(result.message);
         return result;
       } catch {
-        if (id === request.current)
+        if (id === request.current) {
+          if (pinWanted.current) setPinNotice(MY_LEAD_ROW_ERROR_COPY);
           setRefreshError("My Leads could not refresh.");
+        }
         return null;
       }
     },
@@ -505,7 +533,8 @@ export function MyLeadsClient({
     const lookup = await readPin(opening.row.propertyId, member);
     if (
       pendingOpening.current !== opening ||
-      activeScope.current !== opening.scope
+      activeScope.current !== opening.scope ||
+      latestFocusKey.current !== opening.focusKey
     )
       return;
     if (lookup === "error") {
@@ -590,6 +619,7 @@ export function MyLeadsClient({
       action: kind,
       row,
       scope: openingScope,
+      focusKey,
       callActivityId,
     });
   };
@@ -658,9 +688,11 @@ export function MyLeadsClient({
   // ?lead= value arriving later (new link, Back/Forward) is a new target; a refresh
   // that re-renders with the same value is not.
   const focusKey = `${focus?.propertyId ?? ""}|${focus?.notice ?? ""}|${focus?.memberId ?? ""}`;
+  const latestFocusKey = useRef(focusKey);
   const [target, setTarget] = useState(() => ({
     propertyId: focus?.propertyId ?? null,
     notice: focus?.notice ?? null,
+    retryHref: focus?.retryHref,
     nonce: 0,
   }));
   const [seenFocusKey, setSeenFocusKey] = useState(focusKey);
@@ -671,22 +703,15 @@ export function MyLeadsClient({
     setTarget((previous) => ({
       propertyId: focus?.propertyId ?? null,
       notice: focus?.notice ?? null,
+      retryHref: focus?.retryHref,
       nonce: previous.nonce + 1,
     }));
+    setOpeningStatus(null);
+    setDialog(null);
+    setCallOptions(null);
     setPinNotice(null);
     {
-      const seeded: PinRead =
-        focus?.propertyId && focus.pin
-          ? {
-              id: focus.propertyId,
-              lookup: {
-                status: "found",
-                row: focus.pin,
-                snapshotAt: snapshot?.snapshotAt ?? "",
-              },
-            }
-          : null;
-      setPinRead(seeded);
+      setPinRead(pinReadFromFocus(focus, snapshot?.snapshotAt ?? ""));
     }
     if (focus?.propertyId) {
       // A deep link always opens its rep's queue unfiltered.
@@ -695,6 +720,11 @@ export function MyLeadsClient({
       setSearch("");
     }
   }
+  useEffect(() => {
+    latestFocusKey.current = focusKey;
+    pendingOpening.current = null;
+    setOpeningStatus(null);
+  }, [openingScope, focusKey]);
   useEffect(() => {
     pinWanted.current = target.propertyId;
   }, [target.propertyId]);
@@ -708,6 +738,7 @@ export function MyLeadsClient({
       setTarget((previous) => ({
         propertyId: null,
         notice: null,
+        retryHref: undefined,
         nonce: previous.nonce,
       }));
     // Dropping the target drops the pin, and any in-flight pin read is ignored.
@@ -781,6 +812,13 @@ export function MyLeadsClient({
         },
       }
     : null;
+  const canonicalRetryHref = target.propertyId
+    ? `/my-leads?lead=${encodeURIComponent(target.propertyId)}`
+    : null;
+  const retryHref =
+    canonicalRetryHref && target.retryHref === canonicalRetryHref
+      ? target.retryHref
+      : canonicalRetryHref;
   return (
     <>
       {openingStatus && (
@@ -873,7 +911,15 @@ export function MyLeadsClient({
       )}
       {(target.notice ?? pinNotice) && (
         <div role="status" className="mb-4 rounded border p-3 text-sm">
-          {target.notice ?? pinNotice}
+          <span>{target.notice ?? pinNotice}</span>{" "}
+          {target.propertyId && (
+            <a
+              href={retryHref ?? undefined}
+              className="font-bold underline underline-offset-4"
+            >
+              Retry
+            </a>
+          )}
         </div>
       )}
       {error && (

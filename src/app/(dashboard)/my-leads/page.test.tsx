@@ -404,7 +404,12 @@ describe("MyLeadsPage availability boundary", () => {
       });
       expect(clientProps()).toMatchObject({
         initialMemberId: "owner-1",
-        focus: { propertyId: null, memberId: "owner-1" },
+        focus: {
+          propertyId: leadId,
+          memberId: "owner-1",
+          pinStatus: "unavailable",
+          retryHref: `/my-leads?lead=${leadId}`,
+        },
       });
     });
 
@@ -453,7 +458,13 @@ describe("MyLeadsPage availability boundary", () => {
         memberId: "user-1",
       });
       expect(clientProps()).toMatchObject({
-        focus: { propertyId: null, notice: copy, pin: null },
+        focus: {
+          propertyId: leadId,
+          notice: copy,
+          pin: null,
+          pinStatus: "unavailable",
+          retryHref: `/my-leads?lead=${leadId}`,
+        },
       });
     });
 
@@ -480,7 +491,12 @@ describe("MyLeadsPage availability boundary", () => {
 
         expect(html).toContain("my-leads-client");
         expect(clientProps()).toMatchObject({
-          focus: { propertyId: null, notice: copy },
+          focus: {
+            propertyId: leadId,
+            notice: copy,
+            retryHref: `/my-leads?lead=${leadId}`,
+            pinStatus: code === "READ_FAILED" ? "failed" : "unavailable",
+          },
         });
       },
     );

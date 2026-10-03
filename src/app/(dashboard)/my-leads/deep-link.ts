@@ -17,9 +17,9 @@ export type SelectedLeadLink =
 export type SelectedLeadResult =
   | { status: "none" }
   | { status: "invalid"; reason: "malformed" | "duplicate" }
-  | { status: "unavailable"; message: string; retryHref?: string }
-  | { status: "error"; message: string; retryHref: string }
-  | { status: "terminal"; message: string }
+  | { status: "unavailable"; propertyId: string; message: string; retryHref: string }
+  | { status: "error"; propertyId: string; message: string; retryHref: string }
+  | { status: "terminal"; propertyId: string; message: string; retryHref: string }
   | { status: "found"; propertyId: string; row: QueueRow; snapshotAt: string };
 
 export function parseSelectedLeadParam(
