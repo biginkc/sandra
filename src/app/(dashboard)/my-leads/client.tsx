@@ -7,7 +7,7 @@ import { useOptionalSoftphone } from '@/components/softphone/softphone-provider'
 import { BookAppointmentPopover } from '@/components/appointments/book-appointment-popover';
 import type { AcquisitionKpis,AcquisitionRoster,QueueSnapshot,QueueRow,MyLeadRowLookup } from '@/lib/my-leads/queries';
 import { MY_LEAD_ROW_REASON_COPY } from '@/lib/my-leads/row-reasons';
-import { newestCopy,pickAuthoritative,type AuthoritativeLookup } from '@/lib/my-leads/authoritative';
+import { newestCopy,pickAuthoritative,type AuthoritativeLookup,type Copy } from '@/lib/my-leads/authoritative';
 import type { MyLeadDripSnapshot } from '@/lib/my-leads/drip-queries';
 import { WorkflowRecoveryContext } from './_components/workflow-form';
 import { useAttemptWorkflow } from './_components/use-attempt-workflow';
@@ -30,46 +30,65 @@ type PinRead={id:string;lookup:MyLeadRowLookup}|null;
 
 const REFRESH_INTERVAL_MS = 30_000;
 
-/** Every list copy of one lead across stage pages and drip entries. */
-function listCopies(snapshot:QueueSnapshot|null,drips:MyLeadDripSnapshot|null|undefined,id:string):QueueRow[]{
+type DripEntry=MyLeadDripSnapshot['active'][number];
+/**
+ * Every list copy of one lead across stage pages and drip entries, each carrying the
+ * time of the read it came from. Stage rows come from the snapshot's read; drips are
+ * replaced on every successful refresh, so they carry the last check time.
+ */
+function listCopies(snapshot:QueueSnapshot|null,drips:MyLeadDripSnapshot|null|undefined,id:string,dripsAt:string|null=snapshot?.snapshotAt??null):Copy[]{
   return [
-    ...Object.values(snapshot?.stages??{}).flatMap(page=>page?.rows??[]).filter(row=>row.propertyId===id),
-    ...[...(drips?.replied??[]),...(drips?.active??[])].filter(row=>row.propertyId===id).flatMap(row=>row.queueRow?[row.queueRow]:[]),
+    ...Object.values(snapshot?.stages??{}).flatMap(page=>page?.rows??[]).filter(row=>row.propertyId===id).map(row=>({row,at:snapshot?.snapshotAt??null})),
+    ...[...(drips?.replied??[]),...(drips?.active??[])].filter(row=>row.propertyId===id).flatMap(row=>row.queueRow?[{row:row.queueRow,at:dripsAt}]:[]),
   ];
 }
-const lookupOf=(pin:PinRead|undefined,id:string):AuthoritativeLookup=>pin?.id!==id?undefined:pin.lookup.status==='found'?{status:'found',row:pin.lookup.row}:{status:'unavailable'};
+const lookupOf=(pin:PinRead|undefined,id:string):AuthoritativeLookup=>pin?.id!==id?undefined:pin.lookup.status==='found'?{status:'found',row:pin.lookup.row,at:pin.lookup.snapshotAt||null}:{status:'unavailable'};
 
 /**
- * Reconciles the single-row lookup for the deep-linked lead into what is rendered,
- * using pickAuthoritative as the one rule.
- * - Unavailable: the lead is removed from every section by propertyId, including
- *   drip entries that carry no queue row.
- * - Lookup newer: stale stage copies are replaced in place (same section) or dropped
- *   (the caller pins the row), and drip entries take the lookup row.
- * - List newer or equal: nothing changes, so rows are never reordered.
+ * Reconciles competing copies into what is rendered, using pickAuthoritative as the
+ * one rule. The displayed snapshot can be older than the drips (a background refresh
+ * keeps the visible list stable while details are open) and than the single-row
+ * lookup for the deep-linked lead, so any lead with more than one copy is resolved.
+ * - Unavailable (target): removed from every section by propertyId, including drip
+ *   entries that carry no queue row.
+ * - Otherwise the winner, whatever its source, is applied to ALL copies: one stage
+ *   row in the winner's section (replaced in place), wrong-section copies dropped,
+ *   and every drip entry takes the winning row and stage (stagePages groups replied
+ *   pins by drip.stage). If no copy remains the caller pins the row.
  * Counts are deliberately left as the server snapshot reports them until the next
- * refresh: they describe the server's view at snapshotAt, and a lookup for one lead
+ * refresh: they describe the server's view at snapshotAt, and a one-lead correction
  * must not make them disagree with their own timestamp.
  */
-function reconcileWithPin(snapshot:QueueSnapshot,drips:MyLeadDripSnapshot|null,pin:PinRead,id:string|null){
-  if(!id||!pin||pin.id!==id)return {snapshot,drips};
-  const lookup=pin.lookup;
+function reconcileWithPin(snapshot:QueueSnapshot,drips:MyLeadDripSnapshot|null,pin:PinRead,id:string|null,dripsAt:string|null){
   const stages={...snapshot.stages} as QueueSnapshot['stages'];
-  if(lookup.status==='unavailable'){
-    for(const key of Object.keys(stages) as (keyof typeof stages)[]){
-      const page=stages[key];if(page)stages[key]={...page,rows:page.rows.filter(row=>row.propertyId!==id)};
-    }
+  const stageKeys=Object.keys(stages) as (keyof typeof stages)[];
+  if(id&&pin?.id===id&&pin.lookup.status==='unavailable'){
+    for(const key of stageKeys){const page=stages[key];if(page)stages[key]={...page,rows:page.rows.filter(row=>row.propertyId!==id)};}
     return {snapshot:{...snapshot,stages},drips:drips?{...drips,active:drips.active.filter(d=>d.propertyId!==id),replied:drips.replied.filter(d=>d.propertyId!==id)}:drips};
   }
-  const pick=pickAuthoritative(newestCopy(listCopies(snapshot,drips,id)),{status:'found',row:lookup.row});
-  if(pick.source!=='lookup')return {snapshot,drips};
-  for(const key of Object.keys(stages) as (keyof typeof stages)[]){
-    const page=stages[key];if(!page)continue;
-    stages[key]={...page,rows:page.rows.flatMap(row=>row.propertyId!==id?[row]:lookup.row.stage===row.stage?[lookup.row]:[])};
+  const places=new Map<string,number>();
+  for(const key of stageKeys)for(const row of stages[key]?.rows??[])places.set(row.propertyId,(places.get(row.propertyId)??0)+1);
+  for(const entry of [...(drips?.active??[]),...(drips?.replied??[])])places.set(entry.propertyId,(places.get(entry.propertyId)??0)+1);
+  const winners=new Map<string,QueueRow>();
+  for(const [propertyId,count] of places){
+    const lookup=id===propertyId?lookupOf(pin,propertyId):undefined;
+    if(count<2&&!lookup)continue;
+    const winner=pickAuthoritative(newestCopy(listCopies(snapshot,drips,propertyId,dripsAt)),lookup).row;
+    if(winner)winners.set(propertyId,winner);
   }
-  // stagePages groups replied pins by drip.stage, so the stage follows the winning row.
-  const refill=(drip:MyLeadDripSnapshot['active'][number])=>drip.propertyId===id?{...drip,queueRow:lookup.row,stage:lookup.row.stage}:drip;
-  return {snapshot:{...snapshot,stages},drips:drips?{...drips,active:drips.active.map(refill),replied:drips.replied.map(refill)}:drips};
+  if(!winners.size)return {snapshot,drips};
+  for(const key of stageKeys){
+    const page=stages[key];if(!page)continue;
+    const placed=new Set<string>();
+    stages[key]={...page,rows:page.rows.flatMap(row=>{
+      const winner=winners.get(row.propertyId);
+      if(!winner)return [row];
+      if(winner.stage!==row.stage||placed.has(row.propertyId))return [];
+      placed.add(row.propertyId);return [winner];
+    })};
+  }
+  const apply=(entry:DripEntry):DripEntry=>{const winner=winners.get(entry.propertyId);return winner?{...entry,queueRow:winner,stage:winner.stage}:entry;};
+  return {snapshot:{...snapshot,stages},drips:drips?{...drips,active:drips.active.map(apply),replied:drips.replied.map(apply)}:drips};
 }
 const refreshTime = new Intl.DateTimeFormat('en-US', {month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',timeZone:'America/Chicago',timeZoneName:'short'});
 
@@ -123,8 +142,8 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
    * episode (higher queueVersion) from the lists may replace it. Never a stale copy
    * from another episode.
    */
-  const findRow=(readSnapshot:QueueSnapshot|null,readDrips:MyLeadDripSnapshot|null|undefined,id:string,pin?:PinRead)=>
-    pickAuthoritative(newestCopy(listCopies(readSnapshot,readDrips,id)),lookupOf(pin,id)).row;
+  const findRow=(readSnapshot:QueueSnapshot|null,readDrips:MyLeadDripSnapshot|null|undefined,id:string,pin?:PinRead,dripsAt?:string|null)=>
+    pickAuthoritative(newestCopy(listCopies(readSnapshot,readDrips,id,dripsAt)),lookupOf(pin,id)).row;
   const mutationReads=useRef(new Map<string,{scope:string;episodeId:string|null;requestId:number;read:Promise<CurrentRead>}>());
   const renderedRead=useRef<{snapshot:QueueSnapshot;requestId:number;scope:string}|null>(null);
   useEffect(()=>{
@@ -207,7 +226,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   // Newest copy across what is displayed (including load-more pages) and the freshest read,
   // reconciled with the freshest pin lookup.
   const rawRow=(id:string)=>pickAuthoritative(
-    newestCopy([...listCopies(snapshot,drips,id),...listCopies(freshRead.current.snapshot,freshRead.current.drips,id)]),
+    newestCopy([...listCopies(snapshot,drips,id,lastCheckedAt),...listCopies(freshRead.current.snapshot,freshRead.current.drips,id)]),
     lookupOf(actionPin.current,id)).row;
   const finishOpening=async(opening:Opening,read:Promise<CurrentRead>)=>{
     pendingOpening.current=opening;
@@ -299,7 +318,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     setSeenFocusKey(focusKey);setClearedForKey(null);
     setTarget(previous=>({propertyId:focus?.propertyId??null,notice:focus?.notice??null,nonce:previous.nonce+1}));
     setPinNotice(null);
-    {const seeded:PinRead=focus?.propertyId&&focus.pin?{id:focus.propertyId,lookup:{status:'found',row:focus.pin,snapshotAt:snapshot?.snapshotAt??''}}:null;setPinRead(seeded);actionPin.current=seeded;}
+    {const seeded:PinRead=focus?.propertyId&&focus.pin?{id:focus.propertyId,lookup:{status:'found',row:focus.pin,snapshotAt:snapshot?.snapshotAt??''}}:null;setPinRead(seeded);}
     if(focus?.propertyId){
       // A deep link always opens its rep's queue unfiltered.
       if(focus.memberId&&focus.memberId!==member)setMember(focus.memberId);
@@ -307,18 +326,21 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     }
   }
   useEffect(()=>{pinWanted.current=target.propertyId;},[target.propertyId]);
+  // A new deep link reseeds the displayed pin during render; the action pin follows after commit.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(()=>{actionPin.current=pinRead;},[seenFocusKey]);
   const clearFocus=()=>{
     if(target.propertyId||target.notice)setTarget(previous=>({propertyId:null,notice:null,nonce:previous.nonce}));
     // Dropping the target drops the pin, and any in-flight pin read is ignored.
     pinWanted.current=null;setPinRead(null);actionPin.current=null;setPinNotice(null);
     if(focusKey!=='||'&&clearedForKey!==focusKey){setClearedForKey(focusKey);router.replace('/my-leads',{scroll:false});}
   };
-  const view=snapshot?reconcileWithPin(snapshot,drips,pinRead,target.propertyId):null;
+  const view=snapshot?reconcileWithPin(snapshot,drips,pinRead,target.propertyId,lastCheckedAt):null;
   const pages=snapshot&&view?stagePages(view.snapshot,view.drips):null;
   // Show the lead in place when a loaded page has it; otherwise pin it at the top of its section.
   const pinnedLookup=target.propertyId&&pinRead?.id===target.propertyId&&pinRead.lookup.status==='found'?pinRead.lookup.row:null;
   const pinnedView=pages&&snapshot&&pinnedLookup&&!(Object.values(pages).some(page=>page.rows.some(row=>row.propertyId===pinnedLookup.propertyId))||view?.drips?.active.some(row=>row.propertyId===pinnedLookup.propertyId))
-    ?{...queueRowView(findRow(snapshot,drips,pinnedLookup.propertyId,pinRead)??pinnedLookup,snapshot.snapshotAt),dripReply:drips?.replied.find(row=>row.propertyId===pinnedLookup.propertyId)??null}:null;
+    ?{...queueRowView(findRow(snapshot,drips,pinnedLookup.propertyId,pinRead,lastCheckedAt)??pinnedLookup,snapshot.snapshotAt),dripReply:drips?.replied.find(row=>row.propertyId===pinnedLookup.propertyId)??null}:null;
   if(pages)for(const stage of loadingStages)pages[stage].isLoadingMore=true;
   const motivation=dialog?.row.motivationKind==='specified'?{kind:'specified' as const,text:dialog.row.motivationText??''}:dialog?.row.motivationKind==='no_motivation'?{kind:'no_motivation' as const,text:null}:null;
   // Completion callbacks belong to one opening, even when the same lead is reopened.

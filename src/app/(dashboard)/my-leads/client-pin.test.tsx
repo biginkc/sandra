@@ -340,5 +340,35 @@ describe("MyLeadsClient pinned deep-link row", () => {
     expect(screen.getByTestId("my-leads-section-not_contacted").querySelector('[data-lead-id="beyond-9"]')).toBeNull()
     expect(leadEls("beyond-9")).toHaveLength(1)
   })
+
+  it("renders one row in the right section when a newer replied-drip row meets a retained stage snapshot", async () => {
+    const user = userEvent.setup()
+    const other = row("loaded-2", "2 Other Lane")
+    render(ui(null, snap([loaded, other], 25)))
+    await user.click(screen.getByRole("button", { name: "Show details for 2 Other Lane" })) // open details retain the list
+    const newer = { ...loaded, stage: "contacted" as const, queueVersion: 3 }
+    const replied = { ...dripOf(newer), stage: "contacted" as const, status: "Replied" as never, repliedAt: "2026-09-11T13:00:00Z" }
+    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([loaded, other], 25, "2026-09-11T14:05:00.000Z"), kpis, drips: { ...noDrips(), replied: [replied], repliedCount: 1 } })
+    await refreshNow()
+    await waitFor(() => expect(screen.getByTestId("my-leads-section-contacted").querySelector('[data-lead-id="loaded-1"]')).not.toBeNull())
+    expect(screen.getByTestId("my-leads-section-not_contacted").querySelector('[data-lead-id="loaded-1"]')).toBeNull()
+    expect(leadEls("loaded-1")).toHaveLength(1)
+  })
+
+  it("an unchanged episode and version with a changed sharedStatus saves the fresh sharedStatus", async () => {
+    const user = userEvent.setup()
+    mocks.submitMyLeadCommand.mockResolvedValue({ ok: true })
+    render(ui(null, snap([loaded], 25)))
+    await user.click(screen.getByRole("button", { name: "Show details for 1 Loaded Lane" })) // retain the displayed list
+    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([{ ...loaded, sharedStatus: "interested" }], 25, "2026-09-11T14:05:00.000Z"), kpis, drips: noDrips() })
+    await refreshNow()
+    await waitFor(() => expect(mocks.loadMyLeads).toHaveBeenCalled())
+    await user.click(within(screen.getByTestId("my-lead-actions-loaded-1")).getByRole("button", { name: "Contract signed" }))
+    await screen.findByRole("dialog")
+    fireEvent.change(screen.getByLabelText("Signed at"), { target: { value: "2026-09-11T10:00" } })
+    await user.click(screen.getByRole("button", { name: "Record contract" }))
+    await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalled())
+    expect(mocks.submitMyLeadCommand.mock.calls[0][1]).toMatchObject({ expectedQueueVersion: 1, expectedSharedStatus: "interested" })
+  })
 })
 

@@ -55,7 +55,8 @@ export function LogFollowUpButton({ propertyId, propertyLabel, assigneeId, disab
       if (result.message === MY_LEAD_ROW_ERROR_COPY) throw new Error("row read failed")
       return null
     },
-    onCommitted: async () => { router.refresh() },
+    // The page refreshes once, when the save settles.
+    onCommitted: () => Promise.resolve(),
     onSettled: ({ dripFailure }) => {
       if (dripFailure) setMessage(dripFailure)
       router.refresh()

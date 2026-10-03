@@ -74,6 +74,8 @@ describe("LogFollowUpButton", () => {
     await user.click(screen.getByRole("button", { name: "Log follow-up" }))
     await user.click(await screen.findByRole("button", { name: "Save first" }))
     await waitFor(() => expect(mocks.refresh).toHaveBeenCalled())
+    await act(async () => {})
+    expect(mocks.refresh).toHaveBeenCalledTimes(1)
     expect(mocks.submitMyLeadCommand).toHaveBeenCalledWith("log-attempt", expect.objectContaining({ propertyId: "lead-1", expectedEpisodeId: "ep-1", expectedQueueVersion: 3, expectedSharedStatus: "interested" }))
     expect(screen.getByRole("dialog")).toBeInTheDocument()
     mocks.refresh.mockClear()
