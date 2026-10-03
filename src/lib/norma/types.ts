@@ -29,6 +29,20 @@ export const NORMA_OUTCOMES = [
 ] as const;
 export type NormaOutcome = (typeof NORMA_OUTCOMES)[number];
 
+/**
+ * The stored outcome a rep sets with "Mark reviewed". Never produced by a
+ * call: the webhook / reconcile path only knows NORMA_OUTCOMES.
+ */
+export const NORMA_REVIEWED_OUTCOME = "reviewed" as const;
+export type NormaStoredOutcome = NormaOutcome | typeof NORMA_REVIEWED_OUTCOME;
+
+/** What the mark-reviewed RPC answers. */
+export type NormaMarkReviewedRpcResult =
+  | { result: "reviewed"; status: "completed"; task_closed: boolean; drips_kept_paused: number }
+  | { result: "already_reviewed"; status: "completed" }
+  | { result: "invalid_state"; status: string }
+  | { result: "not_found" | "not_authorized" };
+
 /** Reasons `fn_norma_eligibility` / `fn_norma_create_request` can block a call. */
 export type NormaBlockReason =
   | "invalid_request"

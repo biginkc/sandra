@@ -234,6 +234,8 @@ export function formatLeadEventSentence(
       return "Norma's first call was not answered";
     case "norma_call_completed":
       return `Norma call finished — ${normaOutcomeLabel(readString(payload, "outcome"))}`;
+    case "norma_call_reviewed":
+      return `${actor} marked the Norma call reviewed`;
     case "lead_created":
       return `${actor} created the lead`;
     case "qualified":

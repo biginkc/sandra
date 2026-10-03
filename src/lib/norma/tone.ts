@@ -26,7 +26,8 @@ export function isNormaConnectedOutcome(outcome: string | null | undefined): boo
 /** Tone of a finished call's outcome. A missing or unrecognised outcome needs a person. */
 export function normaOutcomeTone(outcome: string | null | undefined): NormaTone {
   if (isNormaConnectedOutcome(outcome)) return "green";
-  if (outcome === "no_answer") return "neutral";
+  // A person looked and took it over: nothing is waiting, but nobody was reached either.
+  if (outcome === "no_answer" || outcome === "reviewed") return "neutral";
   return "amber";
 }
 

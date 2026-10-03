@@ -9,6 +9,7 @@ import {
   type NormaCompletionPayload,
   type NormaCreateResult,
   type NormaEligibility,
+  type NormaMarkReviewedRpcResult,
   type NormaOutcome,
 } from "./types";
 
@@ -166,6 +167,29 @@ export async function completeNormaCall(
     ...raw,
     ...(raw.task_id !== undefined ? { taskId: raw.task_id as string | null } : {}),
   } as NormaCompleteResult;
+}
+
+/**
+ * A rep takes over a request parked in needs_review: it completes as
+ * "reviewed", its review task closes, and its drips stay paused. Replay-safe.
+ * Membership of the lead's org is enforced in SQL for `userId`. Throws on any
+ * transport / RPC error or an unrecognised answer, so callers fail closed.
+ */
+export async function markNormaReviewed(
+  client: Client,
+  params: { requestId: string; propertyId: string; userId: string },
+): Promise<NormaMarkReviewedRpcResult> {
+  const { data, error } = await client.rpc("fn_norma_mark_reviewed", {
+    p_request_id: params.requestId,
+    p_property_id: params.propertyId,
+    p_user_id: params.userId,
+  });
+  if (error) fail("fn_norma_mark_reviewed", error);
+  const result = (data as { result?: unknown } | null)?.result;
+  if (!["reviewed", "already_reviewed", "invalid_state", "not_found", "not_authorized"].includes(String(result))) {
+    throw new Error("fn_norma_mark_reviewed: unexpected result");
+  }
+  return data as NormaMarkReviewedRpcResult;
 }
 
 /** Resume only the pauses this request made itself; safe to repeat. */
