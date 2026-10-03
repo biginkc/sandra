@@ -16,6 +16,11 @@ export type BlandSendCallParams = {
   phoneNumber: string;
   requestId: string;
   idempotencyKey: string;
+  /**
+   * Call-twice attempt from #771 (`1` or `2`). Absent on the single-call path.
+   * Present and not `2`: hang up. Absent or `2`: leave the voicemail.
+   */
+  attempt?: number;
   /** Pathway variables, passed as Bland `request_data`. */
   variables: Record<string, string>;
 };
@@ -74,10 +79,20 @@ async function readJson(response: Response): Promise<Record<string, unknown> | n
 
 /** Spoken after the beep. Digits are spaced so the voice reads them one by one. */
 export const NORMA_VOICEMAIL_MESSAGE =
-  "Hi, this is Norma with The BMH Group following up on your property. Please call us back at 8 1 6, 7 0 5, 3 5 0 1. Thank you.";
+  "Hi, this is Norma with The BMH Group, following up on your offer for your property. Please call us back at 8 1 6, 2 8 0, 4 1 8 1.";
 
 /** Bland `max_duration` is minutes (https://docs.bland.ai/api-v1/post/calls). */
 export const NORMA_MAX_DURATION_MINUTES = 10;
+
+/**
+ * A single call (no attempt) and attempt 2 leave the message. Attempt 1 hangs
+ * up so the call-twice retry does not leave a voicemail before the second dial.
+ * A message is omitted on hangup: Bland treats a message as leave-message.
+ */
+export function normaVoicemail(attempt: number | undefined): { action: "hangup" } | { action: "leave_message"; message: string } {
+  if (attempt != null && attempt !== 2) return { action: "hangup" };
+  return { action: "leave_message", message: NORMA_VOICEMAIL_MESSAGE };
+}
 
 /** Build the exact send-call body. Exported for tests. No pathway script fields (`task`, `prompt`, `first_sentence`). */
 export function buildSendCallBody(config: NormaBlandConfig, params: BlandSendCallParams) {
@@ -91,11 +106,8 @@ export function buildSendCallBody(config: NormaBlandConfig, params: BlandSendCal
     from: config.fromNumber,
     metadata: { request_id: params.requestId, idempotency_key: params.idempotencyKey },
     webhook: config.webhookUrl,
-    // Leave a short neutral voicemail (Jarrad 2026-10-02). No Bland-side retry.
-    voicemail: {
-      action: "leave_message",
-      message: NORMA_VOICEMAIL_MESSAGE,
-    },
+    // No Bland-side retry. Voicemail depends on the call-twice attempt, when present.
+    voicemail: normaVoicemail(params.attempt),
     // Record for quality (the opening line discloses it) and cap call length.
     record: true,
     max_duration: NORMA_MAX_DURATION_MINUTES,

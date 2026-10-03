@@ -30,7 +30,7 @@ Supersedes the "Proposed plan, not yet approved" section of Astra's `DECISIONS-A
 ## Decisions this plan implements
 - Button visible to all active members.
 - Hard blocks: DNC (lead lock and global registry) and `not_interested`.
-- No answer: hang up, no voicemail, no retry.
+- No answer: leave the short callback voicemail on a single call and on call-twice attempt 2; hang up on attempt 1 when that attempt number is present. No Bland-side retry. `pathway_version` is omitted unless `NORMA_BLAND_PATHWAY_VERSION` is a strict integer, so Bland uses the published production pathway.
 - Drip: pause on request; resume on confirmed no answer; stay paused if Norma reached the seller.
 - Seller tells Norma to stop: lead marked `not_interested` (not DNC).
 - Callback requested: callback task for Jarrad, labelled unconfirmed.
@@ -74,7 +74,7 @@ Extend `PauseReason` with `norma_call`; add lead event types `norma_call_request
 1. Dispatch gate (section 0).
 2. Atomic claim: `requested → dispatching` (single conditional update; losers exit).
 3. Re-run `fn_norma_eligibility` immediately before dialling; if it fails, mark `dispatch_rejected` and release owned pauses.
-4. Bland send-call: pathway id + integer `pathway_version` (Bland's field is an integer, not the agent semver `0.0.17`), `from` = local number, `metadata {request_id, idempotency_key}`, webhook URL, voicemail action `hangup`, no `retry`, rep context and lead facts as variables.
+4. Bland send-call: pathway id, omit `pathway_version` unless `NORMA_BLAND_PATHWAY_VERSION` matches `/^(0|[1-9]\d*)$/` and `Number.isSafeInteger` (blank or `production` uses Bland's published production version; `latest` is not an alias), `from` = local number, `metadata {request_id, idempotency_key}`, webhook URL, voicemail `leave_message` unless `attempt` is present and is not 2 (then `hangup`), `record` true, `max_duration` 10 minutes, no `retry`, rep context and lead facts as variables.
 5. Result handling:
    - Explicit rejection (4xx with no call created): `dispatch_rejected`; release owned pauses.
    - Success: bind `bland_call_id` and move `dispatching → dispatched` with a conditional update that cannot overwrite `completed`.
@@ -119,9 +119,9 @@ Cron every 5 minutes over `requested` (stranded), `dispatching`, `dispatched` an
 - Stranded `requested` rows are dispatched only if younger than a short window; otherwise `dispatch_rejected` with pauses released.
 - **Deviation (M2, accepted):** Bland cannot be queried by metadata, so "Bland confirms no call exists" is only possible for a bound call id, and a 404 on a bound id is treated as ambiguous: it escalates to `needs_review` after the window instead of `dispatch_rejected` (a call that Bland once accepted is never auto-closed). Rows with no id escalate by age. The sweep orders by `next_check_at` and pushes each examined row out, so stuck rows cannot starve fresh ones; "close only if still `requested`" callers pass an expected status so they cannot reject a row a dispatcher already claimed.
 
-### 7. Dispatch contract (pin before build)
-**Pinned (M2):** live pathway integer version `3` (agent snapshot 0.0.4), default of `NORMA_BLAND_PATHWAY_VERSION`; staging 0.0.17 has no published integer version. `call_outcome` leading token map and the nine extraction variables are in `src/lib/norma/outcome.ts`. The callback preference is free text, so callback tasks are due now with the raw text in the description.
-Map the existing `0.0.17` outputs (`call_outcome`, `follow_up_preference`, qualification fields) to Sandra outcomes; identify the integer `pathway_version` for that snapshot. Only if a needed field is missing does a pathway change get proposed, and that is a Jarrad gate.
+### 7. Dispatch contract
+**Pathway:** Sandra does not pin a version. Omitting Bland `pathway_version` uses whatever version is published as production. `NORMA_BLAND_PATHWAY_VERSION` pins only when it is a strict non-negative integer (`/^(0|[1-9]\d*)$/` and `Number.isSafeInteger`). Unset, blank, and `production` omit the field. `latest` is not accepted. `call_outcome` leading token map and the nine extraction variables are in `src/lib/norma/outcome.ts`. The callback preference is free text, so callback tasks are due now with the raw text in the description.
+The outcome map still reads the pathway's `call_outcome`, `follow_up_preference`, and qualification fields. A pathway publish that drops one of those fields is a Jarrad gate.
 
 ### 8. Verification
 - Unit: eligibility (incl. global registry and fail-closed), dispatch gate, state transitions, outcome mapping, signature check.

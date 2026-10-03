@@ -6,8 +6,9 @@ import type { NormaCompletionPayload, NormaOutcome } from "./types";
  * so they cannot disagree. Anything that does not map cleanly is `unknown`
  * (which parks the request for a human), never a guess.
  *
- * Contract: the LIVE pathway (integer version 3, agent snapshot 0.0.4), read
- * from the Bland account. All extraction variables are strings.
+ * Contract: the pathway Bland currently has published as production. Sandra
+ * does not pin `pathway_version` unless `NORMA_BLAND_PATHWAY_VERSION` is a
+ * strict integer. All extraction variables are strings.
  *   call_outcome  leading token + a free-text evidence sentence.
  *   follow_up_preference  free text holding any callback time and timezone
  *                         (there is no ISO time).

@@ -37,11 +37,23 @@ describe("bland send-call classification", () => {
       background_track: "office",
     });
     expect(NORMA_VOICEMAIL_MESSAGE).toBe(
-      "Hi, this is Norma with The BMH Group following up on your property. Please call us back at 8 1 6, 7 0 5, 3 5 0 1. Thank you.",
+      "Hi, this is Norma with The BMH Group, following up on your offer for your property. Please call us back at 8 1 6, 2 8 0, 4 1 8 1.",
     );
     expect(JSON.stringify(body)).not.toMatch(/"(task|prompt|first_sentence|script)"/);
     expect("retry" in body).toBe(false);
     expect(Number.isInteger(body.pathway_version)).toBe(true);
+  });
+
+  it("hangs up on attempt 1 and leaves the voicemail only on attempt 2", () => {
+    const first = buildSendCallBody(config, { ...params, attempt: 1 });
+    expect(first.voicemail).toEqual({ action: "hangup" });
+    expect(first.voicemail).not.toHaveProperty("message");
+    const second = buildSendCallBody(config, { ...params, attempt: 2 });
+    expect(second.voicemail).toEqual({ action: "leave_message", message: NORMA_VOICEMAIL_MESSAGE });
+    expect(buildSendCallBody(config, params).voicemail).toEqual({
+      action: "leave_message",
+      message: NORMA_VOICEMAIL_MESSAGE,
+    });
   });
 
   it("omits pathway_version when unpinned so Bland uses the published production version", () => {

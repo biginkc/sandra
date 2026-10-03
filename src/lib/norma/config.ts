@@ -54,21 +54,22 @@ export const DEFAULT_BACKGROUND_TRACK: NormaBackgroundTrack = "office";
 
 const FALSE_VALUES = new Set(["0", "false", "no", "off"]);
 
-/** Env values that mean "do not send pathway_version" (Bland production). */
-const OMIT_PATHWAY_VERSION = new Set(["production", "latest"]);
+/** Strict non-negative integer: no leading zeros, signs, decimals, or exponents. */
+const INTEGER_PATHWAY_VERSION = /^(0|[1-9]\d*)$/;
 
 export const DEFAULT_BLAND_BASE_URL = "https://api.bland.ai";
 export const DEFAULT_BLAND_TIMEOUT_MS = 10_000;
 
 /**
  * null omits `pathway_version`. "invalid" fails config so a bad pin never dials.
- * Unset, blank, "production", and "latest" omit the field.
+ * Unset, blank, and "production" omit the field. "latest" is not an alias.
  */
 function parsePathwayVersion(raw: string | undefined): number | null | "invalid" {
   const text = (raw ?? "").trim();
-  if (!text || OMIT_PATHWAY_VERSION.has(text.toLowerCase())) return null;
+  if (!text || text.toLowerCase() === "production") return null;
+  if (!INTEGER_PATHWAY_VERSION.test(text)) return "invalid";
   const version = Number(text);
-  if (!Number.isInteger(version) || version < 0) return "invalid";
+  if (!Number.isSafeInteger(version)) return "invalid";
   return version;
 }
 

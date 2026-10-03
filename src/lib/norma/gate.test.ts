@@ -35,11 +35,16 @@ describe("dispatch gate", () => {
       NORMA_BLAND_FROM_NUMBER: "+12135550100", NORMA_BLAND_WEBHOOK_URL: "https://x.test/h", NORMA_BLAND_VOICE: "voice-1",
     };
     expect(readNormaBlandConfig(ok)).toMatchObject({ pathwayVersion: 17, timeoutMs: 10_000, baseUrl: "https://api.bland.ai" });
-    expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_PATHWAY_VERSION: "0.0.17" })).toBeNull();
-    expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_PATHWAY_VERSION: "staging" })).toBeNull();
-    expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_PATHWAY_VERSION: "-1" })).toBeNull();
-    // Unset, blank, or the production aliases omit the pin. Bland then uses production.
-    for (const version of [undefined, "", "  ", "production", "latest", " Production ", "LATEST"]) {
+    expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_PATHWAY_VERSION: "0" })).toMatchObject({ pathwayVersion: 0 });
+    expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_PATHWAY_VERSION: " 17 " })).toMatchObject({ pathwayVersion: 17 });
+    expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_PATHWAY_VERSION: String(Number.MAX_SAFE_INTEGER) })).toMatchObject({
+      pathwayVersion: Number.MAX_SAFE_INTEGER,
+    });
+    for (const version of ["0.0.17", "staging", "-1", "latest", "LATEST", "017", "17.0", "1e2", "+17", "9007199254740993", "1.0"]) {
+      expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_PATHWAY_VERSION: version })).toBeNull();
+    }
+    // Unset, blank, or "production" omit the pin. Bland then uses production.
+    for (const version of [undefined, "", "  ", "production", " Production ", "PRODUCTION"]) {
       expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_PATHWAY_VERSION: version })).toMatchObject({ pathwayVersion: null });
     }
     expect(readNormaBlandConfig({ ...ok, NORMA_BLAND_WEBHOOK_URL: "http://x.test" })).toBeNull();
