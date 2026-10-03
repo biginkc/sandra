@@ -37,6 +37,10 @@ type QueryBuilder<T = unknown> = PromiseLike<QueryResult<T>> & {
 
 type PreviewClient = {
   from<T = unknown>(table: string): QueryBuilder<T>;
+  rpc<T = unknown>(
+    functionName: string,
+    args: Record<string, unknown>,
+  ): PromiseLike<QueryResult<T[]>>;
   auth?: {
     admin?: {
       getUserById(
@@ -80,6 +84,14 @@ type AttemptRow = {
   id: string;
   occurred_at: string;
   outcome: string | null;
+};
+
+type AttemptFactsRow = {
+  latest_attempt_id: string | null;
+  latest_attempt_occurred_at: string | null;
+  latest_attempt_outcome: string | null;
+  reached_call_id: string | null;
+  reached_call_occurred_at: string | null;
 };
 
 type MessageRow = {
@@ -311,43 +323,43 @@ export async function loadPreviewData({
     "last successful SMS",
   );
 
-  const latestAttemptPromise = readOne(
-    db
-      .from<AttemptRow>("acquisition_attempts")
-      .select("id, occurred_at, outcome")
-      .eq("org_id", normalizedOrgId)
-      .eq("property_id", normalizedPropertyId)
-      .order("occurred_at", { ascending: false })
-      .order("id", { ascending: false })
-      .limit(1)
-      .maybeSingle(),
-    "latest attempt",
+  // acquisition_attempts is deliberately exposed through this narrow RPC.
+  // The service role can execute the scoped function without receiving broad
+  // table read access, so this remains the same tenant boundary in production
+  // and in the PostgREST integration test.
+  const attemptFactsPromise = readMany<AttemptFactsRow[]>(
+    db.rpc<AttemptFactsRow>("get_slack_preview_attempt_facts", {
+      p_org_id: normalizedOrgId,
+      p_property_id: normalizedPropertyId,
+    }),
+    "attempt facts",
   );
 
-  const reachedCallPromise = readOne(
-    db
-      .from<{ id: string; occurred_at: string }>("acquisition_attempts")
-      .select("id, occurred_at")
-      .eq("org_id", normalizedOrgId)
-      .eq("property_id", normalizedPropertyId)
-      .eq("attempt_kind", "call")
-      .eq("outcome", "reached")
-      .order("occurred_at", { ascending: false })
-      .order("id", { ascending: false })
-      .limit(1)
-      .maybeSingle(),
-    "last reached call",
-  );
-
-  const [contact, ownerName, messageRows, successfulMessage, latestAttempt, reachedCall] =
+  const [contact, ownerName, messageRows, successfulMessage, attemptFacts] =
     await Promise.all([
       contactPromise,
       ownerPromise,
       messagesPromise,
       successfulMessagePromise,
-      latestAttemptPromise,
-      reachedCallPromise,
+      attemptFactsPromise,
     ]);
+
+  const attemptFact = attemptFacts[0] ?? null;
+  const latestAttempt: AttemptRow | null =
+    attemptFact?.latest_attempt_id && attemptFact.latest_attempt_occurred_at
+      ? {
+          id: attemptFact.latest_attempt_id,
+          occurred_at: attemptFact.latest_attempt_occurred_at,
+          outcome: attemptFact.latest_attempt_outcome,
+        }
+      : null;
+  const reachedCall =
+    attemptFact?.reached_call_id && attemptFact.reached_call_occurred_at
+      ? {
+          id: attemptFact.reached_call_id,
+          occurred_at: attemptFact.reached_call_occurred_at,
+        }
+      : null;
 
   const scopedContact =
     contact &&

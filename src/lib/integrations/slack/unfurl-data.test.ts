@@ -22,6 +22,11 @@ type QueryCall = {
   limit: number | null;
 };
 
+type RpcCall = {
+  functionName: string;
+  args: Record<string, unknown>;
+};
+
 type Fixture = {
   property?: Record<string, unknown> | null;
   contact?: Record<string, unknown> | null;
@@ -34,7 +39,11 @@ type Fixture = {
 
 function fakeClient(fixture: Fixture = {}) {
   const calls: QueryCall[] = [];
+  const rpcCalls: RpcCall[] = [];
   const organization = { id: ORG, name: "Preview Org" };
+
+  const field = (row: Record<string, unknown> | null | undefined, key: string) =>
+    typeof row?.[key] === "string" ? row[key] as string : null;
 
   const resolve = (call: QueryCall) => {
     if (call.table === "organizations") return { data: organization, error: null };
@@ -73,10 +82,6 @@ function fakeClient(fixture: Fixture = {}) {
         error: null,
       };
     }
-    if (call.table === "acquisition_attempts") {
-      const reached = "attempt_kind" in call.equals && "outcome" in call.equals;
-      return { data: reached ? fixture.reachedCall ?? null : fixture.latestAttempt ?? null, error: null };
-    }
     return { data: null, error: null };
   };
 
@@ -98,6 +103,21 @@ function fakeClient(fixture: Fixture = {}) {
       };
       return builder;
     },
+    rpc(functionName: string, args: Record<string, unknown>) {
+      rpcCalls.push({ functionName, args });
+      return Promise.resolve({
+        data: [{
+          latest_attempt_id: field(fixture.latestAttempt, "id"),
+          latest_attempt_occurred_at: field(fixture.latestAttempt, "occurred_at"),
+          latest_attempt_outcome: field(fixture.latestAttempt, "outcome"),
+          reached_call_id: fixture.reachedCall
+            ? field(fixture.reachedCall, "id") ?? "reached-call"
+            : null,
+          reached_call_occurred_at: field(fixture.reachedCall, "occurred_at"),
+        }],
+        error: null,
+      });
+    },
     auth: {
       admin: {
         getUserById: async () => ({ data: { user: fixture.user === undefined ? {
@@ -108,7 +128,11 @@ function fakeClient(fixture: Fixture = {}) {
     },
   };
 
-  return { client: client as unknown as SupabaseClient<Database>, calls };
+  return {
+    client: client as unknown as SupabaseClient<Database>,
+    calls,
+    rpcCalls,
+  };
 }
 
 function callsFor(calls: QueryCall[], table: string) {
@@ -117,7 +141,7 @@ function callsFor(calls: QueryCall[], table: string) {
 
 describe("loadPreviewData", () => {
   it("uses the authoritative org/property/message/attempt contract and every tenant filter", async () => {
-    const { client, calls } = fakeClient({
+    const { client, calls, rpcCalls } = fakeClient({
       messages: [
         { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", created_at: "2026-10-03T12:01:00.000Z", body: "Them", direction: "inbound", status: "received", metadata: null },
         { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", created_at: "2026-10-03T12:00:00.000Z", body: "Us", direction: "outbound", status: "failed", metadata: { mediaUrls: ["x"] } },
@@ -180,27 +204,26 @@ describe("loadPreviewData", () => {
       limit: 1,
     });
 
-    const attemptCalls = callsFor(calls, "acquisition_attempts");
-    for (const call of attemptCalls) {
-      expect(call.equals.org_id).toBe(ORG);
-      expect(call.equals.property_id).toBe(PROPERTY);
-      expect(call.orders).toEqual([
-        { column: "occurred_at", ascending: false },
-        { column: "id", ascending: false },
-      ]);
-    }
-    expect(attemptCalls.find((call) => call.equals.attempt_kind === undefined)).toMatchObject({
-      select: "id, occurred_at, outcome",
-      equals: { org_id: ORG, property_id: PROPERTY },
+    expect(rpcCalls).toEqual([{
+      functionName: "get_slack_preview_attempt_facts",
+      args: { p_org_id: ORG, p_property_id: PROPERTY },
+    }]);
+    expect(callsFor(calls, "acquisition_attempts")).toHaveLength(0);
+  });
+
+  it("maps a missing RPC attempt row to truthful null facts", async () => {
+    const { client, rpcCalls } = fakeClient({
+      latestAttempt: null,
+      reachedCall: null,
     });
-    expect(attemptCalls.find((call) => call.equals.attempt_kind === "call")).toMatchObject({
-      select: "id, occurred_at",
-      equals: {
-        org_id: ORG,
-        property_id: PROPERTY,
-        attempt_kind: "call",
-        outcome: "reached",
-      },
+
+    const result = await loadPreviewData({ client, orgId: ORG, propertyId: PROPERTY });
+
+    expect(result?.latestAttempt).toBeNull();
+    expect(result?.lastContactAt).toBeNull();
+    expect(rpcCalls[0]).toEqual({
+      functionName: "get_slack_preview_attempt_facts",
+      args: { p_org_id: ORG, p_property_id: PROPERTY },
     });
   });
 

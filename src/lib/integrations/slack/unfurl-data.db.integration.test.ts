@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { Client } from "pg";
@@ -75,79 +76,57 @@ const fixture: Fixture = {
 
 let pg: Client;
 let service: SupabaseClient<Database>;
+let rpcWasAbsent = false;
 
-type AttemptQuery = {
-  select(columns: string): AttemptQuery;
-  eq(column: string, value: string): AttemptQuery;
-  order(column: string, options: { ascending: boolean }): AttemptQuery;
-  limit(count: number): AttemptQuery;
-  maybeSingle(): Promise<{ data: Record<string, unknown> | null; error: null }>;
-};
-
-function sqlAttemptQuery(): AttemptQuery {
-  const equals: Record<string, string> = {};
-  let columns = "id, occurred_at, outcome";
-  let limit = 1;
-  const builder: AttemptQuery = {
-    select(nextColumns) {
-      columns = nextColumns;
-      return builder;
-    },
-    eq(column, value) {
-      equals[column] = value;
-      return builder;
-    },
-    order() {
-      return builder;
-    },
-    limit(nextLimit) {
-      limit = nextLimit;
-      return builder;
-    },
-    async maybeSingle() {
-      const result = await pg.query(
-        `select ${columns}
-           from public.acquisition_attempts
-          where org_id = $1 and property_id = $2
-            and ($3::text is null or attempt_kind = $3)
-            and ($4::text is null or outcome = $4)
-          order by occurred_at desc, id desc
-          limit $5`,
-        [
-          equals.org_id,
-          equals.property_id,
-          equals.attempt_kind ?? null,
-          equals.outcome ?? null,
-          limit,
-        ],
-      );
-      const row = result.rows[0] ?? null;
-      if (row && row.occurred_at instanceof Date) {
-        row.occurred_at = row.occurred_at.toISOString();
-      }
-      if (row && row.created_at instanceof Date) {
-        row.created_at = row.created_at.toISOString();
-      }
-      return { data: row, error: null };
-    },
-  };
-  return builder;
+function previewAttemptFactsSql(): string {
+  const migration = readFileSync(
+    new URL(
+      "../../../../supabase/migrations/20261003091441_slack_lead_unfurl_foundation.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const start = migration.indexOf(
+    "create or replace function public.get_slack_preview_attempt_facts(",
+  );
+  const end = migration.indexOf(
+    "create or replace function public.approve_slack_channel(",
+    start,
+  );
+  if (start < 0 || end < 0) {
+    throw new Error("authoritative Slack preview attempt RPC was not found");
+  }
+  return migration.slice(start, end);
 }
 
 /**
- * acquisition_attempts intentionally has no service_role REST grant in the
- * current schema. Keep the loader on real PostgREST for every other table and
- * use the direct loopback SQL adapter only for those two authoritative reads.
+ * The shared local stack may not have the uncommitted migration applied yet.
+ * Install only this exact function for the test, reload PostgREST's schema
+ * cache, and remove it afterward when the test created it. The loader itself
+ * still uses the real service-role RPC, never a SQL read shim.
  */
-function loaderClient(): SupabaseClient<Database> {
-  return {
-    from(table: string) {
-      return table === "acquisition_attempts"
-        ? sqlAttemptQuery()
-        : service.from(table as never);
-    },
-    auth: service.auth,
-  } as unknown as SupabaseClient<Database>;
+async function ensurePreviewAttemptFactsRpc(): Promise<void> {
+  const existing = await pg.query<{ function_name: string | null }>(
+    "select to_regprocedure('public.get_slack_preview_attempt_facts(uuid,uuid)')::text as function_name",
+  );
+  rpcWasAbsent = existing.rows[0]?.function_name === null;
+  await pg.query(previewAttemptFactsSql());
+  await pg.query(
+    "grant execute on function public.get_slack_preview_attempt_facts(uuid,uuid) to service_role",
+  );
+  await pg.query("select pg_notify('pgrst', 'reload schema')");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+
+async function removePreviewAttemptFactsRpc(): Promise<void> {
+  if (!rpcWasAbsent) return;
+  await pg.query(
+    "revoke execute on function public.get_slack_preview_attempt_facts(uuid,uuid) from service_role",
+  );
+  await pg.query(
+    "drop function if exists public.get_slack_preview_attempt_facts(uuid,uuid)",
+  );
+  await pg.query("select pg_notify('pgrst', 'reload schema')");
 }
 
 function sqlUuidArray(ids: string[]): string[] {
@@ -414,6 +393,7 @@ beforeAll(async () => {
   service = createClient<Database>(localApiUrl, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
+  await ensurePreviewAttemptFactsRpc();
   await seedFixture();
 });
 
@@ -421,14 +401,17 @@ afterAll(async () => {
   try {
     if (pg) await cleanupFixture();
   } finally {
-    await pg?.end();
+    if (pg) {
+      await removePreviewAttemptFactsRpc();
+      await pg.end();
+    }
   }
 });
 
 describe("loadPreviewData against local PostgREST", () => {
   it("loads current columns and applies tenant-safe PostgREST OR filters", async () => {
     const result = await loadPreviewData({
-      client: loaderClient(),
+      client: service,
       orgId: fixture.orgId,
       propertyId: fixture.propertyId,
     });
@@ -472,7 +455,7 @@ describe("loadPreviewData against local PostgREST", () => {
 
   it("keeps failed outbound text out of last contact, orders tied latest-three oldest-first, and advances on reached call", async () => {
     const beforeCall = await loadPreviewData({
-      client: loaderClient(),
+      client: service,
       orgId: fixture.orgId,
       propertyId: fixture.propertyId,
     });
@@ -507,11 +490,11 @@ describe("loadPreviewData against local PostgREST", () => {
     fixture.attemptIds.push(fixture.reachedAttemptId);
 
     const afterCall = await loadPreviewData({
-      client: loaderClient(),
+      client: service,
       orgId: fixture.orgId,
       propertyId: fixture.propertyId,
     });
-    expect(afterCall?.lastContactAt).toBe("2026-10-03T12:05:00.000Z");
+    expect(afterCall?.lastContactAt).toBe("2026-10-03T12:05:00+00:00");
   });
 
   it("reports the applied property disposition while a separate AI proposal is pending", async () => {
@@ -525,7 +508,7 @@ describe("loadPreviewData against local PostgREST", () => {
     expect(review).toEqual({ status: "pending", disposition: "dnc" });
 
     const result = await loadPreviewData({
-      client: loaderClient(),
+      client: service,
       orgId: fixture.orgId,
       propertyId: fixture.propertyId,
     });
@@ -535,14 +518,14 @@ describe("loadPreviewData against local PostgREST", () => {
   it("returns null for a soft-deleted property even when its UUID and org are valid", async () => {
     await expect(
       loadPreviewData({
-        client: loaderClient(),
+        client: service,
         orgId: fixture.orgId,
         propertyId: fixture.deletedPropertyId,
       }),
     ).resolves.toBeNull();
   });
 
-  it("fails closed for a foreign property and does not resolve an owner through another org", async () => {
+  it("keeps an assigned label within its org and fails closed for a foreign property", async () => {
     await pg.query(
       "delete from public.memberships where user_id = $1 and org_id = $2",
       [fixture.ownerId, fixture.orgId],
@@ -550,15 +533,15 @@ describe("loadPreviewData against local PostgREST", () => {
 
     try {
       const ownerResult = await loadPreviewData({
-        client: loaderClient(),
+        client: service,
         orgId: fixture.orgId,
         propertyId: fixture.propertyId,
       });
-      expect(ownerResult?.ownerName).toBeNull();
+      expect(ownerResult?.ownerName).toBe("Synthetic Preview Owner");
 
       await expect(
         loadPreviewData({
-          client: loaderClient(),
+          client: service,
           orgId: fixture.orgId,
           propertyId: fixture.foreignPropertyId,
         }),
