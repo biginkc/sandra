@@ -111,7 +111,7 @@ async function resolveFocus(
   };
 }
 
-export default async function MyLeadsPage({ searchParams }: { searchParams?: Promise<SearchParams> } = {}) {
+export default async function MyLeadsPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   let memberships: Membership[];
   try {
     memberships = await getCallerMembershipsOrThrow();
@@ -163,7 +163,7 @@ export default async function MyLeadsPage({ searchParams }: { searchParams?: Pro
   try {
     // Owners can switch reps, but every viewer starts on their own profile
     // unless a deep link names a lead in another rep's queue.
-    const resolved = await resolveFocus(viewer, new Set(roster.members.map((m) => m.id)), (await searchParams) ?? {});
+    const resolved = await resolveFocus(viewer, new Set(roster.members.map((m) => m.id)), await searchParams);
     const memberId = resolved?.memberId ?? viewer.userId;
     const search = resolved?.search ?? "";
     focus = resolved?.focus ?? null;
