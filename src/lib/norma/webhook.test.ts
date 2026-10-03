@@ -121,6 +121,18 @@ describe("bland webhook route core", () => {
     expect((await post(client, call())).body).toEqual({ status: "ignored", reason: "call_id_mismatch" });
   });
 
+  it("passes the attempt echoed in the call metadata (default 1) and acknowledges a stale-attempt result as ignored", async () => {
+    const { client, complete } = setup();
+    await post(client, call());
+    expect(complete.mock.calls[0]![0].p_payload).toMatchObject({ attempt: 1 });
+    await post(client, call({ metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt: 2 } }));
+    expect(complete.mock.calls[1]![0].p_payload).toMatchObject({ attempt: 2 });
+    await post(client, call({ metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt: "x" } }));
+    expect(complete.mock.calls[2]![0].p_payload).toMatchObject({ attempt: 0 });
+    const stale = setup({ result: "stale_attempt", status: "dispatching" });
+    expect(await post(stale.client, call())).toEqual({ status: 200, body: { status: "ignored", reason: "stale_attempt" } });
+  });
+
   it("unmappable payloads complete as unknown (parked for a human)", async () => {
     const { client, complete } = setup({ result: "applied", status: "needs_review", outcome: "unknown" });
     await post(client, call({ variables: {} }));

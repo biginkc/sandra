@@ -27,7 +27,7 @@ describe("bland send-call classification", () => {
       pathway_version: 17,
       voice: "voice-1",
       from: "+12135550100",
-      metadata: { request_id: "r1", idempotency_key: "k1" },
+      metadata: { request_id: "r1", idempotency_key: "k1", attempt: 1 },
       webhook: "https://sandra.test/api/webhooks/bland/call",
       voicemail: { action: "hangup" },
       request_data: { a: "b" },

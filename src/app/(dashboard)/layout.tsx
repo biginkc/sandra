@@ -14,6 +14,7 @@ import {
 } from "@/components/dashboard-sidebar";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { JobFailureNotifier } from "@/components/job-failure-notifier";
+import { NormaConnectedNotifier } from "@/components/norma-connected-notifier";
 import { NotificationsBell } from "@/components/notifications-bell";
 import { SoftphoneHeaderButton, SoftphoneProvider } from "@/components/softphone/softphone-provider";
 import { ObjectionPromptProvider } from "@/components/coach/objection-prompt-context";
@@ -80,6 +81,7 @@ export default async function DashboardLayout({
     <div className="bg-background min-h-screen">
       <ConnectionBanner />
       <JobFailureNotifier />
+      <NormaConnectedNotifier />
 
       <header className="nav-field fixed inset-x-0 top-0 left-0 z-40 flex h-16 items-center justify-between gap-3 border-b border-white/10 px-4 md:left-64 md:px-7">
         <div className="flex min-w-0 items-center gap-3">

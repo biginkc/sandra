@@ -9,6 +9,8 @@ const BLOCK_REASON_TEXT: Record<string, string> = {
   dnc_locked: "This lead is marked do-not-contact.",
   dnc_contact: "This contact is marked do-not-contact.",
   global_dnc_registry: "This number is on the do-not-contact list.",
+  sms_opted_out: "This seller opted out by text (STOP).",
+  sms_phone_suppressed: "This number opted out by text (STOP).",
   wrong_number_flagged: "This number was already flagged as a wrong number.",
   not_interested: "This lead is marked not interested.",
   contact_not_on_property: "The homeowner on this lead changed. Reload the page and try again.",

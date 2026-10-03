@@ -16,6 +16,8 @@ export type BlandSendCallParams = {
   phoneNumber: string;
   requestId: string;
   idempotencyKey: string;
+  /** 1, or 2 for the call-twice retry. Echoed back in the webhook so a stale attempt can be told apart. */
+  attempt?: number;
   /** Pathway variables, passed as Bland `request_data`. */
   variables: Record<string, string>;
 };
@@ -80,7 +82,7 @@ export function buildSendCallBody(config: NormaBlandConfig, params: BlandSendCal
     pathway_version: config.pathwayVersion,
     voice: config.voice,
     from: config.fromNumber,
-    metadata: { request_id: params.requestId, idempotency_key: params.idempotencyKey },
+    metadata: { request_id: params.requestId, idempotency_key: params.idempotencyKey, attempt: params.attempt ?? 1 },
     webhook: config.webhookUrl,
     // No voicemail message, no retry: a no-answer ends the attempt.
     voicemail: { action: "hangup" },
