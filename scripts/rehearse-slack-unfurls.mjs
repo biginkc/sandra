@@ -120,6 +120,13 @@ try {
   try { psql(`set role service_role; select public.enqueue_slack_unfurl_event('${team}','${app}','${staleEvent}','link_shared',now(),'${org}','${install[0]}',1,'C_REHEARSAL','0.9','U_REHEARSAL',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null);`); throw new Error("revoked installation accepted an event"); } catch (error) { if (!String(error).includes("INSTALLATION_NOT_ACTIVE")) throw error; }
   if (psql(`set role service_role; select installation_version from public.upsert_slack_installation('${org}','${team}','${app}','Rehearsal','B_REHEARSAL','xoxb-redacted-4',array['links:read','links:write','channels:read','groups:read','users:read'],'${user}','rehearsal-key');`) !== "2") throw new Error("reinstall did not rotate installation version");
   if (psql(`set role service_role; select mode from public.set_slack_preview_policy('${install[0]}','${org}','${user}',true);`) !== "eligible_internal_channels") throw new Error("workspace policy did not enable");
+  psql(`update public.slack_installations set scopes=array['links:read'] where id='${install[0]}';`);
+  if (psql(`set role service_role; select mode from public.set_slack_preview_policy('${install[0]}','${org}','${user}',false);`) !== "disabled") throw new Error("policy disable failed after scope loss");
+  psql(`update public.slack_installations set scopes=array['links:read','links:write','channels:read','groups:read','users:read'] where id='${install[0]}';`);
+  if (psql(`set role service_role; select mode from public.set_slack_preview_policy('${install[0]}','${org}','${user}',true);`) !== "eligible_internal_channels") throw new Error("workspace policy did not restore after scope loss");
+  const stalePolicyEvent = randomUUID();
+  const stalePolicy = psql(`set role service_role; select job_id from public.enqueue_slack_unfurl_event('${team}','${app}','${stalePolicyEvent}','link_shared',now()-interval '2 minutes','${org}','${install[0]}',2,'C_AUTO','1.0','U_REHEARSAL',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null);`);
+  if (stalePolicy || psql(`select denial_code from public.slack_event_receipts where event_id='${stalePolicyEvent}';`) !== "event_before_policy") throw new Error("pre-policy event was accepted after enable");
 
   const event = randomUUID();
   const enqueue = psql(`set role service_role; select job_id, duplicate from public.enqueue_slack_unfurl_event('${team}','${app}','${event}','link_shared',now(),'${org}','${linked[0]}',2,'C_AUTO','1.1','U_REHEARSAL',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null);`).split("\t");

@@ -107,6 +107,7 @@ declare
   v_installation_status text;
   v_policy_mode text := 'legacy';
   v_policy_revision bigint;
+  v_policy_acknowledged_at timestamptz;
   v_denial_code text := p_denial_code;
   v_terminal boolean := p_denial_code is not null or coalesce(array_length(p_url_keys,1),0)=0;
   v_channel_denied boolean := false;
@@ -122,12 +123,16 @@ begin
      for update;
     if v_current_installation_version is null or v_installation_status <> 'active' then raise exception 'INSTALLATION_NOT_ACTIVE' using errcode='22023'; end if;
     if v_current_installation_version <> p_installation_version then raise exception 'INSTALLATION_VERSION_MISMATCH' using errcode='22023'; end if;
-    select coalesce(p.mode,'legacy'), p.policy_revision into v_policy_mode, v_policy_revision
+    select coalesce(p.mode,'legacy'), p.policy_revision, p.acknowledged_at into v_policy_mode, v_policy_revision, v_policy_acknowledged_at
       from public.slack_preview_policies p where p.installation_id=p_installation_id and p.org_id=p_org_id;
     if v_policy_mode='disabled' then
       v_terminal := true;
       v_denial_code := coalesce(v_denial_code,'previews_disabled');
     elsif v_policy_mode='eligible_internal_channels' then
+      if p_event_time is not null and v_policy_acknowledged_at is not null and p_event_time < date_trunc('second', v_policy_acknowledged_at) then
+        v_terminal := true;
+        v_denial_code := coalesce(v_denial_code,'event_before_policy');
+      end if;
       select exists(
         select 1 from public.slack_channel_denials d
          where d.installation_id=p_installation_id and d.org_id=p_org_id and d.channel_id=p_channel_id
@@ -236,6 +241,7 @@ begin
           select 1 from public.slack_preview_policies p
            where p.installation_id=p_installation_id and p.org_id=p_org_id
              and p.mode='eligible_internal_channels' and p.policy_revision=j.policy_revision
+             and (p.acknowledged_at is null or j.event_time >= date_trunc('second', p.acknowledged_at))
        ))
      )
    for update;
@@ -278,8 +284,8 @@ begin
   select i.* into v_installation from public.slack_installations i
    where i.id=p_installation_id and i.org_id=p_org_id
    for update;
-  if not found or v_installation.status <> 'active' then raise exception 'INSTALLATION_NOT_ACTIVE' using errcode='22023'; end if;
-  if not (v_installation.scopes @> array['links:read','links:write','channels:read','groups:read','users:read']::text[]) then
+  if not found or (p_enabled and v_installation.status <> 'active') or (not p_enabled and v_installation.status not in ('active','revoked')) then raise exception 'INSTALLATION_NOT_ACTIVE' using errcode='22023'; end if;
+  if p_enabled and not (v_installation.scopes @> array['links:read','links:write','channels:read','groups:read','users:read']::text[]) then
     raise exception 'INSTALLATION_SCOPE_MISSING' using errcode='22023';
   end if;
   if not exists (

@@ -147,11 +147,12 @@ export async function loadSlackChannelApproval(input: { installationId: string; 
 export async function loadSlackPreviewPolicy(input: { installationId: string; orgId: string }): Promise<SlackPreviewPolicy> {
   const { data, error } = await admin().from("slack_preview_policies").select("installation_id,org_id,mode,policy_revision").eq("installation_id", input.installationId).eq("org_id", input.orgId).maybeSingle();
   if (error) throw new DatabaseError("Slack preview policy lookup failed", { message: error.message });
-  if (!data || typeof data.installation_id !== "string" || typeof data.org_id !== "string" || typeof data.policy_revision !== "number") {
+  const revision = parsePolicyRevision(data?.policy_revision);
+  if (!data || typeof data.installation_id !== "string" || typeof data.org_id !== "string" || revision === null) {
     return { installationId: input.installationId, orgId: input.orgId, mode: "legacy", policyRevision: 0 };
   }
   const mode = data.mode === "eligible_internal_channels" || data.mode === "disabled" ? data.mode : "legacy";
-  return { installationId: data.installation_id, orgId: data.org_id, mode, policyRevision: data.policy_revision };
+  return { installationId: data.installation_id, orgId: data.org_id, mode, policyRevision: revision };
 }
 
 export async function loadSlackChannelDenial(input: { installationId: string; orgId: string; channelId: string }): Promise<boolean> {
@@ -169,9 +170,15 @@ export async function setSlackPreviewPolicy(input: { installationId: string; org
   });
   rpcError(error, "preview policy update");
   const row = Array.isArray(data) ? (data[0] as Record<string, unknown> | undefined) : (data as Record<string, unknown> | null);
-  if (!row || typeof row.policy_revision !== "number") throw new DatabaseError("Slack preview policy update returned no revision", {});
+  const revision = parsePolicyRevision(row?.policy_revision);
+  if (!row || revision === null) throw new DatabaseError("Slack preview policy update returned no revision", {});
   const mode = row.mode === "eligible_internal_channels" || row.mode === "disabled" ? row.mode : "legacy";
-  return { mode, policyRevision: row.policy_revision };
+  return { mode, policyRevision: revision };
+}
+
+function parsePolicyRevision(value: unknown): number | null {
+  const revision = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+  return Number.isSafeInteger(revision) && revision > 0 ? revision : null;
 }
 
 export async function listSlackPreviewInstallations(input: { orgId: string; userId: string }): Promise<SlackPreviewInstallation[]> {
