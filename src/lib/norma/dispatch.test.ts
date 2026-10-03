@@ -241,6 +241,16 @@ describe("dispatchNormaCall", () => {
     expect(t.rpcs.fn_norma_mark_dispatch_unknown).toHaveBeenCalled();
   });
 
+  it("the claim is fenced on the attempt read, and that same attempt goes into the Bland metadata", async () => {
+    const t = setup({ row: { attempt: 2 } });
+    await t.run();
+    expect(t.rpcs.fn_norma_claim_dispatch).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_expected_attempt: 2 });
+    expect(t.sendCall.mock.calls[0][0].attempt).toBe(2);
+    const stale = setup({ claim: false });
+    await expect(stale.run()).resolves.toEqual({ status: "not_claimed" });
+    expect(stale.sendCall).not.toHaveBeenCalled();
+  });
+
   describe("pre-call text (attempt 1 only)", () => {
     const sent = (): import("./precall-sms").PrecallDeps => ({
       enabled: true,

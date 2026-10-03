@@ -95,8 +95,12 @@ export async function createNormaRequest(
 }
 
 /** requested -> dispatching. Exactly one caller wins. */
-export async function claimNormaDispatch(client: Client, requestId: string): Promise<boolean> {
-  const { data, error } = await client.rpc("fn_norma_claim_dispatch", { p_request_id: requestId });
+/** `expectedAttempt`: the attempt the caller read; a row that has since moved to another attempt is not claimed. */
+export async function claimNormaDispatch(client: Client, requestId: string, expectedAttempt?: number): Promise<boolean> {
+  const { data, error } = await client.rpc("fn_norma_claim_dispatch", {
+    p_request_id: requestId,
+    ...(expectedAttempt !== undefined ? { p_expected_attempt: expectedAttempt } : {}),
+  });
   if (error) fail("fn_norma_claim_dispatch", error);
   return data === true;
 }

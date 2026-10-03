@@ -74,7 +74,10 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
   }
 
   // ---- claim: requested -> dispatching ------------------------------------
-  if (!(await claimNormaDispatch(client, requestId))) return { status: "not_claimed" };
+  // Fenced on the attempt read above: every later decision (pre-call text, metadata) uses
+  // that same value, so a stale snapshot can never act for a different attempt.
+  const attempt = row.attempt ?? 1;
+  if (!(await claimNormaDispatch(client, requestId, attempt))) return { status: "not_claimed" };
 
   // ---- pre-send (a failure here means nothing was sent) --------------------
   // The dial-time eligibility recheck is the LAST thing before the send: lead
@@ -86,7 +89,7 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
     const recheck = () =>
       checkNormaEligibility(client, { propertyId: row.property_id, contactId: row.contact_id ?? "", phoneE164: row.phone_e164 });
     let eligibility = await recheck();
-    if (eligibility.eligible && (row.attempt ?? 1) === 1) {
+    if (eligibility.eligible && attempt === 1) {
       // Call twice: the retry (attempt 2) never texts again. The text is a
       // best-effort extra: refused, failed or slow, the call is still placed.
       // After it, eligibility is read once more so the check stays the LAST
@@ -117,7 +120,7 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
     phoneNumber: row.phone_e164,
     requestId,
     idempotencyKey: row.idempotency_key,
-    attempt: row.attempt ?? 1,
+    attempt,
     variables,
   });
 

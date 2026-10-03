@@ -5914,7 +5914,7 @@ export type Database = {
       fn_norma_pause_for_request: { Args: { p_request_id: string }; Returns: number }
       fn_norma_release_pauses: { Args: { p_request_id: string }; Returns: number }
       fn_norma_create_request: { Args: { p_property_id: string; p_contact_id: string; p_phone_e164: string; p_requested_by: string; p_rep_context: string | null; p_callback_assignee_id: string }; Returns: { outcome: string; request_id: string | null; idempotency_key: string | null; block_reason: string | null }[] }
-      fn_norma_claim_dispatch: { Args: { p_request_id: string }; Returns: boolean }
+      fn_norma_claim_dispatch: { Args: { p_request_id: string; p_expected_attempt?: number }; Returns: boolean }
       fn_norma_bind_call_id: { Args: { p_request_id: string; p_call_id: string }; Returns: string }
       fn_norma_mark_dispatch_rejected: { Args: { p_request_id: string; p_reason: string; p_expected_status?: string }; Returns: string }
       fn_norma_mark_dispatch_unknown: { Args: { p_request_id: string; p_reason: string }; Returns: string }

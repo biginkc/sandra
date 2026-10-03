@@ -307,6 +307,37 @@ describe("norma call twice (migration 20261002150000)", () => {
     });
   });
 
+  describe("STOP and the dispatch claim", () => {
+    const eligible = async (db: Client, l: Lead) =>
+      (await svc<{ eligible: boolean; block_reason: string | null }>(db, "select * from public.fn_norma_eligibility($1,$2,$3)", [l.property, l.contact, l.phone])).rows[0]!;
+
+    it("eligibility refuses a seller who texted STOP (contact flag, phone suppression, opted_out disposition)", async () => {
+      await withDb(async (db, ctx) => {
+        const ok = await lead(db, ctx);
+        expect(await eligible(db, ok)).toMatchObject({ eligible: true });
+        const a = await lead(db, ctx);
+        await db.query("update public.contacts set sms_opted_out = true where id = $1", [a.contact]);
+        expect(await eligible(db, a)).toMatchObject({ eligible: false, block_reason: "sms_opted_out" });
+        const b = await lead(db, ctx);
+        await db.query("insert into public.sms_phone_suppressions (org_id, channel, phone_e164, source) values ($1,'sms',$2,'t')", [ctx.org, b.phone]);
+        expect(await eligible(db, b)).toMatchObject({ eligible: false, block_reason: "sms_phone_suppressed" });
+        const c = await lead(db, ctx, { dispo: "opted_out" });
+        expect(await eligible(db, c)).toMatchObject({ eligible: false, block_reason: "sms_opted_out" });
+      });
+    });
+
+    it("the claim is fenced on the attempt the dispatcher read", async () => {
+      await withDb(async (db, ctx) => {
+        const { id } = await dispatched(db, ctx);
+        await complete(db, id, "call-1", "no_answer"); // now requested, attempt 2
+        const stale = (await svc<{ c: boolean }>(db, "select public.fn_norma_claim_dispatch($1, 1) as c", [id])).rows[0]!.c;
+        expect(stale).toBe(false);
+        expect((await rowOf(db, id)).status).toBe("requested");
+        expect((await svc<{ c: boolean }>(db, "select public.fn_norma_claim_dispatch($1, 2) as c", [id])).rows[0]!.c).toBe(true);
+      });
+    });
+  });
+
   describe("the guard trigger allows only that one backwards edge", () => {
     const update = (db: Client, id: string, set: string) => db.query(`update public.norma_call_requests set ${set} where id=$1`, [id]);
     const rejects = async (db: Client, id: string, set: string, pattern: RegExp) => {

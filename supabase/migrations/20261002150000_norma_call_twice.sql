@@ -489,9 +489,177 @@ begin
 end;
 $$;
 
+-- The dispatch claim is fenced on the attempt the dispatcher read: a worker
+-- holding an old snapshot (attempt 1) cannot claim the retry (attempt 2) and
+-- then act on stale facts (a second pre-call text, attempt:1 metadata).
+drop function if exists public.fn_norma_claim_dispatch(uuid);
+create or replace function public.fn_norma_claim_dispatch(p_request_id uuid, p_expected_attempt integer default null)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_n integer;
+begin
+  if coalesce(auth.role(), '') <> 'service_role' then
+    raise exception 'service role required' using errcode = '42501';
+  end if;
+  update public.norma_call_requests
+     set status = 'dispatching', dispatch_started_at = now()
+   where id = p_request_id and status = 'requested'
+     and (p_expected_attempt is null or attempt = p_expected_attempt);
+  get diagnostics v_n = row_count;
+  return v_n = 1;
+end;
+$$;
+revoke all on function public.fn_norma_claim_dispatch(uuid, integer) from public, anon, authenticated;
+grant execute on function public.fn_norma_claim_dispatch(uuid, integer) to service_role;
+
+-- STOP must prevent the next call: fn_norma_eligibility (and so the dial-time
+-- recheck of both attempts) also refuses sms_opted_out, opted_out and a durable
+-- sms_phone_suppressions row for the dialled number.
+create or replace function public.fn_norma_eligibility(
+  p_property_id uuid,
+  p_contact_id uuid,
+  p_phone_e164 text
+)
+returns table (eligible boolean, block_reason text)
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_prop record;
+  v_contact record;
+begin
+  if coalesce(auth.role(), '') <> 'service_role' then
+    raise exception 'service role required' using errcode = '42501';
+  end if;
+
+  if p_property_id is null or p_contact_id is null
+     or p_phone_e164 is null or p_phone_e164 !~ '^\+1[2-9][0-9]{9}$' then
+    eligible := false; block_reason := 'invalid_request';
+    return next; return;
+  end if;
+
+  select p.org_id, p.homeowner_contact_id, p.is_dnc_locked, p.outreach_dispo,
+         p.is_training, p.deleted_at
+    into v_prop
+    from public.properties p
+   where p.id = p_property_id;
+  if not found or v_prop.deleted_at is not null then
+    eligible := false; block_reason := 'property_not_found';
+    return next; return;
+  end if;
+
+  if v_prop.is_training or public.is_training_target(p_property_id, p_contact_id, p_phone_e164) then
+    eligible := false; block_reason := 'training_lead';
+    return next; return;
+  end if;
+
+  if v_prop.is_dnc_locked or v_prop.outreach_dispo = 'dnc' then
+    eligible := false; block_reason := 'dnc_locked';
+    return next; return;
+  end if;
+
+  if v_prop.homeowner_contact_id is distinct from p_contact_id then
+    eligible := false; block_reason := 'contact_not_on_property';
+    return next; return;
+  end if;
+
+  select c.org_id, c.do_not_contact, c.sms_opted_out, c.phone_1, c.phone_2, c.phone_3
+    into v_contact
+    from public.contacts c
+   where c.id = p_contact_id;
+  if not found or v_contact.org_id is distinct from v_prop.org_id then
+    eligible := false; block_reason := 'contact_not_on_property';
+    return next; return;
+  end if;
+  if v_contact.do_not_contact then
+    eligible := false; block_reason := 'dnc_contact';
+    return next; return;
+  end if;
+  -- STOP: a seller who opted out by text (contact flag, durable phone
+  -- suppression, or the opted_out disposition) must not be called next either.
+  if coalesce(v_contact.sms_opted_out, false) or v_prop.outreach_dispo = 'opted_out' then
+    eligible := false; block_reason := 'sms_opted_out';
+    return next; return;
+  end if;
+  -- contacts.phone_1..3 have no format constraint. CSV import writes +1XXXXXXXXXX
+  -- (normalizePhone) but other writers may store "(816) 555-0142". Normalise a
+  -- stored slot to +1XXXXXXXXXX only when it has exactly 10 digits, or 11
+  -- starting with 1 (the same rule as normalizePhone); any other slot is
+  -- ignored. The dialled number must equal a normalised slot in full, so a
+  -- non-US number can never match a US-looking contact number.
+  if not exists (
+    select 1
+      from unnest(array[v_contact.phone_1, v_contact.phone_2, v_contact.phone_3]) as t(ph),
+           lateral (select regexp_replace(coalesce(ph, ''), '\D', '', 'g') as d) x
+     where case
+             -- A slot written with a leading "+" is an international number
+             -- unless it is exactly +1 and ten digits: "+44 12 3456 7890" must
+             -- never be read as a US number.
+             when btrim(coalesce(ph, '')) like '+%'
+                  and not (length(x.d) = 11 and x.d like '1%') then null
+             when length(x.d) = 10 then '+1' || x.d
+             when length(x.d) = 11 and x.d like '1%' then '+' || x.d
+             else null
+           end = p_phone_e164
+  ) then
+    eligible := false; block_reason := 'phone_not_on_contact';
+    return next; return;
+  end if;
+
+  -- evaluateSuppression queries nothing; the registry must be read directly.
+  if exists (
+    select 1 from public.global_phone_dnc_registry g
+     where g.org_id = v_prop.org_id and g.phone_e164 = p_phone_e164
+  ) then
+    eligible := false; block_reason := 'global_dnc_registry';
+    return next; return;
+  end if;
+
+  if exists (
+    select 1 from public.sms_phone_suppressions s
+     where s.org_id = v_prop.org_id and s.channel = 'sms' and s.phone_e164 = p_phone_e164
+  ) then
+    eligible := false; block_reason := 'sms_phone_suppressed';
+    return next; return;
+  end if;
+
+  -- A number Norma already reached as wrong is never dialled again. (Sandra has
+  -- no per-number wrong-number flag on main; this is the only record of it.)
+  if exists (
+    select 1 from public.norma_call_requests w
+     where w.org_id = v_prop.org_id and w.phone_e164 = p_phone_e164
+       and w.status = 'completed' and w.outcome = 'wrong_number'
+  ) then
+    eligible := false; block_reason := 'wrong_number_flagged';
+    return next; return;
+  end if;
+
+  if v_prop.outreach_dispo = 'not_interested' then
+    eligible := false; block_reason := 'not_interested';
+    return next; return;
+  end if;
+
+  eligible := true; block_reason := null;
+  return next; return;
+exception
+  when insufficient_privilege then
+    raise;
+  when others then
+    eligible := false; block_reason := 'eligibility_check_failed';
+    return next; return;
+end;
+$$;
+
 revoke all on function public.fn_norma_bind_call_id(uuid, text) from public, anon, authenticated;
 revoke all on function public.fn_norma_complete_call(uuid, text, text, jsonb) from public, anon, authenticated;
 grant execute on function public.fn_norma_bind_call_id(uuid, text) to service_role;
+revoke all on function public.fn_norma_eligibility(uuid, uuid, text) from public, anon, authenticated;
+grant execute on function public.fn_norma_eligibility(uuid, uuid, text) to service_role;
 grant execute on function public.fn_norma_complete_call(uuid, text, text, jsonb) to service_role;
 
 commit;
