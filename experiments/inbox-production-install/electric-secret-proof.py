@@ -294,13 +294,28 @@ def wait_active(port: int) -> tuple[int | None, str]:
     return result
 
 
-def request(base: str, path: str, token: str | None) -> tuple[int, dict[str, str], bytes]:
+def request(base: str, path: str, token: str | None) -> tuple[int | None, dict[str, str], bytes]:
     headers = {"Authorization": f"Bearer {token}"} if token is not None else {}
     try:
         with urllib.request.urlopen(urllib.request.Request(base + path, headers=headers), timeout=16) as response:
             return response.status, dict(response.headers.items()), response.read(2_100_000)
     except urllib.error.HTTPError as error:
         return error.code, dict(error.headers.items()), error.read(2_100_000)
+    except OSError as error:
+        # The disposable relay can accept its first socket just before Node
+        # begins listening. Treat connection-level readiness failures like a
+        # transient probe miss so the bounded startup loop can retry.
+        return None, {}, str(error).encode("utf-8", "replace")
+
+
+def request_until_response(base: str, path: str, token: str | None, *, attempts: int = 20) -> tuple[int | None, dict[str, str], bytes]:
+    result = request(base, path, token)
+    for _ in range(attempts - 1):
+        if result[0] is not None:
+            return result
+        time.sleep(0.25)
+        result = request(base, path, token)
+    return result
 
 
 def main() -> int:
@@ -403,14 +418,17 @@ def main() -> int:
         if any(secret.encode() in relay_body for secret in (RELAY_TOKEN, ELECTRIC_SECRET, WRONG_ELECTRIC_SECRET)):
             raise ProofError("secret appeared in successful relay body")
 
-        docker("network", "disconnect", network, relay)
-        client_secret_status, _, client_secret_body = request(relay_base, f"/v1/shape?{query}&secret=client-visible-secret", RELAY_TOKEN)
+        # Keep the relay reachable while making the Electric upstream
+        # unavailable. The invalid query must be rejected before any upstream
+        # lookup, so it must still return 400 with Electric disconnected.
+        docker("network", "disconnect", network, electric)
+        client_secret_status, _, client_secret_body = request_until_response(relay_base, f"/v1/shape?{query}&secret=client-visible-secret", RELAY_TOKEN)
         if client_secret_status != 400 or client_secret_body:
             raise ProofError(f"client secret was not rejected before upstream: {client_secret_status}")
-        docker("network", "connect", network, relay)
+        docker("network", "connect", network, electric)
 
         wrong_base = start_relay(wrong_relay, WRONG_ELECTRIC_SECRET)
-        wrong_status, _, wrong_body = request(wrong_base, f"/v1/shape?{query}", RELAY_TOKEN)
+        wrong_status, _, wrong_body = request_until_response(wrong_base, f"/v1/shape?{query}", RELAY_TOKEN)
         if wrong_status not in (401, 502) or any(secret.encode() in wrong_body for secret in (RELAY_TOKEN, ELECTRIC_SECRET, WRONG_ELECTRIC_SECRET)):
             raise ProofError(f"wrong Electric secret was not rejected without leakage: {wrong_status}")
         relay_logs = docker_text("logs", relay, check=False)

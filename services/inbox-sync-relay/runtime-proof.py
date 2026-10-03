@@ -12,7 +12,7 @@ def need(value,label):
 def sql(q):return docker('exec','sandra-inbox-stack-db','psql','-U','postgres','-d','sandra_inbox_t1','-XqAt','-v','ON_ERROR_STOP=1','-c',q)
 need(sql("SELECT current_database()||'|'||marker FROM inbox_t1.fixture_identity")=='sandra_inbox_t1|sandra-inbox-stack-t1-owned-synthetic','Wrong T1 database')
 electric=json.loads(docker('inspect','sandra-inbox-stack-electric'))[0]
-need(electric['Id']=='ede8887c1b120d49bca326f3909af58af47b362f58ba9f7cae0f719bf898de8c','Unexpected Electric owner')
+need(electric['Id']=='1a58784207306758bdba64a8146ccb41d43d81f8e6f5c2609d85cf61e1c5a8ff','Unexpected Electric owner')
 try:
  candidate_image=load_electric_pin(require_ready=True).image
 except CandidateError as exc:
@@ -23,10 +23,10 @@ net=electric['NetworkSettings']['Networks'];need(set(net)=={'sandra-inbox-stack-
 image=json.loads(docker('image','inspect','sandra-inbox-sync-relay:20260913'))[0]
 need(image['Config']['Labels']['com.bmh.inbox-fixture']=='sandra-inbox-hosting-candidate-owned','Wrong relay image owner')
 suffix=uuid.uuid4().hex[:12];schema='inbox_relay_'+suffix;container='sandra-inbox-relay-proof-'+suffix
-o,c=str(uuid.uuid4()),str(uuid.uuid4());token=secrets.token_urlsafe(40);cid=None;electric_id=None
+o,c=str(uuid.uuid4()),str(uuid.uuid4());token=secrets.token_urlsafe(40);electric_secret=secrets.token_urlsafe(40);cid=None;electric_id=None
 stream='relay_'+suffix;publication='electric_publication_'+stream;slot='electric_slot_'+stream
 try:
- sql(f"CREATE SCHEMA {schema};CREATE TABLE {schema}.projection(org_id uuid NOT NULL,target_kind text NOT NULL,target_id uuid NOT NULL,name text,context text,preview text,time_label text,outcome_label text,assigned_label text,unread boolean,PRIMARY KEY(org_id,target_kind,target_id));ALTER TABLE {schema}.projection REPLICA IDENTITY FULL;INSERT INTO {schema}.projection VALUES('{o}','known_conversation','{c}','Synthetic relay proof','Owned','Hello','Now','None','Unassigned',true);")
+ sql(f"CREATE SCHEMA {schema};CREATE TABLE {schema}.projection(org_id uuid NOT NULL,target_kind text NOT NULL,target_id uuid NOT NULL,name text,context text,preview text,time_label text,outcome_label text,assigned_label text,unread boolean,PRIMARY KEY(org_id,target_kind,target_id));ALTER TABLE {schema}.projection REPLICA IDENTITY FULL;CREATE PUBLICATION {publication};INSERT INTO {schema}.projection VALUES('{o}','known_conversation','{c}','Synthetic relay proof','Owned','Hello','Now','None','Unassigned',true);")
  electric_id=docker('run','-d','--name','sandra-inbox-relay-electric-'+suffix,'--label','com.bmh.inbox-fixture=sandra-inbox-hosting-candidate-owned','--network','sandra-inbox-stack-t1','--memory','512m','--cpus','1','-e','DATABASE_URL=postgres://postgres:postgres@sandra-inbox-stack-db:5432/sandra_inbox_t1?sslmode=disable','-e','ELECTRIC_INSECURE=true','-e','ELECTRIC_DB_POOL_SIZE=2','-e','ELECTRIC_MANUAL_TABLE_PUBLISHING=true','-e','ELECTRIC_REPLICATION_STREAM_ID='+stream,'-e','ELECTRIC_LONG_POLL_TIMEOUT=8000','-e','ELECTRIC_TELEMETRY=false',electric['Config']['Image'])
  for _ in range(40):
   if sql(f"SELECT EXISTS(SELECT 1 FROM pg_publication WHERE pubname='{publication}')")=='t':break
@@ -34,7 +34,7 @@ try:
  else:raise RuntimeError('Dedicated Electric publication unavailable')
  sql(f'ALTER PUBLICATION {publication} ADD TABLE {schema}.projection;')
  electric_ip=json.loads(docker('inspect',electric_id))[0]['NetworkSettings']['Networks']['sandra-inbox-stack-t1']['IPAddress']
- cid=docker('run' ,'-d','--name',container,'--label','com.bmh.inbox-fixture=sandra-inbox-hosting-candidate-owned','--network','sandra-inbox-stack-t1','--add-host','inbox-electric.railway.internal:'+electric_ip,'--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--memory','512m','--cpus','0.5','-p','127.0.0.1::3000','-e','INBOX_RELAY_UPSTREAM=http://inbox-electric.railway.internal:3000/','-e','INBOX_RELAY_TOKEN='+token,'-e','INBOX_RELAY_PROJECTION_TABLE='+schema+'.projection',image['Id'])
+ cid=docker('run' ,'-d','--name',container,'--label','com.bmh.inbox-fixture=sandra-inbox-hosting-candidate-owned','--network','sandra-inbox-stack-t1','--add-host','inbox-electric.railway.internal:'+electric_ip,'--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--memory','512m','--cpus','0.5','-p','127.0.0.1::3000','-e','INBOX_RELAY_UPSTREAM=http://inbox-electric.railway.internal:3000/','-e','INBOX_RELAY_TOKEN='+token,'-e','INBOX_ELECTRIC_SECRET='+electric_secret,'-e','INBOX_RELAY_PROJECTION_TABLE='+schema+'.projection',image['Id'])
  state=json.loads(docker('inspect',cid))[0];port=state['NetworkSettings']['Ports']['3000/tcp'][0]
  need(port['HostIp']=='127.0.0.1' and state['Config']['User']=='node','Unsafe relay binding/user')
  base='http://127.0.0.1:'+port['HostPort']
@@ -43,7 +43,9 @@ try:
   try:
    with urllib.request.urlopen(r,timeout=16) as response:return response.status,dict(response.headers),response.read()
   except urllib.error.HTTPError as error:return error.code,dict(error.headers),error.read()
- for _ in range(20):
+ # The pinned Electric image is linux/amd64 while this owned Colima fixture
+ # runs linux/arm64 with emulation; allow its HTTP listener to become ready.
+ for _ in range(60):
   try:
    if request('/health',False)[0]==200:break
   except (urllib.error.URLError,http.client.HTTPException):pass
