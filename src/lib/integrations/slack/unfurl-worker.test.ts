@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   link: vi.fn(),
   membership: vi.fn(),
   approval: vi.fn(),
+  policy: vi.fn(),
+  channelDenial: vi.fn(),
   verify: vi.fn(),
   urls: vi.fn(),
   updateUrl: vi.fn(),
@@ -29,6 +31,8 @@ vi.mock("./unfurl-store", () => ({
   loadSlackAccountLink: mocks.link,
   hasActiveSlackMembership: mocks.membership,
   loadSlackChannelApproval: mocks.approval,
+  loadSlackPreviewPolicy: mocks.policy,
+  loadSlackChannelDenial: mocks.channelDenial,
   loadSlackJobUrls: mocks.urls,
   updateSlackJobUrl: mocks.updateUrl,
   finishSlackUnfurlJob: mocks.finish,
@@ -52,6 +56,7 @@ const job = {
   receipt_id: "receipt-1",
   installation_id: "installation-1",
   installation_version: 1,
+  policy_revision: null,
   org_id: "org-1",
   team_id: "T123",
   app_id: "A123",
@@ -82,6 +87,8 @@ beforeEach(() => {
   mocks.link.mockResolvedValue({ userId: "sandra-user-1", status: "active" });
   mocks.membership.mockResolvedValue(true);
   mocks.approval.mockResolvedValue({ installationId: "installation-1", orgId: "org-1", channelId: "C123", status: "active", sharingPolicyAcknowledged: true });
+  mocks.policy.mockResolvedValue({ installationId: "installation-1", orgId: "org-1", mode: "legacy", policyRevision: 1 });
+  mocks.channelDenial.mockResolvedValue(false);
   mocks.verify.mockResolvedValue({ allowed: true, channel: { id: "C123" }, user: { id: "U123" } });
   mocks.urls.mockResolvedValue([
     { url_key: "https://sandra.bmhgroupkc.com/leads/11111111-1111-4111-8111-111111111111", lead_id: null, lookup_status: null, authorization_status: null, last_error_code: null },

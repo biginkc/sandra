@@ -37,6 +37,7 @@ export type SlackUnfurlJob = {
   receipt_id: string;
   installation_id: string | null;
   installation_version: number | null;
+  policy_revision: number | null;
   org_id: string | null;
   team_id: string;
   app_id: string;
@@ -54,6 +55,23 @@ export type SlackUnfurlJob = {
   expires_at: string;
   created_at: string;
   updated_at: string;
+};
+
+export type SlackPreviewPolicy = {
+  installationId: string;
+  orgId: string;
+  mode: "legacy" | "eligible_internal_channels" | "disabled";
+  policyRevision: number;
+};
+
+export type SlackPreviewInstallation = {
+  id: string;
+  teamName: string | null;
+  appId: string;
+  status: "active" | "revoked";
+  currentVersion: number;
+  policyEnabled: boolean;
+  accountLinked: boolean;
 };
 
 export type SlackInstallationIdentity = {
@@ -124,6 +142,52 @@ export async function loadSlackChannelApproval(input: { installationId: string; 
   if (error) throw new DatabaseError("Slack channel approval lookup failed", { message: error.message });
   if (!data || typeof data.installation_id !== "string" || typeof data.org_id !== "string" || typeof data.channel_id !== "string") return null;
   return { installationId: data.installation_id, orgId: data.org_id, channelId: data.channel_id, status: data.status === "active" ? "active" : "revoked", sharingPolicyAcknowledged: data.sharing_policy_acknowledged === true };
+}
+
+export async function loadSlackPreviewPolicy(input: { installationId: string; orgId: string }): Promise<SlackPreviewPolicy> {
+  const { data, error } = await admin().from("slack_preview_policies").select("installation_id,org_id,mode,policy_revision").eq("installation_id", input.installationId).eq("org_id", input.orgId).maybeSingle();
+  if (error) throw new DatabaseError("Slack preview policy lookup failed", { message: error.message });
+  if (!data || typeof data.installation_id !== "string" || typeof data.org_id !== "string" || typeof data.policy_revision !== "number") {
+    return { installationId: input.installationId, orgId: input.orgId, mode: "legacy", policyRevision: 0 };
+  }
+  const mode = data.mode === "eligible_internal_channels" || data.mode === "disabled" ? data.mode : "legacy";
+  return { installationId: data.installation_id, orgId: data.org_id, mode, policyRevision: data.policy_revision };
+}
+
+export async function loadSlackChannelDenial(input: { installationId: string; orgId: string; channelId: string }): Promise<boolean> {
+  const { data, error } = await admin().from("slack_channel_denials").select("channel_id").eq("installation_id", input.installationId).eq("org_id", input.orgId).eq("channel_id", input.channelId).maybeSingle();
+  if (error) throw new DatabaseError("Slack channel denial lookup failed", { message: error.message });
+  return !!data && data.channel_id === input.channelId;
+}
+
+export async function setSlackPreviewPolicy(input: { installationId: string; orgId: string; ownerId: string; enabled: boolean }): Promise<{ mode: SlackPreviewPolicy["mode"]; policyRevision: number }> {
+  const { data, error } = await admin().rpc("set_slack_preview_policy", {
+    p_installation_id: input.installationId,
+    p_org_id: input.orgId,
+    p_owner_id: input.ownerId,
+    p_enabled: input.enabled,
+  });
+  rpcError(error, "preview policy update");
+  const row = Array.isArray(data) ? (data[0] as Record<string, unknown> | undefined) : (data as Record<string, unknown> | null);
+  if (!row || typeof row.policy_revision !== "number") throw new DatabaseError("Slack preview policy update returned no revision", {});
+  const mode = row.mode === "eligible_internal_channels" || row.mode === "disabled" ? row.mode : "legacy";
+  return { mode, policyRevision: row.policy_revision };
+}
+
+export async function listSlackPreviewInstallations(input: { orgId: string; userId: string }): Promise<SlackPreviewInstallation[]> {
+  const { data, error } = await admin().rpc("list_slack_preview_installations", {
+    p_org_id: input.orgId,
+    p_user_id: input.userId,
+  });
+  rpcError(error, "preview installation listing");
+  return (Array.isArray(data) ? data : []).flatMap((row) => {
+    if (!row || typeof row !== "object") return [];
+    const candidate = row as Record<string, unknown>;
+    if (typeof candidate.installation_id !== "string" || (candidate.team_name !== null && typeof candidate.team_name !== "string") || typeof candidate.app_id !== "string" || typeof candidate.installation_version !== "number") return [];
+    const status = candidate.status === "active" ? "active" : candidate.status === "revoked" ? "revoked" : null;
+    if (!status) return [];
+    return [{ id: candidate.installation_id, teamName: candidate.team_name, appId: candidate.app_id, status, currentVersion: candidate.installation_version, policyEnabled: candidate.policy_enabled === true, accountLinked: candidate.account_linked === true }];
+  });
 }
 
 export async function approveSlackChannel(input: { installationId: string; orgId: string; channelId: string; approvedBy: string; sharingPolicyAcknowledged: true }): Promise<string> {
