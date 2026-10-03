@@ -126,7 +126,14 @@ async function revokeWorkerInstallationGeneration(job: SlackUnfurlJob, installat
   }).catch(() => undefined);
 }
 
-async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Promise<"succeeded" | "noop" | "expired" | "retried" | "failed"> {
+/**
+ * Process one job that has already been claimed with a valid lease.
+ *
+ * This is an internal server/CLI seam for run-owned acceptance checks. It
+ * performs the same deadline, authorization, policy, and final dispatch
+ * guards as the cron sweep; it does not claim jobs or expose an HTTP bypass.
+ */
+export async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Promise<"succeeded" | "noop" | "expired" | "retried" | "failed"> {
   const claimToken = job.claim_token;
   if (!claimToken) return "failed";
   if (Date.now() >= jobExpiry(job) || (job.lease_expires_at && Date.parse(job.lease_expires_at) <= Date.now())) {

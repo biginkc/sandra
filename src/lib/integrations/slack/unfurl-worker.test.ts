@@ -48,7 +48,7 @@ vi.mock("./unfurl-policy", () => ({
 vi.mock("./unfurl-data", () => ({ loadPreviewData: mocks.loadData }));
 vi.mock("./unfurl-blocks", () => ({ buildPreviewBlocks: mocks.blocks }));
 
-import { runSlackUnfurlSweep } from "./unfurl-worker";
+import { processSlackUnfurlJob, runSlackUnfurlSweep } from "./unfurl-worker";
 
 const now = Date.now();
 const job = {
@@ -105,6 +105,13 @@ beforeEach(() => {
 });
 
 describe("Slack unfurl worker", () => {
+  it("rejects a directly invoked job without a claimed lease token", async () => {
+    const result = await processSlackUnfurlJob({ ...job, claim_token: null }, Date.now() + 45_000);
+    expect(result).toBe("failed");
+    expect(mocks.installation).not.toHaveBeenCalled();
+    expect(mocks.unfurl).not.toHaveBeenCalled();
+  });
+
   it("renders the complete eligible URL map in one chat.unfurl call", async () => {
     const result = await runSlackUnfurlSweep();
     expect(result.succeeded).toBe(1);
