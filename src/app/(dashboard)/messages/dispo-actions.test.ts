@@ -32,7 +32,10 @@ vi.mock("@/lib/events", () => ({
   LEAD_EVENT_TYPES: { DISPO_SET: "dispo_set", OPTED_OUT: "opted_out" },
   recordLeadEvent,
 }));
-vi.mock("@/lib/messaging/consent", () => ({ recordConsentEvent }));
+vi.mock("@/lib/messaging/consent", async () => ({
+  ...(await vi.importActual<typeof import("@/lib/messaging/consent")>("@/lib/messaging/consent")),
+  recordConsentEvent,
+}));
 vi.mock("@/lib/sequences/enrollment", () => ({ pauseContactEnrollments }));
 vi.mock("@/lib/sequences/start-drip", () => ({ startFollowUpDrip }));
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
@@ -358,6 +361,7 @@ describe("setOutreachDispo", () => {
         error: null,
       },
       { data: { id: "contact-1" }, error: null },
+      { data: [], error: null },
     ];
 
     const result = await setOutreachDispo("property-1", "opted_out");
@@ -405,15 +409,15 @@ describe("setOutreachDispo", () => {
     });
   });
 
-  it("lets only the contact compare-and-swap winner append opt-out history", async () => {
+  it("decides consent from the event log, not from who won the contact flag update", async () => {
+    // Lost the sms_opted_out race, but the log already shows opted_out (STOP):
+    // no duplicate event.
     responseQueue = [
       { data: property(), error: null },
       { data: { id: "property-1" }, error: null },
-      {
-        data: { do_not_contact: false, sms_opted_out: false },
-        error: null,
-      },
+      { data: { do_not_contact: false, sms_opted_out: false }, error: null },
       { data: null, error: null },
+      { data: [{ event_type: "opt_out", occurred_at: "2026-10-01T00:00:00Z" }], error: null },
     ];
 
     const result = await setOutreachDispo("property-1", "opted_out");
@@ -424,26 +428,165 @@ describe("setOutreachDispo", () => {
     expect(recordLeadEvent).toHaveBeenCalledWith(
       expect.objectContaining({ eventType: "dispo_set" }),
     );
+    expect(pauseContactEnrollments).toHaveBeenCalledTimes(1);
   });
 
-  it("reports a post-commit contact failure without claiming the disposition failed", async () => {
+  it("records a fresh opt_out when the contact opted back in before this manual opt-out", async () => {
     responseQueue = [
       { data: property(), error: null },
       { data: { id: "property-1" }, error: null },
-      { data: null, error: { message: "contact read failed" } },
+      { data: { do_not_contact: false, sms_opted_out: false }, error: null },
+      { data: { id: "contact-1" }, error: null },
+      {
+        data: [
+          { event_type: "opt_in_confirmed", occurred_at: "2026-10-02T00:00:00Z" },
+          { event_type: "opt_out", occurred_at: "2026-10-01T00:00:00Z" },
+        ],
+        error: null,
+      },
     ];
 
-    const result = await setOutreachDispo("property-1", "opted_out");
+    expect(await setOutreachDispo("property-1", "opted_out")).toEqual({ ok: true });
+    expect(recordConsentEvent).toHaveBeenCalledTimes(1);
+  });
 
-    expect(result).toEqual({ ok: true });
-    expect(reportError).toHaveBeenCalledWith(
-      expect.objectContaining({ message: "contact read failed" }),
-      expect.objectContaining({
-        tags: { surface: "manual_dispo_contact_read_after_commit" },
-      }),
-    );
+  it("records consent even when the contact boolean is already true but no opt_out event exists", async () => {
+    responseQueue = [
+      { data: property(), error: null },
+      { data: { id: "property-1" }, error: null },
+      { data: { do_not_contact: false, sms_opted_out: true }, error: null },
+      { data: [], error: null },
+    ];
+
+    expect(await setOutreachDispo("property-1", "opted_out")).toEqual({ ok: true });
+    expect(updatePayloads.filter((u) => u.table === "contacts")).toEqual([]);
+    expect(recordConsentEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it("tolerates DNC_LOCKED on the contact update and still records consent and pauses", async () => {
+    responseQueue = [
+      { data: property(), error: null },
+      { data: { id: "property-1" }, error: null },
+      { data: { do_not_contact: false, sms_opted_out: false }, error: null },
+      { data: null, error: { message: "DNC_LOCKED: contact is locked" } },
+      { data: [], error: null },
+    ];
+
+    expect(await setOutreachDispo("property-1", "dnc")).toEqual({ ok: true });
+    expect(recordConsentEvent).toHaveBeenCalledTimes(1);
+    expect(pauseContactEnrollments).toHaveBeenCalledTimes(1);
+  });
+
+  it("does nothing to contacts when the property has no linked contact", async () => {
+    responseQueue = [
+      { data: { ...property(), homeowner_contact_id: null }, error: null },
+      { data: { id: "property-1" }, error: null },
+    ];
+
+    expect(await setOutreachDispo("property-1", "opted_out")).toEqual({ ok: true });
     expect(recordConsentEvent).not.toHaveBeenCalled();
-    expect(recordLeadEvent).toHaveBeenCalledTimes(1);
+    expect(pauseContactEnrollments).not.toHaveBeenCalled();
+  });
+
+  describe("suppression failures after the property commit", () => {
+    const base = [
+      { data: property(), error: null },
+      { data: { id: "property-1" }, error: null },
+    ];
+    const openContact = { data: { do_not_contact: false, sms_opted_out: false }, error: null };
+
+    function expectCommittedFailure(result: unknown, error: string) {
+      expect(result).toEqual({ ok: false, error, committed: true });
+      expect(reportError).toHaveBeenCalled();
+      for (const path of ["/messages", "/properties", "/leads/property-1"]) {
+        expect(revalidatePath).toHaveBeenCalledWith(path);
+      }
+    }
+
+    it("contact read error", async () => {
+      responseQueue = [...base, { data: null, error: { message: "contact read failed" } }];
+      expectCommittedFailure(await setOutreachDispo("property-1", "opted_out"), "contact read failed");
+      expect(recordConsentEvent).not.toHaveBeenCalled();
+      expect(pauseContactEnrollments).not.toHaveBeenCalled();
+    });
+
+    it("linked contact row missing", async () => {
+      responseQueue = [...base, { data: null, error: null }];
+      expectCommittedFailure(await setOutreachDispo("property-1", "opted_out"), "Contact not found");
+      expect(pauseContactEnrollments).not.toHaveBeenCalled();
+    });
+
+    it("contact update error other than DNC_LOCKED", async () => {
+      responseQueue = [...base, openContact, { data: null, error: { message: "contact update failed" } }];
+      expectCommittedFailure(await setOutreachDispo("property-1", "opted_out"), "contact update failed");
+      expect(recordConsentEvent).not.toHaveBeenCalled();
+      expect(pauseContactEnrollments).not.toHaveBeenCalled();
+    });
+
+    it("consent read error", async () => {
+      responseQueue = [...base, openContact, { data: { id: "contact-1" }, error: null }, { data: null, error: { message: "consent read failed" } }];
+      expectCommittedFailure(await setOutreachDispo("property-1", "opted_out"), "consent read failed");
+      expect(recordConsentEvent).not.toHaveBeenCalled();
+      expect(pauseContactEnrollments).not.toHaveBeenCalled();
+    });
+
+    it("consent insert error", async () => {
+      recordConsentEvent.mockRejectedValueOnce(new Error("recordConsentEvent: insert failed"));
+      responseQueue = [...base, openContact, { data: { id: "contact-1" }, error: null }, { data: [], error: null }];
+      expectCommittedFailure(await setOutreachDispo("property-1", "opted_out"), "recordConsentEvent: insert failed");
+      expect(pauseContactEnrollments).not.toHaveBeenCalled();
+    });
+
+    it("pause error", async () => {
+      pauseContactEnrollments.mockRejectedValueOnce(new Error("pauseContactEnrollments: failed"));
+      responseQueue = [...base, openContact, { data: { id: "contact-1" }, error: null }, { data: [], error: null }];
+      expectCommittedFailure(await setOutreachDispo("property-1", "opted_out"), "pauseContactEnrollments: failed");
+      expect(recordConsentEvent).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("same-disposition recovery", () => {
+    it("skips the property UPDATE and re-runs suppression when the dispo is already saved", async () => {
+      responseQueue = [
+        { data: property("opted_out"), error: null },
+        { data: { do_not_contact: false, sms_opted_out: false }, error: null },
+        { data: { id: "contact-1" }, error: null },
+        { data: [], error: null },
+      ];
+
+      expect(await setOutreachDispo("property-1", "opted_out")).toEqual({ ok: true });
+
+      expect(updatePayloads.filter((u) => u.table === "properties")).toEqual([]);
+      expect(recordLeadEvent.mock.calls.filter(([e]) => e.eventType === "dispo_set")).toEqual([]);
+      expect(recordConsentEvent).toHaveBeenCalledTimes(1);
+      expect(pauseContactEnrollments).toHaveBeenCalledTimes(1);
+      expect(revalidatePath).toHaveBeenCalledWith("/leads/property-1");
+    });
+
+    it("never mutates a DNC-locked property row on a dnc retry", async () => {
+      responseQueue = [
+        { data: { ...property("dnc"), is_dnc_locked: true }, error: null },
+        { data: { do_not_contact: true, sms_opted_out: false }, error: null },
+        { data: [], error: null },
+      ];
+
+      expect(await setOutreachDispo("property-1", "dnc")).toEqual({ ok: true });
+      expect(updatePayloads).toEqual([]);
+      expect(recordConsentEvent).toHaveBeenCalledTimes(1);
+    });
+
+    it("still rejects a training property before the same-dispo skip", async () => {
+      assertNotTrainingTarget.mockRejectedValueOnce(new Error("Training leads are protected."));
+      responseQueue = [{ data: property("opted_out"), error: null }];
+
+      expect(await setOutreachDispo("property-1", "opted_out")).toEqual({
+        ok: false,
+        error: "Training leads are protected.",
+      });
+      expect(recordConsentEvent).not.toHaveBeenCalled();
+      expect(pauseContactEnrollments).not.toHaveBeenCalled();
+      expect(revalidatePath).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -508,16 +651,19 @@ function makeSupabase(userId: string) {
         }),
         eq: vi.fn(() => builder),
         is: vi.fn(() => builder),
+        order: vi.fn(() => builder),
+        limit: vi.fn(() => builder),
         maybeSingle: vi.fn(async () => {
           const response = responseQueue.shift();
           return { data: response?.data ?? null, error: response?.error ?? null };
         }),
         then: (
-          onFulfilled: (value: { error: { message: string } | null }) => unknown,
+          onFulfilled: (value: { data: unknown; error: { message: string } | null }) => unknown,
           onRejected?: (reason: unknown) => unknown,
         ) => {
           const response = responseQueue.shift();
           return Promise.resolve({
+            data: response?.data ?? null,
             error: response?.error ?? null,
           }).then(onFulfilled, onRejected);
         },

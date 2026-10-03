@@ -3,7 +3,7 @@ import "server-only";
 import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { revalidatePath } from "next/cache";
 
-import { recordConsentEvent } from "@/lib/messaging/consent";
+import { computeConsentState, recordConsentEvent } from "@/lib/messaging/consent";
 import { reportError } from "@/lib/errors/report";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { pauseContactEnrollments } from "@/lib/sequences/enrollment";
@@ -52,7 +52,15 @@ const TRIGGERS_OPT_OUT: ReadonlySet<OutreachDispo> = new Set([
 
 export type SetDispoResult =
   | { ok: true; enrollment?: Pick<DripResult, "status" | "reason"> }
-  | { ok: false; error: string };
+  | {
+      ok: false;
+      error: string;
+      /**
+       * Internal: the property disposition is already saved but the opt-out
+       * suppression did not complete. Retrying the same dispo is safe.
+       */
+      committed?: boolean;
+    };
 
 export async function saveOutreachDispo(
   propertyId: string,
@@ -92,91 +100,130 @@ export async function saveOutreachDispo(
   }
 
   const now = new Date();
-  let updateQuery = supabase
-    .from("properties")
-    .update({
-      outreach_dispo: dispo,
-      follow_up_at: null,
-      updated_at: now.toISOString(),
-    })
-    .eq("id", propertyId);
-  updateQuery = prop.outreach_dispo === null
-    ? updateQuery.is("outreach_dispo", null)
-    : updateQuery.eq("outreach_dispo", prop.outreach_dispo);
-  if (dispo === "needs_sequence" || dispo === "nurture" || dispo === "not_interested") updateQuery = updateQuery.eq("is_dnc_locked", false);
-  const { error: updateErr, data: updated } = await updateQuery
-    .select("id")
-    .maybeSingle();
+  // Retrying an opt-out/DNC save whose suppression step failed: the property
+  // already holds this dispo (and a DNC-locked row must not be mutated again),
+  // so skip the property UPDATE and re-run the suppression branch only.
+  const suppressionRecovery =
+    TRIGGERS_OPT_OUT.has(dispo) && prop.outreach_dispo === dispo;
 
-  if (updateErr) {
-    return { ok: false, error: updateErr.message };
-  }
-  if (!updated) {
-    return {
-      ok: false,
-      error: "Disposition changed in another session. Refresh and try again.",
-    };
-  }
+  // Cache invalidation is owed whenever a property write committed or the
+  // suppression branch ran, on success and on failure.
+  let revalidateOwed = false;
 
-  if (prop.outreach_dispo !== dispo) {
-    try {
-      await recordLeadEvent({
-        propertyId,
-        eventType: LEAD_EVENT_TYPES.DISPO_SET,
-        actorType: "user",
-        actorId: user.id,
-        payload: { from: prop.outreach_dispo, to: dispo },
-      });
-    } catch (eventError) {
-      // The property update (and the database trigger that supersedes any AI
-      // review) already committed. Do not tell the operator the correction
-      // failed because a secondary activity-feed append had trouble.
-      reportError(eventError, {
-        tags: { surface: "manual_dispo_event_after_commit" },
-        extra: { propertyId, dispo, userId: user.id },
-      });
-    }
-  }
-
-  // TCPA suppression — fire consent event + flip boolean + pause enrollments.
-  if (TRIGGERS_OPT_OUT.has(dispo) && prop.homeowner_contact_id) {
-    const contactId = prop.homeowner_contact_id;
-    const { data: contact, error: contactReadError } = await supabase
-      .from("contacts")
-      .select("do_not_contact, sms_opted_out")
-      .eq("id", contactId)
+  if (!suppressionRecovery) {
+    let updateQuery = supabase
+      .from("properties")
+      .update({
+        outreach_dispo: dispo,
+        follow_up_at: null,
+        updated_at: now.toISOString(),
+      })
+      .eq("id", propertyId);
+    updateQuery = prop.outreach_dispo === null
+      ? updateQuery.is("outreach_dispo", null)
+      : updateQuery.eq("outreach_dispo", prop.outreach_dispo);
+    if (dispo === "needs_sequence" || dispo === "nurture" || dispo === "not_interested") updateQuery = updateQuery.eq("is_dnc_locked", false);
+    const { error: updateErr, data: updated } = await updateQuery
+      .select("id")
       .maybeSingle();
-    if (contactReadError || !contact) {
-      reportError(
-        new Error(contactReadError?.message ?? "Contact not found"),
-        {
+
+    if (updateErr) {
+      return { ok: false, error: updateErr.message };
+    }
+    if (!updated) {
+      return {
+        ok: false,
+        error: "Disposition changed in another session. Refresh and try again.",
+      };
+    }
+    revalidateOwed = true;
+  }
+
+  try {
+    if (prop.outreach_dispo !== dispo) {
+      try {
+        await recordLeadEvent({
+          propertyId,
+          eventType: LEAD_EVENT_TYPES.DISPO_SET,
+          actorType: "user",
+          actorId: user.id,
+          payload: { from: prop.outreach_dispo, to: dispo },
+        });
+      } catch (eventError) {
+        // The property update (and the database trigger that supersedes any AI
+        // review) already committed. Do not tell the operator the correction
+        // failed because a secondary activity-feed append had trouble.
+        reportError(eventError, {
+          tags: { surface: "manual_dispo_event_after_commit" },
+          extra: { propertyId, dispo, userId: user.id },
+        });
+      }
+    }
+
+    // TCPA suppression — fire consent event + flip boolean + pause enrollments.
+    // The property dispo is already saved here, so any failure is reported as
+    // a committed failure: the caller must not treat the opt-out as complete,
+    // and a retry (same dispo) re-runs this branch idempotently.
+    if (TRIGGERS_OPT_OUT.has(dispo) && prop.homeowner_contact_id) {
+      revalidateOwed = true;
+      const contactId = prop.homeowner_contact_id;
+      const { data: contact, error: contactReadError } = await supabase
+        .from("contacts")
+        .select("do_not_contact, sms_opted_out")
+        .eq("id", contactId)
+        .maybeSingle();
+      if (contactReadError || !contact) {
+        const message = contactReadError?.message ?? "Contact not found";
+        reportError(new Error(message), {
           tags: { surface: "manual_dispo_contact_read_after_commit" },
           extra: { propertyId, contactId, dispo },
-        },
-      );
-    } else if (!contact.do_not_contact && !contact.sms_opted_out) {
-      const { data: claimedContact, error: contactUpdateError } = await supabase
-        .from("contacts")
-        .update({
-          sms_opted_out: true,
-          sms_opted_out_at: now.toISOString(),
-        })
-        .eq("id", contactId)
-        .eq("do_not_contact", false)
-        .eq("sms_opted_out", false)
-        .select("id")
-        .maybeSingle();
-      if (
-        contactUpdateError &&
-        !contactUpdateError.message.includes("DNC_LOCKED")
-      ) {
-        reportError(new Error(contactUpdateError.message), {
-          tags: { surface: "manual_dispo_contact_update_after_commit" },
+        });
+        return { ok: false, error: message, committed: true };
+      }
+      if (!contact.do_not_contact && !contact.sms_opted_out) {
+        const { error: contactUpdateError } = await supabase
+          .from("contacts")
+          .update({
+            sms_opted_out: true,
+            sms_opted_out_at: now.toISOString(),
+          })
+          .eq("id", contactId)
+          .eq("do_not_contact", false)
+          .eq("sms_opted_out", false)
+          .select("id")
+          .maybeSingle();
+        if (
+          contactUpdateError &&
+          !contactUpdateError.message.includes("DNC_LOCKED")
+        ) {
+          reportError(new Error(contactUpdateError.message), {
+            tags: { surface: "manual_dispo_contact_update_after_commit" },
+            extra: { propertyId, contactId, dispo },
+          });
+          return { ok: false, error: contactUpdateError.message, committed: true };
+        }
+      }
+
+      // Same shape as getConsentState, but a read failure must not be mapped
+      // to "no_consent" (which would risk a duplicate or a skipped record).
+      const { data: consentRows, error: consentReadError } = await supabase
+        .from("consent_events")
+        .select("event_type, occurred_at")
+        .eq("contact_id", contactId)
+        .eq("channel", "sms")
+        .order("occurred_at", { ascending: false })
+        .limit(20);
+      if (consentReadError) {
+        reportError(new Error(consentReadError.message), {
+          tags: { surface: "manual_dispo_consent_read_after_commit" },
           extra: { propertyId, contactId, dispo },
         });
-      } else if (claimedContact) {
+        return { ok: false, error: consentReadError.message, committed: true };
+      }
+      if (computeConsentState(consentRows ?? []) !== "opted_out") {
+        let consentOutcome: Awaited<ReturnType<typeof recordConsentEvent>>;
         try {
-          const consentOutcome = await recordConsentEvent(supabase, {
+          consentOutcome = await recordConsentEvent(supabase, {
             contactId,
             channel: "sms",
             eventType: "opt_out",
@@ -184,7 +231,19 @@ export async function saveOutreachDispo(
             sourceDetail: { propertyId, dispo },
             occurredAt: now,
           });
-          if (consentOutcome.inserted) {
+        } catch (error) {
+          reportError(error, {
+            tags: { surface: "manual_dispo_consent_after_commit" },
+            extra: { propertyId, contactId, dispo },
+          });
+          return {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+            committed: true,
+          };
+        }
+        if (consentOutcome.inserted) {
+          try {
             await recordLeadEvent({
               propertyId,
               eventType: LEAD_EVENT_TYPES.OPTED_OUT,
@@ -194,38 +253,47 @@ export async function saveOutreachDispo(
               sourceType: "consent_events.opt_out",
               sourceId: consentOutcome.id,
             });
+          } catch (error) {
+            // Consent is recorded; a retry would see opted_out and not
+            // repeat it, so the activity-feed append is report-only.
+            reportError(error, {
+              tags: { surface: "manual_dispo_consent_after_commit" },
+              extra: { propertyId, contactId, dispo },
+            });
           }
+        }
+      }
+      try {
+        await pauseContactEnrollments(supabase, {
+          contactId,
+          reason: "consent_revoked",
+          permanent: true,
+          actor: { actorType: "user", actorId: user.id },
+        });
+      } catch (error) {
+        reportError(error, {
+          tags: { surface: "manual_dispo_sequence_pause_after_commit" },
+          extra: { propertyId, contactId, dispo },
+        });
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+          committed: true,
+        };
+      }
+    }
+  } finally {
+    if (revalidateOwed) {
+      for (const path of ["/messages", "/properties", `/leads/${propertyId}`]) {
+        try {
+          revalidatePath(path);
         } catch (error) {
           reportError(error, {
-            tags: { surface: "manual_dispo_consent_after_commit" },
-            extra: { propertyId, contactId, dispo },
+            tags: { surface: "manual_dispo_revalidate_after_commit" },
+            extra: { propertyId, dispo, path },
           });
         }
       }
-    }
-    try {
-      await pauseContactEnrollments(supabase, {
-        contactId,
-        reason: "consent_revoked",
-        permanent: true,
-        actor: { actorType: "user", actorId: user.id },
-      });
-    } catch (error) {
-      reportError(error, {
-        tags: { surface: "manual_dispo_sequence_pause_after_commit" },
-        extra: { propertyId, contactId, dispo },
-      });
-    }
-  }
-
-  for (const path of ["/messages", "/properties", `/leads/${propertyId}`]) {
-    try {
-      revalidatePath(path);
-    } catch (error) {
-      reportError(error, {
-        tags: { surface: "manual_dispo_revalidate_after_commit" },
-        extra: { propertyId, dispo, path },
-      });
     }
   }
 
