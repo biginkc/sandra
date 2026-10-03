@@ -115,7 +115,7 @@ describe("MyLeadsPage availability boundary", () => {
       },
     });
 
-    const html = renderPage(await MyLeadsPage());
+    const html = renderPage(await MyLeadsPage({}));
 
     expect(html).toContain("My Leads is disabled for this organization.");
     expect(html).not.toContain("my-leads-client");
@@ -127,7 +127,7 @@ describe("MyLeadsPage availability boundary", () => {
     const internalMessage = "database connection details";
     mocks.getAcquisitionRoster.mockRejectedValue(new Error(internalMessage));
 
-    const html = renderPage(await MyLeadsPage());
+    const html = renderPage(await MyLeadsPage({}));
 
     expect(html).toContain("My Leads is temporarily unavailable.");
     expect(html).toContain('href="/my-leads"');
@@ -142,7 +142,7 @@ describe("MyLeadsPage availability boundary", () => {
       new MyLeadsReadError("FEATURE_DISABLED", "FEATURE_DISABLED: internal detail"),
     );
 
-    const html = renderPage(await MyLeadsPage());
+    const html = renderPage(await MyLeadsPage({}));
 
     expect(html).toContain("My Leads is disabled for this organization.");
     expect(html).not.toContain("internal detail");
@@ -155,7 +155,7 @@ describe("MyLeadsPage availability boundary", () => {
       { ...activeAcquisitionsMembership, org_id: "org-2" },
     ]);
 
-    const html = renderPage(await MyLeadsPage());
+    const html = renderPage(await MyLeadsPage({}));
 
     expect(html).toContain("My Leads is temporarily unavailable.");
     expect(html).toContain("Retry");
@@ -175,7 +175,7 @@ describe("MyLeadsPage availability boundary", () => {
       },
     });
 
-    await expect(MyLeadsPage()).rejects.toThrow("notFound");
+    await expect(MyLeadsPage({})).rejects.toThrow("notFound");
     expect(mocks.getAcquisitionQueue).not.toHaveBeenCalled();
   });
 
@@ -198,7 +198,7 @@ describe("MyLeadsPage availability boundary", () => {
   });
 
   it("keeps the authorized queue path for an active Acquisitions member", async () => {
-    const html = renderPage(await MyLeadsPage());
+    const html = renderPage(await MyLeadsPage({}));
 
     expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({
       memberId: "user-1",
@@ -336,7 +336,7 @@ describe("MyLeadsPage availability boundary", () => {
     ]);
     mocks.getAcquisitionRoster.mockResolvedValue({ viewer: ownerViewer, roster: ownerRoster });
 
-    expect(renderPage(await MyLeadsPage())).toContain("my-leads-client");
+    expect(renderPage(await MyLeadsPage({}))).toContain("my-leads-client");
 
     expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({ memberId: "owner-1" });
     expect(mocks.getAcquisitionKpis).toHaveBeenCalledWith({ memberId: "owner-1", period: "today" });
@@ -354,7 +354,7 @@ describe("MyLeadsPage availability boundary", () => {
     };
     mocks.loadDialpadPanelBootstrap.mockResolvedValue(bootstrap);
 
-    renderPage(await MyLeadsPage());
+    renderPage(await MyLeadsPage({}));
 
     expect(mocks.loadDialpadPanelBootstrap).toHaveBeenCalledWith(expect.anything(), {
       orgId: "org-1",
@@ -366,7 +366,7 @@ describe("MyLeadsPage availability boundary", () => {
   it("keeps the existing calling flow when the Dialpad bootstrap fails", async () => {
     mocks.loadDialpadPanelBootstrap.mockRejectedValue(new Error("db down"));
 
-    const html = renderPage(await MyLeadsPage());
+    const html = renderPage(await MyLeadsPage({}));
 
     expect(html).toContain("my-leads-client");
     expect((mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0]).toMatchObject({ dialpad: null });

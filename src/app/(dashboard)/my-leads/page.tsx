@@ -97,7 +97,7 @@ export default async function MyLeadsPage({
   searchParams,
 }: {
   searchParams?: Promise<MyLeadsSearchParams>;
-} = {}) {
+}) {
   const selectedLeadLink = parseSelectedLeadParam(
     searchParams ? await searchParams : undefined,
   );
