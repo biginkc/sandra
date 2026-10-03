@@ -134,4 +134,21 @@ describe("useAttemptWorkflow", () => {
     expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, busy: false })
     expect(hook.result.current.recoveryValue?.message).toMatch(/assignment changed/)
   })
+
+  it("a save that never answers ends in the uncertain state and replays the frozen request", async () => {
+    vi.useFakeTimers()
+    try {
+      actions.submitMyLeadCommand.mockImplementationOnce(() => new Promise(() => undefined)).mockResolvedValueOnce({ ok: true, attemptRecorded: true })
+      const { hook } = setup(opening())
+      let outcome: unknown
+      await act(async () => { void hook.result.current.submit({ outcome: "reached", note: "original" }).then(() => undefined, (e) => { outcome = e }) })
+      expect(outcome).toBeUndefined()
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_001) })
+      expect(outcome).toBeInstanceOf(Error)
+      expect(hook.result.current.recoveryValue?.reconciliation).toMatchObject({ payload: { note: "original" } })
+      await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "edited" }) })
+      expect(sentInput(1)).toEqual(sentInput(0))
+    } finally { vi.useRealTimers() }
+  })
 })
+

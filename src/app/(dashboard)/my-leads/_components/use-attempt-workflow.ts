@@ -50,6 +50,25 @@ type Submission = {
   uncertain: boolean
 }
 
+/**
+ * A save that has not answered by now is treated like a lost response: the dialog
+ * must never sit on a disabled "Saving…". The exact request stays frozen with its
+ * idempotency key, so replaying it is safe whether or not the server committed it.
+ */
+export const SAVE_TIMEOUT_MS = 25_000
+class SaveTimeoutError extends Error {
+  constructor() { super("The save did not answer in time") }
+}
+function withSaveTimeout<T>(call: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new SaveTimeoutError()), ms)
+    call.then(
+      (value) => { clearTimeout(timer); resolve(value) },
+      (error) => { clearTimeout(timer); reject(error) },
+    )
+  })
+}
+
 const NOT_CONFIRMED = "The update was not confirmed. Retry with the same form."
 const UNCONFIRMED_MESSAGE = "Sandra could not confirm this save. The original request is preserved for reconciliation."
 
@@ -73,6 +92,8 @@ export type UseAttemptWorkflowOptions<O extends AttemptOpening> = {
   onClose: (opening: O) => void
   /** Called when the drip step changed the lead's queue state. */
   onDripChanged: () => void
+  /** Overrides SAVE_TIMEOUT_MS (tests). */
+  saveTimeoutMs?: number
 }
 
 /**
@@ -80,7 +101,7 @@ export type UseAttemptWorkflowOptions<O extends AttemptOpening> = {
  * Host-specific freshness barriers stay in the host via the callbacks above.
  */
 export function useAttemptWorkflow<O extends AttemptOpening>({
-  opening, memberId, readRow, onCommitted, onSettled, onClose, onDripChanged,
+  opening, memberId, readRow, onCommitted, onSettled, onClose, onDripChanged, saveTimeoutMs = SAVE_TIMEOUT_MS,
 }: UseAttemptWorkflowOptions<O>) {
   const submission = useRef<Submission | null>(null)
   const activeOpening = useRef(opening)
@@ -137,13 +158,13 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     }
     let result: CommandResult
     try {
-      result = command === "handoff" && typeof input.sequenceId === "string" && input.sequenceId
-        ? await submitMyLeadHandoffDrip({ memberId, propertyId: row.propertyId, sequenceId: input.sequenceId,
+      result = await withSaveTimeout(Promise.resolve(command === "handoff" && typeof input.sequenceId === "string" && input.sequenceId
+        ? submitMyLeadHandoffDrip({ memberId, propertyId: row.propertyId, sequenceId: input.sequenceId,
             reason: "not_interested", expectedEpisodeId: typeof input.expectedEpisodeId === "string" ? input.expectedEpisodeId : row.assignmentEpisodeId,
             expectedQueueVersion: typeof input.expectedQueueVersion === "number" ? input.expectedQueueVersion : row.queueVersion,
             expectedSharedStatus: typeof input.expectedSharedStatus === "string" ? input.expectedSharedStatus : row.sharedStatus,
             idempotencyKey: state.key })
-        : await submitMyLeadCommand(command, input)
+        : submitMyLeadCommand(command, input)), saveTimeoutMs)
     } catch (error) {
       // A rejected server action can mean the request reached Postgres but its
       // response did not reach the browser. Retain the exact request so the
@@ -175,7 +196,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       else { await read; onSettled(committed) }
     }
     return result
-  }, [opening, recovery, memberId, onCommitted, onSettled, onClose])
+  }, [opening, recovery, memberId, onCommitted, onSettled, onClose, saveTimeoutMs])
 
   const recoveryValue: AttemptRecoveryValue | null = recovery?.opening === opening
     ? { message: recovery.message, blocked: recovery.blocked, busy: recovery.busy, reconciliation: recovery.reconciliation, refresh: () => void recover() }

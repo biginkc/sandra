@@ -417,5 +417,50 @@ describe("MyLeadsClient pinned deep-link row", () => {
       expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({ expectedQueueVersion: 7, expectedSharedStatus: "interested" })
     })
   })
+
+  describe("a second tab's save never leaves a stuck Saving…", () => {
+    async function openContract(user: ReturnType<typeof userEvent.setup>) {
+      await user.click(screen.getByRole("button", { name: "Show details for 1 Loaded Lane" }))
+      await user.click(within(screen.getByTestId("my-lead-actions-loaded-1")).getByRole("button", { name: "Contract signed" }))
+      await screen.findByRole("dialog")
+      fireEvent.change(screen.getByLabelText("Signed at"), { target: { value: "2026-09-11T10:00" } })
+    }
+
+    it("a stale-state answer ends in the recovery UI within the test", async () => {
+      const user = userEvent.setup()
+      mocks.submitMyLeadCommand.mockResolvedValue({ ok: false, code: "STALE_STATE", message: "This lead changed. Refresh before trying again." })
+      render(ui(null, snap([loaded], 25)))
+      await openContract(user)
+      await user.click(screen.getByRole("button", { name: "Record contract" }))
+      expect(await screen.findByRole("button", { name: "Refresh" })).toBeInTheDocument()
+      expect(screen.queryByText("Saving…")).toBeNull()
+    })
+
+    it("a rejected server action ends in the reconcile state", async () => {
+      const user = userEvent.setup()
+      mocks.submitMyLeadCommand.mockRejectedValue(new Error("response lost"))
+      render(ui(null, snap([loaded], 25)))
+      await openContract(user)
+      await user.click(screen.getByRole("button", { name: "Record contract" }))
+      expect(await screen.findByText(/original request is preserved for reconciliation/)).toBeInTheDocument()
+      expect(screen.queryByText("Saving…")).toBeNull()
+    })
+
+    it("a server action that never answers ends in the reconcile state after the save timeout", async () => {
+      const user = userEvent.setup({ delay: null })
+      mocks.submitMyLeadCommand.mockImplementation(() => new Promise(() => undefined))
+      render(ui(null, snap([loaded], 25)))
+      await openContract(user)
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+      try {
+        fireEvent.click(screen.getByRole("button", { name: "Record contract" }))
+        await act(async () => { await Promise.resolve() })
+        expect(screen.getByText("Saving…")).toBeInTheDocument()
+        await act(async () => { await vi.advanceTimersByTimeAsync(25_001) })
+      } finally { vi.useRealTimers() }
+      expect(await screen.findByText(/original request is preserved for reconciliation/)).toBeInTheDocument()
+      expect(screen.queryByText("Saving…")).toBeNull()
+    })
+  })
 })
 
