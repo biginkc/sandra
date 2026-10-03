@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { claimNormaDispatch } from "../rpc";
 import { Harness } from "./harness";
 import { checkInvariants } from "./invariants";
-import { Barrier, rng } from "./trace";
+import { Barrier, Latch, rng } from "./trace";
 
 /**
  * Call twice (Jarrad, 2026-10-02): a confirmed non-connect on the first call
@@ -222,5 +222,94 @@ describe("invariants over everything above", () => {
     await h.recover({ horizonMs: 3 * 3600_000 });
     const { violations } = await checkInvariants(h, { settled: true });
     expect(violations).toEqual([]);
+  });
+});
+
+describe("STOP prevents the next call", () => {
+  const sent = (ctx: Awaited<ReturnType<typeof place>>, onSend: () => Promise<void>) => ({
+    enabled: true,
+    send: async () => {
+      await onSend();
+      return { status: "sent", messageId: "m", externalId: "e" } as never;
+    },
+  });
+
+  it("STOP replied to the pre-call text, before attempt 1: nothing is dialled, the request ends rejected, the drip is not resumed", async () => {
+    const ctx = await h.lead({ enrollments: ["active"] }, { kind: "callback" });
+    let texts = 0;
+    h.precallSms = sent(ctx as never, async () => {
+      texts += 1;
+      await h.stop(ctx);
+    });
+    try {
+      await h.requestCall(ctx, h.world.rep1);
+    } finally {
+      h.precallSms = undefined;
+    }
+    const request = await requestOf(ctx.lead.property);
+    expect(texts).toBe(1);
+    expect(request.status).toBe("dispatch_rejected");
+    expect(request.dispatch_error).toContain("sms_opted_out");
+    expect(h.bland.sendsFor(request.id)).toHaveLength(0);
+    expect((await enrollment(ctx.lead.enrollments[0]!)).status).not.toBe("active");
+  });
+
+  it("STOP between attempts: the retry is refused at the dial-time recheck, one call only", async () => {
+    const ctx = await place("voicemail");
+    await h.stop(ctx);
+    await h.bland.webhook(h.bland.callsForNumber(ctx.lead.phone)[0]!, "good");
+    const request = await requestOf(ctx.lead.property);
+    expect(request.status).toBe("dispatch_rejected");
+    expect(h.bland.sendsFor(request.id)).toHaveLength(1);
+    expect((await enrollment(ctx.lead.enrollments[0]!)).status).not.toBe("active");
+  });
+
+  it.each(["contact flag", "phone suppression", "opted_out disposition"] as const)("each STOP record alone blocks the retry (%s)", async (how) => {
+    const ctx = await place("no_answer_status");
+    if (how === "contact flag") await q("update public.contacts set sms_opted_out = true where id = $1", [ctx.lead.contact]);
+    else if (how === "phone suppression") await q("insert into public.sms_phone_suppressions (org_id, channel, phone_e164, source) values ($1,'sms',$2,'t')", [h.world.org, ctx.lead.phone]);
+    else await q("update public.properties set outreach_dispo = 'opted_out' where id = $1", [ctx.lead.property]);
+    await h.bland.webhook(h.bland.callsForNumber(ctx.lead.phone)[0]!, "good");
+    expect((await requestOf(ctx.lead.property)).status).toBe("dispatch_rejected");
+    expect(h.bland.callsForNumber(ctx.lead.phone)).toHaveLength(1);
+  });
+});
+
+describe("a stalled dispatcher cannot act for the wrong attempt", () => {
+  it("worker A (attempt-1 snapshot) stalls before its claim; B finishes attempt 1; A wakes: no second text, retry carries attempt 2", async () => {
+    const ctx = await h.lead({ enrollments: ["active"] }, { kind: "voicemail", secondKind: "callback" });
+    await h.requestCall(ctx, h.world.rep1, { actor: "press", crashBeforeDispatch: true });
+    const request = await requestOf(ctx.lead.property);
+    let texts = 0;
+    h.precallSms = { enabled: true, send: async () => { texts += 1; return { status: "sent", messageId: "m", externalId: "e" } as never; } };
+    const gate = new Latch();
+    const reached = new Latch();
+    const remove = h.holdOnce(
+      (info) => info.kind === "rpc" && info.name === "fn_norma_claim_dispatch" && info.actor === "worker-A",
+      gate.promise,
+      () => reached.open(),
+    );
+    try {
+      const a = h.dispatch(request.id, "worker-A");
+      await reached.promise;
+      // B takes attempt 1 all the way: text, call 1, its no-answer webhook schedules the retry (not yet dialled).
+      expect(await h.dispatch(request.id, "worker-B")).toMatchObject({ status: "dispatched" });
+      h.skipRetryDispatchOnce = true;
+      await h.bland.webhook(h.bland.callsForNumber(ctx.lead.phone)[0]!, "good");
+      expect(await requestOf(ctx.lead.property)).toMatchObject({ status: "requested", attempt: 2 });
+      gate.open();
+      expect(await a).toEqual({ status: "not_claimed" });
+    } finally {
+      remove();
+      h.precallSms = undefined;
+    }
+    expect(texts).toBe(1);
+    expect(h.bland.sendsFor(request.id)).toHaveLength(1);
+    // The real retry dispatch: attempt 2, and still no text.
+    h.precallSms = { enabled: true, send: async () => { texts += 1; return { status: "sent", messageId: "m", externalId: "e" } as never; } };
+    await h.dispatch(request.id, "worker-C");
+    h.precallSms = undefined;
+    expect(texts).toBe(1);
+    expect(h.bland.sendsFor(request.id).map((s) => s.attempt)).toEqual([1, 2]);
   });
 });

@@ -74,7 +74,7 @@ export type Plan = {
   followUp?: string;
 };
 
-export type SendRecord = { tick: number; requestId: string; key: string; number: string; callId: string | null; placed: boolean };
+export type SendRecord = { tick: number; requestId: string; key: string; number: string; callId: string | null; placed: boolean; attempt: number | null };
 
 export type FakeCall = {
   callId: string;
@@ -142,12 +142,12 @@ export class FakeBland {
     return json(404, { message: "no such route" });
   };
 
-  private async handleSend(body: { phone_number: string; metadata?: { request_id?: string; idempotency_key?: string } }): Promise<Response> {
+  private async handleSend(body: { phone_number: string; metadata?: { request_id?: string; idempotency_key?: string; attempt?: number } }): Promise<Response> {
     const number = body.phone_number;
     const requestId = body.metadata?.request_id ?? "";
     const key = body.metadata?.idempotency_key ?? "";
     const plan = this.plans.get(number);
-    const record: SendRecord = { tick: this.deps.trace.tick(), requestId, key, number, callId: null, placed: false };
+    const record: SendRecord = { tick: this.deps.trace.tick(), requestId, key, number, callId: null, placed: false, attempt: body.metadata?.attempt ?? null };
     this.sends.push(record);
     this.deps.trace.add("bland", "mark", "send-call", { requestId, number });
     if (!plan) return json(400, { status: "error", message: "unplanned number" });

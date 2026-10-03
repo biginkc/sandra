@@ -7,6 +7,7 @@ import { createBlandClient } from "../bland";
 import type { CallbackTimeProvider } from "../callback-time";
 import type { NormaBlandConfig, NormaEnv } from "../config";
 import { readNormaGateConfig } from "../config";
+import type { PrecallDeps } from "../precall-sms";
 import { dispatchNormaCall, type DispatchResult } from "../dispatch";
 import { evaluateNormaGate } from "../gate";
 import { reconcileNormaCalls, type ReconcileSummary } from "../reconcile";
@@ -103,6 +104,8 @@ export class Harness {
   private readonly clients = new Map<string, Client>();
   /** Makes the next webhook-triggered retry dispatch fail (a crash between scheduling and dialling). */
   skipRetryDispatchOnce = false;
+  /** Pre-call text overrides for dispatch (default: disabled, as in production). */
+  precallSms?: PrecallDeps;
   /** Set per run so the random AI stand-in is reproducible. */
   provider: CallbackTimeProvider | null = null;
   /** The database clock can drift from this process's (Docker); workers use DB-aligned time. */
@@ -257,6 +260,7 @@ export class Harness {
         bland: createBlandClient(BLAND_CONFIG, this.bland.fetch),
         blandConfig: BLAND_CONFIG,
         gate,
+        precallSms: this.precallSms,
       });
     } finally {
       inflight.splice(inflight.indexOf(open), 1);
@@ -310,6 +314,17 @@ export class Harness {
     const client = this.client(actor);
     await upgradeNormaHoldPauses(client, { propertyId: ctx.lead.property, reason: "inbound_reply" });
     await pausePropertyEnrollments(client, { propertyId: ctx.lead.property, reason: "inbound_reply" });
+  }
+
+  /** The seller replies STOP: what the inbound handler records (contact flag, durable phone suppression, disposition). */
+  async stop(ctx: LeadCtx) {
+    const p = this.scratch.pool;
+    await p.query("update public.contacts set sms_opted_out = true where id = $1", [ctx.lead.contact]);
+    await p.query(
+      "insert into public.sms_phone_suppressions (org_id, channel, phone_e164, source) values ($1, 'sms', $2, 'stress_stop') on conflict do nothing",
+      [this.world.org, ctx.lead.phone],
+    );
+    await p.query("update public.properties set outreach_dispo = 'opted_out' where id = $1", [ctx.lead.property]);
   }
 
   /** A rep texts the seller; the seller's reply then becomes a human takeover. */
