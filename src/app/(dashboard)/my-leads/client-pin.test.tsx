@@ -74,6 +74,10 @@ function ui(focus: MyLeadsFocus | null, snapshot = snap([loaded], 25), drips: My
 const focusOn = (r: QueueRow, memberId = "rep-1"): MyLeadsFocus => ({ propertyId: r.propertyId, memberId, notice: null, pin: r })
 const leadEls = (id: string) => document.querySelectorAll(`[data-lead-id="${id}"]`)
 const refreshNow = async () => { await act(async () => { window.dispatchEvent(new Event("focus")) }) }
+const setDenialRefreshList = (reject: boolean, snapshot: QueueSnapshot) => {
+  if (reject) mocks.loadMyLeads.mockRejectedValue(new Error("queue unavailable"))
+  else mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot, kpis, drips: noDrips() })
+}
 
 describe("MyLeadsClient pinned deep-link row", () => {
   beforeEach(() => {
@@ -328,9 +332,12 @@ describe("MyLeadsClient pinned deep-link row", () => {
     await waitFor(() => expect(leadEls("loaded-1")).toHaveLength(1))
   })
 
-  it("applies an authoritative denial even when the list refresh fails", async () => {
+  it.each([
+    ["a successful list refresh", false],
+    ["a rejected list refresh", true],
+  ] as const)("applies an authoritative denial after %s", async (_label, rejectList) => {
     render(ui(focusOn(loaded), snap([loaded], 25)))
-    mocks.loadMyLeads.mockRejectedValue(new Error("queue unavailable"))
+    setDenialRefreshList(rejectList, snap([loaded], 25))
     mocks.loadMyLeadRow.mockResolvedValue(unavailable("other_rep"))
     await refreshNow()
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("assigned to another rep"))
@@ -338,7 +345,10 @@ describe("MyLeadsClient pinned deep-link row", () => {
     expect(screen.queryByTestId("my-lead-actions-loaded-1")).not.toBeInTheDocument()
   })
 
-  it("cancels a pending workflow when a background lookup denies its property", async () => {
+  it.each([
+    ["a successful list refresh", false],
+    ["a rejected list refresh", true],
+  ] as const)("cancels a pending workflow after %s denies its property", async (_label, rejectList) => {
     const user = userEvent.setup()
     let releaseOpening!: (value: unknown) => void
     mocks.loadMyLeadRow.mockImplementationOnce(() => new Promise((resolve) => { releaseOpening = resolve }))
@@ -346,7 +356,7 @@ describe("MyLeadsClient pinned deep-link row", () => {
     await user.click(within(screen.getByTestId("my-lead-actions-loaded-1")).getByRole("button", { name: "Ready to make an offer" }))
     expect(screen.getByText("Loading current lead…")).toBeVisible()
 
-    mocks.loadMyLeads.mockRejectedValue(new Error("queue unavailable"))
+    setDenialRefreshList(rejectList, snap([actionable], 25))
     mocks.loadMyLeadRow.mockResolvedValue(unavailable("other_rep"))
     await refreshNow()
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("assigned to another rep"))
@@ -356,21 +366,27 @@ describe("MyLeadsClient pinned deep-link row", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
   })
 
-  it("closes an open workflow when a background lookup denies its property", async () => {
+  it.each([
+    ["a successful list refresh", false],
+    ["a rejected list refresh", true],
+  ] as const)("closes an open workflow after %s denies its property", async (_label, rejectList) => {
     const user = userEvent.setup()
     mocks.loadMyLeadRow.mockResolvedValue(found(actionable))
     render(ui(focusOn(actionable)))
     await user.click(within(screen.getByTestId("my-lead-actions-loaded-1")).getByRole("button", { name: "Ready to make an offer" }))
     await screen.findByRole("dialog", { name: "Ready to make an offer" })
 
-    mocks.loadMyLeads.mockRejectedValue(new Error("queue unavailable"))
+    setDenialRefreshList(rejectList, snap([actionable], 25))
     mocks.loadMyLeadRow.mockResolvedValue(unavailable("other_rep"))
     await refreshNow()
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("assigned to another rep"))
     expect(screen.queryByRole("dialog", { name: "Ready to make an offer" })).not.toBeInTheDocument()
   })
 
-  it("keeps an unrelated workflow open when the pinned property is denied", async () => {
+  it.each([
+    ["a successful list refresh", false],
+    ["a rejected list refresh", true],
+  ] as const)("keeps an unrelated workflow open after %s denies the pinned property", async (_label, rejectList) => {
     const user = userEvent.setup()
     const other = row("loaded-2", "2 Other Lane", { stage: "contacted", sharedStatus: "contacted" })
     // The focused row is already seeded from the server-rendered focus. The
@@ -387,7 +403,7 @@ describe("MyLeadsClient pinned deep-link row", () => {
     await user.click(within(screen.getByTestId("my-lead-actions-loaded-2")).getByRole("button", { name: "Ready to make an offer" }))
     await screen.findByRole("dialog", { name: "Ready to make an offer" })
 
-    mocks.loadMyLeads.mockRejectedValue(new Error("queue unavailable"))
+    setDenialRefreshList(rejectList, snap([loaded, other], 25))
     await refreshNow()
     await waitFor(() => expect(screen.getByText("This lead is assigned to another rep.")).toBeInTheDocument())
     expect(screen.getByRole("dialog", { name: "Ready to make an offer" })).toBeInTheDocument()
