@@ -2,7 +2,7 @@ import { EXPECTED_OUTCOME, NON_CONNECT_KINDS } from "./fake-bland";
 import type { Harness } from "./harness";
 
 /**
- * The eight stress-gate invariants (.planning/norma/PLAN.md section 9), checked
+ * The nine stress-gate invariants (.planning/norma/PLAN.md section 9), checked
  * against the audit trail (every committed transition, written by trigger), the
  * final database state, the fake Bland's record of what it was asked, and the
  * in-process trace. Returns human-readable violations; empty means green.
@@ -23,6 +23,9 @@ export type CheckStats = {
   slackPosts: number;
   /** Requests whose first call was not answered and that placed (or were refused) a second call. */
   retried: number;
+  /** "Mark reviewed" presses, and how many of them completed a request. */
+  reviewPresses: number;
+  reviewsApplied: number;
 };
 
 type Req = {
@@ -39,8 +42,10 @@ type Req = {
   callback_requested_for: string | null;
   completed_at: string | null;
   created_at: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
 };
-type Audit = { seq: string; tbl: string; op: string; row_id: string; property_id: string | null; hold_open: boolean | null; old_row: Record<string, unknown> | null; new_row: Record<string, unknown> | null };
+type Audit = { seq: string; txid: string; tbl: string; op: string; row_id: string; property_id: string | null; hold_open: boolean | null; old_row: Record<string, unknown> | null; new_row: Record<string, unknown> | null };
 
 const OPEN = ["requested", "dispatching", "dispatched", "dispatch_unknown", "needs_review"];
 const SETTLED = ["completed", "dispatch_rejected", "needs_review"];
@@ -98,6 +103,8 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
     windowRaces: 0,
     slackPosts: h.slack.posts.length,
     retried: requests.filter((r) => r.attempt === 2).length,
+    reviewPresses: h.reviews.length,
+    reviewsApplied: h.reviews.filter((x) => x.result.ok && x.result.code === "reviewed").length,
   };
   for (const r of requests) {
     stats.byStatus[r.status] = (stats.byStatus[r.status] ?? 0) + 1;
@@ -231,13 +238,17 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
     const ctx = ctxOf(r.property_id);
     const ev = events.filter((e) => e.source_id === r.id || e.payload?.request_id === r.id);
     const completedEvents = ev.filter((e) => e.event_type === "norma_call_completed");
+    const reviewedEvents = ev.filter((e) => e.event_type === "norma_call_reviewed");
+    // A rep's "Mark reviewed" completes the request without a call result: no completion event, no Slack post.
+    const reviewed = r.status === "completed" && r.outcome === "reviewed";
     const requestedEvents = ev.filter((e) => e.event_type === "norma_call_requested");
     const rowsForTask = tasksByKey.get(`norma_call:${r.id}`) ?? [];
     const everReviewed = audit.some((a) => a.tbl === "norma_call_requests" && a.row_id === r.id && a.new_row?.status === "needs_review");
     const attemptEvents = ev.filter((e) => e.event_type === "norma_call_attempt_no_answer");
     if (attemptEvents.length !== (r.attempt === 2 ? 1 : 0)) v("3", `request ${r.id}: ${attemptEvents.length} first-attempt events for attempt ${r.attempt} (expected ${r.attempt === 2 ? 1 : 0})`);
     if (requestedEvents.length !== 1) v("3", `request ${r.id}: ${requestedEvents.length} norma_call_requested events (expected 1)`);
-    if (completedEvents.length !== (r.status === "completed" ? 1 : 0)) {
+    if (reviewedEvents.length !== (reviewed ? 1 : 0)) v("3", `request ${r.id} (${r.status}/${r.outcome}): ${reviewedEvents.length} norma_call_reviewed events (expected ${reviewed ? 1 : 0})`);
+    if (completedEvents.length !== (r.status === "completed" && !reviewed ? 1 : 0)) {
       v("3", `request ${r.id} (${r.status}): ${completedEvents.length} norma_call_completed events`);
     }
 
@@ -246,10 +257,10 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
       const calls = h.bland.callsFor(r.id);
       // The outcome is that of the FINAL call (the retry when there was one).
       const finalCall = calls.find((c) => c.callId === r.bland_call_id);
-      if (ctx && finalCall && r.outcome !== EXPECTED_OUTCOME[finalCall.kind]) {
+      if (!reviewed && ctx && finalCall && r.outcome !== EXPECTED_OUTCOME[finalCall.kind]) {
         v("3", `request ${r.id}: outcome ${r.outcome} but the final call was a ${finalCall.kind} (expected ${EXPECTED_OUTCOME[finalCall.kind]})`);
       }
-      if (calls.length !== r.attempt || r.bland_call_id !== calls[calls.length - 1]?.callId) v("3", `request ${r.id}: completed at attempt ${r.attempt} with call id ${r.bland_call_id}, Bland placed ${calls.map((c) => c.callId).join(",") || "none"}`);
+      if (!reviewed && (calls.length !== r.attempt || r.bland_call_id !== calls[calls.length - 1]?.callId)) v("3", `request ${r.id}: completed at attempt ${r.attempt} with call id ${r.bland_call_id}, Bland placed ${calls.map((c) => c.callId).join(",") || "none"}`);
       // A no_answer on attempt 1 may only complete a request whose first call was never confirmed in time
       // (late result on dispatch_unknown / needs_review); a normal confirmed miss must have retried.
       if (r.outcome === "no_answer" && r.attempt === 1) {
@@ -273,7 +284,7 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
           const wantDue = r.outcome === "callback_requested" && r.callback_requested_for ? r.callback_requested_for : r.completed_at;
           if (wantDue && Date.parse(String(t.due_at)) !== Date.parse(wantDue)) v("3", `request ${r.id}: task due ${t.due_at}, expected ${wantDue}`);
         }
-      } else if (r.outcome === "no_answer" || r.outcome === "not_interested") {
+      } else if (r.outcome === "no_answer" || r.outcome === "not_interested" || reviewed) {
         // A review task opened before a do-not-contact lock cannot be closed afterwards (tasks on a locked lead are read-only).
         const openTasks = rowsForTask.filter((t) => t.status === "open" || t.status === "snoozed");
         if (openTasks.length > 0 && !staleReviewExcused(r, openTasks)) v("3", `request ${r.id} (${r.outcome}): a task is open but this outcome needs none${whyNotExcused(r, openTasks)}`);
@@ -419,10 +430,59 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
     }
   }
 
+  // ===== [9] "Mark reviewed": members only, atomic, never resumes a drip, never dials ======
+  const MEMBERS = [h.world.rep1, h.world.rep2];
+  for (const rec of h.reviews) {
+    if (rec.result.ok && !MEMBERS.includes(rec.user)) v("9", `request ${rec.requestId}: a non-member (${rec.user}) was told "${rec.result.code}"`);
+    if (!rec.result.ok && rec.result.code !== "not_authorized" && rec.user === h.world.outsider) v("9", `request ${rec.requestId}: a non-member got "${rec.result.code}" instead of a refusal`);
+    // The press touches nothing but the review RPC: no dispatch, no provider call, no other write path.
+    const ops = h.trace.events.filter((e) => e.actor === rec.actor && e.phase === "start");
+    if (ops.length !== 1 || ops[0]!.what !== "rpc:fn_norma_mark_reviewed") v("9", `request ${rec.requestId}: the press issued ${ops.map((o) => o.what).join(", ") || "nothing"} (only fn_norma_mark_reviewed is allowed)`);
+    // Nothing is sent for this request after a successful review.
+    if (rec.result.ok) {
+      const dialled = h.bland.sendsFor(rec.requestId).filter((send) => send.tick > rec.startTick);
+      if (dialled.length > 0) v("9", `request ${rec.requestId}: ${dialled.length} call(s) were sent after it was marked reviewed`);
+    }
+  }
+  for (const r of requests) {
+    if (!(r.status === "completed" && r.outcome === "reviewed")) {
+      if (r.reviewed_by || r.reviewed_at) v("9", `request ${r.id} (${r.status}/${r.outcome}): carries a review stamp but was not reviewed`);
+      continue;
+    }
+    if (!r.reviewed_at || !r.reviewed_by || !MEMBERS.includes(r.reviewed_by)) v("9", `request ${r.id}: reviewed by ${r.reviewed_by ?? "nobody"} (members are ${MEMBERS.join(", ")})`);
+    const transitions = audit.filter((a) => a.tbl === "norma_call_requests" && a.row_id === r.id && a.new_row?.outcome === "reviewed" && a.old_row?.outcome !== "reviewed");
+    if (transitions.length !== 1) {
+      v("9", `request ${r.id}: ${transitions.length} transitions into reviewed (expected exactly 1)`);
+      continue;
+    }
+    const t = transitions[0]!;
+    if (t.old_row?.status !== "needs_review") v("9", `request ${r.id}: reviewed from ${t.old_row?.status}, only needs_review may be reviewed`);
+    if (!h.reviews.some((rec) => rec.requestId === r.id && rec.result.ok && rec.result.code === "reviewed")) v("9", `request ${r.id}: reviewed without any press that was told it succeeded`);
+    // Everything the review wrote shares one transaction. In it: the request itself, the review task, and
+    // drips only paused or left as they were. Never a resume, a new request, a notification or a created task.
+    for (const a of audit.filter((x) => x.txid === t.txid && x.seq !== t.seq)) {
+      if (a.tbl === "sequence_enrollments") {
+        if (a.new_row?.status === "active" && a.old_row?.status !== "active") v("9", `request ${r.id}: marking it reviewed resumed enrollment ${a.row_id} (${a.old_row?.pause_reason} -> active)`);
+        if (a.op === "INSERT" && a.new_row?.status === "active") v("9", `request ${r.id}: marking it reviewed created an active enrollment`);
+      } else if (a.tbl === "tasks") {
+        const closesReviewTask = a.op === "UPDATE" && a.new_row?.source_key === `norma_call:${r.id}` && a.new_row?.status === "completed" && a.new_row?.completed_by === r.reviewed_by;
+        if (!closesReviewTask) v("9", `request ${r.id}: marking it reviewed wrote task ${a.row_id} (${a.op} ${a.new_row?.status})`);
+      } else if (a.tbl === "norma_call_requests" || a.tbl === "norma_notifications") {
+        v("9", `request ${r.id}: marking it reviewed also wrote ${a.tbl} ${a.row_id}`);
+      } else if (a.tbl === "lead_events") {
+        const type = String(a.new_row?.event_type);
+        if (!["norma_call_reviewed", "sequence_paused"].includes(type)) v("9", `request ${r.id}: marking it reviewed wrote a "${type}" event`);
+      }
+    }
+    // It must have left no task open for a lead that can still be written to.
+    const open = (tasksByKey.get(`norma_call:${r.id}`) ?? []).filter((x) => x.status === "open" || x.status === "snoozed");
+    if (open.length > 0 && !staleReviewExcused(r, open)) v("9", `request ${r.id}: reviewed but its task is still ${open[0]!.status}`);
+  }
+
   // ===== [8] Slack ===========================================================
   const notificationsByRequest = new Map(notifications.map((n) => [n.request_id as string, n]));
   for (const r of requests) {
-    const want = r.status === "completed" ? 1 : 0;
+    const want = r.status === "completed" && r.outcome !== "reviewed" ? 1 : 0;
     const got = notificationCount.get(r.id) ?? 0;
     if (got !== want) v("8", `request ${r.id} (${r.status}): ${got} outbox rows (expected ${want})`);
     if (opts.settled && want === 1) {
@@ -434,7 +494,7 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
   // post per COMPLETED request on that lead, none otherwise.
   if (opts.settled) {
     for (const [property, list] of reqsByProperty) {
-      const want = list.filter((r) => r.status === "completed").length;
+      const want = list.filter((r) => r.status === "completed" && r.outcome !== "reviewed").length;
       const got = h.slack.postsFor(property).length;
       if (got !== want) v("8", `property ${property}: ${got} Slack posts accepted for ${want} completed requests (no ambiguous acceptance in this run)`);
     }
