@@ -65,6 +65,7 @@ async function saveContract(user: ReturnType<typeof userEvent.setup>, id: string
 }
 
 const loaded = row("loaded-1", "1 Loaded Lane")
+const actionable = row("loaded-1", "1 Loaded Lane", { stage: "contacted", sharedStatus: "contacted" })
 const beyond = row("beyond-9", "9 Beyond Lane", { assignmentEpisodeId: "ep-b" })
 
 function ui(focus: MyLeadsFocus | null, snapshot = snap([loaded], 25), drips: MyLeadDripSnapshot = noDrips()) {
@@ -73,6 +74,10 @@ function ui(focus: MyLeadsFocus | null, snapshot = snap([loaded], 25), drips: My
 const focusOn = (r: QueueRow, memberId = "rep-1"): MyLeadsFocus => ({ propertyId: r.propertyId, memberId, notice: null, pin: r })
 const leadEls = (id: string) => document.querySelectorAll(`[data-lead-id="${id}"]`)
 const refreshNow = async () => { await act(async () => { window.dispatchEvent(new Event("focus")) }) }
+const setDenialRefreshList = (reject: boolean, snapshot: QueueSnapshot) => {
+  if (reject) mocks.loadMyLeads.mockRejectedValue(new Error("queue unavailable"))
+  else mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot, kpis, drips: noDrips() })
+}
 
 describe("MyLeadsClient pinned deep-link row", () => {
   beforeEach(() => {
@@ -163,6 +168,8 @@ describe("MyLeadsClient pinned deep-link row", () => {
     mocks.loadMyLeadRow.mockResolvedValue({ ok: false, code: "READ_FAILED", message: "x" })
     await refreshNow()
     expect(leadEls("beyond-9")).toHaveLength(1)
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("We couldn't check this lead right now."))
+    expect(screen.getByRole("link", { name: "Retry" })).toHaveAttribute("href", "/my-leads?lead=beyond-9")
   })
 
   it("drops the pin when the user changes the search", async () => {
@@ -170,6 +177,20 @@ describe("MyLeadsClient pinned deep-link row", () => {
     fireEvent.change(screen.getByLabelText("Search My Leads"), { target: { value: "x" } })
     expect(leadEls("beyond-9")).toHaveLength(0)
     expect(mocks.replace).toHaveBeenCalledWith("/my-leads", { scroll: false })
+  })
+
+  it("applies the in-flight search refresh after the server clears the deep link", async () => {
+    let releaseList!: (value: unknown) => void
+    mocks.loadMyLeads.mockImplementationOnce(() => new Promise((resolve) => { releaseList = resolve }))
+    const { rerender } = render(ui(focusOn(beyond), snap([], 0)))
+    fireEvent.change(screen.getByLabelText("Search My Leads"), { target: { value: "current-only" } })
+    await waitFor(() => expect(mocks.loadMyLeads).toHaveBeenCalledWith({ memberId: "rep-1", search: "current-only", period: "today" }), { timeout: 1_000 })
+
+    // The RSC result for /my-leads arrives while the cleared-search refresh is
+    // already in flight. Its valid result must still populate the cleared view.
+    rerender(ui(null, snap([], 0)))
+    await act(async () => releaseList({ ok: true, snapshot: snap([loaded], 25), kpis, drips: noDrips() }))
+    await waitFor(() => expect(leadEls("loaded-1")).toHaveLength(1))
   })
 
   it("loads an owner deep link on the assignee's queue with the assignee's pin lookup", async () => {
@@ -198,17 +219,228 @@ describe("MyLeadsClient pinned deep-link row", () => {
 
   it("removes an unavailable lead from every rendered section, leaving server counts alone", async () => {
     const dripRow = row("drip-3", "3 Drip Lane")
+    mocks.loadMyLeadDetail.mockResolvedValue({
+      ok: true,
+      detail: {
+        groups: {
+          messages: {
+            rows: [{ id: "loaded-detail", at: T0, actorId: null, body: "Loaded detail marker", direction: "inbound", deliveryStatus: "received", attachmentCount: 0 }],
+            cursor: null,
+            hasMore: false,
+          },
+        },
+      },
+    })
     const { rerender } = render(ui(focusOn(loaded), snap([loaded], 25), { ...noDrips(), active: [dripOf(dripRow)] }))
+    await waitFor(() => expect(screen.getByText("Loaded detail marker")).toBeInTheDocument())
+    expect(screen.getByTestId("my-lead-actions-loaded-1")).toBeInTheDocument()
     mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([loaded], 25), kpis, drips: { ...noDrips(), active: [dripOf(dripRow)] } })
     mocks.loadMyLeadRow.mockResolvedValue(unavailable("other_rep"))
     await refreshNow()
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("assigned to another rep"))
     expect(leadEls("loaded-1")).toHaveLength(0)
+    expect(screen.queryByTestId("my-lead-actions-loaded-1")).not.toBeInTheDocument()
     expect(screen.getByLabelText("25 leads")).toBeInTheDocument()
     rerender(ui(focusOn(dripRow), snap([loaded], 25), { ...noDrips(), active: [dripOf(dripRow)] }))
     mocks.loadMyLeadRow.mockResolvedValue(unavailable("archived"))
     await refreshNow()
     await waitFor(() => expect(leadEls("drip-3")).toHaveLength(0))
+  })
+
+  it("keeps an ID-bearing unavailable focus removed when a stale list refresh still contains it", async () => {
+    const staleDrips = { ...noDrips(), active: [dripOf(loaded)] }
+    const staleSnapshot = snap([loaded], 25)
+    mocks.loadMyLeadDetail.mockResolvedValue({
+      ok: true,
+      detail: {
+        groups: {
+          messages: {
+            rows: [{ id: "authoritative-removal-detail", at: T0, actorId: null, body: "A detail must disappear", direction: "inbound", deliveryStatus: "received", attachmentCount: 0 }],
+            cursor: null,
+            hasMore: false,
+          },
+        },
+      },
+    })
+    const { rerender } = render(ui(focusOn(loaded), staleSnapshot, noDrips()))
+    await waitFor(() => expect(screen.getByText("A detail must disappear")).toBeInTheDocument())
+    expect(screen.getByTestId("my-lead-actions-loaded-1")).toBeInTheDocument()
+
+    let releaseList!: (value: unknown) => void
+    let releaseRow!: (value: unknown) => void
+    mocks.loadMyLeads.mockImplementationOnce(() => new Promise((resolve) => { releaseList = resolve }))
+    mocks.loadMyLeadRow.mockImplementationOnce(() => new Promise((resolve) => { releaseRow = resolve }))
+    await refreshNow()
+    await waitFor(() => expect(mocks.loadMyLeadRow).toHaveBeenCalledWith({ memberId: "rep-1", propertyId: "loaded-1" }))
+
+    const unavailableFocus: MyLeadsFocus = {
+      propertyId: loaded.propertyId,
+      memberId: "rep-1",
+      notice: "This lead is assigned to another rep.",
+      pin: null,
+      pinStatus: "unavailable",
+      retryHref: "/my-leads?lead=loaded-1",
+    }
+    rerender(ui(unavailableFocus, staleSnapshot, staleDrips))
+    expect(screen.getByRole("status")).toHaveTextContent("assigned to another rep")
+    expect(leadEls("loaded-1")).toHaveLength(0)
+    expect(screen.queryByText("A detail must disappear")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("my-lead-actions-loaded-1")).not.toBeInTheDocument()
+
+    // The old allowed read resolves after the server has denied A. It must not
+    // re-authorize the cached row or details merely because its request started first.
+    await act(async () => {
+      releaseList({ ok: true, snapshot: staleSnapshot, kpis, drips: staleDrips })
+      releaseRow(found(loaded))
+    })
+    expect(leadEls("loaded-1")).toHaveLength(0)
+    expect(screen.queryByText("A detail must disappear")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("my-lead-actions-loaded-1")).not.toBeInTheDocument()
+
+    // The successful list response is still stale and contains A in both places;
+    // the ID-bearing unavailable lookup must continue to win after reconciliation.
+    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: staleSnapshot, kpis, drips: staleDrips })
+    mocks.loadMyLeadRow.mockResolvedValue(unavailable("other_rep"))
+    await refreshNow()
+    await waitFor(() => expect(mocks.loadMyLeads).toHaveBeenCalledWith({ memberId: "rep-1", search: "", period: "today" }))
+    expect(leadEls("loaded-1")).toHaveLength(0)
+    expect(screen.queryByText("A detail must disappear")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("my-lead-actions-loaded-1")).not.toBeInTheDocument()
+
+    const failedFocus: MyLeadsFocus = {
+      ...unavailableFocus,
+      notice: "We couldn't check this lead right now.",
+      pinStatus: "failed",
+    }
+    rerender(ui(failedFocus, staleSnapshot, staleDrips))
+    expect(leadEls("loaded-1")).toHaveLength(0)
+    expect(screen.queryByText("A detail must disappear")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("my-lead-actions-loaded-1")).not.toBeInTheDocument()
+
+    // A failed background lookup must preserve the earlier denial instead of
+    // trusting the stale stage/drip list copies.
+    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: staleSnapshot, kpis, drips: staleDrips })
+    mocks.loadMyLeadRow.mockResolvedValue({ ok: false, code: "READ_FAILED", message: "x" })
+    await refreshNow()
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("couldn't check this lead"))
+    expect(leadEls("loaded-1")).toHaveLength(0)
+    expect(screen.queryByTestId("my-lead-actions-loaded-1")).not.toBeInTheDocument()
+
+    // A later successful authoritative row read is allowed to restore the lead.
+    mocks.loadMyLeadRow.mockResolvedValue(found({ ...loaded, queueVersion: 2 }))
+    await refreshNow()
+    await waitFor(() => expect(leadEls("loaded-1")).toHaveLength(1))
+  })
+
+  it.each([
+    ["a successful list refresh", false],
+    ["a rejected list refresh", true],
+  ] as const)("applies an authoritative denial after %s", async (_label, rejectList) => {
+    render(ui(focusOn(loaded), snap([loaded], 25)))
+    setDenialRefreshList(rejectList, snap([loaded], 25))
+    mocks.loadMyLeadRow.mockResolvedValue(unavailable("other_rep"))
+    await refreshNow()
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("assigned to another rep"))
+    expect(leadEls("loaded-1")).toHaveLength(0)
+    expect(screen.queryByTestId("my-lead-actions-loaded-1")).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ["a successful list refresh", false],
+    ["a rejected list refresh", true],
+  ] as const)("cancels a pending workflow after %s denies its property", async (_label, rejectList) => {
+    const user = userEvent.setup()
+    let releaseOpening!: (value: unknown) => void
+    mocks.loadMyLeadRow.mockImplementationOnce(() => new Promise((resolve) => { releaseOpening = resolve }))
+    render(ui(focusOn(actionable)))
+    await user.click(within(screen.getByTestId("my-lead-actions-loaded-1")).getByRole("button", { name: "Ready to make an offer" }))
+    expect(screen.getByText("Loading current lead…")).toBeVisible()
+
+    setDenialRefreshList(rejectList, snap([actionable], 25))
+    mocks.loadMyLeadRow.mockResolvedValue(unavailable("other_rep"))
+    await refreshNow()
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("assigned to another rep"))
+    expect(screen.queryByText("Loading current lead…")).not.toBeInTheDocument()
+
+    await act(async () => releaseOpening(found(actionable)))
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ["a successful list refresh", false],
+    ["a rejected list refresh", true],
+  ] as const)("closes an open workflow after %s denies its property", async (_label, rejectList) => {
+    const user = userEvent.setup()
+    mocks.loadMyLeadRow.mockResolvedValue(found(actionable))
+    render(ui(focusOn(actionable)))
+    await user.click(within(screen.getByTestId("my-lead-actions-loaded-1")).getByRole("button", { name: "Ready to make an offer" }))
+    await screen.findByRole("dialog", { name: "Ready to make an offer" })
+
+    setDenialRefreshList(rejectList, snap([actionable], 25))
+    mocks.loadMyLeadRow.mockResolvedValue(unavailable("other_rep"))
+    await refreshNow()
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("assigned to another rep"))
+    expect(screen.queryByRole("dialog", { name: "Ready to make an offer" })).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ["a successful list refresh", false],
+    ["a rejected list refresh", true],
+  ] as const)("keeps an unrelated workflow open after %s denies the pinned property", async (_label, rejectList) => {
+    const user = userEvent.setup()
+    const other = row("loaded-2", "2 Other Lane", { stage: "contacted", sharedStatus: "contacted" })
+    // The focused row is already seeded from the server-rendered focus. The
+    // first client refresh should be the denial transition under test.
+    let loadedReads = 1
+    mocks.loadMyLeadRow.mockImplementation(async ({ propertyId }: { propertyId: string }) =>
+      propertyId === "loaded-1"
+        ? loadedReads++ === 0
+          ? found(loaded)
+          : unavailable("other_rep")
+        : found(other))
+    render(ui(focusOn(loaded), snap([loaded, other], 25)))
+    await user.click(screen.getByRole("button", { name: "Show details for 2 Other Lane" }))
+    await user.click(within(screen.getByTestId("my-lead-actions-loaded-2")).getByRole("button", { name: "Ready to make an offer" }))
+    await screen.findByRole("dialog", { name: "Ready to make an offer" })
+
+    setDenialRefreshList(rejectList, snap([loaded, other], 25))
+    await refreshNow()
+    await waitFor(() => expect(screen.getByText("This lead is assigned to another rep.")).toBeInTheDocument())
+    expect(screen.getByRole("dialog", { name: "Ready to make an offer" })).toBeInTheDocument()
+  })
+
+  it("keeps a new-scope opening through the cleared deep-link acknowledgement", async () => {
+    const user = userEvent.setup()
+    const other = row("loaded-2", "2 Other Lane", { stage: "contacted", sharedStatus: "contacted" })
+    let releaseOpening!: (value: unknown) => void
+    mocks.loadMyLeadRow.mockImplementation(async ({ propertyId }: { propertyId: string }) => {
+      if (propertyId === "loaded-2") return new Promise((resolve) => { releaseOpening = resolve })
+      return found(loaded)
+    })
+    const { rerender } = render(ui(focusOn(loaded), snap([loaded, other], 25)))
+
+    fireEvent.change(screen.getByLabelText("Search My Leads"), { target: { value: "other" } })
+    await user.click(screen.getByRole("button", { name: "Show details for 2 Other Lane" }))
+    await user.click(within(screen.getByTestId("my-lead-actions-loaded-2")).getByRole("button", { name: "Ready to make an offer" }))
+    expect(screen.getByText("Loading current lead…")).toBeVisible()
+
+    rerender(ui(null, snap([loaded, other], 25)))
+    await act(async () => releaseOpening(found(other)))
+    await screen.findByRole("dialog", { name: "Ready to make an offer" })
+  })
+
+  it("keeps a new-scope dialog through the cleared deep-link acknowledgement", async () => {
+    const user = userEvent.setup()
+    const other = row("loaded-2", "2 Other Lane", { stage: "contacted", sharedStatus: "contacted" })
+    mocks.loadMyLeadRow.mockResolvedValue(found(other))
+    const { rerender } = render(ui(focusOn(loaded), snap([loaded, other], 25)))
+
+    fireEvent.change(screen.getByLabelText("Search My Leads"), { target: { value: "other" } })
+    await user.click(screen.getByRole("button", { name: "Show details for 2 Other Lane" }))
+    await user.click(within(screen.getByTestId("my-lead-actions-loaded-2")).getByRole("button", { name: "Ready to make an offer" }))
+    await screen.findByRole("dialog", { name: "Ready to make an offer" })
+    rerender(ui(null, snap([loaded, other], 25)))
+    expect(screen.getByRole("dialog", { name: "Ready to make an offer" })).toBeInTheDocument()
   })
 
   it("replaces a stale loaded copy in place when the lookup is newer in the same section", async () => {
@@ -555,4 +787,3 @@ describe("MyLeadsClient pinned deep-link row", () => {
     })
   })
 })
-

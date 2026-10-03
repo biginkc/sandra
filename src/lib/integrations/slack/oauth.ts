@@ -9,6 +9,10 @@ export const SLACK_BOT_SCOPES = [
   "im:write",
   "users:read",
   "users:read.email",
+  "links:read",
+  "links:write",
+  "channels:read",
+  "groups:read",
 ] as const;
 
 export const SLACK_USER_SCOPES = [] as const;

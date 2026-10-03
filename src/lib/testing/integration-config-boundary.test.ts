@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import localConfig from "../../../vitest.local-integration.config";
 import remoteConfig from "../../../vitest.integration.config";
 import filterLocalConfig from "../../../vitest.filter-local.config";
+import slackLocalConfig from "../../../vitest.slack-local.config";
 
 const root = path.resolve(__dirname, "../../..");
 const migrationsDir = path.join(root, "supabase/migrations");
@@ -72,7 +73,7 @@ describe("integration runner configuration boundary", () => {
   });
 
   it("every guarded suite is selected by exactly one local runner", () => {
-    const included = new Set([...(localConfig.test?.include ?? []), ...(filterLocalConfig.test?.include ?? [])]);
+    const included = new Set([...(localConfig.test?.include ?? []), ...(filterLocalConfig.test?.include ?? []), ...(slackLocalConfig.test?.include ?? [])]);
     for (const suite of guardedSuites) expect(included.has(suite), suite).toBe(true);
   });
 });

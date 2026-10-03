@@ -35,12 +35,16 @@ vi.mock("@/lib/my-leads/queries", () => ({
     }
   },
 }));
-vi.mock('@/lib/my-leads/drip-queries', () => ({listMyLeadsInDrip: mocks.listMyLeadsInDrip}));
+vi.mock("@/lib/my-leads/drip-queries", () => ({
+  listMyLeadsInDrip: mocks.listMyLeadsInDrip,
+}));
 vi.mock("@/lib/dialpad-cti/dispatch", () => ({
   loadDialpadPanelBootstrap: mocks.loadDialpadPanelBootstrap,
   createSupabaseDialpadDispatchDb: vi.fn(() => ({})),
 }));
-vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn(() => ({})) }));
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: vi.fn(() => ({})),
+}));
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => {
     const chain = {
@@ -113,7 +117,12 @@ beforeEach(() => {
   mocks.getAcquisitionRoster.mockResolvedValue({ viewer, roster: baseRoster });
   mocks.getAcquisitionQueue.mockResolvedValue({});
   mocks.getAcquisitionKpis.mockResolvedValue({});
-  mocks.listMyLeadsInDrip.mockResolvedValue({active:[],replied:[],repliedCount:0,counts:{}});
+  mocks.listMyLeadsInDrip.mockResolvedValue({
+    active: [],
+    replied: [],
+    repliedCount: 0,
+    counts: {},
+  });
   mocks.loadDialpadPanelBootstrap.mockResolvedValue(null);
 });
 
@@ -127,7 +136,9 @@ describe("MyLeadsPage availability boundary", () => {
       },
     });
 
-    const html = renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    const html = renderPage(
+      await MyLeadsPage({ searchParams: Promise.resolve({}) }),
+    );
 
     expect(html).toContain("My Leads is disabled for this organization.");
     expect(html).not.toContain("my-leads-client");
@@ -139,7 +150,9 @@ describe("MyLeadsPage availability boundary", () => {
     const internalMessage = "database connection details";
     mocks.getAcquisitionRoster.mockRejectedValue(new Error(internalMessage));
 
-    const html = renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    const html = renderPage(
+      await MyLeadsPage({ searchParams: Promise.resolve({}) }),
+    );
 
     expect(html).toContain("My Leads is temporarily unavailable.");
     expect(html).toContain('href="/my-leads"');
@@ -151,10 +164,15 @@ describe("MyLeadsPage availability boundary", () => {
   it("maps the rollout error to a disabled state without exposing the RPC message", async () => {
     const { MyLeadsReadError } = await import("@/lib/my-leads/queries");
     mocks.getAcquisitionRoster.mockRejectedValue(
-      new MyLeadsReadError("FEATURE_DISABLED", "FEATURE_DISABLED: internal detail"),
+      new MyLeadsReadError(
+        "FEATURE_DISABLED",
+        "FEATURE_DISABLED: internal detail",
+      ),
     );
 
-    const html = renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    const html = renderPage(
+      await MyLeadsPage({ searchParams: Promise.resolve({}) }),
+    );
 
     expect(html).toContain("My Leads is disabled for this organization.");
     expect(html).not.toContain("internal detail");
@@ -167,7 +185,9 @@ describe("MyLeadsPage availability boundary", () => {
       { ...activeAcquisitionsMembership, org_id: "org-2" },
     ]);
 
-    const html = renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    const html = renderPage(
+      await MyLeadsPage({ searchParams: Promise.resolve({}) }),
+    );
 
     expect(html).toContain("My Leads is temporarily unavailable.");
     expect(html).toContain("Retry");
@@ -187,12 +207,16 @@ describe("MyLeadsPage availability boundary", () => {
       },
     });
 
-    await expect(MyLeadsPage({ searchParams: Promise.resolve({}) })).rejects.toThrow("notFound");
+    await expect(
+      MyLeadsPage({ searchParams: Promise.resolve({}) }),
+    ).rejects.toThrow("notFound");
     expect(mocks.getAcquisitionQueue).not.toHaveBeenCalled();
   });
 
   it("keeps the authorized queue path for an active Acquisitions member", async () => {
-    const html = renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    const html = renderPage(
+      await MyLeadsPage({ searchParams: Promise.resolve({}) }),
+    );
 
     expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({
       memberId: "user-1",
@@ -204,29 +228,59 @@ describe("MyLeadsPage availability boundary", () => {
     expect(html).toContain("my-leads-client");
   });
 
-  it.each([true, false])("defaults an owner to their own profile when Acquisitions enabled is %s", async (acquisitionsEnabled) => {
-    const ownerViewer = { ...viewer, userId: "owner-1", isOwner: true };
-    const ownerRoster: AcquisitionRoster = {
-      ...baseRoster,
-      isOwner: true,
-      members: [
-        ...baseRoster.members,
-        { id: "owner-1", label: "Owner", role: "owner", acquisitionsEnabled, active: true, hasHistory: false },
-      ],
-    };
-    mocks.getCallerMembershipsOrThrow.mockResolvedValue([
-      { ...activeAcquisitionsMembership, user_id: "owner-1", role: "owner", acquisitions_enabled: acquisitionsEnabled },
-    ]);
-    mocks.getAcquisitionRoster.mockResolvedValue({ viewer: ownerViewer, roster: ownerRoster });
+  it.each([true, false])(
+    "defaults an owner to their own profile when Acquisitions enabled is %s",
+    async (acquisitionsEnabled) => {
+      const ownerViewer = { ...viewer, userId: "owner-1", isOwner: true };
+      const ownerRoster: AcquisitionRoster = {
+        ...baseRoster,
+        isOwner: true,
+        members: [
+          ...baseRoster.members,
+          {
+            id: "owner-1",
+            label: "Owner",
+            role: "owner",
+            acquisitionsEnabled,
+            active: true,
+            hasHistory: false,
+          },
+        ],
+      };
+      mocks.getCallerMembershipsOrThrow.mockResolvedValue([
+        {
+          ...activeAcquisitionsMembership,
+          user_id: "owner-1",
+          role: "owner",
+          acquisitions_enabled: acquisitionsEnabled,
+        },
+      ]);
+      mocks.getAcquisitionRoster.mockResolvedValue({
+        viewer: ownerViewer,
+        roster: ownerRoster,
+      });
 
-    expect(renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }))).toContain("my-leads-client");
+      expect(
+        renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) })),
+      ).toContain("my-leads-client");
 
-    expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({ memberId: "owner-1" });
-    expect(mocks.getAcquisitionKpis).toHaveBeenCalledWith({ memberId: "owner-1", period: "today" });
-    expect(mocks.listMyLeadsInDrip).toHaveBeenCalledWith("owner-1");
-    expect((mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0])
-      .toMatchObject({ initialMemberId: "owner-1", viewer: ownerViewer });
-  });
+      expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({
+        memberId: "owner-1",
+      });
+      expect(mocks.getAcquisitionKpis).toHaveBeenCalledWith({
+        memberId: "owner-1",
+        period: "today",
+      });
+      expect(mocks.listMyLeadsInDrip).toHaveBeenCalledWith("owner-1");
+      expect(
+        (
+          mocks.MyLeadsClient.mock.calls as unknown as Array<
+            [Record<string, unknown>]
+          >
+        )[0]?.[0],
+      ).toMatchObject({ initialMemberId: "owner-1", viewer: ownerViewer });
+    },
+  );
 
   it("passes the Dialpad panel bootstrap to the client only for the session's own org and rep", async () => {
     const bootstrap = {
@@ -239,102 +293,275 @@ describe("MyLeadsPage availability boundary", () => {
 
     renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
 
-    expect(mocks.loadDialpadPanelBootstrap).toHaveBeenCalledWith(expect.anything(), {
-      orgId: "org-1",
-      userId: "user-1",
-    });
-    expect((mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0]).toMatchObject({ dialpad: bootstrap });
+    expect(mocks.loadDialpadPanelBootstrap).toHaveBeenCalledWith(
+      expect.anything(),
+      {
+        orgId: "org-1",
+        userId: "user-1",
+      },
+    );
+    expect(
+      (
+        mocks.MyLeadsClient.mock.calls as unknown as Array<
+          [Record<string, unknown>]
+        >
+      )[0]?.[0],
+    ).toMatchObject({ dialpad: bootstrap });
   });
 
   it("keeps the existing calling flow when the Dialpad bootstrap fails", async () => {
     mocks.loadDialpadPanelBootstrap.mockRejectedValue(new Error("db down"));
 
-    const html = renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    const html = renderPage(
+      await MyLeadsPage({ searchParams: Promise.resolve({}) }),
+    );
 
     expect(html).toContain("my-leads-client");
-    expect((mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0]).toMatchObject({ dialpad: null });
+    expect(
+      (
+        mocks.MyLeadsClient.mock.calls as unknown as Array<
+          [Record<string, unknown>]
+        >
+      )[0]?.[0],
+    ).toMatchObject({ dialpad: null });
     expect(mocks.reportError).toHaveBeenCalledTimes(1);
   });
 
   describe("lead deep link", () => {
     const leadId = "11111111-1111-4111-8111-111111111111";
-    const clientProps = () => (mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0];
-    const row = { propertyId: leadId, assignmentEpisodeId: "ep-1", queueVersion: 2 };
+    const clientProps = () =>
+      (
+        mocks.MyLeadsClient.mock.calls as unknown as Array<
+          [Record<string, unknown>]
+        >
+      )[0]?.[0];
+    const row = {
+      propertyId: leadId,
+      assignmentEpisodeId: "ep-1",
+      queueVersion: 2,
+    };
     const asOwner = () =>
       mocks.getAcquisitionRoster.mockResolvedValue({
         viewer: { ...viewer, userId: "owner-1", isOwner: true },
-        roster: { ...baseRoster, isOwner: true, members: [...baseRoster.members, { ...baseRoster.members[0], id: "owner-1", role: "owner" }] },
+        roster: {
+          ...baseRoster,
+          isOwner: true,
+          members: [
+            ...baseRoster.members,
+            { ...baseRoster.members[0], id: "owner-1", role: "owner" },
+          ],
+        },
       });
 
     it("leaves the rep's queue unfiltered and pins the looked-up row", async () => {
-      mocks.getMyLeadsQueueRow.mockResolvedValue({ status: "found", row, snapshotAt: "2026-10-01T00:00:00Z" });
+      mocks.getMyLeadsQueueRow.mockResolvedValue({
+        status: "found",
+        row,
+        snapshotAt: "2026-10-01T00:00:00Z",
+      });
 
-      renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId }) }));
+      renderPage(
+        await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId }) }),
+      );
 
-      expect(mocks.getMyLeadsQueueRow).toHaveBeenCalledWith({ memberId: "user-1", propertyId: leadId });
-      expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({ memberId: "user-1" });
+      expect(mocks.getMyLeadsQueueRow).toHaveBeenCalledWith({
+        memberId: "user-1",
+        propertyId: leadId,
+      });
+      expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({
+        memberId: "user-1",
+      });
       expect(clientProps()).toMatchObject({
         initialMemberId: "user-1",
-        focus: { propertyId: leadId, memberId: "user-1", notice: null, pin: row },
+        focus: {
+          propertyId: leadId,
+          memberId: "user-1",
+          notice: null,
+          pin: row,
+        },
       });
       expect(clientProps()?.initialSearch).toBeUndefined();
     });
 
-    it("opens an owner on the assigned rep's queue", async () => {
+    it("keeps an owner on their own queue even when a deep-linked lead is assigned to another rep", async () => {
       asOwner();
       mocks.property = { data: { assigned_user_id: "user-1" }, error: null };
-      mocks.getMyLeadsQueueRow.mockResolvedValue({ status: "found", row, snapshotAt: "x" });
+      mocks.getMyLeadsQueueRow.mockResolvedValue({
+        status: "unavailable",
+        reason: "other_rep",
+      });
 
-      renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId }) }));
+      renderPage(
+        await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId }) }),
+      );
 
-      expect(mocks.getMyLeadsQueueRow).toHaveBeenCalledWith({ memberId: "user-1", propertyId: leadId });
-      expect(clientProps()).toMatchObject({ initialMemberId: "user-1", focus: { propertyId: leadId, memberId: "user-1" } });
+      expect(mocks.getMyLeadsQueueRow).toHaveBeenCalledWith({
+        memberId: "owner-1",
+        propertyId: leadId,
+      });
+      expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({
+        memberId: "owner-1",
+      });
+      expect(clientProps()).toMatchObject({
+        initialMemberId: "owner-1",
+        focus: {
+          propertyId: leadId,
+          memberId: "owner-1",
+          pinStatus: "unavailable",
+          retryHref: `/my-leads?lead=${leadId}`,
+        },
+      });
     });
 
     it("keeps an owner on their own queue when the assignee is not an eligible member", async () => {
       asOwner();
       mocks.property = { data: { assigned_user_id: "stranger" }, error: null };
-      mocks.getMyLeadsQueueRow.mockResolvedValue({ status: "unavailable", reason: "other_rep" });
+      mocks.getMyLeadsQueueRow.mockResolvedValue({
+        status: "unavailable",
+        reason: "other_rep",
+      });
 
-      renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId }) }));
+      renderPage(
+        await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId }) }),
+      );
 
-      expect(mocks.getMyLeadsQueueRow).toHaveBeenCalledWith({ memberId: "owner-1", propertyId: leadId });
+      expect(mocks.getMyLeadsQueueRow).toHaveBeenCalledWith({
+        memberId: "owner-1",
+        propertyId: leadId,
+      });
     });
 
     it.each([
       ["not_found", "We couldn't find this lead."],
       ["unassigned", "This lead isn't assigned to anyone yet."],
       ["other_rep", "This lead is assigned to another rep."],
-      ["closed_dead_dnc", "This lead is closed, dead or marked do-not-contact."],
+      [
+        "closed_dead_dnc",
+        "This lead is closed, dead or marked do-not-contact.",
+      ],
       ["archived", "This lead was archived from My Leads."],
-      ["no_active_episode", "This lead isn't in an active My Leads queue right now."],
+      [
+        "no_active_episode",
+        "This lead isn't in an active My Leads queue right now.",
+      ],
     ])("explains the %s reason in plain English", async (reason, copy) => {
-      mocks.getMyLeadsQueueRow.mockResolvedValue({ status: "unavailable", reason });
+      mocks.getMyLeadsQueueRow.mockResolvedValue({
+        status: "unavailable",
+        reason,
+      });
 
-      renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId }) }));
+      renderPage(
+        await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId }) }),
+      );
 
-      expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({ memberId: "user-1" });
-      expect(clientProps()).toMatchObject({ focus: { propertyId: null, notice: copy, pin: null } });
+      expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({
+        memberId: "user-1",
+      });
+      expect(clientProps()).toMatchObject({
+        focus: {
+          propertyId: leadId,
+          notice: copy,
+          pin: null,
+          pinStatus: "unavailable",
+          retryHref: `/my-leads?lead=${leadId}`,
+        },
+      });
     });
 
     it.each([
       ["NOT_FOUND", "We couldn't find this lead."],
       ["FORBIDDEN", "You don't have access to this lead in My Leads."],
-      ["READ_FAILED", "We couldn't check this lead right now. Try opening it again."],
-    ])("turns a %s lookup error into a notice instead of the unavailable page", async (code, copy) => {
-      const { MyLeadsReadError } = await import("@/lib/my-leads/queries");
-      mocks.getMyLeadsQueueRow.mockRejectedValue(new MyLeadsReadError(code as never, "boom"));
+      [
+        "READ_FAILED",
+        "We couldn't check this lead right now. Try opening it again.",
+      ],
+    ])(
+      "turns a %s lookup error into a notice instead of the unavailable page",
+      async (code, copy) => {
+        const { MyLeadsReadError } = await import("@/lib/my-leads/queries");
+        mocks.getMyLeadsQueueRow.mockRejectedValue(
+          new MyLeadsReadError(code as never, "boom"),
+        );
 
-      const html = renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId }) }));
+        const html = renderPage(
+          await MyLeadsPage({
+            searchParams: Promise.resolve({ lead: leadId }),
+          }),
+        );
 
-      expect(html).toContain("my-leads-client");
-      expect(clientProps()).toMatchObject({ focus: { propertyId: null, notice: copy } });
+        expect(html).toContain("my-leads-client");
+        expect(clientProps()).toMatchObject({
+          focus: {
+            propertyId: leadId,
+            notice: copy,
+            retryHref: `/my-leads?lead=${leadId}`,
+            pinStatus: code === "READ_FAILED" ? "failed" : "unavailable",
+          },
+        });
+      },
+    );
+
+    it("canonicalizes uppercase UUIDs and rejects duplicate values before lookup", async () => {
+      const uppercase = leadId.toUpperCase();
+      mocks.getMyLeadsQueueRow.mockResolvedValue({
+        status: "found",
+        row,
+        snapshotAt: "x",
+      });
+      renderPage(
+        await MyLeadsPage({
+          searchParams: Promise.resolve({ lead: uppercase }),
+        }),
+      );
+      expect(mocks.getMyLeadsQueueRow).toHaveBeenCalledWith({
+        memberId: "user-1",
+        propertyId: leadId,
+      });
+      expect(clientProps()).toMatchObject({
+        selectedLead: { status: "found", propertyId: leadId },
+        focus: { propertyId: leadId },
+      });
+
+      vi.clearAllMocks();
+      mocks.getCallerMembershipsOrThrow.mockResolvedValue([
+        activeAcquisitionsMembership,
+      ]);
+      mocks.getAcquisitionRoster.mockResolvedValue({
+        viewer,
+        roster: baseRoster,
+      });
+      mocks.getAcquisitionQueue.mockResolvedValue({});
+      mocks.getAcquisitionKpis.mockResolvedValue({});
+      mocks.listMyLeadsInDrip.mockResolvedValue({
+        active: [],
+        replied: [],
+        repliedCount: 0,
+        counts: {},
+      });
+      mocks.loadDialpadPanelBootstrap.mockResolvedValue(null);
+      renderPage(
+        await MyLeadsPage({
+          searchParams: Promise.resolve({ lead: [leadId, leadId] }),
+        }),
+      );
+      expect(mocks.getMyLeadsQueueRow).not.toHaveBeenCalled();
+      expect(clientProps()).toMatchObject({
+        selectedLead: { status: "invalid", reason: "duplicate" },
+        focus: null,
+      });
     });
 
     it("ignores a malformed lead id", async () => {
-      renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: "not-a-uuid" }) }));
+      renderPage(
+        await MyLeadsPage({
+          searchParams: Promise.resolve({ lead: "not-a-uuid" }),
+        }),
+      );
 
-      expect(clientProps()).toMatchObject({ focus: null });
+      expect(clientProps()).toMatchObject({
+        focus: null,
+        selectedLead: { status: "invalid", reason: "malformed" },
+      });
     });
   });
 });

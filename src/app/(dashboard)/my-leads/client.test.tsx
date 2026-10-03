@@ -767,6 +767,32 @@ describe("current metadata for rapid workflow openings",()=>{
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
     if(mode==="episode")expect(screen.getByText(/assignment changed/)).toBeVisible();
   }, 15_000);
+  it("cancels an old linked opening when a different linked target arrives", async () => {
+    const user = userEvent.setup();
+    const snapshotA = snapshot("A Deferred Lane");
+    const leadA = snapshotA.stages.not_contacted!.rows[0];
+    const leadB = { ...leadA, propertyId: "property-b", address: "B Deferred Lane" };
+    const snapshotB = { ...snapshotA, stages: { ...snapshotA.stages, not_contacted: { ...snapshotA.stages.not_contacted!, rows: [leadB] } } };
+    let release!: (value: unknown) => void;
+    mocks.loadMyLeadRow.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+    const view = render(
+      <MyLeadsClient viewer={viewer} roster={roster} initialMemberId="rep-1" initialSnapshot={snapshotA} initialKpis={kpis}
+        focus={{ propertyId: leadA.propertyId, memberId: "rep-1", notice: null, pin: leadA }} />,
+    );
+    await user.click(screen.getByRole("button", { name: "Ready for offer" }));
+    expect(screen.getByText("Loading current lead…")).toBeVisible();
+    view.rerender(
+      <MyLeadsClient viewer={viewer} roster={roster} initialMemberId="rep-1" initialSnapshot={snapshotB} initialKpis={kpis}
+        focus={{ propertyId: leadB.propertyId, memberId: "rep-1", notice: null, pin: leadB }} />,
+    );
+    await act(async () => release({ ok: true, lookup: { status: "found", row: leadA, snapshotAt: snapshotA.snapshotAt } }));
+    expect(screen.queryByRole("dialog", { name: "Ready to make an offer" })).not.toBeInTheDocument();
+    mocks.loadMyLeadRow.mockResolvedValue({ ok: true, lookup: { status: "found", row: leadB, snapshotAt: snapshotB.snapshotAt } });
+    await user.click(screen.getByRole("button", { name: "Ready for offer" }));
+    await screen.findByRole("dialog", { name: "Ready to make an offer" });
+    expect(screen.queryByText("Loading current lead…")).not.toBeInTheDocument();
+    view.unmount();
+  });
   it("retries an opening read failure without repeating the saved readiness command",async()=>{
     const {user,fresh,release}=await afterReadiness();await user.click(screen.getByRole("button",{name:"Log offer"}));
     await act(async()=>release({ok:false,message:"Read unavailable"}));

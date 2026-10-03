@@ -114,4 +114,20 @@ describe("slack/state", () => {
       }),
     ).toBe(false);
   });
+
+  it("binds Slack preview state to org, purpose, and a nonce", () => {
+    const state = signOAuthState({
+      userId: "user-1",
+      orgId: "org-1",
+      nonce: "nonce-1",
+      purpose: "slack_installation",
+      returnPath: "/settings/integrations",
+      secret: "state-secret",
+      now: 1760000000,
+    });
+    expect(state).toMatch(/^v2\./);
+    expect(verifyOAuthState({ state, secret: "state-secret", expectedUserId: "user-1", expectedOrgId: "org-1", expectedPurpose: "slack_installation", requireNonce: true, now: 1760000010 })).toBe(true);
+    expect(verifyOAuthState({ state, secret: "state-secret", expectedUserId: "user-1", expectedOrgId: "org-2", expectedPurpose: "slack_installation", requireNonce: true, now: 1760000010 })).toBe(false);
+    expect(verifyOAuthState({ state, secret: "state-secret", expectedUserId: "user-1", expectedOrgId: "org-1", expectedPurpose: "slack_installation", requireNonce: true, now: 1760000010, maxAgeSec: 5 })).toBe(false);
+  });
 });

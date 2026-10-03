@@ -2,7 +2,9 @@ import { NextResponse } from "next/server";
 
 import { reportError } from "@/lib/errors/report";
 import { exchangeSlackCode } from "@/lib/integrations/slack/oauth";
+import { consumeSlackOAuthNonce, hashSlackOAuthNonce, upsertSlackInstallationAndAccountLink } from "@/lib/integrations/slack/installation";
 import { verifyOAuthState } from "@/lib/integrations/slack/state";
+import { decodeSlackPreviewState } from "@/lib/integrations/slack/state-claims";
 import { upsertOAuthToken } from "@/lib/integrations/tokens/store";
 import { createClient } from "@/lib/supabase/server";
 
@@ -31,6 +33,23 @@ export async function GET(request: Request) {
       expectedUserId: user.id,
     });
     if (!stateOk) return NextResponse.redirect(settingsUrl("error=state"));
+    const claims = decodeSlackPreviewState(state);
+    if (state.startsWith("v2.")) {
+      if (!claims?.orgId || !claims.nonce || !verifyOAuthState({ state, secret: stateSecret, expectedUserId: user.id, expectedOrgId: claims.orgId, expectedPurpose: "slack_installation", requireNonce: true })) {
+        return NextResponse.redirect(settingsUrl("error=state"));
+      }
+    }
+
+    // Legacy Slack states remain valid for notification reconnects while the
+    // preview foundation is rolled out. They never acquire preview authority;
+    // only the v2 state below can create an installation/account binding.
+    const previewState = state.startsWith("v2.") && claims?.orgId && claims.nonce;
+    if (state.startsWith("v2.") && !previewState) return NextResponse.redirect(settingsUrl("error=state"));
+    if (previewState) {
+      const consumed = await consumeSlackOAuthNonce({ nonceHash: hashSlackOAuthNonce(claims.nonce!), userId: user.id, orgId: claims.orgId! });
+      if (!consumed) return NextResponse.redirect(settingsUrl("error=state"));
+      if (!(await isActiveOrgMember(supabase, user.id, claims.orgId!))) return NextResponse.redirect(settingsUrl("error=state"));
+    }
 
     const clientId = process.env.SLACK_CLIENT_ID;
     const clientSecret = process.env.SLACK_CLIENT_SECRET;
@@ -48,6 +67,9 @@ export async function GET(request: Request) {
       code,
       redirectUri: `${appUrl}/api/oauth/slack/callback`,
     });
+    if (!tokens.botToken || !tokens.botUserId || !tokens.appId || !tokens.teamId || (process.env.SLACK_APP_ID && process.env.SLACK_APP_ID !== tokens.appId)) {
+      return NextResponse.redirect(settingsUrl("error=callback"));
+    }
 
     await upsertOAuthToken({
       userId: user.id,
@@ -73,9 +95,43 @@ export async function GET(request: Request) {
       });
     }
 
-    return NextResponse.redirect(settingsUrl("connected=slack"));
+    if (previewState) {
+      if (!tokens.userId) return NextResponse.redirect(settingsUrl("error=callback"));
+      await upsertSlackInstallationAndAccountLink({
+        orgId: claims.orgId!,
+        teamId: tokens.teamId,
+        appId: tokens.appId,
+        teamName: tokens.teamName,
+        botUserId: tokens.botUserId,
+        botToken: tokens.botToken,
+        scopes: tokens.scopes,
+        installedBy: user.id,
+        slackUserId: tokens.userId,
+      });
+    }
+
+    const continuation = previewState && claims.returnPath && isSafeRelativePath(claims.returnPath, appUrl) ? new URL(claims.returnPath, appUrl) : settingsUrl("connected=slack");
+    if (continuation.pathname === "/settings/integrations" && !continuation.searchParams.has("connected")) continuation.searchParams.set("connected", "slack");
+    return NextResponse.redirect(continuation);
   } catch (error) {
     reportError(error, { tags: { surface: "oauth_slack_callback" } });
     return NextResponse.redirect(settingsUrl("error=callback"));
+  }
+}
+
+async function isActiveOrgMember(supabase: Awaited<ReturnType<typeof createClient>>, userId: string, orgId: string): Promise<boolean> {
+  const reader = supabase as unknown as { from(table: "memberships"): { select(columns: string): { eq(column: string, value: string): { eq(column: string, value: string): Promise<{ data: Array<Record<string, unknown>> | null; error: { message: string } | null }> } } } };
+  const result = await reader.from("memberships").select("org_id, user_id, access_status, access_expires_at, deletion_prepared_at").eq("user_id", userId).eq("org_id", orgId);
+  if (result.error) return false;
+  const row = result.data?.[0];
+  return !!row && row.user_id === userId && row.org_id === orgId && (row.access_status === undefined || row.access_status === null || row.access_status === "active") && !row.deletion_prepared_at && (typeof row.access_expires_at !== "string" || Date.parse(row.access_expires_at) > Date.now());
+}
+
+function isSafeRelativePath(value: string, baseUrl: string): boolean {
+  if (!value.startsWith("/") || value.startsWith("//") || value.includes("\\") || /[\u0000-\u001f\u007f]/.test(value) || /%(?:0[0-9a-f]|1[0-9a-f]|7f)/i.test(value) || /^https?:/i.test(value)) return false;
+  try {
+    return new URL(value, baseUrl).origin === new URL(baseUrl).origin;
+  } catch {
+    return false;
   }
 }
