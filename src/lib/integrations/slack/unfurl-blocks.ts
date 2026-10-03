@@ -21,6 +21,22 @@ const BUTTON_TEXT_MAX = 75;
 const URL_MAX = 3000;
 const EXCERPT_MAX = 64;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MY_LEADS_ATTEMPT_LABELS: Record<string, string> = {
+  no_answer: "No answer",
+  reached: "Reached",
+  wrong_number: "Wrong number",
+};
+const MESSAGES_DISPO_LABELS: Record<string, string> = {
+  wrong_number: "Wrong #",
+  bad_number: "Bad / disconnected #",
+  not_interested: "Not interested",
+  needs_sequence: "Needs drip",
+  opted_out: "SMS opted out",
+  dnc: "Do not call",
+  nurture: "Follow up",
+  callback_requested: "Lead task requested",
+  booked_appointment: "Booked appointment",
+};
 
 function truncate(text: string, maxCodePoints: number): string {
   const codePoints = Array.from(text);
@@ -45,12 +61,17 @@ function field(label: string, value: string): { type: "plain_text"; text: string
   };
 }
 
-function formatOutcome(outcome: string | null | undefined): string {
-  const value = normalize(outcome);
-  if (!value) return "No attempt outcome recorded";
-  return value
-    .replace(/[_-]+/g, " ")
-    .replace(/\b\w/g, (character) => character.toUpperCase());
+function formatAttemptOutcome(attempt: SlackLeadPreview["latestAttempt"]): string {
+  if (!attempt) return "No attempts recorded";
+  const value = normalize(attempt.outcome);
+  if (!value) return "Outcome pending";
+  return MY_LEADS_ATTEMPT_LABELS[value] ?? value;
+}
+
+function formatMessagesDisposition(disposition: string | null | undefined): string {
+  const value = normalize(disposition);
+  if (!value) return "No disposition recorded";
+  return MESSAGES_DISPO_LABELS[value] ?? value;
 }
 
 function formatDate(value: string | null | undefined, timezone: string): string {
@@ -129,10 +150,10 @@ export function buildPreviewBlocks(snapshot: SlackLeadPreview): KnownBlock[] {
             snapshot.ownerAssigned ? "Owner unavailable" : "Unassigned",
           ),
         ),
-        field("My Leads attempt", formatOutcome(snapshot.latestAttempt?.outcome)),
+        field("My Leads attempt", formatAttemptOutcome(snapshot.latestAttempt)),
         field(
           "Messages disposition",
-          displayValue(snapshot.messagesDisposition, "No disposition recorded"),
+          formatMessagesDisposition(snapshot.messagesDisposition),
         ),
         field("Last contact", formatDate(snapshot.lastContactAt, snapshot.timezone)),
       ],

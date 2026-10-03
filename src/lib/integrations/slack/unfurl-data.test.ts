@@ -16,6 +16,7 @@ type QueryCall = {
   table: string;
   select: string | null;
   equals: Record<string, string>;
+  is: Record<string, null>;
   ors: string[];
   orders: Array<{ column: string; ascending: boolean }>;
   limit: number | null;
@@ -28,7 +29,6 @@ type Fixture = {
   successfulMessage?: Record<string, unknown> | null;
   latestAttempt?: Record<string, unknown> | null;
   reachedCall?: Record<string, unknown> | null;
-  membership?: Record<string, unknown> | null;
   user?: { email?: string | null; app_metadata?: Record<string, unknown> } | null;
 };
 
@@ -39,7 +39,7 @@ function fakeClient(fixture: Fixture = {}) {
   const resolve = (call: QueryCall) => {
     if (call.table === "organizations") return { data: organization, error: null };
     if (call.table === "properties") {
-      return { data: fixture.property === undefined ? {
+      const property = fixture.property === undefined ? {
         id: PROPERTY,
         org_id: ORG,
         address: "123 Main St",
@@ -48,7 +48,16 @@ function fakeClient(fixture: Fixture = {}) {
         homeowner_contact_id: CONTACT,
         assigned_user_id: OWNER,
         outreach_dispo: "not_interested",
-      } : fixture.property, error: null };
+      } : fixture.property;
+      if (
+        property &&
+        call.is.deleted_at === null &&
+        property.deleted_at !== undefined &&
+        property.deleted_at !== null
+      ) {
+        return { data: null, error: null };
+      }
+      return { data: property, error: null };
     }
     if (call.table === "contacts") return { data: fixture.contact === undefined ? {
       id: CONTACT,
@@ -57,7 +66,6 @@ function fakeClient(fixture: Fixture = {}) {
       last_name: "Seller",
       entity_name: null,
     } : fixture.contact, error: null };
-    if (call.table === "memberships") return { data: fixture.membership === undefined ? { user_id: OWNER } : fixture.membership, error: null };
     if (call.table === "messages") {
       const successful = call.limit === 1 && call.ors.some((value) => value.includes("sent,delivered"));
       return {
@@ -74,11 +82,12 @@ function fakeClient(fixture: Fixture = {}) {
 
   const client = {
     from(table: string) {
-      const call: QueryCall = { table, select: null, equals: {}, ors: [], orders: [], limit: null };
+      const call: QueryCall = { table, select: null, equals: {}, is: {}, ors: [], orders: [], limit: null };
       calls.push(call);
       const builder = {
         select(columns: string) { call.select = columns; return builder; },
         eq(column: string, value: string) { call.equals[column] = value; return builder; },
+        is(column: string, value: null) { call.is[column] = value; return builder; },
         or(filters: string) { call.ors.push(filters); return builder; },
         order(column: string, options: { ascending: boolean }) { call.orders.push({ column, ascending: options.ascending }); return builder; },
         limit(count: number) { call.limit = count; return builder; },
@@ -139,6 +148,7 @@ describe("loadPreviewData", () => {
     expect(callsFor(calls, "properties")[0]).toMatchObject({
       select: "id, org_id, address, city, state, homeowner_contact_id, assigned_user_id, outreach_dispo",
       equals: { org_id: ORG, id: PROPERTY },
+      is: { deleted_at: null },
     });
     expect(callsFor(calls, "contacts")[0]).toMatchObject({
       select: "id, org_id, first_name, last_name, entity_name",
@@ -170,7 +180,8 @@ describe("loadPreviewData", () => {
       limit: 1,
     });
 
-    for (const call of callsFor(calls, "acquisition_attempts")) {
+    const attemptCalls = callsFor(calls, "acquisition_attempts");
+    for (const call of attemptCalls) {
       expect(call.equals.org_id).toBe(ORG);
       expect(call.equals.property_id).toBe(PROPERTY);
       expect(call.orders).toEqual([
@@ -178,6 +189,19 @@ describe("loadPreviewData", () => {
         { column: "id", ascending: false },
       ]);
     }
+    expect(attemptCalls.find((call) => call.equals.attempt_kind === undefined)).toMatchObject({
+      select: "id, occurred_at, outcome",
+      equals: { org_id: ORG, property_id: PROPERTY },
+    });
+    expect(attemptCalls.find((call) => call.equals.attempt_kind === "call")).toMatchObject({
+      select: "id, occurred_at",
+      equals: {
+        org_id: ORG,
+        property_id: PROPERTY,
+        attempt_kind: "call",
+        outcome: "reached",
+      },
+    });
   });
 
   it("keeps shared-contact history isolated to contact-only rows and explicit property rows", async () => {
@@ -266,6 +290,76 @@ describe("loadPreviewData", () => {
       messages: [],
     });
     expect(callsFor(calls, "memberships")).toHaveLength(0);
+    for (const call of callsFor(calls, "messages")) {
+      expect(call.ors).toContain(`property_id.eq.${PROPERTY}`);
+      expect(call.ors.join(" ")).not.toContain("contact_id.eq.");
+    }
+  });
+
+  it("returns null and skips contact/message reads for malformed homeowner metadata", async () => {
+    const { client, calls } = fakeClient({
+      property: {
+        id: PROPERTY,
+        org_id: ORG,
+        address: "123 Main St",
+        city: "Kansas City",
+        state: "MO",
+        homeowner_contact_id: "not-a-uuid",
+        assigned_user_id: OWNER,
+        outreach_dispo: null,
+      },
+    });
+
+    await expect(loadPreviewData({ client, orgId: ORG, propertyId: PROPERTY })).resolves.toBeNull();
+    expect(callsFor(calls, "contacts")).toHaveLength(0);
+    expect(callsFor(calls, "messages")).toHaveLength(0);
+  });
+
+  it("does not return a soft-deleted property", async () => {
+    const { client, calls } = fakeClient({
+      property: {
+        id: PROPERTY,
+        org_id: ORG,
+        address: "Deleted Main St",
+        city: "Kansas City",
+        state: "MO",
+        homeowner_contact_id: CONTACT,
+        assigned_user_id: OWNER,
+        outreach_dispo: null,
+        deleted_at: "2026-10-03T12:00:00.000Z",
+      },
+    });
+
+    await expect(loadPreviewData({ client, orgId: ORG, propertyId: PROPERTY })).resolves.toBeNull();
+    expect(callsFor(calls, "properties")[0]?.is).toEqual({ deleted_at: null });
+    expect(callsFor(calls, "messages")).toHaveLength(0);
+  });
+
+  it.each([
+    [
+      "call wins",
+      { created_at: "2026-10-03T11:00:00.000Z" },
+      { occurred_at: "2026-10-03T12:00:00.000Z" },
+      "2026-10-03T12:00:00.000Z",
+    ],
+    [
+      "text wins",
+      { created_at: "2026-10-03T12:00:00.000Z" },
+      { occurred_at: "2026-10-03T11:00:00.000Z" },
+      "2026-10-03T12:00:00.000Z",
+    ],
+    [
+      "a tie prefers the message representation",
+      { created_at: "2026-10-03T12:00:00.000Z" },
+      { occurred_at: "2026-10-03T07:00:00-05:00" },
+      "2026-10-03T12:00:00.000Z",
+    ],
+  ])("uses the latest successful contact time when %s", async (_case, successfulMessage, reachedCall, expected) => {
+    const { client } = fakeClient({ successfulMessage, reachedCall });
+
+    const result = await loadPreviewData({ client, orgId: ORG, propertyId: PROPERTY });
+
+    expect(result?.lastContactAt).toBe(expected);
   });
 
   it("fails closed when the property row is not in the requested organization", async () => {
@@ -285,7 +379,28 @@ describe("loadPreviewData", () => {
     await expect(loadPreviewData({ client, orgId: ORG, propertyId: PROPERTY })).resolves.toBeNull();
   });
 
-  it("does not fabricate a name for an assigned roster member without authoritative identity data", async () => {
+  it("preserves a former assigned member label without a membership lookup", async () => {
+    const { client, calls } = fakeClient({
+      user: { email: "Former.Owner@Example.test", app_metadata: { display_name: "Former Owner" } },
+    });
+
+    await expect(loadPreviewData({ client, orgId: ORG, propertyId: PROPERTY })).resolves.toMatchObject({
+      ownerName: "Former Owner",
+      ownerAssigned: true,
+    });
+    expect(callsFor(calls, "memberships")).toHaveLength(0);
+  });
+
+  it("uses the lowercased verified email when an assigned identity has no display name", async () => {
+    const { client } = fakeClient({ user: { email: "OWNER@EXAMPLE.TEST", app_metadata: {} } });
+
+    await expect(loadPreviewData({ client, orgId: ORG, propertyId: PROPERTY })).resolves.toMatchObject({
+      ownerName: "owner@example.test",
+      ownerAssigned: true,
+    });
+  });
+
+  it("does not fabricate a name for an assigned identity without a verified label", async () => {
     const { client } = fakeClient({ user: { email: null, app_metadata: {} } });
 
     await expect(loadPreviewData({ client, orgId: ORG, propertyId: PROPERTY })).resolves.toMatchObject({

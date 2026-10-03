@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { authoritativeDisplayName } from "@/lib/auth/team-member";
 import type { Database } from "@/lib/supabase/types";
 
 import {
@@ -27,6 +28,7 @@ type QueryResult<T> = {
 type QueryBuilder<T = unknown> = PromiseLike<QueryResult<T>> & {
   select(columns: string): QueryBuilder<T>;
   eq(column: string, value: string): QueryBuilder<T>;
+  is(column: string, value: null): QueryBuilder<T>;
   or(filters: string): QueryBuilder<T>;
   order(column: string, options: { ascending: boolean }): QueryBuilder<T>;
   limit(count: number): QueryBuilder<T>;
@@ -73,8 +75,6 @@ type ContactRow = {
   last_name: string | null;
   entity_name: string | null;
 };
-
-type MembershipRow = { user_id: string };
 
 type AttemptRow = {
   id: string;
@@ -177,34 +177,26 @@ async function readMany<T extends readonly unknown[]>(
 
 async function loadOwnerName(
   client: PreviewClient,
-  orgId: string,
-  assignedUserId: string | null,
+  property: Pick<PropertyRow, "org_id" | "assigned_user_id">,
+  normalizedOrgId: string,
 ): Promise<string | null> {
+  if (property.org_id !== normalizedOrgId) return null;
+  const assignedUserId = property.assigned_user_id;
   if (!assignedUserId) return null;
 
-  const membership = await readOne(
-    client
-      .from<MembershipRow>("memberships")
-      .select("user_id")
-      .eq("org_id", orgId)
-      .eq("user_id", assignedUserId)
-      .maybeSingle(),
-    "owner membership",
-  );
-  if (!membership || membership.user_id !== assignedUserId) return null;
-
-  // The service client used by the unfurl worker can resolve exactly the
-  // assigned identity. Do not enumerate auth.users or use an email match as
-  // an authorization shortcut.
+  // The property row was already read with this org id and assigned user id,
+  // so this is a trusted, display-only historical assignment lookup. Do not
+  // use the identity to grant access or enumerate auth.users.
   const admin = client.auth?.admin;
   if (!admin) return null;
   const result = await admin.getUserById(assignedUserId);
   if (result.error || !result.data.user) return null;
-  const metadata = result.data.user.app_metadata ?? {};
-  const authoritativeName = ["display_name", "full_name", "name"]
-    .map((key) => metadata[key])
-    .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
-  return clean(authoritativeName ?? result.data.user.email);
+  const authoritativeName = authoritativeDisplayName(result.data.user);
+  const emailFallback =
+    typeof result.data.user.email === "string"
+      ? result.data.user.email.toLowerCase()
+      : null;
+  return clean(authoritativeName ?? emailFallback);
 }
 
 export async function loadPreviewData({
@@ -238,6 +230,7 @@ export async function loadPreviewData({
         )
         .eq("org_id", normalizedOrgId)
         .eq("id", normalizedPropertyId)
+        .is("deleted_at", null)
         .maybeSingle(),
       "property",
     ),
@@ -252,13 +245,24 @@ export async function loadPreviewData({
     return null;
   }
 
-  const contactPromise = property.homeowner_contact_id
+  const homeownerContactId =
+    property.homeowner_contact_id === null
+      ? null
+      : typeof property.homeowner_contact_id === "string" &&
+          UUID.test(property.homeowner_contact_id)
+        ? property.homeowner_contact_id.toLowerCase()
+        : null;
+  if (property.homeowner_contact_id !== null && homeownerContactId === null) {
+    return null;
+  }
+
+  const contactPromise = homeownerContactId
     ? readOne(
         db
           .from<ContactRow>("contacts")
           .select("id, org_id, first_name, last_name, entity_name")
           .eq("org_id", normalizedOrgId)
-          .eq("id", property.homeowner_contact_id)
+          .eq("id", homeownerContactId)
           .maybeSingle(),
         "homeowner contact",
       )
@@ -266,12 +270,12 @@ export async function loadPreviewData({
 
   const ownerPromise = loadOwnerName(
     db,
+    property,
     normalizedOrgId,
-    property.assigned_user_id,
   );
 
-  const messageScope = property.homeowner_contact_id
-    ? `property_id.eq.${normalizedPropertyId},and(property_id.is.null,contact_id.eq.${property.homeowner_contact_id})`
+  const messageScope = homeownerContactId
+    ? `property_id.eq.${normalizedPropertyId},and(property_id.is.null,contact_id.eq.${homeownerContactId})`
     : `property_id.eq.${normalizedPropertyId}`;
 
   const messagesPromise = readMany<MessageRow[]>(
@@ -347,7 +351,7 @@ export async function loadPreviewData({
 
   const scopedContact =
     contact &&
-    contact.id === property.homeowner_contact_id &&
+    contact.id === homeownerContactId &&
     contact.org_id === normalizedOrgId
       ? contact
       : null;

@@ -52,8 +52,8 @@ describe("buildPreviewBlocks", () => {
       "Lead\nJane Seller",
       "Address\n123 Main St, Kansas City, MO",
       "Owner\nOwner Name",
-      "My Leads attempt\nNo Answer",
-      "Messages disposition\nnot_interested",
+      "My Leads attempt\nNo answer",
+      "Messages disposition\nNot interested",
       "Last contact\nOct 3, 2026, 7:00 AM CDT",
     ]);
     expect(blocks[2]).toMatchObject({
@@ -133,12 +133,72 @@ describe("buildPreviewBlocks", () => {
         { type: "plain_text", text: "Lead\nName unavailable", emoji: true },
         { type: "plain_text", text: "Address\nAddress unavailable", emoji: true },
         { type: "plain_text", text: "Owner\nUnassigned", emoji: true },
-        { type: "plain_text", text: "My Leads attempt\nNo attempt outcome recorded", emoji: true },
+        { type: "plain_text", text: "My Leads attempt\nNo attempts recorded", emoji: true },
         { type: "plain_text", text: "Messages disposition\nNo disposition recorded", emoji: true },
         { type: "plain_text", text: "Last contact\nNo successful contact recorded", emoji: true },
       ]),
     });
     expect(blocks[2]).toMatchObject({ text: { type: "plain_text", text: "No texts yet" } });
+  });
+
+  it("distinguishes a pending attempt from no attempt", () => {
+    const blocks = buildPreviewBlocks(preview({
+      latestAttempt: {
+        id: "11111111-1111-4111-8111-111111111111",
+        occurredAt: "2026-10-03T12:00:00.000Z",
+        outcome: null,
+      },
+    }));
+
+    expect((blocks[1] as { fields: Array<{ text: string }> }).fields[3]).toMatchObject({
+      text: "My Leads attempt\nOutcome pending",
+    });
+  });
+
+  it.each([
+    ["no_answer", "No answer"],
+    ["reached", "Reached"],
+    ["wrong_number", "Wrong number"],
+    ["future_outcome", "future_outcome"],
+  ])("uses the My Leads attempt label for %s", (outcome, expected) => {
+    const blocks = buildPreviewBlocks(preview({
+      latestAttempt: {
+        id: "11111111-1111-4111-8111-111111111111",
+        occurredAt: "2026-10-03T12:00:00.000Z",
+        outcome,
+      },
+    }));
+
+    expect((blocks[1] as { fields: Array<{ text: string }> }).fields[3]).toMatchObject({
+      text: `My Leads attempt\n${expected}`,
+    });
+  });
+
+  it.each([
+    ["wrong_number", "Wrong #"],
+    ["bad_number", "Bad / disconnected #"],
+    ["not_interested", "Not interested"],
+    ["needs_sequence", "Needs drip"],
+    ["opted_out", "SMS opted out"],
+    ["dnc", "Do not call"],
+    ["nurture", "Follow up"],
+    ["callback_requested", "Lead task requested"],
+    ["booked_appointment", "Booked appointment"],
+    ["future_disposition", "future_disposition"],
+  ])("uses the Messages disposition label for %s", (disposition, expected) => {
+    const blocks = buildPreviewBlocks(preview({ messagesDisposition: disposition }));
+
+    expect((blocks[1] as { fields: Array<{ text: string }> }).fields[4]).toMatchObject({
+      text: `Messages disposition\n${expected}`,
+    });
+  });
+
+  it("keeps assigned-but-unavailable distinct from unassigned", () => {
+    const blocks = buildPreviewBlocks(preview({ ownerName: null, ownerAssigned: true }));
+
+    expect((blocks[1] as { fields: Array<{ text: string }> }).fields[2]).toMatchObject({
+      text: "Owner\nOwner unavailable",
+    });
   });
 
   it("bounds every Slack text/url field and renders at most three texts", () => {
