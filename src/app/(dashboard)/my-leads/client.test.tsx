@@ -321,6 +321,32 @@ describe("MyLeadsClient", () => {
     expect(mocks.loadMyLeadDetail).toHaveBeenCalledTimes(1)
   })
 
+  it("drops the previous lead details immediately while a new linked lead loads", async () => {
+    const initial = snapshot("Lead switch lane")
+    const first = linkedRow("contacted")
+    const second = { ...first, propertyId: "second-linked", address: "Second linked lane" }
+    let resolveSecond!: (value: unknown) => void
+    const detail = (body: string) => ({ ok: true, detail: { groups: { notes: { rows: [{ id: body, actorLabel: "Maria", body, at: "2026-09-11T14:00:00Z" }] } } } })
+    mocks.loadMyLeadDetail
+      .mockResolvedValueOnce(detail("First lead detail"))
+      .mockReturnValueOnce(new Promise(resolve => { resolveSecond = resolve }))
+    const view = renderClient(initial, kpis, null, undefined, {
+      status: "found",
+      propertyId: first.propertyId,
+      row: first,
+      snapshotAt: initial.snapshotAt,
+    })
+    expect(await screen.findByText("First lead detail")).toBeInTheDocument()
+
+    view.rerender(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId={viewer.userId} initialSnapshot={initial} initialKpis={kpis} selectedLead={{ status: "found", propertyId: second.propertyId, row: second, snapshotAt: initial.snapshotAt }} />)
+    await waitFor(() => expect(screen.getByRole("region", { name: "Selected lead from link" })).toHaveTextContent("Second linked lane"))
+    expect(screen.queryByText("First lead detail")).not.toBeInTheDocument()
+    expect(screen.getByText("Loading details…")).toBeInTheDocument()
+
+    await act(async () => resolveSecond(detail("Second lead detail")))
+    expect(await screen.findByText("Second lead detail")).toBeInTheDocument()
+  })
+
   it("opens Log attempt for a pinned reply outside the first 20 rows", async()=>{
     const first=snapshot("Loaded Lane");
     const template=first.stages.not_contacted!.rows[0];

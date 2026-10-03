@@ -438,6 +438,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     {linkedLead.status==='error'&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{linkedLead.message} <a href={linkedLead.retryHref} className="font-bold underline underline-offset-4">Retry</a></div>}
     {linkedLead.status==='terminal'&&<div role="status" className="mb-4 rounded border p-3 text-muted-foreground">{linkedLead.message}</div>}
     {linkedLead.status==='found'&&<SelectedLeadView
+      key={linkedLead.propertyId.toLowerCase()}
       lead={linkedLead}
       active={member===initialMemberId}
       onLoadDetail={loadSelectedDetail}
