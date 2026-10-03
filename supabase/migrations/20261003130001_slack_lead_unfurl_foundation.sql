@@ -467,6 +467,7 @@ begin
      and j.installation_id=p_installation_id and j.installation_version=p_installation_version
      and j.org_id=p_org_id and j.channel_id=p_channel_id
      and j.poster_slack_user_id=p_poster_slack_user_id
+     and j.lease_expires_at > now() and j.expires_at > now()
    for update;
   return found;
 end;

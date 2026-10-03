@@ -69,8 +69,45 @@ it("Slack installation, approval, nonce, receipt, claim, fencing, revocation, an
     expect(duplicate.duplicate).toBe(true);
     const claimed = (await db.query("select * from public.claim_slack_unfurl_jobs(now(),$1,90,5)", [randomUUID()])).rows[0];
     expect(claimed.attempts).toBe(1);
+    const guardArgs = [claimed.id, claimed.claim_token, install.installation_id, 1, org, "C_DB", "U_DB"];
+    expect((await db.query("select public.guard_slack_unfurl_dispatch($1,$2,$3,$4,$5,$6,$7) as ok", guardArgs)).rows[0].ok).toBe(true);
+    await db.query("update public.slack_unfurl_jobs set lease_expires_at=now()-interval '1 second' where id=$1", [claimed.id]);
+    expect((await db.query("select public.guard_slack_unfurl_dispatch($1,$2,$3,$4,$5,$6,$7) as ok", guardArgs)).rows[0].ok).toBe(false);
+    await db.query("update public.slack_unfurl_jobs set lease_expires_at=now()+interval '1 minute',expires_at=now()-interval '1 second' where id=$1", [claimed.id]);
+    expect((await db.query("select public.guard_slack_unfurl_dispatch($1,$2,$3,$4,$5,$6,$7) as ok", guardArgs)).rows[0].ok).toBe(false);
+    const reclaimedToken = randomUUID();
+    await db.query("update public.slack_unfurl_jobs set expires_at=now()+interval '15 minutes',lease_expires_at=now()-interval '1 second',next_attempt_at=now() where id=$1", [claimed.id]);
+    const reclaimed = (await db.query("select * from public.claim_slack_unfurl_jobs(now(),$1,90,5)", [reclaimedToken])).rows[0];
+    expect(reclaimed.id).toBe(claimed.id);
+    expect(reclaimed.attempts).toBe(2);
+    expect((await db.query("select public.guard_slack_unfurl_dispatch($1,$2,$3,$4,$5,$6,$7) as ok", guardArgs)).rows[0].ok).toBe(false);
+    const reclaimedGuardArgs = [reclaimed.id, reclaimed.claim_token, install.installation_id, 1, org, "C_DB", "U_DB"];
+    expect((await db.query("select public.guard_slack_unfurl_dispatch($1,$2,$3,$4,$5,$6,$7) as ok", reclaimedGuardArgs)).rows[0].ok).toBe(true);
+    await db.query("update public.slack_channel_approvals set status='revoked',revoked_at=now() where installation_id=$1 and channel_id='C_DB'", [install.installation_id]);
+    expect((await db.query("select public.guard_slack_unfurl_dispatch($1,$2,$3,$4,$5,$6,$7) as ok", reclaimedGuardArgs)).rows[0].ok).toBe(false);
+    await db.query("update public.slack_channel_approvals set status='active',revoked_at=null where installation_id=$1 and channel_id='C_DB'", [install.installation_id]);
+    // The owner is protected by the repository's FINAL_OWNER_GUARD. Use the
+    // existing member fixture to exercise membership revocation without
+    // weakening that invariant.
+    await db.query("select public.upsert_slack_account_link($1,$2,$3,'U_MEMBER')", [install.installation_id, org, member]);
+    const memberEvent = randomUUID();
+    const memberJob = (await db.query("select * from public.enqueue_slack_unfurl_event($1,$2,$3,'link_shared',now(),$4,$5,$6,'C_DB','1.3','U_MEMBER',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null)", [team, app, memberEvent, org, install.installation_id, 1])).rows[0];
+    const memberToken = randomUUID();
+    await db.query("update public.slack_unfurl_jobs set status='processing',claim_token=$2,lease_expires_at=now()+interval '1 minute' where id=$1", [memberJob.job_id, memberToken]);
+    const memberGuardArgs = [memberJob.job_id, memberToken, install.installation_id, 1, org, "C_DB", "U_MEMBER"];
+    expect((await db.query("select public.guard_slack_unfurl_dispatch($1,$2,$3,$4,$5,$6,$7) as ok", memberGuardArgs)).rows[0].ok).toBe(true);
+    await db.query("update public.memberships set access_status='revoked' where user_id=$1 and org_id=$2", [member, org]);
+    expect((await db.query("select public.guard_slack_unfurl_dispatch($1,$2,$3,$4,$5,$6,$7) as ok", memberGuardArgs)).rows[0].ok).toBe(false);
+    await db.query("update public.memberships set access_status='active' where user_id=$1 and org_id=$2", [member, org]);
+    await db.query("select public.finish_slack_unfurl_job($1,$2,'succeeded',null)", [memberJob.job_id, memberToken]);
+    await db.query("update public.slack_account_links set status='revoked',revoked_at=now() where id=$1", [accountLink]);
+    expect((await db.query("select public.guard_slack_unfurl_dispatch($1,$2,$3,$4,$5,$6,$7) as ok", reclaimedGuardArgs)).rows[0].ok).toBe(false);
+    await db.query("update public.slack_account_links set status='active',revoked_at=null where id=$1", [accountLink]);
+    await db.query("update public.slack_installations set installation_version=2 where id=$1", [install.installation_id]);
+    expect((await db.query("select public.guard_slack_unfurl_dispatch($1,$2,$3,$4,$5,$6,$7) as ok", reclaimedGuardArgs)).rows[0].ok).toBe(false);
+    await db.query("update public.slack_installations set installation_version=1 where id=$1", [install.installation_id]);
     expect((await db.query("select public.finish_slack_unfurl_job($1,$2,'succeeded',null) as ok", [claimed.id, randomUUID()])).rows[0].ok).toBe(false);
-    expect((await db.query("select public.finish_slack_unfurl_job($1,$2,'succeeded',null) as ok", [claimed.id, claimed.claim_token])).rows[0].ok).toBe(true);
+    expect((await db.query("select public.finish_slack_unfurl_job($1,$2,'succeeded',null) as ok", [reclaimed.id, reclaimed.claim_token])).rows[0].ok).toBe(true);
     const releaseEvent = randomUUID();
     const releaseJob = (await db.query("select * from public.enqueue_slack_unfurl_event($1,$2,$3,'link_shared',now(),$4,$5,$6,'C_DB','1.15','U_DB',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null)", [team, app, releaseEvent, org, install.installation_id, 1])).rows[0];
     const releaseToken = randomUUID();

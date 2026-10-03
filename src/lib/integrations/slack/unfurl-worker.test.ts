@@ -202,14 +202,34 @@ describe("Slack unfurl worker", () => {
   it("expires without sending when the TTL crosses while loading a snapshot", async () => {
     let clock = Date.now();
     const clockSpy = vi.spyOn(Date, "now").mockImplementation(() => clock);
-    mocks.claim.mockResolvedValue([{ ...job, event_time: new Date(clock).toISOString(), expires_at: new Date(clock + 1_000).toISOString(), lease_expires_at: new Date(clock + 90_000).toISOString() }]);
+    mocks.claim.mockResolvedValue([{ ...job, event_time: new Date(clock).toISOString(), expires_at: new Date(clock + 10_000).toISOString(), lease_expires_at: new Date(clock + 90_000).toISOString() }]);
     mocks.loadData.mockImplementationOnce(async () => {
-      clock += 2_000;
+      clock += 20_000;
       return { propertyId: "11111111-1111-4111-8111-111111111111", leadName: "Lead", address: "1 Main", ownerName: null, ownerAssigned: false, latestAttempt: null, messagesDisposition: null, lastContactAt: null, timezone: "America/Chicago", messages: [] };
     });
     try {
       const result = await runSlackUnfurlSweep();
       expect(result.expired).toBe(1);
+      expect(mocks.loadData).toHaveBeenCalledTimes(1);
+      expect(mocks.unfurl).not.toHaveBeenCalled();
+      expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "expired", errorCode: "work_window_expired" });
+    } finally {
+      clockSpy.mockRestore();
+    }
+  });
+
+  it("expires without sending when the lease crosses while loading a snapshot", async () => {
+    let clock = Date.now();
+    const clockSpy = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    mocks.claim.mockResolvedValue([{ ...job, event_time: new Date(clock).toISOString(), expires_at: new Date(clock + 15 * 60_000).toISOString(), lease_expires_at: new Date(clock + 10_000).toISOString() }]);
+    mocks.loadData.mockImplementationOnce(async () => {
+      clock += 20_000;
+      return { propertyId: "11111111-1111-4111-8111-111111111111", leadName: "Lead", address: "1 Main", ownerName: null, ownerAssigned: false, latestAttempt: null, messagesDisposition: null, lastContactAt: null, timezone: "America/Chicago", messages: [] };
+    });
+    try {
+      const result = await runSlackUnfurlSweep();
+      expect(result.expired).toBe(1);
+      expect(mocks.loadData).toHaveBeenCalledTimes(1);
       expect(mocks.unfurl).not.toHaveBeenCalled();
       expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "expired", errorCode: "work_window_expired" });
     } finally {
