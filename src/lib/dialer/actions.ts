@@ -1,7 +1,7 @@
 "use server";
 
 import { bookAppointment } from "@/components/appointments/book-appointment-action";
-import { setOutreachDispo, type OutreachDispo } from "@/app/(dashboard)/messages/dispo-actions";
+import { saveOutreachDispo, type OutreachDispo } from "@/lib/leads/outreach-dispo";
 import { pausePropertyEnrollments, resumeByProperty } from "@/lib/sequences/enrollment";
 import { classifyItem } from "@/lib/dialer/eligibility";
 import { checkQuietHours } from "@/lib/messaging/quiet-hours";
@@ -494,7 +494,7 @@ export async function completeSoftphoneCall(input: {
         // it is now safe to perform the authoritative DNC_LOCKED check before
         // replacing the writeback-first row's operator fields.
         if (!replayActivity && input.target.propertyId) {
-          const dispo = await setOutreachDispo(input.target.propertyId, input.disposition);
+          const dispo = await saveOutreachDispo(input.target.propertyId, input.disposition);
           if (!dispo.ok) return { ok: false, error: dispo.error };
           dispositionSucceeded = true;
         }
@@ -526,13 +526,13 @@ export async function completeSoftphoneCall(input: {
         if (unclaimableRow) {
           return { ok: false, error: "The call activity was not saved." };
         }
-        // Preserve origin/main's deliberate order: setOutreachDispo is the
+        // Preserve origin/main's deliberate order: saveOutreachDispo is the
         // authoritative DNC_LOCKED race check and must run before any row is
         // written, so a rejected disposition leaves nothing to clean up.
         // (A concurrent two-tab wrap-up losing the claim after the CRM
         // change is the accepted residual, unchanged from main.)
         if (!replayActivity && input.target.propertyId) {
-          const dispo = await setOutreachDispo(input.target.propertyId, input.disposition);
+          const dispo = await saveOutreachDispo(input.target.propertyId, input.disposition);
           if (!dispo.ok) return { ok: false, error: dispo.error };
           dispositionSucceeded = true;
         }
