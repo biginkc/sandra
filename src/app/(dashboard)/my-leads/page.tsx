@@ -43,6 +43,20 @@ function unavailableState(retryHref = "/my-leads") {
   );
 }
 
+function selectedLeadUnavailableState(retryHref: string) {
+  return (
+    <Page>
+      <PageHeader title="My Leads" />
+      <div role="alert" className="text-destructive text-sm">
+        <span>This lead is unavailable in your My Leads queue. </span>
+        <a href={retryHref} className="font-bold underline underline-offset-4">
+          Retry
+        </a>
+      </div>
+    </Page>
+  );
+}
+
 function disabledState() {
   return (
     <Page>
@@ -120,6 +134,9 @@ export default async function MyLeadsPage({
   }
 
   if (!canViewMyLeads(roster, viewer.userId, viewer.isOwner)) {
+    if (selectedLeadLink.status === "requested" && !viewer.isOwner) {
+      return selectedLeadUnavailableState(retryHref);
+    }
     if (isRestrictedAcquisitionMember) return unavailableState();
     notFound();
   }

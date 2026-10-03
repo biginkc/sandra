@@ -37,6 +37,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   // paginated queue snapshot. A linked lead may be outside every loaded page.
   const [linkedLead,setLinkedLead]=useState(selectedLead);
   const linkedLeadRef=useRef(linkedLead);
+  const linkedReadRequest=useRef(0);
   useEffect(()=>{linkedLeadRef.current=linkedLead;},[linkedLead]);
   const tiles=useMemo(()=>kpis?kpiTiles(kpis):null,[kpis]);
   const [lastCheckedAt,setLastCheckedAt]=useState(initialSnapshot?.snapshotAt??null);
@@ -67,7 +68,6 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     Object.values(readSnapshot?.stages??{}).flatMap(page=>page?.rows??[]).find(row=>row.propertyId===id)??
     [...(readDrips?.replied??[]),...(readDrips?.active??[])].find(row=>row.propertyId===id)?.queueRow??null;
   const linkedRow=useCallback((id:string)=>linkedLeadRef.current.status==='found'&&linkedLeadRef.current.propertyId.toLowerCase()===id.toLowerCase()&&member===initialMemberId?linkedLeadRef.current.row:null,[initialMemberId,member]);
-  const linkedReadRequest=useRef(0);
   const refreshLinkedLead=useCallback(async(propertyId:string):Promise<LinkedReadResult>=>{
     if(member!==initialMemberId)return {ok:false as const,message:'Switch back to your own queue to continue.'};
     const readRequest=++linkedReadRequest.current;
@@ -108,6 +108,10 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       if(linkedRow(opening.row.propertyId)){
         const linked=await refreshLinkedLead(opening.row.propertyId);
         if(activeDialog.current!==opening)return;
+        if(!linkedRow(opening.row.propertyId)){
+          setRecovery({opening,message:'This lead is no longer available in this queue. Your draft is retained; copy it before closing.',blocked:true,busy:false});
+          return;
+        }
         if(!linked.ok||linked.lookup.status!=='found'||linked.lookup.row.assignmentEpisodeId!==opening.row.assignmentEpisodeId){
           setRecovery({opening,message:'This lead is unavailable in this queue or its assignment changed. Your draft is retained; copy it before closing. Reopen the lead from the current link to start a new update.',blocked:true,busy:false});return;
         }
@@ -143,6 +147,36 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     uncertain: boolean;
   };
   const initialEffect=useRef(Boolean(initialSnapshot&&initialKpis));const request=useRef(0);const submission=useRef<OpeningSubmission|null>(null);
+  useEffect(()=>{
+    const current=linkedLeadRef.current;
+    const sameStatus=current.status===selectedLead.status;
+    const sameSelection=sameStatus&&(
+      selectedLead.status==='none' ||
+      selectedLead.status==='invalid'&&current.status==='invalid'&&selectedLead.reason===current.reason ||
+      selectedLead.status==='found'&&current.status==='found'&&selectedLead.propertyId.toLowerCase()===current.propertyId.toLowerCase()&&selectedLead.row===current.row&&selectedLead.snapshotAt===current.snapshotAt ||
+      selectedLead.status==='unavailable'&&current.status==='unavailable'&&selectedLead.message===current.message&&selectedLead.retryHref===current.retryHref ||
+      selectedLead.status==='error'&&current.status==='error'&&selectedLead.message===current.message&&selectedLead.retryHref===current.retryHref ||
+      selectedLead.status==='terminal'&&current.status==='terminal'&&selectedLead.message===current.message
+    );
+    if(sameSelection)return;
+    const sameLead=current.status==='found'&&selectedLead.status==='found'&&current.propertyId.toLowerCase()===selectedLead.propertyId.toLowerCase();
+    // Server props are authoritative for selection and access. Invalidate
+    // older single-row reads immediately, while deferring the state update so
+    // the same-lead detail panel remains mounted through a refresh.
+    ++linkedReadRequest.current;
+    linkedLeadRef.current=selectedLead;
+    let cancelled=false;
+    queueMicrotask(()=>{
+      if(cancelled)return;
+      if(!sameLead){
+        pendingOpening.current=null;setOpeningStatus(null);
+        setDialog(null);setRecovery(null);setCallOptions(null);
+        recoveredRow.current=null;submission.current=null;
+      }
+      setLinkedLead(selectedLead);
+    });
+    return()=>{cancelled=true;};
+  },[selectedLead]);
   useEffect(()=>{
     if(member===initialMemberId)return;
     ++linkedReadRequest.current;
@@ -213,6 +247,10 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     if(linkedRow(opening.row.propertyId)){
       const linked=await refreshLinkedLead(opening.row.propertyId);
       if(pendingOpening.current!==opening||activeScope.current!==opening.scope)return;
+      if(!linkedRow(opening.row.propertyId)){
+        setOpeningStatus({opening,message:'This lead is no longer available in this queue. Refresh the link to continue.',busy:false});
+        return;
+      }
       if(!linked.ok||linked.lookup.status!=='found'||linked.lookup.row.assignmentEpisodeId!==opening.row.assignmentEpisodeId){
         setOpeningStatus({opening,message:'This lead is unavailable or its assignment changed. Refresh the link to continue.',busy:false});return;
       }

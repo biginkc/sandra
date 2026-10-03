@@ -179,6 +179,24 @@ describe("MyLeadsPage availability boundary", () => {
     expect(mocks.getAcquisitionQueue).not.toHaveBeenCalled();
   });
 
+  it("renders an explicit unavailable state for a linked lead from a non-Acquisitions member", async () => {
+    const propertyId = "aabbccdd-eeff-4011-8223-445566778899";
+    mocks.getCallerMembershipsOrThrow.mockResolvedValue([
+      { ...activeAcquisitionsMembership, acquisitions_enabled: false },
+    ]);
+    mocks.getAcquisitionRoster.mockResolvedValue({
+      viewer: { ...viewer, isOwner: false },
+      roster: { ...baseRoster, members: [] },
+    });
+
+    const html = renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: propertyId }) }));
+
+    expect(html).toContain("This lead is unavailable in your My Leads queue.");
+    expect(html).toContain(`href=\"/my-leads?lead=${propertyId}\"`);
+    expect(mocks.notFound).not.toHaveBeenCalled();
+    expect(mocks.getAcquisitionQueue).not.toHaveBeenCalled();
+  });
+
   it("keeps the authorized queue path for an active Acquisitions member", async () => {
     const html = renderPage(await MyLeadsPage());
 

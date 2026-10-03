@@ -278,6 +278,49 @@ describe("MyLeadsClient", () => {
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Switch back to your queue"))
   })
 
+  it("reconciles server-selected lead changes and authoritative unavailable results", async () => {
+    const initial = snapshot("Server selection lane")
+    const first = linkedRow("contacted")
+    const second = { ...first, propertyId: "second-linked", address: "Second linked lane" }
+    mocks.loadMyLeadDetail.mockResolvedValue({ ok: true, detail: { groups: {} } })
+    const view = renderClient(initial, kpis, null, undefined, {
+      status: "found",
+      propertyId: first.propertyId,
+      row: first,
+      snapshotAt: initial.snapshotAt,
+    })
+
+    expect(await screen.findByRole("region", { name: "Selected lead from link" })).toHaveTextContent("Outside page Lane")
+    view.rerender(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId={viewer.userId} initialSnapshot={initial} initialKpis={kpis} selectedLead={{ status: "found", propertyId: second.propertyId, row: second, snapshotAt: initial.snapshotAt }} />)
+    await waitFor(() => expect(screen.getByRole("region", { name: "Selected lead from link" })).toHaveTextContent("Second linked lane"))
+
+    view.rerender(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId={viewer.userId} initialSnapshot={initial} initialKpis={kpis} selectedLead={{ status: "unavailable", message: "The server no longer authorizes this lead." }} />)
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("The server no longer authorizes this lead."))
+    expect(screen.queryByRole("region", { name: "Selected lead from link" })).not.toBeInTheDocument()
+  })
+
+  it("preserves same-lead details while reconciling an updated server row", async () => {
+    const initial = snapshot("Same lead lane")
+    const first = linkedRow("contacted")
+    const updated = { ...first, address: "Same lead refreshed", queueVersion: first.queueVersion + 1 }
+    mocks.loadMyLeadDetail.mockResolvedValue({
+      ok: true,
+      detail: { groups: { notes: { rows: [{ id: "note-1", actorLabel: "Maria", body: "Preserve this detail", at: "2026-09-11T14:00:00Z" }] } } },
+    })
+    const view = renderClient(initial, kpis, null, undefined, {
+      status: "found",
+      propertyId: first.propertyId,
+      row: first,
+      snapshotAt: initial.snapshotAt,
+    })
+    expect(await screen.findByText("Preserve this detail")).toBeInTheDocument()
+
+    view.rerender(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId={viewer.userId} initialSnapshot={initial} initialKpis={kpis} selectedLead={{ status: "found", propertyId: first.propertyId, row: updated, snapshotAt: "2026-09-11T14:01:00.000Z" }} />)
+    await waitFor(() => expect(screen.getByRole("region", { name: "Selected lead from link" })).toHaveTextContent("Same lead refreshed"))
+    expect(screen.getByText("Preserve this detail")).toBeInTheDocument()
+    expect(mocks.loadMyLeadDetail).toHaveBeenCalledTimes(1)
+  })
+
   it("opens Log attempt for a pinned reply outside the first 20 rows", async()=>{
     const first=snapshot("Loaded Lane");
     const template=first.stages.not_contacted!.rows[0];
