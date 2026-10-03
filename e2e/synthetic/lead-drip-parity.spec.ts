@@ -52,7 +52,7 @@ for (const surface of ["top", "rail"] as const) {
         // Server refresh supplies the top bar's active-drip guard too.
         await page.getByTestId("dispo-needs-sequence").getByRole("button", {name:"Needs drip",exact:true}).click();
         await page.getByRole("button", {name:/Confirmed owner.*11 texts/}).click();
-        await expect(page.getByTestId("drip-cant-start")).toContainText("Already in Confirmed owner");
+        await expect(page.getByTestId("drip-cant-start")).toContainText("Already in this drip");
       } else if (scenario === "partial") {
         await expect(page.getByTestId("server-outcome")).toHaveText("needs_sequence");
         await expect(page.getByText(/Synthetic enrollment failure/).first()).toBeVisible();

@@ -17,7 +17,7 @@ export const backend = {
     state.guardedStarts++;
     if (params.get("case") === "dnc") return { ok: false, error: "This lead is do not contact or opted out." };
     state.outcome = "needs_sequence";
-    if (state.progress) return { ok: true, enrollment: { status: "skipped", reason: "Already in Confirmed owner. Stop it or switch." } };
+    if (state.progress) return { ok: true, enrollment: { status: "skipped", reason: "Already in this drip" } };
     if (params.get("case") === "partial") return { ok: true, enrollment: { status: "failed", reason: "Synthetic enrollment failure" } };
     state.progress = {
       propertyId: "synthetic-lead", enrollmentId: "synthetic-enrollment", sequenceId: "synthetic-drip",
