@@ -23,6 +23,7 @@ import { enqueueSlackUnfurlEvent, findSlackInstallations, isSlackUnfurlInstallat
 export const maxDuration = 10;
 
 const FLAG_ENABLED = "1";
+const INGEST_FLAG = "SLACK_LEAD_UNFURL_INGEST_ENABLED";
 // Slack retries quickly; reserve a bounded response window for every lookup,
 // RPC, and deliberate receipt so an accepted event is never acknowledged
 // before its durable job exists.
@@ -49,6 +50,11 @@ async function withinWebhookDeadline<T>(operation: () => Promise<T>, deadline: n
 
 function noOp() {
   return NextResponse.json({ ok: true });
+}
+
+function ingestionEnabled(): boolean {
+  const explicit = process.env[INGEST_FLAG];
+  return explicit === FLAG_ENABLED || (explicit === undefined && process.env.SLACK_LEAD_UNFURL_ENABLED === FLAG_ENABLED);
 }
 
 function configuredAppId(): string | null {
@@ -108,7 +114,7 @@ async function handleEnvelope(body: SlackEventEnvelope, deadline: number): Promi
   }
 
   if (!isLinkSharedSlackEvent(type)) return recordNoOp(body, "unsupported_event", deadline);
-  if (process.env.SLACK_LEAD_UNFURL_ENABLED !== FLAG_ENABLED) return recordNoOp(body, "feature_disabled", deadline);
+  if (!ingestionEnabled()) return recordNoOp(body, "feature_disabled", deadline);
   if (eventChannel(body)?.startsWith("D")) return recordNoOp(body, "private_channel_denied", deadline);
   if (eventChannel(body) === "COMPOSER" || eventSource(body)?.toLowerCase() === "composer") return recordNoOp(body, "composer_denied", deadline);
 
@@ -145,6 +151,7 @@ async function handleEnvelope(body: SlackEventEnvelope, deadline: number): Promi
       posterSlackUserId: poster,
       urlKeys: parsed.links.map((link) => link.originalUrl),
     }), deadline);
+    if (!enqueued.accepted) return noOp();
     if (!enqueued.jobId && !enqueued.duplicate) throw new Error("accepted Slack event did not receive durable job");
     return noOp();
   } catch (error) {

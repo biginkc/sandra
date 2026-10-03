@@ -68,6 +68,29 @@ describe("slack unfurl policy", () => {
     expect(pending.allowed).toBe(false);
   });
 
+  it("allows a broad-policy internal channel when Slack returns the exact channel without is_member", () => {
+    const allowed = authorizeSlackDestination({
+      approval: null,
+      policyEnabled: true,
+      expectedInstallationId: "i", expectedOrgId: "o", expectedTeamId: "T", expectedChannelId: "C", expectedPosterUserId: "U",
+      channel: { id: "C", context_team_id: "T", shared_team_ids: ["T"], is_channel: true, is_member: false },
+      user: { id: "U", team_id: "T", deleted: false, is_bot: false },
+    });
+    expect(allowed.allowed).toBe(true);
+  });
+
+  it("keeps shared, pending, DM, and cross-team channels denied in broad mode", () => {
+    const base = { approval: null, policyEnabled: true, expectedInstallationId: "i", expectedOrgId: "o", expectedTeamId: "T", expectedChannelId: "C", expectedPosterUserId: "U", user: { id: "U", team_id: "T" } };
+    for (const channel of [
+      { id: "C", context_team_id: "T", shared_team_ids: ["T", "T2"], is_channel: true },
+      { id: "C", context_team_id: "T", pending_shared: ["T2"], is_channel: true },
+      { id: "C", context_team_id: "T", is_im: true },
+      { id: "C", context_team_id: "T", is_channel: true, is_shared: true },
+    ]) {
+      expect(authorizeSlackDestination({ ...base, channel }).allowed).toBe(false);
+    }
+  });
+
   it("preserves Slack Retry-After metadata for transient authority failures", async () => {
     slack.channelInfo.mockRejectedValueOnce({ data: { retry_after: 600 } });
     slack.userInfo.mockResolvedValueOnce({ user: { id: "U" } });

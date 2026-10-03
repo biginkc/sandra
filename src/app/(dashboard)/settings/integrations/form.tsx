@@ -369,6 +369,8 @@ export function IntegrationsForm({ initial }: { initial: IntegrationStatus }) {
           pending={pending}
           onToggle={toggleSlack}
           onDisconnect={() => disconnect("slack")}
+          secondaryHref="/settings/integrations/slack-previews"
+          secondaryLabel="Lead link previews"
           testIdPrefix="slack"
         />
 
@@ -812,6 +814,8 @@ function ProviderCard({
   pending,
   onToggle,
   onDisconnect,
+  secondaryHref,
+  secondaryLabel,
   testIdPrefix,
 }: {
   icon: ReactNode;
@@ -827,6 +831,8 @@ function ProviderCard({
   pending: boolean;
   onToggle: (next: boolean) => void;
   onDisconnect: () => void;
+  secondaryHref?: string;
+  secondaryLabel?: string;
   testIdPrefix: "slack" | "google";
 }) {
   return (
@@ -883,6 +889,17 @@ function ProviderCard({
               {connectLabel}
             </Link>
           </div>
+        )}
+        {secondaryHref && secondaryLabel && (
+          <Link
+            href={secondaryHref}
+            className={cn(
+              buttonVariants({ variant: "link", size: "sm" }),
+              "w-fit px-0",
+            )}
+          >
+            {secondaryLabel}
+          </Link>
         )}
       </CardContent>
     </Card>

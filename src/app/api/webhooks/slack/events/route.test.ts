@@ -63,6 +63,29 @@ describe("Slack events route", () => {
     expect(mocks.enqueue).toHaveBeenCalledWith(expect.objectContaining({ appId: "A123", eventId: "Ev123", installationVersion: 1 }));
   });
 
+  it("keeps ingestion off when both ingestion and delivery flags are off", async () => {
+    const response = await POST(request(base));
+    expect(response.status).toBe(200);
+    expect(mocks.find).not.toHaveBeenCalled();
+    expect(mocks.enqueue).toHaveBeenCalledWith(expect.objectContaining({ denialCode: "feature_disabled" }));
+  });
+
+  it("accepts a durable canary event with explicit ingestion enabled while delivery stays off", async () => {
+    vi.stubEnv("SLACK_LEAD_UNFURL_INGEST_ENABLED", "1");
+    vi.stubEnv("SLACK_LEAD_UNFURL_ENABLED", "0");
+    const response = await POST(request(base));
+    expect(response.status).toBe(200);
+    expect(mocks.find).toHaveBeenCalled();
+    expect(mocks.enqueue).toHaveBeenCalledWith(expect.objectContaining({ eventId: "Ev123", installationId: "I1", orgId: "O1" }));
+  });
+
+  it("acknowledges a policy refusal without returning a retryable error", async () => {
+    vi.stubEnv("SLACK_LEAD_UNFURL_ENABLED", "1");
+    mocks.enqueue.mockResolvedValueOnce({ accepted: false, duplicate: false, jobId: null });
+    const response = await POST(request(base));
+    expect(response.status).toBe(200);
+  });
+
   it("turns an installation version race into a durable terminal no-op", async () => {
     vi.stubEnv("SLACK_LEAD_UNFURL_ENABLED", "1");
     mocks.stale.mockReturnValueOnce(true);
