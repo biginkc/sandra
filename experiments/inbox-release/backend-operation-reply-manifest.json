@@ -2,11 +2,11 @@
   "schema_version": 2,
   "status": "PENDING_REVIEW_NO_INSTALL",
   "source_repository": ".",
-  "source_commit": "a18092714821f3805923007a885da4327b596a7e",
+  "source_commit": "8738ae37550e3b170ea3f4650fe0c5f5219cee21",
   "source_commit_role": "coordinator integration exact snapshot; read with git show; no branch import",
   "sql_packet": {
     "path": "experiments/inbox-release/generated/backend-operation-reply.sql",
-    "sha256": "e895bd6fe1f7c0eb58ca467122bda792a0191353cec40fa8218d20b25eb96064"
+    "sha256": "3ac5b47555ef66079fbfc18d297d2ed972056b9f4698ca87e50d92cb5f9ce1f2"
   },
   "sql_sources": [
     {
@@ -63,7 +63,12 @@
       "path": "experiments/inbox-operation-domain/restrictive-apply.sql",
       "sha256": "79dec51b3a2e8ed0cd87fc6f4e545a02c0550e539aebaf2edb4d33d152b24ab5",
       "bytes": 31410,
-      "transformed_sha256": "edaee5650127238e91e0207125b2aae5f4cf170c57ecde7dec9ec3359eb5455d"
+      "transformed_sha256": "76809064a2e1debf10e89afe0d4d697adad432d5b8d0aeb390ac0bc99a1a055d",
+      "reviewed_correction": {
+        "base_commit": "8738ae37550e3b170ea3f4650fe0c5f5219cee21",
+        "sha256": "a935905bb86e545684f6414c4cced8d02d659b6fc60604537195b2a776534128",
+        "bytes": 31653
+      }
     },
     {
       "name": "operation_setup",
@@ -127,7 +132,12 @@
       "path": "experiments/inbox-reply-boundary/context.sql",
       "sha256": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
       "bytes": 5946,
-      "transformed_sha256": "d37e2d745aac9cd34c38b6199beb8bb6cd803dabe75cd249faaacf97e50479f4"
+      "transformed_sha256": "477b32e6d174b2d4719ed9479befdbddfb864c31e941a6b7cb01e09b393a5bd5",
+      "reviewed_correction": {
+        "base_commit": "8738ae37550e3b170ea3f4650fe0c5f5219cee21",
+        "sha256": "942c9e7b117e73b941eeb0874d5928f37b670df264ba59114d8bf9c0838b8e3f",
+        "bytes": 6014
+      }
     },
     {
       "name": "reply_recipient",

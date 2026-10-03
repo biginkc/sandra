@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Shared, disposable-only setup for W3 perf lanes. Source from a lane script.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/failure-exit.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/mapfile-compat.sh"
 PERF_REPO="$(git rev-parse --show-toplevel)"
 PERF_SOURCE="$PERF_REPO/experiments/inbox-production-install/perf"
 PERF_MIGRATIONS_DIR="$PERF_REPO/supabase/migrations"
@@ -10,7 +12,15 @@ perf_preflight() {
   if [[ "${PERF_LOCAL_EXECUTION:-}" != 1 ]]; then
     [[ -z "$(git status --porcelain)" ]] || { echo 'Dirty checkout' >&2; return 1; }
   fi
-  for file in 20260929000000_inbox_control_foundation.sql 20260929000100_inbox_read_companion.sql 20260929000200_inbox_backend_operation_reply.sql; do
+  local files_output inbox_migration_count
+  local -a inbox_migration_files
+  files_output="$(node "$PERF_REPO/scripts/inbox-ci/inbox-migrations.mjs" --files)"
+  mapfile -t inbox_migration_files <<<"$files_output"
+  inbox_migration_count="$(node "$PERF_REPO/scripts/inbox-ci/inbox-migrations.mjs" --count)"
+  [[ "$inbox_migration_count" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid Inbox migration manifest count' >&2; return 1; }
+  [[ "${#inbox_migration_files[@]}" -eq "$inbox_migration_count" ]] || { echo "Expected $inbox_migration_count Inbox migration files, received ${#inbox_migration_files[@]}" >&2; return 1; }
+  for path in "${inbox_migration_files[@]}"; do
+    file="${path##*/}"
     test -s "$PERF_MIGRATIONS_DIR/$file" || { echo "Missing required checked-out migration: $file" >&2; return 1; }
     if [[ "${PERF_LOCAL_EXECUTION:-}" != 1 ]]; then
       git ls-files --error-unmatch "supabase/migrations/$file" >/dev/null || return 1
@@ -27,12 +37,18 @@ perf_start() {
   fi
   PERF_STACK_ID="sandra-heavy-perf-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}"
   export PERF_STACK_ID
+  local -a inbox_exclude_args
+  inbox_exclude_args=()
+  local inbox_exclude_output inbox_migration_count
+  inbox_exclude_output="$(node "$PERF_REPO/scripts/inbox-ci/inbox-migrations.mjs" --exclude-args)"
+  mapfile -t inbox_exclude_args <<<"$inbox_exclude_output"
+  inbox_migration_count="$(node "$PERF_REPO/scripts/inbox-ci/inbox-migrations.mjs" --count)"
+  [[ "$inbox_migration_count" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid Inbox migration manifest count' >&2; return 1; }
+  [[ "${#inbox_exclude_args[@]}" -eq $((2 * inbox_migration_count)) ]] || { echo "Expected $((2 * inbox_migration_count)) Inbox migration exclude arguments, received ${#inbox_exclude_args[@]}" >&2; return 1; }
   node "$PERF_REPO/scripts/ci/provision-disposable-stack.mjs" \
     --no-baseline-owner \
-    "${local_ports[@]}" \
-    --exclude-migrations 20260929000000_inbox_control_foundation.sql \
-    --exclude-migrations 20260929000100_inbox_read_companion.sql \
-    --exclude-migrations 20260929000200_inbox_backend_operation_reply.sql
+    "${local_ports[@]+"${local_ports[@]}"}" \
+    "${inbox_exclude_args[@]}"
   while IFS='=' read -r key value; do
     case "$key" in
       E2E_LOCAL_WORKDIR|E2E_DISPOSABLE_DATABASE|TEST_SUPABASE_URL|TEST_SUPABASE_SERVICE_ROLE_KEY|E2E_CI_SUPABASE_DB_URL)
@@ -79,8 +95,10 @@ perf_stop() {
   unset PERF_DATABASE_URL PERF_API_URL PERF_SERVICE_ROLE_KEY PERF_DB_CONTAINER E2E_DISPOSABLE_DATABASE E2E_LOCAL_WORKDIR E2E_CI_SUPABASE_DB_URL TEST_SUPABASE_URL TEST_SUPABASE_SERVICE_ROLE_KEY PERF_WORKDIR PERF_STACK_ID PERF_ORG_ID PERF_ACTOR_ID
 }
 perf_exit() {
-  perf_stop
+  local status=0
+  perf_stop || status=$?
   # The lane owns and stops each stack. Prevent the workflow's final step from
   # trying to stop an already stopped stack via the provisioner's GITHUB_ENV.
-  echo 'E2E_LOCAL_WORKDIR=' >> "$GITHUB_ENV"
+  echo 'E2E_LOCAL_WORKDIR=' >> "$GITHUB_ENV" || status=$?
+  return "$status"
 }

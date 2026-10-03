@@ -29,7 +29,9 @@ from transaction_envelope import normalize
 # different identity and must not be accepted by this packet.
 RELEASE_DATABASE = "postgres"
 RELEASE_MARKER = "sandra-inbox-http-owned-synthetic-20260917"
-SOURCE_COMMIT = "a18092714821f3805923007a885da4327b596a7e"  # runtime routing and generation guard review fixes
+SOURCE_COMMIT = "8738ae37550e3b170ea3f4650fe0c5f5219cee21"  # runtime guards over the trim-parity P3 source snapshot
+GRANT_FIX_SHA256 = "a935905bb86e545684f6414c4cced8d02d659b6fc60604537195b2a776534128"  # reviewed correction source bytes
+REPLY_CONTEXT_RLS_SHA256 = "942c9e7b117e73b941eeb0874d5928f37b670df264ba59114d8bf9c0838b8e3f"
 
 SQL_SOURCES = [
     ("operation_foundation", "experiments/inbox-operation-acceptance/setup.sql"),
@@ -219,11 +221,55 @@ def main() -> int:
         raw_bytes = git_show(repo, actual, path)
         raw = raw_bytes.decode()
         body, _ = transform_sql(raw, path)
+        if name == "operation_domain_apply":
+            # P3's pinned blob predates the reviewed source correction. Insert
+            # each REVOKE immediately after its replacement definition.
+            boundary = "END $$;\n\n-- Unknown sender actions consume only the frozen message IDs"
+            if body.count(boundary) != 1 or not body.rstrip().endswith("END $$;"):
+                raise RuntimeError("Operation-domain grant correction anchors drifted")
+            body = body.replace(boundary,
+                "END $$;\nREVOKE ALL ON FUNCTION inbox_operation_domain.apply_promotion_step(uuid,uuid,uuid,bigint) FROM PUBLIC,anon,authenticated;\n\n-- Unknown sender actions consume only the frozen message IDs")
+            body = body.rstrip() + "\nREVOKE ALL ON FUNCTION inbox_operation_domain.apply_unknown_step(uuid,uuid,uuid,bigint) FROM PUBLIC,anon,authenticated;\n"
         if name == "reply_accept_recovery":
             body = remove_recovery_admission(body)
+        if name == "reply_context":
+            corrected = (repo / path).read_bytes()
+            if hashlib.sha256(corrected).hexdigest() != REPLY_CONTEXT_RLS_SHA256:
+                raise RuntimeError("Reviewed reply-context RLS source hash drifted")
+            corrected_body, _ = transform_sql(corrected.decode(), path)
+            original_table = "CREATE TABLE inbox_reply_context.versions("
+            rls = "ALTER TABLE inbox_reply_context.versions ENABLE ROW LEVEL SECURITY;"
+            if body.count(original_table) != 1 or corrected_body.count(rls) != 1 or body.replace("\n-- No canonical FK:", "\n" + rls + "\n-- No canonical FK:", 1) != corrected_body:
+                raise RuntimeError("Reply-context correction must add only the reviewed RLS statement")
+            body = corrected_body
         source_hash = hashlib.sha256(raw_bytes).hexdigest()
         transformed_hash = hashlib.sha256(body.encode()).hexdigest()
-        source_entries.append({"name": name, "kind": "sql", "path": path, "sha256": source_hash, "bytes": len(raw_bytes), "transformed_sha256": transformed_hash})
+        entry = {"name": name, "kind": "sql", "path": path, "sha256": source_hash, "bytes": len(raw_bytes), "transformed_sha256": transformed_hash}
+        if name == "operation_domain_apply":
+            corrected = (repo / path).read_bytes()
+            if hashlib.sha256(corrected).hexdigest() != GRANT_FIX_SHA256:
+                raise RuntimeError("Reviewed grant correction source hash drifted")
+            corrected_body, _ = transform_sql(corrected.decode(), path)
+            # The reviewed SQL has one extra blank line before the first REVOKE.
+            corrected_body = corrected_body.replace(
+                "END $$;\n\nREVOKE ALL ON FUNCTION inbox_operation_domain.apply_promotion_step",
+                "END $$;\nREVOKE ALL ON FUNCTION inbox_operation_domain.apply_promotion_step",
+                1,
+            )
+            if corrected_body != body:
+                raise RuntimeError("Reviewed grant correction differs from assembled operation-domain SQL")
+            entry["reviewed_correction"] = {
+                "base_commit": actual,
+                "sha256": GRANT_FIX_SHA256,
+                "bytes": len(corrected),
+            }
+        if name == "reply_context":
+            entry["reviewed_correction"] = {
+                "base_commit": actual,
+                "sha256": REPLY_CONTEXT_RLS_SHA256,
+                "bytes": len(corrected),
+            }
+        source_entries.append(entry)
         sql_parts.append(f"-- Pinned {name}: {path}\n-- source_sha256={source_hash}\n{body}\n")
 
     runtime_entries = []

@@ -1,0 +1,17 @@
+Database|postgres
+Client User|postgres
+Host|localhost
+Server Port|5432
+Options|
+Protocol Version|3.0
+Password Used|false
+GSSAPI Authenticated|false
+Backend PID|12345
+SSL Library|OpenSSL
+SSL Protocol|TLSv1.3
+SSL Key Bits|256
+SSL Cipher|TLS_AES_256_GCM_SHA384
+SSL Compression|false
+ALPN|none
+Superuser|true
+Hot Standby|false

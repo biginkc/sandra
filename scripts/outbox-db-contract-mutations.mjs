@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import pg from 'pg';
 import { assertWriteMode } from './outbox-db-contract/guards.mjs';
 import { makeRest } from './outbox-db-contract/postgrest.mjs';
 import { createFixture } from './outbox-db-contract/fixture.mjs';
-import { sealPhaseRecord } from './outbox-db-contract.mjs';
+import { completePhaseInventory, sealPhaseRecord } from './outbox-db-contract.mjs';
 import { platformFingerprint } from './outbox-db-contract/platform.mjs';
+import { readPostgrestMajor } from './outbox-db-contract/readonly.mjs';
 
 const MUTATIONS = [
   ['M1', 'REVOKE SELECT ON public.messages FROM authenticated', 'GRANT SELECT ON public.messages TO authenticated', ['PIN_BASE_GRANTS', 'C00', 'C01', 'C02', 'C03', 'C04', 'C05', 'C06', 'C07', 'C08', 'C08b', 'C09', 'D02', 'D03']],
@@ -30,18 +31,67 @@ const MUTATIONS = [
   ['M10', 'ALTER TABLE public.messages DISABLE ROW LEVEL SECURITY', 'ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY', ['PIN_BASE_GRANTS', 'C00', 'C01', 'C02', 'C03', 'D01', 'D02', 'D03'], ['pre', 'post']],
 ];
 
+export function fixtureChildEnv(baseEnv, fixture, scratch) {
+  const { MUTATION_FIXTURE_JSON: ignored, ...env } = baseEnv;
+  env.OUTBOX_CONTRACT_SCRATCH_DIR = scratch;
+  if (fixture) {
+    const file = path.join(scratch, 'mutation-fixture.json');
+    writeFileSync(file, JSON.stringify(fixture), { mode: 0o600 });
+    env.MUTATION_FIXTURE_PATH = file;
+  }
+  return env;
+}
+
+export function stagePhaseRunDir(runDir, repoRoot, githubEnv) {
+  appendFileSync(githubEnv, `HEAVY_RUN_DIR=${path.relative(repoRoot, runDir)}\n`);
+}
+
+export function shouldSealPhaseRecord(env, phase) {
+  return env.HEAVY_LANE === `db-contract-${phase}`;
+}
+
+export function finalizeSubstep({ phase, checks, schemaState, mutations, fixtureRows, platformConfig, readonlyRehearsal, failure, env = process.env, runId, startedAt, seal = sealPhaseRecord, stage = stagePhaseRunDir }) {
+  if (!shouldSealPhaseRecord(env, phase)) {
+    if (!failure && !completePhaseInventory(phase, checks, schemaState, mutations)) failure = new Error('INCOMPLETE_PHASE_INVENTORY');
+    return { failure, sealed: null };
+  }
+
+  const sealed = seal({
+    phase,
+    checks,
+    schemaState,
+    mutations,
+    fixtureRows,
+    platformConfig,
+    readonlyRehearsal,
+    verdict: failure ? 'FAIL' : 'PASS',
+    errorText: failure ? String(failure.stack ?? failure) : '',
+    env,
+    runId,
+    startedAt,
+  });
+  if (env.GITHUB_ACTIONS === 'true') stage(sealed.runDir, process.cwd(), env.GITHUB_ENV);
+  if (sealed.verdict !== 'PASS' && !failure) failure = new Error('INCOMPLETE_PHASE_INVENTORY');
+  return { failure, sealed };
+}
+
 function runContract(phase, extra = [], fixture = null) {
   const scratch = mkdtempSync(path.join(os.tmpdir(), 'w4w-contract-step-'));
-  const env = { ...process.env, OUTBOX_CONTRACT_SCRATCH_DIR: scratch, ...(fixture ? { MUTATION_FIXTURE_JSON: JSON.stringify(fixture) } : {}) };
+  const env = fixtureChildEnv(process.env, fixture, scratch);
   try {
     const result = spawnSync(process.execPath, ['scripts/outbox-db-contract.mjs', '--target', 'disposable', '--phase', phase, ...extra], { encoding: 'utf8', env, maxBuffer: 20 * 1024 * 1024 });
     const line = result.stdout?.split('\n').find(value => value.startsWith('CONTRACT_RESULT '));
-    assert(line, `No contract result: ${result.stderr}\n${result.stdout}`);
+    assert(line, `No contract result: spawn=${result.error?.stack ?? 'none'} status=${result.status} signal=${result.signal} stderr=${result.stderr} stdout=${result.stdout}`);
     const parsed = JSON.parse(line.slice('CONTRACT_RESULT '.length));
     const contracts = JSON.parse(readFileSync(path.join(scratch, 'contracts.json'), 'utf8'));
     const fixtureRows = !fixture && result.status === 0 ? readFileSync(path.join(scratch, 'fixture-rows.json')) : undefined;
     return { exit: result.status, ...parsed, contracts, fixtureRows };
   } finally { rmSync(scratch, { recursive: true, force: true }); }
+}
+
+export async function platformConfigFor(db, transport, { apiUrl, anonKey, postgresMajor }) {
+  const { postgrest_major: postgrestMajor, postgrest_reason: postgrestReason, postgrest_observed_major: postgrestObservedMajor } = await readPostgrestMajor(db);
+  return platformFingerprint(apiUrl, anonKey, postgresMajor, transport, { postgrestMajor, postgrestReason, postgrestObservedMajor });
 }
 
 async function prepareFixture() {
@@ -63,6 +113,7 @@ export async function runMutations(output, phase) {
     if (process.env.HEAVY_LOCAL_FAILURE_INJECTION === '1' && process.env.OUTBOX_INJECT_AT === step) throw new Error(`INJECTED_ORCHESTRATION_FAILURE ${step}`);
   };
   let baseline;
+  let readonlyRehearsal;
   let failure;
   try {
     await db.connect();
@@ -119,20 +170,35 @@ export async function runMutations(output, phase) {
       inject(`${id}:recorded`);
     }
     inject('aggregate');
+    if (process.env.HEAVY_LANE === `db-contract-${phase}`) {
+      const rehearsalFile = `${output}.readonly-rehearsal.json`;
+      const fixtureFile = `${output}.fixture-rows.json`;
+      writeFileSync(fixtureFile, baseline.fixtureRows);
+      const pre = phase === 'post' ? ['--pre-file', process.env.HEAVY_PRE_READONLY_OUTPUT ?? ''] : [];
+      const scope = phase === 'post' ? ['--org', process.env.HEAVY_REHEARSAL_ORG ?? ''] : ['--fixture-rows', fixtureFile];
+      const rehearsal = spawnSync(process.execPath, ['scripts/inbox-ci/rehearse-readonly.mjs','--phase',phase,...scope,'--record',rehearsalFile,...pre], { encoding:'utf8', env:process.env, maxBuffer:20*1024*1024 });
+      assert.equal(rehearsal.status, 0, `readonly rehearsal: ${rehearsal.stderr}`);
+      readonlyRehearsal = JSON.parse(readFileSync(rehearsalFile));
+    }
   } catch (error) { failure = error; }
   finally {
     let platformConfig;
-    if (!failure && phase === 'pre') {
+    if (shouldSealPhaseRecord(process.env, phase) && !failure && phase === 'pre') {
       try {
         const version = (await db.query('SHOW server_version_num')).rows[0].server_version_num;
-        platformConfig = await platformFingerprint(process.env.TEST_SUPABASE_URL, process.env.TEST_SUPABASE_ANON_KEY, String(Math.floor(Number(version) / 10000)));
-      } catch (error) { failure = error; }
+        await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+        platformConfig = await platformConfigFor(db, undefined, {
+          apiUrl: process.env.TEST_SUPABASE_URL,
+          anonKey: process.env.TEST_SUPABASE_ANON_KEY,
+          postgresMajor: String(Math.floor(Number(version) / 10000)),
+        });
+        await db.query('COMMIT');
+      } catch (error) { await db.query('ROLLBACK').catch(() => {}); failure = error; }
     }
     await db.end();
     const checks = baseline?.contracts ?? [];
     const fixtureRows = baseline?.fixtureRows;
-    const sealed = sealPhaseRecord({ phase, checks, schemaState: baseline?.schemaState, mutations: results, fixtureRows, platformConfig, verdict: failure ? 'FAIL' : 'PASS', errorText: failure ? String(failure.stack ?? failure) : '' });
-    if (sealed.verdict !== 'PASS' && !failure) failure = new Error('INCOMPLETE_PHASE_INVENTORY');
+    ({ failure } = finalizeSubstep({ phase, checks, schemaState: baseline?.schemaState, mutations: results, fixtureRows, platformConfig, readonlyRehearsal, failure }));
   }
   if (failure) throw failure;
   return results;

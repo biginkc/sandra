@@ -1,5 +1,5 @@
 {
-  "source_sha256": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
+  "source_sha256": "942c9e7b117e73b941eeb0874d5928f37b670df264ba59114d8bf9c0838b8e3f",
   "runner_sha256": "e71efbe55f8bd71ea65f89b9d1ed180970a2a92603aa06da25e9c07792f57d99",
   "checks": [
     "sender sync metadata does not invalidate route",

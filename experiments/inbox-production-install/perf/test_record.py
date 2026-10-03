@@ -70,6 +70,13 @@ def run(*args, cwd, env=None):
 
 
 class RecordContractTests(unittest.TestCase):
+    def test_perf_lanes_export_sealed_run_dir_for_artifact_staging(self):
+        for lane in ('burst', 'perf-120k'):
+            script = (ROOT / f'scripts/inbox-ci/{lane}.sh').read_text()
+            with self.subTest(lane=lane):
+                self.assertIn('HEAVY_RUN_DIR=', script)
+                self.assertIn('>> "$GITHUB_ENV"', script)
+
     def test_raw_truncation_controls(self):
         with tempfile.TemporaryDirectory() as temp:
             attempt = Path(temp)
@@ -140,7 +147,7 @@ class RecordContractTests(unittest.TestCase):
             relative = run('python3', 'experiments/inbox-production-install/perf/record.py', str(source), 'perf-120k', 'PASS', cwd=repo, env=env)
             manifest = json.loads((repo / relative / 'manifest.json').read_text())
             self.assertEqual((manifest['kind'], manifest['phase'], manifest['target']), ('perf-120k', 'n/a', 'disposable'))
-            workflow_run = {'event': 'workflow_dispatch', 'head_branch': 'main', 'path': '.github/workflows/inbox-heavy-verification.yml', 'conclusion': 'success', 'head_sha': sha, 'run_attempt': 1, 'id': 2001, 'display_title': f'Inbox heavy perf-120k {sha}'}
+            workflow_run = {'status': 'completed', 'event': 'workflow_dispatch', 'head_branch': 'main', 'path': '.github/workflows/inbox-heavy-verification.yml', 'conclusion': 'success', 'head_sha': sha, 'run_attempt': 1, 'id': 2001, 'display_title': f'Inbox heavy perf-120k {sha}'}
             artifact = {'name': manifest['artifact_name'], 'expired': False, 'size_in_bytes': 1}
             downloaded = Path(temp) / 'download'
             shutil.copytree(repo / 'docs', downloaded / 'docs')
@@ -250,7 +257,7 @@ class RecordContractTests(unittest.TestCase):
                                cwd=workrepo, env=local_env)
                 manifest = json.loads((workrepo / relative / 'manifest.json').read_text())
                 artifact = {'name': manifest['artifact_name'], 'expired': False, 'size_in_bytes': 1}
-                workflow_run = {'event': 'workflow_dispatch', 'head_branch': 'main',
+                workflow_run = {'status': 'completed', 'event': 'workflow_dispatch', 'head_branch': 'main',
                                 'path': '.github/workflows/inbox-heavy-verification.yml', 'conclusion': 'success',
                                 'head_sha': sha, 'run_attempt': 1, 'id': int(run_id),
                                 'display_title': f'Inbox heavy burst {sha}'}

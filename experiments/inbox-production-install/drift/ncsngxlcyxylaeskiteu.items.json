@@ -1,0 +1,200 @@
+{
+  "fixture_version": 1,
+  "items": [
+    {
+      "approval_sha256": null,
+      "attribute": "indexes",
+      "canonical_definition": "CREATE INDEX idx_users_created_at_desc ON auth.users USING btree (created_at DESC)",
+      "classification": {
+        "class": "index",
+        "constraint": false,
+        "expression": false,
+        "live": true,
+        "owner": "supabase_auth_admin",
+        "predicate": null,
+        "primary": false,
+        "ready": true,
+        "unique": false,
+        "valid": true
+      },
+      "definition_sha256": "a63cbab70b72afa7949ed9e8ebc9bb8629844da3d6d8cd08db06d962da548708",
+      "name": "idx_users_created_at_desc",
+      "object": "auth.users",
+      "origin": "platform"
+    },
+    {
+      "approval_sha256": null,
+      "attribute": "indexes",
+      "canonical_definition": "CREATE INDEX idx_users_email ON auth.users USING btree (email)",
+      "classification": {
+        "class": "index",
+        "constraint": false,
+        "expression": false,
+        "live": true,
+        "owner": "supabase_auth_admin",
+        "predicate": null,
+        "primary": false,
+        "ready": true,
+        "unique": false,
+        "valid": true
+      },
+      "definition_sha256": "d0cc1e405d55b2f5438971efba427645322612771f741ae91e6b4af0240dcca3",
+      "name": "idx_users_email",
+      "object": "auth.users",
+      "origin": "platform"
+    },
+    {
+      "approval_sha256": null,
+      "attribute": "indexes",
+      "canonical_definition": "CREATE INDEX idx_users_last_sign_in_at_desc ON auth.users USING btree (last_sign_in_at DESC)",
+      "classification": {
+        "class": "index",
+        "constraint": false,
+        "expression": false,
+        "live": true,
+        "owner": "supabase_auth_admin",
+        "predicate": null,
+        "primary": false,
+        "ready": true,
+        "unique": false,
+        "valid": true
+      },
+      "definition_sha256": "67c5dba835053e33609364eca25864b66b393d38f41972eb7dbc9d2dfb49609d",
+      "name": "idx_users_last_sign_in_at_desc",
+      "object": "auth.users",
+      "origin": "platform"
+    },
+    {
+      "approval_sha256": "4dbc01feffae5acf04236e5aa3611151cc43e1467f84588e05b025dd9fbc7402",
+      "attribute": "indexes",
+      "canonical_definition": "CREATE INDEX idx_users_name ON auth.users USING btree (((raw_user_meta_data ->> 'name'::text))) WHERE ((raw_user_meta_data ->> 'name'::text) IS NOT NULL)",
+      "classification": {
+        "class": "index",
+        "constraint": false,
+        "expression": true,
+        "live": true,
+        "owner": "supabase_auth_admin",
+        "predicate": "((raw_user_meta_data ->> 'name'::text) IS NOT NULL)",
+        "primary": false,
+        "ready": true,
+        "unique": false,
+        "valid": true
+      },
+      "definition_sha256": "4dbc01feffae5acf04236e5aa3611151cc43e1467f84588e05b025dd9fbc7402",
+      "name": "idx_users_name",
+      "object": "auth.users",
+      "origin": "platform"
+    },
+    {
+      "approval_sha256": null,
+      "attribute": "columns",
+      "canonical_definition": "uuid",
+      "classification": {
+        "attgenerated": "",
+        "attidentity": "",
+        "class": "column",
+        "column_acl": null,
+        "default": null,
+        "nullable": true,
+        "owner": "postgres"
+      },
+      "definition_sha256": "75666699b77db631f576041e8102a55b46758c01b807eacae0f170930ab59b3d",
+      "name": "ai_responder_debounce_token",
+      "object": "public.message_threads",
+      "origin": "unknown"
+    },
+    {
+      "approval_sha256": null,
+      "attribute": "columns",
+      "canonical_definition": "timestamp with time zone",
+      "classification": {
+        "attgenerated": "",
+        "attidentity": "",
+        "class": "column",
+        "column_acl": null,
+        "default": null,
+        "nullable": true,
+        "owner": "postgres"
+      },
+      "definition_sha256": "5cb029883f2ae8e59a01394d598846c04843859ce6e5a7ece5d281d9912bd968",
+      "name": "ai_responder_debounce_until",
+      "object": "public.message_threads",
+      "origin": "unknown"
+    },
+    {
+      "approval_sha256": "e419f623f1922466db14dba7aa091cdd4720924e2b97901088af2dc5719b108a",
+      "attribute": "indexes",
+      "canonical_definition": "CREATE INDEX idx_message_threads_ai_responder_status ON public.message_threads USING btree (ai_responder_status) WHERE (ai_responder_status IS NOT NULL)",
+      "classification": {
+        "class": "index",
+        "constraint": false,
+        "expression": false,
+        "live": true,
+        "owner": "postgres",
+        "predicate": "(ai_responder_status IS NOT NULL)",
+        "primary": false,
+        "ready": true,
+        "unique": false,
+        "valid": true
+      },
+      "definition_sha256": "e419f623f1922466db14dba7aa091cdd4720924e2b97901088af2dc5719b108a",
+      "name": "idx_message_threads_ai_responder_status",
+      "object": "public.message_threads",
+      "origin": "unknown"
+    },
+    {
+      "approval_sha256": null,
+      "attribute": "columns",
+      "canonical_definition": "uuid",
+      "classification": {
+        "attgenerated": "",
+        "attidentity": "",
+        "class": "column",
+        "column_acl": null,
+        "default": null,
+        "nullable": true,
+        "owner": "postgres"
+      },
+      "definition_sha256": "75666699b77db631f576041e8102a55b46758c01b807eacae0f170930ab59b3d",
+      "name": "processing_lease_token",
+      "object": "public.webhook_events",
+      "origin": "unknown"
+    },
+    {
+      "approval_sha256": null,
+      "attribute": "columns",
+      "canonical_definition": "jsonb",
+      "classification": {
+        "attgenerated": "",
+        "attidentity": "",
+        "class": "column",
+        "column_acl": null,
+        "default": null,
+        "nullable": true,
+        "owner": "postgres"
+      },
+      "definition_sha256": "a1bebb5410c4e1a6d03a368eb8eea551fc9183db4d1f52802d420e3dc0c37515",
+      "name": "request_payload",
+      "object": "public.webhook_events",
+      "origin": "unknown"
+    },
+    {
+      "approval_sha256": null,
+      "attribute": "columns",
+      "canonical_definition": "jsonb",
+      "classification": {
+        "attgenerated": "",
+        "attidentity": "",
+        "class": "column",
+        "column_acl": null,
+        "default": null,
+        "nullable": true,
+        "owner": "postgres"
+      },
+      "definition_sha256": "a1bebb5410c4e1a6d03a368eb8eea551fc9183db4d1f52802d420e3dc0c37515",
+      "name": "response_payload",
+      "object": "public.webhook_events",
+      "origin": "unknown"
+    }
+  ]
+}

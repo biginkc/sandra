@@ -29,10 +29,12 @@ for (const phase of ['pre', 'post']) test(`db-contract ${phase} record is accept
       github_run_id: id, github_run_attempt: attempt, event: 'workflow_dispatch',
       head_branch: 'main', workflow_path: '.github/workflows/inbox-heavy-verification.yml',
       workflow_input_sha: sha, runner_script_sha256: sha256(execFileSync('git', ['show', `${sha}:scripts/inbox-ci/${lane}.sh`])),
-      completed_at: new Date().toISOString(), artifacts: { 'contracts.json': sha256(contracts) },
+      started_at: '2026-09-29T00:00:00Z', completed_at: new Date().toISOString(),
+      clean_tree: { start: true, end_excluding_run_dir: true, excluded_path: path.posix.join(root, sha, 'pre-merge', id) },
+      artifacts: { 'contracts.json': sha256(contracts) },
     };
     writeFileSync(path.join(dir, 'manifest.json'), `${JSON.stringify(manifest)}\n`);
-    const run = { id: Number(id), run_attempt: 1, status: 'completed', event: 'workflow_dispatch',
+    const run = { id: Number(id), run_attempt: 1, status: 'completed', conclusion: 'success', event: 'workflow_dispatch',
       head_branch: 'main', path: manifest.workflow_path, head_sha: sha,
       display_title: `Inbox heavy ${lane} ${sha}` };
     const artifact = { name: artifactName, expired: false, size_in_bytes: 1 };

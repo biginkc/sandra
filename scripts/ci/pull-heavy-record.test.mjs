@@ -49,6 +49,22 @@ function fixture({ historical = false } = {}) {
   return { repo, root, dir, sha, manifest, run, artifact, save() { writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest)); }, check() { return verifyDownload(repo, root, run, artifact, sha); } };
 }
 test('valid downloaded evidence verifies', () => assert.equal(fixture().check().manifest.verdict, 'PASS'));
+test('gate refuses a downloaded manifest without clean-tree attestation', () => {
+  const f = fixture();
+  delete f.manifest.clean_tree;
+  f.save();
+  assert.throws(() => f.check(), /Command failed/);
+});
+test('failed workflow cannot supply a PASS or zero-exit manifest', () => {
+  for (const [verdict, exitStatus] of [['PASS', 0], ['PASS', 7], ['FAIL', 0]]) {
+    const f = fixture();
+    f.run.conclusion = 'failure';
+    f.manifest.verdict = verdict;
+    f.manifest.exit_status = exitStatus;
+    f.save();
+    assert.throws(() => f.check(), /workflow conclusion/i);
+  }
+});
 test('workflow upload round trip selects only the new run and preserves its dotfile', () => {
   const f = fixture({ historical: true });
   const hidden = 'playwright/.last-run.json';

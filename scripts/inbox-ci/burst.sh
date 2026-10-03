@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/failure-exit.sh"
+perf_cleaned=0
+perf_cleanup() { if [[ "$perf_cleaned" == 0 ]] && declare -F perf_exit >/dev/null; then perf_exit; fi; }
+trap 'heavy_lane_exit "$?" perf_cleanup' EXIT
 source "$(dirname "$0")/perf-common.sh"
 perf_preflight
 export PERF_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 export PERF_RUN_ROOT="$(mktemp -d "$RUNNER_TEMP/perf-burst.XXXXXX")"
 verdict=PASS
-trap perf_exit EXIT
 attempt_count=3
 if [[ "${PERF_LOCAL_EXECUTION:-}" == 1 && "${PERF_LOCAL_ATTEMPTS:-}" == 1 ]]; then attempt_count=1; fi
 for attempt in $(seq 1 "$attempt_count"); do
@@ -38,9 +41,12 @@ for attempt in $(seq 1 "$attempt_count"); do
   fi
   perf_stop
 done
+perf_exit
+perf_cleaned=1
 if [[ "${PERF_LOCAL_EXECUTION:-}" == 1 ]]; then
   echo "Local diagnostic: $PERF_RUN_ROOT ($verdict, $attempt_count attempt). No approval record."
 else
-  python3 "$PERF_SOURCE/record.py" "$PERF_RUN_ROOT" burst "$verdict"
+  sealed_dir="$(python3 "$PERF_SOURCE/record.py" "$PERF_RUN_ROOT" burst "$verdict")"
+  printf 'HEAVY_RUN_DIR=%s\n' "$sealed_dir" >> "$GITHUB_ENV"
 fi
 [[ "$verdict" == PASS ]]
