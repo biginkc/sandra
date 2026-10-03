@@ -236,6 +236,8 @@ BEGIN
  RETURN result;
 END $$;
 
+REVOKE ALL ON FUNCTION inbox_operation_domain.apply_promotion_step(uuid,uuid,uuid,bigint) FROM PUBLIC,anon,authenticated;
+
 -- Unknown sender actions consume only the frozen message IDs in the
 -- preparation resolution. The worker never looks up a raw sender group to
 -- discover additional rows. A newer group revision is tolerated because it
@@ -286,3 +288,4 @@ BEGIN
  PERFORM inbox_operations.finish_step(o,op,s,g,result);
  RETURN result;
 END $$;
+REVOKE ALL ON FUNCTION inbox_operation_domain.apply_unknown_step(uuid,uuid,uuid,bigint) FROM PUBLIC,anon,authenticated;

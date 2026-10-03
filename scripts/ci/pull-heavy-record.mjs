@@ -12,7 +12,7 @@ const WORKFLOW = '.github/workflows/inbox-heavy-verification.yml';
 const LANES = Object.freeze({
   'outbox-pre': ['browser', 'pre'], 'outbox-post': ['browser', 'post'],
   'db-contract-pre': ['db-contract', 'pre'], 'db-contract-post': ['db-contract', 'post'],
-  'migration-dry-run': ['migration-dry-run', 'n/a'], 'catalog-fingerprint': ['catalog-fingerprint', 'n/a'],
+  'migration-dry-run': ['migration-dry-run', 'n/a'], 'catalog-fingerprint': ['catalog-fingerprint', 'n/a'], 'drift-replay': ['drift-replay', 'n/a'],
   burst: ['burst', 'n/a'], 'perf-120k': ['perf-120k', 'n/a'],
 });
 const MAX_RUN = 40 * 1024 * 1024;
@@ -59,6 +59,7 @@ export function verifyDownload(repo, root, run, artifact, expectedSha) {
   inspectJson(manifest);
   if ('external_artifacts' in manifest) throw new Error('External artifacts forbidden');
   if (manifest.tested_sha !== expectedSha || manifest.tier !== 'pre-merge' || manifest.run_id !== id || !Number.isInteger(manifest.exit_status) || !['PASS', 'FAIL', 'INCONCLUSIVE'].includes(manifest.verdict)) throw new Error('Manifest identity or verdict mismatch');
+  if (run.conclusion !== 'success' && (manifest.verdict === 'PASS' || manifest.exit_status === 0)) throw new Error('Manifest contradicts workflow conclusion');
   if (run.display_title !== `Inbox heavy ${manifest.lane} ${expectedSha}` || artifact.name !== `heavy-${manifest.lane}-${expectedSha}-${id}-${attempt}` || manifest.artifact_name !== artifact.name) throw new Error('Dispatch title/artifact identity mismatch');
   if (manifest.github_run_id !== id || String(manifest.github_run_attempt) !== attempt || manifest.event !== run.event || manifest.head_branch !== run.head_branch || manifest.workflow_path !== WORKFLOW || manifest.workflow_input_sha !== expectedSha) throw new Error('Manifest provenance or attempt mismatch');
   if (LANES[manifest.lane]?.[0] !== manifest.kind || LANES[manifest.lane]?.[1] !== manifest.phase || manifest.target !== 'disposable' || manifest.runner_script_sha256 !== SHA256(execFileSync('git', ['show', `${expectedSha}:scripts/inbox-ci/${manifest.lane}.sh`], { cwd: repo })) || (manifest.kind === 'browser' && manifest.fault_proxy_script_sha256 !== SHA256(execFileSync('git', ['show', `${expectedSha}:e2e/inbox-acceptance/fault-proxy.mjs`], { cwd: repo })))) throw new Error('Runner/proxy script hash mismatch');
@@ -76,6 +77,9 @@ export function verifyDownload(repo, root, run, artifact, expectedSha) {
     } else if (relative.endsWith('.json')) inspectJson(JSON.parse(bytes));
   }
   if (new Date(manifest.completed_at).toString() === 'Invalid Date') throw new Error('Invalid completion time');
+  const validator = path.resolve(fileURLToPath(new URL('../../experiments/inbox-release/sealed_evidence.py', import.meta.url)));
+  const python = `import sys; from pathlib import Path; sys.path.insert(0, str(Path(sys.argv[1]).parent)); from sealed_evidence import validate_downloaded_manifest; validate_downloaded_manifest(Path(sys.argv[2]), sys.argv[3], set(sys.argv[5:]), sys.argv[4])`;
+  execFileSync('python3', ['-c', python, validator, root, prefix.slice(0, -1), expectedSha, ...paths], { stdio: 'pipe' });
   return { prefix: prefix.slice(0, -1), manifest, bytes: total };
 }
 export function seal(repo, source, verified, branch) {

@@ -1,0 +1,89 @@
+{
+  "fixture_version": 1,
+  "items": [
+    {
+      "approval_sha256": null,
+      "attribute": "indexes",
+      "canonical_definition": "CREATE INDEX idx_users_created_at_desc ON auth.users USING btree (created_at DESC)",
+      "classification": {
+        "class": "index",
+        "constraint": false,
+        "expression": false,
+        "live": true,
+        "owner": "supabase_auth_admin",
+        "predicate": null,
+        "primary": false,
+        "ready": true,
+        "unique": false,
+        "valid": true
+      },
+      "definition_sha256": "a63cbab70b72afa7949ed9e8ebc9bb8629844da3d6d8cd08db06d962da548708",
+      "name": "idx_users_created_at_desc",
+      "object": "auth.users",
+      "origin": "platform"
+    },
+    {
+      "approval_sha256": null,
+      "attribute": "indexes",
+      "canonical_definition": "CREATE INDEX idx_users_email ON auth.users USING btree (email)",
+      "classification": {
+        "class": "index",
+        "constraint": false,
+        "expression": false,
+        "live": true,
+        "owner": "supabase_auth_admin",
+        "predicate": null,
+        "primary": false,
+        "ready": true,
+        "unique": false,
+        "valid": true
+      },
+      "definition_sha256": "d0cc1e405d55b2f5438971efba427645322612771f741ae91e6b4af0240dcca3",
+      "name": "idx_users_email",
+      "object": "auth.users",
+      "origin": "platform"
+    },
+    {
+      "approval_sha256": null,
+      "attribute": "indexes",
+      "canonical_definition": "CREATE INDEX idx_users_last_sign_in_at_desc ON auth.users USING btree (last_sign_in_at DESC)",
+      "classification": {
+        "class": "index",
+        "constraint": false,
+        "expression": false,
+        "live": true,
+        "owner": "supabase_auth_admin",
+        "predicate": null,
+        "primary": false,
+        "ready": true,
+        "unique": false,
+        "valid": true
+      },
+      "definition_sha256": "67c5dba835053e33609364eca25864b66b393d38f41972eb7dbc9d2dfb49609d",
+      "name": "idx_users_last_sign_in_at_desc",
+      "object": "auth.users",
+      "origin": "platform"
+    },
+    {
+      "approval_sha256": "4dbc01feffae5acf04236e5aa3611151cc43e1467f84588e05b025dd9fbc7402",
+      "attribute": "indexes",
+      "canonical_definition": "CREATE INDEX idx_users_name ON auth.users USING btree (((raw_user_meta_data ->> 'name'::text))) WHERE ((raw_user_meta_data ->> 'name'::text) IS NOT NULL)",
+      "classification": {
+        "class": "index",
+        "constraint": false,
+        "expression": true,
+        "live": true,
+        "owner": "supabase_auth_admin",
+        "predicate": "((raw_user_meta_data ->> 'name'::text) IS NOT NULL)",
+        "primary": false,
+        "ready": true,
+        "unique": false,
+        "valid": true
+      },
+      "definition_sha256": "4dbc01feffae5acf04236e5aa3611151cc43e1467f84588e05b025dd9fbc7402",
+      "name": "idx_users_name",
+      "object": "auth.users",
+      "origin": "platform"
+    }
+  ]
+}

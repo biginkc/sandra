@@ -10,13 +10,13 @@ import { verifyDownload } from '../ci/pull-heavy-record.mjs';
 const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const git = (repo, ...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
 const copy = (repo, file) => { mkdirSync(path.dirname(path.join(repo, file)), { recursive: true }); cpSync(path.join(source, file), path.join(repo, file)); };
-const versions = ['20260929000000', '20260929000100', '20260929000200'];
+const versions = JSON.parse(readFileSync(path.join(source, 'scripts/inbox-ci/inbox-migrations.json'), 'utf8')).map(entry => entry.version);
 
 test('each W2 lane produces a pullable record and the W1 gate selects both keys', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'w2-record-'));
   const repo = path.join(root, 'repo'); mkdirSync(repo);
   try {
-    for (const file of ['scripts/outbox-run-record.mjs', 'src/lib/supabase/e2e-identity-guard.ts', 'scripts/inbox-ci/write-migration-record.mjs', 'scripts/inbox-ci/migration-dry-run.sh', 'scripts/inbox-ci/catalog-fingerprint.sh', 'scripts/ci/pull-heavy-record.mjs', '.github/workflows/inbox-heavy-verification.yml']) copy(repo, file);
+    for (const file of ['scripts/outbox-run-record.mjs', 'src/lib/supabase/e2e-identity-guard.ts', 'scripts/inbox-ci/write-migration-record.mjs', 'scripts/inbox-ci/inbox-migrations.mjs', 'scripts/inbox-ci/inbox-migrations.json', 'scripts/inbox-ci/migration-dry-run.sh', 'scripts/inbox-ci/catalog-fingerprint.sh', 'scripts/ci/pull-heavy-record.mjs', '.github/workflows/inbox-heavy-verification.yml']) copy(repo, file);
     mkdirSync(path.join(repo, 'e2e/inbox-acceptance'), { recursive: true });
     writeFileSync(path.join(repo, 'e2e/inbox-acceptance/fault-proxy.mjs'), '// synthetic proxy\n');
     writeFileSync(path.join(repo, 'package.json'), '{"type":"module"}\n');
@@ -43,7 +43,18 @@ test('each W2 lane produces a pullable record and the W1 gate selects both keys'
     writeFileSync(path.join(work, 'mutation-cases.json'), completeCases);
     writeFileSync(path.join(repo, 'unrelated.txt'), 'unexpected edit\n');
     assert.throws(() => invoke({}), error => error.stderr?.toString().includes('Non-record working-tree changes at end'));
+    writeFileSync(path.join(work, 'failure.log'), 'line=22\ncommand=false\nexit_status=17\n');
+    assert.throws(() => execFileSync('node', [writer, work, '--fail', '17'], { cwd: repo, env: { ...baseEnv, GITHUB_RUN_ID: '903' }, stdio: 'pipe' }), error => error.stderr?.toString().includes('Non-record working-tree changes at end'));
     rmSync(path.join(repo, 'unrelated.txt'));
+    rmSync(path.join(repo, `docs/performance/inbox-redesign/evidence/${sha}/pre-merge/901`), { recursive: true, force: true });
+    assert.throws(() => execFileSync('node', [writer, work, '--fail', '0'], { cwd: repo, env: { ...baseEnv, GITHUB_RUN_ID: '903' }, stdio: 'pipe' }), error => error.stderr?.toString().includes('Invalid lane failure status'));
+    execFileSync('node', [writer, work, '--fail', '17'], { cwd: repo, env: { ...baseEnv, GITHUB_RUN_ID: '903', HEAVY_LANE: 'catalog-fingerprint' } });
+    const failPath = `docs/performance/inbox-redesign/evidence/${sha}/pre-merge/903/manifest.json`;
+    const failManifest = JSON.parse(readFileSync(path.join(repo, failPath)));
+    assert.equal(failManifest.verdict, 'FAIL');
+    assert.equal(failManifest.exit_status, 17);
+    assert.ok(failManifest.artifacts['failure.log']);
+    rmSync(path.dirname(path.join(repo, failPath)), { recursive: true, force: true });
     for (const [lane, id] of [['migration-dry-run', '901'], ['catalog-fingerprint', '902']]) {
       invoke({ HEAVY_LANE: lane, GITHUB_RUN_ID: id });
       const prefix = `docs/performance/inbox-redesign/evidence/${sha}/pre-merge/${id}`;

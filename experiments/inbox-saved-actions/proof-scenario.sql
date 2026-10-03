@@ -213,6 +213,13 @@ BEGIN
  IF a->'definition'->'steps'->0->>'text'<>repeat('😀',800) THEN RAISE EXCEPTION 'UTF-16-BOUNDARY REVIEW REPLY WAS NOT SAVED'; END IF;
  RAISE NOTICE 'PASS 800 emoji review_reply accepted at 1600 UTF-16 units';
 
+ -- A two-byte UTF-8 character still occupies one UTF-16 unit.
+ EXECUTE 'SET LOCAL ROLE authenticated';
+ a:=public.inbox_saved_action_create('Boundary accented reply',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','review_reply','text',repeat('é',1600)))));
+ EXECUTE 'RESET ROLE';
+ IF a->'definition'->'steps'->0->>'text'<>repeat('é',1600) THEN RAISE EXCEPTION 'ACCENTED REVIEW REPLY WAS NOT SAVED'; END IF;
+ RAISE NOTICE 'PASS 1600 accented review_reply accepted';
+
  failed:=false;
  BEGIN
   EXECUTE 'SET LOCAL ROLE authenticated';
