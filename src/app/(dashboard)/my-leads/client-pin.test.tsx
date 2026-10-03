@@ -749,11 +749,9 @@ describe("MyLeadsClient pinned deep-link row", () => {
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
     })
 
-    it("IDEMPOTENCY_CONFLICT shows the already-saved copy and Refresh replays the identical request and closes the dialog", async () => {
+    it("IDEMPOTENCY_CONFLICT shows the already-saved copy and Refresh re-reads the lead and closes the dialog without a second send", async () => {
       const user = userEvent.setup()
-      mocks.submitMyLeadCommand
-        .mockResolvedValueOnce({ ok: false, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." })
-        .mockResolvedValueOnce({ ok: true, duplicate: true })
+      mocks.submitMyLeadCommand.mockResolvedValue({ ok: false, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." })
       render(ui(null, snap([loaded], 25)))
       await openContract(user)
       await user.click(screen.getByRole("button", { name: "Record contract" }))
@@ -763,8 +761,7 @@ describe("MyLeadsClient pinned deep-link row", () => {
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
       // The host's committed path ran: its queue refresh barrier published a fresh read.
       await waitFor(() => expect(mocks.loadMyLeads).toHaveBeenCalled())
-      expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2)
-      expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toEqual(mocks.submitMyLeadCommand.mock.calls[0][1])
+      expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1)
     })
 
     it("commit then timeout: an unknown replay failure keeps reconciliation and the next replay succeeds once", async () => {

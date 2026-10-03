@@ -237,9 +237,8 @@ describe("useAttemptWorkflow", () => {
 
     const conflict = { ok: false, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." }
 
-    const dup = (extra: object = {}) => ({ ok: true, duplicate: true, attemptRecorded: true, ...extra })
-    it("IDEMPOTENCY_CONFLICT blocks; Refresh replays the identical frozen request and takes the committed path with the real result", async () => {
-      actions.submitMyLeadCommand.mockResolvedValueOnce(conflict).mockResolvedValueOnce(dup({ followUp: { status: "delivered", message: null } }))
+    it("IDEMPOTENCY_CONFLICT blocks; Refresh re-reads the lead, refreshes the host, closes with no result claimed and clears the record", async () => {
+      actions.submitMyLeadCommand.mockResolvedValue(conflict)
       const { hook, handlers } = setup(opening("log-attempt"))
       await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "edited" }) })
       expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, message: "This was already saved. Refresh to see it." })
@@ -247,44 +246,24 @@ describe("useAttemptWorkflow", () => {
       await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "again" }) })
       expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(1)
       await act(async () => { hook.result.current.recoveryValue?.refresh() })
-      // Same key, same command, same payload.
-      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(2)
-      expect(actions.submitMyLeadCommand.mock.calls[1]).toEqual(actions.submitMyLeadCommand.mock.calls[0])
-      expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
-      expect(handlers.onCommitted.mock.calls[0][0]).toMatchObject({ result: { duplicate: true, followUp: { status: "delivered" } } })
-      await vi.waitFor(() => expect(handlers.onSettled).toHaveBeenCalledTimes(1))
-      expect(handlers.onClose).not.toHaveBeenCalled()
-      expect(hook.result.current.recoveryValue).toMatchObject({ blocked: false, message: "Saved earlier. Your update is recorded. Follow-up text status: delivered." })
-      let moved: unknown
-      await act(async () => { moved = await hook.result.current.submit({ outcome: "reached" }) })
-      expect(moved).toMatchObject({ ok: true, attemptRecorded: true, followUp: { status: "delivered" } })
-      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(2)
+      // Never replayed: the server only raises a conflict for a request it has already stored.
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(1)
+      expect(handlers.onReconciled).toHaveBeenCalledTimes(1)
+      expect(handlers.onClose).toHaveBeenCalledTimes(1)
+      expect(handlers.onCommitted).not.toHaveBeenCalled()
+      expect(handlers.onSettled).not.toHaveBeenCalled()
+      expect(hook.result.current.recoveryValue).toBeNull()
     })
 
-    it("IDEMPOTENCY_CONFLICT on an action that ends after one save: Refresh replays, takes the committed path and closes", async () => {
-      actions.submitMyLeadCommand.mockResolvedValueOnce(conflict).mockResolvedValueOnce({ ok: true, duplicate: true })
+    it("IDEMPOTENCY_CONFLICT on an action that ends after one save closes the same way", async () => {
+      actions.submitMyLeadCommand.mockResolvedValue(conflict)
       const { hook, handlers } = setup(opening("log-offer"))
       await act(async () => { await hook.result.current.submit({ amountCents: 1 }) })
       await act(async () => { hook.result.current.recoveryValue?.refresh() })
-      expect(actions.submitMyLeadCommand.mock.calls[1]).toEqual(actions.submitMyLeadCommand.mock.calls[0])
-      expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
+      expect(handlers.onReconciled).toHaveBeenCalledTimes(1)
       expect(handlers.onClose).toHaveBeenCalledTimes(1)
-      expect(handlers.onSettled).toHaveBeenCalledTimes(1)
-    })
-
-    it("a replay that fails uncertainly stays in reconcile; the next Refresh replays again", async () => {
-      actions.submitMyLeadCommand
-        .mockResolvedValueOnce(conflict)
-        .mockRejectedValueOnce(new Error("network"))
-        .mockResolvedValueOnce(dup())
-      const { hook, handlers } = setup(opening("log-attempt"))
-      await act(async () => { await hook.result.current.submit({ outcome: "reached" }) })
-      await act(async () => { hook.result.current.recoveryValue?.refresh() })
-      expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, busy: false })
       expect(handlers.onCommitted).not.toHaveBeenCalled()
-      await act(async () => { hook.result.current.recoveryValue?.refresh() })
-      expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
-      expect(actions.submitMyLeadCommand.mock.calls[2]).toEqual(actions.submitMyLeadCommand.mock.calls[0])
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(1)
     })
 
     it("receipt exists, then FORBIDDEN: reconciliation is kept (same key), and once access is back the replay is a duplicate success", async () => {
@@ -452,7 +431,7 @@ describe("useAttemptWorkflow", () => {
       actions.submitMyLeadCommand
         .mockRejectedValueOnce(new Error("network"))
         .mockResolvedValueOnce({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "stale" })
-      const { hook } = setup(opening("log-attempt", row({ queueVersion: 1 })))
+      const { hook } = setup(opening("log-attempt", row({ queueVersion: 1 })), vi.fn(async (): Promise<QueueRow | null> => row({ queueVersion: 1 })))
       await act(async () => { await hook.result.current.submit({ outcome: "reached", source: "dialpad" }).catch(() => undefined) })
       await act(async () => { await hook.result.current.submit({ outcome: "reached", source: "dialpad" }) }) // replay: STALE, definite
       await act(async () => { hook.result.current.recoveryValue?.refresh() })
@@ -462,6 +441,22 @@ describe("useAttemptWorkflow", () => {
       expect(blocked).toMatchObject({ ok: false, certainty: "rejected" })
       expect((blocked as { message: string }).message).toMatch(/different kind of update/)
       expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(2)
+    })
+
+    it("route switch after a release is allowed once the queue version moved: the old request can never commit", async () => {
+      actions.submitMyLeadCommand
+        .mockRejectedValueOnce(new Error("network"))
+        .mockResolvedValueOnce({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "stale" })
+        .mockResolvedValueOnce({ ok: true })
+      const { hook } = setup(opening("log-attempt", row({ queueVersion: 1 })))
+      await act(async () => { await hook.result.current.submit({ outcome: "reached", source: "dialpad" }).catch(() => undefined) })
+      await act(async () => { await hook.result.current.submit({ outcome: "reached", source: "dialpad" }) })
+      await act(async () => { hook.result.current.recoveryValue?.refresh() }) // the row is now at version 3
+      act(() => hook.result.current.recoveryValue?.startOver?.())
+      await act(async () => { await hook.result.current.submit({ outcome: "reached", source: "sandra", callActivityId: "call-1" }) })
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(3)
+      expect(sentInput(2).idempotencyKey).not.toBe(sentInput(0).idempotencyKey)
+      expect(sentInput(2).expectedQueueVersion).toBe(3)
     })
 
     it("a handoff that commits and then fails to start the drip is committed with a follow-up error and never resubmitted", async () => {

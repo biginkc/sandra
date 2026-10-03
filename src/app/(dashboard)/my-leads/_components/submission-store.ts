@@ -29,6 +29,8 @@ export type SubmissionRecord = SubmissionIdentity & {
   route: string
   status: SubmissionStatus
   createdAt: number
+  /** The queue version the request carried (a number, not sensitive). Lets a reload tell that the request can no longer commit. */
+  expectedQueueVersion?: number | null
 }
 
 export type StoredSubmission = SubmissionRecord & {
@@ -68,6 +70,7 @@ function persistable(record: SubmissionRecord): SubmissionRecord {
     route: record.route,
     status: record.status,
     createdAt: record.createdAt,
+    expectedQueueVersion: typeof record.expectedQueueVersion === "number" ? record.expectedQueueVersion : null,
   }
 }
 

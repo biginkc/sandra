@@ -39,7 +39,7 @@ describe("submission store", () => {
       ...({ note: "leak", phone: "816-555-0199" } as object),
     }))
     const serialized = raw()!
-    expect(Object.keys(JSON.parse(serialized)[0]).sort()).toEqual(["assignmentEpisodeId", "createdAt", "key", "memberId", "operation", "orgId", "propertyId", "route", "status", "viewerUserId"])
+    expect(Object.keys(JSON.parse(serialized)[0]).sort()).toEqual(["assignmentEpisodeId", "createdAt", "expectedQueueVersion", "key", "memberId", "operation", "orgId", "propertyId", "route", "status", "viewerUserId"])
     for (const secret of ["816-555-0100", "816-555-0199", "Jamie", "Rivera", "secret text", "dialpad.example", "leak", "payload"]) expect(serialized).not.toContain(secret)
   })
 

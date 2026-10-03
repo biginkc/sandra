@@ -110,26 +110,19 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
     expect(mocks.refresh).toHaveBeenCalled()
   })
 
-  it("IDEMPOTENCY_CONFLICT shows the already-saved copy; Refresh runs the committed refresh and the dialog moves on to the follow-up step, never looping", async () => {
+  it("IDEMPOTENCY_CONFLICT shows the already-saved copy; Refresh re-reads the lead and closes the dialog with no drip step and no second send", async () => {
     const user = userEvent.setup()
-    mocks.submitMyLeadCommand
-      .mockResolvedValueOnce({ ok: false, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." })
-      .mockResolvedValueOnce({ ok: true, duplicate: true, attemptRecorded: true })
+    mocks.submitMyLeadCommand.mockResolvedValue({ ok: false, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." })
     render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} viewer={{ userId: "rep-9", orgId: "org-1" }} />)
     await user.click(screen.getByRole("button", { name: "Log follow-up" }))
     await fillAndSave(user)
     expect(await screen.findByText("This was already saved. Refresh to see it.")).toBeInTheDocument()
     mocks.refresh.mockClear()
     await user.click(await screen.findByRole("button", { name: "Refresh" }))
-    await screen.findByText("Saved earlier. Your update is recorded.")
-    await waitFor(() => expect(mocks.refresh).toHaveBeenCalled())
-    expect(screen.getByRole("dialog")).toBeInTheDocument()
-    // The next Save sends nothing and continues to the optional drip step.
-    await user.click(screen.getByRole("button", { name: "Save attempt" }))
-    expect(await screen.findByRole("button", { name: "Done without a drip" })).toBeInTheDocument()
-    // One original send plus one identical replay; the follow-up step sends nothing more.
-    expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2)
-    expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toEqual(mocks.submitMyLeadCommand.mock.calls[0][1])
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    expect(mocks.refresh).toHaveBeenCalled()
+    expect(screen.queryByRole("button", { name: "Done without a drip" })).toBeNull()
+    expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1)
   })
 
   it("commit then timeout: an unknown replay failure keeps reconciliation and the next replay succeeds once", async () => {
