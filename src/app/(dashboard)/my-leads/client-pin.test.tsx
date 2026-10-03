@@ -446,6 +446,30 @@ describe("MyLeadsClient pinned deep-link row", () => {
       expect(screen.queryByText("Saving…")).toBeNull()
     })
 
+    it("timeout, then a stale replay, then Refresh: the next save sends the refreshed version and succeeds", async () => {
+      const user = userEvent.setup({ delay: null })
+      mocks.submitMyLeadCommand
+        .mockImplementationOnce(() => new Promise(() => undefined))
+        .mockResolvedValueOnce({ ok: false, code: "STALE_STATE", message: "This lead changed. Refresh before trying again." })
+        .mockResolvedValueOnce({ ok: true })
+      render(ui(null, snap([loaded], 25)))
+      await openContract(user)
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+      try {
+        fireEvent.click(screen.getByRole("button", { name: "Record contract" }))
+        await act(async () => { await vi.advanceTimersByTimeAsync(25_001) })
+      } finally { vi.useRealTimers() }
+      await user.click(await screen.findByRole("button", { name: "Reconcile saved change" })) // replay of the frozen request
+      mocks.loadMyLeadRow.mockResolvedValue(found({ ...loaded, queueVersion: 2, sharedStatus: "interested" }))
+      await user.click(await screen.findByRole("button", { name: "Refresh" }))
+      await screen.findByText(/Lead refreshed/)
+      await user.click(screen.getByRole("button", { name: "Record contract" }))
+      await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(3))
+      expect(mocks.submitMyLeadCommand.mock.calls.map((call) => (call[1] as { expectedQueueVersion: number }).expectedQueueVersion)).toEqual([1, 1, 2])
+      expect(mocks.submitMyLeadCommand.mock.calls[2][1]).toMatchObject({ expectedSharedStatus: "interested" })
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    })
+
     it("a server action that never answers ends in the reconcile state after the save timeout", async () => {
       const user = userEvent.setup({ delay: null })
       mocks.submitMyLeadCommand.mockImplementation(() => new Promise(() => undefined))

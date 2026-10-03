@@ -173,10 +173,19 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       throw error
     }
     if (!result.ok && result.message === NOT_CONFIRMED) markUncertain()
-    if (!result.ok) {
+    else if (!result.ok) {
+      // Any other failure is the server's definite answer that nothing committed
+      // (the RPC rolled back, so no receipt exists). An unresolved replay is over:
+      // drop the frozen payload so refreshed preconditions build a NEW payload on the
+      // next save. The idempotency key is KEPT on purpose: a definite rejection leaves
+      // no receipt, so reusing it with a different request cannot conflict, while a
+      // still-in-flight original that commits later makes the new request fail with an
+      // idempotency conflict instead of recording a second attempt.
+      if (state.uncertain) { state.uncertain = false; state.payload = null }
       const failure = result as { message: string; code?: string }
       if ((failure.code === "FORBIDDEN" || failure.code === "STALE_STATE") && activeOpening.current === opening)
         setRecovery({ opening, message: failure.message, blocked: true, busy: false })
+      else setRecovery((current) => (current?.opening === opening && current.reconciliation ? null : current))
     }
     if (result.ok) {
       const dripFailure = "dripFailure" in result && result.dripFailure ? `Outcome saved. Drip not started: ${result.dripFailure}` : null

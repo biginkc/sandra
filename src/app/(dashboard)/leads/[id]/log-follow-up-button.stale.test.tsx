@@ -82,5 +82,31 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
     expect(await screen.findByText(/original request is preserved for reconciliation/)).toBeInTheDocument()
     expect(screen.queryByText("Saving…")).toBeNull()
   })
+
+  it("timeout, then a stale replay, then Refresh: the next save sends the refreshed version and succeeds", async () => {
+    const user = userEvent.setup({ delay: null })
+    mocks.submitMyLeadCommand
+      .mockImplementationOnce(() => new Promise(() => undefined))
+      .mockResolvedValueOnce({ ok: false, code: "STALE_STATE", message: "This lead changed. Refresh before trying again." })
+      .mockResolvedValueOnce({ ok: true, attemptRecorded: true })
+    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} />)
+    await user.click(screen.getByRole("button", { name: "Log follow-up" }))
+    await user.selectOptions(await screen.findByLabelText("External outcome"), "reached")
+    fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-11T09:00" } })
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Save attempt" }))
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_001) })
+    } finally { vi.useRealTimers() }
+    await user.click(await screen.findByRole("button", { name: "Reconcile saved change" })) // replay of the frozen request
+    mocks.loadMyLeadRow.mockResolvedValue(found(2))
+    await user.click(await screen.findByRole("button", { name: "Refresh" }))
+    await screen.findByText(/Lead refreshed/)
+    await user.click(screen.getByRole("button", { name: "Save attempt" }))
+    await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(3))
+    const versions = mocks.submitMyLeadCommand.mock.calls.map((call) => (call[1] as { expectedQueueVersion: number }).expectedQueueVersion)
+    expect(versions).toEqual([1, 1, 2])
+    expect(mocks.refresh).toHaveBeenCalled()
+  })
 })
 

@@ -159,5 +159,41 @@ describe("useAttemptWorkflow", () => {
     expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(1)
     expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, busy: false })
   })
+
+  describe.each([
+    ["a timed-out save", () => new Promise(() => undefined), true],
+    ["a network error", () => Promise.reject(new Error("network")), false],
+  ])("uncertain replay (%s) then a definite stale answer", (_name, firstAttempt, useTimers) => {
+    it("leaves replay mode: refresh builds a NEW payload with the refreshed version and the same key", async () => {
+      if (useTimers) vi.useFakeTimers()
+      try {
+        actions.submitMyLeadCommand
+          .mockImplementationOnce(firstAttempt as () => Promise<unknown>)
+          .mockResolvedValueOnce({ ok: false, code: "STALE_STATE", message: "This lead changed." })
+          .mockResolvedValueOnce({ ok: true, attemptRecorded: true })
+        const readRow = vi.fn(async (): Promise<QueueRow | null> => row({ queueVersion: 2 }))
+        const { hook, handlers } = setup(opening("log-attempt", row({ queueVersion: 1 })), readRow)
+        await act(async () => {
+          const pending = hook.result.current.submit({ outcome: "reached", note: "original" }).then(() => undefined, () => undefined)
+          if (useTimers) await vi.advanceTimersByTimeAsync(25_001)
+          await pending
+        })
+        expect(hook.result.current.recoveryValue?.reconciliation).toBeTruthy()
+        // Replay of the frozen request: the server says stale (so nothing ever committed).
+        await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "edited" }) })
+        expect(sentInput(1)).toEqual(sentInput(0))
+        expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, reconciliation: undefined })
+        await act(async () => { hook.result.current.recoveryValue?.refresh() })
+        expect(hook.result.current.recoveryValue?.blocked).toBe(false)
+        const result = await act(async () => hook.result.current.submit({ outcome: "reached", note: "edited" }))
+        void result
+        expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(3)
+        expect(sentInput(2).expectedQueueVersion).toBe(2)
+        expect(sentInput(2).note).toBe("edited")
+        expect(sentInput(2).idempotencyKey).toBe(sentInput(0).idempotencyKey)
+        expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
+      } finally { if (useTimers) vi.useRealTimers() }
+    })
+  })
 })
 
