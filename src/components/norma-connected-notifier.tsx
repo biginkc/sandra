@@ -52,27 +52,43 @@ export function NormaConnectedNotifier() {
     const supabase = createClient();
     let alive = true;
     let userId: string | null = null;
+    // Bumped on every sign-in / sign-out / user switch: a poll started for the
+    // previous user must show nothing, whatever it has already fetched.
+    let generation = 0;
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+      const next = session?.user?.id ?? null;
+      if (next !== userId) {
+        userId = next;
+        generation += 1;
+      }
+    });
 
     const check = async () => {
       try {
         if (!userId) {
           const { data } = await supabase.auth.getUser();
-          userId = data.user?.id ?? null;
+          if (!userId && data.user?.id) {
+            userId = data.user.id;
+            generation += 1;
+          }
         }
-        if (!userId) return;
+        const uid = userId;
+        const gen = generation;
+        if (!uid) return;
+        const stillCurrent = () => alive && gen === generation && uid === userId;
         const since = connectedToastSince(mountedAt);
         const { data, error } = await supabase
           .from("norma_call_requests")
           .select("id, property_id, status, outcome, completed_at, requested_by")
-          .eq("requested_by", userId)
+          .eq("requested_by", uid)
           .eq("status", "completed")
           .in("outcome", [...NORMA_CONNECTED_OUTCOMES])
           .gte("completed_at", since)
           .order("completed_at", { ascending: false })
           .limit(10);
-        if (!alive || error || !data) return;
+        if (!stillCurrent() || error || !data) return;
 
-        const fresh = selectConnectedToasts(data as ConnectedRequestRow[], userId, notified, since);
+        const fresh = selectConnectedToasts(data as ConnectedRequestRow[], uid, notified, since);
         if (fresh.length === 0) return;
         // Claim before showing so a later poll cannot repeat the toast.
         for (const row of fresh) notified.add(row.id);
@@ -88,6 +104,12 @@ export function NormaConnectedNotifier() {
           ? await supabase.from("contacts").select("id, first_name, last_name").in("id", contactIds)
           : { data: [] };
 
+        // The user may have changed while the lookups ran: show nothing to the wrong person.
+        if (!stillCurrent()) {
+          for (const row of fresh) notified.delete(row.id);
+          writeSeen(notified);
+          return;
+        }
         for (const row of fresh) {
           const property = (properties ?? []).find((p) => p.id === row.property_id);
           const contact = (contacts ?? []).find((c) => c.id === property?.homeowner_contact_id);
@@ -124,6 +146,7 @@ export function NormaConnectedNotifier() {
     startPolling();
     return () => {
       alive = false;
+      authListener.subscription.unsubscribe();
       stopPolling();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };

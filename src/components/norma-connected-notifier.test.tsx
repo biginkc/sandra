@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { NormaConnectedNotifier } from "./norma-connected-notifier";
 
-const { toastSuccess, push, tables, filters } = vi.hoisted(() => ({
+const { toastSuccess, push, tables, filters, state } = vi.hoisted(() => ({
+  state: { user: "user-me", emit: (_id: string) => undefined } as { user: string; emit: (id: string) => void; hold?: Promise<void> },
   toastSuccess: vi.fn(),
   push: vi.fn(),
   tables: {} as Record<string, unknown[]>,
@@ -14,13 +15,22 @@ vi.mock("sonner", () => ({ toast: { success: toastSuccess } }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push }) }));
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
-    auth: { getUser: async () => ({ data: { user: { id: "user-me" } } }) },
+    auth: {
+      getUser: async () => ({ data: { user: { id: state.user } } }),
+      onAuthStateChange: (cb: (e: string, s: { user: { id: string } } | null) => void) => {
+        state.emit = (id: string) => cb("SIGNED_IN", { user: { id } });
+        return { data: { subscription: { unsubscribe: () => undefined } } };
+      },
+    },
     from: (table: string) => {
       const chain: Record<string, unknown> = {};
       for (const method of ["select", "eq", "in", "gte", "order"]) {
         chain[method] = (...args: unknown[]) => (filters.push({ table, method, args }), chain);
       }
-      chain.limit = async () => ({ data: tables[table] ?? [], error: null });
+      chain.limit = async () => {
+        if (table === "norma_call_requests" && state.hold) await state.hold;
+        return { data: tables[table] ?? [], error: null };
+      };
       chain.then = (resolve: (v: unknown) => unknown) => resolve({ data: tables[table] ?? [], error: null });
       return chain;
     },
@@ -76,5 +86,32 @@ describe("<NormaConnectedNotifier />", () => {
     render(<NormaConnectedNotifier />);
     await new Promise((r) => setTimeout(r, 50));
     expect(toastSuccess).not.toHaveBeenCalled();
+  });
+
+  it("user A -> user B switching mid-poll: A's in-flight poll shows nothing, B sees only B's own", async () => {
+    state.user = "user-a";
+    tables.norma_call_requests = [
+      { id: "ra", property_id: "p1", status: "completed", outcome: "callback_requested", completed_at: recent(), requested_by: "user-a" },
+    ];
+    let release!: () => void;
+    state.hold = new Promise<void>((r) => (release = r));
+    render(<NormaConnectedNotifier />);
+    await waitFor(() => expect(filters.some((f) => f.table === "norma_call_requests")).toBe(true));
+    // The session switches to B while A's poll is still waiting on its query.
+    state.user = "user-b";
+    state.emit("user-b");
+    state.hold = undefined;
+    release();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(toastSuccess).not.toHaveBeenCalled();
+    // B's own connected call does toast; A's row is never shown to B.
+    tables.norma_call_requests = [
+      { id: "ra", property_id: "p1", status: "completed", outcome: "callback_requested", completed_at: recent(), requested_by: "user-a" },
+      { id: "rb", property_id: "p1", status: "completed", outcome: "reached_no_callback", completed_at: recent(), requested_by: "user-b" },
+    ];
+    document.dispatchEvent(new Event("visibilitychange")); // an immediate poll, as when the tab is shown again
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledTimes(1));
+    expect(toastSuccess.mock.calls[0]![1].id).toBe("norma-connected-rb");
+    state.user = "user-me";
   });
 });
