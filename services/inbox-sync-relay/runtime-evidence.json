@@ -1,31 +1,42 @@
 {
   "checks": [
     "built nonroot/read-only/capped relay reaches actual pinned Electric readiness",
+    "Electric itself created the derived publication and active pgoutput replication slot",
     "unauthenticated real shape request denied",
     "authenticated actual Electric shape returns exact owned canonical projection row",
     "configured8000ms idle poll completes below relay14s deadline"
   ],
-  "image_id": "sha256:ff5d15a5eb6f8acb28b92c1c207db04e52549598d7c6a4b118d50062eae75470",
+  "image_id": "sha256:3ee07e6cbbd8160127bb9fc6de412266983d813cb99025a6e7fe92271e177fa3",
+  "electric_image": "ghcr.io/biginkc/inbox-electric@sha256:6a9064f4cbd103875e02eb9085bf5da478a7bafc5439f18868a7ccb2e9fc7ae2",
+  "electric_upstream_commit": "0f404200402f918a4b1596bc5c8a53479a435349",
   "node_version": "v22.23.2",
   "source_sha256": "de518f86adbb5569ecbbcc2138bfc8ae3c06128fd69bb9d04a326d22f11aca05",
   "dockerfile_sha256": "1e33ec793747bee85f0e390017074658da88b027a273c944faeda6625b0e5bbe",
-  "runner_sha256": "3baddb7920f66c7445b1a1cc72481d320a455d65d2dd52d4bed1e31d094d5d11",
+  "runner_sha256": "fa68e13a0e09d359a726e789529e4175c58d018b6c4cf33bd8d7e8e209616ecb",
   "rows": [
     {
       "assigned_label": "Unassigned",
       "context": "Owned",
       "name": "Synthetic relay proof",
-      "org_id": "16c369c1-038f-47cc-98c3-0626c7eebbe9",
+      "org_id": "a72698ad-6a5e-40c1-b7fd-e758ff3fea47",
       "outcome_label": "None",
       "preview": "Hello",
-      "target_id": "74b97370-535f-4b7f-bec9-e6e728899e05",
+      "target_id": "ff4d1893-67c9-451a-8e78-0762f91beb4d",
       "target_kind": "known_conversation",
       "time_label": "Now",
       "unread": "true"
     }
   ],
-  "idle_poll_seconds": 8.026,
+  "idle_poll_seconds": 8.059,
   "idle_poll_status": 200,
+  "source_commit": "bfef883408f09ef447aa048e25117ec502b926fb",
+  "upstream_commit": "0f404200402f918a4b1596bc5c8a53479a435349",
+  "workflow": {
+    "source_commit": "bfef883408f09ef447aa048e25117ec502b926fb",
+    "upstream_commit": "0f404200402f918a4b1596bc5c8a53479a435349",
+    "workflow_path": ".github/workflows/inbox-electric-image.yml",
+    "attestation": "https://github.com/biginkc/sandra/actions/runs/37112503355"
+  },
   "limits": [
     "owned T1 fixture only; no Railway provision or production proof",
     "no end-to-end browser latency claim"
