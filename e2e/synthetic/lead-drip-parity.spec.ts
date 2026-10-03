@@ -64,7 +64,7 @@ for (const surface of ["top", "rail"] as const) {
       expect(await page.evaluate(() => {
         const state = (window as unknown as {__dripBackend:{state:{guardedStarts:number;directStarts:number}}}).__dripBackend.state;
         return {guardedStarts:state.guardedStarts,directStarts:state.directStarts};
-      })).toEqual({guardedStarts:1,directStarts:0});
+      })).toEqual({guardedStarts:scenario === "success" ? 2 : 1,directStarts:0});
       expect(errors).toEqual([]);
     });
   }

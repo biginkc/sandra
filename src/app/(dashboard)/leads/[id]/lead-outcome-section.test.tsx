@@ -123,6 +123,7 @@ describe("lead page outcome section", () => {
   });
 
   it("a failed switch still refetches the drip card and keeps the alert", async () => {
+    setInboxDispoAndStartDripMock.mockResolvedValue({ ok: true, enrollment: { status: "skipped", reason: "Already in Current drip. Stop it or switch." } });
     changeDripActionMock.mockResolvedValue({ ok: false, error: { message: "Replacement failed" } });
     const user = userEvent.setup();
     render(
