@@ -41,6 +41,12 @@ describe('internal seller-start receiver', () => {
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({error:'evidence_pending'});
   });
+  it('answers a definite conflict (MLS01) with a non-retryable 409, never a retryable 503', async () => {
+    mocks.rpc.mockResolvedValue({data:null,error:{code:'MLS01',message:'STALE_ASSIGNMENT'}});
+    const response=await POST(request());
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({error:'evidence_rejected'});
+  });
   it('returns the database replay result unchanged', async () => {
     mocks.rpc.mockResolvedValue({data:{ok:true,duplicate:true,attemptId:'original'},error:null});
     expect(await (await POST(request())).json()).toEqual({ok:true,duplicate:true,attemptId:'original'});

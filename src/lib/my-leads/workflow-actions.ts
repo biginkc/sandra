@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createClient } from "@/lib/supabase/server";
+import { MY_LEADS_CONFLICT_SQLSTATE } from "./sqlstate";
 import type { Json } from "@/lib/supabase/types";
 import type {
   AcquisitionCommandFailure,
@@ -56,7 +57,7 @@ function rpcFailure(error: RpcError): AcquisitionCommandFailure {
     namedCode ??
     (error.code === "23505" ? "IDEMPOTENCY_CONFLICT" :
       error.code === "42501" ? "FORBIDDEN" :
-        error.code === "40001" ? "STALE_STATE" : "INVALID_INPUT");
+        error.code === "40001" || error.code === MY_LEADS_CONFLICT_SQLSTATE ? "STALE_STATE" : "INVALID_INPUT");
   return { ok: false, code, message: errorMessages[code] };
 }
 
