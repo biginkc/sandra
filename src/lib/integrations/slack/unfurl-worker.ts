@@ -18,7 +18,7 @@ import {
   loadSlackInstallation,
   loadSlackJobUrls,
   releaseSlackUnfurlJobClaim,
-  revokeSlackInstallation,
+  revokeSlackInstallationGeneration,
   rescheduleSlackUnfurlJob,
   updateSlackJobUrl,
   type SlackUnfurlJob,
@@ -114,6 +114,16 @@ function payloadForSnapshot(snapshot: unknown): UnfurlPayload {
   return rendered as UnfurlPayload;
 }
 
+async function revokeWorkerInstallationGeneration(job: SlackUnfurlJob, installation: { installationId: string; installationVersion: number }, reason: string): Promise<void> {
+  await revokeSlackInstallationGeneration({
+    teamId: job.team_id,
+    appId: job.app_id,
+    installationId: installation.installationId,
+    installationVersion: job.installation_version ?? installation.installationVersion,
+    reason,
+  }).catch(() => undefined);
+}
+
 async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Promise<"succeeded" | "noop" | "expired" | "retried" | "failed"> {
   const claimToken = job.claim_token;
   if (!claimToken) return "failed";
@@ -145,7 +155,7 @@ async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Pro
   const destination = await verifySlackDestination({ token: installation.botToken.reveal(), approval, installationId: installation.installationId, orgId: job.org_id, teamId: job.team_id, channelId: job.channel_id, posterUserId: job.poster_slack_user_id });
   if (!destination.allowed) {
     if (destination.reason === "installation_revoked") {
-      await revokeSlackInstallation(job.team_id, job.app_id, destination.reason).catch(() => undefined);
+      await revokeWorkerInstallationGeneration(job, installation, destination.reason);
       await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "cancelled", errorCode: destination.reason });
       return "noop";
     }
@@ -187,7 +197,7 @@ async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Pro
     } catch (error) {
       if (isWindowError(error)) throw error;
       if (isTerminalSlackIdentityError(error)) {
-        await revokeSlackInstallation(job.team_id, job.app_id, identityErrorReason(error)).catch(() => undefined);
+        await revokeWorkerInstallationGeneration(job, installation, identityErrorReason(error));
         await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "cancelled", errorCode: "installation_revoked" });
         return "noop";
       }
@@ -208,7 +218,7 @@ async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Pro
   const finalDestination = await verifySlackDestination({ token: installation.botToken.reveal(), approval: await loadSlackChannelApproval({ installationId: installation.installationId, orgId: job.org_id, channelId: job.channel_id }), installationId: installation.installationId, orgId: job.org_id, teamId: job.team_id, channelId: job.channel_id, posterUserId: job.poster_slack_user_id });
   if (!finalDestination.allowed) {
     if (finalDestination.reason === "installation_revoked") {
-      await revokeSlackInstallation(job.team_id, job.app_id, finalDestination.reason).catch(() => undefined);
+      await revokeWorkerInstallationGeneration(job, installation, finalDestination.reason);
       await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "cancelled", errorCode: finalDestination.reason });
       return "noop";
     }
@@ -241,7 +251,7 @@ async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Pro
   } catch (error) {
     if (isWindowError(error)) throw error;
     if (isTerminalSlackIdentityError(error)) {
-      await revokeSlackInstallation(job.team_id, job.app_id, identityErrorReason(error)).catch(() => undefined);
+      await revokeWorkerInstallationGeneration(job, installation, identityErrorReason(error));
       await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "cancelled", errorCode: "installation_revoked" });
       return "noop";
     }

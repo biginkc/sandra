@@ -246,6 +246,34 @@ export async function revokeSlackInstallation(teamId: string, appId: string, rea
   rpcError(error, "installation revocation");
 }
 
+/**
+ * Revoke only the installation generation that produced a worker job.
+ *
+ * A Slack API response can arrive after an uninstall/reinstall. The worker
+ * must not let that stale response revoke the newly installed generation.
+ * The database function locks and compares the generation before changing
+ * any installation-owned state, returning zero for a stale generation.
+ */
+export async function revokeSlackInstallationGeneration(input: {
+  teamId: string;
+  appId: string;
+  installationId: string;
+  installationVersion: number;
+  reason: string;
+}): Promise<number> {
+  const { data, error } = await admin().rpc("revoke_slack_installation_generation", {
+    p_team_id: input.teamId,
+    p_app_id: input.appId,
+    p_installation_id: input.installationId,
+    p_installation_version: input.installationVersion,
+    p_reason: input.reason,
+  });
+  rpcError(error, "installation generation revocation");
+  if (typeof data === "number") return data;
+  if (Array.isArray(data) && typeof data[0] === "number") return data[0];
+  return 0;
+}
+
 export async function revokeSlackChannelApproval(teamId: string, appId: string, channelId: string, reason: string): Promise<void> {
   const { error } = await admin().rpc("revoke_slack_channel_approval", { p_team_id: teamId, p_app_id: appId, p_channel_id: channelId, p_reason: reason });
   rpcError(error, "channel approval revocation");

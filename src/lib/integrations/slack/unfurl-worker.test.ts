@@ -14,7 +14,7 @@ const mocks = vi.hoisted(() => ({
   reschedule: vi.fn(),
   release: vi.fn(),
   guard: vi.fn(),
-  revokeInstallation: vi.fn(),
+  revokeInstallationGeneration: vi.fn(),
   loadData: vi.fn(),
   blocks: vi.fn(),
   unfurl: vi.fn(),
@@ -35,7 +35,7 @@ vi.mock("./unfurl-store", () => ({
   rescheduleSlackUnfurlJob: mocks.reschedule,
   releaseSlackUnfurlJobClaim: mocks.release,
   guardSlackUnfurlDispatch: mocks.guard,
-  revokeSlackInstallation: mocks.revokeInstallation,
+  revokeSlackInstallationGeneration: mocks.revokeInstallationGeneration,
 }));
 vi.mock("./unfurl-policy", () => ({
   parseSlackLeadUrl: vi.fn((url: string) => ({ ok: true, link: { originalUrl: url, propertyId: "11111111-1111-4111-8111-111111111111", kind: "lead" } })),
@@ -94,7 +94,7 @@ beforeEach(() => {
   mocks.reschedule.mockResolvedValue(true);
   mocks.release.mockResolvedValue(true);
   mocks.guard.mockResolvedValue(true);
-  mocks.revokeInstallation.mockResolvedValue(undefined);
+  mocks.revokeInstallationGeneration.mockResolvedValue(1);
 });
 
 describe("Slack unfurl worker", () => {
@@ -221,7 +221,31 @@ describe("Slack unfurl worker", () => {
     mocks.unfurl.mockRejectedValueOnce({ data: { error: "invalid_auth" } });
     const result = await runSlackUnfurlSweep();
     expect(result.noops).toBe(1);
-    expect(mocks.revokeInstallation).toHaveBeenCalledWith("T123", "A123", "invalid_auth");
+    expect(mocks.revokeInstallationGeneration).toHaveBeenCalledWith({
+      teamId: "T123",
+      appId: "A123",
+      installationId: "installation-1",
+      installationVersion: 1,
+      reason: "invalid_auth",
+    });
+    expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "cancelled", errorCode: "installation_revoked" });
+  });
+
+  it("fences an old generation token error after reinstall", async () => {
+    // The worker loaded generation 1 before the uninstall/reinstall changed
+    // the row to generation 2. The conditional RPC returns zero for that
+    // stale response, leaving generation 2 active.
+    mocks.revokeInstallationGeneration.mockResolvedValueOnce(0);
+    mocks.unfurl.mockRejectedValueOnce({ data: { error: "invalid_auth" } });
+
+    const result = await runSlackUnfurlSweep();
+
+    expect(result.noops).toBe(1);
+    expect(mocks.revokeInstallationGeneration).toHaveBeenCalledWith(expect.objectContaining({
+      installationId: "installation-1",
+      installationVersion: 1,
+      reason: "invalid_auth",
+    }));
     expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "cancelled", errorCode: "installation_revoked" });
   });
 

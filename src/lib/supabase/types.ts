@@ -7533,6 +7533,7 @@ export type Database = {
       revoke_slack_channel_approval: { Args: { p_app_id: string; p_channel_id: string; p_reason: string; p_team_id: string }; Returns: number }
       revoke_slack_account_links: { Args: { p_app_id: string; p_reason: string; p_slack_user_ids: string[]; p_team_id: string }; Returns: number }
       revoke_slack_installation: { Args: { p_app_id: string; p_reason: string; p_team_id: string }; Returns: number }
+      revoke_slack_installation_generation: { Args: { p_app_id: string; p_installation_id: string; p_installation_version: number; p_reason: string; p_team_id: string }; Returns: number }
       reschedule_slack_unfurl_job: { Args: { p_claim_token: string; p_error_code: string; p_job_id: string; p_next_attempt_at: string }; Returns: boolean }
       process_slack_lifecycle_event: { Args: { p_action: string; p_app_id: string; p_channel_id: string | null; p_event_id: string; p_event_time: string | null; p_event_type: string; p_slack_user_ids: string[]; p_team_id: string }; Returns: boolean }
       release_slack_unfurl_job_claim: { Args: { p_claim_token: string; p_job_id: string }; Returns: boolean }

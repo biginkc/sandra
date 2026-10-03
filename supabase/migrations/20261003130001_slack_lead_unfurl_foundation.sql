@@ -524,6 +524,60 @@ begin
 end;
 $$;
 
+-- Worker-originated token failures are fenced to the generation that made
+-- the request.  A stale v1 response must not revoke a v2 reinstall.  Slack
+-- lifecycle events deliberately use the team-wide function above because
+-- those events describe the installation as a whole.
+create or replace function public.revoke_slack_installation_generation(
+  p_team_id text, p_app_id text, p_installation_id uuid,
+  p_installation_version integer, p_reason text
+) returns integer language plpgsql security definer set search_path = public, pg_temp as $$
+declare
+  v_current_version integer;
+  v_status text;
+  v_count integer;
+begin
+  select i.installation_version, i.status
+    into v_current_version, v_status
+    from public.slack_installations i
+   where i.id=p_installation_id and i.team_id=p_team_id and i.app_id=p_app_id
+   for update;
+
+  if not found or v_status <> 'active' or v_current_version <> p_installation_version then
+    return 0;
+  end if;
+
+  update public.slack_installations
+     set status='revoked', revoked_at=now(), revoked_reason=p_reason, updated_at=now()
+   where id=p_installation_id;
+  get diagnostics v_count = row_count;
+
+  update public.slack_account_links
+     set status='revoked', revoked_at=now(), updated_at=now()
+   where installation_id=p_installation_id and status='active';
+
+  update public.slack_channel_approvals
+     set status='revoked', revoked_at=now(), revoked_reason=p_reason, updated_at=now()
+   where installation_id=p_installation_id and status='active';
+
+  with cancelled as (
+    update public.slack_unfurl_jobs
+       set status='cancelled', claim_token=null, lease_expires_at=null,
+           last_error_code=p_reason, updated_at=now()
+     where installation_id=p_installation_id
+       and installation_version=p_installation_version
+       and status in ('queued','processing')
+     returning receipt_id
+  )
+  update public.slack_event_receipts r
+     set status='revoked', updated_at=now()
+    from cancelled
+   where r.id=cancelled.receipt_id;
+
+  return v_count;
+end;
+$$;
+
 create or replace function public.revoke_slack_channel_approval(
   p_team_id text, p_app_id text, p_channel_id text, p_reason text
 ) returns integer language plpgsql security definer set search_path = public, pg_temp as $$
@@ -601,6 +655,7 @@ revoke all on function public.reschedule_slack_unfurl_job(uuid,uuid,timestamptz,
 revoke all on function public.guard_slack_unfurl_dispatch(uuid,uuid,uuid,integer,uuid,text,text) from public,anon,authenticated;
 revoke all on function public.process_slack_lifecycle_event(text,text,text,text,timestamptz,text,text[],text) from public,anon,authenticated;
 revoke all on function public.revoke_slack_installation(text,text,text) from public,anon,authenticated;
+revoke all on function public.revoke_slack_installation_generation(text,text,uuid,integer,text) from public,anon,authenticated;
 revoke all on function public.revoke_slack_channel_approval(text,text,text,text) from public,anon,authenticated;
 revoke all on function public.revoke_slack_account_links(text,text,text[],text) from public,anon,authenticated;
 revoke all on function public.cleanup_slack_unfurl_data(timestamptz) from public,anon,authenticated;
@@ -620,6 +675,7 @@ grant execute on function public.reschedule_slack_unfurl_job(uuid,uuid,timestamp
 grant execute on function public.guard_slack_unfurl_dispatch(uuid,uuid,uuid,integer,uuid,text,text) to service_role;
 grant execute on function public.process_slack_lifecycle_event(text,text,text,text,timestamptz,text,text[],text) to service_role;
 grant execute on function public.revoke_slack_installation(text,text,text) to service_role;
+grant execute on function public.revoke_slack_installation_generation(text,text,uuid,integer,text) to service_role;
 grant execute on function public.revoke_slack_channel_approval(text,text,text,text) to service_role;
 grant execute on function public.revoke_slack_account_links(text,text,text[],text) to service_role;
 grant execute on function public.cleanup_slack_unfurl_data(timestamptz) to service_role;

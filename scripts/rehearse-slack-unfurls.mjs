@@ -67,8 +67,8 @@ try {
     );
   `);
   psql(migration);
-  const privilege = psql("select has_function_privilege('service_role', 'public.get_slack_preview_attempt_facts(uuid,uuid)', 'execute'), has_function_privilege('authenticated', 'public.get_slack_preview_attempt_facts(uuid,uuid)', 'execute'), has_function_privilege('service_role', 'public.guard_slack_unfurl_dispatch(uuid,uuid,uuid,integer,uuid,text,text)', 'execute'), has_function_privilege('authenticated', 'public.guard_slack_unfurl_dispatch(uuid,uuid,uuid,integer,uuid,text,text)', 'execute');").split("\t");
-  if (privilege.join("\t") !== "t\tf\tt\tf") throw new Error("Slack operational RPC privileges are not narrowed");
+  const privilege = psql("select has_function_privilege('service_role', 'public.get_slack_preview_attempt_facts(uuid,uuid)', 'execute'), has_function_privilege('authenticated', 'public.get_slack_preview_attempt_facts(uuid,uuid)', 'execute'), has_function_privilege('service_role', 'public.guard_slack_unfurl_dispatch(uuid,uuid,uuid,integer,uuid,text,text)', 'execute'), has_function_privilege('authenticated', 'public.guard_slack_unfurl_dispatch(uuid,uuid,uuid,integer,uuid,text,text)', 'execute'), has_function_privilege('service_role', 'public.revoke_slack_installation_generation(text,text,uuid,integer,text)', 'execute'), has_function_privilege('authenticated', 'public.revoke_slack_installation_generation(text,text,uuid,integer,text)', 'execute');").split("\t");
+  if (privilege.join("\t") !== "t\tf\tt\tf\tt\tf") throw new Error("Slack operational RPC privileges are not narrowed");
   const tablePrivileges = psql("select has_table_privilege('service_role','public.slack_installations','select'), has_table_privilege('service_role','public.slack_account_links','select'), has_table_privilege('service_role','public.slack_channel_approvals','select'), has_table_privilege('service_role','public.memberships','select'), has_table_privilege('service_role','public.slack_unfurl_job_urls','update'), has_table_privilege('authenticated','public.slack_installations','select');").split("\t");
   if (tablePrivileges.join("\t") !== "t\tt\tt\tt\tt\tf") throw new Error("service role Slack table grants are not narrow and explicit");
   try { psql("set role authenticated; select count(*) from public.slack_installations;"); throw new Error("authenticated unexpectedly read Slack installations"); } catch (error) { if (!String(error).includes("permission denied")) throw error; }
@@ -176,6 +176,23 @@ try {
   psql(`update public.slack_unfurl_jobs set attempts=1,status='processing',claim_token='${releaseToken}',lease_expires_at=now()+interval '1 minute' where id='${releaseJob}';`);
   if (psql(`set role service_role; select public.release_slack_unfurl_job_claim('${releaseJob}','${releaseToken}');`) !== "t") throw new Error("never-started claim release failed");
   if (psql(`select status,attempts from public.slack_unfurl_jobs where id='${releaseJob}';`) !== "queued\t0") throw new Error("released claim did not refund its attempt");
+
+  // A late v1 token error must not revoke the active v3 reinstall. The
+  // generation-fenced RPC returns zero for stale v2 and revokes only v3 for
+  // the matching call.
+  psql(`set role service_role; select public.upsert_slack_account_link('${install[0]}','${org}','${user}','U_REHEARSAL');`);
+  psql(`set role service_role; select public.approve_slack_channel('${install[0]}','${org}','C_REHEARSAL','${user}',true);`);
+  const generationEvent = randomUUID();
+  const generationJob = psql(`set role service_role; select job_id from public.enqueue_slack_unfurl_event('${team}','${app}','${generationEvent}','link_shared',now(),'${org}','${install[0]}',3,'C_REHEARSAL','4.5','U_REHEARSAL',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null);`);
+  if (psql(`set role service_role; select public.revoke_slack_installation_generation('${team}','${app}','${install[0]}',2,'invalid_auth');`) !== "0") throw new Error("stale generation unexpectedly revoked current installation");
+  if (psql(`select status from public.slack_installations where id='${install[0]}';`) !== "active") throw new Error("stale generation revoked the active reinstall");
+  if (psql(`select status from public.slack_unfurl_jobs where id='${generationJob}';`) !== "queued") throw new Error("stale generation cancelled a current job");
+  if (psql(`set role service_role; select public.revoke_slack_installation_generation('${team}','${app}','${install[0]}',3,'invalid_auth');`) !== "1") throw new Error("matching generation did not revoke installation");
+  if (psql(`select status from public.slack_installations where id='${install[0]}';`) !== "revoked") throw new Error("matching generation left installation active");
+  if (psql(`select status from public.slack_account_links where installation_id='${install[0]}' and slack_user_id='U_REHEARSAL';`) !== "revoked") throw new Error("matching generation did not revoke link");
+  if (psql(`select status from public.slack_channel_approvals where installation_id='${install[0]}' and channel_id='C_REHEARSAL';`) !== "revoked") throw new Error("matching generation did not revoke approval");
+  if (psql(`select status from public.slack_unfurl_jobs where id='${generationJob}';`) !== "cancelled") throw new Error("matching generation did not cancel job");
+  if (psql(`select status from public.slack_event_receipts where id=(select receipt_id from public.slack_unfurl_jobs where id='${generationJob}');`) !== "revoked") throw new Error("matching generation did not close receipt");
 
   const lifecycleEvent = randomUUID();
   if (psql(`set role service_role; select public.process_slack_lifecycle_event('${team}','${app}','${lifecycleEvent}','app_uninstalled',now(),null,array[]::text[],'installation');`) !== "t") throw new Error("lifecycle event was not applied");
