@@ -94,6 +94,8 @@ describe("My Leads settings RPC wrappers", () => {
   it.each([
     [{ code: "42501", message: "FORBIDDEN" }, "FORBIDDEN"],
     [{ code: "40001", message: "STALE_STATE" }, "STALE_STATE"],
+    [{ code: "MLS01", message: "STALE_STATE" }, "STALE_STATE"],
+    [{ code: "MLS01", message: "IDEMPOTENCY_CONFLICT" }, "IDEMPOTENCY_CONFLICT"],
     [{ code: "22023", message: "RECIPIENT_UNAVAILABLE" }, "RECIPIENT_UNAVAILABLE"],
     [{ code: "40001", message: "IDEMPOTENCY_CONFLICT" }, "IDEMPOTENCY_CONFLICT"],
   ])("maps database error %j to %s", async (error, code) => {

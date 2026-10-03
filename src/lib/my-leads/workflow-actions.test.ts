@@ -136,12 +136,22 @@ describe("My Leads workflow RPC wrappers", () => {
     ["DNC_LOCKED", "DNC_LOCKED"],
     ["PENDING_OFFER_EXISTS", "PENDING_OFFER_EXISTS"],
     ["40001", "STALE_STATE"],
+    ["MLS01", "STALE_STATE"],
     ["23505", "IDEMPOTENCY_CONFLICT"],
   ])("maps database error %s to %s", async (message, code) => {
     rpc.mockResolvedValue({ data: null, error: { code: message, message } });
     await expect(
       archiveAcquisitionContract({ ...envelope }),
     ).resolves.toMatchObject({ ok: false, code });
+  });
+
+  it.each([
+    ["STALE_STATE", "STALE_STATE"],
+    ["STALE_ASSIGNMENT", "STALE_ASSIGNMENT"],
+    ["IDEMPOTENCY_CONFLICT", "IDEMPOTENCY_CONFLICT"],
+  ])("maps the non-retryable MLS01 conflict %s to %s for the client", async (message, code) => {
+    rpc.mockResolvedValue({ data: null, error: { code: "MLS01", message } });
+    await expect(archiveAcquisitionContract({ ...envelope })).resolves.toMatchObject({ ok: false, code });
   });
 
   it("rejects malformed successful results", async () => {

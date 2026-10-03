@@ -153,6 +153,7 @@ describe("My Leads launch RPC wrappers", () => {
     ["ROLLBACK_BLOCKED", "ROLLBACK_BLOCKED"],
     ["LAUNCH_ALREADY_APPLIED", "LAUNCH_ALREADY_APPLIED"],
     ["40001", "STALE_STATE"],
+    ["MLS01", "STALE_STATE"],
   ])("maps %s without claiming mutation success", async (message, code) => {
     rpc.mockResolvedValue({ data: null, error: { code: message, message } });
     await expect(

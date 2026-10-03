@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createClient } from "@/lib/supabase/server";
+import { MY_LEADS_CONFLICT_SQLSTATE } from "./sqlstate";
 import type { AcquisitionErrorCode } from "./types";
 
 export type LaunchErrorCode =
@@ -230,7 +231,7 @@ function mapRpcError(error: RpcError): LaunchCommandFailure {
       ? "IDEMPOTENCY_CONFLICT"
       : error.code === "42501"
         ? "FORBIDDEN"
-        : error.code === "40001"
+        : error.code === "40001" || error.code === MY_LEADS_CONFLICT_SQLSTATE
           ? "STALE_STATE"
           : "INVALID_INPUT");
   return { ok: false, code, message: errorMessages[code] };
