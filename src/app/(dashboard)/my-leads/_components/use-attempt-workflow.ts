@@ -6,7 +6,7 @@ import type { QueueRow } from "@/lib/my-leads/queries"
 import type { Json } from "@/lib/supabase/types"
 import { submitMyLeadCommand, submitMyLeadHandoffDrip } from "../actions"
 import {
-  clearSubmission, discardOtherViewers, hasUncertainSubmission, listSubmissions, saveSubmission, subscribeSubmissions,
+  clearSubmission, discardOtherViewers, hasUncertainSubmission, listSubmissions, listSubmissionsAcrossEpisodes, saveSubmission, subscribeSubmissions,
   type StoredSubmission, type SubmissionScope,
 } from "./submission-store"
 import type { MyLeadAction } from "./types"
@@ -36,6 +36,12 @@ type Recovery<O> = {
   reconciliation?: WorkflowReconciliation
   /** A frozen replay was definitely rejected: the user may release the payload and edit it. */
   canStartOver?: boolean
+  /**
+   * "May have saved": a record exists whose original request may have committed and the page
+   * cannot tell. Plain Save is disabled; Refresh checks and closes; Save as a new update (only
+   * while the assignment episode is unchanged) asks to confirm, then saves once under a new key.
+   */
+  maySaved?: { canSaveNew: boolean }
 }
 
 export type AttemptRecoveryValue = {
@@ -45,6 +51,7 @@ export type AttemptRecoveryValue = {
   refresh: () => void
   reconciliation?: WorkflowReconciliation
   startOver?: () => void
+  saveAsNew?: () => void
   /** A user-initiated close asks first while a save is uncertain or already saved. */
   confirmClose: () => boolean
 }
@@ -76,6 +83,13 @@ type Submission = {
    * lost (reload) or dropped on an IDEMPOTENCY_CONFLICT. Nothing can be replayed any more.
    */
   released?: boolean
+  /**
+   * PROOF that nothing committed under this key: the server rejected the identical frozen
+   * request with STALE_STATE/STALE_ASSIGNMENT. Every command raises those only after its
+   * receipt lookup (migration 20261003130000), so a committed original would have returned
+   * duplicate instead. Only proof (or an explicit Save as a new update) lets the key change.
+   */
+  staleProof?: boolean
   /** The queue version the original request carried. A request whose version no longer matches the row can never commit. */
   queueVersion: number | null
   createdAt: number
@@ -124,6 +138,9 @@ const ALREADY_SAVED_MESSAGE = "This was already saved. Refresh to see it."
 const UNCONFIRMED_MESSAGE = "Sandra could not confirm this save. The original request is preserved for reconciliation."
 const ROUTE_CHANGED_MESSAGE = "A save on this lead may already have gone through as a different kind of update. Choose the same kind of update to save again."
 export const RESUME_NOTICE = "A save on this lead may already have gone through. Saving again won't create a duplicate."
+export const MAY_HAVE_SAVED_MESSAGE = "A save on this lead may already have gone through. Refresh to check, or save this as a new update."
+export const MAY_HAVE_SAVED_REFRESH_ONLY_MESSAGE = "A save on this lead may already have gone through, and the lead has changed. Refresh to check."
+export const NEW_UPDATE_CONFIRM_MESSAGE = "The earlier save may already have gone through. Saving as a new update could record it twice. Save as a new update anyway?"
 export const CANT_SAVE_MESSAGE = "Sandra can't save these values. Start over to edit them."
 export const CLOSE_CONFIRM_MESSAGE = "This save may already have gone through. Close anyway? Reopening this lead picks up where you left off."
 /** Server validation codes that fail the same way every time for the same values. */
@@ -178,6 +195,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
   const callbacks = useRef({ onCommitted, onSettled, onReconciled, onClose, onDripChanged })
   const viewerRef = useRef(viewer)
   useEffect(() => { activeOpening.current = opening; callbacks.current = { onCommitted, onSettled, onReconciled, onClose, onDripChanged }; viewerRef.current = viewer })
+  const orphaned = useRef<{ opening: O; records: StoredSubmission[] } | null>(null)
   const recoveredRow = useRef<{ opening: O; row: QueueRow } | null>(null)
   const [recovery, setRecovery] = useState<Recovery<O> | null>(null)
 
@@ -227,12 +245,17 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     // could have committed: a new opening is a new save with a new key.
     for (const record of records) if (record.status === "committed" || record.status === "fresh") clearSubmission(record)
     const record = records.find((item) => item.status === "uncertain" || item.status === "already-saved")
-    if (!record) return
-    // After a reload there is no payload. Every command checks the expected queue version (and
-    // episode, which is part of the scope) under the row lock, so an unresolved request whose
-    // version no longer matches can never commit: drop the record, a new opening mints a new key.
-    if (record.status === "uncertain" && !record.payload && typeof record.expectedQueueVersion === "number" && record.expectedQueueVersion !== current.row.queueVersion) {
-      clearSubmission(record)
+    if (!record) {
+      // The assignment episode changed under an unresolved record: it may have committed in the
+      // old episode. Never clear it silently and never offer a new update inside the new episode.
+      const orphans = listSubmissionsAcrossEpisodes(
+        { viewerUserId: viewerRef.current.userId, orgId: viewerRef.current.orgId, memberId, propertyId: current.row.propertyId },
+        (operation) => wanted.some((w) => w === operation),
+      ).filter((item) => item.assignmentEpisodeId !== current.row.assignmentEpisodeId && (item.status === "uncertain" || item.status === "already-saved"))
+      if (orphans.length > 0) {
+        orphaned.current = { opening: current, records: orphans }
+        setRecovery({ opening: current, message: MAY_HAVE_SAVED_REFRESH_ONLY_MESSAGE, blocked: true, busy: false, maySaved: { canSaveNew: false } })
+      }
       return
     }
     const subjectMatches = !record.payload || routeOf(current.action, record.payload) === record.route
@@ -245,7 +268,11 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     }
     submission.current = state
     if (payload !== record.payload) persist(state, current)
+    // A reload lost the payload and the row has moved since the request was sent: the original may
+    // have committed (which is what moved it). That is NOT proof of anything: ask.
+    const moved = record.status === "uncertain" && !record.payload && typeof record.expectedQueueVersion === "number" && record.expectedQueueVersion !== current.row.queueVersion
     if (state.alreadySaved) setRecovery({ opening: current, message: ALREADY_SAVED_MESSAGE, blocked: true, busy: false })
+    else if (moved) setRecovery({ opening: current, message: MAY_HAVE_SAVED_MESSAGE, blocked: true, busy: false, maySaved: { canSaveNew: true } })
     else if (state.uncertain) setRecovery({ opening: current, message: UNCONFIRMED_MESSAGE, blocked: false, busy: false, reconciliation: { command: current.action, payload: payload! } })
     else if (state.atRisk) setRecovery({ opening: current, message: RESUME_NOTICE, blocked: false, busy: false })
   }
@@ -306,38 +333,50 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     }
   }
 
+  /**
+   * The user's "Refresh to check" for an already-saved or may-have-saved record: re-read the lead
+   * (a failed read stays retryable), run the host refresh barrier, clear the record and close.
+   * Nothing is claimed about the earlier save; the refreshed queue is what the rep sees.
+   */
+  const refreshAndClose = async (current: O) => {
+    await readRow(current)
+    if (activeOpening.current !== current) return
+    const barrier = callbacks.current.onReconciled?.(current)
+    const held = submission.current
+    if (held?.opening === current) forget(held, current)
+    if (orphaned.current?.opening === current) for (const record of orphaned.current.records) clearSubmission(record)
+    orphaned.current = null
+    submission.current = null
+    setRecovery(null)
+    callbacks.current.onClose(current)
+    await barrier
+  }
+
   const recover = async () => {
     const current = opening
     if (!current || recovery?.busy) return
-    setRecovery({ opening: current, message: "Checking current lead access…", blocked: true, busy: true, reconciliation: frozenFor(current) })
+    setRecovery({ opening: current, message: "Checking current lead access…", blocked: true, busy: true, reconciliation: frozenFor(current), maySaved: recovery?.opening === current ? recovery.maySaved : undefined })
     try {
       const earlier = submission.current
       if (earlier?.opening === current && earlier.alreadySaved) {
         // acquisition_commands cannot be read by any client role, and the server raises
         // IDEMPOTENCY_CONFLICT only when the stored request DIFFERS from the incoming one, so
-        // replaying never helps. No result is claimed: Refresh re-reads the single lead row, the
-        // host refreshes, and the dialog closes (no drip or follow-up step). The record is cleared.
-        const row = await readRow(current)
-        if (activeOpening.current !== current) return
-        // A lead that left the queue is closed too, not blocked forever.
-        const barrier = !row || row.assignmentEpisodeId !== current.row.assignmentEpisodeId ? undefined : callbacks.current.onReconciled?.(current)
-        forget(earlier, current)
-        submission.current = null
-        setRecovery(null)
-        callbacks.current.onClose(current)
-        await barrier
+        // replaying never helps. No result is claimed (see refreshAndClose).
+        await refreshAndClose(current)
+        return
+      }
+      if (recovery?.opening === current && recovery.maySaved) {
+        await refreshAndClose(current)
         return
       }
       const row = await readRow(current)
       if (activeOpening.current !== current) return
       // Never move a retained draft into a different assignment episode.
-      const lost = submission.current?.opening === current && submission.current.released
-      if ((!row || row.assignmentEpisodeId !== current.row.assignmentEpisodeId) && lost) {
-        // Nothing frozen to protect and the lead is gone: clear and close instead of blocking forever.
-        forget(submission.current!, current)
-        submission.current = null
-        setRecovery(null)
-        callbacks.current.onClose(current)
+      const gone = !row || row.assignmentEpisodeId !== current.row.assignmentEpisodeId
+      if (gone && submission.current?.opening === current && submission.current.released) {
+        // No frozen payload to protect and the lead left the queue or changed episode: the old
+        // request may have committed. Never clear silently; Refresh-to-check only.
+        setRecovery({ opening: current, message: MAY_HAVE_SAVED_REFRESH_ONLY_MESSAGE, blocked: true, busy: false, maySaved: { canSaveNew: false } })
         return
       }
       if (!row || row.assignmentEpisodeId !== current.row.assignmentEpisodeId) {
@@ -348,19 +387,10 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       // submission. Keep its idempotency key so retrying the same command is
       // safe even when the draft was edited while the dialog was blocked.
       recoveredRow.current = { opening: current, row }
-      const held = submission.current
-      if (held?.opening === current && held.released && !held.alreadySaved && held.queueVersion !== null && held.queueVersion !== row.queueVersion) {
-        // The old request can never commit now (its expected version is gone): clear it, and the
-        // next save mints a new key and may take any route.
-        forget(held, current)
-        submission.current = null
-        setRecovery({ opening: current, message: "Lead refreshed. Review the form before saving.", blocked: false, busy: false })
-        return
-      }
       const definite = submission.current?.opening === current && submission.current.definite
       setRecovery({ opening: current, message: definite ? CANT_SAVE_MESSAGE : "Lead refreshed. Your draft is retained. Review it before saving.", blocked: false, busy: false, reconciliation: frozenFor(current), canStartOver: definite || undefined })
     } catch {
-      if (activeOpening.current === current) setRecovery({ opening: current, message: "Could not refresh this lead. Your draft is retained. Try Refresh again.", blocked: true, busy: false, reconciliation: frozenFor(current), canStartOver: (submission.current?.opening === current && submission.current.definite) || undefined })
+      if (activeOpening.current === current) setRecovery({ opening: current, message: "Could not refresh this lead. Your draft is retained. Try Refresh again.", blocked: true, busy: false, reconciliation: frozenFor(current), maySaved: recovery?.opening === current ? recovery.maySaved : undefined, canStartOver: (submission.current?.opening === current && submission.current.definite) || undefined })
     }
   }
 
@@ -377,12 +407,24 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     setRecovery({ opening: current, message: RESUME_NOTICE, blocked: false, busy: false })
   }
 
+  /** Explicit user choice: this is a new update. Confirms, then the next Save mints a new key on any route. */
+  const saveAsNew = () => {
+    const current = opening
+    if (!current || recovery?.opening !== current || !recovery.maySaved?.canSaveNew || typeof window === "undefined") return
+    if (!window.confirm(NEW_UPDATE_CONFIRM_MESSAGE)) return
+    const held = submission.current
+    if (held?.opening === current) forget(held, current)
+    submission.current = null
+    recoveredRow.current = null
+    setRecovery(null)
+  }
+
   const confirmClose = useCallback(() => {
     const state = submission.current
-    const risky = Boolean(opening && state?.opening === opening && !state.committed && (state.uncertain || state.alreadySaved))
+    const risky = Boolean(opening && ((state?.opening === opening && !state.committed && (state.uncertain || state.alreadySaved)) || (recovery?.opening === opening && recovery.maySaved)))
     if (!risky || typeof window === "undefined") return true
     return window.confirm(CLOSE_CONFIRM_MESSAGE)
-  }, [opening])
+  }, [opening, recovery])
 
   const submit = useCallback(async (payload: object) => {
     if (!opening) return { ok: false as const, message: "Select a lead first." }
@@ -401,14 +443,14 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     // Never send the key down another operation. When nothing under the key can have committed
     // (its first send was definitely rejected), a different route simply starts a new key.
     if (state.route !== null && (state.route !== wantedRoute || state.memberId !== memberId) && !frozen) {
-      // A released request whose queue version moved on can never commit: lift the lock.
-      const cannotCommit = state.released && state.queueVersion !== null && row.queueVersion !== state.queueVersion
-      if (state.atRisk && !cannotCommit) return { ok: false as const, certainty: "rejected" as const, message: ROUTE_CHANGED_MESSAGE }
+      // Only PROOF lifts the lock: the identical frozen request was rejected with STALE_*.
+      if (state.atRisk && !state.staleProof) return { ok: false as const, certainty: "rejected" as const, message: ROUTE_CHANGED_MESSAGE }
       forget(state, opening)
       state.key = crypto.randomUUID()
       state.route = null
       state.memberId = null
       state.released = false
+      state.staleProof = false
       state.queueVersion = null
       state.createdAt = Date.now()
     }
@@ -458,6 +500,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
           // payload and KEEPS the key and route: a late original commit then conflicts instead of
           // recording a second attempt.
           state.definite = true
+          if (failure.code === "STALE_STATE" || failure.code === "STALE_ASSIGNMENT") state.staleProof = true
           persist(state, opening)
           if (activeOpening.current === opening) setRecovery({ opening, message: CANT_SAVE_MESSAGE, blocked: false, busy: false, reconciliation: { command, payload: state.payload ?? input }, canStartOver: true })
           return
@@ -500,7 +543,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
 
   const recoveryValue: AttemptRecoveryValue | null = recovery?.opening === opening
     ? { message: recovery.message, blocked: recovery.blocked, busy: recovery.busy, reconciliation: recovery.reconciliation, refresh: () => void recover(), confirmClose,
-        ...(recovery.canStartOver ? { startOver } : {}) }
+        ...(recovery.canStartOver ? { startOver } : {}), ...(recovery.maySaved?.canSaveNew ? { saveAsNew } : {}) }
     : null
 
   return { submit, recoveryValue, onDripChanged, confirmClose }

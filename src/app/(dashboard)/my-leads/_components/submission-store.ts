@@ -139,6 +139,13 @@ export function listSubmissions(scope: SubmissionScope, matches: (operation: str
     record.propertyId === scope.propertyId && record.assignmentEpisodeId === scope.assignmentEpisodeId && matches(record.operation))
 }
 
+/** Records for this lead under ANY assignment episode (an episode change orphans the old record). */
+export function listSubmissionsAcrossEpisodes(scope: Omit<SubmissionScope, "assignmentEpisodeId">, matches: (operation: string) => boolean, now = Date.now()): StoredSubmission[] {
+  return all(now).filter((record) =>
+    record.viewerUserId === scope.viewerUserId && record.orgId === scope.orgId && record.memberId === scope.memberId &&
+    record.propertyId === scope.propertyId && matches(record.operation))
+}
+
 export function saveSubmission(record: StoredSubmission, now = Date.now()) {
   memory.set(submissionId(record), { ...record, payload: record.payload })
   sync(now)

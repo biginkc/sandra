@@ -427,13 +427,13 @@ describe("useAttemptWorkflow", () => {
       } finally { vi.useRealTimers() }
     })
 
-    it("route switch after a release is blocked and sends nothing", async () => {
+    it("route switch after a definite rejection that is NOT stale proof stays blocked and sends nothing", async () => {
       actions.submitMyLeadCommand
         .mockRejectedValueOnce(new Error("network"))
-        .mockResolvedValueOnce({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "stale" })
+        .mockResolvedValueOnce({ ok: false, certainty: "rejected", code: "FEATURE_DISABLED", message: "off" })
       const { hook } = setup(opening("log-attempt", row({ queueVersion: 1 })), vi.fn(async (): Promise<QueueRow | null> => row({ queueVersion: 1 })))
       await act(async () => { await hook.result.current.submit({ outcome: "reached", source: "dialpad" }).catch(() => undefined) })
-      await act(async () => { await hook.result.current.submit({ outcome: "reached", source: "dialpad" }) }) // replay: STALE, definite
+      await act(async () => { await hook.result.current.submit({ outcome: "reached", source: "dialpad" }) }) // replay: definite, but not STALE
       await act(async () => { hook.result.current.recoveryValue?.refresh() })
       act(() => hook.result.current.recoveryValue?.startOver?.()) // payload released; key and route kept
       let blocked: unknown
@@ -443,20 +443,19 @@ describe("useAttemptWorkflow", () => {
       expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(2)
     })
 
-    it("route switch after a release is allowed once the queue version moved: the old request can never commit", async () => {
+    it("route switch after STALE proof (the identical frozen request was rejected STALE_*) takes a new key", async () => {
       actions.submitMyLeadCommand
         .mockRejectedValueOnce(new Error("network"))
-        .mockResolvedValueOnce({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "stale" })
+        .mockResolvedValueOnce({ ok: false, certainty: "rejected", answered: true, code: "STALE_STATE", message: "stale" })
         .mockResolvedValueOnce({ ok: true })
       const { hook } = setup(opening("log-attempt", row({ queueVersion: 1 })))
       await act(async () => { await hook.result.current.submit({ outcome: "reached", source: "dialpad" }).catch(() => undefined) })
       await act(async () => { await hook.result.current.submit({ outcome: "reached", source: "dialpad" }) })
-      await act(async () => { hook.result.current.recoveryValue?.refresh() }) // the row is now at version 3
+      await act(async () => { hook.result.current.recoveryValue?.refresh() })
       act(() => hook.result.current.recoveryValue?.startOver?.())
       await act(async () => { await hook.result.current.submit({ outcome: "reached", source: "sandra", callActivityId: "call-1" }) })
       expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(3)
       expect(sentInput(2).idempotencyKey).not.toBe(sentInput(0).idempotencyKey)
-      expect(sentInput(2).expectedQueueVersion).toBe(3)
     })
 
     it("a handoff that commits and then fails to start the drip is committed with a follow-up error and never resubmitted", async () => {
