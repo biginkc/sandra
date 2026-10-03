@@ -1,12 +1,13 @@
 import { act, renderHook } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-const actions = vi.hoisted(() => ({ submitMyLeadCommand: vi.fn(), submitMyLeadHandoffDrip: vi.fn() }))
-vi.mock("../actions", () => ({ submitMyLeadCommand: actions.submitMyLeadCommand, submitMyLeadHandoffDrip: actions.submitMyLeadHandoffDrip }))
+const actions = vi.hoisted(() => ({ submitMyLeadCommand: vi.fn(), submitMyLeadHandoffDrip: vi.fn(), loadMyLeadCommandReceipt: vi.fn() }))
+vi.mock("../actions", () => ({ submitMyLeadCommand: actions.submitMyLeadCommand, submitMyLeadHandoffDrip: actions.submitMyLeadHandoffDrip, loadMyLeadCommandReceipt: actions.loadMyLeadCommandReceipt }))
 
 import type { QueueRow } from "@/lib/my-leads/queries"
 import { useAttemptWorkflow, type AttemptOpening } from "./use-attempt-workflow"
 
+const VIEWER = { userId: "user-1", orgId: "org-1" }
 const row = (overrides: Partial<QueueRow> = {}) =>
   ({ propertyId: "p1", assignmentEpisodeId: "ep-1", queueVersion: 3, sharedStatus: "new_lead", address: "1 Main", ...overrides }) as unknown as QueueRow
 const opening = (action: AttemptOpening["action"] = "log-attempt", r = row()): AttemptOpening => ({ action, row: r })
@@ -20,7 +21,7 @@ function setup(initial: AttemptOpening | null, readRow = vi.fn(async (): Promise
     onDripChanged: vi.fn(),
   }
   const hook = renderHook(({ current }: { current: AttemptOpening | null }) =>
-    useAttemptWorkflow({ opening: current, memberId: "rep-1", ...handlers }), { initialProps: { current: initial } })
+    useAttemptWorkflow({ opening: current, memberId: "rep-1", viewer: VIEWER, ...handlers }), { initialProps: { current: initial } })
   return { hook, handlers }
 }
 
@@ -30,6 +31,8 @@ describe("useAttemptWorkflow", () => {
   beforeEach(() => {
     actions.submitMyLeadCommand.mockReset()
     actions.submitMyLeadHandoffDrip.mockReset()
+    actions.loadMyLeadCommandReceipt.mockReset()
+    actions.loadMyLeadCommandReceipt.mockResolvedValue({ ok: true, receipt: { operation: "log_acquisition_attempt", propertyId: "p1", episodeId: "ep-1", attemptRecorded: true, followUp: null } })
   })
 
   it("uses one idempotency key per opening and a new one for the next opening", async () => {
@@ -182,9 +185,13 @@ describe("useAttemptWorkflow", () => {
         // Replay of the frozen request: the server says stale (so nothing ever committed).
         await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "edited" }) })
         expect(sentInput(1)).toEqual(sentInput(0))
-        expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, reconciliation: undefined })
+        // Definitely rejected: the values stay locked until Start over; the key and route are kept.
+        expect(hook.result.current.recoveryValue).toMatchObject({ blocked: false, message: "Sandra can't save these values. Start over to edit them.", reconciliation: { payload: { note: "original" } } })
+        expect(hook.result.current.recoveryValue?.startOver).toBeTypeOf("function")
         await act(async () => { hook.result.current.recoveryValue?.refresh() })
         expect(hook.result.current.recoveryValue?.blocked).toBe(false)
+        act(() => hook.result.current.recoveryValue?.startOver?.())
+        expect(hook.result.current.recoveryValue?.reconciliation).toBeUndefined()
         const result = await act(async () => hook.result.current.submit({ outcome: "reached", note: "edited" }))
         void result
         expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(3)
@@ -264,8 +271,8 @@ describe("useAttemptWorkflow", () => {
 
     it("a failed refresh after IDEMPOTENCY_CONFLICT stays blocked and retryable", async () => {
       actions.submitMyLeadCommand.mockResolvedValue(conflict)
-      const readRow = vi.fn().mockRejectedValueOnce(new Error("down")).mockResolvedValueOnce(row())
-      const { hook, handlers } = setup(opening("log-attempt"), readRow)
+      actions.loadMyLeadCommandReceipt.mockResolvedValueOnce({ ok: false, code: "READ_FAILED", message: "Could not check the earlier save. Try Refresh again." })
+      const { hook, handlers } = setup(opening("log-attempt"))
       await act(async () => { await hook.result.current.submit({ outcome: "reached" }) })
       await act(async () => { hook.result.current.recoveryValue?.refresh() })
       expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true })
@@ -413,8 +420,9 @@ describe("useAttemptWorkflow", () => {
           await vi.advanceTimersByTimeAsync(25_001)
           await pending
         })
-        await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "original" }) }) // replay -> STALE, released
+        await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "original" }) }) // replay -> STALE, definite
         await act(async () => { hook.result.current.recoveryValue?.refresh() })
+        act(() => hook.result.current.recoveryValue?.startOver?.()) // releases the payload, keeps the key
         await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "edited" }) }) // same key -> conflict
         expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, message: "This was already saved. Refresh to see it." })
         expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(3)
@@ -437,12 +445,13 @@ describe("useAttemptWorkflow", () => {
         .mockResolvedValueOnce({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "stale" })
       const { hook } = setup(opening("log-attempt", row({ queueVersion: 1 })))
       await act(async () => { await hook.result.current.submit({ outcome: "reached", source: "dialpad" }).catch(() => undefined) })
-      await act(async () => { await hook.result.current.submit({ outcome: "reached", source: "dialpad" }) }) // replay: STALE, released
+      await act(async () => { await hook.result.current.submit({ outcome: "reached", source: "dialpad" }) }) // replay: STALE, definite
       await act(async () => { hook.result.current.recoveryValue?.refresh() })
+      act(() => hook.result.current.recoveryValue?.startOver?.()) // payload released; key and route kept
       let blocked: unknown
       await act(async () => { blocked = await hook.result.current.submit({ outcome: "reached", source: "sandra", callActivityId: "call-1" }) })
       expect(blocked).toMatchObject({ ok: false, certainty: "rejected" })
-      expect((blocked as { message: string }).message).toMatch(/Cancel and start over/)
+      expect((blocked as { message: string }).message).toMatch(/different kind of update/)
       expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(2)
     })
 

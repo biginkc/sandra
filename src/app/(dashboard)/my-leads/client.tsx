@@ -708,6 +708,7 @@ export function MyLeadsClient({
   const { submit, recoveryValue, onDripChanged } = useAttemptWorkflow({
     opening: dialog,
     memberId: member,
+    viewer: { userId: viewer.userId, orgId: viewer.orgId },
     readRow: readRecoveryRow,
     onCommitted: () => {
       const read = refresh();

@@ -18,6 +18,8 @@ type Props = {
   assigneeId: string | null
   /** Decided at page load: why this viewer cannot log a follow-up, or null when they can. */
   disabledReason: string | null
+  /** The signed-in viewer: saved-attempt records are scoped to them. */
+  viewer: { userId: string; orgId: string }
 }
 
 type LogFollowUp = { open: () => void; busy: boolean; message: string | null; disabledReason: string | null; hydrated: boolean }
@@ -34,7 +36,7 @@ const LogFollowUpContext = createContext<LogFollowUp | null>(null)
  * The dialog, idempotency and recovery behaviour are the shared My Leads workflow, so a save
  * here is the same command a save there would be.
  */
-export function LogFollowUpProvider({ propertyId, propertyLabel, assigneeId, disabledReason, children }: Props & { children?: ReactNode }) {
+export function LogFollowUpProvider({ propertyId, propertyLabel, assigneeId, disabledReason, viewer, children }: Props & { children?: ReactNode }) {
   const router = useRouter()
   // Server markup and the pre-hydration client render are disabled, so a click that lands
   // before React attaches its handler can never be silently dropped. The label is unchanged.
@@ -61,6 +63,7 @@ export function LogFollowUpProvider({ propertyId, propertyLabel, assigneeId, dis
   const workflow = useAttemptWorkflow({
     opening,
     memberId: assigneeId ?? "",
+    viewer,
     readRow: async () => {
       const result = await lookup()
       if ("row" in result) return result.row

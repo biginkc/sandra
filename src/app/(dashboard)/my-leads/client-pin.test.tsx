@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   loadMyLeadsStage: vi.fn(),
   loadMyLeadDetail: vi.fn(),
   submitMyLeadCommand: vi.fn(),
+  loadMyLeadCommandReceipt: vi.fn(),
 }))
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.refresh, replace: mocks.replace }) }))
@@ -19,7 +20,7 @@ vi.mock("@/app/(dashboard)/sequences/actions", () => ({ listDripChoices: vi.fn(a
 vi.mock("./actions", () => ({
   loadMyLeads: mocks.loadMyLeads, loadMyLeadRow: mocks.loadMyLeadRow, loadMyLeadsStage: mocks.loadMyLeadsStage, loadMyLeadDetail: mocks.loadMyLeadDetail,
   loadMyLeadCallReferences: vi.fn(async () => ({ ok: true, options: [] })),
-  submitMyLeadCommand: mocks.submitMyLeadCommand, submitMyLeadHandoffDrip: vi.fn(), changeAcquisitionDesignation: vi.fn(), changeAcquisitionSettings: vi.fn(),
+  submitMyLeadCommand: mocks.submitMyLeadCommand, loadMyLeadCommandReceipt: mocks.loadMyLeadCommandReceipt, submitMyLeadHandoffDrip: vi.fn(), changeAcquisitionDesignation: vi.fn(), changeAcquisitionSettings: vi.fn(),
 }))
 vi.mock("./rep-sms-settings", () => ({ RepSmsSettings: () => null }))
 vi.mock("./rep-sms-composer", () => ({ RepSmsComposer: () => null }))
@@ -85,6 +86,7 @@ describe("MyLeadsClient pinned deep-link row", () => {
     for (const m of Object.values(mocks)) m.mockReset()
     mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([loaded], 25), kpis, drips: noDrips() })
     mocks.loadMyLeadDetail.mockResolvedValue({ ok: false, message: "no detail" })
+    mocks.loadMyLeadCommandReceipt.mockResolvedValue({ ok: true, receipt: { operation: "record_acquisition_contract", propertyId: "loaded-1", episodeId: "ep-loaded-1", attemptRecorded: false, followUp: null } })
     // Database truth for the two fixture leads; tests override per scenario.
     mocks.loadMyLeadRow.mockImplementation(async ({ propertyId }: { propertyId: string }) =>
       propertyId === "beyond-9" ? found(beyond) : propertyId === "loaded-1" ? found(loaded) : unavailable("not_found"))
@@ -668,6 +670,50 @@ describe("MyLeadsClient pinned deep-link row", () => {
       expect(screen.queryByText("Saving…")).toBeNull()
     })
 
+    it("Cancel while the save is uncertain asks first; keeping it open changes nothing, closing keeps the record, and reopening replays the SAME key with the original values locked", async () => {
+      const user = userEvent.setup()
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false)
+      mocks.submitMyLeadCommand.mockRejectedValueOnce(new Error("response lost")).mockResolvedValueOnce({ ok: true, duplicate: true })
+      render(ui(null, snap([loaded], 25)))
+      await openContract(user)
+      await user.click(screen.getByRole("button", { name: "Record contract" }))
+      await screen.findByText(/original request is preserved for reconciliation/)
+      await user.click(screen.getByRole("button", { name: "Cancel" }))
+      expect(confirm).toHaveBeenCalledWith("This save may already have gone through. Close anyway? Reopening this lead picks up where you left off.")
+      expect(screen.getByRole("dialog")).toBeInTheDocument()
+      expect(screen.getByLabelText("Signed at")).toHaveValue("2026-09-11T10:00")
+      // Escape is a user-initiated close as well.
+      await user.keyboard("{Escape}")
+      expect(confirm).toHaveBeenCalledTimes(2)
+      expect(screen.getByRole("dialog")).toBeInTheDocument()
+      confirm.mockReturnValue(true)
+      await user.click(screen.getByRole("button", { name: "Cancel" }))
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+      // Reopen: the original values are locked in the reconcile state and the replay is the identical request.
+      await user.click(within(screen.getByTestId("my-lead-actions-loaded-1")).getByRole("button", { name: "Contract signed" }))
+      await user.click(await screen.findByRole("button", { name: "Reconcile saved change" }))
+      await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2))
+      expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toEqual(mocks.submitMyLeadCommand.mock.calls[0][1])
+      confirm.mockRestore()
+    })
+
+    it("closing without an unresolved save never asks, and a code-driven close after a confirmed save stays silent", async () => {
+      const user = userEvent.setup()
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false)
+      mocks.submitMyLeadCommand.mockResolvedValue({ ok: true })
+      render(ui(null, snap([loaded], 25)))
+      await openContract(user)
+      await user.click(screen.getByRole("button", { name: "Cancel" }))
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+      await user.click(within(screen.getByTestId("my-lead-actions-loaded-1")).getByRole("button", { name: "Contract signed" }))
+      await screen.findByRole("dialog")
+      fireEvent.change(screen.getByLabelText("Signed at"), { target: { value: "2026-09-11T10:00" } })
+      await user.click(screen.getByRole("button", { name: "Record contract" }))
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+      expect(confirm).not.toHaveBeenCalled()
+      confirm.mockRestore()
+    })
+
     it("a rejected server action ends in the reconcile state", async () => {
       const user = userEvent.setup()
       mocks.submitMyLeadCommand.mockRejectedValue(new Error("response lost"))
@@ -692,9 +738,12 @@ describe("MyLeadsClient pinned deep-link row", () => {
         await act(async () => { await vi.advanceTimersByTimeAsync(25_001) })
       } finally { vi.useRealTimers() }
       await user.click(await screen.findByRole("button", { name: "Reconcile saved change" })) // replay of the frozen request
+      // A definite rejection of the replay keeps the values locked until the user chooses Start over.
+      expect(await screen.findByText("Sandra can't save these values. Start over to edit them.")).toBeInTheDocument()
       mocks.loadMyLeadRow.mockResolvedValue(found({ ...loaded, queueVersion: 2, sharedStatus: "interested" }))
       await user.click(await screen.findByRole("button", { name: "Refresh" }))
-      await screen.findByText(/Lead refreshed/)
+      await screen.findByText(/Sandra can't save these values/)
+      await user.click(await screen.findByRole("button", { name: "Start over" }))
       await user.click(screen.getByRole("button", { name: "Record contract" }))
       await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(3))
       expect(mocks.submitMyLeadCommand.mock.calls.map((call) => (call[1] as { expectedQueueVersion: number }).expectedQueueVersion)).toEqual([1, 1, 2])

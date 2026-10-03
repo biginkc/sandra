@@ -101,11 +101,31 @@ const viewerFailure = (error: unknown) =>
         "unknown",
         "Sign in with an active organization before updating a lead.",
       );
+/**
+ * True only for a real Postgres error RESPONSE: postgrest-js resolves transport failures
+ * (fetch failed, abort) as `{ error: { code: "" }, status: 0 }`, a non-JSON gateway body as an
+ * error with no code, and PostgREST's own errors with a longer `PGRST...` code. None of those
+ * prove the function ran and rolled back. A raised SQLSTATE (P0001, 42501, ...) has status > 0
+ * and exactly five characters.
+ */
+function isAnsweredRpcError(rpc: {
+  status?: number;
+  error?: { code?: string } | null;
+}) {
+  const code = rpc.error?.code;
+  return (
+    (rpc.status ?? 0) > 0 &&
+    typeof code === "string" &&
+    /^[0-9A-Z]{5}$/.test(code)
+  );
+}
 /** Marks a failure built from an RPC error RESPONSE: the call reached Postgres and rolled back. Never set for transport failures, thrown calls or missing confirmation. */
-const ans = <T extends object>(failureResult: T) => ({
-  ...failureResult,
-  answered: true as const,
-});
+const answeredWrapper =
+  (rpc: { status?: number; error?: { code?: string } | null }) =>
+  <T extends object>(failureResult: T) =>
+    isAnsweredRpcError(rpc)
+      ? { ...failureResult, answered: true as const }
+      : failureResult;
 class ReceiptLookupError extends Error {}
 const ALREADY_SAVED = "This was already saved. Refresh to see it.";
 type Certainty = "rejected" | "unknown";
@@ -160,7 +180,8 @@ export async function submitMyLeadHandoffDrip(input: {
     return failure("unknown", "You can update only your own queue.");
   let rpc: {
     data: { ok?: boolean } | null;
-    error: { message?: string } | null;
+    error: { message?: string; code?: string } | null;
+    status?: number;
   };
   try {
     rpc = await (
@@ -170,7 +191,8 @@ export async function submitMyLeadHandoffDrip(input: {
           args: Record<string, string | number>,
         ): Promise<{
           data: { ok?: boolean } | null;
-          error: { message?: string } | null;
+          error: { message?: string; code?: string } | null;
+          status?: number;
         }>;
       }
     ).rpc("fn_handoff_acquisition_lead_to_drip", {
@@ -189,6 +211,7 @@ export async function submitMyLeadHandoffDrip(input: {
     );
   }
   const { data, error } = rpc;
+  const ans = answeredWrapper(rpc);
   if (error) {
     const message = error.message ?? "";
     if (named(message, ["IDEMPOTENCY_CONFLICT"]))
@@ -295,6 +318,153 @@ export async function loadMyLeadQueueRow(input: {
       ok: false as const,
       message: "Could not load this lead. Please retry.",
     };
+  }
+}
+/** The `acquisition_commands.operation` values the My Leads save dialogs can write. */
+const MY_LEAD_RECEIPT_OPERATIONS = [
+  "log_acquisition_attempt",
+  "finalize_acquisition_attempt",
+  "ready_acquisition_offer",
+  "log_acquisition_offer",
+  "record_acquisition_contract",
+  "decline_acquisition_offer",
+  "handoff_acquisition_lead",
+  "handoff_acquisition_lead_to_drip",
+  "archive_acquisition_contract",
+] as const;
+export type MyLeadReceiptOperation = (typeof MY_LEAD_RECEIPT_OPERATIONS)[number];
+const RECEIPT_FOLLOW_UP_STATUSES = new Set([
+  "required",
+  "draft",
+  "sending",
+  "accepted",
+  "delivered",
+  "delivery_failed",
+  "blocked",
+  "failed_not_dispatched",
+  "unknown",
+]);
+export type MyLeadReceiptFollowUp = {
+  status:
+    | "required"
+    | "draft"
+    | "sending"
+    | "accepted"
+    | "delivered"
+    | "delivery_failed"
+    | "blocked"
+    | "failed_not_dispatched"
+    | "unknown";
+};
+export type MyLeadCommandReceipt = {
+  operation: MyLeadReceiptOperation;
+  propertyId: string;
+  episodeId: string;
+  attemptRecorded: boolean;
+  followUp: MyLeadReceiptFollowUp | null;
+};
+const RECEIPT_NOT_FOUND = "Sandra could not find the earlier save yet. Try Refresh again.";
+const RECEIPT_READ_FAILED = "Could not check the earlier save. Try Refresh again.";
+/**
+ * Verifies that a save under this idempotency key really committed, and for the lead and
+ * assignment episode the caller is looking at. `acquisition_commands` is closed to every
+ * client role, so this reads it with the admin client and enforces EVERY scope in code:
+ * the viewer's organization, the viewer as the actor (the command functions record
+ * auth.uid() as the actor, including when an owner acts for a rep), the operation, the
+ * key, and the property and episode stored in the receipt's own result. The follow-up
+ * status (attempts only) is read for that attempt with the same org, property and actor.
+ * Never fakes success: anything missing or non-matching is a failure.
+ */
+export async function loadMyLeadCommandReceipt(input: {
+  idempotencyKey: string;
+  operation: string;
+  propertyId: string;
+  episodeId: string;
+}): Promise<
+  | { ok: true; receipt: MyLeadCommandReceipt }
+  | { ok: false; code: "NOT_FOUND" | "FORBIDDEN" | "READ_FAILED"; message: string }
+> {
+  const operation = (MY_LEAD_RECEIPT_OPERATIONS as readonly string[]).includes(
+    input.operation,
+  )
+    ? (input.operation as MyLeadReceiptOperation)
+    : null;
+  if (
+    !operation ||
+    typeof input.idempotencyKey !== "string" ||
+    !input.idempotencyKey ||
+    !input.propertyId ||
+    !input.episodeId
+  )
+    return { ok: false, code: "NOT_FOUND", message: RECEIPT_NOT_FOUND };
+  let viewer;
+  try {
+    viewer = await myLeadsViewer();
+  } catch {
+    return { ok: false, code: "FORBIDDEN", message: RECEIPT_READ_FAILED };
+  }
+  try {
+    const admin = createAdminClient();
+    const found = await admin
+      .from("acquisition_commands")
+      .select("result")
+      .eq("org_id", viewer.orgId)
+      .eq("actor_user_id", viewer.userId)
+      .eq("operation", operation)
+      .eq("idempotency_key", input.idempotencyKey)
+      .maybeSingle();
+    if (found.error) throw new ReceiptLookupError();
+    const result = found.data?.result as Record<string, unknown> | undefined;
+    if (!result || typeof result !== "object" || Array.isArray(result))
+      return { ok: false, code: "NOT_FOUND", message: RECEIPT_NOT_FOUND };
+    // The receipt must belong to this lead and episode, whatever the key says.
+    // (The drip handoff's stored result carries no episode id; its property and key still bind it.)
+    const episodeMatches =
+      result.assignmentEpisodeId === input.episodeId ||
+      (result.assignmentEpisodeId === undefined &&
+        operation === "handoff_acquisition_lead_to_drip");
+    if (
+      result.ok !== true ||
+      result.propertyId !== input.propertyId ||
+      !episodeMatches
+    )
+      return { ok: false, code: "NOT_FOUND", message: RECEIPT_NOT_FOUND };
+    const isAttempt =
+      operation === "log_acquisition_attempt" ||
+      operation === "finalize_acquisition_attempt";
+    let followUp: MyLeadReceiptFollowUp | null = null;
+    if (isAttempt && typeof result.attemptId === "string") {
+      const obligation = await admin
+        .from("rep_sms_obligations")
+        .select("state")
+        .eq("org_id", viewer.orgId)
+        .eq("property_id", input.propertyId)
+        .eq("actor_user_id", viewer.userId)
+        .eq("attempt_id", result.attemptId)
+        .maybeSingle();
+      if (obligation.error) throw new ReceiptLookupError();
+      const state = (obligation.data as { state?: unknown } | null)?.state;
+      if (typeof state === "string") {
+        const status = state === "claimed" ? "sending" : state;
+        followUp = {
+          status: (RECEIPT_FOLLOW_UP_STATUSES.has(status)
+            ? status
+            : "unknown") as MyLeadReceiptFollowUp["status"],
+        };
+      }
+    }
+    return {
+      ok: true,
+      receipt: {
+        operation,
+        propertyId: input.propertyId,
+        episodeId: input.episodeId,
+        attemptRecorded: isAttempt,
+        followUp,
+      },
+    };
+  } catch {
+    return { ok: false, code: "READ_FAILED", message: RECEIPT_READ_FAILED };
   }
 }
 function reportMyLeadsReadFailure(operation: string) {
@@ -404,14 +574,22 @@ export async function submitMyLeadCommand(
     command === "log-attempt" && input.source === "sandra"
       ? "fn_finalize_acquisition_attempt"
       : commands[command];
-  let rpc: { data: Json | null; error: { message?: string } | null };
+  let rpc: {
+    data: Json | null;
+    error: { message?: string; code?: string } | null;
+    status?: number;
+  };
   try {
     rpc = await (
       client as unknown as {
         rpc(
           name: string,
           args: { p_input: Json },
-        ): Promise<{ data: Json | null; error: { message?: string } | null }>;
+        ): Promise<{
+          data: Json | null;
+          error: { message?: string; code?: string } | null;
+          status?: number;
+        }>;
       }
     ).rpc(rpcName, { p_input: input });
   } catch {
@@ -421,6 +599,7 @@ export async function submitMyLeadCommand(
     );
   }
   const { data, error } = rpc;
+  const ans = answeredWrapper(rpc);
   if (error) {
     const message = error.message ?? "";
     // A receipt exists for this key with a different request: the save already went through.
@@ -463,18 +642,25 @@ export async function submitMyLeadCommand(
         failure(
           certainty,
           "Attach the DialPad recording link before saving this call.",
+          "RECORDING_REQUIRED" as const,
+        ),
+      );
+    if (message.includes("MOTIVATION"))
+      return ans(
+        failure(
+          certainty,
+          "Specify motivation or choose No motivation provided.",
+          "MOTIVATION_REQUIRED" as const,
         ),
       );
     return ans(
       failure(
         certainty,
-        message.includes("MOTIVATION")
-          ? "Specify motivation or choose No motivation provided."
-          : message.includes("PENDING_OFFER")
-            ? "Resolve the current pending offer first."
-            : message.includes("RECIPIENT")
-              ? "The handoff recipient is unavailable. Ask the owner to update settings."
-              : "The update could not be saved. Check the fields and retry.",
+        message.includes("PENDING_OFFER")
+          ? "Resolve the current pending offer first."
+          : message.includes("RECIPIENT")
+            ? "The handoff recipient is unavailable. Ask the owner to update settings."
+            : "The update could not be saved. Check the fields and retry.",
       ),
     );
   }

@@ -1,6 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterEach, vi } from "vitest";
+import { resetSubmissionStoreForTests } from "./src/app/(dashboard)/my-leads/_components/submission-store";
 
 // jsdom doesn't fully wire window.localStorage. Install a minimal in-memory
 // Storage shim so components that read/write localStorage on mount can be
@@ -30,5 +31,7 @@ Element.prototype.scrollIntoView ??= vi.fn();
 afterEach(() => {
   cleanup();
   store.clear();
+  // A save record must never leak from one test into the next.
+  resetSubmissionStoreForTests();
   vi.clearAllMocks();
 });
