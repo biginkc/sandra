@@ -1,294 +1,249 @@
 import { createRoot } from "react-dom/client"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo } from "react"
 
 import LoginPage from "@/app/(auth)/login/page"
-import { AcquisitionReadinessDialog } from "@/app/(dashboard)/my-leads/_components/readiness-dialog"
-import { MyLeadQueueRow } from "@/app/(dashboard)/my-leads/_components/queue-row"
-import { MyLeadsQueue } from "@/app/(dashboard)/my-leads/_components/queue"
-import { WorkflowRecoveryContext } from "@/app/(dashboard)/my-leads/_components/workflow-form"
-import type {
-  MyLeadDetail,
-  MyLeadDetailPageResult,
-  MyLeadDetailState,
-  MyLeadQueueRow as MyLeadQueueRowDto,
-  MyLeadStage,
-  MyLeadsKpis,
-  MyLeadsQueueProps,
-} from "@/app/(dashboard)/my-leads/_components/types"
+import { MyLeadsClient } from "@/app/(dashboard)/my-leads/client"
 import {
   parseSelectedLeadParam,
   selectedLeadUnavailableMessage,
+  type SelectedLeadResult,
 } from "@/app/(dashboard)/my-leads/deep-link"
+import type {
+  AcquisitionDetail,
+  DetailFact,
+  AcquisitionKpis,
+  AcquisitionRoster,
+  QueueRow,
+  QueueSnapshot,
+} from "@/lib/my-leads/queries"
+import type { MyLeadStage } from "@/app/(dashboard)/my-leads/_components/types"
 
-// The database-free synthetic project cannot run the authenticated page server
-// loader or Supabase RLS. Feed its server-shaped result seam into the real
-// client-facing queue, row, text strip, readiness dialog, and login components;
-// no production auth bypass or direct database fixture is introduced here.
-const LINKED_LEAD_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
-const CURRENT_QUEUE_ID = "11111111-2222-4333-8444-555555555555"
-const EMPTY_GROUP = { rows: [], hasMore: false, nextCursor: null } as const
+export const LINKED_LEAD_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+export const CURRENT_QUEUE_ID = "11111111-2222-4333-8444-555555555555"
 
-const linkedDetail: MyLeadDetail = {
-  messages: {
-    rows: [
-      {
-        id: "text-3",
-        body: "Final check-in before the weekend ✅",
-        direction: "outbound",
-        createdAt: "2026-10-02T20:00:00.000Z",
-        createdLabel: "Oct 2, 2026",
-        deliveryStatus: "delivered",
-        attachmentCount: 0,
-      },
-      {
-        id: "text-2",
-        body: "Yes, Thursday works for me.",
-        direction: "inbound",
-        createdAt: "2026-10-01T18:00:00.000Z",
-        createdLabel: "Oct 1, 2026",
-        deliveryStatus: "received",
-        attachmentCount: 0,
-      },
-      {
-        id: "text-1",
-        body: "Hi — is Thursday still a good time to talk?",
-        direction: "outbound",
-        createdAt: "2026-09-30T18:00:00.000Z",
-        createdLabel: "Sep 30, 2026",
-        deliveryStatus: "delivered",
-        attachmentCount: 0,
-      },
-    ],
-    hasMore: false,
-    nextCursor: null,
-  },
-  notes: EMPTY_GROUP,
-  attempts: EMPTY_GROUP,
-  appointments: EMPTY_GROUP,
-  offers: EMPTY_GROUP,
-  history: EMPTY_GROUP,
+function emptyDetailGroup(): { rows: DetailFact[]; cursor: string | null; hasMore: boolean } {
+  return { rows: [], cursor: null, hasMore: false }
+}
+const viewer = { userId: "owner-a", orgId: "org-synthetic", isOwner: true }
+
+const roster: AcquisitionRoster = {
+  isOwner: true,
+  members: [
+    { id: "owner-a", label: "Owner A", role: "owner", acquisitionsEnabled: true, active: true, hasHistory: true },
+    { id: "owner-b", label: "Owner B", role: "member", acquisitionsEnabled: true, active: true, hasHistory: true },
+  ],
+  settings: { enabled: true, recipientId: null, revision: 1 },
 }
 
-function row(
+const linkedDetail: AcquisitionDetail = {
+  groups: {
+    messages: {
+      ...emptyDetailGroup(),
+      rows: [
+        { id: "text-3", at: "2026-10-02T20:00:00.000Z", actorId: null, body: "Final check-in before the weekend", direction: "outbound", deliveryStatus: "delivered", attachmentCount: 0 },
+        { id: "text-2", at: "2026-10-01T18:00:00.000Z", actorId: null, body: "Yes, Thursday works for me.", direction: "inbound", deliveryStatus: "received", attachmentCount: 0 },
+        { id: "text-1", at: "2026-09-30T18:00:00.000Z", actorId: null, body: "Hi — is Thursday still a good time to talk?", direction: "outbound", deliveryStatus: "delivered", attachmentCount: 0 },
+      ],
+    },
+    notes: emptyDetailGroup(),
+    attempts: emptyDetailGroup(),
+    appointments: emptyDetailGroup(),
+    offers: emptyDetailGroup(),
+    history: emptyDetailGroup(),
+  },
+}
+
+function queueRow(
   propertyId: string,
   address: string,
   homeownerName: string,
-  queueStage: MyLeadStage,
-): MyLeadQueueRowDto {
+  stage: MyLeadStage,
+): QueueRow {
   return {
     propertyId,
-    queueStage,
+    stage,
+    queueVersion: 1,
+    sharedStatus: stage === "contacted" ? "contacted" : "new_lead",
+    assignmentEpisodeId: "episode-synthetic-1",
+    assignedAt: "2026-10-03T14:00:00.000Z",
+    initializedAt: "2026-10-03T14:00:00.000Z",
+    episodeKind: "live",
+    clockEligible: true,
+    firstCallAt: stage === "contacted" ? "2026-10-03T14:12:00.000Z" : null,
+    stageEnteredAt: "2026-10-03T14:00:00.000Z",
     address,
+    city: "Kansas City",
+    state: "MO",
     homeownerName,
     phone: "(816) 555-0100",
-    assignment: { state: "known", label: "today" },
-    firstCall: { state: "started", label: "12 min elapsed" },
+    contactId: "contact-synthetic-1",
+    phones: ["(816) 555-0100"],
+    contactDnc: false,
+    temperature: null,
+    motivationKind: null,
+    motivationText: null,
     warningReasons: [],
-    attemptsCount: 2,
-    motivation: {
-      temperature: "warm",
-      motivationResponseKind: "provided",
-      text: "Planning a move this season",
-    },
-    nextStep: null,
+    nextStepAt: null,
+    nextStepType: null,
     offer: null,
-    archived: false,
+    attemptsCount: stage === "contacted" ? 1 : 0,
   }
 }
 
-const linkedRow = row(LINKED_LEAD_ID, "44 Synthetic Link Lane", "Linked Synthetic Seller", "contacted")
-const currentQueueRow = row(CURRENT_QUEUE_ID, "1 Current Queue Road", "Current Queue Seller", "not_contacted")
+const currentQueueRow = queueRow(CURRENT_QUEUE_ID, "1 Current Queue Road", "Current Queue Seller", "not_contacted")
 
-const stages: MyLeadsQueueProps["stages"] = {
-  not_contacted: { stage: "not_contacted", rows: [currentQueueRow], totalCount: 1, hasMore: true },
-  contacted: { stage: "contacted", rows: [], totalCount: 11, hasMore: true },
-  needs_offer: { stage: "needs_offer", rows: [], totalCount: 0, hasMore: false },
-  offer_sent: { stage: "offer_sent", rows: [], totalCount: 0, hasMore: false },
-  under_contract: { stage: "under_contract", rows: [], totalCount: 0, hasMore: false },
+function queueSnapshot(row = currentQueueRow): QueueSnapshot {
+  return {
+    stages: {
+      not_contacted: { rows: [row], totalCount: 1, filteredCount: 1, cursor: null, hasMore: false },
+      contacted: { rows: [], totalCount: 11, filteredCount: 11, cursor: "contacted-next", hasMore: true },
+      needs_offer: { rows: [], totalCount: 0, filteredCount: 0, cursor: null, hasMore: false },
+      offer_sent: { rows: [], totalCount: 0, filteredCount: 0, cursor: null, hasMore: false },
+      under_contract: { rows: [], totalCount: 0, filteredCount: 0, cursor: null, hasMore: false },
+    },
+    snapshotAt: "2026-10-03T15:00:00.000Z",
+    nextWarningAt: null,
+    search: "",
+  }
 }
 
-const kpis: MyLeadsKpis = {
-  attempts: 2,
-  reached: 1,
-  offersSent: 0,
-  contactWithoutFollowUp: 1,
-  needsOffers: 0,
-  appointmentsOverdue: 0,
-  lastAttemptAt: "2026-10-02T20:00:00.000Z",
-  lastAttemptClockVersion: undefined,
-  asOf: "2026-10-03T15:00:00.000Z",
-  missingRecordings: 0,
-  recordingExpectationUnknown: 0,
-  averageTalkSeconds: 180,
-  talkTimeSamples: 1,
-  talkTimeUnknown: 0,
-  conversationsOverFiveMinutes: 0,
+function kpis(overrides: Partial<AcquisitionKpis> = {}): AcquisitionKpis {
+  return {
+    contactWithoutFollowUp: 1,
+    needsOffers: 0,
+    appointmentsOverdue: 0,
+    lastAttemptAt: "2026-10-03T14:12:00.000Z",
+    lastAttemptClockVersion: undefined,
+    asOf: "2026-10-03T15:00:00.000Z",
+    missingRecordings: 0,
+    recordingExpectationUnknown: 0,
+    averageTalkSeconds: 180,
+    talkTimeSamples: 1,
+    talkTimeUnknown: 0,
+    conversationsOverFiveMinutes: 0,
+    attempts: 1,
+    reached: 1,
+    pendingOutcomes: 0,
+    firstCallSamples: 1,
+    firstCallPending: 0,
+    firstCallElapsedSeconds: 720,
+    appointmentsDue: 0,
+    appointmentsHeld: 0,
+    orgAppointmentsUnattributed: 0,
+    offersSent: 0,
+    staleLeads: 0,
+    ...overrides,
+  }
 }
 
-function readSearchParams() {
+export type SyntheticSubmitCall = { command: string; input: Record<string, unknown> }
+export type SyntheticMyLeadsBackend = {
+  linkedRow: QueueRow
+  rowReads: number
+  queueReads: Array<{ memberId: string; search: string; period: string }>
+  submitCalls: SyntheticSubmitCall[]
+  loadMyLeads(input: { memberId: string; search: string; period: string }): Promise<unknown>
+  loadMyLeadQueueRow(input: { memberId: string; propertyId: string }): Promise<unknown>
+  loadMyLeadDetail(): Promise<unknown>
+  loadMyLeadCallReferences(): Promise<unknown>
+  submitMyLeadCommand(command: string, input: Record<string, unknown>): Promise<unknown>
+  submitMyLeadHandoffDrip(): Promise<unknown>
+}
+
+export function createSyntheticBackend(): SyntheticMyLeadsBackend {
+  const backend: SyntheticMyLeadsBackend = {
+    linkedRow: queueRow(LINKED_LEAD_ID, "44 Synthetic Link Lane", "Linked Synthetic Seller", "contacted"),
+    rowReads: 0,
+    queueReads: [],
+    submitCalls: [],
+    async loadMyLeads(input) {
+      backend.queueReads.push(input)
+      return { ok: true, snapshot: queueSnapshot(), kpis: kpis({ needsOffers: backend.linkedRow.stage === "needs_offer" ? 1 : 0, offersSent: backend.linkedRow.stage === "offer_sent" ? 1 : 0 }) }
+    },
+    async loadMyLeadQueueRow(input) {
+      backend.rowReads += 1
+      if (input.propertyId.toLowerCase() !== LINKED_LEAD_ID.toLowerCase()) return { ok: false, message: "This lead is unavailable in your My Leads queue." }
+      return { ok: true, lookup: { status: "found", row: { ...backend.linkedRow }, snapshotAt: `2026-10-03T15:0${backend.rowReads}:00.000Z` } }
+    },
+    async loadMyLeadDetail() {
+      return { ok: true, detail: linkedDetail }
+    },
+    async loadMyLeadCallReferences() {
+      return { ok: true, options: [] }
+    },
+    async submitMyLeadCommand(command, input) {
+      backend.submitCalls.push({ command, input })
+      if (command === "ready-for-offer" && backend.submitCalls.filter(call => call.command === command).length === 1) {
+        backend.linkedRow = { ...backend.linkedRow, queueVersion: 2, sharedStatus: "interested", stage: "needs_offer" }
+        return { ok: false, code: "STALE_STATE", message: "This lead changed. Refresh before trying again." }
+      }
+      if (command === "ready-for-offer") {
+        backend.linkedRow = { ...backend.linkedRow, queueVersion: 2, sharedStatus: "interested", stage: "needs_offer", motivationKind: "specified", motivationText: "Seller plans to relocate.", temperature: "warm" }
+      }
+      if (command === "log-offer") {
+        backend.linkedRow = { ...backend.linkedRow, queueVersion: 3, sharedStatus: "offer_sent", stage: "offer_sent", offer: { id: "offer-1", amountCents: 12500050, method: "verbal", sentAt: "2026-10-03T15:10:00.000Z", followUpAt: "2026-10-04T15:10:00.000Z", outcome: "pending" } }
+      }
+      return { ok: true }
+    },
+    async submitMyLeadHandoffDrip() {
+      return { ok: true }
+    },
+  }
+  return backend
+}
+
+function selectedLeadFromLocation(): SelectedLeadResult {
   const params = new URLSearchParams(window.location.search)
   const values = params.getAll("lead")
-  return {
-    params,
-    selected: parseSelectedLeadParam({
-      lead: values.length === 0 ? undefined : values.length === 1 ? values[0] : values,
-    }),
+  const parsed = parseSelectedLeadParam({ lead: values.length === 0 ? undefined : values.length === 1 ? values[0] : values })
+  if (parsed.status !== "requested") return parsed
+  if (params.get("state") === "unavailable") {
+    return {
+      status: "unavailable",
+      message: selectedLeadUnavailableMessage("access_denied"),
+      retryHref: `/my-leads?lead=${encodeURIComponent(parsed.propertyId)}`,
+    }
   }
-}
-
-function detailPage(group: keyof MyLeadDetail): MyLeadDetailPageResult {
-  return { ok: true, group, page: linkedDetail[group] } as MyLeadDetailPageResult
+  if (parsed.propertyId !== LINKED_LEAD_ID) {
+    return { status: "unavailable", message: selectedLeadUnavailableMessage("not_found"), retryHref: `/my-leads?lead=${encodeURIComponent(parsed.propertyId)}` }
+  }
+  const linked = queueRow(LINKED_LEAD_ID, "44 Synthetic Link Lane", "Linked Synthetic Seller", "contacted")
+  return { status: "found", propertyId: LINKED_LEAD_ID, row: linked, snapshotAt: "2026-10-03T15:00:00.000Z" }
 }
 
 function DeepLinkAcceptanceApp() {
-  const [{ params, selected }, setLocation] = useState(readSearchParams)
-  const [search, setSearch] = useState("current-only")
-  const [selectedRepId, setSelectedRepId] = useState("owner-a")
-  const [dialogOpen, setDialogOpen] = useState(false)
-  const [submitCount, setSubmitCount] = useState(0)
-  const [recovery, setRecovery] = useState<{
-    message: string
-    blocked: boolean
-    busy: boolean
-    refresh: () => void
-  } | null>(null)
-  const [interactionStatus, setInteractionStatus] = useState<string | null>(null)
-
   useEffect(() => {
-    const onPopState = () => setLocation(readSearchParams())
-    window.addEventListener("popstate", onPopState)
-    return () => window.removeEventListener("popstate", onPopState)
+    const next = createSyntheticBackend()
+    window.__sandraSyntheticMyLeadsBackend = next
   }, [])
-
-  const selectedIsUnavailable =
-    selected.status === "requested" &&
-    (selected.propertyId !== LINKED_LEAD_ID || params.get("state") === "unavailable")
-
-  const detailState: MyLeadDetailState = selected.status === "requested" && selected.propertyId === LINKED_LEAD_ID && !selectedIsUnavailable
-    ? { status: "ready", detail: linkedDetail }
-    : { status: "loading" }
-  const linkedDetailPage = async (group: keyof MyLeadDetail, cursor: string | null) => {
-    void cursor
-    return detailPage(group)
-  }
-  const onStageAction = (action: Parameters<NonNullable<MyLeadsQueueProps["onStageAction"]>>[0], target: MyLeadQueueRowDto) => {
-    if (target.propertyId !== LINKED_LEAD_ID) return
-    if (action === "start-call") {
-      setInteractionStatus(`Call request queued for ${target.address}`)
-      return
-    }
-    if (action === "ready-for-offer") {
-      setInteractionStatus(null)
-      setDialogOpen(true)
-    }
-  }
-
-  const submitReadiness = async () => {
-    if (submitCount === 0) {
-      setSubmitCount(1)
-      setRecovery({
-        message: "This lead changed. Refresh before trying again.",
-        blocked: true,
-        busy: false,
-        refresh: () => setRecovery({
-          message: "Lead refreshed. Your draft is retained. Review it before saving.",
-          blocked: false,
-          busy: false,
-          refresh: () => undefined,
-        }),
-      })
-      return { ok: false as const, message: "This lead changed. Refresh before trying again." }
-    }
-    setRecovery(null)
-    setInteractionStatus(`Saved readiness for ${linkedRow.address}`)
-    return { ok: true as const }
-  }
-
-  const queueProps: MyLeadsQueueProps = useMemo(() => ({
-    stages,
-    kpis,
-    search,
-    selectedRepId,
-    repOptions: [
-      { id: "owner-a", label: "Owner A" },
-      { id: "owner-b", label: "Owner B" },
-    ],
-    canSelectRep: true,
-    selectedRepLabel: selectedRepId === "owner-a" ? "Owner A" : "Owner B",
-    onSearchChange: setSearch,
-    onRepChange: setSelectedRepId,
-    onLoadMore: async () => undefined,
-    onLoadDetail: async () => ({ ok: true, detail: linkedDetail }),
-    onLoadDetailPage: async (_propertyId, group, cursor) => linkedDetailPage(group, cursor),
-    onStageAction,
-  }), [search, selectedRepId])
+  const selectedLead = useMemo(() => selectedLeadFromLocation(), [])
 
   return (
-    <main className="mx-auto max-w-[1200px] space-y-5 p-6">
-      <header>
-        <h1>My Leads</h1>
-        <p data-testid="route-state">{window.location.pathname}{window.location.search}</p>
-      </header>
-
-      {selected.status === "invalid" && (
-        <div role="alert">
-          {selected.reason === "duplicate"
-            ? "This My Leads link contains more than one lead. Open a link with exactly one lead."
-            : "This My Leads link is invalid. Open a link with a valid lead id."}
-        </div>
-      )}
-
-      {selectedIsUnavailable && selected.status === "requested" && (
-        <div role="alert">
-          {selectedLeadUnavailableMessage("access_denied")} {" "}
-          <a href={`/my-leads?lead=${encodeURIComponent(selected.propertyId)}`}>Retry</a>
-        </div>
-      )}
-
-      {selected.status === "requested" && !selectedIsUnavailable && selected.propertyId === LINKED_LEAD_ID && (
-        <section aria-label="Selected lead from link">
-          <p>Opened from a My Leads link</p>
-          <MyLeadQueueRow
-            row={linkedRow}
-            idSuffix="-linked"
-            detailsOpen
-            detailState={detailState}
-            onToggleDetails={() => undefined}
-            onRetryDetails={() => undefined}
-            onLoadDetailPage={(group, cursor) => linkedDetailPage(group, cursor)}
-            onStageAction={onStageAction}
-          />
-        </section>
-      )}
-
-      <label>
-        Filter snapshot
-        <input aria-label="Synthetic queue filter" value={search} onChange={(event) => setSearch(event.target.value)} />
-      </label>
-      <MyLeadsQueue {...queueProps} />
-
-      {interactionStatus && <p role="status">{interactionStatus}</p>}
-
-      <WorkflowRecoveryContext.Provider value={recovery}>
-        <AcquisitionReadinessDialog
-          open={dialogOpen}
-          propertyId={linkedRow.propertyId}
-          propertyLabel={linkedRow.address}
-          initialTemperature={linkedRow.motivation.temperature}
-          initialMotivationResponse={null}
-          onOpenChange={(open) => {
-            setDialogOpen(open)
-            if (!open) setRecovery(null)
-          }}
-          onSubmit={submitReadiness}
-        />
-      </WorkflowRecoveryContext.Provider>
-    </main>
+    <MyLeadsClient
+      viewer={viewer}
+      roster={roster}
+      initialMemberId={viewer.userId}
+      initialSnapshot={queueSnapshot()}
+      initialKpis={kpis()}
+      selectedLead={selectedLead}
+      dialpad={{
+        connectionId: "synthetic-dialpad",
+        allowedOrigins: ["https://dialpad.example.test"],
+        binding: { status: "verified", dialpadUserId: "synthetic-user" },
+        grants: [],
+      }}
+    />
   )
 }
 
 function App() {
   return window.location.pathname === "/login" ? <LoginPage /> : <DeepLinkAcceptanceApp />
+}
+
+declare global {
+  interface Window {
+    __sandraSyntheticMyLeadsBackend: SyntheticMyLeadsBackend
+  }
 }
 
 const root = document.getElementById("root")
