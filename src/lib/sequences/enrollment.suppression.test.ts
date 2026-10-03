@@ -140,3 +140,13 @@ it("creates an active enrollment after not_interested", async () => {
     property_id: "property-1", sequence_id: "sequence-1", status: "active",
   }));
 });
+
+
+it("the same Nurture lead becomes eligible after the explicit Needs drip outcome save", async () => {
+  const held = clientFor({ outreach_dispo: "nurture" });
+  expect((await enrollLead(held.client as never, { sequenceId: "sequence-1", propertyId: "property-1" })).status).toBe("suppressed");
+  expect(held.insert).not.toHaveBeenCalled();
+  const ready = clientFor({ outreach_dispo: "needs_sequence" });
+  expect((await enrollLead(ready.client as never, { sequenceId: "sequence-1", propertyId: "property-1" })).status).toBe("enrolled");
+  expect(ready.insert).toHaveBeenCalledOnce();
+});

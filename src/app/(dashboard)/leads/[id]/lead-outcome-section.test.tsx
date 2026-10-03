@@ -93,6 +93,24 @@ describe("lead page outcome section", () => {
     expect(refreshMock).toHaveBeenCalled();
   });
 
+
+  it.each(["top", "rail"])("starts a Nurture lead through the same guarded action from the %s", async (surface) => {
+    const user = userEvent.setup();
+    const { rerender } = render(page({ initialDispo: "nurture" }));
+    await screen.findByRole("button", { name: "Start drip" });
+    expect(screen.getByText("Follow up", { selector: "span" })).toBeVisible();
+    await user.click(surface === "rail"
+      ? screen.getByRole("button", { name: "Start drip" })
+      : screen.getByTestId("dispo-needs-sequence").querySelector("button")!);
+    await user.click(await screen.findByRole("button", { name: /Seller follow-up/ }));
+    await waitFor(() => expect(setInboxDispoAndStartDripMock).toHaveBeenCalledWith("prop-1", "needs_sequence", "s1"));
+    expect(startDripForLeadsMock).not.toHaveBeenCalled();
+    expect(refreshMock).toHaveBeenCalled();
+    // router.refresh supplies the newly saved server outcome to the top bar.
+    rerender(page({ initialDispo: "needs_sequence" }));
+    expect(screen.getByText("Needs drip", { selector: "span" })).toBeVisible();
+  });
+
   it("opt-out from the lead page refetches the drip card", async () => {
     const user = userEvent.setup();
     render(page());

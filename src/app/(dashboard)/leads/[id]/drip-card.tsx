@@ -4,7 +4,8 @@ import { Droplet } from "lucide-react";
 import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 
-import { changeDripAction, cancelEnrollment, pauseEnrollmentAction, resumeEnrollmentAction, retrySequenceStepAction, startDripForLeads } from "@/app/(dashboard)/sequences/actions";
+import { setInboxDispoAndStartDrip } from "@/app/(dashboard)/messages/dispo-actions";
+import { changeDripAction, cancelEnrollment, pauseEnrollmentAction, resumeEnrollmentAction, retrySequenceStepAction } from "@/app/(dashboard)/sequences/actions";
 import { StartDripPicker, type PickResult } from "@/components/sequences/start-drip-picker";
 import { Button } from "@/components/ui/button";
 import { callAction } from "@/lib/errors/call-action";
@@ -46,20 +47,26 @@ export function DripCard({ propertyId, initialProgress }: { propertyId: string; 
 
   async function choose(sequenceId: string): Promise<PickResult> {
     const changing = Boolean(progress && ["active", "paused"].includes(progress.enrollmentStatus));
-    const result = changing && progress
-      ? await changeDripAction(progress.enrollmentId, sequenceId)
-      : await startDripForLeads(sequenceId, [propertyId]);
-    if (changing) {
+    if (changing && progress) {
+      const result = await changeDripAction(progress.enrollmentId, sequenceId);
+      // A failed replacement may still have stopped the previous drip.
       await refresh();
       router.refresh();
+      if (!result.ok) return { status: "failed", reason: result.error.message, saved: false };
+      return { ...result.data, saved: false };
     }
-    if (!result.ok) return { status: "failed", reason: result.error.message, saved: false };
-    const outcome = "results" in result.data ? result.data.results[0] : result.data;
-    if (!changing && outcome.status === "enrolled") {
+
+    // Match the top Needs drip action: an explicit start moves the outcome
+    // out of human-owned follow-up before the guarded enrollment attempt.
+    const result = await setInboxDispoAndStartDrip(propertyId, "needs_sequence", sequenceId);
+    if (result.ok || result.committed) {
       await refresh();
+      // Refresh the top outcome and active-drip guard even if only the
+      // outcome saved. Keep this card mounted so failure feedback survives.
       router.refresh();
     }
-    return { ...outcome, saved: false };
+    if (!result.ok) return { status: "failed", reason: result.error, saved: Boolean(result.committed) };
+    return { ...(result.enrollment ?? { status: "failed", reason: "Could not enroll this lead." }), saved: true };
   }
 
   function mutate(kind: "pause" | "resume" | "retry" | "stop") {
