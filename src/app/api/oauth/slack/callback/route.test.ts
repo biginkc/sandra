@@ -21,6 +21,16 @@ vi.mock("@/lib/integrations/slack/state", () => ({
   verifyOAuthState: vi.fn(),
 }));
 
+const slackInstallationMocks = vi.hoisted(() => ({
+  consumeSlackOAuthNonce: vi.fn(),
+  hashSlackOAuthNonce: vi.fn((value: string) => `hash:${value}`),
+  upsertSlackAccountLink: vi.fn(),
+  upsertSlackInstallation: vi.fn(),
+  upsertSlackInstallationAndAccountLink: vi.fn(),
+}));
+
+vi.mock("@/lib/integrations/slack/installation", () => slackInstallationMocks);
+
 vi.mock("@/lib/integrations/tokens/store", () => ({
   upsertOAuthToken: vi.fn(),
 }));
@@ -71,6 +81,10 @@ describe("oauth/slack/callback route", () => {
       userScopes: [],
     });
     upsertOAuthTokenMock.mockResolvedValue(undefined);
+    slackInstallationMocks.consumeSlackOAuthNonce.mockResolvedValue(true);
+    slackInstallationMocks.upsertSlackInstallation.mockResolvedValue({ installationId: "I123", installationVersion: 1 });
+    slackInstallationMocks.upsertSlackAccountLink.mockResolvedValue("L123");
+    slackInstallationMocks.upsertSlackInstallationAndAccountLink.mockResolvedValue({ installationId: "I123", installationVersion: 1, accountLinkId: "L123" });
   });
 
   it("redirects to /login when not authenticated", async () => {
@@ -168,5 +182,70 @@ describe("oauth/slack/callback route", () => {
     expect(reportErrorMock).toHaveBeenCalledWith(error, {
       tags: { surface: "oauth_slack_callback" },
     });
+  });
+
+  it("requires a live nonce and current org membership for preview OAuth state", async () => {
+    const claims = { userId: "user-1", orgId: "org-1", nonce: "nonce-1", purpose: "slack_installation", issuedAt: 1760000000 };
+    const state = `v2.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
+    const membershipBuilder = { select: vi.fn(), eq: vi.fn() };
+    membershipBuilder.select.mockReturnValue(membershipBuilder);
+    let eqCalls = 0;
+    membershipBuilder.eq.mockImplementation(() => {
+      eqCalls += 1;
+      return eqCalls === 2 ? Promise.resolve({ data: [{ org_id: "org-2", user_id: "user-1" }], error: null }) : membershipBuilder;
+    });
+    createClientMock.mockResolvedValue({ auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }) }, from: vi.fn(() => membershipBuilder) } as never);
+
+    const response = await GET(request(`?code=code-1&state=${encodeURIComponent(state)}`));
+    expect(response.headers.get("location")).toBe("https://app.example.com/settings/integrations?error=state");
+    expect(exchangeSlackCodeMock).not.toHaveBeenCalled();
+
+    eqCalls = 0;
+    membershipBuilder.eq.mockImplementation(() => {
+      eqCalls += 1;
+      return eqCalls === 2 ? Promise.resolve({ data: [{ org_id: "org-1", user_id: "user-1" }], error: null }) : membershipBuilder;
+    });
+    slackInstallationMocks.consumeSlackOAuthNonce.mockResolvedValueOnce(false);
+    const replay = await GET(request(`?code=code-1&state=${encodeURIComponent(state)}`));
+    expect(replay.headers.get("location")).toBe("https://app.example.com/settings/integrations?error=state");
+    expect(exchangeSlackCodeMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses preview authority when Slack omits returned installation identity", async () => {
+    const claims = { userId: "user-1", orgId: "org-1", nonce: "nonce-1", purpose: "slack_installation", issuedAt: 1760000000 };
+    const state = `v2.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
+    const membershipBuilder = { select: vi.fn(), eq: vi.fn() };
+    membershipBuilder.select.mockReturnValue(membershipBuilder);
+    let eqCalls = 0;
+    membershipBuilder.eq.mockImplementation(() => {
+      eqCalls += 1;
+      return eqCalls === 2 ? Promise.resolve({ data: [{ org_id: "org-1", user_id: "user-1" }], error: null }) : membershipBuilder;
+    });
+    createClientMock.mockResolvedValue({ auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }) }, from: vi.fn(() => membershipBuilder) } as never);
+    exchangeSlackCodeMock.mockResolvedValueOnce({ botToken: "xoxb-token", botUserId: "", appId: "A123", teamId: "T123", teamName: "Test Team", scopes: [], userToken: null, userId: "U123", userScopes: [] });
+    const response = await GET(request(`?code=code-1&state=${encodeURIComponent(state)}`));
+    expect(response.headers.get("location")).toBe("https://app.example.com/settings/integrations?error=callback");
+    expect(slackInstallationMocks.upsertSlackInstallation).not.toHaveBeenCalled();
+  });
+
+  it("persists preview installation and account binding in one RPC after membership recheck", async () => {
+    const claims = { userId: "user-1", orgId: "org-1", nonce: "nonce-1", purpose: "slack_installation", issuedAt: 1760000000 };
+    const state = `v2.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
+    const membershipBuilder = { select: vi.fn(), eq: vi.fn() };
+    membershipBuilder.select.mockReturnValue(membershipBuilder);
+    let eqCalls = 0;
+    membershipBuilder.eq.mockImplementation(() => {
+      eqCalls += 1;
+      return eqCalls === 2 ? Promise.resolve({ data: [{ org_id: "org-1", user_id: "user-1" }], error: null }) : membershipBuilder;
+    });
+    createClientMock.mockResolvedValue({ auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }) }, from: vi.fn(() => membershipBuilder) } as never);
+
+    const response = await GET(request(`?code=code-1&state=${encodeURIComponent(state)}`));
+    expect(response.headers.get("location")).toBe("https://app.example.com/settings/integrations?connected=slack");
+    expect(slackInstallationMocks.upsertSlackInstallationAndAccountLink).toHaveBeenCalledWith({
+      orgId: "org-1", teamId: "T123", appId: "A123", teamName: "Test Team", botUserId: "B123", botToken: "xoxb-token", scopes: ["chat:write"], installedBy: "user-1", slackUserId: "U123",
+    });
+    expect(slackInstallationMocks.upsertSlackInstallation).not.toHaveBeenCalled();
+    expect(slackInstallationMocks.upsertSlackAccountLink).not.toHaveBeenCalled();
   });
 });

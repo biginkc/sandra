@@ -4646,6 +4646,48 @@ export type Database = {
         }
         Relationships: []
       }
+      slack_installations: {
+        Row: { id: string; org_id: string; team_id: string; app_id: string; team_name: string | null; bot_user_id: string; bot_token_encrypted: string; scopes: string[]; installation_version: number; status: string; installed_by: string; revoked_at: string | null; revoked_reason: string | null; created_at: string; updated_at: string }
+        Insert: { id?: string; org_id: string; team_id: string; app_id: string; team_name?: string | null; bot_user_id: string; bot_token_encrypted: string; scopes?: string[]; installation_version?: number; status?: string; installed_by: string; revoked_at?: string | null; revoked_reason?: string | null; created_at?: string; updated_at?: string }
+        Update: { team_name?: string | null; bot_user_id?: string; bot_token_encrypted?: string; scopes?: string[]; installation_version?: number; status?: string; installed_by?: string; revoked_at?: string | null; revoked_reason?: string | null; updated_at?: string }
+        Relationships: []
+      }
+      slack_account_links: {
+        Row: { id: string; installation_id: string; org_id: string; user_id: string; slack_user_id: string; status: string; verified_at: string; revoked_at: string | null; created_at: string; updated_at: string }
+        Insert: { id?: string; installation_id: string; org_id: string; user_id: string; slack_user_id: string; status?: string; verified_at?: string; revoked_at?: string | null; created_at?: string; updated_at?: string }
+        Update: { slack_user_id?: string; status?: string; verified_at?: string; revoked_at?: string | null; updated_at?: string }
+        Relationships: []
+      }
+      slack_channel_approvals: {
+        Row: { id: string; installation_id: string; org_id: string; channel_id: string; sharing_policy_acknowledged: boolean; status: string; approved_by: string; approved_at: string; revoked_at: string | null; revoked_reason: string | null; created_at: string; updated_at: string }
+        Insert: { id?: string; installation_id: string; org_id: string; channel_id: string; sharing_policy_acknowledged?: boolean; status?: string; approved_by: string; approved_at?: string; revoked_at?: string | null; revoked_reason?: string | null; created_at?: string; updated_at?: string }
+        Update: { sharing_policy_acknowledged?: boolean; status?: string; approved_by?: string; approved_at?: string; revoked_at?: string | null; revoked_reason?: string | null; updated_at?: string }
+        Relationships: []
+      }
+      slack_oauth_nonces: {
+        Row: { nonce_hash: string; user_id: string; org_id: string; purpose: string; return_path: string | null; expires_at: string; used_at: string | null; created_at: string }
+        Insert: { nonce_hash: string; user_id: string; org_id: string; purpose?: string; return_path?: string | null; expires_at: string; used_at?: string | null; created_at?: string }
+        Update: { used_at?: string | null }
+        Relationships: []
+      }
+      slack_event_receipts: {
+        Row: { id: string; team_id: string; app_id: string; event_id: string; event_type: string; event_time: string | null; channel_id: string | null; message_ts: string | null; poster_slack_user_id: string | null; status: string; denial_code: string | null; created_at: string; updated_at: string }
+        Insert: { id?: string; team_id: string; app_id: string; event_id: string; event_type: string; event_time?: string | null; channel_id?: string | null; message_ts?: string | null; poster_slack_user_id?: string | null; status?: string; denial_code?: string | null; created_at?: string; updated_at?: string }
+        Update: { status?: string; denial_code?: string | null; updated_at?: string }
+        Relationships: []
+      }
+      slack_unfurl_jobs: {
+        Row: { id: string; receipt_id: string; installation_id: string | null; org_id: string | null; team_id: string; app_id: string; channel_id: string; message_ts: string; poster_slack_user_id: string; event_time: string; status: string; attempts: number; max_attempts: number; next_attempt_at: string; lease_expires_at: string | null; claim_token: string | null; last_error_code: string | null; expires_at: string; created_at: string; updated_at: string }
+        Insert: { id?: string; receipt_id: string; installation_id?: string | null; org_id?: string | null; team_id: string; app_id: string; channel_id: string; message_ts: string; poster_slack_user_id: string; event_time: string; status?: string; attempts?: number; max_attempts?: number; next_attempt_at?: string; lease_expires_at?: string | null; claim_token?: string | null; last_error_code?: string | null; expires_at: string; created_at?: string; updated_at?: string }
+        Update: { status?: string; attempts?: number; next_attempt_at?: string; lease_expires_at?: string | null; claim_token?: string | null; last_error_code?: string | null; updated_at?: string }
+        Relationships: []
+      }
+      slack_unfurl_job_urls: {
+        Row: { job_id: string; url_key: string; lead_id: string | null; lookup_status: string | null; authorization_status: string | null; last_error_code: string | null; updated_at: string }
+        Insert: { job_id: string; url_key: string; lead_id?: string | null; lookup_status?: string | null; authorization_status?: string | null; last_error_code?: string | null; updated_at?: string }
+        Update: { lead_id?: string | null; lookup_status?: string | null; authorization_status?: string | null; last_error_code?: string | null; updated_at?: string }
+        Relationships: []
+      }
       user_integration_prefs: {
         Row: {
           channel: string
@@ -7478,6 +7520,22 @@ export type Database = {
         Args: { p_provider: string; p_user_id: string }
         Returns: undefined
       }
+      approve_slack_channel: { Args: { p_approved_by: string; p_channel_id: string; p_installation_id: string; p_org_id: string; p_sharing_policy_acknowledged: boolean }; Returns: string }
+      claim_slack_unfurl_jobs: { Args: { p_claim_token: string; p_lease_seconds: number; p_limit: number; p_now: string }; Returns: Database["public"]["Tables"]["slack_unfurl_jobs"]["Row"][] }
+      cleanup_slack_unfurl_data: { Args: { p_cutoff: string }; Returns: number }
+      consume_slack_oauth_nonce: { Args: { p_nonce_hash: string; p_org_id: string; p_user_id: string }; Returns: boolean }
+      create_slack_oauth_nonce: { Args: { p_expires_at: string; p_nonce_hash: string; p_org_id: string; p_return_path: string | null; p_user_id: string }; Returns: undefined }
+      enqueue_slack_unfurl_event: { Args: { p_app_id: string; p_channel_id: string | null; p_denial_code?: string | null; p_event_id: string; p_event_time: string | null; p_event_type: string; p_installation_id: string | null; p_message_ts: string | null; p_org_id: string | null; p_poster_slack_user_id: string | null; p_team_id: string; p_url_keys: string[] }; Returns: { accepted: boolean; duplicate: boolean; job_id: string | null }[] }
+      finish_slack_unfurl_job: { Args: { p_claim_token: string; p_error_code?: string | null; p_job_id: string; p_status: string }; Returns: boolean }
+      get_slack_preview_attempt_facts: { Args: { p_org_id: string; p_property_id: string }; Returns: { latest_attempt_id: string | null; latest_attempt_occurred_at: string | null; latest_attempt_outcome: string | null; reached_call_id: string | null; reached_call_occurred_at: string | null }[] }
+      get_slack_installation: { Args: { p_app_id: string; p_key: string; p_org_id: string; p_team_id: string }; Returns: { app_id: string; bot_token: string; bot_user_id: string; installation_id: string; installation_version: number; org_id: string; scopes: string[]; status: string; team_id: string; team_name: string | null }[] }
+      revoke_slack_channel_approval: { Args: { p_app_id: string; p_channel_id: string; p_reason: string; p_team_id: string }; Returns: number }
+      revoke_slack_account_links: { Args: { p_app_id: string; p_reason: string; p_slack_user_ids: string[]; p_team_id: string }; Returns: number }
+      revoke_slack_installation: { Args: { p_app_id: string; p_reason: string; p_team_id: string }; Returns: number }
+      reschedule_slack_unfurl_job: { Args: { p_claim_token: string; p_error_code: string; p_job_id: string; p_next_attempt_at: string }; Returns: boolean }
+      upsert_slack_account_link: { Args: { p_installation_id: string; p_org_id: string; p_slack_user_id: string; p_user_id: string }; Returns: string }
+      upsert_slack_installation_and_account_link: { Args: { p_app_id: string; p_bot_token: string; p_bot_user_id: string; p_installed_by: string; p_key: string; p_org_id: string; p_scopes: string[]; p_slack_user_id: string; p_team_id: string; p_team_name: string | null; p_user_id: string }; Returns: { account_link_id: string; installation_id: string; installation_version: number }[] }
+      upsert_slack_installation: { Args: { p_app_id: string; p_bot_token: string; p_bot_user_id: string; p_installed_by: string; p_key: string; p_org_id: string; p_scopes: string[]; p_team_id: string; p_team_name: string | null }; Returns: { installation_id: string; installation_version: number }[] }
       get_oauth_token: {
         Args: {
           p_key: string
