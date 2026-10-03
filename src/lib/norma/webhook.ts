@@ -60,6 +60,13 @@ export type WebhookResponse = { status: number; body: Record<string, unknown> };
 
 const respond = (status: number, body: Record<string, unknown>): WebhookResponse => ({ status, body });
 
+/** Attempt echoed in the call's metadata; anything unreadable is 0, which matches no attempt (a no-op). */
+function parseAttempt(value: unknown): number {
+  if (value === undefined || value === null) return 1;
+  const n = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value.trim()) ? Number(value) : 0;
+  return Number.isInteger(n) ? n : 0;
+}
+
 function str(value: unknown): string | null {
   return typeof value === "string" && value.trim() && value.trim().length <= MAX_IDENTITY ? value.trim() : null;
 }
@@ -144,6 +151,8 @@ export async function handleBlandCallWebhook(
       callId,
       outcome: mapping.outcome,
       payload: mapping.payload,
+      // Calls sent before call-twice carry no attempt: they are attempt 1.
+      attempt: parseAttempt(metadata.attempt),
     });
     if (result.result === "applied" || result.result === "replayed") {
       // Attempt 1 was confirmed not answered: place the one retry now.

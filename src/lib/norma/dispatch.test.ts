@@ -98,7 +98,7 @@ describe("dispatchNormaCall", () => {
     const t = setup();
     await expect(t.run()).resolves.toEqual({ status: "dispatched", callId: "call-1" });
     expect(t.sendCall).toHaveBeenCalledWith({
-      phoneNumber: PHONE, requestId: REQUEST_ID, idempotencyKey: "22222222-2222-4222-8222-222222222222",
+      phoneNumber: PHONE, requestId: REQUEST_ID, idempotencyKey: "22222222-2222-4222-8222-222222222222", attempt: 1,
       variables: { seller_first_name: "Sam", property_address: "1 Main, KC, MO, 64111", rep_context: "ctx", asking_price: "", latest_notes: "" },
     });
     expect(t.rpcs.fn_norma_bind_call_id).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_call_id: "call-1" });

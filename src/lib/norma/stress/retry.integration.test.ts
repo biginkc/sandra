@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { claimNormaDispatch } from "../rpc";
 import { Harness } from "./harness";
 import { checkInvariants } from "./invariants";
 import { Barrier, rng } from "./trace";
@@ -116,6 +117,30 @@ describe.each(["voicemail", "no_answer_status"] as const)("first call not answer
     expect(await requestOf(ctx.lead.property)).toMatchObject({ status: "dispatch_rejected", attempt: 2 });
     expect(h.bland.sendsFor(request.id)).toHaveLength(1);
     expect(await enrollment(ctx.lead.enrollments[0]!)).toEqual({ status: "active", pause_reason: null });
+  });
+});
+
+describe("only the current attempt can complete or advance the request", () => {
+  it("a stale/forged attempt-1 id while attempt 2 is claimed but unbound is a no-op: no completion, no release, no task, no Slack row, no extra call", async () => {
+    const ctx = await place("voicemail", { secondKind: "callback" });
+    const request = await requestOf(ctx.lead.property);
+    h.skipRetryDispatchOnce = true;
+    const first = h.bland.callsForNumber(ctx.lead.phone)[0]!;
+    await h.bland.webhook(first, "good");
+    // Attempt 2 claimed (dispatching) but its call id is not bound yet.
+    expect(await claimNormaDispatch(h.client("claim"), request.id)).toBe(true);
+    expect(await requestOf(ctx.lead.property)).toMatchObject({ status: "dispatching", attempt: 2, bland_call_id: null });
+    for (const flavor of ["mismatch_call_id", "good"] as const) {
+      const hook = await h.bland.webhook(first, flavor);
+      expect(hook.status).toBe(200);
+      expect(hook.body.status).not.toBe("applied");
+    }
+    expect(await requestOf(ctx.lead.property)).toMatchObject({ status: "dispatching", attempt: 2, bland_call_id: null, outcome: null });
+    expect(await enrollment(ctx.lead.enrollments[0]!)).toEqual({ status: "paused", pause_reason: "norma_call" });
+    expect(await events(request.id, "norma_call_completed")).toBe(0);
+    expect(await countOf("select count(*) as n from public.norma_notifications where request_id = $1", [request.id])).toBe(0);
+    expect(await tasksOf(request.id)).toHaveLength(0);
+    expect(h.bland.sendsFor(request.id)).toHaveLength(1);
   });
 });
 

@@ -287,6 +287,26 @@ describe("norma call twice (migration 20261002150000)", () => {
     });
   });
 
+  it("only the current attempt can complete a request whose current call is not bound yet", async () => {
+    await withDb(async (db, ctx) => {
+      const { l, id } = await dispatched(db, ctx);
+      await complete(db, id, "call-1", "no_answer");
+      await claim(db, id); // attempt 2 dispatching, no call id yet
+      const before = await rowOf(db, id);
+      for (const [callId, attempt] of [["forged-1", 1], ["call-1", 1], ["forged-2", 3], ["forged-3", 0]] as const) {
+        const r = await complete(db, id, callId, "callback_requested", { attempt });
+        expect(r.result === "stale_attempt" || r.result === "replayed").toBe(true);
+      }
+      expect(await rowOf(db, id)).toEqual(before);
+      expect(await enrollmentState(db, l.enrollment!)).toEqual({ status: "paused", pause_reason: "norma_call" });
+      expect(await events(db, id, "norma_call_completed")).toBe(0);
+      expect(await count(db, "select count(*) as n from public.norma_notifications where request_id=$1", [id])).toBe(0);
+      expect(await count(db, "select count(*) as n from public.tasks where source_key=$1", [`norma_call:${id}`])).toBe(0);
+      // The current attempt's own result (webhook before bind) still completes it.
+      expect(await complete(db, id, "call-2", "callback_requested", { attempt: 2 })).toMatchObject({ result: "applied", status: "completed" });
+    });
+  });
+
   describe("the guard trigger allows only that one backwards edge", () => {
     const update = (db: Client, id: string, set: string) => db.query(`update public.norma_call_requests set ${set} where id=$1`, [id]);
     const rejects = async (db: Client, id: string, set: string, pattern: RegExp) => {

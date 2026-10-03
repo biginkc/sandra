@@ -177,7 +177,7 @@ async function reconcileRow(row: Row, deps: ReconcileDeps, now: number, summary:
       // A needs_review row already holding an unknown result gains nothing.
       if (!(row.status === "needs_review" && mapping.outcome === "unknown")) {
         const result = await completeNormaCall(deps.client, {
-          requestId: row.id, callId: row.bland_call_id, outcome: mapping.outcome, payload: mapping.payload,
+          requestId: row.id, callId: row.bland_call_id, outcome: mapping.outcome, payload: mapping.payload, attempt: row.attempt,
         });
         if (result.result === "applied" || result.result === "replayed") {
           // Attempt 1 confirmed not answered: place the one retry now.

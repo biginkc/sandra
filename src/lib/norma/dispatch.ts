@@ -117,6 +117,7 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
     phoneNumber: row.phone_e164,
     requestId,
     idempotencyKey: row.idempotency_key,
+    attempt: row.attempt ?? 1,
     variables,
   });
 

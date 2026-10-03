@@ -205,7 +205,7 @@ export class FakeBland {
       case "not_completed":
         return json(200, { ...this.payload(call), completed: false, status: "in-progress" });
       case "mismatch_key":
-        return json(200, { ...this.payload(call), metadata: { request_id: call.requestId, idempotency_key: randomUUID() } });
+        return json(200, { ...this.payload(call), metadata: { request_id: call.requestId, idempotency_key: randomUUID(), attempt: call.attempt } });
       case "mismatch_number":
         return json(200, { ...this.payload(call), to: "+18165559999" });
       case "mismatch_call_id":
@@ -230,7 +230,7 @@ export class FakeBland {
       completed: true,
       status: "completed",
       answered_by: "human",
-      metadata: { request_id: call.requestId, idempotency_key: call.key },
+      metadata: { request_id: call.requestId, idempotency_key: call.key, attempt: call.attempt },
       summary: "stress summary",
       variables: vars,
     };

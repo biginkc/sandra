@@ -139,6 +139,24 @@ const SCENE_MUTANTS: SceneMutant[] = [
     },
   },
   {
+    name: "a stale or forged attempt-1 call id can complete an unbound attempt 2",
+    apply: (q) =>
+      mutateFunction(q, "public.fn_norma_complete_call(uuid, text, text, jsonb)", "if v_payload ? 'attempt'", "if false and v_payload ? 'attempt'"),
+    scene: async (h) => {
+      const ctx = await h.lead({ enrollments: ["active"] }, { kind: "voicemail", secondKind: "callback" });
+      await h.requestCall(ctx, h.world.rep1);
+      const first = h.bland.callForNumber(ctx.lead.phone)!;
+      h.skipRetryDispatchOnce = true;
+      await h.bland.webhook(first, "good");
+      const id = (await h.scratch.pool.query("select id from public.norma_call_requests where property_id = $1", [ctx.lead.property])).rows[0].id;
+      const { claimNormaDispatch } = await import("../rpc");
+      await claimNormaDispatch(h.client("claim"), id);
+      await h.bland.webhook(first, "mismatch_call_id");
+      const row = (await h.scratch.pool.query("select status from public.norma_call_requests where id = $1", [id])).rows[0];
+      return row?.status === "dispatching" ? [] : [`a forged attempt-1 call id moved the request to ${row?.status}`];
+    },
+  },
+  {
     name: "a replayed completion is not short-circuited",
     apply: (q) =>
       mutateFunction(q, "public.fn_norma_complete_call(uuid, text, text, jsonb)", "if r.status = 'completed' then", "if false then"),

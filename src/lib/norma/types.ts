@@ -76,7 +76,7 @@ export type NormaCompleteResult =
       converted?: number;
     }
   | { result: "replayed"; status: string; outcome?: string | null }
-  | { result: "call_id_mismatch" | "invalid_state" | "not_found" | "call_id_required" | "call_id_conflict"; status?: string };
+  | { result: "call_id_mismatch" | "invalid_state" | "not_found" | "call_id_required" | "call_id_conflict" | "stale_attempt"; status?: string };
 
 export type NormaBindResult =
   | "bound"

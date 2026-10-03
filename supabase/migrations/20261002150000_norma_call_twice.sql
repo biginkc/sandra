@@ -256,6 +256,16 @@ begin
   if r.first_bland_call_id is not null and r.first_bland_call_id = p_call_id then
     return jsonb_build_object('result', 'replayed', 'status', r.status, 'outcome', r.outcome);
   end if;
+  -- Only the CURRENT attempt may complete or advance the request. Both calls
+  -- share request_id + idempotency_key, so the call echoes its attempt number in
+  -- the metadata (carried here as payload.attempt). While the current attempt has
+  -- no bound call id yet (between scheduling and bind) any id would otherwise be
+  -- accepted, including a stale or forged attempt-1 one: a result for another
+  -- attempt is a no-op.
+  if v_payload ? 'attempt'
+     and coalesce(case when (v_payload ->> 'attempt') ~ '^[0-9]+$' then (v_payload ->> 'attempt')::integer end, 0) <> r.attempt then
+    return jsonb_build_object('result', 'stale_attempt', 'status', r.status);
+  end if;
   if r.bland_call_id is not null and r.bland_call_id <> p_call_id then
     return jsonb_build_object('result', 'call_id_mismatch', 'status', r.status);
   end if;

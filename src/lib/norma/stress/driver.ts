@@ -212,12 +212,10 @@ async function runLifecycle(h: Harness, seed: number, index: number): Promise<Li
           await jitter(r, 3);
         }
         if (r.chance(0.3)) await h.bland.webhook(target, "unmapped_token");
-        // A wrong call id can only be detected once the real one is bound. A call-twice request unbinds
-        // its call id for a moment between the calls (the retry has none yet), so a non-connect lead is
-        // left out: the check-then-send below could land in that gap, which is the same documented
-        // limit (a signed webhook with the right request metadata but a call id we never saw).
+        // A wrong call id (carrying the first call's attempt) must be a no-op at every moment,
+        // including the gap between the two calls when the current attempt has no call id yet.
         const row = (await h.scratch.pool.query("select bland_call_id from public.norma_call_requests where property_id = $1 limit 1", [ctx.lead.property])).rows[0];
-        if (row?.bland_call_id && !NON_CONNECT_KINDS.includes(kind)) await h.bland.webhook(target, "mismatch_call_id");
+        if (row?.bland_call_id) await h.bland.webhook(target, "mismatch_call_id");
       })(),
     );
   }
