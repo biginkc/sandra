@@ -310,5 +310,35 @@ describe("MyLeadsClient pinned deep-link row", () => {
     await user.click(screen.getByRole("button", { name: "Refresh" }))
     await waitFor(() => expect(screen.getByRole("button", { name: "Record contract" })).toBeEnabled())
   })
+
+  it("with details open, a failed lookup plus a newer list row makes actions use the newer row", async () => {
+    const user = userEvent.setup()
+    mocks.submitMyLeadCommand.mockResolvedValue({ ok: true })
+    const episodeA = { ...beyond, assignmentEpisodeId: "ep-A", queueVersion: 1 }
+    const episodeB = { ...beyond, assignmentEpisodeId: "ep-B", assignedAt: "2026-09-12T00:00:00.000Z", queueVersion: 6, sharedStatus: "interested" }
+    render(ui(focusOn(episodeA)))
+    // Details stay open (the target starts expanded), so the displayed list is retained.
+    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([episodeB, loaded], 25), kpis, drips: noDrips() })
+    mocks.loadMyLeadRow.mockResolvedValue({ ok: false, code: "READ_FAILED", message: "x" })
+    await refreshNow()
+    await waitFor(() => expect(mocks.loadMyLeads).toHaveBeenCalled())
+    await user.click(within(screen.getByTestId("my-lead-actions-beyond-9")).getByRole("button", { name: "Contract signed" }))
+    await screen.findByRole("dialog")
+    fireEvent.change(screen.getByLabelText("Signed at"), { target: { value: "2026-09-11T10:00" } })
+    await user.click(screen.getByRole("button", { name: "Record contract" }))
+    await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalled())
+    expect(mocks.submitMyLeadCommand.mock.calls[0][1]).toMatchObject({ expectedEpisodeId: "ep-B", expectedQueueVersion: 6, expectedSharedStatus: "interested" })
+  })
+
+  it("renders a replied lead in its new section when a newer lookup changes its stage", async () => {
+    const replied = { ...dripOf(beyond), status: "Replied" as never, repliedAt: "2026-09-11T13:00:00Z" }
+    render(ui(focusOn(beyond), snap([loaded], 25), { ...noDrips(), replied: [replied], repliedCount: 1 }))
+    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([loaded], 25), kpis, drips: { ...noDrips(), replied: [replied], repliedCount: 1 } })
+    mocks.loadMyLeadRow.mockResolvedValue(found({ ...beyond, stage: "contacted", queueVersion: 2 }))
+    await refreshNow()
+    await waitFor(() => expect(screen.getByTestId("my-leads-section-contacted").querySelector('[data-lead-id="beyond-9"]')).not.toBeNull())
+    expect(screen.getByTestId("my-leads-section-not_contacted").querySelector('[data-lead-id="beyond-9"]')).toBeNull()
+    expect(leadEls("beyond-9")).toHaveLength(1)
+  })
 })
 

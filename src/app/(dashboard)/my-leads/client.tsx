@@ -67,7 +67,8 @@ function reconcileWithPin(snapshot:QueueSnapshot,drips:MyLeadDripSnapshot|null,p
     const page=stages[key];if(!page)continue;
     stages[key]={...page,rows:page.rows.flatMap(row=>row.propertyId!==id?[row]:lookup.row.stage===row.stage?[lookup.row]:[])};
   }
-  const refill=(drip:MyLeadDripSnapshot['active'][number])=>drip.propertyId===id?{...drip,queueRow:lookup.row}:drip;
+  // stagePages groups replied pins by drip.stage, so the stage follows the winning row.
+  const refill=(drip:MyLeadDripSnapshot['active'][number])=>drip.propertyId===id?{...drip,queueRow:lookup.row,stage:lookup.row.stage}:drip;
   return {snapshot:{...snapshot,stages},drips:drips?{...drips,active:drips.active.map(refill),replied:drips.replied.map(refill)}:drips};
 }
 const refreshTime = new Intl.DateTimeFormat('en-US', {month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',timeZone:'America/Chicago',timeZoneName:'short'});
@@ -96,13 +97,12 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   type CurrentRead = (Awaited<ReturnType<typeof loadMyLeads>> & {pin?:PinRead}) | null;
   const openingScope=JSON.stringify([member,search]);
   const activeScope=useRef(openingScope);activeScope.current=openingScope;
-  const currentSnapshot=useRef(snapshot);currentSnapshot.current=snapshot;
-  const currentDrips=useRef(drips);
-  useEffect(()=>{currentDrips.current=drips;},[drips]);
   const [pinRead,setPinRead]=useState<PinRead>(()=>focus?.propertyId&&focus.pin?{id:focus.propertyId,lookup:{status:'found',row:focus.pin,snapshotAt:initialSnapshot?.snapshotAt??''}}:null);
   const [pinNotice,setPinNotice]=useState<string|null>(null);
-  const currentPin=useRef(pinRead);
-  useEffect(()=>{currentPin.current=pinRead;},[pinRead]);
+  // The displayed list stays stable while details are open, but actions must use the
+  // freshest read: the latest list and the pin as last reconciled with it.
+  const freshRead=useRef<{snapshot:QueueSnapshot|null;drips:MyLeadDripSnapshot|null}>({snapshot:initialSnapshot,drips:initialDrips});
+  const actionPin=useRef<PinRead>(pinRead);
   // The deep-linked lead whose single-row lookup rides along with every refresh.
   const pinWanted=useRef<string|null>(focus?.propertyId??null);
   const readPin=async(propertyId:string,memberId:string):Promise<PinRead|'error'>=>{
@@ -114,7 +114,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     } catch {return 'error';}
   };
   const applyPin=(pin:PinRead)=>{
-    setPinRead(pin);
+    setPinRead(pin);actionPin.current=pin;
     setPinNotice(pin?.lookup.status==='unavailable'?MY_LEAD_ROW_REASON_COPY[pin.lookup.reason]:null);
   };
   /**
@@ -154,10 +154,12 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       // A failed lookup never resurrects an old pin over a list row: if the new list
       // has the lead the pin is dropped, otherwise the last good pin is kept.
       const inList=loaded.ok&&Boolean(pinId)&&(Object.values(loaded.snapshot.stages).some(page=>page?.rows.some(row=>row.propertyId===pinId))||[...loaded.drips.active,...loaded.drips.replied].some(drip=>drip.propertyId===pinId));
-      const pin:PinRead|undefined=pinResult==='error'?(inList?null:currentPin.current?.id===pinId?currentPin.current:null):pinResult;
+      const pin:PinRead|undefined=pinResult==='error'?(inList?null:actionPin.current?.id===pinId?actionPin.current:null):pinResult;
       const result=loaded.ok&&pin!==undefined?{...loaded,pin}:loaded;
       if(result.ok){
         const applied=!background||!reviewingDetails.current;
+        if(pinWanted.current===pinId&&pin!==undefined)actionPin.current=pin;
+        freshRead.current={snapshot:result.snapshot,drips:result.drips};
         if(pinResult&&pinWanted.current===pinId){if(pinResult!=='error')applyPin(pinResult);else if(inList&&applied)setPinRead(null);}
         // Replacing a paginated/reordered queue can unmount its recording player.
         // Background checks may update KPIs, but must leave open lead details alone.
@@ -183,7 +185,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     const scopeChanged=previousServerScope.current!==serverScopeKey;
     previousServerScope.current=serverScopeKey;
     ++request.current;
-    if(scopeChanged){setSnapshot(null);setKpis(null);setDrips(null);}
+    if(scopeChanged){setSnapshot(null);setKpis(null);setDrips(null);freshRead.current={snapshot:null,drips:null};}
     const timer=setTimeout(()=>void refresh(),250);
     return()=>{clearTimeout(timer);};
   },[refresh,serverScopeKey]);
@@ -202,7 +204,11 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     document.addEventListener('visibilitychange',onVisible);window.addEventListener('focus',onVisible);
     return()=>{cancelled=true;clearTimeout(timer);document.removeEventListener('visibilitychange',onVisible);window.removeEventListener('focus',onVisible);};
   },[snapshot,refresh,roster.settings.enabled]);
-  const rawRow=(id:string)=>findRow(snapshot,drips,id,pinRead);
+  // Newest copy across what is displayed (including load-more pages) and the freshest read,
+  // reconciled with the freshest pin lookup.
+  const rawRow=(id:string)=>pickAuthoritative(
+    newestCopy([...listCopies(snapshot,drips,id),...listCopies(freshRead.current.snapshot,freshRead.current.drips,id)]),
+    lookupOf(actionPin.current,id)).row;
   const finishOpening=async(opening:Opening,read:Promise<CurrentRead>)=>{
     pendingOpening.current=opening;
     setOpeningStatus({opening,message:'Loading current lead…',busy:true});
@@ -213,7 +219,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     if(!fresh||fresh.assignmentEpisodeId!==opening.row.assignmentEpisodeId){
       setOpeningStatus({opening,message:'This lead is unavailable or its assignment changed. Refresh the queue and reopen it.',busy:false});return;
     }
-    const latest=findRow(currentSnapshot.current,currentDrips.current,fresh.propertyId,currentPin.current);
+    const latest=rawRow(fresh.propertyId);
     // Do not rewind an even newer rendered snapshot, or silently change episodes.
     if(!latest||latest.assignmentEpisodeId!==fresh.assignmentEpisodeId){setOpeningStatus({opening,message:'This lead assignment changed. Refresh the queue and reopen it.',busy:false});return;}
     const row=latest&&latest.queueVersion>=fresh.queueVersion?latest:fresh;
@@ -293,7 +299,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     setSeenFocusKey(focusKey);setClearedForKey(null);
     setTarget(previous=>({propertyId:focus?.propertyId??null,notice:focus?.notice??null,nonce:previous.nonce+1}));
     setPinNotice(null);
-    setPinRead(focus?.propertyId&&focus.pin?{id:focus.propertyId,lookup:{status:'found',row:focus.pin,snapshotAt:snapshot?.snapshotAt??''}}:null);
+    {const seeded:PinRead=focus?.propertyId&&focus.pin?{id:focus.propertyId,lookup:{status:'found',row:focus.pin,snapshotAt:snapshot?.snapshotAt??''}}:null;setPinRead(seeded);actionPin.current=seeded;}
     if(focus?.propertyId){
       // A deep link always opens its rep's queue unfiltered.
       if(focus.memberId&&focus.memberId!==member)setMember(focus.memberId);
@@ -304,7 +310,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const clearFocus=()=>{
     if(target.propertyId||target.notice)setTarget(previous=>({propertyId:null,notice:null,nonce:previous.nonce}));
     // Dropping the target drops the pin, and any in-flight pin read is ignored.
-    pinWanted.current=null;setPinRead(null);setPinNotice(null);
+    pinWanted.current=null;setPinRead(null);actionPin.current=null;setPinNotice(null);
     if(focusKey!=='||'&&clearedForKey!==focusKey){setClearedForKey(focusKey);router.replace('/my-leads',{scroll:false});}
   };
   const view=snapshot?reconcileWithPin(snapshot,drips,pinRead,target.propertyId):null;
