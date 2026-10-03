@@ -477,8 +477,11 @@ describe("MyLeadsClient pinned deep-link row", () => {
       await openContract(user)
       await user.click(screen.getByRole("button", { name: "Record contract" }))
       expect(await screen.findByText("This was already saved. Refresh to see it.")).toBeInTheDocument()
+      mocks.loadMyLeads.mockClear()
       await user.click(await screen.findByRole("button", { name: "Refresh" }))
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+      // The host's committed path ran: its queue refresh barrier published a fresh read.
+      await waitFor(() => expect(mocks.loadMyLeads).toHaveBeenCalled())
       expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1)
     })
 

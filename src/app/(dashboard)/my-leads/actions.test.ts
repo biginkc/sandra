@@ -35,6 +35,40 @@ describe('My Leads command integration',()=>{
     mocks.rpc.mockResolvedValue({data:null,error:{message}});
     expect(await submitMyLeadCommand('log-offer',{propertyId:'lead'})).toMatchObject({ok:false,certainty});
   });
+  it.each(['INVALID_INPUT','INVALID_INPUT: MOTIVATION required','UNAUTHENTICATED','RECORDING_REQUIRED'])('classifies SQL %s as unknown (raised before the receipt lookup or not proof)',async message=>{
+    mocks.rpc.mockResolvedValue({data:null,error:{message}});
+    expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toMatchObject({ok:false,certainty:'unknown'});
+  });
+  it.each(['FEATURE_DISABLED','NOT_FOUND','DNC_LOCKED','PENDING_OFFER_EXISTS','RECIPIENT_UNAVAILABLE','PROVIDER_EVIDENCE_PENDING'])('classifies SQL %s as rejected (raised after the receipt lookup)',async message=>{
+    mocks.rpc.mockResolvedValue({data:null,error:{message}});
+    expect(await submitMyLeadCommand('log-offer',{propertyId:'lead'})).toMatchObject({ok:false,certainty:'rejected'});
+  });
+  it('shows sign-in guidance for an expired session and keeps it unknown',async()=>{
+    mocks.viewer.mockRejectedValue(Object.assign(new Error('Sign in'),{code:'UNAUTHENTICATED'}));
+    expect(await submitMyLeadCommand('log-offer',{propertyId:'lead'})).toEqual({ok:false,certainty:'unknown',code:'UNAUTHENTICATED',message:'Your session expired. Sign in again, then Reconcile.'});
+  });
+  describe('managerless no-answer receipt lookup',()=>{
+    const managerless={propertyId:'lead',outcome:'no_answer',idempotencyKey:'key-1',followUp:{templateId:'no-answer-callback-time',introId:'default',remainder:''}};
+    const lookup=(result:unknown,throws=false)=>mocks.adminFrom.mockReturnValue({select:()=>({eq:()=>({eq:()=>({eq:()=>({eq:()=>({maybeSingle:async()=>{if(throws)throw new Error('admin down');return result;}})})})})})});
+    it('a template error is rejected',async()=>{
+      expect(await submitMyLeadCommand('log-attempt',{...managerless,followUp:{introId:'default'}})).toMatchObject({ok:false,certainty:'rejected',message:'Choose a curated follow-up template.'});
+      expect(mocks.rpc).not.toHaveBeenCalled();
+    });
+    it('a confirmed missing receipt is rejected',async()=>{
+      lookup({data:null,error:null});
+      expect(await submitMyLeadCommand('log-attempt',managerless)).toMatchObject({ok:false,certainty:'rejected',message:'Enter the acquisitions manager.'});
+      expect(mocks.rpc).not.toHaveBeenCalled();
+    });
+    it('a lookup error is unknown',async()=>{
+      lookup({data:null,error:{message:'timeout'}});
+      expect(await submitMyLeadCommand('log-attempt',managerless)).toMatchObject({ok:false,certainty:'unknown'});
+      expect(mocks.rpc).not.toHaveBeenCalled();
+    });
+    it('an admin client that throws is unknown',async()=>{
+      lookup(null,true);
+      expect(await submitMyLeadCommand('log-attempt',managerless)).toMatchObject({ok:false,certainty:'unknown'});
+    });
+  });
   it('maps IDEMPOTENCY_CONFLICT to the already-saved answer',async()=>{
     mocks.rpc.mockResolvedValue({data:null,error:{message:'IDEMPOTENCY_CONFLICT'}});
     expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toEqual({ok:false,certainty:'unknown',code:'IDEMPOTENCY_CONFLICT',message:'This was already saved. Refresh to see it.'});
