@@ -7,7 +7,9 @@ vi.mock("../actions", () => ({ submitMyLeadCommand: actions.submitMyLeadCommand,
 
 import type { QueueRow } from "@/lib/my-leads/queries"
 import { useAttemptWorkflow, type AttemptOpening } from "./use-attempt-workflow"
-import { SUBMISSION_STORAGE_KEY, clearAllSubmissions, getEpoch, getSubmission, listSubmissions, resetSubmissionStoreForTests } from "./submission-store"
+import { SignOutForm } from "@/components/sign-out-form"
+import { fireEvent, render, screen } from "@testing-library/react"
+import { SUBMISSION_STORAGE_KEY, clearAllSubmissions, getEpoch, simulateReloadForTests, getSubmission, listSubmissions, resetSubmissionStoreForTests } from "./submission-store"
 
 /**
  * Store epoch + per-record CAS (spec v3). Every test drives the REAL hook against a fake of the command
@@ -243,7 +245,7 @@ describe("store epoch and per-record CAS", () => {
   })
 
   describe("an UNMOUNTED instance that is still the owner may finish", () => {
-    it("ok clears the record", async () => {
+    it("ok writes committed-not-seen (a success nobody saw), never a silent clear", async () => {
       const server = fakeServer(3)
       const gate = gateOf()
       actions.submitMyLeadCommand.mockImplementation(async (_c: string, input: Record<string, unknown>) => { await gate.promise; return server.execute(input) })
@@ -252,7 +254,7 @@ describe("store epoch and per-record CAS", () => {
       hook.unmount()
       gate.open()
       await finish()
-      expect(listSubmissions(scope(), () => true)).toEqual([])
+      expect(getSubmission({ ...scope(), operation: "log_offer" }) ?? getSubmission({ ...scope(), operation: "log-offer" })).toMatchObject({ status: "committed-not-seen" })
       expect(server.db.commits).toBe(1)
     })
     it("STALE on its only send returns the record to fresh", async () => {
@@ -369,6 +371,160 @@ describe("store epoch and per-record CAS", () => {
     await act(async () => { late.hook.result.current.recoveryValue?.refresh() })
     expect(late.handlers.onClose).toHaveBeenCalledTimes(1)
     expect(listSubmissions(scope(), () => true)).toEqual([])
+  })
+
+  describe("v4: no silent re-key (committed-not-seen, held-a-record, persisted pending)", () => {
+    it("Astra P1: a delayed ok after unmount and reopen is written committed-not-seen; Reconcile is refused with no send; Saved earlier, Refresh clears; 1 commit; the next opening is a legit new save", async () => {
+      const server = fakeServer(3)
+      const gate = gateOf()
+      actions.submitMyLeadCommand.mockImplementation(async (_c: string, input: Record<string, unknown>) => {
+        const result = server.execute(input) // the server commits at once
+        await gate.promise // but the answer is delayed
+        return result
+      })
+      const old = setup(opening())
+      const finishOld = startSave(old.hook)
+      old.hook.unmount()
+      const reopened = setup(opening("log-attempt", 4)) // reopened at the post-commit version
+      expect(reopened.hook.result.current.recoveryValue?.reconciliation).toBeDefined()
+      gate.open()
+      await finishOld() // the old, still-owner instance gets its ok while nobody is looking
+      expect(getSubmission({ ...scope(), operation: "log_attempt" })).toMatchObject({ status: "committed-not-seen" })
+      const calls = actions.submitMyLeadCommand.mock.calls.length
+      const out = await save(reopened.hook) // Reconcile
+      expect(out.ok).toBe(false)
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(calls) // no send, no re-key
+      expect(reopened.hook.result.current.recoveryValue).toMatchObject({ blocked: true, message: "Saved earlier. Refresh to see it." })
+      await save(reopened.hook)
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(calls)
+      expect(server.db.commits).toBe(1)
+      await act(async () => { reopened.hook.result.current.recoveryValue?.refresh() })
+      expect(reopened.handlers.onClose).toHaveBeenCalledTimes(1)
+      expect(listSubmissions(scope(), () => true)).toEqual([])
+      // A genuinely new opening afterwards is a new save with a new key.
+      const next = setup(opening("log-attempt", 4))
+      expect(next.hook.result.current.recoveryValue).toBeNull()
+      await save(next.hook, { ...typed, note: "next intended save" })
+      expect(sent(calls).idempotencyKey).not.toBe(sent(0).idempotencyKey)
+      expect(server.db.commits).toBe(2)
+    })
+
+    it("late ok to an unmounted owner, then reload and reopen: committed-not-seen comes back from storage as Saved earlier; 1 commit", async () => {
+      const server = fakeServer(3)
+      const gate = gateOf()
+      actions.submitMyLeadCommand.mockImplementation(async (_c: string, input: Record<string, unknown>) => { const r = server.execute(input); await gate.promise; return r })
+      const { hook } = setup(opening())
+      const finish = startSave(hook)
+      hook.unmount()
+      gate.open()
+      await finish()
+      simulateReloadForTests()
+      const reopened = setup(opening("log-attempt", 4))
+      expect(reopened.hook.result.current.recoveryValue).toMatchObject({ blocked: true, message: "Saved earlier. Refresh to see it." })
+      const calls = actions.submitMyLeadCommand.mock.calls.length
+      await save(reopened.hook)
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(calls)
+      await act(async () => { reopened.hook.result.current.recoveryValue?.refresh() })
+      expect(reopened.handlers.onClose).toHaveBeenCalledTimes(1)
+      expect(server.db.commits).toBe(1)
+    })
+
+    it("a commit shown on screen and then closed is SEEN: cleared, and the next opening is a legit new save with a new key (1 per intended save)", async () => {
+      const server = fakeServer(3)
+      actions.submitMyLeadCommand.mockImplementation(async (_c: string, input: Record<string, unknown>) => server.execute(input))
+      const first = setup(opening())
+      await save(first.hook)
+      expect(server.db.commits).toBe(1)
+      first.hook.rerender({ current: null })
+      expect(listSubmissions(scope(), () => true)).toEqual([])
+      first.hook.rerender({ current: opening("log-attempt", 4) })
+      expect(first.hook.result.current.recoveryValue).toBeNull()
+      await save(first.hook, { ...typed, note: "second intended save" })
+      expect(sent(1).idempotencyKey).not.toBe(sent(0).idempotencyKey)
+      expect(server.db.commits).toBe(2)
+    })
+
+    it("a superseded instance that finds the record gone (another host cleared it) gets Refresh-and-close only, never a fresh form; 1 commit", async () => {
+      const server = fakeServer(3)
+      actions.submitMyLeadCommand
+        .mockImplementationOnce(async (_c: string, input: Record<string, unknown>) => { server.execute(input); throw new Error("network") }) // W: committed, response lost
+        .mockResolvedValueOnce({ ok: false, answered: true, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." }) // Y
+      const w = setup(opening())
+      await save(w.hook)
+      w.hook.unmount()
+      const x = setup(opening())
+      const y = setup(opening())
+      await save(y.hook) // already-saved
+      await act(async () => { y.hook.result.current.recoveryValue?.refresh() }) // another host Refreshes: the record is cleared
+      expect(listSubmissions(scope(), () => true)).toEqual([])
+      const calls = actions.submitMyLeadCommand.mock.calls.length
+      await save(x.hook) // X still holds its old read: refused and re-read
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(calls)
+      expect(x.hook.result.current.recoveryValue).toMatchObject({ blocked: true, message: "This lead was updated. Refresh to see it." })
+      await save(x.hook)
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(calls) // still no way to mint a key
+      await act(async () => { x.hook.result.current.recoveryValue?.refresh() })
+      expect(x.handlers.onClose).toHaveBeenCalledTimes(1)
+      expect(server.db.commits).toBe(1)
+    })
+
+    it("a genuinely new opening on an empty store mints a key and commits once", async () => {
+      const server = fakeServer(3)
+      actions.submitMyLeadCommand.mockImplementation(async (_c: string, input: Record<string, unknown>) => server.execute(input))
+      const { hook } = setup(opening())
+      expect(hook.result.current.recoveryValue).toBeNull()
+      await save(hook)
+      expect(server.db.commits).toBe(1)
+    })
+
+    it("a reload with an unresolved record only in sessionStorage still triggers the sign-out confirm; declining keeps the key, accepting clears and bumps the epoch; 1 commit", async () => {
+      const server = fakeServer(3)
+      actions.submitMyLeadCommand.mockImplementationOnce(async (_c: string, input: Record<string, unknown>) => { server.execute(input); throw new Error("network") })
+        .mockImplementation(async (_c: string, input: Record<string, unknown>) => server.execute(input))
+      const first = setup(opening())
+      await save(first.hook)
+      first.hook.unmount()
+      simulateReloadForTests() // memory gone; the record survives only in sessionStorage
+      expect(window.sessionStorage.getItem(SUBMISSION_STORAGE_KEY)).not.toBeNull()
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false)
+      render(<SignOutForm />)
+      const form = screen.getByRole("button", { name: "Sign out" }).closest("form")!
+      const proceeded = fireEvent.submit(form)
+      expect(confirm).toHaveBeenCalledWith("A save may still be going through. Sign out anyway?")
+      expect(proceeded).toBe(false)
+      const key = getSubmission({ ...scope(), operation: "log_attempt" })!.key
+      expect(key).toBe(sent(0).idempotencyKey)
+      const again = setup(opening())
+      await save(again.hook)
+      expect(sent(1).idempotencyKey).toBe(key) // declining kept the key: the re-save is a duplicate
+      expect(server.db.commits).toBe(1)
+      confirm.mockReturnValue(true)
+      form.addEventListener("submit", (event) => event.preventDefault())
+      const epoch = getEpoch()
+      fireEvent.submit(form)
+      expect(getEpoch()).toBeGreaterThan(epoch)
+      expect(window.sessionStorage.getItem(SUBMISSION_STORAGE_KEY)).toBeNull()
+    })
+
+    it("committed-not-seen older than 24 hours is dropped: a fresh form on reopen (accepted risk) and a deliberate new save", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] })
+      try {
+        const server = fakeServer(3)
+        const gate = gateOf()
+        actions.submitMyLeadCommand.mockImplementation(async (_c: string, input: Record<string, unknown>) => { const r = server.execute(input); await gate.promise; return r })
+        const { hook } = setup(opening())
+        const finish = startSave(hook)
+        hook.unmount()
+        gate.open()
+        await finish()
+        expect(getSubmission({ ...scope(), operation: "log_attempt" })).toMatchObject({ status: "committed-not-seen" })
+        vi.setSystemTime(Date.now() + 25 * 60 * 60 * 1000)
+        const reopened = setup(opening("log-attempt", 4))
+        expect(reopened.hook.result.current.recoveryValue).toBeNull()
+        await save(reopened.hook, { ...typed, note: "deliberate new save" })
+        expect(server.db.commits).toBe(2)
+      } finally { vi.useRealTimers() }
+    })
   })
 
   it("a record is never taken over under a DIFFERENT key: an unresolved record created elsewhere wins and this instance stands down", async () => {

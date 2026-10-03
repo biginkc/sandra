@@ -9,7 +9,8 @@ import type { Json } from "@/lib/supabase/types"
  * recording links) is memory-only: it is never written to storage, so after a reload the
  * record keeps its key and route but not the values.
  */
-export type SubmissionStatus = "fresh" | "uncertain" | "already-saved" | "committed"
+/** "committed-not-seen": a late success reached a dialog that was not on screen. Seen only when the rep Refreshes. */
+export type SubmissionStatus = "fresh" | "uncertain" | "already-saved" | "committed" | "committed-not-seen"
 
 export type SubmissionScope = {
   viewerUserId: string
@@ -51,7 +52,7 @@ export type Lease = { epoch: number; rev: number; tag: string; id: string }
 export const SUBMISSION_STORAGE_KEY = "sandra:my-leads:submissions:v1"
 export const SUBMISSION_TTL_MS = 24 * 60 * 60 * 1000
 
-const STATUSES: readonly string[] = ["fresh", "uncertain", "already-saved", "committed"]
+const STATUSES: readonly string[] = ["fresh", "uncertain", "already-saved", "committed", "committed-not-seen"]
 const memory = new Map<string, StoredSubmission>()
 /** Memory only (never in sessionStorage): per-record revision and owner tag. */
 const meta = new Map<string, { rev: number; owner: string }>()
@@ -180,6 +181,8 @@ export function clearSubmission(identity: SubmissionIdentity, now = Date.now()) 
 export function clearAllSubmissions() {
   epoch += 1
   currentViewer = null
+  sendCounts.clear()
+  inflightSends = 0
   memory.clear()
   meta.clear()
   const store = storage()
@@ -202,7 +205,7 @@ export function discardOtherViewers(viewer: { userId: string; orgId: string }, n
 
 export function getEpoch(): number { return epoch }
 
-const unresolved = (record: { status: SubmissionStatus }) => record.status === "uncertain" || record.status === "already-saved"
+const unresolved = (record: { status: SubmissionStatus }) => record.status === "uncertain" || record.status === "already-saved" || record.status === "committed-not-seen"
 const leaseFor = (id: string, tag: string): Lease => ({ epoch, rev: meta.get(id)?.rev ?? 0, tag, id })
 
 /**
@@ -217,6 +220,8 @@ export function claimSubmission(record: StoredSubmission, tag: string, options: 
   // Compare-and-set: the record must still be at the revision the caller last read.
   if (options.expectRev !== undefined && (existing?.rev ?? 0) !== options.expectRev) return null
   if (existing && existing.key !== record.key && unresolved(existing) && !options.replaceKey) return null
+  // A success nobody saw is only ever resolved by Refresh (claimClear): no claim may build on it.
+  if (existing?.status === "committed-not-seen" && existing.key === record.key) return null
   meta.set(id, { rev: (meta.get(id)?.rev ?? existing?.rev ?? 0) + 1, owner: tag })
   memory.set(id, { ...record, payload: record.payload, rev: undefined })
   if (options.send) sendCounts.set(record.key, (sendCounts.get(record.key) ?? 0) + 1)
@@ -269,10 +274,10 @@ export function claimClear(identity: SubmissionIdentity, options: { epoch: numbe
 export function beginSend() { inflightSends += 1 }
 export function endSend() { inflightSends = Math.max(0, inflightSends - 1) }
 /** A save is in flight or an uncertain one is held in this page: signing out would drop its protection. */
-export function hasPendingSave(): boolean {
+export function hasPendingSave(now = Date.now()): boolean {
   if (inflightSends > 0) return true
-  for (const record of memory.values()) if (record.status === "uncertain") return true
-  return false
+  // Memory AND unexpired records restored from sessionStorage (a reload keeps the key, not the payload).
+  return all(now).some((record) => unresolved(record))
 }
 
 /** True while a save with its payload held in this page is not yet known to have committed. */

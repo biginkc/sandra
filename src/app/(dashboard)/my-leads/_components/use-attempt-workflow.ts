@@ -67,6 +67,8 @@ type Submission = {
   uncertain: boolean
   /** The server proved a receipt exists for this key: the save already went through. */
   alreadySaved?: boolean
+  /** A late success reached this state while its dialog was not on screen: the record says "committed-not-seen" until the rep Refreshes. */
+  committedNotSeen?: boolean
   /**
    * The route (which server operation) and member the key was FIRST sent down. A key must
    * never reach a different operation, so an edit that would change either is refused.
@@ -152,6 +154,8 @@ export const RESUME_NOTICE = "A save on this lead may already have gone through.
 export const MAY_HAVE_SAVED_MESSAGE = "A save on this lead may already have gone through. Refresh to check, or save this as a new update."
 export const MAY_HAVE_SAVED_REFRESH_ONLY_MESSAGE = "A save on this lead may already have gone through, and the lead has changed. Refresh to check."
 export const NEW_UPDATE_CONFIRM_MESSAGE = "The earlier save may already have gone through. Saving as a new update could record it twice. Save as a new update anyway?"
+export const SAVED_EARLIER_MESSAGE = "Saved earlier. Refresh to see it."
+export const UPDATED_MESSAGE = "This lead was updated. Refresh to see it."
 export const SUPERSEDED_MESSAGE = "This save was updated somewhere else. Check the lead before trying again."
 export const NO_VIEWER_MESSAGE = "Sign in with an active organization before updating a lead."
 export const NO_REP_MESSAGE = "This lead has no assigned rep, so it can't be updated here."
@@ -215,9 +219,13 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
   const activeOpening = useRef(opening)
   const callbacks = useRef({ onCommitted, onSettled, onReconciled, onClose, onDripChanged })
   const viewerRef = useRef(viewer)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
   useEffect(() => { activeOpening.current = opening; callbacks.current = { onCommitted, onSettled, onReconciled, onClose, onDripChanged }; viewerRef.current = viewer })
   const orphaned = useRef<{ opening: O; records: StoredSubmission[] } | null>(null)
   const allowNewKey = useRef<O | null>(null)
+  /** The opening that ever held or resumed a record. It may never mint a key by itself afterwards. */
+  const heldFor = useRef<O | null>(null)
+  const mounted = useRef(false)
   const recoveredRow = useRef<{ opening: O; row: QueueRow } | null>(null)
   const [recovery, setRecovery] = useState<Recovery<O> | null>(null)
 
@@ -227,7 +235,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
   })
   const recordOf = (state: Submission, current: O): StoredSubmission | null => {
     if (!state.route) return null
-    const status = state.committed ? "committed" : state.alreadySaved ? "already-saved" : state.atRisk ? "uncertain" : "fresh"
+    const status = state.committedNotSeen ? "committed-not-seen" : state.committed ? "committed" : state.alreadySaved ? "already-saved" : state.atRisk ? "uncertain" : "fresh"
     return {
       ...scopeFor(current, state.memberId ?? memberId, state.owner), operation: operationOf(state.route, current.row), key: state.key, route: state.route,
       status, createdAt: state.createdAt, payload: status === "fresh" ? null : state.payload, expectedQueueVersion: state.queueVersion,
@@ -241,6 +249,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     if (!lease) return false
     state.lease = lease
     state.readRev = lease.rev
+    heldFor.current = current
     return true
   }
   /** CONDITIONAL WRITE (an async result). False: this state was superseded and must not act. */
@@ -295,8 +304,14 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       .sort((a, b) => b.createdAt - a.createdAt)
     // Opening is READ-ONLY: a committed or fresh record has nothing left to protect, so it is simply
     // ignored here (the next send overwrites it with a new key). Nothing is written or claimed.
-    const record = records.find((item) => item.status === "uncertain" || item.status === "already-saved")
+    const record = records.find((item) => item.status === "uncertain" || item.status === "already-saved" || item.status === "committed-not-seen")
     if (!record) {
+      // Re-read table: no record (or one that was seen and cleared) is a fresh form ONLY for an
+      // opening that never held or resumed a record. One that did must not mint a key by itself.
+      if (heldFor.current === current) {
+        setRecovery({ opening: current, message: UPDATED_MESSAGE, blocked: true, busy: false, maySaved: { canSaveNew: false } })
+        return
+      }
       // The assignment episode changed under an unresolved record: it may have committed in the
       // old episode. Never clear it silently and never offer a new update inside the new episode.
       const orphans = listSubmissionsAcrossEpisodes(
@@ -314,17 +329,19 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     const payload = subjectMatches ? record.payload : null
     const state: Submission = {
       opening: current, key: record.key, payload, uncertain: record.status === "uncertain" && payload !== null,
-      alreadySaved: record.status === "already-saved", route: record.route, memberId, atRisk: true,
+      alreadySaved: record.status === "already-saved", committedNotSeen: record.status === "committed-not-seen", route: record.route, memberId, atRisk: true,
       createdAt: record.createdAt, released: payload === null, owner: { ...viewerRef.current }, queueVersion: record.expectedQueueVersion ?? null,
       tag: crypto.randomUUID(), epoch: getEpoch(), lease: null, readRev: record.rev ?? 0,
     }
     submission.current = state
+    heldFor.current = current
     // The only write on open: dropping a payload that no longer fits this row (a claim; a failure is harmless).
     if (payload !== record.payload) claim(state, current)
     // A reload lost the payload and the row has moved since the request was sent: the original may
     // have committed (which is what moved it). That is NOT proof of anything: ask.
     const moved = record.status === "uncertain" && !record.payload && typeof record.expectedQueueVersion === "number" && record.expectedQueueVersion !== current.row.queueVersion
-    if (state.alreadySaved) setRecovery({ opening: current, message: ALREADY_SAVED_MESSAGE, blocked: true, busy: false })
+    if (state.committedNotSeen) setRecovery({ opening: current, message: SAVED_EARLIER_MESSAGE, blocked: true, busy: false })
+    else if (state.alreadySaved) setRecovery({ opening: current, message: ALREADY_SAVED_MESSAGE, blocked: true, busy: false })
     else if (moved) setRecovery({ opening: current, message: MAY_HAVE_SAVED_MESSAGE, blocked: true, busy: false, maySaved: { canSaveNew: true } })
     else if (state.uncertain) setRecovery({ opening: current, message: UNCONFIRMED_MESSAGE, blocked: false, busy: false, reconciliation: { command: current.action, payload: payload! } })
     else if (state.atRisk) setRecovery({ opening: current, message: RESUME_NOTICE, blocked: false, busy: false })
@@ -336,7 +353,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     return () => {
       // Closing keeps an unresolved record. A confirmed save whose dialog is now gone is finished.
       const state = submission.current
-      if (opening && state?.opening === opening && state.committed) drop(state)
+      if (opening && state?.opening === opening && state.committed && !state.committedNotSeen) drop(state)
     }
     // resume/forget only read refs and module state; the opening is the only trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -378,6 +395,14 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
   const finishCommitted = async (current: O, state: Submission, input: Record<string, Json>, result: Extract<CommandResult, { ok: true }>): Promise<boolean> => {
     state.committed = true
     state.definite = false
+    // A late success that reaches a dialog nobody is looking at (unmounted, closed or another
+    // opening) is NOT seen: record it as committed-not-seen. Only the rep's Refresh clears it, so
+    // nothing can mint a new key for the same save in the meantime.
+    if (!mounted.current || activeOpening.current !== current) {
+      state.committedNotSeen = true
+      if (!write(state, current)) { state.committed = false; state.committedNotSeen = false; return false }
+      return true
+    }
     // A save a newer owner has taken over is theirs to resolve: the record stays uncertain and their
     // replay returns duplicate through this same path.
     const keepsOpen = current.action === "log-attempt" || current.action === "handoff"
@@ -428,7 +453,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     setRecovery({ opening: current, message: "Checking current lead access…", blocked: true, busy: true, reconciliation: frozenFor(current), maySaved: recovery?.opening === current ? recovery.maySaved : undefined })
     try {
       const earlier = submission.current
-      if (earlier?.opening === current && earlier.alreadySaved) {
+      if (earlier?.opening === current && (earlier.alreadySaved || earlier.committedNotSeen)) {
         // acquisition_commands cannot be read by any client role, and the server raises
         // IDEMPOTENCY_CONFLICT only when the stored request DIFFERS from the incoming one, so
         // replaying never helps. No result is claimed (see refreshAndClose).
@@ -506,8 +531,14 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       allowNewKey.current = null
       const held = submission.current
       if (held?.opening === opening && !claimDrop(held, opening)) return superseded(held, opening)
+      heldFor.current = null // an explicit, confirmed new update
       submission.current = null
       recoveredRow.current = null
+    }
+    // An opening that ever held or resumed a record never mints a key by itself: re-read instead.
+    if (submission.current?.opening !== opening && heldFor.current === opening) {
+      resume(opening)
+      return { ok: false as const, certainty: "unknown" as const, message: SUPERSEDED_MESSAGE }
     }
     const row = recoveredRow.current?.opening === opening ? recoveredRow.current.row : opening.row
     // A command's idempotency key belongs to the opening, not to the current

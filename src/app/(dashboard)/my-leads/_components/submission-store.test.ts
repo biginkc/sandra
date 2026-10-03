@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
-  SUBMISSION_STORAGE_KEY, SUBMISSION_TTL_MS, clearAllSubmissions, clearSubmission, discardOtherViewers, getSubmission, hasUncertainSubmission,
+  SUBMISSION_STORAGE_KEY, SUBMISSION_TTL_MS, clearAllSubmissions, clearSubmission, discardOtherViewers, getSubmission, hasPendingSave, hasUncertainSubmission,
   listSubmissions, resetSubmissionStoreForTests, saveSubmission, simulateReloadForTests, type StoredSubmission,
 } from "./submission-store"
 
@@ -115,5 +115,21 @@ describe("submission store", () => {
     saveSubmission(record({ payload: { a: 1 } }))
     simulateReloadForTests()
     expect(hasUncertainSubmission()).toBe(false)
+  })
+
+  it("hasPendingSave counts unexpired persisted unresolved records after a reload, not only memory", () => {
+    expect(hasPendingSave()).toBe(false)
+    for (const status of ["uncertain", "already-saved", "committed-not-seen"] as const) {
+      resetSubmissionStoreForTests()
+      saveSubmission(record({ status }))
+      simulateReloadForTests() // memory gone, sessionStorage kept
+      expect(hasPendingSave()).toBe(true)
+    }
+    resetSubmissionStoreForTests()
+    saveSubmission(record({ status: "committed" }))
+    expect(hasPendingSave()).toBe(false)
+    resetSubmissionStoreForTests()
+    saveSubmission(record({ status: "uncertain", createdAt: Date.now() - SUBMISSION_TTL_MS - 1 }))
+    expect(hasPendingSave()).toBe(false)
   })
 })
