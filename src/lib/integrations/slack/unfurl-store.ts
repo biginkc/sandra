@@ -210,6 +210,28 @@ export async function rescheduleSlackUnfurlJob(input: { jobId: string; claimToke
   return data === true || (Array.isArray(data) && data[0] === true);
 }
 
+export async function guardSlackUnfurlDispatch(input: {
+  jobId: string;
+  claimToken: string;
+  installationId: string;
+  installationVersion: number;
+  orgId: string;
+  channelId: string;
+  posterSlackUserId: string;
+}): Promise<boolean> {
+  const { data, error } = await admin().rpc("guard_slack_unfurl_dispatch", {
+    p_job_id: input.jobId,
+    p_claim_token: input.claimToken,
+    p_installation_id: input.installationId,
+    p_installation_version: input.installationVersion,
+    p_org_id: input.orgId,
+    p_channel_id: input.channelId,
+    p_poster_slack_user_id: input.posterSlackUserId,
+  });
+  rpcError(error, "dispatch guard");
+  return data === true || (Array.isArray(data) && data[0] === true);
+}
+
 export async function releaseSlackUnfurlJobClaim(input: { jobId: string; claimToken: string }): Promise<boolean> {
   const { data, error } = await admin().rpc("release_slack_unfurl_job_claim", {
     p_job_id: input.jobId,
@@ -232,6 +254,30 @@ export async function revokeSlackChannelApproval(teamId: string, appId: string, 
 export async function revokeSlackAccountLinks(teamId: string, appId: string, slackUserIds: string[], reason: string): Promise<void> {
   const { error } = await admin().rpc("revoke_slack_account_links", { p_team_id: teamId, p_app_id: appId, p_slack_user_ids: slackUserIds, p_reason: reason });
   rpcError(error, "account revocation");
+}
+
+export async function processSlackLifecycleEvent(input: {
+  teamId: string;
+  appId: string;
+  eventId: string;
+  eventType: string;
+  eventTime: string | null;
+  channelId: string | null;
+  slackUserIds: string[];
+  action: "installation" | "account_links" | "channel" | "noop";
+}): Promise<boolean> {
+  const { data, error } = await admin().rpc("process_slack_lifecycle_event", {
+    p_team_id: input.teamId,
+    p_app_id: input.appId,
+    p_event_id: input.eventId,
+    p_event_type: input.eventType,
+    p_event_time: input.eventTime,
+    p_channel_id: input.channelId,
+    p_slack_user_ids: input.slackUserIds,
+    p_action: input.action,
+  });
+  rpcError(error, "lifecycle event");
+  return data === true || (Array.isArray(data) && data[0] === true);
 }
 
 export async function cleanupSlackUnfurlData(cutoff: Date): Promise<number> {

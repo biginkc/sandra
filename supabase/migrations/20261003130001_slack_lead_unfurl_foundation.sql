@@ -402,10 +402,103 @@ $$;
 
 create or replace function public.reschedule_slack_unfurl_job(
   p_job_id uuid, p_claim_token uuid, p_next_attempt_at timestamptz, p_error_code text
-) returns boolean language sql security definer set search_path = public, pg_temp as $$
-  update public.slack_unfurl_jobs set status=case when attempts>=max_attempts then 'failed' else 'queued' end,
-    claim_token=null,lease_expires_at=null,next_attempt_at=p_next_attempt_at,last_error_code=p_error_code,updated_at=now()
-    where id=p_job_id and status='processing' and claim_token=p_claim_token returning true;
+) returns boolean language plpgsql security definer set search_path = public, pg_temp as $$
+declare v_receipt uuid; v_status text; v_rows integer;
+begin
+  update public.slack_unfurl_jobs
+     set status=case when attempts>=max_attempts then 'failed' else 'queued' end,
+         claim_token=null,lease_expires_at=null,next_attempt_at=p_next_attempt_at,
+         last_error_code=p_error_code,updated_at=now()
+   where id=p_job_id and status='processing' and claim_token=p_claim_token
+   returning receipt_id,status into v_receipt,v_status;
+  get diagnostics v_rows = row_count;
+  if v_rows > 0 and v_status = 'failed' then
+    update public.slack_event_receipts set status='failed',updated_at=now() where id=v_receipt;
+  end if;
+  return v_rows > 0;
+end;
+$$;
+
+-- Recheck every mutable authorization fact while holding the claim and
+-- installation rows. This fenced guard runs after CRM rendering and just
+-- before Slack delivery, so a revocation cannot race a paused worker into a
+-- disclosure. It intentionally returns only a boolean and never exposes a
+-- credential or message body.
+create or replace function public.guard_slack_unfurl_dispatch(
+  p_job_id uuid, p_claim_token uuid, p_installation_id uuid,
+  p_installation_version integer, p_org_id uuid, p_channel_id text,
+  p_poster_slack_user_id text
+) returns boolean language plpgsql security definer set search_path = public, pg_temp as $$
+declare v_user_id uuid; v_found integer;
+begin
+  -- Match the installation-first order used by lifecycle revocation. The
+  -- guard must not deadlock a revoke that is already fencing this generation.
+  perform 1 from public.slack_installations i
+   where i.id=p_installation_id and i.org_id=p_org_id and i.status='active'
+     and i.installation_version=p_installation_version
+   for update;
+  if not found then return false; end if;
+
+  select l.user_id into v_user_id
+    from public.slack_account_links l
+   where l.installation_id=p_installation_id and l.org_id=p_org_id
+     and l.slack_user_id=p_poster_slack_user_id and l.status='active'
+   for update;
+  if not found then return false; end if;
+
+  perform 1 from public.memberships m
+   where m.user_id=v_user_id and m.org_id=p_org_id
+     and coalesce(m.access_status,'active')='active'
+     and m.deletion_prepared_at is null
+     and (m.access_expires_at is null or m.access_expires_at > now())
+   for update;
+  if not found then return false; end if;
+
+  perform 1 from public.slack_channel_approvals a
+   where a.installation_id=p_installation_id and a.org_id=p_org_id
+     and a.channel_id=p_channel_id and a.status='active'
+     and a.sharing_policy_acknowledged=true
+   for update;
+  if not found then return false; end if;
+
+  select 1 into v_found
+    from public.slack_unfurl_jobs j
+   where j.id=p_job_id and j.status='processing' and j.claim_token=p_claim_token
+     and j.installation_id=p_installation_id and j.installation_version=p_installation_version
+     and j.org_id=p_org_id and j.channel_id=p_channel_id
+     and j.poster_slack_user_id=p_poster_slack_user_id
+   for update;
+  return found;
+end;
+$$;
+
+-- Lifecycle receipts and their invalidation are one transaction. A duplicate
+-- Slack delivery therefore cannot revoke a newly reinstalled generation.
+create or replace function public.process_slack_lifecycle_event(
+  p_team_id text, p_app_id text, p_event_id text, p_event_type text,
+  p_event_time timestamptz, p_channel_id text, p_slack_user_ids text[],
+  p_action text
+) returns boolean language plpgsql security definer set search_path = public, pg_temp as $$
+declare v_receipt uuid;
+begin
+  insert into public.slack_event_receipts(
+    team_id,app_id,event_id,event_type,event_time,channel_id,status,denial_code
+  ) values (
+    p_team_id,p_app_id,p_event_id,p_event_type,p_event_time,p_channel_id,'revoked','lifecycle_processed'
+  ) on conflict (team_id,event_id) do nothing returning id into v_receipt;
+  if v_receipt is null then return false; end if;
+
+  if p_action='installation' then
+    perform public.revoke_slack_installation(p_team_id,p_app_id,p_event_type);
+  elsif p_action='account_links' then
+    perform public.revoke_slack_account_links(p_team_id,p_app_id,coalesce(p_slack_user_ids,'{}'),p_event_type);
+  elsif p_action='channel' and p_channel_id is not null then
+    perform public.revoke_slack_channel_approval(p_team_id,p_app_id,p_channel_id,p_event_type);
+  elsif p_action <> 'noop' then
+    raise exception 'INVALID_LIFECYCLE_ACTION' using errcode='22023';
+  end if;
+  return true;
+end;
 $$;
 
 create or replace function public.revoke_slack_installation(
@@ -505,6 +598,8 @@ revoke all on function public.claim_slack_unfurl_jobs(timestamptz,uuid,integer,i
 revoke all on function public.release_slack_unfurl_job_claim(uuid,uuid) from public,anon,authenticated;
 revoke all on function public.finish_slack_unfurl_job(uuid,uuid,text,text) from public,anon,authenticated;
 revoke all on function public.reschedule_slack_unfurl_job(uuid,uuid,timestamptz,text) from public,anon,authenticated;
+revoke all on function public.guard_slack_unfurl_dispatch(uuid,uuid,uuid,integer,uuid,text,text) from public,anon,authenticated;
+revoke all on function public.process_slack_lifecycle_event(text,text,text,text,timestamptz,text,text[],text) from public,anon,authenticated;
 revoke all on function public.revoke_slack_installation(text,text,text) from public,anon,authenticated;
 revoke all on function public.revoke_slack_channel_approval(text,text,text,text) from public,anon,authenticated;
 revoke all on function public.revoke_slack_account_links(text,text,text[],text) from public,anon,authenticated;
@@ -522,6 +617,8 @@ grant execute on function public.claim_slack_unfurl_jobs(timestamptz,uuid,intege
 grant execute on function public.release_slack_unfurl_job_claim(uuid,uuid) to service_role;
 grant execute on function public.finish_slack_unfurl_job(uuid,uuid,text,text) to service_role;
 grant execute on function public.reschedule_slack_unfurl_job(uuid,uuid,timestamptz,text) to service_role;
+grant execute on function public.guard_slack_unfurl_dispatch(uuid,uuid,uuid,integer,uuid,text,text) to service_role;
+grant execute on function public.process_slack_lifecycle_event(text,text,text,text,timestamptz,text,text[],text) to service_role;
 grant execute on function public.revoke_slack_installation(text,text,text) to service_role;
 grant execute on function public.revoke_slack_channel_approval(text,text,text,text) to service_role;
 grant execute on function public.revoke_slack_account_links(text,text,text[],text) to service_role;

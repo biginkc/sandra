@@ -222,9 +222,9 @@ const PERMANENT_SLACK_ERRORS = new Set([
 
 function slackPlatformErrorCode(error: unknown): string | null {
   if (!error || typeof error !== "object") return null;
-  const candidate = error as { data?: { error?: unknown }; statusCode?: unknown };
-  if (candidate.statusCode === 401) return "invalid_auth";
-  if (candidate.statusCode === 404) return "channel_not_found";
+  // HTTP status is transport/proxy metadata. Only Slack's structured error
+  // code is authoritative for identity or channel decisions.
+  const candidate = error as { data?: { error?: unknown } };
   return typeof candidate.data?.error === "string" ? candidate.data.error : null;
 }
 

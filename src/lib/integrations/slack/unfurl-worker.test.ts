@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   finish: vi.fn(),
   reschedule: vi.fn(),
   release: vi.fn(),
+  guard: vi.fn(),
+  revokeInstallation: vi.fn(),
   loadData: vi.fn(),
   blocks: vi.fn(),
   unfurl: vi.fn(),
@@ -32,6 +34,8 @@ vi.mock("./unfurl-store", () => ({
   finishSlackUnfurlJob: mocks.finish,
   rescheduleSlackUnfurlJob: mocks.reschedule,
   releaseSlackUnfurlJobClaim: mocks.release,
+  guardSlackUnfurlDispatch: mocks.guard,
+  revokeSlackInstallation: mocks.revokeInstallation,
 }));
 vi.mock("./unfurl-policy", () => ({
   parseSlackLeadUrl: vi.fn((url: string) => ({ ok: true, link: { originalUrl: url, propertyId: "11111111-1111-4111-8111-111111111111", kind: "lead" } })),
@@ -89,6 +93,8 @@ beforeEach(() => {
   mocks.finish.mockResolvedValue(true);
   mocks.reschedule.mockResolvedValue(true);
   mocks.release.mockResolvedValue(true);
+  mocks.guard.mockResolvedValue(true);
+  mocks.revokeInstallation.mockResolvedValue(undefined);
 });
 
 describe("Slack unfurl worker", () => {
@@ -145,7 +151,7 @@ describe("Slack unfurl worker", () => {
     mocks.claim.mockResolvedValue([{ ...job, attempts: 2 }]);
     mocks.verify.mockResolvedValue({ allowed: false, reason: "channel_sharing_denied" });
     await runSlackUnfurlSweep();
-    expect(mocks.verify).toHaveBeenCalledTimes(2);
+    expect(mocks.verify).toHaveBeenCalledTimes(3);
     expect(mocks.unfurl).toHaveBeenCalledTimes(1);
     expect(mocks.finish).toHaveBeenLastCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "noop", errorCode: "channel_sharing_denied" });
   });
@@ -183,6 +189,40 @@ describe("Slack unfurl worker", () => {
     }));
     const retry = mocks.reschedule.mock.calls[0][0] as { nextAttemptAt: Date };
     expect(retry.nextAttemptAt.getTime()).toBeGreaterThanOrEqual(now + 600_000 - 1_000);
+  });
+
+  it("fences a paused render when current authorization was revoked", async () => {
+    mocks.guard.mockResolvedValueOnce(false);
+    const result = await runSlackUnfurlSweep();
+    expect(result.noops).toBe(1);
+    expect(mocks.unfurl).not.toHaveBeenCalled();
+    expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "noop", errorCode: "dispatch_guard_failed" });
+  });
+
+  it("expires without sending when the TTL crosses while loading a snapshot", async () => {
+    let clock = Date.now();
+    const clockSpy = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    mocks.claim.mockResolvedValue([{ ...job, event_time: new Date(clock).toISOString(), expires_at: new Date(clock + 1_000).toISOString(), lease_expires_at: new Date(clock + 90_000).toISOString() }]);
+    mocks.loadData.mockImplementationOnce(async () => {
+      clock += 2_000;
+      return { propertyId: "11111111-1111-4111-8111-111111111111", leadName: "Lead", address: "1 Main", ownerName: null, ownerAssigned: false, latestAttempt: null, messagesDisposition: null, lastContactAt: null, timezone: "America/Chicago", messages: [] };
+    });
+    try {
+      const result = await runSlackUnfurlSweep();
+      expect(result.expired).toBe(1);
+      expect(mocks.unfurl).not.toHaveBeenCalled();
+      expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "expired", errorCode: "work_window_expired" });
+    } finally {
+      clockSpy.mockRestore();
+    }
+  });
+
+  it("revokes the installation on a confirmed terminal Slack identity error", async () => {
+    mocks.unfurl.mockRejectedValueOnce({ data: { error: "invalid_auth" } });
+    const result = await runSlackUnfurlSweep();
+    expect(result.noops).toBe(1);
+    expect(mocks.revokeInstallation).toHaveBeenCalledWith("T123", "A123", "invalid_auth");
+    expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "cancelled", errorCode: "installation_revoked" });
   });
 
   it("releases claims it cannot start before the worker deadline", async () => {

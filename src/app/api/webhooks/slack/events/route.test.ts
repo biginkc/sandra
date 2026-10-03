@@ -8,10 +8,11 @@ const mocks = vi.hoisted(() => ({
   revoke: vi.fn(),
   revokeChannel: vi.fn(),
   revokeAccounts: vi.fn(),
+  lifecycle: vi.fn(),
 }));
 
 vi.mock("@/lib/integrations/slack/signature", () => ({ verifySlackSignature: mocks.verify }));
-vi.mock("@/lib/integrations/slack/unfurl-store", () => ({ enqueueSlackUnfurlEvent: mocks.enqueue, findSlackInstallations: mocks.find, isSlackUnfurlInstallationStaleError: mocks.stale, revokeSlackInstallation: mocks.revoke, revokeSlackChannelApproval: mocks.revokeChannel, revokeSlackAccountLinks: mocks.revokeAccounts }));
+vi.mock("@/lib/integrations/slack/unfurl-store", () => ({ enqueueSlackUnfurlEvent: mocks.enqueue, findSlackInstallations: mocks.find, isSlackUnfurlInstallationStaleError: mocks.stale, processSlackLifecycleEvent: mocks.lifecycle }));
 
 import { POST } from "./route";
 
@@ -46,6 +47,7 @@ describe("Slack events route", () => {
     mocks.revoke.mockResolvedValue(undefined);
     mocks.revokeChannel.mockResolvedValue(undefined);
     mocks.revokeAccounts.mockResolvedValue(undefined);
+    mocks.lifecycle.mockResolvedValue(true);
   });
 
   it("returns the signed URL verification challenge", async () => {
@@ -86,20 +88,19 @@ describe("Slack events route", () => {
   it("processes lifecycle revocation while the preview flag is disabled", async () => {
     const response = await POST(request({ ...base, event: { type: "app_uninstalled" } }));
     expect(response.status).toBe(200);
-    expect(mocks.revoke).toHaveBeenCalledWith("T123", "A123", "app_uninstalled");
+    expect(mocks.lifecycle).toHaveBeenCalledWith(expect.objectContaining({ teamId: "T123", appId: "A123", eventId: "Ev123", action: "installation" }));
   });
 
   it("revokes only affected account links for user-token lifecycle events", async () => {
     const response = await POST(request({ ...base, event: { type: "tokens_revoked", tokens: { oauth: ["U123", "U456"] } } }));
     expect(response.status).toBe(200);
-    expect(mocks.revokeAccounts).toHaveBeenCalledWith("T123", "A123", ["U123", "U456"], "tokens_revoked");
-    expect(mocks.revoke).not.toHaveBeenCalled();
+    expect(mocks.lifecycle).toHaveBeenCalledWith(expect.objectContaining({ teamId: "T123", appId: "A123", slackUserIds: ["U123", "U456"], action: "account_links" }));
   });
 
   it("revokes channel approval when Slack reports a newly shared channel", async () => {
     const response = await POST(request({ ...base, event: { type: "channel_shared", channel: "C123" } }));
     expect(response.status).toBe(200);
-    expect(mocks.revokeChannel).toHaveBeenCalledWith("T123", "A123", "C123", "channel_shared");
+    expect(mocks.lifecycle).toHaveBeenCalledWith(expect.objectContaining({ teamId: "T123", appId: "A123", channelId: "C123", action: "channel" }));
   });
 
   it("denies composer link events before installation lookup or enqueue", async () => {
@@ -115,5 +116,43 @@ describe("Slack events route", () => {
     expect((await POST(request(base))).status).toBe(401);
     mocks.verify.mockReturnValue(true);
     expect((await POST(request({ type: "event_callback", event_id: "x" }))).status).toBe(400);
+  });
+
+  it("times out accepted installation lookup with a retryable response", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubEnv("SLACK_LEAD_UNFURL_ENABLED", "1");
+      mocks.find.mockReturnValue(new Promise(() => undefined));
+      const pending = POST(request(base));
+      await vi.advanceTimersByTimeAsync(2_500);
+      expect((await pending).status).toBe(503);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("times out accepted enqueue with a retryable response", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubEnv("SLACK_LEAD_UNFURL_ENABLED", "1");
+      mocks.enqueue.mockReturnValue(new Promise(() => undefined));
+      const pending = POST(request(base));
+      await vi.advanceTimersByTimeAsync(2_500);
+      expect((await pending).status).toBe(503);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("acknowledges a deliberate denial when its receipt logger stalls", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.enqueue.mockReturnValue(new Promise(() => undefined));
+      const pending = POST(request(base));
+      await vi.advanceTimersByTimeAsync(2_500);
+      expect((await pending).status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

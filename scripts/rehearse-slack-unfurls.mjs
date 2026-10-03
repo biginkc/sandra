@@ -67,8 +67,8 @@ try {
     );
   `);
   psql(migration);
-  const privilege = psql("select has_function_privilege('service_role', 'public.get_slack_preview_attempt_facts(uuid,uuid)', 'execute'), has_function_privilege('authenticated', 'public.get_slack_preview_attempt_facts(uuid,uuid)', 'execute');").split("\t");
-  if (privilege[0] !== "t" || privilege[1] !== "f") throw new Error("preview attempt facts RPC privileges are not narrowed");
+  const privilege = psql("select has_function_privilege('service_role', 'public.get_slack_preview_attempt_facts(uuid,uuid)', 'execute'), has_function_privilege('authenticated', 'public.get_slack_preview_attempt_facts(uuid,uuid)', 'execute'), has_function_privilege('service_role', 'public.guard_slack_unfurl_dispatch(uuid,uuid,uuid,integer,uuid,text,text)', 'execute'), has_function_privilege('authenticated', 'public.guard_slack_unfurl_dispatch(uuid,uuid,uuid,integer,uuid,text,text)', 'execute');").split("\t");
+  if (privilege.join("\t") !== "t\tf\tt\tf") throw new Error("Slack operational RPC privileges are not narrowed");
   const tablePrivileges = psql("select has_table_privilege('service_role','public.slack_installations','select'), has_table_privilege('service_role','public.slack_account_links','select'), has_table_privilege('service_role','public.slack_channel_approvals','select'), has_table_privilege('service_role','public.memberships','select'), has_table_privilege('service_role','public.slack_unfurl_job_urls','update'), has_table_privilege('authenticated','public.slack_installations','select');").split("\t");
   if (tablePrivileges.join("\t") !== "t\tt\tt\tt\tt\tf") throw new Error("service role Slack table grants are not narrow and explicit");
   try { psql("set role authenticated; select count(*) from public.slack_installations;"); throw new Error("authenticated unexpectedly read Slack installations"); } catch (error) { if (!String(error).includes("permission denied")) throw error; }
@@ -176,6 +176,13 @@ try {
   psql(`update public.slack_unfurl_jobs set attempts=1,status='processing',claim_token='${releaseToken}',lease_expires_at=now()+interval '1 minute' where id='${releaseJob}';`);
   if (psql(`set role service_role; select public.release_slack_unfurl_job_claim('${releaseJob}','${releaseToken}');`) !== "t") throw new Error("never-started claim release failed");
   if (psql(`select status,attempts from public.slack_unfurl_jobs where id='${releaseJob}';`) !== "queued\t0") throw new Error("released claim did not refund its attempt");
+
+  const lifecycleEvent = randomUUID();
+  if (psql(`set role service_role; select public.process_slack_lifecycle_event('${team}','${app}','${lifecycleEvent}','app_uninstalled',now(),null,array[]::text[],'installation');`) !== "t") throw new Error("lifecycle event was not applied");
+  if (psql(`select status from public.slack_installations where id='${install[0]}';`) !== "revoked") throw new Error("lifecycle event did not revoke installation");
+  if (psql(`set role service_role; select installation_version from public.upsert_slack_installation('${org}','${team}','${app}','Rehearsal','B_REHEARSAL','xoxb-redacted-6',array[]::text[],'${user}','rehearsal-key');`) !== "4") throw new Error("lifecycle reconnect did not rotate version");
+  if (psql(`set role service_role; select public.process_slack_lifecycle_event('${team}','${app}','${lifecycleEvent}','app_uninstalled',now(),null,array[]::text[],'installation');`) !== "f") throw new Error("duplicate lifecycle delivery was reapplied");
+  if (psql(`select status from public.slack_installations where id='${install[0]}';`) !== "active") throw new Error("duplicate lifecycle delivery revoked the reconnected installation");
 
   psql(`update public.slack_event_receipts set created_at=now()-interval '8 days' where team_id='${team}' and event_id='${event}';`);
   if (psql("set role service_role; select public.cleanup_slack_unfurl_data(now()-interval '7 days');") === "0") throw new Error("seven-day cleanup did not remove receipt");

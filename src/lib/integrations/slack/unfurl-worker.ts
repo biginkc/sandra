@@ -10,6 +10,7 @@ import { verifySlackDestination, parseSlackLeadUrl } from "./unfurl-policy";
 import {
   claimSlackUnfurlJobs,
   cleanupSlackUnfurlData,
+  guardSlackUnfurlDispatch,
   finishSlackUnfurlJob,
   hasActiveSlackMembership,
   loadSlackAccountLink,
@@ -17,6 +18,7 @@ import {
   loadSlackInstallation,
   loadSlackJobUrls,
   releaseSlackUnfurlJobClaim,
+  revokeSlackInstallation,
   rescheduleSlackUnfurlJob,
   updateSlackJobUrl,
   type SlackUnfurlJob,
@@ -82,8 +84,28 @@ function nextRetryAt(job: SlackUnfurlJob, now: number, retryAfter: number | null
   return new Date(now + Math.max(backoff, retryAfter ?? 0) * 1000);
 }
 
-function withinDeadline(deadline: number): void {
-  if (Date.now() >= deadline) throw new Error("slack_unfurl_budget_exhausted");
+function jobExpiry(job: SlackUnfurlJob): number {
+  return Math.min(Date.parse(job.expires_at), Date.parse(job.event_time) + JOB_TTL_MS);
+}
+
+function ensureWorkWindow(job: SlackUnfurlJob, deadline: number, reserveApi = false): void {
+  const now = Date.now();
+  const expiry = jobExpiry(job);
+  const leaseExpiry = job.lease_expires_at ? Date.parse(job.lease_expires_at) : Number.POSITIVE_INFINITY;
+  if (!Number.isFinite(expiry) || now >= expiry || now >= leaseExpiry) throw new Error("slack_unfurl_expired");
+  if (now >= deadline) throw new Error("slack_unfurl_budget_exhausted");
+  if (reserveApi) {
+    if (now + 5_000 >= Math.min(expiry, leaseExpiry)) throw new Error("slack_unfurl_expired");
+    if (now + 5_000 >= deadline) throw new Error("slack_unfurl_budget_exhausted");
+  }
+}
+
+function isWindowError(error: unknown): boolean {
+  return error instanceof Error && (error.message === "slack_unfurl_expired" || error.message === "slack_unfurl_budget_exhausted");
+}
+
+function identityErrorReason(error: unknown): string {
+  return slackApiErrorCode(error) ?? "slack_identity_error";
 }
 
 function payloadForSnapshot(snapshot: unknown): UnfurlPayload {
@@ -95,8 +117,7 @@ function payloadForSnapshot(snapshot: unknown): UnfurlPayload {
 async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Promise<"succeeded" | "noop" | "expired" | "retried" | "failed"> {
   const claimToken = job.claim_token;
   if (!claimToken) return "failed";
-  const now = Date.now();
-  if (Date.parse(job.event_time) + JOB_TTL_MS <= now || Date.parse(job.expires_at) <= now) {
+  if (Date.now() >= jobExpiry(job) || (job.lease_expires_at && Date.parse(job.lease_expires_at) <= Date.now())) {
     await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "expired", errorCode: "event_expired" });
     return "expired";
   }
@@ -120,10 +141,11 @@ async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Pro
     return "noop";
   }
   const approval = await loadSlackChannelApproval({ installationId: installation.installationId, orgId: job.org_id, channelId: job.channel_id });
-  withinDeadline(deadline);
+  ensureWorkWindow(job, deadline, true);
   const destination = await verifySlackDestination({ token: installation.botToken.reveal(), approval, installationId: installation.installationId, orgId: job.org_id, teamId: job.team_id, channelId: job.channel_id, posterUserId: job.poster_slack_user_id });
   if (!destination.allowed) {
     if (destination.reason === "installation_revoked") {
+      await revokeSlackInstallation(job.team_id, job.app_id, destination.reason).catch(() => undefined);
       await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "cancelled", errorCode: destination.reason });
       return "noop";
     }
@@ -140,12 +162,13 @@ async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Pro
     return "noop";
   }
 
+  ensureWorkWindow(job, deadline);
   const urls = await loadSlackJobUrls(job.id);
   const client = createAdminClient() as PreviewLoaderClient;
   const unfurls: Record<string, UnfurlPayload> = {};
   let eligible = 0;
   for (const url of urls) {
-    withinDeadline(deadline);
+    ensureWorkWindow(job, deadline);
     const parsed = parseSlackLeadUrl(url.url_key);
     if (!parsed.ok) {
       await updateSlackJobUrl({ jobId: job.id, urlKey: url.url_key, lookupStatus: "invalid", authorizationStatus: "denied", errorCode: parsed.reason });
@@ -162,7 +185,9 @@ async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Pro
       eligible += 1;
       await updateSlackJobUrl({ jobId: job.id, urlKey: url.url_key, leadId: parsed.link.propertyId, lookupStatus: "resolved", authorizationStatus: "allowed" });
     } catch (error) {
+      if (isWindowError(error)) throw error;
       if (isTerminalSlackIdentityError(error)) {
+        await revokeSlackInstallation(job.team_id, job.app_id, identityErrorReason(error)).catch(() => undefined);
         await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "cancelled", errorCode: "installation_revoked" });
         return "noop";
       }
@@ -176,15 +201,47 @@ async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Pro
     return "noop";
   }
 
+  // CRM loading may be paused for several seconds. Recheck the work window,
+  // then ask Slack again and fence the claim against current DB authority
+  // immediately before sending any rendered content.
+  ensureWorkWindow(job, deadline, true);
+  const finalDestination = await verifySlackDestination({ token: installation.botToken.reveal(), approval: await loadSlackChannelApproval({ installationId: installation.installationId, orgId: job.org_id, channelId: job.channel_id }), installationId: installation.installationId, orgId: job.org_id, teamId: job.team_id, channelId: job.channel_id, posterUserId: job.poster_slack_user_id });
+  if (!finalDestination.allowed) {
+    if (finalDestination.reason === "installation_revoked") {
+      await revokeSlackInstallation(job.team_id, job.app_id, finalDestination.reason).catch(() => undefined);
+      await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "cancelled", errorCode: finalDestination.reason });
+      return "noop";
+    }
+    if (finalDestination.reason === "slack_authority_unavailable") {
+      const next = nextRetryAt(job, Date.now(), finalDestination.retryAfterSeconds ?? null);
+      if (next.getTime() >= jobExpiry(job)) {
+        await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "expired", errorCode: "authority_retry_ttl_expired" });
+        return "expired";
+      }
+      const rescheduled = await rescheduleSlackUnfurlJob({ jobId: job.id, claimToken, nextAttemptAt: next, errorCode: "slack_authority_unavailable" });
+      return rescheduled ? "retried" : "failed";
+    }
+    await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "noop", errorCode: finalDestination.reason });
+    return "noop";
+  }
+  ensureWorkWindow(job, deadline, true);
+  const dispatchGuard = await guardSlackUnfurlDispatch({ jobId: job.id, claimToken, installationId: installation.installationId, installationVersion: job.installation_version ?? installation.installationVersion, orgId: job.org_id, channelId: job.channel_id, posterSlackUserId: job.poster_slack_user_id });
+  if (!dispatchGuard) {
+    await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "noop", errorCode: "dispatch_guard_failed" });
+    return "noop";
+  }
+
   try {
-    withinDeadline(deadline);
+    ensureWorkWindow(job, deadline, true);
     const slack = new WebClient(installation.botToken.reveal(), { timeout: 5000, retryConfig: { retries: 0 }, rejectRateLimitedCalls: true });
     const response = await slack.chat.unfurl({ channel: job.channel_id, ts: job.message_ts, unfurls });
     if (!response.ok) throw new Error(`slack_unfurl_failed:${response.error ?? "unknown"}`);
     await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "succeeded" });
     return "succeeded";
   } catch (error) {
+    if (isWindowError(error)) throw error;
     if (isTerminalSlackIdentityError(error)) {
+      await revokeSlackInstallation(job.team_id, job.app_id, identityErrorReason(error)).catch(() => undefined);
       await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "cancelled", errorCode: "installation_revoked" });
       return "noop";
     }
@@ -230,6 +287,11 @@ export async function runSlackUnfurlSweep(): Promise<SlackSweepSummary> {
           if (unprocessedClaimToken) await releaseSlackUnfurlJobClaim({ jobId: unprocessed.id, claimToken: unprocessedClaimToken }).catch(() => false);
         }
         break;
+      }
+      if (error instanceof Error && error.message === "slack_unfurl_expired") {
+        if (job.claim_token) await finishSlackUnfurlJob({ jobId: job.id, claimToken: job.claim_token, status: "expired", errorCode: "work_window_expired" }).catch(() => false);
+        summary.expired += 1;
+        continue;
       }
       summary.failed += 1;
       if (job.claim_token) {

@@ -23,6 +23,26 @@ import { enqueueSlackUnfurlEvent, findSlackInstallations, isSlackUnfurlInstallat
 export const maxDuration = 10;
 
 const FLAG_ENABLED = "1";
+// Slack retries quickly; reserve a bounded response window for every lookup,
+// RPC, and deliberate receipt so an accepted event is never acknowledged
+// before its durable job exists.
+const WEBHOOK_BUDGET_MS = 2_500;
+
+async function withinWebhookDeadline<T>(promise: Promise<T>, deadline: number): Promise<T> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new Error("slack_webhook_deadline_exhausted");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("slack_webhook_deadline_exhausted")), remaining);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 function noOp() {
   return NextResponse.json({ ok: true });
@@ -35,13 +55,13 @@ function configuredAppId(): string | null {
   return appId && appId.length <= 128 ? appId : null;
 }
 
-async function recordNoOp(body: SlackEventEnvelope, reason: string): Promise<Response> {
+async function recordNoOp(body: SlackEventEnvelope, reason: string, deadline: number): Promise<Response> {
   const teamId = body.team_id;
   const appId = body.api_app_id;
   const eventId = body.event_id;
   if (!teamId || !appId || !eventId) return noOp();
   try {
-    await enqueueSlackUnfurlEvent({
+    await withinWebhookDeadline(enqueueSlackUnfurlEvent({
       teamId,
       appId,
       eventId,
@@ -55,7 +75,7 @@ async function recordNoOp(body: SlackEventEnvelope, reason: string): Promise<Res
       posterSlackUserId: eventPoster(body),
       urlKeys: [],
       denialCode: reason,
-    });
+    }), deadline);
     return noOp();
   } catch (error) {
     reportError(error, { tags: { surface: "slack_events_receipt" }, extra: { teamId, eventId, reason } });
@@ -66,7 +86,7 @@ async function recordNoOp(body: SlackEventEnvelope, reason: string): Promise<Res
   }
 }
 
-async function handleEnvelope(body: SlackEventEnvelope): Promise<Response> {
+async function handleEnvelope(body: SlackEventEnvelope, deadline: number): Promise<Response> {
   const teamId = body.team_id;
   const appId = body.api_app_id;
   const eventId = body.event_id;
@@ -77,38 +97,38 @@ async function handleEnvelope(body: SlackEventEnvelope): Promise<Response> {
   // revoked installation cannot leave pending jobs or approvals live.
   if (isLifecycleSlackEvent(type)) {
     try {
-      await handleLifecycleSlackEvent(body);
+      await withinWebhookDeadline(handleLifecycleSlackEvent(body), deadline);
     } catch {
       return NextResponse.json({ error: "temporary_lifecycle_failure" }, { status: 503 });
     }
-    return recordNoOp(body, "lifecycle_processed");
+    return recordNoOp(body, "lifecycle_processed", deadline);
   }
 
-  if (!isLinkSharedSlackEvent(type)) return recordNoOp(body, "unsupported_event");
-  if (process.env.SLACK_LEAD_UNFURL_ENABLED !== FLAG_ENABLED) return recordNoOp(body, "feature_disabled");
-  if (eventChannel(body)?.startsWith("D")) return recordNoOp(body, "private_channel_denied");
-  if (eventChannel(body) === "COMPOSER" || eventSource(body)?.toLowerCase() === "composer") return recordNoOp(body, "composer_denied");
+  if (!isLinkSharedSlackEvent(type)) return recordNoOp(body, "unsupported_event", deadline);
+  if (process.env.SLACK_LEAD_UNFURL_ENABLED !== FLAG_ENABLED) return recordNoOp(body, "feature_disabled", deadline);
+  if (eventChannel(body)?.startsWith("D")) return recordNoOp(body, "private_channel_denied", deadline);
+  if (eventChannel(body) === "COMPOSER" || eventSource(body)?.toLowerCase() === "composer") return recordNoOp(body, "composer_denied", deadline);
 
   const rawLinks = eventLinks(body);
   const parsed = parseSlackLeadLinks(rawLinks);
-  if (parsed.overLimit) return recordNoOp(body, "link_limit_exceeded");
-  if (parsed.links.length === 0) return recordNoOp(body, "unsupported_link");
+  if (parsed.overLimit) return recordNoOp(body, "link_limit_exceeded", deadline);
+  if (parsed.links.length === 0) return recordNoOp(body, "unsupported_link", deadline);
   const channelId = eventChannel(body);
   const poster = eventPoster(body);
   const messageTs = eventMessageTs(body);
-  if (!channelId || !poster || !messageTs) return recordNoOp(body, "missing_destination");
+  if (!channelId || !poster || !messageTs) return recordNoOp(body, "missing_destination", deadline);
 
   let installations;
   try {
-    installations = (await findSlackInstallations(teamId, appId)).filter((row) => row.status === "active");
+    installations = (await withinWebhookDeadline(findSlackInstallations(teamId, appId), deadline)).filter((row) => row.status === "active");
   } catch (error) {
     reportError(error, { tags: { surface: "slack_events_installation_lookup" }, extra: { teamId, eventId } });
     return NextResponse.json({ error: "temporary_receipt_failure" }, { status: 503 });
   }
-  if (installations.length !== 1) return recordNoOp(body, installations.length === 0 ? "installation_missing" : "installation_ambiguous");
+  if (installations.length !== 1) return recordNoOp(body, installations.length === 0 ? "installation_missing" : "installation_ambiguous", deadline);
   const installation = installations[0];
   try {
-    const enqueued = await enqueueSlackUnfurlEvent({
+    const enqueued = await withinWebhookDeadline(enqueueSlackUnfurlEvent({
       teamId,
       appId,
       eventId,
@@ -121,20 +141,26 @@ async function handleEnvelope(body: SlackEventEnvelope): Promise<Response> {
       messageTs,
       posterSlackUserId: poster,
       urlKeys: parsed.links.map((link) => link.originalUrl),
-    });
+    }), deadline);
     if (!enqueued.jobId && !enqueued.duplicate) throw new Error("accepted Slack event did not receive durable job");
     return noOp();
   } catch (error) {
-    if (isSlackUnfurlInstallationStaleError(error)) return recordNoOp(body, "installation_stale");
+    if (isSlackUnfurlInstallationStaleError(error)) return recordNoOp(body, "installation_stale", deadline);
     reportError(error, { tags: { surface: "slack_events_enqueue" }, extra: { teamId, eventId, installationId: installation.installationId } });
     return NextResponse.json({ error: "temporary_enqueue_failure" }, { status: 503 });
   }
 }
 
 export async function POST(request: Request): Promise<Response> {
+  const deadline = Date.now() + WEBHOOK_BUDGET_MS;
   const contentLength = Number(request.headers.get("content-length") ?? "0");
   if (Number.isFinite(contentLength) && contentLength > SLACK_EVENT_BODY_LIMIT) return NextResponse.json({ error: "body_too_large" }, { status: 413 });
-  const rawBody = await request.text();
+  let rawBody: string;
+  try {
+    rawBody = await withinWebhookDeadline(request.text(), deadline);
+  } catch {
+    return NextResponse.json({ error: "temporary_request_timeout" }, { status: 503 });
+  }
   const secret = process.env.SLACK_SIGNING_SECRET;
   if (!secret || !verifySlackSignature({ signingSecret: secret, timestamp: request.headers.get("x-slack-request-timestamp"), signature: request.headers.get("x-slack-signature"), rawBody })) return NextResponse.json({ error: "invalid_signature" }, { status: 401 });
   if (Buffer.byteLength(rawBody, "utf8") > SLACK_EVENT_BODY_LIMIT) return NextResponse.json({ error: "body_too_large" }, { status: 413 });
@@ -142,9 +168,9 @@ export async function POST(request: Request): Promise<Response> {
   if (!body) return NextResponse.json({ error: "malformed_body" }, { status: 400 });
   const expectedAppId = configuredAppId();
   if (expectedAppId && body.api_app_id && body.api_app_id !== expectedAppId) {
-    if (body.type === "event_callback") return recordNoOp(body, "wrong_app");
+    if (body.type === "event_callback") return recordNoOp(body, "wrong_app", deadline);
     return noOp();
   }
   if (body.type === "url_verification") return NextResponse.json({ challenge: (body as SlackUrlVerification).challenge });
-  return handleEnvelope(body);
+  return handleEnvelope(body, deadline);
 }

@@ -1,6 +1,6 @@
 import { reportError } from "@/lib/errors/report";
 
-import { revokeSlackAccountLinks, revokeSlackChannelApproval, revokeSlackInstallation } from "./unfurl-store";
+import { processSlackLifecycleEvent } from "./unfurl-store";
 
 export const SLACK_EVENT_BODY_LIMIT = 256 * 1024;
 
@@ -95,26 +95,34 @@ export async function handleLifecycleSlackEvent(body: SlackEventEnvelope): Promi
   const teamId = body.team_id;
   const appId = body.api_app_id;
   const type = eventType(body);
-  if (!teamId || !appId) return;
+  const eventId = body.event_id;
+  if (!teamId || !appId || !eventId) return;
   try {
+    let action: "installation" | "account_links" | "channel" | "noop" = "noop";
+    let slackUserIds: string[] = [];
     if (type === "app_uninstalled") {
-      await revokeSlackInstallation(teamId, appId, type);
-      return;
-    }
-    if (type === "tokens_revoked") {
+      action = "installation";
+    } else if (type === "tokens_revoked") {
       const tokens = (body.event as { tokens?: { bot?: unknown; oauth?: unknown } } | undefined)?.tokens;
       const botTokens = Array.isArray(tokens?.bot) ? tokens.bot.filter((value): value is string => typeof value === "string") : [];
-      const userTokens = Array.isArray(tokens?.oauth) ? tokens.oauth.filter((value): value is string => typeof value === "string") : [];
+      slackUserIds = Array.isArray(tokens?.oauth) ? tokens.oauth.filter((value): value is string => typeof value === "string") : [];
       // A revoked bot token invalidates the whole installation. A user OAuth
       // token revocation only invalidates the corresponding account links.
-      if (botTokens.length > 0 || (botTokens.length === 0 && userTokens.length === 0)) await revokeSlackInstallation(teamId, appId, type);
-      else await revokeSlackAccountLinks(teamId, appId, userTokens, type);
-      return;
-    }
-    if (type === "channel_shared") {
+      action = botTokens.length > 0 || slackUserIds.length === 0 ? "installation" : "account_links";
+    } else if (type === "channel_shared") {
       const channelId = eventChannel(body);
-      if (channelId) await revokeSlackChannelApproval(teamId, appId, channelId, type);
+      action = channelId ? "channel" : "noop";
     }
+    await processSlackLifecycleEvent({
+      teamId,
+      appId,
+      eventId,
+      eventType: type,
+      eventTime: typeof body.event_time === "number" ? new Date(body.event_time * 1000).toISOString() : null,
+      channelId: eventChannel(body),
+      slackUserIds,
+      action,
+    });
   } catch (error) {
     reportError(error, { tags: { surface: "slack_lifecycle_event" }, extra: { teamId, appId, type } });
     throw error;
