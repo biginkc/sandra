@@ -30,7 +30,7 @@ import { LogFollowUpButton } from "./log-follow-up-button"
 
 const row = { propertyId: "lead-1", assignmentEpisodeId: "ep-1", queueVersion: 3, sharedStatus: "interested", address: "1 Main" }
 const foundRow = { ok: true, lookup: { status: "found", row, snapshotAt: "x" } }
-const props = { propertyId: "lead-1", propertyLabel: "1 Main", assigneeId: "rep-9", disabledReason: null }
+const props = { propertyId: "lead-1", propertyLabel: "1 Main", assigneeId: "rep-9", disabledReason: null, viewer: { userId: "rep-9", orgId: "org-1" } }
 const sent = (i: number) => mocks.submitMyLeadCommand.mock.calls[i][1] as Record<string, unknown>
 
 describe("LogFollowUpButton", () => {

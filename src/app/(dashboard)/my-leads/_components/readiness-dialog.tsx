@@ -89,6 +89,8 @@ export function AcquisitionReadinessDialog({
   })
   const closeDialog = () => {
     if (submitState.submitting) return
+    // A user-initiated close while a save is uncertain or already saved asks first.
+    if (recovery && !recovery.confirmClose()) return
     resetFields()
     submitState.clearErrors()
     onOpenChange(false)

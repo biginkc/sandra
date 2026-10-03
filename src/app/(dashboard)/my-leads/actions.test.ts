@@ -70,7 +70,7 @@ describe('My Leads command integration',()=>{
     });
   });
   it('marks only RPC error responses as answered, never transport failures, thrown calls or missing confirmation',async()=>{
-    mocks.rpc.mockResolvedValue({data:null,error:{message:'INVALID_INPUT: occurredAt cannot be in the future'}});
+    mocks.rpc.mockResolvedValue({data:null,status:400,error:{message:'INVALID_INPUT: occurredAt cannot be in the future',code:'P0001'}});
     expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toMatchObject({ok:false,answered:true,certainty:'unknown'});
     mocks.rpc.mockRejectedValue(new Error('network'));
     expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).not.toHaveProperty('answered');
@@ -79,12 +79,46 @@ describe('My Leads command integration',()=>{
     mocks.viewer.mockRejectedValue(new Error('No session'));
     expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).not.toHaveProperty('answered');
   });
+  describe('transport failures never count as answered (installed postgrest-js shapes)',()=>{
+    // postgrest-js 2.104 resolves a failed fetch as { error: { message: 'TypeError: fetch failed', details, hint, code: '' }, status: 0 }.
+    const transport={data:null,status:0,statusText:'',error:{message:'TypeError: fetch failed',details:'',hint:'',code:''}};
+    it('a fetch failure resolved as status 0 with an empty code is not answered, for commands and for the drip handoff',async()=>{
+      mocks.rpc.mockResolvedValue(transport);
+      const result=await submitMyLeadCommand('log-attempt',{propertyId:'lead'});
+      expect(result).toMatchObject({ok:false,certainty:'unknown'});
+      expect(result).not.toHaveProperty('answered');
+    });
+    it('an aborted request and a gateway page without a SQLSTATE are not answered',async()=>{
+      mocks.rpc.mockResolvedValue({...transport,error:{...transport.error,message:'AbortError: aborted',hint:'Request was aborted (timeout or manual cancellation)'}});
+      expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).not.toHaveProperty('answered');
+      mocks.rpc.mockResolvedValue({data:null,status:502,error:{message:'<html>Bad Gateway</html>'}});
+      expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).not.toHaveProperty('answered');
+    });
+    it('a PostgREST-level error code (PGRST...) is not a raised SQLSTATE and is not answered',async()=>{
+      mocks.rpc.mockResolvedValue({data:null,status:401,error:{message:'JWT expired',code:'PGRST301'}});
+      expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).not.toHaveProperty('answered');
+    });
+    it('a raised SQLSTATE with an HTTP status is answered',async()=>{
+      mocks.rpc.mockResolvedValue({data:null,status:400,error:{message:'STALE_STATE',code:'P0001'}});
+      expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toMatchObject({ok:false,answered:true,certainty:'rejected'});
+    });
+    it('status 0 with a SQLSTATE-looking code is still not answered',async()=>{
+      mocks.rpc.mockResolvedValue({data:null,status:0,error:{message:'STALE_STATE',code:'P0001'}});
+      expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).not.toHaveProperty('answered');
+    });
+  });
+  it('tags the deterministic validation answers with their code',async()=>{
+    mocks.rpc.mockResolvedValue({data:null,status:400,error:{message:'INVALID_INPUT: MOTIVATION required',code:'P0001'}});
+    expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toMatchObject({ok:false,answered:true,code:'MOTIVATION_REQUIRED'});
+    mocks.rpc.mockResolvedValue({data:null,status:400,error:{message:'RECORDING_REQUIRED',code:'P0001'}});
+    expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toMatchObject({ok:false,answered:true,code:'RECORDING_REQUIRED'});
+  });
   it('maps a SQL UNAUTHENTICATED to the sign-in guidance, unknown',async()=>{
-    mocks.rpc.mockResolvedValue({data:null,error:{message:'UNAUTHENTICATED'}});
+    mocks.rpc.mockResolvedValue({data:null,status:400,error:{message:'UNAUTHENTICATED',code:'P0001'}});
     expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toMatchObject({ok:false,answered:true,certainty:'unknown',code:'UNAUTHENTICATED',message:'Your session expired. Sign in again, then Reconcile.'});
   });
   it('maps IDEMPOTENCY_CONFLICT to the already-saved answer',async()=>{
-    mocks.rpc.mockResolvedValue({data:null,error:{message:'IDEMPOTENCY_CONFLICT'}});
+    mocks.rpc.mockResolvedValue({data:null,status:400,error:{message:'IDEMPOTENCY_CONFLICT',code:'P0001'}});
     expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toEqual({ok:false,answered:true,certainty:'unknown',code:'IDEMPOTENCY_CONFLICT',message:'This was already saved. Refresh to see it.'});
   });
   it('is unknown for a thrown RPC, a session failure and a missing confirmation',async()=>{
@@ -107,7 +141,7 @@ describe('My Leads command integration',()=>{
     expect(mocks.adminRpc).not.toHaveBeenCalled();
   });
   it('does not revalidate or report success for a rejected stale command',async()=>{
-    mocks.rpc.mockResolvedValue({data:null,error:{message:'STALE_ASSIGNMENT'}});
+    mocks.rpc.mockResolvedValue({data:null,status:400,error:{message:'STALE_ASSIGNMENT',code:'P0001'}});
     expect(await submitMyLeadCommand('handoff',{propertyId:'lead'})).toEqual({ok:false,answered:true,certainty:'rejected',code:'STALE_STATE',message:'This lead changed. Refresh before trying again.'});
     expect(mocks.revalidate).not.toHaveBeenCalled();
   });
@@ -120,7 +154,7 @@ it('keeps KPI scope at today for the rep regardless of search and obsolete perio
 });
 
 it('returns safe typed access guidance without revealing assignment or revalidating', async()=>{
-  mocks.rpc.mockResolvedValue({data:null,error:{message:'FORBIDDEN'}});
+  mocks.rpc.mockResolvedValue({data:null,status:403,error:{message:'FORBIDDEN',code:'42501'}});
   expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toEqual({ok:false,answered:true,certainty:'unknown',code:'FORBIDDEN',message:'This lead is unavailable or you no longer have access. Refresh to check access. Your draft is retained.'});
   expect(mocks.revalidate).not.toHaveBeenCalled();
 });
