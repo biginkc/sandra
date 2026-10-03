@@ -46,6 +46,13 @@
 
 begin;
 
+-- Fail fast instead of queueing every Norma reader/writer behind a long-open transaction.
+set local lock_timeout = '5s';
+-- Bound any single statement here; the table is small, so 60s is far above normal.
+set local statement_timeout = '60s';
+-- Take the ACCESS EXCLUSIVE lock the ALTERs need up front: on timeout (55P03) nothing has changed.
+lock table public.norma_call_requests in access exclusive mode;
+
 alter table public.norma_call_requests
   add column if not exists reviewed_by uuid references auth.users(id) on delete set null,
   add column if not exists reviewed_at timestamptz;
