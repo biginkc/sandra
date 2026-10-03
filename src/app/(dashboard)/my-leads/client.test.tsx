@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   submitMyLeadCommand: vi.fn(),
   submitMyLeadHandoffDrip: vi.fn(),
   loadMyLeads: vi.fn(),
+  loadMyLeadDetail: vi.fn(),
   loadMyLeadCallReferences: vi.fn(),
   realDialpad: false,
   realQueue: false,
@@ -33,7 +34,7 @@ vi.mock("@/components/appointments/book-appointment-popover", () => ({
 vi.mock("./actions", () => ({
   loadMyLeads: mocks.loadMyLeads,
   loadMyLeadsStage: vi.fn(),
-  loadMyLeadDetail: vi.fn(),
+  loadMyLeadDetail: mocks.loadMyLeadDetail,
   loadMyLeadCallReferences: mocks.loadMyLeadCallReferences,
   submitMyLeadCommand: mocks.submitMyLeadCommand,
   submitMyLeadHandoffDrip: mocks.submitMyLeadHandoffDrip,
@@ -198,7 +199,7 @@ function snapshot(address: string): QueueSnapshot {
   }
 }
 
-function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis, initialDrips:MyLeadDripSnapshot|null=null, dialpad?: React.ComponentProps<typeof MyLeadsClient>["dialpad"]) {
+function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis, initialDrips:MyLeadDripSnapshot|null=null, dialpad?: React.ComponentProps<typeof MyLeadsClient>["dialpad"], selectedLead?: React.ComponentProps<typeof MyLeadsClient>["selectedLead"]) {
   return render(
     <MyLeadsClient
       viewer={viewer}
@@ -208,6 +209,7 @@ function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis, initia
       initialKpis={initialKpis}
       initialDrips={initialDrips}
       dialpad={dialpad}
+      selectedLead={selectedLead}
     />,
   )
 }
@@ -215,6 +217,7 @@ function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis, initia
 describe("MyLeadsClient", () => {
   beforeEach(() => {
     mocks.loadMyLeads.mockReset()
+    mocks.loadMyLeadDetail.mockReset()
     mocks.submitMyLeadCommand.mockReset()
     mocks.loadMyLeadCallReferences.mockReset()
     mocks.dialpadHandlers.length = 0
@@ -222,6 +225,34 @@ describe("MyLeadsClient", () => {
     mocks.realQueue = false
     mocks.dialpadRecent.mockResolvedValue({ok:true,calls:[]})
     mocks.dialpadTargets.mockResolvedValue({ok:true,contactId:'contact-1',phones:[{slot:1,masked:'••• ••• 0196'}],grants:[]})
+  })
+
+  it("opens the exact authorized lead outside the active filter and does not follow an owner queue switch", async () => {
+    const own = snapshot("Deep Link Lane")
+    const row = {...own.stages.not_contacted!.rows[0], propertyId:"outside-filter", address:"Outside current filter"}
+    mocks.loadMyLeadDetail.mockResolvedValue({ok:false, message:"This lead is unavailable in your My Leads queue."})
+    mocks.loadMyLeads.mockResolvedValue({ok:true, snapshot:own, kpis})
+    const ownerViewer = {...viewer, isOwner:true}
+    const ownerRoster: AcquisitionRoster = {
+      ...roster,
+      isOwner:true,
+      members:[...roster.members, {...roster.members[0], id:"rep-2", label:"Other rep"}],
+    }
+    render(<MyLeadsClient
+      viewer={ownerViewer}
+      roster={ownerRoster}
+      initialMemberId={ownerViewer.userId}
+      initialSnapshot={own}
+      initialKpis={kpis}
+      selectedLead={{status:"found", propertyId:row.propertyId, row, snapshotAt:own.snapshotAt}}
+    />)
+
+    expect(await screen.findByRole("region", {name:"Selected lead from link"})).toBeInTheDocument()
+    expect(mocks.loadMyLeadDetail).toHaveBeenCalledWith({memberId:"rep-1", propertyId:row.propertyId})
+    await userEvent.type(screen.getByRole("textbox", {name:"Search My Leads"}), "outside current filter")
+    expect(screen.getByRole("region", {name:"Selected lead from link"})).toBeInTheDocument()
+    await userEvent.selectOptions(screen.getByRole("combobox", {name:"Acquisitions member"}), "rep-2")
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Switch back to your queue"))
   })
 
   it("opens Log attempt for a pinned reply outside the first 20 rows", async()=>{

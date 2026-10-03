@@ -16,16 +16,19 @@ import { AcquisitionOfferDialog } from './_components/offer-dialog';
 import { AcquisitionLifecycleDialog } from './_components/lifecycle-dialog';
 import { DialpadPanel,type DialpadCallRequest } from './_components/dialpad-panel';
 import type { DialpadPanelBootstrap } from '@/lib/dialpad-cti/dispatch';
-import type { MyLeadAction,MyLeadStage,AcquisitionLifecycleMode } from './_components/types';
+import type { MyLeadAction,MyLeadStage,AcquisitionLifecycleMode,MyLeadDetailPageResult,MyLeadDetailResult,MyLeadDetailState,MyLeadDetailGroupName } from './_components/types';
 import { detailView,kpiTiles,stagePages } from './adapter';
 import { loadMyLeadCallReferences,loadMyLeads,loadMyLeadsStage,loadMyLeadDetail,submitMyLeadCommand,submitMyLeadHandoffDrip,changeAcquisitionDesignation,changeAcquisitionSettings } from './actions';
+import { MyLeadQueueRow } from './_components/queue-row';
+import { queueRow as queueRowView } from './adapter';
+import type { SelectedLeadResult } from './deep-link';
 
-type Props={viewer:{userId:string;orgId:string;isOwner:boolean};roster:AcquisitionRoster;initialMemberId:string;initialSnapshot:QueueSnapshot|null;initialKpis:AcquisitionKpis|null;initialDrips?:MyLeadDripSnapshot|null;dialpad?:DialpadPanelBootstrap|null};
+type Props={viewer:{userId:string;orgId:string;isOwner:boolean};roster:AcquisitionRoster;initialMemberId:string;initialSnapshot:QueueSnapshot|null;initialKpis:AcquisitionKpis|null;initialDrips?:MyLeadDripSnapshot|null;dialpad?:DialpadPanelBootstrap|null;selectedLead?:SelectedLeadResult};
 
 const REFRESH_INTERVAL_MS = 30_000;
 const refreshTime = new Intl.DateTimeFormat('en-US', {month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',timeZone:'America/Chicago',timeZoneName:'short'});
 
-export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,initialKpis,initialDrips=null,dialpad=null}:Props) {
+export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,initialKpis,initialDrips=null,dialpad=null,selectedLead={status:'none'}}:Props) {
   const router=useRouter();const softphone=useOptionalSoftphone();
   const [member,setMember]=useState(initialMemberId);const [search,setSearch]=useState('');
   const [snapshot,setSnapshot]=useState(initialSnapshot);const [kpis,setKpis]=useState(initialKpis);
@@ -178,8 +181,8 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     const read=refresh();mutationReads.current.set(opening.row.propertyId,{scope:opening.scope,episodeId:opening.row.assignmentEpisodeId,requestId:request.current,read});
     void finishOpening(opening,read);
   };
-  const action=(kind:MyLeadAction,id:string,callActivityId?:string|null)=>{
-    const row=rawRow(id);if(!row)return;
+  const action=(kind:MyLeadAction,id:string,callActivityId?:string|null,rowOverride?:QueueRow)=>{
+    const row=rowOverride??rawRow(id);if(!row)return;
     cancelOpening();
     if(kind==='start-call'&&dialpad){
       // An active Dialpad connection routes calls through the audited CTI flow; the server re-derives org and rep and revalidates at dispatch.
@@ -280,6 +283,17 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     return result;
   },[dialog,refresh,router,recovery,openingScope,member]);
   const pages=snapshot?stagePages(snapshot,drips):null;
+  const loadSelectedDetail=useCallback(async(propertyId:string):Promise<MyLeadDetailResult>=>{
+    if(member!==initialMemberId)return {ok:false as const,message:'This lead is unavailable while another queue is selected.'};
+    const result=await loadMyLeadDetail({memberId:initialMemberId,propertyId});
+    return result.ok?{ok:true as const,detail:detailView(result.detail,roster)}:result;
+  },[initialMemberId,member,roster]);
+  const loadSelectedDetailPage=useCallback(async(propertyId:string,group:MyLeadDetailGroupName,cursor:string|null):Promise<MyLeadDetailPageResult>=>{
+    if(member!==initialMemberId)return {ok:false as const,message:'This lead is unavailable while another queue is selected.'};
+    const result=await loadMyLeadDetail({memberId:initialMemberId,propertyId,group,cursor});if(!result.ok)return result;
+    const detail=detailView(result.detail,roster);
+    switch(group){case 'messages':return {ok:true,group,page:detail.messages};case 'notes':return {ok:true,group,page:detail.notes};case 'attempts':return {ok:true,group,page:detail.attempts};case 'appointments':return {ok:true,group,page:detail.appointments};case 'offers':return {ok:true,group,page:detail.offers};case 'history':return {ok:true,group,page:detail.history};}
+  },[initialMemberId,member,roster]);
   if(pages)for(const stage of loadingStages)pages[stage].isLoadingMore=true;
   const motivation=dialog?.row.motivationKind==='specified'?{kind:'specified' as const,text:dialog.row.motivationText??''}:dialog?.row.motivationKind==='no_motivation'?{kind:'no_motivation' as const,text:null}:null;
   // Completion callbacks belong to one opening, even when the same lead is reopened.
@@ -304,6 +318,18 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       onCallRequestHandled={onCallRequestHandled}
       onRecordingFinalResult={()=>{void refresh(true);}}
       onLogOutcome={(propertyId,callActivityId)=>{if(!rawRow(propertyId)){setError('This lead is no longer in your queue.');return;}action('log-attempt',propertyId,callActivityId);}}/>}
+    {selectedLead.status==='invalid'&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">
+      {selectedLead.reason==='duplicate'?'This My Leads link contains more than one lead. Open a link with exactly one lead.':'This My Leads link is invalid. Open a link with a valid lead id.'}
+    </div>}
+    {selectedLead.status==='unavailable'&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{selectedLead.message}</div>}
+    {selectedLead.status==='found'&&<SelectedLeadView
+      lead={selectedLead}
+      active={member===initialMemberId}
+      onLoadDetail={loadSelectedDetail}
+      onLoadDetailPage={loadSelectedDetailPage}
+      onStageAction={kind=>action(kind,selectedLead.row.propertyId,undefined,selectedLead.row)}
+      onLeadChanged={()=>{void refresh();router.refresh();}}
+    />}
     {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis||!tiles?<p role="status">Loading My Leads…</p>:<>
       <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} drips={drips} kpis={tiles} search={search} selectedRepId={member}
         onReviewingChange={onReviewingChange}
@@ -347,4 +373,48 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       <BookAppointmentPopover propertyId={dialog.row.propertyId} subjectLabel={dialog.row.address} currentUserId={member} onBooked={()=>{setDialog(current=>current===dialog?null:current);setDetailRevision(revision=>revision+1);void refresh();}}/>
       <Button variant="ghost" onClick={()=>setDialog(null)}>Close</Button></div>}
   </>;
+}
+
+type SelectedLeadViewProps={
+  lead:Extract<SelectedLeadResult,{status:'found'}>;
+  active:boolean;
+  onLoadDetail:(propertyId:string)=>Promise<MyLeadDetailResult>;
+  onLoadDetailPage:(propertyId:string,group:MyLeadDetailGroupName,cursor:string|null)=>Promise<MyLeadDetailPageResult>;
+  onStageAction:(action:MyLeadAction)=>void;
+  onLeadChanged:()=>void;
+};
+
+/**
+ * Render the server-authorized link target through the same row/detail surface
+ * as the queue. This keeps deep links useful when the lead is outside the
+ * first page or current filter without changing the owner's selected queue.
+ */
+function SelectedLeadView({lead,active,onLoadDetail,onLoadDetailPage,onStageAction,onLeadChanged}:SelectedLeadViewProps){
+  const [detailsOpen,setDetailsOpen]=useState(true);
+  const [detailState,setDetailState]=useState<MyLeadDetailState>({status:'loading'});
+  const view=useMemo(()=>queueRowView(lead.row,lead.snapshotAt),[lead.row,lead.snapshotAt]);
+  const load=useCallback(async()=>{
+    if(!active){setDetailState({status:'error',message:'This lead is unavailable while another owner queue is selected.'});return;}
+    setDetailState({status:'loading'});
+    try{
+      const result=await onLoadDetail(lead.propertyId);
+      setDetailState(result.ok?{status:'ready',detail:result.detail}:{status:'error',message:result.message});
+    }catch{setDetailState({status:'error',message:'This lead is unavailable in your My Leads queue.'});}
+  },[active,lead.propertyId,onLoadDetail]);
+  useEffect(()=>{void load();},[load]);
+
+  if(!active)return <div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">This lead is opened in your own My Leads queue. Switch back to your queue to continue.</div>;
+  return <section aria-label="Selected lead from link" className="mb-6 space-y-2">
+    <p className="text-sm font-semibold text-muted-foreground">Opened from a My Leads link</p>
+    <MyLeadQueueRow
+      row={view}
+      detailsOpen={detailsOpen}
+      detailState={detailState}
+      onToggleDetails={()=>setDetailsOpen(open=>!open)}
+      onRetryDetails={()=>{void load();}}
+      onDetailChanged={onLeadChanged}
+      onLoadDetailPage={(group,cursor)=>onLoadDetailPage(lead.propertyId,group,cursor)}
+      onStageAction={(action)=>onStageAction(action)}
+    />
+  </section>;
 }

@@ -16,10 +16,17 @@ import {
   getAcquisitionKpis,
   getAcquisitionQueue,
   getAcquisitionRoster,
+  getMyLeadsQueueRow,
   MyLeadsReadError,
 } from "@/lib/my-leads/queries";
 
 import { MyLeadsClient } from "./client";
+import {
+  parseSelectedLeadParam,
+  selectedLeadUnavailableMessage,
+  type MyLeadsSearchParams,
+  type SelectedLeadResult,
+} from "./deep-link";
 
 function unavailableState() {
   return (
@@ -66,7 +73,14 @@ function loadFailureState(error: unknown) {
   return isFeatureDisabled(error) ? disabledState() : unavailableState();
 }
 
-export default async function MyLeadsPage() {
+export default async function MyLeadsPage({
+  searchParams,
+}: {
+  searchParams?: Promise<MyLeadsSearchParams>;
+} = {}) {
+  const selectedLeadLink = parseSelectedLeadParam(
+    searchParams ? await searchParams : undefined,
+  );
   let memberships: Membership[];
   try {
     memberships = await getCallerMembershipsOrThrow();
@@ -128,6 +142,35 @@ export default async function MyLeadsPage() {
     return loadFailureState(error);
   }
 
+  let selectedLead: SelectedLeadResult = selectedLeadLink.status === "none"
+    ? { status: "none" }
+    : selectedLeadLink.status === "invalid"
+      ? selectedLeadLink
+      : { status: "unavailable", message: "This lead is unavailable in your My Leads queue." };
+
+  if (selectedLeadLink.status === "requested") {
+    try {
+      // Resolve every deep link against the signed-in user's own queue. Owners
+      // may browse other queues interactively, but a URL never changes their
+      // selected owner or grants access to another representative's lead.
+      const lookup = await getMyLeadsQueueRow({
+        memberId: data.viewer.userId,
+        propertyId: selectedLeadLink.propertyId,
+      });
+      selectedLead = lookup.status === "found"
+        ? typeof lookup.row.propertyId === "string" && lookup.row.propertyId.toLowerCase() === selectedLeadLink.propertyId
+          ? { status: "found", propertyId: selectedLeadLink.propertyId, row: lookup.row, snapshotAt: lookup.snapshotAt }
+          : { status: "unavailable", message: "This lead is unavailable in your My Leads queue." }
+        : { status: "unavailable", message: selectedLeadUnavailableMessage(lookup.reason) };
+    } catch (error) {
+      if (error instanceof MyLeadsReadError && ["FORBIDDEN", "INVALID_INPUT", "NOT_FOUND", "UNAUTHENTICATED"].includes(error.code)) {
+        selectedLead = { status: "unavailable", message: "This lead is unavailable in your My Leads queue." };
+      } else {
+        return loadFailureState(error);
+      }
+    }
+  }
+
   // Only a usable connection (active, fixed Dialpad origin allowed) surfaces the panel; any failure keeps the existing softphone flow.
   let dialpad: Awaited<ReturnType<typeof loadDialpadPanelBootstrap>> = null;
   if (data.roster.settings.enabled) {
@@ -154,6 +197,7 @@ export default async function MyLeadsPage() {
         initialSnapshot={data.snapshot}
         initialKpis={data.kpis}
         initialDrips={data.drips}
+        selectedLead={selectedLead}
       />
     </Page>
   );

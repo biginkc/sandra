@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   getAcquisitionRoster: vi.fn(),
   getAcquisitionQueue: vi.fn(),
   getAcquisitionKpis: vi.fn(),
+  getMyLeadsQueueRow: vi.fn(),
   listMyLeadsInDrip: vi.fn(),
   MyLeadsClient: vi.fn(() => <div data-testid="my-leads-client" />),
   loadDialpadPanelBootstrap: vi.fn(),
@@ -23,6 +24,7 @@ vi.mock("@/lib/my-leads/queries", () => ({
   getAcquisitionRoster: mocks.getAcquisitionRoster,
   getAcquisitionQueue: mocks.getAcquisitionQueue,
   getAcquisitionKpis: mocks.getAcquisitionKpis,
+  getMyLeadsQueueRow: mocks.getMyLeadsQueueRow,
   MyLeadsReadError: class MockMyLeadsReadError extends Error {
     code: string;
 
@@ -98,6 +100,7 @@ beforeEach(() => {
   mocks.getAcquisitionRoster.mockResolvedValue({ viewer, roster: baseRoster });
   mocks.getAcquisitionQueue.mockResolvedValue({});
   mocks.getAcquisitionKpis.mockResolvedValue({});
+  mocks.getMyLeadsQueueRow.mockReset();
   mocks.listMyLeadsInDrip.mockResolvedValue({active:[],replied:[],repliedCount:0,counts:{}});
   mocks.loadDialpadPanelBootstrap.mockResolvedValue(null);
 });
@@ -187,6 +190,60 @@ describe("MyLeadsPage availability boundary", () => {
       period: "today",
     });
     expect(html).toContain("my-leads-client");
+  });
+
+  it("looks up an exact deep-linked lead for the signed-in member and canonicalizes its UUID", async () => {
+    const uppercase = "AABBCCDD-EEFF-4011-8223-445566778899";
+    const propertyId = uppercase.toLowerCase();
+    const row = { propertyId };
+    mocks.getMyLeadsQueueRow.mockResolvedValue({
+      status: "found",
+      row,
+      snapshotAt: "2026-10-03T12:00:00.000Z",
+    });
+
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: uppercase }) }));
+
+    expect(mocks.getMyLeadsQueueRow).toHaveBeenCalledWith({
+      memberId: "user-1",
+      propertyId,
+    });
+    expect((mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0])
+      .toMatchObject({ selectedLead: { status: "found", propertyId, row } });
+  });
+
+  it.each([
+    { lead: ["aabbccdd-eeff-4011-8223-445566778899", "aabbccdd-eeff-4011-8223-445566778899"] },
+    { lead: "not-a-uuid" },
+  ])("rejects malformed or duplicate deep links without querying a lead", async (searchParams) => {
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve(searchParams) }));
+
+    expect(mocks.getMyLeadsQueueRow).not.toHaveBeenCalled();
+    expect((mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0])
+      .toMatchObject({ selectedLead: { status: "invalid" } });
+  });
+
+  it("keeps an owner on their own queue when a deep-linked lead belongs to another rep", async () => {
+    const ownerViewer = { ...viewer, userId: "owner-1", isOwner: true };
+    mocks.getCallerMembershipsOrThrow.mockResolvedValue([
+      { ...activeAcquisitionsMembership, user_id: "owner-1", role: "owner" },
+    ]);
+    mocks.getAcquisitionRoster.mockResolvedValue({
+      viewer: ownerViewer,
+      roster: { ...baseRoster, isOwner: true },
+    });
+    mocks.getMyLeadsQueueRow.mockResolvedValue({ status: "unavailable", reason: "other_rep" });
+
+    renderPage(await MyLeadsPage({
+      searchParams: Promise.resolve({ lead: "aabbccdd-eeff-4011-8223-445566778899" }),
+    }));
+
+    expect(mocks.getMyLeadsQueueRow).toHaveBeenCalledWith({
+      memberId: "owner-1",
+      propertyId: "aabbccdd-eeff-4011-8223-445566778899",
+    });
+    expect((mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0])
+      .toMatchObject({ initialMemberId: "owner-1", selectedLead: { status: "unavailable" } });
   });
 
   it.each([true, false])("defaults an owner to their own profile when Acquisitions enabled is %s", async (acquisitionsEnabled) => {
