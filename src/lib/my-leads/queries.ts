@@ -34,7 +34,7 @@ export type AcquisitionRoster = {
 };
 type ReadClient = { rpc(name: string, args: Record<string, Json>): Promise<{data: Json | null;error: {message?: string;code?: string} | null}> };
 export class MyLeadsReadError extends Error {
-  constructor(public readonly code: 'UNAUTHENTICATED'|'FORBIDDEN'|'FEATURE_DISABLED'|'READ_FAILED'|'INVALID_INPUT',message: string) { super(message); }
+  constructor(public readonly code: 'UNAUTHENTICATED'|'FORBIDDEN'|'FEATURE_DISABLED'|'NOT_FOUND'|'READ_FAILED'|'INVALID_INPUT',message: string) { super(message); }
 }
 export async function myLeadsViewer() {
   const client=await createClient();
@@ -49,6 +49,7 @@ async function readRpc<T>(client: unknown,name: string,args: Record<string,Json>
   if(error) {
     if(error.message?.includes('FEATURE_DISABLED')) throw new MyLeadsReadError('FEATURE_DISABLED','My Leads is not enabled yet.');
     if(error.code==='42501') throw new MyLeadsReadError('FORBIDDEN','You do not have access to this queue.');
+    if(error.code==='P0002'||error.message?.includes('NOT_FOUND')) throw new MyLeadsReadError('NOT_FOUND','That queue or lead was not found.');
     if(error.code==='22023') throw new MyLeadsReadError('INVALID_INPUT','Refresh the queue or check the selected filters.');
     throw new MyLeadsReadError('READ_FAILED','My Leads could not load. Please retry.');
   }
@@ -65,6 +66,21 @@ export async function getAcquisitionQueue(input: { memberId: string; search?: st
   return readRpc<QueueSnapshot>(viewer.client,'fn_get_acquisition_queue_page',{
     p_org_id:viewer.orgId,p_member_id:input.memberId,p_search:input.search??'',p_stage:input.stage??null,p_cursor:input.cursor??null,p_limit:20,
   });
+}
+export type MyLeadRowReason='not_found'|'unassigned'|'other_rep'|'closed_dead_dnc'|'archived'|'no_active_episode';
+export type MyLeadRowLookup={status:'found';row:QueueRow;snapshotAt:string}|{status:'unavailable';reason:MyLeadRowReason};
+const ROW_REASONS:readonly string[]=['not_found','unassigned','other_rep','closed_dead_dnc','archived','no_active_episode'];
+/** Opens one lead by propertyId, unfiltered, or explains why it is not in the member's queue. */
+export async function getMyLeadsQueueRow(input:{memberId:string;propertyId:string}): Promise<MyLeadRowLookup> {
+  if(!UUID.test(input.propertyId)) throw new MyLeadsReadError('INVALID_INPUT','Choose a valid lead.');
+  const viewer=await myLeadsViewer();
+  if(!viewer.isOwner&&input.memberId!==viewer.userId) throw new MyLeadsReadError('FORBIDDEN','You can view only your own queue.');
+  const result=await readRpc<Partial<MyLeadRowLookup>&Record<string,unknown>>(viewer.client,'fn_get_my_leads_queue_row',{
+    p_org_id:viewer.orgId,p_member_id:input.memberId,p_property_id:input.propertyId,
+  });
+  if(result.status==='found'&&result.row&&typeof result.snapshotAt==='string') return {status:'found',row:result.row,snapshotAt:result.snapshotAt};
+  if(result.status==='unavailable'&&typeof result.reason==='string'&&ROW_REASONS.includes(result.reason)) return {status:'unavailable',reason:result.reason as MyLeadRowReason};
+  throw new MyLeadsReadError('READ_FAILED','My Leads returned an unexpected response.');
 }
 export async function getAcquisitionKpis(input: {memberId:string;period:AcquisitionPeriod|'custom';startDate?:string;endDate?:string}): Promise<AcquisitionKpis> {
   const viewer=await myLeadsViewer();
