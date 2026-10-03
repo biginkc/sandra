@@ -249,6 +249,14 @@ function selectedLeadFromLocation(): SelectedLeadResult {
       retryHref: `/my-leads?lead=${encodeURIComponent(parsed.propertyId)}`,
     }
   }
+  if (params.get("state") === "error") {
+    return {
+      status: "error",
+      propertyId: parsed.propertyId,
+      message: "We couldn't check this lead right now.",
+      retryHref: `/my-leads?lead=${encodeURIComponent(parsed.propertyId)}`,
+    }
+  }
   if (![LINKED_LEAD_ID, SECONDARY_LEAD_ID].includes(parsed.propertyId)) {
     return { status: "unavailable", propertyId: parsed.propertyId, message: selectedLeadUnavailableMessage("not_found"), retryHref: `/my-leads?lead=${encodeURIComponent(parsed.propertyId)}` }
   }

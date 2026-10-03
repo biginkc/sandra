@@ -192,6 +192,19 @@ test("unavailable link exposes a safe canonical retry and can reopen that lead",
   await expect(page).toHaveURL(`http://synthetic.local/my-leads?lead=${linkedLeadId}`)
 })
 
+test("transient linked read failure exposes a safe retry and recovers the own queue row", async ({ page }) => {
+  await mount(page, "/my-leads", `?lead=${linkedLeadId}&state=error`)
+
+  const retry = page.getByRole("link", { name: "Retry" })
+  await expect(page.getByRole("status")).toContainText("We couldn't check this lead right now.")
+  await expect(retry).toHaveAttribute("href", `/my-leads?lead=${linkedLeadId}`)
+
+  await retry.click()
+  await page.addScriptTag({ content: harnessBundle })
+  await expect(page.getByTestId(`my-lead-row-${linkedLeadId}`)).toContainText("44 Synthetic Link Lane")
+  await expect(page).toHaveURL(`http://synthetic.local/my-leads?lead=${linkedLeadId}`)
+})
+
 test("linked lead call uses the selected linked row and readiness save recovers from stale state", async ({ page }) => {
   await mount(page, "/my-leads", `?lead=${linkedLeadId}`)
   const linkedRow = page.getByTestId(`my-lead-row-${linkedLeadId}`)

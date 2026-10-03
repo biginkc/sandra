@@ -341,6 +341,28 @@ export function MyLeadsClient({
   const openingScope = JSON.stringify([member, search]);
   const activeScope = useRef(openingScope);
   activeScope.current = openingScope;
+  const pendingOpening = useRef<Opening | null>(null);
+  const [openingStatus, setOpeningStatus] = useState<{
+    opening: Opening;
+    message: string;
+    busy: boolean;
+  } | null>(null);
+  const cancelOpening = useCallback(() => {
+    pendingOpening.current = null;
+    setOpeningStatus(null);
+  }, []);
+  const cancelWorkflowFor = useCallback((propertyId: string) => {
+    if (pendingOpening.current?.row.propertyId === propertyId) {
+      pendingOpening.current = null;
+      setOpeningStatus(null);
+    }
+    setDialog((current) =>
+      current?.row.propertyId === propertyId ? null : current,
+    );
+    setCallOptions((current) =>
+      current?.propertyId === propertyId ? null : current,
+    );
+  }, []);
   const [pinRead, setPinRead] = useState<PinRead>(() =>
     pinReadFromFocus(focus, initialSnapshot?.snapshotAt ?? ""),
   );
@@ -366,7 +388,8 @@ export function MyLeadsClient({
       return "error";
     }
   };
-  const applyPin = (pin: PinRead) => {
+  const applyPin = useCallback((pin: PinRead) => {
+    if (pin?.lookup.status === "unavailable") cancelWorkflowFor(pin.id);
     setPinRead(pin);
     actionPin.current = pin;
     setPinNotice(
@@ -374,7 +397,7 @@ export function MyLeadsClient({
         ? MY_LEAD_ROW_REASON_COPY[pin.lookup.reason]
         : null,
     );
-  };
+  }, [cancelWorkflowFor]);
   /**
    * The authoritative row for a lead: an unavailable single-row lookup removes it
    * everywhere; otherwise the lookup's episode wins and a newer copy of that same
@@ -391,16 +414,6 @@ export function MyLeadsClient({
       newestCopy(copiesFor(readSnapshot, readDrips, id)),
       lookupOf(pin, id),
     ).row;
-  const pendingOpening = useRef<Opening | null>(null);
-  const [openingStatus, setOpeningStatus] = useState<{
-    opening: Opening;
-    message: string;
-    busy: boolean;
-  } | null>(null);
-  const cancelOpening = () => {
-    pendingOpening.current = null;
-    setOpeningStatus(null);
-  };
   const [detailRevision, setDetailRevision] = useState(0);
   const [recipient, setRecipient] = useState(roster.settings.recipientId ?? "");
   const [settingsBusy, setSettingsBusy] = useState(false);
@@ -431,10 +444,15 @@ export function MyLeadsClient({
             [...loaded.drips.active, ...loaded.drips.replied].some(
               (drip) => drip.propertyId === pinId,
             ));
+        const deniedPin =
+          actionPin.current?.id === pinId &&
+          actionPin.current.lookup.status === "unavailable"
+            ? actionPin.current
+            : null;
         const pin: PinRead | undefined =
           pinResult === "error"
             ? inList
-              ? null
+              ? deniedPin
               : actionPin.current?.id === pinId
                 ? actionPin.current
                 : null
@@ -448,7 +466,7 @@ export function MyLeadsClient({
             if (pinResult !== "error") applyPin(pinResult);
             else {
               setPinNotice(MY_LEAD_ROW_ERROR_COPY);
-              if (inList && applied) setPinRead(null);
+              if (inList && applied) setPinRead(deniedPin);
             }
           }
           // Replacing a paginated/reordered queue can unmount its recording player.
@@ -470,7 +488,7 @@ export function MyLeadsClient({
         return null;
       }
     },
-    [member, search, roster.settings.enabled],
+    [applyPin, member, search, roster.settings.enabled],
   );
   useEffect(() => {
     if (initialEffect.current) {
@@ -695,6 +713,7 @@ export function MyLeadsClient({
   // ?lead= value arriving later (new link, Back/Forward) is a new target; a refresh
   // that re-renders with the same value is not.
   const focusKey = `${focus?.propertyId ?? ""}|${focus?.notice ?? ""}|${focus?.memberId ?? ""}`;
+  const focusPropertyId = focus?.propertyId;
   const latestFocusKey = useRef(focusKey);
   const [target, setTarget] = useState(() => ({
     propertyId: focus?.propertyId ?? null,
@@ -718,7 +737,15 @@ export function MyLeadsClient({
     setCallOptions(null);
     setPinNotice(null);
     {
-      setPinRead(pinReadFromFocus(focus, snapshot?.snapshotAt ?? ""));
+      const seeded = pinReadFromFocus(focus, snapshot?.snapshotAt ?? "");
+      setPinRead((previous) =>
+        seeded &&
+        previous?.id === seeded.id &&
+        previous.lookup.status === "unavailable" &&
+        seeded.lookup.status !== "found"
+          ? previous
+          : seeded,
+      );
     }
     if (focus?.propertyId) {
       // A deep link always opens its rep's queue unfiltered.
@@ -731,9 +758,9 @@ export function MyLeadsClient({
     latestFocusKey.current = focusKey;
     // A focus transition invalidates every refresh that started for the prior
     // target, including same-member transitions where openingScope is unchanged.
-    ++request.current;
+    if (focusPropertyId) ++request.current;
     pendingOpening.current = null;
-  }, [openingScope, focusKey]);
+  }, [openingScope, focusKey, focusPropertyId]);
   useEffect(() => {
     setOpeningStatus(null);
   }, [openingScope, focusKey]);

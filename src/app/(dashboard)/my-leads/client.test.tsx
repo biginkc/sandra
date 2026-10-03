@@ -787,6 +787,10 @@ describe("current metadata for rapid workflow openings",()=>{
     );
     await act(async () => release({ ok: true, lookup: { status: "found", row: leadA, snapshotAt: snapshotA.snapshotAt } }));
     expect(screen.queryByRole("dialog", { name: "Ready to make an offer" })).not.toBeInTheDocument();
+    mocks.loadMyLeadRow.mockResolvedValue({ ok: true, lookup: { status: "found", row: leadB, snapshotAt: snapshotB.snapshotAt } });
+    await user.click(screen.getByRole("button", { name: "Ready for offer" }));
+    await screen.findByRole("dialog", { name: "Ready to make an offer" });
+    expect(screen.queryByText("Loading current lead…")).not.toBeInTheDocument();
     view.unmount();
   });
   it("retries an opening read failure without repeating the saved readiness command",async()=>{
