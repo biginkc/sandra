@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { Client } from "pg";
@@ -92,13 +92,20 @@ let rpcLockHeld = false;
 const rpcLockKey = "slack-preview-attempt-facts";
 
 function previewAttemptFactsSql(): string {
-  const migration = readFileSync(
-    new URL(
-      "../../../../supabase/migrations/20261003091441_slack_lead_unfurl_foundation.sql",
-      import.meta.url,
-    ),
-    "utf8",
-  );
+  const migrationsUrl = new URL("../../../../supabase/migrations/", import.meta.url);
+  const migrationName = readdirSync(migrationsUrl)
+    .filter((name) => /^\d{14}_slack_lead_unfurl_foundation\.sql$/.test(name))
+    .sort()
+    .findLast((name) => {
+      const source = readFileSync(new URL(name, migrationsUrl), "utf8");
+      return source.includes(
+        "create or replace function public.get_slack_preview_attempt_facts(",
+      );
+    });
+  if (!migrationName) {
+    throw new Error("authoritative Slack foundation migration was not found");
+  }
+  const migration = readFileSync(new URL(migrationName, migrationsUrl), "utf8");
   const start = migration.indexOf(
     "create or replace function public.get_slack_preview_attempt_facts(",
   );

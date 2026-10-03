@@ -36,7 +36,8 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   // Keep the server-authorized link target independent from the filtered and
   // paginated queue snapshot. A linked lead may be outside every loaded page.
   const [linkedLead,setLinkedLead]=useState(selectedLead);
-  const linkedLeadRef=useRef(linkedLead);linkedLeadRef.current=linkedLead;
+  const linkedLeadRef=useRef(linkedLead);
+  useEffect(()=>{linkedLeadRef.current=linkedLead;},[linkedLead]);
   const tiles=useMemo(()=>kpis?kpiTiles(kpis):null,[kpis]);
   const [lastCheckedAt,setLastCheckedAt]=useState(initialSnapshot?.snapshotAt??null);
   const reviewingDetails=useRef(false);
@@ -90,11 +91,6 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const [openingStatus,setOpeningStatus]=useState<{opening:Opening;message:string;busy:boolean}|null>(null);
   const cancelOpening=()=>{pendingOpening.current=null;setOpeningStatus(null);};
   useEffect(()=>{pendingOpening.current=null;setOpeningStatus(null);mutationReads.current.clear();},[openingScope]);
-  useEffect(()=>{
-    if(member===initialMemberId)return;
-    cancelOpening();
-    setDialog(null);setRecovery(null);setCallOptions(null);recoveredRow.current=null;submission.current=null;
-  },[initialMemberId,member]);
   const activeDialog=useRef(dialog);activeDialog.current=dialog;
   const recoveredRow=useRef<{opening:NonNullable<typeof dialog>;row:QueueRow}|null>(null);
   const [recovery,setRecovery]=useState<{opening:NonNullable<typeof dialog>;message:string;blocked:boolean;busy:boolean;reconciliation?:WorkflowReconciliation}|null>(null);
@@ -140,6 +136,11 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     uncertain: boolean;
   };
   const initialEffect=useRef(Boolean(initialSnapshot&&initialKpis));const request=useRef(0);const submission=useRef<OpeningSubmission|null>(null);
+  useEffect(()=>{
+    if(member===initialMemberId)return;
+    cancelOpening();
+    setDialog(null);setRecovery(null);setCallOptions(null);recoveredRow.current=null;submission.current=null;
+  },[initialMemberId,member]);
   const serverScopeKey=member;
   const previousServerScope=useRef(serverScopeKey);
   const refresh=useCallback(async(background=false)=>{
