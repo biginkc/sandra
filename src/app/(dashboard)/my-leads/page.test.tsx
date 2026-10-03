@@ -258,17 +258,17 @@ describe("MyLeadsPage availability boundary", () => {
     const leadId = "11111111-1111-4111-8111-111111111111";
     const clientProps = () => (mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0];
 
-    it("filters the rep's queue to the lead's address and focuses it", async () => {
+    it("leaves the rep's queue unfiltered and focuses the lead", async () => {
       mocks.property = { data: { id: leadId, address: " 12 Oak St ", assigned_user_id: "user-1" }, error: null };
 
-      renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId, action: "log-attempt" }) }));
+      renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId }) }));
 
-      expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({ memberId: "user-1", search: "12 Oak St" });
+      expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({ memberId: "user-1" });
       expect(clientProps()).toMatchObject({
         initialMemberId: "user-1",
-        initialSearch: "12 Oak St",
-        focus: { propertyId: leadId, action: "log-attempt", notice: null },
+        focus: { propertyId: leadId, memberId: "user-1", notice: null },
       });
+      expect(clientProps()?.initialSearch).toBeUndefined();
     });
 
     it("opens an owner on the assigned rep's queue", async () => {
@@ -280,7 +280,7 @@ describe("MyLeadsPage availability boundary", () => {
 
       renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId }) }));
 
-      expect(clientProps()).toMatchObject({ initialMemberId: "user-1", focus: { propertyId: leadId, action: null } });
+      expect(clientProps()).toMatchObject({ initialMemberId: "user-1", focus: { propertyId: leadId, memberId: "user-1" } });
     });
 
     it("explains when a rep opens a lead assigned to someone else", async () => {
@@ -289,13 +289,13 @@ describe("MyLeadsPage availability boundary", () => {
       renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: leadId }) }));
 
       expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({ memberId: "user-1" });
-      expect(clientProps()).toMatchObject({ initialSearch: "", focus: { propertyId: null, notice: expect.stringContaining("another rep") } });
+      expect(clientProps()).toMatchObject({ focus: { propertyId: null, notice: expect.stringContaining("another rep") } });
     });
 
     it("ignores a malformed lead id", async () => {
       renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: "not-a-uuid" }) }));
 
-      expect(clientProps()).toMatchObject({ focus: null, initialSearch: "" });
+      expect(clientProps()).toMatchObject({ focus: null });
     });
   });
 });

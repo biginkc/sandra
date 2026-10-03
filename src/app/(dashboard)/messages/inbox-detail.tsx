@@ -566,8 +566,8 @@ export function InboxDetail({
             <Button
               type="button"
               onClick={() => {
-                if (!data.propertyId || typeof window === "undefined") return;
-                window.open(myLeadsHref(data.propertyId), "_blank", "noopener,noreferrer");
+                if (!data.propertyId) return;
+                router.push(myLeadsHref(data.propertyId));
               }}
               variant="outline"
               size="sm"

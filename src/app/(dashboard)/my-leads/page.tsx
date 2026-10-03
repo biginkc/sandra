@@ -76,27 +76,26 @@ function firstParam(value: string | string[] | undefined): string | null {
 }
 
 /**
- * Resolves a `?lead=` deep link to the rep queue that holds it, pre-filtering
- * by address so the lead is on the first page. Reads go through the viewer's
- * RLS-scoped client, so a lead outside the viewer's org resolves to nothing.
+ * Resolves a `?lead=` deep link to the rep queue that holds it. The queue
+ * itself stays unfiltered; the client pins the lead to the top of its section.
+ * Reads go through the viewer's RLS-scoped client, so a lead outside the
+ * viewer's org resolves to nothing.
  */
 async function resolveFocus(
   viewer: { userId: string; isOwner: boolean },
   memberIds: ReadonlySet<string>,
   params: SearchParams,
-): Promise<{ focus: MyLeadsFocus; memberId: string; search: string } | null> {
+): Promise<{ focus: MyLeadsFocus; memberId: string } | null> {
   const propertyId = firstParam(params.lead);
   if (!propertyId || !UUID.test(propertyId)) return null;
-  const action = firstParam(params.action) === "log-attempt" ? "log-attempt" : null;
   const notInQueue = (notice: string) => ({
-    focus: { propertyId: null, action: null, notice },
+    focus: { propertyId: null, memberId: viewer.userId, notice },
     memberId: viewer.userId,
-    search: "",
   });
   const client = await createClient();
   const { data, error } = await client
     .from("properties")
-    .select("id,address,assigned_user_id")
+    .select("id,assigned_user_id")
     .eq("id", propertyId)
     .is("deleted_at", null)
     .maybeSingle();
@@ -105,9 +104,8 @@ async function resolveFocus(
   if (!assignee) return notInQueue("That lead is not assigned to a rep yet, so it is not in My Leads. Assign it from the lead page first.");
   if (assignee !== viewer.userId && (!viewer.isOwner || !memberIds.has(assignee))) return notInQueue("That lead is assigned to another rep, so it is not in your My Leads queue.");
   return {
-    focus: { propertyId, action, notice: null },
+    focus: { propertyId, memberId: assignee, notice: null },
     memberId: assignee,
-    search: ((data.address as string | null) ?? "").trim().slice(0, 200),
   };
 }
 
@@ -156,7 +154,6 @@ export default async function MyLeadsPage({ searchParams }: { searchParams: Prom
         snapshot: Awaited<ReturnType<typeof getAcquisitionQueue>> | null;
         kpis: Awaited<ReturnType<typeof getAcquisitionKpis>> | null;
         drips: Awaited<ReturnType<typeof listMyLeadsInDrip>> | null;
-        search: string;
       }
     | null = null;
   let focus: MyLeadsFocus | null = null;
@@ -165,16 +162,15 @@ export default async function MyLeadsPage({ searchParams }: { searchParams: Prom
     // unless a deep link names a lead in another rep's queue.
     const resolved = await resolveFocus(viewer, new Set(roster.members.map((m) => m.id)), await searchParams);
     const memberId = resolved?.memberId ?? viewer.userId;
-    const search = resolved?.search ?? "";
     focus = resolved?.focus ?? null;
     const [snapshot, kpis, drips] = roster.settings.enabled
       ? await Promise.all([
-          getAcquisitionQueue(search ? { memberId, search } : { memberId }),
+          getAcquisitionQueue({ memberId }),
           getAcquisitionKpis({ memberId, period: "today" }),
           listMyLeadsInDrip(memberId),
         ])
       : [null, null, null];
-    data = { viewer, roster, memberId, snapshot, kpis, drips, search };
+    data = { viewer, roster, memberId, snapshot, kpis, drips };
   } catch (error) {
     return loadFailureState(error);
   }
@@ -205,7 +201,6 @@ export default async function MyLeadsPage({ searchParams }: { searchParams: Prom
         initialSnapshot={data.snapshot}
         initialKpis={data.kpis}
         initialDrips={data.drips}
-        initialSearch={data.search}
         focus={focus}
       />
     </Page>

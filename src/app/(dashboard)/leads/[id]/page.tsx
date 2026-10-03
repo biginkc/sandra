@@ -712,13 +712,6 @@ export default async function LeadDetailPage({
       >
         Open in My Leads
       </Link>
-      <Link
-        href={myLeadsHref(lead.id, "log-attempt")}
-        data-testid="log-follow-up-attempt"
-        className={buttonVariants({ variant: "outline", size: "sm" })}
-      >
-        Log follow-up
-      </Link>
       <fieldset disabled={training} inert={training || undefined} className="contents"><HaveNormaCallButton
         propertyId={lead.id}
         sellerName={homeownerName}
