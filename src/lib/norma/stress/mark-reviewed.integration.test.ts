@@ -170,7 +170,6 @@ describe("mark reviewed (stress scenes)", () => {
       expect(await requests(ctx.lead.property)).toHaveLength(1);
     }
     // Both orders are legal and either may win a given round; the point is that neither corrupts the other.
-    // eslint-disable-next-line no-console
     console.log(`[norma-stress] mark-reviewed races: reviewed won ${reviewedWins}, the call result won ${resultWins}`);
     expect(reviewedWins + resultWins).toBe(8);
     await expectClean();
