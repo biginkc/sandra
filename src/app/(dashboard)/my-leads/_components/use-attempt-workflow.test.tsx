@@ -255,6 +255,44 @@ describe("useAttemptWorkflow", () => {
       await act(async () => { hook.result.current.recoveryValue?.refresh() })
       expect(handlers.onClose).toHaveBeenCalledTimes(1)
     })
+
+    it("receipt exists, then FORBIDDEN: reconciliation is kept (same key), and once access is back the replay is a duplicate success", async () => {
+      actions.submitMyLeadCommand
+        .mockResolvedValueOnce({ ok: false, certainty: "unknown", code: "FORBIDDEN", message: "This lead is unavailable or you no longer have access." })
+        .mockResolvedValueOnce({ ok: true, duplicate: true, attemptRecorded: true })
+      const readRow = vi.fn(async (): Promise<QueueRow | null> => row({ queueVersion: 1 }))
+      const { hook, handlers } = setup(opening("log-attempt", row({ queueVersion: 1 })), readRow)
+      await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "original" }) })
+      expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, reconciliation: { payload: { note: "original" } } })
+      // Blocked while access is gone.
+      await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "edited" }) })
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(1)
+      // Refresh re-reads the row and does NOT release the frozen payload.
+      await act(async () => { hook.result.current.recoveryValue?.refresh() })
+      expect(readRow).toHaveBeenCalledTimes(1)
+      expect(hook.result.current.recoveryValue).toMatchObject({ blocked: false, reconciliation: { payload: { note: "original" } } })
+      await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "edited" }) })
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(2)
+      expect(sentInput(1)).toEqual(sentInput(0))
+      expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
+    })
+
+    it("Refresh in the reconciliation state only re-reads the row: the frozen payload and key survive it", async () => {
+      actions.submitMyLeadCommand
+        .mockRejectedValueOnce(new Error("network"))
+        .mockResolvedValueOnce({ ok: true, duplicate: true, attemptRecorded: true })
+      const readRow = vi.fn(async (): Promise<QueueRow | null> => row({ queueVersion: 9 }))
+      const { hook } = setup(opening("log-attempt", row({ queueVersion: 1 })), readRow)
+      await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "original" }).catch(() => undefined) })
+      expect(hook.result.current.recoveryValue).toMatchObject({ blocked: false, reconciliation: { payload: { note: "original" } } })
+      await act(async () => { hook.result.current.recoveryValue?.refresh() })
+      expect(readRow).toHaveBeenCalledTimes(1)
+      expect(hook.result.current.recoveryValue).toMatchObject({ reconciliation: { payload: { note: "original" } } })
+      await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "edited" }) })
+      // The replay is the original request (queueVersion 1, not the refreshed 9).
+      expect(sentInput(1)).toEqual(sentInput(0))
+      expect(sentInput(1).expectedQueueVersion).toBe(1)
+    })
   })
 })
 

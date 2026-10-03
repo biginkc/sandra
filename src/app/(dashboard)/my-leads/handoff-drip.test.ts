@@ -38,8 +38,8 @@ it('keeps the saved outcome successful when enrollment fails',async()=>{
   expect(await submitMyLeadHandoffDrip(input)).toEqual({ok:true,dripFailure:'No approved sender'});
 });
 
-it('rejects another member queue before mutation',async()=>{
-  expect((await submitMyLeadHandoffDrip({...input,memberId:'other'})).ok).toBe(false);
+it('rejects another member queue before mutation as an unknown (mutable permission) failure',async()=>{
+  expect(await submitMyLeadHandoffDrip({...input,memberId:'other'})).toMatchObject({ok:false,certainty:'unknown'});
   expect(mocks.rpc).not.toHaveBeenCalled();
 });
 

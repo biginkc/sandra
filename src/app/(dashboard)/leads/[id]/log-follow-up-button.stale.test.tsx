@@ -145,5 +145,21 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
     expect(calls[1]).toEqual(calls[0])
     expect(calls[2]).toEqual(calls[0])
   })
+
+  it("FORBIDDEN keeps reconciliation; Refresh re-reads the row without releasing the payload; the replay succeeds once", async () => {
+    const user = userEvent.setup()
+    mocks.submitMyLeadCommand
+      .mockResolvedValueOnce({ ok: false, certainty: "unknown", code: "FORBIDDEN", message: "This lead is unavailable or you no longer have access." })
+      .mockResolvedValueOnce({ ok: true, duplicate: true, attemptRecorded: true })
+    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} />)
+    await user.click(screen.getByRole("button", { name: "Log follow-up" }))
+    await fillAndSave(user)
+    await user.click(await screen.findByRole("button", { name: "Refresh" }))
+    await screen.findByText(/Lead refreshed/)
+    expect(screen.getByRole("button", { name: "Reconcile saved change" })).toBeEnabled()
+    await user.click(screen.getByRole("button", { name: "Reconcile saved change" }))
+    await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2))
+    expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toEqual(mocks.submitMyLeadCommand.mock.calls[0][1])
+  })
 })
 

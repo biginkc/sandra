@@ -29,7 +29,7 @@ describe('My Leads command integration',()=>{
     expect((await submitMyLeadCommand('archive',{propertyId:'lead'})).ok).toBe(false);expect(mocks.rpc).not.toHaveBeenCalled();
   });
   it.each([
-    ['STALE_STATE','rejected'],['STALE_ASSIGNMENT','rejected'],['FORBIDDEN','rejected'],['DNC_LOCKED','rejected'],
+    ['STALE_STATE','rejected'],['STALE_ASSIGNMENT','rejected'],['FORBIDDEN','unknown'],['DNC_LOCKED','rejected'],
     ['fetch failed','unknown'],['JWT expired','unknown'],['IDEMPOTENCY_CONFLICT','unknown'],
   ])('classifies command RPC error %s as %s',async(message,certainty)=>{
     mocks.rpc.mockResolvedValue({data:null,error:{message}});
@@ -73,7 +73,7 @@ it('keeps KPI scope at today for the rep regardless of search and obsolete perio
 
 it('returns safe typed access guidance without revealing assignment or revalidating', async()=>{
   mocks.rpc.mockResolvedValue({data:null,error:{message:'FORBIDDEN'}});
-  expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toEqual({ok:false,certainty:'rejected',code:'FORBIDDEN',message:'This lead is unavailable or you no longer have access. Refresh to check access. Your draft is retained.'});
+  expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toEqual({ok:false,certainty:'unknown',code:'FORBIDDEN',message:'This lead is unavailable or you no longer have access. Refresh to check access. Your draft is retained.'});
   expect(mocks.revalidate).not.toHaveBeenCalled();
 });
 

@@ -34,8 +34,11 @@ export async function loadMyLeadsStage(input:{memberId:string;search:string;stag
  *   request may have committed, so the client keeps the exact request for replay.
  * Raise sites were verified against supabase/migrations/20261003130000_my_leads_conflicts_non_retryable.sql
  * (and the log/finalize attempt functions): every name in REJECTED_AFTER_LOOKUP is raised after the
- * lookup in all command functions. FORBIDDEN is also raised before the lookup in
- * fn_handoff_acquisition_lead_to_drip, so there it stays `unknown`.
+ * lookup in all command functions. FORBIDDEN is always `unknown`: access can change after an original
+ * committed, and the SQL raises it before the receipt lookup in the attempt/finalize functions
+ * (fn_log_acquisition_attempt_without_sms_obligation, fn_finalize_..._without_sms_obligation), in
+ * fn_handoff_acquisition_lead_to_drip, and through my_leads_workflow_require_actor, which workflow
+ * commands call before any replay. The app-side mutable permission check is `unknown` for the same reason.
  */
 /** Deterministic payload checks the SQL makes before any write; a payload that fails them now could not have committed. */
 const DETERMINISTIC_VALIDATION=/INVALID_INPUT|RECORDING_REQUIRED|MOTIVATION|PENDING_OFFER|RECIPIENT/;
@@ -50,7 +53,7 @@ export async function submitMyLeadHandoffDrip(input:{memberId:string;propertyId:
   let viewer;
   try { viewer=await myLeadsViewer(); }
   catch { return failure('unknown','Sign in with an active organization before updating a lead.'); }
-  if(!viewer.isOwner&&viewer.userId!==input.memberId) return failure('rejected','You can update only your own queue.');
+  if(!viewer.isOwner&&viewer.userId!==input.memberId) return failure('unknown','You can update only your own queue.');
   let rpc:{data:{ok?:boolean}|null;error:{message?:string}|null};
   try {
     rpc=await (viewer.client as unknown as {rpc(name:string,args:Record<string,string|number>):Promise<{data:{ok?:boolean}|null;error:{message?:string}|null}>}).rpc('fn_handoff_acquisition_lead_to_drip',{
@@ -63,7 +66,7 @@ export async function submitMyLeadHandoffDrip(input:{memberId:string;propertyId:
   if(error) {
     const message=error.message??'';
     if(named(message,['IDEMPOTENCY_CONFLICT'])) return failure('unknown',ALREADY_SAVED,'IDEMPOTENCY_CONFLICT' as const);
-    // FORBIDDEN is raised before the receipt lookup in this function, so it proves nothing.
+    if(named(message,['FORBIDDEN'])) return failure('unknown','This lead is unavailable. Refresh and try again.','FORBIDDEN' as const);
     if(named(message,['STALE_STATE','STALE_ASSIGNMENT'])) return failure('rejected','This lead changed. Refresh before trying again.','STALE_STATE' as const);
     if(named(message,REJECTED_AFTER_LOOKUP)||DETERMINISTIC_VALIDATION.test(message.toUpperCase())) return failure('rejected','This lead is unavailable. Refresh and try again.');
     return failure('unknown','Could not save the handoff outcome. Please retry.');
@@ -150,7 +153,7 @@ export async function submitMyLeadCommand(command:keyof typeof commands,input:Re
     const message=error.message??'';
     // A receipt exists for this key with a different request: the save already went through.
     if(named(message,['IDEMPOTENCY_CONFLICT'])) return failure('unknown',ALREADY_SAVED,'IDEMPOTENCY_CONFLICT' as const);
-    if(named(message,['FORBIDDEN'])) return failure('rejected','This lead is unavailable or you no longer have access. Refresh to check access. Your draft is retained.','FORBIDDEN' as const);
+    if(named(message,['FORBIDDEN'])) return failure('unknown','This lead is unavailable or you no longer have access. Refresh to check access. Your draft is retained.','FORBIDDEN' as const);
     if(named(message,['STALE_STATE','STALE_ASSIGNMENT'])||message.includes('STALE_')) return failure('rejected','This lead changed. Refresh before trying again.','STALE_STATE' as const);
     const certainty:Certainty=named(message,REJECTED_AFTER_LOOKUP)||DETERMINISTIC_VALIDATION.test(message.toUpperCase())?'rejected':'unknown';
     if(message.includes('RECORDING_REQUIRED')) return failure(certainty,'Attach the DialPad recording link before saving this call.');

@@ -111,10 +111,17 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
   const recoveredRow = useRef<{ opening: O; row: QueueRow } | null>(null)
   const [recovery, setRecovery] = useState<Recovery<O> | null>(null)
 
+  // While a request may have committed, its exact payload stays locked in the form, through
+  // Refresh too: Refresh only re-reads the row and never releases the frozen payload.
+  const frozenFor = (current: O): WorkflowReconciliation | undefined => {
+    const state = submission.current
+    return state?.opening === current && state.uncertain && state.payload ? { command: current.action, payload: state.payload } : undefined
+  }
+
   const recover = async () => {
     const current = opening
     if (!current || recovery?.busy) return
-    setRecovery({ opening: current, message: "Checking current lead access…", blocked: true, busy: true })
+    setRecovery({ opening: current, message: "Checking current lead access…", blocked: true, busy: true, reconciliation: frozenFor(current) })
     try {
       const row = await readRow(current)
       if (activeOpening.current !== current) return
@@ -128,16 +135,16 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       }
       // Never move a retained draft into a different assignment episode.
       if (!row || row.assignmentEpisodeId !== current.row.assignmentEpisodeId) {
-        setRecovery({ opening: current, message: "This lead is unavailable in this queue or its assignment changed. Your draft is retained; copy it before closing. Reopen the lead from the current queue to start a new update.", blocked: true, busy: false })
+        setRecovery({ opening: current, message: "This lead is unavailable in this queue or its assignment changed. Your draft is retained; copy it before closing. Reopen the lead from the current queue to start a new update.", blocked: true, busy: false, reconciliation: frozenFor(current) })
         return
       }
       // Refreshing an opening after a stale response does not start a new
       // submission. Keep its idempotency key so retrying the same command is
       // safe even when the draft was edited while the dialog was blocked.
       recoveredRow.current = { opening: current, row }
-      setRecovery({ opening: current, message: "Lead refreshed. Your draft is retained. Review it before saving.", blocked: false, busy: false })
+      setRecovery({ opening: current, message: "Lead refreshed. Your draft is retained. Review it before saving.", blocked: false, busy: false, reconciliation: frozenFor(current) })
     } catch {
-      if (activeOpening.current === current) setRecovery({ opening: current, message: "Could not refresh this lead. Your draft is retained. Try Refresh again.", blocked: true, busy: false })
+      if (activeOpening.current === current) setRecovery({ opening: current, message: "Could not refresh this lead. Your draft is retained. Try Refresh again.", blocked: true, busy: false, reconciliation: frozenFor(current) })
     }
   }
 
@@ -204,7 +211,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
         // exceptions): the request may have committed, so keep it frozen for replay.
         markUncertain()
         if ((failure.code === "FORBIDDEN" || failure.code === "STALE_STATE") && activeOpening.current === opening)
-          setRecovery({ opening, message: failure.message, blocked: true, busy: false })
+          setRecovery({ opening, message: failure.message, blocked: true, busy: false, reconciliation: { command, payload: state.payload ?? input } })
       }
     }
     if (result.ok) {

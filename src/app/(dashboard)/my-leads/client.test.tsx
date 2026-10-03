@@ -624,7 +624,7 @@ describe('stale form recovery',()=>{
   });
   async function rejectedDraft(code='STALE_STATE'){
     const user=userEvent.setup();
-    mocks.submitMyLeadCommand.mockResolvedValueOnce({ok:false,certainty:'rejected',code,message:'This lead changed. Refresh before trying again.'});
+    mocks.submitMyLeadCommand.mockResolvedValueOnce({ok:false,certainty:code==='STALE_STATE'?'rejected':'unknown',code,message:'This lead changed. Refresh before trying again.'});
     renderClient(snapshot('106 Fixture Lane'));
     await user.click(screen.getByRole('button',{name:'Log attempt'}));
     await user.selectOptions(screen.getByLabelText('External outcome'),'reached');
@@ -632,7 +632,7 @@ describe('stale form recovery',()=>{
     await user.type(screen.getByLabelText('Note (optional)'),'Keep this original draft');
     await user.click(screen.getByRole('button',{name:'Save attempt'}));
     await screen.findByRole('button',{name:'Refresh'});
-    expect(screen.getByRole('button',{name:'Save attempt'})).toBeDisabled();
+    expect(screen.getByRole('button',{name:/Save attempt|Reconcile saved change/})).toBeDisabled();
     return user;
   }
   it('refreshes version metadata while preserving the draft and only saves on explicit retry',async()=>{
@@ -707,7 +707,8 @@ describe('stale form recovery',()=>{
     await user.click(screen.getByRole('button',{name:'Refresh'}));
     await waitFor(()=>expect(screen.getByRole('button',{name:'Refresh'})).toBeEnabled());
     expect(screen.getByLabelText('Note (optional)')).toHaveValue('Keep this original draft');
-    expect(screen.getByRole('button',{name:'Save attempt'})).toBeDisabled();
+    // FORBIDDEN is an unknown outcome, so the exact original request stays locked for reconciliation.
+    expect(screen.getByRole('button',{name:/Save attempt|Reconcile saved change/})).toBeDisabled();
     expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
   });
 });

@@ -503,6 +503,22 @@ describe("MyLeadsClient pinned deep-link row", () => {
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
     })
 
+    it("FORBIDDEN keeps reconciliation; Refresh only re-reads the row; the replay succeeds once", async () => {
+      const user = userEvent.setup()
+      mocks.submitMyLeadCommand
+        .mockResolvedValueOnce({ ok: false, certainty: "unknown", code: "FORBIDDEN", message: "This lead is unavailable or you no longer have access." })
+        .mockResolvedValueOnce({ ok: true, duplicate: true })
+      render(ui(null, snap([loaded], 25)))
+      await openContract(user)
+      await user.click(screen.getByRole("button", { name: "Record contract" }))
+      await user.click(await screen.findByRole("button", { name: "Refresh" }))
+      await screen.findByText(/Lead refreshed/)
+      await user.click(screen.getByRole("button", { name: "Reconcile saved change" }))
+      await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2))
+      expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toEqual(mocks.submitMyLeadCommand.mock.calls[0][1])
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    })
+
     it("a server action that never answers ends in the reconcile state after the save timeout", async () => {
       const user = userEvent.setup({ delay: null })
       mocks.submitMyLeadCommand.mockImplementation(() => new Promise(() => undefined))
