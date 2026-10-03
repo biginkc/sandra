@@ -1936,6 +1936,27 @@ describe("<InboxDetail />", () => {
     );
   });
 
+  it("Open in My Leads goes to the lead in the same tab", async () => {
+    const user = userEvent.setup();
+    const data = makeData({
+      contactId: "contact-my-leads",
+      propertyId: "prop-my-leads",
+      propertyStatus: "new_lead",
+      initialMessages: [],
+    });
+
+    render(
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+    );
+    (window.open as unknown as { mockClear?: () => void }).mockClear?.();
+    pushCalls.length = 0;
+
+    await user.click(screen.getByTestId("inbox-detail-open-my-leads"));
+
+    expect(pushCalls).toContain("/my-leads?lead=prop-my-leads");
+    expect(window.open).not.toHaveBeenCalled();
+  });
+
   it("disables Move to Lead when the same property refreshes from prospect to lead", () => {
     const prospectData = makeData({
       contactId: "contact-status-refresh",

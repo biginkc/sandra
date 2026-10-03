@@ -5,10 +5,12 @@ import { RepSmsSettings } from './rep-sms-settings';
 import { Button } from '@/components/ui/button';
 import { useOptionalSoftphone } from '@/components/softphone/softphone-provider';
 import { BookAppointmentPopover } from '@/components/appointments/book-appointment-popover';
-import type { Json } from '@/lib/supabase/types';
-import type { AcquisitionKpis,AcquisitionRoster,QueueSnapshot,QueueRow } from '@/lib/my-leads/queries';
+import type { AcquisitionKpis,AcquisitionRoster,QueueSnapshot,QueueRow,MyLeadRowLookup } from '@/lib/my-leads/queries';
+import { MY_LEAD_ROW_REASON_COPY } from '@/lib/my-leads/row-reasons';
+import { newestCopy,pickAuthoritative,type AuthoritativeLookup } from '@/lib/my-leads/authoritative';
 import type { MyLeadDripSnapshot } from '@/lib/my-leads/drip-queries';
-import { WorkflowRecoveryContext, type WorkflowReconciliation } from './_components/workflow-form';
+import { WorkflowRecoveryContext } from './_components/workflow-form';
+import { useAttemptWorkflow } from './_components/use-attempt-workflow';
 import { MyLeadsQueue } from './_components/queue';
 import { AcquisitionAttemptDialog } from './_components/attempt-dialog';
 import { AcquisitionReadinessDialog } from './_components/readiness-dialog';
@@ -17,17 +19,82 @@ import { AcquisitionLifecycleDialog } from './_components/lifecycle-dialog';
 import { DialpadPanel,type DialpadCallRequest } from './_components/dialpad-panel';
 import type { DialpadPanelBootstrap } from '@/lib/dialpad-cti/dispatch';
 import type { MyLeadAction,MyLeadStage,AcquisitionLifecycleMode } from './_components/types';
-import { detailView,kpiTiles,stagePages } from './adapter';
-import { loadMyLeadCallReferences,loadMyLeads,loadMyLeadsStage,loadMyLeadDetail,submitMyLeadCommand,submitMyLeadHandoffDrip,changeAcquisitionDesignation,changeAcquisitionSettings } from './actions';
+import { detailView,kpiTiles,queueRow as queueRowView,stagePages } from './adapter';
+import { loadMyLeadCallReferences,loadMyLeadRow,loadMyLeads,loadMyLeadsStage,loadMyLeadDetail,changeAcquisitionDesignation,changeAcquisitionSettings } from './actions';
 
-type Props={viewer:{userId:string;orgId:string;isOwner:boolean};roster:AcquisitionRoster;initialMemberId:string;initialSnapshot:QueueSnapshot|null;initialKpis:AcquisitionKpis|null;initialDrips?:MyLeadDripSnapshot|null;dialpad?:DialpadPanelBootstrap|null};
+type Props={viewer:{userId:string;orgId:string;isOwner:boolean};roster:AcquisitionRoster;initialMemberId:string;initialSnapshot:QueueSnapshot|null;initialKpis:AcquisitionKpis|null;initialDrips?:MyLeadDripSnapshot|null;dialpad?:DialpadPanelBootstrap|null;initialSearch?:string;focus?:MyLeadsFocus|null};
+/** A lead opened from a deep link (lead page or Messages). */
+export type MyLeadsFocus={propertyId:string|null;memberId?:string|null;notice:string|null;pin?:QueueRow|null};
+/** The latest single-row lookup for the deep-linked lead; part of the read model. */
+type PinRead={id:string;lookup:MyLeadRowLookup}|null;
 
 const REFRESH_INTERVAL_MS = 30_000;
+
+type DripEntry=MyLeadDripSnapshot['active'][number];
+/** Every copy of every lead, grouped by propertyId in one pass, plus how many places hold each lead. */
+function indexCopies(snapshot:QueueSnapshot|null|undefined,drips:MyLeadDripSnapshot|null|undefined){
+  const copies=new Map<string,QueueRow[]>();const places=new Map<string,number>();
+  const add=(id:string,row:QueueRow|null)=>{
+    places.set(id,(places.get(id)??0)+1);
+    if(row)(copies.get(id)??copies.set(id,[]).get(id)!).push(row);
+  };
+  for(const page of Object.values(snapshot?.stages??{}))for(const row of page?.rows??[])add(row.propertyId,row);
+  for(const entry of [...(drips?.replied??[]),...(drips?.active??[])])add(entry.propertyId,entry.queueRow);
+  return {copies,places};
+}
+const copiesFor=(snapshot:QueueSnapshot|null|undefined,drips:MyLeadDripSnapshot|null|undefined,id:string)=>indexCopies(snapshot,drips).copies.get(id)??[];
+const lookupOf=(pin:PinRead|undefined,id:string):AuthoritativeLookup=>pin?.id!==id?undefined:pin.lookup.status==='found'?{status:'found',row:pin.lookup.row}:{status:'unavailable'};
+
+/**
+ * Reconciles competing copies into what is rendered, using pickAuthoritative as the
+ * one rule. The displayed snapshot can be older than the drips (a background refresh
+ * keeps the visible list stable while details are open) and than the single-row
+ * lookup for the deep-linked lead, so any lead with more than one copy is resolved.
+ * - Unavailable target: removed from every section by propertyId (including drip
+ *   entries with no queue row), and reconciliation CONTINUES for every other lead.
+ * - Otherwise the winner, whatever its source, is applied to ALL copies: one stage
+ *   row in the winner's section (replaced in place), wrong-section copies dropped,
+ *   and every drip entry takes the winning row and stage (stagePages groups replied
+ *   pins by drip.stage). If no copy remains the caller pins the row.
+ * Counts are deliberately left as the server snapshot reports them until the next
+ * refresh: they describe the server's view at snapshotAt, and a one-lead correction
+ * must not make them disagree with their own timestamp.
+ */
+function reconcileWithPin(snapshot:QueueSnapshot,drips:MyLeadDripSnapshot|null,pin:PinRead,id:string|null){
+  const removed=id&&pin?.id===id&&pin.lookup.status==='unavailable'?id:null;
+  const stages={...snapshot.stages} as QueueSnapshot['stages'];
+  const stageKeys=Object.keys(stages) as (keyof typeof stages)[];
+  if(removed)for(const key of stageKeys){const page=stages[key];if(page)stages[key]={...page,rows:page.rows.filter(row=>row.propertyId!==removed)};}
+  let working=drips;
+  if(removed&&drips)working={...drips,active:drips.active.filter(d=>d.propertyId!==removed),replied:drips.replied.filter(d=>d.propertyId!==removed)};
+  const base:QueueSnapshot={...snapshot,stages};
+  const {copies,places}=indexCopies(base,working);
+  const winners=new Map<string,QueueRow>();
+  for(const [propertyId,count] of places){
+    const lookup=id===propertyId?lookupOf(pin,propertyId):undefined;
+    if(count<2&&!lookup)continue;
+    const winner=pickAuthoritative(newestCopy(copies.get(propertyId)??[]),lookup).row;
+    if(winner)winners.set(propertyId,winner);
+  }
+  if(!winners.size)return {snapshot:removed?base:snapshot,drips:working};
+  for(const key of stageKeys){
+    const page=stages[key];if(!page)continue;
+    const placed=new Set<string>();
+    stages[key]={...page,rows:page.rows.flatMap(row=>{
+      const winner=winners.get(row.propertyId);
+      if(!winner)return [row];
+      if(winner.stage!==row.stage||placed.has(row.propertyId))return [];
+      placed.add(row.propertyId);return [winner];
+    })};
+  }
+  const apply=(entry:DripEntry):DripEntry=>{const winner=winners.get(entry.propertyId);return winner?{...entry,queueRow:winner,stage:winner.stage}:entry;};
+  return {snapshot:{...snapshot,stages},drips:working?{...working,active:working.active.map(apply),replied:working.replied.map(apply)}:working};
+}
 const refreshTime = new Intl.DateTimeFormat('en-US', {month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',timeZone:'America/Chicago',timeZoneName:'short'});
 
-export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,initialKpis,initialDrips=null,dialpad=null}:Props) {
+export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,initialKpis,initialDrips=null,dialpad=null,initialSearch='',focus=null}:Props) {
   const router=useRouter();const softphone=useOptionalSoftphone();
-  const [member,setMember]=useState(initialMemberId);const [search,setSearch]=useState('');
+  const [member,setMember]=useState(initialMemberId);const [search,setSearch]=useState(initialSearch);
   const [snapshot,setSnapshot]=useState(initialSnapshot);const [kpis,setKpis]=useState(initialKpis);
   const [drips,setDrips]=useState(initialDrips);
   const tiles=useMemo(()=>kpis?kpiTiles(kpis):null,[kpis]);
@@ -46,82 +113,63 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   },[]);
   const [dialog,setDialog]=useState<{action:MyLeadAction;row:QueueRow;callActivityId?:string|null}|null>(null);
   type Opening = {action:MyLeadAction;row:QueueRow;scope:string;callActivityId?:string|null};
-  type CurrentRead = Awaited<ReturnType<typeof loadMyLeads>> | null;
   const openingScope=JSON.stringify([member,search]);
   const activeScope=useRef(openingScope);activeScope.current=openingScope;
-  const currentSnapshot=useRef(snapshot);currentSnapshot.current=snapshot;
-  const currentDrips=useRef(drips);
-  useEffect(()=>{currentDrips.current=drips;},[drips]);
-  const findRow=(readSnapshot:QueueSnapshot|null,readDrips:MyLeadDripSnapshot|null|undefined,id:string)=>
-    Object.values(readSnapshot?.stages??{}).flatMap(page=>page?.rows??[]).find(row=>row.propertyId===id)??
-    [...(readDrips?.replied??[]),...(readDrips?.active??[])].find(row=>row.propertyId===id)?.queueRow??null;
-  const mutationReads=useRef(new Map<string,{scope:string;episodeId:string|null;requestId:number;read:Promise<CurrentRead>}>());
-  const renderedRead=useRef<{snapshot:QueueSnapshot;requestId:number;scope:string}|null>(null);
-  useEffect(()=>{
-    const read=renderedRead.current;if(!read||read.snapshot!==snapshot)return;
-    // A committed newer authorized read supersedes both successful and failed barriers.
-    for(const [propertyId,barrier] of mutationReads.current){
-      if(barrier.scope===read.scope&&barrier.requestId<=read.requestId)mutationReads.current.delete(propertyId);
-    }
-  },[snapshot]);
+  const [pinRead,setPinRead]=useState<PinRead>(()=>focus?.propertyId&&focus.pin?{id:focus.propertyId,lookup:{status:'found',row:focus.pin,snapshotAt:initialSnapshot?.snapshotAt??''}}:null);
+  const [pinNotice,setPinNotice]=useState<string|null>(null);
+  // The latest pin outcome, for reconciling a failed lookup against the next list read.
+  const actionPin=useRef<PinRead>(pinRead);
+  // The deep-linked lead whose single-row lookup rides along with every refresh.
+  const pinWanted=useRef<string|null>(focus?.propertyId??null);
+  const readPin=async(propertyId:string,memberId:string):Promise<PinRead|'error'>=>{
+    try {
+      const result=await loadMyLeadRow({memberId,propertyId});
+      if(result.ok)return {id:propertyId,lookup:result.lookup};
+      if(result.code==='NOT_FOUND')return {id:propertyId,lookup:{status:'unavailable',reason:'not_found'}};
+      return 'error';
+    } catch {return 'error';}
+  };
+  const applyPin=(pin:PinRead)=>{
+    setPinRead(pin);actionPin.current=pin;
+    setPinNotice(pin?.lookup.status==='unavailable'?MY_LEAD_ROW_REASON_COPY[pin.lookup.reason]:null);
+  };
+  /**
+   * The authoritative row for a lead: an unavailable single-row lookup removes it
+   * everywhere; otherwise the lookup's episode wins and a newer copy of that same
+   * episode (higher queueVersion) from the lists may replace it. Never a stale copy
+   * from another episode.
+   */
+  const findRow=(readSnapshot:QueueSnapshot|null,readDrips:MyLeadDripSnapshot|null|undefined,id:string,pin?:PinRead)=>
+    pickAuthoritative(newestCopy(copiesFor(readSnapshot,readDrips,id)),lookupOf(pin,id)).row;
   const pendingOpening=useRef<Opening|null>(null);
   const [openingStatus,setOpeningStatus]=useState<{opening:Opening;message:string;busy:boolean}|null>(null);
   const cancelOpening=()=>{pendingOpening.current=null;setOpeningStatus(null);};
-  useEffect(()=>{pendingOpening.current=null;setOpeningStatus(null);mutationReads.current.clear();},[openingScope]);
-  const activeDialog=useRef(dialog);activeDialog.current=dialog;
-  const recoveredRow=useRef<{opening:NonNullable<typeof dialog>;row:QueueRow}|null>(null);
-  const [recovery,setRecovery]=useState<{opening:NonNullable<typeof dialog>;message:string;blocked:boolean;busy:boolean;reconciliation?:WorkflowReconciliation}|null>(null);
-  const recoverDialog=async()=>{
-    const opening=dialog;if(!opening||recovery?.busy)return;
-    setRecovery({opening,message:'Checking current lead access…',blocked:true,busy:true});
-    try {
-      const result=await loadMyLeads({memberId:member,search,period:'today'});
-      if(activeDialog.current!==opening)return;
-      if(!result.ok)throw new Error('read failed');
-      const row=findRow(result.snapshot,result.drips,opening.row.propertyId);
-      // Never move a retained draft into a different assignment episode.
-      if(!row||row.assignmentEpisodeId!==opening.row.assignmentEpisodeId){
-        setRecovery({opening,message:'This lead is unavailable in this queue or its assignment changed. Your draft is retained; copy it before closing. Reopen the lead from the current queue to start a new update.',blocked:true,busy:false});return;
-      }
-      // Refreshing an opening after a stale response does not start a new
-      // submission. Keep its idempotency key so retrying the same command is
-      // safe even when the draft was edited while the dialog was blocked.
-      recoveredRow.current={opening,row};
-      setRecovery({opening,message:'Lead refreshed. Your draft is retained. Review it before saving.',blocked:false,busy:false});
-    }catch{
-      if(activeDialog.current===opening)setRecovery({opening,message:'Could not refresh this lead. Your draft is retained. Try Refresh again.',blocked:true,busy:false});
-    }
-  };
+  useEffect(()=>{pendingOpening.current=null;setOpeningStatus(null);},[openingScope]);
   const [detailRevision,setDetailRevision]=useState(0);
   const [recipient,setRecipient]=useState(roster.settings.recipientId??'');const [settingsBusy,setSettingsBusy]=useState(false);
-  type OpeningSubmission = {
-    key: string;
-    // Once the request may have crossed the RPC boundary, keep the exact
-    // payload that was sent with the key. A retry must replay this pair even
-    // if the form was edited while the response was unavailable.
-    payload: Record<string, Json> | null;
-    uncertain: boolean;
-  };
-  const initialEffect=useRef(Boolean(initialSnapshot&&initialKpis));const request=useRef(0);const submission=useRef<OpeningSubmission|null>(null);
+  const initialEffect=useRef(Boolean(initialSnapshot&&initialKpis));const request=useRef(0);
   const serverScopeKey=member;
   const previousServerScope=useRef(serverScopeKey);
   const refresh=useCallback(async(background=false)=>{
     if(!roster.settings.enabled) return null;
     const id=++request.current;
     try {
-      const result=await loadMyLeads({memberId:member,search,period:'today'});
+      const pinId=pinWanted.current;
+      const [loaded,pinResult]=await Promise.all([loadMyLeads({memberId:member,search,period:'today'}),pinId?readPin(pinId,member):Promise.resolve(undefined)]);
+      // A newer refresh, or a cleared/changed deep-link target, supersedes this read.
       if(id!==request.current)return null;
+      // A failed lookup never resurrects an old pin over a list row: if the new list
+      // has the lead the pin is dropped, otherwise the last good pin is kept.
+      const inList=loaded.ok&&Boolean(pinId)&&(Object.values(loaded.snapshot.stages).some(page=>page?.rows.some(row=>row.propertyId===pinId))||[...loaded.drips.active,...loaded.drips.replied].some(drip=>drip.propertyId===pinId));
+      const pin:PinRead|undefined=pinResult==='error'?(inList?null:actionPin.current?.id===pinId?actionPin.current:null):pinResult;
+      const result=loaded;
       if(result.ok){
+        const applied=!background||!reviewingDetails.current;
+        if(pinWanted.current===pinId&&pin!==undefined)actionPin.current=pin;
+        if(pinResult&&pinWanted.current===pinId){if(pinResult!=='error')applyPin(pinResult);else if(inList&&applied)setPinRead(null);}
         // Replacing a paginated/reordered queue can unmount its recording player.
         // Background checks may update KPIs, but must leave open lead details alone.
-        if(!background||!reviewingDetails.current){renderedRead.current={snapshot:result.snapshot,requestId:id,scope:JSON.stringify([member,search])};setSnapshot(result.snapshot);}
-        else {
-          // Playback keeps the visible queue stable, but a successful read must still
-          // replace a failed barrier before the next workflow opening.
-          for(const [propertyId,barrier] of mutationReads.current){
-            if(barrier.scope===JSON.stringify([member,search])&&barrier.requestId<=id)mutationReads.current.set(propertyId,{...barrier,requestId:id,read:Promise.resolve(result)});
-          }
-        }
+        if(!background||!reviewingDetails.current)setSnapshot(result.snapshot);
         setKpis(result.kpis);setDrips(result.drips);setLastCheckedAt(result.snapshot.snapshotAt);setError(null);setRefreshError(null);
       }
       else setRefreshError(result.message);
@@ -155,28 +203,32 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     document.addEventListener('visibilitychange',onVisible);window.addEventListener('focus',onVisible);
     return()=>{cancelled=true;clearTimeout(timer);document.removeEventListener('visibilitychange',onVisible);window.removeEventListener('focus',onVisible);};
   },[snapshot,refresh,roster.settings.enabled]);
-  const rawRow=(id:string)=>findRow(snapshot,drips,id);
-  const finishOpening=async(opening:Opening,read:Promise<CurrentRead>)=>{
+  // The displayed row. Only used to find what the user clicked; command preconditions come from the single-row lookup at opening time.
+  const rawRow=(id:string)=>findRow(snapshot,drips,id,pinRead);
+  /**
+   * Every workflow opening reads the lead through the single-row lookup (a database
+   * statement-time read) and uses THAT row for the command's preconditions (episode,
+   * version, shared status). List copies are never trusted for a command: they can
+   * be stale in ways queueVersion does not reveal. A failed lookup blocks the opening
+   * with a retryable error rather than falling back to a list row.
+   */
+  const finishOpening=async(opening:Opening)=>{
     pendingOpening.current=opening;
     setOpeningStatus({opening,message:'Loading current lead…',busy:true});
-    const result=await read;
+    const lookup=await readPin(opening.row.propertyId,member);
     if(pendingOpening.current!==opening||activeScope.current!==opening.scope)return;
-    if(!result?.ok){setOpeningStatus({opening,message:'Could not load current lead details. Retry to continue.',busy:false});return;}
-    const fresh=findRow(result.snapshot,result.drips,opening.row.propertyId);
+    if(lookup==='error'){setOpeningStatus({opening,message:'Could not load current lead details. Retry to continue.',busy:false});return;}
+    const fresh=lookup?.lookup.status==='found'?lookup.lookup.row:null;
+    // Never silently move an opening into a different assignment episode.
     if(!fresh||fresh.assignmentEpisodeId!==opening.row.assignmentEpisodeId){
       setOpeningStatus({opening,message:'This lead is unavailable or its assignment changed. Refresh the queue and reopen it.',busy:false});return;
     }
-    const latest=findRow(currentSnapshot.current,currentDrips.current,fresh.propertyId);
-    // Do not rewind an even newer rendered snapshot, or silently change episodes.
-    if(!latest||latest.assignmentEpisodeId!==fresh.assignmentEpisodeId){setOpeningStatus({opening,message:'This lead assignment changed. Refresh the queue and reopen it.',busy:false});return;}
-    const row=latest&&latest.queueVersion>=fresh.queueVersion?latest:fresh;
-    pendingOpening.current=null;setOpeningStatus(null);submission.current=null;setCallOptions(null);
-    setDialog({action:opening.action,row,callActivityId:opening.callActivityId});
+    pendingOpening.current=null;setOpeningStatus(null);setCallOptions(null);
+    setDialog({action:opening.action,row:fresh,callActivityId:opening.callActivityId});
   };
   const retryOpening=()=>{
     const opening=pendingOpening.current;if(!opening||openingStatus?.busy)return;
-    const read=refresh();mutationReads.current.set(opening.row.propertyId,{scope:opening.scope,episodeId:opening.row.assignmentEpisodeId,requestId:request.current,read});
-    void finishOpening(opening,read);
+    void finishOpening(opening);
   };
   const action=(kind:MyLeadAction,id:string,callActivityId?:string|null)=>{
     const row=rawRow(id);if(!row)return;
@@ -192,12 +244,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       softphone.openLead({id:row.propertyId,contactId:row.contactId,firstName:row.homeownerName?.split(' ')[0]??'',name:row.homeownerName??row.address,address:row.address,state:row.state,
         phones:row.phones,dncLocked:false,contactDnc:row.contactDnc,callable:row.phones.some(phone=>!!phone.trim())&&!row.contactDnc});return;
     }
-    const previous=mutationReads.current.get(id);
-    if(previous?.scope===openingScope&&previous.episodeId===row.assignmentEpisodeId){
-      void finishOpening({action:kind,row,scope:openingScope,callActivityId},previous.read);return;
-    }
-    cancelOpening();submission.current=null;setCallOptions(null);setDialog({action:kind,row,callActivityId});
-
+    void finishOpening({action:kind,row,scope:openingScope,callActivityId});
   };
   useEffect(()=>{
     if(dialog?.action!=='log-attempt')return;
@@ -211,80 +258,66 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     });
     return()=>{cancelled=true;};
   },[dialog,member,callRetry]);
-  const submit=useCallback(async(payload:object)=>{
-    if(!dialog)return {ok:false as const,message:'Select a lead first.'};
-    if(recovery?.opening===dialog&&(recovery.blocked||recovery.busy))return {ok:false as const,message:recovery.message};
-    const row=recoveredRow.current?.opening===dialog?recoveredRow.current.row:dialog.row;
-    // Keep the reconciliation receipt mounted while the exact original
-    // request is being replayed. Clearing it before the server action returns
-    // would briefly re-enable edited controls and make the replay ambiguous.
-    if(!(recovery?.opening===dialog&&recovery.reconciliation))setRecovery(null);
-    // A command's idempotency key belongs to the opened submission, not to
-    // the current draft contents. Before the RPC is known to have crossed its
-    // boundary, a deterministic rejection may be retried with refreshed
-    // queue metadata. Once transport or confirmation is uncertain, however,
-    // the original payload and key become one immutable replay pair. This is
-    // what prevents an edited draft from producing SQL IDEMPOTENCY_CONFLICT.
-    if(!submission.current)submission.current={key:crypto.randomUUID(),payload:null,uncertain:false};
-    const command=dialog.action as Parameters<typeof submitMyLeadCommand>[0];
-    const nextInput=JSON.parse(JSON.stringify({...payload,propertyId:row.propertyId,expectedEpisodeId:row.assignmentEpisodeId,
-      expectedQueueVersion:row.queueVersion,expectedSharedStatus:row.sharedStatus,idempotencyKey:submission.current.key})) as Record<string,Json>;
-    const input=submission.current.uncertain&&submission.current.payload
-      ? submission.current.payload
-      : nextInput;
-    submission.current.payload=input;
-    let result: Awaited<ReturnType<typeof submitMyLeadCommand>>;
-    try {
-      result=command==='handoff'&&typeof input.sequenceId==='string'&&input.sequenceId
-        ? await submitMyLeadHandoffDrip({memberId:member,propertyId:row.propertyId,sequenceId:input.sequenceId,
-            reason:'not_interested',expectedEpisodeId:typeof input.expectedEpisodeId==='string'?input.expectedEpisodeId:row.assignmentEpisodeId,
-            expectedQueueVersion:typeof input.expectedQueueVersion==='number'?input.expectedQueueVersion:row.queueVersion,
-            expectedSharedStatus:typeof input.expectedSharedStatus==='string'?input.expectedSharedStatus:row.sharedStatus,
-            idempotencyKey:submission.current.key})
-        : await submitMyLeadCommand(command,input);
-    } catch(error) {
-      // A rejected server action can mean the request reached Postgres but its
-      // response did not reach the browser. Retain the exact request so the
-      // next click is a server-side replay instead of a second mutation.
-      submission.current.uncertain=true;
-      if(activeDialog.current===dialog)setRecovery({opening:dialog,message:'Sandra could not confirm this save. The original request is preserved for reconciliation.',blocked:false,busy:false,reconciliation:{command,payload:submission.current.payload??input}});
-      throw error;
-    }
-    if(!result.ok&&result.message==='The update was not confirmed. Retry with the same form.') {
-      submission.current.uncertain=true;
-      if(activeDialog.current===dialog)setRecovery({opening:dialog,message:'Sandra could not confirm this save. The original request is preserved for reconciliation.',blocked:false,busy:false,reconciliation:{command,payload:submission.current.payload??input}});
-    }
-    if(!result.ok){
-      const failure=result as {message:string;code?:string};
-      if((failure.code==='FORBIDDEN'||failure.code==='STALE_STATE')&&activeDialog.current===dialog)
-        setRecovery({opening:dialog,message:failure.message,blocked:true,busy:false});
-    }
-    if(result.ok){
-      const dripFailure='dripFailure' in result && result.dripFailure ? `Outcome saved. Drip not started: ${result.dripFailure}` : null;
-      setRecovery(null);
-      // Publish the refresh barrier before closing so a rapid next click is retained
-      // and initialized from authorized post-command metadata, never the old row.
-      const read=refresh();mutationReads.current.set(dialog.row.propertyId,{scope:openingScope,episodeId:dialog.row.assignmentEpisodeId,requestId:request.current,read});
-      const followUpPending = dialog.action === 'log-attempt' && input.outcome === 'no_answer' &&
-        (!result.followUp || !['accepted','delivered'].includes(result.followUp.status));
-      if(!followUpPending && dialog.action!=='log-attempt' && dialog.action!=='handoff'){
-        setDialog(current=>current===dialog?null:current);
-        // This result is the confirmed terminal outcome for the opening.
-        // A subsequent dialog gets a fresh idempotency key.
-        submission.current=null;
-      }
+  const readRecoveryRow=useCallback(async(opening:{row:QueueRow})=>{
+    // Recovery stays blocked until the authoritative single-row lookup succeeds, and
+    // the lookup row (never a list row) supplies the retried command's preconditions.
+    const lookup=await readPin(opening.row.propertyId,member);
+    if(lookup==='error')throw new Error('row lookup failed');
+    return lookup?.lookup.status==='found'?lookup.lookup.row:null;
+  },[member]);
+  const {submit,recoveryValue,onDripChanged}=useAttemptWorkflow({
+    opening:dialog,memberId:member,readRow:readRecoveryRow,
+    onCommitted:()=>{
+      const read=refresh();
       setDetailRevision(revision=>revision+1);
-      if(dialog.action==='log-attempt'||dialog.action==='handoff') void read.then(()=>{if(dripFailure)setError(dripFailure);router.refresh();});
-      else {await read;router.refresh();}
+      return read;
+    },
+    onSettled:({opening,dripFailure})=>{
+      if(dripFailure&&(opening.action==='log-attempt'||opening.action==='handoff'))setError(dripFailure);
+      router.refresh();
+    },
+    onClose:opening=>setDialog(current=>current===opening?null:current),
+    onDripChanged:()=>{void refresh();router.refresh();},
+  });
+  // The deep-link target lives in client state, seeded from the URL. A user-driven
+  // rep/search change clears it (and the URL, without adding history). A different
+  // ?lead= value arriving later (new link, Back/Forward) is a new target; a refresh
+  // that re-renders with the same value is not.
+  const focusKey=`${focus?.propertyId??''}|${focus?.notice??''}|${focus?.memberId??''}`;
+  const [target,setTarget]=useState(()=>({propertyId:focus?.propertyId??null,notice:focus?.notice??null,nonce:0}));
+  const [seenFocusKey,setSeenFocusKey]=useState(focusKey);const [clearedForKey,setClearedForKey]=useState<string|null>(null);
+  if(seenFocusKey!==focusKey){
+    setSeenFocusKey(focusKey);setClearedForKey(null);
+    setTarget(previous=>({propertyId:focus?.propertyId??null,notice:focus?.notice??null,nonce:previous.nonce+1}));
+    setPinNotice(null);
+    {const seeded:PinRead=focus?.propertyId&&focus.pin?{id:focus.propertyId,lookup:{status:'found',row:focus.pin,snapshotAt:snapshot?.snapshotAt??''}}:null;setPinRead(seeded);}
+    if(focus?.propertyId){
+      // A deep link always opens its rep's queue unfiltered.
+      if(focus.memberId&&focus.memberId!==member)setMember(focus.memberId);
+      setSearch('');
     }
-    return result;
-  },[dialog,refresh,router,recovery,openingScope,member]);
-  const pages=snapshot?stagePages(snapshot,drips):null;
+  }
+  useEffect(()=>{pinWanted.current=target.propertyId;},[target.propertyId]);
+  // A new deep link reseeds the displayed pin during render; the action pin follows after commit.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(()=>{actionPin.current=pinRead;},[seenFocusKey]);
+  const clearFocus=()=>{
+    if(target.propertyId||target.notice)setTarget(previous=>({propertyId:null,notice:null,nonce:previous.nonce}));
+    // Dropping the target drops the pin, and any in-flight pin read is ignored.
+    pinWanted.current=null;setPinRead(null);actionPin.current=null;setPinNotice(null);
+    if(focusKey!=='||'&&clearedForKey!==focusKey){setClearedForKey(focusKey);router.replace('/my-leads',{scroll:false});}
+  };
+  const view=useMemo(()=>snapshot?reconcileWithPin(snapshot,drips,pinRead,target.propertyId):null,[snapshot,drips,pinRead,target.propertyId]);
+  const pages=snapshot&&view?stagePages(view.snapshot,view.drips):null;
+  // Show the lead in place when a loaded page has it; otherwise pin it at the top of its section.
+  const pinnedLookup=target.propertyId&&pinRead?.id===target.propertyId&&pinRead.lookup.status==='found'?pinRead.lookup.row:null;
+  const pinnedView=pages&&snapshot&&pinnedLookup&&!(Object.values(pages).some(page=>page.rows.some(row=>row.propertyId===pinnedLookup.propertyId))||view?.drips?.active.some(row=>row.propertyId===pinnedLookup.propertyId))
+    ?{...queueRowView(findRow(snapshot,drips,pinnedLookup.propertyId,pinRead)??pinnedLookup,snapshot.snapshotAt),dripReply:drips?.replied.find(row=>row.propertyId===pinnedLookup.propertyId)??null}:null;
   if(pages)for(const stage of loadingStages)pages[stage].isLoadingMore=true;
   const motivation=dialog?.row.motivationKind==='specified'?{kind:'specified' as const,text:dialog.row.motivationText??''}:dialog?.row.motivationKind==='no_motivation'?{kind:'no_motivation' as const,text:null}:null;
   // Completion callbacks belong to one opening, even when the same lead is reopened.
   // A previous form can finish after its post-save refresh and must not close a new form.
-  const common=dialog?{open:true,propertyId:dialog.row.propertyId,propertyLabel:dialog.row.address,onOpenChange:(open:boolean)=>{if(!open){submission.current=null;setDialog(current=>current===dialog?null:current);}}}:null;
+  const common=dialog?{open:true,propertyId:dialog.row.propertyId,propertyLabel:dialog.row.address,onOpenChange:(open:boolean)=>{if(!open){setDialog(current=>current===dialog?null:current);}}}:null;
   return <>
     {openingStatus&&<div role="status" className="mb-4 rounded border p-3">
       {openingStatus.message}
@@ -298,6 +331,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       <Button disabled={!recipient||settingsBusy} onClick={async()=>{setSettingsBusy(true);try{const result=await changeAcquisitionSettings({orgId:viewer.orgId,needsSequenceOwnerId:recipient,expectedSettingsRevision:roster.settings.revision,idempotencyKey:crypto.randomUUID()});if(!result.ok)setError(result.message);else router.refresh();}finally{setSettingsBusy(false);}}}>Save recipient</Button></div>
     <RepSmsSettings orgId={viewer.orgId} members={roster.members} />
     </details>}
+    {(target.notice??pinNotice)&&<div role="status" className="mb-4 rounded border p-3 text-sm">{target.notice??pinNotice}</div>}
     {error&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{error} <Button variant="outline" onClick={()=>void refresh()}>Refresh</Button></div>}
     {refreshError&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{refreshError} Displayed counts may be out of date. Retrying automatically. <Button variant="outline" onClick={()=>void refresh()}>Retry now</Button> <Button variant="outline" onClick={()=>window.location.reload()}>Reload and reconnect</Button></div>}
     {dialpad&&roster.settings.enabled&&<DialpadPanel bootstrap={dialpad} callRequest={dialpadRequest}
@@ -305,12 +339,12 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       onRecordingFinalResult={()=>{void refresh(true);}}
       onLogOutcome={(propertyId,callActivityId)=>{if(!rawRow(propertyId)){setError('This lead is no longer in your queue.');return;}action('log-attempt',propertyId,callActivityId);}}/>}
     {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis||!tiles?<p role="status">Loading My Leads…</p>:<>
-      <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} drips={drips} kpis={tiles} search={search} selectedRepId={member}
+      <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} drips={view?.drips??drips} kpis={tiles} search={search} selectedRepId={member}
         onReviewingChange={onReviewingChange}
-        detailRevision={detailRevision}
+        detailRevision={detailRevision} focusPropertyId={target.propertyId} focusNonce={target.nonce} pinnedRow={pinnedView}
         repOptions={roster.members.filter(m=>m.acquisitionsEnabled||m.hasHistory||m.id===viewer.userId).map(m=>({id:m.id,label:m.label+(m.acquisitionsEnabled?'':' — Acquisitions disabled')}))}
         selectedRepLabel={roster.members.find(m=>m.id===member)?.label}
-        onSearchChange={setSearch} onRepChange={setMember}
+        onSearchChange={value=>{clearFocus();setSearch(value);}} onRepChange={value=>{clearFocus();setMember(value);}}
         onLoadMore={async stage=>{
           const cursor=snapshot?.stages[stage]?.cursor;if(!cursor||loadingStages.has(stage))return;
           const id=request.current;setLoadingStages(previous=>new Set(previous).add(stage));
@@ -334,8 +368,8 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       {search&&<p className="mb-2 text-sm text-muted-foreground">Section counts match your search. KPIs cover the selected rep.</p>}
       <p className="mt-3 text-xs text-muted-foreground">{kpis.firstCallPending} first calls pending · {kpis.pendingOutcomes} call outcomes pending{kpis.orgAppointmentsUnattributed?` · ${kpis.orgAppointmentsUnattributed} appointments in this organization have unknown historical attribution`:''}</p>
     </>}
-    <WorkflowRecoveryContext.Provider value={recovery?.opening===dialog?{...recovery,refresh:()=>void recoverDialog()}:null}>
-    {common&&dialog?.action==='log-attempt'&&<AcquisitionAttemptDialog {...common} onSubmit={payload=>submit(payload)} onDripChanged={()=>{void refresh();router.refresh();}} key={`${dialog.row.propertyId}:${dialog.callActivityId??''}`} initialCallActivityId={dialog.callActivityId??null} callReferenceOptions={callOptions?.propertyId===dialog.row.propertyId?callOptions.options:[]} callReferencesLoading={!callOptions} callReferencesError={callOptions?.error} onRetryCallReferences={()=>setCallRetry(value=>value+1)}/>}
+    <WorkflowRecoveryContext.Provider value={recoveryValue}>
+    {common&&dialog?.action==='log-attempt'&&<AcquisitionAttemptDialog {...common} onSubmit={payload=>submit(payload)} onDripChanged={onDripChanged} key={`${dialog.row.propertyId}:${dialog.callActivityId??''}`} initialCallActivityId={dialog.callActivityId??null} callReferenceOptions={callOptions?.propertyId===dialog.row.propertyId?callOptions.options:[]} callReferencesLoading={!callOptions} callReferencesError={callOptions?.error} onRetryCallReferences={()=>setCallRetry(value=>value+1)}/>}
     {common&&dialog?.action==='ready-for-offer'&&<AcquisitionReadinessDialog {...common} onSubmit={payload=>submit(payload)} initialTemperature={dialog.row.temperature} initialMotivationResponse={motivation}/>}
     {common&&dialog?.action==='log-offer'&&<AcquisitionOfferDialog {...common} onSubmit={payload=>submit(payload)} motivationRequired={!motivation} initialTemperature={dialog.row.temperature} initialMotivationResponse={motivation}/>}
     {common&&dialog&&['contract-signed','decline-offer','handoff','archive'].includes(dialog.action)&&<AcquisitionLifecycleDialog {...common} onSubmit={payload=>submit(payload)} mode={dialog.action as AcquisitionLifecycleMode}

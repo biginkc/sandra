@@ -174,7 +174,7 @@ export function WorkflowFormError({ message }: { message: string | null }) {
       <span>
         {recovery?.message ?? message}
         {recovery?.reconciliation && <span className="mt-1 block text-xs font-medium text-foreground">The original values are locked while Sandra reconciles this save. Review the displayed values and submit the saved request again.</span>}
-        {recovery?.blocked && <Button type="button" variant="link" disabled={recovery.busy} onClick={recovery.refresh}>{recovery.busy ? "Refreshing…" : "Refresh"}</Button>}
+        {(recovery?.blocked || recovery?.reconciliation) && <Button type="button" variant="link" disabled={recovery.busy} onClick={recovery.refresh}>{recovery.busy ? "Refreshing…" : "Refresh"}</Button>}
       </span>
     </div>
   )

@@ -3,14 +3,15 @@ import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 import { expect, it } from 'vitest';
 import { loadTestEnv } from '@tests/integration/env';
+import { requireLoopbackPostgresUrl } from '@/lib/testing/loopback-postgres-url';
 
 const sql=readFileSync(new URL('./20261003120000_my_leads_queue_row_lookup.sql',import.meta.url),'utf8');
 const url=process.env.TEST_SUPABASE_DB_URL??loadTestEnv().TEST_SUPABASE_DB_URL;
 
 it('returns a queue row identical to the page row, or a precise unavailable reason, with scoped access',async()=>{
   if(!url) throw new Error('Missing TEST_SUPABASE_DB_URL');
-  const target=new URL(url);
-  if(target.hostname!=='127.0.0.1'||target.port!=='54329') throw new Error('Queue row lookup integration requires local Postgres at 127.0.0.1:54329');
+  // Loopback only, on whichever port the local stack or the CI disposable stack (54322) uses.
+  requireLoopbackPostgresUrl(url);
   if(!/^begin;\s*/i.test(sql)||!/\s*commit;\s*$/i.test(sql)) throw new Error('Migration transaction wrapper changed');
   const db=new Client({connectionString:url});
   await db.connect();

@@ -69,6 +69,14 @@ export async function getAcquisitionQueue(input: { memberId: string; search?: st
 }
 export type MyLeadRowReason='not_found'|'unassigned'|'other_rep'|'closed_dead_dnc'|'archived'|'no_active_episode';
 export type MyLeadRowLookup={status:'found';row:QueueRow;snapshotAt:string}|{status:'unavailable';reason:MyLeadRowReason};
+const QUEUE_STAGES:readonly string[]=['not_contacted','contacted','needs_offer','offer_sent','under_contract'];
+/** Runtime check for the fields the client relies on; anything else is a failed read. */
+function isQueueRowFor(row:unknown,propertyId:string): row is QueueRow {
+  if(typeof row!=='object'||row===null||Array.isArray(row)) return false;
+  const value=row as Record<string,unknown>;
+  return value.propertyId===propertyId&&typeof value.assignmentEpisodeId==='string'&&value.assignmentEpisodeId!==''&&
+    typeof value.queueVersion==='number'&&Number.isFinite(value.queueVersion)&&typeof value.stage==='string'&&QUEUE_STAGES.includes(value.stage);
+}
 const ROW_REASONS:readonly string[]=['not_found','unassigned','other_rep','closed_dead_dnc','archived','no_active_episode'];
 /** Opens one lead by propertyId, unfiltered, or explains why it is not in the member's queue. */
 export async function getMyLeadsQueueRow(input:{memberId:string;propertyId:string}): Promise<MyLeadRowLookup> {
@@ -78,7 +86,7 @@ export async function getMyLeadsQueueRow(input:{memberId:string;propertyId:strin
   const result=await readRpc<Partial<MyLeadRowLookup>&Record<string,unknown>>(viewer.client,'fn_get_my_leads_queue_row',{
     p_org_id:viewer.orgId,p_member_id:input.memberId,p_property_id:input.propertyId,
   });
-  if(result.status==='found'&&result.row&&typeof result.snapshotAt==='string') return {status:'found',row:result.row,snapshotAt:result.snapshotAt};
+  if(result.status==='found'&&isQueueRowFor(result.row,input.propertyId)&&typeof result.snapshotAt==='string'&&Number.isFinite(Date.parse(result.snapshotAt))) return {status:'found',row:result.row,snapshotAt:result.snapshotAt};
   if(result.status==='unavailable'&&typeof result.reason==='string'&&ROW_REASONS.includes(result.reason)) return {status:'unavailable',reason:result.reason as MyLeadRowReason};
   throw new MyLeadsReadError('READ_FAILED','My Leads returned an unexpected response.');
 }

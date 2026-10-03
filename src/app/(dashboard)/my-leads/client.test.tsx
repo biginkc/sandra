@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   submitMyLeadCommand: vi.fn(),
   submitMyLeadHandoffDrip: vi.fn(),
   loadMyLeads: vi.fn(),
+  loadMyLeadRow: vi.fn(),
   loadMyLeadCallReferences: vi.fn(),
   realDialpad: false,
   realQueue: false,
@@ -32,6 +33,7 @@ vi.mock("@/components/appointments/book-appointment-popover", () => ({
 
 vi.mock("./actions", () => ({
   loadMyLeads: mocks.loadMyLeads,
+  loadMyLeadRow: mocks.loadMyLeadRow,
   loadMyLeadsStage: vi.fn(),
   loadMyLeadDetail: vi.fn(),
   loadMyLeadCallReferences: mocks.loadMyLeadCallReferences,
@@ -198,7 +200,25 @@ function snapshot(address: string): QueueSnapshot {
   }
 }
 
+/**
+ * Default single-row lookup: the database truth is the most recent successful queue read
+ * (or the initial snapshot). Tests that need a specific lookup override it after rendering.
+ */
+function installDefaultRowLookup(initial: QueueSnapshot, initialDrips: MyLeadDripSnapshot | null) {
+  mocks.loadMyLeadRow.mockImplementation(async ({ propertyId }: { propertyId: string }) => {
+    const settled = [...mocks.loadMyLeads.mock.settledResults].reverse().find((r) => r.type === "fulfilled" && (r.value as { ok?: boolean })?.ok)
+    const read = (settled?.value as { snapshot: QueueSnapshot; drips?: MyLeadDripSnapshot | null } | undefined) ?? { snapshot: initial, drips: initialDrips }
+    const rows = [
+      ...Object.values(read.snapshot.stages).flatMap((page) => page?.rows ?? []),
+      ...[...(read.drips?.active ?? []), ...(read.drips?.replied ?? [])].flatMap((drip) => (drip.queueRow ? [drip.queueRow] : [])),
+    ]
+    const row = rows.find((candidate) => candidate.propertyId === propertyId)
+    return row ? { ok: true, lookup: { status: "found", row, snapshotAt: read.snapshot.snapshotAt } } : { ok: true, lookup: { status: "unavailable", reason: "not_found" } }
+  })
+}
+
 function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis, initialDrips:MyLeadDripSnapshot|null=null, dialpad?: React.ComponentProps<typeof MyLeadsClient>["dialpad"]) {
+  installDefaultRowLookup(initialSnapshot, initialDrips)
   return render(
     <MyLeadsClient
       viewer={viewer}
@@ -422,8 +442,9 @@ describe("MyLeadsClient", () => {
     mocks.loadMyLeadCallReferences.mockResolvedValueOnce({ ok: true, options: [{ id: "new-call", label: "Current call" }] })
     renderClient(snapshot("106 Fixture Lane"))
     await user.click(screen.getByRole("button", { name: "Log attempt" }))
-    await user.click(screen.getByRole("button", { name: "Cancel" }))
+    await user.click(await screen.findByRole("button", { name: "Cancel" }))
     await user.click(screen.getByRole("button", { name: "Log attempt" }))
+    await screen.findByLabelText("Source")
     await user.selectOptions(screen.getByLabelText("Source"), "sandra")
     expect(screen.getByLabelText("Sandra call")).toHaveValue("new-call")
     resolveOld({ ok: true, options: [{ id: "old-call", label: "Stale call" }] })
@@ -535,7 +556,6 @@ it.each(["log-offer", "log-attempt"])("retains a rapid %s opening intent until a
   const user = userEvent.setup();
   const initial = snapshot("106 Fixture Lane");
   let release!: (value: unknown) => void;
-  mocks.loadMyLeads.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
   mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:initial,kpis});
   mocks.loadMyLeadCallReferences.mockResolvedValue({ok:true,options:[]});
   mocks.submitMyLeadCommand.mockResolvedValue({ok:true});
@@ -547,10 +567,12 @@ it.each(["log-offer", "log-attempt"])("retains a rapid %s opening intent until a
   await user.click(await screen.findByRole('button',{name:'Done without a drip'}));
   await waitFor(()=>expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   expect(mocks.loadMyLeads).toHaveBeenCalledTimes(1);
+  // The next opening reads the lead through the single-row lookup and waits for it.
+  mocks.loadMyLeadRow.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
   await user.click(screen.getByRole("button",{name:nextAction==="log-offer"?"Log offer":"Log attempt"}));
   expect(screen.getByText("Loading current lead…")).toBeVisible();
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-  await act(async()=>{release({ok:true,snapshot:initial,kpis});});
+  await act(async()=>{release({ok:true,lookup:{status:'found',row:initial.stages.not_contacted!.rows[0],snapshotAt:initial.snapshotAt}});});
   if(nextAction==="log-offer"){
     await user.type(screen.getByLabelText("Offer amount"),"125000.50");
     await user.selectOptions(screen.getByLabelText("Offer method"),"verbal");
@@ -580,7 +602,7 @@ describe('stale form recovery',()=>{
   it('refreshes a stale drip handoff and retries with the current queue version',async()=>{
     const user=userEvent.setup();
     mocks.listDripChoices.mockResolvedValue({ok:true,data:[{id:'drip-1',name:'Seller follow-up',textCount:4,days:90,firstSend:'Today'}]});
-    mocks.submitMyLeadHandoffDrip.mockResolvedValueOnce({ok:false,code:'STALE_STATE',message:'This lead changed. Refresh before trying again.'})
+    mocks.submitMyLeadHandoffDrip.mockResolvedValueOnce({ ok: false, certainty: "rejected", code: 'STALE_STATE',message:'This lead changed. Refresh before trying again.'})
       .mockResolvedValueOnce({ok:true});
     renderClient(snapshot('106 Fixture Lane'));
     await user.click(screen.getByRole('button',{name:'Handoff'}));
@@ -591,6 +613,8 @@ describe('stale form recovery',()=>{
     expect(mocks.submitMyLeadHandoffDrip.mock.calls[0][0]).toMatchObject({expectedQueueVersion:1,sequenceId:'drip-1'});
     const fresh=snapshot('106 Fixture Lane');fresh.stages.not_contacted!.rows[0].queueVersion=2;
     mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});
+    // Recovery requires the authoritative single-row lookup to succeed.
+    mocks.loadMyLeadRow.mockResolvedValue({ok:true,lookup:{status:'found',row:fresh.stages.not_contacted!.rows[0],snapshotAt:fresh.snapshotAt}});
     await user.click(screen.getByRole('button',{name:'Refresh'}));
     await screen.findByText('Lead refreshed. Your draft is retained. Review it before saving.');
     expect(screen.getByLabelText('Handoff reason')).toHaveValue('not_interested');
@@ -600,7 +624,7 @@ describe('stale form recovery',()=>{
   });
   async function rejectedDraft(code='STALE_STATE'){
     const user=userEvent.setup();
-    mocks.submitMyLeadCommand.mockResolvedValueOnce({ok:false,code,message:'This lead changed. Refresh before trying again.'});
+    mocks.submitMyLeadCommand.mockResolvedValueOnce({ok:false,certainty:code==='STALE_STATE'?'rejected':'unknown',code,message:'This lead changed. Refresh before trying again.'});
     renderClient(snapshot('106 Fixture Lane'));
     await user.click(screen.getByRole('button',{name:'Log attempt'}));
     await user.selectOptions(screen.getByLabelText('External outcome'),'reached');
@@ -608,13 +632,15 @@ describe('stale form recovery',()=>{
     await user.type(screen.getByLabelText('Note (optional)'),'Keep this original draft');
     await user.click(screen.getByRole('button',{name:'Save attempt'}));
     await screen.findByRole('button',{name:'Refresh'});
-    expect(screen.getByRole('button',{name:'Save attempt'})).toBeDisabled();
+    expect(screen.getByRole('button',{name:/Save attempt|Reconcile saved change/})).toBeDisabled();
     return user;
   }
   it('refreshes version metadata while preserving the draft and only saves on explicit retry',async()=>{
     const user=await rejectedDraft();
     const fresh=snapshot('106 Fixture Lane');fresh.stages.not_contacted!.rows[0].queueVersion=2;
     mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});
+    // Recovery requires the authoritative single-row lookup to succeed.
+    mocks.loadMyLeadRow.mockResolvedValue({ok:true,lookup:{status:'found',row:fresh.stages.not_contacted!.rows[0],snapshotAt:fresh.snapshotAt}});
     await user.click(screen.getByRole('button',{name:'Refresh'}));
     await screen.findByText('Lead refreshed. Your draft is retained. Review it before saving.');
     expect(screen.getByLabelText('Note (optional)')).toHaveValue('Keep this original draft');
@@ -657,13 +683,13 @@ describe('stale form recovery',()=>{
   it('ignores recovery finishing after cancellation and reopening the same lead',async()=>{
     const user=await rejectedDraft();
     let release!: (value: unknown)=>void;
-    mocks.loadMyLeads.mockReturnValueOnce(new Promise(resolve=>{release=resolve;}));
+    mocks.loadMyLeadRow.mockReturnValueOnce(new Promise(resolve=>{release=resolve;}));
     await user.click(screen.getByRole('button',{name:'Refresh'}));
     await user.click(screen.getByRole('button',{name:'Cancel'}));
     await user.click(screen.getByRole('button',{name:'Log attempt'}));
     await user.type(screen.getByLabelText('Note (optional)'),'New opening draft');
     const fresh=snapshot('106 Fixture Lane');fresh.stages.not_contacted!.rows[0].queueVersion=99;
-    await act(async()=>release({ok:true,snapshot:fresh,kpis}));
+    await act(async()=>release({ok:true,lookup:{status:'found',row:fresh.stages.not_contacted!.rows[0],snapshotAt:'x'}}));
     expect(screen.getByLabelText('Note (optional)')).toHaveValue('New opening draft');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.getByRole('button',{name:'Save attempt'})).toBeEnabled();
@@ -674,11 +700,15 @@ describe('stale form recovery',()=>{
     const fresh=snapshot('106 Fixture Lane');
     if(kind==='missing')fresh.stages.not_contacted!.rows=[];
     if(kind==='different episode')fresh.stages.not_contacted!.rows[0].assignmentEpisodeId='episode-2';
-    mocks.loadMyLeads.mockResolvedValue(kind==='failed read'?{ok:false,message:'denied'}:{ok:true,snapshot:fresh,kpis});
+    mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});
+    mocks.loadMyLeadRow.mockResolvedValue(kind==='failed read'?{ok:false,code:'READ_FAILED',message:'denied'}
+      :kind==='missing'?{ok:true,lookup:{status:'unavailable',reason:'other_rep'}}
+      :{ok:true,lookup:{status:'found',row:fresh.stages.not_contacted!.rows[0],snapshotAt:'x'}});
     await user.click(screen.getByRole('button',{name:'Refresh'}));
     await waitFor(()=>expect(screen.getByRole('button',{name:'Refresh'})).toBeEnabled());
     expect(screen.getByLabelText('Note (optional)')).toHaveValue('Keep this original draft');
-    expect(screen.getByRole('button',{name:'Save attempt'})).toBeDisabled();
+    // FORBIDDEN is an unknown outcome, so the exact original request stays locked for reconciliation.
+    expect(screen.getByRole('button',{name:/Save attempt|Reconcile saved change/})).toBeDisabled();
     expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
   });
 });
@@ -690,7 +720,6 @@ describe("current metadata for rapid workflow openings",()=>{
   async function afterReadiness(){
     const user=userEvent.setup();const initial=snapshot("106 Fixture Lane");
     let release!:(value:unknown)=>void;
-    mocks.loadMyLeads.mockReturnValueOnce(new Promise(resolve=>{release=resolve;}));
     mocks.submitMyLeadCommand.mockResolvedValue({ok:true});
     renderClient(initial);
     await user.click(screen.getByRole("button",{name:"Ready for offer"}));
@@ -699,7 +728,15 @@ describe("current metadata for rapid workflow openings",()=>{
     await user.click(screen.getByRole("button",{name:"Save readiness"}));
     await waitFor(()=>expect(screen.queryByRole("dialog")).not.toBeInTheDocument(), settle);
     const fresh=snapshot("106 Fixture Lane");Object.assign(fresh.stages.not_contacted!.rows[0],{queueVersion:2,sharedStatus:"interested",motivationKind:"specified",motivationText:"Seller plans to relocate.",temperature:"warm"});
-    return {user,initial,fresh,release};
+    // The NEXT opening's single-row lookup is the delayed read. Tests release it with a queue-read-shaped value.
+    mocks.loadMyLeadRow.mockReturnValueOnce(new Promise(resolve=>{release=resolve;}));
+    const lookupOf=(value:{ok:boolean;message?:string;snapshot?:QueueSnapshot}|unknown)=>{
+      const v=value as {ok:boolean;message?:string;snapshot?:QueueSnapshot};
+      if(!v.ok)return {ok:false,code:'READ_FAILED',message:v.message};
+      const row=v.snapshot?.stages.not_contacted?.rows[0];
+      return row?{ok:true,lookup:{status:'found',row,snapshotAt:'x'}}:{ok:true,lookup:{status:'unavailable',reason:'not_found'}};
+    };
+    return {user,initial,fresh,release:(value:unknown)=>release(lookupOf(value))};
   }
   it.each(["offer","attempt"])("initializes next %s from saved readiness rather than the stale opening row",async next=>{
     const {user,fresh,release}=await afterReadiness();
@@ -730,39 +767,27 @@ describe("current metadata for rapid workflow openings",()=>{
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
     if(mode==="episode")expect(screen.getByText(/assignment changed/)).toBeVisible();
   }, 15_000);
-  it.each(["foreground","background"])("a later authorized %s queue refresh replaces a failed barrier for future openings",async mode=>{
-    const {user,fresh,release}=await afterReadiness();
-    await act(async()=>release({ok:false,message:"First read failed"}));
-    mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});
-    if(mode==="background"){await user.click(screen.getByRole("button",{name:"Expand details"}));await act(async()=>window.dispatchEvent(new Event("focus")));}
-    else await user.click(screen.getByRole("button",{name:"Retry now"}));
-    await waitFor(()=>expect(screen.queryByText(/Displayed counts may be out of date/)).not.toBeInTheDocument(), settle);
-    await user.click(screen.getByRole("button",{name:"Log offer"}));
-    expect(await screen.findByRole("dialog", undefined, settle)).toBeVisible();
-    expect(screen.queryByText(/Could not load current lead details/)).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Motivation")).not.toBeInTheDocument();
-    expect(mocks.loadMyLeads).toHaveBeenCalledTimes(2);
-    expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
-  }, 15_000);
   it("retries an opening read failure without repeating the saved readiness command",async()=>{
     const {user,fresh,release}=await afterReadiness();await user.click(screen.getByRole("button",{name:"Log offer"}));
     await act(async()=>release({ok:false,message:"Read unavailable"}));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});await user.click(screen.getByRole("button",{name:"Retry opening"}));
+    mocks.loadMyLeadRow.mockResolvedValue({ok:true,lookup:{status:'found',row:fresh.stages.not_contacted!.rows[0],snapshotAt:'x'}});await user.click(screen.getByRole("button",{name:"Retry opening"}));
     expect(await screen.findByRole("dialog", undefined, settle)).toBeVisible();expect(screen.queryByLabelText("Motivation")).not.toBeInTheDocument();expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
   }, 15_000);
 });
 
 
-it("keeps elapsed call time advancing when opening a workflow dialog", () => {
+it("keeps elapsed call time advancing when opening a workflow dialog", async () => {
   mocks.loadMyLeadCallReferences.mockResolvedValue({ ok: true, options: [] })
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] })
   try {
     const clockKpis = { ...kpis, lastAttemptClockVersion: 1, asOf: "2026-09-14T15:00:00Z", lastAttemptAt: "2026-09-14T14:59:00Z" }
-    const view = render(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId="rep-1" initialSnapshot={snapshot("Clock Fixture Lane")} initialKpis={clockKpis} />)
+    const clockSnapshot = snapshot("Clock Fixture Lane")
+    installDefaultRowLookup(clockSnapshot, null)
+    const view = render(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId="rep-1" initialSnapshot={clockSnapshot} initialKpis={clockKpis} />)
     act(() => vi.advanceTimersByTime(5000))
     expect(screen.getByText("1m 5s")).toBeInTheDocument()
-    fireEvent.click(screen.getByRole("button", { name: "Log attempt" }))
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Log attempt" })) })
     expect(screen.getByRole("dialog")).toBeInTheDocument()
     expect(screen.getByText("1m 5s")).toBeInTheDocument()
     act(() => vi.advanceTimersByTime(1000))

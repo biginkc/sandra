@@ -10,16 +10,19 @@ import { shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { reportError } from "@/lib/errors/report";
 import { createSupabaseDialpadDispatchDb, loadDialpadPanelBootstrap } from "@/lib/dialpad-cti/dispatch";
 import { canViewMyLeads } from "@/lib/my-leads/access";
+import { MY_LEAD_ROW_ERROR_COPY, MY_LEAD_ROW_FORBIDDEN_COPY, MY_LEAD_ROW_REASON_COPY } from "@/lib/my-leads/row-reasons";
 import { listMyLeadsInDrip } from "@/lib/my-leads/drip-queries";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { createClient } from "@/lib/supabase/server";
 import {
   getAcquisitionKpis,
   getAcquisitionQueue,
   getAcquisitionRoster,
+  getMyLeadsQueueRow,
   MyLeadsReadError,
 } from "@/lib/my-leads/queries";
 
-import { MyLeadsClient } from "./client";
+import { MyLeadsClient, type MyLeadsFocus } from "./client";
 
 function unavailableState() {
   return (
@@ -66,7 +69,61 @@ function loadFailureState(error: unknown) {
   return isFeatureDisabled(error) ? disabledState() : unavailableState();
 }
 
-export default async function MyLeadsPage() {
+type SearchParams = Record<string, string | string[] | undefined>;
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function firstParam(value: string | string[] | undefined): string | null {
+  return (Array.isArray(value) ? value[0] : value) ?? null;
+}
+
+/**
+ * Resolves a `?lead=` deep link. The queue itself stays unfiltered; the lead's
+ * current row (or the reason it is not in the viewer's queue) comes from the
+ * RLS-scoped single-row lookup, never from a search prefill. Only an owner needs
+ * the assignee to pick which rep's queue to open.
+ */
+async function resolveFocus(
+  viewer: { userId: string; isOwner: boolean },
+  memberIds: ReadonlySet<string>,
+  params: SearchParams,
+): Promise<{ focus: MyLeadsFocus; memberId: string } | null> {
+  const propertyId = firstParam(params.lead);
+  if (!propertyId || !UUID.test(propertyId)) return null;
+  const notInQueue = (notice: string) => ({
+    focus: { propertyId: null, memberId: viewer.userId, notice, pin: null },
+    memberId: viewer.userId,
+  });
+  let memberId = viewer.userId;
+  if (viewer.isOwner) {
+    try {
+      const client = await createClient();
+      const { data } = await client
+        .from("properties")
+        .select("assigned_user_id")
+        .eq("id", propertyId)
+        .is("deleted_at", null)
+        .maybeSingle();
+      const assignee = (data?.assigned_user_id as string | null | undefined) ?? null;
+      if (assignee && memberIds.has(assignee)) memberId = assignee;
+    } catch {
+      // Fall back to the owner's own queue; the lookup below still explains the result.
+    }
+  }
+  try {
+    const lookup = await getMyLeadsQueueRow({ memberId, propertyId });
+    if (lookup.status === "unavailable") return notInQueue(MY_LEAD_ROW_REASON_COPY[lookup.reason]);
+    return { focus: { propertyId, memberId, notice: null, pin: lookup.row }, memberId };
+  } catch (error) {
+    if (error instanceof MyLeadsReadError) {
+      if (error.code === "NOT_FOUND") return notInQueue(MY_LEAD_ROW_REASON_COPY.not_found);
+      if (error.code === "FORBIDDEN") return notInQueue(MY_LEAD_ROW_FORBIDDEN_COPY);
+    }
+    return notInQueue(MY_LEAD_ROW_ERROR_COPY);
+  }
+}
+
+export default async function MyLeadsPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   let memberships: Membership[];
   try {
     memberships = await getCallerMembershipsOrThrow();
@@ -113,9 +170,15 @@ export default async function MyLeadsPage() {
         drips: Awaited<ReturnType<typeof listMyLeadsInDrip>> | null;
       }
     | null = null;
+  let focus: MyLeadsFocus | null = null;
   try {
-    // Owners can switch reps, but every viewer starts on their own profile.
-    const memberId = viewer.userId;
+    // Owners can switch reps, but every viewer starts on their own profile
+    // unless a deep link names a lead in another rep's queue.
+    const resolved = roster.settings.enabled
+      ? await resolveFocus(viewer, new Set(roster.members.map((m) => m.id)), await searchParams)
+      : null;
+    const memberId = resolved?.memberId ?? viewer.userId;
+    focus = resolved?.focus ?? null;
     const [snapshot, kpis, drips] = roster.settings.enabled
       ? await Promise.all([
           getAcquisitionQueue({ memberId }),
@@ -154,6 +217,7 @@ export default async function MyLeadsPage() {
         initialSnapshot={data.snapshot}
         initialKpis={data.kpis}
         initialDrips={data.drips}
+        focus={focus}
       />
     </Page>
   );

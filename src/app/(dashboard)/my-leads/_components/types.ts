@@ -241,6 +241,12 @@ export type MyLeadsQueueProps = {
   ) => Promise<MyLeadDetailPageResult>
   /** Increments after a successful workflow mutation so open rows refetch detail. */
   detailRevision?: number
+  /** Lead opened from a deep link; starts expanded and scrolled into view. */
+  focusPropertyId?: string | null
+  /** Changes for every new deep-link navigation, so a repeated target re-focuses. */
+  focusNonce?: number
+  /** The deep-linked lead when no loaded page has it; pinned at the top of its section. */
+  pinnedRow?: MyLeadQueueRow | null
   /** Called after a confirmed existing note/appointment mutation. */
   onLeadChanged?: (propertyId: string) => void
   onStageAction: (action: MyLeadAction, row: MyLeadQueueRow) => void
