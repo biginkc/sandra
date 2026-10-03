@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 
 import type { QueueRow } from "@/lib/my-leads/queries"
 import type { Json } from "@/lib/supabase/types"
-import { loadMyLeadCommandReceipt, submitMyLeadCommand, submitMyLeadHandoffDrip, type MyLeadReceiptFollowUp } from "../actions"
+import { submitMyLeadCommand, submitMyLeadHandoffDrip } from "../actions"
 import {
   clearSubmission, discardOtherViewers, hasUncertainSubmission, listSubmissions, saveSubmission, subscribeSubmissions,
   type StoredSubmission, type SubmissionScope,
@@ -73,22 +73,15 @@ type Submission = {
   atRisk: boolean
   /** A frozen replay was definitely rejected; the payload stays locked until Start over. */
   definite?: boolean
-  /** Follow-up status read from a verified receipt, shown display-only. */
-  savedFollowUp?: MyLeadReceiptFollowUp & { message: string | null } | null
+  /** The REAL result the server returned when the identical frozen request was replayed (duplicate: true). */
+  savedResult?: Extract<CommandResult, { ok: true }> | null
+  /**
+   * The original frozen request is no longer available to replay: it was released (Start over),
+   * dropped (subject mismatch) or lost (reload). A later conflict then cannot be verified by a
+   * replay and uses the Refresh-and-close path.
+   */
+  released?: boolean
   createdAt: number
-}
-
-/** The server-side operation name for each route, as stored in acquisition_commands. */
-const DB_OPERATION: Record<string, string> = {
-  log_attempt: "log_acquisition_attempt",
-  finalize_attempt: "finalize_acquisition_attempt",
-  handoff: "handoff_acquisition_lead",
-  handoff_to_drip: "handoff_acquisition_lead_to_drip",
-  "ready-for-offer": "ready_acquisition_offer",
-  "log-offer": "log_acquisition_offer",
-  "contract-signed": "record_acquisition_contract",
-  "decline-offer": "decline_acquisition_offer",
-  archive: "archive_acquisition_contract",
 }
 
 /** The routes one dialog action can reach (an attempt can log or finalize; a handoff can go to a drip). */
@@ -160,6 +153,11 @@ export type UseAttemptWorkflowOptions<O extends AttemptOpening> = {
   onCommitted: (committed: AttemptCommitted<O>) => Promise<unknown>
   /** Called once that read settles (host refreshes its server data / surfaces a drip failure). */
   onSettled: (committed: AttemptCommitted<O>) => void
+  /**
+   * Optional host refresh barrier for an already-saved conflict that cannot be replayed (the
+   * frozen request is gone). Re-reads the host's data; carries no result details.
+   */
+  onReconciled?: (opening: O) => Promise<unknown>
   /** Closes the dialog; only called for actions that end after one save. */
   onClose: (opening: O) => void
   /** Called when the drip step changed the lead's queue state. */
@@ -177,13 +175,13 @@ export type UseAttemptWorkflowOptions<O extends AttemptOpening> = {
  * unmount, navigation or a reload while a save is uncertain cannot lose the key.
  */
 export function useAttemptWorkflow<O extends AttemptOpening>({
-  opening, memberId, viewer, readRow, onCommitted, onSettled, onClose, onDripChanged, saveTimeoutMs = SAVE_TIMEOUT_MS,
+  opening, memberId, viewer, readRow, onCommitted, onSettled, onReconciled, onClose, onDripChanged, saveTimeoutMs = SAVE_TIMEOUT_MS,
 }: UseAttemptWorkflowOptions<O>) {
   const submission = useRef<Submission | null>(null)
   const activeOpening = useRef(opening)
-  const callbacks = useRef({ onCommitted, onSettled, onClose, onDripChanged })
+  const callbacks = useRef({ onCommitted, onSettled, onReconciled, onClose, onDripChanged })
   const viewerRef = useRef(viewer)
-  useEffect(() => { activeOpening.current = opening; callbacks.current = { onCommitted, onSettled, onClose, onDripChanged }; viewerRef.current = viewer })
+  useEffect(() => { activeOpening.current = opening; callbacks.current = { onCommitted, onSettled, onReconciled, onClose, onDripChanged }; viewerRef.current = viewer })
   const recoveredRow = useRef<{ opening: O; row: QueueRow } | null>(null)
   const [recovery, setRecovery] = useState<Recovery<O> | null>(null)
 
@@ -240,7 +238,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     const state: Submission = {
       opening: current, key: record.key, payload, uncertain: record.status === "uncertain" && payload !== null,
       alreadySaved: record.status === "already-saved", route: record.route, memberId, atRisk: true,
-      createdAt: record.createdAt,
+      createdAt: record.createdAt, released: payload === null,
     }
     submission.current = state
     if (payload !== record.payload) persist(state, current)
@@ -267,6 +265,16 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     const state = submission.current
     return state?.opening === current && state.uncertain && state.payload ? { command: current.action, payload: state.payload } : undefined
   }
+
+  /** Sends one frozen or fresh request down its real route. Shared by Save and the already-saved replay. */
+  const dispatch = (command: string, input: Record<string, Json>, row: QueueRow, sendMember: string, key: string): Promise<CommandResult> =>
+    Promise.resolve(command === "handoff" && typeof input.sequenceId === "string" && input.sequenceId
+      ? submitMyLeadHandoffDrip({ memberId: sendMember, propertyId: row.propertyId, sequenceId: input.sequenceId,
+          reason: "not_interested", expectedEpisodeId: typeof input.expectedEpisodeId === "string" ? input.expectedEpisodeId : row.assignmentEpisodeId,
+          expectedQueueVersion: typeof input.expectedQueueVersion === "number" ? input.expectedQueueVersion : row.queueVersion,
+          expectedSharedStatus: typeof input.expectedSharedStatus === "string" ? input.expectedSharedStatus : row.sharedStatus,
+          idempotencyKey: key })
+      : submitMyLeadCommand(command as Parameters<typeof submitMyLeadCommand>[0], input))
 
   /** The committed path shared by a normal answer and an already-saved Refresh. */
   const finishCommitted = async (current: O, input: Record<string, Json>, result: Extract<CommandResult, { ok: true }>) => {
@@ -302,33 +310,57 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     try {
       const earlier = submission.current
       if (earlier?.opening === current && earlier.alreadySaved) {
-        // Verified, not assumed: the server must hold a receipt for this key, this operation,
-        // this viewer, this lead and this episode.
-        const verified = await loadMyLeadCommandReceipt({
-          idempotencyKey: earlier.key, operation: DB_OPERATION[earlier.route ?? ""] ?? "",
-          propertyId: current.row.propertyId, episodeId: current.row.assignmentEpisodeId,
-        })
-        if (activeOpening.current !== current) return
-        if (!verified.ok) {
-          setRecovery({ opening: current, message: verified.message, blocked: true, busy: false })
+        // acquisition_commands cannot be read by any client role, so a receipt is never read
+        // directly. Two ways to resolve an already-saved conflict:
+        // (a) the ORIGINAL frozen request is still in memory: replay the identical request (same
+        //     key, same payload, so the same request hash). The server finds the receipt and
+        //     returns duplicate: true with the stored result, which takes the normal committed path.
+        // (b) no frozen request (reload, Start over, subject mismatch): nothing can be replayed and
+        //     no result is claimed. Refresh re-reads the lead, then closes the dialog.
+        // Trade-off: once a payload is released, a later conflict can only use (b): the user sees
+        // the lead's refreshed state, not a follow-up/drip step.
+        const frozenInput = earlier.payload && !earlier.released && earlier.route ? earlier.payload : null
+        if (frozenInput) {
+          const command = current.action
+          let replay: CommandResult
+          try {
+            replay = await withSaveTimeout(dispatch(command, frozenInput, current.row, earlier.memberId ?? memberId, earlier.key), saveTimeoutMs)
+          } catch {
+            if (activeOpening.current === current) setRecovery({ opening: current, message: UNCONFIRMED_MESSAGE, blocked: true, busy: false })
+            return
+          }
+          if (activeOpening.current !== current) return
+          if (!replay.ok) {
+            // Uncertain (or still conflicting): stay in reconcile, never guess, retry on the next Refresh.
+            setRecovery({ opening: current, message: ALREADY_SAVED_MESSAGE, blocked: true, busy: false })
+            return
+          }
+          earlier.alreadySaved = false
+          earlier.uncertain = false
+          const keepsOpen = current.action === "log-attempt" || current.action === "handoff"
+          // For an attempt or handoff the drip step / follow-up status continues: the next Save
+          // sends nothing and moves the dialog on, instead of silently closing.
+          if (keepsOpen) { earlier.savedEarlier = true; earlier.savedResult = replay }
+          await finishCommitted(current, frozenInput, replay)
+          if (keepsOpen && activeOpening.current === current) {
+            const followUp = "followUp" in replay && replay.followUp ? replay.followUp : null
+            const label = followUp ? ` Follow-up text status: ${followUp.status.replaceAll("_", " ")}.` : ""
+            setRecovery({ opening: current, message: SAVED_EARLIER_MESSAGE + label, blocked: false, busy: false })
+          }
           return
         }
-        const state = earlier
-        state.alreadySaved = false
-        state.uncertain = false
-        const keepsOpen = current.action === "log-attempt" || current.action === "handoff"
-        const followUp = verified.receipt.followUp ? { status: verified.receipt.followUp.status, message: null } : null
-        // For an attempt or handoff the drip step / follow-up status continues: the next Save
-        // sends nothing and moves the dialog on, instead of silently closing.
-        if (keepsOpen) { state.savedEarlier = true; state.savedFollowUp = followUp }
-        const result: Extract<CommandResult, { ok: true }> = followUp
-          ? { ok: true, attemptRecorded: verified.receipt.attemptRecorded, followUp }
-          : { ok: true, ...(verified.receipt.attemptRecorded ? { attemptRecorded: true as const } : {}) }
-        await finishCommitted(current, state.payload ?? {}, result)
-        if (keepsOpen && activeOpening.current === current) {
-          const label = followUp ? ` Follow-up text status: ${followUp.status.replaceAll("_", " ")}.` : ""
-          setRecovery({ opening: current, message: SAVED_EARLIER_MESSAGE + label, blocked: false, busy: false })
+        const row = await readRow(current)
+        if (activeOpening.current !== current) return
+        if (!row || row.assignmentEpisodeId !== current.row.assignmentEpisodeId) {
+          setRecovery({ opening: current, message: ALREADY_SAVED_MESSAGE, blocked: true, busy: false })
+          return
         }
+        const barrier = callbacks.current.onReconciled?.(current)
+        forget(earlier, current)
+        submission.current = null
+        setRecovery(null)
+        callbacks.current.onClose(current)
+        await barrier
         return
       }
       const row = await readRow(current)
@@ -357,6 +389,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     state.uncertain = false
     state.definite = false
     state.payload = null
+    state.released = true
     persist(state, current)
     setRecovery({ opening: current, message: RESUME_NOTICE, blocked: false, busy: false })
   }
@@ -373,12 +406,10 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     if (recovery?.opening === opening && (recovery.blocked || recovery.busy)) return { ok: false as const, message: recovery.message }
     // A key's request is first sent once; an earlier confirmed save only moves the dialog on.
     if (submission.current?.opening === opening && submission.current.savedEarlier) {
-      const followUp = submission.current.savedFollowUp
+      const saved = submission.current.savedResult
       submission.current.savedEarlier = false
       setRecovery(null)
-      return followUp
-        ? { ok: true as const, attemptRecorded: opening.action === "log-attempt", followUp }
-        : { ok: true as const, ...(opening.action === "log-attempt" ? { attemptRecorded: true as const } : {}) }
+      return saved ?? { ok: true as const, ...(opening.action === "log-attempt" ? { attemptRecorded: true as const } : {}) }
     }
     const row = recoveredRow.current?.opening === opening ? recoveredRow.current.row : opening.row
     // A command's idempotency key belongs to the opening, not to the current
@@ -399,6 +430,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       state.key = crypto.randomUUID()
       state.route = null
       state.memberId = null
+      state.released = false
       state.createdAt = Date.now()
     }
     const nextInput = JSON.parse(JSON.stringify({ ...payload, propertyId: row.propertyId, expectedEpisodeId: row.assignmentEpisodeId,
@@ -462,13 +494,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
           setRecovery({ opening, message: failure.message, blocked: true, busy: false, reconciliation: { command, payload: state.payload ?? input } })
       }
     }
-    const send = (): Promise<CommandResult> => Promise.resolve(command === "handoff" && typeof input.sequenceId === "string" && input.sequenceId
-      ? submitMyLeadHandoffDrip({ memberId: sendMember ?? memberId, propertyId: row.propertyId, sequenceId: input.sequenceId,
-          reason: "not_interested", expectedEpisodeId: typeof input.expectedEpisodeId === "string" ? input.expectedEpisodeId : row.assignmentEpisodeId,
-          expectedQueueVersion: typeof input.expectedQueueVersion === "number" ? input.expectedQueueVersion : row.queueVersion,
-          expectedSharedStatus: typeof input.expectedSharedStatus === "string" ? input.expectedSharedStatus : row.sharedStatus,
-          idempotencyKey: state.key })
-      : submitMyLeadCommand(command, input))
+    const send = (): Promise<CommandResult> => dispatch(command, input, row, sendMember ?? memberId, state.key)
     const call = send()
     let result: CommandResult
     try {

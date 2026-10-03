@@ -1,8 +1,8 @@
 import { act, renderHook } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-const actions = vi.hoisted(() => ({ submitMyLeadCommand: vi.fn(), submitMyLeadHandoffDrip: vi.fn(), loadMyLeadCommandReceipt: vi.fn() }))
-vi.mock("../actions", () => ({ submitMyLeadCommand: actions.submitMyLeadCommand, submitMyLeadHandoffDrip: actions.submitMyLeadHandoffDrip, loadMyLeadCommandReceipt: actions.loadMyLeadCommandReceipt }))
+const actions = vi.hoisted(() => ({ submitMyLeadCommand: vi.fn(), submitMyLeadHandoffDrip: vi.fn() }))
+vi.mock("../actions", () => ({ submitMyLeadCommand: actions.submitMyLeadCommand, submitMyLeadHandoffDrip: actions.submitMyLeadHandoffDrip }))
 
 import type { QueueRow } from "@/lib/my-leads/queries"
 import { useAttemptWorkflow, type AttemptOpening } from "./use-attempt-workflow"
@@ -15,8 +15,9 @@ const opening = (action: AttemptOpening["action"] = "log-attempt", r = row()): A
 function setup(initial: AttemptOpening | null, readRow = vi.fn(async (): Promise<QueueRow | null> => row())) {
   const handlers = {
     readRow,
-    onCommitted: vi.fn(async () => undefined),
+    onCommitted: vi.fn(async (...args: unknown[]) => { void args }),
     onSettled: vi.fn(),
+    onReconciled: vi.fn(async () => undefined),
     onClose: vi.fn(),
     onDripChanged: vi.fn(),
   }
@@ -31,8 +32,6 @@ describe("useAttemptWorkflow", () => {
   beforeEach(() => {
     actions.submitMyLeadCommand.mockReset()
     actions.submitMyLeadHandoffDrip.mockReset()
-    actions.loadMyLeadCommandReceipt.mockReset()
-    actions.loadMyLeadCommandReceipt.mockResolvedValue({ ok: true, receipt: { operation: "log_acquisition_attempt", propertyId: "p1", episodeId: "ep-1", attemptRecorded: true, followUp: null } })
   })
 
   it("uses one idempotency key per opening and a new one for the next opening", async () => {
@@ -238,8 +237,9 @@ describe("useAttemptWorkflow", () => {
 
     const conflict = { ok: false, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." }
 
-    it("IDEMPOTENCY_CONFLICT blocks; Refresh runs the committed path, shows Saved earlier, and the next Save only moves the dialog on", async () => {
-      actions.submitMyLeadCommand.mockResolvedValue(conflict)
+    const dup = (extra: object = {}) => ({ ok: true, duplicate: true, attemptRecorded: true, ...extra })
+    it("IDEMPOTENCY_CONFLICT blocks; Refresh replays the identical frozen request and takes the committed path with the real result", async () => {
+      actions.submitMyLeadCommand.mockResolvedValueOnce(conflict).mockResolvedValueOnce(dup({ followUp: { status: "delivered", message: null } }))
       const { hook, handlers } = setup(opening("log-attempt"))
       await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "edited" }) })
       expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, message: "This was already saved. Refresh to see it." })
@@ -247,38 +247,44 @@ describe("useAttemptWorkflow", () => {
       await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "again" }) })
       expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(1)
       await act(async () => { hook.result.current.recoveryValue?.refresh() })
-      // The host's barrier and refresh ran; an attempt keeps its dialog for the follow-up/drip step.
+      // Same key, same command, same payload.
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(2)
+      expect(actions.submitMyLeadCommand.mock.calls[1]).toEqual(actions.submitMyLeadCommand.mock.calls[0])
       expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
+      expect(handlers.onCommitted.mock.calls[0][0]).toMatchObject({ result: { duplicate: true, followUp: { status: "delivered" } } })
       await vi.waitFor(() => expect(handlers.onSettled).toHaveBeenCalledTimes(1))
       expect(handlers.onClose).not.toHaveBeenCalled()
-      expect(hook.result.current.recoveryValue).toMatchObject({ blocked: false, message: "Saved earlier. Your update is recorded." })
+      expect(hook.result.current.recoveryValue).toMatchObject({ blocked: false, message: "Saved earlier. Your update is recorded. Follow-up text status: delivered." })
       let moved: unknown
       await act(async () => { moved = await hook.result.current.submit({ outcome: "reached" }) })
-      expect(moved).toMatchObject({ ok: true, attemptRecorded: true })
-      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(1)
+      expect(moved).toMatchObject({ ok: true, attemptRecorded: true, followUp: { status: "delivered" } })
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(2)
     })
 
-    it("IDEMPOTENCY_CONFLICT on an action that ends after one save: Refresh runs the committed path and closes", async () => {
-      actions.submitMyLeadCommand.mockResolvedValue(conflict)
+    it("IDEMPOTENCY_CONFLICT on an action that ends after one save: Refresh replays, takes the committed path and closes", async () => {
+      actions.submitMyLeadCommand.mockResolvedValueOnce(conflict).mockResolvedValueOnce({ ok: true, duplicate: true })
       const { hook, handlers } = setup(opening("log-offer"))
       await act(async () => { await hook.result.current.submit({ amountCents: 1 }) })
       await act(async () => { hook.result.current.recoveryValue?.refresh() })
+      expect(actions.submitMyLeadCommand.mock.calls[1]).toEqual(actions.submitMyLeadCommand.mock.calls[0])
       expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
       expect(handlers.onClose).toHaveBeenCalledTimes(1)
       expect(handlers.onSettled).toHaveBeenCalledTimes(1)
-      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(1)
     })
 
-    it("a failed refresh after IDEMPOTENCY_CONFLICT stays blocked and retryable", async () => {
-      actions.submitMyLeadCommand.mockResolvedValue(conflict)
-      actions.loadMyLeadCommandReceipt.mockResolvedValueOnce({ ok: false, code: "READ_FAILED", message: "Could not check the earlier save. Try Refresh again." })
+    it("a replay that fails uncertainly stays in reconcile; the next Refresh replays again", async () => {
+      actions.submitMyLeadCommand
+        .mockResolvedValueOnce(conflict)
+        .mockRejectedValueOnce(new Error("network"))
+        .mockResolvedValueOnce(dup())
       const { hook, handlers } = setup(opening("log-attempt"))
       await act(async () => { await hook.result.current.submit({ outcome: "reached" }) })
       await act(async () => { hook.result.current.recoveryValue?.refresh() })
-      expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true })
+      expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, busy: false })
       expect(handlers.onCommitted).not.toHaveBeenCalled()
       await act(async () => { hook.result.current.recoveryValue?.refresh() })
       expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
+      expect(actions.submitMyLeadCommand.mock.calls[2]).toEqual(actions.submitMyLeadCommand.mock.calls[0])
     })
 
     it("receipt exists, then FORBIDDEN: reconciliation is kept (same key), and once access is back the replay is a duplicate success", async () => {
@@ -406,7 +412,7 @@ describe("useAttemptWorkflow", () => {
       } finally { vi.useRealTimers() }
     })
 
-    it("timeout, then a definite STALE (released), Refresh, an edited save that hits IDEMPOTENCY_CONFLICT: already saved, Refresh runs the committed path, one attempt", async () => {
+    it("timeout, then a definite STALE (released), Refresh, an edited save that hits IDEMPOTENCY_CONFLICT: already saved after release: Refresh re-reads and closes, one attempt", async () => {
       vi.useFakeTimers()
       try {
         actions.submitMyLeadCommand
@@ -431,11 +437,14 @@ describe("useAttemptWorkflow", () => {
         expect(sentInput(2).note).toBe("edited")
         expect(handlers.onCommitted).not.toHaveBeenCalled()
         await act(async () => { hook.result.current.recoveryValue?.refresh() })
-        // The committed path ran exactly once, and nothing further was sent: the edited payload never committed.
-        expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
-        await vi.waitFor(() => expect(handlers.onSettled).toHaveBeenCalledTimes(1))
+        // The payload was released, so nothing is replayed and no result is claimed: the lead is
+        // re-read, the host refreshes, and the dialog closes. No drip step, nothing further sent.
+        expect(handlers.onReconciled).toHaveBeenCalledTimes(1)
+        expect(handlers.onClose).toHaveBeenCalledTimes(1)
+        expect(handlers.onCommitted).not.toHaveBeenCalled()
+        expect(handlers.onSettled).not.toHaveBeenCalled()
         expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(3)
-        expect(hook.result.current.recoveryValue).toMatchObject({ blocked: false, message: "Saved earlier. Your update is recorded." })
+        expect(hook.result.current.recoveryValue).toBeNull()
       } finally { vi.useRealTimers() }
     })
 

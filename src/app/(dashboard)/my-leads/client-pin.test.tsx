@@ -10,7 +10,6 @@ const mocks = vi.hoisted(() => ({
   loadMyLeadsStage: vi.fn(),
   loadMyLeadDetail: vi.fn(),
   submitMyLeadCommand: vi.fn(),
-  loadMyLeadCommandReceipt: vi.fn(),
 }))
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.refresh, replace: mocks.replace }) }))
@@ -20,7 +19,7 @@ vi.mock("@/app/(dashboard)/sequences/actions", () => ({ listDripChoices: vi.fn(a
 vi.mock("./actions", () => ({
   loadMyLeads: mocks.loadMyLeads, loadMyLeadRow: mocks.loadMyLeadRow, loadMyLeadsStage: mocks.loadMyLeadsStage, loadMyLeadDetail: mocks.loadMyLeadDetail,
   loadMyLeadCallReferences: vi.fn(async () => ({ ok: true, options: [] })),
-  submitMyLeadCommand: mocks.submitMyLeadCommand, loadMyLeadCommandReceipt: mocks.loadMyLeadCommandReceipt, submitMyLeadHandoffDrip: vi.fn(), changeAcquisitionDesignation: vi.fn(), changeAcquisitionSettings: vi.fn(),
+  submitMyLeadCommand: mocks.submitMyLeadCommand, submitMyLeadHandoffDrip: vi.fn(), changeAcquisitionDesignation: vi.fn(), changeAcquisitionSettings: vi.fn(),
 }))
 vi.mock("./rep-sms-settings", () => ({ RepSmsSettings: () => null }))
 vi.mock("./rep-sms-composer", () => ({ RepSmsComposer: () => null }))
@@ -86,7 +85,6 @@ describe("MyLeadsClient pinned deep-link row", () => {
     for (const m of Object.values(mocks)) m.mockReset()
     mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([loaded], 25), kpis, drips: noDrips() })
     mocks.loadMyLeadDetail.mockResolvedValue({ ok: false, message: "no detail" })
-    mocks.loadMyLeadCommandReceipt.mockResolvedValue({ ok: true, receipt: { operation: "record_acquisition_contract", propertyId: "loaded-1", episodeId: "ep-loaded-1", attemptRecorded: false, followUp: null } })
     // Database truth for the two fixture leads; tests override per scenario.
     mocks.loadMyLeadRow.mockImplementation(async ({ propertyId }: { propertyId: string }) =>
       propertyId === "beyond-9" ? found(beyond) : propertyId === "loaded-1" ? found(loaded) : unavailable("not_found"))
@@ -751,9 +749,11 @@ describe("MyLeadsClient pinned deep-link row", () => {
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
     })
 
-    it("IDEMPOTENCY_CONFLICT shows the already-saved copy and Refresh closes the dialog", async () => {
+    it("IDEMPOTENCY_CONFLICT shows the already-saved copy and Refresh replays the identical request and closes the dialog", async () => {
       const user = userEvent.setup()
-      mocks.submitMyLeadCommand.mockResolvedValue({ ok: false, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." })
+      mocks.submitMyLeadCommand
+        .mockResolvedValueOnce({ ok: false, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." })
+        .mockResolvedValueOnce({ ok: true, duplicate: true })
       render(ui(null, snap([loaded], 25)))
       await openContract(user)
       await user.click(screen.getByRole("button", { name: "Record contract" }))
@@ -763,7 +763,8 @@ describe("MyLeadsClient pinned deep-link row", () => {
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
       // The host's committed path ran: its queue refresh barrier published a fresh read.
       await waitFor(() => expect(mocks.loadMyLeads).toHaveBeenCalled())
-      expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1)
+      expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2)
+      expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toEqual(mocks.submitMyLeadCommand.mock.calls[0][1])
     })
 
     it("commit then timeout: an unknown replay failure keeps reconciliation and the next replay succeeds once", async () => {

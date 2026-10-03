@@ -6,7 +6,6 @@ const mocks = vi.hoisted(() => ({
   refresh: vi.fn(),
   loadMyLeadRow: vi.fn(),
   loadMyLeadCallReferences: vi.fn(),
-  loadMyLeadCommandReceipt: vi.fn(),
   submitMyLeadCommand: vi.fn(),
   submitMyLeadHandoffDrip: vi.fn(),
 }))
@@ -14,7 +13,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.refresh }) }))
 vi.mock("@/app/(dashboard)/sequences/actions", () => ({ listDripChoices: vi.fn(async () => ({ ok: true, data: [] })), startDripForLeads: vi.fn() }))
 vi.mock("@/app/(dashboard)/my-leads/actions", () => ({
-  loadMyLeadRow: mocks.loadMyLeadRow, loadMyLeadCallReferences: mocks.loadMyLeadCallReferences, loadMyLeadCommandReceipt: mocks.loadMyLeadCommandReceipt,
+  loadMyLeadRow: mocks.loadMyLeadRow, loadMyLeadCallReferences: mocks.loadMyLeadCallReferences,
   submitMyLeadCommand: mocks.submitMyLeadCommand, submitMyLeadHandoffDrip: mocks.submitMyLeadHandoffDrip,
 }))
 
@@ -35,7 +34,6 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
     for (const m of Object.values(mocks)) m.mockReset()
     mocks.loadMyLeadCallReferences.mockResolvedValue({ ok: true, options: [] })
     mocks.loadMyLeadRow.mockResolvedValue(found(1))
-    mocks.loadMyLeadCommandReceipt.mockResolvedValue({ ok: true, receipt: { operation: "log_acquisition_attempt", propertyId: "lead-1", episodeId: "ep-1", attemptRecorded: true, followUp: null } })
   })
 
   it("a second save that the server rejects as stale ends in the recovery UI, not a stuck Saving…", async () => {
@@ -114,7 +112,9 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
 
   it("IDEMPOTENCY_CONFLICT shows the already-saved copy; Refresh runs the committed refresh and the dialog moves on to the follow-up step, never looping", async () => {
     const user = userEvent.setup()
-    mocks.submitMyLeadCommand.mockResolvedValue({ ok: false, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." })
+    mocks.submitMyLeadCommand
+      .mockResolvedValueOnce({ ok: false, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." })
+      .mockResolvedValueOnce({ ok: true, duplicate: true, attemptRecorded: true })
     render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} viewer={{ userId: "rep-9", orgId: "org-1" }} />)
     await user.click(screen.getByRole("button", { name: "Log follow-up" }))
     await fillAndSave(user)
@@ -127,7 +127,9 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
     // The next Save sends nothing and continues to the optional drip step.
     await user.click(screen.getByRole("button", { name: "Save attempt" }))
     expect(await screen.findByRole("button", { name: "Done without a drip" })).toBeInTheDocument()
-    expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1)
+    // One original send plus one identical replay; the follow-up step sends nothing more.
+    expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2)
+    expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toEqual(mocks.submitMyLeadCommand.mock.calls[0][1])
   })
 
   it("commit then timeout: an unknown replay failure keeps reconciliation and the next replay succeeds once", async () => {

@@ -73,6 +73,10 @@ export function LogFollowUpProvider({ propertyId, propertyLabel, assigneeId, dis
     },
     // The page refreshes once, when the save settles.
     onCommitted: () => Promise.resolve(),
+    onReconciled: () => {
+      router.refresh()
+      return Promise.resolve()
+    },
     onSettled: ({ dripFailure }) => {
       if (dripFailure) setMessage(dripFailure)
       router.refresh()

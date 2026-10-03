@@ -715,6 +715,12 @@ export function MyLeadsClient({
       setDetailRevision((revision) => revision + 1);
       return read;
     },
+    onReconciled: () => {
+      const read = refresh();
+      setDetailRevision((revision) => revision + 1);
+      router.refresh();
+      return read;
+    },
     onSettled: ({ opening, dripFailure }) => {
       if (
         dripFailure &&

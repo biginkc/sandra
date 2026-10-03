@@ -2,8 +2,8 @@ import { StrictMode, type ReactNode } from "react"
 import { act, renderHook } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-const actions = vi.hoisted(() => ({ submitMyLeadCommand: vi.fn(), submitMyLeadHandoffDrip: vi.fn(), loadMyLeadCommandReceipt: vi.fn() }))
-vi.mock("../actions", () => ({ submitMyLeadCommand: actions.submitMyLeadCommand, submitMyLeadHandoffDrip: actions.submitMyLeadHandoffDrip, loadMyLeadCommandReceipt: actions.loadMyLeadCommandReceipt }))
+const actions = vi.hoisted(() => ({ submitMyLeadCommand: vi.fn(), submitMyLeadHandoffDrip: vi.fn() }))
+vi.mock("../actions", () => ({ submitMyLeadCommand: actions.submitMyLeadCommand, submitMyLeadHandoffDrip: actions.submitMyLeadHandoffDrip }))
 
 import type { QueueRow } from "@/lib/my-leads/queries"
 import { CLOSE_CONFIRM_MESSAGE, RESUME_NOTICE, useAttemptWorkflow, type AttemptOpening } from "./use-attempt-workflow"
@@ -17,7 +17,7 @@ const pendingOffer = (id: string) => row({ offer: { id, amountCents: 1, method: 
 
 type Props = { current: AttemptOpening | null; memberId?: string; viewer?: { userId: string; orgId: string } }
 function setup(initial: AttemptOpening | null, options: { memberId?: string; viewer?: Props["viewer"]; strict?: boolean } = {}) {
-  const handlers = { readRow: vi.fn(async (): Promise<QueueRow | null> => row()), onCommitted: vi.fn(async () => undefined), onSettled: vi.fn(), onClose: vi.fn(), onDripChanged: vi.fn() }
+  const handlers = { readRow: vi.fn(async (): Promise<QueueRow | null> => row()), onCommitted: vi.fn(async (...args: unknown[]) => { void args }), onSettled: vi.fn(), onReconciled: vi.fn(async () => undefined), onClose: vi.fn(), onDripChanged: vi.fn() }
   const wrapper = options.strict ? ({ children }: { children: ReactNode }) => <StrictMode>{children}</StrictMode> : undefined
   const hook = renderHook(({ current, memberId, viewer }: Props) =>
     useAttemptWorkflow({ opening: current, memberId: memberId ?? options.memberId ?? "rep-A", viewer: viewer ?? options.viewer ?? VIEWER, ...handlers }),
@@ -33,7 +33,6 @@ describe("submission store backs the workflow across close, unmount and reload",
   beforeEach(() => {
     window.sessionStorage.clear()
     for (const fn of Object.values(actions)) fn.mockReset()
-    actions.loadMyLeadCommandReceipt.mockResolvedValue({ ok: true, receipt: { operation: "log_acquisition_attempt", propertyId: "p1", episodeId: "ep-1", attemptRecorded: true, followUp: null } })
   })
 
   it("close then reopen while uncertain: the original values come back locked and the replay uses the same key", async () => {
@@ -245,47 +244,85 @@ describe("submission store backs the workflow across close, unmount and reload",
     })
   })
 
-  describe("verified Saved earlier", () => {
+  describe("already saved (no receipt table read)", () => {
     const conflict = { ok: false, answered: true, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." }
-    it("already-saved survives close and reopen as a blocked state, and Refresh verifies the receipt with the scoped lookup", async () => {
-      actions.submitMyLeadCommand.mockResolvedValue(conflict)
+    it("(a) with the frozen request in memory, Refresh replays it identically and takes the committed path with the real result", async () => {
+      actions.submitMyLeadCommand.mockResolvedValueOnce(conflict).mockResolvedValueOnce({ ok: true, duplicate: true, attemptRecorded: true, followUp: { status: "delivered", message: null } })
       const { hook, handlers } = setup(opening())
-      await act(async () => { await hook.result.current.submit({ outcome: "reached" }) })
+      await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "original" }) })
+      // Survives close and reopen in the same page session (payload still in memory).
       hook.rerender({ current: null })
       hook.rerender({ current: opening() })
       expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, message: "This was already saved. Refresh to see it." })
-      actions.loadMyLeadCommandReceipt.mockResolvedValue({ ok: true, receipt: { operation: "log_acquisition_attempt", propertyId: "p1", episodeId: "ep-1", attemptRecorded: true, followUp: { status: "delivered" } } })
       await act(async () => { hook.result.current.recoveryValue?.refresh() })
-      expect(actions.loadMyLeadCommandReceipt).toHaveBeenCalledWith({ idempotencyKey: sent(0).idempotencyKey, operation: "log_acquisition_attempt", propertyId: "p1", episodeId: "ep-1" })
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(2)
+      expect(actions.submitMyLeadCommand.mock.calls[1]).toEqual(actions.submitMyLeadCommand.mock.calls[0])
+      expect(sent(1)).toMatchObject({ idempotencyKey: sent(0).idempotencyKey, note: "original" })
       expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
+      expect(handlers.onCommitted.mock.calls[0][0]).toMatchObject({ result: { duplicate: true, followUp: { status: "delivered" } } })
+      expect(handlers.onReconciled).not.toHaveBeenCalled()
       expect(hook.result.current.recoveryValue?.message).toBe("Saved earlier. Your update is recorded. Follow-up text status: delivered.")
-      // No retry: the next Save sends nothing and carries the verified follow-up status.
+      // No retry: the next Save sends nothing and carries the real follow-up status.
       let moved: unknown
       await act(async () => { moved = await hook.result.current.submit({ outcome: "reached" }) })
       expect(moved).toMatchObject({ ok: true, attemptRecorded: true, followUp: { status: "delivered" } })
-      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(1)
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(2)
     })
-    it.each([
-      ["a missing receipt", { ok: false, code: "NOT_FOUND", message: "Sandra could not find the earlier save yet. Try Refresh again." }],
-      ["a denied or failed lookup", { ok: false, code: "FORBIDDEN", message: "Could not check the earlier save. Try Refresh again." }],
-    ])("%s stays blocked with a retryable message and never fakes success", async (_name, lookup) => {
-      actions.submitMyLeadCommand.mockResolvedValue(conflict)
-      actions.loadMyLeadCommandReceipt.mockResolvedValue(lookup)
-      const { hook, handlers } = setup(opening("log-offer"))
-      await act(async () => { await hook.result.current.submit({ amountCents: 1 }) })
-      await act(async () => { hook.result.current.recoveryValue?.refresh() })
-      expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, busy: false, message: (lookup as { message: string }).message })
-      expect(handlers.onCommitted).not.toHaveBeenCalled()
-      expect(handlers.onClose).not.toHaveBeenCalled()
-    })
-    it("a lookup that throws stays blocked and retryable", async () => {
-      actions.submitMyLeadCommand.mockResolvedValue(conflict)
-      actions.loadMyLeadCommandReceipt.mockRejectedValueOnce(new Error("down"))
+    it("(a) a replay that fails uncertainly stays in reconcile and never claims success", async () => {
+      actions.submitMyLeadCommand.mockResolvedValueOnce(conflict).mockRejectedValueOnce(new Error("down"))
       const { hook, handlers } = setup(opening("log-offer"))
       await act(async () => { await hook.result.current.submit({ amountCents: 1 }) })
       await act(async () => { hook.result.current.recoveryValue?.refresh() })
       expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, busy: false })
       expect(handlers.onCommitted).not.toHaveBeenCalled()
+      expect(handlers.onClose).not.toHaveBeenCalled()
+    })
+    it("(b) after a reload there is no frozen request: Refresh re-reads the lead, closes the dialog, shows no drip step and clears the record", async () => {
+      actions.submitMyLeadCommand.mockResolvedValueOnce(conflict)
+      const first = setup(opening())
+      await act(async () => { await first.hook.result.current.submit({ outcome: "reached", note: "original" }) })
+      first.hook.unmount()
+      simulateReloadForTests()
+      const { hook, handlers } = setup(opening())
+      expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, message: "This was already saved. Refresh to see it." })
+      await act(async () => { hook.result.current.recoveryValue?.refresh() })
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(1)
+      expect(handlers.readRow).toHaveBeenCalledTimes(1)
+      expect(handlers.onReconciled).toHaveBeenCalledTimes(1)
+      expect(handlers.onClose).toHaveBeenCalledTimes(1)
+      expect(handlers.onCommitted).not.toHaveBeenCalled()
+      expect(handlers.onSettled).not.toHaveBeenCalled()
+      expect(hook.result.current.recoveryValue).toBeNull()
+      expect(listSubmissions({ viewerUserId: "user-1", orgId: "org-1", memberId: "rep-A", propertyId: "p1", assignmentEpisodeId: "ep-1" }, () => true)).toEqual([])
+    })
+    it("(b) after Start over released the payload, a later conflict uses Refresh-and-close and never replays", async () => {
+      actions.submitMyLeadCommand
+        .mockRejectedValueOnce(new Error("network"))
+        .mockResolvedValueOnce({ ok: false, certainty: "rejected", message: "no" })
+        .mockResolvedValueOnce(conflict)
+      const { hook, handlers } = setup(opening())
+      await uncertainSave(hook)
+      await act(async () => { await hook.result.current.submit({ outcome: "reached" }).catch(() => undefined) })
+      await act(async () => { hook.result.current.recoveryValue?.startOver?.() })
+      await act(async () => { await hook.result.current.submit({ outcome: "no_answer", note: "edited" }) })
+      expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, message: "This was already saved. Refresh to see it." })
+      await act(async () => { hook.result.current.recoveryValue?.refresh() })
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(3)
+      expect(handlers.onReconciled).toHaveBeenCalledTimes(1)
+      expect(handlers.onClose).toHaveBeenCalledTimes(1)
+      expect(handlers.onCommitted).not.toHaveBeenCalled()
+    })
+    it("(b) a lead that moved on keeps the dialog blocked and retryable instead of closing", async () => {
+      actions.submitMyLeadCommand.mockResolvedValueOnce(conflict)
+      const first = setup(opening())
+      await act(async () => { await first.hook.result.current.submit({ outcome: "reached" }) })
+      first.hook.unmount()
+      simulateReloadForTests()
+      const { hook, handlers } = setup(opening())
+      handlers.readRow.mockResolvedValueOnce(null)
+      await act(async () => { hook.result.current.recoveryValue?.refresh() })
+      expect(handlers.onClose).not.toHaveBeenCalled()
+      expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, busy: false })
     })
   })
 
@@ -304,9 +341,9 @@ describe("submission store backs the workflow across close, unmount and reload",
     })
     it("asks when already saved, but not after a confirmed save", async () => {
       const confirm = vi.spyOn(window, "confirm").mockReturnValue(true)
-      actions.submitMyLeadCommand.mockResolvedValueOnce({ ok: false, answered: true, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "saved" })
-      const { hook } = setup(opening())
-      await act(async () => { await hook.result.current.submit({ outcome: "reached" }) })
+      actions.submitMyLeadCommand.mockResolvedValueOnce({ ok: false, answered: true, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "saved" }).mockResolvedValueOnce({ ok: true, duplicate: true })
+      const { hook } = setup(opening("log-offer"))
+      await act(async () => { await hook.result.current.submit({ amountCents: 1 }) })
       hook.result.current.confirmClose()
       expect(confirm).toHaveBeenCalledTimes(1)
       await act(async () => { hook.result.current.recoveryValue?.refresh() })

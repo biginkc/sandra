@@ -3,13 +3,13 @@ import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const mocks = vi.hoisted(() => ({
-  refresh: vi.fn(), loadMyLeadRow: vi.fn(), loadMyLeadCallReferences: vi.fn(), loadMyLeadCommandReceipt: vi.fn(),
+  refresh: vi.fn(), loadMyLeadRow: vi.fn(), loadMyLeadCallReferences: vi.fn(),
   submitMyLeadCommand: vi.fn(), submitMyLeadHandoffDrip: vi.fn(),
 }))
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.refresh }) }))
 vi.mock("@/app/(dashboard)/sequences/actions", () => ({ listDripChoices: vi.fn(async () => ({ ok: true, data: [] })), startDripForLeads: vi.fn() }))
 vi.mock("@/app/(dashboard)/my-leads/actions", () => ({
-  loadMyLeadRow: mocks.loadMyLeadRow, loadMyLeadCallReferences: mocks.loadMyLeadCallReferences, loadMyLeadCommandReceipt: mocks.loadMyLeadCommandReceipt,
+  loadMyLeadRow: mocks.loadMyLeadRow, loadMyLeadCallReferences: mocks.loadMyLeadCallReferences,
   submitMyLeadCommand: mocks.submitMyLeadCommand, submitMyLeadHandoffDrip: mocks.submitMyLeadHandoffDrip,
 }))
 
