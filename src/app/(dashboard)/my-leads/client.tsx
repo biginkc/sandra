@@ -28,6 +28,30 @@ export type MyLeadsFocus={propertyId:string|null;memberId?:string|null;notice:st
 type PinRead={id:string;lookup:MyLeadRowLookup}|null;
 
 const REFRESH_INTERVAL_MS = 30_000;
+
+/**
+ * Reconciles the single-row lookup for the deep-linked lead into what is rendered.
+ * - Unavailable: the lead is removed from every section (stages, drips, replied pins).
+ * - Found: any loaded copy that is older (other episode, lower queueVersion, other
+ *   stage) is dropped. A stale stage-row copy is replaced in place when the
+ *   authoritative row belongs to the same section; otherwise the caller pins it.
+ * Counts are deliberately left as the server snapshot reports them until the next
+ * refresh: they describe the server's view at snapshotAt, and a lookup for one lead
+ * must not make them disagree with their own timestamp.
+ */
+function reconcileWithPin(snapshot:QueueSnapshot,drips:MyLeadDripSnapshot|null,pin:PinRead,id:string|null){
+  if(!id||!pin||pin.id!==id)return {snapshot,drips};
+  const lookup=pin.lookup;
+  const stale=(row:QueueRow)=>lookup.status==='unavailable'||row.assignmentEpisodeId!==lookup.row.assignmentEpisodeId||row.queueVersion<lookup.row.queueVersion||row.stage!==lookup.row.stage;
+  const stages={...snapshot.stages} as QueueSnapshot['stages'];
+  for(const key of Object.keys(stages) as (keyof typeof stages)[]){
+    const page=stages[key];if(!page)continue;
+    stages[key]={...page,rows:page.rows.flatMap(row=>row.propertyId!==id||!stale(row)?[row]:lookup.status==='found'&&lookup.row.stage===row.stage?[lookup.row]:[])};
+  }
+  const keepDrip=(drip:MyLeadDripSnapshot['active'][number])=>drip.propertyId!==id||!drip.queueRow||!stale(drip.queueRow);
+  const nextDrips=drips?{...drips,active:drips.active.filter(keepDrip),replied:drips.replied.filter(keepDrip)}:drips;
+  return {snapshot:{...snapshot,stages},drips:nextDrips};
+}
 const refreshTime = new Intl.DateTimeFormat('en-US', {month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',timeZone:'America/Chicago',timeZoneName:'short'});
 
 export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,initialKpis,initialDrips=null,dialpad=null,initialSearch='',focus=null}:Props) {
@@ -225,13 +249,14 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     return()=>{cancelled=true;};
   },[dialog,member,callRetry]);
   const readRecoveryRow=useCallback(async(opening:{row:QueueRow})=>{
-    const result=await loadMyLeads({memberId:member,search,period:'today'});
-    if(!result.ok)throw new Error('read failed');
-    const listed=findRow(result.snapshot,result.drips,opening.row.propertyId);
-    if(listed)return listed;
-    // A lead opened beyond the loaded pages is only reachable through its own lookup.
-    const pin=await readPin(opening.row.propertyId,member);
-    if(pin==='error')throw new Error('row read failed');
+    // The single-row lookup is authoritative for any lead; the list read only
+    // supplies a newer copy of the same episode, or the fallback if the lookup fails.
+    const [result,pin]=await Promise.all([loadMyLeads({memberId:member,search,period:'today'}),readPin(opening.row.propertyId,member)]);
+    if(pin==='error'){
+      if(!result.ok)throw new Error('read failed');
+      return findRow(result.snapshot,result.drips,opening.row.propertyId);
+    }
+    if(!result.ok)return pin?.lookup.status==='found'?pin.lookup.row:null;
     return findRow(result.snapshot,result.drips,opening.row.propertyId,pin);
   },[member,search]);
   const {submit,recoveryValue,onDripChanged}=useAttemptWorkflow({
@@ -274,10 +299,11 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     pinWanted.current=null;setPinRead(null);setPinNotice(null);
     if(focusKey!=='||'&&clearedForKey!==focusKey){setClearedForKey(focusKey);router.replace('/my-leads',{scroll:false});}
   };
-  const pages=snapshot?stagePages(snapshot,drips):null;
+  const view=snapshot?reconcileWithPin(snapshot,drips,pinRead,target.propertyId):null;
+  const pages=snapshot&&view?stagePages(view.snapshot,view.drips):null;
   // Show the lead in place when a loaded page has it; otherwise pin it at the top of its section.
   const pinnedLookup=target.propertyId&&pinRead?.id===target.propertyId&&pinRead.lookup.status==='found'?pinRead.lookup.row:null;
-  const pinnedView=pages&&snapshot&&pinnedLookup&&!(Object.values(pages).some(page=>page.rows.some(row=>row.propertyId===pinnedLookup.propertyId))||drips?.active.some(row=>row.propertyId===pinnedLookup.propertyId))
+  const pinnedView=pages&&snapshot&&pinnedLookup&&!(Object.values(pages).some(page=>page.rows.some(row=>row.propertyId===pinnedLookup.propertyId))||view?.drips?.active.some(row=>row.propertyId===pinnedLookup.propertyId))
     ?{...queueRowView(findRow(snapshot,drips,pinnedLookup.propertyId,pinRead)??pinnedLookup,snapshot.snapshotAt),dripReply:drips?.replied.find(row=>row.propertyId===pinnedLookup.propertyId)??null}:null;
   if(pages)for(const stage of loadingStages)pages[stage].isLoadingMore=true;
   const motivation=dialog?.row.motivationKind==='specified'?{kind:'specified' as const,text:dialog.row.motivationText??''}:dialog?.row.motivationKind==='no_motivation'?{kind:'no_motivation' as const,text:null}:null;
@@ -305,7 +331,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       onRecordingFinalResult={()=>{void refresh(true);}}
       onLogOutcome={(propertyId,callActivityId)=>{if(!rawRow(propertyId)){setError('This lead is no longer in your queue.');return;}action('log-attempt',propertyId,callActivityId);}}/>}
     {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis||!tiles?<p role="status">Loading My Leads…</p>:<>
-      <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} drips={drips} kpis={tiles} search={search} selectedRepId={member}
+      <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} drips={view?.drips??drips} kpis={tiles} search={search} selectedRepId={member}
         onReviewingChange={onReviewingChange}
         detailRevision={detailRevision} focusPropertyId={target.propertyId} focusNonce={target.nonce} pinnedRow={pinnedView}
         repOptions={roster.members.filter(m=>m.acquisitionsEnabled||m.hasHistory||m.id===viewer.userId).map(m=>({id:m.id,label:m.label+(m.acquisitionsEnabled?'':' — Acquisitions disabled')}))}
