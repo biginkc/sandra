@@ -219,13 +219,13 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
   const activeOpening = useRef(opening)
   const callbacks = useRef({ onCommitted, onSettled, onReconciled, onClose, onDripChanged })
   const viewerRef = useRef(viewer)
+  const mounted = useRef(false)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
   useEffect(() => { activeOpening.current = opening; callbacks.current = { onCommitted, onSettled, onReconciled, onClose, onDripChanged }; viewerRef.current = viewer })
   const orphaned = useRef<{ opening: O; records: StoredSubmission[] } | null>(null)
   const allowNewKey = useRef<O | null>(null)
   /** The opening that ever held or resumed a record. It may never mint a key by itself afterwards. */
   const heldFor = useRef<O | null>(null)
-  const mounted = useRef(false)
   const recoveredRow = useRef<{ opening: O; row: QueueRow } | null>(null)
   const [recovery, setRecovery] = useState<Recovery<O> | null>(null)
 
@@ -317,7 +317,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       const orphans = listSubmissionsAcrossEpisodes(
         { viewerUserId: viewerRef.current.userId, orgId: viewerRef.current.orgId, memberId, propertyId: current.row.propertyId },
         (operation) => wanted.some((w) => w === operation),
-      ).filter((item) => item.assignmentEpisodeId !== current.row.assignmentEpisodeId && (item.status === "uncertain" || item.status === "already-saved"))
+      ).filter((item) => item.assignmentEpisodeId !== current.row.assignmentEpisodeId && (item.status === "uncertain" || item.status === "already-saved" || item.status === "committed-not-seen"))
       if (orphans.length > 0) {
         orphaned.current = { opening: current, records: orphans }
         setRecovery({ opening: current, message: MAY_HAVE_SAVED_REFRESH_ONLY_MESSAGE, blocked: true, busy: false, maySaved: { canSaveNew: false } })

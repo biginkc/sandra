@@ -254,7 +254,7 @@ describe("store epoch and per-record CAS", () => {
       hook.unmount()
       gate.open()
       await finish()
-      expect(getSubmission({ ...scope(), operation: "log_offer" }) ?? getSubmission({ ...scope(), operation: "log-offer" })).toMatchObject({ status: "committed-not-seen" })
+      expect(getSubmission({ ...scope(), operation: "log-offer" })).toMatchObject({ status: "committed-not-seen" })
       expect(server.db.commits).toBe(1)
     })
     it("STALE on its only send returns the record to fresh", async () => {
@@ -467,6 +467,30 @@ describe("store epoch and per-record CAS", () => {
       expect(x.handlers.onClose).toHaveBeenCalledTimes(1)
       expect(server.db.commits).toBe(1)
     })
+
+    for (const reload of [false, true]) {
+      it(`committed-not-seen survives an assignment episode change${reload ? " and a reload" : ""}: Refresh-and-close only, no fresh form, no new key; 1 commit`, async () => {
+        const server = fakeServer(3)
+        const gate = gateOf()
+        actions.submitMyLeadCommand.mockImplementation(async (_c: string, input: Record<string, unknown>) => { const r = server.execute(input); await gate.promise; return r })
+        const { hook } = setup(opening())
+        const finish = startSave(hook)
+        hook.unmount()
+        gate.open()
+        await finish() // late ok to an unmounted owner: committed-not-seen in ep-1
+        if (reload) simulateReloadForTests()
+        const calls = actions.submitMyLeadCommand.mock.calls.length
+        const reopened = setup({ action: "log-attempt", row: { ...row(1), assignmentEpisodeId: "ep-2" } as QueueRow })
+        expect(reopened.hook.result.current.recoveryValue).toMatchObject({ blocked: true })
+        expect(reopened.hook.result.current.recoveryValue?.saveAsNew).toBeUndefined()
+        await save(reopened.hook)
+        expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(calls) // never a fresh key
+        await act(async () => { reopened.hook.result.current.recoveryValue?.refresh() })
+        expect(reopened.handlers.onClose).toHaveBeenCalledTimes(1)
+        expect(listSubmissions(scope(), () => true)).toEqual([]) // the original marker is cleared
+        expect(server.db.commits).toBe(1)
+      })
+    }
 
     it("a genuinely new opening on an empty store mints a key and commits once", async () => {
       const server = fakeServer(3)
