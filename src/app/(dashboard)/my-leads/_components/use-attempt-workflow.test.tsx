@@ -399,6 +399,38 @@ describe("useAttemptWorkflow", () => {
       } finally { vi.useRealTimers() }
     })
 
+    it("timeout, then a definite STALE (released), Refresh, an edited save that hits IDEMPOTENCY_CONFLICT: already saved, Refresh runs the committed path, one attempt", async () => {
+      vi.useFakeTimers()
+      try {
+        actions.submitMyLeadCommand
+          .mockImplementationOnce(() => new Promise(() => undefined)) // first send: times out (frozen)
+          .mockResolvedValueOnce({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "stale" }) // replay: definite, released
+          .mockResolvedValueOnce({ ok: false, answered: true, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." }) // the original committed after the STALE
+        const readRow = vi.fn(async (): Promise<QueueRow | null> => row({ queueVersion: 2 }))
+        const { hook, handlers } = setup(opening("log-attempt", row({ queueVersion: 1 })), readRow)
+        await act(async () => {
+          const pending = hook.result.current.submit({ outcome: "reached", note: "original" }).then(() => undefined, () => undefined)
+          await vi.advanceTimersByTimeAsync(25_001)
+          await pending
+        })
+        await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "original" }) }) // replay -> STALE, released
+        await act(async () => { hook.result.current.recoveryValue?.refresh() })
+        await act(async () => { await hook.result.current.submit({ outcome: "reached", note: "edited" }) }) // same key -> conflict
+        expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, message: "This was already saved. Refresh to see it." })
+        expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(3)
+        expect(sentInput(1).idempotencyKey).toBe(sentInput(0).idempotencyKey)
+        expect(sentInput(2).idempotencyKey).toBe(sentInput(0).idempotencyKey)
+        expect(sentInput(2).note).toBe("edited")
+        expect(handlers.onCommitted).not.toHaveBeenCalled()
+        await act(async () => { hook.result.current.recoveryValue?.refresh() })
+        // The committed path ran exactly once, and nothing further was sent: the edited payload never committed.
+        expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
+        await vi.waitFor(() => expect(handlers.onSettled).toHaveBeenCalledTimes(1))
+        expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(3)
+        expect(hook.result.current.recoveryValue).toMatchObject({ blocked: false, message: "Saved earlier. Your update is recorded." })
+      } finally { vi.useRealTimers() }
+    })
+
     it("route switch after a release is blocked and sends nothing", async () => {
       actions.submitMyLeadCommand
         .mockRejectedValueOnce(new Error("network"))
