@@ -44,6 +44,7 @@ export default defineConfig({
       "supabase/migrations/20261002120100_norma_m2_hardening.integration.test.ts",
       "supabase/migrations/20261002120200_norma_m2_review_fixes.integration.test.ts",
       "supabase/migrations/20261002150000_norma_call_twice.integration.test.ts",
+      "supabase/migrations/20261002150100_norma_mark_reviewed.integration.test.ts",
       "supabase/migrations/20260927023443_dialpad_cti_kpi_seller_speech.integration.test.ts",
       "supabase/migrations/20260929034021_dialpad_cti_foundation.integration.test.ts",
       "supabase/migrations/20260929120000_dialpad_cti_call_projection.integration.test.ts",
