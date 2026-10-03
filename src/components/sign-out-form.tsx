@@ -1,12 +1,19 @@
 "use client"
 
 import { Button } from "@/components/ui/button"
-import { clearAllSubmissions } from "@/app/(dashboard)/my-leads/_components/submission-store"
+import { clearAllSubmissions, hasPendingSave } from "@/app/(dashboard)/my-leads/_components/submission-store"
 
 /** Sign out, and forget any My Leads save records this browser session held. */
 export function SignOutForm() {
   return (
-    <form action="/auth/signout" method="post" className="border-l border-white/10" onSubmit={() => clearAllSubmissions()}>
+    <form action="/auth/signout" method="post" className="border-l border-white/10" onSubmit={(event) => {
+        // Signing out drops the protection of an unresolved save (accepted trade-off): ask first.
+        if (hasPendingSave() && !window.confirm("A save may still be going through. Sign out anyway?")) {
+          event.preventDefault()
+          return
+        }
+        clearAllSubmissions()
+      }}>
       <Button
         type="submit"
         variant="ghost"
