@@ -22,27 +22,61 @@ export async function loadMyLeadsStage(input:{memberId:string;search:string;stag
   try {return {ok:true as const,snapshot:await getAcquisitionQueue(input)};}
   catch(error){reportMyLeadsReadFailure('my_leads_stage');return {ok:false as const,message:error instanceof Error?error.message:'Could not load this section.'};}
 }
+/**
+ * How sure a failed command is about NOT having committed.
+ * - `rejected`: the failure proves nothing was committed under this idempotency key: a
+ *   deterministic pre-RPC payload check, or a SQL raise that the function makes AFTER its
+ *   receipt lookup and BEFORE the receipt insert (a plpgsql raise rolls the whole call back,
+ *   and a committed original would have returned its stored receipt before reaching any
+ *   later raise). The client may release a frozen replay payload.
+ * - `unknown`: anything else (transport/fetch errors, auth/session errors, unexpected
+ *   exceptions, missing confirmation, raises made BEFORE the receipt lookup). The original
+ *   request may have committed, so the client keeps the exact request for replay.
+ * Raise sites were verified against supabase/migrations/20261003130000_my_leads_conflicts_non_retryable.sql
+ * (and the log/finalize attempt functions): every name in REJECTED_AFTER_LOOKUP is raised after the
+ * lookup in all command functions. FORBIDDEN is also raised before the lookup in
+ * fn_handoff_acquisition_lead_to_drip, so there it stays `unknown`.
+ */
+/** Deterministic payload checks the SQL makes before any write; a payload that fails them now could not have committed. */
+const DETERMINISTIC_VALIDATION=/INVALID_INPUT|RECORDING_REQUIRED|MOTIVATION|PENDING_OFFER|RECIPIENT/;
+const ALREADY_SAVED='This was already saved. Refresh to see it.';
+type Certainty='rejected'|'unknown';
+const REJECTED_AFTER_LOOKUP=['STALE_STATE','STALE_ASSIGNMENT','FEATURE_DISABLED','NOT_FOUND','DNC_LOCKED','PENDING_OFFER_EXISTS','RECIPIENT_UNAVAILABLE','PROVIDER_EVIDENCE_PENDING'];
+const failure=<C extends string|undefined>(certainty:Certainty,message:string,code?:C)=>({ok:false as const,certainty,message,...(code?{code}:{})} as {ok:false;certainty:Certainty;message:string}&(C extends string?{code:C}:{code?:undefined}));
+const named=(message:string,names:readonly string[])=>names.find(name=>new RegExp(`^${name}\\b`).test(message.trim().toUpperCase()));
 /** Handoff with a drip records the outcome while keeping the current owner. */
 export async function submitMyLeadHandoffDrip(input:{memberId:string;propertyId:string;sequenceId:string;reason:'not_interested';expectedEpisodeId:string;expectedQueueVersion:number;expectedSharedStatus:string;idempotencyKey:string}) {
+  if(input.reason!=='not_interested'||!input.sequenceId||!input.idempotencyKey) return failure('rejected','Choose an eligible handoff reason and drip.');
+  let viewer;
+  try { viewer=await myLeadsViewer(); }
+  catch { return failure('unknown','Sign in with an active organization before updating a lead.'); }
+  if(!viewer.isOwner&&viewer.userId!==input.memberId) return failure('rejected','You can update only your own queue.');
+  let rpc:{data:{ok?:boolean}|null;error:{message?:string}|null};
   try {
-    if(input.reason!=='not_interested'||!input.sequenceId||!input.idempotencyKey) return {ok:false as const,message:'Choose an eligible handoff reason and drip.'};
-    const viewer=await myLeadsViewer();
-    if(!viewer.isOwner&&viewer.userId!==input.memberId) return {ok:false as const,message:'You can update only your own queue.'};
-    const {data,error}=await (viewer.client as unknown as {rpc(name:string,args:Record<string,string|number>):Promise<{data:{ok?:boolean}|null;error:{message:string}|null}>}).rpc('fn_handoff_acquisition_lead_to_drip',{
+    rpc=await (viewer.client as unknown as {rpc(name:string,args:Record<string,string|number>):Promise<{data:{ok?:boolean}|null;error:{message?:string}|null}>}).rpc('fn_handoff_acquisition_lead_to_drip',{
       p_org_id:viewer.orgId,p_member_id:input.memberId,p_property_id:input.propertyId,
       p_expected_episode_id:input.expectedEpisodeId,p_expected_queue_version:input.expectedQueueVersion,
       p_expected_shared_status:input.expectedSharedStatus,p_idempotency_key:input.idempotencyKey,
     });
-    if(error||data?.ok!==true) return error?.message?.includes('STALE_')
-      ? {ok:false as const,code:'STALE_STATE' as const,message:'This lead changed. Refresh before trying again.'}
-      : {ok:false as const,message:'This lead is unavailable. Refresh and try again.'};
-    revalidatePath('/my-leads');revalidatePath('/leads');revalidatePath(`/leads/${input.propertyId}`);
-    // The RPC commits the guarded outcome before enrollment starts.
+  } catch {return failure('unknown','Could not save the handoff outcome. Please retry.');}
+  const {data,error}=rpc;
+  if(error) {
+    const message=error.message??'';
+    if(named(message,['IDEMPOTENCY_CONFLICT'])) return failure('unknown',ALREADY_SAVED,'IDEMPOTENCY_CONFLICT' as const);
+    // FORBIDDEN is raised before the receipt lookup in this function, so it proves nothing.
+    if(named(message,['STALE_STATE','STALE_ASSIGNMENT'])) return failure('rejected','This lead changed. Refresh before trying again.','STALE_STATE' as const);
+    if(named(message,REJECTED_AFTER_LOOKUP)||DETERMINISTIC_VALIDATION.test(message.toUpperCase())) return failure('rejected','This lead is unavailable. Refresh and try again.');
+    return failure('unknown','Could not save the handoff outcome. Please retry.');
+  }
+  if(data?.ok!==true) return failure('unknown','The update was not confirmed. Retry with the same form.');
+  // The RPC committed. Nothing below may turn this into a failure.
+  try {revalidatePath('/my-leads');revalidatePath('/leads');revalidatePath(`/leads/${input.propertyId}`);} catch {}
+  try {
     const enrolled=await startDripForLeads(input.sequenceId,[input.propertyId]);
     if(!enrolled.ok) return {ok:true as const,dripFailure:enrolled.error.message};
     const item=enrolled.data.results[0];
     return {ok:true as const,...(item?.status==='enrolled'?{}:{dripFailure:item?.reason??'Could not start drip.'})};
-  } catch {return {ok:false as const,message:'Could not save the handoff outcome. Please retry.'};}
+  } catch {return {ok:true as const,dripFailure:'Could not start the drip.'};}
 }
 /** One lead's current queue row (or why it is unavailable), for the pinned deep link and lead-page logging. */
 export async function loadMyLeadRow(input:{memberId:string;propertyId:string}) {
@@ -67,10 +101,10 @@ const commands={
   'contract-signed':'fn_record_acquisition_contract','decline-offer':'fn_decline_acquisition_offer','handoff':'fn_handoff_acquisition_lead','archive':'fn_archive_acquisition_contract',
 } as const;
 export async function submitMyLeadCommand(command:keyof typeof commands,input:Record<string,Json>) {
-  if(!Object.hasOwn(commands,command)) return {ok:false as const,message:'Unsupported action.'};
+  if(!Object.hasOwn(commands,command)) return failure('rejected','Unsupported action.');
   let viewer;
   try { viewer=await myLeadsViewer(); }
-  catch { return {ok:false as const,message:'Sign in with an active organization before updating a lead.'}; }
+  catch { return failure('unknown','Sign in with an active organization before updating a lead.'); }
   const client=viewer.client;
   input={...input,orgId:viewer.orgId};
   let composition: RepSmsComposition | null = null;
@@ -104,28 +138,48 @@ export async function submitMyLeadCommand(command:keyof typeof commands,input:Re
         followUp: followUpPayload as Json,
       };
     } catch (error) {
-      return {ok:false as const,message:error instanceof Error?error.message:'Choose a valid follow-up message.'};
+      return failure('rejected',error instanceof Error?error.message:'Choose a valid follow-up message.');
     }
   }
-  const {data,error}=await (client as unknown as {rpc(name:string,args:{p_input:Json}):Promise<{data:Json|null;error:{message?:string}|null}>}).rpc(command==='log-attempt'&&input.source==='sandra'?'fn_finalize_acquisition_attempt':commands[command],{p_input:input});
+  const rpcName=command==='log-attempt'&&input.source==='sandra'?'fn_finalize_acquisition_attempt':commands[command];
+  let rpc:{data:Json|null;error:{message?:string}|null};
+  try { rpc=await (client as unknown as {rpc(name:string,args:{p_input:Json}):Promise<{data:Json|null;error:{message?:string}|null}>}).rpc(rpcName,{p_input:input}); }
+  catch { return failure('unknown','The update could not be confirmed. Retry with the same form.'); }
+  const {data,error}=rpc;
   if(error) {
     const message=error.message??'';
-    if(message==='FORBIDDEN') return {ok:false as const,code:'FORBIDDEN' as const,message:'This lead is unavailable or you no longer have access. Refresh to check access. Your draft is retained.'};
-    if(message.includes('RECORDING_REQUIRED')) return {ok:false as const,message:'Attach the DialPad recording link before saving this call.'};
-    if(message.includes('STALE_')) return {ok:false as const,code:'STALE_STATE' as const,message:'This lead changed. Refresh before trying again.'};
-    return {ok:false as const,message:message.includes('MOTIVATION')?'Specify motivation or choose No motivation provided.':message.includes('PENDING_OFFER')?'Resolve the current pending offer first.':message.includes('RECIPIENT')?'The handoff recipient is unavailable. Ask the owner to update settings.':'The update could not be saved. Check the fields and retry.'};
+    // A receipt exists for this key with a different request: the save already went through.
+    if(named(message,['IDEMPOTENCY_CONFLICT'])) return failure('unknown',ALREADY_SAVED,'IDEMPOTENCY_CONFLICT' as const);
+    if(named(message,['FORBIDDEN'])) return failure('rejected','This lead is unavailable or you no longer have access. Refresh to check access. Your draft is retained.','FORBIDDEN' as const);
+    if(named(message,['STALE_STATE','STALE_ASSIGNMENT'])||message.includes('STALE_')) return failure('rejected','This lead changed. Refresh before trying again.','STALE_STATE' as const);
+    const certainty:Certainty=named(message,REJECTED_AFTER_LOOKUP)||DETERMINISTIC_VALIDATION.test(message.toUpperCase())?'rejected':'unknown';
+    if(message.includes('RECORDING_REQUIRED')) return failure(certainty,'Attach the DialPad recording link before saving this call.');
+    return failure(certainty,message.includes('MOTIVATION')?'Specify motivation or choose No motivation provided.':message.includes('PENDING_OFFER')?'Resolve the current pending offer first.':message.includes('RECIPIENT')?'The handoff recipient is unavailable. Ask the owner to update settings.':'The update could not be saved. Check the fields and retry.');
   }
-  if(!data||typeof data!=='object'||Array.isArray(data)||data.ok!==true) return {ok:false as const,message:'The update was not confirmed. Retry with the same form.'};
-  revalidatePath('/my-leads');revalidatePath('/leads');
-  if(typeof input.propertyId==='string') revalidatePath(`/leads/${input.propertyId}`);
+  if(!data||typeof data!=='object'||Array.isArray(data)||data.ok!==true) return failure('unknown','The update was not confirmed. Retry with the same form.');
+  // The RPC committed. Nothing below may turn this into a failure.
+  try {
+    revalidatePath('/my-leads');revalidatePath('/leads');
+    if(typeof input.propertyId==='string') revalidatePath(`/leads/${input.propertyId}`);
+  } catch {}
+  return finishCommitted({command,viewer,input,data,composition});
+}
+
+async function finishCommitted(args:{command:keyof typeof commands;viewer:Awaited<ReturnType<typeof myLeadsViewer>>;input:Record<string,Json>;data:Json;composition:RepSmsComposition|null}) {
+  const {command,viewer,input,data,composition}=args;
   const record = data as Record<string, unknown>;
   if (command === 'log-attempt' && input.outcome === 'no_answer') {
-    return finishNoAnswerFollowUp({
-      viewer,
-      input,
-      record,
-      composition,
-    });
+    // The attempt is committed; a failure while composing or sending the follow-up is reported as a follow-up status.
+    try {
+      return await finishNoAnswerFollowUp({
+        viewer,
+        input,
+        record,
+        composition,
+      });
+    } catch {
+      return followUpResult('unknown','The attempt was saved, but its follow-up could not be confirmed.');
+    }
   }
   const followUpValue = record.followUp ?? record.follow_up;
   const followUp = followUpValue && typeof followUpValue === 'object' && !Array.isArray(followUpValue)

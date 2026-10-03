@@ -29,7 +29,7 @@ it('guards and saves the outcome in one RPC before starting the drip',async()=>{
 
 it('does not enroll when reassignment wins the race at the write boundary',async()=>{
   mocks.rpc.mockResolvedValue({data:null,error:{message:'STALE_ASSIGNMENT'}});
-  expect(await submitMyLeadHandoffDrip(input)).toEqual({ok:false,code:'STALE_STATE',message:'This lead changed. Refresh before trying again.'});
+  expect(await submitMyLeadHandoffDrip(input)).toEqual({ok:false,certainty:'rejected',code:'STALE_STATE',message:'This lead changed. Refresh before trying again.'});
   expect(mocks.start).not.toHaveBeenCalled();
 });
 
@@ -42,3 +42,23 @@ it('rejects another member queue before mutation',async()=>{
   expect((await submitMyLeadHandoffDrip({...input,memberId:'other'})).ok).toBe(false);
   expect(mocks.rpc).not.toHaveBeenCalled();
 });
+
+it('reports a committed handoff with a follow-up error when the drip start throws, never as a failure',async()=>{
+  mocks.start.mockRejectedValue(new Error('boom after commit'));
+  expect(await submitMyLeadHandoffDrip(input)).toEqual({ok:true,dripFailure:'Could not start the drip.'});
+});
+
+it.each([
+  ['STALE_STATE','rejected'],['STALE_ASSIGNMENT','rejected'],['FORBIDDEN','unknown'],['fetch failed','unknown'],['IDEMPOTENCY_CONFLICT','unknown'],
+])('classifies handoff-drip RPC error %s as %s',async(message,certainty)=>{
+  mocks.rpc.mockResolvedValue({data:null,error:{message}});
+  expect(await submitMyLeadHandoffDrip(input)).toMatchObject({ok:false,certainty});
+});
+
+it('treats a missing confirmation or a thrown RPC as unknown',async()=>{
+  mocks.rpc.mockResolvedValue({data:{ok:false},error:null});
+  expect(await submitMyLeadHandoffDrip(input)).toMatchObject({ok:false,certainty:'unknown',message:'The update was not confirmed. Retry with the same form.'});
+  mocks.rpc.mockRejectedValue(new Error('network'));
+  expect(await submitMyLeadHandoffDrip(input)).toMatchObject({ok:false,certainty:'unknown'});
+});
+

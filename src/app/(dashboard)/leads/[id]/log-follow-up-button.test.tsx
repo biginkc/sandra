@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -111,4 +111,31 @@ describe("LogFollowUpButton", () => {
     expect(sent(1).note).toBe("first")
     await act(async () => {})
   })
+
+  it("renders disabled before hydration (same label) and enabled once mounted, so an early click is never dropped", async () => {
+    const { renderToString } = await import("react-dom/server")
+    const html = renderToString(<LogFollowUpButton {...props} />)
+    expect(html).toMatch(/<button[^>]* disabled=""[^>]*>Log follow-up<\/button>/)
+    render(<LogFollowUpButton {...props} />)
+    expect(screen.getByRole("button", { name: "Log follow-up" })).toBeEnabled()
+  })
+
+  it("shows a visible loading state while the opening lookup is in flight, and a second click starts no second opening", async () => {
+    const user = userEvent.setup()
+    let release!: (value: unknown) => void
+    mocks.loadMyLeadRow.mockReturnValueOnce(new Promise((resolve) => { release = resolve }))
+    render(<LogFollowUpButton {...props} />)
+    const button = screen.getByRole("button", { name: "Log follow-up" })
+    fireEvent.click(button)
+    fireEvent.click(button)
+    expect(await screen.findByTestId("log-follow-up-loading")).toHaveTextContent("Loading current lead…")
+    expect(screen.getByRole("button", { name: "Opening…" })).toBeDisabled()
+    expect(mocks.loadMyLeadRow).toHaveBeenCalledTimes(1)
+    await act(async () => { release(foundRow) })
+    expect(await screen.findByRole("dialog")).toBeInTheDocument()
+    expect(screen.queryByTestId("log-follow-up-loading")).toBeNull()
+    expect(mocks.loadMyLeadRow).toHaveBeenCalledTimes(1)
+    void user
+  })
 })
+

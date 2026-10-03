@@ -242,7 +242,7 @@ describe("MyLeadsClient pinned deep-link row", () => {
   it("recovers a STALE_STATE save on a loaded, non-pinned lead from the authoritative lookup", async () => {
     const user = userEvent.setup()
     mocks.submitMyLeadCommand
-      .mockResolvedValueOnce({ ok: false, code: "STALE_STATE", message: "This lead changed." })
+      .mockResolvedValueOnce({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "This lead changed." })
       .mockResolvedValueOnce({ ok: true })
     render(ui(null))
     await user.click(screen.getByRole("button", { name: "Show details for 1 Loaded Lane" }))
@@ -308,7 +308,7 @@ describe("MyLeadsClient pinned deep-link row", () => {
 
   it("keeps recovery blocked with a retryable error when the authoritative lookup fails", async () => {
     const user = userEvent.setup()
-    mocks.submitMyLeadCommand.mockResolvedValueOnce({ ok: false, code: "STALE_STATE", message: "This lead changed." })
+    mocks.submitMyLeadCommand.mockResolvedValueOnce({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "This lead changed." })
     render(ui(null))
     await user.click(screen.getByRole("button", { name: "Show details for 1 Loaded Lane" }))
     await user.click(within(screen.getByTestId("my-lead-actions-loaded-1")).getByRole("button", { name: "Contract signed" }))
@@ -405,7 +405,7 @@ describe("MyLeadsClient pinned deep-link row", () => {
 
     it("recovery after STALE_STATE retries with the lookup row and never the list", async () => {
       const user = userEvent.setup()
-      mocks.submitMyLeadCommand.mockResolvedValueOnce({ ok: false, code: "STALE_STATE", message: "This lead changed." }).mockResolvedValueOnce({ ok: true })
+      mocks.submitMyLeadCommand.mockResolvedValueOnce({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "This lead changed." }).mockResolvedValueOnce({ ok: true })
       mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([loaded], 25), kpis, drips: noDrips() }) // the list stays stale
       render(ui(null, snap([loaded], 25)))
       await user.click(screen.getByRole("button", { name: "Show details for 1 Loaded Lane" }))
@@ -428,7 +428,7 @@ describe("MyLeadsClient pinned deep-link row", () => {
 
     it("a stale-state answer ends in the recovery UI within the test", async () => {
       const user = userEvent.setup()
-      mocks.submitMyLeadCommand.mockResolvedValue({ ok: false, code: "STALE_STATE", message: "This lead changed. Refresh before trying again." })
+      mocks.submitMyLeadCommand.mockResolvedValue({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "This lead changed. Refresh before trying again." })
       render(ui(null, snap([loaded], 25)))
       await openContract(user)
       await user.click(screen.getByRole("button", { name: "Record contract" }))
@@ -450,7 +450,7 @@ describe("MyLeadsClient pinned deep-link row", () => {
       const user = userEvent.setup({ delay: null })
       mocks.submitMyLeadCommand
         .mockImplementationOnce(() => new Promise(() => undefined))
-        .mockResolvedValueOnce({ ok: false, code: "STALE_STATE", message: "This lead changed. Refresh before trying again." })
+        .mockResolvedValueOnce({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "This lead changed. Refresh before trying again." })
         .mockResolvedValueOnce({ ok: true })
       render(ui(null, snap([loaded], 25)))
       await openContract(user)
@@ -467,6 +467,39 @@ describe("MyLeadsClient pinned deep-link row", () => {
       await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(3))
       expect(mocks.submitMyLeadCommand.mock.calls.map((call) => (call[1] as { expectedQueueVersion: number }).expectedQueueVersion)).toEqual([1, 1, 2])
       expect(mocks.submitMyLeadCommand.mock.calls[2][1]).toMatchObject({ expectedSharedStatus: "interested" })
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    })
+
+    it("IDEMPOTENCY_CONFLICT shows the already-saved copy and Refresh closes the dialog", async () => {
+      const user = userEvent.setup()
+      mocks.submitMyLeadCommand.mockResolvedValue({ ok: false, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." })
+      render(ui(null, snap([loaded], 25)))
+      await openContract(user)
+      await user.click(screen.getByRole("button", { name: "Record contract" }))
+      expect(await screen.findByText("This was already saved. Refresh to see it.")).toBeInTheDocument()
+      await user.click(await screen.findByRole("button", { name: "Refresh" }))
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+      expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1)
+    })
+
+    it("commit then timeout: an unknown replay failure keeps reconciliation and the next replay succeeds once", async () => {
+      const user = userEvent.setup({ delay: null })
+      mocks.submitMyLeadCommand
+        .mockImplementationOnce(() => new Promise(() => undefined))
+        .mockResolvedValueOnce({ ok: false, certainty: "unknown", message: "The update could not be confirmed. Retry with the same form." })
+        .mockResolvedValueOnce({ ok: true, duplicate: true })
+      render(ui(null, snap([loaded], 25)))
+      await openContract(user)
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+      try {
+        fireEvent.click(screen.getByRole("button", { name: "Record contract" }))
+        await act(async () => { await vi.advanceTimersByTimeAsync(25_001) })
+      } finally { vi.useRealTimers() }
+      await user.click(await screen.findByRole("button", { name: "Reconcile saved change" }))
+      await user.click(await screen.findByRole("button", { name: "Reconcile saved change" }))
+      await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(3))
+      const calls = mocks.submitMyLeadCommand.mock.calls.map((call) => call[1])
+      expect(calls[2]).toEqual(calls[0])
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
     })
 

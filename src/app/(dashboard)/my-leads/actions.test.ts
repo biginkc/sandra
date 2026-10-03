@@ -28,16 +28,39 @@ describe('My Leads command integration',()=>{
     mocks.viewer.mockRejectedValue(new Error('No membership'));
     expect((await submitMyLeadCommand('archive',{propertyId:'lead'})).ok).toBe(false);expect(mocks.rpc).not.toHaveBeenCalled();
   });
+  it.each([
+    ['STALE_STATE','rejected'],['STALE_ASSIGNMENT','rejected'],['FORBIDDEN','rejected'],['DNC_LOCKED','rejected'],
+    ['fetch failed','unknown'],['JWT expired','unknown'],['IDEMPOTENCY_CONFLICT','unknown'],
+  ])('classifies command RPC error %s as %s',async(message,certainty)=>{
+    mocks.rpc.mockResolvedValue({data:null,error:{message}});
+    expect(await submitMyLeadCommand('log-offer',{propertyId:'lead'})).toMatchObject({ok:false,certainty});
+  });
+  it('maps IDEMPOTENCY_CONFLICT to the already-saved answer',async()=>{
+    mocks.rpc.mockResolvedValue({data:null,error:{message:'IDEMPOTENCY_CONFLICT'}});
+    expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toEqual({ok:false,certainty:'unknown',code:'IDEMPOTENCY_CONFLICT',message:'This was already saved. Refresh to see it.'});
+  });
+  it('is unknown for a thrown RPC, a session failure and a missing confirmation',async()=>{
+    mocks.rpc.mockRejectedValue(new Error('network'));
+    expect(await submitMyLeadCommand('log-offer',{propertyId:'lead'})).toMatchObject({ok:false,certainty:'unknown'});
+    mocks.rpc.mockResolvedValue({data:{ok:false},error:null});
+    expect(await submitMyLeadCommand('log-offer',{propertyId:'lead'})).toMatchObject({ok:false,certainty:'unknown',message:'The update was not confirmed. Retry with the same form.'});
+    mocks.viewer.mockRejectedValue(new Error('No session'));
+    expect(await submitMyLeadCommand('log-offer',{propertyId:'lead'})).toMatchObject({ok:false,certainty:'unknown'});
+  });
+  it('keeps a committed save a success when revalidation throws',async()=>{
+    mocks.revalidate.mockImplementation(()=>{throw new Error('revalidate failed');});
+    expect(await submitMyLeadCommand('log-offer',{propertyId:'lead'})).toEqual({ok:true});
+  });
   it.each(['STALE_STATE','STALE_ASSIGNMENT'])('treats %s as a definite answer: exactly one RPC call, returned immediately',async message=>{
     mocks.rpc.mockResolvedValue({data:null,error:{message,code:'40001'}});
     const result=await submitMyLeadCommand('log-attempt',{propertyId:'lead',outcome:'reached',expectedSharedStatus:'interested'});
-    expect(result).toMatchObject({ok:false,code:'STALE_STATE'});
+    expect(result).toMatchObject({ ok: false, certainty: "rejected", code: 'STALE_STATE'});
     expect(mocks.rpc).toHaveBeenCalledTimes(1);
     expect(mocks.adminRpc).not.toHaveBeenCalled();
   });
   it('does not revalidate or report success for a rejected stale command',async()=>{
     mocks.rpc.mockResolvedValue({data:null,error:{message:'STALE_ASSIGNMENT'}});
-    expect(await submitMyLeadCommand('handoff',{propertyId:'lead'})).toEqual({ok:false,code:'STALE_STATE',message:'This lead changed. Refresh before trying again.'});
+    expect(await submitMyLeadCommand('handoff',{propertyId:'lead'})).toEqual({ok:false,certainty:'rejected',code:'STALE_STATE',message:'This lead changed. Refresh before trying again.'});
     expect(mocks.revalidate).not.toHaveBeenCalled();
   });
 });
@@ -50,7 +73,7 @@ it('keeps KPI scope at today for the rep regardless of search and obsolete perio
 
 it('returns safe typed access guidance without revealing assignment or revalidating', async()=>{
   mocks.rpc.mockResolvedValue({data:null,error:{message:'FORBIDDEN'}});
-  expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toEqual({ok:false,code:'FORBIDDEN',message:'This lead is unavailable or you no longer have access. Refresh to check access. Your draft is retained.'});
+  expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toEqual({ok:false,certainty:'rejected',code:'FORBIDDEN',message:'This lead is unavailable or you no longer have access. Refresh to check access. Your draft is retained.'});
   expect(mocks.revalidate).not.toHaveBeenCalled();
 });
 

@@ -602,7 +602,7 @@ describe('stale form recovery',()=>{
   it('refreshes a stale drip handoff and retries with the current queue version',async()=>{
     const user=userEvent.setup();
     mocks.listDripChoices.mockResolvedValue({ok:true,data:[{id:'drip-1',name:'Seller follow-up',textCount:4,days:90,firstSend:'Today'}]});
-    mocks.submitMyLeadHandoffDrip.mockResolvedValueOnce({ok:false,code:'STALE_STATE',message:'This lead changed. Refresh before trying again.'})
+    mocks.submitMyLeadHandoffDrip.mockResolvedValueOnce({ ok: false, certainty: "rejected", code: 'STALE_STATE',message:'This lead changed. Refresh before trying again.'})
       .mockResolvedValueOnce({ok:true});
     renderClient(snapshot('106 Fixture Lane'));
     await user.click(screen.getByRole('button',{name:'Handoff'}));
@@ -624,7 +624,7 @@ describe('stale form recovery',()=>{
   });
   async function rejectedDraft(code='STALE_STATE'){
     const user=userEvent.setup();
-    mocks.submitMyLeadCommand.mockResolvedValueOnce({ok:false,code,message:'This lead changed. Refresh before trying again.'});
+    mocks.submitMyLeadCommand.mockResolvedValueOnce({ok:false,certainty:'rejected',code,message:'This lead changed. Refresh before trying again.'});
     renderClient(snapshot('106 Fixture Lane'));
     await user.click(screen.getByRole('button',{name:'Log attempt'}));
     await user.selectOptions(screen.getByLabelText('External outcome'),'reached');

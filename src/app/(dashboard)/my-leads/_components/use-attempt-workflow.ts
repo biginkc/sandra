@@ -48,6 +48,8 @@ type Submission = {
   // was edited while the response was unavailable.
   payload: Record<string, Json> | null
   uncertain: boolean
+  /** The server proved a receipt exists for this key: the save already went through. */
+  alreadySaved?: boolean
 }
 
 /**
@@ -116,6 +118,14 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     try {
       const row = await readRow(current)
       if (activeOpening.current !== current) return
+      if (submission.current?.opening === current && submission.current.alreadySaved) {
+        // The lookup succeeded, so the saved change is visible: end this opening.
+        submission.current = null
+        setRecovery(null)
+        onClose(current)
+        onDripChanged()
+        return
+      }
       // Never move a retained draft into a different assignment episode.
       if (!row || row.assignmentEpisodeId !== current.row.assignmentEpisodeId) {
         setRecovery({ opening: current, message: "This lead is unavailable in this queue or its assignment changed. Your draft is retained; copy it before closing. Reopen the lead from the current queue to start a new update.", blocked: true, busy: false })
@@ -172,20 +182,30 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       markUncertain()
       throw error
     }
-    if (!result.ok && result.message === NOT_CONFIRMED) markUncertain()
-    else if (!result.ok) {
-      // Any other failure is the server's definite answer that nothing committed
-      // (the RPC rolled back, so no receipt exists). An unresolved replay is over:
-      // drop the frozen payload so refreshed preconditions build a NEW payload on the
-      // next save. The idempotency key is KEPT on purpose: a definite rejection leaves
-      // no receipt, so reusing it with a different request cannot conflict, while a
-      // still-in-flight original that commits later makes the new request fail with an
-      // idempotency conflict instead of recording a second attempt.
-      if (state.uncertain) { state.uncertain = false; state.payload = null }
-      const failure = result as { message: string; code?: string }
-      if ((failure.code === "FORBIDDEN" || failure.code === "STALE_STATE") && activeOpening.current === opening)
-        setRecovery({ opening, message: failure.message, blocked: true, busy: false })
-      else setRecovery((current) => (current?.opening === opening && current.reconciliation ? null : current))
+    if (!result.ok) {
+      const failure = result as { message: string; code?: string; certainty?: "rejected" | "unknown" }
+      if (failure.code === "IDEMPOTENCY_CONFLICT") {
+        // A receipt exists for this key, so the save already went through. Never loop,
+        // never rotate the key: block with plain copy until a lookup succeeds.
+        state.alreadySaved = true
+        if (activeOpening.current === opening) setRecovery({ opening, message: failure.message, blocked: true, busy: false })
+      } else if (failure.certainty === "rejected" && failure.message !== NOT_CONFIRMED) {
+        // The server proved nothing committed under this key. An unresolved replay is
+        // over: drop the frozen payload so refreshed preconditions build a NEW payload on
+        // the next save. The key is KEPT: no receipt exists after a rollback, so reuse
+        // cannot conflict, while a late original commit then conflicts instead of
+        // recording a second attempt.
+        if (state.uncertain) { state.uncertain = false; state.payload = null }
+        if ((failure.code === "FORBIDDEN" || failure.code === "STALE_STATE") && activeOpening.current === opening)
+          setRecovery({ opening, message: failure.message, blocked: true, busy: false })
+        else setRecovery((current) => (current?.opening === opening && current.reconciliation ? null : current))
+      } else {
+        // Unknown outcome (transport/auth errors, missing confirmation, unexpected
+        // exceptions): the request may have committed, so keep it frozen for replay.
+        markUncertain()
+        if ((failure.code === "FORBIDDEN" || failure.code === "STALE_STATE") && activeOpening.current === opening)
+          setRecovery({ opening, message: failure.message, blocked: true, busy: false })
+      }
     }
     if (result.ok) {
       const dripFailure = "dripFailure" in result && result.dripFailure ? `Outcome saved. Drip not started: ${result.dripFailure}` : null

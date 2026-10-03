@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
 import { useRouter } from "next/navigation"
 
 import { Button } from "@/components/ui/button"
@@ -27,6 +27,10 @@ type Props = {
  */
 export function LogFollowUpButton({ propertyId, propertyLabel, assigneeId, disabledReason }: Props) {
   const router = useRouter()
+  // Server markup and the pre-hydration client render are disabled, so a click that lands
+  // before React attaches its handler can never be silently dropped. The label is unchanged.
+  const hydrated = useSyncExternalStore(() => () => {}, () => true, () => false)
+  const opening_ = useRef(false)
   const [opening, setOpening] = useState<AttemptOpening | null>(null)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
@@ -77,7 +81,9 @@ export function LogFollowUpButton({ propertyId, propertyLabel, assigneeId, disab
   }, [opening, assigneeId, propertyId, callRetry])
 
   const open = async () => {
-    if (busy || disabledReason) return
+    // A synchronous guard: a second click before the first lookup returns never starts a second opening.
+    if (opening_.current || disabledReason) return
+    opening_.current = true
     setBusy(true)
     setMessage(null)
     try {
@@ -85,16 +91,18 @@ export function LogFollowUpButton({ propertyId, propertyLabel, assigneeId, disab
       if ("row" in result) setOpening({ action: "log-attempt", row: result.row })
       else setMessage(result.message)
     } finally {
+      opening_.current = false
       setBusy(false)
     }
   }
 
   return (
     <>
-      <Button type="button" variant="outline" size="sm" data-testid="log-follow-up-attempt" disabled={Boolean(disabledReason) || busy}
+      <Button type="button" variant="outline" size="sm" data-testid="log-follow-up-attempt" disabled={Boolean(disabledReason) || busy || !hydrated} aria-busy={busy || undefined}
         title={disabledReason ?? undefined} onClick={() => void open()}>
-        Log follow-up
+        {busy ? "Opening…" : "Log follow-up"}
       </Button>
+      {busy && <span role="status" data-testid="log-follow-up-loading" className="text-xs text-muted-foreground">Loading current lead…</span>}
       {(disabledReason || message) && (
         <span role="status" data-testid="log-follow-up-note" className="text-xs text-muted-foreground">{disabledReason ?? message}</span>
       )}

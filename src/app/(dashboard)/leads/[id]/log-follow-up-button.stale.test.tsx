@@ -38,7 +38,7 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
 
   it("a second save that the server rejects as stale ends in the recovery UI, not a stuck Saving…", async () => {
     const user = userEvent.setup()
-    mocks.submitMyLeadCommand.mockResolvedValue({ ok: false, code: "STALE_STATE", message: "This lead changed. Refresh before trying again." })
+    mocks.submitMyLeadCommand.mockResolvedValue({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "This lead changed. Refresh before trying again." })
     render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} />)
     await user.click(screen.getByRole("button", { name: "Log follow-up" }))
     await fillAndSave(user)
@@ -87,7 +87,7 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
     const user = userEvent.setup({ delay: null })
     mocks.submitMyLeadCommand
       .mockImplementationOnce(() => new Promise(() => undefined))
-      .mockResolvedValueOnce({ ok: false, code: "STALE_STATE", message: "This lead changed. Refresh before trying again." })
+      .mockResolvedValueOnce({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "This lead changed. Refresh before trying again." })
       .mockResolvedValueOnce({ ok: true, attemptRecorded: true })
     render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} />)
     await user.click(screen.getByRole("button", { name: "Log follow-up" }))
@@ -107,6 +107,43 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
     const versions = mocks.submitMyLeadCommand.mock.calls.map((call) => (call[1] as { expectedQueueVersion: number }).expectedQueueVersion)
     expect(versions).toEqual([1, 1, 2])
     expect(mocks.refresh).toHaveBeenCalled()
+  })
+
+  it("IDEMPOTENCY_CONFLICT shows the already-saved copy and Refresh closes the dialog, never looping", async () => {
+    const user = userEvent.setup()
+    mocks.submitMyLeadCommand.mockResolvedValue({ ok: false, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." })
+    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} />)
+    await user.click(screen.getByRole("button", { name: "Log follow-up" }))
+    await fillAndSave(user)
+    expect(await screen.findByText("This was already saved. Refresh to see it.")).toBeInTheDocument()
+    await user.click(await screen.findByRole("button", { name: "Refresh" }))
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1)
+    expect(mocks.refresh).toHaveBeenCalled()
+  })
+
+  it("commit then timeout: an unknown replay failure keeps reconciliation and the next replay succeeds once", async () => {
+    const user = userEvent.setup({ delay: null })
+    mocks.submitMyLeadCommand
+      .mockImplementationOnce(() => new Promise(() => undefined))
+      .mockResolvedValueOnce({ ok: false, certainty: "unknown", message: "The update could not be confirmed. Retry with the same form." })
+      .mockResolvedValueOnce({ ok: true, duplicate: true, attemptRecorded: true })
+    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} />)
+    await user.click(screen.getByRole("button", { name: "Log follow-up" }))
+    await user.selectOptions(await screen.findByLabelText("External outcome"), "reached")
+    fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-11T09:00" } })
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Save attempt" }))
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_001) })
+    } finally { vi.useRealTimers() }
+    await user.click(await screen.findByRole("button", { name: "Reconcile saved change" }))
+    // The unknown failure proved nothing: the reconcile path is still there.
+    await user.click(await screen.findByRole("button", { name: "Reconcile saved change" }))
+    await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(3))
+    const calls = mocks.submitMyLeadCommand.mock.calls.map((call) => call[1])
+    expect(calls[1]).toEqual(calls[0])
+    expect(calls[2]).toEqual(calls[0])
   })
 })
 
