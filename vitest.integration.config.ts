@@ -65,6 +65,9 @@ export default defineConfig({
       "src/lib/prospects/search-eval-budget.integration.test.ts",
       // Local-only: designation setup + failure injection need loopback Postgres.
       "src/lib/leads/outreach-dispo.db.integration.test.ts",
+      // Slack rehearsal and fixtures must never run against the hosted project.
+      "src/lib/integrations/slack/unfurl-data.db.integration.test.ts",
+      "supabase/migrations/20261003091441_slack_lead_unfurl_foundation.integration.test.ts",
     ],
     environment: "node",
     reporters: ["default"],
