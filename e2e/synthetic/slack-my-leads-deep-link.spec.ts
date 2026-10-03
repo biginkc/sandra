@@ -25,7 +25,7 @@ test.beforeAll(async () => {
     ["my-leads-actions", `
       const backend=()=>window.__sandraSyntheticMyLeadsBackend;
       export const loadMyLeads=(input)=>backend().loadMyLeads(input);
-      export const loadMyLeadsStage=async()=>({ok:true,snapshot:backend().loadMyLeads({memberId:'owner-a',search:'',period:'today'})});
+      export const loadMyLeadsStage=(input)=>backend().loadMyLeads(input);
       export const loadMyLeadDetail=(input)=>backend().loadMyLeadDetail(input);
       export const loadMyLeadQueueRow=(input)=>backend().loadMyLeadQueueRow(input);
       export const loadMyLeadCallReferences=(propertyId,memberId)=>backend().loadMyLeadCallReferences(propertyId,memberId);
