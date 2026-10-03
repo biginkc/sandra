@@ -212,6 +212,47 @@ describe("MyLeadsPage availability boundary", () => {
       .toMatchObject({ selectedLead: { status: "found", propertyId, row } });
   });
 
+  it("keeps the queue usable when a linked lead read fails and preserves the retry URL", async () => {
+    const { MyLeadsReadError } = await import("@/lib/my-leads/queries");
+    const propertyId = "aabbccdd-eeff-4011-8223-445566778899";
+    mocks.getMyLeadsQueueRow.mockRejectedValue(
+      new MyLeadsReadError("READ_FAILED", "internal database detail"),
+    );
+
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({ lead: propertyId }) }));
+
+    expect(mocks.getAcquisitionQueue).toHaveBeenCalledWith({ memberId: "user-1" });
+    expect((mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0])
+      .toMatchObject({
+        selectedLead: {
+          status: "error",
+          message: "We couldn't check this lead right now.",
+          retryHref: `/my-leads?lead=${propertyId}`,
+        },
+      });
+    expect((mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0])
+      .not.toMatchObject({ selectedLead: { message: "internal database detail" } });
+  });
+
+  it("skips a linked lead lookup while the owner sees rollout disabled", async () => {
+    const ownerViewer = { ...viewer, userId: "owner-1", isOwner: true };
+    mocks.getCallerMembershipsOrThrow.mockResolvedValue([
+      { ...activeAcquisitionsMembership, user_id: "owner-1", role: "owner" },
+    ]);
+    mocks.getAcquisitionRoster.mockResolvedValue({
+      viewer: ownerViewer,
+      roster: { ...baseRoster, isOwner: true, settings: { ...baseRoster.settings, enabled: false } },
+    });
+
+    renderPage(await MyLeadsPage({
+      searchParams: Promise.resolve({ lead: "aabbccdd-eeff-4011-8223-445566778899" }),
+    }));
+
+    expect(mocks.getMyLeadsQueueRow).not.toHaveBeenCalled();
+    expect((mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0])
+      .toMatchObject({ selectedLead: { status: "unavailable", message: "My Leads is disabled for this organization." } });
+  });
+
   it.each([
     { lead: ["aabbccdd-eeff-4011-8223-445566778899", "aabbccdd-eeff-4011-8223-445566778899"] },
     { lead: "not-a-uuid" },

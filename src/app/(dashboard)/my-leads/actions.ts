@@ -6,7 +6,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { startDripForLeads } from '@/app/(dashboard)/sequences/actions';
 import { composeRepSms, type RepSmsComposition, type RepSmsCompositionInput } from '@/lib/messaging/rep-sms-composition';
 import { createRepSmsObligationFence, dispatchRepSms } from '@/lib/messaging/rep-sms';
-import { getAcquisitionQueue,getAcquisitionKpis,getAcquisitionDetail,myLeadsViewer,type DetailGroup } from '@/lib/my-leads/queries';
+import { getAcquisitionQueue,getAcquisitionKpis,getAcquisitionDetail,getMyLeadsQueueRow,myLeadsViewer,type DetailGroup } from '@/lib/my-leads/queries';
 import { listMyLeadsInDrip } from '@/lib/my-leads/drip-queries';
 import { setAcquisitionDesignation,setAcquisitionSettings } from '@/lib/my-leads/settings';
 import type { SetAcquisitionDesignationInput,SetAcquisitionSettingsInput } from '@/lib/my-leads/types';
@@ -47,6 +47,10 @@ export async function submitMyLeadHandoffDrip(input:{memberId:string;propertyId:
 export async function loadMyLeadDetail(input:{memberId:string;propertyId:string;group?:DetailGroup;cursor?:string|null}) {
   try {return {ok:true as const,detail:await getAcquisitionDetail(input)};}
   catch(error){reportMyLeadsReadFailure('my_leads_detail');return {ok:false as const,message:error instanceof Error?error.message:'Could not load lead details.'};}
+}
+export async function loadMyLeadQueueRow(input:{memberId:string;propertyId:string}) {
+  try {return {ok:true as const,lookup:await getMyLeadsQueueRow(input)};}
+  catch {reportMyLeadsReadFailure('my_leads_queue_row');return {ok:false as const,message:'Could not load this lead. Please retry.'};}
 }
 function reportMyLeadsReadFailure(operation:string) {
   const diagnostic=new Error('My Leads read failed');

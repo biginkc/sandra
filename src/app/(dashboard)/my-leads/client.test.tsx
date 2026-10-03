@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import * as React from "react"
@@ -10,12 +10,14 @@ const mocks = vi.hoisted(() => ({
   submitMyLeadHandoffDrip: vi.fn(),
   loadMyLeads: vi.fn(),
   loadMyLeadDetail: vi.fn(),
+  loadMyLeadQueueRow: vi.fn(),
   loadMyLeadCallReferences: vi.fn(),
   realDialpad: false,
   realQueue: false,
   dialpadTargets: vi.fn(),
   dialpadRecent: vi.fn(),
   dialpadHandlers: [] as Array<((nonce: number) => void) | undefined>,
+  dialpadLogOutcome: undefined as ((propertyId: string, callActivityId: string) => void) | undefined,
   listDripChoices: vi.fn(async () => ({ ok: true, data: [{ id: 'drip-1', name: 'Seller follow-up', textCount: 4, days: 90, firstSend: 'Today' }] })),
 }))
 
@@ -35,6 +37,7 @@ vi.mock("./actions", () => ({
   loadMyLeads: mocks.loadMyLeads,
   loadMyLeadsStage: vi.fn(),
   loadMyLeadDetail: mocks.loadMyLeadDetail,
+  loadMyLeadQueueRow: mocks.loadMyLeadQueueRow,
   loadMyLeadCallReferences: mocks.loadMyLeadCallReferences,
   submitMyLeadCommand: mocks.submitMyLeadCommand,
   submitMyLeadHandoffDrip: mocks.submitMyLeadHandoffDrip,
@@ -61,7 +64,11 @@ vi.mock("./_components/dialpad-panel", async (importOriginal) => {
   return { DialpadPanel: (props: React.ComponentProps<typeof actual.DialpadPanel>) => {
     if (mocks.realDialpad) return React.createElement(actual.DialpadPanel, props)
     mocks.dialpadHandlers.push(props.onCallRequestHandled)
-    return React.createElement("button", { type: "button", "data-testid": "dialpad-panel-stub", onClick: () => props.onCallRequestHandled?.(1) }, "Dialpad panel")
+    mocks.dialpadLogOutcome = props.onLogOutcome
+    return React.createElement(React.Fragment, null,
+      React.createElement("button", { type: "button", "data-testid": "dialpad-panel-stub", onClick: () => props.onCallRequestHandled?.(1) }, "Dialpad panel"),
+      React.createElement("button", { type: "button", "data-testid": "dialpad-log-outcome", onClick: () => props.onLogOutcome("outside-page", "activity-1") }, "Log Dialpad outcome"),
+    )
   }}
 })
 
@@ -112,7 +119,7 @@ vi.mock("./_components/queue", async (importOriginal) => {
 
 
 
-import type { AcquisitionKpis, AcquisitionRoster, QueueSnapshot } from "@/lib/my-leads/queries"
+import type { AcquisitionKpis, AcquisitionRoster, QueueRow, QueueSnapshot } from "@/lib/my-leads/queries"
 import type { MyLeadDripSnapshot } from "@/lib/my-leads/drip-queries"
 import { MyLeadsClient } from "./client"
 
@@ -214,13 +221,20 @@ function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis, initia
   )
 }
 
+function linkedRow(stage: QueueRow["stage"] = "contacted"): QueueRow {
+  const row = snapshot("Outside page Lane").stages.not_contacted!.rows[0];
+  return { ...row, propertyId: "outside-page", stage, address: "Outside page Lane" };
+}
+
 describe("MyLeadsClient", () => {
   beforeEach(() => {
     mocks.loadMyLeads.mockReset()
     mocks.loadMyLeadDetail.mockReset()
+    mocks.loadMyLeadQueueRow.mockReset()
     mocks.submitMyLeadCommand.mockReset()
     mocks.loadMyLeadCallReferences.mockReset()
     mocks.dialpadHandlers.length = 0
+    mocks.dialpadLogOutcome = undefined
     mocks.realDialpad = false
     mocks.realQueue = false
     mocks.dialpadRecent.mockResolvedValue({ok:true,calls:[]})
@@ -271,6 +285,112 @@ describe("MyLeadsClient", () => {
     await userEvent.setup().click(screen.getByRole('button',{name:'Log attempt'}));
     expect(screen.getByRole('dialog',{name:/Log an attempt/i})).toBeVisible();
     expect(mocks.loadMyLeadCallReferences).toHaveBeenCalledWith('pinned-reply','rep-1');
+  });
+
+  it("opens Dialpad Log outcome for a linked lead outside the loaded queue", async () => {
+    const user = userEvent.setup();
+    const initial = snapshot("Loaded queue lane");
+    const first = linkedRow("contacted");
+    mocks.loadMyLeadDetail.mockResolvedValue({ ok: true, detail: { groups: {} } });
+    mocks.loadMyLeadQueueRow.mockResolvedValue({
+      ok: true,
+      lookup: { status: "found", row: first, snapshotAt: initial.snapshotAt },
+    });
+    mocks.loadMyLeadCallReferences.mockResolvedValue({ ok: true, options: [] });
+
+    renderClient(initial, kpis, null, {
+      connectionId: "connection-1",
+      allowedOrigins: ["https://dialpad.com"],
+      binding: { status: "verified", dialpadUserId: "5551234" },
+      grants: [],
+    }, {
+      status: "found",
+      propertyId: first.propertyId,
+      row: first,
+      snapshotAt: initial.snapshotAt,
+    });
+
+    await user.click(screen.getByTestId("dialpad-log-outcome"));
+    expect(await screen.findByRole("dialog", { name: /Log an attempt/i })).toBeVisible();
+    expect(mocks.loadMyLeadQueueRow).toHaveBeenCalledWith({ memberId: "rep-1", propertyId: "outside-page" });
+    expect(mocks.loadMyLeadCallReferences).toHaveBeenCalledWith("outside-page", "rep-1");
+  });
+
+  it("refreshes a linked lead by id after save before opening its second action", async () => {
+    const user = userEvent.setup();
+    const initial = snapshot("Loaded queue lane");
+    const first = linkedRow("contacted");
+    const saved = { ...first, queueVersion: 2, sharedStatus: "interested" };
+    mocks.loadMyLeadDetail.mockResolvedValue({ ok: true, detail: { groups: {} } });
+    mocks.loadMyLeadQueueRow
+      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: first, snapshotAt: initial.snapshotAt } })
+      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: saved, snapshotAt: "2026-09-11T14:01:00.000Z" } })
+      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: saved, snapshotAt: "2026-09-11T14:01:00.000Z" } });
+    mocks.submitMyLeadCommand.mockResolvedValue({ ok: true });
+
+    renderClient(initial, kpis, null, undefined, {
+      status: "found",
+      propertyId: first.propertyId,
+      row: first,
+      snapshotAt: initial.snapshotAt,
+    });
+    const region = await screen.findByRole("region", { name: "Selected lead from link" });
+    await user.click(within(region).getByRole("button", { name: "Ready to make an offer" }));
+    fireEvent.change(screen.getByLabelText("Motivation"), { target: { value: "Seller plans to relocate." } });
+    await user.selectOptions(screen.getByLabelText("Temperature (optional)"), "warm");
+    await user.click(screen.getByRole("button", { name: "Save readiness" }));
+    await waitFor(() => expect(mocks.loadMyLeadQueueRow).toHaveBeenCalledTimes(2));
+
+    const updatedRegion = screen.getByRole("region", { name: "Selected lead from link" });
+    await user.click(within(updatedRegion).getByRole("button", { name: "Log offer" }));
+    await waitFor(() => expect(mocks.loadMyLeadQueueRow).toHaveBeenCalledTimes(3));
+    await user.type(screen.getByLabelText("Offer amount"), "125000.50");
+    await user.selectOptions(screen.getByLabelText("Offer method"), "verbal");
+    fireEvent.change(screen.getByLabelText("Offer sent"), { target: { value: "2026-09-11T10:00" } });
+    fireEvent.change(screen.getByLabelText("Required follow-up"), { target: { value: "2026-09-12T10:00" } });
+    await user.click(screen.getByRole("radio", { name: "No motivation provided" }));
+    await user.click(screen.getByRole("button", { name: "Save offer" }));
+
+    await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2));
+    expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({
+      propertyId: "outside-page",
+      expectedQueueVersion: 2,
+    });
+  });
+
+  it("uses the linked single-row read for stale recovery outside the loaded queue", async () => {
+    const user = userEvent.setup();
+    const initial = snapshot("Loaded queue lane");
+    const first = linkedRow("contacted");
+    const fresh = { ...first, queueVersion: 2, sharedStatus: "interested" };
+    mocks.loadMyLeadDetail.mockResolvedValue({ ok: true, detail: { groups: {} } });
+    mocks.loadMyLeadQueueRow
+      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: first, snapshotAt: initial.snapshotAt } })
+      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: fresh, snapshotAt: "2026-09-11T14:02:00.000Z" } });
+    mocks.submitMyLeadCommand
+      .mockResolvedValueOnce({ ok: false, code: "STALE_STATE", message: "This lead changed. Refresh before trying again." })
+      .mockResolvedValueOnce({ ok: true });
+
+    renderClient(initial, kpis, null, undefined, {
+      status: "found",
+      propertyId: first.propertyId,
+      row: first,
+      snapshotAt: initial.snapshotAt,
+    });
+    const region = await screen.findByRole("region", { name: "Selected lead from link" });
+    await user.click(within(region).getByRole("button", { name: "Ready to make an offer" }));
+    fireEvent.change(screen.getByLabelText("Motivation"), { target: { value: "Seller plans to relocate." } });
+    await user.selectOptions(screen.getByLabelText("Temperature (optional)"), "warm");
+    await user.click(screen.getByRole("button", { name: "Save readiness" }));
+    await screen.findByRole("button", { name: "Refresh" });
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    await screen.findByText("Lead refreshed. Your draft is retained. Review it before saving.");
+    await user.click(screen.getByRole("button", { name: "Save readiness" }));
+    await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2));
+    expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({
+      propertyId: "outside-page",
+      expectedQueueVersion: 2,
+    });
   });
 
   it("updates the visible check time every 30 seconds even when attempts do not change", async () => {

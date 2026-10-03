@@ -28,14 +28,14 @@ import {
   type SelectedLeadResult,
 } from "./deep-link";
 
-function unavailableState() {
+function unavailableState(retryHref = "/my-leads") {
   return (
     <Page>
       <PageHeader title="My Leads" />
       <div role="alert" className="text-destructive text-sm">
         <span>My Leads is temporarily unavailable. </span>
         {/* Reload the document so Retry reruns the failed server reads even on this same URL. */}
-        <a href="/my-leads" className="font-bold underline underline-offset-4">
+        <a href={retryHref} className="font-bold underline underline-offset-4">
           Retry
         </a>
       </div>
@@ -66,11 +66,17 @@ function isFeatureDisabled(error: unknown): boolean {
   );
 }
 
-function loadFailureState(error: unknown) {
+function loadFailureState(error: unknown, retryHref = "/my-leads") {
   // Only expose the stable rollout state. All transport, database, and
   // authorization failures use the same retryable message so internal
   // details cannot reach the page.
-  return isFeatureDisabled(error) ? disabledState() : unavailableState();
+  return isFeatureDisabled(error) ? disabledState() : unavailableState(retryHref);
+}
+
+function selectedLeadRetryHref(selectedLeadLink: ReturnType<typeof parseSelectedLeadParam>): string {
+  return selectedLeadLink.status === "requested"
+    ? `/my-leads?lead=${encodeURIComponent(selectedLeadLink.propertyId)}`
+    : "/my-leads";
 }
 
 export default async function MyLeadsPage({
@@ -81,17 +87,18 @@ export default async function MyLeadsPage({
   const selectedLeadLink = parseSelectedLeadParam(
     searchParams ? await searchParams : undefined,
   );
+  const retryHref = selectedLeadRetryHref(selectedLeadLink);
   let memberships: Membership[];
   try {
     memberships = await getCallerMembershipsOrThrow();
   } catch (error) {
-    return loadFailureState(error);
+    return loadFailureState(error, retryHref);
   }
 
   // `getAcquisitionRoster` also requires one active organization. Resolve
   // that boundary before the roster call so a missing or ambiguous scope is
   // an explicit unavailable state rather than an accidental 404 or 500.
-  if (memberships.length !== 1) return unavailableState();
+  if (memberships.length !== 1) return unavailableState(retryHref);
 
   const isRestrictedAcquisitionMember =
     shouldRestrictMessagesAndLeadsBoard(memberships);
@@ -101,7 +108,7 @@ export default async function MyLeadsPage({
   try {
     ({ viewer, roster } = await getAcquisitionRoster());
   } catch (error) {
-    return loadFailureState(error);
+    return loadFailureState(error, retryHref);
   }
 
   // A known Acquisitions member keeps the /my-leads route when rollout is
@@ -139,7 +146,7 @@ export default async function MyLeadsPage({
       : [null, null, null];
     data = { viewer, roster, memberId, snapshot, kpis, drips };
   } catch (error) {
-    return loadFailureState(error);
+    return loadFailureState(error, retryHref);
   }
 
   let selectedLead: SelectedLeadResult = selectedLeadLink.status === "none"
@@ -148,7 +155,7 @@ export default async function MyLeadsPage({
       ? selectedLeadLink
       : { status: "unavailable", message: "This lead is unavailable in your My Leads queue." };
 
-  if (selectedLeadLink.status === "requested") {
+  if (selectedLeadLink.status === "requested" && data.roster.settings.enabled) {
     try {
       // Resolve every deep link against the signed-in user's own queue. Owners
       // may browse other queues interactively, but a URL never changes their
@@ -166,9 +173,19 @@ export default async function MyLeadsPage({
       if (error instanceof MyLeadsReadError && ["FORBIDDEN", "INVALID_INPUT", "NOT_FOUND", "UNAUTHENTICATED"].includes(error.code)) {
         selectedLead = { status: "unavailable", message: "This lead is unavailable in your My Leads queue." };
       } else {
-        return loadFailureState(error);
+        selectedLead = {
+          status: "error",
+          message: "We couldn't check this lead right now.",
+          retryHref,
+        };
       }
     }
+  } else if (selectedLeadLink.status === "requested") {
+    selectedLead = {
+      status: "unavailable",
+      message: "My Leads is disabled for this organization.",
+      retryHref,
+    };
   }
 
   // Only a usable connection (active, fixed Dialpad origin allowed) surfaces the panel; any failure keeps the existing softphone flow.

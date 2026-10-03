@@ -132,6 +132,7 @@ const ACTIONS_BY_STAGE: Record<
 
 export type MyLeadQueueRowProps = {
   row: MyLeadQueueRow
+  idSuffix?: string
   sectionVisible?: boolean
   detailsOpen: boolean
   detailState?: MyLeadDetailState
@@ -147,6 +148,7 @@ export type MyLeadQueueRowProps = {
 
 export function MyLeadQueueRow({
   row,
+  idSuffix = "",
   detailsOpen,
   sectionVisible = true,
   detailState,
@@ -156,6 +158,7 @@ export function MyLeadQueueRow({
   onLoadDetailPage,
   onStageAction,
 }: MyLeadQueueRowProps) {
+  const domId = `${row.propertyId}${idSuffix}`
   const temperature = row.motivation.temperature
   const motivationLabel =
     row.motivation.motivationResponseKind === "provided"
@@ -175,15 +178,15 @@ export function MyLeadQueueRow({
         "overflow-hidden rounded-[14px] border border-l-[3px] bg-card text-card-foreground",
         STAGE_CARD_BORDER[row.queueStage]
       )}
-      data-testid={`my-lead-row-${row.propertyId}`}
+      data-testid={`my-lead-row-${domId}`}
     >
       <button
         type="button"
         className="flex w-full min-w-0 items-center gap-3.5 px-4 py-3.5 text-left hover:bg-muted/30 outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/50"
         aria-label={detailsOpen ? `Hide details for ${row.address}` : `Show details for ${row.address}`}
-        aria-describedby={`my-lead-summary-${row.propertyId}`}
+        aria-describedby={`my-lead-summary-${domId}`}
         aria-expanded={detailsOpen}
-        aria-controls={`my-lead-detail-${row.propertyId}`}
+        aria-controls={`my-lead-detail-${domId}`}
         onClick={onToggleDetails}
       >
         <span
@@ -194,7 +197,7 @@ export function MyLeadQueueRow({
           title={temperature ? `${capitalize(temperature)} motivation` : motivationLabel}
           aria-label={temperature ? `${temperature} temperature` : motivationLabel}
         />
-        <span id={`my-lead-summary-${row.propertyId}`} className="flex min-w-0 flex-1 flex-col gap-x-4 gap-y-2 xl:flex-row xl:items-center">
+        <span id={`my-lead-summary-${domId}`} className="flex min-w-0 flex-1 flex-col gap-x-4 gap-y-2 xl:flex-row xl:items-center">
           <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-3 gap-y-1">
             <span className="break-words text-[14.5px] font-bold">{row.homeownerName || "Homeowner unavailable"}</span>
             <span className="break-words text-[12.5px] text-muted-foreground">{row.address}</span>
@@ -243,7 +246,7 @@ export function MyLeadQueueRow({
         )}
       </button>
 
-      <div id={`my-lead-detail-${row.propertyId}`} hidden={!detailsOpen}>
+      <div id={`my-lead-detail-${domId}`} hidden={!detailsOpen}>
       {/* Retain loaded detail state through collapse without mounting unopened details. */}
       {(detailsOpen || detailState?.status === "ready") && <>
       <div className="border-t border-[#f0eeec] pl-[33px] pr-[18px] pt-2 pb-[18px] dark:border-border">
@@ -366,7 +369,7 @@ export function MyLeadQueueRow({
             onLoadDetailPage={onLoadDetailPage}
           />
 
-      <div data-testid={`my-lead-actions-${row.propertyId}`} role="group" aria-label="Lead actions">
+      <div data-testid={`my-lead-actions-${domId}`} role="group" aria-label="Lead actions">
         <div className="flex flex-wrap items-center gap-2.5 border-t border-[#f0eeec] px-4 pt-4 dark:border-border">
           <Button
             type="button"

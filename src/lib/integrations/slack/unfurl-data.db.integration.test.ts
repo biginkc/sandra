@@ -22,6 +22,8 @@ type Fixture = {
   orgId: string;
   foreignOrgId: string;
   ownerId: string;
+  ownerEmail: string;
+  ownerPassword: string;
   anchorOwnerId: string;
   foreignOwnerId: string;
   contactId: string;
@@ -47,11 +49,20 @@ type Fixture = {
 const localDbUrl = process.env.TEST_SUPABASE_DB_URL!;
 const localApiUrl = process.env.TEST_SUPABASE_URL!;
 const serviceKey = process.env.TEST_SUPABASE_SERVICE_ROLE_KEY!;
+const ATTEMPT_FACT_KEYS = [
+  "latest_attempt_id",
+  "latest_attempt_occurred_at",
+  "latest_attempt_outcome",
+  "reached_call_id",
+  "reached_call_occurred_at",
+] as const;
 
 const fixture: Fixture = {
   orgId: randomUUID(),
   foreignOrgId: randomUUID(),
   ownerId: randomUUID(),
+  ownerEmail: "",
+  ownerPassword: "",
   anchorOwnerId: randomUUID(),
   foreignOwnerId: randomUUID(),
   contactId: randomUUID(),
@@ -77,6 +88,8 @@ const fixture: Fixture = {
 let pg: Client;
 let service: SupabaseClient<Database>;
 let rpcWasAbsent = false;
+let rpcLockHeld = false;
+const rpcLockKey = "slack-preview-attempt-facts";
 
 function previewAttemptFactsSql(): string {
   const migration = readFileSync(
@@ -106,27 +119,107 @@ function previewAttemptFactsSql(): string {
  * still uses the real service-role RPC, never a SQL read shim.
  */
 async function ensurePreviewAttemptFactsRpc(): Promise<void> {
-  const existing = await pg.query<{ function_name: string | null }>(
-    "select to_regprocedure('public.get_slack_preview_attempt_facts(uuid,uuid)')::text as function_name",
-  );
-  rpcWasAbsent = existing.rows[0]?.function_name === null;
-  await pg.query(previewAttemptFactsSql());
-  await pg.query(
-    "grant execute on function public.get_slack_preview_attempt_facts(uuid,uuid) to service_role",
-  );
-  await pg.query("select pg_notify('pgrst', 'reload schema')");
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await pg.query("select pg_advisory_lock(hashtextextended($1, 0))", [rpcLockKey]);
+  rpcLockHeld = true;
+  try {
+    const existing = await pg.query<{ oid: string | null }>(
+      "select to_regprocedure('public.get_slack_preview_attempt_facts(uuid,uuid)')::oid as oid",
+    );
+    const oid = existing.rows[0]?.oid;
+    if (oid) {
+      const contract = await pg.query<{
+        definition: string;
+        service_execute: boolean;
+        anon_execute: boolean;
+        authenticated_execute: boolean;
+      }>(
+        `select pg_get_functiondef($1::oid) as definition,
+                has_function_privilege('service_role', 'public.get_slack_preview_attempt_facts(uuid,uuid)', 'execute') as service_execute,
+                has_function_privilege('anon', 'public.get_slack_preview_attempt_facts(uuid,uuid)', 'execute') as anon_execute,
+                has_function_privilege('authenticated', 'public.get_slack_preview_attempt_facts(uuid,uuid)', 'execute') as authenticated_execute`,
+        [oid],
+      );
+      const row = contract.rows[0];
+      const definition = row?.definition.toLowerCase() ?? "";
+      const expectedContract = [
+        "returns table(",
+        "latest_attempt_id",
+        "reached_call_id",
+        "security definer",
+        "public.acquisition_attempts",
+        "p.deleted_at is null",
+      ].every((fragment) => definition.includes(fragment));
+      if (
+        !expectedContract ||
+        !row.service_execute ||
+        row.anon_execute ||
+        row.authenticated_execute
+      ) {
+        throw new Error(
+          "existing Slack preview attempt RPC does not match the expected contract or service-only grant",
+        );
+      }
+      return;
+    }
+
+    await pg.query("begin");
+    try {
+      await pg.query(previewAttemptFactsSql());
+      await pg.query(
+        "revoke all on function public.get_slack_preview_attempt_facts(uuid,uuid) from public, anon, authenticated",
+      );
+      await pg.query(
+        "grant execute on function public.get_slack_preview_attempt_facts(uuid,uuid) to service_role",
+      );
+      await pg.query("commit");
+    } catch (error) {
+      await pg.query("rollback");
+      throw error;
+    }
+    rpcWasAbsent = true;
+    await pg.query("select pg_notify('pgrst', 'reload schema')");
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const { error } = await service.rpc("get_slack_preview_attempt_facts", {
+        p_org_id: randomUUID(),
+        p_property_id: randomUUID(),
+      });
+      if (!error) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error("PostgREST did not expose the local Slack preview attempt RPC in time");
+  } catch (error) {
+    if (rpcLockHeld) {
+      await pg.query("select pg_advisory_unlock(hashtextextended($1, 0))", [rpcLockKey]);
+      rpcLockHeld = false;
+    }
+    throw error;
+  }
 }
 
 async function removePreviewAttemptFactsRpc(): Promise<void> {
-  if (!rpcWasAbsent) return;
-  await pg.query(
-    "revoke execute on function public.get_slack_preview_attempt_facts(uuid,uuid) from service_role",
-  );
-  await pg.query(
-    "drop function if exists public.get_slack_preview_attempt_facts(uuid,uuid)",
-  );
-  await pg.query("select pg_notify('pgrst', 'reload schema')");
+  if (!rpcLockHeld) return;
+  try {
+    if (rpcWasAbsent) {
+      await pg.query("begin");
+      try {
+        await pg.query(
+          "revoke all on function public.get_slack_preview_attempt_facts(uuid,uuid) from public, anon, authenticated, service_role",
+        );
+        await pg.query(
+          "drop function if exists public.get_slack_preview_attempt_facts(uuid,uuid)",
+        );
+        await pg.query("commit");
+      } catch (error) {
+        await pg.query("rollback");
+        throw error;
+      }
+      await pg.query("select pg_notify('pgrst', 'reload schema')");
+    }
+  } finally {
+    await pg.query("select pg_advisory_unlock(hashtextextended($1, 0))", [rpcLockKey]);
+    rpcLockHeld = false;
+  }
 }
 
 function sqlUuidArray(ids: string[]): string[] {
@@ -134,9 +227,11 @@ function sqlUuidArray(ids: string[]): string[] {
 }
 
 async function seedFixture(): Promise<void> {
+  fixture.ownerEmail = `slack-preview-owner-${fixture.ownerId}@example.test`;
+  fixture.ownerPassword = randomUUID();
   const createdOwner = await service.auth.admin.createUser({
-    email: `slack-preview-owner-${fixture.ownerId}@example.test`,
-    password: randomUUID(),
+    email: fixture.ownerEmail,
+    password: fixture.ownerPassword,
     email_confirm: true,
     app_metadata: { display_name: "Synthetic Preview Owner" },
   });
@@ -451,6 +546,49 @@ describe("loadPreviewData against local PostgREST", () => {
       fixture.oldSuccessfulMessageId,
     ]);
     expect(data?.map((row) => row.id)).not.toContain(fixture.siblingMessageId);
+
+    const { data: attemptFacts, error: attemptFactsError } = await service.rpc(
+      "get_slack_preview_attempt_facts",
+      { p_org_id: fixture.orgId, p_property_id: fixture.propertyId },
+    );
+    expect(attemptFactsError).toBeNull();
+    expect(Object.keys(attemptFacts?.[0] ?? {}).sort()).toEqual(
+      [...ATTEMPT_FACT_KEYS].sort(),
+    );
+    expect(attemptFacts?.[0]).toMatchObject({
+      latest_attempt_id: fixture.pendingAttemptId,
+      latest_attempt_occurred_at: "2026-10-03T12:07:00+00:00",
+      latest_attempt_outcome: null,
+      reached_call_id: null,
+      reached_call_occurred_at: null,
+    });
+
+    const anonClient = createClient<Database>(
+      localApiUrl,
+      process.env.TEST_SUPABASE_ANON_KEY!,
+      { auth: { persistSession: false, autoRefreshToken: false } },
+    );
+    const anonAttemptFacts = await anonClient.rpc(
+      "get_slack_preview_attempt_facts",
+      { p_org_id: fixture.orgId, p_property_id: fixture.propertyId },
+    );
+    expect(anonAttemptFacts.error).toBeTruthy();
+
+    const authenticatedClient = createClient<Database>(
+      localApiUrl,
+      process.env.TEST_SUPABASE_ANON_KEY!,
+      { auth: { persistSession: false, autoRefreshToken: false } },
+    );
+    const signIn = await authenticatedClient.auth.signInWithPassword({
+      email: fixture.ownerEmail,
+      password: fixture.ownerPassword,
+    });
+    expect(signIn.error).toBeNull();
+    const authenticatedAttemptFacts = await authenticatedClient.rpc(
+      "get_slack_preview_attempt_facts",
+      { p_org_id: fixture.orgId, p_property_id: fixture.propertyId },
+    );
+    expect(authenticatedAttemptFacts.error).toBeTruthy();
   });
 
   it("keeps failed outbound text out of last contact, orders tied latest-three oldest-first, and advances on reached call", async () => {
@@ -523,6 +661,19 @@ describe("loadPreviewData against local PostgREST", () => {
         propertyId: fixture.deletedPropertyId,
       }),
     ).resolves.toBeNull();
+
+    const { data, error } = await service.rpc(
+      "get_slack_preview_attempt_facts",
+      { p_org_id: fixture.orgId, p_property_id: fixture.deletedPropertyId },
+    );
+    expect(error).toBeNull();
+    expect(data).toEqual([{
+      latest_attempt_id: null,
+      latest_attempt_occurred_at: null,
+      latest_attempt_outcome: null,
+      reached_call_id: null,
+      reached_call_occurred_at: null,
+    }]);
   });
 
   it("keeps an assigned label within its org and fails closed for a foreign property", async () => {
@@ -546,6 +697,19 @@ describe("loadPreviewData against local PostgREST", () => {
           propertyId: fixture.foreignPropertyId,
         }),
       ).resolves.toBeNull();
+
+      const { data, error } = await service.rpc(
+        "get_slack_preview_attempt_facts",
+        { p_org_id: fixture.orgId, p_property_id: fixture.foreignPropertyId },
+      );
+      expect(error).toBeNull();
+      expect(data).toEqual([{
+        latest_attempt_id: null,
+        latest_attempt_occurred_at: null,
+        latest_attempt_outcome: null,
+        reached_call_id: null,
+        reached_call_occurred_at: null,
+      }]);
     } finally {
       await pg.query(
         "insert into public.memberships (user_id, org_id, role) values ($1, $2, 'owner')",

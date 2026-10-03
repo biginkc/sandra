@@ -18,7 +18,7 @@ import { DialpadPanel,type DialpadCallRequest } from './_components/dialpad-pane
 import type { DialpadPanelBootstrap } from '@/lib/dialpad-cti/dispatch';
 import type { MyLeadAction,MyLeadStage,AcquisitionLifecycleMode,MyLeadDetailPageResult,MyLeadDetailResult,MyLeadDetailState,MyLeadDetailGroupName } from './_components/types';
 import { detailView,kpiTiles,stagePages } from './adapter';
-import { loadMyLeadCallReferences,loadMyLeads,loadMyLeadsStage,loadMyLeadDetail,submitMyLeadCommand,submitMyLeadHandoffDrip,changeAcquisitionDesignation,changeAcquisitionSettings } from './actions';
+import { loadMyLeadCallReferences,loadMyLeads,loadMyLeadsStage,loadMyLeadDetail,loadMyLeadQueueRow,submitMyLeadCommand,submitMyLeadHandoffDrip,changeAcquisitionDesignation,changeAcquisitionSettings } from './actions';
 import { MyLeadQueueRow } from './_components/queue-row';
 import { queueRow as queueRowView } from './adapter';
 import type { SelectedLeadResult } from './deep-link';
@@ -33,6 +33,10 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const [member,setMember]=useState(initialMemberId);const [search,setSearch]=useState('');
   const [snapshot,setSnapshot]=useState(initialSnapshot);const [kpis,setKpis]=useState(initialKpis);
   const [drips,setDrips]=useState(initialDrips);
+  // Keep the server-authorized link target independent from the filtered and
+  // paginated queue snapshot. A linked lead may be outside every loaded page.
+  const [linkedLead,setLinkedLead]=useState(selectedLead);
+  const linkedLeadRef=useRef(linkedLead);linkedLeadRef.current=linkedLead;
   const tiles=useMemo(()=>kpis?kpiTiles(kpis):null,[kpis]);
   const [lastCheckedAt,setLastCheckedAt]=useState(initialSnapshot?.snapshotAt??null);
   const reviewingDetails=useRef(false);
@@ -49,7 +53,9 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   },[]);
   const [dialog,setDialog]=useState<{action:MyLeadAction;row:QueueRow;callActivityId?:string|null}|null>(null);
   type Opening = {action:MyLeadAction;row:QueueRow;scope:string;callActivityId?:string|null};
-  type CurrentRead = Awaited<ReturnType<typeof loadMyLeads>> | null;
+  type QueueRead = Awaited<ReturnType<typeof loadMyLeads>>;
+  type LinkedRead = Awaited<ReturnType<typeof loadMyLeadQueueRow>>;
+  type CurrentRead = QueueRead | LinkedRead | null;
   const openingScope=JSON.stringify([member,search]);
   const activeScope=useRef(openingScope);activeScope.current=openingScope;
   const currentSnapshot=useRef(snapshot);currentSnapshot.current=snapshot;
@@ -58,6 +64,19 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const findRow=(readSnapshot:QueueSnapshot|null,readDrips:MyLeadDripSnapshot|null|undefined,id:string)=>
     Object.values(readSnapshot?.stages??{}).flatMap(page=>page?.rows??[]).find(row=>row.propertyId===id)??
     [...(readDrips?.replied??[]),...(readDrips?.active??[])].find(row=>row.propertyId===id)?.queueRow??null;
+  const linkedRow=(id:string)=>linkedLeadRef.current.status==='found'&&linkedLeadRef.current.propertyId===id&&member===initialMemberId?linkedLeadRef.current.row:null;
+  const refreshLinkedLead=useCallback(async(propertyId:string)=>{
+    if(member!==initialMemberId)return {ok:false as const,message:'Switch back to your own queue to continue.'};
+    const result=await loadMyLeadQueueRow({memberId:initialMemberId,propertyId});
+    if(!result.ok)return result;
+    const lookup=result.lookup;
+    if(lookup.status!=='found'||lookup.row.propertyId.toLowerCase()!==propertyId.toLowerCase())
+      return {ok:false as const,message:'This lead is unavailable in your My Leads queue.'};
+    setLinkedLead(current=>current.status==='found'&&current.propertyId===propertyId
+      ? {...current,row:lookup.row,snapshotAt:lookup.snapshotAt}
+      : current);
+    return result;
+  },[initialMemberId,member]);
   const mutationReads=useRef(new Map<string,{scope:string;episodeId:string|null;requestId:number;read:Promise<CurrentRead>}>());
   const renderedRead=useRef<{snapshot:QueueSnapshot;requestId:number;scope:string}|null>(null);
   useEffect(()=>{
@@ -71,6 +90,11 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const [openingStatus,setOpeningStatus]=useState<{opening:Opening;message:string;busy:boolean}|null>(null);
   const cancelOpening=()=>{pendingOpening.current=null;setOpeningStatus(null);};
   useEffect(()=>{pendingOpening.current=null;setOpeningStatus(null);mutationReads.current.clear();},[openingScope]);
+  useEffect(()=>{
+    if(member===initialMemberId)return;
+    cancelOpening();
+    setDialog(null);setRecovery(null);setCallOptions(null);recoveredRow.current=null;submission.current=null;
+  },[initialMemberId,member]);
   const activeDialog=useRef(dialog);activeDialog.current=dialog;
   const recoveredRow=useRef<{opening:NonNullable<typeof dialog>;row:QueueRow}|null>(null);
   const [recovery,setRecovery]=useState<{opening:NonNullable<typeof dialog>;message:string;blocked:boolean;busy:boolean;reconciliation?:WorkflowReconciliation}|null>(null);
@@ -78,6 +102,16 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     const opening=dialog;if(!opening||recovery?.busy)return;
     setRecovery({opening,message:'Checking current lead access…',blocked:true,busy:true});
     try {
+      if(linkedRow(opening.row.propertyId)){
+        const linked=await refreshLinkedLead(opening.row.propertyId);
+        if(activeDialog.current!==opening)return;
+        if(!linked.ok||linked.lookup.status!=='found'||linked.lookup.row.assignmentEpisodeId!==opening.row.assignmentEpisodeId){
+          setRecovery({opening,message:'This lead is unavailable in this queue or its assignment changed. Your draft is retained; copy it before closing. Reopen the lead from the current link to start a new update.',blocked:true,busy:false});return;
+        }
+        recoveredRow.current={opening,row:linked.lookup.row};
+        setRecovery({opening,message:'Lead refreshed. Your draft is retained. Review it before saving.',blocked:false,busy:false});
+        return;
+      }
       const result=await loadMyLeads({memberId:member,search,period:'today'});
       if(activeDialog.current!==opening)return;
       if(!result.ok)throw new Error('read failed');
@@ -162,9 +196,19 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const finishOpening=async(opening:Opening,read:Promise<CurrentRead>)=>{
     pendingOpening.current=opening;
     setOpeningStatus({opening,message:'Loading current lead…',busy:true});
+    if(linkedRow(opening.row.propertyId)){
+      const linked=await refreshLinkedLead(opening.row.propertyId);
+      if(pendingOpening.current!==opening||activeScope.current!==opening.scope)return;
+      if(!linked.ok||linked.lookup.status!=='found'||linked.lookup.row.assignmentEpisodeId!==opening.row.assignmentEpisodeId){
+        setOpeningStatus({opening,message:'This lead is unavailable or its assignment changed. Refresh the link to continue.',busy:false});return;
+      }
+      pendingOpening.current=null;setOpeningStatus(null);submission.current=null;setCallOptions(null);
+      setDialog({action:opening.action,row:linked.lookup.row,callActivityId:opening.callActivityId});
+      return;
+    }
     const result=await read;
     if(pendingOpening.current!==opening||activeScope.current!==opening.scope)return;
-    if(!result?.ok){setOpeningStatus({opening,message:'Could not load current lead details. Retry to continue.',busy:false});return;}
+    if(!result?.ok||!('snapshot' in result)){setOpeningStatus({opening,message:'Could not load current lead details. Retry to continue.',busy:false});return;}
     const fresh=findRow(result.snapshot,result.drips,opening.row.propertyId);
     if(!fresh||fresh.assignmentEpisodeId!==opening.row.assignmentEpisodeId){
       setOpeningStatus({opening,message:'This lead is unavailable or its assignment changed. Refresh the queue and reopen it.',busy:false});return;
@@ -178,11 +222,12 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   };
   const retryOpening=()=>{
     const opening=pendingOpening.current;if(!opening||openingStatus?.busy)return;
-    const read=refresh();mutationReads.current.set(opening.row.propertyId,{scope:opening.scope,episodeId:opening.row.assignmentEpisodeId,requestId:request.current,read});
+    const read=linkedRow(opening.row.propertyId)?Promise.resolve(null):refresh();
+    mutationReads.current.set(opening.row.propertyId,{scope:opening.scope,episodeId:opening.row.assignmentEpisodeId,requestId:request.current,read});
     void finishOpening(opening,read);
   };
   const action=(kind:MyLeadAction,id:string,callActivityId?:string|null,rowOverride?:QueueRow)=>{
-    const row=rowOverride??rawRow(id);if(!row)return;
+    const row=rowOverride??rawRow(id)??linkedRow(id);if(!row)return;
     cancelOpening();
     if(kind==='start-call'&&dialpad){
       // An active Dialpad connection routes calls through the audited CTI flow; the server re-derives org and rep and revalidates at dispatch.
@@ -194,6 +239,9 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       if(!softphone?.callingEnabled){setError('Calling is not enabled.');return;}
       softphone.openLead({id:row.propertyId,contactId:row.contactId,firstName:row.homeownerName?.split(' ')[0]??'',name:row.homeownerName??row.address,address:row.address,state:row.state,
         phones:row.phones,dncLocked:false,contactDnc:row.contactDnc,callable:row.phones.some(phone=>!!phone.trim())&&!row.contactDnc});return;
+    }
+    if(rowOverride&&linkedRow(id)){
+      void finishOpening({action:kind,row,scope:openingScope,callActivityId},Promise.resolve(null));return;
     }
     const previous=mutationReads.current.get(id);
     if(previous?.scope===openingScope&&previous.episodeId===row.assignmentEpisodeId){
@@ -267,7 +315,22 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       setRecovery(null);
       // Publish the refresh barrier before closing so a rapid next click is retained
       // and initialized from authorized post-command metadata, never the old row.
-      const read=refresh();mutationReads.current.set(dialog.row.propertyId,{scope:openingScope,episodeId:dialog.row.assignmentEpisodeId,requestId:request.current,read});
+      const linkedTarget=linkedRow(dialog.row.propertyId);
+      const terminal=dialog.action==='archive'||dialog.action==='handoff';
+      if(linkedTarget&&terminal){
+        setLinkedLead({status:'terminal',message:dialog.action==='archive'?'Lead archived. It is no longer active in My Leads.':'Lead handed off. It is no longer active in My Leads.'});
+        setDialog(current=>current===dialog?null:current);
+        submission.current=null;
+      }
+      const read=linkedTarget
+        ? terminal
+          ? Promise.resolve(null)
+          : refreshLinkedLead(dialog.row.propertyId).then(linked=>{
+              if(!linked.ok)setError(linked.message);
+              return null;
+            })
+        : refresh();
+      mutationReads.current.set(dialog.row.propertyId,{scope:openingScope,episodeId:dialog.row.assignmentEpisodeId,requestId:request.current,read});
       const followUpPending = dialog.action === 'log-attempt' && input.outcome === 'no_answer' &&
         (!result.followUp || !['accepted','delivered'].includes(result.followUp.status));
       if(!followUpPending && dialog.action!=='log-attempt' && dialog.action!=='handoff'){
@@ -284,12 +347,12 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   },[dialog,refresh,router,recovery,openingScope,member]);
   const pages=snapshot?stagePages(snapshot,drips):null;
   const loadSelectedDetail=useCallback(async(propertyId:string):Promise<MyLeadDetailResult>=>{
-    if(member!==initialMemberId)return {ok:false as const,message:'This lead is unavailable while another queue is selected.'};
+    if(member!==initialMemberId)return {ok:false as const,message:'This lead is opened in your own My Leads queue. Switch back to your queue to continue.'};
     const result=await loadMyLeadDetail({memberId:initialMemberId,propertyId});
     return result.ok?{ok:true as const,detail:detailView(result.detail,roster)}:result;
   },[initialMemberId,member,roster]);
   const loadSelectedDetailPage=useCallback(async(propertyId:string,group:MyLeadDetailGroupName,cursor:string|null):Promise<MyLeadDetailPageResult>=>{
-    if(member!==initialMemberId)return {ok:false as const,message:'This lead is unavailable while another queue is selected.'};
+    if(member!==initialMemberId)return {ok:false as const,message:'This lead is opened in your own My Leads queue. Switch back to your queue to continue.'};
     const result=await loadMyLeadDetail({memberId:initialMemberId,propertyId,group,cursor});if(!result.ok)return result;
     const detail=detailView(result.detail,roster);
     switch(group){case 'messages':return {ok:true,group,page:detail.messages};case 'notes':return {ok:true,group,page:detail.notes};case 'attempts':return {ok:true,group,page:detail.attempts};case 'appointments':return {ok:true,group,page:detail.appointments};case 'offers':return {ok:true,group,page:detail.offers};case 'history':return {ok:true,group,page:detail.history};}
@@ -317,18 +380,20 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     {dialpad&&roster.settings.enabled&&<DialpadPanel bootstrap={dialpad} callRequest={dialpadRequest}
       onCallRequestHandled={onCallRequestHandled}
       onRecordingFinalResult={()=>{void refresh(true);}}
-      onLogOutcome={(propertyId,callActivityId)=>{if(!rawRow(propertyId)){setError('This lead is no longer in your queue.');return;}action('log-attempt',propertyId,callActivityId);}}/>}
-    {selectedLead.status==='invalid'&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">
-      {selectedLead.reason==='duplicate'?'This My Leads link contains more than one lead. Open a link with exactly one lead.':'This My Leads link is invalid. Open a link with a valid lead id.'}
+      onLogOutcome={(propertyId,callActivityId)=>{const row=rawRow(propertyId)??linkedRow(propertyId);if(!row){setError('This lead is no longer in your queue.');return;}action('log-attempt',propertyId,callActivityId,row);}}/>}
+    {linkedLead.status==='invalid'&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">
+      {linkedLead.reason==='duplicate'?'This My Leads link contains more than one lead. Open a link with exactly one lead.':'This My Leads link is invalid. Open a link with a valid lead id.'}
     </div>}
-    {selectedLead.status==='unavailable'&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{selectedLead.message}</div>}
-    {selectedLead.status==='found'&&<SelectedLeadView
-      lead={selectedLead}
+    {linkedLead.status==='unavailable'&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{linkedLead.message}{linkedLead.retryHref&&<> <a href={linkedLead.retryHref} className="font-bold underline underline-offset-4">Retry</a></>}</div>}
+    {linkedLead.status==='error'&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{linkedLead.message} <a href={linkedLead.retryHref} className="font-bold underline underline-offset-4">Retry</a></div>}
+    {linkedLead.status==='terminal'&&<div role="status" className="mb-4 rounded border p-3 text-muted-foreground">{linkedLead.message}</div>}
+    {linkedLead.status==='found'&&<SelectedLeadView
+      lead={linkedLead}
       active={member===initialMemberId}
       onLoadDetail={loadSelectedDetail}
       onLoadDetailPage={loadSelectedDetailPage}
-      onStageAction={kind=>action(kind,selectedLead.row.propertyId,undefined,selectedLead.row)}
-      onLeadChanged={()=>{void refresh();router.refresh();}}
+      onStageAction={kind=>action(kind,linkedLead.propertyId,undefined,linkedLead.row)}
+      onLeadChanged={()=>{void refreshLinkedLead(linkedLead.propertyId);void refresh();router.refresh();}}
     />}
     {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis||!tiles?<p role="status">Loading My Leads…</p>:<>
       <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} drips={drips} kpis={tiles} search={search} selectedRepId={member}
@@ -392,14 +457,17 @@ type SelectedLeadViewProps={
 function SelectedLeadView({lead,active,onLoadDetail,onLoadDetailPage,onStageAction,onLeadChanged}:SelectedLeadViewProps){
   const [detailsOpen,setDetailsOpen]=useState(true);
   const [detailState,setDetailState]=useState<MyLeadDetailState>({status:'loading'});
+  const detailRequest=useRef(0);
   const view=useMemo(()=>queueRowView(lead.row,lead.snapshotAt),[lead.row,lead.snapshotAt]);
   const load=useCallback(async()=>{
-    if(!active){setDetailState({status:'error',message:'This lead is unavailable while another owner queue is selected.'});return;}
+    const requestId=++detailRequest.current;
+    if(!active){setDetailState({status:'error',message:'This lead is opened in your own My Leads queue. Switch back to your queue to continue.'});return;}
     setDetailState({status:'loading'});
     try{
       const result=await onLoadDetail(lead.propertyId);
+      if(detailRequest.current!==requestId)return;
       setDetailState(result.ok?{status:'ready',detail:result.detail}:{status:'error',message:result.message});
-    }catch{setDetailState({status:'error',message:'This lead is unavailable in your My Leads queue.'});}
+    }catch{if(detailRequest.current===requestId)setDetailState({status:'error',message:'This lead is unavailable in your My Leads queue.'});}
   },[active,lead.propertyId,onLoadDetail]);
   useEffect(()=>{void load();},[load]);
 
@@ -408,6 +476,7 @@ function SelectedLeadView({lead,active,onLoadDetail,onLoadDetailPage,onStageActi
     <p className="text-sm font-semibold text-muted-foreground">Opened from a My Leads link</p>
     <MyLeadQueueRow
       row={view}
+      idSuffix="-linked"
       detailsOpen={detailsOpen}
       detailState={detailState}
       onToggleDetails={()=>setDetailsOpen(open=>!open)}
