@@ -7,6 +7,7 @@ import { useOptionalSoftphone } from '@/components/softphone/softphone-provider'
 import { BookAppointmentPopover } from '@/components/appointments/book-appointment-popover';
 import type { AcquisitionKpis,AcquisitionRoster,QueueSnapshot,QueueRow,MyLeadRowLookup } from '@/lib/my-leads/queries';
 import { MY_LEAD_ROW_REASON_COPY } from '@/lib/my-leads/row-reasons';
+import { newestCopy,pickAuthoritative,type AuthoritativeLookup } from '@/lib/my-leads/authoritative';
 import type { MyLeadDripSnapshot } from '@/lib/my-leads/drip-queries';
 import { WorkflowRecoveryContext } from './_components/workflow-form';
 import { useAttemptWorkflow } from './_components/use-attempt-workflow';
@@ -29,12 +30,23 @@ type PinRead={id:string;lookup:MyLeadRowLookup}|null;
 
 const REFRESH_INTERVAL_MS = 30_000;
 
+/** Every list copy of one lead across stage pages and drip entries. */
+function listCopies(snapshot:QueueSnapshot|null,drips:MyLeadDripSnapshot|null|undefined,id:string):QueueRow[]{
+  return [
+    ...Object.values(snapshot?.stages??{}).flatMap(page=>page?.rows??[]).filter(row=>row.propertyId===id),
+    ...[...(drips?.replied??[]),...(drips?.active??[])].filter(row=>row.propertyId===id).flatMap(row=>row.queueRow?[row.queueRow]:[]),
+  ];
+}
+const lookupOf=(pin:PinRead|undefined,id:string):AuthoritativeLookup=>pin?.id!==id?undefined:pin.lookup.status==='found'?{status:'found',row:pin.lookup.row}:{status:'unavailable'};
+
 /**
- * Reconciles the single-row lookup for the deep-linked lead into what is rendered.
- * - Unavailable: the lead is removed from every section (stages, drips, replied pins).
- * - Found: any loaded copy that is older (other episode, lower queueVersion, other
- *   stage) is dropped. A stale stage-row copy is replaced in place when the
- *   authoritative row belongs to the same section; otherwise the caller pins it.
+ * Reconciles the single-row lookup for the deep-linked lead into what is rendered,
+ * using pickAuthoritative as the one rule.
+ * - Unavailable: the lead is removed from every section by propertyId, including
+ *   drip entries that carry no queue row.
+ * - Lookup newer: stale stage copies are replaced in place (same section) or dropped
+ *   (the caller pins the row), and drip entries take the lookup row.
+ * - List newer or equal: nothing changes, so rows are never reordered.
  * Counts are deliberately left as the server snapshot reports them until the next
  * refresh: they describe the server's view at snapshotAt, and a lookup for one lead
  * must not make them disagree with their own timestamp.
@@ -42,15 +54,21 @@ const REFRESH_INTERVAL_MS = 30_000;
 function reconcileWithPin(snapshot:QueueSnapshot,drips:MyLeadDripSnapshot|null,pin:PinRead,id:string|null){
   if(!id||!pin||pin.id!==id)return {snapshot,drips};
   const lookup=pin.lookup;
-  const stale=(row:QueueRow)=>lookup.status==='unavailable'||row.assignmentEpisodeId!==lookup.row.assignmentEpisodeId||row.queueVersion<lookup.row.queueVersion||row.stage!==lookup.row.stage;
   const stages={...snapshot.stages} as QueueSnapshot['stages'];
+  if(lookup.status==='unavailable'){
+    for(const key of Object.keys(stages) as (keyof typeof stages)[]){
+      const page=stages[key];if(page)stages[key]={...page,rows:page.rows.filter(row=>row.propertyId!==id)};
+    }
+    return {snapshot:{...snapshot,stages},drips:drips?{...drips,active:drips.active.filter(d=>d.propertyId!==id),replied:drips.replied.filter(d=>d.propertyId!==id)}:drips};
+  }
+  const pick=pickAuthoritative(newestCopy(listCopies(snapshot,drips,id)),{status:'found',row:lookup.row});
+  if(pick.source!=='lookup')return {snapshot,drips};
   for(const key of Object.keys(stages) as (keyof typeof stages)[]){
     const page=stages[key];if(!page)continue;
-    stages[key]={...page,rows:page.rows.flatMap(row=>row.propertyId!==id||!stale(row)?[row]:lookup.status==='found'&&lookup.row.stage===row.stage?[lookup.row]:[])};
+    stages[key]={...page,rows:page.rows.flatMap(row=>row.propertyId!==id?[row]:lookup.row.stage===row.stage?[lookup.row]:[])};
   }
-  const keepDrip=(drip:MyLeadDripSnapshot['active'][number])=>drip.propertyId!==id||!drip.queueRow||!stale(drip.queueRow);
-  const nextDrips=drips?{...drips,active:drips.active.filter(keepDrip),replied:drips.replied.filter(keepDrip)}:drips;
-  return {snapshot:{...snapshot,stages},drips:nextDrips};
+  const refill=(drip:MyLeadDripSnapshot['active'][number])=>drip.propertyId===id?{...drip,queueRow:lookup.row}:drip;
+  return {snapshot:{...snapshot,stages},drips:drips?{...drips,active:drips.active.map(refill),replied:drips.replied.map(refill)}:drips};
 }
 const refreshTime = new Intl.DateTimeFormat('en-US', {month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',timeZone:'America/Chicago',timeZoneName:'short'});
 
@@ -105,20 +123,8 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
    * episode (higher queueVersion) from the lists may replace it. Never a stale copy
    * from another episode.
    */
-  const findRow=(readSnapshot:QueueSnapshot|null,readDrips:MyLeadDripSnapshot|null|undefined,id:string,pin?:PinRead)=>{
-    const forLead=pin?.id===id?pin.lookup:null;
-    if(forLead?.status==='unavailable')return null;
-    const candidates=[
-      ...Object.values(readSnapshot?.stages??{}).flatMap(page=>page?.rows??[]).filter(row=>row.propertyId===id),
-      ...[...(readDrips?.replied??[]),...(readDrips?.active??[])].filter(row=>row.propertyId===id).flatMap(row=>row.queueRow?[row.queueRow]:[]),
-    ];
-    if(forLead?.status==='found'){
-      const pinned=forLead.row;
-      return candidates.filter(row=>row.assignmentEpisodeId===pinned.assignmentEpisodeId&&row.queueVersion>pinned.queueVersion)
-        .sort((a,b)=>b.queueVersion-a.queueVersion)[0]??pinned;
-    }
-    return candidates[0]??null;
-  };
+  const findRow=(readSnapshot:QueueSnapshot|null,readDrips:MyLeadDripSnapshot|null|undefined,id:string,pin?:PinRead)=>
+    pickAuthoritative(newestCopy(listCopies(readSnapshot,readDrips,id)),lookupOf(pin,id)).row;
   const mutationReads=useRef(new Map<string,{scope:string;episodeId:string|null;requestId:number;read:Promise<CurrentRead>}>());
   const renderedRead=useRef<{snapshot:QueueSnapshot;requestId:number;scope:string}|null>(null);
   useEffect(()=>{
@@ -145,10 +151,14 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       const [loaded,pinResult]=await Promise.all([loadMyLeads({memberId:member,search,period:'today'}),pinId?readPin(pinId,member):Promise.resolve(undefined)]);
       // A newer refresh, or a cleared/changed deep-link target, supersedes this read.
       if(id!==request.current)return null;
-      const pin:PinRead|undefined=pinResult==='error'?(currentPin.current?.id===pinId?currentPin.current:null):pinResult;
+      // A failed lookup never resurrects an old pin over a list row: if the new list
+      // has the lead the pin is dropped, otherwise the last good pin is kept.
+      const inList=loaded.ok&&Boolean(pinId)&&(Object.values(loaded.snapshot.stages).some(page=>page?.rows.some(row=>row.propertyId===pinId))||[...loaded.drips.active,...loaded.drips.replied].some(drip=>drip.propertyId===pinId));
+      const pin:PinRead|undefined=pinResult==='error'?(inList?null:currentPin.current?.id===pinId?currentPin.current:null):pinResult;
       const result=loaded.ok&&pin!==undefined?{...loaded,pin}:loaded;
       if(result.ok){
-        if(pinResult&&pinResult!=='error'&&pinWanted.current===pinId)applyPin(pinResult);
+        const applied=!background||!reviewingDetails.current;
+        if(pinResult&&pinWanted.current===pinId){if(pinResult!=='error')applyPin(pinResult);else if(inList&&applied)setPinRead(null);}
         // Replacing a paginated/reordered queue can unmount its recording player.
         // Background checks may update KPIs, but must leave open lead details alone.
         if(!background||!reviewingDetails.current){renderedRead.current={snapshot:result.snapshot,requestId:id,scope:JSON.stringify([member,search])};setSnapshot(result.snapshot);}
@@ -249,13 +259,11 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     return()=>{cancelled=true;};
   },[dialog,member,callRetry]);
   const readRecoveryRow=useCallback(async(opening:{row:QueueRow})=>{
-    // The single-row lookup is authoritative for any lead; the list read only
-    // supplies a newer copy of the same episode, or the fallback if the lookup fails.
+    // Recovery stays blocked until the authoritative single-row lookup succeeds; a
+    // list row is never enough to unblock a retained draft. The list read only
+    // supplies a newer copy of the same episode.
     const [result,pin]=await Promise.all([loadMyLeads({memberId:member,search,period:'today'}),readPin(opening.row.propertyId,member)]);
-    if(pin==='error'){
-      if(!result.ok)throw new Error('read failed');
-      return findRow(result.snapshot,result.drips,opening.row.propertyId);
-    }
+    if(pin==='error')throw new Error('row lookup failed');
     if(!result.ok)return pin?.lookup.status==='found'?pin.lookup.row:null;
     return findRow(result.snapshot,result.drips,opening.row.propertyId,pin);
   },[member,search]);

@@ -219,7 +219,7 @@ describe("MyLeadsClient pinned deep-link row", () => {
     expect(screen.getByTestId("my-leads-section-not_contacted").querySelector('[data-lead-id="loaded-1"]')).toBeNull()
     expect(leadEls("loaded-1")).toHaveLength(1)
     expect(screen.getByLabelText("25 leads")).toBeInTheDocument()
-    mocks.loadMyLeadRow.mockResolvedValue(found({ ...loaded, assignmentEpisodeId: "ep-new", queueVersion: 1 }))
+    mocks.loadMyLeadRow.mockResolvedValue(found({ ...loaded, assignmentEpisodeId: "ep-new", assignedAt: "2026-09-12T00:00:00.000Z", queueVersion: 1 }))
     await refreshNow()
     await waitFor(() => expect(screen.getByTestId("my-leads-section-not_contacted").querySelector('[data-lead-id="loaded-1"]')).not.toBeNull())
     expect(leadEls("loaded-1")).toHaveLength(1)
@@ -244,6 +244,71 @@ describe("MyLeadsClient pinned deep-link row", () => {
     await user.click(await screen.findByRole("button", { name: "Record contract" }))
     await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2))
     expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({ expectedQueueVersion: 7, expectedSharedStatus: "interested", expectedEpisodeId: "ep-loaded-1" })
+  })
+
+  it("removes an unavailable lead from an active drip entry that has no queue row", async () => {
+    const bare = { ...dripOf(row("drip-4", "4 Bare Lane")), queueRow: null } as MyLeadDripSnapshot["active"][number]
+    const drips = { ...noDrips(), active: [bare] }
+    render(ui(focusOn(row("drip-4", "4 Bare Lane")), snap([loaded], 25), drips))
+    expect(leadEls("drip-4")).toHaveLength(1)
+    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([loaded], 25), kpis, drips })
+    mocks.loadMyLeadRow.mockResolvedValue(unavailable("closed_dead_dnc"))
+    await refreshNow()
+    await waitFor(() => expect(leadEls("drip-4")).toHaveLength(0))
+    expect(screen.getByRole("status")).toHaveTextContent("closed, dead or marked do-not-contact")
+  })
+
+  it("never resurrects an old pin over a list row when the lookup fails", async () => {
+    const episodeA = { ...beyond, assignmentEpisodeId: "ep-A", address: "9 Episode A Lane" }
+    const episodeB = { ...beyond, assignmentEpisodeId: "ep-B", assignedAt: "2026-09-12T00:00:00.000Z", address: "9 Episode B Lane" }
+    render(ui(focusOn(episodeA)))
+    // Collapse details so the refreshed list is rendered (open details retain the old list).
+    await userEvent.setup().click(screen.getByRole("button", { name: /Hide details for 9 Episode A Lane/ }))
+    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([episodeB, loaded], 25), kpis, drips: noDrips() })
+    mocks.loadMyLeadRow.mockResolvedValue({ ok: false, code: "READ_FAILED", message: "x" })
+    await refreshNow()
+    await screen.findByRole("button", { name: /details for 9 Episode B Lane/ })
+    expect(screen.queryByRole("button", { name: /details for 9 Episode A Lane/ })).toBeNull()
+    expect(leadEls("beyond-9")).toHaveLength(1)
+  })
+
+  it("keeps the last good pin when the lookup fails and the list lacks the lead", async () => {
+    render(ui(focusOn(beyond)))
+    mocks.loadMyLeadRow.mockResolvedValue({ ok: false, code: "READ_FAILED", message: "x" })
+    await refreshNow()
+    expect(leadEls("beyond-9")).toHaveLength(1)
+  })
+
+  it("does not let an older lookup displace or reorder a newer list row", async () => {
+    const newer = { ...loaded, queueVersion: 8, address: "1 Loaded Lane v8" }
+    const other = row("loaded-2", "2 Other Lane")
+    render(ui(focusOn(loaded), snap([newer, other], 25)))
+    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([newer, other], 25), kpis, drips: noDrips() })
+    mocks.loadMyLeadRow.mockResolvedValue(found({ ...loaded, queueVersion: 3, address: "1 Loaded Lane v3" }))
+    await refreshNow()
+    await waitFor(() => expect(mocks.loadMyLeadRow).toHaveBeenCalled())
+    expect(screen.getByRole("button", { name: /details for 1 Loaded Lane v8/ })).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /v3/ })).toBeNull()
+    expect([...screen.getByTestId("my-leads-section-not_contacted").querySelectorAll("[data-lead-id]")].map((el) => el.getAttribute("data-lead-id"))).toEqual(["loaded-1", "loaded-2"])
+  })
+
+  it("keeps recovery blocked with a retryable error when the authoritative lookup fails", async () => {
+    const user = userEvent.setup()
+    mocks.submitMyLeadCommand.mockResolvedValueOnce({ ok: false, code: "STALE_STATE", message: "This lead changed." })
+    render(ui(null))
+    await user.click(screen.getByRole("button", { name: "Show details for 1 Loaded Lane" }))
+    await user.click(within(screen.getByTestId("my-lead-actions-loaded-1")).getByRole("button", { name: "Contract signed" }))
+    await screen.findByRole("dialog")
+    fireEvent.change(screen.getByLabelText("Signed at"), { target: { value: "2026-09-11T10:00" } })
+    await user.click(screen.getByRole("button", { name: "Record contract" }))
+    mocks.loadMyLeadRow.mockResolvedValue({ ok: false, code: "READ_FAILED", message: "x" })
+    await user.click(await screen.findByRole("button", { name: "Refresh" }))
+    expect(await screen.findByText(/Could not refresh this lead/)).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Record contract" })).toBeDisabled()
+    // Retrying with a working lookup unblocks it.
+    mocks.loadMyLeadRow.mockResolvedValue(found({ ...loaded, queueVersion: 2 }))
+    await user.click(screen.getByRole("button", { name: "Refresh" }))
+    await waitFor(() => expect(screen.getByRole("button", { name: "Record contract" })).toBeEnabled())
   })
 })
 

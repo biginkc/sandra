@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   submitMyLeadCommand: vi.fn(),
   submitMyLeadHandoffDrip: vi.fn(),
   loadMyLeads: vi.fn(),
+  loadMyLeadRow: vi.fn(),
   loadMyLeadCallReferences: vi.fn(),
   realDialpad: false,
   realQueue: false,
@@ -32,6 +33,7 @@ vi.mock("@/components/appointments/book-appointment-popover", () => ({
 
 vi.mock("./actions", () => ({
   loadMyLeads: mocks.loadMyLeads,
+  loadMyLeadRow: mocks.loadMyLeadRow,
   loadMyLeadsStage: vi.fn(),
   loadMyLeadDetail: vi.fn(),
   loadMyLeadCallReferences: mocks.loadMyLeadCallReferences,
@@ -591,6 +593,8 @@ describe('stale form recovery',()=>{
     expect(mocks.submitMyLeadHandoffDrip.mock.calls[0][0]).toMatchObject({expectedQueueVersion:1,sequenceId:'drip-1'});
     const fresh=snapshot('106 Fixture Lane');fresh.stages.not_contacted!.rows[0].queueVersion=2;
     mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});
+    // Recovery requires the authoritative single-row lookup to succeed.
+    mocks.loadMyLeadRow.mockResolvedValue({ok:true,lookup:{status:'found',row:fresh.stages.not_contacted!.rows[0],snapshotAt:fresh.snapshotAt}});
     await user.click(screen.getByRole('button',{name:'Refresh'}));
     await screen.findByText('Lead refreshed. Your draft is retained. Review it before saving.');
     expect(screen.getByLabelText('Handoff reason')).toHaveValue('not_interested');
@@ -615,6 +619,8 @@ describe('stale form recovery',()=>{
     const user=await rejectedDraft();
     const fresh=snapshot('106 Fixture Lane');fresh.stages.not_contacted!.rows[0].queueVersion=2;
     mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});
+    // Recovery requires the authoritative single-row lookup to succeed.
+    mocks.loadMyLeadRow.mockResolvedValue({ok:true,lookup:{status:'found',row:fresh.stages.not_contacted!.rows[0],snapshotAt:fresh.snapshotAt}});
     await user.click(screen.getByRole('button',{name:'Refresh'}));
     await screen.findByText('Lead refreshed. Your draft is retained. Review it before saving.');
     expect(screen.getByLabelText('Note (optional)')).toHaveValue('Keep this original draft');
