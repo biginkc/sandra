@@ -105,9 +105,9 @@ try:
     )
     need(
         sql(
-            f"SELECT EXISTS(SELECT 1 FROM pg_publication WHERE pubname='{publication}')||'|'||EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name='{slot}')"
+            f"SELECT NOT EXISTS(SELECT 1 FROM pg_publication WHERE pubname='{publication}') AND NOT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name='{slot}')"
         )
-        == "f|f",
+        == "t",
         "Temporary Electric publication or slot already exists",
     )
     electric_id = docker(
