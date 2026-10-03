@@ -7,7 +7,7 @@ import { useOptionalSoftphone } from '@/components/softphone/softphone-provider'
 import { BookAppointmentPopover } from '@/components/appointments/book-appointment-popover';
 import type { AcquisitionKpis,AcquisitionRoster,QueueSnapshot,QueueRow,MyLeadRowLookup } from '@/lib/my-leads/queries';
 import { MY_LEAD_ROW_REASON_COPY } from '@/lib/my-leads/row-reasons';
-import { newestCopy,pickAuthoritative,type AuthoritativeLookup,type Copy } from '@/lib/my-leads/authoritative';
+import { newestCopy,pickAuthoritative,type AuthoritativeLookup } from '@/lib/my-leads/authoritative';
 import type { MyLeadDripSnapshot } from '@/lib/my-leads/drip-queries';
 import { WorkflowRecoveryContext } from './_components/workflow-form';
 import { useAttemptWorkflow } from './_components/use-attempt-workflow';
@@ -24,52 +24,26 @@ import { loadMyLeadCallReferences,loadMyLeadRow,loadMyLeads,loadMyLeadsStage,loa
 
 type Props={viewer:{userId:string;orgId:string;isOwner:boolean};roster:AcquisitionRoster;initialMemberId:string;initialSnapshot:QueueSnapshot|null;initialKpis:AcquisitionKpis|null;initialDrips?:MyLeadDripSnapshot|null;dialpad?:DialpadPanelBootstrap|null;initialSearch?:string;focus?:MyLeadsFocus|null};
 /** A lead opened from a deep link (lead page or Messages). */
-export type MyLeadsFocus={propertyId:string|null;memberId?:string|null;notice:string|null;pin?:QueueRow|null;/** The lookup's own snapshotAt for `pin`. */pinAt?:string|null};
+export type MyLeadsFocus={propertyId:string|null;memberId?:string|null;notice:string|null;pin?:QueueRow|null};
 /** The latest single-row lookup for the deep-linked lead; part of the read model. */
 type PinRead={id:string;lookup:MyLeadRowLookup}|null;
 
 const REFRESH_INTERVAL_MS = 30_000;
 
 type DripEntry=MyLeadDripSnapshot['active'][number];
-/**
- * Read provenance travels with the row OBJECT, so every copy keeps the time of the
- * read that produced it however it is later moved, merged or re-grouped:
- * - queue rows: the queue RPC's snapshotAt (the read's own start time), except
- *   cursor pages, which use the time that page was actually fetched (the server's
- *   wall clock when the stage action returned), because their snapshotAt is the
- *   cursor's original one;
- * - drip rows: the server's wall clock when the drip read finished (the drip RPC
- *   returns no time of its own); the client's receipt time is never used;
- * - single-row lookup: its own snapshotAt.
- * Comparisons only matter for equal episode and queueVersion; the clocks involved
- * are the database's and the app server's, so skew can only mis-order reads that
- * were milliseconds apart.
- */
-const readAtOf=new WeakMap<object,string>();
-function stampRows(rows:Iterable<QueueRow|null|undefined>,at:string|null|undefined){
-  if(!at)return;
-  for(const row of rows)if(row)readAtOf.set(row,at);
-}
-const stampSnapshot=(snapshot:QueueSnapshot|null|undefined,at:string|null|undefined=snapshot?.snapshotAt)=>{
-  if(snapshot)for(const page of Object.values(snapshot.stages))stampRows(page?.rows??[],at);
-};
-const stampDrips=(drips:MyLeadDripSnapshot|null|undefined,at:string|null|undefined)=>{
-  if(drips)stampRows([...drips.active,...drips.replied].map(entry=>entry.queueRow),at);
-};
-const copyOf=(row:QueueRow):Copy=>({row,at:readAtOf.get(row)??null});
 /** Every copy of every lead, grouped by propertyId in one pass, plus how many places hold each lead. */
 function indexCopies(snapshot:QueueSnapshot|null|undefined,drips:MyLeadDripSnapshot|null|undefined){
-  const copies=new Map<string,Copy[]>();const places=new Map<string,number>();
+  const copies=new Map<string,QueueRow[]>();const places=new Map<string,number>();
   const add=(id:string,row:QueueRow|null)=>{
     places.set(id,(places.get(id)??0)+1);
-    if(row)(copies.get(id)??copies.set(id,[]).get(id)!).push(copyOf(row));
+    if(row)(copies.get(id)??copies.set(id,[]).get(id)!).push(row);
   };
   for(const page of Object.values(snapshot?.stages??{}))for(const row of page?.rows??[])add(row.propertyId,row);
   for(const entry of [...(drips?.replied??[]),...(drips?.active??[])])add(entry.propertyId,entry.queueRow);
   return {copies,places};
 }
 const copiesFor=(snapshot:QueueSnapshot|null|undefined,drips:MyLeadDripSnapshot|null|undefined,id:string)=>indexCopies(snapshot,drips).copies.get(id)??[];
-const lookupOf=(pin:PinRead|undefined,id:string):AuthoritativeLookup=>pin?.id!==id?undefined:pin.lookup.status==='found'?{status:'found',row:pin.lookup.row,at:pin.lookup.snapshotAt||null}:{status:'unavailable'};
+const lookupOf=(pin:PinRead|undefined,id:string):AuthoritativeLookup=>pin?.id!==id?undefined:pin.lookup.status==='found'?{status:'found',row:pin.lookup.row}:{status:'unavailable'};
 
 /**
  * Reconciles competing copies into what is rendered, using pickAuthoritative as the
@@ -120,9 +94,6 @@ const refreshTime = new Intl.DateTimeFormat('en-US', {month:'short',day:'numeric
 
 export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,initialKpis,initialDrips=null,dialpad=null,initialSearch='',focus=null}:Props) {
   const router=useRouter();const softphone=useOptionalSoftphone();
-  // Initial server-rendered data is stamped once with the page's own read time.
-  const stampedInitial=useRef(false);
-  if(!stampedInitial.current){stampedInitial.current=true;stampSnapshot(initialSnapshot);stampDrips(initialDrips,initialSnapshot?.snapshotAt);if(focus?.pin)stampRows([focus.pin],focus.pinAt??initialSnapshot?.snapshotAt);}
   const [member,setMember]=useState(initialMemberId);const [search,setSearch]=useState(initialSearch);
   const [snapshot,setSnapshot]=useState(initialSnapshot);const [kpis,setKpis]=useState(initialKpis);
   const [drips,setDrips]=useState(initialDrips);
@@ -142,14 +113,11 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   },[]);
   const [dialog,setDialog]=useState<{action:MyLeadAction;row:QueueRow;callActivityId?:string|null}|null>(null);
   type Opening = {action:MyLeadAction;row:QueueRow;scope:string;callActivityId?:string|null};
-  type CurrentRead = (Awaited<ReturnType<typeof loadMyLeads>> & {pin?:PinRead}) | null;
   const openingScope=JSON.stringify([member,search]);
   const activeScope=useRef(openingScope);activeScope.current=openingScope;
-  const [pinRead,setPinRead]=useState<PinRead>(()=>focus?.propertyId&&focus.pin?{id:focus.propertyId,lookup:{status:'found',row:focus.pin,snapshotAt:focus.pinAt??initialSnapshot?.snapshotAt??''}}:null);
+  const [pinRead,setPinRead]=useState<PinRead>(()=>focus?.propertyId&&focus.pin?{id:focus.propertyId,lookup:{status:'found',row:focus.pin,snapshotAt:initialSnapshot?.snapshotAt??''}}:null);
   const [pinNotice,setPinNotice]=useState<string|null>(null);
-  // The displayed list stays stable while details are open, but actions must use the
-  // freshest read: the latest list and the pin as last reconciled with it.
-  const freshRead=useRef<{snapshot:QueueSnapshot|null;drips:MyLeadDripSnapshot|null}>({snapshot:initialSnapshot,drips:initialDrips});
+  // The latest pin outcome, for reconciling a failed lookup against the next list read.
   const actionPin=useRef<PinRead>(pinRead);
   // The deep-linked lead whose single-row lookup rides along with every refresh.
   const pinWanted=useRef<string|null>(focus?.propertyId??null);
@@ -173,19 +141,10 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
    */
   const findRow=(readSnapshot:QueueSnapshot|null,readDrips:MyLeadDripSnapshot|null|undefined,id:string,pin?:PinRead)=>
     pickAuthoritative(newestCopy(copiesFor(readSnapshot,readDrips,id)),lookupOf(pin,id)).row;
-  const mutationReads=useRef(new Map<string,{scope:string;episodeId:string|null;requestId:number;read:Promise<CurrentRead>}>());
-  const renderedRead=useRef<{snapshot:QueueSnapshot;requestId:number;scope:string}|null>(null);
-  useEffect(()=>{
-    const read=renderedRead.current;if(!read||read.snapshot!==snapshot)return;
-    // A committed newer authorized read supersedes both successful and failed barriers.
-    for(const [propertyId,barrier] of mutationReads.current){
-      if(barrier.scope===read.scope&&barrier.requestId<=read.requestId)mutationReads.current.delete(propertyId);
-    }
-  },[snapshot]);
   const pendingOpening=useRef<Opening|null>(null);
   const [openingStatus,setOpeningStatus]=useState<{opening:Opening;message:string;busy:boolean}|null>(null);
   const cancelOpening=()=>{pendingOpening.current=null;setOpeningStatus(null);};
-  useEffect(()=>{pendingOpening.current=null;setOpeningStatus(null);mutationReads.current.clear();},[openingScope]);
+  useEffect(()=>{pendingOpening.current=null;setOpeningStatus(null);},[openingScope]);
   const [detailRevision,setDetailRevision]=useState(0);
   const [recipient,setRecipient]=useState(roster.settings.recipientId??'');const [settingsBusy,setSettingsBusy]=useState(false);
   const initialEffect=useRef(Boolean(initialSnapshot&&initialKpis));const request=useRef(0);
@@ -203,24 +162,14 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       // has the lead the pin is dropped, otherwise the last good pin is kept.
       const inList=loaded.ok&&Boolean(pinId)&&(Object.values(loaded.snapshot.stages).some(page=>page?.rows.some(row=>row.propertyId===pinId))||[...loaded.drips.active,...loaded.drips.replied].some(drip=>drip.propertyId===pinId));
       const pin:PinRead|undefined=pinResult==='error'?(inList?null:actionPin.current?.id===pinId?actionPin.current:null):pinResult;
-      if(loaded.ok){stampSnapshot(loaded.snapshot);stampDrips(loaded.drips,(loaded.dripsReadAt as string|undefined)||loaded.snapshot.snapshotAt);}
-      if(pin?.lookup.status==='found')stampRows([pin.lookup.row],pin.lookup.snapshotAt);
-      const result=loaded.ok&&pin!==undefined?{...loaded,pin}:loaded;
+      const result=loaded;
       if(result.ok){
         const applied=!background||!reviewingDetails.current;
         if(pinWanted.current===pinId&&pin!==undefined)actionPin.current=pin;
-        freshRead.current={snapshot:result.snapshot,drips:result.drips};
         if(pinResult&&pinWanted.current===pinId){if(pinResult!=='error')applyPin(pinResult);else if(inList&&applied)setPinRead(null);}
         // Replacing a paginated/reordered queue can unmount its recording player.
         // Background checks may update KPIs, but must leave open lead details alone.
-        if(!background||!reviewingDetails.current){renderedRead.current={snapshot:result.snapshot,requestId:id,scope:JSON.stringify([member,search])};setSnapshot(result.snapshot);}
-        else {
-          // Playback keeps the visible queue stable, but a successful read must still
-          // replace a failed barrier before the next workflow opening.
-          for(const [propertyId,barrier] of mutationReads.current){
-            if(barrier.scope===JSON.stringify([member,search])&&barrier.requestId<=id)mutationReads.current.set(propertyId,{...barrier,requestId:id,read:Promise.resolve(result)});
-          }
-        }
+        if(!background||!reviewingDetails.current)setSnapshot(result.snapshot);
         setKpis(result.kpis);setDrips(result.drips);setLastCheckedAt(result.snapshot.snapshotAt);setError(null);setRefreshError(null);
       }
       else setRefreshError(result.message);
@@ -235,7 +184,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     const scopeChanged=previousServerScope.current!==serverScopeKey;
     previousServerScope.current=serverScopeKey;
     ++request.current;
-    if(scopeChanged){setSnapshot(null);setKpis(null);setDrips(null);freshRead.current={snapshot:null,drips:null};}
+    if(scopeChanged){setSnapshot(null);setKpis(null);setDrips(null);}
     const timer=setTimeout(()=>void refresh(),250);
     return()=>{clearTimeout(timer);};
   },[refresh,serverScopeKey]);
@@ -254,32 +203,32 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     document.addEventListener('visibilitychange',onVisible);window.addEventListener('focus',onVisible);
     return()=>{cancelled=true;clearTimeout(timer);document.removeEventListener('visibilitychange',onVisible);window.removeEventListener('focus',onVisible);};
   },[snapshot,refresh,roster.settings.enabled]);
-  // Newest copy across what is displayed (including load-more pages) and the freshest read,
-  // reconciled with the freshest pin lookup.
-  const rawRow=(id:string)=>pickAuthoritative(
-    newestCopy([...copiesFor(snapshot,drips,id),...copiesFor(freshRead.current.snapshot,freshRead.current.drips,id)]),
-    lookupOf(actionPin.current,id)).row;
-  const finishOpening=async(opening:Opening,read:Promise<CurrentRead>)=>{
+  // The displayed row. Only used to find what the user clicked; command preconditions come from the single-row lookup at opening time.
+  const rawRow=(id:string)=>findRow(snapshot,drips,id,pinRead);
+  /**
+   * Every workflow opening reads the lead through the single-row lookup (a database
+   * statement-time read) and uses THAT row for the command's preconditions (episode,
+   * version, shared status). List copies are never trusted for a command: they can
+   * be stale in ways queueVersion does not reveal. A failed lookup blocks the opening
+   * with a retryable error rather than falling back to a list row.
+   */
+  const finishOpening=async(opening:Opening)=>{
     pendingOpening.current=opening;
     setOpeningStatus({opening,message:'Loading current lead…',busy:true});
-    const result=await read;
+    const lookup=await readPin(opening.row.propertyId,member);
     if(pendingOpening.current!==opening||activeScope.current!==opening.scope)return;
-    if(!result?.ok){setOpeningStatus({opening,message:'Could not load current lead details. Retry to continue.',busy:false});return;}
-    const fresh=findRow(result.snapshot,result.drips,opening.row.propertyId,result.pin);
+    if(lookup==='error'){setOpeningStatus({opening,message:'Could not load current lead details. Retry to continue.',busy:false});return;}
+    const fresh=lookup?.lookup.status==='found'?lookup.lookup.row:null;
+    // Never silently move an opening into a different assignment episode.
     if(!fresh||fresh.assignmentEpisodeId!==opening.row.assignmentEpisodeId){
       setOpeningStatus({opening,message:'This lead is unavailable or its assignment changed. Refresh the queue and reopen it.',busy:false});return;
     }
-    const latest=rawRow(fresh.propertyId);
-    // Do not rewind an even newer rendered snapshot, or silently change episodes.
-    if(!latest||latest.assignmentEpisodeId!==fresh.assignmentEpisodeId){setOpeningStatus({opening,message:'This lead assignment changed. Refresh the queue and reopen it.',busy:false});return;}
-    const row=latest&&latest.queueVersion>=fresh.queueVersion?latest:fresh;
     pendingOpening.current=null;setOpeningStatus(null);setCallOptions(null);
-    setDialog({action:opening.action,row,callActivityId:opening.callActivityId});
+    setDialog({action:opening.action,row:fresh,callActivityId:opening.callActivityId});
   };
   const retryOpening=()=>{
     const opening=pendingOpening.current;if(!opening||openingStatus?.busy)return;
-    const read=refresh();mutationReads.current.set(opening.row.propertyId,{scope:opening.scope,episodeId:opening.row.assignmentEpisodeId,requestId:request.current,read});
-    void finishOpening(opening,read);
+    void finishOpening(opening);
   };
   const action=(kind:MyLeadAction,id:string,callActivityId?:string|null)=>{
     const row=rawRow(id);if(!row)return;
@@ -295,12 +244,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       softphone.openLead({id:row.propertyId,contactId:row.contactId,firstName:row.homeownerName?.split(' ')[0]??'',name:row.homeownerName??row.address,address:row.address,state:row.state,
         phones:row.phones,dncLocked:false,contactDnc:row.contactDnc,callable:row.phones.some(phone=>!!phone.trim())&&!row.contactDnc});return;
     }
-    const previous=mutationReads.current.get(id);
-    if(previous?.scope===openingScope&&previous.episodeId===row.assignmentEpisodeId){
-      void finishOpening({action:kind,row,scope:openingScope,callActivityId},previous.read);return;
-    }
-    cancelOpening();setCallOptions(null);setDialog({action:kind,row,callActivityId});
-
+    void finishOpening({action:kind,row,scope:openingScope,callActivityId});
   };
   useEffect(()=>{
     if(dialog?.action!=='log-attempt')return;
@@ -315,19 +259,16 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     return()=>{cancelled=true;};
   },[dialog,member,callRetry]);
   const readRecoveryRow=useCallback(async(opening:{row:QueueRow})=>{
-    // Recovery stays blocked until the authoritative single-row lookup succeeds; a
-    // list row is never enough to unblock a retained draft. The list read only
-    // supplies a newer copy of the same episode.
-    const [result,pin]=await Promise.all([loadMyLeads({memberId:member,search,period:'today'}),readPin(opening.row.propertyId,member)]);
-    if(pin==='error')throw new Error('row lookup failed');
-    if(!result.ok)return pin?.lookup.status==='found'?pin.lookup.row:null;
-    return findRow(result.snapshot,result.drips,opening.row.propertyId,pin);
-  },[member,search]);
+    // Recovery stays blocked until the authoritative single-row lookup succeeds, and
+    // the lookup row (never a list row) supplies the retried command's preconditions.
+    const lookup=await readPin(opening.row.propertyId,member);
+    if(lookup==='error')throw new Error('row lookup failed');
+    return lookup?.lookup.status==='found'?lookup.lookup.row:null;
+  },[member]);
   const {submit,recoveryValue,onDripChanged}=useAttemptWorkflow({
     opening:dialog,memberId:member,readRow:readRecoveryRow,
-    onCommitted:({opening})=>{
-      // Queue barrier: a rapid next click must read post-command metadata, never the old row.
-      const read=refresh();mutationReads.current.set(opening.row.propertyId,{scope:openingScope,episodeId:opening.row.assignmentEpisodeId,requestId:request.current,read});
+    onCommitted:()=>{
+      const read=refresh();
       setDetailRevision(revision=>revision+1);
       return read;
     },
@@ -349,7 +290,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     setSeenFocusKey(focusKey);setClearedForKey(null);
     setTarget(previous=>({propertyId:focus?.propertyId??null,notice:focus?.notice??null,nonce:previous.nonce+1}));
     setPinNotice(null);
-    {const seeded:PinRead=focus?.propertyId&&focus.pin?{id:focus.propertyId,lookup:{status:'found',row:focus.pin,snapshotAt:focus.pinAt??snapshot?.snapshotAt??''}}:null;setPinRead(seeded);}
+    {const seeded:PinRead=focus?.propertyId&&focus.pin?{id:focus.propertyId,lookup:{status:'found',row:focus.pin,snapshotAt:snapshot?.snapshotAt??''}}:null;setPinRead(seeded);}
     if(focus?.propertyId){
       // A deep link always opens its rep's queue unfiltered.
       if(focus.memberId&&focus.memberId!==member)setMember(focus.memberId);
@@ -409,8 +350,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
           const id=request.current;setLoadingStages(previous=>new Set(previous).add(stage));
           try{const result=await loadMyLeadsStage({memberId:member,search,stage,cursor});if(id!==request.current)return;
             if(!result.ok){setError(result.message);return;}
-            const next=result.snapshot.stages[stage];if(next)stampRows(next.rows,(result.readAt as string|undefined)||result.snapshot.snapshotAt);
-            if(next)setSnapshot(previous=>{
+            const next=result.snapshot.stages[stage];if(next)setSnapshot(previous=>{
               if(!previous)return previous;const rows=previous.stages[stage]?.rows??[];const ids=new Set(rows.map(r=>r.propertyId));
               return {...previous,stages:{...previous.stages,[stage]:{...next,rows:[...rows,...next.rows.filter(r=>!ids.has(r.propertyId))]}}};
             });
