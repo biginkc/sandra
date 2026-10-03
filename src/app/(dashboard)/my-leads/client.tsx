@@ -20,14 +20,16 @@ import type { MyLeadAction,MyLeadStage,AcquisitionLifecycleMode } from './_compo
 import { detailView,kpiTiles,stagePages } from './adapter';
 import { loadMyLeadCallReferences,loadMyLeads,loadMyLeadsStage,loadMyLeadDetail,submitMyLeadCommand,submitMyLeadHandoffDrip,changeAcquisitionDesignation,changeAcquisitionSettings } from './actions';
 
-type Props={viewer:{userId:string;orgId:string;isOwner:boolean};roster:AcquisitionRoster;initialMemberId:string;initialSnapshot:QueueSnapshot|null;initialKpis:AcquisitionKpis|null;initialDrips?:MyLeadDripSnapshot|null;dialpad?:DialpadPanelBootstrap|null};
+type Props={viewer:{userId:string;orgId:string;isOwner:boolean};roster:AcquisitionRoster;initialMemberId:string;initialSnapshot:QueueSnapshot|null;initialKpis:AcquisitionKpis|null;initialDrips?:MyLeadDripSnapshot|null;dialpad?:DialpadPanelBootstrap|null;initialSearch?:string;focus?:MyLeadsFocus|null};
+/** A lead opened from a deep link (lead page or Messages). */
+export type MyLeadsFocus={propertyId:string|null;action:'log-attempt'|null;notice:string|null};
 
 const REFRESH_INTERVAL_MS = 30_000;
 const refreshTime = new Intl.DateTimeFormat('en-US', {month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',timeZone:'America/Chicago',timeZoneName:'short'});
 
-export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,initialKpis,initialDrips=null,dialpad=null}:Props) {
+export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,initialKpis,initialDrips=null,dialpad=null,initialSearch='',focus=null}:Props) {
   const router=useRouter();const softphone=useOptionalSoftphone();
-  const [member,setMember]=useState(initialMemberId);const [search,setSearch]=useState('');
+  const [member,setMember]=useState(initialMemberId);const [search,setSearch]=useState(initialSearch);
   const [snapshot,setSnapshot]=useState(initialSnapshot);const [kpis,setKpis]=useState(initialKpis);
   const [drips,setDrips]=useState(initialDrips);
   const tiles=useMemo(()=>kpis?kpiTiles(kpis):null,[kpis]);
@@ -285,6 +287,13 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   // Completion callbacks belong to one opening, even when the same lead is reopened.
   // A previous form can finish after its post-save refresh and must not close a new form.
   const common=dialog?{open:true,propertyId:dialog.row.propertyId,propertyLabel:dialog.row.address,onOpenChange:(open:boolean)=>{if(!open){submission.current=null;setDialog(current=>current===dialog?null:current);}}}:null;
+  // A deep link with ?action=log-attempt opens the attempt dialog once its row is loaded.
+  const focusActionDone=useRef(false);
+  useEffect(()=>{
+    if(focusActionDone.current||focus?.action!=='log-attempt'||!focus.propertyId||!rawRow(focus.propertyId))return;
+    focusActionDone.current=true;action('log-attempt',focus.propertyId);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[focus,snapshot,drips]);
   return <>
     {openingStatus&&<div role="status" className="mb-4 rounded border p-3">
       {openingStatus.message}
@@ -298,6 +307,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       <Button disabled={!recipient||settingsBusy} onClick={async()=>{setSettingsBusy(true);try{const result=await changeAcquisitionSettings({orgId:viewer.orgId,needsSequenceOwnerId:recipient,expectedSettingsRevision:roster.settings.revision,idempotencyKey:crypto.randomUUID()});if(!result.ok)setError(result.message);else router.refresh();}finally{setSettingsBusy(false);}}}>Save recipient</Button></div>
     <RepSmsSettings orgId={viewer.orgId} members={roster.members} />
     </details>}
+    {focus?.notice&&<div role="status" className="mb-4 rounded border p-3 text-sm">{focus.notice}</div>}
     {error&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{error} <Button variant="outline" onClick={()=>void refresh()}>Refresh</Button></div>}
     {refreshError&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{refreshError} Displayed counts may be out of date. Retrying automatically. <Button variant="outline" onClick={()=>void refresh()}>Retry now</Button> <Button variant="outline" onClick={()=>window.location.reload()}>Reload and reconnect</Button></div>}
     {dialpad&&roster.settings.enabled&&<DialpadPanel bootstrap={dialpad} callRequest={dialpadRequest}
@@ -307,7 +317,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis||!tiles?<p role="status">Loading My Leads…</p>:<>
       <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} drips={drips} kpis={tiles} search={search} selectedRepId={member}
         onReviewingChange={onReviewingChange}
-        detailRevision={detailRevision}
+        detailRevision={detailRevision} focusPropertyId={focus?.propertyId??null}
         repOptions={roster.members.filter(m=>m.acquisitionsEnabled||m.hasHistory||m.id===viewer.userId).map(m=>({id:m.id,label:m.label+(m.acquisitionsEnabled?'':' — Acquisitions disabled')}))}
         selectedRepLabel={roster.members.find(m=>m.id===member)?.label}
         onSearchChange={setSearch} onRepChange={setMember}

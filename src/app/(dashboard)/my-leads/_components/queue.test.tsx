@@ -81,6 +81,17 @@ function buildProps(overrides: Partial<MyLeadsQueueProps> = {}): MyLeadsQueuePro
 }
 
 describe("MyLeadsQueue", () => {
+  it("starts a deep-linked lead expanded, loads its details, and scrolls to it", async () => {
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+    const props = buildProps()
+    const focusPropertyId = props.stages.contacted.rows[0].propertyId
+    render(<MyLeadsQueue {...props} focusPropertyId={focusPropertyId} />)
+    expect(screen.getByRole("button", { name: "Hide details for 2 Main Street" })).toHaveAttribute("aria-expanded", "true")
+    await waitFor(() => expect(props.onLoadDetail).toHaveBeenCalledWith(focusPropertyId))
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+  })
+
   it("loads SMS with expanded details and prepends older texts without duplicates", async () => {
     const user = userEvent.setup()
     const message = (id: string, body: string, direction: "inbound" | "outbound") => ({

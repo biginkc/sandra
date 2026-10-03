@@ -53,17 +53,20 @@ export function MyLeadsQueue({
   onLoadDetail,
   onLoadDetailPage,
   detailRevision = 0,
+  focusPropertyId = null,
   onLeadChanged,
   onStageAction,
 }: MyLeadsQueueProps) {
   const expandedMetricsRef = useRef<HTMLDivElement>(null)
   const scopeKey = JSON.stringify([search, selectedRepId])
   const [expansionScope, setExpansionScope] = useState(scopeKey)
-  const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(new Set())
+  const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(() => new Set(focusPropertyId ? [focusPropertyId] : []))
   const [collapsedSections, setCollapsedSections] = useState<ReadonlySet<MyLeadStage | 'in_drip'>>(new Set())
   const [detailStates, setDetailStates] = useState<
     Readonly<Record<string, MyLeadDetailState>>
   >({})
+  const focusScope = useRef(scopeKey)
+  const focusScrolled = useRef(false)
   const expandedIdsRef = useRef<ReadonlySet<string>>(new Set())
   expandedIdsRef.current = expandedIds
   const requestIds = useRef<Record<string, number>>({})
@@ -75,6 +78,14 @@ export function MyLeadsQueue({
   const requestedDetails = useRef(new Set<string>())
   const activeDetails = useRef(0)
   const [detailTick, setDetailTick] = useState(0)
+
+  useEffect(() => {
+    if (!focusPropertyId || focusScrolled.current) return
+    const element = document.querySelector(`[data-testid="my-lead-row-${CSS.escape(focusPropertyId)}"]`)
+    if (!element) return
+    focusScrolled.current = true
+    element.scrollIntoView?.({ block: "start", behavior: "smooth" })
+  }, [focusPropertyId, stages])
 
   useEffect(() => {
     onReviewingChange?.(expandedIds.size > 0)
@@ -89,12 +100,14 @@ export function MyLeadsQueue({
 
   useEffect(() => {
     setExpansionScope(scopeKey)
-    setExpandedIds(new Set())
+    // A deep-linked lead stays open within the filter it was opened under.
+    setExpandedIds(new Set(focusPropertyId && scopeKey === focusScope.current ? [focusPropertyId] : []))
     setDetailStates({})
     detailGeneration.current += 1
     requestIds.current = {}
     requestedDetails.current.clear()
     detailPageRequestIds.current = {}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeKey])
 
   useEffect(() => {

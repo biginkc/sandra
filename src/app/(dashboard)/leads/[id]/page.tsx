@@ -1,5 +1,6 @@
 import { LeadRepSmsComposer } from "./rep-sms-composer";
 import Link from "next/link";
+import { myLeadsHref } from "@/lib/my-leads/links";
 import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import { ChevronLeft, ChevronRight, ExternalLink } from "lucide-react";
@@ -704,6 +705,20 @@ export default async function LeadDetailPage({
         currentUserId={sessionUser?.id ?? null}
         triggerLabel="Book appt"
       /></fieldset>
+      <Link
+        href={myLeadsHref(lead.id)}
+        data-testid="open-in-my-leads"
+        className={buttonVariants({ variant: "outline", size: "sm" })}
+      >
+        Open in My Leads
+      </Link>
+      <Link
+        href={myLeadsHref(lead.id, "log-attempt")}
+        data-testid="log-follow-up-attempt"
+        className={buttonVariants({ variant: "outline", size: "sm" })}
+      >
+        Log follow-up
+      </Link>
       <fieldset disabled={training} inert={training || undefined} className="contents"><HaveNormaCallButton
         propertyId={lead.id}
         sellerName={homeownerName}
