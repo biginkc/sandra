@@ -1,13 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHmac } from "node:crypto";
 
-const { createClient, pausePropertyEnrollments, resumeByProperty, setOutreachDispo, bookAppointment, getMemberTimezone } = vi.hoisted(() => ({
+const { createClient, pausePropertyEnrollments, resumeByProperty, setOutreachDispo, bookAppointment, getMemberTimezone, workspaceGate } = vi.hoisted(() => ({
   createClient: vi.fn(),
   pausePropertyEnrollments: vi.fn(),
   resumeByProperty: vi.fn(),
   setOutreachDispo: vi.fn(),
   bookAppointment: vi.fn(),
   getMemberTimezone: vi.fn(),
+  workspaceGate: vi.fn(async () => { throw new Error("Messages workspace access is unavailable."); }),
 }));
 
 const CAPABILITY_KEY = `v1:${"k".repeat(48)}`;
@@ -72,7 +73,13 @@ vi.mock("@/components/appointments/book-appointment-action", () => ({
   bookAppointment,
   getMemberTimezone,
 }));
-vi.mock("@/app/(dashboard)/messages/dispo-actions", () => ({ setOutreachDispo }));
+vi.mock("@/lib/leads/outreach-dispo", () => ({ saveOutreachDispo: setOutreachDispo }));
+// The dialer must reach the shared saver directly: acquisition reps dial from
+// My Leads and are intentionally denied the Messages workspace gate.
+vi.mock("@/app/(dashboard)/messages/workspace-access", () => ({
+  assertMessagesWorkspaceAccess: workspaceGate,
+  MessagesWorkspaceAccessError: class extends Error {},
+}));
 
 import {
   completeSoftphoneCall,
@@ -427,6 +434,20 @@ describe("prepareManualCall", () => {
       provider: "sandra_softphone",
     });
     expect(bookAppointment).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: "11111111-1111-4111-8111-111111111111" }));
+  });
+
+  it("saves the disposition for an Acquisitions rep without touching the Messages workspace gate", async () => {
+    setOutreachDispo.mockResolvedValue({ ok: true });
+    resumeByProperty.mockResolvedValue({ resumed: 1 });
+    createClient.mockResolvedValue(makeActionClient([], undefined, undefined, undefined, [], []));
+
+    await expect(completeSoftphoneCall({
+      ...softphoneCompletionInput("44444444-4444-4444-8444-444444444444"),
+      callCapability: sealCallCapability(RAW_JITTER_CALL_ID),
+    })).resolves.toMatchObject({ ok: true });
+
+    expect(setOutreachDispo).toHaveBeenCalledWith("property-1", "nurture");
+    expect(workspaceGate).not.toHaveBeenCalled();
   });
 
   it("uses the raw Jitter call UUID from the sealed capability for the attempt identity", async () => {

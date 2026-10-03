@@ -63,6 +63,8 @@ export default defineConfig({
       "tests/search-oracle/oracle-comparison.integration.test.ts",
       "src/lib/prospects/search-filter-composition.integration.test.ts",
       "src/lib/prospects/search-eval-budget.integration.test.ts",
+      // Local-only: designation setup + failure injection need loopback Postgres.
+      "src/lib/leads/outreach-dispo.db.integration.test.ts",
     ],
     environment: "node",
     reporters: ["default"],

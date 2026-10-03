@@ -4,6 +4,10 @@ import { createTestClient } from "@tests/integration/client";
 import { createOrgUser, getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
+// Server actions run outside a Next request here; the fixture user is a plain
+// (non-Acquisitions) member so it passes assertMessagesWorkspaceAccess().
+vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
+
 const testClient = createTestClient();
 let actorId = "";
 vi.mock("@/lib/supabase/server", () => ({

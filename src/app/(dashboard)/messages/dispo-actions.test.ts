@@ -148,6 +148,51 @@ describe("setOutreachDispo", () => {
     expect(pauseContactEnrollments).not.toHaveBeenCalled();
     expect(revalidatePath).toHaveBeenCalledWith("/messages");
     expect(revalidatePath).toHaveBeenCalledWith("/properties");
+    expect(revalidatePath).toHaveBeenCalledWith("/leads/property-1");
+  });
+
+  it("rejects an active Acquisitions member on setOutreachDispo and writes nothing", async () => {
+    getCallerMembershipsOrThrow.mockResolvedValue([
+      { user_id: "actor-1", org_id: "org-1", role: "member", acquisitions_enabled: true },
+    ]);
+    responseQueue = [
+      { data: property(), error: null },
+      { data: { id: "property-1" }, error: null },
+    ];
+
+    const result = await setOutreachDispo("property-1", "opted_out");
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Messages workspace access is unavailable.",
+    });
+    expect(responseQueue).toHaveLength(2);
+    expect(updatePayloads).toEqual([]);
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+    expect(recordConsentEvent).not.toHaveBeenCalled();
+    expect(pauseContactEnrollments).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("rejects an active Acquisitions member on setInboxDispoAndStartDrip and writes nothing", async () => {
+    getCallerMembershipsOrThrow.mockResolvedValue([
+      { user_id: "actor-1", org_id: "org-1", role: "member", acquisitions_enabled: true },
+    ]);
+    responseQueue = [
+      { data: property(), error: null },
+      { data: { id: "property-1" }, error: null },
+    ];
+
+    const result = await setInboxDispoAndStartDrip("property-1", "needs_sequence", "sequence-1");
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Messages workspace access is unavailable.",
+    });
+    expect(responseQueue).toHaveLength(2);
+    expect(updatePayloads).toEqual([]);
+    expect(startFollowUpDrip).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
   });
 
   it("accepts needs_sequence as a tag-only disposition", async () => {

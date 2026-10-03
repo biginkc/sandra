@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ client: vi.fn(), pause: vi.fn(), resume: vi.fn(), disposition: vi.fn(), appointment: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.client }));
 vi.mock("@/lib/sequences/enrollment", () => ({ pausePropertyEnrollments: mocks.pause, resumeByProperty: mocks.resume }));
-vi.mock("@/app/(dashboard)/messages/dispo-actions", () => ({ setOutreachDispo: mocks.disposition }));
+vi.mock("@/lib/leads/outreach-dispo", () => ({ saveOutreachDispo: mocks.disposition }));
 vi.mock("@/components/appointments/book-appointment-action", () => ({ bookAppointment: mocks.appointment, getMemberTimezone: vi.fn() }));
 import { prepareLeadCall, prepareManualCall, completeSoftphoneCall, loadDialerRecents } from "./actions";
 const operator = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
