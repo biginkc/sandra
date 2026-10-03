@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils"
 import { MyLeadsMetrics } from "./metrics"
 import { StickyMyLeadsMetrics } from "./sticky-metrics"
 import { MyLeadQueueRow, STAGE_NEXT } from "./queue-row"
+import { MyLeadDetailPanel } from "./detail-panel"
 import {
   MY_LEAD_STAGE_LABELS,
   MY_LEAD_STAGE_ORDER,
@@ -53,17 +54,22 @@ export function MyLeadsQueue({
   onLoadDetail,
   onLoadDetailPage,
   detailRevision = 0,
+  focusPropertyId = null,
+  focusNonce = 0,
+  pinnedRow = null,
   onLeadChanged,
   onStageAction,
 }: MyLeadsQueueProps) {
   const expandedMetricsRef = useRef<HTMLDivElement>(null)
   const scopeKey = JSON.stringify([search, selectedRepId])
   const [expansionScope, setExpansionScope] = useState(scopeKey)
-  const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(new Set())
+  const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(() => new Set(focusPropertyId ? [focusPropertyId] : []))
   const [collapsedSections, setCollapsedSections] = useState<ReadonlySet<MyLeadStage | 'in_drip'>>(new Set())
   const [detailStates, setDetailStates] = useState<
     Readonly<Record<string, MyLeadDetailState>>
   >({})
+  // Key (propertyId:nonce) of the navigation that was last scrolled to.
+  const focusScrolled = useRef<string | null>(null)
   const expandedIdsRef = useRef<ReadonlySet<string>>(new Set())
   expandedIdsRef.current = expandedIds
   const requestIds = useRef<Record<string, number>>({})
@@ -75,6 +81,47 @@ export function MyLeadsQueue({
   const requestedDetails = useRef(new Set<string>())
   const activeDetails = useRef(0)
   const [detailTick, setDetailTick] = useState(0)
+
+  const dripIds = (drips?.active ?? []).map((row) => row.propertyId)
+  // The section a lead currently renders in, so a collapsed destination can be opened.
+  const sectionOf = (propertyId: string): MyLeadStage | "in_drip" | null =>
+    MY_LEAD_STAGE_ORDER.find((stage) => stages[stage].rows.some((row) => row.propertyId === propertyId)) ??
+    (dripIds.includes(propertyId) ? "in_drip" : pinnedRow?.propertyId === propertyId ? pinnedRow.queueStage : null)
+
+  // Opens the destination section once, per deep-link navigation, when the row appears.
+  const sectionOpenedFor = useRef<string | null>(null)
+  useEffect(() => {
+    if (!focusPropertyId) { sectionOpenedFor.current = null; return }
+    const key = `${focusPropertyId}:${focusNonce}`
+    if (sectionOpenedFor.current === key) return
+    const section = sectionOf(focusPropertyId)
+    if (!section) return
+    sectionOpenedFor.current = key
+    setCollapsedSections((previous) => {
+      if (!previous.has(section)) return previous
+      const next = new Set(previous)
+      next.delete(section)
+      return next
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusPropertyId, focusNonce, stages, drips, pinnedRow])
+
+  // Scroll once per deep-link navigation. Background refreshes re-render with the
+  // same target and must not move the page again.
+  useEffect(() => {
+    if (!focusPropertyId) { focusScrolled.current = null; return }
+    const key = `${focusPropertyId}:${focusNonce}`
+    if (focusScrolled.current === key) return
+    const element = document.querySelector(`[data-lead-id="${CSS.escape(focusPropertyId)}"]`)
+    // A row inside a collapsed section is hidden; wait until its section opens.
+    if (!element || element.closest("[hidden]")) return
+    focusScrolled.current = key
+    element.scrollIntoView?.({ block: "start", behavior: "smooth" })
+  }, [focusPropertyId, focusNonce, stages, drips, pinnedRow, collapsedSections])
+
+  // A new deep-link navigation (new lead, repeated link, Back/Forward) re-arms
+  // scrolling and expands the target; the first mount is handled by the initial state.
+  const handledFocus = useRef(focusPropertyId ? `${focusPropertyId}:${focusNonce}` : null)
 
   useEffect(() => {
     onReviewingChange?.(expandedIds.size > 0)
@@ -89,13 +136,23 @@ export function MyLeadsQueue({
 
   useEffect(() => {
     setExpansionScope(scopeKey)
-    setExpandedIds(new Set())
+    // A deep-linked lead stays open; the host clears the target when the user changes filters.
+    setExpandedIds(new Set(focusPropertyId ? [focusPropertyId] : []))
     setDetailStates({})
     detailGeneration.current += 1
     requestIds.current = {}
     requestedDetails.current.clear()
     detailPageRequestIds.current = {}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeKey])
+
+  useEffect(() => {
+    if (!focusPropertyId) { handledFocus.current = null; return }
+    const key = `${focusPropertyId}:${focusNonce}`
+    if (handledFocus.current === key) return
+    handledFocus.current = key
+    setExpandedIds((previous) => new Set(previous).add(focusPropertyId))
+  }, [focusPropertyId, focusNonce])
 
   useEffect(() => {
     if (detailRevision === 0) return
@@ -158,12 +215,12 @@ export function MyLeadsQueue({
   // Collapsing or changing scope removes waiting work without issuing more reads.
   useEffect(() => {
     if (expansionScope !== scopeKey) return
-    const loadedIds = new Set(MY_LEAD_STAGE_ORDER.flatMap((stage) => stages[stage].rows.map((row) => row.propertyId)))
+    const loadedIds = new Set([...MY_LEAD_STAGE_ORDER.flatMap((stage) => stages[stage].rows.map((row) => row.propertyId)), ...(drips?.active ?? []).map((row) => row.propertyId), ...(pinnedRow ? [pinnedRow.propertyId] : [])])
     for (const propertyId of expandedIds) {
       if (activeDetails.current >= 3) break
       if (loadedIds.has(propertyId) && !requestedDetails.current.has(propertyId)) void loadDetails(propertyId)
     }
-  }, [expandedIds, stages, detailTick, loadDetails, expansionScope, scopeKey])
+  }, [expandedIds, stages, drips, pinnedRow, detailTick, loadDetails, expansionScope, scopeKey])
 
   const toggleDetails = (propertyId: string) => {
     const isOpen = expandedIds.has(propertyId)
@@ -274,6 +331,8 @@ export function MyLeadsQueue({
             key={stage}
             stage={stage}
             page={stages[stage]}
+            pinnedRow={pinnedRow?.queueStage === stage ? pinnedRow : null}
+            focusPropertyId={focusPropertyId}
             collapsed={collapsedSections.has(stage)}
             onToggleSection={() =>
               setCollapsedSections((previous) => {
@@ -297,12 +356,14 @@ export function MyLeadsQueue({
           stage="in_drip"
           page={{stage:'not_contacted',rows:[],totalCount:drips?.active.length??0,hasMore:false}}
           dripRows={drips?.active??[]}
+          focusPropertyId={focusPropertyId}
           collapsed={collapsedSections.has('in_drip')}
           onToggleSection={() => setCollapsedSections(previous => {
             const next = new Set(previous); if (next.has('in_drip')) next.delete('in_drip'); else next.add('in_drip'); return next;
           })}
           expandedIds={expandedIds} detailStates={detailStates} onToggleDetails={toggleDetails}
           onRetryDetails={retryDetails} onDetailChanged={handleDetailChanged}
+          onLoadDetailPage={onLoadDetailPage ? loadDetailPage : undefined}
           onLoadMore={onLoadMore} onStageAction={onStageAction}
         />
       </div>
@@ -313,6 +374,8 @@ export function MyLeadsQueue({
 function MyLeadStageSection({
   stage,
   page,
+  pinnedRow = null,
+  focusPropertyId = null,
   dripRows,
   collapsed,
   onToggleSection,
@@ -327,6 +390,8 @@ function MyLeadStageSection({
 }: {
   stage: MyLeadStage | 'in_drip'
   page: MyLeadsQueueProps["stages"][MyLeadStage]
+  pinnedRow?: MyLeadQueueRowDto | null
+  focusPropertyId?: string | null
   dripRows?: readonly MyLeadDrip[]
   collapsed: boolean
   onToggleSection: () => void
@@ -344,6 +409,23 @@ function MyLeadStageSection({
   onStageAction: (action: MyLeadAction, row: MyLeadQueueRowDto) => void
 }) {
   const label = stage === 'in_drip' ? 'In a drip' : MY_LEAD_STAGE_LABELS[stage]
+  const renderRow = (row: MyLeadQueueRowDto) => (
+    <MyLeadQueueRow
+      key={row.propertyId}
+      row={row}
+      openedFromLead={row.propertyId === focusPropertyId}
+      detailsOpen={expandedIds.has(row.propertyId)}
+      sectionVisible={!collapsed}
+      detailState={detailStates[row.propertyId]}
+      onToggleDetails={() => onToggleDetails(row.propertyId)}
+      onRetryDetails={() => onRetryDetails(row.propertyId)}
+      onDetailChanged={() => onDetailChanged(row.propertyId)}
+      onLoadDetailPage={onLoadDetailPage
+        ? (group, cursor) => onLoadDetailPage(row.propertyId, group, cursor)
+        : undefined}
+      onStageAction={onStageAction}
+    />
+  )
   const ChevronIcon = collapsed ? ChevronRight : ChevronDown
 
   return (
@@ -380,35 +462,31 @@ function MyLeadStageSection({
               </p>
             )}
 
-            {stage === 'in_drip' ? (dripRows?.length ? <div className="overflow-x-auto rounded-xl border bg-card">{dripRows.map(row => <article key={row.propertyId} className="grid min-w-[950px] grid-cols-[minmax(150px,1.4fr)_minmax(125px,1fr)_90px_minmax(180px,1.5fr)_minmax(120px,.8fr)_90px] items-center gap-3 border-t px-3 py-2 text-xs first:border-t-0" data-testid={`my-lead-drip-${row.propertyId}`}>
-              <div className="min-w-0"><p className="truncate font-semibold">{row.queueRow?.homeownerName || 'Homeowner unavailable'}</p><p className="truncate text-muted-foreground">{row.queueRow?.address}</p></div>
+            {stage === 'in_drip' ? (dripRows?.length ? <div className="overflow-x-auto rounded-xl border bg-card">{dripRows.map(row => <article key={row.propertyId} className="border-t first:border-t-0" data-testid={`my-lead-drip-${row.propertyId}`} data-lead-id={row.propertyId}>
+              <div className="grid min-w-[950px] grid-cols-[minmax(150px,1.4fr)_minmax(125px,1fr)_90px_minmax(180px,1.5fr)_minmax(120px,.8fr)_90px_90px] items-center gap-3 px-3 py-2 text-xs">
+              <div className="min-w-0">{row.propertyId === focusPropertyId && <p className="text-[10px] font-bold uppercase text-cyan-800">Opened from lead page</p>}<p className="truncate font-semibold">{row.queueRow?.homeownerName || 'Homeowner unavailable'}</p><p className="truncate text-muted-foreground">{row.queueRow?.address}</p></div>
               <p className="flex min-w-0 items-center gap-1 truncate font-semibold text-cyan-800"><Droplet className="size-3 shrink-0" />{row.sequenceName}</p>
               <p className="font-semibold">text {row.step} of {row.totalSteps}</p>
               <div className="min-w-0"><p className="text-[10px] uppercase text-muted-foreground">Last text {row.lastText ? new Date(row.lastText.sentAt).toLocaleDateString() : ''}</p><p className="truncate">{row.lastText?.preview ?? 'None yet'}</p></div>
               <div><p className="text-[10px] uppercase text-muted-foreground">Next text</p><p className="font-semibold">{row.nextTextAt ? new Date(row.nextTextAt).toLocaleString() : 'Not scheduled'}</p></div>
               <Link href={`/leads/${row.propertyId}`} className="rounded-full border px-2 py-1 text-center font-semibold hover:bg-muted">Open lead</Link>
-            </article>)}</div> : <div className="rounded-xl border border-dashed px-4 py-5 text-sm text-muted-foreground">No leads in a drip.</div>) : page.rows.length === 0 ? (
+              <button type="button" className="rounded-full border px-2 py-1 text-center font-semibold hover:bg-muted" aria-expanded={expandedIds.has(row.propertyId)} aria-controls={`my-lead-detail-${row.propertyId}`}
+                aria-label={expandedIds.has(row.propertyId) ? `Hide details for ${row.queueRow?.address ?? 'this lead'}` : `Show details for ${row.queueRow?.address ?? 'this lead'}`}
+                onClick={() => onToggleDetails(row.propertyId)}>{expandedIds.has(row.propertyId) ? 'Hide details' : 'Details'}</button>
+              </div>
+              <div id={`my-lead-detail-${row.propertyId}`} hidden={!expandedIds.has(row.propertyId)}>
+                <MyLeadDetailPanel visible={expandedIds.has(row.propertyId) && !collapsed} state={detailStates[row.propertyId] ?? { status: 'loading' }}
+                  onRetry={() => onRetryDetails(row.propertyId)} propertyId={row.propertyId} onChanged={() => onDetailChanged(row.propertyId)}
+                  onLoadDetailPage={onLoadDetailPage ? (group, cursor) => onLoadDetailPage(row.propertyId, group, cursor) : undefined} />
+              </div>
+            </article>)}</div> : <div className="rounded-xl border border-dashed px-4 py-5 text-sm text-muted-foreground">No leads in a drip.</div>) : page.rows.length === 0 && !pinnedRow ? (
               <div className="rounded-xl border border-dashed px-4 py-5 text-sm text-muted-foreground">
                 No leads in this section.
               </div>
             ) : (
               <div className="space-y-2">
-                {page.rows.map((row) => (
-                  <MyLeadQueueRow
-                    key={row.propertyId}
-                    row={row}
-                    detailsOpen={expandedIds.has(row.propertyId)}
-                    sectionVisible={!collapsed}
-                    detailState={detailStates[row.propertyId]}
-                    onToggleDetails={() => onToggleDetails(row.propertyId)}
-                    onRetryDetails={() => onRetryDetails(row.propertyId)}
-                    onDetailChanged={() => onDetailChanged(row.propertyId)}
-                    onLoadDetailPage={onLoadDetailPage
-                      ? (group, cursor) => onLoadDetailPage(row.propertyId, group, cursor)
-                      : undefined}
-                    onStageAction={onStageAction}
-                  />
-                ))}
+                {pinnedRow && renderRow(pinnedRow)}
+                {page.rows.map((row) => renderRow(row))}
               </div>
             )}
 

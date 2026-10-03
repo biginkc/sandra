@@ -8,8 +8,16 @@ import {
 } from "@/lib/auth/memberships";
 import { shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { reportError } from "@/lib/errors/report";
-import { createSupabaseDialpadDispatchDb, loadDialpadPanelBootstrap } from "@/lib/dialpad-cti/dispatch";
+import {
+  createSupabaseDialpadDispatchDb,
+  loadDialpadPanelBootstrap,
+} from "@/lib/dialpad-cti/dispatch";
 import { canViewMyLeads } from "@/lib/my-leads/access";
+import {
+  MY_LEAD_ROW_ERROR_COPY,
+  MY_LEAD_ROW_FORBIDDEN_COPY,
+  MY_LEAD_ROW_REASON_COPY,
+} from "@/lib/my-leads/row-reasons";
 import { listMyLeadsInDrip } from "@/lib/my-leads/drip-queries";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
@@ -20,7 +28,7 @@ import {
   MyLeadsReadError,
 } from "@/lib/my-leads/queries";
 
-import { MyLeadsClient } from "./client";
+import { MyLeadsClient, type MyLeadsFocus } from "./client";
 import {
   parseSelectedLeadParam,
   selectedLeadUnavailableMessage,
@@ -34,7 +42,6 @@ function unavailableState(retryHref = "/my-leads") {
       <PageHeader title="My Leads" />
       <div role="alert" className="text-destructive text-sm">
         <span>My Leads is temporarily unavailable. </span>
-        {/* Reload the document so Retry reruns the failed server reads even on this same URL. */}
         <a href={retryHref} className="font-bold underline underline-offset-4">
           Retry
         </a>
@@ -69,9 +76,8 @@ function disabledState() {
 }
 
 function isFeatureDisabled(error: unknown): boolean {
-  if (error instanceof MyLeadsReadError) {
+  if (error instanceof MyLeadsReadError)
     return error.code === "FEATURE_DISABLED";
-  }
   return (
     typeof error === "object" &&
     error !== null &&
@@ -81,27 +87,48 @@ function isFeatureDisabled(error: unknown): boolean {
 }
 
 function loadFailureState(error: unknown, retryHref = "/my-leads") {
-  // Only expose the stable rollout state. All transport, database, and
-  // authorization failures use the same retryable message so internal
-  // details cannot reach the page.
-  return isFeatureDisabled(error) ? disabledState() : unavailableState(retryHref);
+  return isFeatureDisabled(error)
+    ? disabledState()
+    : unavailableState(retryHref);
 }
 
-function selectedLeadRetryHref(selectedLeadLink: ReturnType<typeof parseSelectedLeadParam>): string {
+function selectedLeadRetryHref(
+  selectedLeadLink: ReturnType<typeof parseSelectedLeadParam>,
+): string {
   return selectedLeadLink.status === "requested"
     ? `/my-leads?lead=${encodeURIComponent(selectedLeadLink.propertyId)}`
     : "/my-leads";
 }
 
+function focusForSelectedLead(
+  result: SelectedLeadResult,
+  userId: string,
+): MyLeadsFocus | null {
+  if (result.status === "none" || result.status === "invalid") return null;
+  if (result.status === "found") {
+    return {
+      propertyId: result.propertyId,
+      memberId: userId,
+      notice: null,
+      pin: result.row,
+    };
+  }
+  return {
+    propertyId: null,
+    memberId: userId,
+    notice: result.message,
+    pin: null,
+  };
+}
+
 export default async function MyLeadsPage({
   searchParams,
 }: {
-  searchParams?: Promise<MyLeadsSearchParams>;
+  searchParams: Promise<MyLeadsSearchParams>;
 }) {
-  const selectedLeadLink = parseSelectedLeadParam(
-    searchParams ? await searchParams : undefined,
-  );
+  const selectedLeadLink = parseSelectedLeadParam(await searchParams);
   const retryHref = selectedLeadRetryHref(selectedLeadLink);
+
   let memberships: Membership[];
   try {
     memberships = await getCallerMembershipsOrThrow();
@@ -109,14 +136,10 @@ export default async function MyLeadsPage({
     return loadFailureState(error, retryHref);
   }
 
-  // `getAcquisitionRoster` also requires one active organization. Resolve
-  // that boundary before the roster call so a missing or ambiguous scope is
-  // an explicit unavailable state rather than an accidental 404 or 500.
   if (memberships.length !== 1) return unavailableState(retryHref);
 
   const isRestrictedAcquisitionMember =
     shouldRestrictMessagesAndLeadsBoard(memberships);
-
   let viewer: Awaited<ReturnType<typeof getAcquisitionRoster>>["viewer"];
   let roster: Awaited<ReturnType<typeof getAcquisitionRoster>>["roster"];
   try {
@@ -125,77 +148,117 @@ export default async function MyLeadsPage({
     return loadFailureState(error, retryHref);
   }
 
-  // A known Acquisitions member keeps the /my-leads route when rollout is
-  // off, but never gets a queue read in that state. A roster that no longer
-  // represents that member is a recoverable read failure, not an access
-  // grant; the client-side queue authorization remains unchanged.
-  if (!roster.settings.enabled && isRestrictedAcquisitionMember) {
+  // A linked request never changes this boundary. A known member with rollout
+  // disabled gets the same neutral disabled state, and no lead lookup runs.
+  if (!roster.settings.enabled && isRestrictedAcquisitionMember)
     return disabledState();
-  }
 
   if (!canViewMyLeads(roster, viewer.userId, viewer.isOwner)) {
-    if (selectedLeadLink.status === "requested" && !viewer.isOwner) {
+    if (selectedLeadLink.status === "requested")
       return selectedLeadUnavailableState(retryHref);
-    }
     if (isRestrictedAcquisitionMember) return unavailableState();
     notFound();
   }
 
-  let data:
-    | {
-        viewer: typeof viewer;
-        roster: typeof roster;
-        memberId: string;
-        snapshot: Awaited<ReturnType<typeof getAcquisitionQueue>> | null;
-        kpis: Awaited<ReturnType<typeof getAcquisitionKpis>> | null;
-        drips: Awaited<ReturnType<typeof listMyLeadsInDrip>> | null;
-      }
-    | null = null;
+  let snapshot: Awaited<ReturnType<typeof getAcquisitionQueue>> | null = null;
+  let kpis: Awaited<ReturnType<typeof getAcquisitionKpis>> | null = null;
+  let drips: Awaited<ReturnType<typeof listMyLeadsInDrip>> | null = null;
   try {
-    // Owners can switch reps, but every viewer starts on their own profile.
-    const memberId = viewer.userId;
-    const [snapshot, kpis, drips] = roster.settings.enabled
-      ? await Promise.all([
-          getAcquisitionQueue({ memberId }),
-          getAcquisitionKpis({ memberId, period: "today" }),
-          listMyLeadsInDrip(memberId),
-        ])
-      : [null, null, null];
-    data = { viewer, roster, memberId, snapshot, kpis, drips };
+    if (roster.settings.enabled) {
+      [snapshot, kpis, drips] = await Promise.all([
+        getAcquisitionQueue({ memberId: viewer.userId }),
+        getAcquisitionKpis({ memberId: viewer.userId, period: "today" }),
+        listMyLeadsInDrip(viewer.userId),
+      ]);
+    }
   } catch (error) {
     return loadFailureState(error, retryHref);
   }
 
-  let selectedLead: SelectedLeadResult = selectedLeadLink.status === "none"
-    ? { status: "none" }
-    : selectedLeadLink.status === "invalid"
-      ? selectedLeadLink
-      : { status: "unavailable", message: "This lead is unavailable in your My Leads queue." };
+  let selectedLead: SelectedLeadResult =
+    selectedLeadLink.status === "none"
+      ? { status: "none" }
+      : selectedLeadLink.status === "invalid"
+        ? selectedLeadLink
+        : {
+            status: "unavailable",
+            message: "This lead is unavailable in your My Leads queue.",
+          };
+  let focus = focusForSelectedLead(selectedLead, viewer.userId);
 
-  if (selectedLeadLink.status === "requested" && data.roster.settings.enabled) {
+  // The URL is only a lookup key. Always read the signed-in user's queue, even
+  // for owners; a URL cannot grant access or silently switch their queue.
+  if (selectedLeadLink.status === "requested" && roster.settings.enabled) {
     try {
-      // Resolve every deep link against the signed-in user's own queue. Owners
-      // may browse other queues interactively, but a URL never changes their
-      // selected owner or grants access to another representative's lead.
       const lookup = await getMyLeadsQueueRow({
-        memberId: data.viewer.userId,
+        memberId: viewer.userId,
         propertyId: selectedLeadLink.propertyId,
       });
-      selectedLead = lookup.status === "found"
-        ? typeof lookup.row.propertyId === "string" && lookup.row.propertyId.toLowerCase() === selectedLeadLink.propertyId
-          ? { status: "found", propertyId: selectedLeadLink.propertyId, row: lookup.row, snapshotAt: lookup.snapshotAt }
-          : { status: "unavailable", message: "This lead is unavailable in your My Leads queue." }
-        : ["archived", "no_active_episode"].includes(lookup.reason)
-          ? { status: "terminal", message: selectedLeadUnavailableMessage(lookup.reason) }
-          : { status: "unavailable", message: selectedLeadUnavailableMessage(lookup.reason) };
+      if (
+        lookup.status === "found" &&
+        typeof lookup.row.propertyId === "string" &&
+        lookup.row.propertyId.toLowerCase() === selectedLeadLink.propertyId
+      ) {
+        selectedLead = {
+          status: "found",
+          propertyId: selectedLeadLink.propertyId,
+          row: lookup.row,
+          snapshotAt: lookup.snapshotAt,
+        };
+        focus = {
+          propertyId: selectedLeadLink.propertyId,
+          memberId: viewer.userId,
+          notice: null,
+          pin: lookup.row,
+        };
+      } else if (lookup.status === "unavailable") {
+        selectedLead = ["archived", "no_active_episode"].includes(lookup.reason)
+          ? {
+              status: "terminal",
+              message: selectedLeadUnavailableMessage(lookup.reason),
+            }
+          : {
+              status: "unavailable",
+              message: selectedLeadUnavailableMessage(lookup.reason),
+            };
+        focus = {
+          propertyId: null,
+          memberId: viewer.userId,
+          notice: MY_LEAD_ROW_REASON_COPY[lookup.reason],
+          pin: null,
+        };
+      }
     } catch (error) {
-      if (error instanceof MyLeadsReadError && ["FORBIDDEN", "INVALID_INPUT", "NOT_FOUND", "UNAUTHENTICATED"].includes(error.code)) {
-        selectedLead = { status: "unavailable", message: "This lead is unavailable in your My Leads queue." };
+      if (
+        error instanceof MyLeadsReadError &&
+        ["FORBIDDEN", "INVALID_INPUT", "NOT_FOUND", "UNAUTHENTICATED"].includes(
+          error.code,
+        )
+      ) {
+        selectedLead = {
+          status: "unavailable",
+          message: "This lead is unavailable in your My Leads queue.",
+        };
+        focus = {
+          propertyId: null,
+          memberId: viewer.userId,
+          notice:
+            error.code === "FORBIDDEN"
+              ? MY_LEAD_ROW_FORBIDDEN_COPY
+              : MY_LEAD_ROW_REASON_COPY.not_found,
+          pin: null,
+        };
       } else {
         selectedLead = {
           status: "error",
           message: "We couldn't check this lead right now.",
           retryHref,
+        };
+        focus = {
+          propertyId: null,
+          memberId: viewer.userId,
+          notice: MY_LEAD_ROW_ERROR_COPY,
+          pin: null,
         };
       }
     }
@@ -207,19 +270,26 @@ export default async function MyLeadsPage({
     };
   }
 
-  // Only a usable connection (active, fixed Dialpad origin allowed) surfaces the panel; any failure keeps the existing softphone flow.
   let dialpad: Awaited<ReturnType<typeof loadDialpadPanelBootstrap>> = null;
-  if (data.roster.settings.enabled) {
+  if (roster.settings.enabled) {
     try {
-      dialpad = await loadDialpadPanelBootstrap(createSupabaseDialpadDispatchDb(createAdminClient()), {
-        orgId: data.viewer.orgId,
-        userId: data.viewer.userId,
-      });
+      dialpad = await loadDialpadPanelBootstrap(
+        createSupabaseDialpadDispatchDb(createAdminClient()),
+        {
+          orgId: viewer.orgId,
+          userId: viewer.userId,
+        },
+      );
     } catch (error) {
-      reportError(error instanceof Error ? error : new Error("dialpad panel bootstrap failed"), {
-        errorClass: "database",
-        tags: { surface: "server", operation: "dialpad_panel_bootstrap" },
-      });
+      reportError(
+        error instanceof Error
+          ? error
+          : new Error("dialpad panel bootstrap failed"),
+        {
+          errorClass: "database",
+          tags: { surface: "database", operation: "dialpad_panel_bootstrap" },
+        },
+      );
     }
   }
 
@@ -227,13 +297,14 @@ export default async function MyLeadsPage({
     <Page>
       <MyLeadsClient
         dialpad={dialpad}
-        viewer={data.viewer}
-        roster={data.roster}
-        initialMemberId={data.memberId}
-        initialSnapshot={data.snapshot}
-        initialKpis={data.kpis}
-        initialDrips={data.drips}
+        viewer={viewer}
+        roster={roster}
+        initialMemberId={viewer.userId}
+        initialSnapshot={snapshot}
+        initialKpis={kpis}
+        initialDrips={drips}
         selectedLead={selectedLead}
+        focus={focus}
       />
     </Page>
   );

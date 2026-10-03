@@ -1,5 +1,8 @@
 import { LeadRepSmsComposer } from "./rep-sms-composer";
 import Link from "next/link";
+import { myLeadsHref } from "@/lib/my-leads/links";
+import { MY_LEAD_ROW_REASON_COPY } from "@/lib/my-leads/row-reasons";
+import { LogFollowUpProvider, LogFollowUpTrigger } from "./log-follow-up-button";
 import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import { ChevronLeft, ChevronRight, ExternalLink } from "lucide-react";
@@ -145,8 +148,9 @@ export default async function LeadDetailPage({
   const { id } = await params;
   const warning = leadNoticeMessage((await searchParams)?.notice);
   const supabase = await createClient();
+  const callerMemberships = await getCallerMemberships();
   const isAcquisitionMember = shouldRestrictMessagesAndLeadsBoard(
-    await getCallerMemberships(),
+    callerMemberships,
   );
   const { data, error } = await supabase
     .from("properties")
@@ -679,6 +683,14 @@ export default async function LeadDetailPage({
     .replace(/_/g, " ")
     .replace(/^./, (character) => character.toUpperCase());
 
+  // Cheap server-side decision: a rep logs only their own lead; an owner logs for the assignee.
+  const viewerIsOwner = callerMemberships.some((m) => m.user_id === sessionUser?.id && m.role === "owner");
+  const logFollowUpDisabledReason = !lead.assigned_user_id
+    ? MY_LEAD_ROW_REASON_COPY.unassigned
+    : lead.assigned_user_id === sessionUser?.id || viewerIsOwner
+      ? null
+      : MY_LEAD_ROW_REASON_COPY.other_rep;
+
   const heroActions = (
     <>
       <SoftphoneLeadButton lead={detailSoftphoneLead} />
@@ -704,6 +716,14 @@ export default async function LeadDetailPage({
         currentUserId={sessionUser?.id ?? null}
         triggerLabel="Book appt"
       /></fieldset>
+      <Link
+        href={myLeadsHref(lead.id)}
+        data-testid="open-in-my-leads"
+        className={buttonVariants({ variant: "outline", size: "sm" })}
+      >
+        Open in My Leads
+      </Link>
+      <fieldset disabled={training} inert={training || undefined} className="contents"><LogFollowUpTrigger /></fieldset>
       <fieldset disabled={training} inert={training || undefined} className="contents"><HaveNormaCallButton
         propertyId={lead.id}
         sellerName={homeownerName}
@@ -789,6 +809,13 @@ export default async function LeadDetailPage({
 
   return (
     <Page className="gap-0 p-0">
+      {/* Above the hero: the hero re-parents its actions when its image falls back, which remounts them. */}
+      <LogFollowUpProvider
+        propertyId={lead.id}
+        propertyLabel={lead.address}
+        assigneeId={lead.assigned_user_id ?? null}
+        disabledReason={logFollowUpDisabledReason}
+      >
       <LeadOutcomeProvider>
       <LeadMediaHero
         media={mediaPresentation}
@@ -1257,6 +1284,7 @@ export default async function LeadDetailPage({
         </div>
       </section>
       </LeadOutcomeProvider>
+      </LogFollowUpProvider>
     </Page>
   );
 }

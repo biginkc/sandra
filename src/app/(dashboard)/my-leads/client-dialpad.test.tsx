@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   openLead: vi.fn(),
   loadMyLeads: vi.fn(),
+  loadMyLeadRow: vi.fn(),
   loadMyLeadCallReferences: vi.fn(),
   targets: vi.fn(),
   recent: vi.fn(),
@@ -18,6 +19,7 @@ vi.mock('@/components/softphone/softphone-provider', () => ({
 vi.mock('@/components/appointments/book-appointment-popover', () => ({ BookAppointmentPopover: () => null }));
 vi.mock('./actions', () => ({
   loadMyLeads: mocks.loadMyLeads,
+  loadMyLeadRow: mocks.loadMyLeadRow,
   loadMyLeadsStage: vi.fn(),
   loadMyLeadDetail: vi.fn(),
   loadMyLeadCallReferences: mocks.loadMyLeadCallReferences,
@@ -68,6 +70,11 @@ beforeEach(() => {
   vi.resetAllMocks();
   mocks.loadMyLeadCallReferences.mockResolvedValue({ ok: true, options: [] });
   mocks.recent.mockResolvedValue({ ok: true, calls: [] });
+  // Database truth for the single-row opening lookup is the fixture queue.
+  mocks.loadMyLeadRow.mockImplementation(async ({ propertyId }: { propertyId: string }) => {
+    const row = Object.values(snapshot.stages).flatMap((page) => (page as { rows: Array<{ propertyId: string }> }).rows).find((r) => r.propertyId === propertyId)
+    return row ? { ok: true, lookup: { status: 'found', row, snapshotAt: 'x' } } : { ok: true, lookup: { status: 'unavailable', reason: 'not_found' } }
+  });
   mocks.targets.mockResolvedValue({ ok: true, contactId: 'contact-1', phones: [{ slot: 1, masked: '••• ••• 0100' }], grants: [] });
 });
 

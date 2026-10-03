@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import * as React from "react"
@@ -9,15 +9,13 @@ const mocks = vi.hoisted(() => ({
   submitMyLeadCommand: vi.fn(),
   submitMyLeadHandoffDrip: vi.fn(),
   loadMyLeads: vi.fn(),
-  loadMyLeadDetail: vi.fn(),
-  loadMyLeadQueueRow: vi.fn(),
+  loadMyLeadRow: vi.fn(),
   loadMyLeadCallReferences: vi.fn(),
   realDialpad: false,
   realQueue: false,
   dialpadTargets: vi.fn(),
   dialpadRecent: vi.fn(),
   dialpadHandlers: [] as Array<((nonce: number) => void) | undefined>,
-  dialpadLogOutcome: undefined as ((propertyId: string, callActivityId: string) => void) | undefined,
   listDripChoices: vi.fn(async () => ({ ok: true, data: [{ id: 'drip-1', name: 'Seller follow-up', textCount: 4, days: 90, firstSend: 'Today' }] })),
 }))
 
@@ -35,9 +33,9 @@ vi.mock("@/components/appointments/book-appointment-popover", () => ({
 
 vi.mock("./actions", () => ({
   loadMyLeads: mocks.loadMyLeads,
+  loadMyLeadRow: mocks.loadMyLeadRow,
   loadMyLeadsStage: vi.fn(),
-  loadMyLeadDetail: mocks.loadMyLeadDetail,
-  loadMyLeadQueueRow: mocks.loadMyLeadQueueRow,
+  loadMyLeadDetail: vi.fn(),
   loadMyLeadCallReferences: mocks.loadMyLeadCallReferences,
   submitMyLeadCommand: mocks.submitMyLeadCommand,
   submitMyLeadHandoffDrip: mocks.submitMyLeadHandoffDrip,
@@ -48,15 +46,6 @@ vi.mock("./actions", () => ({
 vi.mock("@/app/(dashboard)/sequences/actions", () => ({
   listDripChoices: mocks.listDripChoices,
   startDripForLeads: vi.fn(),
-}))
-
-vi.mock("./_components/existing-detail-actions", () => ({
-  MyLeadAppointmentActions: ({ onChanged }: { onChanged?: () => void }) => (
-    <button type="button" onClick={() => onChanged?.()}>Update linked detail</button>
-  ),
-  MyLeadCallbackActions: ({ onChanged }: { onChanged?: () => void }) => (
-    <button type="button" onClick={() => onChanged?.()}>Update linked callback</button>
-  ),
 }))
 
 vi.mock("./dialpad-actions", () => ({
@@ -73,11 +62,7 @@ vi.mock("./_components/dialpad-panel", async (importOriginal) => {
   return { DialpadPanel: (props: React.ComponentProps<typeof actual.DialpadPanel>) => {
     if (mocks.realDialpad) return React.createElement(actual.DialpadPanel, props)
     mocks.dialpadHandlers.push(props.onCallRequestHandled)
-    mocks.dialpadLogOutcome = props.onLogOutcome
-    return React.createElement(React.Fragment, null,
-      React.createElement("button", { type: "button", "data-testid": "dialpad-panel-stub", onClick: () => props.onCallRequestHandled?.(1) }, "Dialpad panel"),
-      React.createElement("button", { type: "button", "data-testid": "dialpad-log-outcome", onClick: () => props.onLogOutcome("outside-page", "activity-1") }, "Log Dialpad outcome"),
-    )
+    return React.createElement("button", { type: "button", "data-testid": "dialpad-panel-stub", onClick: () => props.onCallRequestHandled?.(1) }, "Dialpad panel")
   }}
 })
 
@@ -128,7 +113,7 @@ vi.mock("./_components/queue", async (importOriginal) => {
 
 
 
-import type { AcquisitionKpis, AcquisitionRoster, QueueRow, QueueSnapshot } from "@/lib/my-leads/queries"
+import type { AcquisitionKpis, AcquisitionRoster, QueueSnapshot } from "@/lib/my-leads/queries"
 import type { MyLeadDripSnapshot } from "@/lib/my-leads/drip-queries"
 import { MyLeadsClient } from "./client"
 
@@ -215,7 +200,25 @@ function snapshot(address: string): QueueSnapshot {
   }
 }
 
-function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis, initialDrips:MyLeadDripSnapshot|null=null, dialpad?: React.ComponentProps<typeof MyLeadsClient>["dialpad"], selectedLead?: React.ComponentProps<typeof MyLeadsClient>["selectedLead"]) {
+/**
+ * Default single-row lookup: the database truth is the most recent successful queue read
+ * (or the initial snapshot). Tests that need a specific lookup override it after rendering.
+ */
+function installDefaultRowLookup(initial: QueueSnapshot, initialDrips: MyLeadDripSnapshot | null) {
+  mocks.loadMyLeadRow.mockImplementation(async ({ propertyId }: { propertyId: string }) => {
+    const settled = [...mocks.loadMyLeads.mock.settledResults].reverse().find((r) => r.type === "fulfilled" && (r.value as { ok?: boolean })?.ok)
+    const read = (settled?.value as { snapshot: QueueSnapshot; drips?: MyLeadDripSnapshot | null } | undefined) ?? { snapshot: initial, drips: initialDrips }
+    const rows = [
+      ...Object.values(read.snapshot.stages).flatMap((page) => page?.rows ?? []),
+      ...[...(read.drips?.active ?? []), ...(read.drips?.replied ?? [])].flatMap((drip) => (drip.queueRow ? [drip.queueRow] : [])),
+    ]
+    const row = rows.find((candidate) => candidate.propertyId === propertyId)
+    return row ? { ok: true, lookup: { status: "found", row, snapshotAt: read.snapshot.snapshotAt } } : { ok: true, lookup: { status: "unavailable", reason: "not_found" } }
+  })
+}
+
+function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis, initialDrips:MyLeadDripSnapshot|null=null, dialpad?: React.ComponentProps<typeof MyLeadsClient>["dialpad"]) {
+  installDefaultRowLookup(initialSnapshot, initialDrips)
   return render(
     <MyLeadsClient
       viewer={viewer}
@@ -225,126 +228,20 @@ function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis, initia
       initialKpis={initialKpis}
       initialDrips={initialDrips}
       dialpad={dialpad}
-      selectedLead={selectedLead}
     />,
   )
-}
-
-function linkedRow(stage: QueueRow["stage"] = "contacted"): QueueRow {
-  const row = snapshot("Outside page Lane").stages.not_contacted!.rows[0];
-  return { ...row, propertyId: "outside-page", stage, address: "Outside page Lane" };
 }
 
 describe("MyLeadsClient", () => {
   beforeEach(() => {
     mocks.loadMyLeads.mockReset()
-    mocks.loadMyLeadDetail.mockReset()
-    mocks.loadMyLeadQueueRow.mockReset()
     mocks.submitMyLeadCommand.mockReset()
     mocks.loadMyLeadCallReferences.mockReset()
     mocks.dialpadHandlers.length = 0
-    mocks.dialpadLogOutcome = undefined
     mocks.realDialpad = false
     mocks.realQueue = false
     mocks.dialpadRecent.mockResolvedValue({ok:true,calls:[]})
     mocks.dialpadTargets.mockResolvedValue({ok:true,contactId:'contact-1',phones:[{slot:1,masked:'••• ••• 0196'}],grants:[]})
-  })
-
-  it("opens the exact authorized lead outside the active filter and does not follow an owner queue switch", async () => {
-    const own = snapshot("Deep Link Lane")
-    const row = {...own.stages.not_contacted!.rows[0], propertyId:"outside-filter", address:"Outside current filter"}
-    mocks.loadMyLeadDetail.mockResolvedValue({ok:false, message:"This lead is unavailable in your My Leads queue."})
-    mocks.loadMyLeads.mockResolvedValue({ok:true, snapshot:own, kpis})
-    const ownerViewer = {...viewer, isOwner:true}
-    const ownerRoster: AcquisitionRoster = {
-      ...roster,
-      isOwner:true,
-      members:[...roster.members, {...roster.members[0], id:"rep-2", label:"Other rep"}],
-    }
-    render(<MyLeadsClient
-      viewer={ownerViewer}
-      roster={ownerRoster}
-      initialMemberId={ownerViewer.userId}
-      initialSnapshot={own}
-      initialKpis={kpis}
-      selectedLead={{status:"found", propertyId:row.propertyId, row, snapshotAt:own.snapshotAt}}
-    />)
-
-    expect(await screen.findByRole("region", {name:"Selected lead from link"})).toBeInTheDocument()
-    expect(mocks.loadMyLeadDetail).toHaveBeenCalledWith({memberId:"rep-1", propertyId:row.propertyId})
-    await userEvent.type(screen.getByRole("textbox", {name:"Search My Leads"}), "outside current filter")
-    expect(screen.getByRole("region", {name:"Selected lead from link"})).toBeInTheDocument()
-    await userEvent.selectOptions(screen.getByRole("combobox", {name:"Acquisitions member"}), "rep-2")
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Switch back to your queue"))
-  })
-
-  it("reconciles server-selected lead changes and authoritative unavailable results", async () => {
-    const initial = snapshot("Server selection lane")
-    const first = linkedRow("contacted")
-    const second = { ...first, propertyId: "second-linked", address: "Second linked lane" }
-    mocks.loadMyLeadDetail.mockResolvedValue({ ok: true, detail: { groups: {} } })
-    const view = renderClient(initial, kpis, null, undefined, {
-      status: "found",
-      propertyId: first.propertyId,
-      row: first,
-      snapshotAt: initial.snapshotAt,
-    })
-
-    expect(await screen.findByRole("region", { name: "Selected lead from link" })).toHaveTextContent("Outside page Lane")
-    view.rerender(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId={viewer.userId} initialSnapshot={initial} initialKpis={kpis} selectedLead={{ status: "found", propertyId: second.propertyId, row: second, snapshotAt: initial.snapshotAt }} />)
-    await waitFor(() => expect(screen.getByRole("region", { name: "Selected lead from link" })).toHaveTextContent("Second linked lane"))
-
-    view.rerender(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId={viewer.userId} initialSnapshot={initial} initialKpis={kpis} selectedLead={{ status: "unavailable", message: "The server no longer authorizes this lead." }} />)
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("The server no longer authorizes this lead."))
-    expect(screen.queryByRole("region", { name: "Selected lead from link" })).not.toBeInTheDocument()
-  })
-
-  it("preserves same-lead details while reconciling an updated server row", async () => {
-    const initial = snapshot("Same lead lane")
-    const first = linkedRow("contacted")
-    const updated = { ...first, address: "Same lead refreshed", queueVersion: first.queueVersion + 1 }
-    mocks.loadMyLeadDetail.mockResolvedValue({
-      ok: true,
-      detail: { groups: { notes: { rows: [{ id: "note-1", actorLabel: "Maria", body: "Preserve this detail", at: "2026-09-11T14:00:00Z" }] } } },
-    })
-    const view = renderClient(initial, kpis, null, undefined, {
-      status: "found",
-      propertyId: first.propertyId,
-      row: first,
-      snapshotAt: initial.snapshotAt,
-    })
-    expect(await screen.findByText("Preserve this detail")).toBeInTheDocument()
-
-    view.rerender(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId={viewer.userId} initialSnapshot={initial} initialKpis={kpis} selectedLead={{ status: "found", propertyId: first.propertyId, row: updated, snapshotAt: "2026-09-11T14:01:00.000Z" }} />)
-    await waitFor(() => expect(screen.getByRole("region", { name: "Selected lead from link" })).toHaveTextContent("Same lead refreshed"))
-    expect(screen.getByText("Preserve this detail")).toBeInTheDocument()
-    expect(mocks.loadMyLeadDetail).toHaveBeenCalledTimes(1)
-  })
-
-  it("drops the previous lead details immediately while a new linked lead loads", async () => {
-    const initial = snapshot("Lead switch lane")
-    const first = linkedRow("contacted")
-    const second = { ...first, propertyId: "second-linked", address: "Second linked lane" }
-    let resolveSecond!: (value: unknown) => void
-    const detail = (body: string) => ({ ok: true, detail: { groups: { notes: { rows: [{ id: body, actorLabel: "Maria", body, at: "2026-09-11T14:00:00Z" }] } } } })
-    mocks.loadMyLeadDetail
-      .mockResolvedValueOnce(detail("First lead detail"))
-      .mockReturnValueOnce(new Promise(resolve => { resolveSecond = resolve }))
-    const view = renderClient(initial, kpis, null, undefined, {
-      status: "found",
-      propertyId: first.propertyId,
-      row: first,
-      snapshotAt: initial.snapshotAt,
-    })
-    expect(await screen.findByText("First lead detail")).toBeInTheDocument()
-
-    view.rerender(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId={viewer.userId} initialSnapshot={initial} initialKpis={kpis} selectedLead={{ status: "found", propertyId: second.propertyId, row: second, snapshotAt: initial.snapshotAt }} />)
-    await waitFor(() => expect(screen.getByRole("region", { name: "Selected lead from link" })).toHaveTextContent("Second linked lane"))
-    expect(screen.queryByText("First lead detail")).not.toBeInTheDocument()
-    expect(screen.getByText("Loading details…")).toBeInTheDocument()
-
-    await act(async () => resolveSecond(detail("Second lead detail")))
-    expect(await screen.findByText("Second lead detail")).toBeInTheDocument()
   })
 
   it("opens Log attempt for a pinned reply outside the first 20 rows", async()=>{
@@ -363,279 +260,6 @@ describe("MyLeadsClient", () => {
     await userEvent.setup().click(screen.getByRole('button',{name:'Log attempt'}));
     expect(screen.getByRole('dialog',{name:/Log an attempt/i})).toBeVisible();
     expect(mocks.loadMyLeadCallReferences).toHaveBeenCalledWith('pinned-reply','rep-1');
-  });
-
-  it("opens Dialpad Log outcome for a linked lead outside the loaded queue", async () => {
-    const user = userEvent.setup();
-    const initial = snapshot("Loaded queue lane");
-    const first = linkedRow("contacted");
-    mocks.loadMyLeadDetail.mockResolvedValue({ ok: true, detail: { groups: {} } });
-    mocks.loadMyLeadQueueRow.mockResolvedValue({
-      ok: true,
-      lookup: { status: "found", row: first, snapshotAt: initial.snapshotAt },
-    });
-    mocks.loadMyLeadCallReferences.mockResolvedValue({ ok: true, options: [] });
-
-    renderClient(initial, kpis, null, {
-      connectionId: "connection-1",
-      allowedOrigins: ["https://dialpad.com"],
-      binding: { status: "verified", dialpadUserId: "5551234" },
-      grants: [],
-    }, {
-      status: "found",
-      propertyId: first.propertyId,
-      row: first,
-      snapshotAt: initial.snapshotAt,
-    });
-
-    await user.click(screen.getByTestId("dialpad-log-outcome"));
-    expect(await screen.findByRole("dialog", { name: /Log an attempt/i })).toBeVisible();
-    expect(mocks.loadMyLeadQueueRow).toHaveBeenCalledWith({ memberId: "rep-1", propertyId: "outside-page" });
-    expect(mocks.loadMyLeadCallReferences).toHaveBeenCalledWith("outside-page", "rep-1");
-  });
-
-  it("refreshes a linked lead by id after save before opening its second action", async () => {
-    const user = userEvent.setup();
-    const initial = snapshot("Loaded queue lane");
-    const first = linkedRow("contacted");
-    const saved = { ...first, queueVersion: 2, sharedStatus: "interested" };
-    mocks.loadMyLeadDetail.mockResolvedValue({ ok: true, detail: { groups: {} } });
-    mocks.loadMyLeadQueueRow
-      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: first, snapshotAt: initial.snapshotAt } })
-      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: saved, snapshotAt: "2026-09-11T14:01:00.000Z" } })
-      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: saved, snapshotAt: "2026-09-11T14:01:00.000Z" } });
-    mocks.submitMyLeadCommand.mockResolvedValue({ ok: true });
-
-    renderClient(initial, kpis, null, undefined, {
-      status: "found",
-      propertyId: first.propertyId,
-      row: first,
-      snapshotAt: initial.snapshotAt,
-    });
-    const region = await screen.findByRole("region", { name: "Selected lead from link" });
-    await user.click(within(region).getByRole("button", { name: "Ready to make an offer" }));
-    fireEvent.change(screen.getByLabelText("Motivation"), { target: { value: "Seller plans to relocate." } });
-    await user.selectOptions(screen.getByLabelText("Temperature (optional)"), "warm");
-    await user.click(screen.getByRole("button", { name: "Save readiness" }));
-    await waitFor(() => expect(mocks.loadMyLeadQueueRow).toHaveBeenCalledTimes(2));
-
-    const updatedRegion = screen.getByRole("region", { name: "Selected lead from link" });
-    await user.click(within(updatedRegion).getByRole("button", { name: "Log offer" }));
-    await waitFor(() => expect(mocks.loadMyLeadQueueRow).toHaveBeenCalledTimes(3));
-    await user.type(screen.getByLabelText("Offer amount"), "125000.50");
-    await user.selectOptions(screen.getByLabelText("Offer method"), "verbal");
-    fireEvent.change(screen.getByLabelText("Offer sent"), { target: { value: "2026-09-11T10:00" } });
-    fireEvent.change(screen.getByLabelText("Required follow-up"), { target: { value: "2026-09-12T10:00" } });
-    await user.click(screen.getByRole("radio", { name: "No motivation provided" }));
-    await user.click(screen.getByRole("button", { name: "Save offer" }));
-
-    await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2));
-    expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({
-      propertyId: "outside-page",
-      expectedQueueVersion: 2,
-    });
-  });
-
-  it("refreshes the normal queue and KPIs when a linked lead is also in that queue", async () => {
-    const user = userEvent.setup();
-    const initial = snapshot("Linked queue lane");
-    const first = { ...initial.stages.not_contacted!.rows[0], stage: "contacted" as const };
-    const saved = { ...first, queueVersion: 2, sharedStatus: "interested", attemptsCount: 1 };
-    const refreshed = {
-      ...initial,
-      stages: {
-        ...initial.stages,
-        not_contacted: { ...initial.stages.not_contacted!, rows: [{ ...saved, address: "Linked queue refreshed" }] },
-      },
-    };
-    mocks.loadMyLeadDetail.mockResolvedValue({ ok: true, detail: { groups: {} } });
-    mocks.loadMyLeadQueueRow
-      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: first, snapshotAt: initial.snapshotAt } })
-      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: saved, snapshotAt: "2026-09-11T14:01:00.000Z" } });
-    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: refreshed, kpis: { ...kpis, attempts: 2 } });
-    mocks.submitMyLeadCommand.mockResolvedValue({ ok: true });
-
-    renderClient(initial, kpis, null, undefined, {
-      status: "found",
-      propertyId: first.propertyId,
-      row: first,
-      snapshotAt: initial.snapshotAt,
-    });
-    const region = await screen.findByRole("region", { name: "Selected lead from link" });
-    await user.click(within(region).getByRole("button", { name: "Ready to make an offer" }));
-    fireEvent.change(screen.getByLabelText("Motivation"), { target: { value: "Seller plans to relocate." } });
-    await user.selectOptions(screen.getByLabelText("Temperature (optional)"), "warm");
-    await user.click(screen.getByRole("button", { name: "Save readiness" }));
-
-    await waitFor(() => expect(mocks.loadMyLeads).toHaveBeenCalledWith({ memberId: "rep-1", search: "", period: "today" }));
-    expect(screen.getByTestId("attempt-count")).toHaveTextContent("2");
-    expect(screen.getByTestId("queue-address")).toHaveTextContent("Linked queue refreshed");
-  });
-
-  it("keeps a linked lead active when a drip handoff retains its owner", async () => {
-    const user = userEvent.setup();
-    const initial = snapshot("Drip handoff lane");
-    const first = linkedRow("contacted");
-    const saved = { ...first, queueVersion: 2, sharedStatus: "needs_drip", address: "Drip handoff refreshed" };
-    mocks.loadMyLeadDetail.mockResolvedValue({ ok: true, detail: { groups: {} } });
-    mocks.loadMyLeadQueueRow
-      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: first, snapshotAt: initial.snapshotAt } })
-      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: saved, snapshotAt: "2026-09-11T14:01:00.000Z" } });
-    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: initial, kpis });
-    mocks.submitMyLeadHandoffDrip.mockResolvedValue({ ok: true });
-
-    renderClient(initial, kpis, null, undefined, {
-      status: "found",
-      propertyId: first.propertyId,
-      row: first,
-      snapshotAt: initial.snapshotAt,
-    });
-    const region = await screen.findByRole("region", { name: "Selected lead from link" });
-    await user.click(within(region).getByRole("button", { name: "Handoff" }));
-    await user.selectOptions(screen.getByLabelText("Handoff reason"), "not_interested");
-    await user.click(await screen.findByRole("button", { name: /Seller follow-up/ }));
-    await user.click(screen.getByRole("button", { name: "Hand off lead" }));
-
-    await waitFor(() => expect(mocks.submitMyLeadHandoffDrip).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(mocks.loadMyLeadQueueRow).toHaveBeenCalledTimes(2));
-    const updatedRegion = screen.getByRole("region", { name: "Selected lead from link" });
-    expect(updatedRegion).toHaveTextContent("Drip handoff refreshed");
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  });
-
-  it("shows a neutral terminal state when a linked lead is actually archived", async () => {
-    const user = userEvent.setup();
-    const initial = snapshot("Archive lane");
-    const first = linkedRow("under_contract");
-    mocks.loadMyLeadDetail.mockResolvedValue({ ok: true, detail: { groups: {} } });
-    mocks.loadMyLeadQueueRow
-      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: first, snapshotAt: initial.snapshotAt } })
-      .mockResolvedValueOnce({ ok: true, lookup: { status: "unavailable", reason: "archived" } });
-    mocks.submitMyLeadCommand.mockResolvedValue({ ok: true });
-
-    renderClient(initial, kpis, null, undefined, {
-      status: "found",
-      propertyId: first.propertyId,
-      row: first,
-      snapshotAt: initial.snapshotAt,
-    });
-    const region = await screen.findByRole("region", { name: "Selected lead from link" });
-    await user.click(within(region).getByRole("button", { name: "Archive" }));
-    await user.click(screen.getByRole("checkbox"));
-    await user.click(screen.getByRole("button", { name: "Archive lead" }));
-
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("archived"));
-    expect(screen.queryByRole("region", { name: "Selected lead from link" })).not.toBeInTheDocument();
-  });
-
-  it("retains linked details while newer detail reads win over stale responses", async () => {
-    const initial = snapshot("Detail race lane");
-    const first = linkedRow("contacted");
-    let resolveSecond!: (value: unknown) => void;
-    let resolveThird!: (value: unknown) => void;
-    const detail = (body: string) => ({ ok: true, detail: { groups: { notes: { rows: [{ id: body, actorLabel: "Maria", body, at: "2026-09-11T14:00:00.000Z" }], cursor: null, hasMore: false } } } });
-    mocks.loadMyLeadDetail
-      .mockResolvedValueOnce(detail("old detail"))
-      .mockReturnValueOnce(new Promise(resolve => { resolveSecond = resolve; }))
-      .mockReturnValueOnce(new Promise(resolve => { resolveThird = resolve; }));
-
-    const view = renderClient(initial, kpis, null, undefined, {
-      status: "found",
-      propertyId: first.propertyId,
-      row: first,
-      snapshotAt: initial.snapshotAt,
-    });
-    expect(await screen.findByText("old detail")).toBeInTheDocument();
-
-    const changedRoster = { ...roster, members: [...roster.members] };
-    view.rerender(<MyLeadsClient viewer={viewer} roster={changedRoster} initialMemberId={viewer.userId} initialSnapshot={initial} initialKpis={kpis} selectedLead={{ status: "found", propertyId: first.propertyId, row: first, snapshotAt: initial.snapshotAt }} />);
-    await waitFor(() => expect(screen.queryByText("Loading details…")).not.toBeInTheDocument());
-    view.rerender(<MyLeadsClient viewer={viewer} roster={{ ...changedRoster, settings: { ...changedRoster.settings } }} initialMemberId={viewer.userId} initialSnapshot={initial} initialKpis={kpis} selectedLead={{ status: "found", propertyId: first.propertyId, row: first, snapshotAt: initial.snapshotAt }} />);
-    await act(async () => resolveThird(detail("new detail")));
-    await act(async () => resolveSecond(detail("stale detail")));
-
-    expect(screen.getByText("new detail")).toBeInTheDocument();
-    expect(screen.queryByText("stale detail")).not.toBeInTheDocument();
-    expect(screen.queryByText("Loading details…")).not.toBeInTheDocument();
-  });
-
-  it("opens from its own read when a newer linked refresh wins the card", async () => {
-    const user = userEvent.setup();
-    const initial = snapshot("Linked overlap lane");
-    const first = linkedRow("contacted");
-    const older = { ...first, address: "Older linked lane", queueVersion: 2 };
-    const newer = { ...first, address: "Current linked lane", queueVersion: 3 };
-    let resolveOlder!: (value: unknown) => void;
-    let resolveNewer!: (value: unknown) => void;
-    mocks.loadMyLeadDetail.mockResolvedValue({
-      ok: true,
-      detail: {
-        groups: {
-          appointments: {
-            rows: [{ id: "appointment-1", type: "appointment", currentAssigneeId: "rep-1", lifecycleState: "scheduled", title: "Inspection", at: "2026-09-11T14:00:00Z" }],
-          },
-        },
-      },
-    });
-    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: initial, kpis });
-    mocks.loadMyLeadQueueRow
-      .mockReturnValueOnce(new Promise(resolve => { resolveOlder = resolve; }))
-      .mockReturnValueOnce(new Promise(resolve => { resolveNewer = resolve; }));
-
-    renderClient(initial, kpis, null, undefined, {
-      status: "found",
-      propertyId: first.propertyId,
-      row: first,
-      snapshotAt: initial.snapshotAt,
-    });
-    const region = await screen.findByRole("region", { name: "Selected lead from link" });
-    await user.click(within(region).getByRole("button", { name: "Ready to make an offer" }));
-    expect(screen.getByText("Loading current lead…")).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Update linked detail" }));
-    await waitFor(() => expect(mocks.loadMyLeadQueueRow).toHaveBeenCalledTimes(2));
-
-    await act(async () => resolveOlder({ ok: true, lookup: { status: "found", row: older, snapshotAt: "2026-09-11T14:01:00.000Z" } }));
-    expect(await screen.findByRole("dialog")).toBeVisible();
-    await act(async () => resolveNewer({ ok: true, lookup: { status: "found", row: newer, snapshotAt: "2026-09-11T14:02:00.000Z" } }));
-
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
-    await waitFor(() => expect(screen.getByRole("region", { name: "Selected lead from link" })).toHaveTextContent("Current linked lane"));
-    expect(screen.queryByText("This lead is unavailable or its assignment changed.")).not.toBeInTheDocument();
-  });
-
-  it("uses the linked single-row read for stale recovery outside the loaded queue", async () => {
-    const user = userEvent.setup();
-    const initial = snapshot("Loaded queue lane");
-    const first = linkedRow("contacted");
-    const fresh = { ...first, queueVersion: 2, sharedStatus: "interested" };
-    mocks.loadMyLeadDetail.mockResolvedValue({ ok: true, detail: { groups: {} } });
-    mocks.loadMyLeadQueueRow
-      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: first, snapshotAt: initial.snapshotAt } })
-      .mockResolvedValueOnce({ ok: true, lookup: { status: "found", row: fresh, snapshotAt: "2026-09-11T14:02:00.000Z" } });
-    mocks.submitMyLeadCommand
-      .mockResolvedValueOnce({ ok: false, code: "STALE_STATE", message: "This lead changed. Refresh before trying again." })
-      .mockResolvedValueOnce({ ok: true });
-
-    renderClient(initial, kpis, null, undefined, {
-      status: "found",
-      propertyId: first.propertyId,
-      row: first,
-      snapshotAt: initial.snapshotAt,
-    });
-    const region = await screen.findByRole("region", { name: "Selected lead from link" });
-    await user.click(within(region).getByRole("button", { name: "Ready to make an offer" }));
-    fireEvent.change(screen.getByLabelText("Motivation"), { target: { value: "Seller plans to relocate." } });
-    await user.selectOptions(screen.getByLabelText("Temperature (optional)"), "warm");
-    await user.click(screen.getByRole("button", { name: "Save readiness" }));
-    await screen.findByRole("button", { name: "Refresh" });
-    await user.click(screen.getByRole("button", { name: "Refresh" }));
-    await screen.findByText("Lead refreshed. Your draft is retained. Review it before saving.");
-    await user.click(screen.getByRole("button", { name: "Save readiness" }));
-    await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2));
-    expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({
-      propertyId: "outside-page",
-      expectedQueueVersion: 2,
-    });
   });
 
   it("updates the visible check time every 30 seconds even when attempts do not change", async () => {
@@ -818,8 +442,9 @@ describe("MyLeadsClient", () => {
     mocks.loadMyLeadCallReferences.mockResolvedValueOnce({ ok: true, options: [{ id: "new-call", label: "Current call" }] })
     renderClient(snapshot("106 Fixture Lane"))
     await user.click(screen.getByRole("button", { name: "Log attempt" }))
-    await user.click(screen.getByRole("button", { name: "Cancel" }))
+    await user.click(await screen.findByRole("button", { name: "Cancel" }))
     await user.click(screen.getByRole("button", { name: "Log attempt" }))
+    await screen.findByLabelText("Source")
     await user.selectOptions(screen.getByLabelText("Source"), "sandra")
     expect(screen.getByLabelText("Sandra call")).toHaveValue("new-call")
     resolveOld({ ok: true, options: [{ id: "old-call", label: "Stale call" }] })
@@ -931,7 +556,6 @@ it.each(["log-offer", "log-attempt"])("retains a rapid %s opening intent until a
   const user = userEvent.setup();
   const initial = snapshot("106 Fixture Lane");
   let release!: (value: unknown) => void;
-  mocks.loadMyLeads.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
   mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:initial,kpis});
   mocks.loadMyLeadCallReferences.mockResolvedValue({ok:true,options:[]});
   mocks.submitMyLeadCommand.mockResolvedValue({ok:true});
@@ -943,10 +567,12 @@ it.each(["log-offer", "log-attempt"])("retains a rapid %s opening intent until a
   await user.click(await screen.findByRole('button',{name:'Done without a drip'}));
   await waitFor(()=>expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   expect(mocks.loadMyLeads).toHaveBeenCalledTimes(1);
+  // The next opening reads the lead through the single-row lookup and waits for it.
+  mocks.loadMyLeadRow.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
   await user.click(screen.getByRole("button",{name:nextAction==="log-offer"?"Log offer":"Log attempt"}));
   expect(screen.getByText("Loading current lead…")).toBeVisible();
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-  await act(async()=>{release({ok:true,snapshot:initial,kpis});});
+  await act(async()=>{release({ok:true,lookup:{status:'found',row:initial.stages.not_contacted!.rows[0],snapshotAt:initial.snapshotAt}});});
   if(nextAction==="log-offer"){
     await user.type(screen.getByLabelText("Offer amount"),"125000.50");
     await user.selectOptions(screen.getByLabelText("Offer method"),"verbal");
@@ -976,7 +602,7 @@ describe('stale form recovery',()=>{
   it('refreshes a stale drip handoff and retries with the current queue version',async()=>{
     const user=userEvent.setup();
     mocks.listDripChoices.mockResolvedValue({ok:true,data:[{id:'drip-1',name:'Seller follow-up',textCount:4,days:90,firstSend:'Today'}]});
-    mocks.submitMyLeadHandoffDrip.mockResolvedValueOnce({ok:false,code:'STALE_STATE',message:'This lead changed. Refresh before trying again.'})
+    mocks.submitMyLeadHandoffDrip.mockResolvedValueOnce({ ok: false, certainty: "rejected", code: 'STALE_STATE',message:'This lead changed. Refresh before trying again.'})
       .mockResolvedValueOnce({ok:true});
     renderClient(snapshot('106 Fixture Lane'));
     await user.click(screen.getByRole('button',{name:'Handoff'}));
@@ -987,6 +613,8 @@ describe('stale form recovery',()=>{
     expect(mocks.submitMyLeadHandoffDrip.mock.calls[0][0]).toMatchObject({expectedQueueVersion:1,sequenceId:'drip-1'});
     const fresh=snapshot('106 Fixture Lane');fresh.stages.not_contacted!.rows[0].queueVersion=2;
     mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});
+    // Recovery requires the authoritative single-row lookup to succeed.
+    mocks.loadMyLeadRow.mockResolvedValue({ok:true,lookup:{status:'found',row:fresh.stages.not_contacted!.rows[0],snapshotAt:fresh.snapshotAt}});
     await user.click(screen.getByRole('button',{name:'Refresh'}));
     await screen.findByText('Lead refreshed. Your draft is retained. Review it before saving.');
     expect(screen.getByLabelText('Handoff reason')).toHaveValue('not_interested');
@@ -996,7 +624,7 @@ describe('stale form recovery',()=>{
   });
   async function rejectedDraft(code='STALE_STATE'){
     const user=userEvent.setup();
-    mocks.submitMyLeadCommand.mockResolvedValueOnce({ok:false,code,message:'This lead changed. Refresh before trying again.'});
+    mocks.submitMyLeadCommand.mockResolvedValueOnce({ok:false,certainty:code==='STALE_STATE'?'rejected':'unknown',code,message:'This lead changed. Refresh before trying again.'});
     renderClient(snapshot('106 Fixture Lane'));
     await user.click(screen.getByRole('button',{name:'Log attempt'}));
     await user.selectOptions(screen.getByLabelText('External outcome'),'reached');
@@ -1004,13 +632,15 @@ describe('stale form recovery',()=>{
     await user.type(screen.getByLabelText('Note (optional)'),'Keep this original draft');
     await user.click(screen.getByRole('button',{name:'Save attempt'}));
     await screen.findByRole('button',{name:'Refresh'});
-    expect(screen.getByRole('button',{name:'Save attempt'})).toBeDisabled();
+    expect(screen.getByRole('button',{name:/Save attempt|Reconcile saved change/})).toBeDisabled();
     return user;
   }
   it('refreshes version metadata while preserving the draft and only saves on explicit retry',async()=>{
     const user=await rejectedDraft();
     const fresh=snapshot('106 Fixture Lane');fresh.stages.not_contacted!.rows[0].queueVersion=2;
     mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});
+    // Recovery requires the authoritative single-row lookup to succeed.
+    mocks.loadMyLeadRow.mockResolvedValue({ok:true,lookup:{status:'found',row:fresh.stages.not_contacted!.rows[0],snapshotAt:fresh.snapshotAt}});
     await user.click(screen.getByRole('button',{name:'Refresh'}));
     await screen.findByText('Lead refreshed. Your draft is retained. Review it before saving.');
     expect(screen.getByLabelText('Note (optional)')).toHaveValue('Keep this original draft');
@@ -1053,13 +683,13 @@ describe('stale form recovery',()=>{
   it('ignores recovery finishing after cancellation and reopening the same lead',async()=>{
     const user=await rejectedDraft();
     let release!: (value: unknown)=>void;
-    mocks.loadMyLeads.mockReturnValueOnce(new Promise(resolve=>{release=resolve;}));
+    mocks.loadMyLeadRow.mockReturnValueOnce(new Promise(resolve=>{release=resolve;}));
     await user.click(screen.getByRole('button',{name:'Refresh'}));
     await user.click(screen.getByRole('button',{name:'Cancel'}));
     await user.click(screen.getByRole('button',{name:'Log attempt'}));
     await user.type(screen.getByLabelText('Note (optional)'),'New opening draft');
     const fresh=snapshot('106 Fixture Lane');fresh.stages.not_contacted!.rows[0].queueVersion=99;
-    await act(async()=>release({ok:true,snapshot:fresh,kpis}));
+    await act(async()=>release({ok:true,lookup:{status:'found',row:fresh.stages.not_contacted!.rows[0],snapshotAt:'x'}}));
     expect(screen.getByLabelText('Note (optional)')).toHaveValue('New opening draft');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.getByRole('button',{name:'Save attempt'})).toBeEnabled();
@@ -1070,11 +700,15 @@ describe('stale form recovery',()=>{
     const fresh=snapshot('106 Fixture Lane');
     if(kind==='missing')fresh.stages.not_contacted!.rows=[];
     if(kind==='different episode')fresh.stages.not_contacted!.rows[0].assignmentEpisodeId='episode-2';
-    mocks.loadMyLeads.mockResolvedValue(kind==='failed read'?{ok:false,message:'denied'}:{ok:true,snapshot:fresh,kpis});
+    mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});
+    mocks.loadMyLeadRow.mockResolvedValue(kind==='failed read'?{ok:false,code:'READ_FAILED',message:'denied'}
+      :kind==='missing'?{ok:true,lookup:{status:'unavailable',reason:'other_rep'}}
+      :{ok:true,lookup:{status:'found',row:fresh.stages.not_contacted!.rows[0],snapshotAt:'x'}});
     await user.click(screen.getByRole('button',{name:'Refresh'}));
     await waitFor(()=>expect(screen.getByRole('button',{name:'Refresh'})).toBeEnabled());
     expect(screen.getByLabelText('Note (optional)')).toHaveValue('Keep this original draft');
-    expect(screen.getByRole('button',{name:'Save attempt'})).toBeDisabled();
+    // FORBIDDEN is an unknown outcome, so the exact original request stays locked for reconciliation.
+    expect(screen.getByRole('button',{name:/Save attempt|Reconcile saved change/})).toBeDisabled();
     expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
   });
 });
@@ -1086,7 +720,6 @@ describe("current metadata for rapid workflow openings",()=>{
   async function afterReadiness(){
     const user=userEvent.setup();const initial=snapshot("106 Fixture Lane");
     let release!:(value:unknown)=>void;
-    mocks.loadMyLeads.mockReturnValueOnce(new Promise(resolve=>{release=resolve;}));
     mocks.submitMyLeadCommand.mockResolvedValue({ok:true});
     renderClient(initial);
     await user.click(screen.getByRole("button",{name:"Ready for offer"}));
@@ -1095,7 +728,15 @@ describe("current metadata for rapid workflow openings",()=>{
     await user.click(screen.getByRole("button",{name:"Save readiness"}));
     await waitFor(()=>expect(screen.queryByRole("dialog")).not.toBeInTheDocument(), settle);
     const fresh=snapshot("106 Fixture Lane");Object.assign(fresh.stages.not_contacted!.rows[0],{queueVersion:2,sharedStatus:"interested",motivationKind:"specified",motivationText:"Seller plans to relocate.",temperature:"warm"});
-    return {user,initial,fresh,release};
+    // The NEXT opening's single-row lookup is the delayed read. Tests release it with a queue-read-shaped value.
+    mocks.loadMyLeadRow.mockReturnValueOnce(new Promise(resolve=>{release=resolve;}));
+    const lookupOf=(value:{ok:boolean;message?:string;snapshot?:QueueSnapshot}|unknown)=>{
+      const v=value as {ok:boolean;message?:string;snapshot?:QueueSnapshot};
+      if(!v.ok)return {ok:false,code:'READ_FAILED',message:v.message};
+      const row=v.snapshot?.stages.not_contacted?.rows[0];
+      return row?{ok:true,lookup:{status:'found',row,snapshotAt:'x'}}:{ok:true,lookup:{status:'unavailable',reason:'not_found'}};
+    };
+    return {user,initial,fresh,release:(value:unknown)=>release(lookupOf(value))};
   }
   it.each(["offer","attempt"])("initializes next %s from saved readiness rather than the stale opening row",async next=>{
     const {user,fresh,release}=await afterReadiness();
@@ -1126,39 +767,27 @@ describe("current metadata for rapid workflow openings",()=>{
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
     if(mode==="episode")expect(screen.getByText(/assignment changed/)).toBeVisible();
   }, 15_000);
-  it.each(["foreground","background"])("a later authorized %s queue refresh replaces a failed barrier for future openings",async mode=>{
-    const {user,fresh,release}=await afterReadiness();
-    await act(async()=>release({ok:false,message:"First read failed"}));
-    mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});
-    if(mode==="background"){await user.click(screen.getByRole("button",{name:"Expand details"}));await act(async()=>window.dispatchEvent(new Event("focus")));}
-    else await user.click(screen.getByRole("button",{name:"Retry now"}));
-    await waitFor(()=>expect(screen.queryByText(/Displayed counts may be out of date/)).not.toBeInTheDocument(), settle);
-    await user.click(screen.getByRole("button",{name:"Log offer"}));
-    expect(await screen.findByRole("dialog", undefined, settle)).toBeVisible();
-    expect(screen.queryByText(/Could not load current lead details/)).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Motivation")).not.toBeInTheDocument();
-    expect(mocks.loadMyLeads).toHaveBeenCalledTimes(2);
-    expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
-  }, 15_000);
   it("retries an opening read failure without repeating the saved readiness command",async()=>{
     const {user,fresh,release}=await afterReadiness();await user.click(screen.getByRole("button",{name:"Log offer"}));
     await act(async()=>release({ok:false,message:"Read unavailable"}));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});await user.click(screen.getByRole("button",{name:"Retry opening"}));
+    mocks.loadMyLeadRow.mockResolvedValue({ok:true,lookup:{status:'found',row:fresh.stages.not_contacted!.rows[0],snapshotAt:'x'}});await user.click(screen.getByRole("button",{name:"Retry opening"}));
     expect(await screen.findByRole("dialog", undefined, settle)).toBeVisible();expect(screen.queryByLabelText("Motivation")).not.toBeInTheDocument();expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
   }, 15_000);
 });
 
 
-it("keeps elapsed call time advancing when opening a workflow dialog", () => {
+it("keeps elapsed call time advancing when opening a workflow dialog", async () => {
   mocks.loadMyLeadCallReferences.mockResolvedValue({ ok: true, options: [] })
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] })
   try {
     const clockKpis = { ...kpis, lastAttemptClockVersion: 1, asOf: "2026-09-14T15:00:00Z", lastAttemptAt: "2026-09-14T14:59:00Z" }
-    const view = render(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId="rep-1" initialSnapshot={snapshot("Clock Fixture Lane")} initialKpis={clockKpis} />)
+    const clockSnapshot = snapshot("Clock Fixture Lane")
+    installDefaultRowLookup(clockSnapshot, null)
+    const view = render(<MyLeadsClient viewer={viewer} roster={roster} initialMemberId="rep-1" initialSnapshot={clockSnapshot} initialKpis={clockKpis} />)
     act(() => vi.advanceTimersByTime(5000))
     expect(screen.getByText("1m 5s")).toBeInTheDocument()
-    fireEvent.click(screen.getByRole("button", { name: "Log attempt" }))
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Log attempt" })) })
     expect(screen.getByRole("dialog")).toBeInTheDocument()
     expect(screen.getByText("1m 5s")).toBeInTheDocument()
     act(() => vi.advanceTimersByTime(1000))

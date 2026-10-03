@@ -230,8 +230,9 @@ it('keeps authorized history readable when a historical identity no longer has a
 
 describe('single-lead queue row lookup',()=>{
   const property='11111111-1111-4111-8111-111111111111';
+  const validRow={propertyId:property,stage:'contacted',assignmentEpisodeId:'ep-1',queueVersion:2};
   it('returns a found row from the RPC with the viewer org',async()=>{
-    const row={propertyId:property,stage:'contacted'};
+    const row=validRow;
     mocks.rpc.mockResolvedValue({data:{status:'found',row,snapshotAt:'2026-10-03T00:00:00Z'},error:null});
     expect(await getMyLeadsQueueRow({memberId:'rep',propertyId:property})).toEqual({status:'found',row,snapshotAt:'2026-10-03T00:00:00Z'});
     expect(mocks.rpc).toHaveBeenCalledWith('fn_get_my_leads_queue_row',{p_org_id:'org',p_member_id:'rep',p_property_id:property});
@@ -241,6 +242,22 @@ describe('single-lead queue row lookup',()=>{
       mocks.rpc.mockResolvedValue({data:{status:'unavailable',reason},error:null});
       expect(await getMyLeadsQueueRow({memberId:'rep',propertyId:property})).toEqual({status:'unavailable',reason});
     }
+  });
+  it.each([
+    ['row is not an object',{status:'found',row:true,snapshotAt:'2026-10-03T00:00:00Z'}],
+    ['row is an array',{status:'found',row:[],snapshotAt:'2026-10-03T00:00:00Z'}],
+    ['snapshotAt is empty',{status:'found',row:validRow,snapshotAt:''}],
+    ['snapshotAt is not a timestamp',{status:'found',row:validRow,snapshotAt:'later'}],
+    ['snapshotAt is missing',{status:'found',row:validRow}],
+    ['row is for another property',{status:'found',row:{...validRow,propertyId:'22222222-2222-4222-8222-222222222222'},snapshotAt:'2026-10-03T00:00:00Z'}],
+    ['episode id is missing',{status:'found',row:{...validRow,assignmentEpisodeId:undefined},snapshotAt:'2026-10-03T00:00:00Z'}],
+    ['queueVersion is a string',{status:'found',row:{...validRow,queueVersion:'2'},snapshotAt:'2026-10-03T00:00:00Z'}],
+    ['stage is unknown',{status:'found',row:{...validRow,stage:'archived'},snapshotAt:'2026-10-03T00:00:00Z'}],
+    ['unavailable reason is unknown',{status:'unavailable',reason:'banana'}],
+    ['status is unknown',{status:'maybe'}],
+  ])('treats a malformed response (%s) as a failed read',async(_name,data)=>{
+    mocks.rpc.mockResolvedValue({data,error:null});
+    await expect(getMyLeadsQueueRow({memberId:'rep',propertyId:property})).rejects.toMatchObject({code:'READ_FAILED'});
   });
   it('rejects a foreign member for non-owners and a non-UUID property before any RPC',async()=>{
     await expect(getMyLeadsQueueRow({memberId:'other',propertyId:property})).rejects.toMatchObject({code:'FORBIDDEN'});

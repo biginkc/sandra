@@ -1,5 +1,6 @@
 "use client";
 
+import { myLeadsHref } from "@/lib/my-leads/links";
 import { formatPhoneDisplay } from "@/lib/phone-format";
 import {
   ArrowLeftIcon,
@@ -559,6 +560,22 @@ export function InboxDetail({
             >
               <ExternalLinkIcon className="h-3.5 w-3.5" />
               Open {recordLabel}
+            </Button>
+          ) : null}
+          {data.propertyId && propertyIsLead ? (
+            <Button
+              type="button"
+              onClick={() => {
+                if (!data.propertyId) return;
+                router.push(myLeadsHref(data.propertyId));
+              }}
+              variant="outline"
+              size="sm"
+              className="min-h-11"
+              data-testid="inbox-detail-open-my-leads"
+            >
+              <ExternalLinkIcon className="h-3.5 w-3.5" />
+              Open in My Leads
             </Button>
           ) : null}
           <DropdownMenu>
