@@ -56,7 +56,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   type Opening = {action:MyLeadAction;row:QueueRow;scope:string;callActivityId?:string|null};
   type QueueRead = Awaited<ReturnType<typeof loadMyLeads>>;
   type LinkedRead = Awaited<ReturnType<typeof loadMyLeadQueueRow>>;
-  type LinkedReadResult = LinkedRead | {ok:false;message:string;stale:true};
+  type LinkedReadResult = LinkedRead;
   type CurrentRead = QueueRead | LinkedRead | null;
   const openingScope=JSON.stringify([member,search]);
   const activeScope=useRef(openingScope);activeScope.current=openingScope;
@@ -66,13 +66,17 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const findRow=(readSnapshot:QueueSnapshot|null,readDrips:MyLeadDripSnapshot|null|undefined,id:string)=>
     Object.values(readSnapshot?.stages??{}).flatMap(page=>page?.rows??[]).find(row=>row.propertyId===id)??
     [...(readDrips?.replied??[]),...(readDrips?.active??[])].find(row=>row.propertyId===id)?.queueRow??null;
-  const linkedRow=(id:string)=>linkedLeadRef.current.status==='found'&&linkedLeadRef.current.propertyId.toLowerCase()===id.toLowerCase()&&member===initialMemberId?linkedLeadRef.current.row:null;
+  const linkedRow=useCallback((id:string)=>linkedLeadRef.current.status==='found'&&linkedLeadRef.current.propertyId.toLowerCase()===id.toLowerCase()&&member===initialMemberId?linkedLeadRef.current.row:null,[initialMemberId,member]);
   const linkedReadRequest=useRef(0);
   const refreshLinkedLead=useCallback(async(propertyId:string):Promise<LinkedReadResult>=>{
     if(member!==initialMemberId)return {ok:false as const,message:'Switch back to your own queue to continue.'};
     const readRequest=++linkedReadRequest.current;
     const result=await loadMyLeadQueueRow({memberId:initialMemberId,propertyId});
-    if(readRequest!==linkedReadRequest.current)return {ok:false as const,message:'A newer lead refresh is in progress.',stale:true as const};
+    // The request epoch only protects the rendered linked card. Callers that
+    // are opening or recovering an action still need the actual result from
+    // their own authorized read; turning an older response into a synthetic
+    // failure can incorrectly block a valid opening.
+    if(readRequest!==linkedReadRequest.current)return result;
     if(!result.ok)return result;
     const lookup=result.lookup;
     if(lookup.status!=='found'||lookup.row.propertyId.toLowerCase()!==propertyId.toLowerCase())return result;
@@ -142,8 +146,13 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   useEffect(()=>{
     if(member===initialMemberId)return;
     ++linkedReadRequest.current;
-    cancelOpening();
-    setDialog(null);setRecovery(null);setCallOptions(null);recoveredRow.current=null;submission.current=null;
+    let cancelled=false;
+    queueMicrotask(()=>{
+      if(cancelled)return;
+      cancelOpening();
+      setDialog(null);setRecovery(null);setCallOptions(null);recoveredRow.current=null;submission.current=null;
+    });
+    return()=>{cancelled=true;};
   },[initialMemberId,member]);
   const serverScopeKey=member;
   const previousServerScope=useRef(serverScopeKey);
@@ -347,7 +356,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       else {await read;router.refresh();}
     }
     return result;
-  },[dialog,refresh,router,recovery,openingScope,member]);
+  },[dialog,refresh,router,recovery,openingScope,member,linkedRow,refreshLinkedLead]);
   const pages=snapshot?stagePages(snapshot,drips):null;
   const loadSelectedDetail=useCallback(async(propertyId:string):Promise<MyLeadDetailResult>=>{
     if(member!==initialMemberId)return {ok:false as const,message:'This lead is opened in your own My Leads queue. Switch back to your queue to continue.'};
@@ -462,8 +471,7 @@ function SelectedLeadView({lead,active,onLoadDetail,onLoadDetailPage,onStageActi
   const [detailState,setDetailState]=useState<MyLeadDetailState>({status:'loading'});
   const detailRequest=useRef(0);
   const view=useMemo(()=>queueRowView(lead.row,lead.snapshotAt),[lead.row,lead.snapshotAt]);
-  const load=useCallback(async()=>{
-    const requestId=++detailRequest.current;
+  const load=useCallback(async(requestId=++detailRequest.current)=>{
     if(!active){setDetailState({status:'error',message:'This lead is opened in your own My Leads queue. Switch back to your queue to continue.'});return;}
     setDetailState(current=>current.status==='ready'?current:{status:'loading'});
     try{
@@ -472,7 +480,12 @@ function SelectedLeadView({lead,active,onLoadDetail,onLoadDetailPage,onStageActi
       setDetailState(result.ok?{status:'ready',detail:result.detail}:{status:'error',message:result.message});
     }catch{if(detailRequest.current===requestId)setDetailState({status:'error',message:'This lead is unavailable in your My Leads queue.'});}
   },[active,lead.propertyId,onLoadDetail]);
-  useEffect(()=>{void load();},[load]);
+  useEffect(()=>{
+    const requestId=++detailRequest.current;
+    let cancelled=false;
+    queueMicrotask(()=>{if(!cancelled)void load(requestId);});
+    return()=>{cancelled=true;};
+  },[load]);
 
   if(!active)return <div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">This lead is opened in your own My Leads queue. Switch back to your queue to continue.</div>;
   return <section aria-label="Selected lead from link" className="mb-6 space-y-2">
