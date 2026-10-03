@@ -330,7 +330,7 @@ describe("MyLeadsClient pinned deep-link row", () => {
 
   it("applies an authoritative denial even when the list refresh fails", async () => {
     render(ui(focusOn(loaded), snap([loaded], 25)))
-    mocks.loadMyLeads.mockResolvedValue({ ok: false, message: "queue unavailable" })
+    mocks.loadMyLeads.mockRejectedValue(new Error("queue unavailable"))
     mocks.loadMyLeadRow.mockResolvedValue(unavailable("other_rep"))
     await refreshNow()
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("assigned to another rep"))
@@ -346,7 +346,7 @@ describe("MyLeadsClient pinned deep-link row", () => {
     await user.click(within(screen.getByTestId("my-lead-actions-loaded-1")).getByRole("button", { name: "Ready to make an offer" }))
     expect(screen.getByText("Loading current lead…")).toBeVisible()
 
-    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([loaded], 25), kpis, drips: noDrips() })
+    mocks.loadMyLeads.mockRejectedValue(new Error("queue unavailable"))
     mocks.loadMyLeadRow.mockResolvedValue(unavailable("other_rep"))
     await refreshNow()
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("assigned to another rep"))
@@ -363,7 +363,7 @@ describe("MyLeadsClient pinned deep-link row", () => {
     await user.click(within(screen.getByTestId("my-lead-actions-loaded-1")).getByRole("button", { name: "Ready to make an offer" }))
     await screen.findByRole("dialog", { name: "Ready to make an offer" })
 
-    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([loaded], 25), kpis, drips: noDrips() })
+    mocks.loadMyLeads.mockRejectedValue(new Error("queue unavailable"))
     mocks.loadMyLeadRow.mockResolvedValue(unavailable("other_rep"))
     await refreshNow()
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("assigned to another rep"))
@@ -387,7 +387,7 @@ describe("MyLeadsClient pinned deep-link row", () => {
     await user.click(within(screen.getByTestId("my-lead-actions-loaded-2")).getByRole("button", { name: "Ready to make an offer" }))
     await screen.findByRole("dialog", { name: "Ready to make an offer" })
 
-    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([loaded, other], 25), kpis, drips: noDrips() })
+    mocks.loadMyLeads.mockRejectedValue(new Error("queue unavailable"))
     await refreshNow()
     await waitFor(() => expect(screen.getByText("This lead is assigned to another rep.")).toBeInTheDocument())
     expect(screen.getByRole("dialog", { name: "Ready to make an offer" })).toBeInTheDocument()

@@ -430,7 +430,12 @@ export function MyLeadsClient({
       try {
         const pinId = pinWanted.current;
         const [loaded, pinResult] = await Promise.all([
-          loadMyLeads({ memberId: member, search, period: "today" }),
+          loadMyLeads({ memberId: member, search, period: "today" }).catch(
+            () => ({
+              ok: false as const,
+              message: "My Leads could not refresh.",
+            }),
+          ),
           pinId ? readPin(pinId, member) : Promise.resolve(undefined),
         ]);
         // A newer refresh, or a cleared/changed deep-link target, supersedes this read.
@@ -490,7 +495,11 @@ export function MyLeadsClient({
           setLastCheckedAt(result.snapshot.snapshotAt);
           setError(null);
           setRefreshError(null);
-        } else setRefreshError(result.message);
+        } else {
+          setRefreshError(result.message);
+          if (pinResult === "error" && pinWanted.current === pinId)
+            setPinNotice(MY_LEAD_ROW_ERROR_COPY);
+        }
         return result;
       } catch {
         if (id === request.current) {
