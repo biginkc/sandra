@@ -7,7 +7,7 @@ vi.mock("../actions", () => ({ submitMyLeadCommand: actions.submitMyLeadCommand,
 
 import type { QueueRow } from "@/lib/my-leads/queries"
 import { CLOSE_CONFIRM_MESSAGE, MAY_HAVE_SAVED_MESSAGE, MAY_HAVE_SAVED_REFRESH_ONLY_MESSAGE, NEW_UPDATE_CONFIRM_MESSAGE, RESUME_NOTICE, useAttemptWorkflow, type AttemptOpening } from "./use-attempt-workflow"
-import { SUBMISSION_STORAGE_KEY, getSubmission, listSubmissions, simulateReloadForTests } from "./submission-store"
+import { SUBMISSION_STORAGE_KEY, getSubmission, hasUncertainSubmission, listSubmissions, simulateReloadForTests } from "./submission-store"
 
 const VIEWER = { userId: "user-1", orgId: "org-1" }
 const row = (overrides: Partial<QueueRow> = {}) =>
@@ -39,7 +39,7 @@ const uncertainSave = async (hook: ReturnType<typeof setup>["hook"], payload: ob
  */
 function fakeServer(start: { version: number; episode?: string; checkVersion?: boolean }) {
   const db = { version: start.version, episode: start.episode ?? "ep-1", receipts: new Map<string, string>(), commits: 0 }
-  let mode: "ok" | "drop" | "lost" | "inflight" = "ok"
+  let mode: "ok" | "drop" | "lost" | "inflight" | "reject" = "ok"
   const inflight: Record<string, unknown>[] = []
   const hashOf = (input: Record<string, unknown>) => JSON.stringify(Object.fromEntries(Object.entries(input).filter(([k]) => k !== "idempotencyKey").sort(([a], [b]) => a.localeCompare(b))))
   const execute = (input: Record<string, unknown>) => {
@@ -48,7 +48,8 @@ function fakeServer(start: { version: number; episode?: string; checkVersion?: b
     const stored = db.receipts.get(key)
     if (stored !== undefined) return stored === hash ? { ok: true, duplicate: true, attemptRecorded: true } : { ok: false, answered: true, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." }
     if (input.expectedEpisodeId !== db.episode) return { ok: false, answered: true, certainty: "rejected", code: "STALE_ASSIGNMENT", message: "stale" }
-    if (start.checkVersion !== false && input.expectedQueueVersion !== db.version) return { ok: false, answered: true, certainty: "rejected", code: "STALE_STATE", message: "stale" }
+    // finalize (source "sandra") has no queue-version check; log_attempt does.
+    if (start.checkVersion !== false && input.source !== "sandra" && input.expectedQueueVersion !== db.version) return { ok: false, answered: true, certainty: "rejected", code: "STALE_STATE", message: "stale" }
     db.receipts.set(key, hash)
     db.version += 1
     db.commits += 1
@@ -58,6 +59,7 @@ function fakeServer(start: { version: number; episode?: string; checkVersion?: b
     const current = mode
     mode = "ok"
     if (current === "lost") throw new Error("network")
+    if (current === "reject") return { ok: false, answered: true, certainty: "rejected", code: "FEATURE_DISABLED", message: "off" }
     if (current === "inflight") { inflight.push(input); throw new Error("network") }
     const result = execute(input)
     if (current === "drop") throw new Error("network")
@@ -65,7 +67,7 @@ function fakeServer(start: { version: number; episode?: string; checkVersion?: b
   }
   return {
     db, call,
-    next: (m: "drop" | "lost" | "inflight") => { mode = m },
+    next: (m: "drop" | "lost" | "inflight" | "reject") => { mode = m },
     land: () => { for (const input of inflight.splice(0)) execute(input) },
   }
 }
@@ -302,13 +304,15 @@ describe("submission store backs the workflow across close, unmount and reload",
       const hook = await replayedTwice({ ok: false, answered: true, certainty: "unknown", code: "RECORDING_REQUIRED", message: "Attach the recording." })
       expect(hook.result.current.recoveryValue?.startOver).toBeTypeOf("function")
     })
-    it.each([
-      ["a transport failure", { ok: false, certainty: "unknown", message: "The update could not be confirmed. Retry with the same form." }],
-      ["an answered unknown failure with no deterministic code", { ok: false, answered: true, certainty: "unknown", message: "The update could not be saved. Check the fields and retry." }],
-    ])("is never offered for %s", async (_name, second) => {
-      const hook = await replayedTwice(second)
+    it("is never offered for a transport failure", async () => {
+      const hook = await replayedTwice({ ok: false, certainty: "unknown", message: "The update could not be confirmed. Retry with the same form." })
       expect(hook.result.current.recoveryValue?.startOver).toBeUndefined()
       expect(hook.result.current.recoveryValue?.reconciliation?.payload).toMatchObject({ note: "original" })
+    })
+    it("is offered for ANY answered database error on a frozen replay (same key, so commit-safe), with honest copy", async () => {
+      const hook = await replayedTwice({ ok: false, answered: true, certainty: "unknown", code: "INVALID_INPUT", message: "The update could not be saved. Check the fields and retry." })
+      expect(hook.result.current.recoveryValue?.startOver).toBeTypeOf("function")
+      expect(hook.result.current.recoveryValue?.message).toBe("Sandra can't save these values. Start over to edit them.")
     })
     it("is not offered when the payload was lost to a reload", async () => {
       actions.submitMyLeadCommand.mockRejectedValueOnce(new Error("network"))
@@ -592,6 +596,158 @@ describe("submission store backs the workflow across close, unmount and reload",
       await saveOnce(hook, { outcome: "reached", source: "sandra", callActivityId: "call-1" })
       expect(sent(2).idempotencyKey).not.toBe(sent(0).idempotencyKey)
       expect(server.db.commits).toBe(1)
+    })
+    it("P1-a: STALE proof dies with the request it proved: after the v4 edit goes uncertain and is definitely rejected (non-STALE), a route switch is refused and the delayed v4 is the only commit", async () => {
+      const server = fakeServer({ version: 3 })
+      actions.submitMyLeadCommand.mockImplementation(server.call)
+      server.next("lost")
+      const { hook, handlers } = setup(row3())
+      await saveOnce(hook) // v3 never reaches the server
+      server.db.version = 4 // another writer
+      await saveOnce(hook) // frozen v3 replay: STALE_STATE (proof for v3)
+      handlers.readRow.mockResolvedValue(row({ queueVersion: 4 }))
+      await act(async () => { hook.result.current.recoveryValue?.refresh() })
+      act(() => hook.result.current.recoveryValue?.startOver?.())
+      server.next("inflight")
+      await saveOnce(hook, { ...typed, note: "edited v4" }) // v4: lost in flight, uncertain
+      server.next("reject")
+      await saveOnce(hook) // frozen v4 replay: definite FEATURE_DISABLED, NOT stale proof
+      await act(async () => { hook.result.current.recoveryValue?.refresh() })
+      act(() => hook.result.current.recoveryValue?.startOver?.())
+      const calls = actions.submitMyLeadCommand.mock.calls.length
+      let refused: { ok: boolean } | undefined
+      await act(async () => { refused = await hook.result.current.submit({ outcome: "reached", source: "sandra", callActivityId: "call-1" }) as { ok: boolean } })
+      expect(refused?.ok).toBe(false)
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(calls) // finalize (no version check) was never sent
+      server.land() // the delayed v4 commits
+      expect(server.db.commits).toBe(1)
+    })
+    it("P1-b: a late rejection after a viewer switch is dropped: viewer B sees nothing and nothing is stored under B", async () => {
+      let reject: (error: Error) => void = () => undefined
+      actions.submitMyLeadCommand.mockImplementationOnce(() => new Promise((_resolve, rej) => { reject = rej }))
+      const { hook } = setup(opening(), { viewer: { userId: "user-1", orgId: "org-1" } })
+      let pending: Promise<unknown> = Promise.resolve()
+      act(() => { pending = hook.result.current.submit({ outcome: "reached", note: "viewer A secret" }).catch(() => undefined) })
+      hook.rerender({ current: opening(), viewer: { userId: "user-2", orgId: "org-1" } })
+      expect(hook.result.current.recoveryValue).toBeNull()
+      await act(async () => { reject(new Error("late network failure")); await pending })
+      expect(hook.result.current.recoveryValue).toBeNull()
+      const raw = window.sessionStorage.getItem(SUBMISSION_STORAGE_KEY) ?? ""
+      expect(raw).not.toContain("viewer A secret")
+      expect(listSubmissions({ ...ownerScope(), viewerUserId: "user-2" }, () => true)).toEqual([])
+      expect(listSubmissions(ownerScope(), () => true)).toEqual([])
+    })
+    it("P2: an answered INVALID_INPUT on a frozen replay offers Start over on the SAME key; the corrected save commits once", async () => {
+      const server = fakeServer({ version: 3 })
+      actions.submitMyLeadCommand.mockImplementation(async (command: string, input: Record<string, unknown>) =>
+        typeof input.recordingUrl === "string" && input.recordingUrl.length > 4096
+          ? { ok: false, answered: true, certainty: "unknown", code: "INVALID_INPUT", message: "The update could not be saved. Check the fields and retry." }
+          : server.call(command, input))
+      const longUrl = `https://example.com/${"a".repeat(4100)}`
+      const { hook } = setup(row3())
+      actions.submitMyLeadCommand.mockRejectedValueOnce(new Error("network")) // the first send is lost: frozen
+      await saveOnce(hook, { ...typed, recordingUrl: longUrl })
+      await saveOnce(hook) // the frozen replay is answered INVALID_INPUT
+      expect(hook.result.current.recoveryValue?.startOver).toBeTypeOf("function")
+      act(() => hook.result.current.recoveryValue?.startOver?.())
+      await saveOnce(hook, { ...typed, recordingUrl: "https://example.com/ok" })
+      const keys = new Set(actions.submitMyLeadCommand.mock.calls.map((call) => (call[1] as { idempotencyKey: string }).idempotencyKey))
+      expect(keys.size).toBe(1)
+      expect(server.db.commits).toBe(1)
+    })
+    it("P2: with the original already committed, the corrected save conflicts and Refresh closes; still 1 commit", async () => {
+      const server = fakeServer({ version: 3 })
+      actions.submitMyLeadCommand.mockImplementation(async (command: string, input: Record<string, unknown>) =>
+        input.recordingUrl === "https://example.com/bad" && server.db.commits === 0 && (actions.submitMyLeadCommand.mock.calls.length > 1)
+          ? { ok: false, answered: true, certainty: "unknown", code: "INVALID_INPUT", message: "x" }
+          : server.call(command, input))
+      server.next("drop") // the original commits, its response is lost
+      const { hook, handlers } = setup(row3())
+      await saveOnce(hook, { ...typed, recordingUrl: "https://example.com/bad" })
+      expect(server.db.commits).toBe(1)
+      // The replay is answered (as if the server rejected the payload before committing anywhere new).
+      actions.submitMyLeadCommand.mockImplementationOnce(async () => ({ ok: false, answered: true, certainty: "unknown", code: "INVALID_INPUT", message: "x" }))
+      await saveOnce(hook)
+      expect(hook.result.current.recoveryValue?.startOver).toBeTypeOf("function")
+      act(() => hook.result.current.recoveryValue?.startOver?.())
+      await saveOnce(hook, { ...typed, recordingUrl: "https://example.com/fixed" })
+      expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, message: "This was already saved. Refresh to see it." })
+      await act(async () => { hook.result.current.recoveryValue?.refresh() })
+      expect(handlers.onClose).toHaveBeenCalledTimes(1)
+      expect(server.db.commits).toBe(1)
+    })
+    it("Fable 1: Save as a new update only ARMS at confirm; closing before sending keeps the record and the may-have-saved state; the key is retired at send time", async () => {
+      const server = fakeServer({ version: 3 })
+      actions.submitMyLeadCommand.mockImplementation(server.call)
+      server.next("drop")
+      const first = setup(row3())
+      await saveOnce(first.hook)
+      first.hook.unmount()
+      simulateReloadForTests()
+      const { hook } = setup(rowAt(4))
+      vi.spyOn(window, "confirm").mockReturnValue(true)
+      act(() => hook.result.current.recoveryValue?.saveAsNew?.())
+      expect(listSubmissions(ownerScope(), () => true)).toHaveLength(1) // still there after the confirm
+      hook.rerender({ current: null })
+      hook.rerender({ current: rowAt(4) }) // closed without sending, then reopened
+      expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, message: MAY_HAVE_SAVED_MESSAGE })
+      expect(getSubmission({ ...ownerScope(), operation: "log_attempt" })).toMatchObject({ key: sent(0).idempotencyKey })
+      act(() => hook.result.current.recoveryValue?.saveAsNew?.())
+      await saveOnce(hook)
+      expect(sent(1).idempotencyKey).not.toBe(sent(0).idempotencyKey)
+      expect(server.db.commits).toBe(2) // by explicit choice only
+    })
+    it("Fable 2: a STALE rejection that was not ANSWERED by the database is not proof, so the route lock holds", async () => {
+      actions.submitMyLeadCommand
+        .mockRejectedValueOnce(new Error("network"))
+        .mockResolvedValueOnce({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "stale" })
+      const { hook, handlers } = setup(row3())
+      await saveOnce(hook)
+      await saveOnce(hook)
+      handlers.readRow.mockResolvedValue(row({ queueVersion: 3 }))
+      await act(async () => { hook.result.current.recoveryValue?.refresh() })
+      act(() => hook.result.current.recoveryValue?.startOver?.())
+      let refused: { ok: boolean } | undefined
+      await act(async () => { refused = await hook.result.current.submit({ outcome: "reached", source: "sandra", callActivityId: "call-1" }) as { ok: boolean } })
+      expect(refused?.ok).toBe(false)
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(2)
+    })
+    it("Fable 3: a resumed save answered with a rejection does not freeze the refused payload (no reconcile on reopen, no beforeunload)", async () => {
+      actions.submitMyLeadCommand
+        .mockRejectedValueOnce(new Error("network"))
+        .mockResolvedValueOnce({ ok: false, answered: true, certainty: "unknown", code: "INVALID_INPUT", message: "The update could not be saved. Check the fields and retry." })
+      const first = setup(row3())
+      await saveOnce(first.hook)
+      first.hook.unmount()
+      simulateReloadForTests()
+      const { hook } = setup(row3())
+      await saveOnce(hook, { ...typed, note: "refused text" })
+      expect(getSubmission({ ...ownerScope(), operation: "log_attempt" })?.payload).toBeNull()
+      expect(hasUncertainSubmission()).toBe(false)
+      hook.rerender({ current: null })
+      hook.rerender({ current: row3() })
+      expect(hook.result.current.recoveryValue?.reconciliation).toBeUndefined()
+    })
+    it("Fable 4: a failed Refresh after IDEMPOTENCY_CONFLICT stays blocked and retryable, then the retry closes", async () => {
+      actions.submitMyLeadCommand.mockResolvedValueOnce({ ok: false, answered: true, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." })
+      const { hook, handlers } = setup(row3())
+      await saveOnce(hook)
+      handlers.readRow.mockRejectedValueOnce(new Error("down"))
+      await act(async () => { hook.result.current.recoveryValue?.refresh() })
+      expect(hook.result.current.recoveryValue).toMatchObject({ blocked: true, busy: false })
+      expect(handlers.onClose).not.toHaveBeenCalled()
+      await act(async () => { hook.result.current.recoveryValue?.refresh() })
+      expect(handlers.onClose).toHaveBeenCalledTimes(1)
+      expect(listSubmissions(ownerScope(), () => true)).toEqual([])
+    })
+    it("Fable 5: without a viewer or a rep nothing is sent or recorded", async () => {
+      const handlers = { readRow: vi.fn(async () => row()), onCommitted: vi.fn(async () => undefined), onSettled: vi.fn(), onClose: vi.fn(), onDripChanged: vi.fn() }
+      const { result } = renderHook(() => useAttemptWorkflow({ opening: opening(), memberId: null, viewer: null, ...handlers }))
+      let out: { ok: boolean } | undefined
+      await act(async () => { out = await result.current.submit({ outcome: "reached" }) as { ok: boolean } })
+      expect(out?.ok).toBe(false)
+      expect(actions.submitMyLeadCommand).not.toHaveBeenCalled()
+      expect(window.sessionStorage.getItem(SUBMISSION_STORAGE_KEY)).toBeNull()
     })
     it("row 11 (accepted risk): after 24 hours the record expires, so a re-save is a new key and a clean form; if the original had committed that is a second commit", async () => {
       vi.useFakeTimers({ toFake: ["Date"] })

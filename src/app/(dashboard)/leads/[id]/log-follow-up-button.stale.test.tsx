@@ -125,6 +125,67 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
     expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1)
   })
 
+  describe("a frozen payload the server cannot accept (over-long recording link)", () => {
+    const longUrl = `https://example.com/${"a".repeat(4100)}`
+    const answeredInvalid = { ok: false, answered: true, certainty: "unknown", code: "INVALID_INPUT", message: "The update could not be saved. Check the fields and retry." }
+    // A tiny model of the SQL: a stored key + same request returns duplicate, a different request conflicts.
+    function model(opts: { originalCommits: boolean }) {
+      const stored = new Map<string, string>()
+      let commits = 0
+      const call = async (_command: string, input: Record<string, unknown>) => {
+        const key = String(input.idempotencyKey)
+        const hash = JSON.stringify({ ...input, idempotencyKey: undefined })
+        const long = typeof input.recordingUrl === "string" && input.recordingUrl.length > 4096
+        if (stored.has(key)) return stored.get(key) === hash ? { ok: true, duplicate: true, attemptRecorded: true } : { ok: false, answered: true, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." }
+        if (long && !opts.originalCommits) return answeredInvalid
+        stored.set(key, hash); commits += 1
+        if (long) throw new Error("response lost")
+        return { ok: true, attemptRecorded: true }
+      }
+      return { call, commits: () => commits }
+    }
+    async function freeze(user: ReturnType<typeof userEvent.setup>, originalCommits: boolean) {
+      const server = model({ originalCommits })
+      // The first send is lost; with originalCommits the server did store it.
+      mocks.submitMyLeadCommand.mockImplementation(async (command: string, input: Record<string, unknown>) => {
+        if (mocks.submitMyLeadCommand.mock.calls.length === 1) { if (originalCommits) await server.call(command, input).catch(() => undefined); throw new Error("response lost") }
+        // From the replay on, an over-long link is answered INVALID_INPUT (nothing new commits).
+        if (typeof input.recordingUrl === "string" && input.recordingUrl.length > 4096) return answeredInvalid
+        return server.call(command, input)
+      })
+      render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} viewer={{ userId: "rep-9", orgId: "org-1" }} />)
+      await user.click(screen.getByRole("button", { name: "Log follow-up" }))
+      await user.selectOptions(await screen.findByLabelText("External outcome"), "reached")
+      fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-11T09:00" } })
+      fireEvent.change(screen.getByLabelText(/Recording link/), { target: { value: longUrl } })
+      await user.click(screen.getByRole("button", { name: "Save attempt" }))
+      await user.click(await screen.findByRole("button", { name: "Reconcile saved change" })) // frozen replay: answered INVALID_INPUT
+      return server
+    }
+    it("Start over keeps the SAME key; the corrected link then commits once", async () => {
+      const user = userEvent.setup()
+      const server = await freeze(user, false)
+      expect(await screen.findByText("Sandra can't save these values. Start over to edit them.")).toBeInTheDocument()
+      await user.click(screen.getByRole("button", { name: "Start over" }))
+      fireEvent.change(screen.getByLabelText(/Recording link/), { target: { value: "https://example.com/ok" } })
+      await user.click(screen.getByRole("button", { name: "Save attempt" }))
+      await waitFor(() => expect(server.commits()).toBe(1))
+      const keys = new Set(mocks.submitMyLeadCommand.mock.calls.map((call) => (call[1] as { idempotencyKey: string }).idempotencyKey))
+      expect(keys.size).toBe(1)
+    })
+    it("with the original already committed, the corrected save conflicts and Refresh closes the dialog; still 1 commit", async () => {
+      const user = userEvent.setup()
+      const server = await freeze(user, true)
+      await user.click(await screen.findByRole("button", { name: "Start over" }))
+      fireEvent.change(screen.getByLabelText(/Recording link/), { target: { value: "https://example.com/ok" } })
+      await user.click(screen.getByRole("button", { name: "Save attempt" }))
+      expect(await screen.findByText("This was already saved. Refresh to see it.")).toBeInTheDocument()
+      await user.click(await screen.findByRole("button", { name: "Refresh" }))
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+      expect(server.commits()).toBe(1)
+    })
+  })
+
   it("commit then timeout: an unknown replay failure keeps reconciliation and the next replay succeeds once", async () => {
     const user = userEvent.setup({ delay: null })
     mocks.submitMyLeadCommand

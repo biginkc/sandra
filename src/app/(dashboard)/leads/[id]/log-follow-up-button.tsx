@@ -19,7 +19,7 @@ type Props = {
   /** Decided at page load: why this viewer cannot log a follow-up, or null when they can. */
   disabledReason: string | null
   /** The signed-in viewer: saved-attempt records are scoped to them. */
-  viewer: { userId: string; orgId: string }
+  viewer: { userId: string; orgId: string } | null
 }
 
 type LogFollowUp = { open: () => void; busy: boolean; message: string | null; disabledReason: string | null; hydrated: boolean }
@@ -62,7 +62,7 @@ export function LogFollowUpProvider({ propertyId, propertyLabel, assigneeId, dis
 
   const workflow = useAttemptWorkflow({
     opening,
-    memberId: assigneeId ?? "",
+    memberId: assigneeId,
     viewer,
     readRow: async () => {
       const result = await lookup()

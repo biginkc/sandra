@@ -815,7 +815,7 @@ export default async function LeadDetailPage({
         propertyLabel={lead.address}
         assigneeId={lead.assigned_user_id ?? null}
         disabledReason={logFollowUpDisabledReason}
-        viewer={{ userId: sessionUser?.id ?? "", orgId: lead.org_id }}
+        viewer={sessionUser ? { userId: sessionUser.id, orgId: lead.org_id } : null}
       >
       <LeadOutcomeProvider>
       <LeadMediaHero

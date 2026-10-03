@@ -88,6 +88,6 @@ describe("lead detail v2 layout contract", () => {
     expect(heroProps).toContain("actions={heroActions}");
     // Training leads cannot reach the trigger, and the provider is scoped to the viewer.
     expect(source).toMatch(/<fieldset disabled=\{training\} inert=\{training \|\| undefined\} className="contents"><LogFollowUpTrigger \/><\/fieldset>/);
-    expect(source).toContain("viewer={{ userId: sessionUser?.id ?? \"\", orgId: lead.org_id }}");
+    expect(source).toContain("viewer={sessionUser ? { userId: sessionUser.id, orgId: lead.org_id } : null}");
   });
 });
