@@ -101,7 +101,7 @@ reconciliation; `serving_enabled=false` alone does not repair the write path.
 
 ## `auth.sessions` ownership evidence
 
-`20261002130000_inbox_control_foundation.sql:4-7` makes the migration role
+`20261004050000_inbox_control_foundation.sql:4-7` makes the migration role
 `postgres`, requires `SELECT` and `TRIGGER` on `auth.sessions`, and refuses a
 missing canonical session table. The approved candidate catalog pin at
 `experiments/inbox-production-install/function-owners.json` records

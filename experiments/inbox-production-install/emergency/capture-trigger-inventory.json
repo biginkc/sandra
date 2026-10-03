@@ -1,9 +1,9 @@
 {
   "approved_commit": "4ee23fcb25d05bad77e2cf74189c24bb1f9ea4c2",
   "migrations": [
-    "20261002130000_inbox_control_foundation.sql",
-    "20261002130100_inbox_read_companion.sql",
-    "20261002130200_inbox_backend_operation_reply.sql"
+    "20261004050000_inbox_control_foundation.sql",
+    "20261004050100_inbox_read_companion.sql",
+    "20261004050200_inbox_backend_operation_reply.sql"
   ],
   "source_relations": [
     "auth.sessions",
@@ -22,7 +22,7 @@
   "functions": [
     {
       "name": "inbox_backfill.capture_collision",
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1065,
       "approved_md5_prosrc": "58b44491162a135f0d2e46d73bb6b79c",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -32,7 +32,7 @@
     },
     {
       "name": "inbox_bridge.capture_access",
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1397,
       "approved_md5_prosrc": "8583671b0e8b10f83edff9c7ba961eb2",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -43,7 +43,7 @@
     },
     {
       "name": "inbox_message_capture.capture",
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 657,
       "approved_md5_prosrc": "c65d454fcef9e87512af5e97e17e599d",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -53,7 +53,7 @@
     },
     {
       "name": "inbox_operation_domain.capture_sms_scope",
-      "migration": "20261002130200_inbox_backend_operation_reply.sql",
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
       "line": 588,
       "approved_md5_prosrc": "3344af15a68206052158425e4283179e",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -64,7 +64,7 @@
     },
     {
       "name": "inbox_operation_domain.capture_target",
-      "migration": "20261002130200_inbox_backend_operation_reply.sql",
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
       "line": 440,
       "approved_md5_prosrc": "380bbd13de051c04e6acd3ee90c269db",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -75,7 +75,7 @@
     },
     {
       "name": "inbox_parent.capture_parent",
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 877,
       "approved_md5_prosrc": "94f86879c7985e63cd0ca7b3e4572b56",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -86,7 +86,7 @@
     },
     {
       "name": "inbox_parent.capture_review",
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 899,
       "approved_md5_prosrc": "16c2de2584351a782e356f01db2bbf41",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -96,7 +96,7 @@
     },
     {
       "name": "inbox_policy.capture_ai_disposition_reviews",
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1300,
       "approved_md5_prosrc": "065afb4f2ecf83ca93211c1a89d3f1b0",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -106,7 +106,7 @@
     },
     {
       "name": "inbox_policy.capture_consent_events",
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1264,
       "approved_md5_prosrc": "1b9f5ebd06f62a86e0c2101ef9acbeb9",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -116,7 +116,7 @@
     },
     {
       "name": "inbox_policy.capture_contacts",
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1240,
       "approved_md5_prosrc": "4d99f53f06cb667721c65cb50ea40b10",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -126,7 +126,7 @@
     },
     {
       "name": "inbox_policy.capture_memberships",
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1318,
       "approved_md5_prosrc": "8d83deb6ed81fb0a3023898f225c6d38",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -136,7 +136,7 @@
     },
     {
       "name": "inbox_policy.capture_message_threads",
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1288,
       "approved_md5_prosrc": "07da9ee2e294444a5f86ce4b44bbe3a6",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -146,7 +146,7 @@
     },
     {
       "name": "inbox_policy.capture_properties",
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1204,
       "approved_md5_prosrc": "bfba50ac7077a0b4c7b56855aca9c6e8",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -156,7 +156,7 @@
     },
     {
       "name": "inbox_policy.capture_sms_phone_suppressions",
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1276,
       "approved_md5_prosrc": "b16569b969660fa433e8b90550c483f0",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -166,7 +166,7 @@
     },
     {
       "name": "inbox_reply_context.capture_organization",
-      "migration": "20261002130200_inbox_backend_operation_reply.sql",
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
       "line": 1842,
       "approved_md5_prosrc": "752e3e58dfec918fe6cd5496faef5ac3",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -176,7 +176,7 @@
     },
     {
       "name": "inbox_reply_context.capture_property",
-      "migration": "20261002130200_inbox_backend_operation_reply.sql",
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
       "line": 1850,
       "approved_md5_prosrc": "ebe4c89c956aaf51468f09fe067b82ef",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -186,7 +186,7 @@
     },
     {
       "name": "inbox_reply_context.capture_sender",
-      "migration": "20261002130200_inbox_backend_operation_reply.sql",
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
       "line": 1834,
       "approved_md5_prosrc": "5c7330d97d21c39e0cfe49aa3535f2a9",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -196,7 +196,7 @@
     },
     {
       "name": "inbox_safety.consent_capture",
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 975,
       "approved_md5_prosrc": "80f52a0718eedb03f177516b20ab3c4d",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -206,7 +206,7 @@
     },
     {
       "name": "inbox_safety.suppression_capture",
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 997,
       "approved_md5_prosrc": "c70a2d52b000a4dad46ccfa137e44680",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -216,7 +216,7 @@
     },
     {
       "name": "inbox_safety.thread_capture",
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 986,
       "approved_md5_prosrc": "0e284768a7315bbbb1adb8730bd42cc2",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -226,7 +226,7 @@
     },
     {
       "name": "public.inbox_capture_inbound_head",
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 41,
       "approved_md5_prosrc": "06d8dd4070ff5b45032f44033dea0053",
       "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
@@ -249,7 +249,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1411
     },
     {
@@ -265,7 +265,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 910
     },
     {
@@ -281,7 +281,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1317
     },
     {
@@ -297,7 +297,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130200_inbox_backend_operation_reply.sql",
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
       "line": 455
     },
     {
@@ -313,7 +313,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 985
     },
     {
@@ -329,7 +329,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1275
     },
     {
@@ -345,7 +345,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 898
     },
     {
@@ -361,7 +361,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1263
     },
     {
@@ -377,7 +377,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1329
     },
     {
@@ -393,7 +393,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1410
     },
     {
@@ -409,7 +409,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1075
     },
     {
@@ -425,7 +425,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 996
     },
     {
@@ -441,7 +441,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1299
     },
     {
@@ -456,7 +456,7 @@
         "UPDATE"
       ],
       "tgtype": 21,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 95
     },
     {
@@ -472,7 +472,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 716
     },
     {
@@ -488,7 +488,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130200_inbox_backend_operation_reply.sql",
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
       "line": 454
     },
     {
@@ -504,7 +504,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130200_inbox_backend_operation_reply.sql",
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
       "line": 1859
     },
     {
@@ -520,7 +520,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 897
     },
     {
@@ -536,7 +536,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1239
     },
     {
@@ -552,7 +552,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130200_inbox_backend_operation_reply.sql",
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
       "line": 1860
     },
     {
@@ -568,7 +568,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130200_inbox_backend_operation_reply.sql",
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
       "line": 616
     },
     {
@@ -584,7 +584,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130200_inbox_backend_operation_reply.sql",
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
       "line": 1858
     },
     {
@@ -600,7 +600,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130200_inbox_backend_operation_reply.sql",
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
       "line": 618
     },
     {
@@ -616,7 +616,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1007
     },
     {
@@ -632,7 +632,7 @@
         "DELETE"
       ],
       "tgtype": 29,
-      "migration": "20261002130000_inbox_control_foundation.sql",
+      "migration": "20261004050000_inbox_control_foundation.sql",
       "line": 1287
     }
   ]

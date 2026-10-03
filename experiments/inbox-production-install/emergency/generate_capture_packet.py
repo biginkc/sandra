@@ -21,9 +21,9 @@ APPROVED_COMMIT = "4ee23fcb25d05bad77e2cf74189c24bb1f9ea4c2"
 PRODUCTION_TARGET_REF = "copflsklaefwzipsrjqz"
 LOCAL_TEST_TARGET_REF = "local-test"
 MIGRATIONS = [
-    ROOT / "supabase/migrations/20261002130000_inbox_control_foundation.sql",
-    ROOT / "supabase/migrations/20261002130100_inbox_read_companion.sql",
-    ROOT / "supabase/migrations/20261002130200_inbox_backend_operation_reply.sql",
+    ROOT / "supabase/migrations/20261004050000_inbox_control_foundation.sql",
+    ROOT / "supabase/migrations/20261004050100_inbox_read_companion.sql",
+    ROOT / "supabase/migrations/20261004050200_inbox_backend_operation_reply.sql",
 ]
 
 # The README/runbook identifies these as the canonical source relations whose

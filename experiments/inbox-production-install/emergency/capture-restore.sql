@@ -1,4 +1,4 @@
--- GENERATED FILE. Source: 20261002130000_inbox_control_foundation.sql, 20261002130100_inbox_read_companion.sql, 20261002130200_inbox_backend_operation_reply.sql at 4ee23fcb25d05bad77e2cf74189c24bb1f9ea4c2.
+-- GENERATED FILE. Source: 20261004050000_inbox_control_foundation.sql, 20261004050100_inbox_read_companion.sql, 20261004050200_inbox_backend_operation_reply.sql at 4ee23fcb25d05bad77e2cf74189c24bb1f9ea4c2.
 -- Tooling-only emergency restore packet; never place this file in supabase/migrations.
 \set ON_ERROR_STOP on
 BEGIN;

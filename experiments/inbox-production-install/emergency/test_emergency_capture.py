@@ -31,9 +31,9 @@ PRODUCTION_TARGET_REF = "copflsklaefwzipsrjqz"
 LOCAL_TEST_CONTAINER: str | None = None
 INVENTORY = json.loads((HERE / "capture-trigger-inventory.json").read_text())
 TARGET_MIGRATIONS = [
-    ROOT / "supabase/migrations/20261002130000_inbox_control_foundation.sql",
-    ROOT / "supabase/migrations/20261002130100_inbox_read_companion.sql",
-    ROOT / "supabase/migrations/20261002130200_inbox_backend_operation_reply.sql",
+    ROOT / "supabase/migrations/20261004050000_inbox_control_foundation.sql",
+    ROOT / "supabase/migrations/20261004050100_inbox_read_companion.sql",
+    ROOT / "supabase/migrations/20261004050200_inbox_backend_operation_reply.sql",
 ]
 TARGET_NAMES = {p.name for p in TARGET_MIGRATIONS}
 RECONCILE_CATALOG_SOURCE = Path(
