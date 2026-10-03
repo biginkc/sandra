@@ -418,6 +418,32 @@ describe("submission store backs the workflow across close, unmount and reload",
       expect(sent(1).idempotencyKey).toBe(sent(0).idempotencyKey)
       expect(server.db.commits).toBe(1)
     })
+    it("row 2: a different route is refused, and Save as a new update (confirm) is the way out: new key, lock lifted, 1 commit", async () => {
+      const server = fakeServer({ version: 3 })
+      actions.submitMyLeadCommand.mockImplementation(server.call)
+      server.next("lost")
+      const first = setup(row3())
+      await saveOnce(first.hook)
+      first.hook.unmount()
+      simulateReloadForTests()
+      const { hook } = setup(row3())
+      const other = { outcome: "reached", source: "sandra", callActivityId: "call-1" }
+      let refused: { ok: boolean; message?: string } | undefined
+      await act(async () => { refused = await hook.result.current.submit(other) as { ok: boolean; message?: string } })
+      expect(refused).toMatchObject({ ok: false })
+      expect(refused?.message).toMatch(/different kind of update/)
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(1)
+      expect(hook.result.current.recoveryValue?.saveAsNew).toBeDefined()
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false)
+      act(() => hook.result.current.recoveryValue?.saveAsNew?.())
+      expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(1)
+      confirm.mockReturnValue(true)
+      act(() => hook.result.current.recoveryValue?.saveAsNew?.())
+      await saveOnce(hook, other)
+      expect(sent(1).idempotencyKey).not.toBe(sent(0).idempotencyKey)
+      expect(sent(1)).toMatchObject({ source: "sandra" })
+      expect(server.db.commits).toBe(1)
+    })
     it("row 3: reload while the original is still in flight: the same key, so the re-save is a duplicate or a conflict, never a second commit", async () => {
       for (const payload of [typed, { ...typed, note: "typed differently" }]) {
         window.sessionStorage.clear()

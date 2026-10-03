@@ -444,7 +444,11 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     // (its first send was definitely rejected), a different route simply starts a new key.
     if (state.route !== null && (state.route !== wantedRoute || state.memberId !== memberId) && !frozen) {
       // Only PROOF lifts the lock: the identical frozen request was rejected with STALE_*.
-      if (state.atRisk && !state.staleProof) return { ok: false as const, certainty: "rejected" as const, message: ROUTE_CHANGED_MESSAGE }
+      if (state.atRisk && !state.staleProof) {
+        // Refused, but never a dead end: the rep may explicitly save this as a new update.
+        setRecovery({ opening, message: ROUTE_CHANGED_MESSAGE, blocked: false, busy: false, maySaved: { canSaveNew: true } })
+        return { ok: false as const, certainty: "rejected" as const, message: ROUTE_CHANGED_MESSAGE }
+      }
       forget(state, opening)
       state.key = crypto.randomUUID()
       state.route = null
