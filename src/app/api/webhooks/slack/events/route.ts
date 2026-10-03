@@ -28,13 +28,16 @@ const FLAG_ENABLED = "1";
 // before its durable job exists.
 const WEBHOOK_BUDGET_MS = 2_500;
 
-async function withinWebhookDeadline<T>(promise: Promise<T>, deadline: number): Promise<T> {
+async function withinWebhookDeadline<T>(operation: () => Promise<T>, deadline: number): Promise<T> {
   const remaining = deadline - Date.now();
   if (remaining <= 0) throw new Error("slack_webhook_deadline_exhausted");
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
+    // Start the operation only after the budget check, and turn synchronous
+    // throws into a promise so the race observes late rejections too.
+    const operationPromise = Promise.resolve().then(operation);
     return await Promise.race([
-      promise,
+      operationPromise,
       new Promise<T>((_, reject) => {
         timer = setTimeout(() => reject(new Error("slack_webhook_deadline_exhausted")), remaining);
       }),
@@ -61,7 +64,7 @@ async function recordNoOp(body: SlackEventEnvelope, reason: string, deadline: nu
   const eventId = body.event_id;
   if (!teamId || !appId || !eventId) return noOp();
   try {
-    await withinWebhookDeadline(enqueueSlackUnfurlEvent({
+    await withinWebhookDeadline(() => enqueueSlackUnfurlEvent({
       teamId,
       appId,
       eventId,
@@ -97,7 +100,7 @@ async function handleEnvelope(body: SlackEventEnvelope, deadline: number): Promi
   // revoked installation cannot leave pending jobs or approvals live.
   if (isLifecycleSlackEvent(type)) {
     try {
-      await withinWebhookDeadline(handleLifecycleSlackEvent(body), deadline);
+      await withinWebhookDeadline(() => handleLifecycleSlackEvent(body), deadline);
     } catch {
       return NextResponse.json({ error: "temporary_lifecycle_failure" }, { status: 503 });
     }
@@ -120,7 +123,7 @@ async function handleEnvelope(body: SlackEventEnvelope, deadline: number): Promi
 
   let installations;
   try {
-    installations = (await withinWebhookDeadline(findSlackInstallations(teamId, appId), deadline)).filter((row) => row.status === "active");
+    installations = (await withinWebhookDeadline(() => findSlackInstallations(teamId, appId), deadline)).filter((row) => row.status === "active");
   } catch (error) {
     reportError(error, { tags: { surface: "slack_events_installation_lookup" }, extra: { teamId, eventId } });
     return NextResponse.json({ error: "temporary_receipt_failure" }, { status: 503 });
@@ -128,7 +131,7 @@ async function handleEnvelope(body: SlackEventEnvelope, deadline: number): Promi
   if (installations.length !== 1) return recordNoOp(body, installations.length === 0 ? "installation_missing" : "installation_ambiguous", deadline);
   const installation = installations[0];
   try {
-    const enqueued = await withinWebhookDeadline(enqueueSlackUnfurlEvent({
+    const enqueued = await withinWebhookDeadline(() => enqueueSlackUnfurlEvent({
       teamId,
       appId,
       eventId,
@@ -157,7 +160,7 @@ export async function POST(request: Request): Promise<Response> {
   if (Number.isFinite(contentLength) && contentLength > SLACK_EVENT_BODY_LIMIT) return NextResponse.json({ error: "body_too_large" }, { status: 413 });
   let rawBody: string;
   try {
-    rawBody = await withinWebhookDeadline(request.text(), deadline);
+    rawBody = await withinWebhookDeadline(() => request.text(), deadline);
   } catch {
     return NextResponse.json({ error: "temporary_request_timeout" }, { status: 503 });
   }

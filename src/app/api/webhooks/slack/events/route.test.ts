@@ -155,4 +155,35 @@ describe("Slack events route", () => {
       vi.useRealTimers();
     }
   });
+
+  it("does not start a no-op receipt operation after the deadline is already exhausted", async () => {
+    const startedAt = Date.now();
+    let nowCalls = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => {
+      nowCalls += 1;
+      return nowCalls <= 2 ? startedAt : startedAt + 3_000;
+    });
+    try {
+      const response = await POST(request(base));
+      expect(response.status).toBe(200);
+      expect(mocks.enqueue).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("observes a late receipt rejection after returning a bounded denial response", async () => {
+    vi.useFakeTimers();
+    let rejectLate!: (error: Error) => void;
+    try {
+      mocks.enqueue.mockReturnValue(new Promise((_, reject) => { rejectLate = reject; }));
+      const pending = POST(request(base));
+      await vi.advanceTimersByTimeAsync(2_500);
+      expect((await pending).status).toBe(200);
+      rejectLate(new Error("late receipt failure"));
+      await Promise.resolve();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
