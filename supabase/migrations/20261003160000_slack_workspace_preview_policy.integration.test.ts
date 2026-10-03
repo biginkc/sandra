@@ -5,7 +5,7 @@ import { expect, it } from "vitest";
 
 import { loadTestEnv } from "@tests/integration/env";
 
-const foundation = readFileSync(new URL("../20261003130001_slack_lead_unfurl_foundation.sql", import.meta.url), "utf8");
+const foundation = readFileSync(new URL("./20261003130001_slack_lead_unfurl_foundation.sql", import.meta.url), "utf8");
 const migration = readFileSync(new URL("./20261003160000_slack_workspace_preview_policy.sql", import.meta.url), "utf8");
 const dbUrl = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
 

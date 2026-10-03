@@ -29,7 +29,7 @@ export async function GET(request: Request) {
     }
     const orgId = selectOrgId(request, memberships);
     if (!orgId) return NextResponse.json({ orgId: null, canManage: false, installations: [] });
-    const membership = memberships.find((candidate) => candidate.org_id === orgId && isActiveMembership(candidate));
+    const membership = memberships.find((candidate) => candidate.user_id === user.id && candidate.org_id === orgId && isActiveMembership(candidate));
     if (!membership) return Response.json({ error: "Organization not found." }, { status: 404 });
     const installations = await listSlackPreviewInstallations({ orgId, userId: user.id });
     return NextResponse.json({
@@ -87,7 +87,9 @@ async function readBody(request: Request): Promise<PolicyRequest> {
   const raw = await request.text();
   if (new TextEncoder().encode(raw).byteLength > MAX_BODY_BYTES) throw new PolicyBodyError("Request is too large.");
   try {
-    return JSON.parse(raw) as PolicyRequest;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new PolicyBodyError("Invalid request.");
+    return parsed as PolicyRequest;
   } catch {
     throw new PolicyBodyError("Invalid request.");
   }
@@ -96,7 +98,8 @@ async function readBody(request: Request): Promise<PolicyRequest> {
 function selectOrgId(request: Request, memberships: readonly Membership[]): string | null {
   const requested = new URL(request.url).searchParams.get("orgId") ?? new URL(request.url).searchParams.get("org_id");
   if (requested) return memberships.some((membership) => membership.org_id === requested && isActiveMembership(membership)) ? requested : null;
-  return memberships.find(isActiveMembership)?.org_id ?? null;
+  const active = memberships.filter(isActiveMembership);
+  return active.length === 1 ? active[0].org_id : null;
 }
 
 function isBoundedId(value: unknown): value is string {
@@ -106,7 +109,9 @@ function isBoundedId(value: unknown): value is string {
 function isActiveMembership(membership: Pick<Membership, "access_status" | "access_expires_at" | "deletion_prepared_at">): boolean {
   if (membership.access_status && membership.access_status !== "active") return false;
   if (membership.deletion_prepared_at) return false;
-  return !(membership.access_expires_at && Date.parse(membership.access_expires_at) <= Date.now());
+  if (!membership.access_expires_at) return true;
+  const expiresAt = Date.parse(membership.access_expires_at);
+  return Number.isFinite(expiresAt) && expiresAt > Date.now();
 }
 
 function databaseCode(error: unknown): string | null {

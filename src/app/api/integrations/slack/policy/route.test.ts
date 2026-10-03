@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
-vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow: mocks.memberships }));
+vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow: mocks.memberships, MembershipLookupError: class MembershipLookupError extends Error {} }));
 vi.mock("@/lib/integrations/slack/unfurl-store", () => ({ listSlackPreviewInstallations: mocks.list, setSlackPreviewPolicy: mocks.set }));
 
 import { GET, POST } from "./route";
@@ -53,5 +53,22 @@ describe("Slack preview policy route", () => {
   it("denies a requested organization outside the caller membership", async () => {
     expect((await GET(request(undefined, "https://sandra.test/api/integrations/slack/policy?orgId=org-2"))).status).toBe(404);
     expect(mocks.list).not.toHaveBeenCalled();
+  });
+
+  it("does not guess a current organization when membership is ambiguous", async () => {
+    mocks.memberships.mockResolvedValue([
+      { user_id: "owner-1", org_id: "org-1", role: "owner", access_status: "active" },
+      { user_id: "owner-1", org_id: "org-2", role: "owner", access_status: "active" },
+    ]);
+    const response = await GET(request(undefined, "https://sandra.test/api/integrations/slack/policy"));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ orgId: null, canManage: false, installations: [] });
+    expect(mocks.list).not.toHaveBeenCalled();
+  });
+
+  it("rejects JSON null and arrays as malformed policy requests", async () => {
+    expect((await POST(request(null))).status).toBe(400);
+    expect((await POST(request([]))).status).toBe(400);
+    expect(mocks.set).not.toHaveBeenCalled();
   });
 });
