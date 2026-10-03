@@ -1,19 +1,24 @@
 // Fail-closed identity check, run immediately before ANY psql/db push/restart in
 // the volume + lock harness. Aborts unless the target is the disposable sandbox:
-//  - docker container `supabase_db_sandra-filter-vol` publishes host port 55329
-//  - the Postgres reachable on 127.0.0.1:55329 started within 30 s of that
+//  - docker container `supabase_db_sandra-filter-vol` publishes the sandbox host port
+//  - the Postgres reachable on 127.0.0.1:<port> started within 30 s of that
 //    container (pg_postmaster_start_time vs docker State.StartedAt)
 //  - it has NO `norma_stress_*`/other-agent databases and database name `postgres`
-//  - the CLI workdir config (SBX_WORKDIR) declares db port 55329
+//  - the CLI workdir config (SBX_WORKDIR) declares the sandbox db port
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
 
-export const SANDBOX = { container: "supabase_db_sandra-filter-vol", port: "55329", url: "postgresql://postgres:postgres@127.0.0.1:55329/postgres" };
+// NO defaults (fail closed): a stack is only ever used when named explicitly, so an inherited/default config can never hit a
+// stack another session is using. Set SBX_PROJECT (supabase project_id) and SBX_DB_PORT of YOUR private disposable stack.
+const PROJECT = process.env.SBX_PROJECT;
+const PORT = process.env.SBX_DB_PORT;
+if (!PROJECT || !PORT) throw new Error("REFUSING: set SBX_PROJECT and SBX_DB_PORT to your private disposable stack (no defaults)");
+export const SANDBOX = { container: `supabase_db_${PROJECT}`, port: PORT, url: `postgresql://postgres:postgres@127.0.0.1:${PORT}/postgres` };
 
 export async function assertSandboxTarget({ url = SANDBOX.url, workdir = process.env.SBX_WORKDIR } = {}) {
-  const fail = (m) => { throw new Error(`REFUSING (not the 55329 sandbox): ${m}`); };
+  const fail = (m) => { throw new Error(`REFUSING (not the configured sandbox): ${m}`); };
   if (!url.includes(`127.0.0.1:${SANDBOX.port}/`)) fail(`url ${url.replace(/:[^:@]*@/, ":***@")}`);
   let info;
   try {
@@ -32,7 +37,7 @@ export async function assertSandboxTarget({ url = SANDBOX.url, workdir = process
     if (Math.abs(Number(r.pm) - started) > 30) fail(`postmaster start ${r.pm} vs container start ${started}`);
     if (workdir !== undefined) {
       if (!workdir) fail("SBX_WORKDIR empty");
-      if (!/port\s*=\s*55329/.test(fs.readFileSync(`${workdir}/supabase/config.toml`, "utf8"))) fail("workdir config is not db port 55329");
+      if (!new RegExp(`port\\s*=\\s*${SANDBOX.port}\\b`).test(fs.readFileSync(`${workdir}/supabase/config.toml`, "utf8"))) fail(`workdir config is not db port ${SANDBOX.port}`);
     }
     return { container: info.Name, id: info.Id.slice(0, 12), port: r.port, serverPort: r.sport, db: r.db, postmasterStart: new Date(Number(r.pm) * 1000).toISOString() };
   } finally { await c.end(); }
