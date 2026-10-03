@@ -1,0 +1,639 @@
+{
+  "approved_commit": "4ee23fcb25d05bad77e2cf74189c24bb1f9ea4c2",
+  "migrations": [
+    "20261004050000_inbox_control_foundation.sql",
+    "20261004050100_inbox_read_companion.sql",
+    "20261004050200_inbox_backend_operation_reply.sql"
+  ],
+  "source_relations": [
+    "auth.sessions",
+    "public.ai_disposition_reviews",
+    "public.consent_events",
+    "public.contacts",
+    "public.memberships",
+    "public.message_threads",
+    "public.messages",
+    "public.organizations",
+    "public.properties",
+    "public.provider_sender_numbers",
+    "public.sequence_enrollments",
+    "public.sms_phone_suppressions"
+  ],
+  "functions": [
+    {
+      "name": "inbox_backfill.capture_collision",
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1065,
+      "approved_md5_prosrc": "58b44491162a135f0d2e46d73bb6b79c",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.message_threads.zzzzz_inbox_backfill_collision"
+      ]
+    },
+    {
+      "name": "inbox_bridge.capture_access",
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1397,
+      "approved_md5_prosrc": "8583671b0e8b10f83edff9c7ba961eb2",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.memberships.zzzzzzz_inbox_access",
+        "auth.sessions.zzzzzzz_inbox_access"
+      ]
+    },
+    {
+      "name": "inbox_message_capture.capture",
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 657,
+      "approved_md5_prosrc": "c65d454fcef9e87512af5e97e17e599d",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.messages.zzzzz_inbox_message_direct"
+      ]
+    },
+    {
+      "name": "inbox_operation_domain.capture_sms_scope",
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
+      "line": 588,
+      "approved_md5_prosrc": "3344af15a68206052158425e4283179e",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.properties.zzzzzzzzz_inbox_sms_scope",
+        "public.sequence_enrollments.zzzzzzzzz_inbox_sms_scope"
+      ]
+    },
+    {
+      "name": "inbox_operation_domain.capture_target",
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
+      "line": 440,
+      "approved_md5_prosrc": "380bbd13de051c04e6acd3ee90c269db",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.messages.zzzzzzzz_inbox_operation_target",
+        "public.ai_disposition_reviews.zzzzzzzz_inbox_operation_target"
+      ]
+    },
+    {
+      "name": "inbox_parent.capture_parent",
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 877,
+      "approved_md5_prosrc": "94f86879c7985e63cd0ca7b3e4572b56",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.properties.zzzzz_inbox_parent",
+        "public.contacts.zzzzz_inbox_parent"
+      ]
+    },
+    {
+      "name": "inbox_parent.capture_review",
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 899,
+      "approved_md5_prosrc": "16c2de2584351a782e356f01db2bbf41",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.ai_disposition_reviews.zzzzz_inbox_parent_review"
+      ]
+    },
+    {
+      "name": "inbox_policy.capture_ai_disposition_reviews",
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1300,
+      "approved_md5_prosrc": "065afb4f2ecf83ca93211c1a89d3f1b0",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.ai_disposition_reviews.zzzzzz_inbox_policy"
+      ]
+    },
+    {
+      "name": "inbox_policy.capture_consent_events",
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1264,
+      "approved_md5_prosrc": "1b9f5ebd06f62a86e0c2101ef9acbeb9",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.consent_events.zzzzzz_inbox_policy"
+      ]
+    },
+    {
+      "name": "inbox_policy.capture_contacts",
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1240,
+      "approved_md5_prosrc": "4d99f53f06cb667721c65cb50ea40b10",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.contacts.zzzzzz_inbox_policy"
+      ]
+    },
+    {
+      "name": "inbox_policy.capture_memberships",
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1318,
+      "approved_md5_prosrc": "8d83deb6ed81fb0a3023898f225c6d38",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.memberships.zzzzzz_inbox_policy"
+      ]
+    },
+    {
+      "name": "inbox_policy.capture_message_threads",
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1288,
+      "approved_md5_prosrc": "07da9ee2e294444a5f86ce4b44bbe3a6",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.message_threads.zzzzzz_inbox_policy"
+      ]
+    },
+    {
+      "name": "inbox_policy.capture_properties",
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1204,
+      "approved_md5_prosrc": "bfba50ac7077a0b4c7b56855aca9c6e8",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.properties.zzzzzz_inbox_policy"
+      ]
+    },
+    {
+      "name": "inbox_policy.capture_sms_phone_suppressions",
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1276,
+      "approved_md5_prosrc": "b16569b969660fa433e8b90550c483f0",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.sms_phone_suppressions.zzzzzz_inbox_policy"
+      ]
+    },
+    {
+      "name": "inbox_reply_context.capture_organization",
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
+      "line": 1842,
+      "approved_md5_prosrc": "752e3e58dfec918fe6cd5496faef5ac3",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.organizations.zzzzzzz_inbox_reply_context"
+      ]
+    },
+    {
+      "name": "inbox_reply_context.capture_property",
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
+      "line": 1850,
+      "approved_md5_prosrc": "ebe4c89c956aaf51468f09fe067b82ef",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.properties.zzzzzzz_inbox_reply_context"
+      ]
+    },
+    {
+      "name": "inbox_reply_context.capture_sender",
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
+      "line": 1834,
+      "approved_md5_prosrc": "5c7330d97d21c39e0cfe49aa3535f2a9",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.provider_sender_numbers.zzzzzzz_inbox_reply_context"
+      ]
+    },
+    {
+      "name": "inbox_safety.consent_capture",
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 975,
+      "approved_md5_prosrc": "80f52a0718eedb03f177516b20ab3c4d",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.consent_events.zzzzz_inbox_safety_consent"
+      ]
+    },
+    {
+      "name": "inbox_safety.suppression_capture",
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 997,
+      "approved_md5_prosrc": "c70a2d52b000a4dad46ccfa137e44680",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.sms_phone_suppressions.zzzzz_inbox_safety_suppression"
+      ]
+    },
+    {
+      "name": "inbox_safety.thread_capture",
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 986,
+      "approved_md5_prosrc": "0e284768a7315bbbb1adb8730bd42cc2",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.message_threads.zzzzz_inbox_safety_thread"
+      ]
+    },
+    {
+      "name": "public.inbox_capture_inbound_head",
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 41,
+      "approved_md5_prosrc": "06d8dd4070ff5b45032f44033dea0053",
+      "no_op_md5_prosrc": "8ab64bae8d78de0c4333d9b2820a4168",
+      "trigger_identities": [
+        "public.messages.inbox_capture_inbound_head"
+      ]
+    }
+  ],
+  "triggers": [
+    {
+      "identity": "auth.sessions.zzzzzzz_inbox_access",
+      "table": "auth.sessions",
+      "name": "zzzzzzz_inbox_access",
+      "function": "inbox_bridge.capture_access",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1411
+    },
+    {
+      "identity": "public.ai_disposition_reviews.zzzzz_inbox_parent_review",
+      "table": "public.ai_disposition_reviews",
+      "name": "zzzzz_inbox_parent_review",
+      "function": "inbox_parent.capture_review",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 910
+    },
+    {
+      "identity": "public.ai_disposition_reviews.zzzzzz_inbox_policy",
+      "table": "public.ai_disposition_reviews",
+      "name": "zzzzzz_inbox_policy",
+      "function": "inbox_policy.capture_ai_disposition_reviews",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1317
+    },
+    {
+      "identity": "public.ai_disposition_reviews.zzzzzzzz_inbox_operation_target",
+      "table": "public.ai_disposition_reviews",
+      "name": "zzzzzzzz_inbox_operation_target",
+      "function": "inbox_operation_domain.capture_target",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
+      "line": 455
+    },
+    {
+      "identity": "public.consent_events.zzzzz_inbox_safety_consent",
+      "table": "public.consent_events",
+      "name": "zzzzz_inbox_safety_consent",
+      "function": "inbox_safety.consent_capture",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 985
+    },
+    {
+      "identity": "public.consent_events.zzzzzz_inbox_policy",
+      "table": "public.consent_events",
+      "name": "zzzzzz_inbox_policy",
+      "function": "inbox_policy.capture_consent_events",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1275
+    },
+    {
+      "identity": "public.contacts.zzzzz_inbox_parent",
+      "table": "public.contacts",
+      "name": "zzzzz_inbox_parent",
+      "function": "inbox_parent.capture_parent",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 898
+    },
+    {
+      "identity": "public.contacts.zzzzzz_inbox_policy",
+      "table": "public.contacts",
+      "name": "zzzzzz_inbox_policy",
+      "function": "inbox_policy.capture_contacts",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1263
+    },
+    {
+      "identity": "public.memberships.zzzzzz_inbox_policy",
+      "table": "public.memberships",
+      "name": "zzzzzz_inbox_policy",
+      "function": "inbox_policy.capture_memberships",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1329
+    },
+    {
+      "identity": "public.memberships.zzzzzzz_inbox_access",
+      "table": "public.memberships",
+      "name": "zzzzzzz_inbox_access",
+      "function": "inbox_bridge.capture_access",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1410
+    },
+    {
+      "identity": "public.message_threads.zzzzz_inbox_backfill_collision",
+      "table": "public.message_threads",
+      "name": "zzzzz_inbox_backfill_collision",
+      "function": "inbox_backfill.capture_collision",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1075
+    },
+    {
+      "identity": "public.message_threads.zzzzz_inbox_safety_thread",
+      "table": "public.message_threads",
+      "name": "zzzzz_inbox_safety_thread",
+      "function": "inbox_safety.thread_capture",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 996
+    },
+    {
+      "identity": "public.message_threads.zzzzzz_inbox_policy",
+      "table": "public.message_threads",
+      "name": "zzzzzz_inbox_policy",
+      "function": "inbox_policy.capture_message_threads",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1299
+    },
+    {
+      "identity": "public.messages.inbox_capture_inbound_head",
+      "table": "public.messages",
+      "name": "inbox_capture_inbound_head",
+      "function": "public.inbox_capture_inbound_head",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE"
+      ],
+      "tgtype": 21,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 95
+    },
+    {
+      "identity": "public.messages.zzzzz_inbox_message_direct",
+      "table": "public.messages",
+      "name": "zzzzz_inbox_message_direct",
+      "function": "inbox_message_capture.capture",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 716
+    },
+    {
+      "identity": "public.messages.zzzzzzzz_inbox_operation_target",
+      "table": "public.messages",
+      "name": "zzzzzzzz_inbox_operation_target",
+      "function": "inbox_operation_domain.capture_target",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
+      "line": 454
+    },
+    {
+      "identity": "public.organizations.zzzzzzz_inbox_reply_context",
+      "table": "public.organizations",
+      "name": "zzzzzzz_inbox_reply_context",
+      "function": "inbox_reply_context.capture_organization",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
+      "line": 1859
+    },
+    {
+      "identity": "public.properties.zzzzz_inbox_parent",
+      "table": "public.properties",
+      "name": "zzzzz_inbox_parent",
+      "function": "inbox_parent.capture_parent",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 897
+    },
+    {
+      "identity": "public.properties.zzzzzz_inbox_policy",
+      "table": "public.properties",
+      "name": "zzzzzz_inbox_policy",
+      "function": "inbox_policy.capture_properties",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1239
+    },
+    {
+      "identity": "public.properties.zzzzzzz_inbox_reply_context",
+      "table": "public.properties",
+      "name": "zzzzzzz_inbox_reply_context",
+      "function": "inbox_reply_context.capture_property",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
+      "line": 1860
+    },
+    {
+      "identity": "public.properties.zzzzzzzzz_inbox_sms_scope",
+      "table": "public.properties",
+      "name": "zzzzzzzzz_inbox_sms_scope",
+      "function": "inbox_operation_domain.capture_sms_scope",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
+      "line": 616
+    },
+    {
+      "identity": "public.provider_sender_numbers.zzzzzzz_inbox_reply_context",
+      "table": "public.provider_sender_numbers",
+      "name": "zzzzzzz_inbox_reply_context",
+      "function": "inbox_reply_context.capture_sender",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
+      "line": 1858
+    },
+    {
+      "identity": "public.sequence_enrollments.zzzzzzzzz_inbox_sms_scope",
+      "table": "public.sequence_enrollments",
+      "name": "zzzzzzzzz_inbox_sms_scope",
+      "function": "inbox_operation_domain.capture_sms_scope",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050200_inbox_backend_operation_reply.sql",
+      "line": 618
+    },
+    {
+      "identity": "public.sms_phone_suppressions.zzzzz_inbox_safety_suppression",
+      "table": "public.sms_phone_suppressions",
+      "name": "zzzzz_inbox_safety_suppression",
+      "function": "inbox_safety.suppression_capture",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1007
+    },
+    {
+      "identity": "public.sms_phone_suppressions.zzzzzz_inbox_policy",
+      "table": "public.sms_phone_suppressions",
+      "name": "zzzzzz_inbox_policy",
+      "function": "inbox_policy.capture_sms_phone_suppressions",
+      "timing": "AFTER",
+      "level": "ROW",
+      "events": [
+        "INSERT",
+        "UPDATE",
+        "DELETE"
+      ],
+      "tgtype": 29,
+      "migration": "20261004050000_inbox_control_foundation.sql",
+      "line": 1287
+    }
+  ]
+}
