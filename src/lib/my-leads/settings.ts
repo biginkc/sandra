@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createClient } from "@/lib/supabase/server";
+import { MY_LEADS_CONFLICT_SQLSTATE } from "./sqlstate";
 import type {
   AcquisitionErrorCode,
   SetAcquisitionDesignationInput,
@@ -48,7 +49,7 @@ function mapRpcError(error: RpcError): AcquisitionSettingsFailure {
   const code =
     text.includes("IDEMPOTENCY_CONFLICT") || error.code === "23505"
       ? "IDEMPOTENCY_CONFLICT"
-      : text.includes("STALE_STATE") || error.code === "40001"
+      : text.includes("STALE_STATE") || error.code === "40001" || error.code === MY_LEADS_CONFLICT_SQLSTATE
         ? "STALE_STATE"
         : text.includes("RECIPIENT_UNAVAILABLE")
           ? "RECIPIENT_UNAVAILABLE"
