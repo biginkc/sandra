@@ -601,3 +601,84 @@ it("reports failed saved-note refresh and retries the first page without another
   expect(onLoadDetailPage.mock.calls).toEqual([["property-1","notes",null],["property-1","notes",null]]);
   expect(noteActions.createLeadNote).toHaveBeenCalledTimes(1);expect(onLeadChanged).not.toHaveBeenCalled();
 });
+
+function makeDrip(propertyId: string, address: string) {
+  return {
+    propertyId, enrollmentId: `enr-${propertyId}`, enrollmentStatus: "active", sequenceId: "seq-1", sequenceName: "Seller follow-up",
+    step: 1, totalSteps: 4, nextTextAt: null, lastText: null, status: null, reason: null,
+    stage: "not_contacted" as const, repliedAt: null, queueRow: { ...makeRow("not_contacted", 9), propertyId, address },
+  } as unknown as NonNullable<MyLeadsQueueProps["drips"]>["active"][number]
+}
+const dripSnapshot = (rows: ReturnType<typeof makeDrip>[]) => ({ active: rows, replied: [], repliedCount: 0, counts: { not_contacted: 0, contacted: 0, needs_offer: 0, offer_sent: 0, under_contract: 0 } }) as unknown as MyLeadsQueueProps["drips"]
+
+describe("MyLeadsQueue deep-link focus", () => {
+  it("expands a drip row with the same detail panel and loads its details", async () => {
+    const user = userEvent.setup()
+    const props = buildProps({ drips: dripSnapshot([makeDrip("drip-1", "77 Drip Lane")]) })
+    render(<MyLeadsQueue {...props} />)
+    expect(props.onLoadDetail).not.toHaveBeenCalled()
+    await user.click(screen.getByRole("button", { name: "Show details for 77 Drip Lane" }))
+    await waitFor(() => expect(props.onLoadDetail).toHaveBeenCalledWith("drip-1"))
+    expect(screen.getByRole("button", { name: "Hide details for 77 Drip Lane" })).toHaveAttribute("aria-expanded", "true")
+  })
+
+  it("scrolls to a drip row through the shared data-lead-id target", async () => {
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+    const props = buildProps({ drips: dripSnapshot([makeDrip("drip-1", "77 Drip Lane")]) })
+    render(<MyLeadsQueue {...props} focusPropertyId="drip-1" focusNonce={0} />)
+    await waitFor(() => expect(props.onLoadDetail).toHaveBeenCalledWith("drip-1"))
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    expect(scrollIntoView.mock.contexts[0]).toBe(document.querySelector('[data-lead-id="drip-1"]'))
+    expect(screen.getByRole("button", { name: "Hide details for 77 Drip Lane" })).toBeInTheDocument()
+  })
+
+  it("opens a collapsed destination section for a new deep-link target", async () => {
+    const user = userEvent.setup()
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+    const props = buildProps()
+    const { rerender } = render(<MyLeadsQueue {...props} />)
+    const section = screen.getByTestId("my-leads-section-contacted")
+    await user.click(within(section).getAllByRole("button")[0])
+    expect(within(section).getAllByRole("button")[0]).toHaveAttribute("aria-expanded", "false")
+    const target = props.stages.contacted.rows[0].propertyId
+    rerender(<MyLeadsQueue {...props} focusPropertyId={target} focusNonce={1} />)
+    await waitFor(() => expect(within(section).getAllByRole("button")[0]).toHaveAttribute("aria-expanded", "true"))
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1))
+    expect(screen.getByRole("button", { name: "Hide details for 2 Main Street" })).toBeInTheDocument()
+  })
+
+  it("re-focuses a repeated target on a new navigation but not on a plain re-render", async () => {
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+    const props = buildProps()
+    const target = props.stages.contacted.rows[0].propertyId
+    const { rerender } = render(<MyLeadsQueue {...props} focusPropertyId={target} focusNonce={0} />)
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1))
+    // Background refresh: same target, new row arrays.
+    rerender(<MyLeadsQueue {...props} stages={{ ...props.stages }} focusPropertyId={target} focusNonce={0} />)
+    rerender(<MyLeadsQueue {...props} stages={{ ...props.stages }} focusPropertyId={target} focusNonce={0} />)
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    // The URL target is cleared (e.g. a filter change), then the same lead is opened again.
+    rerender(<MyLeadsQueue {...props} focusPropertyId={null} focusNonce={0} />)
+    rerender(<MyLeadsQueue {...props} focusPropertyId={target} focusNonce={1} />)
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2))
+    // Switching to another lead (Back/Forward to an older link) also focuses it.
+    const other = props.stages.offer_sent.rows[0].propertyId
+    rerender(<MyLeadsQueue {...props} focusPropertyId={other} focusNonce={2} />)
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(3))
+    expect(screen.getByRole("button", { name: "Hide details for 4 Main Street" })).toBeInTheDocument()
+  })
+
+  it("keeps the focused lead expanded and does not re-expand it after the user collapses it", async () => {
+    const user = userEvent.setup()
+    Element.prototype.scrollIntoView = vi.fn()
+    const props = buildProps()
+    const target = props.stages.contacted.rows[0].propertyId
+    const { rerender } = render(<MyLeadsQueue {...props} focusPropertyId={target} focusNonce={0} />)
+    await user.click(screen.getByRole("button", { name: "Hide details for 2 Main Street" }))
+    rerender(<MyLeadsQueue {...props} stages={{ ...props.stages }} focusPropertyId={target} focusNonce={0} />)
+    expect(screen.getByRole("button", { name: "Show details for 2 Main Street" })).toBeInTheDocument()
+  })
+})

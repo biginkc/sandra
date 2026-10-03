@@ -243,6 +243,8 @@ export type MyLeadsQueueProps = {
   detailRevision?: number
   /** Lead opened from a deep link; starts expanded and scrolled into view. */
   focusPropertyId?: string | null
+  /** Changes for every new deep-link navigation, so a repeated target re-focuses. */
+  focusNonce?: number
   /** Called after a confirmed existing note/appointment mutation. */
   onLeadChanged?: (propertyId: string) => void
   onStageAction: (action: MyLeadAction, row: MyLeadQueueRow) => void

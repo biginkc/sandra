@@ -176,6 +176,7 @@ export function MyLeadQueueRow({
         STAGE_CARD_BORDER[row.queueStage]
       )}
       data-testid={`my-lead-row-${row.propertyId}`}
+      data-lead-id={row.propertyId}
     >
       <button
         type="button"
