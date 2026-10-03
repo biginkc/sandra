@@ -61,7 +61,9 @@ import { CassWidget } from "./cass-widget";
 import { DeleteLeadButton } from "./delete-lead-button";
 import { InlineReply } from "./inline-reply";
 import { LeadAssigneeWidget } from "./assignee-widget";
-import { DripCard } from "./drip-card";
+import { LeadDripCard, LeadOutcomeProvider, LeadOutcomeSection } from "./lead-outcome-section";
+import { NO_ACTIVE_DRIP, toOutcomeBarDrip } from "./lead-outcome-drip";
+import { listDripProgress } from "@/lib/sequences/drip-progress";
 import { LeadMotivationWidget } from "./motivation-widget";
 import { LeadStatusWidget } from "./status-widget";
 import type { CallActivityRollupRow } from "./lead-call-summary";
@@ -297,6 +299,24 @@ export default async function LeadDetailPage({
   const {
     data: { user: sessionUser },
   } = await supabase.auth.getUser();
+
+  // Outcome bar: hidden for Acquisitions members (no Messages access) and
+  // contacts flagged do-not-contact. A failed drip read is "unknown", never "none".
+  const showOutcomeBar =
+    !isAcquisitionMember && !lead.homeowner?.do_not_contact;
+  let outcomeDrip = NO_ACTIVE_DRIP;
+  let outcomeDripUnknown = false;
+  if (showOutcomeBar) {
+    try {
+      const [progress] = await listDripProgress(supabase, [lead.id]);
+      outcomeDrip = toOutcomeBarDrip(progress);
+    } catch (error) {
+      console.error("[leads] drip progress read failed for outcome bar", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      outcomeDripUnknown = true;
+    }
+  }
 
   // Viewer's own saved timezone (same user_integration_prefs.timezone
   // source TasksPanel's fetchMyTasks reads) — LeadAppointmentsSection
@@ -769,6 +789,7 @@ export default async function LeadDetailPage({
 
   return (
     <Page className="gap-0 p-0">
+      <LeadOutcomeProvider>
       <LeadMediaHero
         media={mediaPresentation}
         address={lead.address}
@@ -801,6 +822,17 @@ export default async function LeadDetailPage({
               initialAssigneeEmail={assigneeEmail}
               currentUserId={sessionUser?.id ?? null}
             /></fieldset>
+            {showOutcomeBar ? (
+              <fieldset disabled={training} inert={training || undefined} className="contents"><LeadOutcomeSection
+                propertyId={lead.id}
+                address={lead.address}
+                initialDispo={lead.outreach_dispo}
+                propertyStatus={lead.status}
+                currentUserId={sessionUser?.id ?? null}
+                drip={outcomeDrip}
+                dripUnknown={outcomeDripUnknown}
+              /></fieldset>
+            ) : null}
           </>
         }
         nextAction={
@@ -937,7 +969,7 @@ export default async function LeadDetailPage({
           </div>
 
           <aside className="min-w-0 space-y-3" aria-label="Lead dossier">
-            <fieldset disabled={training} inert={training || undefined} className="contents"><DripCard propertyId={lead.id} /></fieldset>
+            <fieldset disabled={training} inert={training || undefined} className="contents"><LeadDripCard propertyId={lead.id} /></fieldset>
             <LeadFilesCard
               files={esign.files}
               loadError={esign.filesError}
@@ -1224,6 +1256,7 @@ export default async function LeadDetailPage({
           </aside>
         </div>
       </section>
+      </LeadOutcomeProvider>
     </Page>
   );
 }
