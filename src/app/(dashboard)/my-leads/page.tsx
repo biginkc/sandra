@@ -113,7 +113,7 @@ async function resolveFocus(
   try {
     const lookup = await getMyLeadsQueueRow({ memberId, propertyId });
     if (lookup.status === "unavailable") return notInQueue(MY_LEAD_ROW_REASON_COPY[lookup.reason]);
-    return { focus: { propertyId, memberId, notice: null, pin: lookup.row }, memberId };
+    return { focus: { propertyId, memberId, notice: null, pin: lookup.row, pinAt: lookup.snapshotAt }, memberId };
   } catch (error) {
     if (error instanceof MyLeadsReadError) {
       if (error.code === "NOT_FOUND") return notInQueue(MY_LEAD_ROW_REASON_COPY.not_found);

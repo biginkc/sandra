@@ -15,11 +15,13 @@ import type { QueueStage } from '@/lib/my-leads/types';
 export async function loadMyLeads(input:{memberId:string;search:string;period:'today'|'week'|'month'|'custom';startDate?:string;endDate?:string}) {
   try {
     const [snapshot,kpis,drips]=await Promise.all([getAcquisitionQueue(input),getAcquisitionKpis({memberId:input.memberId,period:'today'}),listMyLeadsInDrip(input.memberId,input.search)]);
-    return {ok:true as const,snapshot,kpis,drips};
+    // The drip read returns no time of its own; the server clock when it finished stands in.
+    return {ok:true as const,snapshot,kpis,drips,dripsReadAt:new Date().toISOString()};
   } catch(error) {reportMyLeadsReadFailure('my_leads_queue');return {ok:false as const,message:error instanceof Error?error.message:'Could not load My Leads.'};}
 }
 export async function loadMyLeadsStage(input:{memberId:string;search:string;stage:QueueStage;cursor:string}) {
-  try {return {ok:true as const,snapshot:await getAcquisitionQueue(input)};}
+  // Cursor pages carry the cursor's original snapshotAt; readAt is when this page was actually fetched.
+  try {const snapshot=await getAcquisitionQueue(input);return {ok:true as const,snapshot,readAt:new Date().toISOString()};}
   catch(error){reportMyLeadsReadFailure('my_leads_stage');return {ok:false as const,message:error instanceof Error?error.message:'Could not load this section.'};}
 }
 /** Handoff with a drip records the outcome while keeping the current owner. */

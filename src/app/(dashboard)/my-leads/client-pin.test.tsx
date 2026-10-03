@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   refresh: vi.fn(),
   loadMyLeads: vi.fn(),
   loadMyLeadRow: vi.fn(),
+  loadMyLeadsStage: vi.fn(),
   loadMyLeadDetail: vi.fn(),
   submitMyLeadCommand: vi.fn(),
 }))
@@ -16,7 +17,7 @@ vi.mock("@/components/softphone/softphone-provider", () => ({ useOptionalSoftpho
 vi.mock("@/components/appointments/book-appointment-popover", () => ({ BookAppointmentPopover: () => null }))
 vi.mock("@/app/(dashboard)/sequences/actions", () => ({ listDripChoices: vi.fn(async () => ({ ok: true, data: [] })), startDripForLeads: vi.fn() }))
 vi.mock("./actions", () => ({
-  loadMyLeads: mocks.loadMyLeads, loadMyLeadRow: mocks.loadMyLeadRow, loadMyLeadsStage: vi.fn(), loadMyLeadDetail: mocks.loadMyLeadDetail,
+  loadMyLeads: mocks.loadMyLeads, loadMyLeadRow: mocks.loadMyLeadRow, loadMyLeadsStage: mocks.loadMyLeadsStage, loadMyLeadDetail: mocks.loadMyLeadDetail,
   loadMyLeadCallReferences: vi.fn(async () => ({ ok: true, options: [] })),
   submitMyLeadCommand: mocks.submitMyLeadCommand, submitMyLeadHandoffDrip: vi.fn(), changeAcquisitionDesignation: vi.fn(), changeAcquisitionSettings: vi.fn(),
 }))
@@ -51,6 +52,19 @@ const dripOf = (r: QueueRow) => ({ propertyId: r.propertyId, enrollmentId: "e", 
   nextTextAt: null, lastText: null, status: null, reason: null, stage: "not_contacted", repliedAt: null, queueRow: r }) as unknown as MyLeadDripSnapshot["active"][number]
 const found = (r: QueueRow) => ({ ok: true, lookup: { status: "found", row: r, snapshotAt: "2026-09-11T14:00:00.000Z" } })
 const unavailable = (reason: string) => ({ ok: true, lookup: { status: "unavailable", reason } })
+
+
+const T0 = "2026-09-11T14:00:00.000Z"
+const T3 = "2026-09-11T14:03:00.000Z"
+const T5 = "2026-09-11T14:05:00.000Z"
+const T9 = "2026-09-11T14:09:00.000Z"
+async function saveContract(user: ReturnType<typeof userEvent.setup>, id: string) {
+  await user.click(within(screen.getByTestId(`my-lead-actions-${id}`)).getByRole("button", { name: "Contract signed" }))
+  await screen.findByRole("dialog")
+  fireEvent.change(screen.getByLabelText("Signed at"), { target: { value: "2026-09-11T10:00" } })
+  await user.click(screen.getByRole("button", { name: "Record contract" }))
+  await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalled())
+}
 
 const loaded = row("loaded-1", "1 Loaded Lane")
 const beyond = row("beyond-9", "9 Beyond Lane", { assignmentEpisodeId: "ep-b" })
@@ -369,6 +383,64 @@ describe("MyLeadsClient pinned deep-link row", () => {
     await user.click(screen.getByRole("button", { name: "Record contract" }))
     await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalled())
     expect(mocks.submitMyLeadCommand.mock.calls[0][1]).toMatchObject({ expectedQueueVersion: 1, expectedSharedStatus: "interested" })
+  })
+
+  describe("read provenance with equal episode and version", () => {
+    beforeEach(() => { mocks.submitMyLeadCommand.mockResolvedValue({ ok: true }) })
+
+    it("lookup path: the lookup's own snapshotAt beats an older list copy", async () => {
+      const user = userEvent.setup()
+      const fresh = { ...loaded, sharedStatus: "interested" }
+      render(ui({ propertyId: "loaded-1", memberId: "rep-1", notice: null, pin: fresh, pinAt: T5 }, snap([loaded], 25, T0)))
+      await saveContract(user, "loaded-1")
+      expect(mocks.submitMyLeadCommand.mock.calls[0][1]).toMatchObject({ expectedSharedStatus: "interested" })
+    })
+
+    it("drip path: a drip read taken earlier than the queue read loses the tie", async () => {
+      const user = userEvent.setup()
+      const other = row("loaded-2", "2 Other Lane")
+      render(ui(null, snap([loaded, other], 25, T0)))
+      await user.click(screen.getByRole("button", { name: "Show details for 1 Loaded Lane" })) // retain the displayed list
+      // The drip read finished at T3 with the stale status; the queue read started at T5 and is fresher.
+      const stale = { ...loaded, sharedStatus: "new_lead" }
+      const replied = { ...dripOf(stale), status: "Replied" as never, repliedAt: "2026-09-11T13:00:00Z" }
+      mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([{ ...loaded, sharedStatus: "interested" }, other], 25, T5), kpis, drips: { ...noDrips(), replied: [replied], repliedCount: 1 }, dripsReadAt: T3 })
+      await refreshNow()
+      await waitFor(() => expect(mocks.loadMyLeads).toHaveBeenCalled())
+      await saveContract(user, "loaded-1")
+      expect(mocks.submitMyLeadCommand.mock.calls[0][1]).toMatchObject({ expectedSharedStatus: "interested" })
+    })
+
+    it("pagination path: a cursor page is stamped with when it was fetched, not the cursor's snapshotAt", async () => {
+      const user = userEvent.setup()
+      const first = snap([loaded], 25, T0)
+      Object.assign(first.stages.not_contacted!, { cursor: "c1", hasMore: true })
+      // The page, fetched at T5 (its cursor snapshot is T0), says new_lead; a later-arriving lookup taken at T3 says interested.
+      mocks.loadMyLeadsStage.mockResolvedValue({ ok: true, snapshot: snap([{ ...beyond, sharedStatus: "new_lead" }], 25, T0), readAt: T5 })
+      render(ui(focusOn(beyond), first))
+      await user.click(screen.getByRole("button", { name: /Load more/ }))
+      await waitFor(() => expect(mocks.loadMyLeadsStage).toHaveBeenCalled())
+      mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: first, kpis, drips: noDrips() })
+      mocks.loadMyLeadRow.mockResolvedValue({ ok: true, lookup: { status: "found", row: { ...beyond, sharedStatus: "interested" }, snapshotAt: T3 } })
+      await refreshNow()
+      await waitFor(() => expect(mocks.loadMyLeadRow).toHaveBeenCalled())
+      await saveContract(user, "beyond-9")
+      expect(mocks.submitMyLeadCommand.mock.calls[0][1]).toMatchObject({ expectedSharedStatus: "new_lead" })
+    })
+  })
+
+  it("keeps reconciling other leads when the target is unavailable", async () => {
+    const other = row("loaded-2", "2 Other Lane")
+    render(ui(focusOn(beyond), snap([loaded, other], 25, T0)))
+    const newer = { ...loaded, stage: "contacted" as const, queueVersion: 3 }
+    const replied = { ...dripOf(newer), stage: "contacted" as const, status: "Replied" as never, repliedAt: "2026-09-11T13:00:00Z" }
+    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([loaded, other], 25, T5), kpis, drips: { ...noDrips(), replied: [replied], repliedCount: 1 }, dripsReadAt: T5 })
+    mocks.loadMyLeadRow.mockResolvedValue(unavailable("other_rep"))
+    await refreshNow()
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("assigned to another rep"))
+    expect(leadEls("beyond-9")).toHaveLength(0)
+    expect(leadEls("loaded-1")).toHaveLength(1)
+    expect(screen.getByTestId("my-leads-section-contacted").querySelector('[data-lead-id="loaded-1"]')).not.toBeNull()
   })
 })
 
