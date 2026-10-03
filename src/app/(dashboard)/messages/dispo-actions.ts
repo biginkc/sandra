@@ -98,10 +98,12 @@ async function denyWithoutMessagesAccess(): Promise<SetDispoResult | null> {
     await assertMessagesWorkspaceAccess();
     return null;
   } catch (error) {
-    if (error instanceof MessagesWorkspaceAccessError) {
-      return { ok: false, error: error.message };
+    if (!(error instanceof MessagesWorkspaceAccessError)) {
+      reportError(error, { tags: { surface: "outreach_dispo_workspace_access" } });
     }
-    throw error;
+    // Fail closed with the existing access message so the client toasts
+    // instead of surfacing an unhandled server-action rejection.
+    return { ok: false, error: new MessagesWorkspaceAccessError().message };
   }
 }
 

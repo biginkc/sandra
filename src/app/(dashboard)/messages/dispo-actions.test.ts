@@ -177,6 +177,25 @@ describe("setOutreachDispo", () => {
     expect(revalidatePath).not.toHaveBeenCalled();
   });
 
+  it("fails closed with the access message when the membership lookup errors", async () => {
+    getCallerMembershipsOrThrow.mockRejectedValue(new Error("membership lookup timed out"));
+    responseQueue = [
+      { data: property(), error: null },
+      { data: { id: "property-1" }, error: null },
+    ];
+
+    const result = await setOutreachDispo("property-1", "opted_out");
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Messages workspace access is unavailable.",
+    });
+    expect(reportError).toHaveBeenCalled();
+    expect(responseQueue).toHaveLength(2);
+    expect(updatePayloads).toEqual([]);
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
   it("rejects an active Acquisitions member on setInboxDispoAndStartDrip and writes nothing", async () => {
     getCallerMembershipsOrThrow.mockResolvedValue([
       { user_id: "actor-1", org_id: "org-1", role: "member", acquisitions_enabled: true },
