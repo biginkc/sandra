@@ -4,22 +4,13 @@ import { Client } from 'pg';
 import { expect, it } from 'vitest';
 import { loadTestEnv } from '@tests/integration/env';
 import { requireLoopbackPostgresUrl } from '@/lib/testing/loopback-postgres-url';
-import { applyP1e } from '@tests/integration/my-leads-housekeeping-fixture';
+import { applyMyLeadsChain } from '@tests/integration/my-leads-housekeeping-fixture';
 
 const strip = (file: string) => {
   const sql = readFileSync(new URL(file, import.meta.url), 'utf8');
   if (!/^[\s\S]*?\bbegin;\s*/im.test(sql) || !/\s*commit;\s*$/i.test(sql)) throw new Error(`${file}: transaction wrapper changed`);
   return sql.replace(/^begin;\s*/im, '').replace(/\s*commit;\s*$/i, '');
 };
-const chain = [
-  './20261005120000_next_step_schema.sql',
-  './20261005120500_fn_create_next_step.sql',
-  './20261005121000_next_step_read_model.sql',
-  './20261005121200_next_step_mode_aware_lifecycle.sql',
-  './20261005121500_next_step_relabel_functions.sql',
-  './20261005130000_offer_follow_up_chain.sql',
-].map(strip);
-const migration = strip('./20261005150000_my_leads_call_next.sql');
 const rollback = strip('../rollbacks/20261005150000_my_leads_call_next.sql');
 const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
 const MIN = 60_000;
@@ -36,8 +27,7 @@ async function withDb(fn: (db: Client) => Promise<void>) {
   await db.connect();
   try {
     await db.query('begin');
-    await applyP1e(db, 'outcome');
-    for (const file of [...chain, migration]) await db.query(file);
+    await applyMyLeadsChain(db, ['tools', 'reassign', 'outcome', 'schema', 'createFn', 'readModel', 'modeAware', 'relabel', 'offerChain', 'callNext']);
     await fn(db);
   } finally { await db.query('rollback').catch(() => {}); await db.end(); }
 }
