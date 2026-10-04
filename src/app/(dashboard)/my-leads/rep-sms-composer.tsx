@@ -576,7 +576,7 @@ export function RepSmsComposer({
     >
       {open ? "Hide text" : "Text lead"}
     </Button>
-    {activated && <div hidden={!open} className={actionPlacement ? "basis-full min-w-0 space-y-4 rounded-lg border bg-background p-3" : "space-y-4 rounded-lg border bg-background p-3"}>
+    {activated && <div hidden={!open} className={actionPlacement ? "order-last basis-full min-w-0 space-y-4 rounded-lg border bg-background p-3" : "space-y-4 rounded-lg border bg-background p-3"}>
       {error ? <div role="alert" className="flex items-center justify-between gap-2 text-sm text-destructive">{error}<Button type="button" variant="outline" onClick={() => setRetry((value) => value + 1)}>Retry</Button></div> : !context ? <p role="status">Loading your texting numbers…</p> : !context.senders.length ? <p className="text-sm">No texting number is assigned to you. Ask an owner to add one in Manage Acquisitions.</p> : <>
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="flex flex-col gap-1 text-sm" htmlFor={`rep-sms-sender-${propertyId}`}>
