@@ -183,7 +183,8 @@ describe("Slack unfurl worker", () => {
     await expect(processSlackUnfurlJob({ ...job }, Date.now() + 45_000, canaryFence())).rejects.toThrow("slack_canary_fence_failed");
     expect(mocks.reschedule).not.toHaveBeenCalled();
     expect(mocks.unfurl).not.toHaveBeenCalled();
-    expect(mocks.finish.mock.calls.every(([input]) => (input as { claimToken?: string }).claimToken === "claim-1")).toBe(true);
+    expect(mocks.finish).toHaveBeenCalledTimes(1);
+    expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "noop", errorCode: "canary_fence_failed" });
   });
 
   it("classifies a nonterminal Slack dispatch error as unknown without retry", async () => {
@@ -208,9 +209,12 @@ describe("Slack unfurl worker", () => {
     mocks.urls.mockResolvedValue([{ url_key: "https://sandra.bmhgroupkc.com/leads/11111111-1111-4111-8111-111111111111", lead_id: null, lookup_status: null, authorization_status: null, last_error_code: null }]);
     mocks.finish.mockRejectedValueOnce(new Error("invalid_auth while recording completion"));
     await expect(processSlackUnfurlJob({ ...job }, Date.now() + 45_000, canaryFence())).rejects.toThrow("slack_canary_dispatch_unrecorded");
+    expect(mocks.unfurl).toHaveBeenCalledTimes(1);
     expect(mocks.revokeInstallationGeneration).not.toHaveBeenCalled();
     expect(mocks.reschedule).not.toHaveBeenCalled();
-    expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "noop", errorCode: "canary_dispatch_unrecorded" });
+    expect(mocks.finish).toHaveBeenCalledTimes(2);
+    expect(mocks.finish.mock.calls[0]?.[0]).toEqual({ jobId: "job-1", claimToken: "claim-1", status: "succeeded" });
+    expect(mocks.finish.mock.calls[1]?.[0]).toEqual({ jobId: "job-1", claimToken: "claim-1", status: "noop", errorCode: "canary_dispatch_unrecorded" });
   });
 
   it("finishes disabled-policy jobs without sending", async () => {
