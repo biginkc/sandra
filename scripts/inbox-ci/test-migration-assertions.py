@@ -1,6 +1,7 @@
 import importlib.util
 import hashlib
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -29,6 +30,34 @@ class MigrationAssertionsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 3)
         self.assertIn('Local diagnostic refused on github-hosted runner', result.stderr)
 
+    def test_preflight_failure_routes_to_fail_record(self):
+        lane = Path(__file__).with_name('migration-dry-run.sh')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            node = bin_dir / 'node'
+            node.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$FAIL_WRITER_CALL"\n')
+            node.chmod(0o755)
+            env = {
+                **os.environ,
+                'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+                'RUNNER_TEMP': tmp,
+                'DOCKER_HOST': 'unix:///tmp/not-a-docker-socket',
+                'GITHUB_RUN_ID': '901',
+                'HEAVY_TESTED_SHA': 'a' * 40,
+                'GITHUB_ENV': str(root / 'github-env'),
+                'FAIL_WRITER_CALL': str(root / 'writer-call'),
+            }
+            result = subprocess.run(['bash', str(lane), '--preflight-only'], env=env,
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 3, result.stderr)
+            self.assertIn('Runner requires /var/run/docker.sock', result.stderr)
+            self.assertIn('write-migration-record.mjs', (root / 'writer-call').read_text())
+            self.assertIn('--fail 3', (root / 'writer-call').read_text())
+            self.assertEqual(len(list(root.glob('inbox-migration.*/failure.log'))), 1)
+            self.assertIn('HEAVY_RUN_DIR=', (root / 'github-env').read_text())
+
     def test_runner_socket_requires_system_docker_socket(self):
         self.assertEqual(a.docker_socket({'GITHUB_ACTIONS': 'true'}), 'unix:///var/run/docker.sock')
         with self.assertRaisesRegex(ValueError, 'Runner requires'):
@@ -41,8 +70,14 @@ class MigrationAssertionsTest(unittest.TestCase):
             for version, name in zip(a.VERSIONS, a.NAMES):
                 (directory / f'{version}_{name}.sql').write_text('SELECT 1;\n')
             self.assertEqual(len(a.migration_files(tmp)), 3)
-            (directory / '20260929000300_unreviewed.sql').write_text('SELECT 1;\n')
-            with self.assertRaisesRegex(ValueError, 'exactly the three'):
+            unreviewed = directory / f'{a.RESERVED_END[:-2]}50_inbox_unreviewed.sql'
+            unreviewed.write_text('SELECT 1;\n')
+            with self.assertRaisesRegex(ValueError, 'manifest Inbox'):
+                a.migration_files(tmp)
+            unreviewed.unlink()
+            stale = directory / ('20260929' + '000000_inbox_control_foundation.sql')
+            stale.write_text('SELECT 1;\n')
+            with self.assertRaisesRegex(ValueError, 'manifest Inbox'):
                 a.migration_files(tmp)
 
     def test_missing_migration_fails_closed(self):

@@ -195,6 +195,13 @@ every SQL/runtime hash, emits the transformed SQL packet, and has no database or
 container side effects. The packet includes saved-action version storage and the
 prepare-time immutable reference binding, then gates saved create/update/delete
 and list/get wrappers with the separate saved read/write command families.
+The operation-domain apply entry pins the permanent P3 base commit and records
+the reviewed grant correction by its source file SHA-256 as `reviewed_correction`.
+Assembly checks the current source bytes against that fixed hash and confirms
+that the corrected source transforms to the packet SQL. The release gate checks
+the correction hash and current source bytes. This keeps P3's
+ECMAScript trim and UTF-16 saved-action validation in the same packet as the
+two apply-function re-REVOKEs.
 
 The reproducible disposable HTTP fixture templates are checked in beside the
 manifest: `http-stack-compose.yml`, `http-stack-kong.yml`, and the two

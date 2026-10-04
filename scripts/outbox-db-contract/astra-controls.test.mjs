@@ -4,6 +4,7 @@ import { readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { assertEmbedding, assertExactIds, assertMetrics } from './contracts.mjs';
 import { completePhaseInventory, sealPhaseRecord } from '../outbox-db-contract.mjs';
+import { readManifest } from '../inbox-ci/inbox-migrations.mjs';
 
 test('C01 rejects a broken embedded contact', () => {
   const base = { property: { id: 'p', address: '1 Lane', city: 'Kansas City', state: 'MO' }, contact: { id: 'c', first_name: 'A', last_name: 'B', entity_name: null, phone_1: '+18165550000' } };
@@ -23,9 +24,10 @@ test('C04 rejects wrong queued count and paused count', () => {
 const C_IDS = ['C00','C01','C02','C03','C04','C05','C06','C07','C08','C08b','C09','D01','D02','D03','D04','D05'];
 const PIN_IDS = ['PIN_BASE_GRANTS','PIN_FUNCTIONS','PIN_RELATIONS','PIN_SCHEMAS_ROLLOUT_ROLES','PIN_TRIGGERS'];
 const M_IDS = ['M1','M2','M3','M3b','M4','M4b','M5','M5b','M5c','M5d','M6','M6b','M7','M10'];
+const INBOX_VERSIONS = readManifest().map(entry => entry.version);
 const completePost = () => ({
   checks: [...C_IDS, ...PIN_IDS].map(id => ({ id, verdict: 'PASS' })),
-  schemaState: { versions: ['20260929000000','20260929000100','20260929000200'], inboundHeadsPresent: true },
+  schemaState: { versions: INBOX_VERSIONS, inboundHeadsPresent: true },
   mutations: M_IDS.map(id => ({ id, observed_exit: 1, observed_fail: true, exact_fail: true, restored: 'PASS' })),
 });
 
@@ -61,6 +63,10 @@ test('sealer downgrades incomplete PASS to FAIL', () => {
     const manifest = JSON.parse(readFileSync(path.join(result.runDir, 'manifest.json'), 'utf8'));
     assert.equal(manifest.exit_status, 1);
     assert.equal(manifest.failure, 'INCOMPLETE_PHASE_INVENTORY');
+    assert.deepEqual(Object.keys(manifest.clean_tree).sort(), ['end_excluding_run_dir', 'end_status', 'excluded_path', 'start']);
+    assert.equal(manifest.clean_tree.start, true);
+    assert.equal(manifest.clean_tree.end_excluding_run_dir, true);
+    assert.equal(manifest.clean_tree.excluded_path, `docs/performance/inbox-redesign/evidence/${manifest.tested_sha}/pre-merge/${runId}`);
   } finally { rmSync(result.runDir, { recursive: true, force: true }); }
 });
 

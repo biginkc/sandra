@@ -25,6 +25,8 @@ This is an executable candidate under review, outside `supabase/migrations`. It 
 
 `rehearse-install.py --owned-fixture` applies the compiled candidate only to that marked database. It refuses a duplicate foundation. `--indexes-only` resumes after a failed concurrent index build; existing invalid or differently defined indexes stop it for reviewed repair. It validates the deferred inbound-revision constraint after foundation locks are released, confirms REPLICA IDENTITY FULL and verifies the public authorization API remains disabled. Pass `--target http` to use the separately owned HTTP fixture adapter; that path invokes the same candidate with the adapter's `postgres` login and records the exact target identity in its receipt. It does not bless a `supabase_admin`-owned catalog.
 
+For the operator install, run `operator/concurrent-indexes.sql`, then `operator/precondition-check.sql` and confirm it reports 8 valid indexes. Run `operator/validate-constraints.sql` next, then the read-only post-check. Stop if the index precondition fails.
+
 `worker-step.py --owned-fixture --rounds 10` performs bounded durable steps: baseline users/organizations, two historical jobs of 100 rows, two parent-fanout jobs of 100 rows, 20 expiries and 10 summary claims per round. Claims commit before computation; lease/generation fences check publication afterward. Retry handles only whole aborted deadlock/serialization/lock-timeout transactions. It never contacts a provider. This fixture runner is not the production continuously supervised worker service.
 
 ## Baseline and reconciliation
@@ -55,6 +57,8 @@ If capture itself causes failures, disabling the UI does not remove write-path o
 ## Established migration route
 
 Production promotion uses Sandra's existing `db-migrate-test.yml` followed by `db-migrate-prod.yml`: successful test migration from main, exact tested SHA, ancestry check, committed migration-history safety gate, dry run, then the Production environment approval gate. There is no manual production SQL shortcut or production workflow_dispatch. Do not put generated candidates in the automatically applied migration directory until rehearsal and review are complete. When ready, create migration filenames through the installed Supabase CLI and preserve reviewed source hashes.
+
+`github-approval-api-fixture.json` is a hand-authored synthetic API fixture, not recorded from GitHub. Its local checklist tests do not replace hosted qualification of the Production workflow before J5a.
 
 The current workflows have a five-minute job timeout. Historical concurrent index duration must be measured before deciding how to split/schedule the final migration packet; do not assume seven large-table builds fit. Invalid concurrent indexes require explicit repair and are never accepted because an index name already exists. Schema validation must confirm the deployed canonical dependencies and Auth permissions match the tested source; successful fixture installation alone is insufficient.
 

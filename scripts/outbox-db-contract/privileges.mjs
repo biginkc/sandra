@@ -1,10 +1,28 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 const roles = ['anon', 'authenticated', 'service_role'];
 const ops = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'];
-const triggerPre = ['trg_messages_fill_sms_conversation_id', 'guard_training_messages', 'messages_reject_dnc_locked_read'];
+// These are the three Search filter-cache triggers added by
+// 20261002110000_properties_filter_cache_columns.sql. To re-pin, provision a
+// disposable main+Inbox catalog, then run:
+//
+//   E2E_DISPOSABLE_DATABASE=1 TEST_SUPABASE_URL=http://127.0.0.1:55421 \
+//   E2E_CI_SUPABASE_DB_URL=postgresql://postgres:postgres@127.0.0.1:55422/postgres \
+//   node scripts/outbox-db-contract/print-trigger-pins.mjs
+//
+// Copy only the JSON values printed by that tool after reviewing the migration
+// diff. The reader below pins search_path to '' inside its transaction so the
+// catalog deparse is schema-qualified and independent of the session path.
+export const triggerDefinitionSha256 = Object.freeze({
+  zz_messages_filter_cache_delete: '3ad872cc6a2d7fc9ce34be1432d1f8238be25c4fa92efd37628c23f961e44930',
+  zz_messages_filter_cache_insert: 'dfdd8d311caf0e2972e7f04d30be33496f8a3a991362feef0aadb235e3a44f79',
+  zz_messages_filter_cache_update: '8512a07ab11a5d10fa2d2dfe957ea410e981f373e04575e2f3d2a9b3ae6efb7d',
+});
+const triggerPre = ['trg_messages_fill_sms_conversation_id', 'guard_training_messages', 'messages_reject_dnc_locked_read', ...Object.keys(triggerDefinitionSha256)];
 const triggerPost = [...triggerPre, 'zzz_inbox_guard_inbound_revision_insert', 'zzz_inbox_guard_inbound_revision_update', 'inbox_capture_inbound_head', 'zzzzz_inbox_message_direct', 'zzzzzzzz_inbox_operation_target'];
+const triggerPinQuery = "select t.tgname,t.tgenabled,pg_get_triggerdef(t.oid,true) as definition from pg_trigger t where t.tgrelid='public.messages'::regclass and not t.tgisinternal order by t.tgname";
 const pin = phase => JSON.parse(readFileSync(new URL(`./expected/privileges.${phase}.json`, import.meta.url), 'utf8'));
 export const normalizeSearchPath = value => value === null ? null : value.replaceAll(' ', '').replaceAll('"', '');
 export function assertFunctionPin(actual, expected) {
@@ -13,16 +31,42 @@ export function assertFunctionPin(actual, expected) {
   assert.equal(normalizeSearchPath(actual.search_path), normalizeSearchPath(expected.search_path), actual.name);
   assert.deepEqual([...actual.execute].sort(), expected.execute, actual.name);
 }
+export function assertTriggerPinRows(rows, phase) {
+  const expected = phase === 'post' ? triggerPost : triggerPre;
+  assert.deepEqual(rows.map(row => row.tgname).sort(), expected.sort());
+  assert(rows.every(row => row.tgenabled === 'O'));
+  for (const row of rows) {
+    const expectedHash = triggerDefinitionSha256[row.tgname];
+    if (expectedHash) assert.equal(createHash('sha256').update(row.definition).digest('hex'), expectedHash, row.tgname);
+  }
+  return rows;
+}
+
+export async function readTriggerPinRows(db) {
+  let transactionOpen = false;
+  try {
+    await db.query('begin');
+    transactionOpen = true;
+    await db.query("select set_config('search_path','',true)");
+    const result = await db.query(triggerPinQuery);
+    await db.query('commit');
+    transactionOpen = false;
+    return result.rows;
+  } catch (error) {
+    if (transactionOpen) {
+      try { await db.query('rollback'); } catch {}
+    }
+    throw error;
+  }
+}
 
 export async function checkPrivileges(db, phase) {
   const checks = [];
   const check = async (id, fn) => { try { checks.push({ id, verdict: 'PASS', detail: await fn() }); } catch (error) { checks.push({ id, verdict: 'FAIL', error: String(error.message ?? error) }); } };
   const q = async (sql, params = []) => (await db.query(sql, params)).rows;
   await check('PIN_TRIGGERS', async () => {
-    const rows = await q("select t.tgname,t.tgenabled from pg_trigger t where t.tgrelid='public.messages'::regclass and not t.tgisinternal order by t.tgname");
-    assert.deepEqual(rows.map(r => r.tgname).sort(), (phase === 'post' ? triggerPost : triggerPre).sort());
-    assert(rows.every(r => r.tgenabled === 'O'));
-    return rows;
+    const rows = await readTriggerPinRows(db);
+    return assertTriggerPinRows(rows, phase);
   });
   await check('PIN_BASE_GRANTS', async () => {
     const names = ['messages', 'contacts', 'properties', 'memberships', 'lead_events'];

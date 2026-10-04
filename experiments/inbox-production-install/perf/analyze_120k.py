@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 
 limits = json.loads((Path(__file__).parent / 'thresholds.json').read_text())['single_connection']
+manifest = json.loads((Path(__file__).resolve().parents[3] / 'scripts/inbox-ci/inbox-migrations.json').read_text())
+foundation_file = f"{manifest[0]['version']}_{manifest[0]['name']}.sql.json"
 run = Path(sys.argv[1])
 values = {}
 with (run / 'after-samples.csv').open() as f:
@@ -30,7 +32,7 @@ before_nodes = (run / 'before-relfilenodes.csv').read_text()
 after_nodes = (run / 'after-relfilenodes.csv').read_text()
 if len(before_nodes.splitlines()) != 11 or before_nodes != after_nodes:
     failures.append('table rewrite or missing relfilenode evidence')
-lock = json.loads((run / '20260929000000_inbox_control_foundation.sql.json').read_text())
+lock = json.loads((run / foundation_file).read_text())
 observed_hold = lock.get('access_exclusive_messages_observed_ms')
 if lock['exit'] != 0 or not isinstance(observed_hold, (int, float)) or not math.isfinite(observed_hold) or observed_hold < 0 or observed_hold > limits['foundation_access_exclusive_upper_ms']:
     failures.append('foundation lock upper bound')
