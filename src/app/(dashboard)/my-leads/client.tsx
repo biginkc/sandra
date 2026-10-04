@@ -1273,6 +1273,7 @@ export function MyLeadsClient({
             propertyId={dialog.row.propertyId}
             subjectLabel={dialog.row.address}
             currentUserId={member}
+            defaultMode="phone"
             onBooked={() => {
               setDialog((current) => (current === dialog ? null : current));
               setDetailRevision((revision) => revision + 1);

@@ -29,12 +29,12 @@ import { callAction } from "@/lib/errors/call-action";
 import { wallTimeToUtc } from "@/lib/time/zoned";
 
 import {
-  bookAppointment,
   checkAppointmentOverlap,
   getMemberTimezone,
   type BookAppointmentResult,
 } from "./book-appointment-action";
 import { rescheduleAppointmentAction } from "./lifecycle-actions";
+import { createNextStepAction } from "./next-step-actions";
 
 type Props = {
   /** Property this appointment links to, if any. */
@@ -51,7 +51,11 @@ type Props = {
   triggerSize?: "default" | "sm" | "xs";
   disabled?: boolean;
   onBooked?: (result: BookAppointmentResult) => void;
-  /** "book" (default) creates a new appointment via `bookAppointment`.
+  /** "phone" or "in_person" for a new appointment. Default: phone when the popover is linked to
+   *  a property or contact, in person for a personal calendar block. A phone appointment is
+   *  always 15 minutes (the duration control is hidden); in person shows duration and location. */
+  defaultMode?: "phone" | "in_person";
+  /** "book" (default) creates a new appointment via `createNextStepAction`.
    *  "reschedule" reuses the SAME date/time/duration picker to move an
    *  existing appointment via `rescheduleAppointment` instead — the
    *  assignee never changes on a reschedule, so the assignee select is
@@ -141,6 +145,7 @@ export function BookAppointmentPopover({
   triggerSize = "sm",
   disabled,
   onBooked,
+  defaultMode,
   mode = "book",
   taskId,
   assigneeId: fixedAssigneeId,
@@ -150,6 +155,10 @@ export function BookAppointmentPopover({
   onOpenChange,
 }: Props) {
   const isReschedule = mode === "reschedule";
+  const initialMode: "phone" | "in_person" =
+    defaultMode ?? (propertyId || contactId ? "phone" : "in_person");
+  const [apptMode, setApptMode] = useState<"phone" | "in_person">(initialMode);
+  const [location, setLocation] = useState("");
   const [open, setOpen] = useState(false);
   const [date, setDate] = useState<Date | undefined>(undefined);
   const [time, setTime] = useState<string>("");
@@ -187,9 +196,15 @@ export function BookAppointmentPopover({
     setDurationMinutes(DEFAULT_DURATION_MINUTES);
     setAssigneeId(isReschedule ? (fixedAssigneeId ?? null) : currentUserId);
     setNote("");
+    setLocation("");
+    setApptMode(initialMode);
     setOverlap(null);
     setIdempotencyKey(crypto.randomUUID());
-  }, [open, currentUserId, isReschedule, fixedAssigneeId]);
+  }, [open, currentUserId, isReschedule, fixedAssigneeId, initialMode]);
+
+  // A new phone appointment is fixed at 15 minutes; every other case uses the picker.
+  const phoneBooking = !isReschedule && apptMode === "phone";
+  const effectiveDuration = phoneBooking ? 15 : durationMinutes;
 
   useEffect(() => {
     // Gated on `open` — the trigger renders on every row/detail panel, and
@@ -234,7 +249,7 @@ export function BookAppointmentPopover({
           timeZone: timezone,
           hour: "numeric",
           minute: "2-digit",
-        }).format(new Date(conversion.utc.getTime() + durationMinutes * 60_000))
+        }).format(new Date(conversion.utc.getTime() + effectiveDuration * 60_000))
       : null;
 
   // Soft overlap check — debounced, non-blocking, cleared whenever the
@@ -243,7 +258,7 @@ export function BookAppointmentPopover({
     setOverlap(null);
     if (!assigneeId || !conversion?.ok) return;
     const startUtc = conversion.utc;
-    const endUtc = new Date(startUtc.getTime() + durationMinutes * 60_000);
+    const endUtc = new Date(startUtc.getTime() + effectiveDuration * 60_000);
     const handle = setTimeout(() => {
       checkAppointmentOverlap(
         assigneeId,
@@ -258,7 +273,7 @@ export function BookAppointmentPopover({
       });
     }, 300);
     return () => clearTimeout(handle);
-  }, [assigneeId, conversion, durationMinutes]);
+  }, [assigneeId, conversion, effectiveDuration]);
 
   const canSubmit =
     Boolean(date && time && assigneeId && timezone && !dstError) && !pending;
@@ -294,14 +309,18 @@ export function BookAppointmentPopover({
       : "Appointment";
     startTransition(async () => {
       const result = await callAction(
-        bookAppointment({
+        createNextStepAction({
           propertyId,
           contactId,
           assigneeId,
           date: dateKey,
           time,
           timeZone: timezone,
-          durationMinutes,
+          mode: apptMode,
+          durationMinutes: effectiveDuration,
+          ...(apptMode === "in_person" && location.trim()
+            ? { location: location.trim() }
+            : {}),
           title,
           note: note.trim() || undefined,
           idempotencyKey,
@@ -364,7 +383,33 @@ export function BookAppointmentPopover({
             data-testid="book-appointment-calendar"
           />
 
-          <div className="grid grid-cols-2 gap-2">
+          {!isReschedule ? (
+            <div
+              className="inline-flex w-fit rounded-md border p-0.5"
+              role="group"
+              aria-label="Appointment mode"
+            >
+              {(["phone", "in_person"] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setApptMode(m)}
+                  aria-pressed={apptMode === m}
+                  disabled={pending}
+                  data-testid={`book-appointment-mode-${m}`}
+                  className={
+                    apptMode === m
+                      ? "rounded bg-primary px-3 py-1 text-xs font-semibold text-primary-foreground"
+                      : "rounded px-3 py-1 text-xs font-semibold text-muted-foreground"
+                  }
+                >
+                  {m === "phone" ? "Phone" : "In person"}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          <div className={phoneBooking ? "grid grid-cols-1 gap-2" : "grid grid-cols-2 gap-2"}>
             <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
               Time
               <Select value={time} onValueChange={(v) => setTime(v ?? "")}>
@@ -384,6 +429,7 @@ export function BookAppointmentPopover({
                 </SelectContent>
               </Select>
             </label>
+            {phoneBooking ? null : (
             <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
               Duration
               <Select
@@ -406,7 +452,23 @@ export function BookAppointmentPopover({
                 </SelectContent>
               </Select>
             </label>
+            )}
           </div>
+
+          {!isReschedule && apptMode === "in_person" ? (
+            <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
+              Location
+              <input
+                type="text"
+                value={location}
+                onChange={(e) => setLocation(e.target.value)}
+                disabled={pending}
+                maxLength={500}
+                data-testid="book-appointment-location"
+                className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm text-foreground"
+              />
+            </label>
+          ) : null}
 
           {endLabel ? (
             <p
@@ -484,7 +546,9 @@ export function BookAppointmentPopover({
                 : "Reschedule"
               : pending
                 ? "Booking…"
-                : "Book appointment"}
+                : apptMode === "phone"
+                  ? "Schedule call"
+                  : "Book appointment"}
           </Button>
         </div>
       </PopoverContent>

@@ -18,7 +18,9 @@ const {
   reassignAppointment,
   rescheduleAppointment,
   revalidatePath,
+  schemaReady,
 } = vi.hoisted(() => ({
+  schemaReady: vi.fn(async () => false),
   afterCallbacks: [] as Array<() => Promise<void> | void>,
   afterMock: vi.fn((callback: () => Promise<void> | void) => {
     afterCallbacks.push(callback);
@@ -43,6 +45,7 @@ const {
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
+vi.mock("@/lib/my-leads/schema-ready", () => ({ schemaReady }));
 vi.mock("@/lib/dnc/property-lock", () => ({
   assertAppointmentTaskPropertyDncUnlocked,
 }));
@@ -554,6 +557,35 @@ describe("rescheduleAppointmentAction", () => {
       sourceType: "appointments.rescheduled",
       sourceId: "ledger-reschedule-1",
     });
+  });
+
+  it("forces a phone appointment to 15 minutes, and trusts the submitted duration for an in-person one or before the schema is ready", async () => {
+    const row = {
+      org_id: "org-1",
+      title: "Call",
+      due_at: "2026-09-01T15:00:00Z",
+      related_property_id: "prop-1",
+      contact_id: null,
+    };
+    rescheduleAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "s", oldTaskId: "task-1", chainId: "c", duplicate: false, ledgerId: "l" },
+    });
+    const endMinutes = () => {
+      const args = rescheduleAppointment.mock.calls.at(-1)![1] as { newStartUtc: string; newEndUtc: string };
+      return (Date.parse(args.newEndUtc) - Date.parse(args.newStartUtc)) / 60_000;
+    };
+    schemaReady.mockResolvedValue(true);
+    createClient.mockResolvedValue(makeSupabaseMock({ userId: "user-1", taskRow: { ...row, mode: "phone" } as never }));
+    await rescheduleAppointmentAction(validInput);
+    expect(endMinutes()).toBe(15);
+    createClient.mockResolvedValue(makeSupabaseMock({ userId: "user-1", taskRow: { ...row, mode: "in_person" } as never }));
+    await rescheduleAppointmentAction(validInput);
+    expect(endMinutes()).toBe(30);
+    schemaReady.mockResolvedValue(false);
+    createClient.mockResolvedValue(makeSupabaseMock({ userId: "user-1", taskRow: { ...row, mode: "phone" } as never }));
+    await rescheduleAppointmentAction(validInput);
+    expect(endMinutes()).toBe(30);
   });
 
   it("does not record an idempotent reschedule replay", async () => {
