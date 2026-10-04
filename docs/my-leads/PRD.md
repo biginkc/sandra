@@ -1,16 +1,27 @@
 ---
 type: prd
 status: consolidated-for-review
-version: "0.2"
+version: "0.3"
 created: 2026-09-11
-updated: 2026-09-11
+updated: 2026-10-05
 owner: Jarrad Henry
 tags: [sandra, prd, my-leads, acquisitions]
 ---
 
 # Sandra My Leads — Acquisitions queue and KPIs
 
-**Version 0.2 — consolidated from Jarrad’s feasibility interview.** This specifies the agreed product behavior; it is not an implementation or deployment approval. Maria is the initial Acquisitions user. Jarrad is the owner and receives leads needing sequence follow-up.
+**Version 0.3 — v0.2 (consolidated from Jarrad’s feasibility interview) plus the overrides table below.** Version 0.3 changes no behavioral text; it records, in one place, the October 2026 decisions that consciously override parts of v0.2. This specifies the agreed product behavior; it is not an implementation or deployment approval. Maria is the initial Acquisitions user. Jarrad is the owner and receives leads needing sequence follow-up.
+
+## Overrides (v0.3)
+
+Each row is a conscious override of v0.2 text, made in `docs/my-leads/DECISIONS-2026-10.md`. Where a row and the original text disagree, the decision record wins. Nothing else in this document was rewritten.
+
+| v0.2 text overridden | Section | Override | Decision |
+|---|---|---|---|
+| "No automatic appointments, tasks, sequence enrollments, contract sends, or new dialer/provider behavior are included." | 1 | Next steps become appointment (phone by default) or task through one write path; the dialer and Dialpad gain click-to-dial from a ranked strip; contract send is added through the existing eSign lifecycle. Neither appointment mode dials unattended. | D1, D4, D8 |
+| "DialPad v1 is manual external-call logging; a new voice API or automatic recording import is not required." and "Recording links are optional, including DialPad." | 5 | Sandra prepares a Dialpad call intent and starts calls through Dialpad; calls dialed directly in Dialpad are matched to leads automatically; the recording link is captured from the hangup webhook instead of pasted by hand. | D4, D5 |
+| "Log offer ... records an offer already made; it does not send a contract or trigger eSign." | 5 | The send-contract card sends through Dropbox Sign, and the offer is logged only after the request reaches `sent`. The manual Log offer path is unchanged. | D8 |
+| "Maria is the initial designated Acquisitions member." and Maria's launch treatment | 2, 10 | Scope is the Acquisitions group only (currently Jarrad). Maria's 2 and Mel's 13 queue leads and their open tasks move to Jarrad, with new assignment episodes created ineligible so first-call timers and KPIs do not restart; 137 stale pending attempts are closed as `not_logged`. Both are operator-script data steps with before-images, never migrations. | D10 |
 
 ## 1. Authority and scope
 
