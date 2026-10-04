@@ -6,6 +6,7 @@ import { createBlandClient } from "@/lib/norma/bland";
 import { readNormaBlandConfig } from "@/lib/norma/config";
 import { dispatchNormaCall } from "@/lib/norma/dispatch";
 import { reconcileNormaCalls } from "@/lib/norma/reconcile";
+import { readNormaMaintenanceHold } from "@/lib/norma/maintenance";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const maxDuration = 60;
@@ -23,6 +24,9 @@ async function handle(request: Request) {
   }
   if (request.headers.get("authorization") !== `Bearer ${secret}`) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (readNormaMaintenanceHold()) {
+    return NextResponse.json({ ok: true, maintenanceHeld: true });
   }
   try {
     const admin = createAdminClient();

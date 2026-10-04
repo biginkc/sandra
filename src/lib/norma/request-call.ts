@@ -5,6 +5,7 @@ import type { Database } from "@/lib/supabase/types";
 import { readNormaCallbackAssigneeId, readNormaGateConfig, type NormaEnv } from "./config";
 import { dispatchNormaCall, type DispatchResult } from "./dispatch";
 import { evaluateNormaGate } from "./gate";
+import { readNormaMaintenanceHold } from "./maintenance";
 import { createNormaRequest } from "./rpc";
 import { loadNormaWrongNumbers, selectVoicePhone, toUsVoiceE164 } from "./voice-phone";
 
@@ -45,6 +46,8 @@ export async function requestNormaCallCore(
   deps: RequestNormaCallDeps,
 ): Promise<RequestNormaCallResult> {
   if (!UUID_PATTERN.test(propertyId)) return { ok: false, code: "lead_not_found" };
+
+  if (readNormaMaintenanceHold(deps.env)) return { ok: false, code: "gate_off", reason: "dispatch_disabled" };
 
   const userId = await deps.getUserId();
   if (!userId) return { ok: false, code: "unauthenticated" };

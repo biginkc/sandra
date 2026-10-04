@@ -4,13 +4,16 @@ import { reportError } from "@/lib/errors/report";
 import type { Database } from "@/lib/supabase/types";
 
 import type { BlandClient } from "./bland";
-import type { DispatchResult } from "./dispatch";
 import { withConvertedCallbackTime } from "./callback-wiring";
 import { dispatchScheduledRetry } from "./retry";
 import type { CallbackTimeProvider } from "./callback-time";
+import type { NormaEnv } from "./config";
+import type { DispatchResult } from "./dispatch";
+import { readNormaMaintenanceHold } from "./maintenance";
 import { mapBlandCallToOutcome } from "./outcome";
 import { completeNormaCall, markNormaDispatchRejected, markNormaDispatchUnknown, markNormaNeedsReview } from "./rpc";
 import { toUsVoiceE164 } from "./voice-phone";
+
 
 const MIN = 60_000;
 
@@ -35,6 +38,7 @@ export const RECONCILE_THRESHOLDS = {
 } as const;
 
 export type ReconcileSummary = {
+  maintenanceHeld?: true;
   scanned: number;
   dispatched: number;
   completed: number;
@@ -51,6 +55,7 @@ type Row = Pick<
 >;
 
 export type ReconcileDeps = {
+  env?: NormaEnv;
   client: SupabaseClient<Database>;
   bland: BlandClient | null;
   dispatch: (requestId: string) => Promise<DispatchResult>;
@@ -68,6 +73,7 @@ export async function reconcileNormaCalls(deps: ReconcileDeps): Promise<Reconcil
   const summary: ReconcileSummary = {
     scanned: 0, dispatched: 0, completed: 0, rejected: 0, markedUnknown: 0, escalated: 0, waiting: 0, errors: 0,
   };
+  if (readNormaMaintenanceHold(deps.env)) return { ...summary, maintenanceHeld: true };
   const statuses = ["requested", "dispatching", "dispatched", "dispatch_unknown", ...(deps.includeNeedsReview ? ["needs_review"] : [])];
   const { data, error } = await deps.client
     .from("norma_call_requests")

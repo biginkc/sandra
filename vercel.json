@@ -76,7 +76,9 @@
       "codex/disposable-canary-runner-20260912": false,
       "main": false,
       "codex/norma-schema-first-20261004": false,
-      "codex/norma-runtime-admission-20261004": false
+      "codex/norma-runtime-admission-20261004": false,
+      "codex/norma-maintenance-control-20261004": false,
+      "codex/norma-combined-local-20261004": false
     }
   }
 }
