@@ -42,3 +42,5 @@ Verified facts (gh api, 2026-10-04): `.github/workflows/db-migrate-prod.yml` run
 No change made to repo settings; restoring the reviewer is Jarrad's call.
 
 Migration reservation `20261004092000` is RELEASED — the Phase 4 before-image migration was removed (Phase 1e's housekeeping tables are the only before-image store). Slack may keep 092000.
+- Astra plan review 2 at 37f33448: NO, 4 blocking (reminder retry key, contract replay payload, facts ON CONFLICT predicate, backfill future follow-ups) + 1 non-blocking — applied; review 3 pending.
+- Build: P1e draft PR #794 (a03bb9c3) open, Opus review running; P1a-core building on claude/my-leads-p1a-core (stacked on #794).
