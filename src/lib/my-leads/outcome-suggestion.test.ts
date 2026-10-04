@@ -19,10 +19,10 @@ describe("suggestOutcome", () => {
     expect(s(callOutcome)).toBe(expected);
   });
 
-  it("treats a connected Dialpad call (unknown with talk time) as reached", () => {
-    expect(s("unknown", "dialpad", 42)).toBe("reached");
+  it("never guesses an unknown outcome, whatever the talk time or provider", () => {
+    expect(s("unknown", "dialpad", 42)).toBeNull();
     expect(s("unknown", "dialpad", 0)).toBeNull();
     expect(s("unknown", "dialpad", null)).toBeNull();
-    expect(s("unknown", "jitter", 42)).toBeNull();
+    expect(s("unknown", "jitter", 600)).toBeNull();
   });
 });

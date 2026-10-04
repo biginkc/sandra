@@ -10,6 +10,7 @@ import {
   subscribeSubmissions, writeSubmission,
   type Lease, type StoredSubmission, type SubmissionScope,
 } from "./submission-store"
+import { getExtras, putExtras } from "./extras-store"
 import type { MyLeadAction, PostCallExtras } from "./types"
 import type { WorkflowReconciliation } from "./workflow-form"
 
@@ -29,6 +30,17 @@ export type AttemptCommitted<O extends AttemptOpening> = {
   dripFailure: string | null
   /** Post-call prompt extras (note, quick next step). Never part of the command or its hash. */
   extras?: PostCallExtras
+  /** The attempt's idempotency key: the extras-store key the host clears once the extras are saved. */
+  attemptKey: string
+}
+
+/** The extras of a saved attempt, handed to the host from a recovery path (late success, already saved, Refresh). */
+export type ExtrasFlush<O extends AttemptOpening> = {
+  opening: O
+  attemptKey: string
+  propertyId: string
+  memberId: string
+  extras: PostCallExtras
 }
 
 type Recovery<O> = {
@@ -188,6 +200,12 @@ export type UseAttemptWorkflowOptions<O extends AttemptOpening> = {
    * own refresh barrier here and returns the read that follows the command.
    */
   onCommitted: (committed: AttemptCommitted<O>) => Promise<unknown>
+  /**
+   * Called on every recovery path that proves the attempt is saved without going through
+   * onCommitted for a visible dialog. Each extra has its own idempotency key, so the host may run
+   * this more than once; it clears the entry once the server confirms.
+   */
+  onExtras?: (flush: ExtrasFlush<O>) => void
   /** Called once that read settles (host refreshes its server data / surfaces a drip failure). */
   onSettled: (committed: AttemptCommitted<O>) => void
   /**
@@ -212,7 +230,7 @@ export type UseAttemptWorkflowOptions<O extends AttemptOpening> = {
  * unmount, navigation or a reload while a save is uncertain cannot lose the key.
  */
 export function useAttemptWorkflow<O extends AttemptOpening>({
-  opening, memberId: memberIdOption, viewer: viewerOption, readRow, onCommitted, onSettled, onReconciled, onClose, onDripChanged, saveTimeoutMs = SAVE_TIMEOUT_MS,
+  opening, memberId: memberIdOption, viewer: viewerOption, readRow, onCommitted, onExtras, onSettled, onReconciled, onClose, onDripChanged, saveTimeoutMs = SAVE_TIMEOUT_MS,
 }: UseAttemptWorkflowOptions<O>) {
   // Records need a viewer, an organization and a rep. Without all three nothing is resumed,
   // recorded or sent (the guards below), so the empty placeholders are never used as an identity.
@@ -221,11 +239,11 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
   const viewer = viewerOption ?? { userId: "", orgId: "" }
   const submission = useRef<Submission | null>(null)
   const activeOpening = useRef(opening)
-  const callbacks = useRef({ onCommitted, onSettled, onReconciled, onClose, onDripChanged })
+  const callbacks = useRef({ onCommitted, onExtras, onSettled, onReconciled, onClose, onDripChanged })
   const viewerRef = useRef(viewer)
   const mounted = useRef(false)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
-  useEffect(() => { activeOpening.current = opening; callbacks.current = { onCommitted, onSettled, onReconciled, onClose, onDripChanged }; viewerRef.current = viewer })
+  useEffect(() => { activeOpening.current = opening; callbacks.current = { onCommitted, onExtras, onSettled, onReconciled, onClose, onDripChanged }; viewerRef.current = viewer })
   const orphaned = useRef<{ opening: O; records: StoredSubmission[] } | null>(null)
   const allowNewKey = useRef<O | null>(null)
   /** The opening that ever held or resumed a record. It may never mint a key by itself afterwards. */
@@ -273,6 +291,13 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
   const claimDrop = (state: Submission, current: O): boolean => {
     const record = recordOf(state, current)
     return record ? claimClear(record, { epoch: state.epoch, expectKey: state.key, expectRev: state.lease?.rev ?? state.readRev }) : true
+  }
+
+  /** Hands the stored extras of a saved attempt to the host. A no-op when there are none. */
+  const flushExtras = (current: O, attemptKey: string) => {
+    const entry = getExtras(viewerRef.current.userId, attemptKey)
+    if (!entry) return
+    callbacks.current.onExtras?.({ opening: current, attemptKey, propertyId: entry.propertyId, memberId: entry.memberId, extras: entry.extras })
   }
 
   // Identity change: another viewer's or organization's records are discarded, not just hidden.
@@ -405,6 +430,8 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     if (!mounted.current || activeOpening.current !== current) {
       state.committedNotSeen = true
       if (!write(state, current)) { state.committed = false; state.committedNotSeen = false; return false }
+      // The attempt is saved but nobody saw it: the note and next step must still be written.
+      flushExtras(current, state.key)
       return true
     }
     // A save a newer owner has taken over is theirs to resolve: the record stays uncertain and their
@@ -413,7 +440,8 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     if (keepsOpen ? !write(state, current) : !drop(state)) { state.committed = false; return false }
     const dripFailure = "dripFailure" in result && result.dripFailure ? `Outcome saved. Drip not started: ${result.dripFailure}` : null
     setRecovery(null)
-    const committed: AttemptCommitted<O> = { opening: current, input, result, dripFailure, ...(state.extras ? { extras: state.extras } : {}) }
+    const extras = state.extras ?? getExtras(viewerRef.current.userId, state.key)?.extras ?? null
+    const committed: AttemptCommitted<O> = { opening: current, input, result, dripFailure, attemptKey: state.key, ...(extras ? { extras } : {}) }
     // The host publishes its refresh barrier before the dialog can close so a
     // rapid next click is initialized from authorized post-command metadata.
     const read = callbacks.current.onCommitted(committed)
@@ -442,8 +470,11 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     const held = submission.current
     if (held?.opening === current && !claimDrop(held, current)) { superseded(held, current); return }
     const barrier = callbacks.current.onReconciled?.(current)
+    // Refresh-and-close claims nothing about the earlier save, but its note and next step are
+    // idempotent: write them now so closing never drops what the rep typed.
+    if (held?.opening === current && (held.alreadySaved || held.committedNotSeen || held.atRisk)) flushExtras(current, held.key)
     if (orphaned.current?.opening === current)
-      for (const record of orphaned.current.records) claimClear(record, { epoch: getEpoch(), expectKey: record.key })
+      for (const record of orphaned.current.records) { flushExtras(current, record.key); claimClear(record, { epoch: getEpoch(), expectKey: record.key }) }
     orphaned.current = null
     submission.current = null
     setRecovery(null)
@@ -559,6 +590,8 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     const frozen = state.uncertain && state.payload
     // A frozen replay keeps the extras of the original send; a fresh send takes the form's current ones.
     if (!frozen || state.extras === undefined) state.extras = postCall ?? null
+    // Registered with the key BEFORE anything is sent, so a close, reload or lost response can still finish them.
+    if (!frozen && postCall) putExtras({ viewerUserId: viewerRef.current.userId, attemptKey: state.key, propertyId: row.propertyId, memberId: state.memberId ?? memberId, extras: postCall })
     const wantedRoute = routeOf(command, JSON.parse(JSON.stringify(payload)) as Record<string, Json>)
     // Never send the key down another operation. When nothing under the key can have committed
     // (its first send was definitely rejected), a different route simply starts a new key.
@@ -631,6 +664,8 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
           state.payload = null
           if (!write(state, opening)) return false
           if (activeOpening.current === opening) setRecovery({ opening, message: failure.message, blocked: true, busy: false })
+          // A receipt exists, so the attempt is saved: finish its note and next step.
+          flushExtras(opening, state.key)
         } else if (definite || (failure.answered && !state.uncertain)) {
           // (An answered failure on a first send, with nothing frozen, could not have committed: no
           // earlier send under this key exists. It is shown as the server's field error, not frozen.)

@@ -37,6 +37,7 @@ import { reasonLabel } from "./_components/call-next-reason";
 import type { CallNextSnapshot, TriageSnapshot } from "@/lib/my-leads/call-next";
 import { AcquisitionAttemptDialog } from "./_components/attempt-dialog";
 import { PostCallPrompt } from "./_components/post-call-prompt";
+import { clearExtras } from "./_components/extras-store";
 import type {
   AcquisitionCallReferenceOption,
   PostCallExtras,
@@ -350,12 +351,14 @@ export function MyLeadsClient({
   const [extrasState, setExtrasState] = useState<PostCallExtrasState | null>(
     null,
   );
-  const extrasRequest = useRef<{
+  type ExtrasRequest = {
+    attemptKey: string;
     memberId: string;
     propertyId: string;
     extras: PostCallExtras;
-  } | null>(null);
-  const extrasStarted = useRef(new Set<string>());
+  };
+  const extrasRequest = useRef<ExtrasRequest | null>(null);
+  const extrasInFlight = useRef(new Set<string>());
   const [dialpadRequest, setDialpadRequest] =
     useState<DialpadCallRequest | null>(null);
   const dialpadNonce = useRef(0);
@@ -367,6 +370,10 @@ export function MyLeadsClient({
     row: QueueRow;
     callActivityId?: string | null;
   } | null>(null);
+  const dialogRef = useRef(dialog);
+  useEffect(() => {
+    dialogRef.current = dialog;
+  });
   type Opening = {
     action: MyLeadAction;
     row: QueueRow;
@@ -824,11 +831,17 @@ export function MyLeadsClient({
     },
     [member],
   );
-  const runExtras = async () => {
-    const request = extrasRequest.current;
-    if (!request) return;
+  // Saves the note and quick next step of a saved attempt. Every recovery path may call this
+  // again for the same attempt: each extra carries its own idempotency key, so a repeat cannot
+  // duplicate. The stored entry is removed only after the server confirms both extras.
+  const runExtras = async (request: ExtrasRequest, showState: boolean) => {
     const { extras } = request;
-    setExtrasState({ status: "saving" });
+    if (extrasInFlight.current.has(extras.submissionId)) return;
+    extrasInFlight.current.add(extras.submissionId);
+    if (showState) {
+      extrasRequest.current = request;
+      setExtrasState({ status: "saving" });
+    }
     let result: Awaited<ReturnType<typeof savePostCallExtras>>;
     try {
       result = await savePostCallExtras({
@@ -840,9 +853,20 @@ export function MyLeadsClient({
       });
     } catch {
       result = { ok: false, message: "The note and next step could not be saved." };
+    } finally {
+      extrasInFlight.current.delete(extras.submissionId);
     }
-    // A result for a prompt that has since been replaced is dropped.
-    if (extrasRequest.current !== request) return;
+    if (result.ok && result.note !== "failed" && result.nextStep !== "failed" && !result.message) {
+      clearExtras(viewer.userId, request.attemptKey);
+    }
+    // A result for a prompt that has since been replaced or closed is not shown.
+    if (!showState || extrasRequest.current !== request) {
+      if (result.ok) {
+        void refresh();
+        setDetailRevision((revision) => revision + 1);
+      }
+      return;
+    }
     setExtrasState({ status: "done", result });
     if (result.ok) {
       void refresh();
@@ -866,22 +890,35 @@ export function MyLeadsClient({
     readRow: readRecoveryRow,
     onCommitted: (committed) => {
       if (committed.extras) {
-        const row = committed.opening.row;
-        extrasRequest.current = {
-          memberId: member,
-          propertyId: row.propertyId,
-          extras: committed.extras,
-        };
-        // A submission's extras run once; Retry is the only way to run them again.
-        if (!extrasStarted.current.has(committed.extras.submissionId)) {
-          extrasStarted.current.add(committed.extras.submissionId);
-          void runExtras();
-        }
+        void runExtras(
+          {
+            attemptKey: committed.attemptKey,
+            memberId: member,
+            propertyId: committed.opening.row.propertyId,
+            extras: committed.extras,
+          },
+          true,
+        );
       }
       const read = refresh();
       refreshTriageIfOpen();
       setDetailRevision((revision) => revision + 1);
       return read;
+    },
+    // Recovery paths (late success, already saved, Refresh-and-close): the prompt may be gone.
+    onExtras: (flush) => {
+      const visible =
+        dialogRef.current?.row.propertyId === flush.propertyId &&
+        dialogRef.current.action === "log-attempt";
+      void runExtras(
+        {
+          attemptKey: flush.attemptKey,
+          memberId: flush.memberId,
+          propertyId: flush.propertyId,
+          extras: flush.extras,
+        },
+        visible,
+      );
     },
     onReconciled: () => {
       const read = refresh();
@@ -1455,7 +1492,10 @@ export function MyLeadsClient({
             }
             nextStepAt={dialog.row.nextStepAt}
             extras={extrasState}
-            onRetryExtras={() => void runExtras()}
+            onRetryExtras={() => {
+              const request = extrasRequest.current;
+              if (request) void runExtras(request, true);
+            }}
             onReadyForOffer={() => action("ready-for-offer", dialog.row.propertyId)}
             onDeadNurture={() => action("handoff", dialog.row.propertyId)}
           />
