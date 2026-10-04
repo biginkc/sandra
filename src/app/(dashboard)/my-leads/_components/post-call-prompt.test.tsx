@@ -47,7 +47,6 @@ describe("PostCallPrompt", () => {
     [{ callOutcome: "voicemail" }, "Voicemail"],
     [{ callOutcome: "connected_human" }, "Reached"],
     [{ callOutcome: "busy" }, "No answer"],
-    [{ provider: "dialpad", callOutcome: "unknown", talkSeconds: 40 }, "Reached"],
   ])("pre-guesses the outcome from the linked call %j", (over, label) => {
     setup({ ...linked, callReferenceOptions: refs(over) })
     expect(outcome(label)).toBeChecked()
@@ -212,7 +211,38 @@ describe("PostCallPrompt", () => {
     await user.click(screen.getByTestId("post-call-dead-nurture"))
     expect(onReadyForOffer).toHaveBeenCalledOnce()
     expect(onDeadNurture).toHaveBeenCalledOnce()
-    expect(screen.getByTestId("post-call-send-contract")).toBeDisabled()
+    expect(screen.queryByTestId("post-call-send-contract")).not.toBeInTheDocument()
+    expect(screen.queryByText("Send contract")).not.toBeInTheDocument()
+  })
+
+  it("an unknown call outcome leaves the outcome unselected even with talk time", () => {
+    setup({ ...linked, callReferenceOptions: refs({ provider: "dialpad", callOutcome: "unknown", talkSeconds: 90 }) })
+    expect(within(screen.getByTestId("post-call-outcome")).queryByRole("radio", { checked: true })).toBeNull()
+  })
+
+  it.each([
+    ["failed", { ok: true as const, note: "failed" as const, nextStep: "skipped" as const, message: "Note not saved: no" }],
+    ["skipped", { ok: true as const, note: "skipped" as const, nextStep: "skipped" as const, message: "Note not saved yet" }],
+    ["whole request failed", { ok: false as const, message: "down" }],
+  ])("shows the typed note with a copy button when the note was %s", async (_name, result) => {
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true })
+    const { user } = setup({ ...linked, callReferenceOptions: refs(), extras: { status: "done", result } })
+    await user.click(outcome("Reached"))
+    await user.type(screen.getByTestId("post-call-note"), "Seller wants 120k")
+    await user.click(screen.getByRole("button", { name: "Save" }))
+    expect(await screen.findByTestId("post-call-unsaved-note")).toHaveTextContent("Seller wants 120k")
+    await user.click(screen.getByTestId("post-call-copy-note"))
+    expect(writeText).toHaveBeenCalledWith("Seller wants 120k")
+  })
+
+  it("does not show the unsaved-note box when the note saved", async () => {
+    const { user } = setup({ ...linked, callReferenceOptions: refs(), extras: { status: "done", result: { ok: true, note: "saved", nextStep: "skipped" } } })
+    await user.click(outcome("Reached"))
+    await user.type(screen.getByTestId("post-call-note"), "kept")
+    await user.click(screen.getByRole("button", { name: "Save" }))
+    expect(await screen.findByTestId("post-call-receipt")).toBeVisible()
+    expect(screen.queryByTestId("post-call-unsaved-note")).not.toBeInTheDocument()
   })
 
   it("offers Retry only when an extra failed", async () => {

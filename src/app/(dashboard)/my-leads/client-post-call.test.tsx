@@ -43,6 +43,7 @@ vi.mock("./_components/queue", () => ({
 
 import type { AcquisitionKpis, AcquisitionRoster, QueueRow, QueueSnapshot } from "@/lib/my-leads/queries"
 import { MyLeadsClient } from "./client"
+import { resetExtrasStoreForTests } from "./_components/extras-store"
 
 const viewer = { userId: "rep-1", orgId: "org-1", isOwner: false }
 const roster: AcquisitionRoster = {
@@ -83,6 +84,8 @@ describe("MyLeadsClient attempt logging behind post_call_prompt", () => {
     mocks.submitMyLeadCommand.mockResolvedValue({ ok: true })
     mocks.savePostCallExtras.mockResolvedValue({ ok: true, note: "saved", nextStep: "created" })
     window.localStorage.clear()
+    window.sessionStorage.clear()
+    resetExtrasStoreForTests()
   })
 
   it("flag off: the old Log an attempt dialog renders and never touches the extras", async () => {
@@ -137,7 +140,37 @@ describe("MyLeadsClient attempt logging behind post_call_prompt", () => {
     expect(await screen.findByRole("button", { name: /Seller follow-up/ })).toBeVisible()
     expect(screen.getByTestId("post-call-ready-for-offer")).toBeEnabled()
     expect(screen.getByTestId("post-call-dead-nurture")).toBeEnabled()
-    expect(screen.getByTestId("post-call-send-contract")).toBeDisabled()
+    expect(screen.queryByTestId("post-call-send-contract")).not.toBeInTheDocument()
+  })
+
+  it("clears the stored extras once the server confirmed them", async () => {
+    const user = userEvent.setup()
+    renderClient(true)
+    await user.click(screen.getByRole("button", { name: "Log attempt" }))
+    await user.click(screen.getByTestId("post-call-outcome-reached"))
+    await user.type(screen.getByTestId("post-call-note"), "hello")
+    fireEvent.change(screen.getByLabelText("When did it occur?"), { target: { value: "2026-09-11T09:00" } })
+    fireEvent.change(screen.getByLabelText(/Recording link/), { target: { value: "https://dialpad.example/r/1" } })
+    await user.click(screen.getByRole("button", { name: "Save" }))
+    await waitFor(() => expect(mocks.savePostCallExtras).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(window.sessionStorage.getItem("sandra:my-leads:post-call-extras:v1")).toBeNull())
+  })
+
+  it("already saved (receipt exists): the note is still written, exactly once, and kept when the write fails", async () => {
+    const user = userEvent.setup()
+    mocks.submitMyLeadCommand.mockResolvedValue({ ok: false, answered: true, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." })
+    mocks.savePostCallExtras.mockResolvedValueOnce({ ok: true, note: "failed", nextStep: "skipped", message: "Note not saved: down" })
+    renderClient(true)
+    await user.click(screen.getByRole("button", { name: "Log attempt" }))
+    await user.click(screen.getByTestId("post-call-outcome-reached"))
+    await user.type(screen.getByTestId("post-call-note"), "Do not lose me")
+    fireEvent.change(screen.getByLabelText("When did it occur?"), { target: { value: "2026-09-11T09:00" } })
+    fireEvent.change(screen.getByLabelText(/Recording link/), { target: { value: "https://dialpad.example/r/1" } })
+    await user.click(screen.getByRole("button", { name: "Save" }))
+    await waitFor(() => expect(mocks.savePostCallExtras).toHaveBeenCalledTimes(1))
+    expect(mocks.savePostCallExtras).toHaveBeenCalledWith(expect.objectContaining({ note: "Do not lose me" }))
+    // The write failed: the entry stays in storage so a later recovery can finish it.
+    expect(window.sessionStorage.getItem("sandra:my-leads:post-call-extras:v1")).toContain("Do not lose me")
   })
 
   it("shows a Retry for a failed extra and runs the extras again only on Retry", async () => {
