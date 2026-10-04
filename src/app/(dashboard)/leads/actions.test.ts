@@ -6,7 +6,9 @@ const {
   assertPropertyDncUnlocked,
   createAdminClient,
   createClient,
+  createNextStep,
   createTask,
+  schemaReady,
   dispatchTaskAssigned,
   dispatchTaskAssignedSlack,
   dispatchTaskCalendarEvent,
@@ -26,7 +28,9 @@ const {
   assertPropertyDncUnlocked: vi.fn(),
   createAdminClient: vi.fn(),
   createClient: vi.fn(),
+  createNextStep: vi.fn(),
   createTask: vi.fn(),
+  schemaReady: vi.fn(async () => false),
   dispatchTaskAssigned: vi.fn(),
   dispatchTaskAssignedSlack: vi.fn(),
   dispatchTaskCalendarEvent: vi.fn(),
@@ -92,6 +96,9 @@ vi.mock("next/cache", () => ({
 vi.mock("next/server", () => ({
   after: afterMock,
 }));
+
+vi.mock("@/lib/my-leads/schema-ready", () => ({ schemaReady }));
+vi.mock("@/lib/next-steps", () => ({ createNextStep }));
 
 vi.mock("@/lib/integrations/google/dispatch", () => ({
   dispatchTaskCalendarEvent,
@@ -916,6 +923,106 @@ describe("addPropertiesToListBulk", () => {
 });
 
 describe("createLeadTaskAction", () => {
+  beforeEach(() => {
+    schemaReady.mockReset();
+    schemaReady.mockResolvedValue(false);
+    createNextStep.mockReset();
+  });
+
+  it("rejects an unknown kind and a task without a title before touching anything", async () => {
+    const bad = await createLeadTaskAction("prop-1", {
+      kind: "follow_up" as never,
+      dueAt: "2026-06-20T15:00:00.000Z",
+      assigneeId: "assignee-1",
+    });
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.error.code).toBe("INVALID_TASK_TYPE");
+    const noTitle = await createLeadTaskAction("prop-1", {
+      kind: "task",
+      title: "   ",
+      dueAt: "2026-06-20T15:00:00.000Z",
+      assigneeId: "assignee-1",
+    });
+    expect(noTitle.ok).toBe(false);
+    if (!noTitle.ok) expect(noTitle.error.code).toBe("TITLE_REQUIRED");
+    expect(createNextStep).not.toHaveBeenCalled();
+    expect(createTask).not.toHaveBeenCalled();
+  });
+
+  it("writes through createNextStep once the schema is ready, after the same assignee checks, with no calendar dispatch", async () => {
+    schemaReady.mockResolvedValue(true);
+    createClient.mockResolvedValue(
+      makeLeadTaskSupabase({
+        property: { id: "prop-1", org_id: "org-1", address: "123 Main" },
+        actorMembership: { user_id: "actor-1" },
+      }),
+    );
+    createAdminClient.mockReturnValue(
+      makeLeadTaskAdmin({ assigneeMembership: { user_id: "assignee-1" } }),
+    );
+    createNextStep.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-7", calendarChainId: "chain-7", kind: "appointment", mode: "phone" },
+    });
+
+    const result = await createLeadTaskAction("prop-1", {
+      kind: "appointment",
+      dueAt: "2026-06-20T15:00:00.000Z",
+      assigneeId: "assignee-1",
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      data: { id: "task-7", kind: "appointment", mode: "phone", calendarChainId: "chain-7" },
+    });
+    expect(createTask).not.toHaveBeenCalled();
+    expect(createNextStep).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "appointment",
+        mode: "phone",
+        title: "Call 123 Main",
+        propertyId: "prop-1",
+        assigneeId: "assignee-1",
+        dueAt: "2026-06-20T15:00:00.000Z",
+        origin: "app",
+      }),
+    );
+    expect(dispatchTaskCalendarEvent).not.toHaveBeenCalled();
+    expect(afterMock).not.toHaveBeenCalled();
+
+    createNextStep.mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-8", calendarChainId: null, kind: "task", mode: "phone" },
+    });
+    await createLeadTaskAction("prop-1", {
+      kind: "task",
+      title: " Pull comps ",
+      dueAt: "2026-06-20T15:00:00.000Z",
+      assigneeId: "assignee-1",
+    });
+    expect(createNextStep).toHaveBeenLastCalledWith(
+      expect.objectContaining({ kind: "task", title: "Pull comps", mode: undefined }),
+    );
+  });
+
+  it("keeps the assignee errors on the ready path (nothing is created)", async () => {
+    schemaReady.mockResolvedValue(true);
+    createClient.mockResolvedValue(
+      makeLeadTaskSupabase({
+        property: { id: "prop-1", org_id: "org-1", address: "123 Main" },
+        actorMembership: { user_id: "actor-1" },
+      }),
+    );
+    createAdminClient.mockReturnValue(makeLeadTaskAdmin({ assigneeMembership: null }));
+    const result = await createLeadTaskAction("prop-1", {
+      kind: "appointment",
+      dueAt: "2026-06-20T15:00:00.000Z",
+      assigneeId: "outside-user",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("ASSIGNEE_NOT_IN_ORG");
+    expect(createNextStep).not.toHaveBeenCalled();
+  });
   it("rejects assignees who are not members of the lead org", async () => {
     createClient.mockResolvedValue(
       makeLeadTaskSupabase({
@@ -928,7 +1035,7 @@ describe("createLeadTaskAction", () => {
     );
 
     const result = await createLeadTaskAction("prop-1", {
-      type: "follow_up",
+      kind: "appointment",
       dueAt: "2026-06-20T15:00:00.000Z",
       assigneeId: "outside-user",
     });
@@ -959,7 +1066,7 @@ describe("createLeadTaskAction", () => {
     );
 
     const result = await createLeadTaskAction("prop-1", {
-      type: "follow_up",
+      kind: "appointment",
       dueAt: "2026-06-20T15:00:00.000Z",
       assigneeId: "former-1",
     });
@@ -986,7 +1093,7 @@ describe("createLeadTaskAction", () => {
     });
 
     const result = await createLeadTaskAction("prop-1", {
-      type: "callback",
+      kind: "appointment",
       dueAt: "2026-06-20T15:00:00.000Z",
       assigneeId: "assignee-1",
     });
@@ -1026,7 +1133,7 @@ describe("createLeadTaskAction", () => {
     });
 
     const result = await createLeadTaskAction("prop-1", {
-      type: "follow_up",
+      kind: "appointment",
       dueAt: "2026-06-20T15:00:00.000Z",
       assigneeId: "assignee-1",
     });
@@ -1040,16 +1147,16 @@ describe("createLeadTaskAction", () => {
       taskId: "task-1",
       orgId: "org-1",
       assigneeId: "assignee-1",
-      taskTitle: "Follow up on 123 Main",
-      taskType: "follow_up",
+      taskTitle: "Callback 123 Main",
+      taskType: "callback",
       dueAt: "2026-06-20T15:00:00.000Z",
       propertyAddress: "123 Main",
     });
     expect(dispatchTaskAssignedSlack).toHaveBeenCalledWith({
       taskId: "task-1",
       assigneeId: "assignee-1",
-      taskTitle: "Follow up on 123 Main",
-      taskType: "follow_up",
+      taskTitle: "Callback 123 Main",
+      taskType: "callback",
       dueAt: "2026-06-20T15:00:00.000Z",
       propertyAddress: "123 Main",
       deepLink: "https://app.test/leads/prop-1",
@@ -1059,7 +1166,7 @@ describe("createLeadTaskAction", () => {
     expect(dispatchTaskCalendarEvent).toHaveBeenCalledWith({
       taskId: "task-1",
       assigneeId: "assignee-1",
-      taskTitle: "Follow up on 123 Main",
+      taskTitle: "Callback 123 Main",
       propertyAddress: "123 Main",
       dueAt: "2026-06-20T15:00:00.000Z",
       endAt: undefined,
@@ -1099,7 +1206,7 @@ describe("createLeadTaskAction", () => {
     });
 
     const result = await createLeadTaskAction("prop-1", {
-      type: "follow_up",
+      kind: "appointment",
       dueAt: "2026-06-20T15:00:00.000Z",
       assigneeId: "assignee-1",
     });
@@ -1139,7 +1246,7 @@ describe("createLeadTaskAction", () => {
     });
 
     const result = await createLeadTaskAction("prop-1", {
-      type: "callback",
+      kind: "appointment",
       dueAt: "2026-06-20T15:00:00.000Z",
       assigneeId: "actor-1",
     });
