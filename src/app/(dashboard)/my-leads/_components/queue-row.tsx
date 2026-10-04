@@ -417,6 +417,14 @@ export function MyLeadQueueRow({
                     {nextStepText(row.nextStep)}
                   </span>
                 )}
+                {row.stripReason && (
+                  <span data-testid={`strip-reason-${row.propertyId}`}>
+                    <span className="font-semibold text-foreground">
+                      In Call next:
+                    </span>{" "}
+                    {row.stripReason}
+                  </span>
+                )}
               </div>
 
               <MyLeadSmsStrip

@@ -1,5 +1,5 @@
 import { beforeEach,describe,expect,it,vi } from 'vitest';
-const mocks=vi.hoisted(()=>({viewer:vi.fn(),rpc:vi.fn(),adminRpc:vi.fn(),adminFrom:vi.fn(),dispatch:vi.fn(),revalidate:vi.fn(),report:vi.fn()}));
+const mocks=vi.hoisted(()=>({drips:vi.fn(),callNext:vi.fn(),viewer:vi.fn(),rpc:vi.fn(),adminRpc:vi.fn(),adminFrom:vi.fn(),dispatch:vi.fn(),revalidate:vi.fn(),report:vi.fn()}));
 vi.mock('next/cache',()=>({revalidatePath:mocks.revalidate}));
 vi.mock('@/lib/errors/report',()=>({reportError:mocks.report}));
 vi.mock('@/lib/supabase/admin',()=>({createAdminClient:()=>({rpc:mocks.adminRpc,from:mocks.adminFrom})}));
@@ -11,10 +11,12 @@ vi.mock('@/lib/messaging/rep-sms',()=>({
   }),
 }));
 vi.mock('@/lib/my-leads/queries',()=>({myLeadsViewer:mocks.viewer,getAcquisitionQueue:vi.fn(),getAcquisitionKpis:vi.fn(),getAcquisitionDetail:vi.fn()}));
+vi.mock('@/lib/my-leads/drip-queries',()=>({listMyLeadsInDrip:mocks.drips}));
+vi.mock('@/lib/my-leads/call-next',()=>({getCallNext:mocks.callNext}));
 vi.mock('@/lib/my-leads/settings',()=>({setAcquisitionDesignation:vi.fn(),setAcquisitionSettings:vi.fn()}));
 import { getAcquisitionKpis, getAcquisitionQueue } from '@/lib/my-leads/queries';
 import { loadMyLeads, submitMyLeadCommand } from './actions';
-beforeEach(()=>{vi.resetAllMocks();mocks.viewer.mockResolvedValue({orgId:'actual-org',userId:'actor',client:{rpc:mocks.rpc}});mocks.rpc.mockResolvedValue({data:{ok:true},error:null});mocks.adminRpc.mockResolvedValue({data:{ok:true},error:null});mocks.dispatch.mockResolvedValue({status:'sent',messageId:'message',externalId:'provider-message'});});
+beforeEach(()=>{vi.resetAllMocks();mocks.callNext.mockResolvedValue(null);mocks.drips.mockResolvedValue({active:[],replied:[],repliedCount:0,counts:{}});mocks.viewer.mockResolvedValue({orgId:'actual-org',userId:'actor',client:{rpc:mocks.rpc}});mocks.rpc.mockResolvedValue({data:{ok:true},error:null});mocks.adminRpc.mockResolvedValue({data:{ok:true},error:null});mocks.dispatch.mockResolvedValue({status:'sent',messageId:'message',externalId:'provider-message'});});
 describe('My Leads command integration',()=>{
   it('injects the authenticated organization, overriding client input',async()=>{
     expect(await submitMyLeadCommand('log-offer',{orgId:'forged-org',propertyId:'lead',amountCents:100})).toEqual({ok:true});
@@ -151,6 +153,27 @@ it('keeps KPI scope at today for the rep regardless of search and obsolete perio
   await loadMyLeads({memberId:'rep',search:'filtered lead',period:'custom',startDate:'2020-01-01',endDate:'2020-01-02'});
   expect(getAcquisitionKpis).toHaveBeenCalledWith({memberId:'rep',period:'today'});
   expect(getAcquisitionQueue).toHaveBeenCalledWith(expect.objectContaining({search:'filtered lead'}));
+});
+
+it('adds the Call next strip to the refresh, null when it is off',async()=>{
+  vi.mocked(getAcquisitionQueue).mockResolvedValue({stages:{},snapshotAt:'2026-10-05T12:00:00Z'} as never);
+  vi.mocked(getAcquisitionKpis).mockResolvedValue({} as never);
+  const strip={rows:[],excluded:[],hiddenCount:0,snapshotAt:'2026-10-05T12:00:00Z'};
+  mocks.callNext.mockResolvedValueOnce(strip);
+  expect(await loadMyLeads({memberId:'rep',search:'',period:'today'})).toMatchObject({ok:true,strip});
+  expect(mocks.callNext).toHaveBeenCalledWith({memberId:'rep'});
+  mocks.callNext.mockResolvedValueOnce(null);
+  expect(await loadMyLeads({memberId:'rep',search:'',period:'today'})).toMatchObject({ok:true,strip:null});
+});
+
+it('a failed strip read leaves the queue loading and is reported once with fixed fields',async()=>{
+  vi.mocked(getAcquisitionQueue).mockResolvedValue({stages:{},snapshotAt:'2026-10-05T12:00:00Z'} as never);
+  vi.mocked(getAcquisitionKpis).mockResolvedValue({} as never);
+  mocks.callNext.mockRejectedValueOnce(new Error('Private lead name and phone'));
+  const result=await loadMyLeads({memberId:'rep',search:'',period:'today'});
+  expect(result).toMatchObject({ok:true,strip:undefined});
+  expect(mocks.report).toHaveBeenCalledOnce();
+  expect(mocks.report.mock.calls[0][1]).toEqual({errorClass:'database',tags:{surface:'server',operation:'my_leads_call_next',kind:'read_failure'}});
 });
 
 it('returns safe typed access guidance without revealing assignment or revalidating', async()=>{

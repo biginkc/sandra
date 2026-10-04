@@ -235,7 +235,7 @@ it('orders inside tiers, breaks ties by assignment age then id, and never-touche
     const x = await w.lead('x'); const y = await w.lead('y'); const z = await w.lead('z');
     await w.attempt(x, w.at(-30 * DAY)); await w.attempt(y, w.at(-30 * DAY)); await w.attempt(z, w.at(-30 * DAY));
     await w.setAssigned(y, w.at(-40 * DAY)); await w.setAssigned(x, w.at(-20 * DAY)); await w.setAssigned(z, w.at(-20 * DAY));
-    const ids = w.order(await w.rows()).filter((id) => [x, y, z].includes(id));
+    const ids = w.order(await w.rows()).filter((id) => ([x, y, z] as string[]).includes(id));
     const [first, ...rest] = ids;
     expect(first).toBe(y);
     expect(rest).toEqual([x, z].sort());
