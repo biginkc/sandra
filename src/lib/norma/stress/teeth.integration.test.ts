@@ -148,12 +148,36 @@ describe("the stress gate has teeth (deterministic scenes)", () => {
   });
 });
 
+// The random schedule can miss the stale-sweep window. Keep its full 70
+// lifecycles and add a due, held softphone pause so this tooth is deterministic.
+async function staleSweepWitness(h: Harness) {
+  const ctx = await h.lead({ enrollments: ["paused:call_in_progress"] }, { kind: "no_answer_status" });
+  await h.requestCall(ctx, h.world.rep1, { crashBeforeDispatch: true });
+  await h.scratch.advance(31 * 60_000);
+  const request = (await h.scratch.pool.query("select status from public.norma_call_requests where property_id=$1", [ctx.lead.property])).rows[0];
+  expect(request.status).toBe("requested");
+  expect((await h.scratch.pool.query("select public.fn_norma_hold_active($1) as held", [ctx.lead.property])).rows[0].held).toBe(true);
+  const due = (await h.scratch.pool.query("select count(*)::int as n from public.sequence_enrollments where id=$1 and status='paused' and pause_reason='call_in_progress' and updated_at < now() - interval '30 minutes'", [ctx.lead.enrollments[0]])).rows[0].n;
+  expect(due).toBe(1);
+  await h.staleSweep();
+  const after = (await h.scratch.pool.query("select status,pause_reason from public.sequence_enrollments where id=$1", [ctx.lead.enrollments[0]])).rows[0];
+  return after;
+}
+
 describe("the stress gate has teeth", () => {
-  it.each(MUTANTS)("catches: $name", async ({ invariant, apply }) => {
+  it.each(MUTANTS)("catches: $name", async ({ name, invariant, apply }) => {
     const h = await Harness.create(rng(77));
     try {
       await apply((sql) => h.scratch.pool.query(sql) as never);
       await runRandomRun(h, 77, 70);
+      if (name === "the stale-call sweep ignores an open Norma hold") {
+        const clean = await Harness.create(rng(701));
+        try {
+          expect(await staleSweepWitness(clean)).toEqual({ status: "paused", pause_reason: "call_in_progress" });
+          expect((await checkInvariants(clean, { settled: false })).violations).toEqual([]);
+        } finally { await clean.close(); }
+        expect((await staleSweepWitness(h)).status).toBe("active");
+      }
       const { violations } = await checkInvariants(h, { settled: true });
       expect(violations.filter((v) => v.startsWith(`[${invariant}]`)).length, `no [${invariant}] violation among: ${violations.slice(0, 5).join(" | ")}`).toBeGreaterThan(0);
     } finally {
