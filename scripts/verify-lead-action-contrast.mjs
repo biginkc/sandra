@@ -41,6 +41,7 @@ const browser = await chromium.launch({
 });
 const page = await browser.newPage();
 const results = [];
+const normalBackgrounds = new Map();
 try {
   for (const theme of ["light", "dark"])
     for (let layout = 0; layout < 2; layout++) {
@@ -58,14 +59,30 @@ try {
             await page
               .locator("#" + id)
               .evaluate((el) => el.setAttribute("aria-expanded", "true"));
-          if (state === "focus") await page.locator("#" + id).focus();
+          if (state === "focus") {
+            await page.keyboard.press("Tab");
+            await page.locator("#" + id).focus();
+          }
           const result = await page.locator("#" + id).evaluate((el) => {
             const s = getComputedStyle(el);
+            if (
+              document.querySelector(`#${el.id}:hover`) === el &&
+              !matchMedia("(hover: hover)").matches
+            )
+              throw new Error("Hover styles unavailable");
             const parse = (x) => {
               const c = document.createElement("canvas");
               c.width = c.height = 1;
               const ctx = c.getContext("2d");
+              if (!CSS.supports("color", x))
+                throw new Error(`Invalid computed color: ${x}`);
+              ctx.fillStyle = "#010203";
               ctx.fillStyle = x;
+              const first = ctx.fillStyle;
+              ctx.fillStyle = "#040506";
+              ctx.fillStyle = x;
+              if (first !== ctx.fillStyle)
+                throw new Error(`Canvas rejected computed color: ${x}`);
               ctx.fillRect(0, 0, 1, 1);
               const v = [...ctx.getImageData(0, 0, 1, 1).data];
               return [...v.slice(0, 3), v[3] / 255];
@@ -83,7 +100,8 @@ try {
             bg = blend(parse(s.backgroundColor), bg);
             let fg = parse(s.color);
             const opacity = Number(s.opacity);
-            fg = blend([...fg.slice(0, 3), opacity], parent);
+            fg = blend(fg, bg);
+            fg = blend([...fg, opacity], parent);
             bg = blend([...bg, opacity], parent);
             const lum = (c) =>
               c
@@ -94,6 +112,11 @@ try {
                 .reduce((n, v, i) => n + v * [0.2126, 0.7152, 0.0722][i], 0);
             let l = [lum(fg), lum(bg)].sort((a, b) => b - a);
             return {
+              hovered: document.querySelector(`#${el.id}:hover`) === el,
+              focused: el === document.activeElement,
+              focusVisible:
+                document.querySelector(`#${el.id}:focus-visible`) === el,
+              hoverCapable: matchMedia("(hover: hover)").matches,
               color: s.color,
               background: s.backgroundColor,
               opacity,
@@ -103,6 +126,24 @@ try {
           await page
             .locator("#" + id)
             .evaluate((el) => el.removeAttribute("aria-expanded"));
+          const key = `${theme}:${layout}:${id}`;
+          if (state === "normal") normalBackgrounds.set(key, result.background);
+          if (state === "hover") {
+            assert(
+              result.hoverCapable && result.hovered,
+              `Hover not active: ${key}`,
+            );
+            assert.notEqual(
+              result.background,
+              normalBackgrounds.get(key),
+              "Hover must change the background",
+            );
+          }
+          if (state === "focus")
+            assert(
+              result.focused && result.focusVisible,
+              `Keyboard focus not active: ${key}`,
+            );
           results.push({
             theme,
             layout: layout ? "media" : "flat",
