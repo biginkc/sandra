@@ -52,6 +52,8 @@ import {
 } from "@/lib/messaging/send";
 import type { DialpadFromOption } from "@/lib/messaging/types";
 import { dispatchTaskCalendarEvent } from "@/lib/integrations/google/dispatch";
+import { schemaReady } from "@/lib/my-leads/schema-ready";
+import { createNextStep } from "@/lib/next-steps";
 import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
 import { dispatchTaskAssignedSlack } from "@/lib/integrations/slack/dispatch";
 import {
@@ -1861,23 +1863,47 @@ export async function updatePropertyStatus(
   }
 }
 
-export type LeadTaskKind = Extract<TaskType, "follow_up" | "callback">;
+/** The two next-step kinds a lead page can create: an appointment (phone by default) or a task. */
+export type LeadTaskKind = "appointment" | "task";
+
+export type LeadTaskInput = {
+  kind: LeadTaskKind;
+  dueAt: string;
+  assigneeId: string;
+  /** Required for a task; an appointment defaults to "Call <address>". */
+  title?: string;
+  /** Appointment only, default "phone". */
+  mode?: "phone" | "in_person";
+  /** In-person only (phone is fixed at 15 minutes). */
+  durationMinutes?: number;
+  location?: string;
+  note?: string;
+};
+
+export type LeadTaskResult = {
+  id: string;
+  kind: LeadTaskKind;
+  mode: "phone" | "in_person";
+  calendarChainId: string | null;
+};
 
 export async function createLeadTaskAction(
   propertyId: string,
-  input: {
-    type: LeadTaskKind;
-    dueAt: string;
-    assigneeId: string;
-  },
-): Promise<Result<Task>> {
-  if (input.type !== "follow_up" && input.type !== "callback") {
+  input: LeadTaskInput,
+): Promise<Result<LeadTaskResult>> {
+  if (input.kind !== "appointment" && input.kind !== "task") {
     return {
       ok: false,
       error: {
         code: "INVALID_TASK_TYPE",
-        message: "Choose follow-up or callback.",
+        message: "Choose appointment or task.",
       },
+    };
+  }
+  if (input.kind === "task" && !input.title?.trim()) {
+    return {
+      ok: false,
+      error: { code: "TITLE_REQUIRED", message: "Give the task a title." },
     };
   }
   if (!input.dueAt || Number.isNaN(new Date(input.dueAt).getTime())) {
@@ -1985,15 +2011,45 @@ export async function createLeadTaskAction(
       };
     }
 
+    // Deploy-before-migration guard: until fn_create_next_step and tasks.mode exist the
+    // action runs today's createTask path unchanged (an appointment is a callback row, a
+    // task a custom row); afterwards it writes through the one next-step function.
+    if (await schemaReady("next_step_write")) {
+      const title =
+        input.kind === "task"
+          ? input.title!.trim()
+          : input.title?.trim() || `Call ${property.address}`;
+      const created = await createNextStep({
+        kind: input.kind,
+        assigneeId: input.assigneeId,
+        title,
+        dueAt: input.dueAt,
+        propertyId: property.id,
+        mode: input.kind === "appointment" ? (input.mode ?? "phone") : undefined,
+        durationMinutes: input.durationMinutes,
+        location: input.location,
+        note: input.note,
+        origin: "app",
+      });
+      if (!created.ok) return created;
+      return ok({
+        id: created.data.taskId,
+        kind: created.data.kind,
+        mode: created.data.mode,
+        calendarChainId: created.data.calendarChainId,
+      });
+    }
+
+    const legacyType: LegacyLeadTaskType = input.kind === "task" ? "custom" : "callback";
     const taskTitle =
-      input.type === "callback"
-        ? `Callback ${property.address}`
-        : `Follow up on ${property.address}`;
+      input.kind === "task"
+        ? input.title!.trim()
+        : `Callback ${property.address}`;
     const taskResult = await createTask(supabase, {
       orgId: property.org_id,
       assigneeId: input.assigneeId,
       relatedPropertyId: property.id,
-      type: input.type,
+      type: legacyType,
       title: taskTitle,
       dueAt: input.dueAt,
       createdBy: user.id,
@@ -2017,7 +2073,7 @@ export async function createLeadTaskAction(
             orgId: property.org_id,
             assigneeId: input.assigneeId,
             taskTitle,
-            taskType: input.type,
+            taskType: legacyType,
             dueAt: input.dueAt,
             propertyAddress: property.address,
           }),
@@ -2025,7 +2081,7 @@ export async function createLeadTaskAction(
             taskId: taskResult.data.id,
             assigneeId: input.assigneeId,
             taskTitle,
-            taskType: input.type,
+            taskType: legacyType,
             dueAt: input.dueAt,
             propertyAddress: property.address,
             deepLink,
@@ -2038,9 +2094,8 @@ export async function createLeadTaskAction(
             taskTitle,
             propertyAddress: property.address,
             dueAt: input.dueAt,
-            // createLeadTaskAction only creates follow_up/callback tasks
-            // (guarded above) — never an appointment, so no end_at exists
-            // to thread through; the 30-minute default applies.
+            // The legacy path never creates an appointment row, so no end_at
+            // exists to thread through; the 30-minute default applies.
             endAt: undefined,
             timezone: prefs.timezone,
             deepLink,
@@ -2052,15 +2107,22 @@ export async function createLeadTaskAction(
 
     revalidatePath(`/leads/${propertyId}`);
     revalidatePath("/dashboard");
-    return taskResult;
+    return ok({
+      id: taskResult.data.id,
+      kind: input.kind,
+      mode: "phone",
+      calendarChainId: null,
+    });
   } catch (e) {
     reportError(e, {
       tags: { surface: "create_lead_task" },
-      extra: { propertyId, type: input.type },
+      extra: { propertyId, kind: input.kind },
     });
     return errFromUnknown(e, "TASK_CREATE_FAILED");
   }
 }
+
+type LegacyLeadTaskType = Extract<TaskType, "callback" | "custom">;
 
 function buildLeadTaskDeepLink(propertyId: string): string {
   const baseUrl =
