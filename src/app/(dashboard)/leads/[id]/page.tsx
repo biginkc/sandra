@@ -996,7 +996,7 @@ export default async function LeadDetailPage({
             </div>
           </div>
 
-          <aside className="min-w-0 space-y-3" aria-label="Lead dossier">
+          <aside className="flex min-w-0 flex-col gap-3" aria-label="Lead dossier">
             <fieldset disabled={training} inert={training || undefined} className="contents"><LeadDripCard propertyId={lead.id} /></fieldset>
             <LeadFilesCard
               files={esign.files}

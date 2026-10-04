@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   link: vi.fn(),
   membership: vi.fn(),
   approval: vi.fn(),
+  policy: vi.fn(),
+  channelDenial: vi.fn(),
   verify: vi.fn(),
   urls: vi.fn(),
   updateUrl: vi.fn(),
@@ -29,6 +31,8 @@ vi.mock("./unfurl-store", () => ({
   loadSlackAccountLink: mocks.link,
   hasActiveSlackMembership: mocks.membership,
   loadSlackChannelApproval: mocks.approval,
+  loadSlackPreviewPolicy: mocks.policy,
+  loadSlackChannelDenial: mocks.channelDenial,
   loadSlackJobUrls: mocks.urls,
   updateSlackJobUrl: mocks.updateUrl,
   finishSlackUnfurlJob: mocks.finish,
@@ -44,7 +48,7 @@ vi.mock("./unfurl-policy", () => ({
 vi.mock("./unfurl-data", () => ({ loadPreviewData: mocks.loadData }));
 vi.mock("./unfurl-blocks", () => ({ buildPreviewBlocks: mocks.blocks }));
 
-import { runSlackUnfurlSweep } from "./unfurl-worker";
+import { processSlackUnfurlJob, runSlackUnfurlSweep } from "./unfurl-worker";
 
 const now = Date.now();
 const job = {
@@ -52,6 +56,7 @@ const job = {
   receipt_id: "receipt-1",
   installation_id: "installation-1",
   installation_version: 1,
+  policy_revision: null,
   org_id: "org-1",
   team_id: "T123",
   app_id: "A123",
@@ -82,6 +87,8 @@ beforeEach(() => {
   mocks.link.mockResolvedValue({ userId: "sandra-user-1", status: "active" });
   mocks.membership.mockResolvedValue(true);
   mocks.approval.mockResolvedValue({ installationId: "installation-1", orgId: "org-1", channelId: "C123", status: "active", sharingPolicyAcknowledged: true });
+  mocks.policy.mockResolvedValue({ installationId: "installation-1", orgId: "org-1", mode: "legacy", policyRevision: 1 });
+  mocks.channelDenial.mockResolvedValue(false);
   mocks.verify.mockResolvedValue({ allowed: true, channel: { id: "C123" }, user: { id: "U123" } });
   mocks.urls.mockResolvedValue([
     { url_key: "https://sandra.bmhgroupkc.com/leads/11111111-1111-4111-8111-111111111111", lead_id: null, lookup_status: null, authorization_status: null, last_error_code: null },
@@ -98,6 +105,41 @@ beforeEach(() => {
 });
 
 describe("Slack unfurl worker", () => {
+  it("rejects a directly invoked job without a claimed lease token", async () => {
+    const result = await processSlackUnfurlJob({ ...job, claim_token: null }, Date.now() + 45_000);
+    expect(result).toBe("failed");
+    expect(mocks.installation).not.toHaveBeenCalled();
+    expect(mocks.unfurl).not.toHaveBeenCalled();
+  });
+
+  it("finishes disabled-policy jobs without sending", async () => {
+    mocks.policy.mockResolvedValue({ installationId: "installation-1", orgId: "org-1", mode: "disabled", policyRevision: 2 });
+    const result = await runSlackUnfurlSweep();
+    expect(result.noops).toBe(1);
+    expect(mocks.unfurl).not.toHaveBeenCalled();
+    expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "noop", errorCode: "preview_policy_changed" });
+  });
+
+  it("fences a job whose captured workspace policy revision is stale", async () => {
+    mocks.claim.mockResolvedValue([{ ...job, policy_revision: 2 }]);
+    mocks.policy.mockResolvedValue({ installationId: "installation-1", orgId: "org-1", mode: "eligible_internal_channels", policyRevision: 3 });
+    const result = await runSlackUnfurlSweep();
+    expect(result.noops).toBe(1);
+    expect(mocks.unfurl).not.toHaveBeenCalled();
+  });
+
+  it("passes a null legacy approval through broad policy and carries channel denials to live verification", async () => {
+    mocks.claim.mockResolvedValue([{ ...job, policy_revision: 2 }]);
+    mocks.policy.mockResolvedValue({ installationId: "installation-1", orgId: "org-1", mode: "eligible_internal_channels", policyRevision: 2 });
+    mocks.approval.mockResolvedValue(null);
+    mocks.channelDenial.mockResolvedValue(true);
+    mocks.verify.mockResolvedValue({ allowed: false, reason: "channel_not_approved" });
+    const result = await runSlackUnfurlSweep();
+    expect(result.noops).toBe(1);
+    expect(mocks.verify).toHaveBeenCalledWith(expect.objectContaining({ approval: null, policyEnabled: true, channelDenied: true }));
+    expect(mocks.unfurl).not.toHaveBeenCalled();
+  });
+
   it("renders the complete eligible URL map in one chat.unfurl call", async () => {
     const result = await runSlackUnfurlSweep();
     expect(result.succeeded).toBe(1);

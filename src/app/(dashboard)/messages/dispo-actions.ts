@@ -81,7 +81,7 @@ export async function setOutreachDispo(
   return saveOutreachDispo(propertyId, dispo);
 }
 
-/** Only the inbox picker calls this action. Dialer wrap-up uses the shared saver directly. */
+/** Inbox and lead-page drip pickers share this guarded outcome-and-enrollment action. */
 export async function setInboxDispoAndStartDrip(
   propertyId: string,
   dispo: "needs_sequence",

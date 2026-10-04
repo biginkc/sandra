@@ -66,9 +66,6 @@ export function OutcomeBar({
   onDispositionChanged,
   activeDripEnrollmentId,
   activeDripSequenceId,
-  activeDripName,
-  activeDripStep,
-  activeDripTotal,
   initialFailedStart,
   onDripChanged,
   showMoveToLead = true,
@@ -140,23 +137,8 @@ export function OutcomeBar({
   }
 
   async function chooseDrip(sequenceId: string, afterSavedOutcome = false): Promise<PickResult> {
-    if (activeDripEnrollmentId) {
-      if (!afterSavedOutcome) {
-        const saved = await setOutreachDispo(propertyId, "needs_sequence");
-        if (!saved.ok) {
-          if (saved.committed) {
-            setDispo("needs_sequence");
-            onDispositionChanged?.();
-            onDripChanged?.();
-          }
-          return { status: "failed", reason: saved.error, saved: false };
-        }
-        setDispo("needs_sequence");
-        onDispositionChanged?.();
-        onDripChanged?.();
-      }
-      return { status: "skipped", reason: `Already in ${activeDripName}, text ${activeDripStep} of ${activeDripTotal}. Stop it or switch.`, saved: true };
-    }
+    // Let the server check protected outcomes and the current enrollment,
+    // even when this render already knows about an active or paused drip.
     if (afterSavedOutcome) {
       const result = await startDripForLeads(sequenceId, [propertyId]);
       if (!result.ok) return { status: "failed", reason: result.error.message, saved: false };

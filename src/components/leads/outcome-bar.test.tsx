@@ -177,11 +177,29 @@ describe("<OutcomeBar />", () => {
     });
 
     it("keeps the Open lead link pointing at the lead", async () => {
+      setInboxDispoAndStartDripMock.mockResolvedValue({ ok: true, enrollment: { status: "skipped", reason: "Already in Current drip. Stop it or switch." } });
       const user = userEvent.setup();
       renderBar({ activeDripEnrollmentId: "e1", activeDripSequenceId: "cur", activeDripName: "Current", activeDripStep: 1, activeDripTotal: 2 });
       await user.click(screen.getByTestId("dispo-needs-sequence").querySelector("button")!);
       await pickSeedDrip(user);
       expect(await screen.findByRole("link", { name: "Open lead" })).toHaveAttribute("href", "/leads/prop-1");
+    });
+
+    it.each(["wrong_number", "bad_number", "callback_requested", "booked_appointment"])("checks the server block for %s even when an existing drip is shown", async (dispo) => {
+      setInboxDispoAndStartDripMock.mockResolvedValue({ ok: false, error: "Resolve this outcome before starting a drip." });
+      const user = userEvent.setup();
+      const { onDispositionChanged, onDripChanged } = renderBar({
+        initialDispo: dispo, activeDripEnrollmentId: "e1", activeDripSequenceId: "current",
+        activeDripName: "Current drip", activeDripStep: 1, activeDripTotal: 2,
+      });
+      await user.click(screen.getByTestId("dispo-needs-sequence").querySelector("button")!);
+      await pickSeedDrip(user);
+      expect(setInboxDispoAndStartDripMock).toHaveBeenCalledWith("prop-1", "needs_sequence", "s1");
+      expect(setOutreachDispoMock).not.toHaveBeenCalled();
+      expect(onDispositionChanged).not.toHaveBeenCalled();
+      expect(onDripChanged).not.toHaveBeenCalled();
+      expect(await screen.findByTestId("drip-cant-start")).toHaveTextContent("Resolve this outcome");
+      expect(screen.getByText(DISPO_LABELS[dispo], { selector: "span" })).toBeVisible();
     });
 
     it("disables only the drip pickers when drip state is unknown", async () => {
@@ -253,6 +271,7 @@ describe("<OutcomeBar />", () => {
     });
 
     it("refreshes the drip card in finally after a failed switch, keeping the alert", async () => {
+      setInboxDispoAndStartDripMock.mockResolvedValue({ ok: true, enrollment: { status: "skipped", reason: "Already in Current drip. Stop it or switch." } });
       changeDripActionMock.mockResolvedValue({ ok: false, error: { message: "Replacement failed" } });
       const user = userEvent.setup();
       const { onDripChanged } = renderBar({
@@ -270,6 +289,7 @@ describe("<OutcomeBar />", () => {
     });
 
     it("refreshes the drip card after a thrown switch", async () => {
+      setInboxDispoAndStartDripMock.mockResolvedValue({ ok: true, enrollment: { status: "skipped", reason: "Already in Current drip. Stop it or switch." } });
       changeDripActionMock.mockRejectedValue(new Error("network"));
       const user = userEvent.setup();
       const { onDripChanged } = renderBar({

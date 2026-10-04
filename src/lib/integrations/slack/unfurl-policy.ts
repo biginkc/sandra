@@ -105,6 +105,8 @@ export type SlackDestinationDecision =
 
 export function authorizeSlackDestination(input: {
   approval: SlackChannelApproval | null;
+  policyEnabled?: boolean;
+  channelDenied?: boolean;
   expectedInstallationId: string;
   expectedOrgId: string;
   expectedTeamId: string;
@@ -113,13 +115,16 @@ export function authorizeSlackDestination(input: {
   channel: SlackConversationInfo | null;
   user: SlackUserInfo | null;
 }): SlackDestinationDecision {
-  if (!input.approval || input.approval.status !== "active" || !input.approval.sharingPolicyAcknowledged) return { allowed: false, reason: "channel_not_approved" };
-  if (input.approval.installationId !== input.expectedInstallationId || input.approval.orgId !== input.expectedOrgId || input.approval.channelId !== input.expectedChannelId) return { allowed: false, reason: "channel_binding_mismatch" };
+  if (input.channelDenied) return { allowed: false, reason: "channel_not_approved" };
+  if (!input.policyEnabled && (!input.approval || input.approval.status !== "active" || !input.approval.sharingPolicyAcknowledged)) return { allowed: false, reason: "channel_not_approved" };
+  if (!input.policyEnabled && input.approval?.status === "revoked") return { allowed: false, reason: "channel_not_approved" };
+  if (input.approval && (input.approval.installationId !== input.expectedInstallationId || input.approval.orgId !== input.expectedOrgId || input.approval.channelId !== input.expectedChannelId)) return { allowed: false, reason: "channel_binding_mismatch" };
+  if (!input.policyEnabled && input.approval && !input.approval.sharingPolicyAcknowledged) return { allowed: false, reason: "channel_not_approved" };
   const channel = input.channel;
   const contextTeamId = channel?.context_team_id ?? channel?.team_id;
   if (!channel || channel.id !== input.expectedChannelId || contextTeamId !== input.expectedTeamId || hasForeignTeamId(channel.shared_team_ids, input.expectedTeamId) || hasForeignTeamId(channel.connected_team_ids, input.expectedTeamId) || hasForeignTeamId(channel.internal_team_ids, input.expectedTeamId)) return { allowed: false, reason: "channel_identity_unverified" };
   if (!channel.is_channel && !channel.is_group) return { allowed: false, reason: "channel_type_denied" };
-  if (channel.is_im || channel.is_mpim || channel.is_archived || channel.is_shared || channel.is_ext_shared || channel.is_org_shared || channel.is_pending_ext_shared || hasPendingSharedTeams(channel.pending_shared) || (channel.pending_connected_team_ids?.length ?? 0) > 0 || channel.is_member !== true) return { allowed: false, reason: "channel_sharing_denied" };
+  if (channel.is_im || channel.is_mpim || channel.is_archived || channel.is_shared || channel.is_ext_shared || channel.is_org_shared || channel.is_pending_ext_shared || hasPendingSharedTeams(channel.pending_shared) || (channel.pending_connected_team_ids?.length ?? 0) > 0 || (input.policyEnabled !== true && channel.is_member !== true)) return { allowed: false, reason: "channel_sharing_denied" };
   const user = input.user;
   if (!user || user.id !== input.expectedPosterUserId || user.team_id !== input.expectedTeamId || user.deleted === true || user.is_bot === true) return { allowed: false, reason: "poster_identity_denied" };
   return { allowed: true, channel, user };
@@ -128,6 +133,8 @@ export function authorizeSlackDestination(input: {
 export async function verifySlackDestination(input: {
   token: string;
   approval: SlackChannelApproval | null;
+  policyEnabled?: boolean;
+  channelDenied?: boolean;
   installationId: string;
   orgId: string;
   teamId: string;
@@ -144,6 +151,8 @@ export async function verifySlackDestination(input: {
     ]);
     return authorizeSlackDestination({
       approval: input.approval,
+      policyEnabled: input.policyEnabled,
+      channelDenied: input.channelDenied,
       expectedInstallationId: input.installationId,
       expectedOrgId: input.orgId,
       expectedTeamId: input.teamId,
@@ -183,7 +192,7 @@ export async function verifySlackChannelForApproval(input: {
     const contextTeamId = channel.context_team_id ?? channel.team_id;
     if (contextTeamId !== input.teamId || hasForeignTeamId(channel.shared_team_ids, input.teamId) || hasForeignTeamId(channel.connected_team_ids, input.teamId) || hasForeignTeamId(channel.internal_team_ids, input.teamId)) return { allowed: false, reason: "channel_identity_unverified" };
     if (!channel.is_channel && !channel.is_group) return { allowed: false, reason: "channel_type_denied" };
-    if (channel.is_im || channel.is_mpim || channel.is_archived || channel.is_shared || channel.is_ext_shared || channel.is_org_shared || channel.is_pending_ext_shared || hasPendingSharedTeams(channel.pending_shared) || (channel.pending_connected_team_ids?.length ?? 0) > 0 || channel.is_member !== true) {
+    if (channel.is_im || channel.is_mpim || channel.is_archived || channel.is_shared || channel.is_ext_shared || channel.is_org_shared || channel.is_pending_ext_shared || hasPendingSharedTeams(channel.pending_shared) || (channel.pending_connected_team_ids?.length ?? 0) > 0 || (channel.is_member !== true)) {
       return { allowed: false, reason: "channel_sharing_denied" };
     }
     return { allowed: true, channel };
@@ -240,12 +249,17 @@ function hasPendingSharedTeams(value: string[] | boolean | undefined): boolean {
 
 function preflightSlackApproval(input: {
   approval: SlackChannelApproval | null;
+  policyEnabled?: boolean;
+  channelDenied?: boolean;
   installationId: string;
   orgId: string;
   channelId: string;
 }): Extract<SlackDestinationDecision, { allowed: false }> | null {
-  if (!input.approval || input.approval.status !== "active" || !input.approval.sharingPolicyAcknowledged) return { allowed: false, reason: "channel_not_approved" };
-  if (input.approval.installationId !== input.installationId || input.approval.orgId !== input.orgId || input.approval.channelId !== input.channelId) return { allowed: false, reason: "channel_binding_mismatch" };
+  if (input.channelDenied) return { allowed: false, reason: "channel_not_approved" };
+  if (!input.policyEnabled && (!input.approval || input.approval.status !== "active" || !input.approval.sharingPolicyAcknowledged)) return { allowed: false, reason: "channel_not_approved" };
+  if (!input.policyEnabled && input.approval?.status === "revoked") return { allowed: false, reason: "channel_not_approved" };
+  if (input.approval && (input.approval.installationId !== input.installationId || input.approval.orgId !== input.orgId || input.approval.channelId !== input.channelId)) return { allowed: false, reason: "channel_binding_mismatch" };
+  if (!input.policyEnabled && input.approval && !input.approval.sharingPolicyAcknowledged) return { allowed: false, reason: "channel_not_approved" };
   return null;
 }
 

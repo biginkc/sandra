@@ -16,6 +16,7 @@ const cluster = mkdtempSync(join(tmpdir(), "sandra-slack-unfurl-"));
 const socket = mkdtempSync(join(tmpdir(), "sandra-slack-unfurl-sock-"));
 const port = 6200 + Math.floor(Math.random() * 300);
 const migration = readFileSync(new URL("../supabase/migrations/20261003130001_slack_lead_unfurl_foundation.sql", import.meta.url), "utf8");
+const policyMigration = readFileSync(new URL("../supabase/migrations/20261003160000_slack_workspace_preview_policy.sql", import.meta.url), "utf8");
 const bin = (name) => join(postgresBin, name);
 const run = (name, args, input = "") => execFileSync(bin(name), args, { input, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
 const psql = (query) => run("psql", ["-h", socket, "-p", String(port), "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-At", "-F", "\t"], query).replace(/^SET\n/, "").replace(/\r?\n$/, "");
@@ -31,6 +32,7 @@ const psqlAsync = (query) => new Promise((resolve, reject) => {
     : reject(Object.assign(new Error(`psql exited ${code}`), { stdout, stderr })));
   child.stdin.end(query);
 });
+const errorText = (error) => `${String(error)} ${error && typeof error === "object" && "stderr" in error ? String(error.stderr) : ""}`;
 const org = randomUUID();
 const foreignOrg = randomUUID();
 const user = randomUUID();
@@ -67,6 +69,7 @@ try {
     );
   `);
   psql(migration);
+  psql(policyMigration);
   const privilege = psql("select has_function_privilege('service_role', 'public.get_slack_preview_attempt_facts(uuid,uuid)', 'execute'), has_function_privilege('authenticated', 'public.get_slack_preview_attempt_facts(uuid,uuid)', 'execute'), has_function_privilege('service_role', 'public.guard_slack_unfurl_dispatch(uuid,uuid,uuid,integer,uuid,text,text)', 'execute'), has_function_privilege('authenticated', 'public.guard_slack_unfurl_dispatch(uuid,uuid,uuid,integer,uuid,text,text)', 'execute'), has_function_privilege('service_role', 'public.revoke_slack_installation_generation(text,text,uuid,integer,text)', 'execute'), has_function_privilege('authenticated', 'public.revoke_slack_installation_generation(text,text,uuid,integer,text)', 'execute');").split("\t");
   if (privilege.join("\t") !== "t\tf\tt\tf\tt\tf") throw new Error("Slack operational RPC privileges are not narrowed");
   const tablePrivileges = psql("select has_table_privilege('service_role','public.slack_installations','select'), has_table_privilege('service_role','public.slack_account_links','select'), has_table_privilege('service_role','public.slack_channel_approvals','select'), has_table_privilege('service_role','public.memberships','select'), has_table_privilege('service_role','public.slack_unfurl_job_urls','update'), has_table_privilege('authenticated','public.slack_installations','select');").split("\t");
@@ -104,6 +107,10 @@ try {
   if (relink !== "1") throw new Error("ordinary relink rotated installation version");
   const linked = psql(`set role service_role; select installation_id, installation_version, account_link_id from public.upsert_slack_installation_and_account_link('${org}','${team}','${app}','Rehearsal','B_REHEARSAL','xoxb-redacted-3',array['links:read'],'${user}','${user}','U_REHEARSAL','rehearsal-key');`).split("\t");
   if (linked[1] !== "1" || !linked[2]) throw new Error("atomic installation/account link upsert failed");
+  try { psql(`set role service_role; select public.set_slack_preview_policy('${install[0]}','${org}','${user}',true);`); throw new Error("missing Slack scopes unexpectedly enabled policy"); } catch (error) { if (!errorText(error).includes("INSTALLATION_SCOPE_MISSING")) throw error; }
+  psql(`update public.slack_installations set scopes=array['links:read','links:write','channels:read','groups:read','users:read'] where id='${install[0]}';`);
+  try { psql(`set role service_role; select public.set_slack_preview_policy('${install[0]}','${org}','${member}',true);`); throw new Error("member unexpectedly enabled policy"); } catch (error) { if (!errorText(error).includes("OWNER_NOT_ACTIVE")) throw error; }
+  try { psql(`set role service_role; select public.set_slack_preview_policy('${install[0]}','${foreignOrg}','${user}',true);`); throw new Error("cross-org policy unexpectedly enabled"); } catch (error) { if (!errorText(error).includes("INSTALLATION_NOT_ACTIVE")) throw error; }
 
   const approval = psql(`set role service_role; select public.approve_slack_channel('${install[0]}','${org}','C_REHEARSAL','${user}',true);`);
   if (!approval) throw new Error("channel approval failed");
@@ -111,12 +118,20 @@ try {
   psql(`set role service_role; select public.revoke_slack_installation('${team}','${app}','rehearsal');`);
   const staleEvent = randomUUID();
   try { psql(`set role service_role; select public.enqueue_slack_unfurl_event('${team}','${app}','${staleEvent}','link_shared',now(),'${org}','${install[0]}',1,'C_REHEARSAL','0.9','U_REHEARSAL',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null);`); throw new Error("revoked installation accepted an event"); } catch (error) { if (!String(error).includes("INSTALLATION_NOT_ACTIVE")) throw error; }
-  if (psql(`set role service_role; select installation_version from public.upsert_slack_installation('${org}','${team}','${app}','Rehearsal','B_REHEARSAL','xoxb-redacted-4',array[]::text[],'${user}','rehearsal-key');`) !== "2") throw new Error("reinstall did not rotate installation version");
+  if (psql(`set role service_role; select installation_version from public.upsert_slack_installation('${org}','${team}','${app}','Rehearsal','B_REHEARSAL','xoxb-redacted-4',array['links:read','links:write','channels:read','groups:read','users:read'],'${user}','rehearsal-key');`) !== "2") throw new Error("reinstall did not rotate installation version");
+  if (psql(`set role service_role; select mode from public.set_slack_preview_policy('${install[0]}','${org}','${user}',true);`) !== "eligible_internal_channels") throw new Error("workspace policy did not enable");
+  psql(`update public.slack_installations set scopes=array['links:read'] where id='${install[0]}';`);
+  if (psql(`set role service_role; select mode from public.set_slack_preview_policy('${install[0]}','${org}','${user}',false);`) !== "disabled") throw new Error("policy disable failed after scope loss");
+  psql(`update public.slack_installations set scopes=array['links:read','links:write','channels:read','groups:read','users:read'] where id='${install[0]}';`);
+  if (psql(`set role service_role; select mode from public.set_slack_preview_policy('${install[0]}','${org}','${user}',true);`) !== "eligible_internal_channels") throw new Error("workspace policy did not restore after scope loss");
+  const stalePolicyEvent = randomUUID();
+  const stalePolicy = psql(`set role service_role; select job_id from public.enqueue_slack_unfurl_event('${team}','${app}','${stalePolicyEvent}','link_shared',now()-interval '2 minutes','${org}','${install[0]}',2,'C_AUTO','1.0','U_REHEARSAL',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null);`);
+  if (stalePolicy || psql(`select denial_code from public.slack_event_receipts where event_id='${stalePolicyEvent}';`) !== "event_before_policy") throw new Error("pre-policy event was accepted after enable");
 
   const event = randomUUID();
-  const enqueue = psql(`set role service_role; select job_id, duplicate from public.enqueue_slack_unfurl_event('${team}','${app}','${event}','link_shared',now(),'${org}','${linked[0]}',2,'C_REHEARSAL','1.1','U_REHEARSAL',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null);`).split("\t");
+  const enqueue = psql(`set role service_role; select job_id, duplicate from public.enqueue_slack_unfurl_event('${team}','${app}','${event}','link_shared',now(),'${org}','${linked[0]}',2,'C_AUTO','1.1','U_REHEARSAL',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null);`).split("\t");
   if (!enqueue[0] || enqueue[1] !== "f") throw new Error("accepted enqueue did not create a job");
-  const duplicate = psql(`set role service_role; select job_id, duplicate from public.enqueue_slack_unfurl_event('${team}','${app}','${event}','link_shared',now(),'${org}','${linked[0]}',2,'C_REHEARSAL','1.1','U_REHEARSAL',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null);`).split("\t");
+  const duplicate = psql(`set role service_role; select job_id, duplicate from public.enqueue_slack_unfurl_event('${team}','${app}','${event}','link_shared',now(),'${org}','${linked[0]}',2,'C_AUTO','1.1','U_REHEARSAL',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null);`).split("\t");
   if (duplicate[1] !== "t" || duplicate[0] !== enqueue[0]) throw new Error("duplicate receipt was not durable/idempotent");
   psql(`set role service_role; update public.slack_unfurl_job_urls set lookup_status='queued' where job_id='${enqueue[0]}';`);
 
@@ -124,21 +139,31 @@ try {
   const failedEvent = randomUUID();
   let injectedFailure = "";
   try {
-    psql(`set role service_role; select public.enqueue_slack_unfurl_event('${team}','${app}','${failedEvent}','link_shared',now(),'${org}','${linked[0]}',2,'C_REHEARSAL','1.2','U_REHEARSAL',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null);`);
+    psql(`set role service_role; select public.enqueue_slack_unfurl_event('${team}','${app}','${failedEvent}','link_shared',now(),'${org}','${linked[0]}',2,'C_AUTO','1.2','U_REHEARSAL',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null);`);
   } catch (error) {
     injectedFailure = `${String(error)}\n${error && typeof error === "object" && "stderr" in error ? String(error.stderr) : ""}`;
   }
   if (!injectedFailure.includes("injected_job_insert_failure")) throw new Error("atomic enqueue fault injection did not fail at the job insert");
   psql("drop trigger slack_rehearsal_fail on public.slack_unfurl_jobs; drop function public.slack_rehearsal_fail();");
   if (psql(`select count(*) from public.slack_event_receipts where team_id='${team}' and event_id='${failedEvent}';`) !== "0") throw new Error("receipt survived atomic enqueue failure");
-  const recovered = psql(`set role service_role; select job_id, duplicate from public.enqueue_slack_unfurl_event('${team}','${app}','${failedEvent}','link_shared',now(),'${org}','${install[0]}',2,'C_REHEARSAL','1.2','U_REHEARSAL',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null);`).split("\t");
+  const recovered = psql(`set role service_role; select job_id, duplicate from public.enqueue_slack_unfurl_event('${team}','${app}','${failedEvent}','link_shared',now(),'${org}','${install[0]}',2,'C_AUTO','1.2','U_REHEARSAL',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null);`).split("\t");
   if (!recovered[0] || recovered[1] !== "f") throw new Error("same event did not enqueue after injected failure was removed");
+  if (psql(`set role service_role; select mode from public.set_slack_preview_policy('${install[0]}','${org}','${user}',false);`) !== "disabled") throw new Error("workspace policy did not disable");
+  if (psql(`select status from public.slack_unfurl_jobs where id='${enqueue[0]}';`) !== "cancelled") throw new Error("policy disable did not cancel queued job");
+  const disabledEvent = randomUUID();
+  const disabledResult = psql(`set role service_role; select job_id, duplicate from public.enqueue_slack_unfurl_event('${team}','${app}','${disabledEvent}','link_shared',now(),'${org}','${install[0]}',2,'C_AUTO','1.25','U_REHEARSAL',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null);`).split("\t");
+  if (disabledResult[0] || psql(`select denial_code from public.slack_event_receipts where event_id='${disabledEvent}';`) !== "previews_disabled") throw new Error("disabled policy accepted preview work");
+  if (psql(`set role service_role; select mode from public.set_slack_preview_policy('${install[0]}','${org}','${user}',true);`) !== "eligible_internal_channels") throw new Error("workspace policy did not re-enable");
 
   psql(`set role service_role; select public.revoke_slack_installation('${team}','${app}','rehearsal-after-enqueue');`);
   if (psql(`select status from public.slack_unfurl_jobs where id='${enqueue[0]}';`) !== "cancelled") throw new Error("revocation did not cancel queued job");
-  if (psql(`select status from public.slack_event_receipts where event_id='${event}';`) !== "revoked") throw new Error("revocation did not close event receipt");
+  if (!["cancelled", "revoked"].includes(psql(`select status from public.slack_event_receipts where event_id='${event}';`))) throw new Error("revocation did not close event receipt");
   if (psql(`select status from public.slack_account_links where installation_id='${install[0]}' and slack_user_id='U_REHEARSAL';`) !== "revoked") throw new Error("revocation did not revoke account link");
   if (psql(`set role service_role; select installation_version from public.upsert_slack_installation('${org}','${team}','${app}','Rehearsal','B_REHEARSAL','xoxb-redacted-5',array['links:read','links:write','channels:read','groups:read','users:read'],'${user}','rehearsal-key');`) !== "3") throw new Error("second reinstall did not rotate installation version");
+  if (psql(`set role service_role; select mode from public.set_slack_preview_policy('${install[0]}','${org}','${user}',true);`) !== "eligible_internal_channels") throw new Error("workspace policy did not re-enable");
+  psql(`set role service_role; select public.upsert_slack_account_link('${install[0]}','${org}','${user}','U_REHEARSAL');`);
+  psql(`set role service_role; select public.upsert_slack_account_link('${install[0]}','${org}','${member}','U_MEMBER');`);
+  psql(`set role service_role; select public.approve_slack_channel('${install[0]}','${org}','C_REHEARSAL','${user}',true);`);
   const claimEvent = randomUUID();
   const claimJob = psql(`set role service_role; select job_id from public.enqueue_slack_unfurl_event('${team}','${app}','${claimEvent}','link_shared',now(),'${org}','${install[0]}',3,'C_REHEARSAL','4.4','U_REHEARSAL',array['https://sandra.bmhgroupkc.com/leads/00000000-0000-4000-8000-000000000001'],null);`);
   if (!claimJob) throw new Error("claim fixture enqueue failed");
@@ -160,9 +185,6 @@ try {
   if (parallelRows.some((row) => row.length !== 2 && row.length !== 3) || parallelRows[0][0] === parallelRows[1][0]) throw new Error("parallel claims did not lease distinct jobs");
   for (const row of parallelRows) psql(`set role service_role; select public.finish_slack_unfurl_job('${row[0]}','${row[1]}','succeeded',null);`);
 
-  psql(`set role service_role; select public.upsert_slack_account_link('${install[0]}','${org}','${user}','U_REHEARSAL');`);
-  psql(`set role service_role; select public.upsert_slack_account_link('${install[0]}','${org}','${member}','U_MEMBER');`);
-  psql(`set role service_role; select public.approve_slack_channel('${install[0]}','${org}','C_REHEARSAL','${user}',true);`);
   const claim = psql("set role service_role; select id, claim_token, attempts from public.claim_slack_unfurl_jobs(now(),gen_random_uuid(),90,5);").split("\t");
   if (claim.length !== 3 || claim[2] !== "1") throw new Error("claim did not lease one job");
   psql(`update public.slack_unfurl_jobs set poster_slack_user_id='U_MEMBER' where id='${claim[0]}';`);
@@ -174,7 +196,7 @@ try {
   if (psql(`set role service_role; select public.guard_slack_unfurl_dispatch(${guardArgs});`) !== "f") throw new Error("dispatch guard accepted expired event");
   psql(`update public.slack_unfurl_jobs set expires_at=now()+interval '15 minutes',lease_expires_at=now()+interval '1 minute' where id='${claim[0]}';`);
   psql(`update public.slack_channel_approvals set status='revoked',revoked_at=now() where installation_id='${install[0]}' and channel_id='C_REHEARSAL';`);
-  if (psql(`set role service_role; select public.guard_slack_unfurl_dispatch(${guardArgs});`) !== "f") throw new Error("dispatch guard accepted revoked approval");
+  if (psql(`set role service_role; select public.guard_slack_unfurl_dispatch(${guardArgs});`) !== "t") throw new Error("workspace policy treated a revoked legacy approval as a denial");
   psql(`update public.slack_channel_approvals set status='active',revoked_at=null where installation_id='${install[0]}' and channel_id='C_REHEARSAL';`);
   psql(`update public.memberships set access_status='revoked' where user_id='${member}' and org_id='${org}';`);
   if (psql(`set role service_role; select public.guard_slack_unfurl_dispatch(${guardArgs});`) !== "f") throw new Error("dispatch guard accepted revoked membership");

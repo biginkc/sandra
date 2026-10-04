@@ -114,6 +114,10 @@ describe("<IntegrationsForm />", () => {
       "href",
       "/api/oauth/slack/start",
     );
+    expect(screen.getByRole("link", { name: "Lead link previews" })).toHaveAttribute(
+      "href",
+      "/settings/integrations/slack-previews",
+    );
     expect(
       screen.getByRole("link", { name: "Connect Google Calendar" }),
     ).toHaveAttribute("href", "/api/oauth/google/start");

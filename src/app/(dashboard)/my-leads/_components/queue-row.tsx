@@ -12,7 +12,6 @@ import {
   Phone,
 } from "lucide-react";
 
-import Link from "next/link";
 import { RepSmsComposer } from "../rep-sms-composer";
 
 import { Badge } from "@/components/ui/badge";
@@ -544,76 +543,74 @@ export function MyLeadQueueRow({
               data-testid={`my-lead-actions-${domId}`}
               role="group"
               aria-label="Lead actions"
+              className="flex flex-wrap items-center gap-x-3 gap-y-2.5 border-t border-[#f0eeec] px-4 py-4 dark:border-border"
             >
-              <div className="flex flex-wrap items-center gap-2.5 border-t border-[#f0eeec] px-4 pt-4 dark:border-border">
+              <Button
+                type="button"
+                variant="default"
+                size="sm"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onStageAction(primaryAction.action, row);
+                }}
+              >
+                <ArrowRight className="size-[15px]" aria-hidden="true" />
+                {primaryAction.label}
+              </Button>
+              <a
+                href={`/leads/${row.propertyId}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={buttonVariants({ variant: "outline", size: "sm" })}
+              >
+                Open lead
+              </a>
+              {row.zillowHref && (
+                <a
+                  href={row.zillowHref}
+                  onClick={openActionWindow}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={buttonVariants({
+                    variant: "outline",
+                    size: "sm",
+                    className:
+                      "border-[#bfdbfe] text-[#1d4ed8] dark:border-blue-900 dark:text-blue-300",
+                  })}
+                >
+                  <ExternalLink aria-hidden="true" /> Open in Zillow
+                </a>
+              )}
+              <RepSmsComposer
+                propertyId={row.propertyId}
+                placement="action"
+                onSent={() => {
+                  onRetryDetails();
+                  onDetailChanged?.();
+                }}
+              />
+              {secondaryActions.map(({ action, label, danger }) => (
                 <Button
+                  key={action}
                   type="button"
-                  variant="default"
+                  variant={danger ? "destructive" : "outline"}
                   size="sm"
+                  className={cn(
+                    !danger &&
+                      "border-[#e5e1df] bg-background text-muted-foreground hover:text-foreground dark:border-border",
+                    danger && "ml-auto",
+                  )}
                   onClick={(event) => {
                     event.stopPropagation();
-                    onStageAction(primaryAction.action, row);
+                    onStageAction(action, row);
                   }}
                 >
-                  <ArrowRight className="size-[15px]" aria-hidden="true" />
-                  {primaryAction.label}
+                  {action === "start-call" && (
+                    <Phone className="size-[13px]" aria-hidden="true" />
+                  )}
+                  {label}
                 </Button>
-                <Link
-                  href={`/leads/${row.propertyId}`}
-                  prefetch={false}
-                  className={buttonVariants({ variant: "outline", size: "sm" })}
-                >
-                  Open lead
-                </Link>
-                {row.zillowHref && (
-                  <a
-                    href={row.zillowHref}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className={buttonVariants({
-                      variant: "outline",
-                      size: "sm",
-                      className:
-                        "border-[#bfdbfe] text-[#1d4ed8] dark:border-blue-900 dark:text-blue-300",
-                    })}
-                  >
-                    <ExternalLink aria-hidden="true" /> Open in Zillow
-                  </a>
-                )}
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2 px-4 pt-2.5 pb-4">
-                <RepSmsComposer
-                  propertyId={row.propertyId}
-                  placement="action"
-                  onSent={() => {
-                    onRetryDetails();
-                    onDetailChanged?.();
-                  }}
-                />
-                {secondaryActions.map(({ action, label, danger }) => (
-                  <Button
-                    key={action}
-                    type="button"
-                    variant={danger ? "destructive" : "outline"}
-                    size="sm"
-                    className={cn(
-                      !danger &&
-                        "border-[#e5e1df] bg-background text-muted-foreground hover:text-foreground dark:border-border",
-                      danger && "ml-auto",
-                    )}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onStageAction(action, row);
-                    }}
-                  >
-                    {action === "start-call" && (
-                      <Phone className="size-[13px]" aria-hidden="true" />
-                    )}
-                    {label}
-                  </Button>
-                ))}
-              </div>
+              ))}
             </div>
           </>
         )}
@@ -635,4 +632,11 @@ function firstCallLabel(state: MyLeadQueueRow["firstCall"]["state"]) {
 
 function capitalize(value: string) {
   return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function openActionWindow(event: React.MouseEvent<HTMLAnchorElement>) {
+  event.stopPropagation();
+  if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  window.open(event.currentTarget.href, "_blank", "popup,width=1200,height=900,noopener,noreferrer");
 }

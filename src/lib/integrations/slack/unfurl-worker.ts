@@ -14,9 +14,11 @@ import {
   finishSlackUnfurlJob,
   hasActiveSlackMembership,
   loadSlackAccountLink,
+  loadSlackChannelDenial,
   loadSlackChannelApproval,
   loadSlackInstallation,
   loadSlackJobUrls,
+  loadSlackPreviewPolicy,
   releaseSlackUnfurlJobClaim,
   revokeSlackInstallationGeneration,
   rescheduleSlackUnfurlJob,
@@ -124,7 +126,14 @@ async function revokeWorkerInstallationGeneration(job: SlackUnfurlJob, installat
   }).catch(() => undefined);
 }
 
-async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Promise<"succeeded" | "noop" | "expired" | "retried" | "failed"> {
+/**
+ * Process one job that has already been claimed with a valid lease.
+ *
+ * This is an internal server/CLI seam for run-owned acceptance checks. It
+ * performs the same deadline, authorization, policy, and final dispatch
+ * guards as the cron sweep; it does not claim jobs or expose an HTTP bypass.
+ */
+export async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Promise<"succeeded" | "noop" | "expired" | "retried" | "failed"> {
   const claimToken = job.claim_token;
   if (!claimToken) return "failed";
   if (Date.now() >= jobExpiry(job) || (job.lease_expires_at && Date.parse(job.lease_expires_at) <= Date.now())) {
@@ -141,6 +150,12 @@ async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Pro
     await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "noop", errorCode: "installation_unavailable" });
     return "noop";
   }
+  const previewPolicy = await loadSlackPreviewPolicy({ installationId: installation.installationId, orgId: job.org_id });
+  const expectedPolicyRevision = previewPolicy.mode === "eligible_internal_channels" ? previewPolicy.policyRevision : null;
+  if (previewPolicy.mode === "disabled" || job.policy_revision !== expectedPolicyRevision) {
+    await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "noop", errorCode: "preview_policy_changed" });
+    return "noop";
+  }
   const accountLink = await loadSlackAccountLink({ installationId: installation.installationId, orgId: job.org_id, slackUserId: job.poster_slack_user_id });
   if (!accountLink || accountLink.status !== "active") {
     await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "noop", errorCode: "poster_unbound" });
@@ -151,8 +166,9 @@ async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Pro
     return "noop";
   }
   const approval = await loadSlackChannelApproval({ installationId: installation.installationId, orgId: job.org_id, channelId: job.channel_id });
+  const channelDenied = await loadSlackChannelDenial({ installationId: installation.installationId, orgId: job.org_id, channelId: job.channel_id });
   ensureWorkWindow(job, deadline, true);
-  const destination = await verifySlackDestination({ token: installation.botToken.reveal(), approval, installationId: installation.installationId, orgId: job.org_id, teamId: job.team_id, channelId: job.channel_id, posterUserId: job.poster_slack_user_id });
+  const destination = await verifySlackDestination({ token: installation.botToken.reveal(), approval, policyEnabled: previewPolicy.mode === "eligible_internal_channels", channelDenied, installationId: installation.installationId, orgId: job.org_id, teamId: job.team_id, channelId: job.channel_id, posterUserId: job.poster_slack_user_id });
   if (!destination.allowed) {
     if (destination.reason === "installation_revoked") {
       await revokeWorkerInstallationGeneration(job, installation, destination.reason);
@@ -215,7 +231,7 @@ async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: number): Pro
   // then ask Slack again and fence the claim against current DB authority
   // immediately before sending any rendered content.
   ensureWorkWindow(job, deadline, true);
-  const finalDestination = await verifySlackDestination({ token: installation.botToken.reveal(), approval: await loadSlackChannelApproval({ installationId: installation.installationId, orgId: job.org_id, channelId: job.channel_id }), installationId: installation.installationId, orgId: job.org_id, teamId: job.team_id, channelId: job.channel_id, posterUserId: job.poster_slack_user_id });
+  const finalDestination = await verifySlackDestination({ token: installation.botToken.reveal(), approval: await loadSlackChannelApproval({ installationId: installation.installationId, orgId: job.org_id, channelId: job.channel_id }), policyEnabled: previewPolicy.mode === "eligible_internal_channels", channelDenied: await loadSlackChannelDenial({ installationId: installation.installationId, orgId: job.org_id, channelId: job.channel_id }), installationId: installation.installationId, orgId: job.org_id, teamId: job.team_id, channelId: job.channel_id, posterUserId: job.poster_slack_user_id });
   if (!finalDestination.allowed) {
     if (finalDestination.reason === "installation_revoked") {
       await revokeWorkerInstallationGeneration(job, installation, finalDestination.reason);
