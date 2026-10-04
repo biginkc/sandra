@@ -528,6 +528,7 @@ begin
     || v_summary;
 end $$;
 
+drop function if exists public.fn_create_offer_follow_up_internal(uuid, timestamptz);
 drop index if exists public.acquisition_offers_follow_up_chain_idx;
 alter table public.acquisition_offers drop column if exists follow_up_calendar_chain_id;
 

@@ -26,6 +26,47 @@ create index acquisition_offers_follow_up_chain_idx
   on public.acquisition_offers (org_id, follow_up_calendar_chain_id)
   where follow_up_calendar_chain_id is not null;
 
+-- Internal helper (not callable by any API role): creates an offer's follow-up appointment and
+-- stores its chain on the offer. Everything is derived from the offer row, so a caller can only
+-- say WHEN. fn_create_next_step stays browser-strict: the call below uses origin 'offer', the
+-- booking window and no source key (the key is stamped on the row afterwards), and runs as the
+-- offer's actor, who is the authenticated caller of fn_log_acquisition_offer.
+create or replace function public.fn_create_offer_follow_up_internal(p_offer_id uuid, p_due_at timestamptz)
+returns jsonb
+language plpgsql security definer set search_path = '' as $$
+declare
+  v_offer public.acquisition_offers%rowtype;
+  v_prop public.properties%rowtype;
+  v_follow jsonb;
+begin
+  select * into v_offer from public.acquisition_offers o where o.id = p_offer_id for update;
+  if not found then
+    raise exception 'NOT_FOUND: offer' using errcode = 'P0002';
+  end if;
+  if v_offer.outcome <> 'pending' or v_offer.follow_up_calendar_chain_id is not null then
+    raise exception 'INVALID_INPUT: offer already has a follow-up or is resolved' using errcode = '22023';
+  end if;
+  if p_due_at is null or not isfinite(p_due_at) or p_due_at <= v_offer.sent_at
+     or p_due_at > statement_timestamp() + interval '2 years' then
+    raise exception 'INVALID_INPUT: follow-up must be after the offer was sent and within 2 years'
+      using errcode = '22023';
+  end if;
+  select * into v_prop from public.properties p where p.id = v_offer.property_id and p.org_id = v_offer.org_id;
+  v_follow := public.fn_create_next_step(
+    p_org := v_offer.org_id, p_actor := v_offer.actor_user_id,
+    p_assignee := coalesce(v_prop.assigned_user_id, v_offer.actor_user_id),
+    p_kind := 'appointment', p_title := 'Offer follow-up', p_due_at := p_due_at,
+    p_property := v_offer.property_id, p_contact := v_prop.homeowner_contact_id,
+    p_mode := 'phone', p_origin := 'offer', p_enforce_window := true);
+  update public.tasks
+  set source_key = 'offer_follow_up:' || v_offer.id::text
+  where id = (v_follow ->> 'task_id')::uuid and org_id = v_offer.org_id;
+  update public.acquisition_offers
+  set follow_up_calendar_chain_id = (v_follow ->> 'calendar_chain_id')::uuid
+  where id = v_offer.id and org_id = v_offer.org_id;
+  return v_follow;
+end $$;
+
 CREATE OR REPLACE FUNCTION public.fn_log_acquisition_offer(p_org_id uuid, p_property_id uuid, p_expected_episode_id uuid, p_expected_queue_version bigint, p_expected_shared_status text, p_idempotency_key uuid, p_amount_cents bigint, p_sent_via text, p_sent_at timestamp with time zone, p_follow_up_at timestamp with time zone, p_motivation_kind text DEFAULT NULL::text, p_motivation_text text DEFAULT NULL::text, p_temperature text DEFAULT NULL::text)
  RETURNS jsonb
  LANGUAGE plpgsql
@@ -49,8 +90,7 @@ declare
   v_version bigint;
   v_kind text;
   v_text text;
-  v_follow jsonb;
-  v_prior_role text;
+  v_due timestamptz;
 begin
   if p_property_id is null or p_expected_episode_id is null
      or p_expected_queue_version is null or p_expected_queue_version < 0
@@ -176,31 +216,24 @@ begin
   if p_temperature is not null then
     update public.properties set motivation_level = p_temperature where id = p_property_id and org_id = p_org_id;
   end if;
-  -- The offer's follow-up is an appointment created in this transaction through the one
-  -- write path; the offer stores its chain (not a task id) because a reschedule closes the
-  -- task and inserts a successor in the same chain.
-  -- fn_create_next_step reserves source keys and the no-window mode for the service role (it
-  -- reads auth.role()). This definer function has already authenticated the actor above, and a
-  -- back-dated offer legitimately has a past follow-up, so the call runs with the role claim
-  -- set to service_role for exactly this statement; the caller's claim is restored right after.
-  v_prior_role := coalesce(current_setting('request.jwt.claim.role', true), '');
-  perform set_config('request.jwt.claim.role', 'service_role', true);
-  v_follow := public.fn_create_next_step(
-    p_org := p_org_id, p_actor := v_actor,
-    p_assignee := coalesce(v_property.assigned_user_id, v_actor),
-    p_kind := 'appointment', p_title := 'Offer follow-up', p_due_at := p_follow_up_at,
-    p_property := p_property_id, p_contact := v_property.homeowner_contact_id,
-    p_mode := 'phone', p_source_key := 'offer_follow_up:' || v_offer_id::text, p_origin := 'offer');
-  perform set_config('request.jwt.claim.role', v_prior_role, true);
+  -- The offer's own follow_up_at is stored as entered (history; closed KPI windows must not
+  -- move). Its follow-up APPOINTMENT is never in the past: a back-dated offer's appointment is
+  -- clamped to the next 09:00 America/Chicago and shows up as due then. Created right after the
+  -- offer row exists, by an internal helper that derives everything from that row.
+  v_due := p_follow_up_at;
+  if v_due <= statement_timestamp() then
+    v_due := (date_trunc('day', statement_timestamp() at time zone 'America/Chicago') + interval '9 hours'
+      + case when (statement_timestamp() at time zone 'America/Chicago')::time >= time '09:00'
+             then interval '1 day' else interval '0' end) at time zone 'America/Chicago';
+  end if;
   insert into public.acquisition_offers (
     id, org_id, property_id, assignment_episode_id, actor_user_id,
-    amount_cents, sent_via, sent_at, follow_up_at, idempotency_key, command_id,
-    follow_up_calendar_chain_id
+    amount_cents, sent_via, sent_at, follow_up_at, idempotency_key, command_id
   ) values (
     v_offer_id, p_org_id, p_property_id, v_episode.id, v_actor,
-    p_amount_cents, p_sent_via, p_sent_at, p_follow_up_at, p_idempotency_key, v_command_id,
-    (v_follow ->> 'calendar_chain_id')::uuid
+    p_amount_cents, p_sent_via, p_sent_at, p_follow_up_at, p_idempotency_key, v_command_id
   );
+  perform public.fn_create_offer_follow_up_internal(v_offer_id, v_due);
   update public.properties set status = 'offer_sent', updated_at = statement_timestamp()
   where id = p_property_id and org_id = p_org_id
     and status in ('prospect', 'new_lead', 'contacted', 'interested');
@@ -995,6 +1028,7 @@ begin
     || v_summary;
 end $$;
 
+revoke all on function public.fn_create_offer_follow_up_internal(uuid, timestamptz) from public, anon, authenticated, service_role;
 revoke all on function public.trg_tasks_offer_follow_up_sync() from public, anon, authenticated, service_role;
 revoke all on function public.trg_tasks_offer_follow_up_cancel_guard() from public, anon, authenticated, service_role;
 revoke all on function public.trg_acquisition_offer_close_follow_up() from public, anon, authenticated, service_role;

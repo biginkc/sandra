@@ -120,16 +120,39 @@ it('logging an offer creates its phone follow-up in the same transaction and sto
   });
 });
 
-it('a back-dated offer gets a past (overdue) follow-up and the caller role claim is restored', async () => {
+it('a back-dated offer keeps its own follow_up_at but its appointment is clamped to the next 09:00 Central', async () => {
   await withDb([...chain, offerMigration], async (db) => {
     const w = await world(db);
     const property = await w.prop('past');
     const followUp = new Date(Date.now() - 2 * DAY).toISOString();
     const { result } = await w.logOffer(property, { sentAt: new Date(Date.now() - 3 * DAY).toISOString(), followUpAt: followUp });
     const offer = await w.offer(result.offerId);
+    expect(new Date(offer.follow_up_at).toISOString()).toBe(followUp); // as entered: no KPI window moves
     const [task] = await w.tasksForChain(offer.follow_up_calendar_chain_id);
-    expect(new Date(task.due_at).toISOString()).toBe(followUp);
+    expect(new Date(task.due_at).getTime()).toBeGreaterThan(Date.now());
+    const nine = (await db.query("select (($1::timestamptz) at time zone 'America/Chicago')::time::text as t", [task.due_at])).rows[0].t;
+    expect(nine).toBe('09:00:00');
+    expect(task).toMatchObject({ source_key: `offer_follow_up:${result.offerId}`, type: 'appointment', mode: 'phone' });
+    expect((await db.query('select source from public.acquisition_appointment_attribution where task_id=$1', [task.id])).rows).toEqual([{ source: 'booking_insert' }]);
+    // No role-claim swap anywhere: the caller's claim is untouched, also after an inner error.
     expect((await db.query("select coalesce(current_setting('request.jwt.claim.role', true), '') as r")).rows[0].r).not.toBe('service_role');
+  });
+});
+
+it('the internal helper is closed to API roles and bounds its due time', async () => {
+  await withDb([...chain, offerMigration], async (db) => {
+    const w = await world(db);
+    const property = await w.prop('helper');
+    const { result } = await w.logOffer(property);
+    for (const role of ['anon', 'authenticated', 'service_role'] as const) {
+      await w.expectError(() => w.as(role, w.sam, async () => db.query('select public.fn_create_offer_follow_up_internal($1,$2)', [result.offerId, new Date(Date.now() + DAY).toISOString()])), /permission denied/);
+    }
+    // Owner call on an offer that already has its follow-up is refused; bounds are enforced on a bare offer.
+    await w.expectError(() => db.query('select public.fn_create_offer_follow_up_internal($1,$2)', [result.offerId, new Date(Date.now() + DAY).toISOString()]), /already has a follow-up/);
+    await db.query('update public.acquisition_offers set follow_up_calendar_chain_id = null where id=$1', [result.offerId]);
+    const sent = new Date((await w.offer(result.offerId)).sent_at).getTime();
+    await w.expectError(() => db.query('select public.fn_create_offer_follow_up_internal($1,$2)', [result.offerId, new Date(sent - HOUR).toISOString()]), /after the offer was sent/);
+    await w.expectError(() => db.query('select public.fn_create_offer_follow_up_internal($1,$2)', [result.offerId, new Date(Date.now() + 800 * DAY).toISOString()]), /within 2 years/);
   });
 });
 
