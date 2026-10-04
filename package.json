@@ -49,7 +49,9 @@
     "smoke:ai-escalation-prod": "tsx scripts/smoke-ai-responder-escalation-prod.ts",
     "smoke:stop-prod": "tsx scripts/smoke-stop-keyword-prod.ts",
     "smoke:sendillo-webhook-prod": "tsx scripts/smoke-sendillo-webhook-prod.ts",
-    "verify:calculators-migration": "LC_ALL=C node scripts/rehearse-offer-calculations.mjs"
+    "verify:calculators-migration": "LC_ALL=C node scripts/rehearse-offer-calculations.mjs",
+    "test:norma-schema-contract": "node scripts/ci/run-norma-schema-contract.mjs",
+    "test:norma-schema-contract-unit": "node --test scripts/ci/norma-schema-contract.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.0",
