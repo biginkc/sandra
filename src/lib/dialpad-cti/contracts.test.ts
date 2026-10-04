@@ -7,6 +7,7 @@ import {
   DIALPAD_QUARANTINE_REASONS,
   parseDialpadEventIngestResult,
   parseDialpadCallStatus,
+  parseDialpadDispatchAuthorization,
   parseDialpadEventMatchResult,
   parsePreparedDialpadCallIntent,
 } from './contracts';
@@ -90,5 +91,17 @@ describe('dialpad CTI contracts', () => {
 
   it('knows the native-matching quarantine reasons', () => {
     expect(DIALPAD_QUARANTINE_REASONS).toEqual(expect.arrayContaining(['no_binding', 'no_lead_match', 'ambiguous_lead', 'dnc_number']));
+  });
+
+  it('parses a dispatch authorization and passes the digit-only dialpadUserId through', () => {
+    const base = { status: 'authorized', intentId: intent.intentId, expiresAt: '2026-09-28T12:10:00Z', dispatchAuthorizedAt: '2026-09-28T12:00:01Z' };
+    const dial = { dialpadUserId: '5551234', phoneNumber: '+18165550142', customData: intent.customData, identityType: null, identityId: null, outboundCallerId: null };
+    expect(parseDialpadDispatchAuthorization({ ...base, dial })).toMatchObject({ status: 'authorized', dial: { dialpadUserId: '5551234' } });
+    const missing: Record<string, string | null> = { ...dial };
+    delete missing.dialpadUserId;
+    expect(() => parseDialpadDispatchAuthorization({ ...base, dial: missing })).toThrow();
+    for (const bad of ['abc', '12a', '', '-5', '1.5', ' 5', '5'.repeat(21)]) {
+      expect(() => parseDialpadDispatchAuthorization({ ...base, dial: { ...dial, dialpadUserId: bad } })).toThrow();
+    }
   });
 });

@@ -1,0 +1,461 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('@/lib/errors/report', () => ({ reportError: vi.fn() }));
+
+import { reportError } from '@/lib/errors/report';
+import type { Json } from '@/lib/supabase/types';
+
+import {
+  buildDialpadDialBody,
+  createDialpadHttpDialer,
+  createStubDialpadDialer,
+  dialpadDialUrl,
+  readStubDialpadDials,
+  resetStubDialpadDials,
+  resolveDialpadDialKey,
+  resolveDialpadDialProvider,
+  startDialpadApiCall,
+  type DialpadDialFetch,
+  type DialpadDialRequest,
+  type DialpadDialResult,
+  type DialpadDialer,
+} from './api-dial';
+import { classifyDialpadRpcError } from './contracts';
+import {
+  dialpadDenialMessage,
+  type DialpadActor,
+  type DialpadCallSlot,
+  type DialpadConnectionView,
+  type DialpadDispatchDb,
+} from './dispatch';
+import { DialpadDbError } from './event-processing';
+
+const ORG = '11111111-1111-4111-8111-111111111111';
+const REP = '22222222-2222-4222-8222-222222222222';
+const PROPERTY = '33333333-3333-4333-8333-333333333333';
+const CONTACT = '44444444-4444-4444-8444-444444444444';
+const KEY = '55555555-5555-4555-8555-555555555555';
+const KEY2 = '55555555-5555-4555-8555-555555555556';
+const INTENT = '66666666-6666-4666-8666-666666666666';
+const INTENT2 = '66666666-6666-4666-8666-666666666667';
+const BINDING = '77777777-7777-4777-8777-777777777777';
+const GRANT = '88888888-8888-4888-8888-888888888888';
+const GRANT2 = '88888888-8888-4888-8888-888888888889';
+const TOKEN = `sandra.dialpad.v1.${'b'.repeat(48)}`;
+const API_KEY = 'k'.repeat(24);
+const actor: DialpadActor = { orgId: ORG, userId: REP };
+const env = { DIALPAD_CTI_DIRECTORY_KEY_A: API_KEY, DIALPAD_CTI_DIAL_KEY_X: 'd'.repeat(24) };
+const input = { propertyId: PROPERTY, contactId: CONTACT, phoneSlot: null as unknown, idempotencyKey: KEY as unknown };
+
+const conn = (over: Partial<DialpadConnectionView> = {}): DialpadConnectionView => ({
+  id: 'c', status: 'active', allowedOrigins: ['https://dialpad.com'], companyId: '42', directoryKeyRef: 'env:DIALPAD_CTI_DIRECTORY_KEY_A', dialEndpoint: 'initiate_call', dialKeyRef: null, ...over,
+});
+const prepared = (over: Record<string, Json> = {}): Json => ({
+  intentId: INTENT, customData: TOKEN, status: 'prepared', preparedAt: '2026-09-29T10:00:00Z', expiresAt: '2026-09-29T10:10:00Z',
+  destinationE164: '+18165440196', phoneSlot: 1, callerNumberE164: null, callerIdentityType: null, callerIdentityId: null,
+  dialpadUserId: '5551234', propertyId: PROPERTY, contactId: CONTACT, assignmentEpisodeId: '99999999-9999-4999-8999-999999999999', replayed: false, ...over,
+});
+const authorized = (dial: Record<string, Json> = {}, intentId = INTENT): Json => ({
+  status: 'authorized', intentId, expiresAt: '2026-09-29T10:10:00Z', dispatchAuthorizedAt: '2026-09-29T10:00:01Z',
+  dial: { dialpadUserId: '5551234', phoneNumber: '+18165440196', customData: TOKEN, identityType: null, identityId: null, outboundCallerId: null, ...dial },
+});
+const slotsOk: DialpadCallSlot[] = [{ slot: 1, callable: true, reason: null }];
+
+function fakeDb(over: Partial<DialpadDispatchDb> = {}): DialpadDispatchDb & { calls: string[] } {
+  const calls: string[] = [];
+  const track = <T extends unknown[], R>(name: string, fn: (...args: T) => Promise<R>) => (...args: T) => { calls.push(name); return fn(...args); };
+  const db: DialpadDispatchDb = {
+    loadConnection: track('loadConnection', async () => conn()),
+    loadLiveBinding: track('loadLiveBinding', async () => ({ id: BINDING, status: 'verified' as const, dialpadUserId: '5551234' })),
+    loadActiveGrants: track('loadActiveGrants', async () => []),
+    loadTargetPhones: track('loadTargetPhones', async () => null),
+    loadDispatchLoad: track('loadDispatchLoad', async () => ({ authorizedLastMinute: 0, unmatchedLast20s: 0 })),
+    loadCallSlots: track('loadCallSlots', async () => slotsOk),
+    claimBinding: track('claimBinding', async () => ({})),
+    verifyBinding: track('verifyBinding', async () => ({})),
+    prepareIntent: track('prepareIntent', async () => prepared()),
+    authorizeDispatch: track('authorizeDispatch', async () => authorized()),
+    cancelIntent: track('cancelIntent', async () => ({ intentId: INTENT, status: 'cancelled', replayed: false })),
+    getCallStatus: track('getCallStatus', async () => ({})),
+    ...over,
+  };
+  return Object.assign(db, { calls });
+}
+
+function fakeDialer(result: DialpadDialResult | (() => DialpadDialResult) = { kind: 'accepted', status: 200, providerCallId: '1' }) {
+  const requests: DialpadDialRequest[] = [];
+  const dialer: DialpadDialer = {
+    async dial(request) {
+      requests.push(request);
+      return typeof result === 'function' ? result() : result;
+    },
+  };
+  return { dialer, requests };
+}
+
+const run = (db: DialpadDispatchDb, dialer: DialpadDialer, over: Partial<typeof input> = {}) =>
+  startDialpadApiCall(db, dialer, actor, { ...input, ...over }, { env, now: () => new Date('2026-09-29T10:00:00Z') });
+
+const baseRequest = (over: Partial<DialpadDialRequest> = {}): DialpadDialRequest => ({
+  endpoint: 'initiate_call', apiKey: API_KEY, dialpadUserId: '5551234', phoneNumber: '+18165440196', customData: TOKEN, identity: null, outboundCallerId: null, ...over,
+});
+
+beforeEach(() => {
+  vi.mocked(reportError).mockClear();
+  resetStubDialpadDials();
+});
+
+describe('dialpadDialUrl and buildDialpadDialBody', () => {
+  it('builds the initiate_call URL and body', () => {
+    expect(dialpadDialUrl(baseRequest())).toBe('https://dialpad.com/api/v2/users/5551234/initiate_call');
+    const body = buildDialpadDialBody(baseRequest({ outboundCallerId: '+18165550100' }));
+    expect(Object.keys(JSON.parse(body))).toEqual(['phone_number', 'custom_data', 'outbound_caller_id']);
+    expect(JSON.parse(body)).toEqual({ phone_number: '+18165440196', custom_data: TOKEN, outbound_caller_id: '+18165550100' });
+  });
+  it('omits outbound_caller_id when there is none', () => {
+    expect(Object.keys(JSON.parse(buildDialpadDialBody(baseRequest())))).toEqual(['phone_number', 'custom_data']);
+  });
+  it('renders a group identity as an exact int64 integer with the mapped group_type and no outbound_caller_id', () => {
+    const body = buildDialpadDialBody(baseRequest({ identity: { type: 'Office', id: '9007199254740993' } }));
+    expect(body).toContain('"group_id":9007199254740993,');
+    expect(body).toContain('"group_type":"office"');
+    expect(body).not.toContain('outbound_caller_id');
+    expect(buildDialpadDialBody(baseRequest({ identity: { type: 'OfficeGroup', id: '5' } }))).toContain('"group_type":"department"');
+    expect(buildDialpadDialBody(baseRequest({ identity: { type: 'CallCenter', id: '5' } }))).toContain('"group_type":"callcenter"');
+  });
+  it('uses the /call endpoint with user_id first', () => {
+    const request = baseRequest({ endpoint: 'call', dialpadUserId: '7000000000000000001' });
+    expect(dialpadDialUrl(request)).toBe('https://dialpad.com/api/v2/call');
+    expect(buildDialpadDialBody(request).startsWith('{"user_id":7000000000000000001,')).toBe(true);
+  });
+  it('throws on a caller identity together with an outbound caller id', () => {
+    expect(() => buildDialpadDialBody(baseRequest({ identity: { type: 'Office', id: '5' }, outboundCallerId: '+18165550100' }))).toThrow();
+  });
+  it('throws on a bad phone, custom_data, ids or user id', () => {
+    expect(() => buildDialpadDialBody(baseRequest({ phoneNumber: '8165440196' }))).toThrow();
+    expect(() => buildDialpadDialBody(baseRequest({ customData: 'nope' }))).toThrow();
+    expect(() => buildDialpadDialBody(baseRequest({ outboundCallerId: '123' }))).toThrow();
+    expect(() => buildDialpadDialBody(baseRequest({ identity: { type: 'Office', id: '5,"x":1' } }))).toThrow();
+    expect(() => dialpadDialUrl(baseRequest({ dialpadUserId: '../1' }))).toThrow();
+    expect(() => buildDialpadDialBody(baseRequest({ endpoint: 'call', dialpadUserId: 'x' }))).toThrow();
+  });
+});
+
+describe('createDialpadHttpDialer', () => {
+  function fetchReturning(status: number, body = '', headers: Record<string, string> = {}) {
+    const seen: { url: string; init: Parameters<DialpadDialFetch>[1] }[] = [];
+    const fetchImpl: DialpadDialFetch = async (url, init) => {
+      seen.push({ url, init });
+      return { status, headers: { get: (name) => headers[name.toLowerCase()] ?? null }, text: async () => body };
+    };
+    return { seen, fetchImpl };
+  }
+  const dial = (f: ReturnType<typeof fetchReturning>) => createDialpadHttpDialer(f.fetchImpl).dial(baseRequest());
+
+  it('accepts a 200 and parses the provider call id without rounding', async () => {
+    const f = fetchReturning(200, '{"call_id":7000000000000000001}');
+    expect(await dial(f)).toEqual({ kind: 'accepted', status: 200, providerCallId: '7000000000000000001' });
+  });
+  it('accepts with a null call id when the body has none', async () => {
+    expect(await dial(fetchReturning(200, '{}'))).toEqual({ kind: 'accepted', status: 200, providerCallId: null });
+  });
+  it('maps 429 to rate_limited using Retry-After, defaulting to 60', async () => {
+    expect(await dial(fetchReturning(429, '', { 'retry-after': '30' }))).toEqual({ kind: 'rejected', status: 429, reason: 'rate_limited', retryAfterSeconds: 30 });
+    expect(await dial(fetchReturning(429))).toMatchObject({ kind: 'rejected', reason: 'rate_limited', retryAfterSeconds: 60 });
+  });
+  it.each([[401, 'unauthorized'], [403, 'forbidden'], [404, 'not_found'], [400, 'invalid']])('maps %i to %s', async (status, reason) => {
+    expect(await dial(fetchReturning(status))).toEqual({ kind: 'rejected', status, reason, retryAfterSeconds: null });
+  });
+  it('treats 5xx and a thrown fetch as unknown', async () => {
+    expect(await dial(fetchReturning(503))).toEqual({ kind: 'unknown' });
+    expect(await createDialpadHttpDialer(async () => { throw new Error('timeout'); }).dial(baseRequest())).toEqual({ kind: 'unknown' });
+  });
+  it('sends POST with Bearer, JSON content type, redirect error, no-store and the exact body', async () => {
+    const f = fetchReturning(200, '{}');
+    await dial(f);
+    const { url, init } = f.seen[0]!;
+    expect(url).toBe('https://dialpad.com/api/v2/users/5551234/initiate_call');
+    expect(init.method).toBe('POST');
+    expect(init.headers.Authorization).toBe(`Bearer ${API_KEY}`);
+    expect(init.headers['Content-Type']).toBe('application/json');
+    expect(init.redirect).toBe('error');
+    expect(init.cache).toBe('no-store');
+    expect(init.body).toBe(buildDialpadDialBody(baseRequest()));
+  });
+});
+
+describe('resolveDialpadDialProvider and the stub dialer', () => {
+  it('honours the stub in preview or unset environments and ignores it in production', () => {
+    expect(resolveDialpadDialProvider({ DIALPAD_DIAL_PROVIDER: 'stub', VERCEL_ENV: 'preview' })).toBe('stub');
+    expect(resolveDialpadDialProvider({ DIALPAD_DIAL_PROVIDER: ' STUB ' })).toBe('stub');
+    expect(resolveDialpadDialProvider({ DIALPAD_DIAL_PROVIDER: 'stub', VERCEL_ENV: 'production' })).toBe('live');
+    expect(resolveDialpadDialProvider({})).toBe('live');
+    expect(resolveDialpadDialProvider({ DIALPAD_DIAL_PROVIDER: 'live' })).toBe('live');
+  });
+  it('records the request and accepts without any fetch', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const dialer = createStubDialpadDialer(() => new Date('2026-09-29T10:00:00Z'));
+    const result = await dialer.dial(baseRequest({ outboundCallerId: '+18165550100' }));
+    expect(result).toEqual({ kind: 'accepted', status: 200, providerCallId: null });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+    expect(readStubDialpadDials()).toEqual([{
+      at: '2026-09-29T10:00:00.000Z', endpoint: 'initiate_call', dialpadUserId: '5551234', phoneNumber: '+18165440196', customData: TOKEN,
+      outboundCallerId: '+18165550100', identity: null,
+    }]);
+    resetStubDialpadDials();
+    expect(readStubDialpadDials()).toEqual([]);
+  });
+  it('still throws on an invalid body and records nothing', async () => {
+    await expect(createStubDialpadDialer().dial(baseRequest({ phoneNumber: 'bad' }))).rejects.toThrow();
+    expect(readStubDialpadDials()).toEqual([]);
+  });
+});
+
+describe('resolveDialpadDialKey', () => {
+  it('resolves a dialKeyRef in the DIAL namespace from env', () => {
+    expect(resolveDialpadDialKey({ dialKeyRef: 'env:DIALPAD_CTI_DIAL_KEY_X', directoryKeyRef: null }, env)).toBe(env.DIALPAD_CTI_DIAL_KEY_X);
+  });
+  it('never falls back when the dialKeyRef is outside the namespace or unset in env', () => {
+    expect(resolveDialpadDialKey({ dialKeyRef: 'env:DIALPAD_CTI_DIRECTORY_KEY_A', directoryKeyRef: 'env:DIALPAD_CTI_DIRECTORY_KEY_A' }, env)).toBeNull();
+    expect(resolveDialpadDialKey({ dialKeyRef: 'env:SUPABASE_SERVICE_ROLE_KEY', directoryKeyRef: 'env:DIALPAD_CTI_DIRECTORY_KEY_A' }, { ...env, SUPABASE_SERVICE_ROLE_KEY: 'z'.repeat(30) })).toBeNull();
+    expect(resolveDialpadDialKey({ dialKeyRef: 'env:DIALPAD_CTI_DIAL_KEY_MISSING', directoryKeyRef: 'env:DIALPAD_CTI_DIRECTORY_KEY_A' }, env)).toBeNull();
+  });
+  it('falls back to the directory key when there is no dialKeyRef', () => {
+    expect(resolveDialpadDialKey({ dialKeyRef: null, directoryKeyRef: 'env:DIALPAD_CTI_DIRECTORY_KEY_A' }, env)).toBe(API_KEY);
+    expect(resolveDialpadDialKey({ dialKeyRef: null, directoryKeyRef: null }, env)).toBeNull();
+  });
+});
+
+describe('startDialpadApiCall', () => {
+  it('dials and reports awaiting_provider with the chosen slot', async () => {
+    const db = fakeDb();
+    const { dialer, requests } = fakeDialer();
+    expect(await run(db, dialer)).toEqual({ ok: true, intentId: INTENT, state: 'awaiting_provider', uncertain: false, phoneSlot: 1 });
+    expect(requests).toEqual([{
+      endpoint: 'initiate_call', apiKey: API_KEY, dialpadUserId: '5551234', phoneNumber: '+18165440196', customData: TOKEN, identity: null, outboundCallerId: null,
+    }]);
+    expect(db.calls).not.toContain('cancelIntent');
+  });
+  it('uses the dial key and endpoint from the connection', async () => {
+    const { dialer, requests } = fakeDialer();
+    await run(fakeDb({ loadConnection: async () => conn({ dialKeyRef: 'env:DIALPAD_CTI_DIAL_KEY_X', dialEndpoint: 'call' }) }), dialer);
+    expect(requests[0]).toMatchObject({ endpoint: 'call', apiKey: env.DIALPAD_CTI_DIAL_KEY_X });
+  });
+  it('passes the first grant to prepare and uses its caller id on dial', async () => {
+    const prepareIntent = vi.fn(async () => prepared({ callerNumberE164: '+18165550100' }));
+    const db = fakeDb({
+      loadActiveGrants: async () => [{ id: GRANT, callerNumberE164: '+18165550100', identityType: null }, { id: GRANT2, callerNumberE164: '+18165550101', identityType: null }],
+      prepareIntent,
+      authorizeDispatch: async () => authorized({ outboundCallerId: '+18165550100' }),
+    });
+    const { dialer, requests } = fakeDialer();
+    await run(db, dialer);
+    expect(prepareIntent).toHaveBeenCalledWith(expect.objectContaining({ grantId: GRANT, phoneSlot: 1, idempotencyKey: KEY, orgId: ORG, userId: REP }));
+    expect(requests[0]!.outboundCallerId).toBe('+18165550100');
+  });
+  it('sends the group identity as text and drops the caller id', async () => {
+    const db = fakeDb({
+      loadActiveGrants: async () => [{ id: GRANT, callerNumberE164: '+18165550100', identityType: 'Office' }],
+      prepareIntent: async () => prepared({ callerIdentityType: 'Office', callerIdentityId: '9007199254740993' }),
+      authorizeDispatch: async () => authorized({ identityType: 'Office', identityId: '9007199254740993', outboundCallerId: '+18165550100' }),
+    });
+    const { dialer, requests } = fakeDialer();
+    expect(await run(db, dialer)).toMatchObject({ ok: true, uncertain: false });
+    expect(requests[0]).toMatchObject({ identity: { type: 'Office', id: '9007199254740993' }, outboundCallerId: null });
+  });
+  it('uses no grant and no caller id when the rep has none', async () => {
+    const prepareIntent = vi.fn(async () => prepared());
+    const { dialer, requests } = fakeDialer();
+    await run(fakeDb({ prepareIntent }), dialer);
+    expect(prepareIntent).toHaveBeenCalledWith(expect.objectContaining({ grantId: null }));
+    expect(requests[0]!.outboundCallerId).toBeNull();
+  });
+  it('honours an explicit callable phone slot', async () => {
+    const prepareIntent = vi.fn(async () => prepared({ phoneSlot: 2 }));
+    const db = fakeDb({ prepareIntent, loadCallSlots: async () => [{ slot: 1, callable: false, reason: 'phone_dnc' }, { slot: 2, callable: true, reason: null }] });
+    expect(await run(db, fakeDialer().dialer, { phoneSlot: 2 })).toMatchObject({ ok: true, phoneSlot: 2 });
+    expect(prepareIntent).toHaveBeenCalledWith(expect.objectContaining({ phoneSlot: 2 }));
+  });
+
+  it('never dials again on the same key (already_dispatched)', async () => {
+    const db = fakeDb({ authorizeDispatch: async () => ({ status: 'already_dispatched', intentId: INTENT, expiresAt: '2026-09-29T10:10:00Z', dispatchAuthorizedAt: '2026-09-29T10:00:01Z' }) });
+    const { dialer, requests } = fakeDialer();
+    expect(await run(db, dialer)).toEqual({ ok: true, intentId: INTENT, state: 'already_dispatched' });
+    expect(requests).toHaveLength(0);
+    expect(db.calls).not.toContain('cancelIntent');
+  });
+
+  it('denies with the mapped denial and no prepare or HTTP when no slot is callable', async () => {
+    const db = fakeDb({ loadCallSlots: async () => [{ slot: 1, callable: false, reason: 'phone_dnc' }, { slot: 2, callable: false, reason: 'property_dnc' }] });
+    const { dialer, requests } = fakeDialer();
+    const result = await run(db, dialer);
+    expect(result).toEqual({ ok: false, code: 'denied', message: dialpadDenialMessage('phone_dnc'), denial: 'phone_dnc' });
+    expect(db.calls).not.toContain('prepareIntent');
+    expect(requests).toHaveLength(0);
+  });
+  it.each([
+    ['property_dnc', 'property_dnc_locked'], ['contact_dnc', 'contact_do_not_contact'], ['phone_dnc', 'phone_dnc'], ['invalid', 'phone_unavailable'],
+  ] as const)('maps slot reason %s to denial %s', async (reason, denial) => {
+    const result = await run(fakeDb({ loadCallSlots: async () => [{ slot: 1, callable: false, reason }] }), fakeDialer().dialer);
+    expect(result).toMatchObject({ ok: false, code: 'denied', denial });
+  });
+  it('denies an explicit phone slot that is not callable, even when another slot is', async () => {
+    const db = fakeDb({ loadCallSlots: async () => [{ slot: 1, callable: true, reason: null }, { slot: 2, callable: false, reason: 'phone_dnc' }] });
+    const { dialer, requests } = fakeDialer();
+    expect(await run(db, dialer, { phoneSlot: 2 })).toMatchObject({ ok: false, code: 'denied', denial: 'phone_dnc' });
+    expect(db.calls).not.toContain('prepareIntent');
+    expect(requests).toHaveLength(0);
+  });
+  it('denies a slot the contact does not have', async () => {
+    const db = fakeDb();
+    expect(await run(db, fakeDialer().dialer, { phoneSlot: 3 })).toMatchObject({ ok: false, code: 'denied', denial: 'phone_unavailable' });
+  });
+  it('does not dial when DNC is added between prepare and authorize', async () => {
+    const db = fakeDb({ authorizeDispatch: async () => ({ status: 'denied', intentId: INTENT, denial: 'phone_dnc' }) });
+    const { dialer, requests } = fakeDialer();
+    expect(await run(db, dialer)).toMatchObject({ ok: false, code: 'denied', denial: 'phone_dnc' });
+    expect(requests).toHaveLength(0);
+  });
+
+  it('cancels and offers a fresh key after a provider 429', async () => {
+    const db = fakeDb();
+    const { dialer } = fakeDialer({ kind: 'rejected', status: 429, reason: 'rate_limited', retryAfterSeconds: 30 });
+    const result = await run(db, dialer);
+    expect(result).toMatchObject({ ok: false, code: 'rate_limited', retryAfterSeconds: 30, freshAttemptKey: true });
+    expect(db.calls).toContain('cancelIntent');
+  });
+
+  it('completes the 429 then new-key retry sequence with one accepted dial', async () => {
+    const cancelled = new Set<string>();
+    const intentByKey: Record<string, string> = { [KEY]: INTENT, [KEY2]: INTENT2 };
+    const prepareIntent = vi.fn(async (args: { idempotencyKey: string }) => prepared({ intentId: intentByKey[args.idempotencyKey]! }));
+    const cancelIntent = vi.fn(async (_o: string, _u: string, id: string) => { cancelled.add(id); return {}; });
+    const authorizeDispatch = vi.fn(async (_o: string, _u: string, id: string) => (cancelled.has(id) ? { status: 'cancelled', intentId: id } : authorized({}, id)));
+    const db = fakeDb({ prepareIntent, cancelIntent, authorizeDispatch });
+    const results: DialpadDialResult[] = [
+      { kind: 'rejected', status: 429, reason: 'rate_limited', retryAfterSeconds: 60 },
+      { kind: 'accepted', status: 200, providerCallId: '1' },
+    ];
+    const { dialer, requests } = fakeDialer(() => results.shift()!);
+    expect(await run(db, dialer)).toMatchObject({ ok: false, code: 'rate_limited', freshAttemptKey: true });
+    expect(cancelIntent).toHaveBeenCalledWith(ORG, REP, INTENT);
+    expect(await run(db, dialer, { idempotencyKey: KEY2 })).toEqual({ ok: true, intentId: INTENT2, state: 'awaiting_provider', uncertain: false, phoneSlot: 1 });
+    expect(prepareIntent).toHaveBeenCalledTimes(2);
+    expect(requests).toHaveLength(2);
+    expect(results).toHaveLength(0);
+  });
+  it('a same-key retry after the 429 is cancelled and never reaches the provider', async () => {
+    const db = fakeDb({ authorizeDispatch: async () => ({ status: 'cancelled', intentId: INTENT }) });
+    const { dialer, requests } = fakeDialer();
+    expect(await run(db, dialer)).toMatchObject({ ok: false, code: 'cancelled' });
+    expect(requests).toHaveLength(0);
+  });
+
+  it('keeps the intent on an unknown outcome and reports uncertain', async () => {
+    const db = fakeDb();
+    const { dialer } = fakeDialer({ kind: 'unknown' });
+    expect(await run(db, dialer)).toEqual({ ok: true, intentId: INTENT, state: 'awaiting_provider', uncertain: true, phoneSlot: 1 });
+    expect(db.calls).not.toContain('cancelIntent');
+  });
+  it('a retry with the same key after unknown is already_dispatched with no HTTP', async () => {
+    let released = false;
+    const db = fakeDb({
+      authorizeDispatch: async () => {
+        if (released) return { status: 'already_dispatched', intentId: INTENT, expiresAt: '2026-09-29T10:10:00Z', dispatchAuthorizedAt: '2026-09-29T10:00:01Z' };
+        released = true;
+        return authorized();
+      },
+    });
+    const { dialer, requests } = fakeDialer({ kind: 'unknown' });
+    await run(db, dialer);
+    expect(await run(db, dialer)).toEqual({ ok: true, intentId: INTENT, state: 'already_dispatched' });
+    expect(requests).toHaveLength(1);
+  });
+
+  it.each([400, 401, 403] as const)('cancels and reports provider_rejected on %i without leaking the key or body', async (status) => {
+    const db = fakeDb();
+    const reason = status === 400 ? 'invalid' : status === 401 ? 'unauthorized' : 'forbidden';
+    const { dialer } = fakeDialer({ kind: 'rejected', status, reason, retryAfterSeconds: null });
+    const result = await run(db, dialer);
+    expect(result).toMatchObject({ ok: false, code: 'provider_rejected' });
+    expect(result).not.toHaveProperty('freshAttemptKey');
+    expect(db.calls).toContain('cancelIntent');
+    expect(reportError).toHaveBeenCalledTimes(1);
+    const [, options] = vi.mocked(reportError).mock.calls[0]!;
+    expect(options).toMatchObject({ tags: { surface: 'dialpad_api_dial', reason, status: String(status) } });
+    const payload = JSON.stringify(vi.mocked(reportError).mock.calls[0]![1]) + String((vi.mocked(reportError).mock.calls[0]![0] as Error).message);
+    expect(payload).not.toContain(API_KEY);
+    expect(payload).not.toContain(TOKEN);
+    expect(payload).not.toContain('+18165440196');
+  });
+
+  it('counts the call as placed when the webhook matched before the rejection returned', async () => {
+    const matched = new DialpadDbError(classifyDialpadRpcError({ code: '42501', details: 'intent_already_matched' }), '42501');
+    const db = fakeDb({ cancelIntent: async () => { throw matched; } });
+    const { dialer } = fakeDialer({ kind: 'rejected', status: 400, reason: 'invalid', retryAfterSeconds: null });
+    expect(await run(db, dialer)).toEqual({ ok: true, intentId: INTENT, state: 'awaiting_provider', uncertain: false, phoneSlot: 1 });
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it('rate-limits before preparing when four dials were authorized in the last minute', async () => {
+    const db = fakeDb({ loadDispatchLoad: async () => ({ authorizedLastMinute: 4, unmatchedLast20s: 0 }) });
+    const { dialer, requests } = fakeDialer();
+    expect(await run(db, dialer)).toMatchObject({ ok: false, code: 'rate_limited', freshAttemptKey: true, retryAfterSeconds: 60 });
+    expect(db.calls).not.toContain('prepareIntent');
+    expect(requests).toHaveLength(0);
+  });
+  it('asks the load query for the last 60 seconds', async () => {
+    const loadDispatchLoad = vi.fn(async () => ({ authorizedLastMinute: 0, unmatchedLast20s: 0 }));
+    await run(fakeDb({ loadDispatchLoad }), fakeDialer().dialer);
+    expect(loadDispatchLoad).toHaveBeenCalledWith(ORG, REP, '2026-09-29T09:59:00.000Z');
+  });
+  it('refuses with call_in_flight when a dial is still unmatched', async () => {
+    const db = fakeDb({ loadDispatchLoad: async () => ({ authorizedLastMinute: 1, unmatchedLast20s: 1 }) });
+    const result = await run(db, fakeDialer().dialer);
+    expect(result).toMatchObject({ ok: false, code: 'call_in_flight' });
+    expect(result).not.toHaveProperty('freshAttemptKey');
+    expect(db.calls).not.toContain('prepareIntent');
+  });
+
+  it.each([
+    ['a dialKeyRef outside the namespace', conn({ dialKeyRef: 'env:SUPABASE_SERVICE_ROLE_KEY' })],
+    ['a missing env value', conn({ dialKeyRef: 'env:DIALPAD_CTI_DIAL_KEY_NOPE' })],
+    ['no directory key', conn({ directoryKeyRef: null })],
+  ])('cancels and reports not_configured with %s', async (_label, connection) => {
+    const db = fakeDb({ loadConnection: async () => connection });
+    const { dialer, requests } = fakeDialer();
+    expect(await run(db, dialer)).toMatchObject({ ok: false, code: 'not_configured' });
+    expect(db.calls).toContain('cancelIntent');
+    expect(requests).toHaveLength(0);
+  });
+
+  it('refuses an unbound rep before preparing', async () => {
+    const db = fakeDb({ loadLiveBinding: async () => ({ id: BINDING, status: 'pending' as const, dialpadUserId: '5551234' }) });
+    expect(await run(db, fakeDialer().dialer)).toMatchObject({ ok: false, code: 'not_bound' });
+    expect(db.calls).not.toContain('prepareIntent');
+  });
+  it('refuses a connection without the Dialpad origin or one that is not active', async () => {
+    const origin = fakeDb({ loadConnection: async () => conn({ allowedOrigins: ['https://example.com'] }) });
+    expect(await run(origin, fakeDialer().dialer)).toMatchObject({ ok: false, code: 'origin_not_allowed' });
+    expect(origin.calls).not.toContain('prepareIntent');
+    expect(await run(fakeDb({ loadConnection: async () => conn({ status: 'disabled' }) }), fakeDialer().dialer)).toMatchObject({ ok: false, code: 'not_configured' });
+  });
+
+  it('rejects invalid input without touching the database', async () => {
+    for (const bad of [{ propertyId: 'nope' }, { contactId: null }, { idempotencyKey: 'abc' }, { phoneSlot: 4 }, { phoneSlot: '1' }]) {
+      const db = fakeDb();
+      expect(await run(db, fakeDialer().dialer, bad as never)).toMatchObject({ ok: false, code: 'invalid_input' });
+      expect(db.calls).toEqual([]);
+    }
+  });
+
+  it('reports dialpad_unavailable and logs when the database throws', async () => {
+    const db = fakeDb({ loadDispatchLoad: async () => { throw new Error('socket hang up'); } });
+    const { dialer, requests } = fakeDialer();
+    expect(await run(db, dialer)).toMatchObject({ ok: false, code: 'dialpad_unavailable' });
+    expect(requests).toHaveLength(0);
+    expect(reportError).toHaveBeenCalled();
+    expect(vi.mocked(reportError).mock.calls[0]![1]).toMatchObject({ tags: { surface: 'dialpad_api_dial' } });
+  });
+});
