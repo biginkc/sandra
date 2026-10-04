@@ -55,7 +55,6 @@ export default defineConfig({
       "supabase/migrations/20261003120000_my_leads_queue_row_lookup.integration.test.ts",
       "supabase/migrations/20261003130000_my_leads_conflicts_non_retryable.integration.test.ts",
       "tests/inbox/20261004050300_inbox_optout_scope_retry.integration.test.ts",
-      "tests/inbox/20261004050300_inbox_optout_scope_retry.deadlock.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
       "supabase/migrations/20260929239000_drips_snapshot_isolation.integration.test.ts",
