@@ -109,6 +109,7 @@ const STATE_LABEL: Record<DialpadCallStatus['state'], string> = {
   ended: 'Call ended.',
   cancelled: 'Cancelled. Nothing was dialed.',
   expired: 'No confirmation from Dialpad. Check the dialer before calling again.',
+  failed: 'No confirmation from Dialpad yet. Check the dialer before calling again.',
 };
 
 function duration(seconds: number | null): string {
@@ -471,7 +472,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
     }
     const now = new Date().toISOString();
     const started: DialpadCallStatus = {
-        intentId: result.intentId, state: 'awaiting_provider', connected: false, propertyId: current.request.propertyId, expiresAt: result.expiresAt, dispatchAuthorizedAt: now,
+        intentId: result.intentId, state: 'awaiting_provider', connected: false, propertyId: current.request.propertyId, expiresAt: result.expiresAt, dispatchAuthorizedAt: now, failedAt: null,
         callActivityId: null, attemptId: null, startedAt: null, endedAt: null, durationSeconds: null, talkDurationSeconds: null, recordingCaptureId: null,
     };
     setCalls((existing) => [started, ...existing.filter((entry) => entry.intentId !== started.intentId)].slice(0, 5));

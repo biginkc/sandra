@@ -127,4 +127,27 @@ describe("schemaReady", () => {
     probeReturns({ data: { ...ready, functions: { ...ready.functions, [needed.functions[1]]: false } }, error: null });
     expect(await schemaReady("seller_reminders")).toBe(false);
   });
+
+  it("artifact_fetch needs the claim, record and link functions and the flag column; missing any reads as not ready", async () => {
+    const needed = REQUIREMENTS.artifact_fetch;
+    expect(needed.functions).toHaveLength(3);
+    expect(needed.columns).toContain("my_leads_feature_flags.artifact_fetch");
+    const ready = {
+      functions: Object.fromEntries(needed.functions.map((f) => [f, true])),
+      columns: Object.fromEntries(needed.columns.map((c) => [c, true])),
+    };
+    probeReturns({ data: ready, error: null });
+    expect(await schemaReady("artifact_fetch")).toBe(true);
+    clearSchemaReadyCache();
+    probeReturns({ data: { ...ready, functions: { ...ready.functions, [needed.functions[0]]: false } }, error: null });
+    expect(await schemaReady("artifact_fetch")).toBe(false);
+  });
+
+  it("intent_timeout needs the timeout function and the failed_at marker column", async () => {
+    const needed = REQUIREMENTS.intent_timeout;
+    expect(needed.functions).toEqual(["public.fn_fail_stale_dialpad_intents(integer,integer)"]);
+    expect(needed.columns).toEqual(["dialpad_call_intents.failed_at"]);
+    probeReturns({ data: { functions: { [needed.functions[0]]: true }, columns: { [needed.columns[0]]: false } }, error: null });
+    expect(await schemaReady("intent_timeout")).toBe(false);
+  });
 });

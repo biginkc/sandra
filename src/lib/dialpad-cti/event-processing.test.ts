@@ -5,6 +5,7 @@ vi.mock('@/lib/errors/report', () => ({ reportError: vi.fn(), reportInfo: vi.fn(
 
 import {
   DialpadDbError,
+  failStaleDialpadIntents,
   handleDialpadVoiceWebhook,
   processDialpadCallEvent,
   sweepDialpadCallEvents,
@@ -128,6 +129,7 @@ function makeDb(overrides: Partial<DialpadCtiDb> = {}, calls: string[] = []): Di
     process: vi.fn(async () => { calls.push('process'); return processOk; }),
     recordProcessFailure: vi.fn(async () => { calls.push('recordFailure'); }),
     listPending: vi.fn(async () => []),
+    failStaleIntents: vi.fn(async () => 0),
     ...overrides,
   };
 }
@@ -245,5 +247,16 @@ describe('processDialpadCallEvent and sweepDialpadCallEvents', () => {
     expect(await sweepDialpadCallEvents(db, 10)).toEqual({ candidates: 3, processed: 2, failed: 1 });
     expect(process).toHaveBeenCalledTimes(3);
     expect(db.recordProcessFailure).toHaveBeenCalledWith(ids[1], '40P01');
+  });
+});
+
+describe('failStaleDialpadIntents', () => {
+  it('asks the database for a 120 second cutoff by default and returns how many it marked', async () => {
+    const failStaleIntents = vi.fn(async () => 2);
+    const db = makeDb({ failStaleIntents });
+    expect(await failStaleDialpadIntents(db)).toBe(2);
+    expect(failStaleIntents).toHaveBeenCalledWith(120);
+    await failStaleDialpadIntents(db, 300);
+    expect(failStaleIntents).toHaveBeenLastCalledWith(300);
   });
 });

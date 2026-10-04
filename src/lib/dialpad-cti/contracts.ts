@@ -37,6 +37,11 @@ export const DIALPAD_QUARANTINE_REASONS = [
   'target_mismatch',
   'number_mismatch',
   'outside_intent_window',
+  // Native-call matching (a call dialed outside Sandra).
+  'no_binding',
+  'no_lead_match',
+  'ambiguous_lead',
+  'dnc_number',
 ] as const;
 export type DialpadQuarantineReason = (typeof DIALPAD_QUARANTINE_REASONS)[number];
 
@@ -274,7 +279,7 @@ export function parseDialpadDispatchAuthorization(value: Json | null | undefined
   };
 }
 
-export const DIALPAD_CALL_STATES = ['prepared', 'awaiting_provider', 'dialing', 'connected', 'ended', 'cancelled', 'expired'] as const;
+export const DIALPAD_CALL_STATES = ['prepared', 'awaiting_provider', 'dialing', 'connected', 'ended', 'cancelled', 'expired', 'failed'] as const;
 export type DialpadCallState = (typeof DIALPAD_CALL_STATES)[number];
 
 export interface DialpadCallStatus {
@@ -285,6 +290,8 @@ export interface DialpadCallStatus {
   propertyId: string;
   expiresAt: string;
   dispatchAuthorizedAt: string | null;
+  /** Set once when an authorized dial got no provider event in time. A marker: a late event still matches. */
+  failedAt: string | null;
   callActivityId: string | null;
   attemptId: string | null;
   startedAt: string | null;
@@ -310,6 +317,7 @@ export function parseDialpadCallStatus(value: Json | null | undefined): DialpadC
     propertyId: str(data.propertyId, 'propertyId'),
     expiresAt: str(data.expiresAt, 'expiresAt'),
     dispatchAuthorizedAt: nullableStr(data.dispatchAuthorizedAt, 'dispatchAuthorizedAt'),
+    failedAt: nullableStr(data.failedAt, 'failedAt'),
     callActivityId: nullableStr(data.callActivityId, 'callActivityId'),
     attemptId: nullableStr(data.attemptId, 'attemptId'),
     startedAt: nullableStr(data.startedAt, 'startedAt'),
