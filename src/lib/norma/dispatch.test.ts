@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { BlandClient, BlandSendResult } from "./bland";
+import { createBlandClient, NORMA_VOICEMAIL_MESSAGE, type BlandClient, type BlandSendResult } from "./bland";
 import { readNormaBlandConfig, type NormaBlandConfig } from "./config";
 import { dispatchNormaCall } from "./dispatch";
 import { fakeClient, PHONE, REQUEST_ID, requestRow } from "./test-helpers";
@@ -102,6 +102,42 @@ describe("dispatchNormaCall", () => {
       variables: { seller_first_name: "Sam", property_address: "1 Main, KC, MO, 64111", rep_context: "ctx", asking_price: "", latest_notes: "" },
     });
     expect(t.rpcs.fn_norma_bind_call_id).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_call_id: "call-1" });
+  });
+
+  it.each([1, 2])("serializes attempt %s from the request row through real dispatch and the Bland adapter", async (attempt) => {
+    const t = setup({ row: { attempt } });
+    // Exercise the actual adapter: capture the HTTP boundary without a provider call.
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ status: "success", call_id: `attempt-${attempt}` }),
+      { status: 200 },
+    ));
+    await expect(dispatchNormaCall(REQUEST_ID, {
+      client: t.client,
+      bland: createBlandClient(blandConfig, fetchImpl),
+      blandConfig,
+      gate: openGate,
+      precallSms: { enabled: false },
+    })).resolves.toEqual({ status: "dispatched", callId: `attempt-${attempt}` });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchImpl.mock.calls[0];
+    expect(url).toBe("https://bland.test/v1/calls");
+    expect(options.method).toBe("POST");
+    const body = JSON.parse(options.body);
+    expect(body.metadata).toEqual({
+      request_id: REQUEST_ID,
+      idempotency_key: "22222222-2222-4222-8222-222222222222",
+      attempt,
+    });
+    expect(body.voicemail).toEqual(attempt === 1
+      ? { action: "hangup" }
+      : { action: "leave_message", message: NORMA_VOICEMAIL_MESSAGE });
+    expect(body.pathway_version).toBe(17);
+    expect(body.record).toBe(true);
+    expect(body.max_duration).toBe(10);
+    expect(body).not.toHaveProperty("retry");
+    expect(t.rpcs.fn_norma_claim_dispatch).toHaveBeenCalledWith({
+      p_request_id: REQUEST_ID, p_expected_attempt: attempt,
+    });
   });
 
   describe("asking_price and latest_notes variables", () => {

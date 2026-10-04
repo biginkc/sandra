@@ -30,8 +30,8 @@ Supersedes the "Proposed plan, not yet approved" section of Astra's `DECISIONS-A
 ## Decisions this plan implements
 - Button visible to all active members.
 - Hard blocks: DNC (lead lock and global registry) and `not_interested`.
-- No answer: hang up, no voicemail, no retry.
-- Drip: pause on request; resume on confirmed no answer; stay paused if Norma reached the seller.
+- No answer: leave the short callback voicemail on a single call and on call-twice attempt 2; hang up on attempt 1 when that attempt number is present. No Bland-side retry. `pathway_version` is omitted unless `NORMA_BLAND_PATHWAY_VERSION` is a strict integer, so Bland uses the published production pathway.
+- Drip: pause on request; with PR771, keep the hold across the retry and resume only after the second confirmed no answer; stay paused if Norma reached the seller.
 - Seller tells Norma to stop: lead marked `not_interested` (not DNC).
 - Callback requested: callback task for Jarrad, labelled unconfirmed.
 - Caller ID: build and rehearse on the existing 213 number (no new number fee; calls still draw on Jarrad's prepaid Bland credits at $0.14/min — balance was $15.55 of $20 on 2026-10-02, and whether the 213 number itself is billed is not visible in the account data). Before real sellers, Jarrad chooses between a $15/mo Bland 816 number and a bring-your-own Twilio number (~$1/mo, plan eligibility unverified). No free swap is documented; do not release the 213 number. Callbacks: Norma answers, then transfers to the Dialpad main line (a silent straight-through forward is not documented; inbound answer-and-transfer must itself be verified at rehearsal and is not evidence that outbound warm transfer works).
@@ -74,7 +74,7 @@ Extend `PauseReason` with `norma_call`; add lead event types `norma_call_request
 1. Dispatch gate (section 0).
 2. Atomic claim: `requested → dispatching` (single conditional update; losers exit).
 3. Re-run `fn_norma_eligibility` immediately before dialling; if it fails, mark `dispatch_rejected` and release owned pauses.
-4. Bland send-call: pathway id + integer `pathway_version` (Bland's field is an integer, not the agent semver `0.0.17`), `from` = local number, `metadata {request_id, idempotency_key}`, webhook URL, voicemail action `hangup`, no `retry`, rep context and lead facts as variables.
+4. Bland send-call: pathway id, omit `pathway_version` unless `NORMA_BLAND_PATHWAY_VERSION` matches `/^(0|[1-9]\d*)$/` and `Number.isSafeInteger` (blank or `production` uses Bland's published production version; `latest` is not an alias), `from` = local number, `metadata {request_id, idempotency_key, attempt}`, webhook URL, voicemail `leave_message` unless `attempt` is present and is not 2 (then `hangup`), `record` true, `max_duration` 10 minutes, no `retry`, rep context and lead facts as variables.
 5. Result handling:
    - Explicit rejection (4xx with no call created): `dispatch_rejected`; release owned pauses.
    - Success: bind `bland_call_id` and move `dispatching → dispatched` with a conditional update that cannot overwrite `completed`.
@@ -119,9 +119,11 @@ Cron every 5 minutes over `requested` (stranded), `dispatching`, `dispatched` an
 - Stranded `requested` rows are dispatched only if younger than a short window; otherwise `dispatch_rejected` with pauses released.
 - **Deviation (M2, accepted):** Bland cannot be queried by metadata, so "Bland confirms no call exists" is only possible for a bound call id, and a 404 on a bound id is treated as ambiguous: it escalates to `needs_review` after the window instead of `dispatch_rejected` (a call that Bland once accepted is never auto-closed). Rows with no id escalate by age. The sweep orders by `next_check_at` and pushes each examined row out, so stuck rows cannot starve fresh ones; "close only if still `requested`" callers pass an expected status so they cannot reject a row a dispatcher already claimed.
 
-### 7. Dispatch contract (pin before build)
-**Pinned (M2):** live pathway integer version `3` (agent snapshot 0.0.4), default of `NORMA_BLAND_PATHWAY_VERSION`; staging 0.0.17 has no published integer version. `call_outcome` leading token map and the nine extraction variables are in `src/lib/norma/outcome.ts`. The callback preference is free text, so callback tasks are due now with the raw text in the description.
-Map the existing `0.0.17` outputs (`call_outcome`, `follow_up_preference`, qualification fields) to Sandra outcomes; identify the integer `pathway_version` for that snapshot. Only if a needed field is missing does a pathway change get proposed, and that is a Jarrad gate.
+### 7. Dispatch contract
+**Candidate capability, not release state:** preserve the existing production pin `22` through the coordinated code release. Removing the pin is a separate reviewed release transition: subsequent Bland production publishes then change call behavior immediately. Omitting Bland `pathway_version` uses whatever version is published as production. `NORMA_BLAND_PATHWAY_VERSION` pins only when it is a strict non-negative integer (`/^(0|[1-9]\d*)$/` and `Number.isSafeInteger`). Unset, blank, and `production` omit the field. `latest` is not accepted. `call_outcome` leading token map and the nine extraction variables are in `src/lib/norma/outcome.ts`. The callback preference is free text, so callback tasks are due now with the raw text in the description.
+The outcome map still reads the pathway's `call_outcome`, `follow_up_preference`, and qualification fields. Every pathway publish after unpinning requires an exact compatible export, reviewed output contract, acceptance evidence and a serialized release lease. Recording and voicemail are explicit behavior changes; verify disclosure and first/second attempt behavior against the exact release candidate. The opening-repeat fix in draft v18/internal v18aw, callback lines and replay results remain unverified until authorized provider access succeeds.
+
+**Dependency:** PR771 (`8c2b789147ddeedd5ba7035bef78cd1cdab6f7e4`) and migration `20261002150000_norma_call_twice.sql` are unmerged release prerequisites. Test integration preserves that dependency without transferring its PR/branch ownership or admitting its migration. Do not deploy this integrated candidate while the retry schema is absent and dispatch is enabled.
 
 ### 8. Verification
 - Unit: eligibility (incl. global registry and fail-closed), dispatch gate, state transitions, outcome mapping, signature check.

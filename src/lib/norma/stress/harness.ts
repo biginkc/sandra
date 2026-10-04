@@ -40,7 +40,7 @@ export const BLAND_CONFIG: NormaBlandConfig = {
   apiKey: "stress-key",
   baseUrl: "https://bland.stress.invalid",
   pathwayId: "pathway-stress",
-  pathwayVersion: 3,
+  pathwayVersion: null,
   voice: "voice-stress",
   fromNumber: "+18165550000",
   webhookUrl: "https://sandra.stress.invalid/api/webhooks/bland/call",

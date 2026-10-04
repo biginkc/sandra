@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { buildSendCallBody, createBlandClient } from "./bland";
+import { NORMA_MAX_DURATION_MINUTES, NORMA_VOICEMAIL_MESSAGE, buildSendCallBody, createBlandClient } from "./bland";
 import type { NormaBlandConfig } from "./config";
 
 const config: NormaBlandConfig = {
@@ -19,7 +19,7 @@ const params = { phoneNumber: "+18165550142", requestId: "r1", idempotencyKey: "
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
 
 describe("bland send-call classification", () => {
-  it("builds the exact body: integer version, hangup voicemail, no retry, metadata, webhook", () => {
+  it("builds the exact body: pinned version, voicemail, recording, no retry, metadata, webhook", () => {
     const body = buildSendCallBody(config, params);
     expect(body).toEqual({
       phone_number: "+18165550142",
@@ -29,14 +29,39 @@ describe("bland send-call classification", () => {
       from: "+12135550100",
       metadata: { request_id: "r1", idempotency_key: "k1", attempt: 1 },
       webhook: "https://sandra.test/api/webhooks/bland/call",
-      voicemail: { action: "hangup" },
+      voicemail: { action: "leave_message", message: NORMA_VOICEMAIL_MESSAGE },
+      record: true,
+      max_duration: NORMA_MAX_DURATION_MINUTES,
       request_data: { a: "b" },
       wait_for_greeting: true,
       background_track: "office",
     });
+    expect(NORMA_VOICEMAIL_MESSAGE).toBe(
+      "Hi, this is Norma with The BMH Group, following up on your offer for your property. Please call us back at 8 1 6, 2 8 0, 4 1 8 1.",
+    );
     expect(JSON.stringify(body)).not.toMatch(/"(task|prompt|first_sentence|script)"/);
     expect("retry" in body).toBe(false);
     expect(Number.isInteger(body.pathway_version)).toBe(true);
+  });
+
+  it("hangs up on attempt 1 and leaves the voicemail only on attempt 2", () => {
+    const first = buildSendCallBody(config, { ...params, attempt: 1 });
+    expect(first.voicemail).toEqual({ action: "hangup" });
+    expect(first.voicemail).not.toHaveProperty("message");
+    const second = buildSendCallBody(config, { ...params, attempt: 2 });
+    expect(second.voicemail).toEqual({ action: "leave_message", message: NORMA_VOICEMAIL_MESSAGE });
+    expect(buildSendCallBody(config, params).voicemail).toEqual({
+      action: "leave_message",
+      message: NORMA_VOICEMAIL_MESSAGE,
+    });
+  });
+
+  it("omits pathway_version when unpinned so Bland uses the published production version", () => {
+    const body = buildSendCallBody({ ...config, pathwayVersion: null }, params);
+    expect(body).not.toHaveProperty("pathway_version");
+    expect(body.voicemail).toEqual({ action: "leave_message", message: NORMA_VOICEMAIL_MESSAGE });
+    expect(body.record).toBe(true);
+    expect(body.max_duration).toBe(10);
   });
 
   it("passes configured greeting wait and background track through", () => {
