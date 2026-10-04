@@ -21,8 +21,11 @@ vi.mock("@/lib/errors/call-action", () => ({
 }));
 
 vi.mock("../actions", () => ({
-  createLeadTaskAction,
   listPropertyOrgUsers,
+}));
+
+vi.mock("../lead-task-actions", () => ({
+  createLeadTaskAction,
 }));
 
 import { LeadTaskWidget } from "./lead-task-widget";

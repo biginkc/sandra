@@ -8,12 +8,8 @@ import { callAction } from "@/lib/errors/call-action";
 import { teamMemberOptionLabel } from "@/lib/auth/team-member";
 import { cn } from "@/lib/utils";
 
-import {
-  createLeadTaskAction,
-  listPropertyOrgUsers,
-  type LeadTaskKind,
-  type TeamMember,
-} from "../actions";
+import { listPropertyOrgUsers, type TeamMember } from "../actions";
+import { createLeadTaskAction, type LeadTaskKind } from "../lead-task-actions";
 
 type Props = {
   propertyId: string;
