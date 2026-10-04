@@ -59,6 +59,19 @@ begin
   if coalesce(auth.role(), '') <> 'service_role' and auth.uid() is distinct from p_actor then
     raise exception 'FORBIDDEN: caller is not the actor' using errcode = '42501';
   end if;
+  -- System-only knobs: a browser caller may not use source keys, system origins, or skip the
+  -- booking window (those are for Jitter, Norma and the backfill running as the service role).
+  if coalesce(auth.role(), '') <> 'service_role' then
+    if p_source_key is not null then
+      raise exception 'FORBIDDEN: source keys are service-only' using errcode = '42501';
+    end if;
+    if p_origin is distinct from 'app' and p_origin is distinct from 'board' and p_origin is distinct from 'offer' then
+      raise exception 'FORBIDDEN: origin is service-only' using errcode = '42501';
+    end if;
+    if not coalesce(p_enforce_window, false) then
+      raise exception 'FORBIDDEN: the booking window is mandatory for browser callers' using errcode = '42501';
+    end if;
+  end if;
   if p_org is null or p_actor is null or p_assignee is null then
     raise exception 'INVALID_INPUT: org, actor and assignee are required' using errcode = '22023';
   end if;
@@ -155,9 +168,7 @@ begin
        or v_existing.due_at is distinct from p_due_at
        or v_existing.end_at is distinct from v_end
        or v_existing.title is distinct from v_title
-       or v_existing.description is distinct from p_description
-       or v_existing.mode is distinct from v_mode
-       or v_existing.location is distinct from p_location then
+       or v_existing.description is distinct from p_description then
       raise exception 'fn_create_next_step: idempotency key reuse with different request'
         using errcode = 'P0001';
     end if;
@@ -184,6 +195,14 @@ begin
       if found then
         if v_old.related_property_id is distinct from p_property then
           raise exception 'fn_create_next_step: source key reuse with a different property' using errcode = 'P0001';
+        end if;
+        if v_old.type = 'appointment'
+           and (v_old.status <> 'open'
+                or exists (select 1 from public.tasks c
+                           where c.org_id = p_org and c.calendar_chain_id = v_old.calendar_chain_id
+                             and c.id <> v_old.id)) then
+          raise exception 'fn_create_next_step: this appointment was closed, rescheduled or superseded'
+            using errcode = 'P0001';
         end if;
         if v_old.type = 'appointment' and p_kind = 'task' then
           raise exception 'fn_create_next_step: an appointment cannot be downgraded to a task' using errcode = 'P0001';

@@ -58,6 +58,7 @@ async function world(db: Client) {
     try { return await run(); } finally { await db.query('reset role').catch(() => {}); }
   };
   const call = (args: Record<string, unknown>, role: Role = 'service_role', sub: string | null = null) => {
+    if (role === 'authenticated' && !('p_enforce_window' in args)) args = { ...args, p_enforce_window: true };
     const keys = Object.keys(args);
     const sql = `select public.fn_create_next_step(${keys.map((k, i) => `${k} => $${i + 1}`).join(',')}) as r`;
     return as(role, sub, async () => (await db.query(sql, keys.map((k) => args[k]))).rows[0].r);
@@ -209,13 +210,26 @@ it('upserts by source key: in place, reopening, converting, and refusing unsafe 
     expect(await w.ledger(t1.task_id)).toHaveLength(0);
     // The guard flag is not left on for the rest of the transaction.
     expect((await w.db.query("select coalesce(current_setting('sandra.allow_appointment_time_move',true),'') v")).rows[0].v).toBe('');
-    // Reopen a completed row.
+    // A closed appointment is never reopened or rewritten by a source key.
     await w.db.query("select set_config('sandra.allow_appointment_time_move','on',true)");
     await w.db.query("update public.tasks set status='completed', outcome='held', completed_at=now(), completed_by=$2 where id=$1", [t1.task_id, w.jarrad]);
     await w.db.query("select set_config('sandra.allow_appointment_time_move','',true)");
-    const t3 = await w.call(norma({ p_kind: 'appointment', p_due_at: hours(6), p_title: 'Call back again' }));
-    expect(t3).toMatchObject({ task_id: t1.task_id, converted: false });
-    expect(await w.row(t1.task_id)).toMatchObject({ status: 'open', outcome: null, completed_at: null, title: 'Call back again', calendar_generation: 2 });
+    await w.expectError(() => w.call(norma({ p_kind: 'appointment', p_due_at: hours(6) })), /closed, rescheduled or superseded/);
+    await w.db.query("select set_config('sandra.allow_appointment_time_move','on',true)");
+    await w.db.query("update public.tasks set status='open', outcome=null, completed_at=null, completed_by=null where id=$1", [t1.task_id]);
+    // A successor in the same chain (a reschedule) also blocks, without creating a second open row.
+    await w.db.query('savepoint succ');
+    await w.db.query("insert into public.tasks(org_id,type,status,title,due_at,end_at,assignee_id,created_by,calendar_chain_id,related_property_id) values ($1,'appointment','open','succ',now()+interval '3 days',now()+interval '3 days 15 minutes',$2,$2,$3,$4)", [w.org, w.jarrad, t2.calendar_chain_id, w.property]);
+    await w.db.query("select set_config('sandra.allow_appointment_time_move','',true)");
+    await w.expectError(() => w.call(norma({ p_kind: 'appointment', p_due_at: hours(6) })), /closed, rescheduled or superseded/);
+    expect((await w.db.query('select count(*)::int n from public.tasks where org_id=$1 and calendar_chain_id=$2', [w.org, t2.calendar_chain_id])).rows[0].n).toBe(2);
+    await w.db.query('rollback to savepoint succ');
+    // A completed non-appointment review task IS reopened (the original Norma behaviour).
+    const rk = `norma:${randomUUID()}`;
+    const rev = await w.call(w.base({ p_source_key: rk, p_origin: 'norma', p_kind: 'task', p_title: 'Review' }));
+    await w.db.query("update public.tasks set status='completed', completed_at=now(), completed_by=$2 where id=$1", [rev.task_id, w.jarrad]);
+    await w.call(w.base({ p_source_key: rk, p_origin: 'norma', p_kind: 'task', p_title: 'Review again' }));
+    expect(await w.row(rev.task_id)).toMatchObject({ status: 'open', completed_at: null, title: 'Review again' });
     // Unsafe changes.
     await w.expectError(() => w.call(norma({ p_kind: 'task' })), /cannot be downgraded/);
     const otherProp = await w.prop();
@@ -269,5 +283,33 @@ it('is not executable by anon and is a definer function with a fixed search path
     expect(meta).toHaveLength(1);
     expect(meta[0].prosecdef).toBe(true);
     expect(meta[0].proconfig).toContain('search_path=""');
+  });
+});
+
+it('refuses browser callers the service-only knobs and allows the service role', async () => {
+  await withWorld(async (w) => {
+    const auth = (extra: Record<string, unknown>) => w.call({ ...w.base(), p_enforce_window: true, ...extra }, 'authenticated', w.jarrad);
+    await w.expectError(() => auth({ p_source_key: 'k' }), /FORBIDDEN: source keys are service-only/);
+    await w.expectError(() => auth({ p_origin: 'norma' }), /FORBIDDEN: origin is service-only/);
+    await w.expectError(() => auth({ p_origin: 'offer_backfill' }), /FORBIDDEN: origin is service-only/);
+    await w.expectError(() => auth({ p_enforce_window: false }), /FORBIDDEN: the booking window is mandatory/);
+    expect(await auth({ p_origin: 'board' })).toMatchObject({ kind: 'appointment' });
+    expect(await w.call(w.base({ p_source_key: 'svc', p_origin: 'norma', p_due_at: hours(-3) }))).toMatchObject({ duplicate: false });
+  });
+});
+
+it('a booking made by the legacy path is returned as the original when retried on the new path', async () => {
+  await withWorld(async (w) => {
+    const key = randomUUID();
+    const due = new Date(Date.now() + 86_400_000), end = new Date(+due + 3_600_000), chain = randomUUID();
+    // What fn_book_appointment leaves behind before this migration: phone default mode, one ledger row.
+    const t = (await w.db.query(
+      `insert into public.tasks(org_id,type,status,title,due_at,end_at,assignee_id,created_by,calendar_chain_id,related_property_id,booking_idempotency_key)
+       values ($1,'appointment','open','Walkthrough',$2,$3,$4,$4,$5,$6,$7) returning id`,
+      [w.org, due.toISOString(), end.toISOString(), w.jarrad, chain, w.property, key])).rows[0].id;
+    await w.db.query("insert into public.task_calendar_mutations(org_id,calendar_chain_id,operation,phase,source_task_id,old_assignee_id,expected_generation) values ($1,$2,'create','pending',$3,$4,0)", [w.org, chain, t, w.jarrad]);
+    const r = await w.call(w.base({ p_title: 'Walkthrough', p_due_at: due.toISOString(), p_mode: 'in_person', p_end_at: end.toISOString(), p_idempotency_key: key }), 'authenticated', w.jarrad);
+    expect(r).toMatchObject({ duplicate: true, task_id: t });
+    expect(r.ledger_id).toBeTruthy();
   });
 });
