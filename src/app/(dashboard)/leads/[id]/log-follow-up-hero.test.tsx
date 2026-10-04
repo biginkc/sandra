@@ -30,7 +30,7 @@ const row = { propertyId: "lead-1", assignmentEpisodeId: "ep-1", queueVersion: 1
 // exactly what a brand-new lead with no imagery does 1-2s after the page loads.
 function page(assigneeId = "rep-9") {
   return (
-    <LogFollowUpProvider propertyId="lead-1" propertyLabel="1 Main" assigneeId={assigneeId} disabledReason={null}>
+    <LogFollowUpProvider propertyId="lead-1" propertyLabel="1 Main" assigneeId={assigneeId} disabledReason={null} viewer={{ userId: "rep-9", orgId: "org-1" }}>
       <LeadMediaHero media={media} address="1 Main" locationLine="KC, MO" homeownerName="Jamie" actions={<LogFollowUpTrigger />} />
     </LogFollowUpProvider>
   )

@@ -101,11 +101,31 @@ const viewerFailure = (error: unknown) =>
         "unknown",
         "Sign in with an active organization before updating a lead.",
       );
+/**
+ * True only for a real Postgres error RESPONSE: postgrest-js resolves transport failures
+ * (fetch failed, abort) as `{ error: { code: "" }, status: 0 }`, a non-JSON gateway body as an
+ * error with no code, and PostgREST's own errors with a longer `PGRST...` code. None of those
+ * prove the function ran and rolled back. A raised SQLSTATE (P0001, 42501, ...) has status > 0
+ * and exactly five characters.
+ */
+function isAnsweredRpcError(rpc: {
+  status?: number;
+  error?: { code?: string } | null;
+}) {
+  const code = rpc.error?.code;
+  return (
+    (rpc.status ?? 0) > 0 &&
+    typeof code === "string" &&
+    /^[0-9A-Z]{5}$/.test(code)
+  );
+}
 /** Marks a failure built from an RPC error RESPONSE: the call reached Postgres and rolled back. Never set for transport failures, thrown calls or missing confirmation. */
-const ans = <T extends object>(failureResult: T) => ({
-  ...failureResult,
-  answered: true as const,
-});
+const answeredWrapper =
+  (rpc: { status?: number; error?: { code?: string } | null }) =>
+  <T extends object>(failureResult: T) =>
+    isAnsweredRpcError(rpc)
+      ? { ...failureResult, answered: true as const }
+      : failureResult;
 class ReceiptLookupError extends Error {}
 const ALREADY_SAVED = "This was already saved. Refresh to see it.";
 type Certainty = "rejected" | "unknown";
@@ -160,7 +180,8 @@ export async function submitMyLeadHandoffDrip(input: {
     return failure("unknown", "You can update only your own queue.");
   let rpc: {
     data: { ok?: boolean } | null;
-    error: { message?: string } | null;
+    error: { message?: string; code?: string } | null;
+    status?: number;
   };
   try {
     rpc = await (
@@ -170,7 +191,8 @@ export async function submitMyLeadHandoffDrip(input: {
           args: Record<string, string | number>,
         ): Promise<{
           data: { ok?: boolean } | null;
-          error: { message?: string } | null;
+          error: { message?: string; code?: string } | null;
+          status?: number;
         }>;
       }
     ).rpc("fn_handoff_acquisition_lead_to_drip", {
@@ -189,6 +211,7 @@ export async function submitMyLeadHandoffDrip(input: {
     );
   }
   const { data, error } = rpc;
+  const ans = answeredWrapper(rpc);
   if (error) {
     const message = error.message ?? "";
     if (named(message, ["IDEMPOTENCY_CONFLICT"]))
@@ -404,14 +427,22 @@ export async function submitMyLeadCommand(
     command === "log-attempt" && input.source === "sandra"
       ? "fn_finalize_acquisition_attempt"
       : commands[command];
-  let rpc: { data: Json | null; error: { message?: string } | null };
+  let rpc: {
+    data: Json | null;
+    error: { message?: string; code?: string } | null;
+    status?: number;
+  };
   try {
     rpc = await (
       client as unknown as {
         rpc(
           name: string,
           args: { p_input: Json },
-        ): Promise<{ data: Json | null; error: { message?: string } | null }>;
+        ): Promise<{
+          data: Json | null;
+          error: { message?: string; code?: string } | null;
+          status?: number;
+        }>;
       }
     ).rpc(rpcName, { p_input: input });
   } catch {
@@ -421,6 +452,7 @@ export async function submitMyLeadCommand(
     );
   }
   const { data, error } = rpc;
+  const ans = answeredWrapper(rpc);
   if (error) {
     const message = error.message ?? "";
     // A receipt exists for this key with a different request: the save already went through.
@@ -463,18 +495,25 @@ export async function submitMyLeadCommand(
         failure(
           certainty,
           "Attach the DialPad recording link before saving this call.",
+          "RECORDING_REQUIRED" as const,
+        ),
+      );
+    if (message.includes("MOTIVATION"))
+      return ans(
+        failure(
+          certainty,
+          "Specify motivation or choose No motivation provided.",
+          "MOTIVATION_REQUIRED" as const,
         ),
       );
     return ans(
       failure(
         certainty,
-        message.includes("MOTIVATION")
-          ? "Specify motivation or choose No motivation provided."
-          : message.includes("PENDING_OFFER")
-            ? "Resolve the current pending offer first."
-            : message.includes("RECIPIENT")
-              ? "The handoff recipient is unavailable. Ask the owner to update settings."
-              : "The update could not be saved. Check the fields and retry.",
+        message.includes("PENDING_OFFER")
+          ? "Resolve the current pending offer first."
+          : message.includes("RECIPIENT")
+            ? "The handoff recipient is unavailable. Ask the owner to update settings."
+            : "The update could not be saved. Check the fields and retry.",
       ),
     );
   }

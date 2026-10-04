@@ -708,10 +708,17 @@ export function MyLeadsClient({
   const { submit, recoveryValue, onDripChanged } = useAttemptWorkflow({
     opening: dialog,
     memberId: member,
+    viewer: { userId: viewer.userId, orgId: viewer.orgId },
     readRow: readRecoveryRow,
     onCommitted: () => {
       const read = refresh();
       setDetailRevision((revision) => revision + 1);
+      return read;
+    },
+    onReconciled: () => {
+      const read = refresh();
+      setDetailRevision((revision) => revision + 1);
+      router.refresh();
       return read;
     },
     onSettled: ({ opening, dripFailure }) => {

@@ -3,7 +3,7 @@ import type { Duplex } from 'node:stream'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { verifyCoachToken } from './auth.js'
 import { CoachSession } from './session.js'
-import { createPresenceManager, type WatchdogExpiryClaim, type PresenceManager } from './presence.js'
+import { createPresenceManager, PresenceAdmissionError, type WatchdogExpiryClaim, type PresenceManager } from './presence.js'
 import type { CoachClaims, CoachLogger, CoachPublisher, DirectCoachBinding, DirectCoachDb } from './types.js'
 
 const MAX_SESSIONS = 2
@@ -49,7 +49,23 @@ export function createCoachServer(options: CoachServerOptions): CoachServer {
   server.on('upgrade', (request, socket, head) => {
     const path = new URL(request.url ?? '/', 'http://localhost').pathname
     if (path === '/presence' && watchdog) {
-      void watchdog.admit(request, socket, head).catch(() => { if (!socket.destroyed) socket.destroy() })
+      socket.on('error', () => socket.destroy())
+      void watchdog.admit(request, socket, head).catch((error: unknown) => {
+        const status = error instanceof PresenceAdmissionError ? error.status : null
+        const reason = error instanceof PresenceAdmissionError ? error.reason : 'upgrade_failed'
+        // Never log the URL, cookies, capabilities, or untrusted exception text.
+        options.logger.warn('watchdog.upgrade_rejected', { reason, status, originPresent: typeof request.headers.origin === 'string' })
+        // Unknown failures may occur after the 101 response; never write HTTP
+        // bytes onto a connection that could already be speaking WebSocket.
+        if (status === null) { socket.destroy(); return }
+        if (!socket.destroyed) {
+          const label = status === 403 ? 'Forbidden' : 'Service Unavailable'
+          socket.end(`HTTP/1.1 ${status} ${label}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`)
+          const timer = setTimeout(() => socket.destroy(), 1_000)
+          timer.unref()
+          socket.once('close', () => clearTimeout(timer))
+        }
+      })
       return
     }
     let disconnected = false

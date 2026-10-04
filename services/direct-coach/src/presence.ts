@@ -13,6 +13,12 @@ const MAX_PRESENCE_PAYLOAD = 16_384
 
 export type WatchdogExpiryClaim = { callId: string; operatorUserId: string; sessionId: string }
 
+export class PresenceAdmissionError extends Error {
+  constructor(readonly reason: 'origin_not_allowed' | 'draining', readonly status: 403 | 503) {
+    super(reason)
+  }
+}
+
 export interface PresenceManagerOptions {
   readonly db: DirectCoachDb
   readonly secret: string
@@ -69,8 +75,8 @@ export function createPresenceManager(options: PresenceManagerOptions): Presence
 
   async function admit(request: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     const origin = request.headers.origin
-    if (typeof origin !== 'string' || !options.origins.has(origin)) throw new Error('origin not allowed')
-    if (draining) throw new Error('watchdog is draining')
+    if (typeof origin !== 'string' || !options.origins.has(origin)) throw new PresenceAdmissionError('origin_not_allowed', 403)
+    if (draining) throw new PresenceAdmissionError('draining', 503)
     const admission = new Promise<void>((resolve) => {
       wss.handleUpgrade(request, socket, head, (ws) => {
         const state: SocketState = { ws, claims: undefined as never, authenticated: false, lastPongAt: now(), graceful: false, renewing: false }

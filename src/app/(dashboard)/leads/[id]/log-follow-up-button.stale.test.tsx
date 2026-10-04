@@ -39,7 +39,7 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
   it("a second save that the server rejects as stale ends in the recovery UI, not a stuck Saving…", async () => {
     const user = userEvent.setup()
     mocks.submitMyLeadCommand.mockResolvedValue({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "This lead changed. Refresh before trying again." })
-    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} />)
+    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} viewer={{ userId: "rep-9", orgId: "org-1" }} />)
     await user.click(screen.getByRole("button", { name: "Log follow-up" }))
     await fillAndSave(user)
     expect(await screen.findByText("This lead changed. Refresh before trying again.")).toBeInTheDocument()
@@ -57,7 +57,7 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
   it("a server action that rejects ends in the uncertain/reconcile state, not a stuck Saving…", async () => {
     const user = userEvent.setup()
     mocks.submitMyLeadCommand.mockRejectedValue(new Error("response lost"))
-    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} />)
+    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} viewer={{ userId: "rep-9", orgId: "org-1" }} />)
     await user.click(screen.getByRole("button", { name: "Log follow-up" }))
     await fillAndSave(user)
     expect(await screen.findByText(/original request is preserved for reconciliation/)).toBeInTheDocument()
@@ -68,7 +68,7 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
   it("a save that never answers ends in the uncertain/reconcile state, not a stuck Saving…", async () => {
     const user = userEvent.setup({ delay: null })
     mocks.submitMyLeadCommand.mockImplementation(() => new Promise(() => undefined))
-    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} />)
+    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} viewer={{ userId: "rep-9", orgId: "org-1" }} />)
     await user.click(screen.getByRole("button", { name: "Log follow-up" }))
     await user.selectOptions(await screen.findByLabelText("External outcome"), "reached")
     fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-11T09:00" } })
@@ -89,7 +89,7 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
       .mockImplementationOnce(() => new Promise(() => undefined))
       .mockResolvedValueOnce({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "This lead changed. Refresh before trying again." })
       .mockResolvedValueOnce({ ok: true, attemptRecorded: true })
-    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} />)
+    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} viewer={{ userId: "rep-9", orgId: "org-1" }} />)
     await user.click(screen.getByRole("button", { name: "Log follow-up" }))
     await user.selectOptions(await screen.findByLabelText("External outcome"), "reached")
     fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-11T09:00" } })
@@ -99,9 +99,10 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(25_001) })
     } finally { vi.useRealTimers() }
     await user.click(await screen.findByRole("button", { name: "Reconcile saved change" })) // replay of the frozen request
+    expect(await screen.findByText("Sandra can't save these values. Start over to edit them.")).toBeInTheDocument()
     mocks.loadMyLeadRow.mockResolvedValue(found(2))
     await user.click(await screen.findByRole("button", { name: "Refresh" }))
-    await screen.findByText(/Lead refreshed/)
+    await user.click(await screen.findByRole("button", { name: "Start over" }))
     await user.click(screen.getByRole("button", { name: "Save attempt" }))
     await waitFor(() => expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(3))
     const versions = mocks.submitMyLeadCommand.mock.calls.map((call) => (call[1] as { expectedQueueVersion: number }).expectedQueueVersion)
@@ -109,22 +110,80 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
     expect(mocks.refresh).toHaveBeenCalled()
   })
 
-  it("IDEMPOTENCY_CONFLICT shows the already-saved copy; Refresh runs the committed refresh and the dialog moves on to the follow-up step, never looping", async () => {
+  it("IDEMPOTENCY_CONFLICT shows the already-saved copy; Refresh re-reads the lead and closes the dialog with no drip step and no second send", async () => {
     const user = userEvent.setup()
     mocks.submitMyLeadCommand.mockResolvedValue({ ok: false, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." })
-    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} />)
+    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} viewer={{ userId: "rep-9", orgId: "org-1" }} />)
     await user.click(screen.getByRole("button", { name: "Log follow-up" }))
     await fillAndSave(user)
     expect(await screen.findByText("This was already saved. Refresh to see it.")).toBeInTheDocument()
     mocks.refresh.mockClear()
     await user.click(await screen.findByRole("button", { name: "Refresh" }))
-    await screen.findByText("Saved earlier. Your update is recorded.")
-    await waitFor(() => expect(mocks.refresh).toHaveBeenCalled())
-    expect(screen.getByRole("dialog")).toBeInTheDocument()
-    // The next Save sends nothing and continues to the optional drip step.
-    await user.click(screen.getByRole("button", { name: "Save attempt" }))
-    expect(await screen.findByRole("button", { name: "Done without a drip" })).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    expect(mocks.refresh).toHaveBeenCalled()
+    expect(screen.queryByRole("button", { name: "Done without a drip" })).toBeNull()
     expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1)
+  })
+
+  describe("a frozen payload the server cannot accept (over-long recording link)", () => {
+    const longUrl = `https://example.com/${"a".repeat(4100)}`
+    const answeredInvalid = { ok: false, answered: true, certainty: "unknown", code: "INVALID_INPUT", message: "The update could not be saved. Check the fields and retry." }
+    // A tiny model of the SQL: a stored key + same request returns duplicate, a different request conflicts.
+    function model(opts: { originalCommits: boolean }) {
+      const stored = new Map<string, string>()
+      let commits = 0
+      const call = async (_command: string, input: Record<string, unknown>) => {
+        const key = String(input.idempotencyKey)
+        const hash = JSON.stringify({ ...input, idempotencyKey: undefined })
+        const long = typeof input.recordingUrl === "string" && input.recordingUrl.length > 4096
+        if (stored.has(key)) return stored.get(key) === hash ? { ok: true, duplicate: true, attemptRecorded: true } : { ok: false, answered: true, certainty: "unknown", code: "IDEMPOTENCY_CONFLICT", message: "This was already saved. Refresh to see it." }
+        if (long && !opts.originalCommits) return answeredInvalid
+        stored.set(key, hash); commits += 1
+        if (long) throw new Error("response lost")
+        return { ok: true, attemptRecorded: true }
+      }
+      return { call, commits: () => commits }
+    }
+    async function freeze(user: ReturnType<typeof userEvent.setup>, originalCommits: boolean) {
+      const server = model({ originalCommits })
+      // The first send is lost; with originalCommits the server did store it.
+      mocks.submitMyLeadCommand.mockImplementation(async (command: string, input: Record<string, unknown>) => {
+        if (mocks.submitMyLeadCommand.mock.calls.length === 1) { if (originalCommits) await server.call(command, input).catch(() => undefined); throw new Error("response lost") }
+        // From the replay on, an over-long link is answered INVALID_INPUT (nothing new commits).
+        if (typeof input.recordingUrl === "string" && input.recordingUrl.length > 4096) return answeredInvalid
+        return server.call(command, input)
+      })
+      render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} viewer={{ userId: "rep-9", orgId: "org-1" }} />)
+      await user.click(screen.getByRole("button", { name: "Log follow-up" }))
+      await user.selectOptions(await screen.findByLabelText("External outcome"), "reached")
+      fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-11T09:00" } })
+      fireEvent.change(screen.getByLabelText(/Recording link/), { target: { value: longUrl } })
+      await user.click(screen.getByRole("button", { name: "Save attempt" }))
+      await user.click(await screen.findByRole("button", { name: "Reconcile saved change" })) // frozen replay: answered INVALID_INPUT
+      return server
+    }
+    it("Start over keeps the SAME key; the corrected link then commits once", async () => {
+      const user = userEvent.setup()
+      const server = await freeze(user, false)
+      expect(await screen.findByText("Sandra can't save these values. Start over to edit them.")).toBeInTheDocument()
+      await user.click(screen.getByRole("button", { name: "Start over" }))
+      fireEvent.change(screen.getByLabelText(/Recording link/), { target: { value: "https://example.com/ok" } })
+      await user.click(screen.getByRole("button", { name: "Save attempt" }))
+      await waitFor(() => expect(server.commits()).toBe(1))
+      const keys = new Set(mocks.submitMyLeadCommand.mock.calls.map((call) => (call[1] as { idempotencyKey: string }).idempotencyKey))
+      expect(keys.size).toBe(1)
+    })
+    it("with the original already committed, the corrected save conflicts and Refresh closes the dialog; still 1 commit", async () => {
+      const user = userEvent.setup()
+      const server = await freeze(user, true)
+      await user.click(await screen.findByRole("button", { name: "Start over" }))
+      fireEvent.change(screen.getByLabelText(/Recording link/), { target: { value: "https://example.com/ok" } })
+      await user.click(screen.getByRole("button", { name: "Save attempt" }))
+      expect(await screen.findByText("This was already saved. Refresh to see it.")).toBeInTheDocument()
+      await user.click(await screen.findByRole("button", { name: "Refresh" }))
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+      expect(server.commits()).toBe(1)
+    })
   })
 
   it("commit then timeout: an unknown replay failure keeps reconciliation and the next replay succeeds once", async () => {
@@ -133,7 +192,7 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
       .mockImplementationOnce(() => new Promise(() => undefined))
       .mockResolvedValueOnce({ ok: false, certainty: "unknown", message: "The update could not be confirmed. Retry with the same form." })
       .mockResolvedValueOnce({ ok: true, duplicate: true, attemptRecorded: true })
-    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} />)
+    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} viewer={{ userId: "rep-9", orgId: "org-1" }} />)
     await user.click(screen.getByRole("button", { name: "Log follow-up" }))
     await user.selectOptions(await screen.findByLabelText("External outcome"), "reached")
     fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-11T09:00" } })
@@ -156,7 +215,7 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
     mocks.submitMyLeadCommand
       .mockResolvedValueOnce({ ok: false, certainty: "unknown", code: "FORBIDDEN", message: "This lead is unavailable or you no longer have access." })
       .mockResolvedValueOnce({ ok: true, duplicate: true, attemptRecorded: true })
-    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} />)
+    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} viewer={{ userId: "rep-9", orgId: "org-1" }} />)
     await user.click(screen.getByRole("button", { name: "Log follow-up" }))
     await fillAndSave(user)
     await user.click(await screen.findByRole("button", { name: "Refresh" }))
@@ -172,7 +231,7 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
     mocks.submitMyLeadCommand
       .mockResolvedValueOnce({ ok: false, answered: true, certainty: "unknown", message: "The update could not be saved. Check the fields and retry." })
       .mockResolvedValueOnce({ ok: true, attemptRecorded: true })
-    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} />)
+    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} viewer={{ userId: "rep-9", orgId: "org-1" }} />)
     await user.click(screen.getByRole("button", { name: "Log follow-up" }))
     await fillAndSave(user)
     expect(await screen.findByText("The update could not be saved. Check the fields and retry.")).toBeInTheDocument()
@@ -191,7 +250,7 @@ describe("LogFollowUpButton two-tab sequence (real dialog)", () => {
     mocks.submitMyLeadCommand
       .mockImplementationOnce(() => new Promise((resolve) => { lateAnswer = resolve }))
       .mockResolvedValueOnce({ ok: true, duplicate: true, attemptRecorded: true })
-    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} />)
+    render(<LogFollowUpButton propertyId="lead-1" propertyLabel="1 Main" assigneeId="rep-9" disabledReason={null} viewer={{ userId: "rep-9", orgId: "org-1" }} />)
     await user.click(screen.getByRole("button", { name: "Log follow-up" }))
     await user.selectOptions(await screen.findByLabelText("External outcome"), "reached")
     fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-11T09:00" } })
