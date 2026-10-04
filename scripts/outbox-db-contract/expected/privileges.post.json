@@ -4,7 +4,8 @@
     "supabase/migrations/20261004050100_inbox_read_companion.sql": "7a2c5f49fc8fcf58c7f37585c3c347869816912e47e504ec47f9cdac198d3dd7",
     "supabase/migrations/20261004050200_inbox_backend_operation_reply.sql": "2a4b49d43e67963805d547221d04c84c3f7823f430fd9c0cc9b3f22b36844aad",
     "supabase/migrations/20261004050250_inbox_reply_message_projection.sql": "2a097587ad59aa913a386ce59b513fcbac8452b0b770477bde16533cb2672112",
-    "supabase/migrations/20261004050260_inbox_drip_markers.sql": "bd1bc395cee49b1bd6daae3672267319bafba939ce71d66157e44bee26473382"
+    "supabase/migrations/20261004050260_inbox_drip_markers.sql": "bd1bc395cee49b1bd6daae3672267319bafba939ce71d66157e44bee26473382",
+    "supabase/migrations/20261004050300_inbox_optout_scope_retry.sql": "3b673ee865bebe38a31d97af0d08e0674cce38bf4a80e931b34afb660cda0434"
   },
   "functions": {
     "public.inbox_capture_inbound_head": {
