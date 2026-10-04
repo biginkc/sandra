@@ -35,6 +35,8 @@ export type CompDeps = {
   /** Inline claim deadline (ms). */
   inlineDeadlineMs?: number;
   providerTimeoutMs?: number;
+  /** Drain only: claimed rows for an org this returns false for are finished as `cancelled` (flag off). */
+  orgAllowed?: (orgId: string) => Promise<boolean>;
 };
 
 export const PROVIDER_TIMEOUT_MS = 20_000;
@@ -52,6 +54,7 @@ function resolveDeps(deps: CompDeps | undefined) {
   return {
     admin: deps?.admin ?? (createAdminClient() as CompsClient),
     provider: deps && "provider" in deps ? (deps.provider ?? null) : getCompProvider(),
+    orgAllowed: deps?.orgAllowed,
     flagEnabled: deps?.flagEnabled ?? ((orgId: string) => getMyLeadsFlag(orgId, "comp_queue")),
     schemaReady: deps?.schemaReady ?? (() => schemaReady("lead_comps")),
     inlineDeadlineMs: deps?.inlineDeadlineMs ?? INLINE_DEADLINE_MS,
@@ -144,9 +147,11 @@ export async function compLead(
     p_requested_by: opts?.requestedBy ?? null,
   });
   if (error || !data || typeof data !== "object") return { status: "error", code: "ENQUEUE_FAILED" };
-  const outcome = data as { status?: string; requestId?: string };
+  const outcome = data as { status?: string; requestId?: string; noMatch?: boolean };
   switch (outcome.status) {
     case "fresh": {
+      // A recent no_match inside the window: do not re-queue, and there is no row to show.
+      if (outcome.noMatch) return { status: "no_match" };
       const compId = await newestCompId(d.admin, orgId, propertyId);
       return compId ? { status: "ready", compId, cached: true } : { status: "error", code: "FRESH_ROW_MISSING" };
     }
@@ -161,6 +166,9 @@ export async function compLead(
         .maybeSingle();
       return { status: "pending", requestId: open?.id ?? "" };
     }
+    case "backoff":
+      // A recent error (bad key, rate limit) is inside its backoff window: nothing was queued.
+      return { status: "error", code: "BACKOFF" };
     case "disabled":
       return { status: "disabled" };
     case "capped":
@@ -181,7 +189,7 @@ export async function compLead(
   }
 }
 
-export type DrainOutcome = { requestId: string; status: "ok" | "no_match" | "error" | "capped"; compId?: string; code?: string };
+export type DrainOutcome = { requestId: string; status: "ok" | "no_match" | "error" | "capped" | "cancelled"; compId?: string; code?: string };
 
 /**
  * Claims up to `limit` queued requests (manual first; the SQL function marks over-cap requests
@@ -197,17 +205,33 @@ export async function drainCompQueue(
   const d = resolveDeps(deps);
   const outcomes: DrainOutcome[] = [];
   const provider = d.provider;
-  const { data: claimedRows, error: claimError } = await d.admin.rpc("fn_claim_comp_fetches", { p_limit: Math.max(1, Math.min(limit, 100)) });
+  // Inline ("Comp this lead") claims only its own row via p_request_id, so it can never claim (and
+  // strand in `running`) another org's queued row.
+  const claimArgs: { p_limit: number; p_request_id?: string } = { p_limit: Math.max(1, Math.min(limit, 100)) };
+  if (inline) claimArgs.p_request_id = inline.onlyRequestId;
+  const { data: claimedRows, error: claimError } = await d.admin.rpc("fn_claim_comp_fetches", claimArgs);
   if (claimError || !Array.isArray(claimedRows)) return { claimed: 0, ok: 0, failed: 0, outcomes };
-  const requests = (claimedRows as FetchRequest[]).filter((r) => !inline || r.id === inline.onlyRequestId);
-  // Rows claimed outside an inline target are returned to the queue by finishing them as error/INLINE_SKIP
-  // never happens: with inline we claim 1 and the open index guarantees it is ours or nothing.
+  const requests = claimedRows as FetchRequest[];
   let authReported = false;
   const started = Date.now();
   let ok = 0;
   let failed = 0;
 
+  const orgVerdicts = new Map<string, boolean>();
   for (const req of requests) {
+    if (d.orgAllowed) {
+      let allowed = orgVerdicts.get(req.org_id);
+      if (allowed === undefined) {
+        allowed = await d.orgAllowed(req.org_id).catch(() => false);
+        orgVerdicts.set(req.org_id, allowed);
+      }
+      if (!allowed) {
+        // Flag off for this org: release the reservation (billed 0) without calling the provider.
+        await finish(d.admin, req.id, "cancelled", 0, null, null);
+        outcomes.push({ requestId: req.id, status: "cancelled" });
+        continue;
+      }
+    }
     if (!provider) {
       await finish(d.admin, req.id, "error", 0, "NO_PROVIDER", null);
       outcomes.push({ requestId: req.id, status: "error", code: "NO_PROVIDER" });

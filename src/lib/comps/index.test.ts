@@ -119,6 +119,43 @@ describe("compLead", () => {
   });
 });
 
+describe("enqueue freshness + inline claim + org gate", () => {
+  it("backoff → error/BACKOFF; fresh+noMatch → no_match; neither claims or calls the provider", async () => {
+    const provider = countingProvider();
+    const backoff = fakeAdmin({ enqueue: { status: "backoff" } });
+    expect(await compLead(PROPERTY, { inline: true, deps: { admin: backoff, provider, ...on } })).toEqual({ status: "error", code: "BACKOFF" });
+    const noMatch = fakeAdmin({ enqueue: { status: "fresh", noMatch: true } });
+    expect(await compLead(PROPERTY, { inline: true, deps: { admin: noMatch, provider, ...on } })).toEqual({ status: "no_match" });
+    expect(provider.calls).toBe(0);
+    expect(backoff.rpcLog.some((c) => c.fn === "fn_claim_comp_fetches")).toBe(false);
+    expect(noMatch.rpcLog.some((c) => c.fn === "fn_claim_comp_fetches")).toBe(false);
+  });
+  it("inline claims only its own request id and never touches another org's claimed row", async () => {
+    const provider = countingProvider();
+    const admin = fakeAdmin({ enqueue: { status: "queued", requestId: "r1" }, claim: [{ id: "r1", org_id: ORG, property_id: PROPERTY, trigger: "manual", reserved_calls: 3 }] });
+    await compLead(PROPERTY, { inline: true, deps: { admin, provider, ...on } });
+    expect(admin.rpcLog.find((c) => c.fn === "fn_claim_comp_fetches")?.args).toEqual({ p_limit: 1, p_request_id: "r1" });
+    // Non-inline drains never pass a request id.
+    const cron = fakeAdmin({ claim: [] });
+    await drainCompQueue(3, { admin: cron, provider, ...on });
+    expect(cron.rpcLog.find((c) => c.fn === "fn_claim_comp_fetches")?.args).toEqual({ p_limit: 3 });
+  });
+  it("drain cancels rows for an org whose flag is off, with no provider call; allowed orgs still run", async () => {
+    const provider = countingProvider();
+    const OFF = "99999999-9999-4999-8999-999999999999";
+    const admin = fakeAdmin({ claim: [
+      { id: "rOff", org_id: OFF, property_id: PROPERTY, trigger: "top_ten", reserved_calls: 3 },
+      { id: "rOn", org_id: ORG, property_id: PROPERTY, trigger: "top_ten", reserved_calls: 3 },
+    ] });
+    const r = await drainCompQueue(3, { admin, provider, ...on, orgAllowed: async (o) => o === ORG });
+    expect(r.outcomes.find((o) => o.requestId === "rOff")?.status).toBe("cancelled");
+    expect(r.outcomes.find((o) => o.requestId === "rOn")?.status).toBe("ok");
+    expect(provider.calls).toBe(1);
+    const cancelled = admin.rpcLog.filter((c) => c.fn === "fn_finish_comp_fetch").find((c) => c.args.p_request_id === "rOff");
+    expect(cancelled?.args).toMatchObject({ p_status: "cancelled", p_billed_calls: 0 });
+  });
+});
+
 describe("drainCompQueue", () => {
   it("no provider configured → requests finish as error/NO_PROVIDER", async () => {
     const admin = fakeAdmin({ claim: [{ id: "r1", org_id: ORG, property_id: PROPERTY, trigger: "top_ten", reserved_calls: 3 }] });

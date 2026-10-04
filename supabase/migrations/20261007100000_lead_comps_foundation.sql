@@ -8,8 +8,9 @@
 --   public.comp_fetch_requests          queue + reservation ledger (one open row per property)
 --   public.lead_comps                   append-only comp history, latest row wins, `raw` is service-only
 --   public.lead_valuation_inputs        Jarrad's typed ARV and rehab (never from properties.arv)
---   public.fn_enqueue_comp_fetch        service_role; queued|in_flight|fresh|disabled|capped|unavailable
---   public.fn_claim_comp_fetches        service_role; manual first, Chicago-month cap under an advisory lock
+--   public.fn_enqueue_comp_fetch        service_role; queued|in_flight|fresh|backoff|disabled|capped|unavailable
+--   public.fn_claim_comp_fetches        service_role; manual first, Chicago-month cap under an advisory lock;
+--                                       optional p_request_id claims only that row (inline "Comp this lead")
 --   public.fn_finish_comp_fetch         service_role; trues up reserved_calls to billed
 --   public.fn_reap_stuck_comp_fetches   service_role; running > 5 min -> error/TIMEOUT
 --   public.fn_set_lead_valuation_inputs authenticated; my_leads_workflow_require_actor, upsert
@@ -21,7 +22,8 @@ create table public.org_comp_settings (
   provider text not null default 'attom' check (provider in ('attom', 'fixture')),
   auto_comp_enabled boolean not null default false,
   monthly_call_cap integer not null default 0 check (monthly_call_cap between 0 and 100000),
-  calls_per_comp integer not null default 3 check (calls_per_comp between 1 and 10),
+  -- Minimum 2: the ATTOM path can bill up to 2 calls per comp, so a reservation below 2 would under-count.
+  calls_per_comp integer not null default 3 check (calls_per_comp between 2 and 10),
   est_cents_per_call integer not null default 0 check (est_cents_per_call >= 0),
   ttl_days integer not null default 30 check (ttl_days between 1 and 365),
   manual_refresh_min_hours integer not null default 24 check (manual_refresh_min_hours between 0 and 720),
@@ -150,6 +152,8 @@ declare
   v_settings public.org_comp_settings%rowtype;
   v_latest timestamptz;
   v_freshness interval;
+  v_last record;
+  v_backoff interval;
   v_id uuid;
 begin
   if coalesce(auth.role(), '') <> 'service_role' then
@@ -192,6 +196,31 @@ begin
     return jsonb_build_object('status', 'fresh');
   end if;
 
+  -- A finished no_match inside the freshness window, or an error inside its backoff window, must not
+  -- re-queue: one unmatchable lead or a bad key would otherwise burn the monthly cap on every refresh.
+  select r.status, r.error_code, r.finished_at into v_last
+  from public.comp_fetch_requests r
+  where r.org_id = p_org_id and r.property_id = p_property_id
+    and r.status in ('no_match', 'error') and r.finished_at is not null
+  order by r.finished_at desc
+  limit 1;
+  if found then
+    if v_last.status = 'no_match' and v_last.finished_at > now() - v_freshness then
+      return jsonb_build_object('status', 'fresh', 'noMatch', true);
+    end if;
+    if v_last.status = 'error' then
+      -- Honour a RATE_LIMIT_RETRY_<seconds> hint; otherwise 6 hours.
+      v_backoff := case
+        when v_last.error_code ~ '^RATE_LIMIT_RETRY_[0-9]{1,6}$'
+          then make_interval(secs => greatest(substring(v_last.error_code from 18)::integer, 60))
+        else interval '6 hours'
+      end;
+      if v_last.finished_at > now() - v_backoff then
+        return jsonb_build_object('status', 'backoff');
+      end if;
+    end if;
+  end if;
+
   insert into public.comp_fetch_requests (org_id, property_id, trigger, requested_by)
   values (p_org_id, p_property_id, p_trigger, p_requested_by)
   on conflict (org_id, property_id) where status in ('queued', 'running') do nothing
@@ -208,7 +237,7 @@ grant execute on function public.fn_enqueue_comp_fetch(uuid, uuid, text, uuid) t
 -- ----------------------------------------------------------------------------
 -- fn_claim_comp_fetches (service_role)
 -- ----------------------------------------------------------------------------
-create or replace function public.fn_claim_comp_fetches(p_limit integer)
+create or replace function public.fn_claim_comp_fetches(p_limit integer, p_request_id uuid default null)
 returns setof public.comp_fetch_requests
 language plpgsql
 security definer
@@ -232,6 +261,7 @@ begin
   for v_req in
     select r.* from public.comp_fetch_requests r
     where r.status = 'queued'
+      and (p_request_id is null or r.id = p_request_id)
     order by (r.trigger = 'manual') desc, r.created_at asc
     for update skip locked
   loop
@@ -273,8 +303,8 @@ begin
   return;
 end;
 $$;
-revoke all on function public.fn_claim_comp_fetches(integer) from public, anon, authenticated, service_role;
-grant execute on function public.fn_claim_comp_fetches(integer) to service_role;
+revoke all on function public.fn_claim_comp_fetches(integer, uuid) from public, anon, authenticated, service_role;
+grant execute on function public.fn_claim_comp_fetches(integer, uuid) to service_role;
 
 -- ----------------------------------------------------------------------------
 -- fn_finish_comp_fetch (service_role)

@@ -7,7 +7,7 @@ begin;
 drop function if exists public.fn_set_lead_valuation_inputs(uuid, uuid, numeric, numeric);
 drop function if exists public.fn_reap_stuck_comp_fetches();
 drop function if exists public.fn_finish_comp_fetch(uuid, text, integer, text, uuid);
-drop function if exists public.fn_claim_comp_fetches(integer);
+drop function if exists public.fn_claim_comp_fetches(integer, uuid);
 drop function if exists public.fn_enqueue_comp_fetch(uuid, uuid, text, uuid);
 
 drop table if exists public.lead_valuation_inputs cascade;

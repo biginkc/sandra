@@ -150,6 +150,54 @@ describe('20261007100000_lead_comps_foundation', () => {
     });
   });
 
+  it('fn_enqueue_comp_fetch: no_match inside TTL and error inside backoff do not re-queue', async () => {
+    await withTx(async (db) => {
+      const s = await seed(db);
+      await settings(db, s.orgA, 30);
+      await asService(db);
+      const finished = (prop: string, status: string, code: string | null, ago: string) =>
+        db.query(`insert into public.comp_fetch_requests (org_id, property_id, trigger, status, error_code, started_at, finished_at)
+          values ($1, $2, 'manual', $3, $4, now() - interval '${ago}', now() - interval '${ago}')`, [s.orgA, prop, status, code]);
+      // no_match: fresh inside ttl_days (30), re-queues after.
+      await finished(s.propA, 'no_match', null, '2 days');
+      expect(await enqueue(db, s.orgA, s.propA, 'top_ten')).toEqual({ status: 'fresh', noMatch: true });
+      await db.query(`update public.comp_fetch_requests set finished_at = now() - interval '40 days' where property_id = $1`, [s.propA]);
+      expect((await enqueue(db, s.orgA, s.propA, 'top_ten')).status).toBe('queued');
+      // error: default 6h backoff
+      await finished(s.propA2, 'error', 'AUTH', '1 hour');
+      expect(await enqueue(db, s.orgA, s.propA2)).toEqual({ status: 'backoff' });
+      await db.query(`update public.comp_fetch_requests set finished_at = now() - interval '7 hours' where property_id = $1`, [s.propA2]);
+      expect((await enqueue(db, s.orgA, s.propA2)).status).toBe('queued');
+      // RATE_LIMIT_RETRY_n hint is honoured: 2 hours elapsed < 10000s (~2.8h) -> backoff; > -> queued
+      await db.query(`update public.comp_fetch_requests set status = 'cancelled' where property_id = $1 and status = 'queued'`, [s.propA2]);
+      await finished(s.propA2, 'error', 'RATE_LIMIT_RETRY_10000', '2 hours');
+      expect(await enqueue(db, s.orgA, s.propA2)).toEqual({ status: 'backoff' });
+      await db.query(`update public.comp_fetch_requests set finished_at = now() - interval '3 hours' where error_code = 'RATE_LIMIT_RETRY_10000'`);
+      expect((await enqueue(db, s.orgA, s.propA2)).status).toBe('queued');
+    });
+  });
+
+  it('fn_claim_comp_fetches(p_limit, p_request_id) claims only that row; calls_per_comp minimum is 2', async () => {
+    await withTx(async (db) => {
+      const s = await seed(db);
+      await settings(db, s.orgA, 30);
+      await settings(db, s.orgB, 30);
+      await asService(db);
+      const a = await enqueue(db, s.orgA, s.propA);
+      const b = await enqueue(db, s.orgB, s.propB);
+      const claimed = await db.query(`select id, org_id from public.fn_claim_comp_fetches(1, $1)`, [b.requestId]);
+      expect(claimed.rows.map((r) => r.id)).toEqual([b.requestId]);
+      expect((await db.query(`select status from public.comp_fetch_requests where id = $1`, [a.requestId])).rows[0].status).toBe('queued');
+      // calls_per_comp boundary: 1 rejected, 2 accepted.
+      await asNone(db);
+      await db.query('savepoint c');
+      const bad = await db.query(`update public.org_comp_settings set calls_per_comp = 1 where org_id = $1`, [s.orgA]).catch((e: PgError) => e);
+      expect((bad as PgError).code).toBe('23514');
+      await db.query('rollback to savepoint c');
+      await db.query(`update public.org_comp_settings set calls_per_comp = 2 where org_id = $1`, [s.orgA]);
+    });
+  });
+
   it('fn_set_lead_valuation_inputs: member upserts, non-member and negative rehab rejected', async () => {
     await withTx(async (db) => {
       const s = await seed(db);

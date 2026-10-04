@@ -26,7 +26,13 @@ export async function GET(request: Request) {
       return NextResponse.json({ ok: true, disabled: "flag_off" });
     }
     const reaped = await admin.rpc("fn_reap_stuck_comp_fetches" as never);
-    const result = await drainCompQueue(3, { admin });
+    // Per-row org gate: a row queued before an org's flag went off is cancelled, not fetched.
+    const orgAllowed = async (orgId: string) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const r = await (admin as any).from("my_leads_feature_flags").select("comp_queue").eq("org_id", orgId).maybeSingle();
+      return !r.error && r.data?.comp_queue === true;
+    };
+    const result = await drainCompQueue(3, { admin, orgAllowed });
     return NextResponse.json({ ok: true, reaped: reaped.data ?? 0, claimed: result.claimed, done: result.ok, failed: result.failed });
   } catch (error) {
     reportError(error, { tags: { surface: "cron_comp_queue_drain" } });
