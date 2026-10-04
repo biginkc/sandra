@@ -34,8 +34,11 @@ acceptance thresholds; title company and buyer entity lists; owned phone number 
 seller-reminder SMS text (job ships disabled until supplied); verbatim approval of the Dialpad
 AI-facts extraction prompt; the "appointments kept" KPI scope question (Phase 1, item 9).
 
-Credentials now in BMH Secrets: `op://BMH Secrets/ATTOM - API/credential` (Free Trial, 30 days from
-2026-10-04, account jarrad@bmhgroupkc.com); `Dialpad - API`, `DialPad Sandra API key` (scope
+Credentials now in BMH Secrets, read only via the `op` CLI with the BMH service account (never the
+SDK, desktop app or browser): `op://BMH Secrets/ATTOM - API/credential` — exact item title
+`ATTOM - API` (Free Trial, 30 days from 2026-10-04, account jarrad@bmhgroupkc.com). Runtime code on
+Vercel reads `ATTOM_API_KEY` from the Vercel environment, which is populated from that item by the
+operator with `op read`, never pasted; `Dialpad - API`, `DialPad Sandra API key` (scope
 unknown; Phase 0.1 probes both); `Dropbox Sign - Sandra eSign Test Mode`.
 
 ## PR stack and sequencing
@@ -49,7 +52,7 @@ pasted preview (Phase 1e, Phase 4 runbook).
 
 | Order | Branch | Scope | Depends on |
 |---|---|---|---|
-| 0 | `claude/my-leads-p0-spike` | Phase 0 scripts, findings note | #791 |
+| 0 | `claude/my-leads-p0-spike` | Phase 0 scripts, findings note — **owned by the Codex root orchestrator (sole writer, Sonnet 5.5 builder)**; Claude does not write here | #791 |
 | 1 | `claude/my-leads-p4-before-image` | Phase 4 before-image migration + KPI parity harness (must precede any Phase 1 data step) | #791 |
 | 2 | `claude/my-leads-p1e-housekeeping` | Phase 1e service functions + operator script | p4-before-image |
 | 3 | `claude/my-leads-p1a-core` | additive schema, `fn_create_next_step`, one read definition | p1e |
@@ -67,9 +70,26 @@ pasted preview (Phase 1e, Phase 4 runbook).
 | 15 | `claude/my-leads-p4-acceptance` | Playwright acceptance specs, runbook, monitoring | p3-send-card |
 
 Migration timestamp blocks (must sort after `20261003160000` and after each other): Phase 4
-before-image `20261004090000`; Phase 1 `20261005100000`–`20261005199999`; Phase 2
+before-image `20261004092000` (moved off `090000`, which collides with the Norma `090000` and Slack
+`091000` reservations; root re-checks against the actual release order at lease time); Phase 1 `20261005100000`–`20261005199999`; Phase 2
 `20261006100000`–`20261006199999`; Phase 3 `20261007100000`–`20261007199999`. Builders rename
 placeholder timestamps in the phase sections to these blocks.
+
+## Coordination and release control
+
+- **Root orchestrator (Codex master)** serializes every Sandra merge, migration and deployment and
+  grants an exact-SHA slot per candidate. Nobody merges or deploys without that slot; implementation
+  and reviews keep moving meanwhile. Jarrad made this work top priority above Inbox; Inbox does not
+  block independent My Leads work.
+- **Ownership.** Root owns `claude/my-leads-p0-spike` and appends Phase 0 findings there. The Claude
+  session "Optimize my leads page" owns `claude/my-leads-one-call-close-decisions` (decision record,
+  this plan, `STATUS.md`, PR comments) and the plan reviews. Later stack branches are claimed in
+  `STATUS.md` before anyone writes to them; one writer per branch.
+- **Review split.** Sonnet 5.5 builds; Opus 5.5 does every intermediate review; Fable 5.1 and Astra
+  (gpt-6-astra, medium) review only each phase's tested release candidate, once, before its slot.
+- **Real-data changes** happen only through the tested operator script with before-images; never in a
+  migration. No live Dialpad tests, seller contact, spending, account creation or unapproved business
+  text.
 
 ## Cross-phase contracts (resolved here; phase sections defer to this table)
 
@@ -82,13 +102,14 @@ placeholder timestamps in the phase sections to these blocks.
 | Ledger key predicate | Phase 2.1 replaces all 18 literal `dialpad-cti:` sites (12 live, 6 superseded) with the shared helpers and adds a regression test that fails if any literal survives; Phase 3 and 4 use the helpers. |
 | Several-match disposition | Native-match events with several candidate leads are `quarantined` with reason `ambiguous_lead` (not `received`, which the one-minute sweep would re-drive forever); "Assign to lead" resolves them. |
 | Intent timeout | "failed" is a marker on the intent, not a terminal status; a late event for a real call still projects. |
-| Data steps | Never inside a migration. Service-only functions + before-image tables (Phase 4 `20261004090000`), run by `scripts/my-leads-housekeeping.mjs` after a pasted preview; rollback twins under `supabase/rollbacks/`. |
+| Data steps | Never inside a migration. Service-only functions + before-image tables (Phase 4 `20261004092000`), run by `scripts/my-leads-housekeeping.mjs` after a pasted preview; rollback twins under `supabase/rollbacks/`. |
 | Reassigned leads and the first-call clock | The reassign function creates the new assignment episodes with `eligible=false`, so Jarrad's first-call clock and KPIs do not restart. |
 | Synthetic acceptance lead | Phase 4 uses a non-training synthetic lead (training leads get no attempt row). Dialpad intents/events are permanent, so the lead is soft-retired, never deleted. |
 | ATTOM in production | Fixture provider refused in production; real provider gated by the monthly cap (default 0). |
 | Dialpad activation | Phase 2.11 adds a webhook-only activation path and a `deactivate` mode; disabling the connection is lossy (401, nothing stored), so the preferred revert keeps the connection active and turns consumers off. |
 | Subscription states | Unchanged six states; transcript/Recap are fetched by the hangup-triggered job; adding `call_transcription`/`recap_*` states is decided by Phase 0.2 evidence. |
 | Seller reminder text | No LLM writes it; the job refuses to send until Jarrad supplies the text verbatim. |
+| Secret access | `op` CLI with the BMH service account only. Existing tooling that uses the 1Password SDK (`loadOnePasswordSdk` in `src/lib/dialpad-cti/provisioning-adapters.ts`, used by `scripts/provision-dialpad-cti.ts`) gets an `op`-CLI runner behind the same `SecretStorePort` before any phase script or the Phase 2.11 activation reuses it; no new code calls the SDK. |
 
 ---
 
@@ -105,11 +126,11 @@ placeholder timestamps in the phase sections to these blocks.
   - Dialpad: items `Dialpad - API` (field `credential`; `DEFAULT_API_KEY_ITEM`, `src/lib/dialpad-cti/provisioning.ts:27`, `CREDENTIAL_FIELD` `:29`) and `DialPad Sandra API key` (secure note, field name unknown; read the note body). Both probed; Jarrad does not need to pick first (0.1 reports which one is live).
   - Supabase Management API PAT: item `Supabase - Management API PAT` (`MANAGEMENT_PAT_ITEM`, `src/lib/dialpad-cti/provisioning-adapters.ts:35`), used for read-only SQL as the provisioning scripts do.
   - Dropbox Sign test mode: item `Dropbox Sign - Sandra eSign Test Mode` (API key, client id).
-  - 1Password is reached only through the SDK with the Keychain service token (`readKeychainSecret`, `provisioning-adapters.ts:71`; `loadOnePasswordSdk` `:78`). Never the `op` binary, never argv.
+  - 1Password is reached only through the `op` CLI authenticated as the BMH service account: `OP_SERVICE_ACCOUNT_TOKEN` read from Keychain (`security find-generic-password -w -s OP_SERVICE_ACCOUNT_TOKEN`) into the child process env, then `op read 'op://BMH Secrets/<item>/<field>'` spawned with `execFile` (no shell). The secret arrives on stdout and is never placed in argv, logs or files. **Not** the 1Password SDK (`loadOnePasswordSdk`), the desktop app, or a browser extension; Jarrad's standing credential rule is op CLI + service account only.
 - Run-time facts: org id and connection id (read from `dialpad_org_connections` by 0.1's SQL; `--org-id` is the only typed id), Jarrad's member id for 0.3 (`--member-id`).
 - Needs Jarrad present (0.2 only): desktop Dialpad app logged in, mobile app logged in, one owned phone as the seller stand-in (call it B) not on his Dialpad line, a 60 to 90 minute window outside rep calling hours.
 - Defaults assumed if absent:
-  - No ATTOM key: 0.3 ships and runs against synthetic fixtures only; the live trial and the D6 verdict are deferred ([JARRAD] provides key, spend ceiling, thresholds).
+  - ATTOM key exists (`ATTOM - API`, free 30-day trial). 0.3 may call ATTOM only within the free trial's included allowance: **no paid calls**, and any response or quota signal that a call would bill stops the run. The monthly production cap stays `0`. Fixture mode remains the default for tests and CI. Thresholds stay unapproved until Jarrad sets them.
   - No approved thresholds: `attom-thresholds.json` ships with `"approvedAt": null`; the report prints `UNAPPROVED DEFAULTS` and refuses a GO verdict.
   - No template ids: 0.4 audits every `esign_templates` row with `lifecycle_state='finalized'` and `deleted_at is null` that the test key can see, and records the ones it cannot.
   - The user-scoped Dialpad subscription targets Jarrad's Dialpad user id. 0.1 verifies this; if it targets another user, 0.2 stops and reports (see Risks).
@@ -141,7 +162,7 @@ placeholder timestamps in the phase sections to these blocks.
     export async function readSecret(src: SecretSource, deps?: { env?: NodeJS.ProcessEnv; store?: SecretStorePort }): Promise<SecretResult>;
     export async function listFieldTitles(item: string): Promise<string[]>; // titles only, never values
     ```
-    Order: env `PHASE0_<LABEL>` (for CI or when the vault is unreachable) → `createOnePasswordSecretStore().read(item, field ?? 'credential')` (`provisioning-adapters.ts:89`, `read` `:110`) → for secure notes, SDK `client.items.get(...).notes` via `loadOnePasswordSdk` (`:78`) with `READ_TOKEN_SERVICE` (`:33`) and vault `BMH Secrets` (`:32`); accept a note body only if it is a single token of at least 16 characters with no whitespace. Every secret read is `guard.add(value)` into one shared `SecretGuard` (`provisioning.ts:261`, `scrub`) and every file or stdout write goes through `guard.scrub`.
+    Order: env `PHASE0_<LABEL>` (for CI or when the vault is unreachable) → `op read 'op://BMH Secrets/<item>/<field ?? credential>'` via the service-account runner above → for secure notes, `op item get '<item>' --vault 'BMH Secrets' --fields notesPlain --reveal` through the same runner; accept a note body only if it is a single token of at least 16 characters with no whitespace. Every secret read is `guard.add(value)` into one shared `SecretGuard` (`provisioning.ts:261`, `scrub`) and every file or stdout write goes through `guard.scrub`.
   - `lib/mgmt-sql.ts`:
     ```ts
     export function createReadOnlyRunner(projectRef: string, pat: () => Promise<string>): QueryRunner; // wraps createManagementQueryRunner (provisioning-adapters.ts:237)
@@ -160,7 +181,7 @@ placeholder timestamps in the phase sections to these blocks.
     Per-route minimum spacing (from the pre-read limits): `GET /api/v2/call/{id}` 7000 ms (10/min), `POST /api/v2/call` and `POST /api/v2/users/{id}/initiate_call` 13000 ms (5/min per user), transcripts 100 ms, everything else 500 ms. On 429, honour `Retry-After` once, record it, and stop that probe; never loop. int64 ids are quoted before `JSON.parse` using the same regex idea as `parseProviderJson` (`provisioning.ts:121-130`); duplicate that 6-line function locally (do not export from `provisioning.ts`, which is product code) and test with `9007199254740993`.
   - `lib/csv.ts`: `toCsv(rows: Record<string, string|number|null>[], columns: readonly string[]): string` with RFC 4180 quoting and formula-injection guard (prefix `'` when a cell starts with `= + - @`).
   - `lib/findings-doc.ts`: `appendFindingsSection(docPath: string, marker: '0.1'|'0.2'|'0.3'|'0.4'|'0.5', markdown: string): { appended: boolean }`. Creates `## Phase 0 findings` once; each item is `### 0.k ...` preceded by `<!-- phase0:0.k -->`; refuses (returns `appended:false`, exit code 3) if the marker already exists, so reruns never duplicate or overwrite.
-- Side effects checked: none in product code. `vitest.config.ts` change adds these tests to the husky fast path and `npm test`, so tests must be hermetic (mocked fetch, no network, no Keychain; stub `readKeychain`/`loadSdk` through the existing `SecretStoreDeps`, `provisioning-adapters.ts:84-87`).
+- Side effects checked: none in product code. `vitest.config.ts` change adds these tests to the husky fast path and `npm test`, so tests must be hermetic (mocked fetch, no network, no Keychain, no `op`; inject a fake `runOp(args) => Promise<string>` runner so tests never spawn the binary).
 - Tests (`lib/*.test.ts`):
   - `assertReadOnlySql` rejects `update x`, `select 1; delete from y`, comment-hidden writes (`select 1 /* */; drop table x`), accepts CTE selects.
   - `buildStatusFlipSql` rejects non-UUIDs and any `to` other than `active|disabled`; the output contains `and status = 'disabled'` for `active` and `and status = 'active'` for `disabled`.
@@ -353,7 +374,7 @@ placeholder timestamps in the phase sections to these blocks.
 
   | Key | Meaning | Proposed default [JARRAD] |
   |---|---|---|
-  | `maxTrialSpendUsd` | spend ceiling for the whole trial | the lower of $50 and the trial's included credits |
+  | `maxTrialSpendUsd` | spend ceiling for the whole trial | `0` — free-trial allowance only, no paid calls (Jarrad, via root, 2026-10-04) |
   | `matchCoveragePct` | leads where A1 resolves a property (overall, and each of MO and KS) | 90 overall, 85 per state |
   | `avmPresentPct` | leads with an AVM value | 85 |
   | `avmUsableConfidencePct` | share of AVMs with `scr` at or above `avmMinScr` | 60 at `avmMinScr` 70 |
@@ -1866,7 +1887,7 @@ Conflict watch with Phase 1 (rebase carefully): `client.tsx`, `page.tsx`, `dialp
 - Code change (rollback tooling, in the PR). The existing script has `prepare` and `activate` only (`provisioning.ts:849-905`); there is no way back except hand-edited SQL, and the original failure was a connection disabled while Dialpad kept delivering (401 storm, `event-processing.ts:163`). Add `mode: 'deactivate'`: plan steps `deactivate:subscription:<user>` (PATCH `enabled:false`, preserving target and states exactly as `applyActivate` does at `provisioning.ts:887`) executed **before** `deactivate:connection` (new `ConnectionDbPort.deactivateConnection(id, expected)` doing `update … set status='disabled' where id=… and status='active' and <same identity predicate as activateConnection>`), `--confirm-live-readiness <connection id>` required. Same digest, dry-run, refusal and post-check structure as activate.
 - Recording endpoint blocker: if the production check in Inputs shows `recording_ingest_endpoint` is already a canonical value, leave `provisioning.ts:650` as is (zero risk). Only if it is null, drop that blocker (`provisioning.ts:650`, and the `recordingEndpointColumn` schema blocker at `:648`) and its tests (`provisioning.test.ts:681-688`, and the endpoint recheck test at `:689`), because the browser capture endpoint no longer has a consumer.
 - If Phase 0 shows the directory key lacks dial scope and Jarrad supplies a separate key, add an optional `--dial-key-item` input that adds one `vercel:DIALPAD_CTI_DIAL_KEY_<suffix>` create step through the existing `addSensitiveProductionEnv` port and sets `dial_api_key_ref`; otherwise no change.
-- Runbook (operational; do not run until the PR is merged, migrations are applied through the established prod migration workflow, and the Vercel production deploy is READY). All commands run in the Phase 2 worktree; 1Password is reached only through the script's SDK path; no secret is printed.
+- Runbook (operational; do not run until the PR is merged, migrations are applied through the established prod migration workflow, and the Vercel production deploy is READY). All commands run in the Phase 2 worktree; 1Password is reached only through the `op` CLI with the BMH service account (never the SDK); no secret is printed.
   1. Read-only preconditions (Inputs queries): connection row, binding row, episode eligibility. If the binding is not `verified` while the connection is `disabled`, note it: first-time binding needs an active connection (`fn_claim_dialpad_member_binding`), so it happens at step 6, right after activation.
   2. Dry run, prepare mode (expect every step `[reuse]`; a missing subscription shows `[create]`):
      `npx tsx scripts/provision-dialpad-cti.ts --org-id 00000000-0000-0000-0000-000000000bbb --company-id <connection.dialpad_company_id> --canary-user-id <binding.dialpad_user_id>`
@@ -2494,8 +2515,8 @@ New:
 - `scripts/my-leads-close/lease-manifest.mjs`
 - `scripts/my-leads-close/monitor.mjs`, `monitor.sql`
 - `scripts/my-leads-close/rollback/{reassign-leads,reassign-tasks,relabel-next-steps,close-stale-attempts,retire-synthetic-lead}.sql`
-- `supabase/migrations/20261004090000_my_leads_release_before_image.sql`
-- `supabase/migrations/20261004090000_my_leads_release_before_image.integration.test.ts`
+- `supabase/migrations/20261004092000_my_leads_release_before_image.sql`
+- `supabase/migrations/20261004092000_my_leads_release_before_image.integration.test.ts`
 
 Modified:
 - `playwright.config.ts` (webServerEnv `:93`, add stub `webServer` entry beside `:183-191`)
@@ -2530,10 +2551,10 @@ No file under `src/` changes in this phase.
 #### 4.0 Delivery slices (decide first)
 - Files: none; this item fixes where each artifact ships.
 - Change:
-  - **4a (base `main`, merges before any Phase 1 data operation reaches production):** `20261004090000_my_leads_release_before_image.sql` + its test, `scripts/my-leads-close/{kpi-snapshot,kpi-compare,kpi-rules,lease-manifest}.mjs`, `scripts/my-leads-close/rollback/*.sql`, `scripts/rehearse-next-step-relabel-kpi.mjs`, `package.json` scripts, vitest/e2e.yml registration for the integration test. Reason: before-image capture and a KPI baseline must exist before the first mutation (F7: the pipeline auto-applies on merge).
+  - **4a (base `main`, merges before any Phase 1 data operation reaches production):** `20261004092000_my_leads_release_before_image.sql` + its test, `scripts/my-leads-close/{kpi-snapshot,kpi-compare,kpi-rules,lease-manifest}.mjs`, `scripts/my-leads-close/rollback/*.sql`, `scripts/rehearse-next-step-relabel-kpi.mjs`, `package.json` scripts, vitest/e2e.yml registration for the integration test. Reason: before-image capture and a KPI baseline must exist before the first mutation (F7: the pipeline auto-applies on merge).
   - **4c (base `main`):** `monitor.mjs`, `monitor.sql`. Queries guarded by `@requires` so they run before Phase 2/3 tables exist.
   - **Main PR (stacked on Phase 3):** `docs/my-leads/RELEASE-RUNBOOK.md`, both Playwright specs, fixture and stub server, config/workflow edits for the CI lane.
-- Side effects checked: timestamps. The 4a migration `20261004090000` must sort after `20261003160000` (latest on `origin/main`, `supabase/migrations/20261003160000_slack_workspace_preview_policy.sql`) and before every Phase 1 migration. Reconcile with the Phase 1 plan at lease time with `node scripts/check-migration-safety-cli.mjs --target=sandra-production` (needs PG env; the dry check also runs in CI on main).
+- Side effects checked: timestamps. The 4a migration `20261004092000` must sort after `20261003160000` (latest on `origin/main`, `supabase/migrations/20261003160000_slack_workspace_preview_policy.sql`) and before every Phase 1 migration. Reconcile with the Phase 1 plan at lease time with `node scripts/check-migration-safety-cli.mjs --target=sandra-production` (needs PG env; the dry check also runs in CI on main).
 - Tests: n/a. Rollback: n/a.
 
 #### 4.1 Test-seam contract required from Phases 1-3
@@ -2705,7 +2726,7 @@ rollback;
 - Rollback: delete scripts; revert the e2e.yml step.
 
 #### 4.7 Before-image kit and rollback SQL
-- Files: create `supabase/migrations/20261004090000_my_leads_release_before_image.sql`, its `.integration.test.ts`, `scripts/my-leads-close/rollback/*.sql`; modify `vitest.local-integration.config.ts` (add the test to `include`, same as `:21` entry), `vitest.integration.config.ts` (add to `exclude`, same as `:30-52` entries), `.github/workflows/e2e.yml` (new step in `search-local-suites` beside `:201-208`, command `npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261004090000_my_leads_release_before_image.integration.test.ts`).
+- Files: create `supabase/migrations/20261004092000_my_leads_release_before_image.sql`, its `.integration.test.ts`, `scripts/my-leads-close/rollback/*.sql`; modify `vitest.local-integration.config.ts` (add the test to `include`, same as `:21` entry), `vitest.integration.config.ts` (add to `exclude`, same as `:30-52` entries), `.github/workflows/e2e.yml` (new step in `search-local-suites` beside `:201-208`, command `npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261004092000_my_leads_release_before_image.integration.test.ts`).
 - Change (DDL):
 ```sql
 begin;
@@ -2834,7 +2855,7 @@ update public.properties set deleted_at = now(), assigned_user_id = null where i
 ```
     Run with `-v commit=no` first; deleting `acquisition_attempts` can be refused by FKs from `rep_sms_obligations`/`call_activities`; then leave the rows and note the exact KPI delta in the receipt instead of forcing.
 - Side effects checked: `acquisition_attempts` DELETE has no guard trigger (grep of `20260912*` and later migrations for triggers on it found only the insert/update `rep_sms_no_answer_attempt`, F6); the cleanup remains destructive, hence dry-run default. `task_calendar_mutations` cascades from tasks (`20260814150000_appointments_schema.sql:569-573`), but a still-pending Google mutation must be allowed to finish first, hence the pre-check.
-- Tests: `20261004090000_my_leads_release_before_image.integration.test.ts` (local-only config): (1) capture is idempotent per `(op_id, table, pk)`; (2) `anon`, `authenticated`, `service_role` cannot select/insert the table or execute the function; (3) `UNSUPPORTED_TABLE` for another table; (4) capture + `reassign-leads.sql` logic on a seeded lead restores assignee and refuses a lead with a newer note; (5) `rollback/close-stale-attempts.sql` round-trips outcome null → `not_logged` → null.
+- Tests: `20261004092000_my_leads_release_before_image.integration.test.ts` (local-only config): (1) capture is idempotent per `(op_id, table, pk)`; (2) `anon`, `authenticated`, `service_role` cannot select/insert the table or execute the function; (3) `UNSUPPORTED_TABLE` for another table; (4) capture + `reassign-leads.sql` logic on a seeded lead restores assignee and refuses a lead with a newer note; (5) `rollback/close-stale-attempts.sql` round-trips outcome null → `not_logged` → null.
 - Rollback: the table is additive; dropping it is allowed only after the 7-day bake and receipt archive.
 
 #### 4.8 Release runbook document
@@ -2924,7 +2945,7 @@ Uses Phase 0's own scripts (`scripts/my-leads-phase0/`, see `phase0.md`); Phase 
 6. Exit receipt: findings under `docs/my-leads/phase0/findings/` and the section appended to the decision doc (Phase 0 deliverable).
 
 ### Release 1: Phase 1 (sub-releases in order)
-**R1.0 Kit.** Merge slice 4a (lease; schema-only migration `20261004090000`, no behaviour). Verify the table exists and is closed: `select has_table_privilege('service_role','public.my_leads_release_before_image','select');` is `false`.
+**R1.0 Kit.** Merge slice 4a (lease; schema-only migration `20261004092000`, no behaviour). Verify the table exists and is closed: `select has_table_privilege('service_role','public.my_leads_release_before_image','select');` is `false`.
 
 **R1.1 Baseline capture (read-only, same day as R1.3, T-1 h).**
 - `npm run my-leads-close:kpi-snapshot -- --out /private/tmp/kpi-before.json` (members: Jarrad, Maria, Mel; windows per 4.6). Keep the file off-repo; record sha256 and row counts in the lease. It contains no seller PII, but treat as internal.
@@ -3138,7 +3159,7 @@ Thresholds and responses summarised: stuck inbox, unexplained quarantine, legacy
 ---
 
 ### Acceptance (what the builder runs before opening each Phase 4 PR)
-- Slice 4a: `npm run typecheck`; `npm test -- scripts/my-leads-close`; `node --test scripts/my-leads-close/lease-manifest.test.mjs`; `npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261004090000_my_leads_release_before_image.integration.test.ts` against a disposable local stack (`supabase start` in a throwaway workdir); `LC_ALL=C node scripts/rehearse-next-step-relabel-kpi.mjs` prints `SKIP: pre-Phase 1` before Phase 1 exists and passes after. `node scripts/check-migration-safety-cli.mjs` is run by CI on main; locally confirm the new version sorts after `20261003160000`.
+- Slice 4a: `npm run typecheck`; `npm test -- scripts/my-leads-close`; `node --test scripts/my-leads-close/lease-manifest.test.mjs`; `npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261004092000_my_leads_release_before_image.integration.test.ts` against a disposable local stack (`supabase start` in a throwaway workdir); `LC_ALL=C node scripts/rehearse-next-step-relabel-kpi.mjs` prints `SKIP: pre-Phase 1` before Phase 1 exists and passes after. `node scripts/check-migration-safety-cli.mjs` is run by CI on main; locally confirm the new version sorts after `20261003160000`.
 - Slice 4c: `node --test scripts/my-leads-close/monitor.test.mjs`; `npm run my-leads-close:monitor -- --since 48h` against production in read-only mode prints SKIPPED for not-yet-deployed blocks and exits 0 on the current state (Phase 0 baseline: `inbox_stuck` zero rows, `esign_states` counts).
 - Main PR: `npm run typecheck && npm test && npm run test:rtl`; `npm run test:e2e -- e2e/my-leads-close.spec.ts` green on a disposable stack, three consecutive runs (it is `serial` and non-idempotent, so re-run to prove the reset); the full `Playwright golden paths` job green with the new step and the grep-invert token; `Search RPC… (disposable DB)` green including the two new steps; `Typecheck and unit/RTL tests` and `Hugo lifecycle migrations on PostgreSQL 17` unaffected.
 - Preview/canary check: `RUN_PROD_CANARIES=1 MY_LEADS_CLOSE_LANE=preview npx playwright test --config playwright.canary.config.ts e2e/prod-canary/my-leads-close-attended.spec.ts` on the Vercel preview of the Phase 3 PR, with the receipt of every step; the production lane runs only after Phase 3 is released and Jarrad is present.
