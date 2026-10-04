@@ -41,7 +41,7 @@
     ".env.example": "b16a6aa02db6c7571542081a3001c3bffc1b04159ccb80fe2f0c96819bfae5fe",
     ".github/workflows/norma-stress.yml": "8f76bbc3f0532f8e0cc399bbccab776059b2526db9bea007925eb74b53ded86f",
     "scripts/ci/norma-combined-support.mjs": "b522c09da1e742a7844ce2797a93bc27ff74e7600f40550c9e4f7d7f0f50e36d",
-    "scripts/ci/run-norma-combined-contract.mjs": "967109f2ca12c0a2685b702cb171bd9d800bb9a5b3ca4ece77d82e10598f7401",
+    "scripts/ci/run-norma-combined-contract.mjs": "b01d4a55c017ed11e6f590b731bff96baa93eda26c6f30e8bed5c4fd52f05b52",
     "src/app/api/cron/norma-reconciliation/route.test.ts": "82f61a308a1e46f2d3f2aab010cd79446026b534bb5f8fccb823e659e5d48222",
     "src/app/api/cron/norma-reconciliation/route.ts": "f89fa09faceeb8eef88894344d7bea70d336d4a1ceb4462d298ed81016f7183e",
     "src/lib/norma/bland.ts": "07ee5273cff6ebd0f8975e6d410c95e53ddf155b54a67368e121cbb823e5a3f9",

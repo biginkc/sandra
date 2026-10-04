@@ -50,7 +50,9 @@ export async function main(args=process.argv.slice(2),env=process.env) {
     symlinkSync(path.join(ROOT,'node_modules'),path.join(legacyRoot,'node_modules'),'dir');
     const {main:runLegacy}=await import(pathToFileURL(path.join(legacyRoot,'scripts/ci/run-norma-schema-contract.mjs')).href);
     console.log('Combined gate: immutable matched legacy/schema hazards/upgrade starting');
-    const legacy=await runLegacy(['--output-directory',path.join(out,'legacy-schema')],{...subprocessEnvironment(env),NORMA_STRESS_SOURCE_DB_URL:source});
+    const legacyEnv={...subprocessEnvironment(env),NORMA_STRESS_SOURCE_DB_URL:source};
+    delete legacyEnv.GIT_CONFIG_NOSYSTEM;delete legacyEnv.GIT_CONFIG_GLOBAL; // Entry inputs are distinct from sanitized subprocess environments.
+    const legacy=await runLegacy(['--output-directory',path.join(out,'legacy-schema')],legacyEnv);
     assert.equal(legacy.sourceCommit,COMBINED.legacy_schema_commit);assert.equal(legacy.success,true);assert.deepEqual(legacy.cleanup,{removed:[],remaining:[]});
     receipt.legacyReceipt={sourceCommit:legacy.sourceCommit,node:legacy.node,runId:legacy.runId,sourceDumpSha256:legacy.sourceDumpSha256,lanes:legacy.lanes,cleanup:legacy.cleanup};
     const dump=readFileSync(path.join(out,'legacy-schema/source.sql'));assert.equal(sha256(dump),legacy.sourceDumpSha256);receipt.sourceDumpSha256=legacy.sourceDumpSha256;
