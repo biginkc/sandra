@@ -486,17 +486,19 @@ describe("internal.jitter.call-activities writeback PUT", () => {
 
     const { data: task } = await testClient
       .from("tasks")
-      .select("type, status, due_at, assignee_id, related_property_id")
+      .select("type, mode, status, due_at, end_at, assignee_id, related_property_id")
       .eq("id", json.callback_task.id)
       .single();
     expect(task).toBeTruthy();
     expect(task).toMatchObject({
-      type: "callback",
+      type: "appointment",
+      mode: "phone",
       status: "open",
       assignee_id: operator.userId,
       related_property_id: seeded.propertyId,
     });
     expect(new Date(task!.due_at).toISOString()).toBe(callbackAt);
+    expect(new Date(task!.end_at!).getTime() - new Date(task!.due_at).getTime()).toBe(15 * 60_000);
   });
 
   it("requires callback_at when callback_requested is written back", async () => {
