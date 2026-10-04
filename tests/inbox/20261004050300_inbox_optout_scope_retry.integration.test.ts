@@ -20,8 +20,13 @@ type Fixture = {
   enrollment: string;
   siblingEnrollment: string;
   conversation: string;
+  siblingConversation: string;
   operation: string;
+  item: string;
   step: string;
+  siblingItem: string;
+  siblingStep: string;
+  successorStep: string;
 };
 
 const uuid = () => randomUUID();
@@ -38,13 +43,15 @@ async function one<T extends QueryResultRow>(sql: string, params: unknown[] = []
 async function seedFixture(value: "opted_out" | "not_interested" = "opted_out"): Promise<Fixture> {
   const f = {
     org: uuid(), actor: uuid(), contact: uuid(), property: uuid(), sibling: uuid(), sequence: uuid(),
-    enrollment: uuid(), siblingEnrollment: uuid(), conversation: uuid(), operation: uuid(), step: uuid(),
+    enrollment: uuid(), siblingEnrollment: uuid(), conversation: uuid(), siblingConversation: uuid(), operation: uuid(),
+    item: uuid(), step: uuid(), siblingItem: uuid(), siblingStep: uuid(), successorStep: uuid(),
   } satisfies Fixture;
   const preparation = uuid();
-  const item = uuid();
   const idempotency = uuid();
   const message = uuid();
+  const siblingMessage = uuid();
   const review = uuid();
+  const siblingReview = uuid();
   const definition = { version: 1, steps: [{ type: "outcome", value }] };
   const canonicalInput = {
     purpose: "prepare_action",
@@ -59,8 +66,14 @@ async function seedFixture(value: "opted_out" | "not_interested" = "opted_out"):
   await db.query("insert into public.memberships(org_id,user_id,role,access_status) values($1,$2,'owner','active')", [f.org, f.actor]);
   await db.query("insert into public.contacts(id,org_id,first_name,phone_1,phone_1_type) values($1,$2,'Retry',$3,'mobile')", [f.contact, f.org, `+1816555${f.contact.slice(-4)}`]);
   await db.query("insert into public.properties(id,org_id,address,state,homeowner_contact_id) values($1,$2,'Retry Way','MO',$4),($3,$2,'Sibling Way','MO',$4)", [f.property, f.org, f.sibling, f.contact]);
-  await db.query("insert into public.messages(id,org_id,conversation_id,contact_id,property_id,channel,direction,status,body) values($1,$2,$3,$4,$5,'sms','inbound','received','retry fixture')", [message, f.org, f.conversation, f.contact, f.property]);
-  await db.query("insert into public.ai_disposition_reviews(id,org_id,property_id,conversation_id,source_inbound_message_id,disposition,ai_reason) values($1,$2,$3,$4,$5,'not_interested','retry fixture')", [review, f.org, f.property, f.conversation, message]);
+  await db.query(
+    "insert into public.messages(id,org_id,conversation_id,contact_id,property_id,channel,direction,status,body) values($1,$2,$3,$4,$5,'sms','inbound','received','retry fixture'),($6,$2,$7,$4,$8,'sms','inbound','received','retry sibling fixture')",
+    [message, f.org, f.conversation, f.contact, f.property, siblingMessage, f.siblingConversation, f.sibling],
+  );
+  await db.query(
+    "insert into public.ai_disposition_reviews(id,org_id,property_id,conversation_id,source_inbound_message_id,disposition,ai_reason) values($1,$2,$3,$4,$5,'not_interested','retry fixture'),($6,$2,$7,$8,$9,'not_interested','retry sibling fixture')",
+    [review, f.org, f.property, f.conversation, message, siblingReview, f.sibling, f.siblingConversation, siblingMessage],
+  );
   await db.query("insert into public.sequences(id,org_id,name) values($1,$2,'Retry sequence')", [f.sequence, f.org]);
   await db.query("insert into public.sequence_enrollments(id,org_id,sequence_id,property_id,status,next_run_at) values($1,$2,$3,$4,'active',clock_timestamp())", [f.enrollment, f.org, f.sequence, f.property]);
   await db.query("insert into public.consent_events(org_id,contact_id,channel,event_type,source) values($1,$2,'sms','opt_in_informational','retry fixture')", [f.org, f.contact]);
@@ -108,7 +121,7 @@ async function seedFixture(value: "opted_out" | "not_interested" = "opted_out"):
   await db.query(
     `insert into inbox_operations.items(org_id,operation_id,id,target_kind,target_id,resolution)
      values($1::uuid,$2::uuid,$3::uuid,'conversation',$4::uuid,jsonb_build_object('property_id',$5::uuid))`,
-    [f.org, f.operation, item, f.conversation, f.property],
+    [f.org, f.operation, f.item, f.conversation, f.property],
   );
   await db.query(
     `insert into inbox_operations.steps(org_id,operation_id,id,effect_key,ordinal,action,payload,dependencies)
@@ -118,34 +131,16 @@ async function seedFixture(value: "opted_out" | "not_interested" = "opted_out"):
   );
   await db.query(
     "insert into inbox_operations.item_steps(org_id,operation_id,item_id,step_id) values($1::uuid,$2::uuid,$3::uuid,$4::uuid)",
-    [f.org, f.operation, item, f.step],
+    [f.org, f.operation, f.item, f.step],
   );
   return f;
 }
 
-async function runStep(f: Fixture) {
+async function runStep(f: Fixture, step = f.step) {
   return (await one<{ run_step: Record<string, unknown> }>(
     "select inbox_action_api.run_step($1,$2,$3) run_step",
-    [f.org, f.operation, f.step],
+    [f.org, f.operation, step],
   )).run_step;
-}
-
-async function captureApplyError(f: Fixture) {
-  const generation = (await one<{ generation: string }>(
-    "select inbox_operations.claim_step($1::uuid,$2::uuid,$3::uuid,60)::text generation",
-    [f.org, f.operation, f.step],
-  )).generation;
-  try {
-    return (await one<{ message: string }>(
-      "select pg_temp.capture_inbox_apply_error($1::uuid,$2::uuid,$3::uuid,$4::bigint) message",
-      [f.org, f.operation, f.step, generation],
-    )).message;
-  } finally {
-    await db.query(
-      "update inbox_operations.steps set state='pending',lease_until=null where org_id=$1::uuid and operation_id=$2::uuid and id=$3::uuid",
-      [f.org, f.operation, f.step],
-    );
-  }
 }
 
 async function addSiblingEnrollment(f: Fixture) {
@@ -156,14 +151,80 @@ async function addSiblingEnrollment(f: Fixture) {
   );
 }
 
-async function refreshTargetRevision(f: Fixture) {
-  const revision = (await one<{ revision: string }>(
+async function installScopeFailureTrigger(message: string) {
+  const quotedMessage = message.replaceAll("'", "''");
+  await db.query("create temp sequence inbox_retry_attempts");
+  await db.query(`create or replace function pg_temp.bump_scope_attempt() returns trigger language plpgsql as $$
+    begin
+      perform nextval('pg_temp.inbox_retry_attempts');
+      raise exception '%', tg_argv[0];
+    end $$`);
+  await db.query(`create trigger inbox_retry_test_scope_failure before update of outreach_dispo on public.properties
+    for each row execute function pg_temp.bump_scope_attempt('${quotedMessage}')`);
+}
+
+async function scopeAttemptCount() {
+  return Number((await one<{ n: string }>("select last_value::text n from pg_temp.inbox_retry_attempts")).n);
+}
+
+async function addSiblingStep(f: Fixture) {
+  const row = await one<{ dependencies: Record<string, unknown> }>(
+    "select dependencies from inbox_operations.steps where org_id=$1 and operation_id=$2 and id=$3",
+    [f.org, f.operation, f.step],
+  );
+  const requirements = [
+    ...["property_identity", "property_policy", "property_outcome", "property_assignment", "property_reviews"]
+      .map((namespace) => ({ namespace, key: [f.sibling] })),
+    { namespace: "membership_access", key: [f.actor] },
+    { namespace: "contact_identity", key: [f.contact] },
+    { namespace: "contact_policy", key: [f.contact] },
+    { namespace: "contact_channel_consent", key: [f.contact, "sms"] },
+  ];
+  const policy = (await one<{ snapshot: Record<string, unknown> }>(
+    "select inbox_policy.snapshot($1,$2::jsonb) snapshot",
+    [f.org, JSON.stringify(requirements)],
+  )).snapshot;
+  const targetRevision = (await one<{ revision: string }>(
     "select revision::text from inbox_operation_domain.target_versions where org_id=$1::uuid and conversation_id=$2::uuid",
-    [f.org, f.conversation],
+    [f.org, f.siblingConversation],
   )).revision;
   await db.query(
-    "update inbox_operations.steps set dependencies=jsonb_set(dependencies,'{targets,0,revision}',to_jsonb($1::bigint)) where id=$2::uuid",
-    [revision, f.step],
+    `insert into inbox_operations.items(org_id,operation_id,id,target_kind,target_id,resolution)
+     values($1::uuid,$2::uuid,$3::uuid,'conversation',$4::uuid,jsonb_build_object('property_id',$5::uuid))`,
+    [f.org, f.operation, f.siblingItem, f.siblingConversation, f.sibling],
+  );
+  await db.query(
+    `insert into inbox_operations.steps(org_id,operation_id,id,effect_key,ordinal,action,payload,dependencies)
+     values($1::uuid,$2::uuid,$3::uuid,$4,1,'outcome',jsonb_build_object('property_id',$5::uuid,'value','opted_out'),
+       jsonb_build_object('policy',$6::jsonb,'targets',jsonb_build_array(jsonb_build_object('conversation_id',$7::uuid,'revision',$8::bigint)), 'sms_scope',$9::jsonb))`,
+    [
+      f.org,
+      f.operation,
+      f.siblingStep,
+      `property:${f.sibling}`,
+      f.sibling,
+      JSON.stringify(policy),
+      f.siblingConversation,
+      targetRevision,
+      JSON.stringify(row.dependencies.sms_scope),
+    ],
+  );
+  await db.query(
+    "insert into inbox_operations.item_steps(org_id,operation_id,item_id,step_id) values($1::uuid,$2::uuid,$3::uuid,$4::uuid)",
+    [f.org, f.operation, f.siblingItem, f.siblingStep],
+  );
+}
+
+async function addSuccessorStep(f: Fixture) {
+  await db.query(
+    `insert into inbox_operations.steps(org_id,operation_id,id,effect_key,ordinal,action,payload,dependencies,predecessor_id)
+     select org_id,operation_id,$3::uuid,effect_key,1,action,payload,dependencies,id
+     from inbox_operations.steps where org_id=$1::uuid and operation_id=$2::uuid and id=$4::uuid`,
+    [f.org, f.operation, f.successorStep, f.step],
+  );
+  await db.query(
+    "insert into inbox_operations.item_steps(org_id,operation_id,item_id,step_id) values($1::uuid,$2::uuid,$3::uuid,$4::uuid)",
+    [f.org, f.operation, f.item, f.successorStep],
   );
 }
 
@@ -172,11 +233,6 @@ describe("Inbox opt-out scope retry", () => {
     assertLocalOnlyTestEnv(process.env.TEST_SUPABASE_DB_URL, process.env.TEST_SUPABASE_URL);
     await db.connect();
     await db.query("begin");
-    await db.query(`create or replace function pg_temp.capture_inbox_apply_error(o uuid,op uuid,s uuid,g bigint)
-      returns text language plpgsql as $$
-      begin perform inbox_operation_domain.apply_property_step(o,op,s,g); return null;
-      exception when others then return sqlerrm;
-      end $$`);
   });
   beforeEach(async () => { await db.query("savepoint inbox_retry_case"); });
   afterEach(async () => { await db.query("rollback to savepoint inbox_retry_case"); });
@@ -196,6 +252,7 @@ describe("Inbox opt-out scope retry", () => {
     expect((await one<{ status: string }>("select status from public.sequence_enrollments where id=$1", [f.siblingEnrollment])).status).toBe("opted_out");
     const stored = await one<{ original_scope: Record<string, unknown> }>("select original_scope from inbox_operation_domain.shared_sms_receipts where operation_id=$1", [f.operation]);
     expect(stored.original_scope).toEqual((await one<{ scope: Record<string, unknown> }>("select dependencies->'sms_scope' scope from inbox_operations.steps where id=$1", [f.step])).scope);
+    expect(await runStep(f)).toEqual(result);
   });
 
   it("returns the stored receipt on redelivery and never applies a second effect", async () => {
@@ -206,29 +263,61 @@ describe("Inbox opt-out scope retry", () => {
     expect((await one<{ n: string }>("select count(*) n from public.consent_events where org_id=$1 and contact_id=$2 and event_type='opt_out'", [f.org, f.contact])).n).toBe("1");
   });
 
-  it("does not retry a non-opt-out policy conflict", async () => {
-    const f = await seedFixture("not_interested");
-    await db.query("update public.properties set outreach_dispo='wrong_number' where id=$1", [f.property]);
-    await refreshTargetRevision(f);
-    expect(await captureApplyError(f)).toBe("Dependency conflict");
+  it.each(scopeGateMessages)("retries exactly once for an opt-out scope error: %s", async (message) => {
+    const f = await seedFixture();
+    await installScopeFailureTrigger(message);
     const result = await runStep(f);
-    expect(result).toMatchObject({ state: "conflicted", receipt: { code: "record_changed" } });
-    expect((result.receipt as Record<string, unknown>).scope_rebase_attempted).toBeUndefined();
+    expect(result).toMatchObject({ state: "conflicted", receipt: { code: "sms_scope_changed", scope_rebase_attempted: true } });
+    expect(await scopeAttemptCount()).toBe(2);
   });
 
-  it("keeps record_changed exact for an opt-out policy race", async () => {
-    const f = await seedFixture();
-    await db.query("update public.properties set outreach_dispo='not_interested' where id=$1", [f.property]);
-    await refreshTargetRevision(f);
-    expect(await captureApplyError(f)).toBe("Dependency conflict");
+  it.each(scopeGateMessages)("does not retry a non-opt-out scope error: %s", async (message) => {
+    const f = await seedFixture("not_interested");
+    await installScopeFailureTrigger(message);
     const result = await runStep(f);
-    expect(result).toMatchObject({ state: "conflicted", receipt: { code: "record_changed" } });
+    expect(result).toMatchObject({ state: "conflicted", receipt: { code: "sms_scope_changed" } });
     expect((result.receipt as Record<string, unknown>).scope_rebase_attempted).toBeUndefined();
+    expect(await scopeAttemptCount()).toBe(1);
+  });
+
+  it.each([
+    ["SMS scope contact changed", "sms_contact_changed"],
+    ["SMS policy conflict", "sms_policy_changed"],
+    ["Dependency conflict", "record_changed"],
+  ] as const)("does not retry an opt-out error outside the scope retry list: %s", async (message, code) => {
+    const f = await seedFixture();
+    await installScopeFailureTrigger(message);
+    const result = await runStep(f);
+    expect(result).toMatchObject({ state: "conflicted", receipt: { code } });
+    expect((result.receipt as Record<string, unknown>).scope_rebase_attempted).toBeUndefined();
+    expect(await scopeAttemptCount()).toBe(1);
+  });
+
+  it("reuses the shared SMS receipt for a happy sibling step", async () => {
+    const f = await seedFixture();
+    await addSiblingStep(f);
+    await addSiblingEnrollment(f);
+    const first = await runStep(f);
+    expect(first).toMatchObject({ state: "succeeded", receipt: { sms: { scope_rebase_attempted: true } } });
+    const second = await runStep(f, f.siblingStep);
+    expect(second).toMatchObject({ state: "succeeded", receipt: { sms: { reused: true } } });
+  });
+
+  it("blocks a stale sibling after a new active enrollment on P2", async () => {
+    const f = await seedFixture();
+    await addSiblingStep(f);
+    const first = await runStep(f);
+    expect(first).toMatchObject({ state: "succeeded" });
+    await addSiblingEnrollment(f);
+    await db.query("update public.sequence_enrollments set status='opted_out',pause_reason='test stale sibling',next_run_at=null where id=$1", [f.siblingEnrollment]);
+    const second = await runStep(f, f.siblingStep);
+    expect(second).toMatchObject({ state: "conflicted", receipt: { code: "sms_scope_changed", scope_rebase_attempted: true } });
   });
 
   it("records one failed rebase and rolls back all effects", async () => {
     const f = await seedFixture();
     await addSiblingEnrollment(f);
+    await addSuccessorStep(f);
     await db.query(`create or replace function pg_temp.bump_scope_after_disposition() returns trigger language plpgsql as $$
       begin update inbox_operation_domain.sms_scopes set revision=revision+1 where org_id=new.org_id and contact_id=(select homeowner_contact_id from public.properties where id=new.id); return new; end $$`);
     await db.query(`create trigger inbox_retry_test_bump_scope after update of outreach_dispo on public.properties
@@ -238,13 +327,7 @@ describe("Inbox opt-out scope retry", () => {
     expect((await one<{ sms_opted_out: boolean }>("select sms_opted_out from public.contacts where id=$1", [f.contact])).sms_opted_out).toBe(false);
     expect((await one<{ n: string }>("select count(*) n from public.consent_events where org_id=$1 and contact_id=$2 and event_type='opt_out'", [f.org, f.contact])).n).toBe("0");
     expect((await one<{ status: string }>("select status from public.sequence_enrollments where id=$1", [f.siblingEnrollment])).status).toBe("active");
-  });
-
-  it("keeps the three mapped scope messages explicit", () => {
-    expect(scopeGateMessages).toEqual([
-      "SMS scope changed or unseeded",
-      "SMS scope membership changed",
-      "SMS property scope exceeds bound or changed",
-    ]);
+    expect(await one<{ state: string; result: Record<string, unknown> }>("select s.state,r.result from inbox_operations.steps s join inbox_operations.receipts r on r.org_id=s.org_id and r.operation_id=s.operation_id and r.step_id=s.id where s.id=$1", [f.successorStep])).toMatchObject({ state: "blocked", result: { status: "blocked", code: "predecessor_failed", predecessor_id: f.step, changed: false } });
+    expect(await runStep(f)).toEqual(result);
   });
 });
