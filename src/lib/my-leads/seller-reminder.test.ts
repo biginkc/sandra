@@ -172,10 +172,12 @@ function baseTables(): Tables {
   return {
     seller_reminder_settings: { org1: { org_id: "org1", enabled: true } },
     tasks: { t1: { id: "t1", status: "open", mode: "phone", due_at: DUE.toISOString(), contact_id: "k1" } },
-    properties: { p1: { id: "p1", deleted_at: null, is_dnc_locked: false, status: "new_lead", state: "MO", outreach_dispo: null, homeowner_contact_id: "k9" } },
+    properties: { p1: { id: "p1", org_id: "org1", deleted_at: null, is_dnc_locked: false, status: "new_lead", state: "MO", outreach_dispo: null, homeowner_contact_id: "k9" } },
+    messages: {},
+    property_contacts: { l1: { property_id: "p1", contact_id: "k1" } },
     contacts: {
-      k1: { id: "k1", do_not_contact: false, sms_opted_out: false, first_name: "Sally" },
-      k9: { id: "k9", do_not_contact: false, sms_opted_out: false, first_name: "Homer" },
+      k1: { id: "k1", org_id: "org1", do_not_contact: false, sms_opted_out: false, first_name: "Sally" },
+      k9: { id: "k9", org_id: "org1", do_not_contact: false, sms_opted_out: false, first_name: "Homer" },
     },
   };
 }
@@ -273,6 +275,32 @@ describe("dispatchSellerReminder", () => {
     expect(finishArgs(calls)).toEqual([expect.objectContaining({ p_status: status, p_reason: reason })]);
   });
 
+  it("tenant and linkage fence: a recipient from another org, or not linked to the property, is never texted", async () => {
+    const other = baseTables();
+    other.contacts.k1.org_id = "org2";
+    const a = deps(other);
+    await dispatchSellerReminder(a.d, row());
+    expect(a.send).not.toHaveBeenCalled();
+    expect(finishArgs(a.calls)).toEqual([expect.objectContaining({ p_status: "skipped", p_reason: "no_contact" })]);
+
+    const unlinked = baseTables(); // task contact k1 is not the homeowner (k9); drop its property_contacts link
+    unlinked.property_contacts = {};
+    const b = deps(unlinked);
+    await dispatchSellerReminder(b.d, row());
+    expect(b.send).not.toHaveBeenCalled();
+    expect(finishArgs(b.calls)).toEqual([expect.objectContaining({ p_status: "skipped", p_reason: "no_contact" })]);
+
+    const c = deps(baseTables());
+    await dispatchSellerReminder(c.d, row());
+    expect(c.send).toHaveBeenCalledTimes(1);
+
+    const wrongProperty = baseTables();
+    wrongProperty.properties.p1.org_id = "org2";
+    const e = deps(wrongProperty);
+    await dispatchSellerReminder(e.d, row());
+    expect(e.send).not.toHaveBeenCalled();
+  });
+
   it("STOP recorded after scheduling (consent_events) -> skipped opted_out", async () => {
     const { d, send, calls } = deps(baseTables(), { getConsent: async () => "opted_out" });
     await dispatchSellerReminder(d, row());
@@ -306,8 +334,10 @@ describe("dispatchSellerReminder", () => {
   });
 
   describe("outcome mapping", () => {
-    const run = async (outcome: SendSmsOutcome, attempts = 1) => {
-      const { d, calls } = deps(baseTables());
+    const run = async (outcome: SendSmsOutcome, attempts = 1, messages: Tables["messages"] = {}) => {
+      const t = baseTables();
+      t.messages = messages;
+      const { d, calls } = deps(t);
       (d.send as ReturnType<typeof vi.fn>).mockResolvedValueOnce(outcome);
       await dispatchSellerReminder(d, row({ attempts }));
       return finishArgs(calls)[0];
@@ -322,22 +352,48 @@ describe("dispatchSellerReminder", () => {
       expect(await run({ status, reason: "r", messageId: "m" } as unknown as SendSmsOutcome)).toMatchObject({ p_status: "skipped", p_reason: status });
     });
 
-    it("provider_failed re-queues as pending with a NEW key and a growing delay", async () => {
-      const a = await run({ status: "provider_failed", messageId: "m", error: "boom" }, 1);
+    const rejected = { m1: { id: "m1", org_id: "org1", idempotency_key: "11111111-1111-4111-8111-111111111111", metadata: { providerAttempt: { outcome: "definitively_rejected" } } } };
+    const unknownAttempt = { m1: { id: "m1", org_id: "org1", idempotency_key: "11111111-1111-4111-8111-111111111111", metadata: { providerAttempt: { outcome: "unknown" } } } };
+
+    it("provider_failed re-queues as pending with a NEW key and a growing delay, only on proof of no send", async () => {
+      const a = await run({ status: "provider_failed", messageId: "m", error: "boom" }, 1, rejected);
       expect(a).toMatchObject({ p_status: "pending", p_reason: "provider_failed", p_new_send_key: NEW_KEY, p_retry_at: new Date(NOW.getTime() + 5 * 60_000).toISOString() });
-      const b = await run({ status: "provider_failed", messageId: "m", error: "boom" }, 2);
+      const b = await run({ status: "provider_failed", messageId: "m", error: "boom" }, 2, rejected);
       expect(b.p_retry_at).toBe(new Date(NOW.getTime() + 10 * 60_000).toISOString());
       expect(await run({ status: "provider_deferred", messageId: "m", error: "x", attempt: 1, retryAt: "x" }, 1)).toMatchObject({ p_status: "pending", p_new_send_key: NEW_KEY });
+      expect(await run({ status: "provider_failed", messageId: "m", error: "x", providerAttempted: false }, 1)).toMatchObject({ p_status: "pending", p_new_send_key: NEW_KEY });
+    });
+
+    it("provider_failed WITHOUT proof (generic Twilio/Dialpad-style error after the call began) is uncertain, never retried", async () => {
+      // no stored row, no providerAttempted flag, no deliveryOutcome (the job never passes sequenceContext)
+      expect(await run({ status: "provider_failed", messageId: "m", error: "ETIMEDOUT" })).toMatchObject({ p_status: "uncertain", p_reason: "unknown_delivery", p_new_send_key: null });
+      // stored row whose attempt outcome is unknown or missing
+      expect(await run({ status: "provider_failed", messageId: "m", error: "x" }, 1, unknownAttempt)).toMatchObject({ p_status: "uncertain" });
+      expect(await run({ status: "provider_failed", messageId: "m", error: "x" }, 1, { m1: { ...unknownAttempt.m1, metadata: {} } })).toMatchObject({ p_status: "uncertain" });
+    });
+
+    it("db_error with a stored message for this key (crash after accept, content changed) is uncertain; the key-reuse error is uncertain", async () => {
+      expect(await run({ status: "db_error", error: "SMS idempotency key was already used for a different message body. Start a new message before sending." })).toMatchObject({ p_status: "uncertain", p_new_send_key: null });
+      expect(await run({ status: "db_error", error: "boom" }, 1, unknownAttempt)).toMatchObject({ p_status: "uncertain", p_new_send_key: null });
+    });
+
+    it("a failed message lookup before a retry is uncertain", async () => {
+      const t = baseTables();
+      delete (t as Partial<Tables>).messages;
+      const { d, calls } = deps(t);
+      (d.send as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ status: "provider_failed", messageId: "m", error: "x", providerAttempted: false });
+      await dispatchSellerReminder(d, row());
+      expect(finishArgs(calls)[0]).toMatchObject({ p_status: "uncertain" });
     });
 
     it("the third failed attempt is final", async () => {
-      expect(await run({ status: "provider_failed", messageId: "m", error: "boom" }, 3)).toMatchObject({ p_status: "failed", p_reason: "provider_failed", p_new_send_key: null });
+      expect(await run({ status: "provider_failed", messageId: "m", error: "boom" }, 3, rejected)).toMatchObject({ p_status: "failed", p_reason: "provider_failed", p_new_send_key: null });
     });
 
     it("a retry that would land after the call starts is final", async () => {
       const t = baseTables();
       const { d, calls } = deps(t, { now: () => new Date(DUE.getTime() - 60_000) });
-      (d.send as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ status: "provider_failed", messageId: "m", error: "x" });
+      (d.send as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ status: "provider_failed", messageId: "m", error: "x", providerAttempted: false });
       await dispatchSellerReminder(d, row({ attempts: 2 }));
       expect(finishArgs(calls)[0]).toMatchObject({ p_status: "failed" });
     });
@@ -347,6 +403,7 @@ describe("dispatchSellerReminder", () => {
     });
 
     it("db_error after the provider may have accepted is uncertain; before any message row it retries with a new key", async () => {
+      expect(await run({ status: "db_error", error: "x", messageId: "m" })).toMatchObject({ p_status: "uncertain" });
       expect(await run({ status: "db_error", error: "x", messageId: "m" })).toMatchObject({ p_status: "uncertain" });
       expect(await run({ status: "db_error", error: "x", messageId: "m", externalId: "e" })).toMatchObject({ p_status: "uncertain" });
       expect(await run({ status: "db_error", error: "x", deliveryOutcome: "accepted" })).toMatchObject({ p_status: "uncertain" });

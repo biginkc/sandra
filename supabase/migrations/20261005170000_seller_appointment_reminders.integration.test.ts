@@ -412,6 +412,35 @@ it('finishes with retry semantics: new key on provider retry, third failure is f
   });
 });
 
+it('never cancels a claimed row from the scheduler, and an uncertain row holds the appointment-day slot', async () => {
+  await withDb(async (db) => {
+    const w = await world(db);
+    const { property } = await w.lead();
+    const day = await chicago(db, WINTER_DAY, '13:00');
+    const chainId = randomUUID();
+    const t1 = await w.appt(property, day, { chain: chainId });
+    await schedule(db, horizon);
+    await db.query("update public.seller_appointment_reminders set send_at=now()-interval '1 minute' where task_id=$1", [t1.id]);
+    const [c1] = await claim(db);
+    // the task is rescheduled and the org disabled while the row is claimed (even past its lease)
+    await db.query("update public.tasks set status='cancelled', outcome='rescheduled' where id=$1", [t1.id]);
+    await db.query('update public.seller_reminder_settings set enabled=false where org_id=$1', [w.org]);
+    await db.query("update public.seller_appointment_reminders set claimed_at=now()-interval '11 minutes' where task_id=$1", [t1.id]);
+    const r = await schedule(db, horizon);
+    expect(r.cancelledTaskChanged + r.cancelledDisabled).toBe(0);
+    expect((await byTask(db, t1.id))?.status).toBe('claimed');
+    // the holder finishes uncertain; the same chain/day cannot be claimed again by a successor
+    await db.query("update public.seller_appointment_reminders set claimed_at=now() where task_id=$1", [t1.id]);
+    expect(await finish(db, c1.id, c1.claim_token, 'uncertain', { reason: 'unknown_delivery' })).toBe(true);
+    await db.query('update public.seller_reminder_settings set enabled=true where org_id=$1', [w.org]);
+    const t2 = await w.appt(property, await chicago(db, WINTER_DAY, '16:00'), { chain: chainId });
+    await schedule(db, horizon);
+    await db.query("update public.seller_appointment_reminders set send_at=now()-interval '1 minute' where task_id=$1", [t2.id]);
+    expect(await claim(db)).toHaveLength(0);
+    expect(await byTask(db, t2.id)).toMatchObject({ status: 'skipped', skip_reason: 'duplicate_for_appointment_day' });
+  });
+});
+
 it('leaves the rep reminder sweep alone: no tasks column is written and the claim functions still exist', async () => {
   await withDb(async (db) => {
     const w = await world(db);

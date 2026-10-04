@@ -206,6 +206,18 @@ async function one(
   return data;
 }
 
+async function many(
+  admin: SellerReminderAdmin,
+  table: string,
+  columns: string,
+  idColumn: string,
+  id: string,
+): Promise<Record<string, unknown>[]> {
+  const { data, error } = await admin.from(table).select(columns).eq(idColumn, id);
+  if (error) throw new Error(`${table} read failed: ${error.message ?? "unknown"}`);
+  return data ?? [];
+}
+
 async function finish(
   admin: SellerReminderAdmin,
   row: ClaimedSellerReminder,
@@ -256,12 +268,22 @@ export async function dispatchSellerReminder(
   // 1-2. Re-read everything the decision depends on; never trust the claim snapshot.
   const task = await one(admin, "tasks", "status,mode,due_at,contact_id", "id", row.task_id);
   const property = await one(
-    admin, "properties", "deleted_at,is_dnc_locked,status,state,outreach_dispo,homeowner_contact_id", "id", row.property_id,
+    admin, "properties", "org_id,deleted_at,is_dnc_locked,status,state,outreach_dispo,homeowner_contact_id", "id", row.property_id,
   );
   const contactId = (task?.contact_id as string | null) ?? (property?.homeowner_contact_id as string | null) ?? null;
-  const contactRow = contactId
-    ? await one(admin, "contacts", "do_not_contact,sms_opted_out,first_name", "id", contactId)
+  let contactRow = contactId
+    ? await one(admin, "contacts", "org_id,do_not_contact,sms_opted_out,first_name", "id", contactId)
     : null;
+  // Tenant and linkage fence: the recipient must belong to this org and be linked to this property.
+  if (contactRow && contactId) {
+    let linked = contactRow.org_id === row.org_id && property?.org_id === row.org_id
+      && property?.homeowner_contact_id === contactId;
+    if (!linked && contactRow.org_id === row.org_id && property?.org_id === row.org_id) {
+      linked = (await many(admin, "property_contacts", "contact_id", "property_id", row.property_id))
+        .some((r) => r.contact_id === contactId);
+    }
+    if (!linked) contactRow = null;
+  }
   const consentState = contactId ? await deps.getConsent(contactId) : "no_consent";
 
   const decision = decideReminder({
@@ -343,34 +365,67 @@ function mapOutcome(
       if (outcome.error === openingIdentityError("")) {
         return done({ status: "skipped", reason: "opening_identity_required" });
       }
-      // A message row or provider receipt means the provider may have accepted: terminal, never resent.
+      // A message row, provider receipt, or a key already bound to different content means the provider
+      // may have accepted: terminal, never resent.
       if (outcome.messageId || outcome.externalId
-          || outcome.deliveryOutcome === "accepted" || outcome.deliveryOutcome === "unknown") {
+          || outcome.deliveryOutcome === "accepted" || outcome.deliveryOutcome === "unknown"
+          || /idempotency key was already used/i.test(outcome.error)) {
         return done({ status: "uncertain", reason: "unknown_delivery", messageId: outcome.messageId });
       }
-      return retry(deps, row, now, dueAt, done, "db_error");
+      return retry(deps, row, now, dueAt, done, "db_error", false);
     case "provider_failed":
+      // Retry with a new key ONLY on proof that nothing was sent.
       if (outcome.deliveryOutcome === "accepted" || outcome.deliveryOutcome === "unknown") {
         return done({ status: "uncertain", reason: "unknown_delivery", messageId: outcome.messageId });
       }
-      return retry(deps, row, now, dueAt, done, "provider_failed");
+      return retry(deps, row, now, dueAt, done, "provider_failed", outcome.providerAttempted === false);
     case "provider_deferred":
-      return retry(deps, row, now, dueAt, done, "provider_deferred");
+      return retry(deps, row, now, dueAt, done, "provider_deferred", false);
     default:
       // blocked_*, contact_not_found, property_not_found, skipped_duplicate_destination
       return done({ status: "skipped", reason: outcome.status });
   }
 }
 
-/** Definitively not sent: re-queue with a FRESH persisted UUID v4 (the transport replays a reused key). */
-function retry(
+/**
+ * Re-queue with a FRESH persisted UUID v4 (the transport replays a reused key) ONLY on proof that nothing
+ * was sent: the transport said the provider was never attempted, or the stored message row records
+ * `providerAttempt.outcome` as `definitively_rejected` / `not_attempted`. Any message row for this key
+ * without that proof, or a failed lookup, means delivery is unknown: terminal `uncertain`, no resend.
+ */
+async function retry(
   deps: SellerReminderDeps,
   row: ClaimedSellerReminder,
   now: Date,
   dueAt: Date,
   done: (r: Parameters<typeof finish>[2]) => Promise<DispatchResult>,
   reason: string,
+  transportProvedNotAttempted: boolean,
 ): Promise<DispatchResult> {
+  const uncertain = () => done({ status: "uncertain", reason: "unknown_delivery" });
+  let stored: Record<string, unknown>[];
+  try {
+    stored = await many(deps.admin, "messages", "id,org_id,metadata", "idempotency_key", row.send_key);
+  } catch {
+    return uncertain();
+  }
+  const mine = stored.filter((m) => m.org_id === row.org_id);
+  if (stored.length !== mine.length) return uncertain();
+  let proof: boolean;
+  if (transportProvedNotAttempted) {
+    proof = true;
+  } else if (mine.length > 0) {
+    proof = mine.every((m) => {
+      const meta = m.metadata && typeof m.metadata === "object" ? (m.metadata as Record<string, unknown>) : null;
+      const attempt = meta?.providerAttempt as Record<string, unknown> | undefined;
+      return attempt?.outcome === "definitively_rejected" || attempt?.outcome === "not_attempted";
+    });
+  } else {
+    // No stored message for this key: a db_error or deferral before anything was written dispatched
+    // nothing. A provider_failed outcome with no row and no proof is unknown.
+    proof = reason !== "provider_failed";
+  }
+  if (!proof) return uncertain();
   const retryAt = new Date(now.getTime() + row.attempts * RETRY_STEP_MS);
   if (row.attempts >= REMINDER_MAX_ATTEMPTS || retryAt.getTime() >= dueAt.getTime()) {
     return done({ status: "failed", reason });

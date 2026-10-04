@@ -52,19 +52,19 @@ async function seed() {
   const { data: property, error: pe } = await supabase
     .from("properties")
     .insert({ address: `${randomUUID()} Reminder Ln`, state: "MO", homeowner_contact_id: contact.id })
-    .select("id")
+    .select("id,org_id")
     .single();
   if (pe || !property) throw new Error(`seed property: ${pe?.message}`);
   created.contacts.push(contact.id);
   created.properties.push(property.id);
-  return { contactId: contact.id, propertyId: property.id };
+  return { contactId: contact.id, propertyId: property.id, orgId: property.org_id as string };
 }
 
 type OutboxRow = {
   status: string; send_key: string; attempts: number; message_id: string | null; reason: string | null; token: string;
 };
 
-function harness(contactId: string, propertyId: string) {
+function harness(contactId: string, propertyId: string, orgId: string) {
   const outbox: OutboxRow = { status: "pending", send_key: randomUUID(), attempts: 0, message_id: null, reason: null, token: "" };
   const finishes: Array<Record<string, unknown>> = [];
   const taskRow = { status: "open", mode: "phone", due_at: DUE.toISOString(), contact_id: contactId };
@@ -94,7 +94,7 @@ function harness(contactId: string, propertyId: string) {
     outbox.attempts += 1;
     outbox.token = randomUUID();
     return {
-      id: "r", org_id: "org", task_id: "t", calendar_chain_id: "c", property_id: propertyId, contact_id: contactId,
+      id: "r", org_id: orgId, task_id: "t", calendar_chain_id: "c", property_id: propertyId, contact_id: contactId,
       due_at: DUE.toISOString(), send_at: NOW.toISOString(), send_local_date: "2026-10-07",
       attempts: outbox.attempts, claim_token: outbox.token, send_key: outbox.send_key,
     };
@@ -130,10 +130,10 @@ describe("seller reminder through the real SMS transport (stub provider)", () =>
   it("definitive provider failure retries with a NEW send_key and then sends; the old key would only replay the failure", async () => {
     providerStub.sendSms.mockReset();
     providerStub.sendSms
-      .mockRejectedValueOnce(new Error("carrier rejected the request"))
+      .mockRejectedValueOnce(new ProviderError("carrier rejected the request", "twilio", { definitiveRejection: true }))
       .mockResolvedValueOnce({ externalId: "ext-ok", providerStatus: "sent", raw: {} });
-    const { contactId, propertyId } = await seed();
-    const h = harness(contactId, propertyId);
+    const { contactId, propertyId, orgId } = await seed();
+    const h = harness(contactId, propertyId, orgId);
     const firstKey = h.outbox.send_key;
 
     // attempt 1: provider fails definitively -> re-queued with a fresh persisted key
@@ -170,8 +170,8 @@ describe("seller reminder through the real SMS transport (stub provider)", () =>
     providerStub.sendSms.mockRejectedValueOnce(
       new ProviderError("gateway timeout after request", "sendillo", { ambiguousDelivery: true }),
     );
-    const { contactId, propertyId } = await seed();
-    const h = harness(contactId, propertyId);
+    const { contactId, propertyId, orgId } = await seed();
+    const h = harness(contactId, propertyId, orgId);
     const key = h.outbox.send_key;
     expect(await dispatchSellerReminder(h.deps, h.claim()!)).toMatchObject({ status: "uncertain", reason: "unknown_delivery" });
     expect(h.outbox).toMatchObject({ status: "uncertain", send_key: key });
@@ -181,20 +181,56 @@ describe("seller reminder through the real SMS transport (stub provider)", () =>
 
   it("a transport-level opt-out recorded after scheduling is skipped before the provider", async () => {
     providerStub.sendSms.mockReset();
-    const { contactId, propertyId } = await seed();
+    const { contactId, propertyId, orgId } = await seed();
     await supabase.from("consent_events").insert({ contact_id: contactId, channel: "sms", event_type: "opt_out", source: "test" } as never);
-    const h = harness(contactId, propertyId);
+    const h = harness(contactId, propertyId, orgId);
     expect(await dispatchSellerReminder(h.deps, h.claim()!)).toMatchObject({ status: "skipped", reason: "opted_out" });
     expect(providerStub.sendSms).not.toHaveBeenCalled();
     await supabase.from("consent_events").delete().eq("contact_id", contactId);
   });
 });
 
+describe("no resend without proof of non-delivery", () => {
+  it("a Twilio-style generic ProviderError raised after the provider call began is uncertain: no new key, no second send", async () => {
+    providerStub.sendSms.mockReset();
+    providerStub.sendSms.mockRejectedValueOnce(new ProviderError("socket hang up", "twilio"));
+    const { contactId, propertyId, orgId } = await seed();
+    const h = harness(contactId, propertyId, orgId);
+    const key = h.outbox.send_key;
+    expect(await dispatchSellerReminder(h.deps, h.claim()!)).toMatchObject({ status: "uncertain", reason: "unknown_delivery" });
+    expect(h.outbox).toMatchObject({ status: "uncertain", send_key: key });
+    expect(h.claim()).toBeNull();
+    expect(providerStub.sendSms).toHaveBeenCalledTimes(1);
+  });
+
+  it("crash after the provider accepted, then the contact's first name changes, then the row is reclaimed: uncertain, no second send", async () => {
+    providerStub.sendSms.mockReset();
+    providerStub.sendSms.mockResolvedValue({ externalId: "ext-1", providerStatus: "sent", raw: {} });
+    const { contactId, propertyId, orgId } = await seed();
+    const h = harness(contactId, propertyId, orgId);
+    const first = h.claim()!;
+    // the first dispatch reached the provider and the text went out, then the worker died before finishing
+    expect((await sendSmsToContact(supabase, {
+      origin: "manual", contactId, propertyId, body: TEST_BODY, idempotencyKey: first.send_key,
+    })).status).toBe("sent");
+    expect(providerStub.sendSms).toHaveBeenCalledTimes(1);
+    // before the lease is reclaimed, the seller's first name changes, so the rebuilt body differs
+    await supabase.from("contacts").update({ first_name: "Sarah" }).eq("id", contactId);
+    h.outbox.status = "pending"; // lease expired; claim again with the SAME key
+    const second = h.claim()!;
+    expect(second.send_key).toBe(first.send_key);
+    expect(await dispatchSellerReminder(h.deps, second)).toMatchObject({ status: "uncertain", reason: "unknown_delivery" });
+    expect(providerStub.sendSms).toHaveBeenCalledTimes(1);
+    expect(h.outbox.send_key).toBe(first.send_key);
+    expect(h.claim()).toBeNull();
+  });
+});
+
 describe("opening identity rule in the transport", () => {
   it("a first text in a thread whose body does not name 'Mel with BMH' (the approved copy) is skipped, never retried", async () => {
     providerStub.sendSms.mockReset();
-    const { contactId, propertyId } = await seed();
-    const h = harness(contactId, propertyId);
+    const { contactId, propertyId, orgId } = await seed();
+    const h = harness(contactId, propertyId, orgId);
     h.deps.getCopy = () => SELLER_REMINDER_COPY;
     expect(await dispatchSellerReminder(h.deps, h.claim()!)).toMatchObject({ status: "skipped", reason: "opening_identity_required" });
     expect(providerStub.sendSms).not.toHaveBeenCalled();
@@ -205,7 +241,7 @@ describe("opening identity rule in the transport", () => {
 describe("transport idempotency-key boundary", () => {
   it("accepts a persisted UUID v4 key and rejects a prefixed string key as db_error", async () => {
     providerStub.sendSms.mockReset();
-    const { contactId, propertyId } = await seed();
+    const { contactId, propertyId, orgId } = await seed();
     const bad = await sendSmsToContact(supabase, {
       origin: "manual", contactId, propertyId, body: "x", idempotencyKey: `seller-reminder:${randomUUID()}`,
     });
