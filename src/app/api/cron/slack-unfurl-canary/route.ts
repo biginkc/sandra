@@ -23,7 +23,6 @@ const MAX_BODY_BYTES = 8 * 1024;
 const BODY_READ_TIMEOUT_MS = 5_000;
 const HANDLER_BUDGET_MS = 35_000;
 const MAX_LEASE_MS = 120_000;
-const WORK_BUDGET_MS = 40_000;
 const LEASE_RESERVE_MS = 5_000;
 const JOB_TTL_MS = 15 * 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -161,6 +160,8 @@ function parsePayload(text: string): CanaryPayload | null {
   if (typeof value.messageTs !== "string" || !SLACK_TS.test(value.messageTs)) return null;
   if (typeof value.posterId !== "string" || !SLACK_USER_ID.test(value.posterId)) return null;
   const parsed = parseSlackLeadUrl(value.canonicalURL);
+  // The route accepts only the exact persisted URL whose parser resolves to
+  // the supplied property; the worker repeats this binding before rendering.
   if (!parsed.ok || parsed.link.propertyId !== value.propertyId.toLowerCase() || parsed.link.originalUrl !== value.canonicalURL) return null;
   return value as CanaryPayload;
 }
@@ -194,7 +195,7 @@ function currentWorkerDeadline(job: {
   const expiry = jobExpiry(job);
   if (!Number.isFinite(leaseExpiresAt) || !Number.isFinite(expiry)) return null;
   if (leaseExpiresAt <= now || expiry <= now || leaseExpiresAt - now > MAX_LEASE_MS) return null;
-  const deadline = Math.min(now + WORK_BUDGET_MS, handlerDeadline, leaseExpiresAt - LEASE_RESERVE_MS, expiry - LEASE_RESERVE_MS);
+  const deadline = Math.min(handlerDeadline, leaseExpiresAt - LEASE_RESERVE_MS, expiry - LEASE_RESERVE_MS);
   return deadline > now ? deadline : null;
 }
 
@@ -227,6 +228,14 @@ function workWindowRefusal(stage: "preflight" | "worker" = "preflight"): Respons
 
 function canaryFenceRefusal(stage: "preflight" | "worker" = "preflight"): Response {
   return response(409, { ok: false, stage, category: "canary_fence" });
+}
+
+function canaryDispatchRefusal(): Response {
+  return response(500, { ok: false, stage: "dispatch", category: "outcome_unknown" });
+}
+
+function isCanaryDispatchError(error: unknown): boolean {
+  return error instanceof Error && (error.message === "slack_canary_dispatch_unknown" || error.message === "slack_canary_dispatch_unrecorded");
 }
 
 export async function POST(request: Request): Promise<Response> {
@@ -264,6 +273,8 @@ export async function POST(request: Request): Promise<Response> {
 
     const urls = await loadSlackJobUrls(job.id, 2);
     if (urls.length !== 1 || urls[0]?.url_key !== payload.canonicalURL) return refusal();
+    // Before this point the caller has not proved ownership of the persisted
+    // exact URL/receipt pair, so mismatches must remain non-mutating refusals.
     canaryTargetTrusted = true;
     const now = Date.now();
     const handlerDeadline = handlerStartedAt + HANDLER_BUDGET_MS;
@@ -298,7 +309,10 @@ export async function POST(request: Request): Promise<Response> {
       return canaryFenceRefusal();
     }
     const refreshedDeadline = currentWorkerDeadline(job, afterCapture, handlerDeadline);
-    if (refreshedDeadline === null) return refusal();
+    if (refreshedDeadline === null) {
+      await finishCanaryClaim(job.id, payload.claimToken, "canary_preflight_failed");
+      return refusal();
+    }
     deadline = refreshedDeadline;
     privateClaimToken = randomUUID();
     // The RPC may commit and then lose its response. Mark ownership before
@@ -314,7 +328,14 @@ export async function POST(request: Request): Promise<Response> {
       runId: payload.runId,
       canonicalURL: payload.canonicalURL,
     });
-    if (!claimed) return canaryFenceRefusal();
+    if (!claimed) {
+      // A definitive false is token-conditioned in SQL: it either observes a
+      // drifted fixture or loses the row lock to a private-token winner. The
+      // original-token finish is therefore a no-op for the winner and
+      // terminalizes an otherwise requeueable exact synthetic job.
+      await finishCanaryClaim(job.id, payload.claimToken, "canary_preflight_failed");
+      return canaryFenceRefusal();
+    }
     canaryFence = {
       canonicalURL: payload.canonicalURL,
       propertyId: payload.propertyId.toLowerCase(),
@@ -343,6 +364,7 @@ export async function POST(request: Request): Promise<Response> {
     }
     return response(200, { ok: true, status });
   } catch (error) {
+    if (isCanaryDispatchError(error)) return canaryDispatchRefusal();
     if (error instanceof Error && error.message === "slack_canary_fence_failed") return canaryFenceRefusal("worker");
     if (isWindowError(error)) {
       await finishWorkWindowClaim(job.id, privateClaimToken);

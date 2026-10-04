@@ -166,6 +166,43 @@ describe("Slack unfurl worker", () => {
     expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "noop", errorCode: "canary_fence_failed" });
   });
 
+  it.each([
+    ["destination authority", () => {
+      mocks.verify.mockResolvedValue({ allowed: false, reason: "slack_authority_unavailable" });
+    }],
+    ["preview loading", () => {
+      mocks.urls.mockResolvedValue([{ url_key: "https://sandra.bmhgroupkc.com/leads/11111111-1111-4111-8111-111111111111", lead_id: null, lookup_status: null, authorization_status: null, last_error_code: null }]);
+      mocks.loadData.mockRejectedValue(new Error("preview read failed"));
+    }],
+    ["final destination authority", () => {
+      mocks.urls.mockResolvedValue([{ url_key: "https://sandra.bmhgroupkc.com/leads/11111111-1111-4111-8111-111111111111", lead_id: null, lookup_status: null, authorization_status: null, last_error_code: null }]);
+      mocks.verify.mockResolvedValueOnce({ allowed: true }).mockResolvedValueOnce({ allowed: false, reason: "slack_authority_unavailable" });
+    }],
+  ])("never reschedules a canary %s failure", async (_label, setup) => {
+    setup();
+    await expect(processSlackUnfurlJob({ ...job }, Date.now() + 45_000, canaryFence())).rejects.toThrow("slack_canary_fence_failed");
+    expect(mocks.reschedule).not.toHaveBeenCalled();
+    expect(mocks.unfurl).not.toHaveBeenCalled();
+  });
+
+  it("classifies a nonterminal Slack dispatch error as unknown without retry", async () => {
+    mocks.urls.mockResolvedValue([{ url_key: "https://sandra.bmhgroupkc.com/leads/11111111-1111-4111-8111-111111111111", lead_id: null, lookup_status: null, authorization_status: null, last_error_code: null }]);
+    mocks.unfurl.mockRejectedValue(new Error("socket reset"));
+    await expect(processSlackUnfurlJob({ ...job }, Date.now() + 45_000, canaryFence())).rejects.toThrow("slack_canary_dispatch_unknown");
+    expect(mocks.reschedule).not.toHaveBeenCalled();
+    expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "noop", errorCode: "canary_dispatch_unknown" });
+  });
+
+  it("classifies an accepted dispatch whose success cannot be recorded", async () => {
+    mocks.urls.mockResolvedValue([{ url_key: "https://sandra.bmhgroupkc.com/leads/11111111-1111-4111-8111-111111111111", lead_id: null, lookup_status: null, authorization_status: null, last_error_code: null }]);
+    mocks.finish.mockResolvedValue(false);
+    await expect(processSlackUnfurlJob({ ...job }, Date.now() + 45_000, canaryFence())).rejects.toThrow("slack_canary_dispatch_unrecorded");
+    expect(mocks.unfurl).toHaveBeenCalledTimes(1);
+    expect(mocks.reschedule).not.toHaveBeenCalled();
+    expect(mocks.finish).toHaveBeenCalledTimes(2);
+    expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "noop", errorCode: "canary_dispatch_unrecorded" });
+  });
+
   it("finishes disabled-policy jobs without sending", async () => {
     mocks.policy.mockResolvedValue({ installationId: "installation-1", orgId: "org-1", mode: "disabled", policyRevision: 2 });
     const result = await runSlackUnfurlSweep();

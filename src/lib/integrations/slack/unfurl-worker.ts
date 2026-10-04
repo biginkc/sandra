@@ -128,7 +128,8 @@ function equalCanaryPreview(left: SlackCanaryPreviewSnapshot, right: SlackCanary
   // Every field in SlackLeadPreviewSnapshot is a render fact. Keep this
   // comparison exhaustive so a future snapshot field cannot silently become
   // an unfenced provider input; there are no volatile fields to exclude.
-  if (
+  const fieldsPresent = Object.keys(CANARY_PREVIEW_FIELDS).every((field) => field in left && field in right);
+  if (!fieldsPresent ||
     left.propertyId !== right.propertyId ||
     left.leadName !== right.leadName ||
     left.address !== right.address ||
@@ -153,6 +154,19 @@ function equalCanaryPreview(left: SlackCanaryPreviewSnapshot, right: SlackCanary
   });
 }
 
+const CANARY_PREVIEW_FIELDS = {
+  propertyId: true,
+  leadName: true,
+  address: true,
+  ownerName: true,
+  ownerAssigned: true,
+  latestAttempt: true,
+  messagesDisposition: true,
+  lastContactAt: true,
+  timezone: true,
+  messages: true,
+} satisfies Record<keyof SlackCanaryPreviewSnapshot, true>;
+
 function isCanaryFenceError(error: unknown): boolean {
   return error instanceof Error && error.message === "slack_canary_fence_failed";
 }
@@ -162,6 +176,13 @@ async function failCanaryFence(job: SlackUnfurlJob): Promise<never> {
     await finishSlackUnfurlJob({ jobId: job.id, claimToken: job.claim_token, status: "noop", errorCode: "canary_fence_failed" }).catch(() => false);
   }
   throw new Error("slack_canary_fence_failed");
+}
+
+async function failCanaryDispatch(job: SlackUnfurlJob, errorCode: "canary_dispatch_unknown" | "canary_dispatch_unrecorded"): Promise<never> {
+  if (job.claim_token) {
+    await finishSlackUnfurlJob({ jobId: job.id, claimToken: job.claim_token, status: "noop", errorCode }).catch(() => false);
+  }
+  throw new Error(`slack_${errorCode}`);
 }
 
 async function verifyCanaryFinalFence(job: SlackUnfurlJob, deadline: number, fence: SlackCanaryExecutionFence, client: PreviewLoaderClient): Promise<void> {
@@ -331,12 +352,17 @@ export async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: numbe
     }
   }
 
+  let slackAccepted = false;
   try {
     ensureWorkWindow(job, deadline, true);
     const slack = new WebClient(installation.botToken.reveal(), { timeout: 5000, retryConfig: { retries: 0 }, rejectRateLimitedCalls: true });
     const response = await slack.chat.unfurl({ channel: job.channel_id, ts: job.message_ts, unfurls });
     if (!response.ok) throw new Error(`slack_unfurl_failed:${response.error ?? "unknown"}`);
-    await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "succeeded" });
+    slackAccepted = true;
+    const finished = await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "succeeded" });
+    // Let the single catch path perform private-token terminal cleanup; this
+    // avoids issuing a second cleanup when the first finish returned false.
+    if (!finished && canaryFence) throw new Error("slack_canary_dispatch_unrecorded");
     return "succeeded";
   } catch (error) {
     if (isWindowError(error)) throw error;
@@ -350,7 +376,7 @@ export async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: numbe
       await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "noop", errorCode: `slack_${terminalError}` });
       return "noop";
     }
-    if (canaryFence) await failCanaryFence(job);
+    if (canaryFence) await failCanaryDispatch(job, slackAccepted ? "canary_dispatch_unrecorded" : "canary_dispatch_unknown");
     const next = nextRetryAt(job, Date.now(), retryAfterSeconds(error));
     if (next.getTime() >= Date.parse(job.expires_at)) {
       await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "expired", errorCode: "retry_ttl_expired" });

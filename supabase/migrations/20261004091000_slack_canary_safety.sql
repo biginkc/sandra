@@ -10,7 +10,7 @@ create or replace function public.get_slack_canary_provider_safety(
 ) returns boolean
 language plpgsql
 security definer
-set search_path = public, pg_temp
+set search_path = ''
 as $$
 begin
   if p_org_id is null or p_property_id is null or p_contact_id is null or p_run_id is null then

@@ -223,6 +223,24 @@ describe("hosted exact-job Slack canary route", () => {
     expect(response.status).toBe(409);
     await expect(json(response)).resolves.toEqual({ ok: false, stage: "preflight", category: "canary_fence" });
     expect(mocks.process).not.toHaveBeenCalled();
+    expect(mocks.finish).toHaveBeenCalledWith({ jobId: JOB_ID, claimToken: CLAIM_TOKEN, status: "noop", errorCode: "canary_preflight_failed" });
+  });
+
+  it("terminally fences when the refreshed deadline falls inside the lease reserve", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.loadJob.mockResolvedValue(baseJob({ lease_expires_at: new Date(Date.now() + 10_000).toISOString() }));
+      mocks.loadPreview.mockImplementation(async () => {
+        vi.advanceTimersByTime(6_000);
+        return baseSnapshot();
+      });
+      const response = await POST(request(payload()));
+      expect(response.status).toBe(409);
+      expect(mocks.process).not.toHaveBeenCalled();
+      expect(mocks.finish).toHaveBeenCalledWith({ jobId: JOB_ID, claimToken: CLAIM_TOKEN, status: "noop", errorCode: "canary_preflight_failed" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("cleans an ambiguous CAS outcome with only the private token", async () => {
@@ -307,6 +325,14 @@ describe("hosted exact-job Slack canary route", () => {
     expect((mocks.finish.mock.calls[0]?.[0] as { claimToken?: string }).claimToken).not.toBe(CLAIM_TOKEN);
   });
 
+  it.each(["slack_canary_dispatch_unknown", "slack_canary_dispatch_unrecorded"])("returns a fixed dispatch outcome for %s without a second finish", async (errorCode) => {
+    mocks.process.mockRejectedValue(new Error(errorCode));
+    const response = await POST(request(payload()));
+    expect(response.status).toBe(500);
+    await expect(json(response)).resolves.toEqual({ ok: false, stage: "dispatch", category: "outcome_unknown" });
+    expect(mocks.finish).not.toHaveBeenCalled();
+  });
+
   it("terminally finishes an unexpected worker failure with the private token", async () => {
     mocks.process.mockRejectedValue(new Error("provider failure"));
     const response = await POST(request(payload()));
@@ -332,7 +358,7 @@ describe("hosted exact-job Slack canary route", () => {
     const [job, deadline] = mocks.process.mock.calls[0] as [Record<string, unknown>, number];
     expect(job.id).toBe(JOB_ID);
     expect(deadline).toBeGreaterThan(Date.now());
-    expect(deadline - Date.now()).toBeLessThanOrEqual(40_000);
+    expect(deadline - Date.now()).toBeLessThanOrEqual(35_000);
     expect(mocks.claimCanary).toHaveBeenCalledWith(expect.objectContaining({
       jobId: JOB_ID,
       claimToken: CLAIM_TOKEN,
@@ -345,5 +371,22 @@ describe("hosted exact-job Slack canary route", () => {
     expect(mocks.sweep).not.toHaveBeenCalled();
     expect(mocks.claim).not.toHaveBeenCalled();
     expect(mocks.cleanup).not.toHaveBeenCalled();
+  });
+
+  it("anchors the worker deadline at handler entry after partial preflight time", async () => {
+    vi.useFakeTimers();
+    try {
+      const handlerStartedAt = Date.now();
+      mocks.loadJob.mockImplementation(async () => {
+        vi.advanceTimersByTime(10_000);
+        return baseJob();
+      });
+      const response = await POST(request(payload()));
+      expect(response.status).toBe(200);
+      const [, deadline] = mocks.process.mock.calls[0] as [Record<string, unknown>, number];
+      expect(deadline).toBeLessThanOrEqual(handlerStartedAt + 35_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

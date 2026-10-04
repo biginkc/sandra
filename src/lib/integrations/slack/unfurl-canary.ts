@@ -56,6 +56,7 @@ type HistoryRow = {
 
 type AttemptFacts = {
   latest_attempt_id: string | null;
+  latest_attempt_outcome: string | null;
 };
 
 /** The marker format used by run-owned Slack acceptance fixtures. */
@@ -197,9 +198,14 @@ export async function verifySlackCanaryFixture(input: {
     db.rpc("get_slack_preview_attempt_facts", { p_org_id: orgId, p_property_id: input.propertyId }),
   )) as AttemptFacts[] | null;
   const attempt = Array.isArray(attemptFacts) ? attemptFacts[0] : null;
+  // work/slack-preview-canary-fixture.sql:174-183 records a manual outreach
+  // attempt with outcome `reached`; the foundation RPC's reached_call fields
+  // are call-only and may remain null. Requiring a call fact would fabricate
+  // provider semantics.
   if (
     !attempt ||
-    typeof attempt.latest_attempt_id !== "string"
+    typeof attempt.latest_attempt_id !== "string" ||
+    attempt.latest_attempt_outcome !== "reached"
   ) return false;
 
   return noProviderIntentRows(db, orgId, input.propertyId, row.homeowner_contact_id, input.runId);

@@ -179,18 +179,49 @@ it("CASes one private canary execution token and fences stale or invalid callers
     expect(await callAsServiceRole(first, { jobId, claimToken: originalToken, privateClaimToken: randomUUID(), orgId, propertyId, runId, canonicalURL })).toBe(false);
     await first.query("delete from public.messages where id=$1", [extraMessageId]);
 
+    const refusal = async () => callAsServiceRole(first, {
+      jobId,
+      claimToken: originalToken,
+      privateClaimToken: randomUUID(),
+      orgId,
+      propertyId,
+      runId,
+      canonicalURL,
+    });
+    await first.query("update public.slack_unfurl_jobs set attempts=2 where id=$1", [jobId]);
+    expect(await refusal()).toBe(false);
+    await first.query("update public.slack_unfurl_jobs set attempts=1 where id=$1", [jobId]);
+    await first.query("update public.slack_unfurl_jobs set status='queued' where id=$1", [jobId]);
+    expect(await refusal()).toBe(false);
+    await first.query("update public.slack_unfurl_jobs set status='processing' where id=$1", [jobId]);
+    await first.query("update public.slack_unfurl_jobs set lease_expires_at=now()+interval '121 seconds' where id=$1", [jobId]);
+    expect(await refusal()).toBe(false);
+    await first.query("update public.slack_unfurl_jobs set lease_expires_at=now()+interval '60 seconds' where id=$1", [jobId]);
+    await first.query("update public.slack_unfurl_jobs set event_time=now()-interval '16 minutes' where id=$1", [jobId]);
+    expect(await refusal()).toBe(false);
+    await first.query("update public.slack_unfurl_jobs set event_time=now() where id=$1", [jobId]);
+
     expect(await callAsServiceRole(first, { jobId, claimToken: originalToken, privateClaimToken: randomUUID(), orgId, propertyId, runId, canonicalURL: `${canonicalURL}?other` })).toBe(false);
     expect(await callAsServiceRole(first, { jobId, claimToken: originalToken, privateClaimToken: randomUUID(), orgId, propertyId, runId: randomUUID(), canonicalURL })).toBe(false);
     expect(await callAsServiceRole(first, { jobId, claimToken: originalToken, privateClaimToken: randomUUID(), orgId: randomUUID(), propertyId, runId, canonicalURL })).toBe(false);
     expect(await callAsServiceRole(first, { jobId: expiredJobId, claimToken: originalToken, privateClaimToken: randomUUID(), orgId, propertyId, runId, canonicalURL })).toBe(false);
 
+    const beforeWinningCas = (await first.query(
+      "select status, attempts, lease_expires_at::text, next_attempt_at::text, expires_at::text from public.slack_unfurl_jobs where id=$1",
+      [jobId],
+    )).rows[0];
     const [wonA, wonB] = await Promise.all([
       callAsServiceRole(first, { jobId, claimToken: originalToken, privateClaimToken: privateA, orgId, propertyId, runId, canonicalURL }),
       callAsServiceRole(second, { jobId, claimToken: originalToken, privateClaimToken: privateB, orgId, propertyId, runId, canonicalURL }),
     ]);
     expect([wonA, wonB].filter(Boolean)).toHaveLength(1);
     const winnerToken = wonA ? privateA : privateB;
-    expect((await first.query("select claim_token::text from public.slack_unfurl_jobs where id=$1", [jobId])).rows[0].claim_token).toBe(winnerToken);
+    const afterWinningCas = (await first.query(
+      "select claim_token::text, status, attempts, lease_expires_at::text, next_attempt_at::text, expires_at::text from public.slack_unfurl_jobs where id=$1",
+      [jobId],
+    )).rows[0];
+    expect(afterWinningCas.claim_token).toBe(winnerToken);
+    expect(afterWinningCas).toMatchObject(beforeWinningCas);
     expect(await dispatchGuard(first, { jobId, claimToken: originalToken, installationId, orgId, channelId: "C123", posterId: "U123" })).toBe(false);
     expect(await dispatchGuard(first, { jobId, claimToken: winnerToken, installationId, orgId, channelId: "C123", posterId: "U123" })).toBe(true);
     expect(await finish(first, jobId, originalToken)).toBe(false);

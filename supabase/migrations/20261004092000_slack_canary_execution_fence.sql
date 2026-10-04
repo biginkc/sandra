@@ -12,7 +12,7 @@ create or replace function public.claim_slack_canary_execution(
 ) returns boolean
 language plpgsql
 security definer
-set search_path = public, pg_temp
+set search_path = ''
 as $$
 declare
   v_contact_id uuid;
