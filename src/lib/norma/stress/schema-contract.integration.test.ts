@@ -8,8 +8,7 @@ import { createScratchDb, seedWorld, type Scratch, type World } from "./db";
 import { createPgSupabase } from "./pg-client";
 
 // Post-DDL contract: real committed statements on separate pooled connections.
-// Production reconciliation is invoked only in the explicit negative legacy
-// compatibility receipt; no runtime dispatcher or provider is invoked. This supplements, rather than
+// Production reconciliation is invoked only in the paired grace receipt; no runtime dispatcher or provider is invoked. This supplements, rather than
 // rewrites, the legacy-runtime stress suite and the transactional upgrade tests.
 let scratch: Scratch;
 let world: World;
@@ -180,29 +179,34 @@ describe("schema-only two-call committed concurrency contract", () => {
 });
 
 
-describe("negative compatibility evidence: legacy reconciliation must stay held after DDL", () => {
-  it("the legacy created_at expiry closes a fresh retry of an older request", async () => {
-    expect(createHash("sha256").update(readFileSync("src/lib/norma/reconcile.ts")).digest("hex")).toBe("b388576761c1bf9fa8afa1e5e71066c8604eb20f6b76e1bf4f2e7071696243a6");
+describe("paired-runtime retry grace contract", () => {
+  it("fresh attempt 2 uses updated_at grace despite an old created_at", async () => {
     const ctx = await dispatched();
     // Existing scratch clock helper shifts stored timestamps with triggers off,
     // modelling elapsed time without violating the immutable-identity trigger.
     await scratch.advance(10 * 60_000);
     expect(await complete(ctx.id, `first_${ctx.id}`, "no_answer", 1)).toMatchObject({ retry: true });
     expect(await row(ctx.id)).toMatchObject({ status: "requested", attempt: 2 });
+    const before = await row(ctx.id);
+    const ledger = await pauseRows(ctx.id);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]).toMatchObject({ released_at: null, release_result: null });
+    expect(Date.now() - Date.parse(before.created_at)).toBeGreaterThan(9 * 60_000);
     let dispatchCalls = 0;
     await reconcileNormaCalls({
-      client: createPgSupabase(scratch.pool, { actor: "legacy-reconcile" }),
+      client: createPgSupabase(scratch.pool, { actor: "paired-reconcile" }),
       bland: null,
       dispatch: async () => { dispatchCalls += 1; return { status: "not_claimed" }; },
       now: Date.now() + 5000,
     });
     expect(dispatchCalls).toBe(0);
-    expect(await row(ctx.id)).toMatchObject({ status: "dispatch_rejected", attempt: 2 });
-    expect((await enrollments(ctx.lead.enrollments))[0]).toMatchObject({ status: "active", pause_reason: null });
+    expect(await row(ctx.id)).toMatchObject({ status: "requested", attempt: 2, bland_call_id: null });
+    expect(await pauseRows(ctx.id)).toEqual(ledger);
+    expect((await enrollments(ctx.lead.enrollments))[0]).toMatchObject({ status: "paused", pause_reason: "norma_call" });
     expect(await count("lead_events", ctx.id, "norma_call_attempt_no_answer")).toBe(1);
     expect(await count("lead_events", ctx.id, "norma_call_completed")).toBe(0);
-    // This PASS demonstrates an unsupported mixed-version writer hazard;
-    // it is a release stop condition, never a compatibility approval.
+    // This checks the production attempt-aware reconciliation grace.
+    // Direct legacy SQL caller hazards remain separately asserted below.
   });
 });
 
