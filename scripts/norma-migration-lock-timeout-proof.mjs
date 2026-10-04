@@ -2,7 +2,7 @@
 //
 //   LOCKPROOF_MARKER=<marker> node scripts/norma-migration-lock-timeout-proof.mjs \
 //     --db-url postgresql://postgres:postgres@127.0.0.1:<private-port>/postgres \
-//     --migration supabase/migrations/20261002150000_norma_call_twice.sql
+//     --migration supabase/migrations/20261004090000_norma_call_twice.sql
 //
 // Runs the real `supabase db push --include-all --db-url` (same executor as the CI workflows) against a
 // DISPOSABLE Postgres that already has every earlier migration. Refuses unless the database carries the

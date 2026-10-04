@@ -24,8 +24,8 @@ const migration = [
   "20261002120300_norma_dnc_lock_task_writes.sql",
   "20261002120400_norma_create_request_serialize.sql",
   "20261002120500_norma_lock_order.sql",
-  "20261002150000_norma_call_twice.sql",
 ].map(load).join("\n");
+const retryMigration = load("20261004090000_norma_call_twice.sql");
 
 type Ctx = { org: string; rep: string; assignee: string; sequence: string };
 type Lead = { property: string; contact: string; phone: string; enrollment: string | null };
@@ -33,7 +33,7 @@ type Lead = { property: string; contact: string; phone: string; enrollment: stri
 let phoneCounter = 0;
 const nextPhone = () => `+1816556${String(1000 + (phoneCounter++ % 9000)).padStart(4, "0")}`;
 
-async function withDb(fn: (db: Client, ctx: Ctx) => Promise<void>) {
+async function withDb(fn: (db: Client, ctx: Ctx) => Promise<void>, beforeUpgrade?: (db: Client, ctx: Ctx) => Promise<void>) {
   const db = new Client({ connectionString: url });
   await db.connect();
   try {
@@ -49,6 +49,8 @@ async function withDb(fn: (db: Client, ctx: Ctx) => Promise<void>) {
       "insert into public.sequence_steps(sequence_id,step_index,action_type,template_body) values ($1,0,'send_sms','hi')",
       [ctx.sequence],
     );
+    if (beforeUpgrade) await beforeUpgrade(db, ctx);
+    await db.query(retryMigration);
     await fn(db, ctx);
   } finally {
     await db.query("rollback").catch(() => {});
@@ -147,7 +149,41 @@ async function dispatched(db: Client, ctx: Ctx, opts: Parameters<typeof lead>[2]
   return { l, id };
 }
 
-describe("norma call twice (migration 20261002150000)", () => {
+describe("norma call twice (migration 20261004090000)", () => {
+  it("preserves existing bound review requests and protected pauses across the schema-only upgrade", async () => {
+    let before: Record<string, unknown>[] = [];
+    let pausesBefore: Record<string, unknown>[] = [];
+    const open: { id: string; property: string; callId: string }[] = [];
+    await withDb(async (db) => {
+      const after = (await db.query("select to_jsonb(r) - array['attempt','first_bland_call_id','first_attempt_outcome','first_attempt_at','precall_sms_status'] as row from public.norma_call_requests r order by id")).rows;
+      expect(after).toEqual(before);
+      expect((await db.query("select to_jsonb(e) as row from public.sequence_enrollments e order by id")).rows).toEqual(pausesBefore);
+      for (const r of open) {
+        expect(await rowOf(db, r.id)).toMatchObject({ status: "needs_review", attempt: 1, outcome: "unknown", bland_call_id: r.callId, first_bland_call_id: null });
+        expect(await hold(db, r.property)).toBe(true);
+        // A late confirmed no-answer for an existing review row completes it;
+        // the retry transition applies only to dispatching/dispatched rows.
+        expect(await complete(db, r.id, r.callId, "no_answer", { attempt: 1 })).toMatchObject({ status: "completed", outcome: "no_answer" });
+        expect(await rowOf(db, r.id)).toMatchObject({ status: "completed", attempt: 1 });
+      }
+      expect((await db.query("select to_jsonb(e) as row from public.sequence_enrollments e order by id")).rows).toEqual(pausesBefore);
+    }, async (db, ctx) => {
+      for (let i = 0; i < 3; i++) {
+        const l = await lead(db, ctx, { enrollment: null });
+        const id = (await create(db, ctx, l)).request_id!;
+        expect((await svc<{ c: boolean }>(db, "select public.fn_norma_claim_dispatch($1) as c", [id])).rows[0]!.c).toBe(true);
+        const callId = `legacy-review-${i}`;
+        expect(await bind(db, id, callId)).toBe("bound");
+        expect(await complete(db, id, callId, "unknown")).toMatchObject({ status: "needs_review" });
+        open.push({ id, property: l.property, callId });
+      }
+      await lead(db, ctx, { enrollment: "paused:provider_failed" });
+      await lead(db, ctx, { enrollment: "paused:reconciliation_required" });
+      before = (await db.query("select to_jsonb(r) as row from public.norma_call_requests r order by id")).rows;
+      pausesBefore = (await db.query("select to_jsonb(e) as row from public.sequence_enrollments e order by id")).rows;
+    });
+  });
+
   it("a confirmed no_answer on attempt 1 schedules the retry on the same request, holding everything", async () => {
     await withDb(async (db, ctx) => {
       const { l, id } = await dispatched(db, ctx);
