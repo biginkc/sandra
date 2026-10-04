@@ -114,7 +114,7 @@ test("close-attempts and rollback route to their RPCs", async () => {
 });
 
 test("later-phase commands and unknown commands are refused without any call", async () => {
-  for (const argv of [["offer-backfill", "--org", ORG], ["phone-backfill", "--org", ORG], ["nope"]]) {
+  for (const argv of [["link-backfill", "--org", ORG], ["phone-backfill", "--org", ORG], ["nope"]]) {
     const h = harness();
     assert.equal(await run(argv, h.io), 1);
     assert.equal(h.calls.length, 0);
@@ -187,6 +187,16 @@ test("retire-preflight is read-only and cannot be applied", async () => {
   assert.deepEqual(h.calls, [{ name: "fn_my_leads_next_step_retire_preflight", args: { p_org_id: ORG } }]);
   const a = harness();
   assert.equal(await run(["retire-preflight", "--org", ORG, "--apply", "--confirm", "x"], a.io), 1);
+});
+
+test("offer-backfill previews and applies through the offer follow-up function with the resolved owner as actor", async () => {
+  const preview = { kind: "offer_follow_up_backfill", fingerprint: "e".repeat(64), candidates: 3 };
+  const h = harness({ preview });
+  assert.equal(await run(["offer-backfill", "--org", ORG], h.io), 0);
+  assert.deepEqual(h.calls[0], { name: "fn_my_leads_backfill_offer_follow_ups", args: { p_org_id: ORG, p_actor: JARRAD, p_apply: false } });
+  const a = harness({ preview });
+  assert.equal(await run(["offer-backfill", "--org", ORG, "--apply", "--confirm", sha256Hex(canonicalJson({ ...HOST, ...preview }))], a.io), 0);
+  assert.deepEqual(a.calls[1].args, { p_org_id: ORG, p_actor: JARRAD, p_apply: true, p_fingerprint: preview.fingerprint });
 });
 
 test("reassign requires --from, refuses the target as a source, and passes sorted unique sources", async () => {

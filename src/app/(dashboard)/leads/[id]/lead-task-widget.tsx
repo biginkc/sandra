@@ -8,12 +8,8 @@ import { callAction } from "@/lib/errors/call-action";
 import { teamMemberOptionLabel } from "@/lib/auth/team-member";
 import { cn } from "@/lib/utils";
 
-import {
-  createLeadTaskAction,
-  listPropertyOrgUsers,
-  type LeadTaskKind,
-  type TeamMember,
-} from "../actions";
+import { listPropertyOrgUsers, type TeamMember } from "../actions";
+import { createLeadTaskAction, type LeadTaskKind } from "../lead-task-actions";
 
 type Props = {
   propertyId: string;
@@ -23,9 +19,13 @@ type Props = {
 };
 
 const TASK_LABELS: Record<LeadTaskKind, string> = {
-  follow_up: "Follow-up",
-  callback: "Callback",
+  appointment: "Appointment",
+  task: "Task",
 };
+
+const MODE_LABELS = { phone: "Phone", in_person: "In person" } as const;
+type Mode = keyof typeof MODE_LABELS;
+const DURATION_OPTIONS = [15, 30, 45, 60, 90] as const;
 
 export function LeadTaskWidget({
   propertyId,
@@ -37,7 +37,11 @@ export function LeadTaskWidget({
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loadingMembers, setLoadingMembers] = useState(true);
   const [memberLoadError, setMemberLoadError] = useState(false);
-  const [taskType, setTaskType] = useState<LeadTaskKind>("follow_up");
+  const [taskType, setTaskType] = useState<LeadTaskKind>("appointment");
+  const [mode, setMode] = useState<Mode>("phone");
+  const [title, setTitle] = useState("");
+  const [durationMinutes, setDurationMinutes] = useState<number>(30);
+  const [location, setLocation] = useState("");
   const [dueAt, setDueAt] = useState("");
   const [assigneeId, setAssigneeId] = useState<string>(
     initialAssigneeId ?? currentUserId ?? "",
@@ -77,29 +81,45 @@ export function LeadTaskWidget({
     };
   }, [currentUserId, initialAssigneeId, propertyId]);
 
+  const needsTitle = taskType === "task";
+  const inPerson = taskType === "appointment" && mode === "in_person";
+  const canSubmit =
+    Boolean(dueAt && assigneeId) &&
+    !(needsTitle && !title.trim()) &&
+    !pending &&
+    !loadingMembers &&
+    !memberLoadError;
+
   const submit = () => {
-    if (
-      !dueAt ||
-      !assigneeId ||
-      pending ||
-      loadingMembers ||
-      memberLoadError
-    )
-      return;
+    if (!canSubmit) return;
     startTransition(async () => {
       const result = await callAction(
         createLeadTaskAction(propertyId, {
-          type: taskType,
+          kind: taskType,
           dueAt: new Date(dueAt).toISOString(),
           assigneeId,
+          ...(taskType === "task" ? { title: title.trim() } : {}),
+          ...(taskType === "appointment"
+            ? {
+                mode,
+                ...(inPerson
+                  ? {
+                      durationMinutes,
+                      ...(location.trim() ? { location: location.trim() } : {}),
+                    }
+                  : {}),
+              }
+            : {}),
         }),
         {
-          successMessage: `${TASK_LABELS[taskType]} task created for ${address}`,
-          fallbackMessage: "Could not create task",
+          successMessage: `${TASK_LABELS[taskType]} created for ${address}`,
+          fallbackMessage: `Could not create ${TASK_LABELS[taskType].toLowerCase()}`,
         },
       );
       if (result.ok) {
         setDueAt("");
+        setTitle("");
+        setLocation("");
         router.refresh();
       }
     });
@@ -110,7 +130,7 @@ export function LeadTaskWidget({
       <div
         className="inline-flex w-fit rounded-md border border-[#e5e1df] bg-white p-0.5"
         role="group"
-        aria-label="Task type"
+        aria-label="Next step type"
       >
         {(Object.keys(TASK_LABELS) as LeadTaskKind[]).map((type) => (
           <button
@@ -131,6 +151,78 @@ export function LeadTaskWidget({
           </button>
         ))}
       </div>
+
+      {taskType === "appointment" ? (
+        <div
+          className="inline-flex w-fit rounded-md border border-[#e5e1df] bg-white p-0.5"
+          role="group"
+          aria-label="Appointment mode"
+        >
+          {(Object.keys(MODE_LABELS) as Mode[]).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setMode(m)}
+              aria-pressed={mode === m}
+              data-testid={`lead-task-mode-${m}`}
+              className={cn(
+                "rounded px-3 py-1 text-xs font-semibold transition-colors",
+                mode === m
+                  ? "bg-[#111827] text-white"
+                  : "text-[#78716c] hover:bg-[#f5f5f4] hover:text-[#1c1917]",
+              )}
+            >
+              {MODE_LABELS[m]}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <label className="flex min-w-0 flex-col gap-1 text-xs font-medium text-[#78716c]">
+          Title
+          <input
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            disabled={pending}
+            maxLength={200}
+            data-testid="lead-task-title"
+            className="h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-2 text-sm text-[#1c1917] outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50"
+          />
+        </label>
+      )}
+
+      {inPerson ? (
+        <div className="grid min-w-0 gap-2 sm:grid-cols-2">
+          <label className="flex min-w-0 flex-col gap-1 text-xs font-medium text-[#78716c]">
+            Duration
+            <select
+              value={durationMinutes}
+              onChange={(e) => setDurationMinutes(Number(e.target.value))}
+              disabled={pending}
+              data-testid="lead-task-duration"
+              className="h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-2 text-sm text-[#1c1917] outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50"
+            >
+              {DURATION_OPTIONS.map((minutes) => (
+                <option key={minutes} value={minutes}>
+                  {minutes} min
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex min-w-0 flex-col gap-1 text-xs font-medium text-[#78716c]">
+            Location
+            <input
+              type="text"
+              value={location}
+              onChange={(e) => setLocation(e.target.value)}
+              disabled={pending}
+              maxLength={500}
+              data-testid="lead-task-location"
+              className="h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-2 text-sm text-[#1c1917] outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50"
+            />
+          </label>
+        </div>
+      ) : null}
 
       <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
         <label className="flex min-w-0 flex-col gap-1 text-xs font-medium text-[#78716c]">
@@ -167,23 +259,17 @@ export function LeadTaskWidget({
           <Button
             type="button"
             size="sm"
-            disabled={
-              !dueAt ||
-              !assigneeId ||
-              pending ||
-              loadingMembers ||
-              memberLoadError
-            }
+            disabled={!canSubmit}
             onClick={submit}
             data-testid="lead-task-submit"
           >
-            Create Task
+            {taskType === "appointment" ? "Create appointment" : "Create task"}
           </Button>
         </div>
       </div>
       {memberLoadError ? (
         <p className="text-destructive text-xs" role="alert">
-          Team members could not be loaded. Refresh before assigning this task.
+          Team members could not be loaded. Refresh before assigning this next step.
         </p>
       ) : null}
     </div>

@@ -58,6 +58,17 @@ describe("setLeadNextActionAction", () => {
     });
   });
 
+  it("maps window and permission refusals from the shared write function to plain copy", async () => {
+    for (const [error, expected] of [
+      [{ code: "22023", message: "INVALID_INPUT: start must be within 1 hour in the past and 2 years in the future" }, { code: "INVALID_DUE_AT", message: "Choose a time between one hour ago and two years from now." }],
+      [{ code: "P0001", message: "tasks_reject_dnc_locked_contact: DNC_LOCKED contact" }, { code: "DNC_LOCKED", message: "This lead is permanently read-only." }],
+      [{ code: "42501", message: "FORBIDDEN: caller is not the actor" }, { code: "FORBIDDEN", message: "You can't set a next action on this lead." }],
+    ] as const) {
+      createClient.mockResolvedValue({ rpc: vi.fn().mockResolvedValue({ data: null, error }) });
+      await expect(setLeadNextActionAction(input)).resolves.toEqual({ ok: false, error: expected });
+    }
+  });
+
   it("returns only a proven task row and refreshes its read surfaces", async () => {
     const rpc = vi.fn().mockResolvedValue({
       data: [{ id: "task-1", title: "Follow up on 1 Main St", due_at: input.dueAt, was_created: false }],

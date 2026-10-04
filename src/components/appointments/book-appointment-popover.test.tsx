@@ -11,11 +11,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BookAppointmentPopover } from "./book-appointment-popover";
 import {
-  bookAppointment,
   checkAppointmentOverlap,
   getMemberTimezone,
 } from "./book-appointment-action";
 import { rescheduleAppointmentAction } from "./lifecycle-actions";
+import { createNextStepAction } from "./next-step-actions";
 
 // Mirrors the assign-dropdown.test.tsx convention: mock the base-ui-backed
 // ui/* primitives (no ResizeObserver/PointerEvent polyfills in this jsdom
@@ -139,8 +139,11 @@ vi.mock("@/app/(dashboard)/messages/_components/assignee-select", () => ({
   ),
 }));
 
+vi.mock("./next-step-actions", () => ({
+  createNextStepAction: vi.fn(),
+}));
+
 vi.mock("./book-appointment-action", () => ({
-  bookAppointment: vi.fn(),
   checkAppointmentOverlap: vi.fn(),
   getMemberTimezone: vi.fn(),
 }));
@@ -163,7 +166,7 @@ async function openAndFillHappyPath() {
 
 describe("<BookAppointmentPopover />", () => {
   beforeEach(() => {
-    vi.mocked(bookAppointment).mockReset();
+    vi.mocked(createNextStepAction).mockReset();
     vi.mocked(checkAppointmentOverlap).mockReset();
     vi.mocked(checkAppointmentOverlap).mockResolvedValue({
       ok: true,
@@ -176,7 +179,7 @@ describe("<BookAppointmentPopover />", () => {
     });
   });
 
-  it("opens from the trigger and shows the form fields", async () => {
+  it("opens from the trigger and shows the form fields (a linked lead defaults to a phone call with no duration)", async () => {
     const user = userEvent.setup();
     render(
       <BookAppointmentPopover propertyId="prop-1" currentUserId="user-1" />,
@@ -188,7 +191,10 @@ describe("<BookAppointmentPopover />", () => {
     await user.click(screen.getByTestId("book-appointment-trigger"));
 
     expect(screen.getByTestId("book-appointment-calendar")).toBeInTheDocument();
-    expect(screen.getByTestId("book-appointment-duration")).toBeInTheDocument();
+    expect(screen.getByTestId("book-appointment-mode-phone")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByTestId("book-appointment-duration")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("book-appointment-location")).not.toBeInTheDocument();
+    expect(screen.getByTestId("book-appointment-submit")).toHaveTextContent("Schedule call");
     expect(screen.getByTestId("assignee-select")).toBeInTheDocument();
     expect(screen.getByTestId("book-appointment-note")).toBeInTheDocument();
     expect(screen.getByTestId("book-appointment-submit")).toBeDisabled();
@@ -207,9 +213,33 @@ describe("<BookAppointmentPopover />", () => {
     ).toHaveTextContent("America/Chicago");
   });
 
+  it("a personal calendar block (no property or contact) defaults to in person", async () => {
+    const user = userEvent.setup();
+    render(<BookAppointmentPopover currentUserId="user-1" />);
+    await user.click(screen.getByTestId("book-appointment-trigger"));
+    expect(screen.getByTestId("book-appointment-mode-in_person")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("book-appointment-duration")).toBeInTheDocument();
+    expect(screen.getByTestId("book-appointment-location")).toBeInTheDocument();
+  });
+
+  it("submits a phone appointment as 15 minutes with no location and the phone mode", async () => {
+    vi.mocked(createNextStepAction).mockResolvedValue({
+      ok: true,
+      data: { taskId: "task-p", alreadyQualified: false, chainId: "chain-p", duplicate: false },
+    });
+    render(<BookAppointmentPopover propertyId="prop-1" currentUserId="user-1" />);
+    const user = await openAndFillHappyPath();
+    expect(await screen.findByTestId("book-appointment-end-label")).toHaveTextContent("2:15 PM");
+    await user.click(screen.getByTestId("book-appointment-submit"));
+    await waitFor(() => expect(createNextStepAction).toHaveBeenCalledTimes(1));
+    const call = vi.mocked(createNextStepAction).mock.calls[0]![0];
+    expect(call).toMatchObject({ mode: "phone", durationMinutes: 15, date: "2026-06-15", time: "14:00" });
+    expect(call).not.toHaveProperty("location");
+  });
+
   it("computes the end-time preview from date + time + duration and updates it when duration changes", async () => {
     render(
-      <BookAppointmentPopover propertyId="prop-1" currentUserId="user-1" />,
+      <BookAppointmentPopover propertyId="prop-1" defaultMode="in_person" currentUserId="user-1" />,
     );
     await openAndFillHappyPath();
 
@@ -245,11 +275,11 @@ describe("<BookAppointmentPopover />", () => {
       await screen.findByTestId("book-appointment-dst-error"),
     ).toHaveTextContent("daylight-saving change");
     expect(screen.getByTestId("book-appointment-submit")).toBeDisabled();
-    expect(bookAppointment).not.toHaveBeenCalled();
+    expect(createNextStepAction).not.toHaveBeenCalled();
   });
 
   it("submits the raw wall-clock fields (never a pre-converted Date) and closes on success", async () => {
-    vi.mocked(bookAppointment).mockResolvedValue({
+    vi.mocked(createNextStepAction).mockResolvedValue({
       ok: true,
       data: {
         taskId: "task-1",
@@ -264,6 +294,7 @@ describe("<BookAppointmentPopover />", () => {
         propertyId="prop-1"
         contactId="contact-1"
         subjectLabel="123 Main St"
+        defaultMode="in_person"
         currentUserId="user-1"
         onBooked={onBooked}
       />,
@@ -272,17 +303,20 @@ describe("<BookAppointmentPopover />", () => {
     await screen.findByTestId("book-appointment-end-label");
 
     await user.type(screen.getByTestId("book-appointment-note"), "Bring comps");
+    await user.type(screen.getByTestId("book-appointment-location"), " 12 Oak St ");
     await user.click(screen.getByTestId("book-appointment-submit"));
 
-    await waitFor(() => expect(bookAppointment).toHaveBeenCalledTimes(1));
-    expect(bookAppointment).toHaveBeenCalledWith({
+    await waitFor(() => expect(createNextStepAction).toHaveBeenCalledTimes(1));
+    expect(createNextStepAction).toHaveBeenCalledWith({
       propertyId: "prop-1",
       contactId: "contact-1",
       assigneeId: "user-1",
       date: "2026-06-15",
       time: "14:00",
       timeZone: "America/Chicago",
+      mode: "in_person",
       durationMinutes: 30,
+      location: "12 Oak St",
       title: "Appointment — 123 Main St",
       note: "Bring comps",
       idempotencyKey: expect.stringMatching(
@@ -305,7 +339,7 @@ describe("<BookAppointmentPopover />", () => {
   });
 
   it("mints a fresh idempotency key on each open, so a second booking after a successful one never reuses the first key", async () => {
-    vi.mocked(bookAppointment).mockResolvedValue({
+    vi.mocked(createNextStepAction).mockResolvedValue({
       ok: true,
       data: {
         taskId: "task-1",
@@ -320,9 +354,9 @@ describe("<BookAppointmentPopover />", () => {
 
     let user = await openAndFillHappyPath();
     await user.click(screen.getByTestId("book-appointment-submit"));
-    await waitFor(() => expect(bookAppointment).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(createNextStepAction).toHaveBeenCalledTimes(1));
     const firstKey =
-      vi.mocked(bookAppointment).mock.calls[0]![0].idempotencyKey;
+      vi.mocked(createNextStepAction).mock.calls[0]![0].idempotencyKey;
     expect(firstKey).toEqual(expect.any(String));
 
     // Popover closed on success (asserted above); reopening for a second,
@@ -330,9 +364,9 @@ describe("<BookAppointmentPopover />", () => {
     // the first one.
     user = await openAndFillHappyPath();
     await user.click(screen.getByTestId("book-appointment-submit"));
-    await waitFor(() => expect(bookAppointment).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(createNextStepAction).toHaveBeenCalledTimes(2));
     const secondKey =
-      vi.mocked(bookAppointment).mock.calls[1]![0].idempotencyKey;
+      vi.mocked(createNextStepAction).mock.calls[1]![0].idempotencyKey;
 
     expect(secondKey).toEqual(expect.any(String));
     expect(secondKey).not.toBe(firstKey);
@@ -404,7 +438,9 @@ describe("<BookAppointmentPopover />", () => {
         />,
       );
       await openAndFillHappyPath();
-      await screen.findByTestId("book-appointment-end-label");
+      // No duration control or end preview on a reschedule: the server keeps the existing length.
+      expect(screen.queryByTestId("book-appointment-duration")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("book-appointment-end-label")).not.toBeInTheDocument();
       await userEvent
         .setup()
         .click(screen.getByTestId("book-appointment-submit"));
@@ -422,7 +458,7 @@ describe("<BookAppointmentPopover />", () => {
           /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
         ),
       });
-      expect(bookAppointment).not.toHaveBeenCalled();
+      expect(createNextStepAction).not.toHaveBeenCalled();
       await waitFor(() =>
         expect(onRescheduled).toHaveBeenCalledWith({
           taskId: "task-2",

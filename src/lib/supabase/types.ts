@@ -556,6 +556,7 @@ export type Database = {
           command_id: string | null
           created_at: string
           follow_up_at: string
+          follow_up_calendar_chain_id: string | null
           id: string
           idempotency_key: string
           org_id: string
@@ -574,6 +575,7 @@ export type Database = {
           command_id?: string | null
           created_at?: string
           follow_up_at: string
+          follow_up_calendar_chain_id?: string | null
           id?: string
           idempotency_key: string
           org_id: string
@@ -592,6 +594,7 @@ export type Database = {
           command_id?: string | null
           created_at?: string
           follow_up_at?: string
+          follow_up_calendar_chain_id?: string | null
           id?: string
           idempotency_key?: string
           org_id?: string

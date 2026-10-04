@@ -141,8 +141,15 @@ export async function setLeadNextActionAction(input: {
       p_idempotency_key: input.idempotencyKey,
     });
     if (error) {
-      if (error.message?.startsWith("DNC_LOCKED:")) {
+      const message = error.message ?? "";
+      if (message.includes("DNC_LOCKED")) {
         return { ok: false, error: { code: "DNC_LOCKED", message: "This lead is permanently read-only." } };
+      }
+      if (message.includes("INVALID_INPUT") || error.code === "22023") {
+        return { ok: false, error: { code: "INVALID_DUE_AT", message: "Choose a time between one hour ago and two years from now." } };
+      }
+      if (message.includes("FORBIDDEN") || error.code === "42501") {
+        return { ok: false, error: { code: "FORBIDDEN", message: "You can't set a next action on this lead." } };
       }
       return { ok: false, error: { code: error.code ?? "NEXT_ACTION_FAILED", message: error.message } };
     }
