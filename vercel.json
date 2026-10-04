@@ -45,6 +45,10 @@
       "schedule": "2-59/5 * * * *"
     },
     {
+      "path": "/api/cron/seller-appointment-reminders",
+      "schedule": "6-59/10 * * * *"
+    },
+    {
       "path": "/api/cron/esign-send-reconciliation",
       "schedule": "3-59/5 * * * *"
     },
