@@ -161,7 +161,7 @@ async function staleSweepWitness(h: Harness) {
   expect(due).toBe(1);
   await h.staleSweep();
   const after = (await h.scratch.pool.query("select status,pause_reason from public.sequence_enrollments where id=$1", [ctx.lead.enrollments[0]])).rows[0];
-  return after;
+  return { after, enrollmentId: ctx.lead.enrollments[0] };
 }
 
 describe("the stress gate has teeth", () => {
@@ -173,10 +173,13 @@ describe("the stress gate has teeth", () => {
       if (name === "the stale-call sweep ignores an open Norma hold") {
         const clean = await Harness.create(rng(701));
         try {
-          expect(await staleSweepWitness(clean)).toEqual({ status: "paused", pause_reason: "call_in_progress" });
+          expect((await staleSweepWitness(clean)).after).toEqual({ status: "paused", pause_reason: "call_in_progress" });
           expect((await checkInvariants(clean, { settled: false })).violations).toEqual([]);
+          expect((await checkInvariants(clean, { settled: true })).violations.filter((v) => v.startsWith("[5]"))).toEqual([]);
         } finally { await clean.close(); }
-        expect((await staleSweepWitness(h)).status).toBe("active");
+        const witness = await staleSweepWitness(h);
+        expect(witness.after.status).toBe("active");
+        expect((await checkInvariants(h, { settled: true })).violations.filter((v) => v.startsWith("[5]") && v.includes(`enrollment ${witness.enrollmentId} resumed`)).length, "the witness enrollment itself must produce the forbidden-resume violation").toBeGreaterThan(0);
       }
       const { violations } = await checkInvariants(h, { settled: true });
       expect(violations.filter((v) => v.startsWith(`[${invariant}]`)).length, `no [${invariant}] violation among: ${violations.slice(0, 5).join(" | ")}`).toBeGreaterThan(0);
