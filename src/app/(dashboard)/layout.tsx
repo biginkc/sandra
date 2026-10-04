@@ -5,7 +5,7 @@ import { GlobalSearchTrigger } from "@/components/search/global-search-trigger";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
-import { Button } from "@/components/ui/button";
+import { SignOutForm } from "@/components/sign-out-form";
 import { ConnectionBanner } from "@/components/connection-banner";
 import { DashboardAdminNav } from "@/components/dashboard-admin-nav";
 import {
@@ -104,16 +104,7 @@ export default async function DashboardLayout({
           <GlobalSearchTrigger />
           <SoftphoneHeaderButton />
           <NotificationsBell userId={user.id} />
-          <form action="/auth/signout" method="post" className="border-l border-white/10">
-            <Button
-              type="submit"
-              variant="ghost"
-              size="sm"
-              className="h-auto rounded-lg px-[14px] py-[7px] pl-4 text-sm font-semibold text-white hover:bg-white/[0.07] hover:text-white"
-            >
-              Sign out
-            </Button>
-          </form>
+          <SignOutForm />
         </div>
       </header>
 

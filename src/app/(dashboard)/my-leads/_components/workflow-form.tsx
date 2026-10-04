@@ -25,6 +25,12 @@ export type WorkflowReconciliation = {
 export const WorkflowRecoveryContext = createContext<{
   message: string; blocked: boolean; busy: boolean; refresh: () => void
   reconciliation?: WorkflowReconciliation
+  /** Present only after a frozen replay was definitely rejected: releases the locked values for editing. */
+  startOver?: () => void
+  /** Present in the "may have saved" state: confirm, then save once under a new key. */
+  saveAsNew?: () => void
+  /** Returns false when the user declines to close while a save is uncertain or already saved. */
+  confirmClose: () => boolean
 } | null>(null)
 
 export function centralDateTimeFromIso(value: unknown): string {
@@ -175,6 +181,8 @@ export function WorkflowFormError({ message }: { message: string | null }) {
         {recovery?.message ?? message}
         {recovery?.reconciliation && <span className="mt-1 block text-xs font-medium text-foreground">The original values are locked while Sandra reconciles this save. Review the displayed values and submit the saved request again.</span>}
         {(recovery?.blocked || recovery?.reconciliation) && <Button type="button" variant="link" disabled={recovery.busy} onClick={recovery.refresh}>{recovery.busy ? "Refreshing…" : "Refresh"}</Button>}
+        {recovery?.startOver && <Button type="button" variant="link" disabled={recovery.busy} onClick={recovery.startOver}>Start over</Button>}
+        {recovery?.saveAsNew && <Button type="button" variant="link" disabled={recovery.busy} onClick={recovery.saveAsNew}>Save as a new update</Button>}
       </span>
     </div>
   )

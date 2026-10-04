@@ -28,7 +28,7 @@ it('guards and saves the outcome in one RPC before starting the drip',async()=>{
 });
 
 it('does not enroll when reassignment wins the race at the write boundary',async()=>{
-  mocks.rpc.mockResolvedValue({data:null,error:{message:'STALE_ASSIGNMENT'}});
+  mocks.rpc.mockResolvedValue({data:null,status:400,error:{message:'STALE_ASSIGNMENT',code:'P0001'}});
   expect(await submitMyLeadHandoffDrip(input)).toEqual({ok:false,answered:true,certainty:'rejected',code:'STALE_STATE',message:'This lead changed. Refresh before trying again.'});
   expect(mocks.start).not.toHaveBeenCalled();
 });
@@ -62,3 +62,10 @@ it('treats a missing confirmation or a thrown RPC as unknown',async()=>{
   expect(await submitMyLeadHandoffDrip(input)).toMatchObject({ok:false,certainty:'unknown'});
 });
 
+
+it('does not mark a fetch failure (status 0, empty code) as answered',async()=>{
+  mocks.rpc.mockResolvedValue({data:null,status:0,error:{message:'TypeError: fetch failed',details:'',hint:'',code:''}});
+  const result=await submitMyLeadHandoffDrip(input);
+  expect(result).toMatchObject({ok:false,certainty:'unknown'});
+  expect(result).not.toHaveProperty('answered');
+});
