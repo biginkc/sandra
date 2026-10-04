@@ -51,6 +51,7 @@ export async function main(args=process.argv.slice(2), env=process.env) {
   assert.ok(Number(process.versions.node.split('.')[0])>=24,'Node24+ required');
   checkEntryEnvironment(env);
   checkCheckout(ROOT);
+  assert.equal(execFileSync('git',['status','--porcelain'],{cwd:ROOT,encoding:'utf8'}).trim(),'','Clean candidate required');
   const source=requireLoopbackPostgresUrl(env.NORMA_STRESS_SOURCE_DB_URL ?? '');
   const out=parseArgs(args);
   assert.ok(!existsSync(out),'Output directory already exists');
@@ -87,6 +88,8 @@ export async function main(args=process.argv.slice(2), env=process.env) {
     await admin.query(`drop database "${name}" with (force)`);
     writeManifest(path.join(out,'databases',`${name}.json`),{database:name,lane:'upgrade',runId,sourceDumpSha256:receipt.sourceDumpSha256,migrations:[],state:'dropped'});
     checkCheckout(ROOT); // Refuse source drift during tests, too.
+    assert.equal(execFileSync('git',['rev-parse','HEAD'],{cwd:ROOT,encoding:'utf8'}).trim(),receipt.sourceCommit,'Candidate HEAD changed');
+    assert.equal(execFileSync('git',['status','--porcelain'],{cwd:ROOT,encoding:'utf8'}).trim(),'','Candidate changed during tests');
     assert.deepEqual(Object.fromEntries(readdirSync(path.join(ROOT,'supabase/migrations')).filter(file=>file.endsWith('.sql')).sort().map(file=>[file,sha256(readFileSync(path.join(ROOT,'supabase/migrations',file)))])),checkoutMigrations,'Foundation migration checkout drift');
     const manifests=readdirSync(path.join(out,'databases')).filter(f=>f.endsWith('.json')).map(f=>JSON.parse(readFileSync(path.join(out,'databases',f),'utf8')));
     assert.ok(manifests.some(m=>m.lane==='legacy')&&manifests.some(m=>m.lane==='postddl'),'Missing applied migration manifests');
@@ -104,6 +107,7 @@ export async function main(args=process.argv.slice(2), env=process.env) {
     const upgradeCases=JSON.parse(readFileSync(path.join(out,'upgrade-cases.json'),'utf8'));
     assert.equal(upgradeCases.length,20,'Missing per-case upgrade manifests');
     assert.ok(upgradeCases.every(c=>c.rolledBack===true),'Upgrade rollback incomplete');
+    for (const c of upgradeCases) {checkSchema(c.catalogs.source,'upgrade-source');checkSchema(c.catalogs.legacy,'legacy');checkSchema(c.catalogs.postddl,'postddl');checkSchema(c.catalogs.rolledBack,'upgrade-source');assert.deepEqual(c.migrations,CONTRACT.norma_migrations,'Upgrade hash manifest drift');}
     receipt.databaseManifests=manifests; receipt.upgradeCases=upgradeCases;
     receipt.success=true;
   } catch (error) {

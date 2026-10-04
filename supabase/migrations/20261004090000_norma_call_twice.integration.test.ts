@@ -42,11 +42,12 @@ const nextPhone = () => `+1816556${String(1000 + (phoneCounter++ % 9000)).padSta
 async function withDb(fn: (db: Client, ctx: Ctx) => Promise<void>, beforeUpgrade?: (db: Client, ctx: Ctx) => Promise<void>) {
   const db = new Client({ connectionString: url });
   await db.connect();
+  const catalogs: Record<string, unknown> = {};
   try {
     await db.query("begin");
-    if (lane) checkSchema(await schemaCatalog(db), "upgrade-source");
+    if (lane) { catalogs.source = await schemaCatalog(db); checkSchema(catalogs.source, "upgrade-source"); }
     await db.query(migration);
-    if (lane) checkSchema(await schemaCatalog(db), "legacy");
+    if (lane) { catalogs.legacy = await schemaCatalog(db); checkSchema(catalogs.legacy, "legacy"); }
     const ctx: Ctx = { org: randomUUID(), rep: randomUUID(), assignee: randomUUID(), sequence: randomUUID() };
     await db.query("insert into auth.users(id) values ($1), ($2)", [ctx.rep, ctx.assignee]);
     await db.query("insert into public.organizations(id,name) values ($1,'norma test')", [ctx.org]);
@@ -59,16 +60,17 @@ async function withDb(fn: (db: Client, ctx: Ctx) => Promise<void>, beforeUpgrade
     );
     if (beforeUpgrade) await beforeUpgrade(db, ctx);
     await db.query(retryMigration);
-    if (lane) checkSchema(await schemaCatalog(db), "postddl");
+    if (lane) { catalogs.postddl = await schemaCatalog(db); checkSchema(catalogs.postddl, "postddl"); }
     await fn(db, ctx);
   } finally {
     try {
     await db.query("rollback");
     if (lane) {
-      checkSchema(await schemaCatalog(db), "upgrade-source");
+      catalogs.rolledBack = await schemaCatalog(db);
+      checkSchema(catalogs.rolledBack, "upgrade-source");
       const file = path.join(path.dirname(process.env.NORMA_SCHEMA_MANIFEST_DIRECTORY!), "upgrade-cases.json");
       const receipts = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : [];
-      receipts.push({test: expect.getState().currentTestName, rolledBack: true, migrations: CONTRACT.norma_migrations});
+      receipts.push({test: expect.getState().currentTestName, rolledBack: true, catalogs, migrations: CONTRACT.norma_migrations});
       writeManifest(file, receipts);
     }
     } finally { await db.end(); }
