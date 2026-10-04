@@ -112,7 +112,7 @@ test("close-attempts and rollback route to their RPCs", async () => {
 });
 
 test("later-phase commands and unknown commands are refused without any call", async () => {
-  for (const argv of [["relabel", "--org", ORG], ["phone-backfill", "--org", ORG], ["nope"]]) {
+  for (const argv of [["offer-backfill", "--org", ORG], ["phone-backfill", "--org", ORG], ["nope"]]) {
     const h = harness();
     assert.equal(await run(argv, h.io), 1);
     assert.equal(h.calls.length, 0);
@@ -166,4 +166,23 @@ test("refuses to start without the 1Password service account token, and never lo
   const leak = harness({ rpcError: `boom ${OP_TOKEN}` });
   await run(reassign, leak.io);
   assert.ok(![...leak.out, ...leak.err].join("").includes(OP_TOKEN));
+});
+
+test("relabel previews with the resolved owner as expected assignee and needs the cutoff to apply", async () => {
+  const h = harness();
+  assert.equal(await run(["relabel", "--org", ORG], h.io), 0);
+  assert.equal(h.calls[0].name, "fn_my_leads_relabel_open_next_steps");
+  assert.equal(h.calls[0].args.p_expected_assignee, JARRAD);
+  assert.equal(h.calls[0].args.p_apply, false);
+  const a = harness();
+  assert.equal(await run(["relabel", "--org", ORG, "--apply", "--confirm", "x"], a.io), 1);
+  assert.equal(a.calls.length, 0);
+});
+
+test("retire-preflight is read-only and cannot be applied", async () => {
+  const h = harness({ preview: { openFutureLegacy: 0 } });
+  assert.equal(await run(["retire-preflight", "--org", ORG], h.io), 0);
+  assert.deepEqual(h.calls, [{ name: "fn_my_leads_next_step_retire_preflight", args: { p_org_id: ORG } }]);
+  const a = harness();
+  assert.equal(await run(["retire-preflight", "--org", ORG, "--apply", "--confirm", "x"], a.io), 1);
 });

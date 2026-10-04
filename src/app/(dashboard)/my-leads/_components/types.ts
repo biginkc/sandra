@@ -62,10 +62,11 @@ export type MyLeadQueueRow = {
     motivationResponseKind: MyLeadMotivationResponseKind
     text: string | null
   }
-  nextStep: {
-    kind: "callback" | "appointment"
-    label: string
-  } | null
+  nextStep:
+    | { kind: "appointment"; mode: "phone" | "in_person"; label: string; dueAt?: string }
+    // Legacy rows only, until the next-step read-model migration applies.
+    | { kind: "callback"; label: string; dueAt?: string }
+    | null
   offer: {
     amountLabel: string
     method: string
@@ -138,6 +139,9 @@ export type MyLeadAppointment = {
   label: string
   dueLabel: string
   statusLabel: string
+  /** ISO due time and task type, exposed as data-next-step-* attributes (seam S4). */
+  dueAt?: string
+  taskType?: "appointment" | "callback"
   /** Present only when the existing appointment lifecycle can safely act on this row. */
   lifecycleAction?: MyLeadAppointmentActionTarget
   /** Present only when this task is a callback and the existing task controls can act on it. */

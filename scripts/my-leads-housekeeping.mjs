@@ -9,6 +9,8 @@
 //   reassign        --target <uuid> --owner <uuid> [--keep-clock]   (target/owner default to the
 //                   org's single active owner with acquisitions enabled, read from memberships)
 //   close-attempts  [--older-than "7 days"] (apply also needs --cutoff <timestamp printed by the preview>)
+//   relabel         [--expected-assignee <uuid>] (apply also needs --cutoff <timestamp printed by the preview>)
+//   retire-preflight (read-only count of open legacy follow_up/callback rows)
 //   rollback        --run <uuid>
 // Later phases add relabel, offer-backfill, link-backfill, phone-backfill, ack-legacy-prompts to
 // COMMANDS below as their SQL functions ship; they are refused until then.
@@ -51,9 +53,18 @@ export const COMMANDS = {
     args: (o) => ({ p_org_id: o.org, p_older_than: o.olderThan ?? "7 days", p_cutoff: o.cutoff ?? null }),
     needsCutoffToApply: true,
   },
+  relabel: {
+    needs: ["org"],
+    rpc: "fn_my_leads_relabel_open_next_steps",
+    args: (o) => ({ p_org_id: o.org, p_expected_assignee: o.expectedAssignee ?? o.target, p_cutoff: o.cutoff ?? null }),
+    needsCutoffToApply: true,
+    resolveIdentities: true,
+  },
+  // Read-only gate for the retire migration: never applies anything.
+  "retire-preflight": { needs: ["org"], rpc: "fn_my_leads_next_step_retire_preflight", args: (o) => ({ p_org_id: o.org }), readOnly: true },
   rollback: { needs: ["org", "run"], rollback: true },
 };
-const LATER = ["relabel", "offer-backfill", "link-backfill", "phone-backfill", "ack-legacy-prompts"];
+const LATER = ["offer-backfill", "link-backfill", "phone-backfill", "ack-legacy-prompts"];
 
 export function parseArgs(argv) {
   const [command, ...rest] = argv;
@@ -67,7 +78,7 @@ export function parseArgs(argv) {
     const a = rest[i];
     if (a === "--apply") o.apply = true;
     else if (a === "--keep-clock") o.keepClock = true;
-    else if (["--org", "--target", "--owner", "--run", "--confirm", "--older-than", "--cutoff"].includes(a)) {
+    else if (["--org", "--target", "--owner", "--run", "--confirm", "--older-than", "--cutoff", "--expected-assignee"].includes(a)) {
       const key = a.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
       o[key] = value(i, a.slice(2));
       i += 1;
@@ -147,12 +158,18 @@ export async function run(argv, io) {
 
     const preview = async () => {
       if (spec.rollback) return rpc(client, "fn_my_leads_housekeeping_run_info", { p_run: o.run, p_org_id: o.org });
+      if (spec.readOnly) return rpc(client, spec.rpc, spec.args(o));
       return rpc(client, spec.rpc, { ...spec.args(o), p_apply: false });
     };
     const previewJson = { supabaseHost: host, ...(await preview()) };
     const printed = canonicalJson(previewJson);
     const hash = sha256Hex(printed);
 
+    if (spec.readOnly) {
+      if (o.apply) throw new Error(`${o.command} is read-only and cannot be applied`);
+      io.out(`${printed}\n`);
+      return 0;
+    }
     if (!o.apply) {
       io.out(`${printed}\n`);
       const cutoffFlag = spec.needsCutoffToApply && previewJson.cutoff ? ` --cutoff ${previewJson.cutoff}` : "";

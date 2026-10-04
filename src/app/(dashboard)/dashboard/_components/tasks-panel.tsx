@@ -266,6 +266,9 @@ function Section({
                 isDncLocked ? "text-muted-foreground opacity-70" : ""
               }`}
               data-testid={`task-row-${t.id}`}
+              data-next-step-id={t.id}
+              data-next-step-due-at={t.due_at}
+              data-next-step-kind={t.type}
             >
               <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
                 {href ? (

@@ -273,6 +273,8 @@ async function insertOpenAppointment(opts: {
       created_by: opts.createdBy,
       calendar_chain_id: chainId,
       google_calendar_event_id: opts.googleEventId ?? null,
+      // Phone is the default mode and never touches Google; these fixtures assert Google-ledger behaviour.
+      ...({ mode: "in_person" } as Record<string, unknown>),
     })
     .select("id")
     .single();

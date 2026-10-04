@@ -1,5 +1,6 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { schemaReady } from "@/lib/my-leads/schema-ready";
 import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
 import { teamMemberOptionLabel } from "@/lib/auth/team-member";
 
@@ -288,5 +289,41 @@ export async function fetchCalendarAppointmentsForWindows(
     };
   });
 
+  // One extra read for the mode tag. Skipped (no tag) until `tasks.mode`
+  // exists; any failure degrades to no tag, never to a failed calendar.
+  if (rows.length > 0 && (await schemaReady("next_step_write"))) {
+    try {
+      const { data: modes, error: modeError } = await (
+        supabase as unknown as TaskModeClient
+      )
+        .from("tasks")
+        .select("id, mode")
+        .in(
+          "id",
+          rows.map((r) => r.id),
+        );
+      if (!modeError && modes) {
+        const byId = new Map(modes.map((m) => [m.id, m.mode]));
+        for (const row of rows) row.mode = byId.get(row.id) ?? null;
+      }
+    } catch (err) {
+      console.error("[calendar] task mode lookup failed", err);
+    }
+  }
+
   return { ok: true, rows };
 }
+
+type TaskModeClient = {
+  from(table: "tasks"): {
+    select(columns: string): {
+      in(
+        column: "id",
+        values: string[],
+      ): PromiseLike<{
+        data: { id: string; mode: "phone" | "in_person" | null }[] | null;
+        error: { message: string } | null;
+      }>;
+    };
+  };
+};

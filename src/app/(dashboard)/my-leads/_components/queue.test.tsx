@@ -436,6 +436,24 @@ describe("MyLeadsQueue", () => {
     expect(details.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
+  it("labels the next step by mode and carries the next-step data attributes", () => {
+    const props = buildProps()
+    const contacted = props.stages.contacted.rows as MyLeadQueueRow[]
+    contacted[0] = { ...contacted[0], nextStep: { kind: "appointment", mode: "phone", label: "Sep 12", dueAt: "2026-09-12T15:00:00Z" } }
+    const { rerender } = render(<MyLeadsQueue {...props} />)
+    const row = within(screen.getByTestId("my-lead-row-property-2"))
+    expect(row.getByText("Phone appointment · Sep 12")).toBeInTheDocument()
+    expect(document.querySelector('[data-next-step-kind="appointment"][data-next-step-due-at="2026-09-12T15:00:00Z"]')).not.toBeNull()
+
+    contacted[0] = { ...contacted[0], nextStep: { kind: "appointment", mode: "in_person", label: "Sep 13" } }
+    rerender(<MyLeadsQueue {...props} />)
+    expect(screen.getByText("In person · Sep 13")).toBeInTheDocument()
+
+    contacted[0] = { ...contacted[0], nextStep: { kind: "callback", label: "Sep 14" } }
+    rerender(<MyLeadsQueue {...props} />)
+    expect(screen.getByText("Callback · Sep 14")).toBeInTheDocument()
+  })
+
   it("describes the contacted gate without claiming the seller was reached", async () => {
     const user = userEvent.setup()
     render(<MyLeadsQueue {...buildProps()} />)

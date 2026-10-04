@@ -314,13 +314,14 @@ export function MyLeadQueueRow({
               </span>
             ))}
             {row.queueStage === "contacted" && row.nextStep && (
-              <span className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-[#bbf7d0] bg-[#dcfce7] px-2.5 py-1 text-[11.5px] font-bold text-[#15803d] dark:border-green-900 dark:bg-green-950 dark:text-green-300">
+              <span
+                data-next-step-due-at={row.nextStep.dueAt}
+                data-next-step-kind={row.nextStep.kind}
+                className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-[#bbf7d0] bg-[#dcfce7] px-2.5 py-1 text-[11.5px] font-bold text-[#15803d] dark:border-green-900 dark:bg-green-950 dark:text-green-300"
+              >
                 <CalendarCheck className="size-3 shrink-0" aria-hidden="true" />
                 <span className="break-words">
-                  {row.nextStep.kind === "callback"
-                    ? "Callback"
-                    : "Appointment"}{" "}
-                  · {row.nextStep.label}
+                  {nextStepText(row.nextStep)}
                 </span>
               </span>
             )}
@@ -406,14 +407,14 @@ export function MyLeadQueueRow({
                   {motivationLabel}
                 </span>
                 {row.nextStep && (
-                  <span>
+                  <span
+                    data-next-step-due-at={row.nextStep.dueAt}
+                    data-next-step-kind={row.nextStep.kind}
+                  >
                     <span className="font-semibold text-foreground">
                       Next step:
                     </span>{" "}
-                    {row.nextStep.kind === "callback"
-                      ? "Callback"
-                      : "Appointment"}{" "}
-                    · {row.nextStep.label}
+                    {nextStepText(row.nextStep)}
                   </span>
                 )}
               </div>
@@ -617,6 +618,11 @@ export function MyLeadQueueRow({
       </div>
     </article>
   );
+}
+
+function nextStepText(step: NonNullable<MyLeadQueueRow["nextStep"]>) {
+  if (step.kind === "callback") return `Callback · ${step.label}`
+  return `${step.mode === "in_person" ? "In person" : "Phone appointment"} · ${step.label}`
 }
 
 function firstCallLabel(state: MyLeadQueueRow["firstCall"]["state"]) {

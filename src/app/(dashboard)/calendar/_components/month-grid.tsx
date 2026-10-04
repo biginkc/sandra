@@ -193,6 +193,9 @@ export function MonthGrid({
                       )}
                       data-testid={`calendar-month-appointment-${appt.id}`}
                       data-appointment-tone={tone}
+                      data-next-step-id={appt.id}
+                      data-next-step-due-at={appt.due_at}
+                      data-next-step-kind="appointment"
                     >
                       {line}
                     </Link>
@@ -205,6 +208,9 @@ export function MonthGrid({
                       )}
                       data-testid={`calendar-month-appointment-${appt.id}`}
                       data-appointment-tone={tone}
+                      data-next-step-id={appt.id}
+                      data-next-step-due-at={appt.due_at}
+                      data-next-step-kind="appointment"
                     >
                       {line}
                     </span>
