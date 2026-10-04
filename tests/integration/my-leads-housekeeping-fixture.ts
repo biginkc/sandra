@@ -60,6 +60,7 @@ const CHAIN = [
   { key: 'postCall', file: '20261005160000_post_call_prompt_support', present: column('lead_notes', 'idempotency_key') },
   { key: 'sellerReminders', file: '20261005170000_seller_appointment_reminders', present: "to_regclass('public.seller_appointment_reminders') is not null" },
   { key: 'linkCapture', file: '20261005180000_dialpad_hangup_link_capture', present: proc('dialpad_cti_hangup_links') },
+  { key: 'leadComps', file: '20261007100000_lead_comps_foundation', present: "to_regclass('public.lead_comps') is not null" },
 ] as const;
 
 export type ChainKey = (typeof CHAIN)[number]['key'];

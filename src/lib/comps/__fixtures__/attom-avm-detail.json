@@ -1,0 +1,23 @@
+{
+  "status": { "version": "1.0.0", "code": 0, "msg": "SuccessWithResult", "total": 1, "attomId": 100000001 },
+  "property": [
+    {
+      "identifier": { "Id": 100000001, "fips": "29095", "apn": "00-000-00-00-000-000-000", "attomId": 100000001 },
+      "lot": { "lotsize1": 0.17, "lotsize2": 7405, "lotnum": "12" },
+      "area": { "countrysecsubd": "Sample County", "subdname": "SAMPLE HEIGHTS" },
+      "address": { "oneLine": "100 SAMPLE AVE, SAMPLE CITY, MO 64000" },
+      "location": { "accuracy": "Rooftop", "latitude": "39.000000", "longitude": "-94.500000", "distance": 0 },
+      "summary": { "yearbuilt": 1952, "legal1": "SAMPLE HEIGHTS BLK 4 LOT 12 EXC N 5FT" },
+      "building": { "size": { "universalsize": 1240, "livingsize": 1240 }, "rooms": { "beds": 3, "bathstotal": 1, "roomsTotal": 6 } },
+      "avm": { "eventDate": "2026-10-01", "amount": { "scr": 82, "value": 185000, "high": 203500, "low": 166500, "fsd": 10 } },
+      "owner": {
+        "corporateindicator": "N",
+        "owner1": { "fullname": "SAMPLE OWNER ONE", "lastname": "ONE", "firstnameandmi": "SAMPLE OWNER" },
+        "owner2": { "fullname": "SAMPLE OWNER TWO", "lastname": "TWO", "firstnameandmi": "SAMPLE OWNER" },
+        "absenteeownerstatus": "O",
+        "mailingaddressoneline": "100 SAMPLE AVE, SAMPLE CITY, MO 64000"
+      },
+      "vintage": { "lastModified": "2026-10-01", "pubDate": "2026-10-01" }
+    }
+  ]
+}
