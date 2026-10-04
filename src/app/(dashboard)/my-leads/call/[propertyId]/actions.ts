@@ -33,3 +33,44 @@ export async function compLeadAction(propertyId: string): Promise<CompLeadAction
     return { ok: false, message: "Comps could not be requested. Please retry." };
   }
 }
+
+export type SaveValuationResult = { ok: true; arv: number | null; rehab: number | null } | { ok: false; message: string };
+
+/**
+ * Jarrad's typed ARV and rehab for the numbers card (§3.10) → `fn_set_lead_valuation_inputs`
+ * through the caller's RLS client (the function checks membership itself). Disabled until the
+ * `lead_comps` schema is ready. Never writes `properties.arv`.
+ */
+export async function setValuationInputsAction(input: {
+  propertyId: string;
+  arv: number | null;
+  rehab: number | null;
+}): Promise<SaveValuationResult> {
+  if (typeof input?.propertyId !== "string" || !UUID.test(input.propertyId)) return { ok: false, message: "That lead could not be found." };
+  const valid = (v: number | null, min: number) => v === null || (typeof v === "number" && Number.isFinite(v) && v >= min && v <= 1e12);
+  if (!valid(input.arv, 0.01) || !valid(input.rehab, 0)) return { ok: false, message: "Enter a valid dollar amount." };
+  try {
+    const viewer = await myLeadsViewer();
+    if (!(await schemaReady("lead_comps"))) return { ok: false, message: "Numbers are not available yet." };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data, error } = await (viewer.client as any).rpc("fn_set_lead_valuation_inputs", {
+      p_org_id: viewer.orgId,
+      p_property_id: input.propertyId,
+      p_arv: input.arv,
+      p_rehab: input.rehab,
+    });
+    if (error) {
+      if (error.code === "P0002") return { ok: false, message: "That lead could not be found." };
+      if (error.code === "22023") return { ok: false, message: "Enter a valid dollar amount." };
+      if (error.code === "42501") return { ok: false, message: "You do not have access to this lead." };
+      throw error;
+    }
+    const out = (data ?? {}) as { arv?: unknown; rehab?: unknown };
+    const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+    return { ok: true, arv: num(out.arv), rehab: num(out.rehab) };
+  } catch (error) {
+    if (error instanceof MyLeadsReadError) return { ok: false, message: error.message };
+    reportError(error instanceof Error ? error : new Error("valuation save failed"), { tags: { surface: "call_screen", operation: "set_valuation_inputs" } });
+    return { ok: false, message: "The numbers could not be saved. Please retry." };
+  }
+}

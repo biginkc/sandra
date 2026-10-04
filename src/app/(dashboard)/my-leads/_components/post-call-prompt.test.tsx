@@ -281,3 +281,31 @@ describe("PostCallPrompt", () => {
     expect(screen.getByRole("button", { name: "Reconcile saved change" })).toBeVisible()
   })
 })
+
+describe("PostCallPrompt dock variant", () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+    dripActions.listDripChoices.mockResolvedValue({ ok: true, data: [] })
+  })
+
+  it("renders inline with data-variant=dock and no dialog", () => {
+    setup({ variant: "dock" })
+    expect(screen.getByTestId("post-call-prompt")).toHaveAttribute("data-variant", "dock")
+    expect(screen.queryByRole("dialog")).toBeNull()
+  })
+
+  it("shows the four outcomes and Save, without Cancel", () => {
+    setup({ variant: "dock" })
+    expect(within(screen.getByTestId("post-call-outcome")).getAllByRole("radio").map((r) => r.textContent)).toEqual(["Reached", "No answer", "Voicemail", "Wrong number"])
+    expect(screen.getByRole("button", { name: "Save" })).toBeVisible()
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull()
+  })
+
+  it("still submits once with the chosen outcome", async () => {
+    const { user, onSubmit } = setup({ variant: "dock", ...linked, callReferenceOptions: refs() })
+    await user.click(outcome("Reached"))
+    await user.click(screen.getByRole("button", { name: "Save" }))
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ outcome: "reached" }))
+  })
+})

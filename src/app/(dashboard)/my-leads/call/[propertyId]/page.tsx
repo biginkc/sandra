@@ -1,0 +1,71 @@
+import { notFound } from "next/navigation";
+
+import { Page } from "@/components/page";
+import { PageHeader } from "@/components/page-header";
+import { getCallerMembershipsOrThrow, type Membership } from "@/lib/auth/memberships";
+import { canViewMyLeads } from "@/lib/my-leads/access";
+import { getMyLeadsFlag } from "@/lib/my-leads/flags";
+import { getAcquisitionRoster } from "@/lib/my-leads/queries";
+import { MY_LEAD_ROW_REASON_COPY } from "@/lib/my-leads/row-reasons";
+import { schemaReady } from "@/lib/my-leads/schema-ready";
+
+import { CallScreen } from "./call-screen";
+import { loadCallScreen } from "./loaders";
+
+export const dynamic = "force-dynamic";
+// Server actions on this page inherit the limit (maxDuration.md "Server Actions"); the 3c contract
+// send needs the 4-minute provider abort plus the outcome write.
+export const maxDuration = 300;
+
+function unavailableState(message: string) {
+  return (
+    <Page>
+      <PageHeader title="Call screen" />
+      <div role="alert" className="text-destructive text-sm">
+        <span>{message} </span>
+        <a href="/my-leads" className="font-bold underline underline-offset-4">Back to My Leads</a>
+      </div>
+    </Page>
+  );
+}
+
+/**
+ * TECH-PLAN §3.10. The screen is the signed-in user's own queue only (a URL never grants access).
+ * Renders only when the org's `call_screen` flag is on (a missing row reads OFF) and the Phase 3
+ * schema is ready; otherwise 404, so the route is inert until the operator turns it on.
+ */
+export default async function CallScreenPage({ params }: { params: Promise<{ propertyId: string }> }) {
+  const { propertyId } = await params;
+
+  let memberships: Membership[];
+  try {
+    memberships = await getCallerMembershipsOrThrow();
+  } catch {
+    return unavailableState("The call screen is temporarily unavailable.");
+  }
+  if (memberships.length !== 1) return unavailableState("The call screen is temporarily unavailable.");
+
+  let viewer: Awaited<ReturnType<typeof getAcquisitionRoster>>["viewer"];
+  let roster: Awaited<ReturnType<typeof getAcquisitionRoster>>["roster"];
+  try {
+    ({ viewer, roster } = await getAcquisitionRoster());
+  } catch {
+    return unavailableState("The call screen is temporarily unavailable.");
+  }
+  if (!roster.settings.enabled || !canViewMyLeads(roster, viewer.userId, viewer.isOwner)) notFound();
+
+  const [flagOn, ready] = await Promise.all([getMyLeadsFlag(viewer.orgId, "call_screen"), schemaReady("lead_comps")]);
+  if (!flagOn || !ready) notFound();
+
+  const load = await loadCallScreen(propertyId);
+  if (load.status === "invalid") notFound();
+  if (load.status === "unavailable") return unavailableState(MY_LEAD_ROW_REASON_COPY[load.reason]);
+  if (load.status === "error") return unavailableState(load.message);
+
+  const viewerLabel = roster.members.find((m) => m.id === viewer.userId)?.label ?? null;
+  return (
+    <Page className="gap-4">
+      <CallScreen data={load.data} viewerLabel={viewerLabel} />
+    </Page>
+  );
+}
