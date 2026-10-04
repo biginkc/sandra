@@ -29,12 +29,23 @@ type Fixture = {
   successorStep: string;
 };
 
+type NotificationRow = {
+  user_id: string;
+  event_type: string;
+  entity_type: string;
+  entity_id: string;
+  title: string;
+  title_sha256: string;
+};
+
 const uuid = () => randomUUID();
 const scopeGateMessages = [
   "SMS scope changed or unseeded",
   "SMS scope membership changed",
   "SMS property scope exceeds bound or changed",
 ];
+const optOutNotificationEvent = "inbox_optout_not_applied";
+const optOutNotificationTitleSha256 = "cb36a598e7e3425e4dfb74bab2edc587e6ed990ed8f0ae663f787613da110dda";
 
 async function one<T extends QueryResultRow>(sql: string, params: unknown[] = []): Promise<T> {
   return (await db.query<T>(sql, params)).rows[0]!;
@@ -167,6 +178,15 @@ async function scopeAttemptCount() {
   return Number((await one<{ n: string }>("select last_value::text n from pg_temp.inbox_retry_attempts")).n);
 }
 
+async function notificationsFor(f: Fixture): Promise<NotificationRow[]> {
+  return (await db.query<NotificationRow>(
+    `select user_id,event_type,entity_type,entity_id,title,
+       encode(sha256(convert_to(title,'UTF8')),'hex') title_sha256
+     from public.notifications where org_id=$1 order by created_at,id`,
+    [f.org],
+  )).rows;
+}
+
 async function addSiblingStep(f: Fixture) {
   const row = await one<{ dependencies: Record<string, unknown> }>(
     "select dependencies from inbox_operations.steps where org_id=$1 and operation_id=$2 and id=$3",
@@ -250,6 +270,7 @@ describe("Inbox opt-out scope retry", () => {
     expect((await one<{ sms_opted_out: boolean }>("select sms_opted_out from public.contacts where id=$1", [f.contact])).sms_opted_out).toBe(true);
     expect((await one<{ n: string }>("select count(*) n from public.consent_events where org_id=$1 and contact_id=$2 and event_type='opt_out'", [f.org, f.contact])).n).toBe("1");
     expect((await one<{ status: string }>("select status from public.sequence_enrollments where id=$1", [f.siblingEnrollment])).status).toBe("opted_out");
+    expect(await notificationsFor(f)).toHaveLength(0);
     const stored = await one<{ original_scope: Record<string, unknown> }>("select original_scope from inbox_operation_domain.shared_sms_receipts where operation_id=$1", [f.operation]);
     expect(stored.original_scope).toEqual((await one<{ scope: Record<string, unknown> }>("select dependencies->'sms_scope' scope from inbox_operations.steps where id=$1", [f.step])).scope);
     expect(await runStep(f)).toEqual(result);
@@ -269,6 +290,16 @@ describe("Inbox opt-out scope retry", () => {
     const result = await runStep(f);
     expect(result).toMatchObject({ state: "conflicted", receipt: { code: "sms_scope_changed", scope_rebase_attempted: true } });
     expect(await scopeAttemptCount()).toBe(2);
+    expect(await notificationsFor(f)).toMatchObject([
+      {
+        user_id: f.actor,
+        event_type: optOutNotificationEvent,
+        entity_type: "property",
+        entity_id: f.property,
+        title_sha256: optOutNotificationTitleSha256,
+      },
+    ]);
+    expect(await notificationsFor(f)).toHaveLength(1);
   });
 
   it.each(scopeGateMessages)("does not retry a non-opt-out scope error: %s", async (message) => {
@@ -278,6 +309,7 @@ describe("Inbox opt-out scope retry", () => {
     expect(result).toMatchObject({ state: "conflicted", receipt: { code: "sms_scope_changed" } });
     expect((result.receipt as Record<string, unknown>).scope_rebase_attempted).toBeUndefined();
     expect(await scopeAttemptCount()).toBe(1);
+    expect(await notificationsFor(f)).toHaveLength(0);
   });
 
   it.each([
@@ -291,6 +323,7 @@ describe("Inbox opt-out scope retry", () => {
     expect(result).toMatchObject({ state: "conflicted", receipt: { code } });
     expect((result.receipt as Record<string, unknown>).scope_rebase_attempted).toBeUndefined();
     expect(await scopeAttemptCount()).toBe(1);
+    expect(await notificationsFor(f)).toHaveLength(0);
   });
 
   it("reuses the shared SMS receipt for a happy sibling step", async () => {
@@ -325,6 +358,15 @@ describe("Inbox opt-out scope retry", () => {
     expect((await one<{ status: string }>("select status from public.sequence_enrollments where id=$1", [f.siblingEnrollment])).status).toBe("active");
     const second = await runStep(f, f.siblingStep);
     expect(second).toMatchObject({ state: "conflicted", receipt: { code: "sms_scope_changed", scope_rebase_attempted: true } });
+    expect(await notificationsFor(f)).toMatchObject([
+      {
+        user_id: f.actor,
+        event_type: optOutNotificationEvent,
+        entity_type: "property",
+        entity_id: f.sibling,
+        title_sha256: optOutNotificationTitleSha256,
+      },
+    ]);
   });
 
   it("records one failed rebase and rolls back all effects", async () => {
@@ -342,5 +384,41 @@ describe("Inbox opt-out scope retry", () => {
     expect((await one<{ status: string }>("select status from public.sequence_enrollments where id=$1", [f.siblingEnrollment])).status).toBe("active");
     expect(await one<{ state: string; result: Record<string, unknown> }>("select s.state,r.result from inbox_operations.steps s join inbox_operations.receipts r on r.org_id=s.org_id and r.operation_id=s.operation_id and r.step_id=s.id where s.id=$1", [f.successorStep])).toMatchObject({ state: "blocked", result: { status: "blocked", code: "predecessor_failed", predecessor_id: f.step, changed: false } });
     expect(await runStep(f)).toEqual(result);
+    expect(await notificationsFor(f)).toMatchObject([
+      {
+        user_id: f.actor,
+        event_type: optOutNotificationEvent,
+        entity_type: "property",
+        entity_id: f.property,
+        title_sha256: optOutNotificationTitleSha256,
+      },
+    ]);
+    expect(await notificationsFor(f)).toHaveLength(1);
+  });
+
+  it("preserves the seven existing notification event types and refuses unknown values", async () => {
+    const f = await seedFixture();
+    const existingEventTypes = [
+      "owner_message_added",
+      "property_assigned",
+      "bulk_action_completed",
+      "skip_trace_requested",
+      "task_assigned",
+      "ai_responder_provider_failure",
+      "task_appointment_reminder",
+    ];
+    for (const [index, eventType] of existingEventTypes.entries()) {
+      await db.query(
+        `insert into public.notifications(org_id,user_id,event_type,entity_type,entity_id,title)
+         values($1,$2,$3,'property',$4,$5)`,
+        [f.org, f.actor, eventType, uuid(), `constraint ${index}`],
+      );
+    }
+    expect((await notificationsFor(f)).map((row) => row.event_type).sort()).toEqual([...existingEventTypes].sort());
+    await expect(db.query(
+      `insert into public.notifications(org_id,user_id,event_type,entity_type,entity_id,title)
+       values($1,$2,'unknown_notification_event','property',$3,'constraint unknown')`,
+      [f.org, f.actor, uuid()],
+    )).rejects.toThrow(/notifications_event_type_check/);
   });
 });

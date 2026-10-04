@@ -7,6 +7,20 @@ BEGIN;
 SET LOCAL lock_timeout='2s';
 SET LOCAL statement_timeout='30s';
 
+alter table public.notifications
+  drop constraint notifications_event_type_check;
+alter table public.notifications
+  add constraint notifications_event_type_check check (event_type = any (array[
+    'owner_message_added'::text,
+    'property_assigned'::text,
+    'bulk_action_completed'::text,
+    'skip_trace_requested'::text,
+    'task_assigned'::text,
+    'ai_responder_provider_failure'::text,
+    'task_appointment_reminder'::text,
+    'inbox_optout_not_applied'::text
+  ]));
+
 CREATE OR REPLACE FUNCTION inbox_operation_domain.apply_sms_opt_out(o uuid,p uuid,actor uuid,s uuid,operation_id uuid,expected_scope jsonb,expected_policy jsonb) RETURNS jsonb
 LANGUAGE plpgsql SET search_path='' AS $$
 DECLARE homeowner uuid;scope_revision bigint;contact public.contacts;property_ids uuid[];enrollment_ids uuid[];
@@ -299,6 +313,12 @@ BEGIN
   result:=jsonb_build_object('status',terminal_state,'code',code,'changed',false,'scope_rebase_attempted',true);
   UPDATE inbox_operations.steps SET state=terminal_state,lease_until=NULL,receipt_version=receipt_version+1 WHERE org_id=o AND operation_id=op AND id=s RETURNING receipt_version INTO v;
   INSERT INTO inbox_operations.receipts VALUES(o,op,s,v,g,result,clock_timestamp());
+  INSERT INTO public.notifications(org_id,user_id,event_type,entity_type,entity_id,title)
+  SELECT o,operation_row.requester_id,'inbox_optout_not_applied','property',(step_row.payload->>'property_id')::uuid,
+    'SMS opt-out was not applied — this lead changed while it was saving. Please submit the opt-out again.'
+  FROM inbox_operations.operations operation_row
+  JOIN inbox_operations.steps step_row ON step_row.org_id=operation_row.org_id AND step_row.operation_id=operation_row.id AND step_row.id=s
+  WHERE operation_row.org_id=o AND operation_row.id=op;
   -- Keep the existing prerequisite-blocking semantics of fail_step.
   FOR child IN SELECT st.* FROM inbox_operations.steps st JOIN inbox_operations.steps failed ON failed.org_id=st.org_id AND failed.operation_id=st.operation_id AND failed.effect_key=st.effect_key WHERE failed.org_id=o AND failed.operation_id=op AND failed.id=s AND st.ordinal>failed.ordinal ORDER BY st.ordinal FOR UPDATE OF st LOOP
    IF child.state<>'pending' THEN RAISE EXCEPTION 'Invalid successor state';END IF;

@@ -268,6 +268,7 @@
     "public.memberships",
     "public.message_threads",
     "public.messages",
+    "public.notifications",
     "public.organizations",
     "public.properties",
     "public.provider_sender_numbers",
