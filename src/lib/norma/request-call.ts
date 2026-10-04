@@ -4,8 +4,8 @@ import type { Database } from "@/lib/supabase/types";
 
 import { readNormaCallbackAssigneeId, readNormaGateConfig, type NormaEnv } from "./config";
 import { dispatchNormaCall, type DispatchResult } from "./dispatch";
-import { readNormaMaintenanceHold } from "./maintenance";
 import { evaluateNormaGate } from "./gate";
+import { readNormaMaintenanceHold } from "./maintenance";
 import { createNormaRequest } from "./rpc";
 import { loadNormaWrongNumbers, selectVoicePhone, toUsVoiceE164 } from "./voice-phone";
 
