@@ -30,7 +30,7 @@ Supersedes the "Proposed plan, not yet approved" section of Astra's `DECISIONS-A
 ## Decisions this plan implements
 - Button visible to all active members.
 - Hard blocks: DNC (lead lock and global registry) and `not_interested`.
-- No answer: leave the short callback voicemail on a single call and on call-twice attempt 2; hang up on attempt 1 when that attempt number is present. No Bland-side retry. `pathway_version` is omitted unless `NORMA_BLAND_PATHWAY_VERSION` is a strict integer, so Bland uses the published production pathway.
+- No answer: current dispatch always uses call-twice attempt 1 or 2 (legacy null rows normalize to 1). Hang up on attempt 1; leave the short callback voicemail on attempt 2. The adapter alone supports an absent-attempt voicemail default; no standalone dispatch workflow is added. Eligibility or STOP can prevent attempt 2, in which case no voicemail is promised. No Bland-side retry. `pathway_version` is omitted unless `NORMA_BLAND_PATHWAY_VERSION` is a strict integer, so Bland uses the published production pathway.
 - Drip: pause on request; with PR771, keep the hold across the retry and resume only after the second confirmed no answer; stay paused if Norma reached the seller.
 - Seller tells Norma to stop: lead marked `not_interested` (not DNC).
 - Callback requested: callback task for Jarrad, labelled unconfirmed.

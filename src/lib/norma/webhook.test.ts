@@ -133,6 +133,19 @@ describe("bland webhook route core", () => {
     expect(await post(stale.client, call())).toEqual({ status: 200, body: { status: "ignored", reason: "stale_attempt" } });
   });
 
+  it("attempt-2 voicemail without a pathway outcome completes as confirmed no_answer", async () => {
+    const { client, complete } = setup({ result: "applied", status: "completed", outcome: "no_answer" });
+    expect(await post(client, call({
+      answered_by: "voicemail",
+      variables: { call_outcome: "" },
+      metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt: 2 },
+    }))).toEqual({ status: 200, body: { status: "applied" } });
+    expect(complete).toHaveBeenCalledWith({
+      p_request_id: REQUEST_ID, p_call_id: "call-1", p_outcome: "no_answer",
+      p_payload: expect.objectContaining({ attempt: 2 }),
+    });
+  });
+
   it("unmappable payloads complete as unknown (parked for a human)", async () => {
     const { client, complete } = setup({ result: "applied", status: "needs_review", outcome: "unknown" });
     await post(client, call({ variables: {} }));

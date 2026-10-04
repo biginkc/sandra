@@ -18,7 +18,8 @@ export type BlandSendCallParams = {
   idempotencyKey: string;
   /**
    * Call-twice attempt from #771, echoed in webhook metadata for stale-call fencing.
-   * Attempt 1 hangs up; attempt 2 leaves the voicemail. A standalone call omits it.
+   * Attempt 1 hangs up; attempt 2 leaves the voicemail. Dispatch always supplies it.
+   * The adapter default for an omitted attempt is not a standalone dispatch workflow.
    */
   attempt?: number;
   /** Pathway variables, passed as Bland `request_data`. */

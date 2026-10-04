@@ -104,8 +104,12 @@ describe("dispatchNormaCall", () => {
     expect(t.rpcs.fn_norma_bind_call_id).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_call_id: "call-1" });
   });
 
-  it.each([1, 2])("serializes attempt %s from the request row through real dispatch and the Bland adapter", async (attempt) => {
-    const t = setup({ row: { attempt } });
+  it.each([
+    [1, 22], [2, 22], [1, null], [2, null], [null, 22],
+  ] as const)("serializes row attempt %s with pathway pin %s through real dispatch and the Bland adapter", async (rowAttempt, pathwayVersion) => {
+    const attempt = rowAttempt ?? 1;
+    const config = { ...blandConfig, pathwayVersion };
+    const t = setup({ row: { attempt: rowAttempt } });
     // Exercise the actual adapter: capture the HTTP boundary without a provider call.
     const fetchImpl = vi.fn().mockResolvedValue(new Response(
       JSON.stringify({ status: "success", call_id: `attempt-${attempt}` }),
@@ -113,8 +117,8 @@ describe("dispatchNormaCall", () => {
     ));
     await expect(dispatchNormaCall(REQUEST_ID, {
       client: t.client,
-      bland: createBlandClient(blandConfig, fetchImpl),
-      blandConfig,
+      bland: createBlandClient(config, fetchImpl),
+      blandConfig: config,
       gate: openGate,
       precallSms: { enabled: false },
     })).resolves.toEqual({ status: "dispatched", callId: `attempt-${attempt}` });
@@ -131,7 +135,8 @@ describe("dispatchNormaCall", () => {
     expect(body.voicemail).toEqual(attempt === 1
       ? { action: "hangup" }
       : { action: "leave_message", message: NORMA_VOICEMAIL_MESSAGE });
-    expect(body.pathway_version).toBe(17);
+    if (pathwayVersion === null) expect(body).not.toHaveProperty("pathway_version");
+    else expect(body.pathway_version).toBe(22);
     expect(body.record).toBe(true);
     expect(body.max_duration).toBe(10);
     expect(body).not.toHaveProperty("retry");
