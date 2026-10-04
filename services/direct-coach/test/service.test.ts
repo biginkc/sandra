@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto'
 import { get } from 'node:http'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
-import WebSocket from 'ws'
+import WebSocket, { WebSocketServer } from 'ws'
+import { connect } from 'node:net'
 import { assertSecret, createCoachToken, createWatchdogToken, verifyCoachToken } from '../src/auth.js'
 import { parseMedia, parseStart } from '../src/media.js'
 import { MediaIntegrityError, MediaOrderBuffer } from '../src/order.js'
@@ -58,6 +59,100 @@ test('presence upgrade denies foreign and missing origins with explicit HTTP403 
       { event: 'watchdog.upgrade_rejected', reason: 'origin_not_allowed', status: 403, originPresent: true },
       { event: 'watchdog.upgrade_rejected', reason: 'origin_not_allowed', status: 403, originPresent: false },
     ])
+  } finally { await service.close() }
+})
+
+test('presence draining rejects upgrades with HTTP503 without attaching a lease', async (t) => {
+  const events: unknown[] = []
+  let attachments = 0
+  const db: DirectCoachDb = {
+    readBinding: async () => null, isActive: async () => true, close: async () => {},
+    watchdogHeartbeat: async () => {}, watchdogClaimExpired: async () => [],
+    watchdogRenew: async () => false, watchdogDisconnect: async () => true,
+    watchdogAttach: async () => { attachments++; return false },
+  }
+  const service = createCoachServer({ secret: SECRET, db,
+    publisher: { publish: async () => {}, close: async () => {}, closeAll: async () => {} },
+    deepgramApiKey: 'disabled', jevApiKey: 'disabled',
+    logger: { ...logger, warn: (event, fields) => events.push({ event, ...fields }) },
+    watchdog: { secret: SECRET, origins: new Set(['http://localhost']), onExpired: async () => {} },
+  })
+  await service.listen(0, '127.0.0.1')
+  const address = service.server.address()
+  assert.ok(address && typeof address === 'object')
+  let entered!: () => void
+  const draining = new Promise<void>((resolve) => { entered = resolve })
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const originalClose = WebSocketServer.prototype.close
+  let first = true
+  t.mock.method(WebSocketServer.prototype, 'close', function (this: WebSocketServer, callback?: (error?: Error) => void) {
+    if (!first) return originalClose.call(this, callback)
+    first = false
+    assert.notEqual(this, service.wss, 'expected presence shutdown before coach WebSocket shutdown')
+    // Hold actual presence shutdown after its drain fence, before HTTP closes.
+    entered()
+    void gate.then(() => originalClose.call(this, callback))
+  })
+  const closing = service.close()
+  let fenceTimer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      draining,
+      closing.then(() => { throw new Error('shutdown finished without presence drain fence') }),
+      new Promise<never>((_, reject) => { fenceTimer = setTimeout(() => reject(new Error('presence drain fence timeout')), 2_000) }),
+    ])
+    clearTimeout(fenceTimer)
+    const status = await new Promise<number | undefined>((resolve, reject) => {
+      const req = get(`http://127.0.0.1:${address.port}/presence`, { headers: {
+        Connection: 'Upgrade', Upgrade: 'websocket', Origin: 'http://localhost',
+        'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+      } }, (res) => { res.resume(); resolve(res.statusCode) })
+      req.setTimeout(2_000, () => req.destroy(new Error('drain response timeout')))
+      req.on('error', reject)
+    })
+    assert.equal(status, 503)
+    assert.equal(attachments, 0)
+    assert.deepEqual(events, [{ event: 'watchdog.upgrade_rejected', reason: 'draining', status: 503, originPresent: true }])
+  } finally { clearTimeout(fenceTimer); release(); await closing }
+})
+
+test('injected presence upgrade throws before/after 101 terminate without extra HTTP or exception text', async (t) => {
+  const events: unknown[] = []
+  const db: DirectCoachDb = {
+    readBinding: async () => null, isActive: async () => true, close: async () => {},
+    watchdogHeartbeat: async () => {}, watchdogClaimExpired: async () => [],
+    watchdogRenew: async () => false, watchdogDisconnect: async () => true,
+    watchdogAttach: async () => { throw new Error('must not attach') },
+  }
+  const service = createCoachServer({ secret: SECRET, db,
+    publisher: { publish: async () => {}, close: async () => {}, closeAll: async () => {} },
+    deepgramApiKey: 'disabled', jevApiKey: 'disabled',
+    logger: { ...logger, warn: (event, fields) => events.push({ event, ...fields }) },
+    watchdog: { secret: SECRET, origins: new Set(['http://localhost']), onExpired: async () => {} },
+  })
+  await service.listen(0, '127.0.0.1')
+  const address = service.server.address()
+  assert.ok(address && typeof address === 'object')
+  let afterUpgrade = false
+  const switching = 'HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n'
+  t.mock.method(WebSocketServer.prototype, 'handleUpgrade', (_request: unknown, socket: import('node:stream').Duplex) => {
+    if (afterUpgrade) socket.write(switching)
+    throw new Error('secret-exception-do-not-log')
+  })
+  try {
+    for (afterUpgrade of [false, true]) {
+      const bytes = await new Promise<string>((resolve, reject) => {
+        let data = ''
+        const socket = connect(address.port, '127.0.0.1', () => socket.write('GET /presence HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n'))
+        socket.setTimeout(2_000, () => socket.destroy(new Error('socket did not terminate')))
+        socket.on('data', (chunk) => { data += chunk.toString() })
+        socket.on('error', reject)
+        socket.on('close', () => resolve(data))
+      })
+      assert.equal(bytes, afterUpgrade ? switching : '')
+    }
+    assert.deepEqual(events, [false, true].map(() => ({ event: 'watchdog.upgrade_rejected', reason: 'upgrade_failed', status: null, originPresent: true })))
   } finally { await service.close() }
 })
 
