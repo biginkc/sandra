@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 
 import { requireLoopbackPostgresUrl } from '../../src/lib/testing/loopback-postgres-url.ts';
-import { CONTRACT, LEGACY_EXCLUSION, checkCheckout, checkEntryEnvironment, checkSchema, ownDatabase, schemaCatalog, sha256, validateReport, writeManifest } from './norma-contract-support.mjs';
+import { CONTRACT, LEGACY_EXCLUSION, checkCheckout, checkEntryEnvironment, checkSchema, ownDatabase, schemaCatalog, sha256, subprocessEnvironment, validateUpgradeCases, validateReport, writeManifest } from './norma-contract-support.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 export function parseArgs(args) {
@@ -51,21 +51,21 @@ export async function main(args=process.argv.slice(2), env=process.env) {
   assert.ok(Number(process.versions.node.split('.')[0])>=24,'Node24+ required');
   checkEntryEnvironment(env);
   checkCheckout(ROOT);
-  assert.equal(execFileSync('git',['status','--porcelain'],{cwd:ROOT,encoding:'utf8'}).trim(),'','Clean candidate required');
+  assert.equal(execFileSync('git',['status','--porcelain'],{cwd:ROOT,encoding:'utf8',env:subprocessEnvironment(env)}).trim(),'','Clean candidate required');
   const source=requireLoopbackPostgresUrl(env.NORMA_STRESS_SOURCE_DB_URL ?? '');
   const out=parseArgs(args);
   assert.ok(!existsSync(out),'Output directory already exists');
   mkdirSync(path.join(out,'databases'),{recursive:true,mode:0o700});
   const runId=randomBytes(8).toString('hex');
   const checkoutMigrations=Object.fromEntries(readdirSync(path.join(ROOT,'supabase/migrations')).filter(file=>file.endsWith('.sql')).sort().map(file=>[file,sha256(readFileSync(path.join(ROOT,'supabase/migrations',file)))]));
-  const receipt={checkoutMigrationManifest:checkoutMigrations,version:1,runId,profile:'schema-only-three-mandatory-lanes',sourceCommit:execFileSync('git',['rev-parse','HEAD'],{cwd:ROOT,encoding:'utf8'}).trim(),node:process.version,contractSha256:sha256(readFileSync(path.join(ROOT,'scripts/ci/norma-schema-contract.json'))),lanes:{},success:false,releaseCompatible:false,releaseBlockers:['legacy worker expiry','defaulted unfenced claim','metadata-less unbound completion','serving hold/drain evidence']};
+  const receipt={checkoutMigrationManifest:checkoutMigrations,version:1,runId,profile:'schema-only-three-mandatory-lanes',sourceCommit:execFileSync('git',['rev-parse','HEAD'],{cwd:ROOT,encoding:'utf8',env:subprocessEnvironment(env)}).trim(),node:process.version,contractSha256:sha256(readFileSync(path.join(ROOT,'scripts/ci/norma-schema-contract.json'))),lanes:{},success:false,releaseCompatible:false,releaseBlockers:['legacy worker expiry','defaulted unfenced claim','metadata-less unbound completion','serving hold/drain evidence']};
   const admin=new pg.Client({connectionString:source});
   await admin.connect();
   try {
     receipt.fixturePrivileges=(await admin.query('select current_user as role, rolsuper as superuser, rolcreatedb as createdb from pg_roles where rolname=current_user')).rows[0];
     assert.equal(receipt.fixturePrivileges.superuser,true,'Dedicated local fixture admin required for strict restore and audit clock');
     receipt.sourceCatalog=await schemaCatalog(admin); checkSchema(receipt.sourceCatalog,'source');
-    const dump=execFileSync('pg_dump',['--schema-only','--no-owner',source],{maxBuffer:256*1024*1024});
+    const dump=execFileSync('pg_dump',['--schema-only','--no-owner',source],{maxBuffer:256*1024*1024,env:subprocessEnvironment(env)});
     writeFileSync(path.join(out,'source.sql'),dump,{mode:0o600});
     receipt.sourceDumpSha256=sha256(dump);
     for (const lane of ['legacy','postddl']) {
@@ -79,7 +79,7 @@ export async function main(args=process.argv.slice(2), env=process.env) {
     await admin.query(`create database "${name}"`);
     writeManifest(path.join(out,'databases',`${name}.json`),{database:name,lane:'upgrade',runId,sourceDumpSha256:receipt.sourceDumpSha256,migrations:[],state:'created'});
     const u=new URL(source);u.pathname=`/${name}`;
-    execFileSync('psql',['-q','-X','-v','ON_ERROR_STOP=1','-d',u.toString()],{input:dump,maxBuffer:256*1024*1024,stdio:['pipe','pipe','pipe']});
+    execFileSync('psql',['-q','-X','-v','ON_ERROR_STOP=1','-d',u.toString()],{input:dump,maxBuffer:256*1024*1024,env:subprocessEnvironment(env),stdio:['pipe','pipe','pipe']});
     const upgraded=new pg.Client({connectionString:u.toString()});await upgraded.connect();
     try {checkSchema(await schemaCatalog(upgraded),'upgrade-source');} finally {await upgraded.end();}
     console.log('Norma contract: upgrade starting');
@@ -88,8 +88,8 @@ export async function main(args=process.argv.slice(2), env=process.env) {
     await admin.query(`drop database "${name}" with (force)`);
     writeManifest(path.join(out,'databases',`${name}.json`),{database:name,lane:'upgrade',runId,sourceDumpSha256:receipt.sourceDumpSha256,migrations:[],state:'dropped'});
     checkCheckout(ROOT); // Refuse source drift during tests, too.
-    assert.equal(execFileSync('git',['rev-parse','HEAD'],{cwd:ROOT,encoding:'utf8'}).trim(),receipt.sourceCommit,'Candidate HEAD changed');
-    assert.equal(execFileSync('git',['status','--porcelain'],{cwd:ROOT,encoding:'utf8'}).trim(),'','Candidate changed during tests');
+    assert.equal(execFileSync('git',['rev-parse','HEAD'],{cwd:ROOT,encoding:'utf8',env:subprocessEnvironment(env)}).trim(),receipt.sourceCommit,'Candidate HEAD changed');
+    assert.equal(execFileSync('git',['status','--porcelain'],{cwd:ROOT,encoding:'utf8',env:subprocessEnvironment(env)}).trim(),'','Candidate changed during tests');
     assert.deepEqual(Object.fromEntries(readdirSync(path.join(ROOT,'supabase/migrations')).filter(file=>file.endsWith('.sql')).sort().map(file=>[file,sha256(readFileSync(path.join(ROOT,'supabase/migrations',file)))])),checkoutMigrations,'Foundation migration checkout drift');
     const manifests=readdirSync(path.join(out,'databases')).filter(f=>f.endsWith('.json')).map(f=>JSON.parse(readFileSync(path.join(out,'databases',f),'utf8')));
     assert.ok(manifests.some(m=>m.lane==='legacy')&&manifests.some(m=>m.lane==='postddl'),'Missing applied migration manifests');
@@ -105,7 +105,7 @@ export async function main(args=process.argv.slice(2), env=process.env) {
       }
     }
     const upgradeCases=JSON.parse(readFileSync(path.join(out,'upgrade-cases.json'),'utf8'));
-    assert.equal(upgradeCases.length,20,'Missing per-case upgrade manifests');
+    validateUpgradeCases(upgradeCases,JSON.parse(readFileSync(path.join(out,'upgrade.json'),'utf8')));
     assert.ok(upgradeCases.every(c=>c.rolledBack===true),'Upgrade rollback incomplete');
     for (const c of upgradeCases) {checkSchema(c.catalogs.source,'upgrade-source');checkSchema(c.catalogs.legacy,'legacy');checkSchema(c.catalogs.postddl,'postddl');checkSchema(c.catalogs.rolledBack,'upgrade-source');assert.deepEqual(c.migrations,CONTRACT.norma_migrations,'Upgrade hash manifest drift');}
     receipt.databaseManifests=manifests; receipt.upgradeCases=upgradeCases;
@@ -116,7 +116,7 @@ export async function main(args=process.argv.slice(2), env=process.env) {
   } finally {
     try {receipt.cleanup=await cleanupOwned(admin,runId);}
     catch {receipt.success=false;receipt.cleanup={failed:true};}
-    receipt.success=receipt.success && receipt.cleanup?.remaining?.length===0;
+    receipt.success=receipt.success && receipt.cleanup?.remaining?.length===0 && receipt.cleanup?.removed?.length===0;
     writeManifest(path.join(out,'receipt.json'),receipt);
     await admin.end();
     if (!receipt.success) process.exitCode=1;

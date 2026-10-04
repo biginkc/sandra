@@ -31,6 +31,8 @@ on:
       - "src/app/api/cron/**"
       - "supabase/migrations/*_norma_*"
       - "vitest.norma-stress.config.ts"
+      - "vitest.local-integration.config.ts"
+      - "src/lib/testing/loopback-postgres-url.ts"
       - "scripts/ci/*norma*"
       - "package.json"
       - ".gitattributes"

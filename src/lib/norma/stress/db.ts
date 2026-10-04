@@ -7,7 +7,7 @@ import { Client, type Pool } from "pg";
 
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
-import { CONTRACT, checkLaneEnvironment, checkSchema, schemaCatalog, sha256, writeManifest } from "../../../../scripts/ci/norma-contract-support.mjs";
+import { CONTRACT, checkLaneEnvironment, checkSchema, schemaCatalog, sha256, subprocessEnvironment, writeManifest } from "../../../../scripts/ci/norma-contract-support.mjs";
 
 import { createStressPool } from "./pg-client";
 
@@ -158,9 +158,10 @@ export async function createScratchDb(): Promise<Scratch> {
   const url = withDb(SOURCE_URL, name);
 
   try {
-    const dump = lane ? readFileSync(process.env.NORMA_SCHEMA_SOURCE_DUMP!) : execFileSync("pg_dump", ["--schema-only", "--no-owner", SOURCE_URL], { maxBuffer: 256 * 1024 * 1024 });
+    const dump = lane ? readFileSync(process.env.NORMA_SCHEMA_SOURCE_DUMP!) : execFileSync("pg_dump", ["--schema-only", "--no-owner", SOURCE_URL], { maxBuffer: 256 * 1024 * 1024, env: subprocessEnvironment() });
     const restore = execFileSync("psql", ["-q", "-X", "-v", "ON_ERROR_STOP=1", "-d", url], {
       input: dump,
+      env: subprocessEnvironment(),
       maxBuffer: 256 * 1024 * 1024,
       stdio: ["pipe", "pipe", "pipe"],
       encoding: "utf8",

@@ -8,7 +8,7 @@ export const CONTRACT = JSON.parse(readFileSync(new URL('./norma-schema-contract
 export const LEGACY_EXCLUSION = path.basename(CONTRACT.retry_file);
 export function checkEntryEnvironment(env) {
   for (const key of Object.keys(env)) {
-    if ((key.startsWith('NORMA_') && key !== 'NORMA_STRESS_SOURCE_DB_URL') || key === 'TEST_SUPABASE_DB_URL') throw new Error(`External contract override refused: ${key}`);
+    if ((key.startsWith('NORMA_') && key !== 'NORMA_STRESS_SOURCE_DB_URL') || key === 'TEST_SUPABASE_DB_URL' || key.startsWith('PG') || key.startsWith('GIT_') || key.startsWith('DOCKER_')) throw new Error(`External contract override refused: ${key}`);
   }
 }
 export function checkCheckout(root) {
@@ -67,3 +67,19 @@ export function checkSchema(catalog, lane) {
 }
 export function writeManifest(file, receipt) { writeFileSync(file, JSON.stringify(receipt,null,2)+'\n', {mode:0o600}); }
 export function ownDatabase(name, runId) { return new RegExp(`^norma_schema_${runId}_[a-z0-9_]+$`).test(name) && /^[a-z0-9_]{1,63}$/.test(name); }
+
+// Subprocesses receive no ambient database, Git, Docker or provider settings.
+export function subprocessEnvironment(env=process.env) {
+  const clean={};
+  for (const key of ['PATH','HOME','TMPDIR','TEMP','LANG','LC_ALL','SYSTEMROOT']) if (env[key]) clean[key]=env[key];
+  return {...clean, NODE_ENV:/** @type {'test'} */ ('test'), GIT_CONFIG_NOSYSTEM:'1', GIT_CONFIG_GLOBAL:'/dev/null'};
+}
+export function validateUpgradeCases(cases, report) {
+  const assertions=report.testResults.flatMap(r=>r.assertionResults);
+  const expected=assertions.map(a=>[...a.ancestorTitles,a.title].join(' > '));
+  assert.equal(expected.length,20,'Upgrade assertion count');
+  assert.equal(new Set(expected).size,20,'Duplicate upgrade assertion identity');
+  assert.equal(cases.length,20,'Missing per-case upgrade manifests');
+  assert.equal(new Set(cases.map(c=>c.test)).size,20,'Duplicate upgrade case receipt');
+  assert.deepEqual(cases.map(c=>c.test).sort(),expected.sort(),'Upgrade case identities do not match collected assertions');
+}

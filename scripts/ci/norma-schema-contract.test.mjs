@@ -30,3 +30,12 @@ test('fixture refuses unrelated container label',()=>assert.throws(()=>validateF
 test('fixture refuses outside runner directory',()=>assert.throws(()=>validateFixture(fixtureEnv,config,labels,'/elsewhere/sandra-heavy-Ab12cd','/temp',{'5432/tcp':[{HostIp:'127.0.0.1',HostPort:'55422'}]})));
 
 test('fixture refuses another container port',()=>assert.throws(()=>validateFixture(fixtureEnv,config,labels,'/temp/sandra-heavy-Ab12cd','/temp',{'5432/tcp':[{HostIp:'127.0.0.1',HostPort:'56684'}]})));
+
+import {subprocessEnvironment,validateUpgradeCases} from './norma-contract-support.mjs';
+for (const key of ['PGHOSTADDR','PGSERVICE','PGPASSFILE','PGSSLMODE','PGOPTIONS','GIT_DIR','GIT_WORK_TREE','GIT_INDEX_FILE','GIT_CONFIG_COUNT','DOCKER_CONTEXT','DOCKER_CONFIG']) test(`subprocess override ${key} refused`,()=>assert.throws(()=>checkEntryEnvironment({[key]:'unsafe'})));
+test('subprocess environment strips connection/credential/context settings',()=>assert.deepEqual(subprocessEnvironment({PATH:'/bin',HOME:'/home/test',PGHOSTADDR:'remote',GIT_DIR:'other',DOCKER_CONTEXT:'remote',BLAND_API_KEY:'dummy'}),{PATH:'/bin',HOME:'/home/test',NODE_ENV:'test',GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null'}));
+function upgradeReport() {return {testResults:[{assertionResults:Array.from({length:20},(_,i)=>({ancestorTitles:['upgrade','suite'],title:`case${i}`,fullName:`upgrade suite case${i}`}))}]};}
+const cases=()=>Array.from({length:20},(_,i)=>({test:`upgrade > suite > case${i}`}));
+test('upgrade receipts map one-to-one to collected tests',()=>validateUpgradeCases(cases(),upgradeReport()));
+for (const mutate of [c=>c[19]=c[0],c=>c.pop(),c=>c[0].test='uncollected case']) test(`upgrade identity drift refused ${mutate}`,()=>{const c=cases();mutate(c);assert.throws(()=>validateUpgradeCases(c,upgradeReport()));});
+for (const key of ['PGHOSTADDR','GIT_DIR','DOCKER_CONTEXT','DOCKER_CONFIG']) test(`fixture subprocess override ${key} refused`,()=>assert.throws(()=>validateFixture({...fixtureEnv,[key]:'unsafe'},config,labels,'/temp/sandra-heavy-Ab12cd','/temp',{'5432/tcp':[{HostIp:'127.0.0.1',HostPort:'55422'}]})));
