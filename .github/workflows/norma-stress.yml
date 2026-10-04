@@ -14,10 +14,10 @@ name: Norma stress gate
 # pg_dump/psql 17 come from ankane/setup-postgres (the runner's own client is
 # older than the server and pg_dump refuses to run against a newer server).
 #
-# Schema-only job: all131 legacy,10 post-DDL and20 upgrade tests are mandatory.
-# The paired runtime candidate requires separately reviewed wiring; this exact
-# runner refuses its changed legacy source hashes rather than silently choosing
-# a weaker profile.
+# Explicit combined job: immutable e94 schema checkout runs131 legacy,10
+# post-DDL hazards and20 upgrade cases. This assembled checkout runs the full
+# paired176 suite and19 maintenance/authentication controls on the same dump.
+# The schema-only entry remains fixed and refuses assembled runtime hashes.
 # A failing seed is printed; replay it with
 #   NORMA_STRESS_SEED=<seed> npm run test:norma-stress
 
@@ -48,11 +48,13 @@ jobs:
   norma-stress:
     name: Norma stress gate
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v5
         with:
@@ -75,13 +77,13 @@ jobs:
       - name: Prepare only the owned disposable Norma fixture admin
         run: node scripts/ci/prepare-norma-fixture.mjs
 
-      - name: Validate the schema contract runner
-        run: npm run test:norma-schema-contract-unit
+      - name: Validate the explicit combined contract runner
+        run: npm run test:norma-combined-contract-unit
 
-      - name: Run all mandatory schema contract lanes
+      - name: Run immutable schema and full assembled paired/maintenance lanes
         env:
           NORMA_STRESS_SOURCE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
-        run: npm run test:norma-schema-contract -- --output-directory "$RUNNER_TEMP/norma-schema-contract"
+        run: npm run test:norma-combined-contract -- --output-directory "$RUNNER_TEMP/norma-combined-contract"
 
       - name: Stop disposable stack
         if: always() && env.E2E_LOCAL_WORKDIR != ''
@@ -91,9 +93,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: norma-schema-contract
+          name: norma-combined-contract
           path: |
-            ${{ runner.temp }}/norma-schema-contract/*.json
-            ${{ runner.temp }}/norma-schema-contract/databases/*.json
-            ${{ runner.temp }}/norma-schema-contract/*.log
+            ${{ runner.temp }}/norma-combined-contract/*.json
+            ${{ runner.temp }}/norma-combined-contract/databases/*.json
+            ${{ runner.temp }}/norma-combined-contract/*.log
+            ${{ runner.temp }}/norma-combined-contract/legacy-schema/*.json
+            ${{ runner.temp }}/norma-combined-contract/legacy-schema/databases/*.json
+            ${{ runner.temp }}/norma-combined-contract/legacy-schema/*.log
           if-no-files-found: warn

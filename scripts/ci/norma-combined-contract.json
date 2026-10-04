@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "profile": "combined-explicit-legacy-and-paired-maintenance",
+  "legacy_schema_commit": "e94aef50332c5b2e6074cb8eb365d5ecebe87ee9",
+  "paired_input_commit": "d2edabac632a7196820ff7c4a84fc620177211ee",
+  "maintenance_input_commit": "562e69ca418e1263fdb16c36f66e8c0f593e529d",
+  "current_main_input": "2138fec3404a143971ed4d42561d70e7e7845dc5",
+  "dependency_lock_sha256": "699d7100cb27f95b879dbfebba84e0ed4320d6e67f705fbd8f8e3bbecf70847e",
+  "seeds": [
+    101,
+    202,
+    303,
+    404,
+    505
+  ],
+  "lifecycles": 80,
+  "norma_migrations": {
+    "supabase/migrations/20261002120000_norma_call_requests.sql": "fcf9974207a83d2c92e48b3e3d080f05f829bc858bb2dc5e5c7b73c5837aab88",
+    "supabase/migrations/20261002120100_norma_m2_hardening.sql": "095718605fdf61b220403e21ed01048a1e3cb1d6976f3e7bda615975301953f3",
+    "supabase/migrations/20261002120200_norma_m2_review_fixes.sql": "c03163be6c338757cf22ee4fead88f97fab299579feb5f2bd6c87151b6572bce",
+    "supabase/migrations/20261002120300_norma_dnc_lock_task_writes.sql": "0063e8e0e0efe837cbcca6486071bed80710853f4726e538085209b75c16def0",
+    "supabase/migrations/20261002120400_norma_create_request_serialize.sql": "fc875de9a57465d1750bb227641a2266ea1ff0bb6fa6252b40d1e78a435cfd3d",
+    "supabase/migrations/20261002120500_norma_lock_order.sql": "918c029fa251eaba2ca115a9820207b4aa9280f2adab2f02f2488bf53abfe30b",
+    "supabase/migrations/20261004090000_norma_call_twice.sql": "f386ab9e07d28372acdc37d088a82c153eba8dd2019532964d87a6a1680c3466"
+  },
+  "paired_assertion_sources": {
+    "src/lib/norma/stress/pending-dnc-stuck-review-task.integration.test.ts": "f86041ffa16e94994d1af0ceaa479086a9ed309588af20379239c321e75a6b8c",
+    "src/lib/norma/stress/races.integration.test.ts": "f6c8c72523e0fb329c8c8e18d0759e7a467a196f5d743240dcdd69b54e38685c",
+    "src/lib/norma/stress/random.integration.test.ts": "c97bc28894fcafa703af05a9df1157603a29ab6053d69f84f0ced050af0973f2",
+    "src/lib/norma/stress/regress-create-deadlock.integration.test.ts": "88aa80e8d956d9c3ac99a25a381db1102018a929227b4329d3353044be597cff",
+    "src/lib/norma/stress/regress-dnc-lock.integration.test.ts": "da0554e25627b3901f68946f31884863eaa7889291adec77a4079f2443ba67ac",
+    "src/lib/norma/stress/regress-lock-order.integration.test.ts": "4828930ce62081ea4426f616efd5925486bd45f7352430c75d10d65099c3f523",
+    "src/lib/norma/stress/regress-reconcile-mismatch.integration.test.ts": "802d96b8f2c179b576c853a8b4e75bd9f3c8815028d2fcb4b309ba16457ba22e",
+    "src/lib/norma/stress/regress-switchboard-race.integration.test.ts": "53649ab8de2429f81a24dbec790b181100e321a9f6f07dbfa5a83f809abc1b1d",
+    "src/lib/norma/stress/retry.integration.test.ts": "363dfc61272f465eb5e83e040ac35a8d1c983e228622acae28cf7fa7b46f20d8",
+    "src/lib/norma/stress/schema-contract.integration.test.ts": "bf027a5d34b4e92a39028dcfb4f5d0f21adb582b2805f95094168c3967f64bdd",
+    "src/lib/norma/stress/smoke.integration.test.ts": "f5b447da3b12ae0f062f75875229943cf4c5a65c080d8ef2652a0a777bd87bcb",
+    "src/lib/norma/stress/teeth.integration.test.ts": "2b68a1d7e4c8f3af58aa0a97ccfe245f5c26e54e1c4f2bad0b9d9a87cc48b40a"
+  },
+  "combined_sources": {
+    ".env.example": "b16a6aa02db6c7571542081a3001c3bffc1b04159ccb80fe2f0c96819bfae5fe",
+    ".github/workflows/norma-stress.yml": "8f76bbc3f0532f8e0cc399bbccab776059b2526db9bea007925eb74b53ded86f",
+    "scripts/ci/norma-combined-support.mjs": "b522c09da1e742a7844ce2797a93bc27ff74e7600f40550c9e4f7d7f0f50e36d",
+    "scripts/ci/run-norma-combined-contract.mjs": "967109f2ca12c0a2685b702cb171bd9d800bb9a5b3ca4ece77d82e10598f7401",
+    "src/app/api/cron/norma-reconciliation/route.test.ts": "82f61a308a1e46f2d3f2aab010cd79446026b534bb5f8fccb823e659e5d48222",
+    "src/app/api/cron/norma-reconciliation/route.ts": "f89fa09faceeb8eef88894344d7bea70d336d4a1ceb4462d298ed81016f7183e",
+    "src/lib/norma/bland.ts": "07ee5273cff6ebd0f8975e6d410c95e53ddf155b54a67368e121cbb823e5a3f9",
+    "src/lib/norma/block-copy.ts": "3ad6b5c037739b0a26925a1095ae30a9c5cd3da3c73f30e525d5f81a824eb86a",
+    "src/lib/norma/callback-time-ai.ts": "a7548a0c76405c40b0524032d0671631312dcef90a6548031471efeccf72fc37",
+    "src/lib/norma/callback-time.ts": "4ce5bcd77bd5c7e35e769c0950dc698b47df40e05e820104fc07431a55405c4f",
+    "src/lib/norma/callback-wiring.ts": "13ec6221b5cfbd603cdce825ebf9f7a3731fc3dca52d8358cd9d392036a50712",
+    "src/lib/norma/config.ts": "f7e6047a3651a149c0918c48278422aeefd421c07959cfc4f9e58b5f310ed42b",
+    "src/lib/norma/connected-toast.ts": "37ea9f46b85e03d6185ef1e651b08b3d0cc733e522030f957fb1384bfec6c7d4",
+    "src/lib/norma/dispatch.ts": "def9de5068dd89379a6d7da7368e134ec6c4b5c84e467f5183a631a917386c74",
+    "src/lib/norma/gate.ts": "dbecbf277a04823f50b2e34c3cd94c649eaf42f25fa724f85d68eeecf9d414a8",
+    "src/lib/norma/index.ts": "bb42200406a0c575a9103de1edf9ad6bafd260768745180485b084ba4195a6a5",
+    "src/lib/norma/maintenance.test.ts": "b086c4462c524084399541b2836ae0de6cd8f58a8575b21eb7aa6b57bbbaf482",
+    "src/lib/norma/maintenance.ts": "746873476244c82387d956094f7f936cbb769658a6a8621fb813639f8fcb7505",
+    "src/lib/norma/outcome-labels.ts": "4886b5e0fab26201b4c52a7a760ede22cd500e031489d8e413d6aaf14cc12c34",
+    "src/lib/norma/outcome.ts": "206d836791c7c0e1c506116ff4c878d52725a3d6b8806873b860cfe1c7cca10c",
+    "src/lib/norma/precall-sms.ts": "9242306f1239fe333a270869d08639e920ee0a437ad18d98acab092df2bbf1ec",
+    "src/lib/norma/preview.ts": "ce6b9ed8ce0a8a1aea61b5fea2ea704ee98176a25041725377a12f779df936d1",
+    "src/lib/norma/reconcile.ts": "6eeed0a61fb7733a44938298f609a286c8e636be99cbc6623e8c32a15d59573f",
+    "src/lib/norma/request-call.ts": "7d3092b202b77325f18cd2a4c48e7011f6ee31fedaa3b8f6fa2d7f7230a45241",
+    "src/lib/norma/retry.ts": "1db0e4ad6b106d4f816081ed35b94de3878961d2999f1479473c545e0d05d4bb",
+    "src/lib/norma/rpc.ts": "ac9d4e31c0fbfb4cbaaedbda1d41120970ed9c38c10973d0b25a9179841929f3",
+    "src/lib/norma/slack-blocks.ts": "91978f0ba73829dbf4af0a4fed7c9cda6848ac3d69fa93a0227d7dfa6e646d77",
+    "src/lib/norma/slack-worker.ts": "00936f92a2237ff479e7465514ddfc140bc77b10d3c1bf32e6827c128c15cd42",
+    "src/lib/norma/stress/db.ts": "e80890f5331bccd57a1a6eb9aff111a345736c8f2a09438e9d99e6cdab671fcb",
+    "src/lib/norma/stress/maintenance.integration.test.ts": "96e6fa22185b65a8b719931f64422caa6b534d9da1110bbe7a6bfe7f41b78f4d",
+    "src/lib/norma/test-helpers.ts": "809936607b10508c6b780b93e54cea512662a3addc043f2a80d34e4aabe9f9f4",
+    "src/lib/norma/tone.ts": "8b92834cb349dc01dff28669a9f318b133f4f6f152d493ac5876d872b0a206e7",
+    "src/lib/norma/types.ts": "cb91d0dda82908bfa1775025c83b9724d0673ed9fe3d634d320ade5a11feb925",
+    "src/lib/norma/view.ts": "184f612b3408c0f90ba3da57264f9395a78c239aec2939719f50737fa90ee1d5",
+    "src/lib/norma/voice-phone.ts": "a4f4647606d954b46197e865b85782ec83331d847ea7e5fa805f76bd6fe08bd8",
+    "src/lib/norma/webhook.ts": "001da3c2116501ed37bd38494ab12beef39f3fd7e249404b07322570c5bb6e28",
+    "vercel.json": "5ef11607d3e94410ed1e902fcd3134b20c70c75c7cba9d737711fbdcc6bb2490"
+  },
+  "lanes": {
+    "paired": {
+      "tests": 176,
+      "files": [
+        "src/lib/norma/stress/maintenance.integration.test.ts",
+        "src/lib/norma/stress/pending-dnc-stuck-review-task.integration.test.ts",
+        "src/lib/norma/stress/races.integration.test.ts",
+        "src/lib/norma/stress/random.integration.test.ts",
+        "src/lib/norma/stress/regress-create-deadlock.integration.test.ts",
+        "src/lib/norma/stress/regress-dnc-lock.integration.test.ts",
+        "src/lib/norma/stress/regress-lock-order.integration.test.ts",
+        "src/lib/norma/stress/regress-reconcile-mismatch.integration.test.ts",
+        "src/lib/norma/stress/regress-switchboard-race.integration.test.ts",
+        "src/lib/norma/stress/retry.integration.test.ts",
+        "src/lib/norma/stress/schema-contract.integration.test.ts",
+        "src/lib/norma/stress/smoke.integration.test.ts",
+        "src/lib/norma/stress/teeth.integration.test.ts"
+      ]
+    },
+    "controls": {
+      "tests": 19,
+      "files": [
+        "src/app/api/cron/norma-reconciliation/route.test.ts",
+        "src/lib/norma/maintenance.test.ts"
+      ]
+    }
+  }
+}

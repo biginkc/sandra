@@ -9,6 +9,8 @@ import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url"
 
 import { CONTRACT, checkLaneEnvironment, checkSchema, schemaCatalog, sha256, subprocessEnvironment, writeManifest } from "../../../../scripts/ci/norma-contract-support.mjs";
 
+import { checkCombinedLane } from "../../../../scripts/ci/norma-combined-support.mjs";
+
 import { createStressPool } from "./pg-client";
 
 /**
@@ -144,7 +146,9 @@ export type Scratch = {
 };
 
 export async function createScratchDb(): Promise<Scratch> {
-  const lane = process.env.NORMA_SCHEMA_CONTRACT_LANE ? checkLaneEnvironment(process.env) : undefined;
+  const lane = process.env.NORMA_SCHEMA_CONTRACT_LANE === "paired"
+    ? checkCombinedLane(process.env)
+    : process.env.NORMA_SCHEMA_CONTRACT_LANE ? checkLaneEnvironment(process.env) : undefined;
   const name = lane
     ? `norma_schema_${process.env.NORMA_SCHEMA_CONTRACT_RUN_ID}_${process.pid}_${Date.now().toString(36)}`
     : `norma_stress_${process.pid}_${Date.now().toString(36)}`;
