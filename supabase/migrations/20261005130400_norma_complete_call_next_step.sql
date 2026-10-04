@@ -4,7 +4,7 @@
 -- task, both upserted by the request's source key; the manual task_created lead event is gone
 -- (the shared function writes the identical identity, tasks.created / task id). A closed,
 -- rescheduled or superseded keyed appointment is not reopened: the result becomes a fresh next
--- step under a new key. Signature and grants unchanged (create or replace).
+-- step under a deterministic key (request key + call id), so a repeat updates that row instead of adding another. Signature and grants unchanged (create or replace).
 begin;
 
 create or replace function public.fn_norma_complete_call(
@@ -206,7 +206,7 @@ begin
     -- The actor is the requester when still an active member, else the assignee (the shared
     -- function refuses an actor without an active membership; the old insert did not care).
     -- If the keyed appointment was closed, rescheduled or superseded the shared function
-    -- refuses to reopen it; the result then becomes a fresh next step under a new key.
+    -- refuses to reopen it; the result then becomes a fresh next step under a deterministic key (request key + call id), so a repeat updates that row instead of adding another.
     begin
       begin
         v_task_id := (public.fn_create_next_step(
@@ -236,7 +236,7 @@ begin
           p_title := v_task_title, p_due_at := v_task_due,
           p_property := r.property_id, p_contact := r.contact_id,
           p_mode := 'phone', p_description := v_task_desc,
-          p_source_key := v_task_key || ':' || gen_random_uuid()::text,
+          p_source_key := v_task_key || ':' || p_call_id,
           p_origin := 'norma') ->> 'task_id')::uuid;
       end;
     exception when others then

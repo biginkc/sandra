@@ -106,7 +106,15 @@ describe("fn_norma_complete_call through fn_create_next_step", () => {
       expect(closedRow).toMatchObject({ status: "completed", outcome: "held" });
       const fresh = tasks.find((t) => t.id !== closedId)!;
       expect(fresh).toMatchObject({ type: "appointment", status: "open", mode: "phone" });
-      expect(fresh.source_key).toMatch(new RegExp(`^norma_call:${id}:`));
+      expect(fresh.source_key).toBe(`norma_call:${id}:${callId}`);
+      // Deterministic: a repeat of the same fresh write (same request + call id) lands on the
+      // same row, so there is never a second open callback.
+      const due = new Date(Date.now() + 86_400_000).toISOString();
+      await svc(db, `select public.fn_create_next_step(p_org := $1, p_actor := $2, p_assignee := $2, p_kind := 'appointment', p_title := 't', p_due_at := $3, p_property := $4, p_contact := $5, p_mode := 'phone', p_description := 'once more', p_source_key := $6, p_origin := 'norma')`, [ctx.org, ctx.assignee, due, l.property, l.contact, fresh.source_key]);
+      const again = await tasksFor(db, l.property);
+      expect(again).toHaveLength(2);
+      expect(again.filter((t) => t.status === "open")).toHaveLength(1);
+      expect(again.find((t) => t.id === fresh.id)!.description).toContain("once more");
       expect(fresh.calendar_chain_id).not.toBe(closedRow.calendar_chain_id);
     });
   });
