@@ -44,6 +44,20 @@ describe("<TriageList />", () => {
     expect(screen.queryByTestId("call-next-triage-more")).not.toBeInTheDocument();
   });
 
+  it("disables Call on triage rows that are DNC or have no callable phone", () => {
+    const rows = [
+      entry("ok", null),
+      { propertyId: "dnc", lastTouchAt: null, row: queueRowFixture("dnc", { contactDnc: true }) },
+      { propertyId: "nophone", lastTouchAt: null, row: queueRowFixture("nophone", { phones: [], phone: null }) },
+    ];
+    render(<TriageList {...base({ triage: { rows, totalCount: 3, cursor: null } })} />);
+    expect(screen.getByTestId("call-next-action-call-ok")).toBeEnabled();
+    expect(screen.getByTestId("call-next-action-call-dnc")).toBeDisabled();
+    expect(screen.getByTestId("call-next-action-call-nophone")).toBeDisabled();
+    // Dead / Nurture stays available so these leads can still be drained.
+    expect(screen.getByTestId("call-next-menu-dnc")).toBeEnabled();
+  });
+
   it("shows an error", () => {
     render(<TriageList {...base({ error: "The triage list could not load." })} />);
     expect(screen.getByRole("alert")).toHaveTextContent("could not load");

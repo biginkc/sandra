@@ -84,6 +84,10 @@ export function reasonLabel(
       return ms === null || ms < MINUTE
         ? "Offer follow-up overdue"
         : `Offer follow-up ${compactAge(ms)} overdue`;
+    case "missed_callback":
+      return ms === null || ms < DAY
+        ? "Missed callback (today)"
+        : `Missed callback (${longAge(ms)} ago)`;
     case "hot_going_cold":
       return ms === null ? "Hot, not touched yet" : `Hot, no touch in ${compactAge(ms)}`;
     case "warm_going_cold":

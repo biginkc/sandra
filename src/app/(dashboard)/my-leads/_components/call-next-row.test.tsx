@@ -79,6 +79,16 @@ describe("<CallNextRowView />", () => {
     expect(screen.getByTestId("call-next-menu-lead-1")).toBeDisabled();
   });
 
+  it.each([
+    ["a DNC contact", { contactDnc: true }],
+    ["no phone numbers", { phones: [], phone: null }],
+    ["only blank phone numbers", { phones: [" "] }],
+  ])("disables Call (but keeps the menu) for %s", (_label, over) => {
+    renderRow({ item: { ...stripItem("lead-1"), row: queueRowFixture("lead-1", over) } });
+    expect(screen.getByTestId("call-next-action-call-lead-1")).toBeDisabled();
+    expect(screen.getByTestId("call-next-menu-lead-1")).toBeEnabled();
+  });
+
   it("disables both while this lead's change is saving", () => {
     renderRow({ busy: true });
     expect(screen.getByTestId("call-next-action-call-lead-1")).toBeDisabled();
