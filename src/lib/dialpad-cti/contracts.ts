@@ -281,6 +281,8 @@ export function parseDialpadDispatchAuthorization(value: Json | null | undefined
 
 export const DIALPAD_CALL_STATES = ['prepared', 'awaiting_provider', 'dialing', 'connected', 'ended', 'cancelled', 'expired', 'failed'] as const;
 export type DialpadCallState = (typeof DIALPAD_CALL_STATES)[number];
+/** States the panel keeps polling and recording for. `failed` is a marker, not terminal: a late event inside the window still projects. */
+export const DIALPAD_ACTIVE_CALL_STATES: readonly DialpadCallState[] = ['prepared', 'awaiting_provider', 'dialing', 'connected', 'failed'];
 
 export interface DialpadCallStatus {
   intentId: string;

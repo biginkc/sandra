@@ -15,8 +15,9 @@
 //   offer-backfill  [--owner <uuid>] (creates each pending offer's follow-up; overdue ones land at the next 09:00 Central)
 //   link-backfill   (P1d: stores each stored Dialpad call's share link, admin recording URL and voicemail
 //                   fields that its hangup events carry; fills only empty fields, never prints a link)
-// Later phases add phone-backfill, ack-legacy-prompts to COMMANDS below as their SQL functions
-// ship; they are refused until then.
+//   phone-backfill (P2 2.4: fills contact_phone_numbers for existing contacts; before-image per row, roll back
+//                   with `rollback --run`; must be applied before the Dialpad connection is activated)
+// Later phases add ack-legacy-prompts to COMMANDS below as its SQL function ships; it is refused until then.
 //
 // Runbook: rolling back a reassign to a deactivated Maria/Mel fails safe (the active-assignee guard
 // trg_properties_active_assignee refuses it) and the lead is reported under notRestored, not forced.
@@ -72,11 +73,13 @@ export const COMMANDS = {
   },
   // Captures the links stored hangup events carry into empty fields only (P1d 1d.1).
   "link-backfill": { needs: ["org"], rpc: "fn_my_leads_housekeeping_link_backfill", args: (o) => ({ p_org_id: o.org }) },
+  // Fills the normalized phone table for existing contacts (P2 2.4). Preview -> --confirm fingerprint -> apply.
+  "phone-backfill": { needs: ["org"], rpc: "fn_contact_phone_numbers_backfill", args: (o) => ({ p_org_id: o.org }) },
   // Read-only gate for the retire migration: never applies anything.
   "retire-preflight": { needs: ["org"], rpc: "fn_my_leads_next_step_retire_preflight", args: (o) => ({ p_org_id: o.org }), readOnly: true },
   rollback: { needs: ["org", "run"], rollback: true },
 };
-const LATER = ["phone-backfill", "ack-legacy-prompts"];
+const LATER = ["ack-legacy-prompts"];
 
 export function parseArgs(argv) {
   const [command, ...rest] = argv;

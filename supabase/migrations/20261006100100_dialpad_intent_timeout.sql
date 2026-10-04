@@ -55,10 +55,19 @@ begin
   if p_cutoff_seconds not between 30 and 900 or p_limit not between 1 and 1000 then
     raise exception 'INVALID_INPUT' using errcode = '22023';
   end if;
+  -- Inert until Phase 2 activation: only orgs with the native_matcher flag are swept; missing table/column reads OFF.
+  begin
+    perform 1 from public.my_leads_feature_flags f where f.native_matcher;
+    if not found then return 0; end if;
+  exception when undefined_table or undefined_column then
+    return 0;
+  end;
   with due as (
     select id from public.dialpad_call_intents
     where status = 'prepared' and failed_at is null and dispatch_authorized_at is not null
       and dispatch_authorized_at <= now() - make_interval(secs => p_cutoff_seconds)
+      and exists (select 1 from public.my_leads_feature_flags f where f.org_id = dialpad_call_intents.org_id and f.native_matcher)
+      and expires_at > now() -- only intents still inside their window: old expired rows are never relabeled
     order by dispatch_authorized_at limit p_limit for update skip locked)
   update public.dialpad_call_intents i set failed_at = now() from due where i.id = due.id;
   get diagnostics v_n = row_count;

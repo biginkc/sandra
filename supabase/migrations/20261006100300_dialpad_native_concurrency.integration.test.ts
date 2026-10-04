@@ -178,7 +178,7 @@ describe.skipIf(!present)('P2 data plane concurrency (needs the Phase 2 migratio
 
   it('intent timeout: a second sweep running at the same time skips locked rows and never double-updates', async () => {
     const ids = await seeded(async (db) => {
-      const w = track(await world(db));
+      const w = track(await world(db, { flag: true }));
       const out: string[] = [];
       for (let i = 0; i < 2; i++) {
         const intent = await prepare(onWorld(w, db));

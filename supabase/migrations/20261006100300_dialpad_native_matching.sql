@@ -83,12 +83,14 @@ begin
   begin
     insert into public.dialpad_call_intents (org_id, connection_id, rep_user_id, binding_id, dialpad_user_id, property_id,
       contact_id, phone_slot, destination_e164, assignment_episode_id, custom_data, idempotency_key, request_hash,
-      expires_at, origin, direction)
+      prepared_at, expires_at, origin, direction)
     values (v_event.org_id, v_event.connection_id, v_binding.user_id, v_binding.id, v_binding.dialpad_user_id, p_property_id,
       p_contact_id, p_slot, v_event.payload ->> 'external_number', v_episode.id,
       'sandra.dialpad.v1.' || encode(extensions.gen_random_bytes(24), 'hex'), extensions.gen_random_uuid(),
       encode(sha256(convert_to('dialpad-native:' || v_event.org_id::text || ':' || v_event.provider_call_id, 'utf8')), 'hex'),
-      now() + interval '1 day', 'native', lower(v_event.payload ->> 'direction'))
+      -- Window opens at the root event, not at bind time, so transfer legs and a late Assign-to-lead
+      -- (all stamped earlier than now()) stay inside the intent window.
+      least(to_timestamp(v_event.event_timestamp_ms / 1000.0), now()), now() + interval '1 day', 'native', lower(v_event.payload ->> 'direction'))
     returning id into v_id;
     update public.dialpad_call_intents
       set status = 'matched', matched_provider_call_id = v_event.provider_call_id,

@@ -276,6 +276,22 @@ describe('20261006100300 native-call matching', () => {
     });
   });
 
+  it('10b. the intent window opens at the root event: transfer legs arriving >5 s after the root, all stamped before now(), still project', async () => {
+    await withP2('nativeMatching', async (db) => {
+      const w = await world(db, { flag: true });
+      const start = w.now - 7_200_000; // the call happened two hours before it is processed
+      await deliver(w, { state: 'calling', at: start, extra: { date_started: start } });
+      await deliver(w, { state: 'hangup', at: start + 30_000, extra: { date_started: start, date_connected: start + 3000, date_ended: start + 30_000, talk_time: 27_000, is_transferred: true } });
+      const s2 = start + 31_000;
+      await deliver(w, { callId: LEG, master: CALL, state: 'connected', at: s2 + 1000, extra: { date_started: s2, date_connected: s2 + 1000 } });
+      await deliver(w, { callId: LEG, master: CALL, state: 'hangup', at: s2 + 40_000, extra: { date_started: s2, date_connected: s2 + 1000, date_ended: s2 + 40_000, talk_time: 39_000 } });
+      const l = await ledger(w);
+      expect(l.intent).toHaveLength(1);
+      expect(new Date(l.intent[0].prepared_at).getTime()).toBe(start); // root event time, not bind time
+      expect(new Set(await reasons(w))).toEqual(new Set(['matched:']));
+    });
+  });
+
   it('11. reassignment mid-call: the attempt stays with the rep who took the call, the new owner is untouched', async () => {
     await withP2('nativeMatching', async (db) => {
       const w = await world(db, { flag: true });

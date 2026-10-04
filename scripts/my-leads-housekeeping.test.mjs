@@ -112,7 +112,7 @@ test("close-attempts and rollback route to their RPCs", async () => {
 });
 
 test("later-phase commands and unknown commands are refused without any call", async () => {
-  for (const argv of [["phone-backfill", "--org", ORG], ["nope"]]) {
+  for (const argv of [["ack-legacy-prompts", "--org", ORG], ["nope"]]) {
     const h = harness();
     assert.equal(await run(argv, h.io), 1);
     assert.equal(h.calls.length, 0);
@@ -208,4 +208,20 @@ test("link-backfill previews, refuses apply without the confirm hash, and applie
   const a = harness({ preview });
   assert.equal(await run(["link-backfill", "--org", ORG, "--apply", "--confirm", sha256Hex(canonicalJson({ ...HOST, ...preview }))], a.io), 0);
   assert.deepEqual(a.calls[1].args, { p_org_id: ORG, p_apply: true, p_fingerprint: preview.fingerprint });
+});
+
+test("phone-backfill previews, is bound to the host through the confirm hash, and applies through its own function", async () => {
+  const preview = { kind: "phone_backfill", fingerprint: "e".repeat(64), count: 7 };
+  const h = harness({ preview });
+  assert.equal(await run(["phone-backfill", "--org", ORG], h.io), 0);
+  assert.deepEqual(h.calls, [{ name: "fn_contact_phone_numbers_backfill", args: { p_org_id: ORG, p_apply: false } }]);
+  const none = harness({ preview });
+  assert.equal(await run(["phone-backfill", "--org", ORG, "--apply"], none.io), 1);
+  assert.equal(none.calls.length, 1);
+  const otherHost = harness({ preview });
+  assert.equal(await run(["phone-backfill", "--org", ORG, "--apply", "--confirm", sha256Hex(canonicalJson({ supabaseHost: "other.example.co", ...preview }))], otherHost.io), 1);
+  assert.equal(otherHost.calls.length, 1);
+  const a = harness({ preview });
+  assert.equal(await run(["phone-backfill", "--org", ORG, "--apply", "--confirm", sha256Hex(canonicalJson({ ...HOST, ...preview }))], a.io), 0);
+  assert.deepEqual(a.calls[1], { name: "fn_contact_phone_numbers_backfill", args: { p_org_id: ORG, p_apply: true, p_fingerprint: preview.fingerprint } });
 });

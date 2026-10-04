@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { stripTransaction } from '@tests/integration/my-leads-housekeeping-fixture';
-import { deliver, failure, ledger, nativeCall, prepare, service, withP2, world, type World, type Json } from '@tests/integration/dialpad-p2-fixture';
+import { deliver, failure, ledger, nativeCall, prepare, service, setFlag, withP2, world, type World, type Json } from '@tests/integration/dialpad-p2-fixture';
 
 const authorize = (w: World, id: string, secondsAgo: number) =>
   w.db.query(`update public.dialpad_call_intents set dispatch_authorized_at = now() - make_interval(secs => $2) where id = $1`, [id, secondsAgo]);
@@ -14,7 +14,7 @@ const status = async (w: World, id: string): Promise<Json> =>
 describe('20261006100100 intent timeout marker', () => {
   it('marks an authorized intent after 120 s and not before', async () => {
     await withP2('intentTimeout', async (db) => {
-      const w = await world(db);
+      const w = await world(db, { flag: true });
       const early = await prepare(w);
       await authorize(w, early.intentId, 119);
       expect(await sweep(w)).toBe(0);
@@ -31,7 +31,7 @@ describe('20261006100100 intent timeout marker', () => {
 
   it('never marks a prepared intent that was not authorized', async () => {
     await withP2('intentTimeout', async (db) => {
-      const w = await world(db);
+      const w = await world(db, { flag: true });
       const i = await prepare(w);
       expect(await sweep(w)).toBe(0);
       expect(await failedAt(w, i.intentId)).toBeNull();
@@ -40,7 +40,7 @@ describe('20261006100100 intent timeout marker', () => {
 
   it('a failed intent counts as no touch: no activity, attempt, clock or stage change', async () => {
     await withP2('intentTimeout', async (db) => {
-      const w = await world(db);
+      const w = await world(db, { flag: true });
       const i = await prepare(w);
       await authorize(w, i.intentId, 300);
       expect(await sweep(w)).toBe(1);
@@ -55,7 +55,7 @@ describe('20261006100100 intent timeout marker', () => {
 
   it('a late event inside the intent window still matches and projects once; failed_at is retained', async () => {
     await withP2('intentTimeout', async (db) => {
-      const w = await world(db);
+      const w = await world(db, { flag: true });
       const i = await prepare(w);
       await authorize(w, i.intentId, 300);
       await sweep(w);
@@ -73,7 +73,7 @@ describe('20261006100100 intent timeout marker', () => {
 
   it('an intent matched before the cutoff is never marked', async () => {
     await withP2('intentTimeout', async (db) => {
-      const w = await world(db);
+      const w = await world(db, { flag: true });
       const i = await prepare(w);
       await authorize(w, i.intentId, 300);
       const [calling] = nativeCall(w);
@@ -83,9 +83,37 @@ describe('20261006100100 intent timeout marker', () => {
     });
   });
 
-  it('the guard refuses clearing or moving the marker and refuses it on an unauthorized intent', async () => {
+  it('an already-expired intent is untouched: it stays expired, never relabeled failed', async () => {
+    await withP2('intentTimeout', async (db) => {
+      const w = await world(db, { flag: true });
+      const i = await prepare(w);
+      await authorize(w, i.intentId, 3600);
+      await db.query('set local session_replication_role = replica'); // evidence rows are immutable; age this one directly
+      await db.query(
+        "update public.dialpad_call_intents set prepared_at = now() - interval '2 hours', expires_at = now() - interval '1 hour' where id = $1",
+        [i.intentId]);
+      await db.query('set local session_replication_role = origin');
+      expect(await sweep(w)).toBe(0);
+      expect(await failedAt(w, i.intentId)).toBeNull();
+      expect((await status(w, i.intentId)).state).toBe('expired');
+    });
+  });
+
+  it('is inert until the org native_matcher flag is on', async () => {
     await withP2('intentTimeout', async (db) => {
       const w = await world(db);
+      const i = await prepare(w);
+      await authorize(w, i.intentId, 300);
+      expect(await sweep(w)).toBe(0);
+      expect(await failedAt(w, i.intentId)).toBeNull();
+      await setFlag(db, w.org, 'native_matcher', true);
+      expect(await sweep(w)).toBe(1);
+    });
+  });
+
+  it('the guard refuses clearing or moving the marker and refuses it on an unauthorized intent', async () => {
+    await withP2('intentTimeout', async (db) => {
+      const w = await world(db, { flag: true });
       const i = await prepare(w);
       expect((await failure(db, () => db.query('update public.dialpad_call_intents set failed_at=now() where id=$1', [i.intentId]))).code).toBe('42501');
       await authorize(w, i.intentId, 300);
@@ -97,7 +125,7 @@ describe('20261006100100 intent timeout marker', () => {
 
   it('the sweep is service-only and validates its inputs', async () => {
     await withP2('intentTimeout', async (db) => {
-      const w = await world(db);
+      const w = await world(db, { flag: true });
       await db.query('set local role authenticated');
       expect((await failure(db, () => db.query('select public.fn_fail_stale_dialpad_intents(120)'))).code).toBe('42501');
       await db.query('reset role');

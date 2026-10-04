@@ -14,7 +14,7 @@ import { DIALPAD_API_ORIGIN, resolveDialpadDirectoryKey, type DialpadDirectoryEn
  *
  * Status mapping (a 404 or empty body is "not ready yet", never a failure):
  *   200 with content -> available   404 / empty -> not_ready   429 -> not_ready (backoff is the schedule)
- *   401 / 403 -> denied (terminal, wrong scope or key)   5xx, timeout, network -> error (counts as an attempt)
+ *   401 / 403 -> denied (terminal, wrong scope or key)   5xx, timeout, network, missing key -> error (counts as an attempt)
  * Only status codes are ever stored or reported, never a response body, a key or a transcript.
  */
 
@@ -47,6 +47,7 @@ export interface DialpadArtifactDb {
 
 const DIGITS = /^[0-9]{1,20}$/;
 const REQUEST_TIMEOUT_MS = 8000;
+const ARTIFACT_CONCURRENCY = 5;
 const MAX_RESPONSE_CHARS = 2_000_000;
 const MAX_STORED_TEXT = 500_000;
 
@@ -153,30 +154,37 @@ export async function sweepDialpadArtifacts(
   const recapEnabled = deps.recapPath !== undefined ? deps.recapPath !== null : DIALPAD_RECAP_PATH !== null;
   const rows = await db.claim(deps.limit ?? 10, recapEnabled ? ['transcript', 'recap'] : ['transcript']);
   summary.claimed = rows.length;
-  const keys = new Map<string, string | null>();
-  for (const row of rows) {
-    let result: ArtifactFetchResult;
-    try {
-      if (!keys.has(row.orgId)) keys.set(row.orgId, await db.loadKey(row.orgId));
-      const apiKey = keys.get(row.orgId) ?? null;
-      if (!apiKey) result = { outcome: 'denied', error: 'no_key' };
-      else if (row.artifact === 'transcript') result = await fetchDialpadTranscript({ callId: row.providerCallId, apiKey, fetchImpl: deps.fetchImpl });
-      else result = await fetchDialpadRecap({ callId: row.providerCallId, apiKey, fetchImpl: deps.fetchImpl });
-    } catch {
-      result = { outcome: 'error', error: 'unexpected' };
+  // Rows run through a small worker pool so a full claim finishes inside the route's 60 s budget even when
+  // Dialpad is slow (8 s request timeout x ceil(limit / concurrency) rounds). Keys are cached per org.
+  const keys = new Map<string, Promise<string | null>>();
+  const queue = [...rows];
+  const worker = async () => {
+    for (let row = queue.shift(); row; row = queue.shift()) {
+      let result: ArtifactFetchResult;
+      try {
+        if (!keys.has(row.orgId)) keys.set(row.orgId, db.loadKey(row.orgId));
+        const apiKey = await keys.get(row.orgId)!;
+        // A missing key is a setup gap, not a verdict on the call: retry on the schedule rather than deny terminally.
+        if (!apiKey) result = { outcome: 'error', error: 'no_key' };
+        else if (row.artifact === 'transcript') result = await fetchDialpadTranscript({ callId: row.providerCallId, apiKey, fetchImpl: deps.fetchImpl });
+        else result = await fetchDialpadRecap({ callId: row.providerCallId, apiKey, fetchImpl: deps.fetchImpl });
+      } catch {
+        result = { outcome: 'error', error: 'unexpected' };
+      }
+      try {
+        await db.record(row.id, result);
+      } catch (error) {
+        reportError(error, { tags: { surface: 'dialpad_artifact_record' } });
+        summary.errors += 1;
+        continue;
+      }
+      if (result.outcome === 'available') summary.available += 1;
+      else if (result.outcome === 'not_ready') summary.notReady += 1;
+      else if (result.outcome === 'denied') summary.denied += 1;
+      else summary.errors += 1;
     }
-    try {
-      await db.record(row.id, result);
-    } catch (error) {
-      reportError(error, { tags: { surface: 'dialpad_artifact_record' } });
-      summary.errors += 1;
-      continue;
-    }
-    if (result.outcome === 'available') summary.available += 1;
-    else if (result.outcome === 'not_ready') summary.notReady += 1;
-    else if (result.outcome === 'denied') summary.denied += 1;
-    else summary.errors += 1;
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(ARTIFACT_CONCURRENCY, rows.length) }, worker));
   const links = await db.resolveRecordingLinks();
   summary.linksAvailable = links.available;
   summary.linksFlagged = links.flagged.length;
@@ -230,7 +238,9 @@ export function createSupabaseDialpadArtifactDb(client: SupabaseClient<Database>
     },
     async loadKey(orgId) {
       const { data, error } = await client.from('dialpad_org_connections').select('directory_api_key_ref').eq('org_id', orgId).maybeSingle();
-      if (error || !data) return null;
+      // A failed read is retryable (thrown, recorded as an error attempt); only "no connection row" is null.
+      if (error) throw new Error(`artifact key lookup failed (${error.code ?? 'unknown'})`);
+      if (!data) return null;
       return resolveDialpadDirectoryKey(data.directory_api_key_ref, env);
     },
     async resolveRecordingLinks() {

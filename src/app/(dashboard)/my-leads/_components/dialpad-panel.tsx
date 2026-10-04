@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { formatPhoneDisplay } from '@/lib/phone-format';
 
 import { Button } from '@/components/ui/button';
-import type { DialpadCallStatus } from '@/lib/dialpad-cti/contracts';
+import { DIALPAD_ACTIVE_CALL_STATES, type DialpadCallStatus } from '@/lib/dialpad-cti/contracts';
 import type { DialpadRecordingBrowserCrossing, DialpadRecordingBrowserFinalResult } from '@/lib/dialpad-recording/contracts';
 import type { DialpadPanelBootstrap } from '@/lib/dialpad-cti/dispatch';
 import {
@@ -99,7 +99,7 @@ type ArmedRecording = {
   error?: string;
 };
 
-const ACTIVE_STATES: ReadonlySet<string> = new Set(['prepared', 'awaiting_provider', 'dialing', 'connected']);
+const ACTIVE_STATES: ReadonlySet<string> = new Set(DIALPAD_ACTIVE_CALL_STATES);
 
 const STATE_LABEL: Record<DialpadCallStatus['state'], string> = {
   prepared: 'Preparing',

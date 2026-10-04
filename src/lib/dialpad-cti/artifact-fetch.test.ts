@@ -109,7 +109,7 @@ describe('sweepDialpadArtifacts', () => {
     const summary = await sweepDialpadArtifacts(db, { fetchImpl });
     expect(db.claim).toHaveBeenCalledWith(10, ['transcript']);
     expect(summary).toMatchObject({ claimed: 4, available: 1, notReady: 1, denied: 1, errors: 1 });
-    expect(recorded.map((r) => r.result.outcome)).toEqual(['available', 'not_ready', 'denied', 'error']);
+    expect(recorded.map((r) => r.result.outcome).sort()).toEqual(['available', 'denied', 'error', 'not_ready']);
   });
 
   it('claims recaps too when an endpoint is configured, and loads each org key once', async () => {
@@ -119,13 +119,32 @@ describe('sweepDialpadArtifacts', () => {
     expect(db.loadKey).toHaveBeenCalledTimes(1);
   });
 
-  it('records denied (no_key) without calling Dialpad when the org has no key', async () => {
+  it('a missing key is a retryable error (never a terminal denial) and Dialpad is not called', async () => {
     const fetchImpl = reply(200, TRANSCRIPT);
     const { db, recorded } = makeDb([row('1', 'transcript')], { loadKey: vi.fn(async () => null) });
     const summary = await sweepDialpadArtifacts(db, { fetchImpl });
     expect(fetchImpl).not.toHaveBeenCalled();
-    expect(recorded[0]).toEqual({ id: '1', result: { outcome: 'denied', error: 'no_key' } });
-    expect(summary.denied).toBe(1);
+    expect(recorded[0]).toEqual({ id: '1', result: { outcome: 'error', error: 'no_key' } });
+    expect(summary).toMatchObject({ denied: 0, errors: 1 });
+  });
+
+  it('fetches in parallel with a bounded pool so a full claim fits the route budget', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const fetchImpl: DialpadDirectoryFetch = async () => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight -= 1;
+      return { status: 404, text: async () => '' };
+    };
+    const rows = Array.from({ length: 10 }, (_, i) => row(String(i), 'transcript'));
+    const { db, recorded } = makeDb(rows);
+    const summary = await sweepDialpadArtifacts(db, { fetchImpl });
+    expect(summary.notReady).toBe(10);
+    expect(recorded).toHaveLength(10);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(5);
   });
 
   it('an unexpected throw while fetching becomes a bounded error, not a crash', async () => {

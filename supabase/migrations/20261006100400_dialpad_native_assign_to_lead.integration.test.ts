@@ -61,6 +61,22 @@ describe('20261006100400 assign to lead', () => {
     });
   });
 
+  it('assigning hours after the call still binds every earlier event (window opens at the root event)', async () => {
+    await withP2('assignToLead', async (db) => {
+      const w = await world(db, { flag: true });
+      const other = await addLead(w, { phone: '816-555-0142' });
+      const [calling, connected, hangup] = nativeCall(w, { offset: -3 * 3_600_000 });
+      await deliver(w, calling!);
+      await deliver(w, connected!);
+      expect((await assign(w, w.rep, CALL, other.property)).status).toBe('assigned');
+      await deliver(w, hangup!);
+      const l = await ledger(w);
+      expect(new Set(l.event.map((e) => e.disposition))).toEqual(new Set(['matched']));
+      expect([l.intent.length, l.activity.length, l.attempt.length]).toEqual([1, 1, 1]);
+      expect(l.activity[0].ended_at).not.toBeNull();
+    });
+  });
+
   it('a lost-response replay returns already_assigned with the same ids, never P0002', async () => {
     await withP2('assignToLead', async (db) => {
       const { w, other } = await ambiguous(db);

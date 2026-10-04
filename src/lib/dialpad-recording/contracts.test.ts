@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
+import { DIALPAD_ACTIVE_CALL_STATES, DIALPAD_CALL_STATES } from '@/lib/dialpad-cti/contracts';
+
 import {
+  CALL_STATES,
   classifyDialpadRecordingRpcError,
   DIALPAD_RECORDING_CHUNK_MAX_BYTES,
   DIALPAD_RECORDING_TRACK_MAX_BYTES,
@@ -104,5 +107,14 @@ describe('recording contracts', () => {
       threshold: { status: 'not_latched', thresholdSamples: '4800000' },
     });
     expect(vad).toMatchObject({ voicedSamples: 4_800_000, measurementStatus: 'provisional', threshold: { status: 'not_latched' } });
+  });
+});
+
+describe('call state lists stay in sync', () => {
+  it('the recording contract accepts exactly the CTI call states, and active states are a subset that includes failed', () => {
+    expect([...CALL_STATES].sort()).toEqual([...DIALPAD_CALL_STATES].sort());
+    for (const state of DIALPAD_ACTIVE_CALL_STATES) expect(DIALPAD_CALL_STATES).toContain(state);
+    expect(DIALPAD_ACTIVE_CALL_STATES).toContain('failed');
+    expect(DIALPAD_ACTIVE_CALL_STATES).not.toContain('ended');
   });
 });
