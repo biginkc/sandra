@@ -246,6 +246,29 @@ describe("setOutreachDispo", () => {
     expect(updatePayloads[0].payload).toMatchObject({ outreach_dispo: "needs_sequence" });
   });
 
+  it("starts a Nurture lead after saving Needs drip", async () => {
+    responseQueue = [{ data: property("nurture"), error: null }, { data: { id: "property-1" }, error: null }];
+    expect(await setInboxDispoAndStartDrip("property-1", "needs_sequence", "sequence-1"))
+      .toEqual({ ok: true, enrollment: { status: "enrolled", reason: "Enrolled" } });
+    expect(updatePayloads[0].payload).toMatchObject({ outreach_dispo: "needs_sequence" });
+    expect(startFollowUpDrip).toHaveBeenCalledOnce();
+  });
+
+  it.each(["wrong_number", "bad_number", "callback_requested", "booked_appointment"])("a combined drip start preserves the %s block", async (dispo) => {
+    responseQueue = [{ data: property(dispo), error: null }];
+    expect(await setInboxDispoAndStartDrip("property-1", "needs_sequence", "sequence-1"))
+      .toEqual({ ok: false, error: expect.stringContaining("before starting a drip") });
+    expect(updatePayloads).toEqual([]);
+    expect(startFollowUpDrip).not.toHaveBeenCalled();
+  });
+
+  it("does not enroll if another session changes the outcome before the save", async () => {
+    responseQueue = [{ data: property("nurture"), error: null }, { data: null, error: null }];
+    expect(await setInboxDispoAndStartDrip("property-1", "needs_sequence", "sequence-1"))
+      .toEqual({ ok: false, error: "Disposition changed in another session. Refresh and try again." });
+    expect(startFollowUpDrip).not.toHaveBeenCalled();
+  });
+
   it.each(["dnc", "opted_out"])("refuses to overwrite %s with needs_sequence", async (dispo) => {
     responseQueue = [{ data: property(dispo), error: null }];
     const result = await setInboxDispoAndStartDrip("property-1", "needs_sequence", "sequence-1");
