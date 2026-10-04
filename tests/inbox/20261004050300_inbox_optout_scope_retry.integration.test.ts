@@ -306,10 +306,23 @@ describe("Inbox opt-out scope retry", () => {
   it("blocks a stale sibling after a new active enrollment on P2", async () => {
     const f = await seedFixture();
     await addSiblingStep(f);
+    await db.query(`create or replace function pg_temp.insert_sibling_enrollment_after_first_apply() returns trigger language plpgsql as $$
+      begin
+        if new.id=tg_argv[0]::uuid and new.outreach_dispo='opted_out' then
+          insert into public.sequence_enrollments(id,org_id,sequence_id,property_id,status,next_run_at)
+          values(tg_argv[1]::uuid,tg_argv[2]::uuid,tg_argv[3]::uuid,tg_argv[4]::uuid,'active',clock_timestamp())
+          on conflict (id) do nothing;
+        end if;
+        return new;
+      end $$`);
+    await db.query(`create trigger inbox_retry_test_insert_sibling after update of outreach_dispo on public.properties
+      for each row execute function pg_temp.insert_sibling_enrollment_after_first_apply('${f.property}','${f.siblingEnrollment}','${f.org}','${f.sequence}','${f.sibling}')`);
     const first = await runStep(f);
     expect(first).toMatchObject({ state: "succeeded" });
+    expect((await one<{ status: string }>("select status from public.sequence_enrollments where id=$1", [f.siblingEnrollment])).status).toBe("active");
+    await db.query("delete from public.sequence_enrollments where id=$1", [f.siblingEnrollment]);
     await addSiblingEnrollment(f);
-    await db.query("update public.sequence_enrollments set status='opted_out',pause_reason='test stale sibling',next_run_at=null where id=$1", [f.siblingEnrollment]);
+    expect((await one<{ status: string }>("select status from public.sequence_enrollments where id=$1", [f.siblingEnrollment])).status).toBe("active");
     const second = await runStep(f, f.siblingStep);
     expect(second).toMatchObject({ state: "conflicted", receipt: { code: "sms_scope_changed", scope_rebase_attempted: true } });
   });
