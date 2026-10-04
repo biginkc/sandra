@@ -560,6 +560,8 @@ export function MyLeadQueueRow({
                 </Button>
                 <Link
                   href={`/leads/${row.propertyId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
                   prefetch={false}
                   className={buttonVariants({ variant: "outline", size: "sm" })}
                 >
