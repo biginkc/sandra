@@ -2,7 +2,7 @@
 -- The original prepared scope remains the shared receipt's identity. A
 -- transaction-local flag permits exactly one effective-scope rebase after one
 -- of the three existing sms_scope_changed errors; no grants or triggers are
--- changed here.
+-- changed here, and notifications_event_type_check is widened below.
 BEGIN;
 SET LOCAL lock_timeout='2s';
 SET LOCAL statement_timeout='30s';
@@ -215,7 +215,7 @@ BEGIN
   END IF;
   changed:=p.outreach_dispo IS DISTINCT FROM disposition;
   UPDATE public.properties SET outreach_dispo=disposition,follow_up_at=NULL,updated_at=clock_timestamp() WHERE org_id=o AND id=property_id;
-  -- Guard the shared-reuse return at line 54 against a stale scope.
+  -- Guard the shared-reuse return at line 68 against a stale scope.
   IF scope_rebase AND sms->>'contact_id' IS NOT NULL AND sms->>'scope_revision' IS DISTINCT FROM (SELECT revision::text FROM inbox_operation_domain.sms_scopes WHERE org_id=o AND contact_id=(sms->>'contact_id')::uuid) THEN RAISE EXCEPTION 'SMS scope changed or unseeded';END IF;
   IF changed THEN INSERT INTO public.lead_events(org_id,property_id,actor_type,actor_id,event_type,payload,source_type,source_id) VALUES(o,property_id,'user',requester,'dispo_set',jsonb_build_object('from',p.outreach_dispo,'to',disposition),'inbox_operation_step',s);END IF;
  ELSE

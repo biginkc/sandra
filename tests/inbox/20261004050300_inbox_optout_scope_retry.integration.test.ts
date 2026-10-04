@@ -57,6 +57,7 @@ async function seedFixture(value: "opted_out" | "not_interested" = "opted_out"):
     enrollment: uuid(), siblingEnrollment: uuid(), conversation: uuid(), siblingConversation: uuid(), operation: uuid(),
     item: uuid(), step: uuid(), siblingItem: uuid(), siblingStep: uuid(), successorStep: uuid(),
   } satisfies Fixture;
+  const secondMember = uuid();
   const preparation = uuid();
   const idempotency = uuid();
   const message = uuid();
@@ -73,8 +74,14 @@ async function seedFixture(value: "opted_out" | "not_interested" = "opted_out"):
     savedAction: null,
   };
   await db.query("insert into public.organizations(id,name) values($1,$2)", [f.org, `Inbox retry ${f.org}`]);
-  await db.query("insert into auth.users(id,email) values($1,$2)", [f.actor, `retry-${f.actor}@example.invalid`]);
-  await db.query("insert into public.memberships(org_id,user_id,role,access_status) values($1,$2,'owner','active')", [f.org, f.actor]);
+  await db.query(
+    "insert into auth.users(id,email) values($1,$2),($3,$4)",
+    [f.actor, `retry-${f.actor}@example.invalid`, secondMember, `retry-${secondMember}@example.invalid`],
+  );
+  await db.query(
+    "insert into public.memberships(org_id,user_id,role,access_status) values($1,$2,'owner','active'),($1,$3,'member','active')",
+    [f.org, f.actor, secondMember],
+  );
   await db.query("insert into public.contacts(id,org_id,first_name,phone_1,phone_1_type) values($1,$2,'Retry',$3,'mobile')", [f.contact, f.org, `+1816555${f.contact.slice(-4)}`]);
   await db.query("insert into public.properties(id,org_id,address,state,homeowner_contact_id) values($1,$2,'Retry Way','MO',$4),($3,$2,'Sibling Way','MO',$4)", [f.property, f.org, f.sibling, f.contact]);
   await db.query(
