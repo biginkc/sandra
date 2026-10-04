@@ -18,6 +18,7 @@ export default defineConfig({
     include: [
       "src/lib/integrations/slack/unfurl-data.db.integration.test.ts",
       "supabase/migrations/20261003130001_slack_lead_unfurl_foundation.integration.test.ts",
+      "supabase/migrations/20261003160000_slack_workspace_preview_policy.integration.test.ts",
     ],
     environment: "node",
     reporters: ["default"],
