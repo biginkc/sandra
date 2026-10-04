@@ -10,7 +10,7 @@ Last updated: 2026-10-04 (overnight run)
 | Item | State |
 |---|---|
 | Decision record `DECISIONS-2026-10.md` | Astra `APPROVE_PLAN: YES`, `BLOCKING: 0` at `6edf9b68`; PR #791 open, CI green; merge awaits a root slot |
-| Technical plan `TECH-PLAN-2026-10.md` | **Not yet approved.** Assembled draft; Opus 5.5 consistency review applied (77 fixes). Astra plan review 1 at cae86157: NO, 19 blocking — applied in e02a0597; re-review pending. The approval SHA will be recorded here. |
+| Technical plan `TECH-PLAN-2026-10.md` | **Not yet approved.** Assembled draft; Opus 5.5 consistency review applied (77 fixes). Astra plan review 1 at cae86157: NO, 19 blocking — applied in a89092e4; re-review pending. The approval SHA will be recorded here. |
 
 ## Branch claims (one writer per branch)
 | Branch | Owner | State |
