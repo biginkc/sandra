@@ -25,7 +25,7 @@ CREATE OR REPLACE FUNCTION inbox_operation_domain.apply_sms_opt_out(o uuid,p uui
 LANGUAGE plpgsql SET search_path='' AS $$
 DECLARE homeowner uuid;scope_revision bigint;contact public.contacts;property_ids uuid[];enrollment_ids uuid[];
  shared inbox_operation_domain.shared_sms_receipts;original_scope jsonb:=expected_scope;original_policy jsonb:=expected_policy;effective_scope jsonb;result jsonb;requirements jsonb;actual jsonb;requirement jsonb;consent_id uuid;paused jsonb:='[]';item record;contact_changed boolean:=false;
- scope_rebase boolean:=current_setting('inbox.operation_scope_rebase',true)='on';rebased_from_revision text;rebased_to_revision text;rebased_property_count integer;rebased_enrollment_count integer;
+ scope_rebase boolean:=coalesce(current_setting('inbox.operation_scope_rebase',true),'off')='on';rebased_from_revision text;rebased_to_revision text;rebased_property_count integer;rebased_enrollment_count integer;
 BEGIN
  SELECT homeowner_contact_id INTO homeowner FROM public.properties WHERE org_id=o AND id=p FOR UPDATE;
  IF NOT FOUND THEN RAISE EXCEPTION 'Property missing';END IF;
@@ -99,7 +99,7 @@ CREATE OR REPLACE FUNCTION inbox_operation_domain.apply_property_step(o uuid,op 
 LANGUAGE plpgsql SET search_path='' AS $$
 DECLARE shared_sms inbox_operation_domain.shared_sms_receipts; sms_original_policy jsonb; sms jsonb; sms_expected jsonb; sms_contact uuid; step jsonb; payload jsonb; expected jsonb; actual jsonb; requirements jsonb; prior jsonb; history jsonb; historical jsonb;
  requester uuid; assignee uuid; property_id uuid; p public.properties; member public.memberships;
- requirement jsonb; revised jsonb; result jsonb; changed boolean; disposition text; entry record; targets jsonb; target jsonb; target_revision bigint; resolved jsonb; target_results jsonb:='[]'; actor_count integer;scope_rebase boolean:=current_setting('inbox.operation_scope_rebase',true)='on';
+ requirement jsonb; revised jsonb; result jsonb; changed boolean; disposition text; entry record; targets jsonb; target jsonb; target_revision bigint; resolved jsonb; target_results jsonb:='[]'; actor_count integer;scope_rebase boolean:=coalesce(current_setting('inbox.operation_scope_rebase',true),'off')='on';
 BEGIN
  -- Completed replay never re-applies the effect; callers read the retained receipt.
  -- The fence lock is held through canonical writes and the final receipt.

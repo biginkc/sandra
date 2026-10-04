@@ -47,11 +47,11 @@ const scopeGateMessages = [
 const optOutNotificationEvent = "inbox_optout_not_applied";
 const optOutNotificationTitleSha256 = "cb36a598e7e3425e4dfb74bab2edc587e6ed990ed8f0ae663f787613da110dda";
 
-async function one<T extends QueryResultRow>(sql: string, params: unknown[] = []): Promise<T> {
-  return (await db.query<T>(sql, params)).rows[0]!;
+async function one<T extends QueryResultRow>(sql: string, params: unknown[] = [], client: Client = db): Promise<T> {
+  return (await client.query<T>(sql, params)).rows[0]!;
 }
 
-async function seedFixture(value: "opted_out" | "not_interested" = "opted_out"): Promise<Fixture> {
+async function seedFixture(value: "opted_out" | "not_interested" = "opted_out", client: Client = db): Promise<Fixture> {
   const f = {
     org: uuid(), actor: uuid(), contact: uuid(), property: uuid(), sibling: uuid(), sequence: uuid(),
     enrollment: uuid(), siblingEnrollment: uuid(), conversation: uuid(), siblingConversation: uuid(), operation: uuid(),
@@ -73,32 +73,33 @@ async function seedFixture(value: "opted_out" | "not_interested" = "opted_out"):
     definition,
     savedAction: null,
   };
-  await db.query("insert into public.organizations(id,name) values($1,$2)", [f.org, `Inbox retry ${f.org}`]);
-  await db.query(
+  await client.query("insert into public.organizations(id,name) values($1,$2)", [f.org, `Inbox retry ${f.org}`]);
+  await client.query(
     "insert into auth.users(id,email) values($1,$2),($3,$4)",
     [f.actor, `retry-${f.actor}@example.invalid`, secondMember, `retry-${secondMember}@example.invalid`],
   );
-  await db.query(
+  await client.query(
     "insert into public.memberships(org_id,user_id,role,access_status) values($1,$2,'owner','active'),($1,$3,'member','active')",
     [f.org, f.actor, secondMember],
   );
-  await db.query("insert into public.contacts(id,org_id,first_name,phone_1,phone_1_type) values($1,$2,'Retry',$3,'mobile')", [f.contact, f.org, `+1816555${f.contact.slice(-4)}`]);
-  await db.query("insert into public.properties(id,org_id,address,state,homeowner_contact_id) values($1,$2,'Retry Way','MO',$4),($3,$2,'Sibling Way','MO',$4)", [f.property, f.org, f.sibling, f.contact]);
-  await db.query(
+  await client.query("insert into public.contacts(id,org_id,first_name,phone_1,phone_1_type) values($1,$2,'Retry',$3,'mobile')", [f.contact, f.org, `+1816555${f.contact.slice(-4)}`]);
+  await client.query("insert into public.properties(id,org_id,address,state,homeowner_contact_id) values($1,$2,'Retry Way','MO',$4),($3,$2,'Sibling Way','MO',$4)", [f.property, f.org, f.sibling, f.contact]);
+  await client.query(
     "insert into public.messages(id,org_id,conversation_id,contact_id,property_id,channel,direction,status,body) values($1,$2,$3,$4,$5,'sms','inbound','received','retry fixture'),($6,$2,$7,$4,$8,'sms','inbound','received','retry sibling fixture')",
     [message, f.org, f.conversation, f.contact, f.property, siblingMessage, f.siblingConversation, f.sibling],
   );
-  await db.query(
+  await client.query(
     "insert into public.ai_disposition_reviews(id,org_id,property_id,conversation_id,source_inbound_message_id,disposition,ai_reason) values($1,$2,$3,$4,$5,'not_interested','retry fixture'),($6,$2,$7,$8,$9,'not_interested','retry sibling fixture')",
     [review, f.org, f.property, f.conversation, message, siblingReview, f.sibling, f.siblingConversation, siblingMessage],
   );
-  await db.query("insert into public.sequences(id,org_id,name) values($1,$2,'Retry sequence')", [f.sequence, f.org]);
-  await db.query("insert into public.sequence_enrollments(id,org_id,sequence_id,property_id,status,next_run_at) values($1,$2,$3,$4,'active',clock_timestamp())", [f.enrollment, f.org, f.sequence, f.property]);
-  await db.query("insert into public.consent_events(org_id,contact_id,channel,event_type,source) values($1,$2,'sms','opt_in_informational','retry fixture')", [f.org, f.contact]);
+  await client.query("insert into public.sequences(id,org_id,name) values($1,$2,'Retry sequence')", [f.sequence, f.org]);
+  await client.query("insert into public.sequence_enrollments(id,org_id,sequence_id,property_id,status,next_run_at) values($1,$2,$3,$4,'active',clock_timestamp())", [f.enrollment, f.org, f.sequence, f.property]);
+  await client.query("insert into public.consent_events(org_id,contact_id,channel,event_type,source) values($1,$2,'sms','opt_in_informational','retry fixture')", [f.org, f.contact]);
 
   const targetRevision = (await one<{ revision: string }>(
     "select revision::text from inbox_operation_domain.target_versions where org_id=$1::uuid and conversation_id=$2::uuid",
     [f.org, f.conversation],
+    client,
   )).revision;
   const requirements = [
     ...["property_identity", "property_policy", "property_outcome", "property_assignment", "property_reviews"]
@@ -111,6 +112,7 @@ async function seedFixture(value: "opted_out" | "not_interested" = "opted_out"):
   const policy = (await one<{ snapshot: Record<string, unknown> }>(
     "select inbox_policy.snapshot($1,$2::jsonb) snapshot",
     [f.org, JSON.stringify(requirements)],
+    client,
   )).snapshot;
   const scope = (await one<{ scope: Record<string, unknown> }>(
     `select jsonb_build_object(
@@ -120,34 +122,36 @@ async function seedFixture(value: "opted_out" | "not_interested" = "opted_out"):
        'enrollment_ids',(select coalesce(jsonb_agg(id order by id),'[]'::jsonb) from public.sequence_enrollments where org_id=$1::uuid and property_id in ($3::uuid,$4::uuid) and status='active')
      ) scope`,
     [f.org, f.contact, f.property, f.sibling],
+    client,
   )).scope;
   const canonical = JSON.stringify(canonicalInput);
   const inputHash = (await one<{ input_hash: string }>(
     "select encode(sha256(convert_to('sandra:inbox:action:v1','UTF8') || decode('00','hex') || convert_to(($1::jsonb)::text,'UTF8')),'hex') input_hash",
     [canonical],
+    client,
   )).input_hash;
-  await db.query(
+  await client.query(
     `insert into inbox_operations.preparations(id,org_id,requester_id,canonical_input,input_hash,definition,snapshot,expires_at)
      values($1::uuid,$2::uuid,$3::uuid,$4::jsonb,$5,$6::jsonb,'{"items":[],"effects":[]}',clock_timestamp()+interval '1 hour')`,
     [preparation, f.org, f.actor, canonical, inputHash, JSON.stringify(definition)],
   );
-  await db.query(
+  await client.query(
     `insert into inbox_operations.operations(org_id,id,requester_id,idempotency_key,input_hash,preparation_id,definition)
      values($1::uuid,$2::uuid,$3::uuid,$4,$5,$6::uuid,$7::jsonb)`,
     [f.org, f.operation, f.actor, idempotency, inputHash, preparation, JSON.stringify(definition)],
   );
-  await db.query(
+  await client.query(
     `insert into inbox_operations.items(org_id,operation_id,id,target_kind,target_id,resolution)
      values($1::uuid,$2::uuid,$3::uuid,'conversation',$4::uuid,jsonb_build_object('property_id',$5::uuid))`,
     [f.org, f.operation, f.item, f.conversation, f.property],
   );
-  await db.query(
+  await client.query(
     `insert into inbox_operations.steps(org_id,operation_id,id,effect_key,ordinal,action,payload,dependencies)
      values($1::uuid,$2::uuid,$3::uuid,$4,0,'outcome',jsonb_build_object('property_id',$5::uuid,'value',$6::text),
        jsonb_build_object('policy',$7::jsonb,'targets',jsonb_build_array(jsonb_build_object('conversation_id',$8::uuid,'revision',$9::bigint)), 'sms_scope',$10::jsonb))`,
     [f.org, f.operation, f.step, `property:${f.property}`, f.property, value, JSON.stringify(policy), f.conversation, targetRevision, JSON.stringify(scope)],
   );
-  await db.query(
+  await client.query(
     "insert into inbox_operations.item_steps(org_id,operation_id,item_id,step_id) values($1::uuid,$2::uuid,$3::uuid,$4::uuid)",
     [f.org, f.operation, f.item, f.step],
   );
@@ -289,6 +293,55 @@ describe("Inbox opt-out scope retry", () => {
     const second = await runStep(f);
     expect(second).toEqual(first);
     expect((await one<{ n: string }>("select count(*) n from public.consent_events where org_id=$1 and contact_id=$2 and event_type='opt_out'", [f.org, f.contact])).n).toBe("1");
+  });
+
+  it("fails closed for a stale scope on a direct domain call with an unset rebase GUC", async () => {
+    const directDb = new Client({
+      connectionString: requireLoopbackPostgresUrl(
+        process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
+      ),
+    });
+    await directDb.connect();
+    try {
+      await directDb.query("begin");
+      const f = await seedFixture("opted_out", directDb);
+      await directDb.query(
+        `update inbox_operations.steps
+         set dependencies=jsonb_set(
+           dependencies,
+           '{sms_scope,revision}',
+           to_jsonb((dependencies->'sms_scope'->>'revision')::bigint-1)
+         )
+         where org_id=$1 and operation_id=$2 and id=$3`,
+        [f.org, f.operation, f.step],
+      );
+      expect((await one<{ unset: boolean }>("select current_setting('inbox.operation_scope_rebase',true) is null unset", [], directDb)).unset).toBe(true);
+      const generation = (await one<{ generation: string }>(
+        "select inbox_operations.claim_step($1,$2,$3,60)::text generation",
+        [f.org, f.operation, f.step],
+        directDb,
+      )).generation;
+      await directDb.query("savepoint direct_scope_guard");
+      await expect(directDb.query(
+        "select inbox_operation_domain.apply_property_step($1,$2,$3,$4)",
+        [f.org, f.operation, f.step, generation],
+      )).rejects.toThrow("SMS scope changed or unseeded");
+      await directDb.query("rollback to savepoint direct_scope_guard");
+      expect(await one<{ outreach_dispo: string | null; sms_opted_out: boolean; opt_outs: string; enrollment_status: string }>(
+        `select p.outreach_dispo,c.sms_opted_out,
+           (select count(*)::text from public.consent_events where org_id=$1 and contact_id=$2 and event_type='opt_out') opt_outs,
+           e.status enrollment_status
+         from public.properties p
+         join public.contacts c on c.id=$2
+         join public.sequence_enrollments e on e.id=$3
+         where p.id=$4`,
+        [f.org, f.contact, f.enrollment, f.property],
+        directDb,
+      )).toEqual({ outreach_dispo: null, sms_opted_out: false, opt_outs: "0", enrollment_status: "active" });
+    } finally {
+      await directDb.query("rollback").catch(() => undefined);
+      await directDb.end();
+    }
   });
 
   it.each(scopeGateMessages)("retries exactly once for an opt-out scope error: %s", async (message) => {
