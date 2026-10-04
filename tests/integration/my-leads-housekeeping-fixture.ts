@@ -67,6 +67,11 @@ const CHAIN = [
   { key: 'nativeMatching', file: '20261006100300_dialpad_native_matching', present: proc('dialpad_cti_native_resolve') },
   { key: 'assignToLead', file: '20261006100400_dialpad_native_assign_to_lead', present: proc('fn_assign_native_call_to_lead') },
   { key: 'artifactFetches', file: '20261006100500_dialpad_artifact_fetches', present: "to_regclass('public.dialpad_call_artifact_fetches') is not null" },
+  // Phase 2 UI.
+  { key: 'ackPrompts', file: '20261006100600_call_prompt_acknowledgement', present: proc('fn_list_unacknowledged_call_prompts') },
+  { key: 'apiDial', file: '20261006100700_dialpad_api_dial_support', present: column('dialpad_org_connections', 'dial_endpoint') },
+  { key: 'redaction', file: '20261006100800_dialpad_unmatched_event_redaction', present: proc('fn_redact_dialpad_unmatched_events') },
+  { key: 'callbacksDue', file: '20261006100900_my_leads_callbacks_due', present: proc('fn_my_leads_callbacks_due') },
 ] as const;
 
 export type ChainKey = (typeof CHAIN)[number]['key'];
