@@ -1,17 +1,10 @@
-import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 import { expect, it } from 'vitest';
 import { loadTestEnv } from '@tests/integration/env';
 import { requireLoopbackPostgresUrl } from '@/lib/testing/loopback-postgres-url';
+import { applyMyLeadsChain } from '@tests/integration/my-leads-housekeeping-fixture';
 
-const strip = (file: string) => {
-  const sql = readFileSync(new URL(file, import.meta.url), 'utf8');
-  if (!/^[\s\S]*?\bbegin;\s*/im.test(sql) || !/\s*commit;\s*$/i.test(sql)) throw new Error(`${file}: transaction wrapper changed`);
-  return sql.replace(/^begin;\s*/im, '').replace(/\s*commit;\s*$/i, '');
-};
-const schema = strip('./20261005120000_next_step_schema.sql');
-const createFn = strip('./20261005120500_fn_create_next_step.sql');
 const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
 
 type Role = 'authenticated' | 'anon' | 'service_role';
@@ -24,8 +17,7 @@ async function withWorld(fn: (w: Awaited<ReturnType<typeof world>>) => Promise<v
   await db.connect();
   try {
     await db.query('begin');
-    await db.query(schema);
-    await db.query(createFn);
+    await applyMyLeadsChain(db, ['schema', 'createFn']);
     await fn(await world(db));
   } finally {
     await db.query('rollback').catch(() => {});

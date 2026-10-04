@@ -4,7 +4,7 @@ import { Client } from 'pg';
 import { expect, it } from 'vitest';
 import { loadTestEnv } from '@tests/integration/env';
 import { requireLoopbackPostgresUrl } from '@/lib/testing/loopback-postgres-url';
-import { applyP1e, MIGRATIONS, stripTransaction } from '@tests/integration/my-leads-housekeeping-fixture';
+import { applyMyLeadsChain, MIGRATIONS, stripTransaction } from '@tests/integration/my-leads-housekeeping-fixture';
 
 const strip = (file: string) => {
   const sql = readFileSync(new URL(file, import.meta.url), 'utf8');
@@ -12,8 +12,6 @@ const strip = (file: string) => {
   return sql.replace(/^begin;\s*/im, '').replace(/\s*commit;\s*$/i, '');
 };
 const reassign = stripTransaction(MIGRATIONS.reassign);
-const schema = strip('./20261005120000_next_step_schema.sql');
-const relabel = strip('./20261005121500_next_step_relabel_functions.sql');
 const rollbackFile = strip('../rollbacks/20261005121500_next_step_relabel_functions.sql');
 const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
 const DAY = 86_400_000;
@@ -27,7 +25,7 @@ async function withDb(files: string[], fn: (db: Client) => Promise<void>) {
   await db.connect();
   try {
     await db.query('begin');
-    await applyP1e(db, 'outcome');
+    await applyMyLeadsChain(db, ['tools', 'reassign', 'outcome', 'schema', 'relabel']);
     for (const file of files) await db.query(file);
     await fn(db);
   } finally { await db.query('rollback').catch(() => {}); await db.end(); }
@@ -106,7 +104,7 @@ async function seedLegacy(db: Client, ctx: Awaited<ReturnType<typeof seedOrg>>) 
 }
 
 it('relabels open future next steps behind a fingerprint, leaves history alone, and rolls back exactly', async () => {
-  await withDb([schema, relabel], async (db) => {
+  await withDb([], async (db) => {
     const { as, expectError } = helpers(db);
     const ctx = await seedOrg(db);
     const { org, jarrad, maria } = ctx;
@@ -239,7 +237,7 @@ it('relabels open future next steps behind a fingerprint, leaves history alone, 
 });
 
 it('relabel rollback skips rows that were completed, rescheduled, edited or have new work, and fences attribution changes', async () => {
-  await withDb([schema, relabel], async (db) => {
+  await withDb([], async (db) => {
     const { as, expectError } = helpers(db);
     const ctx = await seedOrg(db);
     const { org, jarrad } = ctx;
@@ -309,7 +307,7 @@ it('relabel rollback skips rows that were completed, rescheduled, edited or have
 });
 
 it('sets next-step mode with the calendar ledger, service role only', async () => {
-  await withDb([schema, relabel], async (db) => {
+  await withDb([], async (db) => {
     const { as, expectError } = helpers(db);
     const ctx = await seedOrg(db);
     const { org, jarrad } = ctx;
@@ -382,7 +380,7 @@ it('sets next-step mode with the calendar ledger, service role only', async () =
 });
 
 it('retire preflight counts the legacy set read-only; every new function is closed to anon and authenticated', async () => {
-  await withDb([schema, relabel], async (db) => {
+  await withDb([], async (db) => {
     const { as, expectError } = helpers(db);
     const ctx = await seedOrg(db);
     const { org, jarrad } = ctx;
@@ -421,7 +419,7 @@ it('retire preflight counts the legacy set read-only; every new function is clos
 });
 
 it('keeps reassign and close_attempts rollbacks working through the replaced rollback functions', async () => {
-  await withDb([schema, relabel], async (db) => {
+  await withDb([], async (db) => {
     const { as } = helpers(db);
     const ctx = await seedOrg(db);
     const { org, jarrad, maria } = ctx;
@@ -458,7 +456,7 @@ it('keeps reassign and close_attempts rollbacks working through the replaced rol
 });
 
 it('the rollback twin restores the P1e rollback functions and drops the new ones', async () => {
-  await withDb([schema, relabel, rollbackFile], async (db) => {
+  await withDb([rollbackFile], async (db) => {
     const exists = async (name: string) => (await db.query('select to_regproc($1) is not null as e', [name])).rows[0].e;
     expect(await exists('public.fn_my_leads_relabel_open_next_steps')).toBe(false);
     expect(await exists('public.fn_set_next_step_mode')).toBe(false);
