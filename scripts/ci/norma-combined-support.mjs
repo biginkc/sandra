@@ -16,6 +16,7 @@ export function checkCombinedCheckout(root) {
   assert.equal(COMBINED.paired_input_commit,'d2edabac632a7196820ff7c4a84fc620177211ee');
   assert.deepEqual(COMBINED.seeds,[101,202,303,404,505]);assert.equal(COMBINED.lifecycles,80);
   assert.deepEqual(Object.values(COMBINED.lanes).map(l=>l.tests),[176,19]);
+  for(const lane of Object.values(COMBINED.lanes))assert.equal(lane.assertion_identities.length,lane.tests);
   assert.deepEqual(COMBINED.norma_migrations,CONTRACT.norma_migrations);
   assert.deepEqual(readdirSync(path.join(root,'supabase/migrations')).filter(f=>/^\d{14}_norma_.+\.sql$/.test(f)).map(f=>'supabase/migrations/'+f).sort(),Object.keys(CONTRACT.norma_migrations).sort());
   for (const [file,hash] of Object.entries({...COMBINED.norma_migrations,...COMBINED.paired_assertion_sources,...COMBINED.combined_sources})) assert.equal(sha256(readFileSync(path.join(root,file))),hash,'Combined source drift: '+file);
@@ -41,7 +42,8 @@ export function validateCombinedReport(report,lane,root) {
   assert.deepEqual(report.testResults.map(r=>path.relative(root,r.name).replaceAll('\\','/')).sort(),expected.files);
   const assertions=report.testResults.flatMap(r=>r.assertionResults);assert.equal(assertions.length,expected.tests);
   assert.ok(assertions.every(a=>a.status==='passed'));
-  assert.equal(new Set(assertions.map(a=>JSON.stringify([a.ancestorTitles,a.title]))).size,expected.tests,'Duplicate assertion identity');
+  const identities=report.testResults.flatMap(f=>f.assertionResults.map(a=>JSON.stringify([path.relative(root,f.name).replaceAll('\\','/'),a.ancestorTitles,a.title]))).sort();
+  assert.deepEqual(identities,expected.assertion_identities.map(a=>JSON.stringify(a)).sort(),'Assertion identity/multiplicity drift');
   if(lane==='paired')for(const seed of COMBINED.seeds)assert.equal(assertions.filter(a=>a.fullName.includes(`seed ${seed}: 80 lifecycles`)).length,1,'Missing paired seed '+seed);
   return {tests:expected.tests,files:expected.files,allAssertionsPassed:true};
 }

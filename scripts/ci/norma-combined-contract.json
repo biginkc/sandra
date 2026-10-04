@@ -39,7 +39,7 @@
   "combined_sources": {
     ".env.example": "b16a6aa02db6c7571542081a3001c3bffc1b04159ccb80fe2f0c96819bfae5fe",
     ".github/workflows/norma-stress.yml": "8f76bbc3f0532f8e0cc399bbccab776059b2526db9bea007925eb74b53ded86f",
-    "scripts/ci/norma-combined-support.mjs": "70997d36368ba9b118365442e628f42e0667245dc36375ec9cd86622d9d4f55c",
+    "scripts/ci/norma-combined-support.mjs": "d6e2bf395c39b6b0a01eb22c608520470a81205ef33f68d053a632cfa7dc8695",
     "scripts/ci/run-norma-combined-contract.mjs": "dd1e80a030f09ababb5bd6bf75459ccc3112e5fc478693cd8f42a81c4321090b",
     "src/app/api/cron/norma-reconciliation/route.test.ts": "82f61a308a1e46f2d3f2aab010cd79446026b534bb5f8fccb823e659e5d48222",
     "src/app/api/cron/norma-reconciliation/route.ts": "f89fa09faceeb8eef88894344d7bea70d336d4a1ceb4462d298ed81016f7183e",
@@ -93,6 +93,1240 @@
         "src/lib/norma/stress/schema-contract.integration.test.ts",
         "src/lib/norma/stress/smoke.integration.test.ts",
         "src/lib/norma/stress/teeth.integration.test.ts"
+      ],
+      "assertion_identities": [
+        [
+          "src/lib/norma/stress/maintenance.integration.test.ts",
+          [
+            "combined maintenance/retry ownership (protected=false)"
+          ],
+          "keeps the retry and pauses held, then releases fencing/grace while signed completions remain available"
+        ],
+        [
+          "src/lib/norma/stress/maintenance.integration.test.ts",
+          [
+            "combined maintenance/retry ownership (protected=true)"
+          ],
+          "keeps the retry and pauses held, then releases fencing/grace while signed completions remain available"
+        ],
+        [
+          "src/lib/norma/stress/pending-dnc-stuck-review-task.integration.test.ts",
+          [
+            "pending decision: a review task opened before a DNC lock stays open after the request completes"
+          ],
+          "contact do-not-contact flag, then a contact webhook: request completes, review task is still open (today's behaviour)"
+        ],
+        [
+          "src/lib/norma/stress/pending-dnc-stuck-review-task.integration.test.ts",
+          [
+            "pending decision: a review task opened before a DNC lock stays open after the request completes"
+          ],
+          "contact do-not-contact flag, then a contact webhook: request completes, review task is still open (today's behaviour)"
+        ],
+        [
+          "src/lib/norma/stress/pending-dnc-stuck-review-task.integration.test.ts",
+          [
+            "pending decision: a review task opened before a DNC lock stays open after the request completes"
+          ],
+          "property lock, then a lock webhook: request completes, review task is still open (today's behaviour)"
+        ],
+        [
+          "src/lib/norma/stress/pending-dnc-stuck-review-task.integration.test.ts",
+          [
+            "pending decision: a review task opened before a DNC lock stays open after the request completes"
+          ],
+          "property lock, then a lock webhook: request completes, review task is still open (today's behaviour)"
+        ],
+        [
+          "src/lib/norma/stress/pending-dnc-stuck-review-task.integration.test.ts",
+          [
+            "pending decision: a review task opened before a DNC lock stays open after the request completes"
+          ],
+          "the invariant excuse covers exactly this case: a review task opened before the lock"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "Slack"
+          ],
+          "ambiguous acceptance (Slack took the post, the response was lost): one duplicate on retry, accepted"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "Slack"
+          ],
+          "failures never touch CRM state, retries are durable, and delivery eventually succeeds exactly once"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "Slack"
+          ],
+          "no outbox row for unknown or needs_review"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "[I1] softphone cleanup race"
+          ],
+          "cleanup selected the pause, a reply upgrades it, Norma no-answer completes, then the cleanup RPC runs: refused"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "[I1] softphone cleanup race"
+          ],
+          "existing softphone pause -> Norma dispatch -> cleanup (no resume) -> no-answer (sweep resumes) -> reached stays paused"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "[I1] softphone cleanup race"
+          ],
+          "without a reply the same interleaving does resume (the expected reason is unchanged and the hold is gone)"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "a database failure during completion rolls everything back"
+          ],
+          "'callback', failure on 'norma_notifications': no partial effect, then the replay applies exactly once"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "a database failure during completion rolls everything back"
+          ],
+          "'callback', failure on 'tasks': no partial effect, then the replay applies exactly once"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "a database failure during completion rolls everything back"
+          ],
+          "'not_interested', failure on 'norma_notifications': no partial effect, then the replay applies exactly once"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "a database failure during completion rolls everything back"
+          ],
+          "'reached', failure on 'norma_notifications': no partial effect, then the replay applies exactly once"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "a database failure during completion rolls everything back"
+          ],
+          "'voicemail', failure on 'norma_notifications': no partial effect, then the replay applies exactly once"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "a database failure during completion rolls everything back"
+          ],
+          "'wrong_number', failure on 'tasks': no partial effect, then the replay applies exactly once"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "button hammer"
+          ],
+          "20 simultaneous dispatches of one requested row: one claim, one send"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "button hammer"
+          ],
+          "20 simultaneous requests for one lead (one user), call held open: exactly one request and one dispatch"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "button hammer"
+          ],
+          "20 simultaneous requests for one lead (two users), call held open: exactly one request and one dispatch"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "close vs dispatch (expected-status)"
+          ],
+          "forced order 1: the expiry close wins, then the late dispatch cannot claim"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "close vs dispatch (expected-status)"
+          ],
+          "forced order 2: the dispatch claims first, then the expiry close leaves the claimed row alone"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "close vs dispatch (expected-status)"
+          ],
+          "simultaneous (round 0): exactly one of {closed, dialled}"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "close vs dispatch (expected-status)"
+          ],
+          "simultaneous (round 1): exactly one of {closed, dialled}"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "close vs dispatch (expected-status)"
+          ],
+          "simultaneous (round 10): exactly one of {closed, dialled}"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "close vs dispatch (expected-status)"
+          ],
+          "simultaneous (round 11): exactly one of {closed, dialled}"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "close vs dispatch (expected-status)"
+          ],
+          "simultaneous (round 2): exactly one of {closed, dialled}"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "close vs dispatch (expected-status)"
+          ],
+          "simultaneous (round 3): exactly one of {closed, dialled}"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "close vs dispatch (expected-status)"
+          ],
+          "simultaneous (round 4): exactly one of {closed, dialled}"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "close vs dispatch (expected-status)"
+          ],
+          "simultaneous (round 5): exactly one of {closed, dialled}"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "close vs dispatch (expected-status)"
+          ],
+          "simultaneous (round 6): exactly one of {closed, dialled}"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "close vs dispatch (expected-status)"
+          ],
+          "simultaneous (round 7): exactly one of {closed, dialled}"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "close vs dispatch (expected-status)"
+          ],
+          "simultaneous (round 8): exactly one of {closed, dialled}"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "close vs dispatch (expected-status)"
+          ],
+          "simultaneous (round 9): exactly one of {closed, dialled}"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "dial-time checks"
+          ],
+          "a DNC write that commits after the request but before the dial stops the dial"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "dial-time checks"
+          ],
+          "a closed gate (disabled) at dispatch time never dials"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "dial-time checks"
+          ],
+          "a closed gate (not_allowed) at dispatch time never dials"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "dial-time checks"
+          ],
+          "a not_interested write after the request stops the dial"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "hostile and malformed webhooks have zero CRM effect"
+          ],
+          "a payload for another lead's request cannot touch this one"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "hostile and malformed webhooks have zero CRM effect"
+          ],
+          "an unmapped or incomplete payload parks the request for review and never completes it; the real result then completes it"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "hostile and malformed webhooks have zero CRM effect"
+          ],
+          "bad_signature"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "hostile and malformed webhooks have zero CRM effect"
+          ],
+          "malformed_json"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "hostile and malformed webhooks have zero CRM effect"
+          ],
+          "mismatch_call_id"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "hostile and malformed webhooks have zero CRM effect"
+          ],
+          "mismatch_key"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "hostile and malformed webhooks have zero CRM effect"
+          ],
+          "mismatch_number"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "hostile and malformed webhooks have zero CRM effect"
+          ],
+          "mismatch_request_id"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "hostile and malformed webhooks have zero CRM effect"
+          ],
+          "missing_signature"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "hostile and malformed webhooks have zero CRM effect"
+          ],
+          "no_metadata"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "hostile and malformed webhooks have zero CRM effect"
+          ],
+          "not_object"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "hostile and malformed webhooks have zero CRM effect"
+          ],
+          "tampered_body"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "late completion after needs_review"
+          ],
+          "callback: the real outcome applies once, the review task is retitled or closed, replay changes nothing"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "late completion after needs_review"
+          ],
+          "not_interested: the real outcome applies once, the review task is retitled or closed, replay changes nothing"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "late completion after needs_review"
+          ],
+          "reached: the real outcome applies once, the review task is retitled or closed, replay changes nothing"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "late completion after needs_review"
+          ],
+          "voicemail: the real outcome applies once, the review task is retitled or closed, replay changes nothing"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "late completion after needs_review"
+          ],
+          "wrong_number: the real outcome applies once, the review task is retitled or closed, replay changes nothing"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "reply fully before the no-answer (active): stays paused as inbound_reply"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "reply fully before the no-answer (paused:call_in_progress): stays paused as inbound_reply"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "reply upgrade done, then the no-answer completes, then the reply's own pause step runs (barrier between them)"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "simultaneous start (active): reply and completion race; reply always wins"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "simultaneous start (active): reply and completion race; reply always wins"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "simultaneous start (active): reply and completion race; reply always wins"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "simultaneous start (active): reply and completion race; reply always wins"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "simultaneous start (active): reply and completion race; reply always wins"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "simultaneous start (active): reply and completion race; reply always wins"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "simultaneous start (active): reply and completion race; reply always wins"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "simultaneous start (active): reply and completion race; reply always wins"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "simultaneous start (paused:call_in_progress): reply and completion race; reply always wins"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "simultaneous start (paused:call_in_progress): reply and completion race; reply always wins"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "simultaneous start (paused:call_in_progress): reply and completion race; reply always wins"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "simultaneous start (paused:call_in_progress): reply and completion race; reply always wins"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "simultaneous start (paused:call_in_progress): reply and completion race; reply always wins"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "simultaneous start (paused:call_in_progress): reply and completion race; reply always wins"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "simultaneous start (paused:call_in_progress): reply and completion race; reply always wins"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "simultaneous start (paused:call_in_progress): reply and completion race; reply always wins"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "takeover during the hold (active): stays paused as rep_sms_human_takeover"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "takeover during the hold (paused:call_in_progress): stays paused as rep_sms_human_takeover"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "reply during a Norma hold"
+          ],
+          "the no-answer completes first, the reply lands after (active lead): paused as inbound_reply, never active"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "webhook before the call id is stored"
+          ],
+          "barrier: the bind RPC is held until the webhook has fully completed the request"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "webhook before the call id is stored"
+          ],
+          "callback: webhook delivered inside the send-call request, before its response"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "webhook before the call id is stored"
+          ],
+          "not_interested: webhook delivered inside the send-call request, before its response"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "webhook before the call id is stored"
+          ],
+          "reached: webhook delivered inside the send-call request, before its response"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "webhook before the call id is stored"
+          ],
+          "voicemail: webhook delivered inside the send-call request, before its response"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "webhook before the call id is stored"
+          ],
+          "webhook delivered many times before the response: still one effect"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "webhook before the call id is stored"
+          ],
+          "wrong_number: webhook delivered inside the send-call request, before its response"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "webhook vs reconciliation"
+          ],
+          "callback: both reach fn_norma_complete_call together; exactly one applies"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "webhook vs reconciliation"
+          ],
+          "callback: both reach fn_norma_complete_call together; exactly one applies"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "webhook vs reconciliation"
+          ],
+          "not_interested: both reach fn_norma_complete_call together; exactly one applies"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "webhook vs reconciliation"
+          ],
+          "not_interested: both reach fn_norma_complete_call together; exactly one applies"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "webhook vs reconciliation"
+          ],
+          "reached: both reach fn_norma_complete_call together; exactly one applies"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "webhook vs reconciliation"
+          ],
+          "reached: both reach fn_norma_complete_call together; exactly one applies"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "webhook vs reconciliation"
+          ],
+          "voicemail: both reach fn_norma_complete_call together; exactly one applies"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "webhook vs reconciliation"
+          ],
+          "voicemail: both reach fn_norma_complete_call together; exactly one applies"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "webhook vs reconciliation"
+          ],
+          "wrong_number: both reach fn_norma_complete_call together; exactly one applies"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "webhook vs reconciliation"
+          ],
+          "wrong_number: both reach fn_norma_complete_call together; exactly one applies"
+        ],
+        [
+          "src/lib/norma/stress/races.integration.test.ts",
+          [
+            "whole-file invariants"
+          ],
+          "every invariant holds over everything the scenarios above did"
+        ],
+        [
+          "src/lib/norma/stress/random.integration.test.ts",
+          [
+            "norma stress gate: randomised lifecycles"
+          ],
+          "seed 101: 80 lifecycles, zero invariant violations"
+        ],
+        [
+          "src/lib/norma/stress/random.integration.test.ts",
+          [
+            "norma stress gate: randomised lifecycles"
+          ],
+          "seed 202: 80 lifecycles, zero invariant violations"
+        ],
+        [
+          "src/lib/norma/stress/random.integration.test.ts",
+          [
+            "norma stress gate: randomised lifecycles"
+          ],
+          "seed 303: 80 lifecycles, zero invariant violations"
+        ],
+        [
+          "src/lib/norma/stress/random.integration.test.ts",
+          [
+            "norma stress gate: randomised lifecycles"
+          ],
+          "seed 404: 80 lifecycles, zero invariant violations"
+        ],
+        [
+          "src/lib/norma/stress/random.integration.test.ts",
+          [
+            "norma stress gate: randomised lifecycles"
+          ],
+          "seed 505: 80 lifecycles, zero invariant violations"
+        ],
+        [
+          "src/lib/norma/stress/regress-create-deadlock.integration.test.ts",
+          [
+            "simultaneous requests for one lead do not deadlock"
+          ],
+          "20 presses (two users: false): one request, 19 clean 'in flight' answers, no database errors, no stall"
+        ],
+        [
+          "src/lib/norma/stress/regress-create-deadlock.integration.test.ts",
+          [
+            "simultaneous requests for one lead do not deadlock"
+          ],
+          "20 presses (two users: true): one request, 19 clean 'in flight' answers, no database errors, no stall"
+        ],
+        [
+          "src/lib/norma/stress/regress-create-deadlock.integration.test.ts",
+          [
+            "simultaneous requests for one lead do not deadlock"
+          ],
+          "20 presses (two users: true): one request, 19 clean 'in flight' answers, no database errors, no stall"
+        ],
+        [
+          "src/lib/norma/stress/regress-dnc-lock.integration.test.ts",
+          [
+            "a DNC lock landing while a call is in flight (tasks on a locked lead are read-only)"
+          ],
+          "a review task opened before the lock does not break the late completion"
+        ],
+        [
+          "src/lib/norma/stress/regress-dnc-lock.integration.test.ts",
+          [
+            "a DNC lock landing while a call is in flight (tasks on a locked lead are read-only)"
+          ],
+          "callback: the late webhook still completes the request; no task is written to the locked lead"
+        ],
+        [
+          "src/lib/norma/stress/regress-dnc-lock.integration.test.ts",
+          [
+            "a DNC lock landing while a call is in flight (tasks on a locked lead are read-only)"
+          ],
+          "escalation to needs_review still works on a locked lead (no review task can be written)"
+        ],
+        [
+          "src/lib/norma/stress/regress-dnc-lock.integration.test.ts",
+          [
+            "a DNC lock landing while a call is in flight (tasks on a locked lead are read-only)"
+          ],
+          "no_answer_status: the late webhook still completes the request; no task is written to the locked lead"
+        ],
+        [
+          "src/lib/norma/stress/regress-dnc-lock.integration.test.ts",
+          [
+            "a DNC lock landing while a call is in flight (tasks on a locked lead are read-only)"
+          ],
+          "not_interested: the late webhook still completes the request; no task is written to the locked lead"
+        ],
+        [
+          "src/lib/norma/stress/regress-dnc-lock.integration.test.ts",
+          [
+            "a DNC lock landing while a call is in flight (tasks on a locked lead are read-only)"
+          ],
+          "reached: the late webhook still completes the request; no task is written to the locked lead"
+        ],
+        [
+          "src/lib/norma/stress/regress-dnc-lock.integration.test.ts",
+          [
+            "a DNC lock landing while a call is in flight (tasks on a locked lead are read-only)"
+          ],
+          "wrong_number: the late webhook still completes the request; no task is written to the locked lead"
+        ],
+        [
+          "src/lib/norma/stress/regress-lock-order.integration.test.ts",
+          [
+            "a do-not-contact lock cannot land between a read and the write that depends on it"
+          ],
+          "completion (drip created in the check-then-write gap) and a DNC lock racing: the completion applies, then the lock"
+        ],
+        [
+          "src/lib/norma/stress/regress-lock-order.integration.test.ts",
+          [
+            "a do-not-contact lock cannot land between a read and the write that depends on it"
+          ],
+          "completion (paused:call_in_progress) and a DNC lock racing: the completion applies, then the lock"
+        ],
+        [
+          "src/lib/norma/stress/regress-lock-order.integration.test.ts",
+          [
+            "one lock order: request -> enrollments -> property"
+          ],
+          "a completing call and a reply on the same lead do not deadlock (not_interested writes the property)"
+        ],
+        [
+          "src/lib/norma/stress/regress-lock-order.integration.test.ts",
+          [
+            "one lock order: request -> enrollments -> property"
+          ],
+          "a new request while the previous call's completion is mid-flight waits for it instead of deadlocking"
+        ],
+        [
+          "src/lib/norma/stress/regress-lock-order.integration.test.ts",
+          [
+            "one lock order: request -> enrollments -> property"
+          ],
+          "a reply holding the enrollment row does not deadlock a new request for the same lead"
+        ],
+        [
+          "src/lib/norma/stress/regress-reconcile-mismatch.integration.test.ts",
+          [
+            "a Bland lookup that keeps disagreeing with the request"
+          ],
+          "mismatch_call_id: never applied, and the request still reaches needs_review within the window"
+        ],
+        [
+          "src/lib/norma/stress/regress-reconcile-mismatch.integration.test.ts",
+          [
+            "a Bland lookup that keeps disagreeing with the request"
+          ],
+          "mismatch_key: never applied, and the request still reaches needs_review within the window"
+        ],
+        [
+          "src/lib/norma/stress/regress-reconcile-mismatch.integration.test.ts",
+          [
+            "a Bland lookup that keeps disagreeing with the request"
+          ],
+          "mismatch_number: never applied, and the request still reaches needs_review within the window"
+        ],
+        [
+          "src/lib/norma/stress/regress-switchboard-race.integration.test.ts",
+          [
+            "Switchboard global do-not-contact vs a Norma completion on the same lead"
+          ],
+          "Norma's enrollment write is slow: both settle and neither effect is lost after retry"
+        ],
+        [
+          "src/lib/norma/stress/regress-switchboard-race.integration.test.ts",
+          [
+            "Switchboard global do-not-contact vs a Norma completion on the same lead"
+          ],
+          "Switchboard's enrollment write is slow: both settle and neither effect is lost after retry"
+        ],
+        [
+          "src/lib/norma/stress/regress-switchboard-race.integration.test.ts",
+          [
+            "Switchboard global do-not-contact vs a Norma completion on the same lead"
+          ],
+          "many races with random offsets: every one settles with both effects (deadlock victims retried)"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "STOP prevents the next call"
+          ],
+          "STOP between attempts: the retry is refused at the dial-time recheck, one call only"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "STOP prevents the next call"
+          ],
+          "STOP replied to the pre-call text, before attempt 1: nothing is dialled, the request ends rejected, the drip is not resumed"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "STOP prevents the next call"
+          ],
+          "each STOP record alone blocks the retry (contact flag)"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "STOP prevents the next call"
+          ],
+          "each STOP record alone blocks the retry (opted_out disposition)"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "STOP prevents the next call"
+          ],
+          "each STOP record alone blocks the retry (phone suppression)"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "a stalled dispatcher cannot act for the wrong attempt"
+          ],
+          "worker A (attempt-1 snapshot) stalls before its claim; B finishes attempt 1; A wakes: no second text, retry carries attempt 2"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "first call not answered (no_answer_status)"
+          ],
+          "a retry nobody dials within the expiry is closed, never dialled late; pauses released, first call on record"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "first call not answered (no_answer_status)"
+          ],
+          "places exactly one second call, same request, drip held across both, released only after the second miss"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "first call not answered (no_answer_status)"
+          ],
+          "process dies after scheduling the retry: the sweep dials it once, a second sweep does not dial again"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "first call not answered (no_answer_status)"
+          ],
+          "replay storm of the first call's webhook (parallel, before and after the retry) never makes a third call"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "first call not answered (no_answer_status)"
+          ],
+          "webhook and reconciliation both finding the miss together: one retry, one second call"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "first call not answered (voicemail)"
+          ],
+          "a retry nobody dials within the expiry is closed, never dialled late; pauses released, first call on record"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "first call not answered (voicemail)"
+          ],
+          "places exactly one second call, same request, drip held across both, released only after the second miss"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "first call not answered (voicemail)"
+          ],
+          "process dies after scheduling the retry: the sweep dials it once, a second sweep does not dial again"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "first call not answered (voicemail)"
+          ],
+          "replay storm of the first call's webhook (parallel, before and after the retry) never makes a third call"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "first call not answered (voicemail)"
+          ],
+          "webhook and reconciliation both finding the miss together: one retry, one second call"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "invariants over everything above"
+          ],
+          "zero violations"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "malformed attempt metadata cannot overflow the completion SQL"
+          ],
+          "acknowledges oversized attempt 99999999999 without changing either call"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "malformed attempt metadata cannot overflow the completion SQL"
+          ],
+          "acknowledges oversized attempt 99999999999 without changing either call"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "never retried unless the first call is a confirmed non-connect"
+          ],
+          "an unconfirmed first call (send timed out, then nothing) is parked, never redialled"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "never retried unless the first call is a confirmed non-connect"
+          ],
+          "callback on the first call completes with a single call"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "never retried unless the first call is a confirmed non-connect"
+          ],
+          "not_interested on the first call completes with a single call"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "never retried unless the first call is a confirmed non-connect"
+          ],
+          "reached on the first call completes with a single call"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "never retried unless the first call is a confirmed non-connect"
+          ],
+          "the second call answered by a person completes normally with its task; the drip stays paused"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "never retried unless the first call is a confirmed non-connect"
+          ],
+          "wrong_number on the first call completes with a single call"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "only the current attempt can complete or advance the request"
+          ],
+          "a stale/forged attempt-1 id while attempt 2 is claimed but unbound is a no-op: no completion, no release, no task, no Slack row, no extra call"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "the retry goes through every gate again"
+          ],
+          "DNC landing between the calls: the retry is refused at the dial-time recheck, nothing is dialled"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "the retry goes through every gate again"
+          ],
+          "dispatch gate closed between the calls: no second call"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "the retry goes through every gate again"
+          ],
+          "seller marked not_interested between the calls: no second call"
+        ],
+        [
+          "src/lib/norma/stress/retry.integration.test.ts",
+          [
+            "the retry goes through every gate again"
+          ],
+          "seller replied during the hold: still called again, drip stays paused as the reply"
+        ],
+        [
+          "src/lib/norma/stress/schema-contract.integration.test.ts",
+          [
+            "negative SQL compatibility evidence: legacy callers remain unfenced"
+          ],
+          "defaulted claim takes attempt 2 and metadata-less result can complete it before bind"
+        ],
+        [
+          "src/lib/norma/stress/schema-contract.integration.test.ts",
+          [
+            "paired-runtime retry grace contract"
+          ],
+          "fresh attempt 2 uses updated_at grace despite an old created_at"
+        ],
+        [
+          "src/lib/norma/stress/schema-contract.integration.test.ts",
+          [
+            "schema-only two-call committed concurrency contract"
+          ],
+          "20 concurrent first no-answers schedule exactly one retry, no final effects, and retain both holds"
+        ],
+        [
+          "src/lib/norma/stress/schema-contract.integration.test.ts",
+          [
+            "schema-only two-call committed concurrency contract"
+          ],
+          "20 concurrent second no-answers finalize once, preserve protected=false pause, and never schedule attempt 3"
+        ],
+        [
+          "src/lib/norma/stress/schema-contract.integration.test.ts",
+          [
+            "schema-only two-call committed concurrency contract"
+          ],
+          "20 concurrent second no-answers finalize once, preserve protected=true pause, and never schedule attempt 3"
+        ],
+        [
+          "src/lib/norma/stress/schema-contract.integration.test.ts",
+          [
+            "schema-only two-call committed concurrency contract"
+          ],
+          "20 simultaneous first claims have one winner and preserve the one-open-request fence"
+        ],
+        [
+          "src/lib/norma/stress/schema-contract.integration.test.ts",
+          [
+            "schema-only two-call committed concurrency contract"
+          ],
+          "reached_no_callback on attempt 1 never creates a retry"
+        ],
+        [
+          "src/lib/norma/stress/schema-contract.integration.test.ts",
+          [
+            "schema-only two-call committed concurrency contract"
+          ],
+          "stale workers cannot claim attempt 2; concurrent current claims have one winner; forged first result is inert before bind"
+        ],
+        [
+          "src/lib/norma/stress/schema-contract.integration.test.ts",
+          [
+            "schema-only two-call committed concurrency contract"
+          ],
+          "terminal outbox failure rolls back every effect and a concurrent replay then applies once"
+        ],
+        [
+          "src/lib/norma/stress/schema-contract.integration.test.ts",
+          [
+            "schema-only two-call committed concurrency contract"
+          ],
+          "unknown on attempt 1 never creates a retry"
+        ],
+        [
+          "src/lib/norma/stress/smoke.integration.test.ts",
+          [
+            "harness smoke"
+          ],
+          "runs one callback call end to end"
+        ],
+        [
+          "src/lib/norma/stress/teeth.integration.test.ts",
+          [
+            "the stress gate has teeth (deterministic scenes)"
+          ],
+          "catches: 'a replayed completion is not short-ci\u2026'"
+        ],
+        [
+          "src/lib/norma/stress/teeth.integration.test.ts",
+          [
+            "the stress gate has teeth (deterministic scenes)"
+          ],
+          "catches: 'a stale or forged attempt-1 call id c\u2026'"
+        ],
+        [
+          "src/lib/norma/stress/teeth.integration.test.ts",
+          [
+            "the stress gate has teeth (deterministic scenes)"
+          ],
+          "catches: 'releasing a request\\'s pauses ignores\u2026'"
+        ],
+        [
+          "src/lib/norma/stress/teeth.integration.test.ts",
+          [
+            "the stress gate has teeth (deterministic scenes)"
+          ],
+          "catches: 'releasing a request\\'s pauses ignores\u2026'"
+        ],
+        [
+          "src/lib/norma/stress/teeth.integration.test.ts",
+          [
+            "the stress gate has teeth"
+          ],
+          "catches: 'Retry ignores an open Norma hold (a p\u2026'"
+        ],
+        [
+          "src/lib/norma/stress/teeth.integration.test.ts",
+          [
+            "the stress gate has teeth"
+          ],
+          "catches: 'a completion forgets its Slack outbox\u2026'"
+        ],
+        [
+          "src/lib/norma/stress/teeth.integration.test.ts",
+          [
+            "the stress gate has teeth"
+          ],
+          "catches: 'a not_interested completion also crea\u2026'"
+        ],
+        [
+          "src/lib/norma/stress/teeth.integration.test.ts",
+          [
+            "the stress gate has teeth"
+          ],
+          "catches: 'call twice never retries (a confirmed\u2026'"
+        ],
+        [
+          "src/lib/norma/stress/teeth.integration.test.ts",
+          [
+            "the stress gate has teeth"
+          ],
+          "catches: 'call twice retries a first call that \u2026'"
+        ],
+        [
+          "src/lib/norma/stress/teeth.integration.test.ts",
+          [
+            "the stress gate has teeth"
+          ],
+          "catches: 'eligibility never blocks (DNC / not_i\u2026'"
+        ],
+        [
+          "src/lib/norma/stress/teeth.integration.test.ts",
+          [
+            "the stress gate has teeth"
+          ],
+          "catches: 'the one-open-request index is gone (a\u2026'"
+        ],
+        [
+          "src/lib/norma/stress/teeth.integration.test.ts",
+          [
+            "the stress gate has teeth"
+          ],
+          "catches: 'the stale-call sweep ignores an open \u2026'"
+        ]
       ]
     },
     "controls": {
@@ -100,6 +1334,141 @@
       "files": [
         "src/app/api/cron/norma-reconciliation/route.test.ts",
         "src/lib/norma/maintenance.test.ts"
+      ],
+      "assertion_identities": [
+        [
+          "src/app/api/cron/norma-reconciliation/route.test.ts",
+          [
+            "Norma maintenance cron"
+          ],
+          "holds authenticated scheduler and manual requests before factories or reconciliation"
+        ],
+        [
+          "src/app/api/cron/norma-reconciliation/route.test.ts",
+          [
+            "Norma maintenance cron"
+          ],
+          "holds authenticated scheduler and manual requests before factories or reconciliation"
+        ],
+        [
+          "src/app/api/cron/norma-reconciliation/route.test.ts",
+          [
+            "Norma maintenance cron"
+          ],
+          "retains cron authentication while held"
+        ],
+        [
+          "src/app/api/cron/norma-reconciliation/route.test.ts",
+          [
+            "Norma maintenance cron"
+          ],
+          "unset/released hold runs the existing reconciliation path"
+        ],
+        [
+          "src/lib/norma/maintenance.test.ts",
+          [
+            "Norma maintenance hold"
+          ],
+          "explicit release or unset  no  preserves normal operation"
+        ],
+        [
+          "src/lib/norma/maintenance.test.ts",
+          [
+            "Norma maintenance hold"
+          ],
+          "explicit release or unset 0 preserves normal operation"
+        ],
+        [
+          "src/lib/norma/maintenance.test.ts",
+          [
+            "Norma maintenance hold"
+          ],
+          "explicit release or unset OFF preserves normal operation"
+        ],
+        [
+          "src/lib/norma/maintenance.test.ts",
+          [
+            "Norma maintenance hold"
+          ],
+          "explicit release or unset false preserves normal operation"
+        ],
+        [
+          "src/lib/norma/maintenance.test.ts",
+          [
+            "Norma maintenance hold"
+          ],
+          "explicit release or unset undefined preserves normal operation"
+        ],
+        [
+          "src/lib/norma/maintenance.test.ts",
+          [
+            "Norma maintenance hold"
+          ],
+          "holds all reconciliation, including old requested expiry and review recovery"
+        ],
+        [
+          "src/lib/norma/maintenance.test.ts",
+          [
+            "Norma maintenance hold"
+          ],
+          "holds direct dispatch without claiming/rejecting/releasing or sending"
+        ],
+        [
+          "src/lib/norma/maintenance.test.ts",
+          [
+            "Norma maintenance hold"
+          ],
+          "present hold or malformed  holds safely"
+        ],
+        [
+          "src/lib/norma/maintenance.test.ts",
+          [
+            "Norma maintenance hold"
+          ],
+          "present hold or malformed 1 holds safely"
+        ],
+        [
+          "src/lib/norma/maintenance.test.ts",
+          [
+            "Norma maintenance hold"
+          ],
+          "present hold or malformed invalid holds safely"
+        ],
+        [
+          "src/lib/norma/maintenance.test.ts",
+          [
+            "Norma maintenance hold"
+          ],
+          "present hold or malformed on holds safely"
+        ],
+        [
+          "src/lib/norma/maintenance.test.ts",
+          [
+            "Norma maintenance hold"
+          ],
+          "present hold or malformed true holds safely"
+        ],
+        [
+          "src/lib/norma/maintenance.test.ts",
+          [
+            "Norma maintenance hold"
+          ],
+          "present hold or malformed yes holds safely"
+        ],
+        [
+          "src/lib/norma/maintenance.test.ts",
+          [
+            "Norma maintenance hold"
+          ],
+          "prevents request creation before authentication/lead reads, RPC or dispatch"
+        ],
+        [
+          "src/lib/norma/maintenance.test.ts",
+          [
+            "Norma maintenance hold"
+          ],
+          "production calls without env overrides use the held process environment"
+        ]
       ]
     }
   },
