@@ -1,10 +1,11 @@
+import { readNormaMaintenanceHold } from "./maintenance";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
 import type { Database } from "@/lib/supabase/types";
 
 import { createBlandClient, type BlandClient } from "./bland";
-import { readNormaBlandConfig, readNormaGateConfig, type NormaBlandConfig, type NormaGateConfig } from "./config";
+import { readNormaBlandConfig, readNormaGateConfig, type NormaBlandConfig, type NormaGateConfig, type NormaEnv } from "./config";
 import { evaluateNormaGate } from "./gate";
 import {
   bindNormaCallId,
@@ -27,6 +28,7 @@ export type DispatchResult =
   | { status: "not_found" };
 
 export type DispatchDeps = {
+  env?: NormaEnv;
   client: Client;
   bland?: BlandClient;
   blandConfig?: NormaBlandConfig | null;
@@ -44,6 +46,8 @@ export type DispatchDeps = {
  * open. The gate runs BEFORE the claim.
  */
 export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): Promise<DispatchResult> {
+  // Hold without rejecting the row or releasing any request-owned pauses.
+  if (readNormaMaintenanceHold(deps.env)) return { status: "not_claimed" };
   const { client } = deps;
 
   const { data: row, error } = await client

@@ -1,3 +1,5 @@
+import type { NormaEnv } from "./config";
+import { readNormaMaintenanceHold } from "./maintenance";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
@@ -34,6 +36,7 @@ export const RECONCILE_THRESHOLDS = {
 } as const;
 
 export type ReconcileSummary = {
+  maintenanceHeld?: true;
   scanned: number;
   dispatched: number;
   completed: number;
@@ -50,6 +53,7 @@ type Row = Pick<
 >;
 
 export type ReconcileDeps = {
+  env?: NormaEnv;
   client: SupabaseClient<Database>;
   bland: BlandClient | null;
   dispatch: (requestId: string) => Promise<DispatchResult>;
@@ -67,6 +71,7 @@ export async function reconcileNormaCalls(deps: ReconcileDeps): Promise<Reconcil
   const summary: ReconcileSummary = {
     scanned: 0, dispatched: 0, completed: 0, rejected: 0, markedUnknown: 0, escalated: 0, waiting: 0, errors: 0,
   };
+  if (readNormaMaintenanceHold(deps.env)) return { ...summary, maintenanceHeld: true };
   const statuses = ["requested", "dispatching", "dispatched", "dispatch_unknown", ...(deps.includeNeedsReview ? ["needs_review"] : [])];
   const { data, error } = await deps.client
     .from("norma_call_requests")

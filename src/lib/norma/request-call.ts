@@ -1,3 +1,4 @@
+import { readNormaMaintenanceHold } from "./maintenance";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/types";
@@ -45,6 +46,8 @@ export async function requestNormaCallCore(
   deps: RequestNormaCallDeps,
 ): Promise<RequestNormaCallResult> {
   if (!UUID_PATTERN.test(propertyId)) return { ok: false, code: "lead_not_found" };
+
+  if (readNormaMaintenanceHold(deps.env)) return { ok: false, code: "gate_off", reason: "dispatch_disabled" };
 
   const userId = await deps.getUserId();
   if (!userId) return { ok: false, code: "unauthenticated" };
