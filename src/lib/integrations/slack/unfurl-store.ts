@@ -57,6 +57,11 @@ export type SlackUnfurlJob = {
   updated_at: string;
 };
 
+export type SlackUnfurlReceiptIdentity = {
+  id: string;
+  eventId: string;
+};
+
 export type SlackPreviewPolicy = {
   installationId: string;
   orgId: string;
@@ -266,6 +271,33 @@ export async function loadSlackJobUrls(jobId: string): Promise<SlackEventJobUrl[
   const { data, error } = await admin().from("slack_unfurl_job_urls").select("url_key,lead_id,lookup_status,authorization_status,last_error_code").eq("job_id", jobId).order("url_key", { ascending: true });
   if (error) throw new DatabaseError("Slack job URL lookup failed", { message: error.message });
   return (data ?? []) as SlackEventJobUrl[];
+}
+
+/**
+ * Read one persisted job by its primary key. This is deliberately separate
+ * from claimSlackUnfurlJobs: a hosted acceptance run must never select a
+ * globally due or expired job as a side effect of looking up its target.
+ */
+export async function loadSlackUnfurlJob(jobId: string): Promise<SlackUnfurlJob | null> {
+  const { data, error } = await admin()
+    .from("slack_unfurl_jobs")
+    .select("id,receipt_id,installation_id,installation_version,policy_revision,org_id,team_id,app_id,channel_id,message_ts,poster_slack_user_id,event_time,status,attempts,max_attempts,next_attempt_at,lease_expires_at,claim_token,last_error_code,expires_at,created_at,updated_at")
+    .eq("id", jobId)
+    .maybeSingle();
+  if (error) throw new DatabaseError("Slack job lookup failed", { message: error.message });
+  if (!data || typeof data.id !== "string" || typeof data.receipt_id !== "string") return null;
+  return data as unknown as SlackUnfurlJob;
+}
+
+export async function loadSlackUnfurlReceiptIdentity(receiptId: string): Promise<SlackUnfurlReceiptIdentity | null> {
+  const { data, error } = await admin()
+    .from("slack_event_receipts")
+    .select("id,event_id")
+    .eq("id", receiptId)
+    .maybeSingle();
+  if (error) throw new DatabaseError("Slack receipt lookup failed", { message: error.message });
+  if (!data || typeof data.id !== "string" || typeof data.event_id !== "string") return null;
+  return { id: data.id, eventId: data.event_id };
 }
 
 export async function updateSlackJobUrl(input: { jobId: string; urlKey: string; leadId?: string | null; lookupStatus?: string | null; authorizationStatus?: string | null; errorCode?: string | null }): Promise<void> {
