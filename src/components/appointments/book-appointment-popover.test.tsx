@@ -438,7 +438,9 @@ describe("<BookAppointmentPopover />", () => {
         />,
       );
       await openAndFillHappyPath();
-      await screen.findByTestId("book-appointment-end-label");
+      // No duration control or end preview on a reschedule: the server keeps the existing length.
+      expect(screen.queryByTestId("book-appointment-duration")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("book-appointment-end-label")).not.toBeInTheDocument();
       await userEvent
         .setup()
         .click(screen.getByTestId("book-appointment-submit"));

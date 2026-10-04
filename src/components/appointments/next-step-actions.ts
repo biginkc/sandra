@@ -37,7 +37,7 @@ export type CreateNextStepActionInput = {
  * "use server" wrapper over `createNextStep` for client components (they cannot import the lib
  * directly). It takes the same wall-clock fields the booking popover already collects and
  * converts them server-side. Until `schemaReady('next_step_write')` it runs today's booking
- * path unchanged (`bookAppointment`, with the duration the form showed), so the window between
+ * path unchanged (`bookAppointment`, which applies the booking effects itself), so the window between
  * a deploy and its migration cannot break scheduling. The result keeps the booking shape.
  */
 export async function createNextStepAction(
@@ -89,6 +89,9 @@ export async function createNextStepAction(
     note: input.note,
     idempotencyKey: input.idempotencyKey,
     origin: "app",
+    // Same as the booking this replaces (fn_book_appointment): a booked seller leaves the drip,
+    // gets booked_appointment, and a prospect is promoted. Property-linked bookings only.
+    applyBookingEffects: true,
   });
   if (!created.ok) return created;
   return ok({
