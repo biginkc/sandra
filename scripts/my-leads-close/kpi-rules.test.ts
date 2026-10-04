@@ -1,14 +1,23 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import { assertRulesCoverKeys, kpiKeysFromMigrationSource, RULES } from "./kpi-rules.mjs";
-import { compare } from "./kpi-compare.mjs";
-import { buildWindows, isProductionRef, parseArgs as parseSnapshotArgs } from "./kpi-snapshot.mjs";
+import { compare, parseArgs as parseCompareArgs } from "./kpi-compare.mjs";
+import { buildWindows, isProductionRef, parseArgs as parseSnapshotArgs, windowsFromFile } from "./kpi-snapshot.mjs";
 import { buildManifest, migrationVersion } from "./lease-manifest.mjs";
 
-const KPI_MIGRATION = path.resolve(__dirname, "../../supabase/migrations/20260930031000_dialpad_recording_provider_window_finalizer.sql");
+const MIGRATIONS_DIR = path.resolve(__dirname, "../../supabase/migrations");
+/** The newest migration (by version prefix) that defines fn_get_acquisition_kpis. */
+function newestKpiMigration(): string {
+  const files = readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith(".sql") && readFileSync(path.join(MIGRATIONS_DIR, f), "utf8").includes("function public.fn_get_acquisition_kpis"))
+    .sort();
+  if (files.length === 0) throw new Error("no migration defines fn_get_acquisition_kpis");
+  return path.join(MIGRATIONS_DIR, files.at(-1)!);
+}
+const KPI_MIGRATION = newestKpiMigration();
 
 describe("kpi-rules", () => {
   it("classifies every key fn_get_acquisition_kpis returns, and nothing else", () => {
@@ -31,35 +40,71 @@ describe("kpi-rules", () => {
 describe("kpi-compare", () => {
   const row = (member: string, window: string, kpi: Record<string, unknown>) => ({ member, window, kpi });
   const base = { attempts: 3, reached: 1, offersSent: 0, pendingOutcomes: 2, contactWithoutFollowUp: 5, firstCallElapsedSeconds: 12.5 };
+  const MIGRATED = "2026-10-05T18:00:00.000Z";
+  const end = (label: string) => (label === "late" ? "2026-10-06T05:00:00.000Z" : "2026-09-21T05:00:00.000Z");
+  const file = (rows: ReturnType<typeof row>[], migrationAppliedAt: string | null = MIGRATED) => ({
+    ...(migrationAppliedAt ? { migrationAppliedAt } : {}),
+    windows: [...new Set(rows.map((r) => r.window))].map((label) => ({ label, start: "2026-09-12T05:00:00.000Z", end: end(label) })),
+    rows,
+  });
 
   it("passes when closed-window tiles match and current-state tiles differ", () => {
-    const before = { rows: [row("m1", "day:2026-09-20", base)] };
-    const after = { rows: [row("m1", "day:2026-09-20", { ...base, contactWithoutFollowUp: 1, firstCallElapsedSeconds: 12.5000000001 })] };
+    const before = file([row("m1", "day:2026-09-20", base)]);
+    const after = file([row("m1", "day:2026-09-20", { ...base, contactWithoutFollowUp: 1, firstCallElapsedSeconds: 12.5000000001 })]);
     const result = compare(before, after);
     expect(result.ok).toBe(true);
     expect(result.compared).toBeGreaterThan(0);
   });
 
   it("fails on a changed period tile, a missing row and an unclassified key", () => {
-    const before = { rows: [row("m1", "w", base), row("m2", "w", base)] };
-    const after = { rows: [row("m1", "w", { ...base, attempts: 4, mysteryTile: 1 })] };
+    const before = file([row("m1", "w", base), row("m2", "w", base)]);
+    const after = file([row("m1", "w", { ...base, attempts: 4, mysteryTile: 1 })]);
     const result = compare(before, after);
     expect(result.ok).toBe(false);
     expect(result.violations.map((v) => v.key).sort()).toEqual(["*", "attempts", "mysteryTile"]);
   });
 
   it("allows pendingOutcomes to drop by exactly the independently counted close-outs", () => {
-    const before = { rows: [row("m1", "since-launch", base)] };
-    const ok = compare(before, { rows: [row("m1", "since-launch", { ...base, pendingOutcomes: 0 })] }, { closeoutByWindow: { "since-launch": 2 } });
+    const before = file([row("m1", "since-launch", base)]);
+    const ok = compare(before, file([row("m1", "since-launch", { ...base, pendingOutcomes: 0 })]), { closeoutByWindow: { "since-launch": 2 } });
     expect(ok.ok).toBe(true);
-    const bad = compare(before, { rows: [row("m1", "since-launch", { ...base, pendingOutcomes: 1 })] }, { closeoutByWindow: { "since-launch": 2 } });
+    const bad = compare(before, file([row("m1", "since-launch", { ...base, pendingOutcomes: 1 })]), { closeoutByWindow: { "since-launch": 2 } });
     expect(bad.ok).toBe(false);
   });
 
   it("compares a rejected member as equal-to-itself instead of skipping it", () => {
-    const before = { rows: [row("m3", "w", { error: "FORBIDDEN" })] };
-    expect(compare(before, { rows: [row("m3", "w", { error: "FORBIDDEN" })] }).ok).toBe(true);
-    expect(compare(before, { rows: [row("m3", "w", base)] }).ok).toBe(false);
+    const before = file([row("m3", "w", { error: "FORBIDDEN" })]);
+    expect(compare(before, file([row("m3", "w", { error: "FORBIDDEN" })])).ok).toBe(true);
+    expect(compare(before, file([row("m3", "w", base)])).ok).toBe(false);
+  });
+
+  it("requires migrationAppliedAt in the after file", () => {
+    const before = file([row("m1", "w", base)]);
+    const result = compare(before, file([row("m1", "w", base)], null));
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]!.key).toBe("migrationAppliedAt");
+  });
+
+  it("compares only windows present in both files and ended by migrationAppliedAt", () => {
+    const before = file([row("m1", "w", base), row("m1", "late", base), row("m1", "only-before", base)]);
+    const after = file([row("m1", "w", base), row("m1", "late", { ...base, attempts: 99 }), row("m1", "only-after", { ...base, attempts: 99 })]);
+    const result = compare(before, after);
+    expect(result.ok).toBe(true);
+    expect(result.violations).toEqual([]);
+    expect(compare(file([row("m1", "late", base)]), file([row("m1", "late", base)])).violations[0]!.reason).toMatch(/no window is present in both/);
+  });
+
+  it("asserts after = before - expectedContactDrop per member and requires it with a run id", () => {
+    const before = file([row("m1", "w", base), row("m2", "w", base)]);
+    const dropped = (n: number) => file([row("m1", "w", { ...base, contactWithoutFollowUp: base.contactWithoutFollowUp - n }), row("m2", "w", { ...base, contactWithoutFollowUp: 5 - n })]);
+    expect(compare(before, dropped(2), { expectedContactDrop: 2 }).ok).toBe(true);
+    const wrong = compare(before, dropped(1), { expectedContactDrop: 2 });
+    expect(wrong.ok).toBe(false);
+    expect(wrong.violations.map((v) => v.member).sort()).toEqual(["m1", "m2"]);
+    expect(compare(before, dropped(2), { runId: "r" }).ok).toBe(false);
+    expect(parseCompareArgs(["a.json", "b.json", "--run-id", "r", "--expected-contact-drop", "2"]).options.expectedContactDrop).toBe(2);
+    expect(() => parseCompareArgs(["a.json", "b.json", "--run-id", "r"])).toThrow(/--expected-contact-drop/);
+    expect(() => parseCompareArgs(["a.json", "b.json", "--expected-contact-drop", "-1"])).toThrow(/non-negative/);
   });
 });
 
@@ -88,6 +133,15 @@ describe("kpi-snapshot", () => {
     expect(() => parseSnapshotArgs(["--org", org, "--owner", org, "--member", org, "--out", "x.json"])).not.toThrow();
     expect(() => parseSnapshotArgs(["--org", "nope", "--owner", org, "--member", org, "--out", "x.json"])).toThrow(/UUID/);
     expect(() => parseSnapshotArgs(["--org", org, "--owner", org, "--out", "x.json"])).toThrow(/--member/);
+  });
+
+  it("the after snapshot needs the before file's windows and a migration instant", () => {
+    const org = "11111111-1111-4111-8111-111111111111";
+    const common = ["--org", org, "--owner", org, "--member", org, "--out", "after.json", "--windows-from", "before.json"];
+    expect(() => parseSnapshotArgs(common)).toThrow(/--migration-applied-at/);
+    expect(parseSnapshotArgs([...common, "--migration-applied-at", "2026-10-05T18:00:00.000Z"]).windowsFrom).toBe("before.json");
+    expect(() => parseSnapshotArgs([...common, "--migration-applied-at", "soon"])).toThrow(/ISO/);
+    expect(() => windowsFromFile("/nonexistent/before.json")).toThrow();
   });
 });
 

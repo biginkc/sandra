@@ -2,6 +2,7 @@ import { createHmac, randomUUID } from "node:crypto";
 
 import type { Pool } from "pg";
 
+import { assertProdSupabaseUrl } from "../../src/lib/prod-canary/env";
 import { requireLoopbackPostgresUrl } from "../../src/lib/testing/loopback-postgres-url";
 
 /**
@@ -46,10 +47,23 @@ export const CI_WEBHOOK_SECRET_ENV = "DIALPAD_CTI_WEBHOOK_SECRET_E2E";
 type Env = Readonly<Record<string, string | undefined>>;
 
 /**
+ * Same rule as `assertCanaryOwned` in e2e/prod-canary/support.ts (a value must carry the PROD-CANARY
+ * label before any write). Re-stated here because importing that module loads `.env.local` into
+ * `process.env` as a side effect, which the CI lane must never do.
+ */
+export function assertCanaryOwned(value: string, context: string): void {
+  if (!value.includes("PROD-CANARY")) {
+    throw new Error(`${context} must include PROD-CANARY before cleanup/write.`);
+  }
+}
+
+/**
  * Throws unless the lane's safety preconditions hold.
  * ci: `E2E_DISPOSABLE_DATABASE==='1'` and a loopback `E2E_CI_SUPABASE_DB_URL`/`TEST_SUPABASE_DB_URL`.
- * preview/production: `RUN_PROD_CANARIES==='1'` and at least one owned phone in
- * `MY_LEADS_CLOSE_OWNED_PHONES` (the attended spec, item 4.4, adds the Hugo state and URL checks).
+ * preview/production: `RUN_PROD_CANARIES==='1'`, at least one owned phone in
+ * `MY_LEADS_CLOSE_OWNED_PHONES`, a `MY_LEADS_CLOSE_RUN_TAG` carrying the PROD-CANARY label
+ * (`assertCanaryOwned`) and a `NEXT_PUBLIC_SUPABASE_URL` that is the production project
+ * (`assertProdSupabaseUrl`). The attended spec (item 4.4) adds the Hugo state check.
  */
 export function assertLaneSafe(lane: CloseLane, env: Env = process.env): void {
   if (lane === "ci") {
@@ -66,6 +80,8 @@ export function assertLaneSafe(lane: CloseLane, env: Env = process.env): void {
   if (phones.length === 0 || !phones.every((p) => /^\+1\d{10}$/.test(p))) {
     throw new Error("The attended lane needs MY_LEADS_CLOSE_OWNED_PHONES (comma-separated +1XXXXXXXXXX owned numbers).");
   }
+  assertCanaryOwned(env.MY_LEADS_CLOSE_RUN_TAG ?? "", "MY_LEADS_CLOSE_RUN_TAG");
+  assertProdSupabaseUrl(env.NEXT_PUBLIC_SUPABASE_URL ?? "");
 }
 
 /** The disposable database URL the ci lane may use; never a hosted one. */
@@ -153,6 +169,27 @@ export async function designateRep(db: Queryable, input: { orgId: string; repUse
 }
 
 /**
+ * Undoes what the spec's setup switched on for `orgId`, so the next file starts from the defaults:
+ * the flags row and seller reminder settings are deleted, the Dialpad connection is disabled (the
+ * table forbids deletes) and every live binding revoked (append-only evidence), and the rep's
+ * `acquisitions_enabled` goes back to false through the same designation guard marker.
+ */
+export async function resetCloseWorld(db: Queryable, input: { orgId: string; repUserId: string }): Promise<void> {
+  await asService(db, async (q) => {
+    await q.query("delete from public.my_leads_feature_flags where org_id=$1", [input.orgId]);
+    await q.query("update public.dialpad_org_connections set status='disabled', updated_at=now() where org_id=$1", [input.orgId]);
+    await q.query(
+      "update public.dialpad_member_bindings set status='revoked', revoked_at=now(), revoked_reason='e2e cleanup' where org_id=$1 and status <> 'revoked'",
+      [input.orgId],
+    );
+    await q.query("select set_config('my_leads.designation_update', format(':%s:%s', $1::text, $2::text), true)", [input.orgId, input.repUserId]);
+    await q.query("update public.memberships set acquisitions_enabled=false where org_id=$1 and user_id=$2", [input.orgId, input.repUserId]);
+    await q.query("select set_config('my_leads.designation_update', '', true)");
+  });
+  await db.query("delete from public.seller_reminder_settings where org_id=$1", [input.orgId]);
+}
+
+/**
  * Non-training lead (`is_training=false`), not DNC-locked, one callable phone, state MO, assigned to
  * `repUserId` so the assignment observer opens a live episode, queue stage `contacted`, last touch
  * `lastTouchDaysAgo` days ago through a manual outreach attempt (ranking tier 5, deterministic reason).
@@ -205,17 +242,13 @@ export async function createSyntheticLead(
        on conflict (property_id,org_id) do update set stage='contacted', stage_entered_at=excluded.stage_entered_at`,
       [propertyId, input.orgId, days],
     );
-    // Direct insert as the owner connection: the attempt is history, not a command (plan F5).
-    await db.query("set session_replication_role='replica'");
-    try {
-      await db.query(
-        `insert into public.acquisition_attempts(org_id,property_id,assignment_episode_id,actor_user_id,attempt_kind,source,occurred_at,idempotency_key,outcome)
-         values ($1,$2,$3,$4,'outreach','manual',now() - make_interval(days => $5),$6,'no_answer')`,
-        [input.orgId, propertyId, episodeId, input.repUserId, days, randomUUID()],
-      );
-    } finally {
-      await db.query("set session_replication_role='origin'");
-    }
+    // Direct insert as the owner connection: the attempt is history, not a command (plan F5). The
+    // attribution and last-touch triggers must run, so no session_replication_role switch.
+    await db.query(
+      `insert into public.acquisition_attempts(org_id,property_id,assignment_episode_id,actor_user_id,attempt_kind,source,occurred_at,idempotency_key,outcome)
+       values ($1,$2,$3,$4,'outreach','manual',now() - make_interval(days => $5),$6,'no_answer')`,
+      [input.orgId, propertyId, episodeId, input.repUserId, days, randomUUID()],
+    );
   }
   return { propertyId, contactId, address, phoneE164: input.phoneE164, episodeId: episodeId ?? "", runTag: input.runTag };
 }
@@ -419,6 +452,20 @@ export async function retireSyntheticLead(db: Queryable, lead: SyntheticLead, re
 /** All lanes: there is no deletion path. Cleanup is `retireSyntheticLead`. */
 export async function cleanupSyntheticLead(db: Queryable, lead: SyntheticLead, lane: CloseLane, repUserId: string): Promise<CleanupReport> {
   assertLaneSafe(lane);
+  // Check the handle actually passed in, not just the environment.
+  const server = await db.query<{ addr: string | null }>("select inet_server_addr()::text as addr");
+  const addr = server.rows[0]?.addr ?? null; // null = unix socket (local)
+  const loopback = addr === null || /^(127\.|::1)/.test(addr);
+  if (lane === "ci" && !loopback) throw new Error(`cleanupSyntheticLead: the ci lane's database handle is not loopback (${addr}).`);
+  if (lane !== "ci") {
+    if (loopback) throw new Error("cleanupSyntheticLead: a production lane was given a loopback database handle.");
+    assertCanaryOwned(lead.runTag, "synthetic lead run tag");
+    assertCanaryOwned(lead.address, "synthetic lead address");
+  }
+  const row = await db.query<{ address: string }>("select address from public.properties where id=$1", [lead.propertyId]);
+  if (!row.rows[0]?.address.startsWith(lead.runTag)) {
+    throw new Error("cleanupSyntheticLead: the property on this database handle is not the tagged synthetic lead; refusing to retire it.");
+  }
   return retireSyntheticLead(db, lead, repUserId);
 }
 

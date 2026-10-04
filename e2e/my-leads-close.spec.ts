@@ -16,6 +16,7 @@ import {
   asMember,
   postDialpadEvent,
   prepareDialpadIntent,
+  resetCloseWorld,
   retireSyntheticLead,
   seedDialpadForRep,
   seedFeatureFlags,
@@ -73,7 +74,14 @@ test.describe.serial("my-leads-close: Phase 1 CI lane", () => {
   });
 
   test.afterAll(async () => {
-    await world.db?.end();
+    const { db, repUserId } = world;
+    if (!db) return;
+    try {
+      // Put the test org back to its defaults: flags, Dialpad connection/binding, reminder settings, designation.
+      if (repUserId) await resetCloseWorld(db, { orgId: DEFAULT_ORG_ID, repUserId });
+    } finally {
+      await db.end();
+    }
   });
 
   test("my-leads-close: T0 seam preflight (S4 test ids, S5 quick-pick oracle, S7 flags)", async () => {
@@ -137,7 +145,7 @@ test.describe.serial("my-leads-close: Phase 1 CI lane", () => {
 
     const prompt = page.getByTestId("post-call-prompt");
     await expect(prompt).toBeVisible();
-    await prompt.getByTestId("post-call-outcome").selectOption("reached");
+    await prompt.getByTestId("post-call-outcome-reached").click();
     const note = `${lead.runTag} seller wants a call back next week`;
     await prompt.getByTestId("post-call-note").fill(note);
     const clickedAt = new Date();
@@ -217,7 +225,12 @@ test.describe.serial("my-leads-close: Phase 1 CI lane", () => {
 
     // Drive the cron by hand (crons never run on previews or in CI). Flag off: it must send nothing.
     const response = await fetch(`${BASE_URL}/api/cron/seller-appointment-reminders`, { headers: { authorization: `Bearer ${CRON_SECRET}` } });
-    expect([200, 500]).toContain(response.status);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ok?: boolean; disabled?: string; claimed?: number; results?: Record<string, number> };
+    expect(body.ok).toBe(true);
+    expect(body.disabled, "the seller_reminders flag is off, so the job reports itself disabled").toBe("flag_off");
+    expect(body.claimed).toBeUndefined();
+    expect(body.results).toBeUndefined();
     const after = await db.query<{ status: string; message_id: string | null }>("select status, message_id from public.seller_appointment_reminders where task_id=$1", [taskId]);
     expect(after.rows[0]!.status).not.toBe("sent");
     expect(after.rows[0]!.message_id).toBeNull();

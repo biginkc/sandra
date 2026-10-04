@@ -2,11 +2,15 @@
 // Compares two KPI snapshots under the parity rules (TECH-PLAN Phase 4, item 4.6).
 //
 //   node scripts/my-leads-close/kpi-compare.mjs before.json after.json \
-//     [--closeout-count <n>] [--closeout-by-window <json: {"<window label>": n}>] [--run-id <uuid>]
+//     [--closeout-count <n>] [--closeout-by-window <json: {"<window label>": n}>] \
+//     [--run-id <relabel run uuid> --expected-contact-drop <n>]
 //
-// Exit 1 on any violation or a missing row. Current-state tiles are never compared to "before"; the
-// independent recount for `contactWithoutFollowUp` is a SQL step in the runbook (plan 4.6) and is
-// passed in as `--expected-contact-drop <n>` when available.
+// Exit 1 on any violation or a missing row. Only windows present in BOTH files whose end is at or
+// before the after file's `migrationAppliedAt` are compared (later windows legitimately move), and the
+// after file must carry `migrationAppliedAt`. Current-state tiles are never compared to "before"
+// except `contactWithoutFollowUp`: the independent recount is a SQL step in the runbook (plan 4.6),
+// passed as `--expected-contact-drop <n>`, and every member must show after = before - n. The flag is
+// required as soon as `--run-id` (the relabel run) is given.
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -29,8 +33,25 @@ export function compare(before, after, options = {}) {
   const closeoutByWindow = options.closeoutByWindow ?? {};
   const violations = [];
   let compared = 0;
-  const afterRows = new Map(after.rows.map((row) => [rowKey(row), row]));
-  for (const b of before.rows) {
+  if (options.runId && options.expectedContactDrop === undefined) {
+    violations.push({ member: "*", window: "*", key: "contactWithoutFollowUp", reason: "--expected-contact-drop is required when a relabel run id is given" });
+  }
+  if (!after.migrationAppliedAt || Number.isNaN(Date.parse(after.migrationAppliedAt))) {
+    violations.push({ member: "*", window: "*", key: "migrationAppliedAt", reason: "the after file has no migrationAppliedAt; re-take it with --migration-applied-at" });
+    return { ok: false, violations, compared };
+  }
+  const cutoff = Date.parse(after.migrationAppliedAt);
+  const endOf = new Map();
+  for (const w of [...(before.windows ?? []), ...(after.windows ?? [])]) if (!endOf.has(w.label)) endOf.set(w.label, Date.parse(w.end));
+  const beforeLabels = new Set(before.rows.map((r) => r.window));
+  const afterLabels = new Set(after.rows.map((r) => r.window));
+  const eligible = (label) => beforeLabels.has(label) && afterLabels.has(label) && endOf.has(label) && endOf.get(label) <= cutoff;
+  const beforeRows = before.rows.filter((r) => eligible(r.window));
+  const afterEligible = after.rows.filter((r) => eligible(r.window));
+  if (beforeRows.length === 0) violations.push({ member: "*", window: "*", key: "*", reason: "no window is present in both files and ends at or before migrationAppliedAt" });
+  const afterRows = new Map(afterEligible.map((row) => [rowKey(row), row]));
+  const dropChecked = new Set();
+  for (const b of beforeRows) {
     const a = afterRows.get(rowKey(b));
     if (!a) {
       violations.push({ member: b.member, window: b.window, key: "*", reason: "missing after row" });
@@ -41,6 +62,14 @@ export function compare(before, after, options = {}) {
       compared += 1;
       if (b.kpi?.error !== a.kpi?.error) violations.push({ member: b.member, window: b.window, key: "error", reason: `before=${b.kpi?.error} after=${a.kpi?.error}` });
       continue;
+    }
+    if (options.expectedContactDrop !== undefined && !dropChecked.has(b.member)) {
+      dropChecked.add(b.member);
+      compared += 1;
+      const want = b.kpi.contactWithoutFollowUp - options.expectedContactDrop;
+      if (a.kpi.contactWithoutFollowUp !== want) {
+        violations.push({ member: b.member, window: b.window, key: "contactWithoutFollowUp", reason: `before=${b.kpi.contactWithoutFollowUp} after=${a.kpi.contactWithoutFollowUp} expectedDrop=${options.expectedContactDrop}` });
+      }
     }
     const keys = new Set([...Object.keys(b.kpi), ...Object.keys(a.kpi)]);
     for (const key of keys) {
@@ -60,8 +89,8 @@ export function compare(before, after, options = {}) {
       }
     }
   }
-  for (const a of after.rows) {
-    if (!before.rows.some((b) => rowKey(b) === rowKey(a))) violations.push({ member: a.member, window: a.window, key: "*", reason: "missing before row" });
+  for (const a of afterEligible) {
+    if (!beforeRows.some((b) => rowKey(b) === rowKey(a))) violations.push({ member: a.member, window: a.window, key: "*", reason: "missing before row" });
   }
   return { ok: violations.length === 0, violations, compared };
 }
@@ -74,8 +103,8 @@ export function formatTable(result) {
 
 export function parseArgs(argv) {
   const [beforePath, afterPath, ...rest] = argv;
-  if (!beforePath || !afterPath) throw new Error("usage: kpi-compare.mjs before.json after.json [--closeout-by-window <json>] [--run-id <uuid>]");
-  const options = { closeoutByWindow: {}, runId: null };
+  if (!beforePath || !afterPath) throw new Error("usage: kpi-compare.mjs before.json after.json [--closeout-by-window <json>] [--run-id <uuid> --expected-contact-drop <n>]");
+  const options = { closeoutByWindow: {}, runId: null, expectedContactDrop: undefined };
   for (let i = 0; i < rest.length; i += 1) {
     const flag = rest[i];
     const value = rest[i + 1];
@@ -84,8 +113,13 @@ export function parseArgs(argv) {
     if (flag === "--closeout-by-window") options.closeoutByWindow = JSON.parse(value);
     else if (flag === "--closeout-count") options.closeoutByWindow["since-launch"] = Number(value);
     else if (flag === "--run-id") options.runId = value;
-    else throw new Error(`Unknown argument ${flag}`);
+    else if (flag === "--expected-contact-drop") {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 0) throw new Error("--expected-contact-drop must be a non-negative integer");
+      options.expectedContactDrop = n;
+    } else throw new Error(`Unknown argument ${flag}`);
   }
+  if (options.runId && options.expectedContactDrop === undefined) throw new Error("--expected-contact-drop is required when --run-id is given");
   return { beforePath, afterPath, options };
 }
 

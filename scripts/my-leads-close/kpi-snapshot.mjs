@@ -3,12 +3,15 @@
 //
 //   SANDRA_PRODUCTION_DATABASE_URL=... node scripts/my-leads-close/kpi-snapshot.mjs \
 //     --org <uuid> --owner <owner uid> --member <uuid> [--member <uuid> ...] --out kpi-before.json \
-//     [--from 2026-09-12] [--migration-applied-at <iso>]
+//     [--from 2026-09-12] [--migration-applied-at <iso>] [--windows-from kpi-before.json]
+//
+// The after snapshot must pass `--windows-from <before file>` (reuses the exact windows) and
+// `--migration-applied-at <iso>`; kpi-compare only compares windows ending at or before that instant.
 //
 // Refuses any database whose project ref is not production, forces every transaction read-only, and
 // records `{error: code}` for a member the function rejects (compared as equal-to-itself, never skipped).
 // The connection string is supplied by `op run`; nothing here reads a vault or prints a secret.
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 export const EXPECTED_PROJECT_REF = "copflsklaefwzipsrjqz";
@@ -62,8 +65,15 @@ export function buildWindows(now, fromDate = "2026-09-12", migrationAppliedAt = 
   return windows;
 }
 
+/** The before file's windows, verbatim, so both snapshots measure identical intervals. */
+export function windowsFromFile(path) {
+  const windows = JSON.parse(readFileSync(path, "utf8")).windows;
+  if (!Array.isArray(windows) || windows.length === 0) throw new Error(`${path} has no windows to reuse`);
+  return windows;
+}
+
 export function parseArgs(argv) {
-  const out = { members: [], from: "2026-09-12", migrationAppliedAt: null, out: null, org: null, owner: null };
+  const out = { members: [], from: "2026-09-12", migrationAppliedAt: null, windowsFrom: null, out: null, org: null, owner: null };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     const value = argv[i + 1];
@@ -74,12 +84,15 @@ export function parseArgs(argv) {
     else if (flag === "--member") out.members.push(value);
     else if (flag === "--from") out.from = value;
     else if (flag === "--migration-applied-at") out.migrationAppliedAt = value;
+    else if (flag === "--windows-from") out.windowsFrom = value;
     else if (flag === "--out") out.out = value;
     else throw new Error(`Unknown argument ${flag}`);
   }
   for (const id of [out.org, out.owner, ...out.members]) if (!id || !UUID.test(id)) throw new Error("--org, --owner and every --member must be UUIDs");
   if (out.members.length === 0) throw new Error("at least one --member is required");
   if (!out.out) throw new Error("--out is required");
+  if (out.windowsFrom && !out.migrationAppliedAt) throw new Error("--windows-from (the after snapshot) requires --migration-applied-at");
+  if (out.migrationAppliedAt && Number.isNaN(Date.parse(out.migrationAppliedAt))) throw new Error("--migration-applied-at must be an ISO timestamp");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(out.from)) throw new Error("--from must be YYYY-MM-DD");
   return out;
 }
@@ -124,7 +137,7 @@ export async function main(argv, env = process.env, io = { out: (t) => process.s
   await client.connect();
   try {
     const now = new Date();
-    const windows = buildWindows(now, args.from, args.migrationAppliedAt ?? now);
+    const windows = args.windowsFrom ? windowsFromFile(args.windowsFrom) : buildWindows(now, args.from, args.migrationAppliedAt ?? now);
     const result = await snapshot(client, { org: args.org, owner: args.owner, members: args.members, windows, now });
     if (args.migrationAppliedAt) result.migrationAppliedAt = args.migrationAppliedAt;
     writeFileSync(args.out, `${JSON.stringify(result, null, 2)}\n`);
