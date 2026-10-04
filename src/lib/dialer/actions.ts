@@ -11,6 +11,9 @@ import type { Database } from "@/lib/supabase/types";
 import { loadHomeownerTrainingProfile } from "@/lib/leads/homeowner-training-profile";
 import { repDisplayName } from "@/lib/coach/rep-display-name";
 import { getMemberTimezone } from "@/components/appointments/book-appointment-action";
+import { schemaReady } from "@/lib/my-leads/schema-ready";
+import { createNextStep } from "@/lib/next-steps";
+import { wallTimeToUtc } from "@/lib/time/zoned";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 import { reportError } from "@/lib/errors/report";
 import { openCallCapability, openCallIdentity } from "./call-capability";
@@ -593,24 +596,63 @@ export async function completeSoftphoneCall(input: {
 
       if (!activity) return { ok: false, error: "The call activity was not saved." };
 
-      // fn_book_appointment owns the booked_appointment write. Supplying the
+      // The booking (fn_create_next_step, or fn_book_appointment on the legacy path) owns the
+      // booked_appointment write. Supplying the
       // stable wrap token makes a retry after a lost response replay the same
       // booking instead of creating a second appointment.
       if (input.callback) {
         const timezone = await getMemberTimezone(user.id);
         const resolvedZone = timezone.ok ? timezone.data : input.callback.timeZone;
-        const booked = await bookAppointment({
-          propertyId: input.target.propertyId!,
-          contactId: input.target.contactId ?? undefined,
-          assigneeId: user.id,
-          date: input.callback.date,
-          time: input.callback.time,
-          timeZone: resolvedZone,
-          durationMinutes: 30,
-          title: `Call back ${input.target.address ?? "lead"}`,
-          note: input.notes.trim(),
-          idempotencyKey: input.wrapToken,
-        });
+        const callbackTitle = `Call back ${input.target.address ?? "lead"}`;
+        // The callback is a 15-minute phone appointment written through the one next-step
+        // function. Until schemaReady('next_step_write') the legacy 30-minute booking runs
+        // unchanged, so the deploy-before-migration window cannot break the wrap-up.
+        let booked: Awaited<ReturnType<typeof bookAppointment>>;
+        if (await schemaReady("next_step_write")) {
+          const converted = wallTimeToUtc({
+            date: input.callback.date,
+            time: input.callback.time,
+            timeZone: resolvedZone,
+          });
+          if (!converted.ok) return { ok: false, error: "Choose a valid date and time." };
+          const created = await createNextStep({
+            kind: "appointment",
+            mode: "phone",
+            assigneeId: user.id,
+            title: callbackTitle,
+            dueAt: converted.utc.toISOString(),
+            propertyId: input.target.propertyId!,
+            contactId: input.target.contactId ?? undefined,
+            note: input.notes.trim(),
+            idempotencyKey: input.wrapToken,
+            origin: "app",
+            applyBookingEffects: true,
+          });
+          booked = created.ok
+            ? {
+                ok: true,
+                data: {
+                  taskId: created.data.taskId,
+                  alreadyQualified: created.data.alreadyQualified,
+                  chainId: created.data.calendarChainId ?? "",
+                  duplicate: created.data.duplicate,
+                },
+              }
+            : created;
+        } else {
+          booked = await bookAppointment({
+            propertyId: input.target.propertyId!,
+            contactId: input.target.contactId ?? undefined,
+            assigneeId: user.id,
+            date: input.callback.date,
+            time: input.callback.time,
+            timeZone: resolvedZone,
+            durationMinutes: 30,
+            title: callbackTitle,
+            note: input.notes.trim(),
+            idempotencyKey: input.wrapToken,
+          });
+        }
         if (!booked.ok) return { ok: false, error: booked.error.message };
         callbackTaskId = booked.data.taskId;
 
