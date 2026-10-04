@@ -1,9 +1,13 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 
 import type { SlackUnfurlJob } from "./unfurl-store";
+import { loadPreviewData } from "./unfurl-data";
+import type { SlackLeadPreviewSnapshot } from "./unfurl-types";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_HISTORY_ROWS = 3;
+
+export type SlackCanaryPreviewSnapshot = SlackLeadPreviewSnapshot;
 
 type QueryResult = {
   data: unknown;
@@ -52,18 +56,39 @@ type HistoryRow = {
 
 type AttemptFacts = {
   latest_attempt_id: string | null;
-  latest_attempt_outcome: string | null;
-  reached_call_id: string | null;
-  reached_call_occurred_at: string | null;
 };
 
 /** The marker format used by run-owned Slack acceptance fixtures. */
 export function slackCanaryRunMarker(runId: string): string {
-  return `slack-canary:${runId}`;
+  return `SLACK PREVIEW CANARY ${runId}`;
 }
 
-function hasRunMarker(value: unknown, runId: string): boolean {
-  return typeof value === "string" && value.trim() === slackCanaryRunMarker(runId);
+/** Load the server-authoritative render snapshot used by the internal fence. */
+export async function loadSlackCanaryPreview(input: {
+  job: SlackUnfurlJob;
+  propertyId: string;
+}): Promise<SlackCanaryPreviewSnapshot | null> {
+  if (typeof input.job.org_id !== "string") return null;
+  return loadPreviewData({
+    client: createAdminClient(),
+    orgId: input.job.org_id,
+    propertyId: input.propertyId,
+  });
+}
+
+/** Deep-freeze the server-captured snapshot before passing it to the worker. */
+export function freezeSlackCanaryPreview(snapshot: SlackCanaryPreviewSnapshot): SlackCanaryPreviewSnapshot {
+  const messages = snapshot.messages.map((message) => Object.freeze({ ...message }));
+  const latestAttempt = snapshot.latestAttempt ? Object.freeze({ ...snapshot.latestAttempt }) : null;
+  return Object.freeze({ ...snapshot, latestAttempt, messages: Object.freeze(messages) });
+}
+
+function propertyRunMarker(runId: string): string {
+  return `${slackCanaryRunMarker(runId)}; synthetic only; no seller contact`;
+}
+
+function contactRunMarker(runId: string): string {
+  return `${slackCanaryRunMarker(runId)}; synthetic only; no phone; no outreach`;
 }
 
 async function read(query: PromiseLike<QueryResult>): Promise<unknown> {
@@ -97,28 +122,30 @@ async function noProviderIntentRows(
   db: CanaryClient,
   orgId: string,
   propertyId: string,
+  contactId: string,
+  runId: string,
 ): Promise<boolean> {
-  // These are deliberately separate exact-key reads. A row in any one of
-  // them means the fixture has a provider obligation, delivery ledger entry,
-  // or call intent and must not enter the hosted canary path.
+  // The service-only boolean RPC owns the ledger read. The route receives no
+  // table rows or provider metadata, and an unavailable/erroring RPC fails
+  // closed.
   try {
-    const rows = await Promise.all([
-      read(db.from("rep_sms_obligations").select("id").eq("org_id", orgId).eq("property_id", propertyId).limit(1)),
-      read(db.from("rep_sms_delivery_ledger").select("id").eq("org_id", orgId).eq("property_id", propertyId).limit(1)),
-      read(db.from("dialpad_call_intents").select("id").eq("org_id", orgId).eq("property_id", propertyId).limit(1)),
-    ]);
-    return rows.every((value) => Array.isArray(value) && value.length === 0);
+    return (await read(db.rpc("get_slack_canary_provider_safety", {
+      p_org_id: orgId,
+      p_property_id: propertyId,
+      p_contact_id: contactId,
+      p_run_id: runId,
+    }))) === true;
   } catch {
-    // A missing table grant or unavailable safety read is ambiguous. Treat it
-    // as evidence that the fixture is unsafe instead of widening access.
     return false;
   }
 }
 
 /**
  * Prove that the target is the current run-owned synthetic fixture before the
- * unchanged Slack worker is allowed to read or send anything. This function
- * is intentionally read-only and returns no fixture data to the HTTP route.
+ * unchanged Slack worker is allowed to read or send anything. Notes are
+ * user-editable, so the exact run-owned history metadata, persisted claim and
+ * scoped attempt fact remain required backstops. This function is intentionally
+ * read-only and returns no fixture data to the HTTP route.
  */
 export async function verifySlackCanaryFixture(input: {
   job: SlackUnfurlJob;
@@ -139,7 +166,7 @@ export async function verifySlackCanaryFixture(input: {
   )) as PropertyRow[] | null;
   const row = Array.isArray(property) ? property[0] : null;
   if (!row || row.id !== input.propertyId || row.org_id !== orgId || !isUuid(row.homeowner_contact_id)) return false;
-  if (!hasRunMarker(row.notes, input.runId)) return false;
+  if (row.notes?.trim() !== propertyRunMarker(input.runId)) return false;
 
   const contactRows = (await read(
     db.from("contacts")
@@ -150,7 +177,7 @@ export async function verifySlackCanaryFixture(input: {
   )) as ContactRow[] | null;
   const contact = Array.isArray(contactRows) ? contactRows[0] : null;
   if (!contact || contact.id !== row.homeowner_contact_id || contact.org_id !== orgId) return false;
-  if (!hasRunMarker(contact.notes, input.runId)) return false;
+  if (contact.notes?.trim() !== contactRunMarker(input.runId)) return false;
   if ([contact.phone_1, contact.phone_2, contact.phone_3].some((value) => nonEmpty(value) !== null)) return false;
 
   const history = (await read(
@@ -172,11 +199,8 @@ export async function verifySlackCanaryFixture(input: {
   const attempt = Array.isArray(attemptFacts) ? attemptFacts[0] : null;
   if (
     !attempt ||
-    typeof attempt.latest_attempt_id !== "string" ||
-    attempt.latest_attempt_outcome !== "reached" ||
-    typeof attempt.reached_call_id !== "string" ||
-    typeof attempt.reached_call_occurred_at !== "string"
+    typeof attempt.latest_attempt_id !== "string"
   ) return false;
 
-  return noProviderIntentRows(db, orgId, input.propertyId);
+  return noProviderIntentRows(db, orgId, input.propertyId, row.homeowner_contact_id, input.runId);
 }

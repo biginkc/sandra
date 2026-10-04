@@ -1,22 +1,27 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 
 import { NextResponse } from "next/server";
 
 import {
+  freezeSlackCanaryPreview,
+  loadSlackCanaryPreview,
   verifySlackCanaryFixture,
 } from "@/lib/integrations/slack/unfurl-canary";
 import {
+  claimSlackCanaryExecution,
   loadSlackJobUrls,
   loadSlackUnfurlJob,
   loadSlackUnfurlReceiptIdentity,
+  finishSlackUnfurlJob,
 } from "@/lib/integrations/slack/unfurl-store";
 import { parseSlackLeadUrl } from "@/lib/integrations/slack/unfurl-policy";
-import { processSlackUnfurlJob } from "@/lib/integrations/slack/unfurl-worker";
+import { processSlackUnfurlJob, type SlackCanaryExecutionFence } from "@/lib/integrations/slack/unfurl-worker";
 
 export const maxDuration = 45;
 
 const MAX_BODY_BYTES = 8 * 1024;
 const BODY_READ_TIMEOUT_MS = 5_000;
+const HANDLER_BUDGET_MS = 35_000;
 const MAX_LEASE_MS = 120_000;
 const WORK_BUDGET_MS = 40_000;
 const LEASE_RESERVE_MS = 5_000;
@@ -183,17 +188,49 @@ function currentWorkerDeadline(job: {
   lease_expires_at: string | null;
   event_time: string;
   expires_at: string;
-}, now: number): number | null {
+}, now: number, handlerDeadline: number): number | null {
   if (job.status !== "processing" || job.attempts !== 1 || !job.lease_expires_at) return null;
   const leaseExpiresAt = Date.parse(job.lease_expires_at);
   const expiry = jobExpiry(job);
   if (!Number.isFinite(leaseExpiresAt) || !Number.isFinite(expiry)) return null;
   if (leaseExpiresAt <= now || expiry <= now || leaseExpiresAt - now > MAX_LEASE_MS) return null;
-  const deadline = Math.min(now + WORK_BUDGET_MS, leaseExpiresAt - LEASE_RESERVE_MS, expiry - LEASE_RESERVE_MS);
+  const deadline = Math.min(now + WORK_BUDGET_MS, handlerDeadline, leaseExpiresAt - LEASE_RESERVE_MS, expiry - LEASE_RESERVE_MS);
   return deadline > now ? deadline : null;
 }
 
+function isWindowError(error: unknown): boolean {
+  return error instanceof Error && (error.message === "slack_unfurl_expired" || error.message === "slack_unfurl_budget_exhausted");
+}
+
+async function finishWorkWindowClaim(jobId: string, claimToken: string): Promise<void> {
+  await finishSlackUnfurlJob({ jobId, claimToken, status: "expired", errorCode: "work_window_expired" }).catch(() => false);
+}
+
+async function finishCanaryClaim(jobId: string, claimToken: string, errorCode: string): Promise<void> {
+  await finishSlackUnfurlJob({ jobId, claimToken, status: "noop", errorCode }).catch(() => false);
+}
+
+async function expireIfHandlerWindowElapsed(
+  job: { id: string; status: string; attempts: number },
+  claimToken: string,
+  handlerDeadline: number,
+  now: number,
+): Promise<boolean> {
+  if (job.status !== "processing" || job.attempts !== 1 || now < handlerDeadline) return false;
+  await finishWorkWindowClaim(job.id, claimToken);
+  return true;
+}
+
+function workWindowRefusal(stage: "preflight" | "worker" = "preflight"): Response {
+  return response(409, { ok: false, stage, category: "work_window" });
+}
+
+function canaryFenceRefusal(stage: "preflight" | "worker" = "preflight"): Response {
+  return response(409, { ok: false, stage, category: "canary_fence" });
+}
+
 export async function POST(request: Request): Promise<Response> {
+  const handlerStartedAt = Date.now();
   const secret = process.env.CRON_SECRET;
   if (!secret) return response(500, { error: "CRON_SECRET not configured" });
   const authorization = request.headers.get("authorization");
@@ -204,11 +241,18 @@ export async function POST(request: Request): Promise<Response> {
 
   const body = await readBoundedBody(request);
   if (!body.ok) return refusal("invalid_body");
-  const payload = parsePayload(body.text);
-  if (!payload) return refusal("invalid_request");
+  const parsedPayload = parsePayload(body.text);
+  if (!parsedPayload) return refusal("invalid_request");
 
+  let job: Awaited<ReturnType<typeof loadSlackUnfurlJob>>;
+  const payload: CanaryPayload = parsedPayload;
+  let deadline: number;
+  let canaryFence: SlackCanaryExecutionFence;
+  let privateClaimToken = "";
+  let canaryTargetTrusted = false;
+  let privateClaimAttempted = false;
   try {
-    const job = await loadSlackUnfurlJob(payload.jobId);
+    job = await loadSlackUnfurlJob(payload.jobId);
     if (!job || job.id !== payload.jobId || job.installation_id !== payload.installationId || job.org_id !== payload.orgId || job.channel_id !== payload.channelId || job.message_ts !== payload.messageTs || job.poster_slack_user_id !== payload.posterId) return refusal();
     if (!job.claim_token || !equalClaimToken(job.claim_token, payload.claimToken)) return refusal();
 
@@ -218,18 +262,95 @@ export async function POST(request: Request): Promise<Response> {
     // below; here we only require the job's persisted receipt to still exist.
     if (!receipt || receipt.id !== job.receipt_id) return refusal();
 
-    const urls = await loadSlackJobUrls(job.id);
+    const urls = await loadSlackJobUrls(job.id, 2);
     if (urls.length !== 1 || urls[0]?.url_key !== payload.canonicalURL) return refusal();
-    const deadline = currentWorkerDeadline(job, Date.now());
-    if (deadline === null) return refusal();
+    canaryTargetTrusted = true;
+    const now = Date.now();
+    const handlerDeadline = handlerStartedAt + HANDLER_BUDGET_MS;
+    const workerDeadline = currentWorkerDeadline(job, now, handlerDeadline);
+    if (workerDeadline === null) {
+      if (await expireIfHandlerWindowElapsed(job, payload.claimToken, handlerDeadline, now)) return workWindowRefusal();
+      // The exact persisted job and original claim are already bound above.
+      // A processing/attempt-one job that fails the bounded lease/TTL fence
+      // must become terminal instead of remaining requeueable synthetic work.
+      if (job.status === "processing" && job.attempts === 1) {
+        await finishCanaryClaim(job.id, payload.claimToken, "canary_preflight_failed");
+      }
+      return refusal();
+    }
     const verified = await verifySlackCanaryFixture({ job, runId: payload.runId, propertyId: payload.propertyId });
-    if (!verified) return refusal();
-
-    const status = await processSlackUnfurlJob(job, deadline);
-    return response(200, { ok: true, status });
+    const afterPreflight = Date.now();
+    if (await expireIfHandlerWindowElapsed(job, payload.claimToken, handlerDeadline, afterPreflight)) return workWindowRefusal();
+    if (!verified) {
+      await finishCanaryClaim(job.id, payload.claimToken, "canary_preflight_failed");
+      return canaryFenceRefusal();
+    }
+    const snapshot = await loadSlackCanaryPreview({ job, propertyId: payload.propertyId });
+    if (!snapshot) {
+      await finishCanaryClaim(job.id, payload.claimToken, "canary_preflight_failed");
+      return canaryFenceRefusal();
+    }
+    const fixtureAfterCapture = await verifySlackCanaryFixture({ job, runId: payload.runId, propertyId: payload.propertyId });
+    const afterCapture = Date.now();
+    if (await expireIfHandlerWindowElapsed(job, payload.claimToken, handlerDeadline, afterCapture)) return workWindowRefusal();
+    if (!fixtureAfterCapture) {
+      await finishCanaryClaim(job.id, payload.claimToken, "canary_preflight_failed");
+      return canaryFenceRefusal();
+    }
+    const refreshedDeadline = currentWorkerDeadline(job, afterCapture, handlerDeadline);
+    if (refreshedDeadline === null) return refusal();
+    deadline = refreshedDeadline;
+    privateClaimToken = randomUUID();
+    // The RPC may commit and then lose its response. Mark ownership before
+    // awaiting it so an ambiguous outcome can only attempt private-token
+    // cleanup, never mutate the original caller claim.
+    privateClaimAttempted = true;
+    const claimed = await claimSlackCanaryExecution({
+      jobId: job.id,
+      claimToken: payload.claimToken,
+      privateClaimToken,
+      orgId: payload.orgId,
+      propertyId: payload.propertyId,
+      runId: payload.runId,
+      canonicalURL: payload.canonicalURL,
+    });
+    if (!claimed) return canaryFenceRefusal();
+    canaryFence = {
+      canonicalURL: payload.canonicalURL,
+      propertyId: payload.propertyId.toLowerCase(),
+      runId: payload.runId,
+      snapshot: freezeSlackCanaryPreview(snapshot),
+    };
   } catch {
+    if (privateClaimAttempted) await finishCanaryClaim(payload.jobId, privateClaimToken, "canary_preflight_failed");
+    else if (canaryTargetTrusted) await finishCanaryClaim(payload.jobId, payload.claimToken, "canary_preflight_failed");
+    return response(500, { ok: false, stage: "preflight", category: "internal_error" });
+  }
+
+  try {
+    const claimedJob = { ...job, claim_token: privateClaimToken };
+    const status = await processSlackUnfurlJob(claimedJob, deadline as number, canaryFence);
+    try {
+      const [urls, fixtureStillOwned] = await Promise.all([
+        loadSlackJobUrls(job.id, 2),
+        verifySlackCanaryFixture({ job, runId: payload.runId, propertyId: payload.propertyId }),
+      ]);
+      if (urls.length !== 1 || urls[0]?.url_key !== payload.canonicalURL || !fixtureStillOwned) {
+        return response(409, { ok: false, stage: "post_dispatch", category: "post_dispatch_drift" });
+      }
+    } catch {
+      return response(500, { ok: false, stage: "post_dispatch", category: "internal_error" });
+    }
+    return response(200, { ok: true, status });
+  } catch (error) {
+    if (error instanceof Error && error.message === "slack_canary_fence_failed") return canaryFenceRefusal("worker");
+    if (isWindowError(error)) {
+      await finishWorkWindowClaim(job.id, privateClaimToken);
+      return workWindowRefusal("worker");
+    }
     // Do not serialize provider errors, credentials, claims, or raw database
     // rows. The durable job state remains the source of truth for diagnosis.
+    await finishCanaryClaim(job.id, privateClaimToken, "canary_worker_failed");
     return response(500, { ok: false, stage: "worker", category: "internal_error" });
   }
 }

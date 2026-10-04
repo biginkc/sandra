@@ -18,6 +18,7 @@ type QueryBuilder = {
   eq(column: string, value: unknown): QueryBuilder;
   maybeSingle(): Promise<{ data: Record<string, unknown> | null; error: { message: string } | null }>;
   order(column: string, options: { ascending: boolean }): Promise<{ data: unknown[] | null; error: { message: string } | null }>;
+  limit(count: number): QueryBuilder;
   update(values: Record<string, unknown>): QueryBuilder;
   then<TResult1 = QueryResponse, TResult2 = never>(onfulfilled?: ((value: QueryResponse) => TResult1 | PromiseLike<TResult1>) | null, onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null): PromiseLike<TResult1 | TResult2>;
 };
@@ -267,8 +268,10 @@ export async function claimSlackUnfurlJobs(input: { now?: Date; limit?: number; 
   return jobs.map((job) => ({ ...job, claim_token: claimToken }));
 }
 
-export async function loadSlackJobUrls(jobId: string): Promise<SlackEventJobUrl[]> {
-  const { data, error } = await admin().from("slack_unfurl_job_urls").select("url_key,lead_id,lookup_status,authorization_status,last_error_code").eq("job_id", jobId).order("url_key", { ascending: true });
+export async function loadSlackJobUrls(jobId: string, limit?: number): Promise<SlackEventJobUrl[]> {
+  let query = admin().from("slack_unfurl_job_urls").select("url_key,lead_id,lookup_status,authorization_status,last_error_code").eq("job_id", jobId);
+  if (limit !== undefined) query = query.limit(limit);
+  const { data, error } = await query.order("url_key", { ascending: true });
   if (error) throw new DatabaseError("Slack job URL lookup failed", { message: error.message });
   return (data ?? []) as SlackEventJobUrl[];
 }
@@ -336,6 +339,28 @@ export async function guardSlackUnfurlDispatch(input: {
     p_poster_slack_user_id: input.posterSlackUserId,
   });
   rpcError(error, "dispatch guard");
+  return data === true || (Array.isArray(data) && data[0] === true);
+}
+
+export async function claimSlackCanaryExecution(input: {
+  jobId: string;
+  claimToken: string;
+  privateClaimToken: string;
+  orgId: string;
+  propertyId: string;
+  runId: string;
+  canonicalURL: string;
+}): Promise<boolean> {
+  const { data, error } = await admin().rpc("claim_slack_canary_execution", {
+    p_job_id: input.jobId,
+    p_claim_token: input.claimToken,
+    p_private_claim_token: input.privateClaimToken,
+    p_org_id: input.orgId,
+    p_property_id: input.propertyId,
+    p_run_id: input.runId,
+    p_canonical_url: input.canonicalURL,
+  });
+  rpcError(error, "canary execution claim");
   return data === true || (Array.isArray(data) && data[0] === true);
 }
 

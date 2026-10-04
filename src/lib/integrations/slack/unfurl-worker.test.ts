@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   guard: vi.fn(),
   revokeInstallationGeneration: vi.fn(),
   loadData: vi.fn(),
+  canaryFixture: vi.fn(),
   blocks: vi.fn(),
   unfurl: vi.fn(),
 }));
@@ -46,6 +47,7 @@ vi.mock("./unfurl-policy", () => ({
   verifySlackDestination: mocks.verify,
 }));
 vi.mock("./unfurl-data", () => ({ loadPreviewData: mocks.loadData }));
+vi.mock("./unfurl-canary", () => ({ verifySlackCanaryFixture: mocks.canaryFixture }));
 vi.mock("./unfurl-blocks", () => ({ buildPreviewBlocks: mocks.blocks }));
 
 import { processSlackUnfurlJob, runSlackUnfurlSweep } from "./unfurl-worker";
@@ -76,6 +78,28 @@ const job = {
   updated_at: new Date(now).toISOString(),
 };
 
+const canarySnapshot = {
+  propertyId: "11111111-1111-4111-8111-111111111111",
+  leadName: "Lead",
+  address: "1 Main",
+  ownerName: null,
+  ownerAssigned: false,
+  latestAttempt: null,
+  messagesDisposition: null,
+  lastContactAt: null,
+  timezone: "America/Chicago",
+  messages: [],
+};
+
+function canaryFence() {
+  return {
+    canonicalURL: "https://sandra.bmhgroupkc.com/leads/11111111-1111-4111-8111-111111111111",
+    propertyId: canarySnapshot.propertyId,
+    runId: "00000000-0000-0000-0000-000000000001",
+    snapshot: canarySnapshot,
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.stubEnv("SLACK_LEAD_UNFURL_ENABLED", "1");
@@ -94,7 +118,8 @@ beforeEach(() => {
     { url_key: "https://sandra.bmhgroupkc.com/leads/11111111-1111-4111-8111-111111111111", lead_id: null, lookup_status: null, authorization_status: null, last_error_code: null },
     { url_key: "https://sandra.bmhgroupkc.com/my-leads?lead=22222222-2222-4222-8222-222222222222", lead_id: null, lookup_status: null, authorization_status: null, last_error_code: null },
   ]);
-  mocks.loadData.mockResolvedValue({ propertyId: "11111111-1111-4111-8111-111111111111", leadName: "Lead", address: "1 Main", ownerName: null, ownerAssigned: false, latestAttempt: null, messagesDisposition: null, lastContactAt: null, timezone: "America/Chicago", messages: [] });
+  mocks.loadData.mockResolvedValue(canarySnapshot);
+  mocks.canaryFixture.mockResolvedValue(true);
   mocks.blocks.mockReturnValue([{ type: "section", text: { type: "mrkdwn", text: "Lead" } }]);
   mocks.unfurl.mockResolvedValue({ ok: true });
   mocks.finish.mockResolvedValue(true);
@@ -110,6 +135,35 @@ describe("Slack unfurl worker", () => {
     expect(result).toBe("failed");
     expect(mocks.installation).not.toHaveBeenCalled();
     expect(mocks.unfurl).not.toHaveBeenCalled();
+  });
+
+  it("rejects a canary fence when a second persisted URL appears before loading", async () => {
+    await expect(processSlackUnfurlJob({ ...job }, Date.now() + 45_000, canaryFence())).rejects.toThrow("slack_canary_fence_failed");
+    expect(mocks.loadData).not.toHaveBeenCalled();
+    expect(mocks.unfurl).not.toHaveBeenCalled();
+    expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "noop", errorCode: "canary_fence_failed" });
+  });
+
+  it("uses the immutable server snapshot for one fenced URL and rechecks it before dispatch", async () => {
+    mocks.urls.mockResolvedValue([
+      { url_key: "https://sandra.bmhgroupkc.com/leads/11111111-1111-4111-8111-111111111111", lead_id: null, lookup_status: null, authorization_status: null, last_error_code: null },
+    ]);
+    const result = await processSlackUnfurlJob({ ...job }, Date.now() + 45_000, canaryFence());
+    expect(result).toBe("succeeded");
+    expect(mocks.loadData).toHaveBeenCalledTimes(2);
+    expect(mocks.canaryFixture).toHaveBeenCalledTimes(1);
+    expect(mocks.unfurl).toHaveBeenCalledTimes(1);
+    expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "succeeded" });
+  });
+
+  it("refuses a canary snapshot that drifts before final dispatch", async () => {
+    mocks.urls.mockResolvedValue([
+      { url_key: "https://sandra.bmhgroupkc.com/leads/11111111-1111-4111-8111-111111111111", lead_id: null, lookup_status: null, authorization_status: null, last_error_code: null },
+    ]);
+    mocks.loadData.mockResolvedValueOnce(canarySnapshot).mockResolvedValueOnce({ ...canarySnapshot, address: "2 Main" });
+    await expect(processSlackUnfurlJob({ ...job }, Date.now() + 45_000, canaryFence())).rejects.toThrow("slack_canary_fence_failed");
+    expect(mocks.unfurl).not.toHaveBeenCalled();
+    expect(mocks.finish).toHaveBeenCalledWith({ jobId: "job-1", claimToken: "claim-1", status: "noop", errorCode: "canary_fence_failed" });
   });
 
   it("finishes disabled-policy jobs without sending", async () => {
