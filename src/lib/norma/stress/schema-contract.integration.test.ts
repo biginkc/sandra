@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { reconcileNormaCalls } from "../reconcile";
+import { RECONCILE_THRESHOLDS, reconcileNormaCalls } from "../reconcile";
 import { createScratchDb, seedWorld, type Scratch, type World } from "./db";
 import { createPgSupabase } from "./pg-client";
 
@@ -192,15 +192,23 @@ describe("paired-runtime retry grace contract", () => {
     expect(ledger).toHaveLength(1);
     expect(ledger[0]).toMatchObject({ released_at: null, release_result: null });
     expect(Date.now() - Date.parse(before.created_at)).toBeGreaterThan(9 * 60_000);
+    expect(Math.abs(Date.now() - Date.parse(before.updated_at))).toBeLessThan(5000);
+    const now = Date.now() + 5000;
+    expect(Date.parse(before.next_check_at)).toBeLessThanOrEqual(now);
     let dispatchCalls = 0;
-    await reconcileNormaCalls({
+    const summary = await reconcileNormaCalls({
       client: createPgSupabase(scratch.pool, { actor: "paired-reconcile" }),
       bland: null,
       dispatch: async () => { dispatchCalls += 1; return { status: "not_claimed" }; },
-      now: Date.now() + 5000,
+      now,
     });
+    expect(summary.errors).toBe(0);
+    expect(summary.scanned).toBeGreaterThan(0);
     expect(dispatchCalls).toBe(0);
-    expect(await row(ctx.id)).toMatchObject({ status: "requested", attempt: 2, bland_call_id: null });
+    const after = await row(ctx.id);
+    expect(after).toMatchObject({ status: "requested", attempt: 2, bland_call_id: null });
+    // The target scheduling write proves this specific row was examined.
+    expect(Date.parse(after.next_check_at)).toBe(now + RECONCILE_THRESHOLDS.recheckAfterRequested);
     expect(await pauseRows(ctx.id)).toEqual(ledger);
     expect((await enrollments(ctx.lead.enrollments))[0]).toMatchObject({ status: "paused", pause_reason: "norma_call" });
     expect(await count("lead_events", ctx.id, "norma_call_attempt_no_answer")).toBe(1);
