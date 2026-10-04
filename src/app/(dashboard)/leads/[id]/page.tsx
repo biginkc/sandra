@@ -815,6 +815,7 @@ export default async function LeadDetailPage({
         propertyLabel={lead.address}
         assigneeId={lead.assigned_user_id ?? null}
         disabledReason={logFollowUpDisabledReason}
+        viewer={sessionUser ? { userId: sessionUser.id, orgId: lead.org_id } : null}
       >
       <LeadOutcomeProvider>
       <LeadMediaHero
@@ -995,7 +996,7 @@ export default async function LeadDetailPage({
             </div>
           </div>
 
-          <aside className="min-w-0 space-y-3" aria-label="Lead dossier">
+          <aside className="flex min-w-0 flex-col gap-3" aria-label="Lead dossier">
             <fieldset disabled={training} inert={training || undefined} className="contents"><LeadDripCard propertyId={lead.id} /></fieldset>
             <LeadFilesCard
               files={esign.files}

@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DripProgress } from "@/lib/sequences/drip-progress";
 import { DripCard } from "./drip-card";
 
-const { pauseEnrollmentAction, resumeEnrollmentAction, retrySequenceStepAction, cancelEnrollment, changeDripAction, listDripProgress, pickResult } = vi.hoisted(() => ({
+const { pauseEnrollmentAction, resumeEnrollmentAction, retrySequenceStepAction, cancelEnrollment, changeDripAction, listDripProgress, pickResult, setInboxDispoAndStartDrip, refreshRouter } = vi.hoisted(() => ({
   pauseEnrollmentAction: vi.fn().mockResolvedValue({ ok: true, data: null }),
   resumeEnrollmentAction: vi.fn().mockResolvedValue({ ok: true, data: null }),
   retrySequenceStepAction: vi.fn().mockResolvedValue({ ok: true, data: null }),
@@ -12,8 +12,11 @@ const { pauseEnrollmentAction, resumeEnrollmentAction, retrySequenceStepAction, 
   changeDripAction: vi.fn().mockResolvedValue({ ok: true, data: { status: "skipped", reason: "Already enrolled" } }),
   listDripProgress: vi.fn().mockResolvedValue([]),
   pickResult: vi.fn(),
+  setInboxDispoAndStartDrip: vi.fn(),
+  refreshRouter: vi.fn(),
 }));
-vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: vi.fn() }) }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: refreshRouter }) }));
+vi.mock("@/app/(dashboard)/messages/dispo-actions", () => ({ setInboxDispoAndStartDrip }));
 vi.mock("@/app/(dashboard)/sequences/actions", () => ({ pauseEnrollmentAction, resumeEnrollmentAction, retrySequenceStepAction, cancelEnrollment, changeDripAction, startDripForLeads: vi.fn() }));
 vi.mock("@/lib/sequences/drip-progress", () => ({ listDripProgress }));
 vi.mock("@/lib/supabase/client", () => ({ createClient: () => ({}) }));
@@ -31,6 +34,7 @@ describe("DripCard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     listDripProgress.mockResolvedValue([]);
+    setInboxDispoAndStartDrip.mockResolvedValue({ ok: true, enrollment: { status: "enrolled", reason: "Enrolled" } });
     changeDripAction.mockResolvedValue({ ok: true, data: { status: "skipped", reason: "Already enrolled" } });
   });
   it("shows an active drip with progress and controls", () => {
@@ -110,4 +114,47 @@ describe("DripCard", () => {
     expect(await screen.findByText("Stopped")).toBeInTheDocument();
     expect(pickResult).toHaveBeenCalledWith({ status: "skipped", reason: "Previous drip stopped. No consent.", saved: false });
   });
+
+  it("starts through the same outcome-and-enrollment action as Needs drip", async () => {
+    const user = userEvent.setup();
+    listDripProgress.mockResolvedValue([progress]);
+    render(<DripCard propertyId="lead-1" initialProgress={null} />);
+    await user.click(screen.getByRole("button", { name: "Start drip" }));
+    await waitFor(() => expect(pickResult).toHaveBeenCalledWith({ status: "enrolled", reason: "Enrolled", saved: true }));
+    expect(setInboxDispoAndStartDrip).toHaveBeenCalledWith("lead-1", "needs_sequence", "drip-2");
+    expect(await screen.findByText("90-day follow-up")).toBeVisible();
+    expect(refreshRouter).toHaveBeenCalledOnce();
+    expect(changeDripAction).not.toHaveBeenCalled();
+  });
+
+  it.each(["skipped", "failed"])("refreshes a saved outcome even when enrollment is %s", async (status) => {
+    setInboxDispoAndStartDrip.mockResolvedValue({ ok: true, enrollment: { status, reason: "Enrollment blocked" } });
+    const user = userEvent.setup();
+    render(<DripCard propertyId="lead-1" initialProgress={null} />);
+    await user.click(screen.getByRole("button", { name: "Start drip" }));
+    await waitFor(() => expect(pickResult).toHaveBeenCalledWith({ status, reason: "Enrollment blocked", saved: true }));
+    expect(listDripProgress).toHaveBeenCalledOnce();
+    expect(refreshRouter).toHaveBeenCalledOnce();
+  });
+
+  it("refreshes after a committed failure without claiming enrollment succeeded", async () => {
+    setInboxDispoAndStartDrip.mockResolvedValue({ ok: false, committed: true, error: "Saved, but follow-up failed" });
+    const user = userEvent.setup();
+    render(<DripCard propertyId="lead-1" initialProgress={null} />);
+    await user.click(screen.getByRole("button", { name: "Start drip" }));
+    await waitFor(() => expect(pickResult).toHaveBeenCalledWith({ status: "failed", reason: "Saved, but follow-up failed", saved: true }));
+    expect(listDripProgress).toHaveBeenCalledOnce();
+    expect(refreshRouter).toHaveBeenCalledOnce();
+  });
+
+  it("does not refresh or claim a saved outcome when the guarded action rejects", async () => {
+    setInboxDispoAndStartDrip.mockResolvedValue({ ok: false, error: "Disposition changed in another session. Refresh and try again." });
+    const user = userEvent.setup();
+    render(<DripCard propertyId="lead-1" initialProgress={null} />);
+    await user.click(screen.getByRole("button", { name: "Start drip" }));
+    await waitFor(() => expect(pickResult).toHaveBeenCalledWith(expect.objectContaining({ status: "failed", saved: false })));
+    expect(listDripProgress).not.toHaveBeenCalled();
+    expect(refreshRouter).not.toHaveBeenCalled();
+  });
+
 });

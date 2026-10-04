@@ -50,6 +50,15 @@ const TRIGGERS_OPT_OUT: ReadonlySet<OutreachDispo> = new Set([
   "opted_out",
 ]);
 
+// A combined drip start can release Nurture to automation, but must not
+// erase an unusable number or an outstanding callback/appointment outcome.
+const DRIP_START_BLOCKED_OUTCOMES: Record<string, string> = {
+  wrong_number: "This lead's phone number is marked wrong. Correct the number and outcome before starting a drip.",
+  bad_number: "This lead's phone number is marked unusable. Correct the number and outcome before starting a drip.",
+  callback_requested: "This lead has a requested callback. Resolve the callback outcome before starting a drip.",
+  booked_appointment: "This lead has a booked appointment. Resolve the appointment outcome before starting a drip.",
+};
+
 export type SetDispoResult =
   | { ok: true; enrollment?: Pick<DripResult, "status" | "reason"> }
   | {
@@ -92,6 +101,10 @@ export async function saveOutreachDispo(
       (prop.is_dnc_locked || prop.outreach_dispo === "dnc" || prop.outreach_dispo === "opted_out")) {
     return { ok: false, error: "This lead is do not contact or opted out. Its follow-up outcome cannot be changed." };
   }
+  const dripStartBlock = sequenceId && dispo === "needs_sequence" && prop.outreach_dispo
+    ? DRIP_START_BLOCKED_OUTCOMES[prop.outreach_dispo]
+    : undefined;
+  if (dripStartBlock) return { ok: false, error: dripStartBlock };
 
   try {
     await assertNotTrainingTarget(supabase, { propertyId });

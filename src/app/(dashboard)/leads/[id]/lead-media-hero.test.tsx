@@ -144,10 +144,10 @@ describe("<LeadMediaHero />", () => {
     expect(screen.queryByTestId("lead-media-scrim")).toBeNull();
     expect(screen.queryByTestId("lead-media-bottom-scrim")).toBeNull();
     expect(screen.getByTestId("lead-media-actions").className).toContain(
-      "[&_button]:text-slate-950",
+      "[&_:is(button,a)]:text-slate-950",
     );
     expect(screen.getByTestId("lead-media-actions").className).toContain(
-      "[&_button]:bg-white/95",
+      "[&_:is(button,a)]:bg-white/95",
     );
     expectVisibleActionFocus();
     expect(screen.getByTestId("lead-media-actions")).not.toHaveClass(
@@ -373,7 +373,7 @@ describe("<LeadMediaHero />", () => {
       name: "Book appointment",
     }).parentElement;
     expect(actions).toHaveClass("flex-wrap", "min-w-0");
-    expect(actions?.className).toContain("[&_button]:min-h-9");
+    expect(actions?.className).toContain("[&_:is(button,a)]:min-h-9");
     expectVisibleActionFocus();
     expect(screen.getByText(/Street View unavailable/)).toBeVisible();
   });

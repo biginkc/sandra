@@ -1,0 +1,32 @@
+name: Lead action contrast
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  contrast:
+    name: Lead action computed contrast
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install dependencies
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm ci
+      # Hosted Ubuntu runners include Chrome; no browser install or auth fixture needed.
+      - name: Verify both hero layouts and themes
+        env:
+          PLAYWRIGHT_CHANNEL: chrome
+        run: node scripts/verify-lead-action-contrast.mjs

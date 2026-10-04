@@ -398,7 +398,9 @@ describe("MyLeadsQueue", () => {
 
   it("groups the Text lead trigger with the other lead actions", async () => {
     const user = userEvent.setup()
-    render(<MyLeadsQueue {...buildProps()} />)
+    const props = buildProps()
+    props.stages.not_contacted!.rows[0]!.zillowHref = "https://www.zillow.com/homes/1-Main-Street"
+    render(<MyLeadsQueue {...props} />)
 
     const row = within(screen.getByTestId("my-lead-row-property-1"))
     await user.click(row.getByRole("button", { name: "Show details for 1 Main Street" }))
@@ -407,6 +409,26 @@ describe("MyLeadsQueue", () => {
     const actions = row.getByTestId("my-lead-actions-property-1")
     const composer = within(actions).getByTestId("rep-sms-composer")
     const textTrigger = within(actions).getByRole("button", { name: "Text lead" })
+
+    const openWindow = vi.spyOn(window, "open").mockReturnValue(null)
+    const currentUrl = window.location.href
+    for (const name of ["Open lead", "Open in Zillow"]) {
+      const link = within(actions).getByRole("link", { name })
+      expect(link).toHaveAttribute("target", "_blank")
+      expect(link).toHaveAttribute("rel", "noopener noreferrer")
+      await user.click(link)
+      if (name === "Open lead") {
+        expect(openWindow).not.toHaveBeenCalled()
+      } else {
+        expect(openWindow).toHaveBeenLastCalledWith(
+          (link as HTMLAnchorElement).href,
+          "_blank",
+          "popup,width=1200,height=900,noopener,noreferrer",
+        )
+      }
+      expect(window.location.href).toBe(currentUrl)
+    }
+    openWindow.mockRestore()
 
     expect(actions).toContainElement(composer)
     expect(composer).toHaveClass("contents")
