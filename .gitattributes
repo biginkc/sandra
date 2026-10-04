@@ -1,0 +1,4 @@
+/supabase/migrations/*_norma_* text eol=lf
+/src/lib/norma/** text eol=lf
+/scripts/ci/*norma* text eol=lf
+/vitest.norma-stress.config.ts text eol=lf

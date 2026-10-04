@@ -14,6 +14,10 @@ name: Norma stress gate
 # pg_dump/psql 17 come from ankane/setup-postgres (the runner's own client is
 # older than the server and pg_dump refuses to run against a newer server).
 #
+# Schema-only job: all131 legacy,10 post-DDL and20 upgrade tests are mandatory.
+# The paired runtime candidate requires separately reviewed wiring; this exact
+# runner refuses its changed legacy source hashes rather than silently choosing
+# a weaker profile.
 # A failing seed is printed; replay it with
 #   NORMA_STRESS_SEED=<seed> npm run test:norma-stress
 
@@ -27,6 +31,9 @@ on:
       - "src/app/api/cron/**"
       - "supabase/migrations/*_norma_*"
       - "vitest.norma-stress.config.ts"
+      - "scripts/ci/*norma*"
+      - "package.json"
+      - ".gitattributes"
       - "scripts/ci/provision-disposable-stack.mjs"
       - ".github/workflows/norma-stress.yml"
   workflow_dispatch: {}
@@ -63,11 +70,25 @@ jobs:
       - name: Provision disposable stack (schema without the Norma migrations)
         run: node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 --no-baseline-owner --exclude-migrations '*_norma_*'
 
-      - name: Run the stress gate
+      - name: Validate the schema contract runner
+        run: npm run test:norma-schema-contract-unit
+
+      - name: Run all mandatory schema contract lanes
         env:
           NORMA_STRESS_SOURCE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
-        run: npm run test:norma-stress
+        run: npm run test:norma-schema-contract -- --output-directory "$RUNNER_TEMP/norma-schema-contract"
 
       - name: Stop disposable stack
         if: always() && env.E2E_LOCAL_WORKDIR != ''
         run: supabase stop --workdir "$E2E_LOCAL_WORKDIR" --no-backup
+
+      - name: Preserve contract receipts (no schema dump)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: norma-schema-contract
+          path: |
+            ${{ runner.temp }}/norma-schema-contract/*.json
+            ${{ runner.temp }}/norma-schema-contract/databases/*.json
+            ${{ runner.temp }}/norma-schema-contract/*.log
+          if-no-files-found: warn

@@ -7,6 +7,8 @@ import { Client, type Pool } from "pg";
 
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
+import { CONTRACT, checkLaneEnvironment, checkSchema, schemaCatalog, sha256, writeManifest } from "../../../../scripts/ci/norma-contract-support.mjs";
+
 import { createStressPool } from "./pg-client";
 
 /**
@@ -142,16 +144,22 @@ export type Scratch = {
 };
 
 export async function createScratchDb(): Promise<Scratch> {
-  const name = `norma_stress_${process.pid}_${Date.now().toString(36)}`;
+  const lane = process.env.NORMA_SCHEMA_CONTRACT_LANE ? checkLaneEnvironment(process.env) : undefined;
+  const name = lane
+    ? `norma_schema_${process.env.NORMA_SCHEMA_CONTRACT_RUN_ID}_${process.pid}_${Date.now().toString(36)}`
+    : `norma_stress_${process.pid}_${Date.now().toString(36)}`;
+  const manifestFile = lane ? path.join(process.env.NORMA_SCHEMA_MANIFEST_DIRECTORY!, `${name}.json`) : undefined;
+  const manifest = { database: name, runId: process.env.NORMA_SCHEMA_CONTRACT_RUN_ID, lane, sourceDumpSha256: process.env.NORMA_SCHEMA_SOURCE_SHA256, migrations: [] as {file: string; sha256: string}[], catalog: undefined as unknown, state: "created" };
   const admin = new Client({ connectionString: SOURCE_URL });
   await admin.connect();
   await admin.query(`create database ${name}`);
   await admin.end();
+  if (manifestFile) writeManifest(manifestFile, manifest);
   const url = withDb(SOURCE_URL, name);
 
   try {
-    const dump = execFileSync("pg_dump", ["--schema-only", "--no-owner", SOURCE_URL], { maxBuffer: 256 * 1024 * 1024 });
-    const restore = execFileSync("psql", ["-q", "-X", "-d", url], {
+    const dump = lane ? readFileSync(process.env.NORMA_SCHEMA_SOURCE_DUMP!) : execFileSync("pg_dump", ["--schema-only", "--no-owner", SOURCE_URL], { maxBuffer: 256 * 1024 * 1024 });
+    const restore = execFileSync("psql", ["-q", "-X", "-v", "ON_ERROR_STOP=1", "-d", url], {
       input: dump,
       maxBuffer: 256 * 1024 * 1024,
       stdio: ["pipe", "pipe", "pipe"],
@@ -159,7 +167,7 @@ export async function createScratchDb(): Promise<Scratch> {
     }) as unknown as string;
     void restore;
   } catch (error) {
-    // psql exits 0 even with SQL errors; a non-zero exit is a real failure.
+    // ON_ERROR_STOP makes every restore error a real failure.
     await dropDatabase(name);
     throw error;
   }
@@ -167,8 +175,22 @@ export async function createScratchDb(): Promise<Scratch> {
   const setup = new Client({ connectionString: url });
   await setup.connect();
   try {
+    if (lane) {
+      checkSchema(await schemaCatalog(setup), "source");
+      const expected = Object.keys(CONTRACT.norma_migrations).map(file => path.basename(file)).filter(file => lane !== "legacy" || file !== path.basename(CONTRACT.retry_file));
+      if (JSON.stringify(MIGRATIONS) !== JSON.stringify(expected)) throw new Error("Applied migration set mismatch");
+    }
     for (const file of MIGRATIONS) {
-      await setup.query(readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"));
+      const sql = readFileSync(path.join(MIGRATIONS_DIR, file), "utf8");
+      if (lane && sha256(sql) !== CONTRACT.norma_migrations[`supabase/migrations/${file}`]) throw new Error(`Applied source hash drift: ${file}`);
+      await setup.query(sql);
+      if (lane) manifest.migrations.push({file, sha256: sha256(sql)});
+    }
+    if (lane) {
+      manifest.catalog = await schemaCatalog(setup);
+      checkSchema(manifest.catalog, lane);
+      manifest.state = "ready";
+      writeManifest(manifestFile!, manifest);
     }
     await setup.query(AUDIT_SQL);
   } catch (error) {
@@ -245,6 +267,7 @@ export async function createScratchDb(): Promise<Scratch> {
     drop: async () => {
       await pool.end().catch(() => undefined);
       await dropDatabase(name);
+      if (manifestFile) { manifest.state = "dropped"; writeManifest(manifestFile, manifest); }
     },
   };
 }

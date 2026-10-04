@@ -1,8 +1,11 @@
+import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 
 import { Client } from "pg";
 import { describe, expect, it } from "vitest";
+
+import { CONTRACT, checkLaneEnvironment, checkSchema, schemaCatalog, sha256, writeManifest } from "../../scripts/ci/norma-contract-support.mjs";
 
 import { requireLoopbackPostgresUrl } from "../../src/lib/testing/loopback-postgres-url";
 
@@ -12,10 +15,13 @@ import { requireLoopbackPostgresUrl } from "../../src/lib/testing/loopback-postg
 const url = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
-const load = (name: string) =>
-  readFileSync(new URL(`./${name}`, import.meta.url), "utf8")
-    .replace(/^\s*begin;\s*$/gim, "")
+const lane = process.env.NORMA_SCHEMA_CONTRACT_LANE ? checkLaneEnvironment(process.env) : undefined;
+const load = (name: string) => {
+  const raw = readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
+  if (lane && sha256(raw) !== CONTRACT.norma_migrations[`supabase/migrations/${name}`]) throw new Error(`Upgrade SQL hash drift: ${name}`);
+  return raw.replace(/^\s*begin;\s*$/gim, "")
     .replace(/^\s*commit;\s*$/gim, "");
+};
 // Every Norma migration, in order: the retry replaces functions defined by several of them.
 const migration = [
   "20261002120000_norma_call_requests.sql",
@@ -38,7 +44,9 @@ async function withDb(fn: (db: Client, ctx: Ctx) => Promise<void>, beforeUpgrade
   await db.connect();
   try {
     await db.query("begin");
+    if (lane) checkSchema(await schemaCatalog(db), "upgrade-source");
     await db.query(migration);
+    if (lane) checkSchema(await schemaCatalog(db), "legacy");
     const ctx: Ctx = { org: randomUUID(), rep: randomUUID(), assignee: randomUUID(), sequence: randomUUID() };
     await db.query("insert into auth.users(id) values ($1), ($2)", [ctx.rep, ctx.assignee]);
     await db.query("insert into public.organizations(id,name) values ($1,'norma test')", [ctx.org]);
@@ -51,10 +59,19 @@ async function withDb(fn: (db: Client, ctx: Ctx) => Promise<void>, beforeUpgrade
     );
     if (beforeUpgrade) await beforeUpgrade(db, ctx);
     await db.query(retryMigration);
+    if (lane) checkSchema(await schemaCatalog(db), "postddl");
     await fn(db, ctx);
   } finally {
-    await db.query("rollback").catch(() => {});
-    await db.end();
+    try {
+    await db.query("rollback");
+    if (lane) {
+      checkSchema(await schemaCatalog(db), "upgrade-source");
+      const file = path.join(path.dirname(process.env.NORMA_SCHEMA_MANIFEST_DIRECTORY!), "upgrade-cases.json");
+      const receipts = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : [];
+      receipts.push({test: expect.getState().currentTestName, rolledBack: true, migrations: CONTRACT.norma_migrations});
+      writeManifest(file, receipts);
+    }
+    } finally { await db.end(); }
   }
 }
 
