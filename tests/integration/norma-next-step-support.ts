@@ -1,6 +1,8 @@
 // Shared fixtures for the P1a-writers Norma integration tests. Local-only: every test runs in
-// one transaction that is rolled back. The whole Norma migration chain is replayed, then the
-// P1a-core next-step schema and fn_create_next_step, then the P1a-writers Norma migrations.
+// one transaction that is rolled back. The My Leads chain is first reset to its pre-stack state
+// (a no-op on an unmigrated database), the Norma migrations are replayed only when the Norma tables
+// are absent, then the P1a-core next-step schema and fn_create_next_step and the P1a-writers Norma
+// migrations are applied, so a fully migrated (CI) database and a bare local one end identically.
 import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -9,6 +11,7 @@ import { Client } from "pg";
 import { expect } from "vitest";
 
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
+import { applyMyLeadsChain } from "@tests/integration/my-leads-housekeeping-fixture";
 
 const dir = `${path.join(process.cwd(), "supabase/migrations")}/`;
 export const url = requireLoopbackPostgresUrl(
@@ -20,10 +23,9 @@ export const load = (file: string, base = dir) =>
 const NORMA_BEFORE = readdirSync(dir)
   .filter((f) => /^\d{14}_norma_.+\.sql$/.test(f) && f < "20261005")
   .sort();
-const CORE = ["20261005120000_next_step_schema.sql", "20261005120500_fn_create_next_step.sql"];
 export const WRITERS = ["20261005130400_norma_complete_call_next_step.sql", "20261005130500_norma_needs_review_next_step.sql"];
 export const ROLLBACKS = WRITERS.map((f) => `../rollbacks/${f}`);
-export const migrations = (writers: string[] = WRITERS) => [...NORMA_BEFORE, ...CORE, ...writers].map((f) => load(f)).join("\n");
+export const migrations = (writers: string[] = WRITERS) => writers.map((f) => load(f)).join("\n");
 
 export type Ctx = { org: string; rep: string; assignee: string; sequence: string };
 export type Lead = { property: string; contact: string; phone: string; enrollment: string | null };
@@ -38,6 +40,11 @@ export async function withDb(fn: (db: Client, ctx: Ctx) => Promise<void>, sql = 
   await db.connect();
   try {
     await db.query("begin");
+    await applyMyLeadsChain(db, []);
+    if (!(await db.query("select to_regclass('public.norma_call_requests') as t")).rows[0].t) {
+      await db.query(NORMA_BEFORE.map((f) => load(f)).join("\n"));
+    }
+    await applyMyLeadsChain(db, ["schema", "createFn"]);
     await db.query(sql);
     const ctx: Ctx = { org: randomUUID(), rep: randomUUID(), assignee: randomUUID(), sequence: randomUUID() };
     await db.query("insert into auth.users(id) values ($1), ($2)", [ctx.rep, ctx.assignee]);

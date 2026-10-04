@@ -4,6 +4,7 @@ import { Client } from 'pg';
 import { expect, it } from 'vitest';
 import { loadTestEnv } from '@tests/integration/env';
 import { requireLoopbackPostgresUrl } from '@/lib/testing/loopback-postgres-url';
+import { applyMyLeadsChain } from '@tests/integration/my-leads-housekeeping-fixture';
 
 const strip = (file: string) => {
   const sql = readFileSync(new URL(file, import.meta.url), 'utf8');
@@ -29,6 +30,7 @@ async function withDb(files: string[], fn: (db: Client) => Promise<void>) {
   await db.connect();
   try {
     await db.query('begin');
+    await applyMyLeadsChain(db, []);
     for (const file of files) await db.query(file);
     await fn(db);
   } finally { await db.query('rollback').catch(() => {}); await db.end(); }
