@@ -41,3 +41,25 @@ export async function enqueueTopTenComps(
     }
   }
 }
+
+/**
+ * Strip trigger (§3.4): enqueue the current top ten only when the org's `comp_queue` flag is on
+ * and the `lead_comps` schema is ready. Meant for Next `after()` so it never blocks the render.
+ */
+export async function enqueueStripComps(
+  orgId: string,
+  propertyIds: readonly string[],
+  deps?: { flagEnabled?: (orgId: string) => Promise<boolean>; schemaReady?: () => Promise<boolean>; enqueue?: typeof enqueueTopTenComps },
+): Promise<boolean> {
+  try {
+    const { getMyLeadsFlag } = await import("@/lib/my-leads/flags");
+    const { schemaReady } = await import("@/lib/my-leads/schema-ready");
+    const flagEnabled = deps?.flagEnabled ?? ((id: string) => getMyLeadsFlag(id, "comp_queue"));
+    const ready = deps?.schemaReady ?? (() => schemaReady("lead_comps"));
+    if (!(await flagEnabled(orgId)) || !(await ready())) return false;
+    await (deps?.enqueue ?? enqueueTopTenComps)(orgId, propertyIds, "top_ten");
+    return true;
+  } catch {
+    return false;
+  }
+}

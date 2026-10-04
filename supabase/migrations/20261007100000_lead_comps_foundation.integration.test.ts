@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { loadTestEnv } from '@tests/integration/env';
 import { requireLoopbackPostgresUrl } from '@/lib/testing/loopback-postgres-url';
 import { applyMyLeadsChain, chainThrough } from '@tests/integration/my-leads-housekeeping-fixture';
