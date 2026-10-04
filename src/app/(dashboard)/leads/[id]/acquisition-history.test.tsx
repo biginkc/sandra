@@ -68,6 +68,13 @@ describe("acquisition history rendering and recovery", () => {
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
     expect(screen.getByText(/Rep A/)).toBeInTheDocument();
   });
+  it.each([
+    ["voicemail", "Voicemail"],
+    ["not_logged", "Not logged"],
+  ])("labels the %s outcome as %s", (outcome, label) => {
+    render(<AcquisitionHistoryCard fact={{ ...fact, outcome }} actor="Rep A" />);
+    expect(screen.getByText(label)).toBeInTheDocument();
+  });
   it("renders the follow-up badge for a no-answer with a durable obligation", () => {
     render(<AcquisitionHistoryCard fact={obligationFact} actor="Rep A" />);
 
