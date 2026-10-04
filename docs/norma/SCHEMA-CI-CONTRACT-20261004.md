@@ -4,12 +4,12 @@ Local preparation only; no publication or workflow change is admitted. Base sche
 
 ## Failure classification
 
-Published792 run37189630910 failed17/131 with cleanup successful. These are the exact source locations and distinct failures; the two concurrent-completion failures appear twice in the log but represent one failed test, and the two mutation names are truncated identically by Vitest.
+Published792 run37189630910 failed17/131 with cleanup successful. These are the exact source locations and distinct failures; the concurrent-completion scenario is deliberately parameterized twice for each outcome, so its two identical voicemail labels represent two failed cases, and the two mutation names are truncated identically by Vitest.
 
 | Failed test (source line in published827e) | Count | Classification and evidence |
 |---|---:|---|
 | races72: voicemail webhook before send response |1| Obsolete terminal assertion: requested attempt2 is the SQL's explicit first confirmed no-answer transition. No final outbox/event is expected yet. |
-| races129: voicemail webhook versus reconciliation |1| Same terminal assertion; concurrent first completions must schedule exactly one retry, retain holds, and emit one attempt event. New forced20-worker SQL race verifies this. |
+| races129: voicemail webhook versus reconciliation (two parameterized cases) |2| Same terminal assertion; concurrent first completions must schedule exactly one retry, retain holds, and emit one attempt event. New forced20-worker SQL race verifies this. |
 | races265: no-answer before inbound reply |1| Obsolete pause release expectation: first non-connect retains norma_call hold; inbound reply must still upgrade protection. Paired runtime suite tests final second-call/reply interleavings. |
 | races303: cleanup selected pause, reply upgrade, then no-answer |1| Obsolete completed-status assertion. Protection remains required; no permissive pause assertion is substituted. |
 | races326: cleanup without reply |1| Obsolete release timing: cleanup cannot resume while retry request is open. |
