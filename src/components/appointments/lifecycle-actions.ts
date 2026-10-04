@@ -25,6 +25,7 @@ import { dispatchTaskAssignedSlack } from "@/lib/integrations/slack/dispatch";
 import { dispatchTaskAssigned } from "@/lib/notifications/dispatch";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { schemaReady } from "@/lib/my-leads/schema-ready";
 import { wallTimeToUtc } from "@/lib/time/zoned";
 
 /**
@@ -339,9 +340,6 @@ export async function rescheduleAppointmentAction(
     });
   }
   const newStartUtc = converted.utc;
-  const newEndUtc = new Date(
-    newStartUtc.getTime() + input.durationMinutes * 60_000,
-  );
 
   try {
     const supabase = await createClient();
@@ -350,6 +348,33 @@ export async function rescheduleAppointmentAction(
     } = await supabase.auth.getUser();
     if (!user)
       return err({ code: "UNAUTHENTICATED", message: "Not signed in" });
+
+    // A phone appointment is always 15 minutes, whatever duration the picker sent: the
+    // server reads the row's mode (only once tasks.mode exists) instead of trusting the client.
+    let durationMinutes = input.durationMinutes;
+    if (await schemaReady("next_step_write")) {
+      try {
+        const { data: modeRow } = await (
+          supabase as unknown as {
+            from(t: "tasks"): {
+              select(c: "mode"): {
+                eq(c: "id", v: string): {
+                  maybeSingle(): PromiseLike<{ data: { mode?: string } | null }>;
+                };
+              };
+            };
+          }
+        )
+          .from("tasks")
+          .select("mode")
+          .eq("id", input.taskId)
+          .maybeSingle();
+        if (modeRow?.mode === "phone") durationMinutes = 15;
+      } catch {
+        // Unknown mode: keep the submitted duration.
+      }
+    }
+    const newEndUtc = new Date(newStartUtc.getTime() + durationMinutes * 60_000);
 
     const unlocked = await assertAppointmentTaskPropertyDncUnlocked(
       supabase,
