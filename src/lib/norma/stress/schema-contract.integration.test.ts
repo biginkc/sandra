@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { reconcileNormaCalls } from "../reconcile";
@@ -5,13 +8,15 @@ import { createScratchDb, seedWorld, type Scratch, type World } from "./db";
 import { createPgSupabase } from "./pg-client";
 
 // Post-DDL contract: real committed statements on separate pooled connections.
-// No runtime dispatcher or provider is invoked. This supplements, rather than
+// Production reconciliation is invoked only in the explicit negative legacy
+// compatibility receipt; no runtime dispatcher or provider is invoked. This supplements, rather than
 // rewrites, the legacy-runtime stress suite and the transactional upgrade tests.
 let scratch: Scratch;
 let world: World;
 beforeAll(async () => {
   scratch = await createScratchDb();
   world = await seedWorld(scratch.pool);
+  expect(createHash("sha256").update(readFileSync("supabase/migrations/20261004090000_norma_call_twice.sql")).digest("hex")).toBe("f386ab9e07d28372acdc37d088a82c153eba8dd2019532964d87a6a1680c3466");
   const columns = await scratch.pool.query("select column_name from information_schema.columns where table_schema='public' and table_name='norma_call_requests' and column_name='attempt'");
   expect(columns.rows).toHaveLength(1); // Refuse a mistakenly pre-DDL fixture.
 });
@@ -29,25 +34,30 @@ const count = async (table: "norma_notifications" | "lead_events", id: string, t
 // concurrent Promise creation alone would not prove overlapping transactions.
 async function race<T>(id: string, action: () => Promise<T>): Promise<T[]> {
   const blocker = await scratch.pool.connect();
-  let pending: Promise<T[]> | undefined;
+  let pending: Promise<PromiseSettledResult<T>[]> | undefined;
+  let waiterError: unknown;
   let waiters = 0;
   try {
     await blocker.query("begin");
     await blocker.query("select id from public.norma_call_requests where id=$1 for update", [id]);
-    pending = Promise.all(Array.from({ length: 20 }, action));
+    pending = Promise.allSettled(Array.from({ length: 20 }, action));
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
       waiters = Number((await q("select count(*) as n from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and query like '%fn_norma_%'"))[0]!.n);
       if (waiters === 20) break;
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
+  } catch (error) {
+    waiterError = error;
   } finally {
     await blocker.query("rollback");
     blocker.release();
   }
-  const results = await pending!;
+  const results = pending ? await pending : [];
+  if (waiterError) throw waiterError;
+  for (const result of results) if (result.status === "rejected") throw result.reason;
   expect(waiters, "all workers must reach the held row lock").toBe(20);
-  return results;
+  return results.map((result) => (result as PromiseFulfilledResult<T>).value);
 }
 async function requested() {
   const lead = await world.nextLead({ enrollments: ["active"] });
@@ -61,6 +71,7 @@ async function dispatched() {
   expect(await bind(ctx.id, `first_${ctx.id}`)).toBe("bound");
   return ctx;
 }
+async function pauseRows(id: string) { return q("select * from public.norma_enrollment_pauses where request_id=$1 order by enrollment_id", [id]); }
 async function enrollments(ids: string[]) { return q("select id,status,pause_reason from public.sequence_enrollments where id=any($1) order by id", [ids]); }
 
 describe("schema-only two-call committed concurrency contract", () => {
@@ -78,11 +89,17 @@ describe("schema-only two-call committed concurrency contract", () => {
   it("20 concurrent first no-answers schedule exactly one retry, no final effects, and retain both holds", async () => {
     const ctx = await dispatched();
     const paused = await enrollments(ctx.lead.enrollments);
+    expect(paused).toHaveLength(1);
+    expect(paused[0]).toMatchObject({ status: "paused", pause_reason: "norma_call" });
+    const pauses = await pauseRows(ctx.id);
+    expect(pauses).toHaveLength(1);
+    expect(pauses[0]).toMatchObject({ enrollment_id: ctx.lead.enrollments[0], released_at: null, release_result: null });
     const results = await race(ctx.id, () => complete(ctx.id, `first_${ctx.id}`, "no_answer", 1));
     expect(results.filter((r) => r.retry === true)).toHaveLength(1);
     expect(results.filter((r) => r.result === "replayed")).toHaveLength(19);
     expect(await row(ctx.id)).toMatchObject({ status: "requested", attempt: 2, first_bland_call_id: `first_${ctx.id}`, first_attempt_outcome: "no_answer", bland_call_id: null, completed_at: null });
     expect(await enrollments(ctx.lead.enrollments)).toEqual(paused);
+    expect(await pauseRows(ctx.id)).toEqual(pauses);
     expect(await count("norma_notifications", ctx.id)).toBe(0);
     expect(await count("lead_events", ctx.id, "norma_call_attempt_no_answer")).toBe(1);
     expect(await count("lead_events", ctx.id, "norma_call_completed")).toBe(0);
@@ -129,19 +146,26 @@ describe("schema-only two-call committed concurrency contract", () => {
   it("terminal outbox failure rolls back every effect and a concurrent replay then applies once", async () => {
     const ctx = await dispatched();
     await complete(ctx.id, `first_${ctx.id}`, "no_answer", 1);
-    await claim(ctx.id, 2);
-    await bind(ctx.id, `second_${ctx.id}`);
+    expect(await claim(ctx.id, 2)).toBe(true);
+    expect(await bind(ctx.id, `second_${ctx.id}`)).toBe("bound");
     const before = await row(ctx.id);
     const pauses = await enrollments(ctx.lead.enrollments);
+    const pauseLedger = await pauseRows(ctx.id);
+    const attemptEvents = await count("lead_events", ctx.id, "norma_call_attempt_no_answer");
+    expect(attemptEvents).toBe(1);
     await q("insert into stress.fault(property_id,tbl) values ($1,'norma_notifications')", [ctx.lead.property]);
     await expect(complete(ctx.id, `second_${ctx.id}`, "no_answer", 2)).rejects.toThrow("injected database failure");
     expect(await row(ctx.id)).toEqual(before);
     expect(await enrollments(ctx.lead.enrollments)).toEqual(pauses);
+    expect(await pauseRows(ctx.id)).toEqual(pauseLedger);
+    expect(await count("lead_events", ctx.id, "norma_call_attempt_no_answer")).toBe(attemptEvents);
     expect(await count("lead_events", ctx.id, "norma_call_completed")).toBe(0);
     expect(await count("norma_notifications", ctx.id)).toBe(0);
     await q("delete from stress.fault where property_id=$1", [ctx.lead.property]);
     const results = await race(ctx.id, () => complete(ctx.id, `second_${ctx.id}`, "no_answer", 2));
     expect(results.filter((r) => r.result === "applied")).toHaveLength(1);
+    expect(results.filter((r) => r.result === "replayed")).toHaveLength(19);
+    expect(await count("lead_events", ctx.id, "norma_call_attempt_no_answer")).toBe(attemptEvents);
     expect(await count("norma_notifications", ctx.id)).toBe(1);
     expect(await count("lead_events", ctx.id, "norma_call_completed")).toBe(1);
   });
@@ -158,23 +182,43 @@ describe("schema-only two-call committed concurrency contract", () => {
 
 describe("negative compatibility evidence: legacy reconciliation must stay held after DDL", () => {
   it("the legacy created_at expiry closes a fresh retry of an older request", async () => {
+    expect(createHash("sha256").update(readFileSync("src/lib/norma/reconcile.ts")).digest("hex")).toBe("b388576761c1bf9fa8afa1e5e71066c8604eb20f6b76e1bf4f2e7071696243a6");
     const ctx = await dispatched();
     // Existing scratch clock helper shifts stored timestamps with triggers off,
     // modelling elapsed time without violating the immutable-identity trigger.
     await scratch.advance(10 * 60_000);
     expect(await complete(ctx.id, `first_${ctx.id}`, "no_answer", 1)).toMatchObject({ retry: true });
     expect(await row(ctx.id)).toMatchObject({ status: "requested", attempt: 2 });
+    let dispatchCalls = 0;
     await reconcileNormaCalls({
       client: createPgSupabase(scratch.pool, { actor: "legacy-reconcile" }),
       bland: null,
-      dispatch: async () => { throw new Error("expiry should precede dispatch"); },
+      dispatch: async () => { dispatchCalls += 1; return { status: "not_claimed" }; },
       now: Date.now() + 5000,
     });
+    expect(dispatchCalls).toBe(0);
     expect(await row(ctx.id)).toMatchObject({ status: "dispatch_rejected", attempt: 2 });
     expect((await enrollments(ctx.lead.enrollments))[0]).toMatchObject({ status: "active", pause_reason: null });
     expect(await count("lead_events", ctx.id, "norma_call_attempt_no_answer")).toBe(1);
     expect(await count("lead_events", ctx.id, "norma_call_completed")).toBe(0);
     // This PASS demonstrates an unsupported mixed-version writer hazard;
     // it is a release stop condition, never a compatibility approval.
+  });
+});
+
+
+describe("negative SQL compatibility evidence: legacy callers remain unfenced", () => {
+  it("defaulted claim takes attempt 2 and metadata-less result can complete it before bind", async () => {
+    const ctx = await dispatched();
+    await complete(ctx.id, `first_${ctx.id}`, "no_answer", 1);
+    expect(await claim(ctx.id, 1)).toBe(false);
+    expect((await q("select public.fn_norma_claim_dispatch($1) as claimed", [ctx.id]))[0]!.claimed).toBe(true);
+    expect(await row(ctx.id)).toMatchObject({ status: "dispatching", attempt: 2, bland_call_id: null });
+    expect(await complete(ctx.id, "forged_legacy_id", "no_answer", 1)).toMatchObject({ result: "stale_attempt" });
+    const result = (await q("select public.fn_norma_complete_call($1,$2,$3,'{}'::jsonb) as result", [ctx.id, "forged_legacy_id", "no_answer"]))[0]!.result;
+    expect(result).toMatchObject({ result: "applied", status: "completed" });
+    expect(await row(ctx.id)).toMatchObject({ attempt: 2, status: "completed", bland_call_id: "forged_legacy_id" });
+    expect(await count("norma_notifications", ctx.id)).toBe(1);
+    // A passing receipt proves the hazard, not safe mixed-version operation.
   });
 });
