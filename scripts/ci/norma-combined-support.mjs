@@ -7,6 +7,12 @@ export const COMBINED=JSON.parse(readFileSync(new URL('./norma-combined-contract
 export function checkCombinedCheckout(root) {
   assert.equal(COMBINED.profile,'combined-explicit-legacy-and-paired-maintenance');
   assert.equal(COMBINED.legacy_schema_commit,'e94aef50332c5b2e6074cb8eb365d5ecebe87ee9');
+  assert.equal(COMBINED.legacy_gate_commit,'b80253189e2cba9fdaaa2306c52f8899db7fabf7');
+  assert.equal(COMBINED.paired_fixture_refinement.reviewed_legacy_commit,COMBINED.legacy_gate_commit);
+  assert.equal(COMBINED.paired_fixture_refinement.file,'src/lib/norma/stress/teeth.integration.test.ts');
+  assert.equal(COMBINED.paired_fixture_refinement.sha256,COMBINED.combined_sources[COMBINED.paired_fixture_refinement.file]);
+  assert.equal(Object.keys(COMBINED.paired_assertion_sources).length,11);
+  assert.equal(COMBINED.paired_assertion_sources[COMBINED.paired_fixture_refinement.file],undefined);
   assert.equal(COMBINED.paired_input_commit,'d2edabac632a7196820ff7c4a84fc620177211ee');
   assert.deepEqual(COMBINED.seeds,[101,202,303,404,505]);assert.equal(COMBINED.lifecycles,80);
   assert.deepEqual(Object.values(COMBINED.lanes).map(l=>l.tests),[176,19]);

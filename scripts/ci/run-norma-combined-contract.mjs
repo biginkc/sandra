@@ -30,6 +30,11 @@ export async function main(args=process.argv.slice(2),env=process.env) {
   assert.equal(git(['status','--porcelain'],env),'','Clean combined candidate required');
   const source=requireLoopbackPostgresUrl(env.NORMA_STRESS_SOURCE_DB_URL??'');const out=parseCombinedArgs(args);assert.ok(!existsSync(out),'New output directory required');
   const commit=git(['rev-parse','HEAD'],env);assert.equal(git(['rev-parse',COMBINED.legacy_schema_commit+'^{commit}'],env),COMBINED.legacy_schema_commit);
+  assert.equal(git(['rev-parse',COMBINED.legacy_gate_commit+'^{commit}'],env),COMBINED.legacy_gate_commit);
+  git(['merge-base','--is-ancestor',COMBINED.legacy_schema_commit,COMBINED.legacy_gate_commit],env);
+  git(['merge-base','--is-ancestor',COMBINED.legacy_gate_commit,commit],env);
+  const refinement=COMBINED.paired_fixture_refinement;
+  assert.equal(sha256(execFileSync('git',['show',COMBINED.paired_input_commit+':'+refinement.file],{cwd:ROOT,env:subprocessEnvironment(env)})),refinement.prior_paired_sha256,'Strengthened fixture provenance differs from paired input');
   const immutableSchema=JSON.parse(git(['show',COMBINED.legacy_schema_commit+':scripts/ci/norma-schema-contract.json'],env));
   assert.deepEqual(CONTRACT.norma_migrations,immutableSchema.norma_migrations,'SQL hashes must equal the immutable schema input');
   for(const [file,hash] of Object.entries(COMBINED.paired_assertion_sources))assert.equal(sha256(execFileSync('git',['show',COMBINED.paired_input_commit+':'+file],{cwd:ROOT,env:subprocessEnvironment(env)})),hash,'Paired assertion pin differs from immutable input: '+file);
@@ -37,23 +42,23 @@ export async function main(args=process.argv.slice(2),env=process.env) {
   const migrations=Object.fromEntries(readdirSync(path.join(ROOT,'supabase/migrations')).filter(f=>f.endsWith('.sql')).sort().map(f=>[f,sha256(readFileSync(path.join(ROOT,'supabase/migrations',f)))]));
   mkdirSync(path.join(out,'databases'),{recursive:true,mode:0o700});
   const runId=randomBytes(8).toString('hex'),legacyRoot=path.join(out,'legacy-checkout');
-  const receipt={profile:COMBINED.profile,sourceCommit:commit,node:process.version,nodeExecutable:process.execPath,runId,legacySchemaCommit:COMBINED.legacy_schema_commit,contractSha256:sha256(readFileSync(path.join(ROOT,'scripts/ci/norma-combined-contract.json'))),checkoutMigrationManifest:migrations,lanes:{},success:false,releaseCompatible:false,releaseBlockers:['unfenced defaulted legacy claim','metadata-less legacy completion','serving hold/drain evidence','immutable provider evidence','hosted workflow and release admission']};
+  const receipt={profile:COMBINED.profile,sourceCommit:commit,node:process.version,nodeExecutable:process.execPath,runId,legacySchemaCommit:COMBINED.legacy_schema_commit,legacyGateCommit:COMBINED.legacy_gate_commit,pairedFixtureRefinement:COMBINED.paired_fixture_refinement,contractSha256:sha256(readFileSync(path.join(ROOT,'scripts/ci/norma-combined-contract.json'))),checkoutMigrationManifest:migrations,lanes:{},success:false,releaseCompatible:false,releaseBlockers:['unfenced defaulted legacy claim','metadata-less legacy completion','serving hold/drain evidence','immutable provider evidence','hosted workflow and release admission']};
   const admin=new pg.Client({connectionString:source});let connected=false,createdLegacy=false;
   try {
     await admin.connect();connected=true;
     receipt.fixturePrivileges=(await admin.query('select current_user as role,rolsuper as superuser from pg_roles where rolname=current_user')).rows[0];assert.equal(receipt.fixturePrivileges.superuser,true,'Dedicated fixture admin required');
     receipt.sourceCatalog=await schemaCatalog(admin);checkSchema(receipt.sourceCatalog,'source');
-    // Immutable, explicit schema profile. No source sniffing or fallback.
-    git(['worktree','add','--detach',legacyRoot,COMBINED.legacy_schema_commit],env);createdLegacy=true;
-    assert.equal(git(['rev-parse','HEAD'],env,legacyRoot),COMBINED.legacy_schema_commit);assert.equal(git(['status','--porcelain'],env,legacyRoot),'');
+    // Fixed reviewed legacy successor; immutable baseline SQL is checked above. No source sniffing or fallback.
+    git(['worktree','add','--detach',legacyRoot,COMBINED.legacy_gate_commit],env);createdLegacy=true;
+    assert.equal(git(['rev-parse','HEAD'],env,legacyRoot),COMBINED.legacy_gate_commit);assert.equal(git(['status','--porcelain'],env,legacyRoot),'');
     assert.equal(sha256(readFileSync(path.join(legacyRoot,'package-lock.json'))),currentLock,'Legacy dependency lock mismatch');
     symlinkSync(path.join(ROOT,'node_modules'),path.join(legacyRoot,'node_modules'),'dir');
     const {main:runLegacy}=await import(pathToFileURL(path.join(legacyRoot,'scripts/ci/run-norma-schema-contract.mjs')).href);
-    console.log('Combined gate: immutable matched legacy/schema hazards/upgrade starting');
+    console.log('Combined gate: explicitly reviewed matched legacy/schema hazards/upgrade starting');
     const legacyEnv={...subprocessEnvironment(env),NORMA_STRESS_SOURCE_DB_URL:source};
     delete legacyEnv.GIT_CONFIG_NOSYSTEM;delete legacyEnv.GIT_CONFIG_GLOBAL; // Entry inputs are distinct from sanitized subprocess environments.
     const legacy=await runLegacy(['--output-directory',path.join(out,'legacy-schema')],legacyEnv);
-    assert.equal(legacy.sourceCommit,COMBINED.legacy_schema_commit);assert.equal(legacy.success,true);assert.deepEqual(legacy.cleanup,{removed:[],remaining:[]});
+    assert.equal(legacy.sourceCommit,COMBINED.legacy_gate_commit);assert.equal(legacy.success,true);assert.deepEqual(legacy.cleanup,{removed:[],remaining:[]});
     receipt.legacyReceipt={sourceCommit:legacy.sourceCommit,node:legacy.node,runId:legacy.runId,sourceDumpSha256:legacy.sourceDumpSha256,lanes:legacy.lanes,cleanup:legacy.cleanup};
     const dump=readFileSync(path.join(out,'legacy-schema/source.sql'));assert.equal(sha256(dump),legacy.sourceDumpSha256);receipt.sourceDumpSha256=legacy.sourceDumpSha256;
     console.log('Combined gate: complete paired/maintenance positive lane starting');
@@ -70,7 +75,7 @@ export async function main(args=process.argv.slice(2),env=process.env) {
   finally {
     try {
       receipt.cleanup=connected?await cleanupOwned(admin,runId):{removed:[],remaining:[]};
-      if(createdLegacy){assert.equal(git(['rev-parse','HEAD'],env,legacyRoot),COMBINED.legacy_schema_commit);assert.equal(git(['status','--porcelain'],env,legacyRoot),'');git(['worktree','remove',legacyRoot],env);receipt.legacyWorktreeRemoved=true;}
+      if(createdLegacy){assert.equal(git(['rev-parse','HEAD'],env,legacyRoot),COMBINED.legacy_gate_commit);assert.equal(git(['status','--porcelain'],env,legacyRoot),'');git(['worktree','remove',legacyRoot],env);receipt.legacyWorktreeRemoved=true;}
       else receipt.legacyWorktreeRemoved='not-created';
     }catch{receipt.success=false;receipt.cleanupFailed=true;}
     receipt.success=receipt.success&&receipt.cleanup?.removed?.length===0&&receipt.cleanup?.remaining?.length===0&&!receipt.cleanupFailed;
