@@ -469,7 +469,7 @@ function MyLeadStageSection({
               <p className="font-semibold">text {row.step} of {row.totalSteps}</p>
               <div className="min-w-0"><p className="text-[10px] uppercase text-muted-foreground">Last text {row.lastText ? new Date(row.lastText.sentAt).toLocaleDateString() : ''}</p><p className="truncate">{row.lastText?.preview ?? 'None yet'}</p></div>
               <div><p className="text-[10px] uppercase text-muted-foreground">Next text</p><p className="font-semibold">{row.nextTextAt ? new Date(row.nextTextAt).toLocaleString() : 'Not scheduled'}</p></div>
-              <Link href={`/leads/${row.propertyId}`} className="rounded-full border px-2 py-1 text-center font-semibold hover:bg-muted">Open lead</Link>
+              <Link href={`/leads/${row.propertyId}`} target="_blank" rel="noopener noreferrer" className="rounded-full border px-2 py-1 text-center font-semibold hover:bg-muted">Open lead</Link>
               <button type="button" className="rounded-full border px-2 py-1 text-center font-semibold hover:bg-muted" aria-expanded={expandedIds.has(row.propertyId)} aria-controls={`my-lead-detail-${row.propertyId}`}
                 aria-label={expandedIds.has(row.propertyId) ? `Hide details for ${row.queueRow?.address ?? 'this lead'}` : `Show details for ${row.queueRow?.address ?? 'this lead'}`}
                 onClick={() => onToggleDetails(row.propertyId)}>{expandedIds.has(row.propertyId) ? 'Hide details' : 'Details'}</button>
