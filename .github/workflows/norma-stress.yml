@@ -14,7 +14,7 @@ name: Norma stress gate
 # pg_dump/psql 17 come from ankane/setup-postgres (the runner's own client is
 # older than the server and pg_dump refuses to run against a newer server).
 #
-# Explicit combined job: immutable e94 schema checkout runs131 legacy,10
+# Explicit combined job: fixed reviewed legacy successor b802 of e94 runs131 legacy,10
 # post-DDL hazards and20 upgrade cases. This assembled checkout runs the full
 # paired176 suite and19 maintenance/authentication controls on the same dump.
 # The schema-only entry remains fixed and refuses assembled runtime hashes.
@@ -31,10 +31,12 @@ on:
       - "src/app/api/cron/**"
       - "supabase/migrations/*_norma_*"
       - "vitest.norma-stress.config.ts"
+      - "vitest.config.ts"
       - "vitest.local-integration.config.ts"
       - "src/lib/testing/loopback-postgres-url.ts"
       - "scripts/ci/*norma*"
       - "package.json"
+      - "package-lock.json"
       - ".gitattributes"
       - "scripts/ci/provision-disposable-stack.mjs"
       - ".github/workflows/norma-stress.yml"

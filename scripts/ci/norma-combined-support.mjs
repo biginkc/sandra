@@ -13,6 +13,8 @@ export function checkCombinedCheckout(root) {
   assert.equal(COMBINED.paired_fixture_refinement.sha256,COMBINED.combined_sources[COMBINED.paired_fixture_refinement.file]);
   assert.equal(Object.keys(COMBINED.paired_assertion_sources).length,11);
   assert.equal(COMBINED.paired_assertion_sources[COMBINED.paired_fixture_refinement.file],undefined);
+  for(const [file,hash] of Object.entries(COMBINED.paired_support_sources))assert.equal(hash,COMBINED.combined_sources[file],'Support pin must equal assembled pin');
+  for(const file of ['vitest.config.ts','vitest.norma-stress.config.ts',...readdirSync(path.join(root,'src/lib/norma/stress')).filter(f=>f.endsWith('.ts')&&!f.endsWith('.integration.test.ts')).map(f=>'src/lib/norma/stress/'+f)]){assert.ok(COMBINED.combined_sources[file],'Missing assertion-support pin: '+file);if(file!=='src/lib/norma/stress/db.ts')assert.equal(COMBINED.paired_support_sources[file],COMBINED.combined_sources[file]);}
   assert.equal(COMBINED.paired_input_commit,'d2edabac632a7196820ff7c4a84fc620177211ee');
   assert.deepEqual(COMBINED.seeds,[101,202,303,404,505]);assert.equal(COMBINED.lifecycles,80);
   assert.deepEqual(Object.values(COMBINED.lanes).map(l=>l.tests),[176,19]);

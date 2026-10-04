@@ -38,9 +38,9 @@
   },
   "combined_sources": {
     ".env.example": "b16a6aa02db6c7571542081a3001c3bffc1b04159ccb80fe2f0c96819bfae5fe",
-    ".github/workflows/norma-stress.yml": "8f76bbc3f0532f8e0cc399bbccab776059b2526db9bea007925eb74b53ded86f",
-    "scripts/ci/norma-combined-support.mjs": "d6e2bf395c39b6b0a01eb22c608520470a81205ef33f68d053a632cfa7dc8695",
-    "scripts/ci/run-norma-combined-contract.mjs": "dd1e80a030f09ababb5bd6bf75459ccc3112e5fc478693cd8f42a81c4321090b",
+    ".github/workflows/norma-stress.yml": "ed2a22e4edeb5aa9c53b89d1670ac65aab958ab2b641910c54ad8821ae8aeaf4",
+    "scripts/ci/norma-combined-support.mjs": "60daca163712aa0f1ba8946b424b459ad67348556675abdbb32bb4fc84a77116",
+    "scripts/ci/run-norma-combined-contract.mjs": "e3984fa9ba0287dc17dbbb40f7199aff5968924b8d868045481829da6241fd35",
     "src/app/api/cron/norma-reconciliation/route.test.ts": "82f61a308a1e46f2d3f2aab010cd79446026b534bb5f8fccb823e659e5d48222",
     "src/app/api/cron/norma-reconciliation/route.ts": "f89fa09faceeb8eef88894344d7bea70d336d4a1ceb4462d298ed81016f7183e",
     "src/lib/norma/bland.ts": "07ee5273cff6ebd0f8975e6d410c95e53ddf155b54a67368e121cbb823e5a3f9",
@@ -74,7 +74,17 @@
     "src/lib/norma/voice-phone.ts": "a4f4647606d954b46197e865b85782ec83331d847ea7e5fa805f76bd6fe08bd8",
     "src/lib/norma/webhook.ts": "001da3c2116501ed37bd38494ab12beef39f3fd7e249404b07322570c5bb6e28",
     "vercel.json": "5ef11607d3e94410ed1e902fcd3134b20c70c75c7cba9d737711fbdcc6bb2490",
-    "src/lib/norma/stress/teeth.integration.test.ts": "2bd5fecfab20651713d06d0cf801f4140c47a45d9494faafb2f5fb1d515cc7ac"
+    "src/lib/norma/stress/teeth.integration.test.ts": "2bd5fecfab20651713d06d0cf801f4140c47a45d9494faafb2f5fb1d515cc7ac",
+    "src/lib/norma/stress/invariants.ts": "dd30cda4cc19d1643f81c77742d2f27fada3b6ac6f7227f4657f0bdf370fdc8c",
+    "src/lib/norma/stress/driver.ts": "937063095d91a680079467151b2d99c8d6cf1daf5499cb436fa39ca68d8d96de",
+    "src/lib/norma/stress/setup.ts": "0742c43f5289acfaaa332e24b73a2f332edabf8976288348534e529cd362972f",
+    "src/lib/norma/stress/fake-bland.ts": "636c17127819eb7c653b4cb925f4f161d74a93d468ae4ad607e92e5ab6e0bf0d",
+    "src/lib/norma/stress/pg-client.ts": "85f0efa647ca32fb7c3dccd1b657bc5a60bd1d2ddf95f9abdbd79ba725efde3a",
+    "src/lib/norma/stress/harness.ts": "016b8b772860b1390a85642ca98b9df46b33f5f1e28d7e987b255606c5e13f83",
+    "src/lib/norma/stress/trace.ts": "c912d4aeff2c7e6d04e7c8c7b15c6f66b9c47b327dcdc6238cac7741d24e66df",
+    "vitest.config.ts": "0bda625c022ba8b65ffe72255375746b2bd716f29495f8417a00ce3bf143d7b2",
+    "vitest.norma-stress.config.ts": "85d4f50637d4311a8c62cf62242f2c6aaae94d873b341256582b00ef5898b7ee",
+    "src/lib/testing/loopback-postgres-url.ts": "d8987ef21e85ddcb54e517876d3bd0ba5d5faf43b8ea91fdb30a0b2a6f80379d"
   },
   "lanes": {
     "paired": {
@@ -1479,5 +1489,17 @@
     "prior_paired_sha256": "2b68a1d7e4c8f3af58aa0a97ccfe245f5c26e54e1c4f2bad0b9d9a87cc48b40a",
     "sha256": "2bd5fecfab20651713d06d0cf801f4140c47a45d9494faafb2f5fb1d515cc7ac",
     "scope": "All original paired cases and matcher expressions retained; additive reviewed stale-sweep clean/mutant witness, no skip or seed reduction."
+  },
+  "paired_support_sources": {
+    "src/lib/norma/stress/invariants.ts": "dd30cda4cc19d1643f81c77742d2f27fada3b6ac6f7227f4657f0bdf370fdc8c",
+    "src/lib/norma/stress/driver.ts": "937063095d91a680079467151b2d99c8d6cf1daf5499cb436fa39ca68d8d96de",
+    "src/lib/norma/stress/setup.ts": "0742c43f5289acfaaa332e24b73a2f332edabf8976288348534e529cd362972f",
+    "src/lib/norma/stress/fake-bland.ts": "636c17127819eb7c653b4cb925f4f161d74a93d468ae4ad607e92e5ab6e0bf0d",
+    "src/lib/norma/stress/pg-client.ts": "85f0efa647ca32fb7c3dccd1b657bc5a60bd1d2ddf95f9abdbd79ba725efde3a",
+    "src/lib/norma/stress/harness.ts": "016b8b772860b1390a85642ca98b9df46b33f5f1e28d7e987b255606c5e13f83",
+    "src/lib/norma/stress/trace.ts": "c912d4aeff2c7e6d04e7c8c7b15c6f66b9c47b327dcdc6238cac7741d24e66df",
+    "vitest.config.ts": "0bda625c022ba8b65ffe72255375746b2bd716f29495f8417a00ce3bf143d7b2",
+    "vitest.norma-stress.config.ts": "85d4f50637d4311a8c62cf62242f2c6aaae94d873b341256582b00ef5898b7ee",
+    "src/lib/testing/loopback-postgres-url.ts": "d8987ef21e85ddcb54e517876d3bd0ba5d5faf43b8ea91fdb30a0b2a6f80379d"
   }
 }
