@@ -70,6 +70,9 @@ jobs:
       - name: Provision disposable stack (schema without the Norma migrations)
         run: node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 --no-baseline-owner --exclude-migrations '*_norma_*'
 
+      - name: Prepare only the owned disposable Norma fixture admin
+        run: node scripts/ci/prepare-norma-fixture.mjs
+
       - name: Validate the schema contract runner
         run: npm run test:norma-schema-contract-unit
 

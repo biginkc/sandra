@@ -61,6 +61,8 @@ export async function main(args=process.argv.slice(2), env=process.env) {
   const admin=new pg.Client({connectionString:source});
   await admin.connect();
   try {
+    receipt.fixturePrivileges=(await admin.query('select current_user as role, rolsuper as superuser, rolcreatedb as createdb from pg_roles where rolname=current_user')).rows[0];
+    assert.equal(receipt.fixturePrivileges.superuser,true,'Dedicated local fixture admin required for strict restore and audit clock');
     receipt.sourceCatalog=await schemaCatalog(admin); checkSchema(receipt.sourceCatalog,'source');
     const dump=execFileSync('pg_dump',['--schema-only','--no-owner',source],{maxBuffer:256*1024*1024});
     writeFileSync(path.join(out,'source.sql'),dump,{mode:0o600});

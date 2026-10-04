@@ -19,3 +19,12 @@ test('post-DDL cannot claim legacy schema',()=>assert.throws(()=>checkSchema({re
 test('legacy cannot claim post-DDL schema',()=>assert.throws(()=>checkSchema({requests:true,attempt:false,legacy_claim:true,attempt_claim:false},'postddl')));
 test('source with Norma relations refused',()=>assert.throws(()=>checkSchema({requests:true,attempt:false,legacy_claim:true,attempt_claim:false},'source')));
 test('cleanup only owns exact run namespace',()=>{const id='0123456789abcdef';assert.ok(ownDatabase(`norma_schema_${id}_upgrade`,id));for (const name of ['norma_stress_other','norma_schema_ffffffffffffffff_upgrade',`norma_schema_${id}_evil";drop table x`]) assert.equal(ownDatabase(name,id),false);});
+
+import {validateFixture} from './prepare-norma-fixture.mjs';
+const fixtureEnv={GITHUB_ACTIONS:'true',E2E_DISPOSABLE_DATABASE:'1',E2E_CI_SUPABASE_DB_URL:'postgresql://postgres:postgres@127.0.0.1:55422/postgres'};
+const config='project_id = "sandra-heavy-0123abcd"\n[db]\nport = 55422\n';
+const labels={'com.supabase.cli.project':'sandra-heavy-0123abcd','com.supabase.cli.workdir':'/temp/sandra-heavy-Ab12cd'};
+test('fixture admin preparation owns exact disposable container',()=>assert.equal(validateFixture(fixtureEnv,config,labels,'/temp/sandra-heavy-Ab12cd','/temp'),'supabase_db_sandra-heavy-0123abcd'));
+for (const [key,value] of [['GITHUB_ACTIONS','false'],['E2E_DISPOSABLE_DATABASE','0'],['E2E_CI_SUPABASE_DB_URL','postgresql://fake.example/db'],['DOCKER_HOST','ssh://remote']]) test(`fixture refuses ${key}`,()=>assert.throws(()=>validateFixture({...fixtureEnv,[key]:value},config,labels,'/temp/sandra-heavy-Ab12cd','/temp')));
+test('fixture refuses unrelated container label',()=>assert.throws(()=>validateFixture(fixtureEnv,config,{...labels,'com.supabase.cli.project':'sandra'},'/temp/sandra-heavy-Ab12cd','/temp')));
+test('fixture refuses outside runner directory',()=>assert.throws(()=>validateFixture(fixtureEnv,config,labels,'/elsewhere/sandra-heavy-Ab12cd','/temp')));
