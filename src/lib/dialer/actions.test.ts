@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHmac } from "node:crypto";
 
-const { createClient, pausePropertyEnrollments, resumeByProperty, setOutreachDispo, bookAppointment, getMemberTimezone, workspaceGate } = vi.hoisted(() => ({
+const { createClient, pausePropertyEnrollments, resumeByProperty, setOutreachDispo, bookAppointment, getMemberTimezone, workspaceGate, schemaReady, createNextStep } = vi.hoisted(() => ({
+  schemaReady: vi.fn(async () => false),
+  createNextStep: vi.fn(),
   createClient: vi.fn(),
   pausePropertyEnrollments: vi.fn(),
   resumeByProperty: vi.fn(),
@@ -73,6 +75,8 @@ vi.mock("@/components/appointments/book-appointment-action", () => ({
   bookAppointment,
   getMemberTimezone,
 }));
+vi.mock("@/lib/my-leads/schema-ready", () => ({ schemaReady }));
+vi.mock("@/lib/next-steps", () => ({ createNextStep }));
 vi.mock("@/lib/leads/outreach-dispo", () => ({ saveOutreachDispo: setOutreachDispo }));
 // The dialer must reach the shared saver directly: acquisition reps dial from
 // My Leads and are intentionally denied the Messages workspace gate.
@@ -101,6 +105,9 @@ describe("prepareManualCall", () => {
     setOutreachDispo.mockReset();
     bookAppointment.mockReset();
     getMemberTimezone.mockReset();
+    createNextStep.mockReset();
+    schemaReady.mockReset();
+    schemaReady.mockResolvedValue(false);
   });
 
   it("refuses the exact phone number of a DNC lead before creating a manual call", async () => {
@@ -434,6 +441,40 @@ describe("prepareManualCall", () => {
       provider: "sandra_softphone",
     });
     expect(bookAppointment).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: "11111111-1111-4111-8111-111111111111" }));
+  });
+
+  it("books the wrap-up callback as a 15-minute phone next step with booking effects once the schema is ready", async () => {
+    const order: string[] = [];
+    setOutreachDispo.mockImplementation(async () => { order.push("disposition"); return { ok: true }; });
+    getMemberTimezone.mockResolvedValue({ ok: true, data: "America/Chicago" });
+    schemaReady.mockResolvedValue(true);
+    createNextStep.mockImplementation(async () => { order.push("booking"); return { ok: true, data: { taskId: "task-9", alreadyQualified: false, calendarChainId: "chain-9", duplicate: false } }; });
+    resumeByProperty.mockImplementation(async () => { order.push("resume"); return { resumed: 1 }; });
+    createClient.mockResolvedValue(makeActionClient(order, undefined, undefined, undefined, undefined, []));
+    const input = {
+      target: {
+        propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123",
+        name: "Lead One", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z",
+      },
+      startedAt: "2026-08-21T15:00:00.000Z", endedAt: "2026-08-21T15:01:00.000Z", durationSeconds: 60,
+      outcome: "connected_human" as const, disposition: "nurture" as const, notes: " Call back tomorrow ",
+      wrapToken: "11111111-1111-4111-8111-111111111111",
+      callback: { date: "2026-08-22", time: "09:00", timeZone: "America/Chicago" },
+    };
+    await expect(completeSoftphoneCall(input)).resolves.toMatchObject({ ok: true, data: { callbackTaskId: "task-9" } });
+    expect(bookAppointment).not.toHaveBeenCalled();
+    expect(createNextStep).toHaveBeenCalledWith({
+      kind: "appointment", mode: "phone", assigneeId: expect.any(String), title: "Call back 1 Main St",
+      dueAt: "2026-08-22T14:00:00.000Z", propertyId: "property-1", contactId: "contact-1",
+      note: "Call back tomorrow", idempotencyKey: "11111111-1111-4111-8111-111111111111",
+      origin: "app", applyBookingEffects: true,
+    });
+    expect(order).toEqual(["disposition", "activity", "booking", "resume"]);
+    // An impossible wall time stops before any booking.
+    createNextStep.mockClear();
+    await expect(completeSoftphoneCall({ ...input, wrapToken: "22222222-2222-4222-8222-222222222222", callback: { date: "2026-03-08", time: "02:30", timeZone: "America/Chicago" } }))
+      .resolves.toMatchObject({ ok: false, error: "Choose a valid date and time." });
+    expect(createNextStep).not.toHaveBeenCalled();
   });
 
   it("saves the disposition for an Acquisitions rep without touching the Messages workspace gate", async () => {
