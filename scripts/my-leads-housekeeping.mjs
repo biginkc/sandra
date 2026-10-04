@@ -12,7 +12,8 @@
 //   relabel         [--expected-assignee <uuid>] (apply also needs --cutoff <timestamp printed by the preview>)
 //   retire-preflight (read-only count of open legacy follow_up/callback rows)
 //   rollback        --run <uuid>
-// Later phases add relabel, offer-backfill, link-backfill, phone-backfill, ack-legacy-prompts to
+//   offer-backfill  [--owner <uuid>] (creates each pending offer's follow-up; overdue ones land at the next 09:00 Central)
+// Later phases add link-backfill, phone-backfill, ack-legacy-prompts to
 // COMMANDS below as their SQL functions ship; they are refused until then.
 //
 // Runbook: rolling back a reassign to a deactivated Maria/Mel fails safe (the active-assignee guard
@@ -60,11 +61,18 @@ export const COMMANDS = {
     needsCutoffToApply: true,
     resolveIdentities: true,
   },
+  // Gives every pending offer its follow-up appointment (P1a-writers 1a.6). The actor is the owner.
+  "offer-backfill": {
+    needs: ["org"],
+    rpc: "fn_my_leads_backfill_offer_follow_ups",
+    args: (o) => ({ p_org_id: o.org, p_actor: o.owner }),
+    resolveIdentities: true,
+  },
   // Read-only gate for the retire migration: never applies anything.
   "retire-preflight": { needs: ["org"], rpc: "fn_my_leads_next_step_retire_preflight", args: (o) => ({ p_org_id: o.org }), readOnly: true },
   rollback: { needs: ["org", "run"], rollback: true },
 };
-const LATER = ["offer-backfill", "link-backfill", "phone-backfill", "ack-legacy-prompts"];
+const LATER = ["link-backfill", "phone-backfill", "ack-legacy-prompts"];
 
 export function parseArgs(argv) {
   const [command, ...rest] = argv;
