@@ -18,7 +18,9 @@ Intended for review by Codex Astra via PR before implementation.
   then changes stage in a third dialog.
 - 102 of 106 queue leads sit in Contacted with no scheduled next step. 137 `acquisition_attempts`
   rows have `outcome null` since Sept 12.
-- The page has no ordering inside sections, so he reads conversations to decide who to call.
+- Sections already order rows (warning rank, assignment order, property id;
+  `20260912110000_acquisition_read_model.sql:133`), but that ordering does not express who to call
+  next, so he reads conversations to decide.
 - No comps or valuation data source exists. The CLOSR calculator is manual and on a separate page.
   Send for signature has ~30 hand-typed fields including price.
 - Appointments: 9 write paths and 8 read paths, all on `public.tasks`, with `type` in
@@ -28,8 +30,10 @@ Intended for review by Codex Astra via PR before implementation.
   invisible in My Leads.
 - Dialpad: the embedded CTI panel was tried Sept 30–Oct 1 and abandoned (`dialpad_org_connections.status='disabled'`).
   The user-scoped Dialpad call webhook subscription is still configured. Its hangup payload carries
-  `public_call_review_share_link`, `admin_recording_urls`, `external_number`, `voicemail_link`,
-  `transcription_text`, `custom_data`. Sandra quarantines events without a Sandra token
+  `public_call_review_share_link`, `admin_recording_urls`, `external_number`, `custom_data`, plus
+  `voicemail_link` and `transcription_text`, which are voicemail-only fields (null on all five stored
+  calls). The call transcript and AI summary are **not** on the payload; they come from
+  `GET /api/v2/transcripts/{call_id}` and AI Recap after the call. Sandra quarantines events without a Sandra token
   (`20260929034021_dialpad_cti_foundation.sql` ~838–870, reason `no_custom_data`).
 - Jitter AI summaries have failed since Sept 7 (`call_transcripts.summary_error_code='summary_billing'`).
 - Telnyx direct-calling pilot exists (outbound only, 9 calls). Rejected for outbound: showing the
@@ -42,16 +46,16 @@ Intended for review by Codex Astra via PR before implementation.
 
 | # | Decision | Reasoning |
 |---|---|---|
-| D1 | **Vocabulary.** Two next-step kinds: **Appointment** (phone by default; optional "in person" adds end time + address and suppresses auto-dial) and **Task** (non-seller work). "Next step" is the umbrella word. Relabel `callback`/`follow_up` → appointment(phone), `custom` → task, **open future rows only**; history untouched. Offer follow-up becomes a phone appointment titled "Offer follow-up"; `acquisition_offers.follow_up_at` is derived from it. One write function, one read definition, every screen. No snooze. | Four labels for one intent was a bug. Callback vs appointment collapse because the only behavioral difference is "does Sandra dial" and "is there a duration", which the in-person flag carries. Relabel only open rows because `acquisition_appointment_attribution` fires on insert of type appointment and converting history would change the "appointments kept" KPI. |
+| D1 | **Vocabulary.** Two next-step kinds: **Appointment** (phone by default; optional "in person" adds end time + address and suppresses auto-dial) and **Task** (non-seller work). "Next step" is the umbrella word. Relabel `callback`/`follow_up` → appointment(phone), `custom` → task, **open future rows only**; history untouched. Offer follow-up becomes a phone appointment titled "Offer follow-up"; `acquisition_offers.follow_up_at` is derived from it. Storage stays `type in ('appointment','custom')`: appointments keep `end_at` (phone = due + 15 min) and a calendar chain, tasks keep `custom`; `follow_up` and `callback` are retired. The relabel runs through the appointment lifecycle (calendar chain created, lifecycle guard satisfied), never a bare `update`. `mode` defaults to `phone` for every existing row; in-person is set by hand on the few open appointments, not inferred from `end_at` (every appointment row has one). One write function, one read definition, every screen. No snooze. | Four labels for one intent was a bug. Callback vs appointment collapse because the only behavioral difference is "does Sandra dial" and "is there a duration", which the in-person flag carries. Relabel only open rows because `acquisition_appointment_attribution` fires on insert of type appointment and converting history would change the "appointments kept" KPI. |
 | D2 | **Layout.** A **Call next** strip of 10 ranked leads above the five existing sections (sections, KPI tiles and timers unchanged). Each row shows the reason it's there. Row actions: **Call today** (pin to top until called or midnight Central), **Not today** (hide from strip until midnight), **Dead / Nurture** (existing handoff with required reason). Strip is a computed view; it never moves a lead between sections. | Sections answer "where is the deal", the strip answers "what now". Both audiences (rep today, owner inspecting a hire later) served. Dead/Nurture so the strip can drain the stale pile. |
 | D3 | **Ranking.** Tiers: (1) appointment due or overdue; (2) inbound text or inbound call unanswered, newest first; (3) Needs offer with no offer logged, Offer Sent past follow-up; (4) hot/warm motivation with no touch in 3 days; (5) everyone else, longest since last touch. Touch = latest of attempt, outbound text, note, call. Inbound text/call counts as a touch *by the seller* and feeds tier 2. Tie-break: assignment age then property id. "Today" and "midnight" are America/Chicago. Leads with no callable phone or all phones DNC are excluded from the strip and flagged. | Matches how Jarrad ranks on a good day: promise made, they reached out, money pending, warm going cold, then fairness. |
-| D4 | **Dialing.** Dialpad for all outbound. Clicking **Call** on a strip row or call screen prepares a Sandra intent (existing `dialpad_call_intents` flow) and calls Dialpad `initiate_call` with the token; Jarrad's Dialpad desktop app dials the seller through his headset. The embedded panel and browser audio capture are **not** used. Scheduled phone appointments: at due time Sandra shows a prominent alert and pins the lead to the top of the strip as "Callback due now"; one click dials. No unattended auto-dial. Calls Jarrad dials directly in Dialpad (desktop or mobile) are matched to leads by exact 10-digit `external_number` against contact phones on properties assigned to him; one match → logged; several → "assign to lead"; none → quarantined `no_lead_match`. Dialpad connection re-enabled **after** the matcher exists. Telnyx stays a pilot. | Dialpad keeps full caller-ID trust on Jarrad's number and he is always at the laptop with a headset. Dialpad's API cannot ring-then-confirm, so scheduled callbacks are alert-plus-click. Number matching covers the mobile app and habit calls; mobile's only limitation is the post-call prompt waits until Sandra is next opened. |
-| D5 | **Recording.** The attempt row is created at dial time. On the hangup webhook, Sandra writes `public_call_review_share_link` to `acquisition_attempts.recording_url` and stores `admin_recording_urls[0]`, `voicemail_link`, and `transcription_text` on the call activity. `RECORDING_REQUIRED` is relaxed for calls Sandra placed or matched (link arrives seconds later and is backfilled; a sweep flags attempts still missing a link after 10 min). Dialpad's own transcript and summary are the source of the AI summary and extracted facts. Deepgram/Claude transcription is deferred until Dialpad's output proves insufficient. | The link Jarrad pastes by hand is already in the payload. Dialpad already transcribes and summarizes; a third summarizer while Jitter's is broken repeats a pattern. |
-| D6 | **Comps.** ATTOM API: as-is AVM with confidence range, ARV estimate, sold comps, owner of record, legal description; CLOSR anchors computed. Pulled automatically when a lead enters the top ten and on a one-click **Comp this lead** anywhere. Never blocks lead visibility; shows "comps pending". Confidence shown; "verify first" flag when low. Validate ATTOM against Assigns.com on 20 leads during the 30-day trial before paying. RentCast is the fallback. | Best data wins (Jarrad). Lazy pull keeps a paid vendor off the assignment path. Confidence rule: give a range when tight, verify when not. |
+| D4 | **Dialing.** Dialpad for all outbound. Clicking **Call** on a strip row or call screen prepares a Sandra intent (existing `dialpad_call_intents` flow) and calls Dialpad `initiate_call` with the token; Jarrad's Dialpad desktop app dials the seller through his headset. The embedded panel and browser audio capture are **not** used. Scheduled phone appointments: at due time Sandra shows a prominent alert and pins the lead to the top of the strip as "Callback due now"; one click dials. No unattended auto-dial. Calls Jarrad dials directly in Dialpad (desktop or mobile) are matched to leads by exact 10-digit `external_number` against contact phones on properties assigned to him; one match → logged; several → "assign to lead"; none → quarantined `no_lead_match`. Dialpad connection re-enabled **after** the matcher exists. Telnyx stays a pilot. | Dialpad keeps full caller-ID trust on Jarrad's number and he is always at the laptop with a headset. `initiate_call` cannot ring-then-confirm (`POST /api/v2/call` may; undocumented, tested in Phase 0), so scheduled callbacks are alert-plus-click regardless; the endpoint choice is provisional until the spike. Number matching covers the mobile app and habit calls; mobile's only limitation is the post-call prompt waits until Sandra is next opened. |
+| D5 | **Recording.** The attempt row is created by the projection on the first call event, as today; dispatch records only the intent, and an intent with no event after 2 min is marked failed and counts as no touch. On the hangup webhook, Sandra writes `public_call_review_share_link` to `acquisition_attempts.recording_url` and stores `admin_recording_urls[0]` on the call activity; `voicemail_link`/`transcription_text` are stored only when present (voicemail). Three later artifacts are fetched separately, each with its own scope and latency: the call transcript (`GET /api/v2/transcripts/{call_id}` after the `call_transcription` state), the AI summary (AI Recap, scope `ai_recap`), and the recording file (download auth proven in Phase 0). `RECORDING_REQUIRED` stays as is: it lives in the manual log wrapper `fn_log_acquisition_attempt` (`20260917193000_recording_accountability.sql:174`), and the projection path never calls it, so Sandra-placed and matched calls need no exemption. A sweep flags attempts still missing a link after 10 min. Deepgram/Claude transcription is deferred until Dialpad's output proves insufficient. | The link Jarrad pastes by hand is already in the payload. Dialpad already transcribes and summarizes; a third summarizer while Jitter's is broken repeats a pattern. |
+| D6 | **Comps.** ATTOM API: as-is AVM with confidence range, sold comps, owner of record, legal description; CLOSR anchors computed. ARV is not an ATTOM product: Phase 0 decides whether Sandra computes it from renovated sold comps or leaves it to Jarrad, and `arv_estimate` is nullable, so Phase 3 ships without it if the method fails validation. The trial has written acceptance thresholds (coverage, AVM vs Jarrad's number, legal-description completeness) and a spend ceiling, both set by Jarrad before Phase 0. Pulled automatically when a lead enters the top ten and on a one-click **Comp this lead** anywhere. Never blocks lead visibility; shows "comps pending". Confidence shown; "verify first" flag when low. Validate ATTOM against Assigns.com on 20 leads during the 30-day trial before paying. RentCast is the fallback. | Best data wins (Jarrad). Lazy pull keeps a paid vendor off the assignment path. Confidence rule: give a range when tight, verify when not. |
 | D7 | **Call screen.** One screen in Sandra: Closer Lab script (already synced by `coach-scripts-sync`, token slots) filled from lead data, static scroll; numbers with confidence and CLOSR anchors; recent notes and texts; the send-contract card; the post-call prompt. | Scripts, numbers, history and the close in one place with no tab switch. |
-| D8 | **Send-contract card.** Editable: price, closing date. Pickers with defaults: title company (default per market), buyer entity. Default: earnest money $500. Read-only review line before Send: seller name(s), legal description, price, closing date. Everything else prefilled from lead, public record, or org defaults. One **Send** → Dropbox Sign. The offer is logged and the stage moves to Offer Sent **only after Dropbox Sign confirms the request**. Legal description and vesting are never prefilled from a low-confidence source. | One-call close. The review line is the eyes-on step for the fields that become title problems. Logging after confirmation prevents ghost offers. Overrides PRD §"Log offer records an offer already made". |
-| D9 | **Post-call prompt.** Auto-opens on hangup (desktop) or on next open (mobile). Outcome pre-guessed from the call (reached / no answer / voicemail / wrong number). One note field. Quick date picks (Tomorrow, 3 days, Next week, Pick) create a phone appointment. Ready to make an offer and Send contract reachable from the same prompt. Nothing blocks save; skipping leaves "outcome not set" and the touch still counts. Seller gets a morning-of reminder text (consent on record; quiet hours and STOP via existing messaging consent code); Jarrad gets the in-app alert at time. | One place decides section and next appearance. Voicemail becomes a real outcome (needs check-constraint widening) so it stops forcing the no-answer SMS flow. |
-| D10 | **Scope.** Acquisitions group only (currently Jarrad). Maria's 2 and Mel's 13 queue leads move to Jarrad before anything schedules. KPIs/timers unchanged. 137 stale pending attempts closed out. Jitter summary billing fixed separately by Jarrad. | Attribution is fixed at insert time, so reassignment comes first. |
+| D8 | **Send-contract card.** Editable: price, closing date. Pickers with defaults: title company (default per market), buyer entity. Default: earnest money $500. Read-only review line before Send: seller name(s), legal description, price, closing date. Everything else prefilled from lead, public record, or org defaults. One **Send** → Dropbox Sign through the existing durable eSign lifecycle (`lead-esign-action-core.ts`: `sending` → `sent` / `send_unknown` / `failed`). The offer is logged and the stage moves to Offer Sent **only after the request reaches `sent`**, by an idempotent projection keyed on the eSign request id; `send_unknown` shows "send unconfirmed" and is reconciled by the existing path, never re-sent; definitive failure logs nothing. `fn_log_acquisition_offer` can still reject (`STALE_STATE`, `STALE_ASSIGNMENT`, `PENDING_OFFER_EXISTS`), so the card pre-checks those before Send and surfaces them after. Legal description and vesting are never prefilled from a low-confidence source. | One-call close. The review line is the eyes-on step for the fields that become title problems. Logging after confirmation prevents ghost offers. Overrides PRD §"Log offer records an offer already made". |
+| D9 | **Post-call prompt.** Auto-opens on hangup (desktop) or on next open (mobile). Outcome pre-guessed from the call (reached / no answer / voicemail / wrong number). One note field. Quick date picks (Tomorrow, 3 days, Next week, Pick) create a phone appointment. Ready to make an offer and Send contract reachable from the same prompt. Nothing blocks save; skipping leaves "outcome not set" and the touch still counts. Seller gets a morning-of reminder text from a **new** seller-reminder job: recipient is the appointment's contact phone, scheduled morning-of in America/Chicago, consent and STOP re-checked at dispatch (`src/lib/messaging/consent.ts`), quiet hours via `src/lib/messaging/quiet-hours.ts`, one send per appointment, cancelled on reschedule or cancel. The existing `appointment-reminder-sweep` (texts the rep's reminder phone within 30 min of due) is unchanged. Jarrad gets the in-app alert at time. | One place decides section and next appearance. Voicemail becomes a real outcome (needs check-constraint widening) so it stops forcing the no-answer SMS flow. |
+| D10 | **Scope.** Acquisitions group only (currently Jarrad). Maria's 2 and Mel's 13 queue leads **and their open tasks** move to Jarrad before anything schedules (attribution captures the task assignee, `20260912111000_acquisition_kpis.sql:18`, so moving leads alone is not enough). KPIs/timers unchanged. 137 stale pending attempts closed out. Jitter summary billing fixed separately by Jarrad. | Attribution is fixed at insert time, so reassignment comes first. |
 
 ### Review findings and resolution
 
@@ -74,14 +78,46 @@ Intended for review by Codex Astra via PR before implementation.
 | Enable connection before matcher floods quarantine | Fable | Connection enabled last in Phase 2 |
 | "Discipline not tooling" | Fable | Disagreed on cause (logging cost two minutes per call); agreed on order: pipeline first, telephony second |
 | Snoozed status exists in schema | Opus | Relabel treats `snoozed` as open; UI never writes it |
-| TCPA for reminder texts | Opus | Consent on record (Jarrad); quiet hours + STOP from existing `src/lib/messaging/consent.ts` path |
+| TCPA for reminder texts | Opus | Consent on record (Jarrad); STOP/consent from `src/lib/messaging/consent.ts`, quiet hours from `src/lib/messaging/quiet-hours.ts` (new seller-reminder job, D9) |
 | Legal review of template defaults | Opus | Dropped by Jarrad |
 | PRD conflicts (§3 no automatic appointments/dialer; §5 DialPad link optional + manual v1; offer logging records an offer already made; §13 Maria) | Opus | Consciously overridden; PRD v0.3 written in Phase 1 |
 
+### Codex Astra review (2026-10-04, head 83cfcafe): findings and resolution
+
+Verdict at 83cfcafe: `APPROVE_PLAN: NO`, `BLOCKING: 4`. Every repo-backed claim was re-verified
+against the code before resolution. All sixteen are folded into the decisions and plan above.
+
+| # | Finding | Resolution |
+|---|---|---|
+| B1 | Relabel not executable: appointments need `end_at` + calendar chain + lifecycle guard; no `task` storage type; contradicts "computed view first" | D1 + Phase 1a: storage stays `appointment`/`custom`; relabel through the lifecycle (15-min `end_at`, chain); additive view and shared SQL `fn_create_next_step` first; reject trigger last |
+| B2 | D4/D5 contradict the pre-reads (`POST /call`; `transcription_text` is voicemail only) | D4 keeps alert-plus-click, endpoint provisional; D5 separates recording link, voicemail transcript, call transcript, AI Recap; Phase 0 proves each |
+| B3 | "Failure → nothing logged" loses contracts that were sent; existing lifecycle has `sending`/`send_unknown`; offer RPC can reject | D8 + Phase 3: existing eSign lifecycle kept, idempotent offer projection on `sent`, `send_unknown` reconciled never re-sent, RPC rejections pre-checked; tests listed |
+| B4 | ARV is not validated by the spike; no thresholds or spend ceiling | D6: ARV conditional and nullable; thresholds, ceiling and ARV method moved to "What needs Jarrad"; Phase 0 item 2 measures them |
+| N1 | `end_at` does not identify in-person (every appointment has one) | Phase 1a: all existing rows `phone`; Jarrad flags in-person by hand |
+| N2 | Attribution captures the task assignee; 1e ran after 1a | 1e runs first and moves tasks too (D10) |
+| N3 | `fn_norma_mark_needs_review` (and `fn_reschedule_appointment`) missing from writer inventory; "schedule action"/"offer dialog" are new writers | Phase 1a inventory corrected |
+| N4 | Existing reminder sweep texts the rep within 30 min; quiet hours are in `quiet-hours.ts`, not `consent.ts` | D9: new seller-reminder job with its own contract; existing sweep untouched; file refs fixed |
+| N5 | Wrong constraint cites; `unknown` invalid on attempts; `RECORDING_REQUIRED` is in the manual wrapper only | Cites fixed (`…offer_facts.sql:14`, `…non_retryable.sql:416/:1142`); stale close-out is Jarrad's choice; no `RECORDING_REQUIRED` exemption needed (D5) |
+| N6 | `listRecentDialpadCalls` is 5 intents / 1 h | Phase 2: durable unacknowledged-call query with persisted acknowledgement |
+| N7 | 14 `dialpad-cti:` predicates, not two | Phase 2: one shared predicate; frozen match per (org, call id); duplicate/out-of-order/reassignment cases |
+| N8 | Dispatch-time attempt changes first-event semantics | D5/Phase 2: attempt stays on first event; intent timeout; tests |
+| N9 | Offer follow-up ownership circular; N undefined; must be after send | Phase 1a/3: created in the offer transaction, propagation defined, N and fallback to Jarrad |
+| N10 | Template audit helpers write; use `getTemplate` | Phase 0 item 3 rewritten |
+| N11 | `is_training` leads produce no attempt | Verification uses an isolated synthetic lead; training isolation asserted separately |
+| N12 | "No ordering" was wrong | Problem statement corrected |
+
 ### What needs Jarrad
 
-- Confirm or create a Dialpad API key with scope to call `initiate_call` and download admin recordings (1Password).
-- ATTOM 30-day trial account and, after validation, the subscription.
+- Say which of the two stored Dialpad keys is live, and confirm it can initiate calls, export recordings
+  (`recordings_export`) and read AI Recap (`ai_recap`); each is a separate permission.
+- ATTOM 30-day trial account, a spend ceiling for the trial, the acceptance thresholds (coverage %,
+  AVM-vs-your-number tolerance, legal-description completeness), and the ARV method (Sandra computes
+  from renovated comps, or you set it); the subscription decision comes after validation.
+- Offer follow-up cadence: N days before closing (must be after the send time); fallback when closing is
+  within N days.
+- How the 137 stale pending attempts close: a new outcome value (e.g. `not_logged`) or deletion of those
+  with no call activity (destructive; separate approval).
+- Flag which of the open appointments are in person (the rest default to phone).
 - Title company list with per-market default; buyer entity list with default.
 - Fix Jitter summary billing (separate).
 - Reassign Maria's and Mel's queue leads to himself (or approve the migration doing it).
@@ -97,47 +133,68 @@ decision record PR (this document under `docs/my-leads/DECISIONS-2026-10.md`) fi
 
 Goal: retire the external unknowns before building on them.
 
-1. **Dialpad test call.** Script under `scripts/` using the stored API key: `initiate_call` to a
-   training lead with `custom_data`; capture the full webhook payloads for calling/connected/hangup;
-   confirm `custom_data` round-trips for API-initiated calls; confirm events arrive for a call dialed
-   natively on desktop and on mobile; attempt `GET admin_recording_urls[0]` with the API key and record
-   status/expiry; measure webhook-to-hangup latency. Requires temporarily setting the connection
-   `active` (revert after).
+1. **Dialpad test call.** Script under `scripts/` using the stored API key. First
+   `GET /api/v2/subscriptions/call` to confirm the user-scoped subscription survived the 401 period.
+   Then both `initiate_call` and `POST /api/v2/call` to a training lead with `custom_data` (ring order,
+   `call_id`, mobile); capture the full webhook payloads for calling/connected/hangup; confirm
+   `custom_data` round-trips; confirm events arrive for a call dialed natively on desktop and on mobile;
+   attempt `GET admin_recording_urls[0]` with the API key and record status/expiry; fetch
+   `GET /api/v2/transcripts/{call_id}` and AI Recap and record when each became available and which
+   permission it needed; measure webhook-to-hangup latency. Requires temporarily setting the connection
+   `active` (revert after). Events quarantined during the spike are the only replay candidates.
 2. **ATTOM trial.** Script pulls property detail, AVM, sales comps, owner, legal description for 20 of
-   Jarrad's real leads; CSV for side-by-side with Assigns; record per-call cost, latency, KC-metro and
-   Kansas-side coverage, legal-description completeness.
-3. **Dropbox Sign template audit.** Dump the template's custom fields via existing
-   `src/lib/esign/website-template-registration.ts` helpers; confirm whether an assignment clause
-   exists; list every field and its prefill source for D8.
+   Jarrad's real leads; CSV for side-by-side of ATTOM AVM vs Zestimate vs Jarrad's number; record
+   per-call cost, latency, KC-metro and Kansas-side coverage, legal-description completeness, and
+   whether an ARV can be derived from renovated sold comps. Judged against Jarrad's thresholds and
+   within his spend ceiling.
+3. **Dropbox Sign template audit.** Read-only: call `createDropboxSignProvider(...).getTemplate`
+   (`src/lib/esign/dropbox-sign.ts:191`) with the test-mode key (the exported helpers in
+   `website-template-registration.ts` write template state); inspect the template document itself for
+   an assignment clause; list every field and its prefill source for D8; record which inputs (signer
+   emails, vesting, legal description) have no source and define the editable fallback.
 
 Exit: a short findings note appended to the decision doc. Go/no-go on D4 details and D6 provider.
 
 ### Phase 1: Next-step vocabulary, ranked strip, post-call prompt, link capture
 
 **1a. Appointment/Task consolidation (SQL + lib).**
-- Migration: add `tasks.next_step_kind` generated/computed as `case type when 'appointment' then
+- Order: 1e housekeeping (lead **and task** reassignment) lands first, so attribution of relabeled rows
+  goes to Jarrad.
+- Migration, additive first: add `tasks.next_step_kind` generated as `case type when 'appointment' then
   'appointment' when 'callback' then 'appointment' when 'follow_up' then 'appointment' else 'task'
-  end`, plus `tasks.mode text check in ('phone','in_person') default 'phone'`; `in_person` set for
-  existing appointment rows with `end_at`. Update **open, future** `callback`/`follow_up` rows to
-  `type='appointment', mode='phone'` and backfill `acquisition_appointment_attribution` with a new
-  `source='relabel_2026_10'` (widen its check). Leave completed/cancelled rows untouched.
-- Add `'voicemail'` to `acquisition_attempts` outcome checks and the finalize/log RPC `in (...)`
-  lists (`20260929120000_dialpad_cti_call_projection.sql:464,91`); Contact rate treats it as not-reached.
+  end`, plus `tasks.mode text check in ('phone','in_person') default 'phone'`. Every existing row is
+  `phone` (every appointment row has `end_at`, `tasks_end_at_check`, so it is no evidence of in-person);
+  Jarrad flags in-person rows by hand. Then convert **open, future** `callback`/`follow_up` rows to
+  `type='appointment', mode='phone'` through the appointment lifecycle: `end_at = due_at + 15 min`,
+  calendar chain created, lifecycle guard (`appointment identity ... immutable outside the lifecycle`,
+  `20260814170000_appointment_booking_rpcs.sql`) satisfied via the migration-only setting; backfill
+  `acquisition_appointment_attribution` with `source='relabel_2026_10'` (widen its check, currently
+  `source='booking_insert'` only). Leave completed/cancelled rows untouched. Tasks keep `type='custom'`.
+- Add `'voicemail'` to the `acquisition_attempts.outcome` column check (currently
+  `no_answer|reached|wrong_number`, `20260912090200_acquisition_attempt_offer_facts.sql:14`) and to the
+  log/finalize RPC lists (`20261003130000_my_leads_conflicts_non_retryable.sql:416` and `:1142`);
+  Contact rate treats it as not-reached. `'unknown'` exists only on `call_activities`, not attempts.
 - One write path: `src/lib/next-steps/index.ts` → `createNextStep({ propertyId, kind:'appointment'|'task',
   mode, dueAt, endAt?, title, assigneeId })` wrapping `fn_book_appointment` for appointments and
-  `createTask` for tasks, always dispatching notifications/lead events/calendar. Migrate writers:
-  lead task widget (`leads/actions.ts` createLeadTaskAction), board `set_lead_next_action`, dialer
-  wrap-up (`src/lib/dialer/actions.ts:602`), Jitter writeback SQL, Norma `fn_norma_complete_call`,
-  My Leads schedule action, offer dialog (creates "Offer follow-up" appointment; `follow_up_at` kept
-  in sync by trigger). Then a DB trigger rejects inserts of `follow_up`/`custom`.
+  `createTask` for tasks, always dispatching notifications/lead events/calendar. SQL producers call a shared
+  database function (`fn_create_next_step`), not the TypeScript wrapper. Migrate every writer, one at a
+  time: lead task widget (`leads/actions.ts` createLeadTaskAction), board `set_lead_next_action`
+  (`20260815233000_leads_urgency_paging.sql:449`), dialer wrap-up (`src/lib/dialer/actions.ts:602`),
+  `fn_reschedule_appointment`, Jitter writeback SQL (`jitter_writeback_call_activity` and
+  `_softphone`), Norma `fn_norma_complete_call` **and** `fn_norma_mark_needs_review`
+  (`20261002120500_norma_lock_order.sql:587`, inserts `custom`). New writers: My Leads schedule action
+  and the offer dialog ("Offer follow-up" appointment created in the same transaction as
+  `fn_log_acquisition_offer`, which sets `follow_up_at` from it; reschedule/complete/cancel propagate;
+  `follow_up_at` must be after `sent_at`, `20261003130000_my_leads_conflicts_non_retryable.sql:682`).
+  Only after every writer is migrated does a DB trigger reject inserts of `follow_up`/`callback`.
 - One read definition: `my_leads_queue_rows`/`fn_get_acquisition_queue_page`
   (`20261003120000_my_leads_queue_row_lookup.sql:44-59`), detail read model
   (`20260917110000_rep_sms_obligation_read_models.sql:130`), `fn_calendar_month_appointments`,
   lead page, dashboard, board: all read `next_step_kind='appointment'` for next step, any assignee
   on My Leads/lead page, viewer on dashboard (unchanged). Calendar shows phone and in-person,
   phone as 15-min blocks. Google Calendar sync only for `in_person`.
-- `appointment-reminder-sweep` sends seller morning-of texts only for appointments created through
-  the new path with a contact that has SMS consent, using `src/lib/messaging/consent.ts`.
+- New seller-reminder job per D9 (recipient, schedule, consent/STOP recheck, quiet hours, dedupe,
+  cancellation), tested for both recipients and retry; `appointment-reminder-sweep` untouched.
 - Snooze UI removed; `snoozed_until` ignored by new reads.
 
 **1b. Ranking + Call next strip (SQL + UI).**
@@ -168,14 +225,17 @@ Exit: a short findings note appended to the decision doc. Go/no-go on D4 details
 **1d. Hangup link capture (SQL, small).**
 - In the existing projection (`20260929120000_dialpad_cti_call_projection.sql` hangup branch): set
   `acquisition_attempts.recording_url = coalesce(recording_url, payload->>'public_call_review_share_link')`,
-  store `admin_recording_urls[0]`, `voicemail_link`, `transcription_text` on new nullable
-  `call_activities.provider_recording_url`, `provider_voicemail_url`, `provider_transcript`.
-  `RECORDING_REQUIRED` skipped when `provider_attempt_key is not null`. Backfill 5 existing rows.
+  store `admin_recording_urls[0]` on new nullable `call_activities.provider_recording_url`, and
+  `voicemail_link`/`transcription_text` (voicemail only) on `provider_voicemail_url`,
+  `provider_voicemail_transcript`. The call transcript and AI Recap land later via a fetch job into
+  `provider_transcript`/`provider_summary` (Phase 3). No change to `RECORDING_REQUIRED` (D5). Backfill
+  5 existing rows.
   (Delivers value only once Phase 2 re-enables the connection; shipped here so Phase 2 is config.)
 
-**1e. Housekeeping.** Reassign Maria's/Mel's queue leads to Jarrad (migration, idempotent,
-preview first). Close 137 pending `sandra` attempts older than 7 days with `outcome='unknown'` or
-delete if no call activity (decide in review). PRD v0.3 with the overrides table.
+**1e. Housekeeping (runs before 1a).** Reassign Maria's/Mel's queue leads **and their open tasks** to
+Jarrad (migration, idempotent, preview first). Close 137 pending `sandra` attempts older than 7 days
+the way Jarrad chooses (`'unknown'` is not a valid attempt outcome today; deletion is a separately
+approved destructive step). PRD v0.3 with the overrides table.
 
 Tests: migration integration tests beside each migration (pattern `*.integration.test.ts`); vitest
 for strip, prompt, ranking reasons; existing My Leads suites green; snapshot of KPIs before/after
@@ -186,19 +246,26 @@ relabel compared in the test.
 - **Click-to-dial via API.** `src/lib/dialpad-cti/api-dial.ts`: `initiate_call` with the intent's
   `custom_data`, caller ID from grants, server-side DNC check per number, rate-limit guard
   (queue + 5/min). Reuse `startDialpadCall` intent lifecycle; replace the iframe dispatch; delete the
-  panel's capture path. Attempt row created at dispatch (already done by projection on first event;
-  make it at dispatch instead).
+  panel's capture path. Attempt row stays created by the projection on the first event (D5); dispatch
+  writes the intent only, and a 2-min no-event timeout marks the intent failed with no touch. Tests:
+  webhook-before-response, provider rejection, timeout, exactly-once stage/first-call-clock effects.
 - **Native-call matching.** Migration: `contact_phone_numbers(contact_id, e164, digits10, slot)`
   maintained by trigger from `contacts.phone_1..3`. New matcher branch for `no_custom_data` events
   whose `target.id` equals a verified binding: exact `digits10` match → properties assigned to the
   binding's user, active queue row; one → synthesize intent, project (`provider_attempt_key =
   'dialpad-native:<call_id>'`); several → disposition `received`/`ambiguous_lead` → "Assign to lead"
   strip in My Leads with an RPC that pins and projects; none → `quarantined`/`no_lead_match`.
-  Inbound direction creates a call activity and tier-2 signal, not an attempt. Widen the two
-  `'dialpad-cti:%'` predicates to include `'dialpad-native:%'`. Replay quarantined events since
-  Sept 29 once.
-- **Auto-open prompt.** `client.tsx` polls `listRecentDialpadCalls` (visible tab, 10s); on a new
-  ended call with a pending attempt, opens the post-call prompt prefilled (outcome from
+  Inbound direction creates a call activity and tier-2 signal, not an attempt. Replace every
+  `'dialpad-cti:'` predicate (14 sites across 7 migrations: indexes, the check constraint, `on conflict`
+  targets, finalize, references, dispatch, recording and training playback) with one shared predicate
+  that also accepts `'dialpad-native:'`. One frozen match per (org, provider call id); duplicate and
+  out-of-order events, concurrent assignment, and reassignment during a call are specified and tested.
+  Replay only events quarantined during the Phase 0 spike (nothing was stored while disabled).
+- **Auto-open prompt.** `client.tsx` polls (visible tab, 10s) a new query for durable unacknowledged
+  ended calls (attempt with provider key, `prompt_acknowledged_at is null`, paginated), not
+  `listRecentDialpadCalls` (5 intents within 1 h, `src/lib/dialpad-cti/dispatch.ts:28,548`), so a prompt
+  survives next-day reopening and more than five calls. Acknowledgement is persisted separately from
+  outcome (skipping leaves outcome null). Opens the post-call prompt prefilled (outcome from
   `call_activities.outcome`, voicemail from `voicemail_link`). Never over an open dialog.
 - **Callback alert.** Appointments (phone) due within 2 min: banner + pinned strip row "Callback
   due now", one-click Call. Browser notification if permitted.
@@ -220,14 +287,19 @@ auto-open; replay idempotency; a training-lead end-to-end in preview.
   left Closer Lab script from `src/lib/coach/script-cache.ts` with tokens resolved from lead/contact/
   comps; right numbers card (as-is, ARV, confidence, anchors, "verify first"), notes/texts, send
   card, post-call prompt docked. Call button → Phase 2 dial.
-- **Send-contract card.** New component using `sendContractWithTemplate`
-  (`src/lib/esign/send-contract.ts:30`): price, closing date editable; title company and entity
+- **Send-contract card.** New component on the existing send orchestration in
+  `lead-esign-action-core.ts` (`provider.sendWithTemplate` then `reconcileSent`; `send-contract.ts` is
+  not the live path): price, closing date editable; title company and entity
   pickers from new org settings tables (`acquisition_contract_defaults`); earnest $500 default;
   read-only review line; all other template fields mapped from lead/public record/defaults per the
-  Phase 0 audit. On provider confirmation → `fn_log_acquisition_offer` with `follow_up_at` = closing
-  date − N days (creates the "Offer follow-up" appointment via the Phase 1 trigger) and stage →
-  Offer Sent. Failure → nothing logged, error shown.
-- **AI facts from Dialpad.** When `provider_transcript`/summary present, a server job writes a
+  Phase 0 audit. On `sent` → idempotent offer projection keyed on the request id calls
+  `fn_log_acquisition_offer`, which creates the "Offer follow-up" appointment (closing date − N days,
+  N from Jarrad, after `sent_at`, short-closing fallback) in the same transaction and stage →
+  Offer Sent. `send_unknown` → "send unconfirmed", reconciled, never re-sent. Definitive failure →
+  nothing logged, error shown. Tests: timeout, provider success then DB failure, concurrent lead
+  mutation, recovery without resend.
+- **AI facts from Dialpad.** A fetch job pulls the transcript and AI Recap after the
+  `call_transcription` state into `provider_transcript`/`provider_summary`; when present, a server job writes a
   summary note and proposes motivation/timeline/condition/mortgage/asking/next-step into a
   `lead_call_facts` row shown on the prompt as prefill chips (accept to write to the lead).
 
@@ -236,7 +308,9 @@ offer-logged-after-confirmation integration test.
 
 ### Verification (end to end, after Phase 3)
 
-1. Preview deploy with Phase 0 keys. Training lead: appears in strip with a reason; Comp this lead
+1. Preview deploy with Phase 0 keys. An isolated synthetic lead (not `is_training`: training leads get
+   an internal-training activity and no attempt row, `20260930036000_dialpad_training_projection.sql:122`;
+   training isolation is asserted separately): appears in strip with a reason; Comp this lead
    fills numbers; Call dials via Dialpad desktop; hangup → prompt opens prefilled, share link on the
    attempt, Dialpad summary note present; tap "Next week" → appointment in My Leads, lead page,
    calendar, dashboard identically; at due time the alert pins the lead; Send contract with a test
@@ -345,6 +419,7 @@ proposed plan edits are listed at the end for review.
    `GET /api/v2/call/{id}`, `/transcripts/{id}` and `ai_recap` as the after-the-fact path for links,
    transcript and summary.
 2. **Phase 2:** drop "replay quarantined events since Sept 29"; nothing was stored while disabled.
+   Events quarantined during the Phase 0 spike are the only replay candidates.
 3. **What needs Jarrad:** say which of the two stored Dialpad keys is live and confirm it carries
    `recordings_export` and `ai_recap` (or is a company-admin key with export enabled by support).
 4. **D6 validation:** comparing ATTOM comps against Assigns compares ATTOM against itself. Reframe the
