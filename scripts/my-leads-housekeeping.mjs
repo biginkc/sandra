@@ -6,8 +6,11 @@
 //     node scripts/my-leads-housekeeping.mjs <command> --org <uuid> [options]
 //
 // Commands available in this release:
-//   reassign        --target <uuid> --owner <uuid> [--keep-clock]   (target/owner default to the
-//                   org's single active owner with acquisitions enabled, read from memberships)
+//   reassign        --from <uuid,uuid,...> [--target <uuid>] [--owner <uuid>] [--keep-clock]
+//                   --from names the SOURCE members whose queue leads (and their open tasks) move to
+//                   the target; it is required and must not include the target. The source's access
+//                   status and acquisitions flag are ignored. Target/owner default to the org's single
+//                   active owner with acquisitions enabled, read from memberships.
 //   close-attempts  [--older-than "7 days"] (apply also needs --cutoff <timestamp printed by the preview>)
 //   relabel         [--expected-assignee <uuid>] (apply also needs --cutoff <timestamp printed by the preview>)
 //   retire-preflight (read-only count of open legacy follow_up/callback rows)
@@ -37,11 +40,12 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const COMMANDS = {
   reassign: {
-    needs: ["org"],
+    needs: ["org", "from"],
     rpc: "fn_my_leads_housekeeping_reassign",
     args: (o) => ({
       p_org_id: o.org,
       p_target: o.target,
+      p_sources: o.from,
       p_owner: o.owner,
       p_keep_clock: Boolean(o.keepClock),
     }),
@@ -78,7 +82,10 @@ export function parseArgs(argv) {
     const a = rest[i];
     if (a === "--apply") o.apply = true;
     else if (a === "--keep-clock") o.keepClock = true;
-    else if (["--org", "--target", "--owner", "--run", "--confirm", "--older-than", "--cutoff", "--expected-assignee"].includes(a)) {
+    else if (a === "--from") {
+      o.from = value(i, "from").split(",").map((x) => x.trim());
+      i += 1;
+    } else if (["--org", "--target", "--owner", "--run", "--confirm", "--older-than", "--cutoff", "--expected-assignee"].includes(a)) {
       const key = a.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
       o[key] = value(i, a.slice(2));
       i += 1;
@@ -86,6 +93,10 @@ export function parseArgs(argv) {
   }
   for (const k of ["org", "target", "owner", "run"]) {
     if (o[k] !== undefined && !UUID.test(o[k])) throw new Error(`--${k} must be a UUID`);
+  }
+  if (o.from !== undefined) {
+    if (o.from.some((id) => !UUID.test(id))) throw new Error("--from must be a comma-separated list of UUIDs");
+    o.from = [...new Set(o.from.map((id) => id.toLowerCase()))].sort();
   }
   return o;
 }
@@ -130,6 +141,22 @@ async function resolveIdentities(client, o) {
   return { ...o, target: o.target ?? data[0].user_id, owner: o.owner ?? data[0].user_id };
 }
 
+// Human-readable per-source counts on stderr (not part of the hashed preview). Emails are looked up
+// best-effort through the auth admin API; a failure only means the id is shown alone.
+async function printSourceSummary(client, o, preview, io) {
+  const leads = new Map((preview.leads ?? []).map((l) => [l.from, l.count]));
+  const tasks = new Map((preview.tasks?.byAssignee ?? []).map((t) => [t.assignee, t]));
+  for (const id of o.from) {
+    let email = "";
+    try {
+      const { data } = (await client.auth?.admin?.getUserById(id)) ?? {};
+      email = data?.user?.email ? ` (${data.user.email})` : "";
+    } catch { /* id only */ }
+    const t = tasks.get(id);
+    io.err(`source ${id}${email}: ${leads.get(id) ?? 0} leads, ${t?.nonAppointment ?? 0} tasks, ${t?.appointments ?? 0} appointments\n`);
+  }
+}
+
 // Runs one command. `io` = { env, out(text), err(text), createClient(url, key) }.
 export async function run(argv, io) {
   const redact = redactor([io.env.SUPABASE_SERVICE_ROLE_KEY, io.env.OP_SERVICE_ACCOUNT_TOKEN]);
@@ -156,6 +183,10 @@ export async function run(argv, io) {
     const client = io.createClient(url, key);
     if (spec.resolveIdentities) o = await resolveIdentities(client, o);
 
+    if (o.command === "reassign" && o.from.includes(o.target.toLowerCase())) {
+      throw new Error("--from must not include the target; the target's own leads never move");
+    }
+
     const preview = async () => {
       if (spec.rollback) return rpc(client, "fn_my_leads_housekeeping_run_info", { p_run: o.run, p_org_id: o.org });
       if (spec.readOnly) return rpc(client, spec.rpc, spec.args(o));
@@ -172,6 +203,7 @@ export async function run(argv, io) {
     }
     if (!o.apply) {
       io.out(`${printed}\n`);
+      if (o.command === "reassign") await printSourceSummary(client, o, previewJson, io);
       const cutoffFlag = spec.needsCutoffToApply && previewJson.cutoff ? ` --cutoff ${previewJson.cutoff}` : "";
       io.err(`preview only. To apply, re-run with: --apply${cutoffFlag} --confirm ${hash}\n`);
       return 0;

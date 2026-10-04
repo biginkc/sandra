@@ -50,6 +50,8 @@ const CHAIN = [
   { key: 'readModel', file: '20261005121000_next_step_read_model', present: procUses('my_leads_queue_rows_for', 'next_step_kind') },
   { key: 'modeAware', file: '20261005121200_next_step_mode_aware_lifecycle', present: procUses('fn_reschedule_appointment_base_20260816', 'phone_no_calendar') },
   { key: 'relabel', file: '20261005121500_next_step_relabel_functions', present: proc('fn_set_next_step_mode') },
+  { key: 'reassignSources', file: '20261005122000_my_leads_housekeeping_reassign_sources',
+    present: "exists (select 1 from pg_proc p where p.pronamespace = 'public'::regnamespace and p.proname = 'fn_my_leads_housekeeping_reassign' and p.pronargs = 7)" },
   { key: 'offerChain', file: '20261005130000_offer_follow_up_chain', present: column('acquisition_offers', 'follow_up_calendar_chain_id') },
   { key: 'setNextAction', file: '20261005130100_set_lead_next_action_next_step', present: procUses('set_lead_next_action', 'fn_create_next_step') },
   { key: 'jitterSoftphone', file: '20261005130200_jitter_softphone_callback_next_step', present: procUses('jitter_writeback_call_activity_softphone', 'fn_create_next_step') },
