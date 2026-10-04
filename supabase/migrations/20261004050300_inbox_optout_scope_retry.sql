@@ -201,6 +201,7 @@ BEGIN
   END IF;
   changed:=p.outreach_dispo IS DISTINCT FROM disposition;
   UPDATE public.properties SET outreach_dispo=disposition,follow_up_at=NULL,updated_at=clock_timestamp() WHERE org_id=o AND id=property_id;
+  -- Guard the shared-reuse return at line 54 against a stale scope.
   IF scope_rebase AND sms->>'contact_id' IS NOT NULL AND sms->>'scope_revision' IS DISTINCT FROM (SELECT revision::text FROM inbox_operation_domain.sms_scopes WHERE org_id=o AND contact_id=(sms->>'contact_id')::uuid) THEN RAISE EXCEPTION 'SMS scope changed or unseeded';END IF;
   IF changed THEN INSERT INTO public.lead_events(org_id,property_id,actor_type,actor_id,event_type,payload,source_type,source_id) VALUES(o,property_id,'user',requester,'dispo_set',jsonb_build_object('from',p.outreach_dispo,'to',disposition),'inbox_operation_step',s);END IF;
  ELSE
@@ -256,6 +257,16 @@ BEGIN
     RETURN result;
    EXCEPTION WHEN SQLSTATE 'P0001' THEN
     GET STACKED DIAGNOSTICS message=MESSAGE_TEXT;
+    IF message NOT IN (
+     'Requester membership ambiguous or missing','Requester access revoked','Access expired during effect',
+     'Assignee unavailable','Property ineligible','Target resolution changed','Target resolution expired',
+     'Canonical target property changed','Dependency conflict','SMS policy conflict',
+     'SMS scope changed or unseeded','SMS scope contact changed','SMS scope membership changed',
+     'SMS contact missing','SMS property scope exceeds bound or changed','SMS enrollment scope exceeds bound',
+     'permanent_dnc_not_enabled','Unknown action snapshot changed','Unknown sender identity changed',
+     'message_unavailable','Access baseline missing'
+    ) THEN RAISE;
+    END IF;
    END;
   END IF;
   CASE message
