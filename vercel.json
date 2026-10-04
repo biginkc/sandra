@@ -74,7 +74,9 @@
       "codex/my-leads-prd-20260911": false,
       "codex/my-leads-migration-history": false,
       "codex/disposable-canary-runner-20260912": false,
-      "main": false
+      "main": false,
+      "codex/norma-schema-first-20261004": false,
+      "codex/norma-runtime-admission-20261004": false
     }
   }
 }
