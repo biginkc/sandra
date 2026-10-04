@@ -360,12 +360,14 @@ export async function processSlackUnfurlJob(job: SlackUnfurlJob, deadline: numbe
     if (!response.ok) throw new Error(`slack_unfurl_failed:${response.error ?? "unknown"}`);
     slackAccepted = true;
     const finished = await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "succeeded" });
-    // Let the single catch path perform private-token terminal cleanup; this
-    // avoids issuing a second cleanup when the first finish returned false.
+    // If durable success cannot be recorded, the catch records a distinct
+    // unrecorded outcome with the private token; the route reports it without
+    // issuing any further finish.
     if (!finished && canaryFence) throw new Error("slack_canary_dispatch_unrecorded");
     return "succeeded";
   } catch (error) {
     if (isWindowError(error)) throw error;
+    if (canaryFence && slackAccepted) await failCanaryDispatch(job, "canary_dispatch_unrecorded");
     if (isTerminalSlackIdentityError(error)) {
       await revokeWorkerInstallationGeneration(job, installation, identityErrorReason(error));
       await finishSlackUnfurlJob({ jobId: job.id, claimToken, status: "cancelled", errorCode: "installation_revoked" });

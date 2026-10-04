@@ -223,6 +223,8 @@ describe("hosted exact-job Slack canary route", () => {
     expect(response.status).toBe(409);
     await expect(json(response)).resolves.toEqual({ ok: false, stage: "preflight", category: "canary_fence" });
     expect(mocks.process).not.toHaveBeenCalled();
+    expect(mocks.finish).toHaveBeenCalledTimes(1);
+    expect(mocks.finish.mock.calls.every(([input]) => (input as { claimToken?: string }).claimToken === CLAIM_TOKEN)).toBe(true);
     expect(mocks.finish).toHaveBeenCalledWith({ jobId: JOB_ID, claimToken: CLAIM_TOKEN, status: "noop", errorCode: "canary_preflight_failed" });
   });
 
@@ -379,7 +381,7 @@ describe("hosted exact-job Slack canary route", () => {
       const handlerStartedAt = Date.now();
       mocks.loadJob.mockImplementation(async () => {
         vi.advanceTimersByTime(10_000);
-        return baseJob();
+        return baseJob({ lease_expires_at: new Date(Date.now() + 90_000).toISOString() });
       });
       const response = await POST(request(payload()));
       expect(response.status).toBe(200);
