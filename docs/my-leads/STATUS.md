@@ -4,7 +4,7 @@ Owner of this file: Claude session "Optimize my leads page" (branch
 `claude/my-leads-one-call-close-decisions`). Root orchestrator and builders: post progress as PR
 comments; ask the owner to update this file, or append under "Root notes".
 
-Last updated: 2026-10-04 17:30 America/Chicago
+Last updated: 2026-10-04 18:20 America/Chicago
 
 ## Plan
 | Item | State |
@@ -18,13 +18,16 @@ Last updated: 2026-10-04 17:30 America/Chicago
 | `claude/my-leads-one-call-close-decisions` | #791 | Claude "Optimize my leads page" | merged `2138fec3`; historical base, no further writes |
 | `claude/my-leads-p0-spike` | none | Codex root orchestrator | Phase 0 harness, root-owned |
 | `claude/my-leads-p1e-housekeeping` | #794 | Claude (Sonnet 5.5 builder) | **MERGED** `10eda0d9` into main. Migrations applied TEST + PROD, high-water `20261005110000`. Housekeeping NOT run. |
-| `claude/my-leads-p1a-core` | #797 | Claude (Sonnet 5.5 builder) | draft; base retargeted to `main`; main (`10eda0d9`) merged in; full CI incl. disposable-DB integration suite now runs |
-| `claude/my-leads-p1a-writers` | #798 | Claude (Sonnet 5.5 builder) | draft, stacked on #797 |
-| `claude/my-leads-p1b-strip` | #799 | Claude (Sonnet 5.5 builder) | draft, stacked on #798 |
-| `claude/my-leads-p1c-prompt` | #800 | Claude (Sonnet 5.5 builder) | draft, stacked on #799 |
-| `claude/my-leads-p1c2-seller-reminders` | #801 | Claude (Sonnet 5.5 builder) | draft, stacked on #800; pre-activation duplicate-text fix pending |
-| `claude/my-leads-p1d-link-capture` | #802 | Claude (Sonnet 5.5 builder) | draft, stacked on #801 |
-| `claude/my-leads-p2-data-plane` | none | Phase 2 sole writer | WIP, no PR yet |
+| `claude/my-leads-p1a-core` | #797 | Claude (Sonnet 5.5 builder) | **MERGED** `46ad7e92` into main. Migrations applied TEST + PROD, high-water `20261005121500`. Feature flags table empty = all flags OFF. Housekeeping NOT run. |
+| `claude/my-leads-p1a-writers` | #798 | Claude (Sonnet 5.5 builder) | draft, base `main` (retargeted after #797 merge); main `46ad7e92` merged in, head `0bf24f32` before this STATUS commit |
+| `claude/my-leads-p1b-strip` | #799 | Claude (Sonnet 5.5 builder) | draft, stacked on #798; rebased, head `29aa0ed3` before STATUS re-cascade |
+| `claude/my-leads-p1c-prompt` | #800 | Claude (Sonnet 5.5 builder) | draft, stacked on #799; rebased, head `4927c8c1` before STATUS re-cascade |
+| `claude/my-leads-p1c2-seller-reminders` | #801 | Claude (Sonnet 5.5 builder) | draft, stacked on #800; rebased, head `78af8f69` before STATUS re-cascade; pre-activation duplicate-text fix pending |
+| `claude/my-leads-p1d-link-capture` | #802 | Claude (Sonnet 5.5 builder) | draft, stacked on #801; rebased, head `94ccc5a8` before STATUS re-cascade |
+| `claude/my-leads-p2-data-plane` | #803 | Phase 2 sole writer | draft; Opus review running |
+| `claude/my-leads-p4-acceptance` | #804 | Phase 4 writer | draft, partial; Opus review running |
+| `claude/my-leads-p3-comps` | #805 | Phase 3 writer | draft; Opus YES / 0 blocking, fixes in progress |
+| `claude/my-leads-p2-ui`, `claude/my-leads-p3-call-screen` | none | Phase 2/3 writers | building |
 | all other branches | none | unclaimed | claim here before writing |
 
 Current heads: `gh pr view <n> --json headRefOid` (stack was rebased onto main on 2026-10-04; heads change on every cascade).
@@ -34,6 +37,10 @@ Astra `APPROVE_MERGE: YES` / 0 blocking and Fable YES / 0 blocking, at these SHA
 those SHAs only):
 #794 `4c684f5a`, #797 `256ec287`, #798 `37fa7458`, #799 `cf6554d9`, #800 `5f44a1dd`, #801 `8d96787d`,
 #802 `1cef1365`. Rebased heads need unchanged-review confirmation via `git range-diff` (all commits `=`).
+
+## Release authority
+Jarrad, 2026-10-04 18:05 CDT: Phase 1 PRs merge as each is green, approved at its current head, and
+its preconditions hold; receipts go to root.
 
 ## Jarrad decisions (2026-10-04, "walk")
 - KPI forward change accepted.
