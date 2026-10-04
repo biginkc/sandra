@@ -284,7 +284,7 @@ jobs:
           LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
           LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
-        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261005190000_my_leads_housekeeping_reassign_queue_scope.integration.test.ts
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261005122500_my_leads_housekeeping_reassign_queue_scope.integration.test.ts
 
       - name: My Leads housekeeping operator script (unit)
         run: node --test scripts/my-leads-housekeeping.test.mjs

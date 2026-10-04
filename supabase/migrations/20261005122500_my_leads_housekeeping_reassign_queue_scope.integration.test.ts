@@ -46,8 +46,8 @@ it('scopes the reassign to the queue-state rows of the named sources (production
       return id;
     };
     const queue = (id: string, stage = 'contacted') => db.query("insert into public.acquisition_queue_states(property_id,org_id,stage,stage_entered_at) values ($1,$2,$3,now()) on conflict do nothing", [id, org, stage]);
-    // A (active, acquisitions-off): 1 queue-state lead + 5 non-queue properties. Observer episodes are
-    // present only for enabled members, so A's leads have none; the queue row is the only signal.
+    // A (active, acquisitions-off): 1 queue-state lead + 5 non-queue properties. The observer opens an
+    // eligible=false episode for any assignee, so A's leads have one; the queue row is the only signal.
     const aLead = await prop('aLead', a);
     await queue(aLead);
     const aOthers: string[] = [];
@@ -182,14 +182,14 @@ it('rolls back a run made by 122000 after this migration, and its rollback twin 
 
     const bodies = async () => (await db.query("select proname, prosrc from pg_proc where pronamespace='public'::regnamespace and proname in ('fn_my_leads_housekeeping_reassign','my_leads_housekeeping_reassign_scope','my_leads_housekeeping_reassign_fingerprint','my_leads_housekeeping_reassign_task_ids') order by 1")).rows;
     const bodies122 = await bodies();
-    await db.query(stripTransaction('migrations/20261005190000_my_leads_housekeeping_reassign_queue_scope.sql'));
+    await db.query(stripTransaction('migrations/20261005122500_my_leads_housekeeping_reassign_queue_scope.sql'));
     const info = await run('select public.fn_my_leads_housekeeping_run_info($1,$2) as r', [old.runId, org]);
     const rolled = await run('select public.fn_my_leads_housekeeping_rollback($1,$2,$3) as r', [old.runId, org, info.fingerprint]);
     expect(rolled).toMatchObject({ status: 'rolled_back', restored: 1, notRestored: [] });
     expect((await db.query('select assigned_user_id from public.properties where id=$1', [lead])).rows[0].assigned_user_id).toBe(mel);
     expect(await bodies()).not.toEqual(bodies122);
 
-    await db.query(stripTransaction('rollbacks/20261005190000_my_leads_housekeeping_reassign_queue_scope.sql'));
+    await db.query(stripTransaction('rollbacks/20261005122500_my_leads_housekeeping_reassign_queue_scope.sql'));
     expect(await bodies()).toEqual(bodies122);
   } finally {
     await db.query('rollback').catch(() => {});
