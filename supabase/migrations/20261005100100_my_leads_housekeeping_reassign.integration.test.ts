@@ -1,17 +1,10 @@
-import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 import { expect, it } from 'vitest';
 import { loadTestEnv } from '@tests/integration/env';
+import { applyP1e } from '@tests/integration/my-leads-housekeeping-fixture';
 import { requireLoopbackPostgresUrl } from '@/lib/testing/loopback-postgres-url';
 
-const strip = (file: string) => {
-  const sql = readFileSync(new URL(file, import.meta.url), 'utf8');
-  if (!/^[\s\S]*?\bbegin;\s*/im.test(sql) || !/\s*commit;\s*$/i.test(sql)) throw new Error(`${file}: transaction wrapper changed`);
-  return sql.replace(/^begin;\s*/im, '').replace(/\s*commit;\s*$/i, '');
-};
-const tools = strip('./20261005100000_my_leads_housekeeping_tools.sql');
-const reassign = strip('./20261005100100_my_leads_housekeeping_reassign.sql');
 const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
 
 it('reassigns queue leads and open tasks, keeps the first-call clock, and rolls back exactly', async () => {
@@ -21,8 +14,7 @@ it('reassigns queue leads and open tasks, keeps the first-call clock, and rolls 
   await db.connect();
   try {
     await db.query('begin');
-    await db.query(tools);
-    await db.query(reassign);
+    await applyP1e(db, 'reassign');
 
     const org = randomUUID(), jarrad = randomUUID(), maria = randomUUID(), mel = randomUUID(), va = randomUUID();
     for (const id of [jarrad, maria, mel, va]) await db.query('insert into auth.users(id) values ($1)', [id]);

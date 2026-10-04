@@ -1,19 +1,12 @@
-import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 import { expect, it } from 'vitest';
 import { loadTestEnv } from '@tests/integration/env';
+import { applyP1e, MIGRATIONS, readSql, ROLLBACKS, stripTransaction } from '@tests/integration/my-leads-housekeeping-fixture';
 import { requireLoopbackPostgresUrl } from '@/lib/testing/loopback-postgres-url';
 
-const strip = (file: string) => {
-  const sql = readFileSync(new URL(file, import.meta.url), 'utf8');
-  if (!/^[\s\S]*?\bbegin;\s*/im.test(sql) || !/\s*commit;\s*$/i.test(sql)) throw new Error(`${file}: transaction wrapper changed`);
-  return sql.replace(/^begin;\s*/im, '').replace(/\s*commit;\s*$/i, '');
-};
-const tools = strip('./20261005100000_my_leads_housekeeping_tools.sql');
-const functions = strip('./20261005100100_my_leads_housekeeping_reassign.sql');
-const outcome = strip('./20261005110000_acquisition_attempt_outcome_voicemail_not_logged.sql');
-const rollbackFile = strip('../rollbacks/20261005110000_acquisition_attempt_outcome_voicemail_not_logged.sql');
+const outcome = readSql(MIGRATIONS.outcome);
+const rollbackFile = stripTransaction(ROLLBACKS.outcome);
 const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
 
 it('widens the outcome check and closes only stale sandra attempts, reversibly', async () => {
@@ -24,9 +17,7 @@ it('widens the outcome check and closes only stale sandra attempts, reversibly',
   await db.connect();
   try {
     await db.query('begin');
-    await db.query(tools);
-    await db.query(functions);
-    await db.query(outcome);
+    await applyP1e(db, 'outcome');
 
     const org = randomUUID(), jarrad = randomUUID(), maria = randomUUID();
     for (const id of [jarrad, maria]) await db.query('insert into auth.users(id) values ($1)', [id]);

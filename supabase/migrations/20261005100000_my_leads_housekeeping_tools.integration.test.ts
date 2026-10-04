@@ -1,11 +1,11 @@
-import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 import { expect, it } from 'vitest';
 import { loadTestEnv } from '@tests/integration/env';
+import { applyP1e, MIGRATIONS, readSql } from '@tests/integration/my-leads-housekeeping-fixture';
 import { requireLoopbackPostgresUrl } from '@/lib/testing/loopback-postgres-url';
 
-const sql = readFileSync(new URL('./20261005100000_my_leads_housekeeping_tools.sql', import.meta.url), 'utf8');
+const sql = readSql(MIGRATIONS.tools);
 const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
 
 it('creates closed run and before-image tables and a service-only gate', async () => {
@@ -17,7 +17,7 @@ it('creates closed run and before-image tables and a service-only gate', async (
   await db.connect();
   try {
     await db.query('begin');
-    await db.query(sql.replace(/^begin;\s*/im, '').replace(/\s*commit;\s*$/i, ''));
+    await applyP1e(db, 'tools');
     const as = async <T>(role: 'authenticated' | 'anon' | 'service_role', fn: () => Promise<T>) => {
       await db.query(`set local role ${role}`);
       await db.query("select set_config('request.jwt.claim.role',$1,true)", [role]);
