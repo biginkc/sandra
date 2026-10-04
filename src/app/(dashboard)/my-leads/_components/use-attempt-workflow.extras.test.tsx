@@ -5,7 +5,7 @@ const actions = vi.hoisted(() => ({ submitMyLeadCommand: vi.fn(), submitMyLeadHa
 vi.mock("../actions", () => ({ submitMyLeadCommand: actions.submitMyLeadCommand, submitMyLeadHandoffDrip: actions.submitMyLeadHandoffDrip }))
 
 import type { QueueRow } from "@/lib/my-leads/queries"
-import { EXTRAS_STORAGE_KEY, clearExtras, getExtras, resetExtrasStoreForTests, simulateExtrasReloadForTests } from "./extras-store"
+import { EXTRAS_STORAGE_KEY, clearAllExtras, clearExtras, discardOtherViewerExtras, getExtras, putExtras, resetExtrasStoreForTests, simulateExtrasReloadForTests } from "./extras-store"
 import { simulateReloadForTests, resetSubmissionStoreForTests } from "./submission-store"
 import { useAttemptWorkflow, type AttemptOpening } from "./use-attempt-workflow"
 
@@ -131,5 +131,46 @@ describe("post-call extras on every recovery path", () => {
       await act(async () => { await hook.result.current.submit({ outcome: "reached", postCall: extras() }) })
       expect(handlers.onExtras).toHaveBeenCalledTimes(1)
     } finally { setItem.mockRestore() }
+  })
+
+  it("after a reload an unresolved entry for lead A survives a save on lead B, and A's note still replays", async () => {
+    actions.submitMyLeadCommand.mockRejectedValue(new Error("network"))
+    const a = setup({ action: "log-attempt", row: { ...row(3), propertyId: "lead-A" } as QueueRow })
+    await act(async () => { await a.hook.result.current.submit({ outcome: "reached", postCall: { ...extras("Note for A"), submissionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } }).catch(() => undefined) })
+    const keyA = (actions.submitMyLeadCommand.mock.calls[0][1] as { idempotencyKey: string }).idempotencyKey
+    a.hook.unmount()
+    simulateReloadForTests()
+    simulateExtrasReloadForTests() // memory gone; A lives only in sessionStorage
+    // Save on lead B: writing it must keep A.
+    const b = setup({ action: "log-attempt", row: { ...row(3), propertyId: "lead-B" } as QueueRow })
+    await act(async () => { await b.hook.result.current.submit({ outcome: "reached", postCall: { ...extras("Note for B"), submissionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" } }).catch(() => undefined) })
+    const keyB = (actions.submitMyLeadCommand.mock.calls[1][1] as { idempotencyKey: string }).idempotencyKey
+    const stored = JSON.parse(window.sessionStorage.getItem(EXTRAS_STORAGE_KEY) ?? "[]") as Array<{ attemptKey: string; extras: { note: string } }>
+    expect(stored.map((e) => e.attemptKey).sort()).toEqual([keyA, keyB].sort())
+    // A's note still replays after another reload.
+    simulateExtrasReloadForTests()
+    expect(getExtras("user-1", keyA)?.extras.note).toBe("Note for A")
+    expect(getExtras("user-1", keyB)?.extras.note).toBe("Note for B")
+    // Clearing one entry after a reload keeps the other.
+    simulateExtrasReloadForTests()
+    clearExtras("user-1", keyB)
+    simulateExtrasReloadForTests()
+    expect(getExtras("user-1", keyA)?.extras.note).toBe("Note for A")
+    expect(getExtras("user-1", keyB)).toBeNull()
+  })
+
+  it("a user change drops the other user's entries; sign-out drops them all", () => {
+    const base = { propertyId: "p1", memberId: "rep-1", extras: extras() }
+    putExtras({ ...base, viewerUserId: "user-1", attemptKey: "k1" })
+    putExtras({ ...base, viewerUserId: "user-2", attemptKey: "k2" })
+    simulateExtrasReloadForTests()
+    discardOtherViewerExtras("user-2")
+    simulateExtrasReloadForTests()
+    expect(getExtras("user-1", "k1")).toBeNull()
+    expect(getExtras("user-2", "k2")).not.toBeNull()
+    clearAllExtras()
+    simulateExtrasReloadForTests()
+    expect(getExtras("user-2", "k2")).toBeNull()
+    expect(window.sessionStorage.getItem(EXTRAS_STORAGE_KEY)).toBeNull()
   })
 })

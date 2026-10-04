@@ -53,24 +53,30 @@ function readAll(now: number): ExtrasEntry[] {
   }
 }
 
-function persist(now: number) {
+/** Writes the list back to sessionStorage (removing the key when empty). Memory still holds entries if storage throws. */
+function writeAll(list: ExtrasEntry[]) {
   const store = storage()
   if (!store) return
   try {
-    const live = [...memory.values()].filter((entry) => now - entry.createdAt < EXTRAS_TTL_MS)
-    if (live.length === 0) store.removeItem(EXTRAS_STORAGE_KEY)
-    else store.setItem(EXTRAS_STORAGE_KEY, JSON.stringify(live))
+    if (list.length === 0) store.removeItem(EXTRAS_STORAGE_KEY)
+    else store.setItem(EXTRAS_STORAGE_KEY, JSON.stringify(list))
   } catch {
     // Storage is a convenience; memory still holds the entry.
   }
 }
 
 const id = (viewerUserId: string, attemptKey: string) => `${viewerUserId}|${attemptKey}`
+const same = (a: { viewerUserId: string; attemptKey: string }, b: { viewerUserId: string; attemptKey: string }) =>
+  a.viewerUserId === b.viewerUserId && a.attemptKey === b.attemptKey
 
-/** Registers the extras for an attempt about to be sent. Replaces an earlier entry for the same key. */
+/**
+ * Every write starts from what sessionStorage holds, not from memory: after a reload older entries
+ * live only in storage, and writing back just the in-memory ones would silently drop them.
+ */
 export function putExtras(entry: Omit<ExtrasEntry, "createdAt">, now = Date.now()) {
-  memory.set(id(entry.viewerUserId, entry.attemptKey), { ...entry, createdAt: now })
-  persist(now)
+  const full: ExtrasEntry = { ...entry, createdAt: now }
+  memory.set(id(entry.viewerUserId, entry.attemptKey), full)
+  writeAll([...readAll(now).filter((item) => !same(item, full)), full])
 }
 
 export function hasExtras(viewerUserId: string, attemptKey: string): boolean {
@@ -88,17 +94,19 @@ export function getExtras(viewerUserId: string, attemptKey: string, now = Date.n
 
 export function clearExtras(viewerUserId: string, attemptKey: string, now = Date.now()) {
   memory.delete(id(viewerUserId, attemptKey))
-  // A reload's copy may exist only in storage: drop it there too.
-  const store = storage()
-  if (store) {
-    try {
-      const rest = readAll(now).filter((item) => !(item.viewerUserId === viewerUserId && item.attemptKey === attemptKey))
-      for (const item of rest) if (!memory.has(id(item.viewerUserId, item.attemptKey))) memory.set(id(item.viewerUserId, item.attemptKey), item)
-    } catch {
-      // ignore
-    }
-  }
-  persist(now)
+  writeAll(readAll(now).filter((item) => !(item.viewerUserId === viewerUserId && item.attemptKey === attemptKey)))
+}
+
+/** A user change keeps only that user's entries (the submission store does the same for its records). */
+export function discardOtherViewerExtras(viewerUserId: string, now = Date.now()) {
+  for (const [key, entry] of memory) if (entry.viewerUserId !== viewerUserId) memory.delete(key)
+  writeAll(readAll(now).filter((item) => item.viewerUserId === viewerUserId))
+}
+
+/** Sign-out: forget every entry, in memory and in storage. */
+export function clearAllExtras() {
+  memory.clear()
+  writeAll([])
 }
 
 /** Test helper: a reload clears memory and leaves sessionStorage alone. */

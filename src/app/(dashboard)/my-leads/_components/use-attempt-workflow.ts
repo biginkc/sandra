@@ -10,7 +10,7 @@ import {
   subscribeSubmissions, writeSubmission,
   type Lease, type StoredSubmission, type SubmissionScope,
 } from "./submission-store"
-import { getExtras, putExtras } from "./extras-store"
+import { discardOtherViewerExtras, getExtras, putExtras } from "./extras-store"
 import type { MyLeadAction, PostCallExtras } from "./types"
 import type { WorkflowReconciliation } from "./workflow-form"
 
@@ -302,7 +302,10 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
 
   // Identity change: another viewer's or organization's records are discarded, not just hidden.
   useEffect(() => {
-    if (identified) discardOtherViewers({ userId: viewer.userId, orgId: viewer.orgId })
+    if (identified) {
+      discardOtherViewers({ userId: viewer.userId, orgId: viewer.orgId })
+      discardOtherViewerExtras(viewer.userId)
+    }
     // Pending work and in-memory state belong to the previous owner: the store epoch already refuses
     // their late writes; drop the in-memory state too.
     if (submission.current && (submission.current.owner.userId !== viewer.userId || submission.current.owner.orgId !== viewer.orgId)) {
