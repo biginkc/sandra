@@ -19,11 +19,11 @@ Last updated: 2026-10-04 18:20 America/Chicago
 | `claude/my-leads-p0-spike` | none | Codex root orchestrator | Phase 0 harness, root-owned |
 | `claude/my-leads-p1e-housekeeping` | #794 | Claude (Sonnet 5.5 builder) | **MERGED** `10eda0d9` into main. Migrations applied TEST + PROD, high-water `20261005110000`. Housekeeping NOT run at the time of #797 merge (later run, see below). |
 | `claude/my-leads-p1a-core` | #797 | Claude (Sonnet 5.5 builder) | **MERGED** `46ad7e92` into main. Migrations applied TEST + PROD, high-water `20261005121500`. Feature flags table empty = all flags OFF. Housekeeping NOT run at the time of #797 merge (later run, see below). |
-| `claude/my-leads-p1a-writers` | #798 | Claude (Sonnet 5.5 builder) | draft, base `main` (retargeted after #797 merge); main `46ad7e92` merged in, head `0bf24f32` before this STATUS commit |
-| `claude/my-leads-p1b-strip` | #799 | Claude (Sonnet 5.5 builder) | draft, stacked on #798; rebased, head `29aa0ed3` before STATUS re-cascade |
-| `claude/my-leads-p1c-prompt` | #800 | Claude (Sonnet 5.5 builder) | draft, stacked on #799; rebased, head `4927c8c1` before STATUS re-cascade |
-| `claude/my-leads-p1c2-seller-reminders` | #801 | Claude (Sonnet 5.5 builder) | draft, stacked on #800; rebased, head `78af8f69` before STATUS re-cascade; pre-activation duplicate-text fix pending |
-| `claude/my-leads-p1d-link-capture` | #802 | Claude (Sonnet 5.5 builder) | draft, stacked on #801; rebased, head `94ccc5a8` before STATUS re-cascade |
+| `claude/my-leads-p1a-writers` | #798 | Claude (Sonnet 5.5 builder) | draft, base `main` (retargeted after #797 merge); main `46ad7e92` merged in; main `02c1dcaf` (#806) merged in; heads change on every cascade (`gh pr view <n> --json headRefOid`) |
+| `claude/my-leads-p1b-strip` | #799 | Claude (Sonnet 5.5 builder) | draft, stacked on #798; rebased onto the previous PR head |
+| `claude/my-leads-p1c-prompt` | #800 | Claude (Sonnet 5.5 builder) | draft, stacked on #799; rebased onto the previous PR head |
+| `claude/my-leads-p1c2-seller-reminders` | #801 | Claude (Sonnet 5.5 builder) | draft, stacked on #800; rebased onto the previous PR head; pre-activation duplicate-text fix pending |
+| `claude/my-leads-p1d-link-capture` | #802 | Claude (Sonnet 5.5 builder) | draft, stacked on #801; rebased onto the previous PR head |
 | `claude/my-leads-p2-data-plane` | #803 | Phase 2 sole writer | draft; Opus review running |
 | `claude/my-leads-p4-acceptance` | #804 | Phase 4 writer | draft, partial; Opus review running |
 | `claude/my-leads-p3-comps` | #805 | Phase 3 writer | draft; Opus YES / 0 blocking, fixes in progress |
