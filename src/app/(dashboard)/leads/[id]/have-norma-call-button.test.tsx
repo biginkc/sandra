@@ -160,4 +160,49 @@ describe("HaveNormaCallButton", () => {
     renderButton();
     expect(screen.getByTestId("have-norma-call-trigger")).toHaveTextContent("Have Norma call");
   });
+
+  describe("status colours and the second call", () => {
+    const withLast = (outcome: string | null) =>
+      render(
+        <HaveNormaCallButton propertyId="p1" sellerName="Pat" propertyAddress="12 Oak St" lastResult={{ id: "r0", outcome }} />,
+      );
+
+    it("shows the last finished call in green when it reached a person", () => {
+      for (const outcome of ["reached_no_callback", "callback_requested", "not_interested", "wrong_number"]) {
+        const { unmount } = withLast(outcome);
+        expect(screen.getByTestId("norma-last-result")).toHaveAttribute("data-tone", "green");
+        unmount();
+      }
+    });
+
+    it("grey for no answer, amber for an unknown result, nothing when there is no finished call", () => {
+      const a = withLast("no_answer");
+      expect(screen.getByTestId("norma-last-result")).toHaveAttribute("data-tone", "neutral");
+      expect(screen.getByTestId("norma-last-result")).toHaveTextContent("Norma: No answer");
+      a.unmount();
+      const b = withLast("unknown");
+      expect(screen.getByTestId("norma-last-result")).toHaveAttribute("data-tone", "amber");
+      b.unmount();
+      render(<HaveNormaCallButton propertyId="p1" sellerName="Pat" propertyAddress="12 Oak St" />);
+      expect(screen.queryByTestId("norma-last-result")).toBeNull();
+    });
+
+    it("hides the last result while a new call is in flight; in-flight is neutral, needs review is amber", () => {
+      const a = render(
+        <HaveNormaCallButton propertyId="p1" sellerName="Pat" propertyAddress="12 Oak St" openRequest={{ id: "r1", status: "dispatched" }} lastResult={{ id: "r0", outcome: "callback_requested" }} />,
+      );
+      expect(screen.queryByTestId("norma-last-result")).toBeNull();
+      expect(screen.getByTestId("have-norma-call-trigger")).toHaveAttribute("data-tone", "neutral");
+      a.unmount();
+      render(<HaveNormaCallButton propertyId="p1" sellerName="Pat" propertyAddress="12 Oak St" openRequest={{ id: "r1", status: "needs_review" }} />);
+      expect(screen.getByTestId("have-norma-call-trigger")).toHaveAttribute("data-tone", "amber");
+    });
+
+    it("says Norma is calling again on the second attempt", () => {
+      render(
+        <HaveNormaCallButton propertyId="p1" sellerName="Pat" propertyAddress="12 Oak St" openRequest={{ id: "r1", status: "requested", attempt: 2 }} />,
+      );
+      expect(screen.getByTestId("have-norma-call-trigger")).toHaveTextContent("Norma calling again");
+    });
+  });
 });

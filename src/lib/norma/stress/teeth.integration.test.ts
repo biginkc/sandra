@@ -46,6 +46,28 @@ const MUTANTS: Mutant[] = [
       mutateFunction(q, "public.fn_norma_complete_call(uuid, text, text, jsonb)", "if p_outcome in ('callback_requested', 'reached_no_callback', 'wrong_number') then", "if p_outcome in ('callback_requested', 'reached_no_callback', 'wrong_number', 'not_interested') then"),
   },
   {
+    name: "call twice retries a first call that reached a person (not only a confirmed non-connect)",
+    invariant: "1",
+    apply: (q) =>
+      mutateFunction(
+        q,
+        "public.fn_norma_complete_call(uuid, text, text, jsonb)",
+        "if p_outcome = 'no_answer' and r.attempt = 1 and r.status in ('dispatching', 'dispatched') then",
+        "if p_outcome <> 'unknown' and r.attempt = 1 and r.status in ('dispatching', 'dispatched') then",
+      ),
+  },
+  {
+    name: "call twice never retries (a confirmed no_answer completes at once)",
+    invariant: "3",
+    apply: (q) =>
+      mutateFunction(
+        q,
+        "public.fn_norma_complete_call(uuid, text, text, jsonb)",
+        "if p_outcome = 'no_answer' and r.attempt = 1 and r.status in ('dispatching', 'dispatched') then",
+        "if false then",
+      ),
+  },
+  {
     name: "a completion forgets its Slack outbox row",
     invariant: "8",
     apply: (q) =>
@@ -87,11 +109,13 @@ const SCENE_MUTANTS: SceneMutant[] = [
       await h.requestCall(ctx, h.world.rep1);
       // Do-not-contact lands on the contact only, leaving the enrollment paused as norma_call.
       await h.scratch.pool.query("update public.contacts set do_not_contact = true where id = $1", [ctx.lead.contact]);
-      const hook = await h.bland.webhook(h.bland.callForNumber(ctx.lead.phone)!, "good");
+      // Call twice: the retry's dial-time recheck refuses a do-not-contact contact, and that
+      // rejection releases the request's pauses (the code under mutation).
+      const hook = (await h.finish(ctx)).at(-1)!;
       const enrollment = (await h.scratch.pool.query("select status from public.sequence_enrollments where id = $1", [ctx.lead.enrollments[0]])).rows[0];
       const request = (await h.scratch.pool.query("select status from public.norma_call_requests where property_id = $1", [ctx.lead.property])).rows[0];
       const problems: string[] = [];
-      if (hook.status !== 200 || request?.status !== "completed") problems.push(`the completion failed (${hook.status}, request ${request?.status})`);
+      if (hook.status !== 200 || !["completed", "dispatch_rejected"].includes(String(request?.status))) problems.push(`the completion failed (${hook.status}, request ${request?.status})`);
       if (enrollment?.status !== "paused") problems.push(`a do-not-contact lead's drip was ${enrollment?.status} after the call ended`);
       return problems;
     },
@@ -104,7 +128,7 @@ const SCENE_MUTANTS: SceneMutant[] = [
       const ctx = await h.lead({ enrollments: ["active"] }, { kind: "no_answer_status" });
       await h.requestCall(ctx, h.world.rep1);
       await h.inboundReply(ctx);
-      const hook = await h.bland.webhook(h.bland.callForNumber(ctx.lead.phone)!, "good");
+      const hook = (await h.finish(ctx)).at(-1)!;
       const pause = (await h.scratch.pool.query("select release_result from public.norma_enrollment_pauses where enrollment_id = $1", [ctx.lead.enrollments[0]])).rows[0];
       const enrollment = (await h.scratch.pool.query("select status, pause_reason from public.sequence_enrollments where id = $1", [ctx.lead.enrollments[0]])).rows[0];
       const problems: string[] = [];
@@ -112,6 +136,24 @@ const SCENE_MUTANTS: SceneMutant[] = [
       if (pause?.release_result !== "reason_changed") problems.push(`release_result was ${pause?.release_result}, expected reason_changed`);
       if (enrollment?.status !== "paused" || enrollment?.pause_reason !== "inbound_reply") problems.push(`the reply pause became ${enrollment?.status}/${enrollment?.pause_reason}`);
       return problems;
+    },
+  },
+  {
+    name: "a stale or forged attempt-1 call id can complete an unbound attempt 2",
+    apply: (q) =>
+      mutateFunction(q, "public.fn_norma_complete_call(uuid, text, text, jsonb)", "if v_payload ? 'attempt'", "if false and v_payload ? 'attempt'"),
+    scene: async (h) => {
+      const ctx = await h.lead({ enrollments: ["active"] }, { kind: "voicemail", secondKind: "callback" });
+      await h.requestCall(ctx, h.world.rep1);
+      const first = h.bland.callForNumber(ctx.lead.phone)!;
+      h.skipRetryDispatchOnce = true;
+      await h.bland.webhook(first, "good");
+      const id = (await h.scratch.pool.query("select id from public.norma_call_requests where property_id = $1", [ctx.lead.property])).rows[0].id;
+      const { claimNormaDispatch } = await import("../rpc");
+      await claimNormaDispatch(h.client("claim"), id);
+      await h.bland.webhook(first, "mismatch_call_id");
+      const row = (await h.scratch.pool.query("select status from public.norma_call_requests where id = $1", [id])).rows[0];
+      return row?.status === "dispatching" ? [] : [`a forged attempt-1 call id moved the request to ${row?.status}`];
     },
   },
   {

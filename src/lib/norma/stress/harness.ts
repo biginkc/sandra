@@ -7,6 +7,7 @@ import { createBlandClient } from "../bland";
 import type { CallbackTimeProvider } from "../callback-time";
 import type { NormaBlandConfig, NormaEnv } from "../config";
 import { readNormaGateConfig } from "../config";
+import type { PrecallDeps } from "../precall-sms";
 import { dispatchNormaCall, type DispatchResult } from "../dispatch";
 import { evaluateNormaGate } from "../gate";
 import { reconcileNormaCalls, type ReconcileSummary } from "../reconcile";
@@ -15,7 +16,7 @@ import { sweepResumeCallInProgress, upgradeNormaHoldPauses } from "../rpc";
 import { drainNormaNotifications, type NormaNotificationSummary, type NormaSlackPost } from "../slack-worker";
 import { handleBlandCallWebhook } from "../webhook";
 import { createScratchDb, seedWorld, type Lead, type LeadOptions, type Scratch, type World } from "./db";
-import { FakeBland, WEBHOOK_SECRET, type Plan } from "./fake-bland";
+import { FakeBland, WEBHOOK_SECRET, type Plan, type WebhookResult } from "./fake-bland";
 import { createPgSupabase, type OpHook, type OpInfo } from "./pg-client";
 import { Trace, type Rng } from "./trace";
 
@@ -39,7 +40,7 @@ export const BLAND_CONFIG: NormaBlandConfig = {
   apiKey: "stress-key",
   baseUrl: "https://bland.stress.invalid",
   pathwayId: "pathway-stress",
-  pathwayVersion: 3,
+  pathwayVersion: null,
   voice: "voice-stress",
   fromNumber: "+18165550000",
   webhookUrl: "https://sandra.stress.invalid/api/webhooks/bland/call",
@@ -101,6 +102,10 @@ export class Harness {
   readonly slack: FakeSlack;
   readonly reports = (globalThis as { __normaStressReports?: { message: string; surface: string | null }[] }).__normaStressReports ?? [];
   private readonly clients = new Map<string, Client>();
+  /** Makes the next webhook-triggered retry dispatch fail (a crash between scheduling and dialling). */
+  skipRetryDispatchOnce = false;
+  /** Pre-call text overrides for dispatch (default: disabled, as in production). */
+  precallSms?: PrecallDeps;
   /** Set per run so the random AI stand-in is reproducible. */
   provider: CallbackTimeProvider | null = null;
   /** The database clock can drift from this process's (Docker); workers use DB-aligned time. */
@@ -120,6 +125,15 @@ export class Harness {
           client: this.client("webhook"),
           secret: WEBHOOK_SECRET,
           callbackTimeProvider: this.provider,
+          // The route's call-twice retry: the ordinary dispatch path, gate and recheck included.
+          dispatch: (id) => {
+            // Test seam: the process "dies" after the retry was scheduled, before it was dialled.
+            if (this.skipRetryDispatchOnce) {
+              this.skipRetryDispatchOnce = false;
+              return Promise.reject(new Error("simulated crash before the retry dispatch"));
+            }
+            return this.dispatch(id, "webhook-retry");
+          },
         });
         if (response.status === 500) {
           const last = [...this.reports].reverse().find((x) => x.surface === "norma_webhook");
@@ -246,10 +260,28 @@ export class Harness {
         bland: createBlandClient(BLAND_CONFIG, this.bland.fetch),
         blandConfig: BLAND_CONFIG,
         gate,
+        precallSms: this.precallSms,
       });
     } finally {
       inflight.splice(inflight.indexOf(open), 1);
     }
+  }
+
+  /**
+   * Deliver the (good) webhook of every call a lead's request places, in order:
+   * a no-answer first call places the retry, whose own webhook is then delivered.
+   * Stops when a delivery places no further call (at most two calls exist).
+   */
+  async finish(ctx: LeadCtx, flavor: "good" = "good"): Promise<WebhookResult[]> {
+    const results: WebhookResult[] = [];
+    const seen = new Set<string>();
+    for (let i = 0; i < 3; i += 1) {
+      const call = this.bland.callsForNumber(ctx.lead.phone).find((c) => !seen.has(c.callId));
+      if (!call) break;
+      seen.add(call.callId);
+      results.push(await this.bland.webhook(call, flavor));
+    }
+    return results;
   }
 
   async reconcile(opts: { includeNeedsReview?: boolean; actor?: string } = {}): Promise<ReconcileSummary> {
@@ -282,6 +314,17 @@ export class Harness {
     const client = this.client(actor);
     await upgradeNormaHoldPauses(client, { propertyId: ctx.lead.property, reason: "inbound_reply" });
     await pausePropertyEnrollments(client, { propertyId: ctx.lead.property, reason: "inbound_reply" });
+  }
+
+  /** The seller replies STOP: what the inbound handler records (contact flag, durable phone suppression, disposition). */
+  async stop(ctx: LeadCtx) {
+    const p = this.scratch.pool;
+    await p.query("update public.contacts set sms_opted_out = true where id = $1", [ctx.lead.contact]);
+    await p.query(
+      "insert into public.sms_phone_suppressions (org_id, channel, phone_e164, source) values ($1, 'sms', $2, 'stress_stop') on conflict do nothing",
+      [this.world.org, ctx.lead.phone],
+    );
+    await p.query("update public.properties set outreach_dispo = 'opted_out' where id = $1", [ctx.lead.property]);
   }
 
   /** A rep texts the seller; the seller's reply then becomes a human takeover. */

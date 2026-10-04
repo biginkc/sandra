@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { BlandClient, BlandSendResult } from "./bland";
+import { createBlandClient, NORMA_VOICEMAIL_MESSAGE, type BlandClient, type BlandSendResult } from "./bland";
 import { readNormaBlandConfig, type NormaBlandConfig } from "./config";
 import { dispatchNormaCall } from "./dispatch";
 import { fakeClient, PHONE, REQUEST_ID, requestRow } from "./test-helpers";
@@ -13,12 +13,16 @@ const blandConfig: NormaBlandConfig = {
 };
 const openGate = { dispatchEnabled: true, sellerRelease: false, allowedNumbers: [PHONE] };
 
-function setup(opts: { property?: Record<string, unknown>; notes?: Array<Record<string, unknown>>; send?: BlandSendResult; gate?: typeof openGate; row?: Record<string, unknown>; claim?: boolean; eligible?: boolean; bind?: string; blandConfig?: NormaBlandConfig | null } = {}) {
+function setup(opts: { precallSms?: import("./precall-sms").PrecallDeps; eligibleSequence?: boolean[]; property?: Record<string, unknown>; notes?: Array<Record<string, unknown>>; send?: BlandSendResult; gate?: typeof openGate; row?: Record<string, unknown>; claim?: boolean; eligible?: boolean; bind?: string; blandConfig?: NormaBlandConfig | null } = {}) {
   const sendCall = vi.fn().mockResolvedValue(opts.send ?? { kind: "accepted", callId: "call-1" });
   const bland: BlandClient = { sendCall, getCall: vi.fn() };
   const rpcs = {
     fn_norma_claim_dispatch: vi.fn().mockReturnValue(opts.claim ?? true),
-    fn_norma_eligibility: vi.fn().mockReturnValue([opts.eligible === false ? { eligible: false, block_reason: "dnc_locked" } : { eligible: true }]),
+    fn_norma_eligibility: vi.fn().mockImplementation(() => {
+      const next = opts.eligibleSequence && opts.eligibleSequence.length > 1 ? opts.eligibleSequence.shift() : opts.eligibleSequence?.[0];
+      const ok = next === undefined ? opts.eligible !== false : next;
+      return [ok ? { eligible: true } : { eligible: false, block_reason: "dnc_locked" }];
+    }),
     fn_norma_bind_call_id: vi.fn().mockReturnValue(opts.bind ?? "bound"),
     fn_norma_mark_dispatch_rejected: vi.fn().mockReturnValue("dispatch_rejected"),
     fn_norma_mark_dispatch_unknown: vi.fn().mockReturnValue("dispatch_unknown"),
@@ -37,6 +41,7 @@ function setup(opts: { property?: Record<string, unknown>; notes?: Array<Record<
       client, bland,
       blandConfig: opts.blandConfig === undefined ? blandConfig : opts.blandConfig,
       gate: opts.gate ?? openGate,
+      precallSms: opts.precallSms,
     });
   return { run, sendCall, rpcs, calls, client };
 }
@@ -93,10 +98,51 @@ describe("dispatchNormaCall", () => {
     const t = setup();
     await expect(t.run()).resolves.toEqual({ status: "dispatched", callId: "call-1" });
     expect(t.sendCall).toHaveBeenCalledWith({
-      phoneNumber: PHONE, requestId: REQUEST_ID, idempotencyKey: "22222222-2222-4222-8222-222222222222",
+      phoneNumber: PHONE, requestId: REQUEST_ID, idempotencyKey: "22222222-2222-4222-8222-222222222222", attempt: 1,
       variables: { seller_first_name: "Sam", property_address: "1 Main, KC, MO, 64111", rep_context: "ctx", asking_price: "", latest_notes: "" },
     });
     expect(t.rpcs.fn_norma_bind_call_id).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_call_id: "call-1" });
+  });
+
+  it.each([
+    [1, 22], [2, 22], [1, null], [2, null], [null, 22],
+  ] as const)("serializes row attempt %s with pathway pin %s through real dispatch and the Bland adapter", async (rowAttempt, pathwayVersion) => {
+    const attempt = rowAttempt ?? 1;
+    const config = { ...blandConfig, pathwayVersion };
+    const t = setup({ row: { attempt: rowAttempt } });
+    // Exercise the actual adapter: capture the HTTP boundary without a provider call.
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ status: "success", call_id: `attempt-${attempt}` }),
+      { status: 200 },
+    ));
+    await expect(dispatchNormaCall(REQUEST_ID, {
+      client: t.client,
+      bland: createBlandClient(config, fetchImpl),
+      blandConfig: config,
+      gate: openGate,
+      precallSms: { enabled: false },
+    })).resolves.toEqual({ status: "dispatched", callId: `attempt-${attempt}` });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchImpl.mock.calls[0];
+    expect(url).toBe("https://bland.test/v1/calls");
+    expect(options.method).toBe("POST");
+    const body = JSON.parse(options.body);
+    expect(body.metadata).toEqual({
+      request_id: REQUEST_ID,
+      idempotency_key: "22222222-2222-4222-8222-222222222222",
+      attempt,
+    });
+    expect(body.voicemail).toEqual(attempt === 1
+      ? { action: "hangup" }
+      : { action: "leave_message", message: NORMA_VOICEMAIL_MESSAGE });
+    if (pathwayVersion === null) expect(body).not.toHaveProperty("pathway_version");
+    else expect(body.pathway_version).toBe(22);
+    expect(body.record).toBe(true);
+    expect(body.max_duration).toBe(10);
+    expect(body).not.toHaveProperty("retry");
+    expect(t.rpcs.fn_norma_claim_dispatch).toHaveBeenCalledWith({
+      p_request_id: REQUEST_ID, p_expected_attempt: attempt,
+    });
   });
 
   describe("asking_price and latest_notes variables", () => {
@@ -234,5 +280,73 @@ describe("dispatchNormaCall", () => {
     const t = setup({ bind: "call_id_conflict" });
     await expect(t.run()).resolves.toEqual({ status: "unknown", reason: "bind_failed" });
     expect(t.rpcs.fn_norma_mark_dispatch_unknown).toHaveBeenCalled();
+  });
+
+  it("the claim is fenced on the attempt read, and that same attempt goes into the Bland metadata", async () => {
+    const t = setup({ row: { attempt: 2 } });
+    await t.run();
+    expect(t.rpcs.fn_norma_claim_dispatch).toHaveBeenCalledWith({ p_request_id: REQUEST_ID, p_expected_attempt: 2 });
+    expect(t.sendCall.mock.calls[0][0].attempt).toBe(2);
+    const stale = setup({ claim: false });
+    await expect(stale.run()).resolves.toEqual({ status: "not_claimed" });
+    expect(stale.sendCall).not.toHaveBeenCalled();
+  });
+
+  describe("pre-call text (attempt 1 only)", () => {
+    const sent = (): import("./precall-sms").PrecallDeps => ({
+      enabled: true,
+      send: vi.fn(async () => ({ status: "sent", messageId: "m", externalId: "e" }) as never),
+    });
+
+    it("default (disabled): no text, no extra eligibility read", async () => {
+      const t = setup({});
+      await t.run();
+      expect(t.rpcs.fn_norma_eligibility).toHaveBeenCalledTimes(1);
+    });
+
+    it("attempt 1: the text goes out BEFORE the dial, eligibility is rechecked after it, the result is recorded", async () => {
+      const precallSms = sent();
+      const order: string[] = [];
+      (precallSms.send as ReturnType<typeof vi.fn>).mockImplementation(async () => (order.push("sms"), { status: "sent", messageId: "m", externalId: "e" }));
+      const t = setup({ precallSms });
+      t.sendCall.mockImplementation(async () => (order.push("dial"), { kind: "accepted", callId: "call-1" }));
+      t.rpcs.fn_norma_eligibility.mockImplementation(() => (order.push("eligibility"), [{ eligible: true }]));
+      await expect(t.run()).resolves.toEqual({ status: "dispatched", callId: "call-1" });
+      expect(order).toEqual(["eligibility", "sms", "eligibility", "dial"]);
+    });
+
+    it("a refused text still places the call", async () => {
+      const precallSms: import("./precall-sms").PrecallDeps = { enabled: true, send: vi.fn(async () => ({ status: "blocked_landline", reason: "x" }) as never) };
+      const t = setup({ precallSms });
+      await expect(t.run()).resolves.toEqual({ status: "dispatched", callId: "call-1" });
+      expect(t.sendCall).toHaveBeenCalledTimes(1);
+    });
+
+    it("a thrown text error still places the call", async () => {
+      const precallSms: import("./precall-sms").PrecallDeps = { enabled: true, send: vi.fn(async () => { throw new Error("boom"); }) };
+      const t = setup({ precallSms });
+      await expect(t.run()).resolves.toEqual({ status: "dispatched", callId: "call-1" });
+    });
+
+    it("the seller became ineligible while the text was going out: no dial", async () => {
+      const t = setup({ precallSms: sent(), eligibleSequence: [true, false] });
+      await expect(t.run()).resolves.toEqual({ status: "rejected", reason: "ineligible:dnc_locked" });
+      expect(t.sendCall).not.toHaveBeenCalled();
+    });
+
+    it("attempt 2 (the retry) never texts again", async () => {
+      const precallSms = sent();
+      const t = setup({ precallSms, row: { attempt: 2 } });
+      await expect(t.run()).resolves.toEqual({ status: "dispatched", callId: "call-1" });
+      expect(precallSms.send).not.toHaveBeenCalled();
+      expect(t.rpcs.fn_norma_eligibility).toHaveBeenCalledTimes(1);
+    });
+
+    it("an ineligible lead is never texted", async () => {
+      const precallSms = sent();
+      const t = setup({ precallSms, eligible: false });
+      await expect(t.run()).resolves.toMatchObject({ status: "rejected" });
+      expect(precallSms.send).not.toHaveBeenCalled();
+    });
   });
 });

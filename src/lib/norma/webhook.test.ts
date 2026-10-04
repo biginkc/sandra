@@ -121,6 +121,44 @@ describe("bland webhook route core", () => {
     expect((await post(client, call())).body).toEqual({ status: "ignored", reason: "call_id_mismatch" });
   });
 
+  it("passes the attempt echoed in the call metadata (default 1) and acknowledges a stale-attempt result as ignored", async () => {
+    const { client, complete } = setup();
+    await post(client, call());
+    expect(complete.mock.calls[0]![0].p_payload).toMatchObject({ attempt: 1 });
+    await post(client, call({ metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt: 2 } }));
+    expect(complete.mock.calls[1]![0].p_payload).toMatchObject({ attempt: 2 });
+    await post(client, call({ metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt: "x" } }));
+    expect(complete.mock.calls[2]![0].p_payload).toMatchObject({ attempt: 0 });
+    const stale = setup({ result: "stale_attempt", status: "dispatching" });
+    expect(await post(stale.client, call())).toEqual({ status: 200, body: { status: "ignored", reason: "stale_attempt" } });
+  });
+
+  it.each([99_999_999_999, "99999999999", Number.MAX_SAFE_INTEGER, 3, -1, 1.5])("fences invalid attempt %s before the SQL integer cast", async (attempt) => {
+    const { client, complete } = setup({ result: "stale_attempt", status: "dispatched" });
+    expect(await post(client, call({ metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt } })))
+      .toEqual({ status: 200, body: { status: "ignored", reason: "stale_attempt" } });
+    expect(complete.mock.calls[0]![0].p_payload).toMatchObject({ attempt: 0 });
+  });
+
+  it.each(["1", "2"])("preserves valid string attempt %s", async (attempt) => {
+    const { client, complete } = setup();
+    await post(client, call({ metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt } }));
+    expect(complete.mock.calls[0]![0].p_payload).toMatchObject({ attempt: Number(attempt) });
+  });
+
+  it("attempt-2 voicemail without a pathway outcome completes as confirmed no_answer", async () => {
+    const { client, complete } = setup({ result: "applied", status: "completed", outcome: "no_answer" });
+    expect(await post(client, call({
+      answered_by: "voicemail",
+      variables: { call_outcome: "" },
+      metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt: 2 },
+    }))).toEqual({ status: 200, body: { status: "applied" } });
+    expect(complete).toHaveBeenCalledWith({
+      p_request_id: REQUEST_ID, p_call_id: "call-1", p_outcome: "no_answer",
+      p_payload: expect.objectContaining({ attempt: 2 }),
+    });
+  });
+
   it("unmappable payloads complete as unknown (parked for a human)", async () => {
     const { client, complete } = setup({ result: "applied", status: "needs_review", outcome: "unknown" });
     await post(client, call({ variables: {} }));

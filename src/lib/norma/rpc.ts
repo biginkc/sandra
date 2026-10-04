@@ -95,8 +95,12 @@ export async function createNormaRequest(
 }
 
 /** requested -> dispatching. Exactly one caller wins. */
-export async function claimNormaDispatch(client: Client, requestId: string): Promise<boolean> {
-  const { data, error } = await client.rpc("fn_norma_claim_dispatch", { p_request_id: requestId });
+/** `expectedAttempt`: the attempt the caller read; a row that has since moved to another attempt is not claimed. */
+export async function claimNormaDispatch(client: Client, requestId: string, expectedAttempt?: number): Promise<boolean> {
+  const { data, error } = await client.rpc("fn_norma_claim_dispatch", {
+    p_request_id: requestId,
+    ...(expectedAttempt !== undefined ? { p_expected_attempt: expectedAttempt } : {}),
+  });
   if (error) fail("fn_norma_claim_dispatch", error);
   return data === true;
 }
@@ -147,13 +151,14 @@ export async function markNormaNeedsReview(client: Client, requestId: string, re
 /** The only path by which a call result touches CRM state. Replay-safe. */
 export async function completeNormaCall(
   client: Client,
-  params: { requestId: string; callId: string; outcome: NormaOutcome; payload?: NormaCompletionPayload },
+  /** `attempt`: the attempt the caller's call belongs to; a result for any other attempt is a stale no-op. */
+  params: { requestId: string; callId: string; outcome: NormaOutcome; payload?: NormaCompletionPayload; attempt?: number },
 ): Promise<NormaCompleteResult> {
   const { data, error } = await client.rpc("fn_norma_complete_call", {
     p_request_id: params.requestId,
     p_call_id: params.callId,
     p_outcome: params.outcome,
-    p_payload: (params.payload ?? {}) as Json,
+    p_payload: { ...(params.payload ?? {}), ...(params.attempt !== undefined ? { attempt: params.attempt } : {}) } as Json,
   });
   if (error) fail("fn_norma_complete_call", error);
   const raw = (data ?? {}) as Record<string, unknown>;

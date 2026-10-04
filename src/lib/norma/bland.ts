@@ -16,6 +16,12 @@ export type BlandSendCallParams = {
   phoneNumber: string;
   requestId: string;
   idempotencyKey: string;
+  /**
+   * Call-twice attempt from #771, echoed in webhook metadata for stale-call fencing.
+   * Attempt 1 hangs up; attempt 2 leaves the voicemail. Dispatch always supplies it.
+   * The adapter default for an omitted attempt is not a standalone dispatch workflow.
+   */
+  attempt?: number;
   /** Pathway variables, passed as Bland `request_data`. */
   variables: Record<string, string>;
 };
@@ -72,18 +78,40 @@ async function readJson(response: Response): Promise<Record<string, unknown> | n
   }
 }
 
-/** Build the exact send-call body. Exported for tests; contains no script text. */
+/** Spoken after the beep. Digits are spaced so the voice reads them one by one. */
+export const NORMA_VOICEMAIL_MESSAGE =
+  "Hi, this is Norma with The BMH Group, following up on your offer for your property. Please call us back at 8 1 6, 2 8 0, 4 1 8 1.";
+
+/** Bland `max_duration` is minutes (https://docs.bland.ai/api-v1/post/calls). */
+export const NORMA_MAX_DURATION_MINUTES = 10;
+
+/**
+ * A single call (no attempt) and attempt 2 leave the message. Attempt 1 hangs
+ * up so the call-twice retry does not leave a voicemail before the second dial.
+ * A message is omitted on hangup: Bland treats a message as leave-message.
+ */
+export function normaVoicemail(attempt: number | undefined): { action: "hangup" } | { action: "leave_message"; message: string } {
+  if (attempt != null && attempt !== 2) return { action: "hangup" };
+  return { action: "leave_message", message: NORMA_VOICEMAIL_MESSAGE };
+}
+
+/** Build the exact send-call body. Exported for tests. No pathway script fields (`task`, `prompt`, `first_sentence`). */
 export function buildSendCallBody(config: NormaBlandConfig, params: BlandSendCallParams) {
   return {
     phone_number: params.phoneNumber,
     pathway_id: config.pathwayId,
-    pathway_version: config.pathwayVersion,
+    // Omit pathway_version unless explicitly pinned. Bland then uses the
+    // published production version (docs: "Defaults to the production version").
+    ...(config.pathwayVersion == null ? {} : { pathway_version: config.pathwayVersion }),
     voice: config.voice,
     from: config.fromNumber,
-    metadata: { request_id: params.requestId, idempotency_key: params.idempotencyKey },
+    metadata: { request_id: params.requestId, idempotency_key: params.idempotencyKey, attempt: params.attempt ?? 1 },
     webhook: config.webhookUrl,
-    // No voicemail message, no retry: a no-answer ends the attempt.
-    voicemail: { action: "hangup" },
+    // No Bland-side retry. Voicemail depends on the call-twice attempt, when present.
+    voicemail: normaVoicemail(params.attempt),
+    // Recording is a reviewed behavior change: verify disclosure in the exact pinned pathway before release.
+    record: true,
+    max_duration: NORMA_MAX_DURATION_MINUTES,
     request_data: params.variables,
     // Let the person say hello first; play office background instead of static.
     wait_for_greeting: config.waitForGreeting,
