@@ -250,3 +250,106 @@ offer-logged-after-confirmation integration test.
 Telnyx as dialer (requires porting numbers), Deepgram/Claude transcription, inbound call handling on
 Telnyx, Assigns.com integration (no API found), Jitter summary billing (Jarrad), portfolio of local
 caller-ID numbers.
+
+---
+
+## Phase 0 pre-reads (2026-10-04, read-only; no code, no provider calls)
+
+Sources: Dialpad developer docs, the 15 Dialpad events stored in production, the BMH Secrets vault
+(service-account view), and Assigns.com while logged in. Nothing here changes a decision on its own;
+proposed plan edits are listed at the end for review.
+
+### Dialpad API (developers.dialpad.com)
+
+- **`POST /api/v2/users/{id}/initiate_call`** ([ref](https://developers.dialpad.com/reference/usersinitiate_call)).
+  Body: `phone_number`, `outbound_caller_id`, `group_id`, `group_type`, `custom_data` (string,
+  "passed through to any subscribed call events", no documented size limit). Response is a `device`
+  object, **no `call_id`**. Needs the web/desktop app or a CTI device; mobile app and deskphones
+  unsupported. Rate limit 5/min **per user target** ([ref](https://developers.dialpad.com/docs/rate-limits)).
+  No scope named; a user-level key may pass `me` as the id. Docs silent on ring-first vs dial-now.
+- **`POST /api/v2/call`** ("initiate via ring", [ref](https://developers.dialpad.com/reference/callinitiate)).
+  "Rings all devices (or a single specified device)" including **mobile and deskphones**; body adds
+  `user_id` (required), `device_id`, `is_consult`; **returns `call_id`**. 5/min. Not considered in the
+  decision record. Whether it rings Jarrad first and then dials the seller is undocumented; if it does,
+  it is the "ring-then-connect" behaviour D4 assumed Dialpad could not do. Spike both endpoints.
+- **Call events** ([subscription](https://developers.dialpad.com/reference/webhook_call_event_subscriptioncreate),
+  [payload](https://developers.dialpad.com/docs/call-events)). Subscription takes `endpoint_id`,
+  `call_states[]`, `target_type`/`target_id` (user scoping supported). `custom_data` is present only for
+  calls started via the API or the app launch URL; for group calls only on the operator event. Signing
+  is JWT HS256 with the shared secret (matches Sandra's verifier). Docs are **silent on whether natively
+  dialed calls (desktop/mobile) fire events**; the spike item stands.
+- **Recordings and transcripts.** The docs never list `admin_recording_urls` on any event; recordings
+  are documented as a separate `recording` state with `recording_details[]`/`recording_url[]`, and
+  `public_call_review_share_link` only on `call_transcription`. **Production disagrees and wins**: all
+  five hangup payloads stored Sept 30–Oct 1 carry `admin_recording_urls[0]`
+  (`https://dialpad.com/blob/adminrecording/<id>.mp3`), `public_call_review_share_link`
+  (`dialpad.com/shared/call/…`), `company_call_review_share_link`, `recording_details`,
+  `voicemail_link`, `transcription_text` and `custom_data`; `connected` events already carry
+  `admin_recording_urls`, `calling` events do not. Recording URLs in events require the
+  `recordings_export` scope (or a company-admin key plus Dialpad support enabling export). Download
+  auth and URL expiry are undocumented (spike). Fallbacks after the fact:
+  `GET /api/v2/call/{id}` (10/min; returns `admin_call_recording_share_links`, `recording_details`,
+  `transcription_text`, `custom_data`), `POST /api/v2/recording_share_link` (100/min),
+  `GET /api/v2/transcripts/{call_id}` (lines + moments, 1200/min, **no summary**). The summary D5 relies
+  on comes from the `recap_*` event fields or `GET … ai_recap` (scope `ai_recap`, 12/min).
+- **Keys and scopes.** Only company admins create API keys; company keys act across all users.
+  Documented scopes: `recordings_export`, `message_content_export`, `screen_pop`, `calls:list`,
+  `fax_message`, `change_log`, `offline_access`, plus endpoint-level `ai_recap` and others.
+
+### Production state (sandra-crm, queried 2026-10-04)
+
+- `dialpad_call_events`: **15 rows = 5 calls × calling/connected/hangup**, all `matched`, **0
+  quarantined**, all outbound, all with `custom_data`. The `no_custom_data` quarantine path has never
+  fired.
+- `dialpad_org_connections.status = 'disabled'` since 2026-10-01. The voice webhook returns **401 and
+  stores nothing** for a disabled connection (`src/lib/dialpad-cti/event-processing.ts:163`). So every
+  call since Oct 1 was dropped, not quarantined: **there is nothing to replay**, and Dialpad may have
+  disabled the subscription after sustained 401s. Phase 0 must read the subscription state before
+  relying on it.
+
+### 1Password (BMH Secrets vault)
+
+- **Dialpad:** four items. `Dialpad - API` (API credential, created 2026-04-02, updated 05-18) and
+  `DialPad Sandra API key` (secure note, 2026-05-17) both have **empty notes**: no owner user, company,
+  or scopes recorded. `Dialpad - CTI Client ID` (09-26) and `Dialpad - CTI Webhook Secret - BMH`
+  (09-29, managed by provisioning) are not API keys. Scope can only be learned from Dialpad Admin >
+  API Keys or a test call.
+- **ATTOM:** none. **RentCast:** none. **Assigns:** no stored login.
+- **Dropbox Sign:** `Dropbox Sign - Sandra eSign Test Mode` (2026-08-30: API key, client id, callback
+  secret, embedded domain `sandra.bmhgroupkc.com`) exists, so the Phase 0 template audit and the Phase 3
+  send test have a test-mode key. Production login `Dropbox Sign - BMH Acquisitions Login`.
+
+### Assigns.com (logged in, Pro plan)
+
+- **API:** Compass → Developer exposes `https://api.assigns.com/api` with one endpoint,
+  `POST /webhooks/contacts` (create a Mini CRM contact) under workspace API keys. Inbound only. No
+  comps, property, or valuation endpoint; no CSV/PDF export on the Comp Map or Report tab. "No API" in
+  Out of scope is confirmed.
+- **Where the data comes from** (observed on the Comp Map's own backend calls
+  `app.assigns.com/api/comp/search` and `/api/comp/property`): every comp record carries
+  `dataSource: "attom"`; the subject property's value is `zestimate`/`rentZestimate` with
+  `source: "zillow"`; the property record is `dataSource: "PUBLIC_RECORD"` with `parcelNumber`,
+  `legalDescription`, `mlsId`/`mlsSource`, `parcelGeometry` and an `ownerData` block (loans, balances,
+  rates). So **Assigns' sold comps are ATTOM**, its headline value is Zillow's Zestimate, and the owner
+  panel is public record.
+- The legal description shown for a KC lead was the subdivision name only ("VINEYARD WOODS"), not a
+  full legal. D8's rule against prefilling legal/vesting from a low-confidence source stands; the ATTOM
+  trial must check legal-description completeness explicitly.
+- Usage is metered on the Pro plan (comp searches counted; AI searches 100/cycle; skip trace
+  25,000/month).
+
+### Proposed plan edits from the pre-reads (for Codex review and Jarrad)
+
+1. **Phase 0 item 1:** test `POST /api/v2/call` beside `initiate_call` (ring order, `call_id`, mobile);
+   `GET /api/v2/subscriptions/call` to confirm the user-scoped subscription survived the 401 period;
+   `GET /api/v2/call/{id}`, `/transcripts/{id}` and `ai_recap` as the after-the-fact path for links,
+   transcript and summary.
+2. **Phase 2:** drop "replay quarantined events since Sept 29"; nothing was stored while disabled.
+3. **What needs Jarrad:** say which of the two stored Dialpad keys is live and confirm it carries
+   `recordings_export` and `ai_recap` (or is a company-admin key with export enabled by support).
+4. **D6 validation:** comparing ATTOM comps against Assigns compares ATTOM against itself. Reframe the
+   20-lead check as ATTOM AVM vs Zestimate vs Jarrad's own number, and judge the sold-comps list on
+   completeness, not agreement.
+5. **D5 wording:** "Dialpad's own transcript and summary" means the transcripts endpoint plus AI Recap,
+   each with its own scope and rate limit; the hangup payload carries only the voicemail
+   `transcription_text`.
