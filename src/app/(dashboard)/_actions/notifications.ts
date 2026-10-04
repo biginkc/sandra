@@ -16,7 +16,8 @@ export type NotificationRow = {
     | "property_assigned"
     | "bulk_action_completed"
     | "task_assigned"
-    | "task_appointment_reminder";
+    | "task_appointment_reminder"
+    | "inbox_optout_not_applied";
   entityType: "property" | "job" | "task" | "message";
   entityId: string;
   href: string;

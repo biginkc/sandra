@@ -48,7 +48,7 @@ test('manifest entries are ordered, hashed, and exhaustive', () => {
   assert.match(RESERVED_BLOCK_END, /^\d{14}$/);
   assert.equal(execFileSync('node', ['scripts/inbox-ci/inbox-migrations.mjs', '--reserved-block-end'], { encoding: 'utf8' }).trim(), RESERVED_BLOCK_END);
   assert.deepEqual(entries.map(entry => entry.version), versions());
-  assert.match(sqlInList(), /^'20261004050000','20261004050100','20261004050200','20261004050250','20261004050260'$/);
+  assert.match(sqlInList(), /^'20261004050000','20261004050100','20261004050200','20261004050250','20261004050260','20261004050300'$/);
   assert.deepEqual(versions(), [...versions()].sort());
 });
 

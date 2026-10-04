@@ -23,5 +23,10 @@
     "version": "20261004050260",
     "name": "inbox_drip_markers",
     "sha256": "bd1bc395cee49b1bd6daae3672267319bafba939ce71d66157e44bee26473382"
+  },
+  {
+    "version": "20261004050300",
+    "name": "inbox_optout_scope_retry",
+    "sha256": "470b33e089fcdd020eb5456b1ac6630d23bf3c748e1fa0789f0cb04f01e3cfc3"
   }
 ]

@@ -273,6 +273,7 @@ test("a legitimate new timestamp migration newer than history's max passes", () 
 test("renumbered Inbox files pass the ledger high-water gate while old names fail", () => {
   const migrationsDir = join(import.meta.dirname, "..", "supabase", "migrations");
   const manifest = JSON.parse(readFileSync(join(import.meta.dirname, "inbox-ci", "inbox-migrations.json"), "utf8"));
+  const legacyPrefix = ['2026', '09', '3004'].join('');
   const manifestVersions = new Set(manifest.map(entry => entry.version));
   const local = loadLocalMigrationVersions(migrationsDir);
   const history = local
@@ -283,7 +284,7 @@ test("renumbered Inbox files pass the ledger high-water gate while old names fai
   assert.equal(accepted.ok, true, JSON.stringify(accepted));
   assert.deepEqual(accepted.pending.map(entry => entry.version), manifest.map(entry => entry.version));
 
-  const oldVersions = ["0000", "0100", "0200"].map(suffix => ["2026", "09", "3004"].join("") + suffix);
+  const oldVersions = manifest.map((_, index) => `${legacyPrefix}${String(index * 100).padStart(4, "0")}`);
   const oldLocal = local.filter(entry => !manifestVersions.has(entry.version));
   oldLocal.push(...manifest.map((entry, index) => ({ file: `${oldVersions[index]}_${entry.name}.sql`, version: oldVersions[index] })));
   const refused = evaluateSafety(history, oldLocal);
