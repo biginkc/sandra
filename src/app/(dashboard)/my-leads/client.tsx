@@ -940,34 +940,35 @@ export function MyLeadsClient({
         : null,
     [snapshot, drips, pinRead, target.propertyId],
   );
-  const basePages =
-    snapshot && view ? stagePages(view.snapshot, view.drips) : null;
+  const basePages = useMemo(
+    () => (snapshot && view ? stagePages(view.snapshot, view.drips) : null),
+    [snapshot, view],
+  );
   // "In Call next: <reason>" on the lead's row and detail, computed from the strip snapshot.
-  const stripReasons = new Map<string, string>();
-  if (strip) {
+  const pages = useMemo(() => {
+    if (!basePages || !strip) return basePages;
     const stripNow = new Date(strip.snapshotAt);
+    const reasons = new Map<string, string>();
     for (const item of strip.rows)
-      stripReasons.set(
+      reasons.set(
         item.propertyId,
         reasonLabel(item.reason, item.reasonAt, stripNow),
       );
-  }
-  const pages =
-    basePages && stripReasons.size
-      ? (Object.fromEntries(
-          Object.entries(basePages).map(([stage, page]) => [
-            stage,
-            {
-              ...page,
-              rows: page.rows.map((row) =>
-                stripReasons.has(row.propertyId)
-                  ? { ...row, stripReason: stripReasons.get(row.propertyId) }
-                  : row,
-              ),
-            },
-          ]),
-        ) as unknown as typeof basePages)
-      : basePages;
+    if (!reasons.size) return basePages;
+    return Object.fromEntries(
+      Object.entries(basePages).map(([stage, page]) => [
+        stage,
+        {
+          ...page,
+          rows: page.rows.map((row) =>
+            reasons.has(row.propertyId)
+              ? { ...row, stripReason: reasons.get(row.propertyId) }
+              : row,
+          ),
+        },
+      ]),
+    ) as unknown as typeof basePages;
+  }, [basePages, strip]);
   // Show the lead in place when a loaded page has it; otherwise pin it at the top of its section.
   const pinnedLookup =
     target.propertyId &&
@@ -999,8 +1000,19 @@ export function MyLeadsClient({
             ) ?? null,
         }
       : null;
-  if (pages)
-    for (const stage of loadingStages) pages[stage].isLoadingMore = true;
+  // Pages are memoized, so the loading flag goes on copies, never on the cached objects.
+  const queuePages =
+    pages && loadingStages.size
+      ? {
+          ...pages,
+          ...Object.fromEntries(
+            [...loadingStages].map((stage) => [
+              stage,
+              { ...pages[stage], isLoadingMore: true },
+            ]),
+          ),
+        }
+      : pages;
   const motivation =
     dialog?.row.motivationKind === "specified"
       ? { kind: "specified" as const, text: dialog.row.motivationText ?? "" }
@@ -1207,7 +1219,7 @@ export function MyLeadsClient({
           )}
           <MyLeadsQueue
             canSelectRep={viewer.isOwner}
-            stages={pages}
+            stages={queuePages!}
             drips={view?.drips ?? drips}
             kpis={tiles}
             search={search}

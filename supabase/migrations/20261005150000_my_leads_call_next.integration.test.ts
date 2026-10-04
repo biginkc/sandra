@@ -361,6 +361,72 @@ it('pins stay until a call or Chicago midnight; a text or note does not unpin; h
   });
 });
 
+it('caps tier 1 at 7 calendar days overdue (Chicago); older callbacks become missed_callback in tier 4, oldest first', async () => {
+  await withDb(async (db) => {
+    const w = await world(db);
+    // 2026-03-10 10:00 CDT. Seven calendar days earlier is 2026-03-03 10:00 CST = 16:00Z
+    // (the DST change on 03-08 makes it 7d + 1h of elapsed time).
+    const at = new Date('2026-03-10T15:00:00Z');
+    const cutoff = new Date('2026-03-03T16:00:00Z');
+    const lead = async (key: string, due: Date) => { const id = await w.lead(key); await w.appt(id, due.toISOString()); return id; };
+    const exact = await lead('exact', cutoff);
+    const justOver = await lead('justOver', new Date(cutoff.getTime() - 1000));
+    const elapsed7d = await lead('elapsed7d', new Date(at.getTime() - 7 * DAY));   // 09:00 CST: older than the calendar cutoff
+    const old30 = await lead('old30', new Date(at.getTime() - 30 * DAY));
+    const old10 = await lead('old10', new Date(at.getTime() - 10 * DAY));
+    const recent = await lead('recent', new Date(at.getTime() - 2 * DAY));
+    const r = await w.rowsAt(at);
+    expect(r[exact]).toMatchObject({ tier: 1, reason: 'appointment_overdue' });
+    expect(r[recent]).toMatchObject({ tier: 1 });
+    for (const id of [justOver, elapsed7d, old30, old10]) expect(r[id], id).toMatchObject({ tier: 4, reason: 'missed_callback' });
+    expect(new Date(r[old30].reason_at).toISOString()).toBe(new Date(at.getTime() - 30 * DAY).toISOString());
+    const missed = w.order(r).filter((id) => r[id].reason === 'missed_callback');
+    expect(missed).toEqual([old30, old10, elapsed7d, justOver]);
+    // Tier 1 leads sit above every missed callback.
+    const all = w.order(r);
+    expect(all.indexOf(recent)).toBeLessThan(all.indexOf(old30));
+    // An offer follow-up appointment is never a missed callback.
+    const offerLead = await w.lead('offerOld', { stage: 'offer_sent' });
+    const chainId = await w.appt(offerLead, new Date(at.getTime() - 20 * DAY).toISOString());
+    await w.offer(offerLead, { sentAt: new Date(at.getTime() - 25 * DAY).toISOString(), followUpAt: new Date(at.getTime() - 20 * DAY).toISOString(), chain: chainId });
+    expect((await w.rowsAt(at))[offerLead]).toMatchObject({ tier: 3, reason: 'offer_follow_up_overdue' });
+  });
+});
+
+it('a hide never buries a due callback or an inbound newer than the hide, but hides everything else', async () => {
+  await withDb(async (db) => {
+    const w = await world(db);
+    const hide = (id: string) => w.raw('insert into public.my_leads_strip_overrides(org_id,member_id,property_id,hidden_until,updated_at) values ($1,$2,$3,$4,$5)', [w.org, w.sam, id, w.at(5 * HOUR), w.at(-2 * HOUR)]);
+    const plain = await w.lead('plain');
+    const due = await w.lead('due'); await w.appt(due, w.at(-1 * HOUR));
+    const dueSoon = await w.lead('dueSoon'); await w.appt(dueSoon, w.at(10 * MIN));
+    const textNew = await w.lead('textNew'); await w.text(textNew, 'inbound', w.at(-1 * HOUR));
+    const callNew = await w.lead('callNew'); await w.call(callNew, 'inbound', w.at(-30 * MIN));
+    const textOld = await w.lead('textOld'); await w.text(textOld, 'inbound', w.at(-3 * HOUR));
+    const cold = await w.lead('cold', { motivation: 'hot' }); await w.attempt(cold, w.at(-9 * DAY));
+    for (const id of [plain, due, dueSoon, textNew, callNew, textOld, cold]) await hide(id);
+    const r = await w.rows();
+    for (const id of [due, dueSoon, textNew, callNew]) expect(r[id].hidden, id).toBe(false);
+    for (const id of [plain, textOld, cold]) expect(r[id].hidden, id).toBe(true);
+    const snap = await w.strip10(w.sam);
+    const shown = snap.rows.map((x: Json) => x.propertyId);
+    expect(shown).toEqual(expect.arrayContaining([due, dueSoon, textNew, callNew]));
+    for (const id of [plain, textOld, cold]) expect(shown).not.toContain(id);
+    expect(snap.hiddenCount).toBe(3);
+  });
+});
+
+it('the newest "Call today" pin sorts first', async () => {
+  await withDb(async (db) => {
+    const w = await world(db);
+    const a = await w.lead('a'); const b = await w.lead('b'); const c = await w.lead('c');
+    for (const [id, ago] of [[a, 3], [b, 1], [c, 2]] as const)
+      await w.raw('insert into public.my_leads_strip_overrides(org_id,member_id,property_id,pinned_at,pinned_until) values ($1,$2,$3,$4,$5)', [w.org, w.sam, id, w.at(-ago * HOUR), w.at(5 * HOUR)]);
+    expect(w.order(await w.rows()).slice(0, 3)).toEqual([b, c, a]);
+    expect((await w.strip10(w.sam)).rows.map((x: Json) => x.propertyId).slice(0, 3)).toEqual([b, c, a]);
+  });
+});
+
 it('computes "midnight" in America/Chicago across both DST changes and the day boundary', async () => {
   await withDb(async (db) => {
     const mid = async (iso: string) => new Date((await db.query('select public.my_leads_next_chicago_midnight($1::timestamptz) as m', [iso])).rows[0].m).toISOString();
