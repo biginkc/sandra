@@ -8,15 +8,22 @@
 // Commands available in this release:
 //   reassign        --target <uuid> --owner <uuid> [--keep-clock]   (target/owner default to the
 //                   org's single active owner with acquisitions enabled, read from memberships)
-//   close-attempts  [--older-than "7 days"]
+//   close-attempts  [--older-than "7 days"] (apply also needs --cutoff <timestamp printed by the preview>)
 //   rollback        --run <uuid>
 // Later phases add relabel, offer-backfill, link-backfill, phone-backfill, ack-legacy-prompts to
 // COMMANDS below as their SQL functions ship; they are refused until then.
+//
+// Runbook: rolling back a reassign to a deactivated Maria/Mel fails safe (the active-assignee guard
+// trg_properties_active_assignee refuses it) and the lead is reported under notRestored, not forced.
 //
 // Default is a read-only preview. Applying needs BOTH --apply and --confirm <sha256 of the
 // preview JSON this script printed>. The script re-runs the preview, refuses on any difference,
 // then passes the preview's row-level fingerprint to the apply RPC, which locks the rows and
 // recomputes it inside the mutation transaction (so rows cannot change between preview and apply).
+//
+// The printed preview includes the Supabase host (not a secret), so the confirm hash is tied to one
+// environment. The script refuses to start unless OP_SERVICE_ACCOUNT_TOKEN is present, i.e. it was
+// launched through `op run` with the BMH service account.
 //
 // Secrets: SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL) and SUPABASE_SERVICE_ROLE_KEY are injected
 // by `op run` from the BMH service account. This script never calls the 1Password SDK, never
@@ -41,7 +48,8 @@ export const COMMANDS = {
   "close-attempts": {
     needs: ["org"],
     rpc: "fn_my_leads_housekeeping_close_attempts",
-    args: (o) => ({ p_org_id: o.org, p_older_than: o.olderThan ?? "7 days" }),
+    args: (o) => ({ p_org_id: o.org, p_older_than: o.olderThan ?? "7 days", p_cutoff: o.cutoff ?? null }),
+    needsCutoffToApply: true,
   },
   rollback: { needs: ["org", "run"], rollback: true },
 };
@@ -59,7 +67,7 @@ export function parseArgs(argv) {
     const a = rest[i];
     if (a === "--apply") o.apply = true;
     else if (a === "--keep-clock") o.keepClock = true;
-    else if (["--org", "--target", "--owner", "--run", "--confirm", "--older-than"].includes(a)) {
+    else if (["--org", "--target", "--owner", "--run", "--confirm", "--older-than", "--cutoff"].includes(a)) {
       const key = a.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
       o[key] = value(i, a.slice(2));
       i += 1;
@@ -113,7 +121,7 @@ async function resolveIdentities(client, o) {
 
 // Runs one command. `io` = { env, out(text), err(text), createClient(url, key) }.
 export async function run(argv, io) {
-  const redact = redactor([io.env.SUPABASE_SERVICE_ROLE_KEY]);
+  const redact = redactor([io.env.SUPABASE_SERVICE_ROLE_KEY, io.env.OP_SERVICE_ACCOUNT_TOKEN]);
   try {
     let o = parseArgs(argv);
     if (LATER.includes(o.command)) {
@@ -123,9 +131,17 @@ export async function run(argv, io) {
     if (!spec) throw new Error(`Unknown command ${o.command ?? "(none)"}; expected ${Object.keys(COMMANDS).join(", ")}`);
     for (const k of spec.needs) if (!o[k]) throw new Error(`--${k} is required for ${o.command}`);
     if (o.confirm && !o.apply) throw new Error("--confirm only makes sense with --apply");
+    if (!io.env.OP_SERVICE_ACCOUNT_TOKEN) {
+      throw new Error("OP_SERVICE_ACCOUNT_TOKEN is not set; run through `op run` with the BMH service account");
+    }
     const url = io.env.SUPABASE_URL ?? io.env.NEXT_PUBLIC_SUPABASE_URL;
     const key = io.env.SUPABASE_SERVICE_ROLE_KEY;
     if (!url || !key) throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be provided by `op run`");
+    let host;
+    try { host = new URL(url).host; } catch { throw new Error("SUPABASE_URL is not a valid URL"); }
+    if (o.apply && spec.needsCutoffToApply && !o.cutoff) {
+      throw new Error("--apply needs --cutoff <timestamp from the preview>");
+    }
     const client = io.createClient(url, key);
     if (spec.resolveIdentities) o = await resolveIdentities(client, o);
 
@@ -133,13 +149,14 @@ export async function run(argv, io) {
       if (spec.rollback) return rpc(client, "fn_my_leads_housekeeping_run_info", { p_run: o.run, p_org_id: o.org });
       return rpc(client, spec.rpc, { ...spec.args(o), p_apply: false });
     };
-    const previewJson = await preview();
+    const previewJson = { supabaseHost: host, ...(await preview()) };
     const printed = canonicalJson(previewJson);
     const hash = sha256Hex(printed);
 
     if (!o.apply) {
       io.out(`${printed}\n`);
-      io.err(`preview only. To apply, re-run with: --apply --confirm ${hash}\n`);
+      const cutoffFlag = spec.needsCutoffToApply && previewJson.cutoff ? ` --cutoff ${previewJson.cutoff}` : "";
+      io.err(`preview only. To apply, re-run with: --apply${cutoffFlag} --confirm ${hash}\n`);
       return 0;
     }
     if (!o.confirm) throw new Error(`--apply needs --confirm <sha256 of the preview>; the current preview hashes to ${hash}`);

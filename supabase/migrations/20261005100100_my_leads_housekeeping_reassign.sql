@@ -30,9 +30,11 @@ language sql stable security definer set search_path = '' as $$
   where m.org_id = p_org_id and m.acquisitions_enabled and m.user_id <> p_target
 $$;
 
--- Internal: sha256 fingerprint of the reassign cohort (ids plus the values the apply changes).
+-- Internal: sha256 fingerprint over exactly the given cohort ids (the same arrays the apply
+-- mutates) plus the values the apply changes.
 create or replace function public.my_leads_housekeeping_reassign_fingerprint(
-  p_org_id uuid, p_target uuid, p_owner uuid, p_keep_clock boolean, p_at timestamptz
+  p_org_id uuid, p_target uuid, p_owner uuid, p_keep_clock boolean,
+  p_prop_ids uuid[], p_task_ids uuid[]
 ) returns text
 language plpgsql stable security definer set search_path = '' as $$
 declare
@@ -43,32 +45,38 @@ begin
   select coalesce(string_agg(p.id::text || ':' || coalesce(p.assigned_user_id::text, '') || ':' || p.updated_at::text,
            ',' order by p.id), '')
   into v_props
-  from public.properties p
-  where p.org_id = p_org_id and p.id in (
-    select sc.property_id from public.my_leads_housekeeping_reassign_scope(p_org_id, p_target, p_at) sc);
+  from public.properties p where p.org_id = p_org_id and p.id = any(p_prop_ids);
 
   select coalesce(string_agg(e.id::text || ':' || e.assignee_user_id::text || ':' || e.eligible::text,
            ',' order by e.id), '')
   into v_eps
   from public.acquisition_assignment_episodes e
-  where e.org_id = p_org_id and e.ended_at is null and e.property_id in (
-    select sc.property_id from public.my_leads_housekeeping_reassign_scope(p_org_id, p_target, p_at) sc);
+  where e.org_id = p_org_id and e.ended_at is null and e.property_id = any(p_prop_ids);
 
   select coalesce(string_agg(t.id::text || ':' || t.assignee_id::text || ':' || t.type || ':' || t.status || ':' ||
            t.due_at::text || ':' || t.calendar_generation::text || ':' || coalesce(t.google_calendar_event_id, '') ||
            ':' || t.updated_at::text, ',' order by t.id), '')
   into v_tasks
-  from public.tasks t
-  where t.org_id = p_org_id and t.assignee_id <> p_target
-    and t.related_property_id in (
-      select sc.property_id from public.my_leads_housekeeping_reassign_scope(p_org_id, p_target, p_at) sc)
-    and ((t.type <> 'appointment' and t.status in ('open', 'snoozed'))
-      or (t.type = 'appointment' and t.status = 'open'));
+  from public.tasks t where t.org_id = p_org_id and t.id = any(p_task_ids);
 
   return encode(sha256(convert_to(
     'reassign|' || p_target::text || '|' || p_owner::text || '|' || p_keep_clock::text ||
     '|' || v_props || '|' || v_eps || '|' || v_tasks, 'utf8')), 'hex');
 end $$;
+
+-- Internal: open tasks to move = open (or snoozed non-appointment) tasks on a scoped lead whose
+-- assignee is that lead's OLD assignee. A VA's or admin's tasks on the lead are left alone.
+create or replace function public.my_leads_housekeeping_reassign_task_ids(
+  p_org_id uuid, p_target uuid, p_at timestamptz
+) returns uuid[]
+language sql stable security definer set search_path = '' as $$
+  select coalesce(array_agg(tk.id order by tk.id), '{}'::uuid[])
+  from public.my_leads_housekeeping_reassign_scope(p_org_id, p_target, p_at) sc
+  join public.tasks tk on tk.org_id = p_org_id and tk.related_property_id = sc.property_id
+    and tk.assignee_id = sc.old_assignee
+  where ((tk.type <> 'appointment' and tk.status in ('open', 'snoozed'))
+      or (tk.type = 'appointment' and tk.status = 'open'))
+$$;
 
 create or replace function public.fn_my_leads_housekeeping_reassign(
   p_org_id uuid,
@@ -84,11 +92,14 @@ declare
   v_run uuid;
   r record;
   t record;
+  v_prop_ids uuid[];
+  v_task_ids uuid[];
   v_leads jsonb;
   v_lead_count int;
   v_na int;
   v_appt int;
   v_inflight int;
+  v_by_assignee jsonb;
   v_sample jsonb;
   v_fp text;
   v_preview jsonb;
@@ -128,36 +139,34 @@ begin
     if p_fingerprint is null then
       raise exception 'FINGERPRINT_REQUIRED: apply needs the fingerprint from the preview' using errcode = 'P0001';
     end if;
-    -- Serialize housekeeping per org, then lock the whole cohort before recomputing the fence.
+    -- Serialize housekeeping per org, lock the candidate rows, then (below) rebuild the id
+    -- arrays under those locks: the fingerprint and every mutation use exactly those arrays.
     perform pg_advisory_xact_lock(hashtextextended('my-leads-housekeeping:' || p_org_id::text, 0));
     perform 1 from public.properties p
     where p.org_id = p_org_id and p.id in (
       select sc.property_id from public.my_leads_housekeeping_reassign_scope(p_org_id, p_target, v_now) sc)
     order by p.id for update;
     perform 1 from public.tasks tk
-    where tk.org_id = p_org_id and tk.assignee_id <> p_target
-      and tk.related_property_id in (
-        select sc.property_id from public.my_leads_housekeeping_reassign_scope(p_org_id, p_target, v_now) sc)
-      and ((tk.type <> 'appointment' and tk.status in ('open', 'snoozed'))
-        or (tk.type = 'appointment' and tk.status = 'open'))
+    where tk.org_id = p_org_id
+      and tk.id = any(public.my_leads_housekeeping_reassign_task_ids(p_org_id, p_target, v_now))
     order by tk.id for update;
   end if;
 
-  select coalesce(jsonb_agg(jsonb_build_object('from', s.old_assignee, 'count', s.n) order by s.old_assignee), '[]'::jsonb),
-         coalesce(sum(s.n), 0)::int
-  into v_leads, v_lead_count
+  select coalesce(array_agg(sc.property_id order by sc.property_id), '{}'::uuid[])
+  into v_prop_ids
+  from public.my_leads_housekeeping_reassign_scope(p_org_id, p_target, v_now) sc;
+  v_task_ids := public.my_leads_housekeeping_reassign_task_ids(p_org_id, p_target, v_now);
+  v_lead_count := coalesce(array_length(v_prop_ids, 1), 0);
+
+  select coalesce(jsonb_agg(jsonb_build_object('from', s.old_assignee, 'count', s.n) order by s.old_assignee), '[]'::jsonb)
+  into v_leads
   from (
     select sc.old_assignee, count(*) as n
     from public.my_leads_housekeeping_reassign_scope(p_org_id, p_target, v_now) sc
     group by sc.old_assignee
   ) s;
-
-  select coalesce(jsonb_agg(x.property_id order by x.property_id) filter (where x.rn <= 20), '[]'::jsonb)
-  into v_sample
-  from (
-    select sc.property_id, row_number() over (order by sc.property_id) as rn
-    from public.my_leads_housekeeping_reassign_scope(p_org_id, p_target, v_now) sc
-  ) x;
+  select coalesce(jsonb_agg(u.x order by u.x), '[]'::jsonb) into v_sample
+  from unnest(v_prop_ids[1:20]) as u(x);
 
   select count(*) filter (where tk.type <> 'appointment')::int,
          count(*) filter (where tk.type = 'appointment')::int,
@@ -166,15 +175,19 @@ begin
            where m.org_id = p_org_id and m.calendar_chain_id = tk.calendar_chain_id
              and m.phase in ('pending', 'provider_done', 'needs_repair')))::int
   into v_na, v_appt, v_inflight
-  from public.tasks tk
-  where tk.org_id = p_org_id
-    and tk.assignee_id <> p_target
-    and tk.related_property_id in (
-      select sc.property_id from public.my_leads_housekeeping_reassign_scope(p_org_id, p_target, v_now) sc)
-    and ((tk.type <> 'appointment' and tk.status in ('open', 'snoozed'))
-      or (tk.type = 'appointment' and tk.status = 'open'));
+  from public.tasks tk where tk.org_id = p_org_id and tk.id = any(v_task_ids);
+  select coalesce(jsonb_agg(jsonb_build_object('assignee', s.assignee_id, 'nonAppointment', s.na, 'appointments', s.ap)
+           order by s.assignee_id), '[]'::jsonb)
+  into v_by_assignee
+  from (
+    select tk.assignee_id,
+           count(*) filter (where tk.type <> 'appointment') as na,
+           count(*) filter (where tk.type = 'appointment') as ap
+    from public.tasks tk where tk.org_id = p_org_id and tk.id = any(v_task_ids)
+    group by tk.assignee_id
+  ) s;
 
-  v_fp := public.my_leads_housekeeping_reassign_fingerprint(p_org_id, p_target, p_owner, p_keep_clock, v_now);
+  v_fp := public.my_leads_housekeeping_reassign_fingerprint(p_org_id, p_target, p_owner, p_keep_clock, v_prop_ids, v_task_ids);
   v_preview := jsonb_build_object(
     'kind', 'reassign',
     'target', p_target,
@@ -182,7 +195,7 @@ begin
     'keepClock', p_keep_clock,
     'leads', v_leads,
     'leadCount', v_lead_count,
-    'tasks', jsonb_build_object('nonAppointment', v_na, 'appointments', v_appt),
+    'tasks', jsonb_build_object('nonAppointment', v_na, 'appointments', v_appt, 'byAssignee', v_by_assignee),
     'appointmentsInFlight', v_inflight,
     'sample', v_sample,
     'fingerprint', v_fp
@@ -205,9 +218,10 @@ begin
   returning id into v_run;
 
   for r in
-    select sc.property_id, sc.old_assignee
-    from public.my_leads_housekeeping_reassign_scope(p_org_id, p_target, v_now) sc
-    order by sc.property_id
+    select p.id as property_id, p.assigned_user_id as old_assignee
+    from public.properties p
+    where p.org_id = p_org_id and p.id = any(v_prop_ids)
+    order by p.id
   loop
     begin
       select p.updated_at into v_old_updated
@@ -267,10 +281,7 @@ begin
       select tk.id, tk.type, tk.assignee_id, tk.status, tk.due_at, tk.end_at,
              tk.calendar_generation, tk.google_calendar_event_id, tk.updated_at
       from public.tasks tk
-      where tk.org_id = p_org_id and tk.related_property_id = r.property_id
-        and tk.assignee_id <> p_target
-        and ((tk.type <> 'appointment' and tk.status in ('open', 'snoozed'))
-          or (tk.type = 'appointment' and tk.status = 'open'))
+      where tk.org_id = p_org_id and tk.id = any(v_task_ids) and tk.related_property_id = r.property_id
       order by tk.id
     loop
       v_prior_sub := coalesce(current_setting('request.jwt.claim.sub', true), '');
@@ -321,7 +332,8 @@ create or replace function public.fn_my_leads_housekeeping_close_attempts(
   p_org_id uuid,
   p_older_than interval default '7 days',
   p_apply boolean default false,
-  p_fingerprint text default null
+  p_fingerprint text default null,
+  p_cutoff timestamptz default null
 ) returns jsonb
 language plpgsql security definer set search_path = '' as $$
 declare
@@ -345,7 +357,14 @@ begin
   if p_older_than is null or p_older_than < interval '1 day' then
     raise exception 'INVALID_INPUT: older-than must be at least 1 day' using errcode = 'P0001';
   end if;
-  v_cutoff := statement_timestamp() - p_older_than;
+  -- The preview reports the cutoff it used; apply must be handed that same timestamp, never recompute it.
+  if p_apply and p_cutoff is null then
+    raise exception 'CUTOFF_REQUIRED: apply needs the cutoff from the preview' using errcode = 'P0001';
+  end if;
+  v_cutoff := coalesce(p_cutoff, statement_timestamp() - p_older_than);
+  if v_cutoff > statement_timestamp() - interval '1 day' then
+    raise exception 'INVALID_INPUT: cutoff must be at least 1 day old' using errcode = 'P0001';
+  end if;
   if p_apply then
     if p_fingerprint is null then
       raise exception 'FINGERPRINT_REQUIRED: apply needs the fingerprint from the preview' using errcode = 'P0001';
@@ -356,10 +375,10 @@ begin
     order by a.id for update;
   end if;
 
-  -- Fingerprint: every candidate id plus the values the apply changes or depends on.
+  -- Fingerprint: every candidate id plus the values the apply changes or depends on, and the cutoff.
   select count(*)::int, min(a.occurred_at), max(a.occurred_at),
          count(*) filter (where a.call_activity_id is not null)::int,
-         encode(sha256(convert_to('close_attempts|' || coalesce(string_agg(
+         encode(sha256(convert_to('close_attempts|' || v_cutoff::text || '|' || coalesce(string_agg(
            a.id::text || ':' || coalesce(a.outcome, '') || ':' || a.occurred_at::text || ':' ||
            coalesce(a.call_activity_id::text, '') || ':' || a.actor_user_id::text,
            ',' order by a.id), ''), 'utf8')), 'hex')
@@ -384,6 +403,7 @@ begin
   v_preview := jsonb_build_object(
     'kind', 'close_attempts',
     'olderThan', p_older_than::text,
+    'cutoff', v_cutoff,
     'count', v_count,
     'oldest', v_oldest,
     'newest', v_newest,
@@ -407,6 +427,7 @@ begin
     'olderThan', p_older_than::text, 'cutoff', v_cutoff, 'fingerprint', v_fp), clock_timestamp())
   returning id into v_run;
 
+  -- Before-images first; only rows that have one are closed.
   insert into public.my_leads_housekeeping_before_images (run_id, table_name, row_id, before)
   select v_run, 'acquisition_attempts', a.id, jsonb_build_object('op', 'updated', 'outcome', a.outcome)
   from public.acquisition_attempts a
@@ -414,7 +435,9 @@ begin
 
   update public.acquisition_attempts a
   set outcome = 'not_logged'
-  where a.org_id = p_org_id and a.outcome is null and a.source = 'sandra' and a.occurred_at < v_cutoff;
+  where a.org_id = p_org_id and a.outcome is null and a.source = 'sandra'
+    and a.id in (select b.row_id from public.my_leads_housekeeping_before_images b
+                 where b.run_id = v_run and b.table_name = 'acquisition_attempts');
   get diagnostics v_closed = row_count;
 
   update public.my_leads_housekeeping_runs
@@ -470,6 +493,15 @@ begin
   if exists (select 1 from public.lead_notes n
              where n.org_id = p_org_id and n.property_id = p_property and n.created_at >= p_since) then
     return 'note_recorded';
+  end if;
+  if exists (select 1 from public.tasks tk
+             where tk.org_id = p_org_id and tk.related_property_id = p_property and tk.created_at >= p_since) then
+    return 'task_created';
+  end if;
+  if exists (select 1 from public.messages m
+             where m.org_id = p_org_id and m.property_id = p_property and m.direction = 'outbound'
+               and m.created_at >= p_since) then
+    return 'outbound_message_sent';
   end if;
   if exists (select 1 from public.rep_sms_obligations s
              where s.org_id = p_org_id and s.assignment_episode_id = p_episode) then
@@ -723,7 +755,9 @@ end $$;
 
 revoke all on function public.my_leads_housekeeping_reassign_scope(uuid, uuid, timestamptz)
   from public, anon, authenticated, service_role;
-revoke all on function public.my_leads_housekeeping_reassign_fingerprint(uuid, uuid, uuid, boolean, timestamptz)
+revoke all on function public.my_leads_housekeeping_reassign_fingerprint(uuid, uuid, uuid, boolean, uuid[], uuid[])
+  from public, anon, authenticated, service_role;
+revoke all on function public.my_leads_housekeeping_reassign_task_ids(uuid, uuid, timestamptz)
   from public, anon, authenticated, service_role;
 revoke all on function public.my_leads_housekeeping_rollback_fingerprint(uuid, uuid)
   from public, anon, authenticated, service_role;
@@ -731,14 +765,14 @@ revoke all on function public.my_leads_housekeeping_work_since(uuid, uuid, uuid,
   from public, anon, authenticated, service_role;
 revoke all on function public.fn_my_leads_housekeeping_reassign(uuid, uuid, uuid, boolean, boolean, text)
   from public, anon, authenticated;
-revoke all on function public.fn_my_leads_housekeeping_close_attempts(uuid, interval, boolean, text)
+revoke all on function public.fn_my_leads_housekeeping_close_attempts(uuid, interval, boolean, text, timestamptz)
   from public, anon, authenticated;
 revoke all on function public.fn_my_leads_housekeeping_run_info(uuid, uuid)
   from public, anon, authenticated;
 revoke all on function public.fn_my_leads_housekeeping_rollback(uuid, uuid, text)
   from public, anon, authenticated;
 grant execute on function public.fn_my_leads_housekeeping_reassign(uuid, uuid, uuid, boolean, boolean, text) to service_role;
-grant execute on function public.fn_my_leads_housekeeping_close_attempts(uuid, interval, boolean, text) to service_role;
+grant execute on function public.fn_my_leads_housekeeping_close_attempts(uuid, interval, boolean, text, timestamptz) to service_role;
 grant execute on function public.fn_my_leads_housekeeping_run_info(uuid, uuid) to service_role;
 grant execute on function public.fn_my_leads_housekeeping_rollback(uuid, uuid, text) to service_role;
 

@@ -5,8 +5,10 @@ import { canonicalJson, parseArgs, run, sha256Hex } from "./my-leads-housekeepin
 const ORG = "11111111-1111-4111-8111-111111111111";
 const JARRAD = "22222222-2222-4222-8222-222222222222";
 const RUN = "33333333-3333-4333-8333-333333333333";
+const OP_TOKEN = "ops_service-account-token-DO-NOT-LOG-9876";
 const KEY = "service-role-key-DO-NOT-LOG-0123456789";
 
+const HOST = { supabaseHost: "example.supabase.co" };
 const PREVIEW = { kind: "reassign", leadCount: 15, fingerprint: "f".repeat(64), leads: [{ from: "a", count: 2 }] };
 
 function harness({ preview = PREVIEW, memberships = [{ user_id: JARRAD }], rpcError = null } = {}) {
@@ -25,7 +27,7 @@ function harness({ preview = PREVIEW, memberships = [{ user_id: JARRAD }], rpcEr
     },
   };
   const io = {
-    env: { SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: KEY },
+    env: { SUPABASE_URL: "https://example.supabase.co", SUPABASE_SERVICE_ROLE_KEY: KEY, OP_SERVICE_ACCOUNT_TOKEN: OP_TOKEN },
     out: (t) => out.push(t),
     err: (t) => err.push(t),
     createClient: () => client,
@@ -72,7 +74,7 @@ test("refuses --apply with a confirm hash that does not match the current previe
 });
 
 test("applies only with the matching hash and passes the preview fingerprint to the RPC", async () => {
-  const hash = sha256Hex(canonicalJson(PREVIEW));
+  const hash = sha256Hex(canonicalJson({ ...HOST, ...PREVIEW }));
   const h = harness();
   assert.equal(await run([...reassign, "--apply", "--confirm", hash], h.io), 0);
   const apply = h.calls.find((c) => c.args.p_apply === true);
@@ -84,22 +86,27 @@ test("applies only with the matching hash and passes the preview fingerprint to 
 });
 
 test("a changed preview since approval blocks the apply", async () => {
-  const approved = sha256Hex(canonicalJson(PREVIEW));
+  const approved = sha256Hex(canonicalJson({ ...HOST, ...PREVIEW }));
   const h = harness({ preview: { ...PREVIEW, leadCount: 16 } });
   assert.equal(await run([...reassign, "--apply", "--confirm", approved], h.io), 1);
   assert.ok(h.calls.every((c) => c.args.p_apply === false));
 });
 
 test("close-attempts and rollback route to their RPCs", async () => {
-  const closePreview = { kind: "close_attempts", count: 137, fingerprint: "e".repeat(64) };
+  const closePreview = { kind: "close_attempts", count: 137, cutoff: "2026-09-27T00:00:00+00:00", fingerprint: "e".repeat(64) };
   const c = harness({ preview: closePreview });
-  assert.equal(await run(["close-attempts", "--org", ORG, "--apply", "--confirm", sha256Hex(canonicalJson(closePreview))], c.io), 0);
+  assert.equal(await run(["close-attempts", "--org", ORG, "--apply", "--cutoff", closePreview.cutoff, "--confirm", sha256Hex(canonicalJson({ ...HOST, ...closePreview }))], c.io), 0);
   assert.deepEqual(c.calls.map((x) => x.name), ["fn_my_leads_housekeeping_close_attempts", "fn_my_leads_housekeeping_close_attempts"]);
   assert.equal(c.calls[1].args.p_older_than, "7 days");
+  assert.equal(c.calls[1].args.p_cutoff, closePreview.cutoff); // explicit, never recomputed
+  const noCut = harness({ preview: closePreview });
+  assert.equal(await run(["close-attempts", "--org", ORG, "--apply", "--confirm", "0".repeat(64)], noCut.io), 1);
+  assert.match(noCut.err.join(""), /--cutoff/);
+  assert.equal(noCut.calls.length, 0);
 
   const infoPreview = { kind: "rollback", run: { id: RUN }, fingerprint: "d".repeat(64) };
   const r = harness({ preview: infoPreview });
-  assert.equal(await run(["rollback", "--org", ORG, "--run", RUN, "--apply", "--confirm", sha256Hex(canonicalJson(infoPreview))], r.io), 0);
+  assert.equal(await run(["rollback", "--org", ORG, "--run", RUN, "--apply", "--confirm", sha256Hex(canonicalJson({ ...HOST, ...infoPreview }))], r.io), 0);
   assert.deepEqual(r.calls.map((x) => x.name), ["fn_my_leads_housekeeping_run_info", "fn_my_leads_housekeeping_rollback"]);
   assert.deepEqual(r.calls[1].args, { p_run: RUN, p_org_id: ORG, p_fingerprint: infoPreview.fingerprint });
 });
@@ -132,4 +139,31 @@ test("requires the credentials from the environment and ambiguity needs explicit
   assert.equal(await run(reassign, two.io), 1);
   assert.match(two.err.join(""), /pass --target and --owner/);
   assert.equal(two.calls.length, 0);
+});
+
+test("preview JSON carries the Supabase host so the hash is tied to one environment", async () => {
+  const a = harness();
+  await run(reassign, a.io);
+  assert.equal(JSON.parse(a.out.join("")).supabaseHost, "example.supabase.co");
+  const other = harness();
+  other.io.env.SUPABASE_URL = "https://other.supabase.co";
+  await run(reassign, other.io);
+  assert.notEqual(sha256Hex(a.out.join("").trimEnd()), sha256Hex(other.out.join("").trimEnd()));
+  // a hash approved on one host does not apply on another
+  const hash = sha256Hex(canonicalJson({ ...HOST, ...PREVIEW }));
+  const wrong = harness();
+  wrong.io.env.SUPABASE_URL = "https://other.supabase.co";
+  assert.equal(await run([...reassign, "--apply", "--confirm", hash], wrong.io), 1);
+  assert.ok(wrong.calls.every((c) => c.args.p_apply === false));
+});
+
+test("refuses to start without the 1Password service account token, and never logs it", async () => {
+  const h = harness();
+  delete h.io.env.OP_SERVICE_ACCOUNT_TOKEN;
+  assert.equal(await run(reassign, h.io), 1);
+  assert.equal(h.calls.length, 0);
+  assert.match(h.err.join(""), /OP_SERVICE_ACCOUNT_TOKEN/);
+  const leak = harness({ rpcError: `boom ${OP_TOKEN}` });
+  await run(reassign, leak.io);
+  assert.ok(![...leak.out, ...leak.err].join("").includes(OP_TOKEN));
 });

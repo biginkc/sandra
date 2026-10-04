@@ -5,10 +5,11 @@
 begin;
 drop function if exists public.fn_my_leads_housekeeping_rollback(uuid, uuid, text);
 drop function if exists public.fn_my_leads_housekeeping_run_info(uuid, uuid);
-drop function if exists public.fn_my_leads_housekeeping_close_attempts(uuid, interval, boolean, text);
+drop function if exists public.fn_my_leads_housekeeping_close_attempts(uuid, interval, boolean, text, timestamptz);
 drop function if exists public.fn_my_leads_housekeeping_reassign(uuid, uuid, uuid, boolean, boolean, text);
 drop function if exists public.my_leads_housekeeping_work_since(uuid, uuid, uuid, timestamptz);
 drop function if exists public.my_leads_housekeeping_rollback_fingerprint(uuid, uuid);
-drop function if exists public.my_leads_housekeeping_reassign_fingerprint(uuid, uuid, uuid, boolean, timestamptz);
+drop function if exists public.my_leads_housekeeping_reassign_fingerprint(uuid, uuid, uuid, boolean, uuid[], uuid[]);
+drop function if exists public.my_leads_housekeeping_reassign_task_ids(uuid, uuid, timestamptz);
 drop function if exists public.my_leads_housekeeping_reassign_scope(uuid, uuid, timestamptz);
 commit;

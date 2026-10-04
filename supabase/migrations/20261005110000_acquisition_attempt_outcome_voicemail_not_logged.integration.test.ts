@@ -61,8 +61,9 @@ it('widens the outcome check and closes only stale sandra attempts, reversibly',
       await db.query('reset role');
       expect(String((failure as Error)?.message)).toMatch(pattern);
     };
+    let cut: string | null = null; // the cutoff the first preview reported; apply never recomputes it
     const close = (apply: boolean, older = '7 days', fingerprint: string | null = null) => as('service_role', async () =>
-      (await db.query('select public.fn_my_leads_housekeeping_close_attempts($1,$2::interval,$3,$4) as r', [org, older, apply, fingerprint])).rows[0].r);
+      (await db.query('select public.fn_my_leads_housekeeping_close_attempts($1,$2::interval,$3,$4,$5) as r', [org, older, apply, fingerprint, cut])).rows[0].r);
     const info = (run: string) => as('service_role', async () => (await db.query('select public.fn_my_leads_housekeeping_run_info($1,$2) as r', [run, org])).rows[0].r);
     const rollback = async (run: string) => as('service_role', async () =>
       (await db.query('select public.fn_my_leads_housekeeping_rollback($1,$2,$3) as r', [run, org, (await info(run)).fingerprint])).rows[0].r);
@@ -80,6 +81,8 @@ it('widens the outcome check and closes only stale sandra attempts, reversibly',
     const before = await outcomes();
     // Preview writes nothing and is stable.
     const preview = await close(false);
+    expect(new Date(preview.cutoff).getTime()).toBeLessThan(Date.now() - 6 * 86_400_000);
+    cut = preview.cutoff;
     expect(preview).toMatchObject({ count: 2, withCallActivity: 0, pendingDialpadCti: 1 });
     expect(preview.byActor).toEqual(expect.arrayContaining([{ actor: jarrad, count: 1 }, { actor: maria, count: 1 }]));
     expect(await close(false)).toEqual(preview);
@@ -90,6 +93,14 @@ it('widens the outcome check and closes only stale sandra attempts, reversibly',
     // B3: apply is fenced to the previewed cohort.
     expect(preview.fingerprint).toMatch(/^[0-9a-f]{64}$/);
     await expectError(() => close(true), /FINGERPRINT_REQUIRED/);
+    // The cutoff is explicit: apply without it is refused, and a fresher cutoff changes the fingerprint.
+    cut = null;
+    await expectError(() => close(true, '7 days', preview.fingerprint), /CUTOFF_REQUIRED/);
+    cut = new Date(Date.now() - 3 * 86_400_000).toISOString();
+    await expectError(() => close(true, '7 days', preview.fingerprint), /FINGERPRINT_MISMATCH/);
+    cut = new Date(Date.now() - 3_600_000).toISOString();
+    await expectError(() => close(false), /INVALID_INPUT/);
+    cut = preview.cutoff;
     await expectError(() => close(true, '7 days', 'a'.repeat(64)), /FINGERPRINT_MISMATCH/);
     // Same count, substituted rows: one stale row is finalised, a fresh one is backdated into the window.
     await db.query('savepoint sub');
@@ -104,6 +115,8 @@ it('widens the outcome check and closes only stale sandra attempts, reversibly',
     await expectError(() => close(true, '7 days', preview.fingerprint), /FINGERPRINT_MISMATCH/);
     await db.query('rollback to savepoint sub');
     expect(await outcomes()).toEqual(before);
+    // Rows are closed only if they carry a before-image.
+    expect((await db.query('select count(*)::int n from public.my_leads_housekeeping_before_images')).rows[0].n).toBe(0);
     // Another org id sees none of these rows.
     const otherOrg = randomUUID();
     await db.query("insert into public.organizations(id,name) values ($1,'Other')", [otherOrg]);
@@ -123,6 +136,8 @@ it('widens the outcome check and closes only stale sandra attempts, reversibly',
     expect(await close(true, '7 days', (await close(false)).fingerprint)).toMatchObject({ noop: true });
     const images = await db.query("select before->>'op' as op, count(*)::int n from public.my_leads_housekeeping_before_images where run_id=$1 group by 1", [applied.runId]);
     expect(images.rows).toEqual([{ op: 'updated', n: 2 }]);
+    // Every closed row has a before-image.
+    expect((await db.query("select count(*)::int n from public.acquisition_attempts a where a.outcome='not_logged' and not exists (select 1 from public.my_leads_housekeeping_before_images b where b.run_id=$1 and b.row_id=a.id)", [applied.runId])).rows[0].n).toBe(0);
 
     // A row finalised since the run is reported, not overwritten.
     await db.query("update public.acquisition_attempts set outcome='reached' where id=$1", [stale2]);

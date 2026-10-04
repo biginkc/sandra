@@ -24,11 +24,11 @@ it('reassigns queue leads and open tasks, keeps the first-call clock, and rolls 
     await db.query(tools);
     await db.query(reassign);
 
-    const org = randomUUID(), jarrad = randomUUID(), maria = randomUUID(), mel = randomUUID();
-    for (const id of [jarrad, maria, mel]) await db.query('insert into auth.users(id) values ($1)', [id]);
+    const org = randomUUID(), jarrad = randomUUID(), maria = randomUUID(), mel = randomUUID(), va = randomUUID();
+    for (const id of [jarrad, maria, mel, va]) await db.query('insert into auth.users(id) values ($1)', [id]);
     await db.query("insert into public.organizations(id,name) values ($1,'Housekeeping')", [org]);
     await db.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'owner')", [jarrad, org]);
-    for (const id of [maria, mel]) await db.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'member')", [id, org]);
+    for (const id of [maria, mel, va]) await db.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'member')", [id, org]);
     await db.query('insert into public.acquisition_org_settings(org_id,my_leads_enabled) values ($1,true)', [org]);
     await db.query("select set_config('request.jwt.claim.sub',$1,true)", [jarrad]);
     for (const id of [jarrad, maria, mel]) {
@@ -65,6 +65,7 @@ it('reassigns queue leads and open tasks, keeps the first-call clock, and rolls 
     const melFollow = await task('follow_up', mel, melA);
     const melAppt = await task('appointment', mel, melB);
     const melClosedTask = await task('custom', mel, melClosed);
+    const vaTask = await task('custom', va, melA); // a VA's task on a scoped lead: left alone
     const melDone = await task('custom', mel, melA, { status: 'completed' });
     // A task whose contact became DNC-locked cannot be updated: reported, not fatal.
     const contact = randomUUID();
@@ -114,7 +115,12 @@ it('reassigns queue leads and open tasks, keeps the first-call clock, and rolls 
     const preview = await call(false);
     expect(preview.leadCount).toBe(3);
     expect(preview.leads).toEqual(expect.arrayContaining([{ from: maria, count: 1 }, { from: mel, count: 2 }]));
-    expect(preview.tasks).toEqual({ nonAppointment: 3, appointments: 1 });
+    expect(preview.tasks).toMatchObject({ nonAppointment: 3, appointments: 1 });
+    expect(preview.tasks.byAssignee).toEqual(expect.arrayContaining([
+      { assignee: maria, nonAppointment: 1, appointments: 0 },
+      { assignee: mel, nonAppointment: 2, appointments: 1 },
+    ]));
+    expect(preview.tasks.byAssignee).toHaveLength(2); // the VA is not in the move
     expect(preview.appointmentsInFlight).toBe(0);
     expect(preview.fingerprint).toMatch(/^[0-9a-f]{64}$/);
     expect(await call(false)).toEqual(preview); // deterministic, so the operator's hash is stable
@@ -168,6 +174,7 @@ it('reassigns queue leads and open tasks, keeps the first-call clock, and rolls 
     expect(taskOwner(dncTask)).toBe(mel);          // DNC contact: skipped and reported
     expect(taskOwner(melClosedTask)).toBe(mel);    // not a queue lead
     expect(taskOwner(melDone)).toBe(mel);          // completed tasks are history
+    expect(taskOwner(vaTask)).toBe(va);            // only the old assignee's tasks move
     const ledger = await db.query("select operation,phase,new_assignee_id from public.task_calendar_mutations where source_task_id=$1 and operation='reassign'", [melAppt]);
     expect(ledger.rows).toEqual([{ operation: 'reassign', phase: 'pending', new_assignee_id: jarrad }]);
     expect((await db.query("select current_setting('request.jwt.claim.sub',true) as s")).rows[0].s).toBe(jarrad);
@@ -259,8 +266,18 @@ it('reassigns queue leads and open tasks, keeps the first-call clock, and rolls 
 
     // keep-clock variant leaves the new episode eligible.
     const keep = await applyNow(true);
+    await finalizeLedger();
     expect(keep.leadsMoved).toBe(3);
     expect((await db.query("select eligible from public.acquisition_assignment_episodes where property_id=$1 and ended_at is null", [mariaA])).rows[0].eligible).toBe(true);
+    // Rollback blockers: a task created on the lead after the run, and an outbound message sent after it.
+    const lateTask = await task('custom', jarrad, melB); // now() is the transaction start in this test, so stamp it after the run
+    await db.query("update public.tasks set created_at=clock_timestamp() where id=$1", [lateTask]);
+    await db.query("insert into public.messages(org_id,channel,direction,property_id,body,status,created_at) values ($1,'sms','outbound',$2,'hi','sent',clock_timestamp())", [org, melA]);
+    const blockers = await rollback(keep.runId);
+    const why = Object.fromEntries((blockers.notRestored as Array<Record<string, string>>).filter(n => n.property).map(n => [n.property, n.reason]));
+    expect(why[melB]).toMatch(/WORK_RECORDED: task_created/);
+    expect(why[melA]).toMatch(/WORK_RECORDED: outbound_message_sent/);
+    expect((await state()).props.find(p => p.id === mariaA).assigned_user_id).toBe(maria); // unblocked lead restored
 
     // (f) access control and input checks.
     await expectError(() => as('anon', () => db.query('select public.fn_my_leads_housekeeping_reassign($1,$2,$3)', [org, jarrad, jarrad])), /permission denied/);
