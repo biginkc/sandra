@@ -907,9 +907,11 @@ export function MyLeadsClient({
     },
     // Recovery paths (late success, already saved, Refresh-and-close): the prompt may be gone.
     onExtras: (flush) => {
+      // Only the prompt this attempt was saved from (one opening, one attempt key) shows the
+      // status; an earlier attempt's replay never takes over a newly opened prompt's line.
       const visible =
-        dialogRef.current?.row.propertyId === flush.propertyId &&
-        dialogRef.current.action === "log-attempt";
+        dialogRef.current === flush.opening &&
+        flush.opening.action === "log-attempt";
       void runExtras(
         {
           attemptKey: flush.attemptKey,
