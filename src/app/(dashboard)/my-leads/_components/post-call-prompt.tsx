@@ -148,6 +148,7 @@ export function PostCallPrompt({
   // One id per opening: the idempotency key of the note and the appointment.
   const [submissionId, setSubmissionId] = useState(() => crypto.randomUUID())
   const [sentNextStepAt, setSentNextStepAt] = useState<string | null>(null)
+  const [sentNote, setSentNote] = useState<string | null>(null)
   // Once the attempt is durably recorded the prompt is a receipt: its payload stays frozen so a
   // changed field cannot generate a second attempt with a new idempotency key.
   const [attemptRecorded, setAttemptRecorded] = useState(false)
@@ -229,6 +230,7 @@ export function PostCallPrompt({
     setCustomAt("")
     setSubmissionId(crypto.randomUUID())
     setSentNextStepAt(null)
+    setSentNote(null)
     setAttemptRecorded(false)
     setSavedForDrip(false)
     setClientError(null)
@@ -304,6 +306,7 @@ export function PostCallPrompt({
     const composed = outcome === "no_answer" ? composeFollowUp(follow) : null
     const selectedTemplateId = follow.templateId
     setSentNextStepAt(nextStep?.dueAt ?? null)
+    setSentNote(note.trim() || null)
     if (outcome === "no_answer") rememberManager(viewerUserId, follow.acquisitionsManager)
     await submitState.submit({
       propertyId,
@@ -345,7 +348,7 @@ export function PostCallPrompt({
   })()
 
   const receipt = attemptRecorded || savedForDrip ? (
-    <ReceiptLines extras={extras} sentNextStepAt={sentNextStepAt} onRetry={onRetryExtras} />
+    <ReceiptLines extras={extras} sentNextStepAt={sentNextStepAt} note={sentNote} onRetry={onRetryExtras} />
   ) : null
 
   const manualSource = source !== "sandra"
@@ -375,9 +378,6 @@ export function PostCallPrompt({
               </Button>
               <Button type="button" variant="outline" size="sm" data-testid="post-call-dead-nurture" onClick={onDeadNurture} disabled={!onDeadNurture}>
                 Dead / Nurture
-              </Button>
-              <Button type="button" variant="outline" size="sm" data-testid="post-call-send-contract" disabled title="Available when contracts ship">
-                Send contract
               </Button>
             </div>
             <p className="text-sm text-muted-foreground">Add to a drip (optional).</p>
@@ -612,15 +612,19 @@ export function PostCallPrompt({
 function ReceiptLines({
   extras,
   sentNextStepAt,
+  note,
   onRetry,
 }: {
   extras: PostCallExtrasState | null
   sentNextStepAt: string | null
+  /** The note the rep typed; shown with a copy button whenever it was not saved. */
+  note: string | null
   onRetry?: () => void
 }) {
   const parts = ["Attempt saved"]
   let failed = false
   let detail: string | undefined
+  let noteNotSaved = false
   if (extras?.status === "saving") parts.push("Saving note and next step…")
   if (extras?.status === "done") {
     const result = extras.result
@@ -628,6 +632,7 @@ function ReceiptLines({
       failed = true
       detail = result.message
       parts.push("Note and next step not saved")
+      noteNotSaved = true
     } else {
       if (result.note === "saved") parts.push("Note saved")
       if (result.note === "failed") { failed = true; parts.push("Note not saved") }
@@ -636,12 +641,34 @@ function ReceiptLines({
       }
       if (result.nextStep === "failed") { failed = true; parts.push("Next step not set") }
       detail = result.message
+      noteNotSaved = result.note !== "saved"
     }
   }
+  const [copied, setCopied] = useState(false)
   return (
     <div role="status" data-testid="post-call-receipt" className="space-y-1 text-sm text-teal-800 dark:text-teal-200">
       <p>{parts.join(" · ")}</p>
       {detail && <p className="text-xs text-muted-foreground">{detail}</p>}
+      {note && noteNotSaved && (
+        <div className="space-y-1 rounded-md border border-border bg-muted/30 p-2 text-foreground" data-testid="post-call-unsaved-note">
+          <p className="text-xs font-medium">Your note was not saved. Copy it so you do not have to retype it:</p>
+          <p className="whitespace-pre-wrap break-words text-sm">{note}</p>
+          <button
+            type="button"
+            data-testid="post-call-copy-note"
+            className="text-xs underline"
+            onClick={() => {
+              try {
+                void navigator.clipboard.writeText(note).then(() => setCopied(true), () => setCopied(false))
+              } catch {
+                setCopied(false)
+              }
+            }}
+          >
+            {copied ? "Copied" : "Copy note"}
+          </button>
+        </div>
+      )}
       {failed && onRetry && (
         <button type="button" data-testid="post-call-retry-extras" className="text-xs underline" onClick={onRetry}>
           Retry
