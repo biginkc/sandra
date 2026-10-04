@@ -153,7 +153,7 @@ describe("norma call twice (migration 20261004090000)", () => {
   it("preserves existing bound review requests and protected pauses across the schema-only upgrade", async () => {
     let before: Record<string, unknown>[] = [];
     let pausesBefore: Record<string, unknown>[] = [];
-    const open: { id: string; property: string; callId: string }[] = [];
+    const open: { id: string; property: string; callId: string; enrollment: string; pauseReason: string }[] = [];
     await withDb(async (db) => {
       const after = (await db.query("select to_jsonb(r) - array['attempt','first_bland_call_id','first_attempt_outcome','first_attempt_at','precall_sms_status'] as row from public.norma_call_requests r order by id")).rows;
       expect(after).toEqual(before);
@@ -165,22 +165,68 @@ describe("norma call twice (migration 20261004090000)", () => {
         // the retry transition applies only to dispatching/dispatched rows.
         expect(await complete(db, r.id, r.callId, "no_answer", { attempt: 1 })).toMatchObject({ status: "completed", outcome: "no_answer" });
         expect(await rowOf(db, r.id)).toMatchObject({ status: "completed", attempt: 1 });
+        expect(await enrollmentState(db, r.enrollment)).toEqual(r.pauseReason === "norma_call" ? { status: "active", pause_reason: null } : { status: "paused", pause_reason: r.pauseReason });
       }
-      expect((await db.query("select to_jsonb(e) as row from public.sequence_enrollments e order by id")).rows).toEqual(pausesBefore);
+      // The protected enrollments belong to the completing requests, so this
+      // exercises release_pauses rather than unrelated-row preservation.
+      const protectedIds = open.filter((r) => r.pauseReason !== "norma_call").map((r) => r.enrollment);
+      const protectedAfter = (await db.query("select to_jsonb(e) as row from public.sequence_enrollments e where id=any($1::uuid[]) order by id", [protectedIds])).rows;
+      expect(protectedAfter).toEqual(pausesBefore.filter((r) => protectedIds.includes((r.row as { id: string }).id)));
     }, async (db, ctx) => {
       for (let i = 0; i < 3; i++) {
-        const l = await lead(db, ctx, { enrollment: null });
+        const l = await lead(db, ctx);
         const id = (await create(db, ctx, l)).request_id!;
         expect((await svc<{ c: boolean }>(db, "select public.fn_norma_claim_dispatch($1) as c", [id])).rows[0]!.c).toBe(true);
         const callId = `legacy-review-${i}`;
         expect(await bind(db, id, callId)).toBe("bound");
         expect(await complete(db, id, callId, "unknown")).toMatchObject({ status: "needs_review" });
-        open.push({ id, property: l.property, callId });
+        const pauseReason = ["provider_failed", "reconciliation_required", "norma_call"][i]!;
+        await db.query("update public.sequence_enrollments set pause_reason=$2 where id=$1", [l.enrollment, pauseReason]);
+        open.push({ id, property: l.property, callId, enrollment: l.enrollment!, pauseReason });
       }
-      await lead(db, ctx, { enrollment: "paused:provider_failed" });
-      await lead(db, ctx, { enrollment: "paused:reconciliation_required" });
       before = (await db.query("select to_jsonb(r) as row from public.norma_call_requests r order by id")).rows;
       pausesBefore = (await db.query("select to_jsonb(e) as row from public.sequence_enrollments e order by id")).rows;
+    });
+  });
+
+  it.each(["dispatching", "dispatched", "dispatch_unknown", "unknown_recovered"] as const)("preserves and accounts for a pre-existing %s row across mixed-version upgrade", async (state) => {
+    let legacy: { id: string; l: Lead };
+    const callId = `legacy-${state}-1`;
+    await withDb(async (db) => {
+      const { id, l } = legacy;
+      expect(await rowOf(db, id)).toMatchObject({ status: state === "unknown_recovered" ? "dispatch_unknown" : state, attempt: 1 });
+      if (state === "unknown_recovered") expect(await bind(db, id, callId)).toBe("bound");
+      // Old completion SQL callers carry no attempt metadata. Their first
+      // no-answer can schedule attempt2 after the schema changes.
+      const result = await complete(db, id, callId, "no_answer");
+      if (state === "dispatch_unknown") {
+        expect(result).toMatchObject({ status: "completed", outcome: "no_answer" });
+        expect(await rowOf(db, id)).toMatchObject({ status: "completed", attempt: 1 });
+        expect(await enrollmentState(db, l.enrollment!)).toEqual({ status: "active", pause_reason: null });
+        return;
+      }
+      expect(result).toMatchObject({ status: "requested", retry: true });
+      expect(await rowOf(db, id)).toMatchObject({ attempt: 2, first_bland_call_id: callId, bland_call_id: null });
+      expect(await hold(db, l.property)).toBe(true);
+      expect(await enrollmentState(db, l.enrollment!)).toEqual({ status: "paused", pause_reason: "norma_call" });
+      // The default parameter preserves legacy SQL claim callers, which is
+      // precisely why an old serving dispatcher must be held during the gap.
+      expect((await svc<{ c: boolean }>(db, "select public.fn_norma_claim_dispatch($1) as c", [id])).rows[0]!.c).toBe(true);
+      const retryCallId = `legacy-${state}-2`;
+      expect(await bind(db, id, retryCallId)).toBe("bound");
+      // New webhook parsing defaults missing legacy metadata to1: stale for2.
+      expect(await complete(db, id, retryCallId, "no_answer", { attempt: 1 })).toMatchObject({ result: "stale_attempt" });
+      expect(await rowOf(db, id)).toMatchObject({ status: "dispatched", attempt: 2 });
+      // Reconciliation uses the current row's attempt and can settle it.
+      expect(await complete(db, id, retryCallId, "no_answer", { attempt: 2 })).toMatchObject({ status: "completed" });
+      expect(await rowOf(db, id)).toMatchObject({ status: "completed", attempt: 2 });
+    }, async (db, ctx) => {
+      const l = await lead(db, ctx);
+      const id = (await create(db, ctx, l)).request_id!;
+      expect((await svc<{ c: boolean }>(db, "select public.fn_norma_claim_dispatch($1) as c", [id])).rows[0]!.c).toBe(true);
+      if (state === "dispatched") expect(await bind(db, id, callId)).toBe("bound");
+      if (state === "dispatch_unknown" || state === "unknown_recovered") await svc(db, "select public.fn_norma_mark_dispatch_unknown($1,'legacy uncertain')", [id]);
+      legacy = { id, l };
     });
   });
 
