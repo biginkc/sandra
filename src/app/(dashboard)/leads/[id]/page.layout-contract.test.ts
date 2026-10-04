@@ -66,4 +66,28 @@ describe("lead detail v2 layout contract", () => {
   it("keeps the expanded custom-tag input at the 36px route target", () => {
     expect(tagsSource).toContain('className="h-9 w-48 max-w-full text-xs"');
   });
+
+  it("composes Log follow-up: the provider wraps the hero and the trigger appears only inside the hero actions", () => {
+    const provider = source.indexOf("<LogFollowUpProvider");
+    const hero = source.indexOf("<LeadMediaHero");
+    const providerEnd = source.indexOf("</LogFollowUpProvider>");
+    expect(provider).toBeGreaterThan(-1);
+    expect(hero).toBeGreaterThan(provider);
+    expect(providerEnd).toBeGreaterThan(hero);
+    // Exactly one trigger, and it lives in the heroActions fragment.
+    expect(source.match(/<LogFollowUpTrigger/g)).toHaveLength(1);
+    const actionsStart = source.indexOf("const heroActions = (");
+    const actionsEnd = source.indexOf("\n  );", actionsStart);
+    const trigger = source.indexOf("<LogFollowUpTrigger");
+    expect(actionsStart).toBeGreaterThan(-1);
+    expect(trigger).toBeGreaterThan(actionsStart);
+    expect(trigger).toBeLessThan(actionsEnd);
+    // heroActions reaches the page only through the hero, which sits inside the provider.
+    expect(source.match(/\{heroActions\}/g)).toHaveLength(1);
+    const heroProps = source.slice(hero, source.indexOf("/>", hero));
+    expect(heroProps).toContain("actions={heroActions}");
+    // Training leads cannot reach the trigger, and the provider is scoped to the viewer.
+    expect(source).toMatch(/<fieldset disabled=\{training\} inert=\{training \|\| undefined\} className="contents"><LogFollowUpTrigger \/><\/fieldset>/);
+    expect(source).toContain("viewer={sessionUser ? { userId: sessionUser.id, orgId: lead.org_id } : null}");
+  });
 });
