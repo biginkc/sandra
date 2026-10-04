@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   getMyLeadsQueueRow: vi.fn(),
   listMyLeadsInDrip: vi.fn(),
   getCallNext: vi.fn(),
+  postCallPromptEnabled: vi.fn(),
   MyLeadsClient: vi.fn(() => <div data-testid="my-leads-client" />),
   loadDialpadPanelBootstrap: vi.fn(),
   reportError: vi.fn(),
@@ -38,6 +39,9 @@ vi.mock("@/lib/my-leads/queries", () => ({
 }));
 vi.mock("@/lib/my-leads/call-next", () => ({
   getCallNext: mocks.getCallNext,
+}));
+vi.mock("@/lib/my-leads/post-call", () => ({
+  postCallPromptEnabled: mocks.postCallPromptEnabled,
 }));
 vi.mock("@/lib/my-leads/drip-queries", () => ({
   listMyLeadsInDrip: mocks.listMyLeadsInDrip,
@@ -122,6 +126,7 @@ beforeEach(() => {
   mocks.getAcquisitionQueue.mockResolvedValue({});
   mocks.getAcquisitionKpis.mockResolvedValue({});
   mocks.getCallNext.mockResolvedValue(null);
+  mocks.postCallPromptEnabled.mockResolvedValue(false);
   mocks.listMyLeadsInDrip.mockResolvedValue({
     active: [],
     replied: [],
@@ -330,6 +335,39 @@ describe("MyLeadsPage availability boundary", () => {
       )[0]?.[0],
     ).toMatchObject({ dialpad: null });
     expect(mocks.reportError).toHaveBeenCalledTimes(1);
+  });
+
+  describe("post-call prompt flag", () => {
+    const clientProps = () =>
+      (mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0];
+
+    it("is off by default (the old attempt dialog stays)", async () => {
+      renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+      expect(mocks.postCallPromptEnabled).toHaveBeenCalledWith("org-1");
+      expect(clientProps()).toMatchObject({ postCallPrompt: false });
+    });
+
+    it("turns on only when the flag helper says so", async () => {
+      mocks.postCallPromptEnabled.mockResolvedValue(true);
+      renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+      expect(clientProps()).toMatchObject({ postCallPrompt: true });
+    });
+
+    it("a failing flag read reads as off and never fails the page", async () => {
+      mocks.postCallPromptEnabled.mockRejectedValue(new Error("down"));
+      const html = renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+      expect(html).toContain("my-leads-client");
+      expect(clientProps()).toMatchObject({ postCallPrompt: false });
+    });
+
+    it("is not read while rollout is disabled", async () => {
+      mocks.getAcquisitionRoster.mockResolvedValue({
+        viewer,
+        roster: { ...baseRoster, settings: { ...baseRoster.settings, enabled: false } },
+      });
+      renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+      expect(mocks.postCallPromptEnabled).not.toHaveBeenCalled();
+    });
   });
 
   describe("Call next strip", () => {

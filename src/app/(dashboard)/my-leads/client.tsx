@@ -36,6 +36,12 @@ import { CallNextStrip } from "./_components/call-next-strip";
 import { reasonLabel } from "./_components/call-next-reason";
 import type { CallNextSnapshot, TriageSnapshot } from "@/lib/my-leads/call-next";
 import { AcquisitionAttemptDialog } from "./_components/attempt-dialog";
+import { PostCallPrompt } from "./_components/post-call-prompt";
+import type {
+  AcquisitionCallReferenceOption,
+  PostCallExtras,
+  PostCallExtrasState,
+} from "./_components/types";
 import { AcquisitionReadinessDialog } from "./_components/readiness-dialog";
 import { AcquisitionOfferDialog } from "./_components/offer-dialog";
 import { AcquisitionLifecycleDialog } from "./_components/lifecycle-dialog";
@@ -58,6 +64,7 @@ import {
 import type { SelectedLeadResult } from "./deep-link";
 import {
   loadMyLeadCallReferences,
+  savePostCallExtras,
   loadMyLeadRow,
   loadMyLeads,
   loadMyLeadsStage,
@@ -74,6 +81,8 @@ type Props = {
   initialSnapshot: QueueSnapshot | null;
   initialKpis: AcquisitionKpis | null;
   initialDrips?: MyLeadDripSnapshot | null;
+  /** The post-call prompt replaces the attempt dialog; off (default) keeps today's dialog. */
+  postCallPrompt?: boolean;
   /** The Call next strip; null or omitted when it is off for this org. */
   initialStrip?: CallNextSnapshot | null;
   dialpad?: DialpadPanelBootstrap | null;
@@ -292,6 +301,7 @@ export function MyLeadsClient({
   initialKpis,
   initialDrips = null,
   initialStrip = null,
+  postCallPrompt = false,
   dialpad = null,
   initialSearch = "",
   focus: providedFocus = null,
@@ -332,10 +342,20 @@ export function MyLeadsClient({
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [callOptions, setCallOptions] = useState<{
     propertyId: string;
-    options: { id: string; label: string }[];
+    options: AcquisitionCallReferenceOption[];
     error: string | null;
   } | null>(null);
   const [callRetry, setCallRetry] = useState(0);
+  // The post-call prompt's note and next step, saved beside the attempt command.
+  const [extrasState, setExtrasState] = useState<PostCallExtrasState | null>(
+    null,
+  );
+  const extrasRequest = useRef<{
+    memberId: string;
+    propertyId: string;
+    extras: PostCallExtras;
+  } | null>(null);
+  const extrasStarted = useRef(new Set<string>());
   const [dialpadRequest, setDialpadRequest] =
     useState<DialpadCallRequest | null>(null);
   const dialpadNonce = useRef(0);
@@ -804,12 +824,60 @@ export function MyLeadsClient({
     },
     [member],
   );
+  const runExtras = async () => {
+    const request = extrasRequest.current;
+    if (!request) return;
+    const { extras } = request;
+    setExtrasState({ status: "saving" });
+    let result: Awaited<ReturnType<typeof savePostCallExtras>>;
+    try {
+      result = await savePostCallExtras({
+        memberId: request.memberId,
+        propertyId: request.propertyId,
+        submissionId: extras.submissionId,
+        note: extras.note,
+        nextStep: extras.nextStep,
+      });
+    } catch {
+      result = { ok: false, message: "The note and next step could not be saved." };
+    }
+    // A result for a prompt that has since been replaced is dropped.
+    if (extrasRequest.current !== request) return;
+    setExtrasState({ status: "done", result });
+    if (result.ok) {
+      void refresh();
+      setDetailRevision((revision) => revision + 1);
+      router.refresh();
+    }
+  };
+  // The extras belong to one opening of the prompt.
+  const attemptDialogOpen = dialog?.action === "log-attempt";
+  const dialogPropertyId = dialog?.row.propertyId ?? null;
+  useEffect(() => {
+    if (attemptDialogOpen) return;
+    extrasRequest.current = null;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setExtrasState(null);
+  }, [attemptDialogOpen, dialogPropertyId]);
   const { submit, recoveryValue, onDripChanged } = useAttemptWorkflow({
     opening: dialog,
     memberId: member,
     viewer: { userId: viewer.userId, orgId: viewer.orgId },
     readRow: readRecoveryRow,
-    onCommitted: () => {
+    onCommitted: (committed) => {
+      if (committed.extras) {
+        const row = committed.opening.row;
+        extrasRequest.current = {
+          memberId: member,
+          propertyId: row.propertyId,
+          extras: committed.extras,
+        };
+        // A submission's extras run once; Retry is the only way to run them again.
+        if (!extrasStarted.current.has(committed.extras.submissionId)) {
+          extrasStarted.current.add(committed.extras.submissionId);
+          void runExtras();
+        }
+      }
       const read = refresh();
       refreshTriageIfOpen();
       setDetailRevision((revision) => revision + 1);
@@ -1366,7 +1434,33 @@ export function MyLeadsClient({
         </>
       )}
       <WorkflowRecoveryContext.Provider value={recoveryValue}>
-        {common && dialog?.action === "log-attempt" && (
+        {common && dialog?.action === "log-attempt" && postCallPrompt && (
+          <PostCallPrompt
+            {...common}
+            onSubmit={(payload) => submit(payload)}
+            onDripChanged={onDripChanged}
+            key={`${dialog.row.propertyId}:${dialog.callActivityId ?? ""}`}
+            initialCallActivityId={dialog.callActivityId ?? null}
+            callReferenceOptions={
+              callOptions?.propertyId === dialog.row.propertyId
+                ? callOptions.options
+                : []
+            }
+            callReferencesLoading={!callOptions}
+            callReferencesError={callOptions?.error}
+            onRetryCallReferences={() => setCallRetry((value) => value + 1)}
+            viewerUserId={viewer.userId}
+            viewerLabel={
+              roster.members.find((m) => m.id === viewer.userId)?.label ?? null
+            }
+            nextStepAt={dialog.row.nextStepAt}
+            extras={extrasState}
+            onRetryExtras={() => void runExtras()}
+            onReadyForOffer={() => action("ready-for-offer", dialog.row.propertyId)}
+            onDeadNurture={() => action("handoff", dialog.row.propertyId)}
+          />
+        )}
+        {common && dialog?.action === "log-attempt" && !postCallPrompt && (
           <AcquisitionAttemptDialog
             {...common}
             onSubmit={(payload) => submit(payload)}

@@ -224,6 +224,10 @@ export type MyLeadDetailPageResult =
 export type AcquisitionCallReferenceOption = {
   id: string
   label: string
+  /** From the linked call; null when the read predates the P1c migration. */
+  callOutcome?: string | null
+  talkSeconds?: number | null
+  provider?: string | null
 }
 
 export type MyLeadsQueueProps = {
@@ -327,6 +331,31 @@ export type AcquisitionAttemptFollowUp = {
   body: string
 }
 
+/** Post-call prompt extras. They ride beside the attempt command and never reach it. */
+export type PostCallNextStep = {
+  pick: "tomorrow" | "three_days" | "next_week" | "custom"
+  /** ISO instant. */
+  dueAt: string
+}
+export type PostCallExtras = {
+  /** A UUID minted when the prompt opens; the idempotency key for the note and the appointment. */
+  submissionId: string
+  note: string | null
+  nextStep: PostCallNextStep | null
+}
+export type PostCallExtrasResult =
+  | {
+      ok: true
+      note: "saved" | "skipped" | "failed"
+      nextStep: "created" | "skipped" | "failed"
+      message?: string
+    }
+  | { ok: false; message: string }
+/** What the prompt shows after the attempt is saved. */
+export type PostCallExtrasState =
+  | { status: "saving" }
+  | { status: "done"; result: PostCallExtrasResult }
+
 export type AcquisitionAttemptFormPayload = {
   propertyId: string
   kind: AcquisitionAttemptKind
@@ -339,6 +368,8 @@ export type AcquisitionAttemptFormPayload = {
   /** Required only for a no-answer outcome when the rep SMS rollout applies. */
   smsBody?: string | null
   followUp?: AcquisitionAttemptFollowUp | null
+  /** Post-call prompt only; stripped before the command is built. */
+  postCall?: PostCallExtras
 }
 
 export type AcquisitionTemperature = "hot" | "warm" | "cold" | null

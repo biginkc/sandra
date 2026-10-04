@@ -10,7 +10,7 @@ import {
   subscribeSubmissions, writeSubmission,
   type Lease, type StoredSubmission, type SubmissionScope,
 } from "./submission-store"
-import type { MyLeadAction } from "./types"
+import type { MyLeadAction, PostCallExtras } from "./types"
 import type { WorkflowReconciliation } from "./workflow-form"
 
 /**
@@ -27,6 +27,8 @@ export type AttemptCommitted<O extends AttemptOpening> = {
   input: Record<string, Json>
   result: Extract<CommandResult, { ok: true }>
   dripFailure: string | null
+  /** Post-call prompt extras (note, quick next step). Never part of the command or its hash. */
+  extras?: PostCallExtras
 }
 
 type Recovery<O> = {
@@ -65,6 +67,8 @@ type Submission = {
   // was edited while the response was unavailable.
   payload: Record<string, Json> | null
   uncertain: boolean
+  /** Post-call prompt extras captured at the first send; a frozen replay keeps the original ones. */
+  extras?: PostCallExtras | null
   /** The server proved a receipt exists for this key: the save already went through. */
   alreadySaved?: boolean
   /** A late success reached this state while its dialog was not on screen: the record says "committed-not-seen" until the rep Refreshes. */
@@ -409,7 +413,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     if (keepsOpen ? !write(state, current) : !drop(state)) { state.committed = false; return false }
     const dripFailure = "dripFailure" in result && result.dripFailure ? `Outcome saved. Drip not started: ${result.dripFailure}` : null
     setRecovery(null)
-    const committed: AttemptCommitted<O> = { opening: current, input, result, dripFailure }
+    const committed: AttemptCommitted<O> = { opening: current, input, result, dripFailure, ...(state.extras ? { extras: state.extras } : {}) }
     // The host publishes its refresh barrier before the dialog can close so a
     // rapid next click is initialized from authorized post-command metadata.
     const read = callbacks.current.onCommitted(committed)
@@ -522,7 +526,10 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     return window.confirm(CLOSE_CONFIRM_MESSAGE)
   }, [opening, recovery])
 
-  const submit = useCallback(async (payload: object) => {
+  const submit = useCallback(async (fullPayload: object) => {
+    // The prompt's extras ride beside the command: they are taken out before anything below hashes,
+    // freezes or replays the payload.
+    const { postCall, ...payload } = fullPayload as { postCall?: PostCallExtras }
     if (!opening) return { ok: false as const, message: "Select a lead first." }
     if (!identified) return { ok: false as const, message: !viewerOption?.userId || !viewerOption.orgId ? NO_VIEWER_MESSAGE : NO_REP_MESSAGE }
     if (recovery?.opening === opening && (recovery.blocked || recovery.busy)) return { ok: false as const, message: recovery.message }
@@ -550,6 +557,8 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     const state = submission.current
     const command = opening.action as Parameters<typeof submitMyLeadCommand>[0]
     const frozen = state.uncertain && state.payload
+    // A frozen replay keeps the extras of the original send; a fresh send takes the form's current ones.
+    if (!frozen || state.extras === undefined) state.extras = postCall ?? null
     const wantedRoute = routeOf(command, JSON.parse(JSON.stringify(payload)) as Record<string, Json>)
     // Never send the key down another operation. When nothing under the key can have committed
     // (its first send was definitely rejected), a different route simply starts a new key.

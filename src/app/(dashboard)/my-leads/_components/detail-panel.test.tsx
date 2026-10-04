@@ -58,6 +58,18 @@ describe("MyLeadDetailPanel", () => {
     expect(screen.getByRole("link", { name: "Recording" })).toHaveAttribute("rel", "noopener noreferrer")
   })
 
+  it("shows the attempt note under the outcome when there is one", () => {
+    render(<MyLeadDetailPanel state={{ status: "ready", detail: {
+      ...EMPTY_DETAIL,
+      attempts: { rows: [
+        { id: "a1", actorLabel: "Maria", outcomeLabel: "Voicemail", occurredLabel: "Sep 11", note: "Said to try after 5" },
+        { id: "a2", actorLabel: "Maria", outcomeLabel: "Reached", occurredLabel: "Sep 10", note: null },
+      ], hasMore: false, nextCursor: null },
+    } }} onRetry={vi.fn()} />)
+    expect(screen.getByText("Said to try after 5")).toBeVisible()
+    expect(screen.getByText("Voicemail")).toBeVisible()
+  })
+
   it("shows follow-up status, details, and the next safe action in attempt history", () => {
     render(<MyLeadDetailPanel state={{ status: "ready", detail: {
       ...EMPTY_DETAIL,
