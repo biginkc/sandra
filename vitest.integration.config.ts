@@ -73,6 +73,7 @@ export default defineConfig({
       "supabase/migrations/20261005150000_my_leads_call_next.integration.test.ts",
       "supabase/migrations/20261005160000_post_call_prompt_support.integration.test.ts",
       "supabase/migrations/20261005170000_seller_appointment_reminders.integration.test.ts",
+      "supabase/migrations/20261005180000_dialpad_hangup_link_capture.integration.test.ts",
       "src/lib/my-leads/seller-reminder.transport.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
