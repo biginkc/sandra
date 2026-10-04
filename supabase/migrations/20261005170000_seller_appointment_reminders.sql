@@ -47,10 +47,10 @@ create table public.seller_appointment_reminders (
     check (send_key::text ~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
 );
 
--- One send per appointment (chain) per Chicago day: a reschedule makes a new task row, not a second text.
+-- One send per appointment (chain) per Chicago day (an uncertain row may have sent, so it holds the slot too): a reschedule makes a new task row, not a second text.
 create unique index seller_appointment_reminders_one_send
   on public.seller_appointment_reminders (calendar_chain_id, send_local_date)
-  where status in ('claimed','sent');
+  where status in ('claimed','sent','uncertain');
 create index seller_appointment_reminders_due_idx
   on public.seller_appointment_reminders (send_at) where status in ('pending','claimed');
 
@@ -83,9 +83,13 @@ begin
   end if;
 
   -- (b) cancel first, so a reschedule successor in the same run is not blocked by its predecessor.
+  -- Only PENDING rows are cancelled here. A claimed row (fresh or stale) may be mid-dispatch or may have
+  -- sent before a crash: cancelling it would free its one-per-day slot while a text may have gone out.
+  -- Dispatch rechecks the task, switch and copy itself and finishes the row; a stale lease is reclaimed
+  -- with the same key (safe replay) or, at 3 attempts, made uncertain.
   update public.seller_appointment_reminders r
      set status = 'cancelled', skip_reason = 'task_changed', claim_token = null, updated_at = now()
-   where r.status in ('pending','claimed')
+   where r.status = 'pending'
      and not exists (
        select 1 from public.tasks t
         where t.id = r.task_id and t.org_id = r.org_id
@@ -94,7 +98,7 @@ begin
 
   update public.seller_appointment_reminders r
      set status = 'cancelled', skip_reason = 'reminders_disabled', claim_token = null, updated_at = now()
-   where r.status in ('pending','claimed')
+   where r.status = 'pending'
      and not exists (
        select 1 from public.seller_reminder_settings s where s.org_id = r.org_id and s.enabled);
   get diagnostics v_cancelled_disabled = row_count;
