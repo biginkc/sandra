@@ -60,6 +60,13 @@ const CHAIN = [
   { key: 'postCall', file: '20261005160000_post_call_prompt_support', present: column('lead_notes', 'idempotency_key') },
   { key: 'sellerReminders', file: '20261005170000_seller_appointment_reminders', present: "to_regclass('public.seller_appointment_reminders') is not null" },
   { key: 'linkCapture', file: '20261005180000_dialpad_hangup_link_capture', present: proc('dialpad_cti_hangup_links') },
+  // Phase 2 data plane.
+  { key: 'ledgerKeys', file: '20261006100000_dialpad_ledger_keys_native_columns', present: proc('dialpad_cti_is_ledger_key') },
+  { key: 'intentTimeout', file: '20261006100100_dialpad_intent_timeout', present: proc('fn_fail_stale_dialpad_intents') },
+  { key: 'phoneNumbers', file: '20261006100200_contact_phone_numbers', present: "to_regclass('public.contact_phone_numbers') is not null" },
+  { key: 'nativeMatching', file: '20261006100300_dialpad_native_matching', present: proc('dialpad_cti_native_resolve') },
+  { key: 'assignToLead', file: '20261006100400_dialpad_native_assign_to_lead', present: proc('fn_assign_native_call_to_lead') },
+  { key: 'artifactFetches', file: '20261006100500_dialpad_artifact_fetches', present: "to_regclass('public.dialpad_call_artifact_fetches') is not null" },
 ] as const;
 
 export type ChainKey = (typeof CHAIN)[number]['key'];
