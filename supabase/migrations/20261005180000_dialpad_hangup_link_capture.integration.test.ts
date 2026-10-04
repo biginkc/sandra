@@ -4,26 +4,17 @@ import { Client } from 'pg';
 import { describe, expect, it } from 'vitest';
 import { loadTestEnv } from '@tests/integration/env';
 import { requireLoopbackPostgresUrl } from '@/lib/testing/loopback-postgres-url';
+import { applyMyLeadsChain } from '@tests/integration/my-leads-housekeeping-fixture';
 
 // Local-only: every test runs inside one transaction that is rolled back. It works on an empty
-// local database (applies the stacked housekeeping chain first) and on an already fully migrated
-// one (CI): when this migration's objects already exist, its rollback twin runs first, inside the
-// same transaction, so both starting states end identically.
+// local database and on an already fully migrated one (CI): applyMyLeadsChain removes whichever
+// stacked My Leads migrations are present (rollback twins, newest first) and applies the ones this
+// suite needs, so both starting states end identically.
 const strip = (file: string) => {
   const sql = readFileSync(new URL(file, import.meta.url), 'utf8');
   if (!/^[\s\S]*?\bbegin;\s*/im.test(sql) || !/\s*commit;\s*$/i.test(sql)) throw new Error(`${file}: transaction wrapper changed`);
   return sql.replace(/^begin;\s*/im, '').replace(/\s*commit;\s*$/i, '');
 };
-const baseChain = [
-  './20261005100000_my_leads_housekeeping_tools.sql',
-  './20261005100100_my_leads_housekeeping_reassign.sql',
-  './20261005110000_acquisition_attempt_outcome_voicemail_not_logged.sql',
-  './20261005120000_next_step_schema.sql',
-  './20261005120500_fn_create_next_step.sql',
-  './20261005121200_next_step_mode_aware_lifecycle.sql',
-  './20261005121500_next_step_relabel_functions.sql',
-  './20261005130000_offer_follow_up_chain.sql',
-].map(strip);
 // A stale local database can hold older Dialpad CTI function bodies than the repo (the projection
 // suite re-applies these for the same reason); a migrated one (CI) already has them.
 const dialpadBase = [
@@ -31,8 +22,6 @@ const dialpadBase = [
   './20260929120000_dialpad_cti_call_projection.sql',
   './20260930036000_dialpad_training_projection.sql',
 ].map(strip);
-const migration = strip('./20261005180000_dialpad_hangup_link_capture.sql');
-const rollback = strip('../rollbacks/20261005180000_dialpad_hangup_link_capture.sql');
 const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
 
 const REP_DIALPAD = '5150000000000001';
@@ -54,12 +43,7 @@ async function withDb(fn: (db: Client) => Promise<void>) {
     await db.query('begin');
     const guard = (await db.query("select prosrc from pg_proc where proname='dialpad_cti_guard_event'")).rows[0]?.prosrc ?? '';
     if (!guard.includes('projected_at')) for (const sql of dialpadBase) await db.query(sql);
-    const hasHousekeeping = (await db.query("select to_regclass('public.my_leads_housekeeping_runs') as t")).rows[0].t;
-    if (!hasHousekeeping) for (const sql of baseChain) await db.query(sql);
-    const applied = (await db.query(
-      "select count(*)::int as n from information_schema.columns where table_schema='public' and table_name='call_activities' and column_name='provider_recording_url'")).rows[0].n;
-    if (applied) await db.query(rollback);
-    await db.query(migration);
+    await applyMyLeadsChain(db, ['tools', 'reassign', 'outcome', 'schema', 'createFn', 'modeAware', 'relabel', 'offerChain', 'linkCapture']);
     await fn(db);
   } finally { await db.query('rollback').catch(() => {}); await db.end(); }
 }
