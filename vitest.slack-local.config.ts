@@ -20,7 +20,7 @@ export default defineConfig({
       "supabase/migrations/20261003130001_slack_lead_unfurl_foundation.integration.test.ts",
       "supabase/migrations/20261003160000_slack_workspace_preview_policy.integration.test.ts",
       "supabase/migrations/20261004091000_slack_canary_safety.integration.test.ts",
-      "supabase/migrations/20261004092000_slack_canary_execution_fence.integration.test.ts",
+      "supabase/migrations/20261004093000_slack_canary_execution_fence.integration.test.ts",
     ],
     environment: "node",
     reporters: ["default"],

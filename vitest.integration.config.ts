@@ -70,7 +70,7 @@ export default defineConfig({
       "src/lib/integrations/slack/unfurl-data.db.integration.test.ts",
       "supabase/migrations/20261003130001_slack_lead_unfurl_foundation.integration.test.ts",
       "supabase/migrations/20261004091000_slack_canary_safety.integration.test.ts",
-      "supabase/migrations/20261004092000_slack_canary_execution_fence.integration.test.ts",
+      "supabase/migrations/20261004093000_slack_canary_execution_fence.integration.test.ts",
     ],
     environment: "node",
     reporters: ["default"],

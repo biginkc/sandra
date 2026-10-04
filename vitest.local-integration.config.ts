@@ -38,7 +38,7 @@ export default defineConfig({
       "supabase/migrations/20260930001000_recording_endpoint_configuration.integration.test.ts",
       "supabase/migrations/20261002110100_search_properties.integration.test.ts",
       "supabase/migrations/20261004091000_slack_canary_safety.integration.test.ts",
-      "supabase/migrations/20261004092000_slack_canary_execution_fence.integration.test.ts",
+      "supabase/migrations/20261004093000_slack_canary_execution_fence.integration.test.ts",
       "tests/search-oracle/oracle-comparison.integration.test.ts",
       "src/lib/leads/outreach-dispo.db.integration.test.ts",
     ],
