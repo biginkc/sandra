@@ -112,7 +112,7 @@ export type RepSmsObligationStatus = 'required'|'draft'|'claimed'|'sending'|'acc
 export type DetailFact = { id:string; at:string; actorId:string|null; actorLabel?:string; body?:string; outcome?:string|null; source?:string;
   direction?:'inbound'|'outbound'; deliveryStatus?:string; attachmentCount?:number;
   recordingUrl?:string|null; callActivityId?:string|null; amountCents?:number; method?:string; title?:string; status?:string; type?:'appointment'|'callback'; mode?:'phone'|'in_person'|null; location?:string|null; lifecycleState?:'past_due'|'upcoming'|null; callbackActionAllowed?:boolean; currentAssigneeId?:string|null; kind?:string; endedAt?:string|null;
-  followUpObligationId?:string|null; followUpStatus?:RepSmsObligationStatus|null; followUpMessage?:string|null; followUpComposition?:Record<string,unknown>|null; followUpBlockedReason?:string|null };
+  followUpObligationId?:string|null; followUpStatus?:RepSmsObligationStatus|null; followUpMessage?:string|null; followUpComposition?:Record<string,unknown>|null; followUpBlockedReason?:string|null; note?:string|null };
 export type AcquisitionDetail = { groups: Partial<Record<DetailGroup,{ rows:DetailFact[];cursor:string|null;hasMore:boolean }>> };
 
 const SMS_PAGE_SIZE=20;

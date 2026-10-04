@@ -19,7 +19,8 @@ export type AcquisitionAttemptSource = "sandra" | "dialpad" | "manual";
 export type AcquisitionAttemptOutcome =
   | "no_answer"
   | "reached"
-  | "wrong_number";
+  | "wrong_number"
+  | "voicemail";
 export type AcquisitionOfferMethod =
   | "dropbox_sign"
   | "verbal"
