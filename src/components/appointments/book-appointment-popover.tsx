@@ -204,6 +204,8 @@ export function BookAppointmentPopover({
 
   // A new phone appointment is fixed at 15 minutes; every other case uses the picker.
   const phoneBooking = !isReschedule && apptMode === "phone";
+  // A reschedule keeps the appointment's existing length (decided server-side), so it shows no duration.
+  const showDuration = !isReschedule && !phoneBooking;
   const effectiveDuration = phoneBooking ? 15 : durationMinutes;
 
   useEffect(() => {
@@ -409,7 +411,7 @@ export function BookAppointmentPopover({
             </div>
           ) : null}
 
-          <div className={phoneBooking ? "grid grid-cols-1 gap-2" : "grid grid-cols-2 gap-2"}>
+          <div className={showDuration ? "grid grid-cols-2 gap-2" : "grid grid-cols-1 gap-2"}>
             <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
               Time
               <Select value={time} onValueChange={(v) => setTime(v ?? "")}>
@@ -429,7 +431,7 @@ export function BookAppointmentPopover({
                 </SelectContent>
               </Select>
             </label>
-            {phoneBooking ? null : (
+            {showDuration ? (
             <label className="flex flex-col gap-1 text-xs font-medium text-muted-foreground">
               Duration
               <Select
@@ -452,7 +454,7 @@ export function BookAppointmentPopover({
                 </SelectContent>
               </Select>
             </label>
-            )}
+            ) : null}
           </div>
 
           {!isReschedule && apptMode === "in_person" ? (
@@ -470,7 +472,7 @@ export function BookAppointmentPopover({
             </label>
           ) : null}
 
-          {endLabel ? (
+          {endLabel && !isReschedule ? (
             <p
               className="text-xs text-muted-foreground"
               data-testid="book-appointment-end-label"

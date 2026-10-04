@@ -38,7 +38,7 @@ describe("createNextStepAction", () => {
     expect(bookAppointment).toHaveBeenCalledWith(expect.objectContaining({ durationMinutes: 45, date: "2026-06-15", time: "14:00" }));
   });
 
-  it("converts the wall time server-side and writes a phone next step (15 minutes, no booking effects)", async () => {
+  it("converts the wall time server-side and writes a phone next step (15 minutes, booking effects on)", async () => {
     schemaReady.mockResolvedValue(true);
     createNextStep.mockResolvedValue({ ok: true, data: { taskId: "t2", calendarChainId: "c2", alreadyQualified: false, duplicate: false } });
     const result = await createNextStepAction({ ...base, durationMinutes: 90, location: "ignored" });
@@ -48,7 +48,8 @@ describe("createNextStepAction", () => {
     expect(arg).toMatchObject({ kind: "appointment", mode: "phone", dueAt: "2026-06-15T19:00:00.000Z", origin: "app", idempotencyKey: base.idempotencyKey });
     expect(arg.durationMinutes).toBeUndefined();
     expect(arg.location).toBeUndefined();
-    expect(arg.applyBookingEffects).toBeUndefined();
+    // Today's behavior kept: booking effects (drip pause, booked_appointment, prospect promotion).
+    expect(arg.applyBookingEffects).toBe(true);
   });
 
   it("passes duration and location for an in-person appointment and refuses a DST-gap time", async () => {
