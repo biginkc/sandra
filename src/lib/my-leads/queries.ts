@@ -44,7 +44,7 @@ export async function myLeadsViewer() {
   if(memberships.length!==1) throw new MyLeadsReadError('FORBIDDEN','A single active organization is required.');
   return {userId:user.id,orgId:memberships[0].org_id,isOwner:memberships[0].role==='owner',client};
 }
-async function readRpc<T>(client: unknown,name: string,args: Record<string,Json>): Promise<T> {
+export async function readRpc<T>(client: unknown,name: string,args: Record<string,Json>): Promise<T> {
   const {data,error}=await (client as ReadClient).rpc(name,args);
   if(error) {
     if(error.message?.includes('FEATURE_DISABLED')) throw new MyLeadsReadError('FEATURE_DISABLED','My Leads is not enabled yet.');
@@ -71,7 +71,7 @@ export type MyLeadRowReason='not_found'|'unassigned'|'other_rep'|'closed_dead_dn
 export type MyLeadRowLookup={status:'found';row:QueueRow;snapshotAt:string}|{status:'unavailable';reason:MyLeadRowReason};
 const QUEUE_STAGES:readonly string[]=['not_contacted','contacted','needs_offer','offer_sent','under_contract'];
 /** Runtime check for the fields the client relies on; anything else is a failed read. */
-function isQueueRowFor(row:unknown,propertyId:string): row is QueueRow {
+export function isQueueRowFor(row:unknown,propertyId:string): row is QueueRow {
   if(typeof row!=='object'||row===null||Array.isArray(row)) return false;
   const value=row as Record<string,unknown>;
   return value.propertyId===propertyId&&typeof value.assignmentEpisodeId==='string'&&value.assignmentEpisodeId!==''&&

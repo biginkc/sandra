@@ -23,6 +23,7 @@ import {
   type DetailGroup,
 } from "@/lib/my-leads/queries";
 import { listMyLeadsInDrip } from "@/lib/my-leads/drip-queries";
+import { getCallNext } from "@/lib/my-leads/call-next";
 import {
   setAcquisitionDesignation,
   setAcquisitionSettings,
@@ -41,12 +42,18 @@ export async function loadMyLeads(input: {
   endDate?: string;
 }) {
   try {
-    const [snapshot, kpis, drips] = await Promise.all([
+    const [snapshot, kpis, drips, strip] = await Promise.all([
       getAcquisitionQueue(input),
       getAcquisitionKpis({ memberId: input.memberId, period: "today" }),
       listMyLeadsInDrip(input.memberId, input.search),
+      // The Call next strip is additive: null when it is off (flag or schema), undefined when
+      // its read failed. Neither may blank the queue.
+      getCallNext({ memberId: input.memberId }).catch(() => {
+        reportMyLeadsReadFailure("my_leads_call_next");
+        return undefined;
+      }),
     ]);
-    return { ok: true as const, snapshot, kpis, drips };
+    return { ok: true as const, snapshot, kpis, drips, strip };
   } catch (error) {
     reportMyLeadsReadFailure("my_leads_queue");
     return {

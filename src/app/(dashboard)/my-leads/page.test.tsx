@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   getAcquisitionKpis: vi.fn(),
   getMyLeadsQueueRow: vi.fn(),
   listMyLeadsInDrip: vi.fn(),
+  getCallNext: vi.fn(),
   MyLeadsClient: vi.fn(() => <div data-testid="my-leads-client" />),
   loadDialpadPanelBootstrap: vi.fn(),
   reportError: vi.fn(),
@@ -34,6 +35,9 @@ vi.mock("@/lib/my-leads/queries", () => ({
       this.code = code;
     }
   },
+}));
+vi.mock("@/lib/my-leads/call-next", () => ({
+  getCallNext: mocks.getCallNext,
 }));
 vi.mock("@/lib/my-leads/drip-queries", () => ({
   listMyLeadsInDrip: mocks.listMyLeadsInDrip,
@@ -117,6 +121,7 @@ beforeEach(() => {
   mocks.getAcquisitionRoster.mockResolvedValue({ viewer, roster: baseRoster });
   mocks.getAcquisitionQueue.mockResolvedValue({});
   mocks.getAcquisitionKpis.mockResolvedValue({});
+  mocks.getCallNext.mockResolvedValue(null);
   mocks.listMyLeadsInDrip.mockResolvedValue({
     active: [],
     replied: [],
@@ -325,6 +330,62 @@ describe("MyLeadsPage availability boundary", () => {
       )[0]?.[0],
     ).toMatchObject({ dialpad: null });
     expect(mocks.reportError).toHaveBeenCalledTimes(1);
+  });
+
+  describe("Call next strip", () => {
+    const clientProps = () =>
+      (
+        mocks.MyLeadsClient.mock.calls as unknown as Array<
+          [Record<string, unknown>]
+        >
+      )[0]?.[0];
+
+    it("passes the strip through when it is on", async () => {
+      const strip = {
+        rows: [],
+        excluded: [],
+        hiddenCount: 2,
+        snapshotAt: "2026-10-05T12:00:00Z",
+      };
+      mocks.getCallNext.mockResolvedValue(strip);
+      renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+      expect(mocks.getCallNext).toHaveBeenCalledWith({ memberId: "user-1" });
+      expect(clientProps()).toMatchObject({ initialStrip: strip });
+    });
+
+    it("renders the unchanged page with no strip when it is off", async () => {
+      mocks.getCallNext.mockResolvedValue(null);
+      const html = renderPage(
+        await MyLeadsPage({ searchParams: Promise.resolve({}) }),
+      );
+      expect(html).toContain("my-leads-client");
+      expect(clientProps()).toMatchObject({ initialStrip: null });
+    });
+
+    it("never fails the page when the strip read fails, and reports it", async () => {
+      mocks.getCallNext.mockRejectedValue(new Error("rpc down"));
+      const html = renderPage(
+        await MyLeadsPage({ searchParams: Promise.resolve({}) }),
+      );
+      expect(html).toContain("my-leads-client");
+      expect(clientProps()).toMatchObject({ initialStrip: null });
+      expect(mocks.reportError).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not read the strip while rollout is disabled", async () => {
+      mocks.getAcquisitionRoster.mockResolvedValue({
+        viewer,
+        roster: {
+          ...baseRoster,
+          settings: { ...baseRoster.settings, enabled: false },
+        },
+      });
+      mocks.getCallerMembershipsOrThrow.mockResolvedValue([
+        { ...activeAcquisitionsMembership, role: "owner" as const },
+      ]);
+      await MyLeadsPage({ searchParams: Promise.resolve({}) }).catch(() => null);
+      expect(mocks.getCallNext).not.toHaveBeenCalled();
+    });
   });
 
   describe("lead deep link", () => {

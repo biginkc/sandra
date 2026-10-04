@@ -9,7 +9,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
  * Each later sub-PR appends its own feature to `SchemaFeature` and
  * `REQUIREMENTS`.
  */
-export type SchemaFeature = "next_step_write";
+export type SchemaFeature = "next_step_write" | "call_next";
 
 export type SchemaRequirement = {
   /** `public.fn_name(argtype,argtype)` regprocedure strings. */
@@ -24,6 +24,16 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
       "public.fn_create_next_step(uuid,uuid,uuid,text,text,timestamptz,uuid,uuid,text,timestamptz,text,text,text,uuid,uuid,text,boolean,boolean)",
     ],
     columns: ["tasks.mode", "tasks.location", "tasks.next_step_kind"],
+  },
+  // P1b: the Call next strip reads the ranking RPCs and, through them, the offer chain column.
+  call_next: {
+    functions: [
+      "public.fn_get_my_leads_call_next(uuid,uuid,integer)",
+      "public.fn_set_my_leads_strip_override(uuid,uuid,uuid,text)",
+      "public.fn_get_my_leads_triage(uuid,uuid,integer,integer,timestamptz,uuid)",
+      "public.my_leads_call_next_rows(uuid,uuid,timestamptz)",
+    ],
+    columns: ["acquisition_offers.follow_up_calendar_chain_id", "tasks.next_step_kind"],
   },
 };
 

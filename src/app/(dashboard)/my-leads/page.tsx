@@ -19,6 +19,7 @@ import {
   MY_LEAD_ROW_REASON_COPY,
 } from "@/lib/my-leads/row-reasons";
 import { listMyLeadsInDrip } from "@/lib/my-leads/drip-queries";
+import { getCallNext } from "@/lib/my-leads/call-next";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   getAcquisitionKpis,
@@ -165,6 +166,21 @@ export default async function MyLeadsPage({
   let snapshot: Awaited<ReturnType<typeof getAcquisitionQueue>> | null = null;
   let kpis: Awaited<ReturnType<typeof getAcquisitionKpis>> | null = null;
   let drips: Awaited<ReturnType<typeof listMyLeadsInDrip>> | null = null;
+  // The Call next strip is additive: null when it is off (flag or schema not ready) and also
+  // null when its read fails, so it can never blank or fail the existing page.
+  const stripRead: Promise<Awaited<ReturnType<typeof getCallNext>>> =
+    roster.settings.enabled
+      ? getCallNext({ memberId: viewer.userId }).catch((error) => {
+          reportError(
+            error instanceof Error ? error : new Error("call next read failed"),
+            {
+              errorClass: "database",
+              tags: { surface: "database", operation: "my_leads_call_next" },
+            },
+          );
+          return null;
+        })
+      : Promise.resolve(null);
   try {
     if (roster.settings.enabled) {
       [snapshot, kpis, drips] = await Promise.all([
@@ -176,6 +192,8 @@ export default async function MyLeadsPage({
   } catch (error) {
     return loadFailureState(error, retryHref);
   }
+
+  const initialStrip = await stripRead;
 
   let selectedLead: SelectedLeadResult =
     selectedLeadLink.status === "none"
@@ -321,6 +339,7 @@ export default async function MyLeadsPage({
         initialSnapshot={snapshot}
         initialKpis={kpis}
         initialDrips={drips}
+        initialStrip={initialStrip}
         selectedLead={selectedLead}
         focus={focus}
       />
