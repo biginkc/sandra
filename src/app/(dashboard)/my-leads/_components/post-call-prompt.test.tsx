@@ -225,15 +225,13 @@ describe("PostCallPrompt", () => {
     ["skipped", { ok: true as const, note: "skipped" as const, nextStep: "skipped" as const, message: "Note not saved yet" }],
     ["whole request failed", { ok: false as const, message: "down" }],
   ])("shows the typed note with a copy button when the note was %s", async (_name, result) => {
-    const writeText = vi.fn(async () => undefined)
-    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true })
     const { user } = setup({ ...linked, callReferenceOptions: refs(), extras: { status: "done", result } })
     await user.click(outcome("Reached"))
     await user.type(screen.getByTestId("post-call-note"), "Seller wants 120k")
     await user.click(screen.getByRole("button", { name: "Save" }))
     expect(await screen.findByTestId("post-call-unsaved-note")).toHaveTextContent("Seller wants 120k")
     await user.click(screen.getByTestId("post-call-copy-note"))
-    expect(writeText).toHaveBeenCalledWith("Seller wants 120k")
+    expect(await navigator.clipboard.readText()).toBe("Seller wants 120k")
   })
 
   it("does not show the unsaved-note box when the note saved", async () => {
