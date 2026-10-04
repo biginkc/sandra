@@ -123,7 +123,7 @@ test.describe.serial("my-leads-close: Phase 1 CI lane", () => {
   });
 
   test("my-leads-close: T4 post-call prompt outcome + note + Next week creates one phone appointment seen identically everywhere", async ({ page }) => {
-    const { db, lead, repUserId } = world as World;
+    const { db, lead } = world as World;
     const before = await db.query<{ n: string }>("select count(*)::text as n from public.tasks where related_property_id=$1 and status in ('open','snoozed')", [lead.propertyId]);
     expect(Number(before.rows[0]!.n)).toBe(0);
 
