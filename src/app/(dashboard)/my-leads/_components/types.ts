@@ -134,6 +134,7 @@ export type MyLeadAttempt = {
   followUpStatus?: "required" | "draft" | "claimed" | "sending" | "accepted" | "delivered" | "failed_not_dispatched" | "unknown" | "blocked" | "delivery_failed" | "voided" | "exception_closed" | null
   followUpMessage?: string | null
   followUpBlockedReason?: string | null
+  note?: string | null
 }
 
 export type MyLeadAppointment = {

@@ -94,6 +94,7 @@ export function MyLeadDetailPanel({
             <div>
               <p className="font-semibold text-foreground">{attempt.outcomeLabel}</p>
               <p className="mt-[3px] text-muted-foreground">{attempt.actorLabel}</p>
+              {attempt.note && <p className="mt-[3px] whitespace-pre-wrap break-words text-foreground">{attempt.note}</p>}
             </div>
             <div className="flex flex-wrap items-center justify-end gap-[9px] whitespace-nowrap">
               {attempt.sourceLabel && (
