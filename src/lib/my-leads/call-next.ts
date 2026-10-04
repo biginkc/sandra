@@ -20,6 +20,7 @@ export const CALL_NEXT_REASONS = [
   "needs_offer",
   "offer_follow_up_overdue",
   "hot_going_cold",
+  "missed_callback",
   "warm_going_cold",
   "longest_since_touch",
 ] as const;

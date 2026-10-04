@@ -41,7 +41,7 @@ export function stripItem(
   reason: CallNextReason = "longest_since_touch",
   over: Partial<CallNextRow> = {},
 ): CallNextRow {
-  const tier: CallNextTier = reason === "pinned_call_today" ? 0 : reason.startsWith("appointment") ? 1 : reason.startsWith("inbound") ? 2 : reason === "needs_offer" || reason === "offer_follow_up_overdue" ? 3 : reason.endsWith("going_cold") ? 4 : 5;
+  const tier: CallNextTier = reason === "pinned_call_today" ? 0 : reason.startsWith("appointment") ? 1 : reason.startsWith("inbound") ? 2 : reason === "needs_offer" || reason === "offer_follow_up_overdue" ? 3 : reason.endsWith("going_cold") || reason === "missed_callback" ? 4 : 5;
   return {
     propertyId,
     tier,

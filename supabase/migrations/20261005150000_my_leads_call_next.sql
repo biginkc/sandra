@@ -109,12 +109,13 @@ revoke all on function public.my_leads_touch_facts(uuid, uuid, timestamptz) from
 -- The one ranking projection. Internal (takes p_at so tests can pin time); the public wrapper
 -- passes statement_timestamp(). Tiers (D3):
 --   0 pinned "Call today" (until called or midnight Central)
---   1 appointment due within 15 minutes or overdue (any mode, any assignee); offer follow-up
---     appointments are excluded here and ranked in tier 3
+--   1 appointment due within 15 minutes or overdue by at most 7 calendar days (America/Chicago;
+--     any mode, any assignee); offer follow-up appointments are excluded here and ranked in tier 3.
+--     Older overdue appointments drop to tier 4 as 'missed_callback', oldest first
 --   2 inbound text/call newer than the last touch, newest first
 --   3 needs_offer with no pending offer; offer_sent whose follow-up (the chain task, falling back
 --     to acquisition_offers.follow_up_at only for an offer with no chain yet) is due
---   4 hot/warm motivation with no touch in 3 days
+--   4 hot/warm motivation with no touch in 3 days, and missed callbacks (overdue > 7 days)
 --   5 everyone else, longest since last touch first (never touched first)
 -- Ties: assignment age (oldest first), then property id. Leads with no callable phone or a DNC
 -- contact are returned with excluded_reason set; leads in an active drip are absent.
@@ -135,7 +136,7 @@ language sql stable security definer set search_path = '' as $$
     select pe.*, tf.last_touch_at, tf.last_call_at, tf.last_inbound_at, tf.last_inbound_kind,
       exists (select 1 from public.sequence_enrollments e
               where e.org_id = p_org and e.property_id = pe.property_id and e.status = 'active') as in_drip,
-      ov.pinned_at, ov.pinned_until, ov.hidden_until
+      ov.pinned_at, ov.pinned_until, ov.hidden_until, ov.updated_at as ov_at
     from people pe
     left join public.my_leads_touch_facts(p_org, p_member, p_at) tf on tf.property_id = pe.property_id
     left join public.my_leads_strip_overrides ov
@@ -151,9 +152,12 @@ language sql stable security definer set search_path = '' as $$
       and t.related_property_id is not null and t.due_at <= p_at + interval '15 minutes'),
   due as (
     select a.property_id,
-      min(a.due_at) filter (where not a.is_offer_follow_up) as appt_due_at,
+      min(a.due_at) filter (where not a.is_offer_follow_up and a.due_at >= cutoff.at) as appt_due_at,
+      min(a.due_at) filter (where not a.is_offer_follow_up and a.due_at < cutoff.at) as missed_due_at,
       min(a.due_at) filter (where a.is_offer_follow_up) as offer_task_due_at
-    from appts a group by a.property_id),
+    from appts a
+    cross join (select ((p_at at time zone 'America/Chicago') - interval '7 days') at time zone 'America/Chicago' as at) cutoff
+    group by a.property_id),
   flagged as (
     select f.*,
       coalesce(f.pinned_until > p_at and (f.last_call_at is null or f.last_call_at <= f.pinned_at), false) as is_pinned,
@@ -163,7 +167,7 @@ language sql stable security definer set search_path = '' as $$
     from facts f
     where not f.in_drip),
   ranked as (
-    select fl.*, d.appt_due_at, d.offer_task_due_at, po.follow_up_at as offer_follow_up_at,
+    select fl.*, d.appt_due_at, d.missed_due_at, d.offer_task_due_at, po.follow_up_at as offer_follow_up_at,
       case
         when fl.is_pinned then 0
         when d.appt_due_at is not null then 1
@@ -171,6 +175,7 @@ language sql stable security definer set search_path = '' as $$
         when fl.stage = 'needs_offer' and po.property_id is null then 3
         when fl.stage = 'offer_sent'
           and coalesce(d.offer_task_due_at, case when not po.has_chain then po.follow_up_at end) <= p_at then 3
+        when d.missed_due_at is not null then 4
         when fl.motivation_level in ('hot', 'warm') and coalesce(fl.last_touch_at, '-infinity') < p_at - interval '3 days' then 4
         else 5
       end::smallint as tr
@@ -188,6 +193,7 @@ language sql stable security definer set search_path = '' as $$
         when 1 then r.appt_due_at
         when 2 then r.last_inbound_at
         when 3 then coalesce(r.offer_task_due_at, r.offer_follow_up_at, (r.row_data ->> 'stageEnteredAt')::timestamptz, r.last_touch_at)
+        when 4 then case when r.missed_due_at is not null then r.missed_due_at else r.last_touch_at end
         else r.last_touch_at
       end as at_ts
     from ranked r)
@@ -197,14 +203,20 @@ language sql stable security definer set search_path = '' as $$
       when 1 then case when s.appt_due_at <= p_at then 'appointment_overdue' else 'appointment_due' end
       when 2 then case s.last_inbound_kind when 'call' then 'inbound_call' else 'inbound_text' end
       when 3 then case when s.stage = 'needs_offer' then 'needs_offer' else 'offer_follow_up_overdue' end
-      when 4 then case s.motivation_level when 'hot' then 'hot_going_cold' else 'warm_going_cold' end
+      when 4 then case when s.missed_due_at is not null then 'missed_callback'
+                       when s.motivation_level = 'hot' then 'hot_going_cold' else 'warm_going_cold' end
       else 'longest_since_touch'
     end,
     s.at_ts,
-    s.is_pinned, s.is_hidden, s.excl, s.last_touch_at, s.assignment_sort,
+    s.is_pinned,
+    -- A hide never buries a callback that is due (tier 1) or an inbound newer than the hide (tier 2).
+    (s.is_hidden and not (s.tr = 1 or (s.tr = 2 and s.last_inbound_at > s.ov_at))),
+    s.excl, s.last_touch_at, s.assignment_sort,
     case s.tr
+      when 0 then -extract(epoch from s.at_ts)   -- newest pin first
       when 2 then -extract(epoch from s.at_ts)
-      when 4 then coalesce(extract(epoch from s.last_touch_at), -1e12)
+      when 4 then case when s.missed_due_at is not null then extract(epoch from s.missed_due_at)
+                       else coalesce(extract(epoch from s.last_touch_at), -1e12) end
       when 5 then coalesce(extract(epoch from s.last_touch_at), -1e12)
       else coalesce(extract(epoch from s.at_ts), 0)
     end::double precision,

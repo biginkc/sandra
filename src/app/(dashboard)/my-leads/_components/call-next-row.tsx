@@ -46,6 +46,9 @@ export function CallNextRowView({
   const name = row.homeownerName ?? "Unnamed owner";
   const reason = reasonLabel(item.reason, item.reasonAt, now);
   const disabled = !canAct || busy;
+  // No point offering Call on a lead that cannot be dialed (DNC contact, or no phone number).
+  const callable = !row.contactDnc && row.phones.some((phone) => phone.trim() !== "");
+  const callDisabled = disabled || !callable;
   return (
     <li
       data-testid={`call-next-row-${propertyId}`}
@@ -75,7 +78,8 @@ export function CallNextRowView({
         <Button
           type="button"
           size="sm"
-          disabled={disabled}
+          disabled={callDisabled}
+          title={callable ? undefined : "No callable phone number"}
           data-testid={`call-next-action-call-${propertyId}`}
           aria-label={`Call ${name}`}
           onClick={() => onCall(propertyId)}
