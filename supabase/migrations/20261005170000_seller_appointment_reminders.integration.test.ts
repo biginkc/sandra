@@ -4,17 +4,13 @@ import { Client } from 'pg';
 import { expect, it } from 'vitest';
 import { loadTestEnv } from '@tests/integration/env';
 import { requireLoopbackPostgresUrl } from '@/lib/testing/loopback-postgres-url';
-import { applyP1e } from '@tests/integration/my-leads-housekeeping-fixture';
+import { applyMyLeadsChain } from '@tests/integration/my-leads-housekeeping-fixture';
 
 const strip = (file: string) => {
   const sql = readFileSync(new URL(file, import.meta.url), 'utf8');
   if (!/^[\s\S]*?\bbegin;\s*/im.test(sql) || !/\s*commit;\s*$/i.test(sql)) throw new Error(`${file}: transaction wrapper changed`);
   return sql.replace(/^begin;\s*/im, '').replace(/\s*commit;\s*$/i, '');
 };
-const chain = [
-  './20261005120000_next_step_schema.sql',
-].map(strip);
-const migration = strip('./20261005170000_seller_appointment_reminders.sql');
 const rollback = strip('../rollbacks/20261005170000_seller_appointment_reminders.sql');
 const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
 const MIN = 60_000;
@@ -30,9 +26,7 @@ async function withDb(fn: (db: Client) => Promise<void>, apply = true) {
   await db.connect();
   try {
     await db.query('begin');
-    await applyP1e(db, 'outcome');
-    for (const file of chain) await db.query(file);
-    if (apply) await db.query(migration);
+    await applyMyLeadsChain(db, ['tools', 'reassign', 'outcome', 'schema', ...(apply ? ['sellerReminders' as const] : [])]);
     await db.query("select set_config('sandra.allow_appointment_time_move','on',true)");
     await fn(db);
   } finally { await db.query('rollback').catch(() => {}); await db.end(); }
