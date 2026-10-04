@@ -7,6 +7,9 @@ import {
 
 const reasons = async (w: World) =>
   (await ledger(w)).event.map((e) => `${e.disposition}:${e.disposition_reason ?? ''}`);
+// The processing list is database-wide; keep only the event ids of this test's org.
+const ownIds = async (w: World, ids: string[]) =>
+  (await w.db.query('select id from public.dialpad_call_events where org_id=$1 and id = any($2::uuid[])', [w.org, ids])).rows.map((r) => r.id);
 const run = async (w: World, evs: Ev[]) => { for (const e of evs) await deliver(w, e); return ledger(w); };
 const episode = async (w: World, property = w.property): Promise<Json> =>
   (await w.db.query('select * from public.acquisition_assignment_episodes where property_id=$1 order by assigned_at desc limit 1', [property])).rows[0];
@@ -323,7 +326,7 @@ describe('20261006100300 native-call matching', () => {
       const firstCall = (await episode(w)).first_call_started_at;
       for (const id of ids) await processEvent(w, id);
       const pending = (await service(db, () => db.query('select public.fn_list_dialpad_call_events_for_processing(50) as v'))).rows[0].v;
-      expect(pending).toEqual([]);
+      expect(await ownIds(w, pending)).toEqual([]); // scoped to this org: other suites may leave committed rows
       const after = await ledger(w);
       expect([after.intent.length, after.activity.length, after.attempt.length]).toEqual([1, 1, 1]);
       expect(after.attempt[0].id).toBe(before.attempt[0].id);
@@ -337,7 +340,7 @@ describe('20261006100300 native-call matching', () => {
       const w = await world(db, { flag: true });
       await run(w, nativeCall(w, { number: '+18165559876' }));
       const pending = (await service(db, () => db.query('select public.fn_list_dialpad_call_events_for_processing(50) as v'))).rows[0].v;
-      expect(pending).toEqual([]);
+      expect(await ownIds(w, pending)).toEqual([]); // scoped to this org: other suites may leave committed rows
     });
   });
 

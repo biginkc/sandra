@@ -116,5 +116,7 @@ describe('call state lists stay in sync', () => {
     for (const state of DIALPAD_ACTIVE_CALL_STATES) expect(DIALPAD_CALL_STATES).toContain(state);
     expect(DIALPAD_ACTIVE_CALL_STATES).toContain('failed');
     expect(DIALPAD_ACTIVE_CALL_STATES).not.toContain('ended');
+    // expired is terminal: the status function reports it once the window passes even when failed_at is set, so polling stops
+    expect(DIALPAD_ACTIVE_CALL_STATES).not.toContain('expired');
   });
 });

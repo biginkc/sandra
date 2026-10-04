@@ -32,7 +32,7 @@ begin
       '    raise exception ''failed marker is set once, on a dispatched prepared intent'' using errcode = ''42501'';\n  end if;\n  return new;'),
     ('public.fn_get_dialpad_call_status(uuid,uuid,uuid)',
       'when v_intent.expires_at <= now() then ''expired''',
-      'when v_intent.failed_at is not null then ''failed'' when v_intent.expires_at <= now() then ''expired'''),
+      'when v_intent.expires_at <= now() then ''expired'' when v_intent.failed_at is not null then ''failed'''),
     ('public.fn_get_dialpad_call_status(uuid,uuid,uuid)',
       '''expiresAt'', v_intent.expires_at,',
       '''expiresAt'', v_intent.expires_at, ''failedAt'', v_intent.failed_at,')

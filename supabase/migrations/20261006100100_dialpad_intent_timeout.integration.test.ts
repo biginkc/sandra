@@ -99,6 +99,23 @@ describe('20261006100100 intent timeout marker', () => {
     });
   });
 
+  it('a failed intent past its window reports expired (failed_at stays as the marker); a failed one inside the window reports failed', async () => {
+    await withP2('intentTimeout', async (db) => {
+      const w = await world(db, { flag: true });
+      const i = await prepare(w);
+      await authorize(w, i.intentId, 300);
+      await sweep(w);
+      expect((await status(w, i.intentId)).state).toBe('failed');
+      await db.query('set local session_replication_role = replica'); // evidence rows are immutable; age this one directly
+      await db.query(
+        "update public.dialpad_call_intents set prepared_at = now() - interval '3 hours', expires_at = now() - interval '1 hour' where id = $1",
+        [i.intentId]);
+      await db.query('set local session_replication_role = origin');
+      expect((await status(w, i.intentId)).state).toBe('expired');
+      expect(await failedAt(w, i.intentId)).not.toBeNull();
+    });
+  });
+
   it('is inert until the org native_matcher flag is on', async () => {
     await withP2('intentTimeout', async (db) => {
       const w = await world(db);
