@@ -24,7 +24,9 @@ import {validateFixture} from './prepare-norma-fixture.mjs';
 const fixtureEnv={GITHUB_ACTIONS:'true',E2E_DISPOSABLE_DATABASE:'1',E2E_CI_SUPABASE_DB_URL:'postgresql://postgres:postgres@127.0.0.1:55422/postgres'};
 const config='project_id = "sandra-heavy-0123abcd"\n[db]\nport = 55422\n';
 const labels={'com.supabase.cli.project':'sandra-heavy-0123abcd','com.supabase.cli.workdir':'/temp/sandra-heavy-Ab12cd'};
-test('fixture admin preparation owns exact disposable container',()=>assert.equal(validateFixture(fixtureEnv,config,labels,'/temp/sandra-heavy-Ab12cd','/temp'),'supabase_db_sandra-heavy-0123abcd'));
-for (const [key,value] of [['GITHUB_ACTIONS','false'],['E2E_DISPOSABLE_DATABASE','0'],['E2E_CI_SUPABASE_DB_URL','postgresql://fake.example/db'],['DOCKER_HOST','ssh://remote']]) test(`fixture refuses ${key}`,()=>assert.throws(()=>validateFixture({...fixtureEnv,[key]:value},config,labels,'/temp/sandra-heavy-Ab12cd','/temp')));
-test('fixture refuses unrelated container label',()=>assert.throws(()=>validateFixture(fixtureEnv,config,{...labels,'com.supabase.cli.project':'sandra'},'/temp/sandra-heavy-Ab12cd','/temp')));
-test('fixture refuses outside runner directory',()=>assert.throws(()=>validateFixture(fixtureEnv,config,labels,'/elsewhere/sandra-heavy-Ab12cd','/temp')));
+test('fixture admin preparation owns exact disposable container',()=>assert.equal(validateFixture(fixtureEnv,config,labels,'/temp/sandra-heavy-Ab12cd','/temp',{'5432/tcp':[{HostIp:'127.0.0.1',HostPort:'55422'}]}),'supabase_db_sandra-heavy-0123abcd'));
+for (const [key,value] of [['GITHUB_ACTIONS','false'],['E2E_DISPOSABLE_DATABASE','0'],['E2E_CI_SUPABASE_DB_URL','postgresql://fake.example/db'],['DOCKER_HOST','ssh://remote']]) test(`fixture refuses ${key}`,()=>assert.throws(()=>validateFixture({...fixtureEnv,[key]:value},config,labels,'/temp/sandra-heavy-Ab12cd','/temp',{'5432/tcp':[{HostIp:'127.0.0.1',HostPort:'55422'}]})));
+test('fixture refuses unrelated container label',()=>assert.throws(()=>validateFixture(fixtureEnv,config,{...labels,'com.supabase.cli.project':'sandra'},'/temp/sandra-heavy-Ab12cd','/temp',{'5432/tcp':[{HostIp:'127.0.0.1',HostPort:'55422'}]})));
+test('fixture refuses outside runner directory',()=>assert.throws(()=>validateFixture(fixtureEnv,config,labels,'/elsewhere/sandra-heavy-Ab12cd','/temp',{'5432/tcp':[{HostIp:'127.0.0.1',HostPort:'55422'}]})));
+
+test('fixture refuses another container port',()=>assert.throws(()=>validateFixture(fixtureEnv,config,labels,'/temp/sandra-heavy-Ab12cd','/temp',{'5432/tcp':[{HostIp:'127.0.0.1',HostPort:'56684'}]})));
