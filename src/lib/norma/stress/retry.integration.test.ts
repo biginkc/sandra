@@ -1,6 +1,10 @@
+import { createHmac } from "node:crypto";
+
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { claimNormaDispatch } from "../rpc";
+import { handleBlandCallWebhook } from "../webhook";
+import { WEBHOOK_SECRET } from "./fake-bland";
 import { Harness } from "./harness";
 import { checkInvariants } from "./invariants";
 import { Barrier, Latch, rng } from "./trace";
@@ -117,6 +121,33 @@ describe.each(["voicemail", "no_answer_status"] as const)("first call not answer
     expect(await requestOf(ctx.lead.property)).toMatchObject({ status: "dispatch_rejected", attempt: 2 });
     expect(h.bland.sendsFor(request.id)).toHaveLength(1);
     expect(await enrollment(ctx.lead.enrollments[0]!)).toEqual({ status: "active", pause_reason: null });
+  });
+});
+
+describe("malformed attempt metadata cannot overflow the completion SQL", () => {
+  it.each([99_999_999_999, "99999999999"])("acknowledges oversized attempt %s without changing either call", async (attempt) => {
+    const ctx = await place("voicemail");
+    for (const currentAttempt of [1, 2]) {
+      const current = h.bland.callsForNumber(ctx.lead.phone)[currentAttempt - 1]!;
+      const payload = h.bland.payload(current);
+      payload.metadata = { request_id: current.requestId, idempotency_key: current.key, attempt };
+      const body = JSON.stringify(payload);
+      const response = await handleBlandCallWebhook(new Request("http://stress.local/api/webhooks/bland/call", {
+        method: "POST", body,
+        headers: { "x-webhook-signature": createHmac("sha256", WEBHOOK_SECRET).update(body).digest("hex") },
+      }), { client: h.client("oversized-attempt"), secret: WEBHOOK_SECRET });
+      expect(response).toEqual({ status: 200, body: { status: "ignored", reason: "stale_attempt" } });
+      const request = await requestOf(ctx.lead.property);
+      expect(request).toMatchObject({ status: "dispatched", attempt: currentAttempt, outcome: null });
+      expect(h.bland.callsForNumber(ctx.lead.phone)).toHaveLength(currentAttempt);
+      expect(await enrollment(ctx.lead.enrollments[0]!)).toEqual({ status: "paused", pause_reason: "norma_call" });
+      expect(await events(request.id, "norma_call_completed")).toBe(0);
+      expect(await tasksOf(request.id)).toHaveLength(0);
+      await h.bland.webhook(current, "good");
+    }
+    expect(await requestOf(ctx.lead.property)).toMatchObject({ status: "completed", outcome: "no_answer", attempt: 2 });
+    expect(await enrollment(ctx.lead.enrollments[0]!)).toEqual({ status: "active", pause_reason: null });
+    expect(h.bland.callsForNumber(ctx.lead.phone)).toHaveLength(2);
   });
 });
 

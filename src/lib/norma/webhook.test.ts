@@ -133,6 +133,19 @@ describe("bland webhook route core", () => {
     expect(await post(stale.client, call())).toEqual({ status: 200, body: { status: "ignored", reason: "stale_attempt" } });
   });
 
+  it.each([99_999_999_999, "99999999999", Number.MAX_SAFE_INTEGER, 3, -1, 1.5])("fences invalid attempt %s before the SQL integer cast", async (attempt) => {
+    const { client, complete } = setup({ result: "stale_attempt", status: "dispatched" });
+    expect(await post(client, call({ metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt } })))
+      .toEqual({ status: 200, body: { status: "ignored", reason: "stale_attempt" } });
+    expect(complete.mock.calls[0]![0].p_payload).toMatchObject({ attempt: 0 });
+  });
+
+  it.each(["1", "2"])("preserves valid string attempt %s", async (attempt) => {
+    const { client, complete } = setup();
+    await post(client, call({ metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt } }));
+    expect(complete.mock.calls[0]![0].p_payload).toMatchObject({ attempt: Number(attempt) });
+  });
+
   it("attempt-2 voicemail without a pathway outcome completes as confirmed no_answer", async () => {
     const { client, complete } = setup({ result: "applied", status: "completed", outcome: "no_answer" });
     expect(await post(client, call({

@@ -60,11 +60,11 @@ export type WebhookResponse = { status: number; body: Record<string, unknown> };
 
 const respond = (status: number, body: Record<string, unknown>): WebhookResponse => ({ status, body });
 
-/** Attempt echoed in the call's metadata; anything unreadable is 0, which matches no attempt (a no-op). */
+/** Only attempts 1 and 2 are valid. Invalid values become 0 (a fenced no-op); missing legacy metadata remains 1. */
 function parseAttempt(value: unknown): number {
   if (value === undefined || value === null) return 1;
   const n = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value.trim()) ? Number(value) : 0;
-  return Number.isInteger(n) ? n : 0;
+  return n === 1 || n === 2 ? n : 0;
 }
 
 function str(value: unknown): string | null {
