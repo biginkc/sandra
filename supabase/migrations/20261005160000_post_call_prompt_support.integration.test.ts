@@ -4,6 +4,7 @@ import { Client } from 'pg';
 import { expect, it } from 'vitest';
 import { loadTestEnv } from '@tests/integration/env';
 import { requireLoopbackPostgresUrl } from '@/lib/testing/loopback-postgres-url';
+import { applyP1e } from '@tests/integration/my-leads-housekeeping-fixture';
 
 const strip = (file: string) => {
   const sql = readFileSync(new URL(file, import.meta.url), 'utf8');
@@ -11,9 +12,6 @@ const strip = (file: string) => {
   return sql.replace(/^begin;\s*/im, '').replace(/\s*commit;\s*$/i, '');
 };
 const chain = [
-  './20261005100000_my_leads_housekeeping_tools.sql',
-  './20261005100100_my_leads_housekeeping_reassign.sql',
-  './20261005110000_acquisition_attempt_outcome_voicemail_not_logged.sql',
   './20261005120000_next_step_schema.sql',
   './20261005120500_fn_create_next_step.sql',
   './20261005121000_next_step_read_model.sql',
@@ -32,6 +30,7 @@ async function withDb(fn: (db: Client) => Promise<void>, apply = true) {
   await db.connect();
   try {
     await db.query('begin');
+    await applyP1e(db, 'outcome');
     for (const file of chain) await db.query(file);
     if (apply) await db.query(migration);
     await fn(db);
