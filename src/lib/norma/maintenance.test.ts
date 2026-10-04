@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { dispatchNormaCall } from "./dispatch";
 import { readNormaMaintenanceHold } from "./maintenance";
@@ -14,6 +14,14 @@ function guardedClient() {
 }
 
 describe("Norma maintenance hold", () => {
+  afterEach(() => vi.unstubAllEnvs());
+  it("production calls without env overrides use the held process environment", async () => {
+    vi.stubEnv("NORMA_MAINTENANCE_HOLD", "1");
+    expect(readNormaMaintenanceHold()).toBe(true);
+    const db = guardedClient(); const getUserId = vi.fn();
+    expect(await requestNormaCallCore("55555555-5555-4555-8555-555555555555", null, { getUserId, sessionClient: db.client, adminClient: db.client })).toEqual({ ok: false, code: "gate_off", reason: "dispatch_disabled" });
+    expect(getUserId).not.toHaveBeenCalled(); expect(db.fail).not.toHaveBeenCalled();
+  });
   it.each([undefined, "0", "false", "OFF", " no "])("explicit release or unset %s preserves normal operation", (value) => {
     expect(readNormaMaintenanceHold({ NORMA_MAINTENANCE_HOLD: value })).toBe(false);
   });

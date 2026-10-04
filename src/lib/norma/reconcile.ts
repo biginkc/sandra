@@ -1,5 +1,3 @@
-import type { NormaEnv } from "./config";
-import { readNormaMaintenanceHold } from "./maintenance";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
@@ -12,6 +10,9 @@ import type { CallbackTimeProvider } from "./callback-time";
 import { mapBlandCallToOutcome } from "./outcome";
 import { completeNormaCall, markNormaDispatchRejected, markNormaDispatchUnknown, markNormaNeedsReview } from "./rpc";
 import { toUsVoiceE164 } from "./voice-phone";
+
+import type { NormaEnv } from "./config";
+import { readNormaMaintenanceHold } from "./maintenance";
 
 const MIN = 60_000;
 

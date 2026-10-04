@@ -1,4 +1,3 @@
-import { readNormaMaintenanceHold } from "./maintenance";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
@@ -6,6 +5,7 @@ import type { Database } from "@/lib/supabase/types";
 
 import { createBlandClient, type BlandClient } from "./bland";
 import { readNormaBlandConfig, readNormaGateConfig, type NormaBlandConfig, type NormaGateConfig, type NormaEnv } from "./config";
+import { readNormaMaintenanceHold } from "./maintenance";
 import { evaluateNormaGate } from "./gate";
 import {
   bindNormaCallId,
