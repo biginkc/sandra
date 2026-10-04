@@ -25,6 +25,8 @@ const MY_LEADS_ATTEMPT_LABELS: Record<string, string> = {
   no_answer: "No answer",
   reached: "Reached",
   wrong_number: "Wrong number",
+  voicemail: "Voicemail",
+  not_logged: "Not logged",
 };
 const MESSAGES_DISPO_LABELS: Record<string, string> = {
   wrong_number: "Wrong #",
