@@ -22,7 +22,7 @@
     "src/lib/norma/stress/regress-reconcile-mismatch.integration.test.ts": "802d96b8f2c179b576c853a8b4e75bd9f3c8815028d2fcb4b309ba16457ba22e",
     "src/lib/norma/stress/regress-switchboard-race.integration.test.ts": "53649ab8de2429f81a24dbec790b181100e321a9f6f07dbfa5a83f809abc1b1d",
     "src/lib/norma/stress/smoke.integration.test.ts": "f5b447da3b12ae0f062f75875229943cf4c5a65c080d8ef2652a0a777bd87bcb",
-    "src/lib/norma/stress/teeth.integration.test.ts": "9f63deff5be17313aeea2be980b158eed0ee192588c7a33156a0cad2db1bf490",
+    "src/lib/norma/stress/teeth.integration.test.ts": "7246e896e1a4a2ff0893d3139976b6dbec4c7474a12594cbecaeab2ebdebe46d",
     "src/lib/norma/request-call.ts": "eb43368302eb99baaa6307efca4abc5fcb2da27d159b0df91de8d6170cd6d267",
     "src/lib/norma/dispatch.ts": "ce323871075dc6bd58c470cdea639f32f12fa380bc4a5fde2ad54e5ab96cdcfb",
     "src/lib/norma/reconcile.ts": "b388576761c1bf9fa8afa1e5e71066c8604eb20f6b76e1bf4f2e7071696243a6",
@@ -77,5 +77,12 @@
         "supabase/migrations/20261004090000_norma_call_twice.integration.test.ts"
       ]
     }
+  },
+  "legacy_fixture_refinement": {
+    "base_commit": "e94aef50332c5b2e6074cb8eb365d5ecebe87ee9",
+    "file": "src/lib/norma/stress/teeth.integration.test.ts",
+    "prior_sha256": "9f63deff5be17313aeea2be980b158eed0ee192588c7a33156a0cad2db1bf490",
+    "sha256": "7246e896e1a4a2ff0893d3139976b6dbec4c7474a12594cbecaeab2ebdebe46d",
+    "scope": "Add deterministic clean/mutant stale-sweep witness. Original131 cases/assertions, seed77/70 mutation run and all five80 lifecycle seeds preserved; only this explicitly reviewed source pin updated."
   }
 }
