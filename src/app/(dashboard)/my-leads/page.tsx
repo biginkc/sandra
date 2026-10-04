@@ -10,7 +10,7 @@ import { shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { reportError } from "@/lib/errors/report";
 import {
   createSupabaseDialpadDispatchDb,
-  loadDialpadPanelBootstrap,
+  loadDialpadCallingBootstrap,
 } from "@/lib/dialpad-cti/dispatch";
 import { canViewMyLeads } from "@/lib/my-leads/access";
 import {
@@ -21,6 +21,7 @@ import {
 import { listMyLeadsInDrip } from "@/lib/my-leads/drip-queries";
 import { getCallNext } from "@/lib/my-leads/call-next";
 import { postCallPromptEnabled } from "@/lib/my-leads/post-call";
+import { CALL_FEATURES_OFF, getMyLeadsCallFeatures } from "@/lib/my-leads/call-features";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   getAcquisitionKpis,
@@ -312,10 +313,17 @@ export default async function MyLeadsPage({
     ? await postCallPromptEnabled(viewer.orgId).catch(() => false)
     : false;
 
-  let dialpad: Awaited<ReturnType<typeof loadDialpadPanelBootstrap>> = null;
-  if (roster.settings.enabled) {
+  // Phase 2 UI surfaces (click-to-dial, auto prompt, callback alert): flag AND landed schema, else off.
+  const callFeatures = roster.settings.enabled
+    ? await getMyLeadsCallFeatures(viewer.orgId).catch(() => CALL_FEATURES_OFF)
+    : CALL_FEATURES_OFF;
+
+  // The API-dial bootstrap exists only while click_to_dial is on; with it off (or the connection
+  // disabled) the client keeps today's Sandra-softphone branch exactly as when `dialpad` is null.
+  let dialpad: Awaited<ReturnType<typeof loadDialpadCallingBootstrap>> = null;
+  if (roster.settings.enabled && callFeatures.clickToDial) {
     try {
-      dialpad = await loadDialpadPanelBootstrap(
+      dialpad = await loadDialpadCallingBootstrap(
         createSupabaseDialpadDispatchDb(createAdminClient()),
         {
           orgId: viewer.orgId,
@@ -326,10 +334,10 @@ export default async function MyLeadsPage({
       reportError(
         error instanceof Error
           ? error
-          : new Error("dialpad panel bootstrap failed"),
+          : new Error("dialpad calling bootstrap failed"),
         {
           errorClass: "database",
-          tags: { surface: "database", operation: "dialpad_panel_bootstrap" },
+          tags: { surface: "database", operation: "dialpad_calling_bootstrap" },
         },
       );
     }
@@ -347,6 +355,7 @@ export default async function MyLeadsPage({
         initialDrips={drips}
         initialStrip={initialStrip}
         postCallPrompt={postCallPrompt}
+        callFeatures={callFeatures}
         selectedLead={selectedLead}
         focus={focus}
       />

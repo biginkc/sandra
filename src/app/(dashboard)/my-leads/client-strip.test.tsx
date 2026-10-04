@@ -42,13 +42,14 @@ vi.mock("@/app/(dashboard)/sequences/actions", () => ({
   startDripForLeads: vi.fn(),
 }))
 vi.mock("./dialpad-actions", () => ({
-  verifyDialpadBindingAction: vi.fn(), listDialpadCallTargetsAction: vi.fn(),
-  startDialpadCallAction: vi.fn(), getDialpadCallStatusAction: vi.fn(),
-  cancelDialpadCallAction: vi.fn(), listRecentDialpadCallsAction: vi.fn(),
+  dialLeadAction: vi.fn(),
+  getDialpadCallStatusAction: vi.fn(async () => ({ ok: false, code: "not_configured", message: "" })),
+  cancelDialpadCallAction: vi.fn(),
+  ensureDialpadBindingAction: vi.fn(),
 }))
-vi.mock("./dialpad-recording-actions", () => ({
-  closeDialpadRecordingCaptureAction: vi.fn(), getDialpadRecordingBrowserStatusAction: vi.fn(),
-  mintDialpadRecordingNextEpochAction: vi.fn(), openDialpadRecordingCaptureAction: vi.fn(),
+vi.mock("./call-state-actions", () => ({
+  pollMyLeadsCallStateAction: vi.fn(async () => ({ ok: true, state: { prompts: [], promptsCursor: null, ambiguous: [], callbacksDue: [], features: { autoPrompt: false, callbackAlert: false } } })),
+  acknowledgeCallPromptAction: vi.fn(async () => ({ ok: true, status: "acknowledged" })),
 }))
 vi.mock("./rep-sms-composer", () => ({ RepSmsComposer: () => null }))
 // A thin queue: the sections themselves are covered elsewhere; this file is about the strip.

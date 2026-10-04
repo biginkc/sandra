@@ -34,9 +34,18 @@ export function CallNextStrip({
   onCallToday,
   onNotToday,
   onDeadNurture,
+  pinned = [],
 }: MyLeadsStripProps) {
   const [excludedOpen, setExcludedOpen] = useState(false);
   const now = new Date(snapshotAt);
+  // Pinned leads (callback due now) first, in pin order; everything else keeps the ranked order.
+  const pinReason = new Map(pinned.map((pin) => [pin.propertyId, pin.reason]));
+  const orderedRows: CallNextRow[] = pinned.length === 0
+    ? [...rows]
+    : [
+        ...pinned.flatMap((pin) => rows.filter((item) => item.propertyId === pin.propertyId)),
+        ...rows.filter((item) => !pinReason.has(item.propertyId)),
+      ];
   return (
     <section
       data-testid="call-next-strip"
@@ -96,11 +105,12 @@ export function CallNextStrip({
         <p className="text-sm text-muted-foreground">Nobody needs a call right now.</p>
       ) : (
         <ol>
-          {rows.map((item: CallNextRow) => (
+          {orderedRows.map((item: CallNextRow) => (
             <CallNextRowView
               key={item.propertyId}
               item={item}
               now={now}
+              reasonOverride={pinReason.get(item.propertyId) ?? null}
               canAct={canAct}
               busy={busyPropertyId === item.propertyId}
               onCall={onCall}
