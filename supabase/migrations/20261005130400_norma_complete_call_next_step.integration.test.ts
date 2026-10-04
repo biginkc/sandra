@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ROLLBACKS, WRITERS, complete, create, dispatched, lead, load, migrations, svc, tasksFor, withDb } from "./norma-next-step-support";
+import { ROLLBACKS, WRITERS, complete, create, dispatched, lead, load, migrations, svc, tasksFor, withDb } from "@tests/integration/norma-next-step-support";
 
 describe("fn_norma_complete_call through fn_create_next_step", () => {
   it("a callback outcome is one open phone appointment (15 minutes) with the Norma identity; a replay adds nothing", async () => {

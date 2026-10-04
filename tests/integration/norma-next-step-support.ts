@@ -3,14 +3,14 @@
 // P1a-core next-step schema and fn_create_next_step, then the P1a-writers Norma migrations.
 import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import path from "node:path";
 
 import { Client } from "pg";
 import { expect } from "vitest";
 
-import { requireLoopbackPostgresUrl } from "../../src/lib/testing/loopback-postgres-url";
+import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
-const dir = fileURLToPath(new URL(".", import.meta.url));
+const dir = `${path.join(process.cwd(), "supabase/migrations")}/`;
 export const url = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
