@@ -561,7 +561,6 @@ export function MyLeadQueueRow({
                 href={`/leads/${row.propertyId}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                onClick={openActionWindow}
                 className={buttonVariants({ variant: "outline", size: "sm" })}
               >
                 Open lead

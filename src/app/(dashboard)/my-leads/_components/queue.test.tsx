@@ -417,11 +417,15 @@ describe("MyLeadsQueue", () => {
       expect(link).toHaveAttribute("target", "_blank")
       expect(link).toHaveAttribute("rel", "noopener noreferrer")
       await user.click(link)
-      expect(openWindow).toHaveBeenLastCalledWith(
-        (link as HTMLAnchorElement).href,
-        "_blank",
-        "popup,width=1200,height=900,noopener,noreferrer",
-      )
+      if (name === "Open lead") {
+        expect(openWindow).not.toHaveBeenCalled()
+      } else {
+        expect(openWindow).toHaveBeenLastCalledWith(
+          (link as HTMLAnchorElement).href,
+          "_blank",
+          "popup,width=1200,height=900,noopener,noreferrer",
+        )
+      }
       expect(window.location.href).toBe(currentUrl)
     }
     openWindow.mockRestore()
