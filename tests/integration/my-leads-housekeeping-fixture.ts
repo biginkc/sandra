@@ -62,6 +62,8 @@ const CHAIN = [
   { key: 'postCall', file: '20261005160000_post_call_prompt_support', present: column('lead_notes', 'idempotency_key') },
   { key: 'sellerReminders', file: '20261005170000_seller_appointment_reminders', present: "to_regclass('public.seller_appointment_reminders') is not null" },
   { key: 'linkCapture', file: '20261005180000_dialpad_hangup_link_capture', present: proc('dialpad_cti_hangup_links') },
+  { key: 'reassignQueueScope', file: '20261005190000_my_leads_housekeeping_reassign_queue_scope',
+    present: procUses('my_leads_housekeeping_reassign_scope', 'acquisition_queue_states') },
 ] as const;
 
 export type ChainKey = (typeof CHAIN)[number]['key'];

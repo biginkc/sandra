@@ -40,6 +40,7 @@ export default defineConfig({
       "supabase/migrations/20261005121200_next_step_mode_aware_lifecycle.integration.test.ts",
       "supabase/migrations/20261005121500_next_step_relabel_functions.integration.test.ts",
       "supabase/migrations/20261005122000_my_leads_housekeeping_reassign_sources.integration.test.ts",
+      "supabase/migrations/20261005190000_my_leads_housekeeping_reassign_queue_scope.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
       "supabase/migrations/20260929239000_drips_snapshot_isolation.integration.test.ts",
