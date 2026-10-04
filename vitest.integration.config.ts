@@ -69,6 +69,7 @@ export default defineConfig({
       "supabase/migrations/20261005130400_norma_complete_call_next_step.integration.test.ts",
       "supabase/migrations/20261005130500_norma_needs_review_next_step.integration.test.ts",
       "supabase/migrations/20261005150000_my_leads_call_next.integration.test.ts",
+      "supabase/migrations/20261005160000_post_call_prompt_support.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
       "supabase/migrations/20260929239000_drips_snapshot_isolation.integration.test.ts",
