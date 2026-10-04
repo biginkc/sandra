@@ -59,6 +59,9 @@ export type CalendarAppointmentRow = {
   /** Display label derived from contacts.entity_name, or
    *  "first_name last_name", or null when neither is set. */
   contact_name: string | null;
+  /** Next-step mode; null/undefined until `tasks.mode` exists (Readiness
+   *  `next_step_write`) or when the row has none. */
+  mode?: "phone" | "in_person" | null;
 };
 
 /**

@@ -5,10 +5,6 @@ import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 
 import { kickCalendarMutationSync } from "@/lib/appointments/inline-sync-kick";
-import {
-  requireOrgMembership,
-  requireOrgMembershipByResource,
-} from "@/lib/auth/require-org-membership";
 import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
 export type { TeamMember } from "@/lib/auth/team-member";
 import { errFromUnknown, err, ok, type Result } from "@/lib/errors/result";
@@ -29,6 +25,9 @@ import {
   assertPropertyDncUnlocked,
 } from "@/lib/dnc/property-lock";
 import { wallTimeToUtc } from "@/lib/time/zoned";
+import { schemaReady } from "@/lib/my-leads/schema-ready";
+import { createNextStep } from "@/lib/next-steps";
+import { resolveBookingOrgId } from "@/lib/next-steps/org";
 
 export type BookAppointmentInput = {
   /** Property this appointment is linked to, if any. */
@@ -118,68 +117,6 @@ type AppointmentRpcClient = {
 const MIN_DURATION_MINUTES = 15;
 const MAX_DURATION_MINUTES = 24 * 60;
 const DEFAULT_TIMEZONE = "America/Chicago";
-
-/**
- * Org resolution shared by `bookAppointment` and `listBookingAssignees`
- * (Codex round 2, assignee-picker scoping): linked bookings derive org
- * from the resource; a personal block (no property, no contact — locked
- * decision #5) falls back to the caller's own single ACTIVE membership,
- * erroring explicitly on zero or multiple memberships rather than
- * guessing. Active-only (R2-2 hardening, Codex round 1): a stale/suspended
- * membership row must not count toward "which org" — without this filter,
- * a caller who is active in one org and merely has HISTORY (suspended,
- * expired, deletion-prepared) in another would see two rows and get a
- * spurious AMBIGUOUS_ORG, or worse, could resolve into an org they no
- * longer have access to. Same active-membership predicates as
- * hasActiveSandraAccess / getCallerMemberships, expressed as PostgREST
- * filters (mirrors updateMembershipRole in admin/users/actions.ts).
- */
-async function resolveBookingOrgId(
-  supabase: Awaited<ReturnType<typeof createClient>>,
-  user: { id: string },
-  ctx: { propertyId?: string; contactId?: string },
-): Promise<Result<string>> {
-  if (ctx.propertyId) {
-    const { orgId } = await requireOrgMembershipByResource(
-      "properties",
-      ctx.propertyId,
-    );
-    return ok(orgId);
-  }
-  if (ctx.contactId) {
-    const { orgId } = await requireOrgMembershipByResource(
-      "contacts",
-      ctx.contactId,
-    );
-    return ok(orgId);
-  }
-
-  const activeAt = new Date().toISOString();
-  const { data: memberships, error: membershipErr } = await supabase
-    .from("memberships")
-    .select("org_id")
-    .eq("user_id", user.id)
-    .eq("access_status", "active")
-    .is("deletion_prepared_at", null)
-    .or(`access_expires_at.is.null,access_expires_at.gt.${activeAt}`);
-  if (membershipErr) {
-    return err({
-      code: "MEMBERSHIP_LOOKUP_FAILED",
-      message: membershipErr.message,
-    });
-  }
-  if (!memberships || memberships.length !== 1) {
-    return err({
-      code: "AMBIGUOUS_ORG",
-      message:
-        memberships && memberships.length > 1
-          ? "You belong to more than one org — book from a linked lead or contact instead."
-          : "You don't belong to an org.",
-    });
-  }
-  const { orgId } = await requireOrgMembership(memberships[0].org_id);
-  return ok(orgId);
-}
 
 /**
  * Looks up a teammate's authoritative reminder/calendar timezone through
@@ -273,7 +210,7 @@ export async function checkAppointmentOverlap(
  * self-only prefs RLS, dispatched in `after()` so a Slack/Google hiccup
  * never rolls back the booking itself.
  */
-export async function bookAppointment(
+async function bookAppointmentLegacy(
   input: BookAppointmentInput,
 ): Promise<Result<BookAppointmentResult>> {
   if (!input.assigneeId) {
@@ -544,6 +481,81 @@ export async function bookAppointment(
     });
     return errFromUnknown(e, "BOOK_APPOINTMENT_FAILED");
   }
+}
+
+/**
+ * Booking action. Until `schemaReady('next_step_write')` (the migration that
+ * adds `fn_create_next_step` and `tasks.mode`) has landed, it runs today's
+ * `fn_book_appointment` path unchanged (`bookAppointmentLegacy`); afterwards it
+ * is a thin adapter over `createNextStep`. Deleted with the legacy path in
+ * P1a-retire.
+ */
+export async function bookAppointment(
+  input: BookAppointmentInput,
+): Promise<Result<BookAppointmentResult>> {
+  if (!(await schemaReady("next_step_write"))) {
+    return bookAppointmentLegacy(input);
+  }
+  if (!input.assigneeId) {
+    return err({
+      code: "ASSIGNEE_REQUIRED",
+      message: "Choose who this appointment is for.",
+    });
+  }
+  if (!input.title.trim()) {
+    return err({
+      code: "TITLE_REQUIRED",
+      message: "Give the appointment a title.",
+    });
+  }
+  if (
+    !Number.isFinite(input.durationMinutes) ||
+    input.durationMinutes < MIN_DURATION_MINUTES ||
+    input.durationMinutes > MAX_DURATION_MINUTES
+  ) {
+    return err({
+      code: "INVALID_DURATION",
+      message: "Choose a valid duration.",
+    });
+  }
+  const converted = wallTimeToUtc({
+    date: input.date,
+    time: input.time,
+    timeZone: input.timeZone,
+  });
+  if (!converted.ok) {
+    return err({
+      code:
+        converted.reason === "nonexistent"
+          ? "TIME_NONEXISTENT"
+          : "TIME_INVALID",
+      message:
+        converted.reason === "nonexistent"
+          ? "That time doesn't exist in this timezone because of a daylight-saving change — pick another."
+          : "Choose a valid date and time.",
+    });
+  }
+  const created = await createNextStep({
+    kind: "appointment",
+    mode: "in_person",
+    assigneeId: input.assigneeId,
+    title: input.title,
+    dueAt: converted.utc.toISOString(),
+    durationMinutes: input.durationMinutes,
+    propertyId: input.propertyId,
+    contactId: input.contactId,
+    note: input.note,
+    idempotencyKey: input.idempotencyKey,
+    origin: "app",
+    applyBookingEffects: true,
+  });
+  if (!created.ok) return created;
+  return ok({
+    taskId: created.data.taskId,
+    alreadyQualified: created.data.alreadyQualified,
+    chainId: created.data.calendarChainId ?? "",
+    duplicate: created.data.duplicate,
+  });
 }
 
 async function loadPropertyAddress(

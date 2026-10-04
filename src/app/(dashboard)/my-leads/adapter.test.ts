@@ -86,3 +86,31 @@ it('displays authorized historical labels without adding historical actors to th
  const rendered=detailView(detail,roster);
  expect(rendered.notes.rows[0].authorLabel).toBe('Former colleague');expect(rendered.attempts.rows[0].actorLabel).toBe('Former colleague');expect(rendered.history.rows[0].label).toBe('Assigned to Former colleague');expect(roster.members.map(m=>m.id)).toEqual(['rep']);
 });
+
+describe('next step shape',()=>{
+  const base={propertyId:'lead',stage:'contacted',address:'1 Main',warningReasons:[],offer:null,nextStepAt:'2026-09-11T18:00:00Z'} as unknown as QueueRow;
+  it('builds an appointment with its mode from the two payload fields',()=>{
+    expect(queueRow({...base,nextStepType:'appointment',nextStepMode:'in_person'}).nextStep).toMatchObject({kind:'appointment',mode:'in_person',dueAt:'2026-09-11T18:00:00Z'});
+    expect(queueRow({...base,nextStepType:'appointment',nextStepMode:'phone'}).nextStep).toMatchObject({kind:'appointment',mode:'phone'});
+  });
+  it('treats a missing mode as phone (payload before the migration)',()=>{
+    expect(queueRow({...base,nextStepType:'appointment'}).nextStep).toMatchObject({kind:'appointment',mode:'phone'});
+  });
+  it('keeps the legacy callback shape for rows still typed callback',()=>{
+    const step=queueRow({...base,nextStepType:'callback'}).nextStep;
+    expect(step).toMatchObject({kind:'callback'});
+    expect(step).not.toHaveProperty('mode');
+  });
+  it('has no next step without a time',()=>{
+    expect(queueRow({...base,nextStepAt:null,nextStepType:null}).nextStep).toBeNull();
+  });
+  it('keeps callbackAction only for callback-typed detail rows',()=>{
+    const detail={groups:{appointments:{rows:[
+      {id:'cb',type:'callback',callbackActionAllowed:true,at:'2026-09-11T18:00:00Z',actorId:null},
+      {id:'ap',type:'appointment',mode:'phone',callbackActionAllowed:true,at:'2026-09-11T18:00:00Z',actorId:null},
+    ],hasMore:false,cursor:null}}} as AcquisitionDetail;
+    const rows=detailView(detail,{members:[]} as unknown as AcquisitionRoster).appointments.rows;
+    expect(rows[0].callbackAction).toEqual({taskId:'cb'});
+    expect(rows[1].callbackAction).toBeUndefined();
+  });
+});

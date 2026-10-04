@@ -70,6 +70,14 @@ export function AppointmentBlock({
         {formatTimeRange(appt.due_at, appt.end_at, timezone)}
       </div>
       <div className="text-foreground truncate text-sm font-bold">{label}</div>
+      {appt.mode ? (
+        <div
+          className="text-muted-foreground truncate text-[10px] font-bold tracking-wide uppercase"
+          data-testid={`calendar-mode-tag-${appt.id}`}
+        >
+          {appt.mode === "in_person" ? "In person" : "Phone"}
+        </div>
+      ) : null}
       {assigneeEmail ? (
         <div className="text-muted-foreground truncate text-xs font-medium">
           {assigneeEmail}
@@ -102,6 +110,9 @@ export function AppointmentBlock({
       )}
       data-testid={`calendar-appointment-${appt.id}`}
       data-appointment-tone={tone}
+      data-next-step-id={appt.id}
+      data-next-step-due-at={appt.due_at}
+      data-next-step-kind="appointment"
     >
       {href ? (
         <Link

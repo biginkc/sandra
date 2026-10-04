@@ -142,6 +142,9 @@ export function NextActionCard({
         <div
           className="border-border bg-card inline-flex min-h-8 max-w-full flex-wrap items-center gap-2 rounded-full border py-1 pr-1 pl-3 text-xs"
           data-testid="lead-next-action"
+          data-next-step-id={task.id}
+          data-next-step-due-at={task.due_at}
+          data-next-step-kind={task.type}
           data-variant="compact"
         >
           <span className="min-w-0 font-bold break-words">
@@ -230,6 +233,9 @@ export function NextActionCard({
         compact ? "px-3 py-2" : "p-4",
       )}
       data-testid="lead-next-action"
+      data-next-step-id={task.id}
+      data-next-step-due-at={task.due_at}
+      data-next-step-kind={task.type}
     >
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">

@@ -179,7 +179,13 @@ export function MyLeadDetailPanel({
           paging={paging.appointments}
           onLoadMore={onLoadDetailPage ? (cursor) => loadGroup("appointments", cursor) : undefined}
           renderRow={(appointment) => (
-            <div key={appointment.id} className="space-y-1.5">
+            <div
+              key={appointment.id}
+              className="space-y-1.5"
+              data-next-step-id={appointment.id}
+              data-next-step-due-at={appointment.dueAt}
+              data-next-step-kind={appointment.taskType}
+            >
               <p className="font-medium text-foreground">{appointment.label}</p>
               <p className="text-xs text-muted-foreground">
                 {appointment.dueLabel} · {appointment.statusLabel}

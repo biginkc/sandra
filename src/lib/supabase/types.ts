@@ -4501,6 +4501,60 @@ export type Database = {
           },
         ]
       }
+      my_leads_feature_flags: {
+        Row: {
+          artifact_fetch: boolean
+          auto_prompt: boolean
+          call_next_strip: boolean
+          call_screen: boolean
+          callback_alert: boolean
+          click_to_dial: boolean
+          comp_queue: boolean
+          contract_card: boolean
+          facts_job: boolean
+          native_matcher: boolean
+          offer_projection: boolean
+          org_id: string
+          post_call_prompt: boolean
+          seller_reminders: boolean
+          updated_at: string
+        }
+        Insert: {
+          artifact_fetch?: boolean
+          auto_prompt?: boolean
+          call_next_strip?: boolean
+          call_screen?: boolean
+          callback_alert?: boolean
+          click_to_dial?: boolean
+          comp_queue?: boolean
+          contract_card?: boolean
+          facts_job?: boolean
+          native_matcher?: boolean
+          offer_projection?: boolean
+          org_id: string
+          post_call_prompt?: boolean
+          seller_reminders?: boolean
+          updated_at?: string
+        }
+        Update: {
+          artifact_fetch?: boolean
+          auto_prompt?: boolean
+          call_next_strip?: boolean
+          call_screen?: boolean
+          callback_alert?: boolean
+          click_to_dial?: boolean
+          comp_queue?: boolean
+          contract_card?: boolean
+          facts_job?: boolean
+          native_matcher?: boolean
+          offer_projection?: boolean
+          org_id?: string
+          post_call_prompt?: boolean
+          seller_reminders?: boolean
+          updated_at?: string
+        }
+        Relationships: []
+      }
       tasks: {
         Row: {
           assignee_id: string
@@ -4517,6 +4571,9 @@ export type Database = {
           google_calendar_event_id: string | null
           id: string
           lead_next_action_idempotency_key: string | null
+          location: string | null
+          mode: string
+          next_step_kind: string
           org_id: string
           outcome: string | null
           related_property_id: string | null
@@ -4545,6 +4602,8 @@ export type Database = {
           google_calendar_event_id?: string | null
           id?: string
           lead_next_action_idempotency_key?: string | null
+          location?: string | null
+          mode?: string
           org_id: string
           outcome?: string | null
           related_property_id?: string | null
@@ -4573,6 +4632,8 @@ export type Database = {
           google_calendar_event_id?: string | null
           id?: string
           lead_next_action_idempotency_key?: string | null
+          location?: string | null
+          mode?: string
           org_id?: string
           outcome?: string | null
           related_property_id?: string | null

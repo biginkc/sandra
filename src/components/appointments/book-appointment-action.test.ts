@@ -19,6 +19,7 @@ const {
   requireOrgMembership,
   requireOrgMembershipByResource,
   revalidatePath,
+  schemaReady,
 } = vi.hoisted(() => ({
   afterCallbacks: [] as Array<() => Promise<void> | void>,
   afterMock: vi.fn((callback: () => Promise<void> | void) => {
@@ -41,9 +42,11 @@ const {
   requireOrgMembership: vi.fn(),
   requireOrgMembershipByResource: vi.fn(),
   revalidatePath: vi.fn(),
+  schemaReady: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
+vi.mock("@/lib/my-leads/schema-ready", () => ({ schemaReady }));
 vi.mock("@/lib/dnc/property-lock", () => ({
   assertContactDncUnlocked,
   assertPropertyDncUnlocked,
@@ -169,6 +172,8 @@ const VALID_INPUT = {
 };
 
 beforeEach(() => {
+  schemaReady.mockReset();
+  schemaReady.mockResolvedValue(false);
   assertContactDncUnlocked.mockResolvedValue({ ok: true, data: null });
   assertPropertyDncUnlocked.mockResolvedValue({ ok: true, data: null });
   requireOrgMembershipByResource.mockResolvedValue({
@@ -1264,3 +1269,76 @@ describe("listBookingAssignees", () => {
   expect(pausePropertyEnrollments).not.toHaveBeenCalled();
   expect(dispatchTaskAssigned).not.toHaveBeenCalled();
  });
+
+describe("bookAppointment — next_step_write readiness", () => {
+  it("runs the legacy fn_book_appointment path and never fn_create_next_step while the schema is not ready", async () => {
+    schemaReady.mockResolvedValue(false);
+    const supabase = makeSupabaseMock({
+      userId: "user-1",
+      rpcResult: {
+        data: {
+          task_id: "task-1",
+          already_qualified: true,
+          calendar_chain_id: "chain-1",
+          ledger_id: "ledger-1",
+          duplicate: false,
+          related_property_id: "prop-1",
+          contact_id: null,
+        },
+        error: null,
+      },
+    });
+    createClient.mockResolvedValue(supabase);
+
+    const result = await bookAppointment(VALID_INPUT);
+
+    expect(schemaReady).toHaveBeenCalledWith("next_step_write");
+    expect(result).toMatchObject({ ok: true, data: { taskId: "task-1", chainId: "chain-1" } });
+    expect(supabase.rpc).toHaveBeenCalledWith("fn_book_appointment", expect.anything());
+    expect(supabase.rpc).not.toHaveBeenCalledWith("fn_create_next_step", expect.anything());
+  });
+
+  it("goes through fn_create_next_step with named args once the schema is ready", async () => {
+    schemaReady.mockResolvedValue(true);
+    const supabase = makeSupabaseMock({
+      userId: "user-1",
+      rpcResult: {
+        data: {
+          task_id: "task-2",
+          calendar_chain_id: "chain-2",
+          ledger_id: null,
+          duplicate: false,
+          kind: "appointment",
+          mode: "in_person",
+          related_property_id: "prop-1",
+          contact_id: null,
+          already_qualified: true,
+        },
+        error: null,
+      },
+    });
+    createClient.mockResolvedValue(supabase);
+
+    const result = await bookAppointment({ ...VALID_INPUT, idempotencyKey: "key-1" });
+
+    expect(result).toEqual({
+      ok: true,
+      data: { taskId: "task-2", alreadyQualified: true, chainId: "chain-2", duplicate: false },
+    });
+    expect(supabase.rpc).not.toHaveBeenCalledWith("fn_book_appointment", expect.anything());
+    expect(supabase.rpc).toHaveBeenCalledWith(
+      "fn_create_next_step",
+      expect.objectContaining({
+        p_org: "org-1",
+        p_actor: "user-1",
+        p_assignee: "user-1",
+        p_kind: "appointment",
+        p_mode: "in_person",
+        p_property: "prop-1",
+        p_idempotency_key: "key-1",
+        p_enforce_window: true,
+        p_apply_booking_effects: true,
+      }),
+    );
+  });
+});

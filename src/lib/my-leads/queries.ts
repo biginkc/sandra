@@ -12,7 +12,7 @@ export type QueueRow = {
   clockEligible: boolean; firstCallAt: string | null; stageEnteredAt: string | null;
   address: string; city: string | null; state: string | null; homeownerName: string | null; phone: string | null; contactId: string | null; phones: string[]; contactDnc: boolean;
   temperature: 'hot' | 'warm' | 'cold' | null; motivationKind: 'specified' | 'no_motivation' | null; motivationText: string | null;
-  warningReasons: string[]; nextStepAt: string | null; nextStepType: 'appointment' | 'callback' | null;
+  warningReasons: string[]; nextStepAt: string | null; nextStepType: 'appointment' | 'callback' | null /* 'callback' only from a payload predating the read-model migration */; nextStepMode?: 'phone' | 'in_person' | null;
   offer: { id: string; amountCents: number; method: string; sentAt: string; followUpAt: string; outcome: 'pending'|'accepted'|'declined' } | null;
   attemptsCount: number;
 };
@@ -111,7 +111,7 @@ export type DetailGroup = 'notes'|'attempts'|'appointments'|'offers'|'history'|'
 export type RepSmsObligationStatus = 'required'|'draft'|'claimed'|'sending'|'accepted'|'delivered'|'failed_not_dispatched'|'unknown'|'blocked'|'delivery_failed'|'voided'|'exception_closed';
 export type DetailFact = { id:string; at:string; actorId:string|null; actorLabel?:string; body?:string; outcome?:string|null; source?:string;
   direction?:'inbound'|'outbound'; deliveryStatus?:string; attachmentCount?:number;
-  recordingUrl?:string|null; callActivityId?:string|null; amountCents?:number; method?:string; title?:string; status?:string; type?:'appointment'|'callback'; lifecycleState?:'past_due'|'upcoming'|null; callbackActionAllowed?:boolean; currentAssigneeId?:string|null; kind?:string; endedAt?:string|null;
+  recordingUrl?:string|null; callActivityId?:string|null; amountCents?:number; method?:string; title?:string; status?:string; type?:'appointment'|'callback'; mode?:'phone'|'in_person'|null; location?:string|null; lifecycleState?:'past_due'|'upcoming'|null; callbackActionAllowed?:boolean; currentAssigneeId?:string|null; kind?:string; endedAt?:string|null;
   followUpObligationId?:string|null; followUpStatus?:RepSmsObligationStatus|null; followUpMessage?:string|null; followUpComposition?:Record<string,unknown>|null; followUpBlockedReason?:string|null };
 export type AcquisitionDetail = { groups: Partial<Record<DetailGroup,{ rows:DetailFact[];cursor:string|null;hasMore:boolean }>> };
 
