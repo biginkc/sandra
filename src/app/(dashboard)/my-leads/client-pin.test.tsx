@@ -183,8 +183,14 @@ describe("MyLeadsClient pinned deep-link row", () => {
     let releaseList!: (value: unknown) => void
     mocks.loadMyLeads.mockImplementationOnce(() => new Promise((resolve) => { releaseList = resolve }))
     const { rerender } = render(ui(focusOn(beyond), snap([], 0)))
-    fireEvent.change(screen.getByLabelText("Search My Leads"), { target: { value: "current-only" } })
-    await waitFor(() => expect(mocks.loadMyLeads).toHaveBeenCalledWith({ memberId: "rep-1", search: "current-only", period: "today" }), { timeout: 1_000 })
+    // The search refresh is debounced by 250ms (client.tsx). Advance that timer explicitly instead of
+    // racing the real clock: the call happens exactly when the debounce fires, under any load.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+    try {
+      fireEvent.change(screen.getByLabelText("Search My Leads"), { target: { value: "current-only" } })
+      await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+    } finally { vi.useRealTimers() }
+    expect(mocks.loadMyLeads).toHaveBeenCalledWith({ memberId: "rep-1", search: "current-only", period: "today" })
 
     // The RSC result for /my-leads arrives while the cleared-search refresh is
     // already in flight. Its valid result must still populate the cleared view.
@@ -410,8 +416,12 @@ describe("MyLeadsClient pinned deep-link row", () => {
   })
 
   it("keeps a new-scope opening through the cleared deep-link acknowledgement", async () => {
-    const user = userEvent.setup()
+    const user = userEvent.setup({ delay: null })
     const other = row("loaded-2", "2 Other Lane", { stage: "contacted", sharedStatus: "contacted" })
+    // The search scope's server answer contains the row being opened. Typing a search starts a 250ms
+    // debounced refresh (client.tsx); whenever it fires relative to the clicks below, the list it
+    // brings is this one, so the outcome never depends on how fast the machine is.
+    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([other], 25), kpis, drips: noDrips() })
     let releaseOpening!: (value: unknown) => void
     mocks.loadMyLeadRow.mockImplementation(async ({ propertyId }: { propertyId: string }) => {
       if (propertyId === "loaded-2") return new Promise((resolve) => { releaseOpening = resolve })
@@ -430,8 +440,10 @@ describe("MyLeadsClient pinned deep-link row", () => {
   })
 
   it("keeps a new-scope dialog through the cleared deep-link acknowledgement", async () => {
-    const user = userEvent.setup()
+    const user = userEvent.setup({ delay: null })
     const other = row("loaded-2", "2 Other Lane", { stage: "contacted", sharedStatus: "contacted" })
+    // Same as above: the debounced search refresh returns the scope that contains the opened row.
+    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: snap([other], 25), kpis, drips: noDrips() })
     mocks.loadMyLeadRow.mockResolvedValue(found(other))
     const { rerender } = render(ui(focusOn(loaded), snap([loaded, other], 25)))
 
@@ -539,7 +551,7 @@ describe("MyLeadsClient pinned deep-link row", () => {
   })
 
   it("keeps recovery blocked with a retryable error when the authoritative lookup fails", async () => {
-    const user = userEvent.setup()
+    const user = userEvent.setup({ delay: null }) // no per-click macrotask delay: nothing here depends on the clock
     mocks.submitMyLeadCommand.mockResolvedValueOnce({ ok: false, certainty: "rejected", code: "STALE_STATE", message: "This lead changed." })
     render(ui(null))
     await user.click(screen.getByRole("button", { name: "Show details for 1 Loaded Lane" }))
