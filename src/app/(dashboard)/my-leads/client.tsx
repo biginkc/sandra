@@ -1416,7 +1416,15 @@ export function MyLeadsClient({
             const attempt = dialFlight?.kind === "rate_limited" ? dialFlight.attempt + 1 : 1;
             void startApiDial(propertyId, attempt);
           }}
-          onDismiss={() => setDialFlight(null)}
+          onDismiss={() => {
+            // A deliberate Dismiss of a finished call (only `expired` still holds its key) releases the
+            // key so the next click dials fresh. The expired status line already cautions to check Dialpad.
+            // Dismissing a call still in flight keeps the key.
+            if (dialFlight?.kind === "in_flight" && dialFinished === dialFlight.intentId && dialKey.current?.intentId === dialFlight.intentId) {
+              dialKey.current = null;
+            }
+            setDialFlight(null);
+          }}
           onFinished={(intentId, finalStatus) => {
             // The call is over: the next deliberate click on this lead dials with a new key. Except after
             // `expired` (Dialpad never confirmed, it may have rung): keep the key so a retry reuses it

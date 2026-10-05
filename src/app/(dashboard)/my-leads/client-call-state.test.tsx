@@ -337,6 +337,21 @@ describe("MyLeadsClient calling and durable call state", () => {
       expect(second.idempotencyKey).toBe(first.idempotencyKey)
     })
 
+    it("Dismiss after an expired call releases the key so the next click dials fresh", async () => {
+      mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-1" })
+      mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-2" })
+      mocks.status.mockImplementation(async (id: string) => callStatus(id, "expired"))
+      renderClient({ dialpad })
+      await click(screen.getByRole("button", { name: "Start call property-1" }))
+      await flush(0)
+      expect(screen.getByTestId("dial-status")).toHaveTextContent(/Check the dialer before calling again/)
+      await click(screen.getByRole("button", { name: "Dismiss" }))
+      await click(screen.getByRole("button", { name: "Start call property-1" }))
+      expect(mocks.dialLead).toHaveBeenCalledTimes(2)
+      const [first, second] = mocks.dialLead.mock.calls.map((c) => c[0])
+      expect(second.idempotencyKey).not.toBe(first.idempotencyKey)
+    })
+
     it("does not dial a second time while the first call is still in flight", async () => {
       mocks.dialLead.mockResolvedValue({ ...dialOk, intentId: "intent-1" })
       mocks.status.mockImplementation(async (id: string) => callStatus(id, "dialing"))
