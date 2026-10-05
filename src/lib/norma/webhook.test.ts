@@ -2,6 +2,8 @@ import { createHmac } from "node:crypto";
 
 import { describe, expect, it, vi } from "vitest";
 
+import { reportError } from "@/lib/errors/report";
+
 import { dispatchNormaCall } from "./dispatch";
 import { fakeClient, KEY, PHONE, REQUEST_ID, requestRow } from "./test-helpers";
 import { handleBlandCallWebhook, MAX_WEBHOOK_BODY_BYTES, verifyBlandSignature } from "./webhook";
@@ -66,12 +68,79 @@ describe("bland webhook route core", () => {
     expect(complete).not.toHaveBeenCalled();
   });
 
-  it("is not configured without a secret, and rejects an oversized body", async () => {
+  it("is not configured without a secret", async () => {
     const { client } = setup();
     const noSecret = await handleBlandCallWebhook(req("{}", sign("{}")), { client, secret: undefined });
     expect(noSecret.status).toBe(500);
-    const big = "x".repeat(MAX_WEBHOOK_BODY_BYTES + 1);
+  });
+
+  it("accepts a signed long-call body above the old 1 MiB limit, including exactly 4 MiB", async () => {
+    const { client, complete } = setup();
+    const payload = call({ transcript: "" });
+    const overhead = Buffer.byteLength(JSON.stringify(payload));
+    const body = JSON.stringify({ ...payload, transcript: "x".repeat(MAX_WEBHOOK_BODY_BYTES - overhead) });
+    expect(Buffer.byteLength(body)).toBe(4 * 1024 * 1024);
+    expect((await post(client, body)).status).toBe(200);
+    expect(complete).toHaveBeenCalledOnce();
+  });
+
+  it("rejects declared oversize before reading, logs 413 and length, and has zero CRM effect", async () => {
+    vi.mocked(reportError).mockClear();
+    const { client, calls, complete } = setup();
+    const request = req("{}", sign("{}"), { "content-length": String(MAX_WEBHOOK_BODY_BYTES + 1) });
+    const read = vi.spyOn(request.body!, "getReader");
+    expect(await handleBlandCallWebhook(request, { client, secret: SECRET })).toEqual({ status: 413, body: { error: "too_large" } });
+    expect(read).not.toHaveBeenCalled();
+    expect(reportError).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: expect.stringContaining("413") }), {
+      tags: { surface: "norma_webhook", httpStatus: 413 },
+      extra: { maxBodyBytes: MAX_WEBHOOK_BODY_BYTES, declaredBytes: MAX_WEBHOOK_BODY_BYTES + 1, observedBytes: 0, callIdHint: null, identityVerified: false },
+    });
+    expect(complete).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each([undefined, "1"])("rejects streamed oversize with content-length %s, cancels and logs a bounded call ID hint", async (declared) => {
+    vi.mocked(reportError).mockClear();
+    const { client, calls, complete } = setup();
+    const prefix = new TextEncoder().encode('{"call_id":"3eb22d00-6c96-4c59-b2bd-2d205080a4de","transcript":"');
+    const cancel = vi.fn();
+    let reads = 0;
+    const stream = new ReadableStream({
+      pull(controller) {
+        reads++;
+        controller.enqueue(reads === 1 ? prefix : new Uint8Array(MAX_WEBHOOK_BODY_BYTES));
+      },
+      cancel,
+    }, { highWaterMark: 0 });
+    const request = new Request("https://sandra.test/api/webhooks/bland/call", {
+      method: "POST", body: stream, duplex: "half", headers: declared ? { "content-length": declared } : {},
+    } as RequestInit);
+    expect((await handleBlandCallWebhook(request, { client, secret: SECRET })).status).toBe(413);
+    expect(reads).toBe(2);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(reportError).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: expect.stringContaining("413") }), {
+      tags: { surface: "norma_webhook", httpStatus: 413 },
+      extra: { maxBodyBytes: MAX_WEBHOOK_BODY_BYTES, declaredBytes: declared ? 1 : null, observedBytes: prefix.byteLength + MAX_WEBHOOK_BODY_BYTES,
+        callIdHint: "3eb22d00-6c96-4c59-b2bd-2d205080a4de", identityVerified: false },
+    });
+    expect(complete).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("counts UTF-8 bytes and does not scan beyond the diagnostic prefix", async () => {
+    vi.mocked(reportError).mockClear();
+    const { client } = setup();
+    const big = JSON.stringify(call({ transcript: "é".repeat(MAX_WEBHOOK_BODY_BYTES / 2) }));
+    expect(big.length).toBeLessThan(MAX_WEBHOOK_BODY_BYTES);
     expect((await post(client, big)).status).toBe(413);
+    expect(reportError).toHaveBeenLastCalledWith(expect.any(Error), expect.objectContaining({
+      extra: expect.objectContaining({ observedBytes: Buffer.byteLength(big), callIdHint: "call-1" }),
+    }));
+    const lateId = JSON.stringify({ transcript: "x".repeat(MAX_WEBHOOK_BODY_BYTES), call_id: "late-call" });
+    expect((await post(client, lateId)).status).toBe(413);
+    expect(reportError).toHaveBeenLastCalledWith(expect.any(Error), expect.objectContaining({
+      extra: expect.objectContaining({ callIdHint: null }),
+    }));
   });
 
   it("signed but malformed JSON is a 400 with no effect", async () => {
