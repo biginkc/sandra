@@ -16,7 +16,8 @@ export type SchemaFeature =
   | "post_call_support"
   | "seller_reminders"
   | "artifact_fetch"
-  | "intent_timeout";
+  | "intent_timeout"
+  | "lead_comps";
 
 export type SchemaRequirement = {
   /** `public.fn_name(argtype,argtype)` regprocedure strings. */
@@ -76,6 +77,15 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
   intent_timeout: {
     functions: ["public.fn_fail_stale_dialpad_intents(integer,integer)"],
     columns: ["dialpad_call_intents.failed_at"],
+  },
+  // P3a: comps enqueue/claim/finish and the cap ledger; `monthly_call_cap` stands for the settings row.
+  lead_comps: {
+    functions: [
+      "public.fn_enqueue_comp_fetch(uuid,uuid,text,uuid)",
+      "public.fn_claim_comp_fetches(integer)",
+      "public.fn_finish_comp_fetch(uuid,text,integer,text,uuid)",
+    ],
+    columns: ["lead_comps.as_is_value", "org_comp_settings.monthly_call_cap", "lead_valuation_inputs.arv"],
   },
 };
 

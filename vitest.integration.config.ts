@@ -81,6 +81,7 @@ export default defineConfig({
       "supabase/migrations/20261006100300_dialpad_native_concurrency.integration.test.ts",
       "supabase/migrations/20261006100400_dialpad_native_assign_to_lead.integration.test.ts",
       "supabase/migrations/20261006100500_dialpad_artifact_fetches.integration.test.ts",
+      "supabase/migrations/20261007100000_lead_comps_foundation.integration.test.ts",
       "src/lib/my-leads/seller-reminder.transport.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
