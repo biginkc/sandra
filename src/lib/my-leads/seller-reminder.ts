@@ -242,6 +242,24 @@ async function finish(
   return data === true;
 }
 
+function storedProvesNotSent(m: Record<string, unknown>): boolean {
+  const meta = m.metadata && typeof m.metadata === "object" ? (m.metadata as Record<string, unknown>) : null;
+  const attempt = meta?.providerAttempt as Record<string, unknown> | undefined;
+  return attempt?.outcome === "definitively_rejected" || attempt?.outcome === "not_attempted";
+}
+
+/** True unless the messages table proves this key never reached the provider (a failed lookup counts as maybe sent). */
+async function mayHaveBeenSent(admin: SellerReminderAdmin, row: ClaimedSellerReminder): Promise<boolean> {
+  let stored: Record<string, unknown>[];
+  try {
+    stored = await many(admin, "messages", "id,org_id,metadata", "idempotency_key", row.send_key);
+  } catch {
+    return true;
+  }
+  if (stored.some((m) => m.org_id !== row.org_id)) return true;
+  return !stored.every(storedProvesNotSent);
+}
+
 export async function dispatchSellerReminder(
   deps: SellerReminderDeps,
   row: ClaimedSellerReminder,
@@ -251,6 +269,19 @@ export async function dispatchSellerReminder(
   const done = async (
     r: Parameters<typeof finish>[2],
   ): Promise<DispatchResult> => {
+    // A reclaimed lease (attempts > 1) may have already sent before the worker died. A cancel, skip or
+    // deferral would free the appointment-day slot (only claimed/sent/uncertain hold it) and let a
+    // rescheduled successor text the seller again. Hold the slot as `uncertain` unless the stored message
+    // row proves nothing went out. Statuses that are already terminal-with-slot (sent, uncertain) and
+    // retries with a fresh key (already proven unsent) are untouched.
+    const freesSlot = r.status === "cancelled" || r.status === "skipped"
+      || (r.status === "pending" && !r.newSendKey);
+    if (freesSlot && row.attempts > 1 && (await mayHaveBeenSent(admin, row))) {
+      if (!(await finish(admin, row, { status: "uncertain", reason: "unknown_delivery" }))) {
+        return { status: "fence_lost" };
+      }
+      return { status: "uncertain", reason: "unknown_delivery" };
+    }
     if (!(await finish(admin, row, r))) return { status: "fence_lost" };
     return r.status === "pending"
       ? { status: "pending", reason: r.reason ?? "", retryAt: r.retryAt! }
@@ -415,11 +446,7 @@ async function retry(
   if (transportProvedNotAttempted) {
     proof = true;
   } else if (mine.length > 0) {
-    proof = mine.every((m) => {
-      const meta = m.metadata && typeof m.metadata === "object" ? (m.metadata as Record<string, unknown>) : null;
-      const attempt = meta?.providerAttempt as Record<string, unknown> | undefined;
-      return attempt?.outcome === "definitively_rejected" || attempt?.outcome === "not_attempted";
-    });
+    proof = mine.every(storedProvesNotSent);
   } else {
     // No stored message for this key: a db_error or deferral before anything was written dispatched
     // nothing. A provider_failed outcome with no row and no proof is unknown.
