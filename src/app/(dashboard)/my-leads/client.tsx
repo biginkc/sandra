@@ -1047,7 +1047,7 @@ export function MyLeadsClient({
   useEffect(() => {
     if (!autoPromptOn || dialog !== null || openingStatus !== null || autoPrompt !== null) return;
     // Never open over an in-flight dial or any other open dialog in the page (menus, drawers, confirms).
-    if (dialActive) return;
+    if (dialActive || softphoneOnCall) return;
     // Sandra's popups are Base UI: open state is `data-open` (closing/closed popups carry `data-closed`), never Radix's `data-state=open`.
     if (typeof document !== "undefined" && document.querySelector(OPEN_FOREIGN_POPUP_SELECTOR)) return;
     const candidates = callPoll.prompts.filter(
