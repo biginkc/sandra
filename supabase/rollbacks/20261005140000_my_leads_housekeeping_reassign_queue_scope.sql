@@ -1,4 +1,4 @@
--- Roll back 20261005122500: restore the 20261005122000 reassign scope (queue predicates plus an open
+-- Roll back 20261005140000: restore the 20261005122000 reassign scope (queue predicates plus an open
 -- episode) and apply loop exactly. Same signatures; data changes already made by a run are not
 -- undone here (use fn_my_leads_housekeeping_rollback first).
 begin;

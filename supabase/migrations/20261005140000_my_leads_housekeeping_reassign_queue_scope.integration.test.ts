@@ -182,14 +182,14 @@ it('rolls back a run made by 122000 after this migration, and its rollback twin 
 
     const bodies = async () => (await db.query("select proname, prosrc from pg_proc where pronamespace='public'::regnamespace and proname in ('fn_my_leads_housekeeping_reassign','my_leads_housekeeping_reassign_scope','my_leads_housekeeping_reassign_fingerprint','my_leads_housekeeping_reassign_task_ids') order by 1")).rows;
     const bodies122 = await bodies();
-    await db.query(stripTransaction('migrations/20261005122500_my_leads_housekeeping_reassign_queue_scope.sql'));
+    await db.query(stripTransaction('migrations/20261005140000_my_leads_housekeeping_reassign_queue_scope.sql'));
     const info = await run('select public.fn_my_leads_housekeeping_run_info($1,$2) as r', [old.runId, org]);
     const rolled = await run('select public.fn_my_leads_housekeeping_rollback($1,$2,$3) as r', [old.runId, org, info.fingerprint]);
     expect(rolled).toMatchObject({ status: 'rolled_back', restored: 1, notRestored: [] });
     expect((await db.query('select assigned_user_id from public.properties where id=$1', [lead])).rows[0].assigned_user_id).toBe(mel);
     expect(await bodies()).not.toEqual(bodies122);
 
-    await db.query(stripTransaction('rollbacks/20261005122500_my_leads_housekeeping_reassign_queue_scope.sql'));
+    await db.query(stripTransaction('rollbacks/20261005140000_my_leads_housekeeping_reassign_queue_scope.sql'));
     expect(await bodies()).toEqual(bodies122);
   } finally {
     await db.query('rollback').catch(() => {});
