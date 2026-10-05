@@ -227,6 +227,10 @@ export async function resetCloseWorld(db: Queryable, input: { orgId: string; rep
  */
 export async function purgeDialpadEvidenceCi(db: Queryable, repUserId: string, env: Env = process.env): Promise<void> {
   assertLaneSafe("ci", env);
+  // Check the handle actually passed in, not just the environment (same rule as cleanupSyntheticLead).
+  const server = await db.query<{ addr: string | null }>("select inet_server_addr()::text as addr");
+  const addr = server.rows[0]?.addr ?? null; // null = unix socket (local)
+  if (!(addr === null || /^(127\.|::1)/.test(addr))) throw new Error(`purgeDialpadEvidenceCi: the database handle is not loopback (${addr}).`);
   await db.query("truncate table public.dialpad_member_bindings cascade");
   // The UI save writes an idempotency receipt per command (`acquisition_commands.actor_user_id` is ON
   // DELETE RESTRICT and, unlike attempts, is not wiped by the next spec's reset_tenant_tables()).

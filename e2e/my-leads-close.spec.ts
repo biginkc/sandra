@@ -268,6 +268,10 @@ test.describe.serial("my-leads-close: Phase 1 CI lane", () => {
         dateStarted: start, dateConnected: start + 1000, shareLink: SHARE_LINK, adminRecordingUrl: ADMIN_RECORDING,
       }),
     ];
+    // T4's manual log-attempt is also a dialpad-source attempt, so count before the first pass.
+    const dialpadAttempts = async () =>
+      Number((await db.query<{ n: string }>("select count(*)::text as n from public.acquisition_attempts where property_id=$1 and source='dialpad'", [lead.propertyId])).rows[0]!.n);
+    const countBefore = await dialpadAttempts();
     for (const payload of events) {
       const response = await postDialpadEvent(BASE_URL, connectionId, signDialpadWebhook(payload, WEBHOOK_SECRET));
       expect(response.status, await response.text().catch(() => "")).toBe(200);
@@ -284,12 +288,11 @@ test.describe.serial("my-leads-close: Phase 1 CI lane", () => {
     const activity = await db.query<{ provider_recording_url: string | null }>("select provider_recording_url from public.call_activities where id=$1", [attempt.rows[0]!.call_activity_id]);
     expect(activity.rows[0]?.provider_recording_url).toBe(ADMIN_RECORDING);
 
-    // Replay creates no second attempt. T4's manual log-attempt is also a dialpad-source attempt, so
-    // compare against the count taken here instead of assuming 1.
-    const countBefore = await db.query<{ n: string }>("select count(*)::text as n from public.acquisition_attempts where property_id=$1 and source='dialpad'", [lead.propertyId]);
+    // The first pass created exactly one attempt; the replay creates no second one.
+    const countAfterFirst = await dialpadAttempts();
+    expect(countAfterFirst).toBe(countBefore + 1);
     for (const payload of events) await postDialpadEvent(BASE_URL, connectionId, signDialpadWebhook(payload, WEBHOOK_SECRET));
-    const count = await db.query<{ n: string }>("select count(*)::text as n from public.acquisition_attempts where property_id=$1 and source='dialpad'", [lead.propertyId]);
-    expect(Number(count.rows[0]!.n)).toBe(Number(countBefore.rows[0]!.n));
+    expect(await dialpadAttempts()).toBe(countAfterFirst);
   });
 
   test("my-leads-close: T9 retire cancels the open appointment and soft-retires the lead; evidence is retained", async () => {
