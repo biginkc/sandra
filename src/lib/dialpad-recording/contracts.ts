@@ -460,7 +460,8 @@ export function parseDialpadRecordingEofResult(value: Json | null | undefined): 
   };
 }
 
-const CALL_STATES = ['prepared', 'awaiting_provider', 'dialing', 'connected', 'ended', 'cancelled', 'expired'] as const;
+/** Must match DIALPAD_CALL_STATES in dialpad-cti/contracts (a test keeps them in sync). */
+export const CALL_STATES = ['prepared', 'awaiting_provider', 'dialing', 'connected', 'ended', 'cancelled', 'expired', 'failed'] as const;
 type DialpadCallState = (typeof CALL_STATES)[number];
 
 export interface DialpadRecordingCallStatus {

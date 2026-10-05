@@ -4,7 +4,9 @@ import {
   assessDialpadIntentForDispatch,
   classifyDialpadRpcError,
   DIALPAD_CTI_CUSTOM_DATA_PATTERN,
+  DIALPAD_QUARANTINE_REASONS,
   parseDialpadEventIngestResult,
+  parseDialpadCallStatus,
   parseDialpadEventMatchResult,
   parsePreparedDialpadCallIntent,
 } from './contracts';
@@ -77,5 +79,16 @@ describe('dialpad CTI contracts', () => {
     expect(classifyDialpadRpcError({ code: '22023', details: 'phone_unavailable' })).toEqual({ kind: 'invalid_input', detail: 'phone_unavailable' });
     expect(classifyDialpadRpcError({ code: '40001' })).toEqual({ kind: 'idempotency_conflict' });
     expect(classifyDialpadRpcError(null)).toEqual({ kind: 'unknown' });
+  });
+
+  it('parses the failed call state and failedAt marker, and tolerates a status without failedAt', () => {
+    const base = { intentId: 'i', state: 'failed', connected: false, propertyId: 'p', expiresAt: '2026-10-06T10:10:00Z', dispatchAuthorizedAt: '2026-10-06T10:00:00Z' };
+    expect(parseDialpadCallStatus({ ...base, failedAt: '2026-10-06T10:02:00Z' })).toMatchObject({ state: 'failed', failedAt: '2026-10-06T10:02:00Z' });
+    expect(parseDialpadCallStatus({ ...base, state: 'ended' })).toMatchObject({ state: 'ended', failedAt: null });
+    expect(() => parseDialpadCallStatus({ ...base, state: 'bogus' })).toThrow();
+  });
+
+  it('knows the native-matching quarantine reasons', () => {
+    expect(DIALPAD_QUARANTINE_REASONS).toEqual(expect.arrayContaining(['no_binding', 'no_lead_match', 'ambiguous_lead', 'dnc_number']));
   });
 });
