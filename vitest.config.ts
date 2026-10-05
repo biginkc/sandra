@@ -6,7 +6,7 @@ import path from "node:path";
 // so they don't touch the fast-path used by the husky pre-commit hook.
 export default defineConfig({
   test: {
-    include: ["src/**/*.test.ts", "scripts/sequence-canary-runtime.test.ts", "scripts/sequence-canary-entrypoints.test.ts", "scripts/direct-call-feasibility/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "scripts/sequence-canary-runtime.test.ts", "scripts/sequence-canary-entrypoints.test.ts", "scripts/direct-call-feasibility/**/*.test.ts", "scripts/my-leads-close/**/*.test.ts", "e2e/support/**/*.test.ts"],
     exclude: ["**/*.integration.test.ts", "node_modules/**"],
     environment: "node",
     reporters: ["default"],

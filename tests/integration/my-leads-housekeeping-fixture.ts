@@ -77,6 +77,7 @@ const CHAIN = [
   { key: 'apiDial', file: '20261007150100_dialpad_api_dial_support', present: column('dialpad_org_connections', 'dial_endpoint') },
   { key: 'redaction', file: '20261007150200_dialpad_unmatched_event_redaction', present: proc('fn_redact_dialpad_unmatched_events') },
   { key: 'callbacksDue', file: '20261007150300_my_leads_callbacks_due', present: proc('fn_my_leads_callbacks_due') },
+  { key: 'leadComps', file: '20261007100000_lead_comps_foundation', present: "to_regclass('public.lead_comps') is not null" },
 ] as const;
 
 export type ChainKey = (typeof CHAIN)[number]['key'];

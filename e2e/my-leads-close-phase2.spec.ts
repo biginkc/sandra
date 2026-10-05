@@ -11,36 +11,20 @@ import {
   assertLaneSafe,
   CI_DIALPAD_USER_ID,
   ciDatabaseUrl,
+  createSyntheticLead,
   designateRep,
-  expireDialIntentCi,
+  dialpadEventPayload,
   postDialpadEvent,
+  prepareDialpadIntent,
   purgeDialpadEvidenceCi,
-  readDialIntents,
-  readEventDispositions,
+  resetCloseWorld,
   seedDialpadForRep,
   seedFeatureFlags,
   signDialpadWebhook,
+  type DialpadEventInput,
   type SyntheticLead,
-} from "./support/my-leads-p2-fixture";
-import type { DialpadEventInput } from "./support/my-leads-p2-fixture";
-
-/*
- * PENDING #804 merge: import shared fixture. These four helpers are #804's (createSyntheticLead,
- * resetCloseWorld, dialpadEventPayload, prepareDialpadIntent). They are declared here for the type
- * checker only and have no runtime body; every test that reaches them is test.fixme until #804
- * merges and this file imports them from its fixture instead.
- */
-declare function createSyntheticLead(
-  db: pg.Pool,
-  input: { orgId: string; repUserId: string; runTag: string; phoneE164: string; lastTouchDaysAgo?: number; training?: boolean },
-): Promise<SyntheticLead>;
-declare function resetCloseWorld(db: pg.Pool, input: { orgId: string; repUserId: string }): Promise<void>;
-declare function dialpadEventPayload(input: DialpadEventInput): string;
-declare function prepareDialpadIntent(
-  db: pg.Pool,
-  input: { orgId: string; repUserId: string; lead: SyntheticLead },
-): Promise<{ intentId: string; customData: string }>;
-const FIXME = { annotation: { type: "fixme", description: "pending #804 merge: import shared fixture" } } as const;
+} from "./support/my-leads-close-fixture";
+import { enableDialpadDialing, expireDialIntentCi, readDialIntents, readEventDispositions } from "./support/my-leads-p2-fixture";
 
 /**
  * my-leads-close Phase 2 CI acceptance slice (TECH-PLAN 4.3: T0 Phase 1-2 seams, T3, T7, T8).
@@ -90,6 +74,7 @@ async function bootstrap(): Promise<void> {
   await designateRep(pool, { orgId: DEFAULT_ORG_ID, repUserId: repId });
   await seedFeatureFlags(pool, DEFAULT_ORG_ID, ["call_next_strip", "post_call_prompt", "click_to_dial", "native_matcher", "auto_prompt", "callback_alert"]);
   const { connectionId } = await seedDialpadForRep(pool, { orgId: DEFAULT_ORG_ID, repUserId: repId });
+  await enableDialpadDialing(pool, DEFAULT_ORG_ID);
   const lead = await createSyntheticLead(pool, { orgId: DEFAULT_ORG_ID, repUserId: repId, runTag, phoneE164: PHONE_MAIN, lastTouchDaysAgo: 20 });
   ctx = { db: pool, repUserId: repId, connectionId, runTag, lead };
 }
@@ -101,7 +86,7 @@ async function teardown(): Promise<void> {
     if (repId) await resetCloseWorld(pool, { orgId: DEFAULT_ORG_ID, repUserId: repId });
   } finally {
     try {
-      await purgeDialpadEvidenceCi(pool);
+      await purgeDialpadEvidenceCi(pool, repId!);
     } finally {
       await pool.end();
     }
@@ -178,7 +163,7 @@ test.describe.serial("my-leads-close: Phase 2 CI lane", () => {
   test.beforeAll(bootstrap);
   test.afterAll(teardown);
 
-  test.fixme("my-leads-close: T3 dial (stub), hangup events, replay, and the post-call prompt opens only after other dialogs close", FIXME, async ({ page }) => {
+  test("my-leads-close: T3 dial (stub), hangup events, replay, and the post-call prompt opens only after other dialogs close", async ({ page }) => {
     const { db, lead } = need();
     expect(await readDialIntents(db, lead.propertyId)).toHaveLength(0);
 
@@ -244,7 +229,7 @@ test.describe.serial("my-leads-close: Phase 2 CI lane", () => {
     expect(await readDialIntents(db, lead.propertyId)).toHaveLength(1);
   });
 
-  test.fixme("my-leads-close: T3b expired call keeps its key for a retry, a deliberate Dismiss releases it", FIXME, async ({ page }) => {
+  test("my-leads-close: T3b expired call keeps its key for a retry, a deliberate Dismiss releases it", async ({ page }) => {
     const { db, repUserId, runTag } = need();
     const lead = await createSyntheticLead(db, { orgId: DEFAULT_ORG_ID, repUserId, runTag, phoneE164: "+18165550146", lastTouchDaysAgo: 40 });
     await page.goto("/my-leads");
@@ -272,7 +257,7 @@ test.describe.serial("my-leads-close: Phase 2 CI lane", () => {
     expect(new Set(intents.map((i) => i.idempotencyKey)).size, "fresh dial minted a new idempotency key").toBe(2);
   });
 
-  test.fixme("my-leads-close: T7 training lead calls are isolated: internal_training, no attempt, no prompt", FIXME, async ({ page }) => {
+  test("my-leads-close: T7 training lead calls are isolated: internal_training, no attempt, no prompt", async ({ page }) => {
     const { db, repUserId, runTag } = need();
     const training = await createSyntheticLead(db, { orgId: DEFAULT_ORG_ID, repUserId, runTag: `${runTag} TRAIN`, phoneE164: PHONE_TRAINING, training: true });
     const intent = await prepareDialpadIntent(db, { orgId: DEFAULT_ORG_ID, repUserId, lead: training });
@@ -303,7 +288,7 @@ test.describe.serial("my-leads-close: Phase 2 CI lane", () => {
     expect(Number(dialpadAttempts.rows[0]!.n)).toBe(0);
   });
 
-  test.fixme("my-leads-close: T8 native call: one lead matches, shared number is ambiguous, unknown number is no_lead_match", FIXME, async ({ page }) => {
+  test("my-leads-close: T8 native call: one lead matches, shared number is ambiguous, unknown number is no_lead_match", async ({ page }) => {
     const { db, repUserId, runTag } = need();
     const one = await createSyntheticLead(db, { orgId: DEFAULT_ORG_ID, repUserId, runTag, phoneE164: PHONE_NATIVE, lastTouchDaysAgo: 25 });
 
@@ -324,7 +309,7 @@ test.describe.serial("my-leads-close: Phase 2 CI lane", () => {
       .poll(async () => new Set(await readEventDispositions(db, DEFAULT_ORG_ID, ambiguousCall)).has("quarantined:ambiguous_lead"), { timeout: 30_000 })
       .toBe(true);
     // The list RPC needs the rep's JWT identity (F4), so read it through the member helper.
-    const ambiguousList = await asMember(db, repUserId, (run) => run<{ v: unknown }>("select public.fn_list_ambiguous_native_calls($1) as v", [DEFAULT_ORG_ID]));
+    const ambiguousList = await asMember(db, repUserId, (q) => q.query<{ v: unknown }>("select public.fn_list_ambiguous_native_calls($1) as v", [DEFAULT_ORG_ID]));
     expect(JSON.stringify(ambiguousList.rows[0]!.v)).toContain(ambiguousCall);
 
     // Unknown number: quarantined no_lead_match, no attempt anywhere.

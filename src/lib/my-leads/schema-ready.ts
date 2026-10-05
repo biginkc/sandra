@@ -20,7 +20,8 @@ export type SchemaFeature =
   | "api_dial"
   | "ack_prompts"
   | "callbacks_due"
-  | "event_redaction";
+  | "event_redaction"
+  | "lead_comps";
 
 export type SchemaRequirement = {
   /** `public.fn_name(argtype,argtype)` regprocedure strings. */
@@ -100,6 +101,15 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
   event_redaction: {
     functions: ["public.fn_redact_dialpad_unmatched_events(interval,integer)"],
     columns: ["dialpad_call_events.redacted_at"],
+  },
+  // P3a: comps enqueue/claim/finish and the cap ledger; `monthly_call_cap` stands for the settings row.
+  lead_comps: {
+    functions: [
+      "public.fn_enqueue_comp_fetch(uuid,uuid,text,uuid)",
+      "public.fn_claim_comp_fetches(integer)",
+      "public.fn_finish_comp_fetch(uuid,text,integer,text,uuid)",
+    ],
+    columns: ["lead_comps.as_is_value", "org_comp_settings.monthly_call_cap", "lead_valuation_inputs.arv"],
   },
 };
 
