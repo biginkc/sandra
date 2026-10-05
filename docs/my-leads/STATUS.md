@@ -32,7 +32,7 @@ Last updated: 2026-10-04 (after #801 release)
 | `claude/my-leads-p3-comps` | #805 | Phase 3 writer | draft, built, NOT merged; Opus YES at `bb86747e` |
 | `claude/my-leads-p3-call-screen` | #807 | Claude Sonnet 5.5 builder | draft, built, NOT merged; Opus YES at `a908ad1c`; pre-enable fixes in progress (dock opening key, notFound on membership failures, valuation action flag+ownership, drop whole-page schemaReady gate) |
 | `claude/my-leads-p3-send-card` | #814 (draft, base `claude/my-leads-p3-call-screen`) | Claude Sonnet 5.5 builder | in progress (contract defaults schema, prefill mapper, send-contract card + actions; offer projection library/migration NOT in this slice) |
-| `claude/my-leads-p3-offer` | pending (draft, base `claude/my-leads-p3-send-card`) | Claude Sonnet 5.5 builder | in progress (offer projection migration/library/sweep cron, recovery actions + UI, contract-defaults settings UI, Dropbox Sign base-URL seam; AI facts NOT built) |
+| `claude/my-leads-p3-offer` | #815 (draft, base `claude/my-leads-p3-send-card`) | Claude Sonnet 5.5 builder | in progress (offer projection migration/library/sweep cron, recovery actions + UI, contract-defaults settings UI, Dropbox Sign base-URL seam; AI facts NOT built) |
 | `p1a-retire` | none | none | NOT built yet |
 | all other branches | none | unclaimed | claim here before writing |
 
