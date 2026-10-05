@@ -79,11 +79,11 @@ describe("Norma lead timeline events", () => {
     expect(detail).not.toHaveTextContent("unconfirmed");
   });
 
-  it("renders only the sentence when there is nothing more to show, and for request events", () => {
+  it("keeps recordings accessible for older completed requests, but not request events", () => {
     const { rerender } = render(
       <LeadEventPill event={event("norma_call_completed", { outcome: "no_answer", request_id: REQUEST_ID })} authorEmails={{}} currentUserId={null} />,
     );
-    expect(screen.queryByTestId("norma-event-detail")).toBeNull();
+    expect(screen.getByRole("button", { name: "Load Norma recordings" })).toBeInTheDocument();
     rerender(<LeadEventPill event={event("norma_call_requested", { has_context: false }, "user")} authorEmails={{}} currentUserId={null} normaRequests={[request]} />);
     expect(screen.queryByTestId("norma-event-detail")).toBeNull();
   });

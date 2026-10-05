@@ -1,5 +1,7 @@
 "use client";
 
+import { NormaRecordings } from "./norma-recordings";
+
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
 import { ActivityIcon } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -163,7 +165,10 @@ export function LeadEventPill({
     </div>
   );
   const detail = formatNormaEventDetail(event, normaRequests);
-  if (!detail) return pill;
+  const requestId = readPayload(event.payload).request_id;
+  const recordingRequestId = event.event_type === "norma_call_completed" && typeof requestId === "string"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId) ? requestId : null;
+  if (!detail && !recordingRequestId) return pill;
   return (
     <div className="flex max-w-full flex-col items-center gap-1.5">
       {pill}
@@ -171,18 +176,19 @@ export function LeadEventPill({
         className="border-border/80 bg-muted/50 text-foreground max-w-md space-y-1 rounded-lg border px-3 py-2 text-xs"
         data-testid="norma-event-detail"
       >
-        {detail.summary ? <p className="whitespace-pre-line">{detail.summary}</p> : null}
-        {detail.callbackPreference ? (
+        {detail?.summary ? <p className="whitespace-pre-line">{detail.summary}</p> : null}
+        {detail?.callbackPreference ? (
           <p>
             <span className="font-medium">Seller&apos;s stated callback preference (unconfirmed):</span>{" "}
             {detail.callbackPreference}
           </p>
         ) : null}
-        {detail.callbackTime ? (
+        {detail?.callbackTime ? (
           <p data-testid="norma-event-callback-time">
             <span className="font-medium">Converted callback time (unconfirmed):</span> {detail.callbackTime}
           </p>
         ) : null}
+        {recordingRequestId ? <NormaRecordings key={recordingRequestId} requestId={recordingRequestId} /> : null}
       </div>
     </div>
   );
