@@ -9,14 +9,12 @@ drop function if exists public.fn_list_unacknowledged_call_prompts(uuid, integer
 drop index if exists public.acquisition_attempts_unacked_prompt_idx;
 do $patch$
 declare
-  r record;
   v_def text;
   v_start int;
   v_end int;
 begin
   -- Fingerprint: remove the ack_legacy_prompts suffix line.
   v_def := pg_get_functiondef('public.my_leads_housekeeping_rollback_fingerprint(uuid,uuid)'::regprocedure);
-  r := null;
   if position('r.kind = ''ack_legacy_prompts''' in v_def) > 0 then
     execute replace(v_def,
       E'            || case when r.kind = ''ack_legacy_prompts'' then ''/'' || coalesce(a.prompt_acknowledged_at::text, '''') || ''/'' || coalesce(a.prompt_acknowledged_via, '''') else '''' end\n',

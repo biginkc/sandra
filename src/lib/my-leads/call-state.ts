@@ -44,6 +44,10 @@ export type CallStateSnapshot = {
   callbacksDue: CallbackDueItem[];
   /** What the server-side flags and schema allow; the client never auto-opens when autoPrompt is false. */
   features: { autoPrompt: boolean; callbackAlert: boolean };
+  /** True when no polled flag is on for the org: the hook stops polling instead of re-reading flags every 10 s. */
+  idle?: boolean;
+  /** Surfaces whose read failed this poll; the rest of the snapshot is still valid. */
+  failedSurfaces?: ("prompts" | "callbacks" | "ambiguous")[];
 };
 
 export type CallPromptAckVia = "saved" | "skipped" | "dismissed";

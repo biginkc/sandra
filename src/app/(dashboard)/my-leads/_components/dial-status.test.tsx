@@ -100,6 +100,25 @@ describe("<DialStatus /> in flight", () => {
   });
 });
 
+describe("<DialStatus /> finished callback", () => {
+  it.each(["ended", "failed", "cancelled", "expired"] as const)("fires onFinished once for %s", async (state) => {
+    statusMock.mockResolvedValue({ ok: true, status: mk({ state }) });
+    const onFinished = vi.fn();
+    setup(flight(), { onFinished });
+    await tick(10_000);
+    expect(onFinished).toHaveBeenCalledTimes(1);
+    expect(onFinished).toHaveBeenCalledWith("i1", expect.objectContaining({ state }));
+  });
+
+  it("does not fire onFinished while the call is live", async () => {
+    statusMock.mockResolvedValue({ ok: true, status: mk({ state: "connected" }) });
+    const onFinished = vi.fn();
+    setup(flight(), { onFinished });
+    await tick(10_000);
+    expect(onFinished).not.toHaveBeenCalled();
+  });
+});
+
 describe("<DialStatus /> rate limited and error", () => {
   const rl = (attempt: number): DialFlight => ({ kind: "rate_limited", propertyId: "p1", label: "12 Elm", retryAfterSeconds: 3, attempt });
 
@@ -115,6 +134,14 @@ describe("<DialStatus /> rate limited and error", () => {
     expect(screen.getByTestId("dial-status")).toHaveTextContent("Retrying…");
     await tick(10_000);
     expect(p.onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows Dismiss during the countdown and Dismiss asks the parent to drop the flight", async () => {
+    const p = setup(rl(1));
+    await tick(1000);
+    const dismiss = screen.getByRole("button", { name: "Dismiss" });
+    await act(async () => { dismiss.click(); });
+    expect(p.onDismiss).toHaveBeenCalledTimes(1);
   });
 
   it("does not auto retry on attempt 2 or later", async () => {

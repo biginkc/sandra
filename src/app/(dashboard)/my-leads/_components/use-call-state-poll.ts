@@ -46,10 +46,13 @@ export function useCallStatePoll({ enabled, suspended, intervalMs = 10_000, back
     let alive = true;
     let inFlight = false;
     let backedOff = false;
+    // No polled flag is on for the org: stop the timer instead of re-reading flags every interval.
+    let idle = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
     const schedule = () => {
       if (timer) clearTimeout(timer);
+      if (idle) return;
       timer = setTimeout(() => {
         if (!alive) return;
         if (isVisible()) fetchNow(false);
@@ -67,6 +70,19 @@ export function useCallStatePoll({ enabled, suspended, intervalMs = 10_000, back
         if (!alive) return;
         if (ok && snapshot) {
           let next = snapshot;
+          idle = snapshot.idle === true;
+          const failed = snapshot.failedSurfaces ?? [];
+          if (failed.length > 0) {
+            // A failed read keeps its last good value; only the successful parts update.
+            const prev = stateRef.current;
+            next = {
+              ...snapshot,
+              prompts: failed.includes("prompts") ? prev.prompts : snapshot.prompts,
+              promptsCursor: failed.includes("prompts") ? prev.promptsCursor : snapshot.promptsCursor,
+              callbacksDue: failed.includes("callbacks") ? prev.callbacksDue : snapshot.callbacksDue,
+              ambiguous: failed.includes("ambiguous") ? prev.ambiguous : snapshot.ambiguous,
+            };
+          }
           if (more) {
             const seen = new Set<string>();
             const prompts = [...stateRef.current.prompts, ...snapshot.prompts].filter((p) => {
@@ -74,12 +90,12 @@ export function useCallStatePoll({ enabled, suspended, intervalMs = 10_000, back
               seen.add(p.attemptId);
               return true;
             });
-            next = { ...snapshot, prompts };
+            next = { ...next, prompts };
           }
           stateRef.current = next;
           setState(next);
-          setError(null);
-          backedOff = false;
+          setError(failed.length > 0 ? "Some call state could not refresh." : null);
+          backedOff = failed.length > 0;
         } else {
           setError(message ?? "Could not refresh call state.");
           backedOff = true;

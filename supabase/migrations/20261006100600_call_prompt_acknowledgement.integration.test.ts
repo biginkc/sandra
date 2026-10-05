@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { stripTransaction } from '@tests/integration/my-leads-housekeeping-fixture';
 import { addLead, asUser, deliver, failure, ledger, nativeCall, prepare, service, setFlag, withP2, world, type Json, type World } from '@tests/integration/dialpad-p2-fixture';
 
 // One Sandra-origin (custom_data) ended call on `property`; returns the attempt row.
@@ -8,6 +9,11 @@ async function sandraCall(w: World, o: { property?: string; contact?: string; ca
   const rows = await w.db.query('select * from public.acquisition_attempts where org_id=$1 and provider_attempt_key = $2', [w.org, `dialpad-cti:${intent.intentId}`]);
   return rows.rows[0];
 }
+const MIGRATION = 'migrations/20261006100600_call_prompt_acknowledgement.sql';
+const ROLLBACK = 'rollbacks/20261006100600_call_prompt_acknowledgement.sql';
+const FINGERPRINT = 'public.my_leads_housekeeping_rollback_fingerprint(uuid,uuid)';
+const ROLLBACK_FN = 'public.fn_my_leads_housekeeping_rollback(uuid,uuid,text)';
+const defOf = async (w: World, sig: string): Promise<string> => (await w.db.query('select pg_get_functiondef($1::regprocedure) as d', [sig])).rows[0].d;
 const callId = (n: number) => `7${String(n).padStart(18, '0')}`;
 
 const list = async (w: World, uid: string, args: { limit?: number; cursor?: { beforeEnded: string; beforeId: string } | null; horizon?: string } = {}): Promise<Json> =>
@@ -203,6 +209,29 @@ describe('20261006100600 call prompt acknowledgement', () => {
       const w = await world(db);
       const err = await failure(db, () => service(db, () => db.query('select public.fn_list_unacknowledged_call_prompts($1)', [w.org])));
       expect(err.code).toBe('42501');
+    });
+  });
+
+  it('rollback drops the functions and index, strips both housekeeping branches, keeps the columns; re-apply restores them', async () => {
+    await withP2('ackPrompts', async (db) => {
+      const w = await world(db);
+      expect(await defOf(w, FINGERPRINT)).toContain('ack_legacy_prompts');
+      expect(await defOf(w, ROLLBACK_FN)).toContain('ack_legacy_prompts');
+      await db.query(stripTransaction(ROLLBACK));
+      const fns = await db.query("select proname from pg_proc where pronamespace='public'::regnamespace and proname in ('fn_my_leads_ack_legacy_call_prompts','fn_acknowledge_call_prompt','fn_list_unacknowledged_call_prompts')");
+      expect(fns.rows).toEqual([]);
+      const idx = await db.query("select 1 from pg_indexes where schemaname='public' and indexname='acquisition_attempts_unacked_prompt_idx'");
+      expect(idx.rows).toEqual([]);
+      expect(await defOf(w, FINGERPRINT)).not.toContain('ack_legacy_prompts');
+      const rollbackDef = await defOf(w, ROLLBACK_FN);
+      expect(rollbackDef).not.toContain('ack_legacy_prompts');
+      expect(rollbackDef).toContain('ROLLBACK_UNSUPPORTED');
+      const cols = await db.query("select column_name from information_schema.columns where table_schema='public' and table_name='acquisition_attempts' and column_name in ('prompt_acknowledged_at','prompt_acknowledged_via')");
+      expect(cols.rows).toHaveLength(2);
+      await db.query(stripTransaction(MIGRATION));
+      expect(await defOf(w, FINGERPRINT)).toContain('ack_legacy_prompts');
+      expect(await defOf(w, ROLLBACK_FN)).toContain('ack_legacy_prompts');
+      expect((await list(w, w.rep)).items).toEqual([]);
     });
   });
 });

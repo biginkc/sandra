@@ -294,6 +294,8 @@ export async function startDialpadApiCall(
     return { ok: false, code: 'invalid_input', message: 'Choose a lead and contact first.' };
   }
   try {
+    // Accepted race: load-then-act is not atomic; simultaneous dials from one rep could both pass
+    // these guards. Accepted for a single rep (the provider 429 is the backstop).
     // 1. Rate and in-flight guards before anything is prepared (a refusal here never created an intent).
     const load = await db.loadDispatchLoad(actor.orgId, actor.userId, new Date(now().getTime() - RATE_WINDOW_MS).toISOString());
     if (load.authorizedLastMinute >= DIAL_RATE_LIMIT_PER_MINUTE) {

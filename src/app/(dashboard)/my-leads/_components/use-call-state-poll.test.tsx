@@ -129,4 +129,24 @@ describe("useCallStatePoll", () => {
     await act(async () => { result.current.loadMorePrompts(); });
     expect(pollMock).toHaveBeenCalledTimes(2);
   });
+
+  it("stops polling after the server says no polled flag is on", async () => {
+    pollMock.mockResolvedValue(ok({ idle: true }));
+    renderHook(() => useCallStatePoll({ enabled: true, suspended: false }));
+    await tick(0);
+    expect(pollMock).toHaveBeenCalledTimes(1);
+    await tick(60_000);
+    expect(pollMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the last good value for a surface whose read failed and updates the rest", async () => {
+    pollMock.mockResolvedValueOnce(ok({ prompts: [prompt("a")], callbacksDue: [{ taskId: "t1", propertyId: "p", dueAt: "x", title: "c", minutesLate: 1 }] }));
+    const { result } = renderHook(() => useCallStatePoll({ enabled: true, suspended: false }));
+    await tick(0);
+    pollMock.mockResolvedValueOnce(ok({ prompts: [prompt("b")], callbacksDue: [], failedSurfaces: ["callbacks"] }));
+    await tick(10_000);
+    expect(result.current.prompts.map((p) => p.attemptId)).toEqual(["b"]);
+    expect(result.current.callbacksDue.map((c) => c.taskId)).toEqual(["t1"]);
+    expect(result.current.error).toBe("Some call state could not refresh.");
+  });
 });

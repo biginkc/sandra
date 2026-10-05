@@ -186,6 +186,8 @@ export function createSupabaseDialpadDispatchDb(client: SupabaseClient<Database>
       }
       return { contactId: contact.id, slots };
     },
+    // Accepted race: this read-then-act guard is not atomic, so two truly simultaneous dials from
+    // one rep could both pass. Accepted for a single rep; the provider 429 is the backstop.
     async loadDispatchLoad(orgId, userId, sinceIso) {
       const { data, error } = await client
         .from('dialpad_call_intents')

@@ -9,7 +9,7 @@ import {
   type CallPromptAckVia,
   type CallStateSnapshot,
 } from "@/lib/my-leads/call-state";
-import { getMyLeadsFlag } from "@/lib/my-leads/flags";
+import { getMyLeadsFlags } from "@/lib/my-leads/flags";
 import { myLeadsViewer } from "@/lib/my-leads/queries";
 import { schemaReady } from "@/lib/my-leads/schema-ready";
 
@@ -37,28 +37,29 @@ export async function pollMyLeadsCallStateAction(
     return { ok: false, message: "Sign in with an active organization." };
   }
   const client = viewer.client as unknown as RpcClient;
-  const [autoPrompt, callbackAlert, nativeMatcher] = await Promise.all([
-    getMyLeadsFlag(viewer.orgId, "auto_prompt"),
-    getMyLeadsFlag(viewer.orgId, "callback_alert"),
-    getMyLeadsFlag(viewer.orgId, "native_matcher"),
-  ]);
+  // One flag read for all four surfaces. When none is on the answer is "idle" and the client stops polling.
+  const flags = await getMyLeadsFlags(viewer.orgId, ["click_to_dial", "auto_prompt", "callback_alert", "native_matcher"]);
+  if (!flags.click_to_dial && !flags.auto_prompt && !flags.callback_alert && !flags.native_matcher) {
+    return { ok: true, state: { ...EMPTY_CALL_STATE, idle: true } };
+  }
+  const { auto_prompt: autoPrompt, callback_alert: callbackAlert, native_matcher: nativeMatcher } = flags;
   const [promptsReady, callbacksReady] = await Promise.all([
     autoPrompt ? schemaReady("ack_prompts") : Promise.resolve(false),
     callbackAlert ? schemaReady("callbacks_due") : Promise.resolve(false),
   ]);
   const state: CallStateSnapshot = { ...EMPTY_CALL_STATE, features: { autoPrompt: promptsReady, callbackAlert: callbacksReady } };
-  let failed = false;
-  const guard = async (surface: string, run: () => Promise<void>) => {
+  const failedSurfaces: NonNullable<CallStateSnapshot["failedSurfaces"]> = [];
+  const guard = async (surface: string, part: "prompts" | "callbacks" | "ambiguous", run: () => Promise<void>) => {
     try {
       await run();
     } catch (error) {
-      failed = true;
+      failedSurfaces.push(part);
       reportError(error instanceof Error ? error : new Error(`${surface} failed`), { tags: { surface: "server", operation: surface } });
     }
   };
   await Promise.all([
     promptsReady
-      ? guard("my_leads_poll_prompts", async () => {
+      ? guard("my_leads_poll_prompts", "prompts", async () => {
           const cursor = input.promptsCursor ?? null;
           const { data, error } = await client.rpc("fn_list_unacknowledged_call_prompts", {
             p_org_id: viewer.orgId,
@@ -73,21 +74,24 @@ export async function pollMyLeadsCallStateAction(
         })
       : Promise.resolve(),
     callbacksReady
-      ? guard("my_leads_poll_callbacks", async () => {
+      ? guard("my_leads_poll_callbacks", "callbacks", async () => {
           const { data, error } = await client.rpc("fn_my_leads_callbacks_due", { p_org_id: viewer.orgId });
           if (error) throw new Error("fn_my_leads_callbacks_due failed");
           state.callbacksDue = parseCallbackDueItems(data);
         })
       : Promise.resolve(),
     nativeMatcher
-      ? guard("my_leads_poll_ambiguous", async () => {
+      ? guard("my_leads_poll_ambiguous", "ambiguous", async () => {
           const { data, error } = await client.rpc("fn_list_ambiguous_native_calls", { p_org_id: viewer.orgId });
           if (error) throw new Error("fn_list_ambiguous_native_calls failed");
           state.ambiguous = parseAmbiguousCallItems(data);
         })
       : Promise.resolve(),
   ]);
-  if (failed) return { ok: false, message: "Could not refresh call state." };
+  // Keep every read that worked; only a total failure (every attempted read failed) is an error.
+  const attempted = Number(promptsReady) + Number(callbacksReady) + Number(nativeMatcher);
+  if (attempted > 0 && failedSurfaces.length >= attempted) return { ok: false, message: "Could not refresh call state." };
+  if (failedSurfaces.length > 0) state.failedSurfaces = failedSurfaces;
   return { ok: true, state };
 }
 

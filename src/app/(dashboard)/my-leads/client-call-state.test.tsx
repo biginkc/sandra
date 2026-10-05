@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   dialLead: vi.fn(),
   poll: vi.fn(),
   ack: vi.fn(),
+  status: vi.fn(),
   softphone: null as null | { callingEnabled: boolean; openLead: (lead: unknown) => void },
 }))
 
@@ -41,7 +42,7 @@ vi.mock("@/app/(dashboard)/sequences/actions", () => ({
 }))
 vi.mock("./dialpad-actions", () => ({
   dialLeadAction: mocks.dialLead,
-  getDialpadCallStatusAction: vi.fn(async () => ({ ok: false, code: "not_configured", message: "" })),
+  getDialpadCallStatusAction: (...a: unknown[]) => mocks.status(...a),
   cancelDialpadCallAction: vi.fn(),
   ensureDialpadBindingAction: vi.fn(),
 }))
@@ -144,6 +145,13 @@ const click = async (el: HTMLElement) => {
   })
   await flush()
 }
+const callStatus = (intentId: string, state: string) => ({
+  ok: true,
+  status: {
+    intentId, state, connected: state === "ended", propertyId: "property-1", expiresAt: "x", dispatchAuthorizedAt: null, failedAt: null,
+    callActivityId: null, attemptId: null, startedAt: null, endedAt: null, durationSeconds: null, talkDurationSeconds: null, recordingCaptureId: null,
+  },
+})
 const ackCalls = () => mocks.ack.mock.calls
 
 beforeEach(() => {
@@ -161,6 +169,7 @@ beforeEach(() => {
   mocks.savePostCallExtras.mockResolvedValue({ ok: true, note: "saved", nextStep: "created" })
   mocks.poll.mockResolvedValue(pollState())
   mocks.ack.mockResolvedValue({ ok: true, status: "acknowledged" })
+  mocks.status.mockResolvedValue({ ok: false, code: "not_configured", message: "" })
   window.localStorage.clear()
   window.sessionStorage.clear()
   resetExtrasStoreForTests()
@@ -297,6 +306,92 @@ describe("MyLeadsClient calling and durable call state", () => {
       expect(mocks.poll).toHaveBeenCalled()
       expect(screen.queryByTestId("post-call-prompt")).not.toBeInTheDocument()
       expect(ackCalls()).toHaveLength(0)
+    })
+  })
+
+  describe("idempotency keys across repeated calls", () => {
+    it("mints a new key and dials again once the previous call to the same lead has finished", async () => {
+      mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-1" })
+      mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-2" })
+      mocks.status.mockImplementation(async (id: string) => callStatus(id, "ended"))
+      renderClient({ dialpad })
+      await click(screen.getByRole("button", { name: "Start call property-1" }))
+      await flush(0)
+      await click(screen.getByRole("button", { name: "Start call property-1" }))
+      expect(mocks.dialLead).toHaveBeenCalledTimes(2)
+      const [first, second] = mocks.dialLead.mock.calls.map((c) => c[0])
+      expect(second.propertyId).toBe(first.propertyId)
+      expect(second.idempotencyKey).not.toBe(first.idempotencyKey)
+    })
+
+    it("does not dial a second time while the first call is still in flight", async () => {
+      mocks.dialLead.mockResolvedValue({ ...dialOk, intentId: "intent-1" })
+      mocks.status.mockImplementation(async (id: string) => callStatus(id, "dialing"))
+      renderClient({ dialpad })
+      await click(screen.getByRole("button", { name: "Start call property-1" }))
+      await click(screen.getByRole("button", { name: "Start call property-1" }))
+      await click(screen.getByRole("button", { name: "Start call property-2" }))
+      expect(mocks.dialLead).toHaveBeenCalledTimes(1)
+    })
+
+    it("keeps the same key when the request threw, so a retry cannot double-dial", async () => {
+      mocks.dialLead.mockRejectedValueOnce(new Error("network"))
+      mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-1" })
+      renderClient({ dialpad })
+      await click(screen.getByRole("button", { name: "Start call property-1" }))
+      await click(screen.getByRole("button", { name: "Start call property-1" }))
+      expect(mocks.dialLead).toHaveBeenCalledTimes(2)
+      expect(mocks.dialLead.mock.calls[1][0].idempotencyKey).toBe(mocks.dialLead.mock.calls[0][0].idempotencyKey)
+    })
+
+    it("Dismiss during the rate-limit countdown cancels the automatic retry", async () => {
+      mocks.dialLead.mockResolvedValueOnce({ ok: false, code: "rate_limited", message: "Slow down", retryAfterSeconds: 3, freshAttemptKey: true })
+      renderClient({ dialpad })
+      await click(screen.getByRole("button", { name: "Start call property-1" }))
+      await flush(1000)
+      await click(screen.getByRole("button", { name: "Dismiss" }))
+      expect(screen.queryByTestId("dial-status")).not.toBeInTheDocument()
+      await flush(10_000)
+      expect(mocks.dialLead).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe("auto-prompt waits", () => {
+    const waiting = prompt()
+    const freshPoll = () => ({ ok: true as const, state: { ...EMPTY_CALL_STATE, features: { autoPrompt: true, callbackAlert: true }, prompts: [{ ...waiting }] } })
+
+    it("holds while a dial is in flight and opens after the call ends", async () => {
+      mocks.dialLead.mockResolvedValue({ ...dialOk, intentId: "intent-1" })
+      let state = "dialing"
+      mocks.status.mockImplementation(async (id: string) => callStatus(id, state))
+      renderClient({ dialpad, postCallPrompt: true, callFeatures: flags({ autoPrompt: true, clickToDial: true }) })
+      await flush()
+      await click(screen.getByRole("button", { name: "Start call property-2" }))
+      mocks.poll.mockImplementation(async () => freshPoll())
+      await flush(10_000)
+      expect(screen.queryByTestId("post-call-prompt")).not.toBeInTheDocument()
+      state = "ended"
+      await flush(10_000)
+      expect(screen.getAllByTestId("post-call-prompt")).toHaveLength(1)
+    })
+
+    it("holds while any other dialog is open in the document, then opens once it closes", async () => {
+      const foreign = document.createElement("div")
+      foreign.setAttribute("role", "dialog")
+      foreign.setAttribute("data-state", "open")
+      document.body.appendChild(foreign)
+      try {
+        mocks.poll.mockImplementation(async () => freshPoll())
+        renderClient({ postCallPrompt: true, callFeatures: flags({ autoPrompt: true }) })
+        await flush(30_000)
+        expect(mocks.poll).toHaveBeenCalled()
+        expect(screen.queryByTestId("post-call-prompt")).not.toBeInTheDocument()
+        foreign.remove()
+        await flush(10_000)
+        expect(screen.getAllByTestId("post-call-prompt")).toHaveLength(1)
+      } finally {
+        foreign.remove()
+      }
     })
   })
 

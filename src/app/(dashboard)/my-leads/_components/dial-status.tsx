@@ -18,6 +18,8 @@ type Props = {
   onDismiss: () => void;
   onLogOutcome?: (propertyId: string, callActivityId: string) => void;
   onEnded?: (status: DialpadCallStatus) => void;
+  /** Fires once when the call reaches any final state (ended, failed, cancelled, expired). */
+  onFinished?: (intentId: string, status: DialpadCallStatus) => void;
 };
 
 const POLLING_STATES: ReadonlySet<DialpadCallStatus["state"]> = new Set(["prepared", "awaiting_provider", "dialing", "connected"]);
@@ -58,16 +60,21 @@ export function DialStatus(props: Props) {
   );
 }
 
-function InFlight({ flight, pollMs = 3000, onDismiss, onLogOutcome, onEnded }: Props & { flight: Extract<DialFlight, { kind: "in_flight" }> }) {
+function InFlight({ flight, pollMs = 3000, onDismiss, onLogOutcome, onEnded, onFinished }: Props & { flight: Extract<DialFlight, { kind: "in_flight" }> }) {
   const [status, setStatus] = useState<DialpadCallStatus | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const endedRef = useRef(onEnded);
   useEffect(() => {
     endedRef.current = onEnded;
   }, [onEnded]);
+  const finishedRef = useRef(onFinished);
+  useEffect(() => {
+    finishedRef.current = onFinished;
+  }, [onFinished]);
 
   useEffect(() => {
     let alive = true;
+    let finishedFired = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let endedFired = false;
     const run = async () => {
@@ -90,6 +97,10 @@ function InFlight({ flight, pollMs = 3000, onDismiss, onLogOutcome, onEnded }: P
       if (next.state === "ended" && !endedFired) {
         endedFired = true;
         endedRef.current?.(next);
+      }
+      if (!POLLING_STATES.has(next.state) && !finishedFired) {
+        finishedFired = true;
+        finishedRef.current?.(flight.intentId, next);
       }
       if (POLLING_STATES.has(next.state)) timer = setTimeout(() => void run(), pollMs);
     };
@@ -147,7 +158,8 @@ function RateLimited({ flight, onRetry, onDismiss }: Props & { flight: Extract<D
             ? "Retrying…"
             : `Dialpad is rate limiting calls. Retrying in ${remaining}s…`}
       </span>
-      {giveUp ? <Button type="button" variant="outline" size="sm" onClick={onDismiss}>Dismiss</Button> : null}
+      {/* Dismiss always works: while counting down it also cancels the automatic retry. */}
+      {retrying && !giveUp ? null : <Button type="button" variant="outline" size="sm" onClick={onDismiss}>Dismiss</Button>}
     </div>
   );
 }

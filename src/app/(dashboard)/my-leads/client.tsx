@@ -371,7 +371,16 @@ export function MyLeadsClient({
   // retry of the same click can never dial twice, and a NEW key is minted only after a proven
   // non-dispatch rejection (the server says freshAttemptKey).
   const [dialFlight, setDialFlight] = useState<DialFlight | null>(null);
-  const dialKey = useRef<{ propertyId: string; key: string } | null>(null);
+  const dialKey = useRef<{ propertyId: string; key: string; intentId?: string } | null>(null);
+  // Mirror of dialFlight for handlers that must not act on a stale render (no second dial while one is in flight).
+  const [dialFinished, setDialFinished] = useState<string | null>(null);
+  // A flight stays on screen after its call ends (for Log outcome); it only blocks new dials and the
+  // auto-prompt while the call itself is still live.
+  const dialActive = dialFlight?.kind === "in_flight" && dialFinished !== dialFlight.intentId;
+  const dialActiveRef = useRef(false);
+  useEffect(() => {
+    dialActiveRef.current = dialActive;
+  });
   const dialBusy = useRef(false);
   const [dialog, setDialog] = useState<{
     action: MyLeadAction;
@@ -691,9 +700,11 @@ export function MyLeadsClient({
       setDialFlight({ kind: "error", propertyId, label, message: "This lead has no contact to call." });
       return;
     }
-    if (dialBusy.current) return;
+    if (dialBusy.current || dialActiveRef.current) return;
     dialBusy.current = true;
-    // Same lead, same key: a repeated click can only ever return already_dispatched.
+    // The key is kept while a call is in flight, uncertain, or the request threw, so a repeat of the
+    // same click cannot dial twice. Once the call finished (onFinished clears it) the next deliberate
+    // click mints a new key and dials again.
     if (!dialKey.current || dialKey.current.propertyId !== propertyId) {
       dialKey.current = { propertyId, key: crypto.randomUUID() };
     }
@@ -704,6 +715,7 @@ export function MyLeadsClient({
         idempotencyKey: dialKey.current.key,
       });
       if (outcome.ok) {
+        if (dialKey.current) dialKey.current.intentId = outcome.intentId;
         setDialFlight({
           kind: "in_flight",
           intentId: outcome.intentId,
@@ -1024,6 +1036,9 @@ export function MyLeadsClient({
   const refreshCallState = callPoll.refreshNow;
   useEffect(() => {
     if (!autoPromptOn || dialog !== null || openingStatus !== null || autoPrompt !== null) return;
+    // Never open over an in-flight dial or any other open dialog in the page (menus, drawers, confirms).
+    if (dialActive) return;
+    if (typeof document !== "undefined" && document.querySelector("[role=dialog][data-state=open]")) return;
     const candidates = callPoll.prompts.filter(
       (item) => !ackedAttempts.current.has(item.attemptId) && !ackInFlight.current.has(item.attemptId),
     );
@@ -1034,7 +1049,7 @@ export function MyLeadsClient({
     setAutoPrompt(next);
     action("log-attempt", next.propertyId, next.callActivityId);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `action`/`rawRow` are stable per render and read latest state
-  }, [autoPromptOn, dialog, openingStatus, autoPrompt, callPoll.prompts]);
+  }, [autoPromptOn, dialog, openingStatus, autoPrompt, callPoll.prompts, dialActive]);
   // Any close of the auto-opened prompt acknowledges it: saved when the attempt committed, else dismissed.
   useEffect(() => {
     if (!autoPrompt) return;
@@ -1402,6 +1417,11 @@ export function MyLeadsClient({
             void startApiDial(propertyId, attempt);
           }}
           onDismiss={() => setDialFlight(null)}
+          onFinished={(intentId) => {
+            // The call is over: the next deliberate click on this lead dials with a new key.
+            if (dialKey.current?.intentId === intentId) dialKey.current = null;
+            setDialFinished(intentId);
+          }}
           onEnded={() => {
             void refresh(true);
             refreshCallState();
@@ -1423,7 +1443,7 @@ export function MyLeadsClient({
             return row ? (row.homeownerName ?? row.address) : null;
           }}
           onCall={(propertyId) => action("start-call", propertyId)}
-          callingPropertyId={dialFlight?.kind === "in_flight" ? dialFlight.propertyId : null}
+          callingPropertyId={dialActive && dialFlight?.kind === "in_flight" ? dialFlight.propertyId : null}
           canCall={ownQueue}
         />
       )}
