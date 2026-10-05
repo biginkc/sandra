@@ -95,7 +95,7 @@ Debug aids (never a PASS): `STRESS_DEBUG_SKIP_REPLAY=1`, `STRESS_DEBUG_BROWSER_G
 
 ## Still open (read before the real run)
 
-- A full run against the merged stack ends FAIL on one real product finding, `second_tab_duplicate_note` (finding 6 above): fresh-key second-tab prompt saves write a second note. Everything else the oracle checks was green in the last local run except what is listed in the PR body.
+- Last local full run (replay + 12 browser ticks + rendered parity, `next dev`, throwaway stack): `FAIL` on exactly one check, 12, from the product finding `second_tab_duplicate_note` (finding 6 above). With `STRESS_KNOWN_FINDINGS=second_tab_duplicate_note` the same run is `PASS` (all 16 checks, every mandatory scenario executed, ~10 min). Self-test: control `PARTIAL_PASS`, `duplicate_send` red at 7, `drop_offer` red at 13/14/15, `wrong_lead_note` red at 12.
 - OS-level `pf` egress needs sudo and was not applied; `STRESS_REQUIRE_OS_EGRESS=1` proves the ring when it is.
 - The lost-response `sms` instance is realized as a gated reload of the prompt save (the mock provider cannot be gated server-side).
 - Supersede is modelled with one contract (finding 7).
