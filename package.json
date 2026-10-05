@@ -14,6 +14,7 @@
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:integration:local": "vitest run --config vitest.local-integration.config.ts",
+    "test:slack-local": "vitest run --config vitest.slack-local.config.ts",
     "test:search-oracle": "vitest run --config vitest.search-oracle.config.ts",
     "test:search-local": "vitest run --config vitest.local-integration.config.ts supabase/migrations/20261002110100_search_properties.integration.test.ts tests/search-oracle/oracle-comparison.integration.test.ts",
     "test:search-filter-local": "vitest run --config vitest.filter-local.config.ts src/lib/prospects/search-filter-composition.integration.test.ts src/lib/prospects/search-eval-budget.integration.test.ts",
