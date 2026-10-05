@@ -154,7 +154,7 @@ test.describe.serial("my-leads-close: Phase 1 CI lane", () => {
     await prompt.getByTestId("post-call-pick-next-week").click();
     // The default source is DialPad, and a DialPad call needs its shared recording link (the RPC
     // refuses with RECORDING_REQUIRED otherwise, so no receipt ever appears).
-    await prompt.locator("#post-call-recording").fill(SHARE_LINK);
+    await prompt.locator("#post-call-recording").fill("https://dialpad.com/callreview/e2e-close-manual");
     await prompt.getByRole("button", { name: /^save$/i }).click();
     await expect(prompt.getByTestId("post-call-receipt")).toBeVisible({ timeout: 20_000 });
 
@@ -248,13 +248,15 @@ test.describe.serial("my-leads-close: Phase 1 CI lane", () => {
     const { connectionId } = await seedDialpadForRep(db, { orgId: DEFAULT_ORG_ID, repUserId });
     const intent = await prepareDialpadIntent(db, { orgId: DEFAULT_ORG_ID, repUserId, lead });
     const callId = `65432109876543${String(Date.now()).slice(-5)}`;
-    const start = Date.now() - 120_000;
+    // fn_match_dialpad_call_event quarantines an event stamped before intent.prepared_at - 5s
+    // (outside_intent_window), so the call must start just now, not minutes ago.
+    const start = Date.now() - 3000;
     const events = [
       dialpadEventPayload({ callId, state: "calling", at: start, customData: intent.customData, externalNumber: lead.phoneE164, targetUserId: CI_DIALPAD_USER_ID }),
-      dialpadEventPayload({ callId, state: "connected", at: start + 4000, customData: intent.customData, externalNumber: lead.phoneE164, targetUserId: CI_DIALPAD_USER_ID, dateStarted: start }),
+      dialpadEventPayload({ callId, state: "connected", at: start + 1000, customData: intent.customData, externalNumber: lead.phoneE164, targetUserId: CI_DIALPAD_USER_ID, dateStarted: start }),
       dialpadEventPayload({
-        callId, state: "hangup", at: start + 64_000, customData: intent.customData, externalNumber: lead.phoneE164, targetUserId: CI_DIALPAD_USER_ID,
-        dateStarted: start, dateConnected: start + 4000, shareLink: SHARE_LINK, adminRecordingUrl: ADMIN_RECORDING,
+        callId, state: "hangup", at: start + 3000, customData: intent.customData, externalNumber: lead.phoneE164, targetUserId: CI_DIALPAD_USER_ID,
+        dateStarted: start, dateConnected: start + 1000, shareLink: SHARE_LINK, adminRecordingUrl: ADMIN_RECORDING,
       }),
     ];
     for (const payload of events) {
@@ -269,14 +271,16 @@ test.describe.serial("my-leads-close: Phase 1 CI lane", () => {
       [lead.propertyId],
     );
     expect(attempt.rows).toHaveLength(1);
-    expect(attempt.rows[0]!.recording_url).toBe(SHARE_LINK);
+    expect(attempt.rows[0]!.recording_url, "the webhook-captured attempt, not T4's manual one").toBe(SHARE_LINK);
     const activity = await db.query<{ provider_recording_url: string | null }>("select provider_recording_url from public.call_activities where id=$1", [attempt.rows[0]!.call_activity_id]);
     expect(activity.rows[0]?.provider_recording_url).toBe(ADMIN_RECORDING);
 
-    // Replay creates no second attempt.
+    // Replay creates no second attempt. T4's manual log-attempt is also a dialpad-source attempt, so
+    // compare against the count taken here instead of assuming 1.
+    const countBefore = await db.query<{ n: string }>("select count(*)::text as n from public.acquisition_attempts where property_id=$1 and source='dialpad'", [lead.propertyId]);
     for (const payload of events) await postDialpadEvent(BASE_URL, connectionId, signDialpadWebhook(payload, WEBHOOK_SECRET));
     const count = await db.query<{ n: string }>("select count(*)::text as n from public.acquisition_attempts where property_id=$1 and source='dialpad'", [lead.propertyId]);
-    expect(Number(count.rows[0]!.n)).toBe(1);
+    expect(Number(count.rows[0]!.n)).toBe(Number(countBefore.rows[0]!.n));
   });
 
   test("my-leads-close: T9 retire cancels the open appointment and soft-retires the lead; evidence is retained", async () => {
