@@ -19,7 +19,7 @@ const mocks = vi.hoisted(() => ({
   poll: vi.fn(),
   ack: vi.fn(),
   status: vi.fn(),
-  softphone: null as null | { callingEnabled: boolean; openLead: (lead: unknown) => void },
+  softphone: null as null | { callingEnabled: boolean; onCall?: boolean; openLead: (lead: unknown) => void },
 }))
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.routerRefresh }) }))
@@ -542,6 +542,21 @@ describe("MyLeadsClient calling and durable call state", () => {
       await flush(10_000)
       expect(screen.queryByTestId("post-call-prompt")).not.toBeInTheDocument()
       state = "ended"
+      await flush(10_000)
+      expect(screen.getAllByTestId("post-call-prompt")).toHaveLength(1)
+    })
+
+    it("holds while the softphone has a live call, then opens once the call ends", async () => {
+      mocks.softphone = { callingEnabled: true, onCall: true, openLead: vi.fn() }
+      mocks.poll.mockImplementation(async () => freshPoll())
+      const view = renderClient({ postCallPrompt: true, callFeatures: flags({ autoPrompt: true }) })
+      await flush(30_000)
+      expect(mocks.poll).toHaveBeenCalled()
+      expect(screen.queryByTestId("post-call-prompt")).not.toBeInTheDocument()
+      mocks.softphone = { callingEnabled: true, onCall: false, openLead: vi.fn() }
+      view.rerender(
+        <MyLeadsClient viewer={viewer} roster={roster} initialMemberId={viewer.userId} initialSnapshot={snapshot()} initialKpis={kpis} postCallPrompt callFeatures={flags({ autoPrompt: true })} />,
+      )
       await flush(10_000)
       expect(screen.getAllByTestId("post-call-prompt")).toHaveLength(1)
     })
