@@ -77,6 +77,7 @@ export default defineConfig({
       "supabase/migrations/20261006100000_dialpad_ledger_keys_native_columns.integration.test.ts",
       "supabase/migrations/20261006100100_dialpad_intent_timeout.integration.test.ts",
       "supabase/migrations/20261006100200_contact_phone_numbers.integration.test.ts",
+      "supabase/migrations/20261007200000_contact_phone_numbers_batched_backfill.integration.test.ts",
       "supabase/migrations/20261006100300_dialpad_native_matching.integration.test.ts",
       "supabase/migrations/20261006100300_dialpad_native_concurrency.integration.test.ts",
       "supabase/migrations/20261006100400_dialpad_native_assign_to_lead.integration.test.ts",
@@ -105,6 +106,8 @@ export default defineConfig({
       // Slack rehearsal and fixtures must never run against the hosted project.
       "src/lib/integrations/slack/unfurl-data.db.integration.test.ts",
       "supabase/migrations/20261003130001_slack_lead_unfurl_foundation.integration.test.ts",
+      "supabase/migrations/20261007210000_slack_canary_safety.integration.test.ts",
+      "supabase/migrations/20261007210100_slack_canary_execution_fence.integration.test.ts",
     ],
     environment: "node",
     reporters: ["default"],

@@ -389,7 +389,7 @@ jobs:
           LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
           LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
-        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261006100200_contact_phone_numbers.integration.test.ts
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261006100200_contact_phone_numbers.integration.test.ts supabase/migrations/20261007200000_contact_phone_numbers_batched_backfill.integration.test.ts
 
       - name: My Leads Dialpad native matching (disposable DB)
         env:
