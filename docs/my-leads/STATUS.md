@@ -4,7 +4,7 @@ Owner of this file: Claude session "Optimize my leads page" (branch
 `claude/my-leads-one-call-close-decisions`). Root orchestrator and builders: post progress as PR
 comments; ask the owner to update this file, or append under "Root notes".
 
-Last updated: 2026-10-04 (after #799 release)
+Last updated: 2026-10-04 (after #800 release)
 
 ## Plan
 | Item | State |
@@ -23,9 +23,9 @@ Last updated: 2026-10-04 (after #799 release)
 | `claude/my-leads-p1e-reassign-scope` | #806 | Claude | **MERGED** `02c1dcaf` into main (reassign `--from`, migration 20261005122000 applied). |
 | `claude/my-leads-p1e-reassign-scope-2` | #808 | Claude | **MERGED** `c72f90f5` into main (migration 20261005140000 applied). |
 | `claude/my-leads-p1b-strip` | #799 | Claude (Sonnet 5.5 builder) | **MERGED** `001cb1fd` into main (migration 20261005150000 applied TEST + PROD; prod high-water now `20261005150000`). |
-| `claude/my-leads-p1c-prompt` | #800 | Claude (Sonnet 5.5 builder) | draft, base `main` (retargeted after #799); `origin/main` 001cb1fd merged in; head via `gh pr view 800` |
-| `claude/my-leads-p1c2-seller-reminders` | #801 | Claude (Sonnet 5.5 builder) | draft, stacked on #800; rebased onto #800 head; pre-activation duplicate-text fix pending |
-| `claude/my-leads-p1d-link-capture` | #802 | Claude (Sonnet 5.5 builder) | draft, stacked on #801; rebased onto #801 head |
+| `claude/my-leads-p1c-prompt` | #800 | Claude (Sonnet 5.5 builder) | **MERGED** `a5ba2b58` into main (migration 20261005160000 applied TEST + PROD; prod high-water now `20261005160000`). |
+| `claude/my-leads-p1c2-seller-reminders` | #801 | Claude (Sonnet 5.5 builder) | draft, base `main`; `origin/main` a5ba2b58 merged in; head via `gh pr view 801`. Reminders stay flag-OFF and org-disabled. Reclaim-after-reschedule duplicate-text edge (Astra RC note on #801) is a pre-ENABLE fix, tracked. |
+| `claude/my-leads-p1d-link-capture` | #802 | Claude (Sonnet 5.5 builder) | draft, stacked on #801; rebased onto #801 head; head via `gh pr view 802` |
 | `claude/my-leads-p2-data-plane` | #803 | Phase 2 sole writer | draft; Opus YES at `757e01c0` |
 | `claude/my-leads-p2-ui` | #809 | Phase 2 writer | draft; Opus YES at `4d03042e`, fixes in progress |
 | `claude/my-leads-p4-acceptance` | #804 | Phase 4 writer | draft, partial; Opus YES at `3cec0c19` |
