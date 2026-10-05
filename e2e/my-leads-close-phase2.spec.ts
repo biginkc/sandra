@@ -185,7 +185,8 @@ test.describe.serial("my-leads-close: Phase 2 CI lane", () => {
     // Another dialog is open when the call ends: the prompt must wait (the poll is suspended too).
     await page.getByTestId(`call-next-menu-${lead.propertyId}`).click();
     await page.getByTestId(`call-next-action-dead-nurture-${lead.propertyId}`).click();
-    const handoff = page.locator("[role=dialog][data-state=open]").first();
+    // The app's dialogs are Base UI popups (role=dialog, `data-open`, not Radix `data-state`).
+    const handoff = page.getByRole("dialog").first();
     await expect(handoff).toBeVisible({ timeout: 10_000 });
 
     const callId = newCallId();
@@ -208,7 +209,7 @@ test.describe.serial("my-leads-close: Phase 2 CI lane", () => {
     await page.waitForTimeout(12_000);
     await expect(page.getByTestId("post-call-prompt")).toHaveCount(0);
     await page.keyboard.press("Escape");
-    await expect(page.locator("[role=dialog][data-state=open]")).toHaveCount(0, { timeout: 10_000 });
+    await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 10_000 });
     const prompt = page.getByTestId("post-call-prompt");
     await expect(prompt).toBeVisible({ timeout: 30_000 });
     // A reached call (60 s of talk time) pre-selects the reached outcome.
@@ -280,7 +281,7 @@ test.describe.serial("my-leads-close: Phase 2 CI lane", () => {
     await page.goto("/my-leads");
     await page.waitForTimeout(12_000);
     await expect(page.getByTestId("post-call-prompt"), "no prompt may appear for a training call").toHaveCount(0);
-    await expect(page.locator("[role=dialog][data-state=open]")).toHaveCount(0);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
     const dialpadAttempts = await db.query<{ n: string }>(
       "select count(*)::text as n from public.acquisition_attempts where property_id=$1 and source='dialpad'",
       [training.propertyId],
