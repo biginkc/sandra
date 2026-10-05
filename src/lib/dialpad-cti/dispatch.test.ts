@@ -56,6 +56,7 @@ function fakeDb(over: Partial<DialpadDispatchDb> = {}): DialpadDispatchDb & { ca
     loadActiveGrants: track('loadActiveGrants', async () => []),
     loadTargetPhones: track('loadTargetPhones', async () => ({ contactId: CONTACT, slots: [{ slot: 1 as const, raw: '(816) 544-0196' }] })),
     loadDispatchLoad: track('loadDispatchLoad', async () => ({ authorizedLastMinute: 0, unmatchedLast20s: 0 })),
+    loadUnresolvedIntent: track('loadUnresolvedIntent', async () => null),
     loadCallSlots: track('loadCallSlots', async () => [{ slot: 1 as const, callable: true, reason: null }]),
     claimBinding: track('claimBinding', async () => ({ bindingId: BINDING, status: 'pending', dialpadUserId: '5551234', replayed: false })),
     verifyBinding: track('verifyBinding', async () => ({ bindingId: BINDING, status: 'verified', replayed: false })),

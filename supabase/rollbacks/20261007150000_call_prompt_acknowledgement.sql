@@ -1,4 +1,4 @@
--- Rollback for 20261006100600_call_prompt_acknowledgement. Turn auto_prompt off first.
+-- Rollback for 20261007150000_call_prompt_acknowledgement. Turn auto_prompt off first.
 -- Drops the three functions and the index; the two nullable columns stay (acknowledgements already
 -- recorded are audit data). An applied ack_legacy_prompts run is undone separately with
 -- fn_my_leads_housekeeping_rollback(run_id) before this file runs (its branch is removed here).

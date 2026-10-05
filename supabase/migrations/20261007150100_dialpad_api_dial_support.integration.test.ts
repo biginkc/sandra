@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { stripTransaction } from '@tests/integration/my-leads-housekeeping-fixture';
 import { addLead, asUser, failure, prepare, service, withP2, world, type Json, type World } from '@tests/integration/dialpad-p2-fixture';
 
-const MIGRATION = 'migrations/20261006100700_dialpad_api_dial_support.sql';
-const ROLLBACK = 'rollbacks/20261006100700_dialpad_api_dial_support.sql';
+const MIGRATION = 'migrations/20261007150100_dialpad_api_dial_support.sql';
+const ROLLBACK = 'rollbacks/20261007150100_dialpad_api_dial_support.sql';
 
 const authorize = async (w: World, intentId: string, rep = w.rep): Promise<Json> =>
   (await service(w.db, () => w.db.query('select public.fn_authorize_dialpad_dispatch($1,$2,$3) as v', [w.org, rep, intentId]))).rows[0].v;
@@ -15,7 +15,7 @@ const slots = async (w: World, property = w.property, contact = w.contact): Prom
 const PREPARE = 'public.fn_prepare_dialpad_call_intent(uuid,uuid,uuid,uuid,smallint,uuid,uuid,integer)';
 const AUTHORIZE = 'public.fn_authorize_dialpad_dispatch(uuid,uuid,uuid)';
 
-describe('20261006100700 dialpad api dial support', () => {
+describe('20261007150100 dialpad api dial support', () => {
   it('a reassigned lead (open episode, eligible=false, right assignee) can be prepared and authorized', async () => {
     await withP2('apiDial', async (db) => {
       const w = await world(db);

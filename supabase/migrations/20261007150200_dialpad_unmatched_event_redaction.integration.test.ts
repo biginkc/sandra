@@ -11,7 +11,7 @@ const age = (w: World, days: number, callId?: string) =>
 const events = async (w: World) => (await ledger(w)).event;
 const UNKNOWN = '+18165559999';
 
-describe('20261006100800 unmatched event redaction', () => {
+describe('20261007150200 unmatched event redaction', () => {
   it('redacts only unmatched quarantined rows older than the interval, keeps five keys, is idempotent', async () => {
     await withP2('redaction', async (db) => {
       const w = await world(db, { flag: true });
@@ -104,11 +104,11 @@ describe('20261006100800 unmatched event redaction', () => {
   it('rollback restores the previous guard and re-apply is clean', async () => {
     await withP2('redaction', async (db) => {
       const w = await world(db, { flag: true });
-      await db.query(stripTransaction('rollbacks/20261006100800_dialpad_unmatched_event_redaction.sql'));
+      await db.query(stripTransaction('rollbacks/20261007150200_dialpad_unmatched_event_redaction.sql'));
       expect((await db.query("select pg_get_functiondef('public.dialpad_cti_guard_event()'::regprocedure) as d")).rows[0].d).not.toContain('redact');
       expect((await db.query("select to_regproc('public.fn_redact_dialpad_unmatched_events') as p")).rows[0].p).toBeNull();
       for (const e of nativeCall(w, { callId: '7100000000000000020', number: UNKNOWN })) await deliver(w, e);
-      await db.query(stripTransaction('migrations/20261006100800_dialpad_unmatched_event_redaction.sql'));
+      await db.query(stripTransaction('migrations/20261007150200_dialpad_unmatched_event_redaction.sql'));
       await age(w, 31);
       expect(await redact(w)).toBe(3);
     });

@@ -237,6 +237,8 @@ export type DialpadApiDialInput = {
   /** 1 | 2 | 3, or null/undefined for the first callable slot (server-side DNC pre-check). */
   phoneSlot: unknown;
   idempotencyKey: unknown;
+  /** The unresolved prior intent the rep chose to redial after the caution. Only honoured when it is the newest one. */
+  confirmRedialOf?: unknown;
 };
 
 export type DialpadApiDialOutcome =
@@ -244,11 +246,13 @@ export type DialpadApiDialOutcome =
   | { ok: true; intentId: string; state: 'already_dispatched' }
   | {
       ok: false;
-      code: DialpadFailureCode | 'rate_limited' | 'call_in_flight' | 'provider_rejected' | 'dialpad_unavailable';
+      code: DialpadFailureCode | 'rate_limited' | 'call_in_flight' | 'provider_rejected' | 'dialpad_unavailable' | 'prior_call_unresolved';
       message: string;
       retryAfterSeconds?: number;
       /** True only after a proven non-dispatch rejection: the client may mint a new idempotency key. */
       freshAttemptKey?: boolean;
+      /** Set with `prior_call_unresolved`: the earlier intent the rep must explicitly confirm to redial. */
+      priorIntentId?: string;
       denial?: DialpadDenialDetail;
     };
 
@@ -290,6 +294,7 @@ export async function startDialpadApiCall(
   const { propertyId, contactId, idempotencyKey } = input;
   if (typeof propertyId !== 'string' || !UUID.test(propertyId) || typeof contactId !== 'string' || !UUID.test(contactId)
       || typeof idempotencyKey !== 'string' || !UUID.test(idempotencyKey)
+      || (input.confirmRedialOf !== undefined && input.confirmRedialOf !== null && (typeof input.confirmRedialOf !== 'string' || !UUID.test(input.confirmRedialOf)))
       || (input.phoneSlot !== null && input.phoneSlot !== undefined && input.phoneSlot !== 1 && input.phoneSlot !== 2 && input.phoneSlot !== 3)) {
     return { ok: false, code: 'invalid_input', message: 'Choose a lead and contact first.' };
   }
@@ -305,6 +310,19 @@ export async function startDialpadApiCall(
       return { ok: false, code: 'call_in_flight', message: 'A call is already being placed. Wait for Dialpad to confirm it.' };
     }
 
+    // 1b. Per-lead backstop that does not depend on client memory (reload, second tab, a key overwritten):
+    // while an earlier released intent for this lead is unmatched and unexpired, it may have rung, so a
+    // NEW key is refused unless the rep confirmed that exact intent. A replay of the intent's own key passes.
+    const unresolved = await db.loadUnresolvedIntent(actor.orgId, actor.userId, propertyId, now().toISOString());
+    if (unresolved && unresolved.idempotencyKey !== idempotencyKey && input.confirmRedialOf !== unresolved.intentId) {
+      return {
+        ok: false,
+        code: 'prior_call_unresolved',
+        message: 'Your last call to this lead was never confirmed. It may have rung. Check Dialpad before calling again.',
+        priorIntentId: unresolved.intentId,
+      };
+    }
+
     // 2. Server-side DNC pre-check picks (or validates) the slot. Enforcement happens again inside prepare/authorize.
     const slots = await db.loadCallSlots(actor.orgId, actor.userId, propertyId, contactId);
     const wanted = input.phoneSlot === 1 || input.phoneSlot === 2 || input.phoneSlot === 3 ? input.phoneSlot : null;
@@ -312,7 +330,8 @@ export async function startDialpadApiCall(
     if (!chosen || !chosen.callable) {
       const reason = chosen?.reason ?? slots.find((slot) => slot.reason)?.reason ?? 'invalid';
       const denial = SLOT_DENIAL[reason];
-      return { ok: false, code: 'denied', message: dialpadDenialMessage(denial), denial };
+      // No intent exists yet: proven non-dispatch.
+      return { ok: false, code: 'denied', message: dialpadDenialMessage(denial), denial, freshAttemptKey: true };
     }
 
     // 3. Caller id: the oldest active grant, or none (the rep's own line keeps A-level attestation).
@@ -321,7 +340,10 @@ export async function startDialpadApiCall(
 
     // 4. Prepare + authorize (one transaction each; DNC, assignment, grant and phone are re-proven).
     const started = await startDialpadCall(db, actor, { propertyId, contactId, phoneSlot: chosen.slot, grantId, idempotencyKey }, { allowLargeIdentityIds: true });
-    if (!started.ok) return started;
+    if (!started.ok) {
+      // Refused before the payload was released (denied, cancelled): proven non-dispatch, the key is dead.
+      return started.code === 'denied' || started.code === 'cancelled' ? { ...started, freshAttemptKey: true } : started;
+    }
     if (!started.dispatched) return { ok: true, intentId: started.intentId, state: 'already_dispatched' };
 
     // 5. Key. Unresolved → cancel; nothing was dialed.
@@ -329,7 +351,7 @@ export async function startDialpadApiCall(
     const apiKey = connection ? resolveDialpadDialKey(connection, deps.env) : null;
     if (!connection || !apiKey) {
       await cancelOrMatched(db, actor, started.intentId);
-      return { ok: false, code: 'not_configured', message: 'Dialpad API dialing is not configured for this organization. Ask an owner to finish setup.' };
+      return { ok: false, code: 'not_configured', message: 'Dialpad API dialing is not configured for this organization. Ask an owner to finish setup.', freshAttemptKey: true };
     }
 
     // 6. Dial.
@@ -363,7 +385,7 @@ export async function startDialpadApiCall(
     reportError(new Error('dialpad api dial rejected'), {
       tags: { surface: 'dialpad_api_dial', reason: result.reason, status: String(result.status), endpoint: connection.dialEndpoint },
     });
-    return { ok: false, code: 'provider_rejected', message: 'Dialpad refused this call. Nothing was dialed; check the Dialpad connection.' };
+    return { ok: false, code: 'provider_rejected', message: 'Dialpad refused this call. Nothing was dialed; check the Dialpad connection.', freshAttemptKey: true };
   } catch (error) {
     reportError(error instanceof Error ? error : new Error('dialpad api dial failed'), { tags: { surface: 'dialpad_api_dial', kind: 'unexpected' } });
     return { ok: false, code: 'dialpad_unavailable', message: 'Sandra could not reach Dialpad calling. Nothing was dialed; try again.' };

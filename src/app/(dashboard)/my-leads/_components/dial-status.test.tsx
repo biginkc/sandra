@@ -39,7 +39,7 @@ describe("<DialStatus /> in flight", () => {
     ["connected", "Connected. Confirmed by Dialpad."],
     ["cancelled", "Cancelled. Nothing was dialed."],
     ["expired", "No confirmation from Dialpad. Check the dialer before calling again."],
-    ["failed", "Dialpad never confirmed this call. Nothing was logged. Is the Dialpad desktop app open?"],
+    ["failed", "Dialpad has not confirmed this call. It may have rung. Check Dialpad before calling again."],
   ] as const)("shows the %s label", async (state, label) => {
     statusMock.mockResolvedValue({ ok: true, status: mk({ state }) });
     setup(flight());
@@ -101,13 +101,34 @@ describe("<DialStatus /> in flight", () => {
 });
 
 describe("<DialStatus /> finished callback", () => {
-  it.each(["ended", "failed", "cancelled", "expired"] as const)("fires onFinished once for %s", async (state) => {
+  it.each(["ended", "cancelled", "expired"] as const)("fires onFinished once for %s", async (state) => {
     statusMock.mockResolvedValue({ ok: true, status: mk({ state }) });
     const onFinished = vi.fn();
     setup(flight(), { onFinished });
     await tick(10_000);
     expect(onFinished).toHaveBeenCalledTimes(1);
     expect(onFinished).toHaveBeenCalledWith("i1", expect.objectContaining({ state }));
+  });
+
+  it("row 4: keeps polling through failed, never finishes on it, shows Dismiss, then reports a late connected and the end", async () => {
+    statusMock.mockResolvedValueOnce({ ok: true, status: mk({ state: "failed", failedAt: "t" }) });
+    const onFinished = vi.fn();
+    const onEnded = vi.fn();
+    const p = setup(flight(), { onFinished, onEnded });
+    await tick(0);
+    expect(screen.getByTestId("dial-status")).toHaveTextContent("It may have rung");
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
+    expect(onFinished).not.toHaveBeenCalled();
+    statusMock.mockResolvedValueOnce({ ok: true, status: mk({ state: "connected", connected: true, failedAt: "t" }) });
+    await tick(3000);
+    expect(screen.getByTestId("dial-status")).toHaveTextContent("Connected. Confirmed by Dialpad.");
+    expect(onFinished).not.toHaveBeenCalled();
+    statusMock.mockResolvedValue({ ok: true, status: mk({ state: "ended", connected: true, callActivityId: "ca1" }) });
+    await tick(3000);
+    expect(onFinished).toHaveBeenCalledTimes(1);
+    expect(onFinished).toHaveBeenCalledWith("i1", expect.objectContaining({ state: "ended" }));
+    expect(onEnded).toHaveBeenCalledTimes(1);
+    expect(p.onDismiss).not.toHaveBeenCalled();
   });
 
   it("does not fire onFinished while the call is live", async () => {

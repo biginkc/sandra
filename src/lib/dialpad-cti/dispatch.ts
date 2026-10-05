@@ -74,6 +74,11 @@ export interface DialpadDispatchDb {
   loadTargetPhones(orgId: string, userId: string, propertyId: string, contactId: string): Promise<DialpadTargetPhones | null>;
   /** How many dials this rep authorized since `sinceIso`, and how many authorized intents are still unmatched and younger than 20 s. */
   loadDispatchLoad(orgId: string, userId: string, sinceIso: string): Promise<{ authorizedLastMinute: number; unmatchedLast20s: number }>;
+  /**
+   * The newest intent for this rep and lead whose dial was released (authorized), is still unmatched and
+   * unexpired. It may or may not have rung. Null when none. Read-then-act like the other guards.
+   */
+  loadUnresolvedIntent(orgId: string, userId: string, propertyId: string, nowIso: string): Promise<{ intentId: string; idempotencyKey: string } | null>;
   loadCallSlots(orgId: string, userId: string, propertyId: string, contactId: string): Promise<DialpadCallSlot[]>;
   claimBinding(orgId: string, userId: string, dialpadUserId: string): Promise<Json>;
   verifyBinding(bindingId: string, kind: 'provider_directory', ref: string): Promise<Json>;
@@ -205,6 +210,23 @@ export function createSupabaseDialpadDispatchDb(client: SupabaseClient<Database>
         unmatchedLast20s: rows.filter((row) => row.status === 'prepared' && row.matched_at === null
           && row.dispatch_authorized_at !== null && Date.parse(row.dispatch_authorized_at) >= inFlightSince).length,
       };
+    },
+    async loadUnresolvedIntent(orgId, userId, propertyId, nowIso) {
+      const { data, error } = await client
+        .from('dialpad_call_intents')
+        .select('id, idempotency_key')
+        .eq('org_id', orgId)
+        .eq('rep_user_id', userId)
+        .eq('property_id', propertyId)
+        .eq('status', 'prepared')
+        .is('matched_at', null)
+        .not('dispatch_authorized_at', 'is', null)
+        .gt('expires_at', nowIso)
+        .order('dispatch_authorized_at', { ascending: false })
+        .limit(1);
+      if (error) throw new DialpadDbError(classifyDialpadRpcError(error), error.code ?? null);
+      const row = data?.[0];
+      return row ? { intentId: row.id as string, idempotencyKey: row.idempotency_key as string } : null;
     },
     async loadCallSlots(orgId, userId, propertyId, contactId) {
       const data = unwrap(await client.rpc('fn_dialpad_call_slots', { p_org_id: orgId, p_rep_user_id: userId, p_property_id: propertyId, p_contact_id: contactId }));
@@ -590,7 +612,7 @@ export async function startDialpadCall(db: DialpadDispatchDb, actor: DialpadActo
       case 'matched':
         return fail('matched', dialpadDenialMessage('intent_already_matched'), 'intent_already_matched');
       case 'expired':
-        return fail('expired', 'This call request expired before it was sent. Start it again.');
+        return fail('expired', 'No confirmation from Dialpad. Check the dialer before calling again.');
     }
   } catch (error) {
     return failureFromDbError(error);

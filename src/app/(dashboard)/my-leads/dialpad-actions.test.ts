@@ -125,10 +125,16 @@ describe('ensureDialpadBindingAction', () => {
 
 describe('status and cancel actions', () => {
   it('derive org and rep from the session', async () => {
+    mocks.getDialpadCallStatus.mockResolvedValue({ ok: true, status: { dispatchAuthorizedAt: null } });
     await getDialpadCallStatusAction('i');
     await cancelDialpadCallAction('i');
     expect(mocks.getDialpadCallStatus).toHaveBeenCalledWith(mocks.db, actor, 'i');
     expect(mocks.cancelDialpadCall).toHaveBeenCalledWith(mocks.db, actor, 'i');
+  });
+  it('refuses to cancel an intent whose dial was already released, so cancelled stays proof of no dial', async () => {
+    mocks.getDialpadCallStatus.mockResolvedValue({ ok: true, status: { dispatchAuthorizedAt: '2026-10-05T10:00:00Z' } });
+    expect(await cancelDialpadCallAction('i')).toMatchObject({ ok: false, code: 'denied' });
+    expect(mocks.cancelDialpadCall).not.toHaveBeenCalled();
   });
   it.each([
     ['no session', () => mocks.myLeadsViewer.mockRejectedValue(new Error('UNAUTHENTICATED'))],
