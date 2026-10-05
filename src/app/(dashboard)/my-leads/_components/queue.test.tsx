@@ -81,6 +81,17 @@ function buildProps(overrides: Partial<MyLeadsQueueProps> = {}): MyLeadsQueuePro
 }
 
 describe("MyLeadsQueue", () => {
+  it("shows \"In Call next\" with the reason in an expanded lead's details, and nothing when it is not in the strip", async () => {
+    const props = buildProps()
+    props.stages.contacted.rows = [
+      { ...props.stages.contacted.rows[0], stripReason: "Texted you 2h ago" },
+      { ...makeRow("contacted", 7), propertyId: "property-plain" },
+    ]
+    render(<MyLeadsQueue {...props} focusPropertyId="property-2" />)
+    expect(await screen.findByTestId("strip-reason-property-2")).toHaveTextContent("In Call next: Texted you 2h ago")
+    expect(screen.queryByTestId("strip-reason-property-plain")).not.toBeInTheDocument()
+  })
+
   it("starts a deep-linked lead expanded, loads its details, and scrolls to it", async () => {
     const scrollIntoView = vi.fn()
     Element.prototype.scrollIntoView = scrollIntoView

@@ -4558,6 +4558,36 @@ export type Database = {
         }
         Relationships: []
       }
+      my_leads_strip_overrides: {
+        Row: {
+          hidden_until: string | null
+          member_id: string
+          org_id: string
+          pinned_at: string | null
+          pinned_until: string | null
+          property_id: string
+          updated_at: string
+        }
+        Insert: {
+          hidden_until?: string | null
+          member_id: string
+          org_id: string
+          pinned_at?: string | null
+          pinned_until?: string | null
+          property_id: string
+          updated_at?: string
+        }
+        Update: {
+          hidden_until?: string | null
+          member_id?: string
+          org_id?: string
+          pinned_at?: string | null
+          pinned_until?: string | null
+          property_id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       tasks: {
         Row: {
           assignee_id: string

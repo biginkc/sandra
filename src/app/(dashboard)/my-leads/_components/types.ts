@@ -38,6 +38,8 @@ export type MyLeadAssignmentState =
 export type MyLeadFirstCallState = "pending" | "started" | "unavailable"
 
 export type MyLeadQueueRow = {
+  /** "In Call next: <reason>" when the lead is currently in the Call next strip. */
+  stripReason?: string
   dripReply?: import('@/lib/my-leads/drip-queries').MyLeadDrip | null
   propertyId: string
   queueStage: MyLeadStage
@@ -254,6 +256,29 @@ export type MyLeadsQueueProps = {
   /** Called after a confirmed existing note/appointment mutation. */
   onLeadChanged?: (propertyId: string) => void
   onStageAction: (action: MyLeadAction, row: MyLeadQueueRow) => void
+}
+
+/** Props of the Call next strip (P1b). The strip is read-only derived data. */
+export type MyLeadsStripProps = {
+  rows: readonly import("@/lib/my-leads/call-next").CallNextRow[]
+  excluded: readonly import("@/lib/my-leads/call-next").CallNextExcluded[]
+  hiddenCount: number
+  snapshotAt: string
+  /** False when an owner views a rep's strip: reading is allowed, acting is not. */
+  canAct: boolean
+  busyPropertyId?: string | null
+  error?: string | null
+  triageOpen: boolean
+  triage: import("@/lib/my-leads/call-next").TriageSnapshot | null
+  triageLoading: boolean
+  triageError: string | null
+  onToggleTriage: () => void
+  onLoadMoreTriage: () => void
+  onCall: (propertyId: string) => void
+  onCallToday: (propertyId: string) => void
+  onNotToday: (propertyId: string) => void
+  /** Opens the existing handoff dialog (its reason field stays required). */
+  onDeadNurture: (propertyId: string) => void
 }
 
 export type MyLeadDetailPanelProps = {

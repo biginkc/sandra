@@ -287,6 +287,65 @@ test.describe.serial("My Leads local acceptance", () => {
     await expect(page.locator('[data-testid^="kpi-"]')).toHaveCount(9)
   })
 
+  test("Call next strip ranks an overdue appointment above an inbound text and its actions work", async ({ page }) => {
+    // Needs 20261005150000_my_leads_call_next applied to the local fixture database. The flag row
+    // and every seeded row are restored or removed in finally, so later tests see the old state.
+    const db = new pg.Client({ host: "127.0.0.1", port: 58322, user: "postgres", password: "postgres", database: "postgres" })
+    await db.connect()
+    const orgId = (await db.query("select org_id from properties where id=$1", [PROPERTY_102_ID])).rows[0].org_id as string
+    const flagBefore = (await db.query("select call_next_strip from my_leads_feature_flags where org_id=$1", [orgId])).rows[0] ?? null
+    let taskId: string | null = null
+    let messageId: string | null = null
+    try {
+      await db.query(
+        "insert into my_leads_feature_flags(org_id,call_next_strip) values ($1,true) on conflict (org_id) do update set call_next_strip=true",
+        [orgId],
+      )
+      taskId = (await db.query(
+        `insert into tasks(org_id,type,status,title,due_at,end_at,assignee_id,created_by,calendar_chain_id,related_property_id)
+         values ($1,'appointment','open','Call next e2e',now()-interval '2 days',now()-interval '2 days'+interval '15 minutes',$2,$2,gen_random_uuid(),$3) returning id`,
+        [orgId, REP_ID, PROPERTY_102_ID],
+      )).rows[0].id
+      messageId = (await db.query(
+        `insert into messages(org_id,channel,direction,body,status,property_id,contact_id,created_at)
+         select $1,'sms','inbound','Call me back','received',p.id,p.homeowner_contact_id,now()-interval '1 hour' from properties p where p.id=$2 returning id`,
+        [orgId, PROPERTY_105_ID],
+      )).rows[0].id
+
+      await openMyLeads(page, "rep")
+      const strip = page.getByTestId("call-next-strip")
+      await expect(strip).toBeVisible()
+      const ids = () => strip.locator("ol > [data-testid^='call-next-row-']").evaluateAll((els) => els.map((el) => el.getAttribute("data-property-id")))
+      await expect.poll(async () => (await ids()).slice(0, 2)).toEqual([PROPERTY_102_ID, PROPERTY_105_ID])
+      await expect(page.getByTestId(`call-next-reason-${PROPERTY_102_ID}`)).toContainText("overdue")
+      await expect(page.getByTestId(`call-next-reason-${PROPERTY_105_ID}`)).toContainText("Texted you")
+
+      // Call today pins to the top; Not today removes it and counts it as hidden.
+      await page.getByTestId(`call-next-menu-${PROPERTY_105_ID}`).click()
+      await page.getByTestId(`call-next-action-call-today-${PROPERTY_105_ID}`).click()
+      await expect.poll(async () => (await ids())[0]).toBe(PROPERTY_105_ID)
+      await expect(page.getByTestId(`call-next-reason-${PROPERTY_105_ID}`)).toHaveText("Pinned: call today")
+      await page.getByTestId(`call-next-menu-${PROPERTY_105_ID}`).click()
+      await page.getByTestId(`call-next-action-not-today-${PROPERTY_105_ID}`).click()
+      await expect(page.getByTestId(`call-next-row-${PROPERTY_105_ID}`)).toHaveCount(0)
+      await expect(page.getByTestId("call-next-hidden")).toContainText("1 hidden today")
+
+      // Dead / Nurture opens the existing handoff dialog; nothing is saved by opening it.
+      await page.getByTestId(`call-next-menu-${PROPERTY_102_ID}`).click()
+      await page.getByTestId(`call-next-action-dead-nurture-${PROPERTY_102_ID}`).click()
+      await expect(page.getByRole("dialog")).toContainText("Hand off lead")
+      await page.keyboard.press("Escape")
+      await expect(page.getByRole("dialog")).toHaveCount(0)
+    } finally {
+      await db.query("delete from my_leads_strip_overrides where org_id=$1 and property_id in ($2,$3)", [orgId, PROPERTY_102_ID, PROPERTY_105_ID])
+      if (taskId) await db.query("delete from tasks where id=$1", [taskId])
+      if (messageId) await db.query("delete from messages where id=$1", [messageId])
+      if (flagBefore) await db.query("update my_leads_feature_flags set call_next_strip=$2 where org_id=$1", [orgId, flagBefore.call_next_strip])
+      else await db.query("delete from my_leads_feature_flags where org_id=$1", [orgId])
+      await db.end()
+    }
+  })
+
   test("offer warnings reflect server deadlines and display red indicators", async ({ page }) => {
     // Only the dedicated local synthetic fixtures; save and restore both dates.
     const db = new pg.Client({ host: "127.0.0.1", port: 58322, user: "postgres", password: "postgres", database: "postgres" })
