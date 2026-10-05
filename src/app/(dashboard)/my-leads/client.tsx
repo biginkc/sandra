@@ -45,14 +45,14 @@ import type {
 import { AcquisitionReadinessDialog } from "./_components/readiness-dialog";
 import { AcquisitionOfferDialog } from "./_components/offer-dialog";
 import { AcquisitionLifecycleDialog } from "./_components/lifecycle-dialog";
-import { DialStatus, type DialFlight } from "./_components/dial-status";
+import { DialStatus } from "./_components/dial-status";
 import { CallbackDueBanner } from "./_components/callback-due-banner";
 import { useCallStatePoll } from "./_components/use-call-state-poll";
 import type { PromptOutcome } from "./_components/post-call-prompt";
 import type { DialpadCallingBootstrap } from "@/lib/dialpad-cti/dispatch";
 import type { MyLeadsCallFeatures } from "@/lib/my-leads/call-features";
 import { oldestPrompt, type CallPromptItem } from "@/lib/my-leads/call-state";
-import { dialLeadAction } from "./dialpad-actions";
+import { useApiDial } from "./_components/use-api-dial";
 import { acknowledgeCallPromptAction } from "./call-state-actions";
 import type {
   MyLeadAction,
@@ -362,32 +362,6 @@ export function MyLeadsClient({
   );
   const extrasRequest = useRef<ExtrasRequest | null>(null);
   const extrasInFlight = useRef(new Set<string>());
-  // ---- API dial (P2 2.7). One in-flight dial at a time; one idempotency key PER LEAD lives here so a
-  // retry of the same click can never dial twice, and dialing another lead never discards an
-  // unresolved lead's key. A key is released only on (1) a server-proven non-dispatch (freshAttemptKey),
-  // (2) a poll state of ended or cancelled, or (3) a deliberate Dismiss/confirm after a visible
-  // "may have rung" caution. Everything else keeps it (allowlist, never a denylist).
-  const [dialFlight, setDialFlight] = useState<DialFlight | null>(null);
-  const dialKeys = useRef(new Map<string, { key: string; intentId?: string }>());
-  const dialNonce = useRef(0);
-  const releaseDialKeyForProperty = (propertyId: string) => {
-    dialKeys.current.delete(propertyId);
-  };
-  const releaseDialKeyForIntent = (intentId: string) => {
-    for (const [propertyId, entry] of dialKeys.current) {
-      if (entry.intentId === intentId) dialKeys.current.delete(propertyId);
-    }
-  };
-  // Mirror of dialFlight for handlers that must not act on a stale render (no second dial while one is in flight).
-  const [dialFinished, setDialFinished] = useState<string | null>(null);
-  // A flight stays on screen after its call ends (for Log outcome); it only blocks new dials and the
-  // auto-prompt while the call itself is still live.
-  const dialActive = dialFlight?.kind === "in_flight" && dialFinished !== dialFlight.intentId;
-  const dialActiveRef = useRef(false);
-  useEffect(() => {
-    dialActiveRef.current = dialActive;
-  });
-  const dialBusy = useRef(false);
   const [dialog, setDialog] = useState<{
     action: MyLeadAction;
     row: QueueRow;
@@ -647,6 +621,11 @@ export function MyLeadsClient({
     strip?.rows.find((item) => item.propertyId === id)?.row ??
     triage?.rows.find((item) => item.propertyId === id)?.row ??
     null;
+  // ---- API dial (P2 2.7): the shared hook owns the per-lead key lifecycle (also behind the call screen).
+  const { dialFlight, dialActive, startApiDial, statusHandlers } = useApiDial((propertyId) => {
+    const row = rawRow(propertyId);
+    return row ? { contactId: row.contactId ?? null, label: row.homeownerName ?? row.address } : null;
+  });
   /**
    * Every workflow opening reads the lead through the single-row lookup (a database
    * statement-time read) and uses THAT row for the command's preconditions (episode,
@@ -699,70 +678,6 @@ export function MyLeadsClient({
     const opening = pendingOpening.current;
     if (!opening || openingStatus?.busy) return;
     void finishOpening(opening);
-  };
-  const startApiDial = async (propertyId: string, attempt: number, confirmRedialOf?: string) => {
-    const row = rawRow(propertyId);
-    if (!row) return;
-    const label = row.homeownerName ?? row.address;
-    if (!row.contactId) {
-      setDialFlight({ kind: "error", propertyId, label, message: "This lead has no contact to call." });
-      return;
-    }
-    if (dialBusy.current || dialActiveRef.current) return;
-    dialBusy.current = true;
-    // This lead's key is kept while its call is in flight, uncertain, failed, expired or the request
-    // threw, so a repeat of the same click cannot dial twice. A new key is minted only when this lead has none.
-    let entry = dialKeys.current.get(propertyId);
-    if (!entry) {
-      entry = { key: crypto.randomUUID() };
-      dialKeys.current.set(propertyId, entry);
-    }
-    try {
-      const outcome = await dialLeadAction({
-        propertyId,
-        contactId: row.contactId,
-        idempotencyKey: entry.key,
-        ...(confirmRedialOf ? { confirmRedialOf } : {}),
-      });
-      if (outcome.ok) {
-        entry.intentId = outcome.intentId;
-        setDialFinished(null);
-        dialNonce.current += 1;
-        setDialFlight({
-          kind: "in_flight",
-          intentId: outcome.intentId,
-          propertyId,
-          label,
-          uncertain: outcome.state === "awaiting_provider" && outcome.uncertain,
-          nonce: dialNonce.current,
-        });
-        return;
-      }
-      if (outcome.freshAttemptKey) releaseDialKeyForProperty(propertyId);
-      if (outcome.code === "prior_call_unresolved" && outcome.priorIntentId) {
-        // The server refused before preparing anything, so a key minted just now was never used.
-        if (!entry.intentId) releaseDialKeyForProperty(propertyId);
-        setDialFlight({ kind: "unresolved", propertyId, label, message: outcome.message, priorIntentId: outcome.priorIntentId });
-        return;
-      }
-      if (outcome.code === "rate_limited") {
-        setDialFlight({
-          kind: "rate_limited",
-          propertyId,
-          label,
-          retryAfterSeconds: outcome.retryAfterSeconds ?? 60,
-          attempt,
-        });
-        return;
-      }
-      // A replay of an expired key: the call may have rung. Dismiss is the deliberate release after this caution.
-      setDialFlight({ kind: "error", propertyId, label, message: outcome.message, releaseKeyOnDismiss: outcome.code === "expired" });
-    } catch {
-      // The request may have reached the server and dialed; the key stays so a retry cannot double-dial.
-      setDialFlight({ kind: "error", propertyId, label, message: "Sandra could not confirm the call. Check Dialpad before trying again." });
-    } finally {
-      dialBusy.current = false;
-    }
   };
   const action = (
     kind: MyLeadAction,
@@ -1422,33 +1337,7 @@ export function MyLeadsClient({
       {dialpad && roster.settings.enabled && (
         <DialStatus
           flight={dialFlight}
-          onRetry={(propertyId) => {
-            // Only after a proven non-dispatch rejection (the key was cleared by the server's freshAttemptKey).
-            const attempt = dialFlight?.kind === "rate_limited" ? dialFlight.attempt + 1 : 1;
-            void startApiDial(propertyId, attempt);
-          }}
-          onConfirmRedial={(propertyId, priorIntentId) => {
-            // The rep read the "may have rung" caution and chose to call again: new key, named prior intent.
-            releaseDialKeyForProperty(propertyId);
-            void startApiDial(propertyId, 1, priorIntentId);
-          }}
-          onDismiss={() => {
-            // A deliberate Dismiss after a visible "may have rung" caution releases that lead's key. A
-            // finished flight is ended/cancelled (key already gone) or expired; `failed` is not finished,
-            // so dismissing it (or any call still live) keeps the key.
-            if (dialFlight?.kind === "in_flight" && dialFinished === dialFlight.intentId) {
-              releaseDialKeyForProperty(dialFlight.propertyId);
-            } else if (dialFlight?.kind === "error" && dialFlight.releaseKeyOnDismiss) {
-              releaseDialKeyForProperty(dialFlight.propertyId);
-            }
-            setDialFlight(null);
-          }}
-          onFinished={(intentId, finalStatus) => {
-            // Allowlist: only a call that definitively ended or was cancelled releases its key. expired,
-            // failed or anything unexpected keeps it (the call may have rung).
-            if (finalStatus.state === "ended" || finalStatus.state === "cancelled") releaseDialKeyForIntent(intentId);
-            setDialFinished(intentId);
-          }}
+          {...statusHandlers}
           onEnded={() => {
             void refresh(true);
             refreshCallState();
