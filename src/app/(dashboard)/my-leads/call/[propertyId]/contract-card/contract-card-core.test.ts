@@ -11,7 +11,7 @@ import {
   type ExistingOfferIntent,
   type SendContractCardInput,
 } from "./contract-card-core";
-import { BUYER, novationBase, NOW, TITLE } from "./fixtures";
+import { BUYER, novationBase, NOW, TEST_ONLY_EARNEST_MONEY_CENTS, TITLE } from "./fixtures";
 
 const PROPERTY = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const TEMPLATE = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -20,7 +20,7 @@ const USER = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 
 const input = (over: Partial<SendContractCardInput> = {}): SendContractCardInput => ({
   propertyId: PROPERTY, templateId: TEMPLATE, sendIntentId: INTENT, priceCents: 21000000, closingDate: "2099-01-02",
-  titleCompanyId: TITLE.id, buyerEntityId: BUYER.id, earnestMoneyCents: 50000, overrides: {},
+  titleCompanyId: TITLE.id, buyerEntityId: BUYER.id, earnestMoneyCents: TEST_ONLY_EARNEST_MONEY_CENTS, overrides: {},
   signers: [
     { role: "Seller", order: 0, name: "Sam Seller", emailAddress: "sam@example.test" },
     { role: "Buyer", order: 1, name: "Test Buyer LLC", emailAddress: "buyer@example.test" },
@@ -71,6 +71,15 @@ describe("sendContractCard", () => {
   it("refuses a lead outside the caller's own queue", async () => {
     const { core, sendSpy } = setup({ ownsLead: async () => false });
     expect(await core.sendContractCard(input())).toMatchObject({ status: "blocked", code: "NOT_IN_QUEUE" });
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it("refuses a missing earnest money server-side (no default), before any intent or send", async () => {
+    const { core, projection, sendSpy } = setup();
+    for (const v of [null, undefined]) {
+      expect(await core.sendContractCard(input({ earnestMoneyCents: v as never }))).toMatchObject({ status: "blocked", code: "EARNEST_MONEY_MISSING" });
+    }
+    expect(projection.createIntent).not.toHaveBeenCalled();
     expect(sendSpy).not.toHaveBeenCalled();
   });
 

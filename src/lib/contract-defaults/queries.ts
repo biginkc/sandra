@@ -39,7 +39,7 @@ export async function loadContractDefaults(
       for (const [k, v] of Object.entries(s.template_field_defaults as Row)) if (typeof v === "string") fieldDefaults[k] = v;
     }
     return {
-      earnestMoneyCents: typeof s?.earnest_money_cents === "number" ? s.earnest_money_cents : Number(s?.earnest_money_cents ?? 50000),
+      earnestMoneyCents: s?.earnest_money_cents == null || !Number.isFinite(Number(s.earnest_money_cents)) ? null : Number(s.earnest_money_cents),
       templateFieldDefaults: fieldDefaults,
       defaultTitleCompanyId: str(s?.default_title_company_id),
       defaultBuyerEntityId: str(s?.default_buyer_entity_id),

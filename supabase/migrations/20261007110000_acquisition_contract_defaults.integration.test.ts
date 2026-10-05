@@ -54,17 +54,33 @@ describe('20261007110000_acquisition_contract_defaults', () => {
     });
   });
 
-  it('settings defaults: earnest $500, follow-up 3 days at 9, no default title company or buyer', async () => {
+  it('settings defaults: earnest money has NO default (null), follow-up 3 days at 9, no default title company or buyer', async () => {
     await withTx(async (db) => {
       const s = await seed(db);
       await db.query(`insert into public.acquisition_contract_settings (org_id) values ($1)`, [s.orgA]);
       const r = (await db.query(`select * from public.acquisition_contract_settings`)).rows[0];
-      expect(Number(r.earnest_money_cents)).toBe(50000);
+      expect(r.earnest_money_cents).toBeNull();
       expect(r.follow_up_days_before_closing).toBe(3);
       expect(r.follow_up_hour_central).toBe(9);
       expect(r.default_title_company_id).toBeNull();
       expect(r.default_buyer_entity_id).toBeNull();
       expect(r.template_field_defaults).toEqual({});
+    });
+  });
+
+  it('earnest money has no column default and rejects a negative value; an explicit value is stored as typed', async () => {
+    await withTx(async (db) => {
+      const s = await seed(db);
+      const col = (await db.query(`select column_default, is_nullable from information_schema.columns
+        where table_schema = 'public' and table_name = 'acquisition_contract_settings' and column_name = 'earnest_money_cents'`)).rows[0];
+      expect(col.column_default).toBeNull();
+      expect(col.is_nullable).toBe('YES');
+      await db.query('savepoint n');
+      const neg = await db.query(`insert into public.acquisition_contract_settings (org_id, earnest_money_cents) values ($1, -1)`, [s.orgA]).catch((e: PgError) => e);
+      expect((neg as PgError).code).toBe('23514');
+      await db.query('rollback to savepoint n');
+      await db.query(`insert into public.acquisition_contract_settings (org_id, earnest_money_cents) values ($1, 777)`, [s.orgA]);
+      expect(Number((await db.query(`select earnest_money_cents from public.acquisition_contract_settings`)).rows[0].earnest_money_cents)).toBe(777);
     });
   });
 

@@ -31,7 +31,9 @@ create table public.acquisition_contract_buyer_entities (
 
 create table public.acquisition_contract_settings (
   org_id uuid primary key references public.organizations(id) on delete cascade,
-  earnest_money_cents bigint not null default 50000 check (earnest_money_cents >= 0),
+  -- No default: earnest money is not an approved business default. NULL means unset, and the card
+  -- requires the rep to type it before Send.
+  earnest_money_cents bigint check (earnest_money_cents is null or earnest_money_cents >= 0),
   follow_up_days_before_closing integer not null default 3
     check (follow_up_days_before_closing between 1 and 60),
   follow_up_hour_central smallint not null default 9 check (follow_up_hour_central between 0 and 23),

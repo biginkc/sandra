@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildContractPrefill, parseDollarsToCents, type PrefillBase } from "./contract-prefill";
-import { BUYER, FULL_DEFAULTS, NOW, novationBase, residentialBase, TITLE } from "./fixtures";
+import { BUYER, FULL_DEFAULTS, NOW, novationBase, residentialBase, TEST_ONLY_EARNEST_MONEY_CENTS, TITLE } from "./fixtures";
 
 const build = (base: PrefillBase, rep: Partial<{ priceCents: number; closingDate: string; overrides: Record<string, string> }> = {}) =>
   buildContractPrefill({
@@ -16,13 +16,13 @@ describe("buildContractPrefill", () => {
     expect(r.missing).toEqual([]);
     expect(r.values.offer_price).toBe("$210,000.00");
     expect(r.values.cash_balance).toBeUndefined();
-    expect(r.values.earnest_money).toBe("$500.00");
+    expect(r.values.earnest_money).toBe("$123.45");
     expect(r.values.earnest_money_holder).toBe("Test Title Co");
     expect(r.values.buyer_name).toBe("Test Buyer LLC");
     expect(r.values.agreement_date).toBe("2026-10-04");
     expect(r.sources.legal_description).toBe("public_record");
     expect(r.sources.offer_price).toBe("rep");
-    expect(r.economics).toEqual({ priceCents: 21000000, closingDate: "2026-11-01", earnestMoneyCents: 50000 });
+    expect(r.economics).toEqual({ priceCents: 21000000, closingDate: "2026-11-01", earnestMoneyCents: TEST_ONLY_EARNEST_MONEY_CENTS });
   });
 
   it("uses street plus city/state/zip for residential-v1 and sets cash_balance", () => {
@@ -53,7 +53,7 @@ describe("buildContractPrefill", () => {
   });
 
   it("blocks on an unsourced field but never on additional_terms", () => {
-    const r = build(novationBase({ settings: { earnestMoneyCents: 50000, templateFieldDefaults: { ...FULL_DEFAULTS, due_diligence_days: "" } } }));
+    const r = build(novationBase({ settings: { earnestMoneyCents: TEST_ONLY_EARNEST_MONEY_CENTS, templateFieldDefaults: { ...FULL_DEFAULTS, due_diligence_days: "" } } }));
     expect(r.missing).toEqual(["due_diligence_days"]);
     expect(r.missing).not.toContain("additional_terms");
     expect(r.blocked).toBe(true);
@@ -92,6 +92,15 @@ describe("buildContractPrefill", () => {
     const r = build(novationBase(), { priceCents: 123456 });
     expect(r.economics.priceCents).toBe(123456);
     expect(parseDollarsToCents(r.values.offer_price!)).toBe(123456);
+  });
+
+  it("an unset org earnest money leaves earnest_money empty, unsourced and blocking", () => {
+    const base = novationBase();
+    const r = build({ ...base, settings: { ...base.settings, earnestMoneyCents: null } });
+    expect(r.values.earnest_money).toBe("");
+    expect(r.sources.earnest_money).toBe("unsourced");
+    expect(r.missing).toContain("earnest_money");
+    expect(r.blocked).toBe(true);
   });
 
   it("is blocked without a price or closing date", () => {

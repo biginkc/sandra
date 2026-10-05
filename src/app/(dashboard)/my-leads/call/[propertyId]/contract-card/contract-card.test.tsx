@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ContractCard, shouldRotateIntent } from "./contract-card";
-import { BUYER, novationBase, TITLE } from "./fixtures";
+import { BUYER, novationBase, TEST_ONLY_EARNEST_MONEY_CENTS, TITLE } from "./fixtures";
 import type { ContractCardState } from "../types";
 
 afterEach(cleanup);
@@ -66,9 +66,24 @@ describe("ContractCard", () => {
     expect(screen.getByTestId("contract-blocked").textContent).toContain("Add a buyer entity in Settings");
   });
 
+  it("with earnest money unset the field is empty and Send stays disabled until the rep types it", async () => {
+    const base = novationBase();
+    const send = vi.fn().mockResolvedValue({ status: "failed", message: "x" });
+    render(<ContractCard state={state({ prefillBase: { ...base, comp: freshComp(), settings: { earnestMoneyCents: null, templateFieldDefaults: base.settings.templateFieldDefaults } } })} propertyId="p" send={send} />);
+    fill();
+    expect((screen.getByTestId("contract-earnest") as HTMLInputElement).value).toBe("");
+    expect(sendBtn().disabled).toBe(true);
+    expect(screen.getByTestId("contract-blocked").textContent).toContain("Enter the earnest money amount");
+    fireEvent.change(screen.getByTestId("contract-earnest"), { target: { value: "100" } });
+    expect(sendBtn().disabled).toBe(false);
+    fireEvent.click(sendBtn());
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(send.mock.calls[0]![0].earnestMoneyCents).toBe(10000);
+  });
+
   it("surfaces unsourced fields in More fields and blocks until filled", () => {
     const base = novationBase();
-    render(<ContractCard state={state({ prefillBase: { ...base, comp: freshComp(), settings: { earnestMoneyCents: 50000, templateFieldDefaults: {} } } })} propertyId="p" send={vi.fn()} />);
+    render(<ContractCard state={state({ prefillBase: { ...base, comp: freshComp(), settings: { earnestMoneyCents: TEST_ONLY_EARNEST_MONEY_CENTS, templateFieldDefaults: {} } } })} propertyId="p" send={vi.fn()} />);
     fill();
     expect(screen.getByTestId("contract-more-fields")).toBeTruthy();
     expect(sendBtn().disabled).toBe(true);
@@ -86,7 +101,7 @@ describe("ContractCard", () => {
     fireEvent.click(sendBtn());
     await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
     expect(send.mock.calls[1]![0].sendIntentId).toBe(send.mock.calls[0]![0].sendIntentId);
-    expect(send.mock.calls[0]![0]).toMatchObject({ priceCents: 21000000, closingDate: "2099-01-02", earnestMoneyCents: 50000 });
+    expect(send.mock.calls[0]![0]).toMatchObject({ priceCents: 21000000, closingDate: "2099-01-02", earnestMoneyCents: TEST_ONLY_EARNEST_MONEY_CENTS });
     await waitFor(() => expect(screen.getByTestId("contract-status").textContent).toContain("Offer logged"));
     expect(sendBtn().disabled).toBe(true);
   });

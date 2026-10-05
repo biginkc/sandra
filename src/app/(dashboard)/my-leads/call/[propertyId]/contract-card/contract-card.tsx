@@ -63,7 +63,7 @@ function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChan
   const [closingDate, setClosingDate] = useState("");
   const [titleId, setTitleId] = useState(state.selectedTitleCompanyId ?? "");
   const [buyerId, setBuyerId] = useState(state.selectedBuyerEntityId ?? "");
-  const [earnest, setEarnest] = useState((state.prefillBase.settings.earnestMoneyCents / 100).toFixed(2));
+  const [earnest, setEarnest] = useState(state.prefillBase.settings.earnestMoneyCents == null ? "" : (state.prefillBase.settings.earnestMoneyCents / 100).toFixed(2));
   const [overrides, setOverrides] = useState<Partial<Record<EsignMergeFieldName, string>>>({});
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState<SendContractCardResult | null>(null);
@@ -84,7 +84,7 @@ function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChan
     () =>
       buildContractPrefill({
         ...state.prefillBase,
-        settings: { ...state.prefillBase.settings, earnestMoneyCents: earnestCents ?? 0 },
+        settings: { ...state.prefillBase.settings, earnestMoneyCents: earnestCents },
         titleCompany: title,
         buyerEntity: buyer,
         rep: { priceCents: priceCents ?? 0, closingDate: closingValid ? closingDate : "", overrides },
@@ -107,6 +107,7 @@ function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChan
   let message: string | null = null;
   if (noTitle) message = "Add a title company in Settings.";
   else if (noBuyer) message = "Add a buyer entity in Settings.";
+  else if (earnestCents === null) message = "Enter the earnest money amount.";
   else if (!signersOk && buyer) message = "The buyer entity needs an email for the buyer signer.";
 
   const doSend = async () => {

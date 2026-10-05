@@ -22,7 +22,8 @@ export type SendContractCardInput = {
   closingDate: string;
   titleCompanyId: string;
   buyerEntityId: string;
-  earnestMoneyCents: number;
+  /** null/undefined = the rep has not typed it; refused server-side (there is no default). */
+  earnestMoneyCents: number | null;
   signers: readonly SignerAssignment[];
   overrides: Partial<Record<EsignMergeFieldName, string>>;
 };
@@ -151,6 +152,9 @@ export function createContractCardCore(deps: ContractCardCoreDeps) {
   }
 
   async function sendContractCard(input: SendContractCardInput): Promise<SendContractCardResult> {
+    if (input && typeof input === "object" && (input as { earnestMoneyCents?: unknown }).earnestMoneyCents == null) {
+      return blocked("EARNEST_MONEY_MISSING", "Enter the earnest money amount.");
+    }
     if (!validShape(input)) return blocked("INVALID_INPUT", "The contract details are invalid.");
     const viewer = await deps.viewer();
     if (!(await deps.flagOn(viewer.orgId)) || !(await deps.projectionReady())) {

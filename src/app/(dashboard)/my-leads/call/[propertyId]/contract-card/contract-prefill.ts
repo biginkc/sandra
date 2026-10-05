@@ -18,7 +18,7 @@ export type PrefillInput = {
     legalDescription: string | null; legalComplete: boolean; confidence: "high" | "medium" | "low" | null;
     fetchedAt: string | null; provider: "attom" | "fixture" | null; ownerOfRecord: string | null;
   } | null;
-  settings: { earnestMoneyCents: number; templateFieldDefaults: Record<string, string> };
+  settings: { earnestMoneyCents: number | null; templateFieldDefaults: Record<string, string> };
   titleCompany: TitleCompany | null;
   buyerEntity: BuyerEntity | null;
   rep: { priceCents: number; closingDate: string; overrides: Partial<Record<EsignMergeFieldName, string>> };
@@ -75,7 +75,7 @@ export function buildContractPrefill(i: PrefillInput): PrefillResult {
   for (const n of names) { values[n] = ""; sources[n] = "unsourced"; }
 
   const price = formatDollars(i.rep.priceCents / 100);
-  const earnest = formatDollars(i.settings.earnestMoneyCents / 100);
+  const earnest = i.settings.earnestMoneyCents == null ? "" : formatDollars(i.settings.earnestMoneyCents / 100);
   set("seller_name", i.lead.sellerName, "lead");
   set("seller_email", i.lead.sellerEmail, "lead");
   set("seller_phone", i.lead.sellerPhone, "lead");

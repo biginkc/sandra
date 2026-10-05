@@ -24,7 +24,8 @@ export type BuyerEntity = {
 export type MarketDefault = { market: string; stateCode: string | null; titleCompanyId: string };
 
 export type ContractDefaults = {
-  earnestMoneyCents: number;
+  /** null = unset: the card requires the rep to type it. There is no built-in value. */
+  earnestMoneyCents: number | null;
   templateFieldDefaults: Record<string, string>;
   defaultTitleCompanyId: string | null;
   defaultBuyerEntityId: string | null;
@@ -34,7 +35,7 @@ export type ContractDefaults = {
 };
 
 export const EMPTY_CONTRACT_DEFAULTS: ContractDefaults = {
-  earnestMoneyCents: 50000,
+  earnestMoneyCents: null,
   templateFieldDefaults: {},
   defaultTitleCompanyId: null,
   defaultBuyerEntityId: null,

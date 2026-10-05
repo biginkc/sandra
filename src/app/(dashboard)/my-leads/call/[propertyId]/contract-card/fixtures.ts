@@ -11,6 +11,8 @@ export const BUYER: BuyerEntity = {
   id: "22222222-2222-4222-8222-222222222222", name: "Test Buyer LLC", phone: "555-0101", email: "buyer@example.test",
   attorneyInFact: "Test Attorney", isActive: true,
 };
+/** TEST ONLY. Not a business default; chosen to be obviously fake. */
+export const TEST_ONLY_EARNEST_MONEY_CENTS = 12345;
 export const NOW = new Date("2026-10-04T12:00:00Z");
 export const FULL_DEFAULTS: Record<string, string> = {
   seller_closing_cost_cap: "$1.00", due_diligence_days: "1", access_days_per_week: "1", access_hours_per_visit: "1",
@@ -22,7 +24,7 @@ export const novationBase = (over: Partial<PrefillBase> = {}): PrefillBase => ({
   fieldNames: ESIGN_NOVATION_FIELD_NAMES,
   lead: { sellerName: "Sam Seller", sellerEmail: "sam@example.test", sellerPhone: "555-0102", street: "9 Test Rd", city: "Testville", state: "MO", zip: "64000", fullAddress: "9 Test Rd, Testville, MO 64000" },
   comp: { legalDescription: "LOT 1 TEST SUB", legalComplete: true, confidence: "high", fetchedAt: "2026-09-20T00:00:00Z", provider: "attom", ownerOfRecord: "SELLER SAM" },
-  settings: { earnestMoneyCents: 50000, templateFieldDefaults: FULL_DEFAULTS },
+  settings: { earnestMoneyCents: TEST_ONLY_EARNEST_MONEY_CENTS, templateFieldDefaults: FULL_DEFAULTS },
   ...over,
 });
 
