@@ -591,6 +591,8 @@ export function MyLeadsClient({
       ),
     );
     let cancelled = false;
+    // NOTE (comps): this 30 s poll is `refresh(true)` and must NOT enqueue comps. A future
+    // refresh(true) comp enqueue needs its own explicit flag, never this background tick.
     // A failed read does not replace snapshot, so it cannot re-arm this effect.
     // Keep retrying even after transport/authentication failures or hidden tabs.
     const tick = async () => {
