@@ -64,6 +64,7 @@ const CHAIN = [
   { key: 'postCall', file: '20261005160000_post_call_prompt_support', present: column('lead_notes', 'idempotency_key') },
   { key: 'sellerReminders', file: '20261005170000_seller_appointment_reminders', present: "to_regclass('public.seller_appointment_reminders') is not null" },
   { key: 'linkCapture', file: '20261005180000_dialpad_hangup_link_capture', present: proc('dialpad_cti_hangup_links') },
+  { key: 'replayLocation', file: '20261006111000_fn_create_next_step_replay_location', present: procUses('fn_create_next_step', 'v_existing.location') },
 ] as const;
 
 export type ChainKey = (typeof CHAIN)[number]['key'];
