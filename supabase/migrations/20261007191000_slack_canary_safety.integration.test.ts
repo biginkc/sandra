@@ -9,7 +9,7 @@ import { requireLoopbackPostgresUrl } from "../../src/lib/testing/loopback-postg
 const dbUrl = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
-const migration = readFileSync(new URL("./20261007180000_slack_canary_safety.sql", import.meta.url), "utf8");
+const migration = readFileSync(new URL("./20261007191000_slack_canary_safety.sql", import.meta.url), "utf8");
 
 it("keeps provider safety behind the service-only boolean RPC", async () => {
   const db = new Client({ connectionString: dbUrl });
