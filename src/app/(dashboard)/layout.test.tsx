@@ -17,6 +17,7 @@ vi.mock("@/components/dashboard-admin-nav", () => ({ DashboardAdminNav: () => nu
 vi.mock("@/components/dashboard-sidebar", () => ({ DashboardSidebar: () => null, DashboardMobileNav: () => null }));
 vi.mock("@/components/error-boundary", () => ({ ErrorBoundary: () => null }));
 vi.mock("@/components/job-failure-notifier", () => ({ JobFailureNotifier: () => null }));
+vi.mock("@/components/norma-connected-notifier", () => ({ NormaConnectedNotifier: () => null }));
 vi.mock("@/components/notifications-bell", () => ({ NotificationsBell: () => null }));
 
 import { DashboardSidebar, DashboardMobileNav } from "@/components/dashboard-sidebar";

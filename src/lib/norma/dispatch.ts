@@ -6,12 +6,14 @@ import type { Database } from "@/lib/supabase/types";
 import { createBlandClient, type BlandClient } from "./bland";
 import { readNormaBlandConfig, readNormaGateConfig, type NormaBlandConfig, type NormaGateConfig } from "./config";
 import { evaluateNormaGate } from "./gate";
+import { sendNormaPrecallSms, type PrecallDeps } from "./precall-sms";
 import {
   bindNormaCallId,
   checkNormaEligibility,
   claimNormaDispatch,
   markNormaDispatchRejected,
   markNormaDispatchUnknown,
+  presendNormaFence,
 } from "./rpc";
 
 type Client = SupabaseClient<Database>;
@@ -31,7 +33,11 @@ export type DispatchDeps = {
   bland?: BlandClient;
   blandConfig?: NormaBlandConfig | null;
   gate?: NormaGateConfig;
+  /** Pre-call text overrides (tests); production reads NORMA_PRECALL_SMS_ENABLED and the template constant. */
+  precallSms?: PrecallDeps;
 };
+
+const PRESEND_FENCE_RESPONSE_BUDGET_MS = 5_000;
 
 /**
  * THE only function that may call Bland send-call. Every path (server action,
@@ -48,30 +54,33 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
 
   const { data: row, error } = await client
     .from("norma_call_requests")
-    .select("id, status, org_id, phone_e164, property_id, contact_id, idempotency_key, rep_context")
+    .select("id, status, org_id, phone_e164, property_id, contact_id, idempotency_key, rep_context, attempt")
     .eq("id", requestId)
     .maybeSingle();
   if (error) throw new Error(`norma dispatch load failed: ${error.message}`);
   if (!row) return { status: "not_found" };
   if (row.status !== "requested") return { status: "not_claimed" };
+  const attempt = row.attempt ?? 1;
 
   // ---- gate (section 0), before the claim ---------------------------------
   const gate = evaluateNormaGate(row.phone_e164, deps.gate ?? readNormaGateConfig());
   if (!gate.open) {
-    const closed = await markNormaDispatchRejected(client, requestId, `gate:${gate.reason}`, "requested");
+    const closed = await markNormaDispatchRejected(client, requestId, `gate:${gate.reason}`, "requested", attempt);
     // Another worker claimed it between our read and the close: it owns the row now.
     if (closed !== "dispatch_rejected") return { status: "not_claimed" };
     return { status: "rejected", reason: gate.reason };
   }
   const blandConfig = deps.blandConfig === undefined ? readNormaBlandConfig() : deps.blandConfig;
   if (!blandConfig) {
-    const closed = await markNormaDispatchRejected(client, requestId, "bland_not_configured", "requested");
+    const closed = await markNormaDispatchRejected(client, requestId, "bland_not_configured", "requested", attempt);
     if (closed !== "dispatch_rejected") return { status: "not_claimed" };
     return { status: "rejected", reason: "bland_not_configured" };
   }
 
   // ---- claim: requested -> dispatching ------------------------------------
-  if (!(await claimNormaDispatch(client, requestId))) return { status: "not_claimed" };
+  // Fenced on the attempt read above: every later decision (pre-call text, metadata) uses
+  // that same value, so a stale snapshot can never act for a different attempt.
+  if (!(await claimNormaDispatch(client, requestId, attempt))) return { status: "not_claimed" };
 
   // ---- pre-send (a failure here means nothing was sent) --------------------
   // The dial-time eligibility recheck is the LAST thing before the send: lead
@@ -80,19 +89,28 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
   let variables: Record<string, string>;
   try {
     variables = await loadCallVariables(client, row);
-    const eligibility = await checkNormaEligibility(client, {
-      propertyId: row.property_id,
-      contactId: row.contact_id ?? "",
-      phoneE164: row.phone_e164,
-    });
+    const recheck = () =>
+      checkNormaEligibility(client, { propertyId: row.property_id, contactId: row.contact_id ?? "", phoneE164: row.phone_e164 });
+    let eligibility = await recheck();
+    if (eligibility.eligible && attempt === 1) {
+      // Call twice: the retry (attempt 2) never texts again. The text is a
+      // best-effort extra: refused, failed or slow, the call is still placed.
+      // After it, eligibility is read once more so the check stays the LAST
+      // thing before the send (the seller may have replied STOP meanwhile).
+      const sms = await sendNormaPrecallSms(client, row, deps.precallSms);
+      if (sms.status !== "disabled" && sms.status !== "empty_template") {
+        await recordPrecallSms(client, requestId, `${sms.status}:${sms.detail}`);
+        eligibility = await recheck();
+      }
+    }
     if (!eligibility.eligible) {
-      await markNormaDispatchRejected(client, requestId, `ineligible:${eligibility.reason}`);
+      await markNormaDispatchRejected(client, requestId, `ineligible:${eligibility.reason}`, undefined, attempt);
       return { status: "rejected", reason: `ineligible:${eligibility.reason}` };
     }
   } catch (preSendError) {
     reportError(preSendError, { tags: { surface: "norma_dispatch_pre_send" }, extra: { requestId } });
     try {
-      await markNormaDispatchRejected(client, requestId, "pre_send_error");
+      await markNormaDispatchRejected(client, requestId, "pre_send_error", undefined, attempt);
     } catch {
       // Left `dispatching`; the reconciliation sweep owns it.
     }
@@ -101,24 +119,33 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
 
   // ---- send ----------------------------------------------------------------
   const bland = deps.bland ?? createBlandClient(blandConfig);
+  const fenceStartedAt = performance.now();
+  let fencePassed = false;
+  try {
+    fencePassed = await presendNormaFence(client, requestId, attempt);
+  } catch (fenceError) {
+    reportError(fenceError, { tags: { surface: "norma_dispatch_presend_fence" }, extra: { requestId, attempt } });
+  }
+  if (!fencePassed || performance.now() - fenceStartedAt > PRESEND_FENCE_RESPONSE_BUDGET_MS) return { status: "not_claimed" };
   const result = await bland.sendCall({
     phoneNumber: row.phone_e164,
     requestId,
     idempotencyKey: row.idempotency_key,
+    attempt,
     variables,
   });
 
   if (result.kind === "rejected") {
-    await markNormaDispatchRejected(client, requestId, `bland_${result.httpStatus}:${result.message}`);
+    await markNormaDispatchRejected(client, requestId, `bland_${result.httpStatus}:${result.message}`, undefined, attempt);
     return { status: "rejected", reason: `bland_${result.httpStatus}` };
   }
   if (result.kind === "unknown") {
-    await markNormaDispatchUnknown(client, requestId, `send_unknown:${result.reason}`);
+    await markNormaDispatchUnknown(client, requestId, `send_unknown:${result.reason}`, attempt);
     return { status: "unknown", reason: result.reason };
   }
 
   try {
-    const bound = await bindNormaCallId(client, requestId, result.callId);
+    const bound = await bindNormaCallId(client, requestId, result.callId, attempt);
     // `already_completed`: the webhook beat us here and finished the request.
     if (bound === "bound" || bound === "already_completed") return { status: "dispatched", callId: result.callId };
     reportError(new Error(`norma bind returned ${bound}`), { tags: { surface: "norma_dispatch_bind" }, extra: { requestId } });
@@ -127,11 +154,20 @@ export async function dispatchNormaCall(requestId: string, deps: DispatchDeps): 
   }
   // A call exists but we could not record it: never redial.
   try {
-    await markNormaDispatchUnknown(client, requestId, "bind_failed");
+    await markNormaDispatchUnknown(client, requestId, "bind_failed", attempt);
   } catch {
     // Left `dispatching`; reconciliation escalates it.
   }
   return { status: "unknown", reason: "bind_failed" };
+}
+
+/** Audit trail for the pre-call text. Best effort: it must never affect the call. */
+async function recordPrecallSms(client: Client, requestId: string, status: string): Promise<void> {
+  try {
+    await client.from("norma_call_requests").update({ precall_sms_status: status.slice(0, 120) }).eq("id", requestId);
+  } catch (error) {
+    reportError(error, { tags: { surface: "norma_precall_sms_record" }, extra: { requestId } });
+  }
 }
 
 /**

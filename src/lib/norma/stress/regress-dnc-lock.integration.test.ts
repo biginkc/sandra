@@ -32,6 +32,15 @@ describe("a DNC lock landing while a call is in flight (tasks on a locked lead a
       expect(hook.status).toBe(200);
       expect(hook.body.status).toBe("applied");
       const request = await requestOf(ctx.lead.property);
+      if (kind === "no_answer_status") {
+        // Call twice: the DNC lock landed before the retry, whose dial-time recheck refuses it. The
+        // request ends rejected (first call on record, nothing dialled again), no task, drip stays opted out.
+        expect(request.status).toBe("dispatch_rejected");
+        expect(h.bland.callsForNumber(ctx.lead.phone)).toHaveLength(1);
+        expect(await tasksOf(request.id)).toHaveLength(0);
+        expect((await q("select status from public.sequence_enrollments where id = $1", [ctx.lead.enrollments[0]]))[0].status).toBe("opted_out");
+        return;
+      }
       expect(request.status).toBe("completed");
       expect(await tasksOf(request.id)).toHaveLength(0);
       // The outbox row exists, so Slack still tells the team what happened.

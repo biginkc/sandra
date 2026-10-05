@@ -9,6 +9,7 @@ import {
   type NormaCompletionPayload,
   type NormaCreateResult,
   type NormaEligibility,
+  type NormaMarkReviewedRpcResult,
   type NormaOutcome,
 } from "./types";
 
@@ -95,9 +96,23 @@ export async function createNormaRequest(
 }
 
 /** requested -> dispatching. Exactly one caller wins. */
-export async function claimNormaDispatch(client: Client, requestId: string): Promise<boolean> {
-  const { data, error } = await client.rpc("fn_norma_claim_dispatch", { p_request_id: requestId });
+/** `expectedAttempt`: the attempt the caller read; a row that has since moved to another attempt is not claimed. */
+export async function claimNormaDispatch(client: Client, requestId: string, expectedAttempt?: number): Promise<boolean> {
+  const { data, error } = await client.rpc("fn_norma_claim_dispatch", {
+    p_request_id: requestId,
+    ...(expectedAttempt !== undefined ? { p_expected_attempt: expectedAttempt } : {}),
+  });
   if (error) fail("fn_norma_claim_dispatch", error);
+  return data === true;
+}
+
+/** Final server-side freshness fence immediately before the provider send. */
+export async function presendNormaFence(client: Client, requestId: string, expectedAttempt?: number): Promise<boolean> {
+  const { data, error } = await client.rpc("fn_norma_presend_fence", {
+    p_request_id: requestId,
+    ...(expectedAttempt !== undefined ? { p_expected_attempt: expectedAttempt } : {}),
+  });
+  if (error) fail("fn_norma_presend_fence", error);
   return data === true;
 }
 
@@ -106,8 +121,13 @@ export async function bindNormaCallId(
   client: Client,
   requestId: string,
   callId: string,
+  expectedAttempt?: number,
 ): Promise<NormaBindResult> {
-  const { data, error } = await client.rpc("fn_norma_bind_call_id", { p_request_id: requestId, p_call_id: callId });
+  const { data, error } = await client.rpc("fn_norma_bind_call_id", {
+    p_request_id: requestId,
+    p_call_id: callId,
+    ...(expectedAttempt !== undefined ? { p_expected_attempt: expectedAttempt } : {}),
+  });
   if (error) fail("fn_norma_bind_call_id", error);
   return data as NormaBindResult;
 }
@@ -122,24 +142,34 @@ export async function markNormaDispatchRejected(
   requestId: string,
   reason: string,
   expectedStatus?: string,
+  expectedAttempt?: number,
 ): Promise<string> {
   const { data, error } = await client.rpc("fn_norma_mark_dispatch_rejected", {
     p_request_id: requestId,
     p_reason: reason,
     ...(expectedStatus ? { p_expected_status: expectedStatus } : {}),
+    ...(expectedAttempt !== undefined ? { p_expected_attempt: expectedAttempt } : {}),
   });
   if (error) fail("fn_norma_mark_dispatch_rejected", error);
   return data;
 }
 
-export async function markNormaDispatchUnknown(client: Client, requestId: string, reason: string): Promise<string> {
-  const { data, error } = await client.rpc("fn_norma_mark_dispatch_unknown", { p_request_id: requestId, p_reason: reason });
+export async function markNormaDispatchUnknown(client: Client, requestId: string, reason: string, expectedAttempt?: number): Promise<string> {
+  const { data, error } = await client.rpc("fn_norma_mark_dispatch_unknown", {
+    p_request_id: requestId,
+    p_reason: reason,
+    ...(expectedAttempt !== undefined ? { p_expected_attempt: expectedAttempt } : {}),
+  });
   if (error) fail("fn_norma_mark_dispatch_unknown", error);
   return data;
 }
 
-export async function markNormaNeedsReview(client: Client, requestId: string, reason: string): Promise<string> {
-  const { data, error } = await client.rpc("fn_norma_mark_needs_review", { p_request_id: requestId, p_reason: reason });
+export async function markNormaNeedsReview(client: Client, requestId: string, reason: string, expectedAttempt?: number): Promise<string> {
+  const { data, error } = await client.rpc("fn_norma_mark_needs_review", {
+    p_request_id: requestId,
+    p_reason: reason,
+    ...(expectedAttempt !== undefined ? { p_expected_attempt: expectedAttempt } : {}),
+  });
   if (error) fail("fn_norma_mark_needs_review", error);
   return data;
 }
@@ -147,13 +177,14 @@ export async function markNormaNeedsReview(client: Client, requestId: string, re
 /** The only path by which a call result touches CRM state. Replay-safe. */
 export async function completeNormaCall(
   client: Client,
-  params: { requestId: string; callId: string; outcome: NormaOutcome; payload?: NormaCompletionPayload },
+  /** `attempt`: the attempt the caller's call belongs to; a result for any other attempt is a stale no-op. */
+  params: { requestId: string; callId: string; outcome: NormaOutcome; payload?: NormaCompletionPayload; attempt?: number },
 ): Promise<NormaCompleteResult> {
   const { data, error } = await client.rpc("fn_norma_complete_call", {
     p_request_id: params.requestId,
     p_call_id: params.callId,
     p_outcome: params.outcome,
-    p_payload: (params.payload ?? {}) as Json,
+    p_payload: { ...(params.payload ?? {}), ...(params.attempt !== undefined ? { attempt: params.attempt } : {}) } as Json,
   });
   if (error) fail("fn_norma_complete_call", error);
   const raw = (data ?? {}) as Record<string, unknown>;
@@ -161,6 +192,29 @@ export async function completeNormaCall(
     ...raw,
     ...(raw.task_id !== undefined ? { taskId: raw.task_id as string | null } : {}),
   } as NormaCompleteResult;
+}
+
+/**
+ * A rep takes over a request parked in needs_review: it completes as
+ * "reviewed", its review task closes, and its drips stay paused. Replay-safe.
+ * Membership of the lead's org is enforced in SQL for `userId`. Throws on any
+ * transport / RPC error or an unrecognised answer, so callers fail closed.
+ */
+export async function markNormaReviewed(
+  client: Client,
+  params: { requestId: string; propertyId: string; userId: string },
+): Promise<NormaMarkReviewedRpcResult> {
+  const { data, error } = await client.rpc("fn_norma_mark_reviewed", {
+    p_request_id: params.requestId,
+    p_property_id: params.propertyId,
+    p_user_id: params.userId,
+  });
+  if (error) fail("fn_norma_mark_reviewed", error);
+  const result = (data as { result?: unknown } | null)?.result;
+  if (!["reviewed", "already_reviewed", "invalid_state", "not_found", "not_authorized"].includes(String(result))) {
+    throw new Error("fn_norma_mark_reviewed: unexpected result");
+  }
+  return data as NormaMarkReviewedRpcResult;
 }
 
 /** Resume only the pauses this request made itself; safe to repeat. */

@@ -1186,9 +1186,9 @@ describe("<ProspectsTable /> select-all-across-pages banner", () => {
         /All 1,382 eligible prospects selected/,
       );
     });
-    await user.click(
-      screen.getByRole("button", { name: /Actions for 1382 selected/ }),
-    );
+    // The banner can commit before the async selection transition has settled.
+    await waitFor(() => expect(screen.getByRole("button", { name: /Actions for 1382 selected/ })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: /Actions for 1382 selected/ }));
     await user.click(
       await screen.findByRole("menuitem", { name: /Create\/apply tag/ }),
     );

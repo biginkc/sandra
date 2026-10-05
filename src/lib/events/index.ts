@@ -41,7 +41,9 @@ export const LEAD_EVENT_TYPES = {
   OPTED_OUT: "opted_out",
   QUEUED_MESSAGE_DELETED: "queued_message_deleted",
   NORMA_CALL_REQUESTED: "norma_call_requested",
+  NORMA_CALL_ATTEMPT_NO_ANSWER: "norma_call_attempt_no_answer",
   NORMA_CALL_COMPLETED: "norma_call_completed",
+  NORMA_CALL_REVIEWED: "norma_call_reviewed",
 } as const;
 
 export type LeadEventType =

@@ -30,8 +30,8 @@ Supersedes the "Proposed plan, not yet approved" section of Astra's `DECISIONS-A
 ## Decisions this plan implements
 - Button visible to all active members.
 - Hard blocks: DNC (lead lock and global registry) and `not_interested`.
-- No answer: hang up, no voicemail, no retry.
-- Drip: pause on request; resume on confirmed no answer; stay paused if Norma reached the seller.
+- No answer: current dispatch always uses call-twice attempt 1 or 2 (legacy null rows normalize to 1). Use Bland sensitive detection with `voicemail.action:"ignore"` on either attempt, keeping the protected pathway in control instead of hanging up or playing a canned message. The adapter alone supports an absent-attempt voicemail default; no standalone dispatch workflow is added. Eligibility or STOP can prevent attempt 2. A provider-confirmed voicemail remains a non-connect for the existing retry policy. Mocked payload proof does not establish that version 27 has the intended voicemail route; exact pathway evidence remains required. No Bland-side retry. `pathway_version` is omitted unless `NORMA_BLAND_PATHWAY_VERSION` is a strict integer, so Bland uses the published production pathway.
+- Drip: pause on request; with PR771, keep the hold across the retry. Resume after the second confirmed no answer, or when a refused/expired retry closes the request, only if current enrollment eligibility still permits resumption. STOP/DNC or changed pause reasons prevent resumption. Stay paused if Norma reached the seller.
 - Seller tells Norma to stop: lead marked `not_interested` (not DNC).
 - Callback requested: callback task for Jarrad, labelled unconfirmed.
 - Caller ID: build and rehearse on the existing 213 number (no new number fee; calls still draw on Jarrad's prepaid Bland credits at $0.14/min — balance was $15.55 of $20 on 2026-10-02, and whether the 213 number itself is billed is not visible in the account data). Before real sellers, Jarrad chooses between a $15/mo Bland 816 number and a bring-your-own Twilio number (~$1/mo, plan eligibility unverified). No free swap is documented; do not release the 213 number. Callbacks: Norma answers, then transfers to the Dialpad main line (a silent straight-through forward is not documented; inbound answer-and-transfer must itself be verified at rehearsal and is not evidence that outbound warm transfer works).
@@ -74,11 +74,11 @@ Extend `PauseReason` with `norma_call`; add lead event types `norma_call_request
 1. Dispatch gate (section 0).
 2. Atomic claim: `requested → dispatching` (single conditional update; losers exit).
 3. Re-run `fn_norma_eligibility` immediately before dialling; if it fails, mark `dispatch_rejected` and release owned pauses.
-4. Bland send-call: pathway id + integer `pathway_version` (Bland's field is an integer, not the agent semver `0.0.17`), `from` = local number, `metadata {request_id, idempotency_key}`, webhook URL, voicemail action `hangup`, no `retry`, rep context and lead facts as variables.
+4. Bland send-call: pathway id, omit `pathway_version` unless `NORMA_BLAND_PATHWAY_VERSION` matches `/^(0|[1-9]\d*)$/` and `Number.isSafeInteger` (blank or `production` uses Bland's published production version; `latest` is not an alias), `from` = local number, `metadata {request_id, idempotency_key}`, webhook URL, voicemail `ignore` with `sensitive:true` and no `message` on both attempts, `record` true, `max_duration` 10 minutes, no `retry`, rep context and lead facts as variables.
 5. Result handling:
    - Explicit rejection (4xx with no call created): `dispatch_rejected`; release owned pauses.
    - Success: bind `bland_call_id` and move `dispatching → dispatched` with a conditional update that cannot overwrite `completed`.
-   - Timeout, 5xx, or failure writing the id: `dispatch_unknown`. Never auto-redial. Pauses stay. Reconciliation (section 6) resolves it.
+   - Timeout, 5xx, or failure writing the id: `dispatch_unknown`. Never redial while acceptance is unresolved. Pauses stay. A subsequent confirmed bind can recover the request to `dispatched`, after which a confirmed no-answer may use the ordinary one-retry rule. Reconciliation (section 6) resolves unresolved calls.
 
 ### 3. Webhook `POST /api/webhooks/bland/call` `[F3][F5][F6]`
 - Verify `X-Webhook-Signature` (HMAC-SHA256, raw body, size-bounded) before parsing.
@@ -119,9 +119,11 @@ Cron every 5 minutes over `requested` (stranded), `dispatching`, `dispatched` an
 - Stranded `requested` rows are dispatched only if younger than a short window; otherwise `dispatch_rejected` with pauses released.
 - **Deviation (M2, accepted):** Bland cannot be queried by metadata, so "Bland confirms no call exists" is only possible for a bound call id, and a 404 on a bound id is treated as ambiguous: it escalates to `needs_review` after the window instead of `dispatch_rejected` (a call that Bland once accepted is never auto-closed). Rows with no id escalate by age. The sweep orders by `next_check_at` and pushes each examined row out, so stuck rows cannot starve fresh ones; "close only if still `requested`" callers pass an expected status so they cannot reject a row a dispatcher already claimed.
 
-### 7. Dispatch contract (pin before build)
-**Pinned (M2):** live pathway integer version `3` (agent snapshot 0.0.4), default of `NORMA_BLAND_PATHWAY_VERSION`; staging 0.0.17 has no published integer version. `call_outcome` leading token map and the nine extraction variables are in `src/lib/norma/outcome.ts`. The callback preference is free text, so callback tasks are due now with the raw text in the description.
-Map the existing `0.0.17` outputs (`call_outcome`, `follow_up_preference`, qualification fields) to Sandra outcomes; identify the integer `pathway_version` for that snapshot. Only if a needed field is missing does a pathway change get proposed, and that is a Jarrad gate.
+### 7. Dispatch contract
+**Candidate capability, not release state:** preserve the user-protected pathway pin `27` and Sandra voice `7558e302-7aa3-4712-b10b-e485a20a785a` through the coordinated code release. Removing the pin is a separate reviewed release transition: subsequent Bland production publishes then change call behavior immediately. Omitting Bland `pathway_version` uses whatever version is published as production. `NORMA_BLAND_PATHWAY_VERSION` pins only when it is a strict non-negative integer (`/^(0|[1-9]\d*)$/` and `Number.isSafeInteger`). Unset, blank, and `production` omit the field. `latest` is not accepted. `call_outcome` leading token map and the nine extraction variables are in `src/lib/norma/outcome.ts`. The callback preference is free text, so callback tasks are due now with the raw text in the description.
+The outcome map still reads the pathway's `call_outcome`, `follow_up_preference`, and qualification fields. Every pathway publish after unpinning requires an exact compatible export, reviewed output contract, acceptance evidence and a serialized release lease. Recording and voicemail are explicit behavior changes; verify disclosure and first/second attempt behavior against the exact release candidate. The opening-repeat fix in draft v18/internal v18aw, callback lines and replay results remain unverified until authorized provider access succeeds.
+
+**Current refresh dependencies:** direct user authorization now requests review and merge of #793, including the necessary #792 schema dependency. The runtime remains stacked on #792 until its schema lands. Current main includes #798's shared My Leads next-step writers and #821's 4 MiB Bland webhook limit/413 diagnostics; preserve both. Root reserved `20261008090100` after PR823/main `05302f21` and confirmed PROD high-water `20261008090000`. TEST/PROD terminal handback and fresh catalogs remain release admission checks. The local integration supersedes unapplied `040900` with one forward `20261008090100_norma_retry_next_step_union_reviewed.sql`; original SQL is preserved in Git history and original PR refs. No ledger repair or include-all is needed. The forward migration unions retry fencing with #798's phone appointments and review tasks, including safe forward-only recovery SQL and #772 human review recovery. Schema admission precedes runtime because the lead view selects `attempt`. Root owns exact publication, migration and merge leases; local preparation is not an external write. Protected version 27's actual voicemail route, recording disclosure and extraction behavior remain unverified; mocked HTTP proof establishes payload intent. These live acceptance requirements do not reinstate an obsolete no-merge hold.
 
 ### 8. Verification
 - Unit: eligibility (incl. global registry and fail-closed), dispatch gate, state transitions, outcome mapping, signature check.
@@ -156,7 +158,7 @@ Un-park only when Bland confirms warm transfer on the account, a Transfer Call n
 ## Gates — Jarrad only
 1. Spend: buying the local Bland number.
 2. Any change to Norma's script or pathway text. Exact text approved verbatim, one approval per text.
-3. Applying the migration.
+3. Applying the migration through Root's explicitly authorized schema-first TEST → PROD lease; no ad hoc hosted DDL.
 4. Bland account configuration: webhook secret, inbound forwarding on the new number.
 5. Turning on `NORMA_SELLER_RELEASE` (first calls to real sellers).
 
@@ -166,3 +168,32 @@ Un-park only when Bland confirms warm transfer on the account, a Transfer Call n
 - Whether `metadata` is echoed in every webhook, and Bland's webhook retry behaviour.
 - Switchboard's deployed Slack channel ID and the BMH outreach bot token.
 - The existing wrong-number columns/write path to reuse inside the completion RPC.
+
+### Current PR792 → PR793 admission
+
+The old `493bef8c` Opus medium approval was local preparation evidence, not approval of the new forward union. The refreshed final candidate needs its own tests and review. Retry acceptance requires Bland-confirmed voicemail/no-answer together with the existing `voicemail` extraction token (mapping to `no_answer`) or an empty outcome. Literal `no_answer` and unrecognized tokens are unknown; conversation tokens contradicting confirmed voicemail are conflicts. No aliases or pathway text changes are admitted without pathway evidence.
+
+The parser supports an omitted version, but release policy fixes version 27 and Sandra voice `7558e302-7aa3-4712-b10b-e485a20a785a`. Exact mocked dispatch proves those inputs pass unchanged; no live environment or provider access is part of verification. Actual v27 routing, extraction output, `answered_by` under ignore/sensitive, and recording disclosure remain activation acceptance items. The new forward SQL rejects invalid attempt values before an integer cast; historical SQL is not amended.
+
+The backward-compatible schema is installed before the new runtime. At the SQL layer, legacy missing-attempt completion can finish attempt 1 but cannot schedule a retry or complete attempt 2. The new webhook normalizes omitted wire metadata to attempt 1, so an old in-flight call completing after runtime cutover can schedule its first retry; the SQL attempt fence still prevents that payload from settling attempt 2. Legacy claims and bind/reject/unknown/review mutators cannot act on attempt 2; the new runtime carries its exact observed attempt through each helper. This also prevents old reconciliation's creation-time expiry or escalation from rejecting/reviewing a new retry during overlapping deployments. Old `next_check_at` bumps are scheduling-only and do not change the attempt's expiry clock. The recovery SQL deliberately re-applies the forward contract and retains attempt-2 data; schema recovery is forward-only, and reverting runtime uses the same legacy argument compatibility. No inherited `939` maintenance-hold or grace proof applies to this candidate.
+
+Root's authorized preparation uses the existing schema PR792 and runtime PR793. Schema792 includes temporary `vercel.git.deploymentEnabled.main: false` and suppresses only the existing792/793 branches, preserving all four current-main branch rules and all 22 cron entries. After compatible schema tests, intermediate review, exact-head CI and final tested release review, Root serializes schema merge and normal TEST → PROD migration/catalog checks. Runtime793 then removes the temporary main hold; its merge admits the automatic runtime deployment. Publication or schema/deploy writes require Root's exact lease. The prepared config deltas are explicitly authorized; no surprise `main:false` or environment mutation is permitted.
+
+
+### Authorized local recovery and playback integration
+
+The original tested schema/runtime pair `817736/77827` remains preserved as baseline evidence. Root authorized a separate local integration of the whole unique #772 feature, #824 serialized transport assertion, and #825 protected recording playback on current main `05302f21`. No hosted publication, database, environment, provider, credential, or spending action is included in this preparation.
+
+A session-authenticated active workspace member may mark a `needs_review` request reviewed. The service-only RPC records `reviewed` as a human outcome, closes the review task when DNC rules permit, and retires owned pause claims as `kept_paused_reviewed`. Drips stay paused; softphone and gap enrollments remain under the human follow-up hold. Review never dispatches a call, resumes a drip, or emits a completion Slack notification. It clears the request's open-status fence so a later intentional call can pass normal eligibility. The same rule applies on attempt 2, including races with a late provider completion. The provider outcome mapper must never synthesize `reviewed`.
+
+Recording playback uses authenticated session/RLS access and call IDs stored on the request. Attempt2 exposes both stored call identities; browser parameters do not select arbitrary provider call IDs or URLs. Completed timeline entries may expose playback even without expanded detail, while retaining retry-attempt and reviewed-event content. Recording=true already exists; #824 adds the exact serialized transport-body assertion without restoring its older voicemail or metadata contract.
+
+The rebuilt pair needs fresh affected SQL, unit/RTL/media, type, stress and intermediate review evidence. Earlier 167 stress/41 SQL/352 unit results are historical baseline evidence, not automatic approval of the integrated feature. The original 167 stress cases must remain alongside review-recovery invariants, mutations, and attempt 2 race proofs. Retimestamping updates only unapplied owned files and references; deployed migration bytes remain immutable.
+
+### Reviewed-call residual provider result
+
+Mark reviewed is a human terminal decision after checking the existing review task, Bland, and the lead. A provider result that arrives afterward is replayed without replacing the human outcome or creating a new task/Slack item. If a call was already placed but unconfirmed, its later callback request can therefore be discarded; a rep must check the provider before marking the request reviewed. This is a documented consequence of the human decision, not live provider acceptance evidence.
+
+### Final send admission after human review
+
+Every new-runtime dispatch uses a final service-only `fn_norma_presend_fence` immediately before the provider call. It admits only a matching `dispatching` attempt with dispatch_started_at newer than 90 seconds and refreshes updated_at. Legacy omitted attempt is accepted only on attempt 1. Completed/reviewed, unknown, stale-attempt and expired claims fail closed. The runtime also refuses a fence response older than a five-second monotonic budget; refusal does not reject the request or release pauses. A cached stranded-dispatch scan cannot downgrade a row whose current updated_at is still fresh. No asynchronous work occurs between successful admission and send invocation. This bounds stale pre-send work but does not make database state and provider acceptance atomic; an arbitrary process suspension in the final synchronous gap remains a distributed-system limit.
