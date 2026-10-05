@@ -10,6 +10,8 @@ import { listExtrasFor } from "@/app/(dashboard)/my-leads/_components/extras-sto
 import { extrasConfirmed, saveExtrasRequest, type ExtrasRequest } from "@/app/(dashboard)/my-leads/_components/extras-saver";
 import type { PostCallExtrasState } from "@/app/(dashboard)/my-leads/_components/types";
 import { useAttemptWorkflow, type AttemptOpening } from "@/app/(dashboard)/my-leads/_components/use-attempt-workflow";
+import { DialStatus } from "@/app/(dashboard)/my-leads/_components/dial-status";
+import { useApiDial } from "@/app/(dashboard)/my-leads/_components/use-api-dial";
 import { WorkflowRecoveryContext } from "@/app/(dashboard)/my-leads/_components/workflow-form";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -26,13 +28,17 @@ const RECOVERY_ACTIONS = {
   cancel: cancelContractAction,
 };
 import { ContractCard } from "./contract-card/contract-card";
-import { DIAL_UNAVAILABLE_COPY, dialLeadAction } from "./dial-stub";
 import { HistoryPanel } from "./history-panel";
 import { NumbersCard } from "./numbers-card";
 import { StaticScriptView } from "./static-script-view";
 import type { CallScreenData } from "./types";
 
-export type CallScreenProps = { data: CallScreenData; viewerLabel?: string | null };
+export type CallScreenProps = {
+  data: CallScreenData;
+  viewerLabel?: string | null;
+  /** `click_to_dial` flag AND `schemaReady('api_dial')`, resolved on the server (getMyLeadsCallFeatures). Off keeps Call disabled. */
+  clickToDial?: boolean;
+};
 
 const STAGE_LABEL: Record<string, string> = {
   not_contacted: "Not contacted",
@@ -47,7 +53,7 @@ const STAGE_LABEL: Record<string, string> = {
  * numbers → (contract, hidden in 3b) → history → docked post-call prompt. Below: single column
  * header, numbers, script, history, prompt. The contract and facts slots are omitted here.
  */
-export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
+export function CallScreen({ data, viewerLabel = null, clickToDial = false }: CallScreenProps) {
   const router = useRouter();
   const { lead, queueRow, viewer } = data;
   const propertyId = lead.propertyId;
@@ -62,13 +68,14 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
     setEntryFields((prev) => ({ ...prev, [token]: value.trim() === "" ? null : value }));
   }, []);
 
-  const [dialNotice, setDialNotice] = useState<string | null>(null);
-  const firstSlot = lead.homeowner.phones[0]?.slot ?? null;
-  const canDial = dialLeadAction !== null && firstSlot !== null && !queueRow.contactDnc;
-  const onCall = async () => {
-    if (!dialLeadAction || firstSlot === null) return;
-    const result = await dialLeadAction({ propertyId, phoneSlot: firstSlot });
-    setDialNotice(result.ok ? null : result.message);
+  // The same dial path (and per-lead key lifecycle) as the My Leads page.
+  const { dialFlight, dialActive, startApiDial, statusHandlers } = useApiDial((id) =>
+    id === propertyId ? { contactId: lead.homeowner.contactId, label: title } : null,
+  );
+  const canDial = clickToDial && !!lead.homeowner.contactId && lead.homeowner.phones.length > 0 && !queueRow.contactDnc && !dialActive;
+  const onCall = () => {
+    if (!canDial) return;
+    void startApiDial(propertyId, 1);
   };
 
   // Post-call prompt (P1c) docked; the attempt workflow core is the same one the queue uses.
@@ -214,7 +221,6 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
             type="button"
             data-testid={`call-button-${propertyId}`}
             disabled={!canDial}
-            title={dialLeadAction === null ? DIAL_UNAVAILABLE_COPY : undefined}
             onClick={onCall}
           >
             Call
@@ -223,10 +229,14 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
             Back to My Leads
           </Link>
         </div>
-        {dialLeadAction === null ? (
-          <p data-testid="call-dial-unavailable" className="text-muted-foreground w-full text-xs">{DIAL_UNAVAILABLE_COPY}</p>
-        ) : dialNotice ? (
-          <p role="alert" className="text-destructive w-full text-xs">{dialNotice}</p>
+        {clickToDial ? (
+          <div className="w-full">
+            <DialStatus
+              flight={dialFlight}
+              {...statusHandlers}
+              onEnded={() => router.refresh()}
+            />
+          </div>
         ) : null}
       </header>
 
