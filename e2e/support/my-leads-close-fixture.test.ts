@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { verifyDialpadWebhookJwt } from "../../src/lib/dialpad-cti/webhook-jwt";
-import { assertLaneSafe, cleanupSyntheticLead, dialpadEventPayload, MY_LEADS_CLOSE_FLAGS, signDialpadWebhook } from "./my-leads-close-fixture";
+import { assertLaneSafe, cleanupSyntheticLead, purgeDialpadEvidenceCi, dialpadEventPayload, MY_LEADS_CLOSE_FLAGS, signDialpadWebhook } from "./my-leads-close-fixture";
 
 describe("my-leads-close fixture (pure parts)", () => {
   it("signs a webhook body the app's verifier accepts, and not with another secret", () => {
@@ -56,11 +56,12 @@ describe("my-leads-close fixture (pure parts)", () => {
 
 describe("cleanupSyntheticLead handle checks", () => {
   const lead = { propertyId: "p", contactId: "c", address: "E2E-CLOSE abc Close Ln", phoneE164: "+18165550142", episodeId: "e", runTag: "E2E-CLOSE abc" };
-  const fakeDb = (addr: string | null, address: string) => ({
+  const fakeDb = (host: string | null, address: string) => ({
+    options: host ? { connectionString: `postgresql://postgres:postgres@${host}:54322/postgres` } : {},
     connect: async () => {
       throw new Error("must not reach the write path");
     },
-    query: async (sql: string) => ({ rows: sql.includes("inet_server_addr") ? [{ addr }] : [{ address }] }),
+    query: async () => ({ rows: [{ address }] }),
   }) as never;
   const ciEnv = { E2E_DISPOSABLE_DATABASE: "1", E2E_CI_SUPABASE_DB_URL: "postgresql://postgres:postgres@127.0.0.1:54322/postgres" };
 
@@ -69,6 +70,8 @@ describe("cleanupSyntheticLead handle checks", () => {
     Object.assign(process.env, ciEnv);
     try {
       await expect(cleanupSyntheticLead(fakeDb("10.1.2.3", lead.address), lead, "ci", "u")).rejects.toThrow(/not loopback/);
+      await expect(cleanupSyntheticLead(fakeDb(null, lead.address), lead, "ci", "u")).rejects.toThrow(/not loopback/);
+      await expect(purgeDialpadEvidenceCi(fakeDb("10.1.2.3", lead.address), "u")).rejects.toThrow(/not configured for a loopback/);
       await expect(cleanupSyntheticLead(fakeDb("127.0.0.1", "Someone Else Ln"), lead, "ci", "u")).rejects.toThrow(/not the tagged synthetic lead/);
     } finally {
       for (const key of Object.keys(ciEnv)) {

@@ -112,7 +112,26 @@ export type CleanupReport = {
   propertyDeletedAt: string | null;
 };
 
-type Queryable = Pick<Pool, "query" | "connect">;
+type Queryable = Pick<Pool, "query" | "connect"> & { options?: { connectionString?: string; host?: string } };
+
+/**
+ * Where the handle was CONFIGURED to connect, from the pool's own client options. Never ask the
+ * server (`inet_server_addr()` reports the container IP when Postgres runs in Docker, even for a
+ * 127.0.0.1 client). `unknown` when the pool carries neither a URL nor a host; callers fail closed.
+ */
+export function handleTarget(db: Queryable): "loopback" | "remote" | "unknown" {
+  const o = db.options;
+  if (o?.connectionString) {
+    try {
+      requireLoopbackPostgresUrl(o.connectionString);
+      return "loopback";
+    } catch {
+      return "remote";
+    }
+  }
+  if (o?.host) return ["127.0.0.1", "localhost", "::1", "[::1]"].includes(o.host) ? "loopback" : "remote";
+  return "unknown";
+}
 
 /** Runs `fn` on one connection inside a transaction with `set local role service_role` and the matching claim. */
 async function asService<T>(db: Queryable, fn: (q: { query: Pool["query"] }) => Promise<T>): Promise<T> {
@@ -227,10 +246,8 @@ export async function resetCloseWorld(db: Queryable, input: { orgId: string; rep
  */
 export async function purgeDialpadEvidenceCi(db: Queryable, repUserId: string, env: Env = process.env): Promise<void> {
   assertLaneSafe("ci", env);
-  // Check the handle actually passed in, not just the environment (same rule as cleanupSyntheticLead).
-  const server = await db.query<{ addr: string | null }>("select inet_server_addr()::text as addr");
-  const addr = server.rows[0]?.addr ?? null; // null = unix socket (local)
-  if (!(addr === null || /^(127\.|::1)/.test(addr))) throw new Error(`purgeDialpadEvidenceCi: the database handle is not loopback (${addr}).`);
+  // Check the handle actually passed in (its configured URL/host), not just the environment.
+  if (handleTarget(db) !== "loopback") throw new Error("purgeDialpadEvidenceCi: the database handle is not configured for a loopback host.");
   await db.query("truncate table public.dialpad_member_bindings cascade");
   // The UI save writes an idempotency receipt per command (`acquisition_commands.actor_user_id` is ON
   // DELETE RESTRICT and, unlike attempts, is not wiped by the next spec's reset_tenant_tables()).
@@ -501,12 +518,11 @@ export async function retireSyntheticLead(db: Queryable, lead: SyntheticLead, re
 export async function cleanupSyntheticLead(db: Queryable, lead: SyntheticLead, lane: CloseLane, repUserId: string): Promise<CleanupReport> {
   assertLaneSafe(lane);
   // Check the handle actually passed in, not just the environment.
-  const server = await db.query<{ addr: string | null }>("select inet_server_addr()::text as addr");
-  const addr = server.rows[0]?.addr ?? null; // null = unix socket (local)
-  const loopback = addr === null || /^(127\.|::1)/.test(addr);
-  if (lane === "ci" && !loopback) throw new Error(`cleanupSyntheticLead: the ci lane's database handle is not loopback (${addr}).`);
+  // The handle's configured target, not the server's self-reported address (a Docker Postgres reports its container IP).
+  const target = handleTarget(db);
+  if (lane === "ci" && target !== "loopback") throw new Error(`cleanupSyntheticLead: the ci lane's database handle is not loopback (${target}).`);
   if (lane !== "ci") {
-    if (loopback) throw new Error("cleanupSyntheticLead: a production lane was given a loopback database handle.");
+    if (target !== "remote") throw new Error(`cleanupSyntheticLead: a production lane needs a non-loopback database handle (${target}).`);
     assertCanaryOwned(lead.runTag, "synthetic lead run tag");
     assertCanaryOwned(lead.address, "synthetic lead address");
   }
