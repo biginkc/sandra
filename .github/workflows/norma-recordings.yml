@@ -1,0 +1,43 @@
+name: Norma recording ledger
+on:
+  pull_request:
+    paths:
+      - "tests/integration/norma-followup-fixture.ts"
+      - "supabase/migrations/*_norma_retry_next_step_union_reviewed*"
+      - "src/lib/norma/recording*"
+      - "src/app/(dashboard)/leads/[id]/norma-recordings*"
+      - "src/app/api/norma/requests/**/recordings/**"
+      - "src/app/api/cron/norma-recordings/**"
+      - "supabase/migrations/*_norma_outbound_recording_state*"
+      - "vitest.norma-recordings.config.ts"
+      - ".github/workflows/norma-recordings.yml"
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  packages: read
+jobs:
+  recordings:
+    name: Norma recording authorization and ledger
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.116.0
+      - run: npm ci
+      - name: Provision disposable Sandra schema
+        run: node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 --no-baseline-owner
+      - name: Verify recording identity and authorization
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+        run: npx vitest run --config vitest.norma-recordings.config.ts
+      - name: Stop disposable stack
+        if: always() && env.E2E_LOCAL_WORKDIR != ''
+        run: supabase stop --workdir "$E2E_LOCAL_WORKDIR" --no-backup

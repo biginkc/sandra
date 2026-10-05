@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { getUser, maybeSingle, from, eq, select } = vi.hoisted(() => ({
-  getUser: vi.fn(), maybeSingle: vi.fn(), from: vi.fn(), eq: vi.fn(), select: vi.fn(),
+const { getUser, maybeSingle, from, eq, select, availability } = vi.hoisted(() => ({
+  getUser: vi.fn(), maybeSingle: vi.fn(), from: vi.fn(), eq: vi.fn(), select: vi.fn(), availability: vi.fn(),
 }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: async () => {
-  const query = { select: select.mockImplementation(() => query), eq: eq.mockImplementation(() => query), maybeSingle };
+  const query = { select: select.mockImplementation(() => query), eq: eq.mockImplementation(() => query), maybeSingle, then: (resolve: (value: unknown) => void) => resolve(availability()) };
   from.mockReturnValue(query);
   return { auth: { getUser }, from };
 } }));
@@ -16,6 +16,7 @@ const request = (attempt = "1", headers: Record<string, string> = {}, requestId 
 
 beforeEach(() => {
   vi.clearAllMocks();
+  availability.mockReturnValue({ data: [], error: null });
   vi.stubGlobal("fetch", fetchMock);
   vi.stubEnv("BLAND_API_KEY", "private-test-key");
   getUser.mockResolvedValue({ data: { user: { id: "member" } }, error: null });
@@ -59,7 +60,7 @@ describe("Norma recording playback authorization and transport", () => {
   it("lists only attempt numbers, without provider IDs, URLs, or call contents", async () => {
     maybeSingle.mockResolvedValue({ data: { id: ID, attempt: 2, first_bland_call_id: "call-1", bland_call_id: "call-2", summary: "private summary", recording_url: "https://evil.test/audio" }, error: null });
     const r = await list(new Request("https://sandra.test"), { params: Promise.resolve({ requestId: ID }) });
-    expect(await r.json()).toEqual({ recordings: [{ attempt: 1 }, { attempt: 2 }] });
+    expect(await r.json()).toEqual({ recordings: [{ attempt: 1, state: "unchecked" }, { attempt: 2, state: "unchecked" }] });
     expect(r.headers.get("cache-control")).toBe("private, no-store");
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -146,4 +147,20 @@ describe("Norma recording playback authorization and transport", () => {
     expect((await request()).status).toBe(503);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+  it("returns persisted state only for the matching stored call identity", async () => {
+    availability.mockReturnValue({data:[{attempt:1,provider_call_id:"wrong-call",state:"reported_available"}],error:null});
+    const params={params:Promise.resolve({requestId:ID})};
+    expect(await (await list(new Request("https://test.invalid"),params)).json()).toEqual({recordings:[{attempt:1,state:"unchecked"}]});
+    availability.mockReturnValue({data:[{attempt:1,provider_call_id:"call-1",state:"unavailable"}],error:null});
+    expect(await (await list(new Request("https://test.invalid"),params)).json()).toEqual({recordings:[{attempt:1,state:"unavailable"}]});
+  });
+  it("preserves legacy playback on absent schema but keeps playback usable on unexpected database errors", async () => {
+    const params={params:Promise.resolve({requestId:ID})};
+    availability.mockReturnValue({data:null,error:{code:"42P01",message:"private"}});
+    expect((await list(new Request("https://test.invalid"),params)).status).toBe(200);
+    availability.mockReturnValue({data:null,error:{code:"XX000",message:"private"}});
+    const response=await list(new Request("https://test.invalid"),params);
+    expect(response.status).toBe(200);expect(await response.json()).toEqual({recordings:[{attempt:1,state:"unchecked"}]});
+  });
+
 });

@@ -65,4 +65,16 @@ describe("Norma recordings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Reload recordings" }));
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
+  it("distinguishes persisted pending, unavailable and failed availability without removing playback", async () => {
+    respond([{ attempt: 1, state: "pending" }, { attempt: 2, state: "failed" }]);
+    const { container } = mount();
+    fireEvent.click(screen.getByRole("button"));
+    await screen.findByText("Recording is still processing or awaiting an availability check.");
+    await screen.findByText("Recording availability could not be checked. Playback may still work; try again later.");
+    expect(container.querySelectorAll("audio")).toHaveLength(2);
+    respond([{ attempt: 1, state: "unavailable" }]);
+    fireEvent.click(screen.getByRole("button", { name: "Reload recordings" }));
+    await screen.findByText("No recording was available after repeated checks.");
+  });
+
 });
