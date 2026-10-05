@@ -149,8 +149,6 @@ export default defineConfig({
     "**/prod-canary/**",
     "**/synthetic/**",
     "**/properties-filter-characterization.*.ts",
-    // Vitest unit tests that live beside the fixtures; Playwright would load them as specs and crash.
-    "**/support/**/*.test.ts",
   ],
   // Don't run in parallel — the suite resets shared DB tables. Parallel
   // specs would race each other and flake.

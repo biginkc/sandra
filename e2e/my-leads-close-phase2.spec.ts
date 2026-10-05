@@ -25,7 +25,7 @@ import {
   seedFeatureFlags,
   signDialpadWebhook,
   type SyntheticLead,
-} from "./support/my-leads-close-fixture";
+} from "./support/my-leads-p2-fixture";
 
 /**
  * my-leads-close Phase 2 CI acceptance slice (TECH-PLAN 4.3: T0 Phase 1-2 seams, T3, T7, T8).
@@ -54,10 +54,44 @@ const PHONE_SHARED = "+18165550144";
 const PHONE_UNKNOWN = "+18165550199";
 const PHONE_TRAINING = "+18165550145";
 
-const ciLane = process.env.E2E_DISPOSABLE_DATABASE === "1";
 
-type World = { db: pg.Pool; repUserId: string; connectionId: string; runTag: string; lead: SyntheticLead };
-const world: Partial<World> = {};
+type Ctx = { db: pg.Pool; repUserId: string; connectionId: string; runTag: string; lead: SyntheticLead };
+let ctx: Ctx | undefined;
+let pool: pg.Pool | undefined;
+let repId: string | undefined;
+const need = (): Ctx => {
+  if (!ctx) throw new Error("Phase 2 acceptance context was not initialised");
+  return ctx;
+};
+
+/** Seeds the org for this file: rep designated, Phase 2 flags on, bound Dialpad connection, one fresh lead. */
+async function bootstrap(): Promise<void> {
+  assertLaneSafe("ci");
+  const admin = adminClient();
+  await resetTenantTables(admin);
+  repId = await ensureTestUser(admin);
+  pool = new pg.Pool({ connectionString: ciDatabaseUrl(), max: 3 });
+  const runTag = `E2E-CLOSE-P2 ${randomUUID().slice(0, 8)}`;
+  await designateRep(pool, { orgId: DEFAULT_ORG_ID, repUserId: repId });
+  await seedFeatureFlags(pool, DEFAULT_ORG_ID, ["call_next_strip", "post_call_prompt", "click_to_dial", "native_matcher", "auto_prompt", "callback_alert"]);
+  const { connectionId } = await seedDialpadForRep(pool, { orgId: DEFAULT_ORG_ID, repUserId: repId });
+  const lead = await createSyntheticLead(pool, { orgId: DEFAULT_ORG_ID, repUserId: repId, runTag, phoneE164: PHONE_MAIN, lastTouchDaysAgo: 20 });
+  ctx = { db: pool, repUserId: repId, connectionId, runTag, lead };
+}
+
+/** Undoes bootstrap in the order that keeps the next spec file's reset trigger happy; always closes the pool. */
+async function teardown(): Promise<void> {
+  if (!pool) return;
+  try {
+    if (repId) await resetCloseWorld(pool, { orgId: DEFAULT_ORG_ID, repUserId: repId });
+  } finally {
+    try {
+      await purgeDialpadEvidenceCi(pool);
+    } finally {
+      await pool.end();
+    }
+  }
+}
 
 /** A fresh 19-digit Dialpad call id (the verifier keeps int64 ids intact). */
 function newCallId(): string {
@@ -65,7 +99,7 @@ function newCallId(): string {
 }
 
 async function postEvent(input: Parameters<typeof dialpadEventPayload>[0]): Promise<void> {
-  const { connectionId } = world as World;
+  const { connectionId } = need();
   const text = dialpadEventPayload(input);
   const res = await postDialpadEvent(BASE_URL, connectionId, signDialpadWebhook(text, WEBHOOK_SECRET));
   expect(res.status, `webhook accepted ${input.state}`).toBeLessThan(300);
@@ -100,65 +134,38 @@ async function clickCall(page: Page, propertyId: string): Promise<void> {
 
 test.describe.serial("my-leads-close: Phase 2 CI lane", () => {
   test.setTimeout(150_000);
-  test.skip(!ciLane, "my-leads-close runs only against the disposable CI database (E2E_DISPOSABLE_DATABASE=1).");
+  test.skip(process.env.E2E_DISPOSABLE_DATABASE !== "1", "Phase 2 acceptance needs the disposable stack (E2E_DISPOSABLE_DATABASE=1).");
 
-  test.beforeAll(async () => {
-    assertLaneSafe("ci");
-    const admin = adminClient();
-    await resetTenantTables(admin);
-    const repUserId = await ensureTestUser(admin);
-    const db = new pg.Pool({ connectionString: ciDatabaseUrl(), max: 3 });
-    Object.assign(world, { db, repUserId });
-    const runTag = `E2E-CLOSE-P2 ${randomUUID().slice(0, 8)}`;
-    await designateRep(db, { orgId: DEFAULT_ORG_ID, repUserId });
-    await seedFeatureFlags(db, DEFAULT_ORG_ID, ["call_next_strip", "post_call_prompt", "click_to_dial", "native_matcher", "auto_prompt", "callback_alert"]);
-    const { connectionId } = await seedDialpadForRep(db, { orgId: DEFAULT_ORG_ID, repUserId });
-    const lead = await createSyntheticLead(db, { orgId: DEFAULT_ORG_ID, repUserId, runTag, phoneE164: PHONE_MAIN, lastTouchDaysAgo: 20 });
-    Object.assign(world, { db, repUserId, connectionId, runTag, lead });
-  });
-
-  test.afterAll(async () => {
-    const { db, repUserId } = world;
-    if (!db) return;
-    try {
-      if (repUserId) await resetCloseWorld(db, { orgId: DEFAULT_ORG_ID, repUserId });
-    } finally {
-      try {
-        await purgeDialpadEvidenceCi(db);
-      } finally {
-        await db.end();
-      }
-    }
-  });
+  test.beforeAll(bootstrap);
+  test.afterAll(teardown);
 
   test("my-leads-close: T0 Phase 1-2 seam preflight", async () => {
-    const root = path.resolve(__dirname, "..");
-    const read = (rel: string) => fs.readFileSync(path.join(root, rel), "utf8");
+    const repoFile = (rel: string) => path.resolve(__dirname, "..", rel);
     const my = "src/app/(dashboard)/my-leads";
-    const seams: Array<[string, string, RegExp]> = [
-      ["S1 dial provider switch", "src/lib/dialpad-cti/api-dial.ts", /DIALPAD_DIAL_PROVIDER/],
-      ["S1 production ignores stub", "src/lib/dialpad-cti/api-dial.ts", /VERCEL_ENV === 'production'\) return 'live'/],
-      ["S4 strip", `${my}/_components/call-next-strip.tsx`, /data-testid="call-next-strip"/],
-      ["S4 strip row call", `${my}/_components/call-next-row.tsx`, /call-next-action-call-\$\{propertyId\}/],
-      ["S4 prompt", `${my}/_components/post-call-prompt.tsx`, /data-testid="post-call-prompt"/],
-      ["S4 prompt outcome", `${my}/_components/post-call-prompt.tsx`, /data-testid="post-call-outcome"/],
-      ["S4 dial status", `${my}/_components/dial-status.tsx`, /data-testid="dial-status"/],
-      ["S4 callback banner", `${my}/_components/callback-due-banner.tsx`, /data-testid="callback-due-banner"/],
-      ["S6 poll uses timers not rAF", `${my}/_components/use-call-state-poll.ts`, /setTimeout/],
-      ["S7 flags", "src/lib/my-leads/flags.ts", /my_leads_feature_flags/],
-      ["S7 native matcher flag", "src/lib/my-leads/flags.ts", /native_matcher/],
-      ["P2 ambiguous list RPC", `${my}/call-state-actions.ts`, /fn_list_ambiguous_native_calls/],
-      ["P2 prompts RPC", `${my}/call-state-actions.ts`, /fn_list_unacknowledged_call_prompts/],
-    ];
-    const missing = seams.filter(([, file, pattern]) => !fs.existsSync(path.join(root, file)) || !pattern.test(read(file))).map(([name]) => name);
+    const wanted: Record<string, { file: string; has: RegExp }> = {
+      "S1 dial provider switch": { file: "src/lib/dialpad-cti/api-dial.ts", has: /DIALPAD_DIAL_PROVIDER/ },
+      "S1 production ignores the stub": { file: "src/lib/dialpad-cti/api-dial.ts", has: /VERCEL_ENV === 'production'\) return 'live'/ },
+      "S4 strip": { file: `${my}/_components/call-next-strip.tsx`, has: /data-testid="call-next-strip"/ },
+      "S4 strip Call action": { file: `${my}/_components/call-next-row.tsx`, has: /call-next-action-call-\$\{propertyId\}/ },
+      "S4 post-call prompt": { file: `${my}/_components/post-call-prompt.tsx`, has: /data-testid="post-call-prompt"/ },
+      "S4 prompt outcome": { file: `${my}/_components/post-call-prompt.tsx`, has: /data-testid="post-call-outcome"/ },
+      "S4 dial status": { file: `${my}/_components/dial-status.tsx`, has: /data-testid="dial-status"/ },
+      "S4 callback banner": { file: `${my}/_components/callback-due-banner.tsx`, has: /data-testid="callback-due-banner"/ },
+      "S6 poll is timer based": { file: `${my}/_components/use-call-state-poll.ts`, has: /setTimeout/ },
+      "S7 flag reader": { file: "src/lib/my-leads/flags.ts", has: /native_matcher/ },
+      "P2 ambiguous list": { file: `${my}/call-state-actions.ts`, has: /fn_list_ambiguous_native_calls/ },
+      "P2 prompt list": { file: `${my}/call-state-actions.ts`, has: /fn_list_unacknowledged_call_prompts/ },
+    };
+    const missing = Object.entries(wanted)
+      .filter(([, w]) => !fs.existsSync(repoFile(w.file)) || !w.has.test(fs.readFileSync(repoFile(w.file), "utf8")))
+      .map(([name]) => name);
     expect(missing, `missing Phase 1-2 seams: ${missing.join(", ")}`).toEqual([]);
-    const pollSource = read(`${my}/_components/use-call-state-poll.ts`);
-    expect(pollSource).not.toMatch(/requestAnimationFrame/);
+    expect(fs.readFileSync(repoFile(`${my}/_components/use-call-state-poll.ts`), "utf8")).not.toMatch(/requestAnimationFrame/);
     expect(() => assertLaneSafe("ci")).not.toThrow();
   });
 
   test("my-leads-close: T3 dial (stub), hangup events, replay, and the post-call prompt opens only after other dialogs close", async ({ page }) => {
-    const { db, lead } = world as World;
+    const { db, lead } = need();
     expect(await readDialIntents(db, lead.propertyId)).toHaveLength(0);
 
     await page.goto("/my-leads");
@@ -223,7 +230,7 @@ test.describe.serial("my-leads-close: Phase 2 CI lane", () => {
   });
 
   test("my-leads-close: T3b expired call keeps its key for a retry, a deliberate Dismiss releases it", async ({ page }) => {
-    const { db, repUserId, runTag } = world as World;
+    const { db, repUserId, runTag } = need();
     const lead = await createSyntheticLead(db, { orgId: DEFAULT_ORG_ID, repUserId, runTag, phoneE164: "+18165550146", lastTouchDaysAgo: 40 });
     await page.goto("/my-leads");
     await clickCall(page, lead.propertyId);
@@ -250,7 +257,7 @@ test.describe.serial("my-leads-close: Phase 2 CI lane", () => {
   });
 
   test("my-leads-close: T7 training lead calls are isolated: internal_training, no attempt, no prompt", async ({ page }) => {
-    const { db, repUserId, runTag } = world as World;
+    const { db, repUserId, runTag } = need();
     const training = await createSyntheticLead(db, { orgId: DEFAULT_ORG_ID, repUserId, runTag: `${runTag} TRAIN`, phoneE164: PHONE_TRAINING, training: true });
     const intent = await prepareDialpadIntent(db, { orgId: DEFAULT_ORG_ID, repUserId, lead: training });
     const callId = newCallId();
@@ -279,7 +286,7 @@ test.describe.serial("my-leads-close: Phase 2 CI lane", () => {
   });
 
   test("my-leads-close: T8 native call: one lead matches, shared number is ambiguous, unknown number is no_lead_match", async ({ page }) => {
-    const { db, repUserId, runTag } = world as World;
+    const { db, repUserId, runTag } = need();
     const one = await createSyntheticLead(db, { orgId: DEFAULT_ORG_ID, repUserId, runTag, phoneE164: PHONE_NATIVE, lastTouchDaysAgo: 25 });
 
     // One live lead with that number: matched, attempt keyed by the call id.
@@ -299,7 +306,7 @@ test.describe.serial("my-leads-close: Phase 2 CI lane", () => {
       .poll(async () => new Set(await readEventDispositions(db, DEFAULT_ORG_ID, ambiguousCall)).has("quarantined:ambiguous_lead"), { timeout: 30_000 })
       .toBe(true);
     // The list RPC needs the rep's JWT identity (F4), so read it through the member helper.
-    const ambiguousList = await asMember(db, repUserId, (q) => q.query<{ v: unknown }>("select public.fn_list_ambiguous_native_calls($1) as v", [DEFAULT_ORG_ID]));
+    const ambiguousList = await asMember(db, repUserId, (run) => run<{ v: unknown }>("select public.fn_list_ambiguous_native_calls($1) as v", [DEFAULT_ORG_ID]));
     expect(JSON.stringify(ambiguousList.rows[0]!.v)).toContain(ambiguousCall);
 
     // Unknown number: quarantined no_lead_match, no attempt anywhere.
