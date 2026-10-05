@@ -19,7 +19,7 @@ const params = { phoneNumber: "+18165550142", requestId: "r1", idempotencyKey: "
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
 
 describe("bland send-call classification", () => {
-  it("builds the exact body: integer version, hangup voicemail, no retry, metadata, webhook", () => {
+  it("builds the exact body: recording, integer version, hangup voicemail, no retry, metadata, webhook", () => {
     const body = buildSendCallBody(config, params);
     expect(body).toEqual({
       phone_number: "+18165550142",
@@ -29,6 +29,7 @@ describe("bland send-call classification", () => {
       from: "+12135550100",
       metadata: { request_id: "r1", idempotency_key: "k1" },
       webhook: "https://sandra.test/api/webhooks/bland/call",
+      record: true,
       voicemail: { action: "hangup" },
       request_data: { a: "b" },
       wait_for_greeting: true,
@@ -52,6 +53,7 @@ describe("bland send-call classification", () => {
     expect(url).toBe("https://bland.test/v1/calls");
     expect(init.method).toBe("POST");
     expect(init.headers.Authorization).toBe("Bearer test-key");
+    expect(JSON.parse(init.body)).toEqual(buildSendCallBody(config, params));
   });
 
   it("accepted: 2xx success with a call id", async () => {

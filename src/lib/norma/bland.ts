@@ -82,6 +82,8 @@ export function buildSendCallBody(config: NormaBlandConfig, params: BlandSendCal
     from: config.fromNumber,
     metadata: { request_id: params.requestId, idempotency_key: params.idempotencyKey },
     webhook: config.webhookUrl,
+    // Explicitly request audio for every outbound Norma call.
+    record: true,
     // No voicemail message, no retry: a no-answer ends the attempt.
     voicemail: { action: "hangup" },
     request_data: params.variables,
