@@ -54,6 +54,108 @@ function setup(over: Partial<ContractCardCoreDeps> = {}, viewer = { userId: USER
   return { core: createContractCardCore(deps), deps, projection, sendSpy };
 }
 
+describe("sendContractCard motivation and open-contract guard", () => {
+  it("never requires a motivation to send, and records one (with temperature) when supplied", async () => {
+    const { core, projection, sendSpy } = setup();
+    projection.precheck.mockResolvedValue({ ok: true as const, motivationRecorded: false } as never);
+    expect((await core.sendContractCard(input())).status).toBe("sent");
+    expect(projection.createIntent).toHaveBeenCalledWith(expect.objectContaining({ motivation: null, temperature: null }));
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const res = await core.sendContractCard(input({ motivation: { kind: "specified", text: "relocating" }, temperature: "hot" }));
+    expect(res.status).toBe("sent");
+    expect(projection.createIntent).toHaveBeenCalledWith(expect.objectContaining({ motivation: { kind: "specified", text: "relocating" }, temperature: "hot" }));
+  });
+
+  it("rejects a malformed motivation or temperature", async () => {
+    const { core, sendSpy } = setup();
+    expect(await core.sendContractCard(input({ motivation: { kind: "specified", text: "  " } as never }))).toMatchObject({ code: "INVALID_INPUT" });
+    expect(await core.sendContractCard(input({ temperature: "lava" as never }))).toMatchObject({ code: "INVALID_INPUT" });
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it("a second intent for the same lead is refused by the database guard and nothing is sent", async () => {
+    const { core, projection, sendSpy } = setup();
+    for (const [error, code] of [["OPEN_CONTRACT_EXISTS", "OPEN_CONTRACT_EXISTS"], ["PENDING_OFFER_EXISTS", "PENDING_OFFER_EXISTS"]] as const) {
+      projection.createIntent.mockResolvedValueOnce({ error } as never);
+      expect(await core.sendContractCard(input({ sendIntentId: randomIntent() }))).toMatchObject({ status: "blocked", code });
+    }
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+});
+
+const randomIntent = () => "eeeeeeee-eeee-4eee-8eee-" + Math.random().toString(16).slice(2, 14).padEnd(12, "0");
+
+describe("typed title company and buyer entity", () => {
+  const typed = (over: Partial<SendContractCardInput> = {}) => input({
+    titleCompanyId: "", buyerEntityId: "",
+    titleCompanyNew: { name: "Brand New Title", closingAgentName: "Agent Z", closingAgentPhone: "555-0199", closingAgentAddress: "9 Test Ave" },
+    buyerEntityNew: { name: "Brand New Buyer LLC", email: "nb@example.test", phone: "555-0198", attorneyInFact: "Test Attorney" },
+    ...over,
+  });
+  it("saves a new one for reuse when the sender may, once the intent exists, and still sends", async () => {
+    const saveTitleCompany = vi.fn(async () => true);
+    const saveBuyerEntity = vi.fn(async () => true);
+    const { core, projection, sendSpy } = setup({ saveTitleCompany, saveBuyerEntity });
+    const res = await core.sendContractCard(typed());
+    expect(res.status).toBe("sent");
+    expect(res).not.toHaveProperty("typedNotSaved");
+    expect(saveTitleCompany).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ name: "Brand New Title" }));
+    expect(saveBuyerEntity).toHaveBeenCalledTimes(1);
+    expect(projection.createIntent.mock.invocationCallOrder[0]).toBeLessThan(saveTitleCompany.mock.invocationCallOrder[0]);
+    const values = (sendSpy.mock.calls[0] as unknown as [{ mergeValues: Record<string, string> }])[0].mergeValues;
+    expect(Object.values(values)).toContain("Brand New Title");
+  });
+  it("a sender who may not write the list sends with the typed values and is told they were not saved", async () => {
+    const saveTitleCompany = vi.fn(async () => false);
+    const { core, sendSpy } = setup({ saveTitleCompany, saveBuyerEntity: async () => false });
+    expect(await core.sendContractCard(typed())).toMatchObject({ status: "sent", typedNotSaved: true });
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const none = setup(); // no save capability at all
+    expect(await none.core.sendContractCard(typed())).toMatchObject({ status: "sent", typedNotSaved: true });
+  });
+  it("a typed name that matches a saved one is reused, not saved twice", async () => {
+    const saveTitleCompany = vi.fn(async () => true);
+    const { core } = setup({ saveTitleCompany });
+    await core.sendContractCard(typed({ titleCompanyNew: { name: " test title co ", closingAgentName: "Agent Z", closingAgentPhone: "555-0199", closingAgentAddress: "9 Test Ave" } }));
+    expect(saveTitleCompany).not.toHaveBeenCalled();
+  });
+  it("refuses while any of title company, buyer entity or earnest money is empty; nothing is saved or sent", async () => {
+    const saveTitleCompany = vi.fn(async () => true);
+    const { core, sendSpy, projection } = setup({ saveTitleCompany });
+    expect(await core.sendContractCard(input({ titleCompanyId: "", buyerEntityId: BUYER.id }))).toMatchObject({ code: "INVALID_INPUT" });
+    expect(await core.sendContractCard(typed({ titleCompanyNew: { name: "x", closingAgentName: " " } }))).toMatchObject({ code: "INVALID_INPUT" });
+    expect(await core.sendContractCard(typed({ buyerEntityNew: { name: " " } }))).toMatchObject({ code: "INVALID_INPUT" });
+    expect(await core.sendContractCard({ ...typed(), earnestMoneyCents: undefined } as never)).toMatchObject({ code: "EARNEST_MONEY_MISSING" });
+    expect(await core.sendContractCard(input({ titleCompanyId: "99999999-9999-4999-8999-999999999999" }))).toMatchObject({ code: "TITLE_COMPANY_MISSING" });
+    expect(saveTitleCompany).not.toHaveBeenCalled();
+    expect(projection.createIntent).not.toHaveBeenCalled();
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("replay of a dead projection", () => {
+  const known = (state: ExistingOfferIntent["state"], esignRequestId: string | null = null): ExistingOfferIntent => ({
+    projectionId: "p", actorUserId: USER, requestHash: "h", submissionHash: submissionHashOf(input()), sendPayload: {}, state, esignRequestId,
+  } as ExistingOfferIntent);
+  it.each(["failed", "cancelled"] as const)("a %s projection replays as a definitive failure with no provider call", async (state) => {
+    const { core, projection, sendSpy } = setup();
+    projection.resolveIntent.mockResolvedValue(known(state, "r1"));
+    expect(await core.sendContractCard(input())).toMatchObject({ status: "failed", definitive: true });
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+  it.each(["awaiting_send", "pending"] as const)("a %s projection is never marked definitive", async (state) => {
+    const { core, projection } = setup();
+    projection.resolveIntent.mockResolvedValue(known(state, null));
+    const res = await core.sendContractCard(input());
+    expect((res as { definitive?: boolean }).definitive).toBeUndefined();
+  });
+  it.each(["logged", "conflict"] as const)("a %s projection with a request replays as sent, not failed", async (state) => {
+    const { core, projection } = setup();
+    projection.resolveIntent.mockResolvedValue(known(state, "r1"));
+    expect(await core.sendContractCard(input())).toMatchObject({ status: "sent" });
+  });
+});
+
 describe("sendContractCard", () => {
   it("is blocked FEATURE_DISABLED when the flag is off, before anything else runs", async () => {
     const { core, projection, sendSpy } = setup({ flagOn: async () => false });

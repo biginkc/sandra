@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const sdk = vi.hoisted(() => ({
   accountGet: vi.fn(),
@@ -13,7 +13,7 @@ const sdk = vi.hoisted(() => ({
   files: vi.fn(),
   templateGet: vi.fn(),
   interceptorOptions: [] as Array<{ signal?: AbortSignal }>,
-  credentials: [] as Array<{ username?: string; password?: string }>,
+  credentials: [] as Array<{ username?: string; password?: string; basePath?: string }>,
 }));
 
 vi.mock("server-only", () => ({}));
@@ -21,8 +21,10 @@ vi.mock("@dropbox/sign", () => {
   class BaseApi {
     username?: string;
     password?: string;
+    basePath = "https://api.hellosign.com/v3";
 
-    constructor() {
+    constructor(basePath?: string) {
+      if (basePath) this.basePath = basePath;
       sdk.credentials.push(this);
     }
 
@@ -545,5 +547,38 @@ describe("Dropbox Sign provider", () => {
     expect(sdk.interceptorOptions.at(-1)).toEqual({
       signal: controller.signal,
     });
+  });
+});
+
+describe("Dropbox Sign API base URL override (seam S3)", () => {
+  const DEFAULT_BASE = "https://api.hellosign.com/v3";
+  const saved = { ...process.env };
+  const build = () => {
+    sdk.credentials.length = 0;
+    createDropboxSignProvider({ apiKey: new EsignSecret("key"), clientId: "client-id" });
+    return sdk.credentials.map((c) => c.basePath);
+  };
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  it("keeps the default base path when unset", () => {
+    delete process.env.DROPBOX_SIGN_API_BASE_URL;
+    delete process.env.VERCEL_ENV;
+    const paths = build();
+    expect(paths.length).toBeGreaterThan(0);
+    expect(paths.every((p) => p === DEFAULT_BASE)).toBe(true);
+  });
+
+  it("applies the override outside production", () => {
+    process.env.DROPBOX_SIGN_API_BASE_URL = "http://127.0.0.1:4010/v3";
+    process.env.VERCEL_ENV = "preview";
+    expect(build().every((p) => p === "http://127.0.0.1:4010/v3")).toBe(true);
+  });
+
+  it("ignores the override when VERCEL_ENV is production", () => {
+    process.env.DROPBOX_SIGN_API_BASE_URL = "http://127.0.0.1:4010/v3";
+    process.env.VERCEL_ENV = "production";
+    expect(build().every((p) => p === DEFAULT_BASE)).toBe(true);
   });
 });
