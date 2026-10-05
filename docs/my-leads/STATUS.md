@@ -30,7 +30,7 @@ Last updated: 2026-10-04 (after #801 release)
 | `claude/my-leads-p2-ui` | #809 | Phase 2 writer | draft, built, NOT merged; Opus YES at `8ab5fc5a` |
 | `claude/my-leads-p4-acceptance` | #804 | Phase 4 writer | draft, built, NOT merged; Opus YES at `3cec0c19` |
 | `claude/my-leads-p3-comps` | #805 | Phase 3 writer | draft, built, NOT merged; Opus YES at `bb86747e` |
-| `claude/my-leads-p3-call-screen` | #807 | Phase 3 writer | draft, built, NOT merged; Opus YES at `a908ad1c` |
+| `claude/my-leads-p3-call-screen` | #807 | Claude Sonnet 5.5 builder | draft, built, NOT merged; Opus YES at `a908ad1c`; pre-enable fixes in progress (dock opening key, notFound on membership failures, valuation action flag+ownership, drop whole-page schemaReady gate) |
 | `p3-send-card`, `p1a-retire` | none | none | NOT built yet |
 | all other branches | none | unclaimed | claim here before writing |
 
