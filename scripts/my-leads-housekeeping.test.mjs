@@ -35,7 +35,9 @@ function harness({ preview = PREVIEW, memberships = [{ user_id: JARRAD }], rpcEr
   return { io, calls, out, err };
 }
 
-const reassign = ["reassign", "--org", ORG];
+const MARIA = "44444444-4444-4444-8444-444444444444";
+const MEL = "55555555-5555-4555-8555-555555555555";
+const reassign = ["reassign", "--org", ORG, "--from", `${MEL},${MARIA}`];
 
 test("parseArgs validates uuids and rejects unknown flags", () => {
   assert.equal(parseArgs(["rollback", "--run", RUN, "--org", ORG]).run, RUN);
@@ -195,6 +197,32 @@ test("offer-backfill previews and applies through the offer follow-up function w
   const a = harness({ preview });
   assert.equal(await run(["offer-backfill", "--org", ORG, "--apply", "--confirm", sha256Hex(canonicalJson({ ...HOST, ...preview }))], a.io), 0);
   assert.deepEqual(a.calls[1].args, { p_org_id: ORG, p_actor: JARRAD, p_apply: true, p_fingerprint: preview.fingerprint });
+});
+
+test("reassign requires --from, refuses the target as a source, and passes sorted unique sources", async () => {
+  const none = harness();
+  assert.equal(await run(["reassign", "--org", ORG], none.io), 1);
+  assert.match(none.err.join(""), /--from is required/);
+  assert.equal(none.calls.length, 0);
+  const self = harness();
+  assert.equal(await run(["reassign", "--org", ORG, "--from", `${MEL},${JARRAD}`], self.io), 1);
+  assert.match(self.err.join(""), /must not include the target/);
+  assert.equal(self.calls.length, 0);
+  assert.throws(() => parseArgs(["reassign", "--from", "nope"]), /UUIDs/);
+  assert.deepEqual(parseArgs(["reassign", "--from", `${MEL},${MARIA},${MEL}`]).from, [MARIA, MEL]);
+  const ok = harness();
+  assert.equal(await run(["reassign", "--org", ORG, "--from", `${MEL},${MARIA}`], ok.io), 0);
+  assert.deepEqual(ok.calls[0].args.p_sources, [MARIA, MEL]);
+});
+
+test("reassign preview prints per-source counts and emails when available", async () => {
+  const h = harness({ preview: { ...PREVIEW, leads: [{ from: MEL, count: 12 }, { from: MARIA, count: 2 }], tasks: { byAssignee: [{ assignee: MEL, nonAppointment: 3, appointments: 1 }] } } });
+  const client = h.io.createClient();
+  client.auth = { admin: { getUserById: async (id) => ({ data: { user: { email: id === MEL ? "mel@example.com" : null } } }) } };
+  assert.equal(await run(reassign, h.io), 0);
+  const err = h.err.join("");
+  assert.match(err, new RegExp(`source ${MEL} \\(mel@example.com\\): 12 leads, 3 tasks, 1 appointments`));
+  assert.match(err, new RegExp(`source ${MARIA}: 2 leads, 0 tasks, 0 appointments`));
 });
 
 test("link-backfill previews, refuses apply without the confirm hash, and applies through its own function", async () => {
