@@ -8,7 +8,6 @@ import { TasksPanel } from "./tasks-panel";
 // Server-action import in TaskActionsRow pulls in next/cache; stub.
 vi.mock("../../tasks/actions", () => ({
   completeTaskAction: vi.fn(),
-  snoozeTaskAction: vi.fn(),
   reassignTaskAction: vi.fn(),
 }));
 
@@ -343,7 +342,7 @@ describe("<TasksPanel />", () => {
     ).not.toBeNull();
   });
 
-  it("each row exposes Done and Snooze action buttons", () => {
+  it("each row exposes a Done action and no Snooze", () => {
     const today = [makeRow({ id: "t1" })];
     render(
       <TasksPanel
@@ -358,7 +357,7 @@ describe("<TasksPanel />", () => {
     );
 
     expect(screen.getByTestId("task-done-t1")).toBeInTheDocument();
-    expect(screen.getByTestId("task-snooze-t1")).toBeInTheDocument();
+    expect(screen.queryByTestId("task-snooze-t1")).toBeNull();
   });
 
   it("renders the outcome row (not the generic actions row) for a past-due open appointment", () => {

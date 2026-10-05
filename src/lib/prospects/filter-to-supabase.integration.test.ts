@@ -159,10 +159,10 @@ async function seedBig() {
     for (const [on, l] of listIds) if (on) { p.lists.push(l); plists.push({ org_id: BMH_ORG_ID, property_id: id, list_id: l }); }
     if (i < 450) {
       p.openTask = true;
-      tasks.push({ org_id: BMH_ORG_ID, assignee_id: userAId, created_by: userAId, related_property_id: id, type: "follow_up", status: "open", title: "t", due_at: now });
+      tasks.push({ org_id: BMH_ORG_ID, assignee_id: userAId, created_by: userAId, related_property_id: id, type: "custom", status: "open", title: "t", due_at: now });
     }
     if (i % 10 === 3) // completed-only task: must NOT count as open
-      tasks.push({ org_id: BMH_ORG_ID, assignee_id: userAId, created_by: userAId, related_property_id: id, type: "follow_up", status: "completed", title: "t", due_at: now });
+      tasks.push({ org_id: BMH_ORG_ID, assignee_id: userAId, created_by: userAId, related_property_id: id, type: "custom", status: "completed", title: "t", due_at: now });
     model.push(p);
   }
   await insertChunked("properties", props);
