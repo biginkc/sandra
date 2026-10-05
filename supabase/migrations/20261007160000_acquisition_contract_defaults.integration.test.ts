@@ -45,7 +45,7 @@ const TABLES = [
   'acquisition_contract_title_market_defaults',
 ] as const;
 
-describe('20261007110000_acquisition_contract_defaults', () => {
+describe('20261007160000_acquisition_contract_defaults', () => {
   it('ships empty: no title companies, buyer entities, settings or market defaults exist', async () => {
     await withTx(async (db) => {
       for (const t of TABLES) {
@@ -154,7 +154,7 @@ describe('20261007110000_acquisition_contract_defaults', () => {
   it('rollback twin applies cleanly: the four tables are gone and the earlier comps tables remain; reapplying works', async () => {
     await withTx(async (db) => {
       await asNone(db);
-      await db.query(stripTransaction('rollbacks/20261007110000_acquisition_contract_defaults.sql'));
+      await db.query(stripTransaction('rollbacks/20261007160000_acquisition_contract_defaults.sql'));
       for (const t of TABLES) {
         expect((await db.query(`select to_regclass($1) as r`, [`public.${t}`])).rows[0].r, t).toBeNull();
       }
