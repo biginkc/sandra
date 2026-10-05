@@ -25,7 +25,7 @@ describe("runCallFactsSweep", () => {
       facts: { asking_price: { value: "185k", evidence: "I want about 185k" }, motivation: { value: "divorce", evidence: "going through a divorce" } },
     }));
     await runCallFactsSweep(3, { claim: async () => ({ claims: [claim()], exhausted: [] }), complete, extractor, now: NOW });
-    expect(complete).toHaveBeenCalledWith({ factId: "f1", claimToken: "t1", facts: { asking_price: { value: "$185,000", evidence: "I want about 185k" } }, status: "proposed", model: "m" });
+    expect(complete).toHaveBeenCalledWith({ factId: "f1", claimToken: "t1", facts: { asking_price: { value: "185k", evidence: "I want about 185k", amount_cents: 18_500_000 } }, status: "proposed", model: "m" });
   });
 
   it("all fields dropped is no_facts", async () => {
@@ -110,7 +110,7 @@ describe("runCallFactsSweep with Jev", () => {
     expect(complete).toHaveBeenCalledWith(expect.objectContaining({
       model: "jev-1.13.0",
       status: "proposed",
-      facts: { asking_price: { value: "$185,000", evidence: "I want 185k, call [phone] or [email], I live at [address]" } },
+      facts: { asking_price: { value: "185k", evidence: "I want 185k, call [phone] or [email], I live at [address]", amount_cents: 18_500_000 } },
     }));
   });
 });
@@ -120,5 +120,23 @@ describe("runCallFactsSweep call time", () => {
     const extractor = vi.fn(async () => ({ model: null, facts: {} }));
     await runCallFactsSweep(1, { claim: async () => ({ claims: [claim({ ended_at: "2026-08-05T20:00:00Z" })], exhausted: [] }), complete: vi.fn(async () => undefined), extractor, now: NOW });
     expect(extractor).toHaveBeenCalledWith(expect.anything(), { now: NOW(), callAt: new Date("2026-08-05T20:00:00Z") });
+  });
+});
+
+describe("runCallFactsSweep rep names", () => {
+  it("masks the claim's rep names in the body and the summary before the extractor sees anything", async () => {
+    const seen: string[] = [];
+    const extractor = vi.fn(async (input: { summary: string | null; transcript: string | null }) => {
+      seen.push(JSON.stringify(input));
+      return { model: null, facts: {} };
+    });
+    await runCallFactsSweep(1, {
+      claim: async () => ({
+        claims: [claim({ summary: "Rick Rep called Sally", transcript: "Speaker: this is Rick Rep from the team\nOther: hi rick", contact_names: ["Sally"], rep_names: ["Rick Rep"] })],
+        exhausted: [],
+      }),
+      complete: vi.fn(async () => undefined), extractor, now: NOW,
+    });
+    expect(seen[0]).not.toMatch(/rick|sally/i);
   });
 });

@@ -4,6 +4,7 @@
 begin;
 
 drop function if exists public.fn_dismiss_call_facts(uuid, uuid);
+drop function if exists public.fn_unaccept_call_fact(uuid, uuid, text);
 drop function if exists public.fn_accept_call_fact(uuid, uuid, text, text);
 drop function if exists public.fn_complete_call_facts(uuid, uuid, jsonb, text, text);
 drop function if exists public.fn_claim_call_facts(integer, integer, integer);

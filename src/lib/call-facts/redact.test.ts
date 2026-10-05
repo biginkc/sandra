@@ -42,6 +42,23 @@ describe("redactFactsInput", () => {
     expect(r(null, "mail sally@gmail.com please").summary).toBe("mail [email] please");
   });
 
+  it("masks a rep name spoken in the body, in any case, as a whole name or a 3+ letter token", () => {
+    const out = r("Speaker: this is Rick Rep, and RICK again, ask for rep Rick or Rep. Al is fine").transcript!;
+    expect(out).toBe("Speaker A: this is [name], and [name] again, ask for [name] [name] or [name]. Al is fine");
+  });
+
+  it("masks a lead first name or last name alone, and a name inside the summary", () => {
+    const c: RedactionContext = { contactNames: ["Margaret Okonkwo"], repNames: ["Jarrad Henry-Smith"] };
+    const out = redactFactsInput({ summary: "margaret wants out; the Okonkwo family; spoke with Jarrad and henry", transcript: "Other: Margaret here" }, c);
+    expect(out.summary).toBe("[name] wants out; the [name] family; spoke with [name] and [name]");
+    expect(out.transcript).toBe("Speaker A: [name] here");
+  });
+
+  it("member names from the org (display names) are masked and label their speaker as Rep", () => {
+    const c: RedactionContext = { contactNames: ["Sally"], repNames: ["Dana Cole"] };
+    expect(redactFactsInput({ summary: null, transcript: "Dana Cole: hi, Dana here\nSally: hi Dana" }, c).transcript).toBe("Rep: hi, [name] here\nOther party: hi [name]");
+  });
+
   it("leaves dollar amounts and ordinary numbers alone", () => {
     const text = "Asking $185,000, owes $92,000.50 on 2 loans, wants 185k, 1,850,000 total, in 3 months";
     expect(r(null, text).summary).toBe(text);
@@ -56,9 +73,9 @@ describe("redactFactsInput", () => {
     const raw = { summary: null, transcript: "Sally Seller-Jones: I want $185,000 and call 816-555-0142 about 1 Native Way" };
     const red = redactFactsInput(raw, ctx);
     const quote = "I want $185,000 and call [phone] about [address]";
-    const ok = validateFacts({ asking_price: { value: "185000", evidence: quote } }, red, new Date());
-    expect(ok.asking_price?.value).toBe("$185,000");
-    const leaked = validateFacts({ asking_price: { value: "185000", evidence: "call 816-555-0142" } }, red, new Date());
+    const ok = validateFacts({ asking_price: { value: "$185,000", evidence: quote } }, red, new Date());
+    expect(ok.asking_price).toEqual({ value: "$185,000", evidence: quote, amount_cents: 18_500_000 });
+    const leaked = validateFacts({ asking_price: { value: "$185,000", evidence: "call 816-555-0142" } }, red, new Date());
     expect(leaked.asking_price).toBeUndefined();
   });
 });

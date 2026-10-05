@@ -51,7 +51,7 @@ describe("choice questions: turn labels and candidate values", () => {
     expect(q.pain_divorce.instructions).toBe(slotById("divorce").text);
     expect(out.facts.asking_price).toEqual({ value: "$185,000", evidence: "I want $185,000 for the house" });
     expect(out.facts.mortgage?.evidence).toBe("we still owe $92,000 on the loan and are two months behind");
-    expect(out.facts.next_step).toEqual({ value: "2026-10-09", evidence: "I can call you Friday" });
+    expect(out.facts.next_step).toEqual({ value: "Friday", evidence: "I can call you Friday", resolved: "2026-10-09" });
     // The two behind-on-payments questions both exist, under their own keys.
     expect(out.facts.behind_on_payments?.evidence).toBe(out.facts.pain_behind_on_payments?.evidence);
     expect(out.facts.pain_divorce).toEqual({ value: "ok, I need to be out by spring, my divorce is final then", evidence: "ok, I need to be out by spring, my divorce is final then" });
@@ -98,21 +98,21 @@ describe("relative dates are anchored to the call, not the sweep clock", () => {
     const callAt = new Date("2026-08-05T20:00:00Z");
     const now = new Date("2026-10-07T15:00:00Z");
     const { out, valid } = await next("Other party: call me tomorrow", callAt, now);
-    expect(out.facts.next_step?.value).toBe("2026-08-06");
+    expect(out.facts.next_step).toMatchObject({ value: "tomorrow", resolved: "2026-08-06" });
     expect(valid.next_step).toBeUndefined();
   });
   it("a late-night call swept after midnight resolves to the day after the CALL", async () => {
     const callAt = new Date("2026-10-08T04:30:00Z"); // 11:30 pm Central, Oct 7
     const now = new Date("2026-10-08T06:30:00Z"); // 1:30 am Central, Oct 8 (sweep)
     const { out, valid } = await next("Other party: call me tomorrow", callAt, now);
-    expect(out.facts.next_step?.value).toBe("2026-10-08"); // not Oct 9
-    expect(valid.next_step?.value).toBe("2026-10-08T14:00:00.000Z");
+    expect(out.facts.next_step).toMatchObject({ value: "tomorrow", resolved: "2026-10-08" }); // not Oct 9
+    expect(valid.next_step).toEqual({ value: "tomorrow", evidence: "call me tomorrow", due_at: "2026-10-08T14:00:00.000Z" });
   });
   it("without a call time it falls back to the sweep clock", async () => {
     const now = new Date("2026-10-07T15:00:00Z");
     const a = choices({ next_step: "T001|tomorrow" });
     const out = await createJevFactsExtractor(a, { questions: [slotById("next_step_with_date")] })({ summary: null, transcript: "Other party: tomorrow" }, { now });
-    expect(out.facts.next_step?.value).toBe("2026-10-08");
+    expect(out.facts.next_step?.resolved).toBe("2026-10-08");
   });
 });
 

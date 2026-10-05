@@ -28,7 +28,7 @@ const factId = "33333333-3333-4333-8333-333333333333";
 const future = new Date(Date.now() + 3 * 24 * 3_600_000).toISOString();
 const factRow = (over: Record<string, unknown> = {}) => ({
   id: factId, property_id: propertyId, status: "proposed", accepted: {},
-  facts: { asking_price: { value: "$185,000" }, motivation: { value: "must move" }, next_step: { value: future } },
+  facts: { asking_price: { value: "$185,000" }, motivation: { value: "must move" }, next_step: { value: "next Friday", due_at: future } },
   ...over,
 });
 
@@ -54,17 +54,27 @@ describe("call fact actions", () => {
     expect(mocks.createNextStep).not.toHaveBeenCalled();
   });
 
-  it("accepting next_step creates a phone appointment through createNextStep, then records the acceptance", async () => {
+  it("accepting next_step records the acceptance FIRST (verbatim value), then creates the phone appointment from due_at", async () => {
+    const order: string[] = [];
+    mocks.rpc.mockImplementation(async (fn: string) => { order.push(fn); return { data: { duplicate: false }, error: null }; });
+    mocks.createNextStep.mockImplementation(async () => { order.push("createNextStep"); return { ok: true, data: { duplicate: false } }; });
     const out = await acceptCallFactAction({ propertyId, factId, field: "next_step" });
-    expect(out).toMatchObject({ ok: true, field: "next_step", nextStepCreated: true });
+    expect(out).toMatchObject({ ok: true, field: "next_step", value: "next Friday", nextStepCreated: true });
+    expect(order).toEqual(["fn_accept_call_fact", "createNextStep"]);
+    expect(mocks.rpc).toHaveBeenCalledWith("fn_accept_call_fact", { p_org_id: "org-1", p_fact_id: factId, p_field: "next_step", p_value: "next Friday" });
     expect(mocks.createNextStep).toHaveBeenCalledWith(expect.objectContaining({
       kind: "appointment", mode: "phone", propertyId, contactId: "c1", assigneeId: "user-1", dueAt: future, title: "Call 12 Elm St", origin: "app",
       idempotencyKey: expect.stringMatching(/^[0-9a-f-]{36}$/),
     }));
-    expect(mocks.rpc).toHaveBeenCalledWith("fn_accept_call_fact", expect.objectContaining({ p_field: "next_step", p_value: expect.stringMatching(/\d/) }));
   });
 
-  it("a next_step key is stable across retries, and a failed createNextStep records nothing", async () => {
+  it("a refused accept (dismissed or not yours) creates no appointment", async () => {
+    mocks.rpc.mockResolvedValue({ data: null, error: { code: "22023" } });
+    expect((await acceptCallFactAction({ propertyId, factId, field: "next_step" })).ok).toBe(false);
+    expect(mocks.createNextStep).not.toHaveBeenCalled();
+  });
+
+  it("the next_step key is stable across retries; a failed createNextStep undoes the acceptance so the chip returns", async () => {
     await acceptCallFactAction({ propertyId, factId, field: "next_step" });
     await acceptCallFactAction({ propertyId, factId, field: "next_step" });
     const keys = mocks.createNextStep.mock.calls.map((c) => c[0].idempotencyKey);
@@ -73,11 +83,13 @@ describe("call fact actions", () => {
     mocks.createNextStep.mockResolvedValue({ ok: false, error: { code: "X", message: "nope" } });
     const out = await acceptCallFactAction({ propertyId, factId, field: "next_step" });
     expect(out).toEqual({ ok: false, message: "Next step not set: nope" });
-    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.rpc).toHaveBeenCalledWith("fn_unaccept_call_fact", { p_org_id: "org-1", p_fact_id: factId, p_field: "next_step" });
   });
 
-  it("refuses a next_step whose time has passed", async () => {
-    mocks.maybeSingle.mockResolvedValue({ data: factRow({ facts: { next_step: { value: "2020-01-01T00:00:00.000Z" } } }), error: null });
+  it("refuses a next_step whose resolved time has passed or is missing", async () => {
+    mocks.maybeSingle.mockResolvedValue({ data: factRow({ facts: { next_step: { value: "x", due_at: "2020-01-01T00:00:00.000Z" } } }), error: null });
+    expect((await acceptCallFactAction({ propertyId, factId, field: "next_step" })).ok).toBe(false);
+    mocks.maybeSingle.mockResolvedValue({ data: factRow({ facts: { next_step: { value: "x" } } }), error: null });
     expect((await acceptCallFactAction({ propertyId, factId, field: "next_step" })).ok).toBe(false);
     expect(mocks.createNextStep).not.toHaveBeenCalled();
     expect(mocks.rpc).not.toHaveBeenCalled();
@@ -92,10 +104,9 @@ describe("call fact actions", () => {
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
-  it("an already accepted field is a no-op success", async () => {
-    mocks.maybeSingle.mockResolvedValue({ data: factRow({ accepted: { asking_price: { value: "$1" } } }), error: null });
+  it("an already accepted field comes back as a duplicate from the database (no second note)", async () => {
+    mocks.rpc.mockResolvedValue({ data: { duplicate: true }, error: null });
     expect(await acceptCallFactAction({ propertyId, factId, field: "asking_price" })).toMatchObject({ ok: true, duplicate: true });
-    expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
   it("is gated by the call_screen flag, the caller's own queue and the schema", async () => {

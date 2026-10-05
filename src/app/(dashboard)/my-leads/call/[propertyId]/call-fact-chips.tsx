@@ -17,17 +17,6 @@ export type CallFactChipsProps = {
   onDismissed?: () => void;
 };
 
-const CENTRAL_STAMP = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/Chicago", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
-});
-
-/** The stored next_step value is an ISO instant; everything else is shown as stored. */
-function display(field: FactField, value: string): string {
-  if (field !== "next_step") return value;
-  const at = Date.parse(value);
-  return Number.isFinite(at) ? CENTRAL_STAMP.format(new Date(at)) : value;
-}
-
 /**
  * Proposed call facts (§3.12). One chip per field with the seller's own words as evidence; nothing
  * is saved until a person taps Accept. `condition` arrives last by design (lowest priority).
@@ -92,7 +81,7 @@ export function CallFactChips({ facts, onAccept, onDismiss, onAccepted, onDismis
           <li key={chip.field} data-testid={`call-fact-chip-${chip.field}`} className="flex items-start justify-between gap-3 rounded-[12px] border border-border px-3 py-2">
             <div className="min-w-0">
               <p className="text-muted-foreground text-xs">{FACT_LABELS[chip.field]}</p>
-              <p className="text-sm font-medium">{display(chip.field, chip.value)}</p>
+              <p className="text-sm font-medium">{chip.value}</p>
               <p data-testid={`call-fact-evidence-${chip.field}`} title={chip.evidence} className="text-muted-foreground truncate text-xs italic">
                 &ldquo;{chip.evidence}&rdquo;
               </p>

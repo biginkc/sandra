@@ -20,7 +20,7 @@ type FactRow = {
   id: string;
   property_id: string;
   status: string;
-  facts: Record<string, { value?: unknown } | undefined> | null;
+  facts: Record<string, { value?: unknown; due_at?: unknown } | undefined> | null;
   accepted: Record<string, unknown> | null;
 };
 
@@ -30,10 +30,6 @@ async function nextStepKey(factId: string): Promise<string> {
   const h = createHash("md5").update(`call_fact_next_step:${factId}`).digest("hex");
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
-
-const CENTRAL_STAMP = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/Chicago", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
-});
 
 /** Gate shared by both actions: flag, own queue, schema; returns the viewer and the open fact row. */
 type Viewer = Awaited<ReturnType<typeof myLeadsViewer>>;
@@ -85,14 +81,33 @@ export async function acceptCallFactAction(input: { propertyId: string; factId: 
     if (fact.status === "dismissed") return { ok: false, message: "That suggestion is no longer available." };
     const stored = fact.facts?.[field]?.value;
     if (typeof stored !== "string" || stored === "") return { ok: false, message: "That suggestion is no longer available." };
-    if (fact.accepted && field in fact.accepted) return { ok: true, field, value: stored, duplicate: true };
-
-    let value = stored;
-    let nextStepCreated = false;
+    // The note and the chip show the VERBATIM value; the resolved instant (`due_at`) is separate data.
+    let due: number | null = null;
     if (field === "next_step") {
-      const due = Date.parse(stored);
+      const raw = fact.facts?.next_step?.due_at;
+      due = typeof raw === "string" ? Date.parse(raw) : Number.NaN;
       if (!Number.isFinite(due) || due <= Date.now()) return { ok: false, message: "That time has already passed. Add the next step yourself." };
-      value = CENTRAL_STAMP.format(new Date(due));
+    }
+
+    // Record the acceptance FIRST (it enforces ownership and refuses a dismissed fact), so a concurrent
+    // dismiss can never leave an appointment behind.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data, error } = await (viewer.client as any).rpc("fn_accept_call_fact", {
+      p_org_id: viewer.orgId,
+      p_fact_id: input.factId,
+      p_field: field,
+      p_value: stored,
+    });
+    if (error) {
+      const mapped = mapRpcError(error);
+      if (mapped) return mapped;
+      throw error;
+    }
+    const duplicate = ((data ?? {}) as { duplicate?: boolean }).duplicate === true;
+
+    let nextStepCreated = false;
+    if (field === "next_step" && due !== null) {
+      // Runs on a replay too (idempotent by key), so a crash between the two steps self-heals.
       const created = await createNextStep({
         kind: "appointment",
         mode: "phone",
@@ -104,24 +119,15 @@ export async function acceptCallFactAction(input: { propertyId: string; factId: 
         idempotencyKey: await nextStepKey(input.factId),
         origin: "app",
       });
-      if (!created.ok) return { ok: false, message: `Next step not set: ${created.error.message}` };
+      if (!created.ok) {
+        // Undo the acceptance so the chip stays and the rep can retry.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (viewer.client as any).rpc("fn_unaccept_call_fact", { p_org_id: viewer.orgId, p_fact_id: input.factId, p_field: field });
+        return { ok: false, message: `Next step not set: ${created.error.message}` };
+      }
       nextStepCreated = !created.data.duplicate;
     }
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data, error } = await (viewer.client as any).rpc("fn_accept_call_fact", {
-      p_org_id: viewer.orgId,
-      p_fact_id: input.factId,
-      p_field: field,
-      p_value: value,
-    });
-    if (error) {
-      const mapped = mapRpcError(error);
-      if (mapped) return mapped;
-      throw error;
-    }
-    const out = (data ?? {}) as { duplicate?: boolean };
-    return { ok: true, field, value, duplicate: out.duplicate === true, nextStepCreated };
+    return { ok: true, field, value: stored, duplicate, nextStepCreated };
   } catch (error) {
     if (error instanceof MyLeadsReadError) return { ok: false, message: error.message };
     reportError(error instanceof Error ? error : new Error("accept call fact failed"), { tags: { surface: "call_facts", operation: "accept", field: FACT_LABELS[field] } });

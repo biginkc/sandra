@@ -271,7 +271,7 @@ describe('20261007190000_call_facts', () => {
       expect(row.facts).toEqual(FACTS); // the proposal itself is untouched
       expect((await accept(w, w.rep, id, 'asking_price', '$185,000')).rows[0].v.duplicate).toBe(true);
       expect(await notes(w, 'From call summary - %')).toHaveLength(1);
-      await accept(w, w.rep2, id, 'motivation', 'must move by spring');
+      await accept(w, w.rep, id, 'motivation', 'must move by spring');
       expect(await notes(w, 'From call summary - %')).toHaveLength(2);
     });
   });
@@ -313,12 +313,77 @@ describe('20261007190000_call_facts', () => {
     });
   });
 
-  it('accept formats a next_step instant in Central time from the stored value', async () => {
+  it('accept writes the VERBATIM value (never derived text) and keeps structured data separate', async () => {
     await withFacts(async (db) => {
       const w = await world(db, { flag: true });
-      const { id } = await done(w, { next_step: { value: '2099-01-05T20:00:00.000Z', evidence: 'call Monday at 2' } });
-      await accept(w, w.rep, id, 'next_step', 'whatever');
-      expect((await notes(w, 'From call summary - %'))[0].body).toBe('From call summary - Next step: Mon Jan 5, 2:00 PM');
+      const { id } = await done(w, {
+        asking_price: { value: '185k', evidence: 'I want 185k', amount_cents: 18500000 },
+        next_step: { value: 'next Friday', evidence: 'call me next Friday', due_at: '2099-01-05T20:00:00.000Z' },
+      });
+      await accept(w, w.rep, id, 'asking_price', '$185,000');
+      await accept(w, w.rep, id, 'next_step', '2099-01-05T20:00:00.000Z');
+      expect((await notes(w, 'From call summary - %')).map((n) => n.body)).toEqual([
+        'From call summary - Asking price: 185k',
+        'From call summary - Next step: next Friday',
+      ]);
+      const row = await factRow(w, id);
+      expect(row.accepted.asking_price).toMatchObject({ value: '185k', amount_cents: 18500000 });
+      expect(row.accepted.next_step).toMatchObject({ value: 'next Friday', due_at: '2099-01-05T20:00:00.000Z' });
+    });
+  });
+
+  it('complete only allows value, evidence and the two structured fields, with sane types', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const a = await call(w);
+      await ready(w, a);
+      const c = (await claim(w)).claims[0];
+      for (const bad of [
+        { asking_price: { value: 'x', evidence: 'x', extra: 1 } },
+        { asking_price: { value: 'x', evidence: 'x', amount_cents: -5 } },
+        { asking_price: { value: 'x', evidence: 'x', amount_cents: '5' } },
+        { next_step: { value: 'x', evidence: 'x', due_at: 5 } },
+      ]) {
+        const e = await failure(db, () => service(db, () => db.query('select public.fn_complete_call_facts($1,$2,$3,$4,$5)', [c.fact_id, c.claim_token, JSON.stringify(bad), 'proposed', null])));
+        expect(e.message).toContain('INVALID_INPUT');
+      }
+    });
+  });
+
+  it('accept, unaccept and dismiss enforce lead ownership in SQL: another rep, an owner who is not assigned, and other orgs are refused', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const { id } = await done(w);
+      for (const user of [w.rep2, w.owner]) {
+        const e1 = await failure(db, () => accept(w, user, id, 'asking_price', 'x'));
+        expect((e1 as { code?: string }).code).toBe('42501');
+        const e2 = await failure(db, () => asUser(db, user, () => db.query('select public.fn_dismiss_call_facts($1,$2)', [w.org, id])));
+        expect((e2 as { code?: string }).code).toBe('42501');
+        const e3 = await failure(db, () => asUser(db, user, () => db.query('select public.fn_unaccept_call_fact($1,$2,$3)', [w.org, id, 'asking_price'])));
+        expect((e3 as { code?: string }).code).toBe('42501');
+      }
+      expect(await notes(w, 'From call summary - %')).toHaveLength(0);
+      expect((await factRow(w, id)).status).toBe('proposed');
+      // After a reassignment the former assignee is refused too.
+      await db.query('update public.properties set assigned_user_id = $1 where id = $2', [w.rep2, w.property]);
+      const gone = await failure(db, () => accept(w, w.rep, id, 'asking_price', 'x'));
+      expect((gone as { code?: string }).code).toBe('42501');
+    });
+  });
+
+  it('unaccept removes the acceptance and its note so the chip returns; a dismissed fact cannot be accepted afterwards', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const { id } = await done(w);
+      await accept(w, w.rep, id, 'asking_price', 'x');
+      expect(await notes(w, 'From call summary - %')).toHaveLength(1);
+      const r = (await asUser(db, w.rep, () => db.query('select public.fn_unaccept_call_fact($1,$2,$3) as v', [w.org, id, 'asking_price']))).rows[0].v;
+      expect(r).toEqual({ reverted: true });
+      expect(await notes(w, 'From call summary - %')).toHaveLength(0);
+      expect(await factRow(w, id)).toMatchObject({ status: 'proposed', accepted: {} });
+      await asUser(db, w.rep, () => db.query('select public.fn_dismiss_call_facts($1,$2)', [w.org, id]));
+      const e = await failure(db, () => accept(w, w.rep, id, 'asking_price', 'x'));
+      expect(e.message).toContain('NOT_ACCEPTABLE');
     });
   });
 
@@ -331,6 +396,11 @@ describe('20261007190000_call_facts', () => {
       expect(c.contact_names).toEqual(['Sally', 'Seller']);
       expect(c.property_address).toBe('1 Native Way');
       expect(c.property_city).toBe('Kansas City');
+      // Names of the org's members, for masking spoken rep names.
+      await db.query(`update auth.users set raw_user_meta_data = '{"full_name":"Rick Rep"}'::jsonb, email = 'rick.rep@example.test' where id = $1`, [w.rep]);
+      await db.query('delete from public.lead_call_facts');
+      const again = (await claim(w)).claims[0];
+      expect(again.rep_names).toEqual(expect.arrayContaining(['Rick Rep', 'rick.rep']));
     });
   });
 

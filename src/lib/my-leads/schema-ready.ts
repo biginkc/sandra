@@ -131,6 +131,7 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
       "public.fn_complete_call_facts(uuid,uuid,jsonb,text,text)",
       "public.fn_accept_call_fact(uuid,uuid,text,text)",
       "public.fn_dismiss_call_facts(uuid,uuid)",
+      "public.fn_unaccept_call_fact(uuid,uuid,text)",
     ],
     columns: ["lead_call_facts.processing_state"],
   },

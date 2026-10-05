@@ -10,7 +10,7 @@ const facts: LeadCallFactsView = {
   factId: "f1",
   chips: [
     { field: "asking_price", value: "$185,000", evidence: "I want about 185k" },
-    { field: "next_step", value: "2026-10-13T19:00:00.000Z", evidence: "call me Tuesday at 2" },
+    { field: "next_step", value: "Tuesday at 2", evidence: "call me Tuesday at 2" },
     { field: "condition", value: "needs a roof", evidence: "the roof is shot" },
   ],
 };
@@ -29,7 +29,7 @@ describe("CallFactChips", () => {
     const order = screen.getAllByRole("listitem").map((li) => li.getAttribute("data-testid"));
     expect(order).toEqual(["call-fact-chip-asking_price", "call-fact-chip-next_step", "call-fact-chip-condition"]);
     expect(screen.getByTestId("call-fact-evidence-asking_price").getAttribute("title")).toBe("I want about 185k");
-    expect(screen.getByText("Tue, Oct 13, 2:00 PM")).toBeTruthy(); // next_step shown in Central time
+    expect(screen.getByText("Tuesday at 2")).toBeTruthy(); // the verbatim phrase, never a derived date
     expect(onAccept).not.toHaveBeenCalled();
   });
 

@@ -9,9 +9,13 @@ import { FACT_FIELDS, type FactsInput, type ValidFacts } from "./types";
  *   - it is not one of the six known fields;
  *   - its value or evidence is not a non-empty string (bounded length);
  *   - its evidence does not appear verbatim (case-insensitive, whitespace-collapsed) in the input;
- *   - asking_price / mortgage do not parse to a positive dollar amount (stored normalized, "$185,000");
- *   - next_step is not an ISO date or date-time ("YYYY-MM-DD" or "YYYY-MM-DDTHH:MM", Central time,
- *     default 09:00) that is still in the future and within the horizon (stored as an ISO instant).
+ *   - its value does not appear verbatim in the input (the stored and displayed value is always the
+ *     verbatim text; nothing derived is ever shown or written to a note);
+ *   - asking_price / mortgage do not parse to a positive dollar amount (the parsed amount is kept
+ *     separately as `amount_cents`);
+ *   - next_step has no `resolved` ISO date ("YYYY-MM-DD" or "YYYY-MM-DDTHH:MM", Central time,
+ *     default 09:00) that is still in the future and within the horizon (the instant is kept
+ *     separately as `due_at`).
  */
 export const FACT_VALUE_MAX = 300;
 export const FACT_EVIDENCE_MAX = 500;
@@ -75,14 +79,16 @@ export function validateFacts(raw: unknown, input: FactsInput, now: Date): Valid
     const evidence = str((entry as Record<string, unknown>).evidence, FACT_EVIDENCE_MAX);
     if (!value || !evidence) continue;
     if (!haystack.includes(normalizeForEvidence(evidence))) continue;
+    if (!haystack.includes(normalizeForEvidence(value))) continue;
     if (field === "asking_price" || field === "mortgage") {
       const amount = parseDollarAmount(value);
       if (amount === null) continue;
-      out[field] = { value: formatDollars(amount), evidence };
+      out[field] = { value, evidence, amount_cents: Math.round(amount * 100) };
     } else if (field === "next_step") {
-      const instant = parseFutureNextStep(value, now);
+      const resolved = str((entry as Record<string, unknown>).resolved, 40);
+      const instant = resolved ? parseFutureNextStep(resolved, now) : null;
       if (instant === null) continue;
-      out[field] = { value: instant, evidence };
+      out[field] = { value, evidence, due_at: instant };
     } else {
       out[field] = { value, evidence };
     }

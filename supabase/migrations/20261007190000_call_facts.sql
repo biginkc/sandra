@@ -9,6 +9,7 @@
 --   public.fn_claim_call_facts      service_role; claim/lease/reclaim, input from call_transcripts
 --   public.fn_complete_call_facts   service_role; ONE transaction: deterministic summary note + facts + done
 --   public.fn_accept_call_fact      authenticated; records accepted[field] and appends a lead note
+--   public.fn_unaccept_call_fact    authenticated; compensation when the next-step appointment fails
 --   public.fn_dismiss_call_facts    authenticated
 -- Rollback twin: supabase/rollbacks/20261007190000_call_facts.sql
 begin;
@@ -139,6 +140,17 @@ begin
            'property_address', pr.address,
            'property_city', pr.city,
            'property_zip', pr.zip,
+           -- Display names of the org's members (reps), so spoken names are masked before any text leaves Sandra.
+           'rep_names', (
+             select coalesce(jsonb_agg(distinct x.n), '[]'::jsonb) from (
+               select nullif(btrim(coalesce(u.raw_user_meta_data ->> 'full_name', u.raw_user_meta_data ->> 'name', '')), '') as n
+                 from public.memberships m join auth.users u on u.id = m.user_id
+                where m.org_id = c.org_id and m.access_status = 'active' and m.deletion_prepared_at is null
+               union
+               select nullif(btrim(split_part(u.email, '@', 1)), '')
+                 from public.memberships m join auth.users u on u.id = m.user_id
+                where m.org_id = c.org_id and m.access_status = 'active' and m.deletion_prepared_at is null
+             ) x where x.n is not null),
            -- Relative dates ("tomorrow") are resolved against the CALL, not against when the sweep runs.
            'ended_at', (select coalesce(ca.ended_at, ca.started_at) from public.call_activities ca where ca.id = c.call_activity_id))), '[]'::jsonb)
     into v_claims
@@ -189,7 +201,11 @@ begin
   -- Shape guard (the real validation, verbatim evidence included, runs in code before this call).
   for v_key, v_item in select * from jsonb_each(p_facts) loop
     if not (v_key = any(v_allowed)) or jsonb_typeof(v_item) <> 'object'
-       or jsonb_typeof(v_item -> 'value') <> 'string' or jsonb_typeof(v_item -> 'evidence') <> 'string' then
+       or jsonb_typeof(v_item -> 'value') <> 'string' or jsonb_typeof(v_item -> 'evidence') <> 'string'
+       -- `value` is verbatim call text; derived data is only ever in these two structured fields.
+       or exists (select 1 from jsonb_object_keys(v_item) k where k not in ('value', 'evidence', 'amount_cents', 'due_at'))
+       or (v_item ? 'amount_cents' and (jsonb_typeof(v_item -> 'amount_cents') <> 'number' or (v_item ->> 'amount_cents')::numeric <= 0))
+       or (v_item ? 'due_at' and jsonb_typeof(v_item -> 'due_at') <> 'string') then
       raise exception 'INVALID_INPUT' using errcode = '22023';
     end if;
   end loop;
@@ -257,6 +273,7 @@ declare
   v_row public.lead_call_facts%rowtype;
   v_label text;
   v_value text;
+  v_item jsonb;
   v_note_key uuid;
   v_inserted integer;
 begin
@@ -322,6 +339,12 @@ begin
   if not found or v_row.processing_state <> 'done' then
     raise exception 'NOT_FOUND' using errcode = 'P0002';
   end if;
+  -- Same scope as the app action: the lead must be in the caller's own My Leads queue.
+  perform public.my_leads_require_read_scope(p_org_id, v_actor);
+  if not exists (select 1 from public.properties p
+                  where p.id = v_row.property_id and p.org_id = p_org_id and p.assigned_user_id = v_actor and p.deleted_at is null) then
+    raise exception 'STALE_ASSIGNMENT' using errcode = '42501';
+  end if;
   if v_row.status = 'dismissed' or not (v_row.facts ? p_field) then
     raise exception 'NOT_ACCEPTABLE' using errcode = '22023';
   end if;
@@ -330,14 +353,9 @@ begin
   end if;
 
   -- The stored proposal is the only source of the value: p_value is kept for signature stability and IGNORED.
-  v_value := btrim(coalesce(v_row.facts -> p_field ->> 'value', ''));
-  if p_field = 'next_step' then
-    begin
-      v_value := to_char((v_value::timestamptz) at time zone 'America/Chicago', 'Dy Mon FMDD, FMHH12:MI AM');
-    exception when others then
-      raise exception 'NOT_ACCEPTABLE' using errcode = '22023';
-    end;
-  end if;
+  -- The value is the verbatim call text; nothing derived is written to the note.
+  v_item := v_row.facts -> p_field;
+  v_value := btrim(coalesce(v_item ->> 'value', ''));
   if v_value = '' or length(v_value) > 500 then
     raise exception 'NOT_ACCEPTABLE' using errcode = '22023';
   end if;
@@ -349,7 +367,9 @@ begin
   get diagnostics v_inserted = row_count;
 
   update public.lead_call_facts
-     set accepted = accepted || jsonb_build_object(p_field, jsonb_build_object('value', v_value, 'by', v_actor, 'at', now())),
+     set accepted = accepted || jsonb_build_object(p_field,
+           jsonb_build_object('value', v_value, 'by', v_actor, 'at', now())
+           || (v_item - 'value' - 'evidence')),
          status = 'partially_accepted', updated_at = now()
    where id = p_fact_id;
   return jsonb_build_object('duplicate', false, 'field', p_field, 'status', 'partially_accepted', 'noteWritten', v_inserted = 1);
@@ -357,6 +377,45 @@ end;
 $$;
 revoke all on function public.fn_accept_call_fact(uuid, uuid, text, text) from public, anon;
 grant execute on function public.fn_accept_call_fact(uuid, uuid, text, text) to authenticated;
+
+-- ----------------------------------------------------------------------------
+-- fn_unaccept_call_fact (authenticated): compensation when the appointment behind an accepted
+-- next_step could not be created. Removes the acceptance and its note so the chip comes back.
+-- ----------------------------------------------------------------------------
+create or replace function public.fn_unaccept_call_fact(p_org_id uuid, p_fact_id uuid, p_field text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_actor uuid := public.my_leads_workflow_require_actor(p_org_id);
+  v_row public.lead_call_facts%rowtype;
+begin
+  select * into v_row from public.lead_call_facts where id = p_fact_id and org_id = p_org_id for update;
+  if not found then
+    raise exception 'NOT_FOUND' using errcode = 'P0002';
+  end if;
+  perform public.my_leads_require_read_scope(p_org_id, v_actor);
+  if not exists (select 1 from public.properties p
+                  where p.id = v_row.property_id and p.org_id = p_org_id and p.assigned_user_id = v_actor and p.deleted_at is null) then
+    raise exception 'STALE_ASSIGNMENT' using errcode = '42501';
+  end if;
+  if not (v_row.accepted ? p_field) or (v_row.accepted -> p_field ->> 'by')::uuid is distinct from v_actor then
+    return jsonb_build_object('reverted', false);
+  end if;
+  delete from public.lead_notes
+   where org_id = p_org_id and idempotency_key = md5('call_fact_accept:' || p_fact_id::text || ':' || p_field)::uuid;
+  update public.lead_call_facts
+     set accepted = accepted - p_field,
+         status = case when status = 'partially_accepted' and (accepted - p_field) = '{}'::jsonb then 'proposed' else status end,
+         updated_at = now()
+   where id = p_fact_id;
+  return jsonb_build_object('reverted', true);
+end;
+$$;
+revoke all on function public.fn_unaccept_call_fact(uuid, uuid, text) from public, anon;
+grant execute on function public.fn_unaccept_call_fact(uuid, uuid, text) to authenticated;
 
 -- ----------------------------------------------------------------------------
 -- fn_dismiss_call_facts (authenticated)
@@ -369,16 +428,21 @@ set search_path = ''
 as $$
 declare
   v_actor uuid := public.my_leads_workflow_require_actor(p_org_id);
+  v_row public.lead_call_facts%rowtype;
 begin
-  update public.lead_call_facts
-     set status = 'dismissed', updated_at = now()
-   where id = p_fact_id and org_id = p_org_id and processing_state = 'done' and status in ('proposed', 'partially_accepted');
-  if not found then
-    if exists (select 1 from public.lead_call_facts where id = p_fact_id and org_id = p_org_id and status in ('dismissed', 'no_facts')) then
-      return jsonb_build_object('status', 'dismissed', 'duplicate', true, 'by', v_actor);
-    end if;
+  select * into v_row from public.lead_call_facts where id = p_fact_id and org_id = p_org_id for update;
+  if not found or v_row.processing_state <> 'done' then
     raise exception 'NOT_FOUND' using errcode = 'P0002';
   end if;
+  perform public.my_leads_require_read_scope(p_org_id, v_actor);
+  if not exists (select 1 from public.properties p
+                  where p.id = v_row.property_id and p.org_id = p_org_id and p.assigned_user_id = v_actor and p.deleted_at is null) then
+    raise exception 'STALE_ASSIGNMENT' using errcode = '42501';
+  end if;
+  if v_row.status in ('dismissed', 'no_facts') then
+    return jsonb_build_object('status', 'dismissed', 'duplicate', true, 'by', v_actor);
+  end if;
+  update public.lead_call_facts set status = 'dismissed', updated_at = now() where id = p_fact_id;
   return jsonb_build_object('status', 'dismissed', 'duplicate', false, 'by', v_actor);
 end;
 $$;

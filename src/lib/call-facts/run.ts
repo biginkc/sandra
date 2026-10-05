@@ -16,6 +16,8 @@ export type ClaimedCall = {
   summary: string | null;
   transcript: string | null;
   contact_names?: string[] | null;
+  /** Display names of the org's members, masked as spoken names. */
+  rep_names?: string[] | null;
   property_address?: string | null;
   property_city?: string | null;
   property_zip?: string | null;
@@ -62,6 +64,7 @@ export async function runCallFactsSweep(limit: number, deps: FactsJobDeps): Prom
           { summary: claim.summary, transcript: claim.transcript },
           {
             contactNames: claim.contact_names ?? [],
+            repNames: claim.rep_names ?? [],
             propertyAddress: { address: claim.property_address, city: claim.property_city, zip: claim.property_zip },
           },
         ),

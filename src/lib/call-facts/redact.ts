@@ -5,7 +5,9 @@ import type { FactsInput } from "./types";
  * evidence is validated against (the model never sees, and can never quote, the raw text).
  *
  * Rules, in order:
- *   1. The lead's known contact names and property address are masked wherever they appear.
+ *   1. The lead's contact names, the org members' names (reps) and the property address are masked
+ *      wherever they appear, in the transcript body AND the summary, case-insensitively, as whole
+ *      names and as first/last-name tokens of 3+ letters.
  *   2. Transcript speaker prefixes ("Name: text") become role labels: "Other party" when the name
  *      is one of the lead's names, "Rep" when it is one of the supplied rep names, otherwise a
  *      neutral "Speaker A", "Speaker B" (stable per distinct name).
@@ -17,7 +19,7 @@ export type RedactionContext = {
   contactNames: readonly string[];
   /** Property street line, with optional city and zip. */
   propertyAddress?: { address?: string | null; city?: string | null; zip?: string | null } | null;
-  /** Optional rep names known to the caller. */
+  /** Display names of the org's members (reps, assignee), from the claim. */
   repNames?: readonly string[];
 };
 
@@ -46,7 +48,7 @@ function maskTerms(text: string, terms: readonly string[], mask: string): string
 
 function nameTerms(names: readonly string[]): { whole: string[]; parts: string[] } {
   const whole = names.map((n) => n.replace(/\s+/g, " ").trim()).filter((n) => n.length >= 2);
-  const parts = whole.flatMap((n) => n.split(/[\s,]+/)).filter((p) => p.length >= 3);
+  const parts = whole.flatMap((n) => n.split(/[^A-Za-z']+/)).filter((p) => p.replace(/'/g, "").length >= 3);
   return { whole, parts };
 }
 
@@ -55,7 +57,8 @@ const LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 export function redactFactsInput(input: FactsInput, ctx: RedactionContext): FactsInput {
   const lead = nameTerms(ctx.contactNames);
   const leadKeys = new Set([...lead.whole, ...lead.parts].map(norm));
-  const repKeys = new Set(nameTerms(ctx.repNames ?? []).whole.map(norm));
+  const rep = nameTerms(ctx.repNames ?? []);
+  const repKeys = new Set([...rep.whole, ...rep.parts].map(norm));
   const addr = ctx.propertyAddress;
   const addressTerms = [addr?.address, [addr?.address, addr?.city].filter(Boolean).join(", "), addr?.zip && addr?.address ? `${addr.address} ${addr.zip}` : null]
     .filter((v): v is string => typeof v === "string" && v.trim().length >= 4)
@@ -65,7 +68,7 @@ export function redactFactsInput(input: FactsInput, ctx: RedactionContext): Fact
     // Emails first: a name inside an address must not leave "[name]@domain" behind.
     let out = text.replace(EMAIL, MASK_EMAIL);
     out = maskTerms(out, addressTerms, MASK_ADDRESS);
-    out = maskTerms(out, [...lead.whole, ...lead.parts], MASK_NAME);
+    out = maskTerms(out, [...lead.whole, ...lead.parts, ...rep.whole, ...rep.parts], MASK_NAME);
     out = out.replace(STREET, MASK_ADDRESS).replace(PHONE, MASK_PHONE);
     return out;
   };
@@ -75,7 +78,7 @@ export function redactFactsInput(input: FactsInput, ctx: RedactionContext): Fact
     const key = norm(rawName);
     const words = key.split(/[\s,]+/).filter(Boolean);
     if (leadKeys.has(key) || (words.length > 0 && words.every((w) => leadKeys.has(w)))) return "Other party";
-    if (repKeys.has(key)) return "Rep";
+    if (repKeys.has(key) || (words.length > 0 && words.every((w) => repKeys.has(w)))) return "Rep";
     let label = speakers.get(key);
     if (!label) {
       label = `Speaker ${LABELS[speakers.size % 26]}${speakers.size >= 26 ? Math.floor(speakers.size / 26) : ""}`;

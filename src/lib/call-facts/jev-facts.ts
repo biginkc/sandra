@@ -64,15 +64,15 @@ export function createJevFactsExtractor(ask: JevAsk, opts: { questions?: readonl
     // 1. One request for every choice-style question (turn / amount / date).
     const choiceSlots = slots.filter((s) => s.kind !== "line_noul");
     const questions: Record<string, JevChoiceQuestion> = {};
-    const resolve: Record<string, Map<string, { turn: Turn; value: string }>> = {};
+    const resolve: Record<string, Map<string, { turn: Turn; value: string; resolved?: string }>> = {};
     for (const slot of choiceSlots) {
-      const map = new Map<string, { turn: Turn; value: string }>();
+      const map = new Map<string, { turn: Turn; value: string; resolved?: string }>();
       if (slot.kind === "turn") {
         for (const t of turns.slice(0, MAX_OPTIONS)) map.set(t.label, { turn: t, value: t.text.slice(0, 300) });
       } else if (slot.kind === "amount") {
         for (const c of findAmountCandidates(turns)) map.set(`${c.turn.label}|${c.raw}`, { turn: c.turn, value: c.raw });
       } else {
-        for (const c of findDateCandidates(turns, anchor)) map.set(`${c.turn.label}|${c.raw}`, { turn: c.turn, value: c.date });
+        for (const c of findDateCandidates(turns, anchor)) map.set(`${c.turn.label}|${c.raw}`, { turn: c.turn, value: c.raw, resolved: c.date });
       }
       if (map.size === 0) continue; // nothing to choose from: no question
       resolve[slot.field] = map;
@@ -86,7 +86,7 @@ export function createJevFactsExtractor(ask: JevAsk, opts: { questions?: readonl
         if (typeof choice !== "string" || choice === NONE) continue;
         const picked = resolve[slot.field]?.get(choice);
         if (!picked) continue; // not an offered option: ignored
-        facts[slot.field] = { value: picked.value, evidence: picked.turn.text };
+        facts[slot.field] = { value: picked.value, evidence: picked.turn.text, ...(picked.resolved ? { resolved: picked.resolved } : {}) };
       }
     }
 
