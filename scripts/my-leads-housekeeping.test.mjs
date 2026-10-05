@@ -314,6 +314,37 @@ test("phone-backfill stops at the first range that drifted and names the run to 
   assert.match(message, new RegExp(`rollback --run ${RUN}`));
 });
 
+test("phone-backfill never claims nothing was applied when the first range's response is lost", async () => {
+  const preview = JSON.parse((await (async () => { const h = phoneHarness(); await run(["phone-backfill", "--org", ORG], h.io); return h.out.join(""); })()));
+  const confirm = sha256Hex(canonicalJson({ ...HOST, ...preview }));
+  const h = phoneHarness();
+  const inner = h.io.createClient();
+  h.io.createClient = () => ({
+    rpc: async (name, args) => (name === "fn_contact_phone_numbers_backfill_range" && args.p_apply
+      ? { data: null, error: { message: "TypeError: fetch failed" } }
+      : inner.rpc(name, args)),
+  });
+  assert.equal(await run(["phone-backfill", "--org", ORG, "--apply", "--confirm", confirm], h.io), 1);
+  const message = h.err.join("");
+  assert.doesNotMatch(message, /Nothing was applied/);
+  assert.match(message, /response was lost/);
+  assert.match(message, /rollback --run <id>/);
+
+  // lost response on a later range: the run id is known, confirmed through run info, and named
+  const later = phoneHarness();
+  const inner2 = later.io.createClient();
+  let applies = 0;
+  later.io.createClient = () => ({
+    rpc: async (name, args) => {
+      if (name === "fn_contact_phone_numbers_backfill_range" && args.p_apply && ++applies === 2) return { data: null, error: { message: "TypeError: fetch failed" } };
+      return inner2.rpc(name, args);
+    },
+  });
+  assert.equal(await run(["phone-backfill", "--org", ORG, "--apply", "--confirm", confirm], later.io), 1);
+  assert.match(later.err.join(""), new RegExp(`rollback --run ${RUN}`));
+  assert.doesNotMatch(later.err.join(""), /Nothing was applied/);
+});
+
 test("phone-backfill batch size is validated and sets the range size", async () => {
   assert.throws(() => parseArgs(["phone-backfill", "--org", ORG, "--batch-size", "0"]), /batch-size/);
   assert.throws(() => parseArgs(["phone-backfill", "--org", ORG, "--batch-size", "9999"]), /batch-size/);

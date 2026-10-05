@@ -199,7 +199,21 @@ async function applyPhoneRanges(client, o, ranges, fingerprint, io) {
       if ((i + 1) % 25 === 0) io.err(`applied ${i + 1}/${ranges.length} ranges\n`);
     }
   } catch (error) {
-    const where = runId ? ` Run ${runId} holds the rows applied so far (created ${created}, updated ${updated}); undo them with: rollback --run ${runId}.` : " Nothing was applied.";
+    // The server refused before writing anything for that range (its transaction rolled back).
+    const refused = /^(FINGERPRINT_MISMATCH|FINGERPRINT_REQUIRED|INVALID_INPUT|RUN_NOT_FOUND)/.test(error.message.replace(/^[a-z_]+ failed: /, ""));
+    let where = "";
+    if (runId) {
+      // Confirm the run row really exists before pointing the operator at it.
+      const info = await rpc(client, "fn_contact_phone_numbers_backfill_run_info", { p_run: runId, p_org_id: o.org }).catch(() => null);
+      where = ` Run ${runId}${info ? "" : " (not confirmed by run info)"} holds the rows applied so far (created ${created}, updated ${updated}); undo them with: rollback --run ${runId}.`;
+    } else if (!refused) {
+      // A range call was sent and its answer was lost: it may have committed, and a run may exist whose
+      // id this script never received. There is no lookup by invocation, so say so instead of claiming nothing happened.
+      where = " The first range call was sent but its response was lost, so a run may exist even though its id was not received."
+        + " Run the phone-backfill preview again: fewer candidates than before means rows were written; find that run id and undo it with rollback --run <id> before re-applying.";
+    } else {
+      where = " Nothing was applied.";
+    }
     throw new Error(`${error.message}.${where}`);
   }
   return { kind: "phone_backfill", runId, noop: runId === null ? true : undefined, created, updated, ranges: ranges.length };
