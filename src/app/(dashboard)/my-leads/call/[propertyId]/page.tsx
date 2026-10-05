@@ -41,16 +41,16 @@ export default async function CallScreenPage({ params }: { params: Promise<{ pro
   try {
     memberships = await getCallerMembershipsOrThrow();
   } catch {
-    return unavailableState("The call screen is temporarily unavailable.");
+    notFound();
   }
-  if (memberships.length !== 1) return unavailableState("The call screen is temporarily unavailable.");
+  if (memberships.length !== 1) notFound();
 
   let viewer: Awaited<ReturnType<typeof getAcquisitionRoster>>["viewer"];
   let roster: Awaited<ReturnType<typeof getAcquisitionRoster>>["roster"];
   try {
     ({ viewer, roster } = await getAcquisitionRoster());
   } catch {
-    return unavailableState("The call screen is temporarily unavailable.");
+    notFound();
   }
   if (!roster.settings.enabled || !canViewMyLeads(roster, viewer.userId, viewer.isOwner)) notFound();
 
