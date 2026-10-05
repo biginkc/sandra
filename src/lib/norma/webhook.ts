@@ -11,8 +11,9 @@ import { mapBlandCallToOutcome } from "./outcome";
 import { completeNormaCall } from "./rpc";
 import { toUsVoiceE164 } from "./voice-phone";
 
-/** Bland post-call payloads carry transcripts; bound generously but firmly. */
-export const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
+/** Long-call transcripts/logs can exceed 1 MiB; 4 MiB stays below Vercel's 4.5 MB request cap. */
+export const MAX_WEBHOOK_BODY_BYTES = 4 * 1024 * 1024;
+const MAX_DIAGNOSTIC_PREFIX = 4096;
 const MAX_IDENTITY = 128;
 
 /**
@@ -28,10 +29,23 @@ export function verifyBlandSignature(secret: string, rawBody: string, header: st
   return timingSafeEqual(expected, Buffer.from(provided, "hex"));
 }
 
-/** Read at most MAX bytes. Returns null when over the bound. */
+/** Size checks precede signature verification, so any identity is only an untrusted hint. */
+function reportOversizedBody(maxBodyBytes: number, declaredBytes: number | null, observedBytes: number, prefix: string): void {
+  // Inspect only a bounded prefix already read; never log transcripts or read more for diagnostics.
+  const callIdHint = /"call_id"\s*:\s*"([a-zA-Z0-9_-]{1,128})"/.exec(prefix)?.[1] ?? null;
+  reportError(new Error("Bland webhook rejected: HTTP 413 body too large"), {
+    tags: { surface: "norma_webhook", httpStatus: 413 },
+    extra: { maxBodyBytes, declaredBytes, observedBytes, callIdHint, identityVerified: false },
+  });
+}
+
+/** Read at most MAX bytes. Returns null and logs diagnostics when over the bound. */
 export async function readBoundedBody(request: Request, maxBytes = MAX_WEBHOOK_BODY_BYTES): Promise<string | null> {
   const declared = Number(request.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > maxBytes) return null;
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    reportOversizedBody(maxBytes, declared, 0, "");
+    return null;
+  }
   if (!request.body) return "";
   const reader = request.body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: false });
@@ -43,6 +57,9 @@ export async function readBoundedBody(request: Request, maxBytes = MAX_WEBHOOK_B
       if (done) break;
       bytes += value.byteLength;
       if (bytes > maxBytes) {
+        const prefix = (text.slice(0, MAX_DIAGNOSTIC_PREFIX) +
+          new TextDecoder().decode(value.subarray(0, MAX_DIAGNOSTIC_PREFIX))).slice(0, MAX_DIAGNOSTIC_PREFIX);
+        reportOversizedBody(maxBytes, Number.isFinite(declared) && declared > 0 ? declared : null, bytes, prefix);
         await reader.cancel();
         return null;
       }
