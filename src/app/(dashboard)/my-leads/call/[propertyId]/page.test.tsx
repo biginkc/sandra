@@ -64,8 +64,17 @@ describe("CallScreenPage", () => {
   it("still renders when the lead_comps schema is not ready (only the numbers card degrades)", async () => {
     mocks.schemaReady.mockResolvedValue(false);
     expect(await render()).toContain("call-screen-client");
-    expect(mocks.schemaReady).not.toHaveBeenCalled();
     expect(mocks.loadCallScreen).toHaveBeenCalledWith(propertyId);
+    expect((mocks.CallScreen.mock.calls.at(-1) as unknown[] | undefined)?.[0]).toMatchObject({ clickToDial: false });
+  });
+
+  it("passes clickToDial only when the click_to_dial flag is on AND schemaReady('api_dial')", async () => {
+    await render();
+    expect(mocks.schemaReady).toHaveBeenCalledWith("api_dial");
+    expect((mocks.CallScreen.mock.calls.at(-1) as unknown[] | undefined)?.[0]).toMatchObject({ clickToDial: true });
+    mocks.getMyLeadsFlag.mockImplementation(async (_org: string, flag: string) => flag === "call_screen");
+    await render();
+    expect((mocks.CallScreen.mock.calls.at(-1) as unknown[] | undefined)?.[0]).toMatchObject({ clickToDial: false });
   });
 
   it("404s on a membership read failure, a multi-org caller and a roster failure, before any flag read", async () => {
