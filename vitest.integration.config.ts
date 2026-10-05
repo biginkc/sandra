@@ -55,6 +55,7 @@ export default defineConfig({
       "supabase/migrations/20261003120000_my_leads_queue_row_lookup.integration.test.ts",
       "supabase/migrations/20261003130000_my_leads_conflicts_non_retryable.integration.test.ts",
       "supabase/migrations/20261005100000_my_leads_housekeeping_tools.integration.test.ts",
+      "supabase/migrations/20261008090000_finalize_single_shot_per_attempt.integration.test.ts",
       "supabase/migrations/20261005100100_my_leads_housekeeping_reassign.integration.test.ts",
       "supabase/migrations/20261005110000_acquisition_attempt_outcome_voicemail_not_logged.integration.test.ts",
       "supabase/migrations/20261005120000_next_step_schema.integration.test.ts",

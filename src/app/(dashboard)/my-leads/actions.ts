@@ -486,6 +486,11 @@ export async function submitMyLeadCommand(
           "FORBIDDEN" as const,
         ),
       );
+    // Another prompt (a second tab, or the call-screen dock) already saved this call under its own
+    // key. Nothing was written, so this prompt must not write its note or next step either: the
+    // blocked STALE_STATE recovery (existing wording, Refresh) keeps the extras unflushed.
+    if (named(message, ["ALREADY_FINALIZED"]))
+      return ans(failure("rejected", ALREADY_SAVED, "STALE_STATE" as const));
     if (
       named(message, ["STALE_STATE", "STALE_ASSIGNMENT"]) ||
       message.includes("STALE_")

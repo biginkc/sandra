@@ -122,6 +122,11 @@ describe('My Leads command integration',()=>{
     mocks.rpc.mockResolvedValue({data:null,status:400,error:{message:'UNAUTHENTICATED',code:'P0001'}});
     expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toMatchObject({ok:false,answered:true,certainty:'unknown',code:'UNAUTHENTICATED',message:'Your session expired. Sign in again, then Reconcile.'});
   });
+  it('maps ALREADY_FINALIZED (second prompt, other key) to a definite already-saved answer that keeps the extras unwritten',async()=>{
+    mocks.rpc.mockResolvedValue({data:null,status:400,error:{message:'ALREADY_FINALIZED',code:'MLS01'}});
+    expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toEqual({ok:false,answered:true,certainty:'rejected',code:'STALE_STATE',message:'This was already saved. Refresh to see it.'});
+    expect(mocks.rpc).toHaveBeenCalledTimes(1);
+  });
   it('maps IDEMPOTENCY_CONFLICT to the already-saved answer',async()=>{
     mocks.rpc.mockResolvedValue({data:null,status:400,error:{message:'IDEMPOTENCY_CONFLICT',code:'P0001'}});
     expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toEqual({ok:false,answered:true,certainty:'unknown',code:'IDEMPOTENCY_CONFLICT',message:'This was already saved. Refresh to see it.'});
