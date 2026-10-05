@@ -25,6 +25,7 @@ Last updated: 2026-10-04 (after #801 release)
 | `claude/my-leads-p1b-strip` | #799 | Claude (Sonnet 5.5 builder) | **MERGED** `001cb1fd` into main (migration 20261005150000 applied TEST + PROD; prod high-water now `20261005150000`). |
 | `claude/my-leads-p1c-prompt` | #800 | Claude (Sonnet 5.5 builder) | **MERGED** `a5ba2b58` into main (migration 20261005160000 applied TEST + PROD; prod high-water now `20261005160000`). |
 | `claude/my-leads-p1c2-seller-reminders` | #801 | Claude (Sonnet 5.5 builder) | **MERGED** `abf3edd6` into main (migration 20261005170000 applied; prod high-water `20261005170000`). Reminders table 0 rows, flag OFF. Reclaim-after-reschedule duplicate-text edge is a pre-ENABLE fix, tracked. |
+| `claude/my-leads-p1c2-dup-fix` | none | Claude Sonnet 5.5 builder | in progress (pre-enable fix: reclaim-after-reschedule duplicate text) |
 | `claude/my-leads-p1d-link-capture` | #802 | Claude (Sonnet 5.5 builder) | draft, base now `main` (retargeted after #801 merge); `origin/main` abf3edd6 merged in; head `1af972f1` before this docs commit (migration 20261005180000). Phase 1 nearly complete. |
 | `claude/my-leads-p2-data-plane` | #803 | Phase 2 sole writer | draft, built, NOT merged; Opus YES at `757e01c0` |
 | `claude/my-leads-p2-ui` | #809 | Phase 2 writer | draft, built, NOT merged; Opus YES at `8ab5fc5a` |
