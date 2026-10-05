@@ -12,7 +12,7 @@
 --     property -> queue -> episode, in the same order as fn_log_acquisition_offer.
 -- No row is inserted and nothing runs when this migration applies. SQLSTATE note: the business
 -- conflicts here use MLS01 like the other My Leads functions (never 40001, which PostgREST retries).
--- Rollback twin: supabase/rollbacks/20261007120000_acquisition_offer_projections.sql
+-- Rollback twin: supabase/rollbacks/20261007170000_acquisition_offer_projections.sql
 begin;
 
 -- 1. Offers can be superseded (never accepted or declined afterwards: those RPCs need 'pending').

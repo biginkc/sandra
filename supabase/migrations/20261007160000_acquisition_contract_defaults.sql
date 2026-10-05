@@ -1,7 +1,7 @@
 -- My Leads Phase 3c (TECH-PLAN-2026-10 §3.5): contract defaults for the send-contract card.
 -- Additive only. No rows are inserted: title companies and buyer entities start EMPTY, so the
 -- card refuses to send until an owner adds them (no invented defaults).
--- Rollback twin: supabase/rollbacks/20261007110000_acquisition_contract_defaults.sql
+-- Rollback twin: supabase/rollbacks/20261007160000_acquisition_contract_defaults.sql
 begin;
 
 create table public.acquisition_contract_title_companies (

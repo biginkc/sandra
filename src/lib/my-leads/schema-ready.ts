@@ -15,6 +15,8 @@ export type SchemaFeature =
   | "lead_note_idempotency"
   | "post_call_support"
   | "seller_reminders"
+  | "artifact_fetch"
+  | "intent_timeout"
   | "lead_comps"
   | "contract_defaults"
   | "offer_projection";
@@ -64,11 +66,25 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
     ],
     columns: ["seller_reminder_settings.enabled", "seller_appointment_reminders.send_key"],
   },
+  // P2 data plane: the Dialpad transcript / Recap fetch job claims and records through these functions.
+  artifact_fetch: {
+    functions: [
+      "public.fn_claim_dialpad_artifact_fetches(integer,integer,text[])",
+      "public.fn_record_dialpad_artifact_result(uuid,text,text,text,text,text)",
+      "public.fn_resolve_dialpad_recording_links(integer)",
+    ],
+    columns: ["dialpad_call_artifact_fetches.state", "my_leads_feature_flags.artifact_fetch"],
+  },
+  // P2 data plane: the event sweep marks stale dials through the timeout function and its marker column.
+  intent_timeout: {
+    functions: ["public.fn_fail_stale_dialpad_intents(integer,integer)"],
+    columns: ["dialpad_call_intents.failed_at"],
+  },
   // P3a: comps enqueue/claim/finish and the cap ledger; `monthly_call_cap` stands for the settings row.
   lead_comps: {
     functions: [
       "public.fn_enqueue_comp_fetch(uuid,uuid,text,uuid)",
-      "public.fn_claim_comp_fetches(integer)",
+      "public.fn_claim_comp_fetches(integer,uuid)",
       "public.fn_finish_comp_fetch(uuid,text,integer,text,uuid)",
     ],
     columns: ["lead_comps.as_is_value", "org_comp_settings.monthly_call_cap", "lead_valuation_inputs.arv"],

@@ -17,7 +17,7 @@ async function withWorld(fn: (w: Awaited<ReturnType<typeof world>>) => Promise<v
   await db.connect();
   try {
     await db.query('begin');
-    await applyMyLeadsChain(db, ['schema', 'createFn']);
+    await applyMyLeadsChain(db, ['schema', 'createFn', 'replayLocation']);
     await fn(await world(db));
   } finally {
     await db.query('rollback').catch(() => {});
@@ -303,5 +303,26 @@ it('a booking made by the legacy path is returned as the original when retried o
     const r = await w.call(w.base({ p_title: 'Walkthrough', p_due_at: due.toISOString(), p_mode: 'in_person', p_end_at: end.toISOString(), p_idempotency_key: key }), 'authenticated', w.jarrad);
     expect(r).toMatchObject({ duplicate: true, task_id: t });
     expect(r.ledger_id).toBeTruthy();
+  });
+});
+
+it('a replay with a different location is refused, an identical one is returned', async () => {
+  await withWorld(async (w) => {
+    const key = randomUUID(), due = hours(48), end = new Date(Date.parse(due) + 3_600_000).toISOString();
+    const args = (loc: string | null) => w.base({ p_due_at: due, p_mode: 'in_person', p_end_at: end, p_location: loc, p_idempotency_key: key });
+    const first = await w.call(args('12 Oak St'), 'authenticated', w.jarrad);
+    expect(await w.call(args('12 Oak St'), 'authenticated', w.jarrad)).toMatchObject({ duplicate: true, task_id: first.task_id });
+    await w.expectError(() => w.call(args('99 Elm St'), 'authenticated', w.jarrad), /idempotency key reuse with different request/);
+    await w.expectError(() => w.call(args(null), 'authenticated', w.jarrad), /idempotency key reuse with different request/);
+  });
+});
+
+it('a replay that flips mode is refused (the legacy phone-with-ledger tolerance is covered above)', async () => {
+  await withWorld(async (w) => {
+    const key = randomUUID(), due = hours(48), end = new Date(Date.parse(due) + 3_600_000).toISOString();
+    const inPerson = { p_due_at: due, p_mode: 'in_person', p_end_at: end, p_location: '12 Oak St', p_idempotency_key: key };
+    await w.call(w.base(inPerson), 'authenticated', w.jarrad);
+    // Same key, same times, but as a phone appointment: a different request.
+    await w.expectError(() => w.call(w.base({ p_due_at: due, p_end_at: new Date(Date.parse(due) + 900_000).toISOString(), p_idempotency_key: key }), 'authenticated', w.jarrad), /idempotency key reuse with different request/);
   });
 });

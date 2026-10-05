@@ -1,4 +1,4 @@
--- Rollback for 20261007120000_acquisition_offer_projections.
+-- Rollback for 20261007170000_acquisition_offer_projections.
 -- Drops the triggers, functions and projection table. The widened outcome constraint is restored
 -- only when no 'superseded' offers exist: supersession is never recorded as a decline, so those rows
 -- are NOT rewritten; if any exist the (additive, harmless) widened constraint is left in place.

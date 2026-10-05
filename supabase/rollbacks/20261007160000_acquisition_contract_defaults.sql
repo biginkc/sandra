@@ -1,4 +1,4 @@
--- Rollback for 20261007110000_acquisition_contract_defaults.
+-- Rollback for 20261007160000_acquisition_contract_defaults.
 -- Safe: nothing outside the Phase 3c send-contract card reads these tables, and sent requests
 -- snapshot their values in esign_requests.merge_value_snapshot. Export the rows first if the
 -- configured title companies and buyer entities matter.

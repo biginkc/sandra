@@ -61,6 +61,10 @@
       "schedule": "*/1 * * * *"
     },
     {
+      "path": "/api/cron/dialpad-artifact-sweep",
+      "schedule": "*/1 * * * *"
+    },
+    {
       "path": "/api/cron/direct-recording-sweep",
       "schedule": "*/1 * * * *"
     },

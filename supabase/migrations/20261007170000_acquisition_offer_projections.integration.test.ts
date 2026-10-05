@@ -121,7 +121,7 @@ async function withTx(fn: (db: Client, w: Awaited<ReturnType<typeof world>>) => 
   }
 }
 
-describe('20261007120000_acquisition_offer_projections', () => {
+describe('20261007170000_acquisition_offer_projections', () => {
   it('widens outcome to superseded but keeps the outcome-by rule, and a superseded offer cannot be declined', async () => {
     await withTx(async (db, w) => {
       const property = await w.prop();
