@@ -23,7 +23,8 @@ export type SchemaFeature =
   | "callbacks_due"
   | "event_redaction"
   | "contract_defaults"
-  | "offer_projection";
+  | "offer_projection"
+  | "call_facts";
 
 export type SchemaRequirement = {
   /** `public.fn_name(argtype,argtype)` regprocedure strings. */
@@ -122,6 +123,16 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
   offer_projection: {
     functions: ["public.fn_project_acquisition_offer(uuid)"],
     columns: ["acquisition_offer_projections.send_payload"],
+  },
+  // P3c call facts (§3.12): the sweep, the chips and their accept/dismiss actions.
+  call_facts: {
+    functions: [
+      "public.fn_claim_call_facts(integer,integer)",
+      "public.fn_complete_call_facts(uuid,uuid,jsonb,text,text)",
+      "public.fn_accept_call_fact(uuid,uuid,text,text)",
+      "public.fn_dismiss_call_facts(uuid,uuid)",
+    ],
+    columns: ["lead_call_facts.processing_state"],
   },
 };
 

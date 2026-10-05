@@ -14,6 +14,8 @@ import { WorkflowRecoveryContext } from "@/app/(dashboard)/my-leads/_components/
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 
+import { CallFactChips } from "./call-fact-chips";
+import { acceptCallFactAction, dismissCallFactsAction } from "./facts-actions";
 import { compLeadAction, setValuationInputsAction } from "./actions";
 import { sendContractCardAction } from "./contract-card/contract-card-actions";
 import { ContractCard } from "./contract-card/contract-card";
@@ -36,7 +38,7 @@ const STAGE_LABEL: Record<string, string> = {
 /**
  * D7 layout. ≥1024px: left 60% static script in its own scroll container; right 40% stacked
  * numbers → (contract, hidden in 3b) → history → docked post-call prompt. Below: single column
- * header, numbers, script, history, prompt. The contract and facts slots are omitted here.
+ * header, numbers, script, history, prompt. Call facts chips sit under the numbers when a proposal is open.
  */
 export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
   const router = useRouter();
@@ -229,6 +231,21 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
         <div data-testid="call-screen-right" className="order-1 flex min-h-0 flex-col gap-4 lg:order-2">
           <div className="contents lg:flex lg:flex-col lg:gap-4">
             {numbers}
+            {data.facts.ok && data.facts.data ? (
+              <div className="order-1 lg:order-none">
+                <CallFactChips
+                  key={data.facts.data.factId}
+                  facts={data.facts.data}
+                  onAccept={(field) => acceptCallFactAction({ propertyId, factId: data.facts.ok && data.facts.data ? data.facts.data.factId : "", field })}
+                  onDismiss={() => dismissCallFactsAction({ propertyId, factId: data.facts.ok && data.facts.data ? data.facts.data.factId : "" })}
+                  // Motivation prefills only the shared entry field (script chip); nothing is written to the lead here.
+                  onAccepted={(field, value) => {
+                    if (field === "motivation") onEntryFieldChange("motivation", value);
+                    router.refresh();
+                  }}
+                />
+              </div>
+            ) : null}
             {data.contract.ok && data.contract.data.enabled ? (
               <div className="order-2 lg:order-none">
                 <ContractCard

@@ -1,0 +1,315 @@
+-- My Leads Phase 3c (TECH-PLAN-2026-10 section 3.12): call facts (AI proposals) and the claim/complete job.
+-- Additive only. Inert until the `facts_job` flag is on for an org (the flag defaults OFF and the claim
+-- function itself refuses orgs with the flag off). Nothing here writes to a lead: a fact is a proposal that
+-- a human accepts through fn_accept_call_fact, which only appends a lead note.
+--
+-- Creates:
+--   public.lead_call_facts          one row per call activity; `status` is the human-facing state,
+--                                   `processing_state` the durable job state (claimed|done|failed)
+--   public.fn_claim_call_facts      service_role; claim/lease/reclaim, input from call_transcripts
+--   public.fn_complete_call_facts   service_role; ONE transaction: deterministic summary note + facts + done
+--   public.fn_accept_call_fact      authenticated; records accepted[field] and appends a lead note
+--   public.fn_dismiss_call_facts    authenticated
+-- Rollback twin: supabase/rollbacks/20261007190000_call_facts.sql
+begin;
+
+create table public.lead_call_facts (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references public.organizations(id) on delete cascade,
+  property_id uuid not null,
+  call_activity_id uuid not null,
+  source text not null default 'dialpad_ai_recap' check (source in ('dialpad_ai_recap')),
+  status text not null default 'proposed'
+    check (status in ('proposed', 'partially_accepted', 'dismissed', 'no_facts')),
+  summary_note_id uuid references public.lead_notes(id) on delete set null,
+  -- { field: { value, evidence } } for motivation, timeline, condition, mortgage, asking_price, next_step
+  facts jsonb not null default '{}'::jsonb check (jsonb_typeof(facts) = 'object'),
+  accepted jsonb not null default '{}'::jsonb check (jsonb_typeof(accepted) = 'object'),
+  model text,
+  extracted_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  -- Durable job state, separate from the human-facing `status`.
+  processing_state text not null default 'claimed' check (processing_state in ('claimed', 'done', 'failed')),
+  claim_token uuid,
+  lease_until timestamptz,
+  attempts smallint not null default 0 check (attempts between 0 and 5),
+  unique (org_id, call_activity_id),
+  foreign key (call_activity_id, property_id, org_id)
+    references public.call_activities(id, property_id, org_id) on delete cascade
+);
+create index lead_call_facts_property_idx on public.lead_call_facts (org_id, property_id, extracted_at desc);
+create index lead_call_facts_reclaim_idx on public.lead_call_facts (lease_until) where processing_state = 'claimed';
+
+alter table public.lead_call_facts enable row level security;
+create policy lead_call_facts_org_select on public.lead_call_facts
+  for select to authenticated using (public.hugo_has_active_org_access(org_id));
+
+revoke all on public.lead_call_facts from public, anon, authenticated, service_role;
+-- Members read the proposal columns; the job state (token, lease) is service-only.
+grant select (
+  id, org_id, property_id, call_activity_id, source, status, summary_note_id,
+  facts, accepted, model, extracted_at, updated_at, processing_state
+) on public.lead_call_facts to authenticated;
+grant select, insert, update on public.lead_call_facts to service_role;
+
+-- ----------------------------------------------------------------------------
+-- fn_claim_call_facts (service_role)
+-- ----------------------------------------------------------------------------
+create or replace function public.fn_claim_call_facts(p_limit integer, p_lease_seconds integer default 300)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_claims jsonb;
+  v_exhausted jsonb;
+begin
+  if p_limit is null or p_limit < 1 or p_limit > 50 then
+    raise exception 'INVALID_INPUT' using errcode = '22023';
+  end if;
+  if p_lease_seconds is null or p_lease_seconds < 30 or p_lease_seconds > 3600 then
+    raise exception 'INVALID_INPUT' using errcode = '22023';
+  end if;
+
+  -- A reservation whose worker crashed at the last allowed attempt is failed once and never selected again.
+  with dead as (
+    update public.lead_call_facts f
+       set processing_state = 'failed', claim_token = null, lease_until = null, updated_at = now()
+     where f.processing_state = 'claimed' and f.lease_until < now() and f.attempts >= 5
+    returning f.id, f.call_activity_id
+  )
+  select coalesce(jsonb_agg(jsonb_build_object('fact_id', d.id, 'call_activity_id', d.call_activity_id)), '[]'::jsonb)
+    into v_exhausted from dead d;
+
+  with eligible as (
+    select ca.id as call_activity_id, ca.org_id, ca.property_id
+      from public.call_activities ca
+      join public.properties p on p.id = ca.property_id and p.org_id = ca.org_id
+     where ca.property_id is not null
+       and p.is_training is not true
+       and p.deleted_at is null
+       and exists (select 1 from public.my_leads_feature_flags g where g.org_id = ca.org_id and g.facts_job)
+       -- Phase 2.9: both artifact rows exist, every one is terminal, and at least one has content.
+       and (select count(*) from public.dialpad_call_artifact_fetches f
+             where f.org_id = ca.org_id and f.call_activity_id = ca.id and f.artifact in ('transcript', 'recap')) = 2
+       and not exists (select 1 from public.dialpad_call_artifact_fetches f
+             where f.org_id = ca.org_id and f.call_activity_id = ca.id and f.artifact in ('transcript', 'recap')
+               and f.state not in ('available', 'unavailable', 'denied'))
+       and exists (select 1 from public.dialpad_call_artifact_fetches f
+             where f.org_id = ca.org_id and f.call_activity_id = ca.id and f.artifact in ('transcript', 'recap')
+               and f.state = 'available')
+       and (
+         not exists (select 1 from public.lead_call_facts lf where lf.org_id = ca.org_id and lf.call_activity_id = ca.id)
+         or exists (select 1 from public.lead_call_facts lf
+                     where lf.org_id = ca.org_id and lf.call_activity_id = ca.id
+                       and lf.processing_state = 'claimed' and lf.lease_until < now() and lf.attempts < 5)
+       )
+     order by ca.ended_at nulls last, ca.id
+     limit p_limit
+  ),
+  claimed as (
+    insert into public.lead_call_facts as lcf (org_id, property_id, call_activity_id, processing_state, claim_token, lease_until, attempts)
+    select e.org_id, e.property_id, e.call_activity_id, 'claimed', gen_random_uuid(),
+           now() + make_interval(secs => p_lease_seconds), 1
+      from eligible e
+    on conflict (org_id, call_activity_id) do update
+       set claim_token = gen_random_uuid(),
+           lease_until = now() + make_interval(secs => p_lease_seconds),
+           attempts = lcf.attempts + 1,
+           updated_at = now()
+     where lcf.processing_state = 'claimed' and lcf.lease_until < now() and lcf.attempts < 5
+    returning lcf.id, lcf.claim_token, lcf.call_activity_id, lcf.org_id, lcf.property_id
+  )
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'fact_id', c.id,
+           'claim_token', c.claim_token,
+           'call_activity_id', c.call_activity_id,
+           'org_id', c.org_id,
+           'property_id', c.property_id,
+           'summary', t.summary,
+           'transcript', t.text)), '[]'::jsonb)
+    into v_claims
+    from claimed c
+    left join lateral (
+      select ct.summary, ct.text from public.call_transcripts ct
+       where ct.call_activity_id = c.call_activity_id
+       order by (ct.status = 'available') desc, ct.updated_at desc, ct.id
+       limit 1
+    ) t on true;
+
+  return jsonb_build_object('claims', v_claims, 'exhausted', v_exhausted);
+end;
+$$;
+revoke all on function public.fn_claim_call_facts(integer, integer) from public, anon, authenticated;
+grant execute on function public.fn_claim_call_facts(integer, integer) to service_role;
+
+-- ----------------------------------------------------------------------------
+-- fn_complete_call_facts (service_role): the single completion transaction
+-- ----------------------------------------------------------------------------
+create or replace function public.fn_complete_call_facts(
+  p_fact_id uuid,
+  p_claim_token uuid,
+  p_facts jsonb,
+  p_status text,
+  p_model text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_row public.lead_call_facts%rowtype;
+  v_summary text;
+  v_ended timestamptz;
+  v_note_id uuid;
+  v_key text;
+  v_item jsonb;
+  v_allowed constant text[] := array['motivation', 'timeline', 'condition', 'mortgage', 'asking_price', 'next_step'];
+begin
+  if p_fact_id is null or p_claim_token is null or p_facts is null or jsonb_typeof(p_facts) <> 'object'
+     or p_status not in ('proposed', 'no_facts') then
+    raise exception 'INVALID_INPUT' using errcode = '22023';
+  end if;
+  -- Shape guard (the real validation, verbatim evidence included, runs in code before this call).
+  for v_key, v_item in select * from jsonb_each(p_facts) loop
+    if not (v_key = any(v_allowed)) or jsonb_typeof(v_item) <> 'object'
+       or jsonb_typeof(v_item -> 'value') <> 'string' or jsonb_typeof(v_item -> 'evidence') <> 'string' then
+      raise exception 'INVALID_INPUT' using errcode = '22023';
+    end if;
+  end loop;
+  if (p_facts = '{}'::jsonb) <> (p_status = 'no_facts') then
+    raise exception 'INVALID_INPUT' using errcode = '22023';
+  end if;
+
+  select * into v_row from public.lead_call_facts where id = p_fact_id for update;
+  if not found then
+    raise exception 'NOT_FOUND' using errcode = 'P0002';
+  end if;
+  if v_row.claim_token is distinct from p_claim_token then
+    raise exception 'CLAIM_TOKEN_MISMATCH' using errcode = '40001';
+  end if;
+  -- A replay of the same completed claim is a no-op.
+  if v_row.processing_state = 'done' then
+    return jsonb_build_object('replayed', true, 'summaryNoteId', v_row.summary_note_id, 'status', v_row.status);
+  end if;
+  if v_row.processing_state <> 'claimed' or v_row.lease_until is null or v_row.lease_until < now() then
+    raise exception 'LEASE_EXPIRED' using errcode = '40001';
+  end if;
+
+  select ct.summary into v_summary
+    from public.call_transcripts ct
+   where ct.call_activity_id = v_row.call_activity_id
+   order by (ct.status = 'available') desc, ct.updated_at desc, ct.id
+   limit 1;
+  select ca.ended_at into v_ended from public.call_activities ca where ca.id = v_row.call_activity_id;
+
+  if v_summary is not null and btrim(v_summary) <> '' then
+    -- Deterministic identity: a replay (or a second worker) cannot create a second note.
+    insert into public.lead_notes (org_id, property_id, author_user_id, body, idempotency_key)
+    values (
+      v_row.org_id, v_row.property_id, null,
+      'Dialpad call summary' || coalesce(' ' || to_char(v_ended at time zone 'America/Chicago', 'YYYY-MM-DD'), '') || E'\n' || v_summary,
+      md5('call_facts_summary:' || v_row.call_activity_id::text)::uuid
+    )
+    on conflict (org_id, idempotency_key) where idempotency_key is not null do nothing;
+    select n.id into v_note_id from public.lead_notes n
+     where n.org_id = v_row.org_id and n.idempotency_key = md5('call_facts_summary:' || v_row.call_activity_id::text)::uuid;
+  end if;
+
+  update public.lead_call_facts
+     set summary_note_id = v_note_id, facts = p_facts, status = p_status, model = p_model,
+         extracted_at = now(), updated_at = now(), processing_state = 'done', lease_until = null
+   where id = p_fact_id;
+
+  return jsonb_build_object('replayed', false, 'summaryNoteId', v_note_id, 'status', p_status);
+end;
+$$;
+revoke all on function public.fn_complete_call_facts(uuid, uuid, jsonb, text, text) from public, anon, authenticated;
+grant execute on function public.fn_complete_call_facts(uuid, uuid, jsonb, text, text) to service_role;
+
+-- ----------------------------------------------------------------------------
+-- fn_accept_call_fact (authenticated)
+-- ----------------------------------------------------------------------------
+create or replace function public.fn_accept_call_fact(p_org_id uuid, p_fact_id uuid, p_field text, p_value text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_actor uuid := public.my_leads_workflow_require_actor(p_org_id);
+  v_row public.lead_call_facts%rowtype;
+  v_label text;
+  v_value text := btrim(coalesce(p_value, ''));
+  v_note_key uuid;
+  v_inserted integer;
+begin
+  v_label := case p_field
+    when 'motivation' then 'Motivation'
+    when 'timeline' then 'Timeline'
+    when 'condition' then 'Condition'
+    when 'mortgage' then 'Mortgage'
+    when 'asking_price' then 'Asking price'
+    when 'next_step' then 'Next step'
+    else null end;
+  if v_label is null or v_value = '' or length(v_value) > 500 then
+    raise exception 'INVALID_INPUT' using errcode = '22023';
+  end if;
+
+  select * into v_row from public.lead_call_facts where id = p_fact_id and org_id = p_org_id for update;
+  if not found or v_row.processing_state <> 'done' then
+    raise exception 'NOT_FOUND' using errcode = 'P0002';
+  end if;
+  if v_row.status = 'dismissed' or not (v_row.facts ? p_field) then
+    raise exception 'NOT_ACCEPTABLE' using errcode = '22023';
+  end if;
+  if v_row.accepted ? p_field then
+    return jsonb_build_object('duplicate', true, 'field', p_field, 'status', v_row.status);
+  end if;
+
+  v_note_key := md5('call_fact_accept:' || p_fact_id::text || ':' || p_field)::uuid;
+  insert into public.lead_notes (org_id, property_id, author_user_id, body, idempotency_key)
+  values (p_org_id, v_row.property_id, v_actor, 'From call summary - ' || v_label || ': ' || v_value, v_note_key)
+  on conflict (org_id, idempotency_key) where idempotency_key is not null do nothing;
+  get diagnostics v_inserted = row_count;
+
+  update public.lead_call_facts
+     set accepted = accepted || jsonb_build_object(p_field, jsonb_build_object('value', v_value, 'by', v_actor, 'at', now())),
+         status = 'partially_accepted', updated_at = now()
+   where id = p_fact_id;
+  return jsonb_build_object('duplicate', false, 'field', p_field, 'status', 'partially_accepted', 'noteWritten', v_inserted = 1);
+end;
+$$;
+revoke all on function public.fn_accept_call_fact(uuid, uuid, text, text) from public, anon;
+grant execute on function public.fn_accept_call_fact(uuid, uuid, text, text) to authenticated;
+
+-- ----------------------------------------------------------------------------
+-- fn_dismiss_call_facts (authenticated)
+-- ----------------------------------------------------------------------------
+create or replace function public.fn_dismiss_call_facts(p_org_id uuid, p_fact_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_actor uuid := public.my_leads_workflow_require_actor(p_org_id);
+begin
+  update public.lead_call_facts
+     set status = 'dismissed', updated_at = now()
+   where id = p_fact_id and org_id = p_org_id and processing_state = 'done' and status in ('proposed', 'partially_accepted');
+  if not found then
+    if exists (select 1 from public.lead_call_facts where id = p_fact_id and org_id = p_org_id and status in ('dismissed', 'no_facts')) then
+      return jsonb_build_object('status', 'dismissed', 'duplicate', true, 'by', v_actor);
+    end if;
+    raise exception 'NOT_FOUND' using errcode = 'P0002';
+  end if;
+  return jsonb_build_object('status', 'dismissed', 'duplicate', false, 'by', v_actor);
+end;
+$$;
+revoke all on function public.fn_dismiss_call_facts(uuid, uuid) from public, anon;
+grant execute on function public.fn_dismiss_call_facts(uuid, uuid) to authenticated;
+
+commit;

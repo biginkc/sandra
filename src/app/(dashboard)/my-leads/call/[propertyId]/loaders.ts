@@ -2,6 +2,7 @@ import "server-only";
 
 import { loadCoachCallContext } from "@/lib/coach/coach-context-actions";
 import { loadCachedCoachBundle } from "@/lib/coach/script-cache";
+import { FACT_FIELDS } from "@/lib/call-facts/types";
 import { LEAD_COMPS_MEMBER_COLUMNS } from "@/lib/comps/types";
 import { reportError } from "@/lib/errors/report";
 import { getMyLeadsFlag } from "@/lib/my-leads/flags";
@@ -18,6 +19,7 @@ import {
   type CallScreenNote,
   type CallScreenPhone,
   type CallScreenScript,
+  type LeadCallFactsView,
   type LeadCompPublic,
   type Section,
 } from "./types";
@@ -199,6 +201,33 @@ async function loadMessages(client: LooseClient, propertyId: string, contactId: 
 }
 
 /** Flag-off, not-ready, or any failure is `{ ok: false }` and the layout omits the slot. */
+/**
+ * The latest finished, still-open call facts proposal for the lead, as chips. Null (nothing rendered)
+ * until the schema exists or when there is nothing left to accept. Reads through the caller's RLS
+ * client and never selects the job columns (token, lease), which members cannot read.
+ */
+async function loadFacts(client: LooseClient, orgId: string, propertyId: string, deps: Deps): Promise<LeadCallFactsView | null> {
+  if (!(await (deps.schemaReady ?? schemaReady)("call_facts"))) return null;
+  const { data, error } = await client
+    .from("lead_call_facts")
+    .select("id, facts, accepted, status")
+    .eq("org_id", orgId)
+    .eq("property_id", propertyId)
+    .eq("processing_state", "done")
+    .in("status", ["proposed", "partially_accepted"])
+    .order("extracted_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  const facts = (data.facts ?? {}) as Record<string, { value?: unknown; evidence?: unknown } | undefined>;
+  const accepted = (data.accepted ?? {}) as Record<string, unknown>;
+  const chips = FACT_FIELDS.filter((f) => !(f in accepted))
+    .map((field) => ({ field, value: facts[field]?.value, evidence: facts[field]?.evidence }))
+    .filter((c): c is { field: (typeof FACT_FIELDS)[number]; value: string; evidence: string } => typeof c.value === "string" && typeof c.evidence === "string");
+  return chips.length === 0 ? null : { factId: String(data.id), chips };
+}
+
 async function loadContractSection(propertyId: string, deps: Deps): Promise<Section<ContractCardState>> {
   try {
     const state = await (deps.contractCard ?? loadContractCard)(propertyId);
@@ -234,7 +263,7 @@ export async function loadCallScreen(propertyId: string, deps: Deps = {}): Promi
         notes,
         messages,
         contract: await loadContractSection(propertyId, deps),
-        facts: { ok: false, message: "Call facts arrive with Phase 3c." },
+        facts: await section<LeadCallFactsView | null>("Call facts could not be loaded.", "facts", () => loadFacts(client, viewer.orgId, propertyId, deps)),
       },
     };
   } catch (error) {

@@ -4,6 +4,7 @@
  */
 import type { CoachCallContext, ScriptBundle } from "@biginkc/coach";
 
+import type { FactField } from "@/lib/call-facts/types";
 import type { CompSale, LeadCompRow, VerifyReason } from "@/lib/comps/types";
 import type { BuyerEntity, TitleCompany } from "@/lib/contract-defaults/resolve";
 import type { QueueRow } from "@/lib/my-leads/queries";
@@ -62,7 +63,9 @@ export type ContractCardState =
       todayCentral: string;
       tomorrowCentral: string;
     };
-export type LeadCallFactsView = { placeholder: true };
+/** One proposed fact still awaiting a human tap, in display-priority order. */
+export type CallFactChipData = { field: FactField; value: string; evidence: string };
+export type LeadCallFactsView = { factId: string; chips: CallFactChipData[] };
 
 export type CallScreenData = {
   viewer: { userId: string; orgId: string; isOwner: boolean };

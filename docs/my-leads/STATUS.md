@@ -34,6 +34,7 @@ Last updated: 2026-10-04 (after #801 release)
 | `claude/my-leads-p3-call-screen` | #807 | Claude Sonnet 5.5 builder | draft, built, NOT merged; Opus YES at `a908ad1c`; pre-enable fixes applied (dock key, notFound, action guards, schemaReady gate dropped, lead_comps probe signature); needs Opus re-review |
 | `claude/my-leads-p1a-replay-fix` | none | Claude (Sonnet 5.5 builder) | draft PR open: restore `location` comparison (and tolerant `mode`) in fn_create_next_step replay, #797 tracked follow-up. Migration 20261006111000 (NOT applied). |
 | `claude/my-leads-p3-send-card` | #814 (draft, base `claude/my-leads-p3-call-screen`) | Claude Sonnet 5.5 builder | in progress (contract defaults schema, prefill mapper, send-contract card + actions; offer projection library/migration NOT in this slice) |
+| `claude/my-leads-p3-facts` | none yet | Claude Sonnet 5.5 builder | in progress (TECH-PLAN 3.12 call facts: migration 20261007190000, claim/complete job, flag-off cron, extractor with null prompt, chips) |
 | `p1a-retire` | none | none | NOT built yet |
 | all other branches | none | unclaimed | claim here before writing |
 
