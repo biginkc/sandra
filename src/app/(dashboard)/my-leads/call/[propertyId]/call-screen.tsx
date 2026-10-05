@@ -15,6 +15,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 
 import { compLeadAction, setValuationInputsAction } from "./actions";
+import { sendContractCardAction } from "./contract-card/contract-card-actions";
+import { ContractCard } from "./contract-card/contract-card";
 import { DIAL_UNAVAILABLE_COPY, dialLeadAction } from "./dial-stub";
 import { HistoryPanel } from "./history-panel";
 import { NumbersCard } from "./numbers-card";
@@ -227,7 +229,18 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
         <div data-testid="call-screen-right" className="order-1 flex min-h-0 flex-col gap-4 lg:order-2">
           <div className="contents lg:flex lg:flex-col lg:gap-4">
             {numbers}
-            {/* contract card slot: p3-send-card */}
+            {data.contract.ok && data.contract.data.enabled ? (
+              <div className="order-2 lg:order-none">
+                <ContractCard
+                  state={data.contract.data}
+                  propertyId={propertyId}
+                  send={sendContractCardAction}
+                  onPriceChange={(v) => onEntryFieldChange("offer_price", v)}
+                  onClosingDateChange={(v) => onEntryFieldChange("closing_date", v)}
+                  onSent={() => router.refresh()}
+                />
+              </div>
+            ) : null}
             <div className="order-3 lg:order-none">{history}</div>
             <div data-testid="call-screen-prompt-dock" className="order-4 flex flex-col gap-3 lg:sticky lg:bottom-0 lg:order-none">{recoveredBanner}{prompt}</div>
           </div>

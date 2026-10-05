@@ -5,7 +5,9 @@
 import type { CoachCallContext, ScriptBundle } from "@biginkc/coach";
 
 import type { CompSale, LeadCompRow, VerifyReason } from "@/lib/comps/types";
+import type { BuyerEntity, TitleCompany } from "@/lib/contract-defaults/resolve";
 import type { QueueRow } from "@/lib/my-leads/queries";
+import type { PrefillBase } from "./contract-card/contract-prefill";
 import type { Database } from "@/lib/supabase/types";
 
 export type Section<T> = { ok: true; data: T } | { ok: false; message: string };
@@ -43,7 +45,23 @@ export type CallScreenNote = Database["public"]["Tables"]["lead_notes"]["Row"];
 export type CallScreenMessage = Database["public"]["Tables"]["messages"]["Row"];
 
 /** p3-send-card fills these; in p3-call-screen the loader always returns `{ ok: false }` for both. */
-export type ContractCardState = { placeholder: true };
+export type ContractCardState =
+  | { enabled: false; reason: string }
+  | {
+      enabled: true;
+      testMode: boolean;
+      templateId: string;
+      sellerRoleName: string;
+      signerRoles: readonly { name: string; order: number }[];
+      sellerSigner: { name: string; emailAddress: string };
+      prefillBase: PrefillBase;
+      titleCompanies: TitleCompany[];
+      buyerEntities: BuyerEntity[];
+      selectedTitleCompanyId: string | null;
+      selectedBuyerEntityId: string | null;
+      todayCentral: string;
+      tomorrowCentral: string;
+    };
 export type LeadCallFactsView = { placeholder: true };
 
 export type CallScreenData = {
