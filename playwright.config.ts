@@ -120,6 +120,14 @@ const webServerEnv: Record<string, string> = {
   // Pin quiet-hours checks to 11:00 AM America/Chicago so send-flow E2E
   // coverage is deterministic when the suite runs overnight.
   E2E_QUIET_HOURS_NOW: process.env.E2E_QUIET_HOURS_NOW,
+  // my-leads-close Phase 2 slice (TECH-PLAN 4.3): stub dial provider (seam S1; ignored when
+  // VERCEL_ENV=production), the webhook secret the fixture's `env:DIALPAD_CTI_WEBHOOK_SECRET_E2E`
+  // connection resolves to, and a dummy Dialpad key (>= 16 chars) behind `env:DIALPAD_CTI_DIAL_KEY_E2E`.
+  // Test-only values for the disposable stack; production never reads these names.
+  DIALPAD_DIAL_PROVIDER: "stub",
+  DIALPAD_CTI_WEBHOOK_SECRET_E2E:
+    process.env.DIALPAD_CTI_WEBHOOK_SECRET_E2E ?? "e2e-dialpad-secret-0123456789",
+  DIALPAD_CTI_DIAL_KEY_E2E: "e2e-dummy-dialpad-key-0123456789",
   NODE_ENV: "development",
 };
 
@@ -141,6 +149,8 @@ export default defineConfig({
     "**/prod-canary/**",
     "**/synthetic/**",
     "**/properties-filter-characterization.*.ts",
+    // Vitest unit tests that live beside the fixtures; Playwright would load them as specs and crash.
+    "**/support/**/*.test.ts",
   ],
   // Don't run in parallel — the suite resets shared DB tables. Parallel
   // specs would race each other and flake.
