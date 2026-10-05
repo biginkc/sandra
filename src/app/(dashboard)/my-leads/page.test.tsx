@@ -12,7 +12,8 @@ const mocks = vi.hoisted(() => ({
   getCallNext: vi.fn(),
   postCallPromptEnabled: vi.fn(),
   MyLeadsClient: vi.fn(() => <div data-testid="my-leads-client" />),
-  loadDialpadPanelBootstrap: vi.fn(),
+  loadDialpadCallingBootstrap: vi.fn(),
+  getMyLeadsCallFeatures: vi.fn(),
   reportError: vi.fn(),
   property: { data: null as unknown, error: null as unknown },
   notFound: vi.fn(() => {
@@ -46,8 +47,12 @@ vi.mock("@/lib/my-leads/post-call", () => ({
 vi.mock("@/lib/my-leads/drip-queries", () => ({
   listMyLeadsInDrip: mocks.listMyLeadsInDrip,
 }));
+vi.mock("@/lib/my-leads/call-features", () => ({
+  CALL_FEATURES_OFF: { clickToDial: false, autoPrompt: false, callbackAlert: false },
+  getMyLeadsCallFeatures: mocks.getMyLeadsCallFeatures,
+}));
 vi.mock("@/lib/dialpad-cti/dispatch", () => ({
-  loadDialpadPanelBootstrap: mocks.loadDialpadPanelBootstrap,
+  loadDialpadCallingBootstrap: mocks.loadDialpadCallingBootstrap,
   createSupabaseDialpadDispatchDb: vi.fn(() => ({})),
 }));
 vi.mock("@/lib/supabase/admin", () => ({
@@ -133,7 +138,8 @@ beforeEach(() => {
     repliedCount: 0,
     counts: {},
   });
-  mocks.loadDialpadPanelBootstrap.mockResolvedValue(null);
+  mocks.loadDialpadCallingBootstrap.mockResolvedValue(null);
+  mocks.getMyLeadsCallFeatures.mockResolvedValue({ clickToDial: true, autoPrompt: false, callbackAlert: false });
 });
 
 describe("MyLeadsPage availability boundary", () => {
@@ -292,18 +298,17 @@ describe("MyLeadsPage availability boundary", () => {
     },
   );
 
-  it("passes the Dialpad panel bootstrap to the client only for the session's own org and rep", async () => {
+  it("passes the Dialpad calling bootstrap to the client only for the session's own org and rep", async () => {
     const bootstrap = {
       connectionId: "c-1",
-      allowedOrigins: ["https://dialpad.com"],
       binding: { status: "none" },
       grants: [],
     };
-    mocks.loadDialpadPanelBootstrap.mockResolvedValue(bootstrap);
+    mocks.loadDialpadCallingBootstrap.mockResolvedValue(bootstrap);
 
     renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
 
-    expect(mocks.loadDialpadPanelBootstrap).toHaveBeenCalledWith(
+    expect(mocks.loadDialpadCallingBootstrap).toHaveBeenCalledWith(
       expect.anything(),
       {
         orgId: "org-1",
@@ -316,11 +321,26 @@ describe("MyLeadsPage availability boundary", () => {
           [Record<string, unknown>]
         >
       )[0]?.[0],
-    ).toMatchObject({ dialpad: bootstrap });
+    ).toMatchObject({ dialpad: bootstrap, callFeatures: { clickToDial: true, autoPrompt: false, callbackAlert: false } });
+  });
+
+  it("never loads the Dialpad bootstrap while click_to_dial is off (the softphone branch stays)", async () => {
+    mocks.getMyLeadsCallFeatures.mockResolvedValue({ clickToDial: false, autoPrompt: true, callbackAlert: true });
+
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+
+    expect(mocks.loadDialpadCallingBootstrap).not.toHaveBeenCalled();
+    expect(
+      (
+        mocks.MyLeadsClient.mock.calls as unknown as Array<
+          [Record<string, unknown>]
+        >
+      )[0]?.[0],
+    ).toMatchObject({ dialpad: null, callFeatures: { clickToDial: false, autoPrompt: true, callbackAlert: true } });
   });
 
   it("keeps the existing calling flow when the Dialpad bootstrap fails", async () => {
-    mocks.loadDialpadPanelBootstrap.mockRejectedValue(new Error("db down"));
+    mocks.loadDialpadCallingBootstrap.mockRejectedValue(new Error("db down"));
 
     const html = renderPage(
       await MyLeadsPage({ searchParams: Promise.resolve({}) }),
@@ -637,7 +657,7 @@ describe("MyLeadsPage availability boundary", () => {
         repliedCount: 0,
         counts: {},
       });
-      mocks.loadDialpadPanelBootstrap.mockResolvedValue(null);
+      mocks.loadDialpadCallingBootstrap.mockResolvedValue(null);
       renderPage(
         await MyLeadsPage({
           searchParams: Promise.resolve({ lead: [leadId, leadId] }),

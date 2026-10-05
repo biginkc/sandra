@@ -242,6 +242,8 @@ export function parseDialpadEventMatchResult(value: Json | null | undefined): Di
 }
 
 export interface DialpadDialRelease {
+  /** The frozen Dialpad user id of the verified binding (int64 as text); the server-side dialer never trusts a browser claim. */
+  dialpadUserId: string;
   phoneNumber: string;
   customData: string;
   identityType: DialpadIdentityType | null;
@@ -269,13 +271,15 @@ export function parseDialpadDispatchAuthorization(value: Json | null | undefined
     : oneOf(dial.identityType, DIALPAD_IDENTITY_TYPES, 'identityType');
   const identityId = nullableStr(dial.identityId, 'identityId');
   if (identityId !== null && !DIALPAD_CALL_ID_PATTERN.test(identityId)) throw new Error('Invalid identityId.');
+  const dialpadUserId = str(dial.dialpadUserId, 'dialpadUserId');
+  if (!DIALPAD_CALL_ID_PATTERN.test(dialpadUserId)) throw new Error('Invalid dialpadUserId.');
   if ((identityType === null) !== (identityId === null)) throw new Error('Invalid caller identity.');
   return {
     status,
     intentId,
     expiresAt: str(data.expiresAt, 'expiresAt'),
     dispatchAuthorizedAt: str(data.dispatchAuthorizedAt, 'dispatchAuthorizedAt'),
-    dial: { phoneNumber: str(dial.phoneNumber, 'phoneNumber'), customData, identityType, identityId, outboundCallerId: nullableStr(dial.outboundCallerId, 'outboundCallerId') },
+    dial: { dialpadUserId, phoneNumber: str(dial.phoneNumber, 'phoneNumber'), customData, identityType, identityId, outboundCallerId: nullableStr(dial.outboundCallerId, 'outboundCallerId') },
   };
 }
 

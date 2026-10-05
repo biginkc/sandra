@@ -29,6 +29,8 @@ export type CallNextRowProps = {
   onCallToday: (propertyId: string) => void;
   onNotToday: (propertyId: string) => void;
   onDeadNurture: (propertyId: string) => void;
+  /** Replaces the ranked reason line (a client-side pin such as "Callback due now"). */
+  reasonOverride?: string | null;
 };
 
 export function CallNextRowView({
@@ -40,11 +42,12 @@ export function CallNextRowView({
   onCallToday,
   onNotToday,
   onDeadNurture,
+  reasonOverride = null,
 }: CallNextRowProps) {
   const { propertyId, row } = item;
   const temperature = row.temperature;
   const name = row.homeownerName ?? "Unnamed owner";
-  const reason = reasonLabel(item.reason, item.reasonAt, now);
+  const reason = reasonOverride ?? reasonLabel(item.reason, item.reasonAt, now);
   const disabled = !canAct || busy;
   // No point offering Call on a lead that cannot be dialed (DNC contact, or no phone number).
   const callable = !row.contactDnc && row.phones.some((phone) => phone.trim() !== "");

@@ -3,9 +3,11 @@
  * so tests never touch Keychain, 1Password, Vercel, Dialpad or Supabase.
  *
  * Secret handling rules enforced here:
- *  - 1Password is reached through the SDK only (never the `op` binary). The
- *    read-only service-account token is fetched lazily from the macOS Keychain;
- *    the read-write token is fetched only when an item must be created.
+ *  - 1Password is reached through the `op` CLI by default (BMH service account
+ *    from the environment, read-only; no new code calls the SDK). The SDK store
+ *    remains for prepare-mode item creation: its read-only token is fetched
+ *    lazily from the macOS Keychain and the read-write token only when an item
+ *    must be created.
  *  - Vercel receives values on stdin only; argv never carries a value.
  *  - Errors thrown from here carry an HTTP status or exit code, never a
  *    response body, stderr text or request text.
@@ -127,6 +129,68 @@ export function createOnePasswordSecretStore(deps: SecretStoreDeps = {}): Secret
         notes: note,
         tags: ['dialpad-cti', 'managed-by-provisioning'],
       });
+    },
+  };
+}
+
+/* ------------------------------ op CLI store ----------------------------- */
+
+export interface OpCommandResult {
+  code: number;
+  stdout: string;
+  /** Used for classification only; never surfaced. */
+  stderr: string;
+}
+export type OpCommandRunner = (command: string, args: readonly string[]) => Promise<OpCommandResult>;
+
+/** Unlike `runCommand`, the environment is passed through unchanged so OP_SERVICE_ACCOUNT_TOKEN reaches `op`. */
+export const runOpCommand: OpCommandRunner = (command, args) =>
+  new Promise((resolve, reject) => {
+    const child = spawn(command, [...args], { stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString('utf8');
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf8');
+    });
+    child.on('error', () => reject(new ProvisioningError('command_failed', `${command} could not be started`)));
+    child.on('close', (code) => resolve({ code: code ?? 1, stdout, stderr }));
+  });
+
+/** op prints an object for one field, or an array of one; anything else is unreadable. */
+function parseOpFieldValue(stdout: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new ProvisioningError('op_output_unreadable', 'op returned output that is not JSON');
+  }
+  const entry = Array.isArray(parsed) ? (parsed.length === 1 ? parsed[0] : undefined) : parsed;
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new ProvisioningError('op_output_unreadable', 'op returned an unexpected JSON shape');
+  const value = (entry as Record<string, unknown>).value;
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+export function createOpCliSecretStore(options: { vault?: string; run?: OpCommandRunner } = {}): SecretStorePort {
+  const run = options.run ?? runOpCommand;
+  const vault = options.vault ?? VAULT_TITLE;
+  return {
+    async read(itemTitle, fieldTitle): Promise<SecretRead> {
+      // Titles are passed as argv; secret values never are.
+      const result = await run('op', ['item', 'get', itemTitle, '--vault', vault, '--fields', `label=${fieldTitle}`, '--reveal', '--format', 'json']);
+      if (result.code !== 0) {
+        if (result.stderr.includes('isn\'t an item')) return { state: 'missing' };
+        if (result.stderr.includes('More than one item')) return { state: 'duplicate' };
+        if (/field/i.test(result.stderr) && /(not found|no field|couldn't|could not|doesn't|does not)/i.test(result.stderr)) return { state: 'no_field' };
+        throw new ProvisioningError('op_read_failed', `op item get exited ${result.code}`);
+      }
+      const value = parseOpFieldValue(result.stdout);
+      return value ? { state: 'found', value } : { state: 'no_field' };
+    },
+    async create() {
+      throw new ProvisioningError('secret_create_unsupported', 'creating items through the op CLI is not supported; use --secret-source sdk for prepare');
     },
   };
 }
@@ -342,6 +406,20 @@ export function createConnectionDbPort(run: QueryRunner): ConnectionDbPort {
         : ` and recording_ingest_endpoint is not distinct from ${endpointExpected(expected.recordingIngestEndpoint)}`;
       const rows = await run(`update public.dialpad_org_connections set status = 'active', updated_at = now()
         where id = ${lit(id, SAFE_UUID)} and org_id = ${lit(expected.orgId, SAFE_UUID)} and status = 'disabled'
+          and webhook_secret_ref = ${lit(expected.webhookSecretRef, SAFE_TEXT)} and webhook_secret_version = 1
+          and dialpad_company_id = ${lit(expected.companyId, /^[0-9]{1,20}$/)} and directory_api_key_ref = ${lit(expected.directoryKeyRef, SAFE_TEXT)}
+          and allowed_origins = array['https://dialpad.com']::text[]
+          and cti_client_id = ${lit(expected.ctiClientId, /^[A-Za-z0-9_-]{1,200}$/)}
+          ${endpointClause}
+        returning id`);
+      return rows.length;
+    },
+    async deactivateConnection(id, expected) {
+      const endpointClause = expected.recordingIngestEndpoint === undefined
+        ? ''
+        : ` and recording_ingest_endpoint is not distinct from ${endpointExpected(expected.recordingIngestEndpoint)}`;
+      const rows = await run(`update public.dialpad_org_connections set status = 'disabled', updated_at = now()
+        where id = ${lit(id, SAFE_UUID)} and org_id = ${lit(expected.orgId, SAFE_UUID)} and status = 'active'
           and webhook_secret_ref = ${lit(expected.webhookSecretRef, SAFE_TEXT)} and webhook_secret_version = 1
           and dialpad_company_id = ${lit(expected.companyId, /^[0-9]{1,20}$/)} and directory_api_key_ref = ${lit(expected.directoryKeyRef, SAFE_TEXT)}
           and allowed_origins = array['https://dialpad.com']::text[]

@@ -46,11 +46,15 @@ import type {
 import { AcquisitionReadinessDialog } from "./_components/readiness-dialog";
 import { AcquisitionOfferDialog } from "./_components/offer-dialog";
 import { AcquisitionLifecycleDialog } from "./_components/lifecycle-dialog";
-import {
-  DialpadPanel,
-  type DialpadCallRequest,
-} from "./_components/dialpad-panel";
-import type { DialpadPanelBootstrap } from "@/lib/dialpad-cti/dispatch";
+import { DialStatus, type DialFlight } from "./_components/dial-status";
+import { CallbackDueBanner } from "./_components/callback-due-banner";
+import { useCallStatePoll } from "./_components/use-call-state-poll";
+import type { PromptOutcome } from "./_components/post-call-prompt";
+import type { DialpadCallingBootstrap } from "@/lib/dialpad-cti/dispatch";
+import type { MyLeadsCallFeatures } from "@/lib/my-leads/call-features";
+import { oldestPrompt, type CallPromptItem } from "@/lib/my-leads/call-state";
+import { dialLeadAction } from "./dialpad-actions";
+import { acknowledgeCallPromptAction } from "./call-state-actions";
 import type {
   MyLeadAction,
   MyLeadStage,
@@ -86,7 +90,10 @@ type Props = {
   postCallPrompt?: boolean;
   /** The Call next strip; null or omitted when it is off for this org. */
   initialStrip?: CallNextSnapshot | null;
-  dialpad?: DialpadPanelBootstrap | null;
+  /** Present only while click_to_dial is on and the connection is active; null keeps the softphone branch. */
+  dialpad?: DialpadCallingBootstrap | null;
+  /** Server-side truth (flag AND landed schema) for the auto prompt and the callback alert. */
+  callFeatures?: MyLeadsCallFeatures | null;
   initialSearch?: string;
   focus?: MyLeadsFocus | null;
   selectedLead?: import("./deep-link").SelectedLeadResult;
@@ -304,6 +311,7 @@ export function MyLeadsClient({
   initialStrip = null,
   postCallPrompt = false,
   dialpad = null,
+  callFeatures = null,
   initialSearch = "",
   focus: providedFocus = null,
   selectedLead = { status: "none" },
@@ -359,12 +367,32 @@ export function MyLeadsClient({
   };
   const extrasRequest = useRef<ExtrasRequest | null>(null);
   const extrasInFlight = useRef(new Set<string>());
-  const [dialpadRequest, setDialpadRequest] =
-    useState<DialpadCallRequest | null>(null);
-  const dialpadNonce = useRef(0);
-  const onCallRequestHandled = useCallback((nonce: number) => {
-    setDialpadRequest((current) => (current?.nonce === nonce ? null : current));
-  }, []);
+  // ---- API dial (P2 2.7). One in-flight dial at a time; one idempotency key PER LEAD lives here so a
+  // retry of the same click can never dial twice, and dialing another lead never discards an
+  // unresolved lead's key. A key is released only on (1) a server-proven non-dispatch (freshAttemptKey),
+  // (2) a poll state of ended or cancelled, or (3) a deliberate Dismiss/confirm after a visible
+  // "may have rung" caution. Everything else keeps it (allowlist, never a denylist).
+  const [dialFlight, setDialFlight] = useState<DialFlight | null>(null);
+  const dialKeys = useRef(new Map<string, { key: string; intentId?: string }>());
+  const dialNonce = useRef(0);
+  const releaseDialKeyForProperty = (propertyId: string) => {
+    dialKeys.current.delete(propertyId);
+  };
+  const releaseDialKeyForIntent = (intentId: string) => {
+    for (const [propertyId, entry] of dialKeys.current) {
+      if (entry.intentId === intentId) dialKeys.current.delete(propertyId);
+    }
+  };
+  // Mirror of dialFlight for handlers that must not act on a stale render (no second dial while one is in flight).
+  const [dialFinished, setDialFinished] = useState<string | null>(null);
+  // A flight stays on screen after its call ends (for Log outcome); it only blocks new dials and the
+  // auto-prompt while the call itself is still live.
+  const dialActive = dialFlight?.kind === "in_flight" && dialFinished !== dialFlight.intentId;
+  const dialActiveRef = useRef(false);
+  useEffect(() => {
+    dialActiveRef.current = dialActive;
+  });
+  const dialBusy = useRef(false);
   const [dialog, setDialog] = useState<{
     action: MyLeadAction;
     row: QueueRow;
@@ -677,6 +705,70 @@ export function MyLeadsClient({
     if (!opening || openingStatus?.busy) return;
     void finishOpening(opening);
   };
+  const startApiDial = async (propertyId: string, attempt: number, confirmRedialOf?: string) => {
+    const row = rawRow(propertyId);
+    if (!row) return;
+    const label = row.homeownerName ?? row.address;
+    if (!row.contactId) {
+      setDialFlight({ kind: "error", propertyId, label, message: "This lead has no contact to call." });
+      return;
+    }
+    if (dialBusy.current || dialActiveRef.current) return;
+    dialBusy.current = true;
+    // This lead's key is kept while its call is in flight, uncertain, failed, expired or the request
+    // threw, so a repeat of the same click cannot dial twice. A new key is minted only when this lead has none.
+    let entry = dialKeys.current.get(propertyId);
+    if (!entry) {
+      entry = { key: crypto.randomUUID() };
+      dialKeys.current.set(propertyId, entry);
+    }
+    try {
+      const outcome = await dialLeadAction({
+        propertyId,
+        contactId: row.contactId,
+        idempotencyKey: entry.key,
+        ...(confirmRedialOf ? { confirmRedialOf } : {}),
+      });
+      if (outcome.ok) {
+        entry.intentId = outcome.intentId;
+        setDialFinished(null);
+        dialNonce.current += 1;
+        setDialFlight({
+          kind: "in_flight",
+          intentId: outcome.intentId,
+          propertyId,
+          label,
+          uncertain: outcome.state === "awaiting_provider" && outcome.uncertain,
+          nonce: dialNonce.current,
+        });
+        return;
+      }
+      if (outcome.freshAttemptKey) releaseDialKeyForProperty(propertyId);
+      if (outcome.code === "prior_call_unresolved" && outcome.priorIntentId) {
+        // The server refused before preparing anything, so a key minted just now was never used.
+        if (!entry.intentId) releaseDialKeyForProperty(propertyId);
+        setDialFlight({ kind: "unresolved", propertyId, label, message: outcome.message, priorIntentId: outcome.priorIntentId });
+        return;
+      }
+      if (outcome.code === "rate_limited") {
+        setDialFlight({
+          kind: "rate_limited",
+          propertyId,
+          label,
+          retryAfterSeconds: outcome.retryAfterSeconds ?? 60,
+          attempt,
+        });
+        return;
+      }
+      // A replay of an expired key: the call may have rung. Dismiss is the deliberate release after this caution.
+      setDialFlight({ kind: "error", propertyId, label, message: outcome.message, releaseKeyOnDismiss: outcome.code === "expired" });
+    } catch {
+      // The request may have reached the server and dialed; the key stays so a retry cannot double-dial.
+      setDialFlight({ kind: "error", propertyId, label, message: "Sandra could not confirm the call. Check Dialpad before trying again." });
+    } finally {
+      dialBusy.current = false;
+    }
+  };
   const action = (
     kind: MyLeadAction,
     id: string,
@@ -686,18 +778,13 @@ export function MyLeadsClient({
     if (!row) return;
     cancelOpening();
     if (kind === "start-call" && dialpad) {
-      // An active Dialpad connection routes calls through the audited CTI flow; the server re-derives org and rep and revalidates at dispatch.
+      // An active Dialpad connection routes calls through the audited API dial; the server re-derives org and rep and revalidates at dispatch.
       if (member !== viewer.userId) {
         setError("Open your own queue to call with Dialpad.");
         return;
       }
       setError(null);
-      setDialpadRequest({
-        nonce: ++dialpadNonce.current,
-        propertyId: row.propertyId,
-        contactId: row.contactId ?? null,
-        label: row.homeownerName ?? row.address,
-      });
+      void startApiDial(row.propertyId, 1);
       return;
     }
     if (kind === "start-call") {
@@ -891,6 +978,12 @@ export function MyLeadsClient({
     viewer: { userId: viewer.userId, orgId: viewer.orgId },
     readRow: readRecoveryRow,
     onCommitted: (committed) => {
+      if (
+        autoPromptRef.current &&
+        committed.opening.callActivityId === autoPromptRef.current.callActivityId
+      ) {
+        autoPromptSaved.current = true;
+      }
       if (committed.extras) {
         void runExtras(
           {
@@ -946,6 +1039,69 @@ export function MyLeadsClient({
       router.refresh();
     },
   });
+  // ---- Durable call state (P2 2.6 / 2.8): one poll, suspended while any dialog is open.
+  const ownQueue = member === viewer.userId;
+  const pollEnabled = roster.settings.enabled && ownQueue;
+  const callPoll = useCallStatePoll({
+    enabled: pollEnabled,
+    suspended: dialog !== null || openingStatus !== null,
+  });
+  const autoPromptOn = Boolean(callFeatures?.autoPrompt) && postCallPrompt && ownQueue;
+  const callbackAlertOn = Boolean(callFeatures?.callbackAlert) && ownQueue;
+  // The prompt opened by the poll, until it is acknowledged; attempts acknowledged this session
+  // are never reopened even if a stale poll still lists them.
+  const [autoPrompt, setAutoPrompt] = useState<CallPromptItem | null>(null);
+  // Mirror for callbacks that run outside render (the workflow's onCommitted).
+  const autoPromptRef = useRef<CallPromptItem | null>(null);
+  useEffect(() => {
+    autoPromptRef.current = autoPrompt;
+  });
+  const autoPromptSaved = useRef(false);
+  const ackedAttempts = useRef(new Set<string>());
+  const ackInFlight = useRef(new Set<string>());
+  const refreshCallState = callPoll.refreshNow;
+  useEffect(() => {
+    if (!autoPromptOn || dialog !== null || openingStatus !== null || autoPrompt !== null) return;
+    // Never open over an in-flight dial or any other open dialog in the page (menus, drawers, confirms).
+    if (dialActive) return;
+    if (typeof document !== "undefined" && document.querySelector("[role=dialog][data-state=open]")) return;
+    const candidates = callPoll.prompts.filter(
+      (item) => !ackedAttempts.current.has(item.attemptId) && !ackInFlight.current.has(item.attemptId),
+    );
+    const next = oldestPrompt(candidates);
+    // A lead no longer in this queue (reassigned since the poll) is never opened.
+    if (!next || !rawRow(next.propertyId)) return;
+    autoPromptSaved.current = false;
+    setAutoPrompt(next);
+    action("log-attempt", next.propertyId, next.callActivityId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `action`/`rawRow` are stable per render and read latest state
+  }, [autoPromptOn, dialog, openingStatus, autoPrompt, callPoll.prompts, dialActive]);
+  // Any close of the auto-opened prompt acknowledges it: saved when the attempt committed, else dismissed.
+  useEffect(() => {
+    if (!autoPrompt) return;
+    const stillOpen =
+      dialog?.action === "log-attempt" && dialog.callActivityId === autoPrompt.callActivityId;
+    if (stillOpen || openingStatus !== null) return;
+    const attemptId = autoPrompt.attemptId;
+    const via = autoPromptSaved.current ? "saved" : "dismissed";
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the close of the auto-opened prompt is the external event being synchronised
+    setAutoPrompt(null);
+    ackedAttempts.current.add(attemptId);
+    ackInFlight.current.add(attemptId);
+    void acknowledgeCallPromptAction(attemptId, via).finally(() => {
+      ackInFlight.current.delete(attemptId);
+      refreshCallState();
+    });
+  }, [autoPrompt, dialog, openingStatus, refreshCallState]);
+  const polledCallbacks = callPoll.callbacksDue;
+  const callbacksDue = useMemo(
+    () => (callbackAlertOn ? polledCallbacks : []),
+    [callbackAlertOn, polledCallbacks],
+  );
+  const stripPins = useMemo(
+    () => callbacksDue.map((item) => ({ propertyId: item.propertyId, reason: "Callback due now" })),
+    [callbacksDue],
+  );
   // The deep-link target lives in client state, seeded from the URL. A user-driven
   // rep/search change clears it (and the URL, without adding history). A different
   // ?lead= value arriving later (new link, Back/Forward) is a new target; a refresh
@@ -1279,12 +1435,38 @@ export function MyLeadsClient({
         </div>
       )}
       {dialpad && roster.settings.enabled && (
-        <DialpadPanel
-          bootstrap={dialpad}
-          callRequest={dialpadRequest}
-          onCallRequestHandled={onCallRequestHandled}
-          onRecordingFinalResult={() => {
+        <DialStatus
+          flight={dialFlight}
+          onRetry={(propertyId) => {
+            // Only after a proven non-dispatch rejection (the key was cleared by the server's freshAttemptKey).
+            const attempt = dialFlight?.kind === "rate_limited" ? dialFlight.attempt + 1 : 1;
+            void startApiDial(propertyId, attempt);
+          }}
+          onConfirmRedial={(propertyId, priorIntentId) => {
+            // The rep read the "may have rung" caution and chose to call again: new key, named prior intent.
+            releaseDialKeyForProperty(propertyId);
+            void startApiDial(propertyId, 1, priorIntentId);
+          }}
+          onDismiss={() => {
+            // A deliberate Dismiss after a visible "may have rung" caution releases that lead's key. A
+            // finished flight is ended/cancelled (key already gone) or expired; `failed` is not finished,
+            // so dismissing it (or any call still live) keeps the key.
+            if (dialFlight?.kind === "in_flight" && dialFinished === dialFlight.intentId) {
+              releaseDialKeyForProperty(dialFlight.propertyId);
+            } else if (dialFlight?.kind === "error" && dialFlight.releaseKeyOnDismiss) {
+              releaseDialKeyForProperty(dialFlight.propertyId);
+            }
+            setDialFlight(null);
+          }}
+          onFinished={(intentId, finalStatus) => {
+            // Allowlist: only a call that definitively ended or was cancelled releases its key. expired,
+            // failed or anything unexpected keeps it (the call may have rung).
+            if (finalStatus.state === "ended" || finalStatus.state === "cancelled") releaseDialKeyForIntent(intentId);
+            setDialFinished(intentId);
+          }}
+          onEnded={() => {
             void refresh(true);
+            refreshCallState();
           }}
           onLogOutcome={(propertyId, callActivityId) => {
             if (!rawRow(propertyId)) {
@@ -1293,6 +1475,18 @@ export function MyLeadsClient({
             }
             action("log-attempt", propertyId, callActivityId);
           }}
+        />
+      )}
+      {callbackAlertOn && roster.settings.enabled && (
+        <CallbackDueBanner
+          items={callbacksDue}
+          labelFor={(propertyId) => {
+            const row = rawRow(propertyId);
+            return row ? (row.homeownerName ?? row.address) : null;
+          }}
+          onCall={(propertyId) => action("start-call", propertyId)}
+          callingPropertyId={dialActive && dialFlight?.kind === "in_flight" ? dialFlight.propertyId : null}
+          canCall={ownQueue}
         />
       )}
       {!roster.settings.enabled ? (
@@ -1324,6 +1518,7 @@ export function MyLeadsClient({
                 void stripOverride(propertyId, "not_today")
               }
               onDeadNurture={(propertyId) => action("handoff", propertyId)}
+              pinned={stripPins}
             />
           )}
           <MyLeadsQueue
@@ -1482,6 +1677,11 @@ export function MyLeadsClient({
             onDripChanged={onDripChanged}
             key={`${dialog.row.propertyId}:${dialog.callActivityId ?? ""}`}
             initialCallActivityId={dialog.callActivityId ?? null}
+            initialOutcome={
+              autoPrompt && autoPrompt.callActivityId === dialog.callActivityId
+                ? (autoPrompt.outcomeGuess as PromptOutcome | null)
+                : null
+            }
             callReferenceOptions={
               callOptions?.propertyId === dialog.row.propertyId
                 ? callOptions.options

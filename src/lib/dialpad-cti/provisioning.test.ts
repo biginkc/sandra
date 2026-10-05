@@ -181,6 +181,14 @@ function makePorts(w: World): ProvisioningPorts {
         w.log.push('db.activate');
         return 1;
       },
+      async deactivateConnection(id, expected) {
+        gate(w, 'db.deactivate');
+        const c = w.connection;
+        if (!c || c.id !== id || c.status !== 'active' || c.webhookSecretRef !== expected.webhookSecretRef || (expected.recordingIngestEndpoint !== undefined && c.recordingIngestEndpoint !== expected.recordingIngestEndpoint)) return 0;
+        c.status = 'disabled';
+        w.log.push('db.deactivate');
+        return 1;
+      },
       async configureRecordingEndpoint(expected) {
         const c = w.connection;
         if (!w.schema.recordingEndpointColumn || !c || c.id !== expected.connectionId || c.status !== 'disabled' || c.companyId !== expected.companyId || c.recordingIngestEndpoint !== expected.expectedPreviousEndpoint) return null;
@@ -250,7 +258,7 @@ function makePorts(w: World): ProvisioningPorts {
           sub.group_calls_only = body.group_calls_only ?? false;
           sub.call_states = body.call_states;
           sub.enabled = body.enabled === true;
-          w.log.push(`PATCH ${sub.target_id}`);
+          w.log.push(`${sub.enabled ? 'PATCH' : 'PATCH-off'} ${sub.target_id}`);
           if (after) throw new Error('lost response');
           return { status: 200, text: rawId(JSON.stringify(subJson(sub))) };
         }
@@ -262,6 +270,7 @@ function makePorts(w: World): ProvisioningPorts {
 
 const inputs = parseInputs({ orgId: ORG, companyId: COMPANY, canaryUserIds: [U1, U2] });
 const activateInputs = parseInputs({ mode: 'activate', orgId: ORG, companyId: COMPANY, canaryUserIds: [U1, U2] });
+const deactivateInputs = parseInputs({ mode: 'deactivate', orgId: ORG, companyId: COMPANY, canaryUserIds: [U1, U2] });
 
 async function dryRun(w: World, i: ProvisioningInputs = inputs) {
   return runProvisioning(makePorts(w), i, { execute: false });
@@ -290,6 +299,18 @@ async function prepared(): Promise<World> {
   w.requests.length = 0;
   return w;
 }
+
+async function activated(): Promise<World> {
+  const w = await prepared();
+  const result = await execute(w, activateInputs, { confirmLiveReadiness: CONNECTION_ID });
+  expect(result.exitCode).toBe(0);
+  expect(w.connection?.status).toBe('active');
+  w.log.length = 0;
+  w.requests.length = 0;
+  return w;
+}
+
+const ownedSubs = (w: World) => w.subs.filter((s) => s.webhook_id === '7000000000000001');
 
 describe('parseInputs', () => {
   it('derives dedicated names and refs from the suffix', () => {
@@ -937,6 +958,198 @@ describe('activate mode', () => {
     const result = await runProvisioning(makePorts(w), activateInputs, { execute: true, expectPlan: preview.plan!.digest, confirmLiveReadiness: CONNECTION_ID });
     expect(result.exitCode).toBe(3);
     expect(w.connection!.status).toBe('disabled');
+  });
+});
+
+describe('deactivate mode', () => {
+  it('accepts the mode', () => {
+    expect(deactivateInputs.mode).toBe('deactivate');
+  });
+
+  it('a dry run lists subscriptions before the connection and changes nothing', async () => {
+    const w = await activated();
+    const result = await dryRun(w, deactivateInputs);
+    expect(result.exitCode).toBe(0);
+    expect(w.log).toEqual([]);
+    expect(w.connection?.status).toBe('active');
+    expect(w.requests.every((r) => r.method === 'GET')).toBe(true);
+    const lines = result.lines.join('\n');
+    const order = [`[disable] deactivate:subscription:${U1}`, `[disable] deactivate:subscription:${U2}`, '[disable] deactivate:connection'].map((needle) => lines.indexOf(needle));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(lines).toContain('--confirm-live-readiness');
+    noSecrets(result.lines);
+  });
+
+  it('does not require the recording endpoint or custom_data schema', async () => {
+    const w = await activated();
+    w.connection!.recordingIngestEndpoint = null;
+    w.schema = { ...w.schema, customDataFunction: false, recordingEndpointColumn: false };
+    const result = await dryRun(w, deactivateInputs);
+    expect(result.exitCode).toBe(0);
+    expect(result.plan!.blockers).toEqual([]);
+  });
+
+  it('refuses without the digest, the wrong digest, or the connection id confirmation', async () => {
+    const w = await activated();
+    const preview = await dryRun(w, deactivateInputs);
+    const wrongDigest = await runProvisioning(makePorts(w), deactivateInputs, { execute: true, expectPlan: 'f'.repeat(64), confirmLiveReadiness: CONNECTION_ID });
+    expect(wrongDigest.exitCode).toBe(3);
+    const noConfirm = await runProvisioning(makePorts(w), deactivateInputs, { execute: true, expectPlan: preview.plan!.digest });
+    expect(noConfirm.exitCode).toBe(3);
+    expect(noConfirm.lines.join('\n')).toContain('refusing to deactivate: --confirm-live-readiness must equal the connection id');
+    const wrongConfirm = await runProvisioning(makePorts(w), deactivateInputs, { execute: true, expectPlan: preview.plan!.digest, confirmLiveReadiness: 'c0000000-0000-4000-8000-00000000ffff' });
+    expect(wrongConfirm.exitCode).toBe(3);
+    expect(w.log).toEqual([]);
+    expect(w.connection?.status).toBe('active');
+    for (const r of [wrongDigest, noConfirm, wrongConfirm]) noSecrets(r.lines);
+  });
+
+  it('is blocked when nothing was prepared', async () => {
+    const w = makeWorld();
+    const result = await dryRun(w, deactivateInputs);
+    expect(result.exitCode).toBe(3);
+    expect(result.plan!.blockers).toContain('not_prepared: connection row missing');
+    expect(result.plan!.blockers).toContain('not_prepared: owned webhook missing');
+    const refused = await runProvisioning(makePorts(w), deactivateInputs, { execute: true, expectPlan: result.plan!.digest, confirmLiveReadiness: CONNECTION_ID });
+    expect(refused.exitCode).toBe(3);
+    expect(w.log).toEqual([]);
+  });
+
+  it('blocks a missing canary subscription', async () => {
+    const w = await activated();
+    w.subs = w.subs.filter((s) => s.target_id !== U2 || s.webhook_id !== '7000000000000001');
+    const result = await dryRun(w, deactivateInputs);
+    expect(result.exitCode).toBe(3);
+    expect(result.plan!.blockers).toContain(`not_prepared: subscription for ${U2} missing`);
+  });
+
+  it('disables and re-reads every subscription before the connection, preserving states and target', async () => {
+    const w = await activated();
+    const before = snapshotUnrelated(w);
+    const result = await execute(w, deactivateInputs, { confirmLiveReadiness: CONNECTION_ID });
+    expect(result.exitCode).toBe(0);
+    expect(w.log).toEqual([`PATCH-off ${U1}`, `PATCH-off ${U2}`, 'db.deactivate']);
+    expect(w.connection?.status).toBe('disabled');
+    for (const sub of ownedSubs(w)) {
+      expect(sub.enabled).toBe(false);
+      expect(sub.target_type).toBe('user');
+      expect([U1, U2]).toContain(sub.target_id);
+      expect([...sub.call_states].sort()).toEqual([...CALL_STATES].sort());
+    }
+    const patches = w.requests.filter((r) => r.method === 'PATCH');
+    expect(patches).toHaveLength(2);
+    for (const patch of patches) expect(patch.body).toMatch(/^\{"enabled":false,"target_type":"user","target_id":\d+,"endpoint_id":7000000000000001,"group_calls_only":false,"call_states":\[/);
+    // Each PATCH is followed by a re-list before the next mutation.
+    const idx = w.requests.map((r, i) => ({ r, i }));
+    const firstPatch = idx.find(({ r }) => r.method === 'PATCH')!.i;
+    expect(w.requests.slice(firstPatch + 1).find((r) => r.method === 'GET' && r.path.startsWith('/api/v2/subscriptions/call'))).toBeDefined();
+    expect(snapshotUnrelated(w)).toBe(before);
+    expect(result.lines.join('\n')).toContain('post-check: converged');
+    noSecrets(result.lines);
+  });
+
+  it('is idempotent on rerun', async () => {
+    const w = await activated();
+    expect((await execute(w, deactivateInputs, { confirmLiveReadiness: CONNECTION_ID })).exitCode).toBe(0);
+    w.log.length = 0;
+    const rerun = await execute(w, deactivateInputs, { confirmLiveReadiness: CONNECTION_ID });
+    expect(rerun.exitCode).toBe(0);
+    expect(w.log).toEqual([]);
+    expect(rerun.plan!.steps.filter((s) => s.id.startsWith('deactivate:')).every((s) => s.action === 'reuse')).toBe(true);
+    expect(rerun.results.every((r) => r.outcome === 'reused')).toBe(true);
+    noSecrets(rerun.lines);
+  });
+
+  it('leaves the connection active when the first subscription disable fails, then resumes', async () => {
+    const w = await activated();
+    w.fail.set(`dialpad.subscription.enable:${U1}`, 'before');
+    const failed = await execute(w, deactivateInputs, { confirmLiveReadiness: CONNECTION_ID });
+    expect(failed.exitCode).toBe(1);
+    expect(w.connection?.status).toBe('active');
+    expect(w.log).toEqual([]);
+    noSecrets(failed.lines);
+    w.fail.clear();
+    const resumed = await execute(w, deactivateInputs, { confirmLiveReadiness: CONNECTION_ID });
+    expect(resumed.exitCode).toBe(0);
+    expect(w.connection?.status).toBe('disabled');
+    expect(w.log).toEqual([`PATCH-off ${U1}`, `PATCH-off ${U2}`, 'db.deactivate']);
+  });
+
+  it('refuses if the connection identity changed after the preview', async () => {
+    const w = await activated();
+    const preview = await dryRun(w, deactivateInputs);
+    w.connection!.webhookSecretRef = 'env:DIALPAD_CTI_WEBHOOK_SECRET_OTHER';
+    const result = await runProvisioning(makePorts(w), deactivateInputs, { execute: true, expectPlan: preview.plan!.digest, confirmLiveReadiness: CONNECTION_ID });
+    expect(result.exitCode).toBe(3);
+    expect(w.log).toEqual([]);
+    expect(w.connection!.status).toBe('active');
+  });
+
+  it('refuses mid-run when the endpoint changes during a subscription PATCH', async () => {
+    const w = await activated();
+    const ports = makePorts(w);
+    const preview = await runProvisioning(ports, deactivateInputs, { execute: false });
+    const original = ports.dialpad.request.bind(ports.dialpad);
+    ports.dialpad.request = async (method, path, body) => {
+      const response = await original(method, path, body);
+      if (method === 'PATCH') w.connection!.recordingIngestEndpoint = OTHER_RECORDING_ENDPOINT;
+      return response;
+    };
+    const result = await runProvisioning(ports, deactivateInputs, { execute: true, expectPlan: preview.plan!.digest, confirmLiveReadiness: CONNECTION_ID });
+    expect(result.exitCode).toBe(1);
+    expect(w.log).not.toContain('db.deactivate');
+    expect(w.connection!.status).toBe('active');
+  });
+
+  it('reuses an already-disabled connection without a database call', async () => {
+    const w = await activated();
+    w.connection!.status = 'disabled';
+    const preview = await dryRun(w, deactivateInputs);
+    expect(preview.plan!.steps.find((s) => s.id === 'deactivate:connection')?.action).toBe('reuse');
+    expect(preview.plan!.steps.filter((s) => s.id.startsWith('deactivate:subscription')).every((s) => s.action === 'disable')).toBe(true);
+    const result = await execute(w, deactivateInputs, { confirmLiveReadiness: CONNECTION_ID });
+    expect(result.exitCode).toBe(0);
+    expect(result.results.find((r) => r.id === 'deactivate:connection')?.outcome).toBe('reused');
+    expect(w.log).not.toContain('db.deactivate');
+    expect(w.connection!.status).toBe('disabled');
+  });
+
+  it('reconciles a lost disable response', async () => {
+    const w = await activated();
+    w.fail.set(`dialpad.subscription.enable:${U1}`, 'after');
+    const result = await execute(w, deactivateInputs, { confirmLiveReadiness: CONNECTION_ID });
+    expect(result.exitCode).toBe(0);
+    expect(result.results.find((r) => r.id === `deactivate:subscription:${U1}`)?.outcome).toBe('reconciled');
+    expect(w.connection?.status).toBe('disabled');
+    noSecrets(result.lines);
+  });
+
+  it('refuses when the database flip matches no row', async () => {
+    const w = await activated();
+    const ports = makePorts(w);
+    ports.db.deactivateConnection = async () => 0;
+    const preview = await runProvisioning(ports, deactivateInputs, { execute: false });
+    const result = await runProvisioning(ports, deactivateInputs, { execute: true, expectPlan: preview.plan!.digest, confirmLiveReadiness: CONNECTION_ID });
+    expect(result.exitCode).toBe(1);
+    expect(result.lines.join('\n')).toContain('deactivation_refused');
+  });
+
+  it('fails the post-check when the connection is not disabled afterwards', async () => {
+    const w = await activated();
+    const ports = makePorts(w);
+    const preview = await runProvisioning(ports, deactivateInputs, { execute: false });
+    ports.db.deactivateConnection = async () => 1;
+    const result = await runProvisioning(ports, deactivateInputs, { execute: true, expectPlan: preview.plan!.digest, confirmLiveReadiness: CONNECTION_ID });
+    expect(result.exitCode).toBe(1);
+    expect(result.lines.join('\n')).toContain('post-check: deactivation identity, status, credentials, or recording endpoint changed; rerun the dry-run');
+  });
+
+  it('changes the digest relative to activate on the same state', async () => {
+    const w = await activated();
+    const a = await dryRun(w, activateInputs);
+    const d = await dryRun(w, deactivateInputs);
+    expect(a.plan!.digest).not.toBe(d.plan!.digest);
   });
 });
 

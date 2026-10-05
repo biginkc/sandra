@@ -113,8 +113,8 @@ test("close-attempts and rollback route to their RPCs", async () => {
   assert.deepEqual(r.calls[1].args, { p_run: RUN, p_org_id: ORG, p_fingerprint: infoPreview.fingerprint });
 });
 
-test("later-phase commands and unknown commands are refused without any call", async () => {
-  for (const argv of [["ack-legacy-prompts", "--org", ORG], ["nope"]]) {
+test("unknown and under-specified commands are refused without any call", async () => {
+  for (const argv of [["nope"], ["ack-legacy-prompts"]]) {
     const h = harness();
     assert.equal(await run(argv, h.io), 1);
     assert.equal(h.calls.length, 0);
@@ -253,3 +253,19 @@ test("phone-backfill previews, is bound to the host through the confirm hash, an
   assert.equal(await run(["phone-backfill", "--org", ORG, "--apply", "--confirm", sha256Hex(canonicalJson({ ...HOST, ...preview }))], a.io), 0);
   assert.deepEqual(a.calls[1], { name: "fn_contact_phone_numbers_backfill", args: { p_org_id: ORG, p_apply: true, p_fingerprint: preview.fingerprint } });
 });
+for (const [command, rpcName, kind] of [
+  ["ack-legacy-prompts", "fn_my_leads_ack_legacy_call_prompts", "ack_legacy_prompts"],
+]) {
+  test(`${command} previews, refuses apply without the confirm hash, and applies through its own function`, async () => {
+    const preview = { kind, fingerprint: "e".repeat(64), candidates: 5 };
+    const h = harness({ preview });
+    assert.equal(await run([command, "--org", ORG], h.io), 0);
+    assert.deepEqual(h.calls, [{ name: rpcName, args: { p_org_id: ORG, p_apply: false } }]);
+    const none = harness({ preview });
+    assert.equal(await run([command, "--org", ORG, "--apply"], none.io), 1);
+    assert.equal(none.calls.length, 1);
+    const a = harness({ preview });
+    assert.equal(await run([command, "--org", ORG, "--apply", "--confirm", sha256Hex(canonicalJson({ ...HOST, ...preview }))], a.io), 0);
+    assert.deepEqual(a.calls[1].args, { p_org_id: ORG, p_apply: true, p_fingerprint: preview.fingerprint });
+  });
+}

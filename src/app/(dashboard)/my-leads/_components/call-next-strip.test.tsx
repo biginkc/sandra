@@ -105,4 +105,25 @@ describe("<CallNextStrip />", () => {
     await userEvent.click(await screen.findByTestId("call-next-action-dead-nurture-a"));
     expect(p.onDeadNurture).toHaveBeenCalledExactlyOnceWith("a");
   });
+
+  it("sorts a pinned row first, overrides its reason text, and ignores unknown pinned ids", () => {
+    const rows = [stripItem("a", "inbound_text"), stripItem("b", "appointment_overdue"), stripItem("c", "inbound_text")];
+    render(
+      <CallNextStrip
+        {...props({
+          rows,
+          pinned: [
+            { propertyId: "ghost", reason: "Callback due now" },
+            { propertyId: "c", reason: "Callback due now" },
+          ],
+        })}
+      />,
+    );
+    const listed = within(screen.getByTestId("call-next-strip")).getAllByTestId(/^call-next-row-/).map((el) => el.getAttribute("data-testid"));
+    expect(listed).toEqual(["call-next-row-c", "call-next-row-a", "call-next-row-b"]);
+    expect(screen.getByTestId("call-next-reason-c")).toHaveTextContent("Callback due now");
+    expect(screen.getByTestId("call-next-reason-a")).toHaveTextContent("Texted you 2d ago");
+    expect(screen.queryByTestId("call-next-row-ghost")).not.toBeInTheDocument();
+    expect(screen.getByTestId("call-next-count")).toHaveTextContent("3 shown");
+  });
 });
