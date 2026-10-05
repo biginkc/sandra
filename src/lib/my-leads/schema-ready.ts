@@ -9,7 +9,11 @@ import { createAdminClient } from "@/lib/supabase/admin";
  * Each later sub-PR appends its own feature to `SchemaFeature` and
  * `REQUIREMENTS`.
  */
-export type SchemaFeature = "next_step_write" | "call_next";
+export type SchemaFeature =
+  | "next_step_write"
+  | "call_next"
+  | "lead_note_idempotency"
+  | "post_call_support";
 
 export type SchemaRequirement = {
   /** `public.fn_name(argtype,argtype)` regprocedure strings. */
@@ -34,6 +38,18 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
       "public.my_leads_call_next_rows(uuid,uuid,timestamptz)",
     ],
     columns: ["acquisition_offers.follow_up_calendar_chain_id", "tasks.next_step_kind"],
+  },
+  // P1c: the idempotent note insert needs the column (the unique index lands in the same migration).
+  lead_note_idempotency: {
+    functions: [],
+    columns: ["lead_notes.idempotency_key"],
+  },
+  // P1c: the post-call prompt needs the widened voicemail validators, the richer call references
+  // and the attempt note. They ship in one migration whose only catalog-visible marker is the
+  // lead_notes column, so that column stands for all of them.
+  post_call_support: {
+    functions: ["public.fn_get_acquisition_call_references(uuid,uuid,uuid)"],
+    columns: ["lead_notes.idempotency_key", "acquisition_attempts.note"],
   },
 };
 

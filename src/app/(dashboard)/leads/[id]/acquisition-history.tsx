@@ -106,6 +106,8 @@ export function AcquisitionHistoryCard({
               reached: "Reached",
               no_answer: "No answer",
               wrong_number: "Wrong number",
+              voicemail: "Voicemail",
+              not_logged: "Not logged",
             }[fact.outcome ?? ""] ?? "Outcome pending")
           : "Offer recorded"}
       </p>

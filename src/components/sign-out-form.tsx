@@ -2,6 +2,7 @@
 
 import { Button } from "@/components/ui/button"
 import { clearAllSubmissions, hasPendingSave } from "@/app/(dashboard)/my-leads/_components/submission-store"
+import { clearAllExtras } from "@/app/(dashboard)/my-leads/_components/extras-store"
 
 /** Sign out, and forget any My Leads save records this browser session held. */
 export function SignOutForm() {
@@ -13,6 +14,7 @@ export function SignOutForm() {
           return
         }
         clearAllSubmissions()
+        clearAllExtras()
       }}>
       <Button
         type="submit"

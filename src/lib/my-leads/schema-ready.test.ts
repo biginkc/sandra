@@ -98,4 +98,18 @@ describe("schemaReady", () => {
     });
     expect(await schemaReady("next_step_write")).toBe(false);
   });
+
+  it.each(["lead_note_idempotency", "post_call_support"] as const)("%s needs the lead_notes idempotency column", async (feature) => {
+    expect(REQUIREMENTS[feature].columns).toContain("lead_notes.idempotency_key");
+    const needed = REQUIREMENTS[feature];
+    const ready = {
+      functions: Object.fromEntries(needed.functions.map((f) => [f, true])),
+      columns: Object.fromEntries(needed.columns.map((c) => [c, true])),
+    };
+    probeReturns({ data: ready, error: null });
+    expect(await schemaReady(feature)).toBe(true);
+    clearSchemaReadyCache();
+    probeReturns({ data: { ...ready, columns: { ...ready.columns, "lead_notes.idempotency_key": false } }, error: null });
+    expect(await schemaReady(feature)).toBe(false);
+  });
 });

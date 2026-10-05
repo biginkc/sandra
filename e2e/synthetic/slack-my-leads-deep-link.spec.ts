@@ -35,6 +35,7 @@ test.beforeAll(async () => {
       export const submitMyLeadHandoffDrip=(input)=>backend().submitMyLeadHandoffDrip(input);
       export const changeAcquisitionDesignation=async()=>({ok:true});
       export const changeAcquisitionSettings=async()=>({ok:true});
+      export const savePostCallExtras=async()=>({ok:true,note:'skipped',nextStep:'skipped'});
     `],
     ["strip-actions", `export const loadCallNext=async()=>({ok:true,data:null}); export const loadTriage=async()=>({ok:true,data:{rows:[],nextCursor:null}}); export const setStripOverride=async()=>({ok:true,data:null});`],
     ["sequences-actions", `export const listDripChoices=async()=>({ok:true,data:[]}); export const startDripForLeads=async()=>({ok:false,error:{message:'Synthetic drip boundary'}});`],
