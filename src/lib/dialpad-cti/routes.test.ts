@@ -1,16 +1,26 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const sweep = vi.fn();
+const failStale = vi.fn();
+const artifactSweep = vi.fn();
+const ready = vi.fn();
 const handle = vi.fn();
 
 vi.mock('@/lib/errors/report', () => ({ reportError: vi.fn(), reportInfo: vi.fn() }));
+vi.mock('@/lib/dialpad-cti/artifact-fetch', () => ({
+  createSupabaseDialpadArtifactDb: vi.fn(() => ({ marker: 'artifact-db' })),
+  sweepDialpadArtifacts: (...args: unknown[]) => artifactSweep(...args),
+}));
+vi.mock('@/lib/my-leads/schema-ready', () => ({ schemaReady: (...args: unknown[]) => ready(...args) }));
 vi.mock('@/lib/supabase/admin', () => ({ createAdminClient: vi.fn(() => ({})) }));
 vi.mock('./event-processing', () => ({
   createSupabaseDialpadCtiDb: vi.fn(() => ({ marker: 'db' })),
   sweepDialpadCallEvents: (...args: unknown[]) => sweep(...args),
+  failStaleDialpadIntents: (...args: unknown[]) => failStale(...args),
   handleDialpadVoiceWebhook: (...args: unknown[]) => handle(...args),
 }));
 
+import { GET as artifactGet } from '@/app/api/cron/dialpad-artifact-sweep/route';
 import { GET as cronGet } from '@/app/api/cron/dialpad-call-events-sweep/route';
 import { POST as voicePost } from '@/app/api/webhooks/dialpad/voice/[connectionId]/route';
 
@@ -20,6 +30,11 @@ describe('dialpad cti routes', () => {
   const original = process.env.CRON_SECRET;
   beforeEach(() => {
     sweep.mockReset();
+    failStale.mockReset();
+    failStale.mockResolvedValue(0);
+    artifactSweep.mockReset();
+    ready.mockReset();
+    ready.mockResolvedValue(true);
     handle.mockReset();
     process.env.CRON_SECRET = 'cron-secret-for-tests';
   });
@@ -40,7 +55,30 @@ describe('dialpad cti routes', () => {
     sweep.mockResolvedValue({ candidates: 2, processed: 2, failed: 0 });
     const ok = await cronGet(new Request('http://x/api/cron/dialpad-call-events-sweep', { headers: { authorization: 'Bearer cron-secret-for-tests' } }));
     expect(ok.status).toBe(200);
-    expect(await ok.json()).toEqual({ ok: true, candidates: 2, processed: 2, failed: 0 });
+    expect(await ok.json()).toEqual({ ok: true, candidates: 2, processed: 2, failed: 0, failedIntents: 0 });
+  });
+
+  it('cron sweep reports failed intents and still sweeps when the timeout call throws', async () => {
+    sweep.mockResolvedValue({ candidates: 0, processed: 0, failed: 0 });
+    failStale.mockResolvedValueOnce(3);
+    const headers = { authorization: 'Bearer cron-secret-for-tests' };
+    const some = await cronGet(new Request('http://x/api/cron/dialpad-call-events-sweep', { headers }));
+    expect(await some.json()).toMatchObject({ ok: true, failedIntents: 3 });
+    failStale.mockRejectedValueOnce(new Error('rpc down'));
+    const thrown = await cronGet(new Request('http://x/api/cron/dialpad-call-events-sweep', { headers }));
+    expect(thrown.status).toBe(200);
+    expect(await thrown.json()).toMatchObject({ ok: true, failedIntents: null });
+    expect(sweep).toHaveBeenCalledTimes(2);
+  });
+
+  it('cron sweep leaves the intent timeout alone until its schema is ready', async () => {
+    sweep.mockResolvedValue({ candidates: 0, processed: 0, failed: 0 });
+    ready.mockResolvedValue(false);
+    const res = await cronGet(new Request('http://x/api/cron/dialpad-call-events-sweep', { headers: { authorization: 'Bearer cron-secret-for-tests' } }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, failedIntents: null });
+    expect(failStale).not.toHaveBeenCalled();
+    expect(sweep).toHaveBeenCalledTimes(1);
   });
 
   it('cron sweep hides internals on failure', async () => {
@@ -58,5 +96,38 @@ describe('dialpad cti routes', () => {
     );
     expect(response.status).toBe(401);
     expect(handle).toHaveBeenCalledWith(expect.objectContaining({ connectionId: CONNECTION_ID, rawBody: 'a.b.c' }));
+  });
+
+  describe('artifact sweep route', () => {
+    const url = 'http://x/api/cron/dialpad-artifact-sweep';
+    const auth = { headers: { authorization: 'Bearer cron-secret-for-tests' } };
+
+    it('requires the bearer secret and does nothing without it', async () => {
+      expect((await artifactGet(new Request(url))).status).toBe(401);
+      expect((await artifactGet(new Request(url, { headers: { authorization: 'Bearer nope' } }))).status).toBe(401);
+      expect(artifactSweep).not.toHaveBeenCalled();
+      expect(ready).not.toHaveBeenCalled();
+    });
+
+    it('runs the sweep with the right bearer and reports its summary', async () => {
+      artifactSweep.mockResolvedValue({ claimed: 1, available: 1, notReady: 0, denied: 0, errors: 0, linksAvailable: 0, linksFlagged: 0 });
+      const ok = await artifactGet(new Request(url, auth));
+      expect(ok.status).toBe(200);
+      expect(await ok.json()).toMatchObject({ ok: true, claimed: 1, available: 1 });
+    });
+
+    it('does not claim anything while the schema is not ready', async () => {
+      ready.mockResolvedValue(false);
+      const res = await artifactGet(new Request(url, auth));
+      expect(await res.json()).toEqual({ ok: true, disabled: 'schema_not_ready' });
+      expect(artifactSweep).not.toHaveBeenCalled();
+    });
+
+    it('hides internals on failure', async () => {
+      artifactSweep.mockRejectedValue(new Error('secret detail'));
+      const failed = await artifactGet(new Request(url, auth));
+      expect(failed.status).toBe(500);
+      expect(await failed.json()).toEqual({ error: 'sweep_failed' });
+    });
   });
 });

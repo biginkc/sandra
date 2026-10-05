@@ -6119,6 +6119,15 @@ export type Database = {
       fn_match_dialpad_call_event: { Args: { p_event_id: string }; Returns: Json }
       fn_process_dialpad_call_event: { Args: { p_event_id: string }; Returns: Json }
       fn_list_dialpad_call_events_for_processing: { Args: { p_limit?: number }; Returns: string[] }
+      fn_fail_stale_dialpad_intents: { Args: { p_cutoff_seconds?: number; p_limit?: number }; Returns: number }
+      fn_list_ambiguous_native_calls: { Args: { p_org_id: string }; Returns: Json }
+      fn_assign_native_call_to_lead: { Args: { p_org_id: string; p_provider_call_id: string; p_property_id: string }; Returns: Json }
+      fn_claim_dialpad_artifact_fetches: { Args: { p_limit?: number; p_lease_seconds?: number; p_artifacts?: string[] }; Returns: Json }
+      fn_record_dialpad_artifact_result: {
+        Args: { p_id: string; p_outcome: string; p_error?: string; p_text?: string; p_language?: string; p_summary?: string }
+        Returns: Json
+      }
+      fn_resolve_dialpad_recording_links: { Args: { p_limit?: number }; Returns: Json }
       fn_open_dialpad_recording_capture: { Args: { p_org_id: string; p_rep_user_id: string; p_intent_id: string }; Returns: Json }
       fn_get_dialpad_recording_capture: { Args: { p_org_id: string; p_rep_user_id: string; p_capture_id: string }; Returns: Json }
       fn_close_dialpad_recording_capture: { Args: { p_org_id: string; p_capture_id: string; p_rep_user_id?: string | null; p_reason?: string | null }; Returns: Json }
