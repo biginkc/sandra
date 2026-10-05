@@ -286,7 +286,7 @@ jobs:
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261005140000_my_leads_housekeeping_reassign_queue_scope.integration.test.ts
 
-      - name: My Leads lead_comps foundation: RLS, enqueue, cap ledger (disposable DB)
+      - name: "My Leads lead_comps foundation - RLS, enqueue, cap ledger (disposable DB)"
         env:
           TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
           LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
