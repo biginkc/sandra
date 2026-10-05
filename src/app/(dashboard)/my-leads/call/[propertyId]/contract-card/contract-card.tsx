@@ -30,6 +30,21 @@ function newIntentId(): string {
     : `00000000-0000-4000-8000-${Date.now().toString(16).padStart(12, "0").slice(-12)}`;
 }
 
+/**
+ * The ONE rotation rule for the send intent id, used by edits and by Send. Rotate only when nothing
+ * can have been sent under the current id: no result yet, a `blocked` result (the server stopped
+ * before sending), or a definitive failure (the server released the intent). Every other state keeps
+ * the id: sent, unconfirmed, a lost response or non-definitive failure, and a send in flight. A
+ * `blocked` IDEMPOTENCY_CONFLICT also keeps it: the id was already used with different values, so the
+ * only safe move is to restore the original values and replay, never to mint a second contract.
+ */
+export function shouldRotateIntent(result: SendContractCardResult | null, sending: boolean): boolean {
+  if (sending) return false;
+  if (result === null) return true;
+  if (result.status === "blocked") return result.code !== "IDEMPOTENCY_CONFLICT" && result.code !== "FORBIDDEN";
+  return result.status === "failed" && result.definitive === true;
+}
+
 function signersFor(state: EnabledState, buyer: BuyerEntity | null): SignerAssignment[] {
   return [...state.signerRoles].sort((a, b) => a.order - b.order).map((role) =>
     role.name === state.sellerRoleName
@@ -56,8 +71,7 @@ function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChan
   const intentRef = useRef<string | null>(null);
   const intent = () => (intentRef.current ??= newIntentId());
   const edited = () => {
-    // Rotate only while no send is in flight and nothing is sent or unconfirmed.
-    if (!sending && result?.status !== "sent" && result?.status !== "unconfirmed") intentRef.current = null;
+    if (shouldRotateIntent(result, sending)) intentRef.current = null;
   };
 
   const title: TitleCompany | null = state.titleCompanies.find((t) => t.id === titleId) ?? null;
@@ -106,7 +120,7 @@ function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChan
       setResult(res);
       // Rotate only when nothing was sent and the server released the intent (blocked, or a definitive
       // failure). Every other result keeps the id so a retry replays the durable outcome.
-      if (res.status === "blocked" || (res.status === "failed" && res.definitive === true)) intentRef.current = null;
+      if (shouldRotateIntent(res, false)) intentRef.current = null;
       if (res.status === "sent") onSent?.();
     } catch {
       // A lost response keeps the SAME intent id so a retry replays the durable result.

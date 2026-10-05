@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ContractCard } from "./contract-card";
+import { ContractCard, shouldRotateIntent } from "./contract-card";
 import { BUYER, novationBase, TITLE } from "./fixtures";
 import type { ContractCardState } from "../types";
 
@@ -128,5 +128,56 @@ describe("ContractCard", () => {
     fill();
     fireEvent.click(sendBtn());
     await waitFor(() => expect(screen.getByTestId("contract-status").textContent).toContain("offer needs reconciling"));
+  });
+});
+
+describe("intent id rotation by last result state", () => {
+  const cases: Array<[string, unknown, boolean]> = [
+    ["no result yet", null, true],
+    ["blocked", { status: "blocked", code: "MISSING_FIELDS", message: "m" }, true],
+    ["blocked IDEMPOTENCY_CONFLICT", { status: "blocked", code: "IDEMPOTENCY_CONFLICT", message: "m" }, false],
+    ["blocked FORBIDDEN", { status: "blocked", code: "FORBIDDEN", message: "m" }, false],
+    ["definitive failure", { status: "failed", message: "m", definitive: true }, true],
+    ["non-definitive failure", { status: "failed", message: "m" }, false],
+    ["lost response (client-synthesised failure)", { status: "failed", message: "The response was lost." }, false],
+    ["sent", { status: "sent", requestId: "r", offer: "pending" }, false],
+    ["unconfirmed", { status: "unconfirmed", projectionId: "x" }, false],
+  ];
+
+  it.each(cases)("helper: %s -> rotate=%s", (_n, result, rotate) => {
+    expect(shouldRotateIntent(result as never, false)).toBe(rotate);
+  });
+  it("never rotates while a send is in flight", () => {
+    expect(shouldRotateIntent(null, true)).toBe(false);
+  });
+
+  // End to end: send (result), edit a field, send again; is the intent reused?
+  it.each(cases.filter(([, r]) => r !== null && (r as { status: string }).status !== "sent" && (r as { status: string }).status !== "unconfirmed"))(
+    "edit then Send after %s reuses the intent: %s",
+    async (_n, result, rotate) => {
+      const send = vi.fn().mockResolvedValueOnce(result).mockResolvedValue({ status: "failed", message: "again" });
+      render(<ContractCard state={state()} propertyId="p" send={send} />);
+      fill();
+      fireEvent.click(sendBtn());
+      await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(screen.getByTestId("contract-status")).toBeTruthy());
+      fireEvent.change(screen.getByTestId("contract-price"), { target: { value: "199000" } });
+      fireEvent.click(sendBtn());
+      await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+      const same = send.mock.calls[1]![0].sendIntentId === send.mock.calls[0]![0].sendIntentId;
+      expect(same).toBe(!rotate);
+    },
+  );
+
+  it("edit after a thrown (lost) response reuses the intent", async () => {
+    const send = vi.fn().mockRejectedValueOnce(new Error("lost")).mockResolvedValue({ status: "failed", message: "x" });
+    render(<ContractCard state={state()} propertyId="p" send={send} />);
+    fill();
+    fireEvent.click(sendBtn());
+    await waitFor(() => expect(screen.getByTestId("contract-status").textContent).toContain("response was lost"));
+    fireEvent.change(screen.getByTestId("contract-closing-date"), { target: { value: "2099-02-03" } });
+    fireEvent.click(sendBtn());
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    expect(send.mock.calls[1]![0].sendIntentId).toBe(send.mock.calls[0]![0].sendIntentId);
   });
 });
