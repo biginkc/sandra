@@ -13,6 +13,7 @@ import {
   type CallScreenComps,
   type CallScreenData,
   type CallScreenLead,
+  type ContractCardState,
   type CallScreenMessage,
   type CallScreenNote,
   type CallScreenPhone,
@@ -20,6 +21,8 @@ import {
   type LeadCompPublic,
   type Section,
 } from "./types";
+
+import { loadContractCard } from "./contract-card/contract-card-actions";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HISTORY_LIMIT = 50;
@@ -41,6 +44,7 @@ type Deps = {
   context?: typeof loadCoachCallContext;
   flag?: typeof getMyLeadsFlag;
   schemaReady?: typeof schemaReady;
+  contractCard?: (propertyId: string) => Promise<ContractCardState>;
 };
 
 function failed<T>(message: string, error: unknown, operation: string): Section<T> {
@@ -194,6 +198,16 @@ async function loadMessages(client: LooseClient, propertyId: string, contactId: 
   return [...((data ?? []) as CallScreenMessage[])].reverse();
 }
 
+/** Flag-off, not-ready, or any failure is `{ ok: false }` and the layout omits the slot. */
+async function loadContractSection(propertyId: string, deps: Deps): Promise<Section<ContractCardState>> {
+  try {
+    const state = await (deps.contractCard ?? loadContractCard)(propertyId);
+    return state.enabled ? { ok: true, data: state } : { ok: false, message: state.reason };
+  } catch {
+    return { ok: false, message: "Send contract is not available." };
+  }
+}
+
 /** Every section is independent and degrades alone; only the lead and its queue row are required. */
 export async function loadCallScreen(propertyId: string, deps: Deps = {}): Promise<CallScreenLoad> {
   if (typeof propertyId !== "string" || !UUID.test(propertyId)) return { status: "invalid" };
@@ -219,8 +233,7 @@ export async function loadCallScreen(propertyId: string, deps: Deps = {}): Promi
         comps,
         notes,
         messages,
-        // p3-send-card mounts these; hidden here.
-        contract: { ok: false, message: "Send contract arrives with Phase 3c." },
+        contract: await loadContractSection(propertyId, deps),
         facts: { ok: false, message: "Call facts arrive with Phase 3c." },
       },
     };

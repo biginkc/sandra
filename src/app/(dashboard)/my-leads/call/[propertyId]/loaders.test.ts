@@ -12,6 +12,7 @@ vi.mock("@/lib/errors/report", () => ({ reportError: mocks.reportError }));
 vi.mock("@/app/(dashboard)/leads/actions", () => ({ markMessagesReadForProperty: mocks.markMessagesReadForProperty }));
 vi.mock("@/lib/coach/coach-context-actions", () => ({ loadCoachCallContext: vi.fn() }));
 vi.mock("@/lib/coach/script-cache", () => ({ loadCachedCoachBundle: vi.fn() }));
+vi.mock("./contract-card/contract-card-actions", () => ({ loadContractCard: vi.fn() }));
 vi.mock("@/lib/my-leads/flags", () => ({ getMyLeadsFlag: vi.fn() }));
 vi.mock("@/lib/my-leads/schema-ready", () => ({ schemaReady: vi.fn() }));
 vi.mock("@/lib/my-leads/queries", () => ({
@@ -51,6 +52,7 @@ const deps = () => ({
   context: vi.fn(async () => ({ sellerName: "Pat", leadSource: null, occupancy: null })),
   flag: vi.fn(async () => true),
   schemaReady: vi.fn(async () => true),
+  contractCard: vi.fn(async () => ({ enabled: false as const, reason: "off" })),
 });
 
 describe("loadCallScreen", () => {
@@ -87,6 +89,16 @@ describe("loadCallScreen", () => {
     expect(result.data.contract.ok).toBe(false);
     expect(result.data.facts.ok).toBe(false);
     expect(mocks.markMessagesReadForProperty).not.toHaveBeenCalled();
+  });
+
+  it("mounts the contract section only when the card state is enabled; a throw degrades it alone", async () => {
+    const on = { ...deps(), contractCard: vi.fn(async () => ({ enabled: true as const, marker: 1 })) };
+    const a = await loadCallScreen(propertyId, on as never);
+    expect(a.status === "ok" && a.data.contract.ok).toBe(true);
+    const boom = { ...deps(), contractCard: vi.fn(async () => { throw new Error("x"); }) };
+    const b = await loadCallScreen(propertyId, boom as never);
+    expect(b.status).toBe("ok");
+    expect(b.status === "ok" && b.data.contract.ok).toBe(false);
   });
 
   it("never requests the service-only raw column from lead_comps", async () => {

@@ -15,7 +15,9 @@ export type SchemaFeature =
   | "lead_note_idempotency"
   | "post_call_support"
   | "seller_reminders"
-  | "lead_comps";
+  | "lead_comps"
+  | "contract_defaults"
+  | "offer_projection";
 
 export type SchemaRequirement = {
   /** `public.fn_name(argtype,argtype)` regprocedure strings. */
@@ -70,6 +72,16 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
       "public.fn_finish_comp_fetch(uuid,text,integer,text,uuid)",
     ],
     columns: ["lead_comps.as_is_value", "org_comp_settings.monthly_call_cap", "lead_valuation_inputs.arv"],
+  },
+  // P3c: contract defaults tables (title companies, buyer entities, settings).
+  contract_defaults: {
+    functions: [],
+    columns: ["acquisition_contract_settings.earnest_money_cents", "acquisition_contract_title_companies.closing_agent_name", "acquisition_contract_buyer_entities.name"],
+  },
+  // P3c offer projection (§3.6) is NOT in this slice: until its migration lands the card stays disabled.
+  offer_projection: {
+    functions: ["public.fn_project_acquisition_offer(uuid)"],
+    columns: ["acquisition_offer_projections.send_payload"],
   },
 };
 
