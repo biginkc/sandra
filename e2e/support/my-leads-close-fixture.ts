@@ -175,18 +175,47 @@ export async function designateRep(db: Queryable, input: { orgId: string; repUse
  * `acquisitions_enabled` goes back to false through the same designation guard marker.
  */
 export async function resetCloseWorld(db: Queryable, input: { orgId: string; repUserId: string }): Promise<void> {
-  await asService(db, async (q) => {
-    await q.query("delete from public.my_leads_feature_flags where org_id=$1", [input.orgId]);
-    await q.query("update public.dialpad_org_connections set status='disabled', updated_at=now() where org_id=$1", [input.orgId]);
-    await q.query(
-      "update public.dialpad_member_bindings set status='revoked', revoked_at=now(), revoked_reason='e2e cleanup' where org_id=$1 and status <> 'revoked'",
-      [input.orgId],
-    );
-    await q.query("select set_config('my_leads.designation_update', format(':%s:%s', $1::text, $2::text), true)", [input.orgId, input.repUserId]);
-    await q.query("update public.memberships set acquisitions_enabled=false where org_id=$1 and user_id=$2", [input.orgId, input.repUserId]);
-    await q.query("select set_config('my_leads.designation_update', '', true)");
-  });
-  await db.query("delete from public.seller_reminder_settings where org_id=$1", [input.orgId]);
+  // Each step is its own transaction and a failure in one never skips the others: the designation
+  // restore in particular must always run, or `reset_tenant_tables()` of the next spec file fails
+  // with MY_LEADS_DESIGNATION_FORBIDDEN. The first error is rethrown after every step has run.
+  const errors: unknown[] = [];
+  const step = async (fn: () => Promise<unknown>) => {
+    try {
+      await fn();
+    } catch (error) {
+      errors.push(error);
+    }
+  };
+
+  // Designation first (through the same guard marker the setup used).
+  await step(() =>
+    asService(db, async (q) => {
+      await q.query("select set_config('my_leads.designation_update', format(':%s:%s', $1::text, $2::text), true)", [input.orgId, input.repUserId]);
+      await q.query("update public.memberships set acquisitions_enabled=false where org_id=$1 and user_id=$2", [input.orgId, input.repUserId]);
+      await q.query("select set_config('my_leads.designation_update', '', true)");
+    }),
+  );
+  await step(() => asService(db, (q) => q.query("delete from public.my_leads_feature_flags where org_id=$1", [input.orgId])));
+  await step(() =>
+    asService(db, (q) =>
+      q.query("update public.dialpad_org_connections set status='disabled', updated_at=now() where org_id=$1", [input.orgId]),
+    ),
+  );
+  // `service_role` only has SELECT on the bindings table; revocation goes through the SECURITY
+  // DEFINER function (which also cancels the binding's prepared intents). The table forbids deletes.
+  await step(() =>
+    asService(db, async (q) => {
+      const live = await q.query<{ id: string }>(
+        "select id from public.dialpad_member_bindings where org_id=$1 and status <> 'revoked'",
+        [input.orgId],
+      );
+      for (const row of live.rows) {
+        await q.query("select public.fn_revoke_dialpad_member_binding($1,'e2e cleanup')", [row.id]);
+      }
+    }),
+  );
+  await step(() => db.query("delete from public.seller_reminder_settings where org_id=$1", [input.orgId]));
+  if (errors.length > 0) throw errors[0];
 }
 
 /**

@@ -64,6 +64,8 @@ test.describe.serial("my-leads-close: Phase 1 CI lane", () => {
     await resetTenantTables(admin);
     const repUserId = await ensureTestUser(admin);
     const db = new pg.Pool({ connectionString: ciDatabaseUrl(), max: 3 });
+    // Recorded before any setup write so afterAll still restores a partial setup.
+    Object.assign(world, { db, repUserId });
     const runTag = `E2E-CLOSE ${randomUUID().slice(0, 8)}`;
     await designateRep(db, { orgId: DEFAULT_ORG_ID, repUserId });
     // Phase 1 surfaces on; seller_reminders deliberately OFF (the schedule row must exist, nothing may send).
@@ -150,6 +152,9 @@ test.describe.serial("my-leads-close: Phase 1 CI lane", () => {
     await prompt.getByTestId("post-call-note").fill(note);
     const clickedAt = new Date();
     await prompt.getByTestId("post-call-pick-next-week").click();
+    // The default source is DialPad, and a DialPad call needs its shared recording link (the RPC
+    // refuses with RECORDING_REQUIRED otherwise, so no receipt ever appears).
+    await prompt.locator("#post-call-recording").fill(SHARE_LINK);
     await prompt.getByRole("button", { name: /^save$/i }).click();
     await expect(prompt.getByTestId("post-call-receipt")).toBeVisible({ timeout: 20_000 });
 
