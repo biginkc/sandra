@@ -219,15 +219,18 @@ export async function resetCloseWorld(db: Queryable, input: { orgId: string; rep
 }
 
 /**
- * CI lane only (disposable database): empties the append-only Dialpad evidence tables. The
+ * CI lane only (disposable database): empties the append-only Dialpad evidence tables and the rep's command receipts. The
  * bindings (and intents) reference `auth.users` with ON DELETE RESTRICT and forbid row deletes, so
  * the exact-run identity cleanup at the end of the job ("Database error deleting user") can never
  * remove the test rep while a binding exists. TRUNCATE fires no row triggers; the owner connection
  * may run it. Refuses to run outside the loopback `ci` lane.
  */
-export async function purgeDialpadEvidenceCi(db: Queryable, env: Env = process.env): Promise<void> {
+export async function purgeDialpadEvidenceCi(db: Queryable, repUserId: string, env: Env = process.env): Promise<void> {
   assertLaneSafe("ci", env);
   await db.query("truncate table public.dialpad_member_bindings cascade");
+  // The UI save writes an idempotency receipt per command (`acquisition_commands.actor_user_id` is ON
+  // DELETE RESTRICT and, unlike attempts, is not wiped by the next spec's reset_tenant_tables()).
+  await db.query("delete from public.acquisition_commands where actor_user_id=$1", [repUserId]);
 }
 
 /**

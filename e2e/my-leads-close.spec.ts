@@ -85,7 +85,7 @@ test.describe.serial("my-leads-close: Phase 1 CI lane", () => {
     } finally {
       try {
         // The job's exact-run identity cleanup cannot delete a user that a Dialpad binding references.
-        await purgeDialpadEvidenceCi(db);
+        if (repUserId) await purgeDialpadEvidenceCi(db, repUserId);
       } finally {
         await db.end();
       }
