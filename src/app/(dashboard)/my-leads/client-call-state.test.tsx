@@ -211,7 +211,7 @@ describe("MyLeadsClient calling and durable call state", () => {
       expect(screen.getByTestId("dial-status")).toBeInTheDocument()
     })
 
-    it("counts down on a rate limit, then retries once with a fresh idempotency key", async () => {
+    it("row 9: counts down on a rate limit, then retries once with a fresh idempotency key", async () => {
       mocks.dialLead.mockResolvedValueOnce({ ok: false, code: "rate_limited", message: "Slow down", retryAfterSeconds: 2, freshAttemptKey: true })
       mocks.dialLead.mockResolvedValueOnce(dialOk)
       renderClient({ dialpad })
@@ -310,7 +310,7 @@ describe("MyLeadsClient calling and durable call state", () => {
   })
 
   describe("idempotency keys across repeated calls", () => {
-    it("mints a new key and dials again once the previous call to the same lead has finished", async () => {
+    it("row 1: ended, then the next click on the same lead mints a new key and dials again", async () => {
       mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-1" })
       mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-2" })
       mocks.status.mockImplementation(async (id: string) => callStatus(id, "ended"))
@@ -324,7 +324,7 @@ describe("MyLeadsClient calling and durable call state", () => {
       expect(second.idempotencyKey).not.toBe(first.idempotencyKey)
     })
 
-    it("keeps the same key after an expired call so a retry reuses it instead of duplicating", async () => {
+    it("row 5a: expired keeps the same key so a retry reuses it instead of duplicating", async () => {
       mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-1" })
       mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-1" })
       mocks.status.mockImplementation(async (id: string) => callStatus(id, "expired"))
@@ -337,7 +337,7 @@ describe("MyLeadsClient calling and durable call state", () => {
       expect(second.idempotencyKey).toBe(first.idempotencyKey)
     })
 
-    it("Dismiss after an expired call releases the key so the next click dials fresh", async () => {
+    it("row 5b: Dismiss after an expired call releases the key so the next click dials fresh", async () => {
       mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-1" })
       mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-2" })
       mocks.status.mockImplementation(async (id: string) => callStatus(id, "expired"))
@@ -352,6 +352,146 @@ describe("MyLeadsClient calling and durable call state", () => {
       expect(second.idempotencyKey).not.toBe(first.idempotencyKey)
     })
 
+
+  describe("#809 acceptance matrix: client rows", () => {
+    const keys = () => mocks.dialLead.mock.calls.map((c) => c[0].idempotencyKey as string)
+    const dismiss = () => click(screen.getByRole("button", { name: "Dismiss" }))
+    const call = (n: number) => click(screen.getByRole("button", { name: `Start call property-${n}` }))
+
+    it("row 2: failed keeps polling, holds the guard and the key, and shows the caution with Dismiss", async () => {
+      mocks.dialLead.mockResolvedValue({ ...dialOk, intentId: "intent-1" })
+      mocks.status.mockImplementation(async (id: string) => callStatus(id, "failed"))
+      renderClient({ dialpad })
+      await call(1)
+      await flush(0)
+      const polled = mocks.status.mock.calls.length
+      expect(screen.getByTestId("dial-status")).toHaveTextContent("It may have rung")
+      expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument()
+      await call(1)
+      expect(mocks.dialLead).toHaveBeenCalledTimes(1)
+      await flush(6000)
+      expect(mocks.status.mock.calls.length).toBeGreaterThan(polled)
+    })
+
+    it("row 3: Dismiss after failed keeps the key; the next click replays it and re-polls", async () => {
+      mocks.dialLead.mockResolvedValue({ ok: true, intentId: "intent-1", state: "already_dispatched" })
+      mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-1" })
+      mocks.status.mockImplementation(async (id: string) => callStatus(id, "failed"))
+      renderClient({ dialpad })
+      await call(1)
+      await flush(0)
+      await dismiss()
+      const polled = mocks.status.mock.calls.length
+      await call(1)
+      await flush(0)
+      expect(mocks.dialLead).toHaveBeenCalledTimes(2)
+      expect(keys()[1]).toBe(keys()[0])
+      expect(mocks.status.mock.calls.length).toBeGreaterThan(polled)
+    })
+
+    it("row 5c: failed, then expired, keeps the key until Dismiss and then dials fresh", async () => {
+      let polls = 0
+      mocks.status.mockImplementation(async (id: string) => callStatus(id, polls++ === 0 ? "failed" : "expired"))
+      mocks.dialLead.mockResolvedValue({ ...dialOk, intentId: "intent-1" })
+      renderClient({ dialpad })
+      await call(1)
+      await flush(3500)
+      expect(screen.getByTestId("dial-status")).toHaveTextContent("Check the dialer before calling again")
+      await call(1)
+      await flush(0)
+      expect(keys()[1]).toBe(keys()[0])
+      await dismiss()
+      await call(1)
+      expect(mocks.dialLead).toHaveBeenCalledTimes(3)
+      expect(keys()[2]).not.toBe(keys()[0])
+    })
+
+    it("row 7: an uncertain request that later fails keeps the key", async () => {
+      mocks.dialLead.mockResolvedValue({ ...dialOk, intentId: "intent-1", uncertain: true })
+      mocks.status.mockImplementation(async (id: string) => callStatus(id, "failed"))
+      renderClient({ dialpad })
+      await call(1)
+      await flush(0)
+      await dismiss()
+      await call(1)
+      expect(mocks.dialLead).toHaveBeenCalledTimes(2)
+      expect(keys()[1]).toBe(keys()[0])
+    })
+
+    it("row 11: dialing another lead never discards an unresolved lead's key, and B is blocked while A is still shown", async () => {
+      mocks.dialLead.mockImplementation(async (input: { propertyId: string }) => ({ ...dialOk, intentId: input.propertyId === "property-1" ? "intent-A" : "intent-B" }))
+      mocks.status.mockImplementation(async (id: string) => callStatus(id, id === "intent-A" ? "failed" : "ended"))
+      renderClient({ dialpad })
+      await call(1)
+      await flush(0)
+      await call(2)
+      expect(mocks.dialLead).toHaveBeenCalledTimes(1)
+      await dismiss()
+      await call(2)
+      await flush(0)
+      expect(mocks.dialLead).toHaveBeenCalledTimes(2)
+      await call(1)
+      expect(mocks.dialLead).toHaveBeenCalledTimes(3)
+      expect(mocks.dialLead.mock.calls[2][0].propertyId).toBe("property-1")
+      expect(keys()[2]).toBe(keys()[0])
+      expect(keys()[1]).not.toBe(keys()[0])
+    })
+
+    const unresolved = { ok: false, code: "prior_call_unresolved", message: "Your last call to this lead was never confirmed. It may have rung. Check Dialpad before calling again.", priorIntentId: "prior-1" }
+
+    it("row 12: a server refusal shows the caution and Call again anyway", async () => {
+      mocks.dialLead.mockResolvedValue(unresolved)
+      renderClient({ dialpad })
+      await call(1)
+      expect(screen.getByTestId("dial-status")).toHaveTextContent("It may have rung")
+      expect(screen.getByRole("button", { name: "Call again anyway" })).toBeInTheDocument()
+      expect(mocks.dialLead).toHaveBeenCalledTimes(1)
+    })
+
+    it("row 13: Call again anyway sends a new key and the named prior intent", async () => {
+      mocks.dialLead.mockResolvedValueOnce(unresolved)
+      mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-2" })
+      renderClient({ dialpad })
+      await call(1)
+      await click(screen.getByRole("button", { name: "Call again anyway" }))
+      expect(mocks.dialLead).toHaveBeenCalledTimes(2)
+      expect(mocks.dialLead.mock.calls[1][0].confirmRedialOf).toBe("prior-1")
+      expect(keys()[1]).not.toBe(keys()[0])
+      expect(screen.getByTestId("dial-status")).not.toHaveTextContent("Call again anyway")
+    })
+
+    it("row 14: after an unresolved refusal on lead A, another lead still dials", async () => {
+      mocks.dialLead.mockResolvedValueOnce(unresolved)
+      mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-B" })
+      renderClient({ dialpad })
+      await call(1)
+      await dismiss()
+      await call(2)
+      expect(mocks.dialLead).toHaveBeenCalledTimes(2)
+      expect(mocks.dialLead.mock.calls[1][0].propertyId).toBe("property-2")
+      expect(mocks.dialLead.mock.calls[1][0].confirmRedialOf).toBeUndefined()
+    })
+
+    it("row 15: an expired replay shows the may-have-rung caution, not 'before it was sent', and Dismiss then dials fresh", async () => {
+      const caution = "No confirmation from Dialpad. Check the dialer before calling again."
+      mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-1" })
+      mocks.dialLead.mockResolvedValueOnce({ ok: false, code: "expired", message: caution })
+      mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-2" })
+      mocks.status.mockImplementation(async (id: string) => callStatus(id, "expired"))
+      renderClient({ dialpad })
+      await call(1)
+      await flush(0)
+      await call(1)
+      expect(keys()[1]).toBe(keys()[0])
+      expect(screen.getByTestId("dial-status")).toHaveTextContent(caution)
+      expect(screen.getByTestId("dial-status")).not.toHaveTextContent("before it was sent")
+      await dismiss()
+      await call(1)
+      expect(mocks.dialLead).toHaveBeenCalledTimes(3)
+      expect(keys()[2]).not.toBe(keys()[0])
+    })
+  })
+
     it("does not dial a second time while the first call is still in flight", async () => {
       mocks.dialLead.mockResolvedValue({ ...dialOk, intentId: "intent-1" })
       mocks.status.mockImplementation(async (id: string) => callStatus(id, "dialing"))
@@ -362,11 +502,13 @@ describe("MyLeadsClient calling and durable call state", () => {
       expect(mocks.dialLead).toHaveBeenCalledTimes(1)
     })
 
-    it("keeps the same key when the request threw, so a retry cannot double-dial", async () => {
+    it("row 8: a thrown request keeps the same key, says Sandra could not confirm, and a retry cannot double-dial", async () => {
       mocks.dialLead.mockRejectedValueOnce(new Error("network"))
       mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-1" })
       renderClient({ dialpad })
       await click(screen.getByRole("button", { name: "Start call property-1" }))
+      expect(screen.getByTestId("dial-status")).toHaveTextContent("Sandra could not confirm the call. Check Dialpad before trying again.")
+      expect(screen.getByTestId("dial-status")).not.toHaveTextContent("Nothing was dialed")
       await click(screen.getByRole("button", { name: "Start call property-1" }))
       expect(mocks.dialLead).toHaveBeenCalledTimes(2)
       expect(mocks.dialLead.mock.calls[1][0].idempotencyKey).toBe(mocks.dialLead.mock.calls[0][0].idempotencyKey)

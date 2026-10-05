@@ -45,7 +45,7 @@ const TOKEN = `sandra.dialpad.v1.${'b'.repeat(48)}`;
 const API_KEY = 'k'.repeat(24);
 const actor: DialpadActor = { orgId: ORG, userId: REP };
 const env = { DIALPAD_CTI_DIRECTORY_KEY_A: API_KEY, DIALPAD_CTI_DIAL_KEY_X: 'd'.repeat(24) };
-const input = { propertyId: PROPERTY, contactId: CONTACT, phoneSlot: null as unknown, idempotencyKey: KEY as unknown };
+const input = { propertyId: PROPERTY, contactId: CONTACT, phoneSlot: null as unknown, idempotencyKey: KEY as unknown, confirmRedialOf: undefined as unknown };
 
 const conn = (over: Partial<DialpadConnectionView> = {}): DialpadConnectionView => ({
   id: 'c', status: 'active', allowedOrigins: ['https://dialpad.com'], companyId: '42', directoryKeyRef: 'env:DIALPAD_CTI_DIRECTORY_KEY_A', dialEndpoint: 'initiate_call', dialKeyRef: null, ...over,
@@ -70,6 +70,7 @@ function fakeDb(over: Partial<DialpadDispatchDb> = {}): DialpadDispatchDb & { ca
     loadActiveGrants: track('loadActiveGrants', async () => []),
     loadTargetPhones: track('loadTargetPhones', async () => null),
     loadDispatchLoad: track('loadDispatchLoad', async () => ({ authorizedLastMinute: 0, unmatchedLast20s: 0 })),
+    loadUnresolvedIntent: track('loadUnresolvedIntent', async () => null),
     loadCallSlots: track('loadCallSlots', async () => slotsOk),
     claimBinding: track('claimBinding', async () => ({})),
     verifyBinding: track('verifyBinding', async () => ({})),
@@ -290,7 +291,7 @@ describe('startDialpadApiCall', () => {
     const db = fakeDb({ loadCallSlots: async () => [{ slot: 1, callable: false, reason: 'phone_dnc' }, { slot: 2, callable: false, reason: 'property_dnc' }] });
     const { dialer, requests } = fakeDialer();
     const result = await run(db, dialer);
-    expect(result).toEqual({ ok: false, code: 'denied', message: dialpadDenialMessage('phone_dnc'), denial: 'phone_dnc' });
+    expect(result).toEqual({ ok: false, code: 'denied', message: dialpadDenialMessage('phone_dnc'), denial: 'phone_dnc', freshAttemptKey: true });
     expect(db.calls).not.toContain('prepareIntent');
     expect(requests).toHaveLength(0);
   });
@@ -378,8 +379,7 @@ describe('startDialpadApiCall', () => {
     const reason = status === 400 ? 'invalid' : status === 401 ? 'unauthorized' : 'forbidden';
     const { dialer } = fakeDialer({ kind: 'rejected', status, reason, retryAfterSeconds: null });
     const result = await run(db, dialer);
-    expect(result).toMatchObject({ ok: false, code: 'provider_rejected' });
-    expect(result).not.toHaveProperty('freshAttemptKey');
+    expect(result).toMatchObject({ ok: false, code: 'provider_rejected', freshAttemptKey: true });
     expect(db.calls).toContain('cancelIntent');
     expect(reportError).toHaveBeenCalledTimes(1);
     const [, options] = vi.mocked(reportError).mock.calls[0]!;
@@ -457,5 +457,77 @@ describe('startDialpadApiCall', () => {
     expect(requests).toHaveLength(0);
     expect(reportError).toHaveBeenCalled();
     expect(vi.mocked(reportError).mock.calls[0]![1]).toMatchObject({ tags: { surface: 'dialpad_api_dial' } });
+  });
+});
+
+describe('#809 acceptance matrix: server rows', () => {
+  const unresolved = (over: Partial<{ intentId: string; idempotencyKey: string }> = {}) => async () => ({ intentId: INTENT2, idempotencyKey: KEY2, ...over });
+
+  it('row 10: provider_rejected carries freshAttemptKey (proven non-dispatch)', async () => {
+    const db = fakeDb();
+    const { dialer } = fakeDialer({ kind: 'rejected', status: 400, reason: 'invalid', retryAfterSeconds: null });
+    const result = await run(db, dialer);
+    expect(result).toMatchObject({ ok: false, code: 'provider_rejected', freshAttemptKey: true });
+    expect(db.calls).toContain('cancelIntent');
+  });
+
+  it('row 10: a missing dial key and an authorize denial also release the key', async () => {
+    const noKey = fakeDb({ loadConnection: async () => conn({ directoryKeyRef: 'env:MISSING' }) });
+    expect(await run(noKey, fakeDialer().dialer)).toMatchObject({ ok: false, code: 'not_configured', freshAttemptKey: true });
+    const denied = fakeDb({ authorizeDispatch: async () => ({ status: 'denied', intentId: INTENT, denial: 'phone_dnc' }) });
+    expect(await run(denied, fakeDialer().dialer)).toMatchObject({ ok: false, code: 'denied', freshAttemptKey: true });
+  });
+
+  it('row 12: refuses a new key while a prior authorized, unexpired, unmatched intent exists for the lead', async () => {
+    const db = fakeDb({ loadUnresolvedIntent: unresolved() });
+    const { dialer, requests } = fakeDialer();
+    const result = await run(db, dialer);
+    expect(result).toMatchObject({ ok: false, code: 'prior_call_unresolved', priorIntentId: INTENT2 });
+    expect(result).not.toHaveProperty('freshAttemptKey');
+    expect(db.calls).not.toContain('prepareIntent');
+    expect(requests).toHaveLength(0);
+  });
+
+  it('row 12: a replay of the unresolved intent own key is not refused', async () => {
+    const db = fakeDb({ loadUnresolvedIntent: unresolved({ idempotencyKey: KEY }), authorizeDispatch: async () => ({ status: 'already_dispatched', intentId: INTENT2, expiresAt: '2026-09-29T10:10:00Z', dispatchAuthorizedAt: '2026-09-29T10:00:01Z' }) });
+    expect(await run(db, fakeDialer().dialer)).toMatchObject({ ok: true, state: 'already_dispatched' });
+  });
+
+  it('row 13: the redial is accepted only when confirmRedialOf is the newest unresolved intent', async () => {
+    const ok = fakeDb({ loadUnresolvedIntent: unresolved() });
+    const { dialer, requests } = fakeDialer();
+    expect(await run(ok, dialer, { confirmRedialOf: INTENT2 })).toMatchObject({ ok: true, state: 'awaiting_provider' });
+    expect(requests).toHaveLength(1);
+    for (const stale of [INTENT, '99999999-9999-4999-8999-999999999999']) {
+      const db = fakeDb({ loadUnresolvedIntent: unresolved() });
+      const fresh = fakeDialer();
+      expect(await run(db, fresh.dialer, { confirmRedialOf: stale })).toMatchObject({ ok: false, code: 'prior_call_unresolved', priorIntentId: INTENT2 });
+      expect(fresh.requests).toHaveLength(0);
+    }
+    expect(await run(fakeDb(), fakeDialer().dialer, { confirmRedialOf: 'nope' })).toMatchObject({ ok: false, code: 'invalid_input' });
+  });
+
+  it('row 14: the backstop is per lead; it asks only about the property being dialed and never blocks another lead', async () => {
+    const loadUnresolvedIntent = vi.fn(async (_o: string, _u: string, property: string) => (property === PROPERTY ? { intentId: INTENT2, idempotencyKey: KEY2 } : null));
+    const other = '33333333-3333-4333-8333-333333333334';
+    const dialA = fakeDb({ loadUnresolvedIntent });
+    expect(await run(dialA, fakeDialer().dialer)).toMatchObject({ ok: false, code: 'prior_call_unresolved' });
+    const dialB = fakeDb({ loadUnresolvedIntent });
+    expect(await run(dialB, fakeDialer().dialer, { propertyId: other, idempotencyKey: KEY2 })).toMatchObject({ ok: true });
+    expect(loadUnresolvedIntent).toHaveBeenNthCalledWith(1, ORG, REP, PROPERTY, '2026-09-29T10:00:00.000Z');
+    expect(loadUnresolvedIntent).toHaveBeenNthCalledWith(2, ORG, REP, other, '2026-09-29T10:00:00.000Z');
+  });
+
+  it('row 15: a replay of an expired key says the call may have rung, not that it was never sent', async () => {
+    const db = fakeDb({ authorizeDispatch: async () => ({ status: 'expired', intentId: INTENT }) });
+    const result = await run(db, fakeDialer().dialer);
+    expect(result).toMatchObject({ ok: false, code: 'expired', message: 'No confirmation from Dialpad. Check the dialer before calling again.' });
+    expect(result).not.toHaveProperty('freshAttemptKey');
+  });
+
+  it('row 16: a second click inside 20 s is refused with call_in_flight and no new intent', async () => {
+    const db = fakeDb({ loadDispatchLoad: async () => ({ authorizedLastMinute: 1, unmatchedLast20s: 1 }) });
+    expect(await run(db, fakeDialer().dialer, { idempotencyKey: KEY2 })).toMatchObject({ ok: false, code: 'call_in_flight' });
+    expect(db.calls).not.toContain('prepareIntent');
   });
 });

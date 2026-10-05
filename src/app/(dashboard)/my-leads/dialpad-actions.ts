@@ -35,7 +35,7 @@ async function session(): Promise<{ actor: DialpadActor; db: DialpadDispatchDb; 
 
 const unauthenticated = { ok: false as const, code: 'not_configured' as const, message: SIGN_IN_MESSAGE };
 
-export type DialLeadInput = { propertyId: unknown; contactId: unknown; phoneSlot?: unknown; idempotencyKey: unknown };
+export type DialLeadInput = { propertyId: unknown; contactId: unknown; phoneSlot?: unknown; idempotencyKey: unknown; confirmRedialOf?: unknown };
 
 /**
  * Click-to-dial through the Dialpad API (2.7). Kill switch and readiness: the `click_to_dial`
@@ -53,6 +53,7 @@ export async function dialLeadAction(input: DialLeadInput): Promise<DialpadApiDi
     contactId: input.contactId,
     phoneSlot: input.phoneSlot ?? null,
     idempotencyKey: input.idempotencyKey,
+    confirmRedialOf: input.confirmRedialOf,
   }, { env: process.env });
   return outcome;
 }
@@ -73,5 +74,12 @@ export async function getDialpadCallStatusAction(intentId: unknown) {
 export async function cancelDialpadCallAction(intentId: unknown) {
   const s = await session();
   if (!s) return unauthenticated;
+  // An intent whose dial was already released may have rung; cancelling it would make `cancelled` a false
+  // proof of non-dispatch for the client key rules. Only unreleased intents can be cancelled here.
+  const status = await getDialpadCallStatus(s.db, s.actor, intentId);
+  if (!status.ok) return status;
+  if (status.status.dispatchAuthorizedAt) {
+    return { ok: false as const, code: 'denied' as const, message: 'This call was already sent to Dialpad and cannot be cancelled here.' };
+  }
   return cancelDialpadCall(s.db, s.actor, intentId);
 }
