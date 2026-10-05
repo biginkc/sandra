@@ -7,11 +7,7 @@ import { reportError } from "@/lib/errors/report";
 import { schemaReady } from "@/lib/my-leads/schema-ready";
 import { createClient } from "@/lib/supabase/server";
 
-import {
-  MARKETS,
-  dollarsToCents,
-  parseTemplateFieldDefaults,
-} from "./validation";
+import { parseTemplateFieldDefaults } from "./validation";
 
 export type ContractDefaultsActionResult = { ok: true } | { ok: false; message: string };
 
@@ -143,61 +139,15 @@ export async function deleteBuyerEntityAction(id: string): Promise<ContractDefau
   return finish(error, "deleteBuyerEntity", "This buyer entity is still used as a default. Remove it there first, or mark it inactive.");
 }
 
-export type MarketDefaultInput = { market: string; stateCode?: string; titleCompanyId: string };
-
-export async function saveMarketDefaultAction(input: MarketDefaultInput): Promise<ContractDefaultsActionResult> {
-  const gate = await requireOwner();
-  if (!gate.ok) return gate;
-  if (!(MARKETS as readonly string[]).includes(input.market)) {
-    return { ok: false, message: "Choose a market." };
-  }
-  const stateCode = clean(input.stateCode)?.toUpperCase() ?? null;
-  if (stateCode !== null && !/^[A-Z]{2}$/.test(stateCode)) {
-    return { ok: false, message: "State must be a 2-letter code." };
-  }
-  if (!input.titleCompanyId) return { ok: false, message: "Choose a title company." };
-  const { error } = await gate.supabase.from("acquisition_contract_title_market_defaults").insert({
-    org_id: gate.orgId,
-    market: input.market,
-    state_code: stateCode,
-    title_company_id: input.titleCompanyId,
-  });
-  return finish(error, "saveMarketDefault", "Choose a title company from this account.");
-}
-
-export async function deleteMarketDefaultAction(input: {
-  market: string;
-  stateCode: string | null;
-}): Promise<ContractDefaultsActionResult> {
-  const gate = await requireOwner();
-  if (!gate.ok) return gate;
-  let q = gate.supabase
-    .from("acquisition_contract_title_market_defaults")
-    .delete()
-    .eq("org_id", gate.orgId)
-    .eq("market", input.market);
-  q = input.stateCode ? q.eq("state_code", input.stateCode) : q.is("state_code", null);
-  const { error } = await q;
-  return finish(error, "deleteMarketDefault");
-}
-
 export type ContractSettingsInput = {
-  /** Dollars as typed by the owner. Required; there is no default. */
-  earnestMoney: string;
   followUpDays: number;
   followUpHour: number;
-  defaultTitleCompanyId: string | null;
-  defaultBuyerEntityId: string | null;
   templateFieldDefaultsText: string;
 };
 
 export async function saveContractSettingsAction(input: ContractSettingsInput): Promise<ContractDefaultsActionResult> {
   const gate = await requireOwner();
   if (!gate.ok) return gate;
-  const cents = dollarsToCents(input.earnestMoney);
-  if (cents === null) {
-    return { ok: false, message: "Enter the earnest money amount (dollars). It has no default." };
-  }
   if (!Number.isInteger(input.followUpDays) || input.followUpDays < 1 || input.followUpDays > 60) {
     return { ok: false, message: "Follow-up days must be a whole number from 1 to 60." };
   }
@@ -209,11 +159,8 @@ export async function saveContractSettingsAction(input: ContractSettingsInput): 
   const { error } = await gate.supabase.from("acquisition_contract_settings").upsert(
     {
       org_id: gate.orgId,
-      earnest_money_cents: cents,
       follow_up_days_before_closing: input.followUpDays,
       follow_up_hour_central: input.followUpHour,
-      default_title_company_id: input.defaultTitleCompanyId || null,
-      default_buyer_entity_id: input.defaultBuyerEntityId || null,
       template_field_defaults: parsed.value,
       updated_by: gate.userId,
       updated_at: new Date().toISOString(),

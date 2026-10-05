@@ -109,12 +109,12 @@ function ProjectionPanel({ state, proj, propertyId, recovery, onRefresh }: {
 function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChange, onSent }: ContractCardProps & { state: EnabledState }) {
   const [price, setPrice] = useState("");
   const [closingDate, setClosingDate] = useState("");
-  const [titleId, setTitleId] = useState(state.selectedTitleCompanyId ?? "");
-  const [buyerId, setBuyerId] = useState(state.selectedBuyerEntityId ?? "");
+  const [titleId, setTitleId] = useState("");
+  const [buyerId, setBuyerId] = useState("");
   const NEW = "__new__";
   const [titleNew, setTitleNew] = useState({ name: "", closingAgentName: "", closingAgentPhone: "", closingAgentEmail: "", closingAgentAddress: "" });
   const [buyerNew, setBuyerNew] = useState({ name: "", attorneyInFact: "", phone: "", email: "" });
-  const [earnest, setEarnest] = useState(state.prefillBase.settings.earnestMoneyCents == null ? "" : (state.prefillBase.settings.earnestMoneyCents / 100).toFixed(2));
+  const [earnest, setEarnest] = useState("");
   const [overrides, setOverrides] = useState<Partial<Record<EsignMergeFieldName, string>>>({});
   const [motivationKind, setMotivationKind] = useState<"" | "specified" | "no_motivation">("");
   const [motivationText, setMotivationText] = useState("");

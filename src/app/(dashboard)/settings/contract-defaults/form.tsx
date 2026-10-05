@@ -10,15 +10,13 @@ import { Textarea } from "@/components/ui/textarea";
 
 import {
   deleteBuyerEntityAction,
-  deleteMarketDefaultAction,
   deleteTitleCompanyAction,
   saveBuyerEntityAction,
   saveContractSettingsAction,
-  saveMarketDefaultAction,
   saveTitleCompanyAction,
   type ContractDefaultsActionResult,
 } from "./actions";
-import { MARKETS, parseTemplateFieldDefaults } from "./validation";
+import { parseTemplateFieldDefaults } from "./validation";
 
 export type TitleCompanyRow = {
   id: string;
@@ -37,23 +35,15 @@ export type BuyerEntityRow = {
   attorneyInFact: string;
   isActive: boolean;
 };
-export type MarketDefaultRow = { market: string; stateCode: string | null; titleCompanyId: string };
 export type ContractDefaultsInitial = {
   titleCompanies: TitleCompanyRow[];
   buyerEntities: BuyerEntityRow[];
-  marketDefaults: MarketDefaultRow[];
   settings: {
-    earnestMoney: string;
     followUpDays: number;
     followUpHour: number;
-    defaultTitleCompanyId: string | null;
-    defaultBuyerEntityId: string | null;
     templateFieldDefaultsText: string;
   };
 };
-
-const SELECT_CLASS =
-  "border-input bg-transparent h-8 w-full rounded-lg border px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50";
 
 function useRun() {
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
@@ -198,96 +188,18 @@ function BuyerEntityEditor({ row }: { row: BuyerEntityRow | null }) {
   );
 }
 
-function MarketGrid({ rows, titles }: { rows: MarketDefaultRow[]; titles: TitleCompanyRow[] }) {
-  const [market, setMarket] = useState<string>(MARKETS[0]);
-  const [state, setState] = useState("");
-  const [title, setTitle] = useState("");
-  const { run, pending, note } = useRun();
-  const nameOf = (id: string) => titles.find((t) => t.id === id)?.name ?? id;
-  return (
-    <div className="flex flex-col gap-3">
-      {rows.length > 0 && (
-        <ul className="flex flex-col gap-2">
-          {rows.map((r) => (
-            <li key={`${r.market}|${r.stateCode ?? ""}`} className="flex items-center justify-between gap-2 rounded-lg border p-2 text-sm">
-              <span>
-                {r.market}
-                {r.stateCode ? ` (${r.stateCode})` : ""} → {nameOf(r.titleCompanyId)}
-              </span>
-              <Button size="xs" variant="destructive" disabled={pending} onClick={() => run(() => deleteMarketDefaultAction({ market: r.market, stateCode: r.stateCode }), "Removed.")}>
-                Remove
-              </Button>
-            </li>
-          ))}
-        </ul>
-      )}
-      <div className="grid gap-3 md:grid-cols-3">
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="md-market">Market</Label>
-          <select id="md-market" className={SELECT_CLASS} value={market} onChange={(e) => setMarket(e.target.value)}>
-            {MARKETS.map((m) => (
-              <option key={m} value={m}>{m}</option>
-            ))}
-          </select>
-        </div>
-        <Field id="md-state" label="State (2 letters, optional)" value={state} onChange={setState} />
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="md-title">Title company</Label>
-          <select id="md-title" className={SELECT_CLASS} value={title} onChange={(e) => setTitle(e.target.value)}>
-            <option value="">Choose…</option>
-            {titles.filter((t) => t.isActive).map((t) => (
-              <option key={t.id} value={t.id}>{t.name}</option>
-            ))}
-          </select>
-        </div>
-      </div>
-      <div className="flex items-center gap-2">
-        <Button size="sm" disabled={pending} onClick={() => run(() => saveMarketDefaultAction({ market, stateCode: state, titleCompanyId: title }), "Saved.", () => { setState(""); setTitle(""); })}>
-          Add market default
-        </Button>
-        {note}
-      </div>
-    </div>
-  );
-}
-
-function SettingsEditor({ initial, titles, buyers }: { initial: ContractDefaultsInitial["settings"]; titles: TitleCompanyRow[]; buyers: BuyerEntityRow[] }) {
-  const [earnest, setEarnest] = useState(initial.earnestMoney);
+function SettingsEditor({ initial }: { initial: ContractDefaultsInitial["settings"] }) {
   const [days, setDays] = useState(String(initial.followUpDays));
   const [hour, setHour] = useState(String(initial.followUpHour));
-  const [title, setTitle] = useState(initial.defaultTitleCompanyId ?? "");
-  const [buyer, setBuyer] = useState(initial.defaultBuyerEntityId ?? "");
   const [text, setText] = useState(initial.templateFieldDefaultsText);
   const { run, pending, note } = useRun();
   const parsed = parseTemplateFieldDefaults(text);
-  const blocked = earnest.trim() === "" || !parsed.ok;
+  const blocked = !parsed.ok;
   return (
     <div className="flex flex-col gap-4">
       <div className="grid gap-3 md:grid-cols-3">
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="st-earnest">Earnest money (dollars) *</Label>
-          <Input id="st-earnest" inputMode="decimal" required value={earnest} onChange={(e) => setEarnest(e.target.value)} />
-        </div>
         <Field id="st-days" label="Follow-up days before closing" type="number" value={days} onChange={setDays} />
         <Field id="st-hour" label="Follow-up hour (Central, 0-23)" type="number" value={hour} onChange={setHour} />
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="st-title">Default title company</Label>
-          <select id="st-title" className={SELECT_CLASS} value={title} onChange={(e) => setTitle(e.target.value)}>
-            <option value="">None</option>
-            {titles.filter((t) => t.isActive).map((t) => (
-              <option key={t.id} value={t.id}>{t.name}</option>
-            ))}
-          </select>
-        </div>
-        <div className="flex flex-col gap-1">
-          <Label htmlFor="st-buyer">Default buyer entity</Label>
-          <select id="st-buyer" className={SELECT_CLASS} value={buyer} onChange={(e) => setBuyer(e.target.value)}>
-            <option value="">None</option>
-            {buyers.filter((b) => b.isActive).map((b) => (
-              <option key={b.id} value={b.id}>{b.name}</option>
-            ))}
-          </select>
-        </div>
       </div>
       <div className="flex flex-col gap-1">
         <Label htmlFor="st-fields">Template field defaults (one key=value per line)</Label>
@@ -307,11 +219,8 @@ function SettingsEditor({ initial, titles, buyers }: { initial: ContractDefaults
           onClick={() =>
             run(() =>
               saveContractSettingsAction({
-                earnestMoney: earnest,
                 followUpDays: Number(days),
                 followUpHour: Number(hour),
-                defaultTitleCompanyId: title || null,
-                defaultBuyerEntityId: buyer || null,
                 templateFieldDefaultsText: text,
               }),
             )
@@ -347,13 +256,9 @@ export function ContractDefaultsForm({ initial }: { initial: ContractDefaultsIni
         </CardContent>
       </Card>
       <Card>
-        <CardHeader><CardTitle>Market defaults</CardTitle></CardHeader>
-        <CardContent><MarketGrid rows={initial.marketDefaults} titles={initial.titleCompanies} /></CardContent>
-      </Card>
-      <Card>
         <CardHeader><CardTitle>Settings</CardTitle></CardHeader>
         <CardContent>
-          <SettingsEditor initial={initial.settings} titles={initial.titleCompanies} buyers={initial.buyerEntities} />
+          <SettingsEditor initial={initial.settings} />
         </CardContent>
       </Card>
     </div>

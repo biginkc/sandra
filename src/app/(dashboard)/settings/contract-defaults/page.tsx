@@ -7,7 +7,7 @@ import { schemaReady } from "@/lib/my-leads/schema-ready";
 import { createClient } from "@/lib/supabase/server";
 
 import { ContractDefaultsForm, type ContractDefaultsInitial } from "./form";
-import { centsToDollars, formatTemplateFieldDefaults } from "./validation";
+import { formatTemplateFieldDefaults } from "./validation";
 
 type Row = Record<string, unknown>;
 const s = (v: unknown) => (typeof v === "string" ? v : "");
@@ -38,13 +38,12 @@ export default async function ContractDefaultsPage() {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabase = (await createClient()) as any;
-  const [settings, titles, buyers, markets] = await Promise.all([
+  const [settings, titles, buyers] = await Promise.all([
     supabase.from("acquisition_contract_settings").select("*").eq("org_id", orgId).maybeSingle(),
     supabase.from("acquisition_contract_title_companies").select("*").eq("org_id", orgId).order("created_at"),
     supabase.from("acquisition_contract_buyer_entities").select("*").eq("org_id", orgId).order("created_at"),
-    supabase.from("acquisition_contract_title_market_defaults").select("*").eq("org_id", orgId),
   ]);
-  if ([settings, titles, buyers, markets].some((r) => r.error)) {
+  if ([settings, titles, buyers].some((r) => r.error)) {
     return (
       <Page>
         {header}
@@ -74,18 +73,9 @@ export default async function ContractDefaultsPage() {
       attorneyInFact: s(r.attorney_in_fact),
       isActive: r.is_active !== false,
     })),
-    marketDefaults: ((markets.data ?? []) as Row[]).map((r) => ({
-      market: s(r.market),
-      stateCode: typeof r.state_code === "string" ? r.state_code : null,
-      titleCompanyId: String(r.title_company_id),
-    })),
     settings: {
-      // Blank until the owner saves a settings row: earnest money has no approved default.
-      earnestMoney: st ? centsToDollars(st.earnest_money_cents as number | string) : "",
       followUpDays: st ? Number(st.follow_up_days_before_closing) : 3,
       followUpHour: st ? Number(st.follow_up_hour_central) : 9,
-      defaultTitleCompanyId: typeof st?.default_title_company_id === "string" ? st.default_title_company_id : null,
-      defaultBuyerEntityId: typeof st?.default_buyer_entity_id === "string" ? st.default_buyer_entity_id : null,
       templateFieldDefaultsText: formatTemplateFieldDefaults(st?.template_field_defaults as Row | undefined),
     },
   };

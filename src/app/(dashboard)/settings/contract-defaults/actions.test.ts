@@ -17,14 +17,11 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
-import { saveContractSettingsAction, saveMarketDefaultAction, saveTitleCompanyAction } from "./actions";
+import { saveContractSettingsAction, saveTitleCompanyAction } from "./actions";
 
 const settings = {
-  earnestMoney: "1",
   followUpDays: 3,
   followUpHour: 9,
-  defaultTitleCompanyId: null,
-  defaultBuyerEntityId: null,
   templateFieldDefaultsText: "",
 };
 
@@ -51,11 +48,6 @@ describe("contract defaults actions", () => {
     expect((await saveTitleCompanyAction({ name: " ", closingAgentName: "b", isActive: true })).ok).toBe(false);
     expect((await saveTitleCompanyAction({ name: "a", closingAgentName: "", isActive: true })).ok).toBe(false);
   });
-  it("refuses blank earnest money", async () => {
-    const r = await saveContractSettingsAction({ ...settings, earnestMoney: "" });
-    expect(r.ok).toBe(false);
-    expect(m.upsert).not.toHaveBeenCalled();
-  });
   it("rejects invalid or economic template default keys", async () => {
     for (const text of ["earnest_money=5", "bogus=1"]) {
       expect((await saveContractSettingsAction({ ...settings, templateFieldDefaultsText: text })).ok).toBe(false);
@@ -63,14 +55,18 @@ describe("contract defaults actions", () => {
     expect(m.upsert).not.toHaveBeenCalled();
   });
   it("upserts explicit values for the owner's org", async () => {
-    const r = await saveContractSettingsAction({ ...settings, earnestMoney: "2.50", templateFieldDefaultsText: "buyer_phone=1" });
+    const r = await saveContractSettingsAction({ ...settings, templateFieldDefaultsText: "buyer_phone=1" });
     expect(r).toEqual({ ok: true });
-    expect(m.upsert.mock.calls[0][0]).toMatchObject({ org_id: "o1", earnest_money_cents: 250, template_field_defaults: { buyer_phone: "1" } });
+    expect(m.upsert.mock.calls[0][0]).toMatchObject({ org_id: "o1", template_field_defaults: { buyer_phone: "1" } });
   });
-  it("validates market and state", async () => {
-    expect((await saveMarketDefaultAction({ market: "Mars", titleCompanyId: "t" })).ok).toBe(false);
-    expect((await saveMarketDefaultAction({ market: "Dayton", stateCode: "OHIO", titleCompanyId: "t" })).ok).toBe(false);
-    expect((await saveMarketDefaultAction({ market: "Dayton", stateCode: "oh", titleCompanyId: "t" })).ok).toBe(true);
-    expect(m.insert.mock.calls[0][0]).toMatchObject({ state_code: "OH", org_id: "o1" });
+  it("saves with no earnest money and writes none of the removed default columns", async () => {
+    expect(await saveContractSettingsAction(settings)).toEqual({ ok: true });
+    const row = m.upsert.mock.calls[0][0];
+    expect(row).not.toHaveProperty("earnest_money_cents");
+    expect(row).not.toHaveProperty("default_title_company_id");
+    expect(row).not.toHaveProperty("default_buyer_entity_id");
+    expect(Object.keys(row).sort()).toEqual(
+      ["follow_up_days_before_closing", "follow_up_hour_central", "org_id", "template_field_defaults", "updated_at", "updated_by"],
+    );
   });
 });

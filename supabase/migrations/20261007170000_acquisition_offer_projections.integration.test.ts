@@ -8,6 +8,15 @@ import { esignTemplateFixture, esignRequestFixture } from '@tests/integration/fi
 
 // Local-only (127.0.0.1:54329). Every test but the last runs in one rolled-back transaction.
 const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
+// A loopback URL alone is not proof of a throwaway database: this file commits rows and disables triggers, so it
+// refuses to open ANY connection unless the disposable-database marker (set by the CI/local provisioner) is present.
+function disposableUrl(): string {
+  if (process.env.E2E_DISPOSABLE_DATABASE !== '1') {
+    throw new Error('Offer projection integration tests require a disposable database (E2E_DISPOSABLE_DATABASE=1). Refusing to connect.');
+  }
+  if (!url) throw new Error('Missing TEST_SUPABASE_DB_URL');
+  return requireLoopbackPostgresUrl(url);
+}
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -108,8 +117,7 @@ async function world(db: Client) {
 }
 
 async function withTx(fn: (db: Client, w: Awaited<ReturnType<typeof world>>) => Promise<void>) {
-  if (!url) throw new Error('Missing TEST_SUPABASE_DB_URL');
-  const db = new Client({ connectionString: requireLoopbackPostgresUrl(url) });
+  const db = new Client({ connectionString: disposableUrl() });
   await db.connect();
   try {
     await db.query('begin');
@@ -283,6 +291,36 @@ describe('20261007170000_acquisition_offer_projections', () => {
     });
   });
 
+  it('a retry of a failed card request is refused while another contract is open, and nothing is sent', async () => {
+    await withTx(async (db, w) => {
+      const property = await w.prop();
+      // contract A fails
+      const a = await w.create(property);
+      const reqA = await w.request(property, a.intent);
+      await db.query("update public.esign_requests set delivery_state='failed', error_message='SEND_FAILED' where id=$1", [reqA]);
+      expect((await w.proj(a.id)).state).toBe('failed');
+      // a fresh card intent B takes the open slot
+      const b = await w.create(property);
+      // retrying A through the existing eSign retry path (a new request with retry_of_request_id) must be refused
+      const before = (await db.query('select count(*)::int n from public.esign_requests where property_id=$1', [property])).rows[0].n;
+      const f = await w.failure(() => w.request(property, randomUUID(), { retryOf: reqA }));
+      expect(f?.message).toContain('OPEN_CONTRACT_EXISTS');
+      expect((await db.query('select count(*)::int n from public.esign_requests where property_id=$1', [property])).rows[0].n).toBe(before);
+      expect((await w.proj(b.id)).state).toBe('awaiting_send');
+      // once B is gone the same retry is allowed (and copies the projection)
+      await db.query('select public.fn_abandon_offer_projection($1)', [b.id]);
+      const retryIntent = randomUUID();
+      await w.request(property, retryIntent, { retryOf: reqA });
+      expect((await db.query('select state from public.acquisition_offer_projections where send_intent_id=$1', [retryIntent])).rows[0].state).toBe('awaiting_send');
+      // a legacy (non-card) request's retry is untouched by the guard
+      const legacy = await w.prop();
+      const legacyReq = await w.request(legacy, randomUUID());
+      await db.query("update public.esign_requests set delivery_state='failed', error_message='SEND_FAILED' where id=$1", [legacyReq]);
+      await w.create(legacy);
+      await w.request(legacy, randomUUID(), { retryOf: legacyReq }).then(() => undefined);
+    });
+  });
+
   it('refuses a second open contract whatever the intent id (database guard)', async () => {
     await withTx(async (db, w) => {
       const property = await w.prop();
@@ -450,7 +488,16 @@ describe('20261007170000_acquisition_offer_projections', () => {
       const b = await w.prop();
       const pb = await w.create(b);
       await db.query("update public.acquisition_offer_projections set created_at = now() - interval '20 minutes' where id=$1", [pb.id]);
-      expect((await db.query('select public.fn_offer_projection_repair() as n')).rows[0].n).toBe(2);
+      // an intent whose request exists but was not linked is re-linked, never marked never_claimed
+      const c = await w.prop();
+      const pc = await w.create(c);
+      await db.query('alter table public.esign_requests disable trigger trg_offer_projection_link');
+      const reqC = await w.request(c, pc.intent);
+      await db.query('alter table public.esign_requests enable trigger trg_offer_projection_link');
+      await db.query("update public.acquisition_offer_projections set created_at = now() - interval '20 minutes' where id=$1", [pc.id]);
+      expect((await w.proj(pc.id)).esign_request_id).toBeNull();
+      expect((await db.query('select public.fn_offer_projection_repair() as n')).rows[0].n).toBeGreaterThanOrEqual(3);
+      expect(await w.proj(pc.id)).toMatchObject({ esign_request_id: reqC, state: 'awaiting_send' });
       expect((await w.proj(pa.id)).state).toBe('pending');
       expect(await w.proj(pb.id)).toMatchObject({ state: 'failed', resolution: 'never_claimed' });
       const due = (await db.query('select * from public.fn_offer_projection_due(10)')).rows.map((r) => r.fn_offer_projection_due);
@@ -500,8 +547,7 @@ describe('20261007170000_acquisition_offer_projections', () => {
 
 describe('open-contract guard under concurrency (committed rows, fully migrated disposable database)', () => {
   it('two sends with different intent ids: exactly one proceeds, the other gets OPEN_CONTRACT_EXISTS', async () => {
-    if (!url) throw new Error('Missing TEST_SUPABASE_DB_URL');
-    const dbUrl = requireLoopbackPostgresUrl(url);
+    const dbUrl = disposableUrl();
     const setup = new Client({ connectionString: dbUrl });
     await setup.connect();
     const a = new Client({ connectionString: dbUrl });

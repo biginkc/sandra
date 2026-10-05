@@ -109,29 +109,53 @@ declare
   v_parent public.acquisition_offer_projections%rowtype;
   v_matched integer;
 begin
+  -- Linking an existing intent never blocks the request (errors are swallowed).
   begin
     update public.acquisition_offer_projections
     set esign_request_id = new.id, updated_at = now()
     where org_id = new.org_id and send_intent_id = new.send_intent_id and esign_request_id is null;
     get diagnostics v_matched = row_count;
-    if v_matched = 0 and new.retry_of_request_id is not null then
-      select * into v_parent from public.acquisition_offer_projections
-      where org_id = new.org_id and esign_request_id = new.retry_of_request_id
-        and state = 'failed' and resolution = 'send_failed';
-      if found then
-        insert into public.acquisition_offer_projections (
-          org_id, property_id, actor_user_id, send_intent_id, request_hash, submission_hash, send_payload,
-          esign_request_id, amount_cents, closing_date, motivation_kind, motivation_text, temperature, state
-        ) values (
-          v_parent.org_id, v_parent.property_id, new.created_by, new.send_intent_id, v_parent.request_hash,
-          v_parent.submission_hash, v_parent.send_payload, new.id, v_parent.amount_cents, v_parent.closing_date,
-          v_parent.motivation_kind, v_parent.motivation_text, v_parent.temperature, 'awaiting_send'
-        );
-      end if;
-    end if;
   exception when others then
     raise warning 'offer projection link skipped: %', sqlerrm;
+    return new;
   end;
+  if v_matched = 0 and new.retry_of_request_id is not null then
+    select * into v_parent from public.acquisition_offer_projections
+    where org_id = new.org_id and esign_request_id = new.retry_of_request_id
+      and state = 'failed' and resolution = 'send_failed';
+    if found then
+      -- A retry of a CARD-originated request must obey the one-open-contract guard BEFORE anything is
+      -- dispatched, so this branch raises (it does not swallow): the retry request is not created and
+      -- nothing is sent. Legacy (non-card) requests have no parent projection and never reach here.
+      perform 1 from public.properties where id = v_parent.property_id and org_id = v_parent.org_id for update;
+      if exists (
+        select 1 from public.acquisition_offer_projections x
+        where x.org_id = v_parent.org_id and x.property_id = v_parent.property_id
+          and x.state in ('awaiting_send', 'pending', 'conflict')
+      ) or exists (
+        select 1 from public.acquisition_offer_projections x
+        join public.esign_requests r on r.id = x.esign_request_id and r.org_id = x.org_id
+        where x.org_id = v_parent.org_id and x.property_id = v_parent.property_id and x.state = 'logged'
+          and r.status in ('awaiting', 'viewed') and r.void_requested_at is null
+      ) then
+        raise exception 'OPEN_CONTRACT_EXISTS' using errcode = 'MLS01';
+      end if;
+      if exists (
+        select 1 from public.acquisition_offers o
+        where o.org_id = v_parent.org_id and o.property_id = v_parent.property_id and o.outcome = 'pending'
+      ) then
+        raise exception 'PENDING_OFFER_EXISTS' using errcode = 'MLS01';
+      end if;
+      insert into public.acquisition_offer_projections (
+        org_id, property_id, actor_user_id, send_intent_id, request_hash, submission_hash, send_payload,
+        esign_request_id, amount_cents, closing_date, motivation_kind, motivation_text, temperature, state
+      ) values (
+        v_parent.org_id, v_parent.property_id, new.created_by, new.send_intent_id, v_parent.request_hash,
+        v_parent.submission_hash, v_parent.send_payload, new.id, v_parent.amount_cents, v_parent.closing_date,
+        v_parent.motivation_kind, v_parent.motivation_text, v_parent.temperature, 'awaiting_send'
+      );
+    end if;
+  end if;
   return new;
 end $$;
 
@@ -429,6 +453,13 @@ set search_path = ''
 as $$
 declare v_n integer := 0; v_c integer;
 begin
+  -- Re-link by intent first: a request that exists for the intent is NOT never-claimed.
+  update public.acquisition_offer_projections p
+  set esign_request_id = r.id, updated_at = now()
+  from public.esign_requests r
+  where p.state = 'awaiting_send' and p.esign_request_id is null
+    and r.org_id = p.org_id and r.send_intent_id = p.send_intent_id;
+  get diagnostics v_c = row_count; v_n := v_n + v_c;
   update public.acquisition_offer_projections p
   set state = 'pending', sent_at = r.sent_at, next_attempt_at = now(), updated_at = now()
   from public.esign_requests r

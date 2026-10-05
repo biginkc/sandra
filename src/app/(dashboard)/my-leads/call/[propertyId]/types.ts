@@ -44,7 +44,6 @@ export type CallScreenComps = {
 export type CallScreenNote = Database["public"]["Tables"]["lead_notes"]["Row"];
 export type CallScreenMessage = Database["public"]["Tables"]["messages"]["Row"];
 
-/** p3-send-card fills these; in p3-call-screen the loader always returns `{ ok: false }` for both. */
 /** The lead's latest offer projection (contract send -> offer log), for status copy and recovery. */
 export type ContractProjectionView = {
   id: string;
@@ -71,8 +70,6 @@ export type ContractCardState =
       prefillBase: PrefillBase;
       titleCompanies: TitleCompany[];
       buyerEntities: BuyerEntity[];
-      selectedTitleCompanyId: string | null;
-      selectedBuyerEntityId: string | null;
       todayCentral: string;
       tomorrowCentral: string;
       projection?: ContractProjectionView | null;

@@ -14,15 +14,41 @@ const state = (over: Record<string, unknown> = {}): ContractCardState => ({
   sellerSigner: { name: "Sam Seller", emailAddress: "sam@example.test" },
   prefillBase: { ...novationBase(), comp: freshComp() },
   titleCompanies: [TITLE], buyerEntities: [BUYER],
-  selectedTitleCompanyId: TITLE.id, selectedBuyerEntityId: BUYER.id,
   todayCentral: "2026-10-04", tomorrowCentral: "2026-10-05", ...over,
 }) as ContractCardState;
 
 const fill = () => {
   fireEvent.change(screen.getByTestId("contract-price"), { target: { value: "210000" } });
   fireEvent.change(screen.getByTestId("contract-closing-date"), { target: { value: "2099-01-02" } });
+  // Nothing is preselected and earnest money has no default: the rep picks (or types) all three per contract.
+  fireEvent.change(screen.getByTestId("contract-title-company"), { target: { value: TITLE.id } });
+  fireEvent.change(screen.getByTestId("contract-buyer-entity"), { target: { value: BUYER.id } });
+  fireEvent.change(screen.getByTestId("contract-earnest"), { target: { value: (TEST_ONLY_EARNEST_MONEY_CENTS / 100).toFixed(2) } });
 };
 const sendBtn = () => screen.getByTestId("contract-send") as HTMLButtonElement;
+
+describe("ContractCard starts blank", () => {
+  it("nothing is preselected and earnest money is empty even when the org has saved lists", () => {
+    render(<ContractCard state={state()} propertyId="p" send={vi.fn()} />);
+    expect((screen.getByTestId("contract-title-company") as HTMLSelectElement).value).toBe("");
+    expect((screen.getByTestId("contract-buyer-entity") as HTMLSelectElement).value).toBe("");
+    expect((screen.getByTestId("contract-earnest") as HTMLInputElement).value).toBe("");
+    expect((screen.getByTestId("contract-send") as HTMLButtonElement).disabled).toBe(true);
+  });
+  it("stays refused until each of title company, buyer entity and earnest money has a value", () => {
+    render(<ContractCard state={state()} propertyId="p" send={vi.fn()} />);
+    const btn = () => screen.getByTestId("contract-send") as HTMLButtonElement;
+    fireEvent.change(screen.getByTestId("contract-price"), { target: { value: "210000" } });
+    fireEvent.change(screen.getByTestId("contract-closing-date"), { target: { value: "2099-01-02" } });
+    fireEvent.change(screen.getByTestId("contract-title-company"), { target: { value: TITLE.id } });
+    fireEvent.change(screen.getByTestId("contract-buyer-entity"), { target: { value: BUYER.id } });
+    expect(btn().disabled).toBe(true); // earnest empty
+    fireEvent.change(screen.getByTestId("contract-earnest"), { target: { value: "100" } });
+    expect(btn().disabled).toBe(false);
+    fireEvent.change(screen.getByTestId("contract-title-company"), { target: { value: "" } });
+    expect(btn().disabled).toBe(true);
+  });
+});
 
 describe("ContractCard", () => {
   it("renders nothing when disabled", () => {
@@ -55,7 +81,7 @@ describe("ContractCard", () => {
   });
 
   it("stays disabled with no saved title company or buyer entity until each has a value (typed or picked)", () => {
-    render(<ContractCard state={state({ titleCompanies: [], buyerEntities: [], selectedTitleCompanyId: null, selectedBuyerEntityId: null })} propertyId="p" send={vi.fn()} />);
+    render(<ContractCard state={state({ titleCompanies: [], buyerEntities: [] })} propertyId="p" send={vi.fn()} />);
     fill();
     expect(sendBtn().disabled).toBe(true);
     fireEvent.change(screen.getByTestId("contract-title-company"), { target: { value: "__new__" } });
@@ -77,7 +103,7 @@ describe("ContractCard", () => {
 
   it("sends typed title company and buyer entity inline with empty ids", async () => {
     const send = vi.fn(async () => ({ status: "sent" as const, requestId: "r", offer: "pending" as const }));
-    render(<ContractCard state={state({ titleCompanies: [], buyerEntities: [], selectedTitleCompanyId: null, selectedBuyerEntityId: null })} propertyId="p" send={send} />);
+    render(<ContractCard state={state({ titleCompanies: [], buyerEntities: [] })} propertyId="p" send={send} />);
     fill();
     fireEvent.change(screen.getByTestId("contract-title-company"), { target: { value: "__new__" } });
     fireEvent.change(screen.getByTestId("contract-title-new-name"), { target: { value: "Typed Title" } });
@@ -103,6 +129,7 @@ describe("ContractCard", () => {
     const send = vi.fn().mockResolvedValue({ status: "failed", message: "x" });
     render(<ContractCard state={state({ prefillBase: { ...base, comp: freshComp(), settings: { earnestMoneyCents: null, templateFieldDefaults: base.settings.templateFieldDefaults } } })} propertyId="p" send={send} />);
     fill();
+    fireEvent.change(screen.getByTestId("contract-earnest"), { target: { value: "" } });
     expect((screen.getByTestId("contract-earnest") as HTMLInputElement).value).toBe("");
     expect(sendBtn().disabled).toBe(true);
     expect(screen.getByTestId("contract-blocked").textContent).toContain("Enter the earnest money amount");
