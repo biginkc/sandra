@@ -23,9 +23,13 @@ async function fixture(fn: (db: Client, ids: { org: string; other: string; user:
   } finally { await db.query("rollback").catch(() => {}); await db.end(); }
 }
 async function service(db: Client, query: string, args: unknown[] = []) {
+  const previousRole=(await db.query("select current_setting('request.jwt.claim.role',true) value")).rows[0].value ?? "";
   await db.query("select set_config('request.jwt.claim.role','service_role',true)");
   await db.query("set local role service_role");
-  try { return await db.query(query,args); } finally { await db.query("reset role").catch(() => {}); }
+  try { return await db.query(query,args); } finally {
+    await db.query("reset role").catch(() => {});
+    await db.query("select set_config('request.jwt.claim.role',$1,true)",[previousRole]).catch(() => {});
+  }
 }
 async function member(db: Client,user: string) {
   await db.query("select set_config('request.jwt.claim.sub',$1,true),set_config('request.jwt.claim.role','authenticated',true)",[user]);
@@ -140,7 +144,7 @@ describe("Norma inbound ledger with Sandra schema", () => {
     const r=(await db.query("select has_function_privilege(current_user,'public.fn_norma_ingest_inbound_call(text,text,text,boolean,text)','execute') ingest,has_table_privilege(current_user,'public.norma_inbound_calls','update') writes")).rows[0];
     expect(r).toEqual({ingest:false,writes:false});
   }));
-  it("rehearses both follow-ups after the canonical dependency on an already migrated fixture", () => fixture(async(db) => {
+  it("replays the full dependency chain twice inside one rollback transaction", () => fixture(async(db) => {
     await applyNormaFollowups(db);
     const result=(await db.query("select to_regclass('public.norma_inbound_calls') is not null inbound, to_regclass('public.norma_attempt_recordings') is not null outbound, exists(select 1 from pg_proc where proname='fn_norma_presend_fence') fence")).rows[0];
     expect(result).toEqual({inbound:true,outbound:true,fence:true});

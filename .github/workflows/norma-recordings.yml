@@ -2,6 +2,8 @@ name: Norma recording ledger
 on:
   pull_request:
     paths:
+      - "vitest.norma-inbound.config.ts"
+      - "supabase/migrations/*_norma_inbound_call_records*"
       - "tests/integration/norma-followup-fixture.ts"
       - "supabase/migrations/*_norma_retry_next_step_union_reviewed*"
       - "src/lib/norma/recording*"

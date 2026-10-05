@@ -22,9 +22,13 @@ async function fixture(fn: (db: Client, ids: { org: string; other: string; user:
   } finally { await db.query("rollback").catch(() => {}); await db.end(); }
 }
 async function service(db: Client, query: string, args: unknown[] = []) {
+  const previousRole=(await db.query("select current_setting('request.jwt.claim.role',true) value")).rows[0].value ?? "";
   await db.query("select set_config('request.jwt.claim.role','service_role',true)");
   await db.query("set local role service_role");
-  try { return await db.query(query,args); } finally { await db.query("reset role").catch(() => {}); }
+  try { return await db.query(query,args); } finally {
+    await db.query("reset role").catch(() => {});
+    await db.query("select set_config('request.jwt.claim.role',$1,true)",[previousRole]).catch(() => {});
+  }
 }
 async function member(db: Client,user: string) {
   await db.query("select set_config('request.jwt.claim.sub',$1,true),set_config('request.jwt.claim.role','authenticated',true)",[user]);
@@ -52,7 +56,7 @@ describe("outbound recording ledger on full Sandra schema",()=>{
     expect((await service(db,"select fn_norma_complete_call($1,'first','no_answer','{\"attempt\":1}'::jsonb) result",[id])).rows[0].result).toMatchObject({retry:true});
     await seed(db);
     expect((await db.query("select attempt,provider_call_id from norma_attempt_recordings")).rows).toEqual([{attempt:1,provider_call_id:"first"}]);
-    await service(db,"select fn_norma_claim_dispatch($1,2)",[id]);
+    expect((await service(db,"select fn_norma_claim_dispatch($1,2) claimed",[id])).rows[0].claimed).toBe(true);
     expect((await service(db,"select fn_norma_bind_call_id($1,'second',2) result",[id])).rows[0].result).toBe("bound");
     await seed(db);
     expect((await db.query("select attempt,provider_call_id from norma_attempt_recordings order by attempt")).rows).toEqual([{attempt:1,provider_call_id:"first"},{attempt:2,provider_call_id:"second"}]);
@@ -151,6 +155,25 @@ describe("outbound recording ledger on full Sandra schema",()=>{
     const fresh=await request(db,{...ids,property:await makeProperty()},"fresh");
     expect((await seed(db)).rows[0].n).toBe(1);
     expect((await db.query("select provider_call_id from norma_attempt_recordings where request_id=$1",[fresh])).rows[0].provider_call_id).toBe("fresh");
+  }));
+
+  it("restores the prior auth claim after service calls",()=>fixture(async(db,ids)=>{
+    const previous=(await db.query("select coalesce(auth.role(),'') value")).rows[0].value;
+    await request(db,ids);await seed(db);
+    expect((await db.query("select coalesce(auth.role(),'') value")).rows[0].value).toBe(previous);
+    await member(db,ids.user);
+    expect((await db.query("select auth.role() value")).rows[0].value).toBe("authenticated");
+  }));
+  it("seeds one owner for an unledgered duplicate within a batch and advances later work",()=>fixture(async(db,ids)=>{
+    const first=await request(db,ids,"duplicate");
+    await service(db,"select fn_norma_claim_dispatch($1,1)",[first]);
+    expect((await service(db,"select fn_norma_complete_call($1,'duplicate','no_answer','{\"attempt\":1}'::jsonb) result",[first])).rows[0].result).toMatchObject({retry:true});
+    const makeProperty=async()=>{const id=randomUUID();await db.query("insert into properties(id,org_id,address,state,status) values($1,$2,'Batch fixture','MO','new_lead')",[id,ids.org]);return id;};
+    await request(db,{...ids,property:await makeProperty()},"duplicate");
+    expect((await seed(db)).rows[0].n).toBe(1);expect((await seed(db)).rows[0].n).toBe(0);
+    const fresh=await request(db,{...ids,property:await makeProperty()},"new-call");
+    expect((await seed(db)).rows[0].n).toBe(1);
+    expect((await db.query("select provider_call_id from norma_attempt_recordings where request_id=$1",[fresh])).rows[0].provider_call_id).toBe("new-call");
   }));
 
 });
