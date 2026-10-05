@@ -38,7 +38,7 @@ Last updated: 2026-10-04 (after #801 release)
 | `claude/my-leads-p3-send-card` | #814 (draft, base `claude/my-leads-p3-call-screen`) | Claude Sonnet 5.5 builder | in progress (contract defaults schema, prefill mapper, send-contract card + actions; offer projection library/migration NOT in this slice) |
 | `claude/my-leads-p3-offer` | #815 (draft, base `claude/my-leads-p3-send-card`) | Claude Sonnet 5.5 builder | in progress (offer projection migration/library/sweep cron, recovery actions + UI, contract-defaults settings UI, Dropbox Sign base-URL seam; AI facts NOT built) |
 | `claude/my-leads-callscreen-dial` | #818 (draft, base `main`) | Claude Sonnet 5.5 builder | in progress: call screen Call button wired to the shared My Leads dial path; deletes dial-stub.ts |
-| `claude/my-leads-phone-backfill` | none (draft PR to follow) | Claude Sonnet 5.5 builder | in progress: batched phone-backfill preview/apply (migration 20261007200000 + script paging) so it runs within the statement timeout on prod; blocks Dialpad activation |
+| `claude/my-leads-phone-backfill` | draft (see PR) | Claude Sonnet 5.5 builder | in progress: batched phone-backfill preview/apply (migration 20261007200000 + script paging) so it runs within the statement timeout on prod; blocks Dialpad activation |
 | `p1a-retire` | none | none | NOT built yet |
 | all other branches | none | unclaimed | claim here before writing |
 

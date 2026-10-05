@@ -18,8 +18,14 @@
 //   offer-backfill  [--owner <uuid>] (creates each pending offer's follow-up; overdue ones land at the next 09:00 Central)
 //   link-backfill   (P1d: stores each stored Dialpad call's share link, admin recording URL and voicemail
 //                   fields that its hangup events carry; fills only empty fields, never prints a link)
-//   phone-backfill (P2 2.4: fills contact_phone_numbers for existing contacts; before-image per row, roll back
-//                   with `rollback --run`; must be applied before the Dialpad connection is activated)
+//   phone-backfill [--batch-size <contacts per call, 1..5000, default 2000>]
+//                   (P2 2.4: fills contact_phone_numbers for existing contacts; before-image per row, roll back
+//                   with `rollback --run`; must be applied before the Dialpad connection is activated.
+//                   The org has hundreds of thousands of contacts, so the preview, the apply and the
+//                   rollback each page through keyset ranges, one API call per range, and the printed
+//                   fingerprint folds every range digest. Apply is one run across many transactions:
+//                   each range re-checks its own digest under row locks; if the data moves mid-apply it
+//                   stops, prints the run id, and the applied part is undone with `rollback --run`.)
 //   ack-legacy-prompts (P2 2.6: marks every pre-existing Dialpad ledger attempt's post-call prompt
 //                   'dismissed' so the auto-open never pops for calls that predate it; run before
 //                   the auto_prompt flag is turned on)
@@ -80,7 +86,7 @@ export const COMMANDS = {
   // Captures the links stored hangup events carry into empty fields only (P1d 1d.1).
   "link-backfill": { needs: ["org"], rpc: "fn_my_leads_housekeeping_link_backfill", args: (o) => ({ p_org_id: o.org }) },
   // Fills the normalized phone table for existing contacts (P2 2.4). Preview -> --confirm fingerprint -> apply.
-  "phone-backfill": { needs: ["org"], rpc: "fn_contact_phone_numbers_backfill", args: (o) => ({ p_org_id: o.org }) },
+  "phone-backfill": { needs: ["org"], batchedPhone: true },
   // Acknowledges pre-existing Dialpad ledger attempts so the auto-open prompt never pops for them (P2 2.6).
   "ack-legacy-prompts": { needs: ["org"], rpc: "fn_my_leads_ack_legacy_call_prompts", args: (o) => ({ p_org_id: o.org }) },
   // Read-only gate for the retire migration: never applies anything.
@@ -104,7 +110,7 @@ export function parseArgs(argv) {
     else if (a === "--from") {
       o.from = value(i, "from").split(",").map((x) => x.trim());
       i += 1;
-    } else if (["--org", "--target", "--owner", "--run", "--confirm", "--older-than", "--cutoff", "--expected-assignee"].includes(a)) {
+    } else if (["--org", "--target", "--owner", "--run", "--confirm", "--older-than", "--cutoff", "--expected-assignee", "--batch-size"].includes(a)) {
       const key = a.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
       o[key] = value(i, a.slice(2));
       i += 1;
@@ -112,6 +118,12 @@ export function parseArgs(argv) {
   }
   for (const k of ["org", "target", "owner", "run"]) {
     if (o[k] !== undefined && !UUID.test(o[k])) throw new Error(`--${k} must be a UUID`);
+  }
+  if (o.batchSize !== undefined) {
+    if (!/^[0-9]+$/.test(o.batchSize) || Number(o.batchSize) < 1 || Number(o.batchSize) > 5000) {
+      throw new Error("--batch-size must be a whole number from 1 to 5000");
+    }
+    o.batchSize = Number(o.batchSize);
   }
   if (o.from !== undefined) {
     if (o.from.some((id) => !UUID.test(id))) throw new Error("--from must be a comma-separated list of UUIDs");
@@ -142,6 +154,94 @@ async function rpc(client, name, args) {
   const { data, error } = await client.rpc(name, args);
   if (error) throw new Error(`${name} failed: ${error.message ?? JSON.stringify(error)}`);
   return data;
+}
+
+export const PHONE_BATCH = 2000;
+const rangeFingerprint = (kind, size, digests) => sha256Hex(`${kind}|${size}|${digests.join(",")}`);
+
+// Pages the phone backfill preview through keyset ranges. Returns the whole-set preview (what gets
+// printed and hashed) plus the per-range plan the apply needs.
+async function pagePhonePreview(client, o) {
+  const size = o.batchSize ?? PHONE_BATCH;
+  const ranges = [];
+  const sample = [];
+  let after = null;
+  let candidates = 0, toCreate = 0, toUpdate = 0;
+  for (;;) {
+    const r = await rpc(client, "fn_contact_phone_numbers_backfill_range", {
+      p_org_id: o.org, p_after: after, p_limit: size, p_apply: false,
+    });
+    if (r.done) break;
+    ranges.push({ after, upto: r.lastId, digest: r.digest });
+    candidates += r.candidates; toCreate += r.toCreate; toUpdate += r.toUpdate;
+    for (const id of r.sample ?? []) if (sample.length < 20) sample.push(id);
+    after = r.lastId;
+  }
+  const preview = {
+    kind: "phone_backfill", batchSize: size, ranges: ranges.length,
+    candidates, toCreate, toUpdate, sample,
+    fingerprint: rangeFingerprint("phone_backfill_batched", size, ranges.map((x) => x.digest)),
+  };
+  return { preview, ranges };
+}
+
+async function applyPhoneRanges(client, o, ranges, fingerprint, io) {
+  let runId = null;
+  let created = 0, updated = 0;
+  try {
+    for (const [i, r] of ranges.entries()) {
+      const out = await rpc(client, "fn_contact_phone_numbers_backfill_range", {
+        p_org_id: o.org, p_after: r.after, p_upto: r.upto, p_apply: true,
+        p_expected_digest: r.digest, p_run: runId, p_fingerprint: fingerprint,
+      });
+      if (out.runId) runId = out.runId;
+      created += out.created ?? 0; updated += out.updated ?? 0;
+      if ((i + 1) % 25 === 0) io.err(`applied ${i + 1}/${ranges.length} ranges\n`);
+    }
+  } catch (error) {
+    const where = runId ? ` Run ${runId} holds the rows applied so far (created ${created}, updated ${updated}); undo them with: rollback --run ${runId}.` : " Nothing was applied.";
+    throw new Error(`${error.message}.${where}`);
+  }
+  return { kind: "phone_backfill", runId, noop: runId === null ? true : undefined, created, updated, ranges: ranges.length };
+}
+
+// Batched rollback of a phone_backfill run: preview pages over the run's before-images, apply re-checks
+// each range under locks, finish flips the run to rolled_back only when nothing was left unrestored.
+async function pagePhoneRollbackPreview(client, o, info) {
+  const size = o.batchSize ?? PHONE_BATCH;
+  const ranges = [];
+  let after = null, images = 0;
+  for (;;) {
+    const r = await rpc(client, "fn_contact_phone_numbers_backfill_rollback_range", {
+      p_run: o.run, p_org_id: o.org, p_after: after, p_limit: size, p_apply: false,
+    });
+    if (r.noop || r.done) break;
+    ranges.push({ after, upto: r.lastId, digest: r.digest });
+    images += r.images;
+    after = r.lastId;
+  }
+  return {
+    preview: {
+      kind: "rollback", run: info.run, batchSize: size, ranges: ranges.length, beforeImages: images,
+      fingerprint: rangeFingerprint("phone_backfill_rollback", size, ranges.map((x) => x.digest)),
+    },
+    ranges,
+  };
+}
+
+async function applyPhoneRollback(client, o, ranges) {
+  let restored = 0, already = 0;
+  const notRestored = [];
+  for (const r of ranges) {
+    const out = await rpc(client, "fn_contact_phone_numbers_backfill_rollback_range", {
+      p_run: o.run, p_org_id: o.org, p_after: r.after, p_upto: r.upto, p_apply: true, p_expected_digest: r.digest,
+    });
+    restored += out.restored ?? 0; already += out.alreadyRestored ?? 0;
+    notRestored.push(...(out.notRestored ?? []));
+  }
+  return rpc(client, "fn_contact_phone_numbers_backfill_rollback_finish", {
+    p_run: o.run, p_org_id: o.org, p_restored: restored, p_already: already, p_not_restored: notRestored,
+  });
 }
 
 async function resolveIdentities(client, o) {
@@ -206,7 +306,23 @@ export async function run(argv, io) {
       throw new Error("--from must not include the target; the target's own leads never move");
     }
 
+    // Phone backfill (and its rollback) page through ranges instead of one statement.
+    let plan = null;
+    let phoneRollback = false;
+    if (spec.rollback) {
+      // Pre-migration databases lack the function: fall through to the generic rollback path.
+      const info = await rpc(client, "fn_contact_phone_numbers_backfill_run_info", { p_run: o.run, p_org_id: o.org })
+        .catch((e) => (/could not find the function|does not exist|schema cache/i.test(e.message) ? null : Promise.reject(e)));
+      phoneRollback = info?.run?.kind === "phone_backfill" && info.run.params?.batched === true;
+      if (phoneRollback) {
+        if (info.run.status === "rolled_back") throw new Error("this run is already rolled back");
+        plan = await pagePhoneRollbackPreview(client, o, info);
+      }
+    } else if (spec.batchedPhone) {
+      plan = await pagePhonePreview(client, o);
+    }
     const preview = async () => {
+      if (plan) return plan.preview;
       if (spec.rollback) return rpc(client, "fn_my_leads_housekeeping_run_info", { p_run: o.run, p_org_id: o.org });
       if (spec.readOnly) return rpc(client, spec.rpc, spec.args(o));
       return rpc(client, spec.rpc, { ...spec.args(o), p_apply: false });
@@ -233,7 +349,11 @@ export async function run(argv, io) {
     }
     const fingerprint = previewJson.fingerprint;
     if (typeof fingerprint !== "string" || fingerprint.length < 32) throw new Error("preview carried no fingerprint; refusing to apply");
-    const result = spec.rollback
+    const result = plan && spec.rollback
+      ? await applyPhoneRollback(client, o, plan.ranges)
+      : plan
+      ? await applyPhoneRanges(client, o, plan.ranges, fingerprint, io)
+      : spec.rollback
       ? await rpc(client, "fn_my_leads_housekeeping_rollback", { p_run: o.run, p_org_id: o.org, p_fingerprint: fingerprint })
       : await rpc(client, spec.rpc, { ...spec.args(o), p_apply: true, p_fingerprint: fingerprint });
     io.out(`${canonicalJson(result)}\n`);
