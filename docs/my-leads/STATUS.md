@@ -4,7 +4,7 @@ Owner of this file: Claude session "Optimize my leads page" (branch
 `claude/my-leads-one-call-close-decisions`). Root orchestrator and builders: post progress as PR
 comments; ask the owner to update this file, or append under "Root notes".
 
-Last updated: 2026-10-04 (after #800 release)
+Last updated: 2026-10-04 (after #801 release)
 
 ## Plan
 | Item | State |
@@ -24,13 +24,14 @@ Last updated: 2026-10-04 (after #800 release)
 | `claude/my-leads-p1e-reassign-scope-2` | #808 | Claude | **MERGED** `c72f90f5` into main (migration 20261005140000 applied). |
 | `claude/my-leads-p1b-strip` | #799 | Claude (Sonnet 5.5 builder) | **MERGED** `001cb1fd` into main (migration 20261005150000 applied TEST + PROD; prod high-water now `20261005150000`). |
 | `claude/my-leads-p1c-prompt` | #800 | Claude (Sonnet 5.5 builder) | **MERGED** `a5ba2b58` into main (migration 20261005160000 applied TEST + PROD; prod high-water now `20261005160000`). |
-| `claude/my-leads-p1c2-seller-reminders` | #801 | Claude (Sonnet 5.5 builder) | draft, base `main`; `origin/main` a5ba2b58 merged in; head via `gh pr view 801`. Reminders stay flag-OFF and org-disabled. Reclaim-after-reschedule duplicate-text edge (Astra RC note on #801) is a pre-ENABLE fix, tracked. |
-| `claude/my-leads-p1d-link-capture` | #802 | Claude (Sonnet 5.5 builder) | draft, stacked on #801; rebased onto #801 head; head via `gh pr view 802` |
-| `claude/my-leads-p2-data-plane` | #803 | Phase 2 sole writer | draft; Opus YES at `757e01c0` |
-| `claude/my-leads-p2-ui` | #809 | Phase 2 writer | draft; Opus YES at `4d03042e`, fixes in progress |
-| `claude/my-leads-p4-acceptance` | #804 | Phase 4 writer | draft, partial; Opus YES at `3cec0c19` |
-| `claude/my-leads-p3-comps` | #805 | Phase 3 writer | draft; Opus YES, fixes applied `bb86747e` |
-| `claude/my-leads-p3-call-screen` | #807 | Phase 3 writer | draft; Opus YES at `a908ad1c` |
+| `claude/my-leads-p1c2-seller-reminders` | #801 | Claude (Sonnet 5.5 builder) | **MERGED** `abf3edd6` into main (migration 20261005170000 applied; prod high-water `20261005170000`). Reminders table 0 rows, flag OFF. Reclaim-after-reschedule duplicate-text edge is a pre-ENABLE fix, tracked. |
+| `claude/my-leads-p1d-link-capture` | #802 | Claude (Sonnet 5.5 builder) | draft, base now `main` (retargeted after #801 merge); `origin/main` abf3edd6 merged in; head `1af972f1` before this docs commit (migration 20261005180000). Phase 1 nearly complete. |
+| `claude/my-leads-p2-data-plane` | #803 | Phase 2 sole writer | draft, built, NOT merged; Opus YES at `757e01c0` |
+| `claude/my-leads-p2-ui` | #809 | Phase 2 writer | draft, built, NOT merged; Opus YES at `8ab5fc5a` |
+| `claude/my-leads-p4-acceptance` | #804 | Phase 4 writer | draft, built, NOT merged; Opus YES at `3cec0c19` |
+| `claude/my-leads-p3-comps` | #805 | Phase 3 writer | draft, built, NOT merged; Opus YES at `bb86747e` |
+| `claude/my-leads-p3-call-screen` | #807 | Phase 3 writer | draft, built, NOT merged; Opus YES at `a908ad1c` |
+| `p3-send-card`, `p1a-retire` | none | none | NOT built yet |
 | all other branches | none | unclaimed | claim here before writing |
 
 Current heads: `gh pr view <n> --json headRefOid` (stack was rebased onto main on 2026-10-04; heads change on every cascade).
