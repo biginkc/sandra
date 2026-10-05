@@ -1,4 +1,4 @@
--- Rollback for 20261006100700_dialpad_api_dial_support. Turn click_to_dial off first.
+-- Rollback for 20261007130100_dialpad_api_dial_support. Turn click_to_dial off first.
 -- Restores the eligibility requirement in both dial functions, removes dialpadUserId from the dial
 -- release, drops the pre-check function and the two connection columns.
 begin;

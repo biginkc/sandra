@@ -17,7 +17,7 @@ const due = async (w: World, uid = w.rep, lookahead = '2 minutes', grace = '60 m
   (await asUser(w.db, uid, () => w.db.query('select public.fn_my_leads_callbacks_due($1,$2::interval,$3::interval) as v', [w.org, lookahead, grace]))).rows[0].v;
 const ids = (rows: Json[]) => rows.map((r) => r.taskId);
 
-describe('20261006100900 callbacks due', () => {
+describe('20261007130300 callbacks due', () => {
   it('returns phone appointments due within 2 minutes or late by at most an hour, ordered by due', async () => {
     await withP2('callbacksDue', async (db) => {
       const w = await world(db);

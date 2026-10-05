@@ -9,8 +9,8 @@ async function sandraCall(w: World, o: { property?: string; contact?: string; ca
   const rows = await w.db.query('select * from public.acquisition_attempts where org_id=$1 and provider_attempt_key = $2', [w.org, `dialpad-cti:${intent.intentId}`]);
   return rows.rows[0];
 }
-const MIGRATION = 'migrations/20261006100600_call_prompt_acknowledgement.sql';
-const ROLLBACK = 'rollbacks/20261006100600_call_prompt_acknowledgement.sql';
+const MIGRATION = 'migrations/20261007130000_call_prompt_acknowledgement.sql';
+const ROLLBACK = 'rollbacks/20261007130000_call_prompt_acknowledgement.sql';
 const FINGERPRINT = 'public.my_leads_housekeeping_rollback_fingerprint(uuid,uuid)';
 const ROLLBACK_FN = 'public.fn_my_leads_housekeeping_rollback(uuid,uuid,text)';
 const defOf = async (w: World, sig: string): Promise<string> => (await w.db.query('select pg_get_functiondef($1::regprocedure) as d', [sig])).rows[0].d;
@@ -31,7 +31,7 @@ const rollback = async (w: World, run: string): Promise<Json> => {
 const ackState = async (w: World, id: string) =>
   (await w.db.query('select prompt_acknowledged_at, prompt_acknowledged_via, outcome from public.acquisition_attempts where id=$1', [id])).rows[0];
 
-describe('20261006100600 call prompt acknowledgement', () => {
+describe('20261007130000 call prompt acknowledgement', () => {
   it('returns only ended, pending, unacknowledged, own, still-assigned, customer ledger attempts from both origins', async () => {
     await withP2('ackPrompts', async (db) => {
       const w = await world(db, { flag: true });
