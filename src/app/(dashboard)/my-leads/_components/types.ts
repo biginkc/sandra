@@ -357,7 +357,7 @@ export type PostCallExtrasResult =
       nextStep: "created" | "skipped" | "failed"
       message?: string
     }
-  | { ok: false; message: string; /** Another prompt already saved this call: the stored extras are dropped, never retried. */ alreadySaved?: true }
+  | { ok: false; message: string; /** Another prompt already saved this call: the stored extras are dropped, never retried. */ alreadySaved?: true; /** No proof yet that this save committed: nothing was written; the stored extras stay for Retry. */ pending?: true }
 /** What the prompt shows after the attempt is saved. */
 export type PostCallExtrasState =
   | { status: "saving" }

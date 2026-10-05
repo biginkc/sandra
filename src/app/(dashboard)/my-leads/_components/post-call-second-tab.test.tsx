@@ -80,6 +80,29 @@ describe("second prompt for an already-saved call", () => {
     expect(window.sessionStorage.getItem("sandra:my-leads:post-call-extras:v1")).toBeNull()
   })
 
+  it("the extras saver KEEPS the stored entry when the server has no proof yet (pending), for Retry (matrix 7, 8)", async () => {
+    const { putExtras, getExtras } = await import("./extras-store")
+    const extras = { submissionId: "11111111-1111-4111-8111-111111111111", note: "n", nextStep: null, callActivityId: null }
+    putExtras({ viewerUserId: "user-1", attemptKey: "k2", propertyId: "p1", memberId: "rep-1", extras })
+    actions.savePostCallExtras.mockResolvedValue({ ok: false, pending: true, message: "Not saved yet: this call's save isn't confirmed. Your note is kept." })
+    const result = await saveExtrasRequest({ attemptKey: "k2", memberId: "rep-1", propertyId: "p1", extras }, "user-1", new Set())
+    expect(result).toMatchObject({ ok: false, pending: true })
+    expect(getExtras("user-1", "k2")).not.toBeNull()
+  })
+
+  it("repeated and racing saves of one request write once per request (matrix 11)", async () => {
+    const extras = { submissionId: "11111111-1111-4111-8111-111111111111", note: "n", nextStep: null, callActivityId: null }
+    let release: () => void = () => undefined
+    actions.savePostCallExtras.mockImplementation(() => new Promise((resolve) => { release = () => resolve({ ok: true, note: "saved", nextStep: "skipped" }) }))
+    const inFlight = new Set<string>()
+    const first = saveExtrasRequest({ attemptKey: "k3", memberId: "rep-1", propertyId: "p1", extras }, "user-1", inFlight)
+    const second = await saveExtrasRequest({ attemptKey: "k3", memberId: "rep-1", propertyId: "p1", extras }, "user-1", inFlight)
+    expect(second).toBeNull()
+    release()
+    await first
+    expect(actions.savePostCallExtras).toHaveBeenCalledTimes(1)
+  })
+
   it("the extras saver drops the stored entry when the server says another prompt already saved the call", async () => {
     const { putExtras, getExtras } = await import("./extras-store")
     const extras = { submissionId: "11111111-1111-4111-8111-111111111111", note: "n", nextStep: null, callActivityId: "22222222-2222-4222-8222-222222222222" }

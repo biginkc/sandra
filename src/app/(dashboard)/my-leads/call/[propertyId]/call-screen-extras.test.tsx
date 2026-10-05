@@ -85,7 +85,7 @@ describe("CallScreen post-call extras (real PostCallPrompt)", () => {
 
   it("saves the note on a late-success / reconciliation flush (onExtras) and clears the stored entry once confirmed", async () => {
     mocks.savePostCallExtras.mockResolvedValue(confirmed);
-    render(<CallScreen data={data} />);
+    render(<CallScreen postCallPrompt data={data} />);
     stash();
     await act(async () => { options().onExtras({ opening: options().opening, attemptKey: "key-1", propertyId, memberId: "user-1", extras }); });
     expect(mocks.savePostCallExtras).toHaveBeenCalledWith({ memberId: "user-1", propertyId, submissionId: "sub-1", attemptKey: expect.any(String), callActivityId: null, note: "Seller wants 250k", nextStep: null });
@@ -95,12 +95,12 @@ describe("CallScreen post-call extras (real PostCallPrompt)", () => {
   it("failed extras: Retry stays reachable after the post-commit refresh (new queue version), then succeeds and clears", async () => {
     const user = userEvent.setup();
     mocks.savePostCallExtras.mockResolvedValueOnce({ ok: false, message: "The note and next step could not be saved." }).mockResolvedValueOnce(confirmed);
-    const { rerender } = render(<CallScreen data={data} />);
+    const { rerender } = render(<CallScreen postCallPrompt data={data} />);
     await recordAttempt(user);
     stash();
     await act(async () => { await options().onCommitted(committedInput()); });
     // router.refresh() brings the row back at the next queue version: a new opening, same mounted prompt.
-    rerender(<CallScreen data={withVersion(2)} />);
+    rerender(<CallScreen postCallPrompt data={withVersion(2)} />);
     expect(screen.getByTestId("post-call-receipt")).toHaveTextContent("Note and next step not saved");
     expect(getExtras("user-1", "key-1")).not.toBeNull();
     await user.click(screen.getByTestId("post-call-retry-extras"));
@@ -113,14 +113,42 @@ describe("CallScreen post-call extras (real PostCallPrompt)", () => {
   it("a partial failure keeps the stored entry and offers Retry", async () => {
     const user = userEvent.setup();
     mocks.savePostCallExtras.mockResolvedValue({ ok: true, note: "failed", nextStep: "skipped" });
-    const { rerender } = render(<CallScreen data={data} />);
+    const { rerender } = render(<CallScreen postCallPrompt data={data} />);
     await recordAttempt(user);
     stash();
     await act(async () => { await options().onCommitted(committedInput()); });
-    rerender(<CallScreen data={withVersion(2)} />);
+    rerender(<CallScreen postCallPrompt data={withVersion(2)} />);
     expect(getExtras("user-1", "key-1")).not.toBeNull();
     expect(screen.getByTestId("post-call-receipt")).toHaveTextContent("Note not saved");
     expect(screen.getByTestId("post-call-retry-extras")).toBeVisible();
+  });
+
+  it("ASTRA at the call screen (matrix 5): reload banner Retry with no proof keeps the entry; once another key saved the call it is dropped, and no Retry remains", async () => {
+    const user = userEvent.setup();
+    stash();
+    simulateExtrasReloadForTests();
+    mocks.savePostCallExtras
+      .mockResolvedValueOnce({ ok: false, pending: true, message: "Not saved yet: this call's save isn't confirmed. Your note is kept." })
+      .mockResolvedValueOnce({ ok: false, message: "This was already saved. Refresh to see it.", alreadySaved: true });
+    render(<CallScreen postCallPrompt data={data} />);
+    const banner = await screen.findByTestId("call-screen-recovered-extras");
+    await user.click(within(banner).getByTestId("post-call-retry-extras"));
+    expect(await screen.findByText(/call's save isn't confirmed/)).toBeVisible();
+    expect(getExtras("user-1", "key-1")).not.toBeNull();
+    await user.click(within(screen.getByTestId("call-screen-recovered-extras")).getByTestId("post-call-retry-extras"));
+    await waitFor(() => expect(getExtras("user-1", "key-1")).toBeNull());
+    expect(mocks.savePostCallExtras).toHaveBeenCalledTimes(2);
+    expect(mocks.savePostCallExtras.mock.calls[0][0]).toMatchObject({ attemptKey: "key-1" });
+  });
+
+  it("flag off (post_call_prompt): the call screen docks no prompt and offers no stored-extras banner or retry", async () => {
+    stash();
+    simulateExtrasReloadForTests();
+    render(<CallScreen data={data} />);
+    expect(screen.queryByTestId("call-screen-prompt-dock")).toBeNull();
+    expect(screen.queryByTestId("post-call-prompt")).toBeNull();
+    expect(screen.queryByTestId("call-screen-recovered-extras")).toBeNull();
+    expect(mocks.savePostCallExtras).not.toHaveBeenCalled();
   });
 
   it("after a reload, a stored failed entry for this lead is surfaced with Retry and is saved then cleared", async () => {
@@ -128,7 +156,7 @@ describe("CallScreen post-call extras (real PostCallPrompt)", () => {
     stash();
     simulateExtrasReloadForTests(); // memory is gone; sessionStorage still holds the entry
     mocks.savePostCallExtras.mockResolvedValue(confirmed);
-    render(<CallScreen data={data} />);
+    render(<CallScreen postCallPrompt data={data} />);
     const banner = await screen.findByTestId("call-screen-recovered-extras");
     expect(banner).toHaveTextContent("not saved");
     expect(banner).toHaveTextContent("Seller wants 250k");
@@ -140,7 +168,7 @@ describe("CallScreen post-call extras (real PostCallPrompt)", () => {
 
   it("shows nothing after a reload when there is no stored entry for this lead", () => {
     putExtras({ viewerUserId: "user-1", attemptKey: "other", propertyId: "22222222-2222-4222-8222-222222222222", memberId: "user-1", extras });
-    render(<CallScreen data={data} />);
+    render(<CallScreen postCallPrompt data={data} />);
     expect(screen.queryByTestId("call-screen-recovered-extras")).toBeNull();
   });
 });

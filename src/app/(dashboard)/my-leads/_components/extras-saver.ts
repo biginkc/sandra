@@ -16,8 +16,8 @@ export function extrasConfirmed(result: PostCallExtrasResult): boolean {
 
 /**
  * The one saver of a saved attempt's note and quick next step (P1c). Every recovery path may call
- * it again for the same attempt: each extra carries its own idempotency key, so a repeat cannot
- * duplicate. The stored entry is removed only after the server confirms both extras; a failure
+ * it again for the same attempt: the server writes only after proving the attempt, with keys derived from it, so a
+ * repeat cannot duplicate. The stored entry is removed only after the server confirms both extras; a failure
  * keeps it for a retry. Returns null (and does nothing) when this submission is already in flight.
  * `onStart` runs once the request is claimed, before the write.
  */

@@ -294,59 +294,92 @@ it('returns an early delivery callback result truthfully instead of reporting ac
 
 describe('savePostCallExtras',()=>{
   const SUB='11111111-1111-4111-8111-111111111111';
+  const KEY='33333333-3333-4333-8333-333333333333';
+  const CALL='22222222-2222-4222-8222-222222222222';
+  const NOTE_KEY='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const STEP_KEY='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
   const DUE='2026-10-06T15:00:00.000Z';
-  const input=(over:Record<string,unknown>={})=>({memberId:'actor',propertyId:'lead',submissionId:SUB,note:'Left a message',nextStep:{pick:'tomorrow' as const,dueAt:DUE},...over});
+  const input=(over:Record<string,unknown>={})=>({memberId:'actor',propertyId:'lead',submissionId:SUB,attemptKey:KEY,callActivityId:CALL,note:'Left a message',nextStep:{pick:'tomorrow' as const,dueAt:DUE},...over});
+  const proven={data:{status:'proven',attemptId:'attempt-1',noteKey:NOTE_KEY,nextStepKey:STEP_KEY},error:null};
+  const noWrites=()=>{expect(mocks.createNote).not.toHaveBeenCalled();expect(mocks.createStep).not.toHaveBeenCalled();};
   beforeEach(()=>{
     mocks.queueRow.mockResolvedValue({status:'found',row:{contactId:'contact-1',address:'1 Main St'},snapshotAt:'x'});
     mocks.ready.mockResolvedValue(true);
+    mocks.rpc.mockResolvedValue(proven);
     mocks.createNote.mockResolvedValue({ok:true,data:{id:'note-1'}});
     mocks.createStep.mockResolvedValue({ok:true,data:{taskId:'task-1'}});
   });
   it('rejects a lead that is not in the member queue before any write',async()=>{
     mocks.queueRow.mockResolvedValue({status:'unavailable',reason:'other_rep'});
     expect(await savePostCallExtras(input())).toEqual({ok:false,message:'This lead is no longer in your queue.'});
-    expect(mocks.createNote).not.toHaveBeenCalled();expect(mocks.createStep).not.toHaveBeenCalled();
+    noWrites();
   });
-  it('rejects an unreadable lead and malformed input before any write',async()=>{
+  it('rejects an unreadable lead, a missing attempt key and malformed input before any write',async()=>{
     mocks.queueRow.mockRejectedValue(new Error('FORBIDDEN'));
     expect((await savePostCallExtras(input())).ok).toBe(false);
+    mocks.queueRow.mockResolvedValue({status:'found',row:{contactId:'contact-1',address:'1 Main St'},snapshotAt:'x'});
     expect((await savePostCallExtras(input({submissionId:'nope'}))).ok).toBe(false);
+    expect((await savePostCallExtras(input({attemptKey:undefined}))).ok).toBe(false);
+    expect((await savePostCallExtras(input({attemptKey:'nope'}))).ok).toBe(false);
     expect((await savePostCallExtras(input({nextStep:{pick:'someday',dueAt:DUE}}))).ok).toBe(false);
     expect((await savePostCallExtras(input({nextStep:{pick:'custom',dueAt:'garbage'}}))).ok).toBe(false);
-    expect(mocks.createNote).not.toHaveBeenCalled();expect(mocks.createStep).not.toHaveBeenCalled();
+    expect(mocks.rpc).not.toHaveBeenCalled();noWrites();
   });
-  describe('a call another prompt already finalized under a different key',()=>{
-    const CALL='22222222-2222-4222-8222-222222222222',KEY='33333333-3333-4333-8333-333333333333';
-    const guarded=(over:Record<string,unknown>={})=>input({callActivityId:CALL,attemptKey:KEY,...over});
-    it('writes nothing and tells the caller to drop the stored extras',async()=>{
-      mocks.rpc.mockResolvedValue({data:true,error:null});
-      expect(await savePostCallExtras(guarded())).toEqual({ok:false,message:'This was already saved. Refresh to see it.',alreadySaved:true});
-      expect(mocks.rpc).toHaveBeenCalledWith('fn_post_call_extras_foreign_finalize',{p_org:'actual-org',p_attempt_key:KEY,p_call_activity:CALL});
-      expect(mocks.createNote).not.toHaveBeenCalled();expect(mocks.createStep).not.toHaveBeenCalled();
-    });
-    it('writes both when the call was finalized under this very key',async()=>{
-      mocks.rpc.mockResolvedValue({data:false,error:null});
-      expect(await savePostCallExtras(guarded())).toEqual({ok:true,note:'saved',nextStep:'created'});
-    });
-    it('fails closed (retryable, no writes) when the check cannot be answered',async()=>{
-      mocks.rpc.mockResolvedValue({data:null,error:{message:'boom'}});
-      expect(await savePostCallExtras(guarded())).toEqual({ok:false,message:'Could not confirm this save. Please retry.'});
-      expect(mocks.createNote).not.toHaveBeenCalled();expect(mocks.createStep).not.toHaveBeenCalled();
-    });
+  it('asks the database to prove the attempt first, with the actor org, lead, attempt key and call',async()=>{
+    await savePostCallExtras(input());
+    expect(mocks.rpc).toHaveBeenCalledWith('fn_post_call_extras_proof',{p_org:'actual-org',p_property:'lead',p_attempt_key:KEY,p_call_activity:CALL});
   });
-  it('note only: writes the note with the submission id as its idempotency key and no step',async()=>{
+  it('proven: the note and the appointment use the keys the PROOF returned, never the client submission id (matrix 1, 10, 11)',async()=>{
+    expect(await savePostCallExtras(input())).toEqual({ok:true,note:'saved',nextStep:'created'});
+    expect(mocks.createNote).toHaveBeenCalledWith('lead','Left a message',NOTE_KEY);
+    expect(mocks.createStep).toHaveBeenCalledWith(expect.objectContaining({idempotencyKey:STEP_KEY,kind:'appointment',mode:'phone',assigneeId:'actor',origin:'app'}));
+    // A second opening (different submission id) lands on the same derived keys.
+    await savePostCallExtras(input({submissionId:'44444444-4444-4444-8444-444444444444'}));
+    expect(mocks.createNote.mock.calls[1][2]).toBe(NOTE_KEY);expect(mocks.createStep.mock.calls[1][0].idempotencyKey).toBe(STEP_KEY);
+    expect(mocks.createStep.mock.calls[0][0]).not.toHaveProperty('applyBookingEffects');
+  });
+  it('pending (no receipt for this key): writes nothing and keeps the extras for Retry (matrix 5, 7, 8)',async()=>{
+    mocks.rpc.mockResolvedValue({data:{status:'pending'},error:null});
+    expect(await savePostCallExtras(input())).toEqual({ok:false,pending:true,message:"Not saved yet: this call's save isn't confirmed. Your note is kept."});
+    noWrites();
+  });
+  it('foreign (another key finalized the call): writes nothing and tells the caller to drop the extras (matrix 5, 9)',async()=>{
+    mocks.rpc.mockResolvedValue({data:{status:'foreign'},error:null});
+    expect(await savePostCallExtras(input())).toEqual({ok:false,message:'This was already saved. Refresh to see it.',alreadySaved:true});
+    noWrites();
+  });
+  it('fails closed, keeping the extras, when the proof function is not installed yet (matrix 16)',async()=>{
+    mocks.ready.mockImplementation(async(feature:string)=>feature!=='post_call_extras_proof');
+    const result=await savePostCallExtras(input());
+    expect(result).toMatchObject({ok:false,pending:true});expect(mocks.rpc).not.toHaveBeenCalled();noWrites();
+  });
+  it.each([
+    ['an rpc error',{data:null,error:{message:'boom'}}],
+    ['no answer',{data:null,error:null}],
+    ['an unknown status',{data:{status:'maybe'},error:null}],
+    ['proven without keys',{data:{status:'proven'},error:null}],
+  ])('fails closed, keeping the extras, on %s (matrix 17)',async(_name,answer)=>{
+    mocks.rpc.mockResolvedValue(answer);
+    expect(await savePostCallExtras(input())).toMatchObject({ok:false,pending:true});noWrites();
+  });
+  it('fails closed when the proof call throws',async()=>{
+    mocks.rpc.mockRejectedValue(new Error('network'));
+    expect(await savePostCallExtras(input())).toMatchObject({ok:false,pending:true});noWrites();
+  });
+  it('note only: writes the note under the proven key and no step',async()=>{
     expect(await savePostCallExtras(input({nextStep:null}))).toEqual({ok:true,note:'saved',nextStep:'skipped'});
-    expect(mocks.createNote).toHaveBeenCalledWith('lead','Left a message',SUB);
+    expect(mocks.createNote).toHaveBeenCalledWith('lead','Left a message',NOTE_KEY);
     expect(mocks.createStep).not.toHaveBeenCalled();
   });
   it('pick only: creates a phone appointment for the rep with booking effects off and no note',async()=>{
     expect(await savePostCallExtras(input({note:'  '}))).toEqual({ok:true,note:'skipped',nextStep:'created'});
     expect(mocks.createNote).not.toHaveBeenCalled();
-    expect(mocks.createStep).toHaveBeenCalledWith({kind:'appointment',mode:'phone',propertyId:'lead',contactId:'contact-1',assigneeId:'actor',dueAt:DUE,title:'Call 1 Main St',idempotencyKey:SUB,origin:'app'});
-    expect(mocks.createStep.mock.calls[0][0]).not.toHaveProperty('applyBookingEffects');
+    expect(mocks.createStep).toHaveBeenCalledWith({kind:'appointment',mode:'phone',propertyId:'lead',contactId:'contact-1',assigneeId:'actor',dueAt:DUE,title:'Call 1 Main St',idempotencyKey:STEP_KEY,origin:'app'});
   });
-  it('both: writes both',async()=>{
-    expect(await savePostCallExtras(input())).toEqual({ok:true,note:'saved',nextStep:'created'});
+  it('a manual attempt (no call id) is still proven by its key alone',async()=>{
+    await savePostCallExtras(input({callActivityId:null}));
+    expect(mocks.rpc).toHaveBeenCalledWith('fn_post_call_extras_proof',expect.objectContaining({p_call_activity:null}));
+    expect(mocks.createNote).toHaveBeenCalledWith('lead','Left a message',NOTE_KEY);
   });
   it('a note failure still creates the step and says what failed',async()=>{
     mocks.createNote.mockResolvedValue({ok:false,error:{code:'NOTE_CREATE_FAILED',message:'boom'}});
@@ -357,18 +390,21 @@ describe('savePostCallExtras',()=>{
     mocks.createStep.mockResolvedValue({ok:false,error:{code:'TIME_INVALID',message:'bad time'}});
     expect(await savePostCallExtras(input())).toEqual({ok:true,note:'saved',nextStep:'failed',message:'Next step not set: bad time'});
   });
-  it('a duplicate submission id returns the existing ids and succeeds again',async()=>{
-    mocks.createNote.mockResolvedValue({ok:true,data:{id:'note-1'}});
+  it('the same attempt returns the existing ids and succeeds again',async()=>{
     mocks.createStep.mockResolvedValue({ok:true,data:{taskId:'task-1',duplicate:true}});
     expect(await savePostCallExtras(input())).toEqual({ok:true,note:'saved',nextStep:'created'});
     expect(await savePostCallExtras(input())).toEqual({ok:true,note:'saved',nextStep:'created'});
-    expect(mocks.createNote.mock.calls[1][2]).toBe(SUB);
+    expect(mocks.createNote.mock.calls[1][2]).toBe(NOTE_KEY);
   });
-  it('before the migration: no note write (skipped, said so) and no step (skipped, said so), nothing throws',async()=>{
-    mocks.ready.mockResolvedValue(false);
+  it('an appointment that already exists for the attempt with different details counts as created, not a failure to retry (matrix 18)',async()=>{
+    mocks.createStep.mockResolvedValue({ok:false,error:{code:'CREATE_NEXT_STEP_FAILED',message:'fn_create_next_step: idempotency key reuse with different request'}});
+    expect(await savePostCallExtras(input())).toEqual({ok:true,note:'saved',nextStep:'created'});
+  });
+  it('before the note or step migration: that extra is skipped and said so, nothing throws',async()=>{
+    mocks.ready.mockImplementation(async(feature:string)=>feature==='post_call_extras_proof');
     const result=await savePostCallExtras(input());
     expect(result).toMatchObject({ok:true,note:'skipped',nextStep:'skipped'});
-    expect(mocks.createNote).not.toHaveBeenCalled();expect(mocks.createStep).not.toHaveBeenCalled();
+    noWrites();
   });
 });
 describe('loadMyLeadCallReferences',()=>{
