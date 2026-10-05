@@ -253,7 +253,7 @@ async function insertTask(
 ): Promise<{ data: { id: string } | null; error: { message: string; code?: string } | null }> {
   const base = {
     org_id: BMH_ORG_ID,
-    type: "follow_up",
+    type: "custom",
     status: "open",
     title: "Test task",
     due_at: new Date(Date.now() + 3600_000).toISOString(),

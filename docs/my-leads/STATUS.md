@@ -38,7 +38,7 @@ Last updated: 2026-10-04 (after #801 release)
 | `claude/my-leads-p3-send-card` | #814 (draft, base `claude/my-leads-p3-call-screen`) | Claude Sonnet 5.5 builder | in progress (contract defaults schema, prefill mapper, send-contract card + actions; offer projection library/migration NOT in this slice) |
 | `claude/my-leads-p3-offer` | #815 (draft, base `claude/my-leads-p3-send-card`) | Claude Sonnet 5.5 builder | in progress (offer projection migration/library/sweep cron, recovery actions + UI, contract-defaults settings UI, Dropbox Sign base-URL seam; AI facts NOT built) |
 | `claude/my-leads-callscreen-dial` | #818 (draft, base `main`) | Claude Sonnet 5.5 builder | in progress: call screen Call button wired to the shared My Leads dial path; deletes dial-stub.ts |
-| `p1a-retire` | none | none | NOT built yet |
+| `claude/my-leads-p1a-retire` | draft PR (base `main`) | Claude Sonnet 5.5 builder | in progress: reject trigger `20261008100000`, legacy writer/snooze removal, KPI snapshot test. Merge gated on >=24h bake + root lease + operator preflight. |
 | all other branches | none | unclaimed | claim here before writing |
 
 Current heads: `gh pr view <n> --json headRefOid` (stack was rebased onto main on 2026-10-04; heads change on every cascade).

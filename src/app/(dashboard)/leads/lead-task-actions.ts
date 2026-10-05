@@ -5,12 +5,9 @@ import { assertPropertyDncUnlocked } from "@/lib/dnc/property-lock";
 import { errFromUnknown, err, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { assertNotTrainingTarget } from "@/lib/leads/training";
-import { schemaReady } from "@/lib/my-leads/schema-ready";
 import { createNextStep } from "@/lib/next-steps";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
-
-import { createLeadTaskAction as createLegacyLeadTaskAction } from "./actions";
 
 /** The two next-step kinds a lead page can create: an appointment (phone by default) or a task. */
 export type LeadTaskKind = "appointment" | "task";
@@ -37,13 +34,9 @@ export type LeadTaskResult = {
 };
 
 /**
- * Lead-page "add a next step" action. Once `schemaReady('next_step_write')` it writes through
- * `createNextStep` (the shared write function also sends the assignment notifications; a phone
- * appointment has no calendar event). Until then it runs the original follow-up/callback
- * action unchanged (`./actions` `createLeadTaskAction`: an appointment is a callback row, a
- * task a follow-up row), so the window between a deploy and its migration cannot break it.
- * The legacy action stays in `./actions` untouched (the legacy-isolation guard pins that file)
- * and is deleted with the other legacy writers in P1a-retire.
+ * Lead-page "add a next step" action. Writes through `createNextStep` (the shared write function
+ * also sends the assignment notifications; a phone appointment has no calendar event). The legacy
+ * follow-up/callback writer and its deploy-before-migration fallback were retired in P1a-retire.
  */
 export async function createLeadTaskAction(
   propertyId: string,
@@ -60,16 +53,6 @@ export async function createLeadTaskAction(
   }
   if (!input.assigneeId) {
     return err({ code: "ASSIGNEE_REQUIRED", message: "Choose who owns this task." });
-  }
-
-  if (!(await schemaReady("next_step_write"))) {
-    const legacy = await createLegacyLeadTaskAction(propertyId, {
-      type: input.kind === "task" ? "follow_up" : "callback",
-      dueAt: input.dueAt,
-      assigneeId: input.assigneeId,
-    });
-    if (!legacy.ok) return legacy;
-    return ok({ id: legacy.data.id, kind: input.kind, mode: "phone", calendarChainId: null });
   }
 
   try {

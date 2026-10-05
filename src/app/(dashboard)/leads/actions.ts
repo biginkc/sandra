@@ -2,12 +2,10 @@
 
 import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { randomUUID } from "node:crypto";
-import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 import { start } from "workflow/api";
 
 import { isAdminEmail } from "@/lib/auth/allowlist";
-import { hasActiveSandraAccess } from "@/lib/auth/access-state";
 import { dispatchRepSms, readRepSmsContext } from "@/lib/messaging/rep-sms";
 import { assertSendilloOrganizationScope } from "@/lib/messaging/rep-sms-scope";
 import { getCallerMemberships, getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
@@ -18,7 +16,6 @@ import {
   parseThreadId,
   resolveSmsConversationOrg,
 } from "@/lib/messages/threading";
-import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import {
@@ -51,13 +48,7 @@ import {
   type SendSmsOutcome,
 } from "@/lib/messaging/send";
 import type { DialpadFromOption } from "@/lib/messaging/types";
-import { dispatchTaskCalendarEvent } from "@/lib/integrations/google/dispatch";
-import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
-import { dispatchTaskAssignedSlack } from "@/lib/integrations/slack/dispatch";
-import {
-  dispatchPropertyAssigned,
-  dispatchTaskAssigned,
-} from "@/lib/notifications/dispatch";
+import { dispatchPropertyAssigned } from "@/lib/notifications/dispatch";
 import {
   applyFilters,
   filterSelectFragment,
@@ -66,7 +57,6 @@ import type { FilterBlock } from "@/lib/prospects/filter-schema";
 import type { Database } from "@/lib/supabase/types";
 import { loadTemplateVars } from "@/lib/sequences/template-vars";
 import type { TemplateVars } from "@/lib/templates/render";
-import { createTask, type Task, type TaskType } from "@/lib/tasks";
 import { validateActiveAssigneeForProperties } from "./assignment-safety";
 
 export type PropertyStatus =
@@ -1859,218 +1849,6 @@ export async function updatePropertyStatus(
     });
     return errFromUnknown(e, "STATUS_UPDATE_FAILED");
   }
-}
-
-export type LeadTaskKind = Extract<TaskType, "follow_up" | "callback">;
-
-export async function createLeadTaskAction(
-  propertyId: string,
-  input: {
-    type: LeadTaskKind;
-    dueAt: string;
-    assigneeId: string;
-  },
-): Promise<Result<Task>> {
-  if (input.type !== "follow_up" && input.type !== "callback") {
-    return {
-      ok: false,
-      error: {
-        code: "INVALID_TASK_TYPE",
-        message: "Choose follow-up or callback.",
-      },
-    };
-  }
-  if (!input.dueAt || Number.isNaN(new Date(input.dueAt).getTime())) {
-    return {
-      ok: false,
-      error: {
-        code: "INVALID_DUE_AT",
-        message: "Choose a valid due date.",
-      },
-    };
-  }
-  if (!input.assigneeId) {
-    return {
-      ok: false,
-      error: {
-        code: "ASSIGNEE_REQUIRED",
-        message: "Choose who owns this task.",
-      },
-    };
-  }
-
-  try {
-    const supabase = await createClient();
-    await assertNotTrainingTarget(supabase, { propertyId });
-    const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);
-    if (!unlocked.ok) return unlocked;
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) {
-      return {
-        ok: false,
-        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
-      };
-    }
-
-    const { data: property, error: propertyErr } = await supabase
-      .from("properties")
-      .select("id, org_id, address")
-      .eq("id", propertyId)
-      .maybeSingle();
-    if (propertyErr) {
-      return {
-        ok: false,
-        error: { code: "LEAD_FETCH_FAILED", message: propertyErr.message },
-      };
-    }
-    if (!property) {
-      return {
-        ok: false,
-        error: { code: "LEAD_NOT_FOUND", message: "Lead not found." },
-      };
-    }
-
-    const { data: actorMembership, error: actorMembershipErr } = await supabase
-      .from("memberships")
-      .select("user_id, access_status, access_expires_at, deletion_prepared_at")
-      .eq("org_id", property.org_id)
-      .eq("user_id", user.id)
-      .maybeSingle();
-    if (actorMembershipErr) {
-      return {
-        ok: false,
-        error: {
-          code: "MEMBERSHIP_LOOKUP_FAILED",
-          message: actorMembershipErr.message,
-        },
-      };
-    }
-    if (!actorMembership || !hasActiveSandraAccess(actorMembership)) {
-      return {
-        ok: false,
-        error: {
-          code: "LEAD_FORBIDDEN",
-          message: "You do not have access to this lead's org.",
-        },
-      };
-    }
-
-    const admin = createAdminClient();
-    const { data: assignee, error: assigneeErr } = await admin
-      .from("memberships")
-      .select("user_id, access_status, access_expires_at, deletion_prepared_at")
-      .eq("org_id", property.org_id)
-      .eq("user_id", input.assigneeId)
-      .maybeSingle();
-    if (assigneeErr) {
-      return {
-        ok: false,
-        error: {
-          code: "ASSIGNEE_LOOKUP_FAILED",
-          message: assigneeErr.message,
-        },
-      };
-    }
-    if (!assignee || !hasActiveSandraAccess(assignee)) {
-      return {
-        ok: false,
-        error: {
-          code: assignee ? "ASSIGNEE_NOT_ACTIVE" : "ASSIGNEE_NOT_IN_ORG",
-          message: assignee
-            ? "Choose an active team member in this lead's organization."
-            : "Choose a team member in this lead's organization.",
-        },
-      };
-    }
-
-    const taskTitle =
-      input.type === "callback"
-        ? `Callback ${property.address}`
-        : `Follow up on ${property.address}`;
-    const taskResult = await createTask(supabase, {
-      orgId: property.org_id,
-      assigneeId: input.assigneeId,
-      relatedPropertyId: property.id,
-      type: input.type,
-      title: taskTitle,
-      dueAt: input.dueAt,
-      createdBy: user.id,
-    });
-
-    if (!taskResult.ok) return taskResult;
-
-    if (input.assigneeId !== user.id) {
-      // Admin client, not the cookie client: prefs RLS is self-only, so the
-      // ASSIGNING user cannot read a teammate's row — the cookie client
-      // silently returns defaults (Chicago, all channels enabled), sending
-      // the wrong timezone and dispatching to channels the assignee turned
-      // off. This single load is the authoritative result threaded into
-      // Slack (timezone + slackEnabled) below.
-      const prefs = await loadIntegrationPrefs(admin, input.assigneeId);
-      const deepLink = buildLeadTaskDeepLink(property.id);
-      after(async () => {
-        await Promise.allSettled([
-          dispatchTaskAssigned(supabase, {
-            taskId: taskResult.data.id,
-            orgId: property.org_id,
-            assigneeId: input.assigneeId,
-            taskTitle,
-            taskType: input.type,
-            dueAt: input.dueAt,
-            propertyAddress: property.address,
-          }),
-          dispatchTaskAssignedSlack({
-            taskId: taskResult.data.id,
-            assigneeId: input.assigneeId,
-            taskTitle,
-            taskType: input.type,
-            dueAt: input.dueAt,
-            propertyAddress: property.address,
-            deepLink,
-            timezone: prefs.timezone,
-            slackEnabled: prefs.slackEnabled,
-          }),
-          dispatchTaskCalendarEvent({
-            taskId: taskResult.data.id,
-            assigneeId: input.assigneeId,
-            taskTitle,
-            propertyAddress: property.address,
-            dueAt: input.dueAt,
-            // createLeadTaskAction only creates follow_up/callback tasks
-            // (guarded above) — never an appointment, so no end_at exists
-            // to thread through; the 30-minute default applies.
-            endAt: undefined,
-            timezone: prefs.timezone,
-            deepLink,
-            calendarEnabled: prefs.calendarEnabled,
-          }),
-        ]);
-      });
-    }
-
-    revalidatePath(`/leads/${propertyId}`);
-    revalidatePath("/dashboard");
-    return taskResult;
-  } catch (e) {
-    reportError(e, {
-      tags: { surface: "create_lead_task" },
-      extra: { propertyId, type: input.type },
-    });
-    return errFromUnknown(e, "TASK_CREATE_FAILED");
-  }
-}
-
-function buildLeadTaskDeepLink(propertyId: string): string {
-  const baseUrl =
-    process.env.NEXT_PUBLIC_APP_URL ??
-    process.env.APP_URL ??
-    "https://sandra-sooty.vercel.app";
-  const normalizedBaseUrl = baseUrl.startsWith("http")
-    ? baseUrl
-    : `https://${baseUrl}`;
-  return `${normalizedBaseUrl}/leads/${propertyId}`;
 }
 
 // ============================================================================

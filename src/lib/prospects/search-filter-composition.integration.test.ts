@@ -126,7 +126,7 @@ beforeAll(async () => {
     if (i % 4 === 0) { p.lists.push(L2); plists.push({ org_id: BMH_ORG_ID, property_id: id, list_id: L2 }); }
     if (i % 6 === 0) {
       p.openTask = true;
-      tasks.push({ org_id: BMH_ORG_ID, assignee_id: userAId, created_by: userAId, related_property_id: id, type: "follow_up", status: "open", title: "t", due_at: now });
+      tasks.push({ org_id: BMH_ORG_ID, assignee_id: userAId, created_by: userAId, related_property_id: id, type: "custom", status: "open", title: "t", due_at: now });
     }
     model.push(p);
   }
@@ -156,7 +156,7 @@ beforeAll(async () => {
   await insertChunked("messages", bMsgs);
   await insertChunked("property_tags", orgBIds.slice(0, 20).map((id) => ({ org_id: TEST_ORG_B_ID, property_id: id, tag_id: bTag })));
   await insertChunked("property_lists", orgBIds.slice(0, 20).map((id) => ({ org_id: TEST_ORG_B_ID, property_id: id, list_id: bList })));
-  await insertChunked("tasks", orgBIds.slice(0, 10).map((id) => ({ org_id: TEST_ORG_B_ID, assignee_id: b.userId, created_by: b.userId, related_property_id: id, type: "follow_up", status: "open", title: "t", due_at: now })));
+  await insertChunked("tasks", orgBIds.slice(0, 10).map((id) => ({ org_id: TEST_ORG_B_ID, assignee_id: b.userId, created_by: b.userId, related_property_id: id, type: "custom", status: "open", title: "t", due_at: now })));
   // Cross-org anomalies on ORG A properties that RLS must neutralise: an org-B message on an org-A
   // property (the DB only forbids cross-org tag/list/task rows, not messages), and an org-A property
   // whose homeowner contact belongs to org B (seeded as superuser, triggers off).

@@ -47,7 +47,7 @@ export function MyLeadAppointmentActions({
 }
 
 /**
- * Reuses Sandra's generic Done/Snooze controls for callback tasks. The
+ * Reuses Sandra's generic Done control for callback tasks. The
  * server-shaped target keeps the My Leads surface from inventing task state
  * or mutating a callback through the appointment lifecycle RPCs.
  */

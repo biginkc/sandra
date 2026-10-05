@@ -43,7 +43,7 @@ async function msg(pid: string | null, direction: "inbound" | "outbound", opts: 
 }
 async function task(pid: string, status = "open") {
   const { rows } = await pg.query(
-    `insert into public.tasks (org_id, assignee_id, created_by, related_property_id, type, status, title, due_at) values ($1, $2, $2, $3, 'follow_up', $4, 't', now()) returning id`,
+    `insert into public.tasks (org_id, assignee_id, created_by, related_property_id, type, status, title, due_at) values ($1, $2, $2, $3, 'custom', $4, 't', now()) returning id`,
     [BMH_ORG_ID, userAId, pid, status],
   );
   return rows[0].id as string;

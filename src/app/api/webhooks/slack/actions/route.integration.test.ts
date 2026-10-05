@@ -92,7 +92,7 @@ async function seedTask(assigneeId: string): Promise<string> {
       org_id: orgId,
       assignee_id: assigneeId,
       related_property_id: propertyId,
-      type: "callback",
+      type: "custom",
       title: "Call owner",
       due_at: new Date(Date.now() + 86_400_000).toISOString(),
       created_by: assigneeId,

@@ -191,7 +191,6 @@ jobs:
             "src/app/(dashboard)/properties/dnc-safe-actions.ts" \
             "src/app/(dashboard)/properties/promote-leads-actions.ts" \
             "src/app/(dashboard)/properties/_actions/count.ts" \
-            "src/app/(dashboard)/leads/actions.ts" \
             "src/app/(dashboard)/campaigns/actions.ts" \
             src/lib/prospects/eligibility.ts \
             src/lib/messaging/bulk-queue.ts \
@@ -319,6 +318,22 @@ jobs:
           LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007170000_acquisition_offer_projections.integration.test.ts
+
+      - name: "My Leads retire follow_up/callback reject trigger (disposable DB)"
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261008100000_retire_follow_up_callback_types.integration.test.ts
+
+      - name: "My Leads next-step KPI snapshot, historical windows unchanged (disposable DB)"
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts src/lib/my-leads/next-step-kpi-snapshot.integration.test.ts
 
       - name: My Leads housekeeping operator script (unit)
         run: node --test scripts/my-leads-housekeeping.test.mjs

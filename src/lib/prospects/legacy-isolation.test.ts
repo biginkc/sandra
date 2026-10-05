@@ -9,13 +9,13 @@ const root = path.resolve(__dirname, "../../..");
 /**
  * Search must never change the legacy Prospects behavior: these files stay byte-for-byte what
  * they were on main when the Search branch was cut. (CI also runs the same `git diff`.)
+ * `leads/actions.ts` left this list in P1a-retire, which deleted its legacy follow-up/callback writer.
  */
 export const LEGACY_FILES = [
   "src/app/(dashboard)/properties/actions.ts",
   "src/app/(dashboard)/properties/dnc-safe-actions.ts",
   "src/app/(dashboard)/properties/promote-leads-actions.ts",
   "src/app/(dashboard)/properties/_actions/count.ts",
-  "src/app/(dashboard)/leads/actions.ts",
   "src/app/(dashboard)/campaigns/actions.ts",
   "src/lib/prospects/eligibility.ts",
   "src/lib/messaging/bulk-queue.ts",

@@ -1,6 +1,5 @@
 "use server";
 
-import { bookAppointment } from "@/components/appointments/book-appointment-action";
 import { saveOutreachDispo, type OutreachDispo } from "@/lib/leads/outreach-dispo";
 import { pausePropertyEnrollments, resumeByProperty } from "@/lib/sequences/enrollment";
 import { classifyItem } from "@/lib/dialer/eligibility";
@@ -11,7 +10,6 @@ import type { Database } from "@/lib/supabase/types";
 import { loadHomeownerTrainingProfile } from "@/lib/leads/homeowner-training-profile";
 import { repDisplayName } from "@/lib/coach/rep-display-name";
 import { getMemberTimezone } from "@/components/appointments/book-appointment-action";
-import { schemaReady } from "@/lib/my-leads/schema-ready";
 import { createNextStep } from "@/lib/next-steps";
 import { wallTimeToUtc } from "@/lib/time/zoned";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
@@ -604,55 +602,37 @@ export async function completeSoftphoneCall(input: {
         const timezone = await getMemberTimezone(user.id);
         const resolvedZone = timezone.ok ? timezone.data : input.callback.timeZone;
         const callbackTitle = `Call back ${input.target.address ?? "lead"}`;
-        // The callback is a 15-minute phone appointment written through the one next-step
-        // function. Until schemaReady('next_step_write') the legacy 30-minute booking runs
-        // unchanged, so the deploy-before-migration window cannot break the wrap-up.
-        let booked: Awaited<ReturnType<typeof bookAppointment>>;
-        if (await schemaReady("next_step_write")) {
-          const converted = wallTimeToUtc({
-            date: input.callback.date,
-            time: input.callback.time,
-            timeZone: resolvedZone,
-          });
-          if (!converted.ok) return { ok: false, error: "Choose a valid date and time." };
-          const created = await createNextStep({
-            kind: "appointment",
-            mode: "phone",
-            assigneeId: user.id,
-            title: callbackTitle,
-            dueAt: converted.utc.toISOString(),
-            propertyId: input.target.propertyId!,
-            contactId: input.target.contactId ?? undefined,
-            note: input.notes.trim(),
-            idempotencyKey: input.wrapToken,
-            origin: "app",
-            applyBookingEffects: true,
-          });
-          booked = created.ok
-            ? {
-                ok: true,
-                data: {
-                  taskId: created.data.taskId,
-                  alreadyQualified: created.data.alreadyQualified,
-                  chainId: created.data.calendarChainId ?? "",
-                  duplicate: created.data.duplicate,
-                },
-              }
-            : created;
-        } else {
-          booked = await bookAppointment({
-            propertyId: input.target.propertyId!,
-            contactId: input.target.contactId ?? undefined,
-            assigneeId: user.id,
-            date: input.callback.date,
-            time: input.callback.time,
-            timeZone: resolvedZone,
-            durationMinutes: 30,
-            title: callbackTitle,
-            note: input.notes.trim(),
-            idempotencyKey: input.wrapToken,
-          });
-        }
+        // The callback is a 15-minute phone appointment written through the one next-step function.
+        const converted = wallTimeToUtc({
+          date: input.callback.date,
+          time: input.callback.time,
+          timeZone: resolvedZone,
+        });
+        if (!converted.ok) return { ok: false, error: "Choose a valid date and time." };
+        const created = await createNextStep({
+          kind: "appointment",
+          mode: "phone",
+          assigneeId: user.id,
+          title: callbackTitle,
+          dueAt: converted.utc.toISOString(),
+          propertyId: input.target.propertyId!,
+          contactId: input.target.contactId ?? undefined,
+          note: input.notes.trim(),
+          idempotencyKey: input.wrapToken,
+          origin: "app",
+          applyBookingEffects: true,
+        });
+        const booked = created.ok
+          ? {
+              ok: true as const,
+              data: {
+                taskId: created.data.taskId,
+                alreadyQualified: created.data.alreadyQualified,
+                chainId: created.data.calendarChainId ?? "",
+                duplicate: created.data.duplicate,
+              },
+            }
+          : created;
         if (!booked.ok) return { ok: false, error: booked.error.message };
         callbackTaskId = booked.data.taskId;
 
