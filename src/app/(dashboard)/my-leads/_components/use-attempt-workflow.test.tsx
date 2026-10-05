@@ -552,5 +552,47 @@ describe("useAttemptWorkflow", () => {
       } finally { vi.useRealTimers() }
     })
   })
+
+  describe("post-call extras", () => {
+    const extras = (note = "n") => ({ submissionId: "11111111-1111-4111-8111-111111111111", note, nextStep: { pick: "tomorrow" as const, dueAt: "2026-10-06T15:00:00.000Z" } })
+
+    it("never lets the extras reach the command, its key or the replay payload, and hands them to onCommitted", async () => {
+      actions.submitMyLeadCommand.mockResolvedValue({ ok: true, attemptRecorded: true })
+      const { hook, handlers } = setup(opening())
+      await act(async () => { await hook.result.current.submit({ outcome: "voicemail", postCall: extras("hello") }) })
+      expect(sentInput(0)).not.toHaveProperty("postCall")
+      expect(JSON.stringify(sentInput(0))).not.toContain("hello")
+      expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
+      expect(handlers.onCommitted.mock.calls[0][0]).toMatchObject({ extras: extras("hello") })
+    })
+
+    it("commands are identical with or without extras (same hash input)", async () => {
+      actions.submitMyLeadCommand.mockResolvedValue({ ok: false, certainty: "rejected", message: "no" })
+      const { hook } = setup(opening())
+      await act(async () => { await hook.result.current.submit({ outcome: "reached" }) })
+      await act(async () => { await hook.result.current.submit({ outcome: "reached", postCall: extras() }) })
+      expect(sentInput(1)).toEqual(sentInput(0))
+    })
+
+    it("a frozen replay after an uncertain save keeps the ORIGINAL extras, not the edited ones", async () => {
+      actions.submitMyLeadCommand
+        .mockRejectedValueOnce(new Error("network"))
+        .mockResolvedValueOnce({ ok: true, duplicate: true, attemptRecorded: true })
+      const { hook, handlers } = setup(opening())
+      await act(async () => { await expect(hook.result.current.submit({ outcome: "voicemail", postCall: extras("original") })).rejects.toThrow("network") })
+      expect(handlers.onCommitted).not.toHaveBeenCalled()
+      await act(async () => { await hook.result.current.submit({ outcome: "reached", postCall: extras("edited") }) })
+      expect(handlers.onCommitted).toHaveBeenCalledTimes(1)
+      expect(handlers.onCommitted.mock.calls[0][0]).toMatchObject({ extras: { note: "original" } })
+      expect(sentInput(1)).toEqual(sentInput(0))
+    })
+
+    it("an attempt saved without extras reports none", async () => {
+      actions.submitMyLeadCommand.mockResolvedValue({ ok: true, attemptRecorded: true })
+      const { hook, handlers } = setup(opening())
+      await act(async () => { await hook.result.current.submit({ outcome: "reached" }) })
+      expect(handlers.onCommitted.mock.calls[0][0]).not.toHaveProperty("extras")
+    })
+  })
 })
 

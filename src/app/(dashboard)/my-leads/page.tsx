@@ -20,6 +20,7 @@ import {
 } from "@/lib/my-leads/row-reasons";
 import { listMyLeadsInDrip } from "@/lib/my-leads/drip-queries";
 import { getCallNext } from "@/lib/my-leads/call-next";
+import { postCallPromptEnabled } from "@/lib/my-leads/post-call";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   getAcquisitionKpis,
@@ -306,6 +307,11 @@ export default async function MyLeadsPage({
     };
   }
 
+  // Off (the old attempt dialog) unless the flag is on and the P1c schema has landed.
+  const postCallPrompt = roster.settings.enabled
+    ? await postCallPromptEnabled(viewer.orgId).catch(() => false)
+    : false;
+
   let dialpad: Awaited<ReturnType<typeof loadDialpadPanelBootstrap>> = null;
   if (roster.settings.enabled) {
     try {
@@ -340,6 +346,7 @@ export default async function MyLeadsPage({
         initialKpis={kpis}
         initialDrips={drips}
         initialStrip={initialStrip}
+        postCallPrompt={postCallPrompt}
         selectedLead={selectedLead}
         focus={focus}
       />

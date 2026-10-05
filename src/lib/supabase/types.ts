@@ -2752,6 +2752,7 @@ export type Database = {
           body: string
           created_at: string
           id: string
+          idempotency_key: string | null
           org_id: string
           property_id: string
         }
@@ -2760,6 +2761,7 @@ export type Database = {
           body: string
           created_at?: string
           id?: string
+          idempotency_key?: string | null
           org_id: string
           property_id: string
         }
@@ -2768,6 +2770,7 @@ export type Database = {
           body?: string
           created_at?: string
           id?: string
+          idempotency_key?: string | null
           org_id?: string
           property_id?: string
         }
