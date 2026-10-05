@@ -88,7 +88,7 @@ describe("CallScreen post-call extras (real PostCallPrompt)", () => {
     render(<CallScreen data={data} />);
     stash();
     await act(async () => { options().onExtras({ opening: options().opening, attemptKey: "key-1", propertyId, memberId: "user-1", extras }); });
-    expect(mocks.savePostCallExtras).toHaveBeenCalledWith({ memberId: "user-1", propertyId, submissionId: "sub-1", note: "Seller wants 250k", nextStep: null });
+    expect(mocks.savePostCallExtras).toHaveBeenCalledWith({ memberId: "user-1", propertyId, submissionId: "sub-1", attemptKey: expect.any(String), callActivityId: null, note: "Seller wants 250k", nextStep: null });
     expect(getExtras("user-1", "key-1")).toBeNull();
   });
 

@@ -124,7 +124,7 @@ describe('My Leads command integration',()=>{
   });
   it('maps ALREADY_FINALIZED (second prompt, other key) to a definite already-saved answer that keeps the extras unwritten',async()=>{
     mocks.rpc.mockResolvedValue({data:null,status:400,error:{message:'ALREADY_FINALIZED',code:'MLS01'}});
-    expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toEqual({ok:false,answered:true,certainty:'rejected',code:'STALE_STATE',message:'This was already saved. Refresh to see it.'});
+    expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toEqual({ok:false,answered:true,certainty:'rejected',code:'ALREADY_FINALIZED',message:'This was already saved. Refresh to see it.'});
     expect(mocks.rpc).toHaveBeenCalledTimes(1);
   });
   it('maps IDEMPOTENCY_CONFLICT to the already-saved answer',async()=>{
@@ -314,6 +314,25 @@ describe('savePostCallExtras',()=>{
     expect((await savePostCallExtras(input({nextStep:{pick:'someday',dueAt:DUE}}))).ok).toBe(false);
     expect((await savePostCallExtras(input({nextStep:{pick:'custom',dueAt:'garbage'}}))).ok).toBe(false);
     expect(mocks.createNote).not.toHaveBeenCalled();expect(mocks.createStep).not.toHaveBeenCalled();
+  });
+  describe('a call another prompt already finalized under a different key',()=>{
+    const CALL='22222222-2222-4222-8222-222222222222',KEY='33333333-3333-4333-8333-333333333333';
+    const guarded=(over:Record<string,unknown>={})=>input({callActivityId:CALL,attemptKey:KEY,...over});
+    it('writes nothing and tells the caller to drop the stored extras',async()=>{
+      mocks.rpc.mockResolvedValue({data:true,error:null});
+      expect(await savePostCallExtras(guarded())).toEqual({ok:false,message:'This was already saved. Refresh to see it.',alreadySaved:true});
+      expect(mocks.rpc).toHaveBeenCalledWith('fn_post_call_extras_foreign_finalize',{p_org:'actual-org',p_attempt_key:KEY,p_call_activity:CALL});
+      expect(mocks.createNote).not.toHaveBeenCalled();expect(mocks.createStep).not.toHaveBeenCalled();
+    });
+    it('writes both when the call was finalized under this very key',async()=>{
+      mocks.rpc.mockResolvedValue({data:false,error:null});
+      expect(await savePostCallExtras(guarded())).toEqual({ok:true,note:'saved',nextStep:'created'});
+    });
+    it('fails closed (retryable, no writes) when the check cannot be answered',async()=>{
+      mocks.rpc.mockResolvedValue({data:null,error:{message:'boom'}});
+      expect(await savePostCallExtras(guarded())).toEqual({ok:false,message:'Could not confirm this save. Please retry.'});
+      expect(mocks.createNote).not.toHaveBeenCalled();expect(mocks.createStep).not.toHaveBeenCalled();
+    });
   });
   it('note only: writes the note with the submission id as its idempotency key and no step',async()=>{
     expect(await savePostCallExtras(input({nextStep:null}))).toEqual({ok:true,note:'saved',nextStep:'skipped'});

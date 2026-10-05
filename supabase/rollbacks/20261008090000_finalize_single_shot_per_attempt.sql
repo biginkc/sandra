@@ -2,6 +2,8 @@
 -- (the same-outcome second-key save is accepted again; a different outcome raises STALE_STATE). No data change.
 begin;
 
+drop function if exists public.fn_post_call_extras_foreign_finalize(uuid, uuid, uuid);
+
 CREATE OR REPLACE FUNCTION public.fn_finalize_acquisition_attempt_without_sms_obligation(p_input jsonb)
  RETURNS jsonb
  LANGUAGE plpgsql

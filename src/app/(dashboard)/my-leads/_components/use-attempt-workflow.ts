@@ -10,7 +10,7 @@ import {
   subscribeSubmissions, writeSubmission,
   type Lease, type StoredSubmission, type SubmissionScope,
 } from "./submission-store"
-import { discardOtherViewerExtras, getExtras, putExtras } from "./extras-store"
+import { clearExtras, discardOtherViewerExtras, getExtras, putExtras } from "./extras-store"
 import type { MyLeadAction, PostCallExtras } from "./types"
 import type { WorkflowReconciliation } from "./workflow-form"
 
@@ -592,9 +592,12 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
     const command = opening.action as Parameters<typeof submitMyLeadCommand>[0]
     const frozen = state.uncertain && state.payload
     // A frozen replay keeps the extras of the original send; a fresh send takes the form's current ones.
-    if (!frozen || state.extras === undefined) state.extras = postCall ?? null
+    const sentCall = (payload as Record<string, unknown>).callActivityId
+    const callActivityId = typeof sentCall === "string" && sentCall ? sentCall : null
+    const extrasToKeep = postCall ? { ...postCall, callActivityId } : null
+    if (!frozen || state.extras === undefined) state.extras = extrasToKeep
     // Registered with the key BEFORE anything is sent, so a close, reload or lost response can still finish them.
-    if (!frozen && postCall) putExtras({ viewerUserId: viewerRef.current.userId, attemptKey: state.key, propertyId: row.propertyId, memberId: state.memberId ?? memberId, extras: postCall })
+    if (!frozen && postCall) putExtras({ viewerUserId: viewerRef.current.userId, attemptKey: state.key, propertyId: row.propertyId, memberId: state.memberId ?? memberId, extras: extrasToKeep! })
     const wantedRoute = routeOf(command, JSON.parse(JSON.stringify(payload)) as Record<string, Json>)
     // Never send the key down another operation. When nothing under the key can have committed
     // (its first send was definitely rejected), a different route simply starts a new key.
@@ -651,6 +654,10 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       const applyFailure = (failure: Failure): boolean => {
         // A save that is already confirmed committed is not changed by a late, older answer.
         if (state.committed) return true
+        // Another prompt (a second tab, or the dock) already saved this call under its own key. This
+        // prompt's note and next step must never be written: drop them (store and memory) before any
+        // recovery path (reload banner, Refresh-and-close) can flush or offer to retry them.
+        if (failure.code === "ALREADY_FINALIZED") { clearExtras(viewerRef.current.userId, state.key); state.extras = null }
         // A frozen replay the server ANSWERED with a database error is Start-over-able whatever the cause:
         // the key never changes, so if the original committed a different payload under it can only
         // conflict, and pre-lookup errors never commit. Access errors keep their own replayable path.
@@ -678,7 +685,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
             // payload and KEEPS the key and route: a late original commit then conflicts instead of
             // recording a second attempt.
             state.definite = true
-            if (failure.answered && (failure.code === "STALE_STATE" || failure.code === "STALE_ASSIGNMENT")) state.staleProof = JSON.stringify(input)
+            if (failure.answered && (failure.code === "STALE_STATE" || failure.code === "ALREADY_FINALIZED" || failure.code === "STALE_ASSIGNMENT")) state.staleProof = JSON.stringify(input)
             if (!write(state, opening)) return false
             if (activeOpening.current === opening) setRecovery({ opening, message: CANT_SAVE_MESSAGE, blocked: false, busy: false, reconciliation: { command, payload: state.payload ?? input }, canStartOver: true })
             return true
@@ -689,7 +696,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
           if (wasAtRisk && !state.uncertain) { state.payload = null; state.released = true }
           // Returning to "fresh" is allowed only for the ONLY send under this key (the store enforces it).
           if (!write(state, opening)) return false
-          if ((failure.code === "FORBIDDEN" || failure.code === "STALE_STATE") && activeOpening.current === opening)
+          if ((failure.code === "FORBIDDEN" || failure.code === "STALE_STATE" || failure.code === "ALREADY_FINALIZED") && activeOpening.current === opening)
             setRecovery({ opening, message: failure.message, blocked: true, busy: false })
           else setRecovery((current) => (current?.opening === opening && current.reconciliation ? null : current))
         } else {
@@ -697,7 +704,7 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
           // exceptions): the request may have committed, so keep it frozen for replay.
           // Actionable guidance from the server (an expired session) is shown as is.
           if (!markUncertain(failure.code === "UNAUTHENTICATED" ? accessMessage(failure.message) : undefined)) return false
-          if ((failure.code === "FORBIDDEN" || failure.code === "STALE_STATE") && activeOpening.current === opening)
+          if ((failure.code === "FORBIDDEN" || failure.code === "STALE_STATE" || failure.code === "ALREADY_FINALIZED") && activeOpening.current === opening)
             setRecovery({ opening, message: accessMessage(failure.message), blocked: true, busy: false, reconciliation: { command, payload: state.payload ?? input } })
         }
         return true

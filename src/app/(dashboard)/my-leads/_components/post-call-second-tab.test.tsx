@@ -7,7 +7,7 @@ vi.mock("../actions", () => actions)
 vi.mock("@/app/(dashboard)/sequences/actions", () => ({ listDripChoices: vi.fn(async () => ({ ok: true, data: [] })), startDripForLeads: vi.fn() }))
 
 import type { QueueRow } from "@/lib/my-leads/queries"
-import { resetExtrasStoreForTests } from "./extras-store"
+import { listExtrasFor, resetExtrasStoreForTests, simulateExtrasReloadForTests } from "./extras-store"
 import { PostCallPrompt } from "./post-call-prompt"
 import { resetSubmissionStoreForTests } from "./submission-store"
 import { useAttemptWorkflow, type AttemptOpening } from "./use-attempt-workflow"
@@ -56,7 +56,7 @@ describe("second prompt for an already-saved call", () => {
 
   it("shows the existing already-saved wording, blocks Save, and writes no note or next step", async () => {
     // What the server answers when tab A already finalized this call under its own key.
-    actions.submitMyLeadCommand.mockResolvedValue({ ok: false, answered: true, certainty: "rejected", code: "STALE_STATE", message: "This was already saved. Refresh to see it." })
+    actions.submitMyLeadCommand.mockResolvedValue({ ok: false, answered: true, certainty: "rejected", code: "ALREADY_FINALIZED", message: "This was already saved. Refresh to see it." })
     const user = userEvent.setup()
     render(<Harness />)
     await user.click(within(screen.getByTestId("post-call-outcome")).getByRole("radio", { name: "Reached" }))
@@ -72,5 +72,21 @@ describe("second prompt for an already-saved call", () => {
     expect(actions.submitMyLeadCommand).toHaveBeenCalledTimes(1)
     // The refused second save never reaches the note or the appointment.
     await waitFor(() => expect(actions.savePostCallExtras).not.toHaveBeenCalled())
+    // The refused save's stored note and next step are gone, so after a reload the call screen's
+    // not-saved banner (listExtrasFor) has nothing to show and no Retry to offer.
+    expect(listExtrasFor("user-1", "p1")).toEqual([])
+    simulateExtrasReloadForTests()
+    expect(listExtrasFor("user-1", "p1")).toEqual([])
+    expect(window.sessionStorage.getItem("sandra:my-leads:post-call-extras:v1")).toBeNull()
+  })
+
+  it("the extras saver drops the stored entry when the server says another prompt already saved the call", async () => {
+    const { putExtras, getExtras } = await import("./extras-store")
+    const extras = { submissionId: "11111111-1111-4111-8111-111111111111", note: "n", nextStep: null, callActivityId: "22222222-2222-4222-8222-222222222222" }
+    putExtras({ viewerUserId: "user-1", attemptKey: "k1", propertyId: "p1", memberId: "rep-1", extras })
+    actions.savePostCallExtras.mockResolvedValue({ ok: false, message: "This was already saved. Refresh to see it.", alreadySaved: true })
+    await saveExtrasRequest({ attemptKey: "k1", memberId: "rep-1", propertyId: "p1", extras }, "user-1", new Set())
+    expect(actions.savePostCallExtras).toHaveBeenCalledWith(expect.objectContaining({ attemptKey: "k1", callActivityId: extras.callActivityId }))
+    expect(getExtras("user-1", "k1")).toBeNull()
   })
 })

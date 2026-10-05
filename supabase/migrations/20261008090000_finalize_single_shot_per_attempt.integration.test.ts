@@ -85,7 +85,7 @@ async function world(db: Client) {
     notes: (await db.query('select count(*)::int n from public.lead_notes where property_id=$1', [property])).rows[0].n as number,
     appointments: (await db.query("select count(*)::int n from public.tasks where related_property_id=$1 and type='appointment'", [property])).rows[0].n as number,
   });
-  return { org, rep, property, finalize, extras, counts };
+  return { org, rep, property, activity, asRep, finalize, extras, counts };
 }
 
 it('refuses a second key for an already-finalized attempt: one receipt, one note, one appointment; same-key replay stays idempotent', async () => {
@@ -113,6 +113,22 @@ it('refuses a second key for an already-finalized attempt: one receipt, one note
     expect(replay.failure).toBeNull();
     expect(replay.value).toMatchObject({ ok: true, duplicate: true, attemptId: first.value!.attemptId });
     expect(await w.counts()).toEqual({ receipts: 1, notes: 1, appointments: 1 });
+  });
+});
+
+it('fn_post_call_extras_foreign_finalize: true only for a call finalized under another key', async () => {
+  await withDb(async (db) => {
+    const w = await world(db);
+    const tabA = randomUUID(), tabB = randomUUID();
+    const foreign = (key: string, activity: string | null = w.activity) => w.asRep(async () => (await db.query(
+      'select public.fn_post_call_extras_foreign_finalize($1,$2,$3) as r', [w.org, key, activity])).rows[0].r as boolean);
+    // Nothing finalized yet: nobody is foreign.
+    expect((await foreign(tabB)).value).toBe(false);
+    expect((await w.finalize('reached', tabA)).failure).toBeNull();
+    // Tab A finalized: tab B's key is foreign, tab A's own key is not, and another call is untouched.
+    expect((await foreign(tabB)).value).toBe(true);
+    expect((await foreign(tabA)).value).toBe(false);
+    expect((await foreign(tabB, randomUUID())).value).toBe(false);
   });
 });
 

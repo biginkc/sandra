@@ -488,9 +488,9 @@ export async function submitMyLeadCommand(
       );
     // Another prompt (a second tab, or the call-screen dock) already saved this call under its own
     // key. Nothing was written, so this prompt must not write its note or next step either: the
-    // blocked STALE_STATE recovery (existing wording, Refresh) keeps the extras unflushed.
+    // blocked recovery (existing wording, Refresh) keeps the extras unflushed.
     if (named(message, ["ALREADY_FINALIZED"]))
-      return ans(failure("rejected", ALREADY_SAVED, "STALE_STATE" as const));
+      return ans(failure("rejected", ALREADY_SAVED, "ALREADY_FINALIZED" as const));
     if (
       named(message, ["STALE_STATE", "STALE_ASSIGNMENT"]) ||
       message.includes("STALE_")
@@ -998,6 +998,10 @@ export async function savePostCallExtras(input: {
   memberId: string;
   propertyId: string;
   submissionId: string;
+  /** The finalize idempotency key of the attempt these extras belong to. */
+  attemptKey?: string | null;
+  /** The Sandra call the attempt records; with attemptKey it lets the server refuse a foreign-finalized call. */
+  callActivityId?: string | null;
   note: string | null;
   nextStep: {
     dueAt: string;
@@ -1010,7 +1014,7 @@ export async function savePostCallExtras(input: {
       nextStep: "created" | "skipped" | "failed";
       message?: string;
     }
-  | { ok: false; message: string }
+  | { ok: false; message: string; alreadySaved?: true }
 > {
   if (
     !POST_CALL_UUID.test(input.submissionId ?? "") ||
@@ -1032,6 +1036,33 @@ export async function savePostCallExtras(input: {
     row = lookup.row;
   } catch {
     return { ok: false, message: "Could not confirm this lead. Please retry." };
+  }
+
+  // Defence in depth: another prompt (a second tab, or the dock) may have saved this same call under
+  // its own key. Those extras belong to a refused save and must write nothing.
+  if (input.callActivityId && input.attemptKey) {
+    if (!POST_CALL_UUID.test(input.callActivityId) || !POST_CALL_UUID.test(input.attemptKey))
+      return { ok: false, message: "Choose a valid note and next step." };
+    try {
+      const viewer = await myLeadsViewer();
+      const { data, error } = await (
+        viewer.client as unknown as {
+          rpc(
+            name: string,
+            args: Record<string, string>,
+          ): Promise<{ data: boolean | null; error: { message?: string } | null }>;
+        }
+      ).rpc("fn_post_call_extras_foreign_finalize", {
+        p_org: viewer.orgId,
+        p_attempt_key: input.attemptKey,
+        p_call_activity: input.callActivityId,
+      });
+      if (error || typeof data !== "boolean")
+        return { ok: false, message: "Could not confirm this save. Please retry." };
+      if (data) return { ok: false, message: ALREADY_SAVED, alreadySaved: true };
+    } catch {
+      return { ok: false, message: "Could not confirm this save. Please retry." };
+    }
   }
 
   const messages: string[] = [];

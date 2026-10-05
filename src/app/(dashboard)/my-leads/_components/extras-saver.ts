@@ -37,6 +37,8 @@ export async function saveExtrasRequest(
       memberId: request.memberId,
       propertyId: request.propertyId,
       submissionId: extras.submissionId,
+      attemptKey: request.attemptKey,
+      callActivityId: extras.callActivityId ?? null,
       note: extras.note,
       nextStep: extras.nextStep,
     })
@@ -45,6 +47,7 @@ export async function saveExtrasRequest(
   } finally {
     inFlight.delete(extras.submissionId)
   }
-  if (extrasConfirmed(result)) clearExtras(viewerUserId, request.attemptKey)
+  // Done with: both extras written, or another prompt already saved this call (never retry those).
+  if (extrasConfirmed(result) || (!result.ok && result.alreadySaved)) clearExtras(viewerUserId, request.attemptKey)
   return result
 }
