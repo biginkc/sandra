@@ -130,13 +130,19 @@ describe("useCallStatePoll", () => {
     expect(pollMock).toHaveBeenCalledTimes(2);
   });
 
-  it("stops polling after the server says no polled flag is on", async () => {
-    pollMock.mockResolvedValue(ok({ idle: true }));
-    renderHook(() => useCallStatePoll({ enabled: true, suspended: false }));
+  it("slows to an idle re-check when no polled flag is on, then resumes when a flag flips on", async () => {
+    pollMock.mockResolvedValueOnce(ok({ idle: true }));
+    const { result } = renderHook(() => useCallStatePoll({ enabled: true, suspended: false }));
     await tick(0);
     expect(pollMock).toHaveBeenCalledTimes(1);
-    await tick(60_000);
+    await tick(10_000);
     expect(pollMock).toHaveBeenCalledTimes(1);
+    pollMock.mockResolvedValue(ok({ prompts: [prompt("a")] }));
+    await tick(50_000);
+    expect(pollMock).toHaveBeenCalledTimes(2);
+    expect(result.current.prompts.map((p) => p.attemptId)).toEqual(["a"]);
+    await tick(10_000);
+    expect(pollMock).toHaveBeenCalledTimes(3);
   });
 
   it("keeps the last good value for a surface whose read failed and updates the rest", async () => {

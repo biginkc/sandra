@@ -11,7 +11,7 @@ import {
   type CallStateSnapshot,
 } from "@/lib/my-leads/call-state";
 
-type Options = { enabled: boolean; suspended: boolean; intervalMs?: number; backoffMs?: number };
+type Options = { enabled: boolean; suspended: boolean; intervalMs?: number; backoffMs?: number; idleMs?: number };
 
 type Result = {
   state: CallStateSnapshot;
@@ -26,7 +26,7 @@ type Result = {
 const isVisible = () => typeof document === "undefined" || document.visibilityState === "visible";
 
 /** Visibility-gated, non-overlapping poll of the durable call state. */
-export function useCallStatePoll({ enabled, suspended, intervalMs = 10_000, backoffMs = 30_000 }: Options): Result {
+export function useCallStatePoll({ enabled, suspended, intervalMs = 10_000, backoffMs = 30_000, idleMs = 60_000 }: Options): Result {
   const [state, setState] = useState<CallStateSnapshot>(EMPTY_CALL_STATE);
   const [error, setError] = useState<string | null>(null);
   const stateRef = useRef<CallStateSnapshot>(EMPTY_CALL_STATE);
@@ -46,18 +46,18 @@ export function useCallStatePoll({ enabled, suspended, intervalMs = 10_000, back
     let alive = true;
     let inFlight = false;
     let backedOff = false;
-    // No polled flag is on for the org: stop the timer instead of re-reading flags every interval.
+    // No polled flag is on for the org: back off to a slow re-check (one cheap flag read per idleMs) so
+    // a flag turned on later resumes polling without a reload or tab switch.
     let idle = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
     const schedule = () => {
       if (timer) clearTimeout(timer);
-      if (idle) return;
       timer = setTimeout(() => {
         if (!alive) return;
         if (isVisible()) fetchNow(false);
         schedule();
-      }, backedOff ? backoffMs : intervalMs);
+      }, idle ? idleMs : backedOff ? backoffMs : intervalMs);
     };
 
     const fetchNow = (more: boolean) => {
@@ -121,7 +121,7 @@ export function useCallStatePoll({ enabled, suspended, intervalMs = 10_000, back
       document.removeEventListener("visibilitychange", onVisibility);
       controls.current = { fetchNow: () => {} };
     };
-  }, [enabled, intervalMs, backoffMs]);
+  }, [enabled, intervalMs, backoffMs, idleMs]);
 
   useEffect(() => {
     const was = prevSuspended.current;
