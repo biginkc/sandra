@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   assertLaneSafe,
   CI_DIAL_KEY_REF,
-  dialpadEventPayload,
   expireDialIntentCi,
   purgeDialpadEvidenceCi,
   seedFeatureFlags,
@@ -16,26 +15,11 @@ const noDb = { connect: () => { throw new Error("must not connect"); }, query: (
 
 describe("my-leads-p2 acceptance fixture (pure parts)", () => {
   it("signs a body the app verifier accepts, and rejects another secret", () => {
-    const text = dialpadEventPayload({ callId: "6543210987654321098", state: "calling", at: 1_790_000_000_000, externalNumber: "+18165550142", targetUserId: "4242424242" });
+    const text = '{"call_id":6543210987654321098,"state":"calling","event_timestamp":1790000000000}';
     const jwt = signDialpadWebhook(text, SECRET);
     const ok = verifyDialpadWebhookJwt(jwt, [SECRET]);
     expect(ok.ok && ok.payloadText).toBe(text);
     expect(verifyDialpadWebhookJwt(jwt, ["another-secret-0123456789abc"]).ok).toBe(false);
-  });
-
-  it("keeps 19-digit call and 10-digit target ids as bare integers and the timestamp at 13 digits", () => {
-    const text = dialpadEventPayload({
-      callId: "6543210987654321098", state: "hangup", at: 1_790_000_064_000, dateStarted: 1_790_000_000_000, dateConnected: 1_790_000_004_000,
-      customData: "cd", externalNumber: "+18165550142", targetUserId: "4242424242", shareLink: "https://dialpad.com/callreview/x", adminRecordingUrl: "https://dialpad.com/blob/x.mp3",
-    });
-    expect(text.startsWith('{"call_id":6543210987654321098,')).toBe(true);
-    expect(text).toContain('"id":4242424242}');
-    expect(text).toMatch(/"event_timestamp":1790000064000,/);
-    const parsed = JSON.parse(text) as Record<string, unknown>;
-    expect(parsed.talk_time).toBe(60_000);
-    expect(parsed.admin_recording_urls).toEqual(["https://dialpad.com/blob/x.mp3"]);
-    expect(() => dialpadEventPayload({ callId: "abc", state: "calling", at: 1_790_000_000_000, externalNumber: "+1", targetUserId: "1" })).toThrow(/callId/);
-    expect(() => dialpadEventPayload({ callId: "1", state: "calling", at: 1_790_000_000, externalNumber: "+1", targetUserId: "1" })).toThrow(/13-digit/);
   });
 
   it("only runs against a disposable loopback database", () => {

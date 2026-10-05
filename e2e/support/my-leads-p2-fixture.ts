@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { createHmac } from "node:crypto";
 
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 
@@ -124,27 +124,6 @@ export async function seedDialpadForRep(db: Db, input: { orgId: string; repUserI
 }
 
 /**
- * Puts the org back to its defaults. Every step is its own transaction and a failure never skips
- * the rest (the designation restore must always run or the next file's reset trigger refuses);
- * the first error is rethrown at the end. Dialpad evidence tables forbid deletes, so the
- * connection is disabled and bindings are revoked through their function.
- */
-export async function resetCloseWorld(db: Db, input: { orgId: string; repUserId: string }): Promise<void> {
-  const errors: unknown[] = [];
-  const step = async (fn: () => Promise<unknown>) => { try { await fn(); } catch (e) { errors.push(e); } };
-  await step(() => asService(db, (run) => setDesignation(run, input.orgId, input.repUserId, false)));
-  await step(() => asService(db, (run) => run("delete from public.my_leads_feature_flags where org_id=$1", [input.orgId])));
-  await step(() => asService(db, (run) => run("update public.dialpad_org_connections set status='disabled', updated_at=now() where org_id=$1", [input.orgId])));
-  await step(() =>
-    asService(db, async (run) => {
-      const live = await run<{ id: string }>("select id from public.dialpad_member_bindings where org_id=$1 and status <> 'revoked'", [input.orgId]);
-      for (const row of live.rows) await run("select public.fn_revoke_dialpad_member_binding($1,'p2 acceptance cleanup')", [row.id]);
-    }),
-  );
-  if (errors.length > 0) throw errors[0];
-}
-
-/**
  * Disposable database only. Bindings reference auth.users with ON DELETE RESTRICT and forbid row
  * deletes, so the job's exact-run identity cleanup could never remove the test rep while one
  * exists. TRUNCATE fires no row triggers; refuses outside the ci lane.
@@ -155,70 +134,6 @@ export async function purgeDialpadEvidenceCi(db: Db, env: Env = process.env): Pr
 }
 
 export type SyntheticLead = { propertyId: string; contactId: string; address: string; phoneE164: string; episodeId: string; runTag: string };
-
-/**
- * A synthetic lead assigned to the rep (so the assignment trigger opens a live episode), in queue
- * stage `contacted` with one old manual outreach attempt so it ranks in the Call next strip.
- * `training: true` makes the immutable training variant instead (service-role insert, dedicated
- * contact, `new_lead`), which gets no episode, queue row or attempt.
- */
-export async function createSyntheticLead(
-  db: Db,
-  input: { orgId: string; repUserId: string; runTag: string; phoneE164: string; lastTouchDaysAgo?: number; training?: boolean },
-): Promise<SyntheticLead> {
-  if (!/^\+1\d{10}$/.test(input.phoneE164)) throw new Error("phoneE164 must look like +1XXXXXXXXXX");
-  const propertyId = randomUUID();
-  const contactId = randomUUID();
-  const address = `${input.runTag} ${propertyId.slice(0, 8)} Fixture Ln`;
-  const days = input.lastTouchDaysAgo ?? 20;
-  const training = input.training === true;
-
-  await db.query(
-    "insert into public.contacts(id,org_id,first_name,last_name,phone_1,phone_1_type) values ($1,$2,$3,'Seller',$4,'mobile')",
-    [contactId, input.orgId, input.runTag, input.phoneE164],
-  );
-  await asService(db, (run) =>
-    run(
-      `insert into public.properties(id,org_id,address,city,state,zip,status,homeowner_contact_id,assigned_user_id,is_training)
-       values ($1,$2,$3,'Kansas City','MO','64151','new_lead',$4,$5,$6)`,
-      [propertyId, input.orgId, address, contactId, input.repUserId, training],
-    ),
-  );
-  const ep = await db.query<{ id: string }>(
-    "select id from public.acquisition_assignment_episodes where property_id=$1 and ended_at is null order by assigned_at desc limit 1",
-    [propertyId],
-  );
-  const episodeId = ep.rows[0]?.id ?? "";
-  if (training) return { propertyId, contactId, address, phoneE164: input.phoneE164, episodeId, runTag: input.runTag };
-  if (!episodeId) throw new Error("createSyntheticLead: no live assignment episode; is the rep designated and acquisitions enabled?");
-
-  await db.query(
-    `insert into public.acquisition_queue_states(property_id,org_id,stage,stage_entered_at)
-     values ($1,$2,'contacted', now() - make_interval(days => $3::int))
-     on conflict (property_id,org_id) do update set stage='contacted', stage_entered_at=excluded.stage_entered_at`,
-    [propertyId, input.orgId, days],
-  );
-  await db.query(
-    `insert into public.acquisition_attempts(org_id,property_id,assignment_episode_id,actor_user_id,attempt_kind,source,occurred_at,idempotency_key,outcome)
-     values ($1,$2,$3,$4,'outreach','manual', now() - make_interval(days => $5::int), $6, 'no_answer')`,
-    [input.orgId, propertyId, episodeId, input.repUserId, days, randomUUID()],
-  );
-  return { propertyId, contactId, address, phoneE164: input.phoneE164, episodeId, runTag: input.runTag };
-}
-
-/** A prepared (not dispatched) intent for the lead, minted through the same function the dial path uses. */
-export async function prepareDialpadIntent(
-  db: Db,
-  input: { orgId: string; repUserId: string; lead: SyntheticLead },
-): Promise<{ intentId: string; customData: string }> {
-  const r = await asService(db, (run) =>
-    run<{ v: { intentId: string; customData: string } }>(
-      "select public.fn_prepare_dialpad_call_intent($1,$2,$3,$4,1::smallint,$5,null,600) as v",
-      [input.orgId, input.repUserId, input.lead.propertyId, input.lead.contactId, randomUUID()],
-    ),
-  );
-  return { intentId: r.rows[0]!.v.intentId, customData: String(r.rows[0]!.v.customData) };
-}
 
 export type DialIntentRow = {
   id: string; status: string; customData: string; destinationE164: string; idempotencyKey: string;
@@ -297,36 +212,6 @@ export type DialpadEventInput = {
   dateConnected?: number;
   talkTimeMs?: number;
 };
-
-/** Raw payload text. `call_id` and `target.id` are written as bare integers: the app keeps 64-bit ids exact only as text. */
-export function dialpadEventPayload(i: DialpadEventInput): string {
-  if (!/^\d{1,20}$/.test(i.callId)) throw new Error("callId must be a decimal integer string");
-  if (!/^\d{1,20}$/.test(i.targetUserId)) throw new Error("targetUserId must be a decimal integer string");
-  if (!Number.isInteger(i.at) || String(i.at).length !== 13) throw new Error("at must be 13-digit epoch milliseconds");
-  const started = i.dateStarted ?? i.at;
-  const connected = i.dateConnected ?? started + 4_000;
-  const hangup = i.state === "hangup";
-  const fields: Record<string, unknown> = {
-    state: i.state,
-    event_timestamp: i.at,
-    direction: i.direction ?? "outbound",
-    external_number: i.externalNumber,
-    internal_number: "+18165550100",
-    target: { type: "user", id: "@@TARGET@@" },
-    date_started: started,
-  };
-  if (i.customData) fields.custom_data = i.customData;
-  if (i.state !== "calling") fields.date_connected = connected;
-  if (hangup) {
-    fields.date_ended = i.at;
-    fields.talk_time = i.talkTimeMs ?? Math.max(0, i.at - connected);
-    fields.was_recorded = Boolean(i.shareLink || i.adminRecordingUrl);
-    if (i.shareLink) fields.public_call_review_share_link = i.shareLink;
-    if (i.adminRecordingUrl) fields.admin_recording_urls = [i.adminRecordingUrl];
-  }
-  const body = JSON.stringify(fields).replace('"@@TARGET@@"', i.targetUserId);
-  return `{"call_id":${i.callId},${body.slice(1)}`;
-}
 
 /** POSTs a signed body to the app's Dialpad voice webhook for one connection. */
 export function postDialpadEvent(baseUrl: string, connectionId: string, jwt: string): Promise<Response> {
