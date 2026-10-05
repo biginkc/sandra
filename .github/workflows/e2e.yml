@@ -87,6 +87,11 @@ jobs:
           # Keep real thread-detail loading and read receipts on a fresh
           # server; the shared run stalled these requests before mark-read.
           npm run test:e2e -- e2e/cockpit-thread-panel.spec.ts
+          # my-leads-close (TECH-PLAN Phase 4, 4.3): the Phase 1 acceptance lane on its own fresh
+          # server. It seeds a synthetic non-training lead over the disposable DB's owner connection,
+          # turns the Phase 1 flags on for the test org in its own setup, and posts stubbed Dialpad
+          # events to the local webhook; the shards above grep-invert it.
+          npm run test:e2e -- e2e/my-leads-close.spec.ts
           # Keep the sequence readiness contract on its own fresh server.
           # The long shared shard can lose its Next/RSC stream after several
           # minutes, which also takes down the local ledger used by these
@@ -96,9 +101,9 @@ jobs:
           # six minutes the CI server has emitted ECONNRESET and stopped
           # committing otherwise-valid RSC interactions. Three disjoint broad
           # shards keep all assertions while preventing that lifecycle leak.
-          npm run test:e2e -- --grep-invert 'sequence readiness|server-side egress guard records denial before network in local ledger|Leads board v2 foundation is usable at desktop and narrow widths|switching tabs preserves URL state|sidebar nav links all route correctly|long thread scrolls to most recent on open|opening a thread clears its unread badge' --shard=1/3
-          npm run test:e2e -- --grep-invert 'sequence readiness|server-side egress guard records denial before network in local ledger|Leads board v2 foundation is usable at desktop and narrow widths|switching tabs preserves URL state|sidebar nav links all route correctly|long thread scrolls to most recent on open|opening a thread clears its unread badge' --shard=2/3
-          npm run test:e2e -- --grep-invert 'sequence readiness|server-side egress guard records denial before network in local ledger|Leads board v2 foundation is usable at desktop and narrow widths|switching tabs preserves URL state|sidebar nav links all route correctly|long thread scrolls to most recent on open|opening a thread clears its unread badge' --shard=3/3
+          npm run test:e2e -- --grep-invert 'my-leads-close|sequence readiness|server-side egress guard records denial before network in local ledger|Leads board v2 foundation is usable at desktop and narrow widths|switching tabs preserves URL state|sidebar nav links all route correctly|long thread scrolls to most recent on open|opening a thread clears its unread badge' --shard=1/3
+          npm run test:e2e -- --grep-invert 'my-leads-close|sequence readiness|server-side egress guard records denial before network in local ledger|Leads board v2 foundation is usable at desktop and narrow widths|switching tabs preserves URL state|sidebar nav links all route correctly|long thread scrolls to most recent on open|opening a thread clears its unread badge' --shard=2/3
+          npm run test:e2e -- --grep-invert 'my-leads-close|sequence readiness|server-side egress guard records denial before network in local ledger|Leads board v2 foundation is usable at desktop and narrow widths|switching tabs preserves URL state|sidebar nav links all route correctly|long thread scrolls to most recent on open|opening a thread clears its unread badge' --shard=3/3
           # Keep the navigation-heavy Leads board contract on its own fresh
           # Turbopack server. Run the two client-navigation contracts against
           # Webpack: GitHub's Turbopack dev runtime returns valid RSC payloads
@@ -296,6 +301,9 @@ jobs:
 
       - name: My Leads housekeeping operator script (unit)
         run: node --test scripts/my-leads-housekeeping.test.mjs
+
+      - name: My Leads close KPI parity rules, lease manifest and fixture (unit)
+        run: npm run test:my-leads-close-unit
 
       # Every SQL mutation must be caught by the RPC suite: a surviving mutation means a test gap.
       - name: search_properties mutation harness (each mutation must fail the suite)
