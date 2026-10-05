@@ -1,4 +1,4 @@
--- Rollback for 20261007130200_dialpad_unmatched_event_redaction. Remove the cron call first.
+-- Rollback for 20261007150200_dialpad_unmatched_event_redaction. Remove the cron call first.
 -- Drops the redaction function and restores the pre-2.10 guard verbatim
 -- (20260929120000_dialpad_cti_call_projection.sql:45-77). Rows already redacted stay redacted
 -- (intentional: the payload is gone) and the nullable redacted_at column stays as their audit mark.
