@@ -30,7 +30,7 @@ Last updated: 2026-10-04 (after #801 release)
 | `claude/my-leads-p2-data-plane` | #803 | Phase 2 sole writer | draft, built, NOT merged; Opus YES at `757e01c0` |
 | `claude/my-leads-p2-ui` | #809 | Phase 2 writer | draft, built, NOT merged; Opus YES at `8ab5fc5a`; owner Claude Sonnet 5.5 builder, pre-enable fixes in progress (keep key after expired callback; resume polling on flag change) |
 | `claude/my-leads-p4-acceptance` | #804 | Phase 4 writer | draft, built, NOT merged; Opus YES at `3cec0c19` |
-| `claude/my-leads-p3-comps` | #805 | Phase 3 writer | draft, built, NOT merged; Opus YES at `bb86747e` |
+| `claude/my-leads-p3-comps` | #805 | Phase 3 writer: Claude Sonnet 5.5 (builder) | draft, built, NOT merged; main merged (f064f455); Opus YES at `bb86747e` pre-merge |
 | `claude/my-leads-p3-call-screen` | #807 | Phase 3 writer | draft, built, NOT merged; Opus YES at `a908ad1c` |
 | `claude/my-leads-p1a-replay-fix` | none | Claude (Sonnet 5.5 builder) | draft PR open: restore `location` comparison (and tolerant `mode`) in fn_create_next_step replay, #797 tracked follow-up. Migration 20261006111000 (NOT applied). |
 | `p3-send-card`, `p1a-retire` | none | none | NOT built yet |

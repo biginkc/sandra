@@ -81,6 +81,7 @@ export default defineConfig({
       "supabase/migrations/20261006100300_dialpad_native_concurrency.integration.test.ts",
       "supabase/migrations/20261006100400_dialpad_native_assign_to_lead.integration.test.ts",
       "supabase/migrations/20261006100500_dialpad_artifact_fetches.integration.test.ts",
+      "supabase/migrations/20261007100000_lead_comps_foundation.integration.test.ts",
       "supabase/migrations/20261007150000_call_prompt_acknowledgement.integration.test.ts",
       "supabase/migrations/20261007150100_dialpad_api_dial_support.integration.test.ts",
       "supabase/migrations/20261007150200_dialpad_unmatched_event_redaction.integration.test.ts",
