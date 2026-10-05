@@ -24,7 +24,7 @@ import {
   type DialpadEventInput,
   type SyntheticLead,
 } from "./support/my-leads-close-fixture";
-import { enableDialpadDialing, expireDialIntentCi, readDialIntents, readEventDispositions } from "./support/my-leads-p2-fixture";
+import { addLeadOnSharedContact, enableDialpadDialing, expireDialIntentCi, readDialIntents, readEventDispositions } from "./support/my-leads-p2-fixture";
 
 /**
  * my-leads-close Phase 2 CI acceptance slice (TECH-PLAN 4.3: T0 Phase 1-2 seams, T3, T7, T8).
@@ -302,8 +302,9 @@ test.describe.serial("my-leads-close: Phase 2 CI lane", () => {
     await expect(page.getByTestId("post-call-prompt")).toBeVisible({ timeout: 40_000 });
 
     // The same number on two leads assigned to the rep: quarantined as ambiguous, listed for assignment.
-    await createSyntheticLead(db, { orgId: DEFAULT_ORG_ID, repUserId, runTag, phoneE164: PHONE_SHARED, lastTouchDaysAgo: 26 });
-    await createSyntheticLead(db, { orgId: DEFAULT_ORG_ID, repUserId, runTag, phoneE164: PHONE_SHARED, lastTouchDaysAgo: 27 });
+    // (contacts.phone_1 is unique, so "one number on two leads" is one contact on two properties.)
+    const shared = await createSyntheticLead(db, { orgId: DEFAULT_ORG_ID, repUserId, runTag, phoneE164: PHONE_SHARED, lastTouchDaysAgo: 26 });
+    await addLeadOnSharedContact(db, { orgId: DEFAULT_ORG_ID, repUserId, contactId: shared.contactId, runTag });
     const ambiguousCall = newCallId();
     await postCall({ callId: ambiguousCall, externalNumber: PHONE_SHARED });
     await expect

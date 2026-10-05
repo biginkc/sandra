@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type { Pool } from "pg";
 
 import { assertLaneSafe, CI_WEBHOOK_SECRET_REF, handleTarget } from "./my-leads-close-fixture";
@@ -101,4 +103,35 @@ export async function readEventDispositions(db: Db, orgId: string, callId: strin
     [orgId, callId],
   );
   return r.rows.map((x) => x.d as string);
+}
+
+/**
+ * Puts a second lead on an existing lead's contact (`contacts.phone_1` is unique, so "one number on two
+ * leads" is one contact on two properties, the case #803's native matcher integration test covers).
+ * Assigned to the same rep so the assignment trigger opens its own live episode. Insert goes through the
+ * service role like the shared fixture's property insert. Returns the new property id.
+ */
+export async function addLeadOnSharedContact(
+  db: Db,
+  input: { orgId: string; repUserId: string; contactId: string; runTag: string },
+): Promise<string> {
+  const propertyId = randomUUID();
+  const c = await db.connect();
+  try {
+    await c.query("begin");
+    await c.query("select set_config('request.jwt.claim.role','service_role',true)");
+    await c.query("set local role service_role");
+    await c.query(
+      `insert into public.properties(id,org_id,address,city,state,zip,status,homeowner_contact_id,assigned_user_id)
+       values ($1,$2,$3,'Kansas City','MO','64151','new_lead',$4,$5)`,
+      [propertyId, input.orgId, `${input.runTag} ${propertyId.slice(0, 8)} Shared Contact Rd`, input.contactId, input.repUserId],
+    );
+    await c.query("commit");
+  } catch (error) {
+    await c.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    c.release();
+  }
+  return propertyId;
 }
