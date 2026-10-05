@@ -5,8 +5,9 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { loadMyLeadQueueRow } from "@/app/(dashboard)/my-leads/actions";
-import { PostCallPrompt } from "@/app/(dashboard)/my-leads/_components/post-call-prompt";
-import { saveExtrasRequest, type ExtrasRequest } from "@/app/(dashboard)/my-leads/_components/extras-saver";
+import { PostCallPrompt, ReceiptLines } from "@/app/(dashboard)/my-leads/_components/post-call-prompt";
+import { listExtrasFor } from "@/app/(dashboard)/my-leads/_components/extras-store";
+import { extrasConfirmed, saveExtrasRequest, type ExtrasRequest } from "@/app/(dashboard)/my-leads/_components/extras-saver";
 import type { PostCallExtrasState } from "@/app/(dashboard)/my-leads/_components/types";
 import { useAttemptWorkflow, type AttemptOpening } from "@/app/(dashboard)/my-leads/_components/use-attempt-workflow";
 import { WorkflowRecoveryContext } from "@/app/(dashboard)/my-leads/_components/workflow-form";
@@ -64,7 +65,6 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
   // refresh (e.g. after a valuation save) hands back a new queueRow object at the same version; that
   // must not mint a new opening and a second attempt key. The row is read at the version's first render.
   const queueVersion = queueRow.queueVersion;
-  const openingKey = `${propertyId}:${queueVersion}`;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const opening = useMemo<AttemptOpening>(() => ({ action: "log-attempt", row: queueRow }), [propertyId, queueVersion]);
   const [extrasState, setExtrasState] = useState<PostCallExtrasState | null>(null);
@@ -87,6 +87,31 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
     });
     if (!result) return;
     if (show && extrasRequest.current === request) setExtrasState({ status: "done", result });
+    if (result.ok) router.refresh();
+  };
+
+  // After a reload the stored entry of an earlier attempt on this lead (a failed or interrupted
+  // save) is surfaced here with a Retry, through the same saver. The live page keeps such an entry
+  // for its recovery paths; this screen has no recovery record after a reload, so it offers Retry.
+  const [recovered, setRecovered] = useState<ExtrasRequest | null>(null);
+  const [recoveredState, setRecoveredState] = useState<PostCallExtrasState | null>(null);
+  useEffect(() => {
+    const entry = listExtrasFor(viewer.userId, propertyId)[0];
+    // Reads sessionStorage, which only exists on the client, once per lead.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setRecovered(entry ? { attemptKey: entry.attemptKey, memberId: entry.memberId, propertyId: entry.propertyId, extras: entry.extras } : null);
+    setRecoveredState(entry ? { status: "done", result: { ok: false, message: "A note or next step from an earlier call on this lead was not saved." } } : null);
+  }, [viewer.userId, propertyId]);
+  const retryRecovered = async () => {
+    if (!recovered) return;
+    const result = await saveExtrasRequest(recovered, viewer.userId, extrasInFlight.current, () => setRecoveredState({ status: "saving" }));
+    if (!result) return;
+    if (extrasConfirmed(result)) {
+      setRecovered(null);
+      setRecoveredState(null);
+    } else {
+      setRecoveredState({ status: "done", result });
+    }
     if (result.ok) router.refresh();
   };
 
@@ -138,13 +163,14 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
   const history = (
     <HistoryPanel propertyId={propertyId} contactId={lead.homeowner.contactId} viewerUserId={viewer.userId} notes={data.notes} messages={data.messages} />
   );
+  const recoveredBanner = recovered ? (
+    <div data-testid="call-screen-recovered-extras" className="rounded-[16px] border border-border bg-card p-4">
+      <ReceiptLines extras={recoveredState} sentNextStepAt={null} note={recovered.extras.note} onRetry={() => void retryRecovered()} />
+    </div>
+  ) : null;
   const prompt = (
     <WorkflowRecoveryContext.Provider value={recoveryValue}>
       <PostCallPrompt
-        // A new opening (a refresh at a new queue version) starts a fresh prompt, so a second call
-        // on the same lead is not stuck on "Attempt recorded". The same opening never remounts, so
-        // it cannot mint a second attempt key.
-        key={openingKey}
         variant="dock"
         open
         propertyId={propertyId}
@@ -203,7 +229,7 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
             {numbers}
             {/* contract card slot: p3-send-card */}
             <div className="order-3 lg:order-none">{history}</div>
-            <div data-testid="call-screen-prompt-dock" className="order-4 lg:sticky lg:bottom-0 lg:order-none">{prompt}</div>
+            <div data-testid="call-screen-prompt-dock" className="order-4 flex flex-col gap-3 lg:sticky lg:bottom-0 lg:order-none">{recoveredBanner}{prompt}</div>
           </div>
         </div>
       </div>

@@ -638,7 +638,7 @@ export function PostCallPrompt({
   )
 }
 
-function ReceiptLines({
+export function ReceiptLines({
   extras,
   sentNextStepAt,
   note,
