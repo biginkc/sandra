@@ -275,6 +275,42 @@ describe("dispatchSellerReminder", () => {
     expect(finishArgs(calls)).toEqual([expect.objectContaining({ p_status: status, p_reason: reason })]);
   });
 
+  it("reclaimed lease whose text already went out, then the task is rescheduled: holds the slot as uncertain, never cancelled", async () => {
+    // The first attempt reached the provider (a message row exists for the key) and the worker died.
+    // The appointment was then rescheduled; cancelling here would free the day slot for the successor.
+    const t = baseTables();
+    t.tasks.t1.status = "cancelled";
+    t.messages = { m1: { id: "m1", org_id: "org1", idempotency_key: row().send_key, metadata: {} } };
+    const { d, send, calls } = deps(t);
+    expect(await dispatchSellerReminder(d, row({ attempts: 2 }))).toEqual({ status: "uncertain", reason: "unknown_delivery" });
+    expect(send).not.toHaveBeenCalled();
+    expect(finishArgs(calls)).toEqual([expect.objectContaining({ p_status: "uncertain", p_reason: "unknown_delivery" })]);
+  });
+
+  it("reclaimed lease with proof nothing was sent still cancels or skips normally", async () => {
+    const t = baseTables();
+    t.tasks.t1.status = "cancelled";
+    t.messages = { m1: { id: "m1", org_id: "org1", idempotency_key: row().send_key, metadata: { providerAttempt: { outcome: "not_attempted" } } } };
+    const a = deps(t);
+    await dispatchSellerReminder(a.d, row({ attempts: 2 }));
+    expect(finishArgs(a.calls)).toEqual([expect.objectContaining({ p_status: "cancelled", p_reason: "task_changed" })]);
+    const b = deps({ ...baseTables(), tasks: { t1: { ...baseTables().tasks.t1, status: "cancelled" } } });
+    await dispatchSellerReminder(b.d, row({ attempts: 2 })); // no message row at all
+    expect(finishArgs(b.calls)).toEqual([expect.objectContaining({ p_status: "cancelled", p_reason: "task_changed" })]);
+  });
+
+  it("a deferral on a reclaimed lease that may have sent is held uncertain; a failed lookup also holds", async () => {
+    const early = baseTables();
+    early.messages = { m1: { id: "m1", org_id: "org1", idempotency_key: row().send_key, metadata: {} } };
+    const a = deps(early, { now: () => new Date("2026-10-07T11:00:00Z") });
+    expect(await dispatchSellerReminder(a.d, row({ attempts: 2 }))).toMatchObject({ status: "uncertain" });
+    const noMessages = baseTables();
+    noMessages.tasks.t1.status = "cancelled";
+    delete (noMessages as Partial<Tables>).messages; // fake admin throws on the lookup
+    const b = deps(noMessages);
+    expect(await dispatchSellerReminder(b.d, row({ attempts: 2 }))).toMatchObject({ status: "uncertain" });
+  });
+
   it("tenant and linkage fence: a recipient from another org, or not linked to the property, is never texted", async () => {
     const other = baseTables();
     other.contacts.k1.org_id = "org2";
