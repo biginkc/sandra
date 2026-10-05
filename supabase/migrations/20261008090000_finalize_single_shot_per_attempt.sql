@@ -38,6 +38,18 @@ begin
   end if;
 end $patch$;
 
+-- Deterministic RFC 4122 UUID (version 5 nibble, variant 10xx) from a name, so every validator that
+-- insists on a real UUID version/variant accepts the derived keys (a raw md5 cast does not set those bits).
+create or replace function public.fn_post_call_derived_uuid(p_name text)
+returns uuid
+language sql immutable parallel safe set search_path to '' as $function$
+  select (substr(h,1,12)||'5'||substr(h,14,3)
+    ||substr('89ab',((('x'||substr(h,17,1))::bit(4))::int & 3)+1,1)||substr(h,18))::uuid
+  from (select md5(p_name) as h) t;
+$function$;
+revoke all on function public.fn_post_call_derived_uuid(text) from public, anon;
+grant execute on function public.fn_post_call_derived_uuid(text) to authenticated, service_role;
+
 create or replace function public.fn_post_call_extras_proof(
   p_org uuid, p_property uuid, p_attempt_key uuid, p_call_activity uuid default null)
 returns jsonb
@@ -61,8 +73,8 @@ begin
     -- Keys derive from the attempt, so any number of openings or retries map to one note and one appointment
     -- through the existing unique indexes (lead_notes idempotency, tasks booking idempotency).
     return jsonb_build_object('status','proven','attemptId',v_attempt,
-      'noteKey',md5('post_call_note:'||v_attempt::text)::uuid,
-      'nextStepKey',md5('post_call_next_step:'||v_attempt::text)::uuid);
+      'noteKey',public.fn_post_call_derived_uuid('post_call_note:'||v_attempt::text),
+      'nextStepKey',public.fn_post_call_derived_uuid('post_call_next_step:'||v_attempt::text));
   end if;
   -- Another key already finalized this call: this prompt's extras belong to a refused save.
   if p_call_activity is not null and exists(

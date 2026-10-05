@@ -338,6 +338,18 @@ describe('savePostCallExtras',()=>{
     expect(mocks.createNote.mock.calls[1][2]).toBe(NOTE_KEY);expect(mocks.createStep.mock.calls[1][0].idempotencyKey).toBe(STEP_KEY);
     expect(mocks.createStep.mock.calls[0][0]).not.toHaveProperty('applyBookingEffects');
   });
+  it("accepts the real derived keys SQL returns for Astra's literal attempt id (version 5, RFC variant) and writes both extras",async()=>{
+    // fn_post_call_derived_uuid('post_call_note:' || attempt) / ('post_call_next_step:' || attempt) for 11111111-1111-4111-8111-111111111111 (asserted in the integration test).
+    const note='249bbca2-5080-5e49-a611-69fe513eab4f',step='fcecf655-7a01-5c38-b419-fc6a43c4a1c2';
+    mocks.rpc.mockResolvedValue({data:{status:'proven',attemptId:'11111111-1111-4111-8111-111111111111',noteKey:note,nextStepKey:step},error:null});
+    expect(await savePostCallExtras(input())).toEqual({ok:true,note:'saved',nextStep:'created'});
+    expect(mocks.createNote).toHaveBeenCalledWith('lead','Left a message',note);
+    expect(mocks.createStep).toHaveBeenCalledWith(expect.objectContaining({idempotencyKey:step}));
+  });
+  it('rejects the old raw-md5 keys (no version/variant bits) instead of writing under them',async()=>{
+    mocks.rpc.mockResolvedValue({data:{status:'proven',noteKey:'249bbca2-5080-4e49-2611-69fe513eab4f',nextStepKey:'fcecf655-7a01-bc38-b419-fc6a43c4a1c2'},error:null});
+    expect(await savePostCallExtras(input())).toMatchObject({ok:false,pending:true});noWrites();
+  });
   it('pending (no receipt for this key): writes nothing and keeps the extras for Retry (matrix 5, 7, 8)',async()=>{
     mocks.rpc.mockResolvedValue({data:{status:'pending'},error:null});
     expect(await savePostCallExtras(input())).toEqual({ok:false,pending:true,message:"Not saved yet: this call's save isn't confirmed. Your note is kept."});

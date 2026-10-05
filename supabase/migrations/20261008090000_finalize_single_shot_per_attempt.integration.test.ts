@@ -13,6 +13,12 @@ const strip = (file: string) => {
 const migration = strip('./20261008090000_finalize_single_shot_per_attempt.sql');
 const rollback = strip('../rollbacks/20261008090000_finalize_single_shot_per_attempt.sql');
 const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
+// The ACTUAL validator the server action applies to every key (read from its source, not re-typed).
+const actionsSource = readFileSync(new URL('../../src/app/(dashboard)/my-leads/actions.ts', import.meta.url), 'utf8');
+const regexSource = /const POST_CALL_UUID =\s*\/(.+)\/i;/.exec(actionsSource);
+if (!regexSource) throw new Error('POST_CALL_UUID validator not found in actions.ts');
+const actionUuid = new RegExp(regexSource[1], 'i');
+const RFC4122 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const FN = 'public.fn_finalize_acquisition_attempt_without_sms_obligation(jsonb)';
 
 // Every test runs in a rolled-back transaction. The database may or may not already carry the
@@ -82,6 +88,9 @@ async function world(db: Client) {
   // (never a client key). Pending and foreign write nothing.
   const writeExtras = async (answer: Proof, text: string, propertyId = property) => {
     if (answer.status !== 'proven') return false;
+    // The keys must survive the server action's own validation, or nothing would ever be written.
+    expect(answer.noteKey).toMatch(actionUuid);
+    expect(answer.nextStepKey).toMatch(actionUuid);
     await db.query('insert into public.lead_notes(org_id,property_id,author_user_id,body,idempotency_key) values ($1,$2,$3,$4,$5) on conflict do nothing',
       [org, propertyId, rep, text, answer.noteKey]);
     await db.query("select set_config('request.jwt.claim.role','service_role',true)");
@@ -171,6 +180,33 @@ it('matrix 10, 11: two openings, repeated retries and racing writers all derive 
     expect([second.noteKey, second.nextStepKey]).toEqual([first.noteKey, first.nextStepKey]);
     for (const text of ['opening one', 'opening two', 'opening one', 'retry']) await w.writeExtras(await w.proof(tabA), text);
     expect(await w.counts()).toEqual({ receipts: 1, notes: 1, appointments: 1 });
+  });
+});
+
+it('derived keys are real RFC 4122 UUIDs that pass the server action validator, and the literal example id yields the literal keys', async () => {
+  await withDb(async (db) => {
+    const w = await world(db);
+    const tabA = randomUUID();
+    expect((await w.finalize('reached', tabA)).failure).toBeNull();
+    const answer = await w.proof(tabA);
+    expect(answer.status).toBe('proven');
+    for (const key of [answer.noteKey!, answer.nextStepKey!]) {
+      expect(key).toMatch(actionUuid);
+      expect(key).toMatch(RFC4122);
+    }
+    expect(answer.noteKey).not.toBe(answer.nextStepKey);
+    // Written through the same path the action uses: exactly one note and one appointment.
+    expect(await w.writeExtras(answer, 'text')).toBe(true);
+    expect(await w.counts()).toEqual({ receipts: 1, notes: 1, appointments: 1 });
+    // The unit test hard-codes these for the attempt id Astra used.
+    const literal = '11111111-1111-4111-8111-111111111111';
+    const keys = (await db.query("select public.fn_post_call_derived_uuid($1) n, public.fn_post_call_derived_uuid($2) s",
+      [`post_call_note:${literal}`, `post_call_next_step:${literal}`])).rows[0];
+    expect(keys).toEqual({ n: '249bbca2-5080-5e49-a611-69fe513eab4f', s: 'fcecf655-7a01-5c38-b419-fc6a43c4a1c2' });
+    for (let i = 0; i < 200; i++) {
+      const k = (await db.query('select public.fn_post_call_derived_uuid($1) k', [randomUUID()])).rows[0].k as string;
+      expect(k).toMatch(RFC4122);
+    }
   });
 });
 
