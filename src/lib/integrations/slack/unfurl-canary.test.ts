@@ -105,6 +105,7 @@ function seed() {
     rep_sms_obligations: [],
     rep_sms_delivery_ledger: [],
     dialpad_call_intents: [],
+    contact_phone_numbers: [],
   };
 }
 
@@ -162,6 +163,17 @@ describe("run-owned Slack canary fixture proof", () => {
   it("rejects a phone-bearing contact before any worker can run", async () => {
     state.tables.contacts![0] = { ...(state.tables.contacts![0] as object), phone_1: "+15555550123" };
     await expect(verifySlackCanaryFixture({ job, runId: RUN_ID, propertyId: PROPERTY_ID })).resolves.toBe(false);
+  });
+
+  it("rejects a normalized phone row even when legacy contact phones are blank", async () => {
+    state.tables.contact_phone_numbers = [{
+      contact_id: CONTACT_ID,
+      org_id: ORG_ID,
+      slot: 1,
+      e164: "+18165550123",
+    }];
+    await expect(verifySlackCanaryFixture({ job, runId: RUN_ID, propertyId: PROPERTY_ID })).resolves.toBe(false);
+    expect(state.queryCalls).toContainEqual({ table: "contact_phone_numbers", method: "eq", args: ["contact_id", CONTACT_ID] });
   });
 
   it.each(["rep_sms_obligations", "rep_sms_delivery_ledger", "dialpad_call_intents"])("rejects a fixture with a provider safety row in %s", async (table) => {

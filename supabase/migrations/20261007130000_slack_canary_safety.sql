@@ -37,6 +37,18 @@ begin
     return false;
   end if;
 
+  -- #803 normalizes legacy contact phones into a service-readable index. A
+  -- stale index row must keep this fixture out of the provider path even
+  -- when the legacy contact columns are blank.
+  if exists (
+    select 1
+      from public.contact_phone_numbers n
+     where n.org_id = p_org_id
+       and n.contact_id = p_contact_id
+  ) then
+    return false;
+  end if;
+
   if exists (
     select 1 from public.rep_sms_obligations o
      where o.org_id = p_org_id and o.property_id = p_property_id

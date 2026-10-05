@@ -9,7 +9,7 @@ import { requireLoopbackPostgresUrl } from "../../src/lib/testing/loopback-postg
 const dbUrl = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
-const migration = readFileSync(new URL("./20261005190000_slack_canary_safety.sql", import.meta.url), "utf8");
+const migration = readFileSync(new URL("./20261007130000_slack_canary_safety.sql", import.meta.url), "utf8");
 
 it("keeps provider safety behind the service-only boolean RPC", async () => {
   const db = new Client({ connectionString: dbUrl });
@@ -69,15 +69,25 @@ it("keeps provider safety behind the service-only boolean RPC", async () => {
       anon_execute: boolean;
       authenticated_execute: boolean;
       ledger_select: boolean;
+      phone_index_select: boolean;
     }>(
       `select
          has_function_privilege('service_role', 'public.get_slack_canary_provider_safety(uuid,uuid,uuid,uuid)', 'execute') as service_execute,
          has_function_privilege('anon', 'public.get_slack_canary_provider_safety(uuid,uuid,uuid,uuid)', 'execute') as anon_execute,
          has_function_privilege('authenticated', 'public.get_slack_canary_provider_safety(uuid,uuid,uuid,uuid)', 'execute') as authenticated_execute,
-         has_table_privilege('service_role', 'public.rep_sms_delivery_ledger', 'select') as ledger_select`,
+         has_table_privilege('service_role', 'public.rep_sms_delivery_ledger', 'select') as ledger_select,
+         has_table_privilege('service_role', 'public.contact_phone_numbers', 'select') as phone_index_select`,
     );
-    expect(privilege.rows[0]).toEqual({ service_execute: true, anon_execute: false, authenticated_execute: false, ledger_select: false });
+    expect(privilege.rows[0]).toEqual({ service_execute: true, anon_execute: false, authenticated_execute: false, ledger_select: false, phone_index_select: true });
     expect(await safety()).toBe(true);
+
+    await db.query(
+      "insert into public.contact_phone_numbers(contact_id,slot,org_id,e164) values ($1,1,$2,'+18165550123')",
+      [contactId, orgId],
+    );
+    expect(await safety()).toBe(false);
+    await db.query("delete from public.contact_phone_numbers where contact_id=$1 and slot=1", [contactId]);
+
     expect(await safety({ orgId: foreignOrgId })).toBe(false);
     expect(await safety({ propertyId: randomUUID() })).toBe(false);
     expect(await safety({ contactId: foreignContactId })).toBe(false);

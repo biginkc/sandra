@@ -141,6 +141,27 @@ async function noProviderIntentRows(
   }
 }
 
+async function hasNormalizedPhoneRows(
+  db: CanaryClient,
+  orgId: string,
+  contactId: string,
+): Promise<boolean> {
+  try {
+    const rows = await read(
+      db.from("contact_phone_numbers")
+        .select("contact_id")
+        .eq("org_id", orgId)
+        .eq("contact_id", contactId)
+        .limit(1),
+    );
+    // Treat an invalid response or any row as unsafe. The canary must fail
+    // closed if the normalized phone index is unavailable or malformed.
+    return !Array.isArray(rows) || rows.length > 0;
+  } catch {
+    return true;
+  }
+}
+
 /**
  * Prove that the target is the current run-owned synthetic fixture before the
  * unchanged Slack worker is allowed to read or send anything. Notes are
@@ -180,6 +201,7 @@ export async function verifySlackCanaryFixture(input: {
   if (!contact || contact.id !== row.homeowner_contact_id || contact.org_id !== orgId) return false;
   if (contact.notes?.trim() !== contactRunMarker(input.runId)) return false;
   if ([contact.phone_1, contact.phone_2, contact.phone_3].some((value) => nonEmpty(value) !== null)) return false;
+  if (await hasNormalizedPhoneRows(db, orgId, row.homeowner_contact_id)) return false;
 
   const history = (await read(
     db.from("messages")
