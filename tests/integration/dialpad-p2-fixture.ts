@@ -4,10 +4,11 @@ import { loadTestEnv } from './env';
 import { requireLoopbackPostgresUrl } from '@/lib/testing/loopback-postgres-url';
 import { applyMyLeadsChain, chainThrough } from './my-leads-housekeeping-fixture';
 
-// Shared harness for the P2 data-plane migrations (20261006100000..100500). Every suite runs inside one
+// Shared harness for the P2 data-plane migrations (20261006100000..100900). Every suite runs inside one
 // transaction that is rolled back; applyP2 uses the shared applyMyLeadsChain probe/rollback/apply helper.
 
-export type P2Key = 'ledgerKeys' | 'intentTimeout' | 'phoneNumbers' | 'nativeMatching' | 'assignToLead' | 'artifactFetches';
+export type P2Key = 'ledgerKeys' | 'intentTimeout' | 'phoneNumbers' | 'nativeMatching' | 'assignToLead' | 'artifactFetches'
+  | 'ackPrompts' | 'apiDial' | 'redaction' | 'callbacksDue';
 
 // Leaves the open transaction with the whole My Leads chain through `through` applied and nothing newer,
 // whatever the database held before (rolls back the present migrations newest first, then applies).

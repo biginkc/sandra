@@ -33,7 +33,16 @@ vi.mock("@/app/(dashboard)/sequences/actions", () => ({
   startDripForLeads: mocks.startDripForLeads,
 }))
 vi.mock("./rep-sms-composer", () => ({ RepSmsComposer: () => null }))
-vi.mock("./_components/dialpad-panel", () => ({ DialpadPanel: () => null }))
+vi.mock("./dialpad-actions", () => ({
+  dialLeadAction: vi.fn(),
+  getDialpadCallStatusAction: vi.fn(async () => ({ ok: false, code: "not_configured", message: "" })),
+  cancelDialpadCallAction: vi.fn(),
+  ensureDialpadBindingAction: vi.fn(),
+}))
+vi.mock("./call-state-actions", () => ({
+  pollMyLeadsCallStateAction: vi.fn(async () => ({ ok: true, state: { prompts: [], promptsCursor: null, ambiguous: [], callbacksDue: [], features: { autoPrompt: false, callbackAlert: false } } })),
+  acknowledgeCallPromptAction: vi.fn(async () => ({ ok: true, status: "acknowledged" })),
+}))
 vi.mock("./_components/queue", () => ({
   MyLeadsQueue: ({ stages, onStageAction }: { stages: Record<string, { rows: never[] } | undefined>; onStageAction: (action: string, row: never) => void }) => {
     const row = stages.not_contacted?.rows[0]

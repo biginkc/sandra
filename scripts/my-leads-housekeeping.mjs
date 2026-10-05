@@ -20,7 +20,9 @@
 //                   fields that its hangup events carry; fills only empty fields, never prints a link)
 //   phone-backfill (P2 2.4: fills contact_phone_numbers for existing contacts; before-image per row, roll back
 //                   with `rollback --run`; must be applied before the Dialpad connection is activated)
-// Later phases add ack-legacy-prompts to COMMANDS below as its SQL function ships; it is refused until then.
+//   ack-legacy-prompts (P2 2.6: marks every pre-existing Dialpad ledger attempt's post-call prompt
+//                   'dismissed' so the auto-open never pops for calls that predate it; run before
+//                   the auto_prompt flag is turned on)
 //
 // Runbook: rolling back a reassign to a deactivated Maria/Mel fails safe (the active-assignee guard
 // trg_properties_active_assignee refuses it) and the lead is reported under notRestored, not forced.
@@ -79,11 +81,13 @@ export const COMMANDS = {
   "link-backfill": { needs: ["org"], rpc: "fn_my_leads_housekeeping_link_backfill", args: (o) => ({ p_org_id: o.org }) },
   // Fills the normalized phone table for existing contacts (P2 2.4). Preview -> --confirm fingerprint -> apply.
   "phone-backfill": { needs: ["org"], rpc: "fn_contact_phone_numbers_backfill", args: (o) => ({ p_org_id: o.org }) },
+  // Acknowledges pre-existing Dialpad ledger attempts so the auto-open prompt never pops for them (P2 2.6).
+  "ack-legacy-prompts": { needs: ["org"], rpc: "fn_my_leads_ack_legacy_call_prompts", args: (o) => ({ p_org_id: o.org }) },
   // Read-only gate for the retire migration: never applies anything.
   "retire-preflight": { needs: ["org"], rpc: "fn_my_leads_next_step_retire_preflight", args: (o) => ({ p_org_id: o.org }), readOnly: true },
   rollback: { needs: ["org", "run"], rollback: true },
 };
-const LATER = ["ack-legacy-prompts"];
+const LATER = [];
 
 export function parseArgs(argv) {
   const [command, ...rest] = argv;

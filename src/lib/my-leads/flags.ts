@@ -63,3 +63,29 @@ export async function getMyLeadsFlag(
     return false;
   }
 }
+
+/**
+ * Reads several kill switches in ONE query. Same OFF-on-anything-wrong rule as `getMyLeadsFlag`:
+ * a missing table, column or row, an error or a throw reads every requested flag as OFF.
+ */
+export async function getMyLeadsFlags<F extends MyLeadsFlag>(
+  orgId: string,
+  flags: readonly F[],
+): Promise<Record<F, boolean>> {
+  const off = Object.fromEntries(flags.map((f) => [f, false])) as Record<F, boolean>;
+  if (!orgId || flags.some((f) => !(MY_LEADS_FLAGS as readonly string[]).includes(f))) {
+    return off;
+  }
+  try {
+    const client = createAdminClient() as unknown as FlagClient;
+    const { data, error } = await client
+      .from("my_leads_feature_flags")
+      .select(flags.join(", "))
+      .eq("org_id", orgId)
+      .maybeSingle();
+    if (error || !data) return off;
+    return Object.fromEntries(flags.map((f) => [f, data[f] === true])) as Record<F, boolean>;
+  } catch {
+    return off;
+  }
+}

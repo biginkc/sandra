@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const sweep = vi.fn();
 const failStale = vi.fn();
+const redact = vi.fn();
+const reportErrorMock = vi.fn();
 const artifactSweep = vi.fn();
 const ready = vi.fn();
 const handle = vi.fn();
 
-vi.mock('@/lib/errors/report', () => ({ reportError: vi.fn(), reportInfo: vi.fn() }));
+vi.mock('@/lib/errors/report', () => ({ reportError: (...args: unknown[]) => reportErrorMock(...args), reportInfo: vi.fn() }));
 vi.mock('@/lib/dialpad-cti/artifact-fetch', () => ({
   createSupabaseDialpadArtifactDb: vi.fn(() => ({ marker: 'artifact-db' })),
   sweepDialpadArtifacts: (...args: unknown[]) => artifactSweep(...args),
@@ -17,6 +19,7 @@ vi.mock('./event-processing', () => ({
   createSupabaseDialpadCtiDb: vi.fn(() => ({ marker: 'db' })),
   sweepDialpadCallEvents: (...args: unknown[]) => sweep(...args),
   failStaleDialpadIntents: (...args: unknown[]) => failStale(...args),
+  redactDialpadUnmatchedEvents: (...args: unknown[]) => redact(...args),
   handleDialpadVoiceWebhook: (...args: unknown[]) => handle(...args),
 }));
 
@@ -32,6 +35,9 @@ describe('dialpad cti routes', () => {
     sweep.mockReset();
     failStale.mockReset();
     failStale.mockResolvedValue(0);
+    redact.mockReset();
+    reportErrorMock.mockReset();
+    redact.mockResolvedValue(0);
     artifactSweep.mockReset();
     ready.mockReset();
     ready.mockResolvedValue(true);
@@ -55,7 +61,7 @@ describe('dialpad cti routes', () => {
     sweep.mockResolvedValue({ candidates: 2, processed: 2, failed: 0 });
     const ok = await cronGet(new Request('http://x/api/cron/dialpad-call-events-sweep', { headers: { authorization: 'Bearer cron-secret-for-tests' } }));
     expect(ok.status).toBe(200);
-    expect(await ok.json()).toEqual({ ok: true, candidates: 2, processed: 2, failed: 0, failedIntents: 0 });
+    expect(await ok.json()).toEqual({ ok: true, candidates: 2, processed: 2, failed: 0, failedIntents: 0, redacted: 0 });
   });
 
   it('cron sweep reports failed intents and still sweeps when the timeout call throws', async () => {
@@ -79,6 +85,31 @@ describe('dialpad cti routes', () => {
     expect(await res.json()).toMatchObject({ ok: true, failedIntents: null });
     expect(failStale).not.toHaveBeenCalled();
     expect(sweep).toHaveBeenCalledTimes(1);
+  });
+
+  it('cron sweep redacts only when event_redaction is ready, after the sweep', async () => {
+    const order: string[] = [];
+    sweep.mockImplementation(async () => { order.push('sweep'); return { candidates: 0, processed: 0, failed: 0 }; });
+    redact.mockImplementation(async () => { order.push('redact'); return 5; });
+    ready.mockImplementation(async (feature: string) => feature !== 'event_redaction');
+    const headers = { authorization: 'Bearer cron-secret-for-tests' };
+    const off = await cronGet(new Request('http://x/api/cron/dialpad-call-events-sweep', { headers }));
+    expect(await off.json()).toMatchObject({ ok: true, redacted: null });
+    expect(redact).not.toHaveBeenCalled();
+    ready.mockResolvedValue(true);
+    const on = await cronGet(new Request('http://x/api/cron/dialpad-call-events-sweep', { headers }));
+    expect(await on.json()).toMatchObject({ ok: true, redacted: 5 });
+    expect(ready).toHaveBeenCalledWith('event_redaction');
+    expect(order).toEqual(['sweep', 'sweep', 'redact']);
+  });
+
+  it('cron sweep reports a redaction failure and still returns 200 with redacted null', async () => {
+    sweep.mockResolvedValue({ candidates: 1, processed: 1, failed: 0 });
+    redact.mockRejectedValueOnce(new Error('rpc down'));
+    const res = await cronGet(new Request('http://x/api/cron/dialpad-call-events-sweep', { headers: { authorization: 'Bearer cron-secret-for-tests' } }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, processed: 1, redacted: null });
+    expect(reportErrorMock).toHaveBeenCalledWith(expect.any(Error), { tags: { surface: 'cron_dialpad_event_redaction' } });
   });
 
   it('cron sweep hides internals on failure', async () => {

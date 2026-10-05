@@ -65,6 +65,7 @@ function fakeDb(options: {
     },
     async insertDisabledConnection() { throw new Error('unused'); },
     async activateConnection() { throw new Error('unused'); },
+    async deactivateConnection() { throw new Error('unused'); },
     async configureRecordingEndpoint(expected) {
       state.calls.push(expected);
       options.beforeConfigure?.(state.row!);

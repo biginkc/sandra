@@ -7,12 +7,15 @@ import {
   createDialpadPort,
   createManagementQueryRunner,
   createOnePasswordSecretStore,
+  createOpCliSecretStore,
   createVercelPort,
   parseVercelEnvNames,
   runCommand,
   type CommandRunner,
   type FetchLike,
   type OnePasswordSdk,
+  type OpCommandResult,
+  type OpCommandRunner,
 } from './provisioning-adapters';
 import { ProvisioningError } from './provisioning';
 
@@ -172,6 +175,20 @@ describe('connection db port', () => {
     expect(await capture(() => []).port.activateConnection('c0000000-0000-4000-8000-000000000001', row)).toBe(0);
   });
 
+  it('deactivates only an active row whose every expected field still matches', async () => {
+    const { port, statements } = capture(() => [{ id: 'x' }]);
+    expect(await port.deactivateConnection('c0000000-0000-4000-8000-000000000001', { ...row, recordingIngestEndpoint: ENDPOINT })).toBe(1);
+    expect(statements[0]).toContain("set status = 'disabled'");
+    expect(statements[0]).toContain("status = 'active'");
+    expect(statements[0]).toContain('webhook_secret_ref =');
+    expect(statements[0]).toContain('dialpad_company_id =');
+    expect(statements[0]).toContain('directory_api_key_ref =');
+    expect(statements[0]).toContain("allowed_origins = array['https://dialpad.com']::text[]");
+    expect(statements[0]).toContain('cti_client_id =');
+    expect(statements[0]).toContain(`recording_ingest_endpoint is not distinct from '${ENDPOINT}'`);
+    expect(await capture(() => []).port.deactivateConnection('c0000000-0000-4000-8000-000000000001', row)).toBe(0);
+  });
+
   it('inspects schema and organization state', async () => {
     const { port } = capture((sql) => (sql.includes('a2_columns') ? [{ a2_columns: true, custom_data_function: false }] : [{ org_exists: true }]));
     expect(await port.inspectSchema()).toEqual({ a2Columns: true, customDataFunction: false, recordingEndpointColumn: false });
@@ -302,5 +319,70 @@ describe('1password secret store adapter', () => {
     expect(created[0]).toMatchObject({ category: 'ApiCredentials', vaultId: 'v2', title: 'Dialpad - CTI Webhook Secret - BMH', notes: 'note' });
     expect(JSON.stringify(created[0]!.fields)).toContain('Concealed');
     expect(String(created[0]!.notes)).not.toContain(SECRET);
+  });
+});
+
+describe('op CLI secret store', () => {
+  function fake(result: Partial<OpCommandResult>) {
+    const calls: { command: string; args: readonly string[] }[] = [];
+    const run: OpCommandRunner = async (command, args) => {
+      calls.push({ command, args });
+      return { code: 0, stdout: '', stderr: '', ...result };
+    };
+    return { calls, store: createOpCliSecretStore({ run }) };
+  }
+
+  it('reads one field by label and returns the value, never putting it on argv', async () => {
+    const { calls, store } = fake({ stdout: JSON.stringify({ id: 'credential', label: 'credential', value: SECRET }) });
+    expect(await store.read('Dialpad - API', 'credential')).toEqual({ state: 'found', value: SECRET });
+    expect(calls[0]).toEqual({
+      command: 'op',
+      args: ['item', 'get', 'Dialpad - API', '--vault', 'BMH Secrets', '--fields', 'label=credential', '--reveal', '--format', 'json'],
+    });
+    expect(calls[0]!.args.join(' ')).not.toContain(SECRET);
+  });
+
+  it('honors a vault override and accepts an array of one', async () => {
+    const calls: (readonly string[])[] = [];
+    const store = createOpCliSecretStore({
+      vault: 'Other',
+      run: async (_c, args) => {
+        calls.push(args);
+        return { code: 0, stdout: JSON.stringify([{ label: 'credential', value: SECRET }]), stderr: '' };
+      },
+    });
+    expect(await store.read('Item', 'credential')).toEqual({ state: 'found', value: SECRET });
+    expect(calls[0]).toContain('Other');
+  });
+
+  it('maps a missing item', async () => {
+    const { store } = fake({ code: 1, stderr: '[ERROR] 2026/10/04 "Nope" isn\'t an item in the "BMH Secrets" vault.' });
+    expect(await store.read('Nope', 'credential')).toEqual({ state: 'missing' });
+  });
+
+  it('maps duplicate items', async () => {
+    const { store } = fake({ code: 1, stderr: '[ERROR] More than one item matches "Dupe".' });
+    expect(await store.read('Dupe', 'credential')).toEqual({ state: 'duplicate' });
+  });
+
+  it('maps a missing field, both by error and by empty value', async () => {
+    expect(await fake({ code: 1, stderr: '[ERROR] the field "credential" could not be found' }).store.read('Item', 'credential')).toEqual({ state: 'no_field' });
+    expect(await fake({ stdout: JSON.stringify({ label: 'credential', value: '' }) }).store.read('Item', 'credential')).toEqual({ state: 'no_field' });
+  });
+
+  it('fails with a secret-free error on other failures and on non-JSON output', async () => {
+    const other = await rejection(fake({ code: 1, stderr: `boom ${SECRET}` }).store.read('Item', 'credential'));
+    expect(other).toBeInstanceOf(ProvisioningError);
+    expect(other.message).not.toContain(SECRET);
+    const bad = await rejection(fake({ stdout: `not json ${SECRET}` }).store.read('Item', 'credential'));
+    expect(bad).toBeInstanceOf(ProvisioningError);
+    expect((bad as ProvisioningError).code).toBe('op_output_unreadable');
+    expect(bad.message).not.toContain(SECRET);
+  });
+
+  it('refuses to create items', async () => {
+    const error = await rejection(fake({}).store.create('Item', 'credential', SECRET, 'note'));
+    expect(error).toBeInstanceOf(ProvisioningError);
+    expect((error as ProvisioningError).code).toBe('secret_create_unsupported');
   });
 });

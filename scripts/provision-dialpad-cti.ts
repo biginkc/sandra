@@ -4,7 +4,7 @@
  * Dry-run by default: prints a secret-free plan and its digest, changes nothing.
  *
  *   npx tsx scripts/provision-dialpad-cti.ts \
- *     --org-id <uuid> --company-id <dialpad company id> --canary-user-id <dialpad user id> [--canary-user-id <id>]
+ *     [--mode prepare|activate|deactivate] [--secret-source op|sdk] --org-id <uuid> --company-id <dialpad company id> --canary-user-id <dialpad user id> [--canary-user-id <id>]
  *
  *   # apply exactly the previewed plan (creates the connection DISABLED, the
  *   # secret, the two Vercel env names, the webhook and DISABLED subscriptions):
@@ -13,8 +13,14 @@
  *   # separate, restricted step after root's live-readiness review and a redeploy:
  *   ... --mode activate --execute --expect-plan <digest> --confirm-live-readiness <connection id>
  *
- * 1Password is reached through the SDK only (Keychain service token bootstrap);
- * never the `op` binary. No secret value is ever printed or passed on argv.
+ *   # reverse of activate: disables every canary subscription, then the connection:
+ *   ... --mode deactivate --execute --expect-plan <digest> --confirm-live-readiness <connection id>
+ *
+ * 1Password is reached through the `op` CLI with the BMH service account
+ * (OP_SERVICE_ACCOUNT_TOKEN from the environment) by default: --secret-source op.
+ * The SDK path (--secret-source sdk, Keychain token bootstrap) remains only for
+ * prepare-mode item creation, which the op store refuses. No secret value is
+ * ever printed or passed on argv.
  * CTI_PROVISION_OP_SDK_PATH may point at an installed @1password/sdk entry file.
  */
 
@@ -37,6 +43,7 @@ import {
   createDialpadPort,
   createManagementQueryRunner,
   createOnePasswordSecretStore,
+  createOpCliSecretStore,
   createVercelPort,
 } from '../src/lib/dialpad-cti/provisioning-adapters';
 
@@ -44,6 +51,7 @@ async function main(): Promise<number> {
   const { values } = parseArgs({
     options: {
       mode: { type: 'string' },
+      'secret-source': { type: 'string', default: 'op' },
       'org-id': { type: 'string' },
       'company-id': { type: 'string' },
       'canary-user-id': { type: 'string', multiple: true },
@@ -72,8 +80,10 @@ async function main(): Promise<number> {
     // The item titles are fixed defaults; override only through code review.
   });
 
+  const secretSource = values['secret-source'] ?? 'op';
+  if (secretSource !== 'op' && secretSource !== 'sdk') throw new ProvisioningError('invalid_input', '--secret-source must be op or sdk');
   const guard = new SecretGuard();
-  const secrets = createOnePasswordSecretStore();
+  const secrets = secretSource === 'sdk' ? createOnePasswordSecretStore() : createOpCliSecretStore();
   const cached = new Map<string, Promise<string>>();
   const readOnce = (title: string) => {
     let pending = cached.get(title);
