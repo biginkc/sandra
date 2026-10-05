@@ -54,8 +54,8 @@ const REPLY_INTENT_VALUES: readonly JevReplyIntent[] = [
   "neutral",
 ];
 
-type JevRawAnswer = { choice: string; confidence?: unknown; probabilities?: Record<string, number> };
-type JevRawResponse = {
+export type JevRawAnswer = { choice: string; noul?: unknown; confidence?: unknown; probabilities?: Record<string, number> };
+export type JevRawResponse = {
   answers?: Record<string, JevRawAnswer>;
   model?: string;
   usage?: { input_tokens?: number; output_tokens?: number };
@@ -106,31 +106,30 @@ function readChoice<T extends string>(
   return { value, probabilities: answer.probabilities ?? {} };
 }
 
+export type JevChoiceQuestion = {
+  type: "choice";
+  instructions: string;
+  /** Option name -> description (null for a bare option). */
+  criteria: Record<string, string | null>;
+};
+/** A yes/no question; the answer carries a probability in `noul`. */
+export type JevNoulQuestion = { type: "noul"; instructions: string };
+export type JevAskRequest = {
+  state: unknown;
+  questions: Record<string, JevChoiceQuestion | JevNoulQuestion>;
+};
+export type JevAskResult = JevRawResponse & { latencyMs: number };
+export type JevAskDeps = { fetch: FetchLike; apiKey: string; maxRetries?: number; timeoutMs?: number };
+
 /**
- * One HTTP call per classification — TypeSafe has no batch endpoint.
- * Bounded retry with exponential backoff on 429/5xx only; auth/billing
- * failures are not retried (retrying a bad key wastes the deadline).
+ * The one HTTP client for TypeSafe System One (shared by SMS classification and call facts).
+ * One call per request; bounded retry with exponential backoff on 429/5xx and timeouts only;
+ * auth/billing failures are not retried (retrying a bad key wastes the deadline).
  */
-export async function classifyWithJev(
-  input: JevClassifyInput,
-  deps: {
-    fetch: FetchLike;
-    apiKey: string;
-    maxRetries?: number;
-    timeoutMs?: number;
-  },
-): Promise<SmsClassificationDecision> {
+export async function askJev(request: JevAskRequest, deps: JevAskDeps): Promise<JevAskResult> {
   const maxRetries = deps.maxRetries ?? 2;
   const timeoutMs = deps.timeoutMs ?? 8000;
-  const questions = buildQuestions(input.includeReplyIntent);
-  const body = JSON.stringify({
-    model: JEV_MODEL,
-    state: {
-      ...input.state,
-      thread: input.thread,
-    },
-    questions,
-  });
+  const body = JSON.stringify({ model: JEV_MODEL, state: request.state, questions: request.questions });
 
   let lastErr: JevProviderError | null = null;
   const startedAt = Date.now();
@@ -163,7 +162,7 @@ export async function classifyWithJev(
       }
 
       const json = (await res.json()) as JevRawResponse;
-      return parseJevResponse(json, input.includeReplyIntent, Date.now() - startedAt);
+      return { ...json, latencyMs: Date.now() - startedAt };
     } catch (e) {
       clearTimeout(timer);
       if (e instanceof JevProviderError) throw e;
@@ -179,6 +178,21 @@ export async function classifyWithJev(
     }
   }
   throw lastErr ?? new JevProviderError("Jev request failed", "server_error");
+}
+
+/** One HTTP call per classification; see askJev for retry rules. */
+export async function classifyWithJev(
+  input: JevClassifyInput,
+  deps: JevAskDeps,
+): Promise<SmsClassificationDecision> {
+  const result = await askJev(
+    {
+      state: { ...input.state, thread: input.thread },
+      questions: buildQuestions(input.includeReplyIntent),
+    },
+    deps,
+  );
+  return parseJevResponse(result, input.includeReplyIntent, result.latencyMs);
 }
 
 function parseJevResponse(

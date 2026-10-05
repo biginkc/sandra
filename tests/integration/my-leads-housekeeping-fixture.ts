@@ -80,6 +80,7 @@ const CHAIN = [
   { key: 'callbacksDue', file: '20261007150300_my_leads_callbacks_due', present: proc('fn_my_leads_callbacks_due') },
   { key: 'contractDefaults', file: '20261007160000_acquisition_contract_defaults', present: "to_regclass('public.acquisition_contract_settings') is not null" },
   { key: 'offerProjections', file: '20261007170000_acquisition_offer_projections', present: "to_regclass('public.acquisition_offer_projections') is not null" },
+  { key: 'callFacts', file: '20261007190000_call_facts', present: "to_regclass('public.lead_call_facts') is not null" },
 ] as const;
 
 export type ChainKey = (typeof CHAIN)[number]['key'];
