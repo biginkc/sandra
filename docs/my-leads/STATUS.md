@@ -28,6 +28,7 @@ Last updated: 2026-10-04 (after #801 release)
 | `claude/my-leads-p1d-link-capture` | #802 | Claude (Sonnet 5.5 builder) | draft, base now `main` (retargeted after #801 merge); `origin/main` abf3edd6 merged in; head `1af972f1` before this docs commit (migration 20261005180000). Phase 1 nearly complete. |
 | `claude/my-leads-p2-data-plane` | #803 | Phase 2 sole writer | draft, built, NOT merged; Opus YES at `757e01c0` |
 | `claude/my-leads-p2-ui` | #809 | Phase 2 writer | draft, built, NOT merged; Opus YES at `8ab5fc5a`; owner Claude Sonnet 5.5 builder, pre-enable fixes in progress (keep key after expired callback; resume polling on flag change) |
+| `claude/my-leads-p2-acceptance` | none yet | Claude Sonnet 5.5 builder | in progress; Phase 2 acceptance slice (fixture, T0/T3/T7/T8 spec, CI step), based on `claude/my-leads-p2-ui`; no migration, no `src/` change |
 | `claude/my-leads-p4-acceptance` | #804 | Phase 4 writer | draft, built, NOT merged; Opus YES at `3cec0c19` |
 | `claude/my-leads-p3-comps` | #805 | Phase 3 writer | draft, built, NOT merged; Opus YES at `bb86747e` |
 | `claude/my-leads-p3-call-screen` | #807 | Phase 3 writer | draft, built, NOT merged; Opus YES at `a908ad1c` |
