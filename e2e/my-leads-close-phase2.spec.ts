@@ -241,18 +241,19 @@ test.describe.serial("my-leads-close: Phase 2 CI lane", () => {
     const status = page.getByTestId("dial-status");
     await expect(status).toContainText(/No confirmation from Dialpad/i, { timeout: 30_000 });
 
-    // Automatic or repeated attempt without Dismiss reuses the key: the server only ever answers
-    // already_dispatched, never a second intent.
+    // Automatic or repeated attempt without Dismiss reuses the key: the server recognises the expired
+    // intent for that key and refuses (`expired`), it never mints a second intent or dials again.
     // The dial server action carries its arguments (including the idempotency key) in the POST body, so
     // observe the retry itself: it must reach the server with the FIRST key, and the server must answer
-    // already_dispatched for it (a retry that was silently dropped would never produce this response).
+    // `expired` for it (observed in CI: prepare reports the expired intent; a retry that was silently
+    // dropped, or one that dialed again under a new key, would not produce this response).
     const carriesFirstKey = (req: { method(): string; postData(): string | null }) =>
       req.method() === "POST" && (req.postData() ?? "").includes(first.idempotencyKey);
     const retryResponse = page.waitForResponse((res) => carriesFirstKey(res.request()), { timeout: 20_000 });
     await clickCall(page, lead.propertyId);
     const retry = await retryResponse;
     expect(retry.request().postData() ?? "", "the retry carries the first idempotency key").toContain(first.idempotencyKey);
-    expect(await retry.text(), "the server recognises the retried key").toContain("already_dispatched");
+    expect(await retry.text(), "the server recognises the retried key as the expired intent").toMatch(/"code\\?":\\?"expired\\?"/);
     expect(await readDialIntents(db, lead.propertyId), "retry after expiry reuses the same key").toHaveLength(1);
 
     // Deliberate Dismiss releases the key: the next click is a fresh dial.
