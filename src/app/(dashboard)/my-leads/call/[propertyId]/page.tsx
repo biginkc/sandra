@@ -6,6 +6,7 @@ import { getCallerMembershipsOrThrow, type Membership } from "@/lib/auth/members
 import { canViewMyLeads } from "@/lib/my-leads/access";
 import { CALL_FEATURES_OFF, getMyLeadsCallFeatures } from "@/lib/my-leads/call-features";
 import { getMyLeadsFlag } from "@/lib/my-leads/flags";
+import { postCallPromptEnabled } from "@/lib/my-leads/post-call";
 import { getAcquisitionRoster } from "@/lib/my-leads/queries";
 import { MY_LEAD_ROW_REASON_COPY } from "@/lib/my-leads/row-reasons";
 
@@ -65,10 +66,12 @@ export default async function CallScreenPage({ params }: { params: Promise<{ pro
 
   // click_to_dial flag AND schemaReady('api_dial'), the same gate the My Leads page uses; off keeps Call disabled.
   const { clickToDial } = await getMyLeadsCallFeatures(viewer.orgId).catch(() => CALL_FEATURES_OFF);
+  // The docked post-call prompt needs BOTH call_screen (checked above) and post_call_prompt (+ its schema).
+  const postCallPrompt = await postCallPromptEnabled(viewer.orgId).catch(() => false);
   const viewerLabel = roster.members.find((m) => m.id === viewer.userId)?.label ?? null;
   return (
     <Page className="gap-4">
-      <CallScreen data={load.data} viewerLabel={viewerLabel} clickToDial={clickToDial} />
+      <CallScreen data={load.data} viewerLabel={viewerLabel} clickToDial={clickToDial} postCallPrompt={postCallPrompt} />
     </Page>
   );
 }

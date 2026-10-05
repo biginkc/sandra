@@ -77,6 +77,20 @@ describe("CallScreenPage", () => {
     expect((mocks.CallScreen.mock.calls.at(-1) as unknown[] | undefined)?.[0]).toMatchObject({ clickToDial: false });
   });
 
+  it("docks the post-call prompt only when call_screen AND post_call_prompt are on (and its schema is ready)", async () => {
+    const lastProps = () => (mocks.CallScreen.mock.calls.at(-1) as unknown[] | undefined)?.[0];
+    await render();
+    expect(mocks.getMyLeadsFlag).toHaveBeenCalledWith("org-1", "post_call_prompt");
+    expect(lastProps()).toMatchObject({ postCallPrompt: true });
+    mocks.getMyLeadsFlag.mockImplementation(async (_org: string, flag: string) => flag !== "post_call_prompt");
+    await render();
+    expect(lastProps()).toMatchObject({ postCallPrompt: false });
+    mocks.getMyLeadsFlag.mockResolvedValue(true);
+    mocks.schemaReady.mockImplementation(async (feature: string) => feature !== "post_call_support");
+    await render();
+    expect(lastProps()).toMatchObject({ postCallPrompt: false });
+  });
+
   it("404s on a membership read failure, a multi-org caller and a roster failure, before any flag read", async () => {
     mocks.getCallerMembershipsOrThrow.mockRejectedValueOnce(new Error("boom"));
     await expect(render()).rejects.toThrow("notFound");
