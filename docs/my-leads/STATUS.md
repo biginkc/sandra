@@ -4,7 +4,7 @@ Owner of this file: Claude session "Optimize my leads page" (branch
 `claude/my-leads-one-call-close-decisions`). Root orchestrator and builders: post progress as PR
 comments; ask the owner to update this file, or append under "Root notes".
 
-Last updated: 2026-10-04 18:20 America/Chicago
+Last updated: 2026-10-04 (after #798 release)
 
 ## Plan
 | Item | State |
@@ -19,15 +19,18 @@ Last updated: 2026-10-04 18:20 America/Chicago
 | `claude/my-leads-p0-spike` | none | Codex root orchestrator | Phase 0 harness, root-owned |
 | `claude/my-leads-p1e-housekeeping` | #794 | Claude (Sonnet 5.5 builder) | **MERGED** `10eda0d9` into main. Migrations applied TEST + PROD, high-water `20261005110000`. Housekeeping NOT run at the time of #797 merge (later run, see below). |
 | `claude/my-leads-p1a-core` | #797 | Claude (Sonnet 5.5 builder) | **MERGED** `46ad7e92` into main. Migrations applied TEST + PROD, high-water `20261005121500`. Feature flags table empty = all flags OFF. Housekeeping NOT run at the time of #797 merge (later run, see below). |
-| `claude/my-leads-p1a-writers` | #798 | Claude (Sonnet 5.5 builder) | draft, base `main` (retargeted after #797 merge); main `46ad7e92` merged in; main `02c1dcaf` (#806) merged in; heads change on every cascade (`gh pr view <n> --json headRefOid`) |
-| `claude/my-leads-p1b-strip` | #799 | Claude (Sonnet 5.5 builder) | draft, stacked on #798; rebased onto the previous PR head |
-| `claude/my-leads-p1c-prompt` | #800 | Claude (Sonnet 5.5 builder) | draft, stacked on #799; rebased onto the previous PR head |
-| `claude/my-leads-p1c2-seller-reminders` | #801 | Claude (Sonnet 5.5 builder) | draft, stacked on #800; rebased onto the previous PR head; pre-activation duplicate-text fix pending |
-| `claude/my-leads-p1d-link-capture` | #802 | Claude (Sonnet 5.5 builder) | draft, stacked on #801; rebased onto the previous PR head |
-| `claude/my-leads-p2-data-plane` | #803 | Phase 2 sole writer | draft; Opus review running |
-| `claude/my-leads-p4-acceptance` | #804 | Phase 4 writer | draft, partial; Opus review running |
-| `claude/my-leads-p3-comps` | #805 | Phase 3 writer | draft; Opus YES / 0 blocking, fixes in progress |
-| `claude/my-leads-p2-ui`, `claude/my-leads-p3-call-screen` | none | Phase 2/3 writers | building |
+| `claude/my-leads-p1a-writers` | #798 | Claude (Sonnet 5.5 builder) | **MERGED** `afec04f4` into main. Migrations 20261005130000-130500 applied TEST + PROD (test and prod migrate runs on afec04f4 succeeded). Flags still OFF. |
+| `claude/my-leads-p1e-reassign-scope-2` | #806 | Claude | **MERGED** `02c1dcaf` into main (reassign `--from`, migration 20261005122000 applied). |
+| `claude/my-leads-p1e-reassign-scope-3` / queue-scope fix | #808 | Claude | OPEN at last check (head `899f186c`), migration renumbered 20261005122500; reassign stays pending until it merges. |
+| `claude/my-leads-p1b-strip` | #799 | Claude (Sonnet 5.5 builder) | draft, base `main`; main `afec04f4` merged in |
+| `claude/my-leads-p1c-prompt` | #800 | Claude (Sonnet 5.5 builder) | draft, stacked on #799; rebased onto the new #799 head |
+| `claude/my-leads-p1c2-seller-reminders` | #801 | Claude (Sonnet 5.5 builder) | draft, stacked on #800; rebased; pre-activation duplicate-text fix pending |
+| `claude/my-leads-p1d-link-capture` | #802 | Claude (Sonnet 5.5 builder) | draft, stacked on #801; rebased |
+| `claude/my-leads-p2-data-plane` | #803 | Phase 2 sole writer | draft; Opus YES at `757e01c0` |
+| `claude/my-leads-p2-ui` | #809 | Phase 2 writer | draft; Opus YES at `4d03042e`, fixes in progress |
+| `claude/my-leads-p4-acceptance` | #804 | Phase 4 writer | draft, partial; Opus YES at `3cec0c19` |
+| `claude/my-leads-p3-comps` | #805 | Phase 3 writer | draft; Opus YES, fixes applied `bb86747e` |
+| `claude/my-leads-p3-call-screen` | #807 | Phase 3 writer | draft; Opus YES at `a908ad1c` |
 | all other branches | none | unclaimed | claim here before writing |
 
 Current heads: `gh pr view <n> --json headRefOid` (stack was rebased onto main on 2026-10-04; heads change on every cascade).
@@ -39,8 +42,8 @@ those SHAs only):
 #802 `1cef1365`. Rebased heads need unchanged-review confirmation via `git range-diff` (all commits `=`).
 
 ## Housekeeping and reassign (2026-10-04, from coordinator)
-- Housekeeping close-attempts applied on PROD 2026-10-04 (run 02166c21-e9a4-4b79-9312-db4f5b2d8135): 134 pending attempts > 7 days → not_logged, 134 before-images, rollback available via `rollback --run <id>`.
-- reassign ON HOLD: scope bug in applied 20261005100100 (selects every acquisitions_enabled member except target → would move Gretchen's 2 leads, skip Mel's 12 and Maria's 2); fix PR on claude/my-leads-p1e-reassign-scope adds explicit `--from` sources (migration 20261005122000).
+- Housekeeping close-attempts run 02166c21 applied (PROD 2026-10-04; run 02166c21-e9a4-4b79-9312-db4f5b2d8135): 134 pending attempts > 7 days → not_logged, 134 before-images, rollback available via `rollback --run <id>`.
+- reassign still pending #808 (queue-scope fix). The `--from` fix (#806, migration 20261005122000) is merged.
 
 ## Release authority
 Jarrad, 2026-10-04 18:05 CDT: Phase 1 PRs merge as each is green, approved at its current head, and
