@@ -2,7 +2,8 @@
 
 import { compLead, type CompLeadResult } from "@/lib/comps";
 import { reportError } from "@/lib/errors/report";
-import { myLeadsViewer, MyLeadsReadError } from "@/lib/my-leads/queries";
+import { getMyLeadsFlag } from "@/lib/my-leads/flags";
+import { getMyLeadsQueueRow, myLeadsViewer, MyLeadsReadError } from "@/lib/my-leads/queries";
 import { schemaReady } from "@/lib/my-leads/schema-ready";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -38,8 +39,8 @@ export type SaveValuationResult = { ok: true; arv: number | null; rehab: number 
 
 /**
  * Jarrad's typed ARV and rehab for the numbers card (§3.10) → `fn_set_lead_valuation_inputs`
- * through the caller's RLS client (the function checks membership itself). Disabled until the
- * `lead_comps` schema is ready. Never writes `properties.arv`.
+ * through the caller's RLS client (the function checks membership itself). Requires the `call_screen` flag,
+ * the lead in the caller's own queue, and the `lead_comps` schema. Never writes `properties.arv`.
  */
 export async function setValuationInputsAction(input: {
   propertyId: string;
@@ -51,6 +52,10 @@ export async function setValuationInputsAction(input: {
   if (!valid(input.arv, 0.01) || !valid(input.rehab, 0)) return { ok: false, message: "Enter a valid dollar amount." };
   try {
     const viewer = await myLeadsViewer();
+    // Same gates as the call screen route: the flag, then the lead must be in the caller's own queue.
+    if (!(await getMyLeadsFlag(viewer.orgId, "call_screen"))) return { ok: false, message: "That lead could not be found." };
+    const owned = await getMyLeadsQueueRow({ memberId: viewer.userId, propertyId: input.propertyId });
+    if (owned.status !== "found") return { ok: false, message: "That lead could not be found." };
     if (!(await schemaReady("lead_comps"))) return { ok: false, message: "Numbers are not available yet." };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data, error } = await (viewer.client as any).rpc("fn_set_lead_valuation_inputs", {
