@@ -6,6 +6,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { toast } from "sonner";
 import * as React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -16,6 +17,8 @@ import {
 } from "./book-appointment-action";
 import { rescheduleAppointmentAction } from "./lifecycle-actions";
 import { createNextStepAction } from "./next-step-actions";
+
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 // Mirrors the assign-dropdown.test.tsx convention: mock the base-ui-backed
 // ui/* primitives (no ResizeObserver/PointerEvent polyfills in this jsdom
@@ -307,6 +310,7 @@ describe("<BookAppointmentPopover />", () => {
     await user.click(screen.getByTestId("book-appointment-submit"));
 
     await waitFor(() => expect(createNextStepAction).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Appointment booked", { description: "123 Main St" }));
     expect(createNextStepAction).toHaveBeenCalledWith({
       propertyId: "prop-1",
       contactId: "contact-1",

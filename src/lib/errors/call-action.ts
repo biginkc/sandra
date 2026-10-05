@@ -5,6 +5,8 @@ import type { Result } from "./result";
 export type CallActionOptions = {
   /** Toast title on success. Omit to stay silent. */
   successMessage?: string;
+  /** Human label identifying the record this action affects. */
+  contextLabel?: string;
   /** Fallback title when the action errors without a human-readable message. */
   fallbackMessage?: string;
   /** Safe description for an unexpected rejection such as response loss. */
@@ -25,17 +27,20 @@ export async function callAction<T>(
   try {
     const result = await actionPromise;
     if (result.ok) {
-      if (options.successMessage) toast.success(options.successMessage);
+      if (options.successMessage) {
+        if (options.contextLabel) toast.success(options.successMessage, { description: options.contextLabel });
+        else toast.success(options.successMessage);
+      }
     } else {
       toast.error(result.error.message || options.fallbackMessage || "Action failed", {
-        description: result.error.code,
+        description: options.contextLabel ? [options.contextLabel, result.error.code].filter(Boolean).join(" — ") : result.error.code,
       });
     }
     return result;
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     toast.error(options.fallbackMessage ?? "Unexpected error", {
-      description: options.unexpectedErrorDescription ?? message,
+      description: options.contextLabel ? `${options.contextLabel} — ${options.unexpectedErrorDescription ?? message}` : options.unexpectedErrorDescription ?? message,
     });
     return {
       ok: false,
