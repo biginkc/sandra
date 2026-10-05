@@ -25,12 +25,14 @@ Last updated: 2026-10-04 (after #801 release)
 | `claude/my-leads-p1b-strip` | #799 | Claude (Sonnet 5.5 builder) | **MERGED** `001cb1fd` into main (migration 20261005150000 applied TEST + PROD; prod high-water now `20261005150000`). |
 | `claude/my-leads-p1c-prompt` | #800 | Claude (Sonnet 5.5 builder) | **MERGED** `a5ba2b58` into main (migration 20261005160000 applied TEST + PROD; prod high-water now `20261005160000`). |
 | `claude/my-leads-p1c2-seller-reminders` | #801 | Claude (Sonnet 5.5 builder) | **MERGED** `abf3edd6` into main (migration 20261005170000 applied; prod high-water `20261005170000`). Reminders table 0 rows, flag OFF. Reclaim-after-reschedule duplicate-text edge is a pre-ENABLE fix, tracked. |
+| `claude/my-leads-p1c2-dup-fix` | none | Claude Sonnet 5.5 builder | in progress (pre-enable fix: reclaim-after-reschedule duplicate text) |
 | `claude/my-leads-p1d-link-capture` | #802 | Claude (Sonnet 5.5 builder) | draft, base now `main` (retargeted after #801 merge); `origin/main` abf3edd6 merged in; head `1af972f1` before this docs commit (migration 20261005180000). Phase 1 nearly complete. |
 | `claude/my-leads-p2-data-plane` | #803 | Phase 2 sole writer | draft, built, NOT merged; Opus YES at `757e01c0` |
 | `claude/my-leads-p2-ui` | #809 | Phase 2 writer | draft, built, NOT merged; Opus YES at `8ab5fc5a` |
 | `claude/my-leads-p4-acceptance` | #804 | Phase 4 writer | draft, built, NOT merged; Opus YES at `3cec0c19` |
-| `claude/my-leads-p3-comps` | #805 | Phase 3 writer | draft, built, NOT merged; Opus YES at `bb86747e` |
-| `claude/my-leads-p3-call-screen` | #807 | Claude Sonnet 5.5 builder | draft, built, NOT merged; Opus YES at `a908ad1c`; pre-enable fixes in progress (dock opening key, notFound on membership failures, valuation action flag+ownership, drop whole-page schemaReady gate) |
+| `claude/my-leads-p3-comps` | #805 | Phase 3 writer: Claude Sonnet 5.5 (builder) | draft, built, NOT merged; main merged (f064f455); Opus YES at `bb86747e` pre-merge |
+| `claude/my-leads-p3-call-screen` | #807 | Claude Sonnet 5.5 builder | draft, built, NOT merged; Opus YES at `a908ad1c`; pre-enable fixes applied (dock key, notFound, action guards, schemaReady gate dropped, lead_comps probe signature); needs Opus re-review |
+| `claude/my-leads-p1a-replay-fix` | none | Claude (Sonnet 5.5 builder) | draft PR open: restore `location` comparison (and tolerant `mode`) in fn_create_next_step replay, #797 tracked follow-up. Migration 20261006111000 (NOT applied). |
 | `claude/my-leads-p3-send-card` | #814 (draft, base `claude/my-leads-p3-call-screen`) | Claude Sonnet 5.5 builder | in progress (contract defaults schema, prefill mapper, send-contract card + actions; offer projection library/migration NOT in this slice) |
 | `p1a-retire` | none | none | NOT built yet |
 | all other branches | none | unclaimed | claim here before writing |
