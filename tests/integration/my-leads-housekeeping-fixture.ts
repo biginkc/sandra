@@ -58,6 +58,8 @@ const CHAIN = [
   { key: 'jitterWriteback', file: '20261005130300_jitter_writeback_callback_next_step', present: procUses('jitter_writeback_call_activity_before_metrics', 'fn_create_next_step') },
   { key: 'normaComplete', file: '20261005130400_norma_complete_call_next_step', present: procUses('fn_norma_complete_call', 'fn_create_next_step') },
   { key: 'normaReview', file: '20261005130500_norma_needs_review_next_step', present: procUses('fn_norma_mark_needs_review', 'fn_create_next_step') },
+  { key: 'reassignQueueScope', file: '20261005140000_my_leads_housekeeping_reassign_queue_scope',
+    present: procUses('my_leads_housekeeping_reassign_scope', 'acquisition_queue_states') },
   { key: 'callNext', file: '20261005150000_my_leads_call_next', present: "to_regclass('public.my_leads_strip_overrides') is not null" },
   { key: 'postCall', file: '20261005160000_post_call_prompt_support', present: column('lead_notes', 'idempotency_key') },
   { key: 'sellerReminders', file: '20261005170000_seller_appointment_reminders', present: "to_regclass('public.seller_appointment_reminders') is not null" },

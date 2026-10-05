@@ -46,6 +46,7 @@ export default defineConfig({
       "supabase/migrations/20261005130400_norma_complete_call_next_step.integration.test.ts",
       "supabase/migrations/20261005130500_norma_needs_review_next_step.integration.test.ts",
       "supabase/migrations/20261005122000_my_leads_housekeeping_reassign_sources.integration.test.ts",
+      "supabase/migrations/20261005140000_my_leads_housekeeping_reassign_queue_scope.integration.test.ts",
       "supabase/migrations/20261005150000_my_leads_call_next.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
