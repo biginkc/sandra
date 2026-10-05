@@ -187,7 +187,10 @@ export function createContractCardCore(deps: ContractCardCoreDeps) {
     if (existing) {
       if (existing.actorUserId !== viewer.userId && !viewer.isOwner) return blocked("FORBIDDEN", "You cannot act on this send.");
       if (existing.submissionHash !== submissionHash) return blocked("IDEMPOTENCY_CONFLICT", "This send was already started with different details.");
-      if (existing.state === "failed" || existing.state === "cancelled") return { status: "failed", message: "That send did not go through. Try again." };
+      if (existing.state === "failed" || existing.state === "cancelled") // Definitive: the projection proves nothing was sent (failed before send) or the contract was
+      // cancelled, so the client may mint a new intent. States where a send happened or might have
+      // (awaiting_send, pending, logged, conflict) never reach here.
+      return { status: "failed", message: "That send did not go through. Try again.", definitive: true };
       if (existing.state === "logged" || existing.state === "conflict" || existing.state === "pending") {
         if (existing.esignRequestId) {
           return { status: "sent", requestId: existing.esignRequestId, offer: existing.state === "pending" ? "pending" : existing.state };

@@ -85,6 +85,29 @@ describe("sendContractCard motivation and open-contract guard", () => {
 
 const randomIntent = () => "eeeeeeee-eeee-4eee-8eee-" + Math.random().toString(16).slice(2, 14).padEnd(12, "0");
 
+describe("replay of a dead projection", () => {
+  const known = (state: ExistingOfferIntent["state"], esignRequestId: string | null = null): ExistingOfferIntent => ({
+    projectionId: "p", actorUserId: USER, requestHash: "h", submissionHash: submissionHashOf(input()), sendPayload: {}, state, esignRequestId,
+  } as ExistingOfferIntent);
+  it.each(["failed", "cancelled"] as const)("a %s projection replays as a definitive failure with no provider call", async (state) => {
+    const { core, projection, sendSpy } = setup();
+    projection.resolveIntent.mockResolvedValue(known(state, "r1"));
+    expect(await core.sendContractCard(input())).toMatchObject({ status: "failed", definitive: true });
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+  it.each(["awaiting_send", "pending"] as const)("a %s projection is never marked definitive", async (state) => {
+    const { core, projection } = setup();
+    projection.resolveIntent.mockResolvedValue(known(state, null));
+    const res = await core.sendContractCard(input());
+    expect((res as { definitive?: boolean }).definitive).toBeUndefined();
+  });
+  it.each(["logged", "conflict"] as const)("a %s projection with a request replays as sent, not failed", async (state) => {
+    const { core, projection } = setup();
+    projection.resolveIntent.mockResolvedValue(known(state, "r1"));
+    expect(await core.sendContractCard(input())).toMatchObject({ status: "sent" });
+  });
+});
+
 describe("sendContractCard", () => {
   it("is blocked FEATURE_DISABLED when the flag is off, before anything else runs", async () => {
     const { core, projection, sendSpy } = setup({ flagOn: async () => false });
