@@ -98,8 +98,8 @@ export default defineConfig({
       // Slack rehearsal and fixtures must never run against the hosted project.
       "src/lib/integrations/slack/unfurl-data.db.integration.test.ts",
       "supabase/migrations/20261003130001_slack_lead_unfurl_foundation.integration.test.ts",
-      "supabase/migrations/20261007130000_slack_canary_safety.integration.test.ts",
-      "supabase/migrations/20261007130100_slack_canary_execution_fence.integration.test.ts",
+      "supabase/migrations/20261007180000_slack_canary_safety.integration.test.ts",
+      "supabase/migrations/20261007180100_slack_canary_execution_fence.integration.test.ts",
     ],
     environment: "node",
     reporters: ["default"],
