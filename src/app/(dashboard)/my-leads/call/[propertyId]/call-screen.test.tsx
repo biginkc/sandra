@@ -91,6 +91,17 @@ describe("CallScreen", () => {
     expect(mocks.refresh).not.toHaveBeenCalled();
   });
 
+  it("keeps one opening (one attempt key) across a refresh at the same queue version, and a new one on a version change", () => {
+    const openings = () => mocks.useAttemptWorkflow.mock.calls.map((call) => (call as unknown as [{ opening: unknown }])[0].opening);
+    const { rerender } = render(<CallScreen data={data} />);
+    // router.refresh() after a valuation save: new queueRow object, same version.
+    rerender(<CallScreen data={{ ...data, queueRow: { ...data.queueRow } }} />);
+    const same = openings();
+    expect(new Set(same).size).toBe(1);
+    rerender(<CallScreen data={{ ...data, queueRow: { ...data.queueRow, queueVersion: 2 } }} />);
+    expect(new Set(openings()).size).toBe(2);
+  });
+
   it("links back to My Leads", () => {
     render(<CallScreen data={data} />);
     expect(screen.getByRole("link", { name: "Back to My Leads" })).toHaveAttribute("href", "/my-leads");

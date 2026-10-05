@@ -59,7 +59,12 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
   };
 
   // Post-call prompt (P1c) docked; the attempt workflow core is the same one the queue uses.
-  const opening = useMemo<AttemptOpening>(() => ({ action: "log-attempt", row: queueRow }), [queueRow]);
+  // The opening's identity is its idempotency key, so key it on the lead + queue version only. A
+  // refresh (e.g. after a valuation save) hands back a new queueRow object at the same version; that
+  // must not mint a new opening and a second attempt key. The row is read at the version's first render.
+  const queueVersion = queueRow.queueVersion;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const opening = useMemo<AttemptOpening>(() => ({ action: "log-attempt", row: queueRow }), [propertyId, queueVersion]);
   const [extrasState, setExtrasState] = useState<PostCallExtrasState | null>(null);
   const { submit, recoveryValue, onDripChanged } = useAttemptWorkflow<AttemptOpening>({
     opening,
