@@ -36,6 +36,7 @@ Last updated: 2026-10-04 (after #801 release)
 | `claude/my-leads-autoprompt-guard` | none | Claude Sonnet 5.5 builder | in progress: auto-prompt foreign-dialog guard used Radix `data-state=open`; Sandra is Base UI (`data-open`). client.tsx guard selector + RTL test only. |
 | `claude/my-leads-p1a-replay-fix` | none | Claude (Sonnet 5.5 builder) | draft PR open: restore `location` comparison (and tolerant `mode`) in fn_create_next_step replay, #797 tracked follow-up. Migration 20261006111000 (NOT applied). |
 | `claude/my-leads-p3-send-card` | #814 (draft, base `claude/my-leads-p3-call-screen`) | Claude Sonnet 5.5 builder | in progress (contract defaults schema, prefill mapper, send-contract card + actions; offer projection library/migration NOT in this slice) |
+| `claude/my-leads-callscreen-dial` | none (draft PR to follow) | Claude Sonnet 5.5 builder | in progress: call screen Call button wired to the shared My Leads dial path; deletes dial-stub.ts |
 | `p1a-retire` | none | none | NOT built yet |
 | all other branches | none | unclaimed | claim here before writing |
 
