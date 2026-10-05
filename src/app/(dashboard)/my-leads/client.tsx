@@ -171,6 +171,9 @@ function focusFromSelectedLead(
 }
 
 const REFRESH_INTERVAL_MS = 30_000;
+/** Any open Base UI popup (dialog, alert dialog, popover, drawer, menu, select list) blocks the auto-prompt. */
+const OPEN_FOREIGN_POPUP_SELECTOR =
+  "[role=dialog][data-open], [role=alertdialog][data-open], [role=menu][data-open], [role=listbox][data-open]";
 
 type DripEntry = MyLeadDripSnapshot["active"][number];
 /** Every copy of every lead, grouped by propertyId in one pass, plus how many places hold each lead. */
@@ -1044,7 +1047,8 @@ export function MyLeadsClient({
     if (!autoPromptOn || dialog !== null || openingStatus !== null || autoPrompt !== null) return;
     // Never open over an in-flight dial or any other open dialog in the page (menus, drawers, confirms).
     if (dialActive) return;
-    if (typeof document !== "undefined" && document.querySelector("[role=dialog][data-state=open]")) return;
+    // Sandra's popups are Base UI: open state is `data-open` (closing/closed popups carry `data-closed`), never Radix's `data-state=open`.
+    if (typeof document !== "undefined" && document.querySelector(OPEN_FOREIGN_POPUP_SELECTOR)) return;
     const candidates = callPoll.prompts.filter(
       (item) => !ackedAttempts.current.has(item.attemptId) && !ackInFlight.current.has(item.attemptId),
     );
