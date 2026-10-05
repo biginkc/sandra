@@ -556,6 +556,7 @@ export type Database = {
           command_id: string | null
           created_at: string
           follow_up_at: string
+          follow_up_calendar_chain_id: string | null
           id: string
           idempotency_key: string
           org_id: string
@@ -574,6 +575,7 @@ export type Database = {
           command_id?: string | null
           created_at?: string
           follow_up_at: string
+          follow_up_calendar_chain_id?: string | null
           id?: string
           idempotency_key: string
           org_id: string
@@ -592,6 +594,7 @@ export type Database = {
           command_id?: string | null
           created_at?: string
           follow_up_at?: string
+          follow_up_calendar_chain_id?: string | null
           id?: string
           idempotency_key?: string
           org_id?: string
@@ -1162,6 +1165,9 @@ export type Database = {
           seller_speech_seconds_measured: number | null
           seller_speech_seconds_estimated: number | null
           seller_speech_confidence: "full" | "partial" | "low" | null
+          provider_recording_url: string | null
+          provider_voicemail_transcript: string | null
+          provider_voicemail_url: string | null
           ended_at: string | null
           error_code: string | null
           error_message: string | null
@@ -1200,6 +1206,9 @@ export type Database = {
           seller_speech_seconds_measured?: number | null
           seller_speech_seconds_estimated?: number | null
           seller_speech_confidence?: "full" | "partial" | "low" | null
+          provider_recording_url?: string | null
+          provider_voicemail_transcript?: string | null
+          provider_voicemail_url?: string | null
           ended_at?: string | null
           error_code?: string | null
           error_message?: string | null
@@ -1238,6 +1247,9 @@ export type Database = {
           seller_speech_seconds_measured?: number | null
           seller_speech_seconds_estimated?: number | null
           seller_speech_confidence?: "full" | "partial" | "low" | null
+          provider_recording_url?: string | null
+          provider_voicemail_transcript?: string | null
+          provider_voicemail_url?: string | null
           ended_at?: string | null
           error_code?: string | null
           error_message?: string | null
@@ -2749,6 +2761,7 @@ export type Database = {
           body: string
           created_at: string
           id: string
+          idempotency_key: string | null
           org_id: string
           property_id: string
         }
@@ -2757,6 +2770,7 @@ export type Database = {
           body: string
           created_at?: string
           id?: string
+          idempotency_key?: string | null
           org_id: string
           property_id: string
         }
@@ -2765,6 +2779,7 @@ export type Database = {
           body?: string
           created_at?: string
           id?: string
+          idempotency_key?: string | null
           org_id?: string
           property_id?: string
         }
@@ -4501,6 +4516,90 @@ export type Database = {
           },
         ]
       }
+      my_leads_feature_flags: {
+        Row: {
+          artifact_fetch: boolean
+          auto_prompt: boolean
+          call_next_strip: boolean
+          call_screen: boolean
+          callback_alert: boolean
+          click_to_dial: boolean
+          comp_queue: boolean
+          contract_card: boolean
+          facts_job: boolean
+          native_matcher: boolean
+          offer_projection: boolean
+          org_id: string
+          post_call_prompt: boolean
+          seller_reminders: boolean
+          updated_at: string
+        }
+        Insert: {
+          artifact_fetch?: boolean
+          auto_prompt?: boolean
+          call_next_strip?: boolean
+          call_screen?: boolean
+          callback_alert?: boolean
+          click_to_dial?: boolean
+          comp_queue?: boolean
+          contract_card?: boolean
+          facts_job?: boolean
+          native_matcher?: boolean
+          offer_projection?: boolean
+          org_id: string
+          post_call_prompt?: boolean
+          seller_reminders?: boolean
+          updated_at?: string
+        }
+        Update: {
+          artifact_fetch?: boolean
+          auto_prompt?: boolean
+          call_next_strip?: boolean
+          call_screen?: boolean
+          callback_alert?: boolean
+          click_to_dial?: boolean
+          comp_queue?: boolean
+          contract_card?: boolean
+          facts_job?: boolean
+          native_matcher?: boolean
+          offer_projection?: boolean
+          org_id?: string
+          post_call_prompt?: boolean
+          seller_reminders?: boolean
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      my_leads_strip_overrides: {
+        Row: {
+          hidden_until: string | null
+          member_id: string
+          org_id: string
+          pinned_at: string | null
+          pinned_until: string | null
+          property_id: string
+          updated_at: string
+        }
+        Insert: {
+          hidden_until?: string | null
+          member_id: string
+          org_id: string
+          pinned_at?: string | null
+          pinned_until?: string | null
+          property_id: string
+          updated_at?: string
+        }
+        Update: {
+          hidden_until?: string | null
+          member_id?: string
+          org_id?: string
+          pinned_at?: string | null
+          pinned_until?: string | null
+          property_id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       tasks: {
         Row: {
           assignee_id: string
@@ -4517,6 +4616,9 @@ export type Database = {
           google_calendar_event_id: string | null
           id: string
           lead_next_action_idempotency_key: string | null
+          location: string | null
+          mode: string
+          next_step_kind: string
           org_id: string
           outcome: string | null
           related_property_id: string | null
@@ -4545,6 +4647,8 @@ export type Database = {
           google_calendar_event_id?: string | null
           id?: string
           lead_next_action_idempotency_key?: string | null
+          location?: string | null
+          mode?: string
           org_id: string
           outcome?: string | null
           related_property_id?: string | null
@@ -4573,6 +4677,8 @@ export type Database = {
           google_calendar_event_id?: string | null
           id?: string
           lead_next_action_idempotency_key?: string | null
+          location?: string | null
+          mode?: string
           org_id?: string
           outcome?: string | null
           related_property_id?: string | null

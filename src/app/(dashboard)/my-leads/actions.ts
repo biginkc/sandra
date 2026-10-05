@@ -23,6 +23,10 @@ import {
   type DetailGroup,
 } from "@/lib/my-leads/queries";
 import { listMyLeadsInDrip } from "@/lib/my-leads/drip-queries";
+import { getCallNext } from "@/lib/my-leads/call-next";
+import { schemaReady } from "@/lib/my-leads/schema-ready";
+import { createNextStep } from "@/lib/next-steps";
+import { createIdempotentLeadNote } from "@/lib/my-leads/lead-note";
 import {
   setAcquisitionDesignation,
   setAcquisitionSettings,
@@ -41,12 +45,18 @@ export async function loadMyLeads(input: {
   endDate?: string;
 }) {
   try {
-    const [snapshot, kpis, drips] = await Promise.all([
+    const [snapshot, kpis, drips, strip] = await Promise.all([
       getAcquisitionQueue(input),
       getAcquisitionKpis({ memberId: input.memberId, period: "today" }),
       listMyLeadsInDrip(input.memberId, input.search),
+      // The Call next strip is additive: null when it is off (flag or schema), undefined when
+      // its read failed. Neither may blank the queue.
+      getCallNext({ memberId: input.memberId }).catch(() => {
+        reportMyLeadsReadFailure("my_leads_call_next");
+        return undefined;
+      }),
     ]);
-    return { ok: true as const, snapshot, kpis, drips };
+    return { ok: true as const, snapshot, kpis, drips, strip };
   } catch (error) {
     reportMyLeadsReadFailure("my_leads_queue");
     return {
@@ -922,7 +932,15 @@ export async function loadMyLeadCallReferences(
           name: string,
           args: Record<string, string>,
         ): Promise<{
-          data: { id: string; occurredAt: string }[] | null;
+          data:
+            | {
+                id: string;
+                occurredAt: string;
+                callOutcome?: string | null;
+                talkSeconds?: number | null;
+                provider?: string | null;
+              }[]
+            | null;
           error: unknown;
         }>;
       }
@@ -946,6 +964,10 @@ export async function loadMyLeadCallReferences(
             timeStyle: "short",
             timeZone: "America/Chicago",
           }).format(new Date(call.occurredAt)) + " Central",
+        // Absent until the P1c migration lands; the prompt then simply skips the prefill.
+        callOutcome: call.callOutcome ?? null,
+        talkSeconds: call.talkSeconds ?? null,
+        provider: call.provider ?? null,
       })),
     };
   } catch {
@@ -954,4 +976,104 @@ export async function loadMyLeadCallReferences(
       message: "Could not load pending call references.",
     };
   }
+}
+
+const POST_CALL_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const POST_CALL_PICKS = ["tomorrow", "three_days", "next_week", "custom"];
+
+/**
+ * The post-call prompt's extras: the one note (written to lead_notes) and the quick next step
+ * (a phone appointment). They are independent, each safe to retry (the note by
+ * lead_notes.idempotency_key, the appointment by its booking idempotency key, both the prompt's
+ * submissionId); a partial success is reported, never rolled back, and never affects the saved
+ * attempt. The lead must be in the member's own queue (same single-row read every opening uses).
+ */
+export async function savePostCallExtras(input: {
+  memberId: string;
+  propertyId: string;
+  submissionId: string;
+  note: string | null;
+  nextStep: {
+    dueAt: string;
+    pick: "tomorrow" | "three_days" | "next_week" | "custom";
+  } | null;
+}): Promise<
+  | {
+      ok: true;
+      note: "saved" | "skipped" | "failed";
+      nextStep: "created" | "skipped" | "failed";
+      message?: string;
+    }
+  | { ok: false; message: string }
+> {
+  if (
+    !POST_CALL_UUID.test(input.submissionId ?? "") ||
+    (input.nextStep &&
+      (!POST_CALL_PICKS.includes(input.nextStep.pick) ||
+        !Number.isFinite(Date.parse(input.nextStep.dueAt))))
+  ) {
+    return { ok: false, message: "Choose a valid note and next step." };
+  }
+  let row;
+  try {
+    const lookup = await getMyLeadsQueueRow({
+      memberId: input.memberId,
+      propertyId: input.propertyId,
+    });
+    if (lookup.status !== "found") {
+      return { ok: false, message: "This lead is no longer in your queue." };
+    }
+    row = lookup.row;
+  } catch {
+    return { ok: false, message: "Could not confirm this lead. Please retry." };
+  }
+
+  const messages: string[] = [];
+  const noteText = input.note?.trim() ?? "";
+  let note: "saved" | "skipped" | "failed" = "skipped";
+  if (noteText) {
+    if (await schemaReady("lead_note_idempotency")) {
+      const saved = await createIdempotentLeadNote(
+        input.propertyId,
+        noteText,
+        input.submissionId,
+      );
+      note = saved.ok ? "saved" : "failed";
+      if (!saved.ok) messages.push(`Note not saved: ${saved.error.message}`);
+    } else {
+      // Not safe to write without the key (a retry could duplicate it): skip, say so.
+      messages.push("Note not saved yet: Sandra is still updating. Add it from the lead page.");
+    }
+  }
+
+  let nextStep: "created" | "skipped" | "failed" = "skipped";
+  if (input.nextStep) {
+    if (await schemaReady("next_step_write")) {
+      // Booking effects stay off (default): a quick pick must not pause the drip or set
+      // booked_appointment, so the drip picker after save keeps working.
+      const created = await createNextStep({
+        kind: "appointment",
+        mode: "phone",
+        propertyId: input.propertyId,
+        contactId: row.contactId ?? undefined,
+        assigneeId: input.memberId,
+        dueAt: new Date(input.nextStep.dueAt).toISOString(),
+        title: `Call ${row.address}`,
+        idempotencyKey: input.submissionId,
+        origin: "app",
+      });
+      nextStep = created.ok ? "created" : "failed";
+      if (!created.ok) messages.push(`Next step not set: ${created.error.message}`);
+    } else {
+      messages.push("Next step not set yet: Sandra is still updating. Add it from the lead page.");
+    }
+  }
+
+  return {
+    ok: true,
+    note,
+    nextStep,
+    ...(messages.length ? { message: messages.join(" ") } : {}),
+  };
 }

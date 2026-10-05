@@ -97,10 +97,33 @@ function makeMembershipsBuilder(): Record<string, unknown> {
 }
 
 const rpcMock = vi.hoisted(() => vi.fn());
+const schemaReadyMock = vi.hoisted(() => vi.fn());
+let taskModeResult: { data: unknown; error: unknown } = {
+  data: [],
+  error: null,
+};
+let taskTableReads = 0;
+
+vi.mock("@/lib/my-leads/schema-ready", () => ({
+  schemaReady: schemaReadyMock,
+}));
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => ({
-    from: vi.fn(() => makeBuilder()),
+    from: vi.fn((table: string) => {
+      if (table === "tasks") {
+        taskTableReads += 1;
+        return {
+          select: () => ({
+            in: (col: string, val: unknown) => {
+              inCalls.push([col, val]);
+              return Promise.resolve(taskModeResult);
+            },
+          }),
+        };
+      }
+      return makeBuilder();
+    }),
     rpc: rpcMock,
   })),
 }));
@@ -132,6 +155,10 @@ beforeEach(() => {
   queuedError = null;
   queuedResponses = [];
   rpcMock.mockReset();
+  schemaReadyMock.mockReset();
+  schemaReadyMock.mockResolvedValue(false);
+  taskModeResult = { data: [], error: null };
+  taskTableReads = 0;
   rpcMock.mockImplementation(async () => ({
     data:
       queuedData?.map((row) => {
@@ -185,6 +212,51 @@ function appointmentRow(
     ...overrides,
   };
 }
+
+describe("fetchCalendarAppointments mode tag", () => {
+  const row = { id: "t1", title: "Walk", due_at: "2026-05-04T15:00:00Z" };
+  const run = () =>
+    fetchCalendarAppointments("org-1", {
+      weekStartUtc: "2026-05-03T05:00:00.000Z",
+      weekEndUtc: "2026-05-10T05:00:00.000Z",
+    });
+
+  it("skips the tasks read entirely while next_step_write is not ready", async () => {
+    queuedData = [row];
+    const result = await run();
+    expect(schemaReadyMock).toHaveBeenCalledWith("next_step_write");
+    expect(taskTableReads).toBe(0);
+    expect(result.ok && result.rows[0].mode).toBeUndefined();
+  });
+
+  it("attaches the mode from one extra tasks read once ready", async () => {
+    schemaReadyMock.mockResolvedValue(true);
+    queuedData = [row, { ...row, id: "t2" }];
+    taskModeResult = {
+      data: [
+        { id: "t1", mode: "in_person" },
+        { id: "t2", mode: "phone" },
+      ],
+      error: null,
+    };
+    const result = await run();
+    expect(taskTableReads).toBe(1);
+    expect(inCalls).toContainEqual(["id", ["t1", "t2"]]);
+    expect(result.ok && result.rows.map((r) => r.mode)).toEqual([
+      "in_person",
+      "phone",
+    ]);
+  });
+
+  it("degrades to no tag, not a failed calendar, when the mode read errors", async () => {
+    schemaReadyMock.mockResolvedValue(true);
+    queuedData = [row];
+    taskModeResult = { data: null, error: { message: "boom" } };
+    const result = await run();
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.rows[0].mode).toBeUndefined();
+  });
+});
 
 describe("fetchCalendarAppointments", () => {
   it("delegates a week to the single-snapshot RPC as exactly one window", async () => {

@@ -94,6 +94,7 @@ export function MyLeadDetailPanel({
             <div>
               <p className="font-semibold text-foreground">{attempt.outcomeLabel}</p>
               <p className="mt-[3px] text-muted-foreground">{attempt.actorLabel}</p>
+              {attempt.note && <p className="mt-[3px] whitespace-pre-wrap break-words text-foreground">{attempt.note}</p>}
             </div>
             <div className="flex flex-wrap items-center justify-end gap-[9px] whitespace-nowrap">
               {attempt.sourceLabel && (
@@ -179,7 +180,13 @@ export function MyLeadDetailPanel({
           paging={paging.appointments}
           onLoadMore={onLoadDetailPage ? (cursor) => loadGroup("appointments", cursor) : undefined}
           renderRow={(appointment) => (
-            <div key={appointment.id} className="space-y-1.5">
+            <div
+              key={appointment.id}
+              className="space-y-1.5"
+              data-next-step-id={appointment.id}
+              data-next-step-due-at={appointment.dueAt}
+              data-next-step-kind={appointment.taskType}
+            >
               <p className="font-medium text-foreground">{appointment.label}</p>
               <p className="text-xs text-muted-foreground">
                 {appointment.dueLabel} · {appointment.statusLabel}

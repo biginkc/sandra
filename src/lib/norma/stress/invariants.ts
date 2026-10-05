@@ -236,7 +236,8 @@ export async function checkInvariants(h: Harness, opts: { settled?: boolean; all
           const title = String(t.title);
           const wantTitle = r.outcome === "callback_requested" ? /time unconfirmed/ : r.outcome === "reached_no_callback" ? /no callback time given/ : /wrong number/;
           if (!wantTitle.test(title)) v("3", `request ${r.id} (${r.outcome}): unexpected task title "${title}"`);
-          if (t.type !== (r.outcome === "wrong_number" ? "custom" : "callback")) v("3", `request ${r.id}: task type ${t.type}`);
+          if (t.type !== (r.outcome === "wrong_number" ? "custom" : "appointment")) v("3", `request ${r.id}: task type ${t.type}`);
+          if (t.mode !== "phone") v("3", `request ${r.id}: task mode ${t.mode}, expected phone`);
           const wantDue = r.outcome === "callback_requested" && r.callback_requested_for ? r.callback_requested_for : r.completed_at;
           if (wantDue && Date.parse(String(t.due_at)) !== Date.parse(wantDue)) v("3", `request ${r.id}: task due ${t.due_at}, expected ${wantDue}`);
         }

@@ -556,6 +556,31 @@ describe("rescheduleAppointmentAction", () => {
     });
   });
 
+  it("keeps the existing appointment's length on reschedule (15, 30 and 60 minutes), falling back to the picker only without a usable window", async () => {
+    const due = "2026-09-01T15:00:00Z";
+    const rowWith = (minutes: number | null) => ({
+      org_id: "org-1", title: "Call", due_at: due,
+      end_at: minutes === null ? null : new Date(Date.parse(due) + minutes * 60_000).toISOString(),
+      related_property_id: "prop-1", contact_id: null,
+    });
+    rescheduleAppointment.mockResolvedValue({
+      ok: true,
+      data: { taskId: "s", oldTaskId: "task-1", chainId: "c", duplicate: false, ledgerId: "l" },
+    });
+    const endMinutes = () => {
+      const args = rescheduleAppointment.mock.calls.at(-1)![1] as { newStartUtc: string; newEndUtc: string };
+      return (Date.parse(args.newEndUtc) - Date.parse(args.newStartUtc)) / 60_000;
+    };
+    for (const minutes of [15, 30, 60]) {
+      createClient.mockResolvedValue(makeSupabaseMock({ userId: "user-1", taskRow: rowWith(minutes) as never }));
+      await rescheduleAppointmentAction({ ...validInput, durationMinutes: 45 });
+      expect(endMinutes(), `${minutes}`).toBe(minutes);
+    }
+    createClient.mockResolvedValue(makeSupabaseMock({ userId: "user-1", taskRow: rowWith(null) as never }));
+    await rescheduleAppointmentAction({ ...validInput, durationMinutes: 45 });
+    expect(endMinutes()).toBe(45);
+  });
+
   it("does not record an idempotent reschedule replay", async () => {
     createClient.mockResolvedValue(
       makeSupabaseMock({

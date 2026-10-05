@@ -43,7 +43,7 @@ export function offerFollowUp(sentAt: string, followUpAt: string): Validation<{ 
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const ATTEMPT_OUTCOMES = new Set<AcquisitionAttemptOutcome>(['no_answer', 'reached', 'wrong_number']);
+const ATTEMPT_OUTCOMES = new Set<AcquisitionAttemptOutcome>(['no_answer', 'reached', 'wrong_number', 'voicemail']);
 
 /** Validate the source/kind/outcome matrix before a command reaches Postgres. */
 export function acquisitionAttemptInput(

@@ -35,6 +35,13 @@ describe('acquisition command validation', () => {
     expect(acquisitionAttemptInput('outreach', 'dialpad', 'reached').ok).toBe(false);
   });
 
+  it('accepts voicemail but not the system-only not_logged', () => {
+    expect(acquisitionAttemptInput('call', 'dialpad', 'voicemail').ok).toBe(true);
+    expect(acquisitionAttemptInput('outreach', 'manual', 'voicemail').ok).toBe(true);
+    expect(acquisitionAttemptInput('call', 'dialpad', 'not_logged').ok).toBe(false);
+    expect(acquisitionAttemptInput('call', 'dialpad', 'bogus').ok).toBe(false);
+  });
+
   it('rejects malformed or negative CAS envelopes', () => {
     expect(acquisitionMutationEnvelope(null).ok).toBe(false);
     expect(acquisitionMutationEnvelope({

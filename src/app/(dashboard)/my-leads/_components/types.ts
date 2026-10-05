@@ -38,6 +38,8 @@ export type MyLeadAssignmentState =
 export type MyLeadFirstCallState = "pending" | "started" | "unavailable"
 
 export type MyLeadQueueRow = {
+  /** "In Call next: <reason>" when the lead is currently in the Call next strip. */
+  stripReason?: string
   dripReply?: import('@/lib/my-leads/drip-queries').MyLeadDrip | null
   propertyId: string
   queueStage: MyLeadStage
@@ -62,10 +64,11 @@ export type MyLeadQueueRow = {
     motivationResponseKind: MyLeadMotivationResponseKind
     text: string | null
   }
-  nextStep: {
-    kind: "callback" | "appointment"
-    label: string
-  } | null
+  nextStep:
+    | { kind: "appointment"; mode: "phone" | "in_person"; label: string; dueAt?: string }
+    // Legacy rows only, until the next-step read-model migration applies.
+    | { kind: "callback"; label: string; dueAt?: string }
+    | null
   offer: {
     amountLabel: string
     method: string
@@ -131,6 +134,7 @@ export type MyLeadAttempt = {
   followUpStatus?: "required" | "draft" | "claimed" | "sending" | "accepted" | "delivered" | "failed_not_dispatched" | "unknown" | "blocked" | "delivery_failed" | "voided" | "exception_closed" | null
   followUpMessage?: string | null
   followUpBlockedReason?: string | null
+  note?: string | null
 }
 
 export type MyLeadAppointment = {
@@ -138,6 +142,9 @@ export type MyLeadAppointment = {
   label: string
   dueLabel: string
   statusLabel: string
+  /** ISO due time and task type, exposed as data-next-step-* attributes (seam S4). */
+  dueAt?: string
+  taskType?: "appointment" | "callback"
   /** Present only when the existing appointment lifecycle can safely act on this row. */
   lifecycleAction?: MyLeadAppointmentActionTarget
   /** Present only when this task is a callback and the existing task controls can act on it. */
@@ -217,6 +224,10 @@ export type MyLeadDetailPageResult =
 export type AcquisitionCallReferenceOption = {
   id: string
   label: string
+  /** From the linked call; null when the read predates the P1c migration. */
+  callOutcome?: string | null
+  talkSeconds?: number | null
+  provider?: string | null
 }
 
 export type MyLeadsQueueProps = {
@@ -250,6 +261,29 @@ export type MyLeadsQueueProps = {
   /** Called after a confirmed existing note/appointment mutation. */
   onLeadChanged?: (propertyId: string) => void
   onStageAction: (action: MyLeadAction, row: MyLeadQueueRow) => void
+}
+
+/** Props of the Call next strip (P1b). The strip is read-only derived data. */
+export type MyLeadsStripProps = {
+  rows: readonly import("@/lib/my-leads/call-next").CallNextRow[]
+  excluded: readonly import("@/lib/my-leads/call-next").CallNextExcluded[]
+  hiddenCount: number
+  snapshotAt: string
+  /** False when an owner views a rep's strip: reading is allowed, acting is not. */
+  canAct: boolean
+  busyPropertyId?: string | null
+  error?: string | null
+  triageOpen: boolean
+  triage: import("@/lib/my-leads/call-next").TriageSnapshot | null
+  triageLoading: boolean
+  triageError: string | null
+  onToggleTriage: () => void
+  onLoadMoreTriage: () => void
+  onCall: (propertyId: string) => void
+  onCallToday: (propertyId: string) => void
+  onNotToday: (propertyId: string) => void
+  /** Opens the existing handoff dialog (its reason field stays required). */
+  onDeadNurture: (propertyId: string) => void
 }
 
 export type MyLeadDetailPanelProps = {
@@ -297,6 +331,31 @@ export type AcquisitionAttemptFollowUp = {
   body: string
 }
 
+/** Post-call prompt extras. They ride beside the attempt command and never reach it. */
+export type PostCallNextStep = {
+  pick: "tomorrow" | "three_days" | "next_week" | "custom"
+  /** ISO instant. */
+  dueAt: string
+}
+export type PostCallExtras = {
+  /** A UUID minted when the prompt opens; the idempotency key for the note and the appointment. */
+  submissionId: string
+  note: string | null
+  nextStep: PostCallNextStep | null
+}
+export type PostCallExtrasResult =
+  | {
+      ok: true
+      note: "saved" | "skipped" | "failed"
+      nextStep: "created" | "skipped" | "failed"
+      message?: string
+    }
+  | { ok: false; message: string }
+/** What the prompt shows after the attempt is saved. */
+export type PostCallExtrasState =
+  | { status: "saving" }
+  | { status: "done"; result: PostCallExtrasResult }
+
 export type AcquisitionAttemptFormPayload = {
   propertyId: string
   kind: AcquisitionAttemptKind
@@ -309,6 +368,8 @@ export type AcquisitionAttemptFormPayload = {
   /** Required only for a no-answer outcome when the rep SMS rollout applies. */
   smsBody?: string | null
   followUp?: AcquisitionAttemptFollowUp | null
+  /** Post-call prompt only; stripped before the command is built. */
+  postCall?: PostCallExtras
 }
 
 export type AcquisitionTemperature = "hot" | "warm" | "cold" | null

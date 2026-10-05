@@ -81,6 +81,17 @@ function buildProps(overrides: Partial<MyLeadsQueueProps> = {}): MyLeadsQueuePro
 }
 
 describe("MyLeadsQueue", () => {
+  it("shows \"In Call next\" with the reason in an expanded lead's details, and nothing when it is not in the strip", async () => {
+    const props = buildProps()
+    props.stages.contacted.rows = [
+      { ...props.stages.contacted.rows[0], stripReason: "Texted you 2h ago" },
+      { ...makeRow("contacted", 7), propertyId: "property-plain" },
+    ]
+    render(<MyLeadsQueue {...props} focusPropertyId="property-2" />)
+    expect(await screen.findByTestId("strip-reason-property-2")).toHaveTextContent("In Call next: Texted you 2h ago")
+    expect(screen.queryByTestId("strip-reason-property-plain")).not.toBeInTheDocument()
+  })
+
   it("starts a deep-linked lead expanded, loads its details, and scrolls to it", async () => {
     const scrollIntoView = vi.fn()
     Element.prototype.scrollIntoView = scrollIntoView
@@ -434,6 +445,24 @@ describe("MyLeadsQueue", () => {
     expect(composer).toHaveClass("contents")
     expect(textTrigger).toHaveClass("h-8")
     expect(details.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it("labels the next step by mode and carries the next-step data attributes", () => {
+    const props = buildProps()
+    const contacted = props.stages.contacted.rows as MyLeadQueueRow[]
+    contacted[0] = { ...contacted[0], nextStep: { kind: "appointment", mode: "phone", label: "Sep 12", dueAt: "2026-09-12T15:00:00Z" } }
+    const { rerender } = render(<MyLeadsQueue {...props} />)
+    const row = within(screen.getByTestId("my-lead-row-property-2"))
+    expect(row.getByText("Phone appointment · Sep 12")).toBeInTheDocument()
+    expect(document.querySelector('[data-next-step-kind="appointment"][data-next-step-due-at="2026-09-12T15:00:00Z"]')).not.toBeNull()
+
+    contacted[0] = { ...contacted[0], nextStep: { kind: "appointment", mode: "in_person", label: "Sep 13" } }
+    rerender(<MyLeadsQueue {...props} />)
+    expect(screen.getByText("In person · Sep 13")).toBeInTheDocument()
+
+    contacted[0] = { ...contacted[0], nextStep: { kind: "callback", label: "Sep 14" } }
+    rerender(<MyLeadsQueue {...props} />)
+    expect(screen.getByText("Callback · Sep 14")).toBeInTheDocument()
   })
 
   it("describes the contacted gate without claiming the seller was reached", async () => {

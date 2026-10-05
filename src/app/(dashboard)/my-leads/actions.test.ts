@@ -1,5 +1,5 @@
 import { beforeEach,describe,expect,it,vi } from 'vitest';
-const mocks=vi.hoisted(()=>({viewer:vi.fn(),rpc:vi.fn(),adminRpc:vi.fn(),adminFrom:vi.fn(),dispatch:vi.fn(),revalidate:vi.fn(),report:vi.fn()}));
+const mocks=vi.hoisted(()=>({drips:vi.fn(),callNext:vi.fn(),viewer:vi.fn(),rpc:vi.fn(),adminRpc:vi.fn(),adminFrom:vi.fn(),dispatch:vi.fn(),revalidate:vi.fn(),report:vi.fn(),queueRow:vi.fn(),createNote:vi.fn(),createStep:vi.fn(),ready:vi.fn()}));
 vi.mock('next/cache',()=>({revalidatePath:mocks.revalidate}));
 vi.mock('@/lib/errors/report',()=>({reportError:mocks.report}));
 vi.mock('@/lib/supabase/admin',()=>({createAdminClient:()=>({rpc:mocks.adminRpc,from:mocks.adminFrom})}));
@@ -10,11 +10,16 @@ vi.mock('@/lib/messaging/rep-sms',()=>({
     propertyId:input.propertyId,assignmentId:input.assignmentId,toNumber:input.toNumber,compositionFingerprint:'test-fingerprint',
   }),
 }));
-vi.mock('@/lib/my-leads/queries',()=>({myLeadsViewer:mocks.viewer,getAcquisitionQueue:vi.fn(),getAcquisitionKpis:vi.fn(),getAcquisitionDetail:vi.fn()}));
+vi.mock('@/lib/my-leads/queries',()=>({myLeadsViewer:mocks.viewer,getMyLeadsQueueRow:mocks.queueRow,getAcquisitionQueue:vi.fn(),getAcquisitionKpis:vi.fn(),getAcquisitionDetail:vi.fn()}));
+vi.mock('@/lib/my-leads/drip-queries',()=>({listMyLeadsInDrip:mocks.drips}));
+vi.mock('@/lib/my-leads/lead-note',()=>({createIdempotentLeadNote:mocks.createNote}));
+vi.mock('@/lib/next-steps',()=>({createNextStep:mocks.createStep}));
+vi.mock('@/lib/my-leads/schema-ready',()=>({schemaReady:mocks.ready}));
+vi.mock('@/lib/my-leads/call-next',()=>({getCallNext:mocks.callNext}));
 vi.mock('@/lib/my-leads/settings',()=>({setAcquisitionDesignation:vi.fn(),setAcquisitionSettings:vi.fn()}));
 import { getAcquisitionKpis, getAcquisitionQueue } from '@/lib/my-leads/queries';
-import { loadMyLeads, submitMyLeadCommand } from './actions';
-beforeEach(()=>{vi.resetAllMocks();mocks.viewer.mockResolvedValue({orgId:'actual-org',userId:'actor',client:{rpc:mocks.rpc}});mocks.rpc.mockResolvedValue({data:{ok:true},error:null});mocks.adminRpc.mockResolvedValue({data:{ok:true},error:null});mocks.dispatch.mockResolvedValue({status:'sent',messageId:'message',externalId:'provider-message'});});
+import { loadMyLeadCallReferences, loadMyLeads, savePostCallExtras, submitMyLeadCommand } from './actions';
+beforeEach(()=>{vi.resetAllMocks();mocks.callNext.mockResolvedValue(null);mocks.drips.mockResolvedValue({active:[],replied:[],repliedCount:0,counts:{}});mocks.viewer.mockResolvedValue({orgId:'actual-org',userId:'actor',client:{rpc:mocks.rpc}});mocks.rpc.mockResolvedValue({data:{ok:true},error:null});mocks.adminRpc.mockResolvedValue({data:{ok:true},error:null});mocks.dispatch.mockResolvedValue({status:'sent',messageId:'message',externalId:'provider-message'});});
 describe('My Leads command integration',()=>{
   it('injects the authenticated organization, overriding client input',async()=>{
     expect(await submitMyLeadCommand('log-offer',{orgId:'forged-org',propertyId:'lead',amountCents:100})).toEqual({ok:true});
@@ -153,6 +158,27 @@ it('keeps KPI scope at today for the rep regardless of search and obsolete perio
   expect(getAcquisitionQueue).toHaveBeenCalledWith(expect.objectContaining({search:'filtered lead'}));
 });
 
+it('adds the Call next strip to the refresh, null when it is off',async()=>{
+  vi.mocked(getAcquisitionQueue).mockResolvedValue({stages:{},snapshotAt:'2026-10-05T12:00:00Z'} as never);
+  vi.mocked(getAcquisitionKpis).mockResolvedValue({} as never);
+  const strip={rows:[],excluded:[],hiddenCount:0,snapshotAt:'2026-10-05T12:00:00Z'};
+  mocks.callNext.mockResolvedValueOnce(strip);
+  expect(await loadMyLeads({memberId:'rep',search:'',period:'today'})).toMatchObject({ok:true,strip});
+  expect(mocks.callNext).toHaveBeenCalledWith({memberId:'rep'});
+  mocks.callNext.mockResolvedValueOnce(null);
+  expect(await loadMyLeads({memberId:'rep',search:'',period:'today'})).toMatchObject({ok:true,strip:null});
+});
+
+it('a failed strip read leaves the queue loading and is reported once with fixed fields',async()=>{
+  vi.mocked(getAcquisitionQueue).mockResolvedValue({stages:{},snapshotAt:'2026-10-05T12:00:00Z'} as never);
+  vi.mocked(getAcquisitionKpis).mockResolvedValue({} as never);
+  mocks.callNext.mockRejectedValueOnce(new Error('Private lead name and phone'));
+  const result=await loadMyLeads({memberId:'rep',search:'',period:'today'});
+  expect(result).toMatchObject({ok:true,strip:undefined});
+  expect(mocks.report).toHaveBeenCalledOnce();
+  expect(mocks.report.mock.calls[0][1]).toEqual({errorClass:'database',tags:{surface:'server',operation:'my_leads_call_next',kind:'read_failure'}});
+});
+
 it('returns safe typed access guidance without revealing assignment or revalidating', async()=>{
   mocks.rpc.mockResolvedValue({data:null,status:403,error:{message:'FORBIDDEN',code:'42501'}});
   expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toEqual({ok:false,answered:true,certainty:'unknown',code:'FORBIDDEN',message:'This lead is unavailable or you no longer have access. Refresh to check access. Your draft is retained.'});
@@ -259,4 +285,78 @@ it('returns an early delivery callback result truthfully instead of reporting ac
       remainder:"Maria wasn't able to reach you. What time would work for her to call you back?",body:'ignored'},
   });
   expect(result).toEqual({ok:true,attemptRecorded:true,followUp:{status:'delivery_failed',message:'carrier rejected'}});
+});
+
+describe('savePostCallExtras',()=>{
+  const SUB='11111111-1111-4111-8111-111111111111';
+  const DUE='2026-10-06T15:00:00.000Z';
+  const input=(over:Record<string,unknown>={})=>({memberId:'actor',propertyId:'lead',submissionId:SUB,note:'Left a message',nextStep:{pick:'tomorrow' as const,dueAt:DUE},...over});
+  beforeEach(()=>{
+    mocks.queueRow.mockResolvedValue({status:'found',row:{contactId:'contact-1',address:'1 Main St'},snapshotAt:'x'});
+    mocks.ready.mockResolvedValue(true);
+    mocks.createNote.mockResolvedValue({ok:true,data:{id:'note-1'}});
+    mocks.createStep.mockResolvedValue({ok:true,data:{taskId:'task-1'}});
+  });
+  it('rejects a lead that is not in the member queue before any write',async()=>{
+    mocks.queueRow.mockResolvedValue({status:'unavailable',reason:'other_rep'});
+    expect(await savePostCallExtras(input())).toEqual({ok:false,message:'This lead is no longer in your queue.'});
+    expect(mocks.createNote).not.toHaveBeenCalled();expect(mocks.createStep).not.toHaveBeenCalled();
+  });
+  it('rejects an unreadable lead and malformed input before any write',async()=>{
+    mocks.queueRow.mockRejectedValue(new Error('FORBIDDEN'));
+    expect((await savePostCallExtras(input())).ok).toBe(false);
+    expect((await savePostCallExtras(input({submissionId:'nope'}))).ok).toBe(false);
+    expect((await savePostCallExtras(input({nextStep:{pick:'someday',dueAt:DUE}}))).ok).toBe(false);
+    expect((await savePostCallExtras(input({nextStep:{pick:'custom',dueAt:'garbage'}}))).ok).toBe(false);
+    expect(mocks.createNote).not.toHaveBeenCalled();expect(mocks.createStep).not.toHaveBeenCalled();
+  });
+  it('note only: writes the note with the submission id as its idempotency key and no step',async()=>{
+    expect(await savePostCallExtras(input({nextStep:null}))).toEqual({ok:true,note:'saved',nextStep:'skipped'});
+    expect(mocks.createNote).toHaveBeenCalledWith('lead','Left a message',SUB);
+    expect(mocks.createStep).not.toHaveBeenCalled();
+  });
+  it('pick only: creates a phone appointment for the rep with booking effects off and no note',async()=>{
+    expect(await savePostCallExtras(input({note:'  '}))).toEqual({ok:true,note:'skipped',nextStep:'created'});
+    expect(mocks.createNote).not.toHaveBeenCalled();
+    expect(mocks.createStep).toHaveBeenCalledWith({kind:'appointment',mode:'phone',propertyId:'lead',contactId:'contact-1',assigneeId:'actor',dueAt:DUE,title:'Call 1 Main St',idempotencyKey:SUB,origin:'app'});
+    expect(mocks.createStep.mock.calls[0][0]).not.toHaveProperty('applyBookingEffects');
+  });
+  it('both: writes both',async()=>{
+    expect(await savePostCallExtras(input())).toEqual({ok:true,note:'saved',nextStep:'created'});
+  });
+  it('a note failure still creates the step and says what failed',async()=>{
+    mocks.createNote.mockResolvedValue({ok:false,error:{code:'NOTE_CREATE_FAILED',message:'boom'}});
+    expect(await savePostCallExtras(input())).toEqual({ok:true,note:'failed',nextStep:'created',message:'Note not saved: boom'});
+    expect(mocks.createStep).toHaveBeenCalledTimes(1);
+  });
+  it('a step failure keeps the saved note',async()=>{
+    mocks.createStep.mockResolvedValue({ok:false,error:{code:'TIME_INVALID',message:'bad time'}});
+    expect(await savePostCallExtras(input())).toEqual({ok:true,note:'saved',nextStep:'failed',message:'Next step not set: bad time'});
+  });
+  it('a duplicate submission id returns the existing ids and succeeds again',async()=>{
+    mocks.createNote.mockResolvedValue({ok:true,data:{id:'note-1'}});
+    mocks.createStep.mockResolvedValue({ok:true,data:{taskId:'task-1',duplicate:true}});
+    expect(await savePostCallExtras(input())).toEqual({ok:true,note:'saved',nextStep:'created'});
+    expect(await savePostCallExtras(input())).toEqual({ok:true,note:'saved',nextStep:'created'});
+    expect(mocks.createNote.mock.calls[1][2]).toBe(SUB);
+  });
+  it('before the migration: no note write (skipped, said so) and no step (skipped, said so), nothing throws',async()=>{
+    mocks.ready.mockResolvedValue(false);
+    const result=await savePostCallExtras(input());
+    expect(result).toMatchObject({ok:true,note:'skipped',nextStep:'skipped'});
+    expect(mocks.createNote).not.toHaveBeenCalled();expect(mocks.createStep).not.toHaveBeenCalled();
+  });
+});
+describe('loadMyLeadCallReferences',()=>{
+  it('maps the call facts and tolerates their absence before the migration',async()=>{
+    mocks.rpc.mockResolvedValue({data:[
+      {id:'a',occurredAt:'2026-10-05T15:00:00Z',callOutcome:'voicemail',talkSeconds:3,provider:'dialpad'},
+      {id:'b',occurredAt:'2026-10-05T16:00:00Z'},
+    ],error:null});
+    const result=await loadMyLeadCallReferences('lead','actor');
+    expect(result).toMatchObject({ok:true,options:[
+      {id:'a',callOutcome:'voicemail',talkSeconds:3,provider:'dialpad'},
+      {id:'b',callOutcome:null,talkSeconds:null,provider:null},
+    ]});
+  });
 });

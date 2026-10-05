@@ -35,7 +35,9 @@ test.beforeAll(async () => {
       export const submitMyLeadHandoffDrip=(input)=>backend().submitMyLeadHandoffDrip(input);
       export const changeAcquisitionDesignation=async()=>({ok:true});
       export const changeAcquisitionSettings=async()=>({ok:true});
+      export const savePostCallExtras=async()=>({ok:true,note:'skipped',nextStep:'skipped'});
     `],
+    ["strip-actions", `export const loadCallNext=async()=>({ok:true,data:null}); export const loadTriage=async()=>({ok:true,data:{rows:[],nextCursor:null}}); export const setStripOverride=async()=>({ok:true,data:null});`],
     ["sequences-actions", `export const listDripChoices=async()=>({ok:true,data:[]}); export const startDripForLeads=async()=>({ok:false,error:{message:'Synthetic drip boundary'}});`],
     ["sms-actions", `export const loadRepSmsAssignments=async()=>({ok:true,data:[]}); export const loadRepSmsSenderInventory=async()=>({ok:true,data:{eligible:[],ineligible:[]}}); export const saveRepSmsSender=async()=>({ok:true});`],
     ["notes-feed", `export const AddNoteComposer=()=>null;`],
@@ -76,6 +78,7 @@ test.beforeAll(async () => {
         build.onResolve({ filter: /existing-detail-actions$/ }, () => virtual("existing-detail-actions"))
         build.onResolve({ filter: /\(dashboard\)[\\/]sequences[\\/]actions$/ }, () => virtual("sequences-actions"))
         build.onResolve({ filter: /login-background$/ }, () => virtual("login-background"))
+        build.onResolve({ filter: /^\.\/strip-actions$/ }, () => virtual("strip-actions"))
         build.onResolve({ filter: /^\.\/actions$/ }, (args) => {
           return args.importer.includes(`${path.sep}(auth)${path.sep}login${path.sep}`)
             ? virtual("login-actions")

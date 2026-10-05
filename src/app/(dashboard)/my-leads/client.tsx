@@ -32,7 +32,17 @@ import type { MyLeadDripSnapshot } from "@/lib/my-leads/drip-queries";
 import { WorkflowRecoveryContext } from "./_components/workflow-form";
 import { useAttemptWorkflow } from "./_components/use-attempt-workflow";
 import { MyLeadsQueue } from "./_components/queue";
+import { CallNextStrip } from "./_components/call-next-strip";
+import { reasonLabel } from "./_components/call-next-reason";
+import type { CallNextSnapshot, TriageSnapshot } from "@/lib/my-leads/call-next";
 import { AcquisitionAttemptDialog } from "./_components/attempt-dialog";
+import { PostCallPrompt } from "./_components/post-call-prompt";
+import { clearExtras } from "./_components/extras-store";
+import type {
+  AcquisitionCallReferenceOption,
+  PostCallExtras,
+  PostCallExtrasState,
+} from "./_components/types";
 import { AcquisitionReadinessDialog } from "./_components/readiness-dialog";
 import { AcquisitionOfferDialog } from "./_components/offer-dialog";
 import { AcquisitionLifecycleDialog } from "./_components/lifecycle-dialog";
@@ -55,6 +65,7 @@ import {
 import type { SelectedLeadResult } from "./deep-link";
 import {
   loadMyLeadCallReferences,
+  savePostCallExtras,
   loadMyLeadRow,
   loadMyLeads,
   loadMyLeadsStage,
@@ -62,6 +73,7 @@ import {
   changeAcquisitionDesignation,
   changeAcquisitionSettings,
 } from "./actions";
+import { loadTriage, setStripOverride } from "./strip-actions";
 
 type Props = {
   viewer: { userId: string; orgId: string; isOwner: boolean };
@@ -70,6 +82,10 @@ type Props = {
   initialSnapshot: QueueSnapshot | null;
   initialKpis: AcquisitionKpis | null;
   initialDrips?: MyLeadDripSnapshot | null;
+  /** The post-call prompt replaces the attempt dialog; off (default) keeps today's dialog. */
+  postCallPrompt?: boolean;
+  /** The Call next strip; null or omitted when it is off for this org. */
+  initialStrip?: CallNextSnapshot | null;
   dialpad?: DialpadPanelBootstrap | null;
   initialSearch?: string;
   focus?: MyLeadsFocus | null;
@@ -285,6 +301,8 @@ export function MyLeadsClient({
   initialSnapshot,
   initialKpis,
   initialDrips = null,
+  initialStrip = null,
+  postCallPrompt = false,
   dialpad = null,
   initialSearch = "",
   focus: providedFocus = null,
@@ -299,6 +317,15 @@ export function MyLeadsClient({
   const [snapshot, setSnapshot] = useState(initialSnapshot);
   const [kpis, setKpis] = useState(initialKpis);
   const [drips, setDrips] = useState(initialDrips);
+  const [strip, setStrip] = useState<CallNextSnapshot | null>(initialStrip);
+  const [stripBusy, setStripBusy] = useState<string | null>(null);
+  const [stripError, setStripError] = useState<string | null>(null);
+  const [triageOpen, setTriageOpen] = useState(false);
+  const [triage, setTriage] = useState<TriageSnapshot | null>(null);
+  const [triageLoading, setTriageLoading] = useState(false);
+  const [triageError, setTriageError] = useState<string | null>(null);
+  const triageRequest = useRef(0);
+  const triageOpenRef = useRef(false);
   const tiles = useMemo(() => (kpis ? kpiTiles(kpis) : null), [kpis]);
   const [lastCheckedAt, setLastCheckedAt] = useState(
     initialSnapshot?.snapshotAt ?? null,
@@ -316,10 +343,22 @@ export function MyLeadsClient({
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [callOptions, setCallOptions] = useState<{
     propertyId: string;
-    options: { id: string; label: string }[];
+    options: AcquisitionCallReferenceOption[];
     error: string | null;
   } | null>(null);
   const [callRetry, setCallRetry] = useState(0);
+  // The post-call prompt's note and next step, saved beside the attempt command.
+  const [extrasState, setExtrasState] = useState<PostCallExtrasState | null>(
+    null,
+  );
+  type ExtrasRequest = {
+    attemptKey: string;
+    memberId: string;
+    propertyId: string;
+    extras: PostCallExtras;
+  };
+  const extrasRequest = useRef<ExtrasRequest | null>(null);
+  const extrasInFlight = useRef(new Set<string>());
   const [dialpadRequest, setDialpadRequest] =
     useState<DialpadCallRequest | null>(null);
   const dialpadNonce = useRef(0);
@@ -331,6 +370,10 @@ export function MyLeadsClient({
     row: QueueRow;
     callActivityId?: string | null;
   } | null>(null);
+  const dialogRef = useRef(dialog);
+  useEffect(() => {
+    dialogRef.current = dialog;
+  });
   type Opening = {
     action: MyLeadAction;
     row: QueueRow;
@@ -492,6 +535,8 @@ export function MyLeadsClient({
             setSnapshot(result.snapshot);
           setKpis(result.kpis);
           setDrips(result.drips);
+          // undefined = the strip read failed: keep the last good strip. null = strip is off.
+          if (result.strip !== undefined) setStrip(result.strip);
           setLastCheckedAt(result.snapshot.snapshotAt);
           setError(null);
           setRefreshError(null);
@@ -523,6 +568,11 @@ export function MyLeadsClient({
       setSnapshot(null);
       setKpis(null);
       setDrips(null);
+      setStrip(null);
+      setStripError(null);
+      setTriage(null);
+      setTriageError(null);
+      ++triageRequest.current;
     }
     const timer = setTimeout(() => void refresh(), 250);
     return () => {
@@ -565,7 +615,13 @@ export function MyLeadsClient({
     };
   }, [snapshot, refresh, roster.settings.enabled]);
   // The displayed row. Only used to find what the user clicked; command preconditions come from the single-row lookup at opening time.
-  const rawRow = (id: string) => findRow(snapshot, drips, id, pinRead);
+  const rawRow = (id: string) =>
+    findRow(snapshot, drips, id, pinRead) ??
+    // A strip or triage lead need not be on a loaded section page. Only used to find what the
+    // user clicked; the workflow re-reads the lead through the single-row lookup before acting.
+    strip?.rows.find((item) => item.propertyId === id)?.row ??
+    triage?.rows.find((item) => item.propertyId === id)?.row ??
+    null;
   /**
    * Every workflow opening reads the lead through the single-row lookup (a database
    * statement-time read) and uses THAT row for the command's preconditions (episode,
@@ -669,6 +725,76 @@ export function MyLeadsClient({
       callActivityId,
     });
   };
+  // ---- Call next strip (P1b). Read-only derived data; it never moves a lead between sections.
+  const stripCanAct = member === viewer.userId;
+  const readTriage = useCallback(
+    async (more: boolean) => {
+      const id = ++triageRequest.current;
+      const cursor = more ? (triage?.cursor ?? null) : null;
+      if (more && !cursor) return;
+      setTriageLoading(true);
+      setTriageError(null);
+      try {
+        const result = await loadTriage(member, cursor);
+        if (id !== triageRequest.current) return;
+        if (!result.ok) {
+          setTriageError(result.message);
+        } else if (result.triage) {
+          const page = result.triage;
+          setTriage((previous) => {
+            if (!more || !previous) return page;
+            const seen = new Set(previous.rows.map((r) => r.propertyId));
+            return {
+              ...page,
+              rows: [...previous.rows, ...page.rows.filter((r) => !seen.has(r.propertyId))],
+            };
+          });
+        } else {
+          setTriage(null);
+          setTriageError("The triage list is not available yet.");
+        }
+      } catch {
+        if (id === triageRequest.current) setTriageError("The triage list could not load.");
+      } finally {
+        if (id === triageRequest.current) setTriageLoading(false);
+      }
+    },
+    [member, triage?.cursor],
+  );
+  const toggleTriage = () => {
+    const next = !triageOpen;
+    triageOpenRef.current = next;
+    setTriageOpen(next);
+    if (next && !triage) void readTriage(false);
+  };
+  // After a committed workflow the triage list may hold a lead that just left it.
+  const refreshTriageIfOpen = () => {
+    if (triageOpenRef.current) void readTriage(false);
+  };
+  const stripOverride = async (
+    propertyId: string,
+    kind: "call_today" | "not_today",
+  ) => {
+    if (!stripCanAct || stripBusy) return;
+    setStripBusy(propertyId);
+    setStripError(null);
+    try {
+      const result = await setStripOverride({
+        memberId: member,
+        propertyId,
+        action: kind,
+      });
+      if (!result.ok) {
+        setStripError(result.message);
+        return;
+      }
+      await refresh(true);
+    } catch {
+      setStripError("The change could not be saved. Please retry.");
+    } finally {
+      setStripBusy(null);
+    }
+  };
   useEffect(() => {
     if (dialog?.action !== "log-attempt") return;
     let cancelled = false;
@@ -705,18 +831,100 @@ export function MyLeadsClient({
     },
     [member],
   );
+  // Saves the note and quick next step of a saved attempt. Every recovery path may call this
+  // again for the same attempt: each extra carries its own idempotency key, so a repeat cannot
+  // duplicate. The stored entry is removed only after the server confirms both extras.
+  const runExtras = async (request: ExtrasRequest, showState: boolean) => {
+    const { extras } = request;
+    if (extrasInFlight.current.has(extras.submissionId)) return;
+    extrasInFlight.current.add(extras.submissionId);
+    if (showState) {
+      extrasRequest.current = request;
+      setExtrasState({ status: "saving" });
+    }
+    let result: Awaited<ReturnType<typeof savePostCallExtras>>;
+    try {
+      result = await savePostCallExtras({
+        memberId: request.memberId,
+        propertyId: request.propertyId,
+        submissionId: extras.submissionId,
+        note: extras.note,
+        nextStep: extras.nextStep,
+      });
+    } catch {
+      result = { ok: false, message: "The note and next step could not be saved." };
+    } finally {
+      extrasInFlight.current.delete(extras.submissionId);
+    }
+    if (result.ok && result.note !== "failed" && result.nextStep !== "failed" && !result.message) {
+      clearExtras(viewer.userId, request.attemptKey);
+    }
+    // A result for a prompt that has since been replaced or closed is not shown.
+    if (!showState || extrasRequest.current !== request) {
+      if (result.ok) {
+        void refresh();
+        setDetailRevision((revision) => revision + 1);
+      }
+      return;
+    }
+    setExtrasState({ status: "done", result });
+    if (result.ok) {
+      void refresh();
+      setDetailRevision((revision) => revision + 1);
+      router.refresh();
+    }
+  };
+  // The extras belong to one opening of the prompt.
+  const attemptDialogOpen = dialog?.action === "log-attempt";
+  const dialogPropertyId = dialog?.row.propertyId ?? null;
+  useEffect(() => {
+    if (attemptDialogOpen) return;
+    extrasRequest.current = null;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setExtrasState(null);
+  }, [attemptDialogOpen, dialogPropertyId]);
   const { submit, recoveryValue, onDripChanged } = useAttemptWorkflow({
     opening: dialog,
     memberId: member,
     viewer: { userId: viewer.userId, orgId: viewer.orgId },
     readRow: readRecoveryRow,
-    onCommitted: () => {
+    onCommitted: (committed) => {
+      if (committed.extras) {
+        void runExtras(
+          {
+            attemptKey: committed.attemptKey,
+            memberId: member,
+            propertyId: committed.opening.row.propertyId,
+            extras: committed.extras,
+          },
+          true,
+        );
+      }
       const read = refresh();
+      refreshTriageIfOpen();
       setDetailRevision((revision) => revision + 1);
       return read;
     },
+    // Recovery paths (late success, already saved, Refresh-and-close): the prompt may be gone.
+    onExtras: (flush) => {
+      // Only the prompt this attempt was saved from (one opening, one attempt key) shows the
+      // status; an earlier attempt's replay never takes over a newly opened prompt's line.
+      const visible =
+        dialogRef.current === flush.opening &&
+        flush.opening.action === "log-attempt";
+      void runExtras(
+        {
+          attemptKey: flush.attemptKey,
+          memberId: flush.memberId,
+          propertyId: flush.propertyId,
+          extras: flush.extras,
+        },
+        visible,
+      );
+    },
     onReconciled: () => {
       const read = refresh();
+      refreshTriageIfOpen();
       setDetailRevision((revision) => revision + 1);
       router.refresh();
       return read;
@@ -839,7 +1047,35 @@ export function MyLeadsClient({
         : null,
     [snapshot, drips, pinRead, target.propertyId],
   );
-  const pages = snapshot && view ? stagePages(view.snapshot, view.drips) : null;
+  const basePages = useMemo(
+    () => (snapshot && view ? stagePages(view.snapshot, view.drips) : null),
+    [snapshot, view],
+  );
+  // "In Call next: <reason>" on the lead's row and detail, computed from the strip snapshot.
+  const pages = useMemo(() => {
+    if (!basePages || !strip) return basePages;
+    const stripNow = new Date(strip.snapshotAt);
+    const reasons = new Map<string, string>();
+    for (const item of strip.rows)
+      reasons.set(
+        item.propertyId,
+        reasonLabel(item.reason, item.reasonAt, stripNow),
+      );
+    if (!reasons.size) return basePages;
+    return Object.fromEntries(
+      Object.entries(basePages).map(([stage, page]) => [
+        stage,
+        {
+          ...page,
+          rows: page.rows.map((row) =>
+            reasons.has(row.propertyId)
+              ? { ...row, stripReason: reasons.get(row.propertyId) }
+              : row,
+          ),
+        },
+      ]),
+    ) as unknown as typeof basePages;
+  }, [basePages, strip]);
   // Show the lead in place when a loaded page has it; otherwise pin it at the top of its section.
   const pinnedLookup =
     target.propertyId &&
@@ -871,8 +1107,19 @@ export function MyLeadsClient({
             ) ?? null,
         }
       : null;
-  if (pages)
-    for (const stage of loadingStages) pages[stage].isLoadingMore = true;
+  // Pages are memoized, so the loading flag goes on copies, never on the cached objects.
+  const queuePages =
+    pages && loadingStages.size
+      ? {
+          ...pages,
+          ...Object.fromEntries(
+            [...loadingStages].map((stage) => [
+              stage,
+              { ...pages[stage], isLoadingMore: true },
+            ]),
+          ),
+        }
+      : pages;
   const motivation =
     dialog?.row.motivationKind === "specified"
       ? { kind: "specified" as const, text: dialog.row.motivationText ?? "" }
@@ -1052,9 +1299,34 @@ export function MyLeadsClient({
         <p role="status">Loading My Leads…</p>
       ) : (
         <>
+          {strip && (
+            <CallNextStrip
+              rows={strip.rows}
+              excluded={strip.excluded}
+              hiddenCount={strip.hiddenCount}
+              snapshotAt={strip.snapshotAt}
+              canAct={stripCanAct}
+              busyPropertyId={stripBusy}
+              error={stripError}
+              triageOpen={triageOpen}
+              triage={triage}
+              triageLoading={triageLoading}
+              triageError={triageError}
+              onToggleTriage={toggleTriage}
+              onLoadMoreTriage={() => void readTriage(true)}
+              onCall={(propertyId) => action("start-call", propertyId)}
+              onCallToday={(propertyId) =>
+                void stripOverride(propertyId, "call_today")
+              }
+              onNotToday={(propertyId) =>
+                void stripOverride(propertyId, "not_today")
+              }
+              onDeadNurture={(propertyId) => action("handoff", propertyId)}
+            />
+          )}
           <MyLeadsQueue
             canSelectRep={viewer.isOwner}
-            stages={pages}
+            stages={queuePages!}
             drips={view?.drips ?? drips}
             kpis={tiles}
             search={search}
@@ -1201,7 +1473,36 @@ export function MyLeadsClient({
         </>
       )}
       <WorkflowRecoveryContext.Provider value={recoveryValue}>
-        {common && dialog?.action === "log-attempt" && (
+        {common && dialog?.action === "log-attempt" && postCallPrompt && (
+          <PostCallPrompt
+            {...common}
+            onSubmit={(payload) => submit(payload)}
+            onDripChanged={onDripChanged}
+            key={`${dialog.row.propertyId}:${dialog.callActivityId ?? ""}`}
+            initialCallActivityId={dialog.callActivityId ?? null}
+            callReferenceOptions={
+              callOptions?.propertyId === dialog.row.propertyId
+                ? callOptions.options
+                : []
+            }
+            callReferencesLoading={!callOptions}
+            callReferencesError={callOptions?.error}
+            onRetryCallReferences={() => setCallRetry((value) => value + 1)}
+            viewerUserId={viewer.userId}
+            viewerLabel={
+              roster.members.find((m) => m.id === viewer.userId)?.label ?? null
+            }
+            nextStepAt={dialog.row.nextStepAt}
+            extras={extrasState}
+            onRetryExtras={() => {
+              const request = extrasRequest.current;
+              if (request) void runExtras(request, true);
+            }}
+            onReadyForOffer={() => action("ready-for-offer", dialog.row.propertyId)}
+            onDeadNurture={() => action("handoff", dialog.row.propertyId)}
+          />
+        )}
+        {common && dialog?.action === "log-attempt" && !postCallPrompt && (
           <AcquisitionAttemptDialog
             {...common}
             onSubmit={(payload) => submit(payload)}
@@ -1273,6 +1574,7 @@ export function MyLeadsClient({
             propertyId={dialog.row.propertyId}
             subjectLabel={dialog.row.address}
             currentUserId={member}
+            defaultMode="phone"
             onBooked={() => {
               setDialog((current) => (current === dialog ? null : current));
               setDetailRevision((revision) => revision + 1);
