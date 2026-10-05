@@ -118,9 +118,18 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
     functions: [],
     columns: ["acquisition_contract_settings.earnest_money_cents", "acquisition_contract_title_companies.closing_agent_name", "acquisition_contract_buyer_entities.name"],
   },
-  // P3c offer projection (§3.6) is NOT in this slice: until its migration lands the card stays disabled.
+  // P3c offer projection (§3.6): the card and the sweep stay disabled until every function they call exists.
   offer_projection: {
-    functions: ["public.fn_project_acquisition_offer(uuid)"],
+    functions: [
+      "public.fn_project_acquisition_offer(uuid)",
+      "public.fn_create_offer_projection(uuid,uuid,uuid,uuid,text,text,jsonb,bigint,date,text,text,text)",
+      "public.fn_abandon_offer_projection(uuid)",
+      "public.fn_offer_projection_repair()",
+      "public.fn_offer_projection_due(integer)",
+      "public.fn_retry_offer_projection(uuid,uuid,text)",
+      "public.fn_supersede_offer_and_log(uuid,uuid,uuid)",
+      "public.fn_list_offer_conflicts(uuid,uuid,uuid)",
+    ],
     columns: ["acquisition_offer_projections.send_payload"],
   },
 };

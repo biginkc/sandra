@@ -25,7 +25,7 @@ export type AcquisitionOfferMethod =
   | "dropbox_sign"
   | "verbal"
   | "email_text";
-export type AcquisitionOfferOutcome = "pending" | "accepted" | "declined";
+export type AcquisitionOfferOutcome = "pending" | "accepted" | "declined" | "superseded";
 export type AcquisitionLaunchCohortStatus =
   | "planned"
   | "running"

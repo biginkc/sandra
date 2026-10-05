@@ -28,6 +28,16 @@ import type {
 import { EsignSecret } from "./secret";
 import { remainingSignatureRequests } from "./quota-policy";
 
+/**
+ * Seam S3 (test-only): lets CI point the SDK at a local stub. Ignored when VERCEL_ENV is
+ * "production"; unset returns undefined so the SDK default base path is used unchanged.
+ */
+function apiBasePath(): string | undefined {
+  if (process.env.VERCEL_ENV === "production") return undefined;
+  const override = process.env.DROPBOX_SIGN_API_BASE_URL?.trim();
+  return override ? override : undefined;
+}
+
 type DropboxApiSet = {
   account: AccountApi;
   apiApp: ApiAppApi;
@@ -37,11 +47,11 @@ type DropboxApiSet = {
 };
 
 function authenticatedApiSet(apiKey: EsignSecret): DropboxApiSet {
-  const account = new AccountApi();
-  const apiApp = new ApiAppApi();
-  const embedded = new EmbeddedApi();
-  const signatureRequest = new SignatureRequestApi();
-  const template = new TemplateApi();
+  const account = new AccountApi(apiBasePath());
+  const apiApp = new ApiAppApi(apiBasePath());
+  const embedded = new EmbeddedApi(apiBasePath());
+  const signatureRequest = new SignatureRequestApi(apiBasePath());
+  const template = new TemplateApi(apiBasePath());
   for (const api of [account, apiApp, embedded, signatureRequest, template]) {
     api.username = apiKey.reveal();
     api.password = "";
@@ -50,7 +60,7 @@ function authenticatedApiSet(apiKey: EsignSecret): DropboxApiSet {
 }
 
 function abortableSignatureApi(apiKey: EsignSecret, signal?: AbortSignal) {
-  const signatureRequest = new SignatureRequestApi();
+  const signatureRequest = new SignatureRequestApi(apiBasePath());
   signatureRequest.username = apiKey.reveal();
   signatureRequest.password = "";
   if (signal) {
@@ -62,7 +72,7 @@ function abortableSignatureApi(apiKey: EsignSecret, signal?: AbortSignal) {
 }
 
 function abortableTemplateApi(apiKey: EsignSecret, signal?: AbortSignal) {
-  const template = new TemplateApi();
+  const template = new TemplateApi(apiBasePath());
   template.username = apiKey.reveal();
   template.password = "";
   if (signal) {
@@ -74,7 +84,7 @@ function abortableTemplateApi(apiKey: EsignSecret, signal?: AbortSignal) {
 }
 
 function abortableAccountApi(apiKey: EsignSecret, signal?: AbortSignal) {
-  const account = new AccountApi();
+  const account = new AccountApi(apiBasePath());
   account.username = apiKey.reveal();
   account.password = "";
   if (signal) {
