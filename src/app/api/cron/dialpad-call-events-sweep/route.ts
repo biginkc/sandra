@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 
-import { createSupabaseDialpadCtiDb, failStaleDialpadIntents, sweepDialpadCallEvents } from '@/lib/dialpad-cti/event-processing';
+import { createSupabaseDialpadCtiDb, failStaleDialpadIntents, redactDialpadUnmatchedEvents, sweepDialpadCallEvents } from '@/lib/dialpad-cti/event-processing';
 import { reportError } from '@/lib/errors/report';
 import { schemaReady } from '@/lib/my-leads/schema-ready';
 import { createAdminClient } from '@/lib/supabase/admin';
@@ -31,7 +31,14 @@ async function handle(request: Request) {
       reportError(error, { tags: { surface: 'cron_dialpad_intent_timeout' } });
     }
     const summary = await sweepDialpadCallEvents(db);
-    return NextResponse.json({ ok: true, ...summary, failedIntents });
+    // Redaction runs after the sweep so a failure here can never block replays.
+    let redacted: number | null = null;
+    try {
+      if (await schemaReady('event_redaction')) redacted = await redactDialpadUnmatchedEvents(db);
+    } catch (error) {
+      reportError(error, { tags: { surface: 'cron_dialpad_event_redaction' } });
+    }
+    return NextResponse.json({ ok: true, ...summary, failedIntents, redacted });
   } catch (error) {
     reportError(error, { tags: { surface: 'cron_dialpad_call_events_sweep' } });
     return NextResponse.json({ error: 'sweep_failed' }, { status: 500 });

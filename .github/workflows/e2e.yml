@@ -394,6 +394,38 @@ jobs:
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261006100500_dialpad_artifact_fetches.integration.test.ts
 
+      - name: My Leads call prompt acknowledgement (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007150000_call_prompt_acknowledgement.integration.test.ts
+
+      - name: Dialpad API dial support (eligibility patch, call slots) (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007150100_dialpad_api_dial_support.integration.test.ts
+
+      - name: Dialpad unmatched event redaction (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007150200_dialpad_unmatched_event_redaction.integration.test.ts
+
+      - name: My Leads callbacks due (disposable DB)
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007150300_my_leads_callbacks_due.integration.test.ts
+
       - name: Destroy disposable database
         if: always() && env.E2E_LOCAL_WORKDIR != ''
         run: supabase stop --workdir "$E2E_LOCAL_WORKDIR" --no-backup

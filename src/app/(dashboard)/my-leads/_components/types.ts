@@ -284,6 +284,11 @@ export type MyLeadsStripProps = {
   onNotToday: (propertyId: string) => void
   /** Opens the existing handoff dialog (its reason field stays required). */
   onDeadNurture: (propertyId: string) => void
+  /**
+   * Client-side pins (P2 2.8): these leads sort first, in this order, and show the given reason text
+   * ("Callback due now") instead of the ranked reason. The ranking RPC is untouched.
+   */
+  pinned?: readonly { propertyId: string; reason: string }[]
 }
 
 export type MyLeadDetailPanelProps = {

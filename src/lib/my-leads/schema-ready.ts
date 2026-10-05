@@ -17,7 +17,11 @@ export type SchemaFeature =
   | "seller_reminders"
   | "artifact_fetch"
   | "intent_timeout"
-  | "lead_comps";
+  | "lead_comps"
+  | "api_dial"
+  | "ack_prompts"
+  | "callbacks_due"
+  | "event_redaction";
 
 export type SchemaRequirement = {
   /** `public.fn_name(argtype,argtype)` regprocedure strings. */
@@ -86,6 +90,26 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
       "public.fn_finish_comp_fetch(uuid,text,integer,text,uuid)",
     ],
     columns: ["lead_comps.as_is_value", "org_comp_settings.monthly_call_cap", "lead_valuation_inputs.arv"],
+  },
+  // P2 UI 2.7: the server-side dialer needs the patched authorize release (dialpadUserId), the slot pre-check and the two connection columns.
+  api_dial: {
+    functions: ["public.fn_dialpad_call_slots(uuid,uuid,uuid,uuid)", "public.fn_authorize_dialpad_dispatch(uuid,uuid,uuid)"],
+    columns: ["dialpad_org_connections.dial_endpoint", "dialpad_org_connections.dial_api_key_ref", "my_leads_feature_flags.click_to_dial"],
+  },
+  // P2 UI 2.6: the poll reads unacknowledged prompts and the auto-open acknowledges them.
+  ack_prompts: {
+    functions: ["public.fn_list_unacknowledged_call_prompts(uuid,integer,timestamptz,uuid,interval)", "public.fn_acknowledge_call_prompt(uuid,uuid,text)"],
+    columns: ["acquisition_attempts.prompt_acknowledged_at", "my_leads_feature_flags.auto_prompt"],
+  },
+  // P2 UI 2.8: the callback-due alert.
+  callbacks_due: {
+    functions: ["public.fn_my_leads_callbacks_due(uuid,interval,interval)"],
+    columns: ["tasks.next_step_kind", "my_leads_feature_flags.callback_alert"],
+  },
+  // P2 UI 2.10: the event sweep redacts unmatched payloads through this function.
+  event_redaction: {
+    functions: ["public.fn_redact_dialpad_unmatched_events(interval,integer)"],
+    columns: ["dialpad_call_events.redacted_at"],
   },
 };
 

@@ -308,6 +308,7 @@ function pgDb(overrides: Partial<DialpadCtiDb> = {}): DialpadCtiDb {
     },
     listPending: (limit) => rpc("select public.fn_list_dialpad_call_events_for_processing($1) as v", [limit]),
     failStaleIntents: async () => 0,
+    redactUnmatched: async () => 0,
     ...overrides,
   };
 }

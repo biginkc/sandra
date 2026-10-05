@@ -45,7 +45,7 @@ const PLAN_DIGEST = /^[0-9a-f]{64}$/;
 const RECORDING_ENDPOINT_PATH = '/dialpad-browser-ingest';
 const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
-export type ProvisioningMode = 'prepare' | 'activate';
+export type ProvisioningMode = 'prepare' | 'activate' | 'deactivate';
 
 export class ProvisioningError extends Error {
   constructor(readonly code: string, message: string) {
@@ -121,7 +121,7 @@ const ITEM_TITLE = /^[A-Za-z0-9][A-Za-z0-9 ._()-]{0,120}$/;
 
 export function parseInputs(raw: RawInputs): ProvisioningInputs {
   const mode = raw.mode ?? 'prepare';
-  if (mode !== 'prepare' && mode !== 'activate') throw new ProvisioningError('invalid_input', 'mode must be prepare or activate');
+  if (mode !== 'prepare' && mode !== 'activate' && mode !== 'deactivate') throw new ProvisioningError('invalid_input', 'mode must be prepare, activate or deactivate');
   const orgId = raw.orgId?.trim().toLowerCase() ?? '';
   if (!UUID.test(orgId)) throw new ProvisioningError('invalid_input', 'a typed --org-id (uuid) is required');
   const companyId = raw.companyId?.trim() ?? '';
@@ -226,6 +226,8 @@ export interface ConnectionDbPort {
   insertDisabledConnection(row: ConnectionInsert): Promise<string | null>;
   /** Flip disabled to active only if every expected field still matches. Returns rows changed. */
   activateConnection(id: string, expected: ConnectionInsert): Promise<number>;
+  /** Flip active to disabled only if every expected field still matches. Returns rows changed. */
+  deactivateConnection(id: string, expected: ConnectionInsert): Promise<number>;
   /** Atomically configure the endpoint on one disabled, identity-matched connection. */
   configureRecordingEndpoint(expected: RecordingEndpointUpdate): Promise<ConnectionObservation | null>;
 }
@@ -516,7 +518,7 @@ async function verifyDirectory(dialpad: DialpadPort, userId: string, companyId: 
 /* Plan                                                                     */
 /* ------------------------------------------------------------------------ */
 
-export type StepAction = 'create' | 'reuse' | 'enable' | 'skip';
+export type StepAction = 'create' | 'reuse' | 'enable' | 'disable' | 'skip';
 
 export interface PlanStep {
   id: string;
@@ -566,7 +568,8 @@ export function buildPlan(inputs: ProvisioningInputs, o: Observed): Plan {
   const notes: string[] = [];
   const blockers: string[] = [];
   const conflicts: string[] = [];
-  const prepare = inputs.mode === 'prepare';
+  const activate = inputs.mode === 'activate';
+  const deactivate = inputs.mode === 'deactivate';
   const need = (ok: boolean, message: string) => {
     if (!ok) blockers.push(message);
   };
@@ -643,7 +646,7 @@ export function buildPlan(inputs: ProvisioningInputs, o: Observed): Plan {
   notes.push('existing SMS webhooks and unrelated subscriptions are never read for change or modified');
 
   // Activation.
-  if (!prepare) {
+  if (activate) {
     need(o.schema.customDataFunction, 'custom_data_migration_missing: dialpad_cti_custom_data() absent (PR697 migration not applied)');
     need(o.schema.recordingEndpointColumn, 'recording_endpoint_migration_missing: recording_ingest_endpoint absent (PR715 browser-session migration not applied)');
     need(connection !== null, 'not_prepared: connection row missing');
@@ -666,6 +669,30 @@ export function buildPlan(inputs: ProvisioningInputs, o: Observed): Plan {
         id: 'activate:connection',
         action: connection.status === 'active' ? 'reuse' : 'enable',
         detail: connection.status === 'active' ? `connection already active with endpoint ${connection.recordingIngestEndpoint}` : `set connection ${connection.id} status=active with endpoint ${connection.recordingIngestEndpoint} after every subscription is enabled and reverified`,
+      });
+    }
+  }
+
+  // Deactivation: the reverse of activation. Subscriptions are disabled first,
+  // the connection last, so the receiver only closes once nothing can reach it.
+  if (deactivate) {
+    need(connection !== null, 'not_prepared: connection row missing');
+    need(wh.kind === 'owned', 'not_prepared: owned webhook missing');
+    for (const canary of o.canaries) need(canary.subscription.kind === 'owned', `not_prepared: subscription for ${canary.userId} missing`);
+    for (const canary of o.canaries) {
+      if (canary.subscription.kind !== 'owned') continue;
+      const enabled = canary.subscription.record.enabled === true;
+      steps.push({
+        id: `deactivate:subscription:${canary.userId}`,
+        action: enabled ? 'disable' : 'reuse',
+        detail: `subscription ${canary.subscription.record.id} ${enabled ? 'disable' : 'already disabled'}`,
+      });
+    }
+    if (connection) {
+      steps.push({
+        id: 'deactivate:connection',
+        action: connection.status === 'active' ? 'disable' : 'reuse',
+        detail: connection.status === 'active' ? `set connection ${connection.id} status=disabled after every subscription is disabled and reverified` : `connection already ${connection.status}`,
       });
     }
   }
@@ -903,6 +930,63 @@ async function applyActivate(ctx: ApplyContext): Promise<void> {
   } else ctx.results.push({ id: 'activate:connection', outcome: 'reused' });
 }
 
+async function applyDeactivate(ctx: ApplyContext): Promise<void> {
+  const { ports, inputs } = ctx;
+  const connection = ctx.observed.connection!;
+  const expectedEndpoint = connection.recordingIngestEndpoint;
+  const verifyConnectionState = async (): Promise<void> => {
+    const current = await ports.db.findConnection(inputs.orgId, ctx.secrets.clientId, connection.id);
+    if (!current || current.id !== connection.id || current.status !== connection.status || current.recordingIngestEndpoint !== expectedEndpoint || connectionConflicts(inputs, current).length > 0) {
+      throw new ProvisioningError('deactivation_refused', 'the connection identity, status, company, origins, credentials, or recording endpoint changed during deactivation');
+    }
+  };
+
+  await verifyConnectionState();
+
+  // Disable and re-read every exact canary subscription before closing the
+  // connection. If any disable fails, the connection stays as observed and a
+  // later rerun can resume from the subscriptions already verified.
+  for (const canary of ctx.observed.canaries) {
+    await verifyConnectionState();
+    const sub = canary.subscription;
+    const id = `deactivate:subscription:${canary.userId}`;
+    if (sub.kind !== 'owned') throw new ProvisioningError('not_prepared', 'subscription missing');
+    const subId = sub.record.id;
+    const verifyDisabled = async (): Promise<boolean> => {
+      const matches = (await listAll(ports.dialpad, '/api/v2/subscriptions/call', parseSubscription)).filter((entry) => entry.id === subId);
+      return matches.length === 1 && matches[0]!.enabled === false && matches[0]!.targetType === 'user' && matches[0]!.targetId === canary.userId && matches[0]!.webhookId === sub.record.webhookId && sameStates(matches[0]!.callStates) && matches[0]!.groupCallsOnly === sub.record.groupCallsOnly;
+    };
+    if (sub.record.enabled !== true) {
+      if (!(await verifyDisabled())) throw new ProvisioningError('subscription_unverified', `subscription ${subId} no longer matches the expected disabled canary`);
+      await verifyConnectionState();
+      ctx.results.push({ id, outcome: 'reused' });
+      continue;
+    }
+    await mutateWithReconcile(
+      ctx,
+      id,
+      async () => {
+        // PATCH requires states and clears omitted target fields. Preserve the full
+        // observed scope; validated IDs stay exact JSON integers beyond 2^53.
+        const body = `{"enabled":false,"target_type":"user","target_id":${canary.userId},"endpoint_id":${sub.record.webhookId},"group_calls_only":${sub.record.groupCallsOnly},"call_states":${JSON.stringify(sub.record.callStates)}}`;
+        const response = await ports.dialpad.request('PATCH', `/api/v2/subscriptions/call/${subId}`, body);
+        if (response.status !== 200) throw new ProvisioningError('subscription_disable_failed', `disable subscription returned HTTP ${response.status}`);
+      },
+      verifyDisabled,
+    );
+    if (!(await verifyDisabled())) throw new ProvisioningError('subscription_unverified', `subscription ${subId} did not verify as disabled`);
+    await verifyConnectionState();
+  }
+
+  await verifyConnectionState();
+  if (connection.status === 'active') {
+    await verifyConnectionState();
+    const changed = await ports.db.deactivateConnection(connection.id, { ...connectionRow(inputs, ctx.secrets.clientId!), recordingIngestEndpoint: expectedEndpoint });
+    if (changed !== 1) throw new ProvisioningError('deactivation_refused', 'the connection no longer matched the previewed state');
+    ctx.results.push({ id: 'deactivate:connection', outcome: 'done' });
+  } else ctx.results.push({ id: 'deactivate:connection', outcome: 'reused' });
+}
+
 /* ------------------------------------------------------------------------ */
 /* Run                                                                      */
 /* ------------------------------------------------------------------------ */
@@ -937,7 +1021,7 @@ export async function runProvisioning(ports: ProvisioningPorts, inputs: Provisio
         emit('plan is not executable until the blockers/conflicts above are resolved');
         return { exitCode: 3, lines, plan, results };
       }
-      emit(`to apply exactly this plan: rerun with --execute --expect-plan ${plan.digest}${inputs.mode === 'activate' ? ' --confirm-live-readiness <connection id>' : ''}`);
+      emit(`to apply exactly this plan: rerun with --execute --expect-plan ${plan.digest}${inputs.mode !== 'prepare' ? ' --confirm-live-readiness <connection id>' : ''}`);
       return { exitCode: 0, lines, plan, results };
     }
 
@@ -954,10 +1038,16 @@ export async function runProvisioning(ports: ProvisioningPorts, inputs: Provisio
       return { exitCode: 3, lines, plan, results };
     }
 
+    if (inputs.mode === 'deactivate' && options.confirmLiveReadiness !== first.observed.connection?.id) {
+      emit('refusing to deactivate: --confirm-live-readiness must equal the connection id');
+      return { exitCode: 3, lines, plan, results };
+    }
+
     const ctx: ApplyContext = { ports, inputs, guard, observed: first.observed, secrets: first.secrets, connectionId: null, results };
     try {
       if (inputs.mode === 'prepare') await applyPrepare(ctx, plan);
-      else await applyActivate(ctx);
+      else if (inputs.mode === 'activate') await applyActivate(ctx);
+      else await applyDeactivate(ctx);
     } catch (error) {
       for (const result of results) emit(`  done ${result.id}: ${result.outcome}`);
       emit(`FAILED: ${guard.describeError(error)}`);
@@ -979,8 +1069,20 @@ export async function runProvisioning(ports: ProvisioningPorts, inputs: Provisio
       emit('post-check: activation identity, status, credentials, or recording endpoint changed; rerun the dry-run');
       return { exitCode: 1, lines, plan, results };
     }
+    const expectedDeactivationConnection = inputs.mode === 'deactivate' ? first.observed.connection : null;
+    const finalDeactivationConnection = after.observed.connection;
+    if (expectedDeactivationConnection && (
+      !finalDeactivationConnection
+      || finalDeactivationConnection.id !== expectedDeactivationConnection.id
+      || finalDeactivationConnection.status !== 'disabled'
+      || finalDeactivationConnection.recordingIngestEndpoint !== expectedDeactivationConnection.recordingIngestEndpoint
+      || connectionConflicts(inputs, finalDeactivationConnection).length > 0
+    )) {
+      emit('post-check: deactivation identity, status, credentials, or recording endpoint changed; rerun the dry-run');
+      return { exitCode: 1, lines, plan, results };
+    }
     const post = buildPlan(inputs, after.observed);
-    const pending = post.steps.filter((step) => step.action === 'create' || step.action === 'enable');
+    const pending = post.steps.filter((step) => step.action === 'create' || step.action === 'enable' || step.action === 'disable');
     if (pending.length > 0 || post.blockers.length > 0 || post.conflicts.length > 0) {
       emit(`post-check: ${pending.length} step(s) still pending, ${post.blockers.length} blocker(s), ${post.conflicts.length} conflict(s); rerun the dry-run`);
       return { exitCode: 1, lines, plan, results };
