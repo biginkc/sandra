@@ -110,6 +110,8 @@ export type PostCallPromptProps = {
   onReadyForOffer?: () => void
   /** Dead / Nurture: the existing handoff dialog (same required reason). */
   onDeadNurture?: () => void
+  /** "dock" renders inline (no dialog) for the call screen. Default "dialog". */
+  variant?: "dialog" | "dock"
 }
 
 export function PostCallPrompt({
@@ -133,6 +135,7 @@ export function PostCallPrompt({
   onRetryExtras,
   onReadyForOffer,
   onDeadNurture,
+  variant = "dialog",
 }: PostCallPromptProps) {
   const [source, setSource] = useState<AcquisitionAttemptSource>(initialCallActivityId ? "sandra" : "dialpad")
   const [outcome, setOutcome] = useState<PromptOutcome | "">(initialOutcome ?? "")
@@ -356,22 +359,8 @@ export function PostCallPrompt({
 
   const manualSource = source !== "sandra"
 
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(nextOpen) => {
-        if (nextOpen) onOpenChange(true)
-        else closeDialog()
-      }}
-    >
-      <DialogContent
-        data-testid="post-call-prompt"
-        className={`flex max-h-[calc(100dvh-2rem)] grid-rows-none flex-col overflow-hidden ${DIALOG_CONTENT_CLASS}`}
-      >
-        <WorkflowDialogHeader
-          title="How did the call go?"
-          description={`Record the outcome for ${propertyLabel}. Opening this prompt does not count as a call.`}
-        />
+  const promptBody = (
+    <>
         {savedForDrip ? (
           <div className="space-y-4 overflow-y-auto">
             {receipt}
@@ -599,20 +588,60 @@ export function PostCallPrompt({
                 </div>
               )}
             </div>
-            <WorkflowDialogFooter
-              submitting={submitState.submitting}
-              submitLabel={attemptRecorded ? "Attempt recorded" : "Save"}
-              onCancel={closeDialog}
-              disabled={attemptRecorded}
-            />
+            {variant === "dock" ? (
+              <div className="flex justify-end gap-2">
+                <Button type="submit" disabled={attemptRecorded || submitState.submitting || recovery?.blocked || recovery?.busy}>
+                  {submitState.submitting ? "Saving…" : recovery?.reconciliation ? "Reconcile saved change" : attemptRecorded ? "Attempt recorded" : "Save"}
+                </Button>
+              </div>
+            ) : (
+              <WorkflowDialogFooter
+                submitting={submitState.submitting}
+                submitLabel={attemptRecorded ? "Attempt recorded" : "Save"}
+                onCancel={closeDialog}
+                disabled={attemptRecorded}
+              />
+            )}
           </form>
         )}
+    </>
+  )
+
+  if (variant === "dock") {
+    return (
+      <section data-testid="post-call-prompt" data-variant="dock" aria-label="Post-call prompt" className="flex flex-col gap-3 rounded-[16px] border border-border bg-card p-4">
+        <div>
+          <h2 className="text-base font-bold">How did the call go?</h2>
+          <p className="text-xs text-muted-foreground">{`Record the outcome for ${propertyLabel}. Opening this prompt does not count as a call.`}</p>
+        </div>
+        {promptBody}
+      </section>
+    )
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (nextOpen) onOpenChange(true)
+        else closeDialog()
+      }}
+    >
+      <DialogContent
+        data-testid="post-call-prompt"
+        className={`flex max-h-[calc(100dvh-2rem)] grid-rows-none flex-col overflow-hidden ${DIALOG_CONTENT_CLASS}`}
+      >
+        <WorkflowDialogHeader
+          title="How did the call go?"
+          description={`Record the outcome for ${propertyLabel}. Opening this prompt does not count as a call.`}
+        />
+        {promptBody}
       </DialogContent>
     </Dialog>
   )
 }
 
-function ReceiptLines({
+export function ReceiptLines({
   extras,
   sentNextStepAt,
   note,
