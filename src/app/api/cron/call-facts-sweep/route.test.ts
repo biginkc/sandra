@@ -53,6 +53,7 @@ describe("call-facts-sweep route", () => {
         : { data: { replayed: false }, error: null });
     const body = await (await GET(authed())).json();
     expect(body).toEqual({ ok: true, claimed: 1, completed: 1, failed: 0, exhausted: 0 });
+    expect(rpc).toHaveBeenCalledWith("fn_claim_call_facts", { p_limit: 1, p_lease_seconds: 900, p_window_hours: 48 });
     expect(rpc).toHaveBeenCalledWith("fn_complete_call_facts", { p_fact_id: "f1", p_claim_token: "t1", p_facts: {}, p_status: "no_facts", p_model: null });
   });
 });

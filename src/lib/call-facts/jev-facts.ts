@@ -2,6 +2,7 @@ import { askJev, type JevAskRequest, type JevChoiceQuestion, type JevNoulQuestio
 import { JEV_MODEL } from "@/lib/sms-classification/questions";
 
 import { findAmountCandidates, findDateCandidates, MAX_OPTIONS, parseTurns, turnState, type Turn } from "./candidates";
+import { FACTS_REQUEST_RETRIES, FACTS_REQUEST_TIMEOUT_MS, MAX_SCORED_TURNS, SCORING_CONCURRENCY } from "./budget";
 import { CLOSER_LAB_FRAMING } from "./catalog";
 import { activeQuestions, FACT_QUESTIONS, type FactQuestionSlot } from "./questions";
 import type { FactsInput, RawFacts } from "./types";
@@ -22,14 +23,13 @@ import type { FactsInput, RawFacts } from "./types";
  */
 export const NONE = "none";
 export const SELLER_SPEAKER = "Other party";
-/** Cost/time bounds: at most this many seller turns are scored per call, this many requests in flight. */
-export const MAX_SCORED_TURNS = 40;
-export const SCORING_CONCURRENCY = 4;
+export { MAX_SCORED_TURNS, SCORING_CONCURRENCY };
 
 export type JevAnswer = { choice?: unknown; noul?: unknown };
 export type JevAsk = (request: JevAskRequest) => Promise<Record<string, JevAnswer | undefined>>;
 export type FactsExtraction = { facts: RawFacts; model: string | null };
-export type FactsExtractor = (input: FactsInput, ctx: { now: Date }) => Promise<FactsExtraction>;
+/** `now` is the validation clock; `callAt` (the call's end) anchors relative dates such as "tomorrow". */
+export type FactsExtractor = (input: FactsInput, ctx: { now: Date; callAt?: Date | null }) => Promise<FactsExtraction>;
 
 const options = (labels: string[]): Record<string, null> => ({ ...Object.fromEntries(labels.map((l) => [l, null])), [NONE]: null });
 const probability = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1 ? v : null);
@@ -54,7 +54,8 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
 
 export function createJevFactsExtractor(ask: JevAsk, opts: { questions?: readonly FactQuestionSlot[] } = {}): FactsExtractor {
   const slots = activeQuestions(opts.questions ?? FACT_QUESTIONS);
-  return async (input, { now }) => {
+  return async (input, { now, callAt }) => {
+    const anchor = callAt ?? now;
     const turns = parseTurns(input);
     if (slots.length === 0 || turns.length === 0) return { facts: {}, model: null };
     const facts: RawFacts = {};
@@ -71,7 +72,7 @@ export function createJevFactsExtractor(ask: JevAsk, opts: { questions?: readonl
       } else if (slot.kind === "amount") {
         for (const c of findAmountCandidates(turns)) map.set(`${c.turn.label}|${c.raw}`, { turn: c.turn, value: c.raw });
       } else {
-        for (const c of findDateCandidates(turns, now)) map.set(`${c.turn.label}|${c.raw}`, { turn: c.turn, value: c.date });
+        for (const c of findDateCandidates(turns, anchor)) map.set(`${c.turn.label}|${c.raw}`, { turn: c.turn, value: c.date });
       }
       if (map.size === 0) continue; // nothing to choose from: no question
       resolve[slot.field] = map;
@@ -130,7 +131,7 @@ export function createFactsExtractorFromEnv(
   const apiKey = env.TYPESAFE_API_KEY?.trim();
   if (!apiKey || activeQuestions(questions).length === 0) return null;
   const ask: JevAsk = async (request) => {
-    const result = await askJev(request, { fetch: fetchImpl, apiKey, timeoutMs: 15_000 });
+    const result = await askJev(request, { fetch: fetchImpl, apiKey, timeoutMs: FACTS_REQUEST_TIMEOUT_MS, maxRetries: FACTS_REQUEST_RETRIES });
     return (result.answers ?? {}) as Record<string, JevAnswer>;
   };
   return createJevFactsExtractor(ask, { questions });

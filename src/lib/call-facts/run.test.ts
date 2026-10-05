@@ -114,3 +114,11 @@ describe("runCallFactsSweep with Jev", () => {
     }));
   });
 });
+
+describe("runCallFactsSweep call time", () => {
+  it("passes the claim's ended_at to the extractor as the date anchor", async () => {
+    const extractor = vi.fn(async () => ({ model: null, facts: {} }));
+    await runCallFactsSweep(1, { claim: async () => ({ claims: [claim({ ended_at: "2026-08-05T20:00:00Z" })], exhausted: [] }), complete: vi.fn(async () => undefined), extractor, now: NOW });
+    expect(extractor).toHaveBeenCalledWith(expect.anything(), { now: NOW(), callAt: new Date("2026-08-05T20:00:00Z") });
+  });
+});

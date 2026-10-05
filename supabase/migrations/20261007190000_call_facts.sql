@@ -55,7 +55,7 @@ grant select, insert, update on public.lead_call_facts to service_role;
 -- ----------------------------------------------------------------------------
 -- fn_claim_call_facts (service_role)
 -- ----------------------------------------------------------------------------
-create or replace function public.fn_claim_call_facts(p_limit integer, p_lease_seconds integer default 300)
+create or replace function public.fn_claim_call_facts(p_limit integer, p_lease_seconds integer, p_window_hours integer)
 returns jsonb
 language plpgsql
 security definer
@@ -69,6 +69,10 @@ begin
     raise exception 'INVALID_INPUT' using errcode = '22023';
   end if;
   if p_lease_seconds is null or p_lease_seconds < 30 or p_lease_seconds > 3600 then
+    raise exception 'INVALID_INPUT' using errcode = '22023';
+  end if;
+  -- No backlog sweep: only calls that ended within this window are ever claimed.
+  if p_window_hours is null or p_window_hours < 1 or p_window_hours > 720 then
     raise exception 'INVALID_INPUT' using errcode = '22023';
   end if;
 
@@ -87,6 +91,7 @@ begin
       from public.call_activities ca
       join public.properties p on p.id = ca.property_id and p.org_id = ca.org_id
      where ca.property_id is not null
+       and coalesce(ca.ended_at, ca.started_at) >= now() - make_interval(hours => p_window_hours)
        and p.is_training is not true
        and p.deleted_at is null
        and exists (select 1 from public.my_leads_feature_flags g where g.org_id = ca.org_id and g.facts_job)
@@ -105,7 +110,7 @@ begin
                      where lf.org_id = ca.org_id and lf.call_activity_id = ca.id
                        and lf.processing_state = 'claimed' and lf.lease_until < now() and lf.attempts < 5)
        )
-     order by ca.ended_at nulls last, ca.id
+     order by coalesce(ca.ended_at, ca.started_at) desc, ca.id
      limit p_limit
   ),
   claimed as (
@@ -133,7 +138,9 @@ begin
            'contact_names', to_jsonb(array_remove(array[ct.first_name, ct.last_name, ct.entity_name], null)),
            'property_address', pr.address,
            'property_city', pr.city,
-           'property_zip', pr.zip)), '[]'::jsonb)
+           'property_zip', pr.zip,
+           -- Relative dates ("tomorrow") are resolved against the CALL, not against when the sweep runs.
+           'ended_at', (select coalesce(ca.ended_at, ca.started_at) from public.call_activities ca where ca.id = c.call_activity_id))), '[]'::jsonb)
     into v_claims
     from claimed c
     join public.properties pr on pr.id = c.property_id and pr.org_id = c.org_id
@@ -148,8 +155,8 @@ begin
   return jsonb_build_object('claims', v_claims, 'exhausted', v_exhausted);
 end;
 $$;
-revoke all on function public.fn_claim_call_facts(integer, integer) from public, anon, authenticated;
-grant execute on function public.fn_claim_call_facts(integer, integer) to service_role;
+revoke all on function public.fn_claim_call_facts(integer, integer, integer) from public, anon, authenticated;
+grant execute on function public.fn_claim_call_facts(integer, integer, integer) to service_role;
 
 -- ----------------------------------------------------------------------------
 -- fn_complete_call_facts (service_role): the single completion transaction

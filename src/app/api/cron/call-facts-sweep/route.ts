@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
 
 import { createFactsExtractorFromEnv, runCallFactsSweep, type ClaimResult } from "@/lib/call-facts";
+import { CLAIM_BATCH, CLAIM_LEASE_SECONDS, CLAIM_WINDOW_HOURS } from "@/lib/call-facts/budget";
 import { reportError } from "@/lib/errors/report";
 import { schemaReady } from "@/lib/my-leads/schema-ready";
 import { createAdminClient } from "@/lib/supabase/admin";
 
-export const maxDuration = 60;
-
-const BATCH = 3;
+// Worst case for the claimed call is bounded in budget.ts (asserted by budget.test.ts) and the lease outlives it.
+// Plan default is 300s; this literal must equal ROUTE_MAX_DURATION_S (Next reads it statically).
+export const maxDuration = 300;
 
 /**
  * Call facts sweep (§3.12). Claims and extracts only: it returns `{ ok: true, disabled }` before
@@ -31,10 +32,10 @@ export async function GET(request: Request) {
     if (flags.error || !Array.isArray(flags.data) || flags.data.length === 0) {
       return NextResponse.json({ ok: true, disabled: "flag_off" });
     }
-    const result = await runCallFactsSweep(BATCH, {
+    const result = await runCallFactsSweep(CLAIM_BATCH, {
       extractor: createFactsExtractorFromEnv(),
       claim: async (limit) => {
-        const { data, error } = await loose.rpc("fn_claim_call_facts", { p_limit: limit, p_lease_seconds: 300 });
+        const { data, error } = await loose.rpc("fn_claim_call_facts", { p_limit: limit, p_lease_seconds: CLAIM_LEASE_SECONDS, p_window_hours: CLAIM_WINDOW_HOURS });
         if (error) throw error;
         return data as ClaimResult;
       },

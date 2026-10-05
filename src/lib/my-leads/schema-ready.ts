@@ -127,7 +127,7 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
   // P3c call facts (§3.12): the sweep, the chips and their accept/dismiss actions.
   call_facts: {
     functions: [
-      "public.fn_claim_call_facts(integer,integer)",
+      "public.fn_claim_call_facts(integer,integer,integer)",
       "public.fn_complete_call_facts(uuid,uuid,jsonb,text,text)",
       "public.fn_accept_call_fact(uuid,uuid,text,text)",
       "public.fn_dismiss_call_facts(uuid,uuid)",

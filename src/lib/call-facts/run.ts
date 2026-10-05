@@ -19,6 +19,8 @@ export type ClaimedCall = {
   property_address?: string | null;
   property_city?: string | null;
   property_zip?: string | null;
+  /** The call's end (start if never ended): relative dates are resolved against this. */
+  ended_at?: string | null;
 };
 
 export type ClaimResult = { claims: ClaimedCall[]; exhausted: { fact_id: string; call_activity_id: string }[] };
@@ -66,7 +68,7 @@ export async function runCallFactsSweep(limit: number, deps: FactsJobDeps): Prom
       );
       if (deps.extractor && (input.summary || input.transcript)) {
         const at = now();
-        const extraction = await deps.extractor(input, { now: at });
+        const extraction = await deps.extractor(input, { now: at, callAt: claim.ended_at ? new Date(claim.ended_at) : null });
         facts = validateFacts(extraction.facts, input, at);
         model = extraction.model;
       }

@@ -40,8 +40,8 @@ const ready = async (w: World, a: Json, text = 'Seller: I want 185k for it', sum
   await setFetch(w, a.id, 'transcript', 'available');
   await setFetch(w, a.id, 'recap', 'available');
 };
-const claim = async (w: World, limit = 10, lease = 300): Promise<{ claims: Json[]; exhausted: Json[] }> =>
-  (await service(w.db, () => w.db.query('select public.fn_claim_call_facts($1,$2) as v', [limit, lease]))).rows[0].v;
+const claim = async (w: World, limit = 10, lease = 300, windowHours = 48): Promise<{ claims: Json[]; exhausted: Json[] }> =>
+  (await service(w.db, () => w.db.query('select public.fn_claim_call_facts($1,$2,$3) as v', [limit, lease, windowHours]))).rows[0].v;
 const complete = async (w: World, id: string, token: string, facts: Json, status: string, model: string | null = 'm') =>
   (await service(w.db, () => w.db.query('select public.fn_complete_call_facts($1,$2,$3,$4,$5) as v', [id, token, JSON.stringify(facts), status, model]))).rows[0].v;
 const factRow = async (w: World, id: string): Promise<Json> => (await w.db.query('select * from public.lead_call_facts where id=$1', [id])).rows[0];
@@ -213,14 +213,33 @@ describe('20261007190000_call_facts', () => {
     });
   });
 
+  it('only claims calls that ended inside the window (no backlog), newest first, and returns the call time', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const a = await call(w);
+      await ready(w, a);
+      // The call ended about 3 hours ago.
+      const c = (await claim(w, 10, 300, 48)).claims;
+      expect(c).toHaveLength(1);
+      expect(new Date(c[0].ended_at).getTime()).toBe(new Date((await db.query('select coalesce(ended_at, started_at) t from public.call_activities where id=$1', [a.id])).rows[0].t).getTime());
+      await db.query('delete from public.lead_call_facts');
+      expect((await claim(w, 10, 300, 2)).claims).toEqual([]); // 3h old call, 2h window
+      await db.query("update public.call_activities set ended_at = now() - interval '20 days', started_at = now() - interval '20 days' where id=$1", [a.id]);
+      expect((await claim(w, 10, 300, 48)).claims).toEqual([]); // a 20-day-old call is history
+      expect((await claim(w, 10, 300, 720)).claims).toHaveLength(1); // only a wider window would reach it
+    });
+  });
+
   it('limits and lease arguments are validated and the job functions are service-only', async () => {
     await withFacts(async (db) => {
       const w = await world(db, { flag: true });
       for (const [l, s] of [[0, 300], [51, 300], [5, 10], [5, 99999]]) {
-        const e = await failure(db, () => service(db, () => db.query('select public.fn_claim_call_facts($1,$2)', [l, s])));
+        const e = await failure(db, () => service(db, () => db.query('select public.fn_claim_call_facts($1,$2,48)', [l, s])));
         expect(e.message).toContain('INVALID_INPUT');
       }
-      const denied = await failure(db, () => asUser(db, w.rep, () => db.query('select public.fn_claim_call_facts(5,300)')));
+      const badWindow = await failure(db, () => service(db, () => db.query('select public.fn_claim_call_facts(5,300,0)')));
+      expect(badWindow.message).toContain('INVALID_INPUT');
+      const denied = await failure(db, () => asUser(db, w.rep, () => db.query('select public.fn_claim_call_facts(5,300,48)')));
       expect((denied as { code?: string }).code).toBe('42501');
       const deniedComplete = await failure(db, () => asUser(db, w.rep, () => db.query('select public.fn_complete_call_facts($1,$1,$2,$3,null)', [randomUUID(), '{}', 'no_facts'])));
       expect((deniedComplete as { code?: string }).code).toBe('42501');

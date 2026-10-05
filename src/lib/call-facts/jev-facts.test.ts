@@ -88,6 +88,34 @@ describe("choice questions: turn labels and candidate values", () => {
   });
 });
 
+describe("relative dates are anchored to the call, not the sweep clock", () => {
+  const next = async (transcript: string, callAt: Date, now: Date) => {
+    const a = choices({ next_step: "T001|tomorrow" });
+    const out = await createJevFactsExtractor(a, { questions: [slotById("next_step_with_date")] })({ summary: null, transcript }, { now, callAt });
+    return { out, valid: validateFacts(out.facts, { summary: null, transcript }, now) };
+  };
+  it("a two-month-old call saying tomorrow yields no next_step (the resolved day is long past)", async () => {
+    const callAt = new Date("2026-08-05T20:00:00Z");
+    const now = new Date("2026-10-07T15:00:00Z");
+    const { out, valid } = await next("Other party: call me tomorrow", callAt, now);
+    expect(out.facts.next_step?.value).toBe("2026-08-06");
+    expect(valid.next_step).toBeUndefined();
+  });
+  it("a late-night call swept after midnight resolves to the day after the CALL", async () => {
+    const callAt = new Date("2026-10-08T04:30:00Z"); // 11:30 pm Central, Oct 7
+    const now = new Date("2026-10-08T06:30:00Z"); // 1:30 am Central, Oct 8 (sweep)
+    const { out, valid } = await next("Other party: call me tomorrow", callAt, now);
+    expect(out.facts.next_step?.value).toBe("2026-10-08"); // not Oct 9
+    expect(valid.next_step?.value).toBe("2026-10-08T14:00:00.000Z");
+  });
+  it("without a call time it falls back to the sweep clock", async () => {
+    const now = new Date("2026-10-07T15:00:00Z");
+    const a = choices({ next_step: "T001|tomorrow" });
+    const out = await createJevFactsExtractor(a, { questions: [slotById("next_step_with_date")] })({ summary: null, transcript: "Other party: tomorrow" }, { now });
+    expect(out.facts.next_step?.value).toBe("2026-10-08");
+  });
+});
+
 describe("Closer Lab yes/no set: per seller turn, approved framing, approved thresholds", () => {
   const motivation = slotById("motivation");
   const think = slotById("think");
