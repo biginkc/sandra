@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { computeScriptDigest, type ScriptBundle } from "@biginkc/coach";
 import { closrOutbound123Bundle } from "@biginkc/coach/fixtures";
-import { syncCoachScriptCache } from "./script-cache";
+import { loadCachedCoachBundle, syncCoachScriptCache } from "./script-cache";
 
 const bundle = closrOutbound123Bundle as ScriptBundle;
 const token = "shared-test-token";
@@ -70,5 +70,61 @@ describe("syncCoachScriptCache", () => {
     await expect(syncCoachScriptCache({ fetch: fetchMock, admin: cache.client as never, baseUrl: "", token: "" }))
       .resolves.toEqual({ ok: true, skipped: "missing_configuration" });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+function readAdmin(result: { data: unknown; error: { message: string } | null }) {
+  return {
+    from: () => ({ select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve(result) }) }) }),
+  } as never;
+}
+
+describe("loadCachedCoachBundle", () => {
+  const revisionRow = (extra: Record<string, unknown> = {}) => ({
+    slug: "closr-outbound", revision: 3, bundle, import_status: "reviewed", ...extra,
+  });
+
+  it("returns ref and bundle for a reviewed row with a matching digest", async () => {
+    const digest = await computeScriptDigest(bundle);
+    const result = await loadCachedCoachBundle("closr-outbound", readAdmin({
+      data: { digest, coach_script_revisions: revisionRow() }, error: null,
+    }));
+    expect(result).toEqual({ ref: { slug: "closr-outbound", revision: 3, digest }, bundle });
+  });
+
+  it("handles the join coming back as an array", async () => {
+    const digest = await computeScriptDigest(bundle);
+    const result = await loadCachedCoachBundle("closr-outbound", readAdmin({
+      data: { digest, coach_script_revisions: [revisionRow()] }, error: null,
+    }));
+    expect(result?.ref).toEqual({ slug: "closr-outbound", revision: 3, digest });
+  });
+
+  it("returns null for an unreviewed revision", async () => {
+    const digest = await computeScriptDigest(bundle);
+    expect(await loadCachedCoachBundle("closr-outbound", readAdmin({
+      data: { digest, coach_script_revisions: revisionRow({ import_status: "unreviewed" }) }, error: null,
+    }))).toBeNull();
+  });
+
+  it("returns null when the stored digest mismatches", async () => {
+    expect(await loadCachedCoachBundle("closr-outbound", readAdmin({
+      data: { digest: "0".repeat(64), coach_script_revisions: revisionRow() }, error: null,
+    }))).toBeNull();
+  });
+
+  it("returns null when there is no row", async () => {
+    expect(await loadCachedCoachBundle("closr-outbound", readAdmin({ data: null, error: null }))).toBeNull();
+  });
+
+  it("returns null on a query error", async () => {
+    expect(await loadCachedCoachBundle("closr-outbound", readAdmin({ data: null, error: { message: "boom" } }))).toBeNull();
+  });
+
+  it("returns null when the bundle fails validation", async () => {
+    const digest = await computeScriptDigest(bundle);
+    expect(await loadCachedCoachBundle("closr-outbound", readAdmin({
+      data: { digest, coach_script_revisions: revisionRow({ bundle: { schema_version: 1 } }) }, error: null,
+    }))).toBeNull();
   });
 });

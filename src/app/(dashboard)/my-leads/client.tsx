@@ -37,10 +37,9 @@ import { reasonLabel } from "./_components/call-next-reason";
 import type { CallNextSnapshot, TriageSnapshot } from "@/lib/my-leads/call-next";
 import { AcquisitionAttemptDialog } from "./_components/attempt-dialog";
 import { PostCallPrompt } from "./_components/post-call-prompt";
-import { clearExtras } from "./_components/extras-store";
+import { saveExtrasRequest, type ExtrasRequest } from "./_components/extras-saver";
 import type {
   AcquisitionCallReferenceOption,
-  PostCallExtras,
   PostCallExtrasState,
 } from "./_components/types";
 import { AcquisitionReadinessDialog } from "./_components/readiness-dialog";
@@ -69,7 +68,6 @@ import {
 import type { SelectedLeadResult } from "./deep-link";
 import {
   loadMyLeadCallReferences,
-  savePostCallExtras,
   loadMyLeadRow,
   loadMyLeads,
   loadMyLeadsStage,
@@ -359,12 +357,6 @@ export function MyLeadsClient({
   const [extrasState, setExtrasState] = useState<PostCallExtrasState | null>(
     null,
   );
-  type ExtrasRequest = {
-    attemptKey: string;
-    memberId: string;
-    propertyId: string;
-    extras: PostCallExtras;
-  };
   const extrasRequest = useRef<ExtrasRequest | null>(null);
   const extrasInFlight = useRef(new Set<string>());
   // ---- API dial (P2 2.7). One in-flight dial at a time; one idempotency key PER LEAD lives here so a
@@ -924,30 +916,18 @@ export function MyLeadsClient({
   // again for the same attempt: each extra carries its own idempotency key, so a repeat cannot
   // duplicate. The stored entry is removed only after the server confirms both extras.
   const runExtras = async (request: ExtrasRequest, showState: boolean) => {
-    const { extras } = request;
-    if (extrasInFlight.current.has(extras.submissionId)) return;
-    extrasInFlight.current.add(extras.submissionId);
-    if (showState) {
-      extrasRequest.current = request;
-      setExtrasState({ status: "saving" });
-    }
-    let result: Awaited<ReturnType<typeof savePostCallExtras>>;
-    try {
-      result = await savePostCallExtras({
-        memberId: request.memberId,
-        propertyId: request.propertyId,
-        submissionId: extras.submissionId,
-        note: extras.note,
-        nextStep: extras.nextStep,
-      });
-    } catch {
-      result = { ok: false, message: "The note and next step could not be saved." };
-    } finally {
-      extrasInFlight.current.delete(extras.submissionId);
-    }
-    if (result.ok && result.note !== "failed" && result.nextStep !== "failed" && !result.message) {
-      clearExtras(viewer.userId, request.attemptKey);
-    }
+    const result = await saveExtrasRequest(
+      request,
+      viewer.userId,
+      extrasInFlight.current,
+      () => {
+        if (showState) {
+          extrasRequest.current = request;
+          setExtrasState({ status: "saving" });
+        }
+      },
+    );
+    if (!result) return;
     // A result for a prompt that has since been replaced or closed is not shown.
     if (!showState || extrasRequest.current !== request) {
       if (result.ok) {
