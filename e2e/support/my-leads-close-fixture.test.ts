@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { verifyDialpadWebhookJwt } from "../../src/lib/dialpad-cti/webhook-jwt";
-import { assertLaneSafe, cleanupSyntheticLead, purgeDialpadEvidenceCi, dialpadEventPayload, MY_LEADS_CLOSE_FLAGS, signDialpadWebhook } from "./my-leads-close-fixture";
+import { assertLaneSafe, cleanupSyntheticLead, purgeDialpadEvidenceCi, resetCloseWorld, dialpadEventPayload, MY_LEADS_CLOSE_FLAGS, signDialpadWebhook } from "./my-leads-close-fixture";
 
 describe("my-leads-close fixture (pure parts)", () => {
   it("signs a webhook body the app's verifier accepts, and not with another secret", () => {
@@ -72,6 +72,7 @@ describe("cleanupSyntheticLead handle checks", () => {
       await expect(cleanupSyntheticLead(fakeDb("10.1.2.3", lead.address), lead, "ci", "u")).rejects.toThrow(/not loopback/);
       await expect(cleanupSyntheticLead(fakeDb(null, lead.address), lead, "ci", "u")).rejects.toThrow(/not loopback/);
       await expect(purgeDialpadEvidenceCi(fakeDb("10.1.2.3", lead.address), "u")).rejects.toThrow(/not configured for a loopback/);
+      await expect(resetCloseWorld(fakeDb("10.1.2.3", lead.address), { orgId: "o", repUserId: "u" })).rejects.toThrow(/not configured for a loopback/);
       await expect(cleanupSyntheticLead(fakeDb("127.0.0.1", "Someone Else Ln"), lead, "ci", "u")).rejects.toThrow(/not the tagged synthetic lead/);
     } finally {
       for (const key of Object.keys(ciEnv)) {

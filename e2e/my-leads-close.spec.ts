@@ -291,7 +291,21 @@ test.describe.serial("my-leads-close: Phase 1 CI lane", () => {
     // The first pass created exactly one attempt; the replay creates no second one.
     const countAfterFirst = await dialpadAttempts();
     expect(countAfterFirst).toBe(countBefore + 1);
-    for (const payload of events) await postDialpadEvent(BASE_URL, connectionId, signDialpadWebhook(payload, WEBHOOK_SECRET));
+    for (const payload of events) {
+      const replay = await postDialpadEvent(BASE_URL, connectionId, signDialpadWebhook(payload, WEBHOOK_SECRET));
+      expect(replay.status).toBe(200);
+      // The handler projects inline; a deferred projection ("pendingProjection") would land after the count below.
+      expect(((await replay.json()) as { pendingProjection?: boolean }).pendingProjection).toBeUndefined();
+    }
+    // Every event row for the call is projected (none left received/quarantined), then the count must hold
+    // across a stable window so a late duplicate cannot slip in after the assertion.
+    await expect
+      .poll(async () => (await db.query<{ n: string }>("select count(*)::text as n from public.dialpad_call_events where provider_call_id=$1 and disposition <> 'matched'", [callId])).rows[0]!.n, { timeout: 20_000 })
+      .toBe("0");
+    let stable = 0;
+    await expect
+      .poll(async () => (stable = (await dialpadAttempts()) === countAfterFirst ? stable + 1 : 0), { intervals: [500], timeout: 20_000 })
+      .toBeGreaterThanOrEqual(4);
     expect(await dialpadAttempts()).toBe(countAfterFirst);
   });
 

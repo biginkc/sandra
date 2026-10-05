@@ -194,6 +194,8 @@ export async function designateRep(db: Queryable, input: { orgId: string; repUse
  * `acquisitions_enabled` goes back to false through the same designation guard marker.
  */
 export async function resetCloseWorld(db: Queryable, input: { orgId: string; repUserId: string }): Promise<void> {
+  // Self-defending like the purge: this writes through the handle, so the handle must be a loopback one.
+  if (handleTarget(db) !== "loopback") throw new Error("resetCloseWorld: the database handle is not configured for a loopback host.");
   // Each step is its own transaction and a failure in one never skips the others: the designation
   // restore in particular must always run, or `reset_tenant_tables()` of the next spec file fails
   // with MY_LEADS_DESIGNATION_FORBIDDEN. The first error is rethrown after every step has run.

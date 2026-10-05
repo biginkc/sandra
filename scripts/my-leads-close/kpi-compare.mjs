@@ -5,8 +5,9 @@
 //     [--closeout-count <n>] [--closeout-by-window <json: {"<window label>": n}>] \
 //     [--run-id <relabel run uuid> --expected-contact-drop <n>]
 //
-// Exit 1 on any violation or a missing row. Only windows present in BOTH files whose end is at or
-// before the after file's `migrationAppliedAt` are compared (later windows legitimately move), and the
+// Exit 1 on any violation or a missing row. Every baseline window whose end is at or
+// before the after file's `migrationAppliedAt` is compared and must reappear in the after file (later windows
+// legitimately move), and the
 // after file must carry `migrationAppliedAt`. Current-state tiles are never compared to "before"
 // except `contactWithoutFollowUp`: the independent recount is a SQL step in the runbook (plan 4.6),
 // passed as `--expected-contact-drop <n>`, and every member must show after = before - n. The flag is
@@ -15,6 +16,9 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 import { CURRENT_STATE_MAY_CHANGE, EQUAL_IN_CLOSED_WINDOWS, EQUAL_UNLESS_CLOSEOUT, FLOAT_TOLERANCE, RULES } from "./kpi-rules.mjs";
+
+/** The only member rejections the runbook plans for; any other SQL error in a snapshot fails the comparison. */
+const PLANNED_MEMBER_ERRORS = new Set(["NOT_FOUND", "FORBIDDEN"]);
 
 const rowKey = (row) => `${row.member}|${row.window}`;
 
@@ -44,8 +48,9 @@ export function compare(before, after, options = {}) {
   const endOf = new Map();
   for (const w of [...(before.windows ?? []), ...(after.windows ?? [])]) if (!endOf.has(w.label)) endOf.set(w.label, Date.parse(w.end));
   const beforeLabels = new Set(before.rows.map((r) => r.window));
-  const afterLabels = new Set(after.rows.map((r) => r.window));
-  const eligible = (label) => beforeLabels.has(label) && afterLabels.has(label) && endOf.has(label) && endOf.get(label) <= cutoff;
+  // Every closed baseline window is eligible whether or not the after file kept it: a window (or a
+  // member row) that vanished is a "missing after row" violation, never a silent pass.
+  const eligible = (label) => beforeLabels.has(label) && endOf.has(label) && endOf.get(label) <= cutoff;
   const beforeRows = before.rows.filter((r) => eligible(r.window));
   const afterEligible = after.rows.filter((r) => eligible(r.window));
   if (beforeRows.length === 0) violations.push({ member: "*", window: "*", key: "*", reason: "no window is present in both files and ends at or before migrationAppliedAt" });
@@ -60,7 +65,10 @@ export function compare(before, after, options = {}) {
     if (b.kpi?.error !== undefined || a.kpi?.error !== undefined) {
       // A rejected member is compared as equal-to-itself, never skipped silently.
       compared += 1;
-      if (b.kpi?.error !== a.kpi?.error) violations.push({ member: b.member, window: b.window, key: "error", reason: `before=${b.kpi?.error} after=${a.kpi?.error}` });
+      const planned = (e) => PLANNED_MEMBER_ERRORS.has(e);
+      if (b.kpi?.error === a.kpi?.error && !planned(b.kpi?.error)) {
+        violations.push({ member: b.member, window: b.window, key: "error", reason: `unplanned error ${JSON.stringify(b.kpi?.error)} in both snapshots (only NOT_FOUND and FORBIDDEN member rejections are parity)` });
+      } else if (b.kpi?.error !== a.kpi?.error) violations.push({ member: b.member, window: b.window, key: "error", reason: `before=${b.kpi?.error} after=${a.kpi?.error}` });
       continue;
     }
     if (options.expectedContactDrop !== undefined && !dropChecked.has(b.member)) {

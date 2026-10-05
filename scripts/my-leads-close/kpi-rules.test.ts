@@ -78,6 +78,28 @@ describe("kpi-compare", () => {
     expect(compare(before, file([row("m3", "w", base)])).ok).toBe(false);
   });
 
+  it("fails when a whole closed baseline window is missing from the after snapshot", () => {
+    const before = file([row("m1", "w1", base), row("m1", "w2", base)]);
+    const after = file([row("m1", "w1", base)]);
+    const result = compare(before, after);
+    expect(result.ok).toBe(false);
+    expect(result.violations).toEqual([expect.objectContaining({ member: "m1", window: "w2", reason: "missing after row" })]);
+  });
+
+  it("fails when a closed baseline member row is missing inside a window the after snapshot has", () => {
+    const before = file([row("m1", "w", base), row("m2", "w", base)]);
+    expect(compare(before, file([row("m1", "w", base)])).ok).toBe(false);
+  });
+
+  it("accepts only the planned NOT_FOUND and FORBIDDEN rejections, never another error in both snapshots", () => {
+    for (const planned of ["NOT_FOUND", "FORBIDDEN"]) {
+      expect(compare(file([row("m3", "w", { error: planned })]), file([row("m3", "w", { error: planned })])).ok).toBe(true);
+    }
+    const unplanned = compare(file([row("m3", "w", { error: "42883" })]), file([row("m3", "w", { error: "42883" })]));
+    expect(unplanned.ok).toBe(false);
+    expect(unplanned.violations[0]!.reason).toMatch(/unplanned/);
+  });
+
   it("requires migrationAppliedAt in the after file", () => {
     const before = file([row("m1", "w", base)]);
     const result = compare(before, file([row("m1", "w", base)], null));
@@ -85,8 +107,8 @@ describe("kpi-compare", () => {
     expect(result.violations[0]!.key).toBe("migrationAppliedAt");
   });
 
-  it("compares only windows present in both files and ended by migrationAppliedAt", () => {
-    const before = file([row("m1", "w", base), row("m1", "late", base), row("m1", "only-before", base)]);
+  it("compares only windows that ended by migrationAppliedAt, ignores later and after-only windows", () => {
+    const before = file([row("m1", "w", base), row("m1", "late", base)]);
     const after = file([row("m1", "w", base), row("m1", "late", { ...base, attempts: 99 }), row("m1", "only-after", { ...base, attempts: 99 })]);
     const result = compare(before, after);
     expect(result.ok).toBe(true);
