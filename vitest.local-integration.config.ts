@@ -45,6 +45,8 @@ export default defineConfig({
       "supabase/migrations/20261005130300_jitter_writeback_callback_next_step.integration.test.ts",
       "supabase/migrations/20261005130400_norma_complete_call_next_step.integration.test.ts",
       "supabase/migrations/20261005130500_norma_needs_review_next_step.integration.test.ts",
+      "supabase/migrations/20261005122000_my_leads_housekeeping_reassign_sources.integration.test.ts",
+      "supabase/migrations/20261005140000_my_leads_housekeeping_reassign_queue_scope.integration.test.ts",
       "supabase/migrations/20261005150000_my_leads_call_next.integration.test.ts",
       "supabase/migrations/20261005160000_post_call_prompt_support.integration.test.ts",
       "supabase/migrations/20261005170000_seller_appointment_reminders.integration.test.ts",
