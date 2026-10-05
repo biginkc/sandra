@@ -72,7 +72,7 @@ export async function loadContractCardData(
       todayCentral: today, tomorrowCentral: tomorrow,
     },
     ctx: {
-      prefillBase, titleCompanies: defaults.titleCompanies, buyerEntities: defaults.buyerEntities,
+      prefillBase, titleCompanies: defaults.titleCompanies.filter((t) => t.isActive), buyerEntities: defaults.buyerEntities.filter((b) => b.isActive),
       todayCentral: today, tomorrowCentral: tomorrow,
     },
   };

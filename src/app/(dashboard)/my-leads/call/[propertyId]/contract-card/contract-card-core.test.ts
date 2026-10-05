@@ -133,9 +133,43 @@ describe("sendContractCard", () => {
 
   it("definitive failure returns failed, logs nothing and releases the open slot", async () => {
     const { core, projection } = setup({ send: async () => ({ ok: false, error: { code: "SEND_FAILED", message: "provider said no" } }) });
-    expect(await core.sendContractCard(input())).toEqual({ status: "failed", message: "provider said no" });
+    expect(await core.sendContractCard(input())).toEqual({ status: "failed", message: "provider said no", definitive: true });
     expect(projection.projectNow).not.toHaveBeenCalled();
     expect(projection.abandon).toHaveBeenCalledWith("proj-1");
+  });
+
+  it("projectNow throwing after a successful send returns sent (offer pending), never a plain failure", async () => {
+    const { core, projection, sendSpy } = setup();
+    projection.projectNow.mockRejectedValueOnce(new Error("db down"));
+    expect(await core.sendContractCard(input())).toEqual({ status: "sent", requestId: `req-${INTENT}`, offer: "pending", code: "PROJECTION_ERROR" });
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(projection.abandon).not.toHaveBeenCalled();
+  });
+
+  it("send throwing (provider call may have happened) returns unconfirmed and keeps the intent", async () => {
+    const { core, projection } = setup({ send: async () => { throw new Error("socket hang up"); } });
+    expect(await core.sendContractCard(input())).toEqual({ status: "unconfirmed", projectionId: "proj-1" });
+    expect(projection.abandon).not.toHaveBeenCalled();
+    expect(projection.projectNow).not.toHaveBeenCalled();
+  });
+
+  it("a failing abandon after a definitive send failure still reports failed", async () => {
+    const { core, projection } = setup({ send: async () => ({ ok: false, error: { code: "SEND_FAILED", message: "no" } }) });
+    projection.abandon.mockRejectedValueOnce(new Error("x"));
+    expect(await core.sendContractCard(input())).toMatchObject({ status: "failed", definitive: true });
+  });
+
+  it("rejects an inactive title company or buyer entity server-side, before any intent exists", async () => {
+    const mk = (t: boolean, b: boolean) => setup({ loadContext: async () => ({
+      prefillBase: { ...novationBase(), comp: { ...novationBase().comp!, fetchedAt: new Date(Date.now() - 86400000).toISOString() } },
+      titleCompanies: [{ ...TITLE, isActive: t }], buyerEntities: [{ ...BUYER, isActive: b }], todayCentral: "2026-10-04", tomorrowCentral: "2026-10-05",
+    }) });
+    const a = mk(false, true);
+    expect(await a.core.sendContractCard(input())).toMatchObject({ status: "blocked", code: "TITLE_COMPANY_MISSING" });
+    const b = mk(true, false);
+    expect(await b.core.sendContractCard(input())).toMatchObject({ status: "blocked", code: "BUYER_ENTITY_MISSING" });
+    for (const x of [a, b]) { expect(x.projection.createIntent).not.toHaveBeenCalled(); expect(x.sendSpy).not.toHaveBeenCalled(); }
+    expect((await mk(true, true).core.sendContractCard(input())).status).toBe("sent");
   });
 
   it("maps createIntent errors without sending", async () => {

@@ -92,7 +92,7 @@ describe("ContractCard", () => {
   });
 
   it("rotates the intent id after a definitive failure", async () => {
-    const send = vi.fn().mockResolvedValue({ status: "failed", message: "nope" });
+    const send = vi.fn().mockResolvedValue({ status: "failed", message: "nope", definitive: true });
     render(<ContractCard state={state()} propertyId="p" send={send} />);
     fill();
     fireEvent.click(sendBtn());
@@ -100,6 +100,17 @@ describe("ContractCard", () => {
     fireEvent.click(sendBtn());
     await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
     expect(send.mock.calls[1]![0].sendIntentId).not.toBe(send.mock.calls[0]![0].sendIntentId);
+  });
+
+  it("keeps the SAME intent id after a non-definitive failure (e.g. a server error after the send step)", async () => {
+    const send = vi.fn().mockResolvedValue({ status: "failed", message: "The contract could not be sent. Please retry." });
+    render(<ContractCard state={state()} propertyId="p" send={send} />);
+    fill();
+    fireEvent.click(sendBtn());
+    await waitFor(() => expect(screen.getByTestId("contract-status").textContent).toContain("Please retry"));
+    fireEvent.click(sendBtn());
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    expect(send.mock.calls[1]![0].sendIntentId).toBe(send.mock.calls[0]![0].sendIntentId);
   });
 
   it("hides the Send button when the send is unconfirmed and says not to send again", async () => {

@@ -84,6 +84,8 @@ export async function sendContractCardAction(input: SendContractCardInput): Prom
   } catch (error) {
     if (error instanceof MyLeadsReadError) return { status: "blocked", code: error.code, message: error.message };
     reportError(error instanceof Error ? error : new Error("send contract card failed"), { tags: { surface: "contract_card", operation: "send" } });
+    // Only reached for failures before the send step (the core handles everything after it); the
+    // client keeps the same intent id, so a retry replays idempotently.
     return { status: "failed", message: "The contract could not be sent. Please retry." };
   }
 }

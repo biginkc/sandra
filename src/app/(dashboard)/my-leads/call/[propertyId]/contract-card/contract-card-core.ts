@@ -31,7 +31,8 @@ export type SendContractCardResult =
   | { status: "sent"; requestId: string; offer: "logged" | "pending" | "conflict"; code?: string }
   | { status: "unconfirmed"; projectionId: string }
   | { status: "blocked"; code: string; message: string }
-  | { status: "failed"; message: string };
+  /** `definitive`: the send definitively did not happen and the intent was released; the client may mint a new intent. */
+  | { status: "failed"; message: string; definitive?: boolean };
 
 export type ProjectionState = "awaiting_send" | "pending" | "logged" | "conflict" | "failed" | "cancelled";
 export type ExistingOfferIntent = {
@@ -123,16 +124,30 @@ function validShape(input: unknown): input is SendContractCardInput {
 
 export function createContractCardCore(deps: ContractCardCoreDeps) {
   async function mapSend(projectionId: string, requestInput: Parameters<ContractCardCoreDeps["send"]>[0], fresh: boolean): Promise<SendContractCardResult> {
-    const sent = await deps.send(requestInput);
+    let sent: EsignSendResult;
+    try {
+      sent = await deps.send(requestInput);
+    } catch {
+      // The provider call may have happened: never a plain retry, never abandon the intent.
+      return { status: "unconfirmed", projectionId };
+    }
     if (sent.ok) {
-      const projected = await deps.projection.projectNow(projectionId);
+      // The contract is out. From here a failure must never read as "retry".
+      let projected: { state: ProjectionState; code?: string };
+      try {
+        projected = await deps.projection.projectNow(projectionId);
+      } catch {
+        return { status: "sent", requestId: sent.data.requestId, offer: "pending", code: "PROJECTION_ERROR" };
+      }
       const offer = projected.state === "logged" ? "logged" : projected.state === "conflict" ? "conflict" : "pending";
       return { status: "sent", requestId: sent.data.requestId, offer, ...(projected.code ? { code: projected.code } : {}) };
     }
     // Never re-send on an unconfirmed or in-flight send; the reconciliation cron resolves it.
     if (sent.error.code === "SEND_UNKNOWN" || sent.error.code === "SEND_IN_PROGRESS") return { status: "unconfirmed", projectionId };
-    if (fresh) await deps.projection.abandon(projectionId);
-    return { status: "failed", message: sent.error.message };
+    if (fresh) {
+      try { await deps.projection.abandon(projectionId); } catch { /* the sweep repairs an open slot */ }
+    }
+    return { status: "failed", message: sent.error.message, definitive: true };
   }
 
   async function sendContractCard(input: SendContractCardInput): Promise<SendContractCardResult> {
@@ -169,8 +184,8 @@ export function createContractCardCore(deps: ContractCardCoreDeps) {
 
     const ctx = await deps.loadContext(viewer, input.propertyId, input.templateId);
     if (!ctx) return blocked("TEMPLATE_UNAVAILABLE", "That contract template is not available.");
-    const titleCompany = ctx.titleCompanies.find((t) => t?.id === input.titleCompanyId) ?? null;
-    const buyerEntity = ctx.buyerEntities.find((b) => b?.id === input.buyerEntityId) ?? null;
+    const titleCompany = ctx.titleCompanies.find((t) => t?.id === input.titleCompanyId && t.isActive) ?? null;
+    const buyerEntity = ctx.buyerEntities.find((b) => b?.id === input.buyerEntityId && b.isActive) ?? null;
     if (!titleCompany) return blocked("TITLE_COMPANY_MISSING", "Choose a title company.");
     if (!buyerEntity) return blocked("BUYER_ENTITY_MISSING", "Choose a buyer entity.");
     for (const key of Object.keys(input.overrides)) {

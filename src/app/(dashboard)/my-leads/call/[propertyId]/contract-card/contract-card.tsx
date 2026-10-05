@@ -104,7 +104,9 @@ function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChan
         titleCompanyId: titleId, buyerEntityId: buyerId, earnestMoneyCents: earnestCents, signers, overrides,
       });
       setResult(res);
-      if (res.status === "failed" || res.status === "blocked") intentRef.current = null;
+      // Rotate only when nothing was sent and the server released the intent (blocked, or a definitive
+      // failure). Every other result keeps the id so a retry replays the durable outcome.
+      if (res.status === "blocked" || (res.status === "failed" && res.definitive === true)) intentRef.current = null;
       if (res.status === "sent") onSent?.();
     } catch {
       // A lost response keeps the SAME intent id so a retry replays the durable result.
