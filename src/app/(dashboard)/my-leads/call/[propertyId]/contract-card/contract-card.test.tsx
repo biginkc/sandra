@@ -14,15 +14,41 @@ const state = (over: Record<string, unknown> = {}): ContractCardState => ({
   sellerSigner: { name: "Sam Seller", emailAddress: "sam@example.test" },
   prefillBase: { ...novationBase(), comp: freshComp() },
   titleCompanies: [TITLE], buyerEntities: [BUYER],
-  selectedTitleCompanyId: TITLE.id, selectedBuyerEntityId: BUYER.id,
   todayCentral: "2026-10-04", tomorrowCentral: "2026-10-05", ...over,
 }) as ContractCardState;
 
 const fill = () => {
   fireEvent.change(screen.getByTestId("contract-price"), { target: { value: "210000" } });
   fireEvent.change(screen.getByTestId("contract-closing-date"), { target: { value: "2099-01-02" } });
+  // Nothing is preselected and earnest money has no default: the rep picks (or types) all three per contract.
+  fireEvent.change(screen.getByTestId("contract-title-company"), { target: { value: TITLE.id } });
+  fireEvent.change(screen.getByTestId("contract-buyer-entity"), { target: { value: BUYER.id } });
+  fireEvent.change(screen.getByTestId("contract-earnest"), { target: { value: (TEST_ONLY_EARNEST_MONEY_CENTS / 100).toFixed(2) } });
 };
 const sendBtn = () => screen.getByTestId("contract-send") as HTMLButtonElement;
+
+describe("ContractCard starts blank", () => {
+  it("nothing is preselected and earnest money is empty even when the org has saved lists", () => {
+    render(<ContractCard state={state()} propertyId="p" send={vi.fn()} />);
+    expect((screen.getByTestId("contract-title-company") as HTMLSelectElement).value).toBe("");
+    expect((screen.getByTestId("contract-buyer-entity") as HTMLSelectElement).value).toBe("");
+    expect((screen.getByTestId("contract-earnest") as HTMLInputElement).value).toBe("");
+    expect((screen.getByTestId("contract-send") as HTMLButtonElement).disabled).toBe(true);
+  });
+  it("stays refused until each of title company, buyer entity and earnest money has a value", () => {
+    render(<ContractCard state={state()} propertyId="p" send={vi.fn()} />);
+    const btn = () => screen.getByTestId("contract-send") as HTMLButtonElement;
+    fireEvent.change(screen.getByTestId("contract-price"), { target: { value: "210000" } });
+    fireEvent.change(screen.getByTestId("contract-closing-date"), { target: { value: "2099-01-02" } });
+    fireEvent.change(screen.getByTestId("contract-title-company"), { target: { value: TITLE.id } });
+    fireEvent.change(screen.getByTestId("contract-buyer-entity"), { target: { value: BUYER.id } });
+    expect(btn().disabled).toBe(true); // earnest empty
+    fireEvent.change(screen.getByTestId("contract-earnest"), { target: { value: "100" } });
+    expect(btn().disabled).toBe(false);
+    fireEvent.change(screen.getByTestId("contract-title-company"), { target: { value: "" } });
+    expect(btn().disabled).toBe(true);
+  });
+});
 
 describe("ContractCard", () => {
   it("renders nothing when disabled", () => {
@@ -54,16 +80,48 @@ describe("ContractCard", () => {
     expect(sendBtn().disabled).toBe(true);
   });
 
-  it("refuses to send with no title company or buyer entity configured (clear disabled state)", () => {
-    render(<ContractCard state={state({ titleCompanies: [], selectedTitleCompanyId: null })} propertyId="p" send={vi.fn()} />);
+  it("stays disabled with no saved title company or buyer entity until each has a value (typed or picked)", () => {
+    render(<ContractCard state={state({ titleCompanies: [], buyerEntities: [] })} propertyId="p" send={vi.fn()} />);
     fill();
     expect(sendBtn().disabled).toBe(true);
-    expect(screen.getByTestId("contract-blocked").textContent).toContain("Add a title company in Settings");
-    cleanup();
-    render(<ContractCard state={state({ buyerEntities: [], selectedBuyerEntityId: null })} propertyId="p" send={vi.fn()} />);
-    fill();
+    fireEvent.change(screen.getByTestId("contract-title-company"), { target: { value: "__new__" } });
     expect(sendBtn().disabled).toBe(true);
-    expect(screen.getByTestId("contract-blocked").textContent).toContain("Add a buyer entity in Settings");
+    fireEvent.change(screen.getByTestId("contract-title-new-name"), { target: { value: "Typed Title" } });
+    expect(sendBtn().disabled).toBe(true); // closing agent still empty
+    fireEvent.change(screen.getByTestId("contract-title-new-closingAgentName"), { target: { value: "Agent A" } });
+    fireEvent.change(screen.getByTestId("contract-title-new-closingAgentPhone"), { target: { value: "555-0100" } });
+    fireEvent.change(screen.getByTestId("contract-title-new-closingAgentAddress"), { target: { value: "1 Test St" } });
+    expect(sendBtn().disabled).toBe(true); // buyer still empty
+    fireEvent.change(screen.getByTestId("contract-buyer-entity"), { target: { value: "__new__" } });
+    fireEvent.change(screen.getByTestId("contract-buyer-new-name"), { target: { value: "Typed Buyer LLC" } });
+    expect(sendBtn().disabled).toBe(true); // buyer signer needs an email
+    fireEvent.change(screen.getByTestId("contract-buyer-new-email"), { target: { value: "b@example.test" } });
+    fireEvent.change(screen.getByTestId("contract-buyer-new-attorneyInFact"), { target: { value: "Test Attorney" } });
+    fireEvent.change(screen.getByTestId("contract-buyer-new-phone"), { target: { value: "555-0101" } });
+    expect(sendBtn().disabled).toBe(false);
+  });
+
+  it("sends typed title company and buyer entity inline with empty ids", async () => {
+    const send = vi.fn(async () => ({ status: "sent" as const, requestId: "r", offer: "pending" as const }));
+    render(<ContractCard state={state({ titleCompanies: [], buyerEntities: [] })} propertyId="p" send={send} />);
+    fill();
+    fireEvent.change(screen.getByTestId("contract-title-company"), { target: { value: "__new__" } });
+    fireEvent.change(screen.getByTestId("contract-title-new-name"), { target: { value: "Typed Title" } });
+    fireEvent.change(screen.getByTestId("contract-title-new-closingAgentName"), { target: { value: "Agent A" } });
+    fireEvent.change(screen.getByTestId("contract-title-new-closingAgentPhone"), { target: { value: "555-0100" } });
+    fireEvent.change(screen.getByTestId("contract-title-new-closingAgentAddress"), { target: { value: "1 Test St" } });
+    fireEvent.change(screen.getByTestId("contract-buyer-entity"), { target: { value: "__new__" } });
+    fireEvent.change(screen.getByTestId("contract-buyer-new-name"), { target: { value: "Typed Buyer LLC" } });
+    fireEvent.change(screen.getByTestId("contract-buyer-new-email"), { target: { value: "b@example.test" } });
+    fireEvent.change(screen.getByTestId("contract-buyer-new-attorneyInFact"), { target: { value: "Test Attorney" } });
+    fireEvent.change(screen.getByTestId("contract-buyer-new-phone"), { target: { value: "555-0101" } });
+    fireEvent.click(sendBtn());
+    await waitFor(() => expect(send).toHaveBeenCalled());
+    expect((send.mock.calls[0] as unknown[])[0]).toMatchObject({
+      titleCompanyId: "", buyerEntityId: "",
+      titleCompanyNew: { name: "Typed Title", closingAgentName: "Agent A" },
+      buyerEntityNew: { name: "Typed Buyer LLC", email: "b@example.test" },
+    });
   });
 
   it("with earnest money unset the field is empty and Send stays disabled until the rep types it", async () => {
@@ -71,6 +129,7 @@ describe("ContractCard", () => {
     const send = vi.fn().mockResolvedValue({ status: "failed", message: "x" });
     render(<ContractCard state={state({ prefillBase: { ...base, comp: freshComp(), settings: { earnestMoneyCents: null, templateFieldDefaults: base.settings.templateFieldDefaults } } })} propertyId="p" send={send} />);
     fill();
+    fireEvent.change(screen.getByTestId("contract-earnest"), { target: { value: "" } });
     expect((screen.getByTestId("contract-earnest") as HTMLInputElement).value).toBe("");
     expect(sendBtn().disabled).toBe(true);
     expect(screen.getByTestId("contract-blocked").textContent).toContain("Enter the earnest money amount");
@@ -194,5 +253,76 @@ describe("intent id rotation by last result state", () => {
     fireEvent.click(sendBtn());
     await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
     expect(send.mock.calls[1]![0].sendIntentId).toBe(send.mock.calls[0]![0].sendIntentId);
+  });
+});
+
+describe("ContractCard projection state", () => {
+  const proj = (over: Record<string, unknown>) => ({ id: "p1", state: "pending", conflictCode: null, requestId: "r1", sendUnknown: false, amountCents: 100, followUpAt: null, pendingOfferAmountCents: null, ...over });
+  const recovery = { retry: vi.fn(), supersede: vi.fn(), reassign: vi.fn(), cancel: vi.fn() };
+
+  it("hides the send form while a contract is open, so a reload cannot offer a second send", () => {
+    for (const p of [proj({ state: "awaiting_send" }), proj({ state: "pending" }), proj({ state: "logged", followUpAt: "2026-11-02T15:00:00Z" }), proj({ state: "conflict", conflictCode: "STALE_STATE" })]) {
+      const { unmount } = render(<ContractCard state={state({ projection: p })} propertyId="p" send={vi.fn()} recovery={recovery} />);
+      expect(screen.queryByTestId("contract-send")).toBeNull();
+      unmount();
+    }
+  });
+
+  it("maps projection state to the status copy", () => {
+    const copy = (p: Record<string, unknown>) => {
+      const { unmount } = render(<ContractCard state={state({ projection: p })} propertyId="p" send={vi.fn()} recovery={recovery} />);
+      const text = screen.getByTestId("contract-status").textContent;
+      unmount();
+      return text;
+    };
+    expect(copy(proj({ state: "awaiting_send", sendUnknown: true }))).toBe("Send unconfirmed. Sandra is checking with Dropbox Sign. Do not send again.");
+    expect(copy(proj({ state: "pending" }))).toBe("Contract sent. Logging the offer…");
+    expect(copy(proj({ state: "logged", followUpAt: "2026-11-02T15:00:00Z" }))).toBe("Contract sent. Offer logged. Follow-up Nov 2, 2026.");
+  });
+
+  it("a conflict shows the recovery banner with its actions", () => {
+    render(<ContractCard state={state({ projection: proj({ state: "conflict", conflictCode: "PENDING_OFFER_EXISTS", pendingOfferAmountCents: 5 }) })} propertyId="p" send={vi.fn()} recovery={recovery} />);
+    expect(screen.getByRole("alert").textContent).toBe("Contract sent, offer needs reconciling");
+    expect(screen.getByTestId("recovery-supersede")).toBeTruthy();
+  });
+
+  it("failed and cancelled projections show the form again with a note (new intent)", () => {
+    const { unmount } = render(<ContractCard state={state({ projection: proj({ state: "cancelled" }) })} propertyId="p" send={vi.fn()} />);
+    expect(screen.getByTestId("contract-prior-cancelled").textContent).toBe("Contract cancelled.");
+    expect(screen.getByTestId("contract-send")).toBeTruthy();
+    unmount();
+  });
+
+  it("offers motivation only when the lead has none; it is optional and sent when supplied", async () => {
+    const send = vi.fn(async () => ({ status: "sent" as const, requestId: "r", offer: "pending" as const }));
+    const { unmount } = render(<ContractCard state={state({ motivationRecorded: true })} propertyId="p" send={send} />);
+    expect(screen.queryByTestId("contract-motivation")).toBeNull();
+    unmount();
+    render(<ContractCard state={state({ motivationRecorded: false })} propertyId="p" send={send} />);
+    fill();
+    expect(sendBtn().disabled).toBe(false);
+    fireEvent.change(screen.getByTestId("contract-motivation-kind"), { target: { value: "no_motivation" } });
+    expect(sendBtn().disabled).toBe(false);
+    fireEvent.click(sendBtn());
+    await waitFor(() => expect(send).toHaveBeenCalled());
+    expect((send.mock.calls[0] as unknown[])[0]).toMatchObject({ motivation: { kind: "no_motivation", text: null }, temperature: null });
+  });
+
+  it("sends without a motivation when none is entered", async () => {
+    const send = vi.fn(async () => ({ status: "sent" as const, requestId: "r", offer: "pending" as const }));
+    render(<ContractCard state={state({ motivationRecorded: false })} propertyId="p" send={send} />);
+    fill();
+    fireEvent.click(sendBtn());
+    await waitFor(() => expect(send).toHaveBeenCalled());
+    expect((send.mock.calls[0] as unknown[])[0]).not.toHaveProperty("motivation");
+  });
+
+  it("polls through onRefresh while the contract is being confirmed", () => {
+    vi.useFakeTimers();
+    const refresh = vi.fn();
+    render(<ContractCard state={state({ projection: proj({ state: "pending" }) })} propertyId="p" send={vi.fn()} onRefresh={refresh} />);
+    vi.advanceTimersByTime(10_500);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
   });
 });
