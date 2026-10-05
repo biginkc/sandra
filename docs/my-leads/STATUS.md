@@ -39,7 +39,7 @@ Last updated: 2026-10-04 (after #801 release)
 | `claude/my-leads-p3-offer` | #815 (draft, base `claude/my-leads-p3-send-card`) | Claude Sonnet 5.5 builder | in progress (offer projection migration/library/sweep cron, recovery actions + UI, contract-defaults settings UI, Dropbox Sign base-URL seam; AI facts NOT built) |
 | `claude/my-leads-callscreen-dial` | #818 (draft, base `main`) | Claude Sonnet 5.5 builder | in progress: call screen Call button wired to the shared My Leads dial path; deletes dial-stub.ts |
 | `claude/my-leads-p3-facts` | none yet | Claude Sonnet 5.5 builder | in progress (TECH-PLAN 3.12 call facts: migration 20261007190000, claim/complete job, flag-off cron, extractor with null prompt, chips) |
-| `claude/my-leads-stress-harness` | none yet | Claude Sonnet 5.5 builder | in progress: chaos-day stress-test tooling under `e2e/stress/` (replay engine, oracles, gates, self-test, browser specs, lane guards, live leg DISABLED). Runs only at the very end, executed by Codex. |
+| `claude/my-leads-stress-harness` | #822 (draft, base `main`) | Claude Sonnet 5.5 builder | built, pending review: chaos-day stress-test tooling under `e2e/stress/` (replay engine, oracles, gates, self-test, browser specs, lane guards, live leg DISABLED). Runs only at the very end, executed by Codex. |
 | `p1a-retire` | none | none | NOT built yet |
 | all other branches | none | unclaimed | claim here before writing |
 
