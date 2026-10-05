@@ -37,6 +37,8 @@ export interface DialpadCtiDb {
   process(eventId: string): Promise<Json>;
   recordProcessFailure(eventId: string, sqlstate: string): Promise<void>;
   listPending(limit: number): Promise<string[]>;
+  /** Marks authorized dials with no provider event for `cutoffSeconds` as failed (a marker; returns how many). */
+  failStaleIntents(cutoffSeconds: number): Promise<number>;
 }
 
 type DbError = { code?: string | null; details?: string | null; message?: string } | null;
@@ -81,6 +83,9 @@ export function createSupabaseDialpadCtiDb(client: SupabaseClient<Database>): Di
     async listPending(limit) {
       return unwrap(await client.rpc('fn_list_dialpad_call_events_for_processing', { p_limit: limit })) ?? [];
     },
+    async failStaleIntents(cutoffSeconds) {
+      return unwrap(await client.rpc('fn_fail_stale_dialpad_intents', { p_cutoff_seconds: cutoffSeconds })) ?? 0;
+    },
   };
 }
 
@@ -101,6 +106,14 @@ export async function processDialpadCallEvent(db: DialpadCtiDb, eventId: string)
     }
     throw error;
   }
+}
+
+/**
+ * D5 intent timeout: an authorized dial with no event after `cutoffSeconds` (default 2 minutes) is marked
+ * failed. The mark is audit only; it never creates or removes a touch, and a late event still projects.
+ */
+export async function failStaleDialpadIntents(db: DialpadCtiDb, cutoffSeconds = 120): Promise<number> {
+  return db.failStaleIntents(cutoffSeconds);
 }
 
 export interface DialpadEventSweepSummary {

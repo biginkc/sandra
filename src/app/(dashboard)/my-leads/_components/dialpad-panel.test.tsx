@@ -581,6 +581,19 @@ describe('DialpadPanel recording capture', () => {
     expect(screen.queryByText(/Verified seller speech/)).not.toBeInTheDocument();
   });
 
+  it('keeps polling a failed call (a late event can still project) and stops once it reports expired', async () => {
+    mocks.start.mockResolvedValue(released);
+    mocks.status.mockResolvedValue(status('failed'));
+    const { call } = await chooseAndCall({ pollMs: 5 });
+    await userEvent.click(call);
+    await waitFor(() => expect(mocks.status.mock.calls.length).toBeGreaterThan(3));
+    mocks.status.mockResolvedValue(status('expired'));
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const settled = mocks.status.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(mocks.status.mock.calls.length).toBe(settled);
+  });
+
   it('does not let a delayed reload hydration replace an owned active capture', async () => {
     let resolveRecent!: (value: unknown) => void;
     mocks.recent.mockReturnValue(new Promise((resolve) => { resolveRecent = resolve; }));

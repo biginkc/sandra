@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { formatPhoneDisplay } from '@/lib/phone-format';
 
 import { Button } from '@/components/ui/button';
-import type { DialpadCallStatus } from '@/lib/dialpad-cti/contracts';
+import { DIALPAD_ACTIVE_CALL_STATES, type DialpadCallStatus } from '@/lib/dialpad-cti/contracts';
 import type { DialpadRecordingBrowserCrossing, DialpadRecordingBrowserFinalResult } from '@/lib/dialpad-recording/contracts';
 import type { DialpadPanelBootstrap } from '@/lib/dialpad-cti/dispatch';
 import {
@@ -99,7 +99,7 @@ type ArmedRecording = {
   error?: string;
 };
 
-const ACTIVE_STATES: ReadonlySet<string> = new Set(['prepared', 'awaiting_provider', 'dialing', 'connected']);
+const ACTIVE_STATES: ReadonlySet<string> = new Set(DIALPAD_ACTIVE_CALL_STATES);
 
 const STATE_LABEL: Record<DialpadCallStatus['state'], string> = {
   prepared: 'Preparing',
@@ -109,6 +109,7 @@ const STATE_LABEL: Record<DialpadCallStatus['state'], string> = {
   ended: 'Call ended.',
   cancelled: 'Cancelled. Nothing was dialed.',
   expired: 'No confirmation from Dialpad. Check the dialer before calling again.',
+  failed: 'No confirmation from Dialpad yet. Check the dialer before calling again.',
 };
 
 function duration(seconds: number | null): string {
@@ -471,7 +472,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
     }
     const now = new Date().toISOString();
     const started: DialpadCallStatus = {
-        intentId: result.intentId, state: 'awaiting_provider', connected: false, propertyId: current.request.propertyId, expiresAt: result.expiresAt, dispatchAuthorizedAt: now,
+        intentId: result.intentId, state: 'awaiting_provider', connected: false, propertyId: current.request.propertyId, expiresAt: result.expiresAt, dispatchAuthorizedAt: now, failedAt: null,
         callActivityId: null, attemptId: null, startedAt: null, endedAt: null, durationSeconds: null, talkDurationSeconds: null, recordingCaptureId: null,
     };
     setCalls((existing) => [started, ...existing.filter((entry) => entry.intentId !== started.intentId)].slice(0, 5));
