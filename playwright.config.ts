@@ -155,6 +155,8 @@ export default defineConfig({
     "**/properties-filter-characterization.*.ts",
     // Vitest unit tests that live beside the fixtures; Playwright would load them as specs and crash.
     "**/support/**/*.test.ts",
+    // Opt-in chaos-day stress harness (e2e/stress): runs only through playwright.stress.config.ts, never the default lanes.
+    "**/stress/**",
   ],
   // Don't run in parallel — the suite resets shared DB tables. Parallel
   // specs would race each other and flake.
