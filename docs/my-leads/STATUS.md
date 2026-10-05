@@ -41,6 +41,7 @@ Last updated: 2026-10-04 (after #801 release)
 | `claude/my-leads-p3-facts` | none yet | Claude Sonnet 5.5 builder | in progress (TECH-PLAN 3.12 call facts: migration 20261007190000, claim/complete job, flag-off cron, extractor with null prompt, chips) |
 | `claude/my-leads-phone-backfill` | draft (see PR) | Claude Sonnet 5.5 builder | in progress: batched phone-backfill preview/apply (migration 20261007200000 + script paging) so it runs within the statement timeout on prod; blocks Dialpad activation |
 | `p1a-retire` | none | none | NOT built yet |
+| `claude/my-leads-pcp-second-tab` | none yet | Claude Sonnet 5.5 builder | in progress (pre-enable fix: a second tab saving the same post-call attempt under a different key duplicates the note and appointment; migration 20261008090000 makes finalize single-shot per attempt) |
 | all other branches | none | unclaimed | claim here before writing |
 
 Current heads: `gh pr view <n> --json headRefOid` (stack was rebased onto main on 2026-10-04; heads change on every cascade).
