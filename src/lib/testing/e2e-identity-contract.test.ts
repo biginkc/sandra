@@ -22,7 +22,7 @@ function executableTypescriptFilesUnder(relativeDirectory: string): string[] {
 }
 
 describe("E2E identity source contract", () => {
-  it("emits one identity before preflight and cleans it after all six invocations", () => {
+  it("emits one identity before preflight and cleans it after all seven invocations", () => {
     const workflow = source(".github/workflows/e2e.yml");
     const emit = workflow.indexOf("e2e-identity-lifecycle.ts emit");
     const preflight = workflow.indexOf("e2e-identity-lifecycle.ts preflight");
@@ -34,7 +34,7 @@ describe("E2E identity source contract", () => {
     expect(run).toBeGreaterThan(preflight);
     expect(cleanup).toBeGreaterThan(run);
     expect(workflow.match(/e2e-identity-lifecycle\.ts emit/g)).toHaveLength(1);
-    expect(workflow.match(/npm run test:e2e/g)).toHaveLength(6);
+    expect(workflow.match(/npm run test:e2e/g)).toHaveLength(7);
     expect(cleanup).toBeGreaterThan(workflow.lastIndexOf("npm run test:e2e"));
     expect(workflow).toMatch(
       /Clean up exact-run E2E identities and verify browser-QA isolation\n\s+if: always\(\)/,
