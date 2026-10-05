@@ -81,6 +81,7 @@ const CHAIN = [
   { key: 'contractDefaults', file: '20261007160000_acquisition_contract_defaults', present: "to_regclass('public.acquisition_contract_settings') is not null" },
   { key: 'offerProjections', file: '20261007170000_acquisition_offer_projections', present: "to_regclass('public.acquisition_offer_projections') is not null" },
   { key: 'callFacts', file: '20261007190000_call_facts', present: "to_regclass('public.lead_call_facts') is not null" },
+  { key: 'phoneBatched', file: '20261007200000_contact_phone_numbers_batched_backfill', present: proc('fn_contact_phone_numbers_backfill_range') },
 ] as const;
 
 export type ChainKey = (typeof CHAIN)[number]['key'];
