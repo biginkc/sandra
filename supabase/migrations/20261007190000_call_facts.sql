@@ -6,6 +6,7 @@
 -- Creates:
 --   public.lead_call_facts          one row per call activity; `status` is the human-facing state,
 --                                   `processing_state` the durable job state (claimed|done|failed)
+--   public.fn_call_known_names      service_role; every person-name string known for a call (single source)
 --   public.fn_claim_call_facts      service_role; claim/lease/reclaim, input from call_transcripts
 --   public.fn_complete_call_facts   service_role; ONE transaction: deterministic summary note + facts + done
 --   public.fn_accept_call_fact      authenticated; records accepted[field] and appends a lead note
@@ -52,6 +53,78 @@ grant select (
   facts, accepted, model, extracted_at, updated_at, processing_state
 ) on public.lead_call_facts to authenticated;
 grant select, insert, update on public.lead_call_facts to service_role;
+
+-- ----------------------------------------------------------------------------
+-- fn_call_known_names (service_role): EVERY person-name string Sandra knows for one call.
+-- kind is 'lead' or 'rep'. Every source is unioned; none is chosen by trust (a name the
+-- person may speak is a name to mask, wherever it is stored). A new name-bearing column must
+-- be read here or classified not_a_person in the drift-guard test (call_facts integration test).
+-- ----------------------------------------------------------------------------
+create or replace function public.fn_call_known_names(p_org_id uuid, p_call_activity_id uuid)
+returns table (kind text, name text)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  with ca as (
+    select id, org_id, property_id, contact_id, operator_user_id, provider_call_id
+      from public.call_activities where id = p_call_activity_id and org_id = p_org_id
+  ),
+  -- Any member of the org (any access status, suspended or former) plus the call's operator.
+  people as (
+    select m.user_id from public.memberships m where m.org_id = p_org_id and exists (select 1 from ca)
+    union
+    select operator_user_id from ca where operator_user_id is not null
+  ),
+  rep_raw as (
+    -- Authoritative names (app_metadata, the user cannot edit) and user-edited ones: ALL keys, never coalesced.
+    select v.value as n from people x join auth.users u on u.id = x.user_id,
+      lateral jsonb_each_text(coalesce(u.raw_app_meta_data, '{}'::jsonb)) v
+     where v.key in ('display_name', 'full_name', 'name', 'given_name', 'family_name', 'first_name', 'last_name', 'preferred_username')
+    union all
+    select v.value from people x join auth.users u on u.id = x.user_id,
+      lateral jsonb_each_text(coalesce(u.raw_user_meta_data, '{}'::jsonb)) v
+     where v.key in ('display_name', 'full_name', 'name', 'given_name', 'family_name', 'first_name', 'last_name', 'preferred_username')
+    union all
+    -- Provider profile names (OAuth, custom:hugo).
+    select v.value from people x join auth.identities i on i.user_id = x.user_id,
+      lateral jsonb_each_text(coalesce(i.identity_data, '{}'::jsonb)) v
+     where v.key in ('name', 'full_name', 'given_name', 'family_name', 'first_name', 'last_name', 'preferred_username')
+    union all
+    select split_part(u.email, '@', 1) from people x join auth.users u on u.id = x.user_id
+    union all
+    -- The rep as Dialpad names them: the exact string its transcript uses.
+    select e.payload -> 'target' ->> 'name'
+      from ca join public.dialpad_call_events e on e.org_id = ca.org_id and e.provider_call_id = ca.provider_call_id
+  ),
+  lead_contacts as (
+    select p.homeowner_contact_id as cid from ca join public.properties p on p.id = ca.property_id and p.org_id = ca.org_id
+    union select p.agent_contact_id from ca join public.properties p on p.id = ca.property_id and p.org_id = ca.org_id
+    union select pc.contact_id from ca join public.property_contacts pc on pc.property_id = ca.property_id and pc.org_id = ca.org_id
+    union select contact_id from ca
+  ),
+  lead_raw as (
+    select unnest(array[c.first_name, c.last_name, c.entity_name, split_part(c.email, '@', 1),
+                        nullif(concat_ws(' ', c.first_name, c.last_name), '')]) as n
+      from lead_contacts lc join public.contacts c on c.id = lc.cid and c.org_id = p_org_id
+    union all
+    -- The other party as Dialpad names them.
+    select e.payload -> 'contact' ->> 'name'
+      from ca join public.dialpad_call_events e on e.org_id = ca.org_id and e.provider_call_id = ca.provider_call_id
+    union all
+    select s.signer_name
+      from ca join public.esign_requests r on r.property_id = ca.property_id and r.org_id = ca.org_id
+      join public.esign_request_signers s on s.request_id = r.id and s.org_id = r.org_id
+    union all
+    select l.owner_of_record from ca join public.lead_comps l on l.property_id = ca.property_id and l.org_id = ca.org_id
+  )
+  select distinct 'rep'::text, btrim(n) from rep_raw where nullif(btrim(n), '') is not null
+  union
+  select distinct 'lead'::text, btrim(n) from lead_raw where nullif(btrim(n), '') is not null;
+$$;
+revoke all on function public.fn_call_known_names(uuid, uuid) from public, anon, authenticated;
+grant execute on function public.fn_call_known_names(uuid, uuid) to service_role;
 
 -- ----------------------------------------------------------------------------
 -- fn_claim_call_facts (service_role)
@@ -135,32 +208,22 @@ begin
            'property_id', c.property_id,
            'summary', t.summary,
            'transcript', t.text,
-           -- Known identifiers of the lead, so the caller can mask them before any text leaves Sandra.
-           'contact_names', to_jsonb(array_remove(array[ct.first_name, ct.last_name, ct.entity_name], null)),
+           -- Every person-name string Sandra knows for this call (single source: fn_call_known_names), so the
+           -- caller can mask them before any text leaves Sandra.
+           'contact_names', (select coalesce(jsonb_agg(k.name), '[]'::jsonb) from public.fn_call_known_names(c.org_id, c.call_activity_id) k where k.kind = 'lead'),
+           'rep_names', (select coalesce(jsonb_agg(k.name), '[]'::jsonb) from public.fn_call_known_names(c.org_id, c.call_activity_id) k where k.kind = 'rep'),
            'property_address', pr.address,
            'property_city', pr.city,
            'property_zip', pr.zip,
-           -- Display names of the org's members (reps), so spoken names are masked before any text leaves Sandra.
-           'rep_names', (
-             select coalesce(jsonb_agg(distinct x.n), '[]'::jsonb) from (
-               select nullif(btrim(coalesce(u.raw_user_meta_data ->> 'full_name', u.raw_user_meta_data ->> 'name', '')), '') as n
-                 from public.memberships m join auth.users u on u.id = m.user_id
-                where m.org_id = c.org_id and m.access_status = 'active' and m.deletion_prepared_at is null
-               union
-               select nullif(btrim(split_part(u.email, '@', 1)), '')
-                 from public.memberships m join auth.users u on u.id = m.user_id
-                where m.org_id = c.org_id and m.access_status = 'active' and m.deletion_prepared_at is null
-             ) x where x.n is not null),
            -- Relative dates ("tomorrow") are resolved against the CALL, not against when the sweep runs.
            'ended_at', (select coalesce(ca.ended_at, ca.started_at) from public.call_activities ca where ca.id = c.call_activity_id))), '[]'::jsonb)
     into v_claims
     from claimed c
     join public.properties pr on pr.id = c.property_id and pr.org_id = c.org_id
-    left join public.contacts ct on ct.id = pr.homeowner_contact_id and ct.org_id = pr.org_id
     left join lateral (
-      select ct.summary, ct.text from public.call_transcripts ct
-       where ct.call_activity_id = c.call_activity_id
-       order by (ct.status = 'available') desc, ct.updated_at desc, ct.id
+      select tr.summary, tr.text from public.call_transcripts tr
+       where tr.call_activity_id = c.call_activity_id
+       order by (tr.status = 'available') desc, tr.updated_at desc, tr.id
        limit 1
     ) t on true;
 

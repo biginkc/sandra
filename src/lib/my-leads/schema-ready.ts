@@ -128,6 +128,7 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
   call_facts: {
     functions: [
       "public.fn_claim_call_facts(integer,integer,integer)",
+      "public.fn_call_known_names(uuid,uuid)",
       "public.fn_complete_call_facts(uuid,uuid,jsonb,text,text)",
       "public.fn_accept_call_fact(uuid,uuid,text,text)",
       "public.fn_dismiss_call_facts(uuid,uuid)",

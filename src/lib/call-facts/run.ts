@@ -1,7 +1,6 @@
 import { reportError } from "@/lib/errors/report";
 
-import { redactFactsInput } from "./redact";
-import { prepareFactsInput } from "./prepare";
+import { finalizeRedacted, maskFactsInput, type RedactionContext } from "./redact";
 import type { FactsExtractor } from "./jev-facts";
 import { validateFacts } from "./validate";
 import type { ValidFacts } from "./types";
@@ -32,6 +31,8 @@ export type FactsJobDeps = {
   complete(args: { factId: string; claimToken: string; facts: ValidFacts; status: "proposed" | "no_facts"; model: string | null }): Promise<void>;
   /** Null: summary note only. */
   extractor: FactsExtractor | null;
+  /** Test seam only: replaces the masking pass. The leak scan (finalizeRedacted) always runs after it. */
+  maskText?: typeof maskFactsInput;
   now?: () => Date;
   report?: typeof reportError;
 };
@@ -59,16 +60,13 @@ export async function runCallFactsSweep(limit: number, deps: FactsJobDeps): Prom
       let facts: ValidFacts = {};
       let model: string | null = null;
       // Redact first: the model only ever sees this text, and evidence is validated against it.
-      const input = prepareFactsInput(
-        redactFactsInput(
-          { summary: claim.summary, transcript: claim.transcript },
-          {
-            contactNames: claim.contact_names ?? [],
-            repNames: claim.rep_names ?? [],
-            propertyAddress: { address: claim.property_address, city: claim.property_city, zip: claim.property_zip },
-          },
-        ),
-      );
+      const ctx: RedactionContext = {
+        contactNames: claim.contact_names ?? [],
+        repNames: claim.rep_names ?? [],
+        propertyAddress: { address: claim.property_address, city: claim.property_city, zip: claim.property_zip },
+      };
+      // A RedactionLeakError here fails this claim before anything is sent: the lease expires and it is retried.
+      const input = finalizeRedacted((deps.maskText ?? maskFactsInput)({ summary: claim.summary, transcript: claim.transcript }, ctx), ctx);
       if (deps.extractor && (input.summary || input.transcript)) {
         const at = now();
         const extraction = await deps.extractor(input, { now: at, callAt: claim.ended_at ? new Date(claim.ended_at) : null });

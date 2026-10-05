@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { FACT_SLOTS } from "./catalog";
 import { createFactsExtractorFromEnv, createJevFactsExtractor, lineQuestionText, MAX_SCORED_TURNS, NONE, type JevAsk } from "./jev-facts";
 import type { FactQuestionSlot } from "./questions";
+import { redactFactsInput } from "./redact";
 import { validateFacts } from "./validate";
 
 const slotById = (id: string, field?: string) => FACT_SLOTS.find((s) => s.id === id && (!field || s.field === field))!;
@@ -15,7 +16,8 @@ const numbersAndPains: FactQuestionSlot[] = [
   slotById("behind_on_payments", "pain_behind_on_payments"),
   slotById("divorce"),
 ];
-const input = {
+const red = (i: { summary: string | null; transcript: string | null }) => redactFactsInput(i, { contactNames: [] });
+const input = red({
   summary: null,
   transcript: [
     "Rep: what do you want for it?",
@@ -24,7 +26,7 @@ const input = {
     "Rep: I can call you Friday",
     "Other party: ok, I need to be out by spring, my divorce is final then",
   ].join("\n"),
-};
+});
 const NOW = new Date("2026-10-07T15:00:00Z");
 const choices = (answers: Record<string, string>) => vi.fn<JevAsk>(async () => Object.fromEntries(Object.entries(answers).map(([k, v]) => [k, { choice: v }])));
 
@@ -77,7 +79,7 @@ describe("choice questions: turn labels and candidate values", () => {
 
   it("asks no amount question when the transcript has no amount, and makes no call when nothing is askable", async () => {
     const a = choices({});
-    const out = await createJevFactsExtractor(a, { questions: [slotById("asking_price")] })({ summary: null, transcript: "A: hello" }, { now: NOW });
+    const out = await createJevFactsExtractor(a, { questions: [slotById("asking_price")] })(red({ summary: null, transcript: "A: hello" }), { now: NOW });
     expect(out).toEqual({ facts: {}, model: null });
     expect(a).not.toHaveBeenCalled();
   });
@@ -91,7 +93,7 @@ describe("choice questions: turn labels and candidate values", () => {
 describe("relative dates are anchored to the call, not the sweep clock", () => {
   const next = async (transcript: string, callAt: Date, now: Date) => {
     const a = choices({ next_step: "T001|tomorrow" });
-    const out = await createJevFactsExtractor(a, { questions: [slotById("next_step_with_date")] })({ summary: null, transcript }, { now, callAt });
+    const out = await createJevFactsExtractor(a, { questions: [slotById("next_step_with_date")] })(red({ summary: null, transcript }), { now, callAt });
     return { out, valid: validateFacts(out.facts, { summary: null, transcript }, now) };
   };
   it("a two-month-old call saying tomorrow yields no next_step (the resolved day is long past)", async () => {
@@ -111,7 +113,7 @@ describe("relative dates are anchored to the call, not the sweep clock", () => {
   it("without a call time it falls back to the sweep clock", async () => {
     const now = new Date("2026-10-07T15:00:00Z");
     const a = choices({ next_step: "T001|tomorrow" });
-    const out = await createJevFactsExtractor(a, { questions: [slotById("next_step_with_date")] })({ summary: null, transcript: "Other party: tomorrow" }, { now });
+    const out = await createJevFactsExtractor(a, { questions: [slotById("next_step_with_date")] })(red({ summary: null, transcript: "Other party: tomorrow" }), { now });
     expect(out.facts.next_step?.resolved).toBe("2026-10-08");
   });
 });
@@ -164,7 +166,7 @@ describe("Closer Lab yes/no set: per seller turn, approved framing, approved thr
   it("scores every turn when no seller speaker can be identified, and caps the scored turns", async () => {
     const a = scored({});
     const lines = Array.from({ length: MAX_SCORED_TURNS + 10 }, (_, i) => `Speaker A: line ${i}`).join("\n");
-    await createJevFactsExtractor(a, { questions: [motivation] })({ summary: null, transcript: lines }, { now: NOW });
+    await createJevFactsExtractor(a, { questions: [motivation] })(red({ summary: null, transcript: lines }), { now: NOW });
     expect(a).toHaveBeenCalledTimes(MAX_SCORED_TURNS);
   });
 

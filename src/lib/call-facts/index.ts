@@ -4,8 +4,7 @@ export { createJevFactsExtractor, createFactsExtractorFromEnv, NONE } from "./je
 export type { FactsExtractor, FactsExtraction, JevAsk } from "./jev-facts";
 export { FACT_QUESTIONS, activeQuestions } from "./questions";
 export type { FactQuestionSlot } from "./questions";
-export { prepareFactsInput } from "./prepare";
-export { redactFactsInput } from "./redact";
-export type { RedactionContext } from "./redact";
+export { redactFactsInput, maskFactsInput, finalizeRedacted, assertNoKnownNames, RedactionLeakError } from "./redact";
+export type { RedactionContext, RedactedFactsInput } from "./redact";
 export { runCallFactsSweep } from "./run";
 export type { ClaimedCall, ClaimResult, FactsJobDeps, FactsJobResult } from "./run";

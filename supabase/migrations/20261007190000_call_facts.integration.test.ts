@@ -393,7 +393,7 @@ describe('20261007190000_call_facts', () => {
       const a = await call(w);
       await ready(w, a);
       const c = (await claim(w)).claims[0];
-      expect(c.contact_names).toEqual(['Sally', 'Seller']);
+      expect(c.contact_names).toEqual(expect.arrayContaining(['Sally', 'Seller', 'Sally Seller']));
       expect(c.property_address).toBe('1 Native Way');
       expect(c.property_city).toBe('Kansas City');
       // Names of the org's members, for masking spoken rep names.
@@ -442,6 +442,222 @@ describe('20261007190000_call_facts', () => {
       const e4 = await failure(db, () => asUser(db, a.rep, () => db.query("update public.lead_call_facts set status='dismissed'")));
       expect((e4 as { code?: string }).code).toBe('42501');
       expect((await factRow(a, id)).status).toBe('proposed');
+    });
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // fn_call_known_names: one source for every known name (acceptance matrix S rows) + the drift guard.
+  // ---------------------------------------------------------------------------------------------
+  const known = async (w: World, activity: string) =>
+    (await service(w.db, () => w.db.query('select kind, name from public.fn_call_known_names($1,$2)', [w.org, activity]))).rows as { kind: string; name: string }[];
+  const names = (rows: { kind: string; name: string }[], kind: string) => rows.filter((r) => r.kind === kind).map((r) => r.name);
+  const setUser = (w: World, user: string, app: Json, meta: Json, email?: string) =>
+    w.db.query(`update auth.users set raw_app_meta_data = coalesce(raw_app_meta_data,'{}'::jsonb) || $2::jsonb, raw_user_meta_data = $3::jsonb, email = coalesce($4, email) where id = $1`,
+      [user, JSON.stringify(app), JSON.stringify(meta), email ?? null]);
+  const newContact = async (w: World, first: string, last: string | null, entity: string | null = null, email: string | null = null) => {
+    const id = randomUUID();
+    await w.db.query('insert into public.contacts (id, org_id, first_name, last_name, entity_name, email) values ($1,$2,$3,$4,$5,$6)', [id, w.org, first, last, entity, email]);
+    return id;
+  };
+
+  it('matrix row 1 (S): a rep with ONLY app_metadata.display_name is returned', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const a = await call(w);
+      await setUser(w, w.rep, { display_name: 'Rick Rep' }, {}, 'ops7@x.example');
+      expect(names(await known(w, a.id), 'rep')).toEqual(expect.arrayContaining(['Rick Rep', 'ops7']));
+    });
+  });
+
+  it('matrix row 2 (S): a rep with ONLY user_metadata.display_name (not full_name/name) is returned', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const a = await call(w);
+      await setUser(w, w.rep2, {}, { display_name: 'Dana Q' });
+      expect(names(await known(w, a.id), 'rep')).toContain('Dana Q');
+    });
+  });
+
+  it('matrix row 3 (S): differing app and user names are BOTH returned (no coalesce), with every metadata key', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const a = await call(w);
+      await setUser(w, w.owner, { display_name: 'Richard Roe', given_name: 'Dick' }, { name: 'Rich', full_name: 'R. Roe', first_name: 'Ricardo', last_name: 'Roe', family_name: 'Rowe', preferred_username: 'rroe' });
+      expect(names(await known(w, a.id), 'rep')).toEqual(expect.arrayContaining(['Richard Roe', 'Dick', 'Rich', 'R. Roe', 'Ricardo', 'Roe', 'Rowe', 'rroe']));
+    });
+  });
+
+  it('matrix row 4 (S): a rep with only an email gives its local part', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const a = await call(w);
+      await setUser(w, w.rep, {}, {}, 'tom.baker@bmh.example');
+      expect(names(await known(w, a.id), 'rep')).toContain('tom.baker');
+    });
+  });
+
+  it('matrix row 5 (S): a rep known only from an identity (custom:hugo) name is returned', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const a = await call(w);
+      await db.query(`insert into auth.identities (user_id, identity_data, provider_id, provider) values ($1, '{"name":"Hugo Lane","given_name":"Hugo"}'::jsonb, $2, 'custom:hugo')`, [w.rep, randomUUID()]);
+      expect(names(await known(w, a.id), 'rep')).toEqual(expect.arrayContaining(['Hugo Lane', 'Hugo']));
+    });
+  });
+
+  it('matrix row 6 (S): a suspended member and a former member who was the call operator are returned', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const a = await call(w);
+      const sam = randomUUID();
+      await db.query('insert into auth.users(id) values ($1)', [sam]);
+      await setUser(w, sam, { display_name: 'Sam Old' }, {});
+      await service(db, () => db.query("insert into public.memberships(user_id,org_id,role,access_status) values ($1,$2,'member','suspended')", [sam, w.org]));
+      const former = randomUUID(); // no membership at all, but the call's operator
+      await db.query('insert into auth.users(id) values ($1)', [former]);
+      await setUser(w, former, {}, { name: 'Fran Former' });
+      await db.query('update public.call_activities set operator_user_id = $2 where id = $1', [a.id, former]);
+      expect(names(await known(w, a.id), 'rep')).toEqual(expect.arrayContaining(['Sam Old', 'Fran Former']));
+    });
+  });
+
+  it("matrix row 7 (S): Dialpad's names for the rep (target.name) and the other party (contact.name) are returned", async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const a = await call(w);
+      await db.query('set local session_replication_role = replica'); // the event payload is immutable outside redaction
+      await db.query(`update public.dialpad_call_events set payload = payload || jsonb_build_object('target', coalesce(payload -> 'target', '{}'::jsonb) || '{"name":"Ricky R"}'::jsonb,
+        'contact', coalesce(payload -> 'contact', '{}'::jsonb) || '{"name":"Sal Seller"}'::jsonb) where org_id = $1`, [w.org]);
+      await db.query('set local session_replication_role = origin');
+      const rows = await known(w, a.id);
+      expect(names(rows, 'rep')).toContain('Ricky R');
+      expect(names(rows, 'lead')).toContain('Sal Seller');
+    });
+  });
+
+  it('matrix row 8 (S): a co-owner via property_contacts, the agent contact and contact emails are returned', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const a = await call(w);
+      const maria = await newContact(w, 'Maria', 'Gomez', null, 'maria.g@example.test');
+      await db.query("insert into public.property_contacts(property_id, contact_id, org_id, source_position, source_identity) values ($1,$2,$3,1,'test')", [w.property, maria, w.org]);
+      const agent = await newContact(w, 'Agent', 'Smith');
+      await db.query('update public.properties set agent_contact_id = $2 where id = $1', [w.property, agent]);
+      const lead = names(await known(w, a.id), 'lead');
+      expect(lead).toEqual(expect.arrayContaining(['Maria Gomez', 'Maria', 'Gomez', 'maria.g', 'Agent Smith', 'Sally', 'Seller']));
+    });
+  });
+
+  it('matrix row 9 (S): the dialed contact (call_activities.contact_id) differs from the homeowner and is returned', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const a = await call(w);
+      const heir = await newContact(w, 'Tom', 'Heir', 'Heir Holdings LLC');
+      await db.query('update public.call_activities set contact_id = $2 where id = $1', [a.id, heir]);
+      expect(names(await known(w, a.id), 'lead')).toEqual(expect.arrayContaining(['Tom Heir', 'Heir Holdings LLC']));
+    });
+  });
+
+  it('eSign signers and lead_comps.owner_of_record for the property are returned (and only for this property)', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const a = await call(w);
+      await db.query('set local session_replication_role = replica');
+      const req = randomUUID();
+      await db.query(`insert into public.esign_requests (id, org_id, property_id, template_id, send_intent_id, created_by, payload_hash, signer_snapshot) values ($1,$2,$3,$4,$5,$6,repeat('a',64),'[]'::jsonb)`,
+        [req, w.org, w.property, randomUUID(), randomUUID(), w.owner]);
+      await db.query(`insert into public.esign_request_signers (org_id, request_id, signer_order, role_name, signer_name, signer_email) values ($1,$2,1,'Seller','Sig Natory','sig@example.test')`, [w.org, req]);
+      const other = randomUUID();
+      await db.query(`insert into public.esign_requests (id, org_id, property_id, template_id, send_intent_id, created_by, payload_hash, signer_snapshot) values ($1,$2,$3,$4,$5,$6,repeat('b',64),'[]'::jsonb)`,
+        [other, w.org, randomUUID(), randomUUID(), randomUUID(), w.owner]);
+      await db.query(`insert into public.esign_request_signers (org_id, request_id, signer_order, role_name, signer_name, signer_email) values ($1,$2,1,'Seller','Not This Property','x@example.test')`, [w.org, other]);
+      await db.query(`insert into public.lead_comps (org_id, property_id, provider, owner_of_record) values ($1,$2,'fixture','Olive Owner')`, [w.org, w.property]);
+      await db.query('set local session_replication_role = origin');
+      const lead = names(await known(w, a.id), 'lead');
+      expect(lead).toEqual(expect.arrayContaining(['Sig Natory', 'Olive Owner']));
+      expect(lead).not.toContain('Not This Property');
+    });
+  });
+
+  it('is scoped to the org and call: another org\'s members and contacts are never returned', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const other = await world(db, { flag: true });
+      const a = await call(w);
+      await setUser(other, other.rep, { display_name: 'Outsider Person' }, {});
+      expect(names(await known(w, a.id), 'rep')).not.toContain('Outsider Person');
+      expect(await known(other, a.id)).toEqual([]); // wrong org for this call
+      const denied = await failure(db, () => asUser(db, w.rep, () => db.query('select * from public.fn_call_known_names($1,$2)', [w.org, a.id])));
+      expect((denied as { code?: string }).code).toBe('42501');
+    });
+  });
+
+  it('the claim returns the single-sourced lists (contact_names = lead, rep_names = rep)', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const a = await call(w);
+      await ready(w, a);
+      await setUser(w, w.rep, { display_name: 'Rick Rep' }, {});
+      const c = (await claim(w)).claims[0];
+      expect(c.rep_names).toContain('Rick Rep');
+      expect(c.contact_names).toEqual(expect.arrayContaining(['Sally']));
+      expect(c.contact_names).not.toContain('Rick Rep');
+    });
+  });
+
+  // Matrix row 19: a new name-bearing column fails CI until someone classifies it.
+  // Every public/auth column called *name (and owner_of_record) must be tagged below. "covered" columns are
+  // read by fn_call_known_names (or its JSON keys); "not_a_person" ones carry the reason they are not names
+  // spoken on a lead call.
+  const NAME_COLUMNS: Record<string, string> = {
+    'public.contacts.first_name': 'covered_by_fn_call_known_names',
+    'public.contacts.last_name': 'covered_by_fn_call_known_names',
+    'public.contacts.entity_name': 'covered_by_fn_call_known_names',
+    'public.esign_request_signers.signer_name': 'covered_by_fn_call_known_names',
+    'public.lead_comps.owner_of_record': 'covered_by_fn_call_known_names',
+    'auth.custom_oauth_providers.name': 'not_a_person (auth provider label)',
+    'auth.mfa_factors.friendly_name': 'not_a_person (device label)',
+    'auth.oauth_clients.client_name': 'not_a_person (app label)',
+    'auth.webauthn_credentials.friendly_name': 'not_a_person (device label)',
+    'public.acquisition_contract_buyer_entities.name': 'not_a_person (our own buying entity, never a call party)',
+    'public.acquisition_contract_title_companies.closing_agent_name': 'not_a_person (title company setup data, never a call party)',
+    'public.acquisition_contract_title_companies.name': 'not_a_person (company)',
+    'public.campaign_delivery_settings.provider_campaign_name': 'not_a_person (campaign label)',
+    'public.campaigns.name': 'not_a_person (campaign label)',
+    'public.campaigns.provider_campaign_name': 'not_a_person (campaign label)',
+    'public.counties.name': 'not_a_person (county)',
+    'public.csv_import_job_provenance.list_name': 'not_a_person (list label)',
+    'public.esign_request_signers.role_name': 'not_a_person (signer role)',
+    'public.esign_templates.name': 'not_a_person (template title)',
+    'public.fips_codes.county_name': 'not_a_person (county)',
+    'public.institute_course_outcomes.learner_name': 'not_a_person (Closer Lab course learner, not a call party)',
+    'public.lead_files.file_name': 'not_a_person (file name)',
+    'public.lists.name': 'not_a_person (list label)',
+    'public.my_leads_housekeeping_before_images.table_name': 'not_a_person (table name)',
+    'public.organizations.name': 'not_a_person (our own company)',
+    'public.provider_campaigns.name': 'not_a_person (campaign label)',
+    'public.saved_filters.name': 'not_a_person (filter label)',
+    'public.sequences.name': 'not_a_person (sequence label)',
+    'public.slack_installations.team_name': 'not_a_person (Slack workspace)',
+    'public.sms_templates.name': 'not_a_person (template title)',
+    'public.tags.name': 'not_a_person (tag label)',
+    'public.webhook_consumers.name': 'not_a_person (consumer label)',
+  };
+  it('matrix row 19 (S): every name-like column is classified; an unclassified one fails (drift guard)', async () => {
+    await withFacts(async (db) => {
+      const find = async () =>
+        (await db.query(`select table_schema || '.' || table_name || '.' || column_name as c
+            from information_schema.columns col
+           where table_schema in ('public','auth') and (column_name ~ '(^|_)name$' or column_name = 'owner_of_record')
+             and not exists (select 1 from information_schema.views v where v.table_schema = col.table_schema and v.table_name = col.table_name)
+           order by 1`)).rows.map((r) => r.c as string);
+      const found = await find();
+      const unclassified = found.filter((c) => !(c in NAME_COLUMNS));
+      expect(unclassified, `classify these in NAME_COLUMNS (covered_by_fn_call_known_names, or not_a_person with a reason), and read covered ones in fn_call_known_names`).toEqual([]);
+      expect(Object.keys(NAME_COLUMNS).filter((c) => !found.includes(c)), 'stale entries').toEqual([]);
+      // The guard trips: a fixture column that is not classified is reported.
+      await db.query('alter table public.tags add column foo_display_name text');
+      expect((await find()).filter((c) => !(c in NAME_COLUMNS))).toEqual(['public.tags.foo_display_name']);
     });
   });
 

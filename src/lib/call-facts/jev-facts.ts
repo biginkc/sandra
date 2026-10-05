@@ -5,7 +5,8 @@ import { findAmountCandidates, findDateCandidates, MAX_OPTIONS, parseTurns, turn
 import { FACTS_REQUEST_RETRIES, FACTS_REQUEST_TIMEOUT_MS, MAX_SCORED_TURNS, SCORING_CONCURRENCY } from "./budget";
 import { CLOSER_LAB_FRAMING } from "./catalog";
 import { activeQuestions, FACT_QUESTIONS, type FactQuestionSlot } from "./questions";
-import type { FactsInput, RawFacts } from "./types";
+import type { RedactedFactsInput } from "./redact";
+import type { RawFacts } from "./types";
 
 /**
  * Fact extraction on Jev (TypeSafe System One), reusing Sandra's one Jev client (askJev) and its
@@ -29,7 +30,7 @@ export type JevAnswer = { choice?: unknown; noul?: unknown };
 export type JevAsk = (request: JevAskRequest) => Promise<Record<string, JevAnswer | undefined>>;
 export type FactsExtraction = { facts: RawFacts; model: string | null };
 /** `now` is the validation clock; `callAt` (the call's end) anchors relative dates such as "tomorrow". */
-export type FactsExtractor = (input: FactsInput, ctx: { now: Date; callAt?: Date | null }) => Promise<FactsExtraction>;
+export type FactsExtractor = (input: RedactedFactsInput, ctx: { now: Date; callAt?: Date | null }) => Promise<FactsExtraction>;
 
 const options = (labels: string[]): Record<string, null> => ({ ...Object.fromEntries(labels.map((l) => [l, null])), [NONE]: null });
 const probability = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1 ? v : null);
