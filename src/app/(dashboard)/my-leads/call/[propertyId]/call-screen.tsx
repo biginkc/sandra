@@ -2,10 +2,11 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { loadMyLeadQueueRow, savePostCallExtras } from "@/app/(dashboard)/my-leads/actions";
+import { loadMyLeadQueueRow } from "@/app/(dashboard)/my-leads/actions";
 import { PostCallPrompt } from "@/app/(dashboard)/my-leads/_components/post-call-prompt";
+import { saveExtrasRequest, type ExtrasRequest } from "@/app/(dashboard)/my-leads/_components/extras-saver";
 import type { PostCallExtrasState } from "@/app/(dashboard)/my-leads/_components/types";
 import { useAttemptWorkflow, type AttemptOpening } from "@/app/(dashboard)/my-leads/_components/use-attempt-workflow";
 import { WorkflowRecoveryContext } from "@/app/(dashboard)/my-leads/_components/workflow-form";
@@ -63,9 +64,32 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
   // refresh (e.g. after a valuation save) hands back a new queueRow object at the same version; that
   // must not mint a new opening and a second attempt key. The row is read at the version's first render.
   const queueVersion = queueRow.queueVersion;
+  const openingKey = `${propertyId}:${queueVersion}`;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const opening = useMemo<AttemptOpening>(() => ({ action: "log-attempt", row: queueRow }), [propertyId, queueVersion]);
   const [extrasState, setExtrasState] = useState<PostCallExtrasState | null>(null);
+  const extrasRequest = useRef<ExtrasRequest | null>(null);
+  const extrasInFlight = useRef(new Set<string>());
+  const openingRef = useRef(opening);
+  useEffect(() => {
+    openingRef.current = opening;
+  });
+
+  // The shared P1c saver (also behind the My Leads page): idempotent per extra, and the stored
+  // entry is cleared only after the server confirms both. `show` is false for a replay that belongs
+  // to an earlier opening, which must not take over the current prompt's status line.
+  const runExtras = async (request: ExtrasRequest, show: boolean) => {
+    const result = await saveExtrasRequest(request, viewer.userId, extrasInFlight.current, () => {
+      if (show) {
+        extrasRequest.current = request;
+        setExtrasState({ status: "saving" });
+      }
+    });
+    if (!result) return;
+    if (show && extrasRequest.current === request) setExtrasState({ status: "done", result });
+    if (result.ok) router.refresh();
+  };
+
   const { submit, recoveryValue, onDripChanged } = useAttemptWorkflow<AttemptOpening>({
     opening,
     memberId: viewer.userId,
@@ -77,21 +101,19 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
     },
     onCommitted: async (committed) => {
       if (committed.extras) {
-        setExtrasState({ status: "saving" });
-        try {
-          const result = await savePostCallExtras({
-            memberId: viewer.userId,
-            propertyId,
-            submissionId: committed.extras.submissionId,
-            note: committed.extras.note,
-            nextStep: committed.extras.nextStep,
-          });
-          setExtrasState({ status: "done", result });
-        } catch {
-          setExtrasState({ status: "done", result: { ok: false, message: "The note and next step could not be saved." } });
-        }
+        void runExtras(
+          { attemptKey: committed.attemptKey, memberId: viewer.userId, propertyId, extras: committed.extras },
+          true,
+        );
       }
       router.refresh();
+    },
+    // Recovery paths (late success, already saved, reconciliation): the note must still be written.
+    onExtras: (flush) => {
+      void runExtras(
+        { attemptKey: flush.attemptKey, memberId: flush.memberId, propertyId: flush.propertyId, extras: flush.extras },
+        flush.opening === openingRef.current,
+      );
     },
     onSettled: () => undefined,
     onClose: () => router.refresh(),
@@ -119,6 +141,10 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
   const prompt = (
     <WorkflowRecoveryContext.Provider value={recoveryValue}>
       <PostCallPrompt
+        // A new opening (a refresh at a new queue version) starts a fresh prompt, so a second call
+        // on the same lead is not stuck on "Attempt recorded". The same opening never remounts, so
+        // it cannot mint a second attempt key.
+        key={openingKey}
         variant="dock"
         open
         propertyId={propertyId}
@@ -130,6 +156,10 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
         viewerLabel={viewerLabel}
         nextStepAt={queueRow.nextStepAt}
         extras={extrasState}
+        onRetryExtras={() => {
+          const request = extrasRequest.current;
+          if (request) void runExtras(request, true);
+        }}
       />
     </WorkflowRecoveryContext.Provider>
   );
