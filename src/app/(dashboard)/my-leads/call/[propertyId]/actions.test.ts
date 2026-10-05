@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   getMyLeadsFlag: vi.fn(),
   schemaReady: vi.fn(),
   rpc: vi.fn(),
+  compLead: vi.fn(),
+  maybeSingle: vi.fn(),
   reportError: vi.fn(),
 }));
 
@@ -17,9 +19,9 @@ vi.mock("@/lib/my-leads/queries", () => ({
 vi.mock("@/lib/my-leads/flags", () => ({ getMyLeadsFlag: mocks.getMyLeadsFlag }));
 vi.mock("@/lib/my-leads/schema-ready", () => ({ schemaReady: mocks.schemaReady }));
 vi.mock("@/lib/errors/report", () => ({ reportError: mocks.reportError }));
-vi.mock("@/lib/comps", () => ({ compLead: vi.fn() }));
+vi.mock("@/lib/comps", () => ({ compLead: mocks.compLead }));
 
-import { setValuationInputsAction } from "./actions";
+import { compLeadAction, setValuationInputsAction } from "./actions";
 
 const propertyId = "11111111-1111-4111-8111-111111111111";
 const input = { propertyId, arv: 250000, rehab: 40000 };
@@ -51,6 +53,43 @@ describe("setValuationInputsAction", () => {
   it("refuses without calling the RPC when the lead is not in the caller's queue", async () => {
     mocks.getMyLeadsQueueRow.mockResolvedValue({ status: "unavailable", reason: "other_rep" });
     expect(await setValuationInputsAction(input)).toEqual({ ok: false, message: "That lead could not be found." });
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+});
+
+describe("compLeadAction", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const from = vi.fn(() => ({ select: () => ({ eq: () => ({ maybeSingle: mocks.maybeSingle }) }) }));
+    mocks.myLeadsViewer.mockResolvedValue({ userId: "user-1", orgId: "org-1", client: { rpc: mocks.rpc, from } });
+    mocks.getMyLeadsFlag.mockResolvedValue(true);
+    mocks.getMyLeadsQueueRow.mockResolvedValue({ status: "found", row: {}, snapshotAt: "2026-10-04T00:00:00Z" });
+    mocks.maybeSingle.mockResolvedValue({ data: { id: propertyId, org_id: "org-1" }, error: null });
+    mocks.schemaReady.mockResolvedValue(true);
+    mocks.compLead.mockResolvedValue({ status: "ok" });
+  });
+
+  it("requests a comp when the flag is on and the lead is in the caller's own queue", async () => {
+    expect(await compLeadAction(propertyId)).toEqual({ ok: true, result: { status: "ok" } });
+    expect(mocks.getMyLeadsFlag).toHaveBeenCalledWith("org-1", "call_screen");
+    expect(mocks.getMyLeadsQueueRow).toHaveBeenCalledWith({ memberId: "user-1", propertyId });
+    expect(mocks.compLead).toHaveBeenCalledTimes(1);
+  });
+
+  it("makes no comp, RPC or property read when the call_screen flag is off", async () => {
+    mocks.getMyLeadsFlag.mockResolvedValue(false);
+    expect((await compLeadAction(propertyId)).ok).toBe(false);
+    expect(mocks.getMyLeadsQueueRow).not.toHaveBeenCalled();
+    expect(mocks.maybeSingle).not.toHaveBeenCalled();
+    expect(mocks.compLead).not.toHaveBeenCalled();
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+
+  it("makes no comp or RPC call when the lead is not in the caller's queue", async () => {
+    mocks.getMyLeadsQueueRow.mockResolvedValue({ status: "unavailable", reason: "other_rep" });
+    expect(await compLeadAction(propertyId)).toEqual({ ok: false, message: "That lead could not be found." });
+    expect(mocks.maybeSingle).not.toHaveBeenCalled();
+    expect(mocks.compLead).not.toHaveBeenCalled();
     expect(mocks.rpc).not.toHaveBeenCalled();
   });
 });

@@ -19,6 +19,11 @@ export async function compLeadAction(propertyId: string): Promise<CompLeadAction
   if (typeof propertyId !== "string" || !UUID.test(propertyId)) return { ok: false, message: "That lead could not be found." };
   try {
     const viewer = await myLeadsViewer();
+    // Gate before any property read, schema check or paid comp: the call_screen flag, then the lead
+    // must be in the caller's own queue.
+    if (!(await getMyLeadsFlag(viewer.orgId, "call_screen"))) return { ok: false, message: "That lead could not be found." };
+    const owned = await getMyLeadsQueueRow({ memberId: viewer.userId, propertyId });
+    if (owned.status !== "found") return { ok: false, message: "That lead could not be found." };
     const { data, error } = await viewer.client
       .from("properties")
       .select("id, org_id")
