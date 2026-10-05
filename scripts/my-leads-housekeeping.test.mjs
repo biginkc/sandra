@@ -114,7 +114,7 @@ test("close-attempts and rollback route to their RPCs", async () => {
 });
 
 test("later-phase commands and unknown commands are refused without any call", async () => {
-  for (const argv of [["link-backfill", "--org", ORG], ["phone-backfill", "--org", ORG], ["nope"]]) {
+  for (const argv of [["phone-backfill", "--org", ORG], ["nope"]]) {
     const h = harness();
     assert.equal(await run(argv, h.io), 1);
     assert.equal(h.calls.length, 0);
@@ -223,4 +223,17 @@ test("reassign preview prints per-source counts and emails when available", asyn
   const err = h.err.join("");
   assert.match(err, new RegExp(`source ${MEL} \\(mel@example.com\\): 12 leads, 3 tasks, 1 appointments`));
   assert.match(err, new RegExp(`source ${MARIA}: 2 leads, 0 tasks, 0 appointments`));
+});
+
+test("link-backfill previews, refuses apply without the confirm hash, and applies through its own function", async () => {
+  const preview = { kind: "link_backfill", fingerprint: "d".repeat(64), candidates: 5 };
+  const h = harness({ preview });
+  assert.equal(await run(["link-backfill", "--org", ORG], h.io), 0);
+  assert.deepEqual(h.calls, [{ name: "fn_my_leads_housekeeping_link_backfill", args: { p_org_id: ORG, p_apply: false } }]);
+  const none = harness({ preview });
+  assert.equal(await run(["link-backfill", "--org", ORG, "--apply"], none.io), 1);
+  assert.equal(none.calls.length, 1);
+  const a = harness({ preview });
+  assert.equal(await run(["link-backfill", "--org", ORG, "--apply", "--confirm", sha256Hex(canonicalJson({ ...HOST, ...preview }))], a.io), 0);
+  assert.deepEqual(a.calls[1].args, { p_org_id: ORG, p_apply: true, p_fingerprint: preview.fingerprint });
 });
