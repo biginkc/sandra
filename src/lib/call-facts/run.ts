@@ -1,5 +1,6 @@
 import { reportError } from "@/lib/errors/report";
 
+import { redactFactsInput } from "./redact";
 import { prepareFactsInput, type FactsExtractor } from "./extract";
 import { validateFacts } from "./validate";
 import type { ValidFacts } from "./types";
@@ -13,6 +14,10 @@ export type ClaimedCall = {
   property_id?: string;
   summary: string | null;
   transcript: string | null;
+  contact_names?: string[] | null;
+  property_address?: string | null;
+  property_city?: string | null;
+  property_zip?: string | null;
 };
 
 export type ClaimResult = { claims: ClaimedCall[]; exhausted: { fact_id: string; call_activity_id: string }[] };
@@ -50,7 +55,16 @@ export async function runCallFactsSweep(limit: number, deps: FactsJobDeps): Prom
     try {
       let facts: ValidFacts = {};
       let model: string | null = null;
-      const input = prepareFactsInput({ summary: claim.summary, transcript: claim.transcript });
+      // Redact first: the model only ever sees this text, and evidence is validated against it.
+      const input = prepareFactsInput(
+        redactFactsInput(
+          { summary: claim.summary, transcript: claim.transcript },
+          {
+            contactNames: claim.contact_names ?? [],
+            propertyAddress: { address: claim.property_address, city: claim.property_city, zip: claim.property_zip },
+          },
+        ),
+      );
       if (deps.extractor && (input.summary || input.transcript)) {
         const at = now();
         const extraction = await deps.extractor(input, { referenceDate: CENTRAL_DATE.format(at) });

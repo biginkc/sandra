@@ -128,9 +128,16 @@ begin
            'org_id', c.org_id,
            'property_id', c.property_id,
            'summary', t.summary,
-           'transcript', t.text)), '[]'::jsonb)
+           'transcript', t.text,
+           -- Known identifiers of the lead, so the caller can mask them before any text leaves Sandra.
+           'contact_names', to_jsonb(array_remove(array[ct.first_name, ct.last_name, ct.entity_name], null)),
+           'property_address', pr.address,
+           'property_city', pr.city,
+           'property_zip', pr.zip)), '[]'::jsonb)
     into v_claims
     from claimed c
+    join public.properties pr on pr.id = c.property_id and pr.org_id = c.org_id
+    left join public.contacts ct on ct.id = pr.homeowner_contact_id and ct.org_id = pr.org_id
     left join lateral (
       select ct.summary, ct.text from public.call_transcripts ct
        where ct.call_activity_id = c.call_activity_id
@@ -242,7 +249,7 @@ declare
   v_actor uuid := public.my_leads_workflow_require_actor(p_org_id);
   v_row public.lead_call_facts%rowtype;
   v_label text;
-  v_value text := btrim(coalesce(p_value, ''));
+  v_value text;
   v_note_key uuid;
   v_inserted integer;
 begin
@@ -254,7 +261,7 @@ begin
     when 'asking_price' then 'Asking price'
     when 'next_step' then 'Next step'
     else null end;
-  if v_label is null or v_value = '' or length(v_value) > 500 then
+  if v_label is null then
     raise exception 'INVALID_INPUT' using errcode = '22023';
   end if;
 
@@ -267,6 +274,19 @@ begin
   end if;
   if v_row.accepted ? p_field then
     return jsonb_build_object('duplicate', true, 'field', p_field, 'status', v_row.status);
+  end if;
+
+  -- The stored proposal is the only source of the value: p_value is kept for signature stability and IGNORED.
+  v_value := btrim(coalesce(v_row.facts -> p_field ->> 'value', ''));
+  if p_field = 'next_step' then
+    begin
+      v_value := to_char((v_value::timestamptz) at time zone 'America/Chicago', 'Dy Mon FMDD, FMHH12:MI AM');
+    exception when others then
+      raise exception 'NOT_ACCEPTABLE' using errcode = '22023';
+    end;
+  end if;
+  if v_value = '' or length(v_value) > 500 then
+    raise exception 'NOT_ACCEPTABLE' using errcode = '22023';
   end if;
 
   v_note_key := md5('call_fact_accept:' || p_fact_id::text || ':' || p_field)::uuid;

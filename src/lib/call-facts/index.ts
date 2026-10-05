@@ -5,3 +5,5 @@ export type { FactsExtractor, FactsExtraction } from "./extract";
 export { FACTS_PROMPT_V1 } from "./prompt";
 export { runCallFactsSweep } from "./run";
 export type { ClaimedCall, ClaimResult, FactsJobDeps, FactsJobResult } from "./run";
+export { redactFactsInput } from "./redact";
+export type { RedactionContext } from "./redact";

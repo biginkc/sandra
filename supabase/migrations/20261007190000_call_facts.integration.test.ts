@@ -257,11 +257,48 @@ describe('20261007190000_call_facts', () => {
     });
   });
 
+  it('accept ignores the client value: the stored proposal value is what is written', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const { id } = await done(w);
+      for (const spoof of ['$1', '  ', 'x'.repeat(900)]) {
+        await db.query('delete from public.lead_notes where body like $1', ['From call summary - %']);
+        await db.query("update public.lead_call_facts set accepted='{}'::jsonb, status='proposed' where id=$1", [id]);
+        const r = (await accept(w, w.rep, id, 'asking_price', spoof)).rows[0].v;
+        expect(r.duplicate).toBe(false);
+        const n = await notes(w, 'From call summary - %');
+        expect(n.map((x) => x.body)).toEqual(['From call summary - Asking price: $185,000']);
+        expect((await factRow(w, id)).accepted.asking_price.value).toBe('$185,000');
+      }
+    });
+  });
+
+  it('accept formats a next_step instant in Central time from the stored value', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const { id } = await done(w, { next_step: { value: '2099-01-05T20:00:00.000Z', evidence: 'call Monday at 2' } });
+      await accept(w, w.rep, id, 'next_step', 'whatever');
+      expect((await notes(w, 'From call summary - %'))[0].body).toBe('From call summary - Next step: Mon Jan 5, 2:00 PM');
+    });
+  });
+
+  it('claim returns the lead identifiers for redaction', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const a = await call(w);
+      await ready(w, a);
+      const c = (await claim(w)).claims[0];
+      expect(c.contact_names).toEqual(['Sally', 'Seller']);
+      expect(c.property_address).toBe('1 Native Way');
+      expect(c.property_city).toBe('Kansas City');
+    });
+  });
+
   it('accept refuses a field outside the allow-list, a field with no proposal, blank values and a dismissed fact', async () => {
     await withFacts(async (db) => {
       const w = await world(db, { flag: true });
       const { id } = await done(w);
-      for (const [field, value] of [['bogus', 'x'], ['timeline', 'x'], ['asking_price', '  '], ['asking_price', 'x'.repeat(501)]]) {
+      for (const [field, value] of [['bogus', 'x'], ['timeline', 'x']]) {
         const e = await failure(db, () => accept(w, w.rep, id, field, value));
         expect(e.message).toMatch(/INVALID_INPUT|NOT_ACCEPTABLE/);
       }
