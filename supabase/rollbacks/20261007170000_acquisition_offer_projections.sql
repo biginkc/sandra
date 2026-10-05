@@ -4,6 +4,14 @@
 -- are NOT rewritten; if any exist the (additive, harmless) widened constraint is left in place.
 begin;
 
+do $unpatch$
+declare
+  v_def text := pg_get_functiondef('public.fn_get_acquisition_kpis(uuid,uuid,timestamptz,timestamptz)'::regprocedure);
+begin
+  execute replace(v_def, ' and outcome<>''superseded'';', ';');
+end
+$unpatch$;
+
 drop trigger if exists trg_offer_projection_state on public.esign_requests;
 drop trigger if exists trg_offer_projection_link on public.esign_requests;
 drop function if exists public.fn_list_offer_conflicts(uuid, uuid, uuid);

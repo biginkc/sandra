@@ -44,6 +44,7 @@ vi.mock("@/lib/my-leads/offer-projection", () => ({
 }));
 vi.mock("./contract-card-context", () => ({ loadContractCardData: mocks.load }));
 
+import { novationBase as novationBaseForActions } from "./fixtures";
 import {
   cancelContractAction, loadContractCard, reassignAndLogOfferAction, retryOfferProjectionAction, sendContractCardAction,
   supersedeOfferAction,
@@ -243,5 +244,31 @@ describe("offer recovery actions never send a contract", () => {
     mocks.voidContract.mockResolvedValue({ ok: false, error: { code: "VOID_IN_PROGRESS", message: "busy" } });
     expect(await cancelContractAction(RID)).toMatchObject({ ok: false, code: "VOID_IN_PROGRESS" });
     expect(mocks.send).not.toHaveBeenCalled();
+  });
+});
+
+describe("saving typed entities is authorized like contract defaults", () => {
+  it("only an owner's own client inserts into the org lists; a non-owner never writes", async () => {
+    vi.clearAllMocks();
+    const inserts: { table: string; row: Record<string, unknown> }[] = [];
+    const client = { from: (table: string) => ({ insert: async (row: Record<string, unknown>) => { inserts.push({ table, row }); return { error: null }; } }) };
+    mocks.getMyLeadsFlag.mockResolvedValue(true);
+    mocks.schemaReady.mockResolvedValue(true);
+    mocks.getMyLeadsQueueRow.mockResolvedValue({ status: "found" });
+    mocks.authenticate.mockResolvedValue({ userId: "u1", orgId: "o1", role: "member" });
+    mocks.resolveIntent.mockResolvedValue(null);
+    mocks.precheck.mockResolvedValue({ ok: true });
+    mocks.createIntent.mockResolvedValue({ projectionId: "p1" });
+    mocks.projectNow.mockResolvedValue({ state: "pending" });
+    mocks.send.mockResolvedValue({ ok: true, data: { requestId: "r1" } });
+    mocks.load.mockResolvedValue({ ctx: { prefillBase: { ...novationBaseForActions() }, titleCompanies: [], buyerEntities: [], todayCentral: "2026-10-04", tomorrowCentral: "2026-10-05" } });
+    const typedInput = { ...input, titleCompanyId: "", buyerEntityId: "", titleCompanyNew: { name: "T", closingAgentName: "A" }, buyerEntityNew: { name: "B", email: "b@x.test" }, closingDate: "2099-01-01" };
+    for (const isOwner of [false, true]) {
+      inserts.length = 0;
+      mocks.myLeadsViewer.mockResolvedValue({ userId: "u1", orgId: "o1", isOwner, client });
+      const res = await sendContractCardAction(typedInput as never);
+      expect(inserts.length).toBe(isOwner && res.status === "sent" ? 2 : 0);
+      if (isOwner && res.status === "sent") expect(inserts.map((i) => i.table).sort()).toEqual(["acquisition_contract_buyer_entities", "acquisition_contract_title_companies"]);
+    }
   });
 });

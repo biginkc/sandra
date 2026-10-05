@@ -97,6 +97,26 @@ export async function sendContractCardAction(input: SendContractCardInput): Prom
         return "ctx" in loaded ? loaded.ctx : null;
       },
       projection: projectionPort,
+      saveTitleCompany: async (viewer, t) => {
+        // Same gate as the contract-defaults settings: only the org owner may write (RLS enforces it too).
+        if (!viewer.isOwner) return false;
+        const v = (await myLeadsViewer()) as { client: Loose };
+        const { error } = await v.client.from("acquisition_contract_title_companies").insert({
+          org_id: viewer.orgId, name: t.name.trim(), closing_agent_name: t.closingAgentName.trim(),
+          closing_agent_phone: t.closingAgentPhone?.trim() || null, closing_agent_address: t.closingAgentAddress?.trim() || null,
+          closing_agent_email: t.closingAgentEmail?.trim() || null,
+        });
+        return !error;
+      },
+      saveBuyerEntity: async (viewer, b) => {
+        if (!viewer.isOwner) return false;
+        const v = (await myLeadsViewer()) as { client: Loose };
+        const { error } = await v.client.from("acquisition_contract_buyer_entities").insert({
+          org_id: viewer.orgId, name: b.name.trim(), phone: b.phone?.trim() || null, email: b.email?.trim() || null,
+          attorney_in_fact: b.attorneyInFact?.trim() || null,
+        });
+        return !error;
+      },
       send: (i) => createBoundLeadEsignCore().send({ ...i, mergeValues: i.mergeValues as never }),
     };
     const result = await createContractCardCore(deps).sendContractCard(input);

@@ -589,6 +589,22 @@ begin
   ), '[]'::jsonb);
 end $$;
 
+-- 10. KPI: a superseded offer and its replacement are ONE offer sent; only the latest counts
+-- (Jarrad's decision, "Count only the latest."). Anchored patch of the live fn_get_acquisition_kpis
+-- body (the offers count is the only change); it fails loudly if the anchor ever stops matching.
+do $patch$
+declare
+  v_def text := pg_get_functiondef('public.fn_get_acquisition_kpis(uuid,uuid,timestamptz,timestamptz)'::regprocedure);
+  v_old constant text := 'select count(*) into v_offers from public.acquisition_offers where org_id=p_org_id and actor_user_id=p_member_id and sent_at>=p_start and sent_at<p_end;';
+  v_new constant text := 'select count(*) into v_offers from public.acquisition_offers where org_id=p_org_id and actor_user_id=p_member_id and sent_at>=p_start and sent_at<p_end and outcome<>''superseded'';';
+begin
+  if position(v_old in v_def) = 0 then
+    raise exception 'fn_get_acquisition_kpis offers-count anchor not found';
+  end if;
+  execute replace(v_def, v_old, v_new);
+end
+$patch$;
+
 revoke all on function public.contract_follow_up_at(date, timestamptz, integer, smallint)
   from public, anon, authenticated, service_role;
 grant execute on function public.contract_follow_up_at(date, timestamptz, integer, smallint) to service_role;

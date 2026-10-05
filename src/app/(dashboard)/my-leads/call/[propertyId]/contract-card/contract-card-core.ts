@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { buildContractPrefill, ECONOMIC_FIELDS, type PrefillBase, type PrefillInput } from "./contract-prefill";
+import type { BuyerEntity, TitleCompany } from "@/lib/contract-defaults/resolve";
 import type { EsignMergeFieldName } from "@/lib/esign/contracts";
 import type { AcquisitionMotivationResponse, AcquisitionTemperature } from "@/lib/my-leads/types";
 
@@ -14,6 +15,10 @@ import type { AcquisitionMotivationResponse, AcquisitionTemperature } from "@/li
  * durable intent -> the existing eSign core `send`.
  */
 export type SignerAssignment = Readonly<{ role: string; order: number; name: string; emailAddress: string }>;
+
+/** A title company or buyer entity typed for this contract (no defaults exist; they vary by seller). */
+export type NewTitleCompany = { name: string; closingAgentName: string; closingAgentPhone?: string; closingAgentAddress?: string; closingAgentEmail?: string };
+export type NewBuyerEntity = { name: string; attorneyInFact?: string; phone?: string; email?: string };
 
 export type SendContractCardInput = {
   propertyId: string;
@@ -30,10 +35,14 @@ export type SendContractCardInput = {
   /** Required only when the lead has no recorded motivation yet (the offer needs one). */
   motivation?: AcquisitionMotivationResponse | null;
   temperature?: AcquisitionTemperature;
+  /** When set, `titleCompanyId` is "" and these values are used (and saved to the org list when the sender may). */
+  titleCompanyNew?: NewTitleCompany;
+  buyerEntityNew?: NewBuyerEntity;
 };
 
 export type SendContractCardResult =
-  | { status: "sent"; requestId: string; offer: "logged" | "pending" | "conflict"; code?: string }
+  /** `typedNotSaved`: a typed title company or buyer entity was used on this contract only (the sender may not edit the org list). */
+  | { status: "sent"; requestId: string; offer: "logged" | "pending" | "conflict"; code?: string; typedNotSaved?: boolean }
   | { status: "unconfirmed"; projectionId: string }
   | { status: "blocked"; code: string; message: string }
   /** `definitive`: the send definitively did not happen and the intent was released; the client may mint a new intent. */
@@ -87,6 +96,9 @@ export type ContractCardCoreDeps = {
   ownsLead(viewer: Viewer, propertyId: string): Promise<boolean>;
   loadContext(viewer: Viewer, propertyId: string, templateId: string): Promise<SendContext | null>;
   projection: OfferProjectionPort;
+  /** Saves a typed entity to the org list through the sender's own access. Returns false when not allowed or on error. */
+  saveTitleCompany?(viewer: Viewer, value: NewTitleCompany): Promise<boolean>;
+  saveBuyerEntity?(viewer: Viewer, value: NewBuyerEntity): Promise<boolean>;
   send(input: {
     propertyId: string; templateId: string; sendIntentId: string;
     signers: readonly SignerAssignment[]; mergeValues: Record<string, string>;
@@ -112,6 +124,7 @@ export function submissionHashOf(i: SendContractCardInput): string {
   return sha({
     p: i.propertyId, t: i.templateId, price: i.priceCents, d: i.closingDate, tc: i.titleCompanyId,
     b: i.buyerEntityId, e: i.earnestMoneyCents, s: i.signers.map((s) => sortKeys({ ...s })), o: sortKeys({ ...i.overrides }),
+    ...(i.titleCompanyNew || i.buyerEntityNew ? { tn: i.titleCompanyNew ?? null, bn: i.buyerEntityNew ?? null } : {}),
     ...(i.motivation || i.temperature ? { m: i.motivation ?? null, tp: i.temperature ?? null } : {}),
   });
 }
@@ -119,7 +132,13 @@ export function submissionHashOf(i: SendContractCardInput): string {
 function validShape(input: unknown): input is SendContractCardInput {
   if (!input || typeof input !== "object") return false;
   const i = input as Record<string, unknown>;
-  if (Object.keys(i).filter((k) => k !== "motivation" && k !== "temperature").sort().join(",") !== INPUT_KEYS) return false;
+  if (Object.keys(i).filter((k) => !["motivation", "temperature", "titleCompanyNew", "buyerEntityNew"].includes(k)).sort().join(",") !== INPUT_KEYS) return false;
+  const text = (v: unknown) => v === undefined || typeof v === "string";
+  const tn = i.titleCompanyNew as Record<string, unknown> | undefined;
+  const bn = i.buyerEntityNew as Record<string, unknown> | undefined;
+  if (tn !== undefined && !(tn && typeof tn === "object" && typeof tn.name === "string" && tn.name.trim() !== "" && typeof tn.closingAgentName === "string" && tn.closingAgentName.trim() !== "" && text(tn.closingAgentPhone) && text(tn.closingAgentAddress) && text(tn.closingAgentEmail))) return false;
+  if (bn !== undefined && !(bn && typeof bn === "object" && typeof bn.name === "string" && bn.name.trim() !== "" && text(bn.attorneyInFact) && text(bn.phone) && text(bn.email))) return false;
+  if ((tn !== undefined) !== (i.titleCompanyId === "") || (bn !== undefined) !== (i.buyerEntityId === "")) return false;
   if (i.motivation != null) {
     const m = i.motivation as Record<string, unknown>;
     const okKind = (m.kind === "specified" && typeof m.text === "string" && m.text.trim() !== "") || (m.kind === "no_motivation" && m.text === null);
@@ -130,8 +149,8 @@ function validShape(input: unknown): input is SendContractCardInput {
     typeof i.propertyId === "string" && UUID.test(i.propertyId) &&
     typeof i.templateId === "string" && UUID.test(i.templateId) &&
     typeof i.sendIntentId === "string" && UUID.test(i.sendIntentId) &&
-    typeof i.titleCompanyId === "string" && UUID.test(i.titleCompanyId) &&
-    typeof i.buyerEntityId === "string" && UUID.test(i.buyerEntityId) &&
+    typeof i.titleCompanyId === "string" && (UUID.test(i.titleCompanyId) || i.titleCompanyId === "") &&
+    typeof i.buyerEntityId === "string" && (UUID.test(i.buyerEntityId) || i.buyerEntityId === "") &&
     Number.isInteger(i.priceCents) && (i.priceCents as number) > 0 &&
     Number.isInteger(i.earnestMoneyCents) && (i.earnestMoneyCents as number) >= 0 &&
     typeof i.closingDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(i.closingDate) &&
@@ -205,14 +224,34 @@ export function createContractCardCore(deps: ContractCardCoreDeps) {
 
     const pre = await deps.projection.precheck(viewer, input.propertyId);
     if (!pre.ok) return blocked(pre.code, pre.message);
-    if (pre.motivationRecorded === false && !input.motivation) {
-      return blocked("MOTIVATION_REQUIRED", "Record the seller's motivation before sending.");
-    }
 
     const ctx = await deps.loadContext(viewer, input.propertyId, input.templateId);
     if (!ctx) return blocked("TEMPLATE_UNAVAILABLE", "That contract template is not available.");
-    const titleCompany = ctx.titleCompanies.find((t) => t?.id === input.titleCompanyId && t.isActive) ?? null;
-    const buyerEntity = ctx.buyerEntities.find((b) => b?.id === input.buyerEntityId && b.isActive) ?? null;
+    const norm = (v: string | undefined) => (v ?? "").trim();
+    const orNull = (v: string | undefined) => norm(v) || null;
+    let titleCompany: TitleCompany | null;
+    let titleToSave: NewTitleCompany | null = null;
+    if (input.titleCompanyNew) {
+      const t = input.titleCompanyNew;
+      const same = ctx.titleCompanies.find((x) => x?.isActive && x.name.trim().toLowerCase() === norm(t.name).toLowerCase());
+      titleCompany = {
+        id: same?.id ?? "typed", name: norm(t.name), closingAgentName: norm(t.closingAgentName),
+        closingAgentPhone: orNull(t.closingAgentPhone), closingAgentAddress: orNull(t.closingAgentAddress), closingAgentEmail: orNull(t.closingAgentEmail), isActive: true,
+      };
+      if (!same) titleToSave = t;
+    } else {
+      titleCompany = ctx.titleCompanies.find((t) => t?.id === input.titleCompanyId && t.isActive) ?? null;
+    }
+    let buyerEntity: BuyerEntity | null;
+    let buyerToSave: NewBuyerEntity | null = null;
+    if (input.buyerEntityNew) {
+      const b = input.buyerEntityNew;
+      const same = ctx.buyerEntities.find((x) => x?.isActive && x.name.trim().toLowerCase() === norm(b.name).toLowerCase());
+      buyerEntity = { id: same?.id ?? "typed", name: norm(b.name), phone: orNull(b.phone), email: orNull(b.email), attorneyInFact: orNull(b.attorneyInFact), isActive: true };
+      if (!same) buyerToSave = b;
+    } else {
+      buyerEntity = ctx.buyerEntities.find((b) => b?.id === input.buyerEntityId && b.isActive) ?? null;
+    }
     if (!titleCompany) return blocked("TITLE_COMPANY_MISSING", "Choose a title company.");
     if (!buyerEntity) return blocked("BUYER_ENTITY_MISSING", "Choose a buyer entity.");
     for (const key of Object.keys(input.overrides)) {
@@ -245,10 +284,22 @@ export function createContractCardCore(deps: ContractCardCoreDeps) {
         ? { status: "failed", message: "The send could not be started. Please retry." }
         : blocked(created.error, CREATE_ERROR_COPY[created.error]);
     }
-    return mapSend(created.projectionId, {
+    // Typed entities are saved for reuse only after the intent exists, through the sender's own access. A save
+    // never changes what is sent: the contract values above already carry the typed values.
+    let typedNotSaved = false;
+    if (titleToSave) {
+      const ok = deps.saveTitleCompany ? await deps.saveTitleCompany(viewer, titleToSave).catch(() => false) : false;
+      if (!ok) typedNotSaved = true;
+    }
+    if (buyerToSave) {
+      const ok = deps.saveBuyerEntity ? await deps.saveBuyerEntity(viewer, buyerToSave).catch(() => false) : false;
+      if (!ok) typedNotSaved = true;
+    }
+    const result = await mapSend(created.projectionId, {
       propertyId: input.propertyId, templateId: input.templateId, sendIntentId: input.sendIntentId,
       signers: input.signers, mergeValues: prefill.values,
     }, true);
+    return result.status === "sent" && typedNotSaved ? { ...result, typedNotSaved: true } : result;
   }
 
   return { sendContractCard };

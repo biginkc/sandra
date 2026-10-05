@@ -111,6 +111,9 @@ function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChan
   const [closingDate, setClosingDate] = useState("");
   const [titleId, setTitleId] = useState(state.selectedTitleCompanyId ?? "");
   const [buyerId, setBuyerId] = useState(state.selectedBuyerEntityId ?? "");
+  const NEW = "__new__";
+  const [titleNew, setTitleNew] = useState({ name: "", closingAgentName: "", closingAgentPhone: "", closingAgentEmail: "", closingAgentAddress: "" });
+  const [buyerNew, setBuyerNew] = useState({ name: "", attorneyInFact: "", phone: "", email: "" });
   const [earnest, setEarnest] = useState(state.prefillBase.settings.earnestMoneyCents == null ? "" : (state.prefillBase.settings.earnestMoneyCents / 100).toFixed(2));
   const [overrides, setOverrides] = useState<Partial<Record<EsignMergeFieldName, string>>>({});
   const [motivationKind, setMotivationKind] = useState<"" | "specified" | "no_motivation">("");
@@ -125,8 +128,19 @@ function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChan
     if (shouldRotateIntent(result, sending)) intentRef.current = null;
   };
 
-  const title: TitleCompany | null = state.titleCompanies.find((t) => t.id === titleId) ?? null;
-  const buyer: BuyerEntity | null = state.buyerEntities.find((b) => b.id === buyerId) ?? null;
+  const typedTitle = titleId === NEW;
+  const typedBuyer = buyerId === NEW;
+  const orNull = (v: string) => v.trim() || null;
+  const title: TitleCompany | null = typedTitle
+    ? titleNew.name.trim() && titleNew.closingAgentName.trim()
+      ? { id: "typed", name: titleNew.name.trim(), closingAgentName: titleNew.closingAgentName.trim(), closingAgentPhone: orNull(titleNew.closingAgentPhone), closingAgentEmail: orNull(titleNew.closingAgentEmail), closingAgentAddress: orNull(titleNew.closingAgentAddress), isActive: true }
+      : null
+    : state.titleCompanies.find((t) => t.id === titleId) ?? null;
+  const buyer: BuyerEntity | null = typedBuyer
+    ? buyerNew.name.trim()
+      ? { id: "typed", name: buyerNew.name.trim(), phone: orNull(buyerNew.phone), email: orNull(buyerNew.email), attorneyInFact: orNull(buyerNew.attorneyInFact), isActive: true }
+      : null
+    : state.buyerEntities.find((b) => b.id === buyerId) ?? null;
   const priceCents = parseDollarsToCents(price);
   const earnestCents = parseDollarsToCents(earnest);
   const closingValid = /^\d{4}-\d{2}-\d{2}$/.test(closingDate) && closingDate >= state.tomorrowCentral;
@@ -146,8 +160,6 @@ function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChan
   const signers = signersFor(state, buyer);
   const signersOk = signers.every((s) => s.name.trim() && s.emailAddress.trim());
 
-  const noTitle = state.titleCompanies.length === 0;
-  const noBuyer = state.buyerEntities.length === 0;
   const unsourced = prefill.missing.filter((n) =>
     !(ECONOMIC_FIELDS as readonly string[]).includes(n) && !["seller_name", "legal_description", "buyer_name", "earnest_money_holder"].includes(n),
   );
@@ -160,12 +172,11 @@ function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChan
       : motivationKind === "no_motivation"
         ? { kind: "no_motivation", text: null }
         : null;
-  const complete = (!needsMotivation || motivation !== null) && !prefill.blocked && priceCents !== null && priceCents > 0 && earnestCents !== null && signersOk && !!title && !!buyer;
+  const complete = !prefill.blocked && priceCents !== null && priceCents > 0 && earnestCents !== null && signersOk && !!title && !!buyer;
   const disabled = !complete || sending || locked;
 
   let message: string | null = null;
-  if (noTitle) message = "Add a title company in Settings.";
-  else if (noBuyer) message = "Add a buyer entity in Settings.";
+  if (!title) message = null;
   else if (earnestCents === null) message = "Enter the earnest money amount.";
   else if (!signersOk && buyer) message = "The buyer entity needs an email for the buyer signer.";
 
@@ -175,8 +186,10 @@ function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChan
     try {
       const res = await send({
         propertyId, templateId: state.templateId, sendIntentId: intent(), priceCents, closingDate,
-        titleCompanyId: titleId, buyerEntityId: buyerId, earnestMoneyCents: earnestCents, signers, overrides,
-        ...(needsMotivation ? { motivation, temperature: temperature || null } : {}),
+        titleCompanyId: typedTitle ? "" : titleId, buyerEntityId: typedBuyer ? "" : buyerId, earnestMoneyCents: earnestCents, signers, overrides,
+        ...(typedTitle ? { titleCompanyNew: { name: titleNew.name.trim(), closingAgentName: titleNew.closingAgentName.trim(), closingAgentPhone: titleNew.closingAgentPhone.trim(), closingAgentEmail: titleNew.closingAgentEmail.trim(), closingAgentAddress: titleNew.closingAgentAddress.trim() } } : {}),
+        ...(typedBuyer ? { buyerEntityNew: { name: buyerNew.name.trim(), attorneyInFact: buyerNew.attorneyInFact.trim(), phone: buyerNew.phone.trim(), email: buyerNew.email.trim() } } : {}),
+        ...(needsMotivation && (motivation !== null || temperature) ? { motivation, temperature: temperature || null } : {}),
       });
       setResult(res);
       // Rotate only when nothing was sent and the server released the intent (blocked, or a definitive
@@ -227,19 +240,41 @@ function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChan
             onChange={(e) => { edited(); setClosingDate(e.target.value); onClosingDateChange?.(e.target.value); }} />
         </label>
         <label className="text-xs">Title company
-          <select data-testid="contract-title-company" className={input} value={titleId} disabled={locked || noTitle}
+          <select data-testid="contract-title-company" className={input} value={titleId} disabled={locked}
             onChange={(e) => { edited(); setTitleId(e.target.value); }}>
             <option value="">Choose…</option>
+            <option value={NEW}>Type a new one…</option>
             {state.titleCompanies.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
         </label>
         <label className="text-xs">Buyer entity
-          <select data-testid="contract-buyer-entity" className={input} value={buyerId} disabled={locked || noBuyer}
+          <select data-testid="contract-buyer-entity" className={input} value={buyerId} disabled={locked}
             onChange={(e) => { edited(); setBuyerId(e.target.value); }}>
             <option value="">Choose…</option>
+            <option value={NEW}>Type a new one…</option>
             {state.buyerEntities.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
         </label>
+        {typedTitle ? (
+          <fieldset data-testid="contract-title-new" className="grid gap-2 sm:col-span-2 sm:grid-cols-2">
+            {([["name", "Title company name"], ["closingAgentName", "Closing agent name"], ["closingAgentPhone", "Closing agent phone"], ["closingAgentEmail", "Closing agent email"], ["closingAgentAddress", "Closing agent address"]] as const).map(([k, label]) => (
+              <label key={k} className="text-xs">{label}
+                <input data-testid={`contract-title-new-${k}`} className={input} value={titleNew[k]} disabled={locked}
+                  onChange={(e) => { edited(); setTitleNew((v) => ({ ...v, [k]: e.target.value })); }} />
+              </label>
+            ))}
+          </fieldset>
+        ) : null}
+        {typedBuyer ? (
+          <fieldset data-testid="contract-buyer-new" className="grid gap-2 sm:col-span-2 sm:grid-cols-2">
+            {([["name", "Buyer entity name"], ["attorneyInFact", "Attorney in fact"], ["phone", "Phone"], ["email", "Email"]] as const).map(([k, label]) => (
+              <label key={k} className="text-xs">{label}
+                <input data-testid={`contract-buyer-new-${k}`} className={input} value={buyerNew[k]} disabled={locked}
+                  onChange={(e) => { edited(); setBuyerNew((v) => ({ ...v, [k]: e.target.value })); }} />
+              </label>
+            ))}
+          </fieldset>
+        ) : null}
         <label className="text-xs">Earnest money
           <input data-testid="contract-earnest" className={input} inputMode="decimal" value={earnest} disabled={locked}
             onChange={(e) => { edited(); setEarnest(e.target.value); }} />

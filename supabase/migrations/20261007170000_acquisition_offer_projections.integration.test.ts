@@ -296,6 +296,11 @@ describe('20261007170000_acquisition_offer_projections', () => {
       expect((await db.query("select count(*)::int n from public.tasks where calendar_chain_id=$1 and status<>'cancelled'", [staleChain])).rows[0].n).toBe(0);
       expect((await db.query('select count(*)::int n from public.esign_requests where property_id=$1', [property])).rows[0].n).toBe(1);
       expect((await db.query('select delivery_state, sign_request_id, updated_at from public.esign_requests where id=$1', [reqId])).rows[0]).toEqual(before);
+      // KPI: the superseded offer and its replacement are ONE offer sent (only the latest counts).
+      const kpi = await w.as('authenticated', w.jarrad, async () => (await db.query(
+        'select public.fn_get_acquisition_kpis($1,$2,$3,$4) as r',
+        [w.org, w.sam, new Date(Date.now() - 10 * DAY).toISOString(), new Date(Date.now() + DAY).toISOString()])).rows[0].r as Json);
+      expect(kpi.offersSent).toBe(1);
       const replay = await supersede(key, w.sam);
       expect(replay.duplicate).toBe(true);
       expect(await w.offers(property)).toHaveLength(2);
@@ -457,7 +462,7 @@ describe('20261007170000_acquisition_offer_projections', () => {
   });
 });
 
-describe('open-contract guard under concurrency (committed rows on the disposable local database)', () => {
+describe('open-contract guard under concurrency (committed rows, fully migrated disposable database)', () => {
   it('two sends with different intent ids: exactly one proceeds, the other gets OPEN_CONTRACT_EXISTS', async () => {
     if (!url) throw new Error('Missing TEST_SUPABASE_DB_URL');
     const dbUrl = requireLoopbackPostgresUrl(url);
@@ -470,20 +475,26 @@ describe('open-contract guard under concurrency (committed rows on the disposabl
     let org = '';
     const users: string[] = [];
     try {
-      // The chain is applied for real on the disposable database so two connections can race.
-      await setup.query('begin');
-      await applyMyLeadsChain(setup, chainThrough('offerProjections'));
-      await setup.query('commit');
-      await setup.query('begin');
-      const w = await seedWorld(setup);
-      org = w.org;
-      users.push(w.jarrad, w.sam, w.pat);
+      // Two connections must race on committed rows, so this runs against the fully migrated disposable
+      // database as it is (CI applies every migration). It never changes the schema: rolling the chain back
+      // and committing would strip later migrations from every suite that runs after it.
+      const present = await setup.query("select to_regclass('public.acquisition_offer_projections') as t");
+      if (!present.rows[0].t) throw new Error('Apply the migrations (supabase db reset or the CI provisioner) before this test');
+      // Committed rows must NOT use the My Leads designation (acquisitions_enabled): reset_tenant_tables()
+      // re-inserts memberships and the designation guard rejects that, breaking every later suite.
+      const sam = randomUUID();
+      org = randomUUID();
+      const boss = randomUUID();
+      users.push(sam, boss);
+      for (const id of [sam, boss]) await setup.query('insert into auth.users(id) values ($1)', [id]);
+      await setup.query("insert into public.organizations(id,name) values ($1::uuid,'Offer race '||$2::text)", [org, org]);
+      await setup.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'owner')", [boss, org]);
+      await setup.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'member')", [sam, org]);
       const property = randomUUID();
-      await setup.query("insert into public.properties(id,org_id,address,state,status,assigned_user_id) values ($1,$2,'9 Race','MO','new_lead',$3)", [property, org, w.sam]);
-      await setup.query('commit');
+      await setup.query("insert into public.properties(id,org_id,address,state,status,assigned_user_id) values ($1,$2,'9 Race','MO','new_lead',$3)", [property, org, sam]);
       const call = (db: Client, intent: string) => db.query(
         'select public.fn_create_offer_projection($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9::date,$10,null,null) as id',
-        [org, property, w.sam, intent, `h-${intent}`, 's', '{}', 25000000, '2030-01-15', 'no_motivation']);
+        [org, property, sam, intent, `h-${intent}`, 's', '{}', 25000000, '2030-01-15', 'no_motivation']);
       await a.query('begin');
       await b.query('begin');
       await a.query("select set_config('lock_timeout','10s',true)");
@@ -503,6 +514,8 @@ describe('open-contract guard under concurrency (committed rows on the disposabl
       await b.query('rollback').catch(() => undefined);
       if (org) {
         await setup.query('delete from public.acquisition_offer_projections where org_id=$1', [org]).catch(() => undefined);
+        await setup.query('delete from public.properties where org_id=$1', [org]).catch(() => undefined);
+        await setup.query('delete from public.memberships where org_id=$1', [org]).catch(() => undefined);
         await setup.query('delete from public.organizations where id=$1', [org]).catch(() => undefined);
       }
       for (const id of users) await setup.query('delete from auth.users where id=$1', [id]).catch(() => undefined);

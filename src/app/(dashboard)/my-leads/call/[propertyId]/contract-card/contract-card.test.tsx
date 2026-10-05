@@ -54,16 +54,48 @@ describe("ContractCard", () => {
     expect(sendBtn().disabled).toBe(true);
   });
 
-  it("refuses to send with no title company or buyer entity configured (clear disabled state)", () => {
-    render(<ContractCard state={state({ titleCompanies: [], selectedTitleCompanyId: null })} propertyId="p" send={vi.fn()} />);
+  it("stays disabled with no saved title company or buyer entity until each has a value (typed or picked)", () => {
+    render(<ContractCard state={state({ titleCompanies: [], buyerEntities: [], selectedTitleCompanyId: null, selectedBuyerEntityId: null })} propertyId="p" send={vi.fn()} />);
     fill();
     expect(sendBtn().disabled).toBe(true);
-    expect(screen.getByTestId("contract-blocked").textContent).toContain("Add a title company in Settings");
-    cleanup();
-    render(<ContractCard state={state({ buyerEntities: [], selectedBuyerEntityId: null })} propertyId="p" send={vi.fn()} />);
-    fill();
+    fireEvent.change(screen.getByTestId("contract-title-company"), { target: { value: "__new__" } });
     expect(sendBtn().disabled).toBe(true);
-    expect(screen.getByTestId("contract-blocked").textContent).toContain("Add a buyer entity in Settings");
+    fireEvent.change(screen.getByTestId("contract-title-new-name"), { target: { value: "Typed Title" } });
+    expect(sendBtn().disabled).toBe(true); // closing agent still empty
+    fireEvent.change(screen.getByTestId("contract-title-new-closingAgentName"), { target: { value: "Agent A" } });
+    fireEvent.change(screen.getByTestId("contract-title-new-closingAgentPhone"), { target: { value: "555-0100" } });
+    fireEvent.change(screen.getByTestId("contract-title-new-closingAgentAddress"), { target: { value: "1 Test St" } });
+    expect(sendBtn().disabled).toBe(true); // buyer still empty
+    fireEvent.change(screen.getByTestId("contract-buyer-entity"), { target: { value: "__new__" } });
+    fireEvent.change(screen.getByTestId("contract-buyer-new-name"), { target: { value: "Typed Buyer LLC" } });
+    expect(sendBtn().disabled).toBe(true); // buyer signer needs an email
+    fireEvent.change(screen.getByTestId("contract-buyer-new-email"), { target: { value: "b@example.test" } });
+    fireEvent.change(screen.getByTestId("contract-buyer-new-attorneyInFact"), { target: { value: "Test Attorney" } });
+    fireEvent.change(screen.getByTestId("contract-buyer-new-phone"), { target: { value: "555-0101" } });
+    expect(sendBtn().disabled).toBe(false);
+  });
+
+  it("sends typed title company and buyer entity inline with empty ids", async () => {
+    const send = vi.fn(async () => ({ status: "sent" as const, requestId: "r", offer: "pending" as const }));
+    render(<ContractCard state={state({ titleCompanies: [], buyerEntities: [], selectedTitleCompanyId: null, selectedBuyerEntityId: null })} propertyId="p" send={send} />);
+    fill();
+    fireEvent.change(screen.getByTestId("contract-title-company"), { target: { value: "__new__" } });
+    fireEvent.change(screen.getByTestId("contract-title-new-name"), { target: { value: "Typed Title" } });
+    fireEvent.change(screen.getByTestId("contract-title-new-closingAgentName"), { target: { value: "Agent A" } });
+    fireEvent.change(screen.getByTestId("contract-title-new-closingAgentPhone"), { target: { value: "555-0100" } });
+    fireEvent.change(screen.getByTestId("contract-title-new-closingAgentAddress"), { target: { value: "1 Test St" } });
+    fireEvent.change(screen.getByTestId("contract-buyer-entity"), { target: { value: "__new__" } });
+    fireEvent.change(screen.getByTestId("contract-buyer-new-name"), { target: { value: "Typed Buyer LLC" } });
+    fireEvent.change(screen.getByTestId("contract-buyer-new-email"), { target: { value: "b@example.test" } });
+    fireEvent.change(screen.getByTestId("contract-buyer-new-attorneyInFact"), { target: { value: "Test Attorney" } });
+    fireEvent.change(screen.getByTestId("contract-buyer-new-phone"), { target: { value: "555-0101" } });
+    fireEvent.click(sendBtn());
+    await waitFor(() => expect(send).toHaveBeenCalled());
+    expect((send.mock.calls[0] as unknown[])[0]).toMatchObject({
+      titleCompanyId: "", buyerEntityId: "",
+      titleCompanyNew: { name: "Typed Title", closingAgentName: "Agent A" },
+      buyerEntityNew: { name: "Typed Buyer LLC", email: "b@example.test" },
+    });
   });
 
   it("with earnest money unset the field is empty and Send stays disabled until the rep types it", async () => {
@@ -234,19 +266,28 @@ describe("ContractCard projection state", () => {
     unmount();
   });
 
-  it("collects motivation only when the lead has none and sends it with the contract", async () => {
+  it("offers motivation only when the lead has none; it is optional and sent when supplied", async () => {
     const send = vi.fn(async () => ({ status: "sent" as const, requestId: "r", offer: "pending" as const }));
     const { unmount } = render(<ContractCard state={state({ motivationRecorded: true })} propertyId="p" send={send} />);
     expect(screen.queryByTestId("contract-motivation")).toBeNull();
     unmount();
     render(<ContractCard state={state({ motivationRecorded: false })} propertyId="p" send={send} />);
     fill();
-    expect(sendBtn().disabled).toBe(true);
+    expect(sendBtn().disabled).toBe(false);
     fireEvent.change(screen.getByTestId("contract-motivation-kind"), { target: { value: "no_motivation" } });
     expect(sendBtn().disabled).toBe(false);
     fireEvent.click(sendBtn());
     await waitFor(() => expect(send).toHaveBeenCalled());
     expect((send.mock.calls[0] as unknown[])[0]).toMatchObject({ motivation: { kind: "no_motivation", text: null }, temperature: null });
+  });
+
+  it("sends without a motivation when none is entered", async () => {
+    const send = vi.fn(async () => ({ status: "sent" as const, requestId: "r", offer: "pending" as const }));
+    render(<ContractCard state={state({ motivationRecorded: false })} propertyId="p" send={send} />);
+    fill();
+    fireEvent.click(sendBtn());
+    await waitFor(() => expect(send).toHaveBeenCalled());
+    expect((send.mock.calls[0] as unknown[])[0]).not.toHaveProperty("motivation");
   });
 
   it("polls through onRefresh while the contract is being confirmed", () => {

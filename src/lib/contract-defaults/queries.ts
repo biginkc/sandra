@@ -17,7 +17,7 @@ const str = (v: unknown): string | null => (typeof v === "string" && v.trim() !=
 
 /**
  * Loads the org's defaults through the caller's RLS client. Not ready, or any read error, returns
- * the EMPTY defaults so the card stays blocked ("Add a title company in Settings").
+ * the EMPTY defaults so the card stays blocked.
  */
 export async function loadContractDefaults(
   client: LooseClient,
