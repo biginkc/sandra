@@ -20,8 +20,8 @@ Last updated: 2026-10-04 (after #798 release)
 | `claude/my-leads-p1e-housekeeping` | #794 | Claude (Sonnet 5.5 builder) | **MERGED** `10eda0d9` into main. Migrations applied TEST + PROD, high-water `20261005110000`. Housekeeping NOT run at the time of #797 merge (later run, see below). |
 | `claude/my-leads-p1a-core` | #797 | Claude (Sonnet 5.5 builder) | **MERGED** `46ad7e92` into main. Migrations applied TEST + PROD, high-water `20261005121500`. Feature flags table empty = all flags OFF. Housekeeping NOT run at the time of #797 merge (later run, see below). |
 | `claude/my-leads-p1a-writers` | #798 | Claude (Sonnet 5.5 builder) | **MERGED** `afec04f4` into main. Migrations 20261005130000-130500 applied TEST + PROD (test and prod migrate runs on afec04f4 succeeded). Flags still OFF. |
-| `claude/my-leads-p1e-reassign-scope-2` | #806 | Claude | **MERGED** `02c1dcaf` into main (reassign `--from`, migration 20261005122000 applied). |
-| `claude/my-leads-p1e-reassign-scope-3` / queue-scope fix | #808 | Claude | OPEN at last check (head `899f186c`), migration renumbered 20261005122500; reassign stays pending until it merges. |
+| `claude/my-leads-p1e-reassign-scope` | #806 | Claude | **MERGED** `02c1dcaf` into main (reassign `--from`, migration 20261005122000 applied). |
+| `claude/my-leads-p1e-reassign-scope-2` | #808 | Claude | OPEN at last check (head `899f186c`), migration renumbered 20261005122500; reassign stays pending until it merges. |
 | `claude/my-leads-p1b-strip` | #799 | Claude (Sonnet 5.5 builder) | draft, base `main`; main `afec04f4` merged in |
 | `claude/my-leads-p1c-prompt` | #800 | Claude (Sonnet 5.5 builder) | draft, stacked on #799; rebased onto the new #799 head |
 | `claude/my-leads-p1c2-seller-reminders` | #801 | Claude (Sonnet 5.5 builder) | draft, stacked on #800; rebased; pre-activation duplicate-text fix pending |
