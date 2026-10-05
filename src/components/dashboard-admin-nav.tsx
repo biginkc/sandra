@@ -1,6 +1,6 @@
 "use client";
 
-import { Bot, Link as LinkIcon, Users } from "lucide-react";
+import { Bot, FileSignature, Link as LinkIcon, Users } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -35,6 +35,7 @@ const ADMIN_ITEMS: readonly AdminItem[] = [
   { href: "/admin/users", label: "Team", icon: Users },
   { href: "/admin/webhooks", label: "Webhooks", icon: LinkIcon },
   { href: "/settings/ai-responder", label: "AI responder", icon: Bot },
+  { href: "/settings/contract-defaults", label: "Contract defaults", icon: FileSignature },
 ];
 
 const ITEM_BASE =
