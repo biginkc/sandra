@@ -67,11 +67,11 @@ async function world(db: Client) {
     return id;
   };
   const closing = new Date(Date.now() + 30 * DAY).toISOString().slice(0, 10);
-  const create = async (property: string, over: { intent?: string; actor?: string; cents?: number; hash?: string } = {}) => {
+  const create = async (property: string, over: { intent?: string; actor?: string; cents?: number; hash?: string; kind?: string | null; text?: string | null } = {}) => {
     const intent = over.intent ?? randomUUID();
     const id = (await db.query(
-      'select public.fn_create_offer_projection($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9::date,$10,null,null) as id',
-      [org, property, over.actor ?? sam, intent, over.hash ?? 'h1', 's1', JSON.stringify({ offer_price: '$250,000.00' }), over.cents ?? 25000000, closing, 'no_motivation'])).rows[0].id as string;
+      'select public.fn_create_offer_projection($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9::date,$10,$11,null) as id',
+      [org, property, over.actor ?? sam, intent, over.hash ?? 'h1', 's1', JSON.stringify({ offer_price: '$250,000.00' }), over.cents ?? 25000000, closing, over.kind === undefined ? 'no_motivation' : over.kind, over.text ?? null])).rows[0].id as string;
     return { id, intent };
   };
   const sentAt = new Date(Date.now() - HOUR).toISOString();
@@ -163,6 +163,42 @@ describe('20261007170000_acquisition_offer_projections', () => {
       // closing in 30 days minus 3 days at 09:00 Central
       expect(new Date(after.follow_up_at).getTime()).toBeGreaterThan(Date.now() + 20 * DAY);
       expect((await db.query("select current_setting('request.jwt.claim.sub', true) as s")).rows[0].s ?? '').toBe('');
+    });
+  });
+
+  it('an offer logs with NO motivation (null, not a placeholder); supplied motivation is still recorded; KPI counts both', async () => {
+    await withTx(async (db, w) => {
+      const none = await w.prop();
+      const pn = await w.create(none, { kind: null });
+      await w.markSent(await w.request(none, pn.intent));
+      expect(await w.project(pn.id)).toMatchObject({ state: 'logged' });
+      expect((await w.proj(pn.id)).state).toBe('logged');
+      const q = (await db.query('select stage, motivation_recorded, motivation_kind, motivation_text, motivation_recorded_at, motivation_recorded_by from public.acquisition_queue_states where property_id=$1', [none])).rows[0];
+      expect(q).toMatchObject({ stage: 'offer_sent', motivation_recorded: false, motivation_kind: null, motivation_text: null, motivation_recorded_at: null, motivation_recorded_by: null });
+      expect(await w.offers(none)).toHaveLength(1);
+
+      const some = await w.prop();
+      const ps = await w.create(some, { kind: 'specified', text: ' relocating ' });
+      await w.markSent(await w.request(some, ps.intent));
+      expect(await w.project(ps.id)).toMatchObject({ state: 'logged' });
+      const q2 = (await db.query('select motivation_recorded, motivation_kind, motivation_text from public.acquisition_queue_states where property_id=$1', [some])).rows[0];
+      expect(q2).toMatchObject({ motivation_recorded: true, motivation_kind: 'specified', motivation_text: 'relocating' });
+
+      // supplied-but-invalid motivation is still refused (validation kept)
+      const bad = await w.prop();
+      const pb = await w.create(bad, { kind: 'specified', text: null });
+      await w.markSent(await w.request(bad, pb.intent));
+      expect(await w.project(pb.id)).toMatchObject({ state: 'conflict', code: 'INVALID_INPUT' });
+
+      // KPI: both logged offers count (one by sam each); readers handle the null motivation
+      const kpi = await w.as('authenticated', w.jarrad, async () => (await db.query(
+        'select public.fn_get_acquisition_kpis($1,$2,$3,$4) as r',
+        [w.org, w.sam, new Date(Date.now() - 10 * DAY).toISOString(), new Date(Date.now() + DAY).toISOString()])).rows[0].r as Json);
+      expect(kpi.offersSent).toBe(2);
+      const row = await w.as('authenticated', w.sam, async () => (await db.query(
+        'select public.fn_get_my_leads_queue_row($1,$2,$3) as r', [w.org, w.sam, none])).rows[0].r as Json);
+      expect(row.status).toBe('found');
+      expect(row.row.motivationKind ?? null).toBeNull();
     });
   });
 
@@ -513,12 +549,17 @@ describe('open-contract guard under concurrency (committed rows, fully migrated 
       await a.query('rollback').catch(() => undefined);
       await b.query('rollback').catch(() => undefined);
       if (org) {
-        await setup.query('delete from public.acquisition_offer_projections where org_id=$1', [org]).catch(() => undefined);
-        await setup.query('delete from public.properties where org_id=$1', [org]).catch(() => undefined);
-        await setup.query('delete from public.memberships where org_id=$1', [org]).catch(() => undefined);
-        await setup.query('delete from public.organizations where id=$1', [org]).catch(() => undefined);
+        // The final-owner guard blocks deleting memberships normally, and a leftover membership whose user is gone
+        // breaks reset_tenant_tables() for every later suite. Remove them with triggers off, then cascade the org.
+        await setup.query('begin');
+        await setup.query("set local session_replication_role = replica");
+        await setup.query('delete from public.memberships where org_id=$1', [org]);
+        await setup.query('commit');
+        await setup.query('delete from public.acquisition_offer_projections where org_id=$1', [org]);
+        await setup.query('delete from public.properties where org_id=$1', [org]);
+        await setup.query('delete from public.organizations where id=$1', [org]);
       }
-      for (const id of users) await setup.query('delete from auth.users where id=$1', [id]).catch(() => undefined);
+      for (const id of users) await setup.query('delete from auth.users where id=$1', [id]);
       await a.end();
       await b.end();
       await setup.end();

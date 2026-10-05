@@ -4,6 +4,49 @@
 -- are NOT rewritten; if any exist the (additive, harmless) widened constraint is left in place.
 begin;
 
+do $unpatch2$
+declare
+  v_def text := pg_get_functiondef('public.fn_log_acquisition_offer(uuid,uuid,uuid,bigint,text,uuid,bigint,text,timestamptz,timestamptz,text,text,text)'::regprocedure);
+begin
+  if position($a1$    if p_motivation_kind is not null then
+      perform public.my_leads_workflow_assert_motivation(p_motivation_kind, p_motivation_text);
+      v_kind := p_motivation_kind;
+      v_text := case when p_motivation_kind = 'specified' then btrim(p_motivation_text) end;
+    end if;
+$a1$ in v_def) = 0 then raise exception 'fn_log_acquisition_offer anchor 1 not found'; end if;
+  v_def := replace(v_def, $a1$    if p_motivation_kind is not null then
+      perform public.my_leads_workflow_assert_motivation(p_motivation_kind, p_motivation_text);
+      v_kind := p_motivation_kind;
+      v_text := case when p_motivation_kind = 'specified' then btrim(p_motivation_text) end;
+    end if;
+$a1$, $b1$    if p_motivation_kind is null then raise exception 'INVALID_INPUT' using errcode = '22023'; end if;
+    perform public.my_leads_workflow_assert_motivation(p_motivation_kind, p_motivation_text);
+    v_kind := p_motivation_kind;
+    v_text := case when p_motivation_kind = 'specified' then btrim(p_motivation_text) end;
+$b1$);
+  if position($a2$        motivation_recorded = (v_kind is not null), motivation_kind = v_kind, motivation_text = v_text,
+        motivation_recorded_at = case when v_kind is not null then coalesce(q.motivation_recorded_at, statement_timestamp()) end,
+        motivation_recorded_by = case when v_kind is not null then coalesce(q.motivation_recorded_by, v_actor) end,
+$a2$ in v_def) = 0 then raise exception 'fn_log_acquisition_offer anchor 2 not found'; end if;
+  v_def := replace(v_def, $a2$        motivation_recorded = (v_kind is not null), motivation_kind = v_kind, motivation_text = v_text,
+        motivation_recorded_at = case when v_kind is not null then coalesce(q.motivation_recorded_at, statement_timestamp()) end,
+        motivation_recorded_by = case when v_kind is not null then coalesce(q.motivation_recorded_by, v_actor) end,
+$a2$, $b2$        motivation_recorded = true, motivation_kind = v_kind, motivation_text = v_text,
+        motivation_recorded_at = coalesce(q.motivation_recorded_at, statement_timestamp()),
+        motivation_recorded_by = coalesce(q.motivation_recorded_by, v_actor),
+$b2$);
+  if position($a3$      p_org_id, p_property_id, 'offer_sent', p_sent_at, (v_kind is not null), v_kind, v_text,
+      case when v_kind is not null then statement_timestamp() end, case when v_kind is not null then v_actor end, 1
+$a3$ in v_def) = 0 then raise exception 'fn_log_acquisition_offer anchor 3 not found'; end if;
+  v_def := replace(v_def, $a3$      p_org_id, p_property_id, 'offer_sent', p_sent_at, (v_kind is not null), v_kind, v_text,
+      case when v_kind is not null then statement_timestamp() end, case when v_kind is not null then v_actor end, 1
+$a3$, $b3$      p_org_id, p_property_id, 'offer_sent', p_sent_at, true, v_kind, v_text,
+      statement_timestamp(), v_actor, 1
+$b3$);
+  execute v_def;
+end
+$unpatch2$;
+
 do $unpatch$
 declare
   v_def text := pg_get_functiondef('public.fn_get_acquisition_kpis(uuid,uuid,timestamptz,timestamptz)'::regprocedure);

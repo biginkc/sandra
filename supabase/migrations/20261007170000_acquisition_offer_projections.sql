@@ -605,6 +605,53 @@ begin
 end
 $patch$;
 
+-- 11. An offer may be logged with NO motivation (Jarrad: "motivation should not be required").
+-- Anchored, fail-loud patch of the live fn_log_acquisition_offer body. Only the "motivation required"
+-- check is relaxed: absent motivation leaves the queue's motivation NOT recorded (all motivation columns
+-- null, as the queue check constraint requires); supplied motivation is validated and recorded as before.
+-- No placeholder value is written. All other validation is unchanged.
+do $patch2$
+declare
+  v_def text := pg_get_functiondef('public.fn_log_acquisition_offer(uuid,uuid,uuid,bigint,text,uuid,bigint,text,timestamptz,timestamptz,text,text,text)'::regprocedure);
+begin
+  if position($a1$    if p_motivation_kind is null then raise exception 'INVALID_INPUT' using errcode = '22023'; end if;
+    perform public.my_leads_workflow_assert_motivation(p_motivation_kind, p_motivation_text);
+    v_kind := p_motivation_kind;
+    v_text := case when p_motivation_kind = 'specified' then btrim(p_motivation_text) end;
+$a1$ in v_def) = 0 then raise exception 'fn_log_acquisition_offer anchor 1 not found'; end if;
+  v_def := replace(v_def, $a1$    if p_motivation_kind is null then raise exception 'INVALID_INPUT' using errcode = '22023'; end if;
+    perform public.my_leads_workflow_assert_motivation(p_motivation_kind, p_motivation_text);
+    v_kind := p_motivation_kind;
+    v_text := case when p_motivation_kind = 'specified' then btrim(p_motivation_text) end;
+$a1$, $b1$    if p_motivation_kind is not null then
+      perform public.my_leads_workflow_assert_motivation(p_motivation_kind, p_motivation_text);
+      v_kind := p_motivation_kind;
+      v_text := case when p_motivation_kind = 'specified' then btrim(p_motivation_text) end;
+    end if;
+$b1$);
+  if position($a2$        motivation_recorded = true, motivation_kind = v_kind, motivation_text = v_text,
+        motivation_recorded_at = coalesce(q.motivation_recorded_at, statement_timestamp()),
+        motivation_recorded_by = coalesce(q.motivation_recorded_by, v_actor),
+$a2$ in v_def) = 0 then raise exception 'fn_log_acquisition_offer anchor 2 not found'; end if;
+  v_def := replace(v_def, $a2$        motivation_recorded = true, motivation_kind = v_kind, motivation_text = v_text,
+        motivation_recorded_at = coalesce(q.motivation_recorded_at, statement_timestamp()),
+        motivation_recorded_by = coalesce(q.motivation_recorded_by, v_actor),
+$a2$, $b2$        motivation_recorded = (v_kind is not null), motivation_kind = v_kind, motivation_text = v_text,
+        motivation_recorded_at = case when v_kind is not null then coalesce(q.motivation_recorded_at, statement_timestamp()) end,
+        motivation_recorded_by = case when v_kind is not null then coalesce(q.motivation_recorded_by, v_actor) end,
+$b2$);
+  if position($a3$      p_org_id, p_property_id, 'offer_sent', p_sent_at, true, v_kind, v_text,
+      statement_timestamp(), v_actor, 1
+$a3$ in v_def) = 0 then raise exception 'fn_log_acquisition_offer anchor 3 not found'; end if;
+  v_def := replace(v_def, $a3$      p_org_id, p_property_id, 'offer_sent', p_sent_at, true, v_kind, v_text,
+      statement_timestamp(), v_actor, 1
+$a3$, $b3$      p_org_id, p_property_id, 'offer_sent', p_sent_at, (v_kind is not null), v_kind, v_text,
+      case when v_kind is not null then statement_timestamp() end, case when v_kind is not null then v_actor end, 1
+$b3$);
+  execute v_def;
+end
+$patch2$;
+
 revoke all on function public.contract_follow_up_at(date, timestamptz, integer, smallint)
   from public, anon, authenticated, service_role;
 grant execute on function public.contract_follow_up_at(date, timestamptz, integer, smallint) to service_role;
