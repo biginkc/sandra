@@ -9,10 +9,10 @@ import { requireLoopbackPostgresUrl } from "../../src/lib/testing/loopback-postg
 const dbUrl = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
-const safetyMigration = readFileSync(new URL("./20261004091000_slack_canary_safety.sql", import.meta.url), "utf8");
+const safetyMigration = readFileSync(new URL("./20261005190000_slack_canary_safety.sql", import.meta.url), "utf8");
 const foundationMigration = readFileSync(new URL("./20261003130001_slack_lead_unfurl_foundation.sql", import.meta.url), "utf8");
 const policyMigration = readFileSync(new URL("./20261003160000_slack_workspace_preview_policy.sql", import.meta.url), "utf8");
-const fenceMigration = readFileSync(new URL("./20261004093000_slack_canary_execution_fence.sql", import.meta.url), "utf8");
+const fenceMigration = readFileSync(new URL("./20261005190100_slack_canary_execution_fence.sql", import.meta.url), "utf8");
 
 const callAsServiceRole = async (db: Client, input: {
   jobId: string;
