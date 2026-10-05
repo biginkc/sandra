@@ -8,6 +8,7 @@ import {
   failStaleDialpadIntents,
   handleDialpadVoiceWebhook,
   processDialpadCallEvent,
+  redactDialpadUnmatchedEvents,
   sweepDialpadCallEvents,
   type DialpadConnectionRecord,
   type DialpadCtiDb,
@@ -130,6 +131,7 @@ function makeDb(overrides: Partial<DialpadCtiDb> = {}, calls: string[] = []): Di
     recordProcessFailure: vi.fn(async () => { calls.push('recordFailure'); }),
     listPending: vi.fn(async () => []),
     failStaleIntents: vi.fn(async () => 0),
+    redactUnmatched: vi.fn(async () => 0),
     ...overrides,
   };
 }
@@ -258,5 +260,30 @@ describe('failStaleDialpadIntents', () => {
     expect(failStaleIntents).toHaveBeenCalledWith(120);
     await failStaleDialpadIntents(db, 300);
     expect(failStaleIntents).toHaveBeenLastCalledWith(300);
+  });
+});
+
+describe('redactDialpadUnmatchedEvents', () => {
+  it('defaults to 30 days and 500 rows and returns the count', async () => {
+    const redactUnmatched = vi.fn(async () => 4);
+    const db = makeDb({ redactUnmatched });
+    expect(await redactDialpadUnmatchedEvents(db)).toBe(4);
+    expect(redactUnmatched).toHaveBeenCalledWith(30, 500);
+  });
+
+  it('passes the given days and limit to the port', async () => {
+    const redactUnmatched = vi.fn(async () => 1);
+    const db = makeDb({ redactUnmatched });
+    expect(await redactDialpadUnmatchedEvents(db, 7, 25)).toBe(1);
+    expect(redactUnmatched).toHaveBeenCalledWith(7, 25);
+  });
+
+  it('rejects under one day so fresh rows can never be redacted', async () => {
+    const redactUnmatched = vi.fn(async () => 0);
+    const db = makeDb({ redactUnmatched });
+    await expect(redactDialpadUnmatchedEvents(db, 0)).rejects.toBeInstanceOf(RangeError);
+    await expect(redactDialpadUnmatchedEvents(db, 0.5)).rejects.toBeInstanceOf(RangeError);
+    await expect(redactDialpadUnmatchedEvents(db, -3)).rejects.toBeInstanceOf(RangeError);
+    expect(redactUnmatched).not.toHaveBeenCalled();
   });
 });

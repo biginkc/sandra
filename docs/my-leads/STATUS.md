@@ -28,7 +28,7 @@ Last updated: 2026-10-04 (after #801 release)
 | `claude/my-leads-p1c2-dup-fix` | none | Claude Sonnet 5.5 builder | in progress (pre-enable fix: reclaim-after-reschedule duplicate text) |
 | `claude/my-leads-p1d-link-capture` | #802 | Claude (Sonnet 5.5 builder) | draft, base now `main` (retargeted after #801 merge); `origin/main` abf3edd6 merged in; head `1af972f1` before this docs commit (migration 20261005180000). Phase 1 nearly complete. |
 | `claude/my-leads-p2-data-plane` | #803 | Phase 2 sole writer | draft, built, NOT merged; Opus YES at `757e01c0` |
-| `claude/my-leads-p2-ui` | #809 | Phase 2 writer | draft, built, NOT merged; Opus YES at `8ab5fc5a` |
+| `claude/my-leads-p2-ui` | #809 | Phase 2 writer | draft, built, NOT merged; Opus YES at `8ab5fc5a`; owner Claude Sonnet 5.5 builder, pre-enable fixes in progress (keep key after expired callback; resume polling on flag change) |
 | `claude/my-leads-p4-acceptance` | #804 | Phase 4 writer | draft, built, NOT merged; Opus YES at `3cec0c19` |
 | `claude/my-leads-p3-comps` | #805 | Phase 3 writer: Claude Sonnet 5.5 (builder) | draft, built, NOT merged; main merged (f064f455); Opus YES at `bb86747e` pre-merge |
 | `claude/my-leads-p3-call-screen` | #807 | Claude Sonnet 5.5 builder | draft, built, NOT merged; Opus YES at `a908ad1c`; pre-enable fixes applied (dock key, notFound, action guards, schemaReady gate dropped, lead_comps probe signature); needs Opus re-review |

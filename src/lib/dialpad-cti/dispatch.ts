@@ -16,6 +16,7 @@ import {
   assessDialpadDirectoryIdentity,
   dialpadDirectoryVerificationRef,
   fetchDialpadDirectoryUser,
+  findDialpadDirectoryUserByEmail,
   parseClaimedDialpadUserId,
   resolveDialpadDirectoryKey,
   type DialpadDirectoryEnv,
@@ -25,7 +26,8 @@ import { DialpadDbError } from './event-processing';
 import { isDialpadTargetOriginConfigured } from './protocol';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const RECENT_WINDOW_MS = 60 * 60 * 1000;
+
+export type DialpadDialEndpoint = 'initiate_call' | 'call';
 
 export interface DialpadConnectionView {
   id: string;
@@ -34,6 +36,17 @@ export interface DialpadConnectionView {
   companyId: string | null;
   directoryKeyRef: string | null;
   recordingIngestEndpoint?: string | null;
+  /** Which Dialpad endpoint places API calls (2.7; Phase 0 decides, default initiate_call). */
+  dialEndpoint: DialpadDialEndpoint;
+  /** Separate dial key ref, or null to reuse the directory key. */
+  dialKeyRef: string | null;
+}
+
+/** Per-slot DNC / validity pre-check (fn_dialpad_call_slots); never a substitute for the server-side enforcement. */
+export interface DialpadCallSlot {
+  slot: 1 | 2 | 3;
+  callable: boolean;
+  reason: 'property_dnc' | 'contact_dnc' | 'phone_dnc' | 'invalid' | null;
 }
 
 export interface DialpadBindingView {
@@ -59,7 +72,14 @@ export interface DialpadDispatchDb {
   loadLiveBinding(orgId: string, userId: string): Promise<DialpadBindingView | null>;
   loadActiveGrants(orgId: string, userId: string): Promise<DialpadGrantView[]>;
   loadTargetPhones(orgId: string, userId: string, propertyId: string, contactId: string): Promise<DialpadTargetPhones | null>;
-  listRecentIntentIds(orgId: string, userId: string, sinceIso: string, limit: number): Promise<string[]>;
+  /** How many dials this rep authorized since `sinceIso`, and how many authorized intents are still unmatched and younger than 20 s. */
+  loadDispatchLoad(orgId: string, userId: string, sinceIso: string): Promise<{ authorizedLastMinute: number; unmatchedLast20s: number }>;
+  /**
+   * The newest intent for this rep and lead whose dial was released (authorized), is still unmatched and
+   * unexpired. It may or may not have rung. Null when none. Read-then-act like the other guards.
+   */
+  loadUnresolvedIntent(orgId: string, userId: string, propertyId: string, nowIso: string): Promise<{ intentId: string; idempotencyKey: string } | null>;
+  loadCallSlots(orgId: string, userId: string, propertyId: string, contactId: string): Promise<DialpadCallSlot[]>;
   claimBinding(orgId: string, userId: string, dialpadUserId: string): Promise<Json>;
   verifyBinding(bindingId: string, kind: 'provider_directory', ref: string): Promise<Json>;
   prepareIntent(args: {
@@ -86,13 +106,16 @@ function unwrap<T>(result: { data: T; error: DbError }): T {
 export function createSupabaseDialpadDispatchDb(client: SupabaseClient<Database>): DialpadDispatchDb {
   return {
     async loadConnection(orgId) {
+      // `*` rather than a column list: the 2.7 dial columns land a minute after this code deploys,
+      // and a named missing column would fail the whole bootstrap. Missing columns read as defaults.
       const { data, error } = await client
         .from('dialpad_org_connections')
-        .select('id, status, allowed_origins, dialpad_company_id, directory_api_key_ref, recording_ingest_endpoint')
+        .select('*')
         .eq('org_id', orgId)
         .maybeSingle();
       if (error) throw new DialpadDbError(classifyDialpadRpcError(error), error.code ?? null);
       if (!data) return null;
+      const row = data as Partial<typeof data>;
       return {
         id: data.id,
         status: data.status,
@@ -100,6 +123,8 @@ export function createSupabaseDialpadDispatchDb(client: SupabaseClient<Database>
         companyId: data.dialpad_company_id,
         directoryKeyRef: data.directory_api_key_ref,
         recordingIngestEndpoint: data.recording_ingest_endpoint,
+        dialEndpoint: row.dial_endpoint === 'call' ? 'call' : 'initiate_call',
+        dialKeyRef: typeof row.dial_api_key_ref === 'string' ? row.dial_api_key_ref : null,
       };
     },
     async loadLiveBinding(orgId, userId) {
@@ -166,18 +191,59 @@ export function createSupabaseDialpadDispatchDb(client: SupabaseClient<Database>
       }
       return { contactId: contact.id, slots };
     },
-    async listRecentIntentIds(orgId, userId, sinceIso, limit) {
+    // Accepted race: this read-then-act guard is not atomic, so two truly simultaneous dials from
+    // one rep could both pass. Accepted for a single rep; the provider 429 is the backstop.
+    async loadDispatchLoad(orgId, userId, sinceIso) {
       const { data, error } = await client
         .from('dialpad_call_intents')
-        .select('id')
+        .select('id, status, dispatch_authorized_at, matched_at')
         .eq('org_id', orgId)
         .eq('rep_user_id', userId)
         .not('dispatch_authorized_at', 'is', null)
         .gte('dispatch_authorized_at', sinceIso)
-        .order('dispatch_authorized_at', { ascending: false })
-        .limit(limit);
+        .limit(50);
       if (error) throw new DialpadDbError(classifyDialpadRpcError(error), error.code ?? null);
-      return (data ?? []).map((row) => row.id);
+      const rows = data ?? [];
+      const inFlightSince = Date.now() - 20_000;
+      return {
+        authorizedLastMinute: rows.length,
+        unmatchedLast20s: rows.filter((row) => row.status === 'prepared' && row.matched_at === null
+          && row.dispatch_authorized_at !== null && Date.parse(row.dispatch_authorized_at) >= inFlightSince).length,
+      };
+    },
+    async loadUnresolvedIntent(orgId, userId, propertyId, nowIso) {
+      const { data, error } = await client
+        .from('dialpad_call_intents')
+        .select('id, idempotency_key')
+        .eq('org_id', orgId)
+        .eq('rep_user_id', userId)
+        .eq('property_id', propertyId)
+        .eq('status', 'prepared')
+        .is('matched_at', null)
+        .not('dispatch_authorized_at', 'is', null)
+        .gt('expires_at', nowIso)
+        .order('dispatch_authorized_at', { ascending: false })
+        .limit(1);
+      if (error) throw new DialpadDbError(classifyDialpadRpcError(error), error.code ?? null);
+      const row = data?.[0];
+      return row ? { intentId: row.id as string, idempotencyKey: row.idempotency_key as string } : null;
+    },
+    async loadCallSlots(orgId, userId, propertyId, contactId) {
+      const data = unwrap(await client.rpc('fn_dialpad_call_slots', { p_org_id: orgId, p_rep_user_id: userId, p_property_id: propertyId, p_contact_id: contactId }));
+      if (!Array.isArray(data)) return [];
+      const slots: DialpadCallSlot[] = [];
+      for (const entry of data) {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+        const slot = entry.slot;
+        const reason = entry.reason;
+        if (slot !== 1 && slot !== 2 && slot !== 3) continue;
+        slots.push({
+          slot,
+          callable: entry.callable === true,
+          reason: reason === 'property_dnc' || reason === 'contact_dnc' || reason === 'phone_dnc' || reason === 'invalid' ? reason : null,
+        });
+      }
+      return slots;
     },
     async claimBinding(orgId, userId, dialpadUserId) {
       return unwrap(await client.rpc('fn_claim_dialpad_member_binding', { p_org_id: orgId, p_user_id: userId, p_dialpad_user_id: dialpadUserId }));
@@ -214,12 +280,11 @@ export interface DialpadActor {
   userId: string;
 }
 
-export interface DialpadPanelBootstrap {
+/** What the API-dial client needs: the connection is active and the rep's binding/grant state. No iframe, no browser capture (D4). */
+export interface DialpadCallingBootstrap {
   connectionId: string;
-  allowedOrigins: string[];
   binding: { status: 'none' } | { status: 'pending' | 'verified'; dialpadUserId: string };
   grants: { id: string; callerNumberE164: string; identityType: DialpadIdentityType | null }[];
-  recording?: { ingestEndpoint: string; timingEnabled?: boolean };
 }
 
 const DENIAL_MESSAGES: Record<DialpadDenialDetail, string> = {
@@ -284,34 +349,16 @@ function failureFromDbError(error: unknown): DialpadFailure {
   return fail('unavailable', 'Sandra could not reach Dialpad calling. Nothing was dialed; try again.');
 }
 
-function isTrustedRecordingIngestEndpoint(value: string | null | undefined): value is string {
-  if (!value) return false;
-  try {
-    const endpoint = new URL(value);
-    return endpoint.protocol === 'wss:' && !endpoint.username && !endpoint.password && !endpoint.search && !endpoint.hash && endpoint.pathname === '/dialpad-browser-ingest';
-  } catch {
-    return false;
-  }
-}
-
-/** Everything the panel needs to render, or null when this org/rep has no usable Dialpad connection. */
-export async function loadDialpadPanelBootstrap(db: DialpadDispatchDb, actor: DialpadActor): Promise<DialpadPanelBootstrap | null> {
+/** Everything the API-dial client needs, or null when this org/rep has no usable Dialpad connection. */
+export async function loadDialpadCallingBootstrap(db: DialpadDispatchDb, actor: DialpadActor): Promise<DialpadCallingBootstrap | null> {
   const connection = await db.loadConnection(actor.orgId);
   if (!connection || connection.status !== 'active' || !isDialpadTargetOriginConfigured(connection.allowedOrigins)) return null;
   const [binding, grants] = await Promise.all([db.loadLiveBinding(actor.orgId, actor.userId), db.loadActiveGrants(actor.orgId, actor.userId)]);
-  const bootstrap: DialpadPanelBootstrap = {
+  return {
     connectionId: connection.id,
-    allowedOrigins: connection.allowedOrigins,
     binding: binding ? { status: binding.status, dialpadUserId: binding.dialpadUserId } : { status: 'none' },
     grants,
-  } satisfies DialpadPanelBootstrap;
-  if (isTrustedRecordingIngestEndpoint(connection.recordingIngestEndpoint)) {
-    bootstrap.recording = {
-      ingestEndpoint: connection.recordingIngestEndpoint,
-      ...(process.env.DIALPAD_RECORDING_TIMING_ENABLED === 'true' ? { timingEnabled: true } : {}),
-    };
-  }
-  return bootstrap;
+  };
 }
 
 export type VerifyBindingResult =
@@ -386,10 +433,60 @@ export async function verifyDialpadBinding(
   }
 }
 
+export type EnsureBindingResult =
+  | { ok: true; dialpadUserId: string; status: 'verified'; created: boolean }
+  | DialpadFailure
+  | { ok: false; code: 'identity_mismatch'; message: string; reason: string };
+
+/**
+ * Binding without the iframe (2.7): a verified binding is returned as is; otherwise the rep's
+ * confirmed Sandra email is looked up in the Dialpad directory and the found id goes through the
+ * unchanged `verifyDialpadBinding` (company, active state and listed email are all re-proven).
+ * Claiming needs an active connection, so first-time binding happens right after activation.
+ */
+export async function ensureDialpadBinding(
+  db: DialpadDispatchDb,
+  actor: DialpadActor,
+  identity: { email: string | null; emailConfirmed: boolean },
+  deps: VerifyBindingDeps,
+): Promise<EnsureBindingResult> {
+  try {
+    const connection = await db.loadConnection(actor.orgId);
+    if (!connection || connection.status !== 'active' || !isDialpadTargetOriginConfigured(connection.allowedOrigins)) {
+      return fail('not_configured', dialpadDenialMessage('connection_inactive'));
+    }
+    const existing = await db.loadLiveBinding(actor.orgId, actor.userId);
+    if (existing?.status === 'verified') return { ok: true, dialpadUserId: existing.dialpadUserId, status: 'verified', created: false };
+    const email = identity.email?.trim().toLowerCase() ?? '';
+    if (!email || !identity.emailConfirmed) {
+      return { ok: false, code: 'identity_mismatch', reason: 'email_unverified', message: 'Confirm your Sandra email before connecting Dialpad.' };
+    }
+    const apiKey = resolveDialpadDirectoryKey(connection.directoryKeyRef, deps.env);
+    if (!apiKey || !connection.companyId) {
+      return fail('not_configured', 'Dialpad account verification is not configured for this organization. Ask an owner to finish setup.');
+    }
+    const found = await findDialpadDirectoryUserByEmail({ email, apiKey, fetchImpl: deps.fetchImpl });
+    if (!found.ok) {
+      if (found.reason === 'not_found') {
+        return { ok: false, code: 'identity_mismatch', reason: 'user_not_found', message: 'Dialpad has no user with your Sandra email in this organization.' };
+      }
+      if (found.reason === 'invalid_response') {
+        return { ok: false, code: 'identity_mismatch', reason: 'ambiguous', message: 'Dialpad lists more than one user with your email. Ask an owner to resolve it.' };
+      }
+      return fail('unavailable', 'Sandra could not reach the Dialpad directory right now. Try again shortly.');
+    }
+    const verified = await verifyDialpadBinding(db, actor, identity, found.user.id, deps);
+    if (!verified.ok) return verified;
+    return { ok: true, dialpadUserId: verified.dialpadUserId, status: 'verified', created: !verified.replayed };
+  } catch (error) {
+    return failureFromDbError(error);
+  }
+}
+
 export interface DialpadCallTargets {
   contactId: string;
   phones: { slot: 1 | 2 | 3; masked: string }[];
-  grants: DialpadPanelBootstrap['grants'];
+  grants: DialpadCallingBootstrap['grants'];
 }
 
 export function maskDialpadPhone(raw: string): string {
@@ -433,15 +530,24 @@ export type DialpadStartCallResult =
       intentId: string;
       expiresAt: string;
       dial: {
+        dialpadUserId: string;
         phoneNumber: string;
         customData: string;
         identityType: DialpadIdentityType | null;
+        /** JS number for the browser protocol; null when the identity id is kept as text (`identityIdText`). */
         identityId: number | null;
+        /** The exact int64 text, for the server-side dialer. */
+        identityIdText: string | null;
         outboundCallerId: string | null;
       };
     }
   | { ok: true; dispatched: false; intentId: string }
   | DialpadFailure;
+
+export interface DialpadStartCallOptions {
+  /** The server-side dialer renders ids as exact JSON integer text, so ids beyond 2^53 are fine there. */
+  allowLargeIdentityIds?: boolean;
+}
 
 /**
  * Prepare (idempotent on the client key) then authorize in one server-side
@@ -449,7 +555,7 @@ export type DialpadStartCallResult =
  * payload; every retry of the same key returns dispatched:false, so a retry can
  * never dial twice. The caller identity is never taken from client input.
  */
-export async function startDialpadCall(db: DialpadDispatchDb, actor: DialpadActor, input: DialpadStartCallInput): Promise<DialpadStartCallResult> {
+export async function startDialpadCall(db: DialpadDispatchDb, actor: DialpadActor, input: DialpadStartCallInput, options: DialpadStartCallOptions = {}): Promise<DialpadStartCallResult> {
   const { propertyId, contactId, phoneSlot, grantId, idempotencyKey } = input;
   if (typeof propertyId !== 'string' || !UUID.test(propertyId) || typeof contactId !== 'string' || !UUID.test(contactId)
       || typeof idempotencyKey !== 'string' || !UUID.test(idempotencyKey)
@@ -473,7 +579,7 @@ export async function startDialpadCall(db: DialpadDispatchDb, actor: DialpadActo
       idempotencyKey,
       grantId: typeof grantId === 'string' ? grantId : null,
     }));
-    if (prepared.callerIdentityId !== null && !Number.isSafeInteger(Number(prepared.callerIdentityId))) {
+    if (!options.allowLargeIdentityIds && prepared.callerIdentityId !== null && !Number.isSafeInteger(Number(prepared.callerIdentityId))) {
       // The browser protocol carries identity_id as a JSON number; an id beyond 2^53 cannot be sent exactly.
       await db.cancelIntent(actor.orgId, actor.userId, prepared.intentId);
       return fail('unsupported_caller_identity', 'That caller ID cannot be used from the browser dialer.');
@@ -488,10 +594,12 @@ export async function startDialpadCall(db: DialpadDispatchDb, actor: DialpadActo
           intentId: authorization.intentId,
           expiresAt: authorization.expiresAt,
           dial: {
+            dialpadUserId: authorization.dial.dialpadUserId,
             phoneNumber: authorization.dial.phoneNumber,
             customData: authorization.dial.customData,
             identityType: authorization.dial.identityType,
-            identityId: authorization.dial.identityId === null ? null : Number(authorization.dial.identityId),
+            identityId: authorization.dial.identityId === null || !Number.isSafeInteger(Number(authorization.dial.identityId)) ? null : Number(authorization.dial.identityId),
+            identityIdText: authorization.dial.identityId,
             outboundCallerId: authorization.dial.outboundCallerId,
           },
         };
@@ -504,7 +612,7 @@ export async function startDialpadCall(db: DialpadDispatchDb, actor: DialpadActo
       case 'matched':
         return fail('matched', dialpadDenialMessage('intent_already_matched'), 'intent_already_matched');
       case 'expired':
-        return fail('expired', 'This call request expired before it was sent. Start it again.');
+        return fail('expired', 'No confirmation from Dialpad. Check the dialer before calling again.');
     }
   } catch (error) {
     return failureFromDbError(error);
@@ -533,21 +641,6 @@ export async function cancelDialpadCall(
   try {
     await db.cancelIntent(actor.orgId, actor.userId, intentId);
     return { ok: true };
-  } catch (error) {
-    return failureFromDbError(error);
-  }
-}
-
-/** Calls this rep dialed within the last hour, so a reloaded page resumes showing webhook-derived state. */
-export async function listRecentDialpadCalls(
-  db: DialpadDispatchDb,
-  actor: DialpadActor,
-  now: Date = new Date(),
-): Promise<{ ok: true; calls: DialpadCallStatus[] } | DialpadFailure> {
-  try {
-    const ids = await db.listRecentIntentIds(actor.orgId, actor.userId, new Date(now.getTime() - RECENT_WINDOW_MS).toISOString(), 5);
-    const calls = await Promise.all(ids.map(async (id) => parseDialpadCallStatus(await db.getCallStatus(actor.orgId, actor.userId, id))));
-    return { ok: true, calls };
   } catch (error) {
     return failureFromDbError(error);
   }

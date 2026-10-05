@@ -49,7 +49,7 @@ import type {
 
 const TIME_ZONE = "America/Chicago"
 
-type PromptOutcome = Extract<AcquisitionAttemptFormPayload["outcome"], "reached" | "no_answer" | "voicemail" | "wrong_number">
+export type PromptOutcome = Extract<AcquisitionAttemptFormPayload["outcome"], "reached" | "no_answer" | "voicemail" | "wrong_number">
 const OUTCOMES: { value: PromptOutcome; label: string }[] = [
   { value: "reached", label: "Reached" },
   { value: "no_answer", label: "No answer" },
@@ -87,6 +87,8 @@ export type PostCallPromptProps = {
   propertyId: string
   propertyLabel: string
   initialCallActivityId?: string | null
+  /** Pre-selected outcome (the auto-open prompt's guess from the Dialpad call); the rep can change it. */
+  initialOutcome?: PromptOutcome | null
   callReferenceOptions?: readonly AcquisitionCallReferenceOption[]
   callReferencesLoading?: boolean
   callReferencesError?: string | null
@@ -117,6 +119,7 @@ export function PostCallPrompt({
   propertyId,
   propertyLabel,
   initialCallActivityId = null,
+  initialOutcome = null,
   callReferenceOptions = [],
   callReferencesLoading = false,
   callReferencesError = null,
@@ -135,7 +138,7 @@ export function PostCallPrompt({
   variant = "dialog",
 }: PostCallPromptProps) {
   const [source, setSource] = useState<AcquisitionAttemptSource>(initialCallActivityId ? "sandra" : "dialpad")
-  const [outcome, setOutcome] = useState<PromptOutcome | "">("")
+  const [outcome, setOutcome] = useState<PromptOutcome | "">(initialOutcome ?? "")
   const outcomeTouched = useRef(false)
   const [occurredAt, setOccurredAt] = useState(() => centralDateTimeFromIso(new Date().toISOString()))
   const [note, setNote] = useState("")
@@ -638,7 +641,7 @@ export function PostCallPrompt({
   )
 }
 
-function ReceiptLines({
+export function ReceiptLines({
   extras,
   sentNextStepAt,
   note,

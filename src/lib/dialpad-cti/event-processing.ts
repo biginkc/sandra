@@ -39,6 +39,8 @@ export interface DialpadCtiDb {
   listPending(limit: number): Promise<string[]>;
   /** Marks authorized dials with no provider event for `cutoffSeconds` as failed (a marker; returns how many). */
   failStaleIntents(cutoffSeconds: number): Promise<number>;
+  /** Redacts quarantined no-match/no-binding event payloads older than `olderThanDays` (returns how many). */
+  redactUnmatched(olderThanDays: number, limit: number): Promise<number>;
 }
 
 type DbError = { code?: string | null; details?: string | null; message?: string } | null;
@@ -86,6 +88,9 @@ export function createSupabaseDialpadCtiDb(client: SupabaseClient<Database>): Di
     async failStaleIntents(cutoffSeconds) {
       return unwrap(await client.rpc('fn_fail_stale_dialpad_intents', { p_cutoff_seconds: cutoffSeconds })) ?? 0;
     },
+    async redactUnmatched(olderThanDays, limit) {
+      return unwrap(await client.rpc('fn_redact_dialpad_unmatched_events', { p_older_than: `${olderThanDays} days`, p_limit: limit })) ?? 0;
+    },
   };
 }
 
@@ -114,6 +119,18 @@ export async function processDialpadCallEvent(db: DialpadCtiDb, eventId: string)
  */
 export async function failStaleDialpadIntents(db: DialpadCtiDb, cutoffSeconds = 120): Promise<number> {
   return db.failStaleIntents(cutoffSeconds);
+}
+
+/**
+ * Privacy redaction of personal-call payloads (approved 2026-10-04). Only quarantined
+ * no_lead_match / no_binding rows older than `olderThanDays` are redacted; it never creates a touch
+ * and never writes a ledger row. Rejects `olderThanDays` < 1 so a misconfiguration can never redact fresh rows.
+ */
+export async function redactDialpadUnmatchedEvents(db: DialpadCtiDb, olderThanDays = 30, limit = 500): Promise<number> {
+  if (!Number.isFinite(olderThanDays) || olderThanDays < 1) {
+    throw new RangeError('olderThanDays must be at least 1');
+  }
+  return db.redactUnmatched(olderThanDays, limit);
 }
 
 export interface DialpadEventSweepSummary {

@@ -105,6 +105,73 @@ export async function fetchDialpadDirectoryUser(input: {
   return user ? { ok: true, user } : { ok: false, reason: 'invalid_response' };
 }
 
+/**
+ * Server-side binding without the Mini Dialer: look the Sandra user up by their confirmed email
+ * (GET /api/v2/users?email=...). Exactly one active record is a match; none is `not_found`; two
+ * or more is `invalid_response` (the caller must not guess). Phase 0 confirms the filter exists;
+ * until then the parser also accepts a `{ items: [...] }` envelope and a bare array.
+ */
+export async function findDialpadDirectoryUserByEmail(input: {
+  email: string;
+  apiKey: string;
+  fetchImpl?: DialpadDirectoryFetch;
+}): Promise<DialpadDirectoryResult> {
+  const email = input.email.trim().toLowerCase();
+  if (!email || email.length > 320 || !email.includes('@')) return { ok: false, reason: 'invalid_response' };
+  const doFetch: DialpadDirectoryFetch = input.fetchImpl ?? ((url, init) => fetch(url, init));
+  let response: { status: number; text(): Promise<string> };
+  try {
+    response = await doFetch(`${DIALPAD_API_ORIGIN}/api/v2/users?email=${encodeURIComponent(email)}`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${input.apiKey}`, Accept: 'application/json' },
+      redirect: 'error',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return { ok: false, reason: 'unavailable' };
+  }
+  if (response.status === 404) return { ok: false, reason: 'not_found' };
+  if (response.status === 401 || response.status === 403) return { ok: false, reason: 'rejected' };
+  if (response.status !== 200) return { ok: false, reason: 'unavailable' };
+  let text: string;
+  try {
+    text = await response.text();
+  } catch {
+    return { ok: false, reason: 'unavailable' };
+  }
+  const users = parseDialpadDirectoryUsers(text);
+  if (users === null) return { ok: false, reason: 'invalid_response' };
+  const matches = users.filter((user) => user.emails.some((candidate) => candidate.trim().toLowerCase() === email));
+  if (matches.length === 0) return { ok: false, reason: 'not_found' };
+  if (matches.length > 1) return { ok: false, reason: 'invalid_response' };
+  return { ok: true, user: matches[0]! };
+}
+
+/** Exposed for tests: a list response (`{items:[...]}` or a bare array) without rounding int64 ids. */
+export function parseDialpadDirectoryUsers(rawText: string): DialpadDirectoryUser[] | null {
+  if (rawText.length === 0 || rawText.length > MAX_RESPONSE_CHARS) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawText.replace(INT64_FIELDS, '"$1"$2"$3"'));
+  } catch {
+    return null;
+  }
+  const list = Array.isArray(parsed)
+    ? parsed
+    : parsed && typeof parsed === 'object' && Array.isArray((parsed as { items?: unknown }).items)
+      ? (parsed as { items: unknown[] }).items
+      : null;
+  if (list === null) return null;
+  const users: DialpadDirectoryUser[] = [];
+  for (const item of list) {
+    const user = parseDialpadDirectoryUser(JSON.stringify(item));
+    if (!user) return null;
+    users.push(user);
+  }
+  return users;
+}
+
 export type DialpadIdentityMismatch = 'user_mismatch' | 'inactive' | 'company_mismatch' | 'email_unverified' | 'email_mismatch';
 
 /**

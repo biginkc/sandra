@@ -45,9 +45,9 @@ export type Database = {
         Relationships: []
       }
       dialpad_org_connections: {
-        Row: { id: string; org_id: string; status: string; cti_client_id: string; allowed_origins: string[]; webhook_secret_ref: string; webhook_secret_version: number; dialpad_company_id: string | null; directory_api_key_ref: string | null; recording_ingest_endpoint: string | null; created_at: string; updated_at: string }
-        Insert: { id?: string; org_id: string; status?: string; cti_client_id: string; allowed_origins?: string[]; webhook_secret_ref: string; webhook_secret_version?: number; dialpad_company_id?: string | null; directory_api_key_ref?: string | null; recording_ingest_endpoint?: string | null; created_at?: string; updated_at?: string }
-        Update: { status?: string; cti_client_id?: string; allowed_origins?: string[]; webhook_secret_ref?: string; webhook_secret_version?: number; dialpad_company_id?: string | null; directory_api_key_ref?: string | null; recording_ingest_endpoint?: string | null; updated_at?: string }
+        Row: { id: string; org_id: string; status: string; cti_client_id: string; allowed_origins: string[]; webhook_secret_ref: string; webhook_secret_version: number; dialpad_company_id: string | null; directory_api_key_ref: string | null; recording_ingest_endpoint: string | null; dial_endpoint: string; dial_api_key_ref: string | null; created_at: string; updated_at: string }
+        Insert: { id?: string; org_id: string; status?: string; cti_client_id: string; allowed_origins?: string[]; webhook_secret_ref: string; webhook_secret_version?: number; dialpad_company_id?: string | null; directory_api_key_ref?: string | null; recording_ingest_endpoint?: string | null; dial_endpoint?: string; dial_api_key_ref?: string | null; created_at?: string; updated_at?: string }
+        Update: { status?: string; cti_client_id?: string; allowed_origins?: string[]; webhook_secret_ref?: string; webhook_secret_version?: number; dialpad_company_id?: string | null; directory_api_key_ref?: string | null; recording_ingest_endpoint?: string | null; dial_endpoint?: string; dial_api_key_ref?: string | null; updated_at?: string }
         Relationships: []
       }
 
@@ -73,7 +73,7 @@ export type Database = {
       }
 
       dialpad_call_events: {
-        Row: { id: string; org_id: string; connection_id: string; provider_call_id: string; event_state: string; event_timestamp_ms: number; payload: Json; payload_sha256: string; signature_alg: string; secret_version: number; received_at: string; disposition: string; disposition_reason: string | null; matched_intent_id: string | null; conflicts_with_event_id: string | null; disposed_at: string | null; projected_at: string | null; process_attempts: number; last_process_error: string | null }
+        Row: { id: string; org_id: string; connection_id: string; provider_call_id: string; event_state: string; event_timestamp_ms: number; payload: Json; payload_sha256: string; signature_alg: string; secret_version: number; received_at: string; disposition: string; disposition_reason: string | null; matched_intent_id: string | null; conflicts_with_event_id: string | null; disposed_at: string | null; projected_at: string | null; process_attempts: number; last_process_error: string | null; redacted_at: string | null }
         Insert: { id?: string; org_id: string; connection_id: string; provider_call_id: string; event_state: string; event_timestamp_ms: number; payload: Json; payload_sha256: string; signature_alg?: string; secret_version: number; received_at?: string; disposition?: string; disposition_reason?: string | null; conflicts_with_event_id?: string | null; disposed_at?: string | null }
         Update: { disposition?: string; disposition_reason?: string | null; matched_intent_id?: string | null; disposed_at?: string | null; projected_at?: string | null; process_attempts?: number; last_process_error?: string | null }
         Relationships: []
@@ -370,6 +370,8 @@ export type Database = {
           outcome: string | null
           property_id: string
           provider_attempt_key: string | null
+          prompt_acknowledged_at: string | null
+          prompt_acknowledged_via: string | null
           recorded_at: string
           recording_url: string | null
           source: string
@@ -390,6 +392,8 @@ export type Database = {
           outcome?: string | null
           property_id: string
           provider_attempt_key?: string | null
+          prompt_acknowledged_at?: string | null
+          prompt_acknowledged_via?: string | null
           recorded_at?: string
           recording_url?: string | null
           source: string
@@ -6128,6 +6132,13 @@ export type Database = {
         Returns: Json
       }
       fn_resolve_dialpad_recording_links: { Args: { p_limit?: number }; Returns: Json }
+      // P2 UI (2.6-2.10): hand-added beside the generated Dialpad block.
+      fn_list_unacknowledged_call_prompts: { Args: { p_org_id: string; p_limit?: number; p_before_ended?: string | null; p_before_id?: string | null; p_horizon?: string }; Returns: Json }
+      fn_acknowledge_call_prompt: { Args: { p_org_id: string; p_attempt_id: string; p_via: string }; Returns: Json }
+      fn_my_leads_ack_legacy_call_prompts: { Args: { p_org_id: string; p_apply?: boolean; p_fingerprint?: string | null }; Returns: Json }
+      fn_dialpad_call_slots: { Args: { p_org_id: string; p_rep_user_id: string; p_property_id: string; p_contact_id: string }; Returns: Json }
+      fn_redact_dialpad_unmatched_events: { Args: { p_older_than?: string; p_limit?: number }; Returns: number }
+      fn_my_leads_callbacks_due: { Args: { p_org_id: string; p_lookahead?: string; p_grace?: string }; Returns: Json }
       fn_open_dialpad_recording_capture: { Args: { p_org_id: string; p_rep_user_id: string; p_intent_id: string }; Returns: Json }
       fn_get_dialpad_recording_capture: { Args: { p_org_id: string; p_rep_user_id: string; p_capture_id: string }; Returns: Json }
       fn_close_dialpad_recording_capture: { Args: { p_org_id: string; p_capture_id: string; p_rep_user_id?: string | null; p_reason?: string | null }; Returns: Json }

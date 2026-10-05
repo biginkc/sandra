@@ -97,6 +97,16 @@ export function clearExtras(viewerUserId: string, attemptKey: string, now = Date
   writeAll(readAll(now).filter((item) => !(item.viewerUserId === viewerUserId && item.attemptKey === attemptKey)))
 }
 
+/** A viewer's stored entries for one lead, newest first (memory plus what a reload left in storage). */
+export function listExtrasFor(viewerUserId: string, propertyId: string, now = Date.now()): ExtrasEntry[] {
+  const all = new Map<string, ExtrasEntry>()
+  for (const entry of readAll(now)) all.set(id(entry.viewerUserId, entry.attemptKey), entry)
+  for (const entry of memory.values()) all.set(id(entry.viewerUserId, entry.attemptKey), entry)
+  return [...all.values()]
+    .filter((entry) => entry.viewerUserId === viewerUserId && entry.propertyId === propertyId)
+    .sort((a, b) => b.createdAt - a.createdAt)
+}
+
 /** A user change keeps only that user's entries (the submission store does the same for its records). */
 export function discardOtherViewerExtras(viewerUserId: string, now = Date.now()) {
   for (const [key, entry] of memory) if (entry.viewerUserId !== viewerUserId) memory.delete(key)

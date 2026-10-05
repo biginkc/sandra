@@ -2,10 +2,12 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { loadMyLeadQueueRow, savePostCallExtras } from "@/app/(dashboard)/my-leads/actions";
-import { PostCallPrompt } from "@/app/(dashboard)/my-leads/_components/post-call-prompt";
+import { loadMyLeadQueueRow } from "@/app/(dashboard)/my-leads/actions";
+import { PostCallPrompt, ReceiptLines } from "@/app/(dashboard)/my-leads/_components/post-call-prompt";
+import { listExtrasFor } from "@/app/(dashboard)/my-leads/_components/extras-store";
+import { extrasConfirmed, saveExtrasRequest, type ExtrasRequest } from "@/app/(dashboard)/my-leads/_components/extras-saver";
 import type { PostCallExtrasState } from "@/app/(dashboard)/my-leads/_components/types";
 import { useAttemptWorkflow, type AttemptOpening } from "@/app/(dashboard)/my-leads/_components/use-attempt-workflow";
 import { WorkflowRecoveryContext } from "@/app/(dashboard)/my-leads/_components/workflow-form";
@@ -68,6 +70,53 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const opening = useMemo<AttemptOpening>(() => ({ action: "log-attempt", row: queueRow }), [propertyId, queueVersion]);
   const [extrasState, setExtrasState] = useState<PostCallExtrasState | null>(null);
+  const extrasRequest = useRef<ExtrasRequest | null>(null);
+  const extrasInFlight = useRef(new Set<string>());
+  const openingRef = useRef(opening);
+  useEffect(() => {
+    openingRef.current = opening;
+  });
+
+  // The shared P1c saver (also behind the My Leads page): idempotent per extra, and the stored
+  // entry is cleared only after the server confirms both. `show` is false for a replay that belongs
+  // to an earlier opening, which must not take over the current prompt's status line.
+  const runExtras = async (request: ExtrasRequest, show: boolean) => {
+    const result = await saveExtrasRequest(request, viewer.userId, extrasInFlight.current, () => {
+      if (show) {
+        extrasRequest.current = request;
+        setExtrasState({ status: "saving" });
+      }
+    });
+    if (!result) return;
+    if (show && extrasRequest.current === request) setExtrasState({ status: "done", result });
+    if (result.ok) router.refresh();
+  };
+
+  // After a reload the stored entry of an earlier attempt on this lead (a failed or interrupted
+  // save) is surfaced here with a Retry, through the same saver. The live page keeps such an entry
+  // for its recovery paths; this screen has no recovery record after a reload, so it offers Retry.
+  const [recovered, setRecovered] = useState<ExtrasRequest | null>(null);
+  const [recoveredState, setRecoveredState] = useState<PostCallExtrasState | null>(null);
+  useEffect(() => {
+    const entry = listExtrasFor(viewer.userId, propertyId)[0];
+    // Reads sessionStorage, which only exists on the client, once per lead.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setRecovered(entry ? { attemptKey: entry.attemptKey, memberId: entry.memberId, propertyId: entry.propertyId, extras: entry.extras } : null);
+    setRecoveredState(entry ? { status: "done", result: { ok: false, message: "A note or next step from an earlier call on this lead was not saved." } } : null);
+  }, [viewer.userId, propertyId]);
+  const retryRecovered = async () => {
+    if (!recovered) return;
+    const result = await saveExtrasRequest(recovered, viewer.userId, extrasInFlight.current, () => setRecoveredState({ status: "saving" }));
+    if (!result) return;
+    if (extrasConfirmed(result)) {
+      setRecovered(null);
+      setRecoveredState(null);
+    } else {
+      setRecoveredState({ status: "done", result });
+    }
+    if (result.ok) router.refresh();
+  };
+
   const { submit, recoveryValue, onDripChanged } = useAttemptWorkflow<AttemptOpening>({
     opening,
     memberId: viewer.userId,
@@ -79,21 +128,19 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
     },
     onCommitted: async (committed) => {
       if (committed.extras) {
-        setExtrasState({ status: "saving" });
-        try {
-          const result = await savePostCallExtras({
-            memberId: viewer.userId,
-            propertyId,
-            submissionId: committed.extras.submissionId,
-            note: committed.extras.note,
-            nextStep: committed.extras.nextStep,
-          });
-          setExtrasState({ status: "done", result });
-        } catch {
-          setExtrasState({ status: "done", result: { ok: false, message: "The note and next step could not be saved." } });
-        }
+        void runExtras(
+          { attemptKey: committed.attemptKey, memberId: viewer.userId, propertyId, extras: committed.extras },
+          true,
+        );
       }
       router.refresh();
+    },
+    // Recovery paths (late success, already saved, reconciliation): the note must still be written.
+    onExtras: (flush) => {
+      void runExtras(
+        { attemptKey: flush.attemptKey, memberId: flush.memberId, propertyId: flush.propertyId, extras: flush.extras },
+        flush.opening === openingRef.current,
+      );
     },
     onSettled: () => undefined,
     onClose: () => router.refresh(),
@@ -118,6 +165,11 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
   const history = (
     <HistoryPanel propertyId={propertyId} contactId={lead.homeowner.contactId} viewerUserId={viewer.userId} notes={data.notes} messages={data.messages} />
   );
+  const recoveredBanner = recovered ? (
+    <div data-testid="call-screen-recovered-extras" className="rounded-[16px] border border-border bg-card p-4">
+      <ReceiptLines extras={recoveredState} sentNextStepAt={null} note={recovered.extras.note} onRetry={() => void retryRecovered()} />
+    </div>
+  ) : null;
   const prompt = (
     <WorkflowRecoveryContext.Provider value={recoveryValue}>
       <PostCallPrompt
@@ -132,6 +184,10 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
         viewerLabel={viewerLabel}
         nextStepAt={queueRow.nextStepAt}
         extras={extrasState}
+        onRetryExtras={() => {
+          const request = extrasRequest.current;
+          if (request) void runExtras(request, true);
+        }}
       />
     </WorkflowRecoveryContext.Provider>
   );
@@ -186,7 +242,7 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
               </div>
             ) : null}
             <div className="order-3 lg:order-none">{history}</div>
-            <div data-testid="call-screen-prompt-dock" className="order-4 lg:sticky lg:bottom-0 lg:order-none">{prompt}</div>
+            <div data-testid="call-screen-prompt-dock" className="order-4 flex flex-col gap-3 lg:sticky lg:bottom-0 lg:order-none">{recoveredBanner}{prompt}</div>
           </div>
         </div>
       </div>
