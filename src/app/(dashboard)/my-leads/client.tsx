@@ -1417,9 +1417,11 @@ export function MyLeadsClient({
             void startApiDial(propertyId, attempt);
           }}
           onDismiss={() => setDialFlight(null)}
-          onFinished={(intentId) => {
-            // The call is over: the next deliberate click on this lead dials with a new key.
-            if (dialKey.current?.intentId === intentId) dialKey.current = null;
+          onFinished={(intentId, finalStatus) => {
+            // The call is over: the next deliberate click on this lead dials with a new key. Except after
+            // `expired` (Dialpad never confirmed, it may have rung): keep the key so a retry reuses it
+            // instead of creating a duplicate dial.
+            if (dialKey.current?.intentId === intentId && finalStatus.state !== "expired") dialKey.current = null;
             setDialFinished(intentId);
           }}
           onEnded={() => {
