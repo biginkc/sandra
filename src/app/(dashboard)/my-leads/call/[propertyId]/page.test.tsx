@@ -61,9 +61,21 @@ describe("CallScreenPage", () => {
     expect(mocks.loadCallScreen).not.toHaveBeenCalled();
   });
 
-  it("404s when the Phase 3 schema is not ready", async () => {
+  it("still renders when the lead_comps schema is not ready (only the numbers card degrades)", async () => {
     mocks.schemaReady.mockResolvedValue(false);
+    expect(await render()).toContain("call-screen-client");
+    expect(mocks.schemaReady).not.toHaveBeenCalled();
+    expect(mocks.loadCallScreen).toHaveBeenCalledWith(propertyId);
+  });
+
+  it("404s on a membership read failure, a multi-org caller and a roster failure, before any flag read", async () => {
+    mocks.getCallerMembershipsOrThrow.mockRejectedValueOnce(new Error("boom"));
     await expect(render()).rejects.toThrow("notFound");
+    mocks.getCallerMembershipsOrThrow.mockResolvedValueOnce([membership, { ...membership, org_id: "org-2" }]);
+    await expect(render()).rejects.toThrow("notFound");
+    mocks.getAcquisitionRoster.mockRejectedValueOnce(new Error("boom"));
+    await expect(render()).rejects.toThrow("notFound");
+    expect(mocks.getMyLeadsFlag).not.toHaveBeenCalled();
     expect(mocks.loadCallScreen).not.toHaveBeenCalled();
   });
 

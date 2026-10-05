@@ -7,7 +7,6 @@ import { canViewMyLeads } from "@/lib/my-leads/access";
 import { getMyLeadsFlag } from "@/lib/my-leads/flags";
 import { getAcquisitionRoster } from "@/lib/my-leads/queries";
 import { MY_LEAD_ROW_REASON_COPY } from "@/lib/my-leads/row-reasons";
-import { schemaReady } from "@/lib/my-leads/schema-ready";
 
 import { CallScreen } from "./call-screen";
 import { loadCallScreen } from "./loaders";
@@ -31,8 +30,8 @@ function unavailableState(message: string) {
 
 /**
  * TECH-PLAN §3.10. The screen is the signed-in user's own queue only (a URL never grants access).
- * Renders only when the org's `call_screen` flag is on (a missing row reads OFF) and the Phase 3
- * schema is ready; otherwise 404, so the route is inert until the operator turns it on.
+ * Renders only when the org's `call_screen` flag is on (a missing row reads OFF); otherwise 404 (as for
+ * any membership or roster failure), so the route is inert until the operator turns it on.
  */
 export default async function CallScreenPage({ params }: { params: Promise<{ propertyId: string }> }) {
   const { propertyId } = await params;
@@ -54,8 +53,9 @@ export default async function CallScreenPage({ params }: { params: Promise<{ pro
   }
   if (!roster.settings.enabled || !canViewMyLeads(roster, viewer.userId, viewer.isOwner)) notFound();
 
-  const [flagOn, ready] = await Promise.all([getMyLeadsFlag(viewer.orgId, "call_screen"), schemaReady("lead_comps")]);
-  if (!flagOn || !ready) notFound();
+  // Only the new screen is gated by its flag. The numbers card degrades on its own when the
+  // lead_comps schema is not ready, and the actions that need it check readiness themselves.
+  if (!(await getMyLeadsFlag(viewer.orgId, "call_screen"))) notFound();
 
   const load = await loadCallScreen(propertyId);
   if (load.status === "invalid") notFound();
