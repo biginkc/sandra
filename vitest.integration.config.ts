@@ -77,6 +77,7 @@ export default defineConfig({
       "supabase/migrations/20261006100000_dialpad_ledger_keys_native_columns.integration.test.ts",
       "supabase/migrations/20261006100100_dialpad_intent_timeout.integration.test.ts",
       "supabase/migrations/20261006100200_contact_phone_numbers.integration.test.ts",
+      "supabase/migrations/20261007200000_contact_phone_numbers_batched_backfill.integration.test.ts",
       "supabase/migrations/20261006100300_dialpad_native_matching.integration.test.ts",
       "supabase/migrations/20261006100300_dialpad_native_concurrency.integration.test.ts",
       "supabase/migrations/20261006100400_dialpad_native_assign_to_lead.integration.test.ts",
