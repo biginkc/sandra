@@ -7,7 +7,7 @@ test.beforeAll(async () => {
   const modules: Record<string, string> = {
     navigation: `export const useRouter=()=>({refresh(){window.__refreshes=(window.__refreshes||0)+1},push(url){location.href=url}});`,
     link: `export default function Link({children,...props}){return <a {...props}>{children}</a>}`,
-    dispo: `const save=async()=>{await new Promise(r=>setTimeout(r,300));return new URLSearchParams(location.search).get('case')==='failure'?{ok:false,error:'Save failed'}:{ok:true,alreadyQualified:false}};export const setOutreachDispo=save;export const moveMessageThreadToLead=save;export const setInboxDispoAndStartDrip=async()=>({ok:true,enrollment:{status:'enrolled',reason:'Enrolled'}});`,
+    dispo: `const save=()=>new Promise(resolve=>{window.__completeAction=()=>resolve(new URLSearchParams(location.search).get('case')==='failure'?{ok:false,error:'Save failed'}:{ok:true,alreadyQualified:false})});export const setOutreachDispo=save;export const moveMessageThreadToLead=save;export const setInboxDispoAndStartDrip=async()=>({ok:true,enrollment:{status:'enrolled',reason:'Enrolled'}});`,
     sequences: `export const listDripChoices=async()=>({ok:true,data:[{id:'drip',name:'Follow-up drip',textCount:2,days:3,firstSend:'Tomorrow'}]});export const startDripForLeads=async()=>({ok:true,data:{results:[{status:'enrolled',reason:'Enrolled'}]}});export const changeDripAction=async()=>({ok:true,data:{status:'enrolled'}});`,
     appointments: `export const BookAppointmentPopover=()=>null;`,
   };
@@ -35,6 +35,7 @@ for (const scenario of ["success", "failure"] as const) {
       await page.addScriptTag({ content: bundle });
       await page.getByTestId(action).click();
       await expect(page.locator('[data-sonner-toast]')).toHaveCount(0);
+      await page.evaluate(() => (window as unknown as { __completeAction: () => void }).__completeAction());
       const notification = page.locator('[data-sonner-toast]');
       await expect(notification).toContainText("123 Main St");
       await expect(notification).toContainText(scenario === "failure" ? "Save failed" : action === "message-move-to-lead" ? "Moved to lead" : "Saved: Follow up");
