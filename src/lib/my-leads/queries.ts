@@ -13,7 +13,7 @@ export type QueueRow = {
   address: string; city: string | null; state: string | null; homeownerName: string | null; phone: string | null; contactId: string | null; phones: string[]; contactDnc: boolean;
   temperature: 'hot' | 'warm' | 'cold' | null; motivationKind: 'specified' | 'no_motivation' | null; motivationText: string | null;
   warningReasons: string[]; nextStepAt: string | null; nextStepType: 'appointment' | 'callback' | null /* 'callback' only from a payload predating the read-model migration */; nextStepMode?: 'phone' | 'in_person' | null;
-  offer: { id: string; amountCents: number; method: string; sentAt: string; followUpAt: string; outcome: 'pending'|'accepted'|'declined' } | null;
+  offer: { id: string; amountCents: number; method: string; sentAt: string; followUpAt: string; outcome: 'pending'|'accepted'|'declined'|'superseded' } | null;
   attemptsCount: number;
 };
 export type QueuePage = { rows: QueueRow[]; totalCount: number; filteredCount: number; cursor: string | null; hasMore: boolean };

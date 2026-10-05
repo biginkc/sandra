@@ -5,6 +5,7 @@ import * as React from "react"
 import type { CallNextSnapshot } from "@/lib/my-leads/call-next"
 import type { CallbackDueItem, CallPromptItem, CallStateSnapshot } from "@/lib/my-leads/call-state"
 import type { AcquisitionKpis, AcquisitionRoster, QueueSnapshot } from "@/lib/my-leads/queries"
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { queueRowFixture, stripItem } from "./_components/call-next-test-support"
 
 const mocks = vi.hoisted(() => ({
@@ -18,7 +19,7 @@ const mocks = vi.hoisted(() => ({
   poll: vi.fn(),
   ack: vi.fn(),
   status: vi.fn(),
-  softphone: null as null | { callingEnabled: boolean; openLead: (lead: unknown) => void },
+  softphone: null as null | { callingEnabled: boolean; onCall?: boolean; openLead: (lead: unknown) => void },
 }))
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.routerRefresh }) }))
@@ -545,23 +546,39 @@ describe("MyLeadsClient calling and durable call state", () => {
       expect(screen.getAllByTestId("post-call-prompt")).toHaveLength(1)
     })
 
-    it("holds while any other dialog is open in the document, then opens once it closes", async () => {
-      const foreign = document.createElement("div")
-      foreign.setAttribute("role", "dialog")
-      foreign.setAttribute("data-state", "open")
-      document.body.appendChild(foreign)
-      try {
-        mocks.poll.mockImplementation(async () => freshPoll())
-        renderClient({ postCallPrompt: true, callFeatures: flags({ autoPrompt: true }) })
-        await flush(30_000)
-        expect(mocks.poll).toHaveBeenCalled()
-        expect(screen.queryByTestId("post-call-prompt")).not.toBeInTheDocument()
-        foreign.remove()
-        await flush(10_000)
-        expect(screen.getAllByTestId("post-call-prompt")).toHaveLength(1)
-      } finally {
-        foreign.remove()
-      }
+    it("holds while the softphone has a live call, then opens once the call ends", async () => {
+      mocks.softphone = { callingEnabled: true, onCall: true, openLead: vi.fn() }
+      mocks.poll.mockImplementation(async () => freshPoll())
+      const view = renderClient({ postCallPrompt: true, callFeatures: flags({ autoPrompt: true }) })
+      await flush(30_000)
+      expect(mocks.poll).toHaveBeenCalled()
+      expect(screen.queryByTestId("post-call-prompt")).not.toBeInTheDocument()
+      mocks.softphone = { callingEnabled: true, onCall: false, openLead: vi.fn() }
+      view.rerender(
+        <MyLeadsClient viewer={viewer} roster={roster} initialMemberId={viewer.userId} initialSnapshot={snapshot()} initialKpis={kpis} postCallPrompt callFeatures={flags({ autoPrompt: true })} />,
+      )
+      await flush(10_000)
+      expect(screen.getAllByTestId("post-call-prompt")).toHaveLength(1)
+    })
+
+    it("holds while a Base UI dialog is open elsewhere on the page, then opens once it closes", async () => {
+      const foreign = (open: boolean) => (
+        <Dialog open={open}>
+          <DialogContent>
+            <DialogTitle>Foreign dialog</DialogTitle>
+          </DialogContent>
+        </Dialog>
+      )
+      const other = render(foreign(true))
+      expect(document.querySelector("[role=dialog][data-open]")).not.toBeNull()
+      mocks.poll.mockImplementation(async () => freshPoll())
+      renderClient({ postCallPrompt: true, callFeatures: flags({ autoPrompt: true }) })
+      await flush(30_000)
+      expect(mocks.poll).toHaveBeenCalled()
+      expect(screen.queryByTestId("post-call-prompt")).not.toBeInTheDocument()
+      other.rerender(foreign(false))
+      await flush(10_000)
+      expect(screen.getAllByTestId("post-call-prompt")).toHaveLength(1)
     })
   })
 

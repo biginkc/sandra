@@ -1,7 +1,6 @@
 import "server-only";
 
 import { loadContractDefaults } from "@/lib/contract-defaults/queries";
-import { resolveBuyerEntity, resolveTitleCompany } from "@/lib/contract-defaults/resolve";
 import { getEsignFieldSchema } from "@/lib/esign/contracts";
 import { createBoundLeadEsignCore } from "@/app/(dashboard)/leads/[id]/lead-esign-bindings";
 import { ACQUISITION_TIME_ZONE } from "@/lib/my-leads/time";
@@ -29,9 +28,8 @@ export async function loadContractCardData(
   const schema = template ? getEsignFieldSchema(template.mergeFieldNames) : null;
   if (!template || !schema) return { reason: "No contract template is ready." };
 
-  const [defaults, prop, comp] = await Promise.all([
+  const [defaults, comp] = await Promise.all([
     loadContractDefaults(viewer.client, viewer.orgId),
-    viewer.client.from("properties").select("market, state").eq("id", propertyId).eq("org_id", viewer.orgId).maybeSingle(),
     viewer.client.from("lead_comps").select("legal_description, legal_description_complete, confidence, fetched_at, provider, owner_of_record")
       .eq("org_id", viewer.orgId).eq("property_id", propertyId).order("fetched_at", { ascending: false }).limit(1).maybeSingle(),
   ]);
@@ -57,18 +55,14 @@ export async function loadContractCardData(
           ownerOfRecord: (c.owner_of_record as string | null) ?? null,
         }
       : null,
-    settings: { earnestMoneyCents: defaults.earnestMoneyCents, templateFieldDefaults: defaults.templateFieldDefaults },
+    settings: { earnestMoneyCents: null, templateFieldDefaults: defaults.templateFieldDefaults },
   } as SendContext["prefillBase"];
-  const propRow = (prop.error ? null : prop.data) as { market: string | null; state: string | null } | null;
-  const title = resolveTitleCompany(defaults, { market: propRow?.market ?? null, state: propRow?.state ?? addr.state });
-  const buyer = resolveBuyerEntity(defaults);
   return {
     state: {
       enabled: true, testMode: pf.testMode, templateId: template.id, sellerRoleName: template.sellerRoleName,
       signerRoles: template.signerRoles, sellerSigner: pf.sellerDefaults, prefillBase,
       titleCompanies: defaults.titleCompanies.filter((t) => t.isActive),
       buyerEntities: defaults.buyerEntities.filter((b) => b.isActive),
-      selectedTitleCompanyId: title?.id ?? null, selectedBuyerEntityId: buyer?.id ?? null,
       todayCentral: today, tomorrowCentral: tomorrow,
     },
     ctx: {

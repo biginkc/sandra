@@ -171,6 +171,9 @@ function focusFromSelectedLead(
 }
 
 const REFRESH_INTERVAL_MS = 30_000;
+/** Any open Base UI popup (dialog, alert dialog, popover, drawer, menu) and the hand-built softphone popover blocks the auto-prompt. */
+const OPEN_FOREIGN_POPUP_SELECTOR =
+  "[role=dialog][data-open], [role=alertdialog][data-open], [role=menu][data-open], [data-testid=softphone-popover]";
 
 type DripEntry = MyLeadDripSnapshot["active"][number];
 /** Every copy of every lead, grouped by propertyId in one pass, plus how many places hold each lead. */
@@ -1040,11 +1043,13 @@ export function MyLeadsClient({
   const ackedAttempts = useRef(new Set<string>());
   const ackInFlight = useRef(new Set<string>());
   const refreshCallState = callPoll.refreshNow;
+  const softphoneOnCall = softphone?.onCall === true;
   useEffect(() => {
     if (!autoPromptOn || dialog !== null || openingStatus !== null || autoPrompt !== null) return;
     // Never open over an in-flight dial or any other open dialog in the page (menus, drawers, confirms).
-    if (dialActive) return;
-    if (typeof document !== "undefined" && document.querySelector("[role=dialog][data-state=open]")) return;
+    if (dialActive || softphoneOnCall) return;
+    // Sandra's popups are Base UI: open state is `data-open` (closing/closed popups carry `data-closed`), never Radix's `data-state=open`.
+    if (typeof document !== "undefined" && document.querySelector(OPEN_FOREIGN_POPUP_SELECTOR)) return;
     const candidates = callPoll.prompts.filter(
       (item) => !ackedAttempts.current.has(item.attemptId) && !ackInFlight.current.has(item.attemptId),
     );
@@ -1055,7 +1060,7 @@ export function MyLeadsClient({
     setAutoPrompt(next);
     action("log-attempt", next.propertyId, next.callActivityId);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `action`/`rawRow` are stable per render and read latest state
-  }, [autoPromptOn, dialog, openingStatus, autoPrompt, callPoll.prompts, dialActive]);
+  }, [autoPromptOn, dialog, openingStatus, autoPrompt, callPoll.prompts, dialActive, softphoneOnCall]);
   // Any close of the auto-opened prompt acknowledges it: saved when the attempt committed, else dismissed.
   useEffect(() => {
     if (!autoPrompt) return;

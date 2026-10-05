@@ -17,7 +17,16 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { CallFactChips } from "./call-fact-chips";
 import { acceptCallFactAction, dismissCallFactsAction } from "./facts-actions";
 import { compLeadAction, setValuationInputsAction } from "./actions";
-import { sendContractCardAction } from "./contract-card/contract-card-actions";
+import {
+  cancelContractAction, reassignAndLogOfferAction, retryOfferProjectionAction, sendContractCardAction, supersedeOfferAction,
+} from "./contract-card/contract-card-actions";
+
+const RECOVERY_ACTIONS = {
+  retry: retryOfferProjectionAction,
+  supersede: supersedeOfferAction,
+  reassign: reassignAndLogOfferAction,
+  cancel: cancelContractAction,
+};
 import { ContractCard } from "./contract-card/contract-card";
 import { DIAL_UNAVAILABLE_COPY, dialLeadAction } from "./dial-stub";
 import { HistoryPanel } from "./history-panel";
@@ -252,6 +261,8 @@ export function CallScreen({ data, viewerLabel = null }: CallScreenProps) {
                   state={data.contract.data}
                   propertyId={propertyId}
                   send={sendContractCardAction}
+                  recovery={RECOVERY_ACTIONS}
+                  onRefresh={() => router.refresh()}
                   onPriceChange={(v) => onEntryFieldChange("offer_price", v)}
                   onClosingDateChange={(v) => onEntryFieldChange("closing_date", v)}
                   onSent={() => router.refresh()}
