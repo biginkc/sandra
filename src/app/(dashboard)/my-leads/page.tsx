@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { after } from "next/server";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
@@ -20,6 +21,7 @@ import {
 } from "@/lib/my-leads/row-reasons";
 import { listMyLeadsInDrip } from "@/lib/my-leads/drip-queries";
 import { getCallNext } from "@/lib/my-leads/call-next";
+import { enqueueStripComps } from "@/lib/comps/queue";
 import { postCallPromptEnabled } from "@/lib/my-leads/post-call";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
@@ -195,6 +197,12 @@ export default async function MyLeadsPage({
   }
 
   const initialStrip = await stripRead;
+  // P3a: comp the strip's top ten after the response is sent (never on the render path). Inert
+  // while the org's comp_queue flag is off or the lead_comps migration has not landed.
+  if (initialStrip && initialStrip.rows.length > 0) {
+    const ids = initialStrip.rows.map((row) => row.propertyId);
+    after(() => enqueueStripComps(viewer.orgId, ids));
+  }
 
   let selectedLead: SelectedLeadResult =
     selectedLeadLink.status === "none"

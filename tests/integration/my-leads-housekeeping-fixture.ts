@@ -71,6 +71,8 @@ const CHAIN = [
   { key: 'nativeMatching', file: '20261006100300_dialpad_native_matching', present: proc('dialpad_cti_native_resolve') },
   { key: 'assignToLead', file: '20261006100400_dialpad_native_assign_to_lead', present: proc('fn_assign_native_call_to_lead') },
   { key: 'artifactFetches', file: '20261006100500_dialpad_artifact_fetches', present: "to_regclass('public.dialpad_call_artifact_fetches') is not null" },
+  { key: 'replayLocation', file: '20261006111000_fn_create_next_step_replay_location', present: procUses('fn_create_next_step', 'v_existing.location') },
+  { key: 'leadComps', file: '20261007100000_lead_comps_foundation', present: "to_regclass('public.lead_comps') is not null" },
 ] as const;
 
 export type ChainKey = (typeof CHAIN)[number]['key'];
