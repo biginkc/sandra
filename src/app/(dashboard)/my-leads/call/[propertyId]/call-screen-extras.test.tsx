@@ -134,9 +134,14 @@ describe("CallScreen post-call extras (real PostCallPrompt)", () => {
     const banner = await screen.findByTestId("call-screen-recovered-extras");
     await user.click(within(banner).getByTestId("post-call-retry-extras"));
     expect(await screen.findByText(/call's save isn't confirmed/)).toBeVisible();
+    // A pending banner never claims the attempt was saved.
+    expect(within(screen.getByTestId("call-screen-recovered-extras")).queryByText(/Attempt saved/)).toBeNull();
     expect(getExtras("user-1", "key-1")).not.toBeNull();
     await user.click(within(screen.getByTestId("call-screen-recovered-extras")).getByTestId("post-call-retry-extras"));
     await waitFor(() => expect(getExtras("user-1", "key-1")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("call-screen-recovered-extras")).toBeNull());
+    expect(screen.queryByTestId("post-call-retry-extras")).toBeNull();
+    expect(screen.queryByText(/Attempt saved/)).toBeNull();
     expect(mocks.savePostCallExtras).toHaveBeenCalledTimes(2);
     expect(mocks.savePostCallExtras.mock.calls[0][0]).toMatchObject({ attemptKey: "key-1" });
   });

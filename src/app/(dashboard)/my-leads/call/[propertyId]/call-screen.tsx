@@ -128,7 +128,8 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false, post
     if (!recovered) return;
     const result = await saveExtrasRequest(recovered, viewer.userId, extrasInFlight.current, () => setRecoveredState({ status: "saving" }));
     if (!result) return;
-    if (extrasConfirmed(result)) {
+    // Confirmed, or another prompt already saved this call (the saver dropped the entry): no banner, no Retry.
+    if (extrasConfirmed(result) || (!result.ok && result.alreadySaved)) {
       setRecovered(null);
       setRecoveredState(null);
     } else {
@@ -187,7 +188,7 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false, post
   );
   const recoveredBanner = recovered ? (
     <div data-testid="call-screen-recovered-extras" className="rounded-[16px] border border-border bg-card p-4">
-      <ReceiptLines extras={recoveredState} sentNextStepAt={null} note={recovered.extras.note} onRetry={() => void retryRecovered()} />
+      <ReceiptLines extras={recoveredState} sentNextStepAt={null} note={recovered.extras.note} attemptSaved={false} onRetry={() => void retryRecovered()} />
     </div>
   ) : null;
   const prompt = (
