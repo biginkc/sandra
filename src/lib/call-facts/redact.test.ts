@@ -38,6 +38,10 @@ describe("redactFactsInput", () => {
     expect(out).toContain("[name]");
   });
 
+  it("masks an email whole even when its local part is a lead name", () => {
+    expect(r(null, "mail sally@gmail.com please").summary).toBe("mail [email] please");
+  });
+
   it("leaves dollar amounts and ordinary numbers alone", () => {
     const text = "Asking $185,000, owes $92,000.50 on 2 loans, wants 185k, 1,850,000 total, in 3 months";
     expect(r(null, text).summary).toBe(text);

@@ -22,7 +22,7 @@ const authed = () => new Request("http://x", { headers: { authorization: "Bearer
 describe("call-facts-sweep route", () => {
   beforeEach(() => {
     process.env.CRON_SECRET = "s";
-    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.TYPESAFE_API_KEY;
     rpc.mockReset().mockResolvedValue({ data: { claims: [], exhausted: [] }, error: null });
     flagRows = [{ org_id: "o1" }];
     ready = true;

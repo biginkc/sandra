@@ -273,6 +273,27 @@ describe('20261007190000_call_facts', () => {
     });
   });
 
+  it('the widened allow-list accepts the pains, the reused Closer Lab questions and objections end to end', async () => {
+    await withFacts(async (db) => {
+      const w = await world(db, { flag: true });
+      const { id } = await done(w, {
+        behind_on_payments: { value: 'we are behind', evidence: 'we are behind' },
+        pain_divorce: { value: 'going through a divorce', evidence: 'divorce' },
+        objection_think: { value: 'let me think', evidence: 'let me think' },
+        not_rushed: { value: 'no rush', evidence: 'no rush' },
+      });
+      for (const f of ['behind_on_payments', 'pain_divorce', 'objection_think', 'not_rushed']) await accept(w, w.rep, id, f, 'ignored');
+      expect((await notes(w, 'From call summary - %')).map((n) => n.body)).toEqual([
+        'From call summary - Behind on payments: we are behind',
+        'From call summary - Divorce: going through a divorce',
+        'From call summary - Decision time: let me think',
+        'From call summary - Not rushed: no rush',
+      ]);
+      const bad = await failure(db, () => service(db, () => db.query('select public.fn_complete_call_facts($1,$2,$3,$4,$5)', [randomUUID(), randomUUID(), JSON.stringify({ objections: { value: 'x', evidence: 'x' } }), 'proposed', null])));
+      expect(bad.message).toContain('INVALID_INPUT');
+    });
+  });
+
   it('accept formats a next_step instant in Central time from the stored value', async () => {
     await withFacts(async (db) => {
       const w = await world(db, { flag: true });

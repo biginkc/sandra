@@ -1,18 +1,9 @@
 /**
  * Call facts (TECH-PLAN-2026-10 section 3.12). Pure types: safe for client bundles.
- * Display priority is the order of FACT_FIELDS; `condition` is deliberately last.
+ * Display priority is the order of FACT_FIELDS (catalog.ts); `condition` is deliberately last.
  */
-export const FACT_FIELDS = ["asking_price", "mortgage", "motivation", "timeline", "next_step", "condition"] as const;
-export type FactField = (typeof FACT_FIELDS)[number];
-
-export const FACT_LABELS: Record<FactField, string> = {
-  asking_price: "Asking price",
-  mortgage: "Mortgage",
-  motivation: "Motivation",
-  timeline: "Timeline",
-  next_step: "Next step",
-  condition: "Condition",
-};
+export { FACT_FIELDS, FACT_LABELS, type FactField } from "./catalog";
+import { FACT_FIELDS, type FactField } from "./catalog";
 
 /** What the model returns per field, before validation. */
 export type RawFact = { value: string | null; evidence: string | null };

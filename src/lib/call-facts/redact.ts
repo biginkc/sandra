@@ -62,9 +62,11 @@ export function redactFactsInput(input: FactsInput, ctx: RedactionContext): Fact
     .map((v) => v.trim());
 
   const scrub = (text: string): string => {
-    let out = maskTerms(text, addressTerms, MASK_ADDRESS);
+    // Emails first: a name inside an address must not leave "[name]@domain" behind.
+    let out = text.replace(EMAIL, MASK_EMAIL);
+    out = maskTerms(out, addressTerms, MASK_ADDRESS);
     out = maskTerms(out, [...lead.whole, ...lead.parts], MASK_NAME);
-    out = out.replace(EMAIL, MASK_EMAIL).replace(STREET, MASK_ADDRESS).replace(PHONE, MASK_PHONE);
+    out = out.replace(STREET, MASK_ADDRESS).replace(PHONE, MASK_PHONE);
     return out;
   };
 

@@ -1,7 +1,8 @@
 import { reportError } from "@/lib/errors/report";
 
 import { redactFactsInput } from "./redact";
-import { prepareFactsInput, type FactsExtractor } from "./extract";
+import { prepareFactsInput } from "./prepare";
+import type { FactsExtractor } from "./jev-facts";
 import { validateFacts } from "./validate";
 import type { ValidFacts } from "./types";
 
@@ -32,8 +33,6 @@ export type FactsJobDeps = {
 };
 
 export type FactsJobResult = { claimed: number; completed: number; failed: number; exhausted: number };
-
-const CENTRAL_DATE = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" });
 
 /**
  * Step 1 (extract, outside any transaction) then step 2 (one completion transaction) per claim.
@@ -67,7 +66,7 @@ export async function runCallFactsSweep(limit: number, deps: FactsJobDeps): Prom
       );
       if (deps.extractor && (input.summary || input.transcript)) {
         const at = now();
-        const extraction = await deps.extractor(input, { referenceDate: CENTRAL_DATE.format(at) });
+        const extraction = await deps.extractor(input, { now: at });
         facts = validateFacts(extraction.facts, input, at);
         model = extraction.model;
       }

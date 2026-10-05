@@ -13,7 +13,7 @@ const BATCH = 3;
  * Call facts sweep (§3.12). Claims and extracts only: it returns `{ ok: true, disabled }` before
  * claiming anything unless the `call_facts` schema is ready AND at least one org has `facts_job`
  * on (the flag defaults OFF; the claim function also filters per org). It fetches nothing from any
- * provider. Without ANTHROPIC_API_KEY or an approved FACTS_PROMPT_V1 the extractor is null and the
+ * provider. Without TYPESAFE_API_KEY or an approved question text the extractor is null and the
  * sweep writes only the Dialpad summary note.
  */
 export async function GET(request: Request) {

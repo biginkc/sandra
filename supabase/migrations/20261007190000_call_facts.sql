@@ -22,7 +22,7 @@ create table public.lead_call_facts (
   status text not null default 'proposed'
     check (status in ('proposed', 'partially_accepted', 'dismissed', 'no_facts')),
   summary_note_id uuid references public.lead_notes(id) on delete set null,
-  -- { field: { value, evidence } } for motivation, timeline, condition, mortgage, asking_price, next_step
+  -- { field: { value, evidence } } keyed by the field allow-list in fn_complete_call_facts (the approved Jev questions)
   facts jsonb not null default '{}'::jsonb check (jsonb_typeof(facts) = 'object'),
   accepted jsonb not null default '{}'::jsonb check (jsonb_typeof(accepted) = 'object'),
   model text,
@@ -173,7 +173,7 @@ declare
   v_note_id uuid;
   v_key text;
   v_item jsonb;
-  v_allowed constant text[] := array['motivation', 'timeline', 'condition', 'mortgage', 'asking_price', 'next_step'];
+  v_allowed constant text[] := array['asking_price', 'mortgage', 'motivation', 'timeline', 'next_step', 'behind_on_payments', 'pain_behind_on_payments', 'pain_facing_auction', 'pain_back_taxes', 'pain_bankruptcy', 'pain_liens', 'pain_underwater', 'pain_downsizing_health', 'pain_moving_away', 'pain_tired_landlord', 'pain_inherited', 'pain_divorce', 'pain_vacant', 'pain_failed_listing', 'pain_major_repairs', 'not_rushed', 'objection_think', 'objection_relocation', 'objection_consult', 'objection_review_agreement', 'objection_unknown', 'objection_trust_signing', 'objection_earnest_proof', 'objection_price_pushback', 'objection_listing_realtor', 'objection_external_valuation', 'objection_buyer_identity', 'objection_property_access', 'objection_right_price_preoffer', 'objection_offer_now', 'objection_attorney_review', 'objection_closing_certainty', 'objection_text_only', 'objection_busy_callback', 'objection_buy_without_visit', 'objection_timing_feasibility', 'objection_competing_offer', 'objection_transaction_process', 'objection_email_refusal', 'objection_assignment_fee', 'objection_legal_question', 'objection_seller_costs', 'objection_offer_calculation', 'objection_offer_changes', 'objection_property_preparation', 'bad_experience', 'condition'];
 begin
   if p_fact_id is null or p_claim_token is null or p_facts is null or jsonb_typeof(p_facts) <> 'object'
      or p_status not in ('proposed', 'no_facts') then
@@ -254,12 +254,58 @@ declare
   v_inserted integer;
 begin
   v_label := case p_field
+    when 'asking_price' then 'Asking price'
+    when 'mortgage' then 'Mortgage'
     when 'motivation' then 'Motivation'
     when 'timeline' then 'Timeline'
-    when 'condition' then 'Condition'
-    when 'mortgage' then 'Mortgage'
-    when 'asking_price' then 'Asking price'
     when 'next_step' then 'Next step'
+    when 'behind_on_payments' then 'Behind on payments'
+    when 'pain_behind_on_payments' then 'Behind on payments'
+    when 'pain_facing_auction' then 'Facing auction'
+    when 'pain_back_taxes' then 'Back taxes'
+    when 'pain_bankruptcy' then 'Bankruptcy'
+    when 'pain_liens' then 'Liens'
+    when 'pain_underwater' then 'Underwater'
+    when 'pain_downsizing_health' then 'Downsizing health'
+    when 'pain_moving_away' then 'Moving away'
+    when 'pain_tired_landlord' then 'Tired landlord'
+    when 'pain_inherited' then 'Inherited'
+    when 'pain_divorce' then 'Divorce'
+    when 'pain_vacant' then 'Vacant'
+    when 'pain_failed_listing' then 'Failed listing'
+    when 'pain_major_repairs' then 'Major repairs'
+    when 'not_rushed' then 'Not rushed'
+    when 'objection_think' then 'Decision time'
+    when 'objection_relocation' then 'Housing delay'
+    when 'objection_consult' then 'Consult another person'
+    when 'objection_review_agreement' then 'Personal agreement review'
+    when 'objection_unknown' then 'Other question or concern'
+    when 'objection_trust_signing' then 'Trust'
+    when 'objection_earnest_proof' then 'Funding or earnest money'
+    when 'objection_price_pushback' then 'Offered-price pushback'
+    when 'objection_listing_realtor' then 'Listing alternative'
+    when 'objection_external_valuation' then 'Outside valuation'
+    when 'objection_buyer_identity' then 'Buyer identity'
+    when 'objection_property_access' then 'Property access'
+    when 'objection_right_price_preoffer' then 'Initial offer request'
+    when 'objection_offer_now' then 'Offer-now condition'
+    when 'objection_attorney_review' then 'Attorney review'
+    when 'objection_closing_certainty' then 'Closing certainty'
+    when 'objection_text_only' then 'Switch to text'
+    when 'objection_busy_callback' then 'Busy or callback'
+    when 'objection_buy_without_visit' then 'Sight-unseen explanation'
+    when 'objection_timing_feasibility' then 'Closing timing'
+    when 'objection_competing_offer' then 'Competing offer'
+    when 'objection_transaction_process' then 'Transaction process'
+    when 'objection_email_refusal' then 'Email refusal'
+    when 'objection_assignment_fee' then 'Company compensation'
+    when 'objection_legal_question' then 'Contract meaning'
+    when 'objection_seller_costs' then 'Seller costs'
+    when 'objection_offer_calculation' then 'Offer calculation'
+    when 'objection_offer_changes' then 'Offer changes'
+    when 'objection_property_preparation' then 'Property preparation'
+    when 'bad_experience' then 'Bad experience'
+    when 'condition' then 'Condition'
     else null end;
   if v_label is null then
     raise exception 'INVALID_INPUT' using errcode = '22023';

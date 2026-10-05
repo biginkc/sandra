@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { createJevFactsExtractor } from "./jev-facts";
+import type { FactQuestionSlot } from "./questions";
 import { runCallFactsSweep, type ClaimedCall } from "./run";
 
 const claim = (over: Partial<ClaimedCall> = {}): ClaimedCall => ({
@@ -87,5 +89,28 @@ describe("runCallFactsSweep redaction", () => {
     // The raw-name evidence is not in the redacted text, so it is dropped; the redacted quote survives.
     const call = (complete.mock.calls[0] as unknown as [{ facts: Record<string, unknown> }])[0];
     expect(Object.keys(call.facts)).toEqual(["asking_price"]);
+  });
+});
+
+describe("runCallFactsSweep with Jev", () => {
+  it("redacts BEFORE Jev: the request carries no name, phone, email or address, and the chosen turn validates against the redacted text", async () => {
+    const complete = vi.fn(async () => undefined);
+    const ask = vi.fn(async (req: { state: unknown; questions: Record<string, unknown> }) => {
+      expect(JSON.stringify(req)).not.toMatch(/Sally|816|Elm|sally@/i);
+      return { asking_price: { choice: "T001|185k" } };
+    });
+    const slots: FactQuestionSlot[] = [{ id: "asking_price", field: "asking_price", label: "Asking price", kind: "amount", text: "TEST-ONLY q" }];
+    await runCallFactsSweep(3, {
+      claim: async () => ({
+        claims: [claim({ summary: null, transcript: "Sally Seller: I want 185k, call 816-555-0142 or sally@x.com, I live at 12 Elm Dr", contact_names: ["Sally"], property_address: "12 Elm Dr" })],
+        exhausted: [],
+      }),
+      complete, extractor: createJevFactsExtractor(ask, { questions: slots }), now: NOW,
+    });
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining({
+      model: "jev-1.13.0",
+      status: "proposed",
+      facts: { asking_price: { value: "$185,000", evidence: "I want 185k, call [phone] or [email], I live at [address]" } },
+    }));
   });
 });
