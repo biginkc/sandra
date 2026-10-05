@@ -55,26 +55,16 @@ export function leadPhone(i: number): string {
   return `+1816555${String(1000 + i)}`;
 }
 
-export async function setupWorld(db: Db, cfg: StressConfig): Promise<World> {
+export async function setupWorld(db: Db, cfg: StressConfig, env: Readonly<Record<string, string | undefined>> = process.env): Promise<World> {
   const admin = createClient(cfg.supabaseUrl, process.env.TEST_SUPABASE_SERVICE_ROLE_KEY ?? "", { auth: { persistSession: false, autoRefreshToken: false } });
   // The app's middleware admits only @bmhgroupkc.com addresses. This account exists only on the disposable local stack (no mail is ever sent).
-  const repEmail = `stress-rep-${cfg.runId.toLowerCase()}@bmhgroupkc.com`;
-  const repPassword = `${randomUUID()}${randomUUID()}`;
-  let repUserId: string;
-  const created = await admin.auth.admin.createUser({ email: repEmail, password: repPassword, email_confirm: true, app_metadata: { purpose: "stress-harness", run: cfg.runId } });
-  if (created.data.user) {
-    repUserId = created.data.user.id;
-  } else if (/already.*registered/i.test(created.error?.message ?? "")) {
-    // Re-run of the same run id on the same stack: reuse the user, reset its password so the browser lane can sign in.
-    const list = await admin.auth.admin.listUsers({ page: 1, perPage: 1000 });
-    const existing = list.data?.users.find((u) => u.email === repEmail);
-    if (!existing) throw new Error("createUser said the rep exists but listUsers cannot find it");
-    const upd = await admin.auth.admin.updateUserById(existing.id, { password: repPassword });
-    if (upd.error) throw new Error(`updateUser failed: ${upd.error.message}`);
-    repUserId = existing.id;
-  } else {
-    throw new Error(`createUser failed: ${created.error?.message ?? "no user"}`);
-  }
+  // The rep is created by provision-stack.mjs (the repo's e2e identity contract allows auth-user creation only there).
+  const repEmail = env.STRESS_REP_EMAIL ?? "";
+  const repPassword = env.STRESS_REP_PASSWORD ?? "";
+  if (!repEmail || !repPassword) throw new Error("STRESS_REP_EMAIL and STRESS_REP_PASSWORD (printed by provision-stack.mjs, stress-env.json) are required");
+  const found = await db.query<{ id: string }>("select id from auth.users where email=$1", [repEmail]);
+  if (found.rowCount !== 1) throw new Error(`the rep ${repEmail} does not exist on this stack: provision it with e2e/stress/provision-stack.mjs`);
+  const repUserId = found.rows[0]!.id;
   // The mock messaging provider needs the same sender/campaign catalog the e2e reset seeds.
   await seedSenderCatalog(admin as never, cfg.orgId, [MOCK_SENDER_PRIMARY, MOCK_SENDER_SECONDARY]);
   await seedProviderCampaignCatalog(admin as never, cfg.orgId, [MOCK_PROVIDER_CAMPAIGN_ID]);

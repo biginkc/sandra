@@ -56,6 +56,14 @@ const owner = await admin.auth.admin.createUser({ email: `stress-baseline-${rand
 if (owner.error || !owner.data.user) throw new Error("baseline owner creation failed");
 const membership = await admin.from("memberships").upsert({ user_id: owner.data.user.id, org_id: "00000000-0000-0000-0000-000000000bbb", role: "owner" }, { onConflict: "user_id,org_id" });
 if (membership.error) throw new Error("baseline owner membership failed");
-const out = { API_URL: status.API_URL, DB_URL: status.DB_URL, ANON_KEY: status.ANON_KEY, SERVICE_ROLE_KEY: status.SERVICE_ROLE_KEY };
+// The harness's rep. Created here (not in e2e/stress TypeScript): the repo's e2e identity contract allows auth-user creation only in
+// the provisioning scripts. Local, disposable stack only; the address is in the domain the app's middleware admits.
+const REP_EMAIL = "stress-rep@bmhgroupkc.com";
+const REP_PASSWORD = randomUUID() + randomUUID();
+const rep = await admin.auth.admin.createUser({ email: REP_EMAIL, password: REP_PASSWORD, email_confirm: true, app_metadata: { purpose: "stress-rep" } });
+if (rep.error || !rep.data.user) throw new Error("stress rep creation failed");
+const repMembership = await admin.from("memberships").upsert({ user_id: rep.data.user.id, org_id: "00000000-0000-0000-0000-000000000bbb", role: "member" }, { onConflict: "user_id,org_id" });
+if (repMembership.error) throw new Error("stress rep membership failed");
+const out = { API_URL: status.API_URL, DB_URL: status.DB_URL, ANON_KEY: status.ANON_KEY, SERVICE_ROLE_KEY: status.SERVICE_ROLE_KEY, REP_EMAIL, REP_PASSWORD };
 writeFileSync(path.join(workdir, "stress-env.json"), JSON.stringify(out, null, 2), { mode: 0o600 });
-console.log(JSON.stringify({ ...out, ANON_KEY: "***", SERVICE_ROLE_KEY: "***", env_file: path.join(workdir, "stress-env.json") }));
+console.log(JSON.stringify({ ...out, ANON_KEY: "***", SERVICE_ROLE_KEY: "***", REP_PASSWORD: "***", env_file: path.join(workdir, "stress-env.json") }));
