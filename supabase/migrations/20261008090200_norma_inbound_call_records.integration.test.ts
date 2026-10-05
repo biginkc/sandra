@@ -121,7 +121,9 @@ describe("Norma inbound ledger with Sandra schema", () => {
   it("leases at most five eligible lookups and never immediately reclaims them", () => fixture(async(db) => {
     await db.query("update norma_inbound_destinations set recording_lookup_enabled=true");
     for(let i=0;i<7;i++)await service(db,"select fn_norma_ingest_inbound_call($1,'+18165551001','+18165551002',true,'pending')",[`call-${i}`]);
-    expect((await service(db,"select id from fn_norma_claim_inbound_recordings()")).rows).toHaveLength(5);
+    const batch=(await service(db,"select * from fn_norma_claim_inbound_recordings()")).rows;expect(batch).toHaveLength(5);
+    expect((await service(db,"select id from fn_norma_claim_inbound_recordings()")).rows).toHaveLength(0);
+    await service(db,"select fn_norma_finish_inbound_lookup($1,false)",[batch[0].lease_id]);
     expect((await service(db,"select id from fn_norma_claim_inbound_recordings()")).rows).toHaveLength(2);
     expect((await service(db,"select id from fn_norma_claim_inbound_recordings()")).rows).toHaveLength(0);
     expect((await db.query("select distinct reconciliation_attempts from norma_inbound_calls")).rows).toEqual([{reconciliation_attempts:1}]);
@@ -151,4 +153,38 @@ describe("Norma inbound ledger with Sandra schema", () => {
     expect((await db.query("select enabled,awaiting_result from norma_recording_lookup_control")).rows[0]).toEqual({enabled:false,awaiting_result:false});
   }));
 
+  it("retains an uncertain-result barrier across lease expiry and a failed denial write", () => fixture(async(db) => {
+    await ingest(db);await db.query("update norma_inbound_destinations set recording_lookup_enabled=true");
+    const c=(await service(db,"select * from fn_norma_claim_inbound_recordings()")).rows[0];
+    expect((await service(db,"select fn_norma_start_inbound_lookup($1,$2) ok",[c.lease_id,c.id])).rows[0].ok).toBe(true);
+    await db.query("savepoint denial_write");
+    await db.query("create function pg_temp.reject_pause() returns trigger language plpgsql as $$ begin raise exception 'test pause write failure'; end $$; create trigger test_pause_failure before update on norma_inbound_destinations for each row execute function pg_temp.reject_pause()");
+    await expect(service(db,"select fn_norma_finish_inbound_lookup($1,true)",[c.lease_id])).rejects.toThrow("test pause write failure");
+    await db.query("rollback to savepoint denial_write");
+    await db.query("update norma_inbound_lookup_control set lease_until=now()-interval '1 minute'");
+    expect((await service(db,"select * from fn_norma_claim_inbound_recordings()")).rows).toHaveLength(0);
+    expect((await db.query("select awaiting_result,denied_at from norma_inbound_lookup_control")).rows[0]).toEqual({awaiting_result:true,denied_at:null});
+  }));
+  it("stops previously claimed work after a denial, including a stale worker denial", () => fixture(async(db) => {
+    await ingest(db);await db.query("update norma_inbound_destinations set recording_lookup_enabled=true");
+    const c=(await service(db,"select * from fn_norma_claim_inbound_recordings()")).rows[0];
+    // A stale worker cannot release another lease, but its denial must still stop admission.
+    await service(db,"select fn_norma_finish_inbound_lookup($1,true)",[randomUUID()]);
+    expect((await service(db,"select fn_norma_start_inbound_lookup($1,$2) ok",[c.lease_id,c.id])).rows[0].ok).toBe(false);
+    expect((await service(db,"select * from fn_norma_claim_inbound_recordings()")).rows).toHaveLength(0);
+    expect((await db.query("select lease_id,denied_at is not null denied from norma_inbound_lookup_control")).rows[0]).toEqual({lease_id:c.lease_id,denied:true});
+  }));
+  it("preserves a newer webhook while clearing a matching known-result barrier", () => fixture(async(db) => {
+    await ingest(db);await db.query("update norma_inbound_destinations set recording_lookup_enabled=true");
+    const c=(await service(db,"select * from fn_norma_claim_inbound_recordings()")).rows[0];
+    await service(db,"select fn_norma_start_inbound_lookup($1,$2)",[c.lease_id,c.id]);
+    await ingest(db,"reported_available",true);
+    expect((await service(db,"select fn_norma_checkpoint_inbound_lookup($1,$2,$3,'pending') ok",[c.id,c.reconciliation_attempts,c.lease_id])).rows[0].ok).toBe(true);
+    expect((await db.query("select recording_state,reconciliation_state from norma_inbound_calls where id=$1",[c.id])).rows[0]).toEqual({recording_state:"reported_available",reconciliation_state:"done"});
+    expect((await db.query("select awaiting_result from norma_inbound_lookup_control")).rows[0].awaiting_result).toBe(false);
+  }));
+  it("denies authenticated users all new admission controls", () => fixture(async(db,ids) => {
+    await member(db,ids.user);
+    expect((await db.query("select has_table_privilege(current_user,'norma_inbound_lookup_control','select') readable,has_function_privilege(current_user,'fn_norma_start_inbound_lookup(uuid,uuid)','execute') start,has_function_privilege(current_user,'fn_norma_checkpoint_inbound_lookup(uuid,smallint,uuid,text)','execute') checkpoint,has_function_privilege(current_user,'fn_norma_finish_inbound_lookup(uuid,boolean)','execute') finish")).rows[0]).toEqual({readable:false,start:false,checkpoint:false,finish:false});
+  }));
 });

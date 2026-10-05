@@ -12,35 +12,41 @@ export async function reconcileInboundRecordings(client: SupabaseClient<Database
   const {data:claims,error}=await client.rpc("fn_norma_claim_inbound_recordings",{});
   if(error)throw new Error("Inbound recording claim failed");
   const result={checked:0,updated:0,denied:0,unavailable:0};
-  for(const call of claims??[]) {
-    result.checked++;
-    let state: "pending"|"done"|"denied"|"unavailable"=call.reconciliation_attempts>=6?"unavailable":"pending";
-    try {
-      const response=await fetcher(`https://api.bland.ai/v1/calls/${encodeURIComponent(call.provider_call_id)}`,{headers:{authorization:`Bearer ${apiKey}`},redirect:"error",cache:"no-store",signal:AbortSignal.timeout(8_000)});
-      if(response.status===401||response.status===403){
-        state="denied";result.denied++;await response.body?.cancel();
-        const paused=await client.rpc("fn_norma_pause_inbound_lookups",{});
-        if(paused.error)throw new Error("Inbound lookup pause failed");
-      }
-      else if(response.ok) {
-        // Bound decoded provider JSON without logging response contents or media URLs.
-        const parsed=parseInboundCall(await readProviderJson(response));
-        if(parsed && parsed.callId===call.provider_call_id && parsed.from===call.from_e164 && parsed.to===call.to_e164) {
-          const saved=await client.rpc("fn_norma_ingest_inbound_call",{p_call_id:parsed.callId,p_from:parsed.from,p_to:parsed.to,p_completed:parsed.completed,p_recording_state:parsed.recordingState});
-          if(saved.error || !saved.data)throw new Error("Inbound recording update failed");
-          if(parsed.recordingState!=="pending"){state="done";result.updated++;}
-        }
-      } else {await response.body?.cancel();}
-    } catch {
-      if(state==="denied")throw new Error("Inbound lookup denial could not be checkpointed");
-      // Transient lookup failures remain bounded by persisted attempts/backoff.
+  const leaseId=claims?.[0]?.lease_id;
+  if(!leaseId)return result;
+  let denied=false;
+  try {
+    for(const call of claims??[]) {
+      const started=await client.rpc("fn_norma_start_inbound_lookup",{p_lease_id:leaseId,p_call_id:call.id});
+      if(started.error)throw new Error("Inbound lookup admission failed");
+      if(!started.data)break;
+      result.checked++;
+      let state: "pending"|"done"|"unavailable"=call.reconciliation_attempts>=6?"unavailable":"pending";
+      try {
+        const response=await fetcher(`https://api.bland.ai/v1/calls/${encodeURIComponent(call.provider_call_id)}`,{headers:{authorization:`Bearer ${apiKey}`},redirect:"error",cache:"no-store",signal:AbortSignal.timeout(8_000)});
+        if(response.status===401||response.status===403){
+          denied=true;result.denied++;
+          await response.body?.cancel();
+        } else if(response.ok) {
+          const parsed=parseInboundCall(await readProviderJson(response));
+          if(parsed && parsed.callId===call.provider_call_id && parsed.from===call.from_e164 && parsed.to===call.to_e164) {
+            const saved=await client.rpc("fn_norma_ingest_inbound_call",{p_call_id:parsed.callId,p_from:parsed.from,p_to:parsed.to,p_completed:parsed.completed,p_recording_state:parsed.recordingState});
+            if(saved.error || !saved.data)throw new Error("Inbound recording update failed");
+            if(parsed.recordingState!=="pending"){state="done";result.updated++;}
+          }
+        } else {await response.body?.cancel();}
+      } catch { /* Transient lookup failures retain the persisted bounded attempt budget. */ }
+      // Cancellation failure cannot skip the denial write or admit another request.
+      if(denied)break;
+      const saved=await client.rpc("fn_norma_checkpoint_inbound_lookup",{p_call_id:call.id,p_attempts:call.reconciliation_attempts,p_lease_id:leaseId,p_state:state});
+      if(saved.error)throw new Error("Inbound recording checkpoint failed");
+      if(!saved.data)break;
+      if(state==="unavailable")result.unavailable++;
     }
-    // A later webhook wins: do not replace its completed recording evidence with stale lookup state.
-    const saved=await client.from("norma_inbound_calls").update({reconciliation_state:state==="denied"?"pending":state}).eq("id",call.id).eq("reconciliation_attempts",call.reconciliation_attempts).eq("recording_state","pending");
-    if(saved.error)throw new Error("Inbound recording checkpoint failed");
-    if(state==="unavailable")result.unavailable++;
-    // Stop the whole run on denial; do not probe the same credential through other call IDs.
-    if(state==="denied")break;
+  } finally {
+    // A failed release leaves the already-committed awaiting_result barrier set.
+    const finished=await client.rpc("fn_norma_finish_inbound_lookup",{p_lease_id:leaseId,p_denied:denied});
+    if(finished.error)throw new Error("Inbound lookup release failed");
   }
   return result;
 }

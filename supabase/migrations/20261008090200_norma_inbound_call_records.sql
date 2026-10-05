@@ -92,31 +92,97 @@ begin
 end $$;
 revoke all on function public.fn_norma_ingest_inbound_call(text,text,text,boolean,text) from public,anon,authenticated;
 grant execute on function public.fn_norma_ingest_inbound_call(text,text,text,boolean,text) to service_role;
--- At most five lookups per run, leased by the backoff timestamp. A crashed worker cannot strand a row.
+-- Serialize inbound provider work and retain uncertain results across lease expiry.
+-- Destination flags remain the activation control; denial recovery also requires
+-- explicitly clearing denied_at after the access condition has been resolved.
+create table public.norma_inbound_lookup_control (
+  singleton boolean primary key default true check (singleton),
+  denied_at timestamptz,
+  awaiting_result boolean not null default false,
+  lease_id uuid,
+  lease_until timestamptz
+);
+insert into public.norma_inbound_lookup_control(singleton) values(true);
+alter table public.norma_inbound_lookup_control enable row level security;
+revoke all on public.norma_inbound_lookup_control from public,anon,authenticated;
+grant all on public.norma_inbound_lookup_control to service_role;
 create function public.fn_norma_claim_inbound_recordings()
-returns setof public.norma_inbound_calls language sql security invoker set search_path='' as $$
-  with exhausted as (
-    update public.norma_inbound_calls set reconciliation_state='unavailable'
-      where reconciliation_state='pending' and reconciliation_attempts>=6 and next_lookup_at<=now() returning id
-  ), eligible as (
+returns table(id uuid,provider_call_id text,from_e164 text,to_e164 text,reconciliation_attempts smallint,lease_id uuid)
+language plpgsql security invoker set search_path='' as $$
+declare token uuid; n integer;
+begin
+  select gen_random_uuid() into token from public.norma_inbound_lookup_control c
+    where c.singleton and c.denied_at is null and not c.awaiting_result
+      and (c.lease_until is null or c.lease_until<now()) for update skip locked;
+  if not found then return; end if;
+  update public.norma_inbound_lookup_control set lease_id=token,lease_until=now()+interval '2 minutes' where singleton;
+  update public.norma_inbound_calls c set reconciliation_state='unavailable'
+    where c.reconciliation_state='pending' and c.reconciliation_attempts>=6 and c.next_lookup_at<=now();
+  return query
+  with eligible as (
     select c.id from public.norma_inbound_calls c
     where exists(select 1 from public.norma_inbound_destinations d where d.phone_e164=c.to_e164 and d.org_id=c.org_id and d.enabled and d.recording_lookup_enabled)
-      and reconciliation_state='pending' and recording_state='pending' and next_lookup_at<=now()
-      and reconciliation_attempts<6
-    order by next_lookup_at,id for update skip locked limit 5
-  )
-  update public.norma_inbound_calls c set reconciliation_attempts=c.reconciliation_attempts+1,
-    next_lookup_at=now()+make_interval(mins => (5*power(2,c.reconciliation_attempts))::integer)
-  from eligible e where c.id=e.id returning c.*;
-$$;
-revoke all on function public.fn_norma_claim_inbound_recordings() from public,anon,authenticated;
-grant execute on function public.fn_norma_claim_inbound_recordings() to service_role;
--- A provider credential denial pauses every automatic inbound lookup until an operator explicitly repairs/re-enables it.
-create function public.fn_norma_pause_inbound_lookups() returns void language sql security invoker set search_path='' as $$
+      and c.reconciliation_state='pending' and c.recording_state='pending' and c.next_lookup_at<=now()
+      and c.reconciliation_attempts<6
+    order by c.next_lookup_at,c.id for update skip locked limit 5
+  ), claimed as (
+    update public.norma_inbound_calls c set reconciliation_attempts=c.reconciliation_attempts+1,
+      next_lookup_at=now()+make_interval(mins => (5*power(2,c.reconciliation_attempts))::integer)
+    from eligible e where c.id=e.id returning c.*
+  ) select c.id,c.provider_call_id,c.from_e164,c.to_e164,c.reconciliation_attempts::smallint,token from claimed c;
+  get diagnostics n=row_count;
+  if n=0 then
+    update public.norma_inbound_lookup_control c set lease_id=null,lease_until=null where c.singleton and c.lease_id=token;
+  end if;
+end $$;
+-- Commit this barrier before the network request. A failed checkpoint/denial write
+-- blocks all new batches, even after lease expiry, until admitted operator recovery.
+create function public.fn_norma_start_inbound_lookup(p_lease_id uuid,p_call_id uuid)
+returns boolean language plpgsql security invoker set search_path='' as $$
+declare n integer;
+begin
+  update public.norma_inbound_lookup_control ctl set awaiting_result=true
+    where ctl.singleton and ctl.denied_at is null and not ctl.awaiting_result
+      and ctl.lease_id=p_lease_id and ctl.lease_until>now()
+      and exists(select 1 from public.norma_inbound_calls c join public.norma_inbound_destinations d
+        on d.phone_e164=c.to_e164 and d.org_id=c.org_id
+        where c.id=p_call_id and c.recording_state='pending' and c.reconciliation_state='pending'
+          and d.enabled and d.recording_lookup_enabled);
+  get diagnostics n=row_count; return n=1;
+end $$;
+create function public.fn_norma_checkpoint_inbound_lookup(p_call_id uuid,p_attempts smallint,p_lease_id uuid,p_state text)
+returns boolean language plpgsql security invoker set search_path='' as $$
+begin
+  if p_state not in ('pending','done','unavailable') then raise exception 'Invalid inbound state' using errcode='22023'; end if;
+  perform 1 from public.norma_inbound_lookup_control c where c.singleton and c.denied_at is null
+    and c.lease_id=p_lease_id and c.lease_until>now() and c.awaiting_result for update;
+  if not found then return false; end if;
+  perform 1 from public.norma_inbound_calls c where c.id=p_call_id and c.reconciliation_attempts=p_attempts for update;
+  if not found then return false; end if;
+  -- A signed webhook may have won while the lookup was in flight. Its evidence
+  -- stays terminal, but this known result can still safely clear our barrier.
+  update public.norma_inbound_calls set reconciliation_state=p_state
+    where id=p_call_id and reconciliation_attempts=p_attempts and recording_state='pending';
+  update public.norma_inbound_lookup_control set awaiting_result=false where singleton and lease_id=p_lease_id;
+  return true;
+end $$;
+create function public.fn_norma_pause_inbound_lookups() returns void language plpgsql security invoker set search_path='' as $$
+begin
+  update public.norma_inbound_lookup_control set denied_at=now() where singleton;
   update public.norma_inbound_destinations set recording_lookup_enabled=false,lookup_denied_at=now();
-$$;
-revoke all on function public.fn_norma_pause_inbound_lookups() from public,anon,authenticated;
-grant execute on function public.fn_norma_pause_inbound_lookups() to service_role;
+end $$;
+create function public.fn_norma_finish_inbound_lookup(p_lease_id uuid,p_denied boolean default false)
+returns void language plpgsql security invoker set search_path='' as $$
+begin
+  -- Denial is global even if the reporting worker's lease has become stale.
+  if p_denied then perform public.fn_norma_pause_inbound_lookups(); end if;
+  update public.norma_inbound_lookup_control
+    set lease_id=null,lease_until=null,
+        awaiting_result=case when p_denied then false else awaiting_result end
+    where singleton and lease_id=p_lease_id;
+end $$;
+revoke all on function public.fn_norma_claim_inbound_recordings(),public.fn_norma_start_inbound_lookup(uuid,uuid),public.fn_norma_checkpoint_inbound_lookup(uuid,smallint,uuid,text),public.fn_norma_pause_inbound_lookups(),public.fn_norma_finish_inbound_lookup(uuid,boolean) from public,anon,authenticated;
+grant execute on function public.fn_norma_claim_inbound_recordings(),public.fn_norma_start_inbound_lookup(uuid,uuid),public.fn_norma_checkpoint_inbound_lookup(uuid,smallint,uuid,text),public.fn_norma_pause_inbound_lookups(),public.fn_norma_finish_inbound_lookup(uuid,boolean) to service_role;
 
 -- Association is an explicit authenticated action. Preserve each decision in an append-only audit.
 create table public.norma_inbound_reviews (

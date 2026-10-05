@@ -14,7 +14,11 @@ export async function applyNormaFollowups(db: Client) {
     drop function if exists public.fn_norma_seed_recordings();
     drop table if exists public.norma_attempt_recordings;
     drop table if exists public.norma_recording_lookup_control;
+    drop function if exists public.fn_norma_finish_inbound_lookup(uuid,boolean);
+    drop function if exists public.fn_norma_checkpoint_inbound_lookup(uuid,smallint,uuid,text);
+    drop function if exists public.fn_norma_start_inbound_lookup(uuid,uuid);
     drop function if exists public.fn_norma_pause_inbound_lookups();
+    drop table if exists public.norma_inbound_lookup_control;
     drop function if exists public.fn_norma_claim_inbound_recordings();
     drop function if exists public.fn_norma_associate_inbound_call(uuid,uuid,timestamptz);
     drop function if exists norma_private.associate_inbound_call(uuid,uuid,timestamptz);

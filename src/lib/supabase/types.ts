@@ -6079,7 +6079,10 @@ export type Database = {
     }
     Functions: {
       fn_norma_pause_inbound_lookups: { Args: Record<string, never>; Returns: undefined }
-      fn_norma_claim_inbound_recordings: { Args: Record<string, never>; Returns: Database["public"]["Tables"]["norma_inbound_calls"]["Row"][] }
+      fn_norma_claim_inbound_recordings: { Args: Record<string, never>; Returns: { id: string; provider_call_id: string; from_e164: string; to_e164: string; reconciliation_attempts: number; lease_id: string }[] }
+      fn_norma_start_inbound_lookup: { Args: { p_lease_id: string; p_call_id: string }; Returns: boolean }
+      fn_norma_checkpoint_inbound_lookup: { Args: { p_call_id: string; p_attempts: number; p_lease_id: string; p_state: string }; Returns: boolean }
+      fn_norma_finish_inbound_lookup: { Args: { p_lease_id: string; p_denied?: boolean }; Returns: undefined }
       fn_norma_associate_inbound_call: { Args: { p_call_id: string; p_property_id: string; p_expected_updated_at: string }; Returns: string }
       fn_norma_ingest_inbound_call: { Args: { p_call_id: string; p_from: string; p_to: string; p_completed: boolean; p_recording_state: string }; Returns: string | null }
       fn_norma_start_recording_lookup: { Args: { p_lease_id: string }; Returns: boolean }
