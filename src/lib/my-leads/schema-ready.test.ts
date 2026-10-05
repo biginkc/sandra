@@ -112,4 +112,19 @@ describe("schemaReady", () => {
     probeReturns({ data: { ...ready, columns: { ...ready.columns, "lead_notes.idempotency_key": false } }, error: null });
     expect(await schemaReady(feature)).toBe(false);
   });
+
+  it("seller_reminders needs the three outbox functions and the switch column; missing any reads as not ready", async () => {
+    const needed = REQUIREMENTS.seller_reminders;
+    expect(needed.functions).toHaveLength(3);
+    expect(needed.columns).toContain("seller_reminder_settings.enabled");
+    const ready = {
+      functions: Object.fromEntries(needed.functions.map((f) => [f, true])),
+      columns: Object.fromEntries(needed.columns.map((c) => [c, true])),
+    };
+    probeReturns({ data: ready, error: null });
+    expect(await schemaReady("seller_reminders")).toBe(true);
+    clearSchemaReadyCache();
+    probeReturns({ data: { ...ready, functions: { ...ready.functions, [needed.functions[1]]: false } }, error: null });
+    expect(await schemaReady("seller_reminders")).toBe(false);
+  });
 });

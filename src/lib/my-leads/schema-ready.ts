@@ -13,7 +13,8 @@ export type SchemaFeature =
   | "next_step_write"
   | "call_next"
   | "lead_note_idempotency"
-  | "post_call_support";
+  | "post_call_support"
+  | "seller_reminders";
 
 export type SchemaRequirement = {
   /** `public.fn_name(argtype,argtype)` regprocedure strings. */
@@ -50,6 +51,15 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
   post_call_support: {
     functions: ["public.fn_get_acquisition_call_references(uuid,uuid,uuid)"],
     columns: ["lead_notes.idempotency_key", "acquisition_attempts.note"],
+  },
+  // P1c-2: the seller reminder job calls the three outbox functions and reads the on/off switch.
+  seller_reminders: {
+    functions: [
+      "public.fn_schedule_seller_reminders(interval,integer,uuid[])",
+      "public.fn_claim_seller_reminders(integer,uuid[])",
+      "public.fn_finish_seller_reminder(uuid,uuid,text,text,uuid,timestamptz,uuid)",
+    ],
+    columns: ["seller_reminder_settings.enabled", "seller_appointment_reminders.send_key"],
   },
 };
 
