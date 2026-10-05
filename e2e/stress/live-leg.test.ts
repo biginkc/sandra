@@ -22,12 +22,13 @@ const ready: Record<string, string> = {
   STRESS_TUNNEL_URL: "https://stress-tunnel.example.net",
   STRESS_STUB_LEG_REPORT: "/r/REPORT.md",
   STRESS_DIALPAD_SUBSCRIPTION_PROOF: "/r/proof.txt",
+  STRESS_LIVE_WORLD_FILE: "/r/world.json",
   STRESS_OP_REF_CELL: "op://vault/cell/number",
   STRESS_OP_REF_TELNYX: "op://vault/telnyx/number",
 };
 const deps: LiveDeps = {
   opRead: (ref) => (ref.includes("cell") ? "+18165550111" : "+18165550222"),
-  readFile: (p) => (p.endsWith("REPORT.md") ? `# Chaos day live1: PASS\n\n- SHA: ${SHA}\n- Profile: full, scope: full, fault: none\n` : p.endsWith("proof.txt") ? "subscription https://stress-tunnel.example.net ok" : null),
+  readFile: (p) => (p.endsWith("REPORT.md") ? `# Chaos day live1: PASS\n\n- SHA: ${SHA}\n- Profile: full, scope: full, fault: none\n` : p.endsWith("world.json") ? JSON.stringify({ orgId: "o", repUserId: "u" }) : p.endsWith("proof.txt") ? "subscription https://stress-tunnel.example.net ok" : null),
 };
 const status = (env: Record<string, string | undefined>, d: LiveDeps = deps) => liveLegStatus(readConfig(env), env, d);
 
@@ -41,7 +42,7 @@ describe("live leg gating (disabled by default, refuses unless every prerequisit
     expect((await status(ready)).ready).toBe(true);
   });
   it("any single missing prerequisite blocks it", async () => {
-    const keys = ["STRESS_LIVE_LEG", "STRESS_TEST_SMS_STRING_APPROVED", "STRESS_DIALPAD_LIVE_JARRAD_PRESENT", "STRESS_ROOT_BROWSER_CONTEXT", "STRESS_ROOT_PROD_DIALPAD_NO_SUBSCRIPTION", "STRESS_DIALPAD_DESKTOP_CONFIRMED", "STRESS_TUNNEL_URL", "STRESS_STUB_LEG_REPORT", "STRESS_DIALPAD_SUBSCRIPTION_PROOF", "STRESS_OP_REF_CELL", "STRESS_OP_REF_TELNYX", "STRESS_ARTIFACTS_DIR"];
+    const keys = ["STRESS_LIVE_LEG", "STRESS_TEST_SMS_STRING_APPROVED", "STRESS_DIALPAD_LIVE_JARRAD_PRESENT", "STRESS_ROOT_BROWSER_CONTEXT", "STRESS_ROOT_PROD_DIALPAD_NO_SUBSCRIPTION", "STRESS_DIALPAD_DESKTOP_CONFIRMED", "STRESS_TUNNEL_URL", "STRESS_STUB_LEG_REPORT", "STRESS_DIALPAD_SUBSCRIPTION_PROOF", "STRESS_LIVE_WORLD_FILE", "STRESS_OP_REF_CELL", "STRESS_OP_REF_TELNYX", "STRESS_ARTIFACTS_DIR"];
     for (const k of keys) {
       const env = { ...ready, [k]: undefined };
       expect((await status(env)).ready, `without ${k}`).toBe(false);
@@ -55,6 +56,9 @@ describe("live leg gating (disabled by default, refuses unless every prerequisit
   it("blocks when the two owned numbers are the same, or are not numbers", async () => {
     expect((await status(ready, { ...deps, opRead: () => "+18165550111" })).ready).toBe(false);
     expect((await status(ready, { ...deps, opRead: () => "not-a-number" })).ready).toBe(false);
+  });
+  it("never runs in CI or a hosted runtime, even when everything else is satisfied", async () => {
+    for (const k of ["CI", "GITHUB_ACTIONS", "VERCEL", "VERCEL_ENV"]) expect((await status({ ...ready, [k]: "1" })).ready, k).toBe(false);
   });
   it("blocks the autonomous Sendillo mode and a non-loopback app", async () => {
     expect((await status({ ...ready, STRESS_SENDILLO_MODE: "autonomous_tagged_rows" })).ready).toBe(false);

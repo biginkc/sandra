@@ -93,6 +93,8 @@ export async function liveLegStatus(cfg: StressConfig, env: Env, deps: LiveDeps 
   const add = (id: string, ok: boolean, detail: string) => p.push({ id, ok, detail });
 
   add("explicit_enable", env.STRESS_LIVE_LEG === "1", "STRESS_LIVE_LEG=1 (the live leg is off unless asked for by name)");
+  // Never in CI or a hosted runtime, whatever else is set.
+  add("not_ci", !env.CI && !env.GITHUB_ACTIONS && !env.VERCEL && !env.VERCEL_ENV, "not running in CI or a hosted runtime (CI, GITHUB_ACTIONS, VERCEL, VERCEL_ENV must be unset)");
 
   // The stubbed leg must have passed, at THIS sha, as a full PASS (never a partial run).
   const reportPath = env.STRESS_STUB_LEG_REPORT ?? "";
@@ -128,6 +130,11 @@ export async function liveLegStatus(cfg: StressConfig, env: Env, deps: LiveDeps 
     numbersDetail = (e as Error).message;
   }
   add("owned_numbers_via_op", numbersOk, numbersDetail);
+
+  // The isolated instance's world (org + rep) written by its provisioning; the driver only reads it.
+  let worldOk = false;
+  try { const w = env.STRESS_LIVE_WORLD_FILE ? readFile(env.STRESS_LIVE_WORLD_FILE) : null; const j = w ? JSON.parse(w) as { orgId?: string; repUserId?: string } : null; worldOk = !!j?.orgId && !!j?.repUserId; } catch { worldOk = false; }
+  add("live_world_file", worldOk, "STRESS_LIVE_WORLD_FILE names a JSON file with { orgId, repUserId } for the rep of the isolated instance");
 
   // The kill switch (KILL file + `stress kill`) needs an explicit artifacts directory to watch.
   add("kill_switch_armed", !!env.STRESS_ARTIFACTS_DIR, "STRESS_ARTIFACTS_DIR is set so the KILL file and kill-switch evidence have a home");

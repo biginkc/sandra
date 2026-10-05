@@ -6,7 +6,7 @@ import { defineConfig, devices } from "@playwright/test";
  * cannot launch Chromium. No improvising "chaos brain": every spec replays a recorded schedule tick.
  *
  * baseURL is the GATE PROXY in front of the app (loopback only). Rolling traces are ALWAYS on and
- * retained around every mutating tick (`trace: "on"` + per-tick trace files under the run dir).
+ * retained around every mutating tick (`trace: on`, light: no snapshots; per-tick trace files under the run dir).
  */
 const proxy = process.env.STRESS_PROXY_URL ?? "";
 if (process.env.STRESS_HARNESS !== "1") throw new Error("playwright.stress.config.ts is opt-in: set STRESS_HARNESS=1.");
@@ -28,7 +28,9 @@ export default defineConfig({
     ...devices["Desktop Chrome"],
     baseURL: proxy,
     timezoneId: "America/Chicago",
-    trace: "on",
+    // Always on, but LIGHT: actions, network and console only. Full snapshots of a Next dev page (every JS chunk and stylesheet, per action)
+    // made each trace zip take minutes at teardown, which the 90 s teardown budget turned into a timeout on a test that had passed.
+    trace: { mode: "on", snapshots: false, screenshots: false, sources: false },
     screenshot: "only-on-failure",
     video: "off",
   },

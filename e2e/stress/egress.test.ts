@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { egressChildEnv, proveInProcessDenial, readEgressViolations } from "./egress";
+import { classifyOsProbe, egressChildEnv, proveInProcessDenial, readEgressViolations } from "./egress";
 
 describe("egress guard", () => {
   it("denies a non-loopback connect, logs it, and the probe proof passes", () => {
@@ -29,5 +29,18 @@ describe("egress guard", () => {
     const code = `const s=require("node:net").createServer().listen(0,"127.0.0.1",()=>{const c=require("node:net").connect(s.address().port,"127.0.0.1",()=>{c.destroy();s.close();process.exit(0)})})`;
     const r = spawnSync(process.execPath, ["-e", code], { env: { ...process.env, ...egressChildEnv(path.join(dir, "e.jsonl")) }, timeout: 10_000 });
     expect(r.status).toBe(0);
+  });
+  it("classifies the OS probe: only a silent timeout proves the pf ring", () => {
+    expect(classifyOsProbe("timeout")).toBe("denied");
+    expect(classifyOsProbe("connected")).toBe("open");
+    expect(classifyOsProbe("error:ENETUNREACH")).toBe("inconclusive");
+  });
+  it("the pf rules are anchored where macOS evaluates them and scoped to one uid", () => {
+    const conf = readFileSync(path.join(__dirname, "egress-pf.conf"), "utf8");
+    const rules = conf.split("\n").filter((l) => l.trim() && !l.startsWith("#"));
+    expect(rules.some((l) => l.startsWith("set "))).toBe(false); // options are illegal in an anchor
+    expect(rules).toContain("pass quick on lo0 all");
+    expect(rules.some((l) => /^block drop out log quick proto \{ tcp, udp \}.* user __UID__$/.test(l))).toBe(true);
+    expect(readFileSync(path.join(__dirname, "egress-pf.sh"), "utf8")).toContain('ANCHOR="com.apple/sandra-stress"');
   });
 });

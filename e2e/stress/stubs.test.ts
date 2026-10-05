@@ -42,4 +42,20 @@ describe("StubServer", () => {
     expect(stub.dials()).toHaveLength(0);
     expect(stub.records.some((r) => r.outcome === "refused")).toBe(true);
   });
+  it("Dropbox Sign: the app's real send shape is keyed by metadata.sandra_request_id, echoes signers and a details URL the app accepts; reads are not sends", async () => {
+    stub = new StubServer();
+    await stub.start();
+    const id = "11111111-1111-4111-8111-111111111111";
+    const body = { template_ids: ["t"], client_id: "c", signers: [{ role: "Seller", name: "A", email_address: "a@example.invalid", order: 0 }], metadata: { sandra_request_id: id }, test_mode: true };
+    const res = await fetch(`${stub.url}/dropbox-sign/v3/signature_request/send_with_template`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const sr = ((await res.json()) as { signature_request: { signature_request_id: string; details_url: string; signatures: Array<{ signer_role: string }> } }).signature_request;
+    expect(sr.details_url).toMatch(/^https:\/\/app\.hellosign\.com\/home\/manage/); // the app's validateDetailsUrl
+    expect(sr.signatures[0]!.signer_role).toBe("Seller");
+    expect(stub.sends()).toHaveLength(1);
+    expect(stub.sends()[0]!.key).toBe(id);
+    const list = await fetch(`${stub.url}/dropbox-sign/v3/signature_request/list?query=${encodeURIComponent(`metadata:${id} AND test_mode:true`)}`);
+    expect(((await list.json()) as { signature_requests: unknown[] }).signature_requests).toHaveLength(1);
+    expect((await fetch(`${stub.url}/dropbox-sign/v3/signature_request/${sr.signature_request_id}`)).status).toBe(200);
+    expect(stub.sends()).toHaveLength(1); // the two reads did not count as sends
+  });
 });

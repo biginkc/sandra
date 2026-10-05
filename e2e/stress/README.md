@@ -10,8 +10,8 @@ ignored), or CI. It never runs against production and the live leg is disabled.
 ```
 # 1. fresh local stack, loopback only, repo migrations only (never the dev stack ports)
 node e2e/stress/provision-stack.mjs --workdir /tmp/sandra-stress-stack --api-port 55431 --db-port 55430
-# 2. start the candidate app against it (see "App env"), with NODE_OPTIONS=--require e2e/stress/egress-guard.cjs
-# 3. egress ring 2 (optional but required for the real run): sudo pfctl -a com.apple.sandra-stress -f e2e/stress/egress-pf.conf
+# 2. start the candidate app against it (see "App env"), with NODE_OPTIONS='--require "<abs path>/e2e/stress/egress-guard.cjs"' (the path MUST be quoted: this repo's path has a space)
+# 3. egress ring 2 (required for the real run): e2e/stress/egress-pf.sh check, then sudo e2e/stress/egress-pf.sh apply <harness uid>; remove it with sudo e2e/stress/egress-pf.sh remove
 # 4. self-test, then the day
 STRESS_HARNESS=1 ... npm run stress -- selftest
 STRESS_HARNESS=1 STRESS_SCOPE=full STRESS_ROOT_BROWSER_CONTEXT=1 STRESS_REQUIRE_OS_EGRESS=1 ... npm run stress -- run
@@ -25,7 +25,7 @@ Environment (all loopback): `E2E_DISPOSABLE_DATABASE=1`, `E2E_CI_SUPABASE_DB_URL
 Unit tests: `npm run test:stress-unit`.
 
 App env for the app under test: `MESSAGING_PROVIDER=mock`, `DIALPAD_DIAL_PROVIDER=stub`, `DIALPAD_CTI_DIAL_KEY_E2E`, `E2E_AUTH_BYPASS=1`,
-`NEXT_PUBLIC_HUGO_SSO=1`, `SKIP_INTENT_GATE=1`, `DROPBOX_SIGN_API_BASE_URL=<stub url>/dropbox-sign`, same as `playwright.config.ts`'s webServer env.
+`NEXT_PUBLIC_HUGO_SSO=1`, `SKIP_INTENT_GATE=1`, same as `playwright.config.ts`'s webServer env, plus for the contract card: `DROPBOX_SIGN_API_BASE_URL=http://127.0.0.1:<STRESS_STUB_PORT>/dropbox-sign/v3`, `ESIGN_CREDENTIAL_ENCRYPTION_KEY=test-esign-encryption-key`, `DROPBOX_SIGN_CLIENT_ID=test-dropbox-sign-client-id`, `DROPBOX_SIGN_CALLBACK_SECRET_KEY`, `DROPBOX_SIGN_EMBEDDED_DOMAIN=localhost`. The harness is started with the same `STRESS_STUB_PORT` (a fixed port, since the app needs the stub's URL before it starts).
 
 ## What it is
 
@@ -78,16 +78,26 @@ non-loopback endpoint; a subscription proof for that tunnel; both owned numbers 
 8. The Dialpad `initiate_call` stub on `main` is in-process (`DIALPAD_DIAL_PROVIDER=stub`), so the Next server's own dial cannot reach the harness stub server. The replay engine models the dial server action (guards, authorize, then a POST to the stub) and the browser lane drives the real Call button against the in-process stub with intent rows as the evidence. A base-URL seam for Dialpad would close this.
 9. `kpi-snapshot.mjs` refuses any non-production database, so oracle 15 calls `fn_get_acquisition_kpis` directly and uses `kpi-rules.mjs` (every key classified; `EQUAL_IN_CLOSED_WINDOWS` keys equal to the schedule's totals).
 
-## Not built / not verified here (read before the real run)
+## Status of the four closed gaps (2026-10-05) and what is still open
 
-- **The browser lane is NOT proven green.** Proven locally on this Mac: the engine spawns Playwright with Chromium through the gate proxy, signs the rep in with SSR cookies,
-  blocks non-loopback browser requests, the Call button creates an authorized intent, and (in a standalone probe) saving the queue's post-call prompt finalizes the webhook attempt.
-  The serial spec set did not complete: the first tick (`second_tab_retry`) timed out waiting for the post-call prompt for that lead on the queue page after the Call click; the cause
-  was not found (suspects: prompt timing/identity on the queue page). Until that is fixed, a full-scope run ends FAIL ("browser lane executed 0/N scheduled ticks"), never PASS, and
-  oracle 16 (rendered parity) is unverified. Selectors used: `call-button-<id>`, `post-call-*`, `lead-add-note-composer`, `lead-next-action`, `send-contract-card`.
-- The contract-send browser runner (`offline_send`) and the Slow-3G/offline gestures need the e-sign provider fully configured in the candidate app (template, credentials, Dropbox base URL to the stub); written against the real test ids, not exercised.
+1. **Browser lane.** It runs and passes its 12 scheduled ticks locally against a real `next dev` stack (replay lane first, then the scripted specs, then rendered parity). Causes found and fixed:
+   - The old first-tick timeout was waiting for the post-call prompt on `/my-leads`. A lead just called has left the "Call next" strip, and the queue only opens the prompt for a lead it has a row for. The runners now land on `/my-leads?lead=<id>` (the deep link pins the lead), which is how a rep reaches it.
+   - Playwright's always-on trace with snapshots made every trace zip of a Next dev page take minutes at teardown, which the 90 s teardown budget reported as a timeout on a test that had passed. The config now records a light trace (actions, network, console; no snapshots).
+   - The note composer is a collapsed `<details>`; the runner opens it before filling.
+   - Stale post-call prompts from the replay lane (the queue opens the oldest of the newest 20, and does nothing when that one is outside the loaded rows) are dismissed as the rep before each browser tick.
+   - Two-tab appointment edits now follow the replay scenario (stale edit refused, refreshed edit lands).
+   The Playwright check in CI (`Playwright golden paths`) never ran on this PR before because the branch conflicted with `main`; it is green at the merged head. The stress specs are not in any CI lane (`**/stress/**` is ignored by the default config).
+2. **Contract-send runner.** `offline_send` drives the REAL contract card (flag `contract_card`, Dropbox Sign test mode) on the call screen: offline click (no request leaves, 0 provider sends), back online on Slow-3G with the same send intent, then exactly one send on the stub and a logged offer. World seeding (`world.ts`): a test-mode e-sign connection with the repo's own integration-test constants, a finalized residential-v1 template, an `attom`-labelled fixture comp so the card can take a legal description (the comps flags stay off, no ATTOM call), and a seller e-mail in a reserved TLD. The stub now answers the real SDK shapes (send, list, get; `details_url` in the form the app validates). App env additions: `DROPBOX_SIGN_API_BASE_URL=http://127.0.0.1:<STRESS_STUB_PORT>/dropbox-sign/v3`, `ESIGN_CREDENTIAL_ENCRYPTION_KEY=test-esign-encryption-key`, `DROPBOX_SIGN_CLIENT_ID=test-dropbox-sign-client-id`, `DROPBOX_SIGN_CALLBACK_SECRET_KEY=<any>`, `DROPBOX_SIGN_EMBEDDED_DOMAIN=localhost`; set `STRESS_STUB_PORT` so the app and the harness agree on the stub's port. Contract-card observations for the product owner: with a `novation-v1` template the card hard-codes the seller phone to null (`contract-card-context.ts`), and that field is not overridable, so Send can never enable for that template; the harness therefore uses the residential-v1 field set.
+3. **Live-leg UI driver.** `live-driver.ts` (pure orchestration over a port, unit-tested with a fake) and `browser/live-leg.spec.ts` (the port wired to the real Call button). DISABLED by default: skipped unless `STRESS_LIVE_LEG=1`, refused when `CI`, `GITHUB_ACTIONS`, `VERCEL` or `VERCEL_ENV` is set (also a failing prerequisite in `liveLegStatus`), and it throws unless every prerequisite passes (stubbed-leg PASS at this sha, human decisions, numbers through `op read`, tunnel and subscription proof, `STRESS_LIVE_WORLD_FILE`). It has never been run. The app has no cancel control once Dialpad has the dial, so `cancel_before_answer` is not dialled and is reported `not_driven` (never a pass); the double-dial pair is dialled back to back and the second must be refused.
+4. **Egress.** The pf rules were wrong three ways: the anchor `com.apple.sandra-stress` is never evaluated (macOS evaluates `com.apple/*`), `set skip` is not legal in an anchor, and `block all` cut off the whole machine, including the agent running the harness. `egress-pf.conf` is now one uid-scoped rule set loaded by `egress-pf.sh check|apply|remove|status` (needs sudo to apply; `check` parses without root). The OS probe used TEST-NET, which is blackholed with or without a firewall (it could never fail), and ran inside the guarded process (the in-process guard threw first); it now dials a routable address from a guard-less child and treats only a silent timeout as denial. `NODE_OPTIONS=--require <path>` must quote the path (this repo's path contains a space; unquoted, Node exits at startup). The pf ring itself was parsed here but NOT applied (no sudo in this environment).
+
+Debug aids (never a PASS): `STRESS_DEBUG_SKIP_REPLAY=1`, `STRESS_DEBUG_BROWSER_GREP=<pattern>`.
+
+## Still open (read before the real run)
+
+- A full run against the merged stack ends FAIL on one real product finding, `second_tab_duplicate_note` (finding 6 above): fresh-key second-tab prompt saves write a second note. Everything else the oracle checks was green in the last local run except what is listed in the PR body.
+- OS-level `pf` egress needs sudo and was not applied; `STRESS_REQUIRE_OS_EGRESS=1` proves the ring when it is.
 - The lost-response `sms` instance is realized as a gated reload of the prompt save (the mock provider cannot be gated server-side).
-- The live leg has gating, the call plan, owned-number resolution and the evidence classifier; the per-call UI driver in `browser/live-leg.spec.ts` is deliberately NOT built (it throws after the prerequisites pass).
-- OS-level `pf` egress needs sudo and was not applied; the in-process guard and the browser route guard are proven, and `STRESS_REQUIRE_OS_EGRESS=1` proves the pf ring when it is applied.
-- The autonomous Sendillo mode (accepting tagged production `webhook_events` rows) is deliberately not built.
+- Supersede is modelled with one contract (finding 7).
+- The autonomous Sendillo mode is deliberately not built.
 - Local proofs ran against `next dev` on a throwaway stack (port 3466); a production build was not tested.

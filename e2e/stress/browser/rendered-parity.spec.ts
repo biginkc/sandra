@@ -10,7 +10,7 @@ import { loadRun, recordResult, signIn } from "./support";
 const run = loadRun();
 
 test("stress rendered parity: lead page next step matches the open appointment row (after reload)", async ({ page, context }) => {
-  test.setTimeout(600_000); // the first dev-server compile of a page is slow; each lead is then quick
+  test.setTimeout(300_000); // the first dev-server compile of a page is slow; each lead is then quick
   await signIn(context, page);
   const leads = await run.db.query<{ related_property_id: string; id: string; due_at: Date }>(
     `select t.related_property_id, t.id, t.due_at from public.tasks t join public.properties p on p.id=t.related_property_id
@@ -23,7 +23,9 @@ test("stress rendered parity: lead page next step matches the open appointment r
     await page.goto(`/leads/${row.related_property_id}`);
     await page.reload();
     const el = page.locator(`[data-testid="lead-next-action"]`).first();
-    await el.waitFor({ timeout: 20_000 }).catch(() => {});
+    // Either the next step renders or the app's error page does: do not sit out the full wait on an error page.
+    await Promise.race([el.waitFor({ timeout: 20_000 }), page.getByText("Something went wrong.").waitFor({ timeout: 20_000 })]).catch(() => {});
+    if (await page.getByText("Something went wrong.").isVisible().catch(() => false)) { failures.push(`${row.related_property_id}: the lead page rendered its error page (${(await page.locator("main, body").first().innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 80)})`); continue; }
     const id = await el.getAttribute("data-next-step-id").catch(() => null);
     const due = await el.getAttribute("data-next-step-due-at").catch(() => null);
     if (!id || !due) { failures.push(`${row.related_property_id}: no rendered next step`); continue; }

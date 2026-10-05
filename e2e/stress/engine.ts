@@ -40,12 +40,18 @@ export function artifactsDirFor(cfg: StressConfig, profile: Profile): string {
 }
 
 /** The server log lines (after `offset`) that mean an unexpected 5xx or an unhandled rejection. */
-export function scanServerLog(file: string, offset: number): string[] {
+export function scanServerLog(file: string, offset: number, opts: { injectedOfflineFetchFailures?: number } = {}): string[] {
   if (!existsSync(file)) return [`server log ${file} not found`];
   const text = readFileSync(file, "utf8").slice(offset);
   const bad: string[] = [];
+  // Injected failure with an explicit, bounded expectation: each scripted offline gesture (browser `setOffline` during Send) makes Next's
+  // client forward exactly one `[browser] unhandledRejection: TypeError: Failed to fetch` to the server log. Only that many are expected.
+  let injectedLeft = opts.injectedOfflineFetchFailures ?? 0;
   for (const line of text.split("\n")) {
-    if (/\s5\d\d in \d+/.test(line) || /unhandled(Rejection| rejection)/i.test(line) || /⨯ unhandled/i.test(line)) bad.push(line.trim().slice(0, 240));
+    if (/\s5\d\d in \d+/.test(line) || /unhandled(Rejection| rejection)/i.test(line) || /⨯ unhandled/i.test(line)) {
+      if (injectedLeft > 0 && /^\[browser\].*unhandledRejection: TypeError: Failed to fetch\s*$/.test(line.trim())) { injectedLeft -= 1; continue; }
+      bad.push(line.trim().slice(0, 240));
+    }
   }
   return bad;
 }
@@ -146,7 +152,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   for (const f of ["executed.ndjson", "invariants.jsonl", "ordering.jsonl", "stub.ndjson", "egress.jsonl", "browser-results.jsonl", "KILL", "kill-switch.json", "test-org-dump.json"]) rmSync(path.join(dir, f), { force: true });
   const egressLog = path.join(dir, "egress.jsonl");
   proveInProcessDenial(egressLog);
-  if (env.STRESS_REQUIRE_OS_EGRESS === "1") await proveOsDenial();
+  if (env.STRESS_REQUIRE_OS_EGRESS === "1") proveOsDenial();
   log(`lane guards passed; egress guard proven; artifacts ${dir}`);
 
   const manifest: Manifest = buildManifest(cfg.seed, cfg.runTag, { profile });
@@ -229,7 +235,10 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     }, cfg.invariantIntervalMs);
 
     // Execute the replay ticks in order.
-    const replayTicks = manifest.ticks.filter((t) => t.actor !== "browser");
+    // Debug aid for iterating on the browser lane: skips the replay ticks. A run with it set can never be a PASS (setup error below).
+    const skipReplay = env.STRESS_DEBUG_SKIP_REPLAY === "1";
+    if (skipReplay) setupErrors.push("STRESS_DEBUG_SKIP_REPLAY=1: the replay lane was skipped (debug run, never a PASS)");
+    const replayTicks = skipReplay ? [] : manifest.ticks.filter((t) => t.actor !== "browser");
     for (const tick of replayTicks) {
       if (stopRequested) break;
       const rec = await executeTick(ctx, tick, tick.leadSlot >= 0 ? world.leads[tick.leadSlot]! : null, cfg.tickDeadlineMs);
@@ -279,7 +288,8 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   // Egress and server-log verdicts.
   const egress = readEgressViolations(egressLog);
   const serverProblems: string[] = [];
-  if (appLog) for (const l of scanServerLog(appLog, appLogOffset)) serverProblems.push(`server log: ${l}`);
+  const offlineGestures = records.filter((r) => r.actor === "browser" && r.steps.some((st) => st.startsWith("provider sends while offline"))).length;
+  if (appLog) for (const l of scanServerLog(appLog, appLogOffset, { injectedOfflineFetchFailures: offlineGestures })) serverProblems.push(`server log: ${l}`);
   else serverProblems.push("STRESS_APP_LOG not set: the server log cannot be scanned for 5xx/unhandled rejections (required)");
 
   const failedAny = setupErrors.length > 0 || [...invariantChecks, ...outcomeChecks].some((c) => !c.ok && !c.deferred) || egress.length > 0 || serverProblems.length > 0;
@@ -390,7 +400,8 @@ async function runBrowserLane(a: { cfg: StressConfig; dir: string; world: World;
     STRESS_RUN_TAG: a.cfg.runTag,
   };
   const code: number = await new Promise((resolve) => {
-    const child = spawn("npx", ["playwright", "test", "-c", "playwright.stress.config.ts", `e2e/stress/browser/${a.spec}.spec.ts`], { env, stdio: "inherit", shell: false });
+    const grep = a.spec === "chaos-browser" && a.env.STRESS_DEBUG_BROWSER_GREP ? ["--grep", a.env.STRESS_DEBUG_BROWSER_GREP] : []; // debug aid: a subset of ticks makes the run a FAIL by "executed N/M"
+    const child = spawn("npx", ["playwright", "test", "-c", "playwright.stress.config.ts", `e2e/stress/browser/${a.spec}.spec.ts`, ...grep], { env, stdio: "inherit", shell: false });
     child.on("close", (c) => resolve(c ?? 1));
     child.on("error", () => resolve(1));
   });

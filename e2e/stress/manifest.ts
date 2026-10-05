@@ -118,7 +118,8 @@ function expectedFor(scenario: ScenarioId, variant: string | undefined, tick: nu
       return { dials: 0, attempts: 1, attemptOutcome: "reached", quarantineResolved: true, noteMarker: marker };
     case "lost_response":
       if (variant === "contract") return { dials: 0, attempts: 0, contracts: 1, offers: 1 };
-      if (variant === "sms") return { dials: 0, attempts: 0 };
+      // The browser realizes "sms" as a real call from the UI with a gated, reloaded prompt save: one dial, one attempt, recovered after the reload.
+      if (variant === "sms") return { dials: 1, attempts: 1, attemptOutcome: "reached" };
       return { dials: 1, attempts: 1, attemptOutcome: "reached", noteMarker: marker, conflictCode: "call_in_flight|prior_call_unresolved|already_dispatched|rate_limited" };
     case "second_tab_retry":
       if (variant === "contract_send") return { dials: 0, attempts: 0, contracts: 1, offers: 1, conflictCode: "OPEN_CONTRACT_EXISTS" };

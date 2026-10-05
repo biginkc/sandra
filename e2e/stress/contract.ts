@@ -49,7 +49,11 @@ export async function contractSend(
   }
 
   const fx = esignRequestFixture({ orgId: ctx.cfg.orgId, propertyId: lead.propertyId, templateId: ctx.world.templateId, userId: ctx.world.repUserId, sendIntentId: intent });
-  fx.merge_value_snapshot = { ...fx.merge_value_snapshot, offer_price: PRICE } as typeof fx.merge_value_snapshot;
+  // The snapshot must carry exactly the template's field set (residential-v1), or the lead page cannot render the request ("Request merge snapshot is invalid").
+  fx.merge_value_snapshot = {
+    seller_name: "Stress Seller", buyer_name: "STRESS Buyer LLC", property_address: "1 Stress Fixture Ln", property_city: "Kansas City", property_state: "MO", property_zip: "64151",
+    legal_description: "LOT 1 STRESS FIXTURE SUBDIVISION", offer_price: PRICE, earnest_money_holder: "STRESS Title Co", earnest_money: "$5,000.00", cash_balance: PRICE, closing_date: closing, additional_terms: "",
+  } as unknown as typeof fx.merge_value_snapshot;
   try {
     await ctx.db.query(
       `insert into public.esign_requests (id,org_id,property_id,template_id,signer_snapshot,merge_value_snapshot,send_intent_id,payload_hash,created_by)

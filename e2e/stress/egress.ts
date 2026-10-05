@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import net from "node:net";
 
 import { LaneRefusal } from "./guards";
 
@@ -34,16 +33,32 @@ export function proveInProcessDenial(logFile: string): void {
   if (r.status !== 0) throw new LaneRefusal("EGRESS_GUARD_INEFFECTIVE", `the in-process egress guard did not deny a non-loopback connect (exit ${r.status}); refusing to run.`);
 }
 
-/** OS ring: a guard-less child tries TEST-NET-1. A completed connect means the firewall is not blocking. */
-export async function proveOsDenial(): Promise<void> {
-  const connected = await new Promise<boolean>((resolve) => {
-    const s = net.connect({ host: "192.0.2.1", port: 80 });
-    const done = (v: boolean) => { s.destroy(); resolve(v); };
-    s.setTimeout(2500, () => done(false));
-    s.on("connect", () => done(true));
-    s.on("error", () => done(false));
-  });
-  if (connected) throw new LaneRefusal("OS_EGRESS_OPEN", "a non-loopback connection succeeded; apply egress-pf.conf before the run.");
+export type OsProbeOutcome = "connected" | "timeout" | `error:${string}`;
+
+/**
+ * A silent timeout is what `block drop` looks like; an immediate "unreachable" is an offline machine, which cannot
+ * tell blocked from not-blocked. Only a timeout proves the ring (and a connect proves it is open).
+ */
+export function classifyOsProbe(outcome: OsProbeOutcome): "denied" | "open" | "inconclusive" {
+  if (outcome === "connected") return "open";
+  if (outcome === "timeout") return "denied";
+  return "inconclusive";
+}
+
+/**
+ * OS ring probe, run in a child WITHOUT the in-process guard (the guard would throw first and the pf ring would
+ * never be exercised). It dials a routable public address (a TCP SYN to Cloudflare's resolver, never a provider):
+ * TEST-NET addresses are blackholed with or without pf, so they prove nothing.
+ */
+export function proveOsDenial(): void {
+  const code = `const s=require("node:net").connect({host:"1.1.1.1",port:443});s.setTimeout(3000,()=>{console.log("timeout");process.exit(0)});s.on("connect",()=>{console.log("connected");process.exit(0)});s.on("error",(e)=>{console.log("error:"+(e&&e.code||"unknown"));process.exit(0)});`;
+  const env = { ...process.env };
+  delete env.NODE_OPTIONS;
+  const r = spawnSync(process.execPath, ["-e", code], { env, timeout: 10_000, encoding: "utf8" });
+  const outcome = (r.stdout ?? "").trim() as OsProbeOutcome;
+  const verdict = classifyOsProbe(outcome || "error:no_output");
+  if (verdict === "open") throw new LaneRefusal("OS_EGRESS_OPEN", "a non-loopback connection succeeded; run `sudo e2e/stress/egress-pf.sh apply` before the run.");
+  if (verdict === "inconclusive") throw new LaneRefusal("OS_EGRESS_INCONCLUSIVE", `the OS egress probe saw "${outcome}", not a firewall-style timeout; cannot prove the pf ring (is the machine offline?).`);
 }
 
 /** Non-probe egress violations recorded during the run. Any entry fails the run. */

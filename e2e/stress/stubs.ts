@@ -67,8 +67,9 @@ export class StubServer {
   dials(): StubRecord[] {
     return this.records.filter((r) => r.provider === "dialpad" && !r.probe && r.outcome === "accepted");
   }
+  /** Accepted signature-request SENDS only (a lookup or account read is not a send). */
   sends(): StubRecord[] {
-    return this.records.filter((r) => r.provider === "dropbox_sign" && !r.probe && r.outcome === "accepted");
+    return this.records.filter((r) => r.provider === "dropbox_sign" && !r.probe && r.outcome === "accepted" && r.path.endsWith("/signature_request/send_with_template"));
   }
 
   private push(rec: StubRecord): void {
@@ -100,7 +101,9 @@ export class StubServer {
     const provider: StubProvider | null = url.pathname.startsWith("/dialpad/") ? "dialpad" : url.pathname.startsWith("/dropbox-sign/") ? "dropbox_sign" : null;
     if (!provider) return json(404, { error: "unknown stub route" });
     const b = (body ?? {}) as Record<string, unknown>;
-    const key = provider === "dialpad" ? (typeof b.custom_data === "string" ? b.custom_data : null) : (typeof b.key === "string" ? b.key : typeof b.client_key === "string" ? b.client_key : null);
+    // Dropbox Sign: the harness's own probes carry `key`; the app's real send carries `metadata.sandra_request_id` (the esign_requests row id).
+    const meta0 = (b.metadata ?? {}) as Record<string, unknown>;
+    const key = provider === "dialpad" ? (typeof b.custom_data === "string" ? b.custom_data : null) : (typeof b.key === "string" ? b.key : typeof meta0.sandra_request_id === "string" ? meta0.sandra_request_id : typeof b.client_key === "string" ? b.client_key : null);
     const phone = provider === "dialpad" && typeof b.phone_number === "string" ? b.phone_number : null;
     const meta = { source: provider, path: url.pathname, key: key ?? undefined };
     let aborted = false;
@@ -118,6 +121,21 @@ export class StubServer {
       this.push({ reqId, at: new Date().toISOString(), provider, path: url.pathname, key, phone, body, outcome: "refused", probe: false });
       return json(503, { error: "closed by kill switch" });
     }
+    if (provider === "dropbox_sign" && req.method === "GET") {
+      // Read-only lookups the app makes when reconciling an unconfirmed send: answered from what this stub accepted.
+      const sent = (id: string) => this.sends().find((r) => r.reqId.startsWith(id.replace(/^sr_stub_/, "")));
+      const toApi = (r: StubRecord) => ({ signature_request_id: `sr_stub_${r.reqId.slice(0, 8)}`, test_mode: true, metadata: { sandra_request_id: r.key }, signatures: this.signaturesFor(r), details_url: `https://app.hellosign.com/home/manage?guid=sr_stub_${r.reqId.slice(0, 8)}` });
+      this.push({ reqId, at: new Date().toISOString(), provider, path: url.pathname, key, phone, body: null, outcome: "accepted", probe: false });
+      if (url.pathname.endsWith("/signature_request/list")) {
+        const q = url.searchParams.get("query") ?? "";
+        const hit = q.match(/metadata:([0-9a-f-]{36})/)?.[1];
+        const list = this.sends().filter((r) => !hit || r.key === hit).map(toApi);
+        return json(200, { list_info: { page: 1, num_pages: 1, num_results: list.length, page_size: 20 }, signature_requests: list });
+      }
+      const m = url.pathname.match(/\/signature_request\/(sr_stub_[0-9a-f]+)$/);
+      const found = m ? sent(m[1]!) : undefined;
+      return found ? json(200, { signature_request: toApi(found) }) : json(404, { error: { error_msg: "not found (stub)", error_name: "not_found" } });
+    }
     const mode = this.modes[provider];
     if (mode === "reject") {
       this.push({ reqId, at: new Date().toISOString(), provider, path: url.pathname, key, phone, body, outcome: "rejected", probe: false });
@@ -131,7 +149,15 @@ export class StubServer {
     await this.gates.reach(reqId, "response_sent", meta);
     if (aborted) return;
     if (provider === "dialpad") return json(200, { call_id: String(Date.now()) + String(Math.floor(Math.random() * 1000)) });
-    return json(200, { signature_request: { signature_request_id: `sr_stub_${reqId.slice(0, 8)}`, test_mode: true } });
+    const rec = this.records.find((r) => r.reqId === reqId && r.outcome === "accepted")!;
+    return json(200, { signature_request: { signature_request_id: `sr_stub_${reqId.slice(0, 8)}`, test_mode: true, metadata: { sandra_request_id: key }, signatures: this.signaturesFor(rec), details_url: `https://app.hellosign.com/home/manage?guid=sr_stub_${reqId.slice(0, 8)}` } });
+  }
+
+  // details_url must pass the app's own check (https, app.hellosign.com, /home/manage); it is only a string here, never fetched.
+  /** The signer rows the real API echoes back for a template send (from the request's own signers). */
+  private signaturesFor(rec: StubRecord): Array<Record<string, unknown>> {
+    const signers = ((rec.body as { signers?: Array<{ role?: string; name?: string; email_address?: string; order?: number }> } | null)?.signers ?? []);
+    return signers.map((sg, i) => ({ signature_id: `sig_stub_${rec.reqId.slice(0, 6)}_${i}`, signer_role: sg.role ?? "Signer", signer_name: sg.name ?? "Signer", signer_email_address: sg.email_address ?? "signer@example.invalid", order: sg.order ?? i }));
   }
 
   private control(url: URL, body: unknown, json: (s: number, p: unknown) => void): void | Promise<void> {
