@@ -16,6 +16,7 @@ import {
   asMember,
   postDialpadEvent,
   prepareDialpadIntent,
+  purgeDialpadEvidenceCi,
   resetCloseWorld,
   retireSyntheticLead,
   seedDialpadForRep,
@@ -82,7 +83,12 @@ test.describe.serial("my-leads-close: Phase 1 CI lane", () => {
       // Put the test org back to its defaults: flags, Dialpad connection/binding, reminder settings, designation.
       if (repUserId) await resetCloseWorld(db, { orgId: DEFAULT_ORG_ID, repUserId });
     } finally {
-      await db.end();
+      try {
+        // The job's exact-run identity cleanup cannot delete a user that a Dialpad binding references.
+        await purgeDialpadEvidenceCi(db);
+      } finally {
+        await db.end();
+      }
     }
   });
 
@@ -140,9 +146,12 @@ test.describe.serial("my-leads-close: Phase 1 CI lane", () => {
     await page.goto("/my-leads");
     const row = page.locator(`[data-testid^="my-lead-row-${lead.propertyId}"]`).first();
     await expect(row).toBeVisible({ timeout: 20_000 });
-    await row.getByRole("button").first().click();
     const actions = page.locator(`[data-testid^="my-lead-actions-${lead.propertyId}"]`).first();
-    await expect(actions).toBeVisible();
+    // The row toggles on click, so only click while collapsed; a click landing before hydration is a no-op (first-attempt flake in CI).
+    await expect(async () => {
+      if (!(await actions.isVisible())) await row.getByRole("button").first().click();
+      await expect(actions).toBeVisible({ timeout: 3_000 });
+    }).toPass({ timeout: 30_000 });
     await actions.getByRole("button", { name: /log attempt/i }).click();
 
     const prompt = page.getByTestId("post-call-prompt");
