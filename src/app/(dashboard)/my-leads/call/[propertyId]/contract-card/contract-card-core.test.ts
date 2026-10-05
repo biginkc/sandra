@@ -54,6 +54,37 @@ function setup(over: Partial<ContractCardCoreDeps> = {}, viewer = { userId: USER
   return { core: createContractCardCore(deps), deps, projection, sendSpy };
 }
 
+describe("sendContractCard motivation and open-contract guard", () => {
+  it("requires a motivation only when the lead has none recorded, before any intent exists", async () => {
+    const { core, projection, sendSpy } = setup();
+    projection.precheck.mockResolvedValue({ ok: true as const, motivationRecorded: false } as never);
+    expect(await core.sendContractCard(input())).toMatchObject({ status: "blocked", code: "MOTIVATION_REQUIRED" });
+    expect(projection.createIntent).not.toHaveBeenCalled();
+    expect(sendSpy).not.toHaveBeenCalled();
+    const res = await core.sendContractCard(input({ motivation: { kind: "specified", text: "relocating" }, temperature: "hot" }));
+    expect(res.status).toBe("sent");
+    expect(projection.createIntent).toHaveBeenCalledWith(expect.objectContaining({ motivation: { kind: "specified", text: "relocating" }, temperature: "hot" }));
+  });
+
+  it("rejects a malformed motivation or temperature", async () => {
+    const { core, sendSpy } = setup();
+    expect(await core.sendContractCard(input({ motivation: { kind: "specified", text: "  " } as never }))).toMatchObject({ code: "INVALID_INPUT" });
+    expect(await core.sendContractCard(input({ temperature: "lava" as never }))).toMatchObject({ code: "INVALID_INPUT" });
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it("a second intent for the same lead is refused by the database guard and nothing is sent", async () => {
+    const { core, projection, sendSpy } = setup();
+    for (const [error, code] of [["OPEN_CONTRACT_EXISTS", "OPEN_CONTRACT_EXISTS"], ["PENDING_OFFER_EXISTS", "PENDING_OFFER_EXISTS"]] as const) {
+      projection.createIntent.mockResolvedValueOnce({ error } as never);
+      expect(await core.sendContractCard(input({ sendIntentId: randomIntent() }))).toMatchObject({ status: "blocked", code });
+    }
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+});
+
+const randomIntent = () => "eeeeeeee-eeee-4eee-8eee-" + Math.random().toString(16).slice(2, 14).padEnd(12, "0");
+
 describe("sendContractCard", () => {
   it("is blocked FEATURE_DISABLED when the flag is off, before anything else runs", async () => {
     const { core, projection, sendSpy } = setup({ flagOn: async () => false });

@@ -74,7 +74,7 @@ export type MyLeadQueueRow = {
     method: string
     sentLabel: string
     followUpLabel: string | null
-    outcome: "pending" | "accepted" | "declined"
+    outcome: "pending" | "accepted" | "declined" | "superseded"
   } | null
   archived: boolean
 }

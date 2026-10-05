@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import type { BuyerEntity, TitleCompany } from "@/lib/contract-defaults/resolve";
@@ -8,6 +8,7 @@ import type { EsignMergeFieldName } from "@/lib/esign/contracts";
 
 import type { ContractCardState } from "../types";
 import type { SendContractCardInput, SendContractCardResult, SignerAssignment } from "./contract-card-core";
+import { OfferRecovery, type OfferRecoveryActions } from "./offer-recovery";
 import { buildContractPrefill, parseDollarsToCents, ECONOMIC_FIELDS } from "./contract-prefill";
 
 type EnabledState = Extract<ContractCardState, { enabled: true }>;
@@ -19,6 +20,10 @@ export type ContractCardProps = {
   onPriceChange?: (value: string) => void;
   onClosingDateChange?: (value: string) => void;
   onSent?: () => void;
+  /** Recovery actions for a sent contract whose offer needs reconciling. */
+  recovery?: OfferRecoveryActions;
+  /** Re-reads the card while a contract is being confirmed or logged (every 5 seconds). */
+  onRefresh?: () => void;
 };
 
 const input = "border-input bg-background w-full rounded-md border px-2 py-1 text-sm";
@@ -53,9 +58,52 @@ function signersFor(state: EnabledState, buyer: BuyerEntity | null): SignerAssig
   );
 }
 
-export function ContractCard({ state, propertyId, send, onPriceChange, onClosingDateChange, onSent }: ContractCardProps) {
+const OPEN_STATES = ["awaiting_send", "pending", "conflict", "logged"] as const;
+const fmtDate = (iso: string | null) =>
+  iso ? new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", month: "short", day: "numeric", year: "numeric" }).format(new Date(iso)) : null;
+
+export function ContractCard(props: ContractCardProps) {
+  const { state } = props;
   if (!state.enabled) return null;
-  return <EnabledCard state={state} propertyId={propertyId} send={send} onPriceChange={onPriceChange} onClosingDateChange={onClosingDateChange} onSent={onSent} />;
+  const proj = state.projection ?? null;
+  if (proj && (OPEN_STATES as readonly string[]).includes(proj.state)) {
+    return <ProjectionPanel state={state} proj={proj} propertyId={props.propertyId} recovery={props.recovery} onRefresh={props.onRefresh} />;
+  }
+  return <EnabledCard {...props} state={state} />;
+}
+
+/** What the lead's contract is doing right now. Replaces the send form while one is open, so a reload never offers a second send. */
+function ProjectionPanel({ state, proj, propertyId, recovery, onRefresh }: {
+  state: EnabledState; proj: NonNullable<EnabledState["projection"]>; propertyId: string; recovery?: OfferRecoveryActions; onRefresh?: () => void;
+}) {
+  useEffect(() => {
+    if (!onRefresh || (proj.state !== "awaiting_send" && proj.state !== "pending")) return;
+    const timer = setInterval(() => { if (typeof document === "undefined" || document.visibilityState !== "hidden") onRefresh(); }, 5000);
+    return () => clearInterval(timer);
+  }, [onRefresh, proj.state]);
+
+  let copy: string;
+  if (proj.state === "awaiting_send") {
+    copy = proj.sendUnknown ? "Send unconfirmed. Sandra is checking with Dropbox Sign. Do not send again." : "Sending the contract. Do not send again.";
+  } else if (proj.state === "pending") copy = "Contract sent. Logging the offer…";
+  else if (proj.state === "logged") copy = `Contract sent. Offer logged.${proj.followUpAt ? ` Follow-up ${fmtDate(proj.followUpAt)}.` : ""}`;
+  else copy = "Contract sent, offer needs reconciling";
+
+  return (
+    <section data-testid="send-contract-card" className="bg-card space-y-3 rounded-lg border p-4">
+      <h2 className="text-sm font-semibold">Send contract</h2>
+      {state.testMode ? <p className="rounded-md border px-3 py-2 text-xs" data-testid="contract-test-mode">Dropbox Sign is in test mode. This document is watermarked and not legally binding.</p> : null}
+      {proj.state === "conflict" && recovery ? (
+        <OfferRecovery
+          target={{ projectionId: proj.id, propertyId, conflictCode: proj.conflictCode, requestId: proj.requestId, amountCents: proj.amountCents, pendingOfferAmountCents: proj.pendingOfferAmountCents }}
+          actions={recovery}
+          onDone={onRefresh}
+        />
+      ) : (
+        <p role="status" data-testid="contract-status" className="text-xs">{copy}</p>
+      )}
+    </section>
+  );
 }
 
 function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChange, onSent }: ContractCardProps & { state: EnabledState }) {
@@ -65,6 +113,9 @@ function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChan
   const [buyerId, setBuyerId] = useState(state.selectedBuyerEntityId ?? "");
   const [earnest, setEarnest] = useState(state.prefillBase.settings.earnestMoneyCents == null ? "" : (state.prefillBase.settings.earnestMoneyCents / 100).toFixed(2));
   const [overrides, setOverrides] = useState<Partial<Record<EsignMergeFieldName, string>>>({});
+  const [motivationKind, setMotivationKind] = useState<"" | "specified" | "no_motivation">("");
+  const [motivationText, setMotivationText] = useState("");
+  const [temperature, setTemperature] = useState<"" | "hot" | "warm" | "cold">("");
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState<SendContractCardResult | null>(null);
   // Stable across double-clicks and timeouts so a lost response re-uses the same idempotent intent.
@@ -101,7 +152,15 @@ function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChan
     !(ECONOMIC_FIELDS as readonly string[]).includes(n) && !["seller_name", "legal_description", "buyer_name", "earnest_money_holder"].includes(n),
   );
   const locked = result?.status === "sent" || result?.status === "unconfirmed";
-  const complete = !prefill.blocked && priceCents !== null && priceCents > 0 && earnestCents !== null && signersOk && !!title && !!buyer;
+  const needsMotivation = state.motivationRecorded === false;
+  const motivation: SendContractCardInput["motivation"] = !needsMotivation
+    ? null
+    : motivationKind === "specified" && motivationText.trim()
+      ? { kind: "specified", text: motivationText.trim() }
+      : motivationKind === "no_motivation"
+        ? { kind: "no_motivation", text: null }
+        : null;
+  const complete = (!needsMotivation || motivation !== null) && !prefill.blocked && priceCents !== null && priceCents > 0 && earnestCents !== null && signersOk && !!title && !!buyer;
   const disabled = !complete || sending || locked;
 
   let message: string | null = null;
@@ -117,6 +176,7 @@ function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChan
       const res = await send({
         propertyId, templateId: state.templateId, sendIntentId: intent(), priceCents, closingDate,
         titleCompanyId: titleId, buyerEntityId: buyerId, earnestMoneyCents: earnestCents, signers, overrides,
+        ...(needsMotivation ? { motivation, temperature: temperature || null } : {}),
       });
       setResult(res);
       // Rotate only when nothing was sent and the server released the intent (blocked, or a definitive
@@ -185,6 +245,37 @@ function EnabledCard({ state, propertyId, send, onPriceChange, onClosingDateChan
             onChange={(e) => { edited(); setEarnest(e.target.value); }} />
         </label>
       </div>
+
+      {state.projection?.state === "cancelled" ? <p data-testid="contract-prior-cancelled" className="text-xs">Contract cancelled.</p> : null}
+      {state.projection?.state === "failed" ? <p data-testid="contract-prior-failed" className="text-xs">That send did not go through. You can try again.</p> : null}
+
+      {needsMotivation ? (
+        <fieldset data-testid="contract-motivation" className="grid gap-2 sm:grid-cols-2">
+          <label className="text-xs">Seller motivation
+            <select data-testid="contract-motivation-kind" className={input} value={motivationKind} disabled={locked}
+              onChange={(e) => { edited(); setMotivationKind(e.target.value as typeof motivationKind); }}>
+              <option value="">Choose…</option>
+              <option value="specified">Has a motivation</option>
+              <option value="no_motivation">No motivation</option>
+            </select>
+          </label>
+          {motivationKind === "specified" ? (
+            <label className="text-xs">What is it
+              <input data-testid="contract-motivation-text" className={input} value={motivationText} disabled={locked}
+                onChange={(e) => { edited(); setMotivationText(e.target.value); }} />
+            </label>
+          ) : null}
+          <label className="text-xs">Temperature (optional)
+            <select data-testid="contract-temperature" className={input} value={temperature} disabled={locked}
+              onChange={(e) => { edited(); setTemperature(e.target.value as typeof temperature); }}>
+              <option value="">Not set</option>
+              <option value="hot">Hot</option>
+              <option value="warm">Warm</option>
+              <option value="cold">Cold</option>
+            </select>
+          </label>
+        </fieldset>
+      ) : null}
 
       {unsourced.length > 0 ? (
         <details data-testid="contract-more-fields">

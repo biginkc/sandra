@@ -45,6 +45,20 @@ export type CallScreenNote = Database["public"]["Tables"]["lead_notes"]["Row"];
 export type CallScreenMessage = Database["public"]["Tables"]["messages"]["Row"];
 
 /** p3-send-card fills these; in p3-call-screen the loader always returns `{ ok: false }` for both. */
+/** The lead's latest offer projection (contract send -> offer log), for status copy and recovery. */
+export type ContractProjectionView = {
+  id: string;
+  state: "awaiting_send" | "pending" | "logged" | "conflict" | "failed" | "cancelled";
+  conflictCode: string | null;
+  requestId: string | null;
+  /** The eSign request is `send_unknown`: Sandra is still checking with Dropbox Sign. */
+  sendUnknown: boolean;
+  amountCents: number;
+  followUpAt: string | null;
+  /** Amount of the lead's pending offer, shown when it blocks logging this contract's offer. */
+  pendingOfferAmountCents: number | null;
+};
+
 export type ContractCardState =
   | { enabled: false; reason: string }
   | {
@@ -61,6 +75,9 @@ export type ContractCardState =
       selectedBuyerEntityId: string | null;
       todayCentral: string;
       tomorrowCentral: string;
+      projection?: ContractProjectionView | null;
+      /** False when the lead has no recorded motivation yet: the card then collects one (the offer needs it). */
+      motivationRecorded?: boolean;
     };
 export type LeadCallFactsView = { placeholder: true };
 
@@ -77,3 +94,20 @@ export type CallScreenData = {
 };
 
 export const CALL_SCREEN_SCRIPT_SLUG = "closr-outbound";
+
+/** Result of an offer recovery action (retry, supersede, reassign, cancel). None of them can send a contract. */
+export type OfferRecoveryResult =
+  | { ok: true; state: string; duplicate?: boolean }
+  | { ok: false; code: string; message: string };
+
+export type OfferConflictRow = {
+  projectionId: string;
+  propertyId: string;
+  address: string | null;
+  conflictCode: string | null;
+  requestId: string | null;
+  sentAt: string | null;
+  amountCents: number;
+  actorUserId: string;
+  pendingOfferAmountCents: number | null;
+};

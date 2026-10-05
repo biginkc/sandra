@@ -196,3 +196,65 @@ describe("intent id rotation by last result state", () => {
     expect(send.mock.calls[1]![0].sendIntentId).toBe(send.mock.calls[0]![0].sendIntentId);
   });
 });
+
+describe("ContractCard projection state", () => {
+  const proj = (over: Record<string, unknown>) => ({ id: "p1", state: "pending", conflictCode: null, requestId: "r1", sendUnknown: false, amountCents: 100, followUpAt: null, pendingOfferAmountCents: null, ...over });
+  const recovery = { retry: vi.fn(), supersede: vi.fn(), reassign: vi.fn(), cancel: vi.fn() };
+
+  it("hides the send form while a contract is open, so a reload cannot offer a second send", () => {
+    for (const p of [proj({ state: "awaiting_send" }), proj({ state: "pending" }), proj({ state: "logged", followUpAt: "2026-11-02T15:00:00Z" }), proj({ state: "conflict", conflictCode: "STALE_STATE" })]) {
+      const { unmount } = render(<ContractCard state={state({ projection: p })} propertyId="p" send={vi.fn()} recovery={recovery} />);
+      expect(screen.queryByTestId("contract-send")).toBeNull();
+      unmount();
+    }
+  });
+
+  it("maps projection state to the status copy", () => {
+    const copy = (p: Record<string, unknown>) => {
+      const { unmount } = render(<ContractCard state={state({ projection: p })} propertyId="p" send={vi.fn()} recovery={recovery} />);
+      const text = screen.getByTestId("contract-status").textContent;
+      unmount();
+      return text;
+    };
+    expect(copy(proj({ state: "awaiting_send", sendUnknown: true }))).toBe("Send unconfirmed. Sandra is checking with Dropbox Sign. Do not send again.");
+    expect(copy(proj({ state: "pending" }))).toBe("Contract sent. Logging the offer…");
+    expect(copy(proj({ state: "logged", followUpAt: "2026-11-02T15:00:00Z" }))).toBe("Contract sent. Offer logged. Follow-up Nov 2, 2026.");
+  });
+
+  it("a conflict shows the recovery banner with its actions", () => {
+    render(<ContractCard state={state({ projection: proj({ state: "conflict", conflictCode: "PENDING_OFFER_EXISTS", pendingOfferAmountCents: 5 }) })} propertyId="p" send={vi.fn()} recovery={recovery} />);
+    expect(screen.getByRole("alert").textContent).toBe("Contract sent, offer needs reconciling");
+    expect(screen.getByTestId("recovery-supersede")).toBeTruthy();
+  });
+
+  it("failed and cancelled projections show the form again with a note (new intent)", () => {
+    const { unmount } = render(<ContractCard state={state({ projection: proj({ state: "cancelled" }) })} propertyId="p" send={vi.fn()} />);
+    expect(screen.getByTestId("contract-prior-cancelled").textContent).toBe("Contract cancelled.");
+    expect(screen.getByTestId("contract-send")).toBeTruthy();
+    unmount();
+  });
+
+  it("collects motivation only when the lead has none and sends it with the contract", async () => {
+    const send = vi.fn(async () => ({ status: "sent" as const, requestId: "r", offer: "pending" as const }));
+    const { unmount } = render(<ContractCard state={state({ motivationRecorded: true })} propertyId="p" send={send} />);
+    expect(screen.queryByTestId("contract-motivation")).toBeNull();
+    unmount();
+    render(<ContractCard state={state({ motivationRecorded: false })} propertyId="p" send={send} />);
+    fill();
+    expect(sendBtn().disabled).toBe(true);
+    fireEvent.change(screen.getByTestId("contract-motivation-kind"), { target: { value: "no_motivation" } });
+    expect(sendBtn().disabled).toBe(false);
+    fireEvent.click(sendBtn());
+    await waitFor(() => expect(send).toHaveBeenCalled());
+    expect((send.mock.calls[0] as unknown[])[0]).toMatchObject({ motivation: { kind: "no_motivation", text: null }, temperature: null });
+  });
+
+  it("polls through onRefresh while the contract is being confirmed", () => {
+    vi.useFakeTimers();
+    const refresh = vi.fn();
+    render(<ContractCard state={state({ projection: proj({ state: "pending" }) })} propertyId="p" send={vi.fn()} onRefresh={refresh} />);
+    vi.advanceTimersByTime(10_500);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+});

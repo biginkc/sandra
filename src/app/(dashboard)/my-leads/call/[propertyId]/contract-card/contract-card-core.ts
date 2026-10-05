@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { buildContractPrefill, ECONOMIC_FIELDS, type PrefillBase, type PrefillInput } from "./contract-prefill";
 import type { EsignMergeFieldName } from "@/lib/esign/contracts";
+import type { AcquisitionMotivationResponse, AcquisitionTemperature } from "@/lib/my-leads/types";
 
 /**
  * Send-contract card server flow (TECH-PLAN-2026-10 §3.9, D8). Dependency-injected so tests use
@@ -26,6 +27,9 @@ export type SendContractCardInput = {
   earnestMoneyCents: number | null;
   signers: readonly SignerAssignment[];
   overrides: Partial<Record<EsignMergeFieldName, string>>;
+  /** Required only when the lead has no recorded motivation yet (the offer needs one). */
+  motivation?: AcquisitionMotivationResponse | null;
+  temperature?: AcquisitionTemperature;
 };
 
 export type SendContractCardResult =
@@ -46,7 +50,7 @@ export type ExistingOfferIntent = {
   esignRequestId: string | null;
 };
 export type OfferPrecheck =
-  | { ok: true }
+  | { ok: true; motivationRecorded?: boolean }
   | { ok: false; code: string; message: string };
 
 /** Offer projection library (§3.6/3.7) is a separate slice; this is the seam it plugs into. */
@@ -56,7 +60,8 @@ export type OfferProjectionPort = {
   createIntent(input: {
     orgId: string; propertyId: string; actorUserId: string; sendIntentId: string; requestHash: string;
     submissionHash: string; sendPayload: Record<string, string>; amountCents: number; closingDate: string;
-  }): Promise<{ projectionId: string } | { error: "OPEN_CONTRACT_EXISTS" | "IDEMPOTENCY_CONFLICT" | "FAILED" }>;
+    motivation: AcquisitionMotivationResponse | null; temperature: AcquisitionTemperature;
+  }): Promise<{ projectionId: string } | { error: "OPEN_CONTRACT_EXISTS" | "PENDING_OFFER_EXISTS" | "IDEMPOTENCY_CONFLICT" | "FAILED" }>;
   projectNow(projectionId: string): Promise<{ state: ProjectionState; code?: string }>;
   abandon(projectionId: string): Promise<void>;
 };
@@ -91,6 +96,11 @@ export type ContractCardCoreDeps = {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const INPUT_KEYS = "buyerEntityId,closingDate,earnestMoneyCents,overrides,priceCents,propertyId,sendIntentId,signers,templateId,titleCompanyId";
 
+const CREATE_ERROR_COPY: Record<"OPEN_CONTRACT_EXISTS" | "PENDING_OFFER_EXISTS" | "IDEMPOTENCY_CONFLICT", string> = {
+  OPEN_CONTRACT_EXISTS: "A contract is already open for this lead.",
+  PENDING_OFFER_EXISTS: "This lead already has a pending offer.",
+  IDEMPOTENCY_CONFLICT: "This send was already started with different details.",
+};
 const blocked = (code: string, message: string): SendContractCardResult => ({ status: "blocked", code, message });
 const sha = (v: unknown) => createHash("sha256").update(JSON.stringify(v)).digest("hex");
 
@@ -102,13 +112,20 @@ export function submissionHashOf(i: SendContractCardInput): string {
   return sha({
     p: i.propertyId, t: i.templateId, price: i.priceCents, d: i.closingDate, tc: i.titleCompanyId,
     b: i.buyerEntityId, e: i.earnestMoneyCents, s: i.signers.map((s) => sortKeys({ ...s })), o: sortKeys({ ...i.overrides }),
+    ...(i.motivation || i.temperature ? { m: i.motivation ?? null, tp: i.temperature ?? null } : {}),
   });
 }
 
 function validShape(input: unknown): input is SendContractCardInput {
   if (!input || typeof input !== "object") return false;
   const i = input as Record<string, unknown>;
-  if (Object.keys(i).sort().join(",") !== INPUT_KEYS) return false;
+  if (Object.keys(i).filter((k) => k !== "motivation" && k !== "temperature").sort().join(",") !== INPUT_KEYS) return false;
+  if (i.motivation != null) {
+    const m = i.motivation as Record<string, unknown>;
+    const okKind = (m.kind === "specified" && typeof m.text === "string" && m.text.trim() !== "") || (m.kind === "no_motivation" && m.text === null);
+    if (!okKind) return false;
+  }
+  if (i.temperature != null && !["hot", "warm", "cold"].includes(i.temperature as string)) return false;
   return (
     typeof i.propertyId === "string" && UUID.test(i.propertyId) &&
     typeof i.templateId === "string" && UUID.test(i.templateId) &&
@@ -185,6 +202,9 @@ export function createContractCardCore(deps: ContractCardCoreDeps) {
 
     const pre = await deps.projection.precheck(viewer, input.propertyId);
     if (!pre.ok) return blocked(pre.code, pre.message);
+    if (pre.motivationRecorded === false && !input.motivation) {
+      return blocked("MOTIVATION_REQUIRED", "Record the seller's motivation before sending.");
+    }
 
     const ctx = await deps.loadContext(viewer, input.propertyId, input.templateId);
     if (!ctx) return blocked("TEMPLATE_UNAVAILABLE", "That contract template is not available.");
@@ -215,11 +235,12 @@ export function createContractCardCore(deps: ContractCardCoreDeps) {
     const created = await deps.projection.createIntent({
       orgId: viewer.orgId, propertyId: input.propertyId, actorUserId: viewer.userId, sendIntentId: input.sendIntentId,
       requestHash, submissionHash, sendPayload: prefill.values, amountCents: e.priceCents, closingDate: e.closingDate,
+      motivation: input.motivation ?? null, temperature: input.temperature ?? null,
     });
     if ("error" in created) {
       return created.error === "FAILED"
         ? { status: "failed", message: "The send could not be started. Please retry." }
-        : blocked(created.error, created.error === "OPEN_CONTRACT_EXISTS" ? "A contract is already open for this lead." : "This send was already started with different details.");
+        : blocked(created.error, CREATE_ERROR_COPY[created.error]);
     }
     return mapSend(created.projectionId, {
       propertyId: input.propertyId, templateId: input.templateId, sendIntentId: input.sendIntentId,
