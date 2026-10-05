@@ -320,6 +320,14 @@ jobs:
           LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007170000_acquisition_offer_projections.integration.test.ts
 
+      - name: "My Leads call facts - claim/complete job, accept, RLS, rollback (disposable DB)"
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+          LOCAL_SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          LOCAL_SUPABASE_ANON_KEY: ${{ env.TEST_SUPABASE_ANON_KEY }}
+          LOCAL_SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx vitest run --config vitest.local-integration.config.ts supabase/migrations/20261007190000_call_facts.integration.test.ts
+
       - name: My Leads housekeeping operator script (unit)
         run: node --test scripts/my-leads-housekeeping.test.mjs
 

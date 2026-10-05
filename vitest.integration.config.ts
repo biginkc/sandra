@@ -89,6 +89,7 @@ export default defineConfig({
       "supabase/migrations/20261007150300_my_leads_callbacks_due.integration.test.ts",
       "supabase/migrations/20261007160000_acquisition_contract_defaults.integration.test.ts",
       "supabase/migrations/20261007170000_acquisition_offer_projections.integration.test.ts",
+      "supabase/migrations/20261007190000_call_facts.integration.test.ts",
       "src/lib/my-leads/seller-reminder.transport.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",

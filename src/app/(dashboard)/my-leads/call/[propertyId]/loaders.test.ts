@@ -33,7 +33,7 @@ function client() {
   const make = (table: string) => {
     const chain: Record<string, unknown> = {};
     const self = () => chain;
-    for (const m of ["eq", "is", "or", "order", "limit"]) chain[m] = self;
+    for (const m of ["eq", "is", "or", "in", "order", "limit"]) chain[m] = self;
     chain.select = (columns: string) => { mocks.selects.push({ table, columns }); return chain; };
     const result = () => mocks.tables[table] ?? { data: null, error: null };
     chain.maybeSingle = async () => result();
@@ -87,7 +87,7 @@ describe("loadCallScreen", () => {
     // Oldest first for the thread.
     expect(result.data.messages.ok && result.data.messages.data.map((m) => m.id)).toEqual(["m1", "m2"]);
     expect(result.data.contract.ok).toBe(false);
-    expect(result.data.facts.ok).toBe(false);
+    expect(result.data.facts).toEqual({ ok: true, data: null }); // no proposal yet
     expect(mocks.markMessagesReadForProperty).not.toHaveBeenCalled();
   });
 
@@ -99,6 +99,37 @@ describe("loadCallScreen", () => {
     const b = await loadCallScreen(propertyId, boom as never);
     expect(b.status).toBe("ok");
     expect(b.status === "ok" && b.data.contract.ok).toBe(false);
+  });
+
+  it("builds chips from the open proposal in display order, minus accepted fields, never reading job columns", async () => {
+    mocks.tables.lead_call_facts = {
+      data: {
+        id: "f1",
+        status: "partially_accepted",
+        accepted: { motivation: { value: "x" } },
+        facts: {
+          condition: { value: "roof", evidence: "needs a roof" },
+          motivation: { value: "move", evidence: "must move" },
+          asking_price: { value: "$185,000", evidence: "185k" },
+          timeline: { value: 5, evidence: "bad shape" },
+        },
+      },
+      error: null,
+    };
+    const result = await loadCallScreen(propertyId, deps() as never);
+    expect(result.status === "ok" && result.data.facts).toEqual({
+      ok: true,
+      data: { factId: "f1", chips: [{ field: "asking_price", value: "$185,000", evidence: "185k" }, { field: "condition", value: "roof", evidence: "needs a roof" }] },
+    });
+    const columns = mocks.selects.find((s) => s.table === "lead_call_facts")!.columns;
+    expect(columns).not.toMatch(/claim_token|lease_until/);
+  });
+
+  it("returns no facts section content while the call_facts schema is not ready", async () => {
+    mocks.tables.lead_call_facts = { data: { id: "f1", accepted: {}, facts: { motivation: { value: "a", evidence: "b" } } }, error: null };
+    const d = { ...deps(), schemaReady: vi.fn(async (f: string) => f !== "call_facts") };
+    const result = await loadCallScreen(propertyId, d as never);
+    expect(result.status === "ok" && result.data.facts).toEqual({ ok: true, data: null });
   });
 
   it("never requests the service-only raw column from lead_comps", async () => {

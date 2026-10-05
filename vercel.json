@@ -83,6 +83,10 @@
     {
       "path": "/api/cron/comp-queue-drain",
       "schedule": "*/2 * * * *"
+    },
+    {
+      "path": "/api/cron/call-facts-sweep",
+      "schedule": "*/2 * * * *"
     }
   ],
   "git": {
