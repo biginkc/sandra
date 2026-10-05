@@ -21,7 +21,9 @@ export type SchemaFeature =
   | "api_dial"
   | "ack_prompts"
   | "callbacks_due"
-  | "event_redaction";
+  | "event_redaction"
+  | "contract_defaults"
+  | "offer_projection";
 
 export type SchemaRequirement = {
   /** `public.fn_name(argtype,argtype)` regprocedure strings. */
@@ -110,6 +112,16 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
   event_redaction: {
     functions: ["public.fn_redact_dialpad_unmatched_events(interval,integer)"],
     columns: ["dialpad_call_events.redacted_at"],
+  },
+  // P3c: contract defaults tables (title companies, buyer entities, settings).
+  contract_defaults: {
+    functions: [],
+    columns: ["acquisition_contract_settings.earnest_money_cents", "acquisition_contract_title_companies.closing_agent_name", "acquisition_contract_buyer_entities.name"],
+  },
+  // P3c offer projection (§3.6) is NOT in this slice: until its migration lands the card stays disabled.
+  offer_projection: {
+    functions: ["public.fn_project_acquisition_offer(uuid)"],
+    columns: ["acquisition_offer_projections.send_payload"],
   },
 };
 

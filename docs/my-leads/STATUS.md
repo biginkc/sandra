@@ -33,7 +33,8 @@ Last updated: 2026-10-04 (after #801 release)
 | `claude/my-leads-p3-comps` | #805 | Phase 3 writer: Claude Sonnet 5.5 (builder) | draft, built, NOT merged; main merged (f064f455); Opus YES at `bb86747e` pre-merge |
 | `claude/my-leads-p3-call-screen` | #807 | Claude Sonnet 5.5 builder | draft, built, NOT merged; Opus YES at `a908ad1c`; pre-enable fixes applied (dock key, notFound, action guards, schemaReady gate dropped, lead_comps probe signature); needs Opus re-review |
 | `claude/my-leads-p1a-replay-fix` | none | Claude (Sonnet 5.5 builder) | draft PR open: restore `location` comparison (and tolerant `mode`) in fn_create_next_step replay, #797 tracked follow-up. Migration 20261006111000 (NOT applied). |
-| `p3-send-card`, `p1a-retire` | none | none | NOT built yet |
+| `claude/my-leads-p3-send-card` | #814 (draft, base `claude/my-leads-p3-call-screen`) | Claude Sonnet 5.5 builder | in progress (contract defaults schema, prefill mapper, send-contract card + actions; offer projection library/migration NOT in this slice) |
+| `p1a-retire` | none | none | NOT built yet |
 | all other branches | none | unclaimed | claim here before writing |
 
 Current heads: `gh pr view <n> --json headRefOid` (stack was rebased onto main on 2026-10-04; heads change on every cascade).
