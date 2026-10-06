@@ -351,11 +351,12 @@ describe("reach 3 + 5: the app env proof rejects provider credentials, proxies, 
       // allowed
       NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:55431", SUPABASE_SERVICE_ROLE_KEY: "s", DATABASE_URL: "postgresql://x@127.0.0.1:55430/p", CRON_SECRET: "c", DIALPAD_CTI_WEBHOOK_SECRET_E2E: "w", DIALPAD_CTI_DIAL_KEY_E2E: "d", DIALPAD_DIAL_PROVIDER: "", DROPBOX_SIGN_API_BASE_URL: "http://127.0.0.1:55500/dropbox-sign/v3", ESIGN_CREDENTIAL_ENCRYPTION_KEY: "e", MESSAGING_PROVIDER: "mock", NEXT_PUBLIC_HUGO_SSO: "1", NEXT_TELEMETRY_DISABLED: "1", E2E_AUTH_BYPASS: "1", STRESS_DIALPAD_STUB_URL: "http://127.0.0.1:55500",
       // not allowed
+      NEXT_PRIVATE_WORKER: "1", __NEXT_PRIVATE_ORIGIN: "http://127.0.0.1:3466", SUPABASE_ACCESS_TOKEN: "tok",
       JITTER_SOFTPHONE_BASE_URL: "http://127.0.0.1:1", JITTER_SERVICE_TOKEN: "secret-value", CLOSER_LAB_API_BASE_URL: "http://x", SANDRA_SERVICE_TOKEN: "t", DROPBOX_SIGN_API_KEY: "k", SOME_THIRD_PARTY_WEBHOOK: "u",
     };
     spawnSync(process.execPath, ["-e", "0"], { env: env as NodeJS.ProcessEnv, encoding: "utf8" });
     const g = JSON.parse(readFileSync(log, "utf8").split("\n").filter(Boolean).pop()!) as { unexpectedEnv: string[] };
-    expect(g.unexpectedEnv).toEqual(["CLOSER_LAB_API_BASE_URL", "DROPBOX_SIGN_API_KEY", "JITTER_SERVICE_TOKEN", "JITTER_SOFTPHONE_BASE_URL", "SANDRA_SERVICE_TOKEN", "SOME_THIRD_PARTY_WEBHOOK"]);
+    expect(g.unexpectedEnv).toEqual(["CLOSER_LAB_API_BASE_URL", "DROPBOX_SIGN_API_KEY", "JITTER_SERVICE_TOKEN", "JITTER_SOFTPHONE_BASE_URL", "SANDRA_SERVICE_TOKEN", "SOME_THIRD_PARTY_WEBHOOK", "SUPABASE_ACCESS_TOKEN"]);
     expect(readFileSync(log, "utf8")).not.toContain("secret-value"); // values are never recorded
   });
   it("reach 3: the guard line itself reports forbidden names (names only), from a real process", () => {
