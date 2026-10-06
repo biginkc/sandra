@@ -34,6 +34,8 @@ export type OracleInput = {
   orgId: string;
   runTag: string;
   runStart: Date;
+  /** The reminder job decides quiet hours from the real clock (08:00-21:00 in the lead's zone); false when the run left that window. */
+  reminderWindowOpen?: boolean;
   world: World;
   stub: StubServer;
   schedule: readonly Tick[];
@@ -176,8 +178,11 @@ export async function fetchReminderRows(db: Pick<OracleInput, "db">["db"], leadI
  * a sent row, both fail. A slot whose appointment was replaced or cancelled never gets a text, and the plain "reschedule" variant must show the
  * old slot's reminder as cancelled.
  */
-export function reminderProblems(rows: readonly ReminderRow[], expected: number | undefined, variant: string): Violation[] {
+export function reminderProblems(rows: readonly ReminderRow[], expected: number | undefined, variant: string, windowOpen = true): Violation[] {
   const out: Violation[] = [];
+  // The reminder job decides quiet hours from the REAL clock (08:00-21:00 in the lead's zone; E2E_QUIET_HOURS_NOW is not honored there). Outside
+  // the window nothing may be sent at all; the send path is then not exercised, and the run says so (decide: reduced, never PASS).
+  if (!windowOpen) expected = 0;
   const sent = rows.filter((r) => r.status === "sent").length;
   const msgs = rows.reduce((n, r) => n + r.messages, 0);
   if (expected !== undefined) {
@@ -296,7 +301,7 @@ export async function expectedOutcomes(i: OracleInput): Promise<Check[]> {
     if (!r.leadId) continue;
     if (t.scenario === "reminder_reschedule") {
       const rem = await fetchReminderRows(i.db, r.leadId);
-      for (const v of reminderProblems(rem, t.expected.reminderSent, String(t.args.variant))) v13.push({ tick: r.tick, scenario: t.scenario, ...v });
+      for (const v of reminderProblems(rem, t.expected.reminderSent, String(t.args.variant), i.reminderWindowOpen !== false)) v13.push({ tick: r.tick, scenario: t.scenario, ...v });
     }
     // Offer follow-ups are appointments too (created by the logged offer); they are checked separately below.
     const open = (await i.db.query<{ id: string; due_at: Date }>("select t.id, t.due_at from public.tasks t where t.related_property_id=$1 and t.type='appointment' and t.status in ('open','snoozed') and not exists (select 1 from public.acquisition_offers o where o.follow_up_calendar_chain_id = t.calendar_chain_id) order by t.created_at", [r.leadId])).rows;

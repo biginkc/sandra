@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
+import { readConfig } from "./config";
 import { browserLaneProblem } from "./engine";
+import { buildManifest } from "./manifest";
+import { reminderWindowOpenAt } from "./reminder-window";
+import { decide } from "./report";
 import { liveAppIdentityProblems } from "./live-leg";
 import { dialProblems, reminderProblems, type ReminderRow } from "./oracle";
 import { sectionParityProblems, stripParityProblems } from "./parity";
@@ -46,6 +50,17 @@ describe("Astra 2: reminders are exact counts and respect cancellation", () => {
     expect(reminderProblems([row({ status: "cancelled", task_status: "cancelled", messages: 1 })], 0, "reschedule").map((v) => v.rule)).toContain("message_for_cancelled_slot");
     expect(reminderProblems([row({ status: "pending" })], 0, "reschedule").map((v) => v.rule)).toContain("old_slot_reminder_not_cancelled");
     expect(reminderProblems([row({ status: "cancelled", task_status: "cancelled" }), row({ id: "r2" })], 0, "reschedule")).toEqual([]);
+  });
+  it("outside the job's real-clock window nothing may be sent, and the run can no longer be a PASS", () => {
+    expect(reminderProblems([row({ status: "pending" })], 1, "plain", false)).toEqual([]);
+    expect(reminderProblems([row({ status: "sent", messages: 1 })], 1, "plain", false).map((v) => v.rule)).toContain("reminder_sent_rows");
+    expect(reminderWindowOpenAt(new Date("2026-10-06T02:30:00Z"))).toBe(false); // 21:30 Central
+    expect(reminderWindowOpenAt(new Date("2026-10-06T15:00:00Z"))).toBe(true); // 10:00 Central
+    const cfg = readConfig({}, { headSha: () => "a".repeat(40) });
+    const manifest = buildManifest(cfg.seed, cfg.runTag, { profile: "full" });
+    const input = { cfg, manifest, records: [], invariantChecks: [], outcomeChecks: [], egressViolations: 0, osEgressProven: true, serverProblems: [], killed: null, setupErrors: [], browserExecuted: manifest.ticks.filter((x) => x.actor === "browser").length };
+    expect(decide({ ...input, reminderWindowOpen: true }).verdict).toBe("PASS");
+    expect(decide({ ...input, reminderWindowOpen: false }).verdict).toBe("PARTIAL_PASS");
   });
   it("the race variant (undefined) allows zero or one, never a message without a sent row", () => {
     expect(reminderProblems([row({ status: "sent", messages: 1 })], undefined, "reschedule_race")).toEqual([]);

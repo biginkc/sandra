@@ -35,7 +35,7 @@ function deny(kind, target, probe) {
 // Dialpad seam from the harness side (no src change): with STRESS_DIALPAD_STUB_URL (loopback only) set, the app's own live dialer, which POSTs to the
 // Dialpad API origin, is diverted to the harness stub server. The stub then holds the receipt (destination + intent key) the oracle checks. Any
 // other URL is untouched, and anything non-loopback is still denied below.
-const DIALPAD_ORIGIN = "https://api.dialpad.com";
+const DIALPAD_ORIGIN = "https://dialpad.com"; // DIALPAD_API_ORIGIN in src/lib/dialpad-cti/directory.ts
 let dialpadRedirect = null;
 // STRESS_GUARD_MODE=announce: ONLY write the guard_loaded line (build identity: commit and cleanliness). No denial, no redirect. For the live-leg app,
 // which must reach real providers but whose build identity must still be bound to the harness checkout.

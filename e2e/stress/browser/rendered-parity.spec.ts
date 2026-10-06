@@ -47,8 +47,9 @@ test("stress rendered parity: lead page next step matches the open appointment r
   failures.push(...stripParityProblems(renderedStrip, dbStrip.rows[0]!.v.rows.map((r) => r.propertyId)));
   const sections = await page.locator('[data-testid^="my-leads-section-"]').evaluateAll((els) => els.map((e) => ({ stage: (e.getAttribute("data-testid") ?? "").replace("my-leads-section-", ""), badge: e.querySelector('[aria-label$="lead"], [aria-label$="leads"]')?.getAttribute("aria-label") ?? "" })));
   const dbCounts = (await run.db.query<{ stage: string; n: number }>(
-    `select qs.stage, count(*)::int n from public.acquisition_queue_states qs join public.properties p on p.id=qs.property_id and p.org_id=qs.org_id
-      where p.org_id=$1 and p.assigned_user_id=$2 and p.deleted_at is null and p.address like $3 || '%' group by qs.stage`, [run.cfg.orgId, run.world.repUserId, run.cfg.runTag])).rows;
+    `select coalesce(qs.stage, 'not_contacted') as stage, count(*)::int n from public.properties p
+        left join public.acquisition_queue_states qs on qs.property_id=p.id and qs.org_id=p.org_id
+      where p.org_id=$1 and p.assigned_user_id=$2 and p.deleted_at is null and p.address like $3 || '%' group by 1`, [run.cfg.orgId, run.world.repUserId, run.cfg.runTag])).rows;
   failures.push(...sectionParityProblems(sections, Object.fromEntries(dbCounts.map((r) => [r.stage, r.n]))));
   recordResult(run.dir, -16, failures.length === 0, failures.slice(0, 5).join(" | "));
   expect(failures).toEqual([]);

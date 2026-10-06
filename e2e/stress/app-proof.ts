@@ -108,6 +108,14 @@ export function proveAppUnderTest(args: { appUrl: string; appEgressLog: string; 
 }
 
 /**
+ * The one known-benign egress attempt of the Next dev server itself: its update indicator fetches the npm dist-tags (`hot-reloader-shared-utils.js`;
+ * failures are ignored by Next and the guard denies it before bytes leave). Exactly this host, only tls/dns/connect, and it is reported, not hidden.
+ * No provider host is ever on this list.
+ */
+export const BENIGN_DEV_EGRESS_HOSTS: readonly string[] = ["registry.npmjs.org"];
+export const isBenignDevEgress = (kind: string | undefined, target: string | undefined) => ["tls", "dns", "connect"].includes(kind ?? "") && BENIGN_DEV_EGRESS_HOSTS.includes(target ?? "");
+
+/**
  * The app's denials since T0, failing closed on the evidence itself: a missing, replaced (new inode), truncated (smaller than at T0) log, or one
  * that lost the app's own guard_loaded line, is a violation: deleting or rotating the log must not erase a denial and keep "guard proven".
  */
@@ -121,7 +129,7 @@ export function appEgressViolations(file: string, snapshot: LogSnapshot | null, 
   const all = readFileSync(file, "utf8");
   if (guardPid != null && !guardLineFor(all.split("\n").filter(Boolean), guardPid)) out.push("the app's guard_loaded line is gone from the log");
   for (const l of all.slice(snapshot.size).split("\n").filter(Boolean)) {
-    try { const j = JSON.parse(l) as { probe?: boolean; kind?: string; target?: string }; if (!j.probe && j.kind !== "guard_loaded") out.push(`${j.kind}:${j.target}`); } catch { out.push(`unparseable app egress line: ${l.slice(0, 80)}`); }
+    try { const j = JSON.parse(l) as { probe?: boolean; kind?: string; target?: string }; if (!j.probe && j.kind !== "guard_loaded" && !isBenignDevEgress(j.kind, j.target)) out.push(`${j.kind}:${j.target}`); } catch { out.push(`unparseable app egress line: ${l.slice(0, 80)}`); }
   }
   return out;
 }

@@ -68,11 +68,11 @@ describe("(b)(c) the app under test is proven at T0 from its own guard line (F1:
   });
   it("the guard's Dialpad redirect rewrites only the Dialpad API origin, to the loopback stub", () => {
     const log = path.join(mkdtempSync(path.join(os.tmpdir(), "guard-")), "app.jsonl");
-    const code = `const seen=[];globalThis.fetch=async(u)=>{seen.push(String(u));return {ok:true}};require(${JSON.stringify(path.resolve(__dirname, "egress-guard.cjs"))});(async()=>{await fetch("https://api.dialpad.com/api/v2/users/1/initiate_call");await fetch("http://127.0.0.1:9/x");process.stdout.write(JSON.stringify(seen))})()`;
+    const code = `const seen=[];globalThis.fetch=async(u)=>{seen.push(String(u));return {ok:true}};require(${JSON.stringify(path.resolve(__dirname, "egress-guard.cjs"))});(async()=>{await fetch("https://dialpad.com/api/v2/users/1/initiate_call");await fetch("http://127.0.0.1:9/x");process.stdout.write(JSON.stringify(seen))})()`;
     const r = spawnSync(process.execPath, ["-e", code], { env: { ...process.env, STRESS_EGRESS_LOG: log, STRESS_DIALPAD_STUB_URL: STUB }, encoding: "utf8" });
     expect(JSON.parse(r.stdout)).toEqual([`${STUB}/dialpad/api/v2/users/1/initiate_call`, "http://127.0.0.1:9/x"]);
     const off = spawnSync(process.execPath, ["-e", code.replace("STRESS_DIALPAD_STUB_URL", "X")], { env: { ...process.env, STRESS_EGRESS_LOG: log, STRESS_DIALPAD_STUB_URL: "https://evil.example" }, encoding: "utf8" });
-    expect(JSON.parse(off.stdout)[0]).toBe("https://api.dialpad.com/api/v2/users/1/initiate_call"); // a non-loopback redirect target is refused: no redirect
+    expect(JSON.parse(off.stdout)[0]).toBe("https://dialpad.com/api/v2/users/1/initiate_call"); // a non-loopback redirect target is refused: no redirect
   });
 });
 
@@ -85,8 +85,14 @@ describe("(d) + #6 the app's egress log: denials fail the run, and so does losin
   it("counts non-probe denials after the T0 snapshot and ignores probes, guard_loaded and what came before", () => {
     const f = fresh();
     const snap = snapshotLog(f)!;
-    appendFileSync(f, [{ kind: "guard_loaded", pid: 1, probe: true }, { kind: "connect", target: "api.dialpad.com", probe: false }, { kind: "dns", target: "x", probe: true }].map((j) => JSON.stringify(j)).join("\n") + "\n");
-    expect(appEgressViolations(f, snap, 99)).toEqual(["connect:api.dialpad.com"]);
+    appendFileSync(f, [{ kind: "guard_loaded", pid: 1, probe: true }, { kind: "connect", target: "dialpad.com", probe: false }, { kind: "dns", target: "x", probe: true }].map((j) => JSON.stringify(j)).join("\n") + "\n");
+    expect(appEgressViolations(f, snap, 99)).toEqual(["connect:dialpad.com"]);
+  });
+  it("the Next dev server's own npm version check is the one tolerated denial; any other host, including a provider, is not", () => {
+    const f = fresh();
+    const snap = snapshotLog(f)!;
+    appendFileSync(f, [{ kind: "tls", target: "registry.npmjs.org", probe: false }, { kind: "tls", target: "dialpad.com", probe: false }, { kind: "tls", target: "registry.npmjs.org.evil.example", probe: false }].map((j) => JSON.stringify(j)).join("\n") + "\n");
+    expect(appEgressViolations(f, snap, 99)).toEqual(["tls:dialpad.com", "tls:registry.npmjs.org.evil.example"]);
   });
   it("a deleted log is a violation, not zero violations (Astra #6)", () => {
     const f = fresh();

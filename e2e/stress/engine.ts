@@ -14,6 +14,7 @@ import { backdateDispatch, expireIntent, expireStripOverride, makeReminderDue, r
 import { buildManifest, toNdjson, type Manifest, type Profile, type Tick } from "./manifest";
 import { expectedOutcomes, pendingJarradObservations, safetyInvariants, type Check, type OracleInput } from "./oracle";
 import { GateProxy } from "./proxy";
+import { reminderWindowOpenAt } from "./reminder-window";
 import { decide, hashConfig, writeReport, type RunSummary } from "./report";
 import { IMPLS, newRecord, type TickRecord } from "./scenarios";
 import { StubServer } from "./stubs";
@@ -178,6 +179,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   let appGuardPid: number | null = null;
   let faultFiredFlag = false;
   let appEgressSnap: LogSnapshot | null = null;
+  let windowOpenAtStart = true;
   let faultFiredCheck: () => boolean = () => false;
   let browserExecuted = 0;
   let stopRequested: string | null = null;
@@ -230,7 +232,8 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     if (levers.some((l) => !l.ok)) throw new LaneRefusal("LEVER_NOT_DEMONSTRATED", levers.filter((l) => !l.ok).map((l) => `${l.lever}: ${l.detail}`).join("; "));
 
     runStart = new Date();
-    oracleInput = { db, orgId: cfg.orgId, runTag: cfg.runTag, runStart, world, stub, schedule: manifest.ticks, records, browserDeferred: cfg.scope !== "full" };
+    windowOpenAtStart = reminderWindowOpenAt(runStart);
+    oracleInput = { db, orgId: cfg.orgId, runTag: cfg.runTag, runStart, world, stub, schedule: manifest.ticks, records, browserDeferred: cfg.scope !== "full", get reminderWindowOpen() { return windowOpenAtStart && reminderWindowOpenAt(new Date()); } };
     const killFile = path.join(dir, "KILL");
 
     // Background: invariants every interval + a random sweep, kill file, watchdog state.
@@ -321,7 +324,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     }
   }
 
-  const summary = decide({ cfg, manifest, records, invariantChecks, outcomeChecks, egressViolations: egress.length, osEgressProven, serverProblems, killed: failedAny ? killed : null, setupErrors, browserExecuted });
+  const summary = decide({ cfg, manifest, records, invariantChecks, outcomeChecks, egressViolations: egress.length, osEgressProven, reminderWindowOpen: windowOpenAtStart && reminderWindowOpenAt(new Date()), serverProblems, killed: failedAny ? killed : null, setupErrors, browserExecuted });
   writeFileSync(path.join(dir, "invariants.final.json"), JSON.stringify(summary.checks, null, 1));
   writeReport(dir, {
     cfg, manifest, summary, pending, osEgressProven, appGuardPid, levers, killed,

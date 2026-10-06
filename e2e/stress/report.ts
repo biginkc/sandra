@@ -28,6 +28,8 @@ export function decide(input: {
   egressViolations: number;
   /** The pf ring was required (STRESS_REQUIRE_OS_EGRESS=1) and its probe saw a firewall-style denial. */
   osEgressProven: boolean;
+  /** The seller-reminder job's real-clock window (08:00-21:00 Central) stayed open for the whole run; when false the reminder send path was not exercised. Defaults to open. */
+  reminderWindowOpen?: boolean;
   serverProblems: string[];
   killed: KillReport | null;
   setupErrors: string[];
@@ -56,6 +58,7 @@ export function decide(input: {
   }));
 
   const reduced: string[] = [];
+  if (input.reminderWindowOpen === false) reduced.push("seller reminders were not exercised: the run left the job's real-clock window (08:00-21:00 Central), where it sends nothing");
   if (!input.osEgressProven) reduced.push("OS egress ring not proven (STRESS_REQUIRE_OS_EGRESS=1 with the pf rules applied)");
   if (input.manifest.profile !== "full") reduced.push(`profile=${input.manifest.profile}`);
   if (input.cfg.scope !== "full") reduced.push(`scope=${input.cfg.scope} (browser lane deferred)`);
