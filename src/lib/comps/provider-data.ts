@@ -15,10 +15,15 @@ export type ProviderData = {
   search: string | null;
 };
 
-function factsFrom(source: unknown, fields: readonly (readonly [string, string])[]): ProviderFact[] {
-  return fields.flatMap(([label, path]) => {
+function factsFrom(source: unknown, fields: readonly (readonly [string, string, "currency"?])[]): ProviderFact[] {
+  return fields.flatMap(([label, path, format]): ProviderFact[] => {
     const value = text(at(source, path));
-    return value === null ? [] : [{label, value}];
+    if (value === null) return [];
+    if (format === "currency") {
+      const amount = number(value);
+      return amount !== null && amount > 0 ? [{label, value: String(amount), format}] : [];
+    }
+    return [{label, value}];
   });
 }
 
@@ -51,8 +56,7 @@ const SALE_DETAIL_FIELDS = [
   ["Parking spaces", "STRUCTURE.CAR_STORAGE.CAR_STORAGE_LOCATION.@_ParkingSpacesCount"],
   ["Parking type", "STRUCTURE.CAR_STORAGE.CAR_STORAGE_LOCATION.@_TypeOtherDescription"],
   ["Cooling", "STRUCTURE.COOLING.@_UnitDescription"], ["Heating", "STRUCTURE.HEATING.@_UnitDescription"],
-  ["Recorded exterior material", "STRUCTURE.EXTERIOR_FEATURE.@_Description"],
-  ["Assessed value", "_TAX.@_TotalAssessedValueAmount"], ["Assessor market value", "_TAX.@_AssessorMarketValue_ext"],
+  ["Assessed value", "_TAX.@_TotalAssessedValueAmount", "currency"], ["Assessor market value", "_TAX.@_AssessorMarketValue_ext", "currency"],
   ["Legal description", "_LEGAL_DESCRIPTION.@_TextDescription"],
   ["Latitude", "@LatitudeNumber"], ["Longitude", "@LongitudeNumber"],
 ] as const;
@@ -83,7 +87,7 @@ export function attomSourceSales(body: unknown): SourceSale[] {
         yearBuilt: number(at(c, "STRUCTURE.STRUCTURE_ANALYSIS.@PropertyStructureBuiltYear")),
         distanceMiles: number(at(c, "@DistanceFromSubjectPropertyMilesCount")),
         providerId: text(at(c, "_IDENTIFICATION.@RTPropertyID_ext")), renovatedHint: null,
-        details: [...factsFrom(c, SALE_DETAIL_FIELDS), ...mailingFact(c), ...loanFacts(c)],
+        details: [...factsFrom(c, SALE_DETAIL_FIELDS), ...mailingFact(c), ...loanFacts(c), ...materialFacts(c)],
       }];
     });
   });
@@ -95,7 +99,7 @@ export function attomSalesStatus(body: unknown, status: unknown, saleCount: numb
   if (rows.some((r) => at(r, "PRODUCT_INFO_ext.STATUS.@_Condition") === "MinimumCompsNotMet")) return "minimum_not_met";
   if (status === "not_entitled") return "not_entitled";
   if (status === "none") return "none";
-  if (status === "ok") return saleCount > 0 ? "ok" : "unmapped";
+  if (status === "ok") return body == null ? "unavailable" : saleCount > 0 ? "ok" : "unmapped";
   return "unavailable";
 }
 
@@ -108,11 +112,11 @@ const FIELDS = [
   ["Absentee-owner indicator", "summary.absenteeInd"], ["Owner mailing address", "owner.mailingaddressoneline"],
   ["Corporate owner indicator", "owner.corporateindicator"], ["Latitude", "location.latitude"], ["Longitude", "location.longitude"],
   ["AVM date", "avm.eventDate"], ["AVM score", "avm.amount.scr"], ["AVM uncertainty (%)", "avm.amount.fsd"],
-  ["Last recorded sale date", "sale.amount.salerecdate"], ["Last recorded sale amount", "sale.amount.saleamt"],
-  ["Assessed value", "assessment.assessed.assdttlvalue"], ["Assessor market value", "assessment.market.mktttlvalue"],
+  ["Last recorded sale date", "sale.amount.salerecdate"], ["Last recorded sale amount", "sale.amount.saleamt", "currency"],
+  ["Assessed value", "assessment.assessed.assdttlvalue", "currency"], ["Assessor market value", "assessment.market.mktttlvalue", "currency"],
   ["Sale transfer date", "sale.saleTransDate"], ["Sale document type", "sale.amount.saledoctype"],
   ["Recorded sale document", "sale.amount.saledocnum"], ["Sale transaction type", "sale.amount.saletranstype"],
-  ["Recorded first mortgage amount", "sale.mortgage.FirstConcurrent.amount"],
+  ["Recorded first mortgage amount", "sale.mortgage.FirstConcurrent.amount", "currency"],
   ["Mortgage document", "sale.mortgage.FirstConcurrent.trustDeedDocumentNumber"],
   ["Basement area (sq ft)", "building.interior.bsmtsize"], ["Fireplaces", "building.interior.fplccount"],
   ["Stories", "building.summary.levels"], ["Living units", "building.summary.unitsCount"],
@@ -126,16 +130,20 @@ function subjectReportFacts(raw: unknown): ProviderFact[] {
   const properties = at(raw, "comparables.RESPONSE_GROUP.RESPONSE.RESPONSE_DATA.PROPERTY_INFORMATION_RESPONSE_ext.SUBJECT_PROPERTY_ext.PROPERTY");
   const rows = Array.isArray(properties) ? properties : record(properties) ? [properties] : [];
   const subject = rows.find((row) => text(at(row, "@PropertyParcelID")) !== null && !at(row, "COMPARABLE_PROPERTY_ext"));
-  const exterior = at(subject, "STRUCTURE.EXTERIOR_FEATURE");
-  const materials = Array.isArray(exterior) ? exterior : record(exterior) ? [exterior] : [];
   return [...factsFrom(subject, [
     ["Recorded zoning category", "SITE.@PropertyZoningCategoryType"],
     ["Parking spaces", "STRUCTURE.CAR_STORAGE.CAR_STORAGE_LOCATION.@_ParkingSpacesCount"],
-  ]), ...materials.flatMap((material): ProviderFact[] => {
+  ]), ...materialFacts(subject)];
+}
+
+function materialFacts(source: unknown): ProviderFact[] {
+  const exterior = at(source, "STRUCTURE.EXTERIOR_FEATURE");
+  const materials = Array.isArray(exterior) ? exterior : record(exterior) ? [exterior] : [];
+  return materials.flatMap((material): ProviderFact[] => {
     const value = text(at(material, "@_Description"));
     const kind = text(at(material, "@_TypeOtherDescription"));
     return value ? [{label: kind === "RoofMaterial" ? "Recorded roof material" : `Recorded exterior material${kind ? ` (${kind})` : ""}`, value}] : [];
-  })];
+  });
 }
 
 /** Explicit allowlist: never return raw vendor payloads, echoed fields, or credentials to clients. */

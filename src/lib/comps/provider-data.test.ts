@@ -32,7 +32,7 @@ describe("live ATTOM V2 response shape (synthetic values)", () => {
     const data = projectProviderData({avm:{property:[{owner:{mailingaddressoneline:"99 Sample Ave"},summary:{absenteeInd:"ABSENTEE"},lot:{depth:130,frontage:85,lotsize1:0.253},sale:{mortgage:{FirstConcurrent:{amount:76500}}},building:{interior:{bsmtsize:1036}},utilities:{walltype:"RECORDED MATERIAL"}}]},comparables:body});
     expect(data.facts).toEqual(expect.arrayContaining([
       {label:"Owner mailing address",value:"99 Sample Ave"}, {label:"Absentee-owner indicator",value:"ABSENTEE"},
-      {label:"Recorded first mortgage amount",value:"76500"}, {label:"Basement area (sq ft)",value:"1036"},
+      {label:"Recorded first mortgage amount",value:"76500",format:"currency"}, {label:"Basement area (sq ft)",value:"1036"},
       {label:"Parking spaces",value:"2"}, {label:"Recorded roof material",value:"Recorded roof"},
     ]));
   });
@@ -51,6 +51,17 @@ describe("live ATTOM V2 response shape (synthetic values)", () => {
     expect(mapComparables(body)).toEqual([]);
     sale!.SALES_HISTORY["@PropertySalesAmount"] = "123456";
     expect(mapComparables(body)[0]).not.toHaveProperty("details");
+  });
+  it("suppresses missing zero, negative and non-numeric monetary subject facts", () => {
+    const data = projectProviderData({avm:{property:[{sale:{amount:{saleamt:0},mortgage:{FirstConcurrent:{amount:"0.00"}}},assessment:{assessed:{assdttlvalue:"unknown"},market:{mktttlvalue:-1}},building:{interior:{bsmtsize:0}}}]}});
+    expect(data.facts).toEqual([{label:"Basement area (sq ft)",value:"0"}]);
+  });
+  it("handles source exterior arrays and retained-body absence accurately", () => {
+    const body = v2();
+    const sale = body.RESPONSE_GROUP.RESPONSE.RESPONSE_DATA.PROPERTY_INFORMATION_RESPONSE_ext.SUBJECT_PROPERTY_ext.PROPERTY[1].COMPARABLE_PROPERTY_ext;
+    Object.assign(sale!.STRUCTURE,{EXTERIOR_FEATURE:[{"@_TypeOtherDescription":"RoofMaterial","@_Description":"Sample roof"}]});
+    expect(attomSourceSales(body)[0].details).toContainEqual({label:"Recorded roof material",value:"Sample roof"});
+    expect(projectProviderData({compsStatus:"ok"}).salesStatus).toBe("unavailable");
   });
   it("does not label an unrecognized success as no sales", () => {
     expect(projectProviderData({comparables:{unexpected:true},compsStatus:"ok"}).salesStatus).toBe("unmapped");

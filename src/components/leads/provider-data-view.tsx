@@ -12,7 +12,7 @@ const STATUS_COPY: Record<ProviderData["salesStatus"], string> = {
 
 function Facts({ facts }: { facts: ProviderFact[] }) {
   return <dl className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
-    {facts.map(({label,value,format}, i) => <div key={`${label}-${i}`}><dt className="text-muted-foreground">{label}</dt><dd className="break-words font-medium">{format === "currency" || label.endsWith("value") || label.endsWith("amount") ? formatDollars(Number(value)) : value}</dd></div>)}
+    {facts.map(({label,value,format}, i) => <div key={`${label}-${i}`}><dt className="text-muted-foreground">{label}</dt><dd className="break-words font-medium">{format === "currency" ? Number.isFinite(Number(value)) && Number(value) > 0 ? formatDollars(Number(value)) : "Not disclosed" : value}</dd></div>)}
   </dl>;
 }
 
