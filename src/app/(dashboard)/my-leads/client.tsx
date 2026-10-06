@@ -53,6 +53,7 @@ import type { DialpadCallingBootstrap } from "@/lib/dialpad-cti/dispatch";
 import type { MyLeadsCallFeatures } from "@/lib/my-leads/call-features";
 import { oldestPrompt, type CallPromptItem } from "@/lib/my-leads/call-state";
 import { useApiDial } from "./_components/use-api-dial";
+import { CoachCallContext } from "./_components/coach-call-context";
 import { acknowledgeCallPromptAction } from "./call-state-actions";
 import type {
   MyLeadAction,
@@ -679,6 +680,26 @@ export function MyLeadsClient({
     if (!opening || openingStatus?.busy) return;
     void finishOpening(opening);
   };
+  const toSoftphoneLead = (row: NonNullable<ReturnType<typeof rawRow>>) => ({
+        id: row.propertyId,
+        contactId: row.contactId,
+        firstName: row.homeownerName?.split(" ")[0] ?? "",
+        name: row.homeownerName ?? row.address,
+        address: row.address,
+        state: row.state,
+        phones: row.phones,
+        dncLocked: false,
+        contactDnc: row.contactDnc,
+        callable: row.phones.some((phone) => !!phone.trim()) && !row.contactDnc,
+      });
+  // "Call with coach": only with the Dialpad route on and a usable softphone; otherwise rows are unchanged.
+  const coachCall =
+    dialpad && softphone?.callingEnabled
+      ? (propertyId: string) => {
+          const row = rawRow(propertyId);
+          if (row) softphone.openLead(toSoftphoneLead(row));
+        }
+      : null;
   const action = (
     kind: MyLeadAction,
     id: string,
@@ -702,18 +723,7 @@ export function MyLeadsClient({
         setError("Calling is not enabled.");
         return;
       }
-      softphone.openLead({
-        id: row.propertyId,
-        contactId: row.contactId,
-        firstName: row.homeownerName?.split(" ")[0] ?? "",
-        name: row.homeownerName ?? row.address,
-        address: row.address,
-        state: row.state,
-        phones: row.phones,
-        dncLocked: false,
-        contactDnc: row.contactDnc,
-        callable: row.phones.some((phone) => !!phone.trim()) && !row.contactDnc,
-      });
+      softphone.openLead(toSoftphoneLead(row));
       return;
     }
     void finishOpening({
@@ -1206,7 +1216,7 @@ export function MyLeadsClient({
       ? target.retryHref
       : canonicalRetryHref;
   return (
-    <>
+    <CoachCallContext.Provider value={coachCall}>
       {openingStatus && (
         <div role="status" className="mb-4 rounded border p-3">
           {openingStatus.message}
@@ -1662,6 +1672,6 @@ export function MyLeadsClient({
           </Button>
         </div>
       )}
-    </>
+    </CoachCallContext.Provider>
   );
 }

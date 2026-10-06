@@ -191,6 +191,19 @@ describe("MyLeadsClient calling and durable call state", () => {
     expect(mocks.dialLead).not.toHaveBeenCalled()
   })
 
+  it("shows Call with coach only with Dialpad connected, and it opens the softphone", async () => {
+    const openLead = vi.fn()
+    mocks.softphone = { callingEnabled: true, openLead }
+    const off = renderClient({ dialpad: null, initialStrip: strip() })
+    expect(screen.queryAllByText("Call with coach")).toHaveLength(0)
+    off.unmount()
+    renderClient({ dialpad, initialStrip: strip() })
+    await click(screen.getAllByText("Call with coach")[0])
+    expect(openLead).toHaveBeenCalledTimes(1)
+    expect(openLead).toHaveBeenCalledWith(expect.objectContaining({ contactId: expect.any(String) }))
+    expect(mocks.dialLead).not.toHaveBeenCalled()
+  })
+
   it("will not dial with Dialpad from another rep's queue", async () => {
     const ownerRoster: AcquisitionRoster = {
       ...roster,
