@@ -94,7 +94,13 @@ export function mapAvmDetail(body: unknown): Omit<ProviderCompResult, "comps" | 
  * Undisclosed/zero prices never become priced comps; source rows remain available for display. */
 export function mapComparables(body: unknown): CompSale[] {
   const sourceSales = attomSourceSales(body);
-  if (sourceSales.length) return sourceSales.filter((c): c is CompSale => c.salePrice !== null);
+  if (sourceSales.length) return sourceSales.flatMap((sale): CompSale[] => {
+    if (sale.salePrice === null) return [];
+    // Source-only ownership/financing fields stay in the authorized raw projection.
+    const { details: _details, ...comp } = sale;
+    void _details;
+    return [{ ...comp, salePrice: sale.salePrice }];
+  });
   const candidates: unknown[] = [];
   const walk = (v: unknown, depth: number) => {
     if (depth > 6) return;
