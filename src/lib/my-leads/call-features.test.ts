@@ -15,18 +15,20 @@ describe("getMyLeadsCallFeatures", () => {
   it("turns each surface on only when its own flag and schema agree", async () => {
     mocks.flag.mockImplementation(async (_org: string, flag: string) => flag !== "callback_alert");
     mocks.ready.mockImplementation(async (feature: string) => feature !== "ack_prompts");
-    expect(await getMyLeadsCallFeatures("org-1")).toEqual({ clickToDial: true, autoPrompt: false, callbackAlert: false });
+    expect(await getMyLeadsCallFeatures("org-1")).toEqual({ clickToDial: true, autoPrompt: false, callbackAlert: false, callScreen: true });
     expect(mocks.flag).toHaveBeenCalledWith("org-1", "click_to_dial");
     expect(mocks.flag).toHaveBeenCalledWith("org-1", "auto_prompt");
     expect(mocks.flag).toHaveBeenCalledWith("org-1", "callback_alert");
     expect(mocks.ready).toHaveBeenCalledWith("api_dial");
     expect(mocks.ready).toHaveBeenCalledWith("ack_prompts");
     expect(mocks.ready).not.toHaveBeenCalledWith("callbacks_due");
+    // The call screen route checks only its flag, so no schema is probed for it.
+    expect(mocks.flag).toHaveBeenCalledWith("org-1", "call_screen");
   });
 
   it("is all off, without probing the schema, when every flag is off (missing row reads OFF)", async () => {
     mocks.flag.mockResolvedValue(false);
-    expect(await getMyLeadsCallFeatures("org-1")).toEqual({ clickToDial: false, autoPrompt: false, callbackAlert: false });
+    expect(await getMyLeadsCallFeatures("org-1")).toEqual({ clickToDial: false, autoPrompt: false, callbackAlert: false, callScreen: false });
     expect(mocks.ready).not.toHaveBeenCalled();
   });
 });

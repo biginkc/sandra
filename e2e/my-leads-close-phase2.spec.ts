@@ -215,12 +215,16 @@ test.describe.serial("my-leads-close: Phase 2 CI lane", () => {
     // A reached call (60 s of talk time) pre-selects the reached outcome.
     await expect(prompt.getByTestId("post-call-outcome-reached")).toHaveAttribute("aria-checked", "true");
 
-    // Acknowledge explicitly: the dialog's own Close control (an auto-opened prompt that is closed unsaved is
-    // acknowledged as dismissed), so later cases see only their own prompts.
-    await prompt.getByRole("button", { name: /close/i }).click();
+    // Closing unsaved only means "later" (the call must still be logged), so finish it the real way: pick the
+    // outcome and save. The call is bound to its Sandra call: no recording-link field exists to fill.
+    await expect(prompt.getByText(/Recording link/)).toHaveCount(0);
+    await prompt.getByTestId("post-call-outcome-reached").click();
+    await prompt.getByRole("button", { name: "Save" }).click();
+    await expect(prompt.getByTestId("post-call-receipt")).toBeVisible({ timeout: 20_000 });
+    await prompt.getByRole("button", { name: "Done without a drip" }).click();
     await expect(prompt).toHaveCount(0, { timeout: 10_000 });
     await expect
-      .poll(async () => (await db.query<{ n: string }>("select count(*)::text as n from public.acquisition_attempts where property_id=$1 and prompt_acknowledged_at is not null", [lead.propertyId])).rows[0]!.n, { timeout: 15_000 })
+      .poll(async () => (await db.query<{ n: string }>("select count(*)::text as n from public.acquisition_attempts where property_id=$1 and outcome='reached'", [lead.propertyId])).rows[0]!.n, { timeout: 15_000 })
       .toBe("1");
 
     // Replay: the same signed events again create nothing new.
@@ -331,5 +335,61 @@ test.describe.serial("my-leads-close: Phase 2 CI lane", () => {
       .toBe(true);
     const stray = await db.query<{ n: string }>("select count(*)::text as n from public.acquisition_attempts where provider_attempt_key=$1", [`dialpad-native:${unknownCall}`]);
     expect(Number(stray.rows[0]!.n)).toBe(0);
+  });
+
+  test("my-leads-close: T3c Call lands on the call screen; one bound prompt after hangup, saved once, no second prompt or stale banner", async ({ page }) => {
+    const { db, repUserId, runTag } = need();
+    const flagsOn = ["call_next_strip", "post_call_prompt", "click_to_dial", "native_matcher", "auto_prompt", "callback_alert"] as const;
+    // The call screen is its own flag; turn it on only for this case so the earlier cases keep their list-page flow.
+    await seedFeatureFlags(db, DEFAULT_ORG_ID, [...flagsOn, "call_screen"]);
+    try {
+      const lead = await createSyntheticLead(db, { orgId: DEFAULT_ORG_ID, repUserId, runTag, phoneE164: "+18165550147", lastTouchDaysAgo: 30 });
+      await page.goto("/my-leads");
+      await expect(page.getByTestId("call-next-strip")).toBeVisible({ timeout: 20_000 });
+      await clickCall(page, lead.propertyId);
+
+      // 1. Pressing Call opens the call screen while it dials: exactly one dial.
+      await expect(page).toHaveURL(new RegExp(`/my-leads/call/${lead.propertyId}`), { timeout: 20_000 });
+      await expect(page.getByTestId("dial-status")).toBeVisible({ timeout: 20_000 });
+      await expect.poll(async () => (await readDialIntents(db, lead.propertyId)).length, { timeout: 20_000 }).toBe(1);
+      const intent = (await readDialIntents(db, lead.propertyId))[0]!;
+      // No standing prompt while the call is still live.
+      await expect(page.getByTestId("post-call-prompt")).toHaveCount(0);
+
+      // 2. Hangup: ONE prompt, at the top of the script column, bound to the call (no manual DialPad fields).
+      await postCall({ callId: newCallId(), externalNumber: lead.phoneE164, customData: intent.customData, recorded: true });
+      const prompt = page.getByTestId("call-screen-left").getByTestId("post-call-prompt");
+      await expect(prompt).toBeVisible({ timeout: 40_000 });
+      await expect(page.getByTestId("post-call-prompt")).toHaveCount(1);
+      await expect(page.getByText(/Recording link/)).toHaveCount(0);
+      await expect(page.getByText("Where was this call?")).toHaveCount(0);
+
+      // 3. It never covers the comps card.
+      const numbers = await page.getByTestId("numbers-card").boundingBox();
+      const promptBox = await prompt.boundingBox();
+      expect(numbers && promptBox).toBeTruthy();
+      const overlaps = !(promptBox!.x + promptBox!.width <= numbers!.x || numbers!.x + numbers!.width <= promptBox!.x ||
+        promptBox!.y + promptBox!.height <= numbers!.y || numbers!.y + numbers!.height <= promptBox!.y);
+      expect(overlaps, "the prompt must not overlap the numbers card").toBe(false);
+
+      // 4. Save once: exactly one attempt for the lead, finalized (not a second manual row).
+      await prompt.getByTestId("post-call-outcome-reached").click();
+      await prompt.getByRole("button", { name: "Save" }).click();
+      await expect(prompt.getByTestId("post-call-receipt")).toBeVisible({ timeout: 20_000 });
+      await expect.poll(async () => (await attemptsFor(db, lead.propertyId)).map((a) => a.outcome), { timeout: 20_000 }).toEqual(["reached"]);
+      // No stale "Call ended" panel and no "not logged" reminder once it is saved.
+      await expect(page.getByTestId("dial-status")).toHaveCount(0, { timeout: 15_000 });
+      await expect(page.getByTestId("call-unlogged-reminder")).toHaveCount(0);
+
+      // 5. Back on My Leads, past one poll interval: no second prompt for the same call.
+      await page.goto("/my-leads");
+      await expect(page.getByTestId("call-next-strip")).toBeVisible({ timeout: 20_000 });
+      await page.waitForTimeout(12_000);
+      await expect(page.getByTestId("post-call-prompt")).toHaveCount(0);
+      await expect(page.getByTestId("call-unlogged-reminder")).toHaveCount(0);
+      expect(await attemptsFor(db, lead.propertyId)).toHaveLength(1);
+    } finally {
+      await seedFeatureFlags(db, DEFAULT_ORG_ID, flagsOn);
+    }
   });
 });

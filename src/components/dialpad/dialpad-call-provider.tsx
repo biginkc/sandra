@@ -11,6 +11,8 @@ import { Button } from "@/components/ui/button";
 import { DialpadCallContext, type DialpadCallContextValue, type DialpadCallRequest, type DialpadPageHandlers } from "./dialpad-call-context";
 import { LogOutcomeHost, type LoggingViewer, type LogOutcomeRequest } from "./log-outcome-host";
 
+type UnloggedCall = { callActivityId: string; propertyId: string; label: string };
+
 /**
  * The single owner of every Dialpad flight and its call lock. It lives in the dashboard layout, so
  * navigating between pages never unmounts it. Lead buttons, Messages, My Leads and the call screen
@@ -40,6 +42,8 @@ export function DialpadCallProvider({
   // Calls whose outcome was saved; kept so a stale poll inside its window cannot reopen the prompt.
   const [loggedCallActivityIds, setLoggedCallActivityIds] = useState<ReadonlySet<string>>(() => new Set());
   const [logRequest, setLogRequest] = useState<LogOutcomeRequest | null>(null);
+  // Sandra calls that ended (or whose prompt was closed with "later") and still have no saved outcome.
+  const [unlogged, setUnlogged] = useState<UnloggedCall[]>([]);
   const { dialFlight, dialActive, lockNotice, panelHidden, startApiDial, statusHandlers } = useApiDial(
     (propertyId) => {
       const request = requests.current.get(propertyId);
@@ -61,6 +65,7 @@ export function DialpadCallProvider({
   useEffect(() => {
     clearRef.current = (callActivityId) => {
       setLoggedCallActivityIds((prev) => (prev.has(callActivityId) ? prev : new Set(prev).add(callActivityId)));
+      setUnlogged((prev) => (prev.some((call) => call.callActivityId === callActivityId) ? prev.filter((call) => call.callActivityId !== callActivityId) : prev));
       // Only the ended flight for this exact call activity; an ended flight has already released the lock.
       if (endedCall?.callActivityId === callActivityId && dialFlight?.kind === "in_flight" && dialFlight.gen === endedCall.gen) {
         statusHandlers.onDismiss();
@@ -77,6 +82,7 @@ export function DialpadCallProvider({
       registerPageHandlers,
       loggedCallActivityIds,
       openLogOutcome: loggingViewer ? (propertyId, callActivityId) => setLogRequest({ propertyId, callActivityId }) : undefined,
+      markUnlogged: (call) => setUnlogged((prev) => (prev.some((c) => c.callActivityId === call.callActivityId) ? prev : [...prev, call])),
       clearEndedCall: (callActivityId) => clearRef.current(callActivityId),
       startCall: (request) => {
         requests.current.set(request.propertyId, request);
@@ -95,6 +101,10 @@ export function DialpadCallProvider({
   // A page that already shows this call's prompt needs no second "Log outcome" button.
   const pageShowsEnded = Boolean(endedCall?.callActivityId && pageHandlers?.showingPromptFor === endedCall.callActivityId);
   const canLogOutcome = Boolean(pageHandlers?.onLogOutcome || loggingViewer) && !pageShowsEnded;
+  // The reminder skips a call whose panel or prompt is on screen right now: it is already asking.
+  const panelShowing = (id: string) =>
+    endedCall?.callActivityId === id && dialFlight?.kind === "in_flight" && dialFlight.gen === endedCall.gen;
+  const reminders = unlogged.filter((call) => !panelShowing(call.callActivityId) && pageHandlers?.showingPromptFor !== call.callActivityId);
   return (
     <DialpadCallContext.Provider value={stable}>
       {children}
@@ -113,6 +123,11 @@ export function DialpadCallProvider({
               onLogOutcome={canLogOutcome ? logOutcome : undefined}
               onEnded={(status: DialpadCallStatus) => {
                 setEndedCall({ callActivityId: status.callActivityId ?? null, gen: dialFlight?.gen });
+                // Acquisitions callers must log every Sandra call: it stays reminded until its outcome is saved.
+                if (loggingViewer && status.callActivityId && dialFlight?.kind === "in_flight") {
+                  const entry = { callActivityId: status.callActivityId, propertyId: dialFlight.propertyId, label: dialFlight.label };
+                  setUnlogged((prev) => (prev.some((call) => call.callActivityId === entry.callActivityId) || loggedCallActivityIds.has(entry.callActivityId) ? prev : [...prev, entry]));
+                }
                 router.refresh();
                 pageHandlers?.onEnded?.(
                   status.callActivityId && dialFlight?.kind === "in_flight"
@@ -132,6 +147,18 @@ export function DialpadCallProvider({
               Call in progress — show status
             </Button>
           ) : null}
+        </div>
+      ) : null}
+      {reminders.length > 0 ? (
+        <div data-testid="call-unlogged-reminder" className={`fixed left-4 z-50 max-w-[calc(100vw-2rem)] md:left-72 ${hasPanel ? "bottom-20" : "bottom-4"}`}>
+          <div role="status" className="bg-card flex flex-wrap items-center gap-2 rounded-md border border-border px-3 py-2 text-sm">
+            <span>{reminders.length === 1 ? "1 call not logged" : `${reminders.length} calls not logged`}</span>
+            {canLogOutcome ? (
+              <Button type="button" size="sm" onClick={() => logOutcome(reminders[0].propertyId, reminders[0].callActivityId)}>
+                Log outcome
+              </Button>
+            ) : null}
+          </div>
         </div>
       ) : null}
       {loggingViewer ? (

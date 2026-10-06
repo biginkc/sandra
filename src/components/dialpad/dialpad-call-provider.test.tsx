@@ -162,4 +162,67 @@ describe("DialpadCallProvider", () => {
     await user.click(await screen.findByRole("button", { name: "Log outcome" }));
     expect(await screen.findByTestId("log-outcome-error")).toHaveTextContent(/not in your My Leads queue/);
   });
+
+  describe("not-logged reminder", () => {
+    it("an ended Sandra call stays reminded after its panel is dismissed, until its outcome is saved", async () => {
+      const user = userEvent.setup();
+      render(
+        <CallLockProvider>
+          <DialpadCallProvider enabled loggingViewer={viewer}>
+            <Starter />
+            <LoggedProbe />
+          </DialpadCallProvider>
+        </CallLockProvider>,
+      );
+      await user.click(screen.getByText("start"));
+      await screen.findByText(/Call ended/);
+      // The panel is asking already: no second reminder beside it.
+      expect(screen.queryByTestId("call-unlogged-reminder")).toBeNull();
+      await user.click(screen.getByRole("button", { name: "Dismiss" }));
+      expect(screen.getByTestId("call-unlogged-reminder")).toHaveTextContent("1 call not logged");
+      await user.click(screen.getByText("mark logged"));
+      expect(screen.queryByTestId("call-unlogged-reminder")).toBeNull();
+    });
+
+    it("a prompt closed with later is reminded; a page showing that call's prompt hides the reminder", async () => {
+      const user = userEvent.setup();
+      function Later() {
+        const dialpad = useOptionalDialpadCall();
+        return <button onClick={() => dialpad?.markUnlogged?.({ callActivityId: "call-9", propertyId: PROPERTY, label: "Pat" })}>later</button>;
+      }
+      function Showing() {
+        const register = useOptionalDialpadCall()?.registerPageHandlers;
+        const [on, setOn] = useState(false);
+        useEffect(() => register?.({ showingPromptFor: on ? "call-9" : null }), [register, on]);
+        return <button onClick={() => setOn(true)}>show prompt</button>;
+      }
+      render(
+        <CallLockProvider>
+          <DialpadCallProvider enabled>
+            <Later />
+            <Showing />
+          </DialpadCallProvider>
+        </CallLockProvider>,
+      );
+      await user.click(screen.getByText("later"));
+      expect(screen.getByTestId("call-unlogged-reminder")).toHaveTextContent("1 call not logged");
+      await user.click(screen.getByText("show prompt"));
+      expect(screen.queryByTestId("call-unlogged-reminder")).toBeNull();
+    });
+
+    it("a non-acquisitions caller (no logging viewer) is never reminded about an ended call", async () => {
+      const user = userEvent.setup();
+      render(
+        <CallLockProvider>
+          <DialpadCallProvider enabled>
+            <Starter />
+          </DialpadCallProvider>
+        </CallLockProvider>,
+      );
+      await user.click(screen.getByText("start"));
+      await screen.findByText(/Call ended/);
+      await user.click(screen.getByRole("button", { name: "Dismiss" }));
+      expect(screen.queryByTestId("call-unlogged-reminder")).toBeNull();
+    });
+  });
 });

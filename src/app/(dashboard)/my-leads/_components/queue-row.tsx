@@ -1,5 +1,5 @@
 import { formatPhoneDisplay } from "@/lib/phone-format";
-import { useCoachCall } from "./coach-call-context";
+import { useCallScreenLink, useCoachCall } from "./coach-call-context";
 import {
   AlertTriangle,
   ArrowRight,
@@ -197,6 +197,7 @@ export function MyLeadQueueRow({
 }: MyLeadQueueRowProps) {
   const domId = `${row.propertyId}${idSuffix}`;
   const coachCall = useCoachCall();
+  const openCallScreen = useCallScreenLink();
   const temperature = row.motivation.temperature;
   const motivationLabel =
     row.motivation.motivationResponseKind === "provided"
@@ -600,6 +601,21 @@ export function MyLeadQueueRow({
                   onDetailChanged?.();
                 }}
               />
+              {openCallScreen && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="border-[#e5e1df] bg-background text-muted-foreground hover:text-foreground dark:border-border"
+                  data-testid={`queue-row-open-call-screen-${row.propertyId}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openCallScreen(row.propertyId);
+                  }}
+                >
+                  Open call screen
+                </Button>
+              )}
               {coachCall && actions.some((item) => item.action === "start-call") && (
                 <Button
                   type="button"

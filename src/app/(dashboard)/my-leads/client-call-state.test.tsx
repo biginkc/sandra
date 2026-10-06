@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react"
+import { act, fireEvent, render, screen, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import * as React from "react"
 import { useEffect } from "react"
@@ -15,6 +15,7 @@ import { queueRowFixture, stripItem } from "./_components/call-next-test-support
 
 const mocks = vi.hoisted(() => ({
   routerRefresh: vi.fn(),
+  routerPush: vi.fn(),
   loadMyLeads: vi.fn(),
   loadMyLeadRow: vi.fn(),
   loadMyLeadCallReferences: vi.fn(),
@@ -27,7 +28,7 @@ const mocks = vi.hoisted(() => ({
   softphone: null as null | { callingEnabled: boolean; onCall?: boolean; openLead: (lead: unknown) => void },
 }))
 
-vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.routerRefresh }) }))
+vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.routerRefresh, push: mocks.routerPush }) }))
 vi.mock("@/components/softphone/softphone-provider", () => ({ useOptionalSoftphone: () => mocks.softphone }))
 vi.mock("@/components/appointments/book-appointment-popover", () => ({ BookAppointmentPopover: () => null }))
 vi.mock("./actions", () => ({
@@ -110,7 +111,7 @@ const strip = (): CallNextSnapshot => ({
   excluded: [], hiddenCount: 0, snapshotAt: SNAPSHOT_AT,
 })
 const dialpad = { connectionId: "c1", binding: { status: "verified", dialpadUserId: "5551234" }, grants: [] } as unknown as NonNullable<Props["dialpad"]>
-const flags = (over: Partial<FlagProps> = {}): FlagProps => ({ clickToDial: false, autoPrompt: false, callbackAlert: false, ...over })
+const flags = (over: Partial<FlagProps> = {}): FlagProps => ({ clickToDial: false, autoPrompt: false, callbackAlert: false, callScreen: false, ...over })
 
 const prompt = (over: Partial<CallPromptItem> = {}): CallPromptItem => ({
   attemptId: "attempt-old", propertyId: "property-1", callActivityId: "activity-old", endedAt: "2026-10-05T10:00:00Z",
@@ -281,6 +282,39 @@ describe("MyLeadsClient calling and durable call state", () => {
       expect(second.idempotencyKey).not.toBe(first.idempotencyKey)
     })
 
+    describe("call screen (call_screen flag)", () => {
+      it("starts the dial FIRST, then opens the call screen while it dials", async () => {
+        mocks.dialLead.mockResolvedValue(dialOk)
+        const order: string[] = []
+        mocks.dialLead.mockImplementation(async () => { order.push("dial"); return dialOk })
+        mocks.routerPush.mockImplementation(() => { order.push("push") })
+        renderClient({ dialpad, callFeatures: flags({ clickToDial: true, callScreen: true }) })
+        await click(screen.getByRole("button", { name: "Start call property-1" }))
+        expect(mocks.routerPush).toHaveBeenCalledWith("/my-leads/call/property-1")
+        expect(mocks.dialLead).toHaveBeenCalledTimes(1)
+        expect(order).toEqual(["dial", "push"])
+      })
+
+      it("stays on the list when the flag is off", async () => {
+        mocks.dialLead.mockResolvedValue(dialOk)
+        mocks.status.mockResolvedValue(callStatus("intent-1", "connected"))
+        renderClient({ dialpad, callFeatures: flags({ clickToDial: true, callScreen: false }) })
+        await click(screen.getByRole("button", { name: "Start call property-1" }))
+        expect(mocks.routerPush).not.toHaveBeenCalled()
+      })
+
+      it("does not navigate for another lead while a call is live", async () => {
+        mocks.dialLead.mockResolvedValue(dialOk)
+        mocks.status.mockResolvedValue(callStatus("intent-1", "connected"))
+        renderClient({ dialpad, callFeatures: flags({ clickToDial: true, callScreen: true }) })
+        await click(screen.getByRole("button", { name: "Start call property-1" }))
+        mocks.routerPush.mockClear()
+        await click(screen.getByRole("button", { name: "Start call property-2" }))
+        expect(mocks.routerPush).not.toHaveBeenCalled()
+        expect(mocks.dialLead).toHaveBeenCalledTimes(1)
+      })
+    })
+
     it("shows a denial as-is and never retries", async () => {
       mocks.dialLead.mockResolvedValue({ ok: false, code: "denied", message: "That phone number is on the Do Not Call list." })
       renderClient({ dialpad })
@@ -298,7 +332,7 @@ describe("MyLeadsClient calling and durable call state", () => {
       endedAt: "2026-10-05T10:05:00Z", outcomeGuess: "no_answer", voicemail: false,
     })
 
-    it("opens the oldest prompt first, pre-sets its outcome, acknowledges on close, then opens the next", async () => {
+    it("opens the oldest prompt first and pre-sets its outcome; closing it unsaved means later (no acknowledgement) with a reminder, then opens the next", async () => {
       mocks.poll.mockResolvedValue(pollState({ prompts: [newer, oldest] }))
       renderClient({ postCallPrompt: true, callFeatures: flags({ autoPrompt: true }) })
       await flush()
@@ -306,19 +340,47 @@ describe("MyLeadsClient calling and durable call state", () => {
       expect(screen.getByTestId("post-call-outcome-voicemail")).toHaveAttribute("aria-checked", "true")
       expect(screen.getByTestId("post-call-outcome-no-answer")).toHaveAttribute("aria-checked", "false")
       expect(ackCalls()).toHaveLength(0)
+      expect(screen.queryByTestId("call-unlogged-reminder")).not.toBeInTheDocument()
 
       await click(screen.getByRole("button", { name: "Cancel" }))
-      expect(ackCalls()[0]).toEqual(["attempt-old", "dismissed"])
-      // The poll still lists the acknowledged attempt: only the other one may open.
+      // Later, not dismissed forever: nothing is acknowledged and the call stays reminded.
+      expect(ackCalls()).toHaveLength(0)
+      expect(screen.getByTestId("call-unlogged-reminder")).toHaveTextContent("1 call not logged")
+      // The poll still lists it: only the other one may open (this one is not re-nagged this session).
       await flush(10_000)
       expect(screen.getAllByTestId("post-call-prompt")).toHaveLength(1)
       expect(screen.getByTestId("post-call-outcome-no-answer")).toHaveAttribute("aria-checked", "true")
 
       await click(screen.getByRole("button", { name: "Cancel" }))
-      expect(ackCalls()).toEqual([["attempt-old", "dismissed"], ["attempt-new", "dismissed"]])
+      expect(ackCalls()).toHaveLength(0)
+      expect(screen.getByTestId("call-unlogged-reminder")).toHaveTextContent("2 calls not logged")
       await flush(30_000)
       expect(screen.queryByTestId("post-call-prompt")).not.toBeInTheDocument()
-      expect(ackCalls()).toHaveLength(2)
+    })
+
+    it("the reminder's Log outcome reopens the call's prompt; saving it clears that call from the reminder", async () => {
+      mocks.poll.mockResolvedValue(pollState({ prompts: [oldest] }))
+      renderClient({ postCallPrompt: true, callFeatures: flags({ autoPrompt: true }) })
+      await flush()
+      await click(screen.getByRole("button", { name: "Cancel" }))
+      expect(screen.getByTestId("call-unlogged-reminder")).toHaveTextContent("1 call not logged")
+      await click(within(screen.getByTestId("call-unlogged-reminder")).getByRole("button", { name: "Log outcome" }))
+      expect(screen.getAllByTestId("post-call-prompt")).toHaveLength(1)
+      expect(screen.queryByText("Where was this call?")).not.toBeInTheDocument()
+      await click(screen.getByTestId("post-call-outcome-reached"))
+      await click(within(screen.getByTestId("post-call-prompt")).getByRole("button", { name: "Save" }))
+      expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1)
+      expect(mocks.submitMyLeadCommand.mock.calls[0]![1]).toMatchObject({ source: "sandra", callActivityId: "activity-old" })
+      expect(screen.queryByTestId("call-unlogged-reminder")).not.toBeInTheDocument()
+    })
+
+    it("a native (not placed through Sandra) call keeps the old dismissal and adds no reminder", async () => {
+      mocks.poll.mockResolvedValue(pollState({ prompts: [prompt({ origin: "native" })] }))
+      renderClient({ postCallPrompt: true, callFeatures: flags({ autoPrompt: true }) })
+      await flush()
+      await click(screen.getByRole("button", { name: "Cancel" }))
+      expect(ackCalls()[0]).toEqual(["attempt-old", "dismissed"])
+      expect(screen.queryByTestId("call-unlogged-reminder")).not.toBeInTheDocument()
     })
 
     it("never reopens a call that was already logged elsewhere this session, even if a stale poll still lists it", async () => {

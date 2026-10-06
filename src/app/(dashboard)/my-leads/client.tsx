@@ -53,7 +53,7 @@ import type { MyLeadsCallFeatures } from "@/lib/my-leads/call-features";
 import { oldestPrompt, type CallPromptItem } from "@/lib/my-leads/call-state";
 import { useOptionalDialpadCall } from "@/components/dialpad/dialpad-call-context";
 import { useCallLockHolder } from "@/components/calls/call-lock-context";
-import { CoachCallContext } from "./_components/coach-call-context";
+import { CallScreenLinkContext, CoachCallContext, callScreenHref } from "./_components/coach-call-context";
 import { acknowledgeCallPromptAction } from "./call-state-actions";
 import type {
   MyLeadAction,
@@ -693,6 +693,11 @@ export function MyLeadsClient({
         contactDnc: row.contactDnc,
         callable: row.phones.some((phone) => !!phone.trim()) && !row.contactDnc,
       });
+  // "Open call screen": only for the rep's own queue with the call_screen flag on; otherwise rows are unchanged.
+  const openCallScreen =
+    callFeatures?.callScreen && member === viewer.userId
+      ? (propertyId: string) => router.push(callScreenHref(propertyId))
+      : null;
   // "Call with coach": only with the Dialpad route on and a usable softphone; otherwise rows are unchanged.
   const coachCall =
     dialpad && softphone?.callingEnabled
@@ -723,11 +728,16 @@ export function MyLeadsClient({
         setError("This lead has no contact to call.");
         return;
       }
+      // A live call already holds the lock: the provider refuses a second dial, and the rep stays put.
+      const alreadyDialing = dialActive;
       dialpadCall?.startCall({
         propertyId: row.propertyId,
         contactId: row.contactId,
         label: row.homeownerName ?? row.address,
       });
+      // The click is the dial intent (started first, so a navigation can never drop it); then the call
+      // screen opens while it dials. The provider lives in the layout, so the flight and lock survive.
+      if (callFeatures?.callScreen && !alreadyDialing) router.push(callScreenHref(row.propertyId));
       return;
     }
     if (kind === "start-call") {
@@ -1033,22 +1043,36 @@ export function MyLeadsClient({
     action("log-attempt", next.propertyId, next.callActivityId);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `action`/`rawRow` are stable per render and read latest state
   }, [autoPromptOn, dialog, openingStatus, autoPrompt, callPoll.prompts, dialActive, softphoneOnCall, dialpadCall?.loggedCallActivityIds]);
-  // Any close of the auto-opened prompt acknowledges it: saved when the attempt committed, else dismissed.
+  // Saving acknowledges the prompt. Closing it WITHOUT saving means "later" for a Sandra call (it must be
+  // logged): no acknowledgement, so it comes back after a reload, and the "not logged" reminder stays until
+  // it is saved. A native (non-Sandra) call keeps the old dismissal.
   useEffect(() => {
     if (!autoPrompt) return;
     const stillOpen =
       dialog?.action === "log-attempt" && dialog.callActivityId === autoPrompt.callActivityId;
     if (stillOpen || openingStatus !== null) return;
     const attemptId = autoPrompt.attemptId;
-    const via = autoPromptSaved.current ? "saved" : "dismissed";
+    const saved = autoPromptSaved.current;
+    const later = !saved && autoPrompt.origin === "sandra";
     // eslint-disable-next-line react-hooks/set-state-in-effect -- the close of the auto-opened prompt is the external event being synchronised
     setAutoPrompt(null);
+    // Handled for this session either way: a stale poll must not reopen it right after the rep closed it.
     ackedAttempts.current.add(attemptId);
+    if (later) {
+      const row = rawRow(autoPrompt.propertyId);
+      dialpadCall?.markUnlogged?.({
+        callActivityId: autoPrompt.callActivityId,
+        propertyId: autoPrompt.propertyId,
+        label: row?.homeownerName ?? row?.address ?? "this lead",
+      });
+      return;
+    }
     ackInFlight.current.add(attemptId);
-    void acknowledgeCallPromptAction(attemptId, via).finally(() => {
+    void acknowledgeCallPromptAction(attemptId, saved ? "saved" : "dismissed").finally(() => {
       ackInFlight.current.delete(attemptId);
       refreshCallState();
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `rawRow` and the provider handle are read at close time
   }, [autoPrompt, dialog, openingStatus, refreshCallState]);
   const polledCallbacks = callPoll.callbacksDue;
   const callbacksDue = useMemo(
@@ -1264,6 +1288,7 @@ export function MyLeadsClient({
       : canonicalRetryHref;
   return (
     <CoachCallContext.Provider value={coachCall}>
+    <CallScreenLinkContext.Provider value={openCallScreen}>
       {openingStatus && (
         <div role="status" className="mb-4 rounded border p-3">
           {openingStatus.message}
@@ -1702,6 +1727,7 @@ export function MyLeadsClient({
           </Button>
         </div>
       )}
+    </CallScreenLinkContext.Provider>
     </CoachCallContext.Provider>
   );
 }

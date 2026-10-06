@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { CoachCallContext } from "./coach-call-context";
+import { CallScreenLinkContext, CoachCallContext } from "./coach-call-context";
 import { CallNextRowView } from "./call-next-row";
 import { SNAPSHOT_AT, stripItem, queueRowFixture } from "./call-next-test-support";
 
@@ -125,5 +125,20 @@ describe("<CallNextRowView />", () => {
       </CoachCallContext.Provider>,
     );
     expect(screen.getByText("Call with coach")).toBeDisabled();
+  });
+
+  it("offers Open call screen only when the call screen is on, and it opens that lead's screen", async () => {
+    const open = vi.fn();
+    const user = userEvent.setup();
+    const { unmount } = render(<ul><CallNextRowView item={stripItem("lead-1", "inbound_text")} now={new Date(SNAPSHOT_AT)} canAct {...handlers()} /></ul>);
+    expect(screen.queryByTestId("call-next-action-open-call-screen-lead-1")).toBeNull();
+    unmount();
+    render(
+      <CallScreenLinkContext.Provider value={open}>
+        <ul><CallNextRowView item={stripItem("lead-1", "inbound_text")} now={new Date(SNAPSHOT_AT)} canAct {...handlers()} /></ul>
+      </CallScreenLinkContext.Provider>,
+    );
+    await user.click(screen.getByTestId("call-next-action-open-call-screen-lead-1"));
+    expect(open).toHaveBeenCalledWith("lead-1");
   });
 });

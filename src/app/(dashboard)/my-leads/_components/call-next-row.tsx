@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import type { CallNextRow } from "@/lib/my-leads/call-next";
-import { useCoachCall } from "./coach-call-context";
+import { useCallScreenLink, useCoachCall } from "./coach-call-context";
 import { reasonLabel } from "./call-next-reason";
 
 const TEMPERATURE_CLASSES = {
@@ -54,6 +54,7 @@ export function CallNextRowView({
   const callable = !row.contactDnc && row.phones.some((phone) => phone.trim() !== "");
   const callDisabled = disabled || !callable;
   const coachCall = useCoachCall();
+  const openCallScreen = useCallScreenLink();
   return (
     <li
       data-testid={`call-next-row-${propertyId}`}
@@ -92,6 +93,17 @@ export function CallNextRowView({
           <Phone aria-hidden="true" />
           Call
         </Button>
+        {openCallScreen && (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            data-testid={`call-next-action-open-call-screen-${propertyId}`}
+            onClick={() => openCallScreen(propertyId)}
+          >
+            Open call screen
+          </Button>
+        )}
         {coachCall && (
           <Button
             type="button"
