@@ -85,6 +85,8 @@ export function writeReport(dir: string, input: {
   pending: string[];
   osEgressProven: boolean;
   appGuardPid: number | null;
+  /** Denials of the Next dev server's own npm version check (the one tolerated app egress attempt). */
+  benignDenials: number;
   levers: Array<{ lever: string; ok: boolean; detail: string }>;
   killed: KillReport | null;
   stubCounts: { dials: number; sends: number };
@@ -94,7 +96,7 @@ export function writeReport(dir: string, input: {
   const { cfg, manifest, summary } = input;
   const lines: string[] = [];
   lines.push(`# Chaos day ${cfg.runId}: ${summary.verdict}`, "");
-  lines.push(`- SHA: ${cfg.sha}`, `- Seed: ${cfg.seed}`, `- Profile: ${manifest.profile}, scope: ${cfg.scope}, fault: ${cfg.fault}`, `- Schedule hash: ${manifest.hash}`, `- Elapsed: ${(input.elapsedMs / 1000).toFixed(1)}s`, `- Stub traffic: ${input.stubCounts.dials} dial(s), ${input.stubCounts.sends} contract send(s)`, `- OS egress: ${input.osEgressProven ? "proven" : "NOT proven"}`, `- App egress guard: ${input.appGuardPid ? `proven in pid ${input.appGuardPid}` : "NOT proven"}`, "");
+  lines.push(`- SHA: ${cfg.sha}`, `- Seed: ${cfg.seed}`, `- Profile: ${manifest.profile}, scope: ${cfg.scope}, fault: ${cfg.fault}`, `- Schedule hash: ${manifest.hash}`, `- Elapsed: ${(input.elapsedMs / 1000).toFixed(1)}s`, `- Stub traffic: ${input.stubCounts.dials} dial(s), ${input.stubCounts.sends} contract send(s)`, `- OS egress: ${input.osEgressProven ? "proven" : "NOT proven"}`, `- App egress guard: ${input.appGuardPid ? `proven in pid ${input.appGuardPid}` : "NOT proven"}`, `- Tolerated app egress denials: ${input.benignDenials} (Next dev version check to registry.npmjs.org, denied by the guard)`, "");
   if (summary.reasons.length) lines.push("## Why not PASS", ...summary.reasons.map((r) => `- ${r}`), "");
   lines.push("## Scenario counts", "| scenario | planned | executed (replay) | deferred (browser) |", "|---|---|---|---|");
   for (const s of summary.scenarioCounts) lines.push(`| ${s.scenario} | ${s.planned} | ${s.executedReplay} | ${s.deferredBrowser} |`);

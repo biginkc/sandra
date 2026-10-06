@@ -65,7 +65,7 @@ try {
   const e = process.env;
   const announce = {
     at: new Date().toISOString(), pid: process.pid, kind: "guard_loaded", target: "", probe: true, log: LOG, cwd: process.cwd(),
-    sha: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain", "--untracked-files=no"]) !== "",
+    sha: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain", "--", ".", ":!.swc", ":!.next", ":!node_modules", ":!artifacts"]) !== "", // tracked changes AND untracked files (Next serves and hot-reloads both)
     redirect: dialpadRedirect,
     env: { DIALPAD_DIAL_PROVIDER: e.DIALPAD_DIAL_PROVIDER ?? null, MESSAGING_PROVIDER: e.MESSAGING_PROVIDER ?? null, DROPBOX_SIGN_API_BASE_URL: e.DROPBOX_SIGN_API_BASE_URL ?? null, VERCEL_ENV: e.VERCEL_ENV ?? null, VERCEL: e.VERCEL ?? null, NODE_OPTIONS: e.NODE_OPTIONS ?? null },
   };

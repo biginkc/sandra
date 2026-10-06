@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { appEgressViolations, appProofProblems, guardLineFor, proveAppUnderTest, snapshotLog, type AppProofInput } from "./app-proof";
+import { appBenignDenials, appEgressViolations, appProofProblems, checkoutDirtyReason, envFilesIn, guardLineFor, proveAppUnderTest, snapshotLog, type AppProofInput } from "./app-proof";
 import { readConfig } from "./config";
 import { egressChildEnv } from "./egress";
 import { buildManifest } from "./manifest";
@@ -18,10 +18,10 @@ const STUB = "http://127.0.0.1:55500";
 const LOG = "/tmp/app-egress.jsonl";
 const SHA = "a".repeat(40);
 const guardLine = (over: Record<string, unknown> = {}) => JSON.stringify({
-  kind: "guard_loaded", pid: 4242, probe: true, log: LOG, sha: SHA, dirty: false, redirect: STUB,
+  kind: "guard_loaded", pid: 4242, probe: true, at: "2026-10-06T12:00:05.000Z", log: LOG, sha: SHA, dirty: false, redirect: STUB,
   env: { DIALPAD_DIAL_PROVIDER: null, MESSAGING_PROVIDER: "mock", DROPBOX_SIGN_API_BASE_URL: `${STUB}/dropbox-sign/v3`, VERCEL_ENV: null, VERCEL: null }, ...over,
 });
-const good = (over: Partial<AppProofInput> = {}): AppProofInput => ({ listenerPid: 4242, listenerUid: 501, harnessUid: 501, appEgressLog: LOG, logLines: [guardLine()], stubUrl: STUB, harnessSha: SHA, ...over });
+const good = (over: Partial<AppProofInput> = {}): AppProofInput => ({ listenerPid: 4242, listenerUid: 501, harnessUid: 501, appEgressLog: LOG, logLines: [guardLine()], stubUrl: STUB, harnessSha: SHA, envFiles: [], listenerStartMs: Date.parse("2026-10-06T12:00:00.000Z"), ...over });
 const withEnv = (env: Record<string, string | null>) => {
   const base = { MESSAGING_PROVIDER: "mock", DROPBOX_SIGN_API_BASE_URL: `${STUB}/dropbox-sign/v3`, DIALPAD_DIAL_PROVIDER: null, VERCEL_ENV: null, VERCEL: null };
   return good({ logLines: [guardLine({ env: { ...base, ...env } })] });
@@ -53,6 +53,31 @@ describe("(b)(c) the app under test is proven at T0 from its own guard line (F1:
     expect(appProofProblems(good({ logLines: [guardLine({ sha: "b".repeat(40) })] })).join()).toMatch(/runs commit/);
     expect(appProofProblems(good({ logLines: [guardLine({ sha: null })] })).join()).toMatch(/runs commit/);
     expect(appProofProblems(good({ logLines: [guardLine({ dirty: true })] })).join()).toMatch(/uncommitted/);
+  });
+  it("N1: a .env* file Next would load in the app checkout is refused (it could set provider env after the guard announced it)", () => {
+    expect(appProofProblems(good({ envFiles: [".env.local"] })).join()).toMatch(/\.env\.local/);
+    const dir = mkdtempSync(path.join(os.tmpdir(), "envs-"));
+    writeFileSync(path.join(dir, ".env.example"), "x=1");
+    expect(envFilesIn(dir)).toEqual([]); // .env.example is never loaded
+    writeFileSync(path.join(dir, ".env.development.local"), "x=1");
+    writeFileSync(path.join(dir, ".env"), "x=1");
+    expect(envFilesIn(dir)).toEqual([".env", ".env.development.local"]);
+  });
+  it("N2: a guard line older than the listener process is a stale line from an earlier process (pid reuse), not this process's", () => {
+    expect(appProofProblems(good({ listenerStartMs: Date.parse("2026-10-06T12:30:00.000Z") })).join()).toMatch(/stale line/);
+    expect(appProofProblems(good({ listenerStartMs: null })).join()).toMatch(/older than the listener|unknown/);
+    expect(appProofProblems(good({ logLines: [guardLine({ at: undefined })] })).join()).toMatch(/no time/);
+  });
+  it("N3: untracked files make the checkout dirty, build caches do not", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "repo-"));
+    const git = (...a: string[]) => spawnSync("git", a, { cwd: dir, encoding: "utf8" });
+    git("init", "-q"); git("config", "user.email", "t@example.invalid"); git("config", "user.name", "t");
+    writeFileSync(path.join(dir, "a.txt"), "1"); git("add", "."); git("commit", "-qm", "init");
+    expect(checkoutDirtyReason(dir)).toBeNull();
+    spawnSync("mkdir", ["-p", path.join(dir, ".swc")]); writeFileSync(path.join(dir, ".swc", "x"), "1");
+    expect(checkoutDirtyReason(dir)).toBeNull(); // a build cache
+    writeFileSync(path.join(dir, "new-route.ts"), "export {}");
+    expect(checkoutDirtyReason(dir)).toMatch(/new-route\.ts/); // an untracked source file
   });
   it("the live proof refuses (LaneRefusal) when nothing listens on the app port", () => {
     expect(() => proveAppUnderTest({ appUrl: "http://127.0.0.1:59871", appEgressLog: LOG, stubUrl: STUB, harnessSha: SHA })).toThrow(LaneRefusal);
@@ -93,6 +118,13 @@ describe("(d) + #6 the app's egress log: denials fail the run, and so does losin
     const snap = snapshotLog(f)!;
     appendFileSync(f, [{ kind: "tls", target: "registry.npmjs.org", probe: false }, { kind: "tls", target: "dialpad.com", probe: false }, { kind: "tls", target: "registry.npmjs.org.evil.example", probe: false }].map((j) => JSON.stringify(j)).join("\n") + "\n");
     expect(appEgressViolations(f, snap, 99)).toEqual(["tls:dialpad.com", "tls:registry.npmjs.org.evil.example"]);
+  });
+  it("N4: the tolerated npm-registry denials are counted so the report can show them", () => {
+    const f = fresh();
+    const snap = snapshotLog(f)!;
+    appendFileSync(f, [{ kind: "tls", target: "registry.npmjs.org", probe: false }, { kind: "dns", target: "registry.npmjs.org", probe: false }, { kind: "tls", target: "dialpad.com", probe: false }].map((j) => JSON.stringify(j)).join("\n") + "\n");
+    expect(appBenignDenials(f, snap)).toBe(2);
+    expect(appBenignDenials(f, null)).toBe(0);
   });
   it("a deleted log is a violation, not zero violations (Astra #6)", () => {
     const f = fresh();

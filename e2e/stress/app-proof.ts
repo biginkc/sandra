@@ -15,6 +15,8 @@ import { LaneRefusal } from "./guards";
  */
 
 export type GuardLine = {
+  at?: string;
+  cwd?: string;
   kind?: string;
   pid?: number;
   log?: string;
@@ -51,7 +53,36 @@ export type AppProofInput = {
   logLines: string[];
   stubUrl: string;
   harnessSha: string;
+  /** `.env*` files in the app's checkout that `next dev` would load (they can set provider env AFTER the guard announced it). */
+  envFiles?: string[];
+  /** When the listener process started (ms epoch), from `ps -o lstart`. A guard line older than this is a stale one from an earlier process. */
+  listenerStartMs?: number | null;
 };
+
+/** `next dev` loads these (in this order of precedence, after the process env); `.env.example` and `.env.production*`/`.env.test*` are not loaded. */
+export const NEXT_DEV_ENV_FILES = [".env", ".env.local", ".env.development", ".env.development.local"] as const;
+export function envFilesIn(cwd: string): string[] {
+  return NEXT_DEV_ENV_FILES.filter((f) => existsSync(`${cwd}/${f}`));
+}
+
+export function readProcessStartMs(pid: number): number | null {
+  try {
+    const t = Date.parse(execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }).trim());
+    return Number.isFinite(t) ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Tracked changes or untracked files (excluding build caches) in a checkout; null when clean. */
+export function checkoutDirtyReason(cwd: string): string | null {
+  try {
+    const out = execFileSync("git", ["status", "--porcelain", "--", ".", ":!.swc", ":!.next", ":!node_modules", ":!artifacts"], { cwd, encoding: "utf8" }).trim();
+    return out ? `uncommitted or untracked files in the app checkout: ${out.split("\n").slice(0, 5).join("; ")}` : null;
+  } catch (e) {
+    return `could not read the app checkout state (${(e as Error).message.split("\n")[0]})`;
+  }
+}
 
 export function guardLineFor(lines: string[], pid: number): GuardLine | null {
   let found: GuardLine | null = null;
@@ -72,6 +103,8 @@ export function appProofProblems(i: AppProofInput): string[] {
   if (!i.appEgressLog || g.log !== i.appEgressLog) p.push(`the app's guard logs to ${g.log ?? "unknown"}, not STRESS_APP_EGRESS_LOG (${i.appEgressLog || "unset"})`);
   if (!g.sha || g.sha !== i.harnessSha) p.push(`the app runs commit ${g.sha ?? "unknown"}, the harness is at ${i.harnessSha}: the tested app must be this checkout's build`);
   if (g.dirty !== false) p.push("the app's checkout has uncommitted tracked changes (or its state is unknown)");
+  if (i.envFiles?.length) p.push(`the app checkout has ${i.envFiles.join(", ")}: Next loads them after the guard announced the environment, so they could set provider variables the proof never saw; remove them for the run`);
+  if (g.at === undefined || i.listenerStartMs == null || Date.parse(g.at) < i.listenerStartMs - 2000) p.push(`the guard_loaded line (${g.at ?? "no time"}) is older than the listener process (started ${i.listenerStartMs == null ? "unknown" : new Date(i.listenerStartMs).toISOString()}): it is a stale line, not this process's`);
   const e = g.env ?? {};
   if (g.redirect !== i.stubUrl) p.push(`the app's Dialpad API is not diverted to the harness stub (redirect "${g.redirect ?? "none"}", expected ${i.stubUrl}); without it the dial receipts are not observable`);
   if (e.DIALPAD_DIAL_PROVIDER === "stub") p.push('DIALPAD_DIAL_PROVIDER=stub keeps dials in process where the harness cannot read the receipts; leave it unset (the diverted live dialer is used)');
@@ -94,17 +127,20 @@ export function snapshotLog(file: string): LogSnapshot | null {
 }
 
 /** The live check, used by the engine at T0. */
-export function proveAppUnderTest(args: { appUrl: string; appEgressLog: string; stubUrl: string; harnessSha: string }): { pid: number; snapshot: LogSnapshot } {
+export function proveAppUnderTest(args: { appUrl: string; appEgressLog: string; stubUrl: string; harnessSha: string }): { pid: number; snapshot: LogSnapshot; cwd: string | null } {
   const port = Number(new URL(args.appUrl).port || 80);
   const pid = findListenerPid(port);
+  const lines = readLines(args.appEgressLog);
+  const g = pid ? guardLineFor(lines, pid) : null;
   const problems = appProofProblems({
     listenerPid: pid, listenerUid: pid ? readProcessUid(pid) : null, harnessUid: process.getuid?.() ?? -1,
-    appEgressLog: args.appEgressLog, logLines: readLines(args.appEgressLog), stubUrl: args.stubUrl, harnessSha: args.harnessSha,
+    appEgressLog: args.appEgressLog, logLines: lines, stubUrl: args.stubUrl, harnessSha: args.harnessSha,
+    envFiles: g?.cwd ? envFilesIn(g.cwd) : [], listenerStartMs: pid ? readProcessStartMs(pid) : null,
   });
   const snapshot = snapshotLog(args.appEgressLog);
   if (!snapshot) problems.push("the app egress log does not exist");
   if (problems.length) throw new LaneRefusal("APP_UNDER_TEST_NOT_PROVEN", problems.join(" | "));
-  return { pid: pid!, snapshot: snapshot! };
+  return { pid: pid!, snapshot: snapshot!, cwd: g?.cwd ?? null };
 }
 
 /**
@@ -114,6 +150,16 @@ export function proveAppUnderTest(args: { appUrl: string; appEgressLog: string; 
  */
 export const BENIGN_DEV_EGRESS_HOSTS: readonly string[] = ["registry.npmjs.org"];
 export const isBenignDevEgress = (kind: string | undefined, target: string | undefined) => ["tls", "dns", "connect"].includes(kind ?? "") && BENIGN_DEV_EGRESS_HOSTS.includes(target ?? "");
+
+/** The tolerated (benign dev-server) denials since T0, counted so the report shows them instead of hiding them. */
+export function appBenignDenials(file: string, snapshot: LogSnapshot | null): number {
+  if (!snapshot || !existsSync(file)) return 0;
+  let n = 0;
+  for (const l of readFileSync(file, "utf8").slice(snapshot.size).split("\n").filter(Boolean)) {
+    try { const j = JSON.parse(l) as { probe?: boolean; kind?: string; target?: string }; if (!j.probe && isBenignDevEgress(j.kind, j.target)) n += 1; } catch { /* counted as a violation elsewhere */ }
+  }
+  return n;
+}
 
 /**
  * The app's denials since T0, failing closed on the evidence itself: a missing, replaced (new inode), truncated (smaller than at T0) log, or one

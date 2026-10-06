@@ -20,7 +20,7 @@ STRESS_HARNESS=1 STRESS_SCOPE=full STRESS_ROOT_BROWSER_CONTEXT=1 STRESS_REQUIRE_
 Environment (all loopback): `E2E_DISPOSABLE_DATABASE=1`, `E2E_CI_SUPABASE_DB_URL`, `STRESS_SUPABASE_URL` (or `TEST_SUPABASE_URL`),
 `TEST_SUPABASE_ANON_KEY`, `TEST_SUPABASE_SERVICE_ROLE_KEY`, `STRESS_REP_EMAIL` / `STRESS_REP_PASSWORD` (the rep `provision-stack.mjs` creates; values are in its `stress-env.json`), `STRESS_APP_URL`, `E2E_CRON_SECRET` (= the app's `CRON_SECRET`),
 `DIALPAD_CTI_WEBHOOK_SECRET_E2E` (= the app's), `STRESS_APP_LOG` (the app's stdout file; scanned for 5xx and unhandled rejections),
-`E2E_QUIET_HOURS_NOW` (set on the app; recorded), `CHAOS_SEED` (default 20261005), `STRESS_SHA` (default `git rev-parse HEAD`).
+`E2E_QUIET_HOURS_NOW` (set on the app; recorded), `CHAOS_SEED` (default 20261005), the sha is always `git rev-parse HEAD` (a `STRESS_SHA` that differs is refused).
 `npm run stress -- plan` writes `schedule.ndjson` with no connection of any kind. `npm run stress -- kill` drops a KILL file.
 Unit tests: `npm run test:stress-unit`.
 

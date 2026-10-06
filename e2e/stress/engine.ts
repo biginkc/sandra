@@ -5,7 +5,7 @@ import path from "node:path";
 import { CRON_ROUTES, FaultState, runCron, sleep, TickDeadline, type Ctx } from "./actions";
 import { approvedTestSms, type StressConfig } from "./config";
 import { assertFreshDatabase, asRep, asService, openDb, type Db } from "./db";
-import { appEgressViolations, proveAppUnderTest, type LogSnapshot } from "./app-proof";
+import { appBenignDenials, appEgressViolations, checkoutDirtyReason, proveAppUnderTest, type LogSnapshot } from "./app-proof";
 import { egressChildEnv, proveInProcessDenial, proveOsDenial, readEgressViolations } from "./egress";
 import { GateController } from "./gates";
 import { assertStressLane, LaneRefusal } from "./guards";
@@ -179,6 +179,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   let appGuardPid: number | null = null;
   let faultFiredFlag = false;
   let appEgressSnap: LogSnapshot | null = null;
+  let appCwd: string | null = null;
   let windowOpenAtStart = true;
   let faultFiredCheck: () => boolean = () => false;
   let browserExecuted = 0;
@@ -206,6 +207,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     const appProof = proveAppUnderTest({ appUrl: cfg.appUrl, appEgressLog: cfg.appEgressLog, stubUrl: stub.url, harnessSha: cfg.sha });
     appGuardPid = appProof.pid;
     appEgressSnap = appProof.snapshot;
+    appCwd = appProof.cwd;
     log(`app under test proven: egress guard loaded in pid ${appGuardPid}, providers stub/test`);
     world = await setupWorld(db, cfg);
     const dbxMode = await db.query<{ test_mode: boolean }>("select test_mode from public.org_esign_integrations where org_id=$1", [cfg.orgId]);
@@ -305,6 +307,10 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   // Egress and server-log verdicts.
   faultFiredFlag = faultFiredCheck();
   // Denials from the harness's own processes AND from the app server (its own log); any denial fails the run.
+  // Build identity again at the end: Next hot-reloads edits and serves untracked files, so a change made after T0 is as bad as one made before.
+  const dirtyAtEnd = appCwd ? checkoutDirtyReason(appCwd) : null;
+  if (dirtyAtEnd) setupErrors.push(`app checkout changed during the run: ${dirtyAtEnd}`);
+  const benignDenials = appBenignDenials(cfg.appEgressLog, appEgressSnap);
   const egressApp = appEgressViolations(cfg.appEgressLog, appEgressSnap, appGuardPid);
   const egress = [...readEgressViolations(egressLog), ...egressApp.map((t) => ({ at: "", kind: "app", target: t, pid: 0 }))];
   const serverProblems: string[] = [];
@@ -327,7 +333,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   const summary = decide({ cfg, manifest, records, invariantChecks, outcomeChecks, egressViolations: egress.length, osEgressProven, reminderWindowOpen: windowOpenAtStart && reminderWindowOpenAt(new Date()), serverProblems, killed: failedAny ? killed : null, setupErrors, browserExecuted });
   writeFileSync(path.join(dir, "invariants.final.json"), JSON.stringify(summary.checks, null, 1));
   writeReport(dir, {
-    cfg, manifest, summary, pending, osEgressProven, appGuardPid, levers, killed,
+    cfg, manifest, summary, pending, osEgressProven, appGuardPid, benignDenials, levers, killed,
     stubCounts: { dials: stub?.dials().length ?? 0, sends: stub?.sends().length ?? 0 },
     elapsedMs: Date.now() - t0,
     repro: `CHAOS_SEED=${cfg.seed} STRESS_PROFILE=${profile} STRESS_SCOPE=${cfg.scope} STRESS_FAULT=${cfg.fault} tsx e2e/stress/cli.ts run   # same seed + the recorded schedule.ndjson + a fresh stack`,

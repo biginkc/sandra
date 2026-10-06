@@ -7,7 +7,8 @@ import { reminderWindowOpenAt } from "./reminder-window";
 import { decide } from "./report";
 import { liveAppIdentityProblems } from "./live-leg";
 import { dialProblems, reminderProblems, type ReminderRow } from "./oracle";
-import { sectionParityProblems, stripParityProblems } from "./parity";
+import { readCallNextLimit, sectionParityProblems, stripParityProblems } from "./parity";
+import { CALL_NEXT_LIMIT } from "@/lib/my-leads/call-next";
 import { selfTestReportOk, type SelfTestReportRow } from "./selftest-spec";
 
 /**
@@ -125,12 +126,18 @@ describe("Astra 5: the live app's build identity is bound to the harness checkou
 
 describe("Astra 8: rendered parity compares the strip and the section counts", () => {
   it("strip: wrong order, a missing or extra lead, or a duplicate fails; the exact prefix passes", () => {
-    expect(stripParityProblems(["a", "b"], ["a", "b", "c"])).toEqual([]);
+    expect(stripParityProblems(["a", "b"], ["a", "b"], 10)).toEqual([]);
+    // B1: rows dropped from the END (rendered 9 where the page limit is 10 and the database has more) must fail.
+    const db = Array.from({ length: 12 }, (_, i) => `l${i}`);
+    expect(stripParityProblems(db.slice(0, 10), db, 10)).toEqual([]);
+    expect(stripParityProblems(db.slice(0, 9), db, 10).join()).toMatch(/rendered 9 rows, expected 10/);
+    expect(stripParityProblems(["a", "b"], ["a", "b", "c"], 10).join()).toMatch(/rendered 2 rows, expected 3/);
+    expect(stripParityProblems(db.slice(0, 9), db).join()).toMatch(/expected 10/); // the real limit
     expect(stripParityProblems(["b", "a"], ["a", "b"]).length).toBeGreaterThan(0);
     expect(stripParityProblems(["a", "x"], ["a", "b"]).length).toBeGreaterThan(0);
     expect(stripParityProblems([], ["a"]).join()).toMatch(/rendered no rows/);
     expect(stripParityProblems(["a", "a"], ["a", "b"]).join()).toMatch(/twice/);
-    expect(stripParityProblems(["a", "b", "c"], ["a", "b"]).join()).toMatch(/rendered 3 rows/);
+    expect(stripParityProblems(["a", "b", "c"], ["a", "b"]).join()).toMatch(/rendered 3 rows, expected 2/);
   });
   it("sections: a wrong badge count, an unreadable badge, or no sections fails", () => {
     expect(sectionParityProblems([{ stage: "contacted", badge: "5 leads" }], { contacted: 5 })).toEqual([]);
@@ -138,5 +145,11 @@ describe("Astra 8: rendered parity compares the strip and the section counts", (
     expect(sectionParityProblems([{ stage: "offer", badge: "" }], {}).join()).toMatch(/no readable count/);
     expect(sectionParityProblems([], {}).join()).toMatch(/no section/);
     expect(sectionParityProblems([{ stage: "in_drip", badge: "9 leads" }], {})).toEqual([]);
+  });
+});
+
+describe("B1 the limit comes from the source of truth", () => {
+  it("the value read from the file equals a real import of CALL_NEXT_LIMIT", () => {
+    expect(readCallNextLimit()).toBe(CALL_NEXT_LIMIT);
   });
 });
