@@ -595,13 +595,31 @@ describe('startDialpadApiCall calling hours (lead-local 08:00-21:00)', () => {
       vi.unstubAllEnvs();
     }
   });
-  it('re-checks the clock: passes at 20:59:59, closes during loadActiveGrants, no authorize and no provider call', async () => {
-    let t = new Date('2026-09-30T01:59:59Z').getTime(); // 20:59:59 CDT
-    const db = fakeDb({ loadActiveGrants: async () => { t = new Date('2026-09-30T02:00:01Z').getTime(); return []; } });
+  it.each(['loadActiveGrants', 'loadConnection', 'loadLiveBinding'] as const)(
+    'passes at 20:59:59, closes during %s: no prepareIntent, no authorize, no provider call',
+    async (hook) => {
+      let t = new Date('2026-09-30T01:59:59Z').getTime(); // 20:59:59 CDT
+      const base = fakeDb();
+      const close = <R,>(fn: () => Promise<R>) => async () => { t = new Date('2026-09-30T02:00:01Z').getTime(); return fn(); };
+      const over: Partial<DialpadDispatchDb> = {};
+      if (hook === 'loadActiveGrants') over.loadActiveGrants = close(async () => []);
+      if (hook === 'loadConnection') over.loadConnection = close(async () => conn());
+      if (hook === 'loadLiveBinding') over.loadLiveBinding = close(async () => ({ id: BINDING, status: 'verified' as const, dialpadUserId: '5551234' }));
+      const db = Object.assign(base, over);
+      const { dialer, requests } = fakeDialer();
+      const result = await startDialpadApiCall(db, dialer, actor, input, { env, now: () => new Date(t) });
+      expect(result).toMatchObject({ ok: false, code: 'denied', denial: 'outside_calling_hours', freshAttemptKey: true });
+      expect(db.calls).not.toContain('prepareIntent');
+      expect(db.calls).not.toContain('authorizeDispatch');
+      expect(requests).toHaveLength(0);
+    },
+  );
+  it('closes between prepare and authorize: intent cancelled, no authorize, no provider call', async () => {
+    let t = new Date('2026-09-30T01:59:59Z').getTime();
+    const db = fakeDb({ prepareIntent: async () => { t = new Date('2026-09-30T02:00:01Z').getTime(); return prepared(); } });
     const { dialer, requests } = fakeDialer();
     const result = await startDialpadApiCall(db, dialer, actor, input, { env, now: () => new Date(t) });
-    expect(result).toMatchObject({ ok: false, code: 'denied', denial: 'outside_calling_hours', freshAttemptKey: true });
-    expect(db.calls).toContain('prepareIntent');
+    expect(result).toMatchObject({ ok: false, denial: 'outside_calling_hours' });
     expect(db.calls).toContain('cancelIntent');
     expect(db.calls).not.toContain('authorizeDispatch');
     expect(requests).toHaveLength(0);

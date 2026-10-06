@@ -556,6 +556,8 @@ export type DialpadStartCallResult =
 export interface DialpadStartCallOptions {
   /** The server-side dialer renders ids as exact JSON integer text, so ids beyond 2^53 are fine there. */
   allowLargeIdentityIds?: boolean;
+  /** Re-checked immediately before preparing the intent; `false` refuses and nothing is created. */
+  beforePrepare?: () => boolean;
   /** Re-checked immediately before authorization; `false` cancels the prepared intent and refuses (nothing is authorized). */
   beforeAuthorize?: () => boolean;
 }
@@ -580,6 +582,10 @@ export async function startDialpadCall(db: DialpadDispatchDb, actor: DialpadActo
     if (!isDialpadTargetOriginConfigured(connection.allowedOrigins)) return fail('origin_not_allowed', 'Dialpad is not allowed for this organization.');
     const binding = await db.loadLiveBinding(actor.orgId, actor.userId);
     if (!binding || binding.status !== 'verified') return fail('not_bound', dialpadDenialMessage('binding_not_verified'), 'binding_not_verified');
+
+    if (options.beforePrepare && !options.beforePrepare()) {
+      return fail('denied', dialpadDenialMessage('outside_calling_hours'), 'outside_calling_hours');
+    }
 
     const prepared = parsePreparedDialpadCallIntent(await db.prepareIntent({
       orgId: actor.orgId,

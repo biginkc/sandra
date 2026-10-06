@@ -339,7 +339,7 @@ export async function startDialpadApiCall(
     // or authorized, so a blocked call creates no intent and reaches no provider. Unknown or missing state fails closed.
     const property = await db.loadPropertyState(actor.orgId, propertyId);
     // The window can close during the awaited calls below, so it is re-read with a fresh clock
-    // immediately before authorization and again immediately before the provider dial.
+    // immediately before preparing the intent, before authorization and again immediately before the provider dial.
     const inWindow = () => property.found && checkQuietHours(property.state, now()).ok;
     const outsideHours = { ok: false, code: 'denied', message: dialpadDenialMessage('outside_calling_hours'), denial: 'outside_calling_hours', freshAttemptKey: true } as const;
     if (!inWindow()) return outsideHours;
@@ -349,7 +349,7 @@ export async function startDialpadApiCall(
     const grantId = grants[0]?.id ?? null;
 
     // 4. Prepare + authorize (one transaction each; DNC, assignment, grant and phone are re-proven).
-    const started = await startDialpadCall(db, actor, { propertyId, contactId, phoneSlot: chosen.slot, grantId, idempotencyKey }, { allowLargeIdentityIds: true, beforeAuthorize: inWindow });
+    const started = await startDialpadCall(db, actor, { propertyId, contactId, phoneSlot: chosen.slot, grantId, idempotencyKey }, { allowLargeIdentityIds: true, beforePrepare: inWindow, beforeAuthorize: inWindow });
     if (!started.ok) {
       // Refused before the payload was released (denied, cancelled): proven non-dispatch, the key is dead.
       return started.code === 'denied' || started.code === 'cancelled' ? { ...started, freshAttemptKey: true } : started;
