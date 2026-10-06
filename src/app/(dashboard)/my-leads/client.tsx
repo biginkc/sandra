@@ -53,6 +53,7 @@ import type { DialpadCallingBootstrap } from "@/lib/dialpad-cti/dispatch";
 import type { MyLeadsCallFeatures } from "@/lib/my-leads/call-features";
 import { oldestPrompt, type CallPromptItem } from "@/lib/my-leads/call-state";
 import { useApiDial } from "./_components/use-api-dial";
+import { useCallLockHolder } from "@/components/calls/call-lock-context";
 import { CoachCallContext } from "./_components/coach-call-context";
 import { acknowledgeCallPromptAction } from "./call-state-actions";
 import type {
@@ -623,7 +624,8 @@ export function MyLeadsClient({
     triage?.rows.find((item) => item.propertyId === id)?.row ??
     null;
   // ---- API dial (P2 2.7): the shared hook owns the per-lead key lifecycle (also behind the call screen).
-  const { dialFlight, dialActive, dialPending, startApiDial, statusHandlers } = useApiDial((propertyId) => {
+  const callLockHolder = useCallLockHolder();
+  const { dialFlight, dialActive, startApiDial, statusHandlers } = useApiDial((propertyId) => {
     const row = rawRow(propertyId);
     return row ? { contactId: row.contactId ?? null, label: row.homeownerName ?? row.address } : null;
   });
@@ -696,10 +698,10 @@ export function MyLeadsClient({
   const coachCall =
     dialpad && softphone?.callingEnabled
       ? {
-          disabled: dialActive || dialPending,
+          disabled: callLockHolder === "dialpad",
           call: (propertyId: string) => {
             const row = rawRow(propertyId);
-            if (row && !dialActive && !dialPending) softphone.openLead(toSoftphoneLead(row));
+            if (row && callLockHolder !== "dialpad") softphone.openLead(toSoftphoneLead(row));
           },
         }
       : null;
@@ -718,11 +720,6 @@ export function MyLeadsClient({
         return;
       }
       setError(null);
-      // The softphone is on a call: never start a second one through Dialpad.
-      if (softphone?.busy) {
-        setError("Finish your current call before starting another.");
-        return;
-      }
       void startApiDial(row.propertyId, 1);
       return;
     }

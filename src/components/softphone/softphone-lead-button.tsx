@@ -2,6 +2,7 @@
 
 import { PhoneIcon } from "lucide-react";
 
+import { useCallLockHolder } from "@/components/calls/call-lock-context";
 import { useOptionalDialpadCall } from "@/components/dialpad/dialpad-call-context";
 import { useOptionalSoftphone, type SoftphoneLead } from "./softphone-provider";
 
@@ -13,6 +14,7 @@ type Props = {
 export function SoftphoneLeadButton({ lead, compact = false }: Props) {
   const context = useOptionalSoftphone();
   const dialpad = useOptionalDialpadCall();
+  const dialpadHolds = useCallLockHolder() === "dialpad";
   // Dialpad only when the server-derived route says so and the lead has a contact to dial; otherwise today's softphone path.
   const viaDialpad = Boolean(dialpad?.enabled && lead.contactId);
   if (!context && !viaDialpad) return null;
@@ -29,8 +31,8 @@ export function SoftphoneLeadButton({ lead, compact = false }: Props) {
           ? `Call ${lead.firstName} now — 1 click`
           : "Calling not yet enabled"
       }
-      disabled={!callingEnabled || (viaDialpad && dialpad?.dialActive === true)}
-      aria-busy={viaDialpad && dialpad?.dialActive === true ? true : undefined}
+      disabled={!callingEnabled || (viaDialpad && dialpadHolds)}
+      aria-busy={viaDialpad && dialpadHolds ? true : undefined}
       className={
         compact
           ? "border-border text-muted-foreground hover:border-emerald-600 hover:bg-emerald-600 hover:text-white flex size-9 shrink-0 items-center justify-center rounded-full border bg-white transition-colors"
@@ -55,7 +57,7 @@ export function SoftphoneLeadButton({ lead, compact = false }: Props) {
       }}
     >
       <PhoneIcon className={compact ? "size-3.5" : "size-3.5"} />
-      {!compact ? (viaDialpad && dialpad?.dialActive === true ? "Calling…" : "Call") : null}
+      {!compact ? (viaDialpad && dialpadHolds ? "Calling…" : "Call") : null}
     </button>
   );
   if (!viaDialpad) return button;
@@ -66,12 +68,12 @@ export function SoftphoneLeadButton({ lead, compact = false }: Props) {
       <button
         type="button"
         data-testid="call-with-coach-button"
-        disabled={!context?.callingEnabled || dialpad?.dialActive === true}
+        disabled={!context?.callingEnabled || dialpadHolds}
         className="border-border text-muted-foreground hover:border-emerald-600 hover:text-emerald-700 inline-flex shrink-0 items-center rounded-full border bg-white px-2 py-1 text-[11px] font-semibold transition-colors disabled:opacity-50"
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => {
           event.stopPropagation();
-          if (context?.callingEnabled && dialpad?.dialActive !== true) openLead(lead);
+          if (context?.callingEnabled && !dialpadHolds) openLead(lead);
         }}
       >
         Call with coach

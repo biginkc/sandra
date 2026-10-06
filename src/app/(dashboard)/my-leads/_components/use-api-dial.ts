@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { useCallLock } from "@/components/calls/call-lock-context";
+import { CALL_LOCK_MESSAGE } from "@/lib/calls/call-lock";
 import type { DialpadCallStatus } from "@/lib/dialpad-cti/contracts";
 import { dialLeadAction } from "../dialpad-actions";
 import type { DialFlight } from "./dial-status";
@@ -24,6 +26,7 @@ export type UseApiDialOptions = {
  * `resolveTarget` returns null when the lead is not known to the caller (nothing is dialed).
  */
 export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | null, options: UseApiDialOptions = {}) {
+  const lock = useCallLock();
   const [dialFlight, setDialFlight] = useState<DialFlight | null>(null);
   const dialKeys = useRef(new Map<string, { key: string; intentId?: string; uncertain?: boolean }>());
   const dialNonce = useRef(0);
@@ -55,6 +58,8 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     notConfiguredRef.current = options.onNotConfigured;
   });
 
+  useEffect(() => () => lock.release("dialpad"), [lock]);
+
   const startApiDial = async (propertyId: string, attempt: number, confirmRedialOf?: string) => {
     const target = resolveRef.current(propertyId);
     if (!target) return;
@@ -64,6 +69,13 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
       return;
     }
     if (dialBusy.current || dialActiveRef.current) return;
+    // The lowest dial level: every path (click, rate-limit auto-retry, Retry, "Call again anyway") passes here.
+    if (!lock.acquire("dialpad")) {
+      setDialFlight({ kind: "error", propertyId, label, message: CALL_LOCK_MESSAGE });
+      return;
+    }
+    // Held through a live call and through a rate-limit countdown; released on every other outcome.
+    let keepLock = false;
     dialBusy.current = true;
     setDialPending(true);
     // This lead's key is kept while its call is in flight, uncertain, failed, expired or the request
@@ -82,6 +94,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
         ...(confirmRedialOf ? { confirmRedialOf } : {}),
       });
       if (outcome.ok) {
+        keepLock = true;
         entry.intentId = outcome.intentId;
         setDialFinished(null);
         dialNonce.current += 1;
@@ -98,6 +111,8 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
       if (outcome.freshAttemptKey) releaseDialKeyForProperty(propertyId);
       // An earlier attempt that threw may have rung: never fall back to another dialer for it.
       if (outcome.code === "not_configured" && notConfiguredRef.current && !entry.uncertain && !entry.intentId) {
+        // The fallback dialer must be able to take the lock.
+        lock.release("dialpad");
         // Refused before anything was prepared: the key was never used.
         if (!entry.intentId) releaseDialKeyForProperty(propertyId);
         notConfiguredRef.current(propertyId);
@@ -110,6 +125,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
         return;
       }
       if (outcome.code === "rate_limited") {
+        keepLock = true;
         setDialFlight({
           kind: "rate_limited",
           propertyId,
@@ -128,6 +144,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     } finally {
       dialBusy.current = false;
       setDialPending(false);
+      if (!keepLock) lock.release("dialpad");
     }
   };
 
@@ -153,8 +170,11 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
         releaseDialKeyForProperty(dialFlight.propertyId);
       }
       setDialFlight(null);
+      // Dismiss ends a live status, a failed one, and cancels a rate-limit countdown.
+      lock.release("dialpad");
     },
     onFinished: (intentId: string, finalStatus: DialpadCallStatus) => {
+      lock.release("dialpad");
       // Allowlist: only a call that definitively ended or was cancelled releases its key. expired,
       // failed or anything unexpected keeps it (the call may have rung).
       if (finalStatus.state === "ended" || finalStatus.state === "cancelled") releaseDialKeyForIntent(intentId);

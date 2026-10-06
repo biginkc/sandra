@@ -60,6 +60,8 @@ import {
   isJitterTransportEnabled,
   isSoftphoneTransportEnabled,
 } from "@/lib/dialer/transport-selection";
+import { useCallLock } from "@/components/calls/call-lock-context";
+import { CALL_LOCK_MESSAGE } from "@/lib/calls/call-lock";
 import {
   transitionSoftphoneState,
   type SoftphoneState,
@@ -88,8 +90,6 @@ type SoftphoneContextValue = {
   toggleOpen: () => void;
   callingEnabled: boolean;
   onCall: boolean;
-  /** Any softphone call state other than closed, idle or wrap (includes "preparing"): another dialer must not start. */
-  busy: boolean;
   timer: string;
 };
 const SoftphoneContext = createContext<SoftphoneContextValue | null>(null);
@@ -282,6 +282,7 @@ export function SoftphoneProvider({
   const transportFactory =
     suppliedTransportFactory ??
     (directMode ? createDirectCallTransport : createSoftphoneCallTransport);
+  const callLock = useCallLock();
   const [phone, setPhone] = useState<SoftphoneState>("closed");
   const [target, setTarget] = useState<SoftphoneTarget | null>(null);
   const [dialInput, setDialInput] = useState("");
@@ -699,6 +700,14 @@ export function SoftphoneProvider({
     return () => clearTimeout(checkingTimer);
   }, [callingEnabled, directMode, showToast, transition, transportFactory]);
 
+  // The shared call lock is held from the moment a start is accepted until the softphone is back to
+  // closed, idle or wrap. Runs after every render so a start that aborts within one batch still releases.
+  useEffect(() => {
+    if (phone !== "preparing" && phone !== "live" && phone !== "held" && !startInFlightRef.current) {
+      callLock.release("softphone");
+    }
+  });
+
   const startTarget = useCallback(
     async (
       prepare: () => Promise<
@@ -713,6 +722,12 @@ export function SoftphoneProvider({
         return;
       }
       if (startInFlightRef.current) return;
+      // The lowest dial entry: openLead, the typed keypad, recents and "Call with coach" all pass here.
+      if (!callLock.acquire("softphone")) {
+        setError(CALL_LOCK_MESSAGE);
+        showToast(CALL_LOCK_MESSAGE);
+        return;
+      }
       const reliabilityTiming =
         suppliedTiming ?? createReliabilityTimingSession();
       if (!suppliedTiming) reliabilityTiming.mark("ui_click");
@@ -1109,6 +1124,7 @@ export function SoftphoneProvider({
       }
     },
     [
+      callLock,
       callingEnabled,
       coachPreference.enabled,
       coachPreference.scriptId,
@@ -1277,7 +1293,6 @@ export function SoftphoneProvider({
     /^[\d\s()+.-]+$/.test(dialInput) && /^\d{10}$/.test(manualDigits);
   const callName = target?.name ?? "";
   const isOnCall = phone === "live" || phone === "held";
-  const softphoneBusy = phone === "preparing" || isOnCall;
   const callerIdReady =
     directMode || (callerIdState === "ready" && Boolean(selectedCallerId));
 
@@ -1395,10 +1410,9 @@ export function SoftphoneProvider({
       toggleOpen: openIdle,
       callingEnabled,
       onCall: isOnCall,
-      busy: softphoneBusy,
       timer: timerText(seconds),
     }),
-    [callingEnabled, isOnCall, softphoneBusy, openIdle, openLead, seconds],
+    [callingEnabled, isOnCall, openIdle, openLead, seconds],
   );
 
   return (

@@ -4,7 +4,8 @@ import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { getCallerMembershipsOrThrow, type Membership } from "@/lib/auth/memberships";
 import { canViewMyLeads } from "@/lib/my-leads/access";
-import { CALL_FEATURES_OFF, getMyLeadsCallFeatures } from "@/lib/my-leads/call-features";
+import { isAcquisitionsCaller } from "@/lib/auth/surface-access";
+import { getDialpadCallRoute } from "@/lib/dialpad-cti/call-route-server";
 import { getMyLeadsFlag } from "@/lib/my-leads/flags";
 import { postCallPromptEnabled } from "@/lib/my-leads/post-call";
 import { getAcquisitionRoster } from "@/lib/my-leads/queries";
@@ -64,8 +65,8 @@ export default async function CallScreenPage({ params }: { params: Promise<{ pro
   if (load.status === "unavailable") return unavailableState(MY_LEAD_ROW_REASON_COPY[load.reason]);
   if (load.status === "error") return unavailableState(load.message);
 
-  // click_to_dial flag AND schemaReady('api_dial'), the same gate the My Leads page uses; off keeps Call disabled.
-  const { clickToDial } = await getMyLeadsCallFeatures(viewer.orgId).catch(() => CALL_FEATURES_OFF);
+  // The shared Dialpad route (flag, schema, connection, Acquisitions caller), the same rule as every Call button; off keeps Call disabled.
+  const clickToDial = (await getDialpadCallRoute(viewer.orgId, viewer.userId, isAcquisitionsCaller(memberships[0]))) === "dialpad";
   // The docked post-call prompt needs BOTH call_screen (checked above) and post_call_prompt (+ its schema).
   const postCallPrompt = await postCallPromptEnabled(viewer.orgId).catch(() => false);
   const viewerLabel = roster.members.find((m) => m.id === viewer.userId)?.label ?? null;

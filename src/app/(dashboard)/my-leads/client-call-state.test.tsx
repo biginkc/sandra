@@ -1,10 +1,13 @@
 import { act, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import * as React from "react"
+import { useEffect } from "react"
 
 import type { CallNextSnapshot } from "@/lib/my-leads/call-next"
 import type { CallbackDueItem, CallPromptItem, CallStateSnapshot } from "@/lib/my-leads/call-state"
 import type { AcquisitionKpis, AcquisitionRoster, QueueSnapshot } from "@/lib/my-leads/queries"
+import { CallLockProvider, useCallLock } from "@/components/calls/call-lock-context"
+import type { CallLock } from "@/lib/calls/call-lock"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { queueRowFixture, stripItem } from "./_components/call-next-test-support"
 
@@ -19,7 +22,7 @@ const mocks = vi.hoisted(() => ({
   poll: vi.fn(),
   ack: vi.fn(),
   status: vi.fn(),
-  softphone: null as null | { callingEnabled: boolean; onCall?: boolean; busy?: boolean; openLead: (lead: unknown) => void },
+  softphone: null as null | { callingEnabled: boolean; onCall?: boolean; openLead: (lead: unknown) => void },
 }))
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.routerRefresh }) }))
@@ -120,16 +123,27 @@ const pollState = (over: Partial<CallStateSnapshot> = {}) => ({
 })
 const dialOk = { ok: true, intentId: "intent-1", state: "awaiting_provider", uncertain: false, phoneSlot: 1 }
 
+const lockProbe: { lock: CallLock | null } = { lock: null }
+function LockProbe() {
+  const lock = useCallLock()
+  useEffect(() => {
+    lockProbe.lock = lock
+  })
+  return null
+}
 function renderClient(props: Partial<Props> = {}) {
   return render(
-    <MyLeadsClient
-      viewer={viewer}
-      roster={roster}
-      initialMemberId={viewer.userId}
-      initialSnapshot={snapshot()}
-      initialKpis={kpis}
-      {...props}
-    />,
+    <CallLockProvider>
+      <LockProbe />
+      <MyLeadsClient
+        viewer={viewer}
+        roster={roster}
+        initialMemberId={viewer.userId}
+        initialSnapshot={snapshot()}
+        initialKpis={kpis}
+        {...props}
+      />
+    </CallLockProvider>,
   )
 }
 const flush = async (ms = 0) => {
@@ -215,12 +229,13 @@ describe("MyLeadsClient calling and durable call state", () => {
     expect(openLead).not.toHaveBeenCalled()
   })
 
-  it("refuses a Dialpad call while the softphone is on a call", async () => {
-    mocks.softphone = { callingEnabled: true, busy: true, openLead: vi.fn() }
+  it("refuses a Dialpad call while the softphone holds the call lock", async () => {
+    mocks.softphone = { callingEnabled: true, openLead: vi.fn() }
     renderClient({ dialpad })
+    expect(lockProbe.lock?.acquire("softphone")).toBe(true)
     await click(screen.getByRole("button", { name: "Start call property-1" }))
     expect(mocks.dialLead).not.toHaveBeenCalled()
-    expect(screen.getByText("Finish your current call before starting another.")).toBeInTheDocument()
+    expect(screen.getByText(/Finish your current call before starting another/)).toBeInTheDocument()
   })
 
   it("will not dial with Dialpad from another rep's queue", async () => {

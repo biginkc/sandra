@@ -27,6 +27,7 @@ import { canAccessMessagesAndLeadsBoard, isAcquisitionsCaller, shouldRestrictMes
 import { createClient } from "@/lib/supabase/server";
 import { getCallingConfigForCurrentUser } from "@/lib/direct-calling/actions";
 import type { CallingConfig } from "@/lib/direct-calling/contract";
+import { CallLockProvider } from "@/components/calls/call-lock-context";
 import { DialpadCallProvider } from "@/components/dialpad/dialpad-call-provider";
 import { getDialpadCallRoute } from "@/lib/dialpad-cti/call-route-server";
 import { refreshMyLeadsBadge } from "./my-leads/nav-actions";
@@ -89,6 +90,7 @@ export default async function DashboardLayout({
 
   return (
     <ObjectionPromptProvider enabled={objectionPromptEnabled}>
+    <CallLockProvider>
     <SoftphoneProvider callingConfig={callingConfig}>
     <DialpadCallProvider enabled={dialpadCallsEnabled}>
     <GlobalSearchProvider>
@@ -175,6 +177,7 @@ export default async function DashboardLayout({
     </GlobalSearchProvider>
     </DialpadCallProvider>
     </SoftphoneProvider>
+    </CallLockProvider>
     </ObjectionPromptProvider>
   );
 }

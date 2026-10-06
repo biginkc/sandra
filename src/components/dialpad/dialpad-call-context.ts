@@ -15,8 +15,6 @@ export type DialpadCallContextValue = {
   /** Server-derived: click_to_dial on, org connection active, viewer bound, api_dial schema ready. */
   enabled: boolean;
   startCall: (request: DialpadCallRequest) => void;
-  /** A Dialpad call is starting or in flight (from the click, not just after the answer); "Call with coach" must stay disabled so the lead is not dialed twice. */
-  dialActive?: boolean;
 };
 
 export const DialpadCallContext = createContext<DialpadCallContextValue | null>(null);

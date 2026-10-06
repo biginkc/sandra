@@ -2,6 +2,7 @@ import 'server-only';
 import { createClient } from '@/lib/supabase/server';
 import { loadOrgTeamMembers } from '@/lib/auth/team-roster';
 import { getCallerMemberships } from '@/lib/auth/memberships';
+import { isAcquisitionsCaller } from '@/lib/auth/surface-access';
 import type { Json } from '@/lib/supabase/types';
 import type { QueueStage } from './types';
 import { acquisitionDateRange, acquisitionPeriodBounds, type AcquisitionPeriod } from './period';
@@ -42,7 +43,7 @@ export async function myLeadsViewer() {
   if(!user) throw new MyLeadsReadError('UNAUTHENTICATED','Sign in to view My Leads.');
   const memberships=(await getCallerMemberships()).filter(m=>m.user_id===user.id);
   if(memberships.length!==1) throw new MyLeadsReadError('FORBIDDEN','A single active organization is required.');
-  return {userId:user.id,orgId:memberships[0].org_id,isOwner:memberships[0].role==='owner',client};
+  return {userId:user.id,orgId:memberships[0].org_id,isOwner:memberships[0].role==='owner',acquisitions:isAcquisitionsCaller(memberships[0]),client};
 }
 export async function readRpc<T>(client: unknown,name: string,args: Record<string,Json>): Promise<T> {
   const {data,error}=await (client as ReadClient).rpc(name,args);
