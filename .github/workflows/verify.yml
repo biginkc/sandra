@@ -33,6 +33,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Dialpad call audio v1 promises the existing artifact sweep stays byte-identical. This guard only applies to
+      # that PR's branch; the same promise for schemaReady('artifact_fetch') is asserted in
+      # src/lib/my-leads/schema-ready-dialpad-call-audio.test.ts.
+      - name: Artifact sweep is untouched (dialpad-call-audio)
+        if: github.event_name == 'pull_request' && github.head_ref == 'claude/dialpad-call-audio'
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          git diff --exit-code "origin/${{ github.base_ref }}" -- \
+            src/lib/dialpad-cti/artifact-fetch.ts src/lib/dialpad-cti/artifact-fetch.test.ts src/app/api/cron/dialpad-artifact-sweep
+
       - name: Verify standalone direct coaching service
         working-directory: services/direct-coach
         run: npm ci --ignore-scripts && npm run typecheck && npm test && npm run build

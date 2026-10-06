@@ -25,7 +25,8 @@ export type SchemaFeature =
   | "contract_defaults"
   | "offer_projection"
   | "call_facts"
-  | "post_call_extras_proof";
+  | "post_call_extras_proof"
+  | "dialpad_call_audio";
 
 export type SchemaRequirement = {
   /** `public.fn_name(argtype,argtype)` regprocedure strings. */
@@ -150,6 +151,39 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
   post_call_extras_proof: {
     functions: ["public.fn_post_call_extras_proof(uuid,uuid,uuid,uuid)"],
     columns: [],
+  },
+  // Dialpad call audio: the recording worker route stays disabled until every table, flag column and function it
+  // calls exists. (The private bucket is checked separately by the route; this probe sees only the public schema.)
+  dialpad_call_audio: {
+    functions: [
+      "public.fn_dpa_worker_take(uuid)",
+      "public.fn_dpa_worker_release(uuid,timestamptz,timestamptz)",
+      "public.fn_dpa_worker_block(uuid,timestamptz)",
+      "public.fn_dpa_queue(uuid,integer)",
+      "public.fn_dpa_discovery_result(uuid,uuid,text,text,bigint,text,text)",
+      "public.fn_dpa_requeue_denied(uuid,uuid,text)",
+      "public.fn_dpa_attempt_begin(uuid,uuid)",
+      "public.fn_dpa_attempt_set(uuid,uuid,text,text,text,text,text,text)",
+      "public.fn_dpa_resolve_ambiguous(uuid,text)",
+      "public.fn_dpa_audio_fail(uuid,uuid,text,text,text,text)",
+      "public.fn_dpa_mark_uploading(uuid,uuid,text,bigint,bigint)",
+      "public.fn_dpa_register_stored(uuid,uuid,text,bigint,text,bigint)",
+      "public.fn_dialpad_audio_authorize(uuid,uuid,uuid)",
+      "public.fn_dialpad_audio_for_service(uuid,uuid,text)",
+    ],
+    columns: [
+      "dialpad_call_audio.state",
+      "dialpad_call_audio.upload_expected_sha256",
+      "dialpad_call_audio.upload_expected_size",
+      "dialpad_call_audio.warning",
+      "dialpad_share_link_attempts.reason",
+      "dialpad_share_link_attempts.state",
+      "dialpad_recording_worker.recording_blocked_until",
+      "dialpad_audio_access_log.consumer",
+      "my_leads_feature_flags.recording_download",
+      "my_leads_feature_flags.recording_download_canary_call_ids",
+      "my_leads_feature_flags.audio_consumers",
+    ],
   },
 };
 

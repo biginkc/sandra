@@ -65,6 +65,10 @@
       "schedule": "*/1 * * * *"
     },
     {
+      "path": "/api/cron/dialpad-recording-download",
+      "schedule": "*/1 * * * *"
+    },
+    {
       "path": "/api/cron/direct-recording-sweep",
       "schedule": "*/1 * * * *"
     },
