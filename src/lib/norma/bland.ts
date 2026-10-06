@@ -16,6 +16,12 @@ export type BlandSendCallParams = {
   phoneNumber: string;
   requestId: string;
   idempotencyKey: string;
+  /**
+   * Call-twice attempt from #771, echoed in webhook metadata for stale-call fencing.
+   * Both attempts keep voicemail handling in the pathway. Dispatch always supplies the attempt.
+   * The adapter default for an omitted attempt is not a standalone dispatch workflow.
+   */
+  attempt?: number;
   /** Pathway variables, passed as Bland `request_data`. */
   variables: Record<string, string>;
 };
@@ -72,18 +78,35 @@ async function readJson(response: Response): Promise<Record<string, unknown> | n
   }
 }
 
-/** Build the exact send-call body. Exported for tests; contains no script text. */
+/** Bland `max_duration` is minutes (https://docs.bland.ai/api-v1/post/calls). */
+export const NORMA_MAX_DURATION_MINUTES = 10;
+
+/** Keep the protected pathway in control when voicemail is detected.
+ * `ignore` prevents provider-side hangup/message interception; the pathway owns
+ * what to say and when to end. Sensitive detection uses Bland's LLM detector.
+ */
+export function normaVoicemail(): { action: "ignore"; sensitive: true } {
+  return { action: "ignore", sensitive: true };
+}
+
+/** Build the exact send-call body. Exported for tests. No pathway script fields (`task`, `prompt`, `first_sentence`). */
 export function buildSendCallBody(config: NormaBlandConfig, params: BlandSendCallParams) {
   return {
     phone_number: params.phoneNumber,
     pathway_id: config.pathwayId,
-    pathway_version: config.pathwayVersion,
+    // Omit pathway_version unless explicitly pinned. Bland then uses the
+    // published production version (docs: "Defaults to the production version").
+    ...(config.pathwayVersion == null ? {} : { pathway_version: config.pathwayVersion }),
     voice: config.voice,
     from: config.fromNumber,
-    metadata: { request_id: params.requestId, idempotency_key: params.idempotencyKey },
+    metadata: { request_id: params.requestId, idempotency_key: params.idempotencyKey, attempt: params.attempt ?? 1 },
     webhook: config.webhookUrl,
-    // No voicemail message, no retry: a no-answer ends the attempt.
-    voicemail: { action: "hangup" },
+    // No Bland-side retry, canned message or SMS. The protected pathway owns voicemail handling.
+    voicemail: normaVoicemail(),
+    // Enable requested recording and cap call length. Protected v27 recording
+    // disclosure still requires acceptance evidence before release.
+    record: true,
+    max_duration: NORMA_MAX_DURATION_MINUTES,
     request_data: params.variables,
     // Let the person say hello first; play office background instead of static.
     wait_for_greeting: config.waitForGreeting,

@@ -25,6 +25,16 @@ describe("Norma lead timeline events", () => {
     expect(formatLeadEventSentence(event("norma_call_requested", { has_context: true }, "user"), {}, null)).toMatch(/asked Norma to call \(with context\)$/);
   });
 
+  it("renders a rep marking a stuck call reviewed", () => {
+    const e = event("norma_call_reviewed", { request_id: REQUEST_ID, previous_outcome: "unknown", task_closed: true }, "user");
+    e.actor_id = "u1";
+    expect(formatLeadEventSentence(e, {}, "u1")).toBe("You marked the Norma call reviewed");
+    expect(formatLeadEventSentence(e, { u1: "pat@example.com" }, "u2")).toMatch(/marked the Norma call reviewed$/);
+    render(<LeadEventPill event={e} authorEmails={{}} currentUserId="u1" />);
+    expect(screen.getByTestId("lead-event-row")).toHaveAttribute("data-event-type", "norma_call_reviewed");
+    expect(screen.getByRole("button", { name: "Load Norma recordings" })).toBeInTheDocument();
+  });
+
   it("renders the outcome of a finished call in plain words", () => {
     const sentence = (outcome: string) =>
       formatLeadEventSentence(event("norma_call_completed", { outcome, request_id: REQUEST_ID }), {}, null);
@@ -79,12 +89,59 @@ describe("Norma lead timeline events", () => {
     expect(detail).not.toHaveTextContent("unconfirmed");
   });
 
-  it("renders only the sentence when there is nothing more to show, and for request events", () => {
+  it("keeps recordings accessible for older completed requests, but not request events", () => {
     const { rerender } = render(
       <LeadEventPill event={event("norma_call_completed", { outcome: "no_answer", request_id: REQUEST_ID })} authorEmails={{}} currentUserId={null} />,
     );
-    expect(screen.queryByTestId("norma-event-detail")).toBeNull();
+    expect(screen.getByRole("button", { name: "Load Norma recordings" })).toBeInTheDocument();
     rerender(<LeadEventPill event={event("norma_call_requested", { has_context: false }, "user")} authorEmails={{}} currentUserId={null} normaRequests={[request]} />);
     expect(screen.queryByTestId("norma-event-detail")).toBeNull();
+    rerender(<LeadEventPill event={event("norma_call_reviewed", { request_id: REQUEST_ID, previous_outcome: "unknown" }, "user")} authorEmails={{}} currentUserId={null} />);
+    expect(screen.getByRole("button", { name: "Load Norma recordings" })).toBeInTheDocument();
+    rerender(<LeadEventPill event={event("norma_call_reviewed", { request_id: "not-a-uuid" }, "user")} authorEmails={{}} currentUserId={null} />);
+    expect(screen.queryByTestId("norma-event-detail")).toBeNull();
+  });
+});
+
+describe("Norma timeline colours and the second call", () => {
+  const pill = (outcome: string) => {
+    const { unmount } = render(
+      <LeadEventPill
+        event={event("norma_call_completed", { outcome, request_id: REQUEST_ID })}
+        authorEmails={{}}
+        currentUserId={null}
+        normaRequests={[]}
+      />,
+    );
+    const row = screen.getByTestId("lead-event-row");
+    const result = { tone: row.getAttribute("data-tone"), className: row.className };
+    unmount();
+    return result;
+  };
+
+  it("green when the call reached a person", () => {
+    for (const outcome of ["reached_no_callback", "callback_requested", "not_interested", "wrong_number"]) {
+      const { tone, className } = pill(outcome);
+      expect(tone).toBe("green");
+      expect(className).toContain("#15803d");
+    }
+  });
+
+  it("grey for no answer, amber for needs review or an unknown outcome", () => {
+    expect(pill("no_answer").tone).toBe("neutral");
+    expect(pill("no_answer").className).not.toContain("#15803d");
+    expect(pill("unknown").tone).toBe("amber");
+    expect(pill("something_new").tone).toBe("amber");
+  });
+
+  it("other events keep the plain pill", () => {
+    render(<LeadEventPill event={event("norma_call_requested", {}, "user")} authorEmails={{}} currentUserId={null} />);
+    expect(screen.getByTestId("lead-event-row")).not.toHaveAttribute("data-tone");
+  });
+
+  it("says plainly that the first call was not answered", () => {
+    expect(formatLeadEventSentence(event("norma_call_attempt_no_answer", { attempt: 1 }), {}, null)).toBe(
+      "Norma's first call was not answered",
+    );
   });
 });

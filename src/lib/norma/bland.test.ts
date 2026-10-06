@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { buildSendCallBody, createBlandClient } from "./bland";
+import { NORMA_MAX_DURATION_MINUTES, buildSendCallBody, createBlandClient } from "./bland";
 import type { NormaBlandConfig } from "./config";
 
 const config: NormaBlandConfig = {
@@ -19,7 +19,7 @@ const params = { phoneNumber: "+18165550142", requestId: "r1", idempotencyKey: "
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
 
 describe("bland send-call classification", () => {
-  it("builds the exact body: integer version, hangup voicemail, no retry, metadata, webhook", () => {
+  it("builds the exact body: pinned version, voicemail, recording, no retry, metadata, webhook", () => {
     const body = buildSendCallBody(config, params);
     expect(body).toEqual({
       phone_number: "+18165550142",
@@ -27,9 +27,11 @@ describe("bland send-call classification", () => {
       pathway_version: 17,
       voice: "voice-1",
       from: "+12135550100",
-      metadata: { request_id: "r1", idempotency_key: "k1" },
+      metadata: { request_id: "r1", idempotency_key: "k1", attempt: 1 },
       webhook: "https://sandra.test/api/webhooks/bland/call",
-      voicemail: { action: "hangup" },
+      voicemail: { action: "ignore", sensitive: true },
+      record: true,
+      max_duration: NORMA_MAX_DURATION_MINUTES,
       request_data: { a: "b" },
       wait_for_greeting: true,
       background_track: "office",
@@ -37,6 +39,23 @@ describe("bland send-call classification", () => {
     expect(JSON.stringify(body)).not.toMatch(/"(task|prompt|first_sentence|script)"/);
     expect("retry" in body).toBe(false);
     expect(Number.isInteger(body.pathway_version)).toBe(true);
+  });
+
+  it.each([1, 2, undefined])("keeps detected voicemail under pathway control for attempt %s", (attempt) => {
+    const body = buildSendCallBody(config, { ...params, attempt });
+    expect(body.voicemail).toEqual({ action: "ignore", sensitive: true });
+    expect(body).not.toHaveProperty("ivr_mode");
+    expect(body).not.toHaveProperty("amd");
+    expect(body.voicemail).not.toHaveProperty("sms");
+    expect(body.voicemail).not.toHaveProperty("message");
+  });
+
+  it("omits pathway_version when unpinned so Bland uses the published production version", () => {
+    const body = buildSendCallBody({ ...config, pathwayVersion: null }, params);
+    expect(body).not.toHaveProperty("pathway_version");
+    expect(body.voicemail).toEqual({ action: "ignore", sensitive: true });
+    expect(body.record).toBe(true);
+    expect(body.max_duration).toBe(10);
   });
 
   it("passes configured greeting wait and background track through", () => {
@@ -52,6 +71,7 @@ describe("bland send-call classification", () => {
     expect(url).toBe("https://bland.test/v1/calls");
     expect(init.method).toBe("POST");
     expect(init.headers.Authorization).toBe("Bearer test-key");
+    expect(JSON.parse(init.body)).toEqual(buildSendCallBody(config, params));
   });
 
   it("accepted: 2xx success with a call id", async () => {

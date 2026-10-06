@@ -1,4 +1,4 @@
-import type { CallKind, FakeCall, LookupBehavior, SendBehavior, WebhookFlavor } from "./fake-bland";
+import { NON_CONNECT_KINDS, type CallKind, type FakeCall, type LookupBehavior, type SendBehavior, type WebhookFlavor } from "./fake-bland";
 import type { GateMode, Harness, LeadCtx } from "./harness";
 import { stubCallbackProvider } from "./harness";
 import type { EnrollmentSeed } from "./db";
@@ -71,8 +71,8 @@ function weighted<T>(r: Rng, table: readonly [T, number][]): T {
   return table[0]![0];
 }
 
-type EventName = "inbound" | "takeover" | "dnc" | "not_interested" | "softphone_pause" | "softphone_cleanup" | "stale_sweep" | "reconcile" | "slack";
-const EVENTS: EventName[] = ["inbound", "takeover", "dnc", "not_interested", "softphone_pause", "softphone_cleanup", "stale_sweep", "reconcile", "slack"];
+type EventName = "inbound" | "takeover" | "dnc" | "not_interested" | "softphone_pause" | "softphone_cleanup" | "stale_sweep" | "reconcile" | "slack" | "mark_reviewed";
+const EVENTS: EventName[] = ["inbound", "takeover", "dnc", "not_interested", "softphone_pause", "softphone_cleanup", "stale_sweep", "reconcile", "slack", "mark_reviewed"];
 
 export type LifecycleRecord = { ctx: LeadCtx; late: boolean; summary: string };
 
@@ -83,6 +83,17 @@ async function awaitCall(h: Harness, ctx: LeadCtx, ms = 3000): Promise<FakeCall 
     const call = h.bland.callForNumber(ctx.lead.phone);
     if (call) return call;
     await sleep(2);
+  }
+  return null;
+}
+
+/** Wait (bounded) until Bland has placed the SECOND call (the call-twice retry) for this lead's number. */
+async function awaitSecondCall(h: Harness, ctx: LeadCtx, ms = 2500): Promise<FakeCall | null> {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    const call = h.bland.callsForNumber(ctx.lead.phone)[1];
+    if (call) return call;
+    await sleep(3);
   }
   return null;
 }
@@ -99,6 +110,8 @@ async function runLifecycle(h: Harness, seed: number, index: number): Promise<Li
   const dispatchGate: GateMode = crash && r.chance(0.5) ? "disabled" : requestGate;
   const preExisting = r.next();
   const enrollmentSeed = r.pick(ENROLLMENTS);
+  // A no-answer first call is retried once; the second call is usually unanswered again, sometimes a person picks up.
+  const secondKind: CallKind = NON_CONNECT_KINDS.includes(kind) ? (r.chance(0.5) ? kind : weighted(r, KINDS)) : kind;
   const ctx = await h.lead(
     {
       enrollments: enrollmentSeed,
@@ -106,6 +119,7 @@ async function runLifecycle(h: Harness, seed: number, index: number): Promise<Li
     },
     {
       kind,
+      secondKind,
       send,
       lookup: weighted(r, LOOKUPS),
       webhooksBeforeResponse: before,
@@ -115,7 +129,7 @@ async function runLifecycle(h: Harness, seed: number, index: number): Promise<Li
   );
   if (preExisting > 0.97) await h.dnc(ctx, r.pick(["lock", "registry", "contact"] as const), "seed");
 
-  const summary: string[] = [`kind=${kind}`, `send=${send}`, `before=${before}`, `gate=${requestGate}/${dispatchGate}`, crash ? "crash" : ""];
+  const summary: string[] = [`kind=${kind}`, `second=${secondKind}`, `send=${send}`, `before=${before}`, `gate=${requestGate}/${dispatchGate}`, crash ? "crash" : ""];
   const late = placed && r.chance(0.1);
   const tasks: Promise<unknown>[] = [];
 
@@ -167,6 +181,25 @@ async function runLifecycle(h: Harness, seed: number, index: number): Promise<Li
       })(),
     );
   }
+  // Second call (the retry): its own webhook story, including replays of the FIRST call's webhook
+  // after the retry was scheduled (must never schedule or dial a third call).
+  if (placed && NON_CONNECT_KINDS.includes(kind) && before === 0) {
+    const second = weighted<"none" | "once" | "many">(r, [["none", 20], ["once", 45], ["many", 35]]);
+    summary.push(`second_story=${second}`);
+    tasks.push(
+      (async () => {
+        const call = await awaitSecondCall(h, ctx);
+        if (!call) return;
+        if (r.chance(0.3)) {
+          const first = h.bland.callForNumber(ctx.lead.phone);
+          if (first) await h.bland.webhook(first, "good");
+        }
+        if (second === "none") return;
+        const times = second === "many" ? r.int(2, 4) : 1;
+        await Promise.all(Array.from({ length: times }, async () => (await jitter(r, 5), h.bland.webhook(call, "good"))));
+      })(),
+    );
+  }
   if (r.chance(0.45)) {
     tasks.push(
       (async () => {
@@ -179,7 +212,8 @@ async function runLifecycle(h: Harness, seed: number, index: number): Promise<Li
           await jitter(r, 3);
         }
         if (r.chance(0.3)) await h.bland.webhook(target, "unmapped_token");
-        // A wrong call id can only be detected once the real one is bound.
+        // A wrong call id (carrying the first call's attempt) must be a no-op at every moment,
+        // including the gap between the two calls when the current attempt has no call id yet.
         const row = (await h.scratch.pool.query("select bland_call_id from public.norma_call_requests where property_id = $1 limit 1", [ctx.lead.property])).rows[0];
         if (row?.bland_call_id) await h.bland.webhook(target, "mismatch_call_id");
       })(),
@@ -212,6 +246,15 @@ async function runLifecycle(h: Harness, seed: number, index: number): Promise<Li
             return h.reconcile({ actor: "reconcile-mid" });
           case "slack":
             return h.slackDrain();
+          case "mark_reviewed":
+            // A rep (or, now and then, a stranger) presses "Mark reviewed" at a random moment, double clicks included.
+            // Usually the call is not parked for review yet or ever, and the answer must be a refusal that changes nothing.
+            return Promise.all(
+              Array.from({ length: r.pick([1, 1, 2, 3]) }, async () => {
+                await jitter(r, 8);
+                return h.markReviewed(ctx, r.chance(0.12) ? h.world.outsider : r.pick([h.world.rep1, h.world.rep2]));
+              }),
+            );
         }
       })().catch((error) => {
         // An event that fails is data, not a crash; the invariants decide if it mattered.
@@ -272,14 +315,25 @@ export async function runRandomRun(h: Harness, seed: number, count: number, opts
   }
   await h.recover({ horizonMs: 3 * 3600_000 });
 
+  // Reps work through some of the parked calls: a stranger tries first now and then (refused), then a member
+  // marks it reviewed, often with a double click. The late webhooks below then land on top of the result.
+  for (const rec of records) {
+    const status = (await h.scratch.pool.query("select status from public.norma_call_requests where property_id = $1", [rec.ctx.lead.property])).rows[0]?.status;
+    if (status !== "needs_review" || !r.chance(0.5)) continue;
+    if (r.chance(0.5)) await h.markReviewed(rec.ctx, h.world.outsider);
+    await Promise.all(Array.from({ length: r.pick([1, 1, 2, 3]) }, () => h.markReviewed(rec.ctx, r.pick([h.world.rep1, h.world.rep2]))));
+  }
+
   // Late webhooks: Bland finally delivers after the request was parked for review.
   for (const rec of records.filter((x) => x.late)) {
-    const call = h.bland.callForNumber(rec.ctx.lead.phone);
-    if (!call) continue;
+    const calls = h.bland.callsForNumber(rec.ctx.lead.phone);
+    if (calls.length === 0) continue;
     const status = (await h.scratch.pool.query("select status from public.norma_call_requests where property_id = $1", [rec.ctx.lead.property])).rows[0]?.status;
     if (status === "needs_review" || status === "completed") {
-      await h.bland.webhook(call, "good");
-      if (r.chance(0.5)) await h.bland.webhook(call, "good");
+      for (const call of calls) {
+        await h.bland.webhook(call, "good");
+        if (r.chance(0.5)) await h.bland.webhook(call, "good");
+      }
     }
   }
   await h.recover({ horizonMs: 3 * 3600_000 });
