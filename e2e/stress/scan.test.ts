@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -25,5 +25,11 @@ describe("server log scan", () => {
   });
   it("does not tolerate any other rejection, even when a fetch failure is allowed", () => {
     expect(scanServerLog(log([FETCH, "⨯ unhandledRejection: TypeError: other"]), 0, { injectedOfflineFetchFailures: 1 })).toHaveLength(1);
+  });
+  it("a byte offset past multibyte text still starts at the right byte", () => {
+    const f = log(["Zoë ✓ 日本語 ñandú 🚫"]);
+    const off = statSync(f).size;
+    appendFileSync(f, " GET /z 500 in 9ms\n");
+    expect(scanServerLog(f, off)).toHaveLength(1);
   });
 });
