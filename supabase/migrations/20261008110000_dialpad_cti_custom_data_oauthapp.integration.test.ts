@@ -111,14 +111,17 @@ describe('20261008110000 Dialpad CTI custom_data OAuthApp wrapper', () => {
     });
   });
 
-  it('keeps the other org isolated: the token is only an intent secret in its own org', async () => {
+  it('keeps the other org isolated: the same wrapped event matches in its own org and not in another', async () => {
     await withP2('callbacksDue', async (db) => {
       await setup(db);
       const a = await world(db);
       const b = await world(db);
       const intentA = await prepare(a);
-      const [calling] = operatorLeg(b, oauth(String(intentA.customData)));
-      expect(await deliver(b, calling!)).toMatchObject({ disposition: 'quarantined', reason: 'unknown_custom_data' });
+      const custom = oauth(String(intentA.customData));
+      const [callingB] = operatorLeg(b, custom);
+      expect(await deliver(b, callingB!)).toMatchObject({ disposition: 'quarantined', reason: 'unknown_custom_data' });
+      const [callingA] = operatorLeg(a, custom);
+      expect(await deliver(a, callingA!)).toMatchObject({ disposition: 'matched', intentId: intentA.intentId });
     });
   });
 
