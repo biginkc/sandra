@@ -7,7 +7,7 @@ import {
   getCallerMembershipsOrThrow,
   type Membership,
 } from "@/lib/auth/memberships";
-import { shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
+import { isActiveAcquisitionsMember, shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { reportError } from "@/lib/errors/report";
 import {
   createSupabaseDialpadDispatchDb,
@@ -352,13 +352,14 @@ export default async function MyLeadsPage({
     }
   }
 
-  // Same rule as every other Call button (layout): the bootstrap alone is not enough, the rep needs a live binding.
-  // A rep with no live binding therefore keeps the Telnyx softphone on My Leads too (instead of a Dialpad "not verified" denial).
+  // Same rule as every other Call button (layout): Dialpad for active Acquisitions members only. A member with no
+  // live binding stays on Dialpad and gets the server's "not verified" denial, never a silent Telnyx call.
   if (
     decideDialpadCallRoute({
       clickToDialFlag: callFeatures.clickToDial,
       apiDialSchemaReady: callFeatures.clickToDial,
       bootstrap: dialpad,
+      acquisitionsMember: isActiveAcquisitionsMember(memberships[0]),
     }) !== "dialpad"
   ) {
     dialpad = null;

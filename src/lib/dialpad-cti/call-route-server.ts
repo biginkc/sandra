@@ -7,7 +7,7 @@ import { loadDialpadCallRoute, type DialpadCallRoute } from './call-route';
 import { createSupabaseDialpadDispatchDb, loadDialpadCallingBootstrap } from './dispatch';
 
 /** The viewer's Call-button route, derived on the server for the dashboard layout. Never throws. */
-export function getDialpadCallRoute(orgId: string, userId: string): Promise<DialpadCallRoute> {
+export function getDialpadCallRoute(orgId: string, userId: string, acquisitionsMember: boolean): Promise<DialpadCallRoute> {
   return loadDialpadCallRoute(
     {
       isFlagOn: (org) => getMyLeadsFlag(org, 'click_to_dial'),
@@ -16,5 +16,6 @@ export function getDialpadCallRoute(orgId: string, userId: string): Promise<Dial
     },
     orgId,
     userId,
+    acquisitionsMember,
   );
 }

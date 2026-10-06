@@ -298,12 +298,28 @@ describe("MyLeadsPage availability boundary", () => {
     },
   );
 
-  it("keeps the softphone path for a rep with no live Dialpad binding (same rule as every Call button)", async () => {
-    mocks.loadDialpadCallingBootstrap.mockResolvedValue({ connectionId: "c-1", binding: { status: "none" }, grants: [] });
+  it("gives a bound owner (not an Acquisitions member) the Telnyx softphone", async () => {
+    mocks.getCallerMembershipsOrThrow.mockResolvedValue([
+      { ...activeAcquisitionsMembership, user_id: "owner-1", role: "owner", acquisitions_enabled: false },
+    ]);
+    mocks.getAcquisitionRoster.mockResolvedValue({
+      viewer: { ...viewer, userId: "owner-1", isOwner: true },
+      roster: { ...baseRoster, members: [...baseRoster.members, { id: "owner-1", label: "Owner", role: "owner", acquisitionsEnabled: false, active: true, hasHistory: false }] },
+    });
+    mocks.loadDialpadCallingBootstrap.mockResolvedValue({ connectionId: "c-1", binding: { status: "verified", dialpadUserId: "d-1" }, grants: [] });
     renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
     expect(
       (mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0],
     ).toMatchObject({ dialpad: null });
+  });
+
+  it("keeps an unbound acquisitions member on Dialpad (the server's not-verified denial), not Telnyx", async () => {
+    const bootstrap = { connectionId: "c-1", binding: { status: "none" }, grants: [] };
+    mocks.loadDialpadCallingBootstrap.mockResolvedValue(bootstrap);
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    expect(
+      (mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0],
+    ).toMatchObject({ dialpad: bootstrap });
   });
 
   it("passes the Dialpad calling bootstrap to the client only for the session's own org and rep", async () => {

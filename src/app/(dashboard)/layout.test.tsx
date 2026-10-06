@@ -85,7 +85,13 @@ function dialpadEnabled(node: ReactNode): unknown {
 it.each([["softphone", false], ["dialpad", true]] as const)("derives the Call route on the server (%s)", async (route, enabled) => {
   mocks.dialpadRoute.mockResolvedValue(route);
   expect(dialpadEnabled(await DashboardLayout({ children: <div>Page</div> }))).toBe(enabled);
-  expect(mocks.dialpadRoute).toHaveBeenCalledWith("org", "rep");
+  expect(mocks.dialpadRoute).toHaveBeenCalledWith("org", "rep", true);
+});
+
+it("passes acquisitions membership to the route resolver (false for a non-acquisitions member)", async () => {
+  mocks.memberships.mockResolvedValue([{ user_id: "rep", org_id: "org", role: "member", acquisitions_enabled: false, access_status: "active" }]);
+  await DashboardLayout({ children: <div>Page</div> });
+  expect(mocks.dialpadRoute).toHaveBeenCalledWith("org", "rep", false);
 });
 
 it("keeps the softphone route when the viewer has no single organization", async () => {
