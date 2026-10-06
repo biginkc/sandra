@@ -91,6 +91,29 @@ describe("loadCallScreen", () => {
     expect(mocks.markMessagesReadForProperty).not.toHaveBeenCalled();
   });
 
+  it("pendingCall is this lead's newest ended Sandra call with no outcome; other leads and native calls never count; a failed read is no prompt", async () => {
+    const item = (o: Record<string, unknown>) => ({ attemptId: "a", propertyId, callActivityId: "call-x", endedAt: "2026-10-05T10:00:00Z", durationSeconds: 60, talkDurationSeconds: 30, origin: "sandra", outcomeGuess: null, voicemail: false, ...o });
+    const withRpc = (result: { data: unknown; error: unknown }) => {
+      const rpc = vi.fn(async () => result);
+      return { rpc, d: { ...deps(), viewer: vi.fn(async () => ({ userId: "user-1", orgId: "org-1", isOwner: false, client: { ...client(), rpc } })) } };
+    };
+    const ok = withRpc({ error: null, data: { items: [
+      item({ attemptId: "old", callActivityId: "call-old" }),
+      item({ attemptId: "new", callActivityId: "call-new", endedAt: "2026-10-05T11:00:00Z" }),
+      item({ attemptId: "other", callActivityId: "call-other", propertyId: "33333333-3333-4333-8333-333333333333", endedAt: "2026-10-05T12:00:00Z" }),
+      item({ attemptId: "native", callActivityId: "call-native", origin: "native", endedAt: "2026-10-05T13:00:00Z" }),
+    ] } });
+    const a = await loadCallScreen(propertyId, ok.d as never);
+    expect(a.status === "ok" && a.data.pendingCall?.callActivityId).toBe("call-new");
+    expect(ok.rpc).toHaveBeenCalledWith("fn_list_unacknowledged_call_prompts", expect.objectContaining({ p_org_id: "org-1" }));
+    const bad = withRpc({ error: { message: "x" }, data: null });
+    const b = await loadCallScreen(propertyId, bad.d as never);
+    expect(b.status === "ok" && b.data.pendingCall).toBeNull();
+    const notReady = { ...ok.d, schemaReady: vi.fn(async (f: string) => f !== "ack_prompts") };
+    const c = await loadCallScreen(propertyId, notReady as never);
+    expect(c.status === "ok" && c.data.pendingCall).toBeNull();
+  });
+
   it("mounts the contract section only when the card state is enabled; a throw degrades it alone", async () => {
     const on = { ...deps(), contractCard: vi.fn(async () => ({ enabled: true as const, marker: 1 })) };
     const a = await loadCallScreen(propertyId, on as never);

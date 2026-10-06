@@ -112,6 +112,11 @@ export type PostCallPromptProps = {
   onDeadNurture?: () => void
   /** "dock" renders inline (no dialog) for the call screen. Default "dialog". */
   variant?: "dialog" | "dock"
+  /**
+   * What is known of the call this prompt is bound to (it is bound whenever `initialCallActivityId` is set).
+   * Shown as one read-only line in place of the manual call pickers.
+   */
+  boundCall?: { endedAt?: string | null; talkSeconds?: number | null } | null
 }
 
 export function PostCallPrompt({
@@ -136,7 +141,11 @@ export function PostCallPrompt({
   onReadyForOffer,
   onDeadNurture,
   variant = "dialog",
+  boundCall = null,
 }: PostCallPromptProps) {
+  // A prompt tied to one Sandra call records THAT call. The manual pickers (where was it, a DialPad
+  // recording link, when it happened) exist only for calls Sandra did not place.
+  const bound = Boolean(initialCallActivityId)
   const [source, setSource] = useState<AcquisitionAttemptSource>(initialCallActivityId ? "sandra" : "dialpad")
   const [outcome, setOutcome] = useState<PromptOutcome | "">(initialOutcome ?? "")
   const outcomeTouched = useRef(false)
@@ -357,7 +366,14 @@ export function PostCallPrompt({
     <ReceiptLines extras={extras} sentNextStepAt={sentNextStepAt} note={sentNote} onRetry={onRetryExtras} />
   ) : null
 
-  const manualSource = source !== "sandra"
+  const manualSource = source !== "sandra" && !bound
+  const boundLine = bound
+    ? [
+        "Sandra call",
+        boundCall?.endedAt ? `ended ${formatZonedDateTime(new Date(boundCall.endedAt), TIME_ZONE)}` : null,
+        typeof boundCall?.talkSeconds === "number" ? `${Math.floor(boundCall.talkSeconds / 60)}m ${String(boundCall.talkSeconds % 60).padStart(2, "0")}s` : null,
+      ].filter(Boolean).join(" · ")
+    : null
 
   const promptBody = (
     <>
@@ -499,6 +515,10 @@ export function PostCallPrompt({
                 ) : null}
               </div>
 
+              {bound ? (
+                <p data-testid="post-call-bound-call" className="text-xs text-muted-foreground">{boundLine}</p>
+              ) : (
+                <>
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="post-call-source">Where was this call?</Label>
                 <select
@@ -559,6 +579,9 @@ export function PostCallPrompt({
                 </div>
               )}
 
+                </>
+              )}
+
               {manualSource && (
                 <DateTimeField
                   id="post-call-occurred-at"
@@ -570,7 +593,7 @@ export function PostCallPrompt({
                 />
               )}
 
-              {source === "dialpad" && (
+              {source === "dialpad" && !bound && (
                 <div className="flex flex-col gap-1.5">
                   <Label htmlFor="post-call-recording">Recording link (required)</Label>
                   <Input

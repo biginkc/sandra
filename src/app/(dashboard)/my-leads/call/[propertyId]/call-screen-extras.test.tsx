@@ -52,6 +52,8 @@ const data: CallScreenData = {
   },
   contract: { ok: false, message: "hidden" },
   facts: { ok: false, message: "hidden" },
+  // The prompt is tied to the call that just ended (it never stands open on its own).
+  pendingCall: { attemptId: "att-1", propertyId, callActivityId: "call-1", endedAt: "2026-10-05T15:00:00Z", durationSeconds: 90, talkDurationSeconds: 60, origin: "sandra", outcomeGuess: null, voicemail: false },
 };
 
 
@@ -65,7 +67,6 @@ const withVersion = (queueVersion: number) => ({ ...data, queueRow: { ...data.qu
 // Records the attempt through the REAL dock prompt, so it shows its receipt (and Retry) exactly as it does live.
 async function recordAttempt(user: ReturnType<typeof userEvent.setup>) {
   await user.click(within(screen.getByTestId("post-call-outcome")).getByRole("radio", { name: "Reached" }));
-  await user.type(screen.getByLabelText("Recording link (required)"), "https://dialpad.example/r/1");
   await user.click(screen.getByRole("button", { name: "Save" }));
   await screen.findByTestId("post-call-receipt");
 }

@@ -7,6 +7,7 @@ import type { CallNextSnapshot } from "@/lib/my-leads/call-next"
 import type { CallbackDueItem, CallPromptItem, CallStateSnapshot } from "@/lib/my-leads/call-state"
 import type { AcquisitionKpis, AcquisitionRoster, QueueSnapshot } from "@/lib/my-leads/queries"
 import { DialpadCallProvider } from "@/components/dialpad/dialpad-call-provider"
+import { useOptionalDialpadCall } from "@/components/dialpad/dialpad-call-context"
 import { CallLockProvider, useCallLock } from "@/components/calls/call-lock-context"
 import type { CallLock } from "@/lib/calls/call-lock"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
@@ -318,6 +319,28 @@ describe("MyLeadsClient calling and durable call state", () => {
       await flush(30_000)
       expect(screen.queryByTestId("post-call-prompt")).not.toBeInTheDocument()
       expect(ackCalls()).toHaveLength(2)
+    })
+
+    it("never reopens a call that was already logged elsewhere this session, even if a stale poll still lists it", async () => {
+      function LoggedElsewhere() {
+        const dialpadCall = useOptionalDialpadCall()
+        return <button onClick={() => dialpadCall?.clearEndedCall?.("activity-old")}>logged elsewhere</button>
+      }
+      render(
+        <CallLockProvider>
+          <DialpadCallProvider enabled>
+            <LoggedElsewhere />
+            <MyLeadsClient viewer={viewer} roster={roster} initialMemberId={viewer.userId} initialSnapshot={snapshot()} initialKpis={kpis}
+              postCallPrompt callFeatures={flags({ autoPrompt: true })} />
+          </DialpadCallProvider>
+        </CallLockProvider>,
+      )
+      await flush()
+      await click(screen.getByRole("button", { name: "logged elsewhere" }))
+      mocks.poll.mockResolvedValue(pollState({ prompts: [oldest] }))
+      await flush(30_000)
+      expect(mocks.poll).toHaveBeenCalled()
+      expect(screen.queryByTestId("post-call-prompt")).not.toBeInTheDocument()
     })
 
     it("never opens over a dialog the rep already has open", async () => {

@@ -112,12 +112,19 @@ describe("PostCallPrompt", () => {
     } finally { getItem.mockRestore(); setItem.mockRestore() }
   })
 
-  it("shows the recording link only for a manual DialPad call and the occurred-at field only for manual sources", async () => {
-    const { user } = setup({ ...linked, callReferenceOptions: refs() })
-    // A linked Sandra call: no recording link, no occurred-at.
+  it("bound to a Sandra call: no manual pickers at all (no where-was-it, DialPad recording link, Sandra-call picker or occurred-at)", () => {
+    setup({ ...linked, callReferenceOptions: refs(), boundCall: { endedAt: "2026-10-05T15:00:00Z", talkSeconds: 192 } })
+    expect(screen.queryByLabelText("Where was this call?")).not.toBeInTheDocument()
     expect(screen.queryByLabelText(/Recording link/)).not.toBeInTheDocument()
     expect(screen.queryByLabelText("When did it occur?")).not.toBeInTheDocument()
-    await user.selectOptions(screen.getByLabelText("Where was this call?"), "dialpad")
+    expect(screen.queryByLabelText("Sandra call")).not.toBeInTheDocument()
+    expect(screen.getByTestId("post-call-bound-call")).toHaveTextContent("Sandra call")
+    expect(screen.getByTestId("post-call-bound-call")).toHaveTextContent("3m 12s")
+  })
+
+  it("not bound (a call Sandra did not place): the DialPad recording link is required and only manual sources show occurred-at", async () => {
+    const { user } = setup()
+    expect(screen.queryByTestId("post-call-bound-call")).not.toBeInTheDocument()
     expect(screen.getByLabelText("Recording link (required)")).toBeVisible()
     expect(screen.getByLabelText("When did it occur?")).toBeVisible()
     await user.selectOptions(screen.getByLabelText("Where was this call?"), "manual")
@@ -125,12 +132,14 @@ describe("PostCallPrompt", () => {
     expect(screen.getByLabelText("When did it occur?")).toBeVisible()
   })
 
-  it("defaults to DialPad without a linked call and Sandra call with one", () => {
+  it("defaults to DialPad without a linked call; a linked call always saves as that Sandra call", async () => {
     const first = setup()
     expect(screen.getByLabelText("Where was this call?")).toHaveValue("dialpad")
     first.unmount()
-    setup({ ...linked, callReferenceOptions: refs() })
-    expect(screen.getByLabelText("Where was this call?")).toHaveValue("sandra")
+    const { user, onSubmit } = setup({ ...linked, callReferenceOptions: refs() })
+    await user.click(outcome("Reached"))
+    await user.click(screen.getByRole("button", { name: "Save" }))
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ source: "sandra", callActivityId: "call-1", recordingUrl: null }))
   })
 
   it("saves with only an outcome (note, next step and drip are optional) and the note never goes to the attempt", async () => {

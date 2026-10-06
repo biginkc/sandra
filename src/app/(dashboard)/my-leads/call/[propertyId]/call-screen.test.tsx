@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react"
+import { act, screen, waitFor, within } from "@testing-library/react"
 import { renderWithDialpad as render } from "@/components/dialpad/test-shell";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -36,6 +36,7 @@ vi.mock("@/lib/supabase/client", () => ({
   }),
 }));
 
+import { useOptionalDialpadCall } from "@/components/dialpad/dialpad-call-context";
 import { CallScreen } from "./call-screen";
 import type { CallScreenData } from "./types";
 
@@ -67,19 +68,110 @@ const data: CallScreenData = {
 describe("CallScreen", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("renders the D7 layout: header, script left, numbers → history → docked prompt right; contract and facts omitted", () => {
+  it("renders the D7 layout: header, script left, numbers then history right; no prompt until a call ends; contract and facts omitted", () => {
     render(<CallScreen postCallPrompt data={data} />);
     expect(screen.getByTestId("call-screen-header")).toHaveTextContent("Pat Seller");
     expect(screen.getByTestId("call-screen-stage")).toHaveTextContent("Contacted");
     expect(within(screen.getByTestId("call-screen-left")).getByTestId("static-script-view")).toBeInTheDocument();
     const right = screen.getByTestId("call-screen-right");
-    const order = [right.querySelector('[data-testid="numbers-card"]'), right.querySelector('[data-testid="history-panel"]'), right.querySelector('[data-testid="call-screen-prompt-dock"]')];
+    const order = [right.querySelector('[data-testid="numbers-card"]'), right.querySelector('[data-testid="history-panel"]')];
     expect(order.every(Boolean)).toBe(true);
     expect(order[0]!.compareDocumentPosition(order[1]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(order[1]!.compareDocumentPosition(order[2]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.getByTestId("post-call-prompt")).toHaveAttribute("data-variant", "dock");
+    // No standing dock: nothing to log means no prompt.
+    expect(screen.queryByTestId("post-call-prompt")).toBeNull();
+    expect(screen.queryByTestId("call-screen-prompt-dock")).toBeNull();
     expect(screen.queryByTestId("send-contract-card")).toBeNull();
     expect(screen.queryByText(/call facts/i)).toBeNull();
+  });
+
+  describe("the one post-call prompt", () => {
+    const pending = { attemptId: "att-1", propertyId, callActivityId: "call-1", endedAt: "2026-10-05T15:00:00Z", durationSeconds: 200, talkDurationSeconds: 192, origin: "sandra" as const, outcomeGuess: null, voicemail: false };
+    const withPending = { ...data, pendingCall: pending };
+    const callButton = () => screen.getByTestId(`call-button-${propertyId}`);
+    const endedStatus = (callActivityId: string | null = "call-1") => ({ ok: true, status: { state: "ended", connected: true, durationSeconds: 192, callActivityId } });
+
+    it("opens for the server's pending call at the top of the script column, never in the right column", () => {
+      render(<CallScreen postCallPrompt data={withPending} />);
+      const left = screen.getByTestId("call-screen-left");
+      const prompt = within(left).getByTestId("post-call-prompt");
+      expect(left.firstElementChild?.contains(prompt) || left.children[0] === prompt).toBe(true);
+      expect(within(screen.getByTestId("call-screen-right")).queryByTestId("post-call-prompt")).toBeNull();
+      expect(within(screen.getByTestId("call-screen-right")).getByTestId("numbers-card")).toBeInTheDocument();
+      // Not fixed or sticky: it can never cover comps or the contract card.
+      expect(prompt.className).not.toMatch(/sticky|fixed|absolute/);
+      expect(screen.getAllByTestId("post-call-prompt")).toHaveLength(1);
+    });
+
+    it("is bound to its call: no manual DialPad or recording-link fields", () => {
+      render(<CallScreen postCallPrompt data={withPending} />);
+      expect(screen.queryByText("Where was this call?")).toBeNull();
+      expect(screen.queryByText(/Recording link/)).toBeNull();
+      expect(screen.queryByText("When did it occur?")).toBeNull();
+      expect(screen.getByTestId("post-call-bound-call")).toHaveTextContent(/Sandra call/);
+      expect(screen.getByTestId("post-call-bound-call")).toHaveTextContent("3m 12s");
+    });
+
+    it("shows nothing when the call is already logged (no pending call from the server)", () => {
+      render(<CallScreen postCallPrompt data={{ ...data, pendingCall: null }} />);
+      expect(screen.queryByTestId("post-call-prompt")).toBeNull();
+    });
+
+    it("shows nothing when the post_call_prompt flag is off", () => {
+      render(<CallScreen data={withPending} />);
+      expect(screen.queryByTestId("post-call-prompt")).toBeNull();
+    });
+
+    it("keeps the script one click away while the prompt is up", async () => {
+      const user = userEvent.setup();
+      render(<CallScreen postCallPrompt data={withPending} />);
+      expect(screen.queryByTestId("static-script-view")).toBeNull();
+      await user.click(screen.getByTestId("call-screen-show-script"));
+      expect(within(screen.getByTestId("call-screen-left")).getByTestId("static-script-view")).toBeInTheDocument();
+    });
+
+    it("appears after hangup of THIS lead's call, with no Log outcome button beside it, and one save clears the panel", async () => {
+      const user = userEvent.setup();
+      const submit = vi.fn(async () => ({ ok: true, attemptRecorded: true }));
+      mocks.useAttemptWorkflow.mockReturnValue({ submit, recoveryValue: null, onDripChanged: vi.fn(), confirmClose: vi.fn() });
+      mocks.dialLead.mockResolvedValue({ ok: true, intentId: "i-1", state: "dialing", uncertain: false });
+      mocks.dialStatus.mockResolvedValue({ ok: true, status: { state: "dialing" } });
+      render(<CallScreen postCallPrompt data={data} clickToDial />);
+      await user.click(callButton());
+      await screen.findByTestId("dial-status");
+      expect(screen.queryByTestId("post-call-prompt")).toBeNull();
+      mocks.dialStatus.mockResolvedValue(endedStatus());
+      await act(async () => { await new Promise((r) => setTimeout(r, 3100)); });
+      const prompt = await screen.findByTestId("post-call-prompt");
+      expect(within(screen.getByTestId("call-screen-left")).getByTestId("post-call-prompt")).toBe(prompt);
+      expect(screen.getByTestId("dial-status")).toHaveTextContent("Call ended");
+      expect(screen.queryByRole("button", { name: "Log outcome" })).toBeNull();
+      await user.click(within(screen.getByTestId("post-call-outcome")).getByRole("radio", { name: "Reached" }));
+      await user.click(within(prompt).getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+      const payload = (submit.mock.calls as unknown as [Record<string, unknown>][])[0]![0];
+      expect(payload).toMatchObject({ source: "sandra", callActivityId: "call-1", outcome: "reached", propertyId });
+      expect(payload.recordingUrl ?? null).toBeNull();
+      const opts = (mocks.useAttemptWorkflow.mock.calls as unknown as [unknown][]).at(-1)![0] as { opening: unknown; onCommitted: (c: unknown) => Promise<void> };
+      expect((opts.opening as { callActivityId: string }).callActivityId).toBe("call-1");
+      await act(async () => { await opts.onCommitted({ opening: opts.opening, attemptKey: "k", extras: null, input: {}, result: { ok: true }, dripFailure: null }); });
+      // The saved call's panel is cleared (no stale "Call ended"), and only one prompt ever showed.
+      await waitFor(() => expect(screen.queryByTestId("dial-status")).toBeNull());
+      expect(screen.getAllByTestId("post-call-prompt")).toHaveLength(1);
+    });
+
+    it("ignores a call that ended for a different lead", async () => {
+      const user = userEvent.setup();
+      mocks.dialLead.mockResolvedValue({ ok: true, intentId: "i-9", state: "dialing", uncertain: false });
+      mocks.dialStatus.mockResolvedValue(endedStatus("call-9"));
+      function OtherLead() {
+        const dialpad = useOptionalDialpadCall();
+        return <button onClick={() => dialpad?.startCall({ propertyId: "22222222-2222-4222-8222-222222222222", contactId: "c-2", label: "Other Seller" })}>call other</button>;
+      }
+      render(<><OtherLead /><CallScreen postCallPrompt data={data} clickToDial /></>);
+      await user.click(screen.getByText("call other"));
+      await screen.findByText(/Call ended/);
+      expect(screen.queryByTestId("post-call-prompt")).toBeNull();
+    });
   });
 
   describe("Call button (shared My Leads dial path)", () => {

@@ -16,17 +16,34 @@ export type DialpadCallRequest = {
 /** Hooks a page registers while mounted; the provider (which outlives navigation) calls them. */
 export type DialpadPageHandlers = {
   onLogOutcome?: (propertyId: string, callActivityId: string) => void;
-  onEnded?: () => void;
+  /** Runs when a call ends. `info` carries the ended call so a page can open its own prompt for it. */
+  onEnded?: (info?: DialpadEndedCall) => void;
+  /** The call activity this page is already showing a prompt for; the panel and reminder then stay quiet about it. */
+  showingPromptFor?: string | null;
+};
+
+export type DialpadEndedCall = {
+  propertyId: string;
+  callActivityId: string;
+  endedAt: string;
+  talkSeconds: number | null;
 };
 
 export type DialpadCallContextValue = {
   /** The one Dialpad flight (owned by the persistent provider) and whether its call is still live. */
   flight?: DialFlight | null;
   dialActive?: boolean;
-  /** Register page-level handlers (Log outcome, refresh on end). Returns nothing; pass null on unmount. */
   /** The attempt for this call activity was saved: clear its ended flight's panel (a no-op for any other flight). */
   clearEndedCall?: (callActivityId: string) => void;
-  setPageHandlers?: (handlers: DialpadPageHandlers | null) => void;
+  /**
+   * Register page-level handlers (Log outcome, refresh on end). Returns an unregister that only removes
+   * THIS registration, so a page that unmounts after the next page registered cannot clear the newer handlers.
+   */
+  registerPageHandlers?: (handlers: DialpadPageHandlers) => () => void;
+  /** Call activities whose outcome was saved this session; a stale poll must never reopen their prompt. */
+  loggedCallActivityIds?: ReadonlySet<string>;
+  /** Open the Log outcome prompt for an ended call right where the rep is (no navigation). Absent when the viewer cannot log. */
+  openLogOutcome?: (propertyId: string, callActivityId: string) => void;
   /** Server-derived: click_to_dial on, org connection active, viewer bound, api_dial schema ready. */
   enabled: boolean;
   startCall: (request: DialpadCallRequest) => void;

@@ -989,7 +989,9 @@ export function MyLeadsClient({
     pageHandlerRef.current = {
       onLogOutcome: (propertyId, callActivityId) => {
         if (!rawRow(propertyId)) {
-          setError("This lead is no longer in your queue.");
+          // Not in this page's loaded queue (a call placed from Messages or a lead page): log it in place.
+          if (dialpadCall?.openLogOutcome) dialpadCall.openLogOutcome(propertyId, callActivityId);
+          else setError("This lead is no longer in your queue.");
           return;
         }
         action("log-attempt", propertyId, callActivityId);
@@ -1000,22 +1002,28 @@ export function MyLeadsClient({
       },
     };
   });
-  const setPageHandlers = dialpadCall?.setPageHandlers;
+  const registerPageHandlers = dialpadCall?.registerPageHandlers;
   useEffect(() => {
-    setPageHandlers?.({
+    if (!registerPageHandlers) return;
+    // The unregister only removes this page's own registration (a newer page's handlers survive).
+    return registerPageHandlers({
       onLogOutcome: (propertyId, callActivityId) => pageHandlerRef.current.onLogOutcome(propertyId, callActivityId),
       onEnded: () => pageHandlerRef.current.onEnded(),
     });
-    return () => setPageHandlers?.(null);
-  }, [setPageHandlers]);
+  }, [registerPageHandlers]);
   useEffect(() => {
     if (!autoPromptOn || dialog !== null || openingStatus !== null || autoPrompt !== null) return;
     // Never open over an in-flight dial or any other open dialog in the page (menus, drawers, confirms).
     if (dialActive || softphoneOnCall) return;
     // Sandra's popups are Base UI: open state is `data-open` (closing/closed popups carry `data-closed`), never Radix's `data-state=open`.
     if (typeof document !== "undefined" && document.querySelector(OPEN_FOREIGN_POPUP_SELECTOR)) return;
+    const logged = dialpadCall?.loggedCallActivityIds;
     const candidates = callPoll.prompts.filter(
-      (item) => !ackedAttempts.current.has(item.attemptId) && !ackInFlight.current.has(item.attemptId),
+      (item) =>
+        !ackedAttempts.current.has(item.attemptId) &&
+        !ackInFlight.current.has(item.attemptId) &&
+        // Saved elsewhere this session (the call screen, Messages): a stale poll must not reopen it.
+        !logged?.has(item.callActivityId),
     );
     const next = oldestPrompt(candidates);
     // A lead no longer in this queue (reassigned since the poll) is never opened.
@@ -1024,7 +1032,7 @@ export function MyLeadsClient({
     setAutoPrompt(next);
     action("log-attempt", next.propertyId, next.callActivityId);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `action`/`rawRow` are stable per render and read latest state
-  }, [autoPromptOn, dialog, openingStatus, autoPrompt, callPoll.prompts, dialActive, softphoneOnCall]);
+  }, [autoPromptOn, dialog, openingStatus, autoPrompt, callPoll.prompts, dialActive, softphoneOnCall, dialpadCall?.loggedCallActivityIds]);
   // Any close of the auto-opened prompt acknowledges it: saved when the attempt committed, else dismissed.
   useEffect(() => {
     if (!autoPrompt) return;
