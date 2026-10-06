@@ -20,6 +20,7 @@
  */
 
 import { reportError } from '@/lib/errors/report';
+import { checkQuietHours } from '@/lib/messaging/quiet-hours';
 
 import { DIALPAD_CTI_CUSTOM_DATA_PATTERN, type DialpadDenialDetail, type DialpadIdentityType } from './contracts';
 import { DIALPAD_API_ORIGIN, resolveDialpadDirectoryKey, type DialpadDirectoryEnv } from './directory';
@@ -332,6 +333,13 @@ export async function startDialpadApiCall(
       const denial = SLOT_DENIAL[reason];
       // No intent exists yet: proven non-dispatch.
       return { ok: false, code: 'denied', message: dialpadDenialMessage(denial), denial, freshAttemptKey: true };
+    }
+
+    // 2b. Calling hours: the existing lead-local 08:00-21:00 rule, unchanged, before any intent is prepared
+    // or authorized, so a blocked call creates no intent and reaches no provider. Unknown or missing state fails closed.
+    const property = await db.loadPropertyState(actor.orgId, propertyId);
+    if (!property.found || !checkQuietHours(property.state, now()).ok) {
+      return { ok: false, code: 'denied', message: dialpadDenialMessage('outside_calling_hours'), denial: 'outside_calling_hours', freshAttemptKey: true };
     }
 
     // 3. Caller id: the oldest active grant, or none (the rep's own line keeps A-level attestation).

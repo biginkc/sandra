@@ -80,6 +80,8 @@ export interface DialpadDispatchDb {
    */
   loadUnresolvedIntent(orgId: string, userId: string, propertyId: string, nowIso: string): Promise<{ intentId: string; idempotencyKey: string } | null>;
   loadCallSlots(orgId: string, userId: string, propertyId: string, contactId: string): Promise<DialpadCallSlot[]>;
+  /** The property's state (drives the lead-local calling window). `found: false` when the property is not visible; callers fail closed. */
+  loadPropertyState(orgId: string, propertyId: string): Promise<{ found: boolean; state: string | null }>;
   claimBinding(orgId: string, userId: string, dialpadUserId: string): Promise<Json>;
   verifyBinding(bindingId: string, kind: 'provider_directory', ref: string): Promise<Json>;
   prepareIntent(args: {
@@ -245,6 +247,11 @@ export function createSupabaseDialpadDispatchDb(client: SupabaseClient<Database>
       }
       return slots;
     },
+    async loadPropertyState(orgId, propertyId) {
+      const { data, error } = await client.from('properties').select('state').eq('id', propertyId).eq('org_id', orgId).is('deleted_at', null).maybeSingle();
+      if (error) throw new DialpadDbError(classifyDialpadRpcError(error), error.code ?? null);
+      return data ? { found: true, state: typeof data.state === 'string' ? data.state : null } : { found: false, state: null };
+    },
     async claimBinding(orgId, userId, dialpadUserId) {
       return unwrap(await client.rpc('fn_claim_dialpad_member_binding', { p_org_id: orgId, p_user_id: userId, p_dialpad_user_id: dialpadUserId }));
     },
@@ -306,6 +313,8 @@ const DENIAL_MESSAGES: Record<DialpadDenialDetail, string> = {
   revoker_not_owner: 'Only an owner can revoke caller IDs.',
   dialpad_user_already_bound: 'That Dialpad account is already connected to another user.',
   intent_already_matched: 'This call is already in progress.',
+  // Same wording as the softphone path (src/lib/dialer/actions.ts).
+  outside_calling_hours: 'Calling is unavailable during quiet hours.',
 };
 
 export function dialpadDenialMessage(detail: DialpadDenialDetail | null): string {
