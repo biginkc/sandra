@@ -25,6 +25,7 @@ export type GuardLine = {
   redirect?: string | null;
   spawnGuard?: boolean;
   forbiddenPresent?: string[];
+  unexpectedEnv?: string[];
   env?: Record<string, string | null>;
 };
 
@@ -48,7 +49,7 @@ export function readProcessUid(pid: number): number | null {
 
 export type AppProofInput = {
   listenerPid: number | null;
-  /** The uid the app listener runs as and the uid the harness (and so the pf rules) runs as. */
+  /** The uid the app listener runs as and the uid the harness runs as. */
   listenerUid: number | null;
   harnessUid: number;
   appEgressLog: string;
@@ -101,7 +102,7 @@ export function appProofProblems(i: AppProofInput): string[] {
   const p: string[] = [];
   if (!i.appEgressLog) p.push("STRESS_APP_EGRESS_LOG is not set (an absolute path; the app must be started with STRESS_EGRESS_LOG pointing at it)");
   if (i.listenerPid == null) { p.push("no process is listening on the app port"); return p; }
-  if (i.listenerUid == null || i.listenerUid !== i.harnessUid) p.push(`the app listener runs as uid ${i.listenerUid ?? "unknown"}, the harness (and the pf rules) as uid ${i.harnessUid}: the OS ring must cover the app`);
+  if (i.listenerUid == null || i.listenerUid !== i.harnessUid) p.push(`the app listener runs as uid ${i.listenerUid ?? "unknown"}, the harness as uid ${i.harnessUid}: the app must run as the harness user`);
   const g = guardLineFor(i.logLines, i.listenerPid);
   if (!g) { p.push(`no guard_loaded line from pid ${i.listenerPid} in the app egress log: the guard did not run inside the app`); return p; }
   if (!i.appEgressLog || g.log !== i.appEgressLog) p.push(`the app's guard logs to ${g.log ?? "unknown"}, not STRESS_APP_EGRESS_LOG (${i.appEgressLog || "unset"})`);
@@ -118,6 +119,8 @@ export function appProofProblems(i: AppProofInput): string[] {
   if (!dbx.startsWith(`${i.stubUrl}/dropbox-sign`)) p.push(`DROPBOX_SIGN_API_BASE_URL is "${dbx || "unset"}", must point at the harness stub (${i.stubUrl}/dropbox-sign/...)`);
   if (g.forbiddenPresent === undefined) p.push("the guard line does not report which provider credentials / proxy variables are present (old guard?)");
   else if (g.forbiddenPresent.length) p.push(`the app process environment holds provider credentials or proxy overrides that must be absent: ${g.forbiddenPresent.join(", ")}`);
+  if (g.unexpectedEnv === undefined) p.push("the guard line does not report unexpected environment names (old guard?)");
+  else if (g.unexpectedEnv.length) p.push(`the app process environment holds variables outside the allowlist that look like credentials, URLs or provider settings (start it with a clean environment): ${g.unexpectedEnv.join(", ")}`);
   const hp = (u: string) => { try { const x = new URL(u.replace(/^postgres(ql)?:/, "http:")); return `${x.hostname.replace(/^\[|\]$/g, "")}:${x.port || "80"}`; } catch { return null; } };
   if (i.supabaseUrl) {
     const appApi = e.NEXT_PUBLIC_SUPABASE_URL ?? e.SUPABASE_URL ?? null;

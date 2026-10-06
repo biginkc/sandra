@@ -10,7 +10,8 @@ import { openDb } from "../db";
 import { driveLiveLeg, summarizeLive, type LivePort } from "../live-driver";
 import { collectLiveAppFacts } from "../app-proof";
 import { assertLiveLane } from "../guards";
-import { assertLiveLegReady, liveAppRecheckProblems, type LiveCallStep, type LiveEvidence } from "../live-leg";
+import { loadReportKey } from "../signing";
+import { assertLiveLegReady, liveAppRecheckProblems, loadPinnedHashes, pinnedPhoneProblems, type LiveCallStep, type LiveEvidence } from "../live-leg";
 
 /**
  * LIVE LEG driver (DISABLED BY DEFAULT, NEVER IN CI). It is skipped unless STRESS_LIVE_LEG=1 and is refused in CI or a
@@ -70,6 +71,10 @@ test("live leg: ~8 owned-number calls, evidence per call", async ({ page }) => {
         const propertyId = leads[step.target].propertyId;
         const since = new Date().toISOString();
         await page.goto(`${cfg.appUrl}/my-leads/call/${propertyId}`);
+        // S5: right before the click, the phone the lead holds NOW must still be the pinned owned number for this target.
+        const phoneNow = (await db.query<{ p: string | null }>("select c.phone_1 as p from public.properties pr join public.contacts c on c.id = pr.homeowner_contact_id where pr.id=$1", [propertyId])).rows[0]?.p ?? null;
+        const pinProblems = pinnedPhoneProblems(phoneNow, step.target, loadPinnedHashes(), loadReportKey(process.env));
+        if (pinProblems.length) throw new Error(`refusing to click Call: ${pinProblems.join(" | ")}`);
         const button = page.getByTestId(`call-button-${propertyId}`);
         await expect(button).toBeEnabled({ timeout: 30_000 });
         const before = (await db.query<{ n: number }>("select count(*)::int n from public.dialpad_call_intents where property_id=$1 and dispatch_authorized_at is not null", [propertyId])).rows[0]!.n;

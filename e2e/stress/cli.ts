@@ -6,7 +6,7 @@ import { artifactsDirFor, runChaos } from "./engine";
 import { assertStressLane, LaneRefusal } from "./guards";
 import { buildManifest, toNdjson, type Profile } from "./manifest";
 import { runSelfTest } from "./selftest";
-import { loadReportKey, sha256, signEvidence } from "./signing";
+import { loadReportKey, numberPin, sha256, signEvidence } from "./signing";
 
 /**
  * Entrypoint (opt-in; never part of the default CI lanes):
@@ -50,14 +50,15 @@ async function main(): Promise<number> {
     // Prints ONLY the sha256 of the owned number behind an op ref, for the operator to commit in owned-numbers.sha256.json. Never prints the number.
     const role = process.argv[3];
     if (role !== "cell" && role !== "telnyx") throw new Error("usage: stress pin-number <cell|telnyx>");
-    const { createHash } = await import("node:crypto");
     const { execFileSync } = await import("node:child_process");
     const ref = process.env[role === "cell" ? "STRESS_OP_REF_CELL" : "STRESS_OP_REF_TELNYX"] ?? "";
     if (!process.env.OP_SERVICE_ACCOUNT_TOKEN) throw new Error("OP_SERVICE_ACCOUNT_TOKEN is not set: refusing to run `op read`");
     if (!/^op:\/\/[^\s]+$/.test(ref)) throw new Error("the op ref env is not an op:// reference");
     const v = execFileSync("op", ["read", "--no-newline", ref], { encoding: "utf8", timeout: 20_000 }).trim();
     if (!/^\+1\d{10}$/.test(v)) throw new Error("the value is not a +1XXXXXXXXXX number");
-    console.log(createHash("sha256").update(v).digest("hex"));
+    const key = loadReportKey(process.env);
+    if (!key) throw new Error("no report signing key: the pin is an HMAC under it");
+    console.log(numberPin(v, key));
     return 0;
   }
   if (cmd === "live-check") {

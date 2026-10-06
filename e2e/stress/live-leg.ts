@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { approvedTestSms, type StressConfig } from "./config";
 import { isLoopbackUrl, LaneRefusal } from "./guards";
-import { evidenceProblems, loadReportKey, sha256, type SignedEvidence } from "./signing";
+import { evidenceProblems, loadReportKey, numberPin, type SignedEvidence } from "./signing";
 import { selfTestReportOk } from "./selftest-spec";
 
 /**
@@ -68,13 +68,26 @@ export function resolveOwnedNumbers(env: Env, deps: LiveDeps = {}): { cell: stri
     return v;
   };
   const numbers = { cell: read("STRESS_OP_REF_CELL"), telnyx: read("STRESS_OP_REF_TELNYX") };
-  // Pinned allowlist: only a number whose sha256 is committed in the repo may ever be dialled. Empty or missing pin = refuse.
+  // Pinned allowlist: only a number whose HMAC (under the report key, kept outside the repo) is committed may ever be dialled. Empty or missing pin = refuse.
   const pinned = deps.pinned ?? loadPinnedHashes();
+  const key = (deps.reportKey ?? (() => loadReportKey(env)))();
+  if (!key) throw new Error("no report signing key (STRESS_REPORT_KEY_FILE or STRESS_REPORT_KEY_OP_REF): the number pins are HMACs under it");
   for (const role of ["cell", "telnyx"] as const) {
-    if (pinned[role].length === 0) throw new Error(`no pinned sha256 for the owned ${role} number: pin it with \`npm run stress -- pin-number ${role}\` and commit the hash`);
-    if (!pinned[role].includes(sha256(numbers[role]))) throw new Error(`the ${role} number resolved from op is not on the pinned allowlist (sha256 mismatch): refusing to dial it`);
+    if (pinned[role].length === 0) throw new Error(`no pinned HMAC for the owned ${role} number: pin it with \`npm run stress -- pin-number ${role}\` and commit the value`);
+    if (!pinned[role].includes(numberPin(numbers[role], key))) throw new Error(`the ${role} number resolved from op is not on the pinned allowlist (HMAC mismatch): refusing to dial it`);
   }
   return numbers;
+}
+
+/**
+ * Re-run immediately before EVERY click: the phone the seeded lead holds right now must still be the pinned owned number for this step's target,
+ * so a lead edited, swapped or re-seeded between the start of the leg and the click can never ring anyone else.
+ */
+export function pinnedPhoneProblems(phoneNow: string | null, role: "cell" | "telnyx", pinned: { cell: readonly string[]; telnyx: readonly string[] }, key: string | null): string[] {
+  if (!key) return ["no report signing key: the number pin cannot be checked"];
+  if (!phoneNow || !E164.test(phoneNow)) return [`the lead's current phone is not a +1XXXXXXXXXX number`];
+  if (pinned[role].length === 0) return [`no pinned HMAC for the owned ${role} number`];
+  return pinned[role].includes(numberPin(phoneNow, key)) ? [] : [`the lead's current phone is not the pinned owned ${role} number: refusing to click Call`];
 }
 
 export type LiveCallShape = "ring_timeout_telnyx" | "voicemail_cell" | "cancel_before_answer" | "double_dial_refused";
@@ -167,17 +180,12 @@ export async function liveLegStatus(cfg: StressConfig, env: Env, deps: LiveDeps 
   let sig: SignedEvidence | null = null;
   try { sig = sigText ? (JSON.parse(sigText) as SignedEvidence) : null; } catch { sig = null; }
   const wantRun = env.STRESS_STUB_LEG_RUN_ID ?? "";
-  const reportRun = report ? /^- Run: (\S+) /m.exec(report)?.[1] ?? "" : "";
   const sigProblems = evidenceProblems(sig, key, { kind: "stub_leg", sha: cfg.sha, subjectText: report, runId: wantRun || "<STRESS_STUB_LEG_RUN_ID not set>", now });
-  if (report && reportRun !== wantRun) sigProblems.push(`the report's run id (${reportRun || "none"}) is not STRESS_STUB_LEG_RUN_ID (${wantRun || "unset"})`);
-  const passLine = report ? /^# Chaos day [^:]+: PASS\s*$/m.test(report) : false;
-  const shaOk = report ? new RegExp(`^- SHA: ${cfg.sha}\\s*$`, "m").test(report) && cfg.sha !== "unknown" : false;
-  const fullOk = report ? /^- Profile: full, scope: full, fault: none\s*$/m.test(report) : false;
-  add("stubbed_leg_passed_at_this_sha", passLine && shaOk && fullOk, report ? `report ${passLine ? "is PASS" : "is not PASS"}, sha ${shaOk ? "matches" : "does not match"}, profile/scope ${fullOk ? "full" : "not full/full/no-fault"}` : "STRESS_STUB_LEG_REPORT is not set or unreadable");
+  // Verdict, profile/scope/fault, sha and the app-guard pid are read from the SIGNED payload (evidenceProblems), never from a regex over the report text:
+  // a FAIL report can quote "# Chaos day X: PASS" in its reasons.
+  add("stubbed_leg_passed_at_this_sha", report !== null && sig !== null && sig.verdict === "PASS" && sig.sha === cfg.sha && cfg.sha !== "unknown" && sig.profile === "full" && sig.scope === "full" && sig.fault === "none", sig ? `signed verdict ${sig.verdict}, sha ${sig.sha === cfg.sha ? "matches" : "does not match"}, run ${sig.profile}/${sig.scope}/${sig.fault}` : "no signed evidence");
   add("stubbed_leg_signed_run_bound_fresh", report !== null && sigProblems.length === 0, report ? (sigProblems.join("; ") || "signed, run-bound, fresh") : "no report");
-
-  const guardProven = report ? /^- App egress guard: proven in pid \d+\s*$/m.test(report) : false;
-  add("stubbed_leg_app_guard_proven", guardProven, report ? `report ${guardProven ? "records" : "does not record"} the guard proven inside the app` : "no stubbed-leg report");
+  add("stubbed_leg_app_guard_proven", sig !== null && typeof sig.appGuardPid === "number" && sig.appGuardPid > 0, sig ? `signed evidence ${typeof sig.appGuardPid === "number" ? "records" : "does not record"} the guard proven inside the app (pid)` : "no signed evidence");
   // And a passing self-test at this sha (the harness must be shown able to fail), signed the same way.
   const stText = env.STRESS_SELFTEST_REPORT ? readFile(env.STRESS_SELFTEST_REPORT) : null;
   let stOk = false;

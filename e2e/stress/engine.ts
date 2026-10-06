@@ -353,7 +353,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     const key = loadReportKey(env);
     if (key) {
       const text = readFileSync(path.join(dir, "REPORT.md"), "utf8");
-      writeFileSync(path.join(dir, "REPORT.sig.json"), JSON.stringify(signEvidence({ v: 1, kind: "stub_leg", runId: cfg.runId, sha: cfg.sha, at: new Date().toISOString(), subjectSha256: sha256(text) }, key), null, 1), { mode: 0o600 });
+      writeFileSync(path.join(dir, "REPORT.sig.json"), JSON.stringify(signEvidence({ v: 1, kind: "stub_leg", runId: cfg.runId, sha: cfg.sha, at: new Date().toISOString(), subjectSha256: sha256(text), verdict: summary.verdict, profile, scope: cfg.scope, fault: cfg.fault, appGuardPid }, key), null, 1), { mode: 0o600 });
     }
   } catch (e) { log(`report not signed: ${(e as Error).message}`); }
   await proxy?.stop().catch(() => {});

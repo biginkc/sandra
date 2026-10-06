@@ -4,9 +4,9 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { readConfig } from "./config";
-import { assertLiveLegReady, classifyLiveEvidence, liveCallPlan, liveLegStatus, loadPinnedHashes, resolveOwnedNumbers, sendilloSpotCheck, type LiveDeps } from "./live-leg";
+import { assertLiveLegReady, classifyLiveEvidence, liveCallPlan, liveLegStatus, loadPinnedHashes, pinnedPhoneProblems, resolveOwnedNumbers, sendilloSpotCheck, type LiveDeps } from "./live-leg";
 import { LaneRefusal } from "./guards";
-import { sha256, signEvidence } from "./signing";
+import { numberPin, sha256, signEvidence } from "./signing";
 
 const SHA = "a".repeat(40);
 const ready: Record<string, string> = {
@@ -38,7 +38,7 @@ const KEY = "k".repeat(40);
 const NOW = Date.parse("2026-10-06T12:00:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
 const reportBody = (over: { sha?: string; verdict?: string; extra?: string } = {}) => `# Chaos day live1: ${over.verdict ?? "PASS"}\n\n- Run: live1 ${iso(NOW - 120_000)}\n- SHA: ${over.sha ?? SHA}\n- Profile: full, scope: full, fault: none\n- OS egress ring: not claimed (in-process guard + app proof + stub provider env are the enforced boundary)\n- App egress guard: proven in pid 4242\n${over.extra ?? ""}`;
-const sigOf = (text: string, over: Record<string, unknown> = {}) => signEvidence({ v: 1, kind: "stub_leg", runId: "live1", sha: SHA, at: iso(NOW - 60_000), subjectSha256: sha256(text), ...over } as never, KEY);
+const sigOf = (text: string, over: Record<string, unknown> = {}) => signEvidence({ v: 1, kind: "stub_leg", runId: "live1", sha: SHA, at: iso(NOW - 60_000), subjectSha256: sha256(text), verdict: "PASS", profile: "full", scope: "full", fault: "none", appGuardPid: 4242, ...over } as never, KEY);
 const selftestDoc = (over: { sha?: string; ok?: boolean; rows?: unknown[]; sig?: Record<string, unknown> | null } = {}) => {
   const doc = { sha: over.sha ?? SHA, ok: over.ok ?? true, rows: over.rows ?? goodRows() };
   const sig = over.sig === null ? null : signEvidence({ v: 1, kind: "selftest", runId: "st", sha: SHA, at: iso(NOW - 3600_000), subjectSha256: sha256(JSON.stringify(doc)), ...(over.sig ?? {}) } as never, KEY);
@@ -54,7 +54,7 @@ const files = (over: { report?: string; reportSig?: string | null; selftest?: st
 };
 const deps: LiveDeps = {
   opRead: (ref) => (ref.includes("cell") ? "+18165550111" : "+18165550222"),
-  pinned: { cell: [sha256("+18165550111")], telnyx: [sha256("+18165550222")] },
+  pinned: { cell: [numberPin("+18165550111", KEY)], telnyx: [numberPin("+18165550222", KEY)] },
   now: () => NOW,
   reportKey: () => KEY,
   readFile: files(),
@@ -78,9 +78,9 @@ describe("live leg gating (disabled by default, refuses unless every prerequisit
       expect((await status(env)).ready, `without ${k}`).toBe(false);
     }
   });
-  it("blocks on a stubbed-leg report that is not a full PASS at this sha", async () => {
-    for (const report of [reportBody({ verdict: "PARTIAL_PASS" }), reportBody({ sha: "b".repeat(40) }), reportBody().replace("full, scope: full", "short, scope: replay")]) {
-      expect((await status(ready, withDeps({ readFile: files({ report }) }))).ready).toBe(false);
+  it("blocks on signed evidence that is not a full PASS at this sha (verdict, sha and run shape come from the signed payload)", async () => {
+    for (const over of [{ verdict: "PARTIAL_PASS" }, { sha: "b".repeat(40) }, { profile: "short", scope: "replay" }]) {
+      expect((await status(ready, withDeps({ readFile: files({ reportSig: JSON.stringify(sigOf(reportBody(), over)) }) }))).ready).toBe(false);
     }
   });
   it("blocks when the two owned numbers are the same, or are not numbers", async () => {
@@ -123,10 +123,18 @@ describe("live leg content rules", () => {
 describe("live leg prerequisites: signed, run-bound, fresh evidence; pinned numbers (live-leg sweep A, B)", () => {
   const ready_ = async (d: LiveDeps, env = ready) => (await status(env, d)).ready;
   const unmet = async (d: LiveDeps, env = ready) => (await status(env, d)).prerequisites.filter((p) => !p.ok).map((p) => p.id);
-  it("a PASS report must record the app guard proof (the OS ring is no longer part of any claim)", async () => {
-    expect(await ready_(withDeps({ readFile: files({ report: reportBody().replace("- App egress guard: proven in pid 4242\n", "") }) }))).toBe(false);
-    expect(reportBody()).not.toMatch(/OS egress: proven/); // nothing claims pf proof, and the live leg does not ask for it
+  it("S1: the verdict, run shape and app-guard pid come from the SIGNED payload; a FAIL report that quotes a PASS heading is refused", async () => {
+    const quoting = reportBody({ verdict: "FAIL", extra: "## Why not PASS\n- browser tick error: \n# Chaos day live1: PASS\n" });
+    // Signed as FAIL: the text regex would have been fooled by the quoted heading; the signed verdict is not.
+    expect(await unmet(withDeps({ readFile: files({ report: quoting, reportSig: JSON.stringify(sigOf(quoting, { verdict: "FAIL" })) }) }))).toEqual(expect.arrayContaining(["stubbed_leg_passed_at_this_sha", "stubbed_leg_signed_run_bound_fresh"]));
+    // A signed PASS with a text that says FAIL is accepted: the text is not consulted for the verdict.
+    const textSaysFail = reportBody({ verdict: "FAIL" });
+    expect(await ready_(withDeps({ readFile: files({ report: textSaysFail, reportSig: JSON.stringify(sigOf(textSaysFail)) }) }))).toBe(true);
+    expect(await unmet(withDeps({ readFile: files({ reportSig: JSON.stringify(sigOf(reportBody(), { profile: "short" })) }) }))).toContain("stubbed_leg_signed_run_bound_fresh");
+    expect(await unmet(withDeps({ readFile: files({ reportSig: JSON.stringify(sigOf(reportBody(), { fault: "drop_offer" })) }) }))).toContain("stubbed_leg_passed_at_this_sha");
+    expect(await unmet(withDeps({ readFile: files({ reportSig: JSON.stringify(sigOf(reportBody(), { appGuardPid: null })) }) }))).toEqual(expect.arrayContaining(["stubbed_leg_app_guard_proven"]));
     expect(await ready_(deps)).toBe(true);
+    expect(reportBody()).not.toMatch(/OS egress: proven/);
   });
   it("an UNSIGNED report, a tampered report, a wrong key, a wrong run id, a stale report, or sha unknown are all refused", async () => {
     expect(await unmet(withDeps({ readFile: files({ reportSig: null }) }))).toContain("stubbed_leg_signed_run_bound_fresh");
@@ -155,15 +163,33 @@ describe("live leg prerequisites: signed, run-bound, fresh evidence; pinned numb
     expect(await ready_(withDeps({ readFile: files({ selftest: selftestDoc({ rows: goodRows({ faultFired: false }) }) }) }))).toBe(false);
     expect(await ready_(withDeps({ readFile: files({ selftest: selftestDoc({ rows: goodRows({ ok: false }) }) }) }))).toBe(false);
   });
-  it("A: an op-read number whose sha256 is not pinned is refused; an empty pin list refuses; plain numbers are never in the repo", () => {
+  it("A/S8: an op-read number whose HMAC is not pinned is refused; a bare sha256 pin is refused; an empty pin list refuses; plain numbers are never in the repo", () => {
     const env = { STRESS_OP_REF_CELL: "op://v/c/n", STRESS_OP_REF_TELNYX: "op://v/t/n" };
     const opRead = (r: string) => (r.includes("/c/") ? "+18165550111" : "+18165550222");
-    expect(resolveOwnedNumbers(env, { opRead, pinned: { cell: [sha256("+18165550111")], telnyx: [sha256("+18165550222")] } }).cell).toBe("+18165550111");
-    expect(() => resolveOwnedNumbers(env, { opRead, pinned: { cell: [sha256("+18165550999")], telnyx: [sha256("+18165550222")] } })).toThrow(/not on the pinned allowlist/);
-    expect(() => resolveOwnedNumbers(env, { opRead, pinned: { cell: [], telnyx: [] } })).toThrow(/no pinned sha256/);
+    const pinned = { cell: [numberPin("+18165550111", KEY)], telnyx: [numberPin("+18165550222", KEY)] };
+    expect(resolveOwnedNumbers(env, { opRead, pinned, reportKey: () => KEY }).cell).toBe("+18165550111");
+    expect(() => resolveOwnedNumbers(env, { opRead, pinned: { ...pinned, cell: [numberPin("+18165550999", KEY)] }, reportKey: () => KEY })).toThrow(/not on the pinned allowlist/);
+    expect(() => resolveOwnedNumbers(env, { opRead, pinned: { cell: [sha256("+18165550111")], telnyx: [sha256("+18165550222")] }, reportKey: () => KEY })).toThrow(/not on the pinned allowlist/); // a bare sha256 is no pin any more
+    expect(() => resolveOwnedNumbers(env, { opRead, pinned, reportKey: () => "z".repeat(40) })).toThrow(/not on the pinned allowlist/); // another key
+    expect(() => resolveOwnedNumbers(env, { opRead, pinned, reportKey: () => null })).toThrow(/no report signing key/);
+    expect(() => resolveOwnedNumbers(env, { opRead, pinned: { cell: [], telnyx: [] }, reportKey: () => KEY })).toThrow(/no pinned HMAC/);
     const file = readFileSync(path.join(__dirname, "owned-numbers.sha256.json"), "utf8");
     expect(file).not.toMatch(/\+?1?\d{10}/);
     expect(loadPinnedHashes().cell.every((h) => /^[0-9a-f]{64}$/.test(h))).toBe(true);
+  });
+  it("S5: right before each click the lead's CURRENT phone must be the pinned owned number for the step's target", () => {
+    const pinned = { cell: [numberPin("+18165550111", KEY)], telnyx: [numberPin("+18165550222", KEY)] };
+    expect(pinnedPhoneProblems("+18165550111", "cell", pinned, KEY)).toEqual([]);
+    expect(pinnedPhoneProblems("+18165550222", "telnyx", pinned, KEY)).toEqual([]);
+    expect(pinnedPhoneProblems("+18165550222", "cell", pinned, KEY).join()).toMatch(/not the pinned owned cell/); // swapped between seeding and the click
+    expect(pinnedPhoneProblems("+18165550999", "telnyx", pinned, KEY).join()).toMatch(/not the pinned owned telnyx/); // edited to a stranger
+    expect(pinnedPhoneProblems(null, "cell", pinned, KEY).join()).toMatch(/not a \+1/);
+    expect(pinnedPhoneProblems("garbage", "cell", pinned, KEY).join()).toMatch(/not a \+1/);
+    expect(pinnedPhoneProblems("+18165550111", "cell", { cell: [], telnyx: [] }, KEY).join()).toMatch(/no pinned HMAC/);
+    expect(pinnedPhoneProblems("+18165550111", "cell", pinned, null).join()).toMatch(/no report signing key/);
+    const spec = readFileSync(path.join(__dirname, "browser/live-leg.spec.ts"), "utf8");
+    expect(spec.indexOf("pinnedPhoneProblems(")).toBeGreaterThan(-1);
+    expect(spec.indexOf("pinnedPhoneProblems(")).toBeLessThan(spec.indexOf("await button.click()")); // checked before the click, inside dial()
   });
   it("N1: the default `op read` path refuses unless OP_SERVICE_ACCOUNT_TOKEN is set (injected readers are unaffected)", () => {
     expect(() => resolveOwnedNumbers({ STRESS_OP_REF_CELL: "op://v/c/n", STRESS_OP_REF_TELNYX: "op://v/t/n" })).toThrow(/OP_SERVICE_ACCOUNT_TOKEN/);

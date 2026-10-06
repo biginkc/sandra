@@ -163,7 +163,7 @@ describe("live B: evidence signing keys live outside the repo, mode 0600, and ve
   it("evidenceProblems: unsigned, wrong key, tampered content, wrong run, stale, future and unknown sha are refused", () => {
     const text = "report";
     const now = Date.parse("2026-10-06T12:00:00Z");
-    const doc = signEvidence({ v: 1, kind: "stub_leg", runId: "r1", sha: SHA, at: new Date(now - 1000).toISOString(), subjectSha256: sha256(text) }, good);
+    const doc = signEvidence({ v: 1, kind: "stub_leg", runId: "r1", sha: SHA, at: new Date(now - 1000).toISOString(), subjectSha256: sha256(text), verdict: "PASS", profile: "full", scope: "full", fault: "none", appGuardPid: 99 }, good);
     const want = { kind: "stub_leg" as const, sha: SHA, subjectText: text, runId: "r1", now };
     expect(evidenceProblems(doc, good, want)).toEqual([]);
     expect(evidenceProblems(null, good, want).join()).toMatch(/unsigned/);
@@ -174,6 +174,10 @@ describe("live B: evidence signing keys live outside the repo, mode 0600, and ve
     expect(evidenceProblems(doc, good, { ...want, now: now - 3600_000 }).join()).toMatch(/future/);
     expect(evidenceProblems(doc, good, { ...want, sha: "unknown" }).join()).toMatch(/sha is unknown/);
     expect(evidenceProblems(doc, good, { ...want, kind: "selftest" }).join()).toMatch(/not a selftest/);
+    for (const [k, v] of Object.entries({ verdict: "FAIL", profile: "short", scope: "replay", fault: "drop_offer", appGuardPid: null })) {
+      const d = signEvidence({ v: 1, kind: "stub_leg", runId: "r1", sha: SHA, at: new Date(now - 1000).toISOString(), subjectSha256: sha256(text), verdict: "PASS", profile: "full", scope: "full", fault: "none", appGuardPid: 99, [k]: v } as never, good);
+      expect(evidenceProblems(d, good, want).length, k).toBeGreaterThan(0); // the signed verdict and run shape are enforced by the signature check itself
+    }
   });
 });
 
@@ -315,7 +319,7 @@ describe("reach 3 + 5: the app env proof rejects provider credentials, proxies, 
   const STUB = "http://127.0.0.1:55500";
   const LOG = "/tmp/app-egress.jsonl";
   const line = (over: Record<string, unknown> = {}, envOver: Record<string, unknown> = {}) => JSON.stringify({
-    kind: "guard_loaded", pid: 4242, at: "2026-10-06T12:00:05.000Z", log: LOG, sha: SHA, dirty: false, redirect: STUB, spawnGuard: true, forbiddenPresent: [],
+    kind: "guard_loaded", pid: 4242, at: "2026-10-06T12:00:05.000Z", log: LOG, sha: SHA, dirty: false, redirect: STUB, spawnGuard: true, forbiddenPresent: [], unexpectedEnv: [],
     env: { NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:55431", DATABASE_URL: null, DIALPAD_DIAL_PROVIDER: null, MESSAGING_PROVIDER: "mock", DROPBOX_SIGN_API_BASE_URL: `${STUB}/dropbox-sign/v3`, VERCEL_ENV: null, VERCEL: null, ...envOver }, ...over,
   });
   const input = (l: string, over: Partial<AppProofInput> = {}): AppProofInput => ({ listenerPid: 4242, listenerUid: 501, harnessUid: 501, appEgressLog: LOG, logLines: [l], stubUrl: STUB, harnessSha: SHA, envFiles: [], listenerStartMs: Date.parse("2026-10-06T12:00:00Z"), supabaseUrl: "http://127.0.0.1:55431", dbUrl: "postgresql://postgres:postgres@127.0.0.1:55430/postgres", ...over });
@@ -332,6 +336,27 @@ describe("reach 3 + 5: the app env proof rejects provider credentials, proxies, 
     expect(appProofProblems(input(line({}, { NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:54321" }))).join()).toMatch(/not the harness's loopback stack/);
     expect(appProofProblems(input(line({}, { NEXT_PUBLIC_SUPABASE_URL: null }))).join()).toMatch(/unset/);
     expect(appProofProblems(input(line({}, { DATABASE_URL: "postgresql://postgres:postgres@127.0.0.1:54322/postgres" }))).join()).toMatch(/DATABASE_URL is not the harness's database/);
+  });
+  it("S2: the env proof is an ALLOWLIST: Jitter, Closer Lab, Sandra service and other credential-or-URL-looking names outside the list are refused", () => {
+    expect(appProofProblems(input(line({ unexpectedEnv: undefined }))).join()).toMatch(/does not report unexpected environment names/);
+    for (const name of ["JITTER_SOFTPHONE_BASE_URL", "JITTER_API_BASE_URL", "JITTER_SERVICE_TOKEN", "CLOSER_LAB_API_BASE_URL", "SANDRA_SERVICE_TOKEN", "DROPBOX_SIGN_API_KEY", "DIALPAD_API_KEY", "ANTHROPIC_BASE_URL"]) {
+      expect(appProofProblems(input(line({ unexpectedEnv: [name] }))).join(), name).toMatch(new RegExp(`allowlist.*${name}`));
+    }
+    expect(appProofProblems(input(line({ unexpectedEnv: [] })))).toEqual([]);
+  });
+  it("S2: from a real process, sensitive-looking names off the list are reported (names only) and the allowlisted app settings are not", () => {
+    const log = path.join(mkdtempSync(path.join(os.tmpdir(), "allow-")), "g.jsonl");
+    const env: Record<string, string> = {
+      PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", STRESS_EGRESS_LOG: log, NODE_OPTIONS: `--require "${path.join(__dirname, "egress-guard.cjs")}"`,
+      // allowed
+      NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:55431", SUPABASE_SERVICE_ROLE_KEY: "s", DATABASE_URL: "postgresql://x@127.0.0.1:55430/p", CRON_SECRET: "c", DIALPAD_CTI_WEBHOOK_SECRET_E2E: "w", DIALPAD_CTI_DIAL_KEY_E2E: "d", DIALPAD_DIAL_PROVIDER: "", DROPBOX_SIGN_API_BASE_URL: "http://127.0.0.1:55500/dropbox-sign/v3", ESIGN_CREDENTIAL_ENCRYPTION_KEY: "e", MESSAGING_PROVIDER: "mock", NEXT_PUBLIC_HUGO_SSO: "1", NEXT_TELEMETRY_DISABLED: "1", E2E_AUTH_BYPASS: "1", STRESS_DIALPAD_STUB_URL: "http://127.0.0.1:55500",
+      // not allowed
+      JITTER_SOFTPHONE_BASE_URL: "http://127.0.0.1:1", JITTER_SERVICE_TOKEN: "secret-value", CLOSER_LAB_API_BASE_URL: "http://x", SANDRA_SERVICE_TOKEN: "t", DROPBOX_SIGN_API_KEY: "k", SOME_THIRD_PARTY_WEBHOOK: "u",
+    };
+    spawnSync(process.execPath, ["-e", "0"], { env: env as NodeJS.ProcessEnv, encoding: "utf8" });
+    const g = JSON.parse(readFileSync(log, "utf8").split("\n").filter(Boolean).pop()!) as { unexpectedEnv: string[] };
+    expect(g.unexpectedEnv).toEqual(["CLOSER_LAB_API_BASE_URL", "DROPBOX_SIGN_API_KEY", "JITTER_SERVICE_TOKEN", "JITTER_SOFTPHONE_BASE_URL", "SANDRA_SERVICE_TOKEN", "SOME_THIRD_PARTY_WEBHOOK"]);
+    expect(readFileSync(log, "utf8")).not.toContain("secret-value"); // values are never recorded
   });
   it("reach 3: the guard line itself reports forbidden names (names only), from a real process", () => {
     const log = path.join(mkdtempSync(path.join(os.tmpdir(), "forb-")), "g.jsonl");

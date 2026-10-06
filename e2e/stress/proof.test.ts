@@ -16,7 +16,7 @@ const STUB = "http://127.0.0.1:55500";
 const LOG = "/tmp/app-egress.jsonl";
 const SHA = "a".repeat(40);
 const guardLine = (over: Record<string, unknown> = {}) => JSON.stringify({
-  kind: "guard_loaded", pid: 4242, probe: true, at: "2026-10-06T12:00:05.000Z", log: LOG, sha: SHA, dirty: false, redirect: STUB, spawnGuard: true, forbiddenPresent: [],
+  kind: "guard_loaded", pid: 4242, probe: true, at: "2026-10-06T12:00:05.000Z", log: LOG, sha: SHA, dirty: false, redirect: STUB, spawnGuard: true, forbiddenPresent: [], unexpectedEnv: [],
   env: { DIALPAD_DIAL_PROVIDER: null, MESSAGING_PROVIDER: "mock", DROPBOX_SIGN_API_BASE_URL: `${STUB}/dropbox-sign/v3`, VERCEL_ENV: null, VERCEL: null }, ...over,
 });
 const good = (over: Partial<AppProofInput> = {}): AppProofInput => ({ listenerPid: 4242, listenerUid: 501, harnessUid: 501, appEgressLog: LOG, logLines: [guardLine()], stubUrl: STUB, harnessSha: SHA, envFiles: [], listenerStartMs: Date.parse("2026-10-06T12:00:00.000Z"), ...over });

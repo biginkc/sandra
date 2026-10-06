@@ -7,7 +7,7 @@ import { LaneRefusal } from "./guards";
 /**
  * Egress denial, fail closed. Two rings:
  *  1. In-process guard (egress-guard.cjs), preloaded via NODE_OPTIONS into every process of the run.
- *  2. (Not a ring any more.) egress-pf.conf/.sh remain an OPTIONAL operator aid; nothing in the harness reads pf state as proof.
+ *  2. Nothing else: there is no OS-firewall ring. egress-pf.conf/.sh are an optional operator convenience only.
  * `proveEgressDenied` is a T0 precondition: it must SEE a denial, otherwise the run is refused.
  */
 

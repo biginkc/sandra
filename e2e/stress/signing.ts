@@ -12,9 +12,12 @@ import path from "node:path";
 
 export const MAX_EVIDENCE_AGE_MS = 24 * 3600_000;
 export type EvidenceKind = "stub_leg" | "selftest";
-export type EvidenceMeta = { v: 1; kind: EvidenceKind; runId: string; sha: string; at: string; subjectSha256: string };
+/** `verdict`, `profile`, `scope`, `fault` and `appGuardPid` are part of the SIGNED payload (stub_leg): the live leg reads them from here, never from a regex over the report text. */
+export type EvidenceMeta = { v: 1; kind: EvidenceKind; runId: string; sha: string; at: string; subjectSha256: string; verdict?: string; profile?: string; scope?: string; fault?: string; appGuardPid?: number | null };
 export type SignedEvidence = EvidenceMeta & { hmac: string };
 
+/** The pin of an owned number: HMAC under the report key, so a committed pin cannot be brute-forced like a bare sha256 of a 10-digit number. */
+export const numberPin = (number: string, key: string) => createHmac("sha256", key).update(`owned-number:${number}`).digest("hex");
 export const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const canonical = (m: EvidenceMeta) => JSON.stringify(Object.fromEntries(Object.entries(m).sort(([a], [b]) => (a < b ? -1 : 1))));
 export const signEvidence = (m: EvidenceMeta, key: string): SignedEvidence => ({ ...m, hmac: createHmac("sha256", key).update(canonical(m)).digest("hex") });
@@ -62,6 +65,12 @@ export function evidenceProblems(doc: SignedEvidence | null, key: string | null,
   if (want.runId !== undefined && doc.runId !== want.runId) p.push(`the evidence is for run ${doc.runId}, not ${want.runId}`);
   const age = want.now - Date.parse(doc.at);
   if (!Number.isFinite(age) || age < 0 || age > (want.maxAgeMs ?? MAX_EVIDENCE_AGE_MS)) p.push("the evidence timestamp is unreadable, in the future, or older than the maximum age");
+  if (want.kind === "stub_leg") {
+    // The verdict and the run shape come from the SIGNED data.
+    if (doc.verdict !== "PASS") p.push(`the signed verdict is ${doc.verdict ?? "absent"}, not PASS`);
+    if (doc.profile !== "full" || doc.scope !== "full" || doc.fault !== "none") p.push(`the signed run is ${doc.profile}/${doc.scope}/${doc.fault}, not full/full/none`);
+    if (typeof doc.appGuardPid !== "number" || !(doc.appGuardPid > 0)) p.push("the signed evidence records no app-guard pid");
+  }
   if (want.subjectText === null) p.push("the evidence content is missing");
   else if (sha256(want.subjectText) !== doc.subjectSha256) p.push("the evidence content does not match what was signed (edited after signing)");
   return p;

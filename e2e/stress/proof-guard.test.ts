@@ -19,7 +19,7 @@ const fields = (over: Partial<ProofFields> = {}): ProofFields => ({
   appPid: 4242, appListenerStartMs: START, appEgressLog: LOG, appEgressLogIno: 7, appEgressLogSizeAtT0: 100, stubUrl: STUB, proxyUrl: "http://localhost:1", appUrl: "http://127.0.0.1:3466", proxyUpstream: "http://127.0.0.1:3466", ...over,
 });
 const guardLine = (over: Record<string, unknown> = {}) => JSON.stringify({
-  kind: "guard_loaded", pid: 4242, at: "2026-10-06T12:00:05.000Z", log: LOG, sha: SHA, dirty: false, redirect: STUB, cwd: "/app", spawnGuard: true, forbiddenPresent: [],
+  kind: "guard_loaded", pid: 4242, at: "2026-10-06T12:00:05.000Z", log: LOG, sha: SHA, dirty: false, redirect: STUB, cwd: "/app", spawnGuard: true, forbiddenPresent: [], unexpectedEnv: [],
   env: { DIALPAD_DIAL_PROVIDER: null, MESSAGING_PROVIDER: "mock", DROPBOX_SIGN_API_BASE_URL: `${STUB}/dropbox-sign/v3`, VERCEL_ENV: null, VERCEL: null }, ...over,
 });
 

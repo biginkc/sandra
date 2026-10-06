@@ -56,6 +56,13 @@ if (!ANNOUNCE_ONLY) {
   } catch { /* no redirect configured */ }
 }
 
+const SENSITIVE_NAME = /(KEY|TOKEN|SECRET|PASSW|PASSWD|AUTH|CREDENTIAL|DSN|ENDPOINT|URL|URI|HOST|PROXY|BASE|WEBHOOK|SIGNING|PRIVATE|BEARER|SESSION|COOKIE)/i;
+const SENSITIVE_PREFIX = /^(JITTER|CLOSER_LAB|SANDRA_SERVICE|DIALPAD|DROPBOX|SENDILLO|TWILIO|TELNYX|SLACK|RESEND|OPENAI|ANTHROPIC|ATTOM|SMARTY|VERCEL|AWS|GOOGLE|GCP|AZURE|STRIPE|ASANA|NORMA|HUGO|SUPABASE|NEXT_PUBLIC_SUPABASE)/i;
+// Permitted names (exact) among the sensitive-looking ones: Supabase loopback, the stub URLs, the app's e2e settings and Node/Next basics.
+const ALLOWED_EXACT = new Set(["NEXT_PUBLIC_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_URL", "DATABASE_URL", "POSTGRES_URL", "CRON_SECRET", "DIALPAD_CTI_WEBHOOK_SECRET_E2E", "DIALPAD_CTI_DIAL_KEY_E2E", "DIALPAD_DIAL_PROVIDER", "DROPBOX_SIGN_API_BASE_URL", "DROPBOX_SIGN_CLIENT_ID", "DROPBOX_SIGN_CALLBACK_SECRET_KEY", "DROPBOX_SIGN_EMBEDDED_DOMAIN", "ESIGN_CREDENTIAL_ENCRYPTION_KEY", "NODE_OPTIONS", "NEXT_PUBLIC_HUGO_SSO", "NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "NEXT_TELEMETRY_DISABLED", "SSH_AUTH_SOCK", "VERCEL_ENV", "VERCEL"]);
+const ALLOWED_PREFIX = /^(STRESS_|E2E_|NODE_|npm_|NPM_|LC_|XDG_|__CF|HOMEBREW_)/;
+function looksSensitive(k) { return SENSITIVE_NAME.test(k) || SENSITIVE_PREFIX.test(k); }
+function allowedEnv(k) { return ALLOWED_EXACT.has(k) || ALLOWED_PREFIX.test(k); }
 const FORBIDDEN_ENV = /^(SENDILLO_API_KEY|REP_SMS_FROM_NUMBER|TWILIO_.*|TELNYX_.*|SLACK_.*|RESEND_.*|OPENAI_API_KEY|ANTHROPIC_API_KEY|http_proxy|https_proxy|all_proxy|no_proxy)$/i;
 
 // Announce: the harness proves the guard ran inside THIS pid, and what that pid is (runtime truth, no `ps` parsing): its provider environment,
@@ -71,6 +78,8 @@ try {
     redirect: dialpadRedirect, spawnGuard: process.env.STRESS_GUARD_SPAWN === "1" && !ANNOUNCE_ONLY,
     // Names (never values) of provider credentials and proxy overrides present in the process environment: the proof requires this list to be EMPTY.
     forbiddenPresent: Object.keys(e).filter((k) => FORBIDDEN_ENV.test(k) && e[k] !== undefined && e[k] !== "").sort(),
+    // ALLOWLIST: any variable whose NAME looks like a credential, URL, endpoint, host, proxy or provider setting and is not on the explicit list. Names only, never values.
+    unexpectedEnv: Object.keys(e).filter((k) => e[k] !== undefined && e[k] !== "" && looksSensitive(k) && !allowedEnv(k)).sort(),
     env: { NEXT_PUBLIC_SUPABASE_URL: e.NEXT_PUBLIC_SUPABASE_URL ?? null, SUPABASE_URL: e.SUPABASE_URL ?? null, DATABASE_URL: e.DATABASE_URL ?? null, POSTGRES_URL: e.POSTGRES_URL ?? null, DIALPAD_DIAL_PROVIDER: e.DIALPAD_DIAL_PROVIDER ?? null, MESSAGING_PROVIDER: e.MESSAGING_PROVIDER ?? null, DROPBOX_SIGN_API_BASE_URL: e.DROPBOX_SIGN_API_BASE_URL ?? null, VERCEL_ENV: e.VERCEL_ENV ?? null, VERCEL: e.VERCEL ?? null, NODE_OPTIONS: e.NODE_OPTIONS ?? null },
   };
   fs.appendFileSync(LOG, JSON.stringify(announce) + "\n");
