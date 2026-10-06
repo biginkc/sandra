@@ -21,6 +21,21 @@ import type { WorkflowReconciliation } from "./workflow-form"
  */
 export type AttemptOpening = { action: MyLeadAction; row: QueueRow; callActivityId?: string | null }
 
+/**
+ * The Sandra call a stored or committed request actually finalizes: only a sandra-source request
+ * carries a call identity. A manual save (even one that names a call id) finalizes no call.
+ */
+export function finalizedCallId(input: Record<string, unknown> | null | undefined): string | null {
+  if (!input || input.source !== "sandra") return null
+  return typeof input.callActivityId === "string" && input.callActivityId ? input.callActivityId : null
+}
+
+/** The call a COMMITTED save finalized, when (and only when) it is the call this opening is bound to. */
+export function boundCallFinalized<O extends AttemptOpening>(committed: AttemptCommitted<O>): string | null {
+  const bound = committed.opening.callActivityId
+  return bound && finalizedCallId(committed.input) === bound ? bound : null
+}
+
 type CommandResult = Awaited<ReturnType<typeof submitMyLeadCommand>>
 
 export type AttemptCommitted<O extends AttemptOpening> = {
@@ -336,7 +351,12 @@ export function useAttemptWorkflow<O extends AttemptOpening>({
       .sort((a, b) => b.createdAt - a.createdAt)
     // Opening is READ-ONLY: a committed or fresh record has nothing left to protect, so it is simply
     // ignored here (the next send overwrites it with a new key). Nothing is written or claimed.
-    const record = records.find((item) => item.status === "uncertain" || item.status === "already-saved" || item.status === "committed-not-seen")
+    // A bound opening (a Sandra call's prompt) never adopts an unresolved record whose own payload names a
+    // different call or none (a manual save): that record stays in the store, fully protected, for the
+    // opening it belongs to. A record whose payload is gone (reload) has no identity to compare and is kept.
+    const bound = current.callActivityId ?? null
+    const record = records.find((item) => (item.status === "uncertain" || item.status === "already-saved" || item.status === "committed-not-seen")
+      && !(bound && item.payload && finalizedCallId(item.payload) !== bound))
     if (!record) {
       // Re-read table: no record (or one that was seen and cleared) is a fresh form ONLY for an
       // opening that never held or resumed a record. One that did must not mint a key by itself.

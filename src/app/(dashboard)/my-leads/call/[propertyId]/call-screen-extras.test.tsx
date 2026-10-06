@@ -18,7 +18,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.refresh, push: vi.fn() }) }));
 vi.mock("next/link", () => ({ default: ({ href, children }: { href: string; children: React.ReactNode }) => <a href={href}>{children}</a> }));
 vi.mock("@/app/(dashboard)/my-leads/actions", () => ({ loadMyLeadQueueRow: mocks.loadMyLeadQueueRow, savePostCallExtras: mocks.savePostCallExtras }));
-vi.mock("@/app/(dashboard)/my-leads/_components/use-attempt-workflow", () => ({ useAttemptWorkflow: mocks.useAttemptWorkflow }));
+vi.mock("@/app/(dashboard)/my-leads/_components/use-attempt-workflow", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/app/(dashboard)/my-leads/_components/use-attempt-workflow")>()), useAttemptWorkflow: mocks.useAttemptWorkflow }));
 vi.mock("@/app/(dashboard)/sequences/actions", () => ({ listDripChoices: vi.fn(async () => ({ ok: true, data: [] })), startDripForLeads: vi.fn() }));
 vi.mock("./actions", () => ({ compLeadAction: vi.fn(), setValuationInputsAction: vi.fn() }));
 vi.mock("./history-panel", () => ({ HistoryPanel: () => null }));
@@ -61,7 +61,7 @@ const extras = { submissionId: "sub-1", note: "Seller wants 250k", nextStep: nul
 const confirmed = { ok: true as const, note: "saved" as const, nextStep: "skipped" as const };
 const options = () => mocks.useAttemptWorkflow.mock.calls.at(-1)![0] as WorkflowOptions;
 const stash = () => putExtras({ viewerUserId: "user-1", attemptKey: "key-1", propertyId, memberId: "user-1", extras });
-const committedInput = () => ({ opening: options().opening, attemptKey: "key-1", extras, input: {}, result: { ok: true }, dripFailure: null });
+const committedInput = () => ({ opening: options().opening, attemptKey: "key-1", extras, input: { source: "sandra", callActivityId: (options().opening as { callActivityId?: string }).callActivityId }, result: { ok: true }, dripFailure: null });
 const withVersion = (queueVersion: number) => ({ ...data, queueRow: { ...data.queueRow, queueVersion } });
 
 // Records the attempt through the REAL dock prompt, so it shows its receipt (and Retry) exactly as it does live.

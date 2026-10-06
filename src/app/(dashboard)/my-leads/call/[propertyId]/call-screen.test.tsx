@@ -21,7 +21,7 @@ vi.mock("next/link", () => ({ default: ({ href, children, className }: { href: s
 vi.mock("@/app/(dashboard)/leads/actions", () => ({ markMessagesReadForProperty: mocks.markMessagesReadForProperty, createLeadNote: vi.fn() }));
 vi.mock("@/app/(dashboard)/my-leads/actions", () => ({ loadMyLeadQueueRow: mocks.loadMyLeadQueueRow, savePostCallExtras: mocks.savePostCallExtras }));
 vi.mock("@/app/(dashboard)/sequences/actions", () => ({ listDripChoices: vi.fn(async () => ({ ok: true, data: [] })), startDripForLeads: vi.fn() }));
-vi.mock("@/app/(dashboard)/my-leads/_components/use-attempt-workflow", () => ({ useAttemptWorkflow: mocks.useAttemptWorkflow }));
+vi.mock("@/app/(dashboard)/my-leads/_components/use-attempt-workflow", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/app/(dashboard)/my-leads/_components/use-attempt-workflow")>()), useAttemptWorkflow: mocks.useAttemptWorkflow }));
 vi.mock("@/app/(dashboard)/my-leads/dialpad-actions", () => ({
   dialLeadAction: mocks.dialLead,
   getDialpadCallStatusAction: (...a: unknown[]) => mocks.dialStatus(...a),
@@ -153,7 +153,7 @@ describe("CallScreen", () => {
       expect(payload.recordingUrl ?? null).toBeNull();
       const opts = (mocks.useAttemptWorkflow.mock.calls as unknown as [unknown][]).at(-1)![0] as { opening: unknown; onCommitted: (c: unknown) => Promise<void> };
       expect((opts.opening as { callActivityId: string }).callActivityId).toBe("call-1");
-      await act(async () => { await opts.onCommitted({ opening: opts.opening, attemptKey: "k", extras: null, input: {}, result: { ok: true }, dripFailure: null }); });
+      await act(async () => { await opts.onCommitted({ opening: opts.opening, attemptKey: "k", extras: null, input: { source: "sandra", callActivityId: "call-1" }, result: { ok: true }, dripFailure: null }); });
       // The saved call's panel is cleared (no stale "Call ended"), and only one prompt ever showed.
       await waitFor(() => expect(screen.queryByTestId("dial-status")).toBeNull());
       expect(screen.getAllByTestId("post-call-prompt")).toHaveLength(1);

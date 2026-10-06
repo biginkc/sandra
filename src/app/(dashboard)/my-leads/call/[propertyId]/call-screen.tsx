@@ -9,7 +9,7 @@ import { PostCallPrompt, ReceiptLines, type PromptOutcome } from "@/app/(dashboa
 import { listExtrasFor } from "@/app/(dashboard)/my-leads/_components/extras-store";
 import { extrasConfirmed, saveExtrasRequest, type ExtrasRequest } from "@/app/(dashboard)/my-leads/_components/extras-saver";
 import type { PostCallExtrasState } from "@/app/(dashboard)/my-leads/_components/types";
-import { useAttemptWorkflow, type AttemptOpening } from "@/app/(dashboard)/my-leads/_components/use-attempt-workflow";
+import { boundCallFinalized, useAttemptWorkflow, type AttemptOpening } from "@/app/(dashboard)/my-leads/_components/use-attempt-workflow";
 import { useOptionalDialpadCall, type DialpadEndedCall } from "@/components/dialpad/dialpad-call-context";
 import { WorkflowRecoveryContext } from "@/app/(dashboard)/my-leads/_components/workflow-form";
 import { Badge } from "@/components/ui/badge";
@@ -193,9 +193,10 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false, post
     },
     onCommitted: async (committed) => {
       // This call's outcome is saved: its panel (and any reminder) is done, and no second prompt can open for it.
-      if (committed.opening.callActivityId) {
-        setSavedHere(committed.opening.callActivityId);
-        dialpadCall?.clearEndedCall?.(committed.opening.callActivityId);
+      const finalized = boundCallFinalized(committed);
+      if (finalized) {
+        setSavedHere(finalized);
+        dialpadCall?.clearEndedCall?.(finalized);
       }
       if (committed.extras) {
         void runExtras(
