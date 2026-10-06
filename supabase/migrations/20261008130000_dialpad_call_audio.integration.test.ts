@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { Client } from 'pg';
-import { stripTransaction } from '@tests/integration/my-leads-housekeeping-fixture';
+import { readSql, stripTransaction } from '@tests/integration/my-leads-housekeeping-fixture';
 import {
   applyP2, asUser, CALL, dbUrl, deliver, failure, ledger, nativeCall, prepare, service, setFlag, world,
   type Json, type World,
@@ -565,6 +565,8 @@ describe('20261008130000 Dialpad call audio', () => {
       expect(await refused()).toContain('ROLLBACK_REFUSED'); // ambiguous
       expect((await db.query("select to_regclass('public.dialpad_share_link_attempts') is not null as present")).rows[0].present).toBe(true);
       await db.query("update public.dialpad_share_link_attempts set state='deleted', reason=null where id=$1", [attemptId]);
+      expect(await refused()).toContain('worker lease is still held'); // the singleton is still held
+      await db.query("update public.dialpad_recording_worker set until = now() - interval '1 second'");
       await db.query(stripTransaction(ROLLBACK));
       expect((await db.query("select to_regclass('public.dialpad_share_link_attempts') is not null as present")).rows[0].present).toBe(false);
     });
@@ -706,6 +708,89 @@ describe('20261008130000 Dialpad call audio', () => {
       await probe.query('delete from public.dialpad_recording_worker').catch(() => undefined);
       await Promise.all([a.end(), b.end(), probe.end()]);
     }
+  });
+
+  describe('rollback vs a concurrent worker (committed state, two connections)', () => {
+    const open = async () => { const c = new Client({ connectionString: dbUrl() }); await c.connect(); return c; };
+    const asService = async (c: Client) => {
+      await c.query('begin');
+      await c.query('set local role service_role');
+      await c.query("select set_config('request.jwt.claim.role','service_role',true)");
+    };
+    const settledWithin = async (p: Promise<unknown>, ms: number) =>
+      Promise.race([p.then(() => true, () => true), new Promise<boolean>((r) => setTimeout(() => r(false), ms))]);
+
+    async function fixture(probe: Client) {
+      const org = randomUUID(), act = randomUUID(), holder = randomUUID();
+      await probe.query('insert into public.organizations(id,name) values ($1,$2)', [org, `rb ${org}`]);
+      await probe.query(
+        `insert into public.call_activities(id, org_id, jitter_attempt_id, provider, provider_call_id, ended_at, outcome, call_purpose)
+         values ($1,$2,$3,'dialpad','6100000000000001', now() - interval '3 hours', 'connected_human', 'customer')`, [act, org, `manual-${act}`]);
+      await probe.query("update public.dialpad_call_audio set state='discovered', provider_recording_id='R1', provider_duration_ms=1000 where call_activity_id=$1", [act]);
+      const audio = (await probe.query('select id from public.dialpad_call_audio where call_activity_id=$1', [act])).rows[0].id;
+      await probe.query("insert into public.dialpad_recording_worker(id, holder, until) values (1, $1, now() + interval '90 seconds') on conflict (id) do update set holder = excluded.holder, until = excluded.until", [holder]);
+      return { org, holder, audio };
+    }
+    const cleanup = async (probe: Client, org: string) => {
+      await probe.query('delete from public.dialpad_recording_worker').catch(() => undefined);
+      await probe.query('delete from public.call_activities where org_id=$1', [org]).catch(() => undefined);
+      await probe.query('delete from public.organizations where id=$1', [org]).catch(() => undefined);
+    };
+
+    it('an attempt begun on connection A holds the rollback on B until A commits; B then refuses because of the unresolved row', async () => {
+      const probe = await open();
+      if (!(await probe.query("select to_regclass('public.dialpad_share_link_attempts') is not null as p")).rows[0].p) { await probe.end(); return; }
+      const [a, b] = [await open(), await open()];
+      const { org, holder, audio } = await fixture(probe);
+      try {
+        await asService(a);
+        const begun = (await a.query('select public.fn_dpa_attempt_begin($1,$2) as v', [holder, audio])).rows[0].v;
+        expect(begun.blocked).toBe(false);
+        await b.query('begin');
+        const rollback = b.query(stripTransaction(ROLLBACK));
+        expect(await settledWithin(rollback, 700)).toBe(false); // waits for A's lock
+        await a.query('commit');
+        await expect(rollback).rejects.toThrow('ROLLBACK_REFUSED');
+        await b.query('rollback');
+        expect((await probe.query("select to_regclass('public.dialpad_share_link_attempts') is not null as p")).rows[0].p).toBe(true);
+      } finally {
+        await a.query('rollback').catch(() => undefined);
+        await b.query('rollback').catch(() => undefined);
+        await cleanup(probe, org);
+        await Promise.all([a.end(), b.end(), probe.end()]);
+      }
+    });
+
+    it('when the rollback holds the lock first, a worker insert waits and then fails once the tables are gone', async () => {
+      const probe = await open();
+      if (!(await probe.query("select to_regclass('public.dialpad_share_link_attempts') is not null as p")).rows[0].p) { await probe.end(); return; }
+      const [a, b] = [await open(), await open()];
+      const { org, holder, audio } = await fixture(probe);
+      // No lease held and no unresolved link, so the rollback is allowed to proceed.
+      await probe.query("update public.dialpad_recording_worker set until = now() - interval '1 second'");
+      let restored = false;
+      try {
+        await b.query('begin');
+        await b.query(stripTransaction(ROLLBACK)); // holds the locks through teardown, not yet committed
+        await asService(a);
+        const attempt = a.query('select public.fn_dpa_attempt_begin($1,$2) as v', [holder, audio]);
+        const outcome = attempt.then(() => 'ok', (e: Error) => e.message);
+        expect(await settledWithin(attempt, 700)).toBe(false); // waits for the rollback's lock
+        await b.query('commit');
+        const message = await outcome;
+        expect(message).not.toBe('ok');
+        expect((await probe.query("select to_regclass('public.dialpad_share_link_attempts') is not null as p")).rows[0].p).toBe(false);
+        await a.query('rollback').catch(() => undefined);
+        await probe.query(readSql(MIGRATION)); // put the migration back for everything after this test
+        restored = true;
+      } finally {
+        await a.query('rollback').catch(() => undefined);
+        await b.query('rollback').catch(() => undefined);
+        if (!restored) await probe.query(readSql(MIGRATION)).catch(() => undefined);
+        await cleanup(probe, org);
+        await Promise.all([a.end(), b.end(), probe.end()]);
+      }
+    });
   });
 
   it('the rollback twin removes every object and flag column, leaves the bucket, and the migration can be re-applied', async () => {
