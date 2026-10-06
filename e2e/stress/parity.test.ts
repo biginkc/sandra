@@ -54,7 +54,7 @@ describe("(b) section parity compares the COMPLETE expected set", () => {
     expect(ok.expected.inDrip).toBe(1);
     const foreign = expectedFromQueueRows([...rows, { stage: "contacted", in_drip: false, is_run_lead: false }]);
     expect(foreign.problems.join()).toMatch(/1 queue lead\(s\) that are not run leads/);
-    expect(QUEUE_ROWS_SQL).toMatch(/my_leads_queue_rows\(\$1, \$2/); // called with the rep as the member (the spec runs it through asRep)
+    expect(QUEUE_ROWS_SQL).toMatch(/my_leads_queue_rows\(\$1, \$2/); // the rep is the member argument ($2)
   });
   it("b10 render-only-when-non-empty mode: an empty stage may be absent, a populated one may not, and present-with-0 is extra", () => {
     const opts = { alwaysRendered: false };

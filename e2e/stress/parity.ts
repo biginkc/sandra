@@ -87,7 +87,7 @@ export function sectionParityProblems(rendered: ReadonlyArray<RenderedSection>, 
 }
 
 /**
- * The expected-count source: the page's own owned-lead definition, `my_leads_queue_rows` called AS THE REP (an open assignment episode, not DNC-locked,
+ * The expected-count source: the page's own owned-lead definition, `my_leads_queue_rows` called with the REP as its member argument (an internal helper, not executable by `authenticated`; an open assignment episode, not DNC-locked,
  * status not closed/dead/dnc, archived excluded), each row joined to its property and to whether it is in an ACTIVE drip. The same query, filtered to
  * non-run addresses, is the "rep owns only run leads" guard.
  */

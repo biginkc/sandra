@@ -46,7 +46,8 @@ test("stress rendered parity: lead page next step matches the open appointment r
   const dbStrip = await asRep(run.db, run.world.repUserId, (c) => c.query<{ v: { rows: Array<{ propertyId: string }> } }>("select public.fn_get_my_leads_call_next($1,$2,25) as v", [run.cfg.orgId, run.world.repUserId]));
   failures.push(...stripParityProblems(renderedStrip, dbStrip.rows[0]!.v.rows.map((r) => r.propertyId)));
   const sections = await page.locator('[data-testid^="my-leads-section-"]').evaluateAll((els) => els.map((e) => ({ stage: (e.getAttribute("data-testid") ?? "").replace("my-leads-section-", ""), badge: e.querySelector('[aria-label$="lead"], [aria-label$="leads"]')?.getAttribute("aria-label") ?? "" })));
-  const queue = await asRep(run.db, run.world.repUserId, (c) => c.query<QueueRow>(QUEUE_ROWS_SQL, [run.cfg.orgId, run.world.repUserId, run.cfg.runTag]));
+  // `my_leads_queue_rows` is an internal helper (not executable by `authenticated`); the REP is its member argument, as in the page's own RPCs.
+  const queue = await run.db.query<QueueRow>(QUEUE_ROWS_SQL, [run.cfg.orgId, run.world.repUserId, run.cfg.runTag]);
   const { expected, problems: unknownStages } = expectedFromQueueRows(queue.rows);
   failures.push(...unknownStages, ...sectionParityProblems(sections, expected));
   recordResult(run.dir, -16, failures.length === 0, failures.slice(0, 5).join(" | "));
