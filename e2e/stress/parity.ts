@@ -91,13 +91,13 @@ export function sectionParityProblems(rendered: ReadonlyArray<RenderedSection>, 
  * status not closed/dead/dnc, archived excluded), each row joined to its property and to whether it is in an ACTIVE drip. The same query, filtered to
  * non-run addresses, is the "rep owns only run leads" guard.
  */
-export const QUEUE_ROWS_SQL = `select r.stage as stage,
+export const QUEUE_ROWS_SQL = `select r.property_id as property_id, r.stage as stage,
        exists (select 1 from public.sequence_enrollments e where e.property_id = r.property_id and e.org_id = $1 and e.status = 'active') as in_drip,
        (p.address like $3 || '%') as is_run_lead
   from public.my_leads_queue_rows($1, $2, statement_timestamp()) r
   join public.properties p on p.id = r.property_id and p.org_id = $1`;
 
-export type QueueRow = { stage: string; in_drip: boolean; is_run_lead: boolean };
+export type QueueRow = { property_id?: string; stage: string; in_drip: boolean; is_run_lead: boolean };
 
 /** Folds the rep's queue rows into expected section counts, and refuses (a problem) when the rep owns a lead that is not a run lead. */
 export function expectedFromQueueRows(rows: readonly QueueRow[]): { expected: ExpectedSections; problems: string[] } {
@@ -107,4 +107,19 @@ export function expectedFromQueueRows(rows: readonly QueueRow[]): { expected: Ex
   const foreign = rows.filter((r) => !r.is_run_lead).length;
   if (foreign > 0) problems.push(`the rep owns ${foreign} queue lead(s) that are not run leads: section counts cannot be compared`);
   return { expected, problems };
+}
+
+/**
+ * Non-vacuity: the comparisons above are meaningless over nothing. The strip must render at least one row (when the database has Call-next rows),
+ * the rep's queue must hold at least one lead, and EVERY run lead must be in that queue (a missing run lead is a lost lead, not a smaller count).
+ */
+export function nonVacuityProblems(i: { renderedStrip: readonly string[]; dbStrip: readonly string[]; queueRows: readonly QueueRow[]; runLeadIds: readonly string[] }): string[] {
+  const p: string[] = [];
+  if (i.dbStrip.length === 0) p.push("the database has no Call-next rows: strip parity compared nothing");
+  if (i.renderedStrip.length === 0) p.push("the page rendered no strip rows: strip parity compared nothing");
+  if (i.queueRows.length === 0) p.push("the rep's queue is empty: section parity compared nothing");
+  const inQueue = new Set(i.queueRows.map((r) => r.property_id));
+  const missing = i.runLeadIds.filter((id) => !inQueue.has(id));
+  if (missing.length > 0) p.push(`${missing.length} run lead(s) are missing from the rep's queue (first: ${missing[0]})`);
+  return p;
 }

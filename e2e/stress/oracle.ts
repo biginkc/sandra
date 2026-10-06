@@ -201,6 +201,21 @@ export function reminderProblems(rows: readonly ReminderRow[], expected: number 
   return out;
 }
 
+/** The keys the KPI parity check must assert (all three must be present, classified EQUAL, and equal the schedule's totals). */
+export const KPI_REQUIRED_KEYS = ["attempts", "reached", "offersSent"] as const;
+
+/** KPI totals: every required key is asserted (a key the rules stopped classifying as EQUAL, or one missing from the KPI result, fails), never silently skipped. */
+export function kpiTotalProblems(kpi: Record<string, unknown>, expected: Record<string, number>, rules: Record<string, string>, equalRule: string): Violation[] {
+  const out: Violation[] = [];
+  for (const key of KPI_REQUIRED_KEYS) {
+    if (rules[key] !== equalRule) { out.push({ rule: "kpi_key_not_asserted", key, classifiedAs: rules[key] ?? null }); continue; }
+    if (!(key in kpi)) { out.push({ rule: "kpi_key_missing", key }); continue; }
+    if (!(key in expected)) { out.push({ rule: "kpi_expected_total_missing", key }); continue; }
+    if (Number(kpi[key]) !== expected[key]) out.push({ rule: "kpi_total", key, planned: expected[key], observed: kpi[key] });
+  }
+  return out;
+}
+
 export type Receipt = { phone: string | null; key: string | null; at?: string };
 export type AuthorizedIntent = { custom_data: string; destination_e164: string };
 
@@ -364,10 +379,7 @@ export async function expectedOutcomes(i: OracleInput): Promise<Check[]> {
     for (const key of Object.keys(kpi)) if (!(key in rules.RULES)) v15.push({ rule: "unclassified_kpi_key", key });
     const reachedPlanned = executed.reduce((n, r) => n + (byTick.get(r.tick)!.expected.attemptOutcome === "reached" ? byTick.get(r.tick)!.expected.attempts : 0), 0);
     const expectedTotals: Record<string, number> = { attempts: plannedAttempts, reached: reachedPlanned, offersSent: plannedOffers };
-    for (const [key, want] of Object.entries(expectedTotals)) {
-      if (rules.RULES[key] !== rules.EQUAL_IN_CLOSED_WINDOWS) continue;
-      if (Number(kpi[key]) !== want) v15.push({ rule: "kpi_total", key, planned: want, observed: kpi[key] });
-    }
+    for (const v of kpiTotalProblems(kpi, expectedTotals, rules.RULES, rules.EQUAL_IN_CLOSED_WINDOWS)) v15.push(v);
   } catch (e) {
     v15.push({ rule: "kpi_check_failed", error: (e as Error).message });
   }

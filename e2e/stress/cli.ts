@@ -6,6 +6,7 @@ import { artifactsDirFor, runChaos } from "./engine";
 import { assertStressLane, LaneRefusal } from "./guards";
 import { buildManifest, toNdjson, type Profile } from "./manifest";
 import { runSelfTest } from "./selftest";
+import { loadReportKey, sha256, signEvidence } from "./signing";
 
 /**
  * Entrypoint (opt-in; never part of the default CI lanes):
@@ -45,6 +46,20 @@ async function main(): Promise<number> {
     console.log(`KILL file written: ${dir}/KILL (the running harness kills within one invariant interval)`);
     return 0;
   }
+  if (cmd === "pin-number") {
+    // Prints ONLY the sha256 of the owned number behind an op ref, for the operator to commit in owned-numbers.sha256.json. Never prints the number.
+    const role = process.argv[3];
+    if (role !== "cell" && role !== "telnyx") throw new Error("usage: stress pin-number <cell|telnyx>");
+    const { createHash } = await import("node:crypto");
+    const { execFileSync } = await import("node:child_process");
+    const ref = process.env[role === "cell" ? "STRESS_OP_REF_CELL" : "STRESS_OP_REF_TELNYX"] ?? "";
+    if (!process.env.OP_SERVICE_ACCOUNT_TOKEN) throw new Error("OP_SERVICE_ACCOUNT_TOKEN is not set: refusing to run `op read`");
+    if (!/^op:\/\/[^\s]+$/.test(ref)) throw new Error("the op ref env is not an op:// reference");
+    const v = execFileSync("op", ["read", "--no-newline", ref], { encoding: "utf8", timeout: 20_000 }).trim();
+    if (!/^\+1\d{10}$/.test(v)) throw new Error("the value is not a +1XXXXXXXXXX number");
+    console.log(createHash("sha256").update(v).digest("hex"));
+    return 0;
+  }
   if (cmd === "live-check") {
     const { liveLegStatus } = await import("./live-leg");
     const cfg = loadConfig();
@@ -60,7 +75,12 @@ async function main(): Promise<number> {
     // Recorded for the live leg: a passing self-test at THIS sha is a prerequisite (STRESS_SELFTEST_REPORT points at it).
     const out = path.resolve(cfg.artifactsRoot, `selftest-${cfg.sha.slice(0, 12)}.json`);
     mkdirSync(path.dirname(out), { recursive: true });
-    writeFileSync(out, JSON.stringify({ sha: cfg.sha, ok: r.ok, at: new Date().toISOString(), rows: r.rows }, null, 2));
+    let sig: unknown = null;
+    try {
+      const key = loadReportKey(process.env);
+      if (key) sig = signEvidence({ v: 1, kind: "selftest", runId: cfg.runId, sha: cfg.sha, at: new Date().toISOString(), subjectSha256: sha256(JSON.stringify({ sha: cfg.sha, ok: r.ok, rows: r.rows })) }, key);
+    } catch (e) { console.error(`self-test report not signed: ${(e as Error).message}`); }
+    writeFileSync(out, JSON.stringify({ sha: cfg.sha, ok: r.ok, at: new Date().toISOString(), rows: r.rows, sig }, null, 2));
     console.log(`self-test report: ${out}`);
     return r.ok ? 0 : 1;
   }

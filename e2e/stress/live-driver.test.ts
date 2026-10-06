@@ -29,8 +29,9 @@ describe("live leg driver", () => {
     expect(f.calls.filter((c) => c === "dial:5" || c === "dial:6")).toEqual([]);
     expect(res.filter((r) => r.verdict === "not_driven").map((r) => r.n)).toEqual([5, 6]);
     const s = summarizeLive(res, plan);
-    expect(s.ok).toBe(false); // a not-driven step is never a pass
-    expect(s).toMatchObject({ verified: 6, notDriven: 2, unverified: 0, missing: 0 });
+    // The cancel shape has no UI control: it is excluded from the required count and reported, so a fully verified run can be ok (live sweep F).
+    expect(s.ok).toBe(true);
+    expect(s).toMatchObject({ required: 6, verified: 6, notDriven: 2, unverified: 0, missing: 0 });
   });
   it("waits the plan gap between calls and fires the second double dial inside the 20 s window", async () => {
     const f = fakePort({ refuseWhen: (s) => s.expectRefusal === true });

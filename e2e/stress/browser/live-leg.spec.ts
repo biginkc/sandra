@@ -8,8 +8,9 @@ import { createSyntheticLead } from "../../support/my-leads-close-fixture";
 import { readConfig } from "../config";
 import { openDb } from "../db";
 import { driveLiveLeg, summarizeLive, type LivePort } from "../live-driver";
-import { findListenerPid, readLines } from "../app-proof";
-import { assertLiveLegReady, liveAppIdentityProblems, type LiveCallStep, type LiveEvidence } from "../live-leg";
+import { collectLiveAppFacts } from "../app-proof";
+import { assertLiveLane } from "../guards";
+import { assertLiveLegReady, liveAppRecheckProblems, type LiveCallStep, type LiveEvidence } from "../live-leg";
 
 /**
  * LIVE LEG driver (DISABLED BY DEFAULT, NEVER IN CI). It is skipped unless STRESS_LIVE_LEG=1 and is refused in CI or a
@@ -30,11 +31,15 @@ test("live leg: ~8 owned-number calls, evidence per call", async ({ page }) => {
   test.setTimeout(60 * 60_000);
   if (process.env.CI || process.env.GITHUB_ACTIONS || process.env.VERCEL || process.env.VERCEL_ENV) throw new Error("the live leg never runs in CI or a hosted runtime");
   const cfg = readConfig(process.env);
+  assertLiveLane(cfg, process.env); // loopback bindings (incl. TEST_SUPABASE_URL and STRESS_SUPABASE_URL), disposable DB, no hosted refs, STRESS_LIVE_LEG=1, not CI
   const { numbers, plan } = await assertLiveLegReady(cfg, process.env);
-  // Bind the tested app's build to THIS checkout (the sha itself comes from git HEAD, never from the environment).
+  // Bind the tested app's build to THIS checkout (the sha comes from git HEAD, never from the environment), now and before EVERY dial.
   const identityLog = process.env.STRESS_LIVE_APP_IDENTITY_LOG!;
-  const identity = liveAppIdentityProblems(readLines(identityLog), findListenerPid(Number(new URL(cfg.appUrl).port || 80)), cfg.sha, identityLog);
-  if (identity.length) throw new Error(`the live app's build is not bound to this checkout: ${identity.join(" | ")}`);
+  const assertIdentity = () => {
+    const problems = liveAppRecheckProblems(collectLiveAppFacts(cfg.appUrl, identityLog), cfg.sha, identityLog, process.getuid?.() ?? -1);
+    if (problems.length) throw new Error(`the live app's identity check failed: ${problems.join(" | ")}`);
+  };
+  assertIdentity();
   const world = JSON.parse(readFileSync(process.env.STRESS_LIVE_WORLD_FILE!, "utf8")) as { orgId: string; repUserId: string };
   const outDir = path.join(cfg.artifactsRoot, `live-${cfg.runId}-${cfg.sha.slice(0, 8)}`);
   const logFile = path.join(outDir, "live.log");
@@ -61,12 +66,14 @@ test("live leg: ~8 owned-number calls, evidence per call", async ({ page }) => {
     const lookup = (step: LiveCallStep) => lastDial.get(step.n)!;
     const port: LivePort = {
       async dial(step) {
+        assertIdentity();
         const propertyId = leads[step.target].propertyId;
         const since = new Date().toISOString();
         await page.goto(`${cfg.appUrl}/my-leads/call/${propertyId}`);
         const button = page.getByTestId(`call-button-${propertyId}`);
         await expect(button).toBeEnabled({ timeout: 30_000 });
         const before = (await db.query<{ n: number }>("select count(*)::int n from public.dialpad_call_intents where property_id=$1 and dispatch_authorized_at is not null", [propertyId])).rows[0]!.n;
+        const clickedAtMs = Date.now();
         await button.click(); // a mutating click: never repeated
         lastDial.set(step.n, { propertyId, since });
         // The database is the judge of a refusal: no new authorized intent appeared.
@@ -75,8 +82,14 @@ test("live leg: ~8 owned-number calls, evidence per call", async ({ page }) => {
           await page.waitForTimeout(500);
           after = (await db.query<{ n: number }>("select count(*)::int n from public.dialpad_call_intents where property_id=$1 and dispatch_authorized_at is not null", [propertyId])).rows[0]!.n;
         }
-        return after === before ? { refused: true, note: (await page.getByTestId("dial-status").first().innerText().catch(() => "no status shown")).slice(0, 160) } : { refused: false };
+        return after === before ? { refused: true, clickedAtMs, note: (await page.getByTestId("dial-status").first().innerText().catch(() => "no status shown")).slice(0, 160) } : { refused: false, clickedAtMs };
       },
+      async lateDial(step) {
+        const d = lookup(step);
+        const n = (await db.query<{ n: number }>("select count(*)::int n from public.dialpad_call_intents where property_id=$1 and dispatch_authorized_at is not null and prepared_at >= $2::timestamptz", [d.propertyId, d.since])).rows[0]!.n;
+        return n > 0;
+      },
+      recheck: async () => assertIdentity(),
       async awaitTerminal(step, timeoutMs) {
         const d = lookup(step);
         const until = Date.now() + timeoutMs;

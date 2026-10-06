@@ -4,9 +4,9 @@ import path from "node:path";
 
 import { CRON_ROUTES, FaultState, runCron, sleep, TickDeadline, type Ctx } from "./actions";
 import { approvedTestSms, type StressConfig } from "./config";
-import { assertFreshDatabase, asRep, asService, openDb, type Db } from "./db";
+import { assertFreshDatabase, assertOnlyHarnessRows, asRep, asService, openDb, type Db } from "./db";
 import { appBenignDenials, appEgressViolations, checkoutDirtyReason, proveAppUnderTest, type LogSnapshot } from "./app-proof";
-import { egressChildEnv, proveInProcessDenial, proveOsDenial, readEgressViolations } from "./egress";
+import { egressChildEnv, proveInProcessDenial, readEgressViolations } from "./egress";
 import { GateController } from "./gates";
 import { assertStressLane, LaneRefusal } from "./guards";
 import { killSwitch, snapshotEvidence, type KillReport } from "./kill-switch";
@@ -16,6 +16,7 @@ import { expectedOutcomes, pendingJarradObservations, safetyInvariants, type Che
 import { GateProxy } from "./proxy";
 import { newRunSecrets, proofChildEnv, writeAppProof } from "./proof-guard";
 import { reminderWindowOpenAt } from "./reminder-window";
+import { loadReportKey, sha256, signEvidence } from "./signing";
 import { decide, hashConfig, writeReport, type RunSummary } from "./report";
 import { IMPLS, newRecord, type TickRecord } from "./scenarios";
 import { StubServer } from "./stubs";
@@ -45,7 +46,8 @@ export function artifactsDirFor(cfg: StressConfig, profile: Profile): string {
 /** The server log lines (after `offset`) that mean an unexpected 5xx or an unhandled rejection. */
 export function scanServerLog(file: string, offset: number, opts: { injectedOfflineFetchFailures?: number } = {}): string[] {
   if (!existsSync(file)) return [`server log ${file} not found`];
-  const text = readFileSync(file, "utf8").slice(offset);
+  // `offset` is a BYTE offset (statSync().size): slice the Buffer, not the decoded string (multibyte text before the offset shifts characters).
+  const text = readFileSync(file).subarray(Math.min(offset, statSync(file).size)).toString("utf8");
   const bad: string[] = [];
   // Injected failure with an explicit, bounded expectation: each scripted offline gesture (browser `setOffline` during Send) makes Next's
   // client forward exactly one `[browser] unhandledRejection: TypeError: Failed to fetch` to the server log. Only that many are expected.
@@ -152,13 +154,9 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   // Guards run BEFORE any connection of any kind (no DB, no HTTP, no stub, no browser).
   assertStressLane(cfg, env);
   mkdirSync(dir, { recursive: true });
-  for (const f of ["executed.ndjson", "invariants.jsonl", "ordering.jsonl", "stub.ndjson", "egress.jsonl", "app-proof.json", "browser-results.jsonl", "KILL", "kill-switch.json", "test-org-dump.json"]) rmSync(path.join(dir, f), { force: true });
+  for (const f of ["executed.ndjson", "invariants.jsonl", "ordering.jsonl", "stub.ndjson", "egress.jsonl", "app-proof.json", "REPORT.md", "REPORT.sig.json", "invariants.final.json", "config.json", "world.json", "schedule.ndjson", "browser-lane.log", "browser-results.jsonl", "KILL", "kill-switch.json", "test-org-dump.json"]) rmSync(path.join(dir, f), { force: true });
   const egressLog = path.join(dir, "egress.jsonl");
   proveInProcessDenial(egressLog);
-  // The OS ring is required for a PASS (and so for the live leg). Without it the run can be at most PARTIAL_PASS; with it set, the probe must see a denial.
-  let osEgressProven = false;
-  let osEgressNotes: string[] = [];
-  if (env.STRESS_REQUIRE_OS_EGRESS === "1") { osEgressNotes = proveOsDenial({ uids: [process.getuid?.() ?? -1] }); osEgressProven = true; }
   log(`lane guards passed; egress guard proven; artifacts ${dir}`);
 
   const manifest: Manifest = buildManifest(cfg.seed, cfg.runTag, { profile });
@@ -192,6 +190,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   let finishingInvariants = false;
 
   try {
+    await assertOnlyHarnessRows(db); // BEFORE the reset, so a wipe of foreign data is never the first step
     if (opts.resetFirst) await resetTenantData(db);
     await assertFreshDatabase(db, cfg);
     await stub.start(cfg.stubPort);
@@ -207,7 +206,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
 
     // T0, before any provider-capable action: the app under test carries the guard, logs to its own file, and every provider is stub/test.
     if (cfg.stubPort <= 0) throw new LaneRefusal("STUB_PORT_REQUIRED", "STRESS_STUB_PORT must be a fixed port: the app under test is started with DROPBOX_SIGN_API_BASE_URL pointing at it.");
-    const appProof = proveAppUnderTest({ appUrl: cfg.appUrl, appEgressLog: cfg.appEgressLog, stubUrl: stub.url, harnessSha: cfg.sha });
+    const appProof = proveAppUnderTest({ appUrl: cfg.appUrl, appEgressLog: cfg.appEgressLog, stubUrl: stub.url, harnessSha: cfg.sha, supabaseUrl: cfg.supabaseUrl, dbUrl: cfg.dbUrl });
     appGuardPid = appProof.pid;
     appEgressSnap = appProof.snapshot;
     appCwd = appProof.cwd;
@@ -216,7 +215,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     writeAppProof(dir, {
       runId: cfg.runId, runTag: cfg.runTag, nonce: runSecrets.nonce, sha: cfg.sha, appPid: appProof.pid, appListenerStartMs: appProof.startMs ?? 0,
       appEgressLog: cfg.appEgressLog, appEgressLogIno: appProof.snapshot.ino, appEgressLogSizeAtT0: appProof.snapshot.size,
-      stubUrl: stub.url, proxyUrl: proxy?.url ?? "", osEgressProven,
+      stubUrl: stub.url, proxyUrl: proxy?.url ?? "", appUrl: cfg.appUrl, proxyUpstream: proxy?.upstreamOrigin ?? new URL(cfg.appUrl).origin,
     }, runSecrets.key);
     log(`app under test proven: egress guard loaded in pid ${appGuardPid}, providers stub/test`);
     world = await setupWorld(db, cfg);
@@ -318,6 +317,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   faultFiredFlag = faultFiredCheck();
   // Denials from the harness's own processes AND from the app server (its own log); any denial fails the run.
   // Build identity again at the end: Next hot-reloads edits and serves untracked files, so a change made after T0 is as bad as one made before.
+  for (const g of gates.unfiredGates()) setupErrors.push(`gate ${g.id} (${g.stage}) was armed but never reached: the race it was meant to create did not happen`);
   const dirtyAtEnd = appCwd ? checkoutDirtyReason(appCwd) : null;
   if (dirtyAtEnd) setupErrors.push(`app checkout changed during the run: ${dirtyAtEnd}`);
   const benignDenials = appBenignDenials(cfg.appEgressLog, appEgressSnap);
@@ -340,14 +340,22 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     }
   }
 
-  const summary = decide({ cfg, manifest, records, invariantChecks, outcomeChecks, egressViolations: egress.length, osEgressProven, reminderWindowOpen: windowOpenAtStart && reminderWindowOpenAt(new Date()), serverProblems, killed: failedAny ? killed : null, setupErrors, browserExecuted });
+  const summary = decide({ cfg, manifest, records, invariantChecks, outcomeChecks, egressViolations: egress.length, reminderWindowOpen: windowOpenAtStart && reminderWindowOpenAt(new Date()), serverProblems, killed: failedAny ? killed : null, setupErrors, browserExecuted });
   writeFileSync(path.join(dir, "invariants.final.json"), JSON.stringify(summary.checks, null, 1));
   writeReport(dir, {
-    cfg, manifest, summary, pending, osEgressProven, osEgressNotes, appGuardPid, benignDenials, levers, killed,
+    cfg, manifest, summary, pending, appGuardPid, benignDenials, levers, killed,
     stubCounts: { dials: stub?.dials().length ?? 0, sends: stub?.sends().length ?? 0 },
     elapsedMs: Date.now() - t0,
     repro: `CHAOS_SEED=${cfg.seed} STRESS_PROFILE=${profile} STRESS_SCOPE=${cfg.scope} STRESS_FAULT=${cfg.fault} tsx e2e/stress/cli.ts run   # same seed + the recorded schedule.ndjson + a fresh stack`,
   });
+  // Signed evidence for the live leg (only when a signing key outside the repo is configured; otherwise the report stays unsigned and the live leg refuses it).
+  try {
+    const key = loadReportKey(env);
+    if (key) {
+      const text = readFileSync(path.join(dir, "REPORT.md"), "utf8");
+      writeFileSync(path.join(dir, "REPORT.sig.json"), JSON.stringify(signEvidence({ v: 1, kind: "stub_leg", runId: cfg.runId, sha: cfg.sha, at: new Date().toISOString(), subjectSha256: sha256(text) }, key), null, 1), { mode: 0o600 });
+    }
+  } catch (e) { log(`report not signed: ${(e as Error).message}`); }
   await proxy?.stop().catch(() => {});
   await stub?.stop().catch(() => {});
   await db?.end().catch(() => {});

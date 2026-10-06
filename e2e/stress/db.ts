@@ -2,7 +2,7 @@ import pg from "pg";
 
 import { ciDatabaseUrl, handleTarget } from "../support/my-leads-close-fixture";
 import type { StressConfig } from "./config";
-import { assertFreshCounts, LaneRefusal } from "./guards";
+import { assertFreshCounts, assertOnlyHarnessData, LaneRefusal } from "./guards";
 
 export type Db = pg.Pool;
 
@@ -23,6 +23,12 @@ export async function assertFreshDatabase(db: Db, cfg: StressConfig): Promise<vo
     [`${cfg.runTag}%`],
   );
   assertFreshCounts({ properties: Number(r.rows[0]!.properties), untaggedProperties: Number(r.rows[0]!.untagged) }, cfg.runTag);
+}
+
+/** Run BEFORE any reset: the database must hold only harness leads (any run tag). */
+export async function assertOnlyHarnessRows(db: Db): Promise<void> {
+  const r = await db.query<{ properties: string; foreign: string }>("select count(*)::text as properties, count(*) filter (where address not like 'STRESS-%')::text as foreign from public.properties");
+  assertOnlyHarnessData({ properties: Number(r.rows[0]!.properties), nonHarnessProperties: Number(r.rows[0]!.foreign) });
 }
 
 /** One transaction as service_role (the outbox/cron functions require that claim). */

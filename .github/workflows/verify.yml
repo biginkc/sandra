@@ -58,6 +58,9 @@ jobs:
           SUPABASE_LOCAL_DB_URL: postgresql://runner@localhost:5432/postgres
         run: npm run verify
 
+      - name: Run chaos-harness guard unit tests (loopback only, no providers)
+        run: npm run test:stress-unit
+
       - name: Run database-free synthetic Playwright gates
         env:
           PLAYWRIGHT_BROWSER_CHANNEL: chrome

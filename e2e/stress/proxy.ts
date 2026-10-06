@@ -18,6 +18,8 @@ export class GateProxy {
   constructor(private readonly upstream: URL, private readonly gates: GateController) {
     if (!["127.0.0.1", "localhost", "[::1]"].includes(upstream.hostname)) throw new Error("GateProxy upstream must be loopback");
   }
+  /** The origin this proxy forwards to: the proof binds STRESS_APP_URL to it. */
+  get upstreamOrigin(): string { return this.upstream.origin; }
   /** `localhost`, not 127.0.0.1: Next dev only serves its client assets (and so hydrates) for allowed dev origins, and `localhost` is the default one. The proxy itself listens on loopback only. */
   get url(): string {
     return `http://localhost:${this.port}`;

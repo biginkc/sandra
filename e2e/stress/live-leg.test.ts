@@ -1,8 +1,12 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { readConfig } from "./config";
-import { assertLiveLegReady, classifyLiveEvidence, liveCallPlan, liveLegStatus, resolveOwnedNumbers, sendilloSpotCheck, type LiveDeps } from "./live-leg";
+import { assertLiveLegReady, classifyLiveEvidence, liveCallPlan, liveLegStatus, loadPinnedHashes, resolveOwnedNumbers, sendilloSpotCheck, type LiveDeps } from "./live-leg";
 import { LaneRefusal } from "./guards";
+import { sha256, signEvidence } from "./signing";
 
 const SHA = "a".repeat(40);
 const ready: Record<string, string> = {
@@ -21,6 +25,7 @@ const ready: Record<string, string> = {
   STRESS_DIALPAD_DESKTOP_CONFIRMED: "1",
   STRESS_TUNNEL_URL: "https://stress-tunnel.example.net",
   STRESS_STUB_LEG_REPORT: "/r/REPORT.md",
+  STRESS_STUB_LEG_RUN_ID: "live1",
   STRESS_DIALPAD_SUBSCRIPTION_PROOF: "/r/proof.txt",
   STRESS_LIVE_WORLD_FILE: "/r/world.json",
   STRESS_SELFTEST_REPORT: "/r/selftest.json",
@@ -29,10 +34,32 @@ const ready: Record<string, string> = {
   STRESS_OP_REF_TELNYX: "op://vault/telnyx/number",
 };
 const goodRows = (over: Record<string, unknown> = {}) => [{ fault: "none", ok: true, faultFired: false, failingChecks: [], verdict: "PARTIAL_PASS" }, { fault: "duplicate_send", ok: true, faultFired: true, failingChecks: [7], verdict: "FAIL", ...over }, { fault: "drop_offer", ok: true, faultFired: true, failingChecks: [14], verdict: "FAIL" }, { fault: "wrong_lead_note", ok: true, faultFired: true, failingChecks: [12], verdict: "FAIL" }];
+const KEY = "k".repeat(40);
+const NOW = Date.parse("2026-10-06T12:00:00.000Z");
+const iso = (ms: number) => new Date(ms).toISOString();
+const reportBody = (over: { sha?: string; verdict?: string; extra?: string } = {}) => `# Chaos day live1: ${over.verdict ?? "PASS"}\n\n- Run: live1 ${iso(NOW - 120_000)}\n- SHA: ${over.sha ?? SHA}\n- Profile: full, scope: full, fault: none\n- OS egress ring: not claimed (in-process guard + app proof + stub provider env are the enforced boundary)\n- App egress guard: proven in pid 4242\n${over.extra ?? ""}`;
+const sigOf = (text: string, over: Record<string, unknown> = {}) => signEvidence({ v: 1, kind: "stub_leg", runId: "live1", sha: SHA, at: iso(NOW - 60_000), subjectSha256: sha256(text), ...over } as never, KEY);
+const selftestDoc = (over: { sha?: string; ok?: boolean; rows?: unknown[]; sig?: Record<string, unknown> | null } = {}) => {
+  const doc = { sha: over.sha ?? SHA, ok: over.ok ?? true, rows: over.rows ?? goodRows() };
+  const sig = over.sig === null ? null : signEvidence({ v: 1, kind: "selftest", runId: "st", sha: SHA, at: iso(NOW - 3600_000), subjectSha256: sha256(JSON.stringify(doc)), ...(over.sig ?? {}) } as never, KEY);
+  return JSON.stringify({ ...doc, sig });
+};
+const files = (over: { report?: string; reportSig?: string | null; selftest?: string } = {}): LiveDeps["readFile"] => (p) => {
+  if (p.endsWith("REPORT.md")) return over.report ?? reportBody();
+  if (p.endsWith("REPORT.sig.json")) return over.reportSig === null ? null : over.reportSig ?? JSON.stringify(sigOf(over.report ?? reportBody()));
+  if (p.endsWith("selftest.json")) return over.selftest ?? selftestDoc();
+  if (p.endsWith("world.json")) return JSON.stringify({ orgId: "o", repUserId: "u" });
+  if (p.endsWith("proof.txt")) return "subscription https://stress-tunnel.example.net ok";
+  return null;
+};
 const deps: LiveDeps = {
   opRead: (ref) => (ref.includes("cell") ? "+18165550111" : "+18165550222"),
-  readFile: (p) => (p.endsWith("REPORT.md") ? `# Chaos day live1: PASS\n\n- SHA: ${SHA}\n- Profile: full, scope: full, fault: none\n- OS egress: proven\n- App egress guard: proven in pid 4242\n` : p.endsWith("selftest.json") ? JSON.stringify({ sha: SHA, ok: true, rows: goodRows() }) : p.endsWith("world.json") ? JSON.stringify({ orgId: "o", repUserId: "u" }) : p.endsWith("proof.txt") ? "subscription https://stress-tunnel.example.net ok" : null),
+  pinned: { cell: [sha256("+18165550111")], telnyx: [sha256("+18165550222")] },
+  now: () => NOW,
+  reportKey: () => KEY,
+  readFile: files(),
 };
+const withDeps = (over: Partial<LiveDeps>): LiveDeps => ({ ...deps, ...over });
 const status = (env: Record<string, string | undefined>, d: LiveDeps = deps) => liveLegStatus(readConfig(env, { headSha: () => SHA }), env, d);
 
 describe("live leg gating (disabled by default, refuses unless every prerequisite is met)", () => {
@@ -52,8 +79,8 @@ describe("live leg gating (disabled by default, refuses unless every prerequisit
     }
   });
   it("blocks on a stubbed-leg report that is not a full PASS at this sha", async () => {
-    for (const body of [`# Chaos day x: PARTIAL_PASS\n- SHA: ${SHA}\n- Profile: full, scope: full, fault: none\n`, `# Chaos day x: PASS\n- SHA: ${"b".repeat(40)}\n- Profile: full, scope: full, fault: none\n`, `# Chaos day x: PASS\n- SHA: ${SHA}\n- Profile: short, scope: replay, fault: none\n`]) {
-      expect((await status(ready, { ...deps, readFile: (p) => (p.endsWith("REPORT.md") ? body : "https://stress-tunnel.example.net") })).ready).toBe(false);
+    for (const report of [reportBody({ verdict: "PARTIAL_PASS" }), reportBody({ sha: "b".repeat(40) }), reportBody().replace("full, scope: full", "short, scope: replay")]) {
+      expect((await status(ready, withDeps({ readFile: files({ report }) }))).ready).toBe(false);
     }
   });
   it("blocks when the two owned numbers are the same, or are not numbers", async () => {
@@ -93,26 +120,52 @@ describe("live leg content rules", () => {
   });
 });
 
-describe("live leg prerequisites added after review B1/N1 (e)", () => {
-  const withReport = (body: string) => ({ ...deps, readFile: (p: string) => (p.endsWith("REPORT.md") ? body : deps.readFile!(p)) });
-  const base = `# Chaos day live1: PASS\n\n- SHA: ${SHA}\n- Profile: full, scope: full, fault: none\n`;
-  it("a PASS report without OS egress proof, or without the app guard proof, does not unlock it", async () => {
-    expect((await status(ready, withReport(`${base}- App egress guard: proven in pid 7\n`))).ready).toBe(false);
-    expect((await status(ready, withReport(`${base}- OS egress: NOT proven\n- App egress guard: proven in pid 7\n`))).ready).toBe(false);
-    expect((await status(ready, withReport(`${base}- OS egress: proven\n- App egress guard: NOT proven\n`))).ready).toBe(false);
-    expect((await status(ready, withReport(`${base}- OS egress: proven\n- App egress guard: proven in pid 7\n`))).ready).toBe(true);
+describe("live leg prerequisites: signed, run-bound, fresh evidence; pinned numbers (live-leg sweep A, B)", () => {
+  const ready_ = async (d: LiveDeps, env = ready) => (await status(env, d)).ready;
+  const unmet = async (d: LiveDeps, env = ready) => (await status(env, d)).prerequisites.filter((p) => !p.ok).map((p) => p.id);
+  it("a PASS report must record the app guard proof (the OS ring is no longer part of any claim)", async () => {
+    expect(await ready_(withDeps({ readFile: files({ report: reportBody().replace("- App egress guard: proven in pid 4242\n", "") }) }))).toBe(false);
+    expect(reportBody()).not.toMatch(/OS egress: proven/); // nothing claims pf proof, and the live leg does not ask for it
+    expect(await ready_(deps)).toBe(true);
   });
-  const withSelftest = (json: unknown) => ({ ...deps, readFile: (p: string) => (p.endsWith("selftest.json") ? JSON.stringify(json) : deps.readFile!(p)) });
-  const rows = goodRows;
-  it("needs a passing self-test at this sha in which every fault fired", async () => {
-    expect((await status(ready, withSelftest({ sha: SHA, ok: true, rows: rows() }))).ready).toBe(true);
-    expect((await status(ready, withSelftest({ sha: SHA, ok: false, rows: rows() }))).ready).toBe(false);
-    expect((await status(ready, withSelftest({ sha: "b".repeat(40), ok: true, rows: rows() }))).ready).toBe(false);
-    expect((await status(ready, withSelftest({ sha: SHA, ok: true, rows: rows({ faultFired: false }) }))).ready).toBe(false);
-    expect((await status(ready, withSelftest({ sha: SHA, ok: true, rows: rows({ ok: false }) }))).ready).toBe(false);
+  it("an UNSIGNED report, a tampered report, a wrong key, a wrong run id, a stale report, or sha unknown are all refused", async () => {
+    expect(await unmet(withDeps({ readFile: files({ reportSig: null }) }))).toContain("stubbed_leg_signed_run_bound_fresh");
+    expect(await unmet(withDeps({ readFile: files({ report: reportBody({ extra: "- tampered\n" }), reportSig: JSON.stringify(sigOf(reportBody())) }) }))).toContain("stubbed_leg_signed_run_bound_fresh");
+    expect(await unmet(withDeps({ reportKey: () => "z".repeat(40) }))).toContain("stubbed_leg_signed_run_bound_fresh");
+    expect(await unmet(deps, { ...ready, STRESS_STUB_LEG_RUN_ID: "other" })).toContain("stubbed_leg_signed_run_bound_fresh");
+    expect(await unmet(withDeps({ readFile: files({ reportSig: JSON.stringify(sigOf(reportBody(), { at: iso(NOW - 25 * 3600_000) })) }) }))).toContain("stubbed_leg_signed_run_bound_fresh");
+    expect(await unmet(withDeps({ readFile: files({ reportSig: JSON.stringify(sigOf(reportBody(), { sha: "unknown" })) }) }))).toContain("stubbed_leg_signed_run_bound_fresh");
+    expect(await unmet(withDeps({ reportKey: () => null }))).toContain("report_signing_key");
+  });
+  it("sha \"unknown\" is refused even when the evidence says unknown too", async () => {
+    const cfgUnknown = readConfig({ ...ready, STRESS_SHA: undefined }, { headSha: () => "unknown" });
+    const s = await liveLegStatus(cfgUnknown, ready, withDeps({ readFile: files({ report: reportBody({ sha: "unknown" }), reportSig: JSON.stringify(sigOf(reportBody({ sha: "unknown" }), { sha: "unknown" })) }) }));
+    expect(s.ready).toBe(false);
+  });
+  it("the self-test report is signed and fresh too; unsigned, tampered, stale or wrong-sha ones are refused", async () => {
+    expect(await ready_(withDeps({ readFile: files({ selftest: selftestDoc() }) }))).toBe(true);
+    expect(await unmet(withDeps({ readFile: files({ selftest: selftestDoc({ sig: null }) }) }))).toContain("selftest_passed_at_this_sha");
+    expect(await unmet(withDeps({ readFile: files({ selftest: selftestDoc({ sig: { at: iso(NOW - 30 * 3600_000) } }) }) }))).toContain("selftest_passed_at_this_sha");
+    const tampered = JSON.parse(selftestDoc()); tampered.ok = false; tampered.rows = goodRows({ ok: false });
+    expect(await unmet(withDeps({ readFile: files({ selftest: JSON.stringify(tampered) }) }))).toContain("selftest_passed_at_this_sha");
+    expect(await unmet(withDeps({ readFile: files({ selftest: selftestDoc({ sha: "b".repeat(40) }) }) }))).toContain("selftest_passed_at_this_sha");
+  });
+  it("needs a passing self-test in which every fault fired", async () => {
+    expect(await ready_(withDeps({ readFile: files({ selftest: selftestDoc({ ok: false }) }) }))).toBe(false);
+    expect(await ready_(withDeps({ readFile: files({ selftest: selftestDoc({ rows: goodRows({ faultFired: false }) }) }) }))).toBe(false);
+    expect(await ready_(withDeps({ readFile: files({ selftest: selftestDoc({ rows: goodRows({ ok: false }) }) }) }))).toBe(false);
+  });
+  it("A: an op-read number whose sha256 is not pinned is refused; an empty pin list refuses; plain numbers are never in the repo", () => {
+    const env = { STRESS_OP_REF_CELL: "op://v/c/n", STRESS_OP_REF_TELNYX: "op://v/t/n" };
+    const opRead = (r: string) => (r.includes("/c/") ? "+18165550111" : "+18165550222");
+    expect(resolveOwnedNumbers(env, { opRead, pinned: { cell: [sha256("+18165550111")], telnyx: [sha256("+18165550222")] } }).cell).toBe("+18165550111");
+    expect(() => resolveOwnedNumbers(env, { opRead, pinned: { cell: [sha256("+18165550999")], telnyx: [sha256("+18165550222")] } })).toThrow(/not on the pinned allowlist/);
+    expect(() => resolveOwnedNumbers(env, { opRead, pinned: { cell: [], telnyx: [] } })).toThrow(/no pinned sha256/);
+    const file = readFileSync(path.join(__dirname, "owned-numbers.sha256.json"), "utf8");
+    expect(file).not.toMatch(/\+?1?\d{10}/);
+    expect(loadPinnedHashes().cell.every((h) => /^[0-9a-f]{64}$/.test(h))).toBe(true);
   });
   it("N1: the default `op read` path refuses unless OP_SERVICE_ACCOUNT_TOKEN is set (injected readers are unaffected)", () => {
     expect(() => resolveOwnedNumbers({ STRESS_OP_REF_CELL: "op://v/c/n", STRESS_OP_REF_TELNYX: "op://v/t/n" })).toThrow(/OP_SERVICE_ACCOUNT_TOKEN/);
-    expect(resolveOwnedNumbers({ STRESS_OP_REF_CELL: "op://v/c/n", STRESS_OP_REF_TELNYX: "op://v/t/n" }, { opRead: (r) => (r.includes("/c/") ? "+18165550111" : "+18165550222") }).cell).toBe("+18165550111");
   });
 });

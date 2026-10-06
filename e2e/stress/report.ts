@@ -26,8 +26,6 @@ export function decide(input: {
   invariantChecks: readonly Check[];
   outcomeChecks: readonly Check[];
   egressViolations: number;
-  /** The pf ring was required (STRESS_REQUIRE_OS_EGRESS=1) and its probe saw a firewall-style denial. */
-  osEgressProven: boolean;
   /** The seller-reminder job's real-clock window (08:00-21:00 Central) stayed open for the whole run; when false the reminder send path was not exercised. Defaults to open. */
   reminderWindowOpen?: boolean;
   serverProblems: string[];
@@ -57,9 +55,23 @@ export function decide(input: {
     deferredBrowser: browserPlanned.get(m.scenario) ?? 0,
   }));
 
+  // A PASS needs every mandatory piece to have RUN, not merely nothing to have failed: all 10 invariants, all 6 outcomes, records, and every
+  // mandatory scenario's replay ticks executed (against the manifest). An empty or truncated result is never a PASS.
+  const have = new Set(all.map((c) => c.id));
+  for (let id = 1; id <= 16; id += 1) if (!have.has(id)) reasons.push(`mandatory check ${id} did not run`);
+  if (input.invariantChecks.length === 0) reasons.push("no invariant checks ran");
+  if (input.outcomeChecks.length === 0) reasons.push("no outcome checks ran");
+  if (input.records.length === 0) reasons.push("no tick records: nothing was executed");
+  const replayPlanned = new Map<string, number>();
+  for (const t of input.manifest.ticks) if (t.actor === "replay") replayPlanned.set(t.scenario, (replayPlanned.get(t.scenario) ?? 0) + 1);
+  for (const sc of scenarioCounts) {
+    if (sc.planned === 0) reasons.push(`mandatory scenario ${sc.scenario} is not in the manifest`);
+    const want = replayPlanned.get(sc.scenario) ?? 0;
+    if (sc.executedReplay < want) reasons.push(`scenario ${sc.scenario}: executed ${sc.executedReplay}/${want} replay ticks`);
+  }
+
   const reduced: string[] = [];
   if (input.reminderWindowOpen === false) reduced.push("seller reminders were not exercised: the run left the job's real-clock window (08:00-21:00 Central), where it sends nothing");
-  if (!input.osEgressProven) reduced.push("OS egress ring not proven (STRESS_REQUIRE_OS_EGRESS=1 with the pf rules applied)");
   if (input.manifest.profile !== "full") reduced.push(`profile=${input.manifest.profile}`);
   if (input.cfg.scope !== "full") reduced.push(`scope=${input.cfg.scope} (browser lane deferred)`);
   if (input.cfg.scope === "full") {
@@ -83,8 +95,6 @@ export function writeReport(dir: string, input: {
   manifest: Manifest;
   summary: RunSummary;
   pending: string[];
-  osEgressProven: boolean;
-  osEgressNotes: string[];
   appGuardPid: number | null;
   /** Denials of the Next dev server's own npm version check (the one tolerated app egress attempt). */
   benignDenials: number;
@@ -96,8 +106,8 @@ export function writeReport(dir: string, input: {
 }): void {
   const { cfg, manifest, summary } = input;
   const lines: string[] = [];
-  lines.push(`# Chaos day ${cfg.runId}: ${summary.verdict}`, "");
-  lines.push(`- SHA: ${cfg.sha}`, `- Seed: ${cfg.seed}`, `- Profile: ${manifest.profile}, scope: ${cfg.scope}, fault: ${cfg.fault}`, `- Schedule hash: ${manifest.hash}`, `- Elapsed: ${(input.elapsedMs / 1000).toFixed(1)}s`, `- Stub traffic: ${input.stubCounts.dials} dial(s), ${input.stubCounts.sends} contract send(s)`, `- OS egress: ${input.osEgressProven ? "proven" : "NOT proven"}`, ...input.osEgressNotes.map((n) => `- OS egress note: ${n}`), `- App egress guard: ${input.appGuardPid ? `proven in pid ${input.appGuardPid}` : "NOT proven"}`, `- Tolerated app egress denials: ${input.benignDenials} (Next dev version check to registry.npmjs.org, denied by the guard)`, "");
+  lines.push(`# Chaos day ${cfg.runId}: ${summary.verdict}`, "", `- Run: ${cfg.runId} ${new Date().toISOString()}`);
+  lines.push(`- SHA: ${cfg.sha}`, `- Seed: ${cfg.seed}`, `- Profile: ${manifest.profile}, scope: ${cfg.scope}, fault: ${cfg.fault}`, `- Schedule hash: ${manifest.hash}`, `- Elapsed: ${(input.elapsedMs / 1000).toFixed(1)}s`, `- Stub traffic: ${input.stubCounts.dials} dial(s), ${input.stubCounts.sends} contract send(s)`, `- OS egress ring: not claimed (in-process guard + app proof + stub provider env are the enforced boundary)`, `- App egress guard: ${input.appGuardPid ? `proven in pid ${input.appGuardPid}` : "NOT proven"}`, `- Tolerated app egress denials: ${input.benignDenials} (Next dev version check to registry.npmjs.org, denied by the guard)`, "");
   if (summary.reasons.length) lines.push("## Why not PASS", ...summary.reasons.map((r) => `- ${r}`), "");
   lines.push("## Scenario counts", "| scenario | planned | executed (replay) | deferred (browser) |", "|---|---|---|---|");
   for (const s of summary.scenarioCounts) lines.push(`| ${s.scenario} | ${s.planned} | ${s.executedReplay} | ${s.deferredBrowser} |`);

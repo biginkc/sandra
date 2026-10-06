@@ -9,7 +9,7 @@
  * <workdir>/stress-env.json. Never reads or writes any hosted-project credential.
  */
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
@@ -26,12 +26,24 @@ if (![apiPort, dbPort].every((p) => Number.isInteger(p) && p >= 1024 && p <= 655
 if ([54321, 54322, 54329, 54331].some((p) => p === apiPort || p === dbPort)) {
   throw new Error("refusing the dev stack ports (54321/54322/54329/54331); pick fresh ones");
 }
+// The workdir must be a throwaway directory this script owns: never the repo root, never a directory holding the repo's supabase/config.toml (that is the
+// dev stack's project), and --stop only works on a directory this script created (marker file).
+const MARKER = ".sandra-stress-stack";
+const absWork = path.resolve(workdir);
+const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+if (absWork === repoRoot || repoRoot.startsWith(absWork + path.sep) || existsSync(path.join(absWork, "supabase", "config.toml")) && !existsSync(path.join(absWork, MARKER))) {
+  throw new Error("refusing --workdir: it is the repo root, contains the repo, or holds a supabase/config.toml this script did not create");
+}
+if (process.argv.includes("--stop") && !existsSync(path.join(absWork, MARKER))) {
+  throw new Error("refusing --stop: this directory has no .sandra-stress-stack marker (not created by provision-stack.mjs)");
+}
 const run = (...argv) => execFileSync("supabase", argv, { stdio: ["ignore", "pipe", "inherit"] });
 if (process.argv.includes("--stop")) {
   run("stop", "--workdir", workdir, "--no-backup");
   process.exit(0);
 }
 mkdirSync(workdir, { recursive: true });
+writeFileSync(path.join(absWork, MARKER), `created ${new Date().toISOString()}\n`);
 run("init", "--workdir", workdir, "--force");
 const source = readFileSync("supabase/config.toml", "utf8");
 if (!/^major_version\s*=\s*17\s*$/m.test(source)) throw new Error("Repo config must pin Postgres 17");

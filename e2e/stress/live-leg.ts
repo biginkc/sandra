@@ -1,8 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 
 import { approvedTestSms, type StressConfig } from "./config";
 import { isLoopbackUrl, LaneRefusal } from "./guards";
+import { evidenceProblems, loadReportKey, sha256, type SignedEvidence } from "./signing";
 import { selfTestReportOk } from "./selftest-spec";
 
 /**
@@ -27,6 +29,12 @@ export type LiveStatus = { ready: boolean; prerequisites: Prerequisite[] };
 
 type Env = Readonly<Record<string, string | undefined>>;
 export type LiveDeps = {
+  /** Pinned sha256 allowlists of the owned numbers (default: owned-numbers.sha256.json). Injected in tests. */
+  pinned?: { cell: readonly string[]; telnyx: readonly string[] };
+  /** Wall clock (ms) for evidence age. */
+  now?: () => number;
+  /** Report signing key loader (default: loadReportKey over env). */
+  reportKey?: () => string | null;
   /** Reads a secret reference (op://...). Default: the 1Password CLI with the service account. Injected in tests. */
   opRead?: (ref: string) => string;
   readFile?: (path: string) => string | null;
@@ -39,6 +47,11 @@ function defaultOpRead(ref: string): string {
   if (!/^op:\/\/[^\s]+$/.test(ref)) throw new Error("not an op:// reference");
   // execFile with an argument vector: no shell, nothing echoed. The value is returned to the caller only.
   return execFileSync("op", ["read", "--no-newline", ref], { encoding: "utf8", timeout: 20_000 }).trim();
+}
+export function loadPinnedHashes(file = path.resolve(__dirname, "owned-numbers.sha256.json")): { cell: string[]; telnyx: string[] } {
+  const j = JSON.parse(readFileSync(file, "utf8")) as { cell?: unknown; telnyx?: unknown };
+  const clean = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && /^[0-9a-f]{64}$/.test(x)) : []);
+  return { cell: clean(j.cell), telnyx: clean(j.telnyx) };
 }
 const defaultReadFile = (p: string): string | null => (existsSync(p) ? readFileSync(p, "utf8") : null);
 
@@ -54,7 +67,14 @@ export function resolveOwnedNumbers(env: Env, deps: LiveDeps = {}): { cell: stri
     if (!E164.test(v)) throw new Error(`${name} did not resolve to a +1XXXXXXXXXX number`);
     return v;
   };
-  return { cell: read("STRESS_OP_REF_CELL"), telnyx: read("STRESS_OP_REF_TELNYX") };
+  const numbers = { cell: read("STRESS_OP_REF_CELL"), telnyx: read("STRESS_OP_REF_TELNYX") };
+  // Pinned allowlist: only a number whose sha256 is committed in the repo may ever be dialled. Empty or missing pin = refuse.
+  const pinned = deps.pinned ?? loadPinnedHashes();
+  for (const role of ["cell", "telnyx"] as const) {
+    if (pinned[role].length === 0) throw new Error(`no pinned sha256 for the owned ${role} number: pin it with \`npm run stress -- pin-number ${role}\` and commit the hash`);
+    if (!pinned[role].includes(sha256(numbers[role]))) throw new Error(`the ${role} number resolved from op is not on the pinned allowlist (sha256 mismatch): refusing to dial it`);
+  }
+  return numbers;
 }
 
 export type LiveCallShape = "ring_timeout_telnyx" | "voicemail_cell" | "cancel_before_answer" | "double_dial_refused";
@@ -108,6 +128,22 @@ export function liveAppIdentityProblems(lines: string[], listenerPid: number | n
   return p;
 }
 
+/**
+ * The identity check re-run before EVERY dial: the listener on the app port is still the announce-mode app of this commit (pid, sha, clean tree, line in
+ * the right log), its guard line POSTDATES the process start (not a stale line from an earlier process), it runs as the harness uid, and its checkout
+ * holds no .env* Next would load.
+ */
+export function liveAppRecheckProblems(f: { pid: number | null; uid: number | null; startMs: number | null; lines: string[]; envFiles: string[] }, sha: string, logPath: string, harnessUid: number): string[] {
+  const p = liveAppIdentityProblems(f.lines, f.pid, sha, logPath);
+  if (f.pid == null) return p;
+  if (f.uid == null || f.uid !== harnessUid) p.push(`the live app runs as uid ${f.uid ?? "unknown"}, the harness as ${harnessUid}`);
+  let at: string | undefined;
+  for (const l of f.lines) { try { const j = JSON.parse(l); if (j.kind === "guard_loaded" && j.pid === f.pid) at = j.at; } catch { /* skip */ } }
+  if (f.startMs == null || at === undefined || !(Date.parse(at) >= f.startMs - 2000)) p.push("the guard line does not postdate the listener's start (stale line, or unknown start time)");
+  if (f.envFiles.length) p.push(`the live app's checkout has ${f.envFiles.join(", ")} (Next would load them)`);
+  return p;
+}
+
 export async function liveLegStatus(cfg: StressConfig, env: Env, deps: LiveDeps = {}): Promise<LiveStatus> {
   const readFile = deps.readFile ?? defaultReadFile;
   const p: Prerequisite[] = [];
@@ -117,24 +153,43 @@ export async function liveLegStatus(cfg: StressConfig, env: Env, deps: LiveDeps 
   // Never in CI or a hosted runtime, whatever else is set.
   add("not_ci", !env.CI && !env.GITHUB_ACTIONS && !env.VERCEL && !env.VERCEL_ENV, "not running in CI or a hosted runtime (CI, GITHUB_ACTIONS, VERCEL, VERCEL_ENV must be unset)");
 
+  // Evidence is SIGNED by the engine (key outside the repo), run-bound and fresh; sha "unknown" is refused everywhere.
+  const now = (deps.now ?? Date.now)();
+  let key: string | null = null;
+  let keyError: string | null = null;
+  try { key = (deps.reportKey ?? (() => loadReportKey(env)))(); } catch (e) { keyError = (e as Error).message; }
+  add("report_signing_key", !!key, key ? "report signing key loaded (outside the repo)" : keyError ?? "no report signing key configured (STRESS_REPORT_KEY_FILE or STRESS_REPORT_KEY_OP_REF)");
+
   // The stubbed leg must have passed, at THIS sha, as a full PASS (never a partial run).
   const reportPath = env.STRESS_STUB_LEG_REPORT ?? "";
   const report = reportPath ? readFile(reportPath) : null;
+  const sigText = reportPath ? readFile(path.join(path.dirname(reportPath), "REPORT.sig.json")) : null;
+  let sig: SignedEvidence | null = null;
+  try { sig = sigText ? (JSON.parse(sigText) as SignedEvidence) : null; } catch { sig = null; }
+  const wantRun = env.STRESS_STUB_LEG_RUN_ID ?? "";
+  const reportRun = report ? /^- Run: (\S+) /m.exec(report)?.[1] ?? "" : "";
+  const sigProblems = evidenceProblems(sig, key, { kind: "stub_leg", sha: cfg.sha, subjectText: report, runId: wantRun || "<STRESS_STUB_LEG_RUN_ID not set>", now });
+  if (report && reportRun !== wantRun) sigProblems.push(`the report's run id (${reportRun || "none"}) is not STRESS_STUB_LEG_RUN_ID (${wantRun || "unset"})`);
   const passLine = report ? /^# Chaos day [^:]+: PASS\s*$/m.test(report) : false;
   const shaOk = report ? new RegExp(`^- SHA: ${cfg.sha}\\s*$`, "m").test(report) && cfg.sha !== "unknown" : false;
   const fullOk = report ? /^- Profile: full, scope: full, fault: none\s*$/m.test(report) : false;
   add("stubbed_leg_passed_at_this_sha", passLine && shaOk && fullOk, report ? `report ${passLine ? "is PASS" : "is not PASS"}, sha ${shaOk ? "matches" : "does not match"}, profile/scope ${fullOk ? "full" : "not full/full/no-fault"}` : "STRESS_STUB_LEG_REPORT is not set or unreadable");
+  add("stubbed_leg_signed_run_bound_fresh", report !== null && sigProblems.length === 0, report ? (sigProblems.join("; ") || "signed, run-bound, fresh") : "no report");
 
-  // The PASS must include the OS egress proof (it is required for any PASS; checked again here from the report itself).
-  const osProven = report ? /^- OS egress: proven\s*$/m.test(report) : false;
-  add("stubbed_leg_os_egress_proven", osProven, report ? `report ${osProven ? "records" : "does not record"} a proven OS egress ring` : "no stubbed-leg report");
   const guardProven = report ? /^- App egress guard: proven in pid \d+\s*$/m.test(report) : false;
   add("stubbed_leg_app_guard_proven", guardProven, report ? `report ${guardProven ? "records" : "does not record"} the guard proven inside the app` : "no stubbed-leg report");
-  // And a passing self-test at this sha (the harness must be shown able to fail).
+  // And a passing self-test at this sha (the harness must be shown able to fail), signed the same way.
   const stText = env.STRESS_SELFTEST_REPORT ? readFile(env.STRESS_SELFTEST_REPORT) : null;
   let stOk = false;
-  try { stOk = selfTestReportOk(stText ? JSON.parse(stText) : null, cfg.sha); } catch { stOk = false; }
-  add("selftest_passed_at_this_sha", stOk, stText ? (stOk ? "self-test report is ok at this sha with every fault fired and caught" : "self-test report is not a pass at this sha") : "STRESS_SELFTEST_REPORT is not set or unreadable");
+  let stDetail = stText ? "self-test report is not a pass at this sha" : "STRESS_SELFTEST_REPORT is not set or unreadable";
+  try {
+    const st = stText ? (JSON.parse(stText) as { sha?: string; ok?: boolean; rows?: unknown[]; sig?: SignedEvidence }) : null;
+    const problems = st ? evidenceProblems(st.sig ?? null, key, { kind: "selftest", sha: cfg.sha, subjectText: JSON.stringify({ sha: st.sha, ok: st.ok, rows: st.rows }), now }) : ["no self-test report"];
+    stOk = !!st && problems.length === 0 && selfTestReportOk(st as never, cfg.sha);
+    if (st && problems.length) stDetail = problems.join("; ");
+    else if (stOk) stDetail = "self-test report is signed, fresh, ok at this sha with every fault fired and caught";
+  } catch { stOk = false; }
+  add("selftest_passed_at_this_sha", stOk, stDetail);
 
   add("live_app_identity_log", !!env.STRESS_LIVE_APP_IDENTITY_LOG && env.STRESS_LIVE_APP_IDENTITY_LOG.startsWith("/"), "STRESS_LIVE_APP_IDENTITY_LOG (absolute path) is where the live app's announce-mode guard writes its build identity");
 

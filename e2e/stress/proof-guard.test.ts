@@ -16,10 +16,10 @@ const NOW = Date.parse("2026-10-06T12:30:00.000Z");
 const SECRETS = { key: "k".repeat(64), nonce: "n".repeat(64) };
 const fields = (over: Partial<ProofFields> = {}): ProofFields => ({
   v: 1, runId: "run1", runTag: "STRESS-run1", nonce: SECRETS.nonce, sha: SHA, startedAt: new Date(NOW - 60_000).toISOString(), engineHost: "h",
-  appPid: 4242, appListenerStartMs: START, appEgressLog: LOG, appEgressLogIno: 7, appEgressLogSizeAtT0: 100, stubUrl: STUB, proxyUrl: "http://localhost:1", osEgressProven: false, ...over,
+  appPid: 4242, appListenerStartMs: START, appEgressLog: LOG, appEgressLogIno: 7, appEgressLogSizeAtT0: 100, stubUrl: STUB, proxyUrl: "http://localhost:1", appUrl: "http://127.0.0.1:3466", proxyUpstream: "http://127.0.0.1:3466", ...over,
 });
 const guardLine = (over: Record<string, unknown> = {}) => JSON.stringify({
-  kind: "guard_loaded", pid: 4242, at: "2026-10-06T12:00:05.000Z", log: LOG, sha: SHA, dirty: false, redirect: STUB, cwd: "/app",
+  kind: "guard_loaded", pid: 4242, at: "2026-10-06T12:00:05.000Z", log: LOG, sha: SHA, dirty: false, redirect: STUB, cwd: "/app", spawnGuard: true, forbiddenPresent: [],
   env: { DIALPAD_DIAL_PROVIDER: null, MESSAGING_PROVIDER: "mock", DROPBOX_SIGN_API_BASE_URL: `${STUB}/dropbox-sign/v3`, VERCEL_ENV: null, VERCEL: null }, ...over,
 });
 
@@ -95,6 +95,12 @@ describe("(c) the browser specs cannot mutate without a run-bound, live app-egre
       expect(out, text).toMatch(/^APP_EGRESS_PROOF_MISMATCH/);
     }
   });
+  it("E + sha unknown: STRESS_APP_URL must be the proxy's proven upstream; the sha \"unknown\" is refused everywhere", () => {
+    expect(refusal(() => assertRunBoundAppProof(deps({ env: { STRESS_APP_URL: "http://127.0.0.1:9999" } })))).toMatch(/MISMATCH.*STRESS_APP_URL/);
+    expect(refusal(() => assertRunBoundAppProof(deps({ proof: signProof(fields({ proxyUpstream: "http://127.0.0.1:1" }), SECRETS.key) })))).toMatch(/MISMATCH.*upstream/);
+    expect(refusal(() => assertRunBoundAppProof(deps({ head: "unknown", proof: signProof(fields({ sha: "unknown" }), SECRETS.key) })))).toMatch(/MISMATCH.*unknown/);
+    expect(refusal(() => assertRunBoundAppProof(deps({ head: "unknown" })))).toMatch(/MISMATCH.*unknown/);
+  });
   it("c15 the engine's proof is written and signed with a per-run key; only the child env carries the key and nonce", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "proofdir-"));
     const s = newRunSecrets();
@@ -147,7 +153,8 @@ describe("(c) static: the guard cannot be bypassed by how a spec is written", ()
   });
 });
 
-describe("(c) integration: real Playwright refuses a direct run before any request or database write", () => {
+// Spawns real Playwright (npx, Chromium libs): skipped in CI; the unit cases above cover the same guard with injected dependencies.
+describe.skipIf(!!process.env.CI)("(c) integration: real Playwright refuses a direct run before any request or database write", () => {
   const root = path.join(__dirname, "../..");
   const setup = () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "directrun-"));

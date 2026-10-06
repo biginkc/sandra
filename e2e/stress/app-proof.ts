@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 
 import { LaneRefusal } from "./guards";
 
@@ -23,6 +23,8 @@ export type GuardLine = {
   sha?: string | null;
   dirty?: boolean;
   redirect?: string | null;
+  spawnGuard?: boolean;
+  forbiddenPresent?: string[];
   env?: Record<string, string | null>;
 };
 
@@ -57,12 +59,14 @@ export type AppProofInput = {
   envFiles?: string[];
   /** When the listener process started (ms epoch), from `ps -o lstart`. A guard line older than this is a stale one from an earlier process. */
   listenerStartMs?: number | null;
+  /** The harness's own Supabase API URL and database URL: the app must be on the SAME loopback stack. */
+  supabaseUrl?: string;
+  dbUrl?: string;
 };
 
-/** `next dev` loads these (in this order of precedence, after the process env); `.env.example` and `.env.production*`/`.env.test*` are not loaded. */
-export const NEXT_DEV_ENV_FILES = [".env", ".env.local", ".env.development", ".env.development.local"] as const;
+/** Any `.env*` file other than `.env.example` (Next loads .env, .env.local, .env.development*, and the .env.production and .env.test families in other modes): refuse them all. */
 export function envFilesIn(cwd: string): string[] {
-  return NEXT_DEV_ENV_FILES.filter((f) => existsSync(`${cwd}/${f}`));
+  try { return readdirSync(cwd).filter((f) => /^\.env/.test(f) && f !== ".env.example").sort(); } catch { return []; }
 }
 
 export function readProcessStartMs(pid: number): number | null {
@@ -102,6 +106,7 @@ export function appProofProblems(i: AppProofInput): string[] {
   if (!g) { p.push(`no guard_loaded line from pid ${i.listenerPid} in the app egress log: the guard did not run inside the app`); return p; }
   if (!i.appEgressLog || g.log !== i.appEgressLog) p.push(`the app's guard logs to ${g.log ?? "unknown"}, not STRESS_APP_EGRESS_LOG (${i.appEgressLog || "unset"})`);
   if (!g.sha || g.sha !== i.harnessSha) p.push(`the app runs commit ${g.sha ?? "unknown"}, the harness is at ${i.harnessSha}: the tested app must be this checkout's build`);
+  if (g.spawnGuard !== true) p.push("the app does not run the child-process guard (start it with STRESS_GUARD_SPAWN=1): a non-Node child would bypass the in-process egress hooks");
   if (g.dirty !== false) p.push("the app's checkout has uncommitted tracked changes (or its state is unknown)");
   if (i.envFiles?.length) p.push(`the app checkout has ${i.envFiles.join(", ")}: Next loads them after the guard announced the environment, so they could set provider variables the proof never saw; remove them for the run`);
   if (g.at === undefined || i.listenerStartMs == null || Date.parse(g.at) < i.listenerStartMs - 2000) p.push(`the guard_loaded line (${g.at ?? "no time"}) is older than the listener process (started ${i.listenerStartMs == null ? "unknown" : new Date(i.listenerStartMs).toISOString()}): it is a stale line, not this process's`);
@@ -111,6 +116,14 @@ export function appProofProblems(i: AppProofInput): string[] {
   if (e.MESSAGING_PROVIDER !== "mock") p.push(`MESSAGING_PROVIDER is "${e.MESSAGING_PROVIDER ?? "unset"}", must be "mock"`);
   const dbx = e.DROPBOX_SIGN_API_BASE_URL ?? "";
   if (!dbx.startsWith(`${i.stubUrl}/dropbox-sign`)) p.push(`DROPBOX_SIGN_API_BASE_URL is "${dbx || "unset"}", must point at the harness stub (${i.stubUrl}/dropbox-sign/...)`);
+  if (g.forbiddenPresent === undefined) p.push("the guard line does not report which provider credentials / proxy variables are present (old guard?)");
+  else if (g.forbiddenPresent.length) p.push(`the app process environment holds provider credentials or proxy overrides that must be absent: ${g.forbiddenPresent.join(", ")}`);
+  const hp = (u: string) => { try { const x = new URL(u.replace(/^postgres(ql)?:/, "http:")); return `${x.hostname.replace(/^\[|\]$/g, "")}:${x.port || "80"}`; } catch { return null; } };
+  if (i.supabaseUrl) {
+    const appApi = e.NEXT_PUBLIC_SUPABASE_URL ?? e.SUPABASE_URL ?? null;
+    if (!appApi || hp(appApi) !== hp(i.supabaseUrl)) p.push(`the app's Supabase URL (${appApi ?? "unset"}) is not the harness's loopback stack (${i.supabaseUrl})`);
+  }
+  if (i.dbUrl) for (const k of ["DATABASE_URL", "POSTGRES_URL"]) if (e[k] && hp(e[k]!) !== hp(i.dbUrl)) p.push(`the app's ${k} is not the harness's database (${hp(i.dbUrl)})`);
   for (const k of ["VERCEL_ENV", "VERCEL"]) if (e[k]) p.push(`${k} is set on the app process (hosted runtime marker)`);
   return p;
 }
@@ -137,7 +150,7 @@ export function collectLiveAppFacts(appUrl: string, appEgressLog: string): LiveA
 }
 
 /** The live check, used by the engine at T0. */
-export function proveAppUnderTest(args: { appUrl: string; appEgressLog: string; stubUrl: string; harnessSha: string }): { pid: number; snapshot: LogSnapshot; cwd: string | null; startMs: number | null } {
+export function proveAppUnderTest(args: { appUrl: string; appEgressLog: string; stubUrl: string; harnessSha: string; supabaseUrl?: string; dbUrl?: string }): { pid: number; snapshot: LogSnapshot; cwd: string | null; startMs: number | null } {
   const port = Number(new URL(args.appUrl).port || 80);
   const pid = findListenerPid(port);
   const facts = collectLiveAppFacts(args.appUrl, args.appEgressLog);
@@ -145,7 +158,7 @@ export function proveAppUnderTest(args: { appUrl: string; appEgressLog: string; 
   const problems = appProofProblems({
     listenerPid: facts.pid, listenerUid: facts.uid, harnessUid: process.getuid?.() ?? -1,
     appEgressLog: args.appEgressLog, logLines: facts.lines, stubUrl: args.stubUrl, harnessSha: args.harnessSha,
-    envFiles: facts.envFiles, listenerStartMs: facts.startMs,
+    envFiles: facts.envFiles, listenerStartMs: facts.startMs, supabaseUrl: args.supabaseUrl, dbUrl: args.dbUrl,
   });
   const snapshot = snapshotLog(args.appEgressLog);
   if (!snapshot) problems.push("the app egress log does not exist");

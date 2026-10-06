@@ -18,6 +18,9 @@ export default defineConfig({
   // Config-level guard: runs for ANY spec selection and cannot be skipped by --no-deps or --grep. See e2e/stress/proof-guard.ts.
   globalSetup: "./e2e/stress/browser/global-setup.ts",
   testMatch: /\.spec\.ts$/,
+  // The live-leg spec dials real phones: at CONFIG level it is not even discovered unless STRESS_LIVE_LEG=1 and this is not CI or a hosted runtime
+  // (the spec body refuses again).
+  testIgnore: process.env.STRESS_LIVE_LEG === "1" && !process.env.CI && !process.env.GITHUB_ACTIONS && !process.env.VERCEL && !process.env.VERCEL_ENV ? [] : ["**/live-leg.spec.ts"],
   fullyParallel: false,
   workers: 1,
   retries: 0, // a mutating step is never retried; non-mutating waits retry inside the spec (max 2, logged)

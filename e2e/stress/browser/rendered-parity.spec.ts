@@ -1,6 +1,6 @@
 import { quickPickDueAt } from "../../../src/lib/my-leads/quick-picks";
 import { asRep } from "../db";
-import { expectedFromQueueRows, QUEUE_ROWS_SQL, sectionParityProblems, stripParityProblems, type QueueRow } from "../parity";
+import { expectedFromQueueRows, nonVacuityProblems, QUEUE_ROWS_SQL, sectionParityProblems, stripParityProblems, type QueueRow } from "../parity";
 import { expect, test } from "./fixtures";
 import { recordResult, signIn, type Run } from "./support";
 
@@ -49,7 +49,8 @@ test("stress rendered parity: lead page next step matches the open appointment r
   // `my_leads_queue_rows` is an internal helper (not executable by `authenticated`); the REP is its member argument, as in the page's own RPCs.
   const queue = await run.db.query<QueueRow>(QUEUE_ROWS_SQL, [run.cfg.orgId, run.world.repUserId, run.cfg.runTag]);
   const { expected, problems: unknownStages } = expectedFromQueueRows(queue.rows);
-  failures.push(...unknownStages, ...sectionParityProblems(sections, expected));
+  const runLeads = (await run.db.query<{ id: string }>("select id from public.properties where org_id=$1 and assigned_user_id=$2 and deleted_at is null and address like $3 || '%'", [run.cfg.orgId, run.world.repUserId, run.cfg.runTag])).rows.map((r) => r.id);
+  failures.push(...unknownStages, ...sectionParityProblems(sections, expected), ...nonVacuityProblems({ renderedStrip, dbStrip: dbStrip.rows[0]!.v.rows.map((r) => r.propertyId), queueRows: queue.rows, runLeadIds: runLeads }));
   recordResult(run.dir, -16, failures.length === 0, failures.slice(0, 5).join(" | "));
   expect(failures).toEqual([]);
 });

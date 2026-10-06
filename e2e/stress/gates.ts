@@ -23,6 +23,7 @@ type Armed = { id: string; stage: Stage; match: GateMatch; held: Array<{ reqId: 
 
 export class GateController {
   private armed = new Map<string, Armed>();
+  private everArmed = new Map<string, Armed>();
   private seq = 0;
   private closed = false;
   readonly ordering: Array<{ n: number; t: number; reqId: string; stage: Stage; source: string; path: string; key?: string; note?: string }> = [];
@@ -36,13 +37,19 @@ export class GateController {
       for (const h of g.held.splice(0)) h.release();
     }
   }
+  /** Gates that were armed but never caught a request: the scenario that needed that race did not get it. */
+  unfiredGates(): Array<{ id: string; stage: Stage; match: GateMatch }> {
+    return [...this.everArmed.values()].filter((g) => g.hits === 0).map((g) => ({ id: g.id, stage: g.stage, match: g.match }));
+  }
   isClosed(): boolean {
     return this.closed;
   }
 
   arm(stage: Stage, match: GateMatch = {}, opts: { once?: boolean } = {}): string {
     const id = `g${(this.seq += 1)}`;
-    this.armed.set(id, { id, stage, match, held: [], reached: [], once: opts.once ?? true, hits: 0 });
+    const g: Armed = { id, stage, match, held: [], reached: [], once: opts.once ?? true, hits: 0 };
+    this.armed.set(id, g);
+    this.everArmed.set(id, g);
     return id;
   }
 

@@ -8,9 +8,7 @@ import { describe, expect, it } from "vitest";
 import { appBenignDenials, appEgressViolations, appProofProblems, checkoutDirtyReason, envFilesIn, guardLineFor, proveAppUnderTest, snapshotLog, type AppProofInput } from "./app-proof";
 import { readConfig } from "./config";
 import { egressChildEnv } from "./egress";
-import { buildManifest } from "./manifest";
 import { LaneRefusal } from "./guards";
-import { decide } from "./report";
 import { faultCaught } from "./selftest";
 import { leadPhone } from "./world";
 
@@ -18,7 +16,7 @@ const STUB = "http://127.0.0.1:55500";
 const LOG = "/tmp/app-egress.jsonl";
 const SHA = "a".repeat(40);
 const guardLine = (over: Record<string, unknown> = {}) => JSON.stringify({
-  kind: "guard_loaded", pid: 4242, probe: true, at: "2026-10-06T12:00:05.000Z", log: LOG, sha: SHA, dirty: false, redirect: STUB,
+  kind: "guard_loaded", pid: 4242, probe: true, at: "2026-10-06T12:00:05.000Z", log: LOG, sha: SHA, dirty: false, redirect: STUB, spawnGuard: true, forbiddenPresent: [],
   env: { DIALPAD_DIAL_PROVIDER: null, MESSAGING_PROVIDER: "mock", DROPBOX_SIGN_API_BASE_URL: `${STUB}/dropbox-sign/v3`, VERCEL_ENV: null, VERCEL: null }, ...over,
 });
 const good = (over: Partial<AppProofInput> = {}): AppProofInput => ({ listenerPid: 4242, listenerUid: 501, harnessUid: 501, appEgressLog: LOG, logLines: [guardLine()], stubUrl: STUB, harnessSha: SHA, envFiles: [], listenerStartMs: Date.parse("2026-10-06T12:00:00.000Z"), ...over });
@@ -152,19 +150,6 @@ describe("(d) + #6 the app's egress log: denials fail the run, and so does losin
     writeFileSync(f, JSON.stringify({ kind: "noise", probe: true }) + "\n".padEnd(snap.size, " ") + "\n");
     expect(appEgressViolations(f, { ino: snap.ino, size: snap.size }, 99).join()).toMatch(/guard_loaded line is gone/);
     expect(appEgressViolations(f, null, 99).join()).toMatch(/never snapshotted/);
-  });
-});
-
-describe("(a) PASS requires the OS egress proof", () => {
-  const cfg = readConfig({}, { headSha: () => SHA });
-  const manifest = buildManifest(cfg.seed, cfg.runTag, { profile: "full" });
-  const browserPlanned = manifest.ticks.filter((t) => t.actor === "browser").length;
-  const run = (osEgressProven: boolean, egressViolations = 0) => decide({ cfg, manifest, records: [], invariantChecks: [], outcomeChecks: [], egressViolations, osEgressProven, serverProblems: [], killed: null, setupErrors: [], browserExecuted: browserPlanned });
-  it("without it the best result is PARTIAL_PASS, with it PASS; a violation is FAIL either way", () => {
-    expect(run(false).verdict).toBe("PARTIAL_PASS");
-    expect(run(false).reasons.join()).toMatch(/OS egress ring not proven/);
-    expect(run(true).verdict).toBe("PASS");
-    expect(run(true, 1).verdict).toBe("FAIL");
   });
 });
 

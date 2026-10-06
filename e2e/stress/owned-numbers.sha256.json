@@ -1,0 +1,5 @@
+{
+  "_comment": "sha256 of each expected E.164 owned number, hex. NEVER put a plain number here. Fill with `npm run stress -- pin-number <cell|telnyx>` (reads the op ref, prints only the hash). Empty means the live leg refuses to dial.",
+  "cell": [],
+  "telnyx": []
+}

@@ -22,7 +22,7 @@ export const MAX_RUN_MS = 6 * 3600_000;
 export type ProofFields = {
   v: 1; runId: string; runTag: string; nonce: string; sha: string; startedAt: string; engineHost: string;
   appPid: number; appListenerStartMs: number; appEgressLog: string; appEgressLogIno: number; appEgressLogSizeAtT0: number;
-  stubUrl: string; proxyUrl: string; osEgressProven: boolean;
+  stubUrl: string; proxyUrl: string; appUrl: string; proxyUpstream: string;
 };
 export type AppProof = ProofFields & { mac: string };
 
@@ -92,7 +92,14 @@ export function verifySignedProof(d: GuardDeps): AppProof {
   if (typeof proof !== "object" || proof === null || typeof proof.mac !== "string" || typeof proof.nonce !== "string") return refuse("APP_EGRESS_PROOF_MISMATCH", `${PROOF_FILE} is not a proof object`);
   if (!macOk(proof, key)) return refuse("APP_EGRESS_PROOF_MISMATCH", `${PROOF_FILE} does not verify against this run's key (edited, or from another run).`);
   if (proof.nonce !== nonce) return refuse("APP_EGRESS_PROOF_STALE", `${PROOF_FILE} is from an earlier run (nonce differs).`);
-  if (proof.sha !== d.headSha()) return refuse("APP_EGRESS_PROOF_MISMATCH", `the proof is for commit ${proof.sha}, this checkout is ${d.headSha()}.`);
+  const head = d.headSha();
+  if (!head || head === "unknown" || proof.sha === "unknown") return refuse("APP_EGRESS_PROOF_MISMATCH", "the checkout sha is unknown: the proof cannot be bound to a commit.");
+  if (d.env.STRESS_APP_URL !== proof.appUrl) return refuse("APP_EGRESS_PROOF_MISMATCH", `STRESS_APP_URL (${d.env.STRESS_APP_URL ?? "unset"}) is not the app URL the engine proved (${proof.appUrl}).`);
+  let appOrigin: string | null = null;
+  try { appOrigin = new URL(proof.appUrl).origin; } catch { appOrigin = null; }
+  if (appOrigin === null) return refuse("APP_EGRESS_PROOF_MISMATCH", "the proof's app URL is not a URL.");
+  if (appOrigin !== proof.proxyUpstream) return refuse("APP_EGRESS_PROOF_MISMATCH", "the gate proxy's upstream is not the proven app URL.");
+  if (proof.sha !== head) return refuse("APP_EGRESS_PROOF_MISMATCH", `the proof is for commit ${proof.sha}, this checkout is ${d.headSha()}.`);
   if (d.env.STRESS_RUN_ID !== proof.runId) return refuse("APP_EGRESS_PROOF_MISMATCH", "the proof's run id is not this run's.");
   if (d.env.STRESS_RUN_TAG !== proof.runTag) return refuse("APP_EGRESS_PROOF_MISMATCH", "the proof's run tag is not this run's.");
   const age = d.now() - Date.parse(proof.startedAt);
@@ -108,7 +115,7 @@ export function verifyLiveApp(proof: AppProof, d: GuardDeps): void {
   if (facts.startMs !== proof.appListenerStartMs) refuse("APP_EGRESS_PROOF_STALE", "the app listener's start time differs from the proof (pid reuse or restart).");
   const problems = appProofProblems({
     listenerPid: facts.pid, listenerUid: facts.uid, harnessUid: d.harnessUid, appEgressLog: proof.appEgressLog, logLines: facts.lines,
-    stubUrl: proof.stubUrl, harnessSha: d.headSha(), envFiles: facts.envFiles, listenerStartMs: facts.startMs,
+    stubUrl: proof.stubUrl, harnessSha: d.headSha(), envFiles: facts.envFiles, listenerStartMs: facts.startMs, supabaseUrl: d.env.STRESS_SUPABASE_URL ?? d.env.TEST_SUPABASE_URL, dbUrl: d.env.E2E_CI_SUPABASE_DB_URL,
   });
   if (problems.length) refuse("APP_EGRESS_PROOF_MISMATCH", `the app no longer satisfies the egress proof: ${problems.join(" | ")}`);
   const snap = d.logStat(proof.appEgressLog);

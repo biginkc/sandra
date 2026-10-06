@@ -56,6 +56,8 @@ if (!ANNOUNCE_ONLY) {
   } catch { /* no redirect configured */ }
 }
 
+const FORBIDDEN_ENV = /^(SENDILLO_API_KEY|REP_SMS_FROM_NUMBER|TWILIO_.*|TELNYX_.*|SLACK_.*|RESEND_.*|OPENAI_API_KEY|ANTHROPIC_API_KEY|http_proxy|https_proxy|all_proxy|no_proxy)$/i;
+
 // Announce: the harness proves the guard ran inside THIS pid, and what that pid is (runtime truth, no `ps` parsing): its provider environment,
 // the redirect, the checkout it runs from. `probe: true` marks it as not a violation.
 function git(args) {
@@ -66,8 +68,10 @@ try {
   const announce = {
     at: new Date().toISOString(), pid: process.pid, kind: "guard_loaded", target: "", probe: true, log: LOG, cwd: process.cwd(),
     sha: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain", "--", ".", ":!.swc", ":!.next", ":!node_modules", ":!artifacts"]) !== "", // tracked changes AND untracked files (Next serves and hot-reloads both)
-    redirect: dialpadRedirect,
-    env: { DIALPAD_DIAL_PROVIDER: e.DIALPAD_DIAL_PROVIDER ?? null, MESSAGING_PROVIDER: e.MESSAGING_PROVIDER ?? null, DROPBOX_SIGN_API_BASE_URL: e.DROPBOX_SIGN_API_BASE_URL ?? null, VERCEL_ENV: e.VERCEL_ENV ?? null, VERCEL: e.VERCEL ?? null, NODE_OPTIONS: e.NODE_OPTIONS ?? null },
+    redirect: dialpadRedirect, spawnGuard: process.env.STRESS_GUARD_SPAWN === "1" && !ANNOUNCE_ONLY,
+    // Names (never values) of provider credentials and proxy overrides present in the process environment: the proof requires this list to be EMPTY.
+    forbiddenPresent: Object.keys(e).filter((k) => FORBIDDEN_ENV.test(k) && e[k] !== undefined && e[k] !== "").sort(),
+    env: { NEXT_PUBLIC_SUPABASE_URL: e.NEXT_PUBLIC_SUPABASE_URL ?? null, SUPABASE_URL: e.SUPABASE_URL ?? null, DATABASE_URL: e.DATABASE_URL ?? null, POSTGRES_URL: e.POSTGRES_URL ?? null, DIALPAD_DIAL_PROVIDER: e.DIALPAD_DIAL_PROVIDER ?? null, MESSAGING_PROVIDER: e.MESSAGING_PROVIDER ?? null, DROPBOX_SIGN_API_BASE_URL: e.DROPBOX_SIGN_API_BASE_URL ?? null, VERCEL_ENV: e.VERCEL_ENV ?? null, VERCEL: e.VERCEL ?? null, NODE_OPTIONS: e.NODE_OPTIONS ?? null },
   };
   fs.appendFileSync(LOG, JSON.stringify(announce) + "\n");
 } catch { /* no log, no proof: the engine refuses */ }
@@ -92,6 +96,26 @@ net.Socket.prototype.connect = function patchedConnect(...args) {
   return origConnect.apply(this, args);
 };
 
+// Child-process guard (app only: STRESS_GUARD_SPAWN=1). The net/dns/tls hooks above live in THIS Node process and in Node children that inherit NODE_OPTIONS;
+// a non-Node child (curl, python...) would bypass them. Next's own workers are `node` (fork / process.execPath), which inherit the guard, so they are the
+// only children allowed; any other spawn is logged as a violation and denied before it starts.
+if (process.env.STRESS_GUARD_SPAWN === "1") {
+  const cp = require("node:child_process");
+  const path = require("node:path");
+  const isNode = (file) => typeof file === "string" && (file === process.execPath || path.basename(file) === "node");
+  for (const name of ["spawn", "spawnSync", "execFile", "execFileSync"]) {
+    const orig = cp[name];
+    cp[name] = function patchedSpawn(file, ...rest) {
+      if (!isNode(file)) deny("spawn", file, false);
+      return orig.call(this, file, ...rest);
+    };
+  }
+  for (const name of ["exec", "execSync"]) {
+    const orig = cp[name];
+    cp[name] = function patchedShell(command, ...rest) { deny("spawn", `shell:${String(command).slice(0, 60)}`, false); return orig.call(this, command, ...rest); };
+  }
+}
+
 const origLookup = dns.lookup;
 dns.lookup = function patchedLookup(hostname, ...rest) {
   if (!isLoopbackHost(hostname)) {
@@ -103,6 +127,30 @@ dns.lookup = function patchedLookup(hostname, ...rest) {
   }
   return origLookup.call(this, hostname, ...rest);
 };
+// Every other way to resolve a name: dns.promises.lookup and the resolve* family (callback, promise and Resolver forms). Non-loopback names are denied
+// before a query leaves; the error is delivered the way each form delivers errors.
+const RESOLVE_FNS = ["resolve", "resolve4", "resolve6", "resolveAny", "resolveCaa", "resolveCname", "resolveMx", "resolveNaptr", "resolveNs", "resolvePtr", "resolveSoa", "resolveSrv", "resolveTxt", "reverse"];
+function guardResolver(target, names, promiseForm) {
+  for (const name of names) {
+    const orig = target[name];
+    if (typeof orig !== "function") continue;
+    target[name] = function guardedResolve(hostname, ...rest) {
+      if (!isLoopbackHost(hostname)) {
+        let err;
+        try { deny("dns", hostname, process.env.STRESS_EGRESS_PROBE === "1"); } catch (e) { err = e; }
+        if (promiseForm) return Promise.reject(err);
+        const cb = rest[rest.length - 1];
+        if (typeof cb === "function") return process.nextTick(cb, err);
+        throw err;
+      }
+      return orig.call(this, hostname, ...rest);
+    };
+  }
+}
+guardResolver(dns, RESOLVE_FNS, false);
+if (dns.promises) { guardResolver(dns.promises, RESOLVE_FNS, true); guardResolver(dns.promises, ["lookup"], true); }
+for (const R of [dns.Resolver, dns.promises && dns.promises.Resolver]) if (R && R.prototype) guardResolver(R.prototype, RESOLVE_FNS, R === (dns.promises && dns.promises.Resolver));
+
 const origTlsConnect = tls.connect;
 tls.connect = function patchedTls(...args) {
   const o = args[0];
