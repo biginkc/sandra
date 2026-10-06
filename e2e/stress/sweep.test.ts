@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -91,7 +91,7 @@ describe("sweep 3: scanServerLog slices by BYTES", () => {
     const f = path.join(dir, "app.log");
     const prefix = "ééééééééééé\n"; // 11 two-byte characters + newline: 23 bytes, 12 characters
     writeFileSync(f, `${prefix} GET /a 500 in 12ms\n GET /b 502 in 9ms\n`);
-    const out = scanServerLog(f, Buffer.byteLength(prefix));
+    const out = scanServerLog(f, { ino: statSync(f).ino, size: Buffer.byteLength(prefix) });
     expect(out).toHaveLength(2); // a character slice at byte offset 23 would have cut into the first error line
   });
 });

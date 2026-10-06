@@ -5,7 +5,8 @@ import path from "node:path";
 import { CRON_ROUTES, FaultState, runCron, sleep, TickDeadline, type Ctx } from "./actions";
 import { approvedTestSms, type StressConfig } from "./config";
 import { assertFreshDatabase, assertOnlyHarnessRows, asRep, asService, openDb, type Db } from "./db";
-import { appBenignDenials, appEgressViolations, checkoutDirtyReason, proveAppUnderTest, type LogSnapshot } from "./app-proof";
+import { BackgroundChecks } from "./background-checks";
+import { appBenignDenials, appEgressViolations, checkoutDirtyReason, proveAppUnderTest, snapshotLog, type LogSnapshot } from "./app-proof";
 import { egressChildEnv, proveInProcessDenial, readEgressViolations } from "./egress";
 import { GateController } from "./gates";
 import { assertStressLane, LaneRefusal } from "./guards";
@@ -44,10 +45,15 @@ export function artifactsDirFor(cfg: StressConfig, profile: Profile): string {
 }
 
 /** The server log lines (after `offset`) that mean an unexpected 5xx or an unhandled rejection. */
-export function scanServerLog(file: string, offset: number, opts: { injectedOfflineFetchFailures?: number } = {}): string[] {
+export function scanServerLog(file: string, snapshot: LogSnapshot | null, opts: { injectedOfflineFetchFailures?: number } = {}): string[] {
+  // Fails closed, like the app egress log: a log never snapshotted at T0, deleted, replaced (new inode) or truncated cannot prove "no 5xx".
+  if (!snapshot) return [`server log ${file} was never snapshotted at T0`];
   if (!existsSync(file)) return [`server log ${file} not found`];
-  // `offset` is a BYTE offset (statSync().size): slice the Buffer, not the decoded string (multibyte text before the offset shifts characters).
-  const text = readFileSync(file).subarray(Math.min(offset, statSync(file).size)).toString("utf8");
+  const st = statSync(file);
+  if (st.ino !== snapshot.ino) return [`server log ${file} was replaced or rotated (inode changed)`];
+  if (st.size < snapshot.size) return [`server log ${file} was truncated (${st.size} < ${snapshot.size} bytes at T0)`];
+  // The offset is a BYTE offset (statSync().size): slice the Buffer, not the decoded string (multibyte text before it shifts characters).
+  const text = readFileSync(file).subarray(snapshot.size).toString("utf8");
   const bad: string[] = [];
   // Injected failure with an explicit, bounded expectation: each scripted offline gesture (browser `setOffline` during Send) makes Next's
   // client forward exactly one `[browser] unhandledRejection: TypeError: Failed to fetch` to the server log. Only that many are expected.
@@ -170,7 +176,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   const executedFile = path.join(dir, "executed.ndjson");
   const invariantsFile = path.join(dir, "invariants.jsonl");
   const appLog = env.STRESS_APP_LOG ?? "";
-  const appLogOffset = appLog && existsSync(appLog) ? statSync(appLog).size : 0;
+  const appLogSnap = appLog ? snapshotLog(appLog) : null;
   let runStart = new Date();
   let levers: LeverProof[] = [];
   let invariantChecks: Check[] = [];
@@ -188,6 +194,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   let ticker: NodeJS.Timeout | null = null;
   let oracleInput: OracleInput | null = null;
   let finishingInvariants = false;
+  const background = new BackgroundChecks();
 
   try {
     await assertOnlyHarnessRows(db); // BEFORE the reset, so a wipe of foreign data is never the first step
@@ -250,17 +257,14 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     // Background: invariants every interval + a random sweep, kill file, watchdog state.
     ticker = setInterval(() => {
       if (finishingInvariants) return;
-      void (async () => {
-        if (existsSync(killFile)) stopRequested = `KILL file present: ${killFile}`;
-        try {
-          const checks = await safetyInvariants(oracleInput!);
-          appendFileSync(invariantsFile, JSON.stringify({ at: new Date().toISOString(), checks: checks.map((c) => ({ id: c.id, ok: c.ok, violations: c.violations.slice(0, 5) })) }) + "\n");
-          const bad = checks.find((c) => !c.ok);
-          if (bad && !stopRequested) stopRequested = `invariant ${bad.id} (${bad.name}) violated mid-run`;
-        } catch (e) {
-          stopRequested = stopRequested ?? `invariant check failed to run: ${(e as Error).message}`;
-        }
-      })();
+      if (existsSync(killFile)) stopRequested = `KILL file present: ${killFile}`;
+      background.start(async () => {
+        const checks = await safetyInvariants(oracleInput!);
+        appendFileSync(invariantsFile, JSON.stringify({ at: new Date().toISOString(), checks: checks.map((c) => ({ id: c.id, ok: c.ok, violations: c.violations.slice(0, 5) })) }) + "\n");
+        const bad = checks.find((c) => !c.ok);
+        if (bad && !stopRequested) stopRequested = `invariant ${bad.id} (${bad.name}) violated mid-run`;
+        return bad ? [`invariant ${bad.id} (${bad.name}) violated mid-run`] : [];
+      });
     }, cfg.invariantIntervalMs);
 
     // Execute the replay ticks in order.
@@ -293,6 +297,8 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     finishingInvariants = true;
     if (ticker) clearInterval(ticker);
     ticker = null;
+    // Every background check still in flight is awaited, and every failure it found is folded into the run's errors (no late violation is dropped).
+    for (const f of await background.settle()) if (!setupErrors.includes(f)) setupErrors.push(f);
 
     invariantChecks = await safetyInvariants(oracleInput);
     appendFileSync(invariantsFile, JSON.stringify({ at: new Date().toISOString(), final: true, checks: invariantChecks.map((c) => ({ id: c.id, ok: c.ok, violations: c.violations.slice(0, 5) })) }) + "\n");
@@ -311,6 +317,8 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     log(`ABORT ${setupErrors[setupErrors.length - 1]}`);
   } finally {
     if (ticker) clearInterval(ticker);
+    finishingInvariants = true;
+    for (const f of await background.settle()) if (!setupErrors.includes(f)) setupErrors.push(f);
   }
 
   // Egress and server-log verdicts.
@@ -325,7 +333,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   const egress = [...readEgressViolations(egressLog), ...egressApp.map((t) => ({ at: "", kind: "app", target: t, pid: 0 }))];
   const serverProblems: string[] = [];
   const offlineGestures = records.filter((r) => r.actor === "browser" && r.steps.some((st) => st.startsWith("provider sends while offline"))).length;
-  if (appLog) for (const l of scanServerLog(appLog, appLogOffset, { injectedOfflineFetchFailures: offlineGestures })) serverProblems.push(`server log: ${l}`);
+  if (appLog) for (const l of scanServerLog(appLog, appLogSnap, { injectedOfflineFetchFailures: offlineGestures })) serverProblems.push(`server log: ${l}`);
   else serverProblems.push("STRESS_APP_LOG not set: the server log cannot be scanned for 5xx/unhandled rejections (required)");
 
   const failedAny = setupErrors.length > 0 || [...invariantChecks, ...outcomeChecks].some((c) => !c.ok && !c.deferred) || egress.length > 0 || serverProblems.length > 0;
