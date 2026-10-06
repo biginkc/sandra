@@ -113,7 +113,11 @@ if (process.env.STRESS_GUARD_SPAWN === "1") {
   }
   for (const name of ["exec", "execSync"]) {
     const orig = cp[name];
-    cp[name] = function patchedShell(command, ...rest) { deny("spawn", `shell:${String(command).slice(0, 60)}`, false); return orig.call(this, command, ...rest); };
+    // Next's own dev helper (next/dist/lib/helpers/git.js) runs read-only git queries through a shell; exactly these strings are allowed, nothing else.
+    cp[name] = function patchedShell(command, ...rest) {
+      if (!["git rev-parse HEAD", "git rev-parse --is-inside-work-tree", "git --version"].includes(String(command).trim())) deny("spawn", `shell:${String(command).slice(0, 60)}`, false);
+      return orig.call(this, command, ...rest);
+    };
   }
 }
 
