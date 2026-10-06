@@ -595,4 +595,25 @@ describe('startDialpadApiCall calling hours (lead-local 08:00-21:00)', () => {
       vi.unstubAllEnvs();
     }
   });
+  it('re-checks the clock: passes at 20:59:59, closes during loadActiveGrants, no authorize and no provider call', async () => {
+    let t = new Date('2026-09-30T01:59:59Z').getTime(); // 20:59:59 CDT
+    const db = fakeDb({ loadActiveGrants: async () => { t = new Date('2026-09-30T02:00:01Z').getTime(); return []; } });
+    const { dialer, requests } = fakeDialer();
+    const result = await startDialpadApiCall(db, dialer, actor, input, { env, now: () => new Date(t) });
+    expect(result).toMatchObject({ ok: false, code: 'denied', denial: 'outside_calling_hours', freshAttemptKey: true });
+    expect(db.calls).toContain('prepareIntent');
+    expect(db.calls).toContain('cancelIntent');
+    expect(db.calls).not.toContain('authorizeDispatch');
+    expect(requests).toHaveLength(0);
+  });
+  it('re-checks the clock again after authorize: closes during loadConnection, intent cancelled, no provider call', async () => {
+    let t = new Date('2026-09-30T01:59:59Z').getTime();
+    const db = fakeDb({ loadConnection: async () => { const c = conn(); if (db.calls.includes('authorizeDispatch')) t = new Date('2026-09-30T02:00:01Z').getTime(); return c; } });
+    const { dialer, requests } = fakeDialer();
+    const result = await startDialpadApiCall(db, dialer, actor, input, { env, now: () => new Date(t) });
+    expect(result).toMatchObject({ ok: false, denial: 'outside_calling_hours' });
+    expect(db.calls).toContain('authorizeDispatch');
+    expect(db.calls).toContain('cancelIntent');
+    expect(requests).toHaveLength(0);
+  });
 });

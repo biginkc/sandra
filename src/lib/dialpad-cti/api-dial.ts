@@ -338,16 +338,18 @@ export async function startDialpadApiCall(
     // 2b. Calling hours: the existing lead-local 08:00-21:00 rule, unchanged, before any intent is prepared
     // or authorized, so a blocked call creates no intent and reaches no provider. Unknown or missing state fails closed.
     const property = await db.loadPropertyState(actor.orgId, propertyId);
-    if (!property.found || !checkQuietHours(property.state, now()).ok) {
-      return { ok: false, code: 'denied', message: dialpadDenialMessage('outside_calling_hours'), denial: 'outside_calling_hours', freshAttemptKey: true };
-    }
+    // The window can close during the awaited calls below, so it is re-read with a fresh clock
+    // immediately before authorization and again immediately before the provider dial.
+    const inWindow = () => property.found && checkQuietHours(property.state, now()).ok;
+    const outsideHours = { ok: false, code: 'denied', message: dialpadDenialMessage('outside_calling_hours'), denial: 'outside_calling_hours', freshAttemptKey: true } as const;
+    if (!inWindow()) return outsideHours;
 
     // 3. Caller id: the oldest active grant, or none (the rep's own line keeps A-level attestation).
     const grants = await db.loadActiveGrants(actor.orgId, actor.userId);
     const grantId = grants[0]?.id ?? null;
 
     // 4. Prepare + authorize (one transaction each; DNC, assignment, grant and phone are re-proven).
-    const started = await startDialpadCall(db, actor, { propertyId, contactId, phoneSlot: chosen.slot, grantId, idempotencyKey }, { allowLargeIdentityIds: true });
+    const started = await startDialpadCall(db, actor, { propertyId, contactId, phoneSlot: chosen.slot, grantId, idempotencyKey }, { allowLargeIdentityIds: true, beforeAuthorize: inWindow });
     if (!started.ok) {
       // Refused before the payload was released (denied, cancelled): proven non-dispatch, the key is dead.
       return started.code === 'denied' || started.code === 'cancelled' ? { ...started, freshAttemptKey: true } : started;
@@ -362,7 +364,12 @@ export async function startDialpadApiCall(
       return { ok: false, code: 'not_configured', message: 'Dialpad API dialing is not configured for this organization. Ask an owner to finish setup.', freshAttemptKey: true };
     }
 
-    // 6. Dial.
+    // 6. Dial. Last look at the clock: if the window closed since authorization, cancel so it can never release.
+    if (!inWindow()) {
+      const cancel = await cancelOrMatched(db, actor, started.intentId);
+      if (cancel === 'matched') return { ok: true, intentId: started.intentId, state: 'awaiting_provider', uncertain: false, phoneSlot: chosen.slot };
+      return outsideHours;
+    }
     const identity = started.dial.identityType && started.dial.identityIdText ? { type: started.dial.identityType, id: started.dial.identityIdText } : null;
     const result = await dialer.dial({
       endpoint: connection.dialEndpoint ?? DIALPAD_DIAL_ENDPOINT_DEFAULT,

@@ -556,6 +556,8 @@ export type DialpadStartCallResult =
 export interface DialpadStartCallOptions {
   /** The server-side dialer renders ids as exact JSON integer text, so ids beyond 2^53 are fine there. */
   allowLargeIdentityIds?: boolean;
+  /** Re-checked immediately before authorization; `false` cancels the prepared intent and refuses (nothing is authorized). */
+  beforeAuthorize?: () => boolean;
 }
 
 /**
@@ -592,6 +594,11 @@ export async function startDialpadCall(db: DialpadDispatchDb, actor: DialpadActo
       // The browser protocol carries identity_id as a JSON number; an id beyond 2^53 cannot be sent exactly.
       await db.cancelIntent(actor.orgId, actor.userId, prepared.intentId);
       return fail('unsupported_caller_identity', 'That caller ID cannot be used from the browser dialer.');
+    }
+
+    if (options.beforeAuthorize && !options.beforeAuthorize()) {
+      await db.cancelIntent(actor.orgId, actor.userId, prepared.intentId);
+      return fail('denied', dialpadDenialMessage('outside_calling_hours'), 'outside_calling_hours');
     }
 
     const authorization = parseDialpadDispatchAuthorization(await db.authorizeDispatch(actor.orgId, actor.userId, prepared.intentId));
