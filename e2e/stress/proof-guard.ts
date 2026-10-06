@@ -82,18 +82,21 @@ export function verifySignedProof(d: GuardDeps): AppProof {
   const dir = d.env.STRESS_RUN_DIR;
   const key = d.env.STRESS_PROOF_KEY;
   const nonce = d.env.STRESS_PROOF_NONCE;
+  if (!d.env.STRESS_RUN_ID || !d.env.STRESS_RUN_TAG) return refuse("APP_EGRESS_PROOF_MISSING", "STRESS_RUN_ID / STRESS_RUN_TAG are not set: the proof cannot be bound to a run.");
   if (!dir) return refuse("APP_EGRESS_PROOF_MISSING", "STRESS_RUN_DIR is not set: the browser specs run only under the engine (npm run stress -- run).");
   const text = d.readFile(path.join(dir, PROOF_FILE));
   if (!text) return refuse("APP_EGRESS_PROOF_MISSING", `no ${PROOF_FILE} in ${dir}: the engine has not proven the app's egress for this run; browser mutations are refused.`);
   if (!key || !nonce) return refuse("APP_EGRESS_PROOF_MISSING", "STRESS_PROOF_KEY / STRESS_PROOF_NONCE are not set: only the engine starts the browser lane.");
   let proof: AppProof;
   try { proof = JSON.parse(text) as AppProof; } catch { return refuse("APP_EGRESS_PROOF_MISMATCH", `${PROOF_FILE} is not valid JSON`); }
+  if (typeof proof !== "object" || proof === null || typeof proof.mac !== "string" || typeof proof.nonce !== "string") return refuse("APP_EGRESS_PROOF_MISMATCH", `${PROOF_FILE} is not a proof object`);
   if (!macOk(proof, key)) return refuse("APP_EGRESS_PROOF_MISMATCH", `${PROOF_FILE} does not verify against this run's key (edited, or from another run).`);
   if (proof.nonce !== nonce) return refuse("APP_EGRESS_PROOF_STALE", `${PROOF_FILE} is from an earlier run (nonce differs).`);
   if (proof.sha !== d.headSha()) return refuse("APP_EGRESS_PROOF_MISMATCH", `the proof is for commit ${proof.sha}, this checkout is ${d.headSha()}.`);
-  if (d.env.STRESS_RUN_ID && d.env.STRESS_RUN_ID !== proof.runId) return refuse("APP_EGRESS_PROOF_MISMATCH", "the proof's run id is not this run's.");
-  if (d.env.STRESS_RUN_TAG && d.env.STRESS_RUN_TAG !== proof.runTag) return refuse("APP_EGRESS_PROOF_MISMATCH", "the proof's run tag is not this run's.");
-  if (d.now() - Date.parse(proof.startedAt) > MAX_RUN_MS) return refuse("APP_EGRESS_PROOF_STALE", "the proof is older than the maximum run length.");
+  if (d.env.STRESS_RUN_ID !== proof.runId) return refuse("APP_EGRESS_PROOF_MISMATCH", "the proof's run id is not this run's.");
+  if (d.env.STRESS_RUN_TAG !== proof.runTag) return refuse("APP_EGRESS_PROOF_MISMATCH", "the proof's run tag is not this run's.");
+  const age = d.now() - Date.parse(proof.startedAt);
+  if (!Number.isFinite(age) || age < 0 || age > MAX_RUN_MS) return refuse("APP_EGRESS_PROOF_STALE", "the proof's start time is unreadable, in the future, or older than the maximum run length.");
   return proof;
 }
 

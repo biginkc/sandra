@@ -1,6 +1,6 @@
 import { quickPickDueAt } from "../../../src/lib/my-leads/quick-picks";
 import { asRep } from "../db";
-import { expectedSectionCounts, sectionParityProblems, stripParityProblems } from "../parity";
+import { expectedFromQueueRows, QUEUE_ROWS_SQL, sectionParityProblems, stripParityProblems, type QueueRow } from "../parity";
 import { expect, test } from "./fixtures";
 import { recordResult, signIn, type Run } from "./support";
 
@@ -46,18 +46,8 @@ test("stress rendered parity: lead page next step matches the open appointment r
   const dbStrip = await asRep(run.db, run.world.repUserId, (c) => c.query<{ v: { rows: Array<{ propertyId: string }> } }>("select public.fn_get_my_leads_call_next($1,$2,25) as v", [run.cfg.orgId, run.world.repUserId]));
   failures.push(...stripParityProblems(renderedStrip, dbStrip.rows[0]!.v.rows.map((r) => r.propertyId)));
   const sections = await page.locator('[data-testid^="my-leads-section-"]').evaluateAll((els) => els.map((e) => ({ stage: (e.getAttribute("data-testid") ?? "").replace("my-leads-section-", ""), badge: e.querySelector('[aria-label$="lead"], [aria-label$="leads"]')?.getAttribute("aria-label") ?? "" })));
-  // The rep must own ONLY run leads, or the comparison would be apples to oranges: refuse instead of narrowing the query.
-  const foreign = (await run.db.query<{ n: number }>("select count(*)::int n from public.properties p where p.org_id=$1 and p.assigned_user_id=$2 and p.deleted_at is null and p.address not like $3 || '%'", [run.cfg.orgId, run.world.repUserId, run.cfg.runTag])).rows[0]!.n;
-  if (foreign > 0) failures.push(`the rep owns ${foreign} lead(s) that are not run leads: section counts cannot be compared`);
-  const dbRows = (await run.db.query<{ stage: string; in_drip: boolean; n: number }>(
-    `select coalesce(qs.stage, 'not_contacted') as stage,
-            exists (select 1 from public.sequence_enrollments e where e.property_id=p.id and e.org_id=p.org_id and e.status='active') as in_drip,
-            count(*)::int n
-       from public.properties p
-       left join public.acquisition_queue_states qs on qs.property_id=p.id and qs.org_id=p.org_id
-      where p.org_id=$1 and p.assigned_user_id=$2 and p.deleted_at is null and (qs.property_id is null or qs.archived_at is null)
-      group by 1, 2`, [run.cfg.orgId, run.world.repUserId])).rows;
-  const { expected, problems: unknownStages } = expectedSectionCounts(dbRows);
+  const queue = await asRep(run.db, run.world.repUserId, (c) => c.query<QueueRow>(QUEUE_ROWS_SQL, [run.cfg.orgId, run.world.repUserId, run.cfg.runTag]));
+  const { expected, problems: unknownStages } = expectedFromQueueRows(queue.rows);
   failures.push(...unknownStages, ...sectionParityProblems(sections, expected));
   recordResult(run.dir, -16, failures.length === 0, failures.slice(0, 5).join(" | "));
   expect(failures).toEqual([]);

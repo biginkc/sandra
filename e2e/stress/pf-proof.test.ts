@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { proveOsDenial, type PfRunner } from "./egress";
 import { LaneRefusal } from "./guards";
-import { classifyRule, expandEvaluation, labelledPackets, pfCoverageProblems, probeProblems, skippedInterfaces, tokenizePfRule, type EvalInput, type ProbeResult } from "./pf-proof";
+import { classifyRule, expandEvaluation, labelledPackets, parseInterfaces, pfAnchorPolicyProblems, pfCoverageProblems, probeProblems, skippedInterfaces, tokenizePfRule, type EvalInput, type ProbeResult } from "./pf-proof";
 
 const U = 501;
 const ON = "Status: Enabled for 0 days 00:10:00           Debug: Urgent";
@@ -17,8 +17,8 @@ block drop out log quick proto udp from any to any user = ${U} ${LABEL}
 const canonical = counters(0);
 const MAIN = 'scrub-anchor "com.apple/*" all fragment reassemble\nanchor "com.apple/*" all\n';
 const ev = (anchorBody: string, extra: Partial<EvalInput> = {}): EvalInput => ({ main: MAIN, anchorRules: { "com.apple/sandra-stress": anchorBody }, children: { "com.apple": ["com.apple/sandra-stress"] }, ...extra });
-const problems = (anchorBody: string, opts: { uids?: number[]; skipped?: string[]; status?: string; input?: Partial<EvalInput> } = {}) =>
-  pfCoverageProblems({ sequence: expandEvaluation(ev(anchorBody, opts.input)), uids: opts.uids ?? [U], skippedIfaces: opts.skipped ?? ["lo0"], statusText: opts.status ?? ON });
+const problems = (anchorBody: string, opts: { uids?: number[]; skipped?: string[]; listed?: string[]; status?: string; input?: Partial<EvalInput> } = {}) =>
+  pfCoverageProblems({ sequence: expandEvaluation(ev(anchorBody, opts.input)), uids: opts.uids ?? [U], skippedIfaces: opts.skipped ?? ["lo0"], listedInterfaces: opts.listed ?? ["lo0", "en0"], statusText: opts.status ?? ON });
 const LO = "pass quick on lo0 all flags S/SA keep state\n";
 
 describe("(a) the pf proof demands COMPLETE coverage of the expected set", () => {
@@ -141,5 +141,103 @@ describe("(a) the full proof, end to end over a scripted pfctl", () => {
   });
   it("is refused when pfctl cannot be run at all (no sudo)", () => {
     expect(() => proveOsDenial({ uids: [U], runner: () => { throw new Error("sudo: a password is required"); }, probe: () => "timeout" })).toThrow(/OS_EGRESS_UNVERIFIABLE|cannot read the pf state/);
+  });
+});
+
+/** A scripted pfctl over an arbitrary main ruleset and anchor bodies (our anchor is always canonical). */
+function scriptedRuleset(main: string, anchors: Record<string, string>, children: string[]) {
+  let tcp = 0;
+  const runner: PfRunner = (args) => {
+    const j = args.join(" ");
+    if (j === "-si") return ON;
+    if (j === "-vsI") return "lo0 (skip)\nen0\n";
+    if (j === "-sr") return main;
+    if (j === "-a com.apple -sA") return children.join("\n") + "\n";
+    if (j === "-a com.apple/sandra-stress -sr") return canonical;
+    if (j === "-a com.apple/sandra-stress -vsr") return counters(tcp, tcp);
+    const m = /^-a (\S+) -sr$/.exec(j);
+    if (m && m[1]! in anchors) return anchors[m[1]!]!;
+    if (m && m[1] === "com.apple/sandra-stress") return canonical;
+    throw new Error(`unexpected pfctl ${j}`);
+  };
+  const probe = (s: { proto: string }) => { tcp += 1; return s.proto === "tcp" ? "timeout" : "sent"; };
+  return { runner, probe };
+}
+const prove = (main: string, anchors: Record<string, string> = {}, children = ["com.apple/sandra-stress"]) => {
+  const r = scriptedRuleset(main, anchors, children);
+  return () => proveOsDenial({ uids: [U], runner: r.runner, probe: r.probe, ipv6Route: () => false });
+};
+const refusedCode = (fn: () => unknown) => { try { fn(); } catch (e) { return `${(e as { code?: string }).code}: ${(e as Error).message}`; } return null; };
+
+describe("(a) anchors fail closed (Astra d628491: conditional anchors, quick-anchor termination, unknown anchors)", () => {
+  it("Astra #1: an anchor restricted to `to <stress_probes>` whose blocks only cover the probe destinations is refused", () => {
+    const main = `${MAIN}anchor "stress_cond" to <stress_probes>\n`;
+    const out = refusedCode(prove(main, { stress_cond: `block drop out quick proto { tcp, udp } from any to <stress_probes> user = ${U}\n` }));
+    expect(out).toMatch(/OS_EGRESS_UNVERIFIABLE/);
+    expect(out).toMatch(/unrecognised main-ruleset anchor "stress_cond"/);
+  });
+  it("Astra #2: an earlier `anchor \"allow\" out quick` holding a destination pass is refused (quick-anchor termination is not modelled, it is refused)", () => {
+    const main = `anchor "allow" out quick\n${MAIN}`;
+    const out = refusedCode(prove(main, { allow: "pass out to 8.8.8.8 flags S/SA keep state\n" }));
+    expect(out).toMatch(/OS_EGRESS_UNVERIFIABLE/);
+    expect(out).toMatch(/unrecognised main-ruleset anchor "allow"/);
+  });
+  it("an unknown child anchor under com.apple/* is refused, even when empty", () => {
+    expect(refusedCode(prove(MAIN, { "com.apple/999.Evil": "" }, ["com.apple/999.Evil", "com.apple/sandra-stress"]))).toMatch(/unknown anchor com\.apple\/999\.Evil/);
+  });
+  it("a stock inert anchor (matched exactly) with only inbound rules is accepted; with an outbound pass it is refused", () => {
+    const stock = 'block drop in quick proto tcp from any to any port 9\npass in proto tcp from any to any port 22 flags S/SA keep state\n';
+    expect(refusedCode(prove(MAIN, { "com.apple/250.ApplicationFirewall": stock }, ["com.apple/250.ApplicationFirewall", "com.apple/sandra-stress"]))).toBeNull();
+    expect(refusedCode(prove(MAIN, { "com.apple/250.ApplicationFirewall": stock + "pass out all flags S/SA keep state\n" }, ["com.apple/250.ApplicationFirewall", "com.apple/sandra-stress"]))).toMatch(/could match outbound/);
+    expect(refusedCode(prove(MAIN, { "com.apple/250.ApplicationFirewall": 'anchor "nested"\n' }, ["com.apple/250.ApplicationFirewall", "com.apple/sandra-stress"]))).toMatch(/OS_EGRESS_UNVERIFIABLE/);
+  });
+  it("a near-miss name is not the stock anchor (exact match only)", () => {
+    expect(refusedCode(prove(MAIN, { "com.apple/250.ApplicationFirewall2": "" }, ["com.apple/250.ApplicationFirewall2", "com.apple/sandra-stress"]))).toMatch(/unknown anchor/);
+  });
+  it("the stock wildcard with any attribute (quick, to, on, user) is refused", () => {
+    for (const attr of ["quick", "out quick", "to <t>", "on en0", "user = 501", "inet"]) {
+      expect(refusedCode(prove(`scrub-anchor "com.apple/*" all\nanchor "com.apple/*" ${attr}\n`)), attr).toMatch(/unrecognised main-ruleset anchor/);
+    }
+  });
+  it("our own anchor must be flat: a nested anchor inside it is refused", () => {
+    expect(pfAnchorPolicyProblems({ main: MAIN, anchorRules: { "com.apple/sandra-stress": `${canonical}anchor "x"\n` }, children: { "com.apple": ["com.apple/sandra-stress"] } }).join()).toMatch(/nested anchor/);
+  });
+  it("the canonical stock layout (wildcard + our anchor) is accepted, and the policy is pure", () => {
+    expect(pfAnchorPolicyProblems({ main: MAIN, anchorRules: { "com.apple/sandra-stress": canonical }, children: { "com.apple": ["com.apple/sandra-stress"] } })).toEqual([]);
+    expect(refusedCode(prove(MAIN))).toBeNull();
+  });
+});
+
+/** Adversarial repros from the pf-proof sub-review (scratchpad/rc822/pf/adv.test.ts): each was accepted before the fix. */
+describe("(a) adversarial repros: `!`, `flags`, anchor attributes, interface listing, status line", () => {
+  const T = (f: string, extra = "") => `block drop out quick proto tcp ${f} user = 501${extra}\nblock drop out quick proto udp ${f} user = 501${extra}\n`;
+  const withBlocks = (blocks: string) => problems(`${LO}${blocks}`);
+  it("`!` is refused everywhere except `on ! lo0` (from ! any, to ! any)", () => {
+    expect(withBlocks(T("from ! any to any")).join()).toMatch(/unknown or restricted|not covered/);
+    expect(withBlocks(T("from any to ! any")).join()).toMatch(/unknown or restricted|not covered/);
+    expect(withBlocks(T("on ! lo0 all"))).toEqual([]); // the one legal use
+  });
+  it("`flags` must be absent or exactly S/SA", () => {
+    expect(withBlocks(`block drop out quick proto tcp all user = 501 flags F/F\nblock drop out quick proto udp all user = 501\n`).join()).toMatch(/unknown or restricted|not covered/);
+    expect(withBlocks(`block drop out quick proto tcp all flags S/SA user = 501\nblock drop out quick proto udp all user = 501\n`)).toEqual([]);
+  });
+  it("any attribute on a main-ruleset `anchor` line other than none or `all` is refused (in, proto icmp, on lo0, user)", () => {
+    for (const attrs of ["in all", "proto icmp all", "on lo0 all", "all user = 999", "out quick"]) {
+      const p = pfCoverageProblems({ sequence: expandEvaluation({ main: `anchor "com.apple/*" ${attrs}`, anchorRules: { "com.apple/sandra-stress": canonical }, children: { "com.apple": ["com.apple/sandra-stress"] } }), uids: [U], skippedIfaces: ["lo0"], listedInterfaces: ["lo0", "en0"], statusText: ON });
+      expect(p.join(), attrs).toMatch(/carries attributes/);
+    }
+  });
+  it("-vsI must positively list a non-loopback interface (en0): an empty or lo0-only listing is refused", () => {
+    expect(parseInterfaces("").listed).toEqual([]);
+    expect(parseInterfaces("lo0\nen0\n").listed).toEqual(["lo0", "en0"]);
+    expect(parseInterfaces("lo0\n\tFlags: skip\nen0\n\tCleared: x").skipped).toEqual(["lo0"]);
+    expect(problems(canonical, { listed: [] }).join()).toMatch(/did not list any non-loopback interface/);
+    expect(problems(canonical, { listed: ["lo0"] }).join()).toMatch(/did not list any non-loopback interface/);
+    expect(problems(canonical, { listed: ["lo0", "en0"] })).toEqual([]);
+  });
+  it("the Status line must be a line of its own: `Not Status: Enabled` and Disabled-with-Enabled-text are refused", () => {
+    expect(problems(canonical, { status: "Status: Disabled for 0 days\nNot Status: Enabled" }).join()).toMatch(/not enabled/);
+    expect(problems(canonical, { status: "Status: Disabled\nfoo Status: Enabled" }).join()).toMatch(/not enabled/);
+    expect(problems(canonical, { status: "Info: x\nStatus: Enabled for 0 days" })).toEqual([]);
   });
 });

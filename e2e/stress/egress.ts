@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { LaneRefusal } from "./guards";
-import { expandEvaluation, labelledPackets, OS_EGRESS_NOTES, pfCoverageProblems, probeProblems, skippedInterfaces, type EvalInput, type Proto, type ProbeResult } from "./pf-proof";
+import { expandEvaluation, labelledPackets, OS_EGRESS_NOTES, parseInterfaces, pfAnchorPolicyProblems, pfCoverageProblems, probeProblems, type EvalInput, type Proto, type ProbeResult } from "./pf-proof";
 
 /**
  * Egress denial, fail closed. Two rings:
@@ -117,9 +117,12 @@ export function proveOsDenial(opts: { uids: readonly number[]; runner?: PfRunner
   const notes: string[] = [OS_EGRESS_NOTES.dns, OS_EGRESS_NOTES.icmp];
   try {
     const statusText = run(["-si"]);
-    const skipped = skippedInterfaces(run(["-vsI"]));
-    const sequence = expandEvaluation(collectRuleset(run));
-    problems.push(...pfCoverageProblems({ sequence, uids: opts.uids, skippedIfaces: skipped, statusText }));
+    const ifaces = parseInterfaces(run(["-vsI"]));
+    const ruleset = collectRuleset(run);
+    const anchorProblems = pfAnchorPolicyProblems(ruleset);
+    if (anchorProblems.length) throw new LaneRefusal("OS_EGRESS_UNVERIFIABLE", `the pf ruleset has anchors the proof does not model, so it fails closed: ${anchorProblems.join(" | ")}`);
+    const sequence = expandEvaluation(ruleset);
+    problems.push(...pfCoverageProblems({ sequence, uids: opts.uids, skippedIfaces: ifaces.skipped, listedInterfaces: ifaces.listed, statusText }));
     const results: ProbeResult[] = [];
     const v6 = (opts.ipv6Route ?? hasIpv6Route)();
     for (const spec of PROBES) {

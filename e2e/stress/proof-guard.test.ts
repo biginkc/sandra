@@ -84,6 +84,17 @@ describe("(c) the browser specs cannot mutate without a run-bound, live app-egre
     expect(() => assertLiveRecheck(proof, d)).not.toThrow();
     expect(refusal(() => assertLiveRecheck(proof, deps({ live: { pid: 1 } })))).toMatch(/STALE/);
   });
+  it("notes: the age check is finite and non-negative; run id and tag must be set; malformed or `null` JSON is a LaneRefusal, not a TypeError", () => {
+    expect(refusal(() => assertRunBoundAppProof(deps({ proof: signProof(fields({ startedAt: "not a date" }), SECRETS.key) })))).toMatch(/STALE.*unreadable/);
+    expect(refusal(() => assertRunBoundAppProof(deps({ proof: signProof(fields({ startedAt: new Date(NOW + 3600_000).toISOString() }), SECRETS.key) })))).toMatch(/STALE.*future/);
+    expect(refusal(() => assertRunBoundAppProof(deps({ env: { STRESS_RUN_ID: undefined } })))).toMatch(/MISSING.*STRESS_RUN_ID/);
+    expect(refusal(() => assertRunBoundAppProof(deps({ env: { STRESS_RUN_TAG: undefined } })))).toMatch(/MISSING.*STRESS_RUN_TAG/);
+    const d = deps();
+    for (const text of ["null", "[]", "42", "{", "{\"mac\":1}"]) {
+      const out = refusal(() => assertRunBoundAppProof({ ...d, readFile: (p) => (p.endsWith(PROOF_FILE) ? text : null) }));
+      expect(out, text).toMatch(/^APP_EGRESS_PROOF_MISMATCH/);
+    }
+  });
   it("c15 the engine's proof is written and signed with a per-run key; only the child env carries the key and nonce", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "proofdir-"));
     const s = newRunSecrets();

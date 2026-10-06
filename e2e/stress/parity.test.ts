@@ -1,9 +1,6 @@
-import { readFileSync } from "node:fs";
-import path from "node:path";
-
 import { describe, expect, it } from "vitest";
 
-import { ALL_SECTIONS, expectedSectionCounts, sectionParityProblems, type RenderedSection } from "./parity";
+import { ALL_SECTIONS, expectedFromQueueRows, expectedSectionCounts, QUEUE_ROWS_SQL, sectionParityProblems, type RenderedSection } from "./parity";
 import { MY_LEAD_STAGE_ORDER } from "../../src/app/(dashboard)/my-leads/_components/types";
 
 const full = (counts: Record<string, number>): RenderedSection[] => ALL_SECTIONS.map((stage) => ({ stage, badge: `${counts[stage] ?? 0} ${(counts[stage] ?? 0) === 1 ? "lead" : "leads"}` }));
@@ -46,12 +43,18 @@ describe("(b) section parity compares the COMPLETE expected set", () => {
     expect(e.inDrip).toBe(2);
     expect(sectionParityProblems(full({ contacted: 4, in_drip: 2 }), e)).toEqual([]);
   });
-  it("b9 the expected-count query excludes archived queue states and deleted leads, and the spec refuses a rep owning non-run leads", () => {
-    const spec = readFileSync(path.join(__dirname, "browser/rendered-parity.spec.ts"), "utf8");
-    expect(spec).toMatch(/qs\.archived_at is null/);
-    expect(spec).toMatch(/p\.deleted_at is null/);
-    expect(spec).toMatch(/not run leads/);
-    expect(spec).toMatch(/status='active'/);
+  it("b9 the expected counts come from the rep's queue rows (the page's own owned-lead definition) and refuse non-run leads", () => {
+    const rows = [
+      { stage: "contacted", in_drip: false, is_run_lead: true }, { stage: "contacted", in_drip: false, is_run_lead: true }, { stage: "contacted", in_drip: true, is_run_lead: true },
+      { stage: "not_contacted", in_drip: false, is_run_lead: true },
+    ];
+    const ok = expectedFromQueueRows(rows);
+    expect(ok.problems).toEqual([]);
+    expect(ok.expected.stages.contacted).toBe(2);
+    expect(ok.expected.inDrip).toBe(1);
+    const foreign = expectedFromQueueRows([...rows, { stage: "contacted", in_drip: false, is_run_lead: false }]);
+    expect(foreign.problems.join()).toMatch(/1 queue lead\(s\) that are not run leads/);
+    expect(QUEUE_ROWS_SQL).toMatch(/my_leads_queue_rows\(\$1, \$2/); // called with the rep as the member (the spec runs it through asRep)
   });
   it("b10 render-only-when-non-empty mode: an empty stage may be absent, a populated one may not, and present-with-0 is extra", () => {
     const opts = { alwaysRendered: false };
@@ -59,12 +62,18 @@ describe("(b) section parity compares the COMPLETE expected set", () => {
     expect(sectionParityProblems([], expected({ contacted: 2 }), opts).join()).toMatch(/contacted missing/);
     expect(sectionParityProblems(full({ contacted: 2 }), expected({ contacted: 2 }), opts).join()).toMatch(/rendered although the database has none/);
   });
-  it("b11 the default pins today's queue.tsx: all six always rendered", () => {
-    const queue = readFileSync(path.join(__dirname, "../../src/app/(dashboard)/my-leads/_components/queue.tsx"), "utf8");
-    expect(queue).toMatch(/MY_LEAD_STAGE_ORDER\.map/);
-    expect(queue).toMatch(/stage="in_drip"/);
+  it("b11 the always-render default: an omitted empty section fails unless the mode is switched consciously", () => {
     expect(ALL_SECTIONS).toEqual([...MY_LEAD_STAGE_ORDER, "in_drip"]);
-    expect(sectionParityProblems([], expected()).join()).toMatch(/missing/);
+    const onlyPopulated = full({ contacted: 2 }).filter((s) => s.stage === "contacted");
+    expect(sectionParityProblems(onlyPopulated, expected({ contacted: 2 })).join()).toMatch(/needs_offer missing/);
+    expect(sectionParityProblems(onlyPopulated, expected({ contacted: 2 }), { alwaysRendered: false })).toEqual([]);
+  });
+  it("the badge regex is plural-correct: `1 lead` and `N leads` only", () => {
+    expect(sectionParityProblems(full({ contacted: 1 }), expected({ contacted: 1 }))).toEqual([]);
+    const wrong = full({ contacted: 1 }).map((s) => (s.stage === "contacted" ? { ...s, badge: "1 leads" } : s));
+    expect(sectionParityProblems(wrong, expected({ contacted: 1 })).join()).toMatch(/no readable count badge/);
+    const wrong2 = full({ contacted: 2 }).map((s) => (s.stage === "contacted" ? { ...s, badge: "2 lead" } : s));
+    expect(sectionParityProblems(wrong2, expected({ contacted: 2 })).join()).toMatch(/no readable count badge/);
   });
   it("b12 a stage in the database that the app does not know is reported, never dropped", () => {
     const { problems } = expectedSectionCounts([{ stage: "mystery", in_drip: false, n: 3 }]);

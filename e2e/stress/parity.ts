@@ -75,11 +75,36 @@ export function sectionParityProblems(rendered: ReadonlyArray<RenderedSection>, 
       continue;
     }
     if (got.length > 1) p.push(`section ${stage} rendered twice`);
-    const n = Number(/^(\d+) leads?$/.exec(got[0]!.badge)?.[1] ?? NaN);
+    // The page renders `1 lead` and `N leads` (queue.tsx): "1 leads" and "2 lead" are wrong.
+    const bm = /^(\d+) (lead|leads)$/.exec(got[0]!.badge);
+    const n = bm && ((bm[1] === "1") === (bm[2] === "lead")) ? Number(bm[1]) : NaN;
     if (!Number.isFinite(n)) { p.push(`section ${stage}: no readable count badge ("${got[0]!.badge}")`); continue; }
     if (!alwaysRendered && want === 0) { p.push(`section ${stage} rendered although the database has none (page is render-only-when-non-empty)`); continue; }
     if (n !== want) p.push(`section ${stage} shows ${n}, database has ${want}`);
   }
   if (rendered.length === 0) p.push("no section rendered");
   return p;
+}
+
+/**
+ * The expected-count source: the page's own owned-lead definition, `my_leads_queue_rows` called AS THE REP (an open assignment episode, not DNC-locked,
+ * status not closed/dead/dnc, archived excluded), each row joined to its property and to whether it is in an ACTIVE drip. The same query, filtered to
+ * non-run addresses, is the "rep owns only run leads" guard.
+ */
+export const QUEUE_ROWS_SQL = `select r.stage as stage,
+       exists (select 1 from public.sequence_enrollments e where e.property_id = r.property_id and e.org_id = $1 and e.status = 'active') as in_drip,
+       (p.address like $3 || '%') as is_run_lead
+  from public.my_leads_queue_rows($1, $2, statement_timestamp()) r
+  join public.properties p on p.id = r.property_id and p.org_id = $1`;
+
+export type QueueRow = { stage: string; in_drip: boolean; is_run_lead: boolean };
+
+/** Folds the rep's queue rows into expected section counts, and refuses (a problem) when the rep owns a lead that is not a run lead. */
+export function expectedFromQueueRows(rows: readonly QueueRow[]): { expected: ExpectedSections; problems: string[] } {
+  const counted = new Map<string, number>();
+  for (const r of rows) { const k = `${r.stage}|${r.in_drip}`; counted.set(k, (counted.get(k) ?? 0) + 1); }
+  const { expected, problems } = expectedSectionCounts([...counted].map(([k, n]) => { const [stage, d] = k.split("|"); return { stage: stage!, in_drip: d === "true", n }; }));
+  const foreign = rows.filter((r) => !r.is_run_lead).length;
+  if (foreign > 0) problems.push(`the rep owns ${foreign} queue lead(s) that are not run leads: section counts cannot be compared`);
+  return { expected, problems };
 }
