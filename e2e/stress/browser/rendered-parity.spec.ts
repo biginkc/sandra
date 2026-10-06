@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 
 import { quickPickDueAt } from "../../../src/lib/my-leads/quick-picks";
+import { asRep } from "../db";
+import { sectionParityProblems, stripParityProblems } from "../parity";
 import { loadRun, recordResult, signIn } from "./support";
 
 /**
@@ -35,6 +37,19 @@ test("stress rendered parity: lead page next step matches the open appointment r
     else if (new Date(String(due)).toISOString() !== new Date(same.rows[0].due_at).toISOString()) failures.push(`${row.related_property_id}: rendered time ${due} != row ${new Date(same.rows[0].due_at).toISOString()}`);
   }
   void quickPickDueAt;
+
+  // Strip membership and section counts, rendered on the My Leads page after a reload, against the same rows in the database.
+  await page.goto("/my-leads");
+  await page.reload();
+  await page.getByTestId("call-next-strip").waitFor({ timeout: 30_000 }).catch(() => {});
+  const renderedStrip = await page.locator('[data-testid^="call-next-row-"]').evaluateAll((els) => els.map((e) => e.getAttribute("data-property-id") ?? ""));
+  const dbStrip = await asRep(run.db, run.world.repUserId, (c) => c.query<{ v: { rows: Array<{ propertyId: string }> } }>("select public.fn_get_my_leads_call_next($1,$2,25) as v", [run.cfg.orgId, run.world.repUserId]));
+  failures.push(...stripParityProblems(renderedStrip, dbStrip.rows[0]!.v.rows.map((r) => r.propertyId)));
+  const sections = await page.locator('[data-testid^="my-leads-section-"]').evaluateAll((els) => els.map((e) => ({ stage: (e.getAttribute("data-testid") ?? "").replace("my-leads-section-", ""), badge: e.querySelector('[aria-label$="lead"], [aria-label$="leads"]')?.getAttribute("aria-label") ?? "" })));
+  const dbCounts = (await run.db.query<{ stage: string; n: number }>(
+    `select qs.stage, count(*)::int n from public.acquisition_queue_states qs join public.properties p on p.id=qs.property_id and p.org_id=qs.org_id
+      where p.org_id=$1 and p.assigned_user_id=$2 and p.deleted_at is null and p.address like $3 || '%' group by qs.stage`, [run.cfg.orgId, run.world.repUserId, run.cfg.runTag])).rows;
+  failures.push(...sectionParityProblems(sections, Object.fromEntries(dbCounts.map((r) => [r.stage, r.n]))));
   recordResult(run.dir, -16, failures.length === 0, failures.slice(0, 5).join(" | "));
   expect(failures).toEqual([]);
 });

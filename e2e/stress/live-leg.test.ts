@@ -24,14 +24,16 @@ const ready: Record<string, string> = {
   STRESS_DIALPAD_SUBSCRIPTION_PROOF: "/r/proof.txt",
   STRESS_LIVE_WORLD_FILE: "/r/world.json",
   STRESS_SELFTEST_REPORT: "/r/selftest.json",
+  STRESS_LIVE_APP_IDENTITY_LOG: "/r/live-identity.jsonl",
   STRESS_OP_REF_CELL: "op://vault/cell/number",
   STRESS_OP_REF_TELNYX: "op://vault/telnyx/number",
 };
+const goodRows = (over: Record<string, unknown> = {}) => [{ fault: "none", ok: true, faultFired: false, failingChecks: [], verdict: "PARTIAL_PASS" }, { fault: "duplicate_send", ok: true, faultFired: true, failingChecks: [7], verdict: "FAIL", ...over }, { fault: "drop_offer", ok: true, faultFired: true, failingChecks: [14], verdict: "FAIL" }, { fault: "wrong_lead_note", ok: true, faultFired: true, failingChecks: [12], verdict: "FAIL" }];
 const deps: LiveDeps = {
   opRead: (ref) => (ref.includes("cell") ? "+18165550111" : "+18165550222"),
-  readFile: (p) => (p.endsWith("REPORT.md") ? `# Chaos day live1: PASS\n\n- SHA: ${SHA}\n- Profile: full, scope: full, fault: none\n- OS egress: proven\n- App egress guard: proven in pid 4242\n` : p.endsWith("selftest.json") ? JSON.stringify({ sha: SHA, ok: true, rows: [{ fault: "none", ok: true, faultFired: false }, { fault: "duplicate_send", ok: true, faultFired: true }, { fault: "drop_offer", ok: true, faultFired: true }, { fault: "wrong_lead_note", ok: true, faultFired: true }] }) : p.endsWith("world.json") ? JSON.stringify({ orgId: "o", repUserId: "u" }) : p.endsWith("proof.txt") ? "subscription https://stress-tunnel.example.net ok" : null),
+  readFile: (p) => (p.endsWith("REPORT.md") ? `# Chaos day live1: PASS\n\n- SHA: ${SHA}\n- Profile: full, scope: full, fault: none\n- OS egress: proven\n- App egress guard: proven in pid 4242\n` : p.endsWith("selftest.json") ? JSON.stringify({ sha: SHA, ok: true, rows: goodRows() }) : p.endsWith("world.json") ? JSON.stringify({ orgId: "o", repUserId: "u" }) : p.endsWith("proof.txt") ? "subscription https://stress-tunnel.example.net ok" : null),
 };
-const status = (env: Record<string, string | undefined>, d: LiveDeps = deps) => liveLegStatus(readConfig(env), env, d);
+const status = (env: Record<string, string | undefined>, d: LiveDeps = deps) => liveLegStatus(readConfig(env, { headSha: () => SHA }), env, d);
 
 describe("live leg gating (disabled by default, refuses unless every prerequisite is met)", () => {
   it("is not ready with an empty environment, and every prerequisite is listed as unmet", async () => {
@@ -43,7 +45,7 @@ describe("live leg gating (disabled by default, refuses unless every prerequisit
     expect((await status(ready)).ready).toBe(true);
   });
   it("any single missing prerequisite blocks it", async () => {
-    const keys = ["STRESS_LIVE_LEG", "STRESS_TEST_SMS_STRING_APPROVED", "STRESS_DIALPAD_LIVE_JARRAD_PRESENT", "STRESS_ROOT_BROWSER_CONTEXT", "STRESS_ROOT_PROD_DIALPAD_NO_SUBSCRIPTION", "STRESS_DIALPAD_DESKTOP_CONFIRMED", "STRESS_TUNNEL_URL", "STRESS_STUB_LEG_REPORT", "STRESS_DIALPAD_SUBSCRIPTION_PROOF", "STRESS_LIVE_WORLD_FILE", "STRESS_SELFTEST_REPORT", "STRESS_OP_REF_CELL", "STRESS_OP_REF_TELNYX", "STRESS_ARTIFACTS_DIR"];
+    const keys = ["STRESS_LIVE_LEG", "STRESS_TEST_SMS_STRING_APPROVED", "STRESS_DIALPAD_LIVE_JARRAD_PRESENT", "STRESS_ROOT_BROWSER_CONTEXT", "STRESS_ROOT_PROD_DIALPAD_NO_SUBSCRIPTION", "STRESS_DIALPAD_DESKTOP_CONFIRMED", "STRESS_TUNNEL_URL", "STRESS_STUB_LEG_REPORT", "STRESS_DIALPAD_SUBSCRIPTION_PROOF", "STRESS_LIVE_WORLD_FILE", "STRESS_SELFTEST_REPORT", "STRESS_LIVE_APP_IDENTITY_LOG", "STRESS_OP_REF_CELL", "STRESS_OP_REF_TELNYX", "STRESS_ARTIFACTS_DIR"];
     for (const k of keys) {
       const env = { ...ready, [k]: undefined };
       expect((await status(env)).ready, `without ${k}`).toBe(false);
@@ -66,8 +68,8 @@ describe("live leg gating (disabled by default, refuses unless every prerequisit
     expect((await status({ ...ready, STRESS_APP_URL: "https://sandra.example.com" })).ready).toBe(false);
   });
   it("assertLiveLegReady throws LaneRefusal listing the unmet items, and returns the plan when ready", async () => {
-    await expect(assertLiveLegReady(readConfig({}), {}, deps)).rejects.toBeInstanceOf(LaneRefusal);
-    const ok = await assertLiveLegReady(readConfig(ready), ready, deps);
+    await expect(assertLiveLegReady(readConfig({}, { headSha: () => SHA }), {}, deps)).rejects.toBeInstanceOf(LaneRefusal);
+    const ok = await assertLiveLegReady(readConfig(ready, { headSha: () => SHA }), ready, deps);
     expect(ok.plan).toHaveLength(8);
     expect(ok.numbers.cell).toBe("+18165550111");
   });
@@ -101,7 +103,7 @@ describe("live leg prerequisites added after review B1/N1 (e)", () => {
     expect((await status(ready, withReport(`${base}- OS egress: proven\n- App egress guard: proven in pid 7\n`))).ready).toBe(true);
   });
   const withSelftest = (json: unknown) => ({ ...deps, readFile: (p: string) => (p.endsWith("selftest.json") ? JSON.stringify(json) : deps.readFile!(p)) });
-  const rows = (over: Record<string, unknown> = {}) => [{ fault: "none", ok: true, faultFired: false }, { fault: "duplicate_send", ok: true, faultFired: true, ...over }, { fault: "drop_offer", ok: true, faultFired: true }, { fault: "wrong_lead_note", ok: true, faultFired: true }];
+  const rows = goodRows;
   it("needs a passing self-test at this sha in which every fault fired", async () => {
     expect((await status(ready, withSelftest({ sha: SHA, ok: true, rows: rows() }))).ready).toBe(true);
     expect((await status(ready, withSelftest({ sha: SHA, ok: false, rows: rows() }))).ready).toBe(false);

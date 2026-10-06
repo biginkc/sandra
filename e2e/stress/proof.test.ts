@@ -1,13 +1,13 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, truncateSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { appEgressViolations, appProofProblems, parsePsEnv, proveAppUnderTest, type AppProofInput } from "./app-proof";
+import { appEgressViolations, appProofProblems, guardLineFor, proveAppUnderTest, snapshotLog, type AppProofInput } from "./app-proof";
 import { readConfig } from "./config";
-import { GUARD_PATH, egressChildEnv } from "./egress";
+import { egressChildEnv } from "./egress";
 import { buildManifest } from "./manifest";
 import { LaneRefusal } from "./guards";
 import { decide } from "./report";
@@ -16,80 +16,125 @@ import { leadPhone } from "./world";
 
 const STUB = "http://127.0.0.1:55500";
 const LOG = "/tmp/app-egress.jsonl";
-const good = (over: Partial<AppProofInput> = {}): AppProofInput => ({
-  env: { NODE_OPTIONS: `--require "${GUARD_PATH}"`, STRESS_EGRESS_LOG: LOG, DIALPAD_DIAL_PROVIDER: "stub", MESSAGING_PROVIDER: "mock", DROPBOX_SIGN_API_BASE_URL: `${STUB}/dropbox-sign/v3` },
-  listenerPid: 4242,
-  appEgressLog: LOG,
-  logLines: [JSON.stringify({ kind: "guard_loaded", pid: 4242, probe: true })],
-  stubUrl: STUB,
-  ...over,
+const SHA = "a".repeat(40);
+const guardLine = (over: Record<string, unknown> = {}) => JSON.stringify({
+  kind: "guard_loaded", pid: 4242, probe: true, log: LOG, sha: SHA, dirty: false, redirect: STUB,
+  env: { DIALPAD_DIAL_PROVIDER: null, MESSAGING_PROVIDER: "mock", DROPBOX_SIGN_API_BASE_URL: `${STUB}/dropbox-sign/v3`, VERCEL_ENV: null, VERCEL: null }, ...over,
 });
+const good = (over: Partial<AppProofInput> = {}): AppProofInput => ({ listenerPid: 4242, listenerUid: 501, harnessUid: 501, appEgressLog: LOG, logLines: [guardLine()], stubUrl: STUB, harnessSha: SHA, ...over });
+const withEnv = (env: Record<string, string | null>) => {
+  const base = { MESSAGING_PROVIDER: "mock", DROPBOX_SIGN_API_BASE_URL: `${STUB}/dropbox-sign/v3`, DIALPAD_DIAL_PROVIDER: null, VERCEL_ENV: null, VERCEL: null };
+  return good({ logLines: [guardLine({ env: { ...base, ...env } })] });
+};
 
-describe("(b)(c) the app under test is proven at T0", () => {
+describe("(b)(c) the app under test is proven at T0 from its own guard line (F1: no ps parsing)", () => {
   it("a fully configured app has no problems", () => {
     expect(appProofProblems(good())).toEqual([]);
   });
-  it("(b) refuses an app without the guard, with the log elsewhere, or with no guard_loaded line from its own pid", () => {
-    expect(appProofProblems(good({ env: { ...good().env!, NODE_OPTIONS: "" } })).join()).toMatch(/does not carry the egress guard/);
-    expect(appProofProblems(good({ env: { ...good().env!, STRESS_EGRESS_LOG: "/somewhere/else.jsonl" } })).join()).toMatch(/STRESS_EGRESS_LOG/);
-    expect(appProofProblems(good({ logLines: [JSON.stringify({ kind: "guard_loaded", pid: 1, probe: true })] })).join()).toMatch(/guard_loaded/);
+  it("(b) refuses: no guard line from the listener's pid, wrong log, no listener, missing log", () => {
+    expect(appProofProblems(good({ logLines: [guardLine({ pid: 1 })] })).join()).toMatch(/guard_loaded/);
     expect(appProofProblems(good({ logLines: [] })).join()).toMatch(/guard_loaded/);
+    expect(appProofProblems(good({ logLines: [guardLine({ log: "/elsewhere.jsonl" })] })).join()).toMatch(/not STRESS_APP_EGRESS_LOG/);
     expect(appProofProblems(good({ appEgressLog: "" })).join()).toMatch(/STRESS_APP_EGRESS_LOG is not set/);
     expect(appProofProblems(good({ listenerPid: null }))).toEqual(expect.arrayContaining([expect.stringMatching(/no process is listening/)]));
-    expect(appProofProblems(good({ env: null })).join()).toMatch(/could not be read/);
   });
-  it("(c) refuses non-stub providers; DIALPAD_DIAL_PROVIDER unset is the LIVE fallback and is refused", () => {
-    const e = good().env!;
-    const noDial = { ...e };
-    delete noDial.DIALPAD_DIAL_PROVIDER;
-    expect(appProofProblems(good({ env: noDial })).join()).toMatch(/DIALPAD_DIAL_PROVIDER is "unset".*LIVE/);
-    expect(appProofProblems(good({ env: { ...e, DIALPAD_DIAL_PROVIDER: "live" } })).join()).toMatch(/DIALPAD_DIAL_PROVIDER/);
-    expect(appProofProblems(good({ env: { ...e, MESSAGING_PROVIDER: "sendillo" } })).join()).toMatch(/MESSAGING_PROVIDER/);
-    expect(appProofProblems(good({ env: { ...e, DROPBOX_SIGN_API_BASE_URL: "https://api.hellosign.com/v3" } })).join()).toMatch(/DROPBOX_SIGN_API_BASE_URL/);
-    expect(appProofProblems(good({ env: { ...e, VERCEL_ENV: "production" } })).join()).toMatch(/VERCEL_ENV/);
+  it("(c) refuses non-stub providers and an undiverted Dialpad API", () => {
+    expect(appProofProblems(withEnv({ DIALPAD_DIAL_PROVIDER: "stub" })).join()).toMatch(/keeps dials in process/);
+    expect(appProofProblems(withEnv({ MESSAGING_PROVIDER: "sendillo" })).join()).toMatch(/MESSAGING_PROVIDER/);
+    expect(appProofProblems(withEnv({ DROPBOX_SIGN_API_BASE_URL: "https://api.hellosign.com/v3" })).join()).toMatch(/DROPBOX_SIGN_API_BASE_URL/);
+    expect(appProofProblems(withEnv({ VERCEL_ENV: "production" })).join()).toMatch(/VERCEL_ENV/);
+    expect(appProofProblems(good({ logLines: [guardLine({ redirect: null })] })).join()).toMatch(/not diverted/);
+  });
+  it("N6: the app listener must run as the uid the pf rules cover", () => {
+    expect(appProofProblems(good({ listenerUid: 502 })).join()).toMatch(/uid 502/);
+    expect(appProofProblems(good({ listenerUid: null })).join()).toMatch(/unknown/);
+  });
+  it("#5: the app must run this checkout's commit with no tracked changes", () => {
+    expect(appProofProblems(good({ logLines: [guardLine({ sha: "b".repeat(40) })] })).join()).toMatch(/runs commit/);
+    expect(appProofProblems(good({ logLines: [guardLine({ sha: null })] })).join()).toMatch(/runs commit/);
+    expect(appProofProblems(good({ logLines: [guardLine({ dirty: true })] })).join()).toMatch(/uncommitted/);
   });
   it("the live proof refuses (LaneRefusal) when nothing listens on the app port", () => {
-    expect(() => proveAppUnderTest({ appUrl: "http://127.0.0.1:59871", appEgressLog: LOG, stubUrl: STUB })).toThrow(LaneRefusal);
+    expect(() => proveAppUnderTest({ appUrl: "http://127.0.0.1:59871", appEgressLog: LOG, stubUrl: STUB, harnessSha: SHA })).toThrow(LaneRefusal);
   });
-  it("parses `ps eww` output whose NODE_OPTIONS value contains a space", () => {
-    const env = parsePsEnv(`node next-server HOME=/Users/x NODE_OPTIONS=--require "/a b/e2e/stress/egress-guard.cjs" STRESS_EGRESS_LOG=/tmp/l.jsonl DIALPAD_DIAL_PROVIDER=stub npm_config_local_prefix=/x y`);
-    expect(env.NODE_OPTIONS).toBe('--require "/a b/e2e/stress/egress-guard.cjs"');
-    expect(env.DIALPAD_DIAL_PROVIDER).toBe("stub"); // a following lowercase key does not leak into the value
-    expect(env.npm_config_local_prefix).toBe("/x y");
-  });
-  it("the guard announces itself with the pid of the process that loaded it", () => {
+  it("the guard announces pid, log, provider env, redirect and checkout identity from inside the process", () => {
     const log = path.join(mkdtempSync(path.join(os.tmpdir(), "guard-")), "app.jsonl");
-    const r = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { env: { ...process.env, ...egressChildEnv(log) }, encoding: "utf8" });
-    const lines = readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { kind: string; pid: number });
-    expect(lines.some((l) => l.kind === "guard_loaded" && l.pid === Number(r.stdout))).toBe(true);
+    const r = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { env: { ...process.env, ...egressChildEnv(log), MESSAGING_PROVIDER: "mock", STRESS_DIALPAD_STUB_URL: STUB }, encoding: "utf8" });
+    const g = guardLineFor(readFileSync(log, "utf8").split("\n").filter(Boolean), Number(r.stdout))!;
+    expect(g.log).toBe(log);
+    expect(g.redirect).toBe(STUB);
+    expect(g.env?.MESSAGING_PROVIDER).toBe("mock");
+    expect(typeof g.sha === "string" || g.sha === null).toBe(true);
+  });
+  it("the guard's Dialpad redirect rewrites only the Dialpad API origin, to the loopback stub", () => {
+    const log = path.join(mkdtempSync(path.join(os.tmpdir(), "guard-")), "app.jsonl");
+    const code = `const seen=[];globalThis.fetch=async(u)=>{seen.push(String(u));return {ok:true}};require(${JSON.stringify(path.resolve(__dirname, "egress-guard.cjs"))});(async()=>{await fetch("https://api.dialpad.com/api/v2/users/1/initiate_call");await fetch("http://127.0.0.1:9/x");process.stdout.write(JSON.stringify(seen))})()`;
+    const r = spawnSync(process.execPath, ["-e", code], { env: { ...process.env, STRESS_EGRESS_LOG: log, STRESS_DIALPAD_STUB_URL: STUB }, encoding: "utf8" });
+    expect(JSON.parse(r.stdout)).toEqual([`${STUB}/dialpad/api/v2/users/1/initiate_call`, "http://127.0.0.1:9/x"]);
+    const off = spawnSync(process.execPath, ["-e", code.replace("STRESS_DIALPAD_STUB_URL", "X")], { env: { ...process.env, STRESS_EGRESS_LOG: log, STRESS_DIALPAD_STUB_URL: "https://evil.example" }, encoding: "utf8" });
+    expect(JSON.parse(off.stdout)[0]).toBe("https://api.dialpad.com/api/v2/users/1/initiate_call"); // a non-loopback redirect target is refused: no redirect
   });
 });
 
-describe("(d) the app's egress log is read and any denial fails the run", () => {
-  it("counts non-probe denials after the T0 offset, ignores probes and guard_loaded, and what came before T0", () => {
+describe("(d) + #6 the app's egress log: denials fail the run, and so does losing the evidence", () => {
+  const fresh = () => {
     const f = path.join(mkdtempSync(path.join(os.tmpdir(), "appeg-")), "a.jsonl");
-    const old = JSON.stringify({ kind: "connect", target: "old.example", probe: false }) + "\n";
-    writeFileSync(f, old);
-    const offset = old.length;
-    writeFileSync(f, old + [{ kind: "guard_loaded", pid: 1, probe: true }, { kind: "connect", target: "api.dialpad.com", probe: false }, { kind: "dns", target: "x", probe: true }].map((j) => JSON.stringify(j)).join("\n") + "\n");
-    expect(appEgressViolations(f, offset)).toEqual(["connect:api.dialpad.com"]);
-    expect(appEgressViolations(f, 0)).toHaveLength(2);
-    expect(appEgressViolations("/nonexistent/x.jsonl", 0)).toEqual([]);
+    writeFileSync(f, guardLine({ pid: 99 }) + "\n");
+    return f;
+  };
+  it("counts non-probe denials after the T0 snapshot and ignores probes, guard_loaded and what came before", () => {
+    const f = fresh();
+    const snap = snapshotLog(f)!;
+    appendFileSync(f, [{ kind: "guard_loaded", pid: 1, probe: true }, { kind: "connect", target: "api.dialpad.com", probe: false }, { kind: "dns", target: "x", probe: true }].map((j) => JSON.stringify(j)).join("\n") + "\n");
+    expect(appEgressViolations(f, snap, 99)).toEqual(["connect:api.dialpad.com"]);
+  });
+  it("a deleted log is a violation, not zero violations (Astra #6)", () => {
+    const f = fresh();
+    const snap = snapshotLog(f)!;
+    unlinkSync(f);
+    expect(appEgressViolations(f, snap, 99).join()).toMatch(/missing/);
+  });
+  it("a truncated log is a violation", () => {
+    const f = fresh();
+    appendFileSync(f, JSON.stringify({ kind: "connect", target: "x", probe: false }) + "\n");
+    const snap = snapshotLog(f)!;
+    truncateSync(f, 10);
+    expect(appEgressViolations(f, snap, 99).join()).toMatch(/truncated/);
+  });
+  it("a replaced log (new inode, even if larger) is a violation", () => {
+    const f = fresh();
+    const snap = snapshotLog(f)!;
+    unlinkSync(f);
+    writeFileSync(f, guardLine({ pid: 99 }) + "\n" + "x".repeat(500) + "\n");
+    expect(appEgressViolations(f, snap, 99).join()).toMatch(/replaced/);
+  });
+  it("a log that lost the app's own guard_loaded line, or was never snapshotted, is a violation", () => {
+    const f = fresh();
+    const snap = snapshotLog(f)!;
+    writeFileSync(f, JSON.stringify({ kind: "noise", probe: true }) + "\n".padEnd(snap.size, " ") + "\n");
+    expect(appEgressViolations(f, { ino: snap.ino, size: snap.size }, 99).join()).toMatch(/guard_loaded line is gone/);
+    expect(appEgressViolations(f, null, 99).join()).toMatch(/never snapshotted/);
   });
 });
 
 describe("(a) PASS requires the OS egress proof", () => {
-  const cfg = readConfig({});
+  const cfg = readConfig({}, { headSha: () => SHA });
   const manifest = buildManifest(cfg.seed, cfg.runTag, { profile: "full" });
   const browserPlanned = manifest.ticks.filter((t) => t.actor === "browser").length;
-  const run = (osEgressProven: boolean) => decide({ cfg, manifest, records: [], invariantChecks: [], outcomeChecks: [], egressViolations: 0, osEgressProven, serverProblems: [], killed: null, setupErrors: [], browserExecuted: browserPlanned });
-  it("without it the best result is PARTIAL_PASS, with it PASS", () => {
+  const run = (osEgressProven: boolean, egressViolations = 0) => decide({ cfg, manifest, records: [], invariantChecks: [], outcomeChecks: [], egressViolations, osEgressProven, serverProblems: [], killed: null, setupErrors: [], browserExecuted: browserPlanned });
+  it("without it the best result is PARTIAL_PASS, with it PASS; a violation is FAIL either way", () => {
     expect(run(false).verdict).toBe("PARTIAL_PASS");
     expect(run(false).reasons.join()).toMatch(/OS egress ring not proven/);
     expect(run(true).verdict).toBe("PASS");
+    expect(run(true, 1).verdict).toBe("FAIL");
   });
-  it("an egress violation is a FAIL either way", () => {
-    expect(decide({ cfg, manifest, records: [], invariantChecks: [], outcomeChecks: [], egressViolations: 1, osEgressProven: true, serverProblems: [], killed: null, setupErrors: [], browserExecuted: browserPlanned }).verdict).toBe("FAIL");
+});
+
+describe("#5 the sha is the checkout's, never the caller's", () => {
+  it("is derived from git HEAD; an env STRESS_SHA that differs is refused, one that matches is harmless", () => {
+    expect(readConfig({}, { headSha: () => SHA }).sha).toBe(SHA);
+    expect(() => readConfig({ STRESS_SHA: "b".repeat(40) }, { headSha: () => SHA })).toThrow(/does not match git HEAD/);
+    expect(readConfig({ STRESS_SHA: SHA }, { headSha: () => SHA }).sha).toBe(SHA);
   });
 });
 

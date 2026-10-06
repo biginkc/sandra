@@ -1,5 +1,6 @@
 import { type StressConfig, type FaultName } from "./config";
 import { runChaos } from "./engine";
+import { EXPECTED_CATCH } from "./selftest-spec";
 
 /**
  * Harness self-test. Before the real run, three fault-injection builds (duplicate a send, drop an
@@ -12,13 +13,7 @@ import { runChaos } from "./engine";
 
 export type SelfTestRow = { fault: FaultName; faultFired: boolean; expectedRed: boolean; verdict: string; failingChecks: number[]; ok: boolean; note: string };
 
-/** The injected defect MUST be caught by at least one of these checks (it may also trip others). `duplicate_send` hits the first provider send the schedule reaches: a dial (1) or a contract send (7, 14). */
-export const EXPECTED_CATCH: Record<FaultName, number[]> = {
-  none: [],
-  duplicate_send: [1, 7, 14],
-  drop_offer: [14],
-  wrong_lead_note: [12],
-};
+export { EXPECTED_CATCH } from "./selftest-spec";
 
 /** A fault is caught only if it actually fired AND a check it is meant to trip went red: an unrelated failure of the same check earns nothing. */
 export function faultCaught(fault: FaultName, failingChecks: readonly number[], fired: boolean): boolean {

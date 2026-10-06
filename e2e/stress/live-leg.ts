@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 
 import { approvedTestSms, type StressConfig } from "./config";
 import { isLoopbackUrl, LaneRefusal } from "./guards";
+import { selfTestReportOk } from "./selftest-spec";
 
 /**
  * LIVE LEG (owned numbers only). WRITTEN BUT DISABLED. It refuses to start unless EVERY prerequisite
@@ -89,6 +90,24 @@ export function sendilloSpotCheck(runId: string): { text: string; readOnlyVerifi
   };
 }
 
+/**
+ * The live app's build identity, bound to the harness checkout: the app is started with the guard in `STRESS_GUARD_MODE=announce` (it denies
+ * nothing and diverts nothing, so real providers stay reachable) and `STRESS_EGRESS_LOG=<STRESS_LIVE_APP_IDENTITY_LOG>`; the line written by the
+ * listener's own pid must name this exact commit with no tracked changes. A retained or foreign sha cannot satisfy it.
+ */
+export function liveAppIdentityProblems(lines: string[], listenerPid: number | null, sha: string, logPath: string): string[] {
+  if (listenerPid == null) return ["no process is listening on the app port"];
+  let g: { kind?: string; pid?: number; sha?: string | null; dirty?: boolean; log?: string; redirect?: string | null } | null = null;
+  for (const l of lines) { try { const j = JSON.parse(l); if (j.kind === "guard_loaded" && j.pid === listenerPid) g = j; } catch { /* skip */ } }
+  if (!g) return [`no guard_loaded line from pid ${listenerPid} in ${logPath}: start the live app with the guard in STRESS_GUARD_MODE=announce`];
+  const p: string[] = [];
+  if (g.log !== logPath) p.push(`the app's identity line is logged to ${g.log ?? "unknown"}, not ${logPath}`);
+  if (!g.sha || g.sha !== sha || sha === "unknown") p.push(`the live app runs commit ${g.sha ?? "unknown"}, the harness checkout is ${sha}`);
+  if (g.dirty !== false) p.push("the live app's checkout has uncommitted tracked changes");
+  if (g.redirect) p.push("the live app has a Dialpad redirect installed (announce mode only)");
+  return p;
+}
+
 export async function liveLegStatus(cfg: StressConfig, env: Env, deps: LiveDeps = {}): Promise<LiveStatus> {
   const readFile = deps.readFile ?? defaultReadFile;
   const p: Prerequisite[] = [];
@@ -114,8 +133,10 @@ export async function liveLegStatus(cfg: StressConfig, env: Env, deps: LiveDeps 
   // And a passing self-test at this sha (the harness must be shown able to fail).
   const stText = env.STRESS_SELFTEST_REPORT ? readFile(env.STRESS_SELFTEST_REPORT) : null;
   let stOk = false;
-  try { const st = stText ? JSON.parse(stText) as { sha?: string; ok?: boolean; rows?: Array<{ ok?: boolean; fault?: string; faultFired?: boolean }> } : null; stOk = !!st && st.ok === true && st.sha === cfg.sha && cfg.sha !== "unknown" && Array.isArray(st.rows) && st.rows.length >= 4 && st.rows.every((r) => r.ok === true && (r.fault === "none" || r.faultFired === true)); } catch { stOk = false; }
+  try { stOk = selfTestReportOk(stText ? JSON.parse(stText) : null, cfg.sha); } catch { stOk = false; }
   add("selftest_passed_at_this_sha", stOk, stText ? (stOk ? "self-test report is ok at this sha with every fault fired and caught" : "self-test report is not a pass at this sha") : "STRESS_SELFTEST_REPORT is not set or unreadable");
+
+  add("live_app_identity_log", !!env.STRESS_LIVE_APP_IDENTITY_LOG && env.STRESS_LIVE_APP_IDENTITY_LOG.startsWith("/"), "STRESS_LIVE_APP_IDENTITY_LOG (absolute path) is where the live app's announce-mode guard writes its build identity");
 
   // Decisions that belong to people (all default off).
   add("decision_sms_string_approved", cfg.decisions.testSmsStringApproved, "Jarrad approved the string `SANDRA TEST <run-id> <n> ignore` (STRESS_TEST_SMS_STRING_APPROVED=1)");

@@ -1,30 +1,28 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 
-import { GUARD_PATH } from "./egress";
 import { LaneRefusal } from "./guards";
 
 /**
- * T0 proof about the APP UNDER TEST (the one process that talks to providers). The harness does not start the Next server, so it
- * proves the server's own environment instead of trusting a README:
- *  - the process listening on the app port carries the egress guard (`NODE_OPTIONS --require <guard>`), logs to STRESS_APP_EGRESS_LOG, and
- *    that log holds a `guard_loaded` line written by THAT pid (the guard really ran inside it);
- *  - every provider is stub/test: DIALPAD_DIAL_PROVIDER=stub (unset falls back to LIVE in the app), MESSAGING_PROVIDER=mock, Dropbox Sign
- *    pointed at the harness stub; no hosted runtime markers.
+ * T0 proof about the APP UNDER TEST (the one process that talks to providers). The harness does not start the Next server, so it proves
+ * what the server says about itself: the egress guard, preloaded into the server, writes a `guard_loaded` line at load with its pid, its
+ * provider environment (runtime truth: no `ps` parsing), the Dialpad redirect it installed and the git checkout it runs from. The engine
+ * finds the process listening on the app port and requires a line from THAT pid:
+ *  - it logs to STRESS_APP_EGRESS_LOG and runs from the same commit as the harness (git HEAD), with no tracked changes;
+ *  - every provider is stub/test: MESSAGING_PROVIDER=mock, Dropbox Sign at the harness stub, the Dialpad API diverted to the harness stub
+ *    (the stub server then holds the receipts), no hosted-runtime markers.
  * Any gap refuses the run before the first provider-capable action.
  */
 
-export type AppEnv = Record<string, string>;
-
-/** `ps eww` prints `KEY=value KEY2=value2`, values unquoted and possibly containing spaces: split on `<space>UPPER_KEY=`. */
-export function parsePsEnv(text: string): AppEnv {
-  const out: AppEnv = {};
-  const re = /(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=/g;
-  const marks: Array<{ key: string; start: number; valueAt: number }> = [];
-  for (let m = re.exec(text); m; m = re.exec(text)) marks.push({ key: m[1]!, start: m.index, valueAt: m.index + m[0].length });
-  marks.forEach((mk, i) => { out[mk.key] = text.slice(mk.valueAt, i + 1 < marks.length ? marks[i + 1]!.start : text.length).trim(); });
-  return out;
-}
+export type GuardLine = {
+  kind?: string;
+  pid?: number;
+  log?: string;
+  sha?: string | null;
+  dirty?: boolean;
+  redirect?: string | null;
+  env?: Record<string, string | null>;
+};
 
 export function findListenerPid(port: number): number | null {
   try {
@@ -35,57 +33,48 @@ export function findListenerPid(port: number): number | null {
   }
 }
 
-/**
- * `next-server` rewrites its process title, which erases the environment `ps` can show for it. Its launcher (`next dev` / `npm`) still shows
- * it, and the child inherited exactly that environment, so the nearest ancestor that exposes `NODE_OPTIONS` stands in. The guard itself is
- * proven separately and exactly: a `guard_loaded` line written by the listener's OWN pid.
- */
-export function readAppEnv(pid: number): AppEnv | null {
-  let cur: number | null = pid;
-  for (let depth = 0; cur && depth < 5; depth += 1) {
-    const env = readProcessEnv(cur);
-    if (env && "NODE_OPTIONS" in env) return env;
-    try { cur = Number(execFileSync("ps", ["-o", "ppid=", "-p", String(cur)], { encoding: "utf8" }).trim()) || null; } catch { cur = null; }
-  }
-  return null;
-}
-
-export function readProcessEnv(pid: number): AppEnv | null {
+export function readProcessUid(pid: number): number | null {
   try {
-    if (existsSync(`/proc/${pid}/environ`)) {
-      const env: AppEnv = {};
-      for (const kv of readFileSync(`/proc/${pid}/environ`, "utf8").split("\0")) { const i = kv.indexOf("="); if (i > 0) env[kv.slice(0, i)] = kv.slice(i + 1); }
-      return env;
-    }
-    return parsePsEnv(execFileSync("ps", ["eww", "-o", "command=", "-p", String(pid)], { encoding: "utf8" }));
+    const n = Number(execFileSync("ps", ["-o", "uid=", "-p", String(pid)], { encoding: "utf8" }).trim());
+    return Number.isInteger(n) ? n : null;
   } catch {
     return null;
   }
 }
 
 export type AppProofInput = {
-  env: AppEnv | null;
   listenerPid: number | null;
+  /** The uid the app listener runs as and the uid the harness (and so the pf rules) runs as. */
+  listenerUid: number | null;
+  harnessUid: number;
   appEgressLog: string;
-  /** Lines of the app's egress log. */
   logLines: string[];
   stubUrl: string;
-  guardPath?: string;
+  harnessSha: string;
 };
+
+export function guardLineFor(lines: string[], pid: number): GuardLine | null {
+  let found: GuardLine | null = null;
+  for (const l of lines) {
+    try { const j = JSON.parse(l) as GuardLine; if (j.kind === "guard_loaded" && j.pid === pid) found = j; } catch { /* not a line */ }
+  }
+  return found;
+}
 
 /** Problems found (empty = proven). Pure, so every branch is unit-tested. */
 export function appProofProblems(i: AppProofInput): string[] {
   const p: string[] = [];
   if (!i.appEgressLog) p.push("STRESS_APP_EGRESS_LOG is not set (an absolute path; the app must be started with STRESS_EGRESS_LOG pointing at it)");
   if (i.listenerPid == null) { p.push("no process is listening on the app port"); return p; }
-  if (!i.env) { p.push(`the environment of the app process (pid ${i.listenerPid}) could not be read`); return p; }
-  const e = i.env;
-  const guard = i.guardPath ?? GUARD_PATH;
-  if (!(e.NODE_OPTIONS ?? "").includes(guard)) p.push(`the app process does not carry the egress guard (NODE_OPTIONS lacks ${guard})`);
-  if (!i.appEgressLog || e.STRESS_EGRESS_LOG !== i.appEgressLog) p.push(`the app's STRESS_EGRESS_LOG (${e.STRESS_EGRESS_LOG ?? "unset"}) is not STRESS_APP_EGRESS_LOG (${i.appEgressLog || "unset"})`);
-  const loaded = i.logLines.some((l) => { try { const j = JSON.parse(l) as { kind?: string; pid?: number }; return j.kind === "guard_loaded" && j.pid === i.listenerPid; } catch { return false; } });
-  if (!loaded) p.push(`no guard_loaded line from pid ${i.listenerPid} in the app egress log: the guard did not run inside the app`);
-  if (e.DIALPAD_DIAL_PROVIDER !== "stub") p.push(`DIALPAD_DIAL_PROVIDER is "${e.DIALPAD_DIAL_PROVIDER ?? "unset"}", must be "stub" (unset falls back to the LIVE Dialpad API)`);
+  if (i.listenerUid == null || i.listenerUid !== i.harnessUid) p.push(`the app listener runs as uid ${i.listenerUid ?? "unknown"}, the harness (and the pf rules) as uid ${i.harnessUid}: the OS ring must cover the app`);
+  const g = guardLineFor(i.logLines, i.listenerPid);
+  if (!g) { p.push(`no guard_loaded line from pid ${i.listenerPid} in the app egress log: the guard did not run inside the app`); return p; }
+  if (!i.appEgressLog || g.log !== i.appEgressLog) p.push(`the app's guard logs to ${g.log ?? "unknown"}, not STRESS_APP_EGRESS_LOG (${i.appEgressLog || "unset"})`);
+  if (!g.sha || g.sha !== i.harnessSha) p.push(`the app runs commit ${g.sha ?? "unknown"}, the harness is at ${i.harnessSha}: the tested app must be this checkout's build`);
+  if (g.dirty !== false) p.push("the app's checkout has uncommitted tracked changes (or its state is unknown)");
+  const e = g.env ?? {};
+  if (g.redirect !== i.stubUrl) p.push(`the app's Dialpad API is not diverted to the harness stub (redirect "${g.redirect ?? "none"}", expected ${i.stubUrl}); without it the dial receipts are not observable`);
+  if (e.DIALPAD_DIAL_PROVIDER === "stub") p.push('DIALPAD_DIAL_PROVIDER=stub keeps dials in process where the harness cannot read the receipts; leave it unset (the diverted live dialer is used)');
   if (e.MESSAGING_PROVIDER !== "mock") p.push(`MESSAGING_PROVIDER is "${e.MESSAGING_PROVIDER ?? "unset"}", must be "mock"`);
   const dbx = e.DROPBOX_SIGN_API_BASE_URL ?? "";
   if (!dbx.startsWith(`${i.stubUrl}/dropbox-sign`)) p.push(`DROPBOX_SIGN_API_BASE_URL is "${dbx || "unset"}", must point at the harness stub (${i.stubUrl}/dropbox-sign/...)`);
@@ -97,21 +86,41 @@ export function readLines(file: string): string[] {
   return existsSync(file) ? readFileSync(file, "utf8").split("\n").filter(Boolean) : [];
 }
 
-/** The live check, used by the engine at T0. */
-export function proveAppUnderTest(args: { appUrl: string; appEgressLog: string; stubUrl: string }): { pid: number } {
-  const port = Number(new URL(args.appUrl).port || 80);
-  const pid = findListenerPid(port);
-  const problems = appProofProblems({ env: pid ? readAppEnv(pid) : null, listenerPid: pid, appEgressLog: args.appEgressLog, logLines: readLines(args.appEgressLog), stubUrl: args.stubUrl });
-  if (problems.length) throw new LaneRefusal("APP_UNDER_TEST_NOT_PROVEN", problems.join(" | "));
-  return { pid: pid! };
+export type LogSnapshot = { ino: number; size: number };
+export function snapshotLog(file: string): LogSnapshot | null {
+  if (!existsSync(file)) return null;
+  const st = statSync(file);
+  return { ino: st.ino, size: st.size };
 }
 
-/** Non-probe denials the APP wrote after `offset` bytes (the position at T0). Any entry fails the run. */
-export function appEgressViolations(file: string, offset: number): string[] {
-  if (!existsSync(file)) return [];
-  const text = readFileSync(file, "utf8").slice(Math.min(offset, statSync(file).size));
+/** The live check, used by the engine at T0. */
+export function proveAppUnderTest(args: { appUrl: string; appEgressLog: string; stubUrl: string; harnessSha: string }): { pid: number; snapshot: LogSnapshot } {
+  const port = Number(new URL(args.appUrl).port || 80);
+  const pid = findListenerPid(port);
+  const problems = appProofProblems({
+    listenerPid: pid, listenerUid: pid ? readProcessUid(pid) : null, harnessUid: process.getuid?.() ?? -1,
+    appEgressLog: args.appEgressLog, logLines: readLines(args.appEgressLog), stubUrl: args.stubUrl, harnessSha: args.harnessSha,
+  });
+  const snapshot = snapshotLog(args.appEgressLog);
+  if (!snapshot) problems.push("the app egress log does not exist");
+  if (problems.length) throw new LaneRefusal("APP_UNDER_TEST_NOT_PROVEN", problems.join(" | "));
+  return { pid: pid!, snapshot: snapshot! };
+}
+
+/**
+ * The app's denials since T0, failing closed on the evidence itself: a missing, replaced (new inode), truncated (smaller than at T0) log, or one
+ * that lost the app's own guard_loaded line, is a violation: deleting or rotating the log must not erase a denial and keep "guard proven".
+ */
+export function appEgressViolations(file: string, snapshot: LogSnapshot | null, guardPid: number | null = null): string[] {
   const out: string[] = [];
-  for (const l of text.split("\n").filter(Boolean)) {
+  if (!snapshot) return ["app egress log was never snapshotted at T0"];
+  if (!existsSync(file)) return ["app egress log is missing"];
+  const st = statSync(file);
+  if (st.ino !== snapshot.ino) out.push("app egress log was replaced (inode changed)");
+  if (st.size < snapshot.size) { out.push(`app egress log was truncated (${st.size} < ${snapshot.size} bytes at T0)`); return out; }
+  const all = readFileSync(file, "utf8");
+  if (guardPid != null && !guardLineFor(all.split("\n").filter(Boolean), guardPid)) out.push("the app's guard_loaded line is gone from the log");
+  for (const l of all.slice(snapshot.size).split("\n").filter(Boolean)) {
     try { const j = JSON.parse(l) as { probe?: boolean; kind?: string; target?: string }; if (!j.probe && j.kind !== "guard_loaded") out.push(`${j.kind}:${j.target}`); } catch { out.push(`unparseable app egress line: ${l.slice(0, 80)}`); }
   }
   return out;

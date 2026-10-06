@@ -161,6 +161,66 @@ export async function safetyInvariants(i: OracleInput): Promise<Check[]> {
 
 const finalPick = (t: Tick) => t.expected.appointment?.reschedulePick ?? t.expected.appointment?.pick;
 
+export type ReminderRow = { id: string; status: string; task_status: string | null; messages: number };
+
+export async function fetchReminderRows(db: Pick<OracleInput, "db">["db"], leadId: string): Promise<ReminderRow[]> {
+  return (await db.query<ReminderRow>(
+    `select r.id, r.status, t.status as task_status,
+            (select count(*)::int from public.messages m where m.idempotency_key = r.send_key and m.direction='outbound') as messages
+       from public.seller_appointment_reminders r left join public.tasks t on t.id = r.task_id where r.property_id = $1`, [leadId])).rows;
+}
+
+/**
+ * Seller reminders as exact counts, not upper bounds. `expected` is the schedule's `reminderSent` (1 sent, 0 sent, or undefined for the race, which
+ * may send once or not at all). The messages are counted by the reminder's send key, so a row marked sent without a message, or a message without
+ * a sent row, both fail. A slot whose appointment was replaced or cancelled never gets a text, and the plain "reschedule" variant must show the
+ * old slot's reminder as cancelled.
+ */
+export function reminderProblems(rows: readonly ReminderRow[], expected: number | undefined, variant: string): Violation[] {
+  const out: Violation[] = [];
+  const sent = rows.filter((r) => r.status === "sent").length;
+  const msgs = rows.reduce((n, r) => n + r.messages, 0);
+  if (expected !== undefined) {
+    if (sent !== expected) out.push({ rule: "reminder_sent_rows", expected, observed: sent });
+    if (msgs !== expected) out.push({ rule: "reminder_messages", expected, observed: msgs });
+  } else {
+    if (sent > 1) out.push({ rule: "reminder_sent_rows_race", max: 1, observed: sent });
+    if (msgs !== sent) out.push({ rule: "reminder_messages_match_sent_rows", sentRows: sent, messages: msgs });
+  }
+  for (const r of rows) {
+    const slotGone = r.task_status !== null && !["open", "snoozed"].includes(r.task_status);
+    if ((slotGone || r.status === "cancelled") && r.messages > 0) out.push({ rule: "message_for_cancelled_slot", reminder: r.id, messages: r.messages });
+    if (r.messages > 0 && r.status !== "sent" && r.status !== "uncertain") out.push({ rule: "message_without_sent_row", reminder: r.id, status: r.status });
+  }
+  if (variant === "reschedule" && !rows.some((r) => r.status === "cancelled")) out.push({ rule: "old_slot_reminder_not_cancelled" });
+  return out;
+}
+
+export type Receipt = { phone: string | null; key: string | null; at?: string };
+export type AuthorizedIntent = { custom_data: string; destination_e164: string };
+
+/**
+ * Dial verdict for one lead from PROVIDER receipts (the stub server's record of what was actually sent): the count must equal the schedule's,
+ * and every receipt must carry a distinct intent key that was authorized for THIS lead whose recorded destination is the number the provider was
+ * asked to ring. Authorization rows alone never count as a dial. Pure, so each case (zero, duplicate, wrong number) is unit-tested.
+ */
+export function dialProblems(receipts: readonly Receipt[], intents: readonly AuthorizedIntent[], leadPhone: string, expectedDials: number): Violation[] {
+  const mine = receipts.filter((d) => d.phone === leadPhone);
+  const out: Violation[] = [];
+  if (mine.length !== expectedDials) out.push({ rule: "dials", expected: expectedDials, observed: mine.length });
+  const byKey = new Map(intents.map((x) => [x.custom_data, x.destination_e164]));
+  const seen = new Set<string>();
+  for (const d of mine) {
+    if (!d.key || !byKey.has(d.key)) { out.push({ rule: "receipt_without_authorized_intent", key: d.key, phone: d.phone }); continue; }
+    if (seen.has(d.key)) out.push({ rule: "duplicate_receipt_for_intent", key: d.key });
+    seen.add(d.key);
+    if (byKey.get(d.key) !== d.phone) out.push({ rule: "receipt_destination_differs_from_intent", key: d.key, intent: byKey.get(d.key), receipt: d.phone });
+  }
+  // A receipt for a destination that is NOT this lead's number but carries one of this lead's intent keys is a wrong-number call.
+  for (const d of receipts) if (d.phone !== leadPhone && d.key && byKey.has(d.key)) out.push({ rule: "wrong_number_for_intent", key: d.key, ringed: d.phone, intended: byKey.get(d.key) });
+  return out;
+}
+
 export async function expectedOutcomes(i: OracleInput): Promise<Check[]> {
   const out: Check[] = [];
   const executed = i.records.filter((r) => r.actor !== "noise");
@@ -172,17 +232,16 @@ export async function expectedOutcomes(i: OracleInput): Promise<Check[]> {
   const v11: Violation[] = [];
   let plannedAttempts = 0;
   let plannedDials = 0;
-  let browserDialTotal = 0;
   for (const r of executed) {
     const t = byTick.get(r.tick)!;
     if (!r.leadId || !r.leadPhone) continue;
     plannedAttempts += t.expected.attempts;
     plannedDials += t.expected.dials;
-    // Replay ticks dial through the stub server; browser ticks dial through the app's in-process stub, so their evidence is the authorized intents.
-    const browserDials = r.actor === "browser" ? (await i.db.query<{ n: number }>("select count(*)::int n from public.dialpad_call_intents where property_id=$1 and dispatch_authorized_at is not null", [r.leadId])).rows[0]!.n : 0;
-    if (r.actor === "browser") browserDialTotal += browserDials;
-    const dials = r.actor === "browser" ? Array.from({ length: browserDials }, () => ({ at: r.expiredAt ?? "" })) : i.stub.dials().filter((d) => d.phone === r.leadPhone);
-    if (dials.length !== t.expected.dials) v11.push({ tick: r.tick, scenario: t.scenario, rule: "dials", expected: t.expected.dials, observed: dials.length });
+    // Dials are counted from the PROVIDER's receipts: the stub server holds one per request the app (or the replay engine) actually sent, with the
+    // destination and the intent key. Authorization rows are never the evidence of a dial: a zero, duplicate or wrong-number call must not pass.
+    const authorized = (await i.db.query<AuthorizedIntent>("select custom_data, destination_e164 from public.dialpad_call_intents where property_id=$1 and dispatch_authorized_at is not null", [r.leadId])).rows;
+    const dials = i.stub.dials().filter((d) => d.phone === r.leadPhone);
+    for (const v of dialProblems(i.stub.dials(), authorized, r.leadPhone, t.expected.dials)) v11.push({ tick: r.tick, scenario: t.scenario, ...v });
     if (t.scenario === "double_click_dial" && r.actor === "replay" && r.expiredAt && dials.length === 2 && new Date((dials[1] as { at: string }).at) < new Date(r.expiredAt)) v11.push({ tick: r.tick, rule: "second_dial_before_expiry" });
     const att = (await i.db.query<{ outcome: string | null }>("select outcome from public.acquisition_attempts where property_id=$1 and source='dialpad'", [r.leadId])).rows;
     if (att.length !== t.expected.attempts) v11.push({ tick: r.tick, scenario: t.scenario, rule: "attempts", expected: t.expected.attempts, observed: att.length });
@@ -206,7 +265,7 @@ export async function expectedOutcomes(i: OracleInput): Promise<Check[]> {
   }
   const observedAttempts = (await i.db.query<{ n: number }>(`select count(*)::int n from public.acquisition_attempts where org_id=$1 and property_id in ${P} and source='dialpad'`, arg(i))).rows[0]!.n;
   if (observedAttempts !== plannedAttempts) v11.push({ rule: "total_attempts", planned: plannedAttempts, observed: observedAttempts });
-  if (i.stub.dials().length + browserDialTotal !== plannedDials) v11.push({ rule: "total_dials", planned: plannedDials, observed: i.stub.dials().length + browserDialTotal });
+  if (i.stub.dials().length !== plannedDials) v11.push({ rule: "total_dials", planned: plannedDials, observed: i.stub.dials().length });
   for (const t of missing) v11.push({ tick: t.tick, scenario: t.scenario, rule: "scheduled_tick_not_executed" });
   out.push(mk(11, "every scheduled dial -> one attempt on the right lead", "outcome", v11, { detail: `planned attempts ${plannedAttempts}, dials ${plannedDials}` }));
 
@@ -235,6 +294,10 @@ export async function expectedOutcomes(i: OracleInput): Promise<Check[]> {
   for (const r of executed) {
     const t = byTick.get(r.tick)!;
     if (!r.leadId) continue;
+    if (t.scenario === "reminder_reschedule") {
+      const rem = await fetchReminderRows(i.db, r.leadId);
+      for (const v of reminderProblems(rem, t.expected.reminderSent, String(t.args.variant))) v13.push({ tick: r.tick, scenario: t.scenario, ...v });
+    }
     // Offer follow-ups are appointments too (created by the logged offer); they are checked separately below.
     const open = (await i.db.query<{ id: string; due_at: Date }>("select t.id, t.due_at from public.tasks t where t.related_property_id=$1 and t.type='appointment' and t.status in ('open','snoozed') and not exists (select 1 from public.acquisition_offers o where o.follow_up_calendar_chain_id = t.calendar_chain_id) order by t.created_at", [r.leadId])).rows;
     const wantFollowUps = t.expected.offers ?? 0;

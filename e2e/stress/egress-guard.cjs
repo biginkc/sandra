@@ -32,8 +32,47 @@ function deny(kind, target, probe) {
   throw err;
 }
 
-// Announce: the harness proves the guard ran inside THIS pid by finding this line in the log (probe: not a violation).
-try { fs.appendFileSync(LOG, JSON.stringify({ at: new Date().toISOString(), pid: process.pid, kind: "guard_loaded", target: "", probe: true }) + "\n"); } catch { /* no log, no proof: the engine refuses */ }
+// Dialpad seam from the harness side (no src change): with STRESS_DIALPAD_STUB_URL (loopback only) set, the app's own live dialer, which POSTs to the
+// Dialpad API origin, is diverted to the harness stub server. The stub then holds the receipt (destination + intent key) the oracle checks. Any
+// other URL is untouched, and anything non-loopback is still denied below.
+const DIALPAD_ORIGIN = "https://api.dialpad.com";
+let dialpadRedirect = null;
+// STRESS_GUARD_MODE=announce: ONLY write the guard_loaded line (build identity: commit and cleanliness). No denial, no redirect. For the live-leg app,
+// which must reach real providers but whose build identity must still be bound to the harness checkout.
+const ANNOUNCE_ONLY = process.env.STRESS_GUARD_MODE === "announce";
+if (!ANNOUNCE_ONLY) {
+  const raw = process.env.STRESS_DIALPAD_STUB_URL || "";
+  try {
+    const u = new URL(raw);
+    if (u.protocol === "http:" && isLoopbackHost(u.hostname) && typeof globalThis.fetch === "function") {
+      dialpadRedirect = u.origin;
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = function patchedFetch(input, init) {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input && input.url;
+        if (typeof url === "string" && url.startsWith(DIALPAD_ORIGIN + "/")) return origFetch(dialpadRedirect + "/dialpad" + url.slice(DIALPAD_ORIGIN.length), init);
+        return origFetch(input, init);
+      };
+    }
+  } catch { /* no redirect configured */ }
+}
+
+// Announce: the harness proves the guard ran inside THIS pid, and what that pid is (runtime truth, no `ps` parsing): its provider environment,
+// the redirect, the checkout it runs from. `probe: true` marks it as not a violation.
+function git(args) {
+  try { return require("node:child_process").execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], cwd: process.cwd() }).trim(); } catch { return null; }
+}
+try {
+  const e = process.env;
+  const announce = {
+    at: new Date().toISOString(), pid: process.pid, kind: "guard_loaded", target: "", probe: true, log: LOG, cwd: process.cwd(),
+    sha: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain", "--untracked-files=no"]) !== "",
+    redirect: dialpadRedirect,
+    env: { DIALPAD_DIAL_PROVIDER: e.DIALPAD_DIAL_PROVIDER ?? null, MESSAGING_PROVIDER: e.MESSAGING_PROVIDER ?? null, DROPBOX_SIGN_API_BASE_URL: e.DROPBOX_SIGN_API_BASE_URL ?? null, VERCEL_ENV: e.VERCEL_ENV ?? null, VERCEL: e.VERCEL ?? null, NODE_OPTIONS: e.NODE_OPTIONS ?? null },
+  };
+  fs.appendFileSync(LOG, JSON.stringify(announce) + "\n");
+} catch { /* no log, no proof: the engine refuses */ }
+
+if (ANNOUNCE_ONLY) { module.exports = { isLoopbackHost, LOG }; return; }
 
 const origConnect = net.Socket.prototype.connect;
 net.Socket.prototype.connect = function patchedConnect(...args) {

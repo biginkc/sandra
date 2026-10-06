@@ -8,7 +8,8 @@ import { createSyntheticLead } from "../../support/my-leads-close-fixture";
 import { readConfig } from "../config";
 import { openDb } from "../db";
 import { driveLiveLeg, summarizeLive, type LivePort } from "../live-driver";
-import { assertLiveLegReady, type LiveCallStep, type LiveEvidence } from "../live-leg";
+import { findListenerPid, readLines } from "../app-proof";
+import { assertLiveLegReady, liveAppIdentityProblems, type LiveCallStep, type LiveEvidence } from "../live-leg";
 
 /**
  * LIVE LEG driver (DISABLED BY DEFAULT, NEVER IN CI). It is skipped unless STRESS_LIVE_LEG=1 and is refused in CI or a
@@ -30,6 +31,10 @@ test("live leg: ~8 owned-number calls, evidence per call", async ({ page }) => {
   if (process.env.CI || process.env.GITHUB_ACTIONS || process.env.VERCEL || process.env.VERCEL_ENV) throw new Error("the live leg never runs in CI or a hosted runtime");
   const cfg = readConfig(process.env);
   const { numbers, plan } = await assertLiveLegReady(cfg, process.env);
+  // Bind the tested app's build to THIS checkout (the sha itself comes from git HEAD, never from the environment).
+  const identityLog = process.env.STRESS_LIVE_APP_IDENTITY_LOG!;
+  const identity = liveAppIdentityProblems(readLines(identityLog), findListenerPid(Number(new URL(cfg.appUrl).port || 80)), cfg.sha, identityLog);
+  if (identity.length) throw new Error(`the live app's build is not bound to this checkout: ${identity.join(" | ")}`);
   const world = JSON.parse(readFileSync(process.env.STRESS_LIVE_WORLD_FILE!, "utf8")) as { orgId: string; repUserId: string };
   const outDir = path.join(cfg.artifactsRoot, `live-${cfg.runId}-${cfg.sha.slice(0, 8)}`);
   const logFile = path.join(outDir, "live.log");

@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+
 /**
  * Harness configuration. Everything is read from the environment once, validated here, and passed
  * down; no other module reads process.env for behaviour.
@@ -74,7 +76,16 @@ export function readDecisions(env: Env): DecisionSwitches {
   };
 }
 
-export function readConfig(env: Env = process.env): StressConfig {
+export type ConfigDeps = { headSha?: () => string };
+
+/** The checkout identity. Never taken from a caller's environment: a retained STRESS_SHA would let another checkout reuse older PASS or self-test evidence. */
+export function gitHeadSha(): string {
+  try { return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(); } catch { return "unknown"; }
+}
+
+export function readConfig(env: Env = process.env, deps: ConfigDeps = {}): StressConfig {
+  const head = (deps.headSha ?? gitHeadSha)();
+  if (env.STRESS_SHA && env.STRESS_SHA !== head) throw new Error(`STRESS_SHA (${env.STRESS_SHA}) does not match git HEAD (${head}); the sha is derived from the checkout, never from the environment.`);
   const seed = Number(env.CHAOS_SEED ?? DEFAULT_SEED);
   if (!Number.isInteger(seed)) throw new Error("CHAOS_SEED must be an integer");
   const fault = (env.STRESS_FAULT ?? "none") as FaultName;
@@ -87,7 +98,7 @@ export function readConfig(env: Env = process.env): StressConfig {
   return {
     seed,
     runId,
-    sha: env.STRESS_SHA ?? "unknown",
+    sha: head,
     scope,
     appUrl,
     supabaseUrl: env.STRESS_SUPABASE_URL ?? env.TEST_SUPABASE_URL ?? "",

@@ -5,7 +5,7 @@ import path from "node:path";
 import { CRON_ROUTES, FaultState, runCron, sleep, TickDeadline, type Ctx } from "./actions";
 import { approvedTestSms, type StressConfig } from "./config";
 import { assertFreshDatabase, asRep, asService, openDb, type Db } from "./db";
-import { appEgressViolations, proveAppUnderTest } from "./app-proof";
+import { appEgressViolations, proveAppUnderTest, type LogSnapshot } from "./app-proof";
 import { egressChildEnv, proveInProcessDenial, proveOsDenial, readEgressViolations } from "./egress";
 import { GateController } from "./gates";
 import { assertStressLane, LaneRefusal } from "./guards";
@@ -155,7 +155,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   proveInProcessDenial(egressLog);
   // The OS ring is required for a PASS (and so for the live leg). Without it the run can be at most PARTIAL_PASS; with it set, the probe must see a denial.
   let osEgressProven = false;
-  if (env.STRESS_REQUIRE_OS_EGRESS === "1") { proveOsDenial(); osEgressProven = true; }
+  if (env.STRESS_REQUIRE_OS_EGRESS === "1") { proveOsDenial({ uids: [process.getuid?.() ?? -1] }); osEgressProven = true; }
   log(`lane guards passed; egress guard proven; artifacts ${dir}`);
 
   const manifest: Manifest = buildManifest(cfg.seed, cfg.runTag, { profile });
@@ -177,7 +177,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   let pending: string[] = [];
   let appGuardPid: number | null = null;
   let faultFiredFlag = false;
-  let appEgressOffset = 0;
+  let appEgressSnap: LogSnapshot | null = null;
   let faultFiredCheck: () => boolean = () => false;
   let browserExecuted = 0;
   let stopRequested: string | null = null;
@@ -200,9 +200,10 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     }
 
     // T0, before any provider-capable action: the app under test carries the guard, logs to its own file, and every provider is stub/test.
-    appEgressOffset = cfg.appEgressLog && existsSync(cfg.appEgressLog) ? statSync(cfg.appEgressLog).size : 0;
     if (cfg.stubPort <= 0) throw new LaneRefusal("STUB_PORT_REQUIRED", "STRESS_STUB_PORT must be a fixed port: the app under test is started with DROPBOX_SIGN_API_BASE_URL pointing at it.");
-    appGuardPid = proveAppUnderTest({ appUrl: cfg.appUrl, appEgressLog: cfg.appEgressLog, stubUrl: stub.url }).pid;
+    const appProof = proveAppUnderTest({ appUrl: cfg.appUrl, appEgressLog: cfg.appEgressLog, stubUrl: stub.url, harnessSha: cfg.sha });
+    appGuardPid = appProof.pid;
+    appEgressSnap = appProof.snapshot;
     log(`app under test proven: egress guard loaded in pid ${appGuardPid}, providers stub/test`);
     world = await setupWorld(db, cfg);
     const dbxMode = await db.query<{ test_mode: boolean }>("select test_mode from public.org_esign_integrations where org_id=$1", [cfg.orgId]);
@@ -265,7 +266,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
 
     // Browser lane (full scope): the scripted Playwright specs, run in root's desktop context.
     if (!stopRequested && cfg.scope === "full") {
-      browserExecuted = await runBrowserLane({ cfg, dir, world, stub, proxy: proxy!, manifest, env, spec: "chaos-browser" });
+      browserExecuted = await runBrowserLane(setupErrors, { cfg, dir, world, stub, proxy: proxy!, manifest, env, spec: "chaos-browser" });
       // Browser ticks are judged by the same oracle as replay ticks: merge their records in.
       for (const r of readBrowserResults(dir)) {
         if (r.tick <= 0) continue;
@@ -284,7 +285,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     outcomeChecks = stopRequested ? [] : await expectedOutcomes(oracleInput);
     if (!stopRequested && cfg.scope === "full") {
       // Oracle 16 (rendered parity) runs after the drain, in the browser, against the settled rows.
-      await runBrowserLane({ cfg, dir, world, stub, proxy: proxy!, manifest, env, spec: "rendered-parity" }).catch((e) => { setupErrors.push((e as Error).message); return 0; });
+      await runBrowserLane(setupErrors, { cfg, dir, world, stub, proxy: proxy!, manifest, env, spec: "rendered-parity" }).catch((e) => { setupErrors.push((e as Error).message); return 0; });
       const parity = readBrowserResults(dir).find((r) => r.tick === -16);
       outcomeChecks = outcomeChecks.map((c) => (c.id === 16 ? { ...c, deferred: undefined, ok: parity?.ok === true, violations: parity?.ok === true ? [] : [{ rule: "rendered_parity", error: parity?.error ?? "no result recorded" }] } : c));
     }
@@ -301,7 +302,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   // Egress and server-log verdicts.
   faultFiredFlag = faultFiredCheck();
   // Denials from the harness's own processes AND from the app server (its own log); any denial fails the run.
-  const egressApp = appEgressViolations(cfg.appEgressLog, appEgressOffset);
+  const egressApp = appEgressViolations(cfg.appEgressLog, appEgressSnap, appGuardPid);
   const egress = [...readEgressViolations(egressLog), ...egressApp.map((t) => ({ at: "", kind: "app", target: t, pid: 0 }))];
   const serverProblems: string[] = [];
   const offlineGestures = records.filter((r) => r.actor === "browser" && r.steps.some((st) => st.startsWith("provider sends while offline"))).length;
@@ -326,7 +327,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     cfg, manifest, summary, pending, osEgressProven, appGuardPid, levers, killed,
     stubCounts: { dials: stub?.dials().length ?? 0, sends: stub?.sends().length ?? 0 },
     elapsedMs: Date.now() - t0,
-    repro: `CHAOS_SEED=${cfg.seed} STRESS_PROFILE=${profile} STRESS_SCOPE=${cfg.scope} STRESS_FAULT=${cfg.fault} STRESS_SHA=${cfg.sha} tsx e2e/stress/cli.ts run   # same seed + the recorded schedule.ndjson + a fresh stack`,
+    repro: `CHAOS_SEED=${cfg.seed} STRESS_PROFILE=${profile} STRESS_SCOPE=${cfg.scope} STRESS_FAULT=${cfg.fault} tsx e2e/stress/cli.ts run   # same seed + the recorded schedule.ndjson + a fresh stack`,
   });
   await proxy?.stop().catch(() => {});
   await stub?.stop().catch(() => {});
@@ -400,7 +401,7 @@ export function readBrowserResults(dir: string): BrowserResult[] {
   return readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as BrowserResult);
 }
 
-async function runBrowserLane(a: { cfg: StressConfig; dir: string; world: World; stub: StubServer; proxy: GateProxy; manifest: Manifest; env: NodeJS.ProcessEnv; spec: "chaos-browser" | "rendered-parity" }): Promise<number> {
+async function runBrowserLane(setupErrors: string[], a: { cfg: StressConfig; dir: string; world: World; stub: StubServer; proxy: GateProxy; manifest: Manifest; env: NodeJS.ProcessEnv; spec: "chaos-browser" | "rendered-parity" }): Promise<number> {
   if (!a.cfg.decisions.rootBrowserContextProvided) throw new LaneRefusal("NO_BROWSER_CONTEXT", "STRESS_ROOT_BROWSER_CONTEXT=1 is required for the browser lane (root provides a browser-capable context; codex exec cannot launch Chromium).");
   // Control API for the browser-side process: the stub server's /__ctl routes.
   const env = {
@@ -422,8 +423,17 @@ async function runBrowserLane(a: { cfg: StressConfig; dir: string; world: World;
     child.on("error", () => resolve(1));
   });
   const results = readBrowserResults(a.dir);
-  if (code !== 0 && results.length === 0) throw new Error(`browser lane (${a.spec}) exited ${code} without results (Chromium not launchable here?)`);
+  const problem = browserLaneProblem(a.spec, code);
+  if (problem) setupErrors.push(problem);
   return results.filter((r) => r.ok && r.tick > 0).length;
+}
+
+/**
+ * ANY nonzero Playwright exit fails the run. Each spec records its success before the fixtures tear down, so a teardown failure, a worker crash
+ * after the last recorded tick or a timeout in afterAll would otherwise leave "all ticks ok" next to a failed lane.
+ */
+export function browserLaneProblem(spec: string, exitCode: number): string | null {
+  return exitCode === 0 ? null : `browser lane (${spec}) exited ${exitCode}: a nonzero Playwright exit fails the run even when every tick recorded success`;
 }
 
 export { approvedTestSms };

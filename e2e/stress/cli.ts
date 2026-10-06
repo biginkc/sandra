@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -18,17 +17,9 @@ import { runSelfTest } from "./selftest";
  *   STRESS_LIVE_LEG=1 ... npm run stress -- live-check  report which live-leg prerequisites are unmet (never dials)
  */
 
-function gitSha(): string {
-  try {
-    return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-  } catch {
-    return "unknown";
-  }
-}
 
 export function loadConfig(): StressConfig {
-  const env = { ...process.env, STRESS_SHA: process.env.STRESS_SHA ?? gitSha() };
-  return readConfig(env);
+  return readConfig(process.env);
 }
 
 async function main(): Promise<number> {

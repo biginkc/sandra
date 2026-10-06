@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -45,20 +45,78 @@ export function classifyOsProbe(outcome: OsProbeOutcome): "denied" | "open" | "i
   return "inconclusive";
 }
 
+export const PF_ANCHOR = "com.apple/sandra-stress";
+
+/** Runs `pfctl` with the privilege it needs (reading rules and counters needs root). Throws when it cannot. Injected in tests. */
+export type PfRunner = (args: string[]) => string;
+export const sudoPfctl: PfRunner = (args) => execFileSync("sudo", ["-n", "pfctl", ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+export type PfRule = { text: string; packets: number | null; uid: number | null; proto: string | null };
+
+/** Parses `pfctl -vsr` (rules, each followed by `[ Evaluations: n  Packets: n  Bytes: n  States: n ]`). */
+export function parsePfRules(output: string): PfRule[] {
+  const rules: PfRule[] = [];
+  for (const raw of output.split("\n")) {
+    const line = raw.trim();
+    if (/^(block|pass)\b/.test(line)) {
+      rules.push({ text: line, packets: null, uid: Number(/\buser = (\d+)/.exec(line)?.[1] ?? NaN) || null, proto: /\bproto (\w+)/.exec(line)?.[1] ?? null });
+    } else if (rules.length && rules[rules.length - 1]!.packets === null) {
+      const m = /Packets:\s*(\d+)/.exec(line);
+      if (m) rules[rules.length - 1]!.packets = Number(m[1]);
+    }
+  }
+  return rules;
+}
+
+const blockPackets = (rules: readonly PfRule[], uid: number) => rules.filter((r) => r.text.startsWith("block") && r.uid === uid && r.text.includes(" out ")).reduce((n, r) => n + (r.packets ?? 0), 0);
+
 /**
- * OS ring probe, run in a child WITHOUT the in-process guard (the guard would throw first and the pf ring would
- * never be exercised). It dials a routable public address (a TCP SYN to Cloudflare's resolver, never a provider):
- * TEST-NET addresses are blackholed with or without pf, so they prove nothing.
+ * A timeout is not proof: an upstream filter, a dead route or a down network produce the same silence. The ring is proven only when pf itself
+ * says so: enabled, the anchor holds a blocking `out` rule for every uid that must be covered (the harness and the app listener), a loopback
+ * pass is present, and the probe's SYN moved a block rule's packet counter. All of it is pure over the pfctl text, so it is unit-tested.
  */
-export function proveOsDenial(): void {
+export function pfProofProblems(input: { statusText: string; rulesBefore: string; rulesAfter: string; uids: readonly number[]; probe: OsProbeOutcome }): string[] {
+  const p: string[] = [];
+  if (!/Status:\s*Enabled/i.test(input.statusText)) p.push("pf is not enabled (`pfctl -si` does not say Enabled)");
+  const before = parsePfRules(input.rulesBefore);
+  const after = parsePfRules(input.rulesAfter);
+  if (!after.length) p.push(`the anchor ${PF_ANCHOR} holds no rules`);
+  if (!after.some((r) => r.text.startsWith("pass") && /\bon lo0\b/.test(r.text))) p.push("the anchor has no loopback pass rule");
+  for (const uid of input.uids) {
+    if (!after.some((r) => r.text.startsWith("block") && r.uid === uid && r.text.includes(" out ") && /\bproto (tcp|udp)\b/.test(r.text))) p.push(`no blocking out rule covers uid ${uid}`);
+    else if (blockPackets(after, uid) <= blockPackets(before, uid)) p.push(`the probe did not move the pf block counter for uid ${uid} (before ${blockPackets(before, uid)}, after ${blockPackets(after, uid)}): the silence is not the firewall's`);
+  }
+  if (input.probe === "connected") p.push("a non-loopback connection succeeded");
+  else if (input.probe !== "timeout") p.push(`the probe saw "${input.probe}", not a firewall-style timeout`);
+  return p;
+}
+
+/** Runs the probe in a child WITHOUT the in-process guard (it would throw first and the ring would never be exercised). A TCP SYN to a public resolver, never a provider. */
+export function runOsProbe(): OsProbeOutcome {
   const code = `const s=require("node:net").connect({host:"1.1.1.1",port:443});s.setTimeout(3000,()=>{console.log("timeout");process.exit(0)});s.on("connect",()=>{console.log("connected");process.exit(0)});s.on("error",(e)=>{console.log("error:"+(e&&e.code||"unknown"));process.exit(0)});`;
   const env = { ...process.env };
   delete env.NODE_OPTIONS;
   const r = spawnSync(process.execPath, ["-e", code], { env, timeout: 10_000, encoding: "utf8" });
-  const outcome = (r.stdout ?? "").trim() as OsProbeOutcome;
-  const verdict = classifyOsProbe(outcome || "error:no_output");
-  if (verdict === "open") throw new LaneRefusal("OS_EGRESS_OPEN", "a non-loopback connection succeeded; run `sudo e2e/stress/egress-pf.sh apply` before the run.");
-  if (verdict === "inconclusive") throw new LaneRefusal("OS_EGRESS_INCONCLUSIVE", `the OS egress probe saw "${outcome}", not a firewall-style timeout; cannot prove the pf ring (is the machine offline?).`);
+  return ((r.stdout ?? "").trim() || "error:no_output") as OsProbeOutcome;
+}
+
+/**
+ * The OS ring proof: read pf state and counters, probe, read again, and require pf's own evidence (see pfProofProblems). Needs root for `pfctl`
+ * (`sudo -n`); when pf state cannot be read the ring is unverifiable and the run is refused (the caller only asks when the ring is required).
+ */
+export function proveOsDenial(opts: { uids: readonly number[]; runner?: PfRunner; probe?: () => OsProbeOutcome }): void {
+  const run = opts.runner ?? sudoPfctl;
+  let statusText: string, rulesBefore: string, rulesAfter: string, probe: OsProbeOutcome;
+  try {
+    statusText = run(["-si"]);
+    rulesBefore = run(["-a", PF_ANCHOR, "-vsr"]);
+    probe = (opts.probe ?? runOsProbe)();
+    rulesAfter = run(["-a", PF_ANCHOR, "-vsr"]);
+  } catch (e) {
+    throw new LaneRefusal("OS_EGRESS_UNVERIFIABLE", `cannot read the pf state (${(e as Error).message.split("\n")[0]}): the ring needs \`sudo -n pfctl\` (passwordless for pfctl) to be proven.`);
+  }
+  const problems = pfProofProblems({ statusText, rulesBefore, rulesAfter, uids: opts.uids, probe });
+  if (problems.length) throw new LaneRefusal("OS_EGRESS_NOT_PROVEN", problems.join(" | ") + " (apply with `sudo e2e/stress/egress-pf.sh apply <uid>`)");
 }
 
 /** Non-probe egress violations recorded during the run. Any entry fails the run. */
