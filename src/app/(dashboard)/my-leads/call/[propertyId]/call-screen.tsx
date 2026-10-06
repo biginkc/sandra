@@ -40,6 +40,8 @@ export type CallScreenProps = {
   viewerLabel?: string | null;
   /** `click_to_dial` flag AND `schemaReady('api_dial')`, resolved on the server (getMyLeadsCallFeatures). Off keeps Call disabled. */
   clickToDial?: boolean;
+  /** `post_call_prompt` flag (and its schema), resolved on the server. The dock needs this AND `call_screen`. */
+  postCallPrompt?: boolean;
 };
 
 const STAGE_LABEL: Record<string, string> = {
@@ -55,7 +57,7 @@ const STAGE_LABEL: Record<string, string> = {
  * numbers → (contract, hidden in 3b) → history → docked post-call prompt. Below: single column
  * header, numbers, script, history, prompt. Call facts chips sit under the numbers when a proposal is open.
  */
-export function CallScreen({ data, viewerLabel = null, clickToDial = false }: CallScreenProps) {
+export function CallScreen({ data, viewerLabel = null, clickToDial = false, postCallPrompt = false }: CallScreenProps) {
   const router = useRouter();
   const { lead, queueRow, viewer } = data;
   const propertyId = lead.propertyId;
@@ -126,7 +128,8 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false }: Ca
     if (!recovered) return;
     const result = await saveExtrasRequest(recovered, viewer.userId, extrasInFlight.current, () => setRecoveredState({ status: "saving" }));
     if (!result) return;
-    if (extrasConfirmed(result)) {
+    // Confirmed, or another prompt already saved this call (the saver dropped the entry): no banner, no Retry.
+    if (extrasConfirmed(result) || (!result.ok && result.alreadySaved)) {
       setRecovered(null);
       setRecoveredState(null);
     } else {
@@ -185,7 +188,7 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false }: Ca
   );
   const recoveredBanner = recovered ? (
     <div data-testid="call-screen-recovered-extras" className="rounded-[16px] border border-border bg-card p-4">
-      <ReceiptLines extras={recoveredState} sentNextStepAt={null} note={recovered.extras.note} onRetry={() => void retryRecovered()} />
+      <ReceiptLines extras={recoveredState} sentNextStepAt={null} note={recovered.extras.note} attemptSaved={false} onRetry={() => void retryRecovered()} />
     </div>
   ) : null;
   const prompt = (
@@ -280,7 +283,7 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false }: Ca
               </div>
             ) : null}
             <div className="order-3 lg:order-none">{history}</div>
-            <div data-testid="call-screen-prompt-dock" className="order-4 flex flex-col gap-3 lg:sticky lg:bottom-0 lg:order-none">{recoveredBanner}{prompt}</div>
+            {postCallPrompt ? <div data-testid="call-screen-prompt-dock" className="order-4 flex flex-col gap-3 lg:sticky lg:bottom-0 lg:order-none">{recoveredBanner}{prompt}</div> : null}
           </div>
         </div>
       </div>

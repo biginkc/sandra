@@ -77,7 +77,7 @@ describe("CallScreen call facts", () => {
   });
 
   it("mounts the chips right after the numbers card when a proposal is open", () => {
-    render(<CallScreen data={withFacts()} />);
+    render(<CallScreen postCallPrompt data={withFacts()} />);
     const right = screen.getByTestId("call-screen-right");
     const numbers = right.querySelector('[data-testid="numbers-card"]')!;
     const chips = within(right).getByTestId("call-fact-chips");
@@ -86,12 +86,12 @@ describe("CallScreen call facts", () => {
   });
 
   it("renders nothing for a missing or failed facts section", () => {
-    render(<CallScreen data={{ ...data, facts: { ok: true, data: null } }} />);
+    render(<CallScreen postCallPrompt data={{ ...data, facts: { ok: true, data: null } }} />);
     expect(screen.queryByTestId("call-fact-chips")).toBeNull();
   });
 
   it("Accept sends the lead and fact ids; accepting motivation prefills the shared script field and refreshes", async () => {
-    render(<CallScreen data={withFacts()} />);
+    render(<CallScreen postCallPrompt data={withFacts()} />);
     expect(screen.getByTestId("static-script-view")).toHaveAttribute("data-motivation", "");
     await userEvent.click(screen.getByTestId("call-fact-accept-motivation"));
     expect(mocks.acceptCallFactAction).toHaveBeenCalledWith({ propertyId, factId: "f1", field: "motivation" });
@@ -101,14 +101,14 @@ describe("CallScreen call facts", () => {
 
   it("accepting another field does not touch the motivation field", async () => {
     mocks.acceptCallFactAction.mockResolvedValue({ ok: true, value: "Fri" });
-    render(<CallScreen data={withFacts()} />);
+    render(<CallScreen postCallPrompt data={withFacts()} />);
     await userEvent.click(screen.getByTestId("call-fact-accept-next_step"));
     await waitFor(() => expect(mocks.acceptCallFactAction).toHaveBeenCalled());
     expect(screen.getByTestId("static-script-view")).toHaveAttribute("data-motivation", "");
   });
 
   it("Dismiss calls the dismiss action for the fact", async () => {
-    render(<CallScreen data={withFacts()} />);
+    render(<CallScreen postCallPrompt data={withFacts()} />);
     await userEvent.click(screen.getByTestId("call-fact-dismiss"));
     expect(mocks.dismissCallFactsAction).toHaveBeenCalledWith({ propertyId, factId: "f1" });
   });

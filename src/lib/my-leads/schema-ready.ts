@@ -24,7 +24,8 @@ export type SchemaFeature =
   | "event_redaction"
   | "contract_defaults"
   | "offer_projection"
-  | "call_facts";
+  | "call_facts"
+  | "post_call_extras_proof";
 
 export type SchemaRequirement = {
   /** `public.fn_name(argtype,argtype)` regprocedure strings. */
@@ -144,6 +145,11 @@ export const REQUIREMENTS: Record<SchemaFeature, SchemaRequirement> = {
       "public.fn_unaccept_call_fact(uuid,uuid,text)",
     ],
     columns: ["lead_call_facts.processing_state"],
+  },
+  // PR #823: the post-call note and appointment are written only behind this proof function.
+  post_call_extras_proof: {
+    functions: ["public.fn_post_call_extras_proof(uuid,uuid,uuid,uuid)"],
+    columns: [],
   },
 };
 

@@ -646,14 +646,17 @@ export function ReceiptLines({
   sentNextStepAt,
   note,
   onRetry,
+  attemptSaved = true,
 }: {
+  /** False for the reload banner of an earlier, unconfirmed save: never claim "Attempt saved" there. */
+  attemptSaved?: boolean
   extras: PostCallExtrasState | null
   sentNextStepAt: string | null
   /** The note the rep typed; shown with a copy button whenever it was not saved. */
   note: string | null
   onRetry?: () => void
 }) {
-  const parts = ["Attempt saved"]
+  const parts = attemptSaved ? ["Attempt saved"] : []
   let failed = false
   let detail: string | undefined
   let noteNotSaved = false

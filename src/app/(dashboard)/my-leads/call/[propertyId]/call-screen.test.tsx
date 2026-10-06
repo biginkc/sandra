@@ -67,7 +67,7 @@ describe("CallScreen", () => {
   beforeEach(() => vi.clearAllMocks());
 
   it("renders the D7 layout: header, script left, numbers → history → docked prompt right; contract and facts omitted", () => {
-    render(<CallScreen data={data} />);
+    render(<CallScreen postCallPrompt data={data} />);
     expect(screen.getByTestId("call-screen-header")).toHaveTextContent("Pat Seller");
     expect(screen.getByTestId("call-screen-stage")).toHaveTextContent("Contacted");
     expect(within(screen.getByTestId("call-screen-left")).getByTestId("static-script-view")).toBeInTheDocument();
@@ -92,7 +92,7 @@ describe("CallScreen", () => {
 
     it("is disabled and dials nothing when click_to_dial / api_dial readiness is off", async () => {
       const user = userEvent.setup();
-      render(<CallScreen data={data} clickToDial={false} />);
+      render(<CallScreen postCallPrompt data={data} clickToDial={false} />);
       expect(callButton()).toBeDisabled();
       await user.click(callButton());
       expect(mocks.dialLead).not.toHaveBeenCalled();
@@ -100,18 +100,18 @@ describe("CallScreen", () => {
     });
 
     it("stays disabled with no contact, no phone, or a do-not-call contact even when the flag is on", () => {
-      const { rerender } = render(<CallScreen data={dialData({ contactDnc: true })} clickToDial />);
+      const { rerender } = render(<CallScreen postCallPrompt data={dialData({ contactDnc: true })} clickToDial />);
       expect(callButton()).toBeDisabled();
-      rerender(<CallScreen data={{ ...data, lead: { ...data.lead, homeowner: { ...data.lead.homeowner, contactId: null } } }} clickToDial />);
+      rerender(<CallScreen postCallPrompt data={{ ...data, lead: { ...data.lead, homeowner: { ...data.lead.homeowner, contactId: null } } }} clickToDial />);
       expect(callButton()).toBeDisabled();
-      rerender(<CallScreen data={{ ...data, lead: { ...data.lead, homeowner: { ...data.lead.homeowner, phones: [] } } }} clickToDial />);
+      rerender(<CallScreen postCallPrompt data={{ ...data, lead: { ...data.lead, homeowner: { ...data.lead.homeowner, phones: [] } } }} clickToDial />);
       expect(callButton()).toBeDisabled();
     });
 
     it("dispatches through dialLeadAction with the lead, contact and a key when the flag is on", async () => {
       const user = userEvent.setup();
       mocks.dialLead.mockResolvedValue({ ok: true, intentId: "i-1", state: "dialing", uncertain: false });
-      render(<CallScreen data={data} clickToDial />);
+      render(<CallScreen postCallPrompt data={data} clickToDial />);
       expect(callButton()).toBeEnabled();
       await user.click(callButton());
       expect(mocks.dialLead).toHaveBeenCalledTimes(1);
@@ -123,7 +123,7 @@ describe("CallScreen", () => {
     it("reuses the key on a retry after an expired replay, and Dismiss of that caution mints a fresh key", async () => {
       const user = userEvent.setup();
       mocks.dialLead.mockResolvedValue({ ok: false, code: "expired", message: "This call may have rung. Check Dialpad." });
-      render(<CallScreen data={data} clickToDial />);
+      render(<CallScreen postCallPrompt data={data} clickToDial />);
       await user.click(callButton());
       await screen.findByTestId("dial-status");
       await user.click(callButton());
@@ -139,7 +139,7 @@ describe("CallScreen", () => {
     it("keeps the key after a thrown request (it may have dialed)", async () => {
       const user = userEvent.setup();
       mocks.dialLead.mockRejectedValue(new Error("network"));
-      render(<CallScreen data={data} clickToDial />);
+      render(<CallScreen postCallPrompt data={data} clickToDial />);
       await user.click(callButton());
       await screen.findByTestId("dial-status");
       await user.click(callButton());
@@ -150,7 +150,7 @@ describe("CallScreen", () => {
     it("releases the key on a server-proven non-dispatch (freshAttemptKey)", async () => {
       const user = userEvent.setup();
       mocks.dialLead.mockResolvedValue({ ok: false, code: "provider_rejected", message: "Nothing was dialed.", freshAttemptKey: true });
-      render(<CallScreen data={data} clickToDial />);
+      render(<CallScreen postCallPrompt data={data} clickToDial />);
       await user.click(callButton());
       await screen.findByTestId("dial-status");
       await user.click(callButton());
@@ -162,7 +162,7 @@ describe("CallScreen", () => {
       const user = userEvent.setup();
       mocks.dialLead.mockResolvedValue({ ok: true, intentId: "i-1", state: "dialing", uncertain: false });
       mocks.dialStatus.mockResolvedValue({ ok: true, status: { state: "failed" } });
-      const { unmount } = render(<CallScreen data={data} clickToDial />);
+      const { unmount } = render(<CallScreen postCallPrompt data={data} clickToDial />);
       await user.click(callButton());
       await screen.findByText(/It may have rung/);
       // `failed` is not final: the Dismiss keeps the key.
@@ -174,7 +174,7 @@ describe("CallScreen", () => {
 
       mocks.dialLead.mockClear();
       mocks.dialStatus.mockResolvedValue({ ok: true, status: { state: "ended", connected: true, durationSeconds: 5, callActivityId: null } });
-      render(<CallScreen data={data} clickToDial />);
+      render(<CallScreen postCallPrompt data={data} clickToDial />);
       await user.click(callButton());
       await screen.findByText(/Call ended/);
       await user.click(callButton());
@@ -185,7 +185,7 @@ describe("CallScreen", () => {
     it("offers Call again anyway on prior_call_unresolved and sends confirmRedialOf with a new key", async () => {
       const user = userEvent.setup();
       mocks.dialLead.mockResolvedValueOnce({ ok: false, code: "prior_call_unresolved", message: "An earlier call may have rung.", priorIntentId: "i-0" });
-      render(<CallScreen data={data} clickToDial />);
+      render(<CallScreen postCallPrompt data={data} clickToDial />);
       await user.click(callButton());
       mocks.dialLead.mockResolvedValueOnce({ ok: true, intentId: "i-2", state: "dialing", uncertain: false });
       await user.click(await screen.findByRole("button", { name: "Call again anyway" }));
@@ -196,7 +196,7 @@ describe("CallScreen", () => {
 
   it("shows texts read-only and never marks them read", async () => {
     const user = userEvent.setup();
-    render(<CallScreen data={data} />);
+    render(<CallScreen postCallPrompt data={data} />);
     await user.click(screen.getByTestId("history-tab-texts"));
     expect(await screen.findByText("Is the offer still open?")).toBeInTheDocument();
     expect(mocks.markMessagesReadForProperty).not.toHaveBeenCalled();
@@ -205,17 +205,17 @@ describe("CallScreen", () => {
 
   it("keeps one opening (one attempt key) across a refresh at the same queue version, and a new one on a version change", () => {
     const openings = () => mocks.useAttemptWorkflow.mock.calls.map((call) => (call as unknown as [{ opening: unknown }])[0].opening);
-    const { rerender } = render(<CallScreen data={data} />);
+    const { rerender } = render(<CallScreen postCallPrompt data={data} />);
     // router.refresh() after a valuation save: new queueRow object, same version.
-    rerender(<CallScreen data={{ ...data, queueRow: { ...data.queueRow } }} />);
+    rerender(<CallScreen postCallPrompt data={{ ...data, queueRow: { ...data.queueRow } }} />);
     const same = openings();
     expect(new Set(same).size).toBe(1);
-    rerender(<CallScreen data={{ ...data, queueRow: { ...data.queueRow, queueVersion: 2 } }} />);
+    rerender(<CallScreen postCallPrompt data={{ ...data, queueRow: { ...data.queueRow, queueVersion: 2 } }} />);
     expect(new Set(openings()).size).toBe(2);
   });
 
   it("links back to My Leads", () => {
-    render(<CallScreen data={data} />);
+    render(<CallScreen postCallPrompt data={data} />);
     expect(screen.getByRole("link", { name: "Back to My Leads" })).toHaveAttribute("href", "/my-leads");
   });
 });

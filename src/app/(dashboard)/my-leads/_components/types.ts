@@ -347,6 +347,8 @@ export type PostCallExtras = {
   submissionId: string
   note: string | null
   nextStep: PostCallNextStep | null
+  /** The Sandra call the attempt records; lets the server refuse extras for a call another prompt already saved. */
+  callActivityId?: string | null
 }
 export type PostCallExtrasResult =
   | {
@@ -355,7 +357,7 @@ export type PostCallExtrasResult =
       nextStep: "created" | "skipped" | "failed"
       message?: string
     }
-  | { ok: false; message: string }
+  | { ok: false; message: string; /** Another prompt already saved this call: the stored extras are dropped, never retried. */ alreadySaved?: true; /** No proof yet that this save committed: nothing was written; the stored extras stay for Retry. */ pending?: true }
 /** What the prompt shows after the attempt is saved. */
 export type PostCallExtrasState =
   | { status: "saving" }
