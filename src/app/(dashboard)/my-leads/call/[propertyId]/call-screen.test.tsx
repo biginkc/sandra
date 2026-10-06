@@ -159,7 +159,7 @@ describe("CallScreen", () => {
       expect(rawKeys()[1]).not.toBe(rawKeys()[0]);
     });
 
-    it("releases the key when the poll reports ended, and a failed call keeps polling and keeps the key", async () => {
+    it("a failed call holds until Mark call ended (Dismiss only hides it); an ended poll releases the key so the next click mints a new one", async () => {
       const user = userEvent.setup();
       mocks.dialLead.mockResolvedValue({ ok: true, intentId: "i-1", state: "dialing", uncertain: false });
       mocks.dialStatus.mockResolvedValue({ ok: true, status: { state: "failed" } });

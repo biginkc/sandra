@@ -24,6 +24,8 @@ type Props = {
   onMarkEnded?: () => void;
   /** Reports whether the dispatched call's status is unknown (failed marker or poll errors). */
   onUnknown?: (intentId: string, unknown: boolean) => void;
+  /** The call has been seen dialing or connected: its status is no longer a mystery, so only a terminal status or the long ceiling releases it. */
+  onConfirmed?: (intentId: string) => void;
   onRetry: (propertyId: string) => void;
   onDismiss: () => void;
   onConfirmRedial?: (propertyId: string, priorIntentId: string) => void;
@@ -100,13 +102,17 @@ function MarkEnded({ onConfirm }: { onConfirm: () => void }) {
   );
 }
 
-function InFlight({ flight, pollMs = 3000, onDismiss, onLogOutcome, onEnded, onFinished, onMarkEnded, onUnknown }: Props & { flight: Extract<DialFlight, { kind: "in_flight" }> }) {
+function InFlight({ flight, pollMs = 3000, onDismiss, onLogOutcome, onEnded, onFinished, onMarkEnded, onUnknown, onConfirmed }: Props & { flight: Extract<DialFlight, { kind: "in_flight" }> }) {
   const [status, setStatus] = useState<DialpadCallStatus | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const endedRef = useRef(onEnded);
   useEffect(() => {
     endedRef.current = onEnded;
   }, [onEnded]);
+  const confirmedRef = useRef(onConfirmed);
+  useEffect(() => {
+    confirmedRef.current = onConfirmed;
+  }, [onConfirmed]);
   const finishedRef = useRef(onFinished);
   useEffect(() => {
     finishedRef.current = onFinished;
@@ -117,6 +123,8 @@ function InFlight({ flight, pollMs = 3000, onDismiss, onLogOutcome, onEnded, onF
     let finishedFired = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let endedFired = false;
+    let confirmedFired = false;
+    let failures = 0;
     const run = async () => {
       let next: DialpadCallStatus | null = null;
       try {
@@ -124,16 +132,26 @@ function InFlight({ flight, pollMs = 3000, onDismiss, onLogOutcome, onEnded, onF
         if (!alive) return;
         if (!res.ok) {
           setMessage(res.message);
+          failures += 1;
+          timer = setTimeout(() => void run(), Math.min(5000 * 2 ** (failures - 1), 30000));
           return;
         }
         next = res.status;
       } catch (err) {
         if (!alive) return;
         setMessage(err instanceof Error ? err.message : "Could not check the call.");
+        // Never stop on an error: a live call must stay tracked. Back off 5s, 10s, 20s, then every 30s.
+        failures += 1;
+        timer = setTimeout(() => void run(), Math.min(5000 * 2 ** (failures - 1), 30000));
         return;
       }
+      failures = 0;
       setStatus(next);
       setMessage(null);
+      if ((next.state === "dialing" || next.state === "connected") && !confirmedFired) {
+        confirmedFired = true;
+        confirmedRef.current?.(flight.intentId);
+      }
       if (next.state === "ended" && !endedFired) {
         endedFired = true;
         endedRef.current?.(next);

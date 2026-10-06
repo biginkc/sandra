@@ -44,6 +44,8 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
   const [panelHidden, setPanelHidden] = useState(false);
   // The status of a dispatched call is unknown (failed marker or poll errors), reported by DialStatus.
   const [statusUnknown, setStatusUnknown] = useState(false);
+  // The intent that has been seen dialing or connected; such a call is only released by a terminal status or the 2h ceiling.
+  const [confirmedIntent, setConfirmedIntent] = useState<string | null>(null);
   const freeLock = () => {
     heldFor.current = null;
     lock.release(token);
@@ -214,13 +216,13 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
   }, [heldIntent]);
   // A dispatched call with unknown status, or a request that may have rung, is released after ten minutes.
   useEffect(() => {
-    if (!((heldIntent && statusUnknown) || heldUncertain)) return;
+    if (!((heldIntent && statusUnknown && confirmedIntent !== heldIntent) || heldUncertain)) return;
     const id = setTimeout(
       () => releaseWithNoticeRef.current("Dialpad status was unknown for 10 minutes; Sandra released the call lock. Check Dialpad."),
       DIAL_UNKNOWN_CEILING_MS,
     );
     return () => clearTimeout(id);
-  }, [heldIntent, statusUnknown, heldUncertain]);
+  }, [heldIntent, statusUnknown, confirmedIntent, heldUncertain]);
 
   /** The handlers `DialStatus` needs for the key lifecycle; spread them next to the caller's onEnded/onLogOutcome. */
   const statusHandlers = {
@@ -263,6 +265,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
       releaseWithNotice("Call marked as ended. Sandra released the call lock.");
     },
     onUnknown: (_intentId: string, unknown: boolean) => setStatusUnknown(unknown),
+    onConfirmed: (intentId: string) => setConfirmedIntent(intentId),
     onFinished: (intentId: string, finalStatus: DialpadCallStatus) => {
       setPanelHidden(false);
       freeLock();

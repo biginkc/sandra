@@ -466,13 +466,13 @@ describe("the persistent provider owns the flight and the lock", () => {
     const user = userEvent.setup();
     mocks.dialLeadAction.mockResolvedValue(accepted);
     mocks.getStatus.mockResolvedValue(statusOf("connected"));
-    const view = render(shell(<Page target={lead} />));
+    const view = render(shell(<Page key="a" target={lead} />));
     await user.click(screen.getByText("dial Seller One"));
     await screen.findByText(/Connected/);
     expect(probe.lock?.holder()).toBe("dialpad");
 
     // Navigate away: the page unmounts, the layout provider does not.
-    view.rerender(shell(<Page target={leadB} />));
+    view.rerender(shell(<Page key="b" target={leadB} />));
     expect(probe.lock?.holder()).toBe("dialpad");
     await user.click(screen.getByText("dial Seller Two"));
     expect(mocks.dialLeadAction).toHaveBeenCalledTimes(1);
@@ -533,6 +533,77 @@ describe("the persistent provider owns the flight and the lock", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe("unknown status and ceilings (fake timers)", () => {
+    const TEN_MIN = 10 * 60 * 1000;
+    beforeEach(() => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+    const start = async () => {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      mocks.dialLeadAction.mockResolvedValue(accepted);
+      render(shell(<Page target={lead} />));
+      await user.click(screen.getByText("dial Seller One"));
+    };
+    const advance = (ms: number) =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+      });
+
+    it("connected, one failed check, connected again: still held at 10 minutes + 1s", async () => {
+      let n = 0;
+      mocks.getStatus.mockImplementation(async () => {
+        n += 1;
+        if (n === 2) throw new Error("blip");
+        return statusOf("connected");
+      });
+      await start();
+      await screen.findByText(/Connected/);
+      await advance(TEN_MIN + 1000);
+      expect(probe.lock?.holder()).toBe("dialpad");
+      expect(n).toBeGreaterThan(3);
+    });
+
+    it("connected, then repeated failures: held at 10 minutes + 1s, released at 2h with a notice", async () => {
+      let n = 0;
+      mocks.getStatus.mockImplementation(async () => {
+        n += 1;
+        if (n >= 2) throw new Error("down");
+        return statusOf("connected");
+      });
+      await start();
+      await screen.findByText(/Connected/);
+      await advance(TEN_MIN + 1000);
+      expect(probe.lock?.holder()).toBe("dialpad");
+      await advance(2 * 60 * 60 * 1000);
+      expect(probe.lock?.holder()).toBeNull();
+      expect(screen.getByTestId("dial-notice")).toHaveTextContent("2 hours");
+    });
+
+    it("a never-confirmed call with unknown status is released at 10 minutes", async () => {
+      mocks.getStatus.mockResolvedValue(statusOf("failed"));
+      await start();
+      await screen.findByRole("button", { name: "Mark call ended" });
+      await advance(TEN_MIN - 5000);
+      expect(probe.lock?.holder()).toBe("dialpad");
+      await advance(10000);
+      expect(probe.lock?.holder()).toBeNull();
+      expect(screen.getByTestId("dial-notice")).toHaveTextContent("10 minutes");
+    });
+
+    it("the 2h ceiling does not fire early", async () => {
+      mocks.getStatus.mockResolvedValue(statusOf("connected"));
+      await start();
+      await screen.findByText(/Connected/);
+      await advance(2 * 60 * 60 * 1000 - 60 * 1000);
+      expect(probe.lock?.holder()).toBe("dialpad");
+      await advance(2 * 60 * 1000);
+      expect(probe.lock?.holder()).toBeNull();
+    });
   });
 
   it("the panel stays visible while the lock is held even if the route flips off", async () => {
