@@ -53,6 +53,8 @@ create table stress.audit (
   row_id uuid,
   property_id uuid,
   hold_open boolean,
+  -- The transaction that wrote the row: rows sharing it are one atomic action.
+  txid bigint not null default txid_current(),
   old_row jsonb,
   new_row jsonb
 );
@@ -170,6 +172,9 @@ export async function createScratchDb(): Promise<Scratch> {
     for (const file of MIGRATIONS) {
       await setup.query(readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"));
     }
+    // This suite exercises the separately activated retry contract. The migration
+    // itself stays OFF; only this owned disposable database explicitly opts in.
+    await setup.query("update public.norma_retry_admission set enabled=true where singleton=true");
     await setup.query(AUDIT_SQL);
   } catch (error) {
     await setup.end().catch(() => undefined);
@@ -267,6 +272,8 @@ export type World = {
   org: string;
   rep1: string;
   rep2: string;
+  /** A real user who belongs to no org: every request from them must be refused. */
+  outsider: string;
   assignee: string;
   sequences: string[];
   nextLead: (opts?: LeadOptions) => Promise<Lead>;
@@ -284,9 +291,10 @@ export async function seedWorld(pool: Pool): Promise<World> {
   const org = randomUUID();
   const rep1 = randomUUID();
   const rep2 = randomUUID();
+  const outsider = randomUUID();
   const assignee = randomUUID();
   const sequences = [randomUUID(), randomUUID(), randomUUID()];
-  await pool.query("insert into auth.users(id) values ($1), ($2), ($3)", [rep1, rep2, assignee]);
+  await pool.query("insert into auth.users(id) values ($1), ($2), ($3), ($4)", [rep1, rep2, assignee, outsider]);
   await pool.query("insert into public.organizations(id, name) values ($1, 'norma stress')", [org]);
   await pool.query("insert into public.memberships(user_id, org_id, role, access_status) values ($1, $2, 'owner', 'active')", [assignee, org]);
   for (const rep of [rep1, rep2]) {
@@ -321,5 +329,5 @@ export async function seedWorld(pool: Pool): Promise<World> {
     }
     return { property, contact, phone, address, enrollments };
   };
-  return { org, rep1, rep2, assignee, sequences, nextLead };
+  return { org, rep1, rep2, outsider, assignee, sequences, nextLead };
 }

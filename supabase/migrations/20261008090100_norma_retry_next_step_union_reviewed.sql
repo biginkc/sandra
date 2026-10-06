@@ -38,6 +38,19 @@ set local statement_timeout = '60s';
 -- Take the ACCESS EXCLUSIVE lock the ALTERs need up front: on timeout (55P03) nothing has changed.
 lock table public.norma_call_requests in access exclusive mode;
 
+-- Retry scheduling is OFF until the database operator separately admits it.
+-- Authoritative retry admission: only the database operator may change this row.
+-- Application/service_role callers (including immutable deployments) cannot opt in.
+-- Missing row fails closed; recovery re-apply preserves an explicit operator decision.
+create table if not exists public.norma_retry_admission (
+  singleton boolean primary key default true check (singleton),
+  enabled boolean not null default false
+);
+alter table public.norma_retry_admission enable row level security;
+revoke all on table public.norma_retry_admission from public, anon, authenticated, service_role;
+insert into public.norma_retry_admission(singleton, enabled) values (true, false)
+  on conflict (singleton) do nothing;
+
 -- Integrated Norma human-review schema from PR 772.
 alter table public.norma_call_requests
   add column if not exists reviewed_by uuid references auth.users(id) on delete set null,
@@ -84,6 +97,7 @@ create unique index if not exists norma_call_requests_first_bland_call_id_key
 create or replace function public.norma_call_requests_guard()
 returns trigger
 language plpgsql
+security definer
 set search_path = public, pg_temp
 as $$
 declare
@@ -112,12 +126,20 @@ begin
   end if;
 
   -- The one backwards edge: attempt 1 confirmed not answered, retry scheduled.
-  v_retry := old.attempt = 1 and new.attempt = 2
+  v_retry := coalesce(old.attempt = 1 and new.attempt = 2
          and old.status in ('dispatching', 'dispatched') and new.status = 'requested'
          and new.first_attempt_outcome = 'no_answer'
          and new.first_bland_call_id is not null
          and (old.bland_call_id is null or old.bland_call_id = new.first_bland_call_id)
-         and new.bland_call_id is null;
+         and new.bland_call_id is null, false);
+
+  -- Enforce the same operator decision at the row transition, so direct
+  -- service-role DML or another writer cannot bypass completion admission.
+  if v_retry and not coalesce((select enabled from public.norma_retry_admission
+                              where singleton = true for share), false) then
+    raise exception 'NORMA_RETRY_DISABLED: operator admission is OFF'
+      using errcode = '42501';
+  end if;
 
   if new.attempt is distinct from old.attempt and not v_retry then
     raise exception 'NORMA_TRANSITION: attempt can only move 1 -> 2 when scheduling the retry'
@@ -371,7 +393,12 @@ begin
   -- caller then runs the ordinary dispatchNormaCall (gate + dial-time recheck).
   -- Nothing is released and no task/disposition/notification is written yet.
   if p_outcome = 'no_answer' and r.attempt = 1 and r.status in ('dispatching', 'dispatched')
-     and (v_payload ->> 'attempt') = '1' then
+     and (v_payload ->> 'attempt') = '1'
+     -- Lock the admission row through the scheduling commit. An operator's OFF
+     -- commit waits for admitted schedulers; later callers see OFF (or abort
+     -- under an older repeatable-read snapshot), never a cached runtime flag.
+     and coalesce((select enabled from public.norma_retry_admission
+                   where singleton = true for share), false) then
     begin
       update public.norma_call_requests
          set status = 'requested', attempt = 2,

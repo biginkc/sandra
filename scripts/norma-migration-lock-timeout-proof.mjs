@@ -52,6 +52,10 @@ try {
       (select string_agg(conname || pg_get_constraintdef(oid), ',' order by conname)
          from pg_constraint where conrelid = 'public.norma_call_requests'::regclass),
       (select string_agg(indexdef, ',' order by indexname) from pg_indexes where tablename = 'norma_call_requests'),
+      (select relrowsecurity::text || ':' || coalesce(relacl::text, '') from pg_class
+         where oid = to_regclass('public.norma_retry_admission')),
+      (select string_agg(column_name || ':' || data_type || ':' || coalesce(column_default, ''), ',' order by column_name)
+         from information_schema.columns where table_schema = 'public' and table_name = 'norma_retry_admission'),
       (select string_agg(p.proname || md5(pg_get_functiondef(p.oid)), ',' order by p.proname, p.oid)
          from pg_proc p join pg_namespace n on n.oid = p.pronamespace
         where n.nspname = 'public' and (p.proname like 'fn\\_norma\\_%' or p.proname like 'norma\\_%')),
@@ -96,6 +100,7 @@ try {
 
   const before = await snapshot();
   const before_col = (await obs.query("select count(*)::int n from information_schema.columns where table_name='norma_call_requests' and column_name='attempt'")).rows[0].n;
+  const admissionAbsentBefore = (await obs.query("select to_regclass('public.norma_retry_admission') is null as absent")).rows[0].absent;
 
   // (a) blocker: an open transaction that has merely READ the table (ACCESS SHARE) is enough to block ACCESS EXCLUSIVE.
   await holder.query("set idle_in_transaction_session_timeout = '90s'"); // bound the blocker too
@@ -113,6 +118,8 @@ try {
       sqlstate55P03: /55P03|lock timeout/i.test(a.log),
       logExcerpt: a.log.split("\n").filter((l) => /55P03|lock timeout|ERROR|Applying/i.test(l)).slice(0, 4),
       schemaAndHistoryUnchanged: before === afterA,
+      admissionTableAbsentBefore: admissionAbsentBefore,
+      admissionTableAbsentAfter: (await obs.query("select to_regclass('public.norma_retry_admission') is null as absent")).rows[0].absent,
     },
   };
   if (a.code === 0) fail("blocked push unexpectedly succeeded");
@@ -125,6 +132,8 @@ try {
   const rec = (await obs.query("select 1 from supabase_migrations.schema_migrations where version = $1", [version])).rowCount;
   result.clean = { exitCode: b.code, cliWallMs: b.ms, recordedInHistory: rec === 1, schemaChanged: (await snapshot()) !== afterA, attemptColumnBefore: before_col };
   if (b.code !== 0 || rec !== 1) fail(`clean push failed: ${b.log.slice(-400)}`);
+  result.clean.retryAdmission = (await obs.query("select enabled from public.norma_retry_admission where singleton=true")).rows;
+  if (admissionAbsentBefore && (result.clean.retryAdmission.length !== 1 || result.clean.retryAdmission[0].enabled !== false)) fail("fresh migration did not install default-OFF retry admission");
   console.log(JSON.stringify(result, null, 1));
 } finally {
   await holder.query("rollback").catch(() => {});

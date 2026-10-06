@@ -22,6 +22,7 @@ export default defineConfig({
       "supabase/migrations/20261002120200_norma_m2_review_fixes.integration.test.ts",
       "supabase/migrations/20261004090000_norma_call_twice.integration.test.ts",
       "supabase/migrations/20261008090100_norma_retry_next_step_union_reviewed.integration.test.ts",
+      "supabase/migrations/20261008090100_norma_retry_admission.integration.test.ts",
       "supabase/migrations/20261008090100_norma_mark_reviewed.integration.test.ts",
       "supabase/migrations/20260927023443_dialpad_cti_kpi_seller_speech.integration.test.ts",
       "supabase/migrations/20260929034021_dialpad_cti_foundation.integration.test.ts",
