@@ -13,6 +13,7 @@ import {
   readStubDialpadDials,
   resetStubDialpadDials,
   resolveDialpadDialKey,
+  resolveDialpadHoursClock,
   resolveDialpadDialProvider,
   startDialpadApiCall,
   type DialpadDialFetch,
@@ -633,5 +634,39 @@ describe('startDialpadApiCall calling hours (lead-local 08:00-21:00)', () => {
     expect(db.calls).toContain('authorizeDispatch');
     expect(db.calls).toContain('cancelIntent');
     expect(requests).toHaveLength(0);
+  });
+});
+
+describe('resolveDialpadHoursClock', () => {
+  const PINNED = '2026-05-09T16:00:00.000Z';
+  it('honours E2E_QUIET_HOURS_NOW only for the stub provider', () => {
+    expect(resolveDialpadHoursClock({ DIALPAD_DIAL_PROVIDER: 'stub', E2E_QUIET_HOURS_NOW: PINNED })().toISOString()).toBe(PINNED);
+  });
+  it('production ignores the override even with the stub requested', () => {
+    const before = Date.now();
+    const got = resolveDialpadHoursClock({ VERCEL_ENV: 'production', DIALPAD_DIAL_PROVIDER: 'stub', E2E_QUIET_HOURS_NOW: PINNED })().getTime();
+    expect(got).toBeGreaterThanOrEqual(before);
+  });
+  it('the live provider ignores the override', () => {
+    const before = Date.now();
+    expect(resolveDialpadHoursClock({ E2E_QUIET_HOURS_NOW: PINNED })().getTime()).toBeGreaterThanOrEqual(before);
+  });
+  it('a stub with a missing or invalid override uses real time', () => {
+    const before = Date.now();
+    expect(resolveDialpadHoursClock({ DIALPAD_DIAL_PROVIDER: 'stub' })().getTime()).toBeGreaterThanOrEqual(before);
+    expect(resolveDialpadHoursClock({ DIALPAD_DIAL_PROVIDER: 'stub', E2E_QUIET_HOURS_NOW: 'nope' })().getTime()).toBeGreaterThanOrEqual(before);
+  });
+  it('startDialpadApiCall defaults to that clock: stub + in-window override dials, production at the same pinned time does not use it', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-30T02:30:00Z')); // 21:30 CDT, closed
+      const stubEnv = { ...env, DIALPAD_DIAL_PROVIDER: 'stub', E2E_QUIET_HOURS_NOW: PINNED };
+      const ok = await startDialpadApiCall(fakeDb(), fakeDialer().dialer, actor, input, { env: stubEnv });
+      expect(ok.ok).toBe(true);
+      const prod = await startDialpadApiCall(fakeDb(), fakeDialer().dialer, actor, input, { env: { ...stubEnv, VERCEL_ENV: 'production' } });
+      expect(prod).toMatchObject({ ok: false, denial: 'outside_calling_hours' });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

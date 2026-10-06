@@ -257,6 +257,18 @@ export type DialpadApiDialOutcome =
       denial?: DialpadDenialDetail;
     };
 
+/**
+ * The calling-hours clock. Real time, except that the stub provider (never honoured in production,
+ * see resolveDialpadDialProvider) lets E2E_QUIET_HOURS_NOW pin it so e2e runs do not depend on wall-clock time.
+ */
+export function resolveDialpadHoursClock(env: DialpadDirectoryEnv): () => Date {
+  if (resolveDialpadDialProvider(env) === 'stub') {
+    const parsed = new Date(env.E2E_QUIET_HOURS_NOW ?? '');
+    if (env.E2E_QUIET_HOURS_NOW && !Number.isNaN(parsed.getTime())) return () => new Date(parsed.getTime());
+  }
+  return () => new Date();
+}
+
 export interface DialpadApiDialDeps {
   env: DialpadDirectoryEnv;
   now?: () => Date;
@@ -291,7 +303,7 @@ export async function startDialpadApiCall(
   input: DialpadApiDialInput,
   deps: DialpadApiDialDeps,
 ): Promise<DialpadApiDialOutcome> {
-  const now = deps.now ?? (() => new Date());
+  const now = deps.now ?? resolveDialpadHoursClock(deps.env);
   const { propertyId, contactId, idempotencyKey } = input;
   if (typeof propertyId !== 'string' || !UUID.test(propertyId) || typeof contactId !== 'string' || !UUID.test(contactId)
       || typeof idempotencyKey !== 'string' || !UUID.test(idempotencyKey)
