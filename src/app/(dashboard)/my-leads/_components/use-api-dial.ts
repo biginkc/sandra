@@ -111,6 +111,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     setLockNotice(null);
     setPanelHidden(false);
     setStatusUnknown(false);
+    setConfirmedIntent(null);
     heldFor.current = propertyId;
     // Held through a live call and through a rate-limit countdown; released on every other outcome.
     let keepLock = false;

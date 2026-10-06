@@ -36,6 +36,11 @@ type Props = {
 };
 
 // Same list the panel and the server use: `failed` keeps polling because a late event can still project.
+/** Status-check retry schedule after an error: 5s, 10s, 20s, then every 30s. */
+function backoffMs(failures: number): number {
+  return Math.min(5000 * 2 ** (failures - 1), 30000);
+}
+
 const POLLING_STATES: ReadonlySet<DialpadCallStatus["state"]> = new Set(DIALPAD_ACTIVE_CALL_STATES);
 
 const FINAL_STATES: ReadonlySet<DialpadCallStatus["state"]> = new Set(["ended", "cancelled", "expired"]);
@@ -133,7 +138,7 @@ function InFlight({ flight, pollMs = 3000, onDismiss, onLogOutcome, onEnded, onF
         if (!res.ok) {
           setMessage(res.message);
           failures += 1;
-          timer = setTimeout(() => void run(), Math.min(5000 * 2 ** (failures - 1), 30000));
+          timer = setTimeout(() => void run(), backoffMs(failures));
           return;
         }
         next = res.status;
@@ -142,7 +147,7 @@ function InFlight({ flight, pollMs = 3000, onDismiss, onLogOutcome, onEnded, onF
         setMessage(err instanceof Error ? err.message : "Could not check the call.");
         // Never stop on an error: a live call must stay tracked. Back off 5s, 10s, 20s, then every 30s.
         failures += 1;
-        timer = setTimeout(() => void run(), Math.min(5000 * 2 ** (failures - 1), 30000));
+        timer = setTimeout(() => void run(), backoffMs(failures));
         return;
       }
       failures = 0;
@@ -185,7 +190,7 @@ function InFlight({ flight, pollMs = 3000, onDismiss, onLogOutcome, onEnded, onF
       {canLog ? (
         <Button type="button" size="sm" onClick={() => onLogOutcome(flight.propertyId, status.callActivityId as string)}>Log outcome</Button>
       ) : null}
-      {unknown && !(status && FINAL_STATES.has(status.state)) && onMarkEnded ? <MarkEnded onConfirm={onMarkEnded} /> : null}
+      {!(status && FINAL_STATES.has(status.state)) && onMarkEnded ? <MarkEnded onConfirm={onMarkEnded} /> : null}
       {status && POLLING_STATES.has(status.state) && status.state !== "failed" && !message ? null : (
         <Button type="button" variant="outline" size="sm" onClick={onDismiss}>Dismiss</Button>
       )}

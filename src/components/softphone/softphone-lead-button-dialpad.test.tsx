@@ -491,6 +491,20 @@ describe("the persistent provider owns the flight and the lock", () => {
     expect(screen.getByTestId("dialpad-call-show")).toBeInTheDocument();
   });
 
+  it("a connected call with healthy polling still offers Mark call ended, and a confirmed click releases the lock", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockResolvedValue(accepted);
+    mocks.getStatus.mockResolvedValue(statusOf("connected"));
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    render(shell(<Page target={lead} />));
+    await user.click(screen.getByText("dial Seller One"));
+    await screen.findByText(/Connected/);
+    await user.click(screen.getByRole("button", { name: "Mark call ended" }));
+    expect(probe.lock?.holder()).toBe("dialpad");
+    await user.click(screen.getByRole("button", { name: "Yes, it ended" }));
+    expect(probe.lock?.holder()).toBeNull();
+  });
+
   it("a terminal hangup status releases the lock", async () => {
     const user = userEvent.setup();
     mocks.dialLeadAction.mockResolvedValue(accepted);
