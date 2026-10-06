@@ -25,7 +25,7 @@ export type UseApiDialOptions = {
  */
 export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | null, options: UseApiDialOptions = {}) {
   const [dialFlight, setDialFlight] = useState<DialFlight | null>(null);
-  const dialKeys = useRef(new Map<string, { key: string; intentId?: string }>());
+  const dialKeys = useRef(new Map<string, { key: string; intentId?: string; uncertain?: boolean }>());
   const dialNonce = useRef(0);
   const releaseDialKeyForProperty = (propertyId: string) => {
     dialKeys.current.delete(propertyId);
@@ -93,7 +93,8 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
         return;
       }
       if (outcome.freshAttemptKey) releaseDialKeyForProperty(propertyId);
-      if (outcome.code === "not_configured" && notConfiguredRef.current) {
+      // An earlier attempt that threw may have rung: never fall back to another dialer for it.
+      if (outcome.code === "not_configured" && notConfiguredRef.current && !entry.uncertain && !entry.intentId) {
         // Refused before anything was prepared: the key was never used.
         if (!entry.intentId) releaseDialKeyForProperty(propertyId);
         notConfiguredRef.current(propertyId);
@@ -119,6 +120,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
       setDialFlight({ kind: "error", propertyId, label, message: outcome.message, releaseKeyOnDismiss: outcome.code === "expired" });
     } catch {
       // The request may have reached the server and dialed; the key stays so a retry cannot double-dial.
+      entry.uncertain = true;
       setDialFlight({ kind: "error", propertyId, label, message: "Sandra could not confirm the call. Check Dialpad before trying again." });
     } finally {
       dialBusy.current = false;

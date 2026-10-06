@@ -204,6 +204,14 @@ describe("MyLeadsClient calling and durable call state", () => {
     expect(mocks.dialLead).not.toHaveBeenCalled()
   })
 
+  it("refuses a Dialpad call while the softphone is on a call", async () => {
+    mocks.softphone = { callingEnabled: true, onCall: true, openLead: vi.fn() }
+    renderClient({ dialpad })
+    await click(screen.getByRole("button", { name: "Start call property-1" }))
+    expect(mocks.dialLead).not.toHaveBeenCalled()
+    expect(screen.getByText("Finish your current call before starting another.")).toBeInTheDocument()
+  })
+
   it("will not dial with Dialpad from another rep's queue", async () => {
     const ownerRoster: AcquisitionRoster = {
       ...roster,

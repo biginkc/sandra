@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 
 import { DialStatus } from "@/app/(dashboard)/my-leads/_components/dial-status";
@@ -16,9 +16,10 @@ import { useApiDial } from "@/app/(dashboard)/my-leads/_components/use-api-dial"
 export function DialpadCallProvider({ enabled, children }: { enabled: boolean; children: ReactNode }) {
   const router = useRouter();
   const softphone = useOptionalSoftphone();
-  const openLead = softphone?.callingEnabled ? softphone.openLead : undefined;
+  const softphoneOnCall = softphone?.onCall === true;
+  const [notice, setNotice] = useState<string | null>(null);
   const requests = useRef(new Map<string, DialpadCallRequest>());
-  const { dialFlight, startApiDial, statusHandlers } = useApiDial(
+  const { dialFlight, dialActive, startApiDial, statusHandlers } = useApiDial(
     (propertyId) => {
       const request = requests.current.get(propertyId);
       return request ? { contactId: request.contactId, label: request.label, phoneSlot: request.phoneSlot ?? null } : null;
@@ -32,17 +33,29 @@ export function DialpadCallProvider({ enabled, children }: { enabled: boolean; c
   const stable = useMemo<DialpadCallContextValue>(
     () => ({
       enabled,
-      callWithCoach: openLead,
+      dialActive,
       startCall: (request) => {
+        // The softphone is on a call: never start a second one through Dialpad.
+        if (softphoneOnCall) {
+          setNotice("Finish your current call before starting another.");
+          return;
+        }
+        setNotice(null);
         requests.current.set(request.propertyId, request);
         void startRef.current(request.propertyId, 1);
       },
     }),
-    [enabled, openLead],
+    [enabled, dialActive, softphoneOnCall],
   );
   return (
     <DialpadCallContext.Provider value={stable}>
       {children}
+      {enabled && notice ? (
+        <div data-testid="dialpad-call-notice" role="status" className="fixed bottom-4 left-4 z-50 flex max-w-[calc(100vw-2rem)] items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm md:left-72">
+          <span>{notice}</span>
+          <button type="button" className="underline" onClick={() => setNotice(null)}>Dismiss</button>
+        </div>
+      ) : null}
       {enabled && dialFlight ? (
         <div data-testid="dialpad-call-status" className="fixed bottom-4 left-4 z-50 max-w-[calc(100vw-2rem)] md:left-72">
           <DialStatus flight={dialFlight} {...statusHandlers} onEnded={() => router.refresh()} />

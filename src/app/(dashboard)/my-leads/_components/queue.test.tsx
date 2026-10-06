@@ -757,7 +757,7 @@ describe("MyLeadsQueue deep-link focus", () => {
 
     const coach = vi.fn()
     render(
-      <CoachCallContext.Provider value={coach}>
+      <CoachCallContext.Provider value={{ call: coach, disabled: false }}>
         <MyLeadsQueue {...buildProps()} />
       </CoachCallContext.Provider>,
     )

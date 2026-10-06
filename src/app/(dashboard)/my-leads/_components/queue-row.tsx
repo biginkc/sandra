@@ -605,11 +605,12 @@ export function MyLeadQueueRow({
                   type="button"
                   variant="outline"
                   size="sm"
+                  disabled={coachCall.disabled}
                   className="border-[#e5e1df] bg-background text-muted-foreground hover:text-foreground dark:border-border"
                   data-testid={`queue-row-call-with-coach-${row.propertyId}`}
                   onClick={(event) => {
                     event.stopPropagation();
-                    coachCall(row.propertyId);
+                    coachCall.call(row.propertyId);
                   }}
                 >
                   <Phone className="size-[13px]" aria-hidden="true" />

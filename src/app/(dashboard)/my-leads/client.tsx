@@ -695,9 +695,12 @@ export function MyLeadsClient({
   // "Call with coach": only with the Dialpad route on and a usable softphone; otherwise rows are unchanged.
   const coachCall =
     dialpad && softphone?.callingEnabled
-      ? (propertyId: string) => {
-          const row = rawRow(propertyId);
-          if (row) softphone.openLead(toSoftphoneLead(row));
+      ? {
+          disabled: dialActive,
+          call: (propertyId: string) => {
+            const row = rawRow(propertyId);
+            if (row && !dialActive) softphone.openLead(toSoftphoneLead(row));
+          },
         }
       : null;
   const action = (
@@ -715,6 +718,11 @@ export function MyLeadsClient({
         return;
       }
       setError(null);
+      // The softphone is on a call: never start a second one through Dialpad.
+      if (softphone?.onCall) {
+        setError("Finish your current call before starting another.");
+        return;
+      }
       void startApiDial(row.propertyId, 1);
       return;
     }

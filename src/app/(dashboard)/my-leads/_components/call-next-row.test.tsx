@@ -105,7 +105,7 @@ describe("<CallNextRowView />", () => {
     const coach = vi.fn();
     const h = handlers();
     render(
-      <CoachCallContext.Provider value={coach}>
+      <CoachCallContext.Provider value={{ call: coach, disabled: false }}>
         <ul>
           <CallNextRowView item={stripItem("lead-1", "inbound_text")} now={new Date(SNAPSHOT_AT)} canAct {...h} />
         </ul>
@@ -114,5 +114,16 @@ describe("<CallNextRowView />", () => {
     await userEvent.click(screen.getByText("Call with coach"));
     expect(coach).toHaveBeenCalledExactlyOnceWith("lead-1");
     expect(h.onCall).not.toHaveBeenCalled();
+  });
+
+  it("disables Call with coach while a Dialpad call is active", () => {
+    render(
+      <CoachCallContext.Provider value={{ call: vi.fn(), disabled: true }}>
+        <ul>
+          <CallNextRowView item={stripItem("lead-1", "inbound_text")} now={new Date(SNAPSHOT_AT)} canAct {...handlers()} />
+        </ul>
+      </CoachCallContext.Provider>,
+    );
+    expect(screen.getByText("Call with coach")).toBeDisabled();
   });
 });

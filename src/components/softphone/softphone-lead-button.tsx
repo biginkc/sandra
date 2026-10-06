@@ -65,12 +65,12 @@ export function SoftphoneLeadButton({ lead, compact = false }: Props) {
       <button
         type="button"
         data-testid="call-with-coach-button"
-        disabled={!context?.callingEnabled}
+        disabled={!context?.callingEnabled || dialpad?.dialActive === true}
         className="border-border text-muted-foreground hover:border-emerald-600 hover:text-emerald-700 inline-flex shrink-0 items-center rounded-full border bg-white px-2 py-1 text-[11px] font-semibold transition-colors disabled:opacity-50"
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => {
           event.stopPropagation();
-          if (context?.callingEnabled) openLead(lead);
+          if (context?.callingEnabled && dialpad?.dialActive !== true) openLead(lead);
         }}
       >
         Call with coach

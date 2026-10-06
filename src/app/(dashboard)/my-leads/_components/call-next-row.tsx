@@ -97,9 +97,9 @@ export function CallNextRowView({
             type="button"
             size="sm"
             variant="outline"
-            disabled={callDisabled}
+            disabled={callDisabled || coachCall.disabled}
             data-testid={`call-next-action-call-with-coach-${propertyId}`}
-            onClick={() => coachCall(propertyId)}
+            onClick={() => coachCall.call(propertyId)}
           >
             Call with coach
           </Button>

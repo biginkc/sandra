@@ -298,10 +298,18 @@ describe("MyLeadsPage availability boundary", () => {
     },
   );
 
+  it("keeps the softphone path for a rep with no live Dialpad binding (same rule as every Call button)", async () => {
+    mocks.loadDialpadCallingBootstrap.mockResolvedValue({ connectionId: "c-1", binding: { status: "none" }, grants: [] });
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    expect(
+      (mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0],
+    ).toMatchObject({ dialpad: null });
+  });
+
   it("passes the Dialpad calling bootstrap to the client only for the session's own org and rep", async () => {
     const bootstrap = {
       connectionId: "c-1",
-      binding: { status: "none" },
+      binding: { status: "verified", dialpadUserId: "d-1" },
       grants: [],
     };
     mocks.loadDialpadCallingBootstrap.mockResolvedValue(bootstrap);

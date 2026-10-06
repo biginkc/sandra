@@ -7,11 +7,12 @@ const mocks = vi.hoisted(() => ({
   dialLeadAction: vi.fn(),
   getStatus: vi.fn(),
   refresh: vi.fn(),
+  onCall: false,
 }));
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.refresh }) }));
 vi.mock("./softphone-provider", () => ({
-  useOptionalSoftphone: () => ({ openLead: mocks.openLead, callingEnabled: true }),
+  useOptionalSoftphone: () => ({ openLead: mocks.openLead, callingEnabled: true, onCall: mocks.onCall }),
 }));
 vi.mock("@/app/(dashboard)/my-leads/dialpad-actions", () => ({
   dialLeadAction: mocks.dialLeadAction,
@@ -44,6 +45,7 @@ function renderButton(enabled: boolean, leadOverride = lead) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.onCall = false;
   mocks.getStatus.mockResolvedValue({ ok: false, code: "denied", message: "x" });
 });
 
@@ -133,5 +135,38 @@ describe("SoftphoneLeadButton Dialpad routing", () => {
     await user.click(screen.getByTestId("call-lead-button"));
     await user.click(await screen.findByRole("button", { name: "Call again anyway" }));
     await waitFor(() => expect(mocks.dialLeadAction).toHaveBeenLastCalledWith(expect.objectContaining({ confirmRedialOf: "33333333-3333-4333-8333-333333333333" })));
+  });
+
+  it("disables Call with coach while a Dialpad call is active", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockResolvedValue({ ok: true, intentId: "i1", state: "awaiting_provider", uncertain: false, phoneSlot: 1 });
+    renderButton(true);
+    expect(screen.getByText("Call with coach")).toBeEnabled();
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByText("Call with coach")).toBeDisabled());
+    await user.click(screen.getByText("Call with coach"));
+    expect(mocks.openLead).not.toHaveBeenCalled();
+  });
+
+  it("refuses a Dialpad call while the softphone is on a call", async () => {
+    const user = userEvent.setup();
+    mocks.onCall = true;
+    renderButton(true);
+    await user.click(screen.getByTestId("call-lead-button"));
+    expect(mocks.dialLeadAction).not.toHaveBeenCalled();
+    expect(await screen.findByTestId("dialpad-call-notice")).toHaveTextContent("Finish your current call");
+  });
+
+  it("does not auto-dial the softphone for not_configured after an attempt that may have rung", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockRejectedValueOnce(new Error("network"));
+    renderButton(true);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByText(/could not confirm/);
+    await user.click(screen.getByRole("button", { name: "Dismiss" }));
+    mocks.dialLeadAction.mockResolvedValueOnce({ ok: false, code: "not_configured", message: "Dialpad click-to-dial is not enabled for this organization." });
+    await user.click(screen.getByTestId("call-lead-button"));
+    expect(await screen.findByText(/not enabled/)).toBeInTheDocument();
+    expect(mocks.openLead).not.toHaveBeenCalled();
   });
 });

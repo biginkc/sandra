@@ -7,8 +7,10 @@ import { createContext, useContext } from "react";
  * Null (the default) unless the Dialpad route is on and the softphone is available, in which case the
  * rows render exactly as before.
  */
-export const CoachCallContext = createContext<((propertyId: string) => void) | null>(null);
+export type CoachCall = { call: (propertyId: string) => void; /** A Dialpad call is in flight: coach buttons stay disabled so the lead is not dialed twice. */ disabled: boolean };
 
-export function useCoachCall(): ((propertyId: string) => void) | null {
+export const CoachCallContext = createContext<CoachCall | null>(null);
+
+export function useCoachCall(): CoachCall | null {
   return useContext(CoachCallContext);
 }

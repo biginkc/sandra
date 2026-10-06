@@ -50,10 +50,17 @@ export default async function DashboardLayout({
     () => ({ transport: "default" }),
   );
   const recordingAccess = await recordingViewer().catch(() => null);
-  const [rosterResult, badgeResult, surfaceMembershipsResult] = await Promise.allSettled([
+  const membershipsPromise = getCallerMemberships();
+  // Chained off the memberships read so it runs alongside the roster and badge reads, not after them.
+  const dialpadRoutePromise = membershipsPromise.then(async (all) => {
+    const mine = all.filter((m) => m.user_id === user.id);
+    return mine.length === 1 ? await getDialpadCallRoute(mine[0].org_id, user.id) : "softphone";
+  });
+  const [rosterResult, badgeResult, surfaceMembershipsResult, dialpadRouteResult] = await Promise.allSettled([
     getAcquisitionRoster(),
     getAcquisitionBadge(),
-    getCallerMemberships(),
+    membershipsPromise,
+    dialpadRoutePromise,
   ]);
   const acquisitionRoster =
     rosterResult.status === "fulfilled" ? rosterResult.value : null;
@@ -75,14 +82,8 @@ export default async function DashboardLayout({
     surfaceMembershipsResult.status === "fulfilled" &&
     canAccessMessagesAndLeadsBoard(surfaceMembershipsResult.value);
 
-  // Where every Call button sends the call. Derived here, once per request; never from the browser.
-  const callerOrgs =
-    surfaceMembershipsResult.status === "fulfilled"
-      ? surfaceMembershipsResult.value.filter((m) => m.user_id === user.id)
-      : [];
-  const dialpadCallsEnabled =
-    callerOrgs.length === 1 &&
-    (await getDialpadCallRoute(callerOrgs[0].org_id, user.id)) === "dialpad";
+  // Where every Call button sends the call: server-derived, never from the browser.
+  const dialpadCallsEnabled = dialpadRouteResult.status === "fulfilled" && dialpadRouteResult.value === "dialpad";
 
   return (
     <ObjectionPromptProvider enabled={objectionPromptEnabled}>

@@ -2307,26 +2307,29 @@ describe("InboxDetail Call routing", () => {
     contactPhoneSlot: 2,
   });
 
-  it("route on also offers Call with coach, which opens the softphone; route off does not", async () => {
+  it("never offers Call with coach in Messages (the softphone cannot dial the thread number)", async () => {
     const user = userEvent.setup();
-    const callWithCoach = vi.fn();
-    const { unmount } = render(
-      <DialpadCallContext.Provider value={{ enabled: true, startCall: vi.fn(), callWithCoach }}>
-        <InboxDetail data={callData()} assigneeEmails={{}} currentUserId="user-1" />
-      </DialpadCallContext.Provider>,
-    );
-    await user.click(screen.getByTestId("inbox-detail-more"));
-    await user.click(await screen.findByText("Call with coach"));
-    expect(callWithCoach).toHaveBeenCalledWith(expect.objectContaining({ id: "prop-call", contactId: "contact-call" }));
-    unmount();
     render(
-      <DialpadCallContext.Provider value={{ enabled: false, startCall: vi.fn(), callWithCoach }}>
+      <DialpadCallContext.Provider value={{ enabled: true, startCall: vi.fn() }}>
         <InboxDetail data={callData()} assigneeEmails={{}} currentUserId="user-1" />
       </DialpadCallContext.Provider>,
     );
     await user.click(screen.getByTestId("inbox-detail-more"));
     await screen.findByTestId("inbox-detail-phone");
     expect(screen.queryByText("Call with coach")).not.toBeInTheDocument();
+  });
+
+  it("keeps the tel: link when the thread number matches no saved slot, even with the route on", async () => {
+    const user = userEvent.setup();
+    const startCall = vi.fn();
+    render(
+      <DialpadCallContext.Provider value={{ enabled: true, startCall }}>
+        <InboxDetail data={{ ...callData(), contactPhoneSlot: null }} assigneeEmails={{}} currentUserId="user-1" />
+      </DialpadCallContext.Provider>,
+    );
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    expect(await screen.findByTestId("inbox-detail-phone")).toHaveAttribute("href", "tel:+15550000002");
+    expect(startCall).not.toHaveBeenCalled();
   });
 
   it("keeps the phone-app link when the Dialpad route is off", async () => {

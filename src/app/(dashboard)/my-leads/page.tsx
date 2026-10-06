@@ -33,6 +33,7 @@ import {
   MyLeadsReadError,
 } from "@/lib/my-leads/queries";
 
+import { decideDialpadCallRoute } from "@/lib/dialpad-cti/call-route";
 import { MyLeadsClient, type MyLeadsFocus } from "./client";
 import {
   parseSelectedLeadParam,
@@ -349,6 +350,17 @@ export default async function MyLeadsPage({
         },
       );
     }
+  }
+
+  // Same rule as every other Call button (layout): the bootstrap alone is not enough, the rep needs a live binding.
+  if (
+    decideDialpadCallRoute({
+      clickToDialFlag: callFeatures.clickToDial,
+      apiDialSchemaReady: callFeatures.clickToDial,
+      bootstrap: dialpad,
+    }) !== "dialpad"
+  ) {
+    dialpad = null;
   }
 
   return (
