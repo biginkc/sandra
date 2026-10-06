@@ -79,6 +79,8 @@ export function buildSendCallBody(config: NormaBlandConfig, params: BlandSendCal
     pathway_id: config.pathwayId,
     pathway_version: config.pathwayVersion,
     voice: config.voice,
+    // Outbound recording is opt-in; inbound number settings do not enable it.
+    record: true,
     from: config.fromNumber,
     metadata: { request_id: params.requestId, idempotency_key: params.idempotencyKey },
     webhook: config.webhookUrl,

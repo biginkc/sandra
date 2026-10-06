@@ -26,6 +26,7 @@ describe("bland send-call classification", () => {
       pathway_id: "pw-1",
       pathway_version: 17,
       voice: "voice-1",
+      record: true,
       from: "+12135550100",
       metadata: { request_id: "r1", idempotency_key: "k1" },
       webhook: "https://sandra.test/api/webhooks/bland/call",
@@ -52,6 +53,7 @@ describe("bland send-call classification", () => {
     expect(url).toBe("https://bland.test/v1/calls");
     expect(init.method).toBe("POST");
     expect(init.headers.Authorization).toBe("Bearer test-key");
+    expect(JSON.parse(init.body).record).toBe(true);
   });
 
   it("accepted: 2xx success with a call id", async () => {
