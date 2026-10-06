@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 
+import { useCallLockHolder } from "@/components/calls/call-lock-context";
 import { DialStatus } from "@/app/(dashboard)/my-leads/_components/dial-status";
 import { useApiDial } from "@/app/(dashboard)/my-leads/_components/use-api-dial";
 import { Button } from "@/components/ui/button";
@@ -15,6 +16,7 @@ import { DialpadCallContext, type DialpadCallContextValue, type DialpadCallReque
  */
 export function DialpadCallProvider({ enabled, children }: { enabled: boolean; children: ReactNode }) {
   const router = useRouter();
+  const lockHolder = useCallLockHolder();
   const requests = useRef(new Map<string, DialpadCallRequest>());
   const [pageHandlers, setPageHandlers] = useState<DialpadPageHandlers | null>(null);
   const { dialFlight, dialActive, lockNotice, panelHidden, startApiDial, statusHandlers } = useApiDial(
@@ -36,7 +38,8 @@ export function DialpadCallProvider({ enabled, children }: { enabled: boolean; c
     () => ({
       enabled,
       flight: dialFlight,
-      dialActive,
+      // True for a live call AND for any other Dialpad hold (an uncertain request, a countdown), so no parallel dial is offered.
+      dialActive: dialActive || lockHolder === "dialpad",
       setPageHandlers,
       startCall: (request) => {
         requests.current.set(request.propertyId, request);
@@ -44,7 +47,7 @@ export function DialpadCallProvider({ enabled, children }: { enabled: boolean; c
         void startRef.current(request.propertyId, 1);
       },
     }),
-    [enabled, dialFlight, dialActive],
+    [enabled, dialFlight, dialActive, lockHolder],
   );
   // Visible whenever there is something to act on or a lock to explain, even if the route flips off mid-call.
   const hasPanel = Boolean(dialFlight || lockNotice);

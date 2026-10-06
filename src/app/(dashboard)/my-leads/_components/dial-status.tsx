@@ -13,7 +13,7 @@ export type DialFlight =
   /** `holdsLock`: the request may have rung (it threw); the call lock stays held until marked ended or the ceiling. */
   | { kind: "error"; propertyId: string; label: string; message: string; releaseKeyOnDismiss?: boolean; holdsLock?: boolean }
   /** The server refused a new key: an earlier call to this lead may have rung. Redialing needs an explicit confirm. */
-  | { kind: "unresolved"; propertyId: string; label: string; message: string; priorIntentId: string };
+  | { kind: "unresolved"; propertyId: string; label: string; message: string; priorIntentId: string; holdsLock?: boolean };
 
 type Props = {
   flight: DialFlight | null;
@@ -88,7 +88,7 @@ function DialFlightStatus(props: Props) {
       {flight.kind === "unresolved" ? (
         <Button type="button" size="sm" onClick={() => props.onConfirmRedial?.(flight.propertyId, flight.priorIntentId)}>Call again anyway</Button>
       ) : null}
-      {flight.kind === "error" && flight.holdsLock && props.onMarkEnded ? <MarkEnded onConfirm={props.onMarkEnded} /> : null}
+      {(flight.kind === "error" || flight.kind === "unresolved") && flight.holdsLock && props.onMarkEnded ? <MarkEnded onConfirm={props.onMarkEnded} /> : null}
       <Button type="button" variant="outline" size="sm" onClick={props.onDismiss}>Dismiss</Button>
     </div>
   );

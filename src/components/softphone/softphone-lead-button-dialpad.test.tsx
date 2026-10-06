@@ -639,3 +639,63 @@ describe("the persistent provider owns the flight and the lock", () => {
     expect(probe.lock?.holder()).toBe("dialpad");
   });
 });
+
+describe("a joining attempt never frees an existing hold (lost response)", () => {
+  function Page({ onFallback }: { onFallback?: () => void }) {
+    const dialpad = useOptionalDialpadCall();
+    return (
+      <button type="button" onClick={() => dialpad?.startCall({ propertyId: lead.id, contactId: lead.contactId, label: lead.name, onFallback })}>
+        dial
+      </button>
+    );
+  }
+  const setup = async (onFallback?: () => void) => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockRejectedValueOnce(new Error("lost response"));
+    render(
+      <CallLockProvider>
+        <LockProbe />
+        <DialpadCallProvider enabled>
+          <Page onFallback={onFallback} />
+        </DialpadCallProvider>
+      </CallLockProvider>,
+    );
+    await user.click(screen.getByText("dial"));
+    await screen.findByText(/could not confirm/);
+    expect(probe.lock?.holder()).toBe("dialpad");
+    return user;
+  };
+  const expectStillHeld = () => {
+    expect(probe.lock?.holder()).toBe("dialpad");
+    expect(probe.lock?.acquire("softphone", Symbol("telnyx"))).toBe(false);
+  };
+
+  it("a retry answered call_in_flight keeps the lock", async () => {
+    const user = await setup();
+    mocks.dialLeadAction.mockResolvedValueOnce({ ok: false, code: "call_in_flight", message: "A call is already being placed." });
+    await user.click(screen.getByText("dial"));
+    await screen.findByText(/already being placed/);
+    expectStillHeld();
+    // Dismiss only hides it; still held.
+    await user.click(screen.getByRole("button", { name: "Dismiss" }));
+    expectStillHeld();
+  });
+
+  it("a thrown retry keeps the lock", async () => {
+    const user = await setup();
+    mocks.dialLeadAction.mockRejectedValueOnce(new Error("lost again"));
+    await user.click(screen.getByText("dial"));
+    await waitFor(() => expect(mocks.dialLeadAction).toHaveBeenCalledTimes(2));
+    expectStillHeld();
+  });
+
+  it("a retry answered not_configured keeps the lock and does not fall back", async () => {
+    const fallback = vi.fn();
+    const user = await setup(fallback);
+    mocks.dialLeadAction.mockResolvedValueOnce({ ok: false, code: "not_configured", message: "Dialpad click-to-dial is not enabled for this organization." });
+    await user.click(screen.getByText("dial"));
+    await screen.findByText(/not enabled/);
+    expect(fallback).not.toHaveBeenCalled();
+    expectStillHeld();
+  });
+});

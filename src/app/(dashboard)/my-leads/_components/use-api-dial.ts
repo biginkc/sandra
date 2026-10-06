@@ -103,6 +103,14 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
       setPanelHidden(false);
       return;
     }
+    // Whether this attempt joins a hold that is already in place for this flight. A joining attempt never frees
+    // that hold on its own refusal, call_in_flight, error or not_configured: only a terminal status, "Mark call
+    // ended" or a ceiling does. (A rate-limit countdown is a proven non-dispatch hold, so its retry may release.)
+    const joining = heldFor.current === propertyId;
+    const preDispatchHold = dialFlight?.kind === "rate_limited";
+    const mayRelease = !joining || preDispatchHold;
+    const holdsDispatched = joining && !preDispatchHold;
+    const heldMark = holdsDispatched ? { holdsLock: true as const } : {};
     // The lowest dial level: every path (click, rate-limit auto-retry, Retry, "Call again anyway") passes here.
     if (!lock.acquire("dialpad", token)) {
       setDialFlight({ kind: "error", propertyId, label, message: CALL_LOCK_MESSAGE });
@@ -149,7 +157,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
       }
       if (outcome.freshAttemptKey) releaseDialKeyForProperty(propertyId);
       // An earlier attempt that threw may have rung: never fall back to another dialer for it.
-      if (outcome.code === "not_configured" && notConfiguredRef.current && hasFallbackRef.current?.(propertyId) && !entry.uncertain && !entry.intentId) {
+      if (outcome.code === "not_configured" && mayRelease && notConfiguredRef.current && hasFallbackRef.current?.(propertyId) && !entry.uncertain && !entry.intentId) {
         // The fallback dialer must be able to take the lock.
         freeLock();
         // Refused before anything was prepared: the key was never used.
@@ -160,10 +168,10 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
       if (outcome.code === "prior_call_unresolved" && outcome.priorIntentId) {
         // The server refused before preparing anything, so a key minted just now was never used.
         if (!entry.intentId) releaseDialKeyForProperty(propertyId);
-        setDialFlight({ kind: "unresolved", propertyId, label, message: outcome.message, priorIntentId: outcome.priorIntentId });
+        setDialFlight({ kind: "unresolved", propertyId, label, message: outcome.message, priorIntentId: outcome.priorIntentId, ...heldMark });
         return;
       }
-      if (outcome.code === "rate_limited") {
+      if (outcome.code === "rate_limited" && !holdsDispatched) {
         // Held only while a countdown will retry; after the second attempt the flight just gives up.
         keepLock = attempt < 2;
         setDialFlight({
@@ -176,7 +184,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
         return;
       }
       // A replay of an expired key: the call may have rung. Dismiss is the deliberate release after this caution.
-      setDialFlight({ kind: "error", propertyId, label, message: outcome.message, releaseKeyOnDismiss: outcome.code === "expired" });
+      setDialFlight({ kind: "error", propertyId, label, message: outcome.message, releaseKeyOnDismiss: outcome.code === "expired", ...heldMark });
     } catch {
       // The request may have reached the server and dialed; the key stays so a retry cannot double-dial.
       entry.uncertain = true;
@@ -186,7 +194,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     } finally {
       dialBusy.current = false;
       setDialPending(false);
-      if (!keepLock) freeLock();
+      if (!keepLock && mayRelease) freeLock();
     }
   };
 
@@ -205,7 +213,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     releaseWithNoticeRef.current = releaseWithNotice;
   });
   const heldIntent = dialFlight?.kind === "in_flight" && dialFinished !== dialFlight.intentId ? dialFlight.intentId : null;
-  const heldUncertain = dialFlight?.kind === "error" && dialFlight.holdsLock === true;
+  const heldUncertain = (dialFlight?.kind === "error" || dialFlight?.kind === "unresolved") && dialFlight.holdsLock === true;
   // Hard ceiling for a dispatched call whose end never arrives.
   useEffect(() => {
     if (!heldIntent) return;
@@ -241,7 +249,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
       // A dispatched call that has not reached a terminal status (live, failed marker, poll errors) or a
       // request that may have rung: Dismiss only hides the panel. The lock is released by the terminal
       // status, "Mark call ended", or the ceiling.
-      if ((dialFlight?.kind === "in_flight" && dialFinished !== dialFlight.intentId) || (dialFlight?.kind === "error" && dialFlight.holdsLock)) {
+      if ((dialFlight?.kind === "in_flight" && dialFinished !== dialFlight.intentId) || ((dialFlight?.kind === "error" || dialFlight?.kind === "unresolved") && dialFlight.holdsLock)) {
         setPanelHidden(true);
         return;
       }

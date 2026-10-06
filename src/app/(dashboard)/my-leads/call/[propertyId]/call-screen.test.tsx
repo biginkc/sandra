@@ -137,15 +137,16 @@ describe("CallScreen", () => {
       expect(rawKeys()[2]).not.toBe(first);
     });
 
-    it("keeps the key after a thrown request (it may have dialed)", async () => {
+    it("after a thrown request (it may have dialed) the Call button stays disabled while the hold lasts, and the key is kept", async () => {
       const user = userEvent.setup();
       mocks.dialLead.mockRejectedValue(new Error("network"));
       render(<CallScreen postCallPrompt data={data} clickToDial />);
       await user.click(callButton());
       await screen.findByTestId("dial-status");
-      await user.click(callButton());
-      await waitFor(() => expect(mocks.dialLead).toHaveBeenCalledTimes(2));
-      expect(rawKeys()[1]).toBe(rawKeys()[0]);
+      // The lock is held for a possibly-ringing call: no second dial is offered.
+      await waitFor(() => expect(callButton()).toBeDisabled());
+      expect(mocks.dialLead).toHaveBeenCalledTimes(1);
+      expect(rawKeys()).toHaveLength(1);
     });
 
     it("releases the key on a server-proven non-dispatch (freshAttemptKey)", async () => {
