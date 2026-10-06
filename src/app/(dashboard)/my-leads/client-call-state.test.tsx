@@ -315,6 +315,29 @@ describe("MyLeadsClient calling and durable call state", () => {
       })
     })
 
+    describe("call screen navigation follows the provider's accept/refuse", () => {
+      it("a Call click on lead B while lead A's dial request is still pending sends no second dial and does not navigate to B", async () => {
+        mocks.dialLead.mockReturnValue(new Promise(() => undefined))
+        renderClient({ dialpad, callFeatures: flags({ clickToDial: true, callScreen: true }) })
+        await click(screen.getByRole("button", { name: "Start call property-1" }))
+        expect(mocks.dialLead).toHaveBeenCalledTimes(1)
+        await click(screen.getByRole("button", { name: "Start call property-2" }))
+        expect(mocks.dialLead).toHaveBeenCalledTimes(1)
+        expect(mocks.routerPush).not.toHaveBeenCalledWith("/my-leads/call/property-2")
+        expect(mocks.routerPush).not.toHaveBeenCalled()
+      })
+
+      it("a Call click on lead B while the call lock is held elsewhere is refused and does not navigate", async () => {
+        renderClient({ dialpad, callFeatures: flags({ clickToDial: true, callScreen: true }) })
+        act(() => {
+          lockProbe.lock!.acquire("softphone", Symbol("other"))
+        })
+        await click(screen.getByRole("button", { name: "Start call property-2" }))
+        expect(mocks.dialLead).not.toHaveBeenCalled()
+        expect(mocks.routerPush).not.toHaveBeenCalled()
+      })
+    })
+
     it("shows a denial as-is and never retries", async () => {
       mocks.dialLead.mockResolvedValue({ ok: false, code: "denied", message: "That phone number is on the Do Not Call list." })
       renderClient({ dialpad })
@@ -356,6 +379,26 @@ describe("MyLeadsClient calling and durable call state", () => {
       expect(screen.getByTestId("call-unlogged-reminder")).toHaveTextContent("2 calls not logged")
       await flush(30_000)
       expect(screen.queryByTestId("post-call-prompt")).not.toBeInTheDocument()
+    })
+
+    it("hides the not-logged reminder for the call whose auto-prompt is open on this page", async () => {
+      mocks.poll.mockResolvedValue(pollState({ prompts: [oldest] }))
+      function MarkUnlogged() {
+        const call = useOptionalDialpadCall()
+        return <button onClick={() => call?.markUnlogged?.({ callActivityId: "activity-old", propertyId: "property-1", label: "Lead" })}>Mark unlogged</button>
+      }
+      render(
+        <CallLockProvider>
+          <DialpadCallProvider enabled>
+            <MarkUnlogged />
+            <MyLeadsClient viewer={viewer} roster={roster} initialMemberId={viewer.userId} initialSnapshot={snapshot()} initialKpis={kpis} postCallPrompt callFeatures={flags({ autoPrompt: true })} />
+          </DialpadCallProvider>
+        </CallLockProvider>,
+      )
+      await flush()
+      expect(screen.getAllByTestId("post-call-prompt")).toHaveLength(1)
+      await click(screen.getByRole("button", { name: "Mark unlogged", hidden: true }))
+      expect(screen.queryByTestId("call-unlogged-reminder")).not.toBeInTheDocument()
     })
 
     it("the reminder's Log outcome reopens the call's prompt; saving it clears that call from the reminder", async () => {

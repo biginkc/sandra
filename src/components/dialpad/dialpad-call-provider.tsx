@@ -87,7 +87,7 @@ export function DialpadCallProvider({
       startCall: (request) => {
         requests.current.set(request.propertyId, request);
         setShowHidden(false);
-        void startRef.current(request.propertyId, 1);
+        return startRef.current(request.propertyId, 1);
       },
     }),
     [enabled, dialFlight, dialActive, lockHolder, registerPageHandlers, loggedCallActivityIds, loggingViewer],

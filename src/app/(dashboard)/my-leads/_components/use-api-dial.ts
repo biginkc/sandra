@@ -111,16 +111,17 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     releaseRef.current(heldGen.current ?? undefined, { ignoreBusy: true });
   }, []);
 
-  const startApiDial = async (propertyId: string, attempt: number, confirmRedialOf?: string) => {
+  /** Resolves true only when the dial was accepted (or this lead's own dial is already in progress); false for every refusal. Surfaces the result only; no lock or key behavior depends on it. */
+  const startApiDial = async (propertyId: string, attempt: number, confirmRedialOf?: string): Promise<boolean> => {
     const target = resolveRef.current(propertyId);
-    if (!target) return;
+    if (!target) return false;
     const { label } = target;
     const gen = ++genCounter.current;
     const setFlight = (flight: DialFlight, flightGen = gen) => setDialFlight({ ...flight, gen: flightGen } as DialFlight);
     // Holding the lock in ANY state (live, pending, uncertain, rate-limit countdown) for another lead: refuse, and never release.
     if (heldFor.current !== null && heldFor.current !== propertyId) {
       setLockNotice(CALL_LOCK_MESSAGE);
-      return;
+      return false;
     }
     // Whether this attempt joins a hold that is already in place for this flight. A joining attempt never frees
     // that hold on its own refusal, call_in_flight, error or not_configured: only a terminal status, "Mark call
@@ -133,17 +134,17 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     if (!target.contactId) {
       // Taken before acquire: a joining attempt shows the OLD hold, so it carries the holder's generation.
       setFlight({ kind: "error", propertyId, label, message: "This lead has no contact to call.", ...heldMark }, holdsDispatched ? (heldGen.current ?? gen) : gen);
-      return;
+      return false;
     }
     if (dialBusy.current || dialActiveRef.current) {
       // A click on the lead that is already dialing just brings its status back.
       setPanelHidden(false);
-      return;
+      return heldFor.current === propertyId;
     }
     // The lowest dial level: every path (click, rate-limit auto-retry, Retry, "Call again anyway") passes here.
     if (!lock.acquire("dialpad", token)) {
       setFlight({ kind: "error", propertyId, label, message: CALL_LOCK_MESSAGE });
-      return;
+      return false;
     }
     setLockNotice(null);
     setPanelHidden(false);
@@ -185,7 +186,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
           uncertain: outcome.state === "awaiting_provider" && outcome.uncertain,
           nonce: dialNonce.current,
         });
-        return;
+        return true;
       }
       if (outcome.freshAttemptKey && !holdsDispatched) releaseDialKeyForProperty(propertyId, gen);
       // An earlier attempt that threw may have rung: never fall back to another dialer for it.
@@ -196,13 +197,13 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
         // Refused before anything was prepared: the key was never used.
         if (!entry.intentId) releaseDialKeyForProperty(propertyId, gen);
         notConfiguredRef.current(propertyId);
-        return;
+        return false;
       }
       if (outcome.code === "prior_call_unresolved" && outcome.priorIntentId) {
         // The server refused before preparing anything, so a key minted just now was never used.
         if (!entry.intentId && !holdsDispatched) releaseDialKeyForProperty(propertyId, gen);
         setFlight({ kind: "unresolved", propertyId, label, message: outcome.message, priorIntentId: outcome.priorIntentId, ...heldMark });
-        return;
+        return false;
       }
       if (outcome.code === "rate_limited" && !holdsDispatched) {
         // Held only while a countdown will retry; after the second attempt the flight just gives up.
@@ -214,16 +215,18 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
           retryAfterSeconds: outcome.retryAfterSeconds ?? 60,
           attempt,
         });
-        return;
+        return false;
       }
       // A replay of an expired key: the call may have rung. Dismiss is the deliberate release after this caution.
       setFlight({ kind: "error", propertyId, label, message: outcome.message, releaseKeyOnDismiss: outcome.code === "expired", ...heldMark });
+      return false;
     } catch {
       // The request may have reached the server and dialed; the key stays so a retry cannot double-dial.
       entry.uncertain = true;
       // May have rung: keep the lock until the call is confirmed ended ("Mark call ended") or the ceiling.
       keepLock = true;
       setFlight({ kind: "error", propertyId, label, message: "Sandra could not confirm the call. Check Dialpad before trying again.", holdsLock: true });
+      return false;
     } finally {
       dialBusy.current = false;
       setDialPending(false);

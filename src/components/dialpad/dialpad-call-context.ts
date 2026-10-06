@@ -51,7 +51,8 @@ export type DialpadCallContextValue = {
   openLogOutcome?: (propertyId: string, callActivityId: string) => void;
   /** Server-derived: click_to_dial on, org connection active, viewer bound, api_dial schema ready. */
   enabled: boolean;
-  startCall: (request: DialpadCallRequest) => void;
+  /** Resolves true when the dial was accepted, false when it was refused (another call holds the lock, no contact, error, fallback). A page navigates to the call screen only on true. */
+  startCall: (request: DialpadCallRequest) => Promise<boolean>;
 };
 
 export const DialpadCallContext = createContext<DialpadCallContextValue | null>(null);

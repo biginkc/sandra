@@ -315,7 +315,7 @@ describe("rate-limit countdown (fake timers)", () => {
   });
 });
 
-function Extra({ onReady }: { onReady: (start: (propertyId: string, attempt: number) => Promise<void>) => void }) {
+function Extra({ onReady }: { onReady: (start: (propertyId: string, attempt: number) => Promise<boolean>) => void }) {
   const { startApiDial } = useApiDial(() => ({ contactId: lead.contactId, label: "Other" }));
   useEffect(() => {
     onReady(startApiDial);
@@ -346,7 +346,7 @@ describe.each([
     await waitFor(() => expect(probe.lock?.holder()).toBe("dialpad"));
 
     // A second Dialpad hook (for example the My Leads page) appears and goes away.
-    let start: ((propertyId: string, attempt: number) => Promise<void>) | null = null;
+    let start: ((propertyId: string, attempt: number) => Promise<boolean>) | null = null;
     view.rerender(
       wrap(
         <CallLockProvider>

@@ -728,16 +728,20 @@ export function MyLeadsClient({
         setError("This lead has no contact to call.");
         return;
       }
-      // A live call already holds the lock: the provider refuses a second dial, and the rep stays put.
-      const alreadyDialing = dialActive;
-      dialpadCall?.startCall({
+      // The click is the dial intent (started first, so a navigation can never drop it); the call screen
+      // opens only once the provider ACCEPTS the dial. A refusal (another lead's dial in flight, the call
+      // lock held, an error) keeps the rep where they are. The provider lives in the layout, so the flight
+      // and lock survive navigation.
+      const dialing = dialpadCall?.startCall({
         propertyId: row.propertyId,
         contactId: row.contactId,
         label: row.homeownerName ?? row.address,
       });
-      // The click is the dial intent (started first, so a navigation can never drop it); then the call
-      // screen opens while it dials. The provider lives in the layout, so the flight and lock survive.
-      if (callFeatures?.callScreen && !alreadyDialing) router.push(callScreenHref(row.propertyId));
+      if (callFeatures?.callScreen) {
+        void Promise.resolve(dialing).then((accepted) => {
+          if (accepted === true) router.push(callScreenHref(row.propertyId));
+        });
+      }
       return;
     }
     if (kind === "start-call") {
@@ -1019,8 +1023,10 @@ export function MyLeadsClient({
     return registerPageHandlers({
       onLogOutcome: (propertyId, callActivityId) => pageHandlerRef.current.onLogOutcome(propertyId, callActivityId),
       onEnded: () => pageHandlerRef.current.onEnded(),
+      // The provider hides its "not logged" reminder for the call whose auto-prompt is open here.
+      showingPromptFor: autoPrompt?.callActivityId ?? null,
     });
-  }, [registerPageHandlers]);
+  }, [registerPageHandlers, autoPrompt?.callActivityId]);
   useEffect(() => {
     if (!autoPromptOn || dialog !== null || openingStatus !== null || autoPrompt !== null) return;
     // Never open over an in-flight dial or any other open dialog in the page (menus, drawers, confirms).
