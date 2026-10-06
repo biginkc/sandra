@@ -669,4 +669,40 @@ describe('resolveDialpadHoursClock', () => {
       vi.useRealTimers();
     }
   });
+  describe('a pinned hours clock never leaks into rate or expiry', () => {
+    const PINNED = '2026-05-09T16:00:00.000Z';
+    const withClock = async (over: Partial<DialpadDispatchDb>) => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date('2026-10-06T02:30:00Z')); // 21:30 CDT
+        const db = fakeDb(over);
+        const result = await startDialpadApiCall(db, fakeDialer().dialer, actor, input, { env: { ...env, DIALPAD_DIAL_PROVIDER: 'stub', E2E_QUIET_HOURS_NOW: PINNED } });
+        return { db, result };
+      } finally {
+        vi.useRealTimers();
+      }
+    };
+    it('U1: rate and unresolved queries use real time', async () => {
+      const loadUnresolvedIntent = vi.fn(async () => null);
+      const loadDispatchLoad = vi.fn(async () => ({ authorizedLastMinute: 0, unmatchedLast20s: 0 }));
+      const { result } = await withClock({ loadUnresolvedIntent, loadDispatchLoad });
+      expect(result.ok).toBe(true);
+      expect((loadUnresolvedIntent.mock.calls as unknown as string[][])[0]![3]).toBe('2026-10-06T02:30:00.000Z');
+      expect((loadDispatchLoad.mock.calls as unknown as string[][])[0]![2]).toBe('2026-10-06T02:29:00.000Z');
+    });
+    it('U2: an intent that expired a minute ago does not block a new key', async () => {
+      const loadUnresolvedIntent = async (_o: string, _u: string, _p: string, nowIso: string) =>
+        nowIso < '2026-10-06T02:29:00.000Z' ? { intentId: 'ffffffff-ffff-4fff-8fff-ffffffffffff', idempotencyKey: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' } : null;
+      const { result } = await withClock({ loadUnresolvedIntent });
+      expect(result).not.toMatchObject({ code: 'prior_call_unresolved' });
+      expect(result.ok).toBe(true);
+    });
+    it('U3: old authorized dials are not counted as the last minute', async () => {
+      const loadDispatchLoad = async (_o: string, _u: string, sinceIso: string) =>
+        ({ authorizedLastMinute: sinceIso <= PINNED ? 4 : 0, unmatchedLast20s: 0 });
+      const { result } = await withClock({ loadDispatchLoad });
+      expect(result).not.toMatchObject({ code: 'rate_limited' });
+      expect(result.ok).toBe(true);
+    });
+  });
 });

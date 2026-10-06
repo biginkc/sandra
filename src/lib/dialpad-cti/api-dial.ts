@@ -303,7 +303,9 @@ export async function startDialpadApiCall(
   input: DialpadApiDialInput,
   deps: DialpadApiDialDeps,
 ): Promise<DialpadApiDialOutcome> {
-  const now = deps.now ?? resolveDialpadHoursClock(deps.env);
+  // Rate window and unresolved-intent expiry always use the real clock; only the calling-hours gate may be pinned (stub only).
+  const now = deps.now ?? (() => new Date());
+  const hoursNow = deps.now ?? resolveDialpadHoursClock(deps.env);
   const { propertyId, contactId, idempotencyKey } = input;
   if (typeof propertyId !== 'string' || !UUID.test(propertyId) || typeof contactId !== 'string' || !UUID.test(contactId)
       || typeof idempotencyKey !== 'string' || !UUID.test(idempotencyKey)
@@ -352,7 +354,7 @@ export async function startDialpadApiCall(
     const property = await db.loadPropertyState(actor.orgId, propertyId);
     // The window can close during the awaited calls below, so it is re-read with a fresh clock
     // immediately before preparing the intent, before authorization and again immediately before the provider dial.
-    const inWindow = () => property.found && checkQuietHours(property.state, now()).ok;
+    const inWindow = () => property.found && checkQuietHours(property.state, hoursNow()).ok;
     const outsideHours = { ok: false, code: 'denied', message: dialpadDenialMessage('outside_calling_hours'), denial: 'outside_calling_hours', freshAttemptKey: true } as const;
     if (!inWindow()) return outsideHours;
 
