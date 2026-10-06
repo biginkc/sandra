@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { authGetUser, maybeSingle, authorize, sign } = vi.hoisted(() => ({
-  authGetUser: vi.fn(), maybeSingle: vi.fn(), authorize: vi.fn(), sign: vi.fn(),
+const { authGetUser, maybeSingle, authorize, sign, ready } = vi.hoisted(() => ({
+  authGetUser: vi.fn(), maybeSingle: vi.fn(), authorize: vi.fn(), sign: vi.fn(), ready: vi.fn(),
 }));
+vi.mock("@/lib/my-leads/schema-ready", () => ({ schemaReady: ready }));
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => {
     const query = { select: () => query, eq: () => query, maybeSingle };
@@ -19,6 +20,7 @@ const request = () => GET(new Request("https://sandra.example.test/x"), { params
 
 beforeEach(() => {
   vi.clearAllMocks();
+  ready.mockResolvedValue(true);
   authGetUser.mockResolvedValue({ data: { user: { id: "user-1" } }, error: null });
   maybeSingle.mockResolvedValue({ data: dialpadCall, error: null });
   authorize.mockResolvedValue({ audioId: "a1", path: "org-1/call-1/5185307806048256.mp3", sha256: null, durationMs: 36000, mode: "owner" });
@@ -26,6 +28,16 @@ beforeEach(() => {
 });
 
 describe("Dialpad recording playback", () => {
+  it("before the migration lands it skips the branch and keeps the pre-migration 409 (never a 500)", async () => {
+    ready.mockResolvedValue(false);
+    const response = await request();
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error_code: "unsupported_provider" });
+    expect(ready).toHaveBeenCalledWith("dialpad_call_audio");
+    expect(authorize).not.toHaveBeenCalled();
+  });
+
+
   it("authorizes the signed-in user for this org and call, then returns a signed URL for the authorized path", async () => {
     const response = await request();
     expect(response.status).toBe(200);

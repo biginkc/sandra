@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { DIRECT_RECORDINGS_BUCKET } from "@/lib/direct-calling/recording";
 import { authorizeDialpadAudio, signDialpadAudioPath } from "@/lib/recordings/dialpad-audio-playback";
+import { schemaReady } from "@/lib/my-leads/schema-ready";
 
 const NO_STORE_HEADERS = {
   "cache-control": "no-store",
@@ -81,7 +82,8 @@ export async function GET(
   const call = data as unknown as RecordingLookup;
   // Dialpad calls play Sandra's own stored copy, only through the SQL authorization (owner, or the attributed rep on
   // an outbound matched call). A denied or missing recording is a plain 404, so nothing about it leaks.
-  if (call.provider === "dialpad" && !call.direct_call_id) {
+  // Until the migration has landed this branch is skipped, so Dialpad calls keep the pre-migration answer (409 below).
+  if (call.provider === "dialpad" && !call.direct_call_id && (await schemaReady("dialpad_call_audio"))) {
     if (!call.org_id) return json({ error: "Call recording not found", error_code: "not_found" }, 404);
     let grant: Awaited<ReturnType<typeof authorizeDialpadAudio>>;
     try {

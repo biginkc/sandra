@@ -89,7 +89,7 @@ describe('20261008130000 Dialpad call audio', () => {
         'fn_dpa_worker_take(uuid)', 'fn_dpa_worker_release(uuid,timestamptz,timestamptz)', 'fn_dpa_worker_block(uuid,timestamptz)',
         'fn_dpa_queue(uuid,integer)', 'fn_dpa_discovery_result(uuid,uuid,text,text,bigint,text,text)', 'fn_dpa_requeue_denied(uuid,uuid,text)',
         'fn_dpa_attempt_begin(uuid,uuid)', 'fn_dpa_attempt_set(uuid,uuid,text,text,text,text,text,text)', 'fn_dpa_resolve_ambiguous(uuid,text)',
-        'fn_dpa_audio_fail(uuid,uuid,text,text,text)', 'fn_dpa_mark_uploading(uuid,uuid,text,bigint,bigint)',
+        'fn_dpa_audio_fail(uuid,uuid,text,text,text,text)', 'fn_dpa_mark_uploading(uuid,uuid,text,bigint,bigint)',
         'fn_dpa_register_stored(uuid,uuid,text,bigint,text,bigint)', 'fn_dialpad_audio_authorize(uuid,uuid,uuid)', 'fn_dialpad_audio_for_service(uuid,uuid,text)',
       ];
       for (const fn of fns) {
@@ -537,6 +537,39 @@ describe('20261008130000 Dialpad call audio', () => {
     });
   });
 
+  it('a refused redirect host is kept on the audio row as a hostname only', async () => {
+    await withAudio(async (db) => {
+      const w = await world(db, { flag: true });
+      const { audio } = await discoveredCall(db, w);
+      const holder = await takeAs(db);
+      await rpc(db, "public.fn_dpa_audio_fail($1,$2,'error','bad_host',null,'storage.googleapis.com')", [holder, audio.id]);
+      expect(await audioOf(db, audio.call_activity_id)).toMatchObject({ warning: 'storage.googleapis.com', last_error: 'bad_host', attempts: 1 });
+      const bad = await failure(db, () => rpc(db, "public.fn_dpa_audio_fail($1,$2,'error','bad_host',null,'cdn.example.com/a.mp3?token=x')", [holder, audio.id]));
+      expect(bad.code).toBe('23514');
+    });
+  });
+
+  it('the rollback twin refuses to run while any share link is requested, live, downloaded or ambiguous, and runs once they are resolved', async () => {
+    await withAudio(async (db) => {
+      const w = await world(db, { flag: true });
+      const { audio } = await discoveredCall(db, w);
+      const holder = await takeAs(db);
+      const { attemptId } = await rpc(db, 'public.fn_dpa_attempt_begin($1,$2)', [holder, audio.id]);
+      const refused = async () => (await failure(db, () => db.query(stripTransaction(ROLLBACK)))).message;
+      expect(await refused()).toContain('ROLLBACK_REFUSED'); // requested
+      await rpc(db, "public.fn_dpa_attempt_set($1,$2,'live',null,'L1','5185307806048256','111','6543210987654321098')", [holder, attemptId]);
+      expect(await refused()).toContain('ROLLBACK_REFUSED'); // live
+      await rpc(db, "public.fn_dpa_attempt_set($1,$2,'downloaded')", [holder, attemptId]);
+      expect(await refused()).toContain('ROLLBACK_REFUSED'); // downloaded
+      await db.query("update public.dialpad_share_link_attempts set state='ambiguous', reason='mismatch' where id=$1", [attemptId]);
+      expect(await refused()).toContain('ROLLBACK_REFUSED'); // ambiguous
+      expect((await db.query("select to_regclass('public.dialpad_share_link_attempts') is not null as present")).rows[0].present).toBe(true);
+      await db.query("update public.dialpad_share_link_attempts set state='deleted', reason=null where id=$1", [attemptId]);
+      await db.query(stripTransaction(ROLLBACK));
+      expect((await db.query("select to_regclass('public.dialpad_share_link_attempts') is not null as present")).rows[0].present).toBe(false);
+    });
+  });
+
   describe('who can play it', () => {
     async function sandraCall(w: World): Promise<Json> {
       const i = await prepare(w);
@@ -647,6 +680,32 @@ describe('20261008130000 Dialpad call audio', () => {
         expect(await forService(db, a.org, callA.id, 'jev')).toBeNull();
       });
     });
+  });
+
+  it('two truly concurrent first takes on an empty table: exactly one wins (the migration seeds no row on purpose)', async () => {
+    const probe = new Client({ connectionString: dbUrl() });
+    await probe.connect();
+    const migrated = (await probe.query("select to_regclass('public.dialpad_recording_worker') is not null as p")).rows[0].p;
+    if (!migrated) { await probe.end(); return; }
+    const open = async () => { const c = new Client({ connectionString: dbUrl() }); await c.connect(); return c; };
+    const [a, b] = [await open(), await open()];
+    try {
+      await probe.query('delete from public.dialpad_recording_worker');
+      const attempt = async (c: Client, holder: string) => {
+        await c.query('begin');
+        await c.query('set local role service_role');
+        await c.query("select set_config('request.jwt.claim.role','service_role',true)");
+        const r = (await c.query('select public.fn_dpa_worker_take($1) as v', [holder])).rows[0].v;
+        await c.query('commit');
+        return r.taken as boolean;
+      };
+      const results = await Promise.all([attempt(a, randomUUID()), attempt(b, randomUUID())]);
+      expect(results.filter(Boolean)).toHaveLength(1);
+      expect((await probe.query('select count(*)::int as n from public.dialpad_recording_worker')).rows[0].n).toBe(1);
+    } finally {
+      await probe.query('delete from public.dialpad_recording_worker').catch(() => undefined);
+      await Promise.all([a.end(), b.end(), probe.end()]);
+    }
   });
 
   it('the rollback twin removes every object and flag column, leaves the bucket, and the migration can be re-applied', async () => {

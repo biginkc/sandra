@@ -77,7 +77,7 @@ describe('db adapter', () => {
     expect(rpc.mock.calls.map(([fn, args]) => [fn, Object.keys(args ?? {})])).toEqual([
       ['fn_dpa_attempt_begin', ['p_holder', 'p_audio_id']],
       ['fn_dpa_attempt_set', ['p_holder', 'p_attempt_id', 'p_to', 'p_reason', 'p_share_link_id', 'p_item_id', 'p_created_by_id', 'p_call_id']],
-      ['fn_dpa_audio_fail', ['p_holder', 'p_audio_id', 'p_kind', 'p_error', 'p_key_fp']],
+      ['fn_dpa_audio_fail', ['p_holder', 'p_audio_id', 'p_kind', 'p_error', 'p_key_fp', 'p_warning']],
       ['fn_dpa_mark_uploading', ['p_holder', 'p_audio_id', 'p_sha256', 'p_size', 'p_decoded_ms']],
       ['fn_dpa_register_stored', ['p_holder', 'p_audio_id', 'p_path', 'p_size', 'p_sha256', 'p_decoded_ms']],
       ['fn_dpa_discovery_result', ['p_holder', 'p_audio_id', 'p_outcome', 'p_recording_id', 'p_duration_ms', 'p_key_fp', 'p_error']],

@@ -47,14 +47,14 @@ const LONG_RETRY_AFTER_MS = 3_600_000;
 export const ADMISSION = {
   /** GET-by-id (1 + 8) + DB 1.5 + DELETE (1 + 8) + DB 1.5 */
   cleanup: 21_000,
-  /** read 10 + remove 10 (the mismatch branch is the widest) + DB 1.5 */
-  recover: 21_500,
+  /** read 10 + decode 8 + remove 10 + DB 1.5: the widest branch is a matching object that fails decode and is removed */
+  recover: 29_500,
   /** insert 1.5 + gap 1 + POST 8 + DB 1.5 + audio GET 15 + DB 1.5 + decode 8 + mark_uploading 1.5 + upload 10 + register 1.5 */
   download: 49_500,
   /** gap 1 + DELETE 8 + DB 1.5 */
   deleteOwn: 10_500,
-  /** wait <= 8 + GET 8 + DB 1.5 */
-  discovery: 18_000,
+  /** wait <= 8 + GET 8 + (on a 429) block 1.5 + record 1.5 */
+  discovery: 19_000,
 } as const;
 
 /** The only host that gets the Authorization header, and the only host a hop may use. The canary records the real redirect host. */
@@ -117,7 +117,7 @@ export interface RecordingAudioDb {
   requeueDenied(holder: string, orgId: string, keyFp: string): Promise<number>;
   attemptBegin(holder: string, audioId: string): Promise<{ blocked: true } | { blocked: false; attemptId: string }>;
   attemptSet(holder: string, attemptId: string, to: AttemptState, extra?: { reason?: AttemptReason; shareLinkId?: string | null; itemId?: string | null; createdById?: string | null; callId?: string | null }): Promise<void>;
-  audioFail(holder: string, audioId: string, kind: AudioFailKind, extra?: { error?: string; keyFp?: string }): Promise<void>;
+  audioFail(holder: string, audioId: string, kind: AudioFailKind, extra?: { error?: string; keyFp?: string; warning?: string }): Promise<void>;
   markUploading(holder: string, audioId: string, sha256: string, size: number, decodedMs: number): Promise<void>;
   registerStored(holder: string, audioId: string, path: string, size: number, sha256: string, decodedMs: number): Promise<void>;
 }
@@ -265,7 +265,7 @@ function validAudioUrl(raw: string, base?: string): URL | null {
 
 type DownloadResult =
   | { ok: true; bytes: Uint8Array; sha256: string }
-  | { ok: false; kind: 'too_large' | 'error' | 'rate_limited' | 'timeout'; detail: string; retryAfter?: string | null };
+  | { ok: false; kind: 'too_large' | 'error' | 'rate_limited' | 'timeout'; detail: string; retryAfter?: string | null; warning?: string };
 
 class RecordingTick {
   private readonly deps: RecordingAudioDeps;
@@ -578,7 +578,7 @@ class RecordingTick {
     const begun = await this.db(() => this.deps.db.attemptBegin(this.holder, row.id));
     if (begun.blocked) return; // an unresolved link exists for this recording; step a / the owner resolve it
     const attemptId = begun.attemptId;
-    const fail = (kind: AudioFailKind, error: string, extra: { keyFp?: string } = {}) =>
+    const fail = (kind: AudioFailKind, error: string, extra: { keyFp?: string; warning?: string } = {}) =>
       this.db(() => this.deps.db.audioFail(this.holder, row.id, kind, { error, ...extra }));
 
     // POST (the gap runs after the insert; a deadline that passes while waiting leaves `not_sent`)
@@ -642,7 +642,7 @@ class RecordingTick {
           await fail('rate_limited', '429');
           stopReason = 'rate_limited';
         } else {
-          await fail('error', got.detail);
+          await fail('error', got.detail, got.warning ? { warning: got.warning } : {});
           if (got.kind === 'timeout') stopReason = 'timeout';
         }
       } else {
@@ -670,7 +670,7 @@ class RecordingTick {
 
   private async processAudio(
     row: QueueDownload, bytes: Uint8Array, sha: string,
-    fail: (kind: AudioFailKind, error: string, extra?: { keyFp?: string }) => Promise<void>,
+    fail: (kind: AudioFailKind, error: string, extra?: { keyFp?: string; warning?: string }) => Promise<void>,
   ): Promise<void> {
     const decoded = await this.safeDecode(bytes);
     if (!decoded.ok) {
@@ -698,7 +698,7 @@ class RecordingTick {
     for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop += 1) {
       if (!url) return { ok: false, kind: 'error', detail: 'bad_url' };
       this.hosts.add(url.hostname);
-      if (!AUDIO_HOST_ALLOWLIST.includes(url.hostname)) return { ok: false, kind: 'error', detail: 'bad_host' };
+      if (!AUDIO_HOST_ALLOWLIST.includes(url.hostname)) return { ok: false, kind: 'error', detail: 'bad_host', warning: url.hostname.slice(0, 200) };
       const sendKey = url.origin === DIALPAD_API_ORIGIN ? key : null;
       // The 1 s gap sits inside the 15 s budget; each hop's timeout is whatever is left of it.
       const earliest = this.lastRequestAt === null ? 0 : this.lastRequestAt + REQUEST_SPACING_MS;

@@ -132,7 +132,7 @@ export function createSupabaseRecordingAudioDb(client: AudioSupabaseClient): Rec
       });
     },
     async audioFail(holder, audioId, kind: AudioFailKind, extra = {}) {
-      await call('fn_dpa_audio_fail', { p_holder: holder, p_audio_id: audioId, p_kind: kind, p_error: extra.error ?? null, p_key_fp: extra.keyFp ?? null });
+      await call('fn_dpa_audio_fail', { p_holder: holder, p_audio_id: audioId, p_kind: kind, p_error: extra.error ?? null, p_key_fp: extra.keyFp ?? null, p_warning: extra.warning ?? null });
     },
     async markUploading(holder, audioId, sha256, size, decodedMs) {
       await call('fn_dpa_mark_uploading', { p_holder: holder, p_audio_id: audioId, p_sha256: sha256, p_size: size, p_decoded_ms: decodedMs });

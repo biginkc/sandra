@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { getUser, maybeSingle, authorize } = vi.hoisted(() => ({ getUser: vi.fn(), maybeSingle: vi.fn(), authorize: vi.fn() }));
+const { getUser, maybeSingle, authorize, ready } = vi.hoisted(() => ({ getUser: vi.fn(), maybeSingle: vi.fn(), authorize: vi.fn(), ready: vi.fn() }));
+vi.mock("@/lib/my-leads/schema-ready", () => ({ schemaReady: ready }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: async () => {
   const query = { select: () => query, eq: () => query, maybeSingle };
   return { auth: { getUser }, from: () => query };
@@ -17,11 +18,22 @@ const request = () => GET(new Request("https://example.test"), { params: Promise
 
 beforeEach(() => {
   vi.clearAllMocks();
+  ready.mockResolvedValue(true);
   getUser.mockResolvedValue({ data: { user: { id: "member" } } });
   maybeSingle.mockResolvedValue({ error: null, data: row() });
 });
 
 describe("Dialpad call artifacts", () => {
+  it("before the migration lands it returns the pre-migration answer (call_recordings rows, no authorization, no 500)", async () => {
+    ready.mockResolvedValue(false);
+    maybeSingle.mockResolvedValue({ error: null, data: row({ call_recordings: [{ status: "available", duration_seconds: 51 }] }) });
+    const response = await request();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ recordingStatus: "available", durationSeconds: 51 });
+    expect(authorize).not.toHaveBeenCalled();
+  });
+
+
   it("reports the recording as available, with its duration, only when the SQL authorization grants it", async () => {
     authorize.mockResolvedValue({ audioId: "a1", path: "p", sha256: null, durationMs: 36400, mode: "rep" });
     const body = await (await request()).json();

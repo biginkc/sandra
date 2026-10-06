@@ -47,7 +47,7 @@ class Clock {
 
 interface Audio {
   id: string; orgId: string; callActivityId: string; providerCallId: string; providerRecordingId: string; durationMs: number;
-  state: string; attempts: number; failKinds: string[]; expectedSha?: string; expectedSize?: number; path?: string;
+  state: string; attempts: number; failKinds: string[]; expectedSha?: string; expectedSize?: number; path?: string; warning?: string;
 }
 interface Attempt {
   id: string; audioId: string; orgId: string; state: string; reason?: string; shareLinkId?: string; itemId?: string; createdById?: string; callId?: string; holder: string;
@@ -58,6 +58,8 @@ class Env {
   /** Per-call latency applied to every DB/RPC call, and to every Storage call, and to every fake Dialpad response. */
   dbLatency = 0;
   storageLatency = 0;
+  /** Extra latency for DB calls whose name starts with the key (e.g. 'block', 'audioFail'). */
+  dbExtra: Record<string, number> = {};
   httpLatency = 0;
   dbTimesOut = false;
   httpHangs = false;
@@ -92,7 +94,7 @@ class Env {
       this.clock.t += 1500;
       throw new RecordingTimeoutError();
     }
-    await this.tick(this.dbLatency);
+    await this.tick(this.dbLatency + Object.entries(this.dbExtra).filter(([k]) => name.startsWith(k)).reduce((n, [, v]) => n + v, 0));
     return run();
   }
 
@@ -163,9 +165,10 @@ class Env {
       if (extra.createdById) t.createdById = extra.createdById;
       if (extra.callId) t.callId = extra.callId;
     }),
-    audioFail: (_h, audioId, kind: AudioFailKind) => this.dbCall(`audioFail:${kind}`, () => {
+    audioFail: (_h, audioId, kind: AudioFailKind, extra) => this.dbCall(`audioFail:${kind}`, () => {
       const a = this.audio.get(audioId)!;
       a.failKinds.push(kind);
+      if (extra?.warning) a.warning = extra.warning;
       if (kind === 'rate_limited') a.state = 'discovered';
       else if (kind === 'too_large' || kind === 'decode_timeout' || kind === 'denied' || kind === 'invalid_media') a.state = kind === 'invalid_media' ? 'invalid_media' : kind;
       else { a.state = 'discovered'; a.attempts += 1; }
@@ -752,17 +755,92 @@ describe('timing', () => {
     }
   });
 
-  it('the cleanup worst case, a download worst case and recovery worst case sum into the documented budget table', () => {
-    // 49.5 s = insert 1.5 + gap 1 + POST 8 + DB 1.5 + audio GET 15 + DB 1.5 + decode 8 + mark 1.5 + upload 10 + register 1.5
-    expect(1.5 + 1 + 8 + 1.5 + 15 + 1.5 + 8 + 1.5 + 10 + 1.5).toBe(ADMISSION.download / 1000);
-    expect((1 + 8) + 1.5 + (1 + 8) + 1.5).toBe(ADMISSION.cleanup / 1000);
-    expect(10 + 10 + 1.5).toBe(ADMISSION.recover / 1000);
-    expect(1 + 8 + 1.5).toBe(ADMISSION.deleteOwn / 1000);
-    expect(8 + 8 + 1.5).toBeLessThanOrEqual(ADMISSION.discovery / 1000);
-    // An empty tick starts its download at <= t0 + 5 s, leaving >= 50 s against 49.5 s.
-    expect(55 - 5).toBeGreaterThanOrEqual(ADMISSION.download / 1000);
+  it('the widest recovery branch (matching object, decode fails, object removed) is admitted at 29.5 s and finishes before 55 s; at 29.4 s it is not started', async () => {
+    for (const [remaining, ran] of [[ADMISSION.recover, true], [ADMISSION.recover - 100, false]] as const) {
+      const env = new Env();
+      env.storageLatency = 10_000; // read 10 s, remove 10 s
+      env.dbExtra = { audioFail: 1_500 };
+      const burner = env.addAudio({ state: 'stored', providerCallId: '1' });
+      env.attempts.set('burn', { id: 'burn', audioId: burner.id, orgId: ORG, state: 'live', shareLinkId: '1', itemId: REC, createdById: '77', callId: CALL, holder: 'old' });
+      const a = env.addAudio({ state: 'uploading', expectedSha: SHA, expectedSize: BYTES.length });
+      a.path = `${a.orgId}/${a.callActivityId}/${a.providerRecordingId}.mp3`;
+      env.objects.set(a.path, BYTES); // sha and size match, so decode runs
+      const t0 = env.clock.t;
+      env.server = () => { env.clock.t += 55_000 - remaining; return new Response('', { status: 404 }); };
+      await env.tickOnce({ decode: async () => { env.clock.t += 8_000; return { ok: false, reason: 'invalid' }; } }, t0);
+      expect(env.objects.has(a.path)).toBe(!ran);
+      if (ran) {
+        expect(env.audio.get(a.id)).toMatchObject({ state: 'discovered', failKinds: ['recovery_reset'] });
+        expect(env.clock.t - t0).toBeLessThanOrEqual(55_000);
+      }
+    }
   });
-});
+
+  it('a discovery that hits a 429 (wait 8 s + GET 8 s + block 1.5 s + record 1.5 s) is admitted at 19 s and finishes before 55 s; at 18.9 s it is not started', async () => {
+    for (const [remaining, ran] of [[ADMISSION.discovery, true], [ADMISSION.discovery - 100, false]] as const) {
+      const env = new Env();
+      env.dbExtra = { block: 1_500, discoveryResult: 1_500 };
+      const burner = env.addAudio({ state: 'stored', providerCallId: '1' });
+      env.attempts.set('burn', { id: 'burn', audioId: burner.id, orgId: ORG, state: 'live', shareLinkId: '1', itemId: REC, createdById: '77', callId: CALL, holder: 'old' });
+      env.discoveryDue.push({ id: 'd1', orgId: ORG, providerCallId: CALL, endedAt: '2026-10-06T12:00:00Z', attempts: 0, keyRef: KEY_REF });
+      const t0 = env.clock.t;
+      // The previous tick's call GET ended just before this admission, so the 8 s spacing wait is the full 8 s.
+      env.worker.lastCallGetAt = t0 + (55_000 - remaining);
+      env.server = ({ url }) => {
+        if (url.pathname.startsWith('/api/v2/call/')) { env.clock.t += 8_000; return new Response('', { status: 429, headers: { 'retry-after': '120' } }); }
+        env.clock.t += 55_000 - remaining;
+        return new Response('', { status: 404 });
+      };
+      await env.tickOnce({}, t0);
+      expect(env.requests.some((r) => r.call === 'call_get')).toBe(ran);
+      if (ran) {
+        expect(env.discoveryResults[0]).toMatchObject({ outcome: 'rate_limited' });
+        expect(env.clock.t - t0).toBeLessThanOrEqual(55_000);
+      }
+    }
+  });
+
+  it('a refused redirect host is kept as a hostname only (no path, no query) for the canary to read', async () => {
+    const env = new Env();
+    const a = env.addAudio();
+    env.server = ({ method, url }) => {
+      if (method === 'POST') return json(linkBody());
+      if (url.pathname === '/blob/abc/abc.mp3') return new Response(null, { status: 302, headers: { location: 'https://storage.googleapis.com/bucket/secret.mp3?token=abc' } });
+      return json({});
+    };
+    await env.tickOnce();
+    expect(env.audio.get(a.id)!.warning).toBe('storage.googleapis.com');
+    expect(env.requests.some((r) => r.host === 'storage.googleapis.com')).toBe(false);
+  });
+
+  it('with the real bound (not the test shim) a normal tick still stores the recording', async () => {
+    const env = new Env();
+    const a = env.addAudio();
+    happyServer(env);
+    const result = await env.tickOnce({ bound: undefined });
+    expect(result.status).toBe('ok');
+    expect(env.audio.get(a.id)!.state).toBe('stored');
+  });
+
+  it('with the real bound, a readiness check that never answers gives slow_start after 1.5 s and no Dialpad request', async () => {
+    vi.useFakeTimers();
+    try {
+      const env = new Env();
+      env.addAudio();
+      const pending = env.tickOnce({ bound: undefined, schemaReady: () => new Promise<boolean>(() => undefined) });
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(await pending).toMatchObject({ status: 'slow_start', requests: 0 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the documented budget table equals the constants', () => {
+    expect(ADMISSION).toEqual({ cleanup: 21_000, recover: 29_500, download: 49_500, deleteOwn: 10_500, discovery: 19_000 });
+    // An empty tick starts its download at <= t0 + 5 s, leaving >= 50 s against 49.5 s.
+    expect(55_000 - 5_000).toBeGreaterThanOrEqual(ADMISSION.download);
+  });
+})
 
 describe('pacing and 429', () => {
   it('request starts are at least 1 s apart (redirect hop included) and call GETs at least 8 s apart, across ticks', async () => {

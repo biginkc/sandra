@@ -59,6 +59,8 @@ create table public.dialpad_call_audio (
   upload_expected_size bigint check (upload_expected_size is null or upload_expected_size > 0),
   stored_at timestamptz,
   last_error text check (last_error is null or length(last_error) <= 64),
+  -- A hostname only (never a path or query): the redirect host Dialpad sent that the allowlist refused.
+  warning text check (warning is null or (length(warning) <= 200 and warning ~ '^[A-Za-z0-9.-]+$')),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (call_activity_id),
@@ -509,7 +511,8 @@ grant execute on function public.fn_dpa_resolve_ambiguous(uuid, text) to service
 --   invalid_media: counted, terminal after 3                       too_large / decode_timeout / denied: terminal
 --   recovery_reset: an `uploading` row whose object is missing or does not match; counted, back to `discovered`
 create or replace function public.fn_dpa_audio_fail(
-  p_holder uuid, p_audio_id uuid, p_kind text, p_error text default null, p_key_fp text default null
+  p_holder uuid, p_audio_id uuid, p_kind text, p_error text default null, p_key_fp text default null,
+  p_warning text default null
 ) returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
   v public.dialpad_call_audio%rowtype;
@@ -523,6 +526,10 @@ begin
   if not found then raise exception 'NOT_FOUND' using errcode = 'P0002'; end if;
   if v.state not in ('discovered', 'uploading') or (p_kind = 'recovery_reset' and v.state <> 'uploading') then
     return jsonb_build_object('state', v.state, 'replayed', true);
+  end if;
+
+  if p_warning is not null then
+    update public.dialpad_call_audio set warning = left(p_warning, 200) where id = v.id;
   end if;
 
   if p_kind = 'rate_limited' then
@@ -554,8 +561,8 @@ begin
     where id = v.id;
   return jsonb_build_object('state', 'discovered', 'attempts', v_attempts);
 end $$;
-revoke all on function public.fn_dpa_audio_fail(uuid, uuid, text, text, text) from public, anon, authenticated;
-grant execute on function public.fn_dpa_audio_fail(uuid, uuid, text, text, text) to service_role;
+revoke all on function public.fn_dpa_audio_fail(uuid, uuid, text, text, text, text) from public, anon, authenticated;
+grant execute on function public.fn_dpa_audio_fail(uuid, uuid, text, text, text, text) to service_role;
 
 -- Before the upload: record what the object must be, so a crash after the upload is recoverable without Dialpad.
 create or replace function public.fn_dpa_mark_uploading(p_holder uuid, p_audio_id uuid, p_sha256 text, p_size bigint, p_decoded_ms bigint)
