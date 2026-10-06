@@ -790,4 +790,59 @@ describe("an ended call's panel clears when its attempt is saved", () => {
     await waitFor(() => expect(screen.queryByText(/Call ended/)).not.toBeInTheDocument());
     expect(probe.lock?.holder()).toBeNull();
   });
+
+  it("a stale ended panel's Dismiss never deletes a newer attempt's key; the lost response then reuses it", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockResolvedValueOnce(accepted);
+    mocks.getStatus.mockResolvedValue(ended("act-1"));
+    renderPage();
+    await user.click(screen.getByText("dial"));
+    await screen.findByText(/Call ended/);
+    // Start a new call to the same lead; it is pending when the old panel is dismissed.
+    let rejectB: (error: Error) => void = () => {};
+    mocks.dialLeadAction.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectB = reject; }));
+    await user.click(screen.getByText("dial"));
+    await waitFor(() => expect(mocks.dialLeadAction).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole("button", { name: "Dismiss" }));
+    // The response is lost; the retry reuses the same key.
+    await act(async () => {
+      rejectB(new Error("lost"));
+    });
+    await screen.findByText(/could not confirm/);
+    mocks.dialLeadAction.mockResolvedValueOnce({ ok: false, code: "call_in_flight", message: "A call is already being placed." });
+    await user.click(screen.getByText("dial"));
+    await waitFor(() => expect(mocks.dialLeadAction).toHaveBeenCalledTimes(3));
+    const keys = mocks.dialLeadAction.mock.calls.map((call) => call[0].idempotencyKey);
+    expect(keys[1]).not.toBe(keys[0]);
+    expect(keys[2]).toBe(keys[1]);
+  });
+
+  it("clearEndedCall is a no-op against a live flight", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockResolvedValue(accepted);
+    mocks.getStatus.mockResolvedValue({ ...statusOf("connected"), status: { ...statusOf("connected").status, callActivityId: "act-1" } });
+    renderPage();
+    await user.click(screen.getByText("dial"));
+    await screen.findByText(/Connected/);
+    await user.click(screen.getByText("save this"));
+    expect(screen.getByText(/Connected/)).toBeInTheDocument();
+    expect(probe.lock?.holder()).toBe("dialpad");
+  });
+
+  it("clearEndedCall for the old call cannot clear a newer flight for the same lead", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockResolvedValueOnce(accepted);
+    mocks.getStatus.mockResolvedValueOnce(ended("act-1"));
+    renderPage();
+    await user.click(screen.getByText("dial"));
+    await screen.findByText(/Call ended/);
+    // A newer call to the same lead goes live.
+    mocks.dialLeadAction.mockResolvedValueOnce({ ...accepted, intentId: "i2" });
+    mocks.getStatus.mockResolvedValue({ ...statusOf("connected"), status: { ...statusOf("connected").status, intentId: "i2" } });
+    await user.click(screen.getByText("dial"));
+    await screen.findByText(/Connected/);
+    await user.click(screen.getByText("save this"));
+    expect(screen.getByText(/Connected/)).toBeInTheDocument();
+    expect(probe.lock?.holder()).toBe("dialpad");
+  });
 });

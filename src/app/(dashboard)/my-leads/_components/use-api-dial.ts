@@ -57,10 +57,13 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     lock.release(token);
   };
   const [dialFlight, setDialFlight] = useState<DialFlight | null>(null);
-  const dialKeys = useRef(new Map<string, { key: string; intentId?: string; uncertain?: boolean }>());
+  // `gen` is the latest attempt that used this key: a key is only ever deleted by the attempt generation that owns it.
+  const dialKeys = useRef(new Map<string, { key: string; gen: number; intentId?: string; uncertain?: boolean }>());
   const dialNonce = useRef(0);
-  const releaseDialKeyForProperty = (propertyId: string) => {
-    dialKeys.current.delete(propertyId);
+  const releaseDialKeyForProperty = (propertyId: string, gen: number | undefined) => {
+    const entry = dialKeys.current.get(propertyId);
+    // A stale panel (an older generation) never touches a newer attempt's key.
+    if (entry && gen !== undefined && entry.gen === gen) dialKeys.current.delete(propertyId);
   };
   const releaseDialKeyForIntent = (intentId: string) => {
     for (const [propertyId, entry] of dialKeys.current) {
@@ -96,7 +99,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     if (!target) return;
     const { label } = target;
     const gen = ++genCounter.current;
-    const setFlight = (flight: DialFlight) => setDialFlight({ ...flight, gen } as DialFlight);
+    const setFlight = (flight: DialFlight, flightGen = gen) => setDialFlight({ ...flight, gen: flightGen } as DialFlight);
     // Holding the lock in ANY state (live, pending, uncertain, rate-limit countdown) for another lead: refuse, and never release.
     if (heldFor.current !== null && heldFor.current !== propertyId) {
       setLockNotice(CALL_LOCK_MESSAGE);
@@ -111,7 +114,8 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     const holdsDispatched = joining && !preDispatchHold;
     const heldMark = holdsDispatched ? { holdsLock: true as const } : {};
     if (!target.contactId) {
-      setFlight({ kind: "error", propertyId, label, message: "This lead has no contact to call.", ...heldMark });
+      // Taken before acquire: a joining attempt shows the OLD hold, so it carries the holder's generation.
+      setFlight({ kind: "error", propertyId, label, message: "This lead has no contact to call.", ...heldMark }, holdsDispatched ? (heldGen.current ?? gen) : gen);
       return;
     }
     if (dialBusy.current || dialActiveRef.current) {
@@ -138,9 +142,10 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     // threw, so a repeat of the same click cannot dial twice. A new key is minted only when this lead has none.
     let entry = dialKeys.current.get(propertyId);
     if (!entry) {
-      entry = { key: crypto.randomUUID() };
+      entry = { key: crypto.randomUUID(), gen };
       dialKeys.current.set(propertyId, entry);
     }
+    entry.gen = gen;
     try {
       const outcome = await dialLeadAction({
         propertyId,
@@ -165,19 +170,19 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
         });
         return;
       }
-      if (outcome.freshAttemptKey && !holdsDispatched) releaseDialKeyForProperty(propertyId);
+      if (outcome.freshAttemptKey && !holdsDispatched) releaseDialKeyForProperty(propertyId, gen);
       // An earlier attempt that threw may have rung: never fall back to another dialer for it.
       if (outcome.code === "not_configured" && mayRelease && notConfiguredRef.current && hasFallbackRef.current?.(propertyId) && !entry.uncertain && !entry.intentId) {
         // The fallback dialer must be able to take the lock.
         freeLock();
         // Refused before anything was prepared: the key was never used.
-        if (!entry.intentId) releaseDialKeyForProperty(propertyId);
+        if (!entry.intentId) releaseDialKeyForProperty(propertyId, gen);
         notConfiguredRef.current(propertyId);
         return;
       }
       if (outcome.code === "prior_call_unresolved" && outcome.priorIntentId) {
         // The server refused before preparing anything, so a key minted just now was never used.
-        if (!entry.intentId && !holdsDispatched) releaseDialKeyForProperty(propertyId);
+        if (!entry.intentId && !holdsDispatched) releaseDialKeyForProperty(propertyId, gen);
         setFlight({ kind: "unresolved", propertyId, label, message: outcome.message, priorIntentId: outcome.priorIntentId, ...heldMark });
         return;
       }
@@ -211,7 +216,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
   const releaseWithNotice = (message: string) => {
     const flight = dialFlight;
     if (flight && "intentId" in flight) releaseDialKeyForIntent(flight.intentId);
-    if (flight) releaseDialKeyForProperty(flight.propertyId);
+    if (flight) releaseDialKeyForProperty(flight.propertyId, flight.gen);
     setDialFlight(null);
     setPanelHidden(false);
     setStatusUnknown(false);
@@ -257,7 +262,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     onConfirmRedial: (propertyId: string, priorIntentId: string) => {
       if (dialFlight?.kind !== "unresolved" || dialFlight.propertyId !== propertyId || dialFlight.priorIntentId !== priorIntentId) return;
       // The rep read the "may have rung" caution and chose to call again: new key, named prior intent.
-      releaseDialKeyForProperty(propertyId);
+      releaseDialKeyForProperty(propertyId, dialFlight.gen);
       void startApiDial(propertyId, 1, priorIntentId);
     },
     onDismiss: () => {
@@ -271,9 +276,9 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
       // A deliberate Dismiss after a visible "may have rung" caution releases that lead's key. A
       // finished flight is ended/cancelled (key already gone) or expired.
       if (dialFlight?.kind === "in_flight" && dialFinished === dialFlight.intentId) {
-        releaseDialKeyForProperty(dialFlight.propertyId);
+        releaseDialKeyForProperty(dialFlight.propertyId, dialFlight.gen);
       } else if (dialFlight?.kind === "error" && dialFlight.releaseKeyOnDismiss) {
-        releaseDialKeyForProperty(dialFlight.propertyId);
+        releaseDialKeyForProperty(dialFlight.propertyId, dialFlight.gen);
       }
       setDialFlight(null);
       setLockNotice(null);
@@ -283,7 +288,10 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     },
     /** The rep confirmed the call has ended while its status is unknown. The only early release; logged client-side. */
     onMarkEnded: () => {
-      if (!flightOwnsLock(dialFlight)) return;
+      if (!flightOwnsLock(dialFlight)) {
+        setLockNotice("That call panel is out of date, so nothing was released.");
+        return;
+      }
       console.info("[dialpad] call lock released manually", {
         propertyId: dialFlight?.propertyId,
         intentId: dialFlight && "intentId" in dialFlight ? dialFlight.intentId : null,
