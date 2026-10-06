@@ -699,3 +699,50 @@ describe("a joining attempt never frees an existing hold (lost response)", () =>
     expectStillHeld();
   });
 });
+
+describe("panel actions are bound to their own flight", () => {
+  const leadB = { ...lead, id: "44444444-4444-4444-8444-444444444444", name: "Seller Two" };
+  function Pair() {
+    const dialpad = useOptionalDialpadCall();
+    const go = (t: typeof lead) => dialpad?.startCall({ propertyId: t.id, contactId: t.contactId, label: t.name });
+    return (
+      <>
+        <button type="button" onClick={() => go(lead)}>dial A</button>
+        <button type="button" onClick={() => go(leadB)}>dial B</button>
+      </>
+    );
+  }
+
+  it("an old refusal panel's Dismiss cannot free a newer pending call's lock", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockResolvedValueOnce({ ok: false, code: "denied", message: "Not verified for A." });
+    let resolveB: (value: unknown) => void = () => {};
+    mocks.dialLeadAction.mockImplementationOnce(() => new Promise((resolve) => { resolveB = resolve; }));
+    mocks.getStatus.mockResolvedValue(statusOf("connected"));
+    render(
+      <CallLockProvider>
+        <LockProbe />
+        <DialpadCallProvider enabled>
+          <Pair />
+        </DialpadCallProvider>
+      </CallLockProvider>,
+    );
+    // A is refused and its panel stays visible.
+    await user.click(screen.getByText("dial A"));
+    await screen.findByText(/Not verified for A/);
+    expect(probe.lock?.holder()).toBeNull();
+    // Another lead's call goes pending.
+    await user.click(screen.getByText("dial B"));
+    await waitFor(() => expect(probe.lock?.holder()).toBe("dialpad"));
+    // Dismiss on the old panel leaves the new flight's lock held.
+    await user.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(probe.lock?.holder()).toBe("dialpad");
+    expect(probe.lock?.acquire("softphone", Symbol("telnyx"))).toBe(false);
+    // The new flight then resolves normally and keeps the lock while connected.
+    await act(async () => {
+      resolveB({ ok: true, intentId: "i1", state: "awaiting_provider", uncertain: false, phoneSlot: 1 });
+    });
+    await screen.findByText(/Connected/);
+    expect(probe.lock?.holder()).toBe("dialpad");
+  });
+});

@@ -6,14 +6,15 @@ import { Button } from "@/components/ui/button";
 import { DIALPAD_ACTIVE_CALL_STATES, type DialpadCallStatus } from "@/lib/dialpad-cti/contracts";
 import { getDialpadCallStatusAction } from "../dialpad-actions";
 
-export type DialFlight =
+export type DialFlight = (
   /** `nonce` remounts the status (and restarts polling) when the same intent is shown again after a re-click. */
   | { kind: "in_flight"; intentId: string; propertyId: string; label: string; uncertain: boolean; nonce?: number }
   | { kind: "rate_limited"; propertyId: string; label: string; retryAfterSeconds: number; attempt: number }
   /** `holdsLock`: the request may have rung (it threw); the call lock stays held until marked ended or the ceiling. */
   | { kind: "error"; propertyId: string; label: string; message: string; releaseKeyOnDismiss?: boolean; holdsLock?: boolean }
   /** The server refused a new key: an earlier call to this lead may have rung. Redialing needs an explicit confirm. */
-  | { kind: "unresolved"; propertyId: string; label: string; message: string; priorIntentId: string; holdsLock?: boolean };
+  | { kind: "unresolved"; propertyId: string; label: string; message: string; priorIntentId: string; holdsLock?: boolean }
+) & { /** Which dial attempt produced this flight; panel actions only touch the lock when it is still the holder. */ gen?: number };
 
 type Props = {
   flight: DialFlight | null;
