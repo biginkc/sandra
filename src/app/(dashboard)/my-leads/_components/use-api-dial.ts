@@ -51,10 +51,21 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
   const genCounter = useRef(0);
   const heldGen = useRef<number | null>(null);
   const intentGen = useRef(new Map<string, number>());
-  const freeLock = () => {
+  // dialBusy is declared below; the ref is read lazily inside the function.
+  const dialBusy = useRef(false);
+  /**
+   * The ONLY place this hook releases the call lock. Releases only when `gen` is the generation that holds it
+   * AND no attempt is in flight (an attempt's own settle step passes after clearing dialBusy). Every dismiss,
+   * terminal status, Mark call ended, ceiling timer, fallback and teardown goes through here, so a stale or
+   * mid-request caller can never free a newer hold.
+   */
+  const releaseIfOwner = (gen: number | undefined, opts: { ignoreBusy?: boolean } = {}): boolean => {
+    if (gen === undefined || heldGen.current !== gen) return false;
+    if (dialBusy.current && !opts.ignoreBusy) return false;
     heldGen.current = null;
     heldFor.current = null;
     lock.release(token);
+    return true;
   };
   const [dialFlight, setDialFlight] = useState<DialFlight | null>(null);
   // `gen` is the latest attempt that used this key: a key is only ever deleted by the attempt generation that owns it.
@@ -78,7 +89,6 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
   useEffect(() => {
     dialActiveRef.current = dialActive;
   });
-  const dialBusy = useRef(false);
   // True from the click until the server answers (the window before a flight exists), so other dialers can be held off.
   const [dialPending, setDialPending] = useState(false);
   const resolveRef = useRef(resolveTarget);
@@ -92,7 +102,14 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     hasFallbackRef.current = options.hasFallback;
   });
 
-  useEffect(() => () => lock.release(token), [lock, token]);
+  // Teardown (the provider itself unmounting, e.g. sign-out): release whatever this instance still holds.
+  const releaseRef = useRef(releaseIfOwner);
+  useEffect(() => {
+    releaseRef.current = releaseIfOwner;
+  });
+  useEffect(() => () => {
+    releaseRef.current(heldGen.current ?? undefined, { ignoreBusy: true });
+  }, []);
 
   const startApiDial = async (propertyId: string, attempt: number, confirmRedialOf?: string) => {
     const target = resolveRef.current(propertyId);
@@ -173,8 +190,9 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
       if (outcome.freshAttemptKey && !holdsDispatched) releaseDialKeyForProperty(propertyId, gen);
       // An earlier attempt that threw may have rung: never fall back to another dialer for it.
       if (outcome.code === "not_configured" && mayRelease && notConfiguredRef.current && hasFallbackRef.current?.(propertyId) && !entry.uncertain && !entry.intentId) {
-        // The fallback dialer must be able to take the lock.
-        freeLock();
+        // The fallback dialer must be able to take the lock. This attempt is done with it: clear busy, then release.
+        dialBusy.current = false;
+        releaseIfOwner(gen);
         // Refused before anything was prepared: the key was never used.
         if (!entry.intentId) releaseDialKeyForProperty(propertyId, gen);
         notConfiguredRef.current(propertyId);
@@ -209,19 +227,23 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     } finally {
       dialBusy.current = false;
       setDialPending(false);
-      if (!keepLock && mayRelease) freeLock();
+      if (!keepLock && mayRelease) releaseIfOwner(gen);
     }
   };
 
-  const releaseWithNotice = (message: string) => {
+  /** Ceiling and Mark-ended exit. Bound to the generation it was armed for; a no-op when stale or while an attempt is in flight. */
+  const releaseWithNotice = (gen: number | undefined, message: string): boolean => {
+    if (!releaseIfOwner(gen)) return false;
     const flight = dialFlight;
-    if (flight && "intentId" in flight) releaseDialKeyForIntent(flight.intentId);
-    if (flight) releaseDialKeyForProperty(flight.propertyId, flight.gen);
+    if (flight && flight.gen === gen) {
+      if ("intentId" in flight) releaseDialKeyForIntent(flight.intentId);
+      releaseDialKeyForProperty(flight.propertyId, flight.gen);
+    }
     setDialFlight(null);
     setPanelHidden(false);
     setStatusUnknown(false);
-    freeLock();
     setLockNotice(message);
+    return true;
   };
   const releaseWithNoticeRef = useRef(releaseWithNotice);
   useEffect(() => {
@@ -229,24 +251,28 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
   });
   const heldIntent = dialFlight?.kind === "in_flight" && dialFinished !== dialFlight.intentId ? dialFlight.intentId : null;
   const heldUncertain = (dialFlight?.kind === "error" || dialFlight?.kind === "unresolved") && dialFlight.holdsLock === true;
-  // Hard ceiling for a dispatched call whose end never arrives.
+  const flightGen = dialFlight?.gen;
+  // Hard ceiling for a dispatched call whose end never arrives. The timer captures the generation it was armed
+  // for; if it fires against a stale generation or mid-request it does nothing, and the effect re-arms for the
+  // current holder once the attempt settles (dialPending is a dependency).
   useEffect(() => {
-    if (!heldIntent) return;
+    if (!heldIntent || dialPending) return;
     const id = setTimeout(
-      () => releaseWithNoticeRef.current("Sandra stopped waiting for Dialpad after 2 hours and released the call lock."),
+      () => releaseWithNoticeRef.current(flightGen, "Sandra stopped waiting for Dialpad after 2 hours and released the call lock."),
       DIAL_CALL_CEILING_MS,
     );
     return () => clearTimeout(id);
-  }, [heldIntent]);
-  // A dispatched call with unknown status, or a request that may have rung, is released after ten minutes.
+  }, [heldIntent, flightGen, dialPending]);
+  // A dispatched call with unknown status that was never confirmed, or a request that may have rung, is released
+  // after ten minutes, with the same generation binding.
   useEffect(() => {
-    if (!((heldIntent && statusUnknown && confirmedIntent !== heldIntent) || heldUncertain)) return;
+    if (!((heldIntent && statusUnknown && confirmedIntent !== heldIntent) || heldUncertain) || dialPending) return;
     const id = setTimeout(
-      () => releaseWithNoticeRef.current("Dialpad status was unknown for 10 minutes; Sandra released the call lock. Check Dialpad."),
+      () => releaseWithNoticeRef.current(flightGen, "Dialpad status was unknown for 10 minutes; Sandra released the call lock. Check Dialpad."),
       DIAL_UNKNOWN_CEILING_MS,
     );
     return () => clearTimeout(id);
-  }, [heldIntent, statusUnknown, confirmedIntent, heldUncertain]);
+  }, [heldIntent, flightGen, statusUnknown, confirmedIntent, heldUncertain, dialPending]);
 
   const flightOwnsLock = (flight: DialFlight | null) => flight !== null && flight.gen !== undefined && flight.gen === heldGen.current;
 
@@ -284,7 +310,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
       setLockNotice(null);
       // Pre-dispatch outcomes (a rate-limit countdown, a finished call) release here, but only if this flight is
       // still the lock's holder: an old refusal panel must never free a newer attempt's lock.
-      if (flightOwnsLock(dialFlight)) freeLock();
+      releaseIfOwner(dialFlight?.gen);
     },
     /** The rep confirmed the call has ended while its status is unknown. The only early release; logged client-side. */
     onMarkEnded: () => {
@@ -296,14 +322,16 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
         propertyId: dialFlight?.propertyId,
         intentId: dialFlight && "intentId" in dialFlight ? dialFlight.intentId : null,
       });
-      releaseWithNotice("Call marked as ended. Sandra released the call lock.");
+      if (!releaseWithNotice(dialFlight?.gen, "Call marked as ended. Sandra released the call lock.")) {
+        setLockNotice("A call attempt is in progress, so nothing was released yet.");
+      }
     },
     onUnknown: (_intentId: string, unknown: boolean) => setStatusUnknown(unknown),
     onConfirmed: (intentId: string) => setConfirmedIntent(intentId),
     onFinished: (intentId: string, finalStatus: DialpadCallStatus) => {
       setPanelHidden(false);
       // Only the attempt that dialed this intent may be freed by its terminal status.
-      if (intentGen.current.get(intentId) === heldGen.current) freeLock();
+      releaseIfOwner(intentGen.current.get(intentId));
       // Allowlist: only a call that definitively ended or was cancelled releases its key. expired,
       // failed or anything unexpected keeps it (the call may have rung).
       if (finalStatus.state === "ended" || finalStatus.state === "cancelled") releaseDialKeyForIntent(intentId);

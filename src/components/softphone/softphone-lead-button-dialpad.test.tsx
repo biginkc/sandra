@@ -609,6 +609,52 @@ describe("the persistent provider owns the flight and the lock", () => {
       expect(screen.getByTestId("dial-notice")).toHaveTextContent("10 minutes");
     });
 
+    it("lost response, a same-lead retry in flight when the 10-minute ceiling is due: the lock stays held and the retry then holds it", async () => {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      mocks.dialLeadAction.mockRejectedValueOnce(new Error("lost"));
+      mocks.getStatus.mockResolvedValue(statusOf("connected"));
+      render(shell(<Page target={lead} />));
+      await user.click(screen.getByText("dial Seller One"));
+      await screen.findByText(/could not confirm/);
+      await advance(TEN_MIN - 1000);
+      expect(probe.lock?.holder()).toBe("dialpad");
+
+      // The retry is still awaiting its response when the original ceiling would fire.
+      let resolveRetry: (value: unknown) => void = () => {};
+      mocks.dialLeadAction.mockImplementationOnce(() => new Promise((resolve) => { resolveRetry = resolve; }));
+      await user.click(screen.getByText("dial Seller One"));
+      await waitFor(() => expect(mocks.dialLeadAction).toHaveBeenCalledTimes(2));
+      await advance(5000);
+      expect(probe.lock?.holder()).toBe("dialpad");
+      expect(probe.lock?.acquire("softphone", Symbol("telnyx"))).toBe(false);
+
+      await act(async () => {
+        resolveRetry(accepted);
+      });
+      await screen.findByText(/Connected/);
+      expect(probe.lock?.holder()).toBe("dialpad");
+      expect(probe.lock?.acquire("softphone", Symbol("telnyx"))).toBe(false);
+      // The old ceiling never fires on the new hold.
+      await advance(TEN_MIN);
+      expect(probe.lock?.holder()).toBe("dialpad");
+    });
+
+    it("a 2h ceiling armed for a live call releases once, with a notice, and never early; a re-click near it is not a new attempt", async () => {
+      mocks.getStatus.mockResolvedValue(statusOf("connected"));
+      await start();
+      await screen.findByText(/Connected/);
+      await advance(2 * 60 * 60 * 1000 - 2000);
+      // A re-click on the live lead only re-shows the panel.
+      await act(async () => {
+        screen.getByText("dial Seller One").click();
+      });
+      expect(mocks.dialLeadAction).toHaveBeenCalledTimes(1);
+      expect(probe.lock?.holder()).toBe("dialpad");
+      await advance(5000);
+      expect(probe.lock?.holder()).toBeNull();
+      expect(screen.getByTestId("dial-notice")).toHaveTextContent("2 hours");
+    });
+
     it("the 2h ceiling does not fire early", async () => {
       mocks.getStatus.mockResolvedValue(statusOf("connected"));
       await start();
