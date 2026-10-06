@@ -68,6 +68,7 @@ export default defineConfig({
       "supabase/migrations/20261007150000_call_prompt_acknowledgement.integration.test.ts",
       "supabase/migrations/20261007150100_dialpad_api_dial_support.integration.test.ts",
       "supabase/migrations/20261007150200_dialpad_unmatched_event_redaction.integration.test.ts",
+      "supabase/migrations/20261008110000_dialpad_cti_custom_data_oauthapp.integration.test.ts",
       "supabase/migrations/20261007150300_my_leads_callbacks_due.integration.test.ts",
       "supabase/migrations/20261007160000_acquisition_contract_defaults.integration.test.ts",
       "supabase/migrations/20261007170000_acquisition_offer_projections.integration.test.ts",
