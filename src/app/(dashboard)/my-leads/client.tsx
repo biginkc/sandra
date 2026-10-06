@@ -904,6 +904,8 @@ export function MyLeadsClient({
       ) {
         autoPromptSaved.current = true;
       }
+      // The attempt for this call is saved: the ended Dialpad call's panel (Log outcome) is done.
+      if (committed.opening.callActivityId) dialpadCall?.clearEndedCall?.(committed.opening.callActivityId);
       if (committed.extras) {
         void runExtras(
           {

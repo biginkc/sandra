@@ -746,3 +746,48 @@ describe("panel actions are bound to their own flight", () => {
     expect(probe.lock?.holder()).toBe("dialpad");
   });
 });
+
+describe("an ended call's panel clears when its attempt is saved", () => {
+  const accepted = { ok: true, intentId: "i1", state: "awaiting_provider", uncertain: false, phoneSlot: 1 };
+  const ended = (callActivityId: string) => {
+    const base = statusOf("ended");
+    return { ...base, status: { ...base.status, callActivityId, durationSeconds: 44 } };
+  };
+  function Page() {
+    const dialpad = useOptionalDialpadCall();
+    return (
+      <>
+        <button type="button" onClick={() => dialpad?.startCall({ propertyId: lead.id, contactId: lead.contactId, label: lead.name })}>dial</button>
+        <button type="button" onClick={() => dialpad?.clearEndedCall?.("act-other")}>save other</button>
+        <button type="button" onClick={() => dialpad?.clearEndedCall?.("act-1")}>save this</button>
+      </>
+    );
+  }
+  const renderPage = () =>
+    render(
+      <CallLockProvider>
+        <LockProbe />
+        <DialpadCallProvider enabled>
+          <Page />
+        </DialpadCallProvider>
+      </CallLockProvider>,
+    );
+
+  it("clears on the matching call activity, ignores another, and the lock was already released", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockResolvedValue(accepted);
+    mocks.getStatus.mockResolvedValue(ended("act-1"));
+    renderPage();
+    await user.click(screen.getByText("dial"));
+    await screen.findByText(/Call ended/);
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
+    expect(probe.lock?.holder()).toBeNull();
+
+    await user.click(screen.getByText("save other"));
+    expect(screen.getByText(/Call ended/)).toBeInTheDocument();
+
+    await user.click(screen.getByText("save this"));
+    await waitFor(() => expect(screen.queryByText(/Call ended/)).not.toBeInTheDocument());
+    expect(probe.lock?.holder()).toBeNull();
+  });
+});

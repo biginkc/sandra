@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 
+import type { DialpadCallStatus } from "@/lib/dialpad-cti/contracts";
 import { useCallLockHolder } from "@/components/calls/call-lock-context";
 import { DialStatus } from "@/app/(dashboard)/my-leads/_components/dial-status";
 import { useApiDial } from "@/app/(dashboard)/my-leads/_components/use-api-dial";
@@ -34,6 +35,18 @@ export function DialpadCallProvider({ enabled, children }: { enabled: boolean; c
     startRef.current = startApiDial;
   });
   const [showHidden, setShowHidden] = useState(false);
+  // The ended flight's call activity, so saving that call's attempt can clear its panel.
+  const [endedCall, setEndedCall] = useState<{ callActivityId: string | null; gen: number | undefined } | null>(null);
+  const clearRef = useRef<(callActivityId: string) => void>(() => undefined);
+  useEffect(() => {
+    clearRef.current = (callActivityId) => {
+      // Only the ended flight for this exact call activity; an ended flight has already released the lock.
+      if (endedCall?.callActivityId === callActivityId && dialFlight?.kind === "in_flight" && dialFlight.gen === endedCall.gen) {
+        statusHandlers.onDismiss();
+        setEndedCall(null);
+      }
+    };
+  });
   const stable = useMemo<DialpadCallContextValue>(
     () => ({
       enabled,
@@ -41,6 +54,7 @@ export function DialpadCallProvider({ enabled, children }: { enabled: boolean; c
       // True for a live call AND for any other Dialpad hold (an uncertain request, a countdown), so no parallel dial is offered.
       dialActive: dialActive || lockHolder === "dialpad",
       setPageHandlers,
+      clearEndedCall: (callActivityId) => clearRef.current(callActivityId),
       startCall: (request) => {
         requests.current.set(request.propertyId, request);
         setShowHidden(false);
@@ -67,7 +81,8 @@ export function DialpadCallProvider({ enabled, children }: { enabled: boolean; c
                 statusHandlers.onDismiss();
               }}
               onLogOutcome={pageHandlers?.onLogOutcome}
-              onEnded={() => {
+              onEnded={(status: DialpadCallStatus) => {
+                setEndedCall({ callActivityId: status.callActivityId ?? null, gen: dialFlight?.gen });
                 router.refresh();
                 pageHandlers?.onEnded?.();
               }}

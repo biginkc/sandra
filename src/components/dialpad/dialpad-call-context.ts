@@ -24,6 +24,8 @@ export type DialpadCallContextValue = {
   flight?: DialFlight | null;
   dialActive?: boolean;
   /** Register page-level handlers (Log outcome, refresh on end). Returns nothing; pass null on unmount. */
+  /** The attempt for this call activity was saved: clear its ended flight's panel (a no-op for any other flight). */
+  clearEndedCall?: (callActivityId: string) => void;
   setPageHandlers?: (handlers: DialpadPageHandlers | null) => void;
   /** Server-derived: click_to_dial on, org connection active, viewer bound, api_dial schema ready. */
   enabled: boolean;
