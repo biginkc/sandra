@@ -1,10 +1,14 @@
 import { act, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import * as React from "react"
+import { useEffect } from "react"
 
 import type { CallNextSnapshot } from "@/lib/my-leads/call-next"
 import type { CallbackDueItem, CallPromptItem, CallStateSnapshot } from "@/lib/my-leads/call-state"
 import type { AcquisitionKpis, AcquisitionRoster, QueueSnapshot } from "@/lib/my-leads/queries"
+import { DialpadCallProvider } from "@/components/dialpad/dialpad-call-provider"
+import { CallLockProvider, useCallLock } from "@/components/calls/call-lock-context"
+import type { CallLock } from "@/lib/calls/call-lock"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { queueRowFixture, stripItem } from "./_components/call-next-test-support"
 
@@ -120,16 +124,29 @@ const pollState = (over: Partial<CallStateSnapshot> = {}) => ({
 })
 const dialOk = { ok: true, intentId: "intent-1", state: "awaiting_provider", uncertain: false, phoneSlot: 1 }
 
+const lockProbe: { lock: CallLock | null } = { lock: null }
+function LockProbe() {
+  const lock = useCallLock()
+  useEffect(() => {
+    lockProbe.lock = lock
+  })
+  return null
+}
 function renderClient(props: Partial<Props> = {}) {
   return render(
-    <MyLeadsClient
-      viewer={viewer}
-      roster={roster}
-      initialMemberId={viewer.userId}
-      initialSnapshot={snapshot()}
-      initialKpis={kpis}
-      {...props}
-    />,
+    <CallLockProvider>
+      <LockProbe />
+      <DialpadCallProvider enabled>
+      <MyLeadsClient
+        viewer={viewer}
+        roster={roster}
+        initialMemberId={viewer.userId}
+        initialSnapshot={snapshot()}
+        initialKpis={kpis}
+        {...props}
+      />
+      </DialpadCallProvider>
+    </CallLockProvider>,
   )
 }
 const flush = async (ms = 0) => {
@@ -189,6 +206,39 @@ describe("MyLeadsClient calling and durable call state", () => {
     expect(openLead).toHaveBeenCalledTimes(1)
     expect(openLead).toHaveBeenCalledWith(expect.objectContaining({ id: "property-1", contactId: "contact-1" }))
     expect(mocks.dialLead).not.toHaveBeenCalled()
+  })
+
+  it("shows Call with coach only with Dialpad connected, and it opens the softphone", async () => {
+    const openLead = vi.fn()
+    mocks.softphone = { callingEnabled: true, openLead }
+    const off = renderClient({ dialpad: null, initialStrip: strip() })
+    expect(screen.queryAllByText("Call with coach")).toHaveLength(0)
+    off.unmount()
+    renderClient({ dialpad, initialStrip: strip() })
+    await click(screen.getAllByText("Call with coach")[0])
+    expect(openLead).toHaveBeenCalledTimes(1)
+    expect(openLead).toHaveBeenCalledWith(expect.objectContaining({ contactId: expect.any(String) }))
+    expect(mocks.dialLead).not.toHaveBeenCalled()
+  })
+
+  it("disables Call with coach while the Dialpad request is still in flight", async () => {
+    const openLead = vi.fn()
+    mocks.softphone = { callingEnabled: true, openLead }
+    mocks.dialLead.mockReturnValue(new Promise(() => {}))
+    renderClient({ dialpad, initialStrip: strip() })
+    await click(screen.getByRole("button", { name: "Start call property-1" }))
+    for (const button of screen.getAllByText("Call with coach")) expect(button).toBeDisabled()
+    await click(screen.getAllByText("Call with coach")[0])
+    expect(openLead).not.toHaveBeenCalled()
+  })
+
+  it("refuses a Dialpad call while the softphone holds the call lock", async () => {
+    mocks.softphone = { callingEnabled: true, openLead: vi.fn() }
+    renderClient({ dialpad })
+    expect(lockProbe.lock?.acquire("softphone", Symbol("test"))).toBe(true)
+    await click(screen.getByRole("button", { name: "Start call property-1" }))
+    expect(mocks.dialLead).not.toHaveBeenCalled()
+    expect(screen.getByText(/Finish your current call before starting another/)).toBeInTheDocument()
   })
 
   it("will not dial with Dialpad from another rep's queue", async () => {
@@ -374,7 +424,7 @@ describe("MyLeadsClient calling and durable call state", () => {
       expect(mocks.status.mock.calls.length).toBeGreaterThan(polled)
     })
 
-    it("row 3: Dismiss after failed keeps the key; the next click replays it and re-polls", async () => {
+    it("row 3: Dismiss after failed only hides the panel; the lock and key stay, and a click on that lead shows it again without a second dial", async () => {
       mocks.dialLead.mockResolvedValue({ ok: true, intentId: "intent-1", state: "already_dispatched" })
       mocks.dialLead.mockResolvedValueOnce({ ...dialOk, intentId: "intent-1" })
       mocks.status.mockImplementation(async (id: string) => callStatus(id, "failed"))
@@ -382,12 +432,14 @@ describe("MyLeadsClient calling and durable call state", () => {
       await call(1)
       await flush(0)
       await dismiss()
+      expect(screen.queryByRole("button", { name: "Dismiss" })).not.toBeInTheDocument()
       const polled = mocks.status.mock.calls.length
+      await flush(3500)
+      expect(mocks.status.mock.calls.length).toBeGreaterThan(polled)
       await call(1)
       await flush(0)
-      expect(mocks.dialLead).toHaveBeenCalledTimes(2)
-      expect(keys()[1]).toBe(keys()[0])
-      expect(mocks.status.mock.calls.length).toBeGreaterThan(polled)
+      expect(mocks.dialLead).toHaveBeenCalledTimes(1)
+      expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument()
     })
 
     it("row 5c: failed, then expired, keeps the key until Dismiss and then dials fresh", async () => {
@@ -415,8 +467,8 @@ describe("MyLeadsClient calling and durable call state", () => {
       await flush(0)
       await dismiss()
       await call(1)
-      expect(mocks.dialLead).toHaveBeenCalledTimes(2)
-      expect(keys()[1]).toBe(keys()[0])
+      // The dispatched call is still unconfirmed: no second dial, same key kept.
+      expect(mocks.dialLead).toHaveBeenCalledTimes(1)
     })
 
     it("row 11: dialing another lead never discards an unresolved lead's key, and B is blocked while A is still shown", async () => {
@@ -427,15 +479,17 @@ describe("MyLeadsClient calling and durable call state", () => {
       await flush(0)
       await call(2)
       expect(mocks.dialLead).toHaveBeenCalledTimes(1)
+      // Dismiss only hides A; B is still refused because A's call is unconfirmed.
       await dismiss()
+      await call(2)
+      expect(mocks.dialLead).toHaveBeenCalledTimes(1)
+      // Only an explicit, confirmed "Mark call ended" frees it.
+      await click(screen.getByRole("button", { name: "Mark call ended" }))
+      await click(screen.getByRole("button", { name: "Yes, it ended" }))
       await call(2)
       await flush(0)
       expect(mocks.dialLead).toHaveBeenCalledTimes(2)
-      await call(1)
-      expect(mocks.dialLead).toHaveBeenCalledTimes(3)
-      expect(mocks.dialLead.mock.calls[2][0].propertyId).toBe("property-1")
-      expect(keys()[2]).toBe(keys()[0])
-      expect(keys()[1]).not.toBe(keys()[0])
+      expect(mocks.dialLead.mock.calls[1][0].propertyId).toBe("property-2")
     })
 
     const unresolved = { ok: false, code: "prior_call_unresolved", message: "Your last call to this lead was never confirmed. It may have rung. Check Dialpad before calling again.", priorIntentId: "prior-1" }

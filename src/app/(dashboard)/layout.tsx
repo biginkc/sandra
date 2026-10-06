@@ -23,10 +23,13 @@ import { getCallerMemberships } from "@/lib/auth/memberships";
 import { canViewMyLeads } from "@/lib/my-leads/access";
 import { canViewCalculators } from "@/lib/calculators/access";
 import { getAcquisitionBadge, getAcquisitionRoster } from "@/lib/my-leads/queries";
-import { canAccessMessagesAndLeadsBoard, shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
+import { canAccessMessagesAndLeadsBoard, isAcquisitionsCaller, shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { createClient } from "@/lib/supabase/server";
 import { getCallingConfigForCurrentUser } from "@/lib/direct-calling/actions";
 import type { CallingConfig } from "@/lib/direct-calling/contract";
+import { CallLockProvider } from "@/components/calls/call-lock-context";
+import { DialpadCallProvider } from "@/components/dialpad/dialpad-call-provider";
+import { getDialpadCallRoute } from "@/lib/dialpad-cti/call-route-server";
 import { refreshMyLeadsBadge } from "./my-leads/nav-actions";
 
 export default async function DashboardLayout({
@@ -48,10 +51,19 @@ export default async function DashboardLayout({
     () => ({ transport: "default" }),
   );
   const recordingAccess = await recordingViewer().catch(() => null);
-  const [rosterResult, badgeResult, surfaceMembershipsResult] = await Promise.allSettled([
+  const membershipsPromise = getCallerMemberships();
+  // Chained off the memberships read so it runs alongside the roster and badge reads, not after them.
+  const dialpadRoutePromise = membershipsPromise.then(async (all) => {
+    const mine = all.filter((m) => m.user_id === user.id);
+    return mine.length === 1
+      ? await getDialpadCallRoute(mine[0].org_id, user.id, isAcquisitionsCaller(mine[0]))
+      : "softphone";
+  });
+  const [rosterResult, badgeResult, surfaceMembershipsResult, dialpadRouteResult] = await Promise.allSettled([
     getAcquisitionRoster(),
     getAcquisitionBadge(),
-    getCallerMemberships(),
+    membershipsPromise,
+    dialpadRoutePromise,
   ]);
   const acquisitionRoster =
     rosterResult.status === "fulfilled" ? rosterResult.value : null;
@@ -73,9 +85,14 @@ export default async function DashboardLayout({
     surfaceMembershipsResult.status === "fulfilled" &&
     canAccessMessagesAndLeadsBoard(surfaceMembershipsResult.value);
 
+  // Where every Call button sends the call: server-derived, never from the browser.
+  const dialpadCallsEnabled = dialpadRouteResult.status === "fulfilled" && dialpadRouteResult.value === "dialpad";
+
   return (
     <ObjectionPromptProvider enabled={objectionPromptEnabled}>
+    <CallLockProvider>
     <SoftphoneProvider callingConfig={callingConfig}>
+    <DialpadCallProvider enabled={dialpadCallsEnabled}>
     <GlobalSearchProvider>
     <div className="bg-background min-h-screen">
       <ConnectionBanner />
@@ -158,7 +175,9 @@ export default async function DashboardLayout({
       </div>
     </div>
     </GlobalSearchProvider>
+    </DialpadCallProvider>
     </SoftphoneProvider>
+    </CallLockProvider>
     </ObjectionPromptProvider>
   );
 }
