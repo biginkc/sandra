@@ -78,7 +78,7 @@ async function main(): Promise<number> {
     mkdirSync(path.dirname(out), { recursive: true });
     let sig: unknown = null;
     try {
-      const key = loadReportKey(process.env);
+      const key = loadReportKey(process.env, {}, "stub");
       if (key) sig = signEvidence({ v: 1, kind: "selftest", runId: cfg.runId, sha: cfg.sha, at: new Date().toISOString(), subjectSha256: sha256(JSON.stringify({ sha: cfg.sha, ok: r.ok, rows: r.rows })) }, key);
     } catch (e) { console.error(`self-test report not signed: ${(e as Error).message}`); }
     writeFileSync(out, JSON.stringify({ sha: cfg.sha, ok: r.ok, at: new Date().toISOString(), rows: r.rows, sig }, null, 2));

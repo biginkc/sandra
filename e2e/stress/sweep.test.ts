@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -142,23 +142,39 @@ describe("sweep 2: stale artifacts are deleted at engine start and the report is
 // ------------------------------------------------------------ signing (live B)
 describe("live B: evidence signing keys live outside the repo, mode 0600, and verify run-bound evidence", () => {
   const good = "k".repeat(40);
-  it("loadReportKey refuses a key file inside the repo, group/other-readable, relative, missing or short; accepts a 0600 file outside", () => {
+  const OPREF = "op://BMH Secrets/stress-report-key/credential";
+  it("loadReportKey (live lane): only the op service account; the file path is gone and a test key file is refused", () => {
+    expect(() => loadReportKey({ STRESS_REPORT_KEY_FILE: "/x/key" })).toThrow(/no longer supported/);
+    expect(() => loadReportKey({ STRESS_TEST_KEY_FILE: "/x/key" })).toThrow(/stubbed lane only/);
+    expect(() => loadReportKey({ STRESS_TEST_KEY_FILE: "/x/key" }, {}, "live")).toThrow(/stubbed lane only/);
+    expect(() => loadReportKey({ STRESS_REPORT_KEY_OP_REF: OPREF })).toThrow(/OP_SERVICE_ACCOUNT_TOKEN/);
+    expect(() => loadReportKey({ STRESS_REPORT_KEY_OP_REF: "op://other-vault/i/k", OP_SERVICE_ACCOUNT_TOKEN: "t" }, { opRead: () => good })).toThrow(/BMH Secrets/);
+    expect(() => loadReportKey({ STRESS_REPORT_KEY_OP_REF: "op://BMH Secrets/", OP_SERVICE_ACCOUNT_TOKEN: "t" }, { opRead: () => good })).toThrow(/BMH Secrets/);
+    expect(loadReportKey({ STRESS_REPORT_KEY_OP_REF: OPREF, OP_SERVICE_ACCOUNT_TOKEN: "t" }, { opRead: () => good })).toBe(good);
+    expect(() => loadReportKey({ STRESS_REPORT_KEY_OP_REF: OPREF, OP_SERVICE_ACCOUNT_TOKEN: "t" }, { opRead: () => "short" })).toThrow(/shorter/);
+    expect(loadReportKey({})).toBeNull();
+  });
+  it("loadReportKey (stubbed lane): a test key file only if realpath is outside every worktree/checkout, 0600, absolute and long enough", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "key-"));
     const f = path.join(dir, "key");
     writeFileSync(f, good); chmodSync(f, 0o600);
-    expect(loadReportKey({ STRESS_REPORT_KEY_FILE: f })).toBe(good);
+    expect(loadReportKey({ STRESS_TEST_KEY_FILE: f }, {}, "stub")).toBe(good);
     chmodSync(f, 0o644);
-    expect(() => loadReportKey({ STRESS_REPORT_KEY_FILE: f })).toThrow(/0600/);
-    expect(() => loadReportKey({ STRESS_REPORT_KEY_FILE: path.join(ROOT, "key") }, { mode: () => 0o600, readFile: () => good })).toThrow(/outside the repository/);
-    expect(() => loadReportKey({ STRESS_REPORT_KEY_FILE: "rel/key" })).toThrow(/absolute/);
-    expect(() => loadReportKey({ STRESS_REPORT_KEY_FILE: path.join(dir, "nope") })).toThrow(/does not exist/);
-    chmodSync(f, 0o600); writeFileSync(f, "short"); chmodSync(f, 0o600);
-    expect(() => loadReportKey({ STRESS_REPORT_KEY_FILE: f })).toThrow(/shorter/);
-    expect(loadReportKey({})).toBeNull();
-  });
-  it("op key: refused without the service account token; an injected reader works", () => {
-    expect(() => loadReportKey({ STRESS_REPORT_KEY_OP_REF: "op://v/i/k" })).toThrow(/OP_SERVICE_ACCOUNT_TOKEN/);
-    expect(loadReportKey({ STRESS_REPORT_KEY_OP_REF: "op://v/i/k" }, { opRead: () => good })).toBe(good);
+    expect(() => loadReportKey({ STRESS_TEST_KEY_FILE: f }, {}, "stub")).toThrow(/0600/);
+    chmodSync(f, 0o600);
+    expect(() => loadReportKey({ STRESS_TEST_KEY_FILE: "rel/key" }, {}, "stub")).toThrow(/absolute/);
+    expect(() => loadReportKey({ STRESS_TEST_KEY_FILE: path.join(dir, "nope") }, {}, "stub")).toThrow(/does not exist/);
+    writeFileSync(f, "short"); chmodSync(f, 0o600);
+    expect(() => loadReportKey({ STRESS_TEST_KEY_FILE: f }, {}, "stub")).toThrow(/shorter/);
+    // inside this repo's tree (the real repo root)
+    expect(() => loadReportKey({ STRESS_TEST_KEY_FILE: path.join(ROOT, "package.json") }, {}, "stub")).toThrow(/outside every git worktree/);
+    // a symlink OUTSIDE the repo that points INTO it resolves to the real path and is refused
+    const link = path.join(dir, "link"); symlinkSync(path.join(ROOT, "package.json"), link);
+    expect(() => loadReportKey({ STRESS_TEST_KEY_FILE: link }, {}, "stub")).toThrow(/outside every git worktree/);
+    // another checkout (any directory with a .git entry above the key), even one that is not this repo
+    const other = mkdtempSync(path.join(os.tmpdir(), "other-checkout-")); mkdirSync(path.join(other, ".git")); mkdirSync(path.join(other, "sub"));
+    const inOther = path.join(other, "sub", "key"); writeFileSync(inOther, good); chmodSync(inOther, 0o600);
+    expect(() => loadReportKey({ STRESS_TEST_KEY_FILE: inOther }, {}, "stub")).toThrow(/outside every git worktree/);
   });
   it("evidenceProblems: unsigned, wrong key, tampered content, wrong run, stale, future and unknown sha are refused", () => {
     const text = "report";

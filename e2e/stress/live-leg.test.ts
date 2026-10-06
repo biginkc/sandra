@@ -4,7 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { readConfig } from "./config";
-import { assertLiveLegReady, classifyLiveEvidence, liveCallPlan, liveLegStatus, loadPinnedHashes, pinnedPhoneProblems, resolveOwnedNumbers, sendilloSpotCheck, type LiveDeps } from "./live-leg";
+import { assertLiveLegReady, classifyLiveEvidence, judgeDialRefusal, liveCallPlan, liveLegStatus, loadPinnedHashes, pinnedPhoneProblems, resolveOwnedNumbers, sendilloSpotCheck, type LiveDeps } from "./live-leg";
 import { LaneRefusal } from "./guards";
 import { numberPin, sha256, signEvidence } from "./signing";
 
@@ -193,5 +193,27 @@ describe("live leg prerequisites: signed, run-bound, fresh evidence; pinned numb
   });
   it("N1: the default `op read` path refuses unless OP_SERVICE_ACCOUNT_TOKEN is set (injected readers are unaffected)", () => {
     expect(() => resolveOwnedNumbers({ STRESS_OP_REF_CELL: "op://v/c/n", STRESS_OP_REF_TELNYX: "op://v/t/n" })).toThrow(/OP_SERVICE_ACCOUNT_TOKEN/);
+  });
+});
+
+describe("judgeDialRefusal: only affirmative evidence counts as the intended refusal", () => {
+  const base = { newAuthorizedIntents: 0, statusText: null as string | null, httpStatuses: [200] };
+  it("an internal server error is refused:false and ok:false, even though no new authorization appeared", () => {
+    expect(judgeDialRefusal({ ...base, httpStatuses: [500] })).toMatchObject({ refused: false, ok: false });
+    expect(judgeDialRefusal({ ...base, httpStatuses: [200, 503], statusText: "A call is already being placed. Wait for Dialpad to confirm it." })).toMatchObject({ refused: false, ok: false });
+    expect(judgeDialRefusal({ ...base, statusText: "Something went wrong." })).toMatchObject({ refused: false, ok: false });
+    expect(judgeDialRefusal({ ...base, statusText: "Sandra could not confirm the call. Check Dialpad before trying again." })).toMatchObject({ refused: false, ok: false });
+  });
+  it("silence (no new intent, nothing on screen) is not a refusal", () => {
+    expect(judgeDialRefusal(base)).toMatchObject({ refused: false, ok: false });
+    expect(judgeDialRefusal({ ...base, statusText: "Retrying in 2s" })).toMatchObject({ refused: false, ok: false });
+  });
+  it("the intent rule's own message, or a recorded refusal row, is a verified refusal", () => {
+    expect(judgeDialRefusal({ ...base, statusText: "Lead: A call is already being placed. Wait for Dialpad to confirm it." })).toMatchObject({ refused: true, ok: true });
+    expect(judgeDialRefusal({ ...base, statusText: "Your last call to this lead was never confirmed. It may have rung. Check Dialpad before calling again." })).toMatchObject({ refused: true, ok: true });
+    expect(judgeDialRefusal({ ...base, intentRefusalRows: 1 })).toMatchObject({ refused: true, ok: true });
+  });
+  it("a new authorized intent is not a refusal", () => {
+    expect(judgeDialRefusal({ ...base, newAuthorizedIntents: 1, statusText: "Calling." })).toMatchObject({ refused: false, ok: true });
   });
 });

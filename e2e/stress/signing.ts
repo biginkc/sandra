@@ -1,12 +1,12 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 /**
  * Signed, run-bound, short-lived evidence for the live leg. The stub-leg report and the self-test report each carry (runId, sha, kind, timestamp, hash
- * of the content) and an HMAC made by the ENGINE with a key that never lives in the repo: a 0600 file outside the checkout (STRESS_REPORT_KEY_FILE), or
- * an `op read` of STRESS_REPORT_KEY_OP_REF with the BMH service account. The live leg refuses unsigned, tampered, wrong-sha, wrong-run or stale (>24 h)
+ * of the content) and an HMAC made by the ENGINE with a key that never lives in the repo: an `op read` of STRESS_REPORT_KEY_OP_REF (BMH Secrets vault) with the
+ * service account; only the stubbed lane may use a local test key file (see loadReportKey). The live leg refuses unsigned, tampered, wrong-sha, wrong-run or stale (>24 h)
  * evidence, and refuses the sha "unknown" everywhere.
  */
 
@@ -22,26 +22,49 @@ export const sha256 = (text: string) => createHash("sha256").update(text).digest
 const canonical = (m: EvidenceMeta) => JSON.stringify(Object.fromEntries(Object.entries(m).sort(([a], [b]) => (a < b ? -1 : 1))));
 export const signEvidence = (m: EvidenceMeta, key: string): SignedEvidence => ({ ...m, hmac: createHmac("sha256", key).update(canonical(m)).digest("hex") });
 
-export type KeyDeps = { readFile?: (p: string) => string | null; mode?: (p: string) => number | null; repoRoot?: string; opRead?: (ref: string) => string };
+export type KeyDeps = { readFile?: (p: string) => string | null; mode?: (p: string) => number | null; repoRoot?: string; opRead?: (ref: string) => string; realpath?: (p: string) => string; isInsideCheckout?: (realDir: string) => boolean };
+/** "live" (the default, the strictest) takes the key ONLY from the 1Password service account. "stub" may also take a local test key file. */
+export type KeyLane = "live" | "stub";
+export const OP_KEY_VAULT_PREFIX = "op://BMH Secrets/";
 
-/** The signing key, or null when none is configured. A key file inside the repo, readable by group/others, or too short is REFUSED (throws), never used. */
-export function loadReportKey(env: Readonly<Record<string, string | undefined>>, deps: KeyDeps = {}): string | null {
-  const file = env.STRESS_REPORT_KEY_FILE;
+/** True when `dir` is inside a git worktree or checkout (any ancestor holds a `.git` entry) or inside this repo's root. */
+function insideAnyCheckout(realDir: string, repoRoot: string): boolean {
+  if (realDir === repoRoot || realDir.startsWith(repoRoot + path.sep)) return true;
+  for (let d = realDir; ; d = path.dirname(d)) {
+    if (existsSync(path.join(d, ".git"))) return true;
+    if (path.dirname(d) === d) return false;
+  }
+}
+
+/**
+ * The signing/pin key, or null when none is configured. The live leg and the pin tool load it ONLY through the op service account: an op:// ref in
+ * the BMH Secrets vault with OP_SERVICE_ACCOUNT_TOKEN present (STRESS_REPORT_KEY_FILE is gone). The stubbed lane alone may use a local TEST key file
+ * (STRESS_TEST_KEY_FILE): absolute, realpath-resolved, mode 0600, at least 32 characters, and never inside any git worktree or checkout (this repo's or
+ * any other). Naming a test key file in the live lane is refused, not ignored.
+ */
+export function loadReportKey(env: Readonly<Record<string, string | undefined>>, deps: KeyDeps = {}, lane: KeyLane = "live"): string | null {
+  if (env.STRESS_REPORT_KEY_FILE) throw new Error("STRESS_REPORT_KEY_FILE is no longer supported: set STRESS_REPORT_KEY_OP_REF (an op:// ref in the BMH Secrets vault)");
+  const file = env.STRESS_TEST_KEY_FILE;
+  if (file && lane === "live") throw new Error("STRESS_TEST_KEY_FILE is for the stubbed lane only: the live leg takes its key only from the op service account");
   if (file) {
-    if (!path.isAbsolute(file)) throw new Error("STRESS_REPORT_KEY_FILE must be an absolute path");
-    const root = deps.repoRoot ?? path.resolve(__dirname, "../..");
-    if (path.resolve(file).startsWith(root + path.sep)) throw new Error("STRESS_REPORT_KEY_FILE must be outside the repository");
-    const mode = (deps.mode ?? ((p) => (existsSync(p) ? statSync(p).mode & 0o777 : null)))(file);
-    if (mode === null) throw new Error("STRESS_REPORT_KEY_FILE does not exist");
-    if ((mode & 0o077) !== 0) throw new Error("STRESS_REPORT_KEY_FILE must be mode 0600 (no group or other access)");
-    const key = ((deps.readFile ?? ((p) => readFileSync(p, "utf8")))(file) ?? "").trim();
-    if (key.length < 32) throw new Error("STRESS_REPORT_KEY_FILE holds a key shorter than 32 characters");
+    if (!path.isAbsolute(file)) throw new Error("STRESS_TEST_KEY_FILE must be an absolute path");
+    let real: string;
+    try { real = (deps.realpath ?? realpathSync)(file); } catch { throw new Error("STRESS_TEST_KEY_FILE does not exist"); }
+    const root = (deps.repoRoot ?? path.resolve(__dirname, "../.."));
+    const realRoot = (() => { try { return (deps.realpath ?? realpathSync)(root); } catch { return root; } })();
+    const inside = deps.isInsideCheckout ?? ((d: string) => insideAnyCheckout(d, realRoot));
+    if (inside(path.dirname(real))) throw new Error("STRESS_TEST_KEY_FILE must be outside every git worktree and checkout (including this repository)");
+    const mode = (deps.mode ?? ((p) => (existsSync(p) ? statSync(p).mode & 0o777 : null)))(real);
+    if (mode === null) throw new Error("STRESS_TEST_KEY_FILE does not exist");
+    if ((mode & 0o077) !== 0) throw new Error("STRESS_TEST_KEY_FILE must be mode 0600 (no group or other access)");
+    const key = ((deps.readFile ?? ((p) => readFileSync(p, "utf8")))(real) ?? "").trim();
+    if (key.length < 32) throw new Error("STRESS_TEST_KEY_FILE holds a key shorter than 32 characters");
     return key;
   }
   const ref = env.STRESS_REPORT_KEY_OP_REF;
   if (ref) {
-    if (!deps.opRead && !env.OP_SERVICE_ACCOUNT_TOKEN) throw new Error("OP_SERVICE_ACCOUNT_TOKEN is not set: refusing to run `op read`");
-    if (!/^op:\/\/[^\s]+$/.test(ref)) throw new Error("STRESS_REPORT_KEY_OP_REF is not an op:// reference");
+    if (!env.OP_SERVICE_ACCOUNT_TOKEN) throw new Error("OP_SERVICE_ACCOUNT_TOKEN is not set: refusing to run `op read`");
+    if (!ref.startsWith(OP_KEY_VAULT_PREFIX) || /[\s]/.test(ref.slice(OP_KEY_VAULT_PREFIX.length)) || ref.length === OP_KEY_VAULT_PREFIX.length) throw new Error(`STRESS_REPORT_KEY_OP_REF must be an ${OP_KEY_VAULT_PREFIX}... reference`);
     const key = (deps.opRead ?? ((r) => execFileSync("op", ["read", "--no-newline", r], { encoding: "utf8", timeout: 20_000 })))(ref).trim();
     if (key.length < 32) throw new Error("the op-stored report key is shorter than 32 characters");
     return key;
@@ -54,7 +77,7 @@ export function evidenceProblems(doc: SignedEvidence | null, key: string | null,
   const p: string[] = [];
   if (!want.sha || want.sha === "unknown") return ["the checkout sha is unknown: nothing can be bound to it"];
   if (!doc) return ["no signature: the evidence is unsigned"];
-  if (!key) return ["no report signing key is configured (STRESS_REPORT_KEY_FILE or STRESS_REPORT_KEY_OP_REF): the evidence cannot be verified"];
+  if (!key) return ["no report signing key is configured (STRESS_REPORT_KEY_OP_REF): the evidence cannot be verified"];
   if (typeof doc !== "object" || typeof doc.hmac !== "string") return ["the signature is malformed"];
   const { hmac, ...meta } = doc;
   let okMac = false;

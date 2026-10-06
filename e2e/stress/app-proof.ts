@@ -177,11 +177,16 @@ export function proveAppUnderTest(args: { appUrl: string; appEgressLog: string; 
 export const BENIGN_DEV_EGRESS_HOSTS: readonly string[] = ["registry.npmjs.org"];
 export const isBenignDevEgress = (kind: string | undefined, target: string | undefined) => ["tls", "dns", "connect"].includes(kind ?? "") && BENIGN_DEV_EGRESS_HOSTS.includes(target ?? "");
 
+/** The log text written after BYTE offset `offset` (a file size): slice the Buffer, then decode. Slicing the decoded string by a byte count shifts on any multibyte character. */
+export function sinceOffset(file: string, offset: number): string {
+  return readFileSync(file).subarray(Math.min(offset, statSync(file).size)).toString("utf8");
+}
+
 /** The tolerated (benign dev-server) denials since T0, counted so the report shows them instead of hiding them. */
 export function appBenignDenials(file: string, snapshot: LogSnapshot | null): number {
   if (!snapshot || !existsSync(file)) return 0;
   let n = 0;
-  for (const l of readFileSync(file, "utf8").slice(snapshot.size).split("\n").filter(Boolean)) {
+  for (const l of sinceOffset(file, snapshot.size).split("\n").filter(Boolean)) {
     try { const j = JSON.parse(l) as { probe?: boolean; kind?: string; target?: string }; if (!j.probe && isBenignDevEgress(j.kind, j.target)) n += 1; } catch { /* counted as a violation elsewhere */ }
   }
   return n;
@@ -198,9 +203,10 @@ export function appEgressViolations(file: string, snapshot: LogSnapshot | null, 
   const st = statSync(file);
   if (st.ino !== snapshot.ino) out.push("app egress log was replaced (inode changed)");
   if (st.size < snapshot.size) { out.push(`app egress log was truncated (${st.size} < ${snapshot.size} bytes at T0)`); return out; }
-  const all = readFileSync(file, "utf8");
+  const buf = readFileSync(file);
+  const all = buf.toString("utf8");
   if (guardPid != null && !guardLineFor(all.split("\n").filter(Boolean), guardPid)) out.push("the app's guard_loaded line is gone from the log");
-  for (const l of all.slice(snapshot.size).split("\n").filter(Boolean)) {
+  for (const l of buf.subarray(snapshot.size).toString("utf8").split("\n").filter(Boolean)) {
     try { const j = JSON.parse(l) as { probe?: boolean; kind?: string; target?: string }; if (!j.probe && j.kind !== "guard_loaded" && !isBenignDevEgress(j.kind, j.target)) out.push(`${j.kind}:${j.target}`); } catch { out.push(`unparseable app egress line: ${l.slice(0, 80)}`); }
   }
   return out;

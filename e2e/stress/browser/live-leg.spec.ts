@@ -11,7 +11,7 @@ import { driveLiveLeg, summarizeLive, type LivePort } from "../live-driver";
 import { collectLiveAppFacts } from "../app-proof";
 import { assertLiveLane } from "../guards";
 import { loadReportKey } from "../signing";
-import { assertLiveLegReady, liveAppRecheckProblems, loadPinnedHashes, pinnedPhoneProblems, type LiveCallStep, type LiveEvidence } from "../live-leg";
+import { assertLiveLegReady, judgeDialRefusal, liveAppRecheckProblems, loadPinnedHashes, pinnedPhoneProblems, type LiveCallStep, type LiveEvidence } from "../live-leg";
 
 /**
  * LIVE LEG driver (DISABLED BY DEFAULT, NEVER IN CI). It is skipped unless STRESS_LIVE_LEG=1 and is refused in CI or a
@@ -61,6 +61,8 @@ test("live leg: ~8 owned-number calls, evidence per call", async ({ page }) => {
     });
     const { error } = await auth.auth.signInWithPassword({ email: process.env.STRESS_REP_EMAIL!, password: process.env.STRESS_REP_PASSWORD! });
     if (error) throw error;
+    const dialResponses: number[] = [];
+    page.on("response", (r) => { if (r.request().method() === "POST" && r.url().startsWith(cfg.appUrl)) dialResponses.push(r.status()); });
     await page.context().addCookies([...jar].map(([name, value]) => ({ name, value, url: cfg.appUrl, sameSite: "Lax" as const })));
 
     const lastDial = new Map<number, { propertyId: string; since: string }>();
@@ -79,6 +81,7 @@ test("live leg: ~8 owned-number calls, evidence per call", async ({ page }) => {
         await expect(button).toBeEnabled({ timeout: 30_000 });
         const before = (await db.query<{ n: number }>("select count(*)::int n from public.dialpad_call_intents where property_id=$1 and dispatch_authorized_at is not null", [propertyId])).rows[0]!.n;
         const clickedAtMs = Date.now();
+        dialResponses.length = 0;
         await button.click(); // a mutating click: never repeated
         lastDial.set(step.n, { propertyId, since });
         // The database is the judge of a refusal: no new authorized intent appeared.
@@ -87,7 +90,10 @@ test("live leg: ~8 owned-number calls, evidence per call", async ({ page }) => {
           await page.waitForTimeout(500);
           after = (await db.query<{ n: number }>("select count(*)::int n from public.dialpad_call_intents where property_id=$1 and dispatch_authorized_at is not null", [propertyId])).rows[0]!.n;
         }
-        return after === before ? { refused: true, clickedAtMs, note: (await page.getByTestId("dial-status").first().innerText().catch(() => "no status shown")).slice(0, 160) } : { refused: false, clickedAtMs };
+        const statusText = await page.getByTestId("dial-status").first().innerText().catch(() => null);
+        const verdict = judgeDialRefusal({ newAuthorizedIntents: after - before, statusText, httpStatuses: dialResponses.splice(0) });
+        if (!verdict.ok) throw new Error(`dial ${step.n}: ${verdict.note}`);
+        return after === before ? { refused: verdict.refused, clickedAtMs, note: verdict.note } : { refused: false, clickedAtMs };
       },
       async lateDial(step) {
         const d = lookup(step);

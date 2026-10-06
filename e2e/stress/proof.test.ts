@@ -124,6 +124,14 @@ describe("(d) + #6 the app's egress log: denials fail the run, and so does losin
     expect(appBenignDenials(f, snap)).toBe(2);
     expect(appBenignDenials(f, null)).toBe(0);
   });
+  it("multibyte text before the T0 offset does not hide a later denial (byte offset, not character offset)", () => {
+    const f = fresh();
+    appendFileSync(f, JSON.stringify({ kind: "note", target: "Zoë ✓ 日本語 ñandú 🚫", probe: true }) + "\n");
+    const snap = snapshotLog(f)!;
+    appendFileSync(f, [{ kind: "connect", target: "dialpad.com", probe: false }, { kind: "tls", target: "registry.npmjs.org", probe: false }].map((j) => JSON.stringify(j)).join("\n") + "\n");
+    expect(appEgressViolations(f, snap, 99)).toEqual(["connect:dialpad.com"]);
+    expect(appBenignDenials(f, snap)).toBe(1);
+  });
   it("a deleted log is a violation, not zero violations (Astra #6)", () => {
     const f = fresh();
     const snap = snapshotLog(f)!;

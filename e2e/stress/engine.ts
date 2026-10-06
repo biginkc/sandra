@@ -350,7 +350,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   });
   // Signed evidence for the live leg (only when a signing key outside the repo is configured; otherwise the report stays unsigned and the live leg refuses it).
   try {
-    const key = loadReportKey(env);
+    const key = loadReportKey(env, {}, "stub");
     if (key) {
       const text = readFileSync(path.join(dir, "REPORT.md"), "utf8");
       writeFileSync(path.join(dir, "REPORT.sig.json"), JSON.stringify(signEvidence({ v: 1, kind: "stub_leg", runId: cfg.runId, sha: cfg.sha, at: new Date().toISOString(), subjectSha256: sha256(text), verdict: summary.verdict, profile, scope: cfg.scope, fault: cfg.fault, appGuardPid }, key), null, 1), { mode: 0o600 });

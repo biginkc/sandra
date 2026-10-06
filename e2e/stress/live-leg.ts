@@ -71,7 +71,7 @@ export function resolveOwnedNumbers(env: Env, deps: LiveDeps = {}): { cell: stri
   // Pinned allowlist: only a number whose HMAC (under the report key, kept outside the repo) is committed may ever be dialled. Empty or missing pin = refuse.
   const pinned = deps.pinned ?? loadPinnedHashes();
   const key = (deps.reportKey ?? (() => loadReportKey(env)))();
-  if (!key) throw new Error("no report signing key (STRESS_REPORT_KEY_FILE or STRESS_REPORT_KEY_OP_REF): the number pins are HMACs under it");
+  if (!key) throw new Error("no report signing key (STRESS_REPORT_KEY_OP_REF): the number pins are HMACs under it");
   for (const role of ["cell", "telnyx"] as const) {
     if (pinned[role].length === 0) throw new Error(`no pinned HMAC for the owned ${role} number: pin it with \`npm run stress -- pin-number ${role}\` and commit the value`);
     if (!pinned[role].includes(numberPin(numbers[role], key))) throw new Error(`the ${role} number resolved from op is not on the pinned allowlist (HMAC mismatch): refusing to dial it`);
@@ -106,6 +106,25 @@ export function liveCallPlan(): LiveCallStep[] {
     { n: 7, shape: "double_dial_refused", target: "telnyx", gapMs: gap },
     { n: 8, shape: "double_dial_refused", target: "telnyx", gapMs: 20_000, expectRefusal: true },
   ];
+}
+
+/**
+ * What the click on Call did, judged ONLY on affirmative evidence. "No new authorization appeared" is not a refusal: an internal error, a 5xx, a dead
+ * page or a silent UI also produce no new intent. A refusal is proven only when the UI shows the intent rule's own message (`call_in_flight`: "A call is
+ * already being placed...", or `prior_call_unresolved`: "...never confirmed. It may have rung...") and no 5xx/server-error evidence exists.
+ */
+export const INTENT_RULE_REFUSALS: readonly RegExp[] = [/A call is already being placed\. Wait for Dialpad to confirm it\./i, /Your last call to this lead was never confirmed\. It may have rung\./i];
+const ERROR_SIGNS: readonly RegExp[] = [/Something went wrong/i, /internal server error/i, /could not confirm the call/i, /\b5\d\d\b/];
+export type DialObservation = { newAuthorizedIntents: number; statusText: string | null; httpStatuses: number[]; intentRefusalRows?: number };
+export type DialJudgement = { refused: boolean; ok: boolean; note: string };
+export function judgeDialRefusal(o: DialObservation): DialJudgement {
+  const text = (o.statusText ?? "").replace(/\s+/g, " ").trim();
+  const serverError = o.httpStatuses.find((s) => s >= 500);
+  if (serverError !== undefined) return { refused: false, ok: false, note: `violation: a ${serverError} came back from the dial action` };
+  if (ERROR_SIGNS.some((r) => r.test(text))) return { refused: false, ok: false, note: `violation: the UI shows an error, not the intended refusal (${text.slice(0, 100)})` };
+  if (o.newAuthorizedIntents > 0) return { refused: false, ok: true, note: "the dial was authorized (not refused)" };
+  if (INTENT_RULE_REFUSALS.some((r) => r.test(text)) || (o.intentRefusalRows ?? 0) > 0) return { refused: true, ok: true, note: text.slice(0, 160) || "intent-rule refusal row recorded" };
+  return { refused: false, ok: false, note: `no affirmative evidence of the intended refusal (no new authorization, but the UI said: ${text.slice(0, 100) || "nothing"})` };
 }
 
 export type LiveEvidence = { callId: string | null; terminalState: string | null; cause: string | null; attemptMatched: boolean; refused?: boolean };
@@ -171,7 +190,7 @@ export async function liveLegStatus(cfg: StressConfig, env: Env, deps: LiveDeps 
   let key: string | null = null;
   let keyError: string | null = null;
   try { key = (deps.reportKey ?? (() => loadReportKey(env)))(); } catch (e) { keyError = (e as Error).message; }
-  add("report_signing_key", !!key, key ? "report signing key loaded (outside the repo)" : keyError ?? "no report signing key configured (STRESS_REPORT_KEY_FILE or STRESS_REPORT_KEY_OP_REF)");
+  add("report_signing_key", !!key, key ? "report signing key loaded (outside the repo)" : keyError ?? "no report signing key configured (STRESS_REPORT_KEY_OP_REF)");
 
   // The stubbed leg must have passed, at THIS sha, as a full PASS (never a partial run).
   const reportPath = env.STRESS_STUB_LEG_REPORT ?? "";
