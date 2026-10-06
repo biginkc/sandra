@@ -23,7 +23,7 @@ import { getCallerMemberships } from "@/lib/auth/memberships";
 import { canViewMyLeads } from "@/lib/my-leads/access";
 import { canViewCalculators } from "@/lib/calculators/access";
 import { getAcquisitionBadge, getAcquisitionRoster } from "@/lib/my-leads/queries";
-import { canAccessMessagesAndLeadsBoard, isActiveAcquisitionsMember, shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
+import { canAccessMessagesAndLeadsBoard, isAcquisitionsCaller, shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { createClient } from "@/lib/supabase/server";
 import { getCallingConfigForCurrentUser } from "@/lib/direct-calling/actions";
 import type { CallingConfig } from "@/lib/direct-calling/contract";
@@ -55,7 +55,7 @@ export default async function DashboardLayout({
   const dialpadRoutePromise = membershipsPromise.then(async (all) => {
     const mine = all.filter((m) => m.user_id === user.id);
     return mine.length === 1
-      ? await getDialpadCallRoute(mine[0].org_id, user.id, isActiveAcquisitionsMember(mine[0]))
+      ? await getDialpadCallRoute(mine[0].org_id, user.id, isAcquisitionsCaller(mine[0]))
       : "softphone";
   });
   const [rosterResult, badgeResult, surfaceMembershipsResult, dialpadRouteResult] = await Promise.allSettled([

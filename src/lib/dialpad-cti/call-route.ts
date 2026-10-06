@@ -9,14 +9,14 @@ export interface DialpadCallRouteFacts {
   apiDialSchemaReady: boolean;
   /** `loadDialpadCallingBootstrap` result: null unless the org Dialpad connection is active. */
   bootstrap: DialpadCallingBootstrap | null;
-  /** The viewer is an active Acquisitions member (`isActiveAcquisitionsMember`, the same designation My Leads uses). */
+  /** The viewer is an active Acquisitions member (`isAcquisitionsCaller`: acquisitions_enabled with active access, any role). */
   acquisitionsMember: boolean;
 }
 
 /**
  * The one rule for where a Call button sends the call. Dialpad only when ALL hold: the flag is on, the
  * api_dial schema has landed, the org Dialpad connection is active (bootstrap non-null) and the viewer is
- * an active Acquisitions member. Everyone else is the legacy softphone, even with a Dialpad binding.
+ * an active Acquisitions caller (acquisitions_enabled, any role, owners included). Everyone else is the legacy softphone, even with a Dialpad binding.
  * An Acquisitions member with no live binding stays on Dialpad: the dial is refused server-side with the
  * "not verified" denial, never silently sent to Telnyx.
  */

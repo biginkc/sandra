@@ -7,7 +7,7 @@ import {
   getCallerMembershipsOrThrow,
   type Membership,
 } from "@/lib/auth/memberships";
-import { isActiveAcquisitionsMember, shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
+import { isAcquisitionsCaller, shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { reportError } from "@/lib/errors/report";
 import {
   createSupabaseDialpadDispatchDb,
@@ -359,7 +359,7 @@ export default async function MyLeadsPage({
       clickToDialFlag: callFeatures.clickToDial,
       apiDialSchemaReady: callFeatures.clickToDial,
       bootstrap: dialpad,
-      acquisitionsMember: isActiveAcquisitionsMember(memberships[0]),
+      acquisitionsMember: isAcquisitionsCaller(memberships[0]),
     }) !== "dialpad"
   ) {
     dialpad = null;

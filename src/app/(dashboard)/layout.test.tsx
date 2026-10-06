@@ -94,6 +94,16 @@ it("passes acquisitions membership to the route resolver (false for a non-acquis
   expect(mocks.dialpadRoute).toHaveBeenCalledWith("org", "rep", false);
 });
 
+it.each([
+  ["owner", true, true],
+  ["owner", false, false],
+  ["member", true, true],
+] as const)("route resolver gets acquisitions=%s/%s -> %s", async (role, enabled, expected) => {
+  mocks.memberships.mockResolvedValue([{ user_id: "rep", org_id: "org", role, acquisitions_enabled: enabled, access_status: "active" }]);
+  await DashboardLayout({ children: <div>Page</div> });
+  expect(mocks.dialpadRoute).toHaveBeenCalledWith("org", "rep", expected);
+});
+
 it("keeps the softphone route when the viewer has no single organization", async () => {
   mocks.memberships.mockResolvedValue([]);
   expect(dialpadEnabled(await DashboardLayout({ children: <div>Page</div> }))).toBe(false);
