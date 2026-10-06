@@ -6,7 +6,12 @@ import type { DialpadCallStatus } from "@/lib/dialpad-cti/contracts";
 import { dialLeadAction } from "../dialpad-actions";
 import type { DialFlight } from "./dial-status";
 
-export type DialTarget = { contactId: string | null; label: string };
+export type DialTarget = { contactId: string | null; label: string; phoneSlot?: 1 | 2 | 3 | null };
+
+export type UseApiDialOptions = {
+  /** The server said Dialpad is not configured for this click (a refusal before anything was prepared). The caller falls back to its legacy path. */
+  onNotConfigured?: (propertyId: string) => void;
+};
 
 /**
  * API dial (P2 2.7), shared by the My Leads page and the call screen. One in-flight dial at a time;
@@ -18,7 +23,7 @@ export type DialTarget = { contactId: string | null; label: string };
  *
  * `resolveTarget` returns null when the lead is not known to the caller (nothing is dialed).
  */
-export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | null) {
+export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | null, options: UseApiDialOptions = {}) {
   const [dialFlight, setDialFlight] = useState<DialFlight | null>(null);
   const dialKeys = useRef(new Map<string, { key: string; intentId?: string }>());
   const dialNonce = useRef(0);
@@ -43,6 +48,10 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
   useEffect(() => {
     resolveRef.current = resolveTarget;
   });
+  const notConfiguredRef = useRef(options.onNotConfigured);
+  useEffect(() => {
+    notConfiguredRef.current = options.onNotConfigured;
+  });
 
   const startApiDial = async (propertyId: string, attempt: number, confirmRedialOf?: string) => {
     const target = resolveRef.current(propertyId);
@@ -65,6 +74,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
       const outcome = await dialLeadAction({
         propertyId,
         contactId: target.contactId,
+        ...(target.phoneSlot ? { phoneSlot: target.phoneSlot } : {}),
         idempotencyKey: entry.key,
         ...(confirmRedialOf ? { confirmRedialOf } : {}),
       });
@@ -83,6 +93,12 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
         return;
       }
       if (outcome.freshAttemptKey) releaseDialKeyForProperty(propertyId);
+      if (outcome.code === "not_configured" && notConfiguredRef.current) {
+        // Refused before anything was prepared: the key was never used.
+        if (!entry.intentId) releaseDialKeyForProperty(propertyId);
+        notConfiguredRef.current(propertyId);
+        return;
+      }
       if (outcome.code === "prior_call_unresolved" && outcome.priorIntentId) {
         // The server refused before preparing anything, so a key minted just now was never used.
         if (!entry.intentId) releaseDialKeyForProperty(propertyId);

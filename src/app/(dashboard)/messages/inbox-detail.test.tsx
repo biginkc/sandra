@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 
+import { DialpadCallContext } from "@/components/dialpad/dialpad-call-context";
 import { InboxDetail } from "./inbox-detail";
 import { outboundStatusClearsDripReply, type InboxDetail as InboxDetailData } from "./inbox-detail-data";
 import { sendSmsFromLead } from "../leads/actions";
@@ -2287,5 +2288,51 @@ describe("<InboxDetail />", () => {
       await waitFor(() => expect(onRevalidate).toHaveBeenCalledTimes(2));
       expect(onBackToList).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("InboxDetail Call routing", () => {
+  const callData = (): InboxDetailData => ({
+    ...makeData({
+      contactId: "contact-call",
+      propertyId: "prop-call",
+      threadId: "conv-call",
+      conversationId: "conv-call",
+      propertyStatus: "prospect",
+      threadCustomerPhone: "+15550000002",
+      contactPhone: "+15550000002",
+      replyToPhone: "+15550000002",
+      initialMessages: [],
+    }),
+    contactPhoneSlot: 2,
+  });
+
+  it("keeps the phone-app link when the Dialpad route is off", async () => {
+    const user = userEvent.setup();
+    const startCall = vi.fn();
+    render(
+      <DialpadCallContext.Provider value={{ enabled: false, startCall }}>
+        <InboxDetail data={callData()} assigneeEmails={{}} currentUserId="user-1" />
+      </DialpadCallContext.Provider>,
+    );
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    const link = await screen.findByTestId("inbox-detail-phone");
+    expect(link).toHaveAttribute("href", "tel:+15550000002");
+    expect(startCall).not.toHaveBeenCalled();
+  });
+
+  it("places the call through Dialpad with property, contact and number slot when the route is on", async () => {
+    const user = userEvent.setup();
+    const startCall = vi.fn();
+    render(
+      <DialpadCallContext.Provider value={{ enabled: true, startCall }}>
+        <InboxDetail data={callData()} assigneeEmails={{}} currentUserId="user-1" />
+      </DialpadCallContext.Provider>,
+    );
+    await user.click(screen.getByTestId("inbox-detail-more"));
+    await user.click(await screen.findByTestId("inbox-detail-phone"));
+    expect(startCall).toHaveBeenCalledWith(
+      expect.objectContaining({ propertyId: "prop-call", contactId: "contact-call", phoneSlot: 2, onFallback: expect.any(Function) }),
+    );
   });
 });

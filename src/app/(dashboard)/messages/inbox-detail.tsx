@@ -1,5 +1,6 @@
 "use client";
 
+import { useOptionalDialpadCall } from "@/components/dialpad/dialpad-call-context";
 import { myLeadsHref } from "@/lib/my-leads/links";
 import { formatPhoneDisplay } from "@/lib/phone-format";
 import {
@@ -184,6 +185,7 @@ export function InboxDetail({
   const [fallbackNowMs] = useState(Date.now);
   const renderNowMs = nowMs ?? fallbackNowMs;
   const router = useRouter();
+  const dialpadCall = useOptionalDialpadCall();
   const searchParams = useSearchParams();
   const [resolveOpen, setResolveOpen] = useState(false);
   const [replyRefreshGate, setReplyRefreshGate] =
@@ -627,6 +629,28 @@ export function InboxDetail({
                 </DropdownMenuItem>
               ) : null}
               {canCall ? (
+                dialpadCall?.enabled && data.propertyId && data.contactId ? (
+                  <DropdownMenuItem
+                    className="min-h-11"
+                    data-testid="inbox-detail-phone"
+                    aria-label={`Call ${formatPhoneDisplay(data.threadCustomerPhone!)} with Dialpad`}
+                    onClick={() =>
+                      dialpadCall.startCall({
+                        propertyId: data.propertyId!,
+                        contactId: data.contactId,
+                        label: data.contactName ?? formatPhoneDisplay(data.threadCustomerPhone!) ?? "this contact",
+                        phoneSlot: data.contactPhoneSlot ?? null,
+                        // Dialpad not configured after all: the phone app, exactly as before.
+                        onFallback: () => {
+                          window.location.href = phoneHref!;
+                        },
+                      })
+                    }
+                  >
+                    <PhoneIcon className="h-4 w-4" />
+                    Call {formatPhoneDisplay(data.threadCustomerPhone!)}
+                  </DropdownMenuItem>
+                ) : (
                 <DropdownMenuItem
                   className="min-h-11"
                   render={
@@ -640,6 +664,7 @@ export function InboxDetail({
                     </a>
                   }
                 />
+                )
               ) : null}
             </DropdownMenuContent>
           </DropdownMenu>

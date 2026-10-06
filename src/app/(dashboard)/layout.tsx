@@ -27,6 +27,8 @@ import { canAccessMessagesAndLeadsBoard, shouldRestrictMessagesAndLeadsBoard } f
 import { createClient } from "@/lib/supabase/server";
 import { getCallingConfigForCurrentUser } from "@/lib/direct-calling/actions";
 import type { CallingConfig } from "@/lib/direct-calling/contract";
+import { DialpadCallProvider } from "@/components/dialpad/dialpad-call-provider";
+import { getDialpadCallRoute } from "@/lib/dialpad-cti/call-route-server";
 import { refreshMyLeadsBadge } from "./my-leads/nav-actions";
 
 export default async function DashboardLayout({
@@ -73,9 +75,19 @@ export default async function DashboardLayout({
     surfaceMembershipsResult.status === "fulfilled" &&
     canAccessMessagesAndLeadsBoard(surfaceMembershipsResult.value);
 
+  // Where every Call button sends the call. Derived here, once per request; never from the browser.
+  const callerOrgs =
+    surfaceMembershipsResult.status === "fulfilled"
+      ? surfaceMembershipsResult.value.filter((m) => m.user_id === user.id)
+      : [];
+  const dialpadCallsEnabled =
+    callerOrgs.length === 1 &&
+    (await getDialpadCallRoute(callerOrgs[0].org_id, user.id)) === "dialpad";
+
   return (
     <ObjectionPromptProvider enabled={objectionPromptEnabled}>
     <SoftphoneProvider callingConfig={callingConfig}>
+    <DialpadCallProvider enabled={dialpadCallsEnabled}>
     <GlobalSearchProvider>
     <div className="bg-background min-h-screen">
       <ConnectionBanner />
@@ -158,6 +170,7 @@ export default async function DashboardLayout({
       </div>
     </div>
     </GlobalSearchProvider>
+    </DialpadCallProvider>
     </SoftphoneProvider>
     </ObjectionPromptProvider>
   );

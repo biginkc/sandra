@@ -45,6 +45,8 @@ export type InboxDetail = {
   contactPhone: string | null;
   /** Saved contact phone that matches the open thread, safe for replying. */
   replyToPhone: string | null;
+  /** Which saved contact phone slot (1-3) the open thread number is, for the Dialpad Call button. */
+  contactPhoneSlot?: 1 | 2 | 3 | null;
   /** Exact saved slot classification for the open thread phone. */
   replyToPhoneLineType: SmsPhoneChoice["lineType"] | null;
   propertyId: string | null;
@@ -255,6 +257,7 @@ export async function fetchInboxDetail(
     contactPhone: parties.customerPhone,
     replyToPhone,
     replyToPhoneLineType: replyPhoneChoice?.lineType ?? null,
+    contactPhoneSlot: contactPhoneSlot(c, parties.customerPhone),
     propertyId,
     propertyAddress: p
       ? [p.address, p.city, p.state].filter(Boolean).join(", ")
@@ -418,4 +421,17 @@ async function loadMessageDripContext(
     dripReplyMessageIds,
     dripReplyLabels,
   };
+}
+
+function contactPhoneSlot(
+  contact: { phone_1: string | null; phone_2: string | null; phone_3: string | null } | null,
+  phone: string | null,
+): 1 | 2 | 3 | null {
+  if (!contact || !phone) return null;
+  const digits = (value: string | null) => (value ?? "").replace(/\D/g, "").slice(-10);
+  const wanted = digits(phone);
+  if (wanted.length < 10) return null;
+  const slots = [contact.phone_1, contact.phone_2, contact.phone_3];
+  const index = slots.findIndex((value) => digits(value) === wanted);
+  return index === -1 ? null : ((index + 1) as 1 | 2 | 3);
 }

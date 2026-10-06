@@ -2,6 +2,7 @@
 
 import { PhoneIcon } from "lucide-react";
 
+import { useOptionalDialpadCall } from "@/components/dialpad/dialpad-call-context";
 import { useOptionalSoftphone, type SoftphoneLead } from "./softphone-provider";
 
 type Props = {
@@ -11,8 +12,12 @@ type Props = {
 
 export function SoftphoneLeadButton({ lead, compact = false }: Props) {
   const context = useOptionalSoftphone();
-  if (!context) return null;
-  const { openLead, callingEnabled } = context;
+  const dialpad = useOptionalDialpadCall();
+  // Dialpad only when the server-derived route says so and the lead has a contact to dial; otherwise today's softphone path.
+  const viaDialpad = Boolean(dialpad?.enabled && lead.contactId);
+  if (!context && !viaDialpad) return null;
+  const openLead = (target: SoftphoneLead) => context?.openLead(target);
+  const callingEnabled = viaDialpad || Boolean(context?.callingEnabled);
   if (!lead.callable) return null;
   return (
     <button
@@ -33,6 +38,18 @@ export function SoftphoneLeadButton({ lead, compact = false }: Props) {
       onPointerDown={(event) => event.stopPropagation()}
       onClick={(event) => {
         event.stopPropagation();
+        if (viaDialpad && dialpad && lead.contactId) {
+          dialpad.startCall({
+            propertyId: lead.id,
+            contactId: lead.contactId,
+            label: lead.name,
+            // Not configured on the server after all: the legacy softphone, exactly as before.
+            onFallback: () => {
+              if (context?.callingEnabled) openLead(lead);
+            },
+          });
+          return;
+        }
         if (callingEnabled) openLead(lead);
       }}
     >
