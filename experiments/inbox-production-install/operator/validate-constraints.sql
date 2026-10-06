@@ -1,0 +1,1 @@
+ALTER TABLE public.messages VALIDATE CONSTRAINT messages_inbox_inbound_revision_nonnegative;

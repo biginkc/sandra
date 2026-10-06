@@ -175,7 +175,7 @@ jobs:
 
       - uses: supabase/setup-cli@v1
         with:
-          version: 2.109.1
+          version: 2.116.0
 
       # Owns its own disposable database on this runner (loopback only). The
       # suites below call the local-only guard and refuse any other target.

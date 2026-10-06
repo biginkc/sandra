@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { assertFunctionPin, checkPrivileges } from './privileges.mjs';
+import pg from 'pg';
+import { assertFunctionPin, assertTriggerPinRows, checkPrivileges, readTriggerPinRows } from './privileges.mjs';
 
 const expected = JSON.parse(readFileSync(new URL('./expected/privileges.post.json', import.meta.url), 'utf8'));
 test('P0b-8 pins the revision guard as invoker and the capture functions as definer', () => {
@@ -10,6 +12,36 @@ test('P0b-8 pins the revision guard as invoker and the capture functions as defi
 });
 test('retired shared-write capability is absent', () => {
   assert(!Object.keys(expected.functions).some(name => name.startsWith('outbox_contract.')));
+});
+
+test('PIN_TRIGGERS matches a fresh disposable main plus Inbox catalog', { skip: !process.env.E2E_CI_SUPABASE_DB_URL || process.env.E2E_DISPOSABLE_DATABASE !== '1' }, async () => {
+  const db = new pg.Client({ connectionString: process.env.E2E_CI_SUPABASE_DB_URL });
+  await db.connect();
+  try {
+    const rows = await readTriggerPinRows(db);
+    assertTriggerPinRows(rows, 'post');
+  } finally {
+    await db.end();
+  }
+});
+
+test('PIN_TRIGGERS is stable across session search_path values', { skip: !process.env.E2E_CI_SUPABASE_DB_URL || process.env.E2E_DISPOSABLE_DATABASE !== '1' }, async () => {
+  const db = new pg.Client({ connectionString: process.env.E2E_CI_SUPABASE_DB_URL });
+  await db.connect();
+  try {
+    const paths = ['', 'public', '"$user",public,extensions'];
+    const hashes = [];
+    for (const searchPath of paths) {
+      await db.query("select set_config('search_path',$1,false)", [searchPath]);
+      const rows = await readTriggerPinRows(db);
+      assertTriggerPinRows(rows, 'post');
+      hashes.push(Object.fromEntries(rows.map(row => [row.tgname, createHash('sha256').update(row.definition).digest('hex')])));
+    }
+    assert.deepEqual(hashes[1], hashes[0]);
+    assert.deepEqual(hashes[2], hashes[0]);
+  } finally {
+    await db.end();
+  }
 });
 
 test('PIN_FUNCTIONS rejects RESET search_path on a pinned definer', async () => {

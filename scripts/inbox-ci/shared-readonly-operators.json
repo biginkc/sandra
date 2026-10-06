@@ -1,0 +1,10 @@
+{
+  "operator_scripts": [
+    "scripts/inbox-ci/shared-readonly-operators.json",
+    "scripts/inbox-ci/seal-shared-readonly.mjs",
+    "scripts/outbox-db-contract-readonly.mjs",
+    "scripts/outbox-db-contract/catalog-sections.mjs",
+    "scripts/outbox-db-contract/plan-contract.mjs",
+    "scripts/outbox-db-contract/connection.mjs"
+  ]
+}

@@ -165,10 +165,29 @@ def verify_backend_source_content(manifest: dict[str, Any], packet: str) -> dict
             if pinned_hash != expected:
                 mismatches.append(f"{group}:{path}: pinned hash {pinned_hash} != manifest {expected}")
                 continue
+            worktree_expected = expected
+            correction = entry.get("reviewed_correction")
+            if correction is not None:
+                reviewed_paths = {
+                    "operation_domain_apply": "experiments/inbox-operation-domain/restrictive-apply.sql",
+                    "reply_context": "experiments/inbox-reply-boundary/context.sql",
+                }
+                if group != "sql_sources" or path != reviewed_paths.get(entry.get("name")) or not isinstance(correction, dict):
+                    mismatches.append(f"{group}:{path}: unexpected reviewed correction")
+                    continue
+                correction_base = correction.get("base_commit")
+                worktree_expected = correction.get("sha256")
+                if correction_base != commit or not isinstance(worktree_expected, str) or not re.fullmatch(r"[0-9a-f]{64}", worktree_expected) or not isinstance(correction.get("bytes"), int):
+                    mismatches.append(f"{group}:{path}: invalid reviewed correction pin")
+                    continue
+                corrected_path = repository / path
+                if not corrected_path.is_file() or corrected_path.stat().st_size != correction["bytes"] or sha256(corrected_path) != worktree_expected:
+                    mismatches.append(f"{group}:{path}: reviewed correction content drift")
+                    continue
             worktree_path = repository / path
             if not worktree_path.is_file():
                 mismatches.append(f"{group}:{path}: source worktree file is missing")
-            elif sha256(worktree_path) != expected:
+            elif sha256(worktree_path) != worktree_expected:
                 mismatches.append(f"{group}:{path}: source worktree content drifted from reviewed hash")
             if group == "sql_sources" and expected not in packet_markers:
                 mismatches.append(f"{group}:{path}: generated packet omits its source hash marker")
@@ -507,6 +526,9 @@ def verify_execution_stack_manifest() -> dict[str, Any]:
             continue
         if entry.get("sha256") != backend_roles.get(entry.get("source")):
             return result("FAIL", f"{entry.get('service')} role hash is not tied to the backend packet")
+        backend_packet = ROOT / str(entry.get("packet", ""))
+        if entry.get("packet") != backend_manifest.get("sql_packet", {}).get("path") or entry.get("packet_sha256") != backend_manifest.get("sql_packet", {}).get("sha256") or not backend_packet.is_file() or sha256(backend_packet) != entry.get("packet_sha256"):
+            return result("FAIL", f"{entry.get('service')} executable packet hash is not tied to the backend packet")
     electric_order = next((entry for entry in order if isinstance(entry, dict) and entry.get("service") == "electric"), None)
     if not isinstance(electric_order, dict):
         return result("FAIL", "Electric role/publication packet is missing from install order")
