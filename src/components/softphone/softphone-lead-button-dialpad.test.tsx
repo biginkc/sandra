@@ -23,6 +23,7 @@ import { StrictMode } from "react";
 import { CallLockProvider, useCallLock } from "@/components/calls/call-lock-context";
 import type { CallLock } from "@/lib/calls/call-lock";
 import { useApiDial } from "@/app/(dashboard)/my-leads/_components/use-api-dial";
+import { useOptionalDialpadCall } from "@/components/dialpad/dialpad-call-context";
 import { DialpadCallProvider } from "@/components/dialpad/dialpad-call-provider";
 import { SoftphoneLeadButton } from "./softphone-lead-button";
 
@@ -357,5 +358,62 @@ describe.each([
     );
     expect(probe.lock?.holder()).toBe("dialpad");
     expect(screen.getByText("Call with coach")).toBeDisabled();
+  });
+});
+
+describe("one instance, one flight (N18)", () => {
+  const leadB = { ...lead, id: "44444444-4444-4444-8444-444444444444", name: "Seller Two" };
+  function Direct() {
+    const dialpad = useOptionalDialpadCall();
+    const go = (target: typeof lead) =>
+      dialpad?.startCall({ propertyId: target.id, contactId: target.contactId, label: target.name, onFallback: () => {} });
+    return (
+      <>
+        <button type="button" onClick={() => go(lead)}>dial A</button>
+        <button type="button" onClick={() => go(leadB)}>dial B</button>
+      </>
+    );
+  }
+  const renderDirect = () =>
+    render(
+      <CallLockProvider>
+        <LockProbe />
+        <DialpadCallProvider enabled>
+          <Direct />
+        </DialpadCallProvider>
+      </CallLockProvider>,
+    );
+
+  it("refuses a different lead while holding in an uncertain state, keeps the lock, and still allows the same flight", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockRejectedValueOnce(new Error("network"));
+    renderDirect();
+    await user.click(screen.getByText("dial A"));
+    await screen.findByText(/could not confirm/);
+    expect(probe.lock?.holder()).toBe("dialpad");
+
+    await user.click(screen.getByText("dial B"));
+    expect(mocks.dialLeadAction).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText(/Finish your current call before starting another/)).toBeInTheDocument();
+    expect(screen.getByText(/could not confirm/)).toBeInTheDocument();
+    expect(probe.lock?.holder()).toBe("dialpad");
+
+    mocks.dialLeadAction.mockResolvedValueOnce({ ok: true, intentId: "i1", state: "awaiting_provider", uncertain: false, phoneSlot: 1 });
+    await user.click(screen.getByText("dial A"));
+    await waitFor(() => expect(mocks.dialLeadAction).toHaveBeenCalledTimes(2));
+    expect(mocks.dialLeadAction.mock.calls[1]![0]).toMatchObject({ propertyId: lead.id });
+    expect(probe.lock?.holder()).toBe("dialpad");
+  });
+
+  it("refuses a different lead while a call is live", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockResolvedValue({ ok: true, intentId: "i1", state: "awaiting_provider", uncertain: false, phoneSlot: 1 });
+    renderDirect();
+    await user.click(screen.getByText("dial A"));
+    await screen.findByTestId("dialpad-call-status");
+    await user.click(screen.getByText("dial B"));
+    expect(mocks.dialLeadAction).toHaveBeenCalledTimes(1);
+    expect(await screen.findByTestId("dial-notice")).toHaveTextContent("Finish your current call");
+    expect(probe.lock?.holder()).toBe("dialpad");
   });
 });

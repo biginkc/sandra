@@ -29,6 +29,13 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
   const lock = useCallLock();
   // This hook instance owns the lock only through its own token; another instance can neither take nor free it.
   const [token] = useState(() => Symbol("dialpad"));
+  // The lead this instance holds the lock for. Same-token re-acquire is only for that same flight; any other lead is refused.
+  const heldFor = useRef<string | null>(null);
+  const [lockNotice, setLockNotice] = useState<string | null>(null);
+  const freeLock = () => {
+    heldFor.current = null;
+    lock.release(token);
+  };
   const [dialFlight, setDialFlight] = useState<DialFlight | null>(null);
   const dialKeys = useRef(new Map<string, { key: string; intentId?: string; uncertain?: boolean }>());
   const dialNonce = useRef(0);
@@ -66,6 +73,11 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     const target = resolveRef.current(propertyId);
     if (!target) return;
     const { label } = target;
+    // Holding the lock in ANY state (live, pending, uncertain, rate-limit countdown) for another lead: refuse, and never release.
+    if (heldFor.current !== null && heldFor.current !== propertyId) {
+      setLockNotice(CALL_LOCK_MESSAGE);
+      return;
+    }
     if (!target.contactId) {
       setDialFlight({ kind: "error", propertyId, label, message: "This lead has no contact to call." });
       return;
@@ -76,6 +88,8 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
       setDialFlight({ kind: "error", propertyId, label, message: CALL_LOCK_MESSAGE });
       return;
     }
+    setLockNotice(null);
+    heldFor.current = propertyId;
     // Held through a live call and through a rate-limit countdown; released on every other outcome.
     let keepLock = false;
     dialBusy.current = true;
@@ -114,7 +128,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
       // An earlier attempt that threw may have rung: never fall back to another dialer for it.
       if (outcome.code === "not_configured" && notConfiguredRef.current && !entry.uncertain && !entry.intentId) {
         // The fallback dialer must be able to take the lock.
-        lock.release(token);
+        freeLock();
         // Refused before anything was prepared: the key was never used.
         if (!entry.intentId) releaseDialKeyForProperty(propertyId);
         notConfiguredRef.current(propertyId);
@@ -149,7 +163,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     } finally {
       dialBusy.current = false;
       setDialPending(false);
-      if (!keepLock) lock.release(token);
+      if (!keepLock) freeLock();
     }
   };
 
@@ -175,11 +189,12 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
         releaseDialKeyForProperty(dialFlight.propertyId);
       }
       setDialFlight(null);
+      setLockNotice(null);
       // Dismiss ends a live status, a failed one, and cancels a rate-limit countdown.
-      lock.release(token);
+      freeLock();
     },
     onFinished: (intentId: string, finalStatus: DialpadCallStatus) => {
-      lock.release(token);
+      freeLock();
       // Allowlist: only a call that definitively ended or was cancelled releases its key. expired,
       // failed or anything unexpected keeps it (the call may have rung).
       if (finalStatus.state === "ended" || finalStatus.state === "cancelled") releaseDialKeyForIntent(intentId);
@@ -187,5 +202,5 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     },
   };
 
-  return { dialFlight, dialActive, dialPending, startApiDial, statusHandlers };
+  return { dialFlight, dialActive, dialPending, lockNotice, startApiDial, statusHandlers };
 }

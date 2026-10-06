@@ -15,7 +15,7 @@ import { useApiDial } from "@/app/(dashboard)/my-leads/_components/use-api-dial"
 export function DialpadCallProvider({ enabled, children }: { enabled: boolean; children: ReactNode }) {
   const router = useRouter();
   const requests = useRef(new Map<string, DialpadCallRequest>());
-  const { dialFlight, startApiDial, statusHandlers } = useApiDial(
+  const { dialFlight, lockNotice, startApiDial, statusHandlers } = useApiDial(
     (propertyId) => {
       const request = requests.current.get(propertyId);
       return request ? { contactId: request.contactId, label: request.label, phoneSlot: request.phoneSlot ?? null } : null;
@@ -39,9 +39,9 @@ export function DialpadCallProvider({ enabled, children }: { enabled: boolean; c
   return (
     <DialpadCallContext.Provider value={stable}>
       {children}
-      {enabled && dialFlight ? (
+      {enabled && (dialFlight || lockNotice) ? (
         <div data-testid="dialpad-call-status" className="fixed bottom-4 left-4 z-50 max-w-[calc(100vw-2rem)] md:left-72">
-          <DialStatus flight={dialFlight} {...statusHandlers} onEnded={() => router.refresh()} />
+          <DialStatus flight={dialFlight} notice={lockNotice} {...statusHandlers} onEnded={() => router.refresh()} />
         </div>
       ) : null}
     </DialpadCallContext.Provider>

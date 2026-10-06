@@ -16,6 +16,8 @@ export type DialFlight =
 
 type Props = {
   flight: DialFlight | null;
+  /** A refused second dial ("Finish your current call…"); shown alongside the live flight, never replacing it. */
+  notice?: string | null;
   pollMs?: number;
   onRetry: (propertyId: string) => void;
   onDismiss: () => void;
@@ -55,6 +57,15 @@ export function statusText(status: DialpadCallStatus): string {
 const ROOT = "rounded-md border border-border bg-muted/40 px-3 py-2 text-sm flex flex-wrap items-center gap-2";
 
 export function DialStatus(props: Props) {
+  return (
+    <>
+      {props.notice ? <div data-testid="dial-notice" role="status" className={ROOT}>{props.notice}</div> : null}
+      <DialFlightStatus {...props} />
+    </>
+  );
+}
+
+function DialFlightStatus(props: Props) {
   const { flight } = props;
   if (!flight) return null;
   if (flight.kind === "in_flight") return <InFlight key={`${flight.intentId}:${flight.nonce ?? 0}`} {...props} flight={flight} />;

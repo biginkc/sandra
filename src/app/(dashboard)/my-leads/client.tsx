@@ -625,7 +625,7 @@ export function MyLeadsClient({
     null;
   // ---- API dial (P2 2.7): the shared hook owns the per-lead key lifecycle (also behind the call screen).
   const callLockHolder = useCallLockHolder();
-  const { dialFlight, dialActive, startApiDial, statusHandlers } = useApiDial((propertyId) => {
+  const { dialFlight, dialActive, lockNotice, startApiDial, statusHandlers } = useApiDial((propertyId) => {
     const row = rawRow(propertyId);
     return row ? { contactId: row.contactId ?? null, label: row.homeownerName ?? row.address } : null;
   });
@@ -1352,6 +1352,7 @@ export function MyLeadsClient({
       {dialpad && roster.settings.enabled && (
         <DialStatus
           flight={dialFlight}
+          notice={lockNotice}
           {...statusHandlers}
           onEnded={() => {
             void refresh(true);

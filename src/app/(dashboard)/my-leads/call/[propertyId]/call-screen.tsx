@@ -73,7 +73,7 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false, post
   }, []);
 
   // The same dial path (and per-lead key lifecycle) as the My Leads page.
-  const { dialFlight, dialActive, startApiDial, statusHandlers } = useApiDial((id) =>
+  const { dialFlight, dialActive, lockNotice, startApiDial, statusHandlers } = useApiDial((id) =>
     id === propertyId ? { contactId: lead.homeowner.contactId, label: title } : null,
   );
   const canDial = clickToDial && !!lead.homeowner.contactId && lead.homeowner.phones.length > 0 && !queueRow.contactDnc && !dialActive;
@@ -238,6 +238,7 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false, post
           <div className="w-full">
             <DialStatus
               flight={dialFlight}
+              notice={lockNotice}
               {...statusHandlers}
               onEnded={() => router.refresh()}
             />
