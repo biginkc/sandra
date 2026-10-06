@@ -32,6 +32,9 @@ function deny(kind, target, probe) {
   throw err;
 }
 
+// Announce: the harness proves the guard ran inside THIS pid by finding this line in the log (probe: not a violation).
+try { fs.appendFileSync(LOG, JSON.stringify({ at: new Date().toISOString(), pid: process.pid, kind: "guard_loaded", target: "", probe: true }) + "\n"); } catch { /* no log, no proof: the engine refuses */ }
+
 const origConnect = net.Socket.prototype.connect;
 net.Socket.prototype.connect = function patchedConnect(...args) {
   // net.connect() hands Socket#connect a pre-normalized array [options, cb].

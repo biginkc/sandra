@@ -10,7 +10,7 @@ import { runChaos } from "./engine";
  * the fresh-database proof holds. Short profile: self-test runs can never produce PASS.
  */
 
-export type SelfTestRow = { fault: FaultName; expectedRed: boolean; verdict: string; failingChecks: number[]; ok: boolean; note: string };
+export type SelfTestRow = { fault: FaultName; faultFired: boolean; expectedRed: boolean; verdict: string; failingChecks: number[]; ok: boolean; note: string };
 
 /** The injected defect MUST be caught by at least one of these checks (it may also trip others). `duplicate_send` hits the first provider send the schedule reaches: a dial (1) or a contract send (7, 14). */
 export const EXPECTED_CATCH: Record<FaultName, number[]> = {
@@ -20,19 +20,24 @@ export const EXPECTED_CATCH: Record<FaultName, number[]> = {
   wrong_lead_note: [12],
 };
 
+/** A fault is caught only if it actually fired AND a check it is meant to trip went red: an unrelated failure of the same check earns nothing. */
+export function faultCaught(fault: FaultName, failingChecks: readonly number[], fired: boolean): boolean {
+  return fired && EXPECTED_CATCH[fault].some((id) => failingChecks.includes(id));
+}
+
 export async function runSelfTest(base: StressConfig): Promise<{ ok: boolean; rows: SelfTestRow[] }> {
   const rows: SelfTestRow[] = [];
   const order: FaultName[] = ["none", "duplicate_send", "drop_offer", "wrong_lead_note"];
   for (const fault of order) {
-    const cfg: StressConfig = { ...base, fault, knownFindings: base.knownFindings, runId: `${base.runId}-${fault === "none" ? "control" : fault.replace(/_/g, "")}`.slice(0, 24), runTag: "" };
+    const cfg: StressConfig = { ...base, fault, runId: `${base.runId}-${fault === "none" ? "control" : fault.replace(/_/g, "")}`.slice(0, 24), runTag: "" };
     cfg.runTag = `STRESS-${cfg.runId}`;
     const r = await runChaos({ cfg, profile: "short", resetFirst: true, env: { ...process.env, STRESS_ALLOW_PARTIAL: "1" } });
     const failing = r.summary.checks.filter((c) => !c.ok && !c.deferred).map((c) => c.id);
     const expectedRed = fault !== "none";
     const red = r.summary.verdict === "FAIL";
-    const caught = EXPECTED_CATCH[fault].some((id) => failing.includes(id));
+    const caught = faultCaught(fault, failing, r.faultFired);
     const ok = expectedRed ? red && caught : r.summary.verdict === "PARTIAL_PASS";
-    rows.push({ fault, expectedRed, verdict: r.summary.verdict, failingChecks: failing, ok, note: expectedRed ? (caught ? "caught by the intended check" : `NOT caught by any of checks ${EXPECTED_CATCH[fault].join(",")}`) : r.summary.reasons.join("; ") || "clean control held" });
+    rows.push({ fault, faultFired: r.faultFired, expectedRed, verdict: r.summary.verdict, failingChecks: failing, ok, note: expectedRed ? (caught ? "caught by the intended check" : r.faultFired ? `NOT caught by any of checks ${EXPECTED_CATCH[fault].join(",")}` : "the injected fault never fired") : r.summary.reasons.join("; ") || "clean control held" });
   }
   return { ok: rows.every((r) => r.ok), rows };
 }

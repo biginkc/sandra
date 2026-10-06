@@ -40,9 +40,7 @@ export type OracleInput = {
   records: readonly TickRecord[];
   /** Browser-lane ticks that were scheduled but not executed in this run (replay scope). */
   browserDeferred: boolean;
-  knownFindings?: readonly string[];
   /** Filled by the checks: findings that matched an allowlist entry (reported, not failed). */
-  toleratedFindings?: string[];
 };
 
 const P = "(select id from public.properties where org_id=$1 and address like $2 || '%')";
@@ -116,7 +114,9 @@ export async function safetyInvariants(i: OracleInput): Promise<Check[]> {
   ]));
 
   // 7. Resend detection via receipts: outbound messages per send_key <= 1; an `uncertain` reminder adds no further message.
-  out.push(mk(7, "no resend (provider receipts)", "invariant", [
+  out.push(mk(7, "no resend (provider receipts); no non-mock outbound", "invariant", [
+    // N5: the run is stub/test only. Any outbound message from a provider other than the mock is a live send and turns the run red.
+    ...(await rows(i, `select id, provider from public.messages where org_id=$1 and $2::text is not null and direction='outbound' and provider <> 'mock' and created_at >= $3`, [i.runStart])),
     ...(await rows(i, `select idempotency_key, count(*)::int n from public.messages where org_id=$1 and direction='outbound' and property_id in ${P} and idempotency_key is not null group by idempotency_key having count(*)>1`)),
     ...(await rows(i, `select r.id, count(m.id)::int messages from public.seller_appointment_reminders r join public.messages m on m.idempotency_key=r.send_key where r.org_id=$1 and r.property_id in ${P} and r.status='uncertain' group by r.id having count(m.id)>1`)),
     ...[...(function* () { const per = new Map<string, number>(); for (const s of i.stub.sends()) if (s.key) per.set(s.key, (per.get(s.key) ?? 0) + 1); for (const [k, n] of per) if (n > 1) yield { source: "stub_contract_send", request: k, sends: n }; })()],

@@ -43,6 +43,8 @@ const defaultReadFile = (p: string): string | null => (existsSync(p) ? readFileS
 
 /** Resolves the owned numbers at run time. Nothing is persisted; the refs (never the values) are what the env carries. */
 export function resolveOwnedNumbers(env: Env, deps: LiveDeps = {}): { cell: string; telnyx: string } {
+  // The default reader shells out to `op`: only in service-account mode (a desktop session would silently use the personal account).
+  if (!deps.opRead && !env.OP_SERVICE_ACCOUNT_TOKEN) throw new Error("OP_SERVICE_ACCOUNT_TOKEN is not set: refusing to run `op read` (BMH service account only)");
   const opRead = deps.opRead ?? defaultOpRead;
   const read = (name: string) => {
     const ref = env[name];
@@ -103,6 +105,17 @@ export async function liveLegStatus(cfg: StressConfig, env: Env, deps: LiveDeps 
   const shaOk = report ? new RegExp(`^- SHA: ${cfg.sha}\\s*$`, "m").test(report) && cfg.sha !== "unknown" : false;
   const fullOk = report ? /^- Profile: full, scope: full, fault: none\s*$/m.test(report) : false;
   add("stubbed_leg_passed_at_this_sha", passLine && shaOk && fullOk, report ? `report ${passLine ? "is PASS" : "is not PASS"}, sha ${shaOk ? "matches" : "does not match"}, profile/scope ${fullOk ? "full" : "not full/full/no-fault"}` : "STRESS_STUB_LEG_REPORT is not set or unreadable");
+
+  // The PASS must include the OS egress proof (it is required for any PASS; checked again here from the report itself).
+  const osProven = report ? /^- OS egress: proven\s*$/m.test(report) : false;
+  add("stubbed_leg_os_egress_proven", osProven, report ? `report ${osProven ? "records" : "does not record"} a proven OS egress ring` : "no stubbed-leg report");
+  const guardProven = report ? /^- App egress guard: proven in pid \d+\s*$/m.test(report) : false;
+  add("stubbed_leg_app_guard_proven", guardProven, report ? `report ${guardProven ? "records" : "does not record"} the guard proven inside the app` : "no stubbed-leg report");
+  // And a passing self-test at this sha (the harness must be shown able to fail).
+  const stText = env.STRESS_SELFTEST_REPORT ? readFile(env.STRESS_SELFTEST_REPORT) : null;
+  let stOk = false;
+  try { const st = stText ? JSON.parse(stText) as { sha?: string; ok?: boolean; rows?: Array<{ ok?: boolean; fault?: string; faultFired?: boolean }> } : null; stOk = !!st && st.ok === true && st.sha === cfg.sha && cfg.sha !== "unknown" && Array.isArray(st.rows) && st.rows.length >= 4 && st.rows.every((r) => r.ok === true && (r.fault === "none" || r.faultFired === true)); } catch { stOk = false; }
+  add("selftest_passed_at_this_sha", stOk, stText ? (stOk ? "self-test report is ok at this sha with every fault fired and caught" : "self-test report is not a pass at this sha") : "STRESS_SELFTEST_REPORT is not set or unreadable");
 
   // Decisions that belong to people (all default off).
   add("decision_sms_string_approved", cfg.decisions.testSmsStringApproved, "Jarrad approved the string `SANDRA TEST <run-id> <n> ignore` (STRESS_TEST_SMS_STRING_APPROVED=1)");

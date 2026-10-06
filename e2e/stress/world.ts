@@ -53,8 +53,9 @@ export type World = {
 };
 
 export function leadPhone(i: number): string {
-  if (!Number.isInteger(i) || i < 0 || i > 8999) throw new Error("lead index out of range");
-  return `+1816555${String(1000 + i)}`;
+  // Only the reserved fictional block 555-0100..0199 (0199 is the harness's unmatched-number probe), so a stray real send could never reach a real subscriber.
+  if (!Number.isInteger(i) || i < 0 || i > 98) throw new Error("lead index out of range (0..98)");
+  return `+1816555${String(100 + i).padStart(4, "0")}`;
 }
 
 export async function setupWorld(db: Db, cfg: StressConfig, env: Readonly<Record<string, string | undefined>> = process.env): Promise<World> {

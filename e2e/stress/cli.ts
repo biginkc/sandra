@@ -66,6 +66,11 @@ async function main(): Promise<number> {
     assertStressLane(cfg, process.env);
     const r = await runSelfTest(cfg);
     console.log(JSON.stringify(r.rows, null, 2));
+    // Recorded for the live leg: a passing self-test at THIS sha is a prerequisite (STRESS_SELFTEST_REPORT points at it).
+    const out = path.resolve(cfg.artifactsRoot, `selftest-${cfg.sha.slice(0, 12)}.json`);
+    mkdirSync(path.dirname(out), { recursive: true });
+    writeFileSync(out, JSON.stringify({ sha: cfg.sha, ok: r.ok, at: new Date().toISOString(), rows: r.rows }, null, 2));
+    console.log(`self-test report: ${out}`);
     return r.ok ? 0 : 1;
   }
   if (cmd === "run") {

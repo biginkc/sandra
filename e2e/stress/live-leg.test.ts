@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { readConfig } from "./config";
-import { assertLiveLegReady, classifyLiveEvidence, liveCallPlan, liveLegStatus, sendilloSpotCheck, type LiveDeps } from "./live-leg";
+import { assertLiveLegReady, classifyLiveEvidence, liveCallPlan, liveLegStatus, resolveOwnedNumbers, sendilloSpotCheck, type LiveDeps } from "./live-leg";
 import { LaneRefusal } from "./guards";
 
 const SHA = "a".repeat(40);
@@ -23,12 +23,13 @@ const ready: Record<string, string> = {
   STRESS_STUB_LEG_REPORT: "/r/REPORT.md",
   STRESS_DIALPAD_SUBSCRIPTION_PROOF: "/r/proof.txt",
   STRESS_LIVE_WORLD_FILE: "/r/world.json",
+  STRESS_SELFTEST_REPORT: "/r/selftest.json",
   STRESS_OP_REF_CELL: "op://vault/cell/number",
   STRESS_OP_REF_TELNYX: "op://vault/telnyx/number",
 };
 const deps: LiveDeps = {
   opRead: (ref) => (ref.includes("cell") ? "+18165550111" : "+18165550222"),
-  readFile: (p) => (p.endsWith("REPORT.md") ? `# Chaos day live1: PASS\n\n- SHA: ${SHA}\n- Profile: full, scope: full, fault: none\n` : p.endsWith("world.json") ? JSON.stringify({ orgId: "o", repUserId: "u" }) : p.endsWith("proof.txt") ? "subscription https://stress-tunnel.example.net ok" : null),
+  readFile: (p) => (p.endsWith("REPORT.md") ? `# Chaos day live1: PASS\n\n- SHA: ${SHA}\n- Profile: full, scope: full, fault: none\n- OS egress: proven\n- App egress guard: proven in pid 4242\n` : p.endsWith("selftest.json") ? JSON.stringify({ sha: SHA, ok: true, rows: [{ fault: "none", ok: true, faultFired: false }, { fault: "duplicate_send", ok: true, faultFired: true }, { fault: "drop_offer", ok: true, faultFired: true }, { fault: "wrong_lead_note", ok: true, faultFired: true }] }) : p.endsWith("world.json") ? JSON.stringify({ orgId: "o", repUserId: "u" }) : p.endsWith("proof.txt") ? "subscription https://stress-tunnel.example.net ok" : null),
 };
 const status = (env: Record<string, string | undefined>, d: LiveDeps = deps) => liveLegStatus(readConfig(env), env, d);
 
@@ -42,7 +43,7 @@ describe("live leg gating (disabled by default, refuses unless every prerequisit
     expect((await status(ready)).ready).toBe(true);
   });
   it("any single missing prerequisite blocks it", async () => {
-    const keys = ["STRESS_LIVE_LEG", "STRESS_TEST_SMS_STRING_APPROVED", "STRESS_DIALPAD_LIVE_JARRAD_PRESENT", "STRESS_ROOT_BROWSER_CONTEXT", "STRESS_ROOT_PROD_DIALPAD_NO_SUBSCRIPTION", "STRESS_DIALPAD_DESKTOP_CONFIRMED", "STRESS_TUNNEL_URL", "STRESS_STUB_LEG_REPORT", "STRESS_DIALPAD_SUBSCRIPTION_PROOF", "STRESS_LIVE_WORLD_FILE", "STRESS_OP_REF_CELL", "STRESS_OP_REF_TELNYX", "STRESS_ARTIFACTS_DIR"];
+    const keys = ["STRESS_LIVE_LEG", "STRESS_TEST_SMS_STRING_APPROVED", "STRESS_DIALPAD_LIVE_JARRAD_PRESENT", "STRESS_ROOT_BROWSER_CONTEXT", "STRESS_ROOT_PROD_DIALPAD_NO_SUBSCRIPTION", "STRESS_DIALPAD_DESKTOP_CONFIRMED", "STRESS_TUNNEL_URL", "STRESS_STUB_LEG_REPORT", "STRESS_DIALPAD_SUBSCRIPTION_PROOF", "STRESS_LIVE_WORLD_FILE", "STRESS_SELFTEST_REPORT", "STRESS_OP_REF_CELL", "STRESS_OP_REF_TELNYX", "STRESS_ARTIFACTS_DIR"];
     for (const k of keys) {
       const env = { ...ready, [k]: undefined };
       expect((await status(env)).ready, `without ${k}`).toBe(false);
@@ -87,5 +88,29 @@ describe("live leg content rules", () => {
     expect(classifyLiveEvidence(step, { callId: "1", terminalState: "hangup", cause: "timeout", attemptMatched: true })).toBe("verified");
     expect(classifyLiveEvidence(step, { callId: "1", terminalState: null, cause: null, attemptMatched: false })).toBe("unverified");
     expect(classifyLiveEvidence(liveCallPlan()[7]!, { callId: null, terminalState: null, cause: null, attemptMatched: false, refused: true })).toBe("verified");
+  });
+});
+
+describe("live leg prerequisites added after review B1/N1 (e)", () => {
+  const withReport = (body: string) => ({ ...deps, readFile: (p: string) => (p.endsWith("REPORT.md") ? body : deps.readFile!(p)) });
+  const base = `# Chaos day live1: PASS\n\n- SHA: ${SHA}\n- Profile: full, scope: full, fault: none\n`;
+  it("a PASS report without OS egress proof, or without the app guard proof, does not unlock it", async () => {
+    expect((await status(ready, withReport(`${base}- App egress guard: proven in pid 7\n`))).ready).toBe(false);
+    expect((await status(ready, withReport(`${base}- OS egress: NOT proven\n- App egress guard: proven in pid 7\n`))).ready).toBe(false);
+    expect((await status(ready, withReport(`${base}- OS egress: proven\n- App egress guard: NOT proven\n`))).ready).toBe(false);
+    expect((await status(ready, withReport(`${base}- OS egress: proven\n- App egress guard: proven in pid 7\n`))).ready).toBe(true);
+  });
+  const withSelftest = (json: unknown) => ({ ...deps, readFile: (p: string) => (p.endsWith("selftest.json") ? JSON.stringify(json) : deps.readFile!(p)) });
+  const rows = (over: Record<string, unknown> = {}) => [{ fault: "none", ok: true, faultFired: false }, { fault: "duplicate_send", ok: true, faultFired: true, ...over }, { fault: "drop_offer", ok: true, faultFired: true }, { fault: "wrong_lead_note", ok: true, faultFired: true }];
+  it("needs a passing self-test at this sha in which every fault fired", async () => {
+    expect((await status(ready, withSelftest({ sha: SHA, ok: true, rows: rows() }))).ready).toBe(true);
+    expect((await status(ready, withSelftest({ sha: SHA, ok: false, rows: rows() }))).ready).toBe(false);
+    expect((await status(ready, withSelftest({ sha: "b".repeat(40), ok: true, rows: rows() }))).ready).toBe(false);
+    expect((await status(ready, withSelftest({ sha: SHA, ok: true, rows: rows({ faultFired: false }) }))).ready).toBe(false);
+    expect((await status(ready, withSelftest({ sha: SHA, ok: true, rows: rows({ ok: false }) }))).ready).toBe(false);
+  });
+  it("N1: the default `op read` path refuses unless OP_SERVICE_ACCOUNT_TOKEN is set (injected readers are unaffected)", () => {
+    expect(() => resolveOwnedNumbers({ STRESS_OP_REF_CELL: "op://v/c/n", STRESS_OP_REF_TELNYX: "op://v/t/n" })).toThrow(/OP_SERVICE_ACCOUNT_TOKEN/);
+    expect(resolveOwnedNumbers({ STRESS_OP_REF_CELL: "op://v/c/n", STRESS_OP_REF_TELNYX: "op://v/t/n" }, { opRead: (r) => (r.includes("/c/") ? "+18165550111" : "+18165550222") }).cell).toBe("+18165550111");
   });
 });

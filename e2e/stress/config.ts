@@ -44,8 +44,8 @@ export type StressConfig = {
   drainMaxMs: number;
   /** Fault injection for the harness self-test: none | duplicate_send | drop_offer | wrong_lead_note. */
   fault: FaultName;
-  /** Explicitly allowlisted findings (default none). A listed finding is REPORTED as known, never silently dropped. */
-  knownFindings: string[];
+  /** Absolute path of the egress log the APP UNDER TEST writes (its STRESS_EGRESS_LOG). Required at T0. */
+  appEgressLog: string;
   decisions: DecisionSwitches;
   /** Every run is tagged; leads, notes and texts carry it. */
   runTag: string;
@@ -103,7 +103,7 @@ export function readConfig(env: Env = process.env): StressConfig {
     invariantIntervalMs: Number(env.STRESS_INVARIANT_INTERVAL_MS ?? 30_000),
     drainMaxMs: Number(env.STRESS_DRAIN_MAX_MS ?? 300_000),
     fault,
-    knownFindings: (env.STRESS_KNOWN_FINDINGS ?? "").split(",").map((x) => x.trim()).filter(Boolean),
+    appEgressLog: env.STRESS_APP_EGRESS_LOG ?? "",
     decisions: readDecisions(env),
     runTag: `STRESS-${runId}`,
   };

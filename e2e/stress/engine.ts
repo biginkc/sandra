@@ -5,6 +5,7 @@ import path from "node:path";
 import { CRON_ROUTES, FaultState, runCron, sleep, TickDeadline, type Ctx } from "./actions";
 import { approvedTestSms, type StressConfig } from "./config";
 import { assertFreshDatabase, asRep, asService, openDb, type Db } from "./db";
+import { appEgressViolations, proveAppUnderTest } from "./app-proof";
 import { egressChildEnv, proveInProcessDenial, proveOsDenial, readEgressViolations } from "./egress";
 import { GateController } from "./gates";
 import { assertStressLane, LaneRefusal } from "./guards";
@@ -30,7 +31,7 @@ export type RunOptions = {
   env?: NodeJS.ProcessEnv;
 };
 
-export type RunResult = { summary: RunSummary; dir: string; killed: KillReport | null; exitCode: number };
+export type RunResult = { summary: RunSummary; dir: string; killed: KillReport | null; exitCode: number; /** The self-test credits a fault only if it actually fired. */ faultFired: boolean };
 
 const log = (m: string) => console.log(`[stress ${new Date().toISOString().slice(11, 19)}] ${m}`);
 
@@ -152,7 +153,9 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   for (const f of ["executed.ndjson", "invariants.jsonl", "ordering.jsonl", "stub.ndjson", "egress.jsonl", "browser-results.jsonl", "KILL", "kill-switch.json", "test-org-dump.json"]) rmSync(path.join(dir, f), { force: true });
   const egressLog = path.join(dir, "egress.jsonl");
   proveInProcessDenial(egressLog);
-  if (env.STRESS_REQUIRE_OS_EGRESS === "1") proveOsDenial();
+  // The OS ring is required for a PASS (and so for the live leg). Without it the run can be at most PARTIAL_PASS; with it set, the probe must see a denial.
+  let osEgressProven = false;
+  if (env.STRESS_REQUIRE_OS_EGRESS === "1") { proveOsDenial(); osEgressProven = true; }
   log(`lane guards passed; egress guard proven; artifacts ${dir}`);
 
   const manifest: Manifest = buildManifest(cfg.seed, cfg.runTag, { profile });
@@ -172,7 +175,10 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   let invariantChecks: Check[] = [];
   let outcomeChecks: Check[] = [];
   let pending: string[] = [];
-  let tolerated: string[] = [];
+  let appGuardPid: number | null = null;
+  let faultFiredFlag = false;
+  let appEgressOffset = 0;
+  let faultFiredCheck: () => boolean = () => false;
   let browserExecuted = 0;
   let stopRequested: string | null = null;
   let ticker: NodeJS.Timeout | null = null;
@@ -193,14 +199,21 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
       if (!("status" in probe) || probe.status === 0) throw new LaneRefusal("PROXY_PROBE_FAILED", "the gate proxy could not reach the app under test");
     }
 
+    // T0, before any provider-capable action: the app under test carries the guard, logs to its own file, and every provider is stub/test.
+    appEgressOffset = cfg.appEgressLog && existsSync(cfg.appEgressLog) ? statSync(cfg.appEgressLog).size : 0;
+    if (cfg.stubPort <= 0) throw new LaneRefusal("STUB_PORT_REQUIRED", "STRESS_STUB_PORT must be a fixed port: the app under test is started with DROPBOX_SIGN_API_BASE_URL pointing at it.");
+    appGuardPid = proveAppUnderTest({ appUrl: cfg.appUrl, appEgressLog: cfg.appEgressLog, stubUrl: stub.url }).pid;
+    log(`app under test proven: egress guard loaded in pid ${appGuardPid}, providers stub/test`);
     world = await setupWorld(db, cfg);
+    const dbxMode = await db.query<{ test_mode: boolean }>("select test_mode from public.org_esign_integrations where org_id=$1", [cfg.orgId]);
+    if (dbxMode.rowCount !== 1 || dbxMode.rows[0]!.test_mode !== true) throw new LaneRefusal("ESIGN_NOT_TEST_MODE", "the e-sign connection is not in Dropbox Sign test mode.");
     writeFileSync(path.join(dir, "world.json"), JSON.stringify({ orgId: world.orgId, repUserId: world.repUserId, connectionId: world.connectionId, templateId: world.templateId, leads: world.leads.map((l) => ({ slot: l.slot, propertyId: l.propertyId, contactId: l.contactId, phone: l.phoneE164, address: l.address })) }, null, 1));
     // Binding proof: the app under test and the database handle are ONE stack. A signed webhook for a number with no lead
     // is stored by the app; the row must appear through the harness's own database URL.
     const probeCall = `7${String(cfg.seed % 1e9).padStart(9, "0")}000`;
     const { sendCallEvents } = await import("./actions");
     const ctxProbe: Ctx = { cfg, db, world, stub, faults: new FaultState("none"), sleep };
-    await sendCallEvents(ctxProbe, { ...world.leads[0]!, phoneE164: "+18165559999" }, { callId: probeCall, order: ["calling"], direction: "inbound" });
+    await sendCallEvents(ctxProbe, { ...world.leads[0]!, phoneE164: "+18165550199" }, { callId: probeCall, order: ["calling"], direction: "inbound" });
     const seen = await db.query("select 1 from public.dialpad_call_events where org_id=$1 and provider_call_id=$2", [cfg.orgId, probeCall]);
     if (seen.rowCount !== 1) throw new LaneRefusal("BINDING_PROOF_FAILED", "the app's webhook write did not appear in the harness database: app and database are not the same stack");
     const authUser = await db.query("select 1 from auth.users where id=$1", [world.repUserId]);
@@ -208,6 +221,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     log("four bindings proven (app, supabase api, database, cron target) and both stubs probed");
 
     const faults = new FaultState(cfg.fault);
+    faultFiredCheck = () => faults.fired;
     const ctx: Ctx = { cfg, db, world, stub, faults, sleep };
     const spareLead = world.leads[world.leads.length - 1]!;
     levers = await demonstrateLevers(ctx, spareLead as never);
@@ -215,7 +229,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     if (levers.some((l) => !l.ok)) throw new LaneRefusal("LEVER_NOT_DEMONSTRATED", levers.filter((l) => !l.ok).map((l) => `${l.lever}: ${l.detail}`).join("; "));
 
     runStart = new Date();
-    oracleInput = { db, orgId: cfg.orgId, runTag: cfg.runTag, runStart, world, stub, schedule: manifest.ticks, records, browserDeferred: cfg.scope !== "full", knownFindings: cfg.knownFindings, toleratedFindings: [] };
+    oracleInput = { db, orgId: cfg.orgId, runTag: cfg.runTag, runStart, world, stub, schedule: manifest.ticks, records, browserDeferred: cfg.scope !== "full" };
     const killFile = path.join(dir, "KILL");
 
     // Background: invariants every interval + a random sweep, kill file, watchdog state.
@@ -275,7 +289,6 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
       outcomeChecks = outcomeChecks.map((c) => (c.id === 16 ? { ...c, deferred: undefined, ok: parity?.ok === true, violations: parity?.ok === true ? [] : [{ rule: "rendered_parity", error: parity?.error ?? "no result recorded" }] } : c));
     }
     pending = await pendingJarradObservations(oracleInput);
-    tolerated = oracleInput.toleratedFindings ?? [];
     if (stopRequested) setupErrors.push(stopRequested);
   } catch (e) {
     setupErrors.push(e instanceof LaneRefusal ? `${e.code}: ${e.message}` : `run aborted: ${(e as Error).message}`);
@@ -286,7 +299,10 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   }
 
   // Egress and server-log verdicts.
-  const egress = readEgressViolations(egressLog);
+  faultFiredFlag = faultFiredCheck();
+  // Denials from the harness's own processes AND from the app server (its own log); any denial fails the run.
+  const egressApp = appEgressViolations(cfg.appEgressLog, appEgressOffset);
+  const egress = [...readEgressViolations(egressLog), ...egressApp.map((t) => ({ at: "", kind: "app", target: t, pid: 0 }))];
   const serverProblems: string[] = [];
   const offlineGestures = records.filter((r) => r.actor === "browser" && r.steps.some((st) => st.startsWith("provider sends while offline"))).length;
   if (appLog) for (const l of scanServerLog(appLog, appLogOffset, { injectedOfflineFetchFailures: offlineGestures })) serverProblems.push(`server log: ${l}`);
@@ -304,10 +320,10 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     }
   }
 
-  const summary = decide({ cfg, manifest, records, invariantChecks, outcomeChecks, egressViolations: egress.length, serverProblems, killed: failedAny ? killed : null, setupErrors, browserExecuted });
+  const summary = decide({ cfg, manifest, records, invariantChecks, outcomeChecks, egressViolations: egress.length, osEgressProven, serverProblems, killed: failedAny ? killed : null, setupErrors, browserExecuted });
   writeFileSync(path.join(dir, "invariants.final.json"), JSON.stringify(summary.checks, null, 1));
   writeReport(dir, {
-    cfg, manifest, summary, pending, tolerated, levers, killed,
+    cfg, manifest, summary, pending, osEgressProven, appGuardPid, levers, killed,
     stubCounts: { dials: stub?.dials().length ?? 0, sends: stub?.sends().length ?? 0 },
     elapsedMs: Date.now() - t0,
     repro: `CHAOS_SEED=${cfg.seed} STRESS_PROFILE=${profile} STRESS_SCOPE=${cfg.scope} STRESS_FAULT=${cfg.fault} STRESS_SHA=${cfg.sha} tsx e2e/stress/cli.ts run   # same seed + the recorded schedule.ndjson + a fresh stack`,
@@ -318,7 +334,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
 
   const exit = summary.verdict === "PASS" ? 0 : summary.verdict === "PARTIAL_PASS" ? (env.STRESS_ALLOW_PARTIAL === "1" ? 0 : 3) : 1;
   log(`${summary.verdict} (${summary.reasons.length} reason(s)); report ${path.join(dir, "REPORT.md")}`);
-  return { summary, dir, killed, exitCode: exit };
+  return { summary, dir, killed, exitCode: exit, faultFired: faultFiredFlag };
 }
 
 async function executeTick(ctx: Ctx, tick: Tick, lead: World["leads"][number] | null, deadlineMs: number): Promise<TickRecord> {
