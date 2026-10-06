@@ -73,7 +73,7 @@ non-loopback endpoint; a subscription proof for that tunnel; both owned numbers 
 3. The plan's "call_activities grouped by `dialpad_call_id`" is `provider_call_id` in the schema; the invariant uses that.
 4. A seller reminder to a seller with no prior SMS thread is skipped as `opening_identity_required` (the approved copy says "Jarrad with BMH Group", the rule wants "Mel with BMH"). The harness seeds a seller reply first so the reminder path is exercised, and reports the skipped count.
 5. Dial guards (rate 4/min, 20 s in flight, per-lead unresolved) live in TypeScript and are non-atomic by design ("accepted race"); a real day therefore paces itself (a few minutes for the replay leg; the plan's 60-90 min is dominated by the live drain).
-6. Second-tab prompt save (fresh keys) is accepted by the finalize function and writes a second note: the plan expects one. Reported as the known finding `second_tab_duplicate_note`; it is a FAILURE by default and is tolerated only when `STRESS_KNOWN_FINDINGS=second_tab_duplicate_note` is set (the self-test sets it so its control run can be clean).
+6. (Resolved by #823, now on main.) A second tab's fresh-key prompt save used to write a second note; the finalize is now single-shot per attempt and the second tab's save is refused. The harness no longer tolerates it.
 7. Supersede is modelled with one contract (the projection exists before the stale offer, as in the integration test); the plan's "2 contracts by revision" needs a failed-send retry chain and is not modelled.
 8. The Dialpad `initiate_call` stub on `main` is in-process (`DIALPAD_DIAL_PROVIDER=stub`), so the Next server's own dial cannot reach the harness stub server. The replay engine models the dial server action (guards, authorize, then a POST to the stub) and the browser lane drives the real Call button against the in-process stub with intent rows as the evidence. A base-URL seam for Dialpad would close this.
 9. `kpi-snapshot.mjs` refuses any non-production database, so oracle 15 calls `fn_get_acquisition_kpis` directly and uses `kpi-rules.mjs` (every key classified; `EQUAL_IN_CLOSED_WINDOWS` keys equal to the schedule's totals).
@@ -95,7 +95,7 @@ Debug aids (never a PASS): `STRESS_DEBUG_SKIP_REPLAY=1`, `STRESS_DEBUG_BROWSER_G
 
 ## Still open (read before the real run)
 
-- Last local full run (replay + 12 browser ticks + rendered parity, `next dev`, throwaway stack): `FAIL` on exactly one check, 12, from the product finding `second_tab_duplicate_note` (finding 6 above). With `STRESS_KNOWN_FINDINGS=second_tab_duplicate_note` the same run is `PASS` (all 16 checks, every mandatory scenario executed, ~10 min). Self-test: control `PARTIAL_PASS`, `duplicate_send` red at 7, `drop_offer` red at 13/14/15, `wrong_lead_note` red at 12.
+- Last local full run (with #823 merged; replay + 12 browser ticks + rendered parity, `next dev`, throwaway stack, no known findings tolerated): `PASS`, all 16 checks, every mandatory scenario executed, ~10 min.
 - OS-level `pf` egress needs sudo and was not applied; `STRESS_REQUIRE_OS_EGRESS=1` proves the ring when it is.
 - The lost-response `sms` instance is realized as a gated reload of the prompt save (the mock provider cannot be gated server-side).
 - Supersede is modelled with one contract (finding 7).

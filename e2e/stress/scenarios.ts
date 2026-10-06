@@ -51,6 +51,8 @@ async function savePromptOnce(ctx: Ctx, tick: Tick, lead: WorldLead, rec: TickRe
   const fin = await finalizeAttempt(ctx, lead, { callActivityId: activity, key: randomUUID(), occurredAt: opts.occurredAt ?? new Date().toISOString(), outcome: tick.expected.attemptOutcome ?? "reached", note: undefined });
   if (!fin.ok) rec.rejections.push({ step: `finalize_tab${tab}`, code: fin.code ?? "?" });
   else if (tab > 1) rec.steps.push(`tab${tab} finalize accepted (duplicate=${String(fin.duplicate)})`);
+  // The fixed client (#823) writes the note and the next step only after positive finalize proof; a refused finalize writes neither.
+  if (!fin.ok) { rec.steps.push(`tab${tab} extras not written (finalize refused)`); return; }
   const m = marker(tick);
   if (m) {
     // Fault wrong_lead_note: the note lands on the NEXT lead (a defect the oracle must catch).

@@ -24,7 +24,7 @@ export async function runSelfTest(base: StressConfig): Promise<{ ok: boolean; ro
   const rows: SelfTestRow[] = [];
   const order: FaultName[] = ["none", "duplicate_send", "drop_offer", "wrong_lead_note"];
   for (const fault of order) {
-    const cfg: StressConfig = { ...base, fault, knownFindings: [...new Set([...base.knownFindings, "second_tab_duplicate_note"])], runId: `${base.runId}-${fault === "none" ? "control" : fault.replace(/_/g, "")}`.slice(0, 24), runTag: "" };
+    const cfg: StressConfig = { ...base, fault, knownFindings: base.knownFindings, runId: `${base.runId}-${fault === "none" ? "control" : fault.replace(/_/g, "")}`.slice(0, 24), runTag: "" };
     cfg.runTag = `STRESS-${cfg.runId}`;
     const r = await runChaos({ cfg, profile: "short", resetFirst: true, env: { ...process.env, STRESS_ALLOW_PARTIAL: "1" } });
     const failing = r.summary.checks.filter((c) => !c.ok && !c.deferred).map((c) => c.id);

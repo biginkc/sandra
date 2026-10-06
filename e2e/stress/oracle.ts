@@ -199,7 +199,7 @@ export async function expectedOutcomes(i: OracleInput): Promise<Check[]> {
     const alts = (t.expected.conflictCode ?? "").split("|").filter(Boolean);
     for (const rej of r.rejections) {
       // A documented conflict is expected here: the schedule names the codes, or the step is the stale/second tab's own write.
-      const allowed = alts.some((a) => rej.code.includes(a)) || /_tab2(_stale)?$/.test(rej.step) || rej.step === "second_tab_send";
+      const allowed = alts.some((a) => rej.code.includes(a)) || /_tab2(_stale)?$/.test(rej.step) || rej.step === "save_tab_two" || rej.step === "second_tab_send";
       if (!allowed) v11.push({ tick: r.tick, rule: "unexpected_rejection", step: rej.step, code: rej.code });
     }
     if (r.error) v11.push({ tick: r.tick, rule: "tick_error", error: r.error });
@@ -222,10 +222,7 @@ export async function expectedOutcomes(i: OracleInput): Promise<Check[]> {
       plannedNotes += 1;
       const onLead = (await i.db.query<{ n: number }>("select count(*)::int n from public.lead_notes where property_id=$1 and body=$2", [r.leadId, body])).rows[0]!.n;
       const elsewhere = (await i.db.query<{ n: number }>("select count(*)::int n from public.lead_notes where property_id<>$1 and body=$2", [r.leadId, body])).rows[0]!.n;
-      if (onLead > 1 && t.scenario === "second_tab_retry" && i.knownFindings?.includes("second_tab_duplicate_note")) {
-        (i.toleratedFindings ??= []).push(`second_tab_duplicate_note: tick ${r.tick} wrote ${onLead} notes with the same body (a second tab's fresh-key save is not rejected; the plan expects one)`);
-        plannedNotes += onLead - 1;
-      } else if (onLead !== 1) v12.push({ tick: r.tick, rule: "note_on_lead", body, observed: onLead });
+      if (onLead !== 1) v12.push({ tick: r.tick, rule: "note_on_lead", body, observed: onLead });
       if (elsewhere > 0) v12.push({ tick: r.tick, rule: "note_on_wrong_lead", body, rows: elsewhere });
     }
   }
