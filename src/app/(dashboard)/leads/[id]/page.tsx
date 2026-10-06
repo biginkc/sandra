@@ -1,3 +1,4 @@
+import { LeadCompsSection } from "./lead-comps-section";
 import { LeadRepSmsComposer } from "./rep-sms-composer";
 import Link from "next/link";
 import { myLeadsHref } from "@/lib/my-leads/links";
@@ -997,6 +998,7 @@ export default async function LeadDetailPage({
           </div>
 
           <aside className="flex min-w-0 flex-col gap-3" aria-label="Lead dossier">
+            <Suspense fallback={<p className="text-sm text-muted-foreground">Loading property valuation…</p>}><LeadCompsSection propertyId={lead.id} /></Suspense>
             <fieldset disabled={training} inert={training || undefined} className="contents"><LeadDripCard propertyId={lead.id} /></fieldset>
             <LeadFilesCard
               files={esign.files}

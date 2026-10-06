@@ -1,6 +1,7 @@
 import "server-only";
 
 import { classifyLegal } from "../normalize";
+import { attomSourceSales } from "../provider-data";
 import { CompProviderError, type CompProvider, type CompSale, type CompSubject, type ProviderCompResult } from "./../types";
 
 /**
@@ -89,9 +90,11 @@ export function mapAvmDetail(body: unknown): Omit<ProviderCompResult, "comps" | 
   return { providerPropertyId: attomId, attomId, asIs, ownerOfRecord: mapOwner(p), legal: mapLegal(p) };
 }
 
-/** Sales comparables mapper. The comparables shape is NOT yet verified against a live key (trial
- * entitlement pending); this reads the documented fields defensively and drops malformed rows. */
+/** ATTOM V2 comparable nodes verified against live data on 2026-10-06.
+ * Undisclosed/zero prices never become priced comps; source rows remain available for display. */
 export function mapComparables(body: unknown): CompSale[] {
+  const sourceSales = attomSourceSales(body);
+  if (sourceSales.length) return sourceSales.filter((c): c is CompSale => c.salePrice !== null);
   const candidates: unknown[] = [];
   const walk = (v: unknown, depth: number) => {
     if (depth > 6) return;
@@ -188,15 +191,18 @@ export function createAttomProvider(opts: AttomProviderOptions): CompProvider {
       }
 
       let comps: CompSale[] = [];
+      let comparables: unknown = null;
+      const compsSearch = {
+        searchType: "Radius", miles: "1", minComps: "3", maxComps: "10", saleDateRange: "12",
+        bedroomsRange: "1", bathroomRange: "1", sqFeetRange: "500",
+      };
       let compsStatus: string = "skipped_no_attom_id";
       if (mapped.attomId) {
-        const cmp = await call(`${ATTOM_COMPS_PATH}/${encodeURIComponent(mapped.attomId)}`, {
-          searchType: "Radius", miles: "1", minComps: "3", maxComps: "10", saleDateRange: "12",
-          bedroomsRange: "1", bathroomsRange: "1", sqFeetRange: "500",
-        }, signal, billed);
+        const cmp = await call(`${ATTOM_COMPS_PATH}/${encodeURIComponent(mapped.attomId)}`, compsSearch, signal, billed);
+        comparables = cmp.body;
         if (cmp.status === 429) throw new CompProviderError("RATE_LIMIT", billed.n, retryAfterSeconds(cmp.res));
         if (cmp.status >= 500) throw new CompProviderError("UPSTREAM", billed.n);
-        if (cmp.status === 200 && cmp.body !== null) {
+        if ((cmp.status === 200 || cmp.status === 206) && cmp.body !== null) {
           comps = mapComparables(cmp.body);
           compsStatus = "ok";
         } else {
@@ -212,7 +218,7 @@ export function createAttomProvider(opts: AttomProviderOptions): CompProvider {
         ownerOfRecord: mapped.ownerOfRecord,
         legal: mapped.legal,
         billedCalls: billed.n,
-        raw: { avm: avm.body as Record<string, unknown>, compsStatus },
+        raw: { avm: avm.body as Record<string, unknown>, comparables, compsStatus, compsSearch },
       };
     },
   };
