@@ -214,6 +214,23 @@ describe("SoftphoneProvider transport gate", () => {
     window.sessionStorage.clear();
   });
 
+  it("holds the lock while the softphone is preparing", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockImplementation(() => new Promise(() => undefined));
+    const user = userEvent.setup();
+    render(
+      <CallLockProvider>
+        <LockProbe />
+        <SoftphoneProvider>
+          <SoftphoneLeadButton lead={lockLead} />
+        </SoftphoneProvider>
+      </CallLockProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("call-preparing")).toBeInTheDocument());
+    expect(lockProbe.lock?.holder()).toBe("softphone");
+  });
+
   it("holds the lock while preparing and releases it when preparation fails", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     prepareLeadCall.mockResolvedValueOnce({ ok: false, error: "No number" });
@@ -242,7 +259,7 @@ describe("SoftphoneProvider transport gate", () => {
         </SoftphoneProvider>
       </CallLockProvider>,
     );
-    expect(lockProbe.lock?.acquire("dialpad")).toBe(true);
+    expect(lockProbe.lock?.acquire("dialpad", Symbol("test"))).toBe(true);
     await user.click(screen.getByTestId("call-lead-button"));
     expect(prepareLeadCall).not.toHaveBeenCalled();
     expect(lockProbe.lock?.holder()).toBe("dialpad");
@@ -261,7 +278,7 @@ describe("SoftphoneProvider transport gate", () => {
     );
     await user.click(screen.getByTestId("header-dialer-button"));
     await user.type(screen.getByTestId("dialer-input"), "3107540662");
-    expect(lockProbe.lock?.acquire("dialpad")).toBe(true);
+    expect(lockProbe.lock?.acquire("dialpad", Symbol("test"))).toBe(true);
     await user.click(screen.getByTestId("dialer-call-manual"));
     expect(prepareManualCall).not.toHaveBeenCalled();
     expect(await screen.findAllByText("Finish your current call before starting another.")).not.toHaveLength(0);

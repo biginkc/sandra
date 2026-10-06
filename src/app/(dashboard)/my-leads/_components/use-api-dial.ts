@@ -27,6 +27,8 @@ export type UseApiDialOptions = {
  */
 export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | null, options: UseApiDialOptions = {}) {
   const lock = useCallLock();
+  // This hook instance owns the lock only through its own token; another instance can neither take nor free it.
+  const [token] = useState(() => Symbol("dialpad"));
   const [dialFlight, setDialFlight] = useState<DialFlight | null>(null);
   const dialKeys = useRef(new Map<string, { key: string; intentId?: string; uncertain?: boolean }>());
   const dialNonce = useRef(0);
@@ -58,7 +60,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     notConfiguredRef.current = options.onNotConfigured;
   });
 
-  useEffect(() => () => lock.release("dialpad"), [lock]);
+  useEffect(() => () => lock.release(token), [lock, token]);
 
   const startApiDial = async (propertyId: string, attempt: number, confirmRedialOf?: string) => {
     const target = resolveRef.current(propertyId);
@@ -70,7 +72,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     }
     if (dialBusy.current || dialActiveRef.current) return;
     // The lowest dial level: every path (click, rate-limit auto-retry, Retry, "Call again anyway") passes here.
-    if (!lock.acquire("dialpad")) {
+    if (!lock.acquire("dialpad", token)) {
       setDialFlight({ kind: "error", propertyId, label, message: CALL_LOCK_MESSAGE });
       return;
     }
@@ -112,7 +114,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
       // An earlier attempt that threw may have rung: never fall back to another dialer for it.
       if (outcome.code === "not_configured" && notConfiguredRef.current && !entry.uncertain && !entry.intentId) {
         // The fallback dialer must be able to take the lock.
-        lock.release("dialpad");
+        lock.release(token);
         // Refused before anything was prepared: the key was never used.
         if (!entry.intentId) releaseDialKeyForProperty(propertyId);
         notConfiguredRef.current(propertyId);
@@ -125,7 +127,8 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
         return;
       }
       if (outcome.code === "rate_limited") {
-        keepLock = true;
+        // Held only while a countdown will retry; after the second attempt the flight just gives up.
+        keepLock = attempt < 2;
         setDialFlight({
           kind: "rate_limited",
           propertyId,
@@ -140,11 +143,13 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     } catch {
       // The request may have reached the server and dialed; the key stays so a retry cannot double-dial.
       entry.uncertain = true;
+      // May have rung: keep the lock until the rep Dismisses the "could not confirm" caution.
+      keepLock = true;
       setDialFlight({ kind: "error", propertyId, label, message: "Sandra could not confirm the call. Check Dialpad before trying again." });
     } finally {
       dialBusy.current = false;
       setDialPending(false);
-      if (!keepLock) lock.release("dialpad");
+      if (!keepLock) lock.release(token);
     }
   };
 
@@ -171,10 +176,10 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
       }
       setDialFlight(null);
       // Dismiss ends a live status, a failed one, and cancels a rate-limit countdown.
-      lock.release("dialpad");
+      lock.release(token);
     },
     onFinished: (intentId: string, finalStatus: DialpadCallStatus) => {
-      lock.release("dialpad");
+      lock.release(token);
       // Allowlist: only a call that definitively ended or was cancelled releases its key. expired,
       // failed or anything unexpected keeps it (the call may have rung).
       if (finalStatus.state === "ended" || finalStatus.state === "cancelled") releaseDialKeyForIntent(intentId);

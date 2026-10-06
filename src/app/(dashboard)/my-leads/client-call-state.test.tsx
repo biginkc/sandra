@@ -232,7 +232,7 @@ describe("MyLeadsClient calling and durable call state", () => {
   it("refuses a Dialpad call while the softphone holds the call lock", async () => {
     mocks.softphone = { callingEnabled: true, openLead: vi.fn() }
     renderClient({ dialpad })
-    expect(lockProbe.lock?.acquire("softphone")).toBe(true)
+    expect(lockProbe.lock?.acquire("softphone", Symbol("test"))).toBe(true)
     await click(screen.getByRole("button", { name: "Start call property-1" }))
     expect(mocks.dialLead).not.toHaveBeenCalled()
     expect(screen.getByText(/Finish your current call before starting another/)).toBeInTheDocument()

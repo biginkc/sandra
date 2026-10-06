@@ -19,8 +19,10 @@ vi.mock("@/app/(dashboard)/my-leads/dialpad-actions", () => ({
   getDialpadCallStatusAction: mocks.getStatus,
 }));
 
+import { StrictMode } from "react";
 import { CallLockProvider, useCallLock } from "@/components/calls/call-lock-context";
 import type { CallLock } from "@/lib/calls/call-lock";
+import { useApiDial } from "@/app/(dashboard)/my-leads/_components/use-api-dial";
 import { DialpadCallProvider } from "@/components/dialpad/dialpad-call-provider";
 import { SoftphoneLeadButton } from "./softphone-lead-button";
 
@@ -164,7 +166,7 @@ describe("SoftphoneLeadButton Dialpad routing", () => {
   it("refuses a Dialpad call while the softphone holds the call lock", async () => {
     const user = userEvent.setup();
     renderButton(true);
-    expect(probe.lock?.acquire("softphone")).toBe(true);
+    expect(probe.lock?.acquire("softphone", Symbol("test"))).toBe(true);
     await user.click(screen.getByTestId("call-lead-button"));
     expect(mocks.dialLeadAction).not.toHaveBeenCalled();
     expect(await screen.findByText(/Finish your current call before starting another/)).toBeInTheDocument();
@@ -199,14 +201,27 @@ describe("SoftphoneLeadButton Dialpad routing", () => {
     await screen.findByTestId("dialpad-call-status");
   });
 
-  it("an error releases the lock and re-enables both buttons", async () => {
+  it("a refusal releases the lock and re-enables both buttons", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockResolvedValueOnce({ ok: false, code: "denied", message: "Your Dialpad account is not verified." });
+    renderButton(true);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByText(/not verified/);
+    expect(probe.lock?.holder()).toBeNull();
+    expect(screen.getByTestId("call-lead-button")).toBeEnabled();
+    expect(screen.getByText("Call with coach")).toBeEnabled();
+  });
+
+  it("after a thrown could-not-confirm request the lock stays held until Dismiss", async () => {
     const user = userEvent.setup();
     mocks.dialLeadAction.mockRejectedValueOnce(new Error("network"));
     renderButton(true);
     await user.click(screen.getByTestId("call-lead-button"));
     await screen.findByText(/could not confirm/);
+    expect(probe.lock?.holder()).toBe("dialpad");
+    expect(screen.getByText("Call with coach")).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(probe.lock?.holder()).toBeNull();
-    expect(screen.getByTestId("call-lead-button")).toBeEnabled();
     expect(screen.getByText("Call with coach")).toBeEnabled();
   });
 
@@ -216,7 +231,7 @@ describe("SoftphoneLeadButton Dialpad routing", () => {
     renderButton(true);
     await user.click(screen.getByTestId("call-lead-button"));
     const again = await screen.findByRole("button", { name: "Call again anyway" });
-    expect(probe.lock?.acquire("softphone")).toBe(true);
+    expect(probe.lock?.acquire("softphone", Symbol("test"))).toBe(true);
     await user.click(again);
     expect(mocks.dialLeadAction).toHaveBeenCalledTimes(1);
     expect(await screen.findByText(/Finish your current call before starting another/)).toBeInTheDocument();
@@ -241,7 +256,7 @@ describe("rate-limit countdown (fake timers)", () => {
     await screen.findByText(/Retrying in/);
     expect(probe.lock?.holder()).toBe("dialpad");
     expect(screen.getByText("Call with coach")).toBeDisabled();
-    expect(probe.lock?.acquire("softphone")).toBe(false);
+    expect(probe.lock?.acquire("softphone", Symbol("test"))).toBe(false);
     await user.click(screen.getByText("Call with coach"));
     expect(mocks.openLead).not.toHaveBeenCalled();
 
@@ -250,6 +265,23 @@ describe("rate-limit countdown (fake timers)", () => {
     });
     await waitFor(() => expect(mocks.dialLeadAction).toHaveBeenCalledTimes(2));
     expect(mocks.openLead).not.toHaveBeenCalled();
+  });
+
+  it("releases the lock and resets the button after the rate limit gives up", async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    mocks.dialLeadAction
+      .mockResolvedValueOnce({ ok: false, code: "rate_limited", message: "slow", retryAfterSeconds: 1, freshAttemptKey: true })
+      .mockResolvedValueOnce({ ok: false, code: "rate_limited", message: "slow", retryAfterSeconds: 1, freshAttemptKey: true });
+    renderButton(true);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByText(/Retrying in/);
+    await act(async () => {
+      vi.advanceTimersByTime(1500);
+    });
+    await screen.findByText(/still rate limiting/);
+    expect(probe.lock?.holder()).toBeNull();
+    expect(screen.getByTestId("call-lead-button")).toBeEnabled();
+    expect(screen.getByText("Call with coach")).toBeEnabled();
   });
 
   it("dismissing the countdown releases the lock", async () => {
@@ -261,5 +293,69 @@ describe("rate-limit countdown (fake timers)", () => {
     await user.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(probe.lock?.holder()).toBeNull();
     expect(screen.getByText("Call with coach")).toBeEnabled();
+  });
+});
+
+function Extra({ onReady }: { onReady: (start: (propertyId: string, attempt: number) => Promise<void>) => void }) {
+  const { startApiDial } = useApiDial(() => ({ contactId: lead.contactId, label: "Other" }));
+  useEffect(() => {
+    onReady(startApiDial);
+  });
+  return null;
+}
+
+describe.each([
+  ["plain", false],
+  ["StrictMode", true],
+])("per-holder lock ownership (%s)", (_name, strict) => {
+  const wrap = (node: React.ReactNode) => (strict ? <StrictMode>{node}</StrictMode> : <>{node}</>);
+
+  it("a second useApiDial mounting and unmounting cannot free the provider's live call lock", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockResolvedValue({ ok: true, intentId: "i1", state: "awaiting_provider", uncertain: false, phoneSlot: 1 });
+    const view = render(
+      wrap(
+        <CallLockProvider>
+          <LockProbe />
+          <DialpadCallProvider enabled>
+            <SoftphoneLeadButton lead={lead} />
+          </DialpadCallProvider>
+        </CallLockProvider>,
+      ),
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(probe.lock?.holder()).toBe("dialpad"));
+
+    // A second Dialpad hook (for example the My Leads page) appears and goes away.
+    let start: ((propertyId: string, attempt: number) => Promise<void>) | null = null;
+    view.rerender(
+      wrap(
+        <CallLockProvider>
+          <LockProbe />
+          <DialpadCallProvider enabled>
+            <SoftphoneLeadButton lead={lead} />
+            <Extra onReady={(fn) => { start = fn; }} />
+          </DialpadCallProvider>
+        </CallLockProvider>,
+      ),
+    );
+    expect(probe.lock?.holder()).toBe("dialpad");
+    // Its own dial is refused while the provider's call holds the lock.
+    await act(async () => {
+      await start?.(lead.id, 1);
+    });
+    expect(mocks.dialLeadAction).toHaveBeenCalledTimes(1);
+    view.rerender(
+      wrap(
+        <CallLockProvider>
+          <LockProbe />
+          <DialpadCallProvider enabled>
+            <SoftphoneLeadButton lead={lead} />
+          </DialpadCallProvider>
+        </CallLockProvider>,
+      ),
+    );
+    expect(probe.lock?.holder()).toBe("dialpad");
+    expect(screen.getByText("Call with coach")).toBeDisabled();
   });
 });

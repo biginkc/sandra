@@ -283,6 +283,7 @@ export function SoftphoneProvider({
     suppliedTransportFactory ??
     (directMode ? createDirectCallTransport : createSoftphoneCallTransport);
   const callLock = useCallLock();
+  const [lockToken] = useState(() => Symbol("softphone"));
   const [phone, setPhone] = useState<SoftphoneState>("closed");
   const [target, setTarget] = useState<SoftphoneTarget | null>(null);
   const [dialInput, setDialInput] = useState("");
@@ -703,8 +704,11 @@ export function SoftphoneProvider({
   // The shared call lock is held from the moment a start is accepted until the softphone is back to
   // closed, idle or wrap. Runs after every render so a start that aborts within one batch still releases.
   useEffect(() => {
-    if (phone !== "preparing" && phone !== "live" && phone !== "held" && !startInFlightRef.current) {
-      callLock.release("softphone");
+    if (phone === "preparing" || phone === "live" || phone === "held" || startInFlightRef.current) {
+      // Includes a call restored after a reload: it holds the lock too.
+      callLock.acquire("softphone", lockToken);
+    } else {
+      callLock.release(lockToken);
     }
   });
 
@@ -723,7 +727,7 @@ export function SoftphoneProvider({
       }
       if (startInFlightRef.current) return;
       // The lowest dial entry: openLead, the typed keypad, recents and "Call with coach" all pass here.
-      if (!callLock.acquire("softphone")) {
+      if (!callLock.acquire("softphone", lockToken)) {
         setError(CALL_LOCK_MESSAGE);
         showToast(CALL_LOCK_MESSAGE);
         return;
@@ -1125,6 +1129,7 @@ export function SoftphoneProvider({
     },
     [
       callLock,
+      lockToken,
       callingEnabled,
       coachPreference.enabled,
       coachPreference.scriptId,
