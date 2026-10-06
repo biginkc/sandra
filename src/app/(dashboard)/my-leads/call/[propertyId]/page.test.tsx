@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   getMyLeadsFlag: vi.fn(),
   schemaReady: vi.fn(),
   loadCallScreen: vi.fn(),
+  dialpadRoute: vi.fn(),
   CallScreen: vi.fn(() => <div data-testid="call-screen-client" />),
   notFound: vi.fn(() => {
     throw new Error("notFound");
@@ -18,6 +19,7 @@ vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow: mocks.ge
 vi.mock("@/lib/my-leads/queries", () => ({ getAcquisitionRoster: mocks.getAcquisitionRoster }));
 vi.mock("@/lib/my-leads/flags", () => ({ getMyLeadsFlag: mocks.getMyLeadsFlag }));
 vi.mock("@/lib/my-leads/schema-ready", () => ({ schemaReady: mocks.schemaReady }));
+vi.mock("@/lib/dialpad-cti/call-route-server", () => ({ getDialpadCallRoute: mocks.dialpadRoute }));
 vi.mock("./loaders", () => ({ loadCallScreen: mocks.loadCallScreen }));
 vi.mock("./call-screen", () => ({ CallScreen: mocks.CallScreen }));
 vi.mock("next/navigation", () => ({ notFound: mocks.notFound }));
@@ -40,6 +42,7 @@ describe("CallScreenPage", () => {
     mocks.getAcquisitionRoster.mockResolvedValue({ viewer: { userId: "user-1", orgId: "org-1", isOwner: false }, roster });
     mocks.getMyLeadsFlag.mockResolvedValue(true);
     mocks.schemaReady.mockResolvedValue(true);
+    mocks.dialpadRoute.mockResolvedValue("dialpad");
     mocks.loadCallScreen.mockResolvedValue({ status: "ok", data: { viewer: { userId: "user-1" } } });
   });
 
@@ -63,18 +66,22 @@ describe("CallScreenPage", () => {
 
   it("still renders when the lead_comps schema is not ready (only the numbers card degrades)", async () => {
     mocks.schemaReady.mockResolvedValue(false);
+    mocks.dialpadRoute.mockResolvedValue("softphone");
     expect(await render()).toContain("call-screen-client");
     expect(mocks.loadCallScreen).toHaveBeenCalledWith(propertyId);
     expect((mocks.CallScreen.mock.calls.at(-1) as unknown[] | undefined)?.[0]).toMatchObject({ clickToDial: false });
   });
 
-  it("passes clickToDial only when the click_to_dial flag is on AND schemaReady('api_dial')", async () => {
+  it("derives clickToDial from the shared Dialpad route with the caller's Acquisitions designation", async () => {
     await render();
-    expect(mocks.schemaReady).toHaveBeenCalledWith("api_dial");
+    expect(mocks.dialpadRoute).toHaveBeenCalledWith("org-1", "user-1", true);
     expect((mocks.CallScreen.mock.calls.at(-1) as unknown[] | undefined)?.[0]).toMatchObject({ clickToDial: true });
-    mocks.getMyLeadsFlag.mockImplementation(async (_org: string, flag: string) => flag === "call_screen");
+    mocks.dialpadRoute.mockResolvedValue("softphone");
     await render();
     expect((mocks.CallScreen.mock.calls.at(-1) as unknown[] | undefined)?.[0]).toMatchObject({ clickToDial: false });
+    mocks.getCallerMembershipsOrThrow.mockResolvedValue([{ ...membership, acquisitions_enabled: false }]);
+    await render();
+    expect(mocks.dialpadRoute).toHaveBeenLastCalledWith("org-1", "user-1", false);
   });
 
   it("docks the post-call prompt only when call_screen AND post_call_prompt are on (and its schema is ready)", async () => {
