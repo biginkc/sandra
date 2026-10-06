@@ -7,7 +7,7 @@ import { loadMyLeadQueueRow } from "@/app/(dashboard)/my-leads/actions";
 import { PostCallPrompt } from "@/app/(dashboard)/my-leads/_components/post-call-prompt";
 import { saveExtrasRequest, type ExtrasRequest } from "@/app/(dashboard)/my-leads/_components/extras-saver";
 import type { PostCallExtrasState } from "@/app/(dashboard)/my-leads/_components/types";
-import { useAttemptWorkflow, type AttemptOpening } from "@/app/(dashboard)/my-leads/_components/use-attempt-workflow";
+import { boundCallFinalized, useAttemptWorkflow, type AttemptOpening } from "@/app/(dashboard)/my-leads/_components/use-attempt-workflow";
 import { WorkflowRecoveryContext } from "@/app/(dashboard)/my-leads/_components/workflow-form";
 import { Button } from "@/components/ui/button";
 
@@ -114,7 +114,9 @@ function LogOutcomeDialog({
       return read.lookup.status === "found" ? read.lookup.row : null;
     },
     onCommitted: async (committed) => {
-      if (opening.callActivityId) onLogged(opening.callActivityId);
+      // Only a save that finalized THIS call (its own sandra identity) marks it logged.
+      const finalized = boundCallFinalized(committed);
+      if (finalized) onLogged(finalized);
       if (committed.extras) {
         void runExtras({ attemptKey: committed.attemptKey, memberId: viewer.userId, propertyId, extras: committed.extras }, true);
       }
