@@ -126,21 +126,31 @@ export function snapshotLog(file: string): LogSnapshot | null {
   return { ino: st.ino, size: st.size };
 }
 
+export type LiveAppFacts = { pid: number | null; uid: number | null; startMs: number | null; lines: string[]; envFiles: string[] };
+
+/** What is true of the app right now: who listens on its port, as which uid, since when, what its egress log says, which .env files its checkout holds. */
+export function collectLiveAppFacts(appUrl: string, appEgressLog: string): LiveAppFacts {
+  const pid = findListenerPid(Number(new URL(appUrl).port || 80));
+  const lines = readLines(appEgressLog);
+  const g = pid ? guardLineFor(lines, pid) : null;
+  return { pid, uid: pid ? readProcessUid(pid) : null, startMs: pid ? readProcessStartMs(pid) : null, lines, envFiles: g?.cwd ? envFilesIn(g.cwd) : [] };
+}
+
 /** The live check, used by the engine at T0. */
-export function proveAppUnderTest(args: { appUrl: string; appEgressLog: string; stubUrl: string; harnessSha: string }): { pid: number; snapshot: LogSnapshot; cwd: string | null } {
+export function proveAppUnderTest(args: { appUrl: string; appEgressLog: string; stubUrl: string; harnessSha: string }): { pid: number; snapshot: LogSnapshot; cwd: string | null; startMs: number | null } {
   const port = Number(new URL(args.appUrl).port || 80);
   const pid = findListenerPid(port);
-  const lines = readLines(args.appEgressLog);
-  const g = pid ? guardLineFor(lines, pid) : null;
+  const facts = collectLiveAppFacts(args.appUrl, args.appEgressLog);
+  const g = pid ? guardLineFor(facts.lines, pid) : null;
   const problems = appProofProblems({
-    listenerPid: pid, listenerUid: pid ? readProcessUid(pid) : null, harnessUid: process.getuid?.() ?? -1,
-    appEgressLog: args.appEgressLog, logLines: lines, stubUrl: args.stubUrl, harnessSha: args.harnessSha,
-    envFiles: g?.cwd ? envFilesIn(g.cwd) : [], listenerStartMs: pid ? readProcessStartMs(pid) : null,
+    listenerPid: facts.pid, listenerUid: facts.uid, harnessUid: process.getuid?.() ?? -1,
+    appEgressLog: args.appEgressLog, logLines: facts.lines, stubUrl: args.stubUrl, harnessSha: args.harnessSha,
+    envFiles: facts.envFiles, listenerStartMs: facts.startMs,
   });
   const snapshot = snapshotLog(args.appEgressLog);
   if (!snapshot) problems.push("the app egress log does not exist");
   if (problems.length) throw new LaneRefusal("APP_UNDER_TEST_NOT_PROVEN", problems.join(" | "));
-  return { pid: pid!, snapshot: snapshot!, cwd: g?.cwd ?? null };
+  return { pid: pid!, snapshot: snapshot!, cwd: g?.cwd ?? null, startMs: facts.startMs };
 }
 
 /**

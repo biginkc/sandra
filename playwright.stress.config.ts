@@ -15,6 +15,8 @@ if (process.env.VERCEL_ENV || process.env.RUN_PROD_CANARIES === "1") throw new E
 
 export default defineConfig({
   testDir: "./e2e/stress/browser",
+  // Config-level guard: runs for ANY spec selection and cannot be skipped by --no-deps or --grep. See e2e/stress/proof-guard.ts.
+  globalSetup: "./e2e/stress/browser/global-setup.ts",
   testMatch: /\.spec\.ts$/,
   fullyParallel: false,
   workers: 1,

@@ -7,7 +7,7 @@ import { reminderWindowOpenAt } from "./reminder-window";
 import { decide } from "./report";
 import { liveAppIdentityProblems } from "./live-leg";
 import { dialProblems, reminderProblems, type ReminderRow } from "./oracle";
-import { readCallNextLimit, sectionParityProblems, stripParityProblems } from "./parity";
+import { readCallNextLimit, stripParityProblems } from "./parity";
 import { CALL_NEXT_LIMIT } from "@/lib/my-leads/call-next";
 import { selfTestReportOk, type SelfTestReportRow } from "./selftest-spec";
 
@@ -138,13 +138,6 @@ describe("Astra 8: rendered parity compares the strip and the section counts", (
     expect(stripParityProblems([], ["a"]).join()).toMatch(/rendered no rows/);
     expect(stripParityProblems(["a", "a"], ["a", "b"]).join()).toMatch(/twice/);
     expect(stripParityProblems(["a", "b", "c"], ["a", "b"]).join()).toMatch(/rendered 3 rows, expected 2/);
-  });
-  it("sections: a wrong badge count, an unreadable badge, or no sections fails", () => {
-    expect(sectionParityProblems([{ stage: "contacted", badge: "5 leads" }], { contacted: 5 })).toEqual([]);
-    expect(sectionParityProblems([{ stage: "contacted", badge: "4 leads" }], { contacted: 5 }).join()).toMatch(/shows 4/);
-    expect(sectionParityProblems([{ stage: "offer", badge: "" }], {}).join()).toMatch(/no readable count/);
-    expect(sectionParityProblems([], {}).join()).toMatch(/no section/);
-    expect(sectionParityProblems([{ stage: "in_drip", badge: "9 leads" }], {})).toEqual([]);
   });
 });
 

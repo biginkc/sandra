@@ -14,6 +14,7 @@ import { backdateDispatch, expireIntent, expireStripOverride, makeReminderDue, r
 import { buildManifest, toNdjson, type Manifest, type Profile, type Tick } from "./manifest";
 import { expectedOutcomes, pendingJarradObservations, safetyInvariants, type Check, type OracleInput } from "./oracle";
 import { GateProxy } from "./proxy";
+import { newRunSecrets, proofChildEnv, writeAppProof } from "./proof-guard";
 import { reminderWindowOpenAt } from "./reminder-window";
 import { decide, hashConfig, writeReport, type RunSummary } from "./report";
 import { IMPLS, newRecord, type TickRecord } from "./scenarios";
@@ -151,12 +152,13 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   // Guards run BEFORE any connection of any kind (no DB, no HTTP, no stub, no browser).
   assertStressLane(cfg, env);
   mkdirSync(dir, { recursive: true });
-  for (const f of ["executed.ndjson", "invariants.jsonl", "ordering.jsonl", "stub.ndjson", "egress.jsonl", "browser-results.jsonl", "KILL", "kill-switch.json", "test-org-dump.json"]) rmSync(path.join(dir, f), { force: true });
+  for (const f of ["executed.ndjson", "invariants.jsonl", "ordering.jsonl", "stub.ndjson", "egress.jsonl", "app-proof.json", "browser-results.jsonl", "KILL", "kill-switch.json", "test-org-dump.json"]) rmSync(path.join(dir, f), { force: true });
   const egressLog = path.join(dir, "egress.jsonl");
   proveInProcessDenial(egressLog);
   // The OS ring is required for a PASS (and so for the live leg). Without it the run can be at most PARTIAL_PASS; with it set, the probe must see a denial.
   let osEgressProven = false;
-  if (env.STRESS_REQUIRE_OS_EGRESS === "1") { proveOsDenial({ uids: [process.getuid?.() ?? -1] }); osEgressProven = true; }
+  let osEgressNotes: string[] = [];
+  if (env.STRESS_REQUIRE_OS_EGRESS === "1") { osEgressNotes = proveOsDenial({ uids: [process.getuid?.() ?? -1] }); osEgressProven = true; }
   log(`lane guards passed; egress guard proven; artifacts ${dir}`);
 
   const manifest: Manifest = buildManifest(cfg.seed, cfg.runTag, { profile });
@@ -180,6 +182,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   let faultFiredFlag = false;
   let appEgressSnap: LogSnapshot | null = null;
   let appCwd: string | null = null;
+  let runSecrets: { key: string; nonce: string } | null = null;
   let windowOpenAtStart = true;
   let faultFiredCheck: () => boolean = () => false;
   let browserExecuted = 0;
@@ -208,6 +211,13 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     appGuardPid = appProof.pid;
     appEgressSnap = appProof.snapshot;
     appCwd = appProof.cwd;
+    // Run-bound proof for the browser lane: signed with a key that lives only in this process and the Playwright child's env.
+    runSecrets = newRunSecrets();
+    writeAppProof(dir, {
+      runId: cfg.runId, runTag: cfg.runTag, nonce: runSecrets.nonce, sha: cfg.sha, appPid: appProof.pid, appListenerStartMs: appProof.startMs ?? 0,
+      appEgressLog: cfg.appEgressLog, appEgressLogIno: appProof.snapshot.ino, appEgressLogSizeAtT0: appProof.snapshot.size,
+      stubUrl: stub.url, proxyUrl: proxy?.url ?? "", osEgressProven,
+    }, runSecrets.key);
     log(`app under test proven: egress guard loaded in pid ${appGuardPid}, providers stub/test`);
     world = await setupWorld(db, cfg);
     const dbxMode = await db.query<{ test_mode: boolean }>("select test_mode from public.org_esign_integrations where org_id=$1", [cfg.orgId]);
@@ -271,7 +281,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
 
     // Browser lane (full scope): the scripted Playwright specs, run in root's desktop context.
     if (!stopRequested && cfg.scope === "full") {
-      browserExecuted = await runBrowserLane(setupErrors, { cfg, dir, world, stub, proxy: proxy!, manifest, env, spec: "chaos-browser" });
+      browserExecuted = await runBrowserLane(setupErrors, runSecrets, { cfg, dir, world, stub, proxy: proxy!, manifest, env, spec: "chaos-browser" });
       // Browser ticks are judged by the same oracle as replay ticks: merge their records in.
       for (const r of readBrowserResults(dir)) {
         if (r.tick <= 0) continue;
@@ -290,7 +300,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
     outcomeChecks = stopRequested ? [] : await expectedOutcomes(oracleInput);
     if (!stopRequested && cfg.scope === "full") {
       // Oracle 16 (rendered parity) runs after the drain, in the browser, against the settled rows.
-      await runBrowserLane(setupErrors, { cfg, dir, world, stub, proxy: proxy!, manifest, env, spec: "rendered-parity" }).catch((e) => { setupErrors.push((e as Error).message); return 0; });
+      await runBrowserLane(setupErrors, runSecrets, { cfg, dir, world, stub, proxy: proxy!, manifest, env, spec: "rendered-parity" }).catch((e) => { setupErrors.push((e as Error).message); return 0; });
       const parity = readBrowserResults(dir).find((r) => r.tick === -16);
       outcomeChecks = outcomeChecks.map((c) => (c.id === 16 ? { ...c, deferred: undefined, ok: parity?.ok === true, violations: parity?.ok === true ? [] : [{ rule: "rendered_parity", error: parity?.error ?? "no result recorded" }] } : c));
     }
@@ -333,7 +343,7 @@ export async function runChaos(opts: RunOptions): Promise<RunResult> {
   const summary = decide({ cfg, manifest, records, invariantChecks, outcomeChecks, egressViolations: egress.length, osEgressProven, reminderWindowOpen: windowOpenAtStart && reminderWindowOpenAt(new Date()), serverProblems, killed: failedAny ? killed : null, setupErrors, browserExecuted });
   writeFileSync(path.join(dir, "invariants.final.json"), JSON.stringify(summary.checks, null, 1));
   writeReport(dir, {
-    cfg, manifest, summary, pending, osEgressProven, appGuardPid, benignDenials, levers, killed,
+    cfg, manifest, summary, pending, osEgressProven, osEgressNotes, appGuardPid, benignDenials, levers, killed,
     stubCounts: { dials: stub?.dials().length ?? 0, sends: stub?.sends().length ?? 0 },
     elapsedMs: Date.now() - t0,
     repro: `CHAOS_SEED=${cfg.seed} STRESS_PROFILE=${profile} STRESS_SCOPE=${cfg.scope} STRESS_FAULT=${cfg.fault} tsx e2e/stress/cli.ts run   # same seed + the recorded schedule.ndjson + a fresh stack`,
@@ -410,13 +420,16 @@ export function readBrowserResults(dir: string): BrowserResult[] {
   return readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as BrowserResult);
 }
 
-async function runBrowserLane(setupErrors: string[], a: { cfg: StressConfig; dir: string; world: World; stub: StubServer; proxy: GateProxy; manifest: Manifest; env: NodeJS.ProcessEnv; spec: "chaos-browser" | "rendered-parity" }): Promise<number> {
+async function runBrowserLane(setupErrors: string[], secrets: { key: string; nonce: string } | null, a: { cfg: StressConfig; dir: string; world: World; stub: StubServer; proxy: GateProxy; manifest: Manifest; env: NodeJS.ProcessEnv; spec: "chaos-browser" | "rendered-parity" }): Promise<number> {
   if (!a.cfg.decisions.rootBrowserContextProvided) throw new LaneRefusal("NO_BROWSER_CONTEXT", "STRESS_ROOT_BROWSER_CONTEXT=1 is required for the browser lane (root provides a browser-capable context; codex exec cannot launch Chromium).");
   // Control API for the browser-side process: the stub server's /__ctl routes.
   const env = {
     ...a.env,
     ...egressChildEnv(path.join(a.dir, "egress.jsonl")),
     STRESS_RUN_DIR: a.dir,
+    STRESS_RUN_ID: a.cfg.runId,
+    STRESS_APP_URL: a.cfg.appUrl,
+    ...(secrets ? proofChildEnv(secrets) : {}),
     STRESS_PROXY_URL: a.proxy.url,
     STRESS_STUB_URL: a.stub.url,
     STRESS_REP_EMAIL: a.world.repEmail,

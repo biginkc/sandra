@@ -1,13 +1,14 @@
 import { appendFileSync } from "node:fs";
 import path from "node:path";
 
-import { expect, test, type BrowserContext, type Locator, type Page } from "@playwright/test";
+import type { BrowserContext, Locator, Page } from "@playwright/test";
 
 import { awaitDialWindow, createAppointment, currentOpenTaskInChain, rescheduleAppointment, sendCallEvents } from "../actions";
 import { expireIntent } from "../levers";
 import type { Tick } from "../manifest";
 import { newRecord, type TickRecord } from "../scenarios";
-import { dismissPendingPrompts, loadRun, recordResult, retryNonMutating, signIn } from "./support";
+import { expect, test } from "./fixtures";
+import { dismissPendingPrompts, loadScheduleTicks, recordResult, retryNonMutating, signIn, type Run } from "./support";
 
 /**
  * Scripted browser chaos. One test per scheduled `browser` tick, in schedule order, no improvisation.
@@ -18,7 +19,8 @@ import { dismissPendingPrompts, loadRun, recordResult, retryNonMutating, signIn 
  * drive the UI and record whether the gestures completed.
  */
 
-const run = loadRun();
+// Set from the `run` fixture at the start of every test (the fixture cannot exist without the verified app-egress proof). Never built at module scope.
+let run!: Run;
 const logLines: string[] = [];
 
 async function slow3g(page: Page): Promise<() => Promise<void>> {
@@ -293,8 +295,9 @@ const RUNNERS: Record<string, Runner> = {
 };
 
 test.describe.configure({ mode: "serial" });
-for (const tick of run.ticks) {
-  test(`stress t${tick.tick} ${tick.scenario}${tick.args.variant ? `/${String(tick.args.variant)}` : ""}`, async ({ page, context }) => {
+for (const tick of loadScheduleTicks()) {
+  test(`stress t${tick.tick} ${tick.scenario}${tick.args.variant ? `/${String(tick.args.variant)}` : ""}`, async ({ page, context, run: fixtureRun }) => {
+    run = fixtureRun;
     const t0 = Date.now();
     test.setTimeout(300_000); // dial pacing (4/min) and first-compile of a dev page are slow; the gestures themselves are not
     const runner = RUNNERS[tick.scenario];
@@ -318,9 +321,6 @@ for (const tick of run.ticks) {
 }
 
 test.afterAll(async () => {
-  const pool = run.db as unknown as { totalCount: number; idleCount: number; waitingCount: number };
-  const t0 = Date.now();
-  const ended = await Promise.race([run.db.end().then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), 15_000))]);
-  logLines.push(`db.end ${ended ? "ok" : "TIMED OUT"} in ${Date.now() - t0}ms (total ${pool.totalCount}, idle ${pool.idleCount}, waiting ${pool.waitingCount})`);
-  appendFileSync(path.join(run.dir, "browser-lane.log"), logLines.join("\n") + "\n");
+  // The database pool is closed by the `run` fixture; only the lane log is written here.
+  if (run) appendFileSync(path.join(run.dir, "browser-lane.log"), logLines.join("\n") + "\n");
 });

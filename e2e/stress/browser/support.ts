@@ -11,14 +11,25 @@ import { assertStressLane } from "../guards";
 import { parseNdjson, type Tick } from "../manifest";
 import type { TickRecord } from "../scenarios";
 import { StubControl } from "../stubs";
+import type { AppProof } from "../proof-guard";
 import type { World, WorldLead } from "../world";
 
-/** Everything a browser spec needs, loaded from the run directory the engine wrote. Guards run first. */
-export function loadRun() {
+/** The browser ticks of the run's schedule: a pure file read (no database, no mutation), needed at collection time to define one test per tick. */
+export function loadScheduleTicks(env: Readonly<Record<string, string | undefined>> = process.env): Tick[] {
+  const file = env.STRESS_SCHEDULE_FILE;
+  if (!file) throw new Error("STRESS_SCHEDULE_FILE is not set: the browser specs run only under the engine (npm run stress -- run).");
+  return parseNdjson(readFileSync(file, "utf8")).filter((t) => t.actor === "browser");
+}
+
+export type Run = ReturnType<typeof loadRun>;
+
+/** Everything a browser spec needs, loaded from the run directory the engine wrote. REQUIRES the verified app proof: it cannot be called without one. */
+export function loadRun(proof: AppProof) {
+  if (!proof || proof.v !== 1 || !proof.mac) throw new Error("loadRun needs the verified app-egress proof (use the `run` fixture from ./fixtures).");
   const cfg = readConfig({ ...process.env, STRESS_APP_URL: process.env.STRESS_APP_URL });
   assertStressLane(cfg, process.env);
   const dir = process.env.STRESS_RUN_DIR!;
-  const ticks = parseNdjson(readFileSync(process.env.STRESS_SCHEDULE_FILE!, "utf8")).filter((t) => t.actor === "browser");
+  const ticks = loadScheduleTicks();
   const w = JSON.parse(readFileSync(process.env.STRESS_WORLD_FILE!, "utf8")) as { orgId: string; repUserId: string; connectionId: string; templateId: string; leads: Array<{ slot: number; propertyId: string; contactId: string; phone: string; address: string }> };
   const leads: WorldLead[] = w.leads.map((l) => ({ slot: l.slot, propertyId: l.propertyId, contactId: l.contactId, phoneE164: l.phone, address: l.address, episodeId: "", runTag: cfg.runTag }));
   const world: World = { orgId: w.orgId, repUserId: w.repUserId, repEmail: process.env.STRESS_REP_EMAIL!, repPassword: process.env.STRESS_REP_PASSWORD!, connectionId: w.connectionId, bindingId: "", templateId: w.templateId, leads, runTag: cfg.runTag };
