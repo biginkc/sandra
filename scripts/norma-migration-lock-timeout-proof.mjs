@@ -12,6 +12,7 @@
 //       SQLSTATE 55P03 in about lock_timeout (5s) and leave schema + migration history byte-identical;
 //   (b) with the blocker released the same push applies cleanly and records the migration.
 import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -29,7 +30,12 @@ if (!dbUrl || !migration || !marker) fail("need --db-url, --migration and LOCKPR
 const u = new URL(dbUrl);
 if (!["127.0.0.1", "localhost"].includes(u.hostname) || u.search) fail("db-url must be loopback with no query");
 if (FORBIDDEN_PORTS.has(u.port)) fail(`port ${u.port} is a shared dev/sandbox port`);
-const file = path.basename(migration);
+const sourceFile = path.basename(migration);
+const reapplyVersion = arg("reapply-version");
+// Test-only ledger entry allows the CLI to execute unchanged recovery bytes on
+// an already-applied owned DB. Never remove/repair its original migration row.
+if (reapplyVersion && reapplyVersion !== "20990101000000") fail("reapply version must be the private test sentinel 20990101000000");
+const file = reapplyVersion ? `${reapplyVersion}_owned_private_recovery.sql` : sourceFile;
 const version = file.split("_")[0];
 const sql = fs.readFileSync(migration, "utf8");
 if (!/^set local lock_timeout\s*=\s*'5s';/m.test(sql) || !/^lock table public\.norma_call_requests in access exclusive mode;/m.test(sql)) {
@@ -43,6 +49,9 @@ let work = "";
 try {
   const own = await obs.query("select 1 from public._lockproof_owner where marker = $1", [marker]);
   if (own.rowCount !== 1) fail("ownership marker missing: not my disposable database");
+  const identity = (await obs.query("select current_database() as database,pg_backend_pid() as observer_pid")).rows[0];
+  const admission = async () => (await obs.query("select to_regclass('public.norma_retry_admission') as t")).rows[0].t
+    ? (await obs.query("select singleton,enabled from public.norma_retry_admission order by singleton")).rows : null;
 
   // Fingerprint of everything these migrations can touch, plus migration history.
   const snapshot = async () => (await obs.query(`
@@ -99,6 +108,8 @@ try {
   })();
 
   const before = await snapshot();
+  const admissionBefore = await admission();
+  if (reapplyVersion && (!admissionBefore || !(await obs.query("select 1 from supabase_migrations.schema_migrations where version=$1", [sourceFile.split("_")[0]])).rowCount)) fail("reapply requires the original migration and admission table already installed");
   const before_col = (await obs.query("select count(*)::int n from information_schema.columns where table_name='norma_call_requests' and column_name='attempt'")).rows[0].n;
   const admissionAbsentBefore = (await obs.query("select to_regclass('public.norma_retry_admission') is null as absent")).rows[0].absent;
 
@@ -111,7 +122,10 @@ try {
   polling = false; await poller;
   const afterA = await snapshot();
   const result = {
+    run_id: randomUUID(), process_pid: process.pid, ...identity,
+    sourceFile, sourceSqlSha256: createHash("sha256").update(sql).digest("hex"), privateReapplyVersion: reapplyVersion ?? null,
     migration: file,
+    admissionBefore,
     blocked: {
       exitCode: a.code, cliWallMs: a.ms,
       serverSideLockWaitMs: firstSeen ? lastSeen - firstSeen + 100 : null,
@@ -126,6 +140,32 @@ try {
   if (!result.blocked.sqlstate55P03) fail(`blocked push did not fail with 55P03/lock timeout: ${a.log.slice(-600)}`);
   if (a.ms > 20_000) fail(`blocked push took ${a.ms}ms (>20s): timeout did not bound the wait`);
   if (!result.blocked.schemaAndHistoryUnchanged) fail("blocked push left a partial change");
+  if (JSON.stringify(await admission()) !== JSON.stringify(admissionBefore)) fail("blocked push changed retry admission");
+
+  if (reapplyVersion) {
+    const beforeControlBlock = await snapshot();
+    await holder.query("begin");
+    await holder.query("select enabled from public.norma_retry_admission where singleton=true for share");
+    let watching = true, start = 0, end = 0;
+    const controlPoll = (async () => {
+      while (watching) {
+        const wait = await obs.query("select 1 from pg_locks l join pg_stat_activity a on a.pid=l.pid where a.datname=current_database() and not l.granted and l.relation=to_regclass('public.norma_retry_admission')");
+        if (wait.rowCount) { end = Date.now(); start ||= end; }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    })();
+    let blocked;
+    try { blocked = await push(); } finally { await holder.query("rollback"); watching = false; await controlPoll; }
+    result.blockedAdmission = {
+      exitCode: blocked.code, cliWallMs: blocked.ms, serverSideLockWaitMs: start ? end - start + 100 : null,
+      sqlstate55P03: /55P03|lock timeout/i.test(blocked.log),
+      logExcerpt: blocked.log.split("\n").filter((line) => /55P03|lock timeout|ERROR|Applying/i.test(line)).slice(0, 4),
+      schemaAndHistoryUnchanged: beforeControlBlock === await snapshot(),
+      admissionUnchanged: JSON.stringify(await admission()) === JSON.stringify(admissionBefore),
+    };
+    if (blocked.code === 0 || !result.blockedAdmission.sqlstate55P03 || blocked.ms > 20_000 || !start
+        || !result.blockedAdmission.schemaAndHistoryUnchanged || !result.blockedAdmission.admissionUnchanged) fail("applied-state admission-table blocker was not bounded and atomic");
+  }
 
   // (b) no blocker.
   const b = await push();
@@ -134,6 +174,11 @@ try {
   if (b.code !== 0 || rec !== 1) fail(`clean push failed: ${b.log.slice(-400)}`);
   result.clean.retryAdmission = (await obs.query("select enabled from public.norma_retry_admission where singleton=true")).rows;
   if (admissionAbsentBefore && (result.clean.retryAdmission.length !== 1 || result.clean.retryAdmission[0].enabled !== false)) fail("fresh migration did not install default-OFF retry admission");
+  result.clean.admissionPreserved = admissionAbsentBefore ? null : JSON.stringify(await admission()) === JSON.stringify(admissionBefore);
+  if (!admissionAbsentBefore && !result.clean.admissionPreserved) fail("recovery changed the operator admission decision");
+  const control = (await obs.query("select relrowsecurity,relacl::text as acl from pg_class where oid='public.norma_retry_admission'::regclass")).rows[0];
+  result.clean.control = control;
+  if (!control.relrowsecurity || control.acl !== "{postgres=arwdDxtm/postgres}") fail("control RLS/owner-only ACL changed");
   console.log(JSON.stringify(result, null, 1));
 } finally {
   await holder.query("rollback").catch(() => {});
