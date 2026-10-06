@@ -351,9 +351,9 @@ describe("reach 3 + 5: the app env proof rejects provider credentials, proxies, 
   it("3 (spawn guard): the app must run the child-process guard; a non-Node child is denied and logged, Node children are not", () => {
     expect(appProofProblems(input(line({ spawnGuard: false }))).join()).toMatch(/child-process guard/);
     const log = path.join(mkdtempSync(path.join(os.tmpdir(), "spawn-")), "g.jsonl");
-    const code = `const cp=require("node:child_process");let denied="";try{cp.execFileSync("curl",["--version"])}catch(e){denied=e.code}let node="";try{node=cp.execFileSync(process.execPath,["-e","process.stdout.write('ok')"]).toString()}catch(e){node=e.code}let sh="";try{cp.execSync("echo hi")}catch(e){sh=e.code}process.stdout.write(JSON.stringify({denied,node,sh}))`;
+    const code = `const cp=require("node:child_process");let denied="";try{cp.execFileSync("curl",["--version"])}catch(e){denied=e.code}let node="";try{node=cp.execFileSync(process.execPath,["-e","process.stdout.write('ok')"]).toString()}catch(e){node=e.code}let sh="";try{cp.execSync("echo hi")}catch(e){sh=e.code}let esb="";try{cp.execFileSync("/x/node_modules/@esbuild/darwin-arm64/bin/esbuild",["--version"])}catch(e){esb=e.code}let fakeEsb="";try{cp.execFileSync("/x/other/bin/esbuild",["--version"])}catch(e){fakeEsb=e.code}process.stdout.write(JSON.stringify({denied,node,sh,esbuildNotDenied:esb!=="EGRESS_DENIED",lookalikeDenied:fakeEsb==="EGRESS_DENIED"}))`;
     const r = spawnSync(process.execPath, ["-e", code], { env: { ...process.env, ...egressChildEnv(log), STRESS_GUARD_SPAWN: "1" }, encoding: "utf8" });
-    expect(JSON.parse(r.stdout)).toEqual({ denied: "EGRESS_DENIED", node: "ok", sh: "EGRESS_DENIED" });
+    expect(JSON.parse(r.stdout)).toEqual({ denied: "EGRESS_DENIED", node: "ok", sh: "EGRESS_DENIED", esbuildNotDenied: true, lookalikeDenied: true });
     expect(readFileSync(log, "utf8")).toMatch(/"kind":"spawn","target":"curl"/);
   });
 });

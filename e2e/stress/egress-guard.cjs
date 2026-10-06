@@ -102,7 +102,8 @@ net.Socket.prototype.connect = function patchedConnect(...args) {
 if (process.env.STRESS_GUARD_SPAWN === "1") {
   const cp = require("node:child_process");
   const path = require("node:path");
-  const isNode = (file) => typeof file === "string" && (file === process.execPath || path.basename(file) === "node");
+  // Allowed children: Node (Next's own workers inherit this guard) and the esbuild binary Next dev uses to load next.config.ts (a build tool with no network client).
+  const isNode = (file) => typeof file === "string" && (file === process.execPath || path.basename(file) === "node" || (path.basename(file) === "esbuild" && /[\\/]node_modules[\\/]@esbuild[\\/][^\\/]+[\\/]bin[\\/]esbuild$/.test(file)));
   for (const name of ["spawn", "spawnSync", "execFile", "execFileSync"]) {
     const orig = cp[name];
     cp[name] = function patchedSpawn(file, ...rest) {
