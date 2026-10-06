@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, truncateSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, truncateSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -140,8 +140,10 @@ describe("(d) + #6 the app's egress log: denials fail the run, and so does losin
   it("a replaced log (new inode, even if larger) is a violation", () => {
     const f = fresh();
     const snap = snapshotLog(f)!;
-    unlinkSync(f);
-    writeFileSync(f, guardLine({ pid: 99 }) + "\n" + "x".repeat(500) + "\n");
+    // Create the replacement WHILE the original still exists, then rename it over: its inode is necessarily different (unlink + recreate can reuse the inode number on Linux).
+    const f2 = `${f}.new`;
+    writeFileSync(f2, guardLine({ pid: 99 }) + "\n" + "x".repeat(500) + "\n");
+    renameSync(f2, f);
     expect(appEgressViolations(f, snap, 99).join()).toMatch(/replaced/);
   });
   it("a log that lost the app's own guard_loaded line, or was never snapshotted, is a violation", () => {
