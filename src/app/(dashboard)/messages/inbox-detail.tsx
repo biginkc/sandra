@@ -630,6 +630,7 @@ export function InboxDetail({
               ) : null}
               {canCall ? (
                 dialpadCall?.enabled && data.propertyId && data.contactId ? (
+                  <>
                   <DropdownMenuItem
                     className="min-h-11"
                     data-testid="inbox-detail-phone"
@@ -650,6 +651,30 @@ export function InboxDetail({
                     <PhoneIcon className="h-4 w-4" />
                     Call {formatPhoneDisplay(data.threadCustomerPhone!)}
                   </DropdownMenuItem>
+                  {dialpadCall.callWithCoach ? (
+                    <DropdownMenuItem
+                      className="min-h-11"
+                      data-testid="inbox-detail-call-with-coach"
+                      onClick={() =>
+                        dialpadCall.callWithCoach?.({
+                          id: data.propertyId!,
+                          contactId: data.contactId,
+                          firstName: (data.contactName ?? "").split(" ")[0] ?? "",
+                          name: data.contactName ?? "",
+                          address: data.propertyAddress ?? "",
+                          state: null,
+                          phones: [data.threadCustomerPhone!],
+                          dncLocked: false,
+                          contactDnc: false,
+                          callable: true,
+                        })
+                      }
+                    >
+                      <PhoneIcon className="h-4 w-4" />
+                      Call with coach
+                    </DropdownMenuItem>
+                  ) : null}
+                  </>
                 ) : (
                 <DropdownMenuItem
                   className="min-h-11"

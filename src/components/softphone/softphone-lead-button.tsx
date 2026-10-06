@@ -19,7 +19,7 @@ export function SoftphoneLeadButton({ lead, compact = false }: Props) {
   const openLead = (target: SoftphoneLead) => context?.openLead(target);
   const callingEnabled = viaDialpad || Boolean(context?.callingEnabled);
   if (!lead.callable) return null;
-  return (
+  const button = (
     <button
       type="button"
       data-testid="call-lead-button"
@@ -56,5 +56,25 @@ export function SoftphoneLeadButton({ lead, compact = false }: Props) {
       <PhoneIcon className={compact ? "size-3.5" : "size-3.5"} />
       {!compact ? "Call" : null}
     </button>
+  );
+  if (!viaDialpad) return button;
+  // Dialpad is the default; the softphone stays one click away so live coaching still works.
+  return (
+    <>
+      {button}
+      <button
+        type="button"
+        data-testid="call-with-coach-button"
+        disabled={!context?.callingEnabled}
+        className="border-border text-muted-foreground hover:border-emerald-600 hover:text-emerald-700 inline-flex shrink-0 items-center rounded-full border bg-white px-2 py-1 text-[11px] font-semibold transition-colors disabled:opacity-50"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (context?.callingEnabled) openLead(lead);
+        }}
+      >
+        Call with coach
+      </button>
+    </>
   );
 }

@@ -56,6 +56,25 @@ describe("SoftphoneLeadButton Dialpad routing", () => {
     expect(mocks.dialLeadAction).not.toHaveBeenCalled();
   });
 
+  it("route off shows only the existing Call", () => {
+    renderButton(false);
+    expect(screen.getByTestId("call-lead-button")).toBeInTheDocument();
+    expect(screen.queryByText("Call with coach")).not.toBeInTheDocument();
+  });
+
+  it("route on shows both; Call goes to Dialpad, Call with coach opens the softphone", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockResolvedValue({ ok: true, intentId: "i1", state: "awaiting_provider", uncertain: false, phoneSlot: 1 });
+    renderButton(true);
+    expect(screen.getByTestId("call-lead-button")).toBeInTheDocument();
+    await user.click(screen.getByText("Call with coach"));
+    expect(mocks.openLead).toHaveBeenCalledWith(lead);
+    expect(mocks.dialLeadAction).not.toHaveBeenCalled();
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(mocks.dialLeadAction).toHaveBeenCalledTimes(1));
+    expect(mocks.openLead).toHaveBeenCalledTimes(1);
+  });
+
   it("uses the softphone when there is no provider at all", async () => {
     const user = userEvent.setup();
     render(<SoftphoneLeadButton lead={lead} />);

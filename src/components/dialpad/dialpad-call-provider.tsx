@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 
 import { DialStatus } from "@/app/(dashboard)/my-leads/_components/dial-status";
+import { useOptionalSoftphone } from "@/components/softphone/softphone-provider";
 import { DialpadCallContext, type DialpadCallContextValue, type DialpadCallRequest } from "./dialpad-call-context";
 import { useApiDial } from "@/app/(dashboard)/my-leads/_components/use-api-dial";
 
@@ -14,6 +15,8 @@ import { useApiDial } from "@/app/(dashboard)/my-leads/_components/use-api-dial"
  */
 export function DialpadCallProvider({ enabled, children }: { enabled: boolean; children: ReactNode }) {
   const router = useRouter();
+  const softphone = useOptionalSoftphone();
+  const openLead = softphone?.callingEnabled ? softphone.openLead : undefined;
   const requests = useRef(new Map<string, DialpadCallRequest>());
   const { dialFlight, startApiDial, statusHandlers } = useApiDial(
     (propertyId) => {
@@ -29,12 +32,13 @@ export function DialpadCallProvider({ enabled, children }: { enabled: boolean; c
   const stable = useMemo<DialpadCallContextValue>(
     () => ({
       enabled,
+      callWithCoach: openLead,
       startCall: (request) => {
         requests.current.set(request.propertyId, request);
         void startRef.current(request.propertyId, 1);
       },
     }),
-    [enabled],
+    [enabled, openLead],
   );
   return (
     <DialpadCallContext.Provider value={stable}>
