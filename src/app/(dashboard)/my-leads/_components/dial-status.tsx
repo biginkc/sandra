@@ -10,7 +10,8 @@ export type DialFlight =
   /** `nonce` remounts the status (and restarts polling) when the same intent is shown again after a re-click. */
   | { kind: "in_flight"; intentId: string; propertyId: string; label: string; uncertain: boolean; nonce?: number }
   | { kind: "rate_limited"; propertyId: string; label: string; retryAfterSeconds: number; attempt: number }
-  | { kind: "error"; propertyId: string; label: string; message: string; releaseKeyOnDismiss?: boolean }
+  /** `holdsLock`: the request may have rung (it threw); the call lock stays held until marked ended or the ceiling. */
+  | { kind: "error"; propertyId: string; label: string; message: string; releaseKeyOnDismiss?: boolean; holdsLock?: boolean }
   /** The server refused a new key: an earlier call to this lead may have rung. Redialing needs an explicit confirm. */
   | { kind: "unresolved"; propertyId: string; label: string; message: string; priorIntentId: string };
 
@@ -19,6 +20,10 @@ type Props = {
   /** A refused second dial ("Finish your current call…"); shown alongside the live flight, never replacing it. */
   notice?: string | null;
   pollMs?: number;
+  /** Confirmed early release for a dispatched call whose status is unknown. Omit to hide the action. */
+  onMarkEnded?: () => void;
+  /** Reports whether the dispatched call's status is unknown (failed marker or poll errors). */
+  onUnknown?: (intentId: string, unknown: boolean) => void;
   onRetry: (propertyId: string) => void;
   onDismiss: () => void;
   onConfirmRedial?: (propertyId: string, priorIntentId: string) => void;
@@ -76,12 +81,26 @@ function DialFlightStatus(props: Props) {
       {flight.kind === "unresolved" ? (
         <Button type="button" size="sm" onClick={() => props.onConfirmRedial?.(flight.propertyId, flight.priorIntentId)}>Call again anyway</Button>
       ) : null}
+      {flight.kind === "error" && flight.holdsLock && props.onMarkEnded ? <MarkEnded onConfirm={props.onMarkEnded} /> : null}
       <Button type="button" variant="outline" size="sm" onClick={props.onDismiss}>Dismiss</Button>
     </div>
   );
 }
 
-function InFlight({ flight, pollMs = 3000, onDismiss, onLogOutcome, onEnded, onFinished }: Props & { flight: Extract<DialFlight, { kind: "in_flight" }> }) {
+/** Two-step: the early release only happens after the rep confirms the call really ended. */
+function MarkEnded({ onConfirm }: { onConfirm: () => void }) {
+  const [asking, setAsking] = useState(false);
+  if (!asking) return <Button type="button" variant="outline" size="sm" onClick={() => setAsking(true)}>Mark call ended</Button>;
+  return (
+    <span className="flex items-center gap-2">
+      <span>Has this call ended in Dialpad?</span>
+      <Button type="button" size="sm" onClick={onConfirm}>Yes, it ended</Button>
+      <Button type="button" variant="outline" size="sm" onClick={() => setAsking(false)}>Cancel</Button>
+    </span>
+  );
+}
+
+function InFlight({ flight, pollMs = 3000, onDismiss, onLogOutcome, onEnded, onFinished, onMarkEnded, onUnknown }: Props & { flight: Extract<DialFlight, { kind: "in_flight" }> }) {
   const [status, setStatus] = useState<DialpadCallStatus | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const endedRef = useRef(onEnded);
@@ -132,6 +151,14 @@ function InFlight({ flight, pollMs = 3000, onDismiss, onLogOutcome, onEnded, onF
     };
   }, [flight.intentId, pollMs]);
 
+  const unknown = message !== null || status?.state === "failed";
+  const unknownRef = useRef(onUnknown);
+  useEffect(() => {
+    unknownRef.current = onUnknown;
+  }, [onUnknown]);
+  useEffect(() => {
+    unknownRef.current?.(flight.intentId, unknown);
+  }, [flight.intentId, unknown]);
   const text = message ?? (status ? statusText(status) : flight.uncertain ? "Sandra sent the call but Dialpad has not confirmed it yet." : "Preparing");
   const canLog = status?.state === "ended" && status.callActivityId && onLogOutcome;
   return (
@@ -140,6 +167,7 @@ function InFlight({ flight, pollMs = 3000, onDismiss, onLogOutcome, onEnded, onF
       {canLog ? (
         <Button type="button" size="sm" onClick={() => onLogOutcome(flight.propertyId, status.callActivityId as string)}>Log outcome</Button>
       ) : null}
+      {unknown && !(status && FINAL_STATES.has(status.state)) && onMarkEnded ? <MarkEnded onConfirm={onMarkEnded} /> : null}
       {status && POLLING_STATES.has(status.state) && status.state !== "failed" && !message ? null : (
         <Button type="button" variant="outline" size="sm" onClick={onDismiss}>Dismiss</Button>
       )}

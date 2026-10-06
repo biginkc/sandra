@@ -22,7 +22,7 @@ vi.mock("@/app/(dashboard)/my-leads/dialpad-actions", () => ({
 import { StrictMode } from "react";
 import { CallLockProvider, useCallLock } from "@/components/calls/call-lock-context";
 import type { CallLock } from "@/lib/calls/call-lock";
-import { useApiDial } from "@/app/(dashboard)/my-leads/_components/use-api-dial";
+import { DIAL_CALL_CEILING_MS, useApiDial } from "@/app/(dashboard)/my-leads/_components/use-api-dial";
 import { useOptionalDialpadCall } from "@/components/dialpad/dialpad-call-context";
 import { DialpadCallProvider } from "@/components/dialpad/dialpad-call-provider";
 import { SoftphoneLeadButton } from "./softphone-lead-button";
@@ -177,12 +177,26 @@ describe("SoftphoneLeadButton Dialpad routing", () => {
   it("does not auto-dial the softphone for not_configured after an attempt that may have rung", async () => {
     const user = userEvent.setup();
     mocks.dialLeadAction.mockRejectedValueOnce(new Error("network"));
-    renderButton(true);
-    await user.click(screen.getByTestId("call-lead-button"));
+    function SameFlightRetry() {
+      const dialpad = useOptionalDialpadCall();
+      return (
+        <button type="button" onClick={() => dialpad?.startCall({ propertyId: lead.id, contactId: lead.contactId, label: lead.name, onFallback: mocks.openLead })}>
+          retry same lead
+        </button>
+      );
+    }
+    render(
+      <CallLockProvider>
+        <LockProbe />
+        <DialpadCallProvider enabled>
+          <SameFlightRetry />
+        </DialpadCallProvider>
+      </CallLockProvider>,
+    );
+    await user.click(screen.getByText("retry same lead"));
     await screen.findByText(/could not confirm/);
-    await user.click(screen.getByRole("button", { name: "Dismiss" }));
     mocks.dialLeadAction.mockResolvedValueOnce({ ok: false, code: "not_configured", message: "Dialpad click-to-dial is not enabled for this organization." });
-    await user.click(screen.getByTestId("call-lead-button"));
+    await user.click(screen.getByText("retry same lead"));
     expect(await screen.findByText(/not enabled/)).toBeInTheDocument();
     expect(mocks.openLead).not.toHaveBeenCalled();
   });
@@ -213,7 +227,7 @@ describe("SoftphoneLeadButton Dialpad routing", () => {
     expect(screen.getByText("Call with coach")).toBeEnabled();
   });
 
-  it("after a thrown could-not-confirm request the lock stays held until Dismiss", async () => {
+  it("after a thrown could-not-confirm request the lock stays held through Dismiss and is freed by a confirmed Mark call ended", async () => {
     const user = userEvent.setup();
     mocks.dialLeadAction.mockRejectedValueOnce(new Error("network"));
     renderButton(true);
@@ -222,6 +236,10 @@ describe("SoftphoneLeadButton Dialpad routing", () => {
     expect(probe.lock?.holder()).toBe("dialpad");
     expect(screen.getByText("Call with coach")).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(probe.lock?.holder()).toBe("dialpad");
+    await user.click(screen.getByTestId("dialpad-call-show"));
+    await user.click(screen.getByRole("button", { name: "Mark call ended" }));
+    await user.click(screen.getByRole("button", { name: "Yes, it ended" }));
     expect(probe.lock?.holder()).toBeNull();
     expect(screen.getByText("Call with coach")).toBeEnabled();
   });
@@ -414,6 +432,125 @@ describe("one instance, one flight (N18)", () => {
     await user.click(screen.getByText("dial B"));
     expect(mocks.dialLeadAction).toHaveBeenCalledTimes(1);
     expect(await screen.findByTestId("dial-notice")).toHaveTextContent("Finish your current call");
+    expect(probe.lock?.holder()).toBe("dialpad");
+  });
+});
+
+const statusOf = (state: string) => ({
+  ok: true,
+  status: {
+    intentId: "i1", state, connected: state === "ended", propertyId: lead.id, expiresAt: "x", dispatchAuthorizedAt: null, failedAt: null,
+    callActivityId: null, attemptId: null, startedAt: null, endedAt: null, durationSeconds: null, talkDurationSeconds: null, recordingCaptureId: null,
+  },
+});
+
+describe("the persistent provider owns the flight and the lock", () => {
+  const leadB = { ...lead, id: "44444444-4444-4444-8444-444444444444", name: "Seller Two" };
+  const accepted = { ok: true, intentId: "i1", state: "awaiting_provider", uncertain: false, phoneSlot: 1 };
+  function Page({ target }: { target: typeof lead }) {
+    const dialpad = useOptionalDialpadCall();
+    return (
+      <button type="button" onClick={() => dialpad?.startCall({ propertyId: target.id, contactId: target.contactId, label: target.name })}>
+        {`dial ${target.name}`}
+      </button>
+    );
+  }
+  const shell = (page: React.ReactNode) => (
+    <CallLockProvider>
+      <LockProbe />
+      <DialpadCallProvider enabled>{page}</DialpadCallProvider>
+    </CallLockProvider>
+  );
+
+  it("a connected call keeps the lock when the page unmounts, and a second dial is refused", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockResolvedValue(accepted);
+    mocks.getStatus.mockResolvedValue(statusOf("connected"));
+    const view = render(shell(<Page target={lead} />));
+    await user.click(screen.getByText("dial Seller One"));
+    await screen.findByText(/Connected/);
+    expect(probe.lock?.holder()).toBe("dialpad");
+
+    // Navigate away: the page unmounts, the layout provider does not.
+    view.rerender(shell(<Page target={leadB} />));
+    expect(probe.lock?.holder()).toBe("dialpad");
+    await user.click(screen.getByText("dial Seller Two"));
+    expect(mocks.dialLeadAction).toHaveBeenCalledTimes(1);
+    expect(await screen.findByTestId("dial-notice")).toHaveTextContent("Finish your current call");
+    expect(probe.lock?.holder()).toBe("dialpad");
+  });
+
+  it("Dismiss while the status is not confirmed only hides the panel; the lock stays held", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockResolvedValue(accepted);
+    mocks.getStatus.mockResolvedValue(statusOf("failed"));
+    render(shell(<Page target={lead} />));
+    await user.click(screen.getByText("dial Seller One"));
+    await user.click(await screen.findByRole("button", { name: "Dismiss" }));
+    expect(probe.lock?.holder()).toBe("dialpad");
+    expect(screen.getByTestId("dialpad-call-show")).toBeInTheDocument();
+  });
+
+  it("a terminal hangup status releases the lock", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockResolvedValue(accepted);
+    mocks.getStatus.mockResolvedValue(statusOf("ended"));
+    render(shell(<Page target={lead} />));
+    await user.click(screen.getByText("dial Seller One"));
+    await screen.findByText(/Call ended/);
+    await waitFor(() => expect(probe.lock?.holder()).toBeNull());
+  });
+
+  it("\"Mark call ended\" asks for confirmation and then releases", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockResolvedValue(accepted);
+    mocks.getStatus.mockResolvedValue(statusOf("failed"));
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    render(shell(<Page target={lead} />));
+    await user.click(screen.getByText("dial Seller One"));
+    await user.click(await screen.findByRole("button", { name: "Mark call ended" }));
+    expect(probe.lock?.holder()).toBe("dialpad");
+    await user.click(screen.getByRole("button", { name: "Yes, it ended" }));
+    expect(probe.lock?.holder()).toBeNull();
+    expect(info).toHaveBeenCalledWith("[dialpad] call lock released manually", expect.objectContaining({ propertyId: lead.id }));
+    info.mockRestore();
+  });
+
+  it("the ceiling releases the lock with a visible notice", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      mocks.dialLeadAction.mockResolvedValue(accepted);
+      mocks.getStatus.mockResolvedValue(statusOf("connected"));
+      render(shell(<Page target={lead} />));
+      await user.click(screen.getByText("dial Seller One"));
+      await screen.findByText(/Connected/);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DIAL_CALL_CEILING_MS + 1000);
+      });
+      expect(probe.lock?.holder()).toBeNull();
+      expect(screen.getByTestId("dial-notice")).toHaveTextContent("released the call lock");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the panel stays visible while the lock is held even if the route flips off", async () => {
+    const user = userEvent.setup();
+    mocks.dialLeadAction.mockResolvedValue(accepted);
+    mocks.getStatus.mockResolvedValue(statusOf("connected"));
+    const view = render(shell(<Page target={lead} />));
+    await user.click(screen.getByText("dial Seller One"));
+    await screen.findByText(/Connected/);
+    view.rerender(
+      <CallLockProvider>
+        <LockProbe />
+        <DialpadCallProvider enabled={false}>
+          <Page target={lead} />
+        </DialpadCallProvider>
+      </CallLockProvider>,
+    );
+    expect(screen.getByTestId("dialpad-call-status")).toBeInTheDocument();
     expect(probe.lock?.holder()).toBe("dialpad");
   });
 });

@@ -45,14 +45,13 @@ import type {
 import { AcquisitionReadinessDialog } from "./_components/readiness-dialog";
 import { AcquisitionOfferDialog } from "./_components/offer-dialog";
 import { AcquisitionLifecycleDialog } from "./_components/lifecycle-dialog";
-import { DialStatus } from "./_components/dial-status";
 import { CallbackDueBanner } from "./_components/callback-due-banner";
 import { useCallStatePoll } from "./_components/use-call-state-poll";
 import type { PromptOutcome } from "./_components/post-call-prompt";
 import type { DialpadCallingBootstrap } from "@/lib/dialpad-cti/dispatch";
 import type { MyLeadsCallFeatures } from "@/lib/my-leads/call-features";
 import { oldestPrompt, type CallPromptItem } from "@/lib/my-leads/call-state";
-import { useApiDial } from "./_components/use-api-dial";
+import { useOptionalDialpadCall } from "@/components/dialpad/dialpad-call-context";
 import { useCallLockHolder } from "@/components/calls/call-lock-context";
 import { CoachCallContext } from "./_components/coach-call-context";
 import { acknowledgeCallPromptAction } from "./call-state-actions";
@@ -625,10 +624,10 @@ export function MyLeadsClient({
     null;
   // ---- API dial (P2 2.7): the shared hook owns the per-lead key lifecycle (also behind the call screen).
   const callLockHolder = useCallLockHolder();
-  const { dialFlight, dialActive, lockNotice, startApiDial, statusHandlers } = useApiDial((propertyId) => {
-    const row = rawRow(propertyId);
-    return row ? { contactId: row.contactId ?? null, label: row.homeownerName ?? row.address } : null;
-  });
+  // The flight and its lock are owned by the persistent layout provider so navigating away cannot drop a live call.
+  const dialpadCall = useOptionalDialpadCall();
+  const dialFlight = dialpadCall?.flight ?? null;
+  const dialActive = dialpadCall?.dialActive ?? false;
   /**
    * Every workflow opening reads the lead through the single-row lookup (a database
    * statement-time read) and uses THAT row for the command's preconditions (episode,
@@ -720,7 +719,15 @@ export function MyLeadsClient({
         return;
       }
       setError(null);
-      void startApiDial(row.propertyId, 1);
+      if (!row.contactId) {
+        setError("This lead has no contact to call.");
+        return;
+      }
+      dialpadCall?.startCall({
+        propertyId: row.propertyId,
+        contactId: row.contactId,
+        label: row.homeownerName ?? row.address,
+      });
       return;
     }
     if (kind === "start-call") {
@@ -974,6 +981,31 @@ export function MyLeadsClient({
   const ackInFlight = useRef(new Set<string>());
   const refreshCallState = callPoll.refreshNow;
   const softphoneOnCall = softphone?.onCall === true;
+  // Handlers the persistent Dialpad panel calls back into while this page is mounted.
+  const pageHandlerRef = useRef<{ onLogOutcome: (propertyId: string, callActivityId: string) => void; onEnded: () => void }>({ onLogOutcome: () => undefined, onEnded: () => undefined });
+  useEffect(() => {
+    pageHandlerRef.current = {
+      onLogOutcome: (propertyId, callActivityId) => {
+        if (!rawRow(propertyId)) {
+          setError("This lead is no longer in your queue.");
+          return;
+        }
+        action("log-attempt", propertyId, callActivityId);
+      },
+      onEnded: () => {
+        void refresh(true);
+        refreshCallState();
+      },
+    };
+  });
+  const setPageHandlers = dialpadCall?.setPageHandlers;
+  useEffect(() => {
+    setPageHandlers?.({
+      onLogOutcome: (propertyId, callActivityId) => pageHandlerRef.current.onLogOutcome(propertyId, callActivityId),
+      onEnded: () => pageHandlerRef.current.onEnded(),
+    });
+    return () => setPageHandlers?.(null);
+  }, [setPageHandlers]);
   useEffect(() => {
     if (!autoPromptOn || dialog !== null || openingStatus !== null || autoPrompt !== null) return;
     // Never open over an in-flight dial or any other open dialog in the page (menus, drawers, confirms).
@@ -1348,24 +1380,6 @@ export function MyLeadsClient({
             Reload and reconnect
           </Button>
         </div>
-      )}
-      {dialpad && roster.settings.enabled && (
-        <DialStatus
-          flight={dialFlight}
-          notice={lockNotice}
-          {...statusHandlers}
-          onEnded={() => {
-            void refresh(true);
-            refreshCallState();
-          }}
-          onLogOutcome={(propertyId, callActivityId) => {
-            if (!rawRow(propertyId)) {
-              setError("This lead is no longer in your queue.");
-              return;
-            }
-            action("log-attempt", propertyId, callActivityId);
-          }}
-        />
       )}
       {callbackAlertOn && roster.settings.enabled && (
         <CallbackDueBanner
