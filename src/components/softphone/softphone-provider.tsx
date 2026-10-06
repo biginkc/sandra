@@ -88,6 +88,8 @@ type SoftphoneContextValue = {
   toggleOpen: () => void;
   callingEnabled: boolean;
   onCall: boolean;
+  /** Any softphone call state other than closed, idle or wrap (includes "preparing"): another dialer must not start. */
+  busy: boolean;
   timer: string;
 };
 const SoftphoneContext = createContext<SoftphoneContextValue | null>(null);
@@ -1275,6 +1277,7 @@ export function SoftphoneProvider({
     /^[\d\s()+.-]+$/.test(dialInput) && /^\d{10}$/.test(manualDigits);
   const callName = target?.name ?? "";
   const isOnCall = phone === "live" || phone === "held";
+  const softphoneBusy = phone === "preparing" || isOnCall;
   const callerIdReady =
     directMode || (callerIdState === "ready" && Boolean(selectedCallerId));
 
@@ -1392,9 +1395,10 @@ export function SoftphoneProvider({
       toggleOpen: openIdle,
       callingEnabled,
       onCall: isOnCall,
+      busy: softphoneBusy,
       timer: timerText(seconds),
     }),
-    [callingEnabled, isOnCall, openIdle, openLead, seconds],
+    [callingEnabled, isOnCall, softphoneBusy, openIdle, openLead, seconds],
   );
 
   return (

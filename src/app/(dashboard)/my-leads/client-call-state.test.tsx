@@ -19,7 +19,7 @@ const mocks = vi.hoisted(() => ({
   poll: vi.fn(),
   ack: vi.fn(),
   status: vi.fn(),
-  softphone: null as null | { callingEnabled: boolean; onCall?: boolean; openLead: (lead: unknown) => void },
+  softphone: null as null | { callingEnabled: boolean; onCall?: boolean; busy?: boolean; openLead: (lead: unknown) => void },
 }))
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.routerRefresh }) }))
@@ -204,8 +204,19 @@ describe("MyLeadsClient calling and durable call state", () => {
     expect(mocks.dialLead).not.toHaveBeenCalled()
   })
 
+  it("disables Call with coach while the Dialpad request is still in flight", async () => {
+    const openLead = vi.fn()
+    mocks.softphone = { callingEnabled: true, openLead }
+    mocks.dialLead.mockReturnValue(new Promise(() => {}))
+    renderClient({ dialpad, initialStrip: strip() })
+    await click(screen.getByRole("button", { name: "Start call property-1" }))
+    for (const button of screen.getAllByText("Call with coach")) expect(button).toBeDisabled()
+    await click(screen.getAllByText("Call with coach")[0])
+    expect(openLead).not.toHaveBeenCalled()
+  })
+
   it("refuses a Dialpad call while the softphone is on a call", async () => {
-    mocks.softphone = { callingEnabled: true, onCall: true, openLead: vi.fn() }
+    mocks.softphone = { callingEnabled: true, busy: true, openLead: vi.fn() }
     renderClient({ dialpad })
     await click(screen.getByRole("button", { name: "Start call property-1" }))
     expect(mocks.dialLead).not.toHaveBeenCalled()

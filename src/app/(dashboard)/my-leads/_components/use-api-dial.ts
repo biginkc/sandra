@@ -44,6 +44,8 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     dialActiveRef.current = dialActive;
   });
   const dialBusy = useRef(false);
+  // True from the click until the server answers (the window before a flight exists), so other dialers can be held off.
+  const [dialPending, setDialPending] = useState(false);
   const resolveRef = useRef(resolveTarget);
   useEffect(() => {
     resolveRef.current = resolveTarget;
@@ -63,6 +65,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     }
     if (dialBusy.current || dialActiveRef.current) return;
     dialBusy.current = true;
+    setDialPending(true);
     // This lead's key is kept while its call is in flight, uncertain, failed, expired or the request
     // threw, so a repeat of the same click cannot dial twice. A new key is minted only when this lead has none.
     let entry = dialKeys.current.get(propertyId);
@@ -124,6 +127,7 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
       setDialFlight({ kind: "error", propertyId, label, message: "Sandra could not confirm the call. Check Dialpad before trying again." });
     } finally {
       dialBusy.current = false;
+      setDialPending(false);
     }
   };
 
@@ -158,5 +162,5 @@ export function useApiDial(resolveTarget: (propertyId: string) => DialTarget | n
     },
   };
 
-  return { dialFlight, dialActive, startApiDial, statusHandlers };
+  return { dialFlight, dialActive, dialPending, startApiDial, statusHandlers };
 }

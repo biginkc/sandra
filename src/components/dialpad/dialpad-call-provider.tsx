@@ -16,16 +16,17 @@ import { useApiDial } from "@/app/(dashboard)/my-leads/_components/use-api-dial"
 export function DialpadCallProvider({ enabled, children }: { enabled: boolean; children: ReactNode }) {
   const router = useRouter();
   const softphone = useOptionalSoftphone();
-  const softphoneOnCall = softphone?.onCall === true;
+  const softphoneBusy = softphone?.busy === true;
   const [notice, setNotice] = useState<string | null>(null);
   const requests = useRef(new Map<string, DialpadCallRequest>());
-  const { dialFlight, dialActive, startApiDial, statusHandlers } = useApiDial(
+  const { dialFlight, dialActive, dialPending, startApiDial, statusHandlers } = useApiDial(
     (propertyId) => {
       const request = requests.current.get(propertyId);
       return request ? { contactId: request.contactId, label: request.label, phoneSlot: request.phoneSlot ?? null } : null;
     },
     { onNotConfigured: (propertyId) => requests.current.get(propertyId)?.onFallback() },
   );
+  const dialBusy = dialActive || dialPending;
   const startRef = useRef(startApiDial);
   useEffect(() => {
     startRef.current = startApiDial;
@@ -33,10 +34,10 @@ export function DialpadCallProvider({ enabled, children }: { enabled: boolean; c
   const stable = useMemo<DialpadCallContextValue>(
     () => ({
       enabled,
-      dialActive,
+      dialActive: dialBusy,
       startCall: (request) => {
         // The softphone is on a call: never start a second one through Dialpad.
-        if (softphoneOnCall) {
+        if (softphoneBusy) {
           setNotice("Finish your current call before starting another.");
           return;
         }
@@ -45,7 +46,7 @@ export function DialpadCallProvider({ enabled, children }: { enabled: boolean; c
         void startRef.current(request.propertyId, 1);
       },
     }),
-    [enabled, dialActive, softphoneOnCall],
+    [enabled, dialBusy, softphoneBusy],
   );
   return (
     <DialpadCallContext.Provider value={stable}>

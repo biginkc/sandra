@@ -353,6 +353,7 @@ export default async function MyLeadsPage({
   }
 
   // Same rule as every other Call button (layout): the bootstrap alone is not enough, the rep needs a live binding.
+  // A rep with no live binding therefore keeps the Telnyx softphone on My Leads too (instead of a Dialpad "not verified" denial).
   if (
     decideDialpadCallRoute({
       clickToDialFlag: callFeatures.clickToDial,

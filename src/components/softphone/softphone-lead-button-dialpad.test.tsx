@@ -7,12 +7,12 @@ const mocks = vi.hoisted(() => ({
   dialLeadAction: vi.fn(),
   getStatus: vi.fn(),
   refresh: vi.fn(),
-  onCall: false,
+  busy: false,
 }));
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: mocks.refresh }) }));
 vi.mock("./softphone-provider", () => ({
-  useOptionalSoftphone: () => ({ openLead: mocks.openLead, callingEnabled: true, onCall: mocks.onCall }),
+  useOptionalSoftphone: () => ({ openLead: mocks.openLead, callingEnabled: true, busy: mocks.busy }),
 }));
 vi.mock("@/app/(dashboard)/my-leads/dialpad-actions", () => ({
   dialLeadAction: mocks.dialLeadAction,
@@ -45,7 +45,7 @@ function renderButton(enabled: boolean, leadOverride = lead) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.onCall = false;
+  mocks.busy = false;
   mocks.getStatus.mockResolvedValue({ ok: false, code: "denied", message: "x" });
 });
 
@@ -148,9 +148,9 @@ describe("SoftphoneLeadButton Dialpad routing", () => {
     expect(mocks.openLead).not.toHaveBeenCalled();
   });
 
-  it("refuses a Dialpad call while the softphone is on a call", async () => {
+  it("refuses a Dialpad call while the softphone is preparing or on a call", async () => {
     const user = userEvent.setup();
-    mocks.onCall = true;
+    mocks.busy = true;
     renderButton(true);
     await user.click(screen.getByTestId("call-lead-button"));
     expect(mocks.dialLeadAction).not.toHaveBeenCalled();
@@ -168,5 +168,20 @@ describe("SoftphoneLeadButton Dialpad routing", () => {
     await user.click(screen.getByTestId("call-lead-button"));
     expect(await screen.findByText(/not enabled/)).toBeInTheDocument();
     expect(mocks.openLead).not.toHaveBeenCalled();
+  });
+
+  it("holds Call with coach and shows a pending Call while the Dialpad request is still in flight", async () => {
+    const user = userEvent.setup();
+    let release: (value: unknown) => void = () => {};
+    mocks.dialLeadAction.mockReturnValue(new Promise((resolve) => { release = resolve; }));
+    renderButton(true);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByText("Call with coach")).toBeDisabled());
+    expect(screen.getByTestId("call-lead-button")).toBeDisabled();
+    expect(screen.getByTestId("call-lead-button")).toHaveTextContent("Calling…");
+    await user.click(screen.getByText("Call with coach"));
+    expect(mocks.openLead).not.toHaveBeenCalled();
+    release({ ok: true, intentId: "i1", state: "awaiting_provider", uncertain: false, phoneSlot: 1 });
+    await screen.findByTestId("dialpad-call-status");
   });
 });

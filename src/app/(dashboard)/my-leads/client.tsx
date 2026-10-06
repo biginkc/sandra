@@ -623,7 +623,7 @@ export function MyLeadsClient({
     triage?.rows.find((item) => item.propertyId === id)?.row ??
     null;
   // ---- API dial (P2 2.7): the shared hook owns the per-lead key lifecycle (also behind the call screen).
-  const { dialFlight, dialActive, startApiDial, statusHandlers } = useApiDial((propertyId) => {
+  const { dialFlight, dialActive, dialPending, startApiDial, statusHandlers } = useApiDial((propertyId) => {
     const row = rawRow(propertyId);
     return row ? { contactId: row.contactId ?? null, label: row.homeownerName ?? row.address } : null;
   });
@@ -696,10 +696,10 @@ export function MyLeadsClient({
   const coachCall =
     dialpad && softphone?.callingEnabled
       ? {
-          disabled: dialActive,
+          disabled: dialActive || dialPending,
           call: (propertyId: string) => {
             const row = rawRow(propertyId);
-            if (row && !dialActive) softphone.openLead(toSoftphoneLead(row));
+            if (row && !dialActive && !dialPending) softphone.openLead(toSoftphoneLead(row));
           },
         }
       : null;
@@ -719,7 +719,7 @@ export function MyLeadsClient({
       }
       setError(null);
       // The softphone is on a call: never start a second one through Dialpad.
-      if (softphone?.onCall) {
+      if (softphone?.busy) {
         setError("Finish your current call before starting another.");
         return;
       }

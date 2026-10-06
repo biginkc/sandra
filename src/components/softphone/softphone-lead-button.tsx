@@ -29,7 +29,8 @@ export function SoftphoneLeadButton({ lead, compact = false }: Props) {
           ? `Call ${lead.firstName} now — 1 click`
           : "Calling not yet enabled"
       }
-      disabled={!callingEnabled}
+      disabled={!callingEnabled || (viaDialpad && dialpad?.dialActive === true)}
+      aria-busy={viaDialpad && dialpad?.dialActive === true ? true : undefined}
       className={
         compact
           ? "border-border text-muted-foreground hover:border-emerald-600 hover:bg-emerald-600 hover:text-white flex size-9 shrink-0 items-center justify-center rounded-full border bg-white transition-colors"
@@ -54,7 +55,7 @@ export function SoftphoneLeadButton({ lead, compact = false }: Props) {
       }}
     >
       <PhoneIcon className={compact ? "size-3.5" : "size-3.5"} />
-      {!compact ? "Call" : null}
+      {!compact ? (viaDialpad && dialpad?.dialActive === true ? "Calling…" : "Call") : null}
     </button>
   );
   if (!viaDialpad) return button;
