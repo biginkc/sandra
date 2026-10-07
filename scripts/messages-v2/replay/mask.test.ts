@@ -115,3 +115,60 @@ describe("maskText leaves ids and timestamps alone", () => {
     expect(m.maskText(`ref ${id} at 2026-10-07T15:04:05Z`)).toBe(`ref ${id} at 2026-10-07T15:04:05Z`);
   });
 });
+
+describe("hardened phone scan", () => {
+  const none = new Set<string>();
+  it("fails on numeric phones in JSON", () => {
+    expect(() => assertNoRealPhones({ a: { b: 9132223344 } }, none)).toThrow(/numeric phone/);
+    expect(() => assertNoRealPhones({ a: [19132223344] }, none)).toThrow(/numeric phone/);
+  });
+  it("allows masked / business / ordinary numbers", () => {
+    expect(() => assertNoRealPhones({ arv: 1234567, sqft: 1800, m: 9135550001, lat: 39.1 }, none)).not.toThrow();
+    expect(() => assertNoRealPhones({ b: 8165559999 }, new Set(["8165559999"]))).not.toThrow();
+  });
+  it("fails on 7-digit local numbers", () => {
+    expect(() => assertNoRealPhones("call 222-3344 later", none)).toThrow(/7-digit/);
+    expect(() => assertNoRealPhones("call 555-0100 later", none)).not.toThrow();
+  });
+  it("fails on international formats, ignores short ids", () => {
+    expect(() => assertNoRealPhones("ph +63 917 123 4567", none)).toThrow(/unmasked/);
+    expect(() => assertNoRealPhones("ph +44 20 7946 0958", none)).toThrow(/unmasked/);
+    expect(() => assertNoRealPhones("v+12 ok", none)).not.toThrow();
+  });
+  it("fails on a real +1 formatted number", () => {
+    expect(() => assertNoRealPhones("+1 (913) 222-3344", none)).toThrow();
+  });
+  it("fails on unmasked emails only when PII masking is on", () => {
+    expect(() => assertNoRealPhones("mail jo@gmail.com", none)).not.toThrow();
+    expect(() => assertNoRealPhones("mail jo@gmail.com", none, { maskPii: true })).toThrow(/email/);
+    expect(() => assertNoRealPhones("mail user-abc@example.invalid", none, { maskPii: true })).not.toThrow();
+  });
+});
+
+describe("maskText covers 7-digit, international and emails", () => {
+  const m = new PhoneMasker(SALT, [], true);
+  it("masks 7-digit and international numbers so the assert passes", () => {
+    const out = m.maskText("home 222-3344, abroad +63 917 123 4567 or +44 20 7946 0958");
+    expect(out).not.toMatch(/222-3344|917 123|7946/);
+    expect(() => assertNoRealPhones(out, new Set())).not.toThrow();
+    expect(m.maskText("home 222-3344")).toBe(new PhoneMasker(SALT, [], true).maskText("home 222-3344"));
+  });
+  it("does not touch dates, uuids, money", () => {
+    const t = "2026-10-07T12:00:00Z 11111111-1111-4111-8111-111111111111 $250,000 offer";
+    expect(m.maskText(t)).toBe(t);
+  });
+  it("masks emails deterministically only with PII masking", () => {
+    const a = m.maskText("write jo.doe@gmail.com now");
+    expect(a).toMatch(/user-[0-9a-f]{10}@example\.invalid/);
+    expect(a).toBe(new PhoneMasker(SALT, [], true).maskText("write jo.doe@gmail.com now"));
+    expect(new PhoneMasker(SALT).maskText("jo.doe@gmail.com")).toBe("jo.doe@gmail.com");
+  });
+  it("masks names deterministically and numeric phones", () => {
+    expect(m.maskName("first", "John")).toBe(new PhoneMasker(SALT, [], true).maskName("first", "John"));
+    expect(m.maskName("first", "John")).not.toContain("John");
+    expect(new PhoneMasker(SALT).maskName("first", "John")).toBe("John");
+    const n = m.maskNumber(9132223344);
+    expect(String(n)).toMatch(/^913555\d{4}$/);
+    expect(m.maskNumber(1234567)).toBe(1234567);
+  });
+});

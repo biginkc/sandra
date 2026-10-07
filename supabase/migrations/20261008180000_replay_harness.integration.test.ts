@@ -5,11 +5,11 @@ import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 /**
- * Messages v2 Phase 5 replay tables (20261008155000). Local-only (loopback
+ * Messages v2 Phase 5 replay tables (20261008180000). Local-only (loopback
  * Postgres): replays the idempotent migration inside a rolled-back transaction.
  */
 const db = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
-const MIGRATION = readFileSync(path.join(__dirname, "20261008155000_replay_harness.sql"), "utf8")
+const MIGRATION = readFileSync(path.join(__dirname, "20261008180000_replay_harness.sql"), "utf8")
   .replace(/^begin;$/m, "")
   .replace(/^commit;$/m, "");
 

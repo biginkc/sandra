@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 /**
  * npm run replay:export -- --db-url <source-db-url> [--days 30] [--context-days 60]
- *                          [--org <uuid>] [--batch <id>] [--out <file>]
+ *                          [--org <uuid>] [--batch <id>] [--out <file>] [--mask-pii (default) | --no-mask-pii]
  *
  * READ-ONLY export of the last N days of inbound SMS plus the minimal context
  * rows they need, with every seller phone masked, into tmp/replay/<batch>.json.
@@ -27,6 +27,8 @@ async function main() {
       org: { type: "string" },
       batch: { type: "string" },
       out: { type: "string" },
+      "mask-pii": { type: "boolean", default: true },
+      "no-mask-pii": { type: "boolean", default: false },
       "statement-timeout-ms": { type: "string", default: "120000" },
     },
   });
@@ -55,6 +57,7 @@ async function main() {
           orgId: values.org ?? null,
           now,
           salt: loadMaskSalt(),
+          maskPii: !values["no-mask-pii"],
           businessNumbers: process.env.SENDILLO_FROM_NUMBER ? [process.env.SENDILLO_FROM_NUMBER] : [],
         }),
       { statementTimeoutMs: Number(values["statement-timeout-ms"]) },

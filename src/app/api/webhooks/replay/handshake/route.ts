@@ -7,7 +7,16 @@ import { getReplayHandshake } from "@/lib/messaging/replay-stub";
  * normal deployment). Reports booleans and the Supabase host, never secrets.
  */
 export async function GET() {
-  const handshake = getReplayHandshake();
+  let handshake;
+  try {
+    handshake = getReplayHandshake();
+  } catch (error) {
+    // Unsafe environment with SMS_PROVIDER_STUB=1: fail loudly, never 200/404.
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "replay stub misconfigured" },
+      { status: 500, headers: { "Cache-Control": "no-store" } },
+    );
+  }
   if (!handshake) return NextResponse.json({ error: "not found" }, { status: 404 });
   return NextResponse.json(handshake, { headers: { "Cache-Control": "no-store" } });
 }

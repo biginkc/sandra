@@ -22,6 +22,7 @@ import {
 import { isSmsPhoneSuppressed } from "./opt-out-phone";
 import type { MessagingProvider } from "./types";
 import { getMessagingProvider } from "./registry";
+import { ReplayStubConfigurationError } from "./replay-stub";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "./sms-phone";
 import {
   evaluateAutomatedSuppression,
@@ -556,7 +557,7 @@ export async function sendSmsToContact(
         reason: "Messaging is off — set MESSAGING_PROVIDER in .env.local to enable it.",
       };
     } catch (e) {
-      if (e instanceof ConfigurationError) {
+      if (e instanceof ConfigurationError && !(e instanceof ReplayStubConfigurationError)) {
         return { status: "blocked_provider_off", reason: e.message };
       }
       throw e;
@@ -1542,7 +1543,7 @@ export async function releaseQueuedMessage(
   try {
     provider = getMessagingProvider();
   } catch (e) {
-    if (e instanceof ConfigurationError) {
+    if (e instanceof ConfigurationError && !(e instanceof ReplayStubConfigurationError)) {
       return { status: "blocked_provider_off", reason: e.message };
     }
     throw e;

@@ -6,7 +6,10 @@ import { SendilloMessagingProvider, sendilloFromEnv } from "./providers/sendillo
 import { TwilioMessagingProvider } from "./providers/twilio";
 import { DialpadMessagingProvider } from "./providers/dialpad";
 import { getMessagingProvider, getWebhookProvider } from "./registry";
+import { ConfigurationError } from "@/lib/errors/classes";
+import { GET as handshakeGET } from "@/app/api/webhooks/replay/handshake/route";
 import {
+  ReplayStubConfigurationError,
   ReplayStubError,
   getReplayHandshake,
   isReplayStubEnabled,
@@ -22,7 +25,11 @@ const ENV_KEYS = [
   "REPLAY_BATCH_ID",
   "AI_RESPONDER_LLM_AUTOSEND",
   "NEXT_PUBLIC_SUPABASE_URL",
+  "VERCEL_ENV",
+  "NODE_ENV",
+  "REPLAY_ALLOW_PROJECT_REF",
 ] as const;
+const LOCAL_URL = "http://127.0.0.1:54331";
 const saved: Record<string, string | undefined> = {};
 
 let fetchSpy: ReturnType<typeof vi.fn>;
@@ -32,6 +39,7 @@ beforeEach(() => {
     saved[k] = process.env[k];
     delete process.env[k];
   }
+  process.env.NEXT_PUBLIC_SUPABASE_URL = LOCAL_URL;
   fetchSpy = vi.fn(async () => {
     throw new Error("network must not be reached");
   });
@@ -39,8 +47,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   for (const k of ENV_KEYS) {
-    if (saved[k] === undefined) delete process.env[k];
-    else process.env[k] = saved[k];
+    if (saved[k] === undefined) delete (process.env as Record<string, string | undefined>)[k];
+    else (process.env as Record<string, string | undefined>)[k] = saved[k];
   }
   setReplayOutboundRecorder(null);
   vi.unstubAllGlobals();
@@ -105,12 +113,11 @@ describe("real providers refuse the network under SMS_PROVIDER_STUB=1", () => {
     expect(provider.verifyWebhookSignature("{}", headers)).toBe(true);
   });
 
-  it("a recorder failure never sends and never throws", async () => {
+  it("a recorder (log insert) failure makes the stub send FAIL, never 'accepted'", async () => {
     setReplayOutboundRecorder(async () => {
       throw new Error("db down");
     });
-    const result = await sendilloFromEnv().sendSms({ to: "+18165550123", body: "x" });
-    expect(result.externalId).toMatch(/^replay-stub-/);
+    await expect(sendilloFromEnv().sendSms({ to: "+18165550123", body: "x" })).rejects.toBeInstanceOf(ProviderError);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -163,5 +170,89 @@ describe("bulk reply transport", () => {
     expect(() => createSendilloReplyTransport("key")).not.toThrow();
     process.env.SMS_PROVIDER_STUB = "1";
     expect(() => createSendilloReplyTransport("key")).toThrow(ReplayStubError);
+  });
+});
+
+describe("fail-closed: the flag in an environment that could be real", () => {
+  const unsafe: Array<[string, () => void]> = [
+    ["VERCEL_ENV=production", () => { process.env.VERCEL_ENV = "production"; }],
+    ["VERCEL_ENV=preview", () => { process.env.VERCEL_ENV = "preview"; }],
+    ["VERCEL_ENV=development", () => { process.env.VERCEL_ENV = "development"; }],
+    ["NODE_ENV=production", () => { (process.env as Record<string, string>).NODE_ENV = "production"; }],
+    ["hosted non-allowed Supabase URL", () => { process.env.NEXT_PUBLIC_SUPABASE_URL = "https://abcdefghijklmnopqrst.supabase.co"; }],
+    ["hosted URL with a different allowed ref", () => {
+      process.env.NEXT_PUBLIC_SUPABASE_URL = "https://abcdefghijklmnopqrst.supabase.co";
+      process.env.REPLAY_ALLOW_PROJECT_REF = "zzzzzzzzzzzzzzzzzzzz";
+    }],
+    ["missing Supabase URL", () => { delete process.env.NEXT_PUBLIC_SUPABASE_URL; }],
+  ];
+
+  describe.each(unsafe)("%s", (_name, arrange) => {
+    beforeEach(() => {
+      process.env.SMS_PROVIDER_STUB = "1";
+      process.env.SENDILLO_WEBHOOK_SECRET = "s";
+      arrange();
+    });
+    it("isReplayStubEnabled / sendilloFromEnv / sendilloFromEnvWithOptions throw", () => {
+      expect(() => isReplayStubEnabled()).toThrow(ReplayStubConfigurationError);
+      expect(() => isReplayStubEnabled()).toThrow(ConfigurationError);
+      expect(() => sendilloFromEnv()).toThrow(ReplayStubConfigurationError);
+    });
+    it("getMessagingProvider throws even when MESSAGING_PROVIDER is unset, sendillo or mock", () => {
+      for (const p of [undefined, "sendillo", "mock", "twilio"]) {
+        if (p === undefined) delete process.env.MESSAGING_PROVIDER;
+        else process.env.MESSAGING_PROVIDER = p;
+        expect(() => getMessagingProvider()).toThrow(ReplayStubConfigurationError);
+      }
+    });
+    it("getWebhookProvider throws for every provider and never returns null", () => {
+      for (const id of ["twilio", "dialpad", "sendillo"] as const) {
+        expect(() => getWebhookProvider(id)).toThrow(ReplayStubConfigurationError);
+      }
+      process.env.MESSAGING_PROVIDER = "mock";
+      expect(() => getWebhookProvider("sendillo")).toThrow(ReplayStubConfigurationError);
+    });
+    it("the real providers and the bulk transport refuse (no fetch)", async () => {
+      const twilio = new TwilioMessagingProvider({ accountSid: "AC1", authToken: "tok", fromNumber: "+18165550100" });
+      await expect(twilio.sendSms({ to: "+18165550123", body: "hi" })).rejects.toBeInstanceOf(ConfigurationError);
+      const { createSendilloReplyTransport } = await import("@/lib/inbox/reply-provider");
+      expect(() => createSendilloReplyTransport("key")).toThrow(ConfigurationError);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+    it("rep-sms provider resolution throws", async () => {
+      process.env.MESSAGING_PROVIDER = "sendillo";
+      const { providerForRepSms } = await import("./rep-sms");
+      expect(() => providerForRepSms()).toThrow(ReplayStubConfigurationError);
+    });
+    it("the handshake route answers 500 (not 200/404)", async () => {
+      const res = await handshakeGET();
+      expect(res.status).toBe(500);
+    });
+    it("releaseQueuedMessage rethrows instead of mapping to blocked_provider_off", async () => {
+      const { releaseQueuedMessage } = await import("./send");
+      process.env.MESSAGING_PROVIDER = "sendillo";
+      await expect(releaseQueuedMessage({} as never, "00000000-0000-4000-8000-000000000000")).rejects.toBeInstanceOf(
+        ReplayStubConfigurationError,
+      );
+    });
+  });
+
+  it("a hosted Supabase URL is allowed only for the exact explicit ref", () => {
+    process.env.SMS_PROVIDER_STUB = "1";
+    process.env.NEXT_PUBLIC_SUPABASE_URL = "https://abcdefghijklmnopqrst.supabase.co";
+    process.env.REPLAY_ALLOW_PROJECT_REF = "abcdefghijklmnopqrst";
+    expect(isReplayStubEnabled()).toBe(true);
+  });
+  it("IPv6 and localhost loopback are fine", () => {
+    process.env.SMS_PROVIDER_STUB = "1";
+    for (const u of ["http://localhost:54331", "http://[::1]:54331"]) {
+      process.env.NEXT_PUBLIC_SUPABASE_URL = u;
+      expect(isReplayStubEnabled()).toBe(true);
+    }
+  });
+  it("without the flag, hosted environments are unaffected", () => {
+    process.env.VERCEL_ENV = "production";
+    expect(isReplayStubEnabled()).toBe(false);
+    expect(getReplayHandshake()).toBeNull();
   });
 });

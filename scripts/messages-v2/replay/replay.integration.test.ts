@@ -16,7 +16,7 @@ import type { Query } from "./schema";
  * mimic a separate target database.
  */
 const db = new Client({ connectionString: requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL ?? "") });
-const MIGRATION = readFileSync(path.join(__dirname, "../../../supabase/migrations/20261008155000_replay_harness.sql"), "utf8")
+const MIGRATION = readFileSync(path.join(__dirname, "../../../supabase/migrations/20261008180000_replay_harness.sql"), "utf8")
   .replace(/^begin;$/m, "")
   .replace(/^commit;$/m, "");
 
@@ -92,7 +92,7 @@ describe("replay export against real Postgres", () => {
     expect(exp.inbound).toHaveLength(1);
     expect(exp.inbound[0].id).toBe(inboundId);
     expect(exp.tables.messages).toHaveLength(1); // only the pre-window outbound is baseline
-    expect(exp.tables.contacts[0].first_name).toBe("Pat");
+    expect(exp.tables.contacts[0].first_name).toMatch(/^First-[0-9a-f]{6}$/); // names masked by default
     expect(exp.tables.properties[0].address).toBe("9 Elm Ct");
     expect(exp.tables.sms_phone_suppressions).toHaveLength(1);
     const json = JSON.stringify(exp);

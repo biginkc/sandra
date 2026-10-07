@@ -59,7 +59,7 @@ async function tableExists(query: Query, table: string): Promise<boolean> {
  */
 export async function seedExport(query: Query, exp: ReplayExport, opts: SeedOptions = {}): Promise<SeedSummary> {
   if (!(await tableExists(query, "replay_batches"))) {
-    throw new Error("replay_batches is missing: apply migration 20261008155000_replay_harness.sql to the target database first");
+    throw new Error("replay_batches is missing: apply migration 20261008180000_replay_harness.sql to the target database first");
   }
   const orgId = replayOrgId(exp.batchId);
   const warnings: string[] = [];

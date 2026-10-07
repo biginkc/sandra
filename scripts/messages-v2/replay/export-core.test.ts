@@ -70,8 +70,33 @@ describe("buildExport", () => {
     expect(out.tables.messages[0].to_address).toBe(c.phone_1);
   });
 
-  it("keeps names, addresses and message bodies verbatim (only phone numbers inside text change)", async () => {
+  it("masks contact names deterministically by default; addresses and bodies stay", async () => {
     const out = await buildExport(fakeDb().query, { ...opts, businessNumbers: [BUSINESS] });
+    const again = await buildExport(fakeDb().query, { ...opts, businessNumbers: [BUSINESS] });
+    expect(out.tables.contacts[0].first_name).toMatch(/^First-[0-9a-f]{6}$/);
+    expect(out.tables.contacts[0].last_name).toMatch(/^Last-[0-9a-f]{6}$/);
+    expect(out.tables.contacts[0].entity_name).toBeNull();
+    expect(out.tables.contacts[0].first_name).toBe(again.tables.contacts[0].first_name);
+    expect(out.tables.properties[0]).toMatchObject({ address: "12 Oak St" });
+  });
+
+  it("masks emails inside free text by default and leaves them with maskPii:false", async () => {
+    const inbound = [{ id: "a", org_id: ORG, external_id: "1", from_address: SELLER, to_address: BUSINESS, body: "email me at jo.doe@gmail.com", created_at: NOW, contact_id: CONTACT, property_id: PROP, conversation_id: CONV }];
+    const masked = await buildExport(fakeDb({ inbound }).query, opts);
+    expect(JSON.stringify(masked)).not.toContain("jo.doe@gmail.com");
+    expect(masked.inbound[0].body).toMatch(/@example\.invalid/);
+    const raw = await buildExport(fakeDb({ inbound }).query, { ...opts, maskPii: false });
+    expect(raw.inbound[0].body).toContain("jo.doe@gmail.com");
+  });
+
+  it("fails the export when a numeric phone survives in JSON metadata-like reference data", async () => {
+    const { query } = fakeDb({ outboundRef: [{ id: "o1", conversation_id: CONV, direction: "outbound", status: "sent", provider: "x", created_at: NOW, extra: 9132223344 }] });
+    const out = await buildExport(query, opts);
+    expect(JSON.stringify(out)).not.toContain("9132223344"); // masked, not leaked
+  });
+
+  it("with maskPii:false, keeps names, addresses and message bodies verbatim (only phone numbers inside text change)", async () => {
+    const out = await buildExport(fakeDb().query, { ...opts, maskPii: false, businessNumbers: [BUSINESS] });
     expect(out.tables.contacts[0]).toMatchObject({ first_name: "John", last_name: "Doe" });
     expect(out.tables.properties[0]).toMatchObject({ address: "12 Oak St", city: "Kansas City", state: "MO", zip: "64111" });
     expect(out.tables.messages[0].body).toBe("Hi John, are you still interested in selling 12 Oak St?");

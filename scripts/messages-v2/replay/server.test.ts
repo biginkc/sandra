@@ -9,6 +9,9 @@ describe("buildServerEnv", () => {
     TWILIO_AUTH_TOKEN: "t",
     DIALPAD_API_KEY: "d",
     BLAND_API_KEY: "b",
+    TELNYX_API_KEY: "tx",
+    TRACERFY_API_KEY: "tr",
+    SMARTY_AUTH_TOKEN: "sm",
     NEXT_PUBLIC_SUPABASE_URL: "https://copflsklaefwzipsrjqz.supabase.co",
     SUPABASE_SERVICE_ROLE_KEY: "prod-service-key",
     ANTHROPIC_API_KEY: "keep-me",
@@ -20,6 +23,12 @@ describe("buildServerEnv", () => {
   it("blanks every seller-SMS / call vendor credential", () => {
     for (const name of BLANKED_ENV) expect(env[name], name).toBe("");
     expect(() => assertHarnessEnv(env)).not.toThrow();
+  });
+  it("blanks Telnyx and the other paid/outbound vendor keys", () => {
+    for (const name of ["TELNYX_API_KEY", "TRACERFY_API_KEY", "SMARTY_AUTH_TOKEN"]) {
+      expect(BLANKED_ENV).toContain(name);
+      expect(env[name]).toBe("");
+    }
   });
   it("turns the stub on, LLM autosend off and forces the sendillo stub provider", () => {
     expect(env.SMS_PROVIDER_STUB).toBe("1");

@@ -16,7 +16,11 @@ export type ExportOptions = {
   salt: string;
   /** Extra business numbers to leave unmasked (e.g. SENDILLO_FROM_NUMBER). */
   businessNumbers?: readonly string[];
+  /** Mask contact names and emails deterministically. Default true. */
+  maskPii?: boolean;
 };
+
+const NAME_COLUMNS: Record<string, "first" | "last" | "entity"> = { first_name: "first", last_name: "last", entity_name: "entity" };
 
 const q = (cols: readonly string[]) => cols.map((c) => `"${c}"`).join(", ");
 
@@ -163,7 +167,7 @@ export async function buildExport(query: Query, opts: ExportOptions): Promise<Re
 
   // 6. Mask. Prime the masker with every real seller number in sorted order so
   //    collision probing is independent of query order.
-  const masker = new PhoneMasker(opts.salt, [...business]);
+  const masker = new PhoneMasker(opts.salt, [...business], opts.maskPii !== false);
   for (const d of [...sellerDigits].sort()) masker.mask(d);
 
   const maskRow = (table: ReplayTable, row: Record<string, unknown>) => {
@@ -172,6 +176,11 @@ export async function buildExport(query: Query, opts: ExportOptions): Promise<Re
     for (const col of spec.columns) {
       if (spec.nullColumns?.includes(col)) {
         out[col] = null;
+        continue;
+      }
+      const nameKind = table === "contacts" ? NAME_COLUMNS[col] : undefined;
+      if (nameKind) {
+        out[col] = masker.maskName(nameKind, row[col] as string | null);
         continue;
       }
       out[col] = maskValue(
@@ -230,7 +239,7 @@ export async function buildExport(query: Query, opts: ExportOptions): Promise<Re
   };
 
   // Last line of defence: fail closed if any real phone survived.
-  assertNoRealPhones({ ...result, businessNumbers: undefined }, business);
+  assertNoRealPhones({ ...result, businessNumbers: undefined }, business, { maskPii: opts.maskPii !== false });
   return result;
 }
 
@@ -241,6 +250,7 @@ function scrub(row: Record<string, unknown>, masker: PhoneMasker): Record<string
 function maskValue(value: unknown, isPhone: boolean, raw: boolean, masker: PhoneMasker): unknown {
   if (value == null) return value;
   if (value instanceof Date) return value.toISOString();
+  if (typeof value === "number") return masker.maskNumber(value);
   if (typeof value === "string") {
     if (isPhone) return masker.maskOrKeep(value);
     return raw ? value : masker.maskText(value);

@@ -1,11 +1,11 @@
--- 20261008155000_replay_harness.sql
+-- 20261008180000_replay_harness.sql
 -- Messages v2 Phase 5: 30-day production-replay harness (docs/messages-v2-replay.md).
 -- Three small, additive, inert tables. Nothing in the app reads or writes them
 -- unless a replay batch exists (only the local/test replay tooling creates one):
 --   replay_batches      one row per seeded replay; its org is the "replay org".
 --   replay_row_tags     every row the seed loaded, tagged with its batch (for --wipe).
 --   replay_outbound_log what the pipeline WOULD have sent (SMS_PROVIDER_STUB=1).
--- Idempotent; rollback in supabase/rollbacks/20261008155000_replay_harness.sql.
+-- Idempotent; rollback in supabase/rollbacks/20261008180000_replay_harness.sql.
 
 begin;
 

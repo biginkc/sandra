@@ -4,7 +4,7 @@ import { dialpadFromEnv } from "./providers/dialpad";
 import { MockMessagingProvider } from "./providers/mock";
 import { sendilloFromEnv } from "./providers/sendillo";
 import { twilioFromEnv } from "./providers/twilio";
-import { ReplayStubError, isReplayStubEnabled } from "./replay-stub";
+import { ReplayStubConfigurationError, ReplayStubError, isReplayStubEnabled } from "./replay-stub";
 import type { MessagingProvider } from "./types";
 
 /**
@@ -18,12 +18,14 @@ import type { MessagingProvider } from "./types";
  * MESSAGING_PROVIDER=mock.
  */
 export function getMessagingProvider(): MessagingProvider | null {
+  // Throws (never returns null) when the stub flag is set in an unsafe environment.
+  const stubEnabled = isReplayStubEnabled();
   const provider = process.env.MESSAGING_PROVIDER?.toLowerCase().trim();
   if (!provider) return null;
 
   // Replay harness: only the recording Sendillo stub (or the in-memory mock)
   // may ever be selected; a real Twilio/Dialpad client is unreachable.
-  if (isReplayStubEnabled() && provider !== "sendillo" && provider !== "mock") {
+  if (stubEnabled && provider !== "sendillo" && provider !== "mock") {
     throw new ReplayStubError(provider, "provider selection");
   }
 
@@ -46,10 +48,12 @@ export function getMessagingProvider(): MessagingProvider | null {
 export function getWebhookProvider(
   providerId: "dialpad" | "sendillo" | "twilio",
 ): MessagingProvider | null {
+  // Throws (never returns null) when the stub flag is set in an unsafe environment.
+  const stubEnabled = isReplayStubEnabled();
   const configured = process.env.MESSAGING_PROVIDER?.toLowerCase().trim();
   if (configured === "mock") return new MockMessagingProvider();
 
-  if (isReplayStubEnabled() && providerId !== "sendillo") return null;
+  if (stubEnabled && providerId !== "sendillo") return null;
 
   try {
     switch (providerId) {
@@ -62,6 +66,7 @@ export function getWebhookProvider(
     }
     return null;
   } catch (error) {
+    if (error instanceof ReplayStubConfigurationError) throw error;
     if (error instanceof ConfigurationError) return null;
     throw error;
   }

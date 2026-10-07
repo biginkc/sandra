@@ -9,7 +9,7 @@ Phase 5 of `.planning/messages-v2/PLAN.md` (see 4.8b outbound gate, 4.9 kill swi
 ## Quick start
 
 Needs: a local Supabase stack with ALL migrations applied (including
-`20261008155000_replay_harness.sql`), a Jev/TypeSafe key and an Anthropic key in
+`20261008180000_replay_harness.sql`), a Jev/TypeSafe key and an Anthropic key in
 `.env.local`, and a read-only connection string for the source database.
 
 ```bash
@@ -59,6 +59,7 @@ Each guarantee has a test. Run them all with `npm run test` (unit) and
 | --- | --- | --- |
 | Harness only targets a localhost server | `assertLocalBaseUrl`: host must be exactly `localhost`, `127.0.0.1` or `[::1]`; no credentials in the URL; lookalikes (`localhost.evil.com`, `evil.com/@localhost`) refused. Runs before any request or query. | `safety.test.ts`, `run-core.test.ts` ("rejects a non-local base URL without making a single request or query") |
 | Supabase target is never production | `assertSafeSupabaseUrl` / `assertSafeDbUrl`: any string containing the production ref (`copflsklaefwzipsrjqz`, plus refs found in `.env.production`, `.env.production.local`, `.vercel/.env.production.local`) is refused even with `--allow-project-ref`. Local stack is allowed; a hosted non-production project needs `--allow-project-ref <that exact ref>`. Unknown hosts refused. Empty ref list refuses (fail closed). DB URLs with `?host=` overrides refused. | `safety.test.ts`, `run-core.test.ts` |
+| The stub flag cannot be set by accident in production | `isReplayStubEnabled` THROWS `ReplayStubConfigurationError` (never returns true, never silently stubs) when `SMS_PROVIDER_STUB=1` and any of: `VERCEL_ENV` is set, `NODE_ENV=production`, or the Supabase host is not loopback and not exactly `<REPLAY_ALLOW_PROJECT_REF>.supabase.co`. The error propagates through the registry, providers, rep-sms, the send pipeline and the handshake route (HTTP 500). A failed `replay_outbound_log` insert fails the stub send. | `replay-stub.test.ts`, `handshake/route.test.ts` |
 | Nothing can reach Sendillo | `SMS_PROVIDER_STUB=1`. The real `SendilloMessagingProvider.sendSms` and catalog reads throw `ReplayStubError` before any `fetch`; the registry only hands out `SendilloReplayStubProvider`, which records the would-be send to `replay_outbound_log` and returns a fake receipt. Twilio/Dialpad `sendSms` and selection are refused; the bulk reply transport cannot be constructed. | `src/lib/messaging/replay-stub.test.ts` (real provider throws and never calls `fetch`; registry refusals; bulk transport) |
 | Harness process holds no provider key | `assertHarnessEnv` refuses if `SENDILLO_API_KEY`, `TWILIO_AUTH_TOKEN` or `DIALPAD_API_KEY` is non-empty, and requires the stub flag. | `safety.test.ts`, `run-core.test.ts` |
 | The SERVER is stubbed too | `GET /api/webhooks/replay/handshake` exists only when `SMS_PROVIDER_STUB=1` (404 otherwise). The runner refuses unless the server reports stub on, no Sendillo key, `AI_RESPONDER_LLM_AUTOSEND=0`, and the same Supabase host as the harness. Nothing is posted before this passes. `replay:server` also blanks vendor credentials and pins Supabase to the local stack. | `safety.test.ts` (`assertHandshake`), `run-core.test.ts` (no POST on any failed handshake), `server.test.ts`, `handshake/route.test.ts` |
@@ -67,6 +68,22 @@ Each guarantee has a test. Run them all with `npm run test` (unit) and
 | Export cannot write to the source | Runs in `begin transaction read only` + `statement_timeout`, always rolled back; only SELECTs are issued. | `export-core.test.ts` (SELECT-only, transaction shape), `replay.integration.test.ts` (Postgres rejects a write) |
 | Seed cannot touch real data | Rows live under a dedicated org named `Replay <batch>`; seeding refuses if an exported id already exists in a non-replay org. Wipe is scoped to that org and refuses any org not named `Replay <batch>`. | `replay.integration.test.ts` |
 | Everything is wipeable | Every seeded row is tagged in `replay_row_tags`; `--wipe` deletes the org's rows (including anything the replay run created), proves no tagged row remains, then drops the org and batch. | `replay.integration.test.ts` |
+
+### PII in the export file (read this before sharing it)
+
+Property addresses are exported unmasked (lead cards need them) and free-text
+message bodies and notes are exported as written, so names mentioned inside a
+message, or any other personal detail a seller typed, are still in the file.
+Treat `tmp/replay/<batch>.json` as seller PII: it is written mode 600 to a
+gitignored directory, never commit or upload it, and delete it (and run
+`--wipe`) when the replay is done.
+
+`replay:export` masks contact names (`first_name`, `last_name`, `entity_name`)
+and email addresses deterministically by default (`--mask-pii`, on unless you
+pass `--no-mask-pii`). Names become `First-<hash>` / `Last-<hash>` /
+`Entity-<hash>`; emails inside text become `user-<hash>@example.invalid`. Names
+and emails are not needed to exercise the pipeline, so there is little reason to
+turn this off.
 
 ### Phone masking
 
@@ -84,10 +101,12 @@ resolved by probing so the mapping is one-to-one). 555 exchange numbers are not
 assigned to subscribers, and the masked numbers are never dialled because sends
 are stubbed.
 
-Kept verbatim: names, addresses, message bodies. One exception: a phone number
-typed inside a message body or note (for example "call me at 913-...") is also
-masked, using the same mapping, because "no real phone in the export" is the
-stricter requirement. Our own sender numbers (inbound `to`, outbound `from`) are
+Kept verbatim: addresses and message bodies. A phone number typed inside a
+message body or note (for example "call me at 913-...") is also masked, because
+"no real phone in the export" is the stricter requirement. That covers 10-digit
+and +1 formats, 7-digit local numbers (replaced by a `555-xxxx` number),
+international `+CC ...` numbers (replaced by `+1 555-xxxx`) and numeric phones
+inside JSON. The final scan fails the export if any of these survive. Our own sender numbers (inbound `to`, outbound `from`) are
 not seller phones and are kept as they are, since the thread matcher uses them.
 
 ## What is and is not replayed
