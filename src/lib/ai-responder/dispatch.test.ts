@@ -2324,18 +2324,10 @@ describe("dispatchAiResponse debounce", () => {
           expect(result.outcome).not.toBe("sent");
           expect(generateAiReply).not.toHaveBeenCalled();
           expect(sendSmsToContact).not.toHaveBeenCalled();
-          // opted_out suppresses the phone immediately at ANY confidence
-          // (only the disposition write is deferred); the other two
-          // below-threshold choices have no suppression side effect.
-          if (choice === "opted_out") {
-            expect(applyPhoneLevelOptOut).toHaveBeenCalledTimes(1);
-            expect(applyPhoneLevelOptOut).toHaveBeenCalledWith(
-              expect.anything(),
-              expect.objectContaining({ surface: "stop", source: "ai_responder", contactId: CONTACT_ID }),
-            );
-          } else {
-            expect(applyPhoneLevelOptOut).not.toHaveBeenCalled();
-          }
+          // Jarrad's Q6 rule (2026-10-08): below threshold goes to human
+          // review EVERYWHERE — including opted_out. Nothing is applied,
+          // the phone is NOT suppressed until a human confirms.
+          expect(applyPhoneLevelOptOut).not.toHaveBeenCalled();
         } finally { vi.stubGlobal("fetch", originalFetch); }
       },
     );
@@ -2362,6 +2354,7 @@ describe("dispatchAiResponse debounce", () => {
         expect(result).toEqual({ outcome: "opted_out", reason: "model:opt_out" });
         expect(state.property.outreach_dispo).toBe("opted_out");
         expect(applyPhoneLevelOptOut).toHaveBeenCalledTimes(1);
+        expect(state.property.needs_human_attention).toBe(false);
       } finally { vi.stubGlobal("fetch", originalFetch); }
     });
   });
@@ -2531,7 +2524,7 @@ describe("dispatchAiResponse debounce", () => {
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
-  it("jev-driven close_dnc suppresses immediately but defers the outreach_dispo write to human confirmation", async () => {
+  it("jev-driven close_dnc is held for human review: no suppression and no outreach_dispo write until confirmed", async () => {
     // Regression test for Astra's BLOCKING PR-review finding (2026-09-20,
     // "Option B" resolution): DNC's suppression effect must happen right
     // away (halting it would mean continuing to text someone who just
@@ -2572,15 +2565,9 @@ describe("dispatchAiResponse debounce", () => {
       // automatic-mode orgs" override).
       expect(vi.mocked(generateAiReply)).not.toHaveBeenCalled();
 
-      // Suppression happens immediately, same as legacy dnc.
-      expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledWith(
-        supabase,
-        expect.objectContaining({
-          contactId: CONTACT_ID,
-          fromPhone: "+18165550001",
-          surface: "dnc",
-        }),
-      );
+      // Q6: dnc is always human-gated, so nothing is suppressed until a
+      // human confirms the pending review.
+      expect(vi.mocked(applyPhoneLevelOptOut)).not.toHaveBeenCalled();
 
       // The entire point of the fix: outreach_dispo is NOT written yet.
       expect(state.property.outreach_dispo).toBeNull();

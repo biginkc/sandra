@@ -7,6 +7,7 @@ import { pauseContactEnrollments } from "@/lib/sequences/enrollment";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
+import { applySuppressionForConfirmedReview } from "@/lib/ai-responder/confirm-suppression";
 import { createClient } from "@/lib/supabase/server";
 
 import { getCorrectionHistory, getNeedsDecisionQueue, type CorrectionHistoryEntry, type JevQueueItem } from "./queries";
@@ -84,7 +85,7 @@ function isFullOutcome(value: string): value is FullOutcome {
 export async function confirmJevQueueItem(
   source: JevQueueSource,
   id: string,
-): Promise<Result<{ status: string }>> {
+): Promise<Result<{ status: string; warning?: string }>> {
   try {
     const supabase = await createClient();
     const {
@@ -99,9 +100,17 @@ export async function confirmJevQueueItem(
       if (error) return { ok: false, error: { code: "JEV_CONFIRM_FAILED", message: error.message } };
       const status = (data as { status?: string } | null)?.status;
       if (!status) return { ok: false, error: { code: "JEV_CONFIRM_FAILED", message: "Unexpected response" } };
+      // The RPC only flips contacts.sms_opted_out; run the full phone-level
+      // suppression for a confirmed opted_out/dnc review (idempotent, so a
+      // retry of this action after a warning is safe).
+      let warning: string | undefined;
+      if (status === "confirmed") {
+        const suppression = await applySuppressionForConfirmedReview(supabase as never, id, user.id);
+        if (!suppression.ok) warning = suppression.warning;
+      }
       revalidatePath("/jev/needs-decision");
       revalidatePath("/jev/review");
-      return ok({ status });
+      return ok(warning ? { status, warning } : { status });
     }
 
     if (source === "jev_lead_decision") {

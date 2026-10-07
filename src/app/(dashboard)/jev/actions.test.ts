@@ -14,6 +14,10 @@ const mocks = vi.hoisted(() => ({
   recordLeadEventCalls: [] as Array<{ propertyId: string; eventType: string }>,
 }));
 
+const { applySuppressionForConfirmedReview } = vi.hoisted(() => ({
+  applySuppressionForConfirmedReview: vi.fn(),
+}));
+vi.mock("@/lib/ai-responder/confirm-suppression", () => ({ applySuppressionForConfirmedReview }));
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({
@@ -60,6 +64,8 @@ import {
 } from "./actions";
 
 beforeEach(() => {
+  applySuppressionForConfirmedReview.mockReset();
+  applySuppressionForConfirmedReview.mockResolvedValue({ ok: true });
   mocks.user = { id: "user-1" };
   mocks.rpcCalls = [];
   mocks.rpcResultsByName = {};
@@ -87,6 +93,28 @@ describe("confirmJevQueueItem", () => {
     expect(mocks.rpcCalls).toEqual([
       { name: "fn_confirm_ai_disposition_review", args: { p_review_id: "review-1" } },
     ]);
+  });
+
+  it("runs suppression after a confirmed ai_disposition_review", async () => {
+    mocks.rpcResult = { data: { status: "confirmed" }, error: null };
+    await confirmJevQueueItem("ai_disposition_review", "review-1");
+    expect(applySuppressionForConfirmedReview).toHaveBeenCalledTimes(1);
+    expect(applySuppressionForConfirmedReview).toHaveBeenCalledWith(expect.anything(), "review-1", "user-1");
+  });
+
+  it("skips suppression when superseded, and for jev_lead_decision", async () => {
+    mocks.rpcResult = { data: { status: "superseded" }, error: null };
+    await confirmJevQueueItem("ai_disposition_review", "review-1");
+    mocks.rpcResult = { data: { status: "confirmed" }, error: null };
+    await confirmJevQueueItem("jev_lead_decision", "decision-1");
+    expect(applySuppressionForConfirmedReview).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a suppression warning while the review stays confirmed", async () => {
+    mocks.rpcResult = { data: { status: "confirmed" }, error: null };
+    applySuppressionForConfirmedReview.mockResolvedValue({ ok: false, warning: "Confirmed, but suppression incomplete — retry." });
+    const result = await confirmJevQueueItem("ai_disposition_review", "review-1");
+    expect(result).toEqual({ ok: true, data: { status: "confirmed", warning: "Confirmed, but suppression incomplete — retry." } });
   });
 
   it("calls fn_confirm_jev_lead_decision for a jev_lead_decision source", async () => {

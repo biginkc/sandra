@@ -1331,14 +1331,16 @@ async function resolveAndApplyRoute(
     case "opt_out":
       const isJevBelowThresholdOptOut = classification.kind === "jev_route" && !classification.eligibleForAutoAccept;
       const optOutResult = isJevBelowThresholdOptOut
-        ? await proposeJevOptOutSuppression(supabase, {
+        ? // Q6 (Jarrad, 2026-10-08): below threshold goes to human review
+          // everywhere. Defer only; the phone is NOT suppressed until a
+          // human confirms (keyword STOP still suppresses upstream).
+          await proposeDeferredJevDisposition(supabase, {
+            runContext: runCtx,
             propertyId: input.propertyId,
-            contactId: input.contactId,
             conversationId: input.conversationId ?? null,
             inboundMessageId: input.inboundMessageId ?? null,
-            inboundFromPhone: input.inboundFromPhone ?? null,
-            orgId: property.org_id,
             classificationRunId: classification.classificationRunId,
+            dispo: "opted_out",
             reason: route.reason,
             expectedRevision: jevRevision!,
           })
@@ -1381,8 +1383,8 @@ async function resolveAndApplyRoute(
       });
       return { outcome: "opted_out", reason: route.reason };
     case "close_dnc": {
-      // Jev-driven dnc: suppress now, defer the outreach_dispo write to
-      // human confirmation (Option B, 2026-09-20). Legacy dnc is
+      // Jev-driven dnc: held for human review, nothing applied until
+      // confirmed (Q4 always-human-gated + Q6). Legacy dnc is
       // completely unchanged — applyResponderDnc still applies
       // everything immediately, exactly as it does today.
       const isJevDnc = classification.kind === "jev_route";
@@ -3247,7 +3249,7 @@ async function reserveSend(
     assertLive(attempt);
     const { data, error } = await supabase.rpc("fn_reserve_ai_send", {
       p_conversation_id: conversationKey,
-      p_inbound_message_id: inboundMessageId ?? undefined,
+      p_inbound_message_id: inboundMessageId ?? null,
       p_holder: attempt.holder,
       p_lease_seconds: sendReservationTuning.leaseSeconds,
     });
@@ -4761,56 +4763,6 @@ async function applyResponderOptOut(
   return result;
 }
 
-/**
- * Jev opted_out below the confidence threshold (review 2026-10-08, BLOCKING):
- * stop texting NOW, defer only the disposition write. Legacy always
- * suppressed the phone on opt_out (applyResponderOptOut); a below-threshold
- * Jev result must not leave the number reachable while a human reviews it.
- * Mirrors proposeJevDncSuppression: same applyPhoneLevelOptOut call and
- * idempotency key as the immediate path, then the deferred review proposal.
- */
-async function proposeJevOptOutSuppression(
-  supabase: SupabaseClient<Database>,
-  args: {
-    propertyId: string;
-    contactId: string;
-    conversationId: string | null;
-    inboundMessageId: string | null;
-    inboundFromPhone: string | null;
-    orgId: string;
-    classificationRunId: string;
-    reason: string;
-    expectedRevision: number;
-  },
-): Promise<ResponderDispoResult> {
-  const contact = await loadContactPhone(supabase, args.contactId);
-  await applyPhoneLevelOptOut(supabase, {
-    contactId: args.contactId,
-    fromPhone: args.inboundFromPhone ?? contact.phone ?? "",
-    orgId: args.orgId,
-    source: "ai_responder",
-    sourceDetail: { propertyId: args.propertyId, reason: args.reason } as Json,
-    occurredAt: new Date(),
-    providerId: "ai_responder",
-    surface: "stop",
-    idempotencyKey: `ai-responder:${args.propertyId}:${args.contactId}:${args.reason}`,
-    leadEvent: {
-      propertyId: args.propertyId,
-      actorType: "ai",
-      trigger: "ai_responder",
-    },
-  });
-  return proposeDeferredJevDisposition(supabase, {
-    propertyId: args.propertyId,
-    conversationId: args.conversationId,
-    inboundMessageId: args.inboundMessageId,
-    classificationRunId: args.classificationRunId,
-    dispo: "opted_out",
-    reason: args.reason,
-    expectedRevision: args.expectedRevision,
-  });
-}
-
 async function applyResponderDnc(
   supabase: SupabaseClient<Database>,
   args: {
@@ -4853,17 +4805,12 @@ async function applyResponderDnc(
 }
 
 /**
- * Astra PR review finding (2026-09-20, BLOCKING) + Jarrad's "Option B"
- * resolution: for a Jev-driven dnc decision (never for legacy — that
- * path is unchanged, `applyResponderDnc` above), suppress the phone
- * immediately (same `applyPhoneLevelOptOut` call, same as legacy — the
- * safety-critical part doesn't wait), but do NOT write
- * `properties.outreach_dispo='dnc'` yet. That write is deferred to a
- * human via `fn_confirm_ai_disposition_review`
- * (`20260920120000_sms_classification_runs.sql`'s extension of it) —
- * the actual disposition/paperwork side of a DNC decision, as opposed
- * to the immediate stop-texting safety action, is what waits for
- * confirmation.
+ * Jev-driven dnc is always human-gated (Q4), so under Jarrad's Q6 rule
+ * ("human review below threshold, everywhere") it is held like any
+ * below-threshold outcome: pending review row + hold flag, NO phone
+ * suppression and NO outreach_dispo write until a human confirms via
+ * `fn_confirm_ai_disposition_review`. The deterministic keyword DNC/STOP
+ * gates in inbound.ts run before Jev and still suppress immediately.
  */
 async function proposeJevDncSuppression(
   supabase: SupabaseClient<Database>,
@@ -4890,24 +4837,6 @@ async function proposeJevDncSuppression(
     return { updated: false, reason: "db_error" };
   }
 
-  const contact = await loadContactPhone(supabase, args.contactId);
-  await applyPhoneLevelOptOut(supabase, {
-    contactId: args.contactId,
-    fromPhone: args.inboundFromPhone ?? contact.phone ?? "",
-    orgId: args.orgId,
-    source: "ai_responder_threat",
-    sourceDetail: { propertyId: args.propertyId, reason: args.reason } as Json,
-    occurredAt: new Date(),
-    providerId: "ai_responder",
-    surface: "dnc",
-    idempotencyKey: `ai-responder-dnc-proposed:${args.propertyId}:${args.contactId}:${args.reason}`,
-    leadEvent: {
-      propertyId: args.propertyId,
-      actorType: "ai",
-      trigger: "ai_responder",
-    },
-  });
-
   const { data, error } = await supabase.rpc(
     "fn_propose_ai_dnc_suppression_review",
     {
@@ -4921,8 +4850,6 @@ async function proposeJevDncSuppression(
   );
   if (error) {
     if (error.message.includes("STALE_DECISION_CONTEXT")) {
-      // Phone is already suppressed above (safety-critical, unconditional);
-      // only the paperwork/review-record side is gated on revision.
       await markPropertyNeedsAttention(supabase, args.propertyId, "jev_stale_decision_context", args.runContext);
       return { updated: false, reason: "stale_context" };
     }
@@ -4936,10 +4863,8 @@ async function proposeJevDncSuppression(
 
   const status = readAiDispositionRpcStatus(data);
   if (status === "already_terminal") return { updated: false, reason: "already_terminal" };
-  // "proposed" and "replayed" both mean suppression + a pending review
-  // now exist — the phone is stopped, which is what `updated: true`
-  // signals to the caller. The disposition write itself is intentionally
-  // still pending, not reflected in this boolean.
+  // "proposed" and "replayed" both mean a pending review + hold now exist.
+  // Nothing is applied until a human confirms (Q6).
   return { updated: true };
 }
 
@@ -4953,10 +4878,9 @@ async function proposeJevDncSuppression(
  * calls `fn_propose_deferred_ai_disposition_review`
  * (20261008140400_jev_deferred_disposition_proposal.sql) instead, which
  * creates the pending review with `dispo_applied=false` and never
- * touches `outreach_dispo`. This function itself applies no suppression.
- * wrong_number/not_interested have none; below-threshold opted_out is
- * suppressed immediately by its caller (proposeJevOptOutSuppression) before
- * this proposal is written.
+ * touches `outreach_dispo`. This function applies no suppression for any
+ * disposition: per Jarrad's Q6 rule a below-threshold opted_out is held for
+ * human review like the others (keyword STOP suppresses upstream in code).
  */
 async function proposeDeferredJevDisposition(
   supabase: SupabaseClient<Database>,

@@ -1,0 +1,140 @@
+import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
+import { applyPhoneLevelOptOut } from "@/lib/messaging/opt-out-phone";
+import { createAdminClient } from "@/lib/supabase/admin";
+import type { Json } from "@/lib/supabase/types";
+
+export const SUPPRESSION_INCOMPLETE_WARNING =
+  "Confirmed, but suppression incomplete — retry.";
+
+export type ConfirmedSuppressionResult =
+  | { ok: true }
+  | { ok: false; warning: string };
+
+/**
+ * fn_confirm_ai_disposition_review only flips contacts.sms_opted_out. When a
+ * human confirms a held opted_out/dnc review this runs the same phone-level
+ * suppression the automated responder path uses (consent event, drip pause,
+ * phone suppression), with the same idempotency-key shape so retries and
+ * replays collapse. Never throws.
+ */
+export async function applyConfirmedSuppression(input: {
+  reviewId: string;
+  contactId: string | null;
+  phone: string | null;
+  propertyId: string;
+  orgId: string;
+  disposition: string;
+  actorId: string;
+  aiReason?: string | null;
+}): Promise<ConfirmedSuppressionResult> {
+  if (input.disposition !== "opted_out" && input.disposition !== "dnc") {
+    return { ok: true };
+  }
+  const isDnc = input.disposition === "dnc";
+  try {
+    if (!input.phone) throw new Error("applyConfirmedSuppression: no phone on contact");
+    const reason = input.aiReason || input.reviewId;
+    await applyPhoneLevelOptOut(createAdminClient(), {
+      contactId: input.contactId,
+      fromPhone: input.phone,
+      orgId: input.orgId,
+      source: isDnc ? "ai_responder_threat" : "ai_responder",
+      sourceDetail: {
+        propertyId: input.propertyId,
+        reason,
+        reviewId: input.reviewId,
+        confirmedBy: input.actorId,
+      } as Json,
+      occurredAt: new Date(),
+      providerId: "ai_responder",
+      surface: isDnc ? "dnc" : "stop",
+      idempotencyKey: isDnc
+        ? `ai-responder-dnc:${input.propertyId}:${input.contactId}:${reason}`
+        : `ai-responder:${input.propertyId}:${input.contactId}:${reason}`,
+    });
+    await recordLeadEvent({
+      propertyId: input.propertyId,
+      eventType: LEAD_EVENT_TYPES.OPTED_OUT,
+      actorType: "user",
+      actorId: input.actorId,
+      payload: {
+        channel: "sms",
+        trigger: "human_confirmed_ai_review",
+        disposition: input.disposition,
+        reviewId: input.reviewId,
+      },
+      sourceType: "ai_disposition_reviews.confirmed_suppression",
+      sourceId: input.reviewId,
+    });
+    return { ok: true };
+  } catch (error) {
+    reportError(error, {
+      tags: { surface: "confirm_ai_disposition_suppression" },
+      extra: { reviewId: input.reviewId, disposition: input.disposition },
+    });
+    return { ok: false, warning: SUPPRESSION_INCOMPLETE_WARNING };
+  }
+}
+
+type ReviewLookupClient = {
+  from: (table: string) => any; // eslint-disable-line @typescript-eslint/no-explicit-any
+};
+
+/**
+ * Loads the confirmed review + homeowner phone, then applies suppression.
+ * Only call after fn_confirm_ai_disposition_review returned "confirmed".
+ */
+export async function applySuppressionForConfirmedReview(
+  supabase: ReviewLookupClient,
+  reviewId: string,
+  actorId: string,
+): Promise<ConfirmedSuppressionResult> {
+  try {
+    const { data: review, error } = await supabase
+      .from("ai_disposition_reviews")
+      .select("property_id, org_id, disposition, ai_reason")
+      .eq("id", reviewId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!review) throw new Error("review not found");
+    if (review.disposition !== "opted_out" && review.disposition !== "dnc") {
+      return { ok: true };
+    }
+    const { data: property, error: propError } = await supabase
+      .from("properties")
+      .select("homeowner_contact_id")
+      .eq("id", review.property_id)
+      .eq("org_id", review.org_id)
+      .maybeSingle();
+    if (propError) throw new Error(propError.message);
+    const contactId: string | null = property?.homeowner_contact_id ?? null;
+    let phone: string | null = null;
+    if (contactId) {
+      const { data: contact, error: contactError } = await supabase
+        .from("contacts")
+        .select("phone_1")
+        .eq("id", contactId)
+        .eq("org_id", review.org_id)
+        .maybeSingle();
+      if (contactError) throw new Error(contactError.message);
+      phone = contact?.phone_1 ?? null;
+    }
+    return await applyConfirmedSuppression({
+      reviewId,
+      contactId,
+      phone,
+      propertyId: review.property_id,
+      orgId: review.org_id,
+      disposition: review.disposition,
+      actorId,
+      aiReason: review.ai_reason,
+    });
+  } catch (error) {
+    reportError(error, {
+      tags: { surface: "confirm_ai_disposition_suppression_lookup" },
+      extra: { reviewId },
+    });
+    return { ok: false, warning: SUPPRESSION_INCOMPLETE_WARNING };
+  }
+}
