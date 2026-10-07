@@ -117,3 +117,32 @@ describe("seller activity after the watermark on a lead flagged before it", () =
     expect(t.sent.length).toBe(before);
   });
 });
+
+describe("a discarded backlog delivery does not block a fresh seller text on the same hold", () => {
+  it("sends exactly one first notification per recipient, and a second run sends nothing more", async () => {
+    // The migration retires discarded rows' keys, so the live key has no row yet.
+    const live = hold({ holdKey: "a:seller_reply", propertyId: "a", startedAt: "2026-10-08T11:30:00.000Z" });
+    const t = makeDeps({ holds: [live], nowIso: "2026-10-08T12:00:00.000Z" });
+    t.store.watermarks.set(ORG, MARK);
+    t.store.rows.push({
+      id: "discarded-1",
+      orgId: ORG,
+      propertyId: "a",
+      holdKey: "a:seller_reply:closed:backlog_discarded:discarded-1",
+      recipientUserId: "u",
+      channel: "slack",
+      stage: "first",
+      status: "skipped",
+      attempts: 0,
+      lastError: "backlog_discarded",
+      createdAt: "2026-10-08T09:00:00.000Z",
+      sentAt: null,
+    });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    const slack = t.sent.filter((s) => s.channel === "slack");
+    expect(slack.length).toBeGreaterThan(0);
+    const firstCount = t.sent.length;
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent.length).toBe(firstCount);
+  });
+});

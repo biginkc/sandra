@@ -59,7 +59,7 @@ async function row(id: string) {
   );
   return r.rows[0] as { flag: boolean; since: Date | null; rev: string };
 }
-async function delivery(propertyId: string | null, status: string, attempts = 0, key = randomUUID()) {
+async function delivery(propertyId: string | null, status: string, attempts = 0, key: string = randomUUID()) {
   await db.query(
     `insert into public.hold_alert_deliveries (org_id, property_id, hold_key, recipient_user_id, channel, stage, status, attempts)
      values ($1, $2, $3, $4, 'slack', 'first', $5, $6)`,
@@ -82,10 +82,61 @@ describe("backlog holds (flagged before the migration)", () => {
     expect((await row(backlog)).since).toBeNull();
     const status = async (k: string) =>
       (await db.query(`select status, last_error from public.hold_alert_deliveries where hold_key = $1`, [k])).rows[0];
-    expect(await status(pendingKey)).toEqual({ status: "skipped", last_error: "backlog_discarded" });
-    expect(await status(retryKey)).toEqual({ status: "skipped", last_error: "backlog_discarded" });
+    const discarded = async (k: string) =>
+      (await db.query(
+        `select status, last_error from public.hold_alert_deliveries where hold_key like $1`,
+        [`${k}:closed:backlog_discarded:%`],
+      )).rows[0];
+    expect(await discarded(pendingKey)).toEqual({ status: "skipped", last_error: "backlog_discarded" });
+    expect(await discarded(retryKey)).toEqual({ status: "skipped", last_error: "backlog_discarded" });
+    expect(await status(pendingKey)).toBeUndefined();
     expect((await status(exhaustedKey)).status).toBe("failed");
     expect((await status(sentKey)).status).toBe("sent");
+  });
+});
+
+describe("discarded backlog deliveries release their keys", () => {
+  // Same insert ensure() runs: on conflict do nothing, then select by key.
+  const ensure = async (propertyId: string, key: string) => {
+    await db.query(
+      `insert into public.hold_alert_deliveries (org_id, property_id, hold_key, recipient_user_id, channel, stage)
+       values ($1, $2, $3, $4, 'slack', 'first')
+       on conflict (hold_key, recipient_user_id, channel, stage) do nothing`,
+      [orgId, propertyId, key, ownerId],
+    );
+    return (await db.query(
+      `select id, status from public.hold_alert_deliveries
+        where hold_key = $1 and recipient_user_id = $2 and channel = 'slack' and stage = 'first'`,
+      [key, ownerId],
+    )).rows;
+  };
+
+  it("a post-watermark seller text on the unchanged hold gets exactly one fresh pending first notification", async () => {
+    const prop = await property(true);
+    const key = `${prop}:seller_reply`;
+    await delivery(prop, "pending", 0, key);
+    await db.query(NEW_ONLY);
+
+    const first = await ensure(prop, key);
+    expect(first).toHaveLength(1);
+    expect(first[0].status).toBe("pending");
+
+    // Second cron run: same key, same row, no extra delivery.
+    const second = await ensure(prop, key);
+    expect(second).toEqual(first);
+    const all = await db.query(`select status from public.hold_alert_deliveries where property_id = $1 order by status`, [prop]);
+    expect(all.rows.map((r) => r.status)).toEqual(["pending", "skipped"]);
+  });
+
+  it("is idempotent: re-running the discard does not re-suffix already retired keys", async () => {
+    const prop = await property(true);
+    await delivery(prop, "pending", 0, `${prop}:x`);
+    await db.query(NEW_ONLY);
+    const keys = async () =>
+      (await db.query(`select hold_key from public.hold_alert_deliveries where property_id = $1`, [prop])).rows;
+    const before = await keys();
+    await db.query(NEW_ONLY);
+    expect(await keys()).toEqual(before);
   });
 });
 

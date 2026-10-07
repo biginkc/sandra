@@ -1,7 +1,9 @@
 -- Rollback for 20261008210000_hold_alerts_new_only. Drops the watermark table,
 -- the start-time trigger/function/column, and unpatches reset_tenant_tables.
 -- Deliveries marked skipped 'backlog_discarded' stay skipped (intentional: the
--- discarded backlog must never be sent).
+-- discarded backlog must never be sent). Their keys also stay retired
+-- (':closed:backlog_discarded:<id>'); restoring them could collide with live
+-- deliveries for the same hold, so the rollback leaves them archived.
 begin;
 
 do $$

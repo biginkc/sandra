@@ -446,7 +446,11 @@ function chunked<T>(items: readonly T[], size = STEP_CHUNK): T[][] {
 }
 const HOLD_LIMIT = 200;
 const ALERT_ROW_CAP = 1000;
-/** The alert lookback never grows past this, however old the watermark is. */
+/**
+ * The alert lookback never grows past this, however old the watermark is. The 1h nudge
+ * therefore needs the hold to still be in-window: a hold whose triggering activity is older
+ * than this drops out of the lookback and is not nudged.
+ */
 export const ALERT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 const PROPERTY_COLUMNS =
   "id, last_ai_escalation_at, last_ai_escalation_reason, updated_at, needs_human_attention_since";

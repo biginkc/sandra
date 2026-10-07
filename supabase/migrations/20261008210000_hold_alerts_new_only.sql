@@ -19,7 +19,9 @@
 -- 2b. idx_messages_org_inbound_created: partial index for the cron's org-wide inbound lookup.
 -- 3. Pending (and retryable failed) deliveries are discarded as skipped
 --    'backlog_discarded' so re-enabling can never send them. skipped reasons live
---    in last_error; the status check already allows 'skipped'.
+--    in last_error; the status check already allows 'skipped'. Their unique keys are
+--    retired too (':closed:' archive convention + id), so a genuinely new seller text
+--    on the same still-open hold gets a fresh delivery instead of the discarded row.
 
 begin;
 
@@ -102,9 +104,10 @@ create index if not exists idx_messages_org_inbound_created
 -- 3. Discard the backlog of undelivered alerts ------------------------------------
 update public.hold_alert_deliveries
    set status = 'skipped',
-       last_error = 'backlog_discarded'
- where status = 'pending'
-    or (status = 'failed' and attempts < 3);
+       last_error = 'backlog_discarded',
+       hold_key = hold_key || ':closed:backlog_discarded:' || id::text
+ where (status = 'pending' or (status = 'failed' and attempts < 3))
+   and hold_key not like '%:closed:%';
 
 -- Test reset helper must clear the new table too.
 do $$

@@ -47,8 +47,9 @@ async function loadAlertHolds(
   orgId: string,
   hotReasons: readonly string[],
   alertsSince: string,
+  nowMs: number,
 ): Promise<{ holds: HoldInfo[]; complete: boolean }> {
-  const data = await loadMessagesV2Data(db, orgId, undefined, { alertsSince });
+  const data = await loadMessagesV2Data(db, orgId, nowMs, { alertsSince });
   const labels = await loadRunLabels(
     db,
     data.holds.map((h) => ({
@@ -69,12 +70,13 @@ export function createHoldAlertDeps(
   const db = admin as unknown as LooseSupabase;
   const senders = createChannelSenders(admin, { env });
   const hotReasons = parseHotHoldReasons(env);
+  const now = () => new Date();
   return {
-    now: () => new Date(),
+    now,
     store: createSupabaseDeliveryStore(db),
     baseUrl: resolveAppBaseUrl(env),
     emailEnabled: env.HOLD_ALERT_EMAIL_ENABLED === "1",
-    loadHolds: (orgId, alertsSince) => loadAlertHolds(db, orgId, hotReasons, alertsSince),
+    loadHolds: (orgId, alertsSince) => loadAlertHolds(db, orgId, hotReasons, alertsSince, now().getTime()),
     loadHeldPropertyIds: (orgId, ids) => loadHeldPropertyIds(db, orgId, ids),
     async loadRecipients(orgId): Promise<Recipient[]> {
       const { data, error } = await db.from("memberships").select(MEMBERSHIP_COLUMNS).eq("org_id", orgId);
