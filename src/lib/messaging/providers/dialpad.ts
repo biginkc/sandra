@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 import { ConfigurationError, ProviderError } from "@/lib/errors/classes";
+import { assertRealProviderAllowed } from "../replay-stub";
 import type {
   DialpadFromOption,
   MessagingProvider,
@@ -39,6 +40,7 @@ export class DialpadMessagingProvider implements MessagingProvider {
   }
 
   async sendSms(input: SmsOutboundInput): Promise<SmsSendResult> {
+    assertRealProviderAllowed("dialpad", "sendSms");
     const body = {
       to_numbers: [input.to],
       from_number: input.from ?? this.fromNumber,
@@ -165,6 +167,7 @@ export class DialpadMessagingProvider implements MessagingProvider {
    * on-demand at composer open.
    */
   async listFromNumbers(): Promise<DialpadFromOption[]> {
+    assertRealProviderAllowed("dialpad", "listFromNumbers");
     const inventorySignal = AbortSignal.timeout(10_000);
     type NumberItem = { number?: string; status?: string; target_id?: string | number; target_type?: string };
     const items: NumberItem[] = [];

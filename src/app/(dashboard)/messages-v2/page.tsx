@@ -18,6 +18,7 @@ import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
 import { loadMessagesV2Data, type LooseSupabase } from "./queries";
 import { MessagesV2View } from "./messages-v2-view";
+import { loadReplayBatchId } from "./replay-batch";
 import type { PipelineCoverage } from "./types";
 
 export const dynamic = "force-dynamic";
@@ -63,9 +64,10 @@ export default async function MessagesV2Page() {
   const { orgId, isOwner } = access;
 
   const supabase = (await createClient()) as unknown as LooseSupabase;
-  const [loaded, coverage] = await Promise.all([
+  const [loaded, coverage, replayBatchId] = await Promise.all([
     loadMessagesV2Data(supabase, orgId, undefined, { includeDraftBody: true }),
     loadCoverage(orgId),
+    isOwner ? loadReplayBatchId(supabase, orgId) : Promise.resolve(null),
   ]);
   // The hold queries are windowed; the version each card sends back is read
   // fresh per displayed property so a hold past the window can still be dismissed.
@@ -89,6 +91,7 @@ export default async function MessagesV2Page() {
       <MessagesV2View
         orgId={orgId}
         isOwner={isOwner}
+        replayBatchId={replayBatchId}
         coverage={coverage === "unavailable" ? null : coverage}
         coverageUnavailable={coverage === "unavailable"}
         holdsMeta={data.holdsMeta}

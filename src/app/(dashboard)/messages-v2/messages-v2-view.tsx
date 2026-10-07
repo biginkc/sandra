@@ -35,6 +35,8 @@ export type MessagesV2ViewProps = {
   orgId: string;
   /** Owners may open the legacy /messages inbox; Acquisitions callers may not. */
   isOwner?: boolean;
+  /** Replay org only: newest replay batch id, shown to owners. */
+  replayBatchId?: string | null;
   runs: RunWithSteps[];
   /** Open holds from the server (flag / pending decision / pending review). */
   holds: OpenHold<RunWithSteps>[];
@@ -271,6 +273,15 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     >
       <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <h1 className="text-xl font-semibold">Messages v2</h1>
+        {isOwner && props.replayBatchId && (
+          <Badge
+            variant="outline"
+            data-testid="replay-batch-badge"
+            className="bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200"
+          >
+            Replay batch {props.replayBatchId}
+          </Badge>
+        )}
         <div className="flex flex-wrap gap-1.5" aria-label="Classifier modes">
           {props.badgesError && (
             <span
