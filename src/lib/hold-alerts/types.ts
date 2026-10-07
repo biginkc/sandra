@@ -70,6 +70,15 @@ export interface DeliveryStore {
   failInterrupted(cutoffIso: string): Promise<number>;
   /** When the SENT delivery for this (hold, recipient, channel, stage) went out; null when there is none. */
   sentAt(q: { holdKey: string; recipientUserId: string; channel: AlertChannel; stage: AlertStage }): Promise<string | null>;
+  /**
+   * Archive-on-clear. Delivery rows (per-hold, so property_id is set) whose
+   * property is not in `openPropertyIds` get `hold_key = hold_key || ':closed:' || id`
+   * so a hold that re-opens later is a new key and alerts again. One guarded
+   * update per row (idempotent, safe to crash and repeat). Digest rows
+   * (property_id null) and already-archived rows are never touched. Returns the
+   * number archived.
+   */
+  archiveClosed(orgId: string, openPropertyIds: readonly string[]): Promise<number>;
   markSent(id: string): Promise<void>;
   markSkipped(id: string, reason: string): Promise<void>;
   /** attempts was already incremented by claim(); `terminal` pins attempts at the max. */
@@ -91,8 +100,12 @@ export interface HoldAlertDeps {
   baseUrl: string;
   /** HOLD_ALERT_EMAIL_ENABLED === "1". When false no digest rows are created. */
   emailEnabled: boolean;
-  /** Alertable holds only (property known, informational holds removed). */
-  loadHolds(orgId: string): Promise<HoldInfo[]>;
+  /**
+   * Alertable holds only (property known, informational holds removed).
+   * `complete` is false when the underlying hold queries were truncated or
+   * failed: an incomplete set must never be used to decide a hold has closed.
+   */
+  loadHolds(orgId: string): Promise<{ holds: HoldInfo[]; complete: boolean }>;
   /** Active owner + acquisitions members. */
   loadRecipients(orgId: string): Promise<Recipient[]>;
   /**
@@ -116,6 +129,8 @@ export type OrgAlertSummary = {
   deferred: number;
   /** Rows swept from 'sending' to failed:interrupted (a previous run died mid-send). */
   interrupted: number;
+  /** Delivery rows archived because their hold closed (a re-open alerts again). */
+  archived: number;
   /** Ran out of the time budget; remaining rows are picked up next run. */
   budgetExhausted: boolean;
 };

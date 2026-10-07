@@ -396,3 +396,55 @@ describe("durability and idempotency", () => {
     expect(summary.budgetExhausted).toBe(true);
   });
 });
+
+describe("archive-on-clear (a re-opened hold alerts again)", () => {
+  it("a hold that clears and re-opens gets a fresh first alert", async () => {
+    const t = makeDeps({ nowIso: "2026-10-08T10:02:00.000Z" });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(2);
+
+    // The hold clears: the next pass sees no open holds and archives its rows.
+    const open = t.deps.loadHolds;
+    t.deps.loadHolds = async () => ({ holds: [], complete: true });
+    t.setNow("2026-10-08T10:10:00.000Z");
+    const summary = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(summary.archived).toBe(2);
+    expect(t.store.rows.every((r) => r.holdKey.includes(":closed:"))).toBe(true);
+
+    // It re-opens (same property, same reason): new keys, new alerts.
+    t.deps.loadHolds = open;
+    t.setNow("2026-10-08T10:20:00.000Z");
+    const before = t.sent.length;
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent.slice(before).filter((s) => s.channel === "slack")).toHaveLength(2);
+    expect(t.store.rows.filter((r) => !r.holdKey.includes(":closed:") && r.status === "sent")).toHaveLength(2);
+  });
+
+  it("does not archive a hold that is still open, a digest row, or another org's row", async () => {
+    const t = makeDeps({ emailEnabled: true });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    const digest = t.store.rows.filter((r) => r.channel === "email");
+    expect(digest.length).toBeGreaterThan(0);
+    await t.store.ensure({ orgId: "other-org", propertyId: "other-prop", holdKey: "other-prop:x", recipientUserId: "u", channel: "slack", stage: "first" });
+    const again = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(again.archived).toBe(0);
+    expect(t.store.rows.some((r) => r.holdKey.includes(":closed:"))).toBe(false);
+  });
+
+  it("an incomplete hold load (truncated or failed query) archives nothing", async () => {
+    const t = makeDeps();
+    await runHoldAlertsForOrg(t.deps, ORG);
+    const partial = makeDeps({ store: t.store, holds: [], holdsComplete: false });
+    const summary = await runHoldAlertsForOrg(partial.deps, ORG);
+    expect(summary.archived).toBe(0);
+    expect(t.store.rows.some((r) => r.holdKey.includes(":closed:"))).toBe(false);
+  });
+
+  it("archiving is idempotent: a repeat pass after a crash archives nothing more", async () => {
+    const t = makeDeps();
+    await runHoldAlertsForOrg(t.deps, ORG);
+    const cleared = makeDeps({ store: t.store, holds: [] });
+    expect((await runHoldAlertsForOrg(cleared.deps, ORG)).archived).toBe(2);
+    expect((await runHoldAlertsForOrg(cleared.deps, ORG)).archived).toBe(0);
+  });
+});

@@ -42,7 +42,10 @@ export function resolveAppBaseUrl(env: Record<string, string | undefined> = proc
  * loader selects includes inbound_preview; it is dropped here (hold -> HoldInfo
  * keeps ids, first name, address only) and never reaches an alert payload.
  */
-async function loadAlertHolds(db: LooseSupabase, orgId: string): Promise<HoldInfo[]> {
+async function loadAlertHolds(
+  db: LooseSupabase,
+  orgId: string,
+): Promise<{ holds: HoldInfo[]; complete: boolean }> {
   const data = await loadMessagesV2Data(db, orgId);
   const labels = await loadRunLabels(
     db,
@@ -53,7 +56,9 @@ async function loadAlertHolds(db: LooseSupabase, orgId: string): Promise<HoldInf
       inbound_message_id: h.run?.inbound_message_id ?? "",
     })),
   );
-  return toAlertHolds(data.holds, labels);
+  // Exact totals only: a truncated or failed source can hide still-open holds.
+  const complete = data.holdsMeta.totalState === "exact" && !data.holdsMeta.truncated && data.holdsMeta.failed.length === 0;
+  return { holds: toAlertHolds(data.holds, labels), complete };
 }
 
 export function createHoldAlertDeps(
@@ -118,6 +123,7 @@ export async function runHoldAlertsForAllOrgs(
     untouched: 0,
     deferred: 0,
     interrupted: 0,
+    archived: 0,
     errors: 0,
     budgetExhausted: false,
   };
@@ -138,6 +144,7 @@ export async function runHoldAlertsForAllOrgs(
       total.untouched += s.untouched;
       total.deferred += s.deferred;
       total.interrupted += s.interrupted;
+      total.archived += s.archived;
       total.budgetExhausted ||= s.budgetExhausted;
     } catch (e) {
       total.errors += 1;

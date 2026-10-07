@@ -48,6 +48,15 @@ describe("hold-alerts cron route", () => {
     expect(run).toHaveBeenCalledTimes(2);
   });
 
+  it("does not fall back to the test service key: without the real key it fails", async () => {
+    vi.stubEnv("CRON_SECRET", "right");
+    vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "");
+    vi.stubEnv("TEST_SUPABASE_SERVICE_ROLE_KEY", "test-key");
+    const res = await GET(req("Bearer right"));
+    expect(res.status).toBe(500);
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("reports and returns 500 when the run throws", async () => {
     vi.stubEnv("CRON_SECRET", "right");
     run.mockRejectedValue(new Error("db down"));

@@ -71,6 +71,16 @@ export class FakeStore implements DeliveryStore {
       )?.sentAt ?? null
     );
   }
+  async archiveClosed(orgId: string, openPropertyIds: readonly string[]) {
+    const open = new Set(openPropertyIds);
+    let n = 0;
+    for (const r of this.rows) {
+      if (r.orgId !== orgId || !r.propertyId || open.has(r.propertyId) || r.holdKey.includes(":closed:")) continue;
+      r.holdKey = `${r.holdKey}:closed:${r.id}`;
+      n += 1;
+    }
+    return n;
+  }
   async markSent(id: string) {
     const r = this.rows.find((x) => x.id === id)!;
     r.status = "sent";
@@ -119,7 +129,7 @@ export function hold(over: Partial<HoldInfo> = {}): HoldInfo {
 export type Sent = { channel: "slack" | "sms" | "email"; userId: string; text: string };
 
 export function makeDeps(
-  over: Partial<HoldAlertDeps> & { holds?: HoldInfo[]; recipients?: Recipient[]; nowIso?: string } = {},
+  over: Partial<HoldAlertDeps> & { holds?: HoldInfo[]; holdsComplete?: boolean; recipients?: Recipient[]; nowIso?: string } = {},
 ) {
   let nowIso = over.nowIso ?? "2026-10-08T10:02:00.000Z";
   const clock = () => new Date(nowIso);
@@ -135,7 +145,7 @@ export function makeDeps(
     store,
     baseUrl: "https://app.example.com",
     emailEnabled: false,
-    loadHolds: async () => over.holds ?? [hold()],
+    loadHolds: async () => ({ holds: over.holds ?? [hold()], complete: over.holdsComplete ?? true }),
     loadRecipients: async () => over.recipients ?? [OWNER, ACQ],
     isRecipientAuthorized: async () => true,
     sendSlack: async (userId, text) => {

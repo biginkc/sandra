@@ -32,6 +32,7 @@ const emptySummary = (): OrgAlertSummary => ({
   untouched: 0,
   deferred: 0,
   interrupted: 0,
+  archived: 0,
   budgetExhausted: false,
 });
 
@@ -58,7 +59,14 @@ export async function runHoldAlertsForOrg(
     new Date(startMs - ROUTE_MAX_DURATION_MS).toISOString(),
   );
 
-  const holds = await deps.loadHolds(orgId);
+  const loaded = await deps.loadHolds(orgId);
+  const holds = loaded.holds;
+  // Archive-on-clear: a property that is no longer held closes its delivery
+  // rows so a re-opened hold gets fresh keys. Only on a COMPLETE load, or a
+  // truncated / failed query would "close" holds that are still open.
+  if (loaded.complete) {
+    summary.archived = await deps.store.archiveClosed(orgId, [...new Set(holds.map((h) => h.propertyId))]);
+  }
   summary.holds = holds.length;
   if (holds.length === 0) return summary;
 

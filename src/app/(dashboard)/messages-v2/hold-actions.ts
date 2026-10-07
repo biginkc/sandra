@@ -10,6 +10,8 @@ import type {
 import type { Database, Json } from "@/lib/supabase/types";
 
 import type { SeenDraft } from "./hold-action-types";
+import { loadFreshSeen } from "./hold-seen";
+import type { LooseSupabase } from "./queries";
 import type { HoldSeen } from "./types";
 
 /**
@@ -50,8 +52,15 @@ export const MAX_DISMISS_REASON_LENGTH = 500;
 const DRAFT_COLUMNS =
   "id, org_id, run_id, property_id, conversation_id, inbound_message_id, body, edited_body, edited_at, status";
 
-/** Lease on the property while a human send is in flight (Dismiss / Take over refuse while it is held). */
-const SEND_LEASE_SECONDS = 120;
+/**
+ * Lease on the property while a human send is in flight (Dismiss / Take over
+ * refuse while it is held). It must outlast the worst-case send, or a Dismiss
+ * could sneak in while a slow send is still going: the responder's own lease
+ * (90s, which also bounds its provider deadline) plus its reservation wait (6s)
+ * plus this action's own reads and bookkeeping, with margin. A test pins this
+ * against the responder's tuning. A crashed worker frees the property after it.
+ */
+export const SEND_LEASE_SECONDS = 300;
 
 type DraftRow = {
   id: string;
@@ -293,14 +302,16 @@ function checkSeen(draft: DraftRow, seen: SeenDraft): Result<null> {
  * uses). Dismiss / Take over refuse while it is held, and take it themselves,
  * so a send and a resolve can never interleave.
  */
-async function withPropertyLease<T>(
+export async function withPropertyLease<T>(
   d: HoldActionDeps,
   propertyId: string,
+  inboundMessageId: string | null,
   run: () => Promise<Result<T>>,
 ): Promise<Result<T>> {
   const holder = `hold-send:${d.userId}:${crypto.randomUUID()}`;
   const { data, error } = await d.admin.rpc("fn_reserve_ai_send", {
     p_conversation_id: propertyId,
+    p_inbound_message_id: inboundMessageId,
     p_holder: holder,
     p_lease_seconds: SEND_LEASE_SECONDS,
   });
@@ -333,7 +344,7 @@ export async function sendHeldDraft(
   if (!first.data.property_id) {
     return fail("DRAFT_NOT_SENDABLE", "This draft is not tied to a seller text, so it cannot be sent from here.");
   }
-  return withPropertyLease(d, first.data.property_id, async () => {
+  return withPropertyLease(d, first.data.property_id, first.data.inbound_message_id ?? null, async () => {
     // Re-read under the lease: a Dismiss that finished first leaves it discarded.
     const draft = await loadDraft(d, input.draftId);
     if (!draft.ok) return draft;
@@ -361,7 +372,7 @@ export async function editAndSendHeldDraft(
   if (!first.data.property_id) {
     return fail("DRAFT_NOT_SENDABLE", "This draft is not tied to a seller text, so it cannot be sent from here.");
   }
-  return withPropertyLease(d, first.data.property_id, async () => {
+  return withPropertyLease(d, first.data.property_id, first.data.inbound_message_id ?? null, async () => {
     const draft = await loadDraft(d, input.draftId);
     if (!draft.ok) return draft;
     // The edit is based on the text they saw; if the draft moved, nothing is written or sent.
@@ -411,7 +422,14 @@ async function resolveHold(
   }
   const counts = (data ?? {}) as Record<string, unknown>;
   if (counts.status === "STALE") {
-    return fail("HOLD_STALE", HOLD_STALE_MESSAGE);
+    // Hand back what the server sees now, so the reloaded card can act on it.
+    let current: HoldSeen | null = null;
+    try {
+      current = (await loadFreshSeen(d.admin as unknown as LooseSupabase, d.orgId, [propertyId]))?.get(propertyId) ?? null;
+    } catch (e) {
+      d.reportError(e, { tags: { surface: "hold_action_stale_seen" }, extra: { propertyId } });
+    }
+    return fail("HOLD_STALE", HOLD_STALE_MESSAGE, current ? { seen: current } : undefined);
   }
   const detail = {
     decisionsSuperseded: counts.decisionsSuperseded ?? 0,

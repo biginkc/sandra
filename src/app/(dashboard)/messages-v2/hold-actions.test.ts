@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { sendReservationTuning } from "@/lib/ai-responder/dispatch";
+
 import {
   assignHold,
   dismissHold,
   editAndSendHeldDraft,
+  SEND_LEASE_SECONDS,
   sendHeldDraft,
   takeOverHold,
   type HoldActionDeps,
@@ -385,8 +388,14 @@ describe("review round 1: the clicker's view is what gets sent", () => {
     await sendHeldDraft(d, { draftId: "draft-1", seen: SEEN });
     const reserve = logFor(log, "rpc:fn_reserve_ai_send")[0]!.calls[0]!.args[0] as Record<string, unknown>;
     const release = logFor(log, "rpc:fn_release_ai_send")[0]!.calls[0]!.args[0] as Record<string, unknown>;
-    expect(reserve).toMatchObject({ p_conversation_id: "prop-1" });
+    expect(reserve).toMatchObject({ p_conversation_id: "prop-1", p_inbound_message_id: "msg-1", p_lease_seconds: SEND_LEASE_SECONDS });
     expect(release).toEqual({ p_conversation_id: "prop-1", p_holder: reserve.p_holder });
+  });
+
+  it("the send lease outlasts the responder's worst-case send (lease + reservation wait + margin)", () => {
+    expect(SEND_LEASE_SECONDS).toBeGreaterThanOrEqual(
+      sendReservationTuning.leaseSeconds + Math.ceil(sendReservationTuning.deadlineMs / 1000) + 60,
+    );
   });
 
   it("does not send while another action holds the property lease", async () => {
@@ -446,6 +455,27 @@ describe("review round 1: Dismiss / Take over from a stale view", () => {
     expect(taken).toMatchObject({ ok: false, error: { code: "HOLD_STALE" } });
     expect(d.recordLeadEvent).not.toHaveBeenCalled();
     expect(d.recordStep).not.toHaveBeenCalled();
+  });
+
+  it("a STALE answer carries the server's current seen so the reloaded card can act", async () => {
+    const reply = baseReply(stale);
+    const withSeen = (table: string, calls: Call[]) => {
+      if (table === "properties" && !calls.some((c) => c.method === "update") && has(calls, "in", "id", ["prop-1"])) {
+        return { data: [{ id: "prop-1", needs_human_attention: true, last_ai_escalation_reason: "draft_held", last_ai_escalation_at: "2026-10-07T13:00:00+00:00" }] };
+      }
+      if (table === "jev_lead_decisions") return { data: [{ property_id: "prop-1", created_at: "2026-10-07T14:00:00+00:00" }] };
+      if (table === "ai_disposition_reviews" || (table === "ai_reply_drafts" && has(calls, "in", "property_id", ["prop-1"]))) return { data: [] };
+      return reply(table, calls);
+    };
+    const { d } = deps({}, withSeen);
+    const result = await dismissHold(d, { propertyId: "prop-1", reason: "done", seen: SEEN_HOLD });
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "HOLD_STALE",
+        details: { seen: { through: "2026-10-07T14:00:00+00:00", flagReason: "draft_held", flagAt: "2026-10-07T13:00:00+00:00" } },
+      },
+    });
   });
 
   it("a Send in flight on the thread is a SEND_IN_PROGRESS refusal, not a generic failure", async () => {

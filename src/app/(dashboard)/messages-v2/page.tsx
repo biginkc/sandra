@@ -13,6 +13,7 @@ import {
   sendHeldDraftAction,
   takeOverHoldAction,
 } from "./actions";
+import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
 import { loadMessagesV2Data, type LooseSupabase } from "./queries";
 import { MessagesV2View } from "./messages-v2-view";
@@ -61,10 +62,13 @@ export default async function MessagesV2Page() {
   const { orgId, isOwner } = access;
 
   const supabase = (await createClient()) as unknown as LooseSupabase;
-  const [data, coverage] = await Promise.all([
+  const [loaded, coverage] = await Promise.all([
     loadMessagesV2Data(supabase, orgId, undefined, { includeDraftBody: true }),
     loadCoverage(orgId),
   ]);
+  // The hold queries are windowed; the version each card sends back is read
+  // fresh per displayed property so a hold past the window can still be dismissed.
+  const data = { ...loaded, holds: await withFreshSeen(supabase, orgId, loaded.holds) };
 
   // Hold cards are labelled by property id; synthesize label inputs from the
   // hold's run (or just the property for runless fallback cards).
