@@ -81,7 +81,8 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
   /**
    * Alert cron only: newest inbound seller message per property since the alert
    * watermark. It counts as fresh activity on a flagged lead, so a lead flagged
-   * before alerts existed still alerts when the seller writes again.
+   * before alerts existed still alerts when the seller writes again. Applied to every
+   * hold, flagged or carried only by a pending decision/review/draft.
    */
   inboundAfter?: ReadonlyMap<string, string>;
   runs: readonly T[];
@@ -129,8 +130,6 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     // Unknown flag start (flagged before the column existed) simply adds no instant here;
     // new activity (pending rows, a later seller message) is what can still make it alert.
     if (p.needs_human_attention_since) a.alertTimes.push(p.needs_human_attention_since);
-    const inbound = input.inboundAfter?.get(p.id);
-    if (inbound) a.alertTimes.push(inbound);
     a.flagReason = p.last_ai_escalation_reason;
     if (p.last_ai_escalation_reason) {
       a.notes.push(p.last_ai_escalation_reason);
@@ -206,6 +205,10 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
         run = candidate;
       }
     }
+    // A seller text after the watermark restarts ANY hold (flagged or not): a hold carried
+    // only by an older pending decision/review/draft still alerts on fresh seller activity.
+    const inbound = input.inboundAfter?.get(propertyId);
+    if (inbound) a.alertTimes.push(inbound);
     const since =
       [...a.times].sort((x, y) => Date.parse(x) - Date.parse(y))[0] ?? null;
     const sources = order.filter((s) => a.sources.has(s));
@@ -432,6 +435,8 @@ export function formatHoldsTotal(meta: HoldsMeta, openCount: number): string {
 
 const STEP_CHUNK = 40;
 const PROPERTY_RPC_CHUNK = 200;
+/** Explicit row limit for the chunked .in() lookups (>= chunk size); hitting it counts as failed. */
+const BY_IDS_LIMIT = 1000;
 
 function chunked<T>(items: readonly T[], size = STEP_CHUNK): T[][] {
   const out: T[][] = [];
@@ -441,6 +446,8 @@ function chunked<T>(items: readonly T[], size = STEP_CHUNK): T[][] {
 }
 const HOLD_LIMIT = 200;
 const ALERT_ROW_CAP = 1000;
+/** The alert lookback never grows past this, however old the watermark is. */
+export const ALERT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 const PROPERTY_COLUMNS =
   "id, last_ai_escalation_at, last_ai_escalation_reason, updated_at, needs_human_attention_since";
 const DECISION_COLUMNS = "property_id, conversation_id, source_inbound_message_id, created_at";
@@ -473,18 +480,30 @@ async function loadAlertSources(
   orgId: string,
   sinceIso: string,
   includeDraftBody: boolean,
+  nowMs: number,
 ): Promise<AlertSources> {
   let failed = false;
-  const rows = async <T,>(q: PromiseLike<{ data?: unknown; error?: unknown }>): Promise<T[]> => {
+  // Lower bound = max(watermark, now - 7 days): the window stops growing even though
+  // the watermark never advances. The newest rows win the cap (every query is ordered desc).
+  const watermarkMs = Date.parse(sinceIso);
+  const lowerMs = Number.isFinite(watermarkMs) ? Math.max(watermarkMs, nowMs - ALERT_LOOKBACK_MS) : nowMs - ALERT_LOOKBACK_MS;
+  const lowerIso = new Date(lowerMs).toISOString();
+  // A result at the cap may be truncated: that is an incomplete load, never a clean one.
+  const rows = async <T,>(
+    q: PromiseLike<{ data?: unknown; error?: unknown }>,
+    cap: number = ALERT_ROW_CAP,
+  ): Promise<T[]> => {
     const res = await q;
     if (res.error) {
       failed = true;
       return [];
     }
-    return (res.data ?? []) as T[];
+    const data = (res.data ?? []) as T[];
+    if (data.length >= cap) failed = true;
+    return data;
   };
   const fresh = (table: string, cols: string) =>
-    supabase.from(table).select(cols).eq("org_id", orgId).eq("status", "pending").gte("created_at", sinceIso);
+    supabase.from(table).select(cols).eq("org_id", orgId).eq("status", "pending").gte("created_at", lowerIso).order("created_at", { ascending: false });
   const [newlyFlagged, inbound, newDecisions, newReviews, newDrafts] = await Promise.all([
     rows<{ id: string }>(
       supabase
@@ -492,7 +511,8 @@ async function loadAlertSources(
         .select("id")
         .eq("org_id", orgId)
         .eq("needs_human_attention", true)
-        .gte("needs_human_attention_since", sinceIso)
+        .gte("needs_human_attention_since", lowerIso)
+        .order("needs_human_attention_since", { ascending: false })
         .limit(ALERT_ROW_CAP),
     ),
     rows<{ property_id: string | null; created_at: string }>(
@@ -501,7 +521,7 @@ async function loadAlertSources(
         .select("property_id, created_at")
         .eq("org_id", orgId)
         .eq("direction", "inbound")
-        .gte("created_at", sinceIso)
+        .gte("created_at", lowerIso)
         .order("created_at", { ascending: false })
         .limit(ALERT_ROW_CAP),
     ),
@@ -530,7 +550,7 @@ async function loadAlertSources(
       chunked(eligible, PROPERTY_RPC_CHUNK).map((ids) => {
         let q = supabase.from(table).select(cols).eq("org_id", orgId).in(col, ids);
         q = pending ? q.eq("status", "pending") : q.eq("needs_human_attention", true);
-        return rows<T>(q);
+        return rows<T>(q.limit(BY_IDS_LIMIT), BY_IDS_LIMIT);
       }),
     ).then((parts) => parts.flat());
   const [properties, decisions, reviews, drafts] = await Promise.all([
@@ -556,9 +576,9 @@ export async function loadHeldPropertyIds(
   const held = new Set<string>();
   let failed = false;
   const lookups = chunked(propertyIds, PROPERTY_RPC_CHUNK).flatMap((ids) => [
-    supabase.from("properties").select("id").eq("org_id", orgId).eq("needs_human_attention", true).in("id", ids),
+    supabase.from("properties").select("id").eq("org_id", orgId).eq("needs_human_attention", true).in("id", ids).limit(BY_IDS_LIMIT),
     ...(["jev_lead_decisions", "ai_disposition_reviews", "ai_reply_drafts"] as const).map((table) =>
-      supabase.from(table).select("property_id").eq("org_id", orgId).eq("status", "pending").in("property_id", ids),
+      supabase.from(table).select("property_id").eq("org_id", orgId).eq("status", "pending").in("property_id", ids).limit(BY_IDS_LIMIT),
     ),
   ]);
   for (const res of await Promise.all(lookups)) {
@@ -566,7 +586,10 @@ export async function loadHeldPropertyIds(
       failed = true;
       continue;
     }
-    for (const r of (res.data ?? []) as Array<{ id?: string; property_id?: string | null }>) {
+    const data = (res.data ?? []) as Array<{ id?: string; property_id?: string | null }>;
+    // A result at the limit may be truncated: a missing id must never read as "closed".
+    if (data.length >= BY_IDS_LIMIT) failed = true;
+    for (const r of data) {
       const id = r.id ?? r.property_id;
       if (id) held.add(id);
     }
@@ -714,7 +737,7 @@ export async function loadMessagesV2Data(
   // Alert cron: the eligible set is looked up directly, not taken from the page's
   // HOLD_LIMIT window (which a large backlog fills with old holds).
   const alertSources = opts.alertsSince
-    ? await loadAlertSources(supabase, orgId, opts.alertsSince, !!opts.includeDraftBody)
+    ? await loadAlertSources(supabase, orgId, opts.alertsSince, !!opts.includeDraftBody, nowMs)
     : null;
   // A failed query is reported as failed, never silently as "no holds".
   const properties = (

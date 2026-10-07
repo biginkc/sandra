@@ -123,8 +123,9 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
       return (data as { sent_at: string | null } | null)?.sent_at ?? null;
     },
 
-    async archiveClosed(orgId, openPropertyIds) {
+    async archiveClosed(orgId, openPropertyIds, candidatePropertyIds) {
       const open = new Set(openPropertyIds);
+      const candidates = candidatePropertyIds ? new Set(candidatePropertyIds) : null;
       let archived = 0;
       // Page by id cursor: still-open rows are skipped client-side, so they can
       // never fill the window and starve closed rows behind them.
@@ -142,7 +143,7 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
         if (error) fail("archive select", error);
         const rows = (data ?? []) as Array<{ id: string; property_id: string | null; hold_key: string }>;
         // One set-based update per page; the function skips rows a concurrent pass already archived.
-        const closedIds = rows.filter((r) => r.property_id && !open.has(r.property_id)).map((r) => r.id);
+        const closedIds = rows.filter((r) => r.property_id && !open.has(r.property_id) && (!candidates || candidates.has(r.property_id))).map((r) => r.id);
         if (closedIds.length > 0) {
           const { data: n, error: rpcError } = await db.rpc("hold_alert_archive_rows", {
             p_org_id: orgId,

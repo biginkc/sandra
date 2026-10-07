@@ -80,11 +80,12 @@ export class FakeStore implements DeliveryStore {
       )?.sentAt ?? null
     );
   }
-  async archiveClosed(orgId: string, openPropertyIds: readonly string[]) {
+  async archiveClosed(orgId: string, openPropertyIds: readonly string[], candidatePropertyIds?: readonly string[]) {
     const open = new Set(openPropertyIds);
+    const candidates = candidatePropertyIds ? new Set(candidatePropertyIds) : null;
     let n = 0;
     for (const r of this.rows) {
-      if (r.orgId !== orgId || !r.propertyId || open.has(r.propertyId) || r.holdKey.includes(":closed:")) continue;
+      if (r.orgId !== orgId || !r.propertyId || open.has(r.propertyId) || (candidates && !candidates.has(r.propertyId)) || r.holdKey.includes(":closed:")) continue;
       r.holdKey = `${r.holdKey}:closed:${r.id}`;
       n += 1;
     }

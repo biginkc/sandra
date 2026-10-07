@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { reportError } from "@/lib/errors/report";
+
 import { runHoldAlertsForOrg } from "./core";
 import { ACQ, hold, makeDeps, ORG, OWNER } from "./test-support";
+
+vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 
 const HOUR = 60 * 60 * 1000;
 
@@ -441,7 +445,39 @@ describe("durability and idempotency", () => {
   });
 });
 
+describe("incomplete alert load", () => {
+  it("is reported once per run, and still alerts on what did load", async () => {
+    vi.mocked(reportError).mockClear();
+    const t = makeDeps({ holdsComplete: false });
+    const summary = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(reportError).toHaveBeenCalledTimes(1);
+    expect(summary.holds).toBe(1);
+  });
+  it("a complete load reports nothing", async () => {
+    vi.mocked(reportError).mockClear();
+    await runHoldAlertsForOrg(makeDeps().deps, ORG);
+    expect(reportError).not.toHaveBeenCalled();
+  });
+});
+
 describe("archive-on-clear (a re-opened hold alerts again)", () => {
+  it("archives only properties this run saw as delivered: a row ensured by an overlapping run is left alone", async () => {
+    const t = makeDeps();
+    await runHoldAlertsForOrg(t.deps, ORG);
+    const cleared = makeDeps({ store: t.store, holds: [] });
+    const realListing = t.store.deliveredPropertyIds.bind(t.store);
+    cleared.store.deliveredPropertyIds = async (org: string) => {
+      const listing = await realListing(org);
+      // An overlapping run ensures a fresh row AFTER this run listed delivered properties.
+      await t.store.ensure({ orgId: ORG, propertyId: "prop-2", holdKey: "prop-2:draft_held", recipientUserId: "owner-1", channel: "slack", stage: "first" });
+      return listing;
+    };
+    const summary = await runHoldAlertsForOrg(cleared.deps, ORG);
+    expect(summary.archived).toBe(2);
+    const fresh = t.store.rows.find((r) => r.propertyId === "prop-2")!;
+    expect(fresh.holdKey.includes(":closed:")).toBe(false);
+  });
+
   it("a hold that clears and re-opens gets a fresh first alert", async () => {
     const t = makeDeps({ nowIso: "2026-10-08T10:02:00.000Z" });
     await runHoldAlertsForOrg(t.deps, ORG);

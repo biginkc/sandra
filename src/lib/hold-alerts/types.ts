@@ -83,9 +83,10 @@ export interface DeliveryStore {
    * so a hold that re-opens later is a new key and alerts again. One guarded
    * update per row (idempotent, safe to crash and repeat). Digest rows
    * (property_id null) and already-archived rows are never touched. Returns the
-   * number archived.
+   * number archived. With `candidatePropertyIds`, only rows for those properties
+   * are considered (candidates minus open).
    */
-  archiveClosed(orgId: string, openPropertyIds: readonly string[]): Promise<number>;
+  archiveClosed(orgId: string, openPropertyIds: readonly string[], candidatePropertyIds?: readonly string[]): Promise<number>;
   /**
    * Distinct property ids that have live (non-archived) per-hold delivery rows.
    * `complete` is false when the paging cap was hit: an incomplete list must not

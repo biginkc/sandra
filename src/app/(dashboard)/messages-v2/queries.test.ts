@@ -1250,6 +1250,17 @@ describe("deriveOpenHolds alert_since (when the hold began, for alert eligibilit
     expect(h.alert_since).toBe(iso("12:30:00"));
   });
 
+  it("a decision-only hold (no flag) with a seller text after the watermark starts at that text", () => {
+    const [h] = deriveOpenHolds({
+      properties: [],
+      decisions: [decision(iso("08:00:00"))],
+      reviews: [],
+      inboundAfter: new Map([["p1", iso("12:30:00")]]),
+      runs: [],
+    });
+    expect(h.alert_since).toBe(iso("12:30:00"));
+  });
+
   it("a flag raised after an old pending decision starts at the flag, not the older decision", () => {
     const [h] = deriveOpenHolds({
       properties: [prop({ since: iso("09:00:00") })],
@@ -1288,6 +1299,8 @@ describe("loadMessagesV2Data alertsSince (eligible set found directly, not throu
     needs_human_attention_since: since,
   });
   const WM = iso("10:00:00");
+  const NOW = Date.parse(iso("13:00:00"));
+  const WM_ISO = new Date(WM).toISOString();
   const has = (c: Call, method: string, col?: string) =>
     c.some((x) => x.method === method && (col === undefined || x.args[0] === col));
   const arg = (c: Call, method: string) => c.find((x) => x.method === method)!.args;
@@ -1321,13 +1334,13 @@ describe("loadMessagesV2Data alertsSince (eligible set found directly, not throu
       inbound: [{ property_id: "late", created_at: iso("12:00:00") }],
       flaggedRows: [flagged("late", null)],
     });
-    const data = await loadMessagesV2Data(client, "org", undefined, { alertsSince: WM });
+    const data = await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
     expect(data.holds.map((h) => h.id)).toEqual(["late"]);
     expect(data.holds[0]!.alert_since).toBe(iso("12:00:00"));
     const msg = queries.filter((q) => q[0]?.table === "messages");
     expect(msg).toHaveLength(1);
     expect(has(msg[0]!, "in")).toBe(false); // org-wide, not chunked by property
-    expect(arg(msg[0]!, "gte")).toEqual(["created_at", WM]);
+    expect(arg(msg[0]!, "gte")).toEqual(["created_at", WM_ISO]);
     expect(arg(msg[0]!, "limit")).toEqual([1000]);
     expect(arg(msg[0]!, "order")[1]).toMatchObject({ ascending: false });
     expect(msg[0]!.some((c) => c.method === "eq" && c.args[0] === "direction" && c.args[1] === "inbound")).toBe(true);
@@ -1338,7 +1351,7 @@ describe("loadMessagesV2Data alertsSince (eligible set found directly, not throu
       inbound: [{ property_id: "edge", created_at: iso("10:05:00") }],
       flaggedRows: [flagged("edge", iso("09:59:00"))],
     });
-    const data = await loadMessagesV2Data(client, "org", undefined, { alertsSince: WM });
+    const data = await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
     expect(data.holds.map((h) => h.id)).toEqual(["edge"]);
     expect(data.holds[0]!.alert_since).toBe(iso("10:05:00"));
     expect(Date.parse(data.holds[0]!.alert_since!)).toBeGreaterThanOrEqual(Date.parse(WM));
@@ -1346,23 +1359,79 @@ describe("loadMessagesV2Data alertsSince (eligible set found directly, not throu
 
   it("the same pre-watermark flag with no later text is not eligible at all", async () => {
     const { client } = world({ flaggedRows: [flagged("edge", iso("09:59:00"))] });
-    const data = await loadMessagesV2Data(client, "org", undefined, { alertsSince: WM });
+    const data = await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
     expect(data.holds).toEqual([]);
   });
 
   it("a lead flagged after the watermark is found by its flag start", async () => {
     const { client, queries } = world({ newlyFlagged: ["fresh"], flaggedRows: [flagged("fresh", iso("11:00:00"))] });
-    const data = await loadMessagesV2Data(client, "org", undefined, { alertsSince: WM });
+    const data = await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
     expect(data.holds.map((h) => [h.id, h.alert_since])).toEqual([["fresh", iso("11:00:00")]]);
     const q = queries.find((x) => x[0]?.table === "properties" && has(x, "gte", "needs_human_attention_since"))!;
-    expect(arg(q, "gte")).toEqual(["needs_human_attention_since", WM]);
+    expect(arg(q, "gte")).toEqual(["needs_human_attention_since", WM_ISO]);
   });
 
   it("a pending decision created after the watermark makes its lead eligible", async () => {
     const decision = { property_id: "d1", conversation_id: "c1", source_inbound_message_id: "m1", created_at: iso("11:30:00") };
     const { client } = world({ decisions: [decision] });
-    const data = await loadMessagesV2Data(client, "org", undefined, { alertsSince: WM });
+    const data = await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
     expect(data.holds.map((h) => [h.property_id, h.alert_since])).toEqual([["d1", iso("11:30:00")]]);
+  });
+
+
+  it("a decision-only hold on an unflagged lead takes the post-watermark seller text as its start", async () => {
+    const decision = { property_id: "d2", conversation_id: "c2", source_inbound_message_id: "m2", created_at: iso("08:00:00") };
+    const { client } = fakeSupabase({
+      messages: () => ({ data: [{ property_id: "d2", created_at: iso("12:00:00") }] }),
+      jev_lead_decisions: (c) => (has(c, "in", "property_id") ? { data: [decision] } : { data: [] }),
+    });
+    const data = await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
+    expect(data.holds.map((h) => [h.property_id, h.alert_since])).toEqual([["d2", iso("12:00:00")]]);
+  });
+
+  it("orders all four fresh lookups newest-first and bounds the lower edge at max(watermark, now - 7 days)", async () => {
+    const OLD_WM = "2026-09-01T00:00:00.000Z";
+    const now = Date.parse("2026-10-08T13:00:00.000Z");
+    const lower = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const { client, queries } = world({});
+    await loadMessagesV2Data(client, "org", now, { alertsSince: OLD_WM });
+    const lookups = queries.filter(
+      (q) => has(q, "gte") && !has(q, "in") && q[0]?.table !== undefined && !isHead(q),
+    );
+    expect(lookups.length).toBe(5);
+    for (const q of lookups) {
+      expect(arg(q, "gte")[1]).toBe(lower);
+      expect(arg(q, "order")[1]).toMatchObject({ ascending: false });
+    }
+    expect(arg(lookups.find((q) => q[0]?.table === "properties")!, "order")[0]).toBe("needs_human_attention_since");
+    // A recent watermark is never pushed earlier than itself.
+    const recent = world({});
+    await loadMessagesV2Data(recent.client, "org", now, { alertsSince: WM });
+    expect(recent.queries.filter((q) => has(q, "gte") && !has(q, "in")).every((q) => arg(q, "gte")[1] === WM_ISO)).toBe(true);
+  });
+
+  it("a lookup that returns the row cap marks the load incomplete (failed), never clean", async () => {
+    const full = Array.from({ length: 1000 }, (_, i) => ({ id: `n${i}` }));
+    const { client } = fakeSupabase({
+      properties: (c) => (has(c, "gte", "needs_human_attention_since") ? { data: full } : { data: [] }),
+    });
+    const data = await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
+    expect(data.holdsMeta.failed.length).toBeGreaterThan(0);
+  });
+
+  it("a chunked .in() lookup carries an explicit limit, and hitting it marks the load incomplete", async () => {
+    const { client, queries } = world({ inbound: [{ property_id: "late", created_at: iso("12:00:00") }] });
+    await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
+    const ins = queries.filter((q) => has(q, "in"));
+    expect(ins.length).toBeGreaterThan(0);
+    for (const q of ins) expect(arg(q, "limit")[0]).toBeGreaterThanOrEqual(200);
+    const capped = fakeSupabase({
+      messages: () => ({ data: [{ property_id: "late", created_at: iso("12:00:00") }] }),
+      properties: (c) =>
+        has(c, "in", "id") ? { data: Array.from({ length: 1000 }, (_, i) => flagged(`late${i}`, null)) } : { data: [] },
+    });
+    const data = await loadMessagesV2Data(capped.client, "org", NOW, { alertsSince: WM });
+    expect(data.holdsMeta.failed.length).toBeGreaterThan(0);
   });
 
   it("makes no messages query without alertsSince (the page)", async () => {
@@ -1373,7 +1442,7 @@ describe("loadMessagesV2Data alertsSince (eligible set found directly, not throu
 
   it("a failed eligibility lookup is reported as failed, never as no holds", async () => {
     const { client } = world({ messagesError: true });
-    const data = await loadMessagesV2Data(client, "org", undefined, { alertsSince: WM });
+    const data = await loadMessagesV2Data(client, "org", NOW, { alertsSince: WM });
     expect(data.holdsMeta.failed.length).toBeGreaterThan(0);
   });
 });
@@ -1387,6 +1456,13 @@ describe("loadHeldPropertyIds", () => {
       ai_reply_drafts: () => ({ data: [{ property_id: "c" }] }),
     });
     expect([...(await loadHeldPropertyIds(client, "org", ["a", "b", "c", "d"]))!].sort()).toEqual(["a", "b", "c"]);
+  });
+  it("is null when a lookup hits its explicit limit (a truncated answer must not read as closed)", async () => {
+    const { client, queries } = fakeSupabase({
+      jev_lead_decisions: () => ({ data: Array.from({ length: 1000 }, (_, i) => ({ property_id: `p${i}` })) }),
+    });
+    expect(await loadHeldPropertyIds(client, "org", ["a"])).toBeNull();
+    for (const q of queries) expect(q.some((c) => c.method === "limit" && (c.args[0] as number) >= 200)).toBe(true);
   });
   it("is null (never 'closed') when a lookup fails", async () => {
     const { client } = fakeSupabase({ ai_reply_drafts: () => ({ error: { message: "x" } }) });

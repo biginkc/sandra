@@ -71,6 +71,19 @@ describe("DeliveryStore.archiveClosed", () => {
     expect(t.selects[1]).toContainEqual({ method: "gt", args: ["id", "a0499"] });
   });
 
+  it("with candidates, archives only candidate properties that are not open", async () => {
+    const t = fake([
+      [
+        { id: "r1", property_id: "open", hold_key: "open:k" },
+        { id: "r2", property_id: "gone", hold_key: "gone:k" },
+        { id: "r3", property_id: "newcomer", hold_key: "newcomer:k" },
+      ],
+    ]);
+    const n = await createSupabaseDeliveryStore(t.client).archiveClosed("org", ["open"], ["open", "gone"]);
+    expect(n).toBe(1);
+    expect(t.rpcs).toEqual([{ fn: "hold_alert_archive_rows", args: { p_org_id: "org", p_ids: ["r2"] } }]);
+  });
+
   it("surfaces an archive RPC error", async () => {
     const t = fake([[{ id: "r2", property_id: "gone", hold_key: "k" }]]);
     t.client.rpc = () => Promise.resolve({ data: null, error: { message: "boom" } });
