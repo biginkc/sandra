@@ -29,6 +29,7 @@ async function main() {
       scope: { type: "string", default: "below_threshold" },
       eligibility: { type: "string", default: "policy" },
       "allow-project-ref": { type: "string" },
+      "count-only": { type: "boolean", default: false },
     },
   });
   const file = values.file ?? (values.batch ? exportPathFor(assertBatchId(values.batch)) : null);
@@ -60,7 +61,7 @@ async function main() {
   const cache = new FileCache(path.join(REPLAY_DIR, `compare-${exp.batchId}.jsonl`));
   const deps: CompareDeps = {
     jev: jevDeps(jevKey, fetch),
-    luna: (thread) => classifyWithLuna(luna, thread, { fetch }),
+    luna: values["count-only"] ? null : (thread) => classifyWithLuna(luna, thread, { fetch }),
     cache, lunaModel: luna.model, lunaApi: luna.api,
     log: (l) => console.log(l),
   };
@@ -70,6 +71,11 @@ async function main() {
   };
   console.log(`replay:compare batch ${exp.batchId}: ${exp.inbound.length} inbound, luna model ${luna.model} (${luna.api}), concurrency ${concurrency}`);
   const run = await runCompare(exp, opts, deps);
+  if (values["count-only"]) {
+    const holds = run.rows.filter((r) => r.jevDecision.status === "hold" && (opts.scope === "all_holds" || r.jevDecision.reason === "needs_decision"));
+    console.log(`replay:compare count-only: ${holds.length} of ${run.rows.length} messages would go to Luna (scope ${opts.scope}); no Luna calls made, no report written`);
+    return;
+  }
   const report = buildReport(exp, run, opts, { generatedAt: new Date().toISOString(), lunaModel: luna.model });
   const base = values.out ? path.resolve(values.out) : path.join(REPLAY_DIR, `compare-${exp.batchId}.report`);
   mkdirSync(path.dirname(base), { recursive: true });

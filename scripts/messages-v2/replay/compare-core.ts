@@ -137,7 +137,7 @@ export async function runCompare(exp: ReplayExport, opts: CompareOptions, deps: 
 
     // 2. Luna: on every Jev hold (the cascade population), or on everything with headToHead.
     let lunaCall: LunaResult | null = null;
-    if (deps.luna && (opts.headToHead || jevDecision.status === "hold")) {
+    if (deps.luna && (opts.headToHead || (jevDecision.status === "hold" && (opts.scope === "all_holds" || jevDecision.reason === "needs_decision")))) {
       const key = `luna|${deps.lunaModel}|${deps.lunaApi}|${promptHash}|${m.id}|${threadHash}`;
       const cached = deps.cache.get(key) as LunaResult | undefined;
       if (cached) { lunaCached++; lunaCall = cached; }
