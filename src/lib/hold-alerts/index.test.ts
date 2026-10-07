@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { isHoldAlertRecipient, resolveAppBaseUrl } from "./index";
+import { holdAlertsEnabled, isHoldAlertRecipient, resolveAppBaseUrl, runHoldAlertsForAllOrgs } from "./index";
 
 const m = (over = {}) => ({
   user_id: "u",
@@ -29,5 +29,24 @@ describe("resolveAppBaseUrl", () => {
   it("normalizes scheme and trailing slashes", () => {
     expect(resolveAppBaseUrl({ NEXT_PUBLIC_APP_URL: "app.example.com/" })).toBe("https://app.example.com");
     expect(resolveAppBaseUrl({})).toBe("https://sandra-sooty.vercel.app");
+  });
+});
+
+describe("HOLD_ALERTS_ENABLED kill switch", () => {
+  it("is off unless the variable is exactly 1", () => {
+    expect(holdAlertsEnabled({})).toBe(false);
+    expect(holdAlertsEnabled({ HOLD_ALERTS_ENABLED: "0" })).toBe(false);
+    expect(holdAlertsEnabled({ HOLD_ALERTS_ENABLED: "true" })).toBe(false);
+    expect(holdAlertsEnabled({ HOLD_ALERTS_ENABLED: "1" })).toBe(true);
+  });
+  it("when off, touches no table and sends nothing, and logs that it skipped", async () => {
+    const from = vi.fn(() => {
+      throw new Error("must not query");
+    });
+    const log = vi.fn();
+    const summary = await runHoldAlertsForAllOrgs({ from } as never, { env: {}, log });
+    expect(from).not.toHaveBeenCalled();
+    expect(summary).toMatchObject({ disabled: true, orgs: 0, sent: 0, holds: 0 });
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("HOLD_ALERTS_ENABLED"));
   });
 });

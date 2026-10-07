@@ -42,6 +42,13 @@ const TONE_CLASS: Record<AgeTone, string> = {
   red: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200",
 };
 
+/** Reason codes only for skips; a failure shows just "failed" (the stored error can be provider text). */
+function alertText(alert: NonNullable<OpenHold["alert"]>): string {
+  return alert.status === "skipped" && alert.reason
+    ? `alert: skipped (${alert.reason})`
+    : `alert: ${alert.status}`;
+}
+
 export function HoldCard({
   hold,
   label,
@@ -139,6 +146,22 @@ export function HoldCard({
           className="mt-1 whitespace-pre-wrap rounded-lg bg-secondary/60 p-2"
         >
           {effectiveDraftBody(hold)}
+        </p>
+      )}
+      {hold.alert && (
+        <p
+          data-testid="hold-alert"
+          data-status={hold.alert.status}
+          className={cn(
+            "mt-2 text-xs",
+            hold.alert.status === "failed"
+              ? "text-red-700 dark:text-red-300"
+              : hold.alert.status === "skipped"
+                ? "text-amber-700 dark:text-amber-300"
+                : "text-muted-foreground",
+          )}
+        >
+          {alertText(hold.alert)}
         </p>
       )}
       {informational && (

@@ -8,11 +8,11 @@ import type { Database } from "@/lib/supabase/types";
 
 import { createChannelSenders } from "./channels";
 import { runHoldAlertsForOrg } from "./core";
-import { toAlertHolds } from "./holds";
+import { parseHotHoldReasons, toAlertHolds } from "./holds";
 import { createSupabaseDeliveryStore } from "./store";
 import type { HoldAlertDeps, HoldInfo, OrgAlertSummary, Recipient } from "./types";
 
-export { HOT_HOLD_REASONS } from "./holds";
+export { HOT_HOLD_REASONS, parseHotHoldReasons } from "./holds";
 export { runHoldAlertsForOrg } from "./core";
 
 type MembershipRow = {
@@ -40,11 +40,12 @@ export function resolveAppBaseUrl(env: Record<string, string | undefined> = proc
 /**
  * Open holds from the SAME derivation as the page. The run window the page
  * loader selects includes inbound_preview; it is dropped here (hold -> HoldInfo
- * keeps ids, first name, address only) and never reaches an alert payload.
+ * keeps ids and first name only) and never reaches an alert payload.
  */
 async function loadAlertHolds(
   db: LooseSupabase,
   orgId: string,
+  hotReasons: readonly string[],
 ): Promise<{ holds: HoldInfo[]; complete: boolean }> {
   const data = await loadMessagesV2Data(db, orgId);
   const labels = await loadRunLabels(
@@ -58,7 +59,7 @@ async function loadAlertHolds(
   );
   // Exact totals only: a truncated or failed source can hide still-open holds.
   const complete = data.holdsMeta.totalState === "exact" && !data.holdsMeta.truncated && data.holdsMeta.failed.length === 0;
-  return { holds: toAlertHolds(data.holds, labels), complete };
+  return { holds: toAlertHolds(data.holds, labels, hotReasons), complete };
 }
 
 export function createHoldAlertDeps(
@@ -67,12 +68,13 @@ export function createHoldAlertDeps(
 ): HoldAlertDeps {
   const db = admin as unknown as LooseSupabase;
   const senders = createChannelSenders(admin, { env });
+  const hotReasons = parseHotHoldReasons(env);
   return {
     now: () => new Date(),
     store: createSupabaseDeliveryStore(db),
     baseUrl: resolveAppBaseUrl(env),
     emailEnabled: env.HOLD_ALERT_EMAIL_ENABLED === "1",
-    loadHolds: (orgId) => loadAlertHolds(db, orgId),
+    loadHolds: (orgId) => loadAlertHolds(db, orgId, hotReasons),
     async loadRecipients(orgId): Promise<Recipient[]> {
       const { data, error } = await db.from("memberships").select(MEMBERSHIP_COLUMNS).eq("org_id", orgId);
       if (error) throw new Error(`memberships lookup failed: ${error.message}`);
@@ -97,7 +99,14 @@ export function createHoldAlertDeps(
   };
 }
 
+/** Kill switch: alerts send only when HOLD_ALERTS_ENABLED is exactly "1". Default off. */
+export function holdAlertsEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return env.HOLD_ALERTS_ENABLED === "1";
+}
+
 export type AllOrgsSummary = Omit<OrgAlertSummary, "budgetExhausted"> & {
+  /** True when the kill switch was off: nothing was read or sent. */
+  disabled?: boolean;
   orgs: number;
   errors: number;
   budgetExhausted: boolean;
@@ -106,14 +115,37 @@ export type AllOrgsSummary = Omit<OrgAlertSummary, "budgetExhausted"> & {
 /** Orgs with an active ai_responder_configs row, processed one at a time within a shared budget. */
 export async function runHoldAlertsForAllOrgs(
   admin: SupabaseClient<Database>,
-  opts: { budgetMs?: number; onError?: (error: unknown, orgId: string) => void } = {},
+  opts: {
+    budgetMs?: number;
+    onError?: (error: unknown, orgId: string) => void;
+    env?: Record<string, string | undefined>;
+    log?: (message: string) => void;
+  } = {},
 ): Promise<AllOrgsSummary> {
+  const env = opts.env ?? process.env;
+  if (!holdAlertsEnabled(env)) {
+    (opts.log ?? ((m: string) => console.warn(m)))("hold alerts skipped: HOLD_ALERTS_ENABLED is not 1");
+    return {
+      disabled: true,
+      orgs: 0,
+      holds: 0,
+      sent: 0,
+      skipped: 0,
+      failed: 0,
+      untouched: 0,
+      deferred: 0,
+      interrupted: 0,
+      archived: 0,
+      errors: 0,
+      budgetExhausted: false,
+    };
+  }
   const db = admin as unknown as LooseSupabase;
   const { data, error } = await db.from("ai_responder_configs").select("org_id").eq("active", true);
   if (error) throw new Error(`ai_responder_configs lookup failed: ${error.message}`);
   const orgIds = [...new Set(((data ?? []) as Array<{ org_id: string }>).map((r) => r.org_id))];
 
-  const deps = createHoldAlertDeps(admin);
+  const deps = createHoldAlertDeps(admin, env);
   const total: AllOrgsSummary = {
     orgs: orgIds.length,
     holds: 0,

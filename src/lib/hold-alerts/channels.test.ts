@@ -119,4 +119,36 @@ describe("sendEmail", () => {
     });
     expect(await s.sendEmail("u1", message)).toMatchObject({ status: "failed" });
   });
+  it("bounds the Resend call with a 10s abort signal", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }));
+    const s = createChannelSenders(admin, {
+      env: { RESEND_API_KEY: "k", HOLD_ALERT_EMAIL_FROM: "a@b.c" },
+      fetch: fetchImpl as never,
+    });
+    await s.sendEmail("u1", message);
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+  it("a timeout or abort is a terminal failure (the request may have been delivered)", async () => {
+    for (const name of ["TimeoutError", "AbortError"]) {
+      const s = createChannelSenders(admin, {
+        env: { RESEND_API_KEY: "k", HOLD_ALERT_EMAIL_FROM: "a@b.c" },
+        fetch: (async () => {
+          throw new DOMException("aborted", name);
+        }) as never,
+      });
+      expect(await s.sendEmail("u1", message)).toMatchObject({ status: "failed", terminal: true });
+    }
+  });
+  it("a plain network error stays a retryable failure", async () => {
+    const s = createChannelSenders(admin, {
+      env: { RESEND_API_KEY: "k", HOLD_ALERT_EMAIL_FROM: "a@b.c" },
+      fetch: (async () => {
+        throw new TypeError("fetch failed");
+      }) as never,
+    });
+    const r = await s.sendEmail("u1", message);
+    expect(r).toMatchObject({ status: "failed" });
+    expect((r as { terminal?: boolean }).terminal).toBeFalsy();
+  });
 });

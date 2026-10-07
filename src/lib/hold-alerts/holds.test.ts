@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { OpenHold, PipelineRun } from "@/app/(dashboard)/messages-v2/types";
 
@@ -6,6 +6,7 @@ import { runHoldAlertsForOrg } from "./core";
 import {
   HOT_HOLD_REASONS,
   holdKeyFor,
+  parseHotHoldReasons,
   holdReasonKey,
   isHotHold,
   isInformationalHold,
@@ -53,8 +54,26 @@ function openHold(over: Partial<OpenHold<PipelineRun>> = {}): OpenHold<PipelineR
 const labels = new Map([["prop-1", { name: "Dana", address: "12 Oak St, Kansas City" }]]);
 
 describe("HOT_HOLD_REASONS", () => {
-  it("is the explicit placeholder list (a rule, pending Jarrad approval), exactly these values", () => {
-    expect([...HOT_HOLD_REASONS]).toEqual(["jev_below_threshold:new_lead", "price_or_offer", "distress"]);
+  it("is empty by default: no hold is hot until reasons are configured", () => {
+    expect([...HOT_HOLD_REASONS]).toEqual([]);
+  });
+});
+
+describe("parseHotHoldReasons (HOLD_ALERT_HOT_REASONS)", () => {
+  it("is empty when the env var is unset or blank", () => {
+    expect(parseHotHoldReasons({})).toEqual([]);
+    expect(parseHotHoldReasons({ HOLD_ALERT_HOT_REASONS: "  " })).toEqual([]);
+  });
+  it("reads a comma-separated list of known hold reasons, trimmed and de-duplicated", () => {
+    expect(
+      parseHotHoldReasons({ HOLD_ALERT_HOT_REASONS: " price_or_offer, distress ,price_or_offer,jev_below_threshold:new_lead" }),
+    ).toEqual(["price_or_offer", "distress", "jev_below_threshold:new_lead"]);
+  });
+  it("ignores unknown values with a warning", () => {
+    const warn = vi.fn();
+    expect(parseHotHoldReasons({ HOLD_ALERT_HOT_REASONS: "distress,made_up,PRICE_OR_OFFER" }, warn)).toEqual(["distress"]);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn.mock.calls.flat().join(" ")).toContain("made_up");
   });
 });
 
@@ -72,22 +91,26 @@ describe("holdKeyFor", () => {
 });
 
 describe("isHotHold", () => {
+  const HOT = ["jev_below_threshold:new_lead", "price_or_offer", "distress"];
+  it("is never hot with no configured reasons", () => {
+    expect(isHotHold(openHold({ flag_reason: "price_or_offer" }))).toBe(false);
+  });
   it("matches only an exact reason from HOT_HOLD_REASONS: flag reason, run outcome or run reason", () => {
-    expect(isHotHold(openHold({ flag_reason: "jev_below_threshold:new_lead" }))).toBe(true);
-    expect(isHotHold(openHold({ flag_reason: "price_or_offer" }))).toBe(true);
-    expect(isHotHold(openHold({ run: run({ final_outcome: "distress" }) }))).toBe(true);
-    expect(isHotHold(openHold({ run: run({ reason: "price_or_offer" }) }))).toBe(true);
+    expect(isHotHold(openHold({ flag_reason: "jev_below_threshold:new_lead" }), HOT)).toBe(true);
+    expect(isHotHold(openHold({ flag_reason: "price_or_offer" }), HOT)).toBe(true);
+    expect(isHotHold(openHold({ run: run({ final_outcome: "distress" }) }), HOT)).toBe(true);
+    expect(isHotHold(openHold({ run: run({ reason: "price_or_offer" }) }), HOT)).toBe(true);
   });
   it("does not match substrings, other casing, composite hold text or other reasons", () => {
-    expect(isHotHold(openHold({ flag_reason: "price_quoted" }))).toBe(false);
-    expect(isHotHold(openHold({ flag_reason: "distressed_seller" }))).toBe(false);
-    expect(isHotHold(openHold({ flag_reason: "jev_below_threshold:not_interested" }))).toBe(false);
-    expect(isHotHold(openHold({ flag_reason: "PRICE_OR_OFFER" }))).toBe(false);
-    expect(isHotHold(openHold({ reason: "Needs attention (price_or_offer, distress)" }))).toBe(false);
+    expect(isHotHold(openHold({ flag_reason: "price_quoted" }), HOT)).toBe(false);
+    expect(isHotHold(openHold({ flag_reason: "distressed_seller" }), HOT)).toBe(false);
+    expect(isHotHold(openHold({ flag_reason: "jev_below_threshold:not_interested" }), HOT)).toBe(false);
+    expect(isHotHold(openHold({ flag_reason: "PRICE_OR_OFFER" }), HOT)).toBe(false);
+    expect(isHotHold(openHold({ reason: "Needs attention (price_or_offer, distress)" }), HOT)).toBe(false);
   });
   it("never reads the inbound preview", () => {
-    expect(isHotHold(openHold({ run: run({ inbound_preview: "price_or_offer distress" }) }))).toBe(false);
-    expect(isHotHold(openHold())).toBe(false);
+    expect(isHotHold(openHold({ run: run({ inbound_preview: "price_or_offer distress" }) }), HOT)).toBe(false);
+    expect(isHotHold(openHold(), HOT)).toBe(false);
   });
 });
 
@@ -112,14 +135,13 @@ describe("toAlertHolds", () => {
     expect(out.map((h) => h.propertyId)).toEqual(["prop-1"]);
   });
 
-  it("builds ids, first name, address and the hold key, nothing else", () => {
+  it("builds ids, first name and the hold key, nothing else (no address)", () => {
     const [h] = toAlertHolds([openHold()], labels);
     expect(h).toEqual({
       holdKey: "prop-1:jev_decision",
       propertyId: "prop-1",
       since: "2026-10-08T10:00:00.000Z",
       name: "Dana",
-      address: "12 Oak St, Kansas City",
       hot: false,
     });
   });
@@ -127,13 +149,12 @@ describe("toAlertHolds", () => {
   it("falls back to an unknown-sender label when no label was loaded", () => {
     const [h] = toAlertHolds([openHold()], new Map());
     expect(h.name).toBe("Unknown sender");
-    expect(h.address).toBeNull();
   });
 });
 
 describe("payloads never carry seller message text", () => {
   it("no channel's text contains the run's inbound_preview", async () => {
-    const holds = toAlertHolds([openHold({ flag_reason: "price_or_offer" })], labels);
+    const holds = toAlertHolds([openHold({ flag_reason: "price_or_offer" })], labels, ["price_or_offer"]);
     expect(JSON.stringify(holds)).not.toContain("SELLER SAID");
     const t = makeDeps({ holds, emailEnabled: true });
     t.setNow("2026-10-08T12:00:00.000Z");
@@ -143,6 +164,7 @@ describe("payloads never carry seller message text", () => {
     for (const s of t.sent) {
       expect(s.text).not.toContain("SELLER SAID");
       expect(s.text).not.toContain("555-0100");
+      expect(s.text).not.toContain("Oak St");
     }
     expect(JSON.stringify(t.store.rows)).not.toContain("SELLER SAID");
   });

@@ -9,8 +9,9 @@ import type { Database } from "@/lib/supabase/types";
  * Vercel cron -> `/api/cron/hold-alerts` every five minutes (Messages v2
  * Phase 1, PLAN 4.7 / 4.11). Creates durable hold_alert_deliveries rows and
  * sends Slack DMs (first + 1h nudge), hot-hold SMS to the owner, and (behind
- * HOLD_ALERT_EMAIL_ENABLED=1) the hourly email digest. Payloads carry ids,
- * first names, addresses and a link only, never seller message text.
+ * HOLD_ALERT_EMAIL_ENABLED=1) the hourly email digest. Nothing sends unless
+ * HOLD_ALERTS_ENABLED=1. Payloads carry ids, first names and a link only, never
+ * seller message text or the property address.
  */
 export const maxDuration = 60;
 

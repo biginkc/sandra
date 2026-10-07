@@ -2229,7 +2229,7 @@ type GateEvaluation =
 /** Upper bound on each evidence query; hitting it fails the decision closed. */
 const GATE_EVIDENCE_CAP = 500;
 
-/** The only flag reason a human Send is exempt from (pending Jarrad approval). */
+/** The only flag reason a human Send is exempt from (engineering policy: the narrowest exemption). */
 export const HUMAN_SEND_EXEMPT_FLAG_REASON = "draft_held";
 
 type GateProperty = Pick<
@@ -2370,7 +2370,7 @@ async function loadSilentExit(
     property = data as unknown as GateProperty & { last_ai_escalation_reason?: string | null };
   }
   if (humanActor) {
-    // pending Jarrad approval: the exemption wording. A human Send is exempt
+    // Engineering policy: a human Send is exempt
     // from the "already flagged" check ONLY when the flag is exactly
     // `draft_held` (the flag that put the draft on the rail). Any other flag
     // reason still refuses, with the reason shown.

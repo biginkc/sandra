@@ -772,6 +772,45 @@ export async function loadMessagesV2Data(
     target.inbound_message_id ??= row.inbound_message_id;
     target.late = target.late || row.late;
   }
+  // Latest alert delivery per held property, so a failed or skipped alert is
+  // visible on the card (PLAN 4.11: failures are surfaced, not swallowed).
+  const alertByProperty = new Map<string, NonNullable<OpenHold["alert"]>>();
+  const alertAtByProperty = new Map<string, string>();
+  const alertPropertyIds = [
+    ...new Set(openHolds.flatMap((h) => (h.property_id ? [h.property_id] : []))),
+  ];
+  const alertResults = await Promise.all(
+    chunked(alertPropertyIds, PROPERTY_RPC_CHUNK).map((ids) =>
+      supabase
+        .from("hold_alert_deliveries")
+        .select("property_id, status, last_error, created_at")
+        .eq("org_id", orgId)
+        .in("property_id", ids)
+        .not("hold_key", "like", "%:closed:%")
+        .order("created_at", { ascending: false })
+        .limit(ids.length * 20),
+    ),
+  );
+  for (const res of alertResults) {
+    if (res.error) {
+      if (!contextErrors.includes("alert status")) contextErrors.push("alert status");
+      continue;
+    }
+    for (const row of (res.data ?? []) as Array<{
+      property_id: string | null;
+      status: NonNullable<OpenHold["alert"]>["status"];
+      last_error: string | null;
+      created_at: string;
+    }>) {
+      if (!row.property_id) continue;
+      const prev = alertByProperty.get(row.property_id);
+      const prevAt = prev ? alertAtByProperty.get(row.property_id)! : null;
+      if (prevAt === null || compareInstants(row.created_at, prevAt) > 0) {
+        alertByProperty.set(row.property_id, { status: row.status, reason: row.last_error });
+        alertAtByProperty.set(row.property_id, row.created_at);
+      }
+    }
+  }
   const deadLettersFor = (h: OpenHold<PipelineRun>): DeadLetterInfo[] =>
     groups
       .filter(
@@ -825,6 +864,9 @@ export async function loadMessagesV2Data(
         ...(isDead(h) ? { dead_letter: true } : {}),
         ...(dls.some((d) => d.late) ? { dead_letter_late: true } : {}),
         ...(dls.length ? { dead_letters: dls } : {}),
+        ...(h.property_id && alertByProperty.has(h.property_id)
+          ? { alert: alertByProperty.get(h.property_id) }
+          : {}),
         run: h.run ? withSteps(h.run) : null,
       };
     }),

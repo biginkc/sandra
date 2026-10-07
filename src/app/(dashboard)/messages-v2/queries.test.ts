@@ -397,7 +397,7 @@ function fakeSupabase(results: Record<string, (calls: Call) => Result>) {
       const calls: Call = [];
       queries.push(calls);
       const q: Record<string, unknown> = {};
-      for (const m of ["select", "eq", "in", "order", "limit"]) {
+      for (const m of ["select", "eq", "in", "order", "limit", "not"]) {
         q[m] = (...args: unknown[]) => {
           calls.push({ table, method: m, args });
           return q;
@@ -490,6 +490,45 @@ describe("loadMessagesV2Data holds", () => {
       total: 1,
       shown: 1,
       truncated: false,
+    });
+  });
+
+  describe("alert delivery status", () => {
+    const flagged = (id: string) => ({
+      id,
+      last_ai_escalation_at: iso("01:00:00"),
+      last_ai_escalation_reason: "draft_held",
+      updated_at: iso("01:00:00"),
+    });
+    const withDeliveries = (rows: unknown[] | null, error?: unknown) =>
+      fakeSupabase({
+        properties: (calls) =>
+          isHead(calls) ? { data: [{ id: "p1" }, { id: "p2" }, { id: "p3" }] } : { data: [flagged("p1"), flagged("p2"), flagged("p3")] },
+        hold_alert_deliveries: () => (error ? { data: null, error } : { data: rows }),
+      });
+
+    it("attaches the latest delivery status per property, newest wins", async () => {
+      const { client, queries } = withDeliveries([
+        { property_id: "p1", status: "skipped", last_error: "no_token", created_at: iso("02:00:00") },
+        { property_id: "p1", status: "sent", last_error: null, created_at: iso("01:00:00") },
+        { property_id: "p2", status: "failed", last_error: "interrupted", created_at: iso("02:00:00") },
+      ]);
+      const data = await loadMessagesV2Data(client, "org");
+      const byId = Object.fromEntries(data.holds.map((h) => [h.id, h.alert]));
+      expect(byId.p1).toEqual({ status: "skipped", reason: "no_token" });
+      expect(byId.p2).toEqual({ status: "failed", reason: "interrupted" });
+      expect(byId.p3).toBeUndefined();
+      const q = queries.find((c) => c[0]?.table === "hold_alert_deliveries")!;
+      expect(q).toContainEqual({ table: "hold_alert_deliveries", method: "eq", args: ["org_id", "org"] });
+      expect(q.find((c) => c.method === "in")!.args[0]).toBe("property_id");
+      expect(q).toContainEqual({ table: "hold_alert_deliveries", method: "not", args: ["hold_key", "like", "%:closed:%"] });
+    });
+
+    it("reports a failed delivery lookup as a context error instead of hiding it", async () => {
+      const { client } = withDeliveries(null, { message: "boom" });
+      const data = await loadMessagesV2Data(client, "org");
+      expect(data.holdsMeta.contextErrors).toContain("alert status");
+      expect(data.holds.every((h) => h.alert === undefined)).toBe(true);
     });
   });
 

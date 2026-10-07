@@ -163,6 +163,8 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
   dead_letter_late?: boolean;
   /** One entry per inbound/run dead-letter on this hold; `late` = provider accepted it late. */
   dead_letters?: DeadLetterInfo[];
+  /** Latest alert delivery for this hold's property (hold_alert_deliveries); absent = none recorded. */
+  alert?: { status: "pending" | "sending" | "sent" | "failed" | "skipped"; reason: string | null };
   /** The property's raw last_ai_escalation_reason (e.g. `send_timeout_then_sent`); null/absent when none. */
   flag_reason?: string | null;
 };

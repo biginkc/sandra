@@ -2,7 +2,7 @@ export type AlertChannel = "slack" | "sms" | "email";
 export type AlertStage = "first" | "nudge_1h" | "digest";
 export type DeliveryStatus = "pending" | "sending" | "sent" | "failed" | "skipped";
 
-/** A hold reduced to what an alert may carry: ids, first name, address, age. Never message text. */
+/** A hold reduced to what an alert may carry: ids, first name, age. Never message text or address. */
 export type HoldInfo = {
   /**
    * `${property_id}:${reason key}`. Deliberately NOT keyed on the hold's start
@@ -15,8 +15,7 @@ export type HoldInfo = {
   since: string | null;
   /** First name (or "Unknown ···1234"), from the page's label loader. */
   name: string;
-  address: string | null;
-  /** One of the hold's reasons is in HOT_HOLD_REASONS (exact match). */
+  /** One of the hold's reasons is in the configured hot list (HOLD_ALERT_HOT_REASONS, exact match). */
   hot: boolean;
 };
 

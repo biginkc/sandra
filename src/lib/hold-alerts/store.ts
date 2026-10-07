@@ -27,8 +27,9 @@ type DbRow = {
 const COLUMNS =
   "id, org_id, property_id, hold_key, recipient_user_id, channel, stage, status, attempts, last_error, created_at";
 
-/** Rows examined per archive pass; the rest is picked up next run. */
+/** Rows per archive page, and the page cap per run (the rest is picked up next run). */
 const ARCHIVE_BATCH = 500;
+const ARCHIVE_MAX_PAGES = 20;
 
 function fail(op: string, error: { message?: string } | null): never {
   throw new Error(`hold_alert_deliveries ${op} failed: ${error?.message ?? "unknown"}`);
@@ -111,25 +112,35 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
 
     async archiveClosed(orgId, openPropertyIds) {
       const open = new Set(openPropertyIds);
-      const { data, error } = await table()
-        .select("id, property_id, hold_key")
-        .eq("org_id", orgId)
-        .not("property_id", "is", null)
-        .not("hold_key", "like", "%:closed:%")
-        .order("created_at", { ascending: true })
-        .limit(ARCHIVE_BATCH);
-      if (error) fail("archive select", error);
       let archived = 0;
-      for (const r of (data ?? []) as Array<{ id: string; property_id: string | null; hold_key: string }>) {
-        if (!r.property_id || open.has(r.property_id)) continue;
-        // Guarded on the old key: a concurrent pass that already archived it matches nothing.
-        const upd = await table()
-          .update({ hold_key: `${r.hold_key}:closed:${r.id}` })
-          .eq("id", r.id)
-          .eq("hold_key", r.hold_key)
-          .select("id");
-        if (upd.error) fail("archive update", upd.error);
-        if (Array.isArray(upd.data) && upd.data.length === 1) archived += 1;
+      // Page by id cursor: still-open rows are skipped client-side, so they can
+      // never fill the window and starve closed rows behind them.
+      let cursor: string | null = null;
+      for (let page = 0; page < ARCHIVE_MAX_PAGES; page += 1) {
+        let q = table()
+          .select("id, property_id, hold_key")
+          .eq("org_id", orgId)
+          .not("property_id", "is", null)
+          .not("hold_key", "like", "%:closed:%")
+          .order("id", { ascending: true })
+          .limit(ARCHIVE_BATCH);
+        if (cursor) q = q.gt("id", cursor);
+        const { data, error } = await q;
+        if (error) fail("archive select", error);
+        const rows = (data ?? []) as Array<{ id: string; property_id: string | null; hold_key: string }>;
+        for (const r of rows) {
+          if (!r.property_id || open.has(r.property_id)) continue;
+          // Guarded on the old key: a concurrent pass that already archived it matches nothing.
+          const upd = await table()
+            .update({ hold_key: `${r.hold_key}:closed:${r.id}` })
+            .eq("id", r.id)
+            .eq("hold_key", r.hold_key)
+            .select("id");
+          if (upd.error) fail("archive update", upd.error);
+          if (Array.isArray(upd.data) && upd.data.length === 1) archived += 1;
+        }
+        if (rows.length < ARCHIVE_BATCH) break;
+        cursor = rows[rows.length - 1]!.id;
       }
       return archived;
     },

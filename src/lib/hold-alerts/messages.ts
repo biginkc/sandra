@@ -1,6 +1,6 @@
 import type { EmailMessage, HoldInfo } from "./types";
 
-/** Alert copy carries ids, first name, address, age and a link only: never seller message text. */
+/** Alert copy carries ids, first name, age and a link only: never seller message text or the property address. */
 
 const escapeSlack = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
@@ -9,7 +9,7 @@ export function holdsLink(baseUrl: string): string {
 }
 
 function where(hold: HoldInfo): string {
-  return hold.address ? `${hold.name}, ${hold.address}` : hold.name;
+  return hold.name;
 }
 
 export function formatAge(since: string | null, nowMs: number): string {

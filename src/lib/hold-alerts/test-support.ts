@@ -120,7 +120,6 @@ export function hold(over: Partial<HoldInfo> = {}): HoldInfo {
     propertyId: "prop-1",
     since: "2026-10-08T10:00:00.000Z",
     name: "Dana",
-    address: "12 Oak St, Kansas City",
     hot: false,
     ...over,
   };

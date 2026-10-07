@@ -15,7 +15,7 @@ function fake(rows: Array<{ id: string; property_id: string | null; hold_key: st
       const calls: Call[] = [];
       let patch: unknown = null;
       const q: Record<string, unknown> = {};
-      for (const m of ["select", "eq", "not", "order", "limit", "update"]) {
+      for (const m of ["select", "eq", "not", "order", "limit", "update", "gt"]) {
         q[m] = (...args: unknown[]) => {
           calls.push({ method: m, args });
           if (m === "update") patch = args[0];
@@ -57,5 +57,42 @@ describe("DeliveryStore.archiveClosed", () => {
     expect(t.selects[0]).toContainEqual({ method: "eq", args: ["org_id", "org"] });
     expect(t.selects[0]).toContainEqual({ method: "not", args: ["property_id", "is", null] });
     expect(t.selects[0]).toContainEqual({ method: "not", args: ["hold_key", "like", "%:closed:%"] });
+  });
+
+  it("pages by id cursor so closed rows past the first window still get archived", async () => {
+    const page1 = Array.from({ length: 500 }, (_, i) => ({
+      id: `a${String(i).padStart(4, "0")}`,
+      property_id: "open",
+      hold_key: "open:draft_held",
+    }));
+    const page2 = [{ id: "b0001", property_id: "gone", hold_key: "gone:draft_held" }];
+    const pages = [page1, page2];
+    const selects: Call[][] = [];
+    const updates: unknown[] = [];
+    const client: LooseSupabase = {
+      rpc: () => Promise.resolve({ data: null, error: null }),
+      from() {
+        const calls: Call[] = [];
+        const q: Record<string, unknown> = {};
+        for (const m of ["select", "eq", "not", "order", "limit", "update", "gt"]) {
+          q[m] = (...args: unknown[]) => {
+            calls.push({ method: m, args });
+            if (m === "update") updates.push(args[0]);
+            return q;
+          };
+        }
+        q.then = (resolve: (v: unknown) => unknown) => {
+          if (calls.some((c) => c.method === "update")) return resolve({ data: [{ id: "x" }], error: null });
+          selects.push(calls);
+          return resolve({ data: pages[selects.length - 1] ?? [], error: null });
+        };
+        return q;
+      },
+    };
+    const n = await createSupabaseDeliveryStore(client).archiveClosed("org", ["open"]);
+    expect(n).toBe(1);
+    expect(updates).toEqual([{ hold_key: "gone:draft_held:closed:b0001" }]);
+    expect(selects).toHaveLength(2);
+    expect(selects[1]).toContainEqual({ method: "gt", args: ["id", "a0499"] });
   });
 });

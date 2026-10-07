@@ -12,7 +12,7 @@ describe("first stage Slack DMs", () => {
     const slack = t.sent.filter((s) => s.channel === "slack");
     expect(slack.map((s) => s.userId).sort()).toEqual(["acq-1", "owner-1"]);
     expect(slack[0].text).toContain("Dana");
-    expect(slack[0].text).toContain("12 Oak St, Kansas City");
+    expect(slack[0].text).not.toContain("Oak St");
     expect(slack[0].text).toContain("https://app.example.com/messages-v2");
     expect(t.store.rows.filter((r) => r.channel === "slack").every((r) => r.status === "sent" && r.stage === "first")).toBe(true);
     expect(summary).toMatchObject({ holds: 1, sent: 2, failed: 0 });
@@ -255,7 +255,7 @@ describe("email digest", () => {
     const mail = t.sent.filter((s) => s.channel === "email");
     expect(mail).toHaveLength(2);
     expect(mail[0].text).toContain("Dana");
-    expect(mail[0].text).toContain("12 Oak St, Kansas City");
+    expect(mail[0].text).not.toContain("Oak St");
     expect(mail[0].text).toContain("https://app.example.com/messages-v2");
     const keys = t.store.rows.filter((r) => r.channel === "email").map((r) => r.holdKey);
     expect(new Set(keys)).toEqual(new Set([`digest:${ORG}:2026-10-08T10`]));

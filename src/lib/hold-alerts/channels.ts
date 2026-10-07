@@ -12,6 +12,10 @@ import type { ChannelResult, EmailMessage } from "./types";
 /** Same bounds as the appointment-reminder path: no SDK retry loop, 10s HTTP cap. */
 const SLACK_CLIENT_OPTIONS = { timeout: 10_000, retryConfig: { retries: 0 } } as const;
 const RESEND_URL = "https://api.resend.com/emails";
+const RESEND_TIMEOUT_MS = 10_000;
+
+const isAbort = (error: unknown) =>
+  error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
 
 type Env = Record<string, string | undefined>;
 
@@ -87,11 +91,14 @@ export function createChannelSenders(
         method: "POST",
         headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
         body: JSON.stringify({ from, to: [to], subject: message.subject, text: message.text }),
+        signal: AbortSignal.timeout(RESEND_TIMEOUT_MS),
       });
       if (!res.ok) return { status: "failed", error: `resend_http_${res.status}` };
       return { status: "sent" };
     } catch (error) {
       reportError(error, { tags: { surface: "hold_alert_email" }, extra: { userId } });
+      // A timeout/abort after the request started is ambiguous (Resend may have accepted it): never retry.
+      if (isAbort(error)) return { status: "failed", error: `resend_timeout: ${messageOf(error)}`, terminal: true };
       return { status: "failed", error: messageOf(error) };
     }
   }
