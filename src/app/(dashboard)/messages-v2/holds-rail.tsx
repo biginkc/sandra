@@ -145,6 +145,7 @@ const SOURCE_NAME: Record<HoldSource, string> = {
   needs_attention: "needs-attention",
   jev_decision: "Jev decision",
   disposition_review: "disposition review",
+  pending_draft: "reply draft",
 };
 
 export function HoldsRail({
@@ -158,24 +159,38 @@ export function HoldsRail({
   labels: ReadonlyMap<string, RunLabel>;
   nowMs: number;
 }) {
+  const holdFailures = meta?.failed.filter((f) => f !== "pending_draft") ?? [];
+  const draftsUnavailable = !!meta?.failed.includes("pending_draft");
+  const count =
+    meta?.totalState === "unavailable"
+      ? `(count unavailable, ${holds.length} shown)`
+      : meta?.totalState === "capped"
+        ? `(2,000+ holds (incomplete), ${meta.shown} shown)`
+        : meta?.truncated
+          ? `(${meta.total}, ${meta.shown} shown)`
+          : `(${holds.length})`;
   return (
     <aside aria-label="Holds" className="flex flex-col gap-3">
       <h2 className="text-sm font-semibold">
-        Holds{" "}
-        <span className="text-muted-foreground">
-          {meta?.truncated
-            ? `(${meta.total}, ${meta.shown} shown)`
-            : `(${holds.length})`}
-        </span>
+        Holds <span className="text-muted-foreground">{count}</span>
       </h2>
-      {meta && meta.failed.length > 0 && (
+      {holdFailures.length > 0 && (
         <p
           role="alert"
           data-testid="holds-unavailable"
           className="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200"
         >
           Holds unavailable —{" "}
-          {meta.failed.map((f) => SOURCE_NAME[f]).join(", ")} query failed
+          {holdFailures.map((f) => SOURCE_NAME[f]).join(", ")} query failed
+        </p>
+      )}
+      {draftsUnavailable && (
+        <p
+          role="alert"
+          data-testid="drafts-unavailable"
+          className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
+        >
+          Draft status unavailable — held Claude drafts may be missing.
         </p>
       )}
       {meta && meta.contextErrors.length > 0 && (
@@ -189,7 +204,7 @@ export function HoldsRail({
         </p>
       )}
       {holds.length === 0 ? (
-        meta && meta.failed.length > 0 ? null : (
+        holdFailures.length > 0 ? null : (
           <p className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
             No open holds.
           </p>

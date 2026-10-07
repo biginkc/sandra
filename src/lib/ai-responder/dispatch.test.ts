@@ -5,16 +5,19 @@ import { applyPhoneLevelOptOut } from "@/lib/messaging/opt-out-phone";
 import { sendSmsToContact } from "@/lib/messaging/send";
 
 import { classifyAiSkip } from "./classify";
-import { dispatchAiResponse, resolveOutboundPolicy } from "./dispatch";
+import { dispatchAiResponse, resolveOutboundPolicy, sendReservationTuning } from "./dispatch";
 import { generateAiReply } from "./generate";
 import { humanizeReply } from "./humanize";
 import { IDENTITY_REPLY_BODY } from "./identity";
 import { validateAiReplyBody } from "./safety";
 import type { AiStructuredOutput } from "./types";
 
-const { recordLeadEvent } = vi.hoisted(() => ({
+const { recordLeadEvent, reportErrorMock } = vi.hoisted(() => ({
   recordLeadEvent: vi.fn(),
+  reportErrorMock: vi.fn(),
 }));
+
+vi.mock("@/lib/errors/report", () => ({ reportError: reportErrorMock }));
 
 vi.mock("@/lib/events", () => ({
   LEAD_EVENT_TYPES: {
@@ -99,6 +102,16 @@ type MockState = {
   aiClaims: AiClaimRow[];
   aiClaimInsertError?: boolean;
   aiReplyDrafts?: Array<Record<string, unknown>>;
+  /** Insert into ai_reply_drafts fails with this error (code optional). */
+  draftInsertError?: { code?: string; message: string };
+  /** Active reservations by conversation key (holder + expiry ms). */
+  sendReservations?: Map<string, { holder: string; expiresAt: number }>;
+  reserveRpcError?: boolean;
+  reserveCalls?: number;
+  /** A messages lookup for this direction returns a DB error. */
+  messageLookupError?: "inbound" | "outbound";
+  /** Hook run once inside fn_reserve_ai_send's winner path (race injection). */
+  onReserved?: () => void;
   jevOutcomeThresholds?: Array<{ outcome: string; min_confidence: number; version?: number; automation_enabled?: boolean }>;
   jevLeadDecisionCalls: Array<{ rpc: string; args: Record<string, unknown> }>;
   contact: {
@@ -143,6 +156,7 @@ type MockState = {
   threadConversationId: string;
 };
 
+const defaultReservationTuning = { ...sendReservationTuning };
 const PROPERTY_ID = "property-1";
 const CONTACT_ID = "contact-1";
 const CONVERSATION_ID = "conversation-1";
@@ -270,6 +284,13 @@ function createMockSupabase(state: MockState) {
     let updateData: Partial<MessageRow> | null = null;
 
     const execute = () => {
+      if (
+        !updateData &&
+        state.messageLookupError &&
+        filters.eq.get("direction") === state.messageLookupError
+      ) {
+        return { data: null, error: { message: "lookup boom" } as { message: string } | null };
+      }
       if (updateData) {
         for (const row of state.messages) {
           if (matchesMessage(row, filters)) {
@@ -354,7 +375,7 @@ function createMockSupabase(state: MockState) {
           | ((value: {
               count?: number | null;
               data: MessageRow[] | null;
-              error: null;
+              error: { message: string } | null;
             }) => TResult1 | PromiseLike<TResult1>)
           | null,
         onrejected?:
@@ -681,7 +702,18 @@ function createMockSupabase(state: MockState) {
       if (table === "ai_reply_drafts") {
         return {
           insert: async (row: Record<string, unknown>) => {
-            (state.aiReplyDrafts ??= []).push(row);
+            if (state.draftInsertError) return { error: state.draftInsertError };
+            const drafts = (state.aiReplyDrafts ??= []);
+            if (
+              row.status === "pending" &&
+              row.inbound_message_id &&
+              drafts.some(
+                (d) => d.status === "pending" && d.inbound_message_id === row.inbound_message_id,
+              )
+            ) {
+              return { error: { code: "23505", message: "duplicate pending draft" } };
+            }
+            drafts.push(row);
             return { error: null };
           },
         };
@@ -689,6 +721,33 @@ function createMockSupabase(state: MockState) {
       throw new Error(`Unexpected table: ${table}`);
     },
     rpc(name: string, args: Record<string, unknown>) {
+      if (name === "fn_reserve_ai_send") {
+        state.reserveCalls = (state.reserveCalls ?? 0) + 1;
+        if (state.reserveRpcError) {
+          return Promise.resolve({ data: null, error: { message: "reserve boom" } });
+        }
+        const reservations = (state.sendReservations ??= new Map());
+        const key = String(args.p_conversation_id);
+        const existing = reservations.get(key);
+        if (existing && existing.expiresAt > Date.now()) {
+          return Promise.resolve({ data: false, error: null });
+        }
+        reservations.set(key, {
+          holder: String(args.p_holder),
+          expiresAt: Date.now() + Number(args.p_lease_seconds) * 1000,
+        });
+        state.onReserved?.();
+        return Promise.resolve({ data: true, error: null });
+      }
+      if (name === "fn_release_ai_send") {
+        const reservations = (state.sendReservations ??= new Map());
+        const key = String(args.p_conversation_id);
+        if (reservations.get(key)?.holder === args.p_holder) {
+          reservations.delete(key);
+          return Promise.resolve({ data: true, error: null });
+        }
+        return Promise.resolve({ data: false, error: null });
+      }
       if (name === "fn_propose_jev_lead_decision") {
         state.jevLeadDecisionCalls.push({ rpc: name, args });
         return Promise.resolve({ data: { status: "proposed", decisionId: "decision-1" }, error: null });
@@ -2296,6 +2355,7 @@ describe("send chokepoint guards (fix round 2)", () => {
   });
 
   beforeEach(() => {
+    Object.assign(sendReservationTuning, { waitAttempts: 1 });
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-13T18:00:00.000Z"));
     vi.mocked(getConsentState).mockResolvedValue({} as never);
@@ -2310,14 +2370,16 @@ describe("send chokepoint guards (fix round 2)", () => {
     vi.unstubAllEnvs();
     vi.useRealTimers();
     vi.clearAllMocks();
+    Object.assign(sendReservationTuning, defaultReservationTuning);
   });
 
   it("two overlapping dispatches for two inbounds in one conversation produce exactly one send", async () => {
+    vi.useRealTimers();
+    Object.assign(sendReservationTuning, { waitAttempts: 200, waitDelayMs: 2 });
     const state = createMockState();
     const supabase = createMockSupabase(state);
     installSendMock(state);
     seedInboundMessage(state, { id: "inbound-a", body: "Hello?" });
-    vi.setSystemTime(new Date("2026-06-13T18:00:05.000Z"));
     seedInboundMessage(state, { id: "inbound-b", body: "Anyone there?" });
 
     const [a, b] = await Promise.all([
@@ -2328,6 +2390,91 @@ describe("send chokepoint guards (fix round 2)", () => {
     expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledTimes(1);
     expect([a, b].filter((r) => r.outcome === "sent")).toHaveLength(1);
     expect(a).toEqual({ outcome: "skipped", reason: "superseded_before_send" });
+    // The newer inbound's own run answered, so nobody is flagged.
+    expect(state.property.needs_human_attention).toBe(false);
+    expect(state.sendReservations?.size).toBe(0);
+  });
+
+  it("two truly concurrent sends for the SAME inbound never both reach the provider", async () => {
+    vi.useRealTimers();
+    Object.assign(sendReservationTuning, { waitAttempts: 1 });
+    const state = createMockState();
+    installSendMock(state);
+    // Another sender already holds the conversation lease.
+    state.sendReservations = new Map([[CONVERSATION_ID, { holder: "other", expiresAt: Date.now() + 60_000 }]]);
+    seedInboundMessage(state, { id: "inbound-r", body: "Hello?" });
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-r", "Hello?"), { anthropic: {} as never });
+    expect(result).toEqual({ outcome: "skipped", reason: "send_reserved_elsewhere" });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+    expect(state.sendReservations.get(CONVERSATION_ID)?.holder).toBe("other");
+  });
+
+  it("a newer inbound that lands AFTER the reservation is taken still blocks the send (and flags it)", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-late", body: "Hello?" });
+    state.onReserved = () => {
+      vi.setSystemTime(new Date("2026-06-13T18:00:03.000Z"));
+      seedInboundMessage(state, { id: "inbound-late-2", body: "Hello??" });
+    };
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-late", "Hello?"), { anthropic: {} as never });
+    expect(result).toEqual({ outcome: "skipped", reason: "superseded_before_send" });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.sendReservations?.size).toBe(0);
+  });
+
+  it("a failed latest-inbound lookup FAILS CLOSED: no send, send_check_failed, property flagged", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-x", body: "Hello?" });
+    state.onReserved = () => {
+      state.messageLookupError = "inbound";
+    };
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-x", "Hello?"), { anthropic: {} as never });
+    expect(result).toEqual({ outcome: "escalated", reason: "send_check_failed" });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.sendReservations?.size).toBe(0);
+  });
+
+  it("a failed outbound lookup FAILS CLOSED", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-y", body: "Hello?" });
+    state.onReserved = () => {
+      state.messageLookupError = "outbound";
+    };
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-y", "Hello?"), { anthropic: {} as never });
+    expect(result).toEqual({ outcome: "escalated", reason: "send_check_failed" });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("a reservation RPC error fails closed", async () => {
+    const state = createMockState();
+    state.reserveRpcError = true;
+    installSendMock(state);
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-z"), { anthropic: {} as never });
+    expect(result).toEqual({ outcome: "escalated", reason: "send_check_failed" });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("flags the property when an outbound landed after the claim and the reply is skipped", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-o", body: "Hello?" });
+    vi.mocked(generateAiReply).mockImplementation(async () => {
+      vi.setSystemTime(new Date("2026-06-13T18:00:02.000Z"));
+      state.messages.push({
+        id: "tick", body: "tick", channel: "sms", contact_id: CONTACT_ID, conversation_id: CONVERSATION_ID,
+        created_at: "2026-06-13T18:00:02+00:00", direction: "outbound", metadata: null, property_id: PROPERTY_ID,
+        sent_at: null, status: "sent",
+      });
+      return HAPPY_REPLY;
+    });
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-o", "Hello?"), { anthropic: {} as never });
+    expect(result).toEqual({ outcome: "skipped", reason: "superseded_before_send" });
+    expect(state.property.needs_human_attention).toBe(true);
   });
 
   it("does not send when another outbound lands in the conversation after the claim", async () => {
@@ -2380,12 +2527,14 @@ describe("send chokepoint guards (fix round 2)", () => {
     expect(state.property.needs_human_attention).toBe(true);
   });
 
-  it("AI_RESPONDER_OUTBOUND_MODE=send overrides a DB hold; =hold overrides a DB send", async () => {
+  it("EITHER hold wins: env send cannot override a DB hold; env hold forces hold over a DB send", async () => {
     vi.stubEnv("AI_RESPONDER_OUTBOUND_MODE", "send");
     const held = createMockState();
     held.config.outbound_mode = "hold";
     installSendMock(held);
-    expect((await dispatchAiResponse(createMockSupabase(held) as never, input("inbound-f"), { anthropic: {} as never })).outcome).toBe("sent");
+    const heldResult = await dispatchAiResponse(createMockSupabase(held) as never, input("inbound-f"), { anthropic: {} as never });
+    expect(heldResult).toEqual({ outcome: "escalated", reason: "draft_held" });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
 
     vi.clearAllMocks();
     vi.mocked(getConsentState).mockResolvedValue({} as never);
@@ -2399,6 +2548,88 @@ describe("send chokepoint guards (fix round 2)", () => {
     const result = await dispatchAiResponse(createMockSupabase(open) as never, input("inbound-g"), { anthropic: {} as never });
     expect(result).toEqual({ outcome: "escalated", reason: "draft_held" });
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+
+    vi.clearAllMocks();
+    vi.mocked(getConsentState).mockResolvedValue({} as never);
+    vi.mocked(classifyAiSkip).mockReturnValue({ skip: false });
+    vi.mocked(generateAiReply).mockResolvedValue(HAPPY_REPLY);
+    vi.mocked(humanizeReply).mockImplementation(async ({ draft }) => draft);
+    vi.mocked(validateAiReplyBody).mockReturnValue({ ok: true });
+    vi.stubEnv("AI_RESPONDER_OUTBOUND_MODE", "send");
+    const both = createMockState();
+    installSendMock(both);
+    expect((await dispatchAiResponse(createMockSupabase(both) as never, input("inbound-g2"), { anthropic: {} as never })).outcome).toBe("sent");
+  });
+
+  it("re-reads the outbound mode immediately before the provider call (an owner flipping to hold mid-flight wins)", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    vi.mocked(generateAiReply).mockImplementation(async () => {
+      state.config.outbound_mode = "hold"; // flipped after dispatch-start snapshot
+      return HAPPY_REPLY;
+    });
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-live"), { anthropic: {} as never });
+    expect(result).toEqual({ outcome: "escalated", reason: "draft_held" });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+    expect(state.aiReplyDrafts).toHaveLength(1);
+    expect(state.sendReservations?.size).toBe(0);
+  });
+
+  it("a failed draft write is NOT swallowed: error outcome, claim left retryable, property not flagged, text preserved in the report", async () => {
+    const state = createMockState();
+    state.config.outbound_mode = "hold";
+    state.draftInsertError = { message: "insert boom" };
+    installSendMock(state);
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-df"), { anthropic: {} as never });
+    expect(result).toEqual({ outcome: "escalated", reason: "draft_persist_failed" });
+    expect(state.property.needs_human_attention).toBe(false);
+    expect(state.aiClaims[0]).toMatchObject({ status: "error", error_message: "draft_persist_failed" });
+    expect(reportErrorMock).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ extra: expect.objectContaining({ replyBody: "Hi there" }) }),
+    );
+  });
+
+  it("a retry after a failed draft write persists the draft once; a duplicate pending insert is idempotent", async () => {
+    const state = createMockState();
+    state.config.outbound_mode = "hold";
+    state.draftInsertError = { message: "insert boom" };
+    installSendMock(state);
+    const supabase = createMockSupabase(state);
+    await dispatchAiResponse(supabase as never, input("inbound-rt"), { anthropic: {} as never });
+    // Lease expires, DB recovers, ordinary retry re-runs.
+    state.draftInsertError = undefined;
+    state.aiClaims[0]!.lease_expires_at = new Date(Date.now() - 1000).toISOString();
+    const retry = await dispatchAiResponse(supabase as never, input("inbound-rt"), { anthropic: {} as never });
+    expect(retry).toEqual({ outcome: "escalated", reason: "draft_held" });
+    expect(state.aiReplyDrafts).toHaveLength(1);
+    // Second run hitting the unique pending index counts as stored.
+    state.property.needs_human_attention = false;
+    state.aiClaims[0]!.status = "processing";
+    state.aiClaims[0]!.lease_expires_at = new Date(Date.now() - 1000).toISOString();
+    const again = await dispatchAiResponse(supabase as never, input("inbound-rt"), { anthropic: {} as never });
+    expect(again).toEqual({ outcome: "escalated", reason: "draft_held" });
+    expect(state.aiReplyDrafts).toHaveLength(1);
+  });
+
+  it("a duplicate dispatch (claim lost) marks its run context duplicate so it cannot finalise the shared run", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    state.aiClaims.push({
+      id: "claim-existing",
+      inbound_message_id: "inbound-dup",
+      lease_expires_at: new Date(Date.now() + 60_000).toISOString(),
+      response_kind: "sms_ai_responder_v1",
+      status: "processing",
+    });
+    const runContext = { runId: "run-dup", orgId: "org-1", seq: 0 };
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-dup"), {
+      anthropic: {} as never,
+      runContext,
+    });
+    expect(result.outcome).toBe("skipped");
+    expect(runContext).toMatchObject({ duplicate: true });
+    expect(runContext).not.toHaveProperty("claimId");
   });
 
   it("AI_RESPONDER_LLM_AUTOSEND=0 holds llm replies (Phase-1 D5 enforcement)", async () => {
@@ -2425,6 +2656,14 @@ describe("resolveOutboundPolicy", () => {
     vi.stubEnv("AI_RESPONDER_LLM_AUTOSEND", "0");
     expect(resolveOutboundPolicy({ source: "llm" })).toEqual({ hold: true, reason: "llm_autosend_off" });
     expect(resolveOutboundPolicy({ source: "approved_template" })).toEqual({ hold: false });
+  });
+
+  it("either hold wins; env send never overrides a DB hold", () => {
+    vi.stubEnv("AI_RESPONDER_OUTBOUND_MODE", "send");
+    expect(resolveOutboundPolicy({ source: "llm", dbMode: "hold" })).toEqual({ hold: true, reason: "outbound_mode_hold" });
+    expect(resolveOutboundPolicy({ source: "llm", dbMode: "send" })).toEqual({ hold: false });
+    vi.stubEnv("AI_RESPONDER_OUTBOUND_MODE", "hold");
+    expect(resolveOutboundPolicy({ source: "llm", dbMode: "send" })).toEqual({ hold: true, reason: "outbound_mode_hold" });
   });
 
   it("ignores an invalid env mode and falls back to the DB value", () => {

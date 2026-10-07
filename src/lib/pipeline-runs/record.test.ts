@@ -58,11 +58,24 @@ function fakeAdmin(opts: {
         if (op === "update") {
           done();
           // Awaitable (updateRun) and chainable (finishRun's guarded update).
-          type Chain = Promise<unknown> & { eq: () => Chain; select: () => Promise<unknown> };
+          type Chain = Promise<unknown> & {
+            eq: () => Chain;
+            or: (f: string) => Chain;
+            is: (c: string, v: unknown) => Chain;
+            select: () => Promise<unknown>;
+          };
           const chain: Chain = Object.assign(
             Promise.resolve({ error: null }),
             {
               eq: () => chain,
+              or: (f: string) => {
+                filters.push(["or", f]);
+                return chain;
+              },
+              is: (c: string, v: unknown) => {
+                filters.push(["is", c, v]);
+                return chain;
+              },
               select: () => Promise.resolve({ data: [{ id: "run-1" }], error: null }),
             },
           );
@@ -225,6 +238,40 @@ describe("finishRun / updateRun / resumeRun", () => {
     expect(typeof p.completed_at).toBe("string");
   });
 
+  describe("terminal ownership", () => {
+    const base = { runId: "run-1", orgId: "o", seq: 3 };
+
+    it("a caller presenting a claim may only finish a run with that claim or none", async () => {
+      const { admin, calls } = fakeAdmin();
+      await finishRun(admin, { ...base }, { status: "replied", claimId: "cl-1" });
+      expect(calls[0].filter).toContainEqual(["or", "claim_id.is.null,claim_id.eq.cl-1"]);
+    });
+
+    it("uses the claim the context won when none is passed", async () => {
+      const { admin, calls } = fakeAdmin();
+      const ctx = { ...base };
+      await updateRun(admin, ctx, { claimId: "cl-9" });
+      expect(ctx).toMatchObject({ claimId: "cl-9" });
+      calls.length = 0;
+      await finishRun(admin, ctx, { status: "skipped" });
+      expect(calls[0].filter).toContainEqual(["or", "claim_id.is.null,claim_id.eq.cl-9"]);
+    });
+
+    it("a context with no claim can only finish a run that has none", async () => {
+      const { admin, calls } = fakeAdmin();
+      await finishRun(admin, { ...base }, { status: "skipped" });
+      expect(calls[0].filter).toContainEqual(["is", "claim_id", null]);
+    });
+
+    it("a duplicate dispatch records duplicate_dispatch and never writes a status", async () => {
+      const { admin, calls } = fakeAdmin();
+      await finishRun(admin, { ...base, duplicate: true }, { status: "skipped", reason: "already_claimed" });
+      expect(calls.some((c) => c.table === "pipeline_runs" && c.op === "update")).toBe(false);
+      const step = calls.find((c) => c.table === "pipeline_run_steps")?.payload as Record<string, unknown>;
+      expect(step).toMatchObject({ name: "duplicate_dispatch", result: "skipped" });
+    });
+  });
+
   it("updateRun sends only provided fields", async () => {
     const { admin, calls } = fakeAdmin();
     await updateRun(admin, { runId: "run-1", orgId: "o", seq: 0 }, { mode: "shadow" });
@@ -329,6 +376,8 @@ describe("seam integrity (fix round 2)", () => {
             filters[c] = v;
             return chain;
           },
+          is: () => chain,
+          or: () => chain,
           select: async () => {
             if (filters.status === "running" && state.status === "running") {
               state.status = "terminal";

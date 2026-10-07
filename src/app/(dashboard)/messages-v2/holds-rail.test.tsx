@@ -162,6 +162,7 @@ describe("HoldsRail degraded states", () => {
     total: 0,
     shown: 0,
     truncated: false,
+    totalState: "exact" as const,
     failed: [],
     contextErrors: [],
     ...over,
@@ -192,6 +193,51 @@ describe("HoldsRail degraded states", () => {
     expect(
       screen.getByRole("heading", { name: /350, 1 shown/ }),
     ).toBeInTheDocument();
+  });
+  it("labels a capped total as incomplete and an unavailable count explicitly", () => {
+    const { unmount } = render(
+      <HoldsRail
+        holds={[hold("a", 5)]}
+        labels={new Map()}
+        nowMs={NOW}
+        meta={meta({
+          total: 2000,
+          shown: 1,
+          truncated: true,
+          totalState: "capped",
+        })}
+      />,
+    );
+    expect(
+      screen.getByRole("heading", { name: /2,000\+ holds \(incomplete\)/ }),
+    ).toBeInTheDocument();
+    unmount();
+    render(
+      <HoldsRail
+        holds={[hold("a", 5)]}
+        labels={new Map()}
+        nowMs={NOW}
+        meta={meta({ totalState: "unavailable" })}
+      />,
+    );
+    expect(
+      screen.getByRole("heading", { name: /count unavailable/ }),
+    ).toBeInTheDocument();
+  });
+  it("shows 'draft status unavailable' when the drafts query failed, without hiding holds", () => {
+    render(
+      <HoldsRail
+        holds={[hold("a", 5)]}
+        labels={new Map()}
+        nowMs={NOW}
+        meta={meta({ failed: ["pending_draft"] })}
+      />,
+    );
+    expect(screen.getByTestId("drafts-unavailable")).toHaveTextContent(
+      /draft status unavailable/i,
+    );
+    expect(screen.queryByTestId("holds-unavailable")).toBeNull();
+    expect(screen.getAllByTestId("hold-card")).toHaveLength(1);
   });
   it("flags context lookup errors", () => {
     render(

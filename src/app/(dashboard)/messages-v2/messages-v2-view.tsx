@@ -13,6 +13,7 @@ import { loadRunLabels } from "./labels";
 import {
   computeHeaderStats,
   describeCoverage,
+  formatHoldsTotal,
   formatModeBadge,
   type LooseSupabase,
 } from "./queries";
@@ -40,6 +41,12 @@ export type MessagesV2ViewProps = {
   /** The coverage query failed: show a degraded indicator, not nothing. */
   coverageUnavailable?: boolean;
   holdsMeta?: HoldsMeta;
+  /** Feed window query failed (reason text, already prefixed "Feed unavailable"). */
+  feedError?: string | null;
+  /** Step lookup failed: cards may lack steps. */
+  stepsUnavailable?: boolean;
+  /** Mode badge queries failed (reason text). */
+  badgesError?: string | null;
   badges: ModeBadge[];
   /** Server-resolved display labels, as [runId, label] pairs. */
   labels: Array<[string, RunLabel]>;
@@ -60,6 +67,7 @@ const BADGE_CLASS: Record<ModeBadge["mode"], string> = {
   AUTO: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200",
   SHADOW: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200",
   LEGACY: "bg-secondary text-muted-foreground",
+  UNKNOWN: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200",
 };
 
 export function MessagesV2View(props: MessagesV2ViewProps) {
@@ -103,11 +111,9 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
     [runs, holds, nowMs],
   );
   const meta = props.holdsMeta;
-  const holdsLabel = meta?.failed.length
-    ? "holds unavailable"
-    : meta?.truncated
-      ? `${meta.total} holds (${meta.shown} shown)`
-      : `${stats.openHolds} holds`;
+  const holdsLabel = meta
+    ? formatHoldsTotal(meta, stats.openHolds)
+    : `${stats.openHolds} holds`;
   const coverage = describeCoverage(props.coverage, props.coverageUnavailable);
 
   useEffect(() => {
@@ -256,6 +262,15 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
       <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <h1 className="text-xl font-semibold">Messages v2</h1>
         <div className="flex flex-wrap gap-1.5" aria-label="Classifier modes">
+          {props.badgesError && (
+            <span
+              role="alert"
+              data-testid="badges-unavailable"
+              className="text-xs text-red-700 dark:text-red-300"
+            >
+              {props.badgesError}
+            </span>
+          )}
           {badges.map((b) => (
             <Badge
               key={b.label}
@@ -309,11 +324,31 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             ref={feedRef}
             className="flex max-h-[calc(100vh-14rem)] flex-col gap-3 overflow-y-auto pr-1"
           >
-            {runs.length === 0 ? (
-              <p className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
-                No pipeline runs yet. New inbound texts will appear here as they
-                are processed.
+            {props.feedError && (
+              <p
+                role="alert"
+                data-testid="feed-unavailable"
+                className="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200"
+              >
+                {props.feedError}
               </p>
+            )}
+            {props.stepsUnavailable && (
+              <p
+                role="alert"
+                data-testid="steps-unavailable"
+                className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
+              >
+                Step details unavailable — run cards may be missing steps.
+              </p>
+            )}
+            {runs.length === 0 ? (
+              props.feedError ? null : (
+                <p className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
+                  No pipeline runs yet. New inbound texts will appear here as
+                  they are processed.
+                </p>
+              )
             ) : (
               runs.map((run) => (
                 <RunCard

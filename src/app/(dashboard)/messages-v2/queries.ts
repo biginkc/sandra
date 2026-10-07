@@ -26,11 +26,23 @@ export type HoldDecisionRow = {
   created_at: string;
 };
 export type HoldReviewRow = HoldDecisionRow & { disposition: string };
+export type HoldDraftRow = {
+  id: string;
+  property_id: string | null;
+  conversation_id: string | null;
+  inbound_message_id: string | null;
+  run_id: string | null;
+  created_at: string;
+};
+
+/** Distinct-hold counting stops here; above it the total is "2,000+ (incomplete)". */
+export const HOLDS_COUNT_CAP = 2000;
 
 const SOURCE_LABEL: Record<HoldSource, string> = {
   needs_attention: "Needs attention",
   jev_decision: "Jev decision pending",
   disposition_review: "Disposition review pending",
+  pending_draft: "Claude draft held",
 };
 
 /**
@@ -46,6 +58,8 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
   properties: readonly HoldPropertyRow[];
   decisions: readonly HoldDecisionRow[];
   reviews: readonly HoldReviewRow[];
+  /** Pending ai_reply_drafts rows: a hold source of their own. Body is never read. */
+  drafts?: readonly HoldDraftRow[];
   runs: readonly T[];
 }): OpenHold<T>[] {
   type Acc = {
@@ -54,6 +68,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     conversations: Set<string>;
     messages: Set<string>;
     notes: string[];
+    noProperty?: boolean;
   };
   const byProperty = new Map<string, Acc>();
   const acc = (id: string): Acc => {
@@ -95,10 +110,34 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     a.notes.push(r.disposition);
   }
 
+  const drafts = [...(input.drafts ?? [])].sort(
+    (x, y) =>
+      Date.parse(x.created_at) - Date.parse(y.created_at) ||
+      x.id.localeCompare(y.id),
+  );
+  for (const d of drafts) {
+    const ref =
+      input.runs.find((r) => d.run_id !== null && r.id === d.run_id) ??
+      input.runs.find(
+        (r) =>
+          d.inbound_message_id !== null &&
+          r.inbound_message_id === d.inbound_message_id,
+      );
+    const propertyId = d.property_id ?? ref?.property_id ?? null;
+    const a = acc(propertyId ?? `draft:${d.id}`);
+    if (propertyId === null) a.noProperty = true;
+    a.sources.add("pending_draft");
+    a.times.push(d.created_at);
+    const conversation = d.conversation_id ?? ref?.conversation_id ?? null;
+    if (conversation) a.conversations.add(conversation);
+    if (d.inbound_message_id) a.messages.add(d.inbound_message_id);
+  }
+
   const order: HoldSource[] = [
     "needs_attention",
     "jev_decision",
     "disposition_review",
+    "pending_draft",
   ];
   const holds: OpenHold<T>[] = [];
   for (const [propertyId, a] of byProperty) {
@@ -119,10 +158,15 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     const since =
       [...a.times].sort((x, y) => Date.parse(x) - Date.parse(y))[0] ?? null;
     const sources = order.filter((s) => a.sources.has(s));
-    const labels = sources.map((s) => SOURCE_LABEL[s]).join(" · ");
+    const labels =
+      sources
+        .filter((s) => s !== "pending_draft")
+        .map((s) => SOURCE_LABEL[s])
+        .join(" · ") || "Reply draft pending";
     holds.push({
       id: propertyId,
-      property_id: propertyId,
+      property_id: a.noProperty ? null : propertyId,
+      draft_held: sources.includes("pending_draft"),
       conversation_id: [...a.conversations][0] ?? run?.conversation_id ?? null,
       sources,
       since,
@@ -171,7 +215,7 @@ export function describeCoverage(
 export type ThresholdRow = {
   outcome: string;
   min_confidence?: number | string | null;
-  /** Missing column / null is treated as enabled. */
+  /** Missing / null is shown as UNKNOWN, never assumed enabled. */
   automation_enabled?: boolean | null;
 };
 
@@ -186,6 +230,9 @@ export function buildModeBadges(
       return { label: t.outcome, mode: "SHADOW" as const };
     if (t.automation_enabled === false)
       return { label: t.outcome, mode: "HELD" as const };
+    // Never guess AUTO: a missing/null flag means we cannot tell if it is held.
+    if (t.automation_enabled !== true)
+      return { label: t.outcome, mode: "UNKNOWN" as const };
     const min = t.min_confidence == null ? NaN : Number(t.min_confidence);
     return {
       label: t.outcome,
@@ -229,39 +276,67 @@ export type MessagesV2Data = {
   holds: OpenHold<RunWithSteps>[];
   holdsMeta: HoldsMeta;
   badges: ModeBadge[];
+  /** Feed window query failed: render "Feed unavailable — <reason>", not an empty feed. */
+  feedError: string | null;
+  /** Step lookup failed: run cards are missing their steps. */
+  stepsUnavailable: boolean;
+  /** Config/threshold query failed: mode badges cannot be trusted. */
+  badgesError: string | null;
   nowMs: number;
 };
 
 /**
- * Truncation/failure summary for the hold queries. `total` is the largest
- * per-source exact count (a lower bound on distinct holds when truncated) and
- * never below what is shown.
+ * Truncation/failure summary for the hold queries. `total` counts DISTINCT held
+ * properties (holds dedupe by property), computed from each source's id list.
+ * Above HOLDS_COUNT_CAP it is reported as capped (incomplete); if a count query
+ * failed it is unavailable. Never below what is shown.
  */
 export function buildHoldsMeta(input: {
   shown: number;
   contextErrors?: string[];
   sources: ReadonlyArray<{
     source: HoldSource;
-    count: number | null;
-    returned: number;
+    /** Held-property keys for the source; null when the count query failed. */
+    ids: readonly string[] | null;
     failed: boolean;
   }>;
 }): HoldsMeta {
   const failed = input.sources.filter((s) => s.failed).map((s) => s.source);
-  const truncated = input.sources.some(
-    (s) => !s.failed && s.count !== null && s.count > s.returned,
-  );
-  const largest = Math.max(
-    0,
-    ...input.sources.map((s) => (s.failed ? 0 : (s.count ?? s.returned))),
-  );
+  const live = input.sources.filter((s) => !s.failed);
+  const totalState: HoldsMeta["totalState"] = live.some((s) => s.ids === null)
+    ? "unavailable"
+    : live.some((s) => (s.ids?.length ?? 0) > HOLDS_COUNT_CAP)
+      ? "capped"
+      : "exact";
+  const distinct = new Set(live.flatMap((s) => s.ids ?? []));
+  const total =
+    totalState === "exact"
+      ? Math.max(input.shown, distinct.size)
+      : totalState === "capped"
+        ? Math.max(input.shown, HOLDS_COUNT_CAP)
+        : input.shown;
   return {
-    total: Math.max(input.shown, largest),
+    total,
     shown: input.shown,
-    truncated,
+    truncated:
+      totalState === "capped" ||
+      (totalState === "exact" && total > input.shown),
+    totalState,
     failed,
     contextErrors: input.contextErrors ?? [],
   };
+}
+
+/** Header wording for the hold total: never silent about incomplete counts. */
+export function formatHoldsTotal(meta: HoldsMeta, openCount: number): string {
+  if (meta.failed.some((f) => f !== "pending_draft"))
+    return "holds unavailable";
+  if (meta.totalState === "unavailable") return "holds count unavailable";
+  if (meta.totalState === "capped")
+    return `${HOLDS_COUNT_CAP.toLocaleString("en-US")}+ holds (incomplete)`;
+  return meta.truncated
+    ? `${meta.total} holds (${meta.shown} shown)`
+    : `${openCount} holds`;
 }
 
 const STEP_CHUNK = 40;
@@ -286,18 +361,24 @@ export async function loadMessagesV2Data(
   orgId: string,
   nowMs: number = Date.now(),
 ): Promise<MessagesV2Data> {
-  // Exact totals come from separate head-only queries, never the capped lists.
+  // Distinct-hold totals come from separate id-only queries (one per source),
+  // capped at HOLDS_COUNT_CAP+1 rows and de-duplicated by property client-side.
   /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-  const headCount = (table: string, filter: (q: any) => any) =>
-    filter(
-      supabase
-        .from(table)
-        .select("id", { count: "exact", head: true })
-        .eq("org_id", orgId),
+  const idQuery = (table: string, columns: string, filter: (q: any) => any) =>
+    filter(supabase.from(table).select(columns).eq("org_id", orgId)).limit(
+      HOLDS_COUNT_CAP + 1,
     );
   const [
-    [windowRes, flaggedRes, decisionRes, reviewRes, configRes, thresholdRes],
-    [flaggedCount, decisionCount, reviewCount],
+    [
+      windowRes,
+      flaggedRes,
+      decisionRes,
+      reviewRes,
+      draftRes,
+      configRes,
+      thresholdRes,
+    ],
+    [flaggedIds, decisionIds, reviewIds, draftIds],
   ] = await Promise.all([
     Promise.all([
       supabase
@@ -338,6 +419,18 @@ export async function loadMessagesV2Data(
         .order("created_at", { ascending: true })
         .order("source_inbound_message_id", { ascending: true })
         .limit(HOLD_LIMIT),
+      // Pending Claude reply drafts are a hold source of their own. The body
+      // column is deliberately not selected.
+      supabase
+        .from("ai_reply_drafts")
+        .select(
+          "id, property_id, conversation_id, inbound_message_id, run_id, created_at",
+        )
+        .eq("org_id", orgId)
+        .eq("status", "pending")
+        .order("created_at", { ascending: true })
+        .order("id", { ascending: true })
+        .limit(HOLD_LIMIT),
       supabase
         .from("ai_responder_configs")
         .select("classifier_provider, classifier_mode")
@@ -351,23 +444,34 @@ export async function loadMessagesV2Data(
         .order("outcome", { ascending: true }),
     ]),
     Promise.all([
-      headCount("properties", (q) => q.eq("needs_human_attention", true)),
-      headCount("jev_lead_decisions", (q) => q.eq("status", "pending")),
-      headCount("ai_disposition_reviews", (q) => q.eq("status", "pending")),
+      idQuery("properties", "id", (q) => q.eq("needs_human_attention", true)),
+      idQuery("jev_lead_decisions", "property_id", (q) =>
+        q.eq("status", "pending"),
+      ),
+      idQuery("ai_disposition_reviews", "property_id", (q) =>
+        q.eq("status", "pending"),
+      ),
+      idQuery("ai_reply_drafts", "id, property_id", (q) =>
+        q.eq("status", "pending"),
+      ),
     ]),
   ]);
 
-  // automation_enabled may not exist yet: retry without it (treated as enabled).
-  let thresholdRows = thresholdRes;
-  if (thresholdRes.error) {
-    thresholdRows = await supabase
-      .from("jev_outcome_thresholds")
-      .select("outcome, min_confidence")
-      .eq("org_id", orgId)
-      .order("outcome", { ascending: true });
-  }
+  const errText = (e: unknown): string =>
+    (e && typeof e === "object" && "message" in e
+      ? String((e as { message: unknown }).message)
+      : null) || "query failed";
+  const feedError = windowRes.error
+    ? `Feed unavailable — ${errText(windowRes.error)}`
+    : null;
+  const badgesError =
+    configRes.error || thresholdRes.error
+      ? `Mode badges unavailable — ${errText(configRes.error ?? thresholdRes.error)}`
+      : null;
 
-  const windowRuns = (windowRes.data ?? []) as PipelineRun[];
+  const windowRuns = (
+    windowRes.error ? [] : (windowRes.data ?? [])
+  ) as PipelineRun[];
   // A failed query is reported as failed, never silently as "no holds".
   const properties = (
     flaggedRes.error ? [] : (flaggedRes.data ?? [])
@@ -378,6 +482,9 @@ export async function loadMessagesV2Data(
   const reviews = (
     reviewRes.error ? [] : (reviewRes.data ?? [])
   ) as HoldReviewRow[];
+  const drafts = (
+    draftRes.error ? [] : (draftRes.data ?? [])
+  ) as HoldDraftRow[];
 
   // Runs for the hold cards: by property and by source inbound message, so a
   // hold older than the feed window still gets its context.
@@ -386,12 +493,16 @@ export async function loadMessagesV2Data(
       ...properties.map((p) => p.id),
       ...decisions.map((d) => d.property_id),
       ...reviews.map((r) => r.property_id),
+      ...drafts.flatMap((d) => (d.property_id ? [d.property_id] : [])),
     ]),
   ];
   const messageIds = [
-    ...new Set(
-      [...decisions, ...reviews].map((r) => r.source_inbound_message_id),
-    ),
+    ...new Set([
+      ...[...decisions, ...reviews].map((r) => r.source_inbound_message_id),
+      ...drafts.flatMap((d) =>
+        d.inbound_message_id ? [d.inbound_message_id] : [],
+      ),
+    ]),
   ];
   const contextErrors: string[] = [];
   // Latest run PER property via the RLS-respecting RPC, 200 ids per call.
@@ -435,6 +546,7 @@ export async function loadMessagesV2Data(
     properties,
     decisions,
     reviews,
+    drafts,
     runs: [...pool.values()],
   });
 
@@ -469,69 +581,60 @@ export async function loadMessagesV2Data(
     steps: stepsByRun.get(run.id) ?? [],
   });
 
-  // Pending Claude reply drafts (ai_reply_drafts) for hold runs. The table may
-  // not exist yet; any failure just means no "draft held" marker. Body is not read.
-  const holdRunIds = [
-    ...new Set(openHolds.flatMap((h) => (h.run ? [h.run.id] : []))),
-  ];
-  const draftRunIds = new Set<string>();
-  for (const ids of chunked(holdRunIds)) {
-    try {
-      const draftRes = await supabase
-        .from("ai_reply_drafts")
-        .select("run_id")
-        .eq("org_id", orgId)
-        .eq("status", "pending")
-        .in("run_id", ids);
-      if (!draftRes?.error) {
-        for (const row of (draftRes?.data ?? []) as Array<{ run_id: string }>)
-          draftRunIds.add(row.run_id);
-      }
-      // An error here (e.g. table not created yet) only means no marker.
-    } catch {
-      // table absent: no marker
-    }
-  }
+  const keysOf = (
+    res: { error?: unknown; data?: unknown },
+    key: (row: Record<string, string | null>) => string | null,
+  ): string[] | null =>
+    res.error
+      ? null
+      : ((res.data ?? []) as Array<Record<string, string | null>>).flatMap(
+          (row) => {
+            const k = key(row);
+            return k ? [k] : [];
+          },
+        );
 
-  const shown = openHolds.length;
   const holdsMeta = buildHoldsMeta({
-    shown,
+    shown: openHolds.length,
     contextErrors,
     sources: [
       {
         source: "needs_attention",
-        count: flaggedCount.error ? null : (flaggedCount.count ?? null),
-        returned: properties.length,
+        ids: keysOf(flaggedIds, (r) => r.id),
         failed: !!flaggedRes.error,
       },
       {
         source: "jev_decision",
-        count: decisionCount.error ? null : (decisionCount.count ?? null),
-        returned: decisions.length,
+        ids: keysOf(decisionIds, (r) => r.property_id),
         failed: !!decisionRes.error,
       },
       {
         source: "disposition_review",
-        count: reviewCount.error ? null : (reviewCount.count ?? null),
-        returned: reviews.length,
+        ids: keysOf(reviewIds, (r) => r.property_id),
         failed: !!reviewRes.error,
+      },
+      {
+        source: "pending_draft",
+        ids: keysOf(draftIds, (r) => r.property_id ?? `draft:${r.id}`),
+        failed: !!draftRes.error,
       },
     ],
   });
 
-  const configRow = (configRes.data ?? [])[0] ?? null;
+  const configRow = (configRes.error ? [] : (configRes.data ?? []))[0] ?? null;
   return {
     runs: windowRuns.map(withSteps),
     holds: openHolds.map((h) => ({
       ...h,
       run: h.run ? withSteps(h.run) : null,
-      draft_held: h.run ? draftRunIds.has(h.run.id) : false,
     })),
     holdsMeta,
-    badges: buildModeBadges(
-      configRow,
-      (thresholdRows.data ?? []) as ThresholdRow[],
-    ),
+    feedError,
+    stepsUnavailable: contextErrors.includes("step lookup"),
+    badgesError,
+    badges: badgesError
+      ? []
+      : buildModeBadges(configRow, (thresholdRes.data ?? []) as ThresholdRow[]),
     nowMs,
   };
 }

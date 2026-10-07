@@ -290,6 +290,7 @@ describe("MessagesV2View", () => {
       total: 0,
       shown: 0,
       truncated: false,
+      totalState: "exact" as const,
       failed: [] as never[],
       contextErrors: [],
     };
@@ -311,6 +312,53 @@ describe("MessagesV2View", () => {
     );
     expect(screen.getByTestId("header-status")).toHaveTextContent(
       "350 holds (1 shown)",
+    );
+  });
+
+  it("shows 'Feed unavailable' instead of the empty-feed message when the feed query failed", async () => {
+    await mount({ ...props(), feedError: "Feed unavailable — timeout" });
+    expect(screen.getByTestId("feed-unavailable")).toHaveTextContent(
+      "Feed unavailable — timeout",
+    );
+    expect(screen.queryByText(/no pipeline runs yet/i)).toBeNull();
+  });
+
+  it("shows step and badge failures explicitly", async () => {
+    await mount({
+      ...props(),
+      stepsUnavailable: true,
+      badgesError: "Mode badges unavailable — x",
+    });
+    expect(screen.getByTestId("steps-unavailable")).toBeInTheDocument();
+    expect(screen.getByTestId("badges-unavailable")).toHaveTextContent(
+      "Mode badges unavailable",
+    );
+  });
+
+  it("header says '2,000+ holds (incomplete)' when capped and 'holds count unavailable' when counts failed", async () => {
+    const m = {
+      total: 2000,
+      shown: 1,
+      truncated: true,
+      totalState: "capped" as const,
+      failed: [] as never[],
+      contextErrors: [],
+    };
+    const { unmount } = render(
+      <MessagesV2View {...props([], [openHold("a")])} holdsMeta={m} />,
+    );
+    expect(screen.getByTestId("header-status")).toHaveTextContent(
+      "2,000+ holds (incomplete)",
+    );
+    unmount();
+    render(
+      <MessagesV2View
+        {...props([], [openHold("a")])}
+        holdsMeta={{ ...m, totalState: "unavailable", truncated: false }}
+      />,
+    );
+    expect(screen.getByTestId("header-status")).toHaveTextContent(
+      "holds count unavailable",
     );
   });
 });

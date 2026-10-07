@@ -266,6 +266,9 @@ export async function updateRun(
   if (!ctx) return;
   const columns = patchColumns(patch);
   if (Object.keys(columns).length === 0) return;
+  // Remember the claim this process won so its own terminal write can
+  // present it (see finishRun).
+  if (patch.claimId !== undefined) ctx.claimId = patch.claimId;
   try {
     const { error } = await admin
       .from("pipeline_runs")
@@ -288,6 +291,12 @@ export type FinishRunInput = RunPatch & {
  * transition: a second terminal write (a late workflow after the webhook
  * already stamped the run, or after the stale sweep) never overwrites the
  * first. The rejected attempt is recorded as a `terminal_conflict` step.
+ *
+ * Terminal ownership: once a run has a claim_id, only the caller presenting
+ * that claim (input.claimId, else the claim this context won) may write a
+ * terminal status. A context that lost the claim (`duplicate`) never
+ * finalises the shared run; it records a `duplicate_dispatch` step instead
+ * and leaves the status to the claim holder.
  */
 export async function finishRun(
   admin: Admin,
@@ -295,8 +304,18 @@ export async function finishRun(
   input: FinishRunInput,
 ): Promise<void> {
   if (!ctx) return;
+  const presentedClaim = input.claimId ?? ctx.claimId ?? null;
+  if (ctx.duplicate && !input.claimId) {
+    await recordStep(admin, ctx, {
+      kind: "gate",
+      name: "duplicate_dispatch",
+      result: "skipped",
+      detail: { attempted_status: input.status },
+    });
+    return;
+  }
   try {
-    const { data, error } = await admin
+    let query = admin
       .from("pipeline_runs")
       .update({
         ...patchColumns(input),
@@ -308,8 +327,11 @@ export async function finishRun(
         completed_at: new Date().toISOString(),
       })
       .eq("id", ctx.runId)
-      .eq("status", "running")
-      .select("id");
+      .eq("status", "running");
+    query = presentedClaim
+      ? query.or(`claim_id.is.null,claim_id.eq.${presentedClaim}`)
+      : query.is("claim_id", null);
+    const { data, error } = await query.select("id");
     if (error) {
       report("finish", error);
       return;

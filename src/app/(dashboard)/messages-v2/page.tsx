@@ -80,6 +80,9 @@ export default async function MessagesV2Page() {
         holdsMeta={data.holdsMeta}
         runs={data.runs}
         holds={data.holds}
+        feedError={data.feedError}
+        stepsUnavailable={data.stepsUnavailable}
+        badgesError={data.badgesError}
         badges={data.badges}
         labels={[...labels.entries()]}
         nowMs={data.nowMs}

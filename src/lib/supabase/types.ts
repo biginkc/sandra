@@ -7698,6 +7698,19 @@ export type Database = {
       // against a fully-migrated disposable local Postgres (colima was
       // resolvable this session); safe to trust as authoritative until
       // the next full regen supersedes it.
+      fn_reserve_ai_send: {
+        Args: {
+          p_conversation_id: string
+          p_holder: string
+          p_inbound_message_id?: string
+          p_lease_seconds: number
+        }
+        Returns: boolean
+      }
+      fn_release_ai_send: {
+        Args: { p_conversation_id: string; p_holder: string }
+        Returns: boolean
+      }
       pipeline_runs_latest_for_properties: {
         Args: { p_org_id: string; p_property_ids: string[] }
         Returns: Database["public"]["Tables"]["pipeline_runs"]["Row"][]

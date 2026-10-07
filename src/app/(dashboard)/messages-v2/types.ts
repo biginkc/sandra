@@ -75,7 +75,7 @@ export type RunLabel = {
 export type ModeBadge = {
   /** Outcome label, e.g. "not_interested". */
   label: string;
-  mode: "AUTO" | "HELD" | "SHADOW" | "LEGACY";
+  mode: "AUTO" | "HELD" | "SHADOW" | "LEGACY" | "UNKNOWN";
   /** Auto-apply confidence floor; only meaningful (and shown) for AUTO. */
   minConfidence?: number | null;
 };
@@ -86,14 +86,20 @@ export type HoldsMeta = {
   total: number;
   shown: number;
   truncated: boolean;
-  /** Sources whose query failed; their holds are missing, not zero. */
+  /**
+   * exact: `total` = distinct held properties. capped: more than the count cap
+   * of source rows, so the total is only "cap+" (incomplete). unavailable: a
+   * count query failed, so no total is known.
+   */
+  totalState: "exact" | "capped" | "unavailable";
+  /** Sources whose query failed; their holds are missing, not zero. pending_draft here means draft status is unavailable. */
   failed: HoldSource[];
   /** Auxiliary lookups (run context, steps, drafts) that errored; cards may be incomplete. */
   contextErrors: string[];
 };
 
 export type HoldSource =
-  "needs_attention" | "jev_decision" | "disposition_review";
+  "needs_attention" | "jev_decision" | "disposition_review" | "pending_draft";
 
 /**
  * An open hold: something a human still has to act on. Derived from the
@@ -105,7 +111,8 @@ export type HoldSource =
 export type OpenHold<R extends PipelineRun = PipelineRun> = {
   /** Property id (one hold per property). */
   id: string;
-  property_id: string;
+  /** null for a pending draft that cannot be tied to a property. */
+  property_id: string | null;
   conversation_id: string | null;
   sources: HoldSource[];
   /** ISO time the oldest underlying item opened; null when unknown (never guessed from updated_at). */

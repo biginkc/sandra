@@ -7,7 +7,11 @@ import {
   describeCoverage,
   formatModeBadge,
   groupStepsByRun,
+  HOLDS_COUNT_CAP,
+  buildHoldsMeta,
+  formatHoldsTotal,
   loadMessagesV2Data,
+  type HoldDraftRow,
   type LooseSupabase,
 } from "./queries";
 import type { PipelineRun, PipelineRunStep } from "./types";
@@ -344,11 +348,11 @@ describe("buildModeBadges", () => {
     { outcome: "nurture", min_confidence: 0.9 },
   ];
   const jevAuto = { classifier_provider: "jev", classifier_mode: "automatic" };
-  it("shows AUTO with the confidence floor; missing automation_enabled counts as enabled", () => {
+  it("shows AUTO with the confidence floor; missing automation_enabled is UNKNOWN", () => {
     const badges = buildModeBadges(jevAuto, thresholds);
     expect(badges.map((b) => [b.label, formatModeBadge(b)])).toEqual([
       ["not_interested", "AUTO ≥0.95"],
-      ["nurture", "AUTO ≥0.90"],
+      ["nurture", "UNKNOWN"],
     ]);
   });
   it("shows HELD for an outcome with automation disabled", () => {
@@ -410,14 +414,12 @@ function fakeSupabase(results: Record<string, (calls: Call) => Result>) {
   };
   return { client, queries, rpcCalls };
 }
+/** The capped id-only query used for distinct-hold totals. */
 const isHead = (c: Call) =>
-  c.some(
-    (x) =>
-      x.method === "select" && JSON.stringify(x.args[1] ?? {}).includes("head"),
-  );
+  c.some((x) => x.method === "limit" && x.args[0] === HOLDS_COUNT_CAP + 1);
 
 describe("loadMessagesV2Data holds", () => {
-  it("orders each hold source oldest-first before limiting, and takes counts from separate head queries", async () => {
+  it("orders each hold source oldest-first before limiting, and takes distinct totals from separate capped id queries", async () => {
     const { client, queries } = fakeSupabase({});
     await loadMessagesV2Data(client, "org");
     const find = (table: string) =>
@@ -429,6 +431,7 @@ describe("loadMessagesV2Data holds", () => {
       ["properties", "last_ai_escalation_at"],
       ["jev_lead_decisions", "created_at"],
       ["ai_disposition_reviews", "created_at"],
+      ["ai_reply_drafts", "created_at"],
     ] as const) {
       const q = find(table)[0];
       expect(orderCols(q)[0]).toBe(first);
@@ -439,7 +442,7 @@ describe("loadMessagesV2Data holds", () => {
         limitIdx(q),
       );
     }
-    expect(queries.filter(isHead)).toHaveLength(3);
+    expect(queries.filter(isHead)).toHaveLength(4);
   });
 
   it("reports truncation as 'N holds (M shown)' data", async () => {
@@ -451,13 +454,16 @@ describe("loadMessagesV2Data holds", () => {
     }));
     const { client } = fakeSupabase({
       properties: (calls) =>
-        isHead(calls) ? { data: null, count: 350 } : { data: props },
+        isHead(calls)
+          ? { data: Array.from({ length: 350 }, (_, i) => ({ id: `p${i}` })) }
+          : { data: props },
     });
     const data = await loadMessagesV2Data(client, "org");
     expect(data.holdsMeta).toMatchObject({
       total: 350,
       shown: 200,
       truncated: true,
+      totalState: "exact",
       failed: [],
     });
   });
@@ -466,7 +472,7 @@ describe("loadMessagesV2Data holds", () => {
     const { client } = fakeSupabase({
       properties: (calls) =>
         isHead(calls)
-          ? { data: null, count: 1 }
+          ? { data: [{ id: "p1" }] }
           : {
               data: [
                 {
@@ -548,61 +554,111 @@ describe("loadMessagesV2Data holds", () => {
     expect(data.holdsMeta.contextErrors).toContain("run lookup by property");
   });
 
-  it("marks holds whose run has a pending ai_reply_drafts row, and tolerates the table being absent", async () => {
-    const decisions = [
-      {
-        property_id: "p1",
-        conversation_id: "c1",
-        source_inbound_message_id: "m1",
-        created_at: iso("02:00:00"),
-      },
-    ];
-    const runRow = {
-      ...run({ id: "r1", property_id: "p1", inbound_message_id: "m1" }),
-    };
-    const base = {
-      jev_lead_decisions: (calls: Call) =>
-        isHead(calls) ? {} : { data: decisions },
-      pipeline_runs: (calls: Call) =>
-        calls.some((c) => c.method === "limit" && c.args[0] === MAX)
-          ? { data: [] }
-          : { data: [runRow] },
-    };
-    const MAX = 200;
-    const withDraft = await loadMessagesV2Data(
-      fakeSupabase({
-        ...base,
-        ai_reply_drafts: () => ({ data: [{ run_id: "r1" }] }),
-      }).client,
-      "org",
-    );
-    expect(withDraft.holds[0].draft_held).toBe(true);
-    const absent = await loadMessagesV2Data(
-      fakeSupabase({
-        ...base,
-        ai_reply_drafts: () => ({
-          data: null,
-          error: { message: "relation does not exist" },
-        }),
-      }).client,
-      "org",
-    );
-    expect(absent.holds[0].draft_held).toBe(false);
-  });
-
-  it("falls back to thresholds without automation_enabled when that column is missing", async () => {
-    let n = 0;
-    const { client } = fakeSupabase({
-      jev_outcome_thresholds: () =>
-        n++ === 0
-          ? { data: null, error: { message: "column does not exist" } }
-          : { data: [{ outcome: "x", min_confidence: 0.9 }] },
-      ai_responder_configs: () => ({
-        data: [{ classifier_provider: "jev", classifier_mode: "automatic" }],
+  it("makes a pending ai_reply_drafts row a hold of its own and never reads the body", async () => {
+    const { client, queries } = fakeSupabase({
+      ai_reply_drafts: () => ({
+        data: [
+          {
+            id: "d1",
+            property_id: "p9",
+            conversation_id: null,
+            inbound_message_id: null,
+            run_id: null,
+            created_at: iso("03:00:00"),
+          },
+        ],
       }),
     });
     const data = await loadMessagesV2Data(client, "org");
-    expect(formatModeBadge(data.badges[0])).toBe("AUTO ≥0.90");
+    expect(data.holds).toHaveLength(1);
+    expect(data.holds[0]).toMatchObject({
+      property_id: "p9",
+      sources: ["pending_draft"],
+      draft_held: true,
+    });
+    const draftQ = queries.find(
+      (q) => q[0]?.table === "ai_reply_drafts" && !isHead(q),
+    )!;
+    const cols = String(draftQ.find((c) => c.method === "select")!.args[0]);
+    expect(cols).not.toMatch(/body/);
+  });
+
+  it("surfaces a failed drafts query as 'draft status unavailable', not as no drafts", async () => {
+    const { client } = fakeSupabase({
+      ai_reply_drafts: () => ({ data: null, error: { message: "x" } }),
+    });
+    const data = await loadMessagesV2Data(client, "org");
+    expect(data.holdsMeta.failed).toEqual(["pending_draft"]);
+  });
+
+  it("surfaces a failed feed window query as feedError, not an empty feed", async () => {
+    const { client } = fakeSupabase({
+      pipeline_runs: (calls) =>
+        calls.some((c) => c.method === "limit" && c.args[0] === 200)
+          ? { data: null, error: { message: "timeout" } }
+          : {},
+    });
+    const data = await loadMessagesV2Data(client, "org");
+    expect(data.feedError).toBe("Feed unavailable — timeout");
+    expect(data.runs).toEqual([]);
+  });
+
+  it("flags a failed count query as total unavailable while keeping the list", async () => {
+    const { client } = fakeSupabase({
+      properties: (calls) =>
+        isHead(calls)
+          ? { data: null, error: { message: "x" } }
+          : {
+              data: [
+                {
+                  id: "p1",
+                  last_ai_escalation_at: iso("01:00:00"),
+                  last_ai_escalation_reason: null,
+                  updated_at: null,
+                },
+              ],
+            },
+    });
+    const data = await loadMessagesV2Data(client, "org");
+    expect(data.holdsMeta).toMatchObject({
+      totalState: "unavailable",
+      shown: 1,
+    });
+    expect(data.holdsMeta.failed).toEqual([]);
+  });
+
+  it("flags a failed step lookup", async () => {
+    const { client } = fakeSupabase({
+      pipeline_runs: (calls) =>
+        calls.some((c) => c.method === "limit")
+          ? { data: [run({ id: "r1" })] }
+          : {},
+      pipeline_run_steps: () => ({ data: null, error: { message: "x" } }),
+    });
+    const data = await loadMessagesV2Data(client, "org");
+    expect(data.stepsUnavailable).toBe(true);
+  });
+
+  it("flags failed config/threshold queries and never retries without automation_enabled", async () => {
+    const { client, queries } = fakeSupabase({
+      jev_outcome_thresholds: () => ({
+        data: null,
+        error: { message: "column does not exist" },
+      }),
+    });
+    const data = await loadMessagesV2Data(client, "org");
+    expect(data.badgesError).toMatch(/Mode badges unavailable/);
+    expect(data.badges).toEqual([]);
+    expect(
+      queries.filter((q) => q[0]?.table === "jev_outcome_thresholds"),
+    ).toHaveLength(1);
+    const cfg = await loadMessagesV2Data(
+      fakeSupabase({
+        ai_responder_configs: () => ({ data: null, error: { message: "x" } }),
+      }).client,
+      "org",
+    );
+    expect(cfg.badgesError).toMatch(/Mode badges unavailable/);
   });
 });
 
@@ -630,5 +686,124 @@ describe("groupStepsByRun", () => {
     ]);
     expect(grouped.get("r1")!.map((s) => s.id)).toEqual(["s1", "s2"]);
     expect(grouped.get("r2")!.map((s) => s.id)).toEqual(["s3"]);
+  });
+});
+
+describe("deriveOpenHolds pending drafts", () => {
+  const draft = (
+    over: Partial<HoldDraftRow> & { id: string },
+  ): HoldDraftRow => ({
+    property_id: null,
+    conversation_id: null,
+    inbound_message_id: null,
+    run_id: null,
+    created_at: iso("05:00:00"),
+    ...over,
+  });
+  it("opens a hold from a pending draft even when the flag is clear and a newer run exists", () => {
+    const holds = deriveOpenHolds({
+      properties: [],
+      decisions: [],
+      reviews: [],
+      drafts: [draft({ id: "d1", property_id: "p1" })],
+      runs: [run({ id: "new", property_id: "p1", status: "replied" })],
+    });
+    expect(holds).toHaveLength(1);
+    expect(holds[0]).toMatchObject({
+      property_id: "p1",
+      sources: ["pending_draft"],
+      draft_held: true,
+      since: iso("05:00:00"),
+    });
+    expect(holds[0].run?.id).toBe("new");
+  });
+  it("merges with other sources for the same property and orders oldest first", () => {
+    const holds = deriveOpenHolds({
+      properties: [
+        {
+          id: "p1",
+          last_ai_escalation_at: iso("06:00:00"),
+          last_ai_escalation_reason: null,
+          updated_at: null,
+        },
+      ],
+      decisions: [],
+      reviews: [],
+      drafts: [
+        draft({ id: "d1", property_id: "p1" }),
+        draft({ id: "d2", property_id: "p2", created_at: iso("01:00:00") }),
+      ],
+      runs: [],
+    });
+    expect(holds.map((h) => h.id)).toEqual(["p2", "p1"]);
+    expect(holds[1].sources).toEqual(["needs_attention", "pending_draft"]);
+    expect(holds[1].since).toBe(iso("05:00:00"));
+  });
+  it("resolves a property-less draft through its run, else keeps it as its own hold", () => {
+    const holds = deriveOpenHolds({
+      properties: [],
+      decisions: [],
+      reviews: [],
+      drafts: [
+        draft({ id: "d1", run_id: "r1" }),
+        draft({ id: "d2", created_at: iso("06:00:00") }),
+      ],
+      runs: [run({ id: "r1", property_id: "p7" })],
+    });
+    expect(holds.map((h) => h.id)).toEqual(["p7", "draft:d2"]);
+    expect(holds[1].property_id).toBeNull();
+  });
+});
+
+describe("buildHoldsMeta / formatHoldsTotal", () => {
+  const src = (
+    source: "needs_attention" | "jev_decision",
+    ids: string[] | null,
+    failed = false,
+  ) => ({ source, ids, failed });
+  it("counts distinct properties across sources, not the largest source", () => {
+    const m = buildHoldsMeta({
+      shown: 2,
+      sources: [
+        src("needs_attention", ["a", "b"]),
+        src("jev_decision", ["b", "c"]),
+      ],
+    });
+    expect(m).toMatchObject({ total: 3, totalState: "exact", truncated: true });
+  });
+  it("reports 2,000+ (incomplete) above the cap", () => {
+    const ids = Array.from({ length: HOLDS_COUNT_CAP + 1 }, (_, i) => `p${i}`);
+    const m = buildHoldsMeta({
+      shown: 5,
+      sources: [src("needs_attention", ids)],
+    });
+    expect(m).toMatchObject({ totalState: "capped", truncated: true });
+    expect(formatHoldsTotal(m, 5)).toBe("2,000+ holds (incomplete)");
+  });
+  it("reports count unavailable when a count query failed", () => {
+    const m = buildHoldsMeta({
+      shown: 1,
+      sources: [src("needs_attention", null)],
+    });
+    expect(m.totalState).toBe("unavailable");
+    expect(formatHoldsTotal(m, 1)).toBe("holds count unavailable");
+  });
+  it("reports holds unavailable when a source failed", () => {
+    const m = buildHoldsMeta({
+      shown: 0,
+      sources: [src("jev_decision", null, true)],
+    });
+    expect(formatHoldsTotal(m, 0)).toBe("holds unavailable");
+  });
+});
+
+describe("buildModeBadges unknown automation flag", () => {
+  it("shows UNKNOWN, never AUTO, when automation_enabled is absent", () => {
+    const b = buildModeBadges(
+      { classifier_provider: "jev", classifier_mode: "automatic" },
+      [{ outcome: "x", min_confidence: 0.9 }],
+    );
+    expect(b[0].mode).toBe("UNKNOWN");
+    expect(formatModeBadge(b[0])).toBe("UNKNOWN");
   });
 });

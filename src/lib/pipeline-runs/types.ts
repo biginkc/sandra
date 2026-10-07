@@ -39,6 +39,10 @@ export type PipelineRunContext = {
   seq: number;
   /** True once an action step recorded a deferred (held) disposition. */
   held?: boolean;
+  /** Claim id this process won for the run; only its holder may finish it. */
+  claimId?: string | null;
+  /** True once this process lost the claim (a duplicate dispatch). */
+  duplicate?: boolean;
 };
 
 /** Optional everywhere so call sites stay one-liners and tests stay unchanged. */
