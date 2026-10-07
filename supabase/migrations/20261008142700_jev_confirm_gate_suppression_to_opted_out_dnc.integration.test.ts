@@ -3,11 +3,11 @@ import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 /**
- * Astra production blocker (20260921090000):
+ * Astra production blocker (20261008142700):
  *
  * fn_confirm_ai_disposition_review's unapplied-proposal branch
  * (dispo_applied = false) used to suppress the linked contact
- * unconditionally, for any deferred disposition. 20260921081409 added
+ * unconditionally, for any deferred disposition. 20261008142600 added
  * not_interested and wrong_number to the deferred-review universe, so
  * confirming either of those was incorrectly flipping
  * contacts.sms_opted_out = true. Fixed to gate suppression to

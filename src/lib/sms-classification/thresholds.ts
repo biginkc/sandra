@@ -8,7 +8,7 @@ import type { JevOutcome } from "./types";
  * excludes `dnc`, `unclear`, and `bad_number` — those are never
  * threshold-gated; see `resolveThresholdDecision` below. Mirrors the
  * `outcome` check constraint on `jev_outcome_thresholds`
- * (20260920225859_jev_outcome_thresholds.sql).
+ * (20261008140000_jev_outcome_thresholds.sql).
  */
 export type ThresholdableOutcome =
   | "new_lead"
@@ -124,7 +124,7 @@ export function resolveThresholdDecision(
 
 /**
  * Loads the org's live per-outcome thresholds from `jev_outcome_thresholds`
- * (20260920225859_jev_outcome_thresholds.sql). Read live at classification
+ * (20261008140000_jev_outcome_thresholds.sql). Read live at classification
  * time — no caching — so an edit through `fn_set_jev_outcome_threshold`
  * takes effect on the very next classification with no deployment.
  *

@@ -57,7 +57,7 @@ type FullOutcome = (typeof FULL_TAXONOMY)[number];
  *  opted_out/dnc on either — goes through the sanctioned TS operation
  *  first (qualifyProperty / setOutreachDispo), then a "record" RPC. See
  *  fn_record_*_correction in
- *  20260921003340_jev_review_taxonomy_and_marking.sql for why
+ *  20261008140300_jev_review_taxonomy_and_marking.sql for why
  *  suppression can't be re-implemented purely in SQL here. */
 const AI_DISPOSITION_DIRECT_SQL_TARGETS = new Set<FullOutcome>(["wrong_number", "not_interested", "nurture"]);
 const LEAD_DECISION_DIRECT_SQL_TARGETS = new Set<FullOutcome>([
@@ -176,7 +176,7 @@ export async function markJevQueueItemReviewed(
  * actionable resolution path — it just sat read-only in Review Jev
  * forever. This "promotes" it into a real, pending jev_lead_decisions
  * row (fn_promote_classifier_event_to_decision,
- * 20260921012632_jev_classifier_event_resolution.sql); from that point
+ * 20261008140500_jev_classifier_event_resolution.sql); from that point
  * on it is an ordinary Needs-a-decision item, resolvable via
  * confirmJevQueueItem/correctJevQueueItem with zero further changes.
  * Idempotent — promoting the same event twice returns the existing
@@ -243,7 +243,7 @@ function friendlyCorrectionError(message: string): string {
  * "record" step's after-the-fact check cannot undo a write that already
  * happened. Fixed by folding validate+write+audit into ONE RPC, ONE
  * transaction (fn_apply_and_record_*_correction,
- * 20260921020527_jev_correction_atomic_apply.sql) — the property
+ * 20261008140700_jev_correction_atomic_apply.sql) — the property
  * UPDATE's WHERE clause is now the actual concurrency enforcement,
  * checked by Postgres against the live row at write time, not by this
  * function reading state once and hoping nothing changes before it acts

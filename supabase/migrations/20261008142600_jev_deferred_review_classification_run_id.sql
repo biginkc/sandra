@@ -10,7 +10,7 @@
 -- that provenance link permanently missing.
 --
 -- Fixed by adding p_classification_run_id to both RPCs and inserting it,
--- with the same integrity verification 20260921055215 already applies
+-- with the same integrity verification 20261008141100 already applies
 -- to jev_lead_decisions: the cited run must exist and its own org/
 -- property/conversation/source_inbound_message_id/provider/
 -- resolved_outcome must match this call's parameters exactly (tenant
@@ -81,7 +81,7 @@ begin
   end if;
 
   -- Tenant/identity integrity for the provenance link (mirrors
-  -- fn_auto_apply_jev_lead_decision, 20260921055215): the cited run must
+  -- fn_auto_apply_jev_lead_decision, 20261008141100): the cited run must
   -- really be the one that produced THIS disposition for THIS org/
   -- property/conversation/source message.
   select cr.org_id, cr.property_id, cr.conversation_id, cr.source_inbound_message_id,

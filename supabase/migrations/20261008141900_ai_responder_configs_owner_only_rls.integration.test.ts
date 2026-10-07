@@ -13,7 +13,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
  * classifier_mode='automatic' — cutting the org over without ever
  * touching the guarded UPDATE path. This proves, against real Postgres,
  * every lifecycle path the new owner-only RLS policies
- * (20260921070946_ai_responder_configs_owner_only_rls.sql) close: an
+ * (20261008141900_ai_responder_configs_owner_only_rls.sql) close: an
  * ordinary member cannot deactivate the active row, delete it, insert a
  * replacement, or reassign org_id — while an active owner's legitimate
  * settings writes and cutover writes still work.

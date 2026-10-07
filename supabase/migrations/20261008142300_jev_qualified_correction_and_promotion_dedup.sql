@@ -35,7 +35,7 @@
 --    already-promoted decision for the same inbound now excludes every
 --    run on that inbound, matching the real idempotency key. DISTINCT ON
 --    dedup, security_invoker, and ordering are unchanged from
---    20260921072107.
+--    20261008142200.
 
 begin;
 

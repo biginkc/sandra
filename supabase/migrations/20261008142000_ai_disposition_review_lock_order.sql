@@ -5,8 +5,8 @@
 -- fn_correct_ai_disposition_review and
 -- fn_apply_and_record_ai_disposition_review_correction locked review
 -- THEN property; fn_confirm_ai_disposition_review and the three
--- service-role paths in 20260921025446 lock property THEN review — the
--- exact same class of bug 20260921064657 fixed for jev_lead_decisions,
+-- service-role paths in 20261008140900 lock property THEN review — the
+-- exact same class of bug 20261008141700 fixed for jev_lead_decisions,
 -- left unfixed on the ai_disposition_reviews side.
 --
 -- Fixed the same way: reorder to property BEFORE review. The initial

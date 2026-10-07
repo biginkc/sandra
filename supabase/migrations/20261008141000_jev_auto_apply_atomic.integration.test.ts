@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 
 /**
  * Root review of 999feefb (jev-root-round11-review.md), finding 2: the
- * atomic-apply fix (20260921045438_jev_auto_apply_atomic.sql) had unit
+ * atomic-apply fix (20261008141000_jev_auto_apply_atomic.sql) had unit
  * tests exercising the TS caller against a mock, but no committed
  * integration test actually invoked fn_auto_apply_jev_lead_decision
  * against real Postgres. This file proves, with real SQL/RPC semantics
@@ -22,7 +22,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
  * p_outcome must be rejected before any effect or audit insert.
  *
  * Run together with the existing decision-context-revision integration
- * tests (20260921022936_jev_decision_context_revision.integration.test.ts)
+ * tests (20261008140800_jev_decision_context_revision.integration.test.ts)
  * — same DB, same setup pattern (per-test transaction, rolled back in
  * afterEach — never a `supabase db reset`, and never touches another
  * agent's stack).

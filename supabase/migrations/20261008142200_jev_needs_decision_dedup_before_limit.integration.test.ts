@@ -4,14 +4,14 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 
 /**
  * Root review of f3ab9e1e (jev-root-round18-prelimit-dedup.md): the
- * eligibility view (20260921070948) moved promoted/reconciled filtering
+ * eligibility view (20261008142100) moved promoted/reconciled filtering
  * before the limit, but left per-inbound "latest wins" dedup to
  * queries.ts AFTER limit(100) — so more than 100 eligible failed-retry
  * rows on ONE inbound could fill the entire DB result on their own,
  * and a genuinely distinct newer actionable inbound would never reach
  * the query at all. Fixed by returning at most one row per
  * source_inbound_message_id from the view itself (DISTINCT ON,
- * 20260921072107_jev_needs_decision_dedup_before_limit.sql). This
+ * 20261008142200_jev_needs_decision_dedup_before_limit.sql). This
  * proves, against real Postgres, using the EXACT order+limit query
  * production runs (order by created_at asc, limit 100): a fixture with
  * MORE than 100 eligible retry rows for ONE inbound, plus one newer

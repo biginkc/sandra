@@ -10,7 +10,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
  * THEN property; fn_confirm_ai_disposition_review (and every
  * service-role path) locked property THEN review — a real deadlock
  * risk. Reordered to property-then-review, consistently, in
- * 20260921070947_ai_disposition_review_lock_order.sql. This proves,
+ * 20261008142000_ai_disposition_review_lock_order.sql. This proves,
  * against real Postgres with TWO separate connections: client A runs
  * confirm to completion (holding property+review locks, uncommitted),
  * client B's correct call is proven genuinely BLOCKED (not resolved,

@@ -1429,7 +1429,7 @@ async function setResponderDispo(
 /**
  * Records a below-threshold/human-gated new_lead or nurture decision in
  * jev_lead_decisions (the Needs-a-decision queue for these two outcomes
- * — see 20260920235450_jev_lead_decisions.sql). Best-effort: the caller's
+ * — see 20261008140100_jev_lead_decisions.sql). Best-effort: the caller's
  * own markPropertyNeedsAttention already surfaces this on the property
  * regardless, so a failed insert here is logged, not escalated as a
  * bigger failure.
@@ -1811,7 +1811,7 @@ async function proposeJevDncSuppression(
  * "Below threshold routes to Needs a decision" must mean the property is
  * UNCHANGED until a human confirms, not merely unacknowledged. This
  * calls `fn_propose_deferred_ai_disposition_review`
- * (20260921005946_jev_deferred_disposition_proposal.sql) instead, which
+ * (20261008140400_jev_deferred_disposition_proposal.sql) instead, which
  * creates the pending review with `dispo_applied=false` and never
  * touches `outreach_dispo`. Unlike dnc's Option B, this applies ZERO
  * suppression side effect either — a below-threshold Jev inference of

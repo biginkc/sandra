@@ -71,7 +71,7 @@ describe("ai_responder_configs classifier cutover columns are guarded against di
 
     // Fable re-review of e5d001bb (jev-root-round17-fable2-fixes.md),
     // finding 1: superseded by the coherent owner-only RLS model
-    // (20260921070946_ai_responder_configs_owner_only_rls.sql) — the
+    // (20261008141900_ai_responder_configs_owner_only_rls.sql) — the
     // row is now excluded from the UPDATE's target set by RLS's USING
     // clause BEFORE this trigger ever runs, so a non-owner gets a
     // silent 0-row result, not the trigger's FORBIDDEN exception
@@ -96,10 +96,10 @@ describe("ai_responder_configs classifier cutover columns are guarded against di
 
   // Fable re-review of e5d001bb (jev-root-round17-fable2-fixes.md),
   // finding 1: superseded by the coherent owner-only RLS model in
-  // 20260921070946_ai_responder_configs_owner_only_rls.sql — an ordinary
+  // 20261008141900_ai_responder_configs_owner_only_rls.sql — an ordinary
   // member can no longer write ANY column directly (not just the
   // classifier ones), closing the active=false-then-replace bypass. See
-  // 20260921070946_ai_responder_configs_owner_only_rls.integration.test.ts
+  // 20261008141900_ai_responder_configs_owner_only_rls.integration.test.ts
   // for full coverage of that policy.
   it("an active ordinary member CANNOT update an unrelated column (system_prompt) either, now that direct writes are owner-only", async () => {
     const userId = await makeMember("member");

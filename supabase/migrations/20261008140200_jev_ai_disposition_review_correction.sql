@@ -10,7 +10,7 @@
 --
 -- Correction targets are restricted to {wrong_number, not_interested,
 -- nurture} — same restriction and same reason as
--- fn_correct_jev_lead_decision (20260920235450_jev_lead_decisions.sql):
+-- fn_correct_jev_lead_decision (20261008140100_jev_lead_decisions.sql):
 -- dnc/opted_out need a TCPA suppression side effect only the existing
 -- authenticated setOutreachDispo action performs correctly, and new_lead
 -- promotion is jev_lead_decisions' domain, not this table's.

@@ -1,6 +1,6 @@
 -- Root review of 57236716 (jev-root-round16-promotion-revision.md): two
 -- release blockers in fn_promote_classifier_event_to_decision, left
--- unfixed by 20260921064657 (already recorded locally — not rewritten,
+-- unfixed by 20261008141700 (already recorded locally — not rewritten,
 -- this is a follow-up).
 --
 -- 1) The property was locked but only p.id was selected, and the INSERT

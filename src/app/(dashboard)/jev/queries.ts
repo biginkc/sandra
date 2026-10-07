@@ -263,7 +263,7 @@ const NEEDS_DECISION_CLASSIFIER_EVENT_LIMIT = 100;
  * promoted/reconciled, a genuinely newer actionable event could never
  * reach the limit window (permanently starved). Now reads
  * jev_needs_decision_classifier_events, a security_invoker view
- * (20260921070948_jev_needs_decision_eligibility_view.sql) that excludes
+ * (20261008142100_jev_needs_decision_eligibility_view.sql) that excludes
  * promoted/reconciled rows AT THE DATABASE, before the limit — the same
  * org-scoped RLS this table already had applies unchanged (security_invoker
  * runs the view as the calling role). limit(100) now applies to actually-
@@ -274,7 +274,7 @@ const NEEDS_DECISION_CLASSIFIER_EVENT_LIMIT = 100;
  * application code, AFTER limit(100) — which reintroduced the exact same
  * starvation shape (>100 eligible retries on ONE inbound could fill the
  * whole result and hide a distinct newer inbound). The view
- * (20260921072107_jev_needs_decision_dedup_before_limit.sql) now returns
+ * (20261008142200_jev_needs_decision_dedup_before_limit.sql) now returns
  * at most one row per source_inbound_message_id itself (DISTINCT ON,
  * ordered by created_at desc/id desc), so a straight map is correct —
  * no application-level dedup step is needed anymore.

@@ -1,5 +1,5 @@
 -- Root review of f3ab9e1e (jev-root-round18-prelimit-dedup.md):
--- remaining P2 starvation bug — 20260921070948 moved promoted/reconciled
+-- remaining P2 starvation bug — 20261008142100 moved promoted/reconciled
 -- filtering before the limit, but left "latest wins per
 -- source_inbound_message_id" deduplication to queries.ts AFTER
 -- limit(100). If one inbound has MORE than 100 eligible failed-retry
@@ -21,7 +21,7 @@
 -- site now applies to already-deduped, already-eligible rows — no
 -- number of retries on one inbound can crowd out a distinct actionable
 -- event on another. security_invoker/RLS and ordering behavior are
--- otherwise unchanged from 20260921070948.
+-- otherwise unchanged from 20261008142100.
 
 create or replace view public.jev_needs_decision_classifier_events
 with (security_invoker = true) as

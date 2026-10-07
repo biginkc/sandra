@@ -283,7 +283,7 @@ function classificationRunRow(overrides: Partial<Record<string, unknown>> = {}) 
 // Fable re-review of e5d001bb (jev-root-round17-fable2-fixes.md), finding
 // 2: promoted/reconciled exclusion moved OUT of application code and
 // into jev_needs_decision_classifier_events (a DB-level view) — see
-// 20260921070948_jev_needs_decision_eligibility_view.integration.test.ts
+// 20261008142100_jev_needs_decision_eligibility_view.integration.test.ts
 // for that behavior against real Postgres. queries.ts now trusts
 // whatever this view returns is already eligible; these unit tests only
 // cover what queries.ts still does itself: mapping, and the per-inbound
@@ -309,7 +309,7 @@ describe("getNeedsDecisionQueue — root final-review P1 #3 (classifier_event re
   // jev_needs_decision_classifier_events view itself (DISTINCT ON,
   // applied before the view's own row selection, so >100 retries on one
   // inbound can never crowd out a distinct newer inbound) — see
-  // 20260921072107_jev_needs_decision_dedup_before_limit.integration.test.ts
+  // 20261008142200_jev_needs_decision_dedup_before_limit.integration.test.ts
   // for that behavior against real Postgres. queries.ts now trusts the
   // view already returns at most one row per source_inbound_message_id;
   // this only proves it maps each returned row straight through, with no

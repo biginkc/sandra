@@ -10,7 +10,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
  * application code — once the 100 oldest were all promoted/reconciled,
  * a genuinely newer actionable event could never reach the limit
  * window. jev_needs_decision_classifier_events
- * (20260921070948_jev_needs_decision_eligibility_view.sql) excludes
+ * (20261008142100_jev_needs_decision_eligibility_view.sql) excludes
  * promoted/reconciled rows BEFORE any limit applies. This proves, against
  * real Postgres: a fixture with MORE than 100 old resolved (promoted)
  * events plus one newer actionable event — the view still surfaces the

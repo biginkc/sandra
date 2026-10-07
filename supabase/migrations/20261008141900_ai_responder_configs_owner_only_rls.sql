@@ -2,7 +2,7 @@
 -- jev-root-round17-fable2-fixes.md), finding 1 — P1 cutover
 -- authorization lifecycle bypass:
 --
--- The round-15 trigger (20260921064444_ai_responder_configs_classifier_cutover_guard.sql)
+-- The round-15 trigger (20261008141600_ai_responder_configs_classifier_cutover_guard.sql)
 -- only fires BEFORE UPDATE and only inspects classifier_provider/
 -- classifier_mode. It closes exactly one path. 054_memberships_and_rls_rewrite.sql's
 -- ai_responder_configs_org_insert / _org_update / _org_delete policies

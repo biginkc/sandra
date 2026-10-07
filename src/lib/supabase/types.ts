@@ -3450,7 +3450,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           // Hand-inserted 2026-09-21 for migration
-          // 20260921022936_jev_decision_context_revision.sql.
+          // 20261008140800_jev_decision_context_revision.sql.
           decision_context_revision: number
           distress_flags: string[]
           equity_estimate: number | null
@@ -6182,7 +6182,7 @@ export type Database = {
         Relationships: []
       }
       // Hand-inserted 2026-09-21 for migration
-      // 20260921070948_jev_needs_decision_eligibility_view.sql (fable
+      // 20261008142100_jev_needs_decision_eligibility_view.sql (fable
       // re-review of e5d001bb, jev-root-round17-fable2-fixes.md, finding
       // 2). security_invoker view over sms_classification_runs — same
       // Row shape as NEEDS_DECISION_CLASSIFIER_EVENT_SELECT's source
@@ -7453,7 +7453,7 @@ export type Database = {
         }[]
       }
       // Hand-patched 2026-09-21 for migration
-      // 20260921025446_jev_decision_context_gaps.sql — added
+      // 20261008140900_jev_decision_context_gaps.sql — added
       // p_expected_revision (root review of 8361775a, gap 2).
       fn_apply_ai_disposition_with_review: {
         Args: {
@@ -7476,10 +7476,10 @@ export type Database = {
         Returns: Json
       }
       // Hand-patched 2026-09-21 for migration
-      // 20260921025446_jev_decision_context_gaps.sql — added
+      // 20261008140900_jev_decision_context_gaps.sql — added
       // p_expected_revision (root review of 8361775a, gap 2).
       // Hand-patched 2026-09-21 for migration
-      // 20260921081409_jev_deferred_review_classification_run_id.sql —
+      // 20261008142600_jev_deferred_review_classification_run_id.sql —
       // added p_classification_run_id (Astra production blocker 3).
       fn_propose_ai_dnc_suppression_review: {
         Args: {
@@ -7493,14 +7493,14 @@ export type Database = {
         Returns: Json
       }
       // Hand-inserted 2026-09-21 for migration
-      // 20260921005946_jev_deferred_disposition_proposal.sql — extends
+      // 20261008140400_jev_deferred_disposition_proposal.sql — extends
       // dnc's Option-B deferred-write pattern above to
       // wrong_number/not_interested/opted_out (root final-review P1 #1).
       // Hand-patched 2026-09-21 for migration
-      // 20260921025446_jev_decision_context_gaps.sql — added
+      // 20261008140900_jev_decision_context_gaps.sql — added
       // p_expected_revision (root review of 8361775a, gap 2).
       // Hand-patched 2026-09-21 for migration
-      // 20260921081409_jev_deferred_review_classification_run_id.sql —
+      // 20261008142600_jev_deferred_review_classification_run_id.sql —
       // added p_classification_run_id (Astra production blocker 3).
       fn_propose_deferred_ai_disposition_review: {
         Args: {
@@ -7515,7 +7515,7 @@ export type Database = {
         Returns: Json
       }
       // Hand-inserted 2026-09-20 for migration
-      // 20260920225859_jev_outcome_thresholds.sql — unlike the
+      // 20261008140000_jev_outcome_thresholds.sql — unlike the
       // sms_classification_runs caveat above, this block IS a verbatim
       // excerpt of a real `supabase gen types typescript --local` run
       // against a fully-migrated disposable local Postgres (colima was
@@ -7532,13 +7532,13 @@ export type Database = {
         Returns: Json
       }
       // Hand-inserted 2026-09-20 for migration
-      // 20260920235450_jev_lead_decisions.sql — same verbatim-excerpt
+      // 20261008140100_jev_lead_decisions.sql — same verbatim-excerpt
       // provenance as fn_set_jev_outcome_threshold above.
       // Hand-patched 2026-09-21 for migration
-      // 20260921013636_jev_lead_decision_threshold_version.sql — added
+      // 20261008140600_jev_lead_decision_threshold_version.sql — added
       // p_threshold_version (root final-review P2).
       // Hand-patched 2026-09-21 for migration
-      // 20260921025446_jev_decision_context_gaps.sql — added
+      // 20261008140900_jev_decision_context_gaps.sql — added
       // p_expected_revision (root review of 8361775a, gap 2).
       fn_propose_jev_lead_decision: {
         Args: {
@@ -7559,7 +7559,7 @@ export type Database = {
         Returns: Json
       }
       // Hand-patched 2026-09-21 for migration
-      // 20260921025446_jev_decision_context_gaps.sql — added
+      // 20261008140900_jev_decision_context_gaps.sql — added
       // p_expected_revision (root review of 8361775a, gap 2).
       fn_auto_apply_jev_lead_decision: {
         Args: {
@@ -7580,7 +7580,7 @@ export type Database = {
         Returns: Json
       }
       // Hand-inserted 2026-09-21 for migration
-      // 20260921060906_jev_automatic_classification_active_access_rpc.sql
+      // 20261008141300_jev_automatic_classification_active_access_rpc.sql
       // (root review of edbd7bfe, jev-root-round13-review.md, finding 1).
       fn_update_jev_automatic_classification: {
         Args: { p_config_id: string; p_enabled: boolean }
@@ -7591,7 +7591,7 @@ export type Database = {
         Returns: Json
       }
       // Hand-inserted 2026-09-21 for migration
-      // 20260921012632_jev_classifier_event_resolution.sql (root
+      // 20261008140500_jev_classifier_event_resolution.sql (root
       // final-review P1 #3: give classifier_event rows an actionable
       // human-resolution path).
       fn_promote_classifier_event_to_decision: {
@@ -7607,7 +7607,7 @@ export type Database = {
         Returns: Json
       }
       // Hand-inserted 2026-09-21 for migration
-      // 20260921001640_jev_ai_disposition_review_correction.sql — same
+      // 20261008140200_jev_ai_disposition_review_correction.sql — same
       // verbatim-excerpt provenance as the jev_lead_decisions functions above.
       fn_correct_ai_disposition_review: {
         Args: {
@@ -7618,7 +7618,7 @@ export type Database = {
         Returns: Json
       }
       // Hand-inserted 2026-09-21 for migration
-      // 20260921003340_jev_review_taxonomy_and_marking.sql — same
+      // 20261008140300_jev_review_taxonomy_and_marking.sql — same
       // verbatim-excerpt provenance as the functions above.
       fn_mark_ai_disposition_review_reviewed: {
         Args: { p_review_id: string }
@@ -7629,7 +7629,7 @@ export type Database = {
         Returns: Json
       }
       // Hand-inserted 2026-09-21 for migration
-      // 20260921020527_jev_correction_atomic_apply.sql — root review of
+      // 20261008140700_jev_correction_atomic_apply.sql — root review of
       // 02b0ad73 (jev-root-correction-race.md) found the prior
       // fn_begin_*/fn_record_* split was NOT atomic (a PostgREST RPC
       // releases its lock the instant it returns; the separate sanctioned

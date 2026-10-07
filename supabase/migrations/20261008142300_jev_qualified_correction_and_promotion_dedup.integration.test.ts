@@ -3,7 +3,7 @@ import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 /**
- * Three Astra production blockers (20260921073917):
+ * Three Astra production blockers (20261008142300):
  *
  * 1. Both jev correction RPCs rejected every pending-decision correction
  *    once the property was already qualified (new_lead) via an EARLIER,

@@ -559,7 +559,7 @@ revoke all on function public.fn_correct_jev_lead_decision(uuid, text, text)
   from public, anon, service_role;
 grant execute on function public.fn_correct_jev_lead_decision(uuid, text, text) to authenticated;
 
--- reset_tenant_tables() (last redefined in 20260920225859_jev_outcome_thresholds.sql)
+-- reset_tenant_tables() (last redefined in 20261008140000_jev_outcome_thresholds.sql)
 -- must truncate jev_lead_decisions too — it FKs to organizations, which
 -- is not itself truncated, so TRUNCATE ... CASCADE would not reach it.
 create or replace function public.reset_tenant_tables()

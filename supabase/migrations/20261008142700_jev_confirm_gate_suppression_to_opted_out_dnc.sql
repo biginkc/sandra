@@ -1,8 +1,8 @@
 -- Astra production blocker (2026-09-21):
 --
 -- fn_confirm_ai_disposition_review's unapplied-proposal branch
--- (20260921081408) runs contact/phone SMS suppression unconditionally
--- whenever the property has a homeowner_contact_id. But 20260921081409
+-- (20261008142500) runs contact/phone SMS suppression unconditionally
+-- whenever the property has a homeowner_contact_id. But 20261008142600
 -- extended the deferred-review universe to include not_interested and
 -- wrong_number (dispo_applied = false, same branch). Confirming either
 -- of those currently flips contacts.sms_opted_out = true, which is wrong

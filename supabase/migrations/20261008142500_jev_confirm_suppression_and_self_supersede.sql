@@ -30,7 +30,7 @@
 --    Fixed with a transaction-local GUC identifying the review currently
 --    being resolved, so the trigger's supersede sweep skips exactly that
 --    row while still correctly superseding every OTHER pending review on
---    the property. Property-before-review lock order (20260921070947)
+--    the property. Property-before-review lock order (20261008142000)
 --    is unchanged — this only changes which rows the trigger's own
 --    UPDATE touches, not any lock acquisition order.
 

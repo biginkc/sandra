@@ -3,7 +3,7 @@ import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 /**
- * Fable production blocker (20260921075324):
+ * Fable production blocker (20261008142400):
  *
  * fn_apply_and_record_ai_disposition_review_correction's new_lead write
  * unconditionally required property.status = 'prospect'. On a property

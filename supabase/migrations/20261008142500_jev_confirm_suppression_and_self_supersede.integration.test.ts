@@ -3,7 +3,7 @@ import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 /**
- * Astra production blockers 1 & 2 (20260921081408):
+ * Astra production blockers 1 & 2 (20261008142500):
  *
  * 1. Confirming a below-threshold opted_out ai_disposition_review (the
  *    deferred, dispo_applied=false path) via fn_confirm_ai_disposition_
@@ -227,7 +227,7 @@ describe("Astra blocker 2 — a property-write review resolution does not self-s
     // both reviews capture the same (already-final) decision_context_
     // revision. If the sibling's message arrived AFTER the target review
     // captured its revision, trg_messages_bump_decision_context_revision
-    // (20260921022936) would legitimately bump the property's revision
+    // (20261008140800) would legitimately bump the property's revision
     // and make the target review stale by design — a real "new context
     // arrived, re-evaluate" case, not the self-supersede bug this test
     // targets. Ordering messages first isolates the two concerns.

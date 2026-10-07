@@ -3,7 +3,7 @@ import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 /**
- * Astra production blocker 3 (20260921081409):
+ * Astra production blocker 3 (20261008142600):
  *
  * fn_propose_deferred_ai_disposition_review and
  * fn_propose_ai_dnc_suppression_review used to insert ai_disposition_
@@ -12,7 +12,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
  * below-threshold deferred proposal and Jev-driven dnc suppression.
  * Fixed with a required p_classification_run_id parameter, verified
  * against the cited run's own org/property/conversation/source message/
- * provider/outcome (same integrity check 20260921055215 already applies
+ * provider/outcome (same integrity check 20261008141100 already applies
  * to jev_lead_decisions) before it is ever linked.
  *
  * Real Postgres, no mocks.
