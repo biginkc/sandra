@@ -263,7 +263,12 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   }, [newestId]);
 
   return (
-    <div className="flex flex-col gap-4" data-testid="messages-v2">
+    // lg: fill the viewport below the dashboard chrome (md:pt-16 header + md:p-6 page padding = 7rem)
+    // so the live feed and the holds rail each scroll on their own.
+    <div
+      className="flex flex-col gap-4 lg:h-[calc(100dvh-7rem)]"
+      data-testid="messages-v2"
+    >
       <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <h1 className="text-xl font-semibold">Messages v2</h1>
         <div className="flex flex-wrap gap-1.5" aria-label="Classifier modes">
@@ -322,12 +327,16 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         </p>
       </header>
 
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
-        <section aria-label="Live feed" className="flex min-w-0 flex-col gap-3">
+      <div className="grid gap-6 lg:min-h-0 lg:flex-1 lg:grid-cols-[minmax(0,1fr)_380px] lg:grid-rows-[minmax(0,1fr)]">
+        <section
+          aria-label="Live feed"
+          className="flex min-w-0 flex-col gap-3 lg:min-h-0"
+        >
           <h2 className="text-sm font-semibold">Live feed</h2>
           <div
             ref={feedRef}
-            className="flex max-h-[calc(100vh-14rem)] flex-col gap-3 overflow-y-auto pr-1"
+            data-testid="live-feed-scroll"
+            className="flex max-h-[60vh] flex-col gap-3 overflow-y-auto pr-1 lg:max-h-none lg:min-h-0 lg:flex-1"
           >
             {props.feedError && (
               <p
