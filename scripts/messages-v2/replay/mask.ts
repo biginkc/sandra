@@ -30,6 +30,7 @@ const LOCAL7_IN_TEXT = /(?<![\d$,.+-])(\d{3})[\s.-](\d{4})(?![\d]|,\d{3})/g;
 const INTL_IN_TEXT = /(?<![\w+])\+(?!1)\d[\d\s().-]{6,18}\d/g;
 const EMAIL_IN_TEXT = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
 export const MASKED_EMAIL_DOMAIN = "example.invalid";
+const MASKED_EMAIL_TOKEN = /user-[0-9a-f]{10}@example\.invalid/g;
 
 const SAFE_OR_LOCAL7 = new RegExp(`(${SAFE_TOKENS.source})|${LOCAL7_IN_TEXT.source}`, "gi");
 const SAFE_OR_INTL = new RegExp(`(${SAFE_TOKENS.source})|${INTL_IN_TEXT.source}`, "gi");
@@ -169,7 +170,8 @@ export function assertNoRealPhones(
   };
   const walk = (v: unknown, where: string): void => {
     if (typeof v === "string") {
-      const scrubbed = v.replace(SAFE_TOKENS, " ");
+      // Masked-email pseudonyms (user-<10 hex>@example.invalid) can be all digits (~1%) and look like a phone.
+      const scrubbed = v.replace(MASKED_EMAIL_TOKEN, (m) => (opts.maskPii ? " " : m)).replace(SAFE_TOKENS, " ");
       for (const m of scrubbed.matchAll(PHONE_IN_TEXT)) {
         const real = `${m[2]}${m[3]}${m[4]}`;
         if (m[3] === "555" || allowedBusiness.has(real)) continue;
