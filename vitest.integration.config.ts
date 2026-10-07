@@ -29,7 +29,7 @@ export default defineConfig({
     // rejects hosted URLs. It has its own local-only runner so this hosted
     // suite cannot accidentally select it.
     exclude: [
-      "supabase/migrations/20261008140000_norma_inbound_call_records.integration.test.ts",
+      "supabase/migrations/20261008135000_norma_inbound_call_records.integration.test.ts",
       // Destructive + local-only (assertLocalOnlyEnvironment); runs via
       // vitest.filter-local.config.ts against a disposable local stack.
       "src/lib/prospects/filter-to-supabase.integration.test.ts",
@@ -42,7 +42,7 @@ export default defineConfig({
       "supabase/migrations/20261002015000_direct_recording_library.integration.test.ts",
       "supabase/migrations/20261002016200_direct_training_wrapup.integration.test.ts",
       "supabase/migrations/20261002120000_norma_call_requests.integration.test.ts",
-      "supabase/migrations/20261008140100_norma_outbound_recording_state.integration.test.ts",
+      "supabase/migrations/20261008135100_norma_outbound_recording_state.integration.test.ts",
       "supabase/migrations/20261002120100_norma_m2_hardening.integration.test.ts",
       "supabase/migrations/20261002120200_norma_m2_review_fixes.integration.test.ts",
       "supabase/migrations/20261004090000_norma_call_twice.integration.test.ts",

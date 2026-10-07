@@ -10,7 +10,7 @@ const dbUrl = requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL ?? def
 export default defineConfig({
   test: {
     include: [
-      "supabase/migrations/20261008140000_norma_inbound_call_records.integration.test.ts",
+      "supabase/migrations/20261008135000_norma_inbound_call_records.integration.test.ts",
       "supabase/migrations/20260929238000_sequence_replace_steps.integration.test.ts",
       "supabase/migrations/20260930038000_sequence_canary_controls.integration.test.ts",
       "supabase/migrations/20261001200000_direct_calls.integration.test.ts",
@@ -19,7 +19,7 @@ export default defineConfig({
       "supabase/migrations/20261002015000_direct_recording_library.integration.test.ts",
       "supabase/migrations/20261002016200_direct_training_wrapup.integration.test.ts",
       "supabase/migrations/20261002120000_norma_call_requests.integration.test.ts",
-      "supabase/migrations/20261008140100_norma_outbound_recording_state.integration.test.ts",
+      "supabase/migrations/20261008135100_norma_outbound_recording_state.integration.test.ts",
       "supabase/migrations/20261002120100_norma_m2_hardening.integration.test.ts",
       "supabase/migrations/20261002120200_norma_m2_review_fixes.integration.test.ts",
       "supabase/migrations/20261004090000_norma_call_twice.integration.test.ts",
