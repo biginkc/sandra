@@ -151,6 +151,8 @@ type MockState = {
   sequenceMessageIds?: string[];
   sequenceLookupError?: boolean;
   deadLetters?: Array<Record<string, unknown>>;
+  /** Rows returned by sweeper pass-A style reads (send_timeout, no inbound filter). */
+  passARowsRead?: number;
   deadLetterInsertError?: { message: string };
   /** pass-B per-inbound send_timeout lookup returns an error. */
   deadLetterLookupError?: boolean;
@@ -893,8 +895,18 @@ function createMockSupabase(state: MockState) {
         let dlRange: [number, number] | null = null;
         let dlLimit: number | null = null;
         let dlAfter: { createdAt: string; id: string } | null = null;
+        const dlIsNull: string[] = [];
+        let dlUpdate: Record<string, unknown> | null = null;
         const dlq = {
           select: () => dlq,
+          is(field: string, _value: null) {
+            dlIsNull.push(field);
+            return dlq;
+          },
+          update(value: Record<string, unknown>) {
+            dlUpdate = value;
+            return dlq;
+          },
           eq(field: string, value: unknown) {
             dlFilters.set(field, value);
             return dlq;
@@ -928,12 +940,17 @@ function createMockSupabase(state: MockState) {
             let rows = (state.deadLetters ?? []).filter(
               (r) =>
                 [...dlFilters].every(([k, v]) => r[k] === v) &&
+                dlIsNull.every((k) => r[k] == null) &&
                 (dlIn === null || dlIn.values.includes(r[dlIn.field])) &&
                 (dlGte === null || String(r.created_at ?? dlGte) >= dlGte) &&
                 (dlAfter === null ||
                   String(r.created_at) > dlAfter.createdAt ||
                   (String(r.created_at) === dlAfter.createdAt && String(r.id) > dlAfter.id)),
             );
+            if (dlUpdate) {
+              for (const r of rows) Object.assign(r, dlUpdate);
+              return Promise.resolve({ data: null, error: null }).then(resolve, reject);
+            }
             rows = [...rows].sort(
               (a, b) =>
                 String(a.created_at ?? "").localeCompare(String(b.created_at ?? "")) ||
@@ -941,11 +958,15 @@ function createMockSupabase(state: MockState) {
             );
             if (dlRange) rows = rows.slice(dlRange[0], dlRange[1] + 1);
             if (dlLimit !== null && !dlFilters.has("inbound_message_id") && !dlIn) rows = rows.slice(0, dlLimit);
+            if (dlFilters.get("reason") === "send_timeout" && !dlFilters.has("inbound_message_id")) {
+              state.passARowsRead = (state.passARowsRead ?? 0) + rows.length;
+            }
             return Promise.resolve({ data: rows, error: null }).then(resolve, reject);
           },
         };
         return {
           select: dlq.select,
+          update: dlq.update,
           insert: async (row: Record<string, unknown>) => {
             state.deadLetterInsertAttempts = (state.deadLetterInsertAttempts ?? 0) + 1;
             if (state.deadLetterInsertError) return { error: state.deadLetterInsertError };
@@ -4945,7 +4966,7 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
         state.property.last_ai_escalation_reason = "send_timeout:inbound-late";
         state.deadLetters = [
           { org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-late", body: "Hi", reason: "sent_late", created_at: new Date().toISOString() },
-          { org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-late", body: "Hi", reason: "send_timeout", created_at: new Date().toISOString() },
+          { org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-late", body: "Hi", reason: "send_timeout", resolved_at: new Date().toISOString(), created_at: new Date().toISOString() },
         ];
         pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
         expect(await sweepLateSends(createMockSupabase(state) as never)).toMatchObject({ reconciled: 0 });
@@ -4975,7 +4996,7 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
         for (let i = 0; i < 1005; i += 1) {
           const id = `old-${String(i).padStart(4, "0")}`;
           rows.push(
-            { id: `t-${id}`, org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: "other", inbound_message_id: id, body: "x", reason: "send_timeout", created_at: new Date(base + i).toISOString() },
+            { id: `t-${id}`, org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: "other", inbound_message_id: id, body: "x", reason: "send_timeout", resolved_at: new Date(base).toISOString(), created_at: new Date(base + i).toISOString() },
             { id: `m-${id}`, org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: "other", inbound_message_id: id, body: "x", reason: "sent_late", created_at: new Date(base + i).toISOString() },
           );
         }
@@ -4984,6 +5005,13 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
         pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
         const result = await sweepLateSends(createMockSupabase(state) as never, { pageSize: 100, maxPages: 20 });
         expect(result.reconciled).toBe(1);
+        // Resolved rows are never read: only the single unresolved timeout was returned.
+        expect(state.passARowsRead).toBe(1);
+        expect(result.scanned).toBe(1);
+        state.passARowsRead = 0;
+        expect(await sweepLateSends(createMockSupabase(state) as never, { pageSize: 100, maxPages: 20 })).toMatchObject({ scanned: 0, reconciled: 0 });
+        expect(state.passARowsRead).toBe(0);
+        expect((state.deadLetters ?? []).find((d) => d.id === "t-late")?.resolved_at).toEqual(expect.any(String));
         expect(result.nextCursor).toBeNull();
         expect((state.deadLetters ?? []).filter((d) => d.inbound_message_id === "inbound-late" && d.reason === "sent_late")).toHaveLength(1);
       });

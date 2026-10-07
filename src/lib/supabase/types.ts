@@ -1121,6 +1121,7 @@ export type Database = {
           org_id: string
           property_id: string | null
           reason: string
+          resolved_at: string | null
           run_id: string | null
         }
         Insert: {
@@ -1132,6 +1133,7 @@ export type Database = {
           org_id: string
           property_id?: string | null
           reason: string
+          resolved_at?: string | null
           run_id?: string | null
         }
         Update: {
@@ -1143,6 +1145,7 @@ export type Database = {
           org_id?: string
           property_id?: string | null
           reason?: string
+          resolved_at?: string | null
           run_id?: string | null
         }
         Relationships: []

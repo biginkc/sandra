@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import type { ThreadRow } from "../queries";
 import { parseEscalationReason } from "@/lib/ai-responder/format-reason";
+import { humanizeMachineValue } from "@/lib/presentation/system-labels";
 
 import { isOlderThan, RelativeTime } from "./relative-time";
 
@@ -11,6 +12,14 @@ type Props = {
   nowMs: number;
   showMessagesAndLeads?: boolean;
 };
+
+// The parser's longLabel falls back to the raw value for gates it has no case
+// for; humanize those instead of showing snake_case.
+function escalationReasonLabel(reason: string): string {
+  const parsed = parseEscalationReason(reason);
+  if (!parsed || parsed.longLabel === parsed.raw) return humanizeMachineValue(reason);
+  return parsed.longLabel;
+}
 
 export function ThreadsNeedingAttention({
   threads,
@@ -59,7 +68,7 @@ export function ThreadsNeedingAttention({
                   </div>
                   {t.last_ai_escalation_reason && (
                     <div className="text-muted-foreground mt-1 truncate text-xs italic">
-                      {parseEscalationReason(t.last_ai_escalation_reason)?.longLabel}
+                      {escalationReasonLabel(t.last_ai_escalation_reason)}
                     </div>
                   )}
                 </div>

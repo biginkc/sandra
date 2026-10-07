@@ -3497,6 +3497,23 @@ export async function reconcileLateSendForInbound(
       });
       if (!written) return "error";
     }
+    // Durable resolution: stamp the original send_timeout row(s) so the sweeper
+    // never re-reads them. Idempotent (only unresolved rows match).
+    if (args.inboundMessageId) {
+      const { error: resolveError } = await supabase
+        .from("ai_reply_dead_letters")
+        .update({ resolved_at: new Date().toISOString() })
+        .eq("inbound_message_id", args.inboundMessageId)
+        .eq("reason", "send_timeout")
+        .is("resolved_at", null);
+      if (resolveError) {
+        reportError(new Error(resolveError.message), {
+          tags: { surface: "ai_responder_late_send_resolve" },
+          extra: { propertyId: args.propertyId },
+        });
+        return "error";
+      }
+    }
     const { data: converted, error } = await supabase
       .from("properties")
       .update({
@@ -3529,27 +3546,30 @@ export async function reconcileLateSendForInbound(
  * text did reach the provider but whose in-process reconciliation never ran
  * (the invocation froze or died). Call from the stale-run cron.
  *
- * Both passes use KEYSET pagination (never offset), so a bounded execution
- * never re-reads the same window and nothing past row 1,000 is unreachable.
+ * Resolution is durable IN THE ROW: `reconcileLateSendForInbound` stamps
+ * `resolved_at` on the original `send_timeout` row when it writes the
+ * `sent_late` marker. Pass A reads ONLY unresolved rows (`resolved_at is null`,
+ * served by a partial index), so every run reaches the oldest unresolved row
+ * with no cursor and no in-memory skipping. Within a run, keyset pagination
+ * (never offset) means no row is examined twice. Rows whose reply was never
+ * accepted stay unresolved and are re-examined at most once per run until the
+ * 7-day window drops them; the per-run reach is pageSize x maxPages (1,000
+ * rows by default). Oldest-first order plus the 7-day window is what
+ * prevents starvation at expected volumes.
  *
- * Pass A walks `send_timeout` rows oldest-first by (created_at, id). Resolved
- * rows (a `sent_late` marker exists) are skipped in memory but the cursor
- * still ADVANCES past them. It does not depend on the property flag, so a
- * timeout whose flag was cleared or replaced is still rescued: if the AI reply
- * for that inbound is sent/delivered and no marker exists, the marker is
- * written regardless of the flag state (the flag update itself stays
- * conditional on the flag still naming that inbound).
+ * Pass A is independent of the property flag, so a timeout whose flag was
+ * cleared or replaced is still rescued: if the AI reply for that inbound is
+ * sent/delivered, the marker is written regardless of the flag state (the flag
+ * update itself stays conditional on the flag still naming that inbound).
  *
  * Pass B repairs flags still reading `send_timeout:<inbound_id>` whose marker
  * already exists (the marker-vs-flag race). It is driven by the flag, keyset
- * over properties.id (a unique, never-null key; `last_ai_escalation_at` can be
- * null on a flagged row, which a timestamp keyset would silently skip).
+ * over properties.id (a unique, never-null key), and ignores flags and
+ * timeout rows older than the 7-day window so permanently stale flags cannot
+ * obstruct it.
  *
- * No migration may persist a cursor, so the continuation is returned
- * (`nextCursor`, null once a pass is exhausted) and accepted back via
- * `options.cursor`; a caller with storage can persist it so bounded runs make
- * progress across invocations. Without one, each invocation restarts from the
- * oldest unresolved row.
+ * `cursor`/`nextCursor` remain as an optional continuation for a caller that
+ * wants to resume a bounded run, but correctness no longer depends on one.
  */
 export type LateSendSweepCursor = {
   a: { createdAt: string; id: string } | null;
@@ -3580,6 +3600,7 @@ export async function sweepLateSends(
       .from("ai_reply_dead_letters")
       .select("id, created_at, org_id, conversation_id, property_id, inbound_message_id, body")
       .eq("reason", "send_timeout")
+      .is("resolved_at", null)
       .gte("created_at", since);
     if (cursorA) {
       query = query.or(
@@ -3596,22 +3617,7 @@ export async function sweepLateSends(
     }
     const all = data ?? [];
     const rows = all.filter((r) => r.inbound_message_id && r.org_id && r.property_id);
-    const ids = rows.map((r) => r.inbound_message_id as string);
-    let resolved = new Set<string>();
-    if (ids.length > 0) {
-      const { data: markers, error: markerError } = await supabase
-        .from("ai_reply_dead_letters")
-        .select("inbound_message_id")
-        .eq("reason", "sent_late")
-        .in("inbound_message_id", ids);
-      if (markerError) {
-        reportError(new Error(markerError.message), { tags: { surface: "ai_responder_late_send_sweep" } });
-        return done();
-      }
-      resolved = new Set((markers ?? []).map((m) => m.inbound_message_id as string));
-    }
     for (const row of rows) {
-      if (resolved.has(row.inbound_message_id as string)) continue;
       scanned += 1;
       const result = await reconcileLateSendForInbound(supabase, {
         orgId: row.org_id as string,
@@ -3637,7 +3643,8 @@ export async function sweepLateSends(
       .from("properties")
       .select("id, last_ai_escalation_reason")
       .eq("needs_human_attention", true)
-      .like("last_ai_escalation_reason", `${SEND_TIMEOUT_FLAG_PREFIX}%`);
+      .like("last_ai_escalation_reason", `${SEND_TIMEOUT_FLAG_PREFIX}%`)
+      .or(`last_ai_escalation_at.is.null,last_ai_escalation_at.gte.${since}`);
     if (cursorB) query = query.gt("id", cursorB);
     const { data, error } = await query.order("id", { ascending: true }).limit(pageSize);
     if (error) {
@@ -3653,6 +3660,7 @@ export async function sweepLateSends(
         .select("org_id, conversation_id, body")
         .eq("reason", "send_timeout")
         .eq("inbound_message_id", inboundId)
+        .gte("created_at", since)
         .limit(1);
       if (letterError) {
         reportError(new Error(letterError.message), { tags: { surface: "ai_responder_late_send_sweep" } });

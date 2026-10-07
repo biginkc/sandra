@@ -59,4 +59,16 @@ describe("<ThreadsNeedingAttention />", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/3f1c2d9e/)).toBeNull();
   });
+
+  it("falls back to a humanized reason when the parser has no label", () => {
+    render(
+      <ThreadsNeedingAttention
+        threads={[{ ...thread, last_ai_escalation_reason: "send_check_failed" }]}
+        totalCount={1}
+        nowMs={Date.parse("2026-06-22T14:00:00Z")}
+      />,
+    );
+    expect(screen.getByText("Send check failed")).toBeInTheDocument();
+    expect(screen.queryByText("send_check_failed")).toBeNull();
+  });
 });

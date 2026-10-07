@@ -4,6 +4,7 @@ import {
   sendSmsToContact,
   type SequenceAttemptOutcome,
 } from "@/lib/messaging/send";
+import { reportError } from "@/lib/errors/report";
 import { shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
 import type { Database } from "@/lib/supabase/types";
 import { pickFromPool } from "@/lib/templates/pool";
@@ -44,6 +45,8 @@ const FIRST_TOUCH_SENDER_PAUSE_REASON =
  */
 
 const CONSENT_UNAVAILABLE_RETRY_MS = 5 * 60 * 1000;
+/** Consecutive consent_unavailable retirements on one step before the enrollment is paused for a human. */
+const CONSENT_UNAVAILABLE_MAX_RETRIES = 12;
 
 export type TickOutcome =
   | { status: "sent"; enrollmentId: string; stepIndex: number; messageId: string | null }
@@ -497,6 +500,24 @@ export async function processEnrollmentTick(
             retireError?.message ?? "consent-unavailable claim changed before retirement",
             "Consent-unavailable claim bookkeeping failed",
           );
+        }
+        // A step advances only after a successful run, so every retired
+        // consent_unavailable row for this enrollment+step is consecutive.
+        // This row is already retired, so it is included in the count.
+        const { count: retiredCount, error: countError } = await client
+          .from("sequence_step_runs")
+          .select("id", { count: "exact", head: true })
+          .eq("enrollment_id", enrollment.id)
+          .eq("step_id", step.id)
+          .eq("failure_reason", "consent_unavailable");
+        if (!countError && (retiredCount ?? 0) >= CONSENT_UNAVAILABLE_MAX_RETRIES) {
+          const pauseError = await pauseEnrollment(client, enrollment.id, "reconciliation_required", false);
+          const message = `Consent/suppression state unreadable for ${retiredCount} consecutive attempts on step ${step.step_index}; enrollment paused${pauseError ? `; ${pauseError}` : ""}`;
+          reportError(new Error(message), {
+            tags: { surface: "sequence_tick_consent_unavailable_cap" },
+          });
+          if (pauseError) return { status: "failed", enrollmentId: enrollment.id, message };
+          return { status: "paused", enrollmentId: enrollment.id, reason: "reconciliation_required" };
         }
         const { data: deferred, error: deferError } = await client
           .from("sequence_enrollments")

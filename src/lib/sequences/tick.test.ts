@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { reportError } from "@/lib/errors/report";
 import { sendSmsToContact } from "@/lib/messaging/send";
 
 import { processEnrollmentTick } from "./tick";
 
+vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 vi.mock("@/lib/messaging/send", () => ({
   sendSmsToContact: vi.fn(),
 }));
@@ -251,6 +253,7 @@ describe("processEnrollmentTick — advancement persistence", () => {
     nextStepError?: boolean;
     runWriteError?: boolean;
     enrollmentWriteError?: boolean;
+    consentRetiredCount?: number;
   } = {}) {
     const enrollment: Record<string, unknown> = { ...BASE_ENROLLMENT };
     let claimed = false;
@@ -283,6 +286,9 @@ describe("processEnrollmentTick — advancement persistence", () => {
             if (claimed) return { data: null, error: { code: "23505", message: "duplicate claim" } };
             claimed = true;
             return ok({ id: "run-1" });
+          }
+          if (operation === "select" && filters.failure_reason === "consent_unavailable") {
+            return { data: null, error: null, count: opts.consentRetiredCount ?? 1 };
           }
           if (opts.runWriteError && operation === "update") return fail("run write failed");
           return ok({ id: "run-1" });
@@ -431,6 +437,29 @@ describe("processEnrollmentTick — advancement persistence", () => {
     expect(enrollment.pause_reason ?? null).toBeNull();
     expect(enrollment.current_step_index).toBe(0);
     expect(enrollment.next_run_at).toEqual(expect.any(String));
+  });
+
+  it.each([
+    [11, "rescheduled_consent_unavailable"],
+    [12, "paused"],
+  ] as const)("consent_unavailable retirement #%i -> %s", async (count, status) => {
+    vi.mocked(sendSmsToContact).mockResolvedValue({
+      status: "blocked_fresh_state_unavailable",
+      error: "consent read failed",
+    });
+    const { client, enrollment } = fixture({ consentRetiredCount: count });
+
+    const outcome = await processEnrollmentTick(client, BASE_ENROLLMENT);
+
+    expect(outcome).toMatchObject({ status, enrollmentId: "enrollment-1" });
+    if (status === "paused") {
+      expect(outcome).toMatchObject({ reason: "reconciliation_required" });
+      expect(enrollment).toMatchObject({ status: "paused", pause_reason: "reconciliation_required" });
+      expect(reportError).toHaveBeenCalledTimes(1);
+    } else {
+      expect(enrollment.status).toBe("active");
+      expect(reportError).not.toHaveBeenCalled();
+    }
   });
 
   it("completes after the final successful step", async () => {
