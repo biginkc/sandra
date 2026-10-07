@@ -4614,8 +4614,94 @@ export type Database = {
         }
         Relationships: []
       }
+      // Hand-inserted 2026-10-08 for migration
+      // 20261008170000_auto_reply_templates.sql (Messages v2 Phase 4).
+      auto_reply_templates: {
+        Row: {
+          active: boolean
+          created_at: string
+          created_by: string | null
+          id: string
+          org_id: string
+          outcome: string
+          priority: number
+          reply_intent: string | null
+          template_id: string
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          active?: boolean
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          org_id: string
+          outcome: string
+          priority?: number
+          reply_intent?: string | null
+          template_id: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          active?: boolean
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          org_id?: string
+          outcome?: string
+          priority?: number
+          reply_intent?: string | null
+          template_id?: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "auto_reply_templates_template_id_fkey"
+            columns: ["template_id"]
+            isOneToOne: false
+            referencedRelation: "sms_templates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sms_template_approval_events: {
+        Row: {
+          action: string
+          actor: string | null
+          content: string
+          created_at: string
+          id: string
+          org_id: string
+          template_id: string
+        }
+        Insert: {
+          action: string
+          actor?: string | null
+          content: string
+          created_at?: string
+          id?: string
+          org_id: string
+          template_id: string
+        }
+        Update: {
+          action?: string
+          actor?: string | null
+          content?: string
+          created_at?: string
+          id?: string
+          org_id?: string
+          template_id?: string
+        }
+        Relationships: []
+      }
       sms_templates: {
         Row: {
+          approved_at: string | null
+          approved_by: string | null
+          approved_content: string | null
+          approved_for_auto_send: boolean
           category: string
           content: string
           created_at: string
@@ -4628,6 +4714,10 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          approved_at?: string | null
+          approved_by?: string | null
+          approved_content?: string | null
+          approved_for_auto_send?: boolean
           category?: string
           content: string
           created_at?: string
@@ -4640,6 +4730,10 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          approved_at?: string | null
+          approved_by?: string | null
+          approved_content?: string | null
+          approved_for_auto_send?: boolean
           category?: string
           content?: string
           created_at?: string
@@ -7858,6 +7952,29 @@ export type Database = {
       pipeline_runs_latest_for_properties: {
         Args: { p_org_id: string; p_property_ids: string[] }
         Returns: Database["public"]["Tables"]["pipeline_runs"]["Row"][]
+      }
+      // Hand-inserted 2026-10-08 for migration
+      // 20261008170000_auto_reply_templates.sql (Messages v2 Phase 4).
+      fn_set_template_auto_send_approval: {
+        Args: {
+          p_approved: boolean
+          p_expected_content?: string | null
+          p_template_id: string
+        }
+        Returns: Json
+      }
+      fn_set_auto_reply_template: {
+        Args: {
+          p_active?: boolean
+          p_delete?: boolean
+          p_mapping_id?: string | null
+          p_org_id: string
+          p_outcome: string
+          p_priority?: number
+          p_reply_intent: string | null
+          p_template_id: string | null
+        }
+        Returns: Json
       }
       fn_set_jev_outcome_threshold: {
         Args: {
