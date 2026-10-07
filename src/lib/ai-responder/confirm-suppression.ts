@@ -256,7 +256,12 @@ async function raiseSuppressionIncompleteHold(
     const existingIds = suppressionReviewIdsFromReason(existing);
     const unbackedIds: string[] = [];
     for (const id of existingIds) {
-      if (id === reviewId) continue;
+      // The current id's own write already failed (or succeeded) above; keep
+      // its original position rather than re-trying it here.
+      if (id === reviewId) {
+        if (!ledgerOk) unbackedIds.push(id);
+        continue;
+      }
       if (!(await writeLedger(id))) unbackedIds.push(id);
     }
     // A send-timeout flag is a different, still-open problem: keep its
@@ -266,15 +271,18 @@ async function raiseSuppressionIncompleteHold(
     // ledger row (it lives only in that reason) and this id is ledger-backed.
     const keepReason =
       (isTimeoutEscalationReason(existing) && ledgerOk) ||
-      (unbackedIds.length > 0 && ledgerOk);
+      (unbackedIds.some((id) => id !== reviewId) && ledgerOk);
     // Ledger write for this id failed: APPEND it to the ids already in the
     // reason (never replace), de-duplicated and capped at the oldest ids.
     let nextReason: string | null = null;
     if (!keepReason) {
       // This id is ledger-backed (earlier ids were backfilled): repoint to it.
+      // Only ids that still have NO ledger row need to ride on the pointer;
+      // backfilled ids are durable already, so the 10-id cap is effectively
+      // unreachable in practice.
       const all = ledgerOk
         ? [reviewId]
-        : [...new Set([...existingIds, reviewId])];
+        : [...new Set([...unbackedIds, reviewId])];
       nextReason = suppressionIncompleteReason(all);
       if (all.length > MAX_SUPPRESSION_REASON_IDS) {
         reportError(new Error("suppression_incomplete reason id cap reached"), {

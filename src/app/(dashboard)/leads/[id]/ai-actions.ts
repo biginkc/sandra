@@ -106,7 +106,8 @@ export async function listOutstandingSuppressionFailures(
       ok: false,
       error: {
         code: "LIST_SUPPRESSION_FAILED",
-        message: e instanceof Error ? e.message : "Could not load suppression status",
+        message:
+          e instanceof Error ? e.message : "Could not load suppression status",
       },
     };
   }
@@ -174,7 +175,9 @@ export async function retrySuppressionForProperty(
       .in("disposition", ["opted_out", "dnc"])
       .in("id", ids);
     if (reviewError) return fail(reviewError.message);
-    const valid = new Set(((reviews ?? []) as Array<{ id: string }>).map((r) => r.id));
+    const valid = new Set(
+      ((reviews ?? []) as Array<{ id: string }>).map((r) => r.id),
+    );
     const targets = ids.filter((id) => valid.has(id));
     if (targets.length === 0) {
       return fail("No confirmed opt-out or DNC review found for this lead");
@@ -188,13 +191,20 @@ export async function retrySuppressionForProperty(
         user.id,
       );
       if (suppression.ok) {
-        await recordSuppressionRetriedOk({ propertyId, reviewId, actorId: user.id });
+        await recordSuppressionRetriedOk({
+          propertyId,
+          reviewId,
+          actorId: user.id,
+        });
       } else {
         warning = suppression.warning;
       }
     }
 
-    const after = await listOutstandingSuppressionReviews(supabase as never, propertyId);
+    const after = await listOutstandingSuppressionReviews(
+      supabase as never,
+      propertyId,
+    );
     let cleared = false;
     if (isSuppressionIncompleteReason(after.reason)) {
       if (after.reviewIds.length === 0) {
@@ -213,7 +223,10 @@ export async function retrySuppressionForProperty(
         if (clearError) {
           return {
             ok: false,
-            error: { code: "CLEAR_ATTENTION_FAILED", message: clearError.message },
+            error: {
+              code: "CLEAR_ATTENTION_FAILED",
+              message: clearError.message,
+            },
           };
         }
         if (clearedRow) {
@@ -223,28 +236,33 @@ export async function retrySuppressionForProperty(
             actorType: "user",
             actorId: user.id,
             eventType: LEAD_EVENT_TYPES.AI_ESCALATION_CLEARED,
-            payload: { from: true, to: false, via: "retry_suppression", reviewIds: targets },
+            payload: {
+              from: true,
+              to: false,
+              via: "retry_suppression",
+              reviewIds: targets,
+            },
           });
         }
       } else {
         const nextReason = suppressionIncompleteReason(after.reviewIds);
         // Drop resolved ids from the reason; keep the hold on what remains.
         if (nextReason !== after.reason) {
-        const { error: repointError } = await supabase
-          .from("properties")
-          .update({
-            last_ai_escalation_reason: nextReason,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", propertyId)
-          .eq("last_ai_escalation_reason", after.reason as string);
-        if (repointError) {
-          // Hold stays exactly as it was; the ledger still lists what remains.
-          reportError(new Error(repointError.message), {
-            tags: { surface: "retry_suppression_repoint" },
-            extra: { propertyId },
-          });
-        }
+          const { error: repointError } = await supabase
+            .from("properties")
+            .update({
+              last_ai_escalation_reason: nextReason,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", propertyId)
+            .eq("last_ai_escalation_reason", after.reason as string);
+          if (repointError) {
+            // Hold stays exactly as it was; the ledger still lists what remains.
+            reportError(new Error(repointError.message), {
+              tags: { surface: "retry_suppression_repoint" },
+              extra: { propertyId },
+            });
+          }
         }
       }
     }
