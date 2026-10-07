@@ -20,6 +20,8 @@ import {
   type LooseSupabase,
 } from "./queries";
 import { RunCard } from "./run-card";
+import type { ReplyGeneration } from "./reply-generation";
+import { ReplyGenerationToggle, type SetReplyGenerationAction } from "./reply-generation-toggle";
 import type {
   HoldsMeta,
   ModeBadge,
@@ -35,6 +37,9 @@ export type MessagesV2ViewProps = {
   orgId: string;
   /** Owners may open the legacy /messages inbox; Acquisitions callers may not. */
   isOwner?: boolean;
+  /** The org's "AI drafts" setting; null/absent hides the control. */
+  replyGeneration?: { configId: string; replyGeneration: ReplyGeneration } | null;
+  setReplyGeneration?: SetReplyGenerationAction;
   runs: RunWithSteps[];
   /** Open holds from the server (flag / pending decision / pending review). */
   holds: OpenHold<RunWithSteps>[];
@@ -286,6 +291,12 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             </Badge>
           ))}
         </div>
+        <ReplyGenerationToggle
+          configId={props.replyGeneration?.configId ?? null}
+          replyGeneration={props.replyGeneration?.replyGeneration ?? null}
+          isOwner={isOwner}
+          action={props.setReplyGeneration}
+        />
         <p
           className="ml-auto text-sm text-muted-foreground"
           data-testid="header-status"

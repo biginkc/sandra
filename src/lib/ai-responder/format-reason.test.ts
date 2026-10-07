@@ -131,6 +131,13 @@ describe("parseEscalationReason — unknown gate falls back gracefully", () => {
 });
 
 describe("provider failure reasons", () => {
+  it("needs_reply reads as a human-reply request, not generic review", () => {
+    const parsed = parseEscalationReason("needs_reply");
+    expect(parsed?.shortLabel).toBe("Needs reply");
+    expect(parsed?.longLabel).toBe("Seller replied — needs a human reply");
+    expect(parsed?.color).toBe("amber");
+  });
+
   it("provider_billing parses loud: rose color, credits label", () => {
     const parsed = parseEscalationReason("provider_billing");
     expect(parsed).not.toBeNull();

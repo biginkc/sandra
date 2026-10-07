@@ -13,6 +13,7 @@ import {
   sendHeldDraftAction,
   takeOverHoldAction,
   retrySuppressionHoldAction,
+  setReplyGenerationAction,
 } from "./actions";
 import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
@@ -51,6 +52,39 @@ async function loadCoverage(
   }
 }
 
+/** The org's active responder config and its "AI drafts" setting (null on any failure: the toggle hides). */
+async function loadReplyGeneration(
+  supabase: LooseSupabase,
+  orgId: string,
+): Promise<{ configId: string; replyGeneration: "llm" | "off" } | null> {
+  try {
+    const { data, error } = await (supabase as unknown as {
+      from: (t: string) => {
+        select: (c: string) => {
+          eq: (c: string, v: unknown) => {
+            eq: (c: string, v: unknown) => {
+              maybeSingle: () => PromiseLike<{
+                data: { id: string; reply_generation: string } | null;
+                error: unknown;
+              }>;
+            };
+          };
+        };
+      };
+    })
+      .from("ai_responder_configs")
+      .select("id, reply_generation")
+      .eq("org_id", orgId)
+      .eq("active", true)
+      .maybeSingle();
+    if (error || !data) return null;
+    if (data.reply_generation !== "llm" && data.reply_generation !== "off") return null;
+    return { configId: data.id, replyGeneration: data.reply_generation };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Live feed of every inbound SMS the pipeline processed (gates, Jev judgment,
  * applied actions, replies, holds), plus the holds rail with its Phase 1
@@ -63,9 +97,10 @@ export default async function MessagesV2Page() {
   const { orgId, isOwner } = access;
 
   const supabase = (await createClient()) as unknown as LooseSupabase;
-  const [loaded, coverage] = await Promise.all([
+  const [loaded, coverage, replySetting] = await Promise.all([
     loadMessagesV2Data(supabase, orgId, undefined, { includeDraftBody: true }),
     loadCoverage(orgId),
+    loadReplyGeneration(supabase, orgId),
   ]);
   // The hold queries are windowed; the version each card sends back is read
   // fresh per displayed property so a hold past the window can still be dismissed.
@@ -89,6 +124,8 @@ export default async function MessagesV2Page() {
       <MessagesV2View
         orgId={orgId}
         isOwner={isOwner}
+        replyGeneration={replySetting}
+        setReplyGeneration={setReplyGenerationAction}
         coverage={coverage === "unavailable" ? null : coverage}
         coverageUnavailable={coverage === "unavailable"}
         holdsMeta={data.holdsMeta}

@@ -468,7 +468,7 @@ async function dispatchAiResponseCore(
   const { data: config } = await supabase
     .from("ai_responder_configs")
     .select(
-      "id, active, model, system_prompt, max_turns, min_confidence, escalation_keywords, business_hours_only, classifier_provider, classifier_mode, outbound_mode",
+      "id, active, model, system_prompt, max_turns, min_confidence, escalation_keywords, business_hours_only, classifier_provider, classifier_mode, outbound_mode, reply_generation",
     )
     .eq("org_id", property.org_id)
     .eq("active", true)
@@ -792,6 +792,7 @@ async function dispatchAiResponseCore(
       system_prompt: config!.system_prompt,
       min_confidence: config!.min_confidence,
       outbound_mode: config!.outbound_mode,
+      reply_generation: config!.reply_generation,
     },
     deps,
     currentTurn,
@@ -835,6 +836,7 @@ async function classifyAndApplyDespiteReplyIneligibility(
     model: string;
     system_prompt: string;
     min_confidence: number;
+    reply_generation?: string | null;
   },
   currentTurn: number,
   runCtx?: MaybeRunContext,
@@ -1148,6 +1150,32 @@ async function classifyAndHandleNonRouteOutcomes(
   return { handled: false, classification };
 }
 
+/**
+ * Jev-only mode (`ai_responder_configs.reply_generation = 'off'`): no LLM reply
+ * is generated or sent. The conversation is held for a human with the reason
+ * `needs_reply` so the seller is never silently unanswered.
+ */
+async function holdForNeedsReply(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  claimId: string | null,
+  runCtx?: MaybeRunContext,
+): Promise<AiDispatchOutcome> {
+  await trace(supabase, {
+    kind: "gate",
+    name: "reply_generation_off",
+    result: "block",
+    detail: { reason: "needs_reply" },
+  }, runCtx);
+  const flagOk = await markPropertyNeedsAttention(supabase, input.propertyId, "needs_reply", runCtx);
+  await completeClaim(supabase, input.propertyId, {
+    claimId,
+    outcome: "escalated",
+    flagOk,
+  });
+  return { outcome: "escalated", reason: "needs_reply" };
+}
+
 async function resolveAndApplyRoute(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
@@ -1157,6 +1185,7 @@ async function resolveAndApplyRoute(
     system_prompt: string;
     min_confidence: number;
     outbound_mode?: string | null;
+    reply_generation?: string | null;
   },
   deps: { anthropic: AnthropicLike },
   currentTurn: number,
@@ -1180,6 +1209,12 @@ async function resolveAndApplyRoute(
       jevAutoAccept = { classificationRunId: classification.classificationRunId };
     }
   } else {
+    // Jev-only mode: the owner turned LLM drafting off. This is the ONLY
+    // place the legacy generator is called, so refusing here guarantees no
+    // Anthropic call on any path. A human answers instead.
+    if (config.reply_generation === "off") {
+      return holdForNeedsReply(supabase, input, responseClaim.claimId, runCtx);
+    }
     // use_legacy — jev_no_action is handled inline above (returns
     // handled: true before reaching resolveAndApplyRoute), so only
     // use_legacy falls through to the existing combined Claude
@@ -1815,6 +1850,7 @@ async function retryWithCarriedReply(
         max_turns: number;
         model: string;
         outbound_mode?: string | null;
+        reply_generation?: string | null;
       }
     | null
     | undefined,
@@ -1856,6 +1892,12 @@ async function retryWithCarriedReply(
       });
       return { outcome: "escalated", reason: "send_check_failed" };
     }
+  }
+
+  // Jev-only mode: a reply generated before drafting was turned off is not
+  // sent either; a human answers.
+  if (config?.reply_generation === "off") {
+    return holdForNeedsReply(supabase, input, claim.claimId, runCtx);
   }
 
   const consentLookup = await getConsentStateStrict(supabase, input.contactId, "sms");

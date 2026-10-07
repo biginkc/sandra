@@ -133,6 +133,24 @@ beforeEach(() => {
   mocks.client.realtime.setAuth.mockClear();
 });
 
+describe("MessagesV2View AI drafts control", () => {
+  const setting = { configId: "cfg-1", replyGeneration: "off" as const };
+  it("owner sees the toggle in the header", async () => {
+    await mount({ ...props(), replyGeneration: setting, setReplyGeneration: vi.fn() });
+    expect(screen.getByTestId("reply-generation-toggle")).toHaveTextContent("AI drafts: off");
+  });
+  it("acquisitions sees a read-only badge, no toggle", async () => {
+    await mount({ ...props(), isOwner: false, replyGeneration: setting, setReplyGeneration: vi.fn() });
+    expect(screen.getByTestId("reply-generation-badge")).toHaveTextContent("AI drafts: off");
+    expect(screen.queryByTestId("reply-generation-toggle")).toBeNull();
+  });
+  it("no control when the setting is unavailable", async () => {
+    await mount(props());
+    expect(screen.queryByTestId("reply-generation-toggle")).toBeNull();
+    expect(screen.queryByTestId("reply-generation-badge")).toBeNull();
+  });
+});
+
 describe("MessagesV2View", () => {
   it("renders header, mode badges, columns, empty states and legend", async () => {
     await mount();
