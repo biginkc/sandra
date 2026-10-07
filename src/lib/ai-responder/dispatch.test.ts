@@ -558,7 +558,8 @@ function createMockSupabase(state: MockState) {
           const stamped = p.last_ai_escalation_at == null ? null : String(p.last_ai_escalation_at);
           return (
             p.needs_human_attention === true &&
-            (reason.startsWith("send_timeout:") || reason.startsWith("dead_letter_failed:send_timeout:")) &&
+            ((reason.startsWith("send_timeout:") && !reason.endsWith(":backed")) ||
+              reason.startsWith("dead_letter_failed:send_timeout:")) &&
             (gtId === null || String(p.id) > gtId) &&
             (gteId === null || String(p.id) >= gteId) &&
             (ltId === null || String(p.id) < ltId) &&
@@ -2969,7 +2970,7 @@ describe("send chokepoint guards (fix round 2)", () => {
     expect(result).toEqual({ outcome: "escalated", reason: "send_timeout" });
     expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledTimes(1);
     expect(state.property.needs_human_attention).toBe(true);
-    expect(state.property.last_ai_escalation_reason).toBe("send_timeout:inbound-slow");
+    expect(state.property.last_ai_escalation_reason).toBe("send_timeout:inbound-slow:backed");
     // The only durable copy of the text is dead-lettered (the send may or may
     // not have landed: a human decides).
     expect(state.deadLetters).toEqual([expect.objectContaining({ inbound_message_id: "inbound-slow", body: "Hi there", reason: "send_timeout" })]);
@@ -2999,7 +3000,7 @@ describe("send chokepoint guards (fix round 2)", () => {
     });
     const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-late"), { anthropic: {} as never });
     expect(result).toEqual({ outcome: "escalated", reason: "send_timeout" });
-    expect(state.property.last_ai_escalation_reason).toBe("send_timeout:inbound-late");
+    expect(state.property.last_ai_escalation_reason).toBe("send_timeout:inbound-late:backed");
     land();
     await new Promise((r) => setTimeout(r, 30));
     expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
@@ -5213,6 +5214,107 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
           expect(state.deadLetters).toHaveLength(1001);
         });
 
+        it("1,001 backed flags in one slice ahead of an older orphan in the SAME slice: the orphan is repaired on the first visit (backed rows never fetched)", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          const recent = hourAgo();
+          const older = new Date(Date.now() - 3 * 24 * 3_600_000).toISOString();
+          state.extraProperties = Array.from({ length: 1001 }, (_v, i) => ({
+            id: uuid("a", i), org_id: "org-1", needs_human_attention: true,
+            last_ai_escalation_reason: `send_timeout:${uuid("c", i)}:backed`, last_ai_escalation_at: recent,
+          }));
+          const orphanInbound = "00000000-0000-4000-8000-0000000000f2";
+          state.property.id = "a0000000-0000-4000-8000-000000009999";
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = `send_timeout:${orphanInbound}`;
+          state.property.last_ai_escalation_at = older;
+          state.deadLetters = [];
+          await sweepLateSends(createMockSupabase(state) as never, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
+          expect(state.deadLetters?.filter((d) => d.inbound_message_id === orphanInbound)).toHaveLength(1);
+          // No backed row was ever looked up.
+          expect(state.deadLetters).toHaveLength(1);
+        });
+
+        it("the dead_letter_failed form stays eligible for orphan repair", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          state.property.id = ORPHAN_PROP;
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = "dead_letter_failed:send_timeout:00000000-0000-4000-8000-0000000000c9";
+          state.property.last_ai_escalation_at = hourAgo();
+          state.deadLetters = [];
+          await sweepLateSends(createMockSupabase(state) as never, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
+          expect(state.deadLetters).toHaveLength(1);
+        });
+
+        it("a backed flag is not an orphan candidate", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          state.property.id = ORPHAN_PROP;
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = "send_timeout:00000000-0000-4000-8000-0000000000c8:backed";
+          state.property.last_ai_escalation_at = hourAgo();
+          state.deadLetters = [];
+          await sweepLateSends(createMockSupabase(state) as never, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
+          expect(state.deadLetters).toHaveLength(0);
+          expect(state.deadLetterInQueries ?? 0).toBe(0);
+        });
+
+        it("a backed flag still converts on late acceptance", async () => {
+          const { reconcileLateSendForInbound } = await import("./dispatch");
+          const state = setup();
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = "send_timeout:inbound-late:backed";
+          const result = await reconcileLateSendForInbound(createMockSupabase(state) as never, {
+            orgId: "org-1", conversationId: CONVERSATION_ID, propertyId: PROPERTY_ID,
+            inboundMessageId: "inbound-late", body: "Hi", confirmedSent: true,
+          });
+          expect(result).toBe("reconciled");
+          expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
+        });
+
+        it("a backed flag bound to a different inbound is never converted", async () => {
+          const { reconcileLateSendForInbound } = await import("./dispatch");
+          const state = setup();
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = "send_timeout:inbound-B:backed";
+          await reconcileLateSendForInbound(createMockSupabase(state) as never, {
+            orgId: "org-1", conversationId: CONVERSATION_ID, propertyId: PROPERTY_ID,
+            inboundMessageId: "inbound-A", body: "A", confirmedSent: true,
+          });
+          expect(state.property.last_ai_escalation_reason).toBe("send_timeout:inbound-B:backed");
+        });
+
+        it("end to end: dead-letter insert succeeds -> flag rewritten to :backed -> late acceptance -> send_timeout_then_sent", async () => {
+          const state = createMockState();
+          afterTasks.capture = true;
+          const { land } = await lateScenario(state);
+          expect(state.deadLetters).toEqual([expect.objectContaining({ reason: "send_timeout" })]);
+          expect(state.property.last_ai_escalation_reason).toBe("send_timeout:inbound-late:backed");
+          land();
+          await Promise.all(afterTasks.fns.map((fn) => fn()));
+          expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
+        });
+
+        it("a failed dead-letter insert keeps the dead_letter_failed flag (never :backed)", async () => {
+          const state = createMockState();
+          afterTasks.capture = true;
+          state.deadLetterInsertError = { message: "dl boom" };
+          await lateScenario(state);
+          expect(state.property.last_ai_escalation_reason).toBe("dead_letter_failed:send_timeout:inbound-late");
+        });
+
+        it("the :backed rewrite is conditional: a replaced flag is left alone", async () => {
+          const state = createMockState();
+          afterTasks.capture = true;
+          state.flagWriteErrorReason = undefined;
+          const { land } = await lateScenario(state);
+          state.property.last_ai_escalation_reason = "reply_skipped:newer_inbound";
+          land();
+          await Promise.all(afterTasks.fns.map((fn) => fn()));
+          expect(state.property.last_ai_escalation_reason).toBe("reply_skipped:newer_inbound");
+        });
+
         it("a malformed inbound id in the flag is skipped and counted, never an error or an insert", async () => {
           const { sweepLateSends } = await import("./dispatch");
           const state = setup();
@@ -5223,11 +5325,15 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
           state.deadLetters = [];
           const result = await sweepLateSends(createMockSupabase(state) as never, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
           expect(result.orphanMalformed).toBe(1);
+          const malformedReports = reportErrorMock.mock.calls.filter(
+            (c) => (c[1] as { tags?: { surface?: string } } | undefined)?.tags?.surface === "ai_responder_orphan_timeout_malformed",
+          );
+          expect(malformedReports).toHaveLength(1);
           expect(state.deadLetters).toHaveLength(0);
           expect(state.deadLetterInQueries ?? 0).toBe(0);
         });
 
-        it("the existence check is one bulk query per page", async () => {
+        it("the existence check is bulk `.in` queries of at most 100 uuids", async () => {
           const { sweepLateSends } = await import("./dispatch");
           const state = setup();
           const at = hourAgo();
@@ -5241,8 +5347,9 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
             body: "x", reason: "send_timeout", created_at: at, resolved_at: at,
           }));
           await sweepLateSends(createMockSupabase(state) as never, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
-          // 450 properties = 3 pages (200 + 200 + 50), one `.in` query each, no inserts.
-          expect(state.deadLetterInQueries).toBe(3);
+          // 450 properties = 3 scan pages (200 + 200 + 50); each page's lookup is chunked
+          // into `.in` queries of at most 100 uuids: 2 + 2 + 1 = 5, no inserts.
+          expect(state.deadLetterInQueries).toBe(5);
           expect(state.deadLetterInsertAttempts ?? 0).toBe(0);
         });
 

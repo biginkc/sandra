@@ -2996,7 +2996,7 @@ async function failClosed(
     result: "error",
     ...(detail ? { detail } : {}),
   }, args.runContext);
-  await flagAndDeadLetterFor(
+  const flagResult = await flagAndDeadLetterFor(
     supabase,
     args,
     reason,
@@ -3004,6 +3004,27 @@ async function failClosed(
       ? { guard, flagFirst: true, flagReason: sendTimeoutFlagReason(args.input.inboundMessageId ?? null) }
       : { guard },
   );
+  const inboundForBacking = args.input.inboundMessageId ?? null;
+  if (reason === "send_timeout" && inboundForBacking && flagResult.deadLettered) {
+    // The dead-letter row now exists, so this flag can never be an orphan:
+    // mark it `:backed` so the orphan scan excludes it server-side. Conditional
+    // on the exact original reason; zero rows = someone replaced it, which is fine.
+    guard();
+    const { error: backedError } = await supabase
+      .from("properties")
+      .update({
+        last_ai_escalation_reason: sendTimeoutBackedFlagReason(inboundForBacking),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", args.input.propertyId)
+      .eq("last_ai_escalation_reason", sendTimeoutFlagReason(inboundForBacking));
+    if (backedError) {
+      reportError(new Error(backedError.message), {
+        tags: { surface: "ai_responder_send_timeout_backed_flag" },
+        extra: { propertyId: args.input.propertyId },
+      });
+    }
+  }
   return { outcome: "escalated", reason };
 }
 
@@ -3017,19 +3038,27 @@ function sendTimeoutFlagReason(inboundMessageId: string | null): string {
   return inboundMessageId ? `${SEND_TIMEOUT_FLAG_PREFIX}${inboundMessageId}` : "send_timeout";
 }
 const DEAD_LETTER_FAILED_TIMEOUT_PREFIX = `dead_letter_failed:${SEND_TIMEOUT_FLAG_PREFIX}`;
-/** Both flag spellings a timeout for this inbound can carry (identity-bound). */
+const SEND_TIMEOUT_BACKED_SUFFIX = ":backed";
+/** `send_timeout:<id>:backed`: the dead-letter row exists, so the orphan scan skips this flag. */
+function sendTimeoutBackedFlagReason(inboundMessageId: string): string {
+  return `${SEND_TIMEOUT_FLAG_PREFIX}${inboundMessageId}${SEND_TIMEOUT_BACKED_SUFFIX}`;
+}
+/** Every flag spelling a timeout for this inbound can carry (identity-bound). */
 function sendTimeoutFlagReasons(inboundMessageId: string | null): string[] {
   const primary = sendTimeoutFlagReason(inboundMessageId);
-  return [primary, `dead_letter_failed:${primary}`];
+  return inboundMessageId
+    ? [primary, `${primary}${SEND_TIMEOUT_BACKED_SUFFIX}`, `dead_letter_failed:${primary}`]
+    : [primary, `dead_letter_failed:${primary}`];
 }
-/** Inbound id carried by a `send_timeout:<id>` / `dead_letter_failed:send_timeout:<id>` flag. */
+/** Inbound id carried by a `send_timeout:<id>[:backed]` / `dead_letter_failed:send_timeout:<id>` flag. */
 function inboundIdFromTimeoutFlag(reason: string | null | undefined): string | null {
   if (!reason) return null;
-  const rest = reason.startsWith(DEAD_LETTER_FAILED_TIMEOUT_PREFIX)
+  let rest = reason.startsWith(DEAD_LETTER_FAILED_TIMEOUT_PREFIX)
     ? reason.slice(DEAD_LETTER_FAILED_TIMEOUT_PREFIX.length)
     : reason.startsWith(SEND_TIMEOUT_FLAG_PREFIX)
       ? reason.slice(SEND_TIMEOUT_FLAG_PREFIX.length)
       : "";
+  if (rest.endsWith(SEND_TIMEOUT_BACKED_SUFFIX)) rest = rest.slice(0, -SEND_TIMEOUT_BACKED_SUFFIX.length);
   return rest.length > 0 ? rest : null;
 }
 
@@ -3718,7 +3747,7 @@ export function orphanPropertiesQuery(
     .select("id, org_id, last_ai_escalation_reason, last_ai_escalation_at")
     .eq("needs_human_attention", true)
     .or(
-      "last_ai_escalation_reason.like.send_timeout:%,last_ai_escalation_reason.like.dead_letter_failed:send_timeout:%",
+      "and(last_ai_escalation_reason.like.send_timeout:%,last_ai_escalation_reason.not.like.%:backed),last_ai_escalation_reason.like.dead_letter_failed:send_timeout:%",
     )
     .gte("last_ai_escalation_at", args.windowIso);
   query = args.after ? query.gt("id", args.after) : query.gte("id", args.lower);
@@ -3727,7 +3756,11 @@ export function orphanPropertiesQuery(
 }
 
 const ORPHAN_SLICE_COUNT = 16;
+// Coupled to the 10-minute cron schedule in vercel.json (one slice per run);
+// change the schedule and this together.
 const ORPHAN_SLICE_MS = 10 * 60 * 1000;
+/** Max uuids per bulk `.in('inbound_message_id', ...)` (about 4KB of URL). */
+const ORPHAN_IN_CHUNK = 100;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Bounds of one of 16 uuid id-space slices (first hex char); `upper` is exclusive, null for the last. */
@@ -3757,6 +3790,14 @@ export function orphanSliceBounds(slice: number): { lower: string; upper: string
  * if more than 1,000 flagged timeouts share one hex prefix (more than ~16,000
  * flagged timeouts in total); beyond that bound a high-id orphan in that slice
  * can still be starved.
+ *
+ * Eligibility is decided server-side: flags already backed by a dead-letter row
+ * (`send_timeout:<id>:backed`, written by the timeout path once its insert
+ * succeeds) are excluded from the query, so only genuine orphans (the
+ * process-death case and the `dead_letter_failed:` double failure) are ever
+ * fetched. The per-slice 1,000 cap therefore matters only with more than 1,000
+ * genuine orphans in one slice; the 16-slice rotation is cheap insurance, not
+ * load-bearing.
  *
  * Per page, one `.in('inbound_message_id', ids)` query finds the existing rows.
  * Flags with no `last_ai_escalation_at` (legacy) are not eligible (no fallback to
@@ -3804,20 +3845,21 @@ async function repairOrphanedTimeouts(
     }
     let existing = new Set<string>();
     if (candidates.length > 0) {
-      const { data: rows, error: existingError } = await supabase
-        .from("ai_reply_dead_letters")
-        .select("inbound_message_id")
-        .in("inbound_message_id", candidates.map((c) => c.inboundId))
-        .eq("reason", "send_timeout");
-      if (existingError) {
-        reportError(new Error(existingError.message), { tags: { surface: "ai_responder_orphan_timeout_repair" } });
-        return { malformed };
+      const ids = candidates.map((c) => c.inboundId);
+      for (let i = 0; i < ids.length; i += ORPHAN_IN_CHUNK) {
+        const { data: rows, error: existingError } = await supabase
+          .from("ai_reply_dead_letters")
+          .select("inbound_message_id")
+          .in("inbound_message_id", ids.slice(i, i + ORPHAN_IN_CHUNK))
+          .eq("reason", "send_timeout");
+        if (existingError) {
+          reportError(new Error(existingError.message), { tags: { surface: "ai_responder_orphan_timeout_repair" } });
+          return { malformed };
+        }
+        for (const r of (rows ?? []) as Array<{ inbound_message_id: string | null }>) {
+          if (r.inbound_message_id) existing.add(r.inbound_message_id);
+        }
       }
-      existing = new Set(
-        ((rows ?? []) as Array<{ inbound_message_id: string | null }>)
-          .map((r) => r.inbound_message_id)
-          .filter((v): v is string => !!v),
-      );
     }
     for (const { prop, inboundId, stampedAt } of candidates) {
       if (inserted >= ORPHAN_PAGE_SIZE) break;
@@ -3901,6 +3943,12 @@ export async function sweepLateSends(
   orphanMalformed = (
     await repairOrphanedTimeouts(supabase, windowStartMs, options.orphanScanNowMs ?? Date.now())
   ).malformed;
+  if (orphanMalformed > 0) {
+    reportError(new Error(`orphan timeout scan skipped ${orphanMalformed} flag(s) with a malformed inbound id`), {
+      tags: { surface: "ai_responder_orphan_timeout_malformed" },
+      extra: { orphanMalformed },
+    });
+  }
 
   for (let page = 0; page < maxPages; page += 1) {
     let query = supabase

@@ -170,6 +170,13 @@ describe("send timeout reasons", () => {
     expect(parsed!.longLabel).toBe("Reply timed out at the provider — held for review");
     expect(parsed!.longLabel).not.toMatch(/3f1c/);
   });
+  it("send_timeout:<inbound_id>:backed is the same send_timeout gate and label, no uuid", () => {
+    const parsed = parseEscalationReason("send_timeout:3f1c2d9e-0000-4000-8000-123456789abc:backed");
+    expect(parsed!.gate).toBe("send_timeout");
+    expect(parsed!.shortLabel).toBe("Send timed out");
+    expect(parsed!.longLabel).toBe("Reply timed out at the provider — held for review");
+    expect(parsed!.longLabel).not.toMatch(/3f1c|backed/);
+  });
   it("send_timeout_then_sent warns not to re-send", () => {
     const parsed = parseEscalationReason("send_timeout_then_sent");
     expect(parsed!.longLabel).toBe("Reply accepted by provider late — do not re-send");

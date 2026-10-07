@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { sweep, lateSweep } = vi.hoisted(() => ({
   sweep: vi.fn(),
-  lateSweep: vi.fn(async () => ({ scanned: 0, reconciled: 0 })),
+  lateSweep: vi.fn(async () => ({ scanned: 3, reconciled: 2, nextCursor: null, orphanMalformed: 1 })),
 }));
 vi.mock("@/lib/pipeline-runs", () => ({ sweepStalePipelineRuns: sweep }));
 vi.mock("@/lib/ai-responder/dispatch", () => ({ sweepLateSends: lateSweep }));
@@ -42,7 +42,11 @@ describe("sweep-stale-pipeline-runs cron route", () => {
     vi.stubEnv("CRON_SECRET", "right");
     const res = await GET(req("Bearer right"));
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: true, swept: 2 });
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      swept: 2,
+      lateSends: { scanned: 3, reconciled: 2, nextCursor: null, orphanMalformed: 1 },
+    });
     expect(sweep).toHaveBeenCalledTimes(1);
   });
 });

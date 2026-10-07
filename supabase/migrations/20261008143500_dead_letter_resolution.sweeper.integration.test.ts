@@ -50,7 +50,7 @@ describe("orphaned-timeout sweeper", () => {
     await db.end();
   });
 
-  it("the orphan properties query ANDs flag, reason (OR of two likes), window and id slice under real PostgREST", async () => {
+  it("the orphan properties query ANDs flag, reason (OR of a like AND NOT like backed, and a like), window and id slice under real PostgREST", async () => {
     await db.query("insert into public.organizations (id, name) values ($1, $2)", [orgId, `Sweeper ${orgId}`]);
     // Slice "a": only 1, 2 and 6 match every filter.
     await seedProperty(A(1), { reason: `send_timeout:${inbound(1)}`, at: hourAgo });
@@ -63,6 +63,9 @@ describe("orphaned-timeout sweeper", () => {
     await seedProperty(A(6), { reason: `send_timeout:${inbound(6)}`, at: hourAgo });
     // Slice "b": matches every filter except the slice.
     await seedProperty(B(1), { reason: `send_timeout:${inbound(9)}`, at: hourAgo });
+    // Backed flags (dead-letter row exists) are excluded server-side, in both slices.
+    await seedProperty(A(9), { reason: `send_timeout:${inbound(10)}:backed`, at: hourAgo });
+    await seedProperty(B(2), { reason: `send_timeout:${inbound(11)}:backed`, at: hourAgo });
 
     const supabase = createClient(process.env.TEST_SUPABASE_URL!, process.env.TEST_SUPABASE_SERVICE_ROLE_KEY!, {
       auth: { persistSession: false, autoRefreshToken: false },
