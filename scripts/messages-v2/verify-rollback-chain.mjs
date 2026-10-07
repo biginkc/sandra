@@ -25,8 +25,8 @@ const PG_URL = (process.env.PG_URL ?? "postgresql://postgres:postgres@127.0.0.1:
 const SOURCE_DB = process.env.SOURCE_DB ?? "postgres";
 const DB = `rollback_chain_${process.pid}_${Date.now().toString(36)}`;
 const FIRST = "20261008140000";
-const LAST = process.env.CHAIN_LAST ?? "20261008150300";
-const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 45); // 28 inherited Jev (140000..142700) + 13 messages-v2 (143000..144200) + 4 Phase 1 (150000..150300)
+const LAST = process.env.CHAIN_LAST ?? "20261008200000";
+const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 46); // 28 inherited Jev (140000..142700) + 13 messages-v2 (143000..144200) + 4 Phase 1 (150000..150300) + 1 templates (200000)
 
 const migDir = join(root, "supabase/migrations");
 const rbDir = join(root, "supabase/rollbacks");
@@ -69,25 +69,35 @@ function phase(name, files, dir) {
 
 // Every jev_/pipeline_/ai_reply_ object (tables, views, functions, triggers,
 // policies, indexes, sequences, types) that must be gone after the rollback.
+// Phase 4 (templates, 20261008200000) objects: the mapping + approval-audit
+// tables, both RPCs, the approval guard trigger/function, the claims sweep
+// index, and the approval columns/constraint added to sms_templates.
+const TPL = "auto_reply_templates|sms_template_approval_events|sms_templates_guard_approval|fn_set_template_auto_send_approval|fn_set_auto_reply_template|idx_ai_response_claims_template_pending|sms_templates_approval_shape_check";
 const LEFTOVER_SQL = `
 select kind || ' ' || name from (
   select 'relation' as kind, n.nspname || '.' || c.relname as name
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
-   where n.nspname = 'public' and c.relname ~ '^(jev_|pipeline_|ai_reply_|hold_alert_|idx_jev_|idx_pipeline_|idx_ai_reply_|idx_hold_alert_)'
+   where n.nspname = 'public' and (c.relname ~ '^(jev_|pipeline_|ai_reply_|hold_alert_|idx_jev_|idx_pipeline_|idx_ai_reply_|idx_hold_alert_)' or c.relname ~ '(${TPL})')
   union all
   select 'function', n.nspname || '.' || p.proname
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-   where n.nspname = 'public' and p.proname ~ '^(jev_|fn_.*jev_|pipeline_|fn_.*pipeline_|ai_reply_|fn_.*ai_reply_|hold_alert_|fn_.*hold_alert_|fn_resolve_hold)'
+   where n.nspname = 'public' and (p.proname ~ '^(jev_|fn_.*jev_|pipeline_|fn_.*pipeline_|ai_reply_|fn_.*ai_reply_|hold_alert_|fn_.*hold_alert_|fn_resolve_hold)' or p.proname ~ '(${TPL})')
   union all
   select 'trigger', c.relname || '.' || t.tgname
     from pg_trigger t join pg_class c on c.oid = t.tgrelid join pg_namespace n on n.oid = c.relnamespace
-   where n.nspname = 'public' and not t.tgisinternal and t.tgname ~ '(jev_|pipeline_|ai_reply_|hold_alert_)'
+   where n.nspname = 'public' and not t.tgisinternal and t.tgname ~ '(jev_|pipeline_|ai_reply_|hold_alert_|auto_reply_templates|sms_templates_guard_approval)'
   union all
   select 'policy', tablename || '.' || policyname from pg_policies
-   where schemaname = 'public' and (policyname ~ '(jev_|pipeline_|ai_reply_|hold_alert_)' or tablename ~ '^(jev_|pipeline_|ai_reply_|hold_alert_)')
+   where schemaname = 'public' and (policyname ~ '(jev_|pipeline_|ai_reply_|hold_alert_|auto_reply_templates|sms_template_approval_events)' or tablename ~ '^(jev_|pipeline_|ai_reply_|hold_alert_|auto_reply_templates|sms_template_approval_events)')
   union all
   select 'type', t.typname from pg_type t join pg_namespace n on n.oid = t.typnamespace
    where n.nspname = 'public' and t.typname ~ '^(jev_|pipeline_|ai_reply_|hold_alert_)' and t.typtype <> 'c'
+  union all
+  select 'column', table_name || '.' || column_name from information_schema.columns
+   where table_schema = 'public' and table_name = 'sms_templates' and column_name ~ '^approved_'
+  union all
+  select 'constraint', conrelid::regclass::text || '.' || conname from pg_constraint
+   where conname ~ '(${TPL})'
 ) x order by 1`;
 
 // Dump the whole public schema (functions, constraints, policies, columns,
