@@ -504,11 +504,11 @@ describe("loadMessagesV2Data holds", () => {
       fakeSupabase({
         properties: (calls) =>
           isHead(calls) ? { data: [{ id: "p1" }, { id: "p2" }, { id: "p3" }] } : { data: [flagged("p1"), flagged("p2"), flagged("p3")] },
-        hold_alert_deliveries: () => (error ? { data: null, error } : { data: rows }),
+        hold_alert_latest_status: () => (error ? { data: null, error } : { data: rows }),
       });
 
     it("attaches the latest delivery status per property, newest wins", async () => {
-      const { client, queries } = withDeliveries([
+      const { client, queries, rpcCalls } = withDeliveries([
         { property_id: "p1", status: "skipped", last_error: "no_token", created_at: iso("02:00:00") },
         { property_id: "p1", status: "sent", last_error: null, created_at: iso("01:00:00") },
         { property_id: "p2", status: "failed", last_error: "interrupted", created_at: iso("02:00:00") },
@@ -518,10 +518,24 @@ describe("loadMessagesV2Data holds", () => {
       expect(byId.p1).toEqual({ status: "skipped", reason: "no_token" });
       expect(byId.p2).toEqual({ status: "failed", reason: "interrupted" });
       expect(byId.p3).toBeUndefined();
-      const q = queries.find((c) => c[0]?.table === "hold_alert_deliveries")!;
-      expect(q).toContainEqual({ table: "hold_alert_deliveries", method: "eq", args: ["org_id", "org"] });
-      expect(q.find((c) => c.method === "in")!.args[0]).toBe("property_id");
-      expect(q).toContainEqual({ table: "hold_alert_deliveries", method: "not", args: ["hold_key", "like", "%:closed:%"] });
+      expect(rpcCalls).toContainEqual({
+        fn: "hold_alert_latest_status",
+        args: { p_org_id: "org", p_property_ids: ["p1", "p2", "p3"] },
+      });
+      expect(queries.some((c) => c[0]?.table === "hold_alert_deliveries")).toBe(false);
+    });
+
+    it("looks up each chunk of properties separately, so one noisy property cannot hide another's status", async () => {
+      const many = Array.from({ length: 450 }, (_, i) => `p${i}`);
+      const { client, rpcCalls } = fakeSupabase({
+        properties: (calls) =>
+          isHead(calls) ? { data: many.map((id) => ({ id })) } : { data: many.map(flagged) },
+        hold_alert_latest_status: () => ({ data: [] }),
+      });
+      await loadMessagesV2Data(client, "org");
+      const lookups = rpcCalls.filter((c) => c.fn === "hold_alert_latest_status");
+      expect(lookups.map((c) => (c.args.p_property_ids as string[]).length)).toEqual([200, 200, 50]);
+      expect(lookups.flatMap((c) => c.args.p_property_ids as string[]).sort()).toEqual([...many].sort());
     });
 
     it("reports a failed delivery lookup as a context error instead of hiding it", async () => {
@@ -565,13 +579,12 @@ describe("loadMessagesV2Data holds", () => {
       .flatMap((q) => q.filter((c) => c.method === "in"))
       .map((c) => (c.args[1] as unknown[]).length);
     expect(Math.max(...inLens)).toBeLessThanOrEqual(40);
-    expect(rpcCalls.map((c) => c.fn)).toEqual(
-      Array(3).fill("pipeline_runs_latest_for_properties"),
-    );
     expect(
-      rpcCalls.map((c) => (c.args.p_property_ids as string[]).length),
-    ).toEqual([200, 200, 50]);
-    expect(rpcCalls[0].args.p_org_id).toBe("org");
+      rpcCalls.map((c) => c.fn).filter((f) => f === "pipeline_runs_latest_for_properties"),
+    ).toEqual(Array(3).fill("pipeline_runs_latest_for_properties"));
+    const runRpcs = rpcCalls.filter((c) => c.fn === "pipeline_runs_latest_for_properties");
+    expect(runRpcs.map((c) => (c.args.p_property_ids as string[]).length)).toEqual([200, 200, 50]);
+    expect(runRpcs[0].args.p_org_id).toBe("org");
   });
 
   it("surfaces run-lookup failures as context errors", async () => {

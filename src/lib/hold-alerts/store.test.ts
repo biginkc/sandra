@@ -6,54 +6,51 @@ import { createSupabaseDeliveryStore } from "./store";
 
 type Call = { method: string; args: unknown[] };
 
-function fake(rows: Array<{ id: string; property_id: string | null; hold_key: string }>) {
-  const updates: Array<{ patch: unknown; calls: Call[] }> = [];
+function fake(pages: Array<Array<{ id: string; property_id: string | null; hold_key: string }>>) {
+  const rpcs: Array<{ fn: string; args: Record<string, unknown> }> = [];
   const selects: Call[][] = [];
   const client: LooseSupabase = {
-    rpc: () => Promise.resolve({ data: null, error: null }),
+    rpc: (fn: string, args: Record<string, unknown>) => {
+      rpcs.push({ fn, args });
+      return Promise.resolve({ data: (args.p_ids as string[]).length, error: null });
+    },
     from() {
       const calls: Call[] = [];
-      let patch: unknown = null;
       const q: Record<string, unknown> = {};
-      for (const m of ["select", "eq", "not", "order", "limit", "update", "gt"]) {
+      for (const m of ["select", "eq", "not", "order", "limit", "gt"]) {
         q[m] = (...args: unknown[]) => {
           calls.push({ method: m, args });
-          if (m === "update") patch = args[0];
           return q;
         };
       }
       q.then = (resolve: (v: unknown) => unknown) => {
-        const isUpdate = calls.some((c) => c.method === "update");
-        if (isUpdate) {
-          updates.push({ patch, calls });
-          return resolve({ data: [{ id: "x" }], error: null });
-        }
         selects.push(calls);
-        return resolve({ data: rows, error: null });
+        return resolve({ data: pages[selects.length - 1] ?? [], error: null });
       };
       return q;
     },
   };
-  return { client, updates, selects };
+  return { client, rpcs, selects };
 }
 
 describe("DeliveryStore.archiveClosed", () => {
-  it("archives only rows whose property is not open, appending :closed:<id> guarded on the old key", async () => {
+  it("archives closed rows in ONE set-based call per page and skips still-open properties", async () => {
     const t = fake([
-      { id: "r1", property_id: "open", hold_key: "open:draft_held" },
-      { id: "r2", property_id: "gone", hold_key: "gone:draft_held" },
+      [
+        { id: "r1", property_id: "open", hold_key: "open:draft_held" },
+        { id: "r2", property_id: "gone", hold_key: "gone:draft_held" },
+        { id: "r3", property_id: "gone2", hold_key: "gone2:draft_held" },
+      ],
     ]);
     const n = await createSupabaseDeliveryStore(t.client).archiveClosed("org", ["open"]);
-    expect(n).toBe(1);
-    expect(t.updates).toHaveLength(1);
-    expect(t.updates[0]!.patch).toEqual({ hold_key: "gone:draft_held:closed:r2" });
-    expect(t.updates[0]!.calls).toContainEqual({ method: "eq", args: ["id", "r2"] });
-    expect(t.updates[0]!.calls).toContainEqual({ method: "eq", args: ["hold_key", "gone:draft_held"] });
+    expect(n).toBe(2);
+    expect(t.rpcs).toEqual([{ fn: "hold_alert_archive_rows", args: { p_org_id: "org", p_ids: ["r2", "r3"] } }]);
   });
 
   it("selects per-hold rows only: org scoped, property set, not already archived", async () => {
-    const t = fake([]);
+    const t = fake([[]]);
     await createSupabaseDeliveryStore(t.client).archiveClosed("org", []);
+    expect(t.rpcs).toHaveLength(0);
     expect(t.selects[0]).toContainEqual({ method: "eq", args: ["org_id", "org"] });
     expect(t.selects[0]).toContainEqual({ method: "not", args: ["property_id", "is", null] });
     expect(t.selects[0]).toContainEqual({ method: "not", args: ["hold_key", "like", "%:closed:%"] });
@@ -66,33 +63,17 @@ describe("DeliveryStore.archiveClosed", () => {
       hold_key: "open:draft_held",
     }));
     const page2 = [{ id: "b0001", property_id: "gone", hold_key: "gone:draft_held" }];
-    const pages = [page1, page2];
-    const selects: Call[][] = [];
-    const updates: unknown[] = [];
-    const client: LooseSupabase = {
-      rpc: () => Promise.resolve({ data: null, error: null }),
-      from() {
-        const calls: Call[] = [];
-        const q: Record<string, unknown> = {};
-        for (const m of ["select", "eq", "not", "order", "limit", "update", "gt"]) {
-          q[m] = (...args: unknown[]) => {
-            calls.push({ method: m, args });
-            if (m === "update") updates.push(args[0]);
-            return q;
-          };
-        }
-        q.then = (resolve: (v: unknown) => unknown) => {
-          if (calls.some((c) => c.method === "update")) return resolve({ data: [{ id: "x" }], error: null });
-          selects.push(calls);
-          return resolve({ data: pages[selects.length - 1] ?? [], error: null });
-        };
-        return q;
-      },
-    };
-    const n = await createSupabaseDeliveryStore(client).archiveClosed("org", ["open"]);
+    const t = fake([page1, page2]);
+    const n = await createSupabaseDeliveryStore(t.client).archiveClosed("org", ["open"]);
     expect(n).toBe(1);
-    expect(updates).toEqual([{ hold_key: "gone:draft_held:closed:b0001" }]);
-    expect(selects).toHaveLength(2);
-    expect(selects[1]).toContainEqual({ method: "gt", args: ["id", "a0499"] });
+    expect(t.rpcs).toEqual([{ fn: "hold_alert_archive_rows", args: { p_org_id: "org", p_ids: ["b0001"] } }]);
+    expect(t.selects).toHaveLength(2);
+    expect(t.selects[1]).toContainEqual({ method: "gt", args: ["id", "a0499"] });
+  });
+
+  it("surfaces an archive RPC error", async () => {
+    const t = fake([[{ id: "r2", property_id: "gone", hold_key: "k" }]]);
+    t.client.rpc = () => Promise.resolve({ data: null, error: { message: "boom" } });
+    await expect(createSupabaseDeliveryStore(t.client).archiveClosed("org", [])).rejects.toThrow(/archive update failed: boom/);
   });
 });

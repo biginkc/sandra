@@ -128,16 +128,15 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
         const { data, error } = await q;
         if (error) fail("archive select", error);
         const rows = (data ?? []) as Array<{ id: string; property_id: string | null; hold_key: string }>;
-        for (const r of rows) {
-          if (!r.property_id || open.has(r.property_id)) continue;
-          // Guarded on the old key: a concurrent pass that already archived it matches nothing.
-          const upd = await table()
-            .update({ hold_key: `${r.hold_key}:closed:${r.id}` })
-            .eq("id", r.id)
-            .eq("hold_key", r.hold_key)
-            .select("id");
-          if (upd.error) fail("archive update", upd.error);
-          if (Array.isArray(upd.data) && upd.data.length === 1) archived += 1;
+        // One set-based update per page; the function skips rows a concurrent pass already archived.
+        const closedIds = rows.filter((r) => r.property_id && !open.has(r.property_id)).map((r) => r.id);
+        if (closedIds.length > 0) {
+          const { data: n, error: rpcError } = await db.rpc("hold_alert_archive_rows", {
+            p_org_id: orgId,
+            p_ids: closedIds,
+          });
+          if (rpcError) fail("archive update", rpcError);
+          archived += typeof n === "number" ? n : 0;
         }
         if (rows.length < ARCHIVE_BATCH) break;
         cursor = rows[rows.length - 1]!.id;

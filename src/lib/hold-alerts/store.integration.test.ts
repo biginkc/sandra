@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { createClient } from "@supabase/supabase-js";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -18,6 +20,7 @@ import { hold, makeDeps } from "./test-support";
  */
 const db = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
 let createdTable = false;
+let createdRpcs = false;
 let orgId: string;
 let userId: string;
 const LAST_ID = "ffffffff-ffff-4fff-bfff-ffffffffffff";
@@ -50,6 +53,19 @@ beforeAll(async () => {
     await new Promise((r) => setTimeout(r, 1500));
     createdTable = true;
   }
+  const fnCheck = await db.query("select to_regproc('public.hold_alert_archive_rows') as f");
+  if (!fnCheck.rows[0].f) {
+    const sql = readFileSync(
+      path.join(process.cwd(), "supabase/migrations/20261008150300_hold_alert_delivery_rpcs.sql"),
+      "utf8",
+    )
+      .replace(/^begin;$/m, "")
+      .replace(/^commit;$/m, "");
+    await db.query(sql);
+    createdRpcs = true;
+    await db.query("notify pgrst, 'reload schema'");
+    await new Promise((r) => setTimeout(r, 1500));
+  }
   orgId = randomUUID();
   userId = randomUUID();
   await db.query("insert into public.organizations (id, name) values ($1, $2)", [orgId, `Archive ${orgId}`]);
@@ -58,6 +74,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   try {
+    if (createdRpcs) {
+      await db.query("drop function if exists public.hold_alert_archive_rows(uuid, uuid[])");
+      await db.query("drop function if exists public.hold_alert_latest_status(uuid, uuid[])");
+    }
     if (createdTable) {
       await db.query("drop table if exists public.hold_alert_deliveries");
       await db.query("notify pgrst, 'reload schema'");
@@ -132,5 +152,34 @@ describe("archiveClosed with a full window of open holds", () => {
 
     const reopened = await pass([h]);
     expect(reopened.t.sent.filter((x) => x.channel === "slack")).toHaveLength(1);
+  });
+});
+
+describe("hold_alert_latest_status", () => {
+  it("returns the newest live row per property: a noisy property cannot hide a quiet one", async () => {
+    const noisy = await newProperty();
+    const quiet = await newProperty();
+    await db.query(
+      `insert into public.hold_alert_deliveries (org_id, property_id, hold_key, recipient_user_id, channel, stage, status, last_error, created_at)
+       select $1, $2::uuid, $2::text || ':k' || g, $3, 'slack', 'first', 'sent', null, now() - (g || ' minutes')::interval
+       from generate_series(1, 100) g`,
+      [orgId, noisy, userId],
+    );
+    await db.query(
+      `insert into public.hold_alert_deliveries (org_id, property_id, hold_key, recipient_user_id, channel, stage, status, last_error, created_at)
+       values ($1, $2::uuid, $2::text || ':quiet', $3, 'slack', 'first', 'failed', 'interrupted', now() - interval '3 days'),
+              ($1, $2::uuid, $2::text || ':quiet:closed:x', $3, 'sms', 'first', 'sent', null, now())`,
+      [orgId, quiet, userId],
+    );
+    const { data, error } = await admin().rpc("hold_alert_latest_status", {
+      p_org_id: orgId,
+      p_property_ids: [noisy, quiet],
+    });
+    expect(error).toBeNull();
+    const byProp = Object.fromEntries((data as Array<{ property_id: string; status: string; last_error: string | null }>).map((r) => [r.property_id, r]));
+    expect(Object.keys(byProp).sort()).toEqual([noisy, quiet].sort());
+    expect(byProp[noisy]).toMatchObject({ status: "sent" });
+    expect(byProp[quiet]).toMatchObject({ status: "failed", last_error: "interrupted" });
+    await db.query("delete from public.hold_alert_deliveries where org_id = $1", [orgId]);
   });
 });

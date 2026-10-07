@@ -779,16 +779,11 @@ export async function loadMessagesV2Data(
   const alertPropertyIds = [
     ...new Set(openHolds.flatMap((h) => (h.property_id ? [h.property_id] : []))),
   ];
-  const alertResults = await Promise.all(
+  const alertResults: Array<{ data?: unknown; error?: unknown }> = await Promise.all(
+    // One newest live row per property (distinct on property_id in SQL), so a
+    // noisy property can never crowd another's status out of a shared row cap.
     chunked(alertPropertyIds, PROPERTY_RPC_CHUNK).map((ids) =>
-      supabase
-        .from("hold_alert_deliveries")
-        .select("property_id, status, last_error, created_at")
-        .eq("org_id", orgId)
-        .in("property_id", ids)
-        .not("hold_key", "like", "%:closed:%")
-        .order("created_at", { ascending: false })
-        .limit(ids.length * 20),
+      supabase.rpc("hold_alert_latest_status", { p_org_id: orgId, p_property_ids: ids }),
     ),
   );
   for (const res of alertResults) {
