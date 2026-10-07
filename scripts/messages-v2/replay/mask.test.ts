@@ -107,3 +107,11 @@ describe("assertNoRealPhones", () => {
     ).not.toThrow();
   });
 });
+
+describe("maskText leaves ids and timestamps alone", () => {
+  it("does not rewrite a uuid with a long digit run", () => {
+    const m = new PhoneMasker(SALT);
+    const id = "123e4567-e89b-12d3-a456-4266141740ab";
+    expect(m.maskText(`ref ${id} at 2026-10-07T15:04:05Z`)).toBe(`ref ${id} at 2026-10-07T15:04:05Z`);
+  });
+});

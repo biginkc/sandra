@@ -22,6 +22,8 @@ const SAFE_TOKENS =
 const PHONE_IN_TEXT =
   /(?<![\d$,.])(\+?1[\s.-]?)?\(?([2-9]\d{2})\)?[\s.-]?(\d{3})[\s.-]?(\d{4})(?![\d]|,\d{3})/g;
 
+const SAFE_OR_PHONE = new RegExp(`(${SAFE_TOKENS.source})|${PHONE_IN_TEXT.source}`, "gi");
+
 export function last10(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const digits = raw.replace(/\D/g, "");
@@ -80,7 +82,9 @@ export class PhoneMasker {
 
   /** Replace every phone number inside free text; everything else is verbatim. */
   maskText(text: string): string {
-    return text.replace(PHONE_IN_TEXT, (match, prefix: string | undefined, a: string, b: string, c: string) => {
+    // One pass over "safe token | phone" so uuids / ISO timestamps are never rewritten.
+    return text.replace(SAFE_OR_PHONE, (match, safe?: string, prefix?: string, a?: string, b?: string, c?: string) => {
+      if (safe !== undefined) return match;
       const real = `${a}${b}${c}`;
       if (this.keep.has(real)) return match;
       const masked = this.mask(real);
