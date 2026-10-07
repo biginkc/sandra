@@ -3705,63 +3705,124 @@ const ORPHAN_MIN_AGE_MS = 5 * 60 * 1000;
 export const ORPHAN_PLACEHOLDER_BODY = "[reply text unavailable — orphaned timeout]";
 
 /**
+ * One page of the orphan scan: flagged properties whose escalation reason is a
+ * timeout flag, stamped inside the window, within one id slice (keyset by id).
+ * Exported so the integration test can run the exact filters against PostgREST.
+ */
+export function orphanPropertiesQuery(
+  supabase: SupabaseClient<Database>,
+  args: { windowIso: string; lower: string; upper: string | null; after: string | null },
+) {
+  let query = supabase
+    .from("properties")
+    .select("id, org_id, last_ai_escalation_reason, last_ai_escalation_at")
+    .eq("needs_human_attention", true)
+    .or(
+      "last_ai_escalation_reason.like.send_timeout:%,last_ai_escalation_reason.like.dead_letter_failed:send_timeout:%",
+    )
+    .gte("last_ai_escalation_at", args.windowIso);
+  query = args.after ? query.gt("id", args.after) : query.gte("id", args.lower);
+  if (args.upper) query = query.lt("id", args.upper);
+  return query.order("id", { ascending: true }).limit(ORPHAN_PAGE_SIZE);
+}
+
+const ORPHAN_SLICE_COUNT = 16;
+const ORPHAN_SLICE_MS = 10 * 60 * 1000;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Bounds of one of 16 uuid id-space slices (first hex char); `upper` is exclusive, null for the last. */
+export function orphanSliceBounds(slice: number): { lower: string; upper: string | null } {
+  const tail = "0000000-0000-0000-0000-000000000000";
+  return {
+    lower: `${slice.toString(16)}${tail}`,
+    upper: slice >= ORPHAN_SLICE_COUNT - 1 ? null : `${(slice + 1).toString(16)}${tail}`,
+  };
+}
+
+/**
  * Third, bounded source: a property flagged `send_timeout:<id>` /
  * `dead_letter_failed:send_timeout:<id>` with NO dead-letter row for that inbound
  * (the process died between the flag write and the row insert, or the insert
  * failed and the after() callback also died). Inserts a synthetic `send_timeout`
  * row (body = placeholder: the text is lost in this double failure) so the normal
  * pass handles it from then on. Properties that already have a row are untouched.
- * Keyset by property id, 200 per page, at most 5 pages scanned and 200 rows
- * inserted per run, 7-day window, flags younger than 5 minutes skipped (the live
- * timeout path may still be writing its own row).
+ *
+ * Stateless rotation: flags that already have a recovery row (or that terminally
+ * failed) stay flagged, so a scan that always restarted at the lowest id could be
+ * consumed by them forever. Instead the uuid id-space is cut into 16 slices by
+ * the first hex character and each run scans only slice
+ * `floor(now / 10min) mod 16`, so every slice is covered every 160 minutes (well
+ * inside the 7-day window). Within a slice: keyset by id, 200 per page, at most
+ * 5 pages (1,000 properties) and 200 inserted rows per run. The cap only matters
+ * if more than 1,000 flagged timeouts share one hex prefix (more than ~16,000
+ * flagged timeouts in total); beyond that bound a high-id orphan in that slice
+ * can still be starved.
+ *
+ * Per page, one `.in('inbound_message_id', ids)` query finds the existing rows.
+ * Flags with no `last_ai_escalation_at` (legacy) are not eligible (no fallback to
+ * `updated_at`); flags younger than 5 minutes are skipped (the live timeout path
+ * may still be writing its own row); flags older than 7 days are out of window.
+ * A flag whose inbound id is not a uuid is skipped and counted, never an error.
  */
 async function repairOrphanedTimeouts(
   supabase: SupabaseClient<Database>,
   windowStartMs: number,
-): Promise<void> {
+  scanClockMs: number,
+): Promise<{ malformed: number }> {
   const windowIso = new Date(windowStartMs).toISOString();
+  const slice = Math.floor(scanClockMs / ORPHAN_SLICE_MS) % ORPHAN_SLICE_COUNT;
+  const { lower, upper } = orphanSliceBounds(slice);
   let after: string | null = null;
   let inserted = 0;
+  let malformed = 0;
   for (let page = 0; page < ORPHAN_MAX_PAGES && inserted < ORPHAN_PAGE_SIZE; page += 1) {
-    let query = supabase
-      .from("properties")
-      .select("id, org_id, last_ai_escalation_reason, last_ai_escalation_at, updated_at")
-      .eq("needs_human_attention", true)
-      .or(
-        "last_ai_escalation_reason.like.send_timeout:%,last_ai_escalation_reason.like.dead_letter_failed:send_timeout:%",
-      )
-      .or(
-        `last_ai_escalation_at.gte.${windowIso},and(last_ai_escalation_at.is.null,updated_at.gte.${windowIso})`,
-      );
-    if (after) query = query.gt("id", after);
-    const { data, error } = await query.order("id", { ascending: true }).limit(ORPHAN_PAGE_SIZE);
+    const query = orphanPropertiesQuery(supabase, { windowIso, lower, upper, after });
+    const { data, error } = await query;
     if (error) {
       reportError(new Error(error.message), { tags: { surface: "ai_responder_orphan_timeout_scan" } });
-      return;
+      return { malformed };
     }
     const props = (data ?? []) as Array<{
       id: string;
       org_id: string | null;
       last_ai_escalation_reason: string | null;
       last_ai_escalation_at: string | null;
-      updated_at: string | null;
     }>;
+    const candidates: Array<{ prop: (typeof props)[number]; inboundId: string; stampedAt: string }> = [];
     for (const prop of props) {
-      if (inserted >= ORPHAN_PAGE_SIZE) break;
       const inboundId = inboundIdFromTimeoutFlag(prop.last_ai_escalation_reason);
       if (!inboundId || !prop.org_id) continue;
-      const stampedAt = prop.last_ai_escalation_at ?? prop.updated_at;
-      const stampedMs = stampedAt ? new Date(stampedAt).getTime() : Number.NaN;
-      if (Number.isFinite(stampedMs) && Date.now() - stampedMs < ORPHAN_MIN_AGE_MS) continue;
+      if (!UUID_RE.test(inboundId)) {
+        malformed += 1;
+        continue;
+      }
+      const stampedAt = prop.last_ai_escalation_at;
+      if (!stampedAt) continue;
+      const stampedMs = new Date(stampedAt).getTime();
+      if (!Number.isFinite(stampedMs) || Date.now() - stampedMs < ORPHAN_MIN_AGE_MS) continue;
+      candidates.push({ prop, inboundId, stampedAt });
+    }
+    let existing = new Set<string>();
+    if (candidates.length > 0) {
+      const { data: rows, error: existingError } = await supabase
+        .from("ai_reply_dead_letters")
+        .select("inbound_message_id")
+        .in("inbound_message_id", candidates.map((c) => c.inboundId))
+        .eq("reason", "send_timeout");
+      if (existingError) {
+        reportError(new Error(existingError.message), { tags: { surface: "ai_responder_orphan_timeout_repair" } });
+        return { malformed };
+      }
+      existing = new Set(
+        ((rows ?? []) as Array<{ inbound_message_id: string | null }>)
+          .map((r) => r.inbound_message_id)
+          .filter((v): v is string => !!v),
+      );
+    }
+    for (const { prop, inboundId, stampedAt } of candidates) {
+      if (inserted >= ORPHAN_PAGE_SIZE) break;
+      if (existing.has(inboundId)) continue;
       try {
-        const { data: existing, error: existingError } = await supabase
-          .from("ai_reply_dead_letters")
-          .select("id")
-          .eq("inbound_message_id", inboundId)
-          .eq("reason", "send_timeout")
-          .limit(1);
-        if (existingError) throw new Error(existingError.message);
-        if ((existing ?? []).length > 0) continue;
         const { data: inbound, error: inboundError } = await supabase
           .from("messages")
           .select("conversation_id")
@@ -3769,13 +3830,13 @@ async function repairOrphanedTimeouts(
           .maybeSingle();
         if (inboundError) throw new Error(inboundError.message);
         const { error: insertError } = await supabase.from("ai_reply_dead_letters").insert({
-          org_id: prop.org_id,
+          org_id: prop.org_id as string,
           conversation_id: (inbound as { conversation_id?: string | null } | null)?.conversation_id ?? null,
           property_id: prop.id,
           inbound_message_id: inboundId,
           body: ORPHAN_PLACEHOLDER_BODY,
           reason: "send_timeout",
-          ...(stampedAt ? { created_at: stampedAt } : {}),
+          created_at: stampedAt,
         });
         if (insertError) throw new Error(insertError.message);
         inserted += 1;
@@ -3787,15 +3848,28 @@ async function repairOrphanedTimeouts(
       }
     }
     const last = props[props.length - 1];
-    if (props.length < ORPHAN_PAGE_SIZE || !last) return;
+    if (props.length < ORPHAN_PAGE_SIZE || !last) return { malformed };
     after = last.id;
   }
+  return { malformed };
 }
 
 export async function sweepLateSends(
   supabase: SupabaseClient<Database>,
-  options: { sinceMs?: number; pageSize?: number; maxPages?: number; cursor?: LateSendSweepCursor } = {},
-): Promise<{ scanned: number; reconciled: number; nextCursor: LateSendSweepCursor | null }> {
+  options: {
+    sinceMs?: number;
+    pageSize?: number;
+    maxPages?: number;
+    cursor?: LateSendSweepCursor;
+    /** Clock used only to pick the orphan-scan slice (tests); defaults to Date.now(). */
+    orphanScanNowMs?: number;
+  } = {},
+): Promise<{
+  scanned: number;
+  reconciled: number;
+  nextCursor: LateSendSweepCursor | null;
+  orphanMalformed: number;
+}> {
   const windowStartMs = Date.now() - (options.sinceMs ?? 7 * 24 * 60 * 60 * 1000);
   const pageSize = options.pageSize ?? 100;
   const maxPages = options.maxPages ?? 10;
@@ -3803,9 +3877,11 @@ export async function sweepLateSends(
   let reconciled = 0;
   let cursorA = options.cursor?.a ?? null;
   let exhaustedA = false;
+  let orphanMalformed = 0;
   const done = () => ({
     scanned,
     reconciled,
+    orphanMalformed,
     nextCursor: exhaustedA ? null : { a: cursorA },
   });
   const resolveUnreconcilable = async (id: string, reason: string): Promise<boolean> => {
@@ -3822,7 +3898,9 @@ export async function sweepLateSends(
   };
 
   // Orphan repair runs FIRST so a repaired row is handled by pass A this run.
-  await repairOrphanedTimeouts(supabase, windowStartMs);
+  orphanMalformed = (
+    await repairOrphanedTimeouts(supabase, windowStartMs, options.orphanScanNowMs ?? Date.now())
+  ).malformed;
 
   for (let page = 0; page < maxPages; page += 1) {
     let query = supabase

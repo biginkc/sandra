@@ -157,6 +157,8 @@ type MockState = {
   /** pass-B per-inbound send_timeout lookup returns an error. */
   deadLetterLookupError?: boolean;
   deadLetterInsertAttempts?: number;
+  /** Count of bulk `.in('inbound_message_id', ...)` dead-letter queries. */
+  deadLetterInQueries?: number;
   /** Extra flagged properties visible ONLY to the orphan-repair list scan. */
   extraProperties?: Array<Record<string, unknown>>;
   /** fn_renew_ai_send returns an error. */
@@ -234,6 +236,9 @@ type MockState = {
 
 const defaultReservationTuning = { ...sendReservationTuning };
 const PROPERTY_ID = "property-1";
+// Orphan-repair scans a uuid id-space slice chosen by the clock; slice 10 ("a").
+const ORPHAN_PROP = "a0000000-0000-4000-8000-00000000ffff";
+const ORPHAN_SLICE_A_NOW = 10 * 10 * 60 * 1000;
 const CONTACT_ID = "contact-1";
 const CONVERSATION_ID = "conversation-1";
 
@@ -524,6 +529,8 @@ function createMockSupabase(state: MockState) {
     let orphanMode = false;
     let orphanWindowIso: string | null = null;
     let gtId: string | null = null;
+    let gteId: string | null = null;
+    let ltId: string | null = null;
     let listLimit: number | null = null;
 
     const matchesCurrentProperty = () => {
@@ -548,12 +555,14 @@ function createMockSupabase(state: MockState) {
         const all = [state.property as unknown as Record<string, unknown>, ...(state.extraProperties ?? [])];
         let rows = all.filter((p) => {
           const reason = typeof p.last_ai_escalation_reason === "string" ? p.last_ai_escalation_reason : "";
-          const stamped = String(p.last_ai_escalation_at ?? p.updated_at ?? orphanWindowIso ?? "");
+          const stamped = p.last_ai_escalation_at == null ? null : String(p.last_ai_escalation_at);
           return (
             p.needs_human_attention === true &&
             (reason.startsWith("send_timeout:") || reason.startsWith("dead_letter_failed:send_timeout:")) &&
             (gtId === null || String(p.id) > gtId) &&
-            (orphanWindowIso === null || stamped >= orphanWindowIso)
+            (gteId === null || String(p.id) >= gteId) &&
+            (ltId === null || String(p.id) < ltId) &&
+            (orphanWindowIso === null || (stamped !== null && stamped >= orphanWindowIso))
           );
         });
         rows = rows.sort((a, b) => String(a.id).localeCompare(String(b.id)));
@@ -603,6 +612,15 @@ function createMockSupabase(state: MockState) {
         gtId = value;
         return query;
       },
+      gte(field: string, value: string) {
+        if (field === "id") gteId = value;
+        else if (field === "last_ai_escalation_at") orphanWindowIso = value;
+        return query;
+      },
+      lt(_field: string, value: string) {
+        ltId = value;
+        return query;
+      },
       in(field: string, values: unknown[]) {
         inFilters.set(field, values);
         return query;
@@ -622,11 +640,6 @@ function createMockSupabase(state: MockState) {
         if (filter.includes("send_timeout:%")) {
           orphanMode = true;
           eqFilters.delete("needs_human_attention");
-          return query;
-        }
-        const win = /last_ai_escalation_at\.gte\.([^,]+),/.exec(filter);
-        if (win) {
-          orphanWindowIso = win[1];
           return query;
         }
         allowsNullDispo = filter.includes("outreach_dispo.is.null");
@@ -959,6 +972,7 @@ function createMockSupabase(state: MockState) {
             return dlq;
           },
           in(field: string, values: unknown[]) {
+            if (field === "inbound_message_id") state.deadLetterInQueries = (state.deadLetterInQueries ?? 0) + 1;
             dlIn = { field, values };
             return dlq;
           },
@@ -5009,14 +5023,15 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
       it("pass A candidates are still only unresolved send_timeout rows; the properties scan is the bounded orphan source", async () => {
         const { sweepLateSends } = await import("./dispatch");
         const state = setup();
+        state.property.id = ORPHAN_PROP;
         state.property.needs_human_attention = true;
-        state.property.last_ai_escalation_reason = "send_timeout:inbound-orphan";
+        state.property.last_ai_escalation_reason = "send_timeout:00000000-0000-4000-8000-0000000000a1";
         state.property.last_ai_escalation_at = new Date(Date.now() - 3_600_000).toISOString();
         state.deadLetters = [];
-        await sweepLateSends(createMockSupabase(state) as never);
+        await sweepLateSends(createMockSupabase(state) as never, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
         // Orphan repair inserted exactly one synthetic recovery row.
         expect(state.deadLetters).toEqual([
-          expect.objectContaining({ inbound_message_id: "inbound-orphan", reason: "send_timeout", property_id: PROPERTY_ID, body: expect.stringContaining("unavailable") }),
+          expect.objectContaining({ inbound_message_id: "00000000-0000-4000-8000-0000000000a1", reason: "send_timeout", property_id: ORPHAN_PROP, body: expect.stringContaining("unavailable") }),
         ]);
       });
 
@@ -5065,16 +5080,17 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
         it("process loss before the row insert, then acceptance: a later sweep repairs and converts the flag", async () => {
           const { sweepLateSends } = await import("./dispatch");
           const state = setup();
+          state.property.id = ORPHAN_PROP;
           state.property.needs_human_attention = true;
-          state.property.last_ai_escalation_reason = "send_timeout:inbound-late";
+          state.property.last_ai_escalation_reason = "send_timeout:00000000-0000-4000-8000-0000000000b1";
           state.property.last_ai_escalation_at = hourAgo();
           state.deadLetters = [];
-          pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
-          const result = await sweepLateSends(createMockSupabase(state) as never);
+          pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("00000000-0000-4000-8000-0000000000b1") });
+          const result = await sweepLateSends(createMockSupabase(state) as never, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
           expect(result.reconciled).toBe(1);
           expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
           expect(state.deadLetters?.filter((d) => d.reason === "send_timeout")).toEqual([
-            expect.objectContaining({ inbound_message_id: "inbound-late", resolved_at: expect.any(String) }),
+            expect.objectContaining({ inbound_message_id: "00000000-0000-4000-8000-0000000000b1", resolved_at: expect.any(String) }),
           ]);
           expect(state.deadLetters?.filter((d) => d.reason === "sent_late")).toHaveLength(1);
         });
@@ -5082,25 +5098,27 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
         it("the same repair works for the dead_letter_failed fallback flag", async () => {
           const { sweepLateSends } = await import("./dispatch");
           const state = setup();
+          state.property.id = ORPHAN_PROP;
           state.property.needs_human_attention = true;
-          state.property.last_ai_escalation_reason = "dead_letter_failed:send_timeout:inbound-late";
+          state.property.last_ai_escalation_reason = "dead_letter_failed:send_timeout:00000000-0000-4000-8000-0000000000b1";
           state.property.last_ai_escalation_at = hourAgo();
           state.deadLetters = [];
-          pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
-          await sweepLateSends(createMockSupabase(state) as never);
+          pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("00000000-0000-4000-8000-0000000000b1") });
+          await sweepLateSends(createMockSupabase(state) as never, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
           expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
         });
 
         it("a property whose row already exists is untouched (no second row)", async () => {
           const { sweepLateSends } = await import("./dispatch");
           const state = setup();
+          state.property.id = ORPHAN_PROP;
           state.property.needs_human_attention = true;
-          state.property.last_ai_escalation_reason = "send_timeout:inbound-x";
+          state.property.last_ai_escalation_reason = "send_timeout:00000000-0000-4000-8000-0000000000b2";
           state.property.last_ai_escalation_at = hourAgo();
           state.deadLetters = [
-            { id: "t1", org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-x", body: "real text", reason: "send_timeout", created_at: hourAgo() },
+            { id: "t1", org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: ORPHAN_PROP, inbound_message_id: "00000000-0000-4000-8000-0000000000b2", body: "real text", reason: "send_timeout", created_at: hourAgo() },
           ];
-          await sweepLateSends(createMockSupabase(state) as never);
+          await sweepLateSends(createMockSupabase(state) as never, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
           expect(state.deadLetters).toHaveLength(1);
           expect(state.deadLetters?.[0].body).toBe("real text");
         });
@@ -5108,22 +5126,24 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
         it("a flag younger than 5 minutes is not repaired (the live timeout path may still be writing)", async () => {
           const { sweepLateSends } = await import("./dispatch");
           const state = setup();
+          state.property.id = ORPHAN_PROP;
           state.property.needs_human_attention = true;
-          state.property.last_ai_escalation_reason = "send_timeout:inbound-new";
+          state.property.last_ai_escalation_reason = "send_timeout:00000000-0000-4000-8000-0000000000b3";
           state.property.last_ai_escalation_at = new Date().toISOString();
           state.deadLetters = [];
-          await sweepLateSends(createMockSupabase(state) as never);
+          await sweepLateSends(createMockSupabase(state) as never, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
           expect(state.deadLetters).toHaveLength(0);
         });
 
         it("a flag older than the 7-day window is not repaired", async () => {
           const { sweepLateSends } = await import("./dispatch");
           const state = setup();
+          state.property.id = ORPHAN_PROP;
           state.property.needs_human_attention = true;
-          state.property.last_ai_escalation_reason = "send_timeout:inbound-old";
+          state.property.last_ai_escalation_reason = "send_timeout:00000000-0000-4000-8000-0000000000b4";
           state.property.last_ai_escalation_at = new Date(Date.now() - 8 * 24 * 3_600_000).toISOString();
           state.deadLetters = [];
-          await sweepLateSends(createMockSupabase(state) as never);
+          await sweepLateSends(createMockSupabase(state) as never, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
           expect(state.deadLetters).toHaveLength(0);
         });
 
@@ -5132,27 +5152,111 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
           const state = setup();
           const at = hourAgo();
           state.extraProperties = Array.from({ length: 200 }, (_v, i) => ({
-            id: `a-${String(i).padStart(3, "0")}`, org_id: "org-1", needs_human_attention: true,
-            last_ai_escalation_reason: `send_timeout:in-${i}`, last_ai_escalation_at: at,
+            id: `a0000000-0000-4000-8000-${String(i).padStart(12, "0")}`, org_id: "org-1", needs_human_attention: true,
+            last_ai_escalation_reason: `send_timeout:00000000-0000-4000-8000-1${String(i).padStart(11, "0")}`, last_ai_escalation_at: at,
           }));
-          // property-1 sorts after the 200 extras: the 201st orphan.
+          // ORPHAN_PROP sorts after the 200 extras (same slice): the 201st orphan.
+          state.property.id = ORPHAN_PROP;
           state.property.needs_human_attention = true;
-          state.property.last_ai_escalation_reason = "send_timeout:inbound-late";
+          state.property.last_ai_escalation_reason = "send_timeout:00000000-0000-4000-8000-0000000000b1";
           state.property.last_ai_escalation_at = at;
-          pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
+          pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("00000000-0000-4000-8000-0000000000b1") });
           // A normal unresolved row for a different (non-flagged) property.
           state.deadLetters = [
             { id: "normal", org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: "other", inbound_message_id: "inbound-normal", body: "x", reason: "send_timeout", created_at: at },
           ];
           pushOutbound(state, { id: "normal-out", status: "sent", metadata: aiReplyTo("inbound-normal") });
           const supabase = createMockSupabase(state) as never;
-          await sweepLateSends(supabase);
+          await sweepLateSends(supabase, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
           expect(state.deadLetters?.find((d) => d.id === "normal")?.resolved_at).toEqual(expect.any(String));
           expect(state.deadLetters?.filter((d) => d.reason === "send_timeout" && d.body === "[reply text unavailable — orphaned timeout]")).toHaveLength(200);
-          expect(state.property.last_ai_escalation_reason).toBe("send_timeout:inbound-late");
-          await sweepLateSends(supabase);
+          expect(state.property.last_ai_escalation_reason).toBe("send_timeout:00000000-0000-4000-8000-0000000000b1");
+          await sweepLateSends(supabase, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
           expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
           expect(state.deadLetters?.filter((d) => d.reason === "send_timeout" && d.body === "[reply text unavailable — orphaned timeout]")).toHaveLength(201);
+        });
+      });
+
+      describe("orphan scan rotation (stateless slices)", () => {
+        const hourAgo = () => new Date(Date.now() - 3_600_000).toISOString();
+        const uuid = (prefix: string, i: number) => `${prefix}0000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+        const SLICE_MS = 10 * 60 * 1000;
+
+        it("1,000 terminal flags in one slice ahead of an older orphan in another slice: the orphan is repaired within 16 runs", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          const recent = hourAgo();
+          const older = new Date(Date.now() - 3 * 24 * 3_600_000).toISOString();
+          state.extraProperties = Array.from({ length: 1000 }, (_v, i) => ({
+            id: uuid("0", i), org_id: "org-1", needs_human_attention: true,
+            last_ai_escalation_reason: `send_timeout:${uuid("c", i)}`, last_ai_escalation_at: recent,
+          }));
+          // Every one of them already has a (resolved) recovery row, so they stay flagged forever.
+          state.deadLetters = Array.from({ length: 1000 }, (_v, i) => ({
+            id: `dl-${i}`, org_id: "org-1", property_id: uuid("0", i), inbound_message_id: uuid("c", i),
+            body: "x", reason: "send_timeout", created_at: recent, resolved_at: recent,
+          }));
+          const orphanInbound = "00000000-0000-4000-8000-0000000000f1";
+          state.property.id = uuid("b", 7);
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = `send_timeout:${orphanInbound}`;
+          state.property.last_ai_escalation_at = older;
+          const supabase = createMockSupabase(state) as never;
+          const isOrphanRow = (d: Record<string, unknown>) => d.inbound_message_id === orphanInbound;
+          let repairedAtRun = -1;
+          for (let run = 0; run < 16; run += 1) {
+            await sweepLateSends(supabase, { orphanScanNowMs: run * SLICE_MS });
+            if (repairedAtRun < 0 && state.deadLetters?.some(isOrphanRow)) repairedAtRun = run;
+          }
+          expect(repairedAtRun).toBe(11);
+          expect(state.deadLetters?.filter(isOrphanRow)).toHaveLength(1);
+          expect(state.deadLetters).toHaveLength(1001);
+        });
+
+        it("a malformed inbound id in the flag is skipped and counted, never an error or an insert", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          state.property.id = ORPHAN_PROP;
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = "send_timeout:not-a-uuid";
+          state.property.last_ai_escalation_at = hourAgo();
+          state.deadLetters = [];
+          const result = await sweepLateSends(createMockSupabase(state) as never, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
+          expect(result.orphanMalformed).toBe(1);
+          expect(state.deadLetters).toHaveLength(0);
+          expect(state.deadLetterInQueries ?? 0).toBe(0);
+        });
+
+        it("the existence check is one bulk query per page", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          const at = hourAgo();
+          state.property.needs_human_attention = false;
+          state.extraProperties = Array.from({ length: 450 }, (_v, i) => ({
+            id: uuid("a", i), org_id: "org-1", needs_human_attention: true,
+            last_ai_escalation_reason: `send_timeout:${uuid("d", i)}`, last_ai_escalation_at: at,
+          }));
+          state.deadLetters = Array.from({ length: 450 }, (_v, i) => ({
+            id: `dl-${i}`, org_id: "org-1", property_id: uuid("a", i), inbound_message_id: uuid("d", i),
+            body: "x", reason: "send_timeout", created_at: at, resolved_at: at,
+          }));
+          await sweepLateSends(createMockSupabase(state) as never, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
+          // 450 properties = 3 pages (200 + 200 + 50), one `.in` query each, no inserts.
+          expect(state.deadLetterInQueries).toBe(3);
+          expect(state.deadLetterInsertAttempts ?? 0).toBe(0);
+        });
+
+        it("a flag with no last_ai_escalation_at is not eligible (no updated_at fallback)", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          state.property.id = ORPHAN_PROP;
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = "send_timeout:00000000-0000-4000-8000-0000000000e1";
+          state.property.last_ai_escalation_at = null;
+          (state.property as Record<string, unknown>).updated_at = hourAgo();
+          state.deadLetters = [];
+          await sweepLateSends(createMockSupabase(state) as never, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
+          expect(state.deadLetters).toHaveLength(0);
         });
       });
 
