@@ -22,16 +22,22 @@ export function readJevScores(
   // (src/lib/sms-classification/dispatch-bridge.ts, "classify" step).
   const scores = detail.probabilities ?? detail.scores;
   if (scores && typeof scores === "object" && !Array.isArray(scores)) {
-    for (const [label, v] of Object.entries(scores as Record<string, unknown>)) {
+    for (const [label, v] of Object.entries(
+      scores as Record<string, unknown>,
+    )) {
       if (typeof v === "number") out.push({ label, pct: toPct(v) });
     }
   } else if (Array.isArray(detail.top)) {
     for (const item of detail.top as Array<Record<string, unknown>>) {
       const label = item.outcome ?? item.label;
       const v = item.confidence ?? item.score;
-      if (typeof label === "string" && typeof v === "number") out.push({ label, pct: toPct(v) });
+      if (typeof label === "string" && typeof v === "number")
+        out.push({ label, pct: toPct(v) });
     }
-  } else if (typeof detail.outcome === "string" && typeof detail.confidence === "number") {
+  } else if (
+    typeof detail.outcome === "string" &&
+    typeof detail.confidence === "number"
+  ) {
     out.push({ label: detail.outcome, pct: toPct(detail.confidence) });
   }
   return out.sort((a, b) => b.pct - a.pct).slice(0, limit);

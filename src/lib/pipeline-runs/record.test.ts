@@ -57,7 +57,16 @@ function fakeAdmin(opts: {
         filters.push([c, v]);
         if (op === "update") {
           done();
-          return Promise.resolve({ error: null });
+          // Awaitable (updateRun) and chainable (finishRun's guarded update).
+          type Chain = Promise<unknown> & { eq: () => Chain; select: () => Promise<unknown> };
+          const chain: Chain = Object.assign(
+            Promise.resolve({ error: null }),
+            {
+              eq: () => chain,
+              select: () => Promise.resolve({ data: [{ id: "run-1" }], error: null }),
+            },
+          );
+          return chain;
         }
         return builder;
       };
@@ -280,5 +289,83 @@ describe("seam hardening", () => {
       at: "2026-10-08T14:27:00.000Z",
       day: "2026-10-08",
     });
+  });
+});
+
+describe("seam integrity (fix round 2)", () => {
+  afterEach(() => reportError.mockClear());
+
+  /** Stateful fake: enforces unique (run_id, seq) and a guarded status update. */
+  function statefulAdmin(initial: { steps: number[]; status: string }) {
+    const state = { steps: [...initial.steps], status: initial.status, inserted: [] as Array<{ seq: number; name: string }> };
+    const admin = {
+      from(table: string) {
+        if (table === "pipeline_run_steps") {
+          return {
+            insert: async (row: { seq: number; name: string }) => {
+              if (state.steps.includes(row.seq)) return { error: { code: "23505", message: "dup" } };
+              state.steps.push(row.seq);
+              state.inserted.push({ seq: row.seq, name: row.name });
+              return { error: null };
+            },
+            select: () => ({
+              eq: () => ({
+                order: () => ({
+                  limit: () => ({
+                    maybeSingle: async () => ({
+                      data: state.steps.length ? { seq: Math.max(...state.steps) } : null,
+                      error: null,
+                    }),
+                  }),
+                }),
+              }),
+            }),
+          };
+        }
+        const filters: Record<string, unknown> = {};
+        const chain = {
+          update: () => chain,
+          eq: (c: string, v: unknown) => {
+            filters[c] = v;
+            return chain;
+          },
+          select: async () => {
+            if (filters.status === "running" && state.status === "running") {
+              state.status = "terminal";
+              return { data: [{ id: "run-1" }], error: null };
+            }
+            return { data: [], error: null };
+          },
+        };
+        return chain;
+      },
+    };
+    return { admin: admin as never, state };
+  }
+
+  it("retries on a seq collision from a concurrent resume and lands on a free seq", async () => {
+    // Stored steps already reach 5 although this process thinks it is at 2.
+    const { admin, state } = statefulAdmin({ steps: [1, 2, 3, 4, 5], status: "running" });
+    const ctx = { runId: "run-1", orgId: "o", seq: 1 };
+    await recordStep(admin, ctx, { kind: "gate", name: "late", result: "pass" });
+    expect(state.inserted).toEqual([{ seq: 6, name: "late" }]);
+    expect(ctx.seq).toBe(6);
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it("does not overwrite a terminal status; records terminal_conflict instead", async () => {
+    const { admin, state } = statefulAdmin({ steps: [1], status: "terminal" });
+    const ctx = { runId: "run-1", orgId: "o", seq: 1 };
+    await finishRun(admin, ctx, { status: "replied" });
+    expect(state.status).toBe("terminal");
+    expect(state.inserted).toEqual([{ seq: 2, name: "terminal_conflict" }]);
+  });
+
+  it("stamps a running run exactly once", async () => {
+    const { admin, state } = statefulAdmin({ steps: [], status: "running" });
+    const ctx = { runId: "run-1", orgId: "o", seq: 0 };
+    await finishRun(admin, ctx, { status: "replied" });
+    await finishRun(admin, ctx, { status: "skipped" });
+    expect(state.inserted.map((s) => s.name)).toEqual(["terminal_conflict"]);
   });
 });

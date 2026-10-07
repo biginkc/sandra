@@ -36,7 +36,22 @@ export function isThresholdableOutcome(
  *  (root final-review P2, jev-root-final-review.md, 2026-09-20: the
  *  version actually used at decision time must be recorded, not just the
  *  numeric value, since two versions can share the same number). */
-export type ThresholdMap = Partial<Record<ThresholdableOutcome, { minConfidence: number; version: number }>>;
+export type ThresholdMap = Partial<
+  Record<
+    ThresholdableOutcome,
+    {
+      minConfidence: number;
+      version: number;
+      /** Explicit per-outcome on/off switch (`automation_enabled`). When
+       *  false the outcome is ALWAYS human-gated, whatever the confidence
+       *  (a confidence of 1.0 would otherwise clear any numeric cutoff).
+       *  Seeded to preserve production today: true for not_interested /
+       *  wrong_number / nurture / opted_out, false for new_lead (the
+       *  origin/main policy escalated every new_lead to a human). */
+      automationEnabled: boolean;
+    }
+  >
+>;
 
 export type ThresholdDecision =
   | {
@@ -60,7 +75,8 @@ export type ThresholdDecision =
         | "not_applicable"
         | "missing_confidence"
         | "invalid_confidence"
-        | "no_threshold_configured";
+        | "no_threshold_configured"
+        | "automation_disabled";
       outcome: JevOutcome;
     };
 
@@ -115,7 +131,11 @@ export function resolveThresholdDecision(
     // everything) — surface this as its own human-gated reason instead.
     return { status: "human_gated", reason: "no_threshold_configured", outcome };
   }
-  const { minConfidence, version: thresholdVersion } = configured;
+  const { minConfidence, version: thresholdVersion, automationEnabled } = configured;
+  // Explicit switch beats any confidence value, including 1.0.
+  if (automationEnabled !== true) {
+    return { status: "human_gated", reason: "automation_disabled", outcome };
+  }
 
   return confidence >= minConfidence
     ? { status: "auto_apply", outcome, confidence, minConfidence, thresholdVersion }
@@ -139,14 +159,19 @@ export async function loadOrgThresholdMap(
 ): Promise<ThresholdMap> {
   const { data, error } = await supabase
     .from("jev_outcome_thresholds")
-    .select("outcome, min_confidence, version")
+    .select("outcome, min_confidence, version, automation_enabled")
     .eq("org_id", orgId);
   if (error || !data) return {};
 
   const map: ThresholdMap = {};
   for (const row of data) {
     if (isThresholdableOutcome(row.outcome as JevOutcome)) {
-      map[row.outcome as ThresholdableOutcome] = { minConfidence: row.min_confidence, version: row.version };
+      map[row.outcome as ThresholdableOutcome] = {
+        minConfidence: row.min_confidence,
+        version: row.version,
+        // Fail closed: anything but an explicit true holds for a human.
+        automationEnabled: row.automation_enabled === true,
+      };
     }
   }
   return map;

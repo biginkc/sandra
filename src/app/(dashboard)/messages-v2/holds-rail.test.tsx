@@ -22,15 +22,41 @@ const hold = (
   reason: "Needs attention",
   run: withRun
     ? {
-        id: `r-${id}`, org_id: "o", inbound_message_id: `m-${id}`, property_id: id, contact_id: null,
-        conversation_id: `c-${id}`, status: "closed", mode: "automatic", final_outcome: null,
-        reason: null, classification_run_id: null, claim_id: null, outbound_message_id: null,
-        inbound_preview: `preview ${id}`, started_at: iso(minsAgo), completed_at: iso(minsAgo), steps, ...over,
+        id: `r-${id}`,
+        org_id: "o",
+        inbound_message_id: `m-${id}`,
+        property_id: id,
+        contact_id: null,
+        conversation_id: `c-${id}`,
+        status: "closed",
+        mode: "automatic",
+        final_outcome: null,
+        reason: null,
+        classification_run_id: null,
+        claim_id: null,
+        outbound_message_id: null,
+        inbound_preview: `preview ${id}`,
+        started_at: iso(minsAgo),
+        completed_at: iso(minsAgo),
+        steps,
+        ...over,
       }
     : null,
 });
-const holdStep = (run_id: string, name: string, detail: Record<string, unknown> = {}): PipelineRunStep => ({
-  id: `s-${run_id}`, run_id, org_id: "o", seq: 1, kind: "hold", name, result: "held", detail, created_at: "",
+const holdStep = (
+  run_id: string,
+  name: string,
+  detail: Record<string, unknown> = {},
+): PipelineRunStep => ({
+  id: `s-${run_id}`,
+  run_id,
+  org_id: "o",
+  seq: 1,
+  kind: "hold",
+  name,
+  result: "held",
+  detail,
+  created_at: "",
 });
 
 describe("ageTone", () => {
@@ -45,33 +71,70 @@ describe("HoldsRail", () => {
   it("renders holds in the order given with why-held and age badges", () => {
     render(
       <HoldsRail
-        holds={[hold("a", 300, [holdStep("a", "needs_human_review")]), hold("b", 90), hold("c", 5)]}
+        holds={[
+          hold("a", 300, [holdStep("a", "needs_human_review")]),
+          hold("b", 90),
+          hold("c", 5),
+        ]}
         labels={new Map()}
         nowMs={NOW}
       />,
     );
     const cards = screen.getAllByTestId("hold-card");
     expect(cards).toHaveLength(3);
-    expect(within(cards[0]).getByText(/needs_human_review/)).toBeInTheDocument();
-    expect(within(cards[0]).getByTestId("hold-age")).toHaveAttribute("data-tone", "red");
-    expect(within(cards[1]).getByTestId("hold-age")).toHaveAttribute("data-tone", "amber");
-    expect(within(cards[2]).getByTestId("hold-age")).toHaveAttribute("data-tone", "neutral");
+    expect(
+      within(cards[0]).getByText(/needs_human_review/),
+    ).toBeInTheDocument();
+    expect(within(cards[0]).getByTestId("hold-age")).toHaveAttribute(
+      "data-tone",
+      "red",
+    );
+    expect(within(cards[1]).getByTestId("hold-age")).toHaveAttribute(
+      "data-tone",
+      "amber",
+    );
+    expect(within(cards[2]).getByTestId("hold-age")).toHaveAttribute(
+      "data-tone",
+      "neutral",
+    );
   });
 
   it("falls back to the run reason when there is no hold step", () => {
-    render(<HoldsRail holds={[hold("a", 5, [], { reason: "low_confidence" })]} labels={new Map()} nowMs={NOW} />);
+    render(
+      <HoldsRail
+        holds={[hold("a", 5, [], { reason: "low_confidence" })]}
+        labels={new Map()}
+        nowMs={NOW}
+      />,
+    );
     expect(screen.getByText(/low_confidence/)).toBeInTheDocument();
   });
 
   it("renders a runless fallback card from the hold itself (older than the seam)", () => {
-    render(<HoldsRail holds={[hold("a", 5, [], {}, false)]} labels={new Map()} nowMs={NOW} />);
-    expect(screen.getByTestId("hold-card")).toHaveTextContent("Needs attention");
+    render(
+      <HoldsRail
+        holds={[hold("a", 5, [], {}, false)]}
+        labels={new Map()}
+        nowMs={NOW}
+      />,
+    );
+    expect(screen.getByTestId("hold-card")).toHaveTextContent(
+      "Needs attention",
+    );
     expect(screen.queryByText(/preview a/)).not.toBeInTheDocument();
   });
 
   it("shows the hold step even when the run status is closed", () => {
     render(
-      <HoldsRail holds={[hold("a", 5, [holdStep("a", "needs_human_review")], { status: "closed" })]} labels={new Map()} nowMs={NOW} />,
+      <HoldsRail
+        holds={[
+          hold("a", 5, [holdStep("a", "needs_human_review")], {
+            status: "closed",
+          }),
+        ]}
+        labels={new Map()}
+        nowMs={NOW}
+      />,
     );
     expect(screen.getByText(/needs_human_review/)).toBeInTheDocument();
   });
@@ -88,6 +151,77 @@ describe("HoldsRail", () => {
   it("shows the empty state and the shadow scorecard placeholder", () => {
     render(<HoldsRail holds={[]} labels={new Map()} nowMs={NOW} />);
     expect(screen.getByText(/no open holds/i)).toBeInTheDocument();
-    expect(screen.getByText(/available after 2h of shadow traffic/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/available after 2h of shadow traffic/i),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("HoldsRail degraded states", () => {
+  const meta = (over: Partial<import("./types").HoldsMeta> = {}) => ({
+    total: 0,
+    shown: 0,
+    truncated: false,
+    failed: [],
+    contextErrors: [],
+    ...over,
+  });
+  it("shows an explicit unavailable state, not an empty rail, when a source failed", () => {
+    render(
+      <HoldsRail
+        holds={[]}
+        labels={new Map()}
+        nowMs={NOW}
+        meta={meta({ failed: ["jev_decision"] })}
+      />,
+    );
+    expect(screen.getByTestId("holds-unavailable")).toHaveTextContent(
+      "Holds unavailable — Jev decision query failed",
+    );
+    expect(screen.queryByText("No open holds.")).toBeNull();
+  });
+  it("shows total and shown when truncated", () => {
+    render(
+      <HoldsRail
+        holds={[hold("a", 5)]}
+        labels={new Map()}
+        nowMs={NOW}
+        meta={meta({ total: 350, shown: 1, truncated: true })}
+      />,
+    );
+    expect(
+      screen.getByRole("heading", { name: /350, 1 shown/ }),
+    ).toBeInTheDocument();
+  });
+  it("flags context lookup errors", () => {
+    render(
+      <HoldsRail
+        holds={[]}
+        labels={new Map()}
+        nowMs={NOW}
+        meta={meta({ contextErrors: ["step lookup"] })}
+      />,
+    );
+    expect(screen.getByTestId("holds-context-errors")).toHaveTextContent(
+      "step lookup",
+    );
+  });
+  it("shows 'age unknown' when the hold time is unknown", () => {
+    const h = { ...hold("a", 5), since: null };
+    render(<HoldsRail holds={[h]} labels={new Map()} nowMs={NOW} />);
+    expect(screen.getByTestId("hold-age")).toHaveTextContent("age unknown");
+  });
+  it("shows the draft-held fact (never a body) when a pending draft exists", () => {
+    render(
+      <HoldsRail
+        holds={[{ ...hold("a", 5), draft_held: true }, hold("b", 5)]}
+        labels={new Map()}
+        nowMs={NOW}
+      />,
+    );
+    expect(screen.getAllByTestId("draft-held")).toHaveLength(1);
+    expect(screen.getByTestId("draft-held")).toHaveTextContent(
+      "Claude draft held (Phase 1 to act)",
+    );
   });
 });

@@ -6,7 +6,13 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 import { holdReason } from "./step-format";
-import type { OpenHold, RunLabel, RunWithSteps } from "./types";
+import type {
+  HoldsMeta,
+  HoldSource,
+  OpenHold,
+  RunLabel,
+  RunWithSteps,
+} from "./types";
 
 const HOUR = 60 * 60 * 1000;
 
@@ -58,8 +64,8 @@ export function HoldCard({
   nowMs: number;
 }) {
   const run = hold.run;
-  const age = Math.max(0, nowMs - Date.parse(hold.since));
-  const tone = ageTone(age);
+  const age = hold.since ? Math.max(0, nowMs - Date.parse(hold.since)) : null;
+  const tone = age === null ? "neutral" : ageTone(age);
   const why = run ? holdReason(run.steps, run.reason) : null;
   return (
     <article
@@ -67,36 +73,57 @@ export function HoldCard({
       className="rounded-xl bg-card p-4 text-sm ring-1 ring-foreground/10"
     >
       <header className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-        <time
-          suppressHydrationWarning
-          dateTime={hold.since}
-          className="text-xs tabular-nums text-muted-foreground"
-        >
-          {format(new Date(hold.since), "h:mm a")}
-        </time>
+        {hold.since ? (
+          <time
+            suppressHydrationWarning
+            dateTime={hold.since}
+            className="text-xs tabular-nums text-muted-foreground"
+          >
+            {format(new Date(hold.since), "h:mm a")}
+          </time>
+        ) : (
+          <span className="text-xs text-muted-foreground">time unknown</span>
+        )}
         <span className="font-semibold">{label?.name ?? "Unknown sender"}</span>
-        {label?.address && <span className="text-muted-foreground">· {label.address}</span>}
+        {label?.address && (
+          <span className="text-muted-foreground">· {label.address}</span>
+        )}
         <span
           data-testid="hold-age"
           data-tone={tone}
-          className={cn("ml-auto rounded-full px-2 text-xs tabular-nums", TONE_CLASS[tone])}
+          className={cn(
+            "ml-auto rounded-full px-2 text-xs tabular-nums",
+            TONE_CLASS[tone],
+          )}
         >
-          {formatAge(age)}
+          {age === null ? "age unknown" : formatAge(age)}
         </span>
       </header>
       {run?.inbound_preview && (
         <p className="mt-2 flex gap-2">
-          <span aria-hidden className="text-muted-foreground">◀</span>
+          <span aria-hidden className="text-muted-foreground">
+            ◀
+          </span>
           <span>{run.inbound_preview}</span>
         </p>
       )}
       <p className="mt-2 flex gap-2">
-        <span aria-hidden className="text-sky-600">●</span>
+        <span aria-hidden className="text-sky-600">
+          ●
+        </span>
         <span>
           {hold.reason}
           {why ? ` · ${why}` : ""}
         </span>
       </p>
+      {hold.draft_held && (
+        <p data-testid="draft-held" className="mt-2 flex gap-2">
+          <span aria-hidden className="text-violet-600">
+            ●
+          </span>
+          <span>Claude draft held (Phase 1 to act)</span>
+        </p>
+      )}
       <Phase2Actions />
     </article>
   );
@@ -114,11 +141,19 @@ export function ShadowScorecard() {
   );
 }
 
+const SOURCE_NAME: Record<HoldSource, string> = {
+  needs_attention: "needs-attention",
+  jev_decision: "Jev decision",
+  disposition_review: "disposition review",
+};
+
 export function HoldsRail({
   holds,
   labels,
   nowMs,
+  meta,
 }: {
+  meta?: HoldsMeta;
   holds: readonly OpenHold<RunWithSteps>[];
   labels: ReadonlyMap<string, RunLabel>;
   nowMs: number;
@@ -126,15 +161,47 @@ export function HoldsRail({
   return (
     <aside aria-label="Holds" className="flex flex-col gap-3">
       <h2 className="text-sm font-semibold">
-        Holds <span className="text-muted-foreground">({holds.length})</span>
+        Holds{" "}
+        <span className="text-muted-foreground">
+          {meta?.truncated
+            ? `(${meta.total}, ${meta.shown} shown)`
+            : `(${holds.length})`}
+        </span>
       </h2>
-      {holds.length === 0 ? (
-        <p className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
-          No open holds.
+      {meta && meta.failed.length > 0 && (
+        <p
+          role="alert"
+          data-testid="holds-unavailable"
+          className="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200"
+        >
+          Holds unavailable —{" "}
+          {meta.failed.map((f) => SOURCE_NAME[f]).join(", ")} query failed
         </p>
+      )}
+      {meta && meta.contextErrors.length > 0 && (
+        <p
+          role="alert"
+          data-testid="holds-context-errors"
+          className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
+        >
+          Some hold details failed to load ({meta.contextErrors.join(", ")});
+          cards may be missing run context.
+        </p>
+      )}
+      {holds.length === 0 ? (
+        meta && meta.failed.length > 0 ? null : (
+          <p className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
+            No open holds.
+          </p>
+        )
       ) : (
         holds.map((hold) => (
-          <HoldCard key={hold.id} hold={hold} label={labels.get(hold.id)} nowMs={nowMs} />
+          <HoldCard
+            key={hold.id}
+            hold={hold}
+            label={labels.get(hold.id)}
+            nowMs={nowMs}
+          />
         ))
       )}
       <ShadowScorecard />

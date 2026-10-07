@@ -11,7 +11,9 @@ export function upsertRun(
 ): RunWithSteps[] {
   const existing = runs.find((r) => r.id === incoming.id);
   const next = existing
-    ? runs.map((r) => (r.id === incoming.id ? { ...r, ...incoming, steps: r.steps } : r))
+    ? runs.map((r) =>
+        r.id === incoming.id ? { ...r, ...incoming, steps: r.steps } : r,
+      )
     : [{ ...incoming, steps: [] as PipelineRunStep[] }, ...runs];
   return next.sort(byStartedDesc).slice(0, MAX_RUNS);
 }

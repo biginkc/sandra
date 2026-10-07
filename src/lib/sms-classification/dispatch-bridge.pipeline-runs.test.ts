@@ -10,7 +10,7 @@ vi.mock("@/lib/pipeline-runs", () => ({ recordStep }));
 import { classifyForDispatch } from "./dispatch-bridge";
 
 // Minimal client: every table answers the few reads the bridge makes.
-function stubSupabase(thresholds: Array<{ outcome: string; min_confidence: number }> = []) {
+function stubSupabase(thresholds: Array<{ outcome: string; min_confidence: number; automation_enabled?: boolean }> = []) {
   const chain: Record<string, unknown> = {};
   const self = () => chain;
   chain.select = self;
@@ -32,7 +32,7 @@ function stubSupabase(thresholds: Array<{ outcome: string; min_confidence: numbe
   const thresholdsChain = {
     select: () => thresholdsChain,
     eq: async () => ({
-      data: thresholds.map((t) => ({ ...t, version: 1 })),
+      data: thresholds.map((t) => ({ automation_enabled: true, ...t, version: 1 })),
       error: null,
     }),
   };
@@ -100,6 +100,20 @@ describe("classifyForDispatch evidence steps", () => {
     const steps = recordStep.mock.calls.map((c) => c[2]);
     expect(steps.map((s) => s.kind)).toEqual(["jev", "threshold"]);
     expect(steps[1].detail).toMatchObject({ decision: "needs_decision", threshold: 0.8 });
+  });
+
+  it("holds a 1.0-confidence new_lead for a human when automation is disabled (records the held threshold step)", async () => {
+    const fn = stubFetch({ answers: { outcome: { choice: "new_lead", confidence: 1 }, escalation_reason: { choice: "call_request" } } });
+    const result = await classifyForDispatch(
+      stubSupabase([{ outcome: "new_lead", min_confidence: 0.9, automation_enabled: false }]),
+      input,
+      { classifierProvider: "jev", classifierMode: "automatic" },
+      { fetch: fn, typesafeApiKey: "k", runContext: ctx },
+    );
+    expect(result.kind).toBe("jev_route");
+    const threshold = recordStep.mock.calls.map((c) => c[2]).find((s) => s.kind === "threshold");
+    expect(threshold).toMatchObject({ result: "held" });
+    expect(threshold.detail).toMatchObject({ decision: "human_gated", reason: "automation_disabled" });
   });
 
   it("records an error jev step when the provider fails", async () => {

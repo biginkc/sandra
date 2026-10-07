@@ -40,7 +40,11 @@ describe("held deferred dispositions", () => {
         insert: async () => ({ error: null }),
         update: (p: unknown) => {
           updates.push(p);
-          return { eq: async () => ({ error: null }) };
+          const chain = {
+            eq: () => chain,
+            select: async () => ({ data: [{ id: "r" }], error: null }),
+          };
+          return chain;
         },
       }),
     } as never;

@@ -276,7 +276,7 @@ async function dispatchAiResponseCore(
   const { data: config } = await supabase
     .from("ai_responder_configs")
     .select(
-      "id, active, model, system_prompt, max_turns, min_confidence, escalation_keywords, business_hours_only, classifier_provider, classifier_mode",
+      "id, active, model, system_prompt, max_turns, min_confidence, escalation_keywords, business_hours_only, classifier_provider, classifier_mode, outbound_mode",
     )
     .eq("org_id", property.org_id)
     .eq("active", true)
@@ -406,6 +406,7 @@ async function dispatchAiResponseCore(
     });
   }
 
+  const claimStartedAt = new Date().toISOString();
   const responseClaim = await claimAiResponse(supabase, {
     orgId: property.org_id,
     inboundMessageId: input.inboundMessageId,
@@ -448,6 +449,13 @@ async function dispatchAiResponseCore(
       confidence: 1,
       sentiment: "neutral",
       turn: currentTurn + 1,
+      // Every current caller is `llm` (brief, fix round 2): even the fixed
+      // identity template is not classed as an approved template until a
+      // human approves that classification.
+      source: "llm",
+      orgId: property.org_id,
+      claimStartedAt,
+      outboundMode: config!.outbound_mode,
     });
     await completeAiResponseClaim(supabase, {
       claimId: responseClaim.claimId,
@@ -484,10 +492,15 @@ async function dispatchAiResponseCore(
     supabase,
     input,
     property,
-    { model: config!.model, system_prompt: config!.system_prompt, min_confidence: config!.min_confidence },
+    {
+      model: config!.model,
+      system_prompt: config!.system_prompt,
+      min_confidence: config!.min_confidence,
+      outbound_mode: config!.outbound_mode,
+    },
     deps,
     currentTurn,
-    responseClaim,
+    { claimId: responseClaim.claimId, startedAt: claimStartedAt },
     classification,
   );
 }
@@ -529,6 +542,7 @@ async function classifyAndApplyDespiteReplyIneligibility(
   },
   currentTurn: number,
 ): Promise<AiDispatchOutcome | null> {
+  const claimStartedAt = new Date().toISOString();
   const responseClaim = await claimAiResponse(supabase, {
     orgId: property.org_id,
     inboundMessageId: input.inboundMessageId,
@@ -594,7 +608,7 @@ async function classifyAndApplyDespiteReplyIneligibility(
     // never calls generateAiReply, only the send-kind cases above do.
     { anthropic: null as never },
     currentTurn,
-    responseClaim,
+    { claimId: responseClaim.claimId, startedAt: claimStartedAt },
     classification,
   );
 }
@@ -833,10 +847,11 @@ async function resolveAndApplyRoute(
     model: string;
     system_prompt: string;
     min_confidence: number;
+    outbound_mode?: string | null;
   },
   deps: { anthropic: AnthropicLike },
   currentTurn: number,
-  responseClaim: { claimId: string | null },
+  responseClaim: { claimId: string | null; startedAt?: string },
   classification: ClassificationBridgeResult,
 ): Promise<AiDispatchOutcome> {
   let generated: AiStructuredOutput;
@@ -1203,6 +1218,10 @@ async function resolveAndApplyRoute(
         confidence: generated.confidence,
         sentiment: generated.sentiment,
         turn: currentTurn + 1,
+        source: "llm",
+        orgId: property.org_id,
+        claimStartedAt: responseClaim.startedAt ?? null,
+        outboundMode: config.outbound_mode,
       });
       if (sent.outcome !== "sent") {
         await completeAiResponseClaim(supabase, {
@@ -1376,6 +1395,72 @@ async function resolveOutboundBody(
   };
 }
 
+export type ReplySource = "approved_template" | "llm" | "human";
+
+/**
+ * Outbound policy. Defaults PRESERVE production today (origin/main always
+ * sent): mode `send` and AI_RESPONDER_LLM_AUTOSEND unset/"1".
+ *  - AI_RESPONDER_OUTBOUND_MODE ("send" | "hold") overrides the DB column
+ *    ai_responder_configs.outbound_mode when set; unset = use the DB.
+ *  - AI_RESPONDER_LLM_AUTOSEND="0" holds every `llm`-sourced reply as a
+ *    draft. Flipping it to "0" is the Phase-1 D5 enforcement.
+ */
+export function resolveOutboundPolicy(args: {
+  source: ReplySource;
+  dbMode?: string | null;
+}): { hold: false } | { hold: true; reason: "outbound_mode_hold" | "llm_autosend_off" } {
+  const envMode = process.env.AI_RESPONDER_OUTBOUND_MODE?.trim().toLowerCase();
+  const mode =
+    envMode === "send" || envMode === "hold"
+      ? envMode
+      : args.dbMode === "hold"
+        ? "hold"
+        : "send";
+  if (mode === "hold") return { hold: true, reason: "outbound_mode_hold" };
+  if (args.source === "llm" && process.env.AI_RESPONDER_LLM_AUTOSEND?.trim() === "0") {
+    return { hold: true, reason: "llm_autosend_off" };
+  }
+  return { hold: false };
+}
+
+async function verifyReplyStillCurrent(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  claimStartedAt: string | null,
+): Promise<{ ok: true } | { ok: false; reason: "newer_inbound" | "outbound_since_claim" }> {
+  if (input.inboundMessageId) {
+    const latest = await findLatestInboundInThread(supabase, input);
+    if (latest && latest.id !== input.inboundMessageId) {
+      return { ok: false, reason: "newer_inbound" };
+    }
+  }
+  if (claimStartedAt) {
+    let query = supabase
+      .from("messages")
+      .select("id, created_at")
+      .eq("property_id", input.propertyId)
+      .eq("direction", "outbound")
+      .neq("status", "failed");
+    query = input.conversationId
+      ? query.eq("conversation_id", input.conversationId)
+      : query.eq("contact_id", input.contactId);
+    const { data, error } = await query
+      .order("created_at", { ascending: false })
+      .limit(5);
+    if (error) {
+      reportError(new Error(error.message), {
+        tags: { surface: "ai_responder_pre_send_outbound_lookup" },
+        extra: { propertyId: input.propertyId },
+      });
+      return { ok: true };
+    }
+    if ((data ?? []).some((row) => row.created_at >= claimStartedAt)) {
+      return { ok: false, reason: "outbound_since_claim" };
+    }
+  }
+  return { ok: true };
+}
+
 async function sendResponderMessage(
   supabase: SupabaseClient<Database>,
   args: {
@@ -1385,10 +1470,64 @@ async function sendResponderMessage(
     confidence: number;
     sentiment: AiMessageMetadata["sentiment"];
     turn: number;
+    /** Who authored the text. Every current caller is `llm`. */
+    source: ReplySource;
+    orgId: string;
+    /** When this run took its claim; null when unknown (check skipped). */
+    claimStartedAt: string | null;
+    /** ai_responder_configs.outbound_mode as loaded for this dispatch. */
+    outboundMode?: string | null;
   },
 ): Promise<
   Extract<AiDispatchOutcome, { outcome: "sent" | "escalated" | "skipped" }>
 > {
+  // Chokepoint 1 — pre-send re-verification. Claims are per inbound message,
+  // so two inbounds in one conversation can both pass the dispatch-entry
+  // checks before either sends. Re-check immediately before the provider
+  // call that (a) our inbound is still the latest and (b) nothing has been
+  // sent in the conversation since we claimed. (A conversation-level claim
+  // index was rejected: see 20261008143200_messages_v2_hardening.sql.)
+  const current = await verifyReplyStillCurrent(supabase, args.input, args.claimStartedAt);
+  if (!current.ok) {
+    await trace(supabase, {
+      kind: "gate",
+      name: "superseded_before_send",
+      result: "block",
+      detail: { reason: current.reason },
+    });
+    return { outcome: "skipped", reason: "superseded_before_send" };
+  }
+
+  // Chokepoint 2 — outbound policy (rollback to draft-only + D5). Lives here
+  // so immediate dispatch AND the resumed delay workflow both hit it.
+  const policy = resolveOutboundPolicy({ source: args.source, dbMode: args.outboundMode });
+  if (policy.hold) {
+    const { error: draftError } = await supabase.from("ai_reply_drafts").insert({
+      org_id: args.orgId,
+      run_id: currentPipelineRun()?.runId ?? null,
+      conversation_id: args.input.conversationId ?? null,
+      property_id: args.input.propertyId,
+      inbound_message_id: args.input.inboundMessageId ?? null,
+      body: args.body,
+      source: args.source,
+      status: "pending",
+    });
+    if (draftError) {
+      reportError(new Error(draftError.message), {
+        tags: { surface: "ai_responder_draft_insert" },
+        extra: { propertyId: args.input.propertyId },
+      });
+    }
+    await trace(supabase, {
+      kind: "hold",
+      name: "llm_draft_held",
+      result: "held",
+      detail: { source: args.source, reason: policy.reason, stored: !draftError },
+    });
+    await markPropertyNeedsAttention(supabase, args.input.propertyId, "draft_held");
+    return { outcome: "escalated", reason: "draft_held" };
+  }
+
   let inboundToPhone = args.input.inboundToPhone ?? null;
   if (!inboundToPhone && args.input.inboundMessageId) {
     try {

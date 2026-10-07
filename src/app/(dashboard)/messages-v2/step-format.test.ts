@@ -7,7 +7,12 @@ describe("readJevScores", () => {
     const scores = readJevScores({
       classificationRunId: "run-1",
       outcome: "nurture",
-      probabilities: { nurture: 0.91, not_interested: 0.06, new_lead: 0.02, unclear: 0.01 },
+      probabilities: {
+        nurture: 0.91,
+        not_interested: 0.06,
+        new_lead: 0.02,
+        unclear: 0.01,
+      },
       nativeConfidence: 0.91,
     });
     expect(scores).toEqual([

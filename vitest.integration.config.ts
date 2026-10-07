@@ -100,6 +100,7 @@ export default defineConfig({
       "src/lib/my-leads/seller-reminder.transport.integration.test.ts",
       "supabase/migrations/20261008143000_pipeline_runs.integration.test.ts",
       "supabase/migrations/20261008143100_pipeline_runs_access_policy.integration.test.ts",
+      "supabase/migrations/20261008143200_messages_v2_hardening.integration.test.ts",
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
       "supabase/migrations/20260929239000_drips_snapshot_isolation.integration.test.ts",

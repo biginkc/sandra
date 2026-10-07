@@ -16,16 +16,33 @@ describe("redactPhone", () => {
 describe("formatRunLabel", () => {
   it("uses first name and address for known contacts", () => {
     expect(
-      formatRunLabel({ firstName: "Dana", address: "12 Elm St", city: "Kansas City", fromAddress: "+18165550142" }),
+      formatRunLabel({
+        firstName: "Dana",
+        address: "12 Elm St",
+        city: "Kansas City",
+        fromAddress: "+18165550142",
+      }),
     ).toEqual({ name: "Dana", address: "12 Elm St, Kansas City" });
   });
   it("redacts the phone for unknown senders and never shows the full number", () => {
-    const label = formatRunLabel({ firstName: null, address: null, city: null, fromAddress: "+18165550142" });
+    const label = formatRunLabel({
+      firstName: null,
+      address: null,
+      city: null,
+      fromAddress: "+18165550142",
+    });
     expect(label.name).toBe("Unknown ···0142");
     expect(label.name).not.toContain("816");
     expect(label.address).toBeNull();
   });
   it("falls back to a generic name with no phone", () => {
-    expect(formatRunLabel({ firstName: " ", address: null, city: null, fromAddress: null }).name).toBe("Unknown sender");
+    expect(
+      formatRunLabel({
+        firstName: " ",
+        address: null,
+        city: null,
+        fromAddress: null,
+      }).name,
+    ).toBe("Unknown sender");
   });
 });

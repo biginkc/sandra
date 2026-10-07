@@ -1016,6 +1016,7 @@ export type Database = {
           min_confidence: number
           model: string
           org_id: string
+          outbound_mode: string
           reply_delay_max_seconds: number
           reply_delay_min_seconds: number
           system_prompt: string
@@ -1035,6 +1036,7 @@ export type Database = {
           min_confidence?: number
           model?: string
           org_id: string
+          outbound_mode?: string
           reply_delay_max_seconds?: number
           reply_delay_min_seconds?: number
           system_prompt: string
@@ -1054,6 +1056,7 @@ export type Database = {
           min_confidence?: number
           model?: string
           org_id?: string
+          outbound_mode?: string
           reply_delay_max_seconds?: number
           reply_delay_min_seconds?: number
           system_prompt?: string
@@ -1068,6 +1071,45 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      ai_reply_drafts: {
+        Row: {
+          body: string
+          conversation_id: string | null
+          created_at: string
+          id: string
+          inbound_message_id: string | null
+          org_id: string
+          property_id: string | null
+          run_id: string | null
+          source: string
+          status: string
+        }
+        Insert: {
+          body: string
+          conversation_id?: string | null
+          created_at?: string
+          id?: string
+          inbound_message_id?: string | null
+          org_id: string
+          property_id?: string | null
+          run_id?: string | null
+          source: string
+          status?: string
+        }
+        Update: {
+          body?: string
+          conversation_id?: string | null
+          created_at?: string
+          id?: string
+          inbound_message_id?: string | null
+          org_id?: string
+          property_id?: string | null
+          run_id?: string | null
+          source?: string
+          status?: string
+        }
+        Relationships: []
       }
       ai_response_claims: {
         Row: {
@@ -2619,6 +2661,8 @@ export type Database = {
       }
       jev_outcome_threshold_history: {
         Row: {
+          new_automation_enabled: boolean
+          previous_automation_enabled: boolean | null
           changed_at: string
           changed_by: string | null
           id: string
@@ -2631,6 +2675,8 @@ export type Database = {
           version: number
         }
         Insert: {
+          new_automation_enabled: boolean
+          previous_automation_enabled?: boolean | null
           changed_at?: string
           changed_by?: string | null
           id?: string
@@ -2643,6 +2689,8 @@ export type Database = {
           version: number
         }
         Update: {
+          new_automation_enabled?: boolean
+          previous_automation_enabled?: boolean | null
           changed_at?: string
           changed_by?: string | null
           id?: string
@@ -2673,6 +2721,7 @@ export type Database = {
       }
       jev_outcome_thresholds: {
         Row: {
+          automation_enabled: boolean
           id: string
           min_confidence: number
           org_id: string
@@ -2682,6 +2731,7 @@ export type Database = {
           version: number
         }
         Insert: {
+          automation_enabled?: boolean
           id?: string
           min_confidence: number
           org_id: string
@@ -2691,6 +2741,7 @@ export type Database = {
           version?: number
         }
         Update: {
+          automation_enabled?: boolean
           id?: string
           min_confidence?: number
           org_id?: string
@@ -7647,8 +7698,13 @@ export type Database = {
       // against a fully-migrated disposable local Postgres (colima was
       // resolvable this session); safe to trust as authoritative until
       // the next full regen supersedes it.
+      pipeline_runs_latest_for_properties: {
+        Args: { p_org_id: string; p_property_ids: string[] }
+        Returns: Database["public"]["Tables"]["pipeline_runs"]["Row"][]
+      }
       fn_set_jev_outcome_threshold: {
         Args: {
+          p_automation_enabled?: boolean
           p_expected_version: number
           p_idempotency_key: string
           p_min_confidence: number

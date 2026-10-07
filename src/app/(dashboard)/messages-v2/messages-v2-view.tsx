@@ -10,9 +10,15 @@ import { useThrottledRefresh } from "../messages/use-throttled-refresh";
 import { appendStep, upsertRun } from "./feed-state";
 import { HoldsRail } from "./holds-rail";
 import { loadRunLabels } from "./labels";
-import { computeHeaderStats, describeCoverage, type LooseSupabase } from "./queries";
+import {
+  computeHeaderStats,
+  describeCoverage,
+  formatModeBadge,
+  type LooseSupabase,
+} from "./queries";
 import { RunCard } from "./run-card";
 import type {
+  HoldsMeta,
   ModeBadge,
   OpenHold,
   PipelineCoverage,
@@ -31,6 +37,9 @@ export type MessagesV2ViewProps = {
   holds: OpenHold<RunWithSteps>[];
   /** Inbound vs run counts for the last hour; null when unavailable. */
   coverage?: PipelineCoverage | null;
+  /** The coverage query failed: show a degraded indicator, not nothing. */
+  coverageUnavailable?: boolean;
+  holdsMeta?: HoldsMeta;
   badges: ModeBadge[];
   /** Server-resolved display labels, as [runId, label] pairs. */
   labels: Array<[string, RunLabel]>;
@@ -47,6 +56,7 @@ const LEGEND = [
 ] as const;
 
 const BADGE_CLASS: Record<ModeBadge["mode"], string> = {
+  HELD: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200",
   AUTO: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200",
   SHADOW: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200",
   LEGACY: "bg-secondary text-muted-foreground",
@@ -83,14 +93,22 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   // is swapped for the live copy when the feed has it (streamed steps).
   const holds = useMemo(() => {
     const live = new Map(runs.map((r) => [r.id, r]));
-    return props.holds.map((h) => (h.run ? { ...h, run: live.get(h.run.id) ?? h.run } : h));
+    return props.holds.map((h) =>
+      h.run ? { ...h, run: live.get(h.run.id) ?? h.run } : h,
+    );
   }, [runs, props.holds]);
 
   const stats = useMemo(
     () => computeHeaderStats(runs, nowMs, holds.length),
     [runs, holds, nowMs],
   );
-  const coverage = describeCoverage(props.coverage);
+  const meta = props.holdsMeta;
+  const holdsLabel = meta?.failed.length
+    ? "holds unavailable"
+    : meta?.truncated
+      ? `${meta.total} holds (${meta.shown} shown)`
+      : `${stats.openHolds} holds`;
+  const coverage = describeCoverage(props.coverage, props.coverageUnavailable);
 
   useEffect(() => {
     const id = window.setInterval(() => setNowMs(Date.now()), 30_000);
@@ -142,21 +160,36 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         .on(
           // pipeline_* tables are not in the generated Database type yet.
           "postgres_changes" as never,
-          { event: "INSERT", schema: "public", table: "pipeline_runs", filter: orgFilter } as never,
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "pipeline_runs",
+            filter: orgFilter,
+          } as never,
           ((payload: { new: PipelineRun }) => {
             setRuns(upsertRun(runsRef.current, payload.new));
           }) as never,
         )
         .on(
           "postgres_changes" as never,
-          { event: "UPDATE", schema: "public", table: "pipeline_runs", filter: orgFilter } as never,
+          {
+            event: "UPDATE",
+            schema: "public",
+            table: "pipeline_runs",
+            filter: orgFilter,
+          } as never,
           ((payload: { new: PipelineRun }) => {
             setRuns(upsertRun(runsRef.current, payload.new));
           }) as never,
         )
         .on(
           "postgres_changes" as never,
-          { event: "INSERT", schema: "public", table: "pipeline_run_steps", filter: orgFilter } as never,
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "pipeline_run_steps",
+            filter: orgFilter,
+          } as never,
           ((payload: { new: PipelineRunStep }) => {
             const res = appendStep(runsRef.current, payload.new);
             setRuns(res.runs);
@@ -167,12 +200,22 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         // event (human action) means the hold set may have changed.
         .on(
           "postgres_changes" as never,
-          { event: "*", schema: "public", table: "ai_disposition_reviews", filter: orgFilter } as never,
+          {
+            event: "*",
+            schema: "public",
+            table: "ai_disposition_reviews",
+            filter: orgFilter,
+          } as never,
           (() => requestRefresh()) as never,
         )
         .on(
           "postgres_changes" as never,
-          { event: "INSERT", schema: "public", table: "lead_events", filter: orgFilter } as never,
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "lead_events",
+            filter: orgFilter,
+          } as never,
           (() => requestRefresh()) as never,
         )
         .subscribe(((status: string) => {
@@ -182,7 +225,11 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
             // After a drop, rows may have been missed: backfill from the server.
             if (wasDown) requestRefresh();
             wasDown = false;
-          } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+          } else if (
+            status === "CHANNEL_ERROR" ||
+            status === "TIMED_OUT" ||
+            status === "CLOSED"
+          ) {
             setLive(false);
             wasDown = true;
           }
@@ -200,7 +247,8 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   const newestId = runs[0]?.id;
   useEffect(() => {
     const el = feedRef.current;
-    if (el && el.scrollTop < 48 && typeof el.scrollTo === "function") el.scrollTo({ top: 0 });
+    if (el && el.scrollTop < 48 && typeof el.scrollTo === "function")
+      el.scrollTo({ top: 0 });
   }, [newestId]);
 
   return (
@@ -209,22 +257,43 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         <h1 className="text-xl font-semibold">Messages v2</h1>
         <div className="flex flex-wrap gap-1.5" aria-label="Classifier modes">
           {badges.map((b) => (
-            <Badge key={b.label} variant="outline" className={cn("gap-1", BADGE_CLASS[b.mode])}>
-              {b.label} [{b.mode}]
+            <Badge
+              key={b.label}
+              variant="outline"
+              className={cn("gap-1", BADGE_CLASS[b.mode])}
+            >
+              {b.label} [{formatModeBadge(b)}]
             </Badge>
           ))}
         </div>
-        <p className="ml-auto text-sm text-muted-foreground" data-testid="header-status">
-          <span aria-hidden className={live ? "text-emerald-600" : "text-muted-foreground"}>●</span>{" "}
-          {live ? "live" : "connecting"} · {stats.runsLastHour} runs last hour · {stats.openHolds} holds
+        <p
+          className="ml-auto text-sm text-muted-foreground"
+          data-testid="header-status"
+        >
+          <span
+            aria-hidden
+            className={live ? "text-emerald-600" : "text-muted-foreground"}
+          >
+            ●
+          </span>{" "}
+          {live ? "live" : "connecting"} · {stats.runsLastHour} runs last hour ·{" "}
+          {holdsLabel}
           {coverage && (
             <>
-              {" "}·{" "}
+              {" "}
+              ·{" "}
               <span
                 data-testid="coverage"
                 data-gap={coverage.gap ? "true" : "false"}
-                className={cn(coverage.gap && "font-medium text-red-600 dark:text-red-400")}
-                title={coverage.gap ? "Fewer runs than inbound texts: the pipeline seam may be failing silently" : undefined}
+                data-degraded={coverage.degraded ? "true" : "false"}
+                className={cn(
+                  coverage.gap && "font-medium text-red-600 dark:text-red-400",
+                )}
+                title={
+                  coverage.gap
+                    ? "Fewer runs than inbound texts: the pipeline seam may be failing silently"
+                    : undefined
+                }
               >
                 {coverage.text}
               </span>
@@ -236,22 +305,34 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
         <section aria-label="Live feed" className="flex min-w-0 flex-col gap-3">
           <h2 className="text-sm font-semibold">Live feed</h2>
-          <div ref={feedRef} className="flex max-h-[calc(100vh-14rem)] flex-col gap-3 overflow-y-auto pr-1">
+          <div
+            ref={feedRef}
+            className="flex max-h-[calc(100vh-14rem)] flex-col gap-3 overflow-y-auto pr-1"
+          >
             {runs.length === 0 ? (
               <p className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
-                No pipeline runs yet. New inbound texts will appear here as they are processed.
+                No pipeline runs yet. New inbound texts will appear here as they
+                are processed.
               </p>
             ) : (
               runs.map((run) => (
-                <RunCard key={run.id} run={run} label={labels.get(run.id)} isOwner={isOwner} />
+                <RunCard
+                  key={run.id}
+                  run={run}
+                  label={labels.get(run.id)}
+                  isOwner={isOwner}
+                />
               ))
             )}
           </div>
         </section>
-        <HoldsRail holds={holds} labels={labels} nowMs={nowMs} />
+        <HoldsRail holds={holds} labels={labels} nowMs={nowMs} meta={meta} />
       </div>
 
-      <ul aria-label="Legend" className="flex flex-wrap gap-x-4 gap-y-1 border-t pt-3 text-xs text-muted-foreground">
+      <ul
+        aria-label="Legend"
+        className="flex flex-wrap gap-x-4 gap-y-1 border-t pt-3 text-xs text-muted-foreground"
+      >
         {LEGEND.map(([glyph, text]) => (
           <li key={text}>
             <span aria-hidden>{glyph}</span> {text}

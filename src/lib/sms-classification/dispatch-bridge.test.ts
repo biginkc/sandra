@@ -13,7 +13,7 @@ function stubSupabase(opts: {
    *  unless a test explicitly opts an outcome in. `version` defaults to 1
    *  when omitted — most tests only care about the confidence comparison,
    *  not which settings version was live. */
-  thresholds?: Array<{ outcome: string; min_confidence: number; version?: number }>;
+  thresholds?: Array<{ outcome: string; min_confidence: number; version?: number; automation_enabled?: boolean }>;
   /** properties.decision_context_revision, as `readDecisionContextRevision`
    *  (dispatch-bridge.ts) would read it. A function lets a test mutate a
    *  shared counter between setup and read — see the delayed-provider race
@@ -86,7 +86,7 @@ function stubSupabase(opts: {
   const thresholdsBuilder = {
     select: () => thresholdsBuilder,
     eq: async () => ({
-      data: (opts.thresholds ?? []).map((t) => ({ ...t, version: t.version ?? 1 })),
+      data: (opts.thresholds ?? []).map((t) => ({ automation_enabled: true, ...t, version: t.version ?? 1 })),
       error: null,
     }),
   };

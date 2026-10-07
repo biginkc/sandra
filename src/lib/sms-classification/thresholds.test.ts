@@ -9,11 +9,11 @@ import {
 } from "./thresholds";
 
 const THRESHOLDS: ThresholdMap = {
-  new_lead: { minConfidence: 0.9, version: 1 },
-  wrong_number: { minConfidence: 0.9, version: 1 },
-  not_interested: { minConfidence: 0.95, version: 2 },
-  nurture: { minConfidence: 0.95, version: 1 },
-  opted_out: { minConfidence: 0.95, version: 1 },
+  new_lead: { minConfidence: 0.9, version: 1, automationEnabled: true },
+  wrong_number: { minConfidence: 0.9, version: 1, automationEnabled: true },
+  not_interested: { minConfidence: 0.95, version: 2, automationEnabled: true },
+  nurture: { minConfidence: 0.95, version: 1, automationEnabled: true },
+  opted_out: { minConfidence: 0.95, version: 1, automationEnabled: true },
 };
 
 describe("resolveThresholdDecision", () => {
@@ -165,9 +165,46 @@ describe("resolveThresholdDecision", () => {
   });
 });
 
+describe("automation_enabled switch", () => {
+  it("holds for a human at confidence 1.0 when automation is disabled", () => {
+    const result = resolveThresholdDecision(
+      { outcome: "new_lead", outcomeConfidence: 1 },
+      { ...THRESHOLDS, new_lead: { minConfidence: 0.9, version: 1, automationEnabled: false } },
+    );
+    expect(result).toEqual({
+      status: "human_gated",
+      reason: "automation_disabled",
+      outcome: "new_lead",
+    });
+  });
+
+  it("still auto-applies the production-preserving outcomes at 1.0", () => {
+    for (const outcome of ["not_interested", "wrong_number", "nurture", "opted_out"] as const) {
+      expect(
+        resolveThresholdDecision({ outcome, outcomeConfidence: 1 }, THRESHOLDS).status,
+      ).toBe("auto_apply");
+    }
+  });
+
+  it("loader fails closed when the flag is missing", async () => {
+    const supabase = {
+      from: () => ({
+        select: () => ({
+          eq: async () => ({
+            data: [{ outcome: "nurture", min_confidence: 0.9, version: 1 }],
+            error: null,
+          }),
+        }),
+      }),
+    } as never;
+    const map = await loadOrgThresholdMap(supabase, "org-1");
+    expect(map.nurture?.automationEnabled).toBe(false);
+  });
+});
+
 describe("loadOrgThresholdMap", () => {
   function stubSupabase(
-    rows: Array<{ outcome: string; min_confidence: number; version: number }> | null,
+    rows: Array<{ outcome: string; min_confidence: number; version: number; automation_enabled?: boolean }> | null,
     error: { message: string } | null = null,
   ) {
     const builder = {
@@ -179,23 +216,23 @@ describe("loadOrgThresholdMap", () => {
 
   it("builds a map from the org's threshold rows, carrying each row's version", async () => {
     const supabase = stubSupabase([
-      { outcome: "new_lead", min_confidence: 0.9, version: 3 },
-      { outcome: "nurture", min_confidence: 0.95, version: 1 },
+      { outcome: "new_lead", min_confidence: 0.9, version: 3, automation_enabled: false },
+      { outcome: "nurture", min_confidence: 0.95, version: 1, automation_enabled: true },
     ]);
     const map = await loadOrgThresholdMap(supabase, "org-1");
     expect(map).toEqual({
-      new_lead: { minConfidence: 0.9, version: 3 },
-      nurture: { minConfidence: 0.95, version: 1 },
+      new_lead: { minConfidence: 0.9, version: 3, automationEnabled: false },
+      nurture: { minConfidence: 0.95, version: 1, automationEnabled: true },
     });
   });
 
   it("drops non-thresholdable outcome rows defensively (dnc/unclear should never appear, but must not crash if they do)", async () => {
     const supabase = stubSupabase([
-      { outcome: "dnc", min_confidence: 0.5, version: 1 },
-      { outcome: "not_interested", min_confidence: 0.95, version: 2 },
+      { outcome: "dnc", min_confidence: 0.5, version: 1, automation_enabled: true },
+      { outcome: "not_interested", min_confidence: 0.95, version: 2, automation_enabled: true },
     ]);
     const map = await loadOrgThresholdMap(supabase, "org-1");
-    expect(map).toEqual({ not_interested: { minConfidence: 0.95, version: 2 } });
+    expect(map).toEqual({ not_interested: { minConfidence: 0.95, version: 2, automationEnabled: true } });
   });
 
   it("returns an empty map (never throws) on a DB error", async () => {

@@ -1,4 +1,7 @@
-import { getCallerMembershipsOrThrow, type Membership } from "@/lib/auth/memberships";
+import {
+  getCallerMembershipsOrThrow,
+  type Membership,
+} from "@/lib/auth/memberships";
 import { hasActiveSandraAccess } from "@/lib/auth/access-state";
 import { isAcquisitionsCaller } from "@/lib/auth/surface-access";
 
@@ -8,14 +11,21 @@ import { isAcquisitionsCaller } from "@/lib/auth/surface-access";
  * members, so it cannot be reused here. Empty / inactive memberships are
  * denied (fail closed).
  */
-export function canAccessMessagesV2(memberships: readonly Membership[]): boolean {
+export function canAccessMessagesV2(
+  memberships: readonly Membership[],
+): boolean {
   return memberships
     .filter((membership) => hasActiveSandraAccess(membership))
-    .some((membership) => membership.role === "owner" || isAcquisitionsCaller(membership));
+    .some(
+      (membership) =>
+        membership.role === "owner" || isAcquisitionsCaller(membership),
+    );
 }
 
 /** Org the caller may view Messages v2 for (first qualifying active membership), or null. */
-export function messagesV2OrgId(memberships: readonly Membership[]): string | null {
+export function messagesV2OrgId(
+  memberships: readonly Membership[],
+): string | null {
   const allowed = memberships.find(
     (membership) =>
       hasActiveSandraAccess(membership) &&
@@ -32,7 +42,9 @@ export function messagesV2OrgId(memberships: readonly Membership[]): string | nu
 export function messagesV2Context(
   memberships: readonly Membership[],
 ): { orgId: string; isOwner: boolean } | null {
-  const active = memberships.filter((membership) => hasActiveSandraAccess(membership));
+  const active = memberships.filter((membership) =>
+    hasActiveSandraAccess(membership),
+  );
   const owner = active.find((membership) => membership.role === "owner");
   if (owner) return { orgId: owner.org_id, isOwner: true };
   const acq = active.find((membership) => isAcquisitionsCaller(membership));

@@ -199,16 +199,37 @@ export async function recordStep(
   // status "held" rather than "closed"; see runStatusForOutcome.
   if (step.kind === "action" && step.result === "held") ctx.held = true;
   try {
-    const { error } = await admin.from("pipeline_run_steps").insert({
-      run_id: ctx.runId,
-      org_id: ctx.orgId,
-      seq,
-      kind: step.kind,
-      name: step.name,
-      result: step.result,
-      detail: sanitizeStepDetail(step.detail ?? {}) as Json,
-    });
-    if (error) report("step", error);
+    // Another process (a resumed delay workflow, a webhook retry) may have
+    // taken this seq from the same run since we read the max. On a unique
+    // violation re-read the stored max and retry, up to 3 more times.
+    let attemptSeq = seq;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const { error } = await admin.from("pipeline_run_steps").insert({
+        run_id: ctx.runId,
+        org_id: ctx.orgId,
+        seq: attemptSeq,
+        kind: step.kind,
+        name: step.name,
+        result: step.result,
+        detail: sanitizeStepDetail(step.detail ?? {}) as Json,
+      });
+      if (!error) return;
+      const isSeqCollision =
+        (error as { code?: string }).code === "23505" && attempt < 3;
+      if (!isSeqCollision) {
+        report("step", error);
+        return;
+      }
+      const { data: latest } = await admin
+        .from("pipeline_run_steps")
+        .select("seq")
+        .eq("run_id", ctx.runId)
+        .order("seq", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      attemptSeq = Math.max(latest?.seq ?? 0, ctx.seq, attemptSeq) + 1;
+      ctx.seq = attemptSeq;
+    }
   } catch (error) {
     report("step", error);
   }
@@ -262,7 +283,12 @@ export type FinishRunInput = RunPatch & {
   reason?: string | null;
 };
 
-/** Stamp the terminal state. Never throws. */
+/**
+ * Stamp the terminal state. Never throws. Only a run still `running` can
+ * transition: a second terminal write (a late workflow after the webhook
+ * already stamped the run, or after the stale sweep) never overwrites the
+ * first. The rejected attempt is recorded as a `terminal_conflict` step.
+ */
 export async function finishRun(
   admin: Admin,
   ctx: MaybeRunContext,
@@ -270,7 +296,7 @@ export async function finishRun(
 ): Promise<void> {
   if (!ctx) return;
   try {
-    const { error } = await admin
+    const { data, error } = await admin
       .from("pipeline_runs")
       .update({
         ...patchColumns(input),
@@ -281,8 +307,21 @@ export async function finishRun(
         ...(input.reason !== undefined ? { reason: input.reason } : {}),
         completed_at: new Date().toISOString(),
       })
-      .eq("id", ctx.runId);
-    if (error) report("finish", error);
+      .eq("id", ctx.runId)
+      .eq("status", "running")
+      .select("id");
+    if (error) {
+      report("finish", error);
+      return;
+    }
+    if (!data || data.length === 0) {
+      await recordStep(admin, ctx, {
+        kind: "gate",
+        name: "terminal_conflict",
+        result: "block",
+        detail: { attempted_status: input.status },
+      });
+    }
   } catch (error) {
     report("finish", error);
   }

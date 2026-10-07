@@ -19,9 +19,11 @@ export const metadata = {
 /**
  * Inbound vs run counts for the last hour, so a silently failing seam shows up
  * in the header. getPipelineCoverage lives in src/lib/pipeline-runs; resolve it
- * defensively so the page still renders if it is unavailable or errors.
+ * defensively so the page still renders if it errors; a failure shows "coverage unavailable".
  */
-async function loadCoverage(orgId: string): Promise<PipelineCoverage | null> {
+async function loadCoverage(
+  orgId: string,
+): Promise<PipelineCoverage | "unavailable"> {
   try {
     const mod = (await import("@/lib/pipeline-runs")) as unknown as {
       getPipelineCoverage?: (
@@ -30,10 +32,12 @@ async function loadCoverage(orgId: string): Promise<PipelineCoverage | null> {
         opts: { sinceMinutes: number },
       ) => Promise<PipelineCoverage>;
     };
-    if (typeof mod.getPipelineCoverage !== "function") return null;
-    return await mod.getPipelineCoverage(createAdminClient(), orgId, { sinceMinutes: 60 });
+    if (typeof mod.getPipelineCoverage !== "function") return "unavailable";
+    return await mod.getPipelineCoverage(createAdminClient(), orgId, {
+      sinceMinutes: 60,
+    });
   } catch {
-    return null;
+    return "unavailable";
   }
 }
 
@@ -61,14 +65,19 @@ export default async function MessagesV2Page() {
     property_id: h.property_id,
     inbound_message_id: h.run?.inbound_message_id ?? "",
   }));
-  const labels = await loadRunLabels(supabase, [...data.runs, ...holdLabelInputs]);
+  const labels = await loadRunLabels(supabase, [
+    ...data.runs,
+    ...holdLabelInputs,
+  ]);
 
   return (
     <div className="p-4 md:p-6">
       <MessagesV2View
         orgId={orgId}
         isOwner={isOwner}
-        coverage={coverage}
+        coverage={coverage === "unavailable" ? null : coverage}
+        coverageUnavailable={coverage === "unavailable"}
+        holdsMeta={data.holdsMeta}
         runs={data.runs}
         holds={data.holds}
         badges={data.badges}

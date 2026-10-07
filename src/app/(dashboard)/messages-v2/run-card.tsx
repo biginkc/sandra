@@ -17,7 +17,9 @@ export function StepLine({ step }: { step: PipelineRunStep }) {
       const scores = readJevScores(step.detail);
       return (
         <li data-testid="step-jev" className={base}>
-          <span aria-hidden className="text-sky-600">●</span>
+          <span aria-hidden className="text-sky-600">
+            ●
+          </span>
           <span className="font-medium">Jev</span>
           {scores.length === 0 ? (
             <span className="text-muted-foreground">{step.name}</span>
@@ -34,16 +36,21 @@ export function StepLine({ step }: { step: PipelineRunStep }) {
     case "threshold":
       return (
         <li data-testid="step-threshold" className={base}>
-          <span aria-hidden className="text-sky-600">●</span>
+          <span aria-hidden className="text-sky-600">
+            ●
+          </span>
           <span>
-            {step.name} <span className="text-muted-foreground">{step.result}</span>
+            {step.name}{" "}
+            <span className="text-muted-foreground">{step.result}</span>
           </span>
         </li>
       );
     case "action":
       return (
         <li data-testid="step-action" className={base}>
-          <span aria-hidden className="text-emerald-600">✔</span>
+          <span aria-hidden className="text-emerald-600">
+            ✔
+          </span>
           <span>{step.name}</span>
           {step.result !== "applied" && (
             <span className="text-muted-foreground">({step.result})</span>
@@ -54,7 +61,9 @@ export function StepLine({ step }: { step: PipelineRunStep }) {
       const persona = replyPersona(step);
       return (
         <li data-testid="step-reply" className={base}>
-          <span aria-hidden className="text-emerald-600">▶</span>
+          <span aria-hidden className="text-emerald-600">
+            ▶
+          </span>
           <span>
             {step.name}{" "}
             <span className="text-muted-foreground">
@@ -69,7 +78,9 @@ export function StepLine({ step }: { step: PipelineRunStep }) {
     case "hold":
       return (
         <li data-testid={`step-${step.kind}`} className={base}>
-          <span aria-hidden className="text-amber-600">■</span>
+          <span aria-hidden className="text-amber-600">
+            ■
+          </span>
           <span>
             {step.name}{" "}
             <span className="text-muted-foreground">({step.result})</span>
@@ -78,7 +89,10 @@ export function StepLine({ step }: { step: PipelineRunStep }) {
       );
     case "shadow":
       return (
-        <li data-testid="step-shadow" className={cn(base, "text-muted-foreground")}>
+        <li
+          data-testid="step-shadow"
+          className={cn(base, "text-muted-foreground")}
+        >
           <span aria-hidden>○</span>
           <span>would → {step.name}</span>
         </li>
@@ -113,15 +127,22 @@ export function RunCard({
 }) {
   const threadHref = openThreadHref(run, isOwner);
   const name = label?.name ?? "Unknown sender";
-  const passedGates = run.steps.filter((s) => s.kind === "gate" && s.result === "pass");
-  const visible = run.steps.filter((s) => !(s.kind === "gate" && s.result === "pass"));
+  const passedGates = run.steps.filter(
+    (s) => s.kind === "gate" && s.result === "pass",
+  );
+  const visible = run.steps.filter(
+    (s) => !(s.kind === "gate" && s.result === "pass"),
+  );
   const running = run.status === "running";
 
   return (
     <article
       data-testid="run-card"
       data-status={run.status}
-      className={cn("rounded-xl bg-card p-4 text-sm ring-1 ring-foreground/10", ENTER)}
+      className={cn(
+        "rounded-xl bg-card p-4 text-sm ring-1 ring-foreground/10",
+        ENTER,
+      )}
     >
       <header className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         {running && (
@@ -149,7 +170,9 @@ export function RunCard({
 
       {run.inbound_preview && (
         <p className="mt-2 flex gap-2">
-          <span aria-hidden className="text-muted-foreground">◀</span>
+          <span aria-hidden className="text-muted-foreground">
+            ◀
+          </span>
           <span>{run.inbound_preview}</span>
         </p>
       )}
@@ -159,8 +182,12 @@ export function RunCard({
           <StepLine key={step.id} step={step} />
         ))}
         {passedGates.length > 0 && (
-          <li data-testid="gates-passed" className="text-xs text-muted-foreground">
-            {passedGates.length} gate{passedGates.length === 1 ? "" : "s"} passed
+          <li
+            data-testid="gates-passed"
+            className="text-xs text-muted-foreground"
+          >
+            {passedGates.length} gate{passedGates.length === 1 ? "" : "s"}{" "}
+            passed
           </li>
         )}
       </ul>

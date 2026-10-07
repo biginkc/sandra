@@ -18,13 +18,7 @@ export type RunStatus = (typeof RUN_STATUSES)[number];
 export type RunMode = "shadow" | "automatic" | "legacy";
 
 export type StepKind =
-  | "gate"
-  | "jev"
-  | "threshold"
-  | "action"
-  | "reply"
-  | "hold"
-  | "shadow";
+  "gate" | "jev" | "threshold" | "action" | "reply" | "hold" | "shadow";
 
 export type StepResult =
   | "pass"
@@ -81,10 +75,25 @@ export type RunLabel = {
 export type ModeBadge = {
   /** Outcome label, e.g. "not_interested". */
   label: string;
-  mode: "AUTO" | "SHADOW" | "LEGACY";
+  mode: "AUTO" | "HELD" | "SHADOW" | "LEGACY";
+  /** Auto-apply confidence floor; only meaningful (and shown) for AUTO. */
+  minConfidence?: number | null;
 };
 
-export type HoldSource = "needs_attention" | "jev_decision" | "disposition_review";
+/** Health of the hold queries, so truncation and failures are never silent. */
+export type HoldsMeta = {
+  /** Best-known open-hold count (>= shown; exact when not truncated). */
+  total: number;
+  shown: number;
+  truncated: boolean;
+  /** Sources whose query failed; their holds are missing, not zero. */
+  failed: HoldSource[];
+  /** Auxiliary lookups (run context, steps, drafts) that errored; cards may be incomplete. */
+  contextErrors: string[];
+};
+
+export type HoldSource =
+  "needs_attention" | "jev_decision" | "disposition_review";
 
 /**
  * An open hold: something a human still has to act on. Derived from the
@@ -99,11 +108,13 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
   property_id: string;
   conversation_id: string | null;
   sources: HoldSource[];
-  /** ISO time the oldest underlying item opened. */
-  since: string;
+  /** ISO time the oldest underlying item opened; null when unknown (never guessed from updated_at). */
+  since: string | null;
   /** Plain-text description of why it is open (source labels + escalation reason). */
   reason: string;
   run: R | null;
+  /** A pending Claude reply draft exists for this hold's run (body not shown in Phase 0). */
+  draft_held?: boolean;
 };
 
 export type PipelineCoverage = { inboundMessages: number; runs: number };

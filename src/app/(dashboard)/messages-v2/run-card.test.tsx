@@ -4,17 +4,41 @@ import { describe, expect, it } from "vitest";
 import { RunCard } from "./run-card";
 import type { PipelineRunStep, RunWithSteps } from "./types";
 
-const step = (seq: number, over: Partial<PipelineRunStep>): PipelineRunStep => ({
-  id: `s${seq}`, run_id: "r1", org_id: "o", seq, kind: "gate", name: "gate", result: "pass",
-  detail: {}, created_at: "2026-10-08T10:00:01Z", ...over,
+const step = (
+  seq: number,
+  over: Partial<PipelineRunStep>,
+): PipelineRunStep => ({
+  id: `s${seq}`,
+  run_id: "r1",
+  org_id: "o",
+  seq,
+  kind: "gate",
+  name: "gate",
+  result: "pass",
+  detail: {},
+  created_at: "2026-10-08T10:00:01Z",
+  ...over,
 });
 
 const baseRun = (over: Partial<RunWithSteps> = {}): RunWithSteps => ({
-  id: "r1", org_id: "o", inbound_message_id: "m1", property_id: "p1", contact_id: "c1",
-  conversation_id: "conv-1", status: "replied", mode: "automatic", final_outcome: null,
-  reason: null, classification_run_id: null, claim_id: null, outbound_message_id: null,
-  inbound_preview: "not interested, please stop", started_at: "2026-10-08T10:00:00Z",
-  completed_at: "2026-10-08T10:00:05Z", steps: [], ...over,
+  id: "r1",
+  org_id: "o",
+  inbound_message_id: "m1",
+  property_id: "p1",
+  contact_id: "c1",
+  conversation_id: "conv-1",
+  status: "replied",
+  mode: "automatic",
+  final_outcome: null,
+  reason: null,
+  classification_run_id: null,
+  claim_id: null,
+  outbound_message_id: null,
+  inbound_preview: "not interested, please stop",
+  started_at: "2026-10-08T10:00:00Z",
+  completed_at: "2026-10-08T10:00:05Z",
+  steps: [],
+  ...over,
 });
 
 const label = { name: "Dana", address: "12 Elm St, Kansas City" };
@@ -29,8 +53,16 @@ describe("RunCard", () => {
 
   it("renders the Jev judgment with its top scores", () => {
     const run = baseRun({
-      steps: [step(1, { kind: "jev", name: "classify", result: "pass",
-        detail: { scores: { nurture: 0.91, not_interested: 0.06, new_lead: 0.01 } } })],
+      steps: [
+        step(1, {
+          kind: "jev",
+          name: "classify",
+          result: "pass",
+          detail: {
+            scores: { nurture: 0.91, not_interested: 0.06, new_lead: 0.01 },
+          },
+        }),
+      ],
     });
     render(<RunCard run={run} label={label} />);
     const line = screen.getByTestId("step-jev");
@@ -42,19 +74,36 @@ describe("RunCard", () => {
     const run = baseRun({
       steps: [
         step(1, { kind: "gate", name: "quiet_hours", result: "block" }),
-        step(2, { kind: "action", name: "set_stage:nurture", result: "applied" }),
-        step(3, { kind: "reply", name: "reply", result: "sent", detail: { persona: "Mel" } }),
+        step(2, {
+          kind: "action",
+          name: "set_stage:nurture",
+          result: "applied",
+        }),
+        step(3, {
+          kind: "reply",
+          name: "reply",
+          result: "sent",
+          detail: { persona: "Mel" },
+        }),
       ],
     });
     render(<RunCard run={run} label={label} />);
     expect(screen.getByTestId("step-gate")).toHaveTextContent("quiet_hours");
-    expect(screen.getByTestId("step-action")).toHaveTextContent("set_stage:nurture");
+    expect(screen.getByTestId("step-action")).toHaveTextContent(
+      "set_stage:nurture",
+    );
     expect(screen.getByTestId("step-reply")).toHaveTextContent(/sent, as Mel/);
   });
 
   it("renders shadow steps muted as 'would →'", () => {
     const run = baseRun({
-      steps: [step(1, { kind: "shadow", name: "set_stage:nurture", result: "would_apply" })],
+      steps: [
+        step(1, {
+          kind: "shadow",
+          name: "set_stage:nurture",
+          result: "would_apply",
+        }),
+      ],
     });
     render(<RunCard run={run} label={label} />);
     const line = screen.getByTestId("step-shadow");
@@ -63,7 +112,12 @@ describe("RunCard", () => {
   });
 
   it("pulses while the run is still running", () => {
-    render(<RunCard run={baseRun({ status: "running", completed_at: null })} label={label} />);
+    render(
+      <RunCard
+        run={baseRun({ status: "running", completed_at: null })}
+        label={label}
+      />,
+    );
     expect(screen.getByTestId("run-pulse")).toBeInTheDocument();
   });
 
@@ -83,15 +137,28 @@ describe("RunCard", () => {
   it("links to /messages only for owners when there is no property", () => {
     const run = baseRun({ property_id: null });
     const { unmount } = render(<RunCard run={run} label={label} isOwner />);
-    expect(screen.getByRole("link", { name: /open thread/i })).toHaveAttribute("href", "/messages?thread=conv-1");
+    expect(screen.getByRole("link", { name: /open thread/i })).toHaveAttribute(
+      "href",
+      "/messages?thread=conv-1",
+    );
     unmount();
     render(<RunCard run={run} label={label} isOwner={false} />);
-    expect(screen.queryByRole("link", { name: /open thread/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /open thread/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("omits the link when there is neither property nor conversation", () => {
-    render(<RunCard run={baseRun({ property_id: null, conversation_id: null })} label={label} isOwner />);
-    expect(screen.queryByRole("link", { name: /open thread/i })).not.toBeInTheDocument();
+    render(
+      <RunCard
+        run={baseRun({ property_id: null, conversation_id: null })}
+        label={label}
+        isOwner
+      />,
+    );
+    expect(
+      screen.queryByRole("link", { name: /open thread/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("falls back gracefully when no label has loaded", () => {

@@ -1,6 +1,6 @@
 # Messages v2 — plan v1 (2026-10-08)
 
-Status: DRAFT v2 — revised after Opus 5.5 round 1 (BLOCKING 3 → fixes in `claude/messages-v2`); Astra medium review pending. Nothing below is approved to ship until both reviews return BLOCKING: 0 and Jarrad confirms.
+Status: DRAFT v3 — after Opus 5.5 r1 (BLOCKING 3) + r2 (BLOCKING 1, approval-only) and Astra medium r1 (BLOCKING 5 → fix round 2 in `claude/messages-v2`). Nothing below is approved to ship until both reviews return BLOCKING: 0 and Jarrad confirms.
 
 ## 1. Problem
 
@@ -65,16 +65,28 @@ Template step: when Jev's `reply_intent` maps to an approved template and the ou
 Slack via existing per-user OAuth `WebClient` (`src/lib/integrations/slack/dispatch.ts`) — DM to Jarrad + each acquisitions member on hold creation and at +1h unresolved. SMS to Jarrad via `src/lib/notifications/rep-sms.ts` for hot holds. Email digest: no email sender exists in Sandra — add Resend (or equivalent) behind an env flag; hourly cron route listing open holds. **Alert payloads carry ids, names and links only — never seller message text** (new vendors receive no SMS bodies). Caps: one Slack DM per hold plus one nudge at +1h; at most 20 DMs per member per hour; hot-hold SMS to Jarrad max 10/hour.
 
 ### 4.8 Mode switches
-Phase 0–3: display only. Phase 4: per-label toggle UI writes through existing `fn_set_jev_outcome_threshold` / `fn_update_jev_automatic_classification` (owner-only). Per-label "AUTO/HELD" is expressed as threshold value (1.0 = always held), not a new column — avoids a new schema concept.
+Phase 0–3: display only. Phase 4: per-label toggle UI writes through `fn_set_jev_outcome_threshold` / `fn_update_jev_automatic_classification` (owner-only). Per-label on/off is an explicit `jev_outcome_thresholds.automation_enabled` boolean checked independently of confidence (a threshold of 1.0 is NOT a switch — confidence equal to the threshold auto-applies). Seeded to preserve prod today: on for not_interested / wrong_number / nurture / opted_out; **off for new_lead** (origin/main always escalated new leads to a human). So merging #837 does not start auto-promoting leads; D4's "new_lead → lead assigned to Jarrad" is Phase 4 and needs its own approval.
+
+### 4.8b Outbound policy gate (Phase 0)
+All responder sends pass one chokepoint, `sendResponderMessage`, which (a) re-verifies immediately before the provider call that the run's inbound is still the latest in the conversation and no outbound has gone since the claim (closes the two-inbounds-one-conversation double-reply race, which pre-dates v2), (b) takes a `source: approved_template | llm | human`, and (c) honours `ai_responder_configs.outbound_mode = send | hold` (owner-only) and env `AI_RESPONDER_LLM_AUTOSEND` (default `1` = prod today; `0` = D5 enforcement, flipped in Phase 1). Held drafts go to `ai_reply_drafts` (RLS owner||acquisitions) and raise a hold — this is the draft-only rollback Astra asked for.
 
 ### 4.9 Kill switches and rollback
-- **Automation:** `classifier_mode=shadow` (owner-only RPC `fn_update_jev_automatic_classification`) stops Jev from driving effects; legacy responder continues as today.
+- **Automation:** `classifier_mode=shadow` stops Jev from driving effects but the legacy responder still generates and sends; **draft-only rollback** = `outbound_mode=hold` (§4.8b), which stops every automated send and holds drafts instead.
 - **Seam:** `PIPELINE_RUNS_ENABLED=0` makes recording a no-op; the page simply shows no new cards.
 - **Thresholds:** per-label relax/tighten via `fn_set_jev_outcome_threshold`, no deploy.
 - **Rollback:** every migration ships a `supabase/rollbacks/` counterpart; `pipeline_*` tables are additive and droppable.
 - **Seam health:** failures go to `reportError`; a 10-minute cron sweeps `running` rows older than 30 min to `error`; the page header shows inbound-vs-runs coverage for the last hour and turns red when runs < inbound.
 
-### 4.10 Known compliance gaps (not closed by this plan)
+### 4.10 Consent / purpose matrix (Phase 4 gate)
+`send.ts` permits no-consent sends and does not distinguish marketing from informational purpose. Before template auto-send or automated drip enrollment, Jarrad approves a matrix of {message purpose} × {consent state} → allowed/held, and it is enforced centrally in `sendResponderMessage`. Recipient-local quiet hours are part of that same gate.
+
+### 4.11 Alert delivery semantics (Phase 1)
+Durable `hold_alert_deliveries` rows keyed by (hold, recipient, channel, stage) with bounded retries, visible failures on the hold card (`no_token` / `pref_disabled` from Slack dispatch are surfaced, not swallowed), recipient authorization re-checked at delivery time, and the caps in §4.7.
+
+### 4.12 Migration proof (done 2026-10-08)
+Full chain (389 files incl. the 28 re-timestamped) applied clean on a fresh Supabase 17 image; every jev_* object exists exactly once; `verify:migration-safety-unit` 60/60. Seven of the 28 are not idempotent (unconditional create) — irrelevant because **neither prod (`copflsklaefwzipsrjqz`) nor test (`ncsngxlcyxylaeskiteu`) ever applied the old versions** (verified via `supabase_migrations.schema_migrations`; only `20260920120000_sms_classification_runs` is present). PR #651 must be closed when #837 merges.
+
+### 4.13 Known compliance gaps (not closed by this plan)
 - Quiet hours are keyed to the **property's** state; TCPA quiet hours follow the **recipient's** location. Absentee owners are common. Phase 4 (template auto-send) is gated on recipient-local quiet hours.
 - Florida's 8am–8pm window and 3-texts-per-24h cap are not modelled.
 - `dnc` is always human-gated in code (`thresholds.ts:81`) even though D4 lists it as auto-fire — open for Jarrad (Q4).
@@ -114,9 +126,13 @@ Human sets `nurture` then promotes to `needs_sequence` 1,701× (95% of human nur
 - Q2 Approve the dispo-taxonomy proposals (separate rule-approval set) or defer to the sibling outcomes session.
 - Q3 Email provider choice for the digest (Resend default?).
 - Q4 `dnc`: keep the code's always-human gate (suppression still immediate) or allow auto-apply as D4 implies?
-- Q5 **Verbatim approvals required before merge** — each seeded threshold is a business rule (migration `20261008140000_jev_outcome_thresholds.sql`):
+- Q7 The fixed deterministic "Who is this?" identity reply is currently tagged `source: llm` at the chokepoint; when `AI_RESPONDER_LLM_AUTOSEND=0` (Phase 1) it would be held too. Reclassify it as `approved_template` (its text was approved in `decisions/Sandra identity-response deterministic interceptor`)? Needs a yes.
+- Q6 **Opt-out suppression rule (own approval):**
+  - `When Jev classifies an inbound SMS as opted_out at any confidence, suppress that phone number immediately (no further automated texts to it from any property), and defer only the disposition write for human review. A human rejecting that review does NOT restore texting; un-suppression stays a separate manual action.`
+- Q5 **Verbatim approvals required before merge** — each seeded threshold is a business rule (migration `20261008140000_jev_outcome_thresholds.sql`); `automation_enabled` defaults (§4.8) preserve prod and are stated here for the record:
   - `new_lead: auto-apply at native confidence ≥ 0.90`
   - `wrong_number: auto-apply at native confidence ≥ 0.90`
   - `not_interested: auto-apply at native confidence ≥ 0.95`
   - `nurture: auto-apply at native confidence ≥ 0.95`
-  - `opted_out: auto-apply at native confidence ≥ 0.95 (phone suppression always immediate)`
+  - `opted_out: auto-apply at native confidence ≥ 0.95`
+  - `automation_enabled: not_interested=on, wrong_number=on, nurture=on, opted_out=on, new_lead=off (as prod today)`
