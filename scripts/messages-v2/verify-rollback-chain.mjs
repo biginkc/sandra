@@ -25,7 +25,7 @@ const PG_URL = (process.env.PG_URL ?? "postgresql://postgres:postgres@127.0.0.1:
 const SOURCE_DB = process.env.SOURCE_DB ?? "postgres";
 const DB = `rollback_chain_${process.pid}_${Date.now().toString(36)}`;
 const FIRST = "20261008140000";
-const LAST = process.env.CHAIN_LAST ?? "20261008143800";
+const LAST = process.env.CHAIN_LAST ?? "20261008144000";
 const EXPECTED = 37; // 28 inherited Jev (140000..142700) + 9 messages-v2 (143000..143800)
 
 const migDir = join(root, "supabase/migrations");
