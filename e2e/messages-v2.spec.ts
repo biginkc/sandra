@@ -12,9 +12,9 @@ test.describe("/messages-v2", () => {
 
     await expect(page.getByRole("heading", { name: "Messages v2" })).toBeVisible();
     await expect(page.getByTestId("header-status")).toContainText("runs last hour");
-    await expect(page.getByLabel("Live feed")).toBeVisible();
-    await expect(page.getByLabel("Holds")).toBeVisible();
-    await expect(page.getByLabel("Shadow scorecard")).toContainText(/2h of shadow traffic/i);
-    await expect(page.getByLabel("Legend")).toBeVisible();
+    await expect(page.getByLabel("Live feed", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Holds", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Shadow scorecard", { exact: true })).toContainText(/2h of shadow traffic/i);
+    await expect(page.getByLabel("Legend", { exact: true })).toBeVisible();
   });
 });
