@@ -7,13 +7,19 @@
 --     20261008090100_norma_retry_next_step_union_reviewed.sql) and merge_duplicate_properties
 --     (from 20261008135000_norma_inbound_call_records.sql);
 --   * drops every queue object in dependency order (triggers, functions, link columns, tables);
---   * repairs the norma_private ACLs the queue migration stripped from pre-existing 135000 objects
---     (schema USAGE and EXECUTE on can_access_callbacks / associate_inbound_call for authenticated).
+--   * re-asserts the norma_private grants from 20261008135000 (schema USAGE and EXECUTE on
+--     can_access_callbacks / associate_inbound_call for authenticated). The queue migration no longer
+--     strips them; the grant lines at the end only restate 135000's state.
 -- It does NOT restore fn_norma_claim_dispatch: 20261008150000 (legacy claim disable) is a separate
 -- migration; apply rollbacks/20261008150000_norma_legacy_claim_disable.sql AFTER this file if the
 -- legacy runtime must dial again.
--- DESTRUCTIVE: queue entries, attempts, digests and follow-up reassignments are dropped. Refuses to
--- run while the queue is enabled or any queue-linked request is still in flight.
+-- DESTRUCTIVE: queue-only data this rollback deletes:
+--   * the norma_queue_* tables (entries, attempts, digests, control), including the
+--     norma_followup_reassignments history and the norma_state_timezones table;
+--   * the send_attempted_at column on norma_call_requests, including the values on button-initiated rows.
+-- Refuses to run while the queue is enabled or any queue-linked request is still in flight.
+-- Idempotent: if the queue objects are already gone (norma_queue_control absent), it raises a NOTICE
+-- and exits cleanly without changing anything.
 -- Nothing here dials anyone or sends anything.
 -- ============================================================================
 begin;
@@ -24,10 +30,19 @@ lock table public.norma_call_requests in access exclusive mode;
 
 do $$
 begin
+  if to_regclass('public.norma_queue_control') is null then
+    -- Idempotent re-run: the queue objects are already gone. Everything below is create-or-replace /
+    -- drop-if-exists / grant, so it converges to the same catalog without touching data.
+    raise notice 'NORMA_ROLLBACK: norma_queue_control does not exist; queue already rolled back, nothing to guard';
+    return;
+  end if;
   if exists (select 1 from public.norma_queue_control where enabled) then
     raise exception 'NORMA_ROLLBACK: norma_queue_control.enabled is true; disable the queue first' using errcode = '55000';
   end if;
   if exists (
+    select 1 from information_schema.columns
+     where table_schema = 'public' and table_name = 'norma_call_requests' and column_name = 'queue_entry_id'
+  ) and exists (
     select 1 from public.norma_call_requests
      where queue_entry_id is not null
        and status in ('requested', 'dispatching', 'dispatched', 'dispatch_unknown')
@@ -976,7 +991,7 @@ drop table if exists public.norma_queue_control;
 drop table if exists public.norma_state_timezones;
 drop function if exists public.norma_queue_entries_guard();
 
--- 5. Repair ACLs the queue migration stripped from pre-existing 20261008135000 objects.
+-- 5. Re-assert the 20261008135000 grants (the queue migration no longer strips them; these just restate them).
 -- (norma_private itself and its two inbound functions pre-date the queue and stay.)
 revoke all on schema norma_private from public, anon;
 grant usage on schema norma_private to authenticated;

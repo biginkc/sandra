@@ -40,9 +40,11 @@ const arrive = (name: string, actors: string[], argKey?: string, argValue?: stri
  * bookkeeping times; what must not change is state, identity and content.
  */
 async function crm(propertyId: string) {
-  const T = "array['created_at','updated_at','next_check_at','completed_at','dispatched_at','dispatch_started_at','due_at','callback_requested_for','next_run_at','enrolled_at','released_at','next_attempt_at','snoozed_until','send_attempted_at']";
+  const T = "array['created_at','updated_at','next_check_at','completed_at','dispatched_at','dispatch_started_at','due_at','callback_requested_for','next_run_at','enrolled_at','released_at','next_attempt_at','snoozed_until']";
+  // send_attempted_at is a stamp (shifted by the virtual clock), so its value is excluded, but whether it is set is state: a wrong null -> set on a refused path must show.
+  const SEND = "jsonb_build_object('send_attempted_at_is_null', (to_jsonb(x) ->> 'send_attempted_at') is null)";
   const r = await q(
-    `select (select coalesce(jsonb_agg(to_jsonb(x) - ${T} order by x.id), '[]') from public.norma_call_requests x where x.property_id = $1) as requests,
+    `select (select coalesce(jsonb_agg((to_jsonb(x) - ${T} - 'send_attempted_at') || ${SEND} order by x.id), '[]') from public.norma_call_requests x where x.property_id = $1) as requests,
             (select coalesce(jsonb_agg(to_jsonb(x) - ${T} order by x.id), '[]') from public.tasks x where x.related_property_id = $1) as tasks,
             (select coalesce(jsonb_agg(to_jsonb(x) - ${T} order by x.id), '[]') from public.lead_events x where x.property_id = $1) as events,
             (select coalesce(jsonb_agg(to_jsonb(x) - ${T} order by x.id), '[]') from public.sequence_enrollments x where x.property_id = $1) as enrollments,

@@ -185,10 +185,12 @@ export async function createScratchDb(): Promise<Scratch> {
 
   const pool = createStressPool(url);
   // The queue migration adds send_attempted_at (the 10 s same-number spacing and the daily cap read it); it must move with every other stored time.
-  const hasSendMarker =
+  // Checked at advance() time, not pool creation, so a column added or dropped after the pool opens is still handled.
+  const hasSendMarker = async () =>
     (await pool.query("select 1 from information_schema.columns where table_schema='public' and table_name='norma_call_requests' and column_name='send_attempted_at'")).rowCount === 1;
   const advance = async (ms: number) => {
     const iv = `${Math.floor(ms)} milliseconds`;
+    const sendMarker = await hasSendMarker();
     // REPEATABLE READ: every table is shifted from ONE snapshot, so a request and
     // its task (written in one transaction) can never be shifted by different
     // amounts. A concurrent writer makes this fail with 40001; just retry.
@@ -202,7 +204,7 @@ export async function createScratchDb(): Promise<Scratch> {
           `update public.norma_call_requests set created_at = created_at - $1::interval, updated_at = updated_at - $1::interval,
              next_check_at = next_check_at - $1::interval, dispatch_started_at = dispatch_started_at - $1::interval,
              dispatched_at = dispatched_at - $1::interval, completed_at = completed_at - $1::interval,
-             callback_requested_for = callback_requested_for - $1::interval${hasSendMarker ? ", send_attempted_at = send_attempted_at - $1::interval" : ""}`,
+             callback_requested_for = callback_requested_for - $1::interval${sendMarker ? ", send_attempted_at = send_attempted_at - $1::interval" : ""}`,
           [iv],
         );
         await c.query(

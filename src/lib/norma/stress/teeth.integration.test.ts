@@ -107,17 +107,6 @@ const MUTANTS: Mutant[] = [
       ),
   },
   {
-    name: "marking a call reviewed also resumes the lead's drip",
-    invariant: "9",
-    apply: (q) =>
-      mutateFunction(
-        q,
-        "public.fn_norma_mark_reviewed(uuid, uuid, uuid)",
-        "select count(*)::integer into v_kept",
-        "update public.sequence_enrollments set status = 'active', pause_reason = null where property_id = r.property_id and status = 'paused' and pause_reason = 'norma_call';\n  select count(*)::integer into v_kept",
-      ),
-  },
-  {
     name: "marking a call reviewed does not check that the caller belongs to the org",
     invariant: "9",
     apply: (q) =>
@@ -177,6 +166,33 @@ const SCENE_MUTANTS: SceneMutant[] = [
         gate.open();
       }
       return h.bland.sendsFor(id).length === 0 ? [] : ["removed pre-send fence still allowed a provider send after review committed"];
+    },
+  },
+  {
+    name: "marking a call reviewed also resumes the lead's drip",
+    apply: (q) =>
+      mutateFunction(
+        q,
+        "public.fn_norma_mark_reviewed(uuid, uuid, uuid)",
+        "select count(*)::integer into v_kept",
+        "update public.sequence_enrollments set status = 'active', pause_reason = null where property_id = r.property_id and status = 'paused' and pause_reason = 'norma_call';\n  select count(*)::integer into v_kept",
+      ),
+    // Deterministic: a lead whose drip is paused by Norma (paused:norma_call), with a needs_review request, then reviewed.
+    scene: async (h) => {
+      const ctx = await h.lead({ enrollments: ["active"] }, { kind: "callback" });
+      await h.requestCall(ctx, h.world.rep1, { crashBeforeDispatch: true });
+      const id = (await h.scratch.pool.query<{ id: string }>("select id from public.norma_call_requests where property_id = $1", [ctx.lead.property])).rows[0]!.id;
+      const enrollment = async () => (await h.scratch.pool.query("select status, pause_reason from public.sequence_enrollments where id = $1", [ctx.lead.enrollments[0]])).rows[0];
+      const before = await enrollment();
+      if (before?.status !== "paused" || before?.pause_reason !== "norma_call") return [`scene setup: drip was ${before?.status}/${before?.pause_reason}, expected paused/norma_call`];
+      const claimed = await (await import("../rpc")).claimNormaDispatchV2(h.client("review-scene"), id, { expectedAttempt: 1, now: new Date(h.nowMs()).toISOString(), queueEnabled: false, maxConcurrent: 1000, dailyCap: 100000, capTz: "America/Chicago" });
+      if (claimed !== "claimed") return [`scene setup: claim answered ${claimed}`];
+      const parked = (await h.scratch.pool.query("select public.fn_norma_mark_needs_review($1, $2, $3) as result", [id, "review-scene", 1])).rows[0]?.result;
+      if (parked !== "needs_review") return [`scene setup: mark_needs_review returned ${parked}`];
+      const reviewed = await h.markReviewed(ctx, h.world.rep1);
+      if (!reviewed?.ok) return [`review failed in scene: ${JSON.stringify(reviewed)}`];
+      const after = await enrollment();
+      return after?.status === "paused" && after?.pause_reason === "norma_call" ? [] : [`reviewing resumed the drip: ${after?.status}/${after?.pause_reason}`];
     },
   },
   {

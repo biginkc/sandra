@@ -140,6 +140,26 @@ export async function applyMyLeadsChain(db: Client, steps: readonly (ChainKey | 
   }
 }
 
+/**
+ * For suites that replay a HISTORICAL Norma migration (20261002120000/-0100/-0200/...) inside their rolled-back transaction on a database where the
+ * whole chain is already applied. The historical migrations re-create the old 1/2-argument dispatch functions next to the evolved overloads that
+ * 20261008090100 (retry admission) and 20261008150000 (legacy claim disable) left behind, so every `fn_norma_*($1,...)` call with untyped
+ * parameters becomes "is not unique". In production the retry migration drops the old shapes after the historical ones; this removes the evolved
+ * shapes first so the replay lands on the same state a historical-only database has. `if exists`, so it is a no-op on a database without them.
+ * Scoped to the caller's transaction (rolled back); the evolved functions are covered by the retry-admission and norma_call_queue suites.
+ */
+export async function dropEvolvedNormaDispatchOverloads(db: Client): Promise<void> {
+  for (const sig of [
+    'fn_norma_claim_dispatch(uuid, integer)',
+    'fn_norma_bind_call_id(uuid, text, integer)',
+    'fn_norma_mark_dispatch_unknown(uuid, text, integer)',
+    'fn_norma_mark_dispatch_rejected(uuid, text, text, integer)',
+    'fn_norma_mark_needs_review(uuid, text, integer)',
+  ]) {
+    await db.query(`drop function if exists public.${sig}`);
+  }
+}
+
 export async function applyP1e(db: Client, through: keyof typeof MIGRATIONS): Promise<void> {
   const order = ['tools', 'reassign', 'outcome'] as const;
   await applyMyLeadsChain(db, order.slice(0, order.indexOf(through) + 1));
