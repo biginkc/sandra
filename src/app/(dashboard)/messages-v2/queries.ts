@@ -2,6 +2,7 @@ import type {
   DeadLetterInfo,
   HeaderStats,
   HoldsMeta,
+  HoldsSplit,
   HoldSource,
   ModeBadge,
   OpenHold,
@@ -415,6 +416,49 @@ function chunked<T>(items: readonly T[], size = STEP_CHUNK): T[][] {
   return out;
 }
 const HOLD_LIMIT = 200;
+/** Cap on the "New" holds loaded onto the page (the rest are counted, not shown). */
+export const NEW_HOLD_CAP = 300;
+/** Backlog page size ("Load more"). */
+export const BACKLOG_PAGE = 200;
+/** Property ids per `.in()` filter (kept short: GET urls). */
+const SCOPE_CHUNK = 100;
+const SCOPE_ROW_LIMIT = 1000;
+
+export type LoadOptions = {
+  /**
+   * Select the pending drafts' text so the hold card can show what Send
+   * would send. The page asks; the alert cron never does (alert payloads
+   * carry no message text).
+   */
+  includeDraftBody?: boolean;
+  /**
+   * Load exactly these properties' hold rows instead of the oldest-200 window.
+   * Used by the New / Backlog split; the alert cron never sets it.
+   */
+  scope?: { propertyIds: readonly string[]; noPropertyDrafts: boolean };
+  /** Skip the feed window, mode badges and distinct-hold totals (backlog pages). */
+  holdsOnly?: boolean;
+};
+
+type QueryRes = { data: unknown; error: unknown };
+const NO_ROWS: Promise<QueryRes> = Promise.resolve({ data: [], error: null });
+
+/** Runs one query per id chunk and merges the rows; any chunk error fails the whole result. */
+async function scopedRows(
+  ids: readonly string[],
+  run: (chunk: string[]) => PromiseLike<QueryRes>,
+  extra?: PromiseLike<QueryRes>,
+): Promise<QueryRes> {
+  const parts = await Promise.all([
+    ...chunked(ids, SCOPE_CHUNK).map((c) => run(c)),
+    ...(extra ? [extra] : []),
+  ]);
+  const error = parts.find((p) => p.error)?.error ?? null;
+  return {
+    data: error ? null : parts.flatMap((p) => (p.data ?? []) as unknown[]),
+    error,
+  };
+}
 
 /**
  * Server loader. Every query is org-scoped explicitly (RLS also applies).
@@ -426,22 +470,29 @@ export async function loadMessagesV2Data(
   supabase: LooseSupabase,
   orgId: string,
   nowMs: number = Date.now(),
-  opts: {
-    /**
-     * Select the pending drafts' text so the hold card can show what Send
-     * would send. The page asks; the alert cron never does (alert payloads
-     * carry no message text).
-     */
-    includeDraftBody?: boolean;
-  } = {},
+  opts: LoadOptions = {},
 ): Promise<MessagesV2Data> {
   // Distinct-hold totals come from separate id-only queries (one per source),
   // capped at HOLDS_COUNT_CAP+1 rows and de-duplicated by property client-side.
+  const scope = opts.scope;
+  const holdsOnly = opts.holdsOnly === true;
   /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
   const idQuery = (table: string, columns: string, filter: (q: any) => any) =>
     filter(supabase.from(table).select(columns).eq("org_id", orgId)).limit(
       HOLDS_COUNT_CAP + 1,
     );
+  const draftQuery = () =>
+    supabase
+      .from("ai_reply_drafts")
+      .select(
+        opts.includeDraftBody
+          ? "id, property_id, conversation_id, inbound_message_id, run_id, created_at, body, edited_body, edited_at"
+          : "id, property_id, conversation_id, inbound_message_id, run_id, created_at",
+      )
+      .eq("org_id", orgId)
+      .eq("status", "pending")
+      .order("created_at", { ascending: true })
+      .order("id", { ascending: true });
   const [
     [
       windowRes,
@@ -455,71 +506,116 @@ export async function loadMessagesV2Data(
     [flaggedIds, decisionIds, reviewIds, draftIds],
   ] = await Promise.all([
     Promise.all([
-      supabase
-        .from("pipeline_runs")
-        .select("*")
-        .eq("org_id", orgId)
-        .order("started_at", { ascending: false })
-        .limit(MAX_RUNS),
+      holdsOnly
+        ? NO_ROWS
+        : supabase
+            .from("pipeline_runs")
+            .select("*")
+            .eq("org_id", orgId)
+            .order("started_at", { ascending: false })
+            .limit(MAX_RUNS),
       // Oldest first BEFORE the limit, so truncation drops the newest holds,
       // never the ones that have waited longest. id is the deterministic tiebreak.
-      supabase
-        .from("properties")
-        .select(
-          "id, last_ai_escalation_at, last_ai_escalation_reason, updated_at",
-        )
-        .eq("org_id", orgId)
-        .eq("needs_human_attention", true)
-        .order("last_ai_escalation_at", { ascending: true, nullsFirst: true })
-        .order("id", { ascending: true })
-        .limit(HOLD_LIMIT),
-      supabase
-        .from("jev_lead_decisions")
-        .select(
-          "property_id, conversation_id, source_inbound_message_id, created_at",
-        )
-        .eq("org_id", orgId)
-        .eq("status", "pending")
-        .order("created_at", { ascending: true })
-        .order("source_inbound_message_id", { ascending: true })
-        .limit(HOLD_LIMIT),
-      supabase
-        .from("ai_disposition_reviews")
-        .select(
-          "property_id, conversation_id, source_inbound_message_id, disposition, created_at",
-        )
-        .eq("org_id", orgId)
-        .eq("status", "pending")
-        .order("created_at", { ascending: true })
-        .order("source_inbound_message_id", { ascending: true })
-        .limit(HOLD_LIMIT),
+      scope
+        ? scopedRows(scope.propertyIds, (chunk) =>
+            supabase
+              .from("properties")
+              .select(
+                "id, last_ai_escalation_at, last_ai_escalation_reason, updated_at",
+              )
+              .eq("org_id", orgId)
+              .eq("needs_human_attention", true)
+              .in("id", chunk)
+              .limit(SCOPE_ROW_LIMIT),
+          )
+        : supabase
+            .from("properties")
+            .select(
+              "id, last_ai_escalation_at, last_ai_escalation_reason, updated_at",
+            )
+            .eq("org_id", orgId)
+            .eq("needs_human_attention", true)
+            .order("last_ai_escalation_at", {
+              ascending: true,
+              nullsFirst: true,
+            })
+            .order("id", { ascending: true })
+            .limit(HOLD_LIMIT),
+      scope
+        ? scopedRows(scope.propertyIds, (chunk) =>
+            supabase
+              .from("jev_lead_decisions")
+              .select(
+                "property_id, conversation_id, source_inbound_message_id, created_at",
+              )
+              .eq("org_id", orgId)
+              .eq("status", "pending")
+              .in("property_id", chunk)
+              .limit(SCOPE_ROW_LIMIT),
+          )
+        : supabase
+            .from("jev_lead_decisions")
+            .select(
+              "property_id, conversation_id, source_inbound_message_id, created_at",
+            )
+            .eq("org_id", orgId)
+            .eq("status", "pending")
+            .order("created_at", { ascending: true })
+            .order("source_inbound_message_id", { ascending: true })
+            .limit(HOLD_LIMIT),
+      scope
+        ? scopedRows(scope.propertyIds, (chunk) =>
+            supabase
+              .from("ai_disposition_reviews")
+              .select(
+                "property_id, conversation_id, source_inbound_message_id, disposition, created_at",
+              )
+              .eq("org_id", orgId)
+              .eq("status", "pending")
+              .in("property_id", chunk)
+              .limit(SCOPE_ROW_LIMIT),
+          )
+        : supabase
+            .from("ai_disposition_reviews")
+            .select(
+              "property_id, conversation_id, source_inbound_message_id, disposition, created_at",
+            )
+            .eq("org_id", orgId)
+            .eq("status", "pending")
+            .order("created_at", { ascending: true })
+            .order("source_inbound_message_id", { ascending: true })
+            .limit(HOLD_LIMIT),
       // Pending Claude reply drafts are a hold source of their own. The body
       // is selected only when the caller needs to show it (hold actions).
-      supabase
-        .from("ai_reply_drafts")
-        .select(
-          opts.includeDraftBody
-            ? "id, property_id, conversation_id, inbound_message_id, run_id, created_at, body, edited_body, edited_at"
-            : "id, property_id, conversation_id, inbound_message_id, run_id, created_at",
-        )
-        .eq("org_id", orgId)
-        .eq("status", "pending")
-        .order("created_at", { ascending: true })
-        .order("id", { ascending: true })
-        .limit(HOLD_LIMIT),
-      supabase
-        .from("ai_responder_configs")
-        .select("classifier_provider, classifier_mode")
-        .eq("org_id", orgId)
-        .eq("active", true)
-        .limit(1),
-      supabase
-        .from("jev_outcome_thresholds")
-        .select("outcome, min_confidence, automation_enabled")
-        .eq("org_id", orgId)
-        .order("outcome", { ascending: true }),
+      scope
+        ? scopedRows(
+            scope.propertyIds,
+            (chunk) => draftQuery().in("property_id", chunk).limit(SCOPE_ROW_LIMIT),
+            // Drafts tied to no property are always "New" (they cannot be old backlog).
+            scope.noPropertyDrafts
+              ? draftQuery().is("property_id", null).limit(HOLD_LIMIT)
+              : undefined,
+          )
+        : draftQuery().limit(HOLD_LIMIT),
+      holdsOnly
+        ? NO_ROWS
+        : supabase
+            .from("ai_responder_configs")
+            .select("classifier_provider, classifier_mode")
+            .eq("org_id", orgId)
+            .eq("active", true)
+            .limit(1),
+      holdsOnly
+        ? NO_ROWS
+        : supabase
+            .from("jev_outcome_thresholds")
+            .select("outcome, min_confidence, automation_enabled")
+            .eq("org_id", orgId)
+            .order("outcome", { ascending: true }),
     ]),
-    Promise.all([
+    scope
+      ? Promise.all([NO_ROWS, NO_ROWS, NO_ROWS, NO_ROWS])
+      : Promise.all([
       idQuery("properties", "id", (q) => q.eq("needs_human_attention", true)),
       idQuery("jev_lead_decisions", "property_id", (q) =>
         q.eq("status", "pending"),
@@ -874,4 +970,151 @@ export async function loadMessagesV2Data(
       : buildModeBadges(configRow, (thresholdRes.data ?? []) as ThresholdRow[]),
     nowMs,
   };
+}
+
+export type HoldBucket = "new" | "backlog";
+export type HoldBuckets = {
+  cutover: string;
+  newTotal: number;
+  backlogTotal: number;
+  /** Property ids of the requested bucket page, oldest effective start first. */
+  propertyIds: string[];
+};
+
+const toCount = (v: unknown): number => {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+};
+
+/**
+ * One page of a hold bucket plus exact New / Backlog counts, classified in SQL
+ * against the org's fixed cutover (messages_v2_settings.backlog_before).
+ * Returns null when the query fails; callers must say so, never show "no holds".
+ */
+export async function loadHoldBuckets(
+  supabase: LooseSupabase,
+  orgId: string,
+  bucket: HoldBucket,
+  limit: number,
+  offset = 0,
+): Promise<HoldBuckets | null> {
+  const res = await supabase.rpc("messages_v2_hold_buckets", {
+    p_org_id: orgId,
+    p_bucket: bucket,
+    p_limit: limit,
+    p_offset: offset,
+  });
+  if (res.error || !res.data || typeof res.data !== "object") return null;
+  const d = res.data as {
+    cutover?: string;
+    new_total?: unknown;
+    backlog_total?: unknown;
+    rows?: Array<{ property_id?: string }>;
+  };
+  return {
+    cutover: String(d.cutover ?? ""),
+    newTotal: toCount(d.new_total),
+    backlogTotal: toCount(d.backlog_total),
+    propertyIds: (d.rows ?? []).flatMap((r) =>
+      r.property_id ? [r.property_id] : [],
+    ),
+  };
+}
+
+/**
+ * Page loader for the Holds rail split into New and Backlog. `holds` are the
+ * New holds only (capped at NEW_HOLD_CAP, with exact totals in `split`); the
+ * Backlog is counted here and loaded on demand by loadBacklogHolds.
+ */
+export async function loadMessagesV2Split(
+  supabase: LooseSupabase,
+  orgId: string,
+  nowMs: number = Date.now(),
+  opts: Pick<LoadOptions, "includeDraftBody"> = {},
+): Promise<MessagesV2Data & { split: HoldsSplit }> {
+  const buckets = await loadHoldBuckets(supabase, orgId, "new", NEW_HOLD_CAP);
+  if (!buckets) {
+    // Still load the feed; the rail reports the failure instead of "no holds".
+    const base = await loadMessagesV2Data(supabase, orgId, nowMs, {
+      ...opts,
+      scope: { propertyIds: [], noPropertyDrafts: false },
+    });
+    return {
+      ...base,
+      split: {
+        backlogBefore: null,
+        newTotal: 0,
+        newShown: 0,
+        backlogTotal: 0,
+        error: "hold classification query failed",
+      },
+    };
+  }
+  const data = await loadMessagesV2Data(supabase, orgId, nowMs, {
+    ...opts,
+    scope: { propertyIds: buckets.propertyIds, noPropertyDrafts: true },
+  });
+  const noProperty = data.holds.filter((h) => h.property_id === null).length;
+  const newTotal = Math.max(buckets.newTotal + noProperty, data.holds.length);
+  const total = newTotal + buckets.backlogTotal;
+  return {
+    ...data,
+    holdsMeta: {
+      ...data.holdsMeta,
+      total,
+      shown: data.holds.length,
+      truncated: total > data.holds.length,
+      totalState: data.holdsMeta.failed.some((f) => f !== "pending_draft")
+        ? data.holdsMeta.totalState
+        : "exact",
+    },
+    split: {
+      backlogBefore: buckets.cutover,
+      newTotal,
+      newShown: data.holds.length,
+      backlogTotal: buckets.backlogTotal,
+    },
+  };
+}
+
+/** One page of Backlog holds, oldest first, with the same card context as New. */
+export async function loadBacklogHolds(
+  supabase: LooseSupabase,
+  orgId: string,
+  offset: number,
+  limit: number,
+  nowMs: number = Date.now(),
+): Promise<{
+  holds: OpenHold<RunWithSteps>[];
+  backlogTotal: number;
+  hasMore: boolean;
+  failed: boolean;
+} | null> {
+  const buckets = await loadHoldBuckets(supabase, orgId, "backlog", limit, offset);
+  if (!buckets) return null;
+  if (buckets.propertyIds.length === 0) {
+    return {
+      holds: [],
+      backlogTotal: buckets.backlogTotal,
+      hasMore: false,
+      failed: false,
+    };
+  }
+  const data = await loadMessagesV2Data(supabase, orgId, nowMs, {
+    includeDraftBody: true,
+    holdsOnly: true,
+    scope: { propertyIds: buckets.propertyIds, noPropertyDrafts: false },
+  });
+  return {
+    holds: data.holds,
+    backlogTotal: buckets.backlogTotal,
+    hasMore: offset + buckets.propertyIds.length < buckets.backlogTotal,
+    failed: data.holdsMeta.failed.length > 0,
+  };
+}
+
+/** Header wording for the split rail: "6 new · 2,504 backlog". */
+export function formatSplitTotal(split: HoldsSplit): string {
+  if (split.error) return "holds unavailable";
+  return `${split.newTotal.toLocaleString("en-US")} new · ${split.backlogTotal.toLocaleString("en-US")} backlog`;
 }

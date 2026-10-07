@@ -1,10 +1,11 @@
 "use client";
 
 import { format } from "date-fns/format";
+import { useEffect, useRef, useState } from "react";
 
 import { cn } from "@/lib/utils";
 
-import type { HoldActionsApi } from "./hold-action-types";
+import type { HoldActionsApi, LoadBacklog } from "./hold-action-types";
 import {
   DisabledHoldActions,
   effectiveDraftBody,
@@ -13,6 +14,7 @@ import {
 import { holdReason } from "./step-format";
 import type {
   HoldsMeta,
+  HoldsSplit,
   HoldSource,
   OpenHold,
   RunLabel,
@@ -224,15 +226,201 @@ const SOURCE_NAME: Record<HoldSource, string> = {
   pending_draft: "reply draft",
 };
 
+const BACKLOG_PAGE_SIZE = 200;
+const fmt = (n: number) => n.toLocaleString("en-US");
+
+type BacklogState = {
+  holds: OpenHold<RunWithSteps>[];
+  labels: Map<string, RunLabel>;
+  total: number;
+  hasMore: boolean;
+  /** The server data these cards were loaded against; a newer one makes them stale. */
+  forKey: unknown;
+  error: string | null;
+};
+
+/**
+ * Collapsed "Backlog" disclosure: holds flagged before Messages v2 went live.
+ * Cards load only when it is opened (oldest first, 200 per page), and reload
+ * when the server data refreshes so a dismissed hold does not linger.
+ */
+function BacklogSection({
+  total,
+  loadBacklog,
+  refreshKey,
+  nowMs,
+  actions,
+  onReload,
+}: {
+  total: number;
+  loadBacklog?: LoadBacklog;
+  refreshKey: unknown;
+  nowMs: number;
+  actions?: HoldActionsApi;
+  onReload?: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [state, setState] = useState<BacklogState | null>(null);
+  const [moreBusy, setMoreBusy] = useState(false);
+  const loadedRef = useRef(0);
+  const loadedCount = state?.holds.length ?? 0;
+  useEffect(() => {
+    loadedRef.current = loadedCount;
+  }, [loadedCount]);
+
+  useEffect(() => {
+    if (!expanded || !loadBacklog) return;
+    let cancelled = false;
+    // First open loads one page; a server refresh reloads what was already shown.
+    const limit = Math.max(BACKLOG_PAGE_SIZE, loadedRef.current);
+    loadBacklog({ offset: 0, limit }).then(
+      (res) => {
+        if (cancelled) return;
+        setState(
+          res.ok
+            ? {
+                holds: res.data.holds,
+                labels: new Map(res.data.labels),
+                total: res.data.backlogTotal,
+                hasMore: res.data.hasMore,
+                forKey: refreshKey,
+                error: null,
+              }
+            : {
+                holds: [],
+                labels: new Map(),
+                total,
+                hasMore: false,
+                forKey: refreshKey,
+                error: res.error.message,
+              },
+        );
+      },
+      () => {
+        if (!cancelled)
+          setState({
+            holds: [],
+            labels: new Map(),
+            total,
+            hasMore: false,
+            forKey: refreshKey,
+            error: "Backlog holds could not be loaded.",
+          });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+    // `total` only labels an error state; reloading on it would refetch needlessly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, loadBacklog, refreshKey]);
+
+  const loadMore = () => {
+    if (!loadBacklog || !state || moreBusy) return;
+    setMoreBusy(true);
+    loadBacklog({ offset: state.holds.length, limit: BACKLOG_PAGE_SIZE })
+      .then((res) => {
+        setState((curr) => {
+          if (!curr) return curr;
+          if (!res.ok) return { ...curr, error: res.error.message };
+          const seen = new Set(curr.holds.map((h) => h.id));
+          return {
+            ...curr,
+            holds: [...curr.holds, ...res.data.holds.filter((h) => !seen.has(h.id))],
+            labels: new Map([...curr.labels, ...res.data.labels]),
+            total: res.data.backlogTotal,
+            hasMore: res.data.hasMore,
+            error: null,
+          };
+        });
+      })
+      .catch(() =>
+        setState((curr) =>
+          curr ? { ...curr, error: "Backlog holds could not be loaded." } : curr,
+        ),
+      )
+      .finally(() => setMoreBusy(false));
+  };
+
+  const loading = expanded && (state === null || state.forKey !== refreshKey);
+  return (
+    <section aria-label="Backlog holds" data-testid="holds-backlog" className="flex flex-col gap-3">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-controls="holds-backlog-list"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center gap-2 text-left text-sm font-semibold"
+      >
+        <span aria-hidden className="text-muted-foreground">
+          {expanded ? "▾" : "▸"}
+        </span>
+        <span>
+          Backlog <span className="text-muted-foreground">({fmt(total)})</span>
+        </span>
+      </button>
+      <p className="-mt-2 pl-5 text-xs text-muted-foreground">
+        Flagged before Messages v2 went live
+      </p>
+      {expanded && (
+        <div id="holds-backlog-list" className="flex flex-col gap-3">
+          {state?.error && (
+            <p
+              role="alert"
+              data-testid="backlog-error"
+              className="rounded-xl border border-red-300 bg-red-50 p-3 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200"
+            >
+              {state.error}
+            </p>
+          )}
+          {loading && !state?.error && (
+            <p data-testid="backlog-loading" className="text-xs text-muted-foreground">
+              Loading backlog…
+            </p>
+          )}
+          {state?.holds.map((hold) => (
+            <HoldCard
+              key={hold.id}
+              hold={hold}
+              label={state.labels.get(hold.id)}
+              nowMs={nowMs}
+              actions={actions}
+              onReload={onReload}
+            />
+          ))}
+          {state && state.hasMore && (
+            <button
+              type="button"
+              onClick={loadMore}
+              disabled={moreBusy}
+              className="self-start rounded-lg px-3 py-1.5 text-sm font-medium ring-1 ring-foreground/20 hover:bg-secondary disabled:opacity-60"
+            >
+              {moreBusy ? "Loading…" : `Load more (${fmt(Math.max(0, state.total - state.holds.length))} left)`}
+            </button>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function HoldsRail({
   holds,
   labels,
   nowMs,
   meta,
+  split,
+  loadBacklog,
+  backlogRefreshKey,
   actions,
   onReload,
 }: {
   meta?: HoldsMeta;
+  /** New / Backlog split; absent = the single flat list (no sections). */
+  split?: HoldsSplit;
+  loadBacklog?: LoadBacklog;
+  /** Changes when the server data refreshes (reloads an open Backlog). */
+  backlogRefreshKey?: unknown;
   actions?: HoldActionsApi;
   onReload?: () => void;
   holds: readonly OpenHold<RunWithSteps>[];
@@ -240,8 +428,11 @@ export function HoldsRail({
   nowMs: number;
 }) {
   const holdFailures = meta?.failed ?? [];
-  const count =
-    meta?.totalState === "unavailable"
+  const count = split
+    ? split.error
+      ? "(count unavailable)"
+      : `(${fmt(split.newTotal)} new · ${fmt(split.backlogTotal)} backlog)`
+    : meta?.totalState === "unavailable"
       ? `(count unavailable, ${holds.length} shown)`
       : meta?.totalState === "capped"
         ? `(2,000+ holds (incomplete), ${meta.shown} shown)`
@@ -250,6 +441,16 @@ export function HoldsRail({
           : meta?.truncated
             ? `(${meta.total}, ${meta.shown} shown)`
             : `(${holds.length})`;
+  const cards = holds.map((hold) => (
+    <HoldCard
+      key={hold.id}
+      hold={hold}
+      label={labels.get(hold.id)}
+      nowMs={nowMs}
+      actions={actions}
+      onReload={onReload}
+    />
+  ));
   return (
     <aside
       aria-label="Holds"
@@ -259,6 +460,15 @@ export function HoldsRail({
       <h2 className="lg:sticky lg:top-0 z-10 bg-background pb-1 text-sm font-semibold">
         Holds <span className="text-muted-foreground">{count}</span>
       </h2>
+      {split?.error && (
+        <p
+          role="alert"
+          data-testid="holds-split-unavailable"
+          className="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200"
+        >
+          Holds unavailable — {split.error}
+        </p>
+      )}
       {holdFailures.length > 0 && (
         <p
           role="alert"
@@ -288,23 +498,48 @@ export function HoldsRail({
           cards may be missing run context.
         </p>
       )}
-      {holds.length === 0 ? (
+      {split ? (
+        <>
+          {!split.error && (
+            <section aria-label="New holds" data-testid="holds-new" className="flex flex-col gap-3">
+              <h3 className="text-sm font-semibold">
+                New <span className="text-muted-foreground">({fmt(split.newTotal)})</span>
+              </h3>
+              {split.newShown < split.newTotal && (
+                <p data-testid="holds-new-capped" className="text-xs text-muted-foreground">
+                  Showing {fmt(split.newShown)} of {fmt(split.newTotal)} new holds
+                </p>
+              )}
+              {holds.length === 0 ? (
+                holdFailures.length > 0 ? null : (
+                  <p className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
+                    No new holds.
+                  </p>
+                )
+              ) : (
+                cards
+              )}
+            </section>
+          )}
+          {!split.error && split.backlogTotal > 0 && (
+            <BacklogSection
+              total={split.backlogTotal}
+              loadBacklog={loadBacklog}
+              refreshKey={backlogRefreshKey}
+              nowMs={nowMs}
+              actions={actions}
+              onReload={onReload}
+            />
+          )}
+        </>
+      ) : holds.length === 0 ? (
         holdFailures.length > 0 ? null : (
           <p className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
             No open holds.
           </p>
         )
       ) : (
-        holds.map((hold) => (
-          <HoldCard
-            key={hold.id}
-            hold={hold}
-            label={labels.get(hold.id)}
-            nowMs={nowMs}
-            actions={actions}
-            onReload={onReload}
-          />
-        ))
+        cards
       )}
       <ShadowScorecard />
     </aside>

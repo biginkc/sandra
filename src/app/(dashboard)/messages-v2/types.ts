@@ -101,6 +101,22 @@ export type HoldsMeta = {
   deadLetterUnavailable?: boolean;
 };
 
+/**
+ * New / Backlog split of the Holds rail. `holds` on the page are the New ones
+ * (up to a cap); Backlog is counted and loaded on demand.
+ */
+export type HoldsSplit = {
+  /** Fixed per-org cutover; holds whose latest activity is before it are Backlog. Null when classification failed. */
+  backlogBefore: string | null;
+  /** Exact number of New holds (may exceed `newShown` when capped). */
+  newTotal: number;
+  newShown: number;
+  /** Exact number of Backlog holds. */
+  backlogTotal: number;
+  /** Classification query failed: counts are unknown, not zero. */
+  error?: string;
+};
+
 export type HoldSource =
   "needs_attention" | "jev_decision" | "disposition_review" | "pending_draft";
 
