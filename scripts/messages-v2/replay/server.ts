@@ -11,12 +11,16 @@ import { spawn } from "node:child_process";
 import { parseArgs } from "node:util";
 
 import { DEFAULT_REPLAY_WEBHOOK_SECRET, assertBatchId, fail } from "./cli";
+import { replayOrgId } from "./seed-core";
 import { applyStubEnv, type EnvLike, assertLocalBaseUrl, assertSafeSupabaseUrl, readProdRefs } from "./safety";
 
 // Public Supabase CLI demo keys (same defaults as vitest.local-integration.config.ts).
 const DEMO_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0";
 const DEMO_SERVICE = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU";
 
+// Deliberately NOT blanked: SENDILLO_ORG_ID / SENDILLO_CONNECTION_ID / SENDILLO_PROVIDER_ACCOUNT_ID are
+// scope ids, not credentials; the send path (assertSendilloOrganizationScope, resolveProvider) needs them.
+// SENDILLO_ORG_ID is additionally pinned to the replay org below.
 export const BLANKED_ENV = [
   "SENDILLO_API_KEY", "SENDILLO_CAPTURE_ENABLED", "SENDILLO_CAPTURE_SECRET", "REP_SMS_FROM_NUMBER",
   "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER", "TWILIO_MESSAGING_SERVICE_SID",
@@ -25,15 +29,14 @@ export const BLANKED_ENV = [
   // Other outbound-capable / paid vendor credentials (audit: process.env.*_KEY/_TOKEN/_SECRET in src/lib + src/app).
   // Left alone on purpose: ANTHROPIC_API_KEY, TYPESAFE_API_KEY (Jev), local Supabase keys.
   "TELNYX_API_KEY", "TRACERFY_API_KEY", "SMARTY_AUTH_ID", "SMARTY_AUTH_TOKEN",
-  "NORMA_BLAND_WEBHOOK_SECRET", "NORMA_BLAND_INBOUND_WEBHOOK_SECRET", "SENDILLO_CONNECTION_ID", "SENDILLO_ORG_ID",
-  "SENDILLO_PROVIDER_ACCOUNT_ID", "DIALPAD_API_BASE_URL",
+  "NORMA_BLAND_WEBHOOK_SECRET", "NORMA_BLAND_INBOUND_WEBHOOK_SECRET", "DIALPAD_API_BASE_URL",
   "DROPBOX_SIGN_CLIENT_ID", "DROPBOX_SIGN_CALLBACK_SECRET_KEY", "DROPBOX_SIGN_API_BASE_URL",
   "SLACK_CLIENT_ID", "SLACK_CLIENT_SECRET", "SLACK_SIGNING_SECRET",
   "GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET", "GOOGLE_MAPS_STATIC_KEY", "GOOGLE_STREET_VIEW_METADATA_KEY",
   "OP_SERVICE_ACCOUNT_TOKEN",
 ] as const;
 
-export function buildServerEnv(base: EnvLike, o: { supabaseUrl: string; batchId: string | null; port: number; fromNumber: string }): EnvLike {
+export function buildServerEnv(base: EnvLike, o: { supabaseUrl: string; batchId: string | null; port: number; fromNumber: string; allowProjectRef?: string | null }): EnvLike {
   const env: EnvLike = { ...base };
   for (const name of BLANKED_ENV) env[name] = "";
   applyStubEnv(env);
@@ -47,7 +50,12 @@ export function buildServerEnv(base: EnvLike, o: { supabaseUrl: string; batchId:
     SUPABASE_SERVICE_ROLE_KEY: base.LOCAL_SUPABASE_SERVICE_ROLE_KEY || DEMO_SERVICE,
     PORT: String(o.port),
   });
-  if (o.batchId) env.REPLAY_BATCH_ID = o.batchId;
+  if (o.batchId) {
+    env.REPLAY_BATCH_ID = o.batchId;
+    // The replay org is the only org that sends here; scope check requires an exact match.
+    env.SENDILLO_ORG_ID = replayOrgId(o.batchId);
+  }
+  if (o.allowProjectRef) env.REPLAY_ALLOW_PROJECT_REF = o.allowProjectRef;
   return env;
 }
 
@@ -74,6 +82,7 @@ async function main() {
     batchId: values.batch ? assertBatchId(values.batch) : null,
     port,
     fromNumber: values["from-number"]!,
+    allowProjectRef: values["allow-project-ref"] ?? null,
   });
   console.log(`replay:server -> http://localhost:${port} (SMS_PROVIDER_STUB=1, Supabase ${new URL(supabaseUrl).host})`);
   const child = spawn("npx", ["next", "dev", "-p", String(port)], { env: env as NodeJS.ProcessEnv, stdio: "inherit" });

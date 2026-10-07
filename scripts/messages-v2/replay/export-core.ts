@@ -188,6 +188,7 @@ export async function buildExport(query: Query, opts: ExportOptions): Promise<Re
         spec.phoneColumns?.includes(col) ?? false,
         spec.rawColumns?.includes(col) ?? false,
         masker,
+        PHONE_COLUMN_NAME.test(col),
       );
     }
     return out;
@@ -243,22 +244,26 @@ export async function buildExport(query: Query, opts: ExportOptions): Promise<Re
   return result;
 }
 
+/** Reference rows have no schema; stay conservative and mask every phone-shaped number. */
 function scrub(row: Record<string, unknown>, masker: PhoneMasker): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(row).map(([k, v]) => [k, maskValue(v, false, k === "id" || k.endsWith("_id"), masker)]));
+  return Object.fromEntries(Object.entries(row).map(([k, v]) => [k, maskValue(v, false, k === "id" || k.endsWith("_id"), masker, true)]));
 }
 
-function maskValue(value: unknown, isPhone: boolean, raw: boolean, masker: PhoneMasker): unknown {
+/** Columns whose name says "phone number"; plain numeric columns (ids, amounts) are never rewritten. */
+const PHONE_COLUMN_NAME = /(phone|mobile|cell|msisdn)/i;
+
+export function maskValue(value: unknown, isPhone: boolean, raw: boolean, masker: PhoneMasker, numericPhone = false, inJson = false): unknown {
   if (value == null) return value;
   if (value instanceof Date) return value.toISOString();
-  if (typeof value === "number") return masker.maskNumber(value);
+  if (typeof value === "number") return inJson || isPhone || numericPhone ? masker.maskNumber(value) : value;
   if (typeof value === "string") {
     if (isPhone) return masker.maskOrKeep(value);
     return raw ? value : masker.maskText(value);
   }
-  if (Array.isArray(value)) return value.map((v) => maskValue(v, false, false, masker));
+  if (Array.isArray(value)) return value.map((v) => maskValue(v, false, false, masker, false, true));
   if (typeof value === "object") {
     return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, maskValue(v, false, false, masker)]),
+      Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, maskValue(v, false, false, masker, false, true)]),
     );
   }
   return value;

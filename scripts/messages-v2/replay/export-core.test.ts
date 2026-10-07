@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { withReadOnlyTransaction } from "./db";
-import { buildExport } from "./export-core";
+import { buildExport, maskValue } from "./export-core";
+import { PhoneMasker } from "./mask";
 import type { Query } from "./schema";
 
 const ORG = "11111111-1111-4111-8111-111111111111";
@@ -167,5 +168,18 @@ describe("withReadOnlyTransaction", () => {
       }),
     ).rejects.toThrow("boom");
     expect(sqls.at(-1)).toBe("rollback");
+  });
+});
+
+describe("maskValue numeric handling", () => {
+  const m = new PhoneMasker("salt", [], true);
+  it("leaves a 10-digit numeric amount/id column untouched", () => {
+    expect(maskValue(9132223344, false, false, m)).toBe(9132223344);
+  });
+  it("masks numeric phones in a phone-named column and inside JSON", () => {
+    const masked = m.maskNumber(9132223344);
+    expect(masked).not.toBe(9132223344);
+    expect(maskValue(9132223344, false, false, m, true)).toBe(masked);
+    expect(maskValue({ a: { phone: 9132223344 }, b: [9132223344] }, false, false, m)).toEqual({ a: { phone: masked }, b: [masked] });
   });
 });
