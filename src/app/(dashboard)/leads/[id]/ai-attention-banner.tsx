@@ -1,12 +1,19 @@
 "use client";
 
 import { AlertTriangleIcon, RotateCcwIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { parseEscalationReason } from "@/lib/ai-responder/format-reason";
+import {
+  parseEscalationReason,
+  suppressionReviewIdsFromReason,
+} from "@/lib/ai-responder/format-reason";
 
-import { clearNeedsHumanAttention } from "./ai-actions";
+import {
+  clearNeedsHumanAttention,
+  listOutstandingSuppressionFailures,
+  retrySuppressionForProperty,
+} from "./ai-actions";
 
 /**
  * Banner shown on lead detail when `properties.needs_human_attention`
@@ -40,6 +47,30 @@ export function AiAttentionBanner({
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const visible = initialVisible && !dismissed;
+  const reasonIsSuppression =
+    reason === "suppression_incomplete" ||
+    !!reason?.startsWith("suppression_incomplete:");
+  // Failed reviews can also hide behind a preserved send-timeout reason, so
+  // the outstanding list is loaded whenever the banner is showing.
+  const [outstanding, setOutstanding] = useState<number | null>(null);
+  useEffect(() => {
+    if (!initialVisible) return;
+    let live = true;
+    listOutstandingSuppressionFailures(propertyId)
+      .then((r) => {
+        if (live && r?.ok) setOutstanding(r.data.reviewIds.length);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [propertyId, initialVisible, reason]);
+  // `outstanding` is the loaded count (null until loaded or if the load failed).
+  // When the ledger is unreadable (or still loading) fall back to the ids the
+  // hold reason itself carries.
+  const outstandingCount =
+    outstanding ?? suppressionReviewIdsFromReason(reason).length;
+  const suppressionIncomplete = reasonIsSuppression || outstandingCount > 0;
 
   if (!visible) return null;
 
@@ -58,6 +89,26 @@ export function AiAttentionBanner({
         error instanceof Error
           ? error.message
           : "Could not clear the attention flag",
+      );
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const onRetrySuppression = async () => {
+    setPending(true);
+    setFailure(null);
+    try {
+      const r = await retrySuppressionForProperty(propertyId);
+      if (!r.ok) {
+        setFailure(r.error.message);
+      } else {
+        setOutstanding(r.data.remaining);
+        if (r.data.cleared) setDismissed(true);
+      }
+    } catch (error) {
+      setFailure(
+        error instanceof Error ? error.message : "Could not retry suppression",
       );
     } finally {
       setPending(false);
@@ -90,6 +141,20 @@ export function AiAttentionBanner({
               {when ? <>{when}</> : null}
             </div>
           )}
+          {suppressionIncomplete ? (
+            <div
+              className="mt-2 text-xs font-semibold"
+              data-testid="ai-attention-suppression-warning"
+            >
+              Suppression is incomplete: this number may still be texted.
+              {outstandingCount > 1
+                ? ` ${outstandingCount} confirmed opt-outs still need suppression.`
+                : outstandingCount === 1
+                  ? " 1 confirmed opt-out still needs suppression."
+                  : " Suppression status loading or unavailable."}{" "}
+              Retry suppression before dismissing.
+            </div>
+          ) : null}
           {failure ? (
             <div
               className="mt-2 text-xs font-semibold"
@@ -100,6 +165,20 @@ export function AiAttentionBanner({
           ) : null}
         </div>
       </div>
+      <div className="flex flex-col gap-2 sm:flex-row">
+        {suppressionIncomplete ? (
+          <Button
+            size="sm"
+            onClick={onRetrySuppression}
+            disabled={pending}
+            className="min-h-11 w-full sm:min-h-8 sm:w-auto"
+            data-testid="ai-attention-retry-suppression"
+          >
+            {outstandingCount > 1
+              ? `Retry suppression (${outstandingCount})`
+              : "Retry suppression"}
+          </Button>
+        ) : null}
       <Button
         variant="outline"
         size="sm"
@@ -109,8 +188,15 @@ export function AiAttentionBanner({
         data-testid="ai-attention-mark-handled"
       >
         {failure ? <RotateCcwIcon className="size-3.5" /> : null}
-        {pending ? "Marking…" : failure ? "Retry" : "Mark handled"}
+        {pending
+          ? "Marking…"
+          : suppressionIncomplete
+            ? "Dismiss anyway"
+            : failure
+              ? "Retry"
+              : "Mark handled"}
       </Button>
+      </div>
     </div>
   );
 }

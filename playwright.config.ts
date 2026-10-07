@@ -149,6 +149,8 @@ export default defineConfig({
   testIgnore: [
     // Requires the four-principal loopback fixture, never the shared CI project.
     "**/my-leads.local.spec.ts",
+    // Runs only via playwright.jev-local.config.ts against local Supabase (127.0.0.1:54329).
+    "**/jev-decision-workflow.local.spec.ts",
     "**/phase-1-5-uat.spec.ts",
     "**/prod-canary/**",
     "**/synthetic/**",

@@ -104,6 +104,8 @@ export async function sendNormaPrecallSms(client: Client, row: PrecallRow, deps:
     if (outcome === "timeout") return { status: "failed", detail: "timeout" };
     if (outcome.status === "sent" || outcome.status === "queued") return { status: outcome.status, detail: outcome.status };
     if (outcome.status === "db_error") return { status: "failed", detail: "db_error" };
+    // Transient consent/suppression read failure: refused (no text sent), call still placed.
+    if (outcome.status === "blocked_fresh_state_unavailable") return { status: "refused", detail: "consent_unavailable" };
     return { status: "refused", detail: outcome.status };
   } catch (error) {
     reportError(error, { tags: { surface: "norma_precall_sms" }, extra: { requestId: row.id } });

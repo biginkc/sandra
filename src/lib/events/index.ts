@@ -162,10 +162,24 @@ export async function recordLeadEvents(
 
   try {
     const { error } = await admin.from("lead_events").insert(rows);
-    if (error) reportLedgerFailure("insert", error, rows.length);
+    if (error) {
+      // A retried action re-records the same (source_type, source_id):
+      // the unique ledger identity already holds the event, so it is not
+      // a failure. Single rows only: a batch violation is ambiguous.
+      if (rows.length === 1 && isUniqueViolation(error)) return;
+      reportLedgerFailure("insert", error, rows.length);
+    }
   } catch (error) {
     reportLedgerFailure("insert", error, rows.length);
   }
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === "23505"
+  );
 }
 
 export async function recordLeadEvent(

@@ -146,4 +146,69 @@ describe("provider failure reasons", () => {
     expect(parsed!.shortLabel).toBe("API key dead");
     expect(parsed!.longLabel).toMatch(/key rejected/i);
   });
+
+  it("dead_letter_failed:<reason> (Q8 rule 7) parses loud and names the original reason", () => {
+    const parsed = parseEscalationReason("dead_letter_failed:send_blocked:db_error");
+    expect(parsed).not.toBeNull();
+    expect(parsed!.color).toBe("rose");
+    expect(parsed!.shortLabel).toBe("Reply text not saved");
+    expect(parsed!.longLabel).toMatch(/send blocked db error/i);
+  });
+});
+
+describe("send timeout reasons", () => {
+  it("dead_letter_failed:send_timeout:<inbound_id> keeps the loud gate, names the timeout, hides the uuid", () => {
+    const parsed = parseEscalationReason("dead_letter_failed:send_timeout:3f1c2d9e-0000-4000-8000-123456789abc");
+    expect(parsed!.gate).toBe("dead_letter_failed");
+    expect(parsed!.color).toBe("rose");
+    expect(parsed!.shortLabel).toBe("Reply text not saved");
+    expect(parsed!.longLabel).toMatch(/timed out/i);
+    expect(parsed!.longLabel).not.toMatch(/3f1c/);
+  });
+  it("send_timeout:<inbound_id> never shows the raw uuid", () => {
+    const parsed = parseEscalationReason("send_timeout:3f1c2d9e-0000-4000-8000-123456789abc");
+    expect(parsed!.longLabel).toBe("Reply timed out at the provider — held for review");
+    expect(parsed!.longLabel).not.toMatch(/3f1c/);
+  });
+  it("send_timeout:<inbound_id>:backed is the same send_timeout gate and label, no uuid", () => {
+    const parsed = parseEscalationReason("send_timeout:3f1c2d9e-0000-4000-8000-123456789abc:backed");
+    expect(parsed!.gate).toBe("send_timeout");
+    expect(parsed!.shortLabel).toBe("Send timed out");
+    expect(parsed!.longLabel).toBe("Reply timed out at the provider — held for review");
+    expect(parsed!.longLabel).not.toMatch(/3f1c|backed/);
+  });
+  it("dead_letter_failed:send_timeout:<inbound_id>:backed is labelled like the unbacked form", () => {
+    const a = parseEscalationReason("dead_letter_failed:send_timeout:3f1c2d9e-0000-4000-8000-123456789abc");
+    const b = parseEscalationReason("dead_letter_failed:send_timeout:3f1c2d9e-0000-4000-8000-123456789abc:backed");
+    expect(b).toMatchObject({ gate: a!.gate, color: a!.color, shortLabel: a!.shortLabel, longLabel: a!.longLabel });
+  });
+  it("send_timeout_unparseable is the send_timeout gate with a needs-review label", () => {
+    const parsed = parseEscalationReason("send_timeout_unparseable");
+    expect(parsed!.gate).toBe("send_timeout");
+    expect(parsed!.shortLabel).toBe("Send timed out");
+    expect(parsed!.longLabel).toBe("Reply timed out at the provider — record unreadable, needs review");
+  });
+  it("send_timeout_then_sent warns not to re-send", () => {
+    const parsed = parseEscalationReason("send_timeout_then_sent");
+    expect(parsed!.longLabel).toBe("Reply accepted by provider late — do not re-send");
+  });
+  it("suppression_incomplete labels the same with or without a review id, never showing the uuid", () => {
+    const bare = parseEscalationReason("suppression_incomplete");
+    const withId = parseEscalationReason("suppression_incomplete:3f1c2d9e-0000-4000-8000-123456789abc");
+    expect(withId).toMatchObject({
+      gate: "suppression_incomplete",
+      shortLabel: "Suppression incomplete",
+      color: "rose",
+      longLabel: bare!.longLabel,
+    });
+    expect(withId!.longLabel).not.toMatch(/3f1c2d9e/);
+  });
+  it("labels the multi-id form without uuids and counts the numbers", () => {
+    const a = "3f1c2d9e-0000-4000-8000-123456789abc";
+    const b = "7a7a7a7a-0000-4000-8000-123456789abc";
+    const parsed = parseEscalationReason(`suppression_incomplete:${a},${b}`);
+    expect(parsed).toMatchObject({ gate: "suppression_incomplete", color: "rose", shortLabel: "Suppression incomplete" });
+    expect(parsed!.longLabel).toMatch(/2 confirmed opt-outs/);
+    expect(parsed!.longLabel).not.toMatch(/3f1c2d9e|7a7a7a7a/);
+  });
 });

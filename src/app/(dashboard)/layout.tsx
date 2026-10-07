@@ -32,6 +32,7 @@ import { CallLockProvider } from "@/components/calls/call-lock-context";
 import { DialpadCallProvider } from "@/components/dialpad/dialpad-call-provider";
 import { getDialpadCallRoute } from "@/lib/dialpad-cti/call-route-server";
 import { refreshMyLeadsBadge } from "./my-leads/nav-actions";
+import { canAccessMessagesV2 } from "./messages-v2/access";
 
 export default async function DashboardLayout({
   children,
@@ -85,6 +86,9 @@ export default async function DashboardLayout({
   const showMessagesAndLeads =
     surfaceMembershipsResult.status === "fulfilled" &&
     canAccessMessagesAndLeadsBoard(surfaceMembershipsResult.value);
+  const showMessagesV2 =
+    surfaceMembershipsResult.status === "fulfilled" &&
+    canAccessMessagesV2(surfaceMembershipsResult.value);
 
   // Where every Call button sends the call: server-derived, never from the browser.
   const dialpadCallsEnabled = dialpadRouteResult.status === "fulfilled" && dialpadRouteResult.value === "dialpad";
@@ -144,6 +148,7 @@ export default async function DashboardLayout({
         <DashboardSidebar
           showCalculators={showCalculators}
           showMessagesAndLeads={showMessagesAndLeads}
+          showMessagesV2={showMessagesV2}
           showMyLeads={showMyLeads}
           showRecordings={recordingAccess?.owner}
           showMyRecordings={recordingAccess?.mine}
@@ -162,6 +167,7 @@ export default async function DashboardLayout({
         <DashboardMobileNav
           showCalculators={showCalculators}
           showMessagesAndLeads={showMessagesAndLeads}
+          showMessagesV2={showMessagesV2}
           showMyLeads={showMyLeads}
           showRecordings={recordingAccess?.owner}
           showMyRecordings={recordingAccess?.mine}

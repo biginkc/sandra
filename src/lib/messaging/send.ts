@@ -6,11 +6,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 import { normalizePhone } from "@/lib/csv/normalize";
 import { ConfigurationError, ProviderError } from "@/lib/errors/classes";
+import { reportError } from "@/lib/errors/report";
 import { ensureConversationIdForThread } from "@/lib/messages/threading";
 import type { Database, Json } from "@/lib/supabase/types";
 import { reconcileStoredStatusEvents } from "./status-events";
 import { retryReceiptTransaction } from "./receipt-persistence";
-import { getConsentState, type ConsentState } from "./consent";
+import { getConsentState, getConsentStateStrict, type ConsentState } from "./consent";
 import { checkQuietHours, type QuietHoursCheck } from "./quiet-hours";
 import {
   getSenderInventoryState,
@@ -300,6 +301,13 @@ async function loadRepSmsIdempotencyRow(
 
 export type SendSmsOutcome =
   | { status: "sent"; messageId: string; externalId: string }
+  /**
+   * `beforeProviderSubmit` refused: nothing was submitted to the provider.
+   * `retired` is false when the refused row could NOT be marked failed with its
+   * uniqueness-bearing stamp released (see `retireRefusedRow`): the caller must
+   * not retry over it.
+   */
+  | { status: "blocked_before_provider"; messageId: string; retired: boolean }
   | { status: "queued"; messageId: string; toAddress?: string }
   | { status: "paused"; messageId: string; toAddress?: string }
   /** A bulk-campaign destination is already represented by an outbound row. */
@@ -356,7 +364,8 @@ export type SendSmsOutcome =
        * (never retried) so the queue doesn't loop on an unresolved read.
        */
       status: "blocked_fresh_state_unavailable";
-      messageId: string;
+      /** Absent when the unreadable state was caught before a row existed. */
+      messageId?: string;
       error: string;
     }
   | {
@@ -489,6 +498,16 @@ export type SendSmsInput = {
    * into a separate provider-default fallback below; replies stay strict.
    */
   requireStickyFrom?: boolean;
+  /**
+   * Fencing hook, awaited as the LAST step before the provider submission
+   * (after every preflight await: sender lookup, suppression re-check, canary
+   * eligibility). Return false to abort: no provider call is made, the pending
+   * row is marked failed and `blocked_before_provider` is returned. A throw is
+   * treated as false. The AI responder uses it to re-validate its send lease
+   * at the real provider boundary, so a preflight that was paused past lease
+   * expiry can never submit.
+   */
+  beforeProviderSubmit?: (ctx?: { messageId: string }) => Promise<boolean>;
   /**
    * Sequence first-touches can have no prior inbound and no campaign snapshot.
    * When true, the provider default may be used, but inventory-aware providers
@@ -667,7 +686,23 @@ export async function sendSmsToContact(
     });
   }
 
-  const consentState = await getConsentState(supabase, input.contactId, "sms");
+  // Automated sends (the AI responder) must FAIL CLOSED on an unreadable
+  // consent state: `getConsentState` would collapse a DB error into
+  // `no_consent`, which the caller cannot tell from a real refusal. Manual
+  // (rep) sends keep the lenient read.
+  let consentState: ConsentState;
+  if (input.origin === "automated") {
+    const strict = await getConsentStateStrict(supabase, input.contactId, "sms");
+    if (!strict.ok) {
+      return preserveRepSmsPreDispatchFailure(input, {
+        status: "blocked_fresh_state_unavailable",
+        error: `consent state lookup failed: ${strict.error}`,
+      });
+    }
+    consentState = strict.state;
+  } else {
+    consentState = await getConsentState(supabase, input.contactId, "sms");
+  }
   const suppression = evaluateSuppression({
     outreachDispo: propertyResult.data.outreach_dispo,
     consentState,
@@ -981,6 +1016,28 @@ export async function sendSmsToContact(
       propertyId: input.propertyId, body: input.body,
       enrollmentId: input.sequenceContext?.enrollmentId,
     });
+    if (input.beforeProviderSubmit) {
+      let proceed = false;
+      try {
+        proceed = (await input.beforeProviderSubmit({ messageId: pending.id })) === true;
+      } catch {
+        proceed = false;
+      }
+      if (!proceed) {
+        // Never reached the provider. The row must not keep a uniqueness-bearing
+        // stamp, or the retry of the same inbound would collide with it
+        // (idx_messages_ai_responder_inbound_unique) and read as "already
+        // replied". `generated_by` stays (every reader of the AI stamp keeps
+        // working); only the inbound key moves to `aborted_inbound_message_id`.
+        const retired = await retireRefusedRow(supabase, pending.id, inputMetadata);
+        if (input.repSmsReceipt) {
+          await recordRepSmsDeliveryLedgerResult(input.repSmsReceipt, "failed_not_dispatched", {
+            providerError: "aborted_before_provider",
+          });
+        }
+        return { status: "blocked_before_provider", messageId: pending.id, retired };
+      }
+    }
     providerCallStarted = true;
     const result = await provider.sendSms({
       to: destination.phone,
@@ -1115,7 +1172,12 @@ export async function sendSmsToContact(
         failed_at: new Date().toISOString(),
         error_message: message,
         metadata: {
-          ...(inputMetadata ?? {}),
+          // A failure BEFORE the provider call started never reached the
+          // provider, so it must not keep the uniqueness-bearing AI stamp
+          // either (same rule as a refused submission).
+          ...(providerCallStarted
+            ? (inputMetadata ?? {})
+            : (metadataForRefusedRow(inputMetadata) as Record<string, Json>)),
             providerAttempt: {
               pendingAt,
               maxPendingMs: PROVIDER_PENDING_STALE_MS,
@@ -1135,6 +1197,62 @@ export async function sendSmsToContact(
       ...(manualDispatch && !providerCallStarted ? { providerAttempted: false } : {}),
     };
   }
+}
+
+/**
+ * Metadata for a row that never reached the provider: the same stamp, minus the
+ * key the AI-reply uniqueness index matches on.
+ */
+function metadataForRefusedRow(inputMetadata: Json | null | undefined): Json {
+  const base = (
+    inputMetadata && typeof inputMetadata === "object" && !Array.isArray(inputMetadata)
+      ? inputMetadata
+      : {}
+  ) as Record<string, Json>;
+  const { inbound_message_id: inboundId, ...rest } = base;
+  return {
+    ...rest,
+    ...(inboundId !== undefined ? { aborted_inbound_message_id: inboundId } : {}),
+    abortedBeforeProvider: true,
+  } as Json;
+}
+
+const REFUSED_ROW_RETIRE_ATTEMPTS = 3;
+
+/**
+ * Mark a refused row failed AND release its uniqueness-bearing stamp. The
+ * write is verified (error AND affected-row count) and retried a bounded
+ * number of times; it never throws. Returns whether retirement is confirmed.
+ */
+async function retireRefusedRow(
+  supabase: SupabaseClient<Database>,
+  messageId: string,
+  inputMetadata: Json | null | undefined,
+): Promise<boolean> {
+  for (let attempt = 1; attempt <= REFUSED_ROW_RETIRE_ATTEMPTS; attempt += 1) {
+    try {
+      const { data, error } = await supabase
+        .from("messages")
+        .update({
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          error_message: "aborted_before_provider",
+          metadata: metadataForRefusedRow(inputMetadata),
+        })
+        .eq("id", messageId)
+        .eq("status", "pending")
+        .select("id")
+        .maybeSingle();
+      if (!error && data) return true;
+    } catch {
+      // fall through to the next attempt
+    }
+  }
+  reportError(new Error("refused SMS row could not be retired"), {
+    tags: { surface: "sms_refused_row_retire" },
+    extra: { messageId },
+  });
+  return false;
 }
 
 function classifySequenceProviderFailure(error: unknown): SequenceAttemptOutcome {
@@ -2343,9 +2461,9 @@ async function checkFreshAutomatedSuppression(
     data: { do_not_contact: boolean | null; sms_opted_out: boolean | null } | null;
     error: { message: string } | null;
   };
-  let consentState: ConsentState;
+  let consentResult: Awaited<ReturnType<typeof getConsentStateStrict>>;
   try {
-    [propertyResult, contactResult, consentState] = await Promise.all([
+    [propertyResult, contactResult, consentResult] = await Promise.all([
       supabase
         .from("properties")
         .select("outreach_dispo")
@@ -2356,7 +2474,7 @@ async function checkFreshAutomatedSuppression(
         .select("do_not_contact, sms_opted_out")
         .eq("id", args.contactId)
         .maybeSingle(),
-      getConsentState(supabase, args.contactId, "sms"),
+      getConsentStateStrict(supabase, args.contactId, "sms"),
     ]);
   } catch (e) {
     return {
@@ -2364,12 +2482,13 @@ async function checkFreshAutomatedSuppression(
       error: `fresh suppression state reload threw: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
-  if (propertyResult.error || contactResult.error) {
+  if (propertyResult.error || contactResult.error || !consentResult.ok) {
     return {
       ok: false,
       error:
         propertyResult.error?.message ??
         contactResult.error?.message ??
+        (!consentResult.ok ? `consent state lookup failed: ${consentResult.error}` : null) ??
         "fresh suppression state reload failed",
     };
   }
@@ -2389,7 +2508,7 @@ async function checkFreshAutomatedSuppression(
   }
   const decision = evaluateAutomatedSuppression({
     outreachDispo: propertyResult.data?.outreach_dispo ?? null,
-    consentState,
+    consentState: consentResult.ok ? consentResult.state : "no_consent",
     doNotContact: contactResult.data?.do_not_contact ?? null,
     smsOptedOut: contactResult.data?.sms_opted_out ?? null,
   });

@@ -18,6 +18,8 @@ import {
   applyKeywordEscalation,
   checkAiResponderDispatchPreGates,
   dispatchAiResponse,
+  flagAndDeadLetter,
+  inboundStampOutcomeOf,
   markPropertyNeedsAttention,
   type AiDispatchInput,
   type AiDispatchOutcome,
@@ -57,7 +59,19 @@ import {
   recordRepSmsHumanTakeover,
   REP_SMS_HUMAN_TAKEOVER_REASON,
 } from "./rep-sms-human-takeover";
+import {
+  isRetryOutcome,
+  recordRetryScheduled,
+  type AiRetryOutcome,
+} from "@/lib/ai-responder/retry";
 import { aiReplyDelayWorkflow } from "@/workflows/ai-reply-delay";
+import {
+  finishRun,
+  finishRunFromOutcome,
+  recordStep,
+  startRun,
+  type PipelineRunContext,
+} from "@/lib/pipeline-runs";
 import { upgradeNormaHoldPauses } from "@/lib/norma";
 import { applyPhoneLevelOptOut } from "./opt-out-phone";
 import type { MessagingProvider } from "./types";
@@ -74,12 +88,13 @@ const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60_000;
 
 export function matchesStopKeyword(body: string) {
   return (
-    UNAMBIGUOUS_STOP_KEYWORDS.test(body) ||
-    AMBIGUOUS_STOP_KEYWORDS.test(body)
+    UNAMBIGUOUS_STOP_KEYWORDS.test(body) || AMBIGUOUS_STOP_KEYWORDS.test(body)
   );
 }
 
-export function classifyWrongNumberScope(body: string): "this_property" | "all" {
+export function classifyWrongNumberScope(
+  body: string,
+): "this_property" | "all" {
   if (
     /\bwrong (?:number|person)\b/i.test(body) ||
     /\bnever (?:owned|own) (?:any )?propert(?:y|ies)\b/i.test(body) ||
@@ -122,9 +137,10 @@ async function setInboundDisposition(
     .from("properties")
     .update({ outreach_dispo: input.disposition })
     .eq("id", input.propertyId);
-  updateQuery = current.outreach_dispo === null
-    ? updateQuery.is("outreach_dispo", null)
-    : updateQuery.eq("outreach_dispo", current.outreach_dispo);
+  updateQuery =
+    current.outreach_dispo === null
+      ? updateQuery.is("outreach_dispo", null)
+      : updateQuery.eq("outreach_dispo", current.outreach_dispo);
   const { data: updated, error: updateError } = await updateQuery
     .select("id")
     .maybeSingle();
@@ -222,6 +238,52 @@ async function resolveInboundOrgId(
   return orgIds.size === 1 ? Array.from(orgIds)[0] : null;
 }
 
+/**
+ * True only when this org has an active `ai_responder_configs` row with
+ * `classifier_provider = 'jev'`. Used solely to gate the legacy Haiku
+ * auto-qualify block above away from an org where Jev's own threshold
+ * decision is the sole new_lead promotion authority — never inferred
+ * elsewhere, and defaults to `false` (preserve the legacy path) when
+ * `orgId` is unresolved or the lookup fails, since guessing wrong here
+ * either duplicates a promotion (safe, existing `qualifyProperty` is
+ * idempotent) or silently skips one (not safe) — failing toward "keep
+ * today's behavior" is the correct default.
+ */
+export type ClassifierMode = "jev" | "legacy" | "unavailable";
+
+/**
+ * Tri-state classifier config. `unavailable` means the lookup errored — the
+ * caller must NOT fall back to the legacy auto-promote path (it would bypass
+ * Jev's automation_enabled/threshold). `legacy` is returned only when the
+ * query succeeded (legacy row, or verified absence of any active row) or
+ * there is no org to look up.
+ */
+export async function resolveClassifierMode(
+  supabase: SupabaseClient<Database>,
+  orgId: string | null,
+): Promise<ClassifierMode> {
+  if (!orgId) return "legacy";
+  try {
+    const { data, error } = await supabase
+      .from("ai_responder_configs")
+      .select("classifier_provider")
+      .eq("org_id", orgId)
+      .eq("active", true)
+      .maybeSingle();
+    if (error) return "unavailable";
+    return data?.classifier_provider === "jev" ? "jev" : "legacy";
+  } catch {
+    return "unavailable";
+  }
+}
+
+export async function isJevClassifierOrg(
+  supabase: SupabaseClient<Database>,
+  orgId: string | null,
+): Promise<boolean> {
+  return (await resolveClassifierMode(supabase, orgId)) === "jev";
+}
+
 export async function handleInboundWebhook(
   request: Request,
   opts: { includeFullUrl: boolean; provider: MessagingProvider | null },
@@ -291,15 +353,20 @@ export async function handleInboundWebhook(
       });
       let attributedOutboundMessageId: string | null = null;
       try {
-        attributedOutboundMessageId = await findAttributedOutboundMessageId(supabase, {
-          contactId,
-          toPhone: ev.to,
-          propertyId,
-          conversationId,
-        });
+        attributedOutboundMessageId = await findAttributedOutboundMessageId(
+          supabase,
+          {
+            contactId,
+            toPhone: ev.to,
+            propertyId,
+            conversationId,
+          },
+        );
       } catch (e) {
         reportError(e, {
-          tags: { surface: `${provider.providerId}_inbound_attribution_lookup` },
+          tags: {
+            surface: `${provider.providerId}_inbound_attribution_lookup`,
+          },
           extra: {
             externalId: ev.externalId,
             contactId,
@@ -345,7 +412,9 @@ export async function handleInboundWebhook(
 
       if (DNC_KEYWORDS.test(ev.body)) {
         if (!orgId) {
-          throw new Error("DNC webhook could not resolve org for phone suppression");
+          throw new Error(
+            "DNC webhook could not resolve org for phone suppression",
+          );
         }
         await applyPhoneLevelOptOut(supabase, {
           contactId,
@@ -403,6 +472,16 @@ export async function handleInboundWebhook(
             { status: 500 },
           );
         }
+        if (!insertOutcome.duplicate) {
+          await recordKeywordExitRun(supabase, {
+            orgId,
+            insertOutcome,
+            body: ev.body,
+            gate: "dnc_keyword",
+            status: "closed",
+            reason: "dnc_keyword",
+          });
+        }
         await markWebhookEventProcessed(
           supabase,
           provider.providerId,
@@ -417,7 +496,9 @@ export async function handleInboundWebhook(
 
       if (matchesStopKeyword(bodyTrimmed)) {
         if (!orgId) {
-          throw new Error("STOP webhook could not resolve org for phone suppression");
+          throw new Error(
+            "STOP webhook could not resolve org for phone suppression",
+          );
         }
         await applyPhoneLevelOptOut(supabase, {
           contactId,
@@ -477,6 +558,16 @@ export async function handleInboundWebhook(
             { status: 500 },
           );
         }
+        if (!insertOutcome.duplicate) {
+          await recordKeywordExitRun(supabase, {
+            orgId,
+            insertOutcome,
+            body: ev.body,
+            gate: "stop_keyword",
+            status: "closed",
+            reason: "stop_keyword",
+          });
+        }
         await markWebhookEventProcessed(
           supabase,
           provider.providerId,
@@ -525,6 +616,16 @@ export async function handleInboundWebhook(
             { error: "inbound message insert failed" },
             { status: 500 },
           );
+        }
+        if (!insertOutcome.duplicate) {
+          await recordKeywordExitRun(supabase, {
+            orgId,
+            insertOutcome,
+            body: ev.body,
+            gate: "help_keyword",
+            status: "skipped",
+            reason: "help_keyword",
+          });
         }
         await markWebhookEventProcessed(
           supabase,
@@ -622,6 +723,16 @@ export async function handleInboundWebhook(
             { status: 500 },
           );
         }
+        if (!insertOutcome.duplicate) {
+          await recordKeywordExitRun(supabase, {
+            orgId,
+            insertOutcome,
+            body: ev.body,
+            gate: "wrong_number_keyword",
+            status: "closed",
+            reason: "wrong_number_keyword",
+          });
+        }
         await markWebhookEventProcessed(
           supabase,
           provider.providerId,
@@ -678,8 +789,26 @@ export async function handleInboundWebhook(
         continue;
       }
       const inboundState = readInboundMessageState(insertOutcome.metadata);
+      // Messages v2 evidence: one run per inbound message. Observation only;
+      // null (never an error) when recording is unavailable.
+      const runCtx = orgId
+        ? await startRun(supabase, {
+            orgId,
+            inboundMessageId: insertOutcome.messageId,
+            propertyId: effectivePropertyId,
+            contactId: effectiveContactId,
+            conversationId: insertOutcome.conversationId,
+            mode: "legacy",
+            inboundPreview: ev.body,
+          })
+        : null;
 
       if (!effectivePropertyId) {
+        await finishRun(supabase, runCtx, {
+          status: "skipped",
+          finalOutcome: "skipped",
+          reason: "no_property",
+        });
         if (effectiveContactId && !inboundState.ownerNotificationSentAt) {
           try {
             const adminUserIds = await listAdminUserIds(supabase);
@@ -722,10 +851,49 @@ export async function handleInboundWebhook(
         .eq("id", effectivePropertyId)
         .maybeSingle();
 
+      const needsClassifierMode =
+        cur?.status === "prospect" &&
+        Boolean(ev.body) &&
+        !inboundState.autoQualifiedAt;
+      const classifierMode: ClassifierMode = needsClassifierMode
+        ? await resolveClassifierMode(supabase, orgId)
+        : "legacy";
+      if (classifierMode === "unavailable") {
+        // Fail closed: skip legacy auto-promotion entirely (it ignores Jev's
+        // automation_enabled/threshold). AI dispatch loads its own config.
+        reportError(new Error("classifier config unavailable"), {
+          tags: {
+            surface: `${provider.providerId}_webhook_classifier_config_unavailable`,
+          },
+          extra: { propertyId: effectivePropertyId, externalId: ev.externalId },
+        });
+        await recordStep(supabase, runCtx, {
+          kind: "gate",
+          name: "classifier_config_unavailable",
+          // The legacy auto-promotion branch is skipped, but the inbound still
+          // proceeds to AI dispatch (which fails closed on its own config load).
+          result: "pass",
+          detail: { skipped: "legacy_auto_promotion" },
+        });
+      }
+
       if (
         cur?.status === "prospect" &&
         ev.body &&
-        !inboundState.autoQualifiedAt
+        !inboundState.autoQualifiedAt &&
+        // Overlap guard (Jev workflow, 2026-09-20): this legacy Haiku
+        // intent-classify + auto-qualify path is independent of and runs
+        // before dispatchAndStampAiResponder/Jev below. For an org whose
+        // active classifier is Jev, Jev's own threshold-gated new_lead
+        // decision is the sole promotion authority — this legacy path
+        // must not also promote the same property, or a below-threshold
+        // Jev "needs a decision" case could get silently bypassed by this
+        // parallel Haiku path reaching qualifyProperty first. Only
+        // queried once the cheaper checks above already narrow to a
+        // prospect awaiting auto-qualify. For every other org
+        // (classifier_provider='legacy', the default, or no active
+        // config at all) this is unchanged from today.
+        classifierMode === "legacy"
       ) {
         let shouldQualify = false;
         if (process.env.SKIP_INTENT_GATE === "1") {
@@ -1001,6 +1169,16 @@ export async function handleInboundWebhook(
       }
 
       if (repSmsHumanTakeover) {
+        await recordStep(supabase, runCtx, {
+          kind: "gate",
+          name: "rep_sms_human_takeover",
+          result: "block",
+        });
+        await finishRun(supabase, runCtx, {
+          status: "skipped",
+          finalOutcome: "skipped",
+          reason: REP_SMS_HUMAN_TAKEOVER_REASON,
+        });
         await markWebhookEventProcessed(
           supabase,
           provider.providerId,
@@ -1023,6 +1201,7 @@ export async function handleInboundWebhook(
             inboundToPhone: ev.to,
             inboundBody: ev.body,
             inboundMessageId: insertOutcome.messageId,
+            runId: runCtx?.runId ?? null,
           };
           const delayConfig = await loadAiReplyDelayConfig(
             supabase,
@@ -1038,23 +1217,26 @@ export async function handleInboundWebhook(
             : 0;
 
           if (delaySeconds === 0) {
-            await dispatchAndStampAiResponder(supabase, dispatchInput);
+            await dispatchAndStampAiResponder(supabase, dispatchInput, runCtx);
           } else {
             const preGates = await checkAiResponderDispatchPreGates(
               supabase,
               dispatchInput,
+              { runContext: runCtx },
             );
             if (!preGates.ok) {
               await stampAiResponderTerminalOutcome(supabase, {
                 messageId: insertOutcome.messageId,
                 conversationId: insertOutcome.conversationId,
                 outcome: preGates.outcome,
+                runContext: runCtx,
               });
             } else {
               const keywordEscalation = await applyKeywordEscalation(supabase, {
                 propertyId: effectivePropertyId,
                 inboundBody: ev.body,
                 escalationKeywords: delayConfig!.escalationKeywords,
+                runContext: runCtx,
               });
 
               if (keywordEscalation.escalated) {
@@ -1065,6 +1247,7 @@ export async function handleInboundWebhook(
                     outcome: "escalated",
                     reason: keywordEscalation.reason,
                   },
+                  runContext: runCtx,
                 });
               } else {
                 const scheduledAt = new Date(
@@ -1081,8 +1264,15 @@ export async function handleInboundWebhook(
                       inboundBody: ev.body,
                       inboundMessageId: insertOutcome.messageId,
                       delaySeconds,
+                      runId: runCtx?.runId ?? null,
                     },
                   ]);
+                  await recordStep(supabase, runCtx, {
+                    kind: "action",
+                    name: "reply_delay_scheduled",
+                    result: "applied",
+                    detail: { delaySeconds },
+                  });
 
                   try {
                     await markInboundMessageState(
@@ -1122,7 +1312,11 @@ export async function handleInboundWebhook(
                     },
                   });
                   try {
-                    await dispatchAndStampAiResponder(supabase, dispatchInput);
+                    await dispatchAndStampAiResponder(
+                      supabase,
+                      dispatchInput,
+                      runCtx,
+                    );
                   } catch (fallbackError) {
                     reportError(fallbackError, {
                       tags: {
@@ -1139,6 +1333,11 @@ export async function handleInboundWebhook(
                       effectivePropertyId,
                       "workflow_start_and_fallback_failed",
                     );
+                    await finishRun(supabase, runCtx, {
+                      status: "error",
+                      finalOutcome: "error",
+                      reason: "workflow_start_and_fallback_failed",
+                    });
                     await markInboundMessageState(
                       supabase,
                       insertOutcome.messageId,
@@ -1163,7 +1362,18 @@ export async function handleInboundWebhook(
               externalId: ev.externalId,
             },
           });
+          await finishRun(supabase, runCtx, {
+            status: "error",
+            finalOutcome: "error",
+            reason: "ai_responder_exception",
+          });
         }
+      } else if (!effectiveContactId) {
+        await finishRun(supabase, runCtx, {
+          status: "skipped",
+          finalOutcome: "skipped",
+          reason: "no_contact",
+        });
       }
 
       await markWebhookEventProcessed(
@@ -1251,7 +1461,10 @@ export async function insertInboundMessage(
     ({ data: inserted, error } = await insert());
   }
   if (!error) {
-    await clearAiResponderThreadState(supabase, inserted?.conversation_id ?? null);
+    await clearAiResponderThreadState(
+      supabase,
+      inserted?.conversation_id ?? null,
+    );
     await markInboundSmsIntentMessageInserted(
       supabase,
       input.inboundIntentId,
@@ -1326,7 +1539,8 @@ async function reserveWebhookEvent(
     })
     .select("id")
     .maybeSingle();
-  if (!error) return { status: "reserved", webhookEventId: inserted?.id ?? null };
+  if (!error)
+    return { status: "reserved", webhookEventId: inserted?.id ?? null };
   if (isMissingWebhookProcessingClaimSupport(error.message)) {
     return reserveWebhookEventLegacy(supabase, input);
   }
@@ -1400,7 +1614,8 @@ async function reserveWebhookEventLegacy(
     })
     .select("id")
     .maybeSingle();
-  if (!error) return { status: "reserved", webhookEventId: inserted?.id ?? null };
+  if (!error)
+    return { status: "reserved", webhookEventId: inserted?.id ?? null };
   if (error.code !== "23505")
     return { status: "error", message: error.message };
 
@@ -1484,7 +1699,9 @@ async function failInboundWebhookForRetry(
   cause: unknown,
 ): Promise<never> {
   const message =
-    cause instanceof Error ? cause.message : "rep SMS takeover processing failed";
+    cause instanceof Error
+      ? cause.message
+      : "rep SMS takeover processing failed";
   try {
     await markWebhookEventError(supabase, providerId, externalId, message);
   } catch (markError) {
@@ -1516,16 +1733,160 @@ function isMissingWebhookProcessingClaimSupport(message: string): boolean {
 async function dispatchAndStampAiResponder(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
-): Promise<AiDispatchOutcome> {
+  runContext?: PipelineRunContext | null,
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
   const outcome = await dispatchAiResponse(supabase, input, {
     anthropic: new Anthropic(),
+    ...(runContext ? { runContext } : {}),
   });
+  if (isRetryOutcome(outcome)) {
+    // Nothing was sent or stored. Re-dispatch the same inbound through the
+    // delay workflow; the run stays `running` and the inbound is NOT stamped
+    // terminal. It is stamped `delayed`, and that stamp does two real jobs:
+    //  - a webhook REDELIVERY of this inbound is skipped by the
+    //    `!inboundState.aiResponder` gate in the webhook handler (no second
+    //    dispatch races the retry);
+    //  - a LATER inbound's run treats this one as handled (see
+    //    `newerInboundIsHandled` in ai-responder/dispatch), so it neither
+    //    flags nor double-answers while the retry is pending.
+    if (await scheduleReplyRetry(supabase, input, outcome, runContext)) {
+      return outcome;
+    }
+    // Could not even schedule it (Q8 rule 7): the generated reply is
+    // dead-lettered (its only durable copy) and a human is flagged rather than
+    // dropping it. A dead letter that cannot be written changes the flag to
+    // dead_letter_failed:<reason>.
+    await flagAndDeadLetter(supabase, {
+      runContext,
+      orgId: outcome.reply?.orgId ?? "",
+      conversationId: input.conversationId ?? null,
+      propertyId: input.propertyId,
+      inboundMessageId: input.inboundMessageId ?? null,
+      body: outcome.reply?.body ?? null,
+      reason: outcome.reason,
+      flagReason:
+        outcome.reason === "draft_persist_failed"
+          ? outcome.reason
+          : `reply_skipped:${outcome.reason}`,
+    });
+    const terminal: AiDispatchOutcome = {
+      outcome: "escalated",
+      reason: outcome.reason,
+    };
+    await stampAiResponderTerminalOutcome(supabase, {
+      messageId: input.inboundMessageId!,
+      conversationId: input.conversationId ?? null,
+      outcome: terminal,
+      runContext,
+    });
+    return terminal;
+  }
   await stampAiResponderTerminalOutcome(supabase, {
     messageId: input.inboundMessageId!,
     conversationId: input.conversationId ?? null,
     outcome,
+    runContext,
   });
   return outcome;
+}
+
+async function scheduleReplyRetry(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  retry: AiRetryOutcome,
+  runContext?: PipelineRunContext | null,
+): Promise<boolean> {
+  try {
+    const run = await start(aiReplyDelayWorkflow, [
+      {
+        propertyId: input.propertyId,
+        contactId: input.contactId,
+        conversationId: input.conversationId ?? null,
+        inboundFromPhone: input.inboundFromPhone ?? null,
+        inboundToPhone: input.inboundToPhone ?? null,
+        inboundBody: input.inboundBody,
+        inboundMessageId: input.inboundMessageId!,
+        delaySeconds: retry.delaySeconds,
+        runId: runContext?.runId ?? input.runId ?? null,
+        retryAttempt: retry.attempt,
+        ...(retry.reply ? { retryReply: retry.reply } : {}),
+      },
+    ]);
+    await recordRetryScheduled(supabase, runContext, retry);
+    try {
+      await markInboundMessageState(supabase, input.inboundMessageId!, {
+        aiResponder: {
+          outcome: "delayed",
+          delaySeconds: retry.delaySeconds,
+          scheduledAt: new Date(
+            Date.now() + retry.delaySeconds * 1000,
+          ).toISOString(),
+          workflowRunId: run.runId,
+          retryAttempt: retry.attempt,
+          retryReason: retry.reason,
+        },
+      });
+    } catch (stampError) {
+      reportError(stampError, {
+        tags: { surface: "ai_responder_retry_stamp" },
+        extra: { inboundMessageId: input.inboundMessageId },
+      });
+    }
+    return true;
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "ai_responder_retry_schedule" },
+      extra: { inboundMessageId: input.inboundMessageId, reason: retry.reason },
+    });
+    return false;
+  }
+}
+
+/**
+ * Evidence for the keyword exits that insert the inbound message before the
+ * AI path: one run, one blocking gate step, terminal state. Never throws.
+ */
+async function recordKeywordExitRun(
+  supabase: SupabaseClient<Database>,
+  args: {
+    orgId: string | null;
+    insertOutcome: {
+      messageId?: string | null;
+      contactId?: string | null;
+      propertyId?: string | null;
+      conversationId?: string | null;
+    };
+    body: string;
+    gate:
+      "stop_keyword" | "dnc_keyword" | "help_keyword" | "wrong_number_keyword";
+    status: "closed" | "skipped";
+    reason: string;
+  },
+): Promise<void> {
+  try {
+    if (!args.orgId || !args.insertOutcome.messageId) return;
+    const ctx = await startRun(supabase, {
+      orgId: args.orgId,
+      inboundMessageId: args.insertOutcome.messageId,
+      propertyId: args.insertOutcome.propertyId ?? null,
+      contactId: args.insertOutcome.contactId ?? null,
+      conversationId: args.insertOutcome.conversationId ?? null,
+      mode: "legacy",
+      inboundPreview: args.body,
+    });
+    await recordStep(supabase, ctx, {
+      kind: "gate",
+      name: args.gate,
+      result: "block",
+    });
+    await finishRun(supabase, ctx, {
+      status: args.status,
+      finalOutcome: args.status,
+      reason: args.reason,
+    });
+  } catch {
+    // Evidence is best-effort; never affect message handling.
+  }
 }
 
 async function stampAiResponderTerminalOutcome(
@@ -1534,9 +1895,11 @@ async function stampAiResponderTerminalOutcome(
     messageId: string;
     conversationId: string | null;
     outcome: AiDispatchOutcome;
+    runContext?: PipelineRunContext | null;
   },
 ): Promise<void> {
   const completedAt = new Date().toISOString();
+  await finishRunFromOutcome(supabase, args.runContext, args.outcome);
   await recordAiResponderOutcomeForThread(supabase, {
     conversationId: args.conversationId,
     outcome: args.outcome,
@@ -1545,7 +1908,11 @@ async function stampAiResponderTerminalOutcome(
   await markInboundMessageState(supabase, args.messageId, {
     aiResponder: {
       ...args.outcome,
+      // `skipped:rule_<n>` for a silent exit (never the bare `skipped` the raw
+      // outcome carries): rule 1 on a later inbound reads this stamp as handled,
+      // and a webhook redelivery is skipped on its presence.
+      outcome: inboundStampOutcomeOf(args.outcome),
       completedAt,
-    },
+    } as unknown as AiDispatchOutcome & { completedAt: string },
   });
 }

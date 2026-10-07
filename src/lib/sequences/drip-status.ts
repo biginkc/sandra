@@ -16,6 +16,7 @@ const REASONS: Record<string, string> = {
   rep_sms_human_takeover: "A person took over the text conversation.",
   provider_failed: "Text provider could not send this step.",
   reconciliation_required: "Text delivery needs review before this drip can continue.",
+  consent_unavailable: "Could not confirm texting permission — paused after repeated checks; resume to retry",
   status_terminal: "Lead reached a final status.",
   status_acquisition_active: "Lead is in an active acquisition conversation.",
   consent_revoked: "Lead opted out of texts.",
