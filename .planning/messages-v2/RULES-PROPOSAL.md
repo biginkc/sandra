@@ -32,7 +32,7 @@ Source: prod Supabase (`copflsklaefwzipsrjqz`), SELECT only, window 2026-04-10 t
 
 Constraints applied to every candidate (from `docs/prompts/ai-responder-v2.md`): 160 characters or fewer, first person as Mel, no price, never the word "investor", at most one cash-offer ask, no motivation questions, no em dashes. Character counts are exact. Templates marked **hold-card draft only** would never auto-send; they would pre-fill a human's one-click hold card (D5: price, distress and new_lead never auto-reply).
 
-Already approved, not re-proposed: the identity reply (`decisions/Sandra identity-response deterministic interceptor`, PR #316). 1,951 of 4,954 legacy AI sends (39%) are exactly this text, so it is the most-used approved reply. Its `source` tag (`approved_template`) is an engineering detail in PLAN §8 Q7 (withdrawn); no approval is sought here.
+Already approved, not re-proposed: the identity reply (`src/lib/ai-responder/identity.ts`, PR #316). 1,951 of 4,954 legacy AI sends (39%) are exactly this text, so it is the most-used approved reply. Its `source` tag (`approved_template`) is an engineering detail in PLAN §8 Q7 (withdrawn); no approval is sought here.
 
 ### 2.1 not_interested  (Jev: 318 runs; 260 at or above 0.95)
 
@@ -68,6 +68,7 @@ Candidate WN-2 (LLM-drafted, 0 human sends; no referral ask; 82 characters)
 Sorry about that, my mistake. I'll take this number off our list. Have a good one.
 ```
 Applies: same as WN-1 but the inbound already shows annoyance.
+Warning before approving WN-1 or WN-2 in the UI: both say "I'll take this number off our list." Approval presumes the send path writes the wrong_number disposition and suppresses the phone in the same action; without that the text is a false statement. WN-1 also asks a follow-up of someone who just said "wrong number" (one follow-up is common practice but is still continued contact after a stated mismatch).
 Must NOT fire: same as WN-1.
 
 ### 2.3 nurture  (Jev: 51 runs; only 2 at or above 0.95, 8 at or above 0.90)
@@ -143,6 +144,8 @@ Third party / "listed with an agent", multi-property, sold, deceased, divorce: *
 
 ## 3. Hold rules (candidates)
 
+Note on bases: Q01–Q09 in `mine-rules.sql` do not filter `channel='sms'` while Q10+ do, so the 20,480 inbound figure may include non-SMS rows and the ratios below (e.g. 9.9%) mix bases. Cosmetic unless non-SMS volume is material.
+
 Rule text below is for always going to a human, beyond the Q8 send-gate table. Counts are keyword-proxy matches on all 20,480 inbounds (Q16, regexes are crude: "worth" also matches "not worth"). `AI replied` = the legacy AI answered within 1h today, which is how often a rule would have changed live behaviour. `Human replied` = a human answered within 48h.
 
 | Rule | Inbounds | Legacy AI replied | Human replied | Resulting dispo (3d) |
@@ -168,6 +171,7 @@ Candidate H-3 (hostility; LLM-drafted, keyword-proxy evidence Q16). The live evi
 ```
 Hold for a human, and never auto-reply, any inbound that is hostile, profane or accuses us of spam or scam. Opt-out wording is handled by the existing opt-out path, not by this rule.
 ```
+Warning: the hostile keyword proxy (Q16) also matches "stop texting", "quit texting", "do not contact" and "never contact". Under TCPA those are revocation requests, not hostility. Today the opt-out path is model-classified (`src/lib/ai-responder/route.ts`), so a classifier miss would leave a held card with no suppression while drips continue. These four phrases should suppress, pending Open question 6 (recommended: yes for these phrases).
 Candidate H-4 (third party; LLM-drafted, keyword-proxy evidence Q16)
 ```
 Hold for a human, and never auto-reply, any inbound that refers to someone else deciding or acting for the owner (realtor, agent, attorney, spouse, relative, landlord, tenant, property manager, estate).
