@@ -226,7 +226,7 @@ describe("applySuppressionForConfirmedReview", () => {
     expect(admin.rpcCalls).toEqual([
       {
         name: "fn_merge_suppression_incomplete_pointer",
-        args: { p_property_id: "property-1", p_ids: [], p_hint_id: "review-1" },
+        args: { p_property_id: "property-1", p_unbacked_ids: [], p_backed_ids: ["review-1"], p_hint_id: "review-1" },
       },
     ]);
     expect(admin.inserts[0]).toMatchObject({
@@ -281,7 +281,7 @@ describe("suppression_incomplete hold vs timeout flags", () => {
       expect(rpcCalls).toEqual([
         {
           name: "fn_merge_suppression_incomplete_pointer",
-          args: { p_property_id: "property-1", p_ids: [], p_hint_id: "review-1" },
+          args: { p_property_id: "property-1", p_unbacked_ids: [], p_backed_ids: ["review-1"], p_hint_id: "review-1" },
         },
       ]);
       expect(inserts[0]).toMatchObject({
@@ -297,20 +297,20 @@ describe("suppression_incomplete hold vs timeout flags", () => {
   it("passes the id as unbacked when the ledger write fails, so the id is never lost", async () => {
     const { rpcCalls } = failingClient("send_timeout:abc", { message: "insert failed" });
     await applyConfirmedSuppression({ ...base, disposition: "dnc" });
-    expect(rpcCalls[0].args).toEqual({ p_property_id: "property-1", p_ids: ["review-1"], p_hint_id: null });
+    expect(rpcCalls[0].args).toEqual({ p_property_id: "property-1", p_unbacked_ids: ["review-1"], p_backed_ids: [], p_hint_id: null });
   });
 
   it("treats a duplicate ledger row (unique violation) as recorded", async () => {
     const { rpcCalls } = failingClient("send_timeout:abc", { code: "23505", message: "dup" });
     await applyConfirmedSuppression({ ...base, disposition: "dnc" });
-    expect(rpcCalls[0].args).toEqual({ p_property_id: "property-1", p_ids: [], p_hint_id: "review-1" });
+    expect(rpcCalls[0].args).toEqual({ p_property_id: "property-1", p_unbacked_ids: [], p_backed_ids: ["review-1"], p_hint_id: "review-1" });
   });
 
   for (const reason of [null, "low_confidence"]) {
     it(`over ${reason ?? "null"} the merge carries the ledger-backed id as the hint`, async () => {
       const { rpcCalls } = failingClient(reason);
       await applyConfirmedSuppression({ ...base, disposition: "dnc" });
-      expect(rpcCalls[0].args).toEqual({ p_property_id: "property-1", p_ids: [], p_hint_id: "review-1" });
+      expect(rpcCalls[0].args).toEqual({ p_property_id: "property-1", p_unbacked_ids: [], p_backed_ids: ["review-1"], p_hint_id: "review-1" });
     });
   }
 });
@@ -389,14 +389,15 @@ describe("atomic pointer merge (r24+)", () => {
     // Runs right before the database applies a merge (a concurrent writer).
     const beforeRpc = { fn: null as null | (() => void) };
     // Mirrors fn_merge_suppression_incomplete_pointer; synchronous = atomic.
-    const merge = (ids: string[], hint: string | null) => {
+    const merge = (ids: string[], hint: string | null, backed: string[] = []) => {
       const isTimeout = !!state.reason && TIMEOUT_PREFIXES.some((p) => state.reason!.startsWith(p));
       state.attention = true;
       if (isTimeout && ids.length === 0) {
         return { reason: state.reason, merged_ids: [], kept_timeout: true, dropped_ids: [] as string[] };
       }
-      const existing = suppressionReviewIdsFromReason(state.reason);
-      const all = [...new Set([...existing, ...ids, ...(hint ? [hint] : [])])];
+      const existing = suppressionReviewIdsFromReason(state.reason).filter((i) => !backed.includes(i));
+      let all = [...new Set([...existing, ...ids])];
+      if (all.length === 0 && hint) all = [hint];
       const merged = all.slice(0, 10);
       const dropped = all.slice(10);
       state.reason = suppressionIncompleteReason(merged);
@@ -404,12 +405,12 @@ describe("atomic pointer merge (r24+)", () => {
     };
     const rpcCalls: Array<Record<string, unknown>> = [];
     const admin = {
-      rpc: async (_name: string, args: { p_ids: string[]; p_hint_id: string | null }) => {
+      rpc: async (_name: string, args: { p_unbacked_ids: string[]; p_backed_ids: string[]; p_hint_id: string | null }) => {
         rpcCalls.push(args);
         await Promise.resolve();
         if (rpcFailure.on) return { data: null, error: { message: "rpc failed" } };
         beforeRpc.fn?.();
-        const row = merge(args.p_ids, args.p_hint_id);
+        const row = merge(args.p_unbacked_ids, args.p_hint_id, args.p_backed_ids);
         if (row.dropped_ids.length) state.dropped.push(row.dropped_ids);
         return { data: [row], error: null };
       },
@@ -456,8 +457,9 @@ describe("atomic pointer merge (r24+)", () => {
     expect(state.events).toHaveLength(0);
 
     await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
-    // A's backfill failed: A stays in the pointer alongside B.
-    expect(state.reason).toBe("suppression_incomplete:A,B");
+    // A's backfill failed: A stays in the pointer; B is ledger-backed so it
+    // takes no slot.
+    expect(state.reason).toBe("suppression_incomplete:A");
     expect(state.events.map((e) => e.source_id)).toEqual(["B"]);
 
     await recordSuppressionRetriedOk({ propertyId: "property-1", reviewId: "B", actorId: "user-1" });
@@ -469,7 +471,8 @@ describe("atomic pointer merge (r24+)", () => {
     const { state } = statefulAdmin("suppression_incomplete:A");
     fail();
     await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
-    expect(state.reason).toBe("suppression_incomplete:A,B");
+    // Both ledger writes succeed: nothing unbacked, so the hint (B) is the pointer.
+    expect(state.reason).toBe("suppression_incomplete:B");
     expect(state.events.map((e) => e.source_id).sort()).toEqual(["A", "B"]);
   });
 
@@ -478,8 +481,8 @@ describe("atomic pointer merge (r24+)", () => {
     state.events.push({ event_type: "suppression_incomplete", source_id: "A", created_at: "0000" });
     fail();
     await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
-    expect(state.reason).toBe("suppression_incomplete:A,B");
-    expect(rpcCalls[0]).toMatchObject({ p_ids: [], p_hint_id: "B" });
+    expect(state.reason).toBe("suppression_incomplete:B");
+    expect(rpcCalls[0]).toMatchObject({ p_unbacked_ids: [], p_backed_ids: ["B", "A"], p_hint_id: "B" });
   });
 
   it("makes exactly one merge call and no client-side pointer write", async () => {
@@ -607,6 +610,33 @@ describe("atomic pointer merge (r24+)", () => {
     await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
     expect(state.reason).toBe("suppression_incomplete:C,B");
     expect(state.attention).toBe(true);
+  });
+
+  it("ten ledger-backed failures then one unbacked: the unbacked id survives and no cap alarm fires", async () => {
+    const ids = Array.from({ length: 10 }, (_, i) => `id${i}`);
+    const { state, failLedgerFor } = statefulAdmin(suppressionIncompleteReason(ids));
+    fail();
+    failLedgerFor.add("suppression_incomplete:new");
+    await applyConfirmedSuppression({ ...base, reviewId: "new", disposition: "dnc" });
+    expect(state.reason).toBe("suppression_incomplete:new");
+    expect(state.events.map((e) => e.source_id).sort()).toEqual([...ids].sort());
+    expect(reportError).not.toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "confirm_ai_disposition_suppression_id_cap" } }),
+    );
+  });
+
+  it("passes backfilled existing ids as backed and failed backfills as unbacked", async () => {
+    const { rpcCalls, failLedgerFor } = statefulAdmin("suppression_incomplete:A,B");
+    fail();
+    failLedgerFor.add("suppression_incomplete:B");
+    await applyConfirmedSuppression({ ...base, reviewId: "C", disposition: "dnc" });
+    expect(rpcCalls[0]).toEqual({
+      p_property_id: "property-1",
+      p_unbacked_ids: ["B"],
+      p_backed_ids: ["C", "A"],
+      p_hint_id: "C",
+    });
   });
 
   it("outstanding set parses every id in a multi-id reason", async () => {

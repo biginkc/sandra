@@ -8,7 +8,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { requireLoopbackPostgresUrl } from "@/lib/testing/loopback-postgres-url";
 
 /**
- * Atomic suppression pointer merge (20261008143900). Local-only. Applies the
+ * Atomic suppression pointer merge v2 (20261008144000). Local-only. Applies the
  * migration (idempotent create-or-replace) and exercises it on committed rows
  * so two real connections can race; rows are removed in afterEach.
  */
@@ -16,9 +16,9 @@ const url = requireLoopbackPostgresUrl(
   process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres",
 );
 const strip = (s: string) => s.replace(/^\s*begin;\s*$/gim, "").replace(/^\s*commit;\s*$/gim, "");
-const MIGRATION = strip(readFileSync(path.join(__dirname, "20261008143900_suppression_pointer_union.sql"), "utf8"));
+const MIGRATION = strip(readFileSync(path.join(__dirname, "20261008144000_suppression_pointer_union_v2.sql"), "utf8"));
 const ROLLBACK = strip(
-  readFileSync(path.join(__dirname, "../rollbacks/20261008143900_suppression_pointer_union.sql"), "utf8"),
+  readFileSync(path.join(__dirname, "../rollbacks/20261008144000_suppression_pointer_union_v2.sql"), "utf8"),
 );
 
 const a = new Client({ connectionString: url });
@@ -53,11 +53,11 @@ afterEach(async () => {
   await a.query("delete from public.organizations where id = $1", [orgId]);
 });
 
-const merge = (c: Client, list: string[], hint: string | null = null) =>
+const merge = (c: Client, list: string[], hint: string | null = null, backed: string[] = []) =>
   c.query(
     `select reason, merged_ids, kept_timeout, dropped_ids
-       from public.fn_merge_suppression_incomplete_pointer($1, $2::uuid[], p_hint_id => $3)`,
-    [propertyId, list, hint],
+       from public.fn_merge_suppression_incomplete_pointer($1, $2::uuid[], $3::uuid[], p_hint_id => $4)`,
+    [propertyId, list, backed, hint],
   );
 const pointer = async () =>
   (await a.query("select last_ai_escalation_reason r, needs_human_attention n from public.properties where id=$1", [propertyId]))
@@ -134,10 +134,57 @@ describe("fn_merge_suppression_incomplete_pointer", () => {
     expect((await pointer()).r).toBe(`suppression_incomplete:${old.join(",")}`);
   });
 
+  it("ten backed ids then one unbacked: the unbacked id survives, no cap alarm", async () => {
+    const backed = ids(10);
+    const [u] = ids(1);
+    await seed(`suppression_incomplete:${backed.join(",")}`);
+    const r = await merge(a, [u], null, backed);
+    expect(r.rows[0].merged_ids).toEqual([u]);
+    expect(r.rows[0].dropped_ids).toEqual([]);
+    expect((await pointer()).r).toBe(`suppression_incomplete:${u}`);
+  });
+
+  it("backed ids are removed but other existing ids keep their order", async () => {
+    const [x, y, z, u] = ids(4);
+    await seed(`suppression_incomplete:${x},${y},${z}`);
+    const r = await merge(a, [u], null, [y]);
+    expect(r.rows[0].reason).toBe(`suppression_incomplete:${x},${z},${u}`);
+  });
+
+  it("cap alarm only when more than 10 UNBACKED ids exist", async () => {
+    const un = ids(11);
+    await seed(null);
+    const r = await merge(a, un);
+    expect(r.rows[0].merged_ids).toEqual(un.slice(0, 10));
+    expect(r.rows[0].dropped_ids).toEqual([un[10]]);
+  });
+
+  it("hint is used only when the list would otherwise be empty", async () => {
+    const [x, h] = ids(2);
+    await seed(null);
+    const r1 = await merge(a, [x], h);
+    expect(r1.rows[0].reason).toBe(`suppression_incomplete:${x}`);
+  });
+
+  it("hint becomes the pointer when every existing id is backed", async () => {
+    const [h] = ids(1);
+    const old = ids(2);
+    await seed(`suppression_incomplete:${old.join(",")}`);
+    const r2 = await merge(a, [], h, old);
+    expect(r2.rows[0].reason).toBe(`suppression_incomplete:${h}`);
+  });
+
+  it("the v1 signature no longer exists", async () => {
+    await seed(null);
+    await expect(
+      a.query("select * from public.fn_merge_suppression_incomplete_pointer($1, $2::uuid[], null::text[], null::uuid)", [propertyId, []]),
+    ).rejects.toThrow(/does not exist|is not unique/);
+  });
+
   it("raises for an unknown property", async () => {
     await seed(null);
     await expect(
-      a.query("select * from public.fn_merge_suppression_incomplete_pointer($1, $2::uuid[])", [randomUUID(), []]),
+      a.query("select * from public.fn_merge_suppression_incomplete_pointer($1, $2::uuid[], $3::uuid[])", [randomUUID(), [], []]),
     ).rejects.toThrow(/property not found/);
   });
 
@@ -160,6 +207,9 @@ describe("fn_merge_suppression_incomplete_pointer", () => {
     await seed(null);
     await a.query(ROLLBACK);
     await expect(merge(a, [])).rejects.toThrow(/does not exist/);
+    // v1 is restored by the rollback.
+    const v1 = await a.query("select * from public.fn_merge_suppression_incomplete_pointer($1, $2::uuid[])", [propertyId, []]);
+    expect(v1.rowCount).toBe(1);
     await a.query(MIGRATION);
   });
 });

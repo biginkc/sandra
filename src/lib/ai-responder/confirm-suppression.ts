@@ -258,22 +258,28 @@ async function raiseSuppressionIncompleteHold(
 
     // The existing reason may be the ONLY record of earlier failures whose
     // ledger writes failed. Backfill each; any that still fail are passed on
-    // as unbacked so the merge keeps them in the pointer.
-    const unbackedIds: string[] = ledgerOk ? [] : [reviewId];
+    // as unbacked so the merge keeps them in the pointer. Ids whose ledger
+    // write succeeded are passed as backed so they free their pointer slot.
+    const unbackedIds: string[] = [];
+    const backedIds: string[] = [];
+    (ledgerOk ? backedIds : unbackedIds).push(reviewId);
     for (const id of suppressionReviewIdsFromReason(existing)) {
       if (id === reviewId) continue;
-      if (!(await writeLedger(id))) unbackedIds.push(id);
+      ((await writeLedger(id)) ? backedIds : unbackedIds).push(id);
     }
 
-    // One atomic call: the database locks the property row and unions this
-    // caller's unbacked ids into whatever the pointer holds right now, so
-    // concurrent failures cannot drop each other's ids. A timeout reason is
-    // kept (hold only) unless unbacked ids exist that live nowhere else.
+    // One atomic call: the database locks the property row, drops backed ids
+    // from the pointer and unions this caller's unbacked ids into whatever it
+    // holds right now, so concurrent failures cannot drop each other's ids and
+    // ledger-backed ids never crowd out an unbacked one. The hint is used only
+    // when nothing else would be left. A timeout reason is kept (hold only)
+    // unless unbacked ids exist that live nowhere else.
     const { data: merged, error } = await admin.rpc(
       "fn_merge_suppression_incomplete_pointer",
       {
         p_property_id: propertyId,
-        p_ids: [...new Set(unbackedIds)],
+        p_unbacked_ids: [...new Set(unbackedIds)],
+        p_backed_ids: [...new Set(backedIds)],
         p_hint_id: ledgerOk ? reviewId : null,
       },
     );

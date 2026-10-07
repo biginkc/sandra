@@ -7722,13 +7722,15 @@ export type Database = {
         Returns: Json
       }
       // Hand-patched 2026-10-07 for migration
-      // 20261008143900_suppression_pointer_union.sql.
+      // 20261008144000_suppression_pointer_union_v2.sql (replaces the
+      // 20261008143900 signature).
       fn_merge_suppression_incomplete_pointer: {
         Args: {
+          p_backed_ids: string[]
           p_hint_id?: string | null
-          p_ids: string[]
           p_property_id: string
           p_timeout_prefixes?: string[]
+          p_unbacked_ids: string[]
         }
         Returns: {
           dropped_ids: string[]
