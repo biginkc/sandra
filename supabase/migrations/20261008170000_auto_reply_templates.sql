@@ -155,12 +155,20 @@ create table if not exists public.auto_reply_templates (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint auto_reply_templates_outcome_check
-    check (outcome in ('new_lead', 'nurture', 'not_interested')),
+    check (outcome in ('nurture', 'not_interested')),
   constraint auto_reply_templates_reply_intent_check
     check (reply_intent is null or reply_intent in ('positive', 'negative', 'neutral')),
   constraint auto_reply_templates_priority_check
     check (priority between 0 and 10000)
 );
+-- Re-assert the outcome allow-list on a database that already has an earlier
+-- draft of this table (PLAN D5: new_lead never auto-replies). Nothing is
+-- seeded, so any new_lead mapping is a stray from that draft and is dropped.
+delete from public.auto_reply_templates where outcome not in ('nurture', 'not_interested');
+alter table public.auto_reply_templates drop constraint if exists auto_reply_templates_outcome_check;
+alter table public.auto_reply_templates
+  add constraint auto_reply_templates_outcome_check
+  check (outcome in ('nurture', 'not_interested'));
 create unique index if not exists uq_auto_reply_templates_key
   on public.auto_reply_templates (org_id, outcome, coalesce(reply_intent, ''), template_id);
 create index if not exists idx_auto_reply_templates_lookup
@@ -323,7 +331,7 @@ begin
     return jsonb_build_object('ok', true, 'mappingId', v_id, 'deleted', true);
   end if;
 
-  if p_outcome is null or p_outcome not in ('new_lead', 'nurture', 'not_interested') then
+  if p_outcome is null or p_outcome not in ('nurture', 'not_interested') then
     raise exception 'INVALID_OUTCOME' using errcode = '22023';
   end if;
   if p_reply_intent is not null and p_reply_intent not in ('positive', 'negative', 'neutral') then

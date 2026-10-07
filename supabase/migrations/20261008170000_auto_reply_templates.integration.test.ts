@@ -228,7 +228,7 @@ describe("auto_reply_templates", () => {
   });
 
   it("rejects outcomes that must never auto-reply, unknown intents, and foreign or deleted templates", async () => {
-    for (const outcome of ["opted_out", "dnc", "wrong_number", "unclear", "bogus"]) {
+    for (const outcome of ["new_lead", "opted_out", "dnc", "wrong_number", "unclear", "bogus"]) {
       await expect(asUser(users.owner, setMapping(outcome, null))).rejects.toThrow(/INVALID_OUTCOME/);
     }
     await expect(asUser(users.owner, setMapping("nurture", "angry"))).rejects.toThrow(/INVALID_REPLY_INTENT/);
@@ -241,6 +241,30 @@ describe("auto_reply_templates", () => {
     await expect(
       db.query(`insert into public.auto_reply_templates (org_id, outcome, template_id) values ($1, 'opted_out', $2)`, [orgId, templateId]),
     ).rejects.toThrow(/auto_reply_templates_outcome_check/);
+  });
+
+  it("new_lead can never be mapped (PLAN D5): table check refuses it, and re-applying over an earlier draft drops a stray row", async () => {
+    const insertLead = () =>
+      db.query(`insert into public.auto_reply_templates (org_id, outcome, template_id) values ($1, 'new_lead', $2)`, [orgId, templateId]);
+    const refused = async () => {
+      await db.query("savepoint lead_try");
+      try {
+        await insertLead();
+        return null;
+      } catch (e) {
+        return String((e as Error).message);
+      } finally {
+        await db.query("rollback to savepoint lead_try");
+      }
+    };
+    expect(await refused()).toMatch(/auto_reply_templates_outcome_check/);
+
+    // An earlier draft of this migration allowed new_lead: simulate its constraint + a stray row.
+    await db.query(`alter table public.auto_reply_templates drop constraint auto_reply_templates_outcome_check`);
+    await insertLead();
+    await db.query(MIGRATION);
+    expect((await db.query(`select 1 from public.auto_reply_templates where org_id = $1`, [orgId])).rows).toHaveLength(0);
+    expect(await refused()).toMatch(/auto_reply_templates_outcome_check/);
   });
 
   it("owner deletes a mapping", async () => {

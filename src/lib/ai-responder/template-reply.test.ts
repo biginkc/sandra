@@ -39,7 +39,7 @@ const cand = (over: Partial<TemplateCandidate> = {}): TemplateCandidate => ({
 const ON: ThresholdMap = {
   nurture: { minConfidence: 0.95, version: 2, automationEnabled: true },
   not_interested: { minConfidence: 0.9, version: 1, automationEnabled: true },
-  new_lead: { minConfidence: 0.9, version: 1, automationEnabled: false },
+  new_lead: { minConfidence: 0.9, version: 1, automationEnabled: true },
 };
 
 function fakeSupabase(result: { data: unknown; error: { message: string } | null }) {
@@ -186,8 +186,9 @@ describe("resolveApprovedTemplateReply", () => {
     const { client, from } = fakeSupabase({ data: [row()], error: null });
     const out = await resolveApprovedTemplateReply(client, {
       ...base,
-      outcome: "new_lead",
+      outcome: "not_interested",
       outcomeConfidence: 1,
+      thresholds: { ...ON, not_interested: { minConfidence: 0.9, version: 1, automationEnabled: false } },
     });
     expect(out).toEqual({ kind: "none", reason: "automation_disabled" });
     expect(from).not.toHaveBeenCalled();
@@ -220,7 +221,7 @@ describe("resolveApprovedTemplateReply", () => {
 
   it("outcomes that must never be answered automatically fall through before any lookup", async () => {
     const { client, from } = fakeSupabase({ data: [row()], error: null });
-    for (const outcome of ["opted_out", "dnc", "wrong_number", "unclear", "bad_number"] as const) {
+    for (const outcome of ["new_lead", "opted_out", "dnc", "wrong_number", "unclear", "bad_number"] as const) {
       expect(await resolveApprovedTemplateReply(client, { ...base, outcome })).toEqual({
         kind: "none",
         reason: "outcome_not_templatable",

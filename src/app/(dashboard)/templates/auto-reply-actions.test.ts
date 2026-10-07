@@ -81,6 +81,7 @@ describe("listAutoReplySettings", () => {
     mocks.mappings = [
       { id: "m1", outcome: "nurture", template_id: "t1", active: true, reply_intent: null },
       { id: "m2", outcome: "opted_out", template_id: "t2", active: true, reply_intent: null },
+      { id: "m3", outcome: "new_lead", template_id: "t3", active: true, reply_intent: null },
     ];
     mocks.thresholds = [
       { outcome: "nurture", automation_enabled: true },
@@ -93,7 +94,7 @@ describe("listAutoReplySettings", () => {
       data: {
         orgId: "org-1",
         mappings: [{ id: "m1", outcome: "nurture", templateId: "t1", active: true }],
-        labelAutomation: { nurture: true, new_lead: false },
+        labelAutomation: { nurture: true },
       },
     });
   });
@@ -135,7 +136,7 @@ describe("setAutoReplyMapping", () => {
   });
 
   it("rejects outcomes that must never be answered automatically", async () => {
-    for (const outcome of ["opted_out", "dnc", "wrong_number", "unclear"]) {
+    for (const outcome of ["new_lead", "opted_out", "dnc", "wrong_number", "unclear"]) {
       const r = await setAutoReplyMapping({ outcome, templateId: "t1", active: true });
       expect(r.ok).toBe(false);
     }

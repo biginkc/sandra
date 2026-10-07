@@ -27,11 +27,11 @@ import type { JevOutcome, JevReplyIntent } from "@/lib/sms-classification/types"
 
 /**
  * Outcomes an owner may map to a template (mirrors the
- * `auto_reply_templates_outcome_check` constraint). opted_out, dnc and
- * wrong_number are never answered automatically.
+ * `auto_reply_templates_outcome_check` constraint). new_lead (PLAN D5: a new
+ * lead never auto-replies), opted_out, dnc and wrong_number are never
+ * answered automatically.
  */
 export const TEMPLATE_REPLY_OUTCOMES: ReadonlySet<JevOutcome> = new Set([
-  "new_lead",
   "nurture",
   "not_interested",
 ]);

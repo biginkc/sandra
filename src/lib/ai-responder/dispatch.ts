@@ -1089,20 +1089,8 @@ async function classifyAndHandleNonRouteOutcomes(
     // actions still use) is not called from this path anymore — its
     // effect is replicated inside fn_auto_apply_jev_lead_decision so it
     // can be atomic with the revision guard and the audit insert.
-    let promoteTemplateMessageId: string | null = null;
-    if (templateCtx) {
-      const step = await runApprovedTemplateStep(supabase, {
-        input,
-        property,
-        ctx: templateCtx,
-        claim: responseClaim,
-        outcome: "new_lead",
-        nativeConfidence: classification.nativeConfidence,
-        runCtx,
-      });
-      if (step.kind === "stop") return { handled: true, outcome: step.outcome };
-      promoteTemplateMessageId = step.outboundMessageId;
-    }
+    // No template step here: a new lead never auto-replies (PLAN D5). The
+    // human follow-up owns the conversation.
     const applyResult = await applyJevLeadDecisionAtomically(supabase, {
       propertyId: input.propertyId,
       conversationId: input.conversationId,
@@ -1136,7 +1124,6 @@ async function classifyAndHandleNonRouteOutcomes(
       await completeClaim(supabase, input.propertyId, {
         claimId: responseClaim.claimId,
         outcome: "auto_closed",
-        ...(promoteTemplateMessageId ? { outboundMessageId: promoteTemplateMessageId } : {}),
       });
       return { handled: true, outcome: { outcome: "auto_closed", reason: "model:new_lead_promoted" } };
     }
@@ -2103,7 +2090,7 @@ async function runApprovedTemplateStep(
     property: AiDispatchPropertyGateRow;
     ctx: TemplateStepContext;
     claim: { claimId: string | null };
-    outcome: "nurture" | "new_lead" | "not_interested";
+    outcome: "nurture" | "not_interested";
     nativeConfidence: number | null;
     runCtx?: MaybeRunContext;
   },

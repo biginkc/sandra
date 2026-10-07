@@ -18,7 +18,7 @@ const templates = [
 const settings = (over: Partial<AutoReplySettings> = {}): AutoReplySettings => ({
   orgId: "org",
   mappings: [],
-  labelAutomation: { nurture: true, not_interested: true, new_lead: false },
+  labelAutomation: { nurture: true, not_interested: false },
   ...over,
 });
 
@@ -32,8 +32,7 @@ describe("<AutoReplySettingsSection />", () => {
     render(<AutoReplySettingsSection settings={settings()} templates={templates} />);
     expect(screen.getByTestId("auto-reply-row-nurture")).toBeVisible();
     expect(screen.getByTestId("auto-reply-row-not_interested")).toBeVisible();
-    expect(screen.getByTestId("auto-reply-row-new_lead")).toBeVisible();
-    for (const never of ["opted_out", "dnc", "wrong_number"]) {
+    for (const never of ["new_lead", "opted_out", "dnc", "wrong_number"]) {
       expect(screen.queryByTestId(`auto-reply-row-${never}`)).not.toBeInTheDocument();
     }
   });
@@ -89,7 +88,7 @@ describe("<AutoReplySettingsSection />", () => {
         settings={settings({
           mappings: [
             { id: "m1", outcome: "nurture", templateId: "c", active: true },
-            { id: "m2", outcome: "new_lead", templateId: "a", active: true },
+            { id: "m2", outcome: "not_interested", templateId: "a", active: true },
           ],
         })}
         templates={templates}
@@ -98,7 +97,7 @@ describe("<AutoReplySettingsSection />", () => {
     const nurture = screen.getByTestId("auto-reply-row-nurture");
     expect(within(nurture).getByText("This template is not approved, so nothing will be sent.")).toBeVisible();
     expect(within(nurture).getByRole("option", { name: "Draft C (not approved)" })).toBeInTheDocument();
-    const lead = screen.getByTestId("auto-reply-row-new_lead");
-    expect(within(lead).getByText("Automation for this label is off, so nothing will be sent.")).toBeVisible();
+    const off = screen.getByTestId("auto-reply-row-not_interested");
+    expect(within(off).getByText("Automation for this label is off, so nothing will be sent.")).toBeVisible();
   });
 });

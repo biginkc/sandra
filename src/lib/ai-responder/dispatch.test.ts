@@ -6339,6 +6339,36 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     expect(state.aiClaims.at(-1)).toMatchObject({ outcome: "auto_closed" });
   });
 
+  it("a promoted new_lead never reaches the template step and never sends (PLAN D5)", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.jevOutcomeThresholds = [{ outcome: "new_lead", min_confidence: 0.9, version: 4 }];
+    installSendMock(state);
+    vi.mocked(resolveApprovedTemplateReply).mockResolvedValue({ ...TEMPLATE, outcome: "new_lead" as never });
+    const supabase = createMockSupabase(state);
+    seedInboundMessage(state, { id: "inbound-tpl-lead", body: "Yes let's talk tomorrow" });
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "new_lead", confidence: 0.99 }, escalation_reason: { choice: "call_request" } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Yes let's talk tomorrow",
+        inboundMessageId: "inbound-tpl-lead", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "auto_closed", reason: "model:new_lead_promoted" });
+      expect(resolveApprovedTemplateReply).not.toHaveBeenCalled();
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+      expect(state.property.status).toBe("new_lead");
+    } finally {
+      vi.stubGlobal("fetch", originalFetch);
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValue({ kind: "none", reason: "no_mapping" });
+    }
+  });
+
   it("no mapping: today's behaviour, nothing is sent", async () => {
     const state = createMockState();
     installSendMock(state);
