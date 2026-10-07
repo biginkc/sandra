@@ -63,6 +63,7 @@ const ITEMS: readonly Item[] = [
   { href: "/templates", label: "Templates", icon: FileText },
   { href: "/messages", label: "Messages", icon: MessageSquare },
   { href: "/leads", label: "Leads", icon: LayoutDashboard },
+  { href: "/norma/callbacks", label: "Norma callbacks", icon: Headphones },
   { href: "/my-leads", label: "My Leads", icon: ClipboardList },
   { href: "/calculators", label: "Calculators", icon: Calculator },
   { href: "/jobs", label: "Jobs", icon: Briefcase },
@@ -79,7 +80,7 @@ function visibleItems(
     (item) =>
       (item.href !== "/my-leads" || showMyLeads) &&
       (item.href !== "/calculators" || showCalculators) &&
-      ((item.href !== "/messages" && item.href !== "/leads") || showMessagesAndLeads),
+      ((item.href !== "/messages" && item.href !== "/leads" && item.href !== "/norma/callbacks") || showMessagesAndLeads),
   );
   const recordings: Item[] = [];
   if (showRecordings) recordings.push({ href: "/owner/recordings", label: "Recordings", icon: Headphones });
