@@ -14,8 +14,11 @@ export const SCORECARD_OUTCOMES = [
 ] as const;
 export type ScorecardOutcome = (typeof SCORECARD_OUTCOMES)[number];
 
-/** [native confidence 0..1, agreed 1 | 0] */
-export type Sample = [number, 0 | 1];
+/**
+ * [native confidence 0..1, agreed 1 | 0, route]. Route is "a" (auto-applied,
+ * settled) or "h" (held, then human-decided); absent on legacy payloads.
+ */
+export type Sample = [number, 0 | 1] | [number, 0 | 1, "a" | "h"];
 
 /** One row of fn_messages_v2_scorecard, with numbers coerced. */
 export type ScorecardRow = {
@@ -36,10 +39,24 @@ export const MIN_SUGGESTION_SAMPLES = 30;
 /** Target tail agreement, as an integer percent (avoids float edge cases). */
 export const TARGET_AGREEMENT_PERCENT = 95;
 
+export type RouteAgreement = { agreed: number; n: number };
+export type SuggestionDirection = "new" | "raises" | "same" | "loosens";
+
 export type Suggestion =
   | { kind: "insufficient"; samples: number }
   | { kind: "none"; samples: number }
-  | { kind: "suggested"; threshold: number; samples: number; agreement: number };
+  /** Enough data, but any lower cutoff is not backed by its own band: do not loosen. */
+  | { kind: "keep_current"; samples: number }
+  | {
+      kind: "suggested";
+      threshold: number;
+      samples: number;
+      agreement: number;
+      direction: SuggestionDirection;
+      /** Tail agreement split by route; never one blended number alone. */
+      auto: RouteAgreement;
+      held: RouteAgreement;
+    };
 
 export type OutcomeScorecard = {
   outcome: ScorecardOutcome;
@@ -62,10 +79,16 @@ const ceil3 = (x: number) => Math.ceil(x * 1000 - 1e-9) / 1000;
 /**
  * Lowest cutoff x (3 decimals, rounded UP so the rule text is exactly what was
  * evaluated) such that samples with confidence >= x number at least 30 and
- * agree at least 95% of the time. "insufficient" under 30 samples overall;
+ * agree at least 95% of the time. A cutoff BELOW the current threshold is a
+ * loosening, so it must also be backed by its own band [x, current): at least
+ * 30 samples agreeing at >= 95%; otherwise the next higher cutoff is tried and,
+ * if none qualifies, "keep_current". "insufficient" under 30 samples overall;
  * "none" when there is enough data but no cutoff reaches the target.
  */
-export function suggestThreshold(samples: readonly Sample[]): Suggestion {
+export function suggestThreshold(
+  samples: readonly Sample[],
+  currentThreshold: number | null = null,
+): Suggestion {
   const valid = samples
     .filter(([c]) => Number.isFinite(c) && c >= 0 && c <= 1)
     .sort((a, b) => a[0] - b[0]);
@@ -78,21 +101,65 @@ export function suggestThreshold(samples: readonly Sample[]): Suggestion {
   for (let i = valid.length - 1; i >= 0; i--) {
     suffixAgreed[i] = suffixAgreed[i + 1] + valid[i][1];
   }
+  const hasCurrent = currentThreshold !== null && Number.isFinite(currentThreshold);
+  let curIdx = valid.length; // first index with confidence >= current
+  if (hasCurrent) {
+    curIdx = valid.findIndex(([c]) => c >= currentThreshold);
+    if (curIdx === -1) curIdx = valid.length;
+  }
 
   const candidates = [...new Set(valid.map(([c]) => ceil3(c)))].sort(
     (a, b) => a - b,
   );
   let start = 0;
+  let rejectedLoosening = false;
   for (const cand of candidates) {
     while (start < valid.length && valid[start][0] < cand) start++;
     const n = valid.length - start;
     if (n < MIN_SUGGESTION_SAMPLES) break; // tails only shrink from here
     const agreed = suffixAgreed[start];
-    if (agreed * 100 >= n * TARGET_AGREEMENT_PERCENT) {
-      return { kind: "suggested", threshold: cand, samples: n, agreement: agreed / n };
+    if (agreed * 100 < n * TARGET_AGREEMENT_PERCENT) continue;
+
+    const loosens = hasCurrent && cand < currentThreshold;
+    if (loosens) {
+      const bandStart = start;
+      const bandEnd = Math.max(start, curIdx);
+      const bandN = bandEnd - bandStart;
+      const bandAgreed = suffixAgreed[bandStart] - suffixAgreed[bandEnd];
+      if (
+        bandN < MIN_SUGGESTION_SAMPLES ||
+        bandAgreed * 100 < bandN * TARGET_AGREEMENT_PERCENT
+      ) {
+        rejectedLoosening = true;
+        continue;
+      }
     }
+
+    const tail = valid.slice(start);
+    const split = (route: "a" | "h"): RouteAgreement => {
+      const t = tail.filter((x) => x[2] === route);
+      return { agreed: t.reduce((m, x) => m + x[1], 0), n: t.length };
+    };
+    const direction: SuggestionDirection = !hasCurrent
+      ? "new"
+      : loosens
+        ? "loosens"
+        : cand > currentThreshold
+          ? "raises"
+          : "same";
+    return {
+      kind: "suggested",
+      threshold: cand,
+      samples: n,
+      agreement: agreed / n,
+      direction,
+      auto: split("a"),
+      held: split("h"),
+    };
   }
-  return { kind: "none", samples: valid.length };
+  return rejectedLoosening
+    ? { kind: "keep_current", samples: valid.length }
+    : { kind: "none", samples: valid.length };
 }
 
 /** The exact rule text copied for approval. Nothing is applied by copying. */
@@ -119,7 +186,7 @@ export function buildScorecard(rows: readonly ScorecardRow[]): OutcomeScorecard[
       heldAgreementRate: rate(r?.held_agreed ?? 0, r?.held_decided ?? 0),
       threshold: r?.threshold ?? null,
       automationEnabled: r?.automation_enabled ?? null,
-      suggestion: suggestThreshold(r?.samples ?? []),
+      suggestion: suggestThreshold(r?.samples ?? [], r?.threshold ?? null),
     };
   });
 }
@@ -137,7 +204,8 @@ function parseSamples(v: unknown): Sample[] {
     const [c, a] = s;
     if (typeof c !== "number" || !Number.isFinite(c)) continue;
     if (a !== 0 && a !== 1) continue;
-    out.push([c, a]);
+    const route = s[2];
+    out.push(route === "a" || route === "h" ? [c, a, route] : [c, a]);
   }
   return out;
 }

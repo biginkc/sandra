@@ -16,9 +16,11 @@
 --   held_decided    held runs a human has since decided
 --   held_agreed     ... of which the human kept Jev's outcome
 --   threshold, automation_enabled   current jev_outcome_thresholds row
---   samples         [[native_confidence, agreed 0|1], ...] for every run with
---                   a verdict and a numeric native confidence; the app turns
---                   these into the suggested threshold.
+--   samples         [[native_confidence, agreed 0|1, route], ...] for every run
+--                   with a verdict and a numeric native confidence; route is
+--                   'a' (auto-applied) or 'h' (held then human-decided), so
+--                   auto-settled and held-decided agreement are never blended.
+--                   The app turns these into the suggested threshold.
 --
 -- "Corrected" means: corrected_disposition on the review (any time for held
 -- rows, <= 72h after the run for auto rows), the first
@@ -103,7 +105,7 @@ as $$
                  and e.event_type = 'dispo_set' and e.actor_type = 'user'
                  and e.created_at > r.created_at
                  and e.created_at <= r.created_at + interval '72 hours'
-                 and e.payload ->> 'to' is distinct from r.outcome
+                 and e.payload ->> 'to' is distinct from v.disposition
              ) as override
     ) o
     cross join lateral (
@@ -193,7 +195,8 @@ as $$
          t.min_confidence,
          t.automation_enabled,
          coalesce(
-           jsonb_agg(jsonb_build_array(s.conf, s.verdict) order by s.conf, s.verdict)
+           jsonb_agg(jsonb_build_array(s.conf, s.verdict, case s.route when 'auto' then 'a' else 'h' end)
+                           order by s.conf, s.verdict, s.route)
              filter (where s.verdict is not null and s.conf is not null),
            '[]'::jsonb
          )
@@ -206,7 +209,7 @@ as $$
 $$;
 
 comment on function public.fn_messages_v2_scorecard(uuid, integer) is
-  'Messages v2 scorecard: per Jev outcome, runs / auto vs held / human agreement over a trailing window, plus [confidence, agreed] samples for the threshold suggestion. SECURITY INVOKER read-only; never writes.';
+  'Messages v2 scorecard: per Jev outcome, runs / auto vs held / human agreement over a trailing window, plus [confidence, agreed, route] samples for the threshold suggestion. SECURITY INVOKER read-only; never writes.';
 
 revoke all on function public.fn_messages_v2_scorecard(uuid, integer) from public, anon;
 grant execute on function public.fn_messages_v2_scorecard(uuid, integer) to authenticated, service_role;

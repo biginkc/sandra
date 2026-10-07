@@ -13,6 +13,7 @@ import {
   MIN_SUGGESTION_SAMPLES,
   TARGET_AGREEMENT_PERCENT,
   type OutcomeScorecard,
+  type RouteAgreement,
   type RpcClient,
   type ScorecardRow,
   type ScorecardWindow,
@@ -30,6 +31,9 @@ const defaultLoad: ScorecardLoader = (orgId, windowDays) =>
   fetchScorecardRows(createClient() as unknown as RpcClient, orgId, windowDays);
 
 const pct = (r: number | null) => (r === null ? "n/a" : `${Math.round(r * 100)}%`);
+
+const routePct = (r: RouteAgreement) =>
+  r.n > 0 ? `${Math.round((r.agreed / r.n) * 100)}% (n=${r.n})` : "n/a (n=0)";
 
 function Stat({ label, value, detail }: { label: string; value: string; detail?: string }) {
   return (
@@ -107,12 +111,23 @@ function OutcomeRow({ o }: { o: OutcomeScorecard }) {
             No cutoff reaches {TARGET_AGREEMENT_PERCENT}% agreement ({s.samples} samples)
           </span>
         )}
+        {s.kind === "keep_current" && (
+          <span className="text-muted-foreground">
+            Keep current threshold: no lower cutoff has {MIN_SUGGESTION_SAMPLES}+ samples at{" "}
+            {TARGET_AGREEMENT_PERCENT}% in its own band ({s.samples} samples)
+          </span>
+        )}
         {s.kind === "suggested" && (
           <>
             <span>
               <span className="font-medium">Suggested ≥ {s.threshold.toFixed(3)}</span>{" "}
+              {s.direction === "loosens" && (
+                <span className="text-xs font-medium text-amber-800 dark:text-amber-200">
+                  loosens current
+                </span>
+              )}{" "}
               <span className="text-xs text-muted-foreground">
-                ({pct(s.agreement)} agree, n={s.samples})
+                (auto {routePct(s.auto)}, held {routePct(s.held)})
               </span>
             </span>
             <Button type="button" size="sm" variant="outline" onClick={copy}>

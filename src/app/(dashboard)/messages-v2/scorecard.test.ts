@@ -29,7 +29,7 @@ describe("suggestThreshold", () => {
       ...batch(0.95, 40, 40),
     ];
     // >=0.9 : 68/70 = 97.1% and n>=30 -> qualifies; >=0.7 : 78/90 = 86.7% no
-    expect(suggestThreshold(samples)).toEqual({
+    expect(suggestThreshold(samples)).toMatchObject({
       kind: "suggested",
       threshold: 0.9,
       samples: 70,
