@@ -34,6 +34,9 @@ export type HoldDraftRow = {
   inbound_message_id: string | null;
   run_id: string | null;
   created_at: string;
+  /** Only present when the loader was asked for draft bodies (the page, never the alert cron). */
+  body?: string;
+  edited_body?: string | null;
 };
 
 /** Distinct-hold counting stops here; above it the total is "2,000+ (incomplete)". */
@@ -71,6 +74,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     notes: string[];
     flagReason?: string | null;
     noProperty?: boolean;
+    draft?: HoldDraftRow;
   };
   const byProperty = new Map<string, Acc>();
   const acc = (id: string): Acc => {
@@ -133,6 +137,8 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     if (propertyId === null) a.noProperty = true;
     a.sources.add("pending_draft");
     a.times.push(d.created_at);
+    // Sorted oldest first above, so the last assignment is the newest draft.
+    a.draft = d;
     const conversation = d.conversation_id ?? ref?.conversation_id ?? null;
     if (conversation) a.conversations.add(conversation);
     if (d.inbound_message_id) a.messages.add(d.inbound_message_id);
@@ -172,6 +178,16 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
       id: propertyId,
       property_id: a.noProperty ? null : propertyId,
       draft_held: sources.includes("pending_draft"),
+      ...(a.draft
+        ? {
+            draft: {
+              id: a.draft.id,
+              inbound_message_id: a.draft.inbound_message_id,
+              ...(a.draft.body !== undefined ? { body: a.draft.body } : {}),
+              ...(a.draft.edited_body !== undefined ? { edited_body: a.draft.edited_body } : {}),
+            },
+          }
+        : {}),
       message_ids: [...a.messages],
       conversation_id: [...a.conversations][0] ?? run?.conversation_id ?? null,
       sources,
@@ -382,6 +398,14 @@ export async function loadMessagesV2Data(
   supabase: LooseSupabase,
   orgId: string,
   nowMs: number = Date.now(),
+  opts: {
+    /**
+     * Select the pending drafts' text so the hold card can show what Send
+     * would send. The page asks; the alert cron never does (alert payloads
+     * carry no message text).
+     */
+    includeDraftBody?: boolean;
+  } = {},
 ): Promise<MessagesV2Data> {
   // Distinct-hold totals come from separate id-only queries (one per source),
   // capped at HOLDS_COUNT_CAP+1 rows and de-duplicated by property client-side.
@@ -442,11 +466,13 @@ export async function loadMessagesV2Data(
         .order("source_inbound_message_id", { ascending: true })
         .limit(HOLD_LIMIT),
       // Pending Claude reply drafts are a hold source of their own. The body
-      // column is deliberately not selected.
+      // is selected only when the caller needs to show it (hold actions).
       supabase
         .from("ai_reply_drafts")
         .select(
-          "id, property_id, conversation_id, inbound_message_id, run_id, created_at",
+          opts.includeDraftBody
+            ? "id, property_id, conversation_id, inbound_message_id, run_id, created_at, body, edited_body"
+            : "id, property_id, conversation_id, inbound_message_id, run_id, created_at",
         )
         .eq("org_id", orgId)
         .eq("status", "pending")

@@ -1008,3 +1008,69 @@ describe("round 4: distinct-before-cap, failed drafts, dead letters", () => {
     expect(b.holdsMeta.deadLetterUnavailable).toBe(true);
   });
 });
+
+describe("Phase 1: pending draft exposed for the hold actions", () => {
+  const draft = (over: Partial<HoldDraftRow> & { id: string }): HoldDraftRow => ({
+    property_id: "p1",
+    conversation_id: "c1",
+    inbound_message_id: "m1",
+    run_id: null,
+    created_at: iso("05:00:00"),
+    ...over,
+  });
+
+  it("a hold carries its newest pending draft (id, inbound, body when loaded)", () => {
+    const holds = deriveOpenHolds({
+      properties: [],
+      decisions: [],
+      reviews: [],
+      drafts: [
+        draft({ id: "old", created_at: iso("01:00:00"), body: "older", edited_body: null }),
+        draft({ id: "new", created_at: iso("02:00:00"), body: "newer", edited_body: "edited" }),
+      ],
+      runs: [],
+    });
+    expect(holds[0]!.draft).toEqual({
+      id: "new",
+      inbound_message_id: "m1",
+      body: "newer",
+      edited_body: "edited",
+    });
+  });
+
+  it("omits body fields when the loader did not select them", () => {
+    const holds = deriveOpenHolds({
+      properties: [],
+      decisions: [],
+      reviews: [],
+      drafts: [draft({ id: "d1" })],
+      runs: [],
+    });
+    expect(holds[0]!.draft).toEqual({ id: "d1", inbound_message_id: "m1" });
+  });
+
+  it("includeDraftBody selects body and edited_body; the default never does", async () => {
+    const rows = [
+      {
+        id: "d1",
+        property_id: "p9",
+        conversation_id: null,
+        inbound_message_id: "m9",
+        run_id: null,
+        created_at: iso("03:00:00"),
+        body: "hello",
+        edited_body: null,
+      },
+    ];
+    const withBody = fakeSupabase({ ai_reply_drafts: () => ({ data: rows }) });
+    const data = await loadMessagesV2Data(withBody.client, "org", Date.now(), { includeDraftBody: true });
+    expect(data.holds[0]!.draft).toMatchObject({ id: "d1", body: "hello" });
+    const q = withBody.queries.find((c) => c[0]?.table === "ai_reply_drafts" && !isHead(c))!;
+    expect(String(q.find((c) => c.method === "select")!.args[0])).toMatch(/body, edited_body/);
+
+    const without = fakeSupabase({ ai_reply_drafts: () => ({ data: rows }) });
+    await loadMessagesV2Data(without.client, "org");
+    const q2 = without.queries.find((c) => c[0]?.table === "ai_reply_drafts" && !isHead(c))!;
+    expect(String(q2.find((c) => c.method === "select")!.args[0])).not.toMatch(/body/);
+  });
+});

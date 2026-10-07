@@ -129,8 +129,18 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
   /** Plain-text description of why it is open (source labels + escalation reason). */
   reason: string;
   run: R | null;
-  /** A pending Claude reply draft exists for this hold's run (body not shown in Phase 0). */
+  /** A pending Claude reply draft exists for this hold's run. */
   draft_held?: boolean;
+  /**
+   * The newest pending draft. `body` / `edited_body` are present only when the
+   * page asked for them (the hold actions need to show and send the text).
+   */
+  draft?: {
+    id: string;
+    inbound_message_id: string | null;
+    body?: string;
+    edited_body?: string | null;
+  };
   /** Inbound message ids tied to this hold (used to match dead letters). */
   message_ids?: string[];
   /** A dead-letter row exists: the reply text was saved for review (text never loaded). */

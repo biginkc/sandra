@@ -1084,11 +1084,18 @@ export type Database = {
           body: string
           conversation_id: string | null
           created_at: string
+          edited_at: string | null
+          edited_body: string | null
+          edited_by: string | null
           id: string
           inbound_message_id: string | null
           org_id: string
           property_id: string | null
+          resolution_reason: string | null
+          resolved_at: string | null
+          resolved_by: string | null
           run_id: string | null
+          sent_message_id: string | null
           source: string
           status: string
         }
@@ -1096,11 +1103,18 @@ export type Database = {
           body: string
           conversation_id?: string | null
           created_at?: string
+          edited_at?: string | null
+          edited_body?: string | null
+          edited_by?: string | null
           id?: string
           inbound_message_id?: string | null
           org_id: string
           property_id?: string | null
+          resolution_reason?: string | null
+          resolved_at?: string | null
+          resolved_by?: string | null
           run_id?: string | null
+          sent_message_id?: string | null
           source: string
           status?: string
         }
@@ -1108,11 +1122,18 @@ export type Database = {
           body?: string
           conversation_id?: string | null
           created_at?: string
+          edited_at?: string | null
+          edited_body?: string | null
+          edited_by?: string | null
           id?: string
           inbound_message_id?: string | null
           org_id?: string
           property_id?: string | null
+          resolution_reason?: string | null
+          resolved_at?: string | null
+          resolved_by?: string | null
           run_id?: string | null
+          sent_message_id?: string | null
           source?: string
           status?: string
         }
@@ -7812,6 +7833,16 @@ export type Database = {
           p_lease_seconds: number
         }
         Returns: boolean
+      }
+      fn_resolve_hold: {
+        Args: {
+          p_org_id: string
+          p_property_id: string
+          p_user_id: string
+          p_action: string
+          p_reason?: string | null
+        }
+        Returns: Json
       }
       fn_renew_ai_send: {
         Args: { p_conversation_id: string; p_holder: string; p_lease_seconds: number }
