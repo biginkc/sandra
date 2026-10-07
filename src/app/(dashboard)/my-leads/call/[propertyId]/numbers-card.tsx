@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { ProviderDataView } from "@/components/leads/provider-data-view";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -208,6 +209,8 @@ export function NumbersCard({ propertyId, comps, isTraining, onSaveValuation, on
         <p className="text-muted-foreground text-sm">No comps yet</p>
       )}
 
+      {latest?.provider === "attom" ? <><p className="text-muted-foreground text-xs">ATTOM automated estimate · Fetched {new Date(latest.fetched_at).toLocaleString("en-US", { timeZone: "America/Chicago" })} CT</p><ProviderDataView data={latest.providerData} /></> : null}
+
       <p className="text-sm">ARV {effectiveArv != null ? formatDollars(effectiveArv) : "unavailable"}</p>
 
       <div className="grid grid-cols-2 gap-1 text-sm" data-testid="numbers-as-is-anchors">
@@ -254,7 +257,7 @@ export function NumbersCard({ propertyId, comps, isTraining, onSaveValuation, on
       {latest ? (
         <div className="overflow-x-auto">
           {topComps.length === 0 ? (
-            <p className="text-muted-foreground text-sm">No comparable sales</p>
+            <p className="text-muted-foreground text-sm">No priced comparable sales</p>
           ) : (
             <table className="w-full text-left text-xs" data-testid="numbers-comps-table">
               <thead>
@@ -281,7 +284,7 @@ export function NumbersCard({ propertyId, comps, isTraining, onSaveValuation, on
           )}
           <p className="text-muted-foreground mt-2 text-xs">Owner of record: {latest.owner_of_record ?? "unknown"}</p>
           <p className="text-muted-foreground text-xs">
-            Legal description: {latest.legal_description_complete ? "complete" : "incomplete"}
+            Legal description: {latest.legal_description ?? "unavailable"} ({latest.legal_description_complete ? "complete" : "incomplete"})
           </p>
         </div>
       ) : null}

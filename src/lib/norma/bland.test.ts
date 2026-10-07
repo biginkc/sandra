@@ -72,6 +72,7 @@ describe("bland send-call classification", () => {
     expect(init.method).toBe("POST");
     expect(init.headers.Authorization).toBe("Bearer test-key");
     expect(JSON.parse(init.body)).toEqual(buildSendCallBody(config, params));
+    expect(JSON.parse(init.body).record).toBe(true);
   });
 
   it("accepted: 2xx success with a call id", async () => {
