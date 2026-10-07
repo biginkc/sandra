@@ -807,3 +807,100 @@ describe("buildModeBadges unknown automation flag", () => {
     expect(formatModeBadge(b[0])).toBe("UNKNOWN");
   });
 });
+
+describe("round 4: distinct-before-cap, failed drafts, dead letters", () => {
+  const draftRow = (i: number) => ({
+    id: `d${i}`,
+    property_id: "p1",
+    conversation_id: null,
+    inbound_message_id: null,
+    run_id: null,
+    created_at: iso("03:00:00"),
+  });
+  it("2,001 pending drafts on one property is 1 hold, labeled incomplete, never '2,000+'", async () => {
+    const rows = Array.from({ length: HOLDS_COUNT_CAP + 1 }, (_, i) => ({
+      id: `d${i}`,
+      property_id: "p1",
+    }));
+    const { client } = fakeSupabase({
+      ai_reply_drafts: (calls) =>
+        isHead(calls) ? { data: rows } : { data: [draftRow(0)] },
+    });
+    const data = await loadMessagesV2Data(client, "org");
+    expect(data.holds).toHaveLength(1);
+    expect(data.holdsMeta.totalState).toBe("incomplete");
+    expect(data.holdsMeta.total).toBe(1);
+    const label = formatHoldsTotal(data.holdsMeta, 1);
+    expect(label).toBe("1+ holds (incomplete)");
+    expect(label).not.toMatch(/2,000/);
+  });
+  it("applies the cap to DISTINCT properties", () => {
+    const ids = Array.from({ length: HOLDS_COUNT_CAP + 1 }, (_, i) => `p${i}`);
+    const m = buildHoldsMeta({
+      shown: 5,
+      sources: [{ source: "pending_draft", ids, failed: false }],
+    });
+    expect(m.totalState).toBe("capped");
+  });
+  it("a failed drafts query makes the total unavailable, never exact", () => {
+    const m = buildHoldsMeta({
+      shown: 0,
+      sources: [
+        { source: "needs_attention", ids: [], failed: false },
+        { source: "pending_draft", ids: null, failed: true },
+      ],
+    });
+    expect(m.totalState).toBe("unavailable");
+    expect(m.failed).toEqual(["pending_draft"]);
+    expect(formatHoldsTotal(m, 0)).toBe("holds count unavailable");
+  });
+  it("marks a hold whose run has a dead-letter row, selecting ids only", async () => {
+    const { client, queries } = fakeSupabase({
+      ai_reply_drafts: (calls) =>
+        isHead(calls)
+          ? {}
+          : {
+              data: [{ ...draftRow(0), run_id: "r1" }],
+            },
+      pipeline_runs_latest_for_properties: () => ({
+        data: [run({ id: "r1", property_id: "p1" })],
+      }),
+      ai_reply_dead_letters: () => ({
+        data: [{ id: "dl1", run_id: "r1", inbound_message_id: null }],
+      }),
+    });
+    const data = await loadMessagesV2Data(client, "org");
+    expect(data.holds[0].dead_letter).toBe(true);
+    expect(data.holdsMeta.deadLetterUnavailable).toBeFalsy();
+    const q = queries.find((c) => c[0]?.table === "ai_reply_dead_letters")!;
+    const cols = String(q.find((c) => c.method === "select")!.args[0]);
+    expect(cols).not.toMatch(/body|text|reply/);
+  });
+  it("treats a missing dead-letter table as none, but other errors as unavailable", async () => {
+    const base = {
+      ai_reply_drafts: (calls: Call) =>
+        isHead(calls)
+          ? {}
+          : { data: [{ ...draftRow(0), inbound_message_id: "m1" }] },
+    };
+    const missing = fakeSupabase({
+      ...base,
+      ai_reply_dead_letters: () => ({
+        data: null,
+        error: { code: "42P01", message: 'relation "x" does not exist' },
+      }),
+    });
+    const a = await loadMessagesV2Data(missing.client, "org");
+    expect(a.holds[0].dead_letter).toBeFalsy();
+    expect(a.holdsMeta.deadLetterUnavailable).toBeFalsy();
+    const broken = fakeSupabase({
+      ...base,
+      ai_reply_dead_letters: () => ({
+        data: null,
+        error: { message: "permission denied" },
+      }),
+    });
+    const b = await loadMessagesV2Data(broken.client, "org");
+    expect(b.holdsMeta.deadLetterUnavailable).toBe(true);
+  });
+});

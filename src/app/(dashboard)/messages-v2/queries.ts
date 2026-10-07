@@ -167,6 +167,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
       id: propertyId,
       property_id: a.noProperty ? null : propertyId,
       draft_held: sources.includes("pending_draft"),
+      message_ids: [...a.messages],
       conversation_id: [...a.conversations][0] ?? run?.conversation_id ?? null,
       sources,
       since,
@@ -294,23 +295,33 @@ export type MessagesV2Data = {
 export function buildHoldsMeta(input: {
   shown: number;
   contextErrors?: string[];
+  deadLetterUnavailable?: boolean;
   sources: ReadonlyArray<{
     source: HoldSource;
     /** Held-property keys for the source; null when the count query failed. */
     ids: readonly string[] | null;
     failed: boolean;
+    /** The id query returned more rows than the cap (fetch limit reached). */
+    limited?: boolean;
   }>;
 }): HoldsMeta {
   const failed = input.sources.filter((s) => s.failed).map((s) => s.source);
   const live = input.sources.filter((s) => !s.failed);
-  const totalState: HoldsMeta["totalState"] = live.some((s) => s.ids === null)
-    ? "unavailable"
-    : live.some((s) => (s.ids?.length ?? 0) > HOLDS_COUNT_CAP)
-      ? "capped"
-      : "exact";
+  // De-duplicate to distinct properties BEFORE applying the cap.
   const distinct = new Set(live.flatMap((s) => s.ids ?? []));
+  const sourceLimited = live.some(
+    (s) => s.limited || (s.ids?.length ?? 0) > HOLDS_COUNT_CAP,
+  );
+  const totalState: HoldsMeta["totalState"] =
+    failed.length > 0 || live.some((s) => s.ids === null)
+      ? "unavailable"
+      : distinct.size > HOLDS_COUNT_CAP
+        ? "capped"
+        : sourceLimited
+          ? "incomplete"
+          : "exact";
   const total =
-    totalState === "exact"
+    totalState === "exact" || totalState === "incomplete"
       ? Math.max(input.shown, distinct.size)
       : totalState === "capped"
         ? Math.max(input.shown, HOLDS_COUNT_CAP)
@@ -320,10 +331,12 @@ export function buildHoldsMeta(input: {
     shown: input.shown,
     truncated:
       totalState === "capped" ||
+      totalState === "incomplete" ||
       (totalState === "exact" && total > input.shown),
     totalState,
     failed,
     contextErrors: input.contextErrors ?? [],
+    ...(input.deadLetterUnavailable ? { deadLetterUnavailable: true } : {}),
   };
 }
 
@@ -331,7 +344,10 @@ export function buildHoldsMeta(input: {
 export function formatHoldsTotal(meta: HoldsMeta, openCount: number): string {
   if (meta.failed.some((f) => f !== "pending_draft"))
     return "holds unavailable";
-  if (meta.totalState === "unavailable") return "holds count unavailable";
+  if (meta.failed.length > 0 || meta.totalState === "unavailable")
+    return "holds count unavailable";
+  if (meta.totalState === "incomplete")
+    return `${meta.total.toLocaleString("en-US")}+ holds (incomplete)`;
   if (meta.totalState === "capped")
     return `${HOLDS_COUNT_CAP.toLocaleString("en-US")}+ holds (incomplete)`;
   return meta.truncated
@@ -594,29 +610,89 @@ export async function loadMessagesV2Data(
           },
         );
 
+  const isLimited = (res: { data?: unknown; error?: unknown }): boolean =>
+    !res.error && Array.isArray(res.data) && res.data.length > HOLDS_COUNT_CAP;
+
+  // Dead letters: ids only (never the saved reply text). A missing table is
+  // treated as "none"; any other error is surfaced as unavailable.
+  const runIds = new Set<string>();
+  const deadMessageIds = new Set<string>();
+  for (const h of openHolds) {
+    if (h.run) {
+      runIds.add(h.run.id);
+      deadMessageIds.add(h.run.inbound_message_id);
+    }
+    for (const m of h.message_ids ?? []) deadMessageIds.add(m);
+  }
+  const deadRunSet = new Set<string>();
+  const deadMsgSet = new Set<string>();
+  let deadLetterUnavailable = false;
+  const deadQueries = [
+    ...chunked([...runIds]).map((ids) => ["run_id", ids] as const),
+    ...chunked([...deadMessageIds]).map(
+      (ids) => ["inbound_message_id", ids] as const,
+    ),
+  ];
+  const deadResults = await Promise.all(
+    deadQueries.map(([col, ids]) =>
+      supabase
+        .from("ai_reply_dead_letters")
+        .select("id, run_id, inbound_message_id")
+        .eq("org_id", orgId)
+        .in(col, ids),
+    ),
+  );
+  for (const res of deadResults) {
+    if (res.error) {
+      const e = res.error as { code?: string; message?: string };
+      const missing =
+        e.code === "42P01" ||
+        e.code === "PGRST205" ||
+        /does not exist|could not find the table/i.test(e.message ?? "");
+      if (!missing) deadLetterUnavailable = true;
+      continue;
+    }
+    for (const row of (res.data ?? []) as Array<{
+      run_id: string | null;
+      inbound_message_id: string | null;
+    }>) {
+      if (row.run_id) deadRunSet.add(row.run_id);
+      if (row.inbound_message_id) deadMsgSet.add(row.inbound_message_id);
+    }
+  }
+  const isDead = (h: OpenHold<PipelineRun>): boolean =>
+    (h.run
+      ? deadRunSet.has(h.run.id) || deadMsgSet.has(h.run.inbound_message_id)
+      : false) || (h.message_ids ?? []).some((m) => deadMsgSet.has(m));
+
   const holdsMeta = buildHoldsMeta({
     shown: openHolds.length,
+    deadLetterUnavailable,
     contextErrors,
     sources: [
       {
         source: "needs_attention",
         ids: keysOf(flaggedIds, (r) => r.id),
         failed: !!flaggedRes.error,
+        limited: isLimited(flaggedIds),
       },
       {
         source: "jev_decision",
         ids: keysOf(decisionIds, (r) => r.property_id),
         failed: !!decisionRes.error,
+        limited: isLimited(decisionIds),
       },
       {
         source: "disposition_review",
         ids: keysOf(reviewIds, (r) => r.property_id),
         failed: !!reviewRes.error,
+        limited: isLimited(reviewIds),
       },
       {
         source: "pending_draft",
         ids: keysOf(draftIds, (r) => r.property_id ?? `draft:${r.id}`),
         failed: !!draftRes.error,
+        limited: isLimited(draftIds),
       },
     ],
   });
@@ -626,6 +702,7 @@ export async function loadMessagesV2Data(
     runs: windowRuns.map(withSteps),
     holds: openHolds.map((h) => ({
       ...h,
+      ...(isDead(h) ? { dead_letter: true } : {}),
       run: h.run ? withSteps(h.run) : null,
     })),
     holdsMeta,

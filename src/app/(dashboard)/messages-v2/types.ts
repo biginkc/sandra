@@ -88,14 +88,17 @@ export type HoldsMeta = {
   truncated: boolean;
   /**
    * exact: `total` = distinct held properties. capped: more than the count cap
-   * of source rows, so the total is only "cap+" (incomplete). unavailable: a
-   * count query failed, so no total is known.
+   * DISTINCT properties, so the total is only "cap+". incomplete: a source hit
+   * its fetch limit, so `total` is only a lower bound ("N+"). unavailable: any
+   * hold source or count query failed, so no total is known.
    */
-  totalState: "exact" | "capped" | "unavailable";
+  totalState: "exact" | "capped" | "incomplete" | "unavailable";
   /** Sources whose query failed; their holds are missing, not zero. pending_draft here means draft status is unavailable. */
   failed: HoldSource[];
   /** Auxiliary lookups (run context, steps, drafts) that errored; cards may be incomplete. */
   contextErrors: string[];
+  /** The dead-letter lookup errored (not merely a missing table): markers may be missing. */
+  deadLetterUnavailable?: boolean;
 };
 
 export type HoldSource =
@@ -122,6 +125,10 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
   run: R | null;
   /** A pending Claude reply draft exists for this hold's run (body not shown in Phase 0). */
   draft_held?: boolean;
+  /** Inbound message ids tied to this hold (used to match dead letters). */
+  message_ids?: string[];
+  /** A dead-letter row exists: the reply text was saved for review (text never loaded). */
+  dead_letter?: boolean;
 };
 
 export type PipelineCoverage = { inboundMessages: number; runs: number };

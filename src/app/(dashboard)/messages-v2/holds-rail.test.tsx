@@ -233,11 +233,68 @@ describe("HoldsRail degraded states", () => {
         meta={meta({ failed: ["pending_draft"] })}
       />,
     );
-    expect(screen.getByTestId("drafts-unavailable")).toHaveTextContent(
-      /draft status unavailable/i,
+    expect(screen.getByTestId("holds-unavailable")).toHaveTextContent(
+      "Holds unavailable — reply draft",
     );
-    expect(screen.queryByTestId("holds-unavailable")).toBeNull();
     expect(screen.getAllByTestId("hold-card")).toHaveLength(1);
+  });
+  it("never says 'No open holds' when only the drafts query failed", () => {
+    render(
+      <HoldsRail
+        holds={[]}
+        labels={new Map()}
+        nowMs={NOW}
+        meta={meta({ failed: ["pending_draft"], totalState: "unavailable" })}
+      />,
+    );
+    expect(screen.getByTestId("holds-unavailable")).toHaveTextContent(
+      "Holds unavailable — reply draft",
+    );
+    expect(screen.queryByText("No open holds.")).toBeNull();
+  });
+  it("labels a truncated-source total as incomplete", () => {
+    render(
+      <HoldsRail
+        holds={[hold("a", 5)]}
+        labels={new Map()}
+        nowMs={NOW}
+        meta={meta({
+          total: 1,
+          shown: 1,
+          truncated: true,
+          totalState: "incomplete",
+        })}
+      />,
+    );
+    const h = screen.getByRole("heading", { name: /incomplete/ });
+    expect(h).toHaveTextContent("1+ holds (incomplete)");
+    expect(h).not.toHaveTextContent("2,000");
+  });
+  it("shows the dead-letter marker on a hold with saved reply text", () => {
+    render(
+      <HoldsRail
+        holds={[{ ...hold("a", 5), dead_letter: true }, hold("b", 5)]}
+        labels={new Map()}
+        nowMs={NOW}
+      />,
+    );
+    expect(screen.getAllByTestId("dead-letter")).toHaveLength(1);
+    expect(screen.getByTestId("dead-letter")).toHaveTextContent(
+      "reply text saved for review",
+    );
+  });
+  it("says dead-letter status unavailable when that lookup failed", () => {
+    render(
+      <HoldsRail
+        holds={[hold("a", 5)]}
+        labels={new Map()}
+        nowMs={NOW}
+        meta={meta({ deadLetterUnavailable: true })}
+      />,
+    );
+    expect(screen.getByTestId("dead-letter-unavailable")).toHaveTextContent(
+      "dead-letter status unavailable",
+    );
   });
   it("flags context lookup errors", () => {
     render(

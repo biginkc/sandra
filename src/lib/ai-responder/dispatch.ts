@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
+import { ensureConversationIdForThread } from "@/lib/messages/threading";
 import { applyPhoneLevelOptOut } from "@/lib/messaging/opt-out-phone";
 import { getConsentState } from "@/lib/messaging/consent";
 import { checkQuietHours } from "@/lib/messaging/quiet-hours";
@@ -31,6 +32,13 @@ import {
 } from "@/lib/sms-classification/dispatch-bridge";
 
 import { claimAiResponse, completeAiResponseClaim } from "./claims";
+import { classifyOutbound } from "./outbound-class";
+import {
+  REPLY_RETRY_DELAY_SECONDS,
+  REPLY_RETRY_MAX,
+  type AiRetryOutcome,
+  type RetryReason,
+} from "./retry";
 import { classifyAiSkip } from "./classify";
 import {
   classifyProviderFailure,
@@ -81,6 +89,8 @@ export type AiDispatchInput = {
   inboundMessageId?: string | null;
   /** Messages v2 evidence run for this inbound; observation only. */
   runId?: string | null;
+  /** 0/undefined = first dispatch; N = the Nth re-dispatch (see ./retry). */
+  retryAttempt?: number;
 };
 
 export type AiDispatchOptions = {
@@ -250,7 +260,7 @@ export async function dispatchAiResponse(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
   deps: { anthropic: AnthropicLike } & AiDispatchOptions,
-): Promise<AiDispatchOutcome> {
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
   // Evidence only: resolve the run (null when none / lookup fails) and expose
   // it ambiently. Nothing below branches on it.
   const runContext =
@@ -264,7 +274,7 @@ async function dispatchAiResponseCore(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
   deps: { anthropic: AnthropicLike } & AiDispatchOptions,
-): Promise<AiDispatchOutcome> {
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
   // --------------------------------------------------------------------------
   // 1. Load property + org + config
   // --------------------------------------------------------------------------
@@ -464,6 +474,7 @@ async function dispatchAiResponseCore(
       outcome: outcome.outcome,
       outboundMessageId: outcome.outcome === "sent" ? outcome.messageId : null,
       errorMessage: retryableClaimError(outcome),
+      releaseLease: outcome.outcome === "retry",
     });
     return outcome;
   }
@@ -544,7 +555,7 @@ async function classifyAndApplyDespiteReplyIneligibility(
     min_confidence: number;
   },
   currentTurn: number,
-): Promise<AiDispatchOutcome | null> {
+): Promise<AiDispatchOutcome | AiRetryOutcome | null> {
   const claimStartedAt = new Date().toISOString();
   const responseClaim = await claimAiResponse(supabase, {
     orgId: property.org_id,
@@ -856,7 +867,7 @@ async function resolveAndApplyRoute(
   currentTurn: number,
   responseClaim: { claimId: string | null; startedAt?: string },
   classification: ClassificationBridgeResult,
-): Promise<AiDispatchOutcome> {
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
   let generated: AiStructuredOutput;
   let route: ResponderRoute;
   let jevAutoAccept: { classificationRunId: string } | null = null;
@@ -1231,6 +1242,7 @@ async function resolveAndApplyRoute(
           claimId: responseClaim.claimId,
           outcome: sent.outcome,
           errorMessage: retryableClaimError(sent),
+          releaseLease: sent.outcome === "retry",
         });
         return sent;
       }
@@ -1439,11 +1451,24 @@ export function resolveOutboundPolicy(args: {
 type ReplyCurrentCheck =
   | { ok: true }
   | { ok: false; reason: "newer_inbound"; newerInboundId: string }
-  | { ok: false; reason: "outbound_since_claim" | "send_check_failed" };
+  | {
+      ok: false;
+      reason:
+        | "outbound_since_claim"
+        | "already_answered"
+        | "broadcast_since_claim"
+        | "send_check_failed";
+    };
 
 /**
  * Pre-send re-verification. FAILS CLOSED: a lookup error or an unparseable
  * timestamp is `send_check_failed`, never "assume current".
+ *
+ * Outbounds that landed since the claim are classified (see
+ * ./outbound-class): any conversational-but-unrelated one -> flag a human
+ * (`outbound_since_claim`); else any that already answers THIS inbound ->
+ * `already_answered`; else only broadcasts (drip tick, bulk campaign, Norma
+ * pre-call text) -> `broadcast_since_claim`, which skips without flagging.
  */
 async function verifyReplyStillCurrent(
   supabase: SupabaseClient<Database>,
@@ -1462,7 +1487,7 @@ async function verifyReplyStillCurrent(
     if (Number.isNaN(claimedAtMs)) return { ok: false, reason: "send_check_failed" };
     let query = supabase
       .from("messages")
-      .select("id, created_at")
+      .select("id, created_at, campaign_id, metadata")
       .eq("property_id", input.propertyId)
       .eq("direction", "outbound")
       .neq("status", "failed");
@@ -1471,7 +1496,7 @@ async function verifyReplyStillCurrent(
       : query.eq("contact_id", input.contactId);
     const { data, error } = await query
       .order("created_at", { ascending: false })
-      .limit(5);
+      .limit(50);
     if (error) {
       reportError(new Error(error.message), {
         tags: { surface: "ai_responder_pre_send_outbound_lookup" },
@@ -1479,24 +1504,87 @@ async function verifyReplyStillCurrent(
       });
       return { ok: false, reason: "send_check_failed" };
     }
-    if (
-      (data ?? []).some((row) => {
-        const createdMs = Date.parse(row.created_at);
-        return Number.isNaN(createdMs) || createdMs >= claimedAtMs;
-      })
-    ) {
-      return { ok: false, reason: "outbound_since_claim" };
-    }
+    const since = (data ?? []).filter((row) => {
+      const createdMs = Date.parse(row.created_at);
+      return Number.isNaN(createdMs) || createdMs >= claimedAtMs;
+    });
+    if (since.length === 0) return { ok: true };
+
+    const context = await loadOutboundClassContext(supabase, input, since.map((r) => r.id));
+    if (!context) return { ok: false, reason: "send_check_failed" };
+    const classes = since.map((row) => classifyOutbound(row, context));
+    if (classes.includes("unrelated")) return { ok: false, reason: "outbound_since_claim" };
+    if (classes.includes("answered")) return { ok: false, reason: "already_answered" };
+    return { ok: false, reason: "broadcast_since_claim" };
   }
   return { ok: true };
 }
 
-/** Tunables for waiting on another sender's reservation (tests shrink them). */
+async function loadOutboundClassContext(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  messageIds: string[],
+): Promise<{
+  inboundMessageId: string | null;
+  inboundCreatedAtMs: number | null;
+  sequenceMessageIds: ReadonlySet<string>;
+} | null> {
+  let inboundCreatedAtMs: number | null = null;
+  if (input.inboundMessageId) {
+    const { data, error } = await supabase
+      .from("messages")
+      .select("created_at")
+      .eq("id", input.inboundMessageId)
+      .maybeSingle();
+    if (error) {
+      reportError(new Error(error.message), {
+        tags: { surface: "ai_responder_pre_send_inbound_lookup" },
+        extra: { inboundMessageId: input.inboundMessageId },
+      });
+      return null;
+    }
+    const ms = data ? Date.parse(data.created_at) : Number.NaN;
+    inboundCreatedAtMs = Number.isNaN(ms) ? null : ms;
+  }
+  const { data: runs, error: runsError } = await supabase
+    .from("sequence_step_runs")
+    .select("message_id")
+    .in("message_id", messageIds);
+  if (runsError) {
+    reportError(new Error(runsError.message), {
+      tags: { surface: "ai_responder_pre_send_sequence_lookup" },
+      extra: { propertyId: input.propertyId },
+    });
+    return null;
+  }
+  return {
+    inboundMessageId: input.inboundMessageId ?? null,
+    inboundCreatedAtMs,
+    sequenceMessageIds: new Set(
+      (runs ?? []).map((r) => r.message_id).filter((id): id is string => !!id),
+    ),
+  };
+}
+
+/**
+ * Tunables for waiting on another sender's reservation (tests shrink them).
+ * `deadlineMs` is a wall-clock budget INCLUDING RPC time (not an attempt
+ * count). `providerTimeoutMs` must stay under `leaseSeconds`; the lease is also
+ * renewed right before the provider call.
+ */
 export const sendReservationTuning = {
   leaseSeconds: 90,
-  waitAttempts: 10,
-  waitDelayMs: 500,
+  deadlineMs: 6_000,
+  waitDelayMs: 250,
+  providerTimeoutMs: 60_000,
 };
+
+function providerTimeoutMs(): number {
+  const fromEnv = Number(process.env.AI_RESPONDER_SEND_TIMEOUT_MS);
+  const wanted =
+    Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : sendReservationTuning.providerTimeoutMs;
+  return Math.max(1, Math.min(wanted, sendReservationTuning.leaseSeconds * 1000 - 10_000));
+}
 
 type ResponderSendArgs = {
   input: AiDispatchInput;
@@ -1514,25 +1602,26 @@ type ResponderSendArgs = {
   outboundMode?: string | null;
 };
 
-type ResponderSendOutcome = Extract<
-  AiDispatchOutcome,
-  { outcome: "sent" | "escalated" | "skipped" }
->;
+type ResponderSendOutcome =
+  | Extract<AiDispatchOutcome, { outcome: "sent" | "escalated" | "skipped" }>
+  | AiRetryOutcome;
 
-/** Escalated reason meaning "nothing was persisted or sent; leave the claim retryable". */
-export const DRAFT_PERSIST_FAILED = "draft_persist_failed";
-
-/** Claim error text for an outcome that must stay retryable ("" = complete normally). */
-function retryableClaimError(outcome: { outcome: string; reason?: string }): string | undefined {
-  return outcome.outcome === "escalated" && outcome.reason === DRAFT_PERSIST_FAILED
-    ? DRAFT_PERSIST_FAILED
+/**
+ * Claim bookkeeping for an outcome. A `retry` leaves the claim in `error`
+ * with its lease released so the re-dispatch of the SAME inbound can reclaim
+ * it immediately; everything else completes normally.
+ */
+function retryableClaimError(outcome: { outcome: string; reason?: string; attempt?: number }): string | undefined {
+  return outcome.outcome === "retry"
+    ? `retry_scheduled:${outcome.reason}:${outcome.attempt}`
     : undefined;
 }
 
 /**
  * Re-read the owner's outbound mode right before the provider call; the
- * dispatch-start snapshot can be minutes old (delay workflow). A lookup error
- * keeps the snapshot (still honouring EITHER-hold-wins).
+ * dispatch-start snapshot can be minutes old (delay workflow). FAILS CLOSED:
+ * a lookup error OR no active config row means `hold` (never the stale
+ * snapshot), and EITHER-hold-wins still applies.
  */
 async function loadLiveOutboundMode(
   supabase: SupabaseClient<Database>,
@@ -1550,9 +1639,9 @@ async function loadLiveOutboundMode(
       tags: { surface: "ai_responder_live_outbound_mode" },
       extra: { orgId },
     });
-    return fallback;
+    return "hold";
   }
-  if (!data) return fallback;
+  if (!data) return "hold";
   return fallback === "hold" ? "hold" : (data.outbound_mode ?? fallback);
 }
 
@@ -1570,6 +1659,17 @@ async function guardReplyStillCurrent(
     });
     await markPropertyNeedsAttention(supabase, args.input.propertyId, "send_check_failed");
     return { outcome: "escalated", reason: "send_check_failed" };
+  }
+  if (current.reason === "already_answered") {
+    // A conversational reply to THIS inbound already exists (AI or human).
+    await trace(supabase, { kind: "gate", name: "already_answered", result: "pass" });
+    return { outcome: "skipped", reason: "already_answered" };
+  }
+  if (current.reason === "broadcast_since_claim") {
+    // Only a drip / bulk / Norma pre-call text landed. It does not answer the
+    // seller and says nothing about a human, so: no flag.
+    await trace(supabase, { kind: "gate", name: "superseded_by_broadcast", result: "block" });
+    return { outcome: "skipped", reason: "superseded_by_broadcast" };
   }
   await trace(supabase, {
     kind: "gate",
@@ -1613,43 +1713,154 @@ async function newerInboundIsHandled(
   return data?.status === "processing" || data?.status === "completed";
 }
 
-async function holdReplyAsDraft(
+/**
+ * Durable last resort for a reply that could not be stored or sent: a row in
+ * ai_reply_dead_letters (RLS: owner||acquisitions read). Returns false when
+ * even that write failed.
+ */
+async function writeReplyDeadLetter(
   supabase: SupabaseClient<Database>,
   args: ResponderSendArgs,
-  reason: "outbound_mode_hold" | "llm_autosend_off",
-): Promise<ResponderSendOutcome> {
-  const { error: draftError } = await supabase.from("ai_reply_drafts").insert({
+  reason: string,
+): Promise<boolean> {
+  const { error } = await supabase.from("ai_reply_dead_letters").insert({
     org_id: args.orgId,
     run_id: currentPipelineRun()?.runId ?? null,
     conversation_id: args.input.conversationId ?? null,
     property_id: args.input.propertyId,
     inbound_message_id: args.input.inboundMessageId ?? null,
     body: args.body,
-    source: args.source,
-    status: "pending",
+    reason,
   });
-  // 23505 = the unique pending-draft-per-inbound index: this draft is already
-  // stored (a retry), which is success.
-  const alreadyStored = (draftError as { code?: string } | null)?.code === "23505";
-  if (draftError && !alreadyStored) {
-    reportError(new Error(draftError.message), {
-      tags: { surface: "ai_responder_draft_insert" },
-      // The reply text rides along so it is recoverable from the error report.
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_dead_letter_insert" },
+      // Ids only here; the body is attached solely when this is the last
+      // place it could have been kept (see retryOrFailReply).
+      extra: {
+        propertyId: args.input.propertyId,
+        inboundMessageId: args.input.inboundMessageId ?? null,
+      },
+    });
+    return false;
+  }
+  return true;
+}
+
+/**
+ * A reply that could not be sent or stored. While retries remain, nothing is
+ * flagged or completed: the caller re-dispatches the same inbound through the
+ * delay workflow (REPLY_RETRY_DELAY_SECONDS later, REPLY_RETRY_MAX times). On
+ * the last attempt: dead-letter the text, and flag the property so a human
+ * sees it.
+ */
+async function retryOrFailReply(
+  supabase: SupabaseClient<Database>,
+  args: ResponderSendArgs,
+  reason: RetryReason,
+): Promise<ResponderSendOutcome> {
+  const attempt = args.input.retryAttempt ?? 0;
+  if (attempt < REPLY_RETRY_MAX) {
+    return {
+      outcome: "retry",
+      reason,
+      attempt: attempt + 1,
+      delaySeconds: REPLY_RETRY_DELAY_SECONDS,
+    };
+  }
+  const stored = await writeReplyDeadLetter(supabase, args, reason);
+  if (!stored) {
+    // Dead letter failed too: the report is the last copy of the text.
+    reportError(new Error(`ai reply lost after retries: ${reason}`), {
+      tags: { surface: "ai_responder_reply_lost" },
       extra: {
         propertyId: args.input.propertyId,
         inboundMessageId: args.input.inboundMessageId ?? null,
         replyBody: args.body,
       },
     });
+  }
+  const flag = reason === "draft_persist_failed" ? reason : `reply_skipped:${reason}`;
+  await markPropertyNeedsAttention(supabase, args.input.propertyId, flag);
+  return { outcome: "escalated", reason };
+}
+
+/**
+ * Store a held reply exactly once per inbound. Reuses ANY existing draft for
+ * the inbound: pending = already stored; discarded = set back to pending;
+ * sent = a human already answered, nothing to store.
+ */
+async function persistHeldDraft(
+  supabase: SupabaseClient<Database>,
+  args: ResponderSendArgs,
+): Promise<"stored" | "already_sent" | { error: { message: string } }> {
+  const inboundId = args.input.inboundMessageId ?? null;
+  if (inboundId) {
+    const { data: existing, error: lookupError } = await supabase
+      .from("ai_reply_drafts")
+      .select("id, status, created_at")
+      .eq("inbound_message_id", inboundId)
+      .order("created_at", { ascending: false })
+      .limit(10);
+    if (lookupError) return { error: lookupError };
+    const rows = existing ?? [];
+    if (rows.some((d) => d.status === "sent")) return "already_sent";
+    if (rows.some((d) => d.status === "pending")) return "stored";
+    const discarded = rows.find((d) => d.status === "discarded");
+    if (discarded) {
+      const { error: reviveError } = await supabase
+        .from("ai_reply_drafts")
+        .update({ status: "pending" })
+        .eq("id", discarded.id)
+        .eq("status", "discarded");
+      return reviveError ? { error: reviveError } : "stored";
+    }
+  }
+  const { error: draftError } = await supabase.from("ai_reply_drafts").insert({
+    org_id: args.orgId,
+    run_id: currentPipelineRun()?.runId ?? null,
+    conversation_id: args.input.conversationId ?? null,
+    property_id: args.input.propertyId,
+    inbound_message_id: inboundId,
+    body: args.body,
+    source: args.source,
+    status: "pending",
+  });
+  // 23505 = the unique pending-draft-per-inbound index: a concurrent run
+  // stored it first, which is success.
+  if (draftError && (draftError as { code?: string }).code !== "23505") {
+    return { error: draftError };
+  }
+  return "stored";
+}
+
+async function holdReplyAsDraft(
+  supabase: SupabaseClient<Database>,
+  args: ResponderSendArgs,
+  reason: "outbound_mode_hold" | "llm_autosend_off",
+): Promise<ResponderSendOutcome> {
+  const persisted = await persistHeldDraft(supabase, args);
+  if (persisted === "already_sent") {
+    await trace(supabase, { kind: "gate", name: "already_answered", result: "pass" });
+    return { outcome: "skipped", reason: "already_answered" };
+  }
+  if (typeof persisted === "object") {
+    reportError(new Error(persisted.error.message), {
+      tags: { surface: "ai_responder_draft_insert" },
+      // Ids only: the reply text is preserved by the dead letter (or, if that
+      // fails too, by the final report), never by this routine report.
+      extra: {
+        propertyId: args.input.propertyId,
+        inboundMessageId: args.input.inboundMessageId ?? null,
+      },
+    });
     await trace(supabase, {
       kind: "gate",
       name: "draft_persist_failed",
       result: "error",
-      detail: { source: args.source, reason },
+      detail: { source: args.source, reason, attempt: args.input.retryAttempt ?? 0 },
     });
-    // Not marked for attention and the caller must not complete the claim:
-    // the ordinary retry re-runs and re-persists.
-    return { outcome: "escalated", reason: DRAFT_PERSIST_FAILED };
+    return retryOrFailReply(supabase, args, "draft_persist_failed");
   }
   await trace(supabase, {
     kind: "hold",
@@ -1667,7 +1878,8 @@ async function reserveSend(
   inboundMessageId: string | null,
   holder: string,
 ): Promise<"reserved" | "elsewhere" | "error"> {
-  for (let attempt = 0; attempt < sendReservationTuning.waitAttempts; attempt += 1) {
+  const deadline = Date.now() + sendReservationTuning.deadlineMs;
+  for (;;) {
     const { data, error } = await supabase.rpc("fn_reserve_ai_send", {
       p_conversation_id: conversationKey,
       p_inbound_message_id: inboundMessageId ?? undefined,
@@ -1682,11 +1894,53 @@ async function reserveSend(
       return "error";
     }
     if (data === true) return "reserved";
-    if (attempt < sendReservationTuning.waitAttempts - 1) {
-      await new Promise((resolve) => setTimeout(resolve, sendReservationTuning.waitDelayMs));
-    }
+    if (Date.now() + sendReservationTuning.waitDelayMs > deadline) return "elsewhere";
+    await new Promise((resolve) => setTimeout(resolve, sendReservationTuning.waitDelayMs));
   }
-  return "elsewhere";
+}
+
+/** Verify the lease is still ours and push its expiry out a full lease. */
+async function renewSend(
+  supabase: SupabaseClient<Database>,
+  conversationKey: string,
+  holder: string,
+): Promise<"renewed" | "lost" | "error"> {
+  const { data, error } = await supabase.rpc("fn_renew_ai_send", {
+    p_conversation_id: conversationKey,
+    p_holder: holder,
+    p_lease_seconds: sendReservationTuning.leaseSeconds,
+  });
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_send_renew" },
+      extra: { conversationKey },
+    });
+    return "error";
+  }
+  return data === true ? "renewed" : "lost";
+}
+
+/**
+ * The reservation key for a thread. conversation ids are assigned per
+ * (contact, property) by ensureConversationIdForThread (the same function
+ * resolveInboundThread uses), so a run that arrives without a conversation id
+ * resolves the SAME id instead of falling back to the contact id; every run
+ * in a thread therefore contends on one key. Null = could not resolve.
+ */
+async function resolveReservationKey(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+): Promise<string | null> {
+  if (input.conversationId) return input.conversationId;
+  try {
+    return await ensureConversationIdForThread(supabase, input.contactId, input.propertyId);
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "ai_responder_reservation_key" },
+      extra: { propertyId: input.propertyId },
+    });
+    return null;
+  }
 }
 
 async function sendResponderMessage(
@@ -1710,7 +1964,12 @@ async function sendResponderMessage(
   // message, so two inbounds in one conversation can both pass every
   // dispatch-entry check; the lease serialises the re-check + provider call so
   // exactly one of them can send.
-  const conversationKey = args.input.conversationId ?? args.input.contactId;
+  const conversationKey = await resolveReservationKey(supabase, args.input);
+  if (!conversationKey) {
+    await trace(supabase, { kind: "gate", name: "send_check_failed", result: "error" });
+    await markPropertyNeedsAttention(supabase, args.input.propertyId, "send_check_failed");
+    return { outcome: "escalated", reason: "send_check_failed" };
+  }
   const holder = randomUUID();
   const reservation = await reserveSend(
     supabase,
@@ -1724,10 +1983,18 @@ async function sendResponderMessage(
     return { outcome: "escalated", reason: "send_check_failed" };
   }
   if (reservation === "elsewhere") {
-    await trace(supabase, { kind: "gate", name: "send_reserved_elsewhere", result: "block" });
-    return { outcome: "skipped", reason: "send_reserved_elsewhere" };
+    // Another sender held the lease for the whole wait budget. Nothing was
+    // sent, so this must not end silently: retry later, flag after the last.
+    await trace(supabase, {
+      kind: "gate",
+      name: "send_reserved_elsewhere",
+      result: "block",
+      detail: { attempt: args.input.retryAttempt ?? 0 },
+    });
+    return retryOrFailReply(supabase, args, "send_reserved_elsewhere");
   }
 
+  let keepLease = false;
   try {
     // Re-validate UNDER the reservation: our inbound is still the latest and
     // nothing has been sent in the conversation since we claimed.
@@ -1740,17 +2007,37 @@ async function sendResponderMessage(
     if (livePolicy.hold) {
       return await holdReplyAsDraft(supabase, args, livePolicy.reason);
     }
-    return await deliverResponderMessage(supabase, args);
+
+    // Provider boundary: the lease must still be ours, and is renewed to a
+    // full lease so the (timeout-bounded) provider call cannot outlive it.
+    const renewed = await renewSend(supabase, conversationKey, holder);
+    if (renewed === "error") {
+      await trace(supabase, { kind: "gate", name: "send_check_failed", result: "error" });
+      await markPropertyNeedsAttention(supabase, args.input.propertyId, "send_check_failed");
+      return { outcome: "escalated", reason: "send_check_failed" };
+    }
+    if (renewed === "lost") {
+      await trace(supabase, { kind: "gate", name: "send_lease_lost", result: "block" });
+      return await retryOrFailReply(supabase, args, "send_lease_lost");
+    }
+
+    const delivered = await deliverResponderMessage(supabase, args);
+    // After a provider timeout the request may still be in flight; keep the
+    // lease until it expires so nobody else sends over it.
+    keepLease = delivered.outcome === "escalated" && delivered.reason === "send_timeout";
+    return delivered;
   } finally {
-    const { error: releaseError } = await supabase.rpc("fn_release_ai_send", {
-      p_conversation_id: conversationKey,
-      p_holder: holder,
-    });
-    if (releaseError) {
-      reportError(new Error(releaseError.message), {
-        tags: { surface: "ai_responder_send_release" },
-        extra: { conversationKey },
+    if (!keepLease) {
+      const { error: releaseError } = await supabase.rpc("fn_release_ai_send", {
+        p_conversation_id: conversationKey,
+        p_holder: holder,
       });
+      if (releaseError) {
+        reportError(new Error(releaseError.message), {
+          tags: { surface: "ai_responder_send_release" },
+          extra: { conversationKey },
+        });
+      }
     }
   }
 }
@@ -1779,7 +2066,11 @@ async function deliverResponderMessage(
       return { outcome: "escalated", reason };
     }
   }
-  const sendResult = await sendSmsToContact(supabase, {
+  // The provider call is bounded below the send lease. If it times out the
+  // request may still complete, so this run does NOT retry it (a second send
+  // could double-text): it records `send_timeout`, flags a human, and the
+  // caller keeps the lease until it expires.
+  const sendPromise = sendSmsToContact(supabase, {
     origin: "automated",
     contactId: args.input.contactId,
     propertyId: args.input.propertyId,
@@ -1794,6 +2085,25 @@ async function deliverResponderMessage(
         } as Json)
       : null,
   });
+  sendPromise.catch(() => undefined); // a late rejection after timeout is not unhandled
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const raced = await Promise.race([
+    sendPromise,
+    new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), providerTimeoutMs());
+    }),
+  ]).finally(() => clearTimeout(timer));
+  if (raced === "timeout") {
+    await trace(supabase, {
+      kind: "gate",
+      name: "send_timeout",
+      result: "error",
+      detail: { timeoutMs: providerTimeoutMs() },
+    });
+    await markPropertyNeedsAttention(supabase, args.input.propertyId, "send_timeout");
+    return { outcome: "escalated", reason: "send_timeout" };
+  }
+  const sendResult = raced;
 
   if (
     args.input.inboundMessageId &&

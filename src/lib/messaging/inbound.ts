@@ -57,6 +57,11 @@ import {
   recordRepSmsHumanTakeover,
   REP_SMS_HUMAN_TAKEOVER_REASON,
 } from "./rep-sms-human-takeover";
+import {
+  isRetryOutcome,
+  recordRetryScheduled,
+  type AiRetryOutcome,
+} from "@/lib/ai-responder/retry";
 import { aiReplyDelayWorkflow } from "@/workflows/ai-reply-delay";
 import {
   finishRun,
@@ -1662,11 +1667,34 @@ async function dispatchAndStampAiResponder(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
   runContext?: PipelineRunContext | null,
-): Promise<AiDispatchOutcome> {
+): Promise<AiDispatchOutcome | AiRetryOutcome> {
   const outcome = await dispatchAiResponse(supabase, input, {
     anthropic: new Anthropic(),
     ...(runContext ? { runContext } : {}),
   });
+  if (isRetryOutcome(outcome)) {
+    // Nothing was sent or stored. Re-dispatch the same inbound through the
+    // delay workflow; the run stays `running` and the inbound is NOT stamped
+    // terminal (it is stamped `delayed`, which also keeps a webhook redelivery
+    // from racing the retry).
+    if (await scheduleReplyRetry(supabase, input, outcome, runContext)) {
+      return outcome;
+    }
+    // Could not even schedule it: surface to a human rather than drop it.
+    await markPropertyNeedsAttention(
+      supabase,
+      input.propertyId,
+      `reply_skipped:${outcome.reason}`,
+    );
+    const terminal: AiDispatchOutcome = { outcome: "escalated", reason: outcome.reason };
+    await stampAiResponderTerminalOutcome(supabase, {
+      messageId: input.inboundMessageId!,
+      conversationId: input.conversationId ?? null,
+      outcome: terminal,
+      runContext,
+    });
+    return terminal;
+  }
   await stampAiResponderTerminalOutcome(supabase, {
     messageId: input.inboundMessageId!,
     conversationId: input.conversationId ?? null,
@@ -1674,6 +1702,55 @@ async function dispatchAndStampAiResponder(
     runContext,
   });
   return outcome;
+}
+
+async function scheduleReplyRetry(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  retry: AiRetryOutcome,
+  runContext?: PipelineRunContext | null,
+): Promise<boolean> {
+  try {
+    const run = await start(aiReplyDelayWorkflow, [
+      {
+        propertyId: input.propertyId,
+        contactId: input.contactId,
+        conversationId: input.conversationId ?? null,
+        inboundFromPhone: input.inboundFromPhone ?? null,
+        inboundToPhone: input.inboundToPhone ?? null,
+        inboundBody: input.inboundBody,
+        inboundMessageId: input.inboundMessageId!,
+        delaySeconds: retry.delaySeconds,
+        runId: runContext?.runId ?? input.runId ?? null,
+        retryAttempt: retry.attempt,
+      },
+    ]);
+    await recordRetryScheduled(supabase, runContext, retry);
+    try {
+      await markInboundMessageState(supabase, input.inboundMessageId!, {
+        aiResponder: {
+          outcome: "delayed",
+          delaySeconds: retry.delaySeconds,
+          scheduledAt: new Date(Date.now() + retry.delaySeconds * 1000).toISOString(),
+          workflowRunId: run.runId,
+          retryAttempt: retry.attempt,
+          retryReason: retry.reason,
+        },
+      });
+    } catch (stampError) {
+      reportError(stampError, {
+        tags: { surface: "ai_responder_retry_stamp" },
+        extra: { inboundMessageId: input.inboundMessageId },
+      });
+    }
+    return true;
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "ai_responder_retry_schedule" },
+      extra: { inboundMessageId: input.inboundMessageId, reason: retry.reason },
+    });
+    return false;
+  }
 }
 
 /**

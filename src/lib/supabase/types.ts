@@ -1111,6 +1111,42 @@ export type Database = {
         }
         Relationships: []
       }
+      ai_reply_dead_letters: {
+        Row: {
+          body: string
+          conversation_id: string | null
+          created_at: string
+          id: string
+          inbound_message_id: string | null
+          org_id: string
+          property_id: string | null
+          reason: string
+          run_id: string | null
+        }
+        Insert: {
+          body: string
+          conversation_id?: string | null
+          created_at?: string
+          id?: string
+          inbound_message_id?: string | null
+          org_id: string
+          property_id?: string | null
+          reason: string
+          run_id?: string | null
+        }
+        Update: {
+          body?: string
+          conversation_id?: string | null
+          created_at?: string
+          id?: string
+          inbound_message_id?: string | null
+          org_id?: string
+          property_id?: string | null
+          reason?: string
+          run_id?: string | null
+        }
+        Relationships: []
+      }
       ai_response_claims: {
         Row: {
           claimed_at: string
@@ -7705,6 +7741,10 @@ export type Database = {
           p_inbound_message_id?: string
           p_lease_seconds: number
         }
+        Returns: boolean
+      }
+      fn_renew_ai_send: {
+        Args: { p_conversation_id: string; p_holder: string; p_lease_seconds: number }
         Returns: boolean
       }
       fn_release_ai_send: {

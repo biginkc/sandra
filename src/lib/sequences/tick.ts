@@ -403,6 +403,9 @@ export async function processEnrollmentTick(
       allowDefaultFromWhenNoSticky: true,
       requiresOpeningIdentity:
         step.step_index === 0 && step.template_category === "Opener - Homeowner",
+      // Provenance stamp: the AI responder reads this to tell a drip tick
+      // from a conversational reply without joining sequence_step_runs.
+      metadata: { generated_by: "sequence_tick", sequence_enrollment_id: enrollment.id },
       sequenceContext: {
         enrollmentId: enrollment.id,
         stepId: step.id,

@@ -129,4 +129,7 @@ export type AiReplyDelayProcessingMetadata = {
   delaySeconds: number;
   scheduledAt: string;
   workflowRunId?: string;
+  /** Set when this delay is a retry of a contended / failed reply (see ./retry). */
+  retryAttempt?: number;
+  retryReason?: string;
 };

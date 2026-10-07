@@ -124,6 +124,14 @@ export function HoldCard({
           <span>Claude draft held (Phase 1 to act)</span>
         </p>
       )}
+      {hold.dead_letter && (
+        <p data-testid="dead-letter" className="mt-2 flex gap-2">
+          <span aria-hidden className="text-amber-600">
+            ●
+          </span>
+          <span>reply text saved for review</span>
+        </p>
+      )}
       <Phase2Actions />
     </article>
   );
@@ -159,16 +167,17 @@ export function HoldsRail({
   labels: ReadonlyMap<string, RunLabel>;
   nowMs: number;
 }) {
-  const holdFailures = meta?.failed.filter((f) => f !== "pending_draft") ?? [];
-  const draftsUnavailable = !!meta?.failed.includes("pending_draft");
+  const holdFailures = meta?.failed ?? [];
   const count =
     meta?.totalState === "unavailable"
       ? `(count unavailable, ${holds.length} shown)`
       : meta?.totalState === "capped"
         ? `(2,000+ holds (incomplete), ${meta.shown} shown)`
-        : meta?.truncated
-          ? `(${meta.total}, ${meta.shown} shown)`
-          : `(${holds.length})`;
+        : meta?.totalState === "incomplete"
+          ? `(${meta.total}+ holds (incomplete), ${meta.shown} shown)`
+          : meta?.truncated
+            ? `(${meta.total}, ${meta.shown} shown)`
+            : `(${holds.length})`;
   return (
     <aside aria-label="Holds" className="flex flex-col gap-3">
       <h2 className="text-sm font-semibold">
@@ -184,13 +193,13 @@ export function HoldsRail({
           {holdFailures.map((f) => SOURCE_NAME[f]).join(", ")} query failed
         </p>
       )}
-      {draftsUnavailable && (
+      {meta?.deadLetterUnavailable && (
         <p
           role="alert"
-          data-testid="drafts-unavailable"
+          data-testid="dead-letter-unavailable"
           className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
         >
-          Draft status unavailable — held Claude drafts may be missing.
+          dead-letter status unavailable — saved-reply markers may be missing.
         </p>
       )}
       {meta && meta.contextErrors.length > 0 && (

@@ -153,6 +153,8 @@ export async function completeAiResponseClaim(
     outcome: string;
     outboundMessageId?: string | null;
     errorMessage?: string | null;
+    /** Expire the lease now so the same inbound can be reclaimed (retry). */
+    releaseLease?: boolean;
   },
 ): Promise<void> {
   if (!args.claimId) return;
@@ -165,6 +167,7 @@ export async function completeAiResponseClaim(
       outbound_message_id: args.outboundMessageId ?? null,
       outcome: args.outcome,
       error_message: args.errorMessage ?? null,
+      ...(args.releaseLease ? { lease_expires_at: now } : {}),
       updated_at: now,
     })
     .eq("id", args.claimId);

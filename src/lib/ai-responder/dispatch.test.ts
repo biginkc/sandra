@@ -69,6 +69,7 @@ vi.mock("./safety", () => ({
 type MessageRow = {
   id: string;
   body: string | null;
+  campaign_id?: string | null;
   channel: string;
   contact_id: string;
   conversation_id: string | null;
@@ -107,6 +108,18 @@ type MockState = {
   /** Active reservations by conversation key (holder + expiry ms). */
   sendReservations?: Map<string, { holder: string; expiresAt: number }>;
   reserveRpcError?: boolean;
+  /** fn_renew_ai_send returns false (the lease was lost before the provider call). */
+  renewLost?: boolean;
+  /** Active-config re-read errors / finds no row (fail-closed hold). */
+  configReadError?: boolean;
+  configMissing?: boolean;
+  /** message ids that sequence_step_runs links to (drip ticks). */
+  sequenceMessageIds?: string[];
+  sequenceLookupError?: boolean;
+  deadLetters?: Array<Record<string, unknown>>;
+  deadLetterInsertError?: { message: string };
+  /** Drafts' select/update errors. */
+  draftLookupError?: boolean;
   reserveCalls?: number;
   /** A messages lookup for this direction returns a DB error. */
   messageLookupError?: "inbound" | "outbound";
@@ -145,6 +158,7 @@ type MockState = {
     id: string;
     homeowner_contact_id: string;
     needs_human_attention: boolean;
+    last_ai_escalation_reason?: string | null;
     org_id: string;
     outreach_dispo: string | null;
     state: string;
@@ -470,6 +484,12 @@ function createMockSupabase(state: MockState) {
         return query;
       },
       maybeSingle() {
+        if (state.configReadError) {
+          return Promise.resolve({ data: null, error: { message: "config boom" } });
+        }
+        if (state.configMissing) {
+          return Promise.resolve({ data: null, error: null });
+        }
         return Promise.resolve({
           data: state.config,
           error: null,
@@ -699,24 +719,78 @@ function createMockSupabase(state: MockState) {
       if (table === "jev_outcome_thresholds") {
         return buildJevOutcomeThresholdsQuery();
       }
-      if (table === "ai_reply_drafts") {
+      if (table === "sequence_step_runs") {
+        const q = {
+          select: () => q,
+          in: (_field: string, ids: string[]) =>
+            Promise.resolve(
+              state.sequenceLookupError
+                ? { data: null, error: { message: "sequence boom" } }
+                : {
+                    data: (state.sequenceMessageIds ?? [])
+                      .filter((id) => ids.includes(id))
+                      .map((id) => ({ message_id: id })),
+                    error: null,
+                  },
+            ),
+        };
+        return q;
+      }
+      if (table === "ai_reply_dead_letters") {
         return {
           insert: async (row: Record<string, unknown>) => {
+            if (state.deadLetterInsertError) return { error: state.deadLetterInsertError };
+            (state.deadLetters ??= []).push(row);
+            return { error: null };
+          },
+        };
+      }
+      if (table === "ai_reply_drafts") {
+        const drafts = () => (state.aiReplyDrafts ??= []);
+        const filters = new Map<string, unknown>();
+        let updateData: Record<string, unknown> | null = null;
+        const q = {
+          select: () => q,
+          eq(field: string, value: unknown) {
+            filters.set(field, value);
+            return q;
+          },
+          order: () => q,
+          limit: () => q,
+          update(value: Record<string, unknown>) {
+            updateData = value;
+            return q;
+          },
+          then(resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) {
+            const run = () => {
+              if (state.draftLookupError) return { data: null, error: { message: "draft lookup boom" } };
+              const matches = drafts().filter((d) =>
+                [...filters].every(([k, v]) => d[k] === v),
+              );
+              if (updateData) {
+                for (const d of matches) Object.assign(d, updateData);
+                return { data: null, error: null };
+              }
+              return { data: matches.slice().reverse(), error: null };
+            };
+            return Promise.resolve(run()).then(resolve, reject);
+          },
+          insert: async (row: Record<string, unknown>) => {
             if (state.draftInsertError) return { error: state.draftInsertError };
-            const drafts = (state.aiReplyDrafts ??= []);
             if (
               row.status === "pending" &&
               row.inbound_message_id &&
-              drafts.some(
+              drafts().some(
                 (d) => d.status === "pending" && d.inbound_message_id === row.inbound_message_id,
               )
             ) {
               return { error: { code: "23505", message: "duplicate pending draft" } };
             }
-            drafts.push(row);
+            drafts().push({ id: `draft-${drafts().length + 1}`, ...row });
             return { error: null };
           },
         };
+        return q;
       }
       throw new Error(`Unexpected table: ${table}`);
     },
@@ -738,6 +812,18 @@ function createMockSupabase(state: MockState) {
         });
         state.onReserved?.();
         return Promise.resolve({ data: true, error: null });
+      }
+      if (name === "fn_renew_ai_send") {
+        const reservations = (state.sendReservations ??= new Map());
+        const existing = reservations.get(String(args.p_conversation_id));
+        if (state.renewLost || !existing || existing.holder !== args.p_holder || existing.expiresAt <= Date.now()) {
+          return Promise.resolve({ data: false, error: null });
+        }
+        existing.expiresAt = Date.now() + Number(args.p_lease_seconds) * 1000;
+        return Promise.resolve({ data: true, error: null });
+      }
+      if (name === "ensure_sms_conversation_id") {
+        return Promise.resolve({ data: state.threadConversationId, error: null });
       }
       if (name === "fn_release_ai_send") {
         const reservations = (state.sendReservations ??= new Map());
@@ -2355,7 +2441,7 @@ describe("send chokepoint guards (fix round 2)", () => {
   });
 
   beforeEach(() => {
-    Object.assign(sendReservationTuning, { waitAttempts: 1 });
+    Object.assign(sendReservationTuning, { deadlineMs: 0 });
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-13T18:00:00.000Z"));
     vi.mocked(getConsentState).mockResolvedValue({} as never);
@@ -2375,7 +2461,7 @@ describe("send chokepoint guards (fix round 2)", () => {
 
   it("two overlapping dispatches for two inbounds in one conversation produce exactly one send", async () => {
     vi.useRealTimers();
-    Object.assign(sendReservationTuning, { waitAttempts: 200, waitDelayMs: 2 });
+    Object.assign(sendReservationTuning, { deadlineMs: 2000, waitDelayMs: 2 });
     const state = createMockState();
     const supabase = createMockSupabase(state);
     installSendMock(state);
@@ -2395,18 +2481,142 @@ describe("send chokepoint guards (fix round 2)", () => {
     expect(state.sendReservations?.size).toBe(0);
   });
 
-  it("two truly concurrent sends for the SAME inbound never both reach the provider", async () => {
+  it("two truly concurrent sends for the SAME inbound never both reach the provider: the loser is re-scheduled, not dropped", async () => {
     vi.useRealTimers();
-    Object.assign(sendReservationTuning, { waitAttempts: 1 });
     const state = createMockState();
     installSendMock(state);
     // Another sender already holds the conversation lease.
     state.sendReservations = new Map([[CONVERSATION_ID, { holder: "other", expiresAt: Date.now() + 60_000 }]]);
     seedInboundMessage(state, { id: "inbound-r", body: "Hello?" });
     const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-r", "Hello?"), { anthropic: {} as never });
-    expect(result).toEqual({ outcome: "skipped", reason: "send_reserved_elsewhere" });
+    expect(result).toEqual({ outcome: "retry", reason: "send_reserved_elsewhere", attempt: 1, delaySeconds: 20 });
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
     expect(state.sendReservations.get(CONVERSATION_ID)?.holder).toBe("other");
+    // Not flagged and not dead-lettered while retries remain; claim stays reclaimable.
+    expect(state.property.needs_human_attention).toBe(false);
+    expect(state.deadLetters ?? []).toHaveLength(0);
+    expect(state.aiClaims[0]).toMatchObject({ status: "error", error_message: "retry_scheduled:send_reserved_elsewhere:1" });
+    expect(new Date(state.aiClaims[0]!.lease_expires_at).getTime()).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("the retry reclaims the SAME inbound's claim immediately and sends once the lease is free", async () => {
+    vi.useRealTimers();
+    const state = createMockState();
+    installSendMock(state);
+    state.sendReservations = new Map([[CONVERSATION_ID, { holder: "other", expiresAt: Date.now() + 60_000 }]]);
+    seedInboundMessage(state, { id: "inbound-rr", body: "Hello?" });
+    const supabase = createMockSupabase(state);
+    const first = await dispatchAiResponse(supabase as never, input("inbound-rr"), { anthropic: {} as never });
+    expect(first.outcome).toBe("retry");
+    state.sendReservations.clear();
+    const second = await dispatchAiResponse(supabase as never, { ...input("inbound-rr"), retryAttempt: 1 }, { anthropic: {} as never });
+    expect(second.outcome).toBe("sent");
+    expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledTimes(1);
+    expect(state.aiClaims[0]).toMatchObject({ status: "completed" });
+  });
+
+  it("after the LAST retry a contended send is dead-lettered and the property is flagged", async () => {
+    vi.useRealTimers();
+    const state = createMockState();
+    installSendMock(state);
+    state.sendReservations = new Map([[CONVERSATION_ID, { holder: "other", expiresAt: Date.now() + 60_000 }]]);
+    seedInboundMessage(state, { id: "inbound-last", body: "Hello?" });
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, { ...input("inbound-last"), retryAttempt: 3 }, { anthropic: {} as never });
+    expect(result).toEqual({ outcome: "escalated", reason: "send_reserved_elsewhere" });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.property.last_ai_escalation_reason).toBe("reply_skipped:send_reserved_elsewhere");
+    expect(state.deadLetters).toEqual([
+      expect.objectContaining({ org_id: "org-1", property_id: PROPERTY_ID, inbound_message_id: "inbound-last", body: "Hi there", reason: "send_reserved_elsewhere" }),
+    ]);
+    expect(state.aiClaims[0]).toMatchObject({ status: "completed" });
+  });
+
+  it("waits for a lease that frees within the wall-clock deadline (no attempt counting)", async () => {
+    vi.useRealTimers();
+    Object.assign(sendReservationTuning, { deadlineMs: 500, waitDelayMs: 5 });
+    const state = createMockState();
+    installSendMock(state);
+    state.sendReservations = new Map([[CONVERSATION_ID, { holder: "other", expiresAt: Date.now() + 40 }]]);
+    seedInboundMessage(state, { id: "inbound-wait", body: "Hello?" });
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-wait"), { anthropic: {} as never });
+    expect(result.outcome).toBe("sent");
+  });
+
+  it("a run WITHOUT a conversation id serialises against the thread's lease (same resolver, not the contact id)", async () => {
+    vi.useRealTimers();
+    const state = createMockState();
+    installSendMock(state);
+    state.sendReservations = new Map([[CONVERSATION_ID, { holder: "other", expiresAt: Date.now() + 60_000 }]]);
+    seedInboundMessage(state, { id: "inbound-nc", body: "Hello?" });
+    const { conversationId: _omit, ...noConversation } = input("inbound-nc");
+    void _omit;
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, noConversation, { anthropic: {} as never });
+    expect(result).toMatchObject({ outcome: "retry", reason: "send_reserved_elsewhere" });
+    expect(state.reserveCalls).toBeGreaterThan(0);
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("a lease lost before the provider call (renew fails) is retried, never sent", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    state.renewLost = true;
+    seedInboundMessage(state, { id: "inbound-lost", body: "Hello?" });
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-lost"), { anthropic: {} as never });
+    expect(result).toEqual({ outcome: "retry", reason: "send_lease_lost", attempt: 1, delaySeconds: 20 });
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+    expect(state.sendReservations?.size).toBe(0);
+  });
+
+  it("renews the lease right before the provider call", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-renew", body: "Hello?" });
+    const holderExpiry: number[] = [];
+    state.onReserved = () => {
+      holderExpiry.push([...(state.sendReservations?.values() ?? [])][0]?.expiresAt ?? 0);
+      vi.setSystemTime(new Date(Date.now() + 10_000)); // time passes before the provider boundary
+    };
+    vi.mocked(sendSmsToContact).mockImplementationOnce(async () => {
+      holderExpiry.push([...(state.sendReservations?.values() ?? [])][0]?.expiresAt ?? 0);
+      return { externalId: "e", messageId: "m1", status: "sent" } as never;
+    });
+    vi.setSystemTime(new Date("2026-06-13T18:00:00.000Z"));
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-renew"), { anthropic: {} as never });
+    expect(result.outcome).toBe("sent");
+    expect(holderExpiry).toHaveLength(2);
+    expect(holderExpiry[1]).toBeGreaterThan(holderExpiry[0]!);
+  });
+
+  it("a provider call that outlives its timeout is a failed send: send_timeout, flagged, not retried, lease kept", async () => {
+    vi.useRealTimers();
+    Object.assign(sendReservationTuning, { providerTimeoutMs: 20 });
+    const state = createMockState();
+    seedInboundMessage(state, { id: "inbound-slow", body: "Hello?" });
+    vi.mocked(sendSmsToContact).mockImplementation(() => new Promise(() => undefined));
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-slow"), { anthropic: {} as never });
+    expect(result).toEqual({ outcome: "escalated", reason: "send_timeout" });
+    expect(vi.mocked(sendSmsToContact)).toHaveBeenCalledTimes(1);
+    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.property.last_ai_escalation_reason).toBe("send_timeout");
+    // The request may still be in flight: the lease is NOT released.
+    expect(state.sendReservations?.size).toBe(1);
+    expect(state.aiClaims[0]).toMatchObject({ status: "completed" });
+  });
+
+  it("the provider timeout is always capped under the send lease", async () => {
+    vi.useRealTimers();
+    Object.assign(sendReservationTuning, { providerTimeoutMs: 10 * 60_000 });
+    const state = createMockState();
+    seedInboundMessage(state, { id: "inbound-cap", body: "Hello?" });
+    vi.mocked(sendSmsToContact).mockImplementation(() => new Promise(() => undefined));
+    const spy = vi.spyOn(globalThis, "setTimeout");
+    void dispatchAiResponse(createMockSupabase(state) as never, input("inbound-cap"), { anthropic: {} as never });
+    await new Promise((r) => setTimeout(r, 30));
+    const delays = spy.mock.calls.map((c) => Number(c[1])).filter((n) => n >= 60_000);
+    spy.mockRestore();
+    expect(delays.length).toBeGreaterThan(0);
+    expect(Math.max(...delays)).toBeLessThan(sendReservationTuning.leaseSeconds * 1000);
   });
 
   it("a newer inbound that lands AFTER the reservation is taken still blocks the send (and flags it)", async () => {
@@ -2459,50 +2669,105 @@ describe("send chokepoint guards (fix round 2)", () => {
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
   });
 
-  it("flags the property when an outbound landed after the claim and the reply is skipped", async () => {
+  const pushOutbound = (state: MockState, row: Partial<MessageRow> & { id: string }) => {
+    state.messages.push({
+      body: "x", channel: "sms", contact_id: CONTACT_ID, conversation_id: CONVERSATION_ID,
+      created_at: new Date().toISOString(), direction: "outbound", metadata: null, property_id: PROPERTY_ID,
+      sent_at: null, status: "sent", ...row,
+    });
+  };
+  const landDuringGeneration = (state: MockState, row: Partial<MessageRow> & { id: string }) =>
+    vi.mocked(generateAiReply).mockImplementation(async () => {
+      vi.setSystemTime(new Date("2026-06-13T18:00:02.000Z"));
+      pushOutbound(state, { ...row, created_at: row.created_at ?? new Date().toISOString() });
+      return HAPPY_REPLY;
+    });
+
+  it("FLAGS when a conversational outbound that does not answer this inbound landed after the claim (AI reply to a different inbound)", async () => {
     const state = createMockState();
     installSendMock(state);
     seedInboundMessage(state, { id: "inbound-o", body: "Hello?" });
+    landDuringGeneration(state, { id: "ai-other", metadata: { generated_by: "ai_responder_v1", inbound_message_id: "some-other-inbound" } });
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-o", "Hello?"), { anthropic: {} as never });
+    expect(result).toEqual({ outcome: "skipped", reason: "superseded_before_send" });
+    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.property.last_ai_escalation_reason).toBe("reply_skipped:outbound_since_claim");
+    expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+  });
+
+  it("already_answered: an AI reply to THIS inbound (or a human reply after it) skips silently, no flag", async () => {
+    for (const row of [
+      { id: "ai-same", metadata: { generated_by: "ai_responder_v1", inbound_message_id: "inbound-c" } },
+      { id: "human-reply", metadata: null },
+      { id: "rep-sms", metadata: { repSms: { workflow: "manager-through-mel" } } },
+    ]) {
+      vi.clearAllMocks();
+      vi.mocked(getConsentState).mockResolvedValue({} as never);
+      vi.mocked(classifyAiSkip).mockReturnValue({ skip: false });
+      vi.mocked(generateAiReply).mockResolvedValue(HAPPY_REPLY);
+      vi.mocked(humanizeReply).mockImplementation(async ({ draft }) => draft);
+      vi.mocked(validateAiReplyBody).mockReturnValue({ ok: true });
+      const state = createMockState();
+      installSendMock(state);
+      seedInboundMessage(state, { id: "inbound-c", body: "Hello?" });
+      landDuringGeneration(state, row);
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-c", "Hello?"), { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "skipped", reason: "already_answered" });
+      expect(state.property.needs_human_attention).toBe(false);
+      expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+    }
+  });
+
+  it("broadcast-only outbounds (bulk campaign, Norma pre-call, sequence tick by stamp or by step-run link) skip silently as superseded_by_broadcast", async () => {
+    const cases: Array<[string, Partial<MessageRow> & { id: string }, string[]?]> = [
+      ["bulk campaign", { id: "bulk", campaign_id: "campaign-1" }],
+      ["norma precall", { id: "norma", metadata: { generated_by: "norma_precall", request_id: "r" } }],
+      ["sequence tick stamp", { id: "tick-a", metadata: { generated_by: "sequence_tick" } }],
+      ["sequence tick link", { id: "tick-b" }, ["tick-b"]],
+      ["seller reminder", { id: "rem", metadata: { kind: "seller_appointment_reminder" } }],
+    ];
+    for (const [label, row, linked] of cases) {
+      vi.clearAllMocks();
+      vi.mocked(getConsentState).mockResolvedValue({} as never);
+      vi.mocked(classifyAiSkip).mockReturnValue({ skip: false });
+      vi.mocked(generateAiReply).mockResolvedValue(HAPPY_REPLY);
+      vi.mocked(humanizeReply).mockImplementation(async ({ draft }) => draft);
+      vi.mocked(validateAiReplyBody).mockReturnValue({ ok: true });
+      const state = createMockState();
+      state.sequenceMessageIds = linked;
+      installSendMock(state);
+      seedInboundMessage(state, { id: "inbound-b", body: "Hello?" });
+      landDuringGeneration(state, row);
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-b", "Hello?"), { anthropic: {} as never });
+      expect(result, label).toEqual({ outcome: "skipped", reason: "superseded_by_broadcast" });
+      expect(state.property.needs_human_attention, label).toBe(false);
+      expect(vi.mocked(sendSmsToContact), label).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a broadcast PLUS an unrelated conversational outbound still flags (conversational wins)", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-m", body: "Hello?" });
     vi.mocked(generateAiReply).mockImplementation(async () => {
       vi.setSystemTime(new Date("2026-06-13T18:00:02.000Z"));
-      state.messages.push({
-        id: "tick", body: "tick", channel: "sms", contact_id: CONTACT_ID, conversation_id: CONVERSATION_ID,
-        created_at: "2026-06-13T18:00:02+00:00", direction: "outbound", metadata: null, property_id: PROPERTY_ID,
-        sent_at: null, status: "sent",
-      });
+      pushOutbound(state, { id: "bulk", campaign_id: "campaign-1" });
+      pushOutbound(state, { id: "ai-other", metadata: { generated_by: "ai_responder_v1", inbound_message_id: "different" } });
       return HAPPY_REPLY;
     });
-    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-o", "Hello?"), { anthropic: {} as never });
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-m", "Hello?"), { anthropic: {} as never });
     expect(result).toEqual({ outcome: "skipped", reason: "superseded_before_send" });
     expect(state.property.needs_human_attention).toBe(true);
   });
 
-  it("does not send when another outbound lands in the conversation after the claim", async () => {
+  it("a failed sequence-link lookup fails closed (send_check_failed)", async () => {
     const state = createMockState();
-    const supabase = createMockSupabase(state);
     installSendMock(state);
-    seedInboundMessage(state, { id: "inbound-c", body: "Hello?" });
-    vi.mocked(generateAiReply).mockImplementation(async () => {
-      vi.setSystemTime(new Date("2026-06-13T18:00:02.000Z"));
-      state.messages.push({
-        id: "human-reply",
-        body: "Hi, it's Sam",
-        channel: "sms",
-        contact_id: CONTACT_ID,
-        conversation_id: CONVERSATION_ID,
-        created_at: new Date().toISOString(),
-        direction: "outbound",
-        metadata: null,
-        property_id: PROPERTY_ID,
-        sent_at: new Date().toISOString(),
-        status: "sent",
-      });
-      return HAPPY_REPLY;
-    });
-
-    const result = await dispatchAiResponse(supabase as never, input("inbound-c", "Hello?"), { anthropic: {} as never });
-
-    expect(result).toEqual({ outcome: "skipped", reason: "superseded_before_send" });
+    state.sequenceLookupError = true;
+    seedInboundMessage(state, { id: "inbound-sq", body: "Hello?" });
+    landDuringGeneration(state, { id: "bulk", campaign_id: "campaign-1" });
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-sq", "Hello?"), { anthropic: {} as never });
+    expect(result).toEqual({ outcome: "escalated", reason: "send_check_failed" });
     expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
   });
 
@@ -2575,19 +2840,91 @@ describe("send chokepoint guards (fix round 2)", () => {
     expect(state.sendReservations?.size).toBe(0);
   });
 
-  it("a failed draft write is NOT swallowed: error outcome, claim left retryable, property not flagged, text preserved in the report", async () => {
+  it("a failed draft write is NOT swallowed or dropped: while retries remain it is re-scheduled (no flag, no dead letter, no body in the report)", async () => {
     const state = createMockState();
     state.config.outbound_mode = "hold";
     state.draftInsertError = { message: "insert boom" };
     installSendMock(state);
     const result = await dispatchAiResponse(createMockSupabase(state) as never, input("inbound-df"), { anthropic: {} as never });
-    expect(result).toEqual({ outcome: "escalated", reason: "draft_persist_failed" });
+    expect(result).toEqual({ outcome: "retry", reason: "draft_persist_failed", attempt: 1, delaySeconds: 20 });
     expect(state.property.needs_human_attention).toBe(false);
-    expect(state.aiClaims[0]).toMatchObject({ status: "error", error_message: "draft_persist_failed" });
+    expect(state.deadLetters ?? []).toHaveLength(0);
+    expect(state.aiClaims[0]).toMatchObject({ status: "error", error_message: "retry_scheduled:draft_persist_failed:1" });
+    for (const call of reportErrorMock.mock.calls) {
+      expect(JSON.stringify(call[1])).not.toContain("Hi there");
+    }
+  });
+
+  it("after the LAST retry a failed draft write is dead-lettered and the property flagged draft_persist_failed", async () => {
+    const state = createMockState();
+    state.config.outbound_mode = "hold";
+    state.draftInsertError = { message: "insert boom" };
+    installSendMock(state);
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, { ...input("inbound-dl"), retryAttempt: 3 }, { anthropic: {} as never });
+    expect(result).toEqual({ outcome: "escalated", reason: "draft_persist_failed" });
+    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.property.last_ai_escalation_reason).toBe("draft_persist_failed");
+    expect(state.deadLetters).toEqual([
+      expect.objectContaining({ org_id: "org-1", inbound_message_id: "inbound-dl", body: "Hi there", reason: "draft_persist_failed" }),
+    ]);
+    for (const call of reportErrorMock.mock.calls) {
+      expect(JSON.stringify(call[1])).not.toContain("Hi there");
+    }
+  });
+
+  it("when the dead letter write fails too, the report is the last copy of the text and the property is still flagged", async () => {
+    const state = createMockState();
+    state.config.outbound_mode = "hold";
+    state.draftInsertError = { message: "insert boom" };
+    state.deadLetterInsertError = { message: "dead letter boom" };
+    installSendMock(state);
+    const result = await dispatchAiResponse(createMockSupabase(state) as never, { ...input("inbound-dl2"), retryAttempt: 3 }, { anthropic: {} as never });
+    expect(result).toEqual({ outcome: "escalated", reason: "draft_persist_failed" });
+    expect(state.property.needs_human_attention).toBe(true);
     expect(reportErrorMock).toHaveBeenCalledWith(
       expect.any(Error),
       expect.objectContaining({ extra: expect.objectContaining({ replyBody: "Hi there" }) }),
     );
+  });
+
+  it("policy re-read FAILS CLOSED: a config lookup error, or no active config row, holds the reply instead of sending", async () => {
+    for (const flag of ["configReadError", "configMissing"] as const) {
+      vi.clearAllMocks();
+      vi.mocked(getConsentState).mockResolvedValue({} as never);
+      vi.mocked(classifyAiSkip).mockReturnValue({ skip: false });
+      vi.mocked(generateAiReply).mockResolvedValue(HAPPY_REPLY);
+      vi.mocked(humanizeReply).mockImplementation(async ({ draft }) => draft);
+      vi.mocked(validateAiReplyBody).mockReturnValue({ ok: true });
+      const state = createMockState();
+      installSendMock(state);
+      state.onReserved = () => {
+        state[flag] = true;
+      };
+      const result = await dispatchAiResponse(createMockSupabase(state) as never, input(`inbound-${flag}`), { anthropic: {} as never });
+      expect(result, flag).toEqual({ outcome: "escalated", reason: "draft_held" });
+      expect(vi.mocked(sendSmsToContact), flag).not.toHaveBeenCalled();
+      expect(state.aiReplyDrafts, flag).toHaveLength(1);
+    }
+  });
+
+  it("draft reuse: a discarded draft for the inbound is set back to pending (no second row); a sent one is never resurrected", async () => {
+    const state = createMockState();
+    state.config.outbound_mode = "hold";
+    installSendMock(state);
+    state.aiReplyDrafts = [{ id: "d1", inbound_message_id: "inbound-ru", status: "discarded", body: "old" }];
+    const supabase = createMockSupabase(state);
+    const revived = await dispatchAiResponse(supabase as never, input("inbound-ru"), { anthropic: {} as never });
+    expect(revived).toEqual({ outcome: "escalated", reason: "draft_held" });
+    expect(state.aiReplyDrafts).toEqual([expect.objectContaining({ id: "d1", status: "pending" })]);
+
+    const sent = createMockState();
+    sent.config.outbound_mode = "hold";
+    installSendMock(sent);
+    sent.aiReplyDrafts = [{ id: "d2", inbound_message_id: "inbound-sn", status: "sent", body: "old" }];
+    const result = await dispatchAiResponse(createMockSupabase(sent) as never, input("inbound-sn"), { anthropic: {} as never });
+    expect(result).toEqual({ outcome: "skipped", reason: "already_answered" });
+    expect(sent.aiReplyDrafts).toEqual([expect.objectContaining({ id: "d2", status: "sent" })]);
+    expect(sent.property.needs_human_attention).toBe(false);
   });
 
   it("a retry after a failed draft write persists the draft once; a duplicate pending insert is idempotent", async () => {

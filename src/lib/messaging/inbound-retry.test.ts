@@ -22,6 +22,8 @@ const mocks = vi.hoisted(() => ({
   findTakeover: vi.fn(async () => null),
   recordTakeover: vi.fn(async () => undefined),
   persistTakeover: vi.fn(async () => undefined),
+  markAttention: vi.fn(async () => undefined),
+  recordThread: vi.fn(async () => undefined),
 }));
 
 vi.mock("@supabase/supabase-js", async () => {
@@ -33,7 +35,7 @@ vi.mock("@supabase/supabase-js", async () => {
 
 vi.mock("@/lib/messages/ai-responder-thread-state", () => ({
   clearAiResponderThreadState: mocks.clearThread,
-  recordAiResponderOutcomeForThread: vi.fn(),
+  recordAiResponderOutcomeForThread: mocks.recordThread,
 }));
 
 vi.mock("@/lib/messaging/inbound-intents", () => ({
@@ -66,7 +68,7 @@ vi.mock("@/lib/ai-responder/dispatch", () => ({
   applyKeywordEscalation: vi.fn(async () => ({ escalated: false })),
   checkAiResponderDispatchPreGates: vi.fn(async () => ({ ok: true })),
   dispatchAiResponse: mocks.dispatchAi,
-  markPropertyNeedsAttention: vi.fn(async () => undefined),
+  markPropertyNeedsAttention: mocks.markAttention,
 }));
 
 vi.mock("@/lib/messaging/inbound-state", () => ({
@@ -319,5 +321,75 @@ describe("handleInboundWebhook retry boundary", () => {
     expect(mocks.markComplete).toHaveBeenCalledTimes(1);
     expect(mocks.dispatchOwner).toHaveBeenCalledTimes(1);
     expect(mocks.dispatchAi).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("handleInboundWebhook retry outcome (immediate dispatch)", () => {
+  async function runWebhook() {
+    const handler = handlerClient([{ data: INSERTED, error: null }]);
+    mocks.serviceClient = handler.client;
+    process.env.TEST_SUPABASE_URL = "http://example.test";
+    process.env.TEST_SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+    return handleInboundWebhook(
+      new Request("https://example.test/api/webhooks/sendillo/sms", {
+        method: "POST",
+        headers: { host: "example.test" },
+        body: "{}",
+      }),
+      { includeFullUrl: true, provider: provider() as never },
+    );
+  }
+  const retryOutcome = {
+    outcome: "retry" as const,
+    reason: "send_reserved_elsewhere" as const,
+    attempt: 1,
+    delaySeconds: 20,
+  };
+
+  it("re-schedules the same inbound through the delay workflow and does NOT stamp a terminal outcome", async () => {
+    mocks.dispatchAi.mockResolvedValueOnce(retryOutcome as never);
+    const response = await runWebhook();
+    expect(response.status).toBe(200);
+    expect(mocks.startWorkflow).toHaveBeenCalledTimes(1);
+    const [, [args]] = mocks.startWorkflow.mock.calls[0] as unknown as [unknown, [Record<string, unknown>]];
+    expect(args).toMatchObject({
+      inboundMessageId: "message-1",
+      propertyId: "property-1",
+      delaySeconds: 20,
+      retryAttempt: 1,
+    });
+    // Inbound is stamped `delayed` (so a webhook redelivery does not race the
+    // retry), never with the retry outcome or a terminal state.
+    expect(mocks.markState).toHaveBeenCalledWith(
+      expect.anything(),
+      "message-1",
+      { aiResponder: expect.objectContaining({ outcome: "delayed", retryAttempt: 1, retryReason: "send_reserved_elsewhere" }) },
+    );
+    expect(mocks.recordThread).not.toHaveBeenCalled();
+    expect(mocks.markAttention).not.toHaveBeenCalled();
+  });
+
+  it("when the retry cannot be scheduled, the property is flagged reply_skipped:<reason> and a terminal escalation is stamped", async () => {
+    mocks.dispatchAi.mockResolvedValueOnce(retryOutcome as never);
+    mocks.startWorkflow.mockRejectedValueOnce(new Error("queue down"));
+    await runWebhook();
+    expect(mocks.markAttention).toHaveBeenCalledWith(
+      expect.anything(),
+      "property-1",
+      "reply_skipped:send_reserved_elsewhere",
+    );
+    expect(mocks.markState).toHaveBeenCalledWith(
+      expect.anything(),
+      "message-1",
+      { aiResponder: expect.objectContaining({ outcome: "escalated", reason: "send_reserved_elsewhere" }) },
+    );
+  });
+
+  it("a webhook redelivery of an inbound already stamped delayed does not dispatch again", async () => {
+    mocks.readState.mockReturnValueOnce({ aiResponder: { outcome: "delayed", delaySeconds: 20, scheduledAt: "x" } } as never);
+    // First delivery's insert is a duplicate on redelivery; the stamp check is
+    // what keeps the retry from being short-circuited AND from being doubled.
+    await runWebhook();
+    expect(mocks.dispatchAi).not.toHaveBeenCalled();
   });
 });
