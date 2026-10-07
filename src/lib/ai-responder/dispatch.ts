@@ -1566,7 +1566,27 @@ async function resolveAndApplyRoute(
 async function findExistingAiReplyForInbound(
   supabase: SupabaseClient<Database>,
   inboundMessageId: string,
-): Promise<{ id: string; status: string; aborted: boolean } | null> {
+): Promise<ExistingAiReply | null> {
+  const result = await lookupAiReplyForInbound(supabase, inboundMessageId);
+  return result.ok ? result.reply : null;
+}
+
+type ExistingAiReply = {
+  id: string;
+  status: string;
+  aborted: boolean;
+  /** Failed row whose provider outcome is ambiguous (the text may have gone out). */
+  providerUnknown: boolean;
+};
+
+/**
+ * Same ranking as `findExistingAiReplyForInbound`, but a database error is
+ * `{ ok: false }` (lookup failure), never conflated with "no reply exists".
+ */
+async function lookupAiReplyForInbound(
+  supabase: SupabaseClient<Database>,
+  inboundMessageId: string,
+): Promise<{ ok: true; reply: ExistingAiReply | null } | { ok: false }> {
   const { data, error } = await supabase
     .from("messages")
     .select("id, status, metadata")
@@ -1583,7 +1603,7 @@ async function findExistingAiReplyForInbound(
       tags: { surface: "ai_responder_existing_reply_lookup" },
       extra: { inboundMessageId },
     });
-    return null;
+    return { ok: false };
   }
   const rank = (status: string) =>
     status === "sent" || status === "delivered" ? 0 : status === "pending" || status === "queued" ? 1 : 2;
@@ -1594,9 +1614,10 @@ async function findExistingAiReplyForInbound(
       const meta = readJsonObject((r.metadata ?? null) as Json | null);
       return meta.abortedBeforeProvider === true || meta.aborted_inbound_message_id !== undefined;
     })(),
+    providerUnknown: readJsonObject((r.metadata ?? null) as Json | null).providerOutcome === "provider_unknown",
   }));
   rows.sort((l, r) => rank(l.status) - rank(r.status));
-  return rows[0] ?? null;
+  return { ok: true, reply: rows[0] ?? null };
 }
 
 /**
@@ -2859,9 +2880,53 @@ export async function flagAndDeadLetter(
     reason: string;
     flagReason?: string;
     guard?: () => void;
+    /**
+     * Write the flag BEFORE the dead-letter row. The late-send sweeper treats
+     * an unresolved `send_timeout` row as proof the flag write already ran, so
+     * the timeout path must never insert that row first. If the dead letter
+     * then fails, the flag is rewritten to `dead_letter_failed:<reason>`.
+     */
+    flagFirst?: boolean;
   },
 ): Promise<{ deadLettered: boolean; flagReason: string; flagged: boolean }> {
   args.guard?.();
+  if (args.flagFirst && args.body !== null) {
+    const firstReason = args.flagReason ?? args.reason;
+    const flagged = await markPropertyNeedsAttention(
+      supabase,
+      args.propertyId,
+      firstReason,
+      args.runContext,
+      args.guard ?? NO_GUARD,
+    );
+    args.guard?.();
+    const stored = await writeReplyDeadLetter(supabase, args.runContext, {
+      orgId: args.orgId,
+      conversationId: args.conversationId,
+      propertyId: args.propertyId,
+      inboundMessageId: args.inboundMessageId,
+      body: args.body,
+      reason: args.reason,
+      guard: args.guard,
+    });
+    if (stored) return { deadLettered: true, flagReason: firstReason, flagged };
+    const failedReason = `dead_letter_failed:${args.reason}`;
+    args.guard?.();
+    // The flag is already set (needs_human_attention), so rewrite only OUR
+    // reason; a different flag reason is never overwritten.
+    const { error: rewriteError } = await supabase
+      .from("properties")
+      .update({ last_ai_escalation_reason: failedReason, updated_at: new Date().toISOString() })
+      .eq("id", args.propertyId)
+      .eq("last_ai_escalation_reason", firstReason);
+    if (rewriteError) {
+      reportError(new Error(rewriteError.message), {
+        tags: { surface: "ai_responder_dead_letter_failed_flag_rewrite" },
+        extra: { propertyId: args.propertyId },
+      });
+    }
+    return { deadLettered: false, flagReason: failedReason, flagged: flagged && !rewriteError };
+  }
   const deadLettered =
     args.body === null
       ? true
@@ -2892,7 +2957,7 @@ async function flagAndDeadLetterFor(
   supabase: SupabaseClient<Database>,
   args: ResponderSendArgs,
   reason: string,
-  options: { flagReason?: string; guard?: Guard } = {},
+  options: { flagReason?: string; guard?: Guard; flagFirst?: boolean } = {},
 ) {
   const result = await flagAndDeadLetter(supabase, {
     runContext: args.runContext,
@@ -2934,7 +2999,7 @@ async function failClosed(
     args,
     reason,
     reason === "send_timeout"
-      ? { guard, flagReason: sendTimeoutFlagReason(args.input.inboundMessageId ?? null) }
+      ? { guard, flagFirst: true, flagReason: sendTimeoutFlagReason(args.input.inboundMessageId ?? null) }
       : { guard },
   );
   return { outcome: "escalated", reason };
@@ -3472,7 +3537,10 @@ export async function reconcileLateSendForInbound(
     let markerExisted = false;
     if (args.inboundMessageId) {
       if (!args.confirmedSent) {
-        const reply = await findExistingAiReplyForInbound(supabase, args.inboundMessageId);
+        const lookup = await lookupAiReplyForInbound(supabase, args.inboundMessageId);
+        // A failed lookup is NOT "not sent": surface it so callers skip the row.
+        if (!lookup.ok) return "error";
+        const reply = lookup.reply;
         if (!reply || reply.aborted || (reply.status !== "sent" && reply.status !== "delivered")) {
           return "not_sent";
         }
@@ -3514,6 +3582,29 @@ export async function reconcileLateSendForInbound(
       });
       return "error";
     }
+    // A zero-row flag update is NOT success: the timeout writer may not have
+    // written its flag yet. Resolve only when the flag is provably gone (read
+    // succeeded and it is not still THIS inbound's timeout flag); otherwise
+    // leave the row unresolved so a later sweep converts the flag.
+    let resolutionReason: string | null = null;
+    if (!converted) {
+      const { data: current, error: readError } = await supabase
+        .from("properties")
+        .select("last_ai_escalation_reason")
+        .eq("id", args.propertyId)
+        .maybeSingle();
+      if (readError) {
+        reportError(new Error(readError.message), {
+          tags: { surface: "ai_responder_late_send_flag_read" },
+          extra: { propertyId: args.propertyId },
+        });
+        return "error";
+      }
+      const currentReason = (current as { last_ai_escalation_reason?: string | null } | null)
+        ?.last_ai_escalation_reason ?? null;
+      if (currentReason === sendTimeoutFlagReason(args.inboundMessageId)) return "error";
+      if (currentReason !== "send_timeout_then_sent") resolutionReason = "flag_replaced";
+    }
     // Durable resolution, stamped LAST: the original send_timeout row(s) stay
     // unresolved until the flag conversion above has succeeded, so the sweeper
     // (which reads only unresolved rows) re-drives a failed flag update.
@@ -3521,7 +3612,10 @@ export async function reconcileLateSendForInbound(
     if (args.inboundMessageId) {
       const { error: resolveError } = await supabase
         .from("ai_reply_dead_letters")
-        .update({ resolved_at: new Date().toISOString() })
+        .update({
+          resolved_at: new Date().toISOString(),
+          ...(resolutionReason ? { resolution_reason: resolutionReason } : {}),
+        })
         .eq("inbound_message_id", args.inboundMessageId)
         .eq("reason", "send_timeout")
         .is("resolved_at", null);
@@ -3561,8 +3655,14 @@ export async function reconcileLateSendForInbound(
  *   - `unreconcilable:missing_ids`  the row lacks inbound/org/property ids;
  *   - `unreconcilable:reply_failed` the AI reply for that inbound is terminally
  *     `failed` (not an aborted-before-provider row), so it cannot be accepted;
- *   - `unreconcilable:no_reply`     older than the 7-day window with no accepted
- *     reply (none, pending, or aborted).
+ *   - `unreconcilable:reply_unknown` the reply failed with an ambiguous
+ *     provider outcome (`provider_unknown`); re-checked each sweep, stamped only
+ *     after the 7-day window;
+ *   - `unreconcilable:no_reply`     older than the 7-day window and BOTH reads
+ *     positively found no accepted reply (none, pending, or aborted). A lookup
+ *     error is never terminal: the row is skipped and retried;
+ *   - `flag_replaced`               the property flag was cleared/replaced by
+ *     someone else (not an error; the marker is still written).
  * Reconciled rows are stamped with a null reason.
  *
  * Pass A reach per run is pageSize x maxPages (1,000 rows by default); because
@@ -3638,11 +3738,34 @@ export async function sweepLateSends(
         body: row.body,
       });
       if (result === "reconciled") reconciled += 1;
+      // "error" (including a failed reply lookup) is never terminal: skip this
+      // row for this run; it stays unresolved and is retried next sweep.
       if (result !== "not_sent") continue;
-      const reply = await findExistingAiReplyForInbound(supabase, row.inbound_message_id);
+      const second = await lookupAiReplyForInbound(supabase, row.inbound_message_id);
+      if (!second.ok) continue;
+      const reply = second.reply;
+      if (reply && !reply.aborted && (reply.status === "sent" || reply.status === "delivered")) {
+        // Accepted between the two reads: reconcile (marker + flag), never no_reply.
+        const again = await reconcileLateSendForInbound(supabase, {
+          orgId: row.org_id as string,
+          conversationId: row.conversation_id,
+          propertyId: row.property_id as string,
+          inboundMessageId: row.inbound_message_id,
+          body: row.body,
+        });
+        if (again === "reconciled") reconciled += 1;
+        continue;
+      }
+      const aged = new Date(row.created_at as string).getTime() < windowStartMs;
       if (reply && !reply.aborted && reply.status === "failed") {
-        await resolveUnreconcilable(row.id as string, "unreconcilable:reply_failed");
-      } else if (new Date(row.created_at as string).getTime() < windowStartMs) {
+        if (reply.providerUnknown) {
+          // Ambiguous provider error: the text may have gone out and a status
+          // webhook can still flip the row. Keep re-checking until the window ends.
+          if (aged) await resolveUnreconcilable(row.id as string, "unreconcilable:reply_unknown");
+        } else {
+          await resolveUnreconcilable(row.id as string, "unreconcilable:reply_failed");
+        }
+      } else if (aged) {
         await resolveUnreconcilable(row.id as string, "unreconcilable:no_reply");
       }
     }

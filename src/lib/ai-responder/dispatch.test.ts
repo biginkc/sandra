@@ -5145,6 +5145,156 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
         expect(result.reconciled).toBe(1);
         expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
       });
+
+      describe("r13 late-send completion race and false terminal resolution", () => {
+        const tRow = (over: Record<string, unknown> = {}) => ({
+          id: "t-1", org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID,
+          inbound_message_id: "inbound-late", body: "Hi", reason: "send_timeout", created_at: new Date().toISOString(), ...over,
+        });
+        const dayMs = 24 * 3_600_000;
+        const wrap = (state: ReturnType<typeof setup>, hook: (table: string, real: unknown) => unknown) => {
+          const real = createMockSupabase(state) as { from: (t: string) => unknown };
+          return { ...real, from: (t: string) => hook(t, real.from(t)) } as never;
+        };
+
+        it("the timeout writer writes the flag BEFORE the send_timeout dead-letter row", async () => {
+          const state = createMockState();
+          afterTasks.capture = true;
+          const seen: Array<string | null | undefined> = [];
+          const rows: Array<Record<string, unknown>> = [];
+          const orig = rows.push.bind(rows);
+          rows.push = (...items: Array<Record<string, unknown>>) => {
+            for (const it of items) if (it.reason === "send_timeout") seen.push(state.property.last_ai_escalation_reason);
+            return orig(...items);
+          };
+          state.deadLetters = rows;
+          const { land } = await lateScenario(state);
+          expect(seen).toEqual(["send_timeout:inbound-late"]);
+          land();
+          await Promise.all(afterTasks.fns.map((fn) => fn()));
+        });
+
+        it("a zero-row flag update while the flag still carries this timeout leaves the row unresolved; a later sweep converts it", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          state.property.last_ai_escalation_reason = "send_timeout:inbound-late";
+          state.deadLetters = [tRow()];
+          pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
+          let swallowed = false;
+          const racing = wrap(state, (t, real) => {
+            if (t !== "properties" || swallowed) return real;
+            const q = real as { update: (v: unknown) => unknown };
+            const none: Record<string, unknown> = {};
+            for (const m of ["eq", "select"]) none[m] = () => none;
+            none.maybeSingle = () => Promise.resolve({ data: null, error: null });
+            return { ...q, update: () => { swallowed = true; return none; } };
+          });
+          await sweepLateSends(racing);
+          expect(state.deadLetters[0].resolved_at).toBeUndefined();
+          expect(state.property.last_ai_escalation_reason).toBe("send_timeout:inbound-late");
+          await sweepLateSends(createMockSupabase(state) as never);
+          expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
+          expect(state.deadLetters.find((d) => d.id === "t-1")?.resolved_at).toEqual(expect.any(String));
+        });
+
+        it("a cleared/replaced flag resolves with flag_replaced and still writes the marker", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          state.property.last_ai_escalation_reason = "reply_skipped:newer_inbound";
+          state.deadLetters = [tRow()];
+          pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
+          await sweepLateSends(createMockSupabase(state) as never);
+          expect(state.deadLetters.find((d) => d.id === "t-1")).toMatchObject({ resolution_reason: "flag_replaced", resolved_at: expect.any(String) });
+          expect(state.deadLetters.filter((d) => d.reason === "sent_late")).toHaveLength(1);
+        });
+
+        it("an unreadable flag after a zero-row update leaves the row unresolved", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          state.property.last_ai_escalation_reason = "reply_skipped:newer_inbound";
+          state.deadLetters = [tRow()];
+          pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
+          const failing = wrap(state, (t, real) => {
+            if (t !== "properties") return real;
+            const r = real as { update: (v: unknown) => unknown; select: (c?: string) => unknown };
+            return {
+              ...r,
+              update: r.update.bind(r),
+              select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: null, error: { message: "read boom" } }) }) }),
+            };
+          });
+          await sweepLateSends(failing);
+          expect(state.deadLetters[0].resolved_at).toBeUndefined();
+        });
+
+        it("an aged timeout whose reread shows sent is reconciled, not stamped no_reply", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          state.property.last_ai_escalation_reason = "send_timeout:inbound-late";
+          state.deadLetters = [tRow({ created_at: new Date(Date.now() - 8 * dayMs).toISOString() })];
+          let reads = 0;
+          const flipping = wrap(state, (t, real) => {
+            if (t === "messages") {
+              reads += 1;
+              if (reads === 2) pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
+            }
+            return reads === 1 && t === "messages" ? createMockSupabase(state).from(t) : real;
+          });
+          await sweepLateSends(flipping);
+          const row = state.deadLetters.find((d) => d.id === "t-1");
+          expect(row?.resolution_reason).not.toBe("unreconcilable:no_reply");
+          expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
+          expect(state.deadLetters.filter((d) => d.reason === "sent_late")).toHaveLength(1);
+        });
+
+        it("a failed reply lookup never retires an aged timeout", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          state.deadLetters = [tRow({ created_at: new Date(Date.now() - 8 * dayMs).toISOString() })];
+          const broken = wrap(state, (t, real) => {
+            if (t !== "messages") return real;
+            const q: Record<string, unknown> = {};
+            for (const m of ["select", "eq", "contains", "order"]) q[m] = () => q;
+            q.limit = () => Promise.resolve({ data: null, error: { message: "lookup boom" } });
+            return q;
+          });
+          await sweepLateSends(broken);
+          expect(state.deadLetters[0].resolved_at).toBeUndefined();
+        });
+
+        it("two positive no-reply reads on an aged row stamp no_reply; a fresh row stays unresolved", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          state.deadLetters = [
+            tRow({ id: "t-old", inbound_message_id: "i-old", created_at: new Date(Date.now() - 8 * dayMs).toISOString() }),
+            tRow({ id: "t-new", inbound_message_id: "i-new" }),
+          ];
+          await sweepLateSends(createMockSupabase(state) as never);
+          expect(state.deadLetters.find((d) => d.id === "t-old")?.resolution_reason).toBe("unreconcilable:no_reply");
+          expect(state.deadLetters.find((d) => d.id === "t-new")?.resolved_at).toBeUndefined();
+        });
+
+        it("a failed reply with providerOutcome provider_unknown is kept unresolved inside 7 days, stamped reply_unknown after", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          state.deadLetters = [
+            tRow({ id: "t-fresh", inbound_message_id: "i-fresh" }),
+            tRow({ id: "t-old", inbound_message_id: "i-old", created_at: new Date(Date.now() - 8 * dayMs).toISOString() }),
+          ];
+          pushOutbound(state, { id: "u-1", status: "failed", metadata: { ...aiReplyTo("i-fresh"), providerOutcome: "provider_unknown" } });
+          pushOutbound(state, { id: "u-2", status: "failed", metadata: { ...aiReplyTo("i-old"), providerOutcome: "provider_unknown" } });
+          await sweepLateSends(createMockSupabase(state) as never);
+          expect(state.deadLetters.find((d) => d.id === "t-fresh")?.resolved_at).toBeUndefined();
+          expect(state.deadLetters.find((d) => d.id === "t-old")?.resolution_reason).toBe("unreconcilable:reply_unknown");
+          // A webhook later flips the fresh row to sent: the next sweep reconciles it.
+          state.property.last_ai_escalation_reason = "send_timeout:inbound-late";
+          state.deadLetters.find((d) => d.id === "t-fresh")!.inbound_message_id = "inbound-late";
+          state.messages.find((m) => m.id === "u-1")!.metadata = aiReplyTo("inbound-late") as never;
+          state.messages.find((m) => m.id === "u-1")!.status = "sent";
+          await sweepLateSends(createMockSupabase(state) as never);
+          expect(state.deadLetters.find((d) => d.id === "t-fresh")?.resolved_at).toEqual(expect.any(String));
+        });
+      });
     });
 
     describe("5. max-turns counting excludes both retired-row markers", () => {
