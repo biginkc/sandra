@@ -32,7 +32,7 @@ Source: prod Supabase (`copflsklaefwzipsrjqz`), SELECT only, window 2026-04-10 t
 
 Constraints applied to every candidate (from `docs/prompts/ai-responder-v2.md`): 160 characters or fewer, first person as Mel, no price, never the word "investor", at most one cash-offer ask, no motivation questions, no em dashes. Character counts are exact. Templates marked **hold-card draft only** would never auto-send; they would pre-fill a human's one-click hold card (D5: price, distress and new_lead never auto-reply).
 
-Already approved, not re-proposed: the identity reply (`decisions/Sandra identity-response deterministic interceptor`, PR #316). 1,951 of 4,954 legacy AI sends (39%) are exactly this text, so it is the most-used approved reply. Q7 (reclassify it as `approved_template`) still needs a yes.
+Already approved, not re-proposed: the identity reply (`decisions/Sandra identity-response deterministic interceptor`, PR #316). 1,951 of 4,954 legacy AI sends (39%) are exactly this text, so it is the most-used approved reply. Its `source` tag (`approved_template`) is an engineering detail in PLAN §8 Q7 (withdrawn); no approval is sought here.
 
 ### 2.1 not_interested  (Jev: 318 runs; 260 at or above 0.95)
 
@@ -139,7 +139,7 @@ Happy to get you a real number. When's a good time for a quick call?
 
 ### 2.8 Intents with no candidate
 
-Third party / "listed with an agent", multi-property, sold, deceased, divorce: **no candidate.** Reasons: the Library has templates (lines 366-370), but 0 of the 2,727 human first replies used them in volume, the call transcripts contain none of these reactions, and D5 says distress never auto-replies. Even an LLM-drafted candidate would be invention here, so none was written. The LLM-drafted candidates elsewhere (WN-2, NU-3, UC-1, NL-1, PR-2) are labelled as such.
+Third party / "listed with an agent", multi-property, sold, deceased, divorce: **no candidate.** Reasons: the Library has templates (lines 366-370), but 0 of the 2,727 human first replies used them in volume, the call transcripts contain none of these reactions, and D5 says distress never auto-replies. Even an LLM-drafted candidate would be invention here, so none was written. The LLM-drafted candidates elsewhere (WN-2, NU-3, UC-1, NL-1, PR-2, and all hold rules H-1 to H-8) are labelled as such.
 
 ## 3. Hold rules (candidates)
 
@@ -154,37 +154,37 @@ Rule text below is for always going to a human, beyond the Q8 send-gate table. C
 | 3.5 multi-property | 86 | 9 | 22 | nurture 9, not_int 10, none 62 |
 | 3.6 over 200 chars | 171 | 6 | 49 | nurture 29, not_int 15, none 115 |
 | 3.7 legal | 75 | 5 | 8 | dnc/opt 6, wrong 6, none 53 |
-| any rule | 2,032 (9.9% of inbound) | not de-duplicated | | |
+| any rule | 2,032 (9.9% of inbound) | de-duplicated; AI-replied column not computed | | |
 
-Candidate H-1 (price or offer)
+Candidate H-1 (price or offer; LLM-drafted, keyword-proxy evidence Q16)
 ```
 Hold for a human, and never auto-reply, any inbound that asks for, mentions or answers with a price, an offer or a dollar figure.
 ```
-Candidate H-2 (distress)
+Candidate H-2 (distress; LLM-drafted, keyword-proxy evidence Q16)
 ```
 Hold for a human, and never auto-reply, any inbound that mentions divorce, death, probate, inheritance, foreclosure, liens, bankruptcy, back taxes, eviction, serious illness or a care facility.
 ```
-Candidate H-3 (hostility). The live evidence: the legacy AI answered 73 hostile inbounds. 159 sends of `So sorry to bug you. Sounds like you get a lot of these. Are you <name>? Just want to make sure we don't bother you again` went out in 180 days, including to `Fuck off`, `Spam` and an abusive reply (12-row sample, Q17). Jev also classes `fuck off` as `not_interested` (5 + 3 runs), which would auto-send NI-1 if no hold rule existed.
+Candidate H-3 (hostility; LLM-drafted, keyword-proxy evidence Q16). The live evidence: the legacy AI answered 73 hostile inbounds. 159 sends of `So sorry to bug you. Sounds like you get a lot of these. Are you <name>? Just want to make sure we don't bother you again` went out in 180 days, including to `Fuck off`, `Spam` and an abusive reply (12-row sample, Q17). Jev also classes `fuck off` as `not_interested` (5 + 3 runs), which would auto-send NI-1 if no hold rule existed.
 ```
 Hold for a human, and never auto-reply, any inbound that is hostile, profane or accuses us of spam or scam. Opt-out wording is handled by the existing opt-out path, not by this rule.
 ```
-Candidate H-4 (third party)
+Candidate H-4 (third party; LLM-drafted, keyword-proxy evidence Q16)
 ```
 Hold for a human, and never auto-reply, any inbound that refers to someone else deciding or acting for the owner (realtor, agent, attorney, spouse, relative, landlord, tenant, property manager, estate).
 ```
-Candidate H-5 (multi-property)
+Candidate H-5 (multi-property; LLM-drafted, keyword-proxy evidence Q16)
 ```
 Hold for a human, and never auto-reply, any inbound that refers to more than one property or asks which property we mean.
 ```
-Candidate H-6 (length)
+Candidate H-6 (length; LLM-drafted, keyword-proxy evidence Q16)
 ```
 Hold for a human, and never auto-reply, any inbound longer than 200 characters.
 ```
-Candidate H-7 (legal)
+Candidate H-7 (legal; LLM-drafted, keyword-proxy evidence Q16)
 ```
 Hold for a human, and never auto-reply, any inbound that mentions an attorney, lawyer, court, code violation, TCPA, FCC, police or a threat to report us.
 ```
-Candidate H-8 (Jev flags). Jev `escalationReason` counts over 13 days: hot_lead 49, call_request 27, price_or_offer 23, third_party 27, multi_property 4, distress 2, needs_review 39, uncertain 38.
+Candidate H-8 (Jev flags; LLM-drafted, keyword-proxy evidence Q16). Jev `escalationReason` counts over 13 days: hot_lead 49, call_request 27, price_or_offer 23, third_party 27, multi_property 4, distress 2, needs_review 39, uncertain 38.
 ```
 Hold for a human, and never auto-reply, any message where Jev's escalation reason is anything other than not_applicable.
 ```
