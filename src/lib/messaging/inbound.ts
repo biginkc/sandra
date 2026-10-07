@@ -88,12 +88,13 @@ const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60_000;
 
 export function matchesStopKeyword(body: string) {
   return (
-    UNAMBIGUOUS_STOP_KEYWORDS.test(body) ||
-    AMBIGUOUS_STOP_KEYWORDS.test(body)
+    UNAMBIGUOUS_STOP_KEYWORDS.test(body) || AMBIGUOUS_STOP_KEYWORDS.test(body)
   );
 }
 
-export function classifyWrongNumberScope(body: string): "this_property" | "all" {
+export function classifyWrongNumberScope(
+  body: string,
+): "this_property" | "all" {
   if (
     /\bwrong (?:number|person)\b/i.test(body) ||
     /\bnever (?:owned|own) (?:any )?propert(?:y|ies)\b/i.test(body) ||
@@ -136,9 +137,10 @@ async function setInboundDisposition(
     .from("properties")
     .update({ outreach_dispo: input.disposition })
     .eq("id", input.propertyId);
-  updateQuery = current.outreach_dispo === null
-    ? updateQuery.is("outreach_dispo", null)
-    : updateQuery.eq("outreach_dispo", current.outreach_dispo);
+  updateQuery =
+    current.outreach_dispo === null
+      ? updateQuery.is("outreach_dispo", null)
+      : updateQuery.eq("outreach_dispo", current.outreach_dispo);
   const { data: updated, error: updateError } = await updateQuery
     .select("id")
     .maybeSingle();
@@ -247,18 +249,39 @@ async function resolveInboundOrgId(
  * idempotent) or silently skips one (not safe) — failing toward "keep
  * today's behavior" is the correct default.
  */
+export type ClassifierMode = "jev" | "legacy" | "unavailable";
+
+/**
+ * Tri-state classifier config. `unavailable` means the lookup errored — the
+ * caller must NOT fall back to the legacy auto-promote path (it would bypass
+ * Jev's automation_enabled/threshold). `legacy` is returned only when the
+ * query succeeded (legacy row, or verified absence of any active row) or
+ * there is no org to look up.
+ */
+export async function resolveClassifierMode(
+  supabase: SupabaseClient<Database>,
+  orgId: string | null,
+): Promise<ClassifierMode> {
+  if (!orgId) return "legacy";
+  try {
+    const { data, error } = await supabase
+      .from("ai_responder_configs")
+      .select("classifier_provider")
+      .eq("org_id", orgId)
+      .eq("active", true)
+      .maybeSingle();
+    if (error) return "unavailable";
+    return data?.classifier_provider === "jev" ? "jev" : "legacy";
+  } catch {
+    return "unavailable";
+  }
+}
+
 export async function isJevClassifierOrg(
   supabase: SupabaseClient<Database>,
   orgId: string | null,
 ): Promise<boolean> {
-  if (!orgId) return false;
-  const { data } = await supabase
-    .from("ai_responder_configs")
-    .select("classifier_provider")
-    .eq("org_id", orgId)
-    .eq("active", true)
-    .maybeSingle();
-  return data?.classifier_provider === "jev";
+  return (await resolveClassifierMode(supabase, orgId)) === "jev";
 }
 
 export async function handleInboundWebhook(
@@ -330,15 +353,20 @@ export async function handleInboundWebhook(
       });
       let attributedOutboundMessageId: string | null = null;
       try {
-        attributedOutboundMessageId = await findAttributedOutboundMessageId(supabase, {
-          contactId,
-          toPhone: ev.to,
-          propertyId,
-          conversationId,
-        });
+        attributedOutboundMessageId = await findAttributedOutboundMessageId(
+          supabase,
+          {
+            contactId,
+            toPhone: ev.to,
+            propertyId,
+            conversationId,
+          },
+        );
       } catch (e) {
         reportError(e, {
-          tags: { surface: `${provider.providerId}_inbound_attribution_lookup` },
+          tags: {
+            surface: `${provider.providerId}_inbound_attribution_lookup`,
+          },
           extra: {
             externalId: ev.externalId,
             contactId,
@@ -384,7 +412,9 @@ export async function handleInboundWebhook(
 
       if (DNC_KEYWORDS.test(ev.body)) {
         if (!orgId) {
-          throw new Error("DNC webhook could not resolve org for phone suppression");
+          throw new Error(
+            "DNC webhook could not resolve org for phone suppression",
+          );
         }
         await applyPhoneLevelOptOut(supabase, {
           contactId,
@@ -466,7 +496,9 @@ export async function handleInboundWebhook(
 
       if (matchesStopKeyword(bodyTrimmed)) {
         if (!orgId) {
-          throw new Error("STOP webhook could not resolve org for phone suppression");
+          throw new Error(
+            "STOP webhook could not resolve org for phone suppression",
+          );
         }
         await applyPhoneLevelOptOut(supabase, {
           contactId,
@@ -819,6 +851,29 @@ export async function handleInboundWebhook(
         .eq("id", effectivePropertyId)
         .maybeSingle();
 
+      const needsClassifierMode =
+        cur?.status === "prospect" &&
+        Boolean(ev.body) &&
+        !inboundState.autoQualifiedAt;
+      const classifierMode: ClassifierMode = needsClassifierMode
+        ? await resolveClassifierMode(supabase, orgId)
+        : "legacy";
+      if (classifierMode === "unavailable") {
+        // Fail closed: skip legacy auto-promotion entirely (it ignores Jev's
+        // automation_enabled/threshold). AI dispatch loads its own config.
+        reportError(new Error("classifier config unavailable"), {
+          tags: {
+            surface: `${provider.providerId}_webhook_classifier_config_unavailable`,
+          },
+          extra: { propertyId: effectivePropertyId, externalId: ev.externalId },
+        });
+        await recordStep(supabase, runCtx, {
+          kind: "gate",
+          name: "classifier_config_unavailable",
+          result: "block",
+        });
+      }
+
       if (
         cur?.status === "prospect" &&
         ev.body &&
@@ -835,7 +890,7 @@ export async function handleInboundWebhook(
         // prospect awaiting auto-qualify. For every other org
         // (classifier_provider='legacy', the default, or no active
         // config at all) this is unchanged from today.
-        !(await isJevClassifierOrg(supabase, orgId))
+        classifierMode === "legacy"
       ) {
         let shouldQualify = false;
         if (process.env.SKIP_INTENT_GATE === "1") {
@@ -1403,7 +1458,10 @@ export async function insertInboundMessage(
     ({ data: inserted, error } = await insert());
   }
   if (!error) {
-    await clearAiResponderThreadState(supabase, inserted?.conversation_id ?? null);
+    await clearAiResponderThreadState(
+      supabase,
+      inserted?.conversation_id ?? null,
+    );
     await markInboundSmsIntentMessageInserted(
       supabase,
       input.inboundIntentId,
@@ -1478,7 +1536,8 @@ async function reserveWebhookEvent(
     })
     .select("id")
     .maybeSingle();
-  if (!error) return { status: "reserved", webhookEventId: inserted?.id ?? null };
+  if (!error)
+    return { status: "reserved", webhookEventId: inserted?.id ?? null };
   if (isMissingWebhookProcessingClaimSupport(error.message)) {
     return reserveWebhookEventLegacy(supabase, input);
   }
@@ -1552,7 +1611,8 @@ async function reserveWebhookEventLegacy(
     })
     .select("id")
     .maybeSingle();
-  if (!error) return { status: "reserved", webhookEventId: inserted?.id ?? null };
+  if (!error)
+    return { status: "reserved", webhookEventId: inserted?.id ?? null };
   if (error.code !== "23505")
     return { status: "error", message: error.message };
 
@@ -1636,7 +1696,9 @@ async function failInboundWebhookForRetry(
   cause: unknown,
 ): Promise<never> {
   const message =
-    cause instanceof Error ? cause.message : "rep SMS takeover processing failed";
+    cause instanceof Error
+      ? cause.message
+      : "rep SMS takeover processing failed";
   try {
     await markWebhookEventError(supabase, providerId, externalId, message);
   } catch (markError) {
@@ -1704,7 +1766,10 @@ async function dispatchAndStampAiResponder(
           ? outcome.reason
           : `reply_skipped:${outcome.reason}`,
     });
-    const terminal: AiDispatchOutcome = { outcome: "escalated", reason: outcome.reason };
+    const terminal: AiDispatchOutcome = {
+      outcome: "escalated",
+      reason: outcome.reason,
+    };
     await stampAiResponderTerminalOutcome(supabase, {
       messageId: input.inboundMessageId!,
       conversationId: input.conversationId ?? null,
@@ -1750,7 +1815,9 @@ async function scheduleReplyRetry(
         aiResponder: {
           outcome: "delayed",
           delaySeconds: retry.delaySeconds,
-          scheduledAt: new Date(Date.now() + retry.delaySeconds * 1000).toISOString(),
+          scheduledAt: new Date(
+            Date.now() + retry.delaySeconds * 1000,
+          ).toISOString(),
           workflowRunId: run.runId,
           retryAttempt: retry.attempt,
           retryReason: retry.reason,
@@ -1788,10 +1855,7 @@ async function recordKeywordExitRun(
     };
     body: string;
     gate:
-      | "stop_keyword"
-      | "dnc_keyword"
-      | "help_keyword"
-      | "wrong_number_keyword";
+      "stop_keyword" | "dnc_keyword" | "help_keyword" | "wrong_number_keyword";
     status: "closed" | "skipped";
     reason: string;
   },
