@@ -7721,6 +7721,22 @@ export type Database = {
         Args: { p_review_id: string }
         Returns: Json
       }
+      // Hand-patched 2026-10-07 for migration
+      // 20261008143900_suppression_pointer_union.sql.
+      fn_merge_suppression_incomplete_pointer: {
+        Args: {
+          p_hint_id?: string | null
+          p_ids: string[]
+          p_property_id: string
+          p_timeout_prefixes?: string[]
+        }
+        Returns: {
+          dropped_ids: string[]
+          kept_timeout: boolean
+          merged_ids: string[]
+          reason: string
+        }[]
+      }
       // Hand-patched 2026-09-20, same caveat as sms_classification_runs above.
       fn_accept_ai_disposition_review: {
         Args: { p_classification_run_id: string; p_review_id: string }

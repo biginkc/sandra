@@ -151,7 +151,12 @@ function lookupClient(disposition: string, overrides: Record<string, unknown> = 
     c.then = (resolve: (v: unknown) => void) => resolve({ data: [{ id: "property-1" }], error: null });
     return c;
   };
-  return { from: chain, updates, inserts };
+  const rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  const rpc = async (name: string, args: Record<string, unknown>) => {
+    rpcCalls.push({ name, args });
+    return { data: [{ reason: "suppression_incomplete:review-1", merged_ids: [], kept_timeout: false, dropped_ids: [] }], error: null };
+  };
+  return { from: chain, rpc, updates, inserts, rpcCalls };
 }
 
 describe("applySuppressionForConfirmedReview", () => {
@@ -218,13 +223,12 @@ describe("applySuppressionForConfirmedReview", () => {
       "user-1",
     );
     expect(result).toEqual({ ok: false, warning: SUPPRESSION_INCOMPLETE_WARNING });
-    const hold = admin.updates.find((u) => u.table === "properties");
-    expect(hold?.values).toEqual(
-      expect.objectContaining({
-        needs_human_attention: true,
-        last_ai_escalation_reason: "suppression_incomplete:review-1",
-      }),
-    );
+    expect(admin.rpcCalls).toEqual([
+      {
+        name: "fn_merge_suppression_incomplete_pointer",
+        args: { p_property_id: "property-1", p_ids: [], p_hint_id: "review-1" },
+      },
+    ]);
     expect(admin.inserts[0]).toMatchObject({
       table: "lead_events",
       values: expect.objectContaining({
@@ -238,10 +242,15 @@ describe("applySuppressionForConfirmedReview", () => {
 
 describe("suppression_incomplete hold vs timeout flags", () => {
   function failingClient(currentReason: string | null, ledgerError: unknown = null) {
-    const updates: unknown[] = [];
+    const rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
     const inserts: unknown[] = [];
+    const updates: unknown[] = [];
     applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
     createAdminClient.mockReturnValue({
+      rpc: async (name: string, args: Record<string, unknown>) => {
+        rpcCalls.push({ name, args });
+        return { data: [{ reason: null, merged_ids: [], kept_timeout: false, dropped_ids: [] }], error: null };
+      },
       from: () => {
         const c: Record<string, unknown> = {};
         c.select = () => c;
@@ -256,25 +265,25 @@ describe("suppression_incomplete hold vs timeout flags", () => {
         };
         c.update = (v: unknown) => {
           updates.push(v);
-          const b: Record<string, unknown> = {};
-          b.eq = () => b;
-          b.is = () => b;
-          b.select = async () => ({ data: [{ id: "property-1" }], error: null });
-          return b;
+          return c;
         };
         return c;
       },
     } as never);
-    return { updates, inserts };
+    return { rpcCalls, inserts, updates };
   }
 
   for (const reason of ["send_timeout:abc", "dead_letter_failed:send_timeout:abc"]) {
-    it(`keeps existing ${reason} reason, raises the hold, and records the failed review id as a lead event`, async () => {
-      const { updates, inserts } = failingClient(reason);
+    it(`over ${reason}: records the failed id in the ledger and merges with nothing unbacked (database keeps the timeout reason)`, async () => {
+      const { rpcCalls, inserts, updates } = failingClient(reason);
       await applyConfirmedSuppression({ ...base, disposition: "dnc" });
-      expect(updates).toHaveLength(1);
-      expect(updates[0]).toMatchObject({ needs_human_attention: true });
-      expect(updates[0]).not.toHaveProperty("last_ai_escalation_reason");
+      expect(updates).toHaveLength(0); // no client-side pointer write at all
+      expect(rpcCalls).toEqual([
+        {
+          name: "fn_merge_suppression_incomplete_pointer",
+          args: { p_property_id: "property-1", p_ids: [], p_hint_id: "review-1" },
+        },
+      ]);
       expect(inserts[0]).toMatchObject({
         org_id: "org-1",
         property_id: "property-1",
@@ -285,26 +294,23 @@ describe("suppression_incomplete hold vs timeout flags", () => {
     });
   }
 
-  it("falls back to the suppression reason when the ledger write fails, so the id is never lost", async () => {
-    const { updates } = failingClient("send_timeout:abc", { message: "insert failed" });
+  it("passes the id as unbacked when the ledger write fails, so the id is never lost", async () => {
+    const { rpcCalls } = failingClient("send_timeout:abc", { message: "insert failed" });
     await applyConfirmedSuppression({ ...base, disposition: "dnc" });
-    expect(updates[0]).toMatchObject({ last_ai_escalation_reason: "suppression_incomplete:review-1" });
+    expect(rpcCalls[0].args).toEqual({ p_property_id: "property-1", p_ids: ["review-1"], p_hint_id: null });
   });
 
   it("treats a duplicate ledger row (unique violation) as recorded", async () => {
-    const { updates } = failingClient("send_timeout:abc", { code: "23505", message: "dup" });
+    const { rpcCalls } = failingClient("send_timeout:abc", { code: "23505", message: "dup" });
     await applyConfirmedSuppression({ ...base, disposition: "dnc" });
-    expect(updates[0]).not.toHaveProperty("last_ai_escalation_reason");
+    expect(rpcCalls[0].args).toEqual({ p_property_id: "property-1", p_ids: [], p_hint_id: "review-1" });
   });
 
   for (const reason of [null, "low_confidence"]) {
-    it(`sets suppression_incomplete:<reviewId> over ${reason ?? "null"}`, async () => {
-      const { updates } = failingClient(reason);
+    it(`over ${reason ?? "null"} the merge carries the ledger-backed id as the hint`, async () => {
+      const { rpcCalls } = failingClient(reason);
       await applyConfirmedSuppression({ ...base, disposition: "dnc" });
-      expect(updates[0]).toMatchObject({
-        needs_human_attention: true,
-        last_ai_escalation_reason: "suppression_incomplete:review-1",
-      });
+      expect(rpcCalls[0].args).toEqual({ p_property_id: "property-1", p_ids: [], p_hint_id: "review-1" });
     });
   }
 });
@@ -359,14 +365,16 @@ describe("listOutstandingSuppressionReviews", () => {
   });
 });
 
-describe("overwriting an existing suppression_incomplete reason (r24)", () => {
+describe("atomic pointer merge (r24+)", () => {
   type Ev = { event_type: string; source_id: string; created_at: string };
+  const TIMEOUT_PREFIXES = ["send_timeout:", "dead_letter_failed:send_timeout:"];
   function statefulAdmin(initialReason: string | null) {
     const state = {
       reason: initialReason,
+      attention: false,
       events: [] as Ev[],
       seq: 0,
-      writes: [] as Array<{ reason: string | null; conditional: boolean }>,
+      dropped: [] as string[][],
     };
     // Holds the first `expected` reads of the property until all have arrived.
     let release!: () => void;
@@ -377,8 +385,34 @@ describe("overwriting an existing suppression_incomplete reason (r24)", () => {
       gate: new Promise<void>((r) => { release = r; }),
     };
     const failLedgerFor = new Set<string>();
-    const failUpdate = { on: false };
+    const rpcFailure = { on: false };
+    // Runs right before the database applies a merge (a concurrent writer).
+    const beforeRpc = { fn: null as null | (() => void) };
+    // Mirrors fn_merge_suppression_incomplete_pointer; synchronous = atomic.
+    const merge = (ids: string[], hint: string | null) => {
+      const isTimeout = !!state.reason && TIMEOUT_PREFIXES.some((p) => state.reason!.startsWith(p));
+      state.attention = true;
+      if (isTimeout && ids.length === 0) {
+        return { reason: state.reason, merged_ids: [], kept_timeout: true, dropped_ids: [] as string[] };
+      }
+      const existing = suppressionReviewIdsFromReason(state.reason);
+      const all = [...new Set([...existing, ...ids, ...(hint ? [hint] : [])])];
+      const merged = all.slice(0, 10);
+      const dropped = all.slice(10);
+      state.reason = suppressionIncompleteReason(merged);
+      return { reason: state.reason, merged_ids: merged, kept_timeout: false, dropped_ids: dropped };
+    };
+    const rpcCalls: Array<Record<string, unknown>> = [];
     const admin = {
+      rpc: async (_name: string, args: { p_ids: string[]; p_hint_id: string | null }) => {
+        rpcCalls.push(args);
+        await Promise.resolve();
+        if (rpcFailure.on) return { data: null, error: { message: "rpc failed" } };
+        beforeRpc.fn?.();
+        const row = merge(args.p_ids, args.p_hint_id);
+        if (row.dropped_ids.length) state.dropped.push(row.dropped_ids);
+        return { data: [row], error: null };
+      },
       from: (table: string) => {
         const c: Record<string, unknown> = {};
         c.select = () => c;
@@ -405,42 +439,25 @@ describe("overwriting an existing suppression_incomplete reason (r24)", () => {
           state.events.push({ event_type: v.event_type, source_id: v.source_id, created_at: String(++state.seq).padStart(4, "0") });
           return { error: null };
         };
-        c.update = (v: Record<string, unknown>) => {
-          const filters: Array<[string, unknown]> = [];
-          const run = () => {
-            if (failUpdate.on) return { data: null, error: { message: "update failed" } };
-            const f = filters.find(([col]) => col === "last_ai_escalation_reason");
-            if (f && f[1] !== state.reason) return { data: [], error: null };
-            if ("last_ai_escalation_reason" in v) {
-              state.reason = v.last_ai_escalation_reason as string | null;
-            }
-            state.writes.push({ reason: state.reason, conditional: !!f });
-            return { data: [{ id: "property-1" }], error: null };
-          };
-          const b: Record<string, unknown> = {};
-          b.eq = (col: string, val: unknown) => { filters.push([col, val]); return b; };
-          b.is = (col: string, val: unknown) => { filters.push([col, val]); return b; };
-          b.select = async () => run();
-          return b;
-        };
         return c;
       },
     };
     createAdminClient.mockReturnValue(admin as never);
-    return { state, failLedgerFor, failUpdate, admin, barrier };
+    return { state, failLedgerFor, rpcFailure, beforeRpc, admin, barrier, merge, rpcCalls };
   }
+  const fail = () => applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
 
   it("A fails + ledger fails -> B fails + ledger ok -> retry B: A stays outstanding, hold not cleared", async () => {
     const { state, failLedgerFor } = statefulAdmin(null);
-    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    fail();
     failLedgerFor.add("suppression_incomplete:A");
     await applyConfirmedSuppression({ ...base, reviewId: "A", disposition: "dnc" });
     expect(state.reason).toBe("suppression_incomplete:A");
     expect(state.events).toHaveLength(0);
 
     await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
-    // A's backfill failed: the existing reason must NOT be overwritten.
-    expect(state.reason).toBe("suppression_incomplete:A");
+    // A's backfill failed: A stays in the pointer alongside B.
+    expect(state.reason).toBe("suppression_incomplete:A,B");
     expect(state.events.map((e) => e.source_id)).toEqual(["B"]);
 
     await recordSuppressionRetriedOk({ propertyId: "property-1", reviewId: "B", actorId: "user-1" });
@@ -448,34 +465,60 @@ describe("overwriting an existing suppression_incomplete reason (r24)", () => {
     expect(out.reviewIds).toEqual(["A"]);
   });
 
-  it("backfills a ledger row for A before overwriting its reason with B", async () => {
+  it("backfills a ledger row for A when B fails", async () => {
     const { state } = statefulAdmin("suppression_incomplete:A");
-    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    fail();
     await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
-    expect(state.reason).toBe("suppression_incomplete:B");
+    expect(state.reason).toBe("suppression_incomplete:A,B");
     expect(state.events.map((e) => e.source_id).sort()).toEqual(["A", "B"]);
   });
 
   it("the A backfill is idempotent (duplicate row counts as recorded)", async () => {
-    const { state } = statefulAdmin("suppression_incomplete:A");
+    const { state, rpcCalls } = statefulAdmin("suppression_incomplete:A");
     state.events.push({ event_type: "suppression_incomplete", source_id: "A", created_at: "0000" });
-    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    fail();
     await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
-    expect(state.reason).toBe("suppression_incomplete:B");
+    expect(state.reason).toBe("suppression_incomplete:A,B");
+    expect(rpcCalls[0]).toMatchObject({ p_ids: [], p_hint_id: "B" });
   });
 
-  it("reports and leaves the hold as is when the hold update fails", async () => {
-    const { state, failUpdate } = statefulAdmin("low_confidence");
-    failUpdate.on = true;
-    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+  it("makes exactly one merge call and no client-side pointer write", async () => {
+    const { rpcCalls } = statefulAdmin("low_confidence");
+    fail();
+    await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
+    expect(rpcCalls).toHaveLength(1);
+  });
+
+  it("reports and leaves the hold as is when the merge call fails", async () => {
+    const { state, rpcFailure } = statefulAdmin("low_confidence");
+    rpcFailure.on = true;
+    fail();
     const r = await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
     expect(r).toEqual({ ok: false, warning: SUPPRESSION_INCOMPLETE_WARNING });
     expect(state.reason).toBe("low_confidence");
+    expect(reportError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "rpc failed" }),
+      expect.objectContaining({ tags: { surface: "confirm_ai_disposition_suppression_hold" } }),
+    );
+  });
+
+  it("keeps a send-timeout reason when the id is ledger-backed, and overrides it when it is not", async () => {
+    const s1 = statefulAdmin("send_timeout:abc");
+    fail();
+    await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
+    expect(s1.state.reason).toBe("send_timeout:abc");
+    expect(s1.state.attention).toBe(true);
+    expect(s1.state.events.map((e) => e.source_id)).toEqual(["B"]);
+
+    const s2 = statefulAdmin("send_timeout:abc");
+    s2.failLedgerFor.add("suppression_incomplete:B");
+    await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
+    expect(s2.state.reason).toBe("suppression_incomplete:B");
   });
 
   it("both ledger writes fail (A then B): the reason carries A and B, retry B leaves A outstanding", async () => {
     const { state, failLedgerFor } = statefulAdmin(null);
-    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    fail();
     failLedgerFor.add("suppression_incomplete:A");
     failLedgerFor.add("suppression_incomplete:B");
     await applyConfirmedSuppression({ ...base, reviewId: "A", disposition: "dnc" });
@@ -490,7 +533,7 @@ describe("overwriting an existing suppression_incomplete reason (r24)", () => {
 
   it("three ledger failures accumulate A,B,C without duplicates, even on a repeat failure of B", async () => {
     const { state, failLedgerFor } = statefulAdmin(null);
-    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    fail();
     for (const id of ["A", "B", "C"]) failLedgerFor.add(`suppression_incomplete:${id}`);
     for (const id of ["A", "B", "C", "B"]) {
       await applyConfirmedSuppression({ ...base, reviewId: id, disposition: "dnc" });
@@ -504,21 +547,24 @@ describe("overwriting an existing suppression_incomplete reason (r24)", () => {
     const ids = Array.from({ length: 10 }, (_, i) => `id${i}`);
     const { state, failLedgerFor } = statefulAdmin(suppressionIncompleteReason(ids));
     expect(suppressionReviewIdsFromReason(state.reason)).toHaveLength(10);
-    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    fail();
     failLedgerFor.add("suppression_incomplete:new");
     for (const id of ids) failLedgerFor.add(`suppression_incomplete:${id}`);
     await applyConfirmedSuppression({ ...base, reviewId: "new", disposition: "dnc" });
     expect(suppressionReviewIdsFromReason(state.reason)).toEqual(ids);
     expect(reportError).toHaveBeenCalledWith(
       expect.any(Error),
-      expect.objectContaining({ tags: { surface: "confirm_ai_disposition_suppression_id_cap" } }),
+      expect.objectContaining({
+        tags: { surface: "confirm_ai_disposition_suppression_id_cap" },
+        extra: { propertyId: "property-1", dropped: ["new"] },
+      }),
     );
   });
 
   it("concurrent failures A and B (both read null, both ledger writes fail): neither id is lost", async () => {
     const { state, failLedgerFor, barrier } = statefulAdmin(null);
     barrier.expected = 2;
-    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    fail();
     failLedgerFor.add("suppression_incomplete:A");
     failLedgerFor.add("suppression_incomplete:B");
     await Promise.all([
@@ -531,13 +577,12 @@ describe("overwriting an existing suppression_incomplete reason (r24)", () => {
     await recordSuppressionRetriedOk({ propertyId: "property-1", reviewId: "B", actorId: "user-1" });
     const out = await listOutstandingSuppressionReviews(createAdminClient() as never, "property-1");
     expect(out.reviewIds).toEqual(["A"]);
-    expect(state.reason).toBe("suppression_incomplete:A,B");
   });
 
   it("outstanding is [A, B] before any retry", async () => {
-    const { state, failLedgerFor, barrier } = statefulAdmin(null);
+    const { failLedgerFor, barrier } = statefulAdmin(null);
     barrier.expected = 2;
-    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    fail();
     failLedgerFor.add("suppression_incomplete:A");
     failLedgerFor.add("suppression_incomplete:B");
     await Promise.all([
@@ -546,76 +591,22 @@ describe("overwriting an existing suppression_incomplete reason (r24)", () => {
     ]);
     const out = await listOutstandingSuppressionReviews(createAdminClient() as never, "property-1");
     expect(out.reviewIds).toEqual(["A", "B"]);
-    expect(state.writes.every((w) => w.conditional)).toBe(true);
   });
 
-  it("a conflict that resolves on retry writes the merged value conditionally", async () => {
-    const { state, failLedgerFor, admin } = statefulAdmin(null);
-    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
-    failLedgerFor.add("suppression_incomplete:A");
+  it("a failure arriving after B's last read (the old final window) is preserved: C lands, then B merges", async () => {
+    const { state, failLedgerFor, beforeRpc, merge } = statefulAdmin(null);
+    fail();
     failLedgerFor.add("suppression_incomplete:B");
-    // Another writer lands "A" between B's read and B's write.
-    const realFrom = admin.from;
-    let injected = false;
-    admin.from = (table: string) => {
-      const c = realFrom(table) as Record<string, (...a: unknown[]) => unknown>;
-      if (table === "properties") {
-        const realUpdate = c.update;
-        c.update = (...a: unknown[]) => {
-          if (!injected) {
-            injected = true;
-            state.reason = "suppression_incomplete:A";
-          }
-          return realUpdate(...a);
-        };
-      }
-      return c;
+    failLedgerFor.add("suppression_incomplete:C");
+    // C's failure reaches the database after B read the pointer (null) and
+    // before B's merge runs.
+    beforeRpc.fn = () => {
+      beforeRpc.fn = null;
+      merge(["C"], null);
     };
     await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
-    expect(state.reason).toBe("suppression_incomplete:A,B");
-    expect(state.writes).toEqual([{ reason: "suppression_incomplete:A,B", conditional: true }]);
-    expect(reportError).not.toHaveBeenCalledWith(
-      expect.any(Error),
-      expect.objectContaining({ tags: { surface: "confirm_ai_disposition_suppression_pointer_conflict" } }),
-    );
-  });
-
-  it("persistent conflict: after 5 retries writes the merged union unconditionally and reports", async () => {
-    const { state, failLedgerFor, admin } = statefulAdmin("suppression_incomplete:A");
-    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
-    failLedgerFor.add("suppression_incomplete:A");
-    failLedgerFor.add("suppression_incomplete:B");
-    // Every conditional write loses a race: the pointer keeps changing under it.
-    let n = 0;
-    const realFrom = admin.from;
-    admin.from = (table: string) => {
-      const c = realFrom(table) as Record<string, (...a: unknown[]) => unknown>;
-      if (table === "properties") {
-        const realUpdate = c.update;
-        c.update = (...a: unknown[]) => {
-          const values = a[0] as { last_ai_escalation_reason?: string };
-          const b = realUpdate(...a) as { select: () => Promise<unknown> };
-          const realSelect = b.select;
-          b.select = async () => {
-            if (n < 6 && "last_ai_escalation_reason" in values) {
-              n++;
-              state.reason = `suppression_incomplete:A,X${n}`;
-              return { data: [], error: null };
-            }
-            return realSelect();
-          };
-          return b;
-        };
-      }
-      return c;
-    };
-    await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
-    expect(n).toBe(6);
-    expect(suppressionReviewIdsFromReason(state.reason)).toEqual(["A", "B"]);
-    expect(reportError).toHaveBeenCalledWith(
-      expect.any(Error),
-      expect.objectContaining({ tags: { surface: "confirm_ai_disposition_suppression_pointer_conflict" } }),
-    );
+    expect(state.reason).toBe("suppression_incomplete:C,B");
+    expect(state.attention).toBe(true);
   });
 
   it("outstanding set parses every id in a multi-id reason", async () => {
