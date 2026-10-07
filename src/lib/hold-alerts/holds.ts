@@ -27,6 +27,8 @@ export const KNOWN_HOLD_REASONS: readonly string[] = [
   "third_party",
   "needs_review",
   "draft_held",
+  "quiet_hours_recipient",
+  "template_sent_outcome_missing",
   "draft_persist_failed",
   "reply_pending",
   "send_timeout",
