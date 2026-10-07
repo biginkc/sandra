@@ -6,6 +6,7 @@ import {
   decideDraftGate,
   decideSendGate,
   NEWER_INBOUND_GRACE_MS,
+  silentExitReason,
   type GateOutboundFact,
   type NewerInboundFact,
 } from "./send-gate";
@@ -228,7 +229,8 @@ describe("classifyNewerInboundHandler (rule 1: what counts as a LIVE handler)", 
   it("a processing claim with an unexpired lease is live; an expired one is not", () => {
     expect(classifyNewerInboundHandler({ claim: { status: "processing", lease_expires_at: future }, stamp: null, nowMs })).toBe(true);
     expect(classifyNewerInboundHandler({ claim: { status: "processing", lease_expires_at: past }, stamp: null, nowMs })).toBe(false);
-    expect(classifyNewerInboundHandler({ claim: { status: "processing", lease_expires_at: past }, stamp: workflow, nowMs })).toBe(false);
+    // A confirmed reply delay (workflow id) still counts alongside an expired claim.
+    expect(classifyNewerInboundHandler({ claim: { status: "processing", lease_expires_at: past }, stamp: workflow, nowMs })).toBe(true);
     expect(classifyNewerInboundHandler({ claim: { status: "processing", lease_expires_at: "garbage" }, stamp: null, nowMs })).toBe(false);
   });
   it("a retry parked retry_scheduled counts only when its scheduling was confirmed (workflow run id stamped)", () => {
@@ -246,8 +248,86 @@ describe("classifyNewerInboundHandler (rule 1: what counts as a LIVE handler)", 
   it("a plain errored claim is not a handler, even when a stale delayed stamp is present", () => {
     expect(classifyNewerInboundHandler({ claim: { status: "error", error_message: "boom", lease_expires_at: past }, stamp: workflow, nowMs })).toBe(false);
   });
-  it("a completed claim is a finished handler", () => {
-    expect(classifyNewerInboundHandler({ claim: { status: "completed", lease_expires_at: past }, stamp: null, nowMs })).toBe(true);
+  it("a completed claim is a live handler ONLY when it sent a reply or flagged the property (or ended by design)", () => {
+    const completed = (outcome: string | null) =>
+      classifyNewerInboundHandler({ claim: { status: "completed", outcome, lease_expires_at: past }, stamp: null, nowMs });
+    expect(completed("sent")).toBe(true);
+    expect(completed("escalated")).toBe(true);
+    // Rule-0 type endings: silent by design.
+    expect(completed("opted_out")).toBe(true);
+    expect(completed("auto_closed")).toBe(true);
+    // Everything else handled nothing.
+    for (const outcome of ["skipped", "no_consent", "disabled_org_wide", "disabled_per_property", "retry", null]) {
+      expect(completed(outcome)).toBe(false);
+    }
+  });
+  it("a completed claim is authoritative over a stale delayed stamp", () => {
+    expect(classifyNewerInboundHandler({ claim: { status: "completed", outcome: "skipped", lease_expires_at: past }, stamp: workflow, nowMs })).toBe(false);
+  });
+  it("a terminally errored claim (reply_ineligible) is not a handler", () => {
+    expect(classifyNewerInboundHandler({ claim: { status: "error", error_message: "reply_ineligible", lease_expires_at: past }, stamp: null, nowMs })).toBe(false);
+  });
+});
+
+describe("Q8 rule 0: suppression / disabled / consent exits are silent by design and checked first", () => {
+  const silentExit = { reason: "disabled_per_property" };
+  it("rule 0 beats every other rule, including an unhandled newer inbound and an unrelated text (nothing flagged)", () => {
+    expect(
+      decideSendGate({
+        silentExit,
+        newerInbound: { present: true, handled: false, ageMs: 60_000 },
+        outbound: [fact("ai_other_inbound"), fact("human_unrelated")],
+      }),
+    ).toEqual({ action: "skip", flag: false, rule: 0, reason: "disabled_per_property" });
+  });
+  it("rule 0 also applies at the early gate (no defer)", () => {
+    expect(
+      decideSendGate(
+        { silentExit, newerInbound: { present: true, handled: false, ageMs: 1_000 }, outbound: [] },
+        { phase: "early" },
+      ),
+    ).toMatchObject({ action: "skip", flag: false, rule: 0 });
+  });
+  it("silentExitReason maps org off, opt-out and disabled property; otherwise null", () => {
+    expect(silentExitReason({ configActive: false, consentState: "opted_in", propertyDisabled: false })).toBe("disabled_org_wide");
+    expect(silentExitReason({ configActive: true, consentState: "opted_out", propertyDisabled: false })).toBe("no_consent");
+    expect(silentExitReason({ configActive: true, consentState: "cold", propertyDisabled: true })).toBe("disabled_per_property");
+    expect(silentExitReason({ configActive: true, consentState: "cold", propertyDisabled: false })).toBeNull();
+  });
+});
+
+describe("Q8 rule 8 inside the gate: a terminal draft ends silently, before rules 1-6", () => {
+  it("rule 8 beats an unhandled newer inbound and an unrelated text", () => {
+    expect(
+      decideSendGate({
+        terminalDraft: true,
+        newerInbound: { present: true, handled: false, ageMs: 60_000 },
+        outbound: [fact("ai_other_inbound")],
+      }),
+    ).toEqual({ action: "skip", flag: false, rule: 8, reason: "already_answered" });
+  });
+  it("rule 0 is checked before rule 8", () => {
+    expect(
+      decideSendGate({ silentExit: { reason: "no_consent" }, terminalDraft: true, newerInbound: none, outbound: [] }),
+    ).toMatchObject({ rule: 0 });
+  });
+});
+
+describe("classifyGateRow: 'went out' is the submission time", () => {
+  const ctx = {
+    inboundMessageId: "in-1",
+    inboundCreatedAtMs: Date.parse("2026-06-13T18:00:00.000Z"),
+    nowMs: Date.parse("2026-06-13T18:30:00.000Z"),
+  };
+  const rep = (over: Record<string, unknown>) => ({ id: "m", created_at: "2026-06-13T17:00:00.000Z", status: "sent", metadata: null, ...over });
+  it("a rep text created BEFORE the inbound but submitted AFTER it answers the seller", () => {
+    expect(classifyGateRow(rep({ sent_at: "2026-06-13T18:05:00.000Z" }), ctx)?.author).toBe("human_after_inbound");
+  });
+  it("a rep text created and submitted before the inbound is unrelated", () => {
+    expect(classifyGateRow(rep({ sent_at: "2026-06-13T17:30:00.000Z" }), ctx)?.author).toBe("human_unrelated");
+  });
+  it("a QUEUED rep text is judged by created_at only (it has not gone out)", () => {
+    expect(classifyGateRow(rep({ status: "queued", sent_at: "2026-06-13T18:05:00.000Z" }), ctx)?.author).toBe("human_unrelated");
   });
 });
 

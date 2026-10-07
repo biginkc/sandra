@@ -44,6 +44,7 @@ import {
   type NewerInboundFact,
   type SendGateDecision,
   type SendGatePhase,
+  silentExitReason,
 } from "./send-gate";
 import {
   REPLY_RETRY_DELAY_SECONDS,
@@ -222,27 +223,6 @@ export async function checkAiResponderDispatchPreGates(
       { kind: "gate", name: reason, result: "block", detail: { reason } },
       runCtx,
     );
-  if (input.inboundMessageId) {
-    // Q8 decision table at the early gate (rules 1-6, first match wins; the
-    // same function the pre-send check uses). A failed lookup never decides
-    // here: the pre-send check re-reads under the lease and fails closed.
-    const evaluation = await evaluateSendGate(supabase, input, {
-      phase: "early",
-      claimStartedAt: null,
-      checkNewerInbound: options.checkSuperseded === true,
-    });
-    if (evaluation.ok) {
-      const plan = skipPlanFor(evaluation.decision, "early");
-      if (plan) {
-        await blocked(plan.trace);
-        if (plan.flagReason) {
-          await markPropertyNeedsAttention(supabase, input.propertyId, plan.flagReason, runCtx);
-        }
-        return { ok: false, outcome: { outcome: "skipped", reason: plan.reason } };
-      }
-    }
-  }
-
   const { data: property } = await supabase
     .from("properties")
     .select(
@@ -263,6 +243,35 @@ export async function checkAiResponderDispatchPreGates(
       ok: false,
       outcome: { outcome: "skipped", reason: "already_terminal" },
     };
+  }
+
+  if (input.inboundMessageId) {
+    // Q8 decision table at the early gate: rule 0 (suppression / disabled /
+    // terminal) and rule 8 first, then rules 1-6, first match wins; the same
+    // function the pre-send check uses. A failed lookup never decides here:
+    // the pre-send check re-reads under the lease and fails closed.
+    const evaluation = await evaluateSendGate(supabase, input, {
+      phase: "early",
+      claimStartedAt: null,
+      checkNewerInbound: options.checkSuperseded === true,
+      property,
+    });
+    if (evaluation.ok) {
+      const decision = evaluation.decision;
+      // Rule 0 reasons other than a terminal property (consent, org off,
+      // disabled property) keep their existing downstream handling (the skip
+      // classifier still lets Jev classify): silent, nothing flagged here,
+      // and rules 1-6 must not run for a dead lead.
+      const passThrough = decision.action === "skip" && decision.rule === 0 && decision.reason !== "already_terminal";
+      const plan = passThrough ? null : skipPlanFor(decision, "early");
+      if (plan) {
+        await blocked(plan.trace);
+        if (plan.flagReason) {
+          await markPropertyNeedsAttention(supabase, input.propertyId, plan.flagReason, runCtx);
+        }
+        return { ok: false, outcome: { outcome: "skipped", reason: plan.reason } };
+      }
+    }
   }
 
   await trace(supabase, { kind: "gate", name: "pre_gates", result: "pass" }, runCtx);
@@ -439,6 +448,7 @@ async function dispatchAiResponseCore(
         claimStartedAt: null,
         checkNewerInbound: false,
         extraWindowStartMs: recentReply.createdAtMs,
+        property,
       });
       if (evaluation.ok && evaluation.decision.action === "retry") {
         await trace(supabase, {
@@ -663,6 +673,17 @@ async function classifyAndApplyDespiteReplyIneligibility(
     // use_legacy — jev_no_action is handled inline above and never
     // reaches here; nothing for Jev to apply, so the original
     // reply-pacing skip reason stands (handled by the caller).
+    //
+    // This run took a claim and is leaving WITHOUT a reply: settle the claim
+    // as an error (lease released) so it can never read as a live handler of
+    // this inbound (Q8 rule 1) for the rest of its 5-minute lease, and so a
+    // re-dispatch of the same inbound can reclaim it at once.
+    await completeAiResponseClaim(supabase, {
+      claimId: responseClaim.claimId,
+      outcome: "skipped",
+      errorMessage: "reply_ineligible",
+      releaseLease: true,
+    });
     return null;
   }
 
@@ -1334,16 +1355,20 @@ async function resolveAndApplyRoute(
 
 
 /**
- * The newest AI reply row stamped for this inbound. `status` matters: a
- * `pending` row is an in-flight (or abandoned) attempt, not a delivered reply.
+ * The AI reply row that matters for a duplicate-insert on this inbound. Several
+ * rows can carry the stamp, so rank them: a row the provider accepted
+ * (sent / delivered) beats an in-flight one (pending / queued), which beats a
+ * failed one. `status` matters: a `pending` row is an in-flight (or
+ * abandoned) attempt, not a delivered reply. `aborted` = the row was retired
+ * before the provider (`metadata.aborted_inbound_message_id`).
  */
 async function findExistingAiReplyForInbound(
   supabase: SupabaseClient<Database>,
   inboundMessageId: string,
-): Promise<{ id: string; status: string } | null> {
+): Promise<{ id: string; status: string; aborted: boolean } | null> {
   const { data, error } = await supabase
     .from("messages")
-    .select("id, status")
+    .select("id, status, metadata")
     .eq("channel", "sms")
     .eq("direction", "outbound")
     .contains("metadata", {
@@ -1351,8 +1376,7 @@ async function findExistingAiReplyForInbound(
       inbound_message_id: inboundMessageId,
     })
     .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .limit(10);
   if (error) {
     reportError(new Error(error.message), {
       tags: { surface: "ai_responder_existing_reply_lookup" },
@@ -1360,7 +1384,15 @@ async function findExistingAiReplyForInbound(
     });
     return null;
   }
-  return data ?? null;
+  const rank = (status: string) =>
+    status === "sent" || status === "delivered" ? 0 : status === "pending" || status === "queued" ? 1 : 2;
+  const rows = (data ?? []).map((r) => ({
+    id: r.id,
+    status: r.status,
+    aborted: readJsonObject((r.metadata ?? null) as Json | null).aborted_inbound_message_id !== undefined,
+  }));
+  rows.sort((l, r) => rank(l.status) - rank(r.status));
+  return rows[0] ?? null;
 }
 
 /**
@@ -1920,7 +1952,19 @@ export function resolveOutboundPolicy(args: {
  */
 type GateEvaluation =
   | { ok: true; decision: SendGateDecision; newerInboundId: string | null }
-  | { ok: false };
+  | {
+      ok: false;
+      /** The evidence set was too large to read completely: fail closed (rule 7). */
+      reason?: "evidence_truncated";
+    };
+
+/** Upper bound on each evidence query; hitting it fails the decision closed. */
+const GATE_EVIDENCE_CAP = 500;
+
+type GateProperty = Pick<
+  AiDispatchPropertyGateRow,
+  "needs_human_attention" | "outreach_dispo" | "ai_responder_disabled" | "org_id"
+>;
 
 /**
  * Gather every fact the Q8 table needs and decide. READS ONLY (no flag, no
@@ -1941,9 +1985,42 @@ async function evaluateSendGate(
     claimStartedAt: string | null;
     checkNewerInbound: boolean;
     extraWindowStartMs?: number | null;
+    /** Already-loaded property (the early gate has it); otherwise read here. */
+    property?: GateProperty | null;
   },
 ): Promise<GateEvaluation> {
   const nowMs = Date.now();
+
+  // Rule 0 evidence (suppression / disabled / consent / terminal): silent by
+  // design and decided before anything else is read.
+  const silent = await loadSilentExit(supabase, input, opts.property ?? null);
+  if (!silent.ok) return { ok: false };
+  if (silent.reason) {
+    return {
+      ok: true,
+      decision: decideSendGate(
+        { silentExit: { reason: silent.reason }, newerInbound: { present: false }, outbound: [] },
+        { phase: opts.phase },
+      ),
+      newerInboundId: null,
+    };
+  }
+
+  // Rule 8 evidence: a terminal (discarded / already sent) draft.
+  if (input.inboundMessageId) {
+    const draft = await loadDraftState(supabase, input.inboundMessageId);
+    if (draft === "error") return { ok: false };
+    if (draft === "resolved") {
+      return {
+        ok: true,
+        decision: decideSendGate(
+          { terminalDraft: true, newerInbound: { present: false }, outbound: [] },
+          { phase: opts.phase },
+        ),
+        newerInboundId: null,
+      };
+    }
+  }
 
   let newerInbound: NewerInboundFact = { present: false };
   let newerInboundId: string | null = null;
@@ -1970,11 +2047,65 @@ async function evaluateSendGate(
   }
 
   const outbound = await gatherOutboundFacts(supabase, input, opts, nowMs);
-  if (!outbound.ok) return { ok: false };
+  if (!outbound.ok) return outbound.truncated ? { ok: false, reason: "evidence_truncated" } : { ok: false };
   return {
     ok: true,
     decision: decideSendGate({ newerInbound, outbound: outbound.facts }, { phase: opts.phase }),
     newerInboundId,
+  };
+}
+
+/**
+ * Rule 0 evidence. Same predicates as today's gates, read in one place: the
+ * property is terminal (human attention / terminal disposition), the AI
+ * responder is off for the org (no active config) or the property, or the
+ * seller opted out. `reason` is null when none holds. A failed read is
+ * `ok: false` (the caller fails closed).
+ */
+async function loadSilentExit(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  known: GateProperty | null,
+): Promise<{ ok: true; reason: string | null } | { ok: false }> {
+  let property: GateProperty | null = known;
+  if (!property) {
+    const { data, error } = await supabase
+      .from("properties")
+      .select("org_id, ai_responder_disabled, outreach_dispo, needs_human_attention")
+      .eq("id", input.propertyId)
+      .maybeSingle();
+    if (error || !data) {
+      reportError(new Error(error?.message ?? "property not found"), {
+        tags: { surface: "ai_responder_rule0_property_lookup" },
+        extra: { propertyId: input.propertyId },
+      });
+      return { ok: false };
+    }
+    property = data as GateProperty;
+  }
+  if (isTerminalAiResponderProperty(property)) return { ok: true, reason: "already_terminal" };
+
+  const { data: config, error: configError } = await supabase
+    .from("ai_responder_configs")
+    .select("active")
+    .eq("org_id", property.org_id)
+    .eq("active", true)
+    .maybeSingle();
+  if (configError) {
+    reportError(new Error(configError.message), {
+      tags: { surface: "ai_responder_rule0_config_lookup" },
+      extra: { propertyId: input.propertyId },
+    });
+    return { ok: false };
+  }
+  const consentState = await getConsentState(supabase, input.contactId, "sms");
+  return {
+    ok: true,
+    reason: silentExitReason({
+      configActive: !!config,
+      consentState,
+      propertyDisabled: property.ai_responder_disabled,
+    }),
   };
 }
 
@@ -1983,7 +2114,7 @@ async function gatherOutboundFacts(
   input: AiDispatchInput,
   opts: { claimStartedAt: string | null; extraWindowStartMs?: number | null },
   nowMs: number,
-): Promise<{ ok: true; facts: GateOutboundFact[] } | { ok: false }> {
+): Promise<{ ok: true; facts: GateOutboundFact[] } | { ok: false; truncated?: true }> {
   let claimedAtMs: number | null = null;
   if (opts.claimStartedAt) {
     claimedAtMs = Date.parse(opts.claimStartedAt);
@@ -1999,38 +2130,63 @@ async function gatherOutboundFacts(
   type Row = {
     id: string;
     created_at: string;
+    sent_at: string | null;
     status: string;
     campaign_id: string | null;
     metadata: Json | null;
     scheduled_for: string | null;
   };
-  const columns = "id, created_at, status, campaign_id, metadata, scheduled_for";
+  const columns = "id, created_at, sent_at, status, campaign_id, metadata, scheduled_for";
   const rows = new Map<string, Row>();
 
-  if (windowStartMs !== null) {
+  const threadQuery = (statuses: readonly string[]) => {
     let query = supabase
       .from("messages")
       .select(columns)
       .eq("property_id", input.propertyId)
+      .eq("channel", "sms")
       .eq("direction", "outbound")
-      .in("status", [...GATE_EVIDENCE_STATUSES]);
-    query = input.conversationId
+      .in("status", [...statuses]);
+    return input.conversationId
       ? query.eq("conversation_id", input.conversationId)
       : query.eq("contact_id", input.contactId);
-    const { data, error } = await query
+  };
+  const reportLookup = (message: string) =>
+    reportError(new Error(message), {
+      tags: { surface: "ai_responder_pre_send_outbound_lookup" },
+      extra: { propertyId: input.propertyId },
+    });
+
+  // (1) Outstanding competitors (pending / queued), whenever they were created:
+  // a rep text scheduled for later may predate the inbound. Complete set, no
+  // time window; reaching the cap fails the decision closed.
+  {
+    const { data, error } = await threadQuery(["pending", "queued"])
       .order("created_at", { ascending: false })
-      .limit(50);
+      .limit(GATE_EVIDENCE_CAP + 1);
     if (error) {
-      reportError(new Error(error.message), {
-        tags: { surface: "ai_responder_pre_send_outbound_lookup" },
-        extra: { propertyId: input.propertyId },
-      });
+      reportLookup(error.message);
       return { ok: false };
     }
-    for (const row of (data ?? []) as Row[]) {
-      const createdMs = Date.parse(row.created_at);
-      if (Number.isNaN(createdMs) || createdMs >= windowStartMs) rows.set(row.id, row);
+    if ((data ?? []).length > GATE_EVIDENCE_CAP) return { ok: false, truncated: true };
+    for (const row of (data ?? []) as Row[]) rows.set(row.id, row);
+  }
+
+  // (2) Rows that went out (sent / delivered) since the window start. "Went
+  // out" is the submission time (sent_at); created_at is the fallback for a
+  // row with no sent_at. Complete set within the window; cap = fail closed.
+  if (windowStartMs !== null) {
+    const iso = new Date(windowStartMs).toISOString();
+    const { data, error } = await threadQuery(["sent", "delivered"])
+      .or(`sent_at.gte.${iso},and(sent_at.is.null,created_at.gte.${iso})`)
+      .order("created_at", { ascending: false })
+      .limit(GATE_EVIDENCE_CAP + 1);
+    if (error) {
+      reportLookup(error.message);
+      return { ok: false };
     }
+    if ((data ?? []).length > GATE_EVIDENCE_CAP) return { ok: false, truncated: true };
+    for (const row of (data ?? []) as Row[]) rows.set(row.id, row);
   }
 
   if (input.inboundMessageId) {
@@ -2057,24 +2213,28 @@ async function gatherOutboundFacts(
   }
   if (rows.size === 0) return { ok: true, facts: [] };
 
-  const { data: runs, error: runsError } = await supabase
-    .from("sequence_step_runs")
-    .select("message_id")
-    .in("message_id", [...rows.keys()]);
-  if (runsError) {
-    reportError(new Error(runsError.message), {
-      tags: { surface: "ai_responder_pre_send_sequence_lookup" },
-      extra: { propertyId: input.propertyId },
-    });
-    return { ok: false };
+  // Chunked: up to ~1000 ids must not blow the request URL limit.
+  const sequenceMessageIds = new Set<string>();
+  const ids = [...rows.keys()];
+  for (let i = 0; i < ids.length; i += 100) {
+    const { data: runs, error: runsError } = await supabase
+      .from("sequence_step_runs")
+      .select("message_id")
+      .in("message_id", ids.slice(i, i + 100));
+    if (runsError) {
+      reportError(new Error(runsError.message), {
+        tags: { surface: "ai_responder_pre_send_sequence_lookup" },
+        extra: { propertyId: input.propertyId },
+      });
+      return { ok: false };
+    }
+    for (const r of runs ?? []) if (r.message_id) sequenceMessageIds.add(r.message_id);
   }
   const ctx = {
     inboundMessageId: input.inboundMessageId ?? null,
     inboundCreatedAtMs: inbound.ms,
     nowMs,
-    sequenceMessageIds: new Set(
-      (runs ?? []).map((r) => r.message_id).filter((id): id is string => !!id),
-    ),
+    sequenceMessageIds,
   };
   const facts: GateOutboundFact[] = [];
   for (const row of rows.values()) {
@@ -2116,6 +2276,11 @@ function skipPlanFor(
 ): { reason: string; trace: string; flagReason: string | null } | null {
   if (decision.action !== "skip") return null;
   switch (decision.rule) {
+    case 0:
+      // Silent by design; the reason is the pre-existing gate reason.
+      return { reason: decision.reason, trace: decision.reason, flagReason: null };
+    case 8:
+      return { reason: "already_answered", trace: "already_answered", flagReason: null };
     case 1:
       return decision.flag
         ? {
@@ -2162,7 +2327,7 @@ async function newerInboundHasLiveHandler(
 ): Promise<boolean | null> {
   const { data: claim, error } = await supabase
     .from("ai_response_claims")
-    .select("status, error_message, lease_expires_at")
+    .select("status, outcome, error_message, lease_expires_at")
     .eq("inbound_message_id", newerInboundId)
     .eq("response_kind", "sms_ai_responder_v1")
     .maybeSingle();
@@ -2309,6 +2474,15 @@ async function applyGateEvaluation(
   guard: Guard,
 ): Promise<ResponderSendOutcome | null> {
   if (!evaluation.ok) {
+    if (evaluation.reason === "evidence_truncated") {
+      guard();
+      await trace(supabase, {
+        kind: "gate",
+        name: "evidence_truncated",
+        result: "error",
+        detail: { cap: GATE_EVIDENCE_CAP },
+      }, args.runContext);
+    }
     return failClosed(supabase, args, "send_check_failed", undefined, guard);
   }
   const decision = evaluation.decision;
@@ -2326,9 +2500,11 @@ async function applyGateEvaluation(
   guard();
   await trace(
     supabase,
-    decision.rule === 2
-      ? { kind: "gate", name: plan.trace, result: "pass" }
-      : { kind: "gate", name: plan.trace, result: "block", detail: { rule: decision.rule } },
+    decision.rule === 2 || decision.rule === 8
+      ? { kind: "gate", name: plan.trace, result: "pass", detail: { rule: decision.rule } }
+      : decision.rule === 0
+        ? { kind: "gate", name: plan.trace, result: "block", detail: { rule: 0, reason: decision.reason } }
+        : { kind: "gate", name: plan.trace, result: "block", detail: { rule: decision.rule } },
     args.runContext,
   );
   if (plan.flagReason) {
@@ -2338,6 +2514,7 @@ async function applyGateEvaluation(
       args.input.propertyId,
       plan.flagReason,
       args.runContext,
+      guard,
     );
   }
   return { outcome: "skipped", reason: plan.reason };
@@ -2382,12 +2559,19 @@ export async function flagAndDeadLetter(
           inboundMessageId: args.inboundMessageId,
           body: args.body,
           reason: args.reason,
+          guard: args.guard,
         });
   const flagReason = deadLettered
     ? (args.flagReason ?? args.reason)
     : `dead_letter_failed:${args.reason}`;
   args.guard?.();
-  await markPropertyNeedsAttention(supabase, args.propertyId, flagReason, args.runContext);
+  await markPropertyNeedsAttention(
+    supabase,
+    args.propertyId,
+    flagReason,
+    args.runContext,
+    args.guard ?? NO_GUARD,
+  );
   return { deadLettered, flagReason };
 }
 
@@ -2480,7 +2664,9 @@ async function retryOrFailReply(
 async function persistHeldDraft(
   supabase: SupabaseClient<Database>,
   args: ResponderSendArgs,
+  guard: Guard = NO_GUARD,
 ): Promise<"stored" | "already_resolved" | { error: { message: string } }> {
+  guard();
   const inboundId = args.input.inboundMessageId ?? null;
   if (inboundId) {
     const { data: existing, error: lookupError } = await supabase
@@ -2496,6 +2682,8 @@ async function persistHeldDraft(
     }
     if (rows.some((d) => d.status === "pending")) return "stored";
   }
+  // The lookup above awaits: an attempt that expired meanwhile must not insert.
+  guard();
   const { error: draftError } = await supabase.from("ai_reply_drafts").insert({
     org_id: args.orgId,
     run_id: args.runContext?.runId ?? null,
@@ -2521,7 +2709,7 @@ async function holdReplyAsDraft(
   guard: Guard = NO_GUARD,
 ): Promise<ResponderSendOutcome> {
   guard();
-  const persisted = await persistHeldDraft(supabase, args);
+  const persisted = await persistHeldDraft(supabase, args, guard);
   guard();
   if (persisted === "already_resolved") {
     await trace(supabase, { kind: "gate", name: "already_answered", result: "pass" }, args.runContext);
@@ -2552,7 +2740,7 @@ async function holdReplyAsDraft(
     detail: { source: args.source, reason, stored: true },
   }, args.runContext);
   guard();
-  await markPropertyNeedsAttention(supabase, args.input.propertyId, "draft_held", args.runContext);
+  await markPropertyNeedsAttention(supabase, args.input.propertyId, "draft_held", args.runContext, guard);
   return { outcome: "escalated", reason: "draft_held" };
 }
 
@@ -2748,21 +2936,9 @@ async function sendResponderMessage(
   supabase: SupabaseClient<Database>,
   args: ResponderSendArgs,
 ): Promise<ResponderSendOutcome> {
-  // Rule 8: a draft a human discarded, or that was already sent, is never
-  // re-sent or revived by any run (first attempt, retry, identity reply).
-  if (args.input.inboundMessageId) {
-    const draft = await loadDraftState(supabase, args.input.inboundMessageId);
-    if (draft === "error") return failClosed(supabase, args, "send_check_failed");
-    if (draft === "resolved") {
-      await trace(supabase, {
-        kind: "gate",
-        name: "already_answered",
-        result: "pass",
-        detail: { rule: 8 },
-      }, args.runContext);
-      return { outcome: "skipped", reason: "already_answered" };
-    }
-  }
+  // Rules 0 and 8 (suppression / terminal draft) are the FIRST thing every
+  // gate evaluation checks (see `evaluateSendGate`), on both the hold path and
+  // under the send lease.
 
   // Outbound policy (rollback to draft-only + D5). Lives here so immediate
   // dispatch AND the resumed delay workflow both hit it. A held reply sends
@@ -2817,6 +2993,14 @@ async function sendResponderMessage(
     });
     const raced = await Promise.race([done, deadline]);
     if (raced.kind === "done") return raced.outcome;
+    // The deadline won: `done` may still settle later. A late failure must be
+    // reported, never left as an unhandled rejection.
+    done.catch((e: unknown) =>
+      reportError(e, {
+        tags: { surface: "ai_responder_late_attempt_error" },
+        extra: { propertyId: args.input.propertyId },
+      }),
+    );
 
     attempt.abandoned = true;
     if (attempt.providerStarted) {
@@ -2953,9 +3137,9 @@ async function deliverResponderMessage(
       // The refused row could not be retired: it still carries the stamp that
       // owns this inbound, so a retry would collide with it. Never retry over
       // it; dead-letter + flag a human.
+      guard();
       await trace(supabase, { kind: "gate", name: "send_abort_unconfirmed", result: "error" }, args.runContext);
       const reason = "send_blocked:abort_unconfirmed";
-      guard();
       await flagAndDeadLetterFor(supabase, args, reason, { guard });
       return { outcome: "escalated", reason };
     }
@@ -2979,22 +3163,9 @@ async function deliverResponderMessage(
       args.input.inboundMessageId,
     );
     guard();
-    if (existingReply?.status === "pending") {
-      // Another attempt's row for this inbound is still in flight (or was
-      // abandoned and has not aborted yet). It is not a delivered reply: try
-      // again shortly instead of ending the seller's thread silently.
-      await trace(supabase, { kind: "gate", name: "send_row_in_flight", result: "block" }, args.runContext);
-      return retryOrFailReply(supabase, args, "send_reserved_elsewhere", guard);
-    }
-    if (existingReply?.status === "failed") {
-      // A previous attempt's row failed AFTER the provider boundary and still
-      // owns this inbound's stamp: the seller was not answered and a resend
-      // would collide with it. Flag, never "already replied".
-      const reason = "send_blocked:prior_attempt_failed";
-      await flagAndDeadLetterFor(supabase, args, reason, { guard });
-      return { outcome: "escalated", reason };
-    }
-    if (existingReply) {
+    const existingStatus = existingReply?.status;
+    if (existingStatus === "sent" || existingStatus === "delivered") {
+      // Only a row the provider accepted counts as an answered seller.
       await trace(supabase, {
         kind: "gate",
         name: "already_replied",
@@ -3002,6 +3173,29 @@ async function deliverResponderMessage(
       }, args.runContext);
       return { outcome: "skipped", reason: "already_replied" };
     }
+    if (existingStatus === "pending" || existingStatus === "queued") {
+      // Another attempt's row for this inbound is still in flight (or was
+      // abandoned and has not aborted yet). It is not a delivered reply (Q8
+      // rule 4): try again shortly instead of ending the seller's thread silently.
+      await trace(supabase, { kind: "gate", name: "send_row_in_flight", result: "block" }, args.runContext);
+      return retryOrFailReply(supabase, args, "send_reserved_elsewhere", guard);
+    }
+    if (existingReply && existingStatus === "failed" && !existingReply.aborted) {
+      // A previous attempt's row failed AFTER the provider boundary and still
+      // owns this inbound's stamp: the seller was not answered and a resend
+      // would collide with it. Flag, never "already replied".
+      const reason = "send_blocked:prior_attempt_failed";
+      await flagAndDeadLetterFor(supabase, args, reason, { guard });
+      return { outcome: "escalated", reason };
+    }
+    if (existingReply && existingStatus !== "failed") {
+      // Any other status is a blocked send (rule 7), never an answered seller.
+      const reason = `send_blocked:${existingStatus}`;
+      await flagAndDeadLetterFor(supabase, args, reason, { guard });
+      return { outcome: "escalated", reason };
+    }
+    // No row, or a failed row retired before the provider: the duplicate is
+    // unexplained; fall through to the generic blocked-send handling (rule 7).
   }
 
   if (
@@ -3024,6 +3218,15 @@ async function deliverResponderMessage(
     return { outcome: "escalated", reason };
   }
 
+  // ---- DELIVERY RECONCILIATION -------------------------------------------
+  // Everything below records that the provider ACCEPTED this reply (the
+  // message id, its AI metadata, the evidence step, the run link). It is
+  // deliberately NOT guarded by the attempt deadline: a submission that
+  // completed after the deadline still happened and must be recorded. It is
+  // reachable only after a successful submission (status sent / queued, i.e.
+  // the provider fence let it through); an attempt that did NOT submit can
+  // never get here, and the assertion keeps it so.
+  if (!attempt.providerStarted) guard();
   const messageId = sendResult.messageId;
   const metadata: AiMessageMetadata = {
     generated_by: "ai_responder_v1",
@@ -3931,13 +4134,21 @@ export async function markPropertyNeedsAttention(
   propertyId: string,
   reason: string,
   runContext?: MaybeRunContext,
+  /**
+   * An abandoned send attempt passes its validity check: it runs immediately
+   * before the evidence step AND again before the property write (the trace
+   * awaits, so the attempt can expire in between). Not an attempt = no guard.
+   */
+  guard: Guard = NO_GUARD,
 ): Promise<void> {
   // Evidence first: the hold is recorded whether or not the flag write wins.
+  guard();
   await trace(
     supabase,
     { kind: "hold", name: "needs_attention", result: "held", detail: { reason } },
     runContext,
   );
+  guard();
   const now = new Date().toISOString();
   const { data: updated, error } = await supabase
     .from("properties")
@@ -3991,20 +4202,23 @@ async function countAiTurnsInThread(
   contactId: string,
   conversationId: string | null,
 ): Promise<number> {
-  let query = supabase
-    .from("messages")
-    .select("*", { count: "exact", head: true })
-    .eq("property_id", propertyId)
-    .eq("direction", "outbound")
-    // A failed row (including one retired by a refused provider submission) is
-    // not a turn the seller received.
-    .neq("status", "failed")
-    .contains("metadata", { generated_by: "ai_responder_v1" });
-  query = conversationId
-    ? query.eq("conversation_id", conversationId)
-    : query.eq("contact_id", contactId);
-  const { count } = await query;
-  return count ?? 0;
+  const base = () => {
+    const query = supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("property_id", propertyId)
+      .eq("direction", "outbound")
+      .contains("metadata", { generated_by: "ai_responder_v1" });
+    return conversationId
+      ? query.eq("conversation_id", conversationId)
+      : query.eq("contact_id", contactId);
+  };
+  const { count } = await base();
+  // Exclude ONLY rows retired before the provider (`aborted_inbound_message_id`
+  // present): the seller never received those. A row that failed at or after
+  // the provider boundary still counts (its text may have reached the seller).
+  const { count: retired } = await base().not("metadata->aborted_inbound_message_id", "is", null);
+  return Math.max(0, (count ?? 0) - (retired ?? 0));
 }
 
 /**

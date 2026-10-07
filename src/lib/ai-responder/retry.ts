@@ -28,8 +28,9 @@ export const REPLY_RETRY_MAX = 3;
  *  claim_refused_on_retry     NO        dead-letter + flag reply_skipped:claim_refused_on_retry
  *  send_blocked:<status>      NO        dead-letter + flag send_blocked:<status> (incl.
  *                                       db_error, abort_unconfirmed, prior_attempt_failed)
- *  outside_business_hours /   NO        retry gap tripped a pacing gate: draft held +
- *   max_turns_reached                   dead-letter + flag reply_skipped:<reason>
+ *  outside_business_hours /   NO        a pacing gate tripped during the retry gap: draft held +
+ *   max_turns_reached                   dead-letter + flag reply_skipped:outside_business_hours
+ *                                       or reply_skipped:max_turns_reached (rule 7)
  *  retry unschedulable        NO        dead-letter + flag reply_skipped:<reason>
  */
 export type RetryReason =
@@ -110,10 +111,17 @@ export async function writeReplyDeadLetter(
     inboundMessageId: string | null;
     body: string;
     reason: string;
+    /**
+     * Attempt-validity check (throws once the attempt is abandoned). Called
+     * immediately before EACH insert (every retry iteration) and before the
+     * failure step, OUTSIDE the try so its throw is never swallowed.
+     */
+    guard?: () => void;
   },
 ): Promise<boolean> {
   let lastError: string | null = null;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
+    args.guard?.();
     try {
       const { error } = await supabase.from("ai_reply_dead_letters").insert({
         org_id: args.orgId,
@@ -134,6 +142,7 @@ export async function writeReplyDeadLetter(
     tags: { surface: "ai_responder_dead_letter_insert" },
     extra: { propertyId: args.propertyId, inboundMessageId: args.inboundMessageId, reason: args.reason },
   });
+  args.guard?.();
   await recordStep(supabase, ctx, {
     kind: "action",
     name: "dead_letter_failed",
