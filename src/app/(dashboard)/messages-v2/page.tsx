@@ -23,6 +23,7 @@ import {
   type RpcClient,
   type ScorecardRow,
 } from "./scorecard";
+import { loadReplayBatchId } from "./replay-batch";
 import type { PipelineCoverage } from "./types";
 
 export const dynamic = "force-dynamic";
@@ -80,10 +81,11 @@ export default async function MessagesV2Page() {
   const { orgId, isOwner } = access;
 
   const supabase = (await createClient()) as unknown as LooseSupabase;
-  const [loaded, coverage, scorecardRows] = await Promise.all([
+  const [loaded, coverage, scorecardRows, replayBatchId] = await Promise.all([
     loadMessagesV2Data(supabase, orgId, undefined, { includeDraftBody: true }),
     loadCoverage(orgId),
     loadScorecard(supabase, orgId),
+    isOwner ? loadReplayBatchId(supabase, orgId) : Promise.resolve(null),
   ]);
   // The hold queries are windowed; the version each card sends back is read
   // fresh per displayed property so a hold past the window can still be dismissed.
@@ -107,6 +109,7 @@ export default async function MessagesV2Page() {
       <MessagesV2View
         orgId={orgId}
         isOwner={isOwner}
+        replayBatchId={replayBatchId}
         coverage={coverage === "unavailable" ? null : coverage}
         coverageUnavailable={coverage === "unavailable"}
         holdsMeta={data.holdsMeta}
