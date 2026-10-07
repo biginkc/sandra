@@ -129,13 +129,15 @@ const FORBIDDEN_CREDENTIALS = [
 ] as const;
 
 /** Force the stub and LLM-hold flags for this process (and its children). */
-export function applyStubEnv(env: NodeJS.ProcessEnv): void {
+export type EnvLike = Record<string, string | undefined>;
+
+export function applyStubEnv(env: EnvLike): void {
   env.SMS_PROVIDER_STUB = "1";
   env.AI_RESPONDER_LLM_AUTOSEND = "0";
 }
 
 /** The harness process must hold no way to reach a seller-SMS provider. */
-export function assertHarnessEnv(env: NodeJS.ProcessEnv): void {
+export function assertHarnessEnv(env: EnvLike): void {
   if (env.SMS_PROVIDER_STUB !== "1") {
     throw new ReplaySafetyError("SMS_PROVIDER_STUB=1 must be set");
   }

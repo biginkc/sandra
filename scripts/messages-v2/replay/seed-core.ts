@@ -90,8 +90,8 @@ export async function seedExport(query: Query, exp: ReplayExport, opts: SeedOpti
       inserted[table] = 0;
       continue;
     }
-    const remapped = rows.map((r) => {
-      const row = { ...r, org_id: orgId };
+    const remapped = rows.map((r): Record<string, unknown> => {
+      const row: Record<string, unknown> = { ...r, org_id: orgId };
       if (table === "ai_responder_configs" && !opts.keepReplyDelay) {
         row.reply_delay_min_seconds = 0;
         row.reply_delay_max_seconds = 0;

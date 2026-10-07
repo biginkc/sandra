@@ -110,7 +110,7 @@ describe("readProdRefs", () => {
 
 describe("harness env", () => {
   it("applyStubEnv forces the stub and LLM hold flags", () => {
-    const env: NodeJS.ProcessEnv = { AI_RESPONDER_LLM_AUTOSEND: "1" };
+    const env: Record<string, string | undefined> = { AI_RESPONDER_LLM_AUTOSEND: "1" };
     applyStubEnv(env);
     expect(env.SMS_PROVIDER_STUB).toBe("1");
     expect(env.AI_RESPONDER_LLM_AUTOSEND).toBe("0");

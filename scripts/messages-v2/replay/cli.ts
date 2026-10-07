@@ -7,6 +7,8 @@ import type { ReplayExport } from "./schema";
 export const REPLAY_DIR = path.resolve(process.cwd(), "tmp/replay");
 export const DEFAULT_LOCAL_DB_URL = "postgresql://postgres:postgres@127.0.0.1:54329/postgres";
 
+export const DEFAULT_REPLAY_WEBHOOK_SECRET = "replay-local-webhook-secret";
+
 export function fail(message: string): never {
   console.error(`replay: ${message}`);
   process.exit(1);
