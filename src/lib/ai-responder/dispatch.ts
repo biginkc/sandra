@@ -2197,6 +2197,11 @@ export function resolveOutboundPolicy(args: {
   source: ReplySource;
   dbMode?: string | null;
 }): { hold: false } | { hold: true; reason: "outbound_mode_hold" | "llm_autosend_off" } {
+  // A human clicking Send on a held draft is the human decision the hold was
+  // waiting for. The AI outbound policy (draft-only rollback, LLM autosend off)
+  // governs what the AI may send on its own; re-holding a human's click would
+  // loop the draft back into the hold rail forever.
+  if (args.source === "human") return { hold: false };
   const envMode = process.env.AI_RESPONDER_OUTBOUND_MODE?.trim().toLowerCase();
   if (envMode === "hold" || args.dbMode === "hold") {
     return { hold: true, reason: "outbound_mode_hold" };
@@ -2223,6 +2228,9 @@ type GateEvaluation =
 
 /** Upper bound on each evidence query; hitting it fails the decision closed. */
 const GATE_EVIDENCE_CAP = 500;
+
+/** The only flag reason a human Send is exempt from (engineering policy: the narrowest exemption). */
+export const HUMAN_SEND_EXEMPT_FLAG_REASON = "draft_held";
 
 type GateProperty = Pick<
   AiDispatchPropertyGateRow,
@@ -2251,13 +2259,20 @@ async function evaluateSendGate(
     property?: GateProperty | null;
     /** The caller's own pending send row: it is not a competitor to itself. */
     excludeMessageId?: string;
+    /**
+     * A human is sending a held draft: the property's own "flagged for a human"
+     * state is what put the draft on the rail, so it is not a reason to refuse
+     * the human's click. Every other rule 0 predicate (suppression, DNC,
+     * consent, terminal disposition, responder off) still applies.
+     */
+    humanActor?: boolean;
   },
 ): Promise<GateEvaluation> {
   const nowMs = Date.now();
 
   // Rule 0 evidence (suppression / disabled / consent / terminal): silent by
   // design and decided before anything else is read.
-  const silent = await loadSilentExit(supabase, input, opts.property ?? null);
+  const silent = await loadSilentExit(supabase, input, opts.property ?? null, opts.humanActor === true);
   if (!silent.ok) return { ok: false };
   if (silent.reason) {
     return {
@@ -2330,12 +2345,19 @@ async function loadSilentExit(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
   known: GateProperty | null,
+  humanActor = false,
 ): Promise<{ ok: true; reason: string | null } | { ok: false }> {
-  let property: GateProperty | null = known;
+  // A human send reads the flag reason fresh: the exemption below depends on
+  // it, and the early gate's row does not carry it.
+  let property: (GateProperty & { last_ai_escalation_reason?: string | null }) | null = humanActor ? null : known;
   if (!property) {
     const { data, error } = await supabase
       .from("properties")
-      .select("org_id, ai_responder_disabled, outreach_dispo, needs_human_attention")
+      .select(
+        humanActor
+          ? "org_id, ai_responder_disabled, outreach_dispo, needs_human_attention, last_ai_escalation_reason"
+          : "org_id, ai_responder_disabled, outreach_dispo, needs_human_attention",
+      )
       .eq("id", input.propertyId)
       .maybeSingle();
     if (error || !data) {
@@ -2345,9 +2367,25 @@ async function loadSilentExit(
       });
       return { ok: false };
     }
-    property = data as GateProperty;
+    property = data as unknown as GateProperty & { last_ai_escalation_reason?: string | null };
   }
-  if (isTerminalAiResponderProperty(property)) return { ok: true, reason: "already_terminal" };
+  if (humanActor) {
+    // Engineering policy: a human Send is exempt
+    // from the "already flagged" check ONLY when the flag is exactly
+    // `draft_held` (the flag that put the draft on the rail). Any other flag
+    // reason still refuses, with the reason shown.
+    if (shouldSuppressAutomatedSend({ outreachDispo: property.outreach_dispo })) {
+      return { ok: true, reason: "already_terminal" };
+    }
+    if (property.needs_human_attention && property.last_ai_escalation_reason !== HUMAN_SEND_EXEMPT_FLAG_REASON) {
+      return {
+        ok: true,
+        reason: `already_flagged:${property.last_ai_escalation_reason ?? "unknown"}`,
+      };
+    }
+  } else if (isTerminalAiResponderProperty(property)) {
+    return { ok: true, reason: "already_terminal" };
+  }
 
   const { data: config, error: configError } = await supabase
     .from("ai_responder_configs")
@@ -2699,8 +2737,10 @@ type ResponderSendArgs = {
   confidence: number;
   sentiment: AiMessageMetadata["sentiment"];
   turn: number;
-  /** Who authored the text. Every current caller is `llm`. */
+  /** Who authored the text. `llm` for the responder; `human` for a hold click (see `sendHumanDraft`). */
   source: ReplySource;
+  /** Set only for a human-approved send: who clicked, and whether they edited the text. */
+  approvedBy?: { userId: string; edited: boolean };
   orgId: string;
   /** When this run took its claim; null when unknown (check skipped). */
   claimStartedAt: string | null;
@@ -3255,9 +3295,7 @@ async function reserveSend(
     assertLive(attempt);
     const { data, error } = await supabase.rpc("fn_reserve_ai_send", {
       p_conversation_id: conversationKey,
-      // Generated type is `?: string`; SQL accepts null. Cast keeps types.ts
-      // regen-safe.
-      p_inbound_message_id: (inboundMessageId ?? null) as string | undefined,
+      p_inbound_message_id: inboundMessageId ?? null,
       p_holder: attempt.holder,
       p_lease_seconds: sendReservationTuning.leaseSeconds,
     });
@@ -3388,6 +3426,7 @@ async function fenceProviderSubmit(
     claimStartedAt: args.claimStartedAt,
     checkNewerInbound: !!args.input.inboundMessageId,
     excludeMessageId: ctx.messageId,
+    humanActor: args.source === "human",
   });
   if (pastDeadline()) {
     attempt.abandoned = true;
@@ -3443,6 +3482,85 @@ async function sendResponderMessage(
   return outcome;
 }
 
+/**
+ * A human clicked Send on a held draft (Messages v2 holds rail). The text goes
+ * through the SAME chokepoint as every other responder send, so the Q8 table,
+ * the per-conversation lease, the suppression / consent / quiet-hours checks
+ * inside `sendSmsToContact`, and the one-reply-per-inbound guard all run at
+ * click time; a stale draft is refused, never sent.
+ *
+ * Differences from an AI send, all deliberate: `source: "human"` (never held
+ * by the AI outbound policy); the property being flagged for a human does not
+ * refuse the click (that flag is what put the draft on the rail); there is no
+ * claim and nothing is re-scheduled: a transient refusal (`retryable`) is shown
+ * to the user, who clicks again.
+ */
+export type HumanDraftSendInput = {
+  orgId: string;
+  propertyId: string;
+  contactId: string;
+  conversationId: string | null;
+  inboundMessageId: string | null;
+  /** The number that texted us, so the reply goes to the same phone. */
+  inboundFromPhone?: string | null;
+  /** The text to send (the draft, or the human's edit of it). */
+  body: string;
+  userId: string;
+  edited: boolean;
+  runContext?: MaybeRunContext;
+};
+
+export type HumanDraftSendResult =
+  | { status: "sent"; messageId: string }
+  | {
+      status: "refused";
+      /** Machine reason (a Q8 skip reason, or a send failure reason). */
+      reason: string;
+      /** The send was refused for a transient reason; clicking again may work. */
+      retryable: boolean;
+      /** The refusal flagged the property for a human (or it already was). */
+      flagged: boolean;
+    };
+
+export async function sendHumanDraft(
+  supabase: SupabaseClient<Database>,
+  input: HumanDraftSendInput,
+): Promise<HumanDraftSendResult> {
+  const outcome = await sendResponderMessage(supabase, {
+    input: {
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      conversationId: input.conversationId,
+      inboundFromPhone: input.inboundFromPhone ?? null,
+      inboundBody: "",
+      inboundMessageId: input.inboundMessageId,
+    },
+    body: input.body,
+    model: "human",
+    confidence: 1,
+    sentiment: "neutral",
+    turn: 0,
+    source: "human",
+    approvedBy: { userId: input.userId, edited: input.edited },
+    orgId: input.orgId,
+    claimStartedAt: null,
+    runContext: input.runContext,
+    replyKind: "send_reply",
+  });
+  if (outcome.outcome === "sent") {
+    return { status: "sent", messageId: outcome.messageId };
+  }
+  if (outcome.outcome === "retry") {
+    return { status: "refused", reason: outcome.reason, retryable: true, flagged: false };
+  }
+  return {
+    status: "refused",
+    reason: outcome.reason,
+    retryable: false,
+    flagged: outcome.outcome === "escalated" || outcomeMeta.get(outcome)?.flagged === true,
+  };
+}
+
 async function sendResponderMessageInner(
   supabase: SupabaseClient<Database>,
   args: ResponderSendArgs,
@@ -3463,6 +3581,7 @@ async function sendResponderMessageInner(
       phase: "presend",
       claimStartedAt: args.claimStartedAt,
       checkNewerInbound: !!args.input.inboundMessageId,
+      humanActor: args.source === "human",
     });
     const stale = await applyGateEvaluation(supabase, args, evaluation, NO_GUARD);
     if (stale) return stale;
@@ -4205,6 +4324,7 @@ async function leasedSend(
     phase: "presend",
     claimStartedAt: args.claimStartedAt,
     checkNewerInbound: !!args.input.inboundMessageId,
+    humanActor: args.source === "human",
   });
   assertLive(attempt);
   const stale = await applyGateEvaluation(supabase, args, evaluation, guard);
@@ -4298,6 +4418,7 @@ async function deliverResponderMessage(
         phase: "presend",
         claimStartedAt: args.claimStartedAt,
         checkNewerInbound: !!args.input.inboundMessageId,
+        humanActor: args.source === "human",
       });
       guard();
       const stale = await applyGateEvaluation(supabase, args, evaluation, guard);
@@ -4425,6 +4546,12 @@ async function deliverResponderMessage(
       metadata: {
         ...readJsonObject(messageRow?.metadata ?? null),
         ...metadata,
+        ...(args.approvedBy
+          ? {
+              approved_by_user_id: args.approvedBy.userId,
+              edited_by_human: args.approvedBy.edited,
+            }
+          : {}),
       } as Json,
     })
     .eq("id", messageId);
@@ -4435,7 +4562,7 @@ async function deliverResponderMessage(
     result: "sent",
     detail: {
       outboundMessageId: messageId,
-      actor: "ai",
+      actor: args.approvedBy ? "human_approved" : "ai",
       confidence: args.confidence,
       persona: getOutboundSenderName(),
     },

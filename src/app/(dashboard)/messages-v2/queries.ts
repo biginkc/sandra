@@ -34,7 +34,22 @@ export type HoldDraftRow = {
   inbound_message_id: string | null;
   run_id: string | null;
   created_at: string;
+  /** Only present when the loader was asked for draft bodies (the page, never the alert cron). */
+  body?: string;
+  edited_body?: string | null;
+  edited_at?: string | null;
 };
+
+/**
+ * Orders two database timestamp strings by instant to the microsecond (Date
+ * alone stops at the millisecond, and two rows can share one).
+ */
+export function compareInstants(a: string, b: string): number {
+  const ms = Date.parse(a) - Date.parse(b);
+  if (ms !== 0 && Number.isFinite(ms)) return ms;
+  const micros = (v: string) => Number((/\.(\d+)/.exec(v)?.[1] ?? "").padEnd(6, "0").slice(0, 6) || 0);
+  return micros(a) - micros(b);
+}
 
 /** Distinct-hold counting stops here; above it the total is "2,000+ (incomplete)". */
 export const HOLDS_COUNT_CAP = 2000;
@@ -70,7 +85,11 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     messages: Set<string>;
     notes: string[];
     flagReason?: string | null;
+    flagAt?: string | null;
+    /** created_at of every pending decision / review / draft (raw strings, never re-parsed). */
+    rowTimes: string[];
     noProperty?: boolean;
+    draft?: HoldDraftRow;
   };
   const byProperty = new Map<string, Acc>();
   const acc = (id: string): Acc => {
@@ -82,6 +101,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
         conversations: new Set(),
         messages: new Set(),
         notes: [],
+        rowTimes: [],
       };
       byProperty.set(id, a);
     }
@@ -94,6 +114,8 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     // updated_at is NOT a hold clock (any edit resets it): unknown stays unknown
     // unless a pending decision/review supplies an earlier-known time.
     if (p.last_ai_escalation_at) a.times.push(p.last_ai_escalation_at);
+    a.flagAt = p.last_ai_escalation_at;
+    a.flagReason = p.last_ai_escalation_reason;
     if (p.last_ai_escalation_reason) {
       a.notes.push(p.last_ai_escalation_reason);
       a.flagReason = p.last_ai_escalation_reason;
@@ -103,6 +125,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     const a = acc(d.property_id);
     a.sources.add("jev_decision");
     a.times.push(d.created_at);
+    a.rowTimes.push(d.created_at);
     a.conversations.add(d.conversation_id);
     a.messages.add(d.source_inbound_message_id);
   }
@@ -110,6 +133,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     const a = acc(r.property_id);
     a.sources.add("disposition_review");
     a.times.push(r.created_at);
+    a.rowTimes.push(r.created_at);
     a.conversations.add(r.conversation_id);
     a.messages.add(r.source_inbound_message_id);
     a.notes.push(r.disposition);
@@ -133,6 +157,9 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     if (propertyId === null) a.noProperty = true;
     a.sources.add("pending_draft");
     a.times.push(d.created_at);
+    a.rowTimes.push(d.created_at);
+    // Sorted oldest first above, so the last assignment is the newest draft.
+    a.draft = d;
     const conversation = d.conversation_id ?? ref?.conversation_id ?? null;
     if (conversation) a.conversations.add(conversation);
     if (d.inbound_message_id) a.messages.add(d.inbound_message_id);
@@ -172,6 +199,23 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
       id: propertyId,
       property_id: a.noProperty ? null : propertyId,
       draft_held: sources.includes("pending_draft"),
+      ...(a.draft
+        ? {
+            draft: {
+              id: a.draft.id,
+              inbound_message_id: a.draft.inbound_message_id,
+              ...(a.draft.body !== undefined ? { body: a.draft.body } : {}),
+              ...(a.draft.edited_body !== undefined ? { edited_body: a.draft.edited_body } : {}),
+              ...(a.draft.edited_at !== undefined ? { edited_at: a.draft.edited_at } : {}),
+            },
+          }
+        : {}),
+      seen: {
+        // Chronological max by instant; the raw string is what goes back to the database.
+        through: [...a.rowTimes].sort((x, y) => compareInstants(y, x))[0] ?? null,
+        flagReason: a.sources.has("needs_attention") ? (a.flagReason ?? null) : null,
+        flagAt: a.sources.has("needs_attention") ? (a.flagAt ?? null) : null,
+      },
       message_ids: [...a.messages],
       conversation_id: [...a.conversations][0] ?? run?.conversation_id ?? null,
       sources,
@@ -382,6 +426,14 @@ export async function loadMessagesV2Data(
   supabase: LooseSupabase,
   orgId: string,
   nowMs: number = Date.now(),
+  opts: {
+    /**
+     * Select the pending drafts' text so the hold card can show what Send
+     * would send. The page asks; the alert cron never does (alert payloads
+     * carry no message text).
+     */
+    includeDraftBody?: boolean;
+  } = {},
 ): Promise<MessagesV2Data> {
   // Distinct-hold totals come from separate id-only queries (one per source),
   // capped at HOLDS_COUNT_CAP+1 rows and de-duplicated by property client-side.
@@ -442,11 +494,13 @@ export async function loadMessagesV2Data(
         .order("source_inbound_message_id", { ascending: true })
         .limit(HOLD_LIMIT),
       // Pending Claude reply drafts are a hold source of their own. The body
-      // column is deliberately not selected.
+      // is selected only when the caller needs to show it (hold actions).
       supabase
         .from("ai_reply_drafts")
         .select(
-          "id, property_id, conversation_id, inbound_message_id, run_id, created_at",
+          opts.includeDraftBody
+            ? "id, property_id, conversation_id, inbound_message_id, run_id, created_at, body, edited_body, edited_at"
+            : "id, property_id, conversation_id, inbound_message_id, run_id, created_at",
         )
         .eq("org_id", orgId)
         .eq("status", "pending")
@@ -718,6 +772,40 @@ export async function loadMessagesV2Data(
     target.inbound_message_id ??= row.inbound_message_id;
     target.late = target.late || row.late;
   }
+  // Latest alert delivery per held property, so a failed or skipped alert is
+  // visible on the card (PLAN 4.11: failures are surfaced, not swallowed).
+  const alertByProperty = new Map<string, NonNullable<OpenHold["alert"]>>();
+  const alertAtByProperty = new Map<string, string>();
+  const alertPropertyIds = [
+    ...new Set(openHolds.flatMap((h) => (h.property_id ? [h.property_id] : []))),
+  ];
+  const alertResults: Array<{ data?: unknown; error?: unknown }> = await Promise.all(
+    // One newest live row per property (distinct on property_id in SQL), so a
+    // noisy property can never crowd another's status out of a shared row cap.
+    chunked(alertPropertyIds, PROPERTY_RPC_CHUNK).map((ids) =>
+      supabase.rpc("hold_alert_latest_status", { p_org_id: orgId, p_property_ids: ids }),
+    ),
+  );
+  for (const res of alertResults) {
+    if (res.error) {
+      if (!contextErrors.includes("alert status")) contextErrors.push("alert status");
+      continue;
+    }
+    for (const row of (res.data ?? []) as Array<{
+      property_id: string | null;
+      status: NonNullable<OpenHold["alert"]>["status"];
+      last_error: string | null;
+      created_at: string;
+    }>) {
+      if (!row.property_id) continue;
+      const prev = alertByProperty.get(row.property_id);
+      const prevAt = prev ? alertAtByProperty.get(row.property_id)! : null;
+      if (prevAt === null || compareInstants(row.created_at, prevAt) > 0) {
+        alertByProperty.set(row.property_id, { status: row.status, reason: row.last_error });
+        alertAtByProperty.set(row.property_id, row.created_at);
+      }
+    }
+  }
   const deadLettersFor = (h: OpenHold<PipelineRun>): DeadLetterInfo[] =>
     groups
       .filter(
@@ -771,6 +859,9 @@ export async function loadMessagesV2Data(
         ...(isDead(h) ? { dead_letter: true } : {}),
         ...(dls.some((d) => d.late) ? { dead_letter_late: true } : {}),
         ...(dls.length ? { dead_letters: dls } : {}),
+        ...(h.property_id && alertByProperty.has(h.property_id)
+          ? { alert: alertByProperty.get(h.property_id) }
+          : {}),
         run: h.run ? withSteps(h.run) : null,
       };
     }),

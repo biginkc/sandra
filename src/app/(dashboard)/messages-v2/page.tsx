@@ -5,6 +5,16 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
 import { messagesV2Context } from "./access";
+import {
+  assignHoldAction,
+  dismissHoldAction,
+  editAndSendHeldDraftAction,
+  listHoldAssigneesAction,
+  sendHeldDraftAction,
+  takeOverHoldAction,
+  retrySuppressionHoldAction,
+} from "./actions";
+import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
 import { loadMessagesV2Data, type LooseSupabase } from "./queries";
 import { MessagesV2View } from "./messages-v2-view";
@@ -43,9 +53,10 @@ async function loadCoverage(
 }
 
 /**
- * Phase 0 evidence page: a live, read-only feed of every inbound SMS the
- * pipeline processed (gates, Jev judgment, applied actions, replies, holds).
- * Visible to org owners and the Acquisitions group.
+ * Live feed of every inbound SMS the pipeline processed (gates, Jev judgment,
+ * applied actions, replies, holds), plus the holds rail with its Phase 1
+ * actions (Send, Edit, Take over, Assign, Dismiss). Visible to org owners and
+ * the Acquisitions group.
  */
 export default async function MessagesV2Page() {
   const access = messagesV2Context(await getCallerMembershipsOrThrow());
@@ -53,11 +64,14 @@ export default async function MessagesV2Page() {
   const { orgId, isOwner } = access;
 
   const supabase = (await createClient()) as unknown as LooseSupabase;
-  const [data, coverage, replayBatchId] = await Promise.all([
-    loadMessagesV2Data(supabase, orgId),
+  const [loaded, coverage, replayBatchId] = await Promise.all([
+    loadMessagesV2Data(supabase, orgId, undefined, { includeDraftBody: true }),
     loadCoverage(orgId),
     isOwner ? loadReplayBatchId(supabase, orgId) : Promise.resolve(null),
   ]);
+  // The hold queries are windowed; the version each card sends back is read
+  // fresh per displayed property so a hold past the window can still be dismissed.
+  const data = { ...loaded, holds: await withFreshSeen(supabase, orgId, loaded.holds) };
 
   // Hold cards are labelled by property id; synthesize label inputs from the
   // hold's run (or just the property for runless fallback cards).
@@ -89,6 +103,15 @@ export default async function MessagesV2Page() {
         badges={data.badges}
         labels={[...labels.entries()]}
         nowMs={data.nowMs}
+        actions={{
+          send: sendHeldDraftAction,
+          editAndSend: editAndSendHeldDraftAction,
+          takeOver: takeOverHoldAction,
+          assign: assignHoldAction,
+          dismiss: dismissHoldAction,
+          retrySuppression: retrySuppressionHoldAction,
+          listAssignees: listHoldAssigneesAction,
+        }}
       />
     </div>
   );
