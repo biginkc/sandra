@@ -15,10 +15,8 @@ import type { Database, Json } from "@/lib/supabase/types";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 
 import {
-  currentPipelineRun,
   recordStep,
   resumeRun,
-  runWithPipelineRun,
   updateRun,
   type MaybeRunContext,
   type PipelineRunContext,
@@ -99,13 +97,13 @@ export type AiDispatchOptions = {
   runContext?: PipelineRunContext | null;
 };
 
-/** Best-effort evidence step against the ambient (or given) run. Never throws. */
+/** Best-effort evidence step against the given run (no-op when null). Never throws. */
 async function trace(
   supabase: SupabaseClient<Database>,
   step: RecordStepInput,
   ctx?: MaybeRunContext,
 ): Promise<void> {
-  await recordStep(supabase, ctx ?? currentPipelineRun(), step);
+  await recordStep(supabase, ctx ?? null, step);
 }
 
 const AI_REPLY_THREAD_DEBOUNCE_MS = 45_000;
@@ -193,7 +191,7 @@ export async function checkAiResponderDispatchPreGates(
   input: AiDispatchInput,
   options: AiDispatchOptions = {},
 ): Promise<AiDispatchPreGateResult> {
-  const runCtx = options.runContext ?? currentPipelineRun();
+  const runCtx = options.runContext ?? null;
   const blocked = async (
     reason: string,
   ): Promise<void> =>
@@ -261,13 +259,11 @@ export async function dispatchAiResponse(
   input: AiDispatchInput,
   deps: { anthropic: AnthropicLike } & AiDispatchOptions,
 ): Promise<AiDispatchOutcome | AiRetryOutcome> {
-  // Evidence only: resolve the run (null when none / lookup fails) and expose
-  // it ambiently. Nothing below branches on it.
+  // Evidence only: resolve the run (null when none / lookup fails) and thread
+  // it explicitly down every helper. Nothing below branches on it.
   const runContext =
     deps.runContext ?? (input.runId ? await resumeRun(supabase, input.runId) : null);
-  return runWithPipelineRun(runContext, () =>
-    dispatchAiResponseCore(supabase, input, { ...deps, runContext }),
-  );
+  return dispatchAiResponseCore(supabase, input, { ...deps, runContext });
 }
 
 async function dispatchAiResponseCore(
@@ -314,6 +310,7 @@ async function dispatchAiResponseCore(
     propertyId: input.propertyId,
     inboundBody: input.inboundBody,
     escalationKeywords: config?.escalation_keywords ?? null,
+    runContext: deps.runContext,
   });
 
   if (keywordEscalation.escalated) {
@@ -357,6 +354,7 @@ async function dispatchAiResponseCore(
           detail: { reason: decision.reason },
         }
       : { kind: "gate", name: "ai_skip", result: "pass" },
+      deps.runContext,
   );
 
   if (decision.skip) {
@@ -387,6 +385,7 @@ async function dispatchAiResponseCore(
         property,
         config,
         currentTurn,
+        deps.runContext,
       );
       if (outcome) return outcome;
       // use_legacy — Jev had nothing actionable to apply (jev_no_action
@@ -408,14 +407,14 @@ async function dispatchAiResponseCore(
         kind: "gate",
         name: "duplicate_throttled",
         result: "block",
-      });
+      }, deps.runContext);
       return { outcome: "skipped", reason: "duplicate_throttled" };
     }
     await trace(supabase, {
       kind: "gate",
       name: "duplicate_throttled",
       result: "pass",
-    });
+    }, deps.runContext);
   }
 
   const claimStartedAt = new Date().toISOString();
@@ -446,8 +445,8 @@ async function dispatchAiResponseCore(
         name: "safety",
         result: "block",
         detail: { reason: safety.reason },
-      });
-      await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+      }, deps.runContext);
+      await markPropertyNeedsAttention(supabase, input.propertyId, reason, deps.runContext);
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
         outcome: "escalated",
@@ -455,6 +454,7 @@ async function dispatchAiResponseCore(
       return { outcome: "escalated", reason };
     }
     const outcome = await sendResponderMessage(supabase, {
+      runContext: deps.runContext,
       input,
       body: IDENTITY_REPLY_BODY,
       model: config!.model,
@@ -497,6 +497,7 @@ async function dispatchAiResponseCore(
     property,
     config,
     responseClaim,
+    deps.runContext,
   );
   if (classificationResult.handled) return classificationResult.outcome;
   const classification = classificationResult.classification;
@@ -516,6 +517,7 @@ async function dispatchAiResponseCore(
     currentTurn,
     { claimId: responseClaim.claimId, startedAt: claimStartedAt },
     classification,
+    deps.runContext,
   );
 }
 
@@ -555,6 +557,7 @@ async function classifyAndApplyDespiteReplyIneligibility(
     min_confidence: number;
   },
   currentTurn: number,
+  runCtx?: MaybeRunContext,
 ): Promise<AiDispatchOutcome | AiRetryOutcome | null> {
   const claimStartedAt = new Date().toISOString();
   const responseClaim = await claimAiResponse(supabase, {
@@ -564,7 +567,7 @@ async function classifyAndApplyDespiteReplyIneligibility(
     contactId: input.contactId,
     conversationId: input.conversationId ?? null,
   });
-  await traceClaim(supabase, responseClaim);
+  await traceClaim(supabase, responseClaim, runCtx);
   if (!responseClaim.claimed) {
     return {
       outcome: "skipped",
@@ -581,6 +584,7 @@ async function classifyAndApplyDespiteReplyIneligibility(
     property,
     config,
     responseClaim,
+    runCtx,
   );
   if (classificationResult.handled) return classificationResult.outcome;
   const classification = classificationResult.classification;
@@ -604,7 +608,7 @@ async function classifyAndApplyDespiteReplyIneligibility(
         extra: { propertyId: input.propertyId, routeKind: classification.route.kind },
       },
     );
-    await markPropertyNeedsAttention(supabase, input.propertyId, "jev_unexpected_send_route");
+    await markPropertyNeedsAttention(supabase, input.propertyId, "jev_unexpected_send_route", runCtx);
     await completeAiResponseClaim(supabase, {
       claimId: responseClaim.claimId,
       outcome: "escalated",
@@ -624,6 +628,7 @@ async function classifyAndApplyDespiteReplyIneligibility(
     currentTurn,
     { claimId: responseClaim.claimId, startedAt: claimStartedAt },
     classification,
+    runCtx,
   );
 }
 
@@ -633,6 +638,7 @@ async function classifyAndHandleNonRouteOutcomes(
   property: AiDispatchPropertyGateRow,
   config: { classifier_provider?: string | null; classifier_mode?: string | null } | null | undefined,
   responseClaim: { claimId: string | null },
+  runCtx?: MaybeRunContext,
 ): Promise<
   | { handled: true; outcome: AiDispatchOutcome }
   | { handled: false; classification: ClassificationBridgeResult }
@@ -654,7 +660,7 @@ async function classifyAndHandleNonRouteOutcomes(
     {
       fetch,
       typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "",
-      runContext: currentPipelineRun(),
+      runContext: runCtx,
     },
   );
 
@@ -683,7 +689,7 @@ async function classifyAndHandleNonRouteOutcomes(
         name: "apply_nurture",
         result: "applied",
         detail: { status: applyResult.status },
-      });
+      }, runCtx);
       if (applyResult.status === "applied") {
         await recordLeadEvent({
           propertyId: input.propertyId,
@@ -703,7 +709,7 @@ async function classifyAndHandleNonRouteOutcomes(
       name: "apply_nurture",
       result: applyResult.status === "already_terminal" ? "skipped" : "error",
       detail: { status: applyResult.status },
-    });
+    }, runCtx);
     if (applyResult.status === "already_terminal") {
       // Benign, not an error: something more specific than nurture is
       // already set (possibly by a human while Jev was classifying) —
@@ -721,7 +727,7 @@ async function classifyAndHandleNonRouteOutcomes(
       outcome: "escalated",
       errorMessage: applyResult.status,
     });
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
     return { handled: true, outcome: { outcome: "escalated", reason } };
   }
 
@@ -746,7 +752,7 @@ async function classifyAndHandleNonRouteOutcomes(
         expectedRevision: classification.evaluationRevision,
       });
     }
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
     await completeAiResponseClaim(supabase, {
       claimId: responseClaim.claimId,
       outcome: "escalated",
@@ -783,7 +789,7 @@ async function classifyAndHandleNonRouteOutcomes(
         name: "promote_new_lead",
         result: "applied",
         detail: { status: applyResult.status },
-      });
+      }, runCtx);
       if (applyResult.status === "applied") {
         await recordLeadEvent({
           propertyId: input.propertyId,
@@ -808,8 +814,8 @@ async function classifyAndHandleNonRouteOutcomes(
       name: "promote_new_lead",
       result: "error",
       detail: { status: applyResult.status },
-    });
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    }, runCtx);
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
     await completeAiResponseClaim(supabase, {
       claimId: responseClaim.claimId,
       outcome: "escalated",
@@ -832,7 +838,7 @@ async function classifyAndHandleNonRouteOutcomes(
   // upstream of classification, in inbound.ts's matchesStopKeyword.
   if (classification.kind === "jev_no_action") {
     const reason = "jev_unclear_no_action";
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
     await completeAiResponseClaim(supabase, {
       claimId: responseClaim.claimId,
       outcome: "escalated",
@@ -842,7 +848,7 @@ async function classifyAndHandleNonRouteOutcomes(
 
   if (classification.kind === "jev_automatic_failed") {
     const reason = `jev_automatic_failed:${classification.reason}`;
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
     await completeAiResponseClaim(supabase, {
       claimId: responseClaim.claimId,
       outcome: "escalated",
@@ -867,6 +873,7 @@ async function resolveAndApplyRoute(
   currentTurn: number,
   responseClaim: { claimId: string | null; startedAt?: string },
   classification: ClassificationBridgeResult,
+  runCtx?: MaybeRunContext,
 ): Promise<AiDispatchOutcome | AiRetryOutcome> {
   let generated: AiStructuredOutput;
   let route: ResponderRoute;
@@ -927,7 +934,7 @@ async function resolveAndApplyRoute(
         tags: { surface: "ai_responder_generate", reason },
         extra: { propertyId: input.propertyId },
       });
-      await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+      await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
       if (providerFailure) {
         await notifyAdminsOfProviderFailure(supabase, {
           orgId: property.org_id,
@@ -965,7 +972,7 @@ async function resolveAndApplyRoute(
       expectedDisposition !== "dnc"
     ) {
       const reason = "ai_disposition_replay_lookup_failed";
-      await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+      await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
         outcome: "escalated",
@@ -992,7 +999,7 @@ async function resolveAndApplyRoute(
     generated.confidence < config!.min_confidence
   ) {
     const reason = `low_confidence:${generated.confidence}`;
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
     await completeAiResponseClaim(supabase, {
       claimId: responseClaim.claimId,
       outcome: "escalated",
@@ -1023,6 +1030,7 @@ async function resolveAndApplyRoute(
         supabase,
         input.propertyId,
         route.reason,
+        runCtx,
       );
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
@@ -1058,6 +1066,7 @@ async function resolveAndApplyRoute(
         "opted_out",
         optOutResult,
         isJevBelowThresholdOptOut,
+        runCtx,
       );
       if (!optOutResult.updated) {
         const outcome = closeOutcome(optOutResult, route.reason);
@@ -1088,6 +1097,7 @@ async function resolveAndApplyRoute(
       const isJevDnc = classification.kind === "jev_route";
       const dncResult = isJevDnc
         ? await proposeJevDncSuppression(supabase, {
+          runContext: runCtx,
             propertyId: input.propertyId,
             contactId: input.contactId,
             conversationId: input.conversationId ?? null,
@@ -1107,7 +1117,7 @@ async function resolveAndApplyRoute(
             orgId: property.org_id,
             reason: route.reason,
           });
-      await traceDisposition(supabase, "dnc", dncResult, isJevDnc);
+      await traceDisposition(supabase, "dnc", dncResult, isJevDnc, runCtx);
       const dncOutcome = closeOutcome(dncResult, route.reason);
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
@@ -1120,6 +1130,7 @@ async function resolveAndApplyRoute(
       const isJevBelowThresholdWrongNumber = classification.kind === "jev_route" && !classification.eligibleForAutoAccept;
       const wrongNumberResult = isJevBelowThresholdWrongNumber
         ? await proposeDeferredJevDisposition(supabase, {
+          runContext: runCtx,
             propertyId: input.propertyId,
             conversationId: input.conversationId ?? null,
             inboundMessageId: input.inboundMessageId ?? null,
@@ -1129,6 +1140,7 @@ async function resolveAndApplyRoute(
             expectedRevision: jevRevision!,
           })
         : await applyWrongNumber(supabase, {
+          runContext: runCtx,
             propertyId: input.propertyId,
             contactId: input.contactId,
             conversationId: input.conversationId ?? null,
@@ -1144,6 +1156,7 @@ async function resolveAndApplyRoute(
         "wrong_number",
         wrongNumberResult,
         isJevBelowThresholdWrongNumber,
+        runCtx,
       );
       const wrongNumberOutcome = closeOutcome(wrongNumberResult, route.reason);
       if (jevAutoAccept && wrongNumberResult.updated && input.inboundMessageId) {
@@ -1163,6 +1176,7 @@ async function resolveAndApplyRoute(
       const isJevBelowThresholdAutoClose = classification.kind === "jev_route" && !classification.eligibleForAutoAccept;
       const autoCloseResult = isJevBelowThresholdAutoClose
         ? await proposeDeferredJevDisposition(supabase, {
+          runContext: runCtx,
             propertyId: input.propertyId,
             conversationId: input.conversationId ?? null,
             inboundMessageId: input.inboundMessageId ?? null,
@@ -1172,6 +1186,7 @@ async function resolveAndApplyRoute(
             expectedRevision: jevRevision!,
           })
         : await setResponderDispo(supabase, {
+          runContext: runCtx,
             propertyId: input.propertyId,
             conversationId: input.conversationId ?? null,
             inboundMessageId: input.inboundMessageId ?? null,
@@ -1184,6 +1199,7 @@ async function resolveAndApplyRoute(
         route.dispo,
         autoCloseResult,
         isJevBelowThresholdAutoClose,
+        runCtx,
       );
       const autoCloseOutcome = closeOutcome(autoCloseResult, route.reason);
       if (jevAutoAccept && autoCloseResult.updated && input.inboundMessageId) {
@@ -1215,17 +1231,18 @@ async function resolveAndApplyRoute(
           name: "safety",
           result: "block",
           detail: { reason: safety.reason },
-        });
-        await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+        }, runCtx);
+        await markPropertyNeedsAttention(supabase, input.propertyId, reason, runCtx);
         await completeAiResponseClaim(supabase, {
           claimId: responseClaim.claimId,
           outcome: "escalated",
         });
         return { outcome: "escalated", reason };
       }
-      await trace(supabase, { kind: "gate", name: "safety", result: "pass" });
+      await trace(supabase, { kind: "gate", name: "safety", result: "pass" }, runCtx);
 
       const sent = await sendResponderMessage(supabase, {
+        runContext: runCtx,
         input,
         body: bodyResult.body,
         model: config!.model,
@@ -1249,6 +1266,7 @@ async function resolveAndApplyRoute(
 
       if (route.kind === "deescalate_close") {
         const closeResult = await setResponderDispo(supabase, {
+          runContext: runCtx,
           propertyId: input.propertyId,
           conversationId: input.conversationId ?? null,
           inboundMessageId: input.inboundMessageId ?? null,
@@ -1600,6 +1618,8 @@ type ResponderSendArgs = {
   claimStartedAt: string | null;
   /** ai_responder_configs.outbound_mode as loaded for this dispatch. */
   outboundMode?: string | null;
+  /** Explicit pipeline run handle for evidence steps (null = no run). */
+  runContext?: MaybeRunContext;
 };
 
 type ResponderSendOutcome =
@@ -1656,19 +1676,19 @@ async function guardReplyStillCurrent(
       kind: "gate",
       name: "send_check_failed",
       result: "error",
-    });
-    await markPropertyNeedsAttention(supabase, args.input.propertyId, "send_check_failed");
+    }, args.runContext);
+    await markPropertyNeedsAttention(supabase, args.input.propertyId, "send_check_failed", args.runContext);
     return { outcome: "escalated", reason: "send_check_failed" };
   }
   if (current.reason === "already_answered") {
     // A conversational reply to THIS inbound already exists (AI or human).
-    await trace(supabase, { kind: "gate", name: "already_answered", result: "pass" });
+    await trace(supabase, { kind: "gate", name: "already_answered", result: "pass" }, args.runContext);
     return { outcome: "skipped", reason: "already_answered" };
   }
   if (current.reason === "broadcast_since_claim") {
     // Only a drip / bulk / Norma pre-call text landed. It does not answer the
     // seller and says nothing about a human, so: no flag.
-    await trace(supabase, { kind: "gate", name: "superseded_by_broadcast", result: "block" });
+    await trace(supabase, { kind: "gate", name: "superseded_by_broadcast", result: "block" }, args.runContext);
     return { outcome: "skipped", reason: "superseded_by_broadcast" };
   }
   await trace(supabase, {
@@ -1676,7 +1696,7 @@ async function guardReplyStillCurrent(
     name: "superseded_before_send",
     result: "block",
     detail: { reason: current.reason },
-  });
+  }, args.runContext);
   // The seller got no reply from this run. When a NEWER inbound already has
   // a live or finished response claim, that run answers the seller and
   // flagging would only block it; otherwise a human must see it.
@@ -1690,6 +1710,7 @@ async function guardReplyStillCurrent(
     supabase,
     args.input.propertyId,
     `reply_skipped:${current.reason}`,
+    args.runContext,
   );
   return { outcome: "skipped", reason: "superseded_before_send" };
 }
@@ -1725,7 +1746,7 @@ async function writeReplyDeadLetter(
 ): Promise<boolean> {
   const { error } = await supabase.from("ai_reply_dead_letters").insert({
     org_id: args.orgId,
-    run_id: currentPipelineRun()?.runId ?? null,
+    run_id: args.runContext?.runId ?? null,
     conversation_id: args.input.conversationId ?? null,
     property_id: args.input.propertyId,
     inbound_message_id: args.input.inboundMessageId ?? null,
@@ -1781,7 +1802,7 @@ async function retryOrFailReply(
     });
   }
   const flag = reason === "draft_persist_failed" ? reason : `reply_skipped:${reason}`;
-  await markPropertyNeedsAttention(supabase, args.input.propertyId, flag);
+  await markPropertyNeedsAttention(supabase, args.input.propertyId, flag, args.runContext);
   return { outcome: "escalated", reason };
 }
 
@@ -1818,7 +1839,7 @@ async function persistHeldDraft(
   }
   const { error: draftError } = await supabase.from("ai_reply_drafts").insert({
     org_id: args.orgId,
-    run_id: currentPipelineRun()?.runId ?? null,
+    run_id: args.runContext?.runId ?? null,
     conversation_id: args.input.conversationId ?? null,
     property_id: args.input.propertyId,
     inbound_message_id: inboundId,
@@ -1841,7 +1862,7 @@ async function holdReplyAsDraft(
 ): Promise<ResponderSendOutcome> {
   const persisted = await persistHeldDraft(supabase, args);
   if (persisted === "already_sent") {
-    await trace(supabase, { kind: "gate", name: "already_answered", result: "pass" });
+    await trace(supabase, { kind: "gate", name: "already_answered", result: "pass" }, args.runContext);
     return { outcome: "skipped", reason: "already_answered" };
   }
   if (typeof persisted === "object") {
@@ -1859,7 +1880,7 @@ async function holdReplyAsDraft(
       name: "draft_persist_failed",
       result: "error",
       detail: { source: args.source, reason, attempt: args.input.retryAttempt ?? 0 },
-    });
+    }, args.runContext);
     return retryOrFailReply(supabase, args, "draft_persist_failed");
   }
   await trace(supabase, {
@@ -1867,8 +1888,8 @@ async function holdReplyAsDraft(
     name: "llm_draft_held",
     result: "held",
     detail: { source: args.source, reason, stored: true },
-  });
-  await markPropertyNeedsAttention(supabase, args.input.propertyId, "draft_held");
+  }, args.runContext);
+  await markPropertyNeedsAttention(supabase, args.input.propertyId, "draft_held", args.runContext);
   return { outcome: "escalated", reason: "draft_held" };
 }
 
@@ -1966,8 +1987,8 @@ async function sendResponderMessage(
   // exactly one of them can send.
   const conversationKey = await resolveReservationKey(supabase, args.input);
   if (!conversationKey) {
-    await trace(supabase, { kind: "gate", name: "send_check_failed", result: "error" });
-    await markPropertyNeedsAttention(supabase, args.input.propertyId, "send_check_failed");
+    await trace(supabase, { kind: "gate", name: "send_check_failed", result: "error" }, args.runContext);
+    await markPropertyNeedsAttention(supabase, args.input.propertyId, "send_check_failed", args.runContext);
     return { outcome: "escalated", reason: "send_check_failed" };
   }
   const holder = randomUUID();
@@ -1978,8 +1999,8 @@ async function sendResponderMessage(
     holder,
   );
   if (reservation === "error") {
-    await trace(supabase, { kind: "gate", name: "send_check_failed", result: "error" });
-    await markPropertyNeedsAttention(supabase, args.input.propertyId, "send_check_failed");
+    await trace(supabase, { kind: "gate", name: "send_check_failed", result: "error" }, args.runContext);
+    await markPropertyNeedsAttention(supabase, args.input.propertyId, "send_check_failed", args.runContext);
     return { outcome: "escalated", reason: "send_check_failed" };
   }
   if (reservation === "elsewhere") {
@@ -1990,7 +2011,7 @@ async function sendResponderMessage(
       name: "send_reserved_elsewhere",
       result: "block",
       detail: { attempt: args.input.retryAttempt ?? 0 },
-    });
+    }, args.runContext);
     return retryOrFailReply(supabase, args, "send_reserved_elsewhere");
   }
 
@@ -2012,12 +2033,12 @@ async function sendResponderMessage(
     // full lease so the (timeout-bounded) provider call cannot outlive it.
     const renewed = await renewSend(supabase, conversationKey, holder);
     if (renewed === "error") {
-      await trace(supabase, { kind: "gate", name: "send_check_failed", result: "error" });
-      await markPropertyNeedsAttention(supabase, args.input.propertyId, "send_check_failed");
+      await trace(supabase, { kind: "gate", name: "send_check_failed", result: "error" }, args.runContext);
+      await markPropertyNeedsAttention(supabase, args.input.propertyId, "send_check_failed", args.runContext);
       return { outcome: "escalated", reason: "send_check_failed" };
     }
     if (renewed === "lost") {
-      await trace(supabase, { kind: "gate", name: "send_lease_lost", result: "block" });
+      await trace(supabase, { kind: "gate", name: "send_lease_lost", result: "block" }, args.runContext);
       return await retryOrFailReply(supabase, args, "send_lease_lost");
     }
 
@@ -2062,7 +2083,7 @@ async function deliverResponderMessage(
           inboundMessageId: args.input.inboundMessageId,
         },
       });
-      await markPropertyNeedsAttention(supabase, args.input.propertyId, reason);
+      await markPropertyNeedsAttention(supabase, args.input.propertyId, reason, args.runContext);
       return { outcome: "escalated", reason };
     }
   }
@@ -2099,8 +2120,8 @@ async function deliverResponderMessage(
       name: "send_timeout",
       result: "error",
       detail: { timeoutMs: providerTimeoutMs() },
-    });
-    await markPropertyNeedsAttention(supabase, args.input.propertyId, "send_timeout");
+    }, args.runContext);
+    await markPropertyNeedsAttention(supabase, args.input.propertyId, "send_timeout", args.runContext);
     return { outcome: "escalated", reason: "send_timeout" };
   }
   const sendResult = raced;
@@ -2119,7 +2140,7 @@ async function deliverResponderMessage(
         kind: "gate",
         name: "already_replied",
         result: "block",
-      });
+      }, args.runContext);
       return { outcome: "skipped", reason: "already_replied" };
     }
   }
@@ -2133,13 +2154,13 @@ async function deliverResponderMessage(
       name: "send_suppressed",
       result: "block",
       detail: { status: sendResult.status },
-    });
+    }, args.runContext);
     return { outcome: "skipped", reason: "already_terminal" };
   }
 
   if (sendResult.status !== "sent" && sendResult.status !== "queued") {
     const reason = `send_blocked:${sendResult.status}`;
-    await markPropertyNeedsAttention(supabase, args.input.propertyId, reason);
+    await markPropertyNeedsAttention(supabase, args.input.propertyId, reason, args.runContext);
     return { outcome: "escalated", reason };
   }
 
@@ -2188,8 +2209,8 @@ async function deliverResponderMessage(
       confidence: args.confidence,
       persona: getOutboundSenderName(),
     },
-  });
-  await updateRun(supabase, currentPipelineRun(), {
+  }, args.runContext);
+  await updateRun(supabase, args.runContext, {
     outboundMessageId: messageId,
   });
   return { outcome: "sent", messageId, confidence: args.confidence };
@@ -2198,6 +2219,7 @@ async function deliverResponderMessage(
 async function setResponderDispo(
   supabase: SupabaseClient<Database>,
   args: {
+    runContext?: MaybeRunContext;
     propertyId: string;
     conversationId: string | null;
     inboundMessageId: string | null;
@@ -2211,7 +2233,7 @@ async function setResponderDispo(
 ): Promise<ResponderDispoResult> {
   if (!args.conversationId || !args.inboundMessageId) {
     const reason = "ai_disposition_missing_thread_identity";
-    await markPropertyNeedsAttention(supabase, args.propertyId, reason);
+    await markPropertyNeedsAttention(supabase, args.propertyId, reason, args.runContext);
     reportError(new Error(reason), {
       tags: { surface: "ai_responder_set_dispo" },
       extra: { propertyId: args.propertyId, dispo: args.dispo },
@@ -2234,7 +2256,7 @@ async function setResponderDispo(
     );
     if (error) {
       if (error.message.includes("STALE_DECISION_CONTEXT")) {
-        await markPropertyNeedsAttention(supabase, args.propertyId, "jev_stale_decision_context");
+        await markPropertyNeedsAttention(supabase, args.propertyId, "jev_stale_decision_context", args.runContext);
         return { updated: false, reason: "stale_context" };
       }
       failureMessage = error.message;
@@ -2277,6 +2299,7 @@ async function setResponderDispo(
     supabase,
     args.propertyId,
     "disposition_write_failed",
+    args.runContext,
   );
   reportError(new Error(failureMessage), {
     tags: { surface: "ai_responder_set_dispo" },
@@ -2657,6 +2680,7 @@ async function applyResponderDnc(
 async function proposeJevDncSuppression(
   supabase: SupabaseClient<Database>,
   args: {
+    runContext?: MaybeRunContext;
     propertyId: string;
     contactId: string;
     conversationId: string | null;
@@ -2670,7 +2694,7 @@ async function proposeJevDncSuppression(
 ): Promise<ResponderDispoResult> {
   if (!args.conversationId || !args.inboundMessageId) {
     const reason = "ai_disposition_missing_thread_identity";
-    await markPropertyNeedsAttention(supabase, args.propertyId, reason);
+    await markPropertyNeedsAttention(supabase, args.propertyId, reason, args.runContext);
     reportError(new Error(reason), {
       tags: { surface: "ai_responder_propose_dnc" },
       extra: { propertyId: args.propertyId },
@@ -2711,10 +2735,10 @@ async function proposeJevDncSuppression(
     if (error.message.includes("STALE_DECISION_CONTEXT")) {
       // Phone is already suppressed above (safety-critical, unconditional);
       // only the paperwork/review-record side is gated on revision.
-      await markPropertyNeedsAttention(supabase, args.propertyId, "jev_stale_decision_context");
+      await markPropertyNeedsAttention(supabase, args.propertyId, "jev_stale_decision_context", args.runContext);
       return { updated: false, reason: "stale_context" };
     }
-    await markPropertyNeedsAttention(supabase, args.propertyId, "dnc_proposal_write_failed");
+    await markPropertyNeedsAttention(supabase, args.propertyId, "dnc_proposal_write_failed", args.runContext);
     reportError(new Error(error.message), {
       tags: { surface: "ai_responder_propose_dnc" },
       extra: { propertyId: args.propertyId, reason: args.reason },
@@ -2749,6 +2773,7 @@ async function proposeJevDncSuppression(
 async function proposeDeferredJevDisposition(
   supabase: SupabaseClient<Database>,
   args: {
+    runContext?: MaybeRunContext;
     propertyId: string;
     conversationId: string | null;
     inboundMessageId: string | null;
@@ -2760,7 +2785,7 @@ async function proposeDeferredJevDisposition(
 ): Promise<ResponderDispoResult> {
   if (!args.conversationId || !args.inboundMessageId) {
     const reason = "ai_disposition_missing_thread_identity";
-    await markPropertyNeedsAttention(supabase, args.propertyId, reason);
+    await markPropertyNeedsAttention(supabase, args.propertyId, reason, args.runContext);
     reportError(new Error(reason), {
       tags: { surface: "ai_responder_propose_deferred_dispo" },
       extra: { propertyId: args.propertyId, dispo: args.dispo },
@@ -2782,10 +2807,10 @@ async function proposeDeferredJevDisposition(
   );
   if (error) {
     if (error.message.includes("STALE_DECISION_CONTEXT")) {
-      await markPropertyNeedsAttention(supabase, args.propertyId, "jev_stale_decision_context");
+      await markPropertyNeedsAttention(supabase, args.propertyId, "jev_stale_decision_context", args.runContext);
       return { updated: false, reason: "stale_context" };
     }
-    await markPropertyNeedsAttention(supabase, args.propertyId, "disposition_proposal_write_failed");
+    await markPropertyNeedsAttention(supabase, args.propertyId, "disposition_proposal_write_failed", args.runContext);
     reportError(new Error(error.message), {
       tags: { surface: "ai_responder_propose_deferred_dispo" },
       extra: { propertyId: args.propertyId, dispo: args.dispo, reason: args.reason },
@@ -2804,6 +2829,7 @@ async function proposeDeferredJevDisposition(
 async function applyWrongNumber(
   supabase: SupabaseClient<Database>,
   args: {
+    runContext?: MaybeRunContext;
     propertyId: string;
     contactId: string;
     conversationId: string | null;
@@ -2816,6 +2842,7 @@ async function applyWrongNumber(
   },
 ): Promise<ResponderDispoResult> {
   const result = await setResponderDispo(supabase, {
+    runContext: args.runContext,
     propertyId: args.propertyId,
     conversationId: args.conversationId,
     inboundMessageId: args.inboundMessageId,
@@ -2879,7 +2906,7 @@ async function traceClaim(
   claim: { claimed: boolean; claimId?: string | null; reason?: string },
   ctx?: MaybeRunContext,
 ): Promise<void> {
-  const runCtx = ctx ?? currentPipelineRun();
+  const runCtx = ctx ?? null;
   if (!runCtx) return;
   await trace(
     supabase,
@@ -2922,6 +2949,7 @@ async function traceDisposition(
   name: string,
   result: ResponderDispoResult,
   deferred: boolean,
+  ctx?: MaybeRunContext,
 ): Promise<void> {
   await trace(supabase, {
     kind: "action",
@@ -2936,7 +2964,7 @@ async function traceDisposition(
     detail: result.updated
       ? { deferred }
       : { deferred, reason: result.reason },
-  });
+  }, ctx);
 }
 
 function closeOutcome(

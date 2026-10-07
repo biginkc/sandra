@@ -11,11 +11,7 @@ vi.mock("@/lib/events", () => ({
 }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 vi.mock("@/lib/pipeline-runs", async () => {
-  const context = await vi.importActual<typeof import("@/lib/pipeline-runs/context")>(
-    "@/lib/pipeline-runs/context",
-  );
   return {
-    ...context,
     recordStep,
     resumeRun: vi.fn().mockResolvedValue(null),
     updateRun: vi.fn().mockResolvedValue(undefined),

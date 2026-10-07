@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-import { currentPipelineRun, runWithPipelineRun } from "./context";
 import { finishRunFromOutcome, runStatusForOutcome } from "./outcome";
 import { recordStep } from "./record";
 
@@ -57,18 +56,5 @@ describe("held deferred dispositions", () => {
     await recordStep(admin, applied, { kind: "action", name: "opted_out", result: "applied" });
     await finishRunFromOutcome(admin, applied, { outcome: "opted_out", reason: "model:opt_out" });
     expect(updates[1]).toMatchObject({ status: "closed" });
-  });
-});
-
-describe("ambient run context", () => {
-  it("is null outside a run and visible inside, across awaits", async () => {
-    expect(currentPipelineRun()).toBeNull();
-    const ctx = { runId: "r", orgId: "o", seq: 0 };
-    const seen = await runWithPipelineRun(ctx, async () => {
-      await Promise.resolve();
-      return currentPipelineRun();
-    });
-    expect(seen).toBe(ctx);
-    expect(currentPipelineRun()).toBeNull();
   });
 });

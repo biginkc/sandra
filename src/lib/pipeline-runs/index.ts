@@ -1,4 +1,3 @@
-export { currentPipelineRun, runWithPipelineRun } from "./context";
 export {
   STALE_RUNNING_REASON,
   getPipelineCoverage,
