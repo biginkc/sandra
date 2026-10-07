@@ -26,7 +26,7 @@ const SOURCE_DB = process.env.SOURCE_DB ?? "postgres";
 const DB = `rollback_chain_${process.pid}_${Date.now().toString(36)}`;
 const FIRST = "20261008140000";
 const LAST = process.env.CHAIN_LAST ?? "20261008210000";
-const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 46); // 28 inherited Jev (140000..142700) + 13 messages-v2 (143000..144200) + 4 Phase 1 (150000..150300) + 1 new-only watermark (210000)
+const EXPECTED = Number(process.env.CHAIN_EXPECTED ?? 47); // 28 inherited Jev (140000..142700) + 13 messages-v2 (143000..144200) + 4 Phase 1 (150000..150300) + 1 replay harness (180000) + 1 new-only watermark (210000)
 
 const migDir = join(root, "supabase/migrations");
 const rbDir = join(root, "supabase/rollbacks");
