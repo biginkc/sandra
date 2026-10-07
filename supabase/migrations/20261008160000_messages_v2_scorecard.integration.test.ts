@@ -306,6 +306,26 @@ describe("fn_messages_v2_scorecard", () => {
     });
   });
 
+  it("review path: an auto_accepted run corrected at +24h then again at +100h stays disagreed (corrected_at is overwritten)", async () => {
+    const a = await seedRun({ outcome: "wrong_number", conf: 0.96, ageHours: 140 });
+    // corrected_at holds the LAST correction (+100h, outside the 72h window)
+    await seedReview(a, "wrong_number", "auto_accepted", { correctedTo: "nurture", correctedHoursAfter: 100, runAgeHours: 140 });
+    const rev = await db.query(
+      "select id from public.ai_disposition_reviews where classification_run_id = $1",
+      [a.runId],
+    );
+    const reviewId = rev.rows[0].id as string;
+    await leadEvent(a.propertyId, "ai_disposition_review_corrected", "user", { review_id: reviewId, corrected_disposition: "nurture" }, 140 - 24);
+    await leadEvent(a.propertyId, "ai_disposition_review_corrected", "user", { review_id: reviewId, corrected_disposition: "not_interested" }, 140 - 100);
+
+    expect((await scorecard()).wrong_number).toMatchObject({
+      runs: "1",
+      auto_applied: "1",
+      auto_settled: "1",
+      auto_agreed: "0",
+    });
+  });
+
   it("review path: a human dispo_set to the mapped disposition (dnc) is not an override of Jev's opted_out", async () => {
     // superseded dnc review, human set dnc -> same as the review, so no verdict (run only)
     const a = await seedRun({ outcome: "opted_out", conf: 0.97, ageHours: 120 });

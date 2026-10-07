@@ -87,6 +87,7 @@ as $$
              when x.route = 'auto' then
                case
                  when (v.corrected_at is not null and v.corrected_at <= r.created_at + interval '72 hours')
+                   or x.corrected_in_window
                    or x.override then 0
                  when r.created_at <= p.at - interval '72 hours' then 1
                end
@@ -113,6 +114,14 @@ as $$
     ) o
     cross join lateral (
       select o.override,
+             exists (
+               select 1 from public.lead_events e
+               where e.org_id = v.org_id and e.property_id = v.property_id
+                 and e.event_type = 'ai_disposition_review_corrected'
+                 and e.payload ->> 'review_id' = v.id::text
+                 and e.created_at > r.created_at
+                 and e.created_at <= r.created_at + interval '72 hours'
+             ) as corrected_in_window,
              case
                when v.status = 'auto_accepted' then 'auto'
                when v.status in ('pending', 'confirmed') then 'held'
