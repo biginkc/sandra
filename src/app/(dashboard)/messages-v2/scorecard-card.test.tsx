@@ -147,6 +147,21 @@ describe("ScorecardCard", () => {
     expect(el.getByText(/total n=60/i)).toBeInTheDocument();
   });
 
+  it("hides Copy for approval when the suggestion equals the current threshold", () => {
+    render(
+      <ScorecardCard
+        orgId="o"
+        initialRows={[
+          row("nurture", { runs: 30, threshold: 0.9, samples: batch(0.9, 30, 30) }),
+        ]}
+        load={vi.fn()}
+      />,
+    );
+    const el = within(section("nurture"));
+    expect(el.getByText(/suggested ≥ 0\.900/i)).toBeInTheDocument();
+    expect(el.queryByRole("button", { name: /copy for approval/i })).not.toBeInTheDocument();
+  });
+
   it("keeps the current threshold when only a stray low sample would loosen it", () => {
     const samples: Sample[] = [...batch(0.96, 29, 29), [0.4, 1]];
     render(

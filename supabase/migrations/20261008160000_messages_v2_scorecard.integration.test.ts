@@ -239,6 +239,29 @@ describe("fn_messages_v2_scorecard", () => {
     ]);
   });
 
+  it("nurture is a parking step: a human dispo_set to needs_sequence after a nurture run agrees (auto and held)", async () => {
+    // auto nurture, user sets needs_sequence 24h after -> still agreed
+    const a = await seedRun({ outcome: "nurture", conf: 0.95, ageHours: 120 });
+    await seedDecision(a, "nurture", "confirmed", "system");
+    await leadEvent(a.propertyId, "dispo_set", "user", { from: "nurture", to: "needs_sequence" }, 96);
+    // auto nurture, user sets a different dispo -> still a disagreement
+    const b = await seedRun({ outcome: "nurture", conf: 0.94, ageHours: 120 });
+    await seedDecision(b, "nurture", "confirmed", "system");
+    await leadEvent(b.propertyId, "dispo_set", "user", { from: "nurture", to: "not_interested" }, 96);
+    // held nurture confirmed by a human, then needs_sequence -> agreed
+    const c = await seedRun({ outcome: "nurture", conf: 0.8, ageHours: 100 });
+    const cd = await seedDecision(c, "nurture", "confirmed", "human");
+    await leadEvent(c.propertyId, "jev_lead_decision_confirmed", "user", { decision_id: cd }, 90,
+      ["jev_lead_decisions.confirmed", cd]);
+    await leadEvent(c.propertyId, "dispo_set", "user", { from: "nurture", to: "needs_sequence" }, 80);
+    expect((await scorecard()).nurture).toMatchObject({
+      auto_settled: "2",
+      auto_agreed: "1",
+      held_decided: "1",
+      held_agreed: "1",
+    });
+  });
+
   it("new_lead ignores human dispo_set events (they are not a verdict on a promotion)", async () => {
     const a = await seedRun({ outcome: "new_lead", conf: 0.97, ageHours: 120 });
     await seedDecision(a, "new_lead", "confirmed", "system");

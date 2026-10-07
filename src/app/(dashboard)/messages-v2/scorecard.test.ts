@@ -121,6 +121,28 @@ describe("suggestThreshold vs the current threshold", () => {
     });
   });
 
+  it("ignores passive auto samples in the loosening band (only held, human-decided samples can back a loosening)", () => {
+    const samples: Sample[] = [
+      ...Array.from({ length: 30 }, () => [0.8, 1, "a"] as Sample),
+      ...Array.from({ length: 30 }, () => [0.96, 1, "h"] as Sample),
+    ];
+    const s = suggestThreshold(samples, 0.95);
+    expect(s).not.toMatchObject({ direction: "loosens" });
+    expect(s).toMatchObject({ kind: "suggested", threshold: 0.96, direction: "raises" });
+  });
+
+  it("loosens when the band is backed by 30 held samples at >=95%", () => {
+    const samples: Sample[] = [
+      ...Array.from({ length: 30 }, () => [0.8, 1, "h"] as Sample),
+      ...Array.from({ length: 30 }, () => [0.96, 1, "a"] as Sample),
+    ];
+    expect(suggestThreshold(samples, 0.95)).toMatchObject({
+      kind: "suggested",
+      threshold: 0.8,
+      direction: "loosens",
+    });
+  });
+
   it("does not loosen when the band agrees under 95%", () => {
     const samples: Sample[] = [...batch(0.8, 30, 27), ...batch(0.96, 30, 30)];
     const s = suggestThreshold(samples, 0.95);
