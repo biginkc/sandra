@@ -32,6 +32,8 @@
     "replay:seed": "tsx scripts/messages-v2/replay/seed.ts",
     "replay:server": "tsx scripts/messages-v2/replay/server.ts",
     "replay:run": "tsx scripts/messages-v2/replay/run.ts",
+    "replay:compare": "tsx scripts/messages-v2/replay/compare.ts",
+    "replay:luna-prompt": "tsx scripts/messages-v2/replay/classifiers/luna-prompt-write.ts",
     "replay:wipe": "tsx scripts/messages-v2/replay/seed.ts --wipe",
     "verify:hugo-sql": "node scripts/verify-hugo-access-migrations.mjs",
     "verify:hugo-rollback": "SANDRA_HUGO_VERIFY_LANE=rollback-roundtrip node scripts/verify-hugo-access-migrations.mjs",

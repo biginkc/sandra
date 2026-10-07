@@ -48,6 +48,10 @@ function fakeDb(overrides: Partial<Record<string, Record<string, unknown>[]>> = 
     if (/from public.contacts/.test(s)) return pick("contacts", [{ id: CONTACT, org_id: ORG, contact_type: "person", first_name: "John", last_name: "Doe", entity_name: null, phone_1: SELLER, phone_1_type: "mobile", phone_2: "(816) 222-3344", phone_2_type: "unknown", phone_3: null, phone_3_type: "unknown", do_not_contact: false, sms_opted_out: false, sms_opted_out_at: null, notes: "call back at 816.222.3344 evenings", created_at: new Date("2026-08-01T00:00:00Z") }]);
     if (/from public.properties/.test(s)) return pick("properties", [{ id: PROP, org_id: ORG, address: "12 Oak St", city: "Kansas City", state: "MO", zip: "64111", status: "prospect", homeowner_contact_id: "99999999-9999-4999-8999-999999999999", notes: null, created_at: new Date("2026-08-01T00:00:00Z"), updated_at: new Date("2026-08-02T00:00:00Z") }]);
     if (/from public.sms_phone_suppressions/.test(s)) return pick("suppressions", [{ id: "77777777-7777-4777-8777-777777777777", org_id: ORG, phone_e164: "+19135559876", source: "stop", source_detail: { from: "+19135559876" }, provider: "sendillo", suppressed_at: new Date("2026-09-01T00:00:00Z"), created_at: new Date("2026-09-01T00:00:00Z"), updated_at: new Date("2026-09-01T00:00:00Z") }]);
+    if (/from public.ai_disposition_reviews/.test(s)) return pick("reviews");
+    if (/from public.sms_classification_runs/.test(s)) return pick("runs");
+    if (/from public.jev_lead_decisions/.test(s)) return pick("decisions");
+    if (/from public.lead_events/.test(s)) return pick("dispoSets");
     return { rows: [] };
   };
   return { query, calls };
@@ -112,6 +116,19 @@ describe("buildExport", () => {
     expect(out.inbound.map((i) => i.externalId)).toEqual(["sendillo-ext-1"]);
     expect(out.counts.inbound).toBe(1);
     expect(out.window).toMatchObject({ days: 30, start: "2026-09-07T12:00:00.000Z" });
+  });
+
+  it("exports production Jev runs and human decisions as reference-only evidence, read-only and masked", async () => {
+    const reviews = [{ id: "r1", source_inbound_message_id: "55555555-5555-4555-8555-555555555551", classification_run_id: null, disposition: "not_interested", status: "confirmed", corrected_disposition: null, corrected_at: null, created_at: NOW, resolved_at: NOW }];
+    const dispoSets = [{ property_id: PROP, to_dispo: "wrong_number", created_at: NOW }];
+    const runs = [{ id: "u1", source_inbound_message_id: "55555555-5555-4555-8555-555555555551", resolved_outcome: "not_interested", native_confidence: "0.9300", created_at: NOW }];
+    const { query, calls } = fakeDb({ reviews, dispoSets, runs });
+    const out = await buildExport(query, opts);
+    expect(out.reference.humanEvents?.reviews[0]).toMatchObject({ disposition: "not_interested", status: "confirmed" });
+    expect(out.reference.humanEvents?.dispoSets[0]).toMatchObject({ to_dispo: "wrong_number" });
+    expect(out.reference.humanEvents?.runs[0]).toMatchObject({ native_confidence: "0.9300" });
+    expect(out.counts.referenceHumanEvents).toBe(2);
+    expect(calls.every((c) => /^\s*(select|begin|rollback)/i.test(c.sql))).toBe(true);
   });
 
   it("is deterministic for the same data and salt", async () => {

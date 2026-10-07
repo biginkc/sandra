@@ -129,6 +129,13 @@ export type ReplayExport = {
   reference: {
     pipelineRuns: Record<string, unknown>[];
     outboundInWindow: Record<string, unknown>[];
+    /** Production Jev runs and later human decisions; used only by replay:compare. Absent in older exports. */
+    humanEvents?: {
+      runs: Record<string, unknown>[];
+      reviews: Record<string, unknown>[];
+      decisions: Record<string, unknown>[];
+      dispoSets: Record<string, unknown>[];
+    };
   };
   counts: Record<string, number>;
 };

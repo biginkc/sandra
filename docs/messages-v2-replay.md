@@ -117,7 +117,7 @@ not seller phones and are kept as they are, since the thread matcher uses them.
 - Seeded as history: SMS in the same threads from the 60 days (`--context-days`)
   BEFORE the window, so prior-outbound gate evidence exists. Messages inside the
   window are not seeded; the replay recreates them. Real outbound replies from
-  the window go in the export under `reference` only (ids and statuses, no bodies).
+  the window go in the export under `reference` only (ids, statuses and, for the classifier comparison, message bodies; plus Jev production runs and later human decisions).
 - Also seeded: contacts, properties, property links, threads, suppressions,
   consent events, and the org's `ai_responder_configs` and `jev_outcome_thresholds`
   (when the target has those tables).
@@ -131,3 +131,93 @@ not seller phones and are kept as they are, since the thread matcher uses them.
 - The export keeps the source's `ai_responder_configs.outbound_mode`; with the stub on, "send" mode sends only into `replay_outbound_log`.
 - Alerts that Messages v2 Phase 1 raises (Slack DMs, email digests) use the local database's tokens; a fresh local database has none, so none fire. If you copy tokens in, they would fire.
 - A hosted (non-local) test project is supported only with `--allow-project-ref`; the local stack is the tested path.
+
+## Jev -> Luna fallback cascade evaluation (`replay:compare`)
+
+Question: when Jev is not confident enough to auto-apply (its call is under the per-outcome
+threshold, so today it goes to a human hold), would a second model, "Luna", have resolved those
+holds correctly? Luna is an OpenAI model used as a classifier. It exists ONLY in this local
+comparison. Nothing under `src/` references it (a unit test enforces that) and it is not wired
+into any production path.
+
+```bash
+# Export first (the export now also carries Jev's production runs and later human decisions,
+# plus outbound message bodies for context). Re-export if your file predates this section.
+npm run replay:export -- --db-url "$SOURCE_DB_URL" --days 30 --batch 2026-10-07
+
+# Only these keys in the shell. SENDILLO/TWILIO/DIALPAD keys make the script refuse to start.
+export TYPESAFE_API_KEY=... OPENAI_API_KEY=... LUNA_MODEL=<model id>   # LUNA_MODEL has no default
+# optional: LUNA_API=responses|chat (default responses), LUNA_TIMEOUT_MS,
+#           LUNA_PRICE_INPUT_PER_MTOK + LUNA_PRICE_OUTPUT_PER_MTOK (USD per 1M tokens, enables cost)
+npm run replay:compare -- --batch 2026-10-07 --concurrency 4
+#   --head-to-head   also run Luna on EVERY message (default: only on Jev's holds)
+#   --scope all_holds       cascade also covers policy holds (dnc, unclear, automation off); default below_threshold
+#   --eligibility any       let Luna apply any thresholdable outcome (default: only outcomes Jev policy auto-applies)
+#   --limit N               first N inbound
+```
+
+Output: `tmp/replay/compare-<batch>.report.md` and `.json` (mode 600; contains masked message text,
+treat as seller PII). Message text is sent to TypeSafe and OpenAI, so it is masked but not anonymous:
+names a seller typed inside a message are still in it. Results are cached in
+`tmp/replay/compare-<batch>.jsonl`; a rerun makes no new paid calls for anything already answered
+(changing the Luna model, API, prompt, or a message's thread invalidates only that entry; errors are
+never cached, so they are retried).
+
+### What is compared
+
+1. **Jev alone (baseline):** Jev runs on each inbound with the same two-way thread production sends
+   (last 15 messages plus the new text). The org's thresholds decide: at or above, auto-applied;
+   below, held for a human. Thresholds come from `jev_outcome_thresholds` in the export; if the export
+   has none, the Q5 defaults are used and the report says so (not_interested 0.90, wrong_number 0.90,
+   nurture 0.95, opted_out 0.95, new_lead automation off).
+2. **Cascade:** Jev's below-threshold holds go to Luna. Luna's call is applied only if its own
+   confidence is at or above a cutoff (swept 0.80 to 0.99) AND the outcome is one Jev policy would
+   auto-apply for this org (so Luna never auto-applies dnc, unclear, bad_number or an off outcome);
+   everything else stays with the human. Per cutoff, overall and per Luna outcome: holds resolved,
+   agreement with the human on exactly that subset, remaining human holds, and the **key risk
+   number**: cases the cascade would get wrong that Jev alone would have sent to a human. The report
+   also shows how often Jev's own below-threshold label was right on the same set.
+3. **Head-to-head (`--head-to-head`):** per-outcome precision, recall and agreement, confusion matrix,
+   and agreement at each confidence cutoff for both models on all messages with a human decision.
+
+### Ground truth (what counts as "the human decided")
+
+Reuses the Phase 3 scorecard's definition of agreed/corrected (`fn_messages_v2_scorecard`), turned
+into the human's label. Per inbound text, first match, all within 72 hours of the text:
+
+1. a corrected `ai_disposition_reviews` row: the corrected disposition (explicit)
+2. a corrected `jev_lead_decisions` row: its resolved outcome (explicit)
+3. a human `dispo_set` that differs from Jev's disposition: that disposition (explicit).
+   `nurture` then `needs_sequence` is not an override (nurture is a parking step); `needs_sequence`
+   is folded into `nurture`. With no Jev review/decision at all, the first human `dispo_set` is the label.
+4. a human-confirmed review or decision: Jev's label (explicit)
+5. auto-applied, at least 72 hours old at export time, never corrected: Jev's label (**implicit**,
+   silence is not a decision)
+
+Any other human disposition becomes the label `other` and can never match a Jev outcome. Messages
+with no human decision are excluded from every score (they still count toward volume). The headline
+tables use **explicit** decisions only; a second section adds implicit agreement. Sample sizes
+(total, human-decided, cascade population, scored cascade cases) lead the report, and it warns when
+fewer than 30 cascade cases are scored.
+
+### Limits to read before trusting a number
+
+- Luna's confidence is self-reported by the model, not Jev's native calibrated score. A cutoff of
+  0.95 means different things for the two. Treat the sweep as a way to find where Luna's own numbers
+  start to hold up, then verify on a fresh batch.
+- Production thresholds changed over the window (Q5 landed 2026-10-08), but truth does not depend on
+  thresholds, so it stays valid; the hold/auto split in the replay uses today's thresholds.
+- Context fidelity: outbound bodies inside the window exist only in exports made after this section
+  landed; the report counts messages whose context lacks them.
+- Luna's prompt (`scripts/messages-v2/replay/luna-prompt.md`) is a **draft, not approved**. Every
+  outcome and escalation-reason definition is copied verbatim from `src/lib/sms-classification/questions.ts`;
+  the few connecting sentences are listed in that file and in the PR for approval. Regenerate with
+  `npm run replay:luna-prompt`; a test fails if the file drifts from the code.
+
+### Safety
+
+The compare script opens no database connection and has no SMS code path. It refuses to start if
+`SENDILLO_API_KEY`, `TWILIO_AUTH_TOKEN` or `DIALPAD_API_KEY` is set, or if any Supabase/Postgres URL in
+the environment is production or non-local (same guards as the rest of the harness). `OPENAI_API_KEY`
+is deliberately not blanked by `replay:server`'s `BLANKED_ENV`: the compare script runs standalone, never
+through the replay server, so the server never receives it. No secret is written to any output.

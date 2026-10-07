@@ -89,7 +89,7 @@ export async function buildExport(query: Query, opts: ExportOptions): Promise<Re
   // 3. Reference only (never seeded): what really happened in the window.
   const outboundRef = conversationIds.size
     ? await query(
-        `select id, conversation_id, direction, status, provider, created_at
+        `select id, conversation_id, direction, status, provider, created_at, body
            from public.messages
           where org_id = $1 and channel = 'sms' and direction = 'outbound'
             and conversation_id = any($2::uuid[]) and created_at >= $3 and created_at < $4
@@ -105,6 +105,16 @@ export async function buildExport(query: Query, opts: ExportOptions): Promise<Re
           [sourceOrgId, inboundRes.rows.map((r) => r.id)],
         )
       : { rows: [] };
+
+  // 3b. Reference only (never seeded): what Jev decided in production and what a human later
+  //     decided. Used ONLY by the offline classifier comparison (replay:compare).
+  const humanEvents = await fetchHumanEvents(query, {
+    orgId: sourceOrgId,
+    inboundIds: inboundRes.rows.map((r) => String(r.id)),
+    propertyIds: [...propertyIds],
+    windowStart,
+    windowEnd,
+  });
 
   // 4. Context rows.
   const fetched: Partial<Record<ReplayTable, Record<string, unknown>[]>> = { messages: baselineRes.rows };
@@ -230,18 +240,97 @@ export async function buildExport(query: Query, opts: ExportOptions): Promise<Re
     reference: {
       pipelineRuns: pipelineRef.rows.map((r) => scrub(r, masker)),
       outboundInWindow: outboundRef.rows.map((r) => scrub(r, masker)),
+      humanEvents: {
+        runs: humanEvents.runs.map((r) => scrub(r, masker)),
+        reviews: humanEvents.reviews.map((r) => scrub(r, masker)),
+        decisions: humanEvents.decisions.map((r) => scrub(r, masker)),
+        dispoSets: humanEvents.dispoSets.map((r) => scrub(r, masker)),
+      },
     },
     counts: {
       inbound: inbound.length,
       ...Object.fromEntries((Object.keys(tables) as ReplayTable[]).map((t) => [t, tables[t].length])),
       referencePipelineRuns: pipelineRef.rows.length,
       referenceOutbound: outboundRef.rows.length,
+      referenceHumanEvents:
+        humanEvents.reviews.length + humanEvents.decisions.length + humanEvents.dispoSets.length,
     },
   };
 
   // Last line of defence: fail closed if any real phone survived.
   assertNoRealPhones({ ...result, businessNumbers: undefined }, business, { maskPii: opts.maskPii !== false });
   return result;
+}
+
+/** Hours after an inbound within which a human dispo change counts as a correction (matches the Phase 3 scorecard). */
+export const HUMAN_EVENT_WINDOW_HOURS = 72;
+
+/**
+ * Production evidence for the offline classifier comparison. SELECT-only; each table is optional
+ * (older databases). No message bodies, no user ids: enum-like strings, ids and timestamps only.
+ */
+async function fetchHumanEvents(
+  query: Query,
+  a: { orgId: string; inboundIds: string[]; propertyIds: string[]; windowStart: Date; windowEnd: Date },
+): Promise<Record<"runs" | "reviews" | "decisions" | "dispoSets", Record<string, unknown>[]>> {
+  const empty = { runs: [], reviews: [], decisions: [], dispoSets: [] } as Record<"runs" | "reviews" | "decisions" | "dispoSets", Record<string, unknown>[]>;
+  if (a.inboundIds.length === 0) return empty;
+  const out = empty;
+  if (await tableExists(query, "sms_classification_runs")) {
+    out.runs = (await query(
+      `select id, source_inbound_message_id, resolved_outcome,
+              decision ->> 'nativeConfidence' as native_confidence, created_at
+         from public.sms_classification_runs
+        where org_id = $1 and provider = 'jev' and source_inbound_message_id = any($2::uuid[])
+        order by created_at asc, id asc`,
+      [a.orgId, a.inboundIds],
+    )).rows;
+  }
+  if (await tableExists(query, "ai_disposition_reviews")) {
+    // Correction columns arrive with the Jev correction migration; a database without it simply has no corrections.
+    const { rows: cols } = await query(
+      `select column_name from information_schema.columns
+        where table_schema = 'public' and table_name = 'ai_disposition_reviews'
+          and column_name in ('corrected_disposition', 'corrected_at')`,
+    );
+    const has = (c: string) => cols.some((r) => r.column_name === c);
+    const corrected = `${has("corrected_disposition") ? "corrected_disposition" : "null::text as corrected_disposition"},
+              ${has("corrected_at") ? "corrected_at" : "null::timestamptz as corrected_at"}`;
+    out.reviews = (await query(
+      `select id, source_inbound_message_id, classification_run_id, disposition, status,
+              ${corrected}, created_at, resolved_at
+         from public.ai_disposition_reviews
+        where org_id = $1 and source_inbound_message_id = any($2::uuid[])
+        order by created_at asc, id asc`,
+      [a.orgId, a.inboundIds],
+    )).rows;
+  }
+  if (await tableExists(query, "jev_lead_decisions")) {
+    out.decisions = (await query(
+      `select id, source_inbound_message_id, classification_run_id, proposed_outcome, status,
+              resolved_outcome, (resolved_by is null) as auto_resolved, created_at, resolved_at
+         from public.jev_lead_decisions
+        where org_id = $1 and source_inbound_message_id = any($2::uuid[])
+        order by created_at asc, id asc`,
+      [a.orgId, a.inboundIds],
+    )).rows;
+  }
+  if (a.propertyIds.length && (await tableExists(query, "lead_events"))) {
+    out.dispoSets = (await query(
+      `select property_id, payload ->> 'to' as to_dispo, created_at
+         from public.lead_events
+        where org_id = $1 and event_type = 'dispo_set' and actor_type = 'user'
+          and property_id = any($2::uuid[]) and created_at >= $3 and created_at < $4
+        order by created_at asc, id asc`,
+      [
+        a.orgId,
+        a.propertyIds,
+        a.windowStart.toISOString(),
+        new Date(a.windowEnd.getTime() + HUMAN_EVENT_WINDOW_HOURS * 3_600_000).toISOString(),
+      ],
+    )).rows;
+  }
+  return out;
 }
 
 /** Reference rows have no schema; stay conservative and mask every phone-shaped number. */
