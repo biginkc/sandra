@@ -30,6 +30,7 @@ async function main() {
       eligibility: { type: "string", default: "policy" },
       "allow-project-ref": { type: "string" },
       "count-only": { type: "boolean", default: false },
+      "truth-only": { type: "boolean", default: false },
     },
   });
   const file = values.file ?? (values.batch ? exportPathFor(assertBatchId(values.batch)) : null);
@@ -67,12 +68,12 @@ async function main() {
   };
   const opts: CompareOptions = {
     concurrency, limit: values.limit ? Number(values.limit) : null, headToHead: values["head-to-head"],
-    scope: values.scope, eligibility: values.eligibility, lunaPrices: prices,
+    truthOnly: values["truth-only"], scope: values.scope, eligibility: values.eligibility, lunaPrices: prices,
   };
   console.log(`replay:compare batch ${exp.batchId}: ${exp.inbound.length} inbound, luna model ${luna.model} (${luna.api}), concurrency ${concurrency}`);
   const run = await runCompare(exp, opts, deps);
   if (values["count-only"]) {
-    const holds = run.rows.filter((r) => r.jevDecision.status === "hold" && (opts.scope === "all_holds" || r.jevDecision.reason === "needs_decision"));
+    const holds = run.rows.filter((r) => r.jevDecision.status === "hold" && (opts.scope === "all_holds" || r.jevDecision.reason === "needs_decision") && (!opts.truthOnly || r.truth?.kind === "explicit"));
     console.log(`replay:compare count-only: ${holds.length} of ${run.rows.length} messages would go to Luna (scope ${opts.scope}); no Luna calls made, no report written`);
     return;
   }

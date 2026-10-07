@@ -77,6 +77,13 @@ describe("runCompare", () => {
     expect(md).toContain("Sample sizes");
   });
 
+  it("truthOnly sends Luna only in-scope holds that have an explicit human decision", async () => {
+    const { d, luna } = deps();
+    const run = await runCompare(fixtureExport(), { ...opts, truthOnly: true }, d);
+    expect(luna.mock.calls.length).toBe(run.rows.filter((r) => r.luna || r.lunaErrored).length);
+    expect(run.rows.filter((r) => r.luna).every((r) => r.truth?.kind === "explicit")).toBe(true);
+  });
+
   it("is resumable: a rerun against the same cache file makes no new calls", async () => {
     const file = path.join(mkdtempSync(path.join(os.tmpdir(), "cmp-")), "compare-t.jsonl");
     const first = deps(new FileCache(file));

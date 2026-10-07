@@ -62,6 +62,8 @@ export type CompareOptions = {
   /** "policy": Luna may only apply outcomes Jev policy would auto-apply for this org. "any": any thresholdable outcome. */
   eligibility: "policy" | "any";
   lunaPrices: { inputPerMTok: number; outputPerMTok: number } | null;
+  /** Luna runs only on messages with an explicit human decision (they are the only ones that can be scored). */
+  truthOnly?: boolean;
 };
 
 const sha = (x: unknown) => createHash("sha256").update(JSON.stringify(x)).digest("hex").slice(0, 16);
@@ -137,7 +139,7 @@ export async function runCompare(exp: ReplayExport, opts: CompareOptions, deps: 
 
     // 2. Luna: on every Jev hold (the cascade population), or on everything with headToHead.
     let lunaCall: LunaResult | null = null;
-    if (deps.luna && (opts.headToHead || (jevDecision.status === "hold" && (opts.scope === "all_holds" || jevDecision.reason === "needs_decision")))) {
+    if (deps.luna && (!opts.truthOnly || truth.get(m.id)?.kind === "explicit") && (opts.headToHead || (jevDecision.status === "hold" && (opts.scope === "all_holds" || jevDecision.reason === "needs_decision")))) {
       const key = `luna|${deps.lunaModel}|${deps.lunaApi}|${promptHash}|${m.id}|${threadHash}`;
       const cached = deps.cache.get(key) as LunaResult | undefined;
       if (cached) { lunaCached++; lunaCall = cached; }
