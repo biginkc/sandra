@@ -92,6 +92,7 @@ export default defineConfig({
       "supabase/migrations/20261008150000_hold_alert_deliveries.integration.test.ts",
       "supabase/migrations/20261008150100_messages_v2_hold_actions.integration.test.ts",
       "supabase/migrations/20261008150200_hold_resolve_stale_guard_and_alert_sending.integration.test.ts",
+      "supabase/migrations/20261008210000_hold_alerts_new_only.integration.test.ts",
       "src/app/(dashboard)/messages-v2/hold-actions.rpc.integration.test.ts",
       "src/lib/hold-alerts/store.integration.test.ts",
       "supabase/migrations/20261008180000_replay_harness.integration.test.ts",

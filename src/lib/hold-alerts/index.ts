@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { loadMessagesV2Data, type LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
+import { loadHeldPropertyIds, loadMessagesV2Data, type LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
 import { loadRunLabels } from "@/app/(dashboard)/messages-v2/labels";
 import { hasActiveSandraAccess } from "@/lib/auth/access-state";
 import { isAcquisitionsCaller } from "@/lib/auth/surface-access";
@@ -46,8 +46,10 @@ async function loadAlertHolds(
   db: LooseSupabase,
   orgId: string,
   hotReasons: readonly string[],
+  alertsSince: string,
+  nowMs: number,
 ): Promise<{ holds: HoldInfo[]; complete: boolean }> {
-  const data = await loadMessagesV2Data(db, orgId);
+  const data = await loadMessagesV2Data(db, orgId, nowMs, { alertsSince });
   const labels = await loadRunLabels(
     db,
     data.holds.map((h) => ({
@@ -57,8 +59,7 @@ async function loadAlertHolds(
       inbound_message_id: h.run?.inbound_message_id ?? "",
     })),
   );
-  // Exact totals only: a truncated or failed source can hide still-open holds.
-  const complete = data.holdsMeta.totalState === "exact" && !data.holdsMeta.truncated && data.holdsMeta.failed.length === 0;
+  const complete = data.holdsMeta.failed.length === 0;
   return { holds: toAlertHolds(data.holds, labels, hotReasons), complete };
 }
 
@@ -69,12 +70,14 @@ export function createHoldAlertDeps(
   const db = admin as unknown as LooseSupabase;
   const senders = createChannelSenders(admin, { env });
   const hotReasons = parseHotHoldReasons(env);
+  const now = () => new Date();
   return {
-    now: () => new Date(),
+    now,
     store: createSupabaseDeliveryStore(db),
     baseUrl: resolveAppBaseUrl(env),
     emailEnabled: env.HOLD_ALERT_EMAIL_ENABLED === "1",
-    loadHolds: (orgId) => loadAlertHolds(db, orgId, hotReasons),
+    loadHolds: (orgId, alertsSince) => loadAlertHolds(db, orgId, hotReasons, alertsSince, now().getTime()),
+    loadHeldPropertyIds: (orgId, ids) => loadHeldPropertyIds(db, orgId, ids),
     async loadRecipients(orgId): Promise<Recipient[]> {
       const { data, error } = await db.from("memberships").select(MEMBERSHIP_COLUMNS).eq("org_id", orgId);
       if (error) throw new Error(`memberships lookup failed: ${error.message}`);
