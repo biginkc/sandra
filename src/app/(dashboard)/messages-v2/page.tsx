@@ -8,6 +8,7 @@ import { messagesV2Context } from "./access";
 import { loadRunLabels } from "./labels";
 import { loadMessagesV2Data, type LooseSupabase } from "./queries";
 import { MessagesV2View } from "./messages-v2-view";
+import { loadReplayBatchId } from "./replay-batch";
 import type { PipelineCoverage } from "./types";
 
 export const dynamic = "force-dynamic";
@@ -52,9 +53,10 @@ export default async function MessagesV2Page() {
   const { orgId, isOwner } = access;
 
   const supabase = (await createClient()) as unknown as LooseSupabase;
-  const [data, coverage] = await Promise.all([
+  const [data, coverage, replayBatchId] = await Promise.all([
     loadMessagesV2Data(supabase, orgId),
     loadCoverage(orgId),
+    isOwner ? loadReplayBatchId(supabase, orgId) : Promise.resolve(null),
   ]);
 
   // Hold cards are labelled by property id; synthesize label inputs from the
@@ -75,6 +77,7 @@ export default async function MessagesV2Page() {
       <MessagesV2View
         orgId={orgId}
         isOwner={isOwner}
+        replayBatchId={replayBatchId}
         coverage={coverage === "unavailable" ? null : coverage}
         coverageUnavailable={coverage === "unavailable"}
         holdsMeta={data.holdsMeta}
