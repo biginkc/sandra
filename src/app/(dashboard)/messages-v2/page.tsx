@@ -12,6 +12,7 @@ import {
   listHoldAssigneesAction,
   sendHeldDraftAction,
   takeOverHoldAction,
+  retrySuppressionHoldAction,
 } from "./actions";
 import { withFreshSeen } from "./hold-seen";
 import { loadRunLabels } from "./labels";
@@ -105,6 +106,7 @@ export default async function MessagesV2Page() {
           takeOver: takeOverHoldAction,
           assign: assignHoldAction,
           dismiss: dismissHoldAction,
+          retrySuppression: retrySuppressionHoldAction,
           listAssignees: listHoldAssigneesAction,
         }}
       />

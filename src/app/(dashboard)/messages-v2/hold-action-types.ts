@@ -17,5 +17,7 @@ export type HoldActionsApi = {
   takeOver(input: { propertyId: string; seen: HoldSeen }): Promise<Result<{ leadHref: string }>>;
   assign(input: { propertyId: string; assigneeId: string | null }): Promise<Result<null>>;
   dismiss(input: { propertyId: string; reason: string; seen: HoldSeen }): Promise<Result<null>>;
+  /** Optional: re-run suppression for a `suppression_incomplete` hold (the lead banner's action). */
+  retrySuppression?(input: { propertyId: string }): Promise<Result<{ cleared: boolean; remaining: number }>>;
   listAssignees(input: { propertyId: string }): Promise<Result<TeamMember[]>>;
 };

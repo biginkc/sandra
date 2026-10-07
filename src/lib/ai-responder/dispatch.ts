@@ -3295,9 +3295,7 @@ async function reserveSend(
     assertLive(attempt);
     const { data, error } = await supabase.rpc("fn_reserve_ai_send", {
       p_conversation_id: conversationKey,
-      // Generated type is `?: string`; SQL accepts null. Cast keeps types.ts
-      // regen-safe.
-      p_inbound_message_id: (inboundMessageId ?? null) as string | undefined,
+      p_inbound_message_id: inboundMessageId ?? null,
       p_holder: attempt.holder,
       p_lease_seconds: sendReservationTuning.leaseSeconds,
     });
@@ -3428,6 +3426,7 @@ async function fenceProviderSubmit(
     claimStartedAt: args.claimStartedAt,
     checkNewerInbound: !!args.input.inboundMessageId,
     excludeMessageId: ctx.messageId,
+    humanActor: args.source === "human",
   });
   if (pastDeadline()) {
     attempt.abandoned = true;
@@ -4419,6 +4418,7 @@ async function deliverResponderMessage(
         phase: "presend",
         claimStartedAt: args.claimStartedAt,
         checkNewerInbound: !!args.input.inboundMessageId,
+        humanActor: args.source === "human",
       });
       guard();
       const stale = await applyGateEvaluation(supabase, args, evaluation, guard);

@@ -12,6 +12,7 @@ import { recordStep, resumeRun } from "@/lib/pipeline-runs";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
+import { retrySuppressionForProperty } from "../leads/[id]/ai-actions";
 import { listPropertyOrgUsers, updateLeadAssignee } from "../leads/actions";
 import { messagesV2OrgId } from "./access";
 import type { SeenDraft } from "./hold-action-types";
@@ -124,6 +125,18 @@ export async function dismissHoldAction(input: { propertyId: string; reason: str
       seen: seenHold(input.seen),
     }),
   );
+}
+
+/**
+ * Retry a failed opt-out/DNC suppression from the hold card. Same action the
+ * lead banner uses; here it is gated by the Messages v2 access check first.
+ */
+export async function retrySuppressionHoldAction(input: { propertyId: string }) {
+  const auth = await authorize();
+  if (!auth.ok) return auth;
+  const result = await retrySuppressionForProperty(String(input.propertyId));
+  if (result.ok) revalidatePath("/messages-v2");
+  return result;
 }
 
 export async function assignHoldAction(input: { propertyId: string; assigneeId: string | null }) {

@@ -123,6 +123,23 @@ export function HoldActionControls({
       () => ({ text: "Sent (edited)" }),
     );
 
+  const suppressionIncomplete =
+    hold.flag_reason === "suppression_incomplete" || !!hold.flag_reason?.startsWith("suppression_incomplete:");
+
+  const retrySuppression = () =>
+    propertyId &&
+    actions.retrySuppression &&
+    perform(
+      "Retrying suppression…",
+      () => actions.retrySuppression!({ propertyId }),
+      (data) => ({
+        text: data.cleared
+          ? "Suppression complete: the hold is cleared"
+          : `Suppression still incomplete: ${data.remaining} opt-out${data.remaining === 1 ? "" : "s"} left`,
+      }),
+      onReload,
+    );
+
   const takeOver = () =>
     propertyId &&
     perform(
@@ -205,6 +222,20 @@ export function HoldActionControls({
         <p role="alert" className="rounded-lg border border-red-300 bg-red-50 p-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
           {error}
         </p>
+      )}
+
+      {suppressionIncomplete && (
+        <div
+          data-testid="suppression-incomplete-warning"
+          className="flex flex-wrap items-center gap-2 rounded-lg border border-red-300 bg-red-50 p-2 text-xs font-semibold text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200"
+        >
+          <span>Suppression is incomplete: this number may still be texted. Retry suppression before dismissing.</span>
+          {actions.retrySuppression && (
+            <Button type="button" size="xs" disabled={!propertyId} onClick={retrySuppression}>
+              Retry suppression
+            </Button>
+          )}
+        </div>
       )}
 
       <div className="flex flex-wrap gap-2">

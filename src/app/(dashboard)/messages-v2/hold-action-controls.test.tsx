@@ -267,3 +267,21 @@ describe("hold action controls", () => {
     });
   });
 });
+
+describe("suppression incomplete hold", () => {
+  it("shows the warning and retries suppression", async () => {
+    const retrySuppression = vi.fn().mockResolvedValue(ok({ cleared: true, remaining: 0 }));
+    const onReload = vi.fn();
+    renderRail(hold({ flag_reason: "suppression_incomplete:rev-1" }), api({ retrySuppression }), onReload);
+    expect(screen.getByTestId("suppression-incomplete-warning")).toHaveTextContent(/Suppression is incomplete/);
+    await userEvent.click(button("Retry suppression"));
+    await waitFor(() => expect(retrySuppression).toHaveBeenCalledWith({ propertyId: "p1" }));
+    expect(await screen.findByTestId("hold-status")).toHaveTextContent(/hold is cleared/);
+    expect(onReload).toHaveBeenCalled();
+  });
+
+  it("shows nothing for other hold reasons", () => {
+    renderRail(hold({ flag_reason: "draft_held" }), api({ retrySuppression: vi.fn() }));
+    expect(screen.queryByTestId("suppression-incomplete-warning")).toBeNull();
+  });
+});
