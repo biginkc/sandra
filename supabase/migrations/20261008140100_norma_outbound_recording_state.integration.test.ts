@@ -51,6 +51,8 @@ describe("outbound recording ledger on full Sandra schema",()=>{
     expect((await db.query("select * from norma_notifications where request_id=$1",[id])).rows).toHaveLength(0);
   }));
   it("supports the retry schema contract while attempt two is pending and after binding",()=>fixture(async(db,ids)=>{
+    // Retry admission is retained and defaults OFF; these retry-shaped cases opt in inside the rollback-only fixture (same pattern as 20261004090000_norma_call_twice).
+    await db.query("update public.norma_retry_admission set enabled=true where singleton=true");
     const id=await request(db,ids,"first");
     expect((await service(db,"select fn_norma_claim_dispatch($1,1) claimed",[id])).rows[0].claimed).toBe(true);
     expect((await service(db,"select fn_norma_complete_call($1,'first','no_answer','{\"attempt\":1}'::jsonb) result",[id])).rows[0].result).toMatchObject({retry:true});
@@ -144,6 +146,8 @@ describe("outbound recording ledger on full Sandra schema",()=>{
     expect((await db.query("select awaiting_result from norma_recording_lookup_control")).rows[0].awaiting_result).toBe(false);
   }));
   it("does not let conflicting provider identities across retry/current columns starve newer requests",()=>fixture(async(db,ids)=>{
+    // Retry admission is retained and defaults OFF; these retry-shaped cases opt in inside the rollback-only fixture (same pattern as 20261004090000_norma_call_twice).
+    await db.query("update public.norma_retry_admission set enabled=true where singleton=true");
     const makeProperty=async()=>{const id=randomUUID();await db.query("insert into properties(id,org_id,address,state,status) values($1,$2,'Conflict fixture','MO','new_lead')",[id,ids.org]);return id;};
     for(let i=0;i<101;i++) {
       const id=await request(db,{...ids,property:await makeProperty()},`existing-${i}`);
@@ -165,6 +169,8 @@ describe("outbound recording ledger on full Sandra schema",()=>{
     expect((await db.query("select auth.role() value")).rows[0].value).toBe("authenticated");
   }));
   it("seeds one owner for an unledgered duplicate within a batch and advances later work",()=>fixture(async(db,ids)=>{
+    // Retry admission is retained and defaults OFF; these retry-shaped cases opt in inside the rollback-only fixture (same pattern as 20261004090000_norma_call_twice).
+    await db.query("update public.norma_retry_admission set enabled=true where singleton=true");
     const first=await request(db,ids,"duplicate");
     await service(db,"select fn_norma_claim_dispatch($1,1)",[first]);
     expect((await service(db,"select fn_norma_complete_call($1,'duplicate','no_answer','{\"attempt\":1}'::jsonb) result",[first])).rows[0].result).toMatchObject({retry:true});
