@@ -7,8 +7,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { teamMemberOptionLabel, teamMemberPrimaryLabel, type TeamMember } from "@/lib/auth/team-member";
 import type { Result } from "@/lib/errors/result";
 
-import type { HoldActionsApi } from "./hold-action-types";
-import type { OpenHold, RunWithSteps } from "./types";
+import type { HoldActionsApi, SeenDraft } from "./hold-action-types";
+import type { HoldSeen, OpenHold, RunWithSteps } from "./types";
 
 type Status = { text: string; pending: boolean; href?: string };
 type Mode = "idle" | "editing" | "dismissing" | "assigning";
@@ -49,9 +49,12 @@ function errorText<T>(result: Result<T>): string {
 export function HoldActionControls({
   hold,
   actions,
+  onReload,
 }: {
   hold: OpenHold<RunWithSteps>;
   actions: HoldActionsApi;
+  /** Re-fetch the page data; called when the server says the card is out of date. */
+  onReload?: () => void;
 }) {
   const propertyId = hold.property_id;
   const draft = hold.draft ?? null;
@@ -63,6 +66,12 @@ export function HoldActionControls({
   const [members, setMembers] = useState<TeamMember[] | null>(null);
   const [assignee, setAssignee] = useState<string | null>(null);
   const busy = useRef(false);
+  // A provider timeout means the text may have gone out: Send stays off until the card reloads.
+  const [sendLocked, setSendLocked] = useState(false);
+  const seenHold: HoldSeen = hold.seen ?? { through: null, flagReason: null, flagAt: null };
+  const seenDraft: SeenDraft | null = draft && draft.body !== undefined
+    ? { body: draft.edited_body ?? draft.body, editedAt: draft.edited_at ?? null }
+    : null;
 
   // Runs one action: flip to `pending` text now, settle or roll back after.
   async function perform<T>(
@@ -89,22 +98,28 @@ export function HoldActionControls({
     } else {
       setStatus(null);
       setError(errorText(result));
+      const code = result.error.code;
+      if (code === "SEND_TIMEOUT") setSendLocked(true);
+      // The card is out of date: show why, then pull fresh data.
+      if (code === "DRAFT_CHANGED" || code === "HOLD_STALE" || code === "DRAFT_NOT_PENDING") onReload?.();
     }
   }
 
   const sendDraft = () =>
     draft &&
+    seenDraft &&
     perform(
       "Sending…",
-      () => actions.send({ draftId: draft.id }),
+      () => actions.send({ draftId: draft.id, seen: seenDraft }),
       () => ({ text: "Sent" }),
     );
 
   const sendEdit = () =>
     draft &&
+    seenDraft &&
     perform(
       "Sending…",
-      () => actions.editAndSend({ draftId: draft.id, body: editText }),
+      () => actions.editAndSend({ draftId: draft.id, body: editText, seen: seenDraft }),
       () => ({ text: "Sent (edited)" }),
     );
 
@@ -112,7 +127,7 @@ export function HoldActionControls({
     propertyId &&
     perform(
       "Taking over…",
-      () => actions.takeOver({ propertyId }),
+      () => actions.takeOver({ propertyId, seen: seenHold }),
       (data) => ({ text: "Taken over: the AI is off for this lead", href: data.leadHref }),
     );
 
@@ -120,7 +135,7 @@ export function HoldActionControls({
     propertyId &&
     perform(
       "Dismissing…",
-      () => actions.dismiss({ propertyId, reason }),
+      () => actions.dismiss({ propertyId, reason, seen: seenHold }),
       () => ({ text: "Dismissed" }),
     );
 
@@ -193,14 +208,14 @@ export function HoldActionControls({
       )}
 
       <div className="flex flex-wrap gap-2">
-        <Button type="button" size="xs" variant="outline" disabled={!draft} onClick={sendDraft} title={draft ? undefined : "No reply draft to send"}>
+        <Button type="button" size="xs" variant="outline" disabled={!draft || !seenDraft || sendLocked} onClick={sendDraft} title={draft ? undefined : "No reply draft to send"}>
           Send
         </Button>
         <Button
           type="button"
           size="xs"
           variant="outline"
-          disabled={!draft}
+          disabled={!draft || !seenDraft || sendLocked}
           onClick={() => {
             setEditText(effectiveDraftBody(hold) ?? "");
             setMode("editing");
@@ -239,7 +254,7 @@ export function HoldActionControls({
             rows={4}
           />
           <div className="flex gap-2">
-            <Button type="button" size="xs" disabled={editText.trim() === ""} onClick={sendEdit}>
+            <Button type="button" size="xs" disabled={editText.trim() === "" || sendLocked} onClick={sendEdit}>
               Send edit
             </Button>
             <Button type="button" size="xs" variant="ghost" onClick={() => setMode("idle")}>

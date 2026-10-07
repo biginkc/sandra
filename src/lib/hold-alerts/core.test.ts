@@ -52,8 +52,27 @@ describe("nudge_1h", () => {
     expect(t.sent.length).toBe(before);
   });
 
-  it("never nudges a hold whose age is unknown", async () => {
-    const t = makeDeps({ holds: [hold({ since: null, holdKey: "prop-1:unknown" })], nowIso: "2026-10-08T15:00:00.000Z" });
+  it("does not blast a nudge on first deploy for an old hold: it waits an hour after the first DM was SENT", async () => {
+    const old = hold({ since: "2026-10-01T10:00:00.000Z" });
+    const t = makeDeps({ holds: [old], nowIso: "2026-10-08T10:00:00.000Z" });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(2);
+    expect(t.store.rows.some((r) => r.stage === "nudge_1h")).toBe(false);
+
+    t.setNow("2026-10-08T10:59:00.000Z");
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.store.rows.some((r) => r.stage === "nudge_1h")).toBe(false);
+
+    t.setNow("2026-10-08T11:01:00.000Z");
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.store.rows.filter((r) => r.stage === "nudge_1h" && r.status === "sent")).toHaveLength(2);
+  });
+
+  it("never nudges a recipient whose first DM was skipped or never sent", async () => {
+    const t = makeDeps({ nowIso: "2026-10-08T10:00:00.000Z" });
+    t.results.slack = { status: "skipped", reason: "no_token" };
+    await runHoldAlertsForOrg(t.deps, ORG);
+    t.setNow("2026-10-08T13:00:00.000Z");
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.store.rows.some((r) => r.stage === "nudge_1h")).toBe(false);
   });
@@ -108,10 +127,29 @@ describe("caps", () => {
         sentAt: "2026-10-08T09:50:00.000Z",
       });
     }
+    const summary = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toHaveLength(0);
+    expect(summary.deferred).toBe(1);
+    // Over the cap is "not yet", not "never": the row stays pending with no attempt spent.
+    const row = t.store.rows.find((r) => r.holdKey.startsWith("prop-1"))!;
+    expect([row.status, row.attempts, row.lastError]).toEqual(["pending", 0, null]);
+  });
+
+  it("delivers a capped row on a later run once the hour has rolled", async () => {
+    const t = makeDeps({ recipients: [ACQ] });
+    for (let i = 0; i < 20; i++) {
+      t.store.rows.push({
+        id: `old${i}`, orgId: ORG, propertyId: `p${i}`, holdKey: `p${i}:x`, recipientUserId: ACQ.userId,
+        channel: "slack", stage: "first", status: "sent", attempts: 1, lastError: null,
+        createdAt: "2026-10-08T09:50:00.000Z", sentAt: "2026-10-08T09:50:00.000Z",
+      });
+    }
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent).toHaveLength(0);
-    const row = t.store.rows.find((r) => r.holdKey.startsWith("prop-1"))!;
-    expect([row.status, row.lastError]).toEqual(["skipped", "cap_dm_per_hour"]);
+    t.setNow("2026-10-08T10:55:00.000Z");
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent.filter((s) => s.channel === "slack")).toHaveLength(1);
+    expect(t.store.rows.find((r) => r.holdKey.startsWith("prop-1") && r.stage === "first")!.status).toBe("sent");
   });
 
   it("counts only the last hour toward the DM cap", async () => {
@@ -157,7 +195,7 @@ describe("caps", () => {
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent.some((s) => s.channel === "sms")).toBe(false);
     const row = t.store.rows.find((r) => r.channel === "sms" && r.holdKey.startsWith("prop-1"))!;
-    expect([row.status, row.lastError]).toEqual(["skipped", "cap_sms_per_hour"]);
+    expect([row.status, row.attempts, row.lastError]).toEqual(["pending", 0, null]);
   });
 });
 
@@ -168,6 +206,26 @@ describe("authorization re-check at delivery time", () => {
     expect(t.sent.map((s) => s.userId)).toEqual(["owner-1"]);
     const row = t.store.rows.find((r) => r.recipientUserId === "acq-1")!;
     expect([row.status, row.lastError]).toEqual(["skipped", "recipient_not_authorized"]);
+  });
+
+  it("re-confirms role = owner at send time for the SMS only", async () => {
+    const asked: Array<{ user: string; requireOwner: boolean | undefined }> = [];
+    const t = makeDeps({
+      holds: [hold({ hot: true })],
+      recipients: [OWNER],
+      isRecipientAuthorized: async (_org, user, opts) => {
+        asked.push({ user, requireOwner: opts?.requireOwner });
+        return !opts?.requireOwner; // demoted since the list was loaded
+      },
+    });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(asked).toEqual([
+      { user: "owner-1", requireOwner: undefined },
+      { user: "owner-1", requireOwner: true },
+    ]);
+    expect(t.sent.some((s) => s.channel === "sms")).toBe(false);
+    const row = t.store.rows.find((r) => r.channel === "sms")!;
+    expect([row.status, row.lastError]).toEqual(["skipped", "recipient_not_owner"]);
   });
 
   it("re-checks immediately before each send, not once per run", async () => {
@@ -265,6 +323,56 @@ describe("durability and idempotency", () => {
     await runHoldAlertsForOrg(t.deps, ORG);
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.sent).toHaveLength(1);
+  });
+
+  it("a row is already `sending` when the provider is called (before, not after)", async () => {
+    const seen: string[] = [];
+    const t = makeDeps({ recipients: [OWNER] });
+    t.deps.sendSlack = async () => {
+      seen.push(t.store.rows[0]!.status);
+      return { status: "sent" };
+    };
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(seen).toEqual(["sending"]);
+  });
+
+  it("a crash mid-send is swept to failed:interrupted after the route's max duration and never resent", async () => {
+    const t = makeDeps({ recipients: [OWNER], nowIso: "2026-10-08T10:00:00.000Z" });
+    t.deps.sendSlack = async () => {
+      throw new Error("process died"); // stands in for a crash: the row is left claimed
+    };
+    // Simulate the dead run directly: a row claimed and left in `sending`.
+    const row = await t.store.ensure({ orgId: ORG, propertyId: "prop-1", holdKey: "prop-1:draft_held", recipientUserId: "owner-1", channel: "slack", stage: "first" });
+    await t.store.claim(row);
+    expect(t.store.rows[0]).toMatchObject({ status: "sending", attempts: 1 });
+
+    // Within the route's duration the row belongs to a live run: untouched, not resent.
+    t.setNow("2026-10-08T10:00:30.000Z");
+    const early = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(early.interrupted).toBe(0);
+    expect(t.store.rows[0]!.status).toBe("sending");
+
+    // Past it, the row is terminal and is never sent again by any later run.
+    t.setNow("2026-10-08T10:01:30.000Z");
+    const late = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(late.interrupted).toBe(1);
+    expect(t.store.rows[0]).toMatchObject({ status: "failed", lastError: "interrupted", attempts: 3 });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.store.rows).toHaveLength(1);
+    expect(t.sent).toHaveLength(0);
+  });
+
+  it("a sender that throws AFTER the provider call began is terminal: no retry, no duplicate", async () => {
+    const t = makeDeps({
+      recipients: [OWNER],
+      sendSlack: async () => {
+        throw new Error("socket hang up");
+      },
+    });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.store.rows[0]).toMatchObject({ status: "failed", attempts: 3, lastError: "socket hang up" });
   });
 
   it("a thrown sender is recorded as failed, not crashed", async () => {

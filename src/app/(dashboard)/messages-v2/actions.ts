@@ -14,6 +14,7 @@ import { createClient } from "@/lib/supabase/server";
 
 import { listPropertyOrgUsers, updateLeadAssignee } from "../leads/actions";
 import { messagesV2OrgId } from "./access";
+import type { SeenDraft } from "./hold-action-types";
 import {
   assignHold,
   dismissHold,
@@ -22,6 +23,7 @@ import {
   takeOverHold,
   type HoldActionDeps,
 } from "./hold-actions";
+import type { HoldSeen } from "./types";
 
 /**
  * Server actions behind the Messages v2 holds rail. Every action resolves the
@@ -70,12 +72,25 @@ async function authorize(): Promise<Result<HoldActionDeps>> {
   };
 }
 
+const RELOAD_CODES = new Set(["DRAFT_CHANGED", "HOLD_STALE", "DRAFT_NOT_PENDING"]);
+
+const seenDraft = (v: SeenDraft | undefined): SeenDraft => ({
+  body: String(v?.body ?? ""),
+  editedAt: v?.editedAt == null ? null : String(v.editedAt),
+});
+const seenHold = (v: HoldSeen | undefined): HoldSeen => ({
+  through: v?.through == null ? null : String(v.through),
+  flagReason: v?.flagReason == null ? null : String(v.flagReason),
+  flagAt: v?.flagAt == null ? null : String(v.flagAt),
+});
+
 async function run<T>(action: (deps: HoldActionDeps) => Promise<Result<T>>): Promise<Result<T>> {
   const auth = await authorize();
   if (!auth.ok) return auth;
   try {
     const result = await action(auth.data);
-    if (result.ok) revalidatePath("/messages-v2");
+    // A changed card is reloaded from fresh data, so the refusal revalidates too.
+    if (result.ok || RELOAD_CODES.has(result.error.code)) revalidatePath("/messages-v2");
     return result;
   } catch (e) {
     reportError(e, { tags: { surface: "messages_v2_hold_action" } });
@@ -83,20 +98,32 @@ async function run<T>(action: (deps: HoldActionDeps) => Promise<Result<T>>): Pro
   }
 }
 
-export async function sendHeldDraftAction(input: { draftId: string }) {
-  return run((d) => sendHeldDraft(d, { draftId: String(input.draftId) }));
+export async function sendHeldDraftAction(input: { draftId: string; seen: SeenDraft }) {
+  return run((d) => sendHeldDraft(d, { draftId: String(input.draftId), seen: seenDraft(input.seen) }));
 }
 
-export async function editAndSendHeldDraftAction(input: { draftId: string; body: string }) {
-  return run((d) => editAndSendHeldDraft(d, { draftId: String(input.draftId), body: String(input.body ?? "") }));
+export async function editAndSendHeldDraftAction(input: { draftId: string; body: string; seen: SeenDraft }) {
+  return run((d) =>
+    editAndSendHeldDraft(d, {
+      draftId: String(input.draftId),
+      body: String(input.body ?? ""),
+      seen: seenDraft(input.seen),
+    }),
+  );
 }
 
-export async function takeOverHoldAction(input: { propertyId: string }) {
-  return run((d) => takeOverHold(d, { propertyId: String(input.propertyId) }));
+export async function takeOverHoldAction(input: { propertyId: string; seen: HoldSeen }) {
+  return run((d) => takeOverHold(d, { propertyId: String(input.propertyId), seen: seenHold(input.seen) }));
 }
 
-export async function dismissHoldAction(input: { propertyId: string; reason: string }) {
-  return run((d) => dismissHold(d, { propertyId: String(input.propertyId), reason: String(input.reason ?? "") }));
+export async function dismissHoldAction(input: { propertyId: string; reason: string; seen: HoldSeen }) {
+  return run((d) =>
+    dismissHold(d, {
+      propertyId: String(input.propertyId),
+      reason: String(input.reason ?? ""),
+      seen: seenHold(input.seen),
+    }),
+  );
 }
 
 export async function assignHoldAction(input: { propertyId: string; assigneeId: string | null }) {

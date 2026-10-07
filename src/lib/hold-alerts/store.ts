@@ -74,13 +74,36 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
 
     async claim(row) {
       const { data, error } = await table()
-        .update({ attempts: row.attempts + 1 })
+        .update({ attempts: row.attempts + 1, status: "sending", sending_at: new Date().toISOString() })
         .eq("id", row.id)
         .in("status", ["pending", "failed"])
         .eq("attempts", row.attempts)
         .select("id");
       if (error) fail("claim", error);
       return Array.isArray(data) && data.length === 1;
+    },
+
+    async failInterrupted(cutoffIso) {
+      const { data, error } = await table()
+        .update({ status: "failed", attempts: MAX_ATTEMPTS, last_error: "interrupted" })
+        .eq("status", "sending")
+        .lt("sending_at", cutoffIso)
+        .select("id");
+      if (error) fail("failInterrupted", error);
+      return Array.isArray(data) ? data.length : 0;
+    },
+
+    async sentAt(q) {
+      const { data, error } = await table()
+        .select("sent_at")
+        .eq("hold_key", q.holdKey)
+        .eq("recipient_user_id", q.recipientUserId)
+        .eq("channel", q.channel)
+        .eq("stage", q.stage)
+        .eq("status", "sent")
+        .maybeSingle();
+      if (error) fail("sentAt", error);
+      return (data as { sent_at: string | null } | null)?.sent_at ?? null;
     },
 
     async markSent(id) {

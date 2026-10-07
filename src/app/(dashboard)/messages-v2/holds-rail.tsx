@@ -47,10 +47,13 @@ export function HoldCard({
   label,
   nowMs,
   actions,
+  onReload,
 }: {
   hold: OpenHold<RunWithSteps>;
   label: RunLabel | undefined;
   nowMs: number;
+  /** Re-fetch page data (a card the server found out of date). */
+  onReload?: () => void;
   /** Server actions for the five hold actions; absent = shown disabled. */
   actions?: HoldActionsApi;
 }) {
@@ -165,7 +168,13 @@ export function HoldCard({
       )}
       {!informational &&
         (actions ? (
-          <HoldActionControls hold={hold} actions={actions} />
+          <HoldActionControls
+            // A changed draft or hold remounts the controls, so no stale edit text or status survives a reload.
+            key={`${hold.draft?.id ?? ""}|${hold.draft?.edited_at ?? ""}|${hold.draft?.body ?? ""}|${hold.seen?.through ?? ""}|${hold.seen?.flagAt ?? ""}`}
+            hold={hold}
+            actions={actions}
+            onReload={onReload}
+          />
         ) : (
           <DisabledHoldActions title="Actions unavailable" />
         ))}
@@ -198,9 +207,11 @@ export function HoldsRail({
   nowMs,
   meta,
   actions,
+  onReload,
 }: {
   meta?: HoldsMeta;
   actions?: HoldActionsApi;
+  onReload?: () => void;
   holds: readonly OpenHold<RunWithSteps>[];
   labels: ReadonlyMap<string, RunLabel>;
   nowMs: number;
@@ -264,6 +275,7 @@ export function HoldsRail({
             label={labels.get(hold.id)}
             nowMs={nowMs}
             actions={actions}
+            onReload={onReload}
           />
         ))
       )}

@@ -5,12 +5,18 @@ vi.mock("@/lib/hold-alerts", () => ({ runHoldAlertsForAllOrgs: run }));
 vi.mock("@/lib/errors/report", () => ({ reportError: report }));
 vi.mock("@supabase/supabase-js", () => ({ createClient: vi.fn(() => ({})) }));
 
-import { GET, POST } from "./route";
+import { ROUTE_MAX_DURATION_MS } from "@/lib/hold-alerts/types";
+
+import { GET, POST, maxDuration } from "./route";
 
 const req = (auth?: string) =>
   new Request("http://localhost/api/cron/hold-alerts", { headers: auth ? { authorization: auth } : {} });
 
 describe("hold-alerts cron route", () => {
+  it("keeps the interrupted-delivery window equal to the route's maxDuration", () => {
+    expect(ROUTE_MAX_DURATION_MS).toBe(maxDuration * 1000);
+  });
+
   beforeEach(() => {
     run.mockReset().mockResolvedValue({ orgs: 1, holds: 2, created: 3, sent: 3, skipped: 0, failed: 0, untouched: 0, errors: 0 });
     report.mockReset();

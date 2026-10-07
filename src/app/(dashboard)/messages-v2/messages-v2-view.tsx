@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -75,6 +76,7 @@ const BADGE_CLASS: Record<ModeBadge["mode"], string> = {
 
 export function MessagesV2View(props: MessagesV2ViewProps) {
   const { badges, orgId, isOwner = false } = props;
+  const router = useRouter();
   const requestRefresh = useThrottledRefresh();
 
   const [lastInitial, setLastInitial] = useState(props);
@@ -370,6 +372,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
           nowMs={nowMs}
           meta={meta}
           actions={props.actions}
+          onReload={() => router.refresh()}
         />
       </div>
 

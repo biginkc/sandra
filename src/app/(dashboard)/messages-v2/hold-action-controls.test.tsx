@@ -9,6 +9,8 @@ import type { OpenHold, RunWithSteps } from "./types";
 const NOW = Date.parse("2026-10-08T12:00:00Z");
 const iso = (minsAgo: number) => new Date(NOW - minsAgo * 60_000).toISOString();
 
+const SEEN_HOLD = { through: "2026-10-08T11:55:00.123456+00:00", flagReason: "draft_held", flagAt: "2026-10-08T11:55:00+00:00" };
+
 function hold(over: Partial<OpenHold<RunWithSteps>> = {}): OpenHold<RunWithSteps> {
   return {
     id: "p1",
@@ -18,7 +20,8 @@ function hold(over: Partial<OpenHold<RunWithSteps>> = {}): OpenHold<RunWithSteps
     since: iso(5),
     reason: "Needs attention",
     draft_held: true,
-    draft: { id: "d1", inbound_message_id: "m1", body: "Draft text for the seller" },
+    draft: { id: "d1", inbound_message_id: "m1", body: "Draft text for the seller", edited_at: null },
+    seen: SEEN_HOLD,
     run: null,
     ...over,
   };
@@ -47,8 +50,8 @@ function api(over: Partial<HoldActionsApi> = {}): HoldActionsApi {
   };
 }
 
-const renderRail = (h = hold(), actions = api()) => {
-  render(<HoldsRail holds={[h]} labels={new Map()} nowMs={NOW} actions={actions} />);
+const renderRail = (h = hold(), actions = api(), onReload?: () => void) => {
+  render(<HoldsRail holds={[h]} labels={new Map()} nowMs={NOW} actions={actions} onReload={onReload} />);
   return actions;
 };
 const button = (name: RegExp | string) => screen.getByRole("button", { name });
@@ -63,7 +66,7 @@ describe("hold action controls", () => {
   });
 
   it("shows an edited draft's edited text, not the original", () => {
-    renderRail(hold({ draft: { id: "d1", inbound_message_id: "m1", body: "orig", edited_body: "edited text" } }));
+    renderRail(hold({ draft: { id: "d1", inbound_message_id: "m1", body: "orig", edited_body: "edited text", edited_at: "2026-10-08T11:58:00+00:00" } }));
     expect(screen.getByTestId("draft-text")).toHaveTextContent("edited text");
   });
 
@@ -87,7 +90,7 @@ describe("hold action controls", () => {
       const send = vi.fn().mockReturnValue(new Promise((r) => (release = r)));
       renderRail(hold(), api({ send }));
       await userEvent.click(button(/^Send/));
-      expect(send).toHaveBeenCalledWith({ draftId: "d1" });
+      expect(send).toHaveBeenCalledWith({ draftId: "d1", seen: { body: "Draft text for the seller", editedAt: null } });
       expect(screen.getByTestId("hold-status")).toHaveTextContent(/sending/i);
       expect(screen.queryByRole("button", { name: /^Send/ })).toBeNull();
       release(ok({ messageId: "out-1" }));
@@ -117,6 +120,49 @@ describe("hold action controls", () => {
     });
   });
 
+  describe("review round 1", () => {
+    it("Send passes the edited text and its edit version when the card shows an edit", async () => {
+      const actions = renderRail(
+        hold({ draft: { id: "d1", inbound_message_id: "m1", body: "orig", edited_body: "edited text", edited_at: "2026-10-08T11:58:00+00:00" } }),
+      );
+      await userEvent.click(button(/^Send/));
+      expect(actions.send).toHaveBeenCalledWith({
+        draftId: "d1",
+        seen: { body: "edited text", editedAt: "2026-10-08T11:58:00+00:00" },
+      });
+    });
+
+    it("a draft that changed under the clicker shows the message and reloads the card", async () => {
+      const onReload = vi.fn();
+      const send = vi.fn().mockResolvedValue(fail("DRAFT_CHANGED", "This draft changed after you opened it, so nothing was sent."));
+      renderRail(hold(), api({ send }), onReload);
+      await userEvent.click(button(/^Send/));
+      expect(await screen.findByRole("alert")).toHaveTextContent(/draft changed/i);
+      expect(onReload).toHaveBeenCalledTimes(1);
+    });
+
+    it("Dismiss from a stale view shows 'This thread changed — reload' and reloads", async () => {
+      const onReload = vi.fn();
+      const dismiss = vi.fn().mockResolvedValue(fail("HOLD_STALE", "This thread changed — reload"));
+      renderRail(hold(), api({ dismiss }), onReload);
+      await userEvent.click(button(/^Dismiss/));
+      await userEvent.type(screen.getByRole("textbox", { name: /reason/i }), "done");
+      await userEvent.click(button(/confirm dismiss/i));
+      expect(await screen.findByRole("alert")).toHaveTextContent("This thread changed — reload");
+      expect(onReload).toHaveBeenCalledTimes(1);
+    });
+
+    it("after a send timeout the text may have gone out: Send and Edit stay off, other actions still work", async () => {
+      const message = "Send timed out at the provider — the text may have gone out; do not re-send until the thread updates.";
+      renderRail(hold(), api({ send: vi.fn().mockResolvedValue(fail("SEND_TIMEOUT", message)) }));
+      await userEvent.click(button(/^Send/));
+      expect(await screen.findByRole("alert")).toHaveTextContent(message);
+      expect(button(/^Send/)).toBeDisabled();
+      expect(button(/^Edit/)).toBeDisabled();
+      expect(button(/^Take over/)).toBeEnabled();
+    });
+  });
+
   describe("Edit", () => {
     it("edits the text, then sends the edit", async () => {
       const actions = renderRail();
@@ -126,7 +172,11 @@ describe("hold action controls", () => {
       await userEvent.clear(box);
       await userEvent.type(box, "A shorter reply");
       await userEvent.click(button(/send edit/i));
-      expect(actions.editAndSend).toHaveBeenCalledWith({ draftId: "d1", body: "A shorter reply" });
+      expect(actions.editAndSend).toHaveBeenCalledWith({
+        draftId: "d1",
+        body: "A shorter reply",
+        seen: { body: "Draft text for the seller", editedAt: null },
+      });
       await waitFor(() => expect(screen.getByTestId("hold-status")).toHaveTextContent(/sent/i));
     });
 
@@ -154,7 +204,7 @@ describe("hold action controls", () => {
     it("marks the lead human-owned and offers the lead link", async () => {
       const actions = renderRail();
       await userEvent.click(button(/^Take over/));
-      expect(actions.takeOver).toHaveBeenCalledWith({ propertyId: "p1" });
+      expect(actions.takeOver).toHaveBeenCalledWith({ propertyId: "p1", seen: SEEN_HOLD });
       const link = await screen.findByRole("link", { name: /open lead/i });
       expect(link).toHaveAttribute("href", "/leads/p1");
       expect(screen.getByTestId("hold-status")).toHaveTextContent(/taken over/i);
@@ -177,7 +227,7 @@ describe("hold action controls", () => {
       expect(confirm).toBeDisabled();
       await userEvent.type(screen.getByRole("textbox", { name: /reason/i }), "handled by phone");
       await userEvent.click(confirm);
-      expect(actions.dismiss).toHaveBeenCalledWith({ propertyId: "p1", reason: "handled by phone" });
+      expect(actions.dismiss).toHaveBeenCalledWith({ propertyId: "p1", reason: "handled by phone", seen: SEEN_HOLD });
       await waitFor(() => expect(screen.getByTestId("hold-status")).toHaveTextContent(/dismissed/i));
     });
 

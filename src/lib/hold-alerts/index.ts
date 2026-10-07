@@ -12,7 +12,7 @@ import { toAlertHolds } from "./holds";
 import { createSupabaseDeliveryStore } from "./store";
 import type { HoldAlertDeps, HoldInfo, OrgAlertSummary, Recipient } from "./types";
 
-export { HOT_HOLD_REASON_TOKENS } from "./holds";
+export { HOT_HOLD_REASONS } from "./holds";
 export { runHoldAlertsForOrg } from "./core";
 
 type MembershipRow = {
@@ -75,7 +75,7 @@ export function createHoldAlertDeps(
         .filter(isHoldAlertRecipient)
         .map((m) => ({ userId: m.user_id, role: m.role }));
     },
-    async isRecipientAuthorized(orgId, userId) {
+    async isRecipientAuthorized(orgId, userId, opts) {
       const { data, error } = await db
         .from("memberships")
         .select(MEMBERSHIP_COLUMNS)
@@ -83,7 +83,10 @@ export function createHoldAlertDeps(
         .eq("user_id", userId)
         .maybeSingle();
       if (error) throw new Error(`membership re-check failed: ${error.message}`);
-      return data ? isHoldAlertRecipient(data as MembershipRow) : false;
+      if (!data) return false;
+      const m = data as MembershipRow;
+      if (!isHoldAlertRecipient(m)) return false;
+      return opts?.requireOwner ? m.role === "owner" : true;
     },
     ...senders,
   };
@@ -113,6 +116,8 @@ export async function runHoldAlertsForAllOrgs(
     skipped: 0,
     failed: 0,
     untouched: 0,
+    deferred: 0,
+    interrupted: 0,
     errors: 0,
     budgetExhausted: false,
   };
@@ -131,6 +136,8 @@ export async function runHoldAlertsForAllOrgs(
       total.skipped += s.skipped;
       total.failed += s.failed;
       total.untouched += s.untouched;
+      total.deferred += s.deferred;
+      total.interrupted += s.interrupted;
       total.budgetExhausted ||= s.budgetExhausted;
     } catch (e) {
       total.errors += 1;

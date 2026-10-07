@@ -9,6 +9,9 @@ import type {
 } from "@/lib/pipeline-runs";
 import type { Database, Json } from "@/lib/supabase/types";
 
+import type { SeenDraft } from "./hold-action-types";
+import type { HoldSeen } from "./types";
+
 /**
  * Messages v2 Phase 1 hold actions: Send, Edit (then send), Take over, Assign,
  * Dismiss. The functions here are plain and take their collaborators as a
@@ -45,7 +48,10 @@ export const MAX_EDIT_LENGTH = 1600;
 export const MAX_DISMISS_REASON_LENGTH = 500;
 
 const DRAFT_COLUMNS =
-  "id, org_id, run_id, property_id, conversation_id, inbound_message_id, body, edited_body, status";
+  "id, org_id, run_id, property_id, conversation_id, inbound_message_id, body, edited_body, edited_at, status";
+
+/** Lease on the property while a human send is in flight (Dismiss / Take over refuse while it is held). */
+const SEND_LEASE_SECONDS = 120;
 
 type DraftRow = {
   id: string;
@@ -56,6 +62,7 @@ type DraftRow = {
   inbound_message_id: string | null;
   body: string;
   edited_body: string | null;
+  edited_at: string | null;
   status: string;
 };
 
@@ -134,7 +141,14 @@ async function audit(
   }
 }
 
+/** A provider timeout: the text may or may not have gone out. */
+export const SEND_TIMEOUT_MESSAGE =
+  "Send timed out at the provider — the text may have gone out; do not re-send until the thread updates.";
+
+const isSendTimeout = (reason: string) => reason.includes("send_timeout");
+
 function refusalMessage(reason: string, retryable: boolean): string {
+  if (isSendTimeout(reason)) return SEND_TIMEOUT_MESSAGE;
   const spaced = reason.replace(/[_:]+/g, " ");
   return retryable
     ? `Not sent: the conversation was busy (${spaced}). Try again in a moment.`
@@ -188,7 +202,7 @@ async function performSend(
       },
       [],
     );
-    return fail("SEND_REFUSED", refusalMessage(sent.reason, sent.retryable), {
+    return fail(isSendTimeout(sent.reason) ? "SEND_TIMEOUT" : "SEND_REFUSED", refusalMessage(sent.reason, sent.retryable), {
       reason: sent.reason,
       retryable: sent.retryable,
       flagged: sent.flagged,
@@ -260,21 +274,80 @@ async function performSend(
   return ok({ messageId: sent.messageId });
 }
 
-/** Send the pending draft exactly as stored (or as last edited). */
+export const HOLD_STALE_MESSAGE = "This thread changed — reload";
+
+const DRAFT_CHANGED_MESSAGE =
+  "This draft changed after you opened it, so nothing was sent. The card is reloading; check the text and try again.";
+
+/** Refuses unless the draft is exactly what the clicker saw (text and edit version). */
+function checkSeen(draft: DraftRow, seen: SeenDraft): Result<null> {
+  const current = draft.edited_body ?? draft.body;
+  if (current !== seen.body || (draft.edited_at ?? null) !== (seen.editedAt ?? null)) {
+    return fail("DRAFT_CHANGED", DRAFT_CHANGED_MESSAGE);
+  }
+  return ok(null);
+}
+
+/**
+ * Runs a send under the per-property lease (the same lease table the send path
+ * uses). Dismiss / Take over refuse while it is held, and take it themselves,
+ * so a send and a resolve can never interleave.
+ */
+async function withPropertyLease<T>(
+  d: HoldActionDeps,
+  propertyId: string,
+  run: () => Promise<Result<T>>,
+): Promise<Result<T>> {
+  const holder = `hold-send:${d.userId}:${crypto.randomUUID()}`;
+  const { data, error } = await d.admin.rpc("fn_reserve_ai_send", {
+    p_conversation_id: propertyId,
+    p_holder: holder,
+    p_lease_seconds: SEND_LEASE_SECONDS,
+  });
+  if (error) {
+    d.reportError(new Error(error.message), { tags: { surface: "hold_action_lease" }, extra: { propertyId } });
+    return fail("SEND_BUSY", "Could not start the send. Nothing was sent; try again.");
+  }
+  if (data !== true) {
+    return fail("SEND_BUSY", "Another action on this thread is in progress. Nothing was sent; try again in a moment.");
+  }
+  try {
+    return await run();
+  } finally {
+    try {
+      const released = await d.admin.rpc("fn_release_ai_send", { p_conversation_id: propertyId, p_holder: holder });
+      if (released.error) throw new Error(released.error.message);
+    } catch (e) {
+      d.reportError(e, { tags: { surface: "hold_action_lease_release" }, extra: { propertyId } });
+    }
+  }
+}
+
+/** Send the draft the clicker saw, exactly as they saw it. */
 export async function sendHeldDraft(
   d: HoldActionDeps,
-  input: { draftId: string },
+  input: { draftId: string; seen: SeenDraft },
 ): Promise<Result<{ messageId: string }>> {
-  const draft = await loadDraft(d, input.draftId);
-  if (!draft.ok) return draft;
-  const body = (draft.data.edited_body ?? draft.data.body).trim();
-  return performSend(d, draft.data, body, draft.data.edited_body !== null);
+  const first = await loadDraft(d, input.draftId);
+  if (!first.ok) return first;
+  if (!first.data.property_id) {
+    return fail("DRAFT_NOT_SENDABLE", "This draft is not tied to a seller text, so it cannot be sent from here.");
+  }
+  return withPropertyLease(d, first.data.property_id, async () => {
+    // Re-read under the lease: a Dismiss that finished first leaves it discarded.
+    const draft = await loadDraft(d, input.draftId);
+    if (!draft.ok) return draft;
+    const seen = checkSeen(draft.data, input.seen);
+    if (!seen.ok) return seen;
+    const body = (draft.data.edited_body ?? draft.data.body).trim();
+    return performSend(d, draft.data, body, draft.data.edited_body !== null);
+  });
 }
 
 /** Record the edit on the draft row, then send the edited text. */
 export async function editAndSendHeldDraft(
   d: HoldActionDeps,
-  input: { draftId: string; body: string },
+  input: { draftId: string; body: string; seen: SeenDraft },
 ): Promise<Result<{ messageId: string }>> {
   const body = input.body.trim();
   if (!body || body.length > MAX_EDIT_LENGTH) {
@@ -283,20 +356,30 @@ export async function editAndSendHeldDraft(
       body ? `Keep the reply under ${MAX_EDIT_LENGTH + 1} characters.` : "Write the reply before sending.",
     );
   }
-  const draft = await loadDraft(d, input.draftId);
-  if (!draft.ok) return draft;
-
-  const { data: updated, error } = await d.admin
-    .from("ai_reply_drafts")
-    .update({ edited_body: body, edited_by: d.userId, edited_at: new Date().toISOString() })
-    .eq("id", draft.data.id)
-    .eq("status", "pending")
-    .select("id");
-  if (error) return fail("DRAFT_EDIT_FAILED", "Could not save your edit. Nothing was sent.");
-  if (!Array.isArray(updated) || updated.length === 0) {
-    return fail("DRAFT_NOT_PENDING", "That draft was already handled. Refresh the page.");
+  const first = await loadDraft(d, input.draftId);
+  if (!first.ok) return first;
+  if (!first.data.property_id) {
+    return fail("DRAFT_NOT_SENDABLE", "This draft is not tied to a seller text, so it cannot be sent from here.");
   }
-  return performSend(d, draft.data, body, true);
+  return withPropertyLease(d, first.data.property_id, async () => {
+    const draft = await loadDraft(d, input.draftId);
+    if (!draft.ok) return draft;
+    // The edit is based on the text they saw; if the draft moved, nothing is written or sent.
+    const seen = checkSeen(draft.data, input.seen);
+    if (!seen.ok) return seen;
+
+    const { data: updated, error } = await d.admin
+      .from("ai_reply_drafts")
+      .update({ edited_body: body, edited_by: d.userId, edited_at: new Date().toISOString() })
+      .eq("id", draft.data.id)
+      .eq("status", "pending")
+      .select("id");
+    if (error) return fail("DRAFT_EDIT_FAILED", "Could not save your edit. Nothing was sent.");
+    if (!Array.isArray(updated) || updated.length === 0) {
+      return fail("DRAFT_NOT_PENDING", "That draft was already handled. Refresh the page.");
+    }
+    return performSend(d, draft.data, body, true);
+  });
 }
 
 async function resolveHold(
@@ -304,6 +387,7 @@ async function resolveHold(
   propertyId: string,
   action: "take_over" | "dismiss",
   reason: string | null,
+  seen: HoldSeen,
 ): Promise<Result<Record<string, unknown>>> {
   const property = await loadProperty(d, propertyId);
   if (!property.ok) return property;
@@ -314,12 +398,21 @@ async function resolveHold(
     p_user_id: d.userId,
     p_action: action,
     p_reason: reason,
+    p_seen_through: seen.through,
+    p_flag_reason: seen.flagReason,
+    p_flag_at: seen.flagAt,
   });
   if (error) {
+    if (error.message.includes("SEND_IN_PROGRESS")) {
+      return fail("SEND_IN_PROGRESS", "A reply is being sent on this thread. Nothing was changed; try again in a moment.");
+    }
     d.reportError(new Error(error.message), { tags: { surface: "hold_action_resolve" }, extra: { propertyId, action } });
     return fail("HOLD_RESOLVE_FAILED", "Could not update that hold. Nothing was changed.");
   }
   const counts = (data ?? {}) as Record<string, unknown>;
+  if (counts.status === "STALE") {
+    return fail("HOLD_STALE", HOLD_STALE_MESSAGE);
+  }
   const detail = {
     decisionsSuperseded: counts.decisionsSuperseded ?? 0,
     reviewsSuperseded: counts.reviewsSuperseded ?? 0,
@@ -336,6 +429,16 @@ async function resolveHold(
       ...(reason ? { reason } : {}),
     },
   };
+  const events: HoldEvent[] = [];
+  if (counts.flagCleared !== false) events.push(cleared);
+  // The toggle is logged only when this action actually switched the responder off.
+  if (action === "take_over" && counts.responderChanged === true) {
+    events.push({
+      propertyId,
+      eventType: "ai_responder_toggled" as const,
+      payload: { from: false, to: true, via: "messages_v2" },
+    });
+  }
   await audit(
     d,
     ctx,
@@ -345,16 +448,7 @@ async function resolveHold(
       result: "applied",
       detail: action === "dismiss" ? { ...detail, hasReason: true } : detail,
     },
-    action === "take_over"
-      ? [
-          cleared,
-          {
-            propertyId,
-            eventType: "ai_responder_toggled" as const,
-            payload: { from: false, to: true, via: "messages_v2" },
-          },
-        ]
-      : [cleared],
+    events,
   );
   return ok(detail);
 }
@@ -362,9 +456,9 @@ async function resolveHold(
 /** Mark the property human-owned (AI responder off, hold cleared) and point at the lead. */
 export async function takeOverHold(
   d: HoldActionDeps,
-  input: { propertyId: string },
+  input: { propertyId: string; seen: HoldSeen },
 ): Promise<Result<{ leadHref: string }>> {
-  const done = await resolveHold(d, input.propertyId, "take_over", null);
+  const done = await resolveHold(d, input.propertyId, "take_over", null, input.seen);
   if (!done.ok) return done;
   return ok({ leadHref: `/leads/${input.propertyId}` });
 }
@@ -372,14 +466,14 @@ export async function takeOverHold(
 /** Clear the hold with a required reason. Re-arms automation for the property. */
 export async function dismissHold(
   d: HoldActionDeps,
-  input: { propertyId: string; reason: string },
+  input: { propertyId: string; reason: string; seen: HoldSeen },
 ): Promise<Result<null>> {
   const reason = input.reason.trim();
   if (!reason) return fail("REASON_REQUIRED", "Say why you are dismissing this hold.");
   if (reason.length > MAX_DISMISS_REASON_LENGTH) {
     return fail("REASON_TOO_LONG", `Keep the reason under ${MAX_DISMISS_REASON_LENGTH + 1} characters.`);
   }
-  const done = await resolveHold(d, input.propertyId, "dismiss", reason);
+  const done = await resolveHold(d, input.propertyId, "dismiss", reason, input.seen);
   if (!done.ok) return done;
   return ok(null);
 }

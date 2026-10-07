@@ -7841,6 +7841,9 @@ export type Database = {
           p_user_id: string
           p_action: string
           p_reason?: string | null
+          p_seen_through?: string | null
+          p_flag_reason?: string | null
+          p_flag_at?: string | null
         }
         Returns: Json
       }

@@ -1074,3 +1074,64 @@ describe("Phase 1: pending draft exposed for the hold actions", () => {
     expect(String(q2.find((c) => c.method === "select")!.args[0])).not.toMatch(/body/);
   });
 });
+
+describe("deriveOpenHolds seen (the stale-click guard's view of the card)", () => {
+  it("carries the newest pending row time (to the microsecond) and the flag the card displayed", () => {
+    const holds = deriveOpenHolds({
+      properties: [
+        {
+          id: "p1",
+          last_ai_escalation_at: "2026-10-07T11:59:00.5+00:00",
+          last_ai_escalation_reason: "draft_held",
+          updated_at: null,
+        },
+      ],
+      decisions: [
+        { property_id: "p1", conversation_id: "c1", source_inbound_message_id: "m1", created_at: "2026-10-07T12:00:00.123456+00:00" },
+      ],
+      reviews: [
+        { property_id: "p1", conversation_id: "c1", source_inbound_message_id: "m2", disposition: "dnc", created_at: "2026-10-07T12:00:00.123999+00:00" },
+      ],
+      drafts: [
+        { id: "d1", property_id: "p1", conversation_id: "c1", inbound_message_id: "m1", run_id: null, created_at: "2026-10-07T11:00:00+00:00" },
+      ],
+      runs: [],
+    });
+    expect(holds[0]!.seen).toEqual({
+      through: "2026-10-07T12:00:00.123999+00:00",
+      flagReason: "draft_held",
+      flagAt: "2026-10-07T11:59:00.5+00:00",
+    });
+  });
+
+  it("has no flag fields when the hold is not flagged, and a null `through` when no rows are pending", () => {
+    const unflagged = deriveOpenHolds({
+      properties: [],
+      decisions: [],
+      reviews: [],
+      drafts: [{ id: "d1", property_id: "p1", conversation_id: null, inbound_message_id: null, run_id: null, created_at: "2026-10-07T11:00:00+00:00" }],
+      runs: [],
+    });
+    expect(unflagged[0]!.seen).toEqual({ through: "2026-10-07T11:00:00+00:00", flagReason: null, flagAt: null });
+    const flagOnly = deriveOpenHolds({
+      properties: [{ id: "p2", last_ai_escalation_at: null, last_ai_escalation_reason: "price_or_offer", updated_at: null }],
+      decisions: [],
+      reviews: [],
+      runs: [],
+    });
+    expect(flagOnly[0]!.seen).toEqual({ through: null, flagReason: "price_or_offer", flagAt: null });
+  });
+
+  it("passes the draft's edit version through for Send / Edit", () => {
+    const holds = deriveOpenHolds({
+      properties: [],
+      decisions: [],
+      reviews: [],
+      drafts: [
+        { id: "d1", property_id: "p1", conversation_id: null, inbound_message_id: null, run_id: null, created_at: "2026-10-07T11:00:00+00:00", body: "b", edited_body: "e", edited_at: "2026-10-07T11:30:00+00:00" },
+      ],
+      runs: [],
+    });
+    expect(holds[0]!.draft).toMatchObject({ body: "b", edited_body: "e", edited_at: "2026-10-07T11:30:00+00:00" });
+  });
+});

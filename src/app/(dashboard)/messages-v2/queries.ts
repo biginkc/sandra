@@ -37,7 +37,19 @@ export type HoldDraftRow = {
   /** Only present when the loader was asked for draft bodies (the page, never the alert cron). */
   body?: string;
   edited_body?: string | null;
+  edited_at?: string | null;
 };
+
+/**
+ * Orders two database timestamp strings by instant to the microsecond (Date
+ * alone stops at the millisecond, and two rows can share one).
+ */
+export function compareInstants(a: string, b: string): number {
+  const ms = Date.parse(a) - Date.parse(b);
+  if (ms !== 0 && Number.isFinite(ms)) return ms;
+  const micros = (v: string) => Number((/\.(\d+)/.exec(v)?.[1] ?? "").padEnd(6, "0").slice(0, 6) || 0);
+  return micros(a) - micros(b);
+}
 
 /** Distinct-hold counting stops here; above it the total is "2,000+ (incomplete)". */
 export const HOLDS_COUNT_CAP = 2000;
@@ -73,6 +85,9 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     messages: Set<string>;
     notes: string[];
     flagReason?: string | null;
+    flagAt?: string | null;
+    /** created_at of every pending decision / review / draft (raw strings, never re-parsed). */
+    rowTimes: string[];
     noProperty?: boolean;
     draft?: HoldDraftRow;
   };
@@ -86,6 +101,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
         conversations: new Set(),
         messages: new Set(),
         notes: [],
+        rowTimes: [],
       };
       byProperty.set(id, a);
     }
@@ -98,6 +114,8 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     // updated_at is NOT a hold clock (any edit resets it): unknown stays unknown
     // unless a pending decision/review supplies an earlier-known time.
     if (p.last_ai_escalation_at) a.times.push(p.last_ai_escalation_at);
+    a.flagAt = p.last_ai_escalation_at;
+    a.flagReason = p.last_ai_escalation_reason;
     if (p.last_ai_escalation_reason) {
       a.notes.push(p.last_ai_escalation_reason);
       a.flagReason = p.last_ai_escalation_reason;
@@ -107,6 +125,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     const a = acc(d.property_id);
     a.sources.add("jev_decision");
     a.times.push(d.created_at);
+    a.rowTimes.push(d.created_at);
     a.conversations.add(d.conversation_id);
     a.messages.add(d.source_inbound_message_id);
   }
@@ -114,6 +133,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     const a = acc(r.property_id);
     a.sources.add("disposition_review");
     a.times.push(r.created_at);
+    a.rowTimes.push(r.created_at);
     a.conversations.add(r.conversation_id);
     a.messages.add(r.source_inbound_message_id);
     a.notes.push(r.disposition);
@@ -137,6 +157,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     if (propertyId === null) a.noProperty = true;
     a.sources.add("pending_draft");
     a.times.push(d.created_at);
+    a.rowTimes.push(d.created_at);
     // Sorted oldest first above, so the last assignment is the newest draft.
     a.draft = d;
     const conversation = d.conversation_id ?? ref?.conversation_id ?? null;
@@ -185,9 +206,16 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
               inbound_message_id: a.draft.inbound_message_id,
               ...(a.draft.body !== undefined ? { body: a.draft.body } : {}),
               ...(a.draft.edited_body !== undefined ? { edited_body: a.draft.edited_body } : {}),
+              ...(a.draft.edited_at !== undefined ? { edited_at: a.draft.edited_at } : {}),
             },
           }
         : {}),
+      seen: {
+        // Chronological max by instant; the raw string is what goes back to the database.
+        through: [...a.rowTimes].sort((x, y) => compareInstants(y, x))[0] ?? null,
+        flagReason: a.sources.has("needs_attention") ? (a.flagReason ?? null) : null,
+        flagAt: a.sources.has("needs_attention") ? (a.flagAt ?? null) : null,
+      },
       message_ids: [...a.messages],
       conversation_id: [...a.conversations][0] ?? run?.conversation_id ?? null,
       sources,
@@ -471,7 +499,7 @@ export async function loadMessagesV2Data(
         .from("ai_reply_drafts")
         .select(
           opts.includeDraftBody
-            ? "id, property_id, conversation_id, inbound_message_id, run_id, created_at, body, edited_body"
+            ? "id, property_id, conversation_id, inbound_message_id, run_id, created_at, body, edited_body, edited_at"
             : "id, property_id, conversation_id, inbound_message_id, run_id, created_at",
         )
         .eq("org_id", orgId)

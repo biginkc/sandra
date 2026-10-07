@@ -10,7 +10,7 @@ import type {
 
 /** In-memory DeliveryStore with the same unique-key + atomic-claim semantics as the table. */
 export class FakeStore implements DeliveryStore {
-  rows: Array<DeliveryRow & { sentAt: string | null; orgId: string }> = [];
+  rows: Array<DeliveryRow & { sentAt: string | null; sendingAt?: string | null; orgId: string }> = [];
   private seq = 0;
   constructor(private readonly clock: () => Date) {}
 
@@ -46,7 +46,30 @@ export class FakeStore implements DeliveryStore {
       return false;
     }
     live.attempts += 1;
+    live.status = "sending";
+    live.sendingAt = this.clock().toISOString();
     return true;
+  }
+  async failInterrupted(cutoffIso: string) {
+    const stuck = this.rows.filter((r) => r.status === "sending" && r.sendingAt != null && r.sendingAt < cutoffIso);
+    for (const r of stuck) {
+      r.status = "failed";
+      r.attempts = 3;
+      r.lastError = "interrupted";
+    }
+    return stuck.length;
+  }
+  async sentAt(q: { holdKey: string; recipientUserId: string; channel: string; stage: string }) {
+    return (
+      this.rows.find(
+        (r) =>
+          r.status === "sent" &&
+          r.holdKey === q.holdKey &&
+          r.recipientUserId === q.recipientUserId &&
+          r.channel === q.channel &&
+          r.stage === q.stage,
+      )?.sentAt ?? null
+    );
   }
   async markSent(id: string) {
     const r = this.rows.find((x) => x.id === id)!;
@@ -83,7 +106,7 @@ export const ACQ: Recipient = { userId: "acq-1", role: "member" };
 
 export function hold(over: Partial<HoldInfo> = {}): HoldInfo {
   return {
-    holdKey: "prop-1:2026-10-08T10:00:00.000Z",
+    holdKey: "prop-1:draft_held",
     propertyId: "prop-1",
     since: "2026-10-08T10:00:00.000Z",
     name: "Dana",

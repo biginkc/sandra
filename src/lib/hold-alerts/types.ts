@@ -1,17 +1,22 @@
 export type AlertChannel = "slack" | "sms" | "email";
 export type AlertStage = "first" | "nudge_1h" | "digest";
-export type DeliveryStatus = "pending" | "sent" | "failed" | "skipped";
+export type DeliveryStatus = "pending" | "sending" | "sent" | "failed" | "skipped";
 
 /** A hold reduced to what an alert may carry: ids, first name, address, age. Never message text. */
 export type HoldInfo = {
-  /** `${property_id}:${since ?? "unknown"}`: a hold that clears and re-opens alerts again. */
+  /**
+   * `${property_id}:${reason key}`. Deliberately NOT keyed on the hold's start
+   * time: that moves whenever the oldest underlying item resolves, which would
+   * re-alert a hold nobody touched. Recipient, channel and stage complete the
+   * unique key in hold_alert_deliveries.
+   */
   holdKey: string;
   propertyId: string;
   since: string | null;
   /** First name (or "Unknown ···1234"), from the page's label loader. */
   name: string;
   address: string | null;
-  /** Hold text contains a HOT_HOLD_REASON_TOKENS token. */
+  /** One of the hold's reasons is in HOT_HOLD_REASONS (exact match). */
   hot: boolean;
 };
 
@@ -50,11 +55,21 @@ export interface DeliveryStore {
   /** insert ... on conflict do nothing, then return the row for the unique key. */
   ensure(input: EnsureInput): Promise<DeliveryRow>;
   /**
-   * Atomic claim: update ... set attempts = attempts + 1 where id = row.id and
-   * status in ('pending','failed') and attempts = row.attempts. False when
-   * another run got there first or the row is no longer claimable.
+   * Atomic claim: update ... set status = 'sending', sending_at = now(),
+   * attempts = attempts + 1 where id = row.id and status in ('pending','failed')
+   * and attempts = row.attempts. The row is 'sending' BEFORE the provider call,
+   * so a crash leaves a row that is never resent. False when another run got
+   * there first or the row is no longer claimable.
    */
   claim(row: DeliveryRow): Promise<boolean>;
+  /**
+   * Rows stuck in 'sending' since before `cutoffIso` (the run died mid-send)
+   * become terminal failed:interrupted. They are never resent: the provider may
+   * already have delivered. Returns how many were swept.
+   */
+  failInterrupted(cutoffIso: string): Promise<number>;
+  /** When the SENT delivery for this (hold, recipient, channel, stage) went out; null when there is none. */
+  sentAt(q: { holdKey: string; recipientUserId: string; channel: AlertChannel; stage: AlertStage }): Promise<string | null>;
   markSent(id: string): Promise<void>;
   markSkipped(id: string, reason: string): Promise<void>;
   /** attempts was already incremented by claim(); `terminal` pins attempts at the max. */
@@ -80,8 +95,11 @@ export interface HoldAlertDeps {
   loadHolds(orgId: string): Promise<HoldInfo[]>;
   /** Active owner + acquisitions members. */
   loadRecipients(orgId: string): Promise<Recipient[]>;
-  /** Re-reads the membership right before each send. */
-  isRecipientAuthorized(orgId: string, userId: string): Promise<boolean>;
+  /**
+   * Re-reads the membership right before each send. `requireOwner` also
+   * re-confirms role = owner at send time (the SMS path).
+   */
+  isRecipientAuthorized(orgId: string, userId: string, opts?: { requireOwner?: boolean }): Promise<boolean>;
   sendSlack(userId: string, text: string): Promise<ChannelResult>;
   sendSms(userId: string, text: string): Promise<ChannelResult>;
   sendEmail(userId: string, message: EmailMessage): Promise<ChannelResult>;
@@ -94,9 +112,20 @@ export type OrgAlertSummary = {
   failed: number;
   /** Rows already sent/skipped/exhausted, or claimed by a concurrent run. */
   untouched: number;
+  /** Over a cap: left pending for the next run, not skipped. */
+  deferred: number;
+  /** Rows swept from 'sending' to failed:interrupted (a previous run died mid-send). */
+  interrupted: number;
   /** Ran out of the time budget; remaining rows are picked up next run. */
   budgetExhausted: boolean;
 };
+
+/**
+ * The alert route's maxDuration, in ms (keep equal to `maxDuration` in
+ * src/app/api/cron/hold-alerts/route.ts; a test enforces it). A delivery still
+ * 'sending' after this long belongs to a run that no longer exists.
+ */
+export const ROUTE_MAX_DURATION_MS = 60_000;
 
 /** A delivery is retried while failed with fewer attempts than this. */
 export const MAX_ATTEMPTS = 3;

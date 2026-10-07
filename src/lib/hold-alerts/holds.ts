@@ -3,23 +3,29 @@ import type { OpenHold, PipelineRun, RunLabel } from "@/app/(dashboard)/messages
 import type { HoldInfo } from "./types";
 
 /**
- * A hold is HOT (SMS to the owner) when its text contains any of these tokens,
- * case-insensitively. Exactly the three tokens in PLAN D8 / section 4.7; do not
- * add others without Jarrad's approval of the exact list.
+ * A hold is HOT (SMS to the owner) when one of its reasons is EXACTLY one of
+ * these values. Exact match, not substring: `price_quoted` or `distressed_seller`
+ * are not hot. This list is a business rule: it lives only here.
  */
-export const HOT_HOLD_REASON_TOKENS = ["new_lead", "price", "distress"] as const;
+// pending Jarrad approval: placeholder values, not an approved list.
+export const HOT_HOLD_REASONS = ["jev_below_threshold:new_lead", "price_or_offer", "distress"] as const;
 
-export function holdKeyFor(propertyId: string, since: string | null): string {
-  return `${propertyId}:${since ?? "unknown"}`;
+/** The reasons a hold carries, each compared whole against HOT_HOLD_REASONS: flag reason, run outcome, run reason. */
+export function isHotHold(hold: OpenHold<PipelineRun>): boolean {
+  const reasons = [hold.flag_reason, hold.run?.final_outcome, hold.run?.reason].filter(
+    (v): v is string => typeof v === "string",
+  );
+  return reasons.some((reason) => (HOT_HOLD_REASONS as readonly string[]).includes(reason));
 }
 
-/** Hold text only: reason, flag reason, run outcome and run reason. Never the inbound preview. */
-export function isHotHold(hold: OpenHold<PipelineRun>): boolean {
-  const text = [hold.reason, hold.flag_reason, hold.run?.final_outcome, hold.run?.reason]
-    .filter((v): v is string => typeof v === "string")
-    .join(" ")
-    .toLowerCase();
-  return HOT_HOLD_REASON_TOKENS.some((token) => text.includes(token));
+/** What the hold is about, stable while the hold is: its flag reason, else the sources that opened it. */
+export function holdReasonKey(hold: Pick<OpenHold<PipelineRun>, "flag_reason" | "sources">): string {
+  return hold.flag_reason || hold.sources.join("+") || "hold";
+}
+
+/** `${property}:${reason}`; the start time is never part of the key. */
+export function holdKeyFor(propertyId: string, reasonKey: string): string {
+  return `${propertyId}:${reasonKey}`;
 }
 
 /** The send-timeout flag alone is informational (the reply did go out): no alert. */
@@ -46,7 +52,7 @@ export function toAlertHolds(
     if (isInformationalHold(hold)) continue;
     const label = labels.get(hold.id);
     out.push({
-      holdKey: holdKeyFor(hold.property_id, hold.since),
+      holdKey: holdKeyFor(hold.property_id, holdReasonKey(hold)),
       propertyId: hold.property_id,
       since: hold.since,
       name: label?.name ?? "Unknown sender",

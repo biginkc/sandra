@@ -2229,6 +2229,9 @@ type GateEvaluation =
 /** Upper bound on each evidence query; hitting it fails the decision closed. */
 const GATE_EVIDENCE_CAP = 500;
 
+/** The only flag reason a human Send is exempt from (pending Jarrad approval). */
+export const HUMAN_SEND_EXEMPT_FLAG_REASON = "draft_held";
+
 type GateProperty = Pick<
   AiDispatchPropertyGateRow,
   "needs_human_attention" | "outreach_dispo" | "ai_responder_disabled" | "org_id"
@@ -2344,11 +2347,17 @@ async function loadSilentExit(
   known: GateProperty | null,
   humanActor = false,
 ): Promise<{ ok: true; reason: string | null } | { ok: false }> {
-  let property: GateProperty | null = known;
+  // A human send reads the flag reason fresh: the exemption below depends on
+  // it, and the early gate's row does not carry it.
+  let property: (GateProperty & { last_ai_escalation_reason?: string | null }) | null = humanActor ? null : known;
   if (!property) {
     const { data, error } = await supabase
       .from("properties")
-      .select("org_id, ai_responder_disabled, outreach_dispo, needs_human_attention")
+      .select(
+        humanActor
+          ? "org_id, ai_responder_disabled, outreach_dispo, needs_human_attention, last_ai_escalation_reason"
+          : "org_id, ai_responder_disabled, outreach_dispo, needs_human_attention",
+      )
       .eq("id", input.propertyId)
       .maybeSingle();
     if (error || !data) {
@@ -2358,12 +2367,25 @@ async function loadSilentExit(
       });
       return { ok: false };
     }
-    property = data as GateProperty;
+    property = data as unknown as GateProperty & { last_ai_escalation_reason?: string | null };
   }
-  const terminal = humanActor
-    ? shouldSuppressAutomatedSend({ outreachDispo: property.outreach_dispo })
-    : isTerminalAiResponderProperty(property);
-  if (terminal) return { ok: true, reason: "already_terminal" };
+  if (humanActor) {
+    // pending Jarrad approval: the exemption wording. A human Send is exempt
+    // from the "already flagged" check ONLY when the flag is exactly
+    // `draft_held` (the flag that put the draft on the rail). Any other flag
+    // reason still refuses, with the reason shown.
+    if (shouldSuppressAutomatedSend({ outreachDispo: property.outreach_dispo })) {
+      return { ok: true, reason: "already_terminal" };
+    }
+    if (property.needs_human_attention && property.last_ai_escalation_reason !== HUMAN_SEND_EXEMPT_FLAG_REASON) {
+      return {
+        ok: true,
+        reason: `already_flagged:${property.last_ai_escalation_reason ?? "unknown"}`,
+      };
+    }
+  } else if (isTerminalAiResponderProperty(property)) {
+    return { ok: true, reason: "already_terminal" };
+  }
 
   const { data: config, error: configError } = await supabase
     .from("ai_responder_configs")

@@ -117,6 +117,12 @@ export type DeadLetterInfo = {
   late: boolean;
 };
 
+export type HoldSeen = {
+  through: string | null;
+  flagReason: string | null;
+  flagAt: string | null;
+};
+
 export type OpenHold<R extends PipelineRun = PipelineRun> = {
   /** Property id (one hold per property). */
   id: string;
@@ -140,7 +146,15 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
     inbound_message_id: string | null;
     body?: string;
     edited_body?: string | null;
+    /** Version of the human edit (null = never edited). Sent back with Send / Edit so a changed draft is refused. */
+    edited_at?: string | null;
   };
+  /**
+   * What this card displayed, for the stale-click guard: Dismiss / Take over
+   * send it back and the server refuses (STALE) when anything newer exists.
+   * `through` is the newest pending decision / review / draft created_at shown.
+   */
+  seen?: HoldSeen;
   /** Inbound message ids tied to this hold (used to match dead letters). */
   message_ids?: string[];
   /** A dead-letter row exists: the reply text was saved for review (text never loaded). */

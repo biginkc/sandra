@@ -4,8 +4,9 @@ import type { OpenHold, PipelineRun } from "@/app/(dashboard)/messages-v2/types"
 
 import { runHoldAlertsForOrg } from "./core";
 import {
-  HOT_HOLD_REASON_TOKENS,
+  HOT_HOLD_REASONS,
   holdKeyFor,
+  holdReasonKey,
   isHotHold,
   isInformationalHold,
   toAlertHolds,
@@ -51,28 +52,41 @@ function openHold(over: Partial<OpenHold<PipelineRun>> = {}): OpenHold<PipelineR
 
 const labels = new Map([["prop-1", { name: "Dana", address: "12 Oak St, Kansas City" }]]);
 
-describe("HOT_HOLD_REASON_TOKENS", () => {
-  it("is exactly the three PLAN D8 tokens", () => {
-    expect([...HOT_HOLD_REASON_TOKENS]).toEqual(["new_lead", "price", "distress"]);
+describe("HOT_HOLD_REASONS", () => {
+  it("is the explicit placeholder list (a rule, pending Jarrad approval), exactly these values", () => {
+    expect([...HOT_HOLD_REASONS]).toEqual(["jev_below_threshold:new_lead", "price_or_offer", "distress"]);
   });
 });
 
 describe("holdKeyFor", () => {
-  it("keys on property and since, with unknown when age is unknown", () => {
-    expect(holdKeyFor("p", "2026-10-08T10:00:00.000Z")).toBe("p:2026-10-08T10:00:00.000Z");
-    expect(holdKeyFor("p", null)).toBe("p:unknown");
+  it("keys on property and reason only; the hold's start time is not in it", () => {
+    expect(holdKeyFor("p", "draft_held")).toBe("p:draft_held");
+    const a = toAlertHolds([openHold({ since: "2026-10-08T10:00:00.000Z", flag_reason: "draft_held" })], labels)[0]!;
+    const b = toAlertHolds([openHold({ since: "2026-10-08T07:00:00.000Z", flag_reason: "draft_held" })], labels)[0]!;
+    expect(a.holdKey).toBe(b.holdKey);
+  });
+  it("uses the sources when the hold has no flag reason, and changes when the reason does", () => {
+    expect(holdReasonKey({ flag_reason: undefined, sources: ["jev_decision", "pending_draft"] })).toBe("jev_decision+pending_draft");
+    expect(holdReasonKey({ flag_reason: "price_or_offer", sources: ["needs_attention"] })).toBe("price_or_offer");
   });
 });
 
 describe("isHotHold", () => {
-  it("matches a token in reason, flag_reason, final_outcome or run reason, case-insensitively", () => {
-    expect(isHotHold(openHold({ reason: "Needs attention (NEW_LEAD)" }))).toBe(true);
-    expect(isHotHold(openHold({ flag_reason: "asks_about_Price" }))).toBe(true);
-    expect(isHotHold(openHold({ run: run({ final_outcome: "distress_signal" }) }))).toBe(true);
-    expect(isHotHold(openHold({ run: run({ reason: "price_quoted" }) }))).toBe(true);
+  it("matches only an exact reason from HOT_HOLD_REASONS: flag reason, run outcome or run reason", () => {
+    expect(isHotHold(openHold({ flag_reason: "jev_below_threshold:new_lead" }))).toBe(true);
+    expect(isHotHold(openHold({ flag_reason: "price_or_offer" }))).toBe(true);
+    expect(isHotHold(openHold({ run: run({ final_outcome: "distress" }) }))).toBe(true);
+    expect(isHotHold(openHold({ run: run({ reason: "price_or_offer" }) }))).toBe(true);
   });
-  it("does not match other text, and never reads the inbound preview", () => {
-    expect(isHotHold(openHold({ run: run({ inbound_preview: "price new_lead distress" }) }))).toBe(false);
+  it("does not match substrings, other casing, composite hold text or other reasons", () => {
+    expect(isHotHold(openHold({ flag_reason: "price_quoted" }))).toBe(false);
+    expect(isHotHold(openHold({ flag_reason: "distressed_seller" }))).toBe(false);
+    expect(isHotHold(openHold({ flag_reason: "jev_below_threshold:not_interested" }))).toBe(false);
+    expect(isHotHold(openHold({ flag_reason: "PRICE_OR_OFFER" }))).toBe(false);
+    expect(isHotHold(openHold({ reason: "Needs attention (price_or_offer, distress)" }))).toBe(false);
+  });
+  it("never reads the inbound preview", () => {
+    expect(isHotHold(openHold({ run: run({ inbound_preview: "price_or_offer distress" }) }))).toBe(false);
     expect(isHotHold(openHold())).toBe(false);
   });
 });
@@ -101,7 +115,7 @@ describe("toAlertHolds", () => {
   it("builds ids, first name, address and the hold key, nothing else", () => {
     const [h] = toAlertHolds([openHold()], labels);
     expect(h).toEqual({
-      holdKey: "prop-1:2026-10-08T10:00:00.000Z",
+      holdKey: "prop-1:jev_decision",
       propertyId: "prop-1",
       since: "2026-10-08T10:00:00.000Z",
       name: "Dana",
@@ -119,7 +133,7 @@ describe("toAlertHolds", () => {
 
 describe("payloads never carry seller message text", () => {
   it("no channel's text contains the run's inbound_preview", async () => {
-    const holds = toAlertHolds([openHold({ reason: "price", flag_reason: "new_lead" })], labels);
+    const holds = toAlertHolds([openHold({ flag_reason: "price_or_offer" })], labels);
     expect(JSON.stringify(holds)).not.toContain("SELLER SAID");
     const t = makeDeps({ holds, emailEnabled: true });
     t.setNow("2026-10-08T12:00:00.000Z");

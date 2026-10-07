@@ -1,6 +1,7 @@
 import { digestMessage, holdsLink, slackFirstText, slackNudgeText, smsText } from "./messages";
 import {
   MAX_ATTEMPTS,
+  ROUTE_MAX_DURATION_MS,
   type ChannelResult,
   type EmailMessage,
   type EnsureInput,
@@ -17,6 +18,10 @@ export const DEFAULT_BUDGET_MS = 50_000;
 type Task = {
   input: EnsureInput;
   send: () => Promise<ChannelResult>;
+  /** The recipient must still be an owner when the send happens (SMS). */
+  requireOwner?: boolean;
+  /** Asked before the row is even created; false = nothing to do yet. */
+  eligible?: () => Promise<boolean>;
 };
 
 const emptySummary = (): OrgAlertSummary => ({
@@ -25,14 +30,19 @@ const emptySummary = (): OrgAlertSummary => ({
   skipped: 0,
   failed: 0,
   untouched: 0,
+  deferred: 0,
+  interrupted: 0,
   budgetExhausted: false,
 });
 
 /**
  * One alert pass for one org: derive tasks (first/nudge Slack DMs, owner SMS
  * for hot holds, hourly email digest), then run each through
- * ensure -> claim -> authorize -> cap -> send -> record. Idempotent: every
- * delivery is keyed (hold, recipient, channel, stage) and claimed atomically.
+ * ensure -> cap -> claim -> authorize -> send -> record. Idempotent: every
+ * delivery is keyed (hold, recipient, channel, stage) and claimed atomically;
+ * a claimed row is `sending` before the provider is called, so a run that dies
+ * mid-send can never cause a second send (the next pass sweeps it to
+ * failed:interrupted). A capped row stays `pending` and is retried next run.
  */
 export async function runHoldAlertsForOrg(
   deps: HoldAlertDeps,
@@ -42,6 +52,11 @@ export async function runHoldAlertsForOrg(
   const startMs = deps.now().getTime();
   const budgetMs = opts.budgetMs ?? DEFAULT_BUDGET_MS;
   const summary = emptySummary();
+
+  // A row left 'sending' longer than the route can run belongs to a dead run.
+  summary.interrupted = await deps.store.failInterrupted(
+    new Date(startMs - ROUTE_MAX_DURATION_MS).toISOString(),
+  );
 
   const holds = await deps.loadHolds(orgId);
   summary.holds = holds.length;
@@ -65,17 +80,28 @@ export async function runHoldAlertsForOrg(
         tasks.push({
           input: { ...base, propertyId: hold.propertyId, holdKey: hold.holdKey, recipientUserId: r.userId, channel: "sms", stage: "first" },
           send: () => deps.sendSms(r.userId, smsText(hold, link)),
+          requireOwner: true,
         });
       }
     }
   }
+  // The nudge is "still unanswered an hour after we told you": it keys off when
+  // the first DM was actually SENT, never off the hold's own age. On first
+  // deploy every old hold would otherwise get its first DM and a nudge at once.
   for (const hold of holds) {
-    const age = hold.since ? nowMs - Date.parse(hold.since) : NaN;
-    if (!Number.isFinite(age) || age < HOUR_MS) continue;
     for (const r of recipients) {
       tasks.push({
         input: { ...base, propertyId: hold.propertyId, holdKey: hold.holdKey, recipientUserId: r.userId, channel: "slack", stage: "nudge_1h" },
         send: () => deps.sendSlack(r.userId, slackNudgeText(hold, link)),
+        eligible: async () => {
+          const firstSentAt = await deps.store.sentAt({
+            holdKey: hold.holdKey,
+            recipientUserId: r.userId,
+            channel: "slack",
+            stage: "first",
+          });
+          return firstSentAt !== null && nowMs - Date.parse(firstSentAt) >= HOUR_MS;
+        },
       });
     }
   }
@@ -104,23 +130,26 @@ export async function runHoldAlertsForOrg(
 async function runTask(
   deps: HoldAlertDeps,
   task: Task,
-): Promise<"sent" | "skipped" | "failed" | "untouched"> {
+): Promise<"sent" | "skipped" | "failed" | "untouched" | "deferred"> {
   const { store } = deps;
+  if (task.eligible && !(await task.eligible())) return "untouched";
   const row = await store.ensure(task.input);
   const claimable = (row.status === "pending" || row.status === "failed") && row.attempts < MAX_ATTEMPTS;
   if (!claimable) return "untouched";
+
+  // Over a cap: leave the row pending (nothing is claimed, no attempt is spent)
+  // so the next run delivers it once the hour has rolled.
+  if (await capReached(deps, task.input)) return "deferred";
+
   if (!(await store.claim(row))) return "untouched";
 
+  let sendStarted = false;
   try {
-    if (!(await deps.isRecipientAuthorized(task.input.orgId, task.input.recipientUserId))) {
-      await store.markSkipped(row.id, "recipient_not_authorized");
+    if (!(await deps.isRecipientAuthorized(task.input.orgId, task.input.recipientUserId, { requireOwner: task.requireOwner }))) {
+      await store.markSkipped(row.id, task.requireOwner ? "recipient_not_owner" : "recipient_not_authorized");
       return "skipped";
     }
-    const capReason = await capReached(deps, task.input);
-    if (capReason) {
-      await store.markSkipped(row.id, capReason);
-      return "skipped";
-    }
+    sendStarted = true;
     const result = await task.send();
     if (result.status === "sent") {
       await store.markSent(row.id);
@@ -133,7 +162,8 @@ async function runTask(
     await store.markFailed(row.id, result.error, result.terminal);
     return "failed";
   } catch (error) {
-    await store.markFailed(row.id, error instanceof Error ? error.message : String(error));
+    // Once the provider call began, a throw is ambiguous (it may have been delivered): never retry.
+    await store.markFailed(row.id, error instanceof Error ? error.message : String(error), sendStarted);
     return "failed";
   }
 }
