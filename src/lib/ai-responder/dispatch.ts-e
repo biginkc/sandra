@@ -2254,8 +2254,10 @@ async function evaluateSendGate(
     checkNewerInbound: boolean;
     /** Already-loaded property (the early gate has it); otherwise read here. */
     property?: GateProperty | null;
+<<<<<<< HEAD
     /** The caller's own pending send row: it is not a competitor to itself. */
     excludeMessageId?: string;
+=======
     /**
      * A human is sending a held draft: the property's own "flagged for a human"
      * state is what put the draft on the rail, so it is not a reason to refuse
@@ -2263,6 +2265,7 @@ async function evaluateSendGate(
      * consent, terminal disposition, responder off) still applies.
      */
     humanActor?: boolean;
+>>>>>>> f2e62d12 (feat(messages-v2): human send path through the responder chokepoint)
   },
 ): Promise<GateEvaluation> {
   const nowMs = Date.now();

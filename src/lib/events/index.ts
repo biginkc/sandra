@@ -33,6 +33,7 @@ export const LEAD_EVENT_TYPES = {
   AI_ESCALATED: "ai_escalated",
   AI_ESCALATION_CLEARED: "ai_escalation_cleared",
   AI_RESPONDER_TOGGLED: "ai_responder_toggled",
+  HOLD_REPLY_SENT: "hold_reply_sent",
   SKIP_TRACE_TOGGLED: "skip_trace_toggled",
   SKIP_TRACE_REQUESTED: "skip_trace_requested",
   SKIP_TRACE_COMPLETED: "skip_trace_completed",
