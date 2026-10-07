@@ -55,7 +55,9 @@ comment on column public.sms_templates.approved_content is
 create table if not exists public.sms_template_approval_events (
   id uuid primary key default gen_random_uuid(),
   org_id uuid not null references public.organizations(id) on delete cascade,
-  template_id uuid not null references public.sms_templates(id) on delete cascade,
+  -- set null (not cascade): the log survives a hard delete of the template and
+  -- keeps the exact text that was approved / revoked in `content`.
+  template_id uuid references public.sms_templates(id) on delete set null,
   action text not null,
   content text not null,
   actor uuid references auth.users(id) on delete set null,
@@ -63,6 +65,13 @@ create table if not exists public.sms_template_approval_events (
   constraint sms_template_approval_events_action_check
     check (action in ('approved', 'revoked', 'revoked_text_changed', 'revoked_deleted'))
 );
+-- Re-assert on a database that already holds an earlier draft (cascade, not null).
+alter table public.sms_template_approval_events alter column template_id drop not null;
+alter table public.sms_template_approval_events
+  drop constraint if exists sms_template_approval_events_template_id_fkey;
+alter table public.sms_template_approval_events
+  add constraint sms_template_approval_events_template_id_fkey
+  foreign key (template_id) references public.sms_templates(id) on delete set null;
 create index if not exists idx_sms_template_approval_events_template
   on public.sms_template_approval_events (template_id, created_at desc);
 

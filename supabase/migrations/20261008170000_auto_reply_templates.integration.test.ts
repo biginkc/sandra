@@ -180,6 +180,20 @@ describe("template approval", () => {
     expect(ev.rows.map((e) => e.action).sort()).toEqual(["approved", "revoked"]);
   });
 
+  it("the audit log survives hard-deleting the template, keeping the approved text", async () => {
+    await asUser(users.owner, approve(true, TEXT));
+    await asUser(users.owner, approve(false, null));
+    await db.query(`delete from public.sms_templates where id = $1`, [templateId]);
+    const ev = await db.query(
+      `select template_id, action, content from public.sms_template_approval_events where org_id = $1 order by created_at, action`,
+      [orgId],
+    );
+    expect(ev.rows).toEqual([
+      { template_id: null, action: "approved", content: TEXT },
+      { template_id: null, action: "revoked", content: TEXT },
+    ]);
+  });
+
   it("the audit trail is owner-readable only", async () => {
     await asUser(users.owner, approve(true, TEXT));
     const read = () => db.query(`select id from public.sms_template_approval_events where org_id = $1`, [orgId]);
