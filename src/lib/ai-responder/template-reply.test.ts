@@ -128,6 +128,7 @@ describe("resolveApprovedTemplateReply", () => {
     contactId: "c1",
     outcome: "nurture" as const,
     outcomeConfidence: 0.97,
+    escalationReason: "not_applicable" as const,
     thresholds: ON,
   };
   const row = (over: Record<string, unknown> = {}) => ({
@@ -164,6 +165,30 @@ describe("resolveApprovedTemplateReply", () => {
     const { client } = fakeSupabase({ data: [row()], error: null });
     const out = await resolveApprovedTemplateReply(client, base);
     expect(out).toMatchObject({ kind: "template", body: "Hi there, this is Mel. Thanks for letting us know." });
+  });
+
+  it("any human follow-up reason (or a missing/unknown one) fails closed before any lookup", async () => {
+    const { client, from } = fakeSupabase({ data: [row()], error: null });
+    for (const outcome of ["nurture", "not_interested"] as const) {
+      for (const escalationReason of [
+        "price_or_offer",
+        "distress",
+        "call_request",
+        "hot_lead",
+        "multi_property",
+        "third_party",
+        "needs_review",
+        "uncertain",
+        null,
+        "something_new" as never,
+      ] as const) {
+        expect(
+          await resolveApprovedTemplateReply(client, { ...base, outcome, escalationReason }),
+        ).toEqual({ kind: "none", reason: "human_follow_up" });
+      }
+    }
+    expect(from).not.toHaveBeenCalled();
+    expect(loadTemplateVars).not.toHaveBeenCalled();
   });
 
   it("mapping miss falls through", async () => {

@@ -111,7 +111,7 @@ describe("<LabelRuleEditor />", () => {
   });
 
   it("an unknown switch state is never assumed: the owner must choose", async () => {
-    const user = setup(badge({ mode: "UNKNOWN", rule: { automationEnabled: null } }));
+    const user = setup(badge({ mode: "UNKNOWN", rule: { minConfidence: null, automationEnabled: null, version: 1 } }));
     await open(user);
     expect(screen.getByTestId("current-rule-text")).toHaveTextContent(/not fully known/);
     expect(screen.getByRole("radio", { name: "On" })).not.toBeChecked();

@@ -6284,7 +6284,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     vi.clearAllMocks();
   });
 
-  async function runNurture(state: MockState, id: string, confidence = 0.97) {
+  async function runNurture(state: MockState, id: string, confidence = 0.97, reason = "not_applicable") {
     state.config.classifier_provider = "jev";
     state.config.classifier_mode = "automatic";
     state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.95 }];
@@ -6293,7 +6293,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     const originalFetch = globalThis.fetch;
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true, status: 200,
-      json: async () => ({ answers: { outcome: { choice: "nurture", confidence } } }),
+      json: async () => ({ answers: { outcome: { choice: "nurture", confidence }, escalation_reason: { choice: reason } } }),
     })));
     try {
       return await dispatchAiResponse(supabase as never, {
@@ -6328,7 +6328,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     expect(generateAiReply).not.toHaveBeenCalled();
     expect(resolveApprovedTemplateReply).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ orgId: "org-1", outcome: "nurture", outcomeConfidence: 0.97, replyIntent: null }),
+      expect.objectContaining({ orgId: "org-1", outcome: "nurture", outcomeConfidence: 0.97, escalationReason: "not_applicable", replyIntent: null }),
     );
     const sentMessage = state.messages.find((m) => m.direction === "outbound");
     expect(sentMessage?.metadata).toMatchObject({
@@ -6337,6 +6337,61 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
       template_id: "tpl-1",
     });
     expect(state.aiClaims.at(-1)).toMatchObject({ outcome: "auto_closed" });
+  });
+
+  describe("human follow-up reasons never get a template (PLAN D5), through the real resolver", () => {
+    beforeEach(async () => {
+      const actual = await vi.importActual<typeof import("./template-reply")>("./template-reply");
+      vi.mocked(resolveApprovedTemplateReply).mockImplementation(actual.resolveApprovedTemplateReply);
+    });
+    afterEach(() => {
+      vi.mocked(resolveApprovedTemplateReply).mockReset();
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValue({ kind: "none", reason: "no_mapping" });
+    });
+
+    for (const reason of ["price_or_offer", "distress", "call_request", "uncertain"]) {
+      it(`nurture with escalation_reason=${reason}: no template, nurture still applies as today`, async () => {
+        const state = createMockState();
+        installSendMock(state);
+        const result = await runNurture(state, `inbound-tpl-nurture-${reason}`, 0.97, reason);
+        expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
+        expect(resolveApprovedTemplateReply).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({ escalationReason: reason }),
+        );
+        expect(sendSmsToContact).not.toHaveBeenCalled();
+        expect(state.property.outreach_dispo).toBe("nurture");
+      });
+
+      it(`not_interested with escalation_reason=${reason}: no template, the close still applies`, async () => {
+        const state = createMockState();
+        state.config.classifier_provider = "jev";
+        state.config.classifier_mode = "automatic";
+        state.jevOutcomeThresholds = [{ outcome: "not_interested", min_confidence: 0.9 }];
+        installSendMock(state);
+        const supabase = createMockSupabase(state);
+        seedInboundMessage(state, { id: `inbound-tpl-ni-${reason}`, body: "Not interested, how much though" });
+        const originalFetch = globalThis.fetch;
+        vi.stubGlobal("fetch", vi.fn(async () => ({
+          ok: true, status: 200,
+          json: async () => ({ answers: { outcome: { choice: "not_interested", confidence: 0.95 }, escalation_reason: { choice: reason } } }),
+        })));
+        try {
+          const result = await dispatchAiResponse(supabase as never, {
+            contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+            inboundBody: "Not interested, how much though",
+            inboundMessageId: `inbound-tpl-ni-${reason}`, propertyId: PROPERTY_ID,
+          }, { anthropic: {} as never });
+          expect(result).toMatchObject({ outcome: "auto_closed" });
+          expect(sendSmsToContact).not.toHaveBeenCalled();
+          expect(state.property.outreach_dispo).toBe("not_interested");
+          expect(resolveApprovedTemplateReply).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({ outcome: "not_interested", escalationReason: reason }),
+          );
+        } finally { vi.stubGlobal("fetch", originalFetch); }
+      });
+    }
   });
 
   it("a promoted new_lead never reaches the template step and never sends (PLAN D5)", async () => {
@@ -6518,7 +6573,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     const originalFetch = globalThis.fetch;
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true, status: 200,
-      json: async () => ({ answers: { outcome: { choice: "not_interested", confidence: 0.95 } } }),
+      json: async () => ({ answers: { outcome: { choice: "not_interested", confidence: 0.95 }, escalation_reason: { choice: "not_applicable" } } }),
     })));
     try {
       const result = await dispatchAiResponse(supabase as never, {

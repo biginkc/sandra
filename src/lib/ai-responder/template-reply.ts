@@ -9,7 +9,11 @@ import {
   resolveThresholdDecision,
   type ThresholdMap,
 } from "@/lib/sms-classification/thresholds";
-import type { JevOutcome, JevReplyIntent } from "@/lib/sms-classification/types";
+import type {
+  JevEscalationReason,
+  JevOutcome,
+  JevReplyIntent,
+} from "@/lib/sms-classification/types";
 
 /**
  * Template step for the AI responder (Messages v2 Phase 4, PLAN D5 / 4.6).
@@ -96,6 +100,7 @@ export function selectAutoReplyTemplate(
 
 export type TemplateSkipReason =
   | "outcome_not_templatable"
+  | "human_follow_up"
   | "automation_disabled"
   | "below_threshold"
   | "threshold_unavailable"
@@ -130,6 +135,14 @@ export async function resolveApprovedTemplateReply(
     contactId: string;
     outcome: JevOutcome;
     outcomeConfidence: number | null;
+    /**
+     * Jev's human-follow-up answer for this message. REQUIRED (no default):
+     * a template is sent ONLY when it is exactly `not_applicable`. Price /
+     * offer, distress, call request, multi-property, third party, needs
+     * review, `uncertain`, and a missing answer (null) all fail closed to "no
+     * template" so a human sees the conversation (PLAN D5).
+     */
+    escalationReason: JevEscalationReason | null;
     replyIntent?: JevReplyIntent | null;
     /** Test seam: defaults to the live per-org thresholds. */
     thresholds?: ThresholdMap;
@@ -137,6 +150,10 @@ export async function resolveApprovedTemplateReply(
 ): Promise<TemplateReplyResolution> {
   if (!TEMPLATE_REPLY_OUTCOMES.has(args.outcome)) {
     return { kind: "none", reason: "outcome_not_templatable" };
+  }
+
+  if (args.escalationReason !== "not_applicable") {
+    return { kind: "none", reason: "human_follow_up" };
   }
 
   // The label's own switch and cutoff are re-read live: an owner who just

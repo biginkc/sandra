@@ -33,6 +33,7 @@ import {
   classifyForDispatch,
   type ClassificationBridgeResult,
 } from "@/lib/sms-classification/dispatch-bridge";
+import type { JevEscalationReason } from "@/lib/sms-classification/types";
 
 import {
   claimAiResponse,
@@ -982,6 +983,7 @@ async function classifyAndHandleNonRouteOutcomes(
         claim: responseClaim,
         outcome: "nurture",
         nativeConfidence: classification.nativeConfidence,
+        escalationReason: classification.escalationReason,
         runCtx,
       });
       if (step.kind === "stop") return { handled: true, outcome: step.outcome };
@@ -1516,6 +1518,7 @@ async function resolveAndApplyRoute(
           claim: responseClaim,
           outcome: "not_interested",
           nativeConfidence: classification.nativeConfidence,
+          escalationReason: classification.escalationReason,
           runCtx,
         });
         if (step.kind === "stop") return step.outcome;
@@ -2092,6 +2095,8 @@ async function runApprovedTemplateStep(
     claim: { claimId: string | null };
     outcome: "nurture" | "not_interested";
     nativeConfidence: number | null;
+    /** Jev's human-follow-up answer; only `not_applicable` allows a template. */
+    escalationReason: JevEscalationReason | null;
     runCtx?: MaybeRunContext;
   },
 ): Promise<TemplateStepResult> {
@@ -2102,12 +2107,14 @@ async function runApprovedTemplateStep(
     contactId: input.contactId,
     outcome: a.outcome,
     outcomeConfidence: a.nativeConfidence,
+    escalationReason: a.escalationReason,
     // The responder does not ask Jev for a reply intent yet, so only
     // any-intent mappings match until it does.
     replyIntent: null,
   });
   if (resolved.kind === "none") {
     if (
+      resolved.reason === "human_follow_up" ||
       resolved.reason === "template_unavailable" ||
       resolved.reason === "render_failed" ||
       resolved.reason === "lookup_failed"
