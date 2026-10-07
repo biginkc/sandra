@@ -2,6 +2,8 @@
 
 Status: PROPOSAL ONLY. Nothing in this file is approved, wired, seeded or live. Every fenced block below is a **candidate** that needs Jarrad's verbatim approval, one block at a time, before any code uses it (PLAN.md §3 D5/D9, standing rule: no LLM adds, edits or removes a business rule). Where a block is approved, it is copied character for character. Counts are evidence, not authority.
 
+**Path to approval.** Every reply-template candidate is loaded as an UNAPPROVED draft into the Phase 4 Templates library and approved there verbatim, one template at a time. Hold rules H-1..H-8 are approved as rule text through the same one-rule-per-approval process, surfaced in the /messages-v2 settings. Nothing in this document, and nothing said in chat, counts as approval.
+
 Depends on: #837 (Messages v2 plan). Queries: `scripts/messages-v2/mine-rules.sql` (Q-numbers below refer to it).
 
 ## 1. Method and data volumes
@@ -36,14 +38,14 @@ Already approved, not re-proposed: the identity reply (`decisions/Sandra identit
 
 Human evidence: macro H (`All good, <first name>, if anything changes in the next N-M months, mind if I check back?`) was sent 484 times; 255 of those had `not_interested` as the resulting disposition, 33 `nurture`; 198 got a reply within 24h (41%, includes more "no"s). Macro D (short acknowledgement) was sent 205 times, only 30 got a reply (15%), so it ends the thread cleanly. Inbounds that got H: `no` (118), `not for sale` (25), `no thanks` (19), `no thank you` (16), `not interested` (13), `nope` (13), `not at this time` (12). Mel's call tone matches: she closes on a refusal with a thank-you and one soft ask to keep in touch (`20260417-151333 8167411558-all.txt`, `20260417-152655 8167161212-all.txt`); no pushback.
 
-Candidate NI-1 (distilled from 484 sends of macro H; first name dropped so it needs no variable; 104 characters)
+Candidate NI-1 (human macro H, 484 sends; first name dropped so it needs no variable; 104 characters)
 ```
 All good, thanks for letting me know. If anything changes in the next 6-12 months, mind if I check back?
 ```
 Applies: clean refusal, Jev not_interested, no hostility, no third party, first reply in the thread.
 Must NOT fire: hostile or profane inbound (see 3.3); "sold", "just sold", "already sold" (Jev tags 5+ of these not_interested; a check-back ask is wrong); any STOP-type wording; owner says they are not the owner (that is wrong_number); any reply after the AI/human has already answered once.
 
-Candidate NI-2 (distilled from 205 sends of macro D; 50 characters)
+Candidate NI-2 (human macro D, 205 sends; 50 characters)
 ```
 Understood, thanks for letting me know. Take care.
 ```
@@ -54,14 +56,14 @@ Must NOT fire: same list as NI-1.
 
 Human evidence: the referral macro `My apologies, I'll get you off the list right away. Quick favor though, any chance you know who owns <address>?` was sent 65 times; 33 got a reply within 24h (51%), which is the highest reply-back for any "no" type. The Library template is `Reply: Wrong number / referral ask` (`docs/sms-templates.md` line 360).
 
-Candidate WN-1 (distilled from 65 sends; address dropped to avoid repeating it per the anti-repetition rule; 105 characters)
+Candidate WN-1 (human macro (referral), 65 sends; address dropped to avoid repeating it per the anti-repetition rule; 105 characters)
 ```
 Sorry about that, my mistake. I'll take this number off our list. Any chance you know who owns the place?
 ```
 Applies: Jev wrong_number with `wrongScope = this_property`, "wrong number", "wrong person", "I don't own that".
 Must NOT fire: `wrongScope = all` or `uncertain`; escalationReason `third_party` (20 of the 72 wrong_number runs carry it, so the person may be a relative or tenant who does know the owner, which is a human call); hostile wording; inbound says they are the owner.
 
-Candidate WN-2 (no referral ask; 82 characters)
+Candidate WN-2 (LLM-drafted, 0 human sends; no referral ask; 82 characters)
 ```
 Sorry about that, my mistake. I'll take this number off our list. Have a good one.
 ```
@@ -72,31 +74,31 @@ Must NOT fire: same as WN-1.
 
 Human evidence: this is where Mel spends most of her effort. Macro B (call-time ask) 385 sends, 205 got a reply (53%), resulting disposition `nurture` 184 and `none` 194. Macro C (cash-offer ask) 171 sends, 123 got a reply (72%, the highest of any macro), inbound mostly `yes` (52). Both are Library-derived.
 
-Candidate NU-1 (distilled from 385 sends of macro B; 85 characters)
+Candidate NU-1 (human macro B, 385 sends; 85 characters)
 ```
 Thanks for your reply. When's a good time for a quick call? Shouldn't take very long.
 ```
 Applies: inbound shows willingness to talk ("maybe", "text is better", "sure", "depends") with no price and no distress.
 Must NOT fire: inbound already includes a price, a figure or "what's your offer" (17 inbounds answered with macro B were literally "what's your offer" variants, and Mel answered with a call ask anyway); any hold rule in section 3; Jev escalationReason `hot_lead` or `call_request` (a person should call, not text back a call ask).
 
-Candidate NU-2 (distilled from 171 sends of macro C; the one cash-offer ask; 110 characters)
+Candidate NU-2 (human macro C, 171 sends; the one cash-offer ask; 110 characters)
 ```
 Would you consider a cash offer for your property? We handle everything as-is, and you'd save on realtor fees.
 ```
 Applies: ownership already confirmed in the thread and the seller is not hostile; one cash-offer ask maximum per thread.
 Must NOT fire: if a cash-offer ask has already gone out in the thread; if the property is listed or the inbound mentions an agent (the "save on realtor fees" line is wrong for listed homes); price or distress inbound.
 
-Candidate NU-3 (not human-sent: it is the approved Example 1 wording in `docs/prompts/ai-responder-v2.md`, adapted; 96 characters; 0 human sends)
+Candidate NU-3 (LLM-drafted, 0 human sends; adapted from the Example 1 wording in `docs/prompts/ai-responder-v2.md`; 96 characters)
 ```
 Totally understand, no pressure. Would you be open to a cash offer if the number worked for you?
 ```
-Applies: softer variant of NU-2 for a "maybe". Must NOT fire: same as NU-2. Jarrad may prefer this because it already exists in approved prompt text.
+Applies: softer variant of NU-2 for a "maybe". Must NOT fire: same as NU-2. It borrows wording from the Example 1 text in the prompt file.
 
 ### 2.4 unclear  (Jev: 39 runs; none above 0.85)
 
 Human evidence: Jev `unclear` inbounds are things like `over where`, `where`, `owner where?`, `huh`, `i'm sorry?`. Humans then set `nurture` 13, `not_interested` 5, `wrong_number` 1 and left 20 untouched. Macro A was also used here (see 2.5), including on `who is this?` (62+28 sends), where the approved identity reply should fire instead.
 
-Candidate UC-1 (no human-sent equivalent; written from the approved identity wording; 122 characters; 0 human sends)
+Candidate UC-1 (LLM-drafted, 0 human sends; written from the approved identity wording; 122 characters)
 ```
 Sorry, I should have been clearer. I'm Mel with BMH, a local home buyer. Are you the owner of the property I texted about?
 ```
@@ -108,11 +110,11 @@ Evidence is weak here: 39 runs in 13 days and no human equivalent. I would not a
 
 This is the most important mismatch in the data. Of 93 Jev `new_lead` runs, humans later set `nurture` on 51, `not_interested` on 1, and left 41 untouched, and **never** set a label matching `new_lead` (0 of 93). The inbounds are `yes` (16), `sure` (12), `call me` (2). In practice a "yes" is answered by macro A, then marked `nurture` (343 of 718 A sends; 358 had no disposition). Macro A is the single most-used human reply: 718 sends, 361 got a reply (50%). That is the strongest counterargument to D5's "new_lead never auto-replies" and to treating Jev's `new_lead` as a lead at all, but D5 stands unless Jarrad changes it.
 
-Candidate NL-1 (hold-card draft only; mirrors macro B; 84 characters)
+Candidate NL-1 (LLM-drafted, 0 human sends; hold-card draft only; mirrors macro B's wording; 84 characters)
 ```
 Great, thanks for confirming. When's a good time for a quick call today or tomorrow?
 ```
-Candidate NL-2 (hold-card draft only; distilled from 718 sends of macro A, wording tidied; 104 characters). Flag: "Have you considered selling before?" is an interest probe, not a "why" question, but it is the closest thing to a motivation question in Mel's actual usage, and ai-responder-v2.md bans motivation questions. Needs an explicit ruling (Open question 2).
+Candidate NL-2 (human macro A, 718 sends; hold-card draft only; wording tidied; 104 characters). Flag: "Have you considered selling before?" is an interest probe, not a "why" question, but it is the closest thing to a motivation question in Mel's actual usage, and ai-responder-v2.md bans motivation questions. Needs an explicit ruling (Open question 2).
 ```
 Thank you for your reply. I'm Mel with BMH, we're local home buyers. Have you considered selling before?
 ```
@@ -126,18 +128,18 @@ Candidate: **no reply template.** Evidence: Mel sent a removal confirmation only
 
 Human evidence: macro F (`Honestly depends a lot on condition ... ballpark same day`) 60 sends, 26 replied (43%); it is the Library deflection. Also seen: a "company doesn't authorize approvals via text" reply (28 sends, 171 characters average, over the 160 limit) and a seller-financing counter (17 sends, which names a price direction and so is a quote in substance).
 
-Candidate PR-1 (hold-card draft only; macro F; 131 characters). Flag: "ballpark same day" is a soft promise of a number.
+Candidate PR-1 (human macro F, 60 sends; hold-card draft only; 131 characters). Flag: "ballpark same day" is a soft promise of a number.
 ```
 Honestly depends a lot on condition. If you give me a couple of minutes on a quick call, I can usually get you a ballpark same day.
 ```
-Candidate PR-2 (hold-card draft only; shorter, no promise of timing; 68 characters; 0 human sends)
+Candidate PR-2 (LLM-drafted, 0 human sends; hold-card draft only; shorter, no promise of timing; 68 characters)
 ```
 Happy to get you a real number. When's a good time for a quick call?
 ```
 
 ### 2.8 Intents with no candidate
 
-Third party / "listed with an agent", multi-property, sold, deceased, divorce: **no candidate.** Reasons: the Library has templates (lines 366-370), but 0 of the 2,727 human first replies used them in volume, the call transcripts contain none of these reactions, and D5 says distress never auto-replies. Writing text here would be invention, so I have not.
+Third party / "listed with an agent", multi-property, sold, deceased, divorce: **no candidate.** Reasons: the Library has templates (lines 366-370), but 0 of the 2,727 human first replies used them in volume, the call transcripts contain none of these reactions, and D5 says distress never auto-replies. Even an LLM-drafted candidate would be invention here, so none was written. The LLM-drafted candidates elsewhere (WN-2, NU-3, UC-1, NL-1, PR-2) are labelled as such.
 
 ## 3. Hold rules (candidates)
 
@@ -192,13 +194,13 @@ Note for Jarrad: H-8 overlaps H-1, H-2, H-4 and H-5 by design (belt and braces).
 
 Windows differ from the earlier 90-day audit; numbers are 180-day (Q02-Q05).
 
-- P1. `nurture` is a parking step: humans move `nurture` to `needs_sequence` 1,701 times, the median wait is 10.7 days (15,459 minutes), and nurture/needs_sequence together are 3,993 of 6,022 human sets (66%). Proposal: promote automatically after the human's first touch, or merge the two (not rename). Decision needed from Jarrad.
-- P2. `callback_requested`: 0 new sets in 180 days, 109 exits (103 of them to `needs_sequence`). Proposal: retire from the picker; keep for history.
-- P3. `not_interested` and `wrong_number` are confused both ways: 145 human `not_interested` to `wrong_number` corrections vs 20 the other way. Proposal: show Jev's `wrongScope` on the card so a person sees why.
-- P4. `needs_sequence` carries two jobs (active interest, follow-up later): 135 go back to `nurture`, 48 to `not_interested`. Proposal: needs a two-way split decision.
-- P5. `booked_appointment` has no automated path and is moved out 49 times (29 to nurture, 20 to needs_sequence). Proposal: define what ends an appointment.
-- P6. Jev `new_lead` has a 0% label match with humans (51 of 93 became `nurture`). Proposal: keep Jev's label, but treat it as "hot nurture" until Jarrad rules on Open question 1.
-- P7. Jev puts abusive inbounds into `not_interested`. Proposal: a hostility flag separate from the label (feeds H-3).
+- P1. `nurture` is a parking step: humans move `nurture` to `needs_sequence` 1,701 times, the median wait is 10.7 days (15,459 minutes), and nurture/needs_sequence together are 3,993 of 6,022 human sets (66%). Decision needed: promote automatically after the human's first touch, or merge the two (not rename). Decision needed from Jarrad.
+- P2. `callback_requested`: 0 new sets in 180 days, 109 exits (103 of them to `needs_sequence`). Decision needed: retire from the picker; keep for history.
+- P3. `not_interested` and `wrong_number` are confused both ways: 145 human `not_interested` to `wrong_number` corrections vs 20 the other way. Decision needed: show Jev's `wrongScope` on the card so a person sees why.
+- P4. `needs_sequence` carries two jobs (active interest, follow-up later): 135 go back to `nurture`, 48 to `not_interested`. Decision needed: needs a two-way split decision.
+- P5. `booked_appointment` has no automated path and is moved out 49 times (29 to nurture, 20 to needs_sequence). Decision needed: define what ends an appointment.
+- P6. Jev `new_lead` has a 0% label match with humans (51 of 93 became `nurture`). Decision needed: keep Jev's label, but treat it as "hot nurture" until Jarrad rules on Open question 1.
+- P7. Jev puts abusive inbounds into `not_interested`. Decision needed: a hostility flag separate from the label (feeds H-3).
 - P8. Carried forward from the earlier audit, not re-measured here: 404 properties had an inbound after their last dispo.
 
 ## 5. Threshold evidence (Q07)
@@ -237,11 +239,11 @@ Reading it plainly: lowering `not_interested` to 0.90 adds 9 auto-applies with n
 
 1. Humans treat Jev's `new_lead` as `nurture` (51 of 93) and answer a "yes" with macro A. Do you want `new_lead` kept as a hold, or mapped to a nurture-style reply path? (This is the strongest case against D5 as written.)
 2. Macro A ("Have you considered selling before?") is Mel's most-used reply (718 sends, 50% reply-back). Does it count as a banned motivation question? If yes, NL-2 is out and NL-1 is the only new_lead draft.
-3. NI-1 asks a question after a "no" ("mind if I check back?"). Approve it, or use only NI-2 (no question)?
-4. NU-2 says "you'd save on realtor fees". Acceptable claim, or strike it?
-5. PR-1 promises "a ballpark same day". Keep as a hold-card draft, drop it, or use PR-2?
+3. Note: NI-1 asks a question after a "no" ("mind if I check back?"); NI-2 has no question. Each is approved or rejected on its own in the Templates library.
+4. Note: NU-2 includes the claim "you'd save on realtor fees", which is wrong for listed homes (see its Must NOT fire list).
+5. Note: PR-1 says "a ballpark same day", a soft promise of a number; PR-2 makes no timing promise. Both are hold-card drafts only.
 6. H-3: should hostile wording also trigger suppression, as an opt-out would? Today it only silences the auto-reply. (Your call; the data shows 23 hostile inbounds ended in dnc/opted_out.)
 7. Should opted_out/dnc send any confirmation text, or stay silent? (Legal question, not answerable from data.)
 8. Do you want `reply_intent` built at all? Jev currently emits only an outcome and an escalation reason. If yes, the intent list is itself a rule set needing approval.
-9. Thresholds: keep the seeded 0.90/0.95, or lower `not_interested` to 0.90 and `wrong_number` to 0.85 based on section 5? (Only 13 days of data.)
+9. Note: section 5 shows no disagreement at `not_interested` 0.90 and `wrong_number` 0.85, against seeded 0.95 and 0.90. Only 13 days of data; no threshold is changed by this document.
 10. More Mel evidence would help: call recordings of price, agent, hostile and "who is this" reactions are absent from all 9 transcripts.

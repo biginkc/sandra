@@ -3,6 +3,9 @@
 -- Nothing here writes. Output feeds .planning/messages-v2/RULES-PROPOSAL.md (proposal only, nothing approved).
 -- Redaction: results are quoted in the proposal with phones/surnames removed; queries return raw bodies, do not paste them elsewhere.
 
+begin transaction read only;
+set local statement_timeout='60s';
+
 -- Q01 volumes
 select (select count(*) from messages where direction='inbound' and created_at>now()-interval '180 days') inbound_180d,
        (select count(*) from messages where direction='outbound' and created_at>now()-interval '180 days') outbound_180d,
@@ -32,8 +35,9 @@ from ai_disposition_reviews r where r.created_at>now()-interval '180 days' group
 -- Q06 Jev runs: outcome distribution, escalation reasons
 select decision->>'outcome' o, count(*) from sms_classification_runs where created_at>now()-interval '180 days' group by 1 order by 2 desc;
 select decision->>'escalationReason' er, decision->>'outcome' o, count(*) n from sms_classification_runs where created_at>now()-interval '180 days' group by 1,2 order by 1,3 desc;
-select k, count(*) from sms_classification_runs r, jsonb_object_keys(r.decision) k group by 1 order by 2 desc;  -- shows there is NO reply_intent key today
+select k, count(*) from sms_classification_runs r, jsonb_object_keys(r.decision) k where r.created_at>now()-interval '180 days' group by 1 order by 2 desc;  -- shows there is NO reply_intent key today
 
+-- NOTE (section 5 of the proposal): Q07 counts Jev RUNS, not distinct properties. A property with several runs is counted once per run.
 -- Q07 THRESHOLD EVIDENCE: Jev outcome x confidence cutoff x what a human then did (first user dispo_set on the property within 30 days after the run)
 with runs as (
  select id, property_id, created_at, decision->>'outcome' o, (decision->>'outcomeConfidence')::numeric c from sms_classification_runs where created_at>now()-interval '180 days'),
@@ -150,9 +154,21 @@ select cat, count(*) n, count(*) filter (where ai_replied) ai_replied, count(*) 
  count(*) filter (where dispo='nurture') d_nurture, count(*) filter (where dispo='needs_sequence') d_needs_seq, count(*) filter (where dispo='not_interested') d_not_int,
  count(*) filter (where dispo in ('dnc','opted_out')) d_dnc_opt, count(*) filter (where dispo='wrong_number') d_wrong, count(*) filter (where dispo is null) d_none
 from r group by cat order by n desc;
--- (total inbound 180d and any-flag count came from the same CTE with: select count(*), count(*) filter (where price or distress or legal or hostile or third or multi or long) from fl)
+-- Any-rule total (de-duplicated per inbound): total inbound 180d and count flagged by at least one rule.
+with i as (select m.id, m.body, lower(m.body) lb from messages m where m.direction='inbound' and m.channel='sms' and m.created_at>now()-interval '180 days'),
+fl as (select i.*,
+ (lb ~ '\$\s?[0-9]|[0-9][0-9,.]*\s?k\y|how much|your offer|what.{0,20}offer|your number|asking price|my price|worth|appraised|\y[0-9]{2,3},[0-9]{3}\y') price,
+ (lb ~ 'divorc|deceased|passed away|\ydied\y|\ydeath\y|probate|inherit|foreclos|behind on|\ylien|bankrupt|back taxes|eviction|evict|hospice|nursing home|cancer|widow') distress,
+ (lb ~ 'attorney|lawyer|legal|\ysue\y|\ysuing\y|\ycourt\y|code violation|cease|harass|\ytcpa\y|\yfcc\y|report you|reported|police|power of attorney') legal,
+ (lb ~ 'fuck|\yscam|\yspam|leave me alone|piss|asshole|bitch|\yidiot|\ystalk|never contact|do not contact|quit texting|stop texting|stop contacting|f off|go to hell|harass') hostile,
+ (lb ~ 'realtor|\yagent\y|broker|my husband|my wife|my son|my daughter|my mom|my mother|my dad|my father|my brother|my sister|landlord|tenant|property manager|listed with|\yestate\y|trustee') third,
+ (lb ~ 'which (one|property|house)|other (house|propert|home)|more than one|several|a few|all of them|two (house|propert|home)|three (house|propert|home)|\yrentals\y|other places|my properties|portfolio') multi,
+ (length(body)>200) long from i)
+select count(*) total_inbound, count(*) filter (where price or distress or legal or hostile or third or multi or long) any_rule from fl;
 
 -- Q17 hostile inbound that the legacy AI answered anyway (sample; body shown, names replaced when quoted)
 select left(regexp_replace(i.body,'[0-9]{3,}','#','g'),90) inbound, left(regexp_replace(a.body,'[0-9]{3,}','#','g'),120) ai_reply
 from messages i join lateral (select o.body from messages o where o.conversation_id=i.conversation_id and o.direction='outbound' and o.metadata->>'generated_by'='ai_responder_v1' and o.created_at>i.created_at and o.created_at<i.created_at+interval '1 hour' order by o.created_at limit 1) a on true
 where i.direction='inbound' and i.created_at>now()-interval '180 days' and lower(i.body) ~ 'fuck|\yscam|\yspam|leave me alone|piss|asshole|bitch|harass|stop texting|f off' order by i.created_at desc limit 12;
+
+commit;
