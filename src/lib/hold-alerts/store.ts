@@ -168,8 +168,11 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
         .select("id", { count: "exact", head: true })
         .eq("org_id", q.orgId)
         .eq("channel", q.channel)
-        .eq("status", "sent")
-        .gte("sent_at", q.sinceIso);
+        // An in-flight delivery (`sending`, stamped by sending_at) counts toward the cap as well as a
+        // finished one (`sent`, stamped by sent_at), so concurrent runs cannot all slip past it.
+        .or(
+          `and(status.eq.sent,sent_at.gte.${q.sinceIso}),and(status.eq.sending,sending_at.gte.${q.sinceIso})`,
+        );
       if (q.recipientUserId) query = query.eq("recipient_user_id", q.recipientUserId);
       const { count, error } = await query;
       if (error) fail("count", error);

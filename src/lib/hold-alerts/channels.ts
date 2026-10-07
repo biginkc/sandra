@@ -87,28 +87,42 @@ export function createChannelSenders(
     if (!key) return { status: "skipped", reason: "no_resend_key" };
     const from = env.HOLD_ALERT_EMAIL_FROM ?? env.RESEND_FROM;
     if (!from) return { status: "skipped", reason: "no_email_from" };
+    // Preflight: nothing has been submitted yet, so a failure here is clean and retryable.
+    let request: { headers: Record<string, string>; body: string };
     try {
       const { data, error } = await admin.auth.admin.getUserById(userId);
-      const to = data?.user?.email;
-      if (error || !to) return { status: "skipped", reason: "no_email" };
-      const res = await fetchImpl(RESEND_URL, {
-        method: "POST",
+      const email = data?.user?.email;
+      if (error || !email) return { status: "skipped", reason: "no_email" };
+      request = {
         headers: {
           Authorization: `Bearer ${key}`,
           "Content-Type": "application/json",
           // Same delivery row => same key, so a retried request can never duplicate a digest.
           ...(opts.idempotencyKey ? { "Idempotency-Key": opts.idempotencyKey } : {}),
         },
-        body: JSON.stringify({ from, to: [to], subject: message.subject, text: message.text }),
+        body: JSON.stringify({ from, to: [email], subject: message.subject, text: message.text }),
+      };
+    } catch (error) {
+      reportError(error, { tags: { surface: "hold_alert_email" }, extra: { userId, stage: "pre_send" } });
+      return { status: "failed", error: messageOf(error) };
+    }
+    // Submission: once fetch is invoked the outcome can be ambiguous (Resend may have accepted the
+    // request). Any throw (timeout, reset, "fetch failed") and any 5xx is terminal: never resent.
+    // A 4xx is a definite rejection (nothing was sent), so it stays retryable, like the SMS sender's
+    // non-ambiguous failures.
+    try {
+      const res = await fetchImpl(RESEND_URL, {
+        method: "POST",
+        ...request,
         signal: AbortSignal.timeout(RESEND_TIMEOUT_MS),
       });
-      if (!res.ok) return { status: "failed", error: `resend_http_${res.status}` };
-      return { status: "sent" };
+      if (res.ok) return { status: "sent" };
+      if (res.status >= 500) return { status: "failed", error: `resend_http_${res.status}`, terminal: true };
+      return { status: "failed", error: `resend_http_${res.status}` };
     } catch (error) {
-      reportError(error, { tags: { surface: "hold_alert_email" }, extra: { userId } });
-      // A timeout/abort after the request started is ambiguous (Resend may have accepted it): never retry.
-      if (isAbort(error)) return { status: "failed", error: `resend_timeout: ${messageOf(error)}`, terminal: true };
-      return { status: "failed", error: messageOf(error) };
+      reportError(error, { tags: { surface: "hold_alert_email" }, extra: { userId, stage: "send" } });
+      const label = isAbort(error) ? "resend_timeout" : "resend_ambiguous";
+      return { status: "failed", error: `${label}: ${messageOf(error)}`, terminal: true };
     }
   }
 

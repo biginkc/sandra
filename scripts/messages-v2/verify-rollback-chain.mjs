@@ -7,7 +7,7 @@
 //   2. applies ALL supabase/migrations/*.sql in order (ON_ERROR_STOP),
 //   3. applies the 44 rollbacks in REVERSE order,
 //   4. asserts no jev_* / pipeline_* / ai_reply_* object remains,
-//   5. re-applies the 39 migrations forward again.
+//   5. re-applies the 45 migrations forward again.
 // It exits non-zero on any error or leftover object, and always drops the
 // scratch DB.
 //

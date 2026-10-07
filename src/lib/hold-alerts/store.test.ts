@@ -77,3 +77,27 @@ describe("DeliveryStore.archiveClosed", () => {
     await expect(createSupabaseDeliveryStore(t.client).archiveClosed("org", [])).rejects.toThrow(/archive update failed: boom/);
   });
 });
+
+describe("DeliveryStore.countSentSince", () => {
+  it("counts in-flight (sending) as well as sent deliveries, each by its own timestamp", async () => {
+    const calls: Call[] = [];
+    const q: Record<string, unknown> = {};
+    for (const m of ["select", "eq", "or"]) {
+      q[m] = (...args: unknown[]) => {
+        calls.push({ method: m, args });
+        return q;
+      };
+    }
+    q.then = (resolve: (v: unknown) => unknown) => resolve({ count: 4, error: null });
+    const client = { from: () => q } as unknown as LooseSupabase;
+    const n = await createSupabaseDeliveryStore(client).countSentSince({
+      orgId: "org",
+      channel: "slack",
+      sinceIso: "2026-10-08T09:00:00.000Z",
+    });
+    expect(n).toBe(4);
+    const or = calls.find((c) => c.method === "or")!.args[0] as string;
+    expect(or).toContain("and(status.eq.sent,sent_at.gte.2026-10-08T09:00:00.000Z)");
+    expect(or).toContain("and(status.eq.sending,sending_at.gte.2026-10-08T09:00:00.000Z)");
+  });
+});

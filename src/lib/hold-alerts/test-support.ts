@@ -100,12 +100,11 @@ export class FakeStore implements DeliveryStore {
   async countSentSince(q: { orgId: string; channel: string; recipientUserId?: string; sinceIso: string }) {
     return this.rows.filter(
       (r) =>
-        r.status === "sent" &&
         r.orgId === q.orgId &&
         r.channel === q.channel &&
         (!q.recipientUserId || r.recipientUserId === q.recipientUserId) &&
-        r.sentAt !== null &&
-        r.sentAt >= q.sinceIso,
+        ((r.status === "sent" && r.sentAt !== null && r.sentAt >= q.sinceIso) ||
+          (r.status === "sending" && r.sendingAt != null && r.sendingAt >= q.sinceIso)),
     ).length;
   }
 }

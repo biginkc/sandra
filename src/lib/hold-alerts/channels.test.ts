@@ -125,12 +125,39 @@ describe("sendEmail", () => {
     expect((withKey.headers as Record<string, string>)["Idempotency-Key"]).toBe("hold-alert-row-1");
     expect((withoutKey.headers as Record<string, string>)["Idempotency-Key"]).toBeUndefined();
   });
-  it("a non-2xx response is a retryable failure", async () => {
-    const s = createChannelSenders(admin, {
+  it("a 5xx response is a terminal failure (Resend may have accepted the request)", async () => {
+    for (const status of [500, 502, 503]) {
+      const s = createChannelSenders(admin, {
+        env: { RESEND_API_KEY: "k", HOLD_ALERT_EMAIL_FROM: "a@b.c" },
+        fetch: (async () => new Response("no", { status })) as never,
+      });
+      expect(await s.sendEmail("u1", message)).toEqual({ status: "failed", error: `resend_http_${status}`, terminal: true });
+    }
+  });
+  it("a 4xx response is a definite rejection and stays retryable", async () => {
+    for (const status of [400, 422, 429]) {
+      const s = createChannelSenders(admin, {
+        env: { RESEND_API_KEY: "k", HOLD_ALERT_EMAIL_FROM: "a@b.c" },
+        fetch: (async () => new Response("no", { status })) as never,
+      });
+      const r = await s.sendEmail("u1", message);
+      expect(r).toMatchObject({ status: "failed", error: `resend_http_${status}` });
+      expect((r as { terminal?: boolean }).terminal).toBeFalsy();
+    }
+  });
+  it("a preflight failure (user lookup throws) is retryable and never reaches fetch", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }));
+    const throwing = {
+      auth: { admin: { getUserById: vi.fn(async () => { throw new Error("db down"); }) } },
+    } as never;
+    const s = createChannelSenders(throwing, {
       env: { RESEND_API_KEY: "k", HOLD_ALERT_EMAIL_FROM: "a@b.c" },
-      fetch: (async () => new Response("no", { status: 500 })) as never,
+      fetch: fetchImpl as never,
     });
-    expect(await s.sendEmail("u1", message)).toMatchObject({ status: "failed" });
+    const r = await s.sendEmail("u1", message);
+    expect(r).toMatchObject({ status: "failed", error: "db down" });
+    expect((r as { terminal?: boolean }).terminal).toBeFalsy();
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
   it("bounds the Resend call with a 10s abort signal", async () => {
     const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }));
@@ -153,15 +180,13 @@ describe("sendEmail", () => {
       expect(await s.sendEmail("u1", message)).toMatchObject({ status: "failed", terminal: true });
     }
   });
-  it("a plain network error stays a retryable failure", async () => {
+  it("a post-submit network error is terminal (the request may have reached Resend)", async () => {
     const s = createChannelSenders(admin, {
       env: { RESEND_API_KEY: "k", HOLD_ALERT_EMAIL_FROM: "a@b.c" },
       fetch: (async () => {
         throw new TypeError("fetch failed");
       }) as never,
     });
-    const r = await s.sendEmail("u1", message);
-    expect(r).toMatchObject({ status: "failed" });
-    expect((r as { terminal?: boolean }).terminal).toBeFalsy();
+    expect(await s.sendEmail("u1", message)).toMatchObject({ status: "failed", terminal: true });
   });
 });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { runHoldAlertsForOrg } from "./core";
 import { ACQ, hold, makeDeps, ORG, OWNER } from "./test-support";
@@ -133,6 +133,20 @@ describe("caps", () => {
     // Over the cap is "not yet", not "never": the row stays pending with no attempt spent.
     const row = t.store.rows.find((r) => r.holdKey.startsWith("prop-1"))!;
     expect([row.status, row.attempts, row.lastError]).toEqual(["pending", 0, null]);
+  });
+
+  it("counts in-flight (sending) deliveries toward the DM cap", async () => {
+    const t = makeDeps({ recipients: [ACQ] });
+    for (let i = 0; i < 20; i++) {
+      t.store.rows.push({
+        id: `old${i}`, orgId: ORG, propertyId: `p${i}`, holdKey: `p${i}:x`, recipientUserId: ACQ.userId,
+        channel: "slack", stage: "first", status: "sending", attempts: 1, lastError: null,
+        createdAt: "2026-10-08T10:01:30.000Z", sentAt: null, sendingAt: "2026-10-08T10:01:30.000Z",
+      });
+    }
+    const summary = await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent).toHaveLength(0);
+    expect(summary.deferred).toBe(1);
   });
 
   it("delivers a capped row on a later run once the hour has rolled", async () => {
@@ -380,6 +394,29 @@ describe("durability and idempotency", () => {
     await runHoldAlertsForOrg(t.deps, ORG);
     await runHoldAlertsForOrg(t.deps, ORG);
     expect(t.store.rows[0]).toMatchObject({ status: "failed", attempts: 3, lastError: "socket hang up" });
+  });
+
+  it("an email that hit a post-submit throw or a 5xx is terminal: the next cron passes never claim it again", async () => {
+    const { createChannelSenders } = await import("./channels");
+    const admin = {
+      auth: { admin: { getUserById: async () => ({ data: { user: { email: "o@example.com" } }, error: null }) } },
+    } as never;
+    const outcomes: Array<() => Promise<Response>> = [
+      async () => { throw new TypeError("fetch failed"); },
+      async () => new Response("bad gateway", { status: 502 }),
+    ];
+    for (const outcome of outcomes) {
+      const calls = vi.fn(outcome);
+      const senders = createChannelSenders(admin, {
+        env: { RESEND_API_KEY: "k", HOLD_ALERT_EMAIL_FROM: "a@b.c" },
+        fetch: calls as never,
+      });
+      const t = makeDeps({ emailEnabled: true, recipients: [OWNER], sendEmail: senders.sendEmail });
+      for (let i = 0; i < 4; i++) await runHoldAlertsForOrg(t.deps, ORG);
+      expect(calls).toHaveBeenCalledTimes(1);
+      const row = t.store.rows.find((r) => r.channel === "email")!;
+      expect(row).toMatchObject({ status: "failed", attempts: 3 });
+    }
   });
 
   it("a thrown sender is recorded as failed, not crashed", async () => {
