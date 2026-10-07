@@ -4959,33 +4959,71 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
         expect((state.deadLetters ?? []).filter((d) => d.reason === "sent_late")).toHaveLength(1);
       });
 
-      it("pass B only looks at flagged properties (needs_human_attention = true) so the partial index applies", async () => {
-        const { sweepLateSends } = await import("./dispatch");
-        const state = setup();
-        state.property.needs_human_attention = false;
-        state.property.last_ai_escalation_reason = "send_timeout:inbound-late";
-        state.deadLetters = [
-          { org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-late", body: "Hi", reason: "sent_late", created_at: new Date().toISOString() },
-          { org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-late", body: "Hi", reason: "send_timeout", resolved_at: new Date().toISOString(), created_at: new Date().toISOString() },
-        ];
-        pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
-        expect(await sweepLateSends(createMockSupabase(state) as never)).toMatchObject({ reconciled: 0 });
-        expect(state.property.last_ai_escalation_reason).toBe("send_timeout:inbound-late");
-      });
-
-      it("pass B reports a dead-letter lookup error instead of ignoring it", async () => {
+      it("never scans properties: candidates come only from unresolved send_timeout rows", async () => {
         const { sweepLateSends } = await import("./dispatch");
         const state = setup();
         state.property.needs_human_attention = true;
-        state.property.last_ai_escalation_reason = "send_timeout:inbound-late";
-        state.deadLetterLookupError = true;
-        reportErrorMock.mockClear();
-        const result = await sweepLateSends(createMockSupabase(state) as never);
-        expect(result).toMatchObject({ scanned: 0, reconciled: 0 });
-        expect(reportErrorMock).toHaveBeenCalledWith(
-          expect.objectContaining({ message: "dl boom" }),
-          { tags: { surface: "ai_responder_late_send_sweep" } },
-        );
+        state.property.last_ai_escalation_reason = "send_timeout:inbound-orphan";
+        state.deadLetters = [];
+        const supabase = createMockSupabase(state) as { from: (t: string) => unknown };
+        const tables: string[] = [];
+        const spy = { ...supabase, from: (t: string) => { tables.push(t); return supabase.from(t); } };
+        await sweepLateSends(spy as never);
+        expect(tables).not.toContain("properties");
+      });
+
+      it("stamps rows missing ids, terminally failed replies, and stale no-reply rows as unreconcilable (with a reason) and never re-reads them", async () => {
+        const { sweepLateSends } = await import("./dispatch");
+        const state = setup();
+        const now = Date.now();
+        const old = new Date(now - 8 * 24 * 3_600_000).toISOString();
+        state.deadLetters = [
+          { id: "t-noids", org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: null, inbound_message_id: null, body: "x", reason: "send_timeout", created_at: new Date(now - 5000).toISOString() },
+          { id: "t-failed", org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-failed", body: "x", reason: "send_timeout", created_at: new Date(now - 4000).toISOString() },
+          { id: "t-stale", org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-stale", body: "x", reason: "send_timeout", created_at: old },
+          { id: "t-fresh", org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-fresh", body: "x", reason: "send_timeout", created_at: new Date(now - 3000).toISOString() },
+        ];
+        pushOutbound(state, { id: "failed-out", status: "failed", metadata: aiReplyTo("inbound-failed") });
+        const supabase = createMockSupabase(state) as never;
+        await sweepLateSends(supabase);
+        const byId = (id: string) => (state.deadLetters ?? []).find((d) => d.id === id);
+        expect(byId("t-noids")).toMatchObject({ resolution_reason: "unreconcilable:missing_ids", resolved_at: expect.any(String) });
+        expect(byId("t-failed")).toMatchObject({ resolution_reason: "unreconcilable:reply_failed", resolved_at: expect.any(String) });
+        expect(byId("t-stale")).toMatchObject({ resolution_reason: "unreconcilable:no_reply", resolved_at: expect.any(String) });
+        expect(byId("t-fresh")?.resolved_at).toBeUndefined();
+        state.passARowsRead = 0;
+        await sweepLateSends(supabase);
+        expect(state.passARowsRead).toBe(1);
+      });
+
+      it("does not stamp a reply that was aborted before the provider as reply_failed", async () => {
+        const { sweepLateSends } = await import("./dispatch");
+        const state = setup();
+        state.deadLetters = [
+          { id: "t-abort", org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-abort", body: "x", reason: "send_timeout", created_at: new Date().toISOString() },
+        ];
+        pushOutbound(state, { id: "abort-out", status: "failed", metadata: { ...aiReplyTo("inbound-abort"), abortedBeforeProvider: true } });
+        await sweepLateSends(createMockSupabase(state) as never);
+        expect(state.deadLetters[0].resolved_at).toBeUndefined();
+      });
+
+      it("1,000 unreconcilable blockers do not starve a newer accepted row: repeated invocations reach it", async () => {
+        const { sweepLateSends } = await import("./dispatch");
+        const state = setup();
+        const base = Date.now() - 3_600_000;
+        const rows: Array<Record<string, unknown>> = [];
+        for (let i = 0; i < 1000; i += 1) {
+          rows.push({ id: `b-${String(i).padStart(4, "0")}`, org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: null, inbound_message_id: null, body: "x", reason: "send_timeout", created_at: new Date(base + i).toISOString() });
+        }
+        rows.push({ id: "t-good", org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-late", body: "Hi", reason: "send_timeout", created_at: new Date(base + 5000).toISOString() });
+        state.deadLetters = rows;
+        pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
+        const supabase = createMockSupabase(state) as never;
+        await sweepLateSends(supabase, { pageSize: 100, maxPages: 10 });
+        const second = await sweepLateSends(supabase, { pageSize: 100, maxPages: 10 });
+        expect(second.reconciled).toBe(1);
+        expect(state.deadLetters.find((d) => d.id === "t-good")?.resolved_at).toEqual(expect.any(String));
+        expect(state.deadLetters.filter((d) => d.resolution_reason === "unreconcilable:missing_ids")).toHaveLength(1000);
       });
 
       it("pass A keysets past 1,000+ resolved rows (never re-reads a window) and rescues an unresolved timeout beyond the boundary", async () => {

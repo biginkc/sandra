@@ -501,23 +501,47 @@ export async function processEnrollmentTick(
             "Consent-unavailable claim bookkeeping failed",
           );
         }
-        // A step advances only after a successful run, so every retired
-        // consent_unavailable row for this enrollment+step is consecutive.
-        // This row is already retired, so it is included in the count.
-        const { count: retiredCount, error: countError } = await client
+        // Consecutive consent-check attempts on this step. A step advances only
+        // after a successful run, so rows are scoped to enrollment+step. Rows
+        // before the latest attempt that reached past the consent check (any
+        // outcome other than not_attempted, e.g. a provider failure) do not
+        // count, quiet-hours retirements (not_attempted) are ignored entirely,
+        // and `resume_sequence_enrollment` relabels earlier deferred rows so an
+        // earlier outage never counts toward a later one. Only rows still
+        // labelled consent_unavailable_deferred are counted; this row is
+        // already retired, so it is included.
+        // Fail closed: if the budget cannot be read, pause rather than retry
+        // without a bound.
+        const { data: boundaryRows, error: boundaryError } = await client
+          .from("sequence_step_runs")
+          .select("created_at")
+          .eq("enrollment_id", enrollment.id)
+          .eq("step_id", step.id)
+          .neq("attempt_outcome", "not_attempted")
+          .order("created_at", { ascending: false })
+          .limit(1);
+        let countQuery = client
           .from("sequence_step_runs")
           .select("id", { count: "exact", head: true })
           .eq("enrollment_id", enrollment.id)
           .eq("step_id", step.id)
-          .eq("failure_reason", "consent_unavailable");
-        if (!countError && (retiredCount ?? 0) >= CONSENT_UNAVAILABLE_MAX_RETRIES) {
-          const pauseError = await pauseEnrollment(client, enrollment.id, "reconciliation_required", false);
-          const message = `Consent/suppression state unreadable for ${retiredCount} consecutive attempts on step ${step.step_index}; enrollment paused${pauseError ? `; ${pauseError}` : ""}`;
+          .eq("recovery_action", "consent_unavailable_deferred");
+        const boundaryAt = (boundaryRows ?? [])[0]?.created_at;
+        if (boundaryAt) countQuery = countQuery.gt("created_at", boundaryAt);
+        const { count: retiredCount, error: countError } = boundaryError
+          ? { count: null, error: boundaryError }
+          : await countQuery;
+        const budgetUnverifiable = Boolean(boundaryError || countError || retiredCount === null);
+        if (budgetUnverifiable || (retiredCount ?? 0) >= CONSENT_UNAVAILABLE_MAX_RETRIES) {
+          const pauseError = await pauseEnrollment(client, enrollment.id, "consent_unavailable", false);
+          const message = budgetUnverifiable
+            ? `Consent/suppression retry budget could not be verified on step ${step.step_index} (${(boundaryError ?? countError)?.message ?? "no count returned"}); enrollment paused${pauseError ? `; ${pauseError}` : ""}`
+            : `Consent/suppression state unreadable for ${retiredCount} consecutive checks on step ${step.step_index}; enrollment paused${pauseError ? `; ${pauseError}` : ""}`;
           reportError(new Error(message), {
             tags: { surface: "sequence_tick_consent_unavailable_cap" },
           });
           if (pauseError) return { status: "failed", enrollmentId: enrollment.id, message };
-          return { status: "paused", enrollmentId: enrollment.id, reason: "reconciliation_required" };
+          return { status: "paused", enrollmentId: enrollment.id, reason: "consent_unavailable" };
         }
         const { data: deferred, error: deferError } = await client
           .from("sequence_enrollments")

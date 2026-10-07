@@ -3497,23 +3497,6 @@ export async function reconcileLateSendForInbound(
       });
       if (!written) return "error";
     }
-    // Durable resolution: stamp the original send_timeout row(s) so the sweeper
-    // never re-reads them. Idempotent (only unresolved rows match).
-    if (args.inboundMessageId) {
-      const { error: resolveError } = await supabase
-        .from("ai_reply_dead_letters")
-        .update({ resolved_at: new Date().toISOString() })
-        .eq("inbound_message_id", args.inboundMessageId)
-        .eq("reason", "send_timeout")
-        .is("resolved_at", null);
-      if (resolveError) {
-        reportError(new Error(resolveError.message), {
-          tags: { surface: "ai_responder_late_send_resolve" },
-          extra: { propertyId: args.propertyId },
-        });
-        return "error";
-      }
-    }
     const { data: converted, error } = await supabase
       .from("properties")
       .update({
@@ -3531,6 +3514,25 @@ export async function reconcileLateSendForInbound(
       });
       return "error";
     }
+    // Durable resolution, stamped LAST: the original send_timeout row(s) stay
+    // unresolved until the flag conversion above has succeeded, so the sweeper
+    // (which reads only unresolved rows) re-drives a failed flag update.
+    // Idempotent (only unresolved rows match).
+    if (args.inboundMessageId) {
+      const { error: resolveError } = await supabase
+        .from("ai_reply_dead_letters")
+        .update({ resolved_at: new Date().toISOString() })
+        .eq("inbound_message_id", args.inboundMessageId)
+        .eq("reason", "send_timeout")
+        .is("resolved_at", null);
+      if (resolveError) {
+        reportError(new Error(resolveError.message), {
+          tags: { surface: "ai_responder_late_send_resolve" },
+          extra: { propertyId: args.propertyId },
+        });
+        return "error";
+      }
+    }
     return markerExisted && !converted ? "already_reconciled" : "reconciled";
   } catch (e) {
     reportError(e, {
@@ -3546,62 +3548,68 @@ export async function reconcileLateSendForInbound(
  * text did reach the provider but whose in-process reconciliation never ran
  * (the invocation froze or died). Call from the stale-run cron.
  *
- * Resolution is durable IN THE ROW: `reconcileLateSendForInbound` stamps
- * `resolved_at` on the original `send_timeout` row when it writes the
- * `sent_late` marker. Pass A reads ONLY unresolved rows (`resolved_at is null`,
- * served by a partial index), so every run reaches the oldest unresolved row
- * with no cursor and no in-memory skipping. Within a run, keyset pagination
- * (never offset) means no row is examined twice. Rows whose reply was never
- * accepted stay unresolved and are re-examined at most once per run until the
- * 7-day window drops them; the per-run reach is pageSize x maxPages (1,000
- * rows by default). Oldest-first order plus the 7-day window is what
- * prevents starvation at expected volumes.
+ * The ONLY candidate source is the unresolved `send_timeout` dead-letter rows
+ * (`resolved_at is null`, served by a partial index, oldest first, keyset
+ * paginated, never offset). There is deliberately no scan of `properties`: a
+ * flag stuck on `send_timeout:<inbound_id>` is repaired through its timeout row
+ * because `reconcileLateSendForInbound` stamps `resolved_at` only AFTER the
+ * flag conversion succeeds, so a stuck flag always has an unresolved row.
  *
- * Pass A is independent of the property flag, so a timeout whose flag was
- * cleared or replaced is still rescued: if the AI reply for that inbound is
- * sent/delivered, the marker is written regardless of the flag state (the flag
- * update itself stays conditional on the flag still naming that inbound).
+ * Rows that can never be reconciled are stamped resolved (with
+ * `resolution_reason`) on first sight so they are not re-read every run and
+ * cannot starve newer rows:
+ *   - `unreconcilable:missing_ids`  the row lacks inbound/org/property ids;
+ *   - `unreconcilable:reply_failed` the AI reply for that inbound is terminally
+ *     `failed` (not an aborted-before-provider row), so it cannot be accepted;
+ *   - `unreconcilable:no_reply`     older than the 7-day window with no accepted
+ *     reply (none, pending, or aborted).
+ * Reconciled rows are stamped with a null reason.
  *
- * Pass B repairs flags still reading `send_timeout:<inbound_id>` whose marker
- * already exists (the marker-vs-flag race). It is driven by the flag, keyset
- * over properties.id (a unique, never-null key), and ignores flags and
- * timeout rows older than the 7-day window so permanently stale flags cannot
- * obstruct it.
+ * Pass A reach per run is pageSize x maxPages (1,000 rows by default); because
+ * blockers resolve on first sight, repeated runs always reach newer rows.
  *
  * `cursor`/`nextCursor` remain as an optional continuation for a caller that
  * wants to resume a bounded run, but correctness no longer depends on one.
  */
 export type LateSendSweepCursor = {
   a: { createdAt: string; id: string } | null;
-  b: string | null;
 };
 
 export async function sweepLateSends(
   supabase: SupabaseClient<Database>,
   options: { sinceMs?: number; pageSize?: number; maxPages?: number; cursor?: LateSendSweepCursor } = {},
 ): Promise<{ scanned: number; reconciled: number; nextCursor: LateSendSweepCursor | null }> {
-  const since = new Date(Date.now() - (options.sinceMs ?? 7 * 24 * 60 * 60 * 1000)).toISOString();
+  const windowStartMs = Date.now() - (options.sinceMs ?? 7 * 24 * 60 * 60 * 1000);
   const pageSize = options.pageSize ?? 100;
   const maxPages = options.maxPages ?? 10;
   let scanned = 0;
   let reconciled = 0;
   let cursorA = options.cursor?.a ?? null;
-  let cursorB = options.cursor?.b ?? null;
   let exhaustedA = false;
-  let exhaustedB = false;
   const done = () => ({
     scanned,
     reconciled,
-    nextCursor: exhaustedA && exhaustedB ? null : { a: exhaustedA ? null : cursorA, b: exhaustedB ? null : cursorB },
+    nextCursor: exhaustedA ? null : { a: cursorA },
   });
+  const resolveUnreconcilable = async (id: string, reason: string): Promise<boolean> => {
+    const { error } = await supabase
+      .from("ai_reply_dead_letters")
+      .update({ resolved_at: new Date().toISOString(), resolution_reason: reason })
+      .eq("id", id)
+      .is("resolved_at", null);
+    if (error) {
+      reportError(new Error(error.message), { tags: { surface: "ai_responder_late_send_sweep" } });
+      return false;
+    }
+    return true;
+  };
 
   for (let page = 0; page < maxPages; page += 1) {
     let query = supabase
       .from("ai_reply_dead_letters")
       .select("id, created_at, org_id, conversation_id, property_id, inbound_message_id, body")
       .eq("reason", "send_timeout")
-      .is("resolved_at", null)
-      .gte("created_at", since);
+      .is("resolved_at", null);
     if (cursorA) {
       query = query.or(
         `created_at.gt.${cursorA.createdAt},and(created_at.eq.${cursorA.createdAt},id.gt.${cursorA.id})`,
@@ -3616,9 +3624,12 @@ export async function sweepLateSends(
       return done();
     }
     const all = data ?? [];
-    const rows = all.filter((r) => r.inbound_message_id && r.org_id && r.property_id);
-    for (const row of rows) {
+    for (const row of all) {
       scanned += 1;
+      if (!row.inbound_message_id || !row.org_id || !row.property_id) {
+        await resolveUnreconcilable(row.id as string, "unreconcilable:missing_ids");
+        continue;
+      }
       const result = await reconcileLateSendForInbound(supabase, {
         orgId: row.org_id as string,
         conversationId: row.conversation_id,
@@ -3627,59 +3638,19 @@ export async function sweepLateSends(
         body: row.body,
       });
       if (result === "reconciled") reconciled += 1;
+      if (result !== "not_sent") continue;
+      const reply = await findExistingAiReplyForInbound(supabase, row.inbound_message_id);
+      if (reply && !reply.aborted && reply.status === "failed") {
+        await resolveUnreconcilable(row.id as string, "unreconcilable:reply_failed");
+      } else if (new Date(row.created_at as string).getTime() < windowStartMs) {
+        await resolveUnreconcilable(row.id as string, "unreconcilable:no_reply");
+      }
     }
     // Advance past EVERY row read (resolved or not) so the next page never re-reads it.
     const last = all[all.length - 1];
     if (last?.created_at) cursorA = { createdAt: last.created_at as string, id: last.id as string };
     if (all.length < pageSize) {
       exhaustedA = true;
-      break;
-    }
-  }
-
-  // Pass B: flags still bound to a timeout whose marker already exists.
-  for (let page = 0; page < maxPages; page += 1) {
-    let query = supabase
-      .from("properties")
-      .select("id, last_ai_escalation_reason")
-      .eq("needs_human_attention", true)
-      .like("last_ai_escalation_reason", `${SEND_TIMEOUT_FLAG_PREFIX}%`)
-      .or(`last_ai_escalation_at.is.null,last_ai_escalation_at.gte.${since}`);
-    if (cursorB) query = query.gt("id", cursorB);
-    const { data, error } = await query.order("id", { ascending: true }).limit(pageSize);
-    if (error) {
-      reportError(new Error(error.message), { tags: { surface: "ai_responder_late_send_sweep" } });
-      return done();
-    }
-    for (const property of data ?? []) {
-      cursorB = property.id;
-      const inboundId = (property.last_ai_escalation_reason ?? "").slice(SEND_TIMEOUT_FLAG_PREFIX.length);
-      if (!inboundId) continue;
-      const { data: letter, error: letterError } = await supabase
-        .from("ai_reply_dead_letters")
-        .select("org_id, conversation_id, body")
-        .eq("reason", "send_timeout")
-        .eq("inbound_message_id", inboundId)
-        .gte("created_at", since)
-        .limit(1);
-      if (letterError) {
-        reportError(new Error(letterError.message), { tags: { surface: "ai_responder_late_send_sweep" } });
-        return done();
-      }
-      const row = (letter ?? [])[0];
-      if (!row?.org_id) continue;
-      scanned += 1;
-      const result = await reconcileLateSendForInbound(supabase, {
-        orgId: row.org_id,
-        conversationId: row.conversation_id,
-        propertyId: property.id,
-        inboundMessageId: inboundId,
-        body: row.body,
-      });
-      if (result === "reconciled") reconciled += 1;
-    }
-    if ((data ?? []).length < pageSize) {
-      exhaustedB = true;
       break;
     }
   }

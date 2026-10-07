@@ -1122,6 +1122,7 @@ export type Database = {
           property_id: string | null
           reason: string
           resolved_at: string | null
+          resolution_reason: string | null
           run_id: string | null
         }
         Insert: {
@@ -1134,6 +1135,7 @@ export type Database = {
           property_id?: string | null
           reason: string
           resolved_at?: string | null
+          resolution_reason?: string | null
           run_id?: string | null
         }
         Update: {
@@ -1146,6 +1148,7 @@ export type Database = {
           property_id?: string | null
           reason?: string
           resolved_at?: string | null
+          resolution_reason?: string | null
           run_id?: string | null
         }
         Relationships: []

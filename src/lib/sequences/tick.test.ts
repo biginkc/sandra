@@ -254,9 +254,13 @@ describe("processEnrollmentTick — advancement persistence", () => {
     runWriteError?: boolean;
     enrollmentWriteError?: boolean;
     consentRetiredCount?: number;
+    consentCountError?: boolean;
+    consentBoundaryError?: boolean;
+    consentBoundary?: string;
   } = {}) {
     const enrollment: Record<string, unknown> = { ...BASE_ENROLLMENT };
     let claimed = false;
+    const countQueries: Array<Record<string, unknown>> = [];
     const from = vi.fn((table: string) => {
       let operation = "select";
       let payload: Record<string, unknown> = {};
@@ -287,8 +291,14 @@ describe("processEnrollmentTick — advancement persistence", () => {
             claimed = true;
             return ok({ id: "run-1" });
           }
-          if (operation === "select" && filters.failure_reason === "consent_unavailable") {
+          if (operation === "select" && filters.recovery_action === "consent_unavailable_deferred") {
+            countQueries.push({ ...filters });
+            if (opts.consentCountError) return { data: null, error: { message: "count failed" }, count: null };
             return { data: null, error: null, count: opts.consentRetiredCount ?? 1 };
+          }
+          if (operation === "select" && filters.neq_attempt_outcome === "not_attempted") {
+            if (opts.consentBoundaryError) return fail("boundary failed");
+            return { data: opts.consentBoundary ? [{ created_at: opts.consentBoundary }] : [], error: null };
           }
           if (opts.runWriteError && operation === "update") return fail("run write failed");
           return ok({ id: "run-1" });
@@ -302,6 +312,8 @@ describe("processEnrollmentTick — advancement persistence", () => {
       };
       const builder = makeQueryResult(null);
       builder.eq = (key: string, value: unknown) => { filters[key] = value; return builder; };
+      builder.neq = (key: string, value: unknown) => { filters[`neq_${key}`] = value; return builder; };
+      builder.gt = (key: string, value: unknown) => { filters[`gt_${key}`] = value; return builder; };
       builder.insert = (value: Record<string, unknown>) => { operation = "insert"; payload = value; return builder; };
       builder.update = (value: Record<string, unknown>) => { operation = "update"; payload = value; return builder; };
       builder.maybeSingle = builder.single = () => Promise.resolve(result());
@@ -315,6 +327,7 @@ describe("processEnrollmentTick — advancement persistence", () => {
       } as never,
       enrollment,
       from,
+      countQueries,
     };
   }
 
@@ -453,13 +466,38 @@ describe("processEnrollmentTick — advancement persistence", () => {
 
     expect(outcome).toMatchObject({ status, enrollmentId: "enrollment-1" });
     if (status === "paused") {
-      expect(outcome).toMatchObject({ reason: "reconciliation_required" });
-      expect(enrollment).toMatchObject({ status: "paused", pause_reason: "reconciliation_required" });
+      expect(outcome).toMatchObject({ reason: "consent_unavailable" });
+      expect(enrollment).toMatchObject({ status: "paused", pause_reason: "consent_unavailable" });
       expect(reportError).toHaveBeenCalledTimes(1);
     } else {
       expect(enrollment.status).toBe("active");
       expect(reportError).not.toHaveBeenCalled();
     }
+  });
+
+  it("counts only deferred rows after the last non-not_attempted run (earlier outage / provider attempt resets)", async () => {
+    vi.mocked(sendSmsToContact).mockResolvedValue({ status: "blocked_fresh_state_unavailable", error: "x" });
+    const { client, countQueries } = fixture({ consentRetiredCount: 3, consentBoundary: "2026-10-01T00:00:00Z" });
+    await processEnrollmentTick(client, BASE_ENROLLMENT);
+    expect(countQueries[0]).toMatchObject({
+      recovery_action: "consent_unavailable_deferred",
+      gt_created_at: "2026-10-01T00:00:00Z",
+    });
+    // Quiet-hours retirements are not_attempted rows: they are neither counted
+    // (recovery_action differs) nor a boundary (excluded by the not_attempted filter).
+    expect(countQueries[0]).not.toHaveProperty("neq_attempt_outcome");
+  });
+
+  it.each([
+    ["count query errors", { consentCountError: true }],
+    ["boundary query errors", { consentBoundaryError: true }],
+  ] as const)("fails closed when the %s: pauses as consent_unavailable and reports", async (_label, opts) => {
+    vi.mocked(sendSmsToContact).mockResolvedValue({ status: "blocked_fresh_state_unavailable", error: "x" });
+    const { client, enrollment } = fixture(opts);
+    const outcome = await processEnrollmentTick(client, BASE_ENROLLMENT);
+    expect(outcome).toMatchObject({ status: "paused", reason: "consent_unavailable" });
+    expect(enrollment).toMatchObject({ status: "paused", pause_reason: "consent_unavailable" });
+    expect(reportError).toHaveBeenCalledTimes(1);
   });
 
   it("completes after the final successful step", async () => {
