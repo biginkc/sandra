@@ -13,6 +13,8 @@
 --      mapping, written only by fn_set_auto_reply_template (owner-only RPC).
 --      Read: owner or Acquisitions (same audience as Messages v2). The
 --      responder reads it with the service role.
+--   4. a partial index on ai_response_claims for the stale-claim sweeper that
+--      flags a template that was sent but whose outcome never applied.
 -- No template text, mapping or approval is seeded.
 begin;
 
@@ -380,6 +382,15 @@ revoke all on function public.fn_set_auto_reply_template(uuid, text, text, uuid,
   from public, anon, service_role;
 grant execute on function public.fn_set_auto_reply_template(uuid, text, text, uuid, integer, boolean, uuid, boolean)
   to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 4b. Stale-claim sweeper index: the template step stamps a dispatch claim with
+-- outcome = 'template_sent_outcome_pending' between the template send and the
+-- outcome apply; the sweep looks for those past their lease.
+-- ---------------------------------------------------------------------------
+create index if not exists idx_ai_response_claims_template_pending
+  on public.ai_response_claims (lease_expires_at)
+  where outcome = 'template_sent_outcome_pending';
 
 -- ---------------------------------------------------------------------------
 -- 5. Test resets: clear mappings and approvals (system-managed templates

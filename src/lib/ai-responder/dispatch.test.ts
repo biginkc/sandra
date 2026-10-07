@@ -131,6 +131,7 @@ type AiClaimRow = {
   inbound_message_id: string;
   lease_expires_at: string;
   outcome?: string | null;
+  outbound_message_id?: string | null;
   response_kind: string;
   status: string;
 };
@@ -179,6 +180,8 @@ type MockState = {
   ensureConversationError?: boolean;
   /** The next N ai_response_claims updates fail. */
   claimUpdateFailures?: number;
+  /** fn_auto_apply_jev_lead_decision throws (simulates the function dying after the template send). */
+  crashOnApply?: boolean;
   /** Drafts' select/update errors. */
   draftLookupError?: boolean;
   /** Called with the 1-based index of each ai_reply_drafts SELECT; may pause it. */
@@ -1177,6 +1180,7 @@ function createMockSupabase(state: MockState) {
         // state.property assertions still reflect what actually happens,
         // rather than relying on a SEPARATE qualifyProperty/
         // setOutreachDispoNurture mutation dispatch.ts no longer makes.
+        if (state.crashOnApply) throw new Error("function died");
         state.jevLeadDecisionCalls.push({ rpc: name, args });
         const outcome = args.p_outcome as string;
         let status = "applied";
@@ -6444,7 +6448,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     expect(state.property.outreach_dispo).toBeNull();
   });
 
-  it("outbound hold mode stores the template as an approved_template draft and does not apply nurture", async () => {
+  it("outbound hold mode drops the template (no draft, no flag) and STILL applies nurture: hold stops sends, not dispositions", async () => {
     const state = createMockState();
     state.config.outbound_mode = "hold";
     installSendMock(state);
@@ -6452,13 +6456,13 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
 
     const result = await runNurture(state, "inbound-tpl-hold");
 
-    expect(result).toEqual({ outcome: "escalated", reason: "draft_held" });
+    expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
     expect(sendSmsToContact).not.toHaveBeenCalled();
-    expect(state.aiReplyDrafts).toEqual([
-      expect.objectContaining({ source: "approved_template", body: TEMPLATE_BODY, status: "pending" }),
-    ]);
-    expect(state.property.outreach_dispo).toBeNull();
-    expect(state.property.needs_human_attention).toBe(true);
+    expect(state.aiReplyDrafts ?? []).toEqual([]);
+    expect(state.deadLetters ?? []).toEqual([]);
+    expect(state.property.outreach_dispo).toBe("nurture");
+    expect(state.property.needs_human_attention).toBe(false);
+    expect(state.aiClaims.at(-1)).toMatchObject({ outcome: "auto_closed", status: "completed" });
   });
 
   it("an LLM-autosend-off deploy flag does not hold an approved template", async () => {
@@ -6475,7 +6479,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     }
   });
 
-  it("refuses outside the RECIPIENT's local window (rule 7: flag + dead letter) and applies nothing", async () => {
+  it("outside the RECIPIENT's local window the template is dropped (no flag, no dead letter) but the outcome STILL applies", async () => {
     const state = createMockState();
     installSendMock(state);
     // 05:00Z = midnight Central for the Missouri number.
@@ -6484,14 +6488,11 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
 
     const result = await runNurture(state, "inbound-tpl-quiet");
 
-    expect(result).toEqual({ outcome: "escalated", reason: "quiet_hours_recipient" });
+    expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
     expect(sendSmsToContact).not.toHaveBeenCalled();
-    expect(state.property.needs_human_attention).toBe(true);
-    expect(state.property.last_ai_escalation_reason).toBe("quiet_hours_recipient");
-    expect(state.deadLetters).toEqual([
-      expect.objectContaining({ body: TEMPLATE_BODY, reason: "quiet_hours_recipient" }),
-    ]);
-    expect(state.property.outreach_dispo).toBeNull();
+    expect(state.property.needs_human_attention).toBe(false);
+    expect(state.deadLetters ?? []).toEqual([]);
+    expect(state.property.outreach_dispo).toBe("nurture");
   });
 
   it("uses the recipient's area code, not the property's state", async () => {
@@ -6503,7 +6504,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     vi.setSystemTime(new Date("2026-06-13T17:00:00.000Z"));
     vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
     const result = await runNurture(state, "inbound-tpl-absentee");
-    expect(result).toEqual({ outcome: "escalated", reason: "quiet_hours_recipient" });
+    expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
     expect(sendSmsToContact).not.toHaveBeenCalled();
   });
 
@@ -6513,7 +6514,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     state.contact.phone_1 = "+14165550001"; // Toronto
     vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
     const result = await runNurture(state, "inbound-tpl-unknown");
-    expect(result).toEqual({ outcome: "escalated", reason: "quiet_hours_recipient" });
+    expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
     expect(sendSmsToContact).not.toHaveBeenCalled();
   });
 
@@ -6524,7 +6525,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     vi.setSystemTime(new Date("2026-06-14T00:30:00.000Z")); // 8:30pm Eastern
     vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
     const result = await runNurture(state, "inbound-tpl-fl-late");
-    expect(result).toEqual({ outcome: "escalated", reason: "quiet_hours_recipient" });
+    expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
     expect(sendSmsToContact).not.toHaveBeenCalled();
   });
 
@@ -6542,7 +6543,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     refused.messages.push(outboundAt(2), outboundAt(5), outboundAt(9));
     vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
     expect(await runNurture(refused, "inbound-tpl-fl-cap")).toEqual({
-      outcome: "escalated", reason: "quiet_hours_recipient",
+      outcome: "auto_closed", reason: "model:nurture",
     });
     expect(sendSmsToContact).not.toHaveBeenCalled();
 
@@ -6576,7 +6577,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
       vi.setSystemTime(new Date("2026-06-13T17:00:00.000Z"));
       vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
       const result = await runNurture(state, "inbound-tpl-best-phone");
-      expect(result).toEqual({ outcome: "escalated", reason: "quiet_hours_recipient" });
+      expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
       expect(sendSmsToContact).not.toHaveBeenCalled();
     });
 
@@ -6586,7 +6587,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
       vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
       await runNurture(state, "inbound-tpl-unsaved", 0.97, "not_applicable", { inboundFromPhone: "+18135559999" });
       expect(sendSmsToContact).not.toHaveBeenCalled();
-      expect(state.deadLetters).toEqual([expect.objectContaining({ reason: "quiet_hours_recipient" })]);
+      expect(state.property.outreach_dispo).toBe("nurture");
     });
 
     it("the Florida cap counts texts to the same destination only", async () => {
@@ -6611,7 +6612,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
       vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
       await runNurture(toPhone1, "inbound-tpl-cap-same");
       expect(sendSmsToContact).not.toHaveBeenCalled();
-      expect(toPhone1.deadLetters).toEqual([expect.objectContaining({ reason: "quiet_hours_recipient" })]);
+      expect(toPhone1.property.outreach_dispo).toBe("nurture");
     });
   });
 
@@ -6652,6 +6653,124 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
         expect.anything(),
         expect.objectContaining({ outcome: "not_interested", outcomeConfidence: 0.95 }),
       );
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
+  for (const mode of ["hold", "quiet"] as const) {
+    it(`not_interested: a template refused by ${mode === "hold" ? "outbound hold mode" : "recipient quiet hours"} never blocks the close`, async () => {
+      const state = createMockState();
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [{ outcome: "not_interested", min_confidence: 0.9 }];
+      if (mode === "hold") state.config.outbound_mode = "hold";
+      else vi.setSystemTime(new Date("2026-06-14T05:00:00.000Z")); // midnight Central
+      installSendMock(state);
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce({ ...TEMPLATE, outcome: "not_interested" });
+      const supabase = createMockSupabase(state);
+      seedInboundMessage(state, { id: `inbound-tpl-ni-${mode}`, body: "Not interested, thanks" });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice: "not_interested", confidence: 0.95 }, escalation_reason: { choice: "not_applicable" } } }),
+      })));
+      try {
+        const result = await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+          inboundBody: "Not interested, thanks",
+          inboundMessageId: `inbound-tpl-ni-${mode}`, propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+        expect(result).toMatchObject({ outcome: "auto_closed" });
+        expect(sendSmsToContact).not.toHaveBeenCalled();
+        expect(state.property.outreach_dispo).toBe("not_interested");
+        // Dropped, not held: nothing flagged, stored or dead-lettered, so the disposition RPC is not blocked.
+        expect(state.property.needs_human_attention).toBe(false);
+        expect(state.aiReplyDrafts ?? []).toEqual([]);
+        expect(state.deadLetters ?? []).toEqual([]);
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+    });
+  }
+
+  it("records the sent template on the claim BEFORE the outcome is applied; a crash in between leaves the claim for the sweeper and a re-dispatch never re-sends", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    state.crashOnApply = true;
+    vi.mocked(resolveApprovedTemplateReply).mockResolvedValue(TEMPLATE);
+    try {
+      await expect(runNurture(state, "inbound-tpl-crash")).rejects.toThrow("function died");
+      expect(sendSmsToContact).toHaveBeenCalledTimes(1);
+      const sentId = state.messages.find((m) => m.direction === "outbound")?.id;
+      expect(sentId).toBeTruthy();
+      expect(state.aiClaims[0]).toMatchObject({
+        status: "processing",
+        outcome: "template_sent_outcome_pending",
+        outbound_message_id: sentId,
+      });
+      expect(state.property.outreach_dispo).toBeNull();
+
+      // The lease expires; the same inbound is dispatched again.
+      state.crashOnApply = false;
+      state.aiClaims[0]!.lease_expires_at = new Date(Date.now() - 1000).toISOString();
+      const rerun = await runNurture(state, "inbound-tpl-crash");
+      // The early gate sees the seller already answered: silent skip, never a second text.
+      expect(rerun).toMatchObject({ outcome: "skipped", reason: "already_replied" });
+      expect(sendSmsToContact).toHaveBeenCalledTimes(1);
+      // ...which leaves the marker for the stale-claim sweeper to flag.
+      expect(state.aiClaims[0]).toMatchObject({
+        outcome: "template_sent_outcome_pending",
+        outbound_message_id: sentId,
+      });
+    } finally {
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValue({ kind: "none", reason: "no_mapping" });
+    }
+  });
+
+  it("a refusal inside the send path (send blocked, property flagged) does not stop nurture from applying", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    vi.mocked(sendSmsToContact).mockResolvedValue({ status: "blocked_no_phone", reason: "no phone" } as never);
+    vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+    const result = await runNurture(state, "inbound-tpl-blocked");
+    expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
+    expect(state.property.outreach_dispo).toBe("nurture");
+    expect(state.property.needs_human_attention).toBe(true); // the send path's own flag stays for a human
+    expect(state.deadLetters).toEqual([expect.objectContaining({ body: TEMPLATE_BODY })]);
+  });
+
+  it("an unreadable claim fails closed: the template is not sent a second time", async () => {
+    const state = createMockState();
+    installSendMock(state);
+    vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+    const supabase = createMockSupabase(state);
+    const realFrom = supabase.from.bind(supabase);
+    (supabase as { from: unknown }).from = (table: string) => {
+      const q = realFrom(table) as Record<string, unknown>;
+      if (table !== "ai_response_claims") return q;
+      const select = q.select as (cols: string) => Record<string, unknown>;
+      q.select = (cols: string) => {
+        const sq = select.call(q, cols);
+        if (cols.includes("outbound_message_id")) {
+          sq.maybeSingle = async () => ({ data: null, error: { message: "claim read boom" } });
+        }
+        return sq;
+      };
+      return q;
+    };
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.95 }];
+    seedInboundMessage(state, { id: "inbound-tpl-unreadable", body: "later" });
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "nurture", confidence: 0.99 }, escalation_reason: { choice: "not_applicable" } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID, inboundBody: "later",
+        inboundMessageId: "inbound-tpl-unreadable", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
+      expect(sendSmsToContact).not.toHaveBeenCalled();
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 

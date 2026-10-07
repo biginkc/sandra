@@ -282,7 +282,13 @@ describe("auto_reply_templates", () => {
 
 describe("rollback", () => {
   it("removes the feature and the migration re-applies cleanly", async () => {
+    expect(
+      (await db.query(`select to_regclass('public.idx_ai_response_claims_template_pending') as i`)).rows[0].i,
+    ).not.toBeNull();
     await db.query(ROLLBACK);
+    expect(
+      (await db.query(`select to_regclass('public.idx_ai_response_claims_template_pending') as i`)).rows[0].i,
+    ).toBeNull();
     expect(
       (await db.query(`select to_regclass('public.auto_reply_templates') as t, to_regprocedure('public.fn_set_auto_reply_template(uuid, text, text, uuid, integer, boolean, uuid, boolean)') as f`)).rows[0],
     ).toEqual({ t: null, f: null });

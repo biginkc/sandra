@@ -28,6 +28,7 @@ begin
   end if;
 end $$;
 
+drop index if exists public.idx_ai_response_claims_template_pending;
 drop function if exists public.fn_set_auto_reply_template(uuid, text, text, uuid, integer, boolean, uuid, boolean);
 drop function if exists public.fn_set_template_auto_send_approval(uuid, boolean, text);
 drop table if exists public.auto_reply_templates;

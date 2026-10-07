@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { sweep, lateSweep } = vi.hoisted(() => ({
+const { sweep, lateSweep, templateSweep } = vi.hoisted(() => ({
   sweep: vi.fn(),
+  templateSweep: vi.fn(async () => ({ scanned: 1, flagged: 1, failed: 0 })),
   lateSweep: vi.fn(async () => ({ scanned: 3, reconciled: 2, nextCursor: null, orphanMalformed: 1 })),
 }));
 vi.mock("@/lib/pipeline-runs", () => ({ sweepStalePipelineRuns: sweep }));
 vi.mock("@/lib/ai-responder/dispatch", () => ({ sweepLateSends: lateSweep }));
+vi.mock("@/lib/ai-responder/template-claims", () => ({ sweepTemplateSentClaims: templateSweep }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 vi.mock("@supabase/supabase-js", () => ({ createClient: vi.fn(() => ({})) }));
 
@@ -46,7 +48,9 @@ describe("sweep-stale-pipeline-runs cron route", () => {
       ok: true,
       swept: 2,
       lateSends: { scanned: 3, reconciled: 2, nextCursor: null, orphanMalformed: 1 },
+      templateClaims: { scanned: 1, flagged: 1, failed: 0 },
     });
+    expect(templateSweep).toHaveBeenCalledTimes(1);
     expect(sweep).toHaveBeenCalledTimes(1);
   });
 });
