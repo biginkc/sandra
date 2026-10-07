@@ -2,7 +2,7 @@
 
 Status: PROPOSAL ONLY. Nothing in this file is approved, wired, seeded or live. Every fenced block below is a **candidate** that needs Jarrad's verbatim approval, one block at a time, before any code uses it (PLAN.md §3 D5/D9, standing rule: no LLM adds, edits or removes a business rule). Where a block is approved, it is copied character for character. Counts are evidence, not authority.
 
-**Path to approval.** Every reply-template candidate is loaded as an UNAPPROVED draft into the Phase 4 Templates library and approved there verbatim, one template at a time. Hold rules H-1..H-8 are approved as rule text through the same one-rule-per-approval process, surfaced in the /messages-v2 settings. Nothing in this document, and nothing said in chat, counts as approval.
+**Path to approval.** Every reply-template candidate is loaded as an UNAPPROVED draft into the Phase 4 Templates library and approved there verbatim, one template at a time. Hold rules H-1..H-8 are loaded into the same Phase 4 Templates library as UNAPPROVED rule-text entries and approved there verbatim, one rule at a time, through the same one-text-per-approval process; /messages-v2 settings only display the library's approval state. All 20 candidate texts therefore share one approval path: the Templates library. Nothing in this document, and nothing said in chat, counts as approval.
 
 Depends on: #837 (Messages v2 plan). Queries: `scripts/messages-v2/mine-rules.sql` (Q-numbers below refer to it).
 
