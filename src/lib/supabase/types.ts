@@ -14,6 +14,13 @@ export type Database = {
   }
   public: {
     Tables: {
+      norma_inbound_calls: {
+        Row: { id: string; org_id: string; provider_call_id: string; from_e164: string; to_e164: string; completed: boolean; reconciliation_state: "pending" | "done" | "denied" | "unavailable"; reconciliation_attempts: number; next_lookup_at: string; recording_state: "pending" | "reported_available" | "not_recorded"; review_state: "needs_review" | "associated"; property_id: string | null; reviewed_by: string | null; reviewed_at: string | null; created_at: string; updated_at: string }
+        Insert: never
+        Update: { reconciliation_state?: "pending" | "done" | "denied" | "unavailable" }
+        Relationships: []
+      }
+
       direct_call_operators: {
         Row: { user_id: string; org_id: string; telnyx_credential_id: string; sip_username: string; created_at: string }
         Insert: { user_id: string; org_id: string; telnyx_credential_id: string; sip_username: string; created_at?: string }
@@ -3139,10 +3146,22 @@ export type Database = {
           },
         ]
       }
+      norma_recording_lookup_control: {
+        Row: { singleton: boolean; enabled: boolean; denied_at: string | null; awaiting_result: boolean; lease_id: string | null; lease_until: string | null }
+        Insert: { singleton?: boolean; enabled?: boolean; denied_at?: string | null; awaiting_result?: boolean; lease_id?: string | null; lease_until?: string | null }
+        Update: { enabled?: boolean; denied_at?: string | null; awaiting_result?: boolean; lease_id?: string | null; lease_until?: string | null }
+        Relationships: []
+      }
+      norma_attempt_recordings: {
+        Row: { request_id: string; attempt: number; provider_call_id: string; state: string; lookup_attempts: number; next_lookup_at: string; last_checked_at: string | null; updated_at: string }
+        Insert: { request_id: string; attempt: number; provider_call_id: string; state?: string; lookup_attempts?: number; next_lookup_at?: string; last_checked_at?: string | null; updated_at?: string }
+        Update: { state?: string; lookup_attempts?: number; next_lookup_at?: string; last_checked_at?: string | null; updated_at?: string }
+        Relationships: []
+      }
       norma_call_requests: {
-        Row: { id: string; org_id: string; property_id: string; contact_id: string | null; phone_e164: string; requested_by: string | null; rep_context: string | null; callback_assignee_id: string; status: string; idempotency_key: string; bland_call_id: string | null; outcome: string | null; callback_requested_for: string | null; callback_timezone: string | null; callback_raw: string | null; qualification: Json; summary: string | null; dispatch_error: string | null; dispatch_started_at: string | null; dispatched_at: string | null; completed_at: string | null; created_at: string; updated_at: string; next_check_at: string }
-        Insert: { id?: string; org_id: string; property_id: string; contact_id?: string | null; phone_e164: string; requested_by?: string | null; rep_context?: string | null; callback_assignee_id: string; status?: string; idempotency_key?: string; bland_call_id?: string | null; outcome?: string | null; callback_requested_for?: string | null; callback_timezone?: string | null; callback_raw?: string | null; qualification?: Json; summary?: string | null; dispatch_error?: string | null; dispatch_started_at?: string | null; dispatched_at?: string | null; completed_at?: string | null; created_at?: string; updated_at?: string; next_check_at?: string }
-        Update: { id?: string; org_id?: string; property_id?: string; contact_id?: string | null; phone_e164?: string; requested_by?: string | null; rep_context?: string | null; callback_assignee_id?: string; status?: string; idempotency_key?: string; bland_call_id?: string | null; outcome?: string | null; callback_requested_for?: string | null; callback_timezone?: string | null; callback_raw?: string | null; qualification?: Json; summary?: string | null; dispatch_error?: string | null; dispatch_started_at?: string | null; dispatched_at?: string | null; completed_at?: string | null; created_at?: string; updated_at?: string; next_check_at?: string }
+        Row: { id: string; org_id: string; property_id: string; contact_id: string | null; phone_e164: string; requested_by: string | null; rep_context: string | null; callback_assignee_id: string; status: string; idempotency_key: string; bland_call_id: string | null; outcome: string | null; callback_requested_for: string | null; callback_timezone: string | null; callback_raw: string | null; qualification: Json; summary: string | null; dispatch_error: string | null; dispatch_started_at: string | null; dispatched_at: string | null; completed_at: string | null; created_at: string; updated_at: string; next_check_at: string; attempt: number; first_bland_call_id: string | null; first_attempt_outcome: string | null; first_attempt_at: string | null; precall_sms_status: string | null; reviewed_by: string | null; reviewed_at: string | null }
+        Insert: { id?: string; org_id: string; property_id: string; contact_id?: string | null; phone_e164: string; requested_by?: string | null; rep_context?: string | null; callback_assignee_id: string; status?: string; idempotency_key?: string; bland_call_id?: string | null; outcome?: string | null; callback_requested_for?: string | null; callback_timezone?: string | null; callback_raw?: string | null; qualification?: Json; summary?: string | null; dispatch_error?: string | null; dispatch_started_at?: string | null; dispatched_at?: string | null; completed_at?: string | null; created_at?: string; updated_at?: string; next_check_at?: string; attempt?: number; first_bland_call_id?: string | null; first_attempt_outcome?: string | null; first_attempt_at?: string | null; precall_sms_status?: string | null; reviewed_by?: string | null; reviewed_at?: string | null }
+        Update: { id?: string; org_id?: string; property_id?: string; contact_id?: string | null; phone_e164?: string; requested_by?: string | null; rep_context?: string | null; callback_assignee_id?: string; status?: string; idempotency_key?: string; bland_call_id?: string | null; outcome?: string | null; callback_requested_for?: string | null; callback_timezone?: string | null; callback_raw?: string | null; qualification?: Json; summary?: string | null; dispatch_error?: string | null; dispatch_started_at?: string | null; dispatched_at?: string | null; completed_at?: string | null; created_at?: string; updated_at?: string; next_check_at?: string; attempt?: number; first_bland_call_id?: string | null; first_attempt_outcome?: string | null; first_attempt_at?: string | null; precall_sms_status?: string | null; reviewed_by?: string | null; reviewed_at?: string | null }
         Relationships: []
       }
       norma_enrollment_pauses: {
@@ -6059,6 +6078,19 @@ export type Database = {
       }
     }
     Functions: {
+      fn_norma_pause_inbound_lookups: { Args: Record<string, never>; Returns: undefined }
+      fn_norma_claim_inbound_recordings: { Args: Record<string, never>; Returns: { id: string; provider_call_id: string; from_e164: string; to_e164: string; reconciliation_attempts: number; lease_id: string }[] }
+      fn_norma_start_inbound_lookup: { Args: { p_lease_id: string; p_call_id: string }; Returns: boolean }
+      fn_norma_checkpoint_inbound_lookup: { Args: { p_call_id: string; p_attempts: number; p_lease_id: string; p_state: string }; Returns: boolean }
+      fn_norma_finish_inbound_lookup: { Args: { p_lease_id: string; p_denied?: boolean }; Returns: undefined }
+      fn_norma_associate_inbound_call: { Args: { p_call_id: string; p_property_id: string; p_expected_updated_at: string }; Returns: string }
+      fn_norma_ingest_inbound_call: { Args: { p_call_id: string; p_from: string; p_to: string; p_completed: boolean; p_recording_state: string }; Returns: string | null }
+      fn_norma_start_recording_lookup: { Args: { p_lease_id: string }; Returns: boolean }
+      fn_norma_claim_recordings: { Args: Record<PropertyKey, never>; Returns: { request_id: string; attempt: number; provider_call_id: string; phone_e164: string; lookup_attempts: number; lease_id: string }[] }
+      fn_norma_checkpoint_recording: { Args: { p_request_id: string; p_attempt: number; p_call_id: string; p_lookup_attempts: number; p_lease_id: string; p_state: string }; Returns: boolean }
+      fn_norma_finish_recording_lookup: { Args: { p_lease_id: string; p_denied?: boolean }; Returns: undefined }
+      fn_norma_seed_recordings: { Args: Record<PropertyKey, never>; Returns: number }
+
       direct_call_active_for_operator: { Args: { p_user: string }; Returns: Database["public"]["Tables"]["direct_calls"]["Row"][] }
       direct_call_operator_busy: { Args: { p_user: string }; Returns: string | null }
       direct_call_begin: { Args: { p_org: string; p_operator: string; p_property: string | null; p_contact: string | null; p_destination: string; p_caller: string; p_request: string; p_time_limit_secs: number; p_preparation_property: string | null }; Returns: { outcome: string; call_id: string | null }[] }
@@ -6078,12 +6110,14 @@ export type Database = {
       fn_norma_pause_for_request: { Args: { p_request_id: string }; Returns: number }
       fn_norma_release_pauses: { Args: { p_request_id: string }; Returns: number }
       fn_norma_create_request: { Args: { p_property_id: string; p_contact_id: string; p_phone_e164: string; p_requested_by: string; p_rep_context: string | null; p_callback_assignee_id: string }; Returns: { outcome: string; request_id: string | null; idempotency_key: string | null; block_reason: string | null }[] }
-      fn_norma_claim_dispatch: { Args: { p_request_id: string }; Returns: boolean }
-      fn_norma_bind_call_id: { Args: { p_request_id: string; p_call_id: string }; Returns: string }
-      fn_norma_mark_dispatch_rejected: { Args: { p_request_id: string; p_reason: string; p_expected_status?: string }; Returns: string }
-      fn_norma_mark_dispatch_unknown: { Args: { p_request_id: string; p_reason: string }; Returns: string }
-      fn_norma_mark_needs_review: { Args: { p_request_id: string; p_reason: string }; Returns: string }
+      fn_norma_claim_dispatch: { Args: { p_request_id: string; p_expected_attempt?: number }; Returns: boolean }
+      fn_norma_presend_fence: { Args: { p_request_id: string; p_expected_attempt?: number }; Returns: boolean }
+      fn_norma_bind_call_id: { Args: { p_request_id: string; p_call_id: string; p_expected_attempt?: number }; Returns: string }
+      fn_norma_mark_dispatch_rejected: { Args: { p_request_id: string; p_reason: string; p_expected_status?: string; p_expected_attempt?: number }; Returns: string }
+      fn_norma_mark_dispatch_unknown: { Args: { p_request_id: string; p_reason: string; p_expected_attempt?: number }; Returns: string }
+      fn_norma_mark_needs_review: { Args: { p_request_id: string; p_reason: string; p_expected_attempt?: number }; Returns: string }
       fn_norma_complete_call: { Args: { p_request_id: string; p_call_id: string; p_outcome: string; p_payload?: Json }; Returns: Json }
+      fn_norma_mark_reviewed: { Args: { p_request_id: string; p_property_id: string; p_user_id: string }; Returns: Json }
       fn_norma_upgrade_pauses_for_reply: { Args: { p_property_id: string; p_reason: string }; Returns: number }
       sweep_resume_call_in_progress: { Args: { p_enrollment_ids: string[]; p_resume_at: string }; Returns: number }
       sequence_replace_steps: { Args: { p_sequence: string; p_steps: Json; p_name: string; p_description: string | null }; Returns: Json }

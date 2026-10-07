@@ -13,6 +13,7 @@ import {
   readStubDialpadDials,
   resetStubDialpadDials,
   resolveDialpadDialKey,
+  resolveDialpadHoursClock,
   resolveDialpadDialProvider,
   startDialpadApiCall,
   type DialpadDialFetch,
@@ -72,6 +73,7 @@ function fakeDb(over: Partial<DialpadDispatchDb> = {}): DialpadDispatchDb & { ca
     loadDispatchLoad: track('loadDispatchLoad', async () => ({ authorizedLastMinute: 0, unmatchedLast20s: 0 })),
     loadUnresolvedIntent: track('loadUnresolvedIntent', async () => null),
     loadCallSlots: track('loadCallSlots', async () => slotsOk),
+    loadPropertyState: track('loadPropertyState', async () => ({ found: true, state: 'MO' })),
     claimBinding: track('claimBinding', async () => ({})),
     verifyBinding: track('verifyBinding', async () => ({})),
     prepareIntent: track('prepareIntent', async () => prepared()),
@@ -94,8 +96,10 @@ function fakeDialer(result: DialpadDialResult | (() => DialpadDialResult) = { ki
   return { dialer, requests };
 }
 
-const run = (db: DialpadDispatchDb, dialer: DialpadDialer, over: Partial<typeof input> = {}) =>
-  startDialpadApiCall(db, dialer, actor, { ...input, ...over }, { env, now: () => new Date('2026-09-29T10:00:00Z') });
+// 17:00Z = 12:00 CDT: inside the 08:00-21:00 lead-local window for the default MO property.
+const IN_WINDOW = new Date('2026-09-29T17:00:00Z');
+const run = (db: DialpadDispatchDb, dialer: DialpadDialer, over: Partial<typeof input> = {}, at: Date = IN_WINDOW) =>
+  startDialpadApiCall(db, dialer, actor, { ...input, ...over }, { env, now: () => at });
 
 const baseRequest = (over: Partial<DialpadDialRequest> = {}): DialpadDialRequest => ({
   endpoint: 'initiate_call', apiKey: API_KEY, dialpadUserId: '5551234', phoneNumber: '+18165440196', customData: TOKEN, identity: null, outboundCallerId: null, ...over,
@@ -408,7 +412,7 @@ describe('startDialpadApiCall', () => {
   it('asks the load query for the last 60 seconds', async () => {
     const loadDispatchLoad = vi.fn(async () => ({ authorizedLastMinute: 0, unmatchedLast20s: 0 }));
     await run(fakeDb({ loadDispatchLoad }), fakeDialer().dialer);
-    expect(loadDispatchLoad).toHaveBeenCalledWith(ORG, REP, '2026-09-29T09:59:00.000Z');
+    expect(loadDispatchLoad).toHaveBeenCalledWith(ORG, REP, '2026-09-29T16:59:00.000Z');
   });
   it('refuses with call_in_flight when a dial is still unmatched', async () => {
     const db = fakeDb({ loadDispatchLoad: async () => ({ authorizedLastMinute: 1, unmatchedLast20s: 1 }) });
@@ -514,8 +518,8 @@ describe('#809 acceptance matrix: server rows', () => {
     expect(await run(dialA, fakeDialer().dialer)).toMatchObject({ ok: false, code: 'prior_call_unresolved' });
     const dialB = fakeDb({ loadUnresolvedIntent });
     expect(await run(dialB, fakeDialer().dialer, { propertyId: other, idempotencyKey: KEY2 })).toMatchObject({ ok: true });
-    expect(loadUnresolvedIntent).toHaveBeenNthCalledWith(1, ORG, REP, PROPERTY, '2026-09-29T10:00:00.000Z');
-    expect(loadUnresolvedIntent).toHaveBeenNthCalledWith(2, ORG, REP, other, '2026-09-29T10:00:00.000Z');
+    expect(loadUnresolvedIntent).toHaveBeenNthCalledWith(1, ORG, REP, PROPERTY, '2026-09-29T17:00:00.000Z');
+    expect(loadUnresolvedIntent).toHaveBeenNthCalledWith(2, ORG, REP, other, '2026-09-29T17:00:00.000Z');
   });
 
   it('row 15: a replay of an expired key says the call may have rung, not that it was never sent', async () => {
@@ -529,5 +533,176 @@ describe('#809 acceptance matrix: server rows', () => {
     const db = fakeDb({ loadDispatchLoad: async () => ({ authorizedLastMinute: 1, unmatchedLast20s: 1 }) });
     expect(await run(db, fakeDialer().dialer, { idempotencyKey: KEY2 })).toMatchObject({ ok: false, code: 'call_in_flight' });
     expect(db.calls).not.toContain('prepareIntent');
+  });
+});
+
+describe('startDialpadApiCall calling hours (lead-local 08:00-21:00)', () => {
+  const NIGHT = new Date('2026-09-30T02:30:00Z'); // 21:30 CDT
+  const quietCopy = 'Calling is unavailable during quiet hours.';
+  const expectNothingDialed = (db: ReturnType<typeof fakeDb>, requests: DialpadDialRequest[]) => {
+    expect(db.calls).not.toContain('prepareIntent');
+    expect(db.calls).not.toContain('authorizeDispatch');
+    expect(requests).toHaveLength(0);
+  };
+
+  it('dials inside the window', async () => {
+    const db = fakeDb();
+    const { dialer, requests } = fakeDialer();
+    const result = await run(db, dialer);
+    expect(result.ok).toBe(true);
+    expect(requests).toHaveLength(1);
+  });
+  it('refuses outside the window before prepare, authorize or any provider call', async () => {
+    const db = fakeDb();
+    const { dialer, requests } = fakeDialer();
+    const result = await run(db, dialer, {}, NIGHT);
+    expect(result).toMatchObject({ ok: false, code: 'denied', denial: 'outside_calling_hours', message: quietCopy, freshAttemptKey: true });
+    expectNothingDialed(db, requests);
+  });
+  it('treats 21:00:00 as closed and 20:59:59 as open, and 07:59:59 as closed', async () => {
+    const { dialer } = fakeDialer();
+    expect((await run(fakeDb(), dialer, {}, new Date('2026-09-30T02:00:00Z'))).ok).toBe(false);
+    expect((await run(fakeDb(), dialer, {}, new Date('2026-09-30T01:59:59Z'))).ok).toBe(true);
+    expect((await run(fakeDb(), dialer, {}, new Date('2026-09-29T12:59:59Z'))).ok).toBe(false);
+  });
+  it('uses the property state zone (HI is open at 21:30 CDT)', async () => {
+    const db = fakeDb({ loadPropertyState: async () => ({ found: true, state: 'HI' }) });
+    expect((await run(db, fakeDialer().dialer, {}, NIGHT)).ok).toBe(true);
+  });
+  it.each([null, '', 'ZZ'])('fails closed for unknown state %s', async (state) => {
+    const db = fakeDb({ loadPropertyState: async () => ({ found: true, state }) });
+    const { dialer, requests } = fakeDialer();
+    const result = await run(db, dialer);
+    expect(result).toMatchObject({ ok: false, denial: 'outside_calling_hours' });
+    expectNothingDialed(db, requests);
+  });
+  it('fails closed when the property is not found', async () => {
+    const db = fakeDb({ loadPropertyState: async () => ({ found: false, state: null }) });
+    const { dialer, requests } = fakeDialer();
+    expect(await run(db, dialer)).toMatchObject({ ok: false, denial: 'outside_calling_hours' });
+    expectNothingDialed(db, requests);
+  });
+  it('fails closed when the state lookup throws', async () => {
+    const db = fakeDb({ loadPropertyState: async () => { throw new Error('boom'); } });
+    const { dialer, requests } = fakeDialer();
+    expect(await run(db, dialer)).toMatchObject({ ok: false, code: 'dialpad_unavailable' });
+    expectNothingDialed(db, requests);
+  });
+  it('ignores E2E_QUIET_HOURS_NOW because the injected clock decides', async () => {
+    vi.stubEnv('E2E_QUIET_HOURS_NOW', IN_WINDOW.toISOString());
+    try {
+      expect((await run(fakeDb(), fakeDialer().dialer, {}, NIGHT)).ok).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+  it.each(['loadActiveGrants', 'loadConnection', 'loadLiveBinding'] as const)(
+    'passes at 20:59:59, closes during %s: no prepareIntent, no authorize, no provider call',
+    async (hook) => {
+      let t = new Date('2026-09-30T01:59:59Z').getTime(); // 20:59:59 CDT
+      const base = fakeDb();
+      const close = <R,>(fn: () => Promise<R>) => async () => { t = new Date('2026-09-30T02:00:01Z').getTime(); return fn(); };
+      const over: Partial<DialpadDispatchDb> = {};
+      if (hook === 'loadActiveGrants') over.loadActiveGrants = close(async () => []);
+      if (hook === 'loadConnection') over.loadConnection = close(async () => conn());
+      if (hook === 'loadLiveBinding') over.loadLiveBinding = close(async () => ({ id: BINDING, status: 'verified' as const, dialpadUserId: '5551234' }));
+      const db = Object.assign(base, over);
+      const { dialer, requests } = fakeDialer();
+      const result = await startDialpadApiCall(db, dialer, actor, input, { env, now: () => new Date(t) });
+      expect(result).toMatchObject({ ok: false, code: 'denied', denial: 'outside_calling_hours', freshAttemptKey: true });
+      expect(db.calls).not.toContain('prepareIntent');
+      expect(db.calls).not.toContain('authorizeDispatch');
+      expect(requests).toHaveLength(0);
+    },
+  );
+  it('closes between prepare and authorize: intent cancelled, no authorize, no provider call', async () => {
+    let t = new Date('2026-09-30T01:59:59Z').getTime();
+    const db = fakeDb({ prepareIntent: async () => { t = new Date('2026-09-30T02:00:01Z').getTime(); return prepared(); } });
+    const { dialer, requests } = fakeDialer();
+    const result = await startDialpadApiCall(db, dialer, actor, input, { env, now: () => new Date(t) });
+    expect(result).toMatchObject({ ok: false, denial: 'outside_calling_hours' });
+    expect(db.calls).toContain('cancelIntent');
+    expect(db.calls).not.toContain('authorizeDispatch');
+    expect(requests).toHaveLength(0);
+  });
+  it('re-checks the clock again after authorize: closes during loadConnection, intent cancelled, no provider call', async () => {
+    let t = new Date('2026-09-30T01:59:59Z').getTime();
+    const db = fakeDb({ loadConnection: async () => { const c = conn(); if (db.calls.includes('authorizeDispatch')) t = new Date('2026-09-30T02:00:01Z').getTime(); return c; } });
+    const { dialer, requests } = fakeDialer();
+    const result = await startDialpadApiCall(db, dialer, actor, input, { env, now: () => new Date(t) });
+    expect(result).toMatchObject({ ok: false, denial: 'outside_calling_hours' });
+    expect(db.calls).toContain('authorizeDispatch');
+    expect(db.calls).toContain('cancelIntent');
+    expect(requests).toHaveLength(0);
+  });
+});
+
+describe('resolveDialpadHoursClock', () => {
+  const PINNED = '2026-05-09T16:00:00.000Z';
+  it('honours E2E_QUIET_HOURS_NOW only for the stub provider', () => {
+    expect(resolveDialpadHoursClock({ DIALPAD_DIAL_PROVIDER: 'stub', E2E_QUIET_HOURS_NOW: PINNED })().toISOString()).toBe(PINNED);
+  });
+  it('production ignores the override even with the stub requested', () => {
+    const before = Date.now();
+    const got = resolveDialpadHoursClock({ VERCEL_ENV: 'production', DIALPAD_DIAL_PROVIDER: 'stub', E2E_QUIET_HOURS_NOW: PINNED })().getTime();
+    expect(got).toBeGreaterThanOrEqual(before);
+  });
+  it('the live provider ignores the override', () => {
+    const before = Date.now();
+    expect(resolveDialpadHoursClock({ E2E_QUIET_HOURS_NOW: PINNED })().getTime()).toBeGreaterThanOrEqual(before);
+  });
+  it('a stub with a missing or invalid override uses real time', () => {
+    const before = Date.now();
+    expect(resolveDialpadHoursClock({ DIALPAD_DIAL_PROVIDER: 'stub' })().getTime()).toBeGreaterThanOrEqual(before);
+    expect(resolveDialpadHoursClock({ DIALPAD_DIAL_PROVIDER: 'stub', E2E_QUIET_HOURS_NOW: 'nope' })().getTime()).toBeGreaterThanOrEqual(before);
+  });
+  it('startDialpadApiCall defaults to that clock: stub + in-window override dials, production at the same pinned time does not use it', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-30T02:30:00Z')); // 21:30 CDT, closed
+      const stubEnv = { ...env, DIALPAD_DIAL_PROVIDER: 'stub', E2E_QUIET_HOURS_NOW: PINNED };
+      const ok = await startDialpadApiCall(fakeDb(), fakeDialer().dialer, actor, input, { env: stubEnv });
+      expect(ok.ok).toBe(true);
+      const prod = await startDialpadApiCall(fakeDb(), fakeDialer().dialer, actor, input, { env: { ...stubEnv, VERCEL_ENV: 'production' } });
+      expect(prod).toMatchObject({ ok: false, denial: 'outside_calling_hours' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  describe('a pinned hours clock never leaks into rate or expiry', () => {
+    const PINNED = '2026-05-09T16:00:00.000Z';
+    const withClock = async (over: Partial<DialpadDispatchDb>) => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date('2026-10-06T02:30:00Z')); // 21:30 CDT
+        const db = fakeDb(over);
+        const result = await startDialpadApiCall(db, fakeDialer().dialer, actor, input, { env: { ...env, DIALPAD_DIAL_PROVIDER: 'stub', E2E_QUIET_HOURS_NOW: PINNED } });
+        return { db, result };
+      } finally {
+        vi.useRealTimers();
+      }
+    };
+    it('U1: rate and unresolved queries use real time', async () => {
+      const loadUnresolvedIntent = vi.fn(async () => null);
+      const loadDispatchLoad = vi.fn(async () => ({ authorizedLastMinute: 0, unmatchedLast20s: 0 }));
+      const { result } = await withClock({ loadUnresolvedIntent, loadDispatchLoad });
+      expect(result.ok).toBe(true);
+      expect((loadUnresolvedIntent.mock.calls as unknown as string[][])[0]![3]).toBe('2026-10-06T02:30:00.000Z');
+      expect((loadDispatchLoad.mock.calls as unknown as string[][])[0]![2]).toBe('2026-10-06T02:29:00.000Z');
+    });
+    it('U2: an intent that expired a minute ago does not block a new key', async () => {
+      const loadUnresolvedIntent = async (_o: string, _u: string, _p: string, nowIso: string) =>
+        nowIso < '2026-10-06T02:29:00.000Z' ? { intentId: 'ffffffff-ffff-4fff-8fff-ffffffffffff', idempotencyKey: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' } : null;
+      const { result } = await withClock({ loadUnresolvedIntent });
+      expect(result).not.toMatchObject({ code: 'prior_call_unresolved' });
+      expect(result.ok).toBe(true);
+    });
+    it('U3: old authorized dials are not counted as the last minute', async () => {
+      const loadDispatchLoad = async (_o: string, _u: string, sinceIso: string) =>
+        ({ authorizedLastMinute: sinceIso <= PINNED ? 4 : 0, unmatchedLast20s: 0 });
+      const { result } = await withClock({ loadDispatchLoad });
+      expect(result).not.toMatchObject({ code: 'rate_limited' });
+      expect(result.ok).toBe(true);
+    });
   });
 });

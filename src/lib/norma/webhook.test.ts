@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { reportError } from "@/lib/errors/report";
 
 import { dispatchNormaCall } from "./dispatch";
+import { mapBlandCallToOutcome } from "./outcome";
 import { fakeClient, KEY, PHONE, REQUEST_ID, requestRow } from "./test-helpers";
 import { handleBlandCallWebhook, MAX_WEBHOOK_BODY_BYTES, verifyBlandSignature } from "./webhook";
 
@@ -190,6 +191,64 @@ describe("bland webhook route core", () => {
     expect((await post(client, call())).body).toEqual({ status: "ignored", reason: "call_id_mismatch" });
   });
 
+  it("passes the attempt echoed in the call metadata (default 1) and acknowledges a stale-attempt result as ignored", async () => {
+    const { client, complete } = setup();
+    await post(client, call());
+    expect(complete.mock.calls[0]![0].p_payload).toMatchObject({ attempt: 1 });
+    await post(client, call({ metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt: 2 } }));
+    expect(complete.mock.calls[1]![0].p_payload).toMatchObject({ attempt: 2 });
+    await post(client, call({ metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt: "x" } }));
+    expect(complete.mock.calls[2]![0].p_payload).toMatchObject({ attempt: 0 });
+    const stale = setup({ result: "stale_attempt", status: "dispatching" });
+    expect(await post(stale.client, call())).toEqual({ status: 200, body: { status: "ignored", reason: "stale_attempt" } });
+  });
+
+  it.each([99_999_999_999, "99999999999", Number.MAX_SAFE_INTEGER, 3, -1, 1.5])("fences invalid attempt %s before the SQL integer cast", async (attempt) => {
+    const { client, complete } = setup({ result: "stale_attempt", status: "dispatched" });
+    expect(await post(client, call({ metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt } })))
+      .toEqual({ status: 200, body: { status: "ignored", reason: "stale_attempt" } });
+    expect(complete.mock.calls[0]![0].p_payload).toMatchObject({ attempt: 0 });
+  });
+
+  it.each(["1", "2"])("preserves valid string attempt %s", async (attempt) => {
+    const { client, complete } = setup();
+    await post(client, call({ metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt } }));
+    expect(complete.mock.calls[0]![0].p_payload).toMatchObject({ attempt: Number(attempt) });
+  });
+
+  it("attempt-2 voicemail without a pathway outcome completes as confirmed no_answer", async () => {
+    const { client, complete } = setup({ result: "applied", status: "completed", outcome: "no_answer" });
+    expect(await post(client, call({
+      answered_by: "voicemail",
+      variables: { call_outcome: "" },
+      metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt: 2 },
+    }))).toEqual({ status: 200, body: { status: "applied" } });
+    expect(complete).toHaveBeenCalledWith({
+      p_request_id: REQUEST_ID, p_call_id: "call-1", p_outcome: "no_answer",
+      p_payload: expect.objectContaining({ attempt: 2 }),
+    });
+  });
+
+  it.each([
+    ["voicemail", "no_answer", null],
+    ["no_answer", "unknown", "unrecognised_call_outcome"],
+    ["voicemail_left", "unknown", "unrecognised_call_outcome"],
+    ["qualified_review_requested", "unknown", "conflict_no_answer_vs_outcome"],
+  ])("voicemail with pathway token %s preserves the completion contract", async (token, outcome, reason) => {
+    const { client, complete } = setup({ result: "applied", status: outcome === "unknown" ? "needs_review" : "requested", outcome });
+    const payload = call({
+      answered_by: "voicemail",
+      variables: { call_outcome: token },
+      metadata: { request_id: REQUEST_ID, idempotency_key: KEY, attempt: 1 },
+    });
+    expect(mapBlandCallToOutcome(payload)).toMatchObject({ outcome, ...(reason ? { reason } : {}) });
+    expect(await post(client, payload)).toEqual({ status: 200, body: { status: "applied" } });
+    expect(complete).toHaveBeenCalledWith({
+      p_request_id: REQUEST_ID, p_call_id: "call-1", p_outcome: outcome,
+      p_payload: expect.objectContaining({ attempt: 1 }),
+    });
+  });
+
   it("unmappable payloads complete as unknown (parked for a human)", async () => {
     const { client, complete } = setup({ result: "applied", status: "needs_review", outcome: "unknown" });
     await post(client, call({ variables: {} }));
@@ -215,6 +274,7 @@ describe("bland webhook route core", () => {
       { norma_call_requests: [requestRow()] },
       {
         fn_norma_claim_dispatch: () => true,
+        fn_norma_presend_fence: () => true,
         fn_norma_eligibility: () => [{ eligible: true }],
         fn_norma_bind_call_id: () => (state.status === "completed" ? "already_completed" : "bound"),
         fn_norma_mark_dispatch_unknown: unknown,
@@ -297,4 +357,3 @@ describe("callback time conversion in the webhook", () => {
     expect(complete.mock.calls[0]![0].p_payload.callback_requested_for).toBeUndefined();
   });
 });
-

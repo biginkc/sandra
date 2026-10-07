@@ -11,10 +11,12 @@ export type NormaRequestView = {
   callback_requested_for?: string | null;
   callback_timezone?: string | null;
   completed_at: string | null;
+  /** 1, or 2 once the first call was not answered and Norma is calling again. */
+  attempt?: number | null;
 };
 
 export const NORMA_REQUEST_VIEW_COLUMNS =
-  "id, status, outcome, summary, callback_raw, callback_requested_for, callback_timezone, completed_at";
+  "id, status, outcome, summary, callback_raw, callback_requested_for, callback_timezone, completed_at, attempt";
 
 /** "Tue, Oct 6, 3:00 PM CDT" in the seller's zone; null when there is no usable time. */
 export function formatNormaCallbackTime(iso: string | null | undefined, timeZone: string | null | undefined): string | null {
@@ -35,4 +37,9 @@ export function formatNormaCallbackTime(iso: string | null | undefined, timeZone
 /** The request, if any, that is currently holding the lead (newest first input). */
 export function findOpenNormaRequest(rows: readonly NormaRequestView[]): NormaRequestView | null {
   return rows.find((row) => (NORMA_OPEN_STATUSES as readonly string[]).includes(row.status)) ?? null;
+}
+
+/** The newest finished call (rows are newest first), for the result badge beside the button. */
+export function findLastCompletedNormaRequest(rows: readonly NormaRequestView[]): NormaRequestView | null {
+  return rows.find((row) => row.status === "completed") ?? null;
 }
