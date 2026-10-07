@@ -5,7 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { OUTCOME_CRITERIA, buildQuestions } from "../../../../src/lib/sms-classification/questions";
 import { BLANKED_ENV } from "../server";
-import { classifyWithLuna, lunaConfigFromEnv, parseLunaJson, type LunaConfig } from "./luna";
+import { writeFileSync } from "node:fs";
+import { classifyWithLuna, codexPrompt, lastJsonObject, lunaConfigFromEnv, parseLunaJson, type CodexRun, type LunaConfig } from "./luna";
 import { LUNA_BANNER, NON_VERBATIM, lunaSystemPrompt, lunaSystemSegments, renderLunaPromptMarkdown } from "./luna-prompt";
 
 const cfg = (api: "responses" | "chat" = "responses"): LunaConfig => ({ apiKey: "sk-test", model: "luna-test", api, timeoutMs: 1000, baseUrl: "https://api.openai.com/v1" });
@@ -144,5 +145,67 @@ describe("Luna stays out of production", () => {
       expect(imports, f).not.toMatch(/from "pg"|from "@supabase|messaging\/|sms-send|rep-sms/);
       expect(src, f).not.toMatch(/\bsendSms\w*\(/);
     }
+  });
+});
+
+describe("codex-cli transport", () => {
+  const ccfg = (): LunaConfig => ({ apiKey: "", model: "gpt-6-luna", api: "codex-cli", timeoutMs: 1000, baseUrl: "" });
+  const outOf = (args: string[]) => args[args.indexOf("-o") + 1];
+  const reply = (text: string, extra: Partial<CodexRun> = {}) => vi.fn(async (args: string[], _stdin: string) => {
+    writeFileSync(outOf(args), text);
+    return { code: 0, stderr: "", stdout: "", timedOut: false, ...extra };
+  });
+
+  it("config needs no API key", () => {
+    expect(lunaConfigFromEnv({ LUNA_API: "codex-cli", LUNA_MODEL: "gpt-6-luna" })).toMatchObject({ api: "codex-cli", timeoutMs: 120_000 });
+  });
+  it("lastJsonObject picks the last object, ignoring braces in strings", () => {
+    expect(lastJsonObject('x {"a":1} y ```json\n{"b":"}{"}\n```')).toBe('{"b":"}{"}');
+    expect(lastJsonObject("no json")).toBeNull();
+  });
+  it("passes the prompt on stdin with the required flags and parses the last JSON object", async () => {
+    const run = reply(`thinking...\n${JSON.stringify({ ...good, confidence: 0.1 })}\n${JSON.stringify(good)}`);
+    const r = await classifyWithLuna(ccfg(), thread, { fetch: vi.fn() as never, sleep: noSleep, runCodex: run });
+    expect(r).toMatchObject({ status: "ok", outcome: "not_interested", confidence: 0.93 });
+    const [args, stdin] = run.mock.calls[0];
+    expect(args.slice(0, 9)).toEqual(["exec", "-m", "gpt-6-luna", "-s", "read-only", "--skip-git-repo-check", "-C", args[7], "-o"]);
+    expect(args[args.length - 1]).toBe("-");
+    expect(stdin).toBe(codexPrompt(thread));
+    expect(stdin).toContain("no thanks");
+    expect(stdin).toContain("escalation_reason");
+  });
+  it("retries once on off-schema output, then records an error (never guesses)", async () => {
+    const run = reply("I think it is not_interested");
+    const r = await classifyWithLuna(ccfg(), thread, { fetch: vi.fn() as never, sleep: noSleep, runCodex: run });
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(r).toMatchObject({ status: "error", error: "no JSON object in codex output" });
+  });
+  it("retries once then recovers", async () => {
+    let n = 0;
+    const run = vi.fn(async (args: string[]) => { writeFileSync(outOf(args), n++ === 0 ? "{}" : JSON.stringify(good)); return { code: 0, stderr: "", stdout: "", timedOut: false }; });
+    const r = await classifyWithLuna(ccfg(), thread, { fetch: vi.fn() as never, sleep: noSleep, runCodex: run });
+    expect(r.status).toBe("ok");
+  });
+  it("records an error on timeout and on non-zero exit", async () => {
+    const t = await classifyWithLuna(ccfg(), thread, { fetch: vi.fn() as never, sleep: noSleep, runCodex: async () => ({ code: null, stderr: "", stdout: "", timedOut: true }) });
+    expect(t).toMatchObject({ status: "error", error: "codex timed out" });
+    const x = await classifyWithLuna(ccfg(), thread, { fetch: vi.fn() as never, sleep: noSleep, runCodex: async () => ({ code: 1, stderr: "boom", stdout: "", timedOut: false }) });
+    expect(x).toMatchObject({ status: "error", error: "codex exited 1" });
+  });
+  it("backs off 30s and retries up to 3 times when at capacity", async () => {
+    const sleeps: number[] = [];
+    let n = 0;
+    const run = vi.fn(async (args: string[]) => {
+      if (n++ < 3) return { code: 1, stderr: "Model is at capacity", stdout: "", timedOut: false };
+      writeFileSync(outOf(args), JSON.stringify(good));
+      return { code: 0, stderr: "", stdout: "", timedOut: false };
+    });
+    const r = await classifyWithLuna(ccfg(), thread, { fetch: vi.fn() as never, sleep: async (ms) => { sleeps.push(ms); }, runCodex: run });
+    expect(r.status).toBe("ok");
+    expect(sleeps).toEqual([30_000, 30_000, 30_000]);
+    const always = vi.fn(async () => ({ code: 1, stderr: "at capacity", stdout: "", timedOut: false }));
+    const e = await classifyWithLuna(ccfg(), thread, { fetch: vi.fn() as never, sleep: noSleep, runCodex: always });
+    expect(always).toHaveBeenCalledTimes(4);
+    expect(e).toMatchObject({ status: "error", error: "codex at capacity" });
   });
 });

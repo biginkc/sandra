@@ -4,7 +4,7 @@
  *                           [--scope below_threshold|all_holds] [--eligibility policy|any]
  *
  * Jev -> Luna fallback cascade evaluation on a masked replay export (tmp/replay/<batch>.json).
- * Needs: TYPESAFE_API_KEY, OPENAI_API_KEY, LUNA_MODEL (no default). Optional: LUNA_API=responses|chat,
+ * Needs: TYPESAFE_API_KEY, OPENAI_API_KEY (not for LUNA_API=codex-cli, which uses the local Codex CLI login), LUNA_MODEL (no default). Optional: LUNA_API=responses|chat,
  * LUNA_TIMEOUT_MS, LUNA_PRICE_INPUT_PER_MTOK + LUNA_PRICE_OUTPUT_PER_MTOK (USD per 1M tokens, for cost).
  * Standalone: no database, no replay server, no SMS. Resumable cache: tmp/replay/compare-<batch>.jsonl.
  * Writes tmp/replay/compare-<batch>.report.{md,json} (mode 600; contains masked message text).
@@ -52,6 +52,7 @@ async function main() {
     if (error instanceof LunaConfigError) fail(error.message);
     throw error;
   }
+  if (luna.api === "codex-cli" && concurrency > 4) fail("--concurrency must be at most 4 with LUNA_API=codex-cli");
   const inP = process.env.LUNA_PRICE_INPUT_PER_MTOK, outP = process.env.LUNA_PRICE_OUTPUT_PER_MTOK;
   const prices = inP && outP && Number.isFinite(Number(inP)) && Number.isFinite(Number(outP)) ? { inputPerMTok: Number(inP), outputPerMTok: Number(outP) } : null;
 

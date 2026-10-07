@@ -4,6 +4,11 @@
  * shape Jev returns (outcome, confidence 0..1, escalationReason). A failed call is an `error` result;
  * nothing is ever guessed.
  */
+import { spawn } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import {
   LUNA_ESCALATION_REASONS,
   LUNA_OUTCOMES,
@@ -17,7 +22,7 @@ import type { JevEscalationReason, JevOutcome } from "../../../../src/lib/sms-cl
 export type LunaConfig = {
   apiKey: string;
   model: string;
-  api: "responses" | "chat";
+  api: "responses" | "chat" | "codex-cli";
   timeoutMs: number;
   baseUrl: string;
 };
@@ -26,13 +31,14 @@ export class LunaConfigError extends Error {}
 
 /** OPENAI_API_KEY and LUNA_MODEL are required; there is deliberately no default model. */
 export function lunaConfigFromEnv(env: Record<string, string | undefined>): LunaConfig {
+  const api = (env.LUNA_API ?? "responses").trim();
+  if (api !== "responses" && api !== "chat" && api !== "codex-cli") throw new LunaConfigError('LUNA_API must be "responses", "chat" or "codex-cli"');
   const apiKey = (env.OPENAI_API_KEY ?? "").trim();
-  if (!apiKey) throw new LunaConfigError("OPENAI_API_KEY is required");
+  // codex-cli uses the local Codex CLI login; no API key is read or needed.
+  if (!apiKey && api !== "codex-cli") throw new LunaConfigError("OPENAI_API_KEY is required");
   const model = (env.LUNA_MODEL ?? "").trim();
   if (!model) throw new LunaConfigError("LUNA_MODEL is required (no default; Jarrad supplies the model id)");
-  const api = (env.LUNA_API ?? "responses").trim();
-  if (api !== "responses" && api !== "chat") throw new LunaConfigError('LUNA_API must be "responses" or "chat"');
-  const timeoutMs = env.LUNA_TIMEOUT_MS ? Number(env.LUNA_TIMEOUT_MS) : 30_000;
+  const timeoutMs = env.LUNA_TIMEOUT_MS ? Number(env.LUNA_TIMEOUT_MS) : api === "codex-cli" ? 120_000 : 30_000;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new LunaConfigError("LUNA_TIMEOUT_MS must be a positive number");
   return { apiKey, model, api, timeoutMs, baseUrl: "https://api.openai.com/v1" };
 }
@@ -50,7 +56,81 @@ export type LunaOk = {
 export type LunaError = { status: "error"; error: string; latencyMs: number; model: string };
 export type LunaResult = LunaOk | LunaError;
 
-export type LunaDeps = { fetch: typeof fetch; sleep?: (ms: number) => Promise<void> };
+export type CodexRun = { code: number | null; stderr: string; stdout: string; timedOut: boolean };
+export type LunaDeps = {
+  fetch: typeof fetch;
+  sleep?: (ms: number) => Promise<void>;
+  /** codex-cli transport only: run `codex` with args, prompt on stdin. Default spawns the real CLI. */
+  runCodex?: (args: string[], stdin: string, timeoutMs: number) => Promise<CodexRun>;
+};
+
+export const CODEX_CAPACITY_BACKOFF_MS = 30_000;
+export const CODEX_CAPACITY_RETRIES = 3;
+
+class Capacity extends Error {}
+
+/** Pure: the last top-level JSON object in free text (codex may wrap it in prose or a fence). */
+export function lastJsonObject(text: string): string | null {
+  let last: string | null = null;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== "{") continue;
+    let depth = 0, inStr = false, esc = false;
+    for (let j = i; j < text.length; j++) {
+      const c = text[j];
+      if (inStr) { if (esc) esc = false; else if (c === "\\") esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') inStr = true;
+      else if (c === "{") depth++;
+      else if (c === "}" && --depth === 0) { last = text.slice(i, j + 1); i = j; break; }
+    }
+  }
+  return last;
+}
+
+export function codexPrompt(thread: readonly ThreadLine[]): string {
+  return [
+    lunaSystemPrompt(),
+    "Respond with ONLY one JSON object (no prose, no code fence) that validates against this JSON schema:",
+    JSON.stringify(lunaJsonSchema()),
+    lunaUserPrompt(thread),
+  ].join("\n\n");
+}
+
+export function defaultRunCodex(args: string[], stdin: string, timeoutMs: number): Promise<CodexRun> {
+  return new Promise((resolve) => {
+    const child = spawn("codex", args, { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "", stderr = "", timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, timeoutMs);
+    child.stdout.on("data", (d) => { stdout += d; });
+    child.stderr.on("data", (d) => { stderr += d; });
+    child.on("error", (e) => { clearTimeout(timer); resolve({ code: null, stderr: String(e.message), stdout, timedOut }); });
+    child.on("close", (code) => { clearTimeout(timer); resolve({ code, stderr, stdout, timedOut }); });
+    child.stdin.on("error", () => undefined);
+    child.stdin.end(stdin);
+  });
+}
+
+async function onceCodex(cfg: LunaConfig, thread: readonly ThreadLine[], deps: LunaDeps) {
+  const run = deps.runCodex ?? defaultRunCodex;
+  const scratch = mkdtempSync(path.join(tmpdir(), "luna-codex-"));
+  const cwd = path.join(scratch, "cwd");
+  const outFile = path.join(scratch, "out.txt");
+  try {
+    mkdirSync(cwd);
+    const args = ["exec", "-m", cfg.model, "-s", "read-only", "--skip-git-repo-check", "-C", cwd, "-o", outFile, "-"];
+    const r = await run(args, codexPrompt(thread), cfg.timeoutMs);
+    if (r.timedOut) throw new Retryable("codex timed out");
+    // Status only; never echo codex output (it can contain request content).
+    if (/at capacity/i.test(`${r.stderr}\n${r.stdout}`)) throw new Capacity("codex at capacity");
+    if (r.code !== 0) throw new Retryable(`codex exited ${r.code}`);
+    let text: string;
+    try { text = readFileSync(outFile, "utf8"); } catch { throw new Retryable("codex wrote no output file"); }
+    const json = lastJsonObject(text);
+    if (!json) throw new Retryable("no JSON object in codex output");
+    return { ...parseLunaJson(json), usage: null as LunaUsage | null };
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
 
 class Retryable extends Error {}
 class Fatal extends Error {}
@@ -73,7 +153,7 @@ export function parseLunaJson(text: string): { outcome: JevOutcome; confidence: 
   return { outcome: o.outcome as JevOutcome, confidence: o.confidence, escalationReason: o.escalation_reason as JevEscalationReason };
 }
 
-function buildRequest(cfg: LunaConfig, thread: readonly ThreadLine[]): { url: string; body: unknown } {
+function buildRequest(cfg: LunaConfig & { api: "responses" | "chat" }, thread: readonly ThreadLine[]): { url: string; body: unknown } {
   const schema = lunaJsonSchema();
   const system = lunaSystemPrompt();
   const user = lunaUserPrompt(thread);
@@ -106,7 +186,7 @@ type ApiJson = {
   usage?: { input_tokens?: number; output_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
 };
 
-function extract(cfg: LunaConfig, json: ApiJson): { text: string; usage: LunaUsage | null } {
+function extract(cfg: LunaConfig & { api: "responses" | "chat" }, json: ApiJson): { text: string; usage: LunaUsage | null } {
   if (cfg.api === "responses") {
     const parts: string[] = [];
     for (const item of json?.output ?? []) {
@@ -126,7 +206,7 @@ function extract(cfg: LunaConfig, json: ApiJson): { text: string; usage: LunaUsa
   return { text: msg.content, usage: u ? { inputTokens: u.prompt_tokens ?? null, outputTokens: u.completion_tokens ?? null } : null };
 }
 
-async function once(cfg: LunaConfig, thread: readonly ThreadLine[], deps: LunaDeps) {
+async function once(cfg: LunaConfig & { api: "responses" | "chat" }, thread: readonly ThreadLine[], deps: LunaDeps) {
   const { url, body } = buildRequest(cfg, thread);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
@@ -165,12 +245,17 @@ export async function classifyWithLuna(cfg: LunaConfig, thread: readonly ThreadL
   const started = Date.now();
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   let lastError = "unknown error";
+  let capacityLeft = CODEX_CAPACITY_RETRIES;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const r = await once(cfg, thread, deps);
+      const r = cfg.api === "codex-cli" ? await onceCodex(cfg, thread, deps) : await once(cfg as LunaConfig & { api: "responses" | "chat" }, thread, deps);
       return { status: "ok", ...r, latencyMs: Date.now() - started, model: cfg.model };
     } catch (e) {
       lastError = e instanceof Error ? e.message : "unknown error";
+      if (e instanceof Capacity) {
+        if (capacityLeft-- > 0) { await sleep(CODEX_CAPACITY_BACKOFF_MS); attempt--; continue; }
+        break;
+      }
       if (e instanceof Fatal || !(e instanceof Retryable)) break;
       if (attempt === 0) await sleep(500);
     }
