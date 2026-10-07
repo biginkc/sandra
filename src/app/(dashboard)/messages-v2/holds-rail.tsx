@@ -251,8 +251,12 @@ export function HoldsRail({
             ? `(${meta.total}, ${meta.shown} shown)`
             : `(${holds.length})`;
   return (
-    <aside aria-label="Holds" className="flex flex-col gap-3">
-      <h2 className="text-sm font-semibold">
+    <aside
+      aria-label="Holds"
+      data-testid="holds-scroll"
+      className="flex flex-col gap-3 lg:min-h-0 lg:overflow-y-auto lg:pr-1"
+    >
+      <h2 className="lg:sticky lg:top-0 z-10 bg-background pb-1 text-sm font-semibold">
         Holds <span className="text-muted-foreground">{count}</span>
       </h2>
       {holdFailures.length > 0 && (
