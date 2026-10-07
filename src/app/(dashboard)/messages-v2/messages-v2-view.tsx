@@ -331,7 +331,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         </p>
       </header>
 
-      <div className="grid gap-6 lg:min-h-0 lg:flex-1 lg:grid-cols-[minmax(0,1fr)_380px] lg:grid-rows-[minmax(0,1fr)]">
+      <div className="grid gap-6 lg:min-h-[20rem] lg:flex-1 lg:grid-cols-[minmax(0,1fr)_380px] lg:grid-rows-[minmax(0,1fr)]">
         <section
           aria-label="Live feed"
           className="flex min-w-0 flex-col gap-3 lg:min-h-0"
@@ -389,7 +389,14 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         />
       </div>
 
-      <ScorecardCard orgId={orgId} initialRows={props.scorecardRows ?? null} />
+      {/* lg: the scorecard gets a bounded, scrollable slice so the feed and holds
+          columns above always keep their height (min 20rem). */}
+      <div
+        data-testid="scorecard-slot"
+        className="lg:max-h-[35vh] lg:shrink-0 lg:overflow-y-auto"
+      >
+        <ScorecardCard orgId={orgId} initialRows={props.scorecardRows ?? null} />
+      </div>
 
       <ul
         aria-label="Legend"
