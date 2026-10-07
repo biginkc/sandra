@@ -90,6 +90,13 @@ export class FakeStore implements DeliveryStore {
     }
     return n;
   }
+  async deliveredPropertyIds(orgId: string) {
+    const ids = new Set<string>();
+    for (const r of this.rows) {
+      if (r.orgId === orgId && r.propertyId && !r.holdKey.includes(":closed:")) ids.add(r.propertyId);
+    }
+    return { ids: [...ids], complete: true };
+  }
   async markSent(id: string) {
     const r = this.rows.find((x) => x.id === id)!;
     r.status = "sent";
@@ -143,7 +150,7 @@ export function makeDeps(
   const clock = () => new Date(nowIso);
   const store = (over.store as FakeStore | undefined) ?? new FakeStore(clock);
   // Existing tests model an org whose alerts were enabled long ago; watermark tests clear this.
-  if (!over.noWatermark && !store.watermarks.has(ORG)) store.watermarks.set(ORG, "2026-10-01T00:00:00.000Z");
+  if (!over.noWatermark && store instanceof FakeStore && !store.watermarks.has(ORG)) store.watermarks.set(ORG, "2026-10-01T00:00:00.000Z");
   const sent: Sent[] = [];
   const results: Record<"slack" | "sms" | "email", ChannelResult> = {
     slack: { status: "sent" },
@@ -156,6 +163,11 @@ export function makeDeps(
     baseUrl: "https://app.example.com",
     emailEnabled: false,
     loadHolds: async () => ({ holds: over.holds ?? [hold()], complete: over.holdsComplete ?? true }),
+    // Default: a property is held while the (possibly swapped) loadHolds still returns it.
+    loadHeldPropertyIds: async (org, ids) => {
+      const held = new Set((await deps.loadHolds(org, "")).holds.map((h) => h.propertyId));
+      return new Set(ids.filter((id) => held.has(id)));
+    },
     loadRecipients: async () => over.recipients ?? [OWNER, ACQ],
     isRecipientAuthorized: async () => true,
     sendSlack: async (userId, text) => {

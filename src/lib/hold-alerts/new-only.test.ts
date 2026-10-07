@@ -86,12 +86,16 @@ describe("alerts only for holds that start after alerts were enabled", () => {
     expect(none.sent).toEqual([]);
   });
 
-  it("still archives delivery rows for closed holds using the full open set", async () => {
+  it("archives delivery rows for closed holds; a backlog hold elsewhere does not matter", async () => {
     const t = makeDeps({ holds: [fresh], nowIso: "2026-10-08T12:00:00.000Z" });
     t.store.watermarks.set(ORG, MARK);
     await runHoldAlertsForOrg(t.deps, ORG);
     // The hold closes; a backlog hold elsewhere stays open and silent.
-    const t2 = { ...t.deps, loadHolds: async () => ({ holds: [old], complete: true }) };
+    const t2 = {
+      ...t.deps,
+      loadHolds: async () => ({ holds: [], complete: true }),
+      loadHeldPropertyIds: async () => new Set(["old"]),
+    };
     const s = await runHoldAlertsForOrg(t2, ORG);
     expect(s.archived).toBeGreaterThan(0);
   });

@@ -78,6 +78,28 @@ describe("DeliveryStore.archiveClosed", () => {
   });
 });
 
+describe("DeliveryStore.deliveredPropertyIds", () => {
+  it("returns distinct property ids from live per-hold rows, complete when the last page is short", async () => {
+    const t = fake([
+      [
+        { id: "r1", property_id: "a", hold_key: "a:x" },
+        { id: "r2", property_id: "a", hold_key: "a:y" },
+        { id: "r3", property_id: "b", hold_key: "b:x" },
+      ],
+    ]);
+    const got = await createSupabaseDeliveryStore(t.client).deliveredPropertyIds("org");
+    expect(got).toEqual({ ids: ["a", "b"], complete: true });
+    expect(t.selects[0]).toContainEqual({ method: "not", args: ["hold_key", "like", "%:closed:%"] });
+  });
+
+  it("is incomplete when the page cap is hit", async () => {
+    const page = (n: number) =>
+      Array.from({ length: 500 }, (_, i) => ({ id: `r${n}-${String(i).padStart(4, "0")}`, property_id: `p${n}-${i}`, hold_key: "k" }));
+    const t = fake(Array.from({ length: 20 }, (_, n) => page(n)));
+    expect((await createSupabaseDeliveryStore(t.client).deliveredPropertyIds("org")).complete).toBe(false);
+  });
+});
+
 describe("DeliveryStore.countSentSince", () => {
   it("counts in-flight (sending) as well as sent deliveries, each by its own timestamp", async () => {
     const calls: Call[] = [];

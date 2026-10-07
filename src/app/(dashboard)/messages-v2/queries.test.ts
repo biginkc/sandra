@@ -9,6 +9,7 @@ import {
   groupStepsByRun,
   HOLDS_COUNT_CAP,
   buildHoldsMeta,
+  loadHeldPropertyIds,
   formatHoldsTotal,
   loadMessagesV2Data,
   type HoldDraftRow,
@@ -1278,7 +1279,7 @@ describe("deriveOpenHolds alert_since (when the hold began, for alert eligibilit
   });
 });
 
-describe("loadMessagesV2Data alertsSince (seller messages on backlog-flagged leads)", () => {
+describe("loadMessagesV2Data alertsSince (eligible set found directly, not through HOLD_LIMIT)", () => {
   const flagged = (id: string, since: string | null) => ({
     id,
     last_ai_escalation_at: iso("01:00:00"),
@@ -1287,36 +1288,108 @@ describe("loadMessagesV2Data alertsSince (seller messages on backlog-flagged lea
     needs_human_attention_since: since,
   });
   const WM = iso("10:00:00");
+  const has = (c: Call, method: string, col?: string) =>
+    c.some((x) => x.method === method && (col === undefined || x.args[0] === col));
+  const arg = (c: Call, method: string) => c.find((x) => x.method === method)!.args;
+  const backlog = Array.from({ length: 250 }, (_, i) => flagged(`b${i}`, null));
 
-  it("asks for inbound messages only for properties with an unknown flag start, at/after the watermark", async () => {
-    const { client, queries } = fakeSupabase({
-      properties: (c) => (isHead(c) ? { data: [] } : { data: [flagged("old", null), flagged("tracked", iso("11:00:00"))] }),
-      messages: () => ({ data: [{ property_id: "old", created_at: iso("12:00:00") }] }),
+  /** Page window (200 oldest backlog) + the alert lookups, keyed by what each query asks for. */
+  const world = (opts: {
+    newlyFlagged?: string[];
+    inbound?: Array<{ property_id: string; created_at: string }>;
+    flaggedRows?: ReturnType<typeof flagged>[];
+    decisions?: unknown[];
+    messagesError?: boolean;
+  }) =>
+    fakeSupabase({
+      properties: (c) => {
+        if (has(c, "gte", "needs_human_attention_since"))
+          return { data: (opts.newlyFlagged ?? []).map((id) => ({ id })) };
+        if (has(c, "in", "id")) {
+          const ids = arg(c, "in")[1] as string[];
+          return { data: (opts.flaggedRows ?? []).filter((r) => ids.includes(r.id)) };
+        }
+        return isHead(c) ? { data: [] } : { data: backlog.slice(0, 200) };
+      },
+      messages: () =>
+        opts.messagesError ? { error: { message: "boom" } } : { data: opts.inbound ?? [] },
+      jev_lead_decisions: (c) => (has(c, "in", "property_id") || has(c, "gte") ? { data: opts.decisions ?? [] } : { data: [] }),
+    });
+
+  it("finds a post-watermark seller text on a lead the page window never reaches (2,504-style backlog)", async () => {
+    const { client, queries } = world({
+      inbound: [{ property_id: "late", created_at: iso("12:00:00") }],
+      flaggedRows: [flagged("late", null)],
     });
     const data = await loadMessagesV2Data(client, "org", undefined, { alertsSince: WM });
-    const msgQueries = queries.filter((q) => q[0]?.table === "messages");
-    expect(msgQueries).toHaveLength(1);
-    const call = (q: Call, m: string) => q.find((c) => c.method === m)!.args;
-    expect(call(msgQueries[0]!, "in")).toEqual(["property_id", ["old"]]);
-    expect(call(msgQueries[0]!, "gte")).toEqual(["created_at", WM]);
-    expect(msgQueries[0]!.some((c) => c.method === "eq" && c.args[0] === "direction" && c.args[1] === "inbound")).toBe(true);
-    expect(data.holds.find((h) => h.id === "old")!.alert_since).toBe(iso("12:00:00"));
-    expect(data.holds.find((h) => h.id === "tracked")!.alert_since).toBe(iso("11:00:00"));
+    expect(data.holds.map((h) => h.id)).toEqual(["late"]);
+    expect(data.holds[0]!.alert_since).toBe(iso("12:00:00"));
+    const msg = queries.filter((q) => q[0]?.table === "messages");
+    expect(msg).toHaveLength(1);
+    expect(has(msg[0]!, "in")).toBe(false); // org-wide, not chunked by property
+    expect(arg(msg[0]!, "gte")).toEqual(["created_at", WM]);
+    expect(arg(msg[0]!, "limit")).toEqual([1000]);
+    expect(arg(msg[0]!, "order")[1]).toMatchObject({ ascending: false });
+    expect(msg[0]!.some((c) => c.method === "eq" && c.args[0] === "direction" && c.args[1] === "inbound")).toBe(true);
+  });
+
+  it("a lead flagged 1 minute BEFORE the watermark that gets a seller text after it starts at that text", async () => {
+    const { client } = world({
+      inbound: [{ property_id: "edge", created_at: iso("10:05:00") }],
+      flaggedRows: [flagged("edge", iso("09:59:00"))],
+    });
+    const data = await loadMessagesV2Data(client, "org", undefined, { alertsSince: WM });
+    expect(data.holds.map((h) => h.id)).toEqual(["edge"]);
+    expect(data.holds[0]!.alert_since).toBe(iso("10:05:00"));
+    expect(Date.parse(data.holds[0]!.alert_since!)).toBeGreaterThanOrEqual(Date.parse(WM));
+  });
+
+  it("the same pre-watermark flag with no later text is not eligible at all", async () => {
+    const { client } = world({ flaggedRows: [flagged("edge", iso("09:59:00"))] });
+    const data = await loadMessagesV2Data(client, "org", undefined, { alertsSince: WM });
+    expect(data.holds).toEqual([]);
+  });
+
+  it("a lead flagged after the watermark is found by its flag start", async () => {
+    const { client, queries } = world({ newlyFlagged: ["fresh"], flaggedRows: [flagged("fresh", iso("11:00:00"))] });
+    const data = await loadMessagesV2Data(client, "org", undefined, { alertsSince: WM });
+    expect(data.holds.map((h) => [h.id, h.alert_since])).toEqual([["fresh", iso("11:00:00")]]);
+    const q = queries.find((x) => x[0]?.table === "properties" && has(x, "gte", "needs_human_attention_since"))!;
+    expect(arg(q, "gte")).toEqual(["needs_human_attention_since", WM]);
+  });
+
+  it("a pending decision created after the watermark makes its lead eligible", async () => {
+    const decision = { property_id: "d1", conversation_id: "c1", source_inbound_message_id: "m1", created_at: iso("11:30:00") };
+    const { client } = world({ decisions: [decision] });
+    const data = await loadMessagesV2Data(client, "org", undefined, { alertsSince: WM });
+    expect(data.holds.map((h) => [h.property_id, h.alert_since])).toEqual([["d1", iso("11:30:00")]]);
   });
 
   it("makes no messages query without alertsSince (the page)", async () => {
-    const { client, queries } = fakeSupabase({
-      properties: (c) => (isHead(c) ? { data: [] } : { data: [flagged("old", null)] }),
-    });
+    const { client, queries } = world({});
     await loadMessagesV2Data(client, "org");
     expect(queries.some((q) => q[0]?.table === "messages")).toBe(false);
   });
 
-  it("a backlog lead with no seller message after the watermark stays unknown (silent)", async () => {
-    const { client } = fakeSupabase({
-      properties: (c) => (isHead(c) ? { data: [] } : { data: [flagged("old", null)] }),
-    });
+  it("a failed eligibility lookup is reported as failed, never as no holds", async () => {
+    const { client } = world({ messagesError: true });
     const data = await loadMessagesV2Data(client, "org", undefined, { alertsSince: WM });
-    expect(data.holds[0]!.alert_since).toBeNull();
+    expect(data.holdsMeta.failed.length).toBeGreaterThan(0);
+  });
+});
+
+describe("loadHeldPropertyIds", () => {
+  it("returns the properties still flagged or with a pending decision, review or draft", async () => {
+    const { client } = fakeSupabase({
+      properties: () => ({ data: [{ id: "a" }] }),
+      jev_lead_decisions: () => ({ data: [{ property_id: "b" }] }),
+      ai_disposition_reviews: () => ({ data: [] }),
+      ai_reply_drafts: () => ({ data: [{ property_id: "c" }] }),
+    });
+    expect([...(await loadHeldPropertyIds(client, "org", ["a", "b", "c", "d"]))!].sort()).toEqual(["a", "b", "c"]);
+  });
+  it("is null (never 'closed') when a lookup fails", async () => {
+    const { client } = fakeSupabase({ ai_reply_drafts: () => ({ error: { message: "x" } }) });
+    expect(await loadHeldPropertyIds(client, "org", ["a"])).toBeNull();
   });
 });

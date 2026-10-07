@@ -86,6 +86,12 @@ export interface DeliveryStore {
    * number archived.
    */
   archiveClosed(orgId: string, openPropertyIds: readonly string[]): Promise<number>;
+  /**
+   * Distinct property ids that have live (non-archived) per-hold delivery rows.
+   * `complete` is false when the paging cap was hit: an incomplete list must not
+   * be used to decide anything closed.
+   */
+  deliveredPropertyIds(orgId: string): Promise<{ ids: string[]; complete: boolean }>;
   markSent(id: string): Promise<void>;
   markSkipped(id: string, reason: string): Promise<void>;
   /** attempts was already incremented by claim(); `terminal` pins attempts at the max. */
@@ -108,11 +114,16 @@ export interface HoldAlertDeps {
   /** HOLD_ALERT_EMAIL_ENABLED === "1". When false no digest rows are created. */
   emailEnabled: boolean;
   /**
-   * Alertable holds only (property known, informational holds removed).
-   * `complete` is false when the underlying hold queries were truncated or
-   * failed: an incomplete set must never be used to decide a hold has closed.
+   * Alertable holds only (property known, informational holds removed), and only
+   * for leads with activity at/after `alertsSince` (looked up directly, not
+   * through the page's hold window). `complete` is false when a source query failed.
    */
   loadHolds(orgId: string, alertsSince: string): Promise<{ holds: HoldInfo[]; complete: boolean }>;
+  /**
+   * Which of these properties are held right now. null = a lookup failed, so
+   * nothing may be treated as closed.
+   */
+  loadHeldPropertyIds(orgId: string, propertyIds: readonly string[]): Promise<Set<string> | null>;
   /** Active owner + acquisitions members. */
   loadRecipients(orgId: string): Promise<Recipient[]>;
   /**

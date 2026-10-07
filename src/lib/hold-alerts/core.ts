@@ -75,13 +75,19 @@ export async function runHoldAlertsForOrg(
   const alertsSinceMs = Date.parse(mark.alertsSince);
 
   const loaded = await deps.loadHolds(orgId, mark.alertsSince);
-  const openHolds = loaded.holds;
-  const holds = openHolds.filter((h) => isNewHold(h, alertsSinceMs));
+  const holds = loaded.holds.filter((h) => isNewHold(h, alertsSinceMs));
   // Archive-on-clear: a property that is no longer held closes its delivery
-  // rows so a re-opened hold gets fresh keys. Only on a COMPLETE load, or a
-  // truncated / failed query would "close" holds that are still open.
-  if (loaded.complete) {
-    summary.archived = await deps.store.archiveClosed(orgId, [...new Set(openHolds.map((h) => h.propertyId))]);
+  // rows so a re-opened hold gets fresh keys. Bounded and independent of the
+  // alert load: look only at properties that have live delivery rows, ask which
+  // are still held, and archive the rest. Any incomplete answer archives nothing.
+  const delivered = await deps.store.deliveredPropertyIds(orgId);
+  if (delivered.complete && delivered.ids.length > 0) {
+    const held = await deps.loadHeldPropertyIds(orgId, delivered.ids);
+    if (held) {
+      // Properties delivered after the listing (a concurrent run) stay untouched.
+      const open = new Set([...held, ...loaded.holds.map((h) => h.propertyId)]);
+      summary.archived = await deps.store.archiveClosed(orgId, [...open]);
+    }
   }
   summary.holds = holds.length;
   if (holds.length === 0) return summary;

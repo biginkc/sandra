@@ -157,6 +157,28 @@ export function createSupabaseDeliveryStore(db: LooseSupabase): DeliveryStore {
       return archived;
     },
 
+    async deliveredPropertyIds(orgId) {
+      const ids = new Set<string>();
+      let cursor: string | null = null;
+      for (let page = 0; page < ARCHIVE_MAX_PAGES; page += 1) {
+        let q = table()
+          .select("id, property_id")
+          .eq("org_id", orgId)
+          .not("property_id", "is", null)
+          .not("hold_key", "like", "%:closed:%")
+          .order("id", { ascending: true })
+          .limit(ARCHIVE_BATCH);
+        if (cursor) q = q.gt("id", cursor);
+        const { data, error } = await q;
+        if (error) fail("delivered select", error);
+        const rows = (data ?? []) as Array<{ id: string; property_id: string | null }>;
+        for (const r of rows) if (r.property_id) ids.add(r.property_id);
+        if (rows.length < ARCHIVE_BATCH) return { ids: [...ids], complete: true };
+        cursor = rows[rows.length - 1]!.id;
+      }
+      return { ids: [...ids], complete: false };
+    },
+
     async markSent(id) {
       const { error } = await table()
         .update({ status: "sent", sent_at: new Date().toISOString(), last_error: null })

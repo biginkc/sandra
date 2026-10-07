@@ -21,8 +21,10 @@ import { hold, makeDeps } from "./test-support";
 const db = new Client({ connectionString: process.env.TEST_SUPABASE_DB_URL });
 let createdTable = false;
 let createdRpcs = false;
+let createdSettings = false;
 let orgId: string;
 let userId: string;
+const WATERMARK = "2026-01-01T00:00:00.000Z";
 const LAST_ID = "ffffffff-ffff-4fff-bfff-ffffffffffff";
 
 beforeAll(async () => {
@@ -53,6 +55,20 @@ beforeAll(async () => {
     await new Promise((r) => setTimeout(r, 1500));
     createdTable = true;
   }
+  const settings = await db.query("select to_regclass('public.hold_alert_settings') as t");
+  if (!settings.rows[0].t) {
+    await db.query(`
+      create table public.hold_alert_settings (
+        org_id uuid primary key references public.organizations(id) on delete cascade,
+        alerts_since timestamptz not null,
+        created_at timestamptz not null default now()
+      );
+      grant select, insert, update on public.hold_alert_settings to service_role;
+    `);
+    await db.query("notify pgrst, 'reload schema'");
+    await new Promise((r) => setTimeout(r, 1500));
+    createdSettings = true;
+  }
   const fnCheck = await db.query("select to_regproc('public.hold_alert_archive_rows') as f");
   if (!fnCheck.rows[0].f) {
     const sql = readFileSync(
@@ -70,6 +86,8 @@ beforeAll(async () => {
   userId = randomUUID();
   await db.query("insert into public.organizations (id, name) values ($1, $2)", [orgId, `Archive ${orgId}`]);
   await db.query("insert into auth.users (id, email) values ($1, $2)", [userId, `a-${userId}@test.local`]);
+  // These tests model an org whose alerts were enabled long ago.
+  await db.query("insert into public.hold_alert_settings (org_id, alerts_since) values ($1, $2)", [orgId, WATERMARK]);
 });
 
 afterAll(async () => {
@@ -77,6 +95,12 @@ afterAll(async () => {
     if (createdRpcs) {
       await db.query("drop function if exists public.hold_alert_archive_rows(uuid, uuid[])");
       await db.query("drop function if exists public.hold_alert_latest_status(uuid, uuid[])");
+    }
+    if (createdSettings) {
+      await db.query("drop table if exists public.hold_alert_settings");
+      await db.query("notify pgrst, 'reload schema'");
+    } else {
+      await db.query("delete from public.hold_alert_settings where org_id = $1", [orgId]);
     }
     if (createdTable) {
       await db.query("drop table if exists public.hold_alert_deliveries");
@@ -152,6 +176,33 @@ describe("archiveClosed with a full window of open holds", () => {
 
     const reopened = await pass([h]);
     expect(reopened.t.sent.filter((x) => x.channel === "slack")).toHaveLength(1);
+  });
+});
+
+describe("getOrInitAlertsSince (real supabase-js client)", () => {
+  it("returns created=false and the EXISTING watermark when the org already has one", async () => {
+    const store = createSupabaseDeliveryStore(admin());
+    const got = await store.getOrInitAlertsSince(orgId, "2026-10-09T00:00:00.000Z");
+    expect(got.created).toBe(false);
+    expect(new Date(got.alertsSince).toISOString()).toBe(WATERMARK);
+    const { rows } = await db.query("select alerts_since from public.hold_alert_settings where org_id = $1", [orgId]);
+    expect(rows[0].alerts_since.toISOString()).toBe(WATERMARK);
+  });
+
+  it("inserts once (created=true) when absent, then conflicts without moving it", async () => {
+    const other = randomUUID();
+    await db.query("insert into public.organizations (id, name) values ($1, $2)", [other, `Mark ${other}`]);
+    try {
+      const store = createSupabaseDeliveryStore(admin());
+      const first = await store.getOrInitAlertsSince(other, "2026-10-09T00:00:00.000Z");
+      expect(first.created).toBe(true);
+      const second = await store.getOrInitAlertsSince(other, "2026-10-10T00:00:00.000Z");
+      expect(second.created).toBe(false);
+      expect(new Date(second.alertsSince).toISOString()).toBe("2026-10-09T00:00:00.000Z");
+    } finally {
+      await db.query("delete from public.hold_alert_settings where org_id = $1", [other]);
+      await db.query("delete from public.organizations where id = $1", [other]);
+    }
   });
 });
 

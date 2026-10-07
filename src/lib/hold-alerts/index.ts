@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { loadMessagesV2Data, type LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
+import { loadHeldPropertyIds, loadMessagesV2Data, type LooseSupabase } from "@/app/(dashboard)/messages-v2/queries";
 import { loadRunLabels } from "@/app/(dashboard)/messages-v2/labels";
 import { hasActiveSandraAccess } from "@/lib/auth/access-state";
 import { isAcquisitionsCaller } from "@/lib/auth/surface-access";
@@ -58,8 +58,7 @@ async function loadAlertHolds(
       inbound_message_id: h.run?.inbound_message_id ?? "",
     })),
   );
-  // Exact totals only: a truncated or failed source can hide still-open holds.
-  const complete = data.holdsMeta.totalState === "exact" && !data.holdsMeta.truncated && data.holdsMeta.failed.length === 0;
+  const complete = data.holdsMeta.failed.length === 0;
   return { holds: toAlertHolds(data.holds, labels, hotReasons), complete };
 }
 
@@ -76,6 +75,7 @@ export function createHoldAlertDeps(
     baseUrl: resolveAppBaseUrl(env),
     emailEnabled: env.HOLD_ALERT_EMAIL_ENABLED === "1",
     loadHolds: (orgId, alertsSince) => loadAlertHolds(db, orgId, hotReasons, alertsSince),
+    loadHeldPropertyIds: (orgId, ids) => loadHeldPropertyIds(db, orgId, ids),
     async loadRecipients(orgId): Promise<Recipient[]> {
       const { data, error } = await db.from("memberships").select(MEMBERSHIP_COLUMNS).eq("org_id", orgId);
       if (error) throw new Error(`memberships lookup failed: ${error.message}`);

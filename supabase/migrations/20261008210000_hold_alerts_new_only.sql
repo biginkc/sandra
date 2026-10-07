@@ -16,6 +16,7 @@
 -- 2. hold_alert_settings: a per-org watermark (alerts_since). The first cron run
 --    after enable inserts alerts_since = now() and sends nothing; only holds that
 --    began at or after it can alert. service_role writes, owners read.
+-- 2b. idx_messages_org_inbound_created: partial index for the cron's org-wide inbound lookup.
 -- 3. Pending (and retryable failed) deliveries are discarded as skipped
 --    'backlog_discarded' so re-enabling can never send them. skipped reasons live
 --    in last_error; the status check already allows 'skipped'.
@@ -89,6 +90,14 @@ create policy hold_alert_settings_owner_select on public.hold_alert_settings
 revoke all on table public.hold_alert_settings from public, anon, authenticated, service_role;
 grant select on table public.hold_alert_settings to authenticated;
 grant select, insert, update on table public.hold_alert_settings to service_role;
+
+-- 2b. Org-wide "inbound since the watermark" lookup ---------------------------------
+-- The alert cron finds leads with new seller texts via one org-wide query
+-- (org_id, direction = inbound, created_at >= watermark, newest first). The existing
+-- messages indexes are per-property or global by created_at only.
+create index if not exists idx_messages_org_inbound_created
+  on public.messages (org_id, created_at desc)
+  where direction = 'inbound';
 
 -- 3. Discard the backlog of undelivered alerts ------------------------------------
 update public.hold_alert_deliveries

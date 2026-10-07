@@ -14,6 +14,7 @@ begin
   if v_new <> v_def then execute v_new; end if;
 end $$;
 
+drop index if exists public.idx_messages_org_inbound_created;
 drop table if exists public.hold_alert_settings;
 drop trigger if exists trg_properties_track_needs_attention_since on public.properties;
 drop function if exists public.properties_track_needs_attention_since();

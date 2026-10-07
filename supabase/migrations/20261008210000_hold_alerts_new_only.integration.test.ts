@@ -130,6 +130,18 @@ describe("needs_human_attention_since trigger", () => {
   });
 });
 
+describe("org-wide inbound lookup index", () => {
+  it("exists and is partial on inbound", async () => {
+    await db.query(NEW_ONLY);
+    const { rows } = await db.query(
+      "select indexdef from pg_indexes where schemaname = 'public' and indexname = 'idx_messages_org_inbound_created'",
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].indexdef).toMatch(/\(org_id, created_at DESC\)/);
+    expect(rows[0].indexdef).toMatch(/direction/);
+  });
+});
+
 describe("hold_alert_settings watermark", () => {
   beforeEach(async () => {
     await db.query(NEW_ONLY);
