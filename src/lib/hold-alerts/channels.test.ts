@@ -112,6 +112,19 @@ describe("sendEmail", () => {
       text: "body",
     });
   });
+  it("sends the Idempotency-Key header when given, and omits it otherwise", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }));
+    const s = createChannelSenders(admin, {
+      env: { RESEND_API_KEY: "k", HOLD_ALERT_EMAIL_FROM: "a@b.c" },
+      fetch: fetchImpl as never,
+    });
+    await s.sendEmail("u1", message, { idempotencyKey: "hold-alert-row-1" });
+    await s.sendEmail("u1", message);
+    const [, withKey] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    const [, withoutKey] = fetchImpl.mock.calls[1] as unknown as [string, RequestInit];
+    expect((withKey.headers as Record<string, string>)["Idempotency-Key"]).toBe("hold-alert-row-1");
+    expect((withoutKey.headers as Record<string, string>)["Idempotency-Key"]).toBeUndefined();
+  });
   it("a non-2xx response is a retryable failure", async () => {
     const s = createChannelSenders(admin, {
       env: { RESEND_API_KEY: "k", HOLD_ALERT_EMAIL_FROM: "a@b.c" },

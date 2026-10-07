@@ -125,7 +125,7 @@ export function hold(over: Partial<HoldInfo> = {}): HoldInfo {
   };
 }
 
-export type Sent = { channel: "slack" | "sms" | "email"; userId: string; text: string };
+export type Sent = { channel: "slack" | "sms" | "email"; userId: string; text: string; idempotencyKey?: string };
 
 export function makeDeps(
   over: Partial<HoldAlertDeps> & { holds?: HoldInfo[]; holdsComplete?: boolean; recipients?: Recipient[]; nowIso?: string } = {},
@@ -155,8 +155,8 @@ export function makeDeps(
       sent.push({ channel: "sms", userId, text });
       return results.sms;
     },
-    sendEmail: async (userId, message) => {
-      sent.push({ channel: "email", userId, text: `${message.subject}\n${message.text}` });
+    sendEmail: async (userId, message, opts) => {
+      sent.push({ channel: "email", userId, text: `${message.subject}\n${message.text}`, idempotencyKey: opts?.idempotencyKey });
       return results.email;
     },
     ...over,

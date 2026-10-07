@@ -78,7 +78,11 @@ export function createChannelSenders(
     }
   }
 
-  async function sendEmail(userId: string, message: EmailMessage): Promise<ChannelResult> {
+  async function sendEmail(
+    userId: string,
+    message: EmailMessage,
+    opts: { idempotencyKey?: string } = {},
+  ): Promise<ChannelResult> {
     const key = env.RESEND_API_KEY;
     if (!key) return { status: "skipped", reason: "no_resend_key" };
     const from = env.HOLD_ALERT_EMAIL_FROM ?? env.RESEND_FROM;
@@ -89,7 +93,12 @@ export function createChannelSenders(
       if (error || !to) return { status: "skipped", reason: "no_email" };
       const res = await fetchImpl(RESEND_URL, {
         method: "POST",
-        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        headers: {
+          Authorization: `Bearer ${key}`,
+          "Content-Type": "application/json",
+          // Same delivery row => same key, so a retried request can never duplicate a digest.
+          ...(opts.idempotencyKey ? { "Idempotency-Key": opts.idempotencyKey } : {}),
+        },
         body: JSON.stringify({ from, to: [to], subject: message.subject, text: message.text }),
         signal: AbortSignal.timeout(RESEND_TIMEOUT_MS),
       });

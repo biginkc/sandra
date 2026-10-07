@@ -114,7 +114,7 @@ export interface HoldAlertDeps {
   isRecipientAuthorized(orgId: string, userId: string, opts?: { requireOwner?: boolean }): Promise<boolean>;
   sendSlack(userId: string, text: string): Promise<ChannelResult>;
   sendSms(userId: string, text: string): Promise<ChannelResult>;
-  sendEmail(userId: string, message: EmailMessage): Promise<ChannelResult>;
+  sendEmail(userId: string, message: EmailMessage, opts?: { idempotencyKey?: string }): Promise<ChannelResult>;
 }
 
 export type OrgAlertSummary = {

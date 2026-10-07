@@ -266,6 +266,13 @@ describe("email digest", () => {
     expect(t.sent.filter((s) => s.channel === "email")).toHaveLength(4);
   });
 
+  it("derives the email Idempotency-Key from the delivery row id", async () => {
+    const t = makeDeps({ emailEnabled: true });
+    await runHoldAlertsForOrg(t.deps, ORG);
+    const mail = t.sent.filter((x) => x.channel === "email");
+    const rows = t.store.rows.filter((r) => r.channel === "email");
+    expect(mail.map((m) => m.idempotencyKey).sort()).toEqual(rows.map((r) => `hold-alert-${r.id}`).sort());
+  });
   it("records a missing Resend key as skipped", async () => {
     const t = makeDeps({ emailEnabled: true });
     t.results.email = { status: "skipped", reason: "no_resend_key" };

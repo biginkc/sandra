@@ -17,7 +17,7 @@ export const DEFAULT_BUDGET_MS = 50_000;
 
 type Task = {
   input: EnsureInput;
-  send: () => Promise<ChannelResult>;
+  send: (ctx: { deliveryId: string }) => Promise<ChannelResult>;
   /** The recipient must still be an owner when the send happens (SMS). */
   requireOwner?: boolean;
   /** Asked before the row is even created; false = nothing to do yet. */
@@ -119,7 +119,7 @@ export async function runHoldAlertsForOrg(
     for (const r of recipients) {
       tasks.push({
         input: { ...base, propertyId: null, holdKey: hourKey, recipientUserId: r.userId, channel: "email", stage: "digest" },
-        send: () => deps.sendEmail(r.userId, message),
+        send: ({ deliveryId }) => deps.sendEmail(r.userId, message, { idempotencyKey: `hold-alert-${deliveryId}` }),
       });
     }
   }
@@ -158,7 +158,7 @@ async function runTask(
       return "skipped";
     }
     sendStarted = true;
-    const result = await task.send();
+    const result = await task.send({ deliveryId: row.id });
     if (result.status === "sent") {
       await store.markSent(row.id);
       return "sent";
