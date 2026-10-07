@@ -21,7 +21,7 @@ test("recordings load on demand and failed audio can be retried without external
     requests.push(url.pathname);
     // Every request is fulfilled locally; no provider or production access.
     if (url.pathname.endsWith("/recordings")) {
-      await route.fulfill({ json: { recordings: [{ attempt: 1 }, { attempt: 2 }] } });
+      await route.fulfill({ json: { recordings: [{ attempt: 1, state: "pending" }, { attempt: 2, state: "failed" }] } });
     } else if (/\/recordings\/[12]$/.test(url.pathname)) {
       await route.fulfill({ status: 404, json: { error: "Recording is not yet available" } });
     } else {
@@ -34,6 +34,8 @@ test("recordings load on demand and failed audio can be retried without external
   expect(requests.filter((url) => url.includes("recordings"))).toEqual([]);
   await page.getByRole("button", { name: "Load Norma recordings" }).click();
   await expect(page.locator("audio")).toHaveCount(2);
+  await expect(page.getByText("Recording is still processing or awaiting an availability check.")).toBeVisible();
+  await expect(page.getByText("Recording availability could not be checked. Playback may still work; try again later.")).toBeVisible();
   const audio = page.locator("audio").first();
   await expect(audio).toHaveAttribute("preload", "none");
   await expect(audio).toHaveAttribute("src", "/api/norma/requests/11111111-1111-4111-8111-111111111111/recordings/1");

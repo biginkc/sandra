@@ -4,7 +4,16 @@ import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 
-type State = { kind: "idle" | "loading" } | { kind: "error"; message: string } | { kind: "ready"; attempts: number[] };
+type Recording = { attempt: number; state?: string };
+const availability: Record<string, string> = {
+  unchecked: "Recording availability has not been checked. You can try playback.",
+  pending: "Recording is still processing or awaiting an availability check.",
+  reported_available: "Recording available.",
+  not_recorded: "The provider reports this call was not recorded.",
+  unavailable: "No recording was available after repeated checks.",
+  failed: "Recording availability could not be checked. Playback may still work; try again later.",
+};
+type State = { kind: "idle" | "loading" } | { kind: "error"; message: string } | { kind: "ready"; recordings: Recording[] };
 
 /** Audio stays behind the dashboard session; provider URLs and keys never reach the browser. */
 export function NormaRecordings({ requestId }: { requestId: string }) {
@@ -30,7 +39,7 @@ export function NormaRecordings({ requestId }: { requestId: string }) {
       }
       setFailed([]);
       setRevision((value) => value + 1);
-      setState({ kind: "ready", attempts: [...new Set<number>(body.recordings.map((item: { attempt: number }) => item.attempt))] });
+      setState({ kind: "ready", recordings: body.recordings.filter((item: Recording, index: number, items: Recording[]) => items.findIndex((other) => other.attempt === item.attempt) === index) });
     } catch (error) {
       if (controllerRef.current !== controller) return;
       setState({ kind: "error", message: controller.signal.aborted ? "Recording request timed out. Try again." : error instanceof Error ? error.message : "Unable to load recordings" });
@@ -42,10 +51,11 @@ export function NormaRecordings({ requestId }: { requestId: string }) {
   return (
     <div className="w-full space-y-2" data-testid="norma-recordings">
       {state.kind === "error" ? <p role="alert">{state.message}</p> : null}
-      {state.kind === "ready" && state.attempts.length === 0 ? <p>No recording is available for this call yet.</p> : null}
-      {state.kind === "ready" ? state.attempts.map((attempt) => (
+      {state.kind === "ready" && state.recordings.length === 0 ? <p>No recording is available for this call yet.</p> : null}
+      {state.kind === "ready" ? state.recordings.map(({ attempt, state: recordingState }) => (
         <div key={attempt} className="space-y-1">
           <p className="font-medium">Norma recording · Attempt {attempt}</p>
+          <p>{typeof recordingState === "string" && Object.hasOwn(availability, recordingState) ? availability[recordingState] : availability.unchecked}</p>
           <audio key={`${attempt}-${revision}`} controls preload="none" aria-label={`Norma recording, attempt ${attempt}`} className="w-full max-w-full"
             src={`/api/norma/requests/${encodeURIComponent(requestId)}/recordings/${attempt}`}
             onError={() => setFailed((values) => values.includes(attempt) ? values : [...values, attempt])} />

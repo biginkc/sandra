@@ -67,6 +67,7 @@ const ITEMS: readonly Item[] = [
   { href: "/messages-v2", label: "Messages v2", icon: Radio },
   { href: "/jev", label: "Jev", icon: Sparkles, matchAlso: ["/jev/needs-decision", "/jev/review"] },
   { href: "/leads", label: "Leads", icon: LayoutDashboard },
+  { href: "/norma/callbacks", label: "Norma callbacks", icon: Headphones },
   { href: "/my-leads", label: "My Leads", icon: ClipboardList },
   { href: "/calculators", label: "Calculators", icon: Calculator },
   { href: "/jobs", label: "Jobs", icon: Briefcase },
@@ -85,7 +86,7 @@ function visibleItems(
       (item.href !== "/my-leads" || showMyLeads) &&
       (item.href !== "/calculators" || showCalculators) &&
       (item.href !== "/messages-v2" || showMessagesV2) &&
-      ((item.href !== "/messages" && item.href !== "/leads" && item.href !== "/jev") || showMessagesAndLeads),
+      ((item.href !== "/messages" && item.href !== "/leads" && item.href !== "/jev" && item.href !== "/norma/callbacks") || showMessagesAndLeads),
   );
   const recordings: Item[] = [];
   if (showRecordings) recordings.push({ href: "/owner/recordings", label: "Recordings", icon: Headphones });
