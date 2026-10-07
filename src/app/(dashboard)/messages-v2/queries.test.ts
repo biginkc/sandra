@@ -77,6 +77,7 @@ describe("deriveOpenHolds", () => {
     });
     expect(holds[0].run?.id).toBe("new");
     expect(holds[0].reason).toContain("seller_angry");
+    expect(holds[0].flag_reason).toBe("seller_angry");
   });
 
   it("still holds when the run is closed but a hold step was recorded (flag is the truth)", () => {
@@ -875,6 +876,60 @@ describe("round 4: distinct-before-cap, failed drafts, dead letters", () => {
     const q = queries.find((c) => c[0]?.table === "ai_reply_dead_letters")!;
     const cols = String(q.find((c) => c.method === "select")!.args[0]);
     expect(cols).not.toMatch(/body|text|reply/);
+  });
+  it("sent_late takes precedence over the original dead-letter row, reason only (no body)", async () => {
+    const { client, queries } = fakeSupabase({
+      ai_reply_drafts: (calls) =>
+        isHead(calls) ? {} : { data: [{ ...draftRow(0), run_id: "r1" }] },
+      pipeline_runs_latest_for_properties: () => ({
+        data: [run({ id: "r1", property_id: "p1" })],
+      }),
+      ai_reply_dead_letters: () => ({
+        data: [
+          {
+            id: "dl1",
+            run_id: "r1",
+            inbound_message_id: null,
+            reason: "send_timeout",
+          },
+          {
+            id: "dl2",
+            run_id: "r1",
+            inbound_message_id: null,
+            reason: "sent_late",
+          },
+        ],
+      }),
+    });
+    const data = await loadMessagesV2Data(client, "org");
+    expect(data.holds[0].dead_letter).toBe(true);
+    expect(data.holds[0].dead_letter_late).toBe(true);
+    const q = queries.find((c) => c[0]?.table === "ai_reply_dead_letters")!;
+    const cols = String(q.find((c) => c.method === "select")!.args[0]);
+    expect(cols).toMatch(/\breason\b/);
+    expect(cols).not.toMatch(/body|text|reply/);
+  });
+  it("a non-late dead-letter reason does not set dead_letter_late", async () => {
+    const { client } = fakeSupabase({
+      ai_reply_drafts: (calls) =>
+        isHead(calls) ? {} : { data: [{ ...draftRow(0), run_id: "r1" }] },
+      pipeline_runs_latest_for_properties: () => ({
+        data: [run({ id: "r1", property_id: "p1" })],
+      }),
+      ai_reply_dead_letters: () => ({
+        data: [
+          {
+            id: "dl1",
+            run_id: "r1",
+            inbound_message_id: null,
+            reason: "send_timeout",
+          },
+        ],
+      }),
+    });
+    const data = await loadMessagesV2Data(client, "org");
+    expect(data.holds[0].dead_letter).toBe(true);
+    expect(data.holds[0].dead_letter_late).toBeFalsy();
   });
   it("treats a missing dead-letter table as none, but other errors as unavailable", async () => {
     const base = {

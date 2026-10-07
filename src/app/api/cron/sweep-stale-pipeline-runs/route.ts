@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
+import { sweepLateSends } from "@/lib/ai-responder/dispatch";
 import { reportError } from "@/lib/errors/report";
 import { sweepStalePipelineRuns } from "@/lib/pipeline-runs";
 import type { Database } from "@/lib/supabase/types";
@@ -9,6 +10,8 @@ import type { Database } from "@/lib/supabase/types";
  * Vercel cron → `/api/cron/sweep-stale-pipeline-runs` every ten minutes.
  * Marks pipeline runs stuck in `running` for 30+ minutes as `error`
  * (reason `stale_running`) so the feed never shows a run in flight forever.
+ * Also finishes any late-send reconciliation (provider accepted a reply after
+ * the send timeout) whose in-process `after()` hook never ran.
  */
 export const maxDuration = 60;
 
@@ -28,10 +31,12 @@ async function handle(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   try {
-    const result = await sweepStalePipelineRuns(createServiceRoleClient(), {
+    const client = createServiceRoleClient();
+    const result = await sweepStalePipelineRuns(client, {
       olderThanMinutes: STALE_AFTER_MINUTES,
     });
-    return NextResponse.json({ ok: true, ...result });
+    const lateSends = await sweepLateSends(client);
+    return NextResponse.json({ ok: true, ...result, lateSends });
   } catch (error) {
     reportError(error, { tags: { surface: "cron_sweep_stale_pipeline_runs" } });
     return NextResponse.json({ error: error instanceof Error ? error.message : "unknown" }, { status: 500 });

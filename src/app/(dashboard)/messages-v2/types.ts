@@ -129,6 +129,10 @@ export type OpenHold<R extends PipelineRun = PipelineRun> = {
   message_ids?: string[];
   /** A dead-letter row exists: the reply text was saved for review (text never loaded). */
   dead_letter?: boolean;
+  /** A dead-letter row with reason `sent_late` exists: the provider accepted the reply after the timeout, so the seller DID get it. Takes precedence over `dead_letter`. */
+  dead_letter_late?: boolean;
+  /** The property's raw last_ai_escalation_reason (e.g. `send_timeout_then_sent`); null/absent when none. */
+  flag_reason?: string | null;
 };
 
 export type PipelineCoverage = { inboundMessages: number; runs: number };

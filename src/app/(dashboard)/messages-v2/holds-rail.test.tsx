@@ -283,6 +283,43 @@ describe("HoldsRail degraded states", () => {
       "reply text saved for review",
     );
   });
+  it("shows delivered-late instead of saved-for-review when sent_late exists", () => {
+    render(
+      <HoldsRail
+        holds={[{ ...hold("a", 5), dead_letter: true, dead_letter_late: true }]}
+        labels={new Map()}
+        nowMs={NOW}
+      />,
+    );
+    expect(screen.getByTestId("dead-letter-late")).toHaveTextContent(
+      "reply was delivered late — do not re-send",
+    );
+    expect(screen.queryByTestId("dead-letter")).toBeNull();
+    expect(screen.queryByText(/saved for review/)).toBeNull();
+  });
+  it("renders a send_timeout_then_sent flag-only hold as muted informational", () => {
+    render(
+      <HoldsRail
+        holds={[
+          {
+            ...hold("a", 5),
+            flag_reason: "send_timeout_then_sent",
+            dead_letter_late: true,
+          },
+          { ...hold("b", 5), flag_reason: "send_timeout" },
+        ]}
+        labels={new Map()}
+        nowMs={NOW}
+      />,
+    );
+    const cards = screen.getAllByTestId("hold-card");
+    expect(cards[0]).toHaveAttribute("data-informational", "true");
+    expect(cards[0]).toHaveClass("opacity-70");
+    expect(cards[1]).not.toHaveAttribute("data-informational");
+    expect(
+      within(cards[0]).getByText("Informational — already delivered"),
+    ).toBeInTheDocument();
+  });
   it("says dead-letter status unavailable when that lookup failed", () => {
     render(
       <HoldsRail

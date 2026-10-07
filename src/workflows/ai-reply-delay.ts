@@ -3,6 +3,7 @@ import { sleep } from "workflow";
 
 import {
   dispatchAiResponse,
+  inboundStampOutcomeOf,
   type AiDispatchOutcome,
 } from "@/lib/ai-responder/dispatch";
 import {
@@ -76,8 +77,11 @@ async function dispatchStep(
   await markInboundMessageState(supabase, params.inboundMessageId, {
     aiResponder: {
       ...outcome,
+      // `skipped:rule_<n>` for a silent exit, so a later inbound's rule 1 reads
+      // this one as handled (see `stampSilentExit` in the dispatch).
+      outcome: inboundStampOutcomeOf(outcome),
       completedAt,
-    },
+    } as unknown as AiDispatchOutcome & { completedAt: string },
   });
 
   return outcome;

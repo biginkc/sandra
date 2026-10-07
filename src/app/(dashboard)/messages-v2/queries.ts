@@ -68,6 +68,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     conversations: Set<string>;
     messages: Set<string>;
     notes: string[];
+    flagReason?: string | null;
     noProperty?: boolean;
   };
   const byProperty = new Map<string, Acc>();
@@ -92,7 +93,10 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     // updated_at is NOT a hold clock (any edit resets it): unknown stays unknown
     // unless a pending decision/review supplies an earlier-known time.
     if (p.last_ai_escalation_at) a.times.push(p.last_ai_escalation_at);
-    if (p.last_ai_escalation_reason) a.notes.push(p.last_ai_escalation_reason);
+    if (p.last_ai_escalation_reason) {
+      a.notes.push(p.last_ai_escalation_reason);
+      a.flagReason = p.last_ai_escalation_reason;
+    }
   }
   for (const d of input.decisions) {
     const a = acc(d.property_id);
@@ -171,6 +175,7 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
       conversation_id: [...a.conversations][0] ?? run?.conversation_id ?? null,
       sources,
       since,
+      ...(a.flagReason ? { flag_reason: a.flagReason } : {}),
       reason:
         a.notes.length > 0
           ? `${labels} (${[...new Set(a.notes)].join(", ")})`
@@ -613,7 +618,7 @@ export async function loadMessagesV2Data(
   const isLimited = (res: { data?: unknown; error?: unknown }): boolean =>
     !res.error && Array.isArray(res.data) && res.data.length > HOLDS_COUNT_CAP;
 
-  // Dead letters: ids only (never the saved reply text). A missing table is
+  // Dead letters: ids and reason only (never the saved reply text). A missing table is
   // treated as "none"; any other error is surfaced as unavailable.
   const runIds = new Set<string>();
   const deadMessageIds = new Set<string>();
@@ -626,6 +631,9 @@ export async function loadMessagesV2Data(
   }
   const deadRunSet = new Set<string>();
   const deadMsgSet = new Set<string>();
+  // sent_late = provider accepted the reply after the timeout (seller got it).
+  const lateRunSet = new Set<string>();
+  const lateMsgSet = new Set<string>();
   let deadLetterUnavailable = false;
   const deadQueries = [
     ...chunked([...runIds]).map((ids) => ["run_id", ids] as const),
@@ -637,7 +645,7 @@ export async function loadMessagesV2Data(
     deadQueries.map(([col, ids]) =>
       supabase
         .from("ai_reply_dead_letters")
-        .select("id, run_id, inbound_message_id")
+        .select("id, run_id, inbound_message_id, reason")
         .eq("org_id", orgId)
         .in(col, ids),
     ),
@@ -655,15 +663,28 @@ export async function loadMessagesV2Data(
     for (const row of (res.data ?? []) as Array<{
       run_id: string | null;
       inbound_message_id: string | null;
+      reason?: string | null;
     }>) {
       if (row.run_id) deadRunSet.add(row.run_id);
       if (row.inbound_message_id) deadMsgSet.add(row.inbound_message_id);
+      if (row.reason === "sent_late") {
+        if (row.run_id) lateRunSet.add(row.run_id);
+        if (row.inbound_message_id) lateMsgSet.add(row.inbound_message_id);
+      }
     }
   }
-  const isDead = (h: OpenHold<PipelineRun>): boolean =>
+  const matches = (
+    h: OpenHold<PipelineRun>,
+    runSet: Set<string>,
+    msgSet: Set<string>,
+  ): boolean =>
     (h.run
-      ? deadRunSet.has(h.run.id) || deadMsgSet.has(h.run.inbound_message_id)
-      : false) || (h.message_ids ?? []).some((m) => deadMsgSet.has(m));
+      ? runSet.has(h.run.id) || msgSet.has(h.run.inbound_message_id)
+      : false) || (h.message_ids ?? []).some((m) => msgSet.has(m));
+  const isDead = (h: OpenHold<PipelineRun>): boolean =>
+    matches(h, deadRunSet, deadMsgSet);
+  const isLate = (h: OpenHold<PipelineRun>): boolean =>
+    matches(h, lateRunSet, lateMsgSet);
 
   const holdsMeta = buildHoldsMeta({
     shown: openHolds.length,
@@ -703,6 +724,7 @@ export async function loadMessagesV2Data(
     holds: openHolds.map((h) => ({
       ...h,
       ...(isDead(h) ? { dead_letter: true } : {}),
+      ...(isLate(h) ? { dead_letter_late: true } : {}),
       run: h.run ? withSteps(h.run) : null,
     })),
     holdsMeta,

@@ -15,6 +15,7 @@ const { dispatchAiResponse } = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/ai-responder/dispatch", () => ({
   dispatchAiResponse,
+  inboundStampOutcomeOf: (o: { outcome: string }) => o.outcome,
 }));
 
 const { recordAiResponderOutcomeForThread } = vi.hoisted(() => ({

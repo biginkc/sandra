@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { sweep } = vi.hoisted(() => ({ sweep: vi.fn() }));
+const { sweep, lateSweep } = vi.hoisted(() => ({
+  sweep: vi.fn(),
+  lateSweep: vi.fn(async () => ({ scanned: 0, reconciled: 0 })),
+}));
 vi.mock("@/lib/pipeline-runs", () => ({ sweepStalePipelineRuns: sweep }));
+vi.mock("@/lib/ai-responder/dispatch", () => ({ sweepLateSends: lateSweep }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
 vi.mock("@supabase/supabase-js", () => ({ createClient: vi.fn(() => ({})) }));
 

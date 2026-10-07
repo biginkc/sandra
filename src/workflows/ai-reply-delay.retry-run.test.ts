@@ -9,7 +9,10 @@ const h = vi.hoisted(() => ({
 }));
 vi.mock("workflow", () => ({ sleep: h.sleep }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => ({}) }));
-vi.mock("@/lib/ai-responder/dispatch", () => ({ dispatchAiResponse: h.dispatch }));
+vi.mock("@/lib/ai-responder/dispatch", () => ({
+  dispatchAiResponse: h.dispatch,
+  inboundStampOutcomeOf: (o: { outcome: string }) => o.outcome,
+}));
 vi.mock("@/lib/messages/ai-responder-thread-state", () => ({
   recordAiResponderOutcomeForThread: vi.fn(async () => undefined),
 }));

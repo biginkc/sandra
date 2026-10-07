@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   classifyGateRow,
@@ -6,6 +6,7 @@ import {
   decideDraftGate,
   decideSendGate,
   NEWER_INBOUND_GRACE_MS,
+  STALE_QUEUED_COMPETITOR_MS,
   silentExitReason,
   silentSkipClaimOutcome,
   type GateOutboundFact,
@@ -411,5 +412,53 @@ describe("Q8 rule 8: terminal drafts are never revived", () => {
     expect(decideDraftGate(["pending", "sent"])).toBe("resolved");
     expect(decideDraftGate(["pending"])).toBe("pending");
     expect(decideDraftGate([])).toBe("none");
+  });
+});
+
+describe("round 9: no-claim stamp, stale queued competitor", () => {
+  const nowMs = Date.parse("2026-06-13T18:00:00.000Z");
+  it("a newer inbound with NO claim but a skipped:rule_<n> stamp is handled; a bare skipped stamp is not", () => {
+    for (const rule of [0, 2, 4, 5, 8] as const) {
+      expect(
+        classifyNewerInboundHandler({ claim: null, stamp: { outcome: silentSkipClaimOutcome(rule) }, nowMs }),
+      ).toBe(true);
+    }
+    expect(classifyNewerInboundHandler({ claim: null, stamp: { outcome: "skipped" }, nowMs })).toBe(false);
+    expect(classifyNewerInboundHandler({ claim: null, stamp: { outcome: "skipped:rule_1" }, nowMs })).toBe(false);
+    // An existing claim stays authoritative over the stamp.
+    expect(
+      classifyNewerInboundHandler({
+        claim: { status: "completed", outcome: "skipped", lease_expires_at: null },
+        stamp: { outcome: "skipped:rule_0" },
+        nowMs,
+      }),
+    ).toBe(false);
+  });
+
+  const queuedRow = (createdAgoMs: number, scheduledFor: string | null = null) =>
+    classifyGateRow(
+      { id: "q", created_at: new Date(nowMs - createdAgoMs).toISOString(), status: "queued", metadata: null, scheduled_for: scheduledFor },
+      { inboundMessageId: "in-1", inboundCreatedAtMs: nowMs - 10_000, nowMs },
+    );
+  it("a non-scheduled queued row older than the limit is stale; a younger or scheduled one is not", () => {
+    expect(queuedRow(STALE_QUEUED_COMPETITOR_MS + 1)?.stale).toBe(true);
+    expect(queuedRow(STALE_QUEUED_COMPETITOR_MS - 60_000)?.stale).toBeUndefined();
+    expect(queuedRow(STALE_QUEUED_COMPETITOR_MS * 3, "2026-06-13T23:00:00.000Z")?.stale).toBeUndefined();
+  });
+  it("the limit is configurable", () => {
+    vi.stubEnv("AI_RESPONDER_STALE_QUEUED_MS", "1000");
+    expect(queuedRow(5_000)?.stale).toBe(true);
+    vi.unstubAllEnvs();
+  });
+  it("a stale queued competitor is rule 7 (flag now); a scheduled one wins as rule 4 silent; a fresh one retries", () => {
+    const stale: GateOutboundFact = { author: "human_unrelated", stage: "queued", scheduledFuture: false, stale: true };
+    expect(decideSendGate({ newerInbound: { present: false }, outbound: [stale] })).toEqual({
+      action: "skip", flag: true, rule: 7, reason: "stale_queued_competitor",
+    });
+    const scheduled: GateOutboundFact = { author: "human_unrelated", stage: "queued", scheduledFuture: true };
+    expect(decideSendGate({ newerInbound: { present: false }, outbound: [stale, scheduled] })).toMatchObject({ rule: 4, flag: false });
+    expect(
+      decideSendGate({ newerInbound: { present: false }, outbound: [{ ...stale, stale: false }] }),
+    ).toEqual({ action: "retry", rule: 4 });
   });
 });

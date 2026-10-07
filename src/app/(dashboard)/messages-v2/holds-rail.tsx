@@ -67,10 +67,18 @@ export function HoldCard({
   const age = hold.since ? Math.max(0, nowMs - Date.parse(hold.since)) : null;
   const tone = age === null ? "neutral" : ageTone(age);
   const why = run ? holdReason(run.steps, run.reason) : null;
+  // Already delivered (late) and nothing else needs a human: muted, not actionable.
+  const informational =
+    hold.flag_reason === "send_timeout_then_sent" &&
+    hold.sources.every((s) => s === "needs_attention");
   return (
     <article
       data-testid="hold-card"
-      className="rounded-xl bg-card p-4 text-sm ring-1 ring-foreground/10"
+      {...(informational ? { "data-informational": "true" } : {})}
+      className={cn(
+        "rounded-xl bg-card p-4 text-sm ring-1 ring-foreground/10",
+        informational && "opacity-70",
+      )}
     >
       <header className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         {hold.since ? (
@@ -124,15 +132,32 @@ export function HoldCard({
           <span>Claude draft held (Phase 1 to act)</span>
         </p>
       )}
-      {hold.dead_letter && (
-        <p data-testid="dead-letter" className="mt-2 flex gap-2">
-          <span aria-hidden className="text-amber-600">
-            ●
-          </span>
-          <span>reply text saved for review</span>
+      {informational && (
+        <p
+          data-testid="hold-informational"
+          className="mt-2 text-xs text-muted-foreground"
+        >
+          Informational — already delivered
         </p>
       )}
-      <Phase2Actions />
+      {hold.dead_letter_late ? (
+        <p data-testid="dead-letter-late" className="mt-2 flex gap-2">
+          <span aria-hidden className="text-red-600">
+            ●
+          </span>
+          <span>reply was delivered late — do not re-send</span>
+        </p>
+      ) : (
+        hold.dead_letter && (
+          <p data-testid="dead-letter" className="mt-2 flex gap-2">
+            <span aria-hidden className="text-amber-600">
+              ●
+            </span>
+            <span>reply text saved for review</span>
+          </p>
+        )
+      )}
+      {!informational && <Phase2Actions />}
     </article>
   );
 }

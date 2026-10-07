@@ -45,6 +45,18 @@
  * No I/O in this file: every fact is gathered by the caller.
  */
 
+/**
+ * A non-scheduled queued/pending competitor older than this is treated as
+ * stuck (rule 7: flag immediately) instead of burning the 4 retries. Overridable
+ * with env `AI_RESPONDER_STALE_QUEUED_MS`.
+ */
+export const STALE_QUEUED_COMPETITOR_MS = 60 * 60 * 1000;
+
+function staleQueuedThresholdMs(): number {
+  const fromEnv = Number(process.env.AI_RESPONDER_STALE_QUEUED_MS);
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : STALE_QUEUED_COMPETITOR_MS;
+}
+
 /** A newer inbound younger than this has not had time to be stamped `delayed`. */
 export const NEWER_INBOUND_GRACE_MS = 10_000;
 
@@ -73,6 +85,8 @@ export type GateOutboundFact = {
   stage: GateStage;
   /** Queued rep text with a future `scheduled_for` (rule 4: silent). */
   scheduledFuture: boolean;
+  /** Queued, not scheduled for the future, and older than the stale limit (rule 7). */
+  stale?: boolean;
 };
 
 export type NewerInboundFact =
@@ -110,6 +124,8 @@ export type SendGateDecision =
   | ({ action: "skip"; flag: false } & SilentSkip)
   | { action: "skip"; flag: true; rule: 1; reason: "newer_inbound_unhandled" }
   | { action: "skip"; flag: true; rule: 3; reason: "unrelated_conversational_text" }
+  /** Rule 7 (failure policy): a queued competitor stuck past the stale limit. */
+  | { action: "skip"; flag: true; rule: 7; reason: "stale_queued_competitor" }
   | { action: "retry"; rule: 4 }
   /** Early phase only, rule 1: too young to judge; the pre-send check decides. */
   | { action: "defer"; rule: 1 };
@@ -166,6 +182,11 @@ export function decideSendGate(
   if (queued.length > 0) {
     if (queued.some((f) => f.scheduledFuture)) {
       return { action: "skip", flag: false, rule: 4, reason: "rep_text_scheduled" };
+    }
+    // A queued row that has sat unsubmitted past the stale limit is not going
+    // out: retrying 4 times cannot help (rule 7, flagged immediately).
+    if (queued.some((f) => f.stale)) {
+      return { action: "skip", flag: true, rule: 7, reason: "stale_queued_competitor" };
     }
     return { action: "retry", rule: 4 };
   }
@@ -234,6 +255,12 @@ export function classifyGateRow(
   },
 ): GateOutboundFact | null {
   const fact = classifyGateRowUnbounded(row, ctx);
+  if (fact && fact.stage === "queued" && fact.author !== "broadcast" && !fact.scheduledFuture) {
+    const createdMs = Date.parse(row.created_at);
+    if (!Number.isNaN(createdMs) && ctx.nowMs - createdMs > staleQueuedThresholdMs()) {
+      return { ...fact, stale: true };
+    }
+  }
   if (!fact || fact.stage !== "submitted") return fact;
   // Rules 3 and 5 are bounded "since the seller's inbound": submitted
   // unrelated / broadcast evidence that went out BEFORE the inbound is not
@@ -355,6 +382,14 @@ export function silentSkipClaimOutcome(rule: SilentHandledRule): string {
   return `skipped:rule_${rule}`;
 }
 
+/** True for the `skipped:rule_<n>` outcome a silent exit records (claim or inbound stamp). */
+export function isSilentSkipOutcome(outcome: unknown): boolean {
+  return (
+    typeof outcome === "string" &&
+    SILENT_HANDLED_RULES.some((rule) => outcome === silentSkipClaimOutcome(rule))
+  );
+}
+
 function isHandledClaimOutcome(outcome: string | null | undefined): boolean {
   if (!outcome) return false;
   if (HANDLED_CLAIM_OUTCOMES.has(outcome)) return true;
@@ -402,7 +437,10 @@ export function classifyNewerInboundHandler(args: {
     }
     return confirmedWorkflow;
   }
-  return confirmedWorkflow;
+  // No claim: an early-gate silent exit (rule 0 / 2 / 4 / 5 / 8) ends the run
+  // before any claim is taken and leaves its `skipped:rule_<n>` stamp on the
+  // inbound row; that is a handler that dealt with the text.
+  return confirmedWorkflow || isSilentSkipOutcome(stamp?.outcome);
 }
 
 // ---------- rule 8: terminal drafts ----------------------------------------
