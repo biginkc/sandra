@@ -263,6 +263,8 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   }, [newestId]);
 
   return (
+    // lg: fill the viewport below the dashboard chrome (md:pt-16 header + md:p-6 page padding = 7rem)
+    // so the live feed and the holds rail each scroll on their own.
     <div
       className="flex flex-col gap-4 lg:h-[calc(100dvh-7rem)]"
       data-testid="messages-v2"
@@ -334,7 +336,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
           <div
             ref={feedRef}
             data-testid="live-feed-scroll"
-            className="flex flex-col gap-3 pr-1 lg:min-h-0 lg:flex-1 lg:overflow-y-auto"
+            className="flex max-h-[60vh] flex-col gap-3 overflow-y-auto pr-1 lg:max-h-none lg:min-h-0 lg:flex-1"
           >
             {props.feedError && (
               <p
