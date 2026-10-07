@@ -13,7 +13,8 @@ import {
   checkRecipientQuietHours,
 } from "@/lib/messaging/quiet-hours-recipient";
 import { sendSmsToContact } from "@/lib/messaging/send";
-import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
+import { normalizePhone } from "@/lib/csv/normalize";
+import { selectBestSmsPhone, selectSmsPhoneByNumber } from "@/lib/messaging/sms-phone";
 import { shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
 import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import type { Database, Json } from "@/lib/supabase/types";
@@ -3661,16 +3662,51 @@ async function resolveReservationKey(
   }
 }
 
-/** Outbound SMS to this contact in the last 24h that reached (or may have reached) the provider; null = unreadable. */
+/**
+ * The number this send will ACTUALLY text: the same choice `sendSmsToContact`
+ * makes (the thread's number when the inbound named one, else the best saved
+ * phone via selectBestSmsPhone). Quiet hours and the Florida cap must follow
+ * this number, not whichever number the inbound happened to arrive from. null
+ * (no contact, no match, unreadable) fails closed upstream.
+ */
+async function resolveSendDestinationPhone(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+): Promise<string | null> {
+  const { data, error } = await supabase
+    .from("contacts")
+    .select("phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type")
+    .eq("id", input.contactId)
+    .maybeSingle();
+  if (error || !data) {
+    reportError(new Error(error?.message ?? "contact not found for send destination"), {
+      tags: { surface: "ai_responder_send_destination" },
+      extra: { contactId: input.contactId },
+    });
+    return null;
+  }
+  const choice = input.inboundFromPhone
+    ? selectSmsPhoneByNumber(data, input.inboundFromPhone)
+    : selectBestSmsPhone(data);
+  return normalizePhone(choice?.phone ?? null);
+}
+
+/**
+ * Outbound SMS to THIS destination number in the last 24h that reached (or may
+ * have reached) the provider; null = unreadable. Counted per destination phone
+ * (a seller's second number is a different recipient).
+ */
 async function countRecentOutboundTexts(
   supabase: SupabaseClient<Database>,
   contactId: string,
+  destinationPhone: string,
 ): Promise<number | null> {
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const { count, error } = await supabase
     .from("messages")
     .select("*", { count: "exact", head: true })
     .eq("contact_id", contactId)
+    .eq("to_address", destinationPhone)
     .eq("channel", "sms")
     .eq("direction", "outbound")
     .gte("created_at", since)
@@ -3694,14 +3730,15 @@ async function refuseOutsideRecipientWindow(
   supabase: SupabaseClient<Database>,
   args: ResponderSendArgs,
 ): Promise<ResponderSendOutcome | null> {
-  const phone =
-    args.input.inboundFromPhone ?? (await loadContactPhone(supabase, args.input.contactId)).phone;
+  const phone = await resolveSendDestinationPhone(supabase, args.input);
   const window = checkRecipientQuietHours(phone);
   let refusal: { why: string; state: string | null; localTime: string | null } | null = null;
   if (!window.ok) {
     refusal = { why: window.reason, state: window.state, localTime: window.localTime };
   } else if (window.florida) {
-    const cap = checkFloridaCap(await countRecentOutboundTexts(supabase, args.input.contactId));
+    const cap = checkFloridaCap(
+      phone ? await countRecentOutboundTexts(supabase, args.input.contactId, phone) : null,
+    );
     if (!cap.ok) refusal = { why: cap.reason, state: window.state, localTime: window.localTime };
   }
   if (!refusal) {

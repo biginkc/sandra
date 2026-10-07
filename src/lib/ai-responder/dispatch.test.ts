@@ -119,6 +119,7 @@ type MessageRow = {
   direction: "inbound" | "outbound";
   metadata: Record<string, unknown> | null;
   property_id: string;
+  to_address?: string | null;
   scheduled_for?: string | null;
   sent_at: string | null;
   status: string;
@@ -6284,7 +6285,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
     vi.clearAllMocks();
   });
 
-  async function runNurture(state: MockState, id: string, confidence = 0.97, reason = "not_applicable") {
+  async function runNurture(state: MockState, id: string, confidence = 0.97, reason = "not_applicable", extra: Record<string, unknown> = {}) {
     state.config.classifier_provider = "jev";
     state.config.classifier_mode = "automatic";
     state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.95 }];
@@ -6299,7 +6300,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
       return await dispatchAiResponse(supabase as never, {
         contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
         inboundBody: "Not right now, maybe check back later",
-        inboundMessageId: id, propertyId: PROPERTY_ID,
+        inboundMessageId: id, propertyId: PROPERTY_ID, ...extra,
       }, { anthropic: {} as never });
     } finally { vi.stubGlobal("fetch", originalFetch); }
   }
@@ -6532,6 +6533,7 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
       id: `earlier-${n}`, body: "earlier", channel: "sms", contact_id: CONTACT_ID,
       conversation_id: CONVERSATION_ID, created_at: new Date(Date.now() - n * 60 * 60 * 1000).toISOString(),
       direction: "outbound" as const, metadata: null, property_id: PROPERTY_ID,
+      to_address: "+18135550001",
       sent_at: new Date(Date.now() - n * 60 * 60 * 1000).toISOString(), status: "delivered",
     });
     const refused = createMockState();
@@ -6553,6 +6555,64 @@ describe("approved-template replies (Messages v2 Phase 4)", () => {
       outcome: "auto_closed", reason: "model:nurture",
     });
     expect(sendSmsToContact).toHaveBeenCalledTimes(1);
+  });
+
+  describe("the number actually texted drives quiet hours and the Florida cap", () => {
+    const outboundTo = (to: string, n: number) => ({
+      id: `earlier-${to}-${n}`, body: "earlier", channel: "sms", contact_id: CONTACT_ID,
+      conversation_id: CONVERSATION_ID, created_at: new Date(Date.now() - n * 60 * 60 * 1000).toISOString(),
+      direction: "outbound" as const, metadata: null, property_id: PROPERTY_ID, to_address: to,
+      sent_at: new Date(Date.now() - n * 60 * 60 * 1000).toISOString(), status: "delivered",
+    });
+
+    it("the best saved phone (selectBestSmsPhone) is the one checked: a mobile in Hawaii beats a Missouri landline", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      state.contact.phone_1 = "+18165550001";
+      state.contact.phone_1_type = "landline";
+      state.contact.phone_2 = "+18085550001";
+      state.contact.phone_2_type = "mobile";
+      // 17:00Z = noon Central (open) but 7am Hawaii (closed).
+      vi.setSystemTime(new Date("2026-06-13T17:00:00.000Z"));
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+      const result = await runNurture(state, "inbound-tpl-best-phone");
+      expect(result).toEqual({ outcome: "escalated", reason: "quiet_hours_recipient" });
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+    });
+
+    it("an inbound number that is not saved on the contact cannot be checked, so the send is refused (fail closed)", async () => {
+      const state = createMockState();
+      installSendMock(state);
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+      await runNurture(state, "inbound-tpl-unsaved", 0.97, "not_applicable", { inboundFromPhone: "+18135559999" });
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+      expect(state.deadLetters).toEqual([expect.objectContaining({ reason: "quiet_hours_recipient" })]);
+    });
+
+    it("the Florida cap counts texts to the same destination only", async () => {
+      const toPhone2 = createMockState();
+      installSendMock(toPhone2);
+      toPhone2.contact.phone_1 = "+18135550001";
+      toPhone2.contact.phone_2 = "+13055550002";
+      toPhone2.contact.phone_2_type = "mobile";
+      toPhone2.messages.push(outboundTo("+13055550002", 1), outboundTo("+13055550002", 2), outboundTo("+13055550002", 3));
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+      // phone_1 (813) is the destination; three texts to the OTHER number do not count.
+      expect(await runNurture(toPhone2, "inbound-tpl-cap-other")).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
+      expect(sendSmsToContact).toHaveBeenCalledTimes(1);
+
+      vi.mocked(sendSmsToContact).mockClear();
+      const toPhone1 = createMockState();
+      installSendMock(toPhone1);
+      toPhone1.contact.phone_1 = "+18135550001";
+      toPhone1.contact.phone_2 = "+13055550002";
+      toPhone1.contact.phone_2_type = "mobile";
+      toPhone1.messages.push(outboundTo("+18135550001", 1), outboundTo("+18135550001", 2), outboundTo("+18135550001", 3));
+      vi.mocked(resolveApprovedTemplateReply).mockResolvedValueOnce(TEMPLATE);
+      await runNurture(toPhone1, "inbound-tpl-cap-same");
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+      expect(toPhone1.deadLetters).toEqual([expect.objectContaining({ reason: "quiet_hours_recipient" })]);
+    });
   });
 
   it("not_interested: the template goes out first, then the close is applied", async () => {
