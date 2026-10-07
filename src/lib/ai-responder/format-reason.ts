@@ -36,6 +36,18 @@ export function parseEscalationReason(
   raw: string | null | undefined,
 ): ParsedReason | null {
   if (!raw) return null;
+  // The orphan scan rewrites an unreadable timeout flag to this value; it is
+  // still the send_timeout gate, with its own label.
+  if (raw === "send_timeout_unparseable") {
+    return {
+      raw,
+      gate: "send_timeout",
+      tier: null,
+      color: "amber",
+      shortLabel: formatShortLabel("send_timeout"),
+      longLabel: "Reply timed out at the provider — record unreadable, needs review",
+    };
+  }
   const [gate, ...rest] = raw.split(":");
   const detail = rest.join(":");
 

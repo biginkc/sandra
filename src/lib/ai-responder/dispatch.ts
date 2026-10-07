@@ -3784,9 +3784,9 @@ export function orphanSliceBounds(slice: number): { lower: string; upper: string
 async function backOrphanFlag(
   supabase: SupabaseClient<Database>,
   prop: { id: string; last_ai_escalation_reason: string | null },
-): Promise<void> {
+): Promise<boolean> {
   const currentReason = prop.last_ai_escalation_reason;
-  if (!currentReason || currentReason.endsWith(SEND_TIMEOUT_BACKED_SUFFIX)) return;
+  if (!currentReason || currentReason.endsWith(SEND_TIMEOUT_BACKED_SUFFIX)) return true;
   const { error } = await supabase
     .from("properties")
     .update({
@@ -3800,7 +3800,39 @@ async function backOrphanFlag(
       tags: { surface: "ai_responder_orphan_timeout_backed_flag" },
       extra: { propertyId: prop.id },
     });
+    return false;
   }
+  return true;
+}
+
+/** Reason an unreadable timeout flag is rewritten to so it leaves the orphan candidate set. */
+const SEND_TIMEOUT_UNPARSEABLE_REASON = "send_timeout_unparseable";
+
+/**
+ * Rewrite a timeout flag whose inbound id is not a uuid to
+ * `send_timeout_unparseable` (no longer matches the scan's `send_timeout:%`
+ * filters; attention flag untouched). Conditional on the exact current value.
+ */
+async function retireMalformedOrphanFlag(
+  supabase: SupabaseClient<Database>,
+  prop: { id: string; last_ai_escalation_reason: string | null },
+): Promise<boolean> {
+  const { error } = await supabase
+    .from("properties")
+    .update({
+      last_ai_escalation_reason: SEND_TIMEOUT_UNPARSEABLE_REASON,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", prop.id)
+    .eq("last_ai_escalation_reason", prop.last_ai_escalation_reason as string);
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_orphan_timeout_malformed_rewrite" },
+      extra: { propertyId: prop.id },
+    });
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -3834,25 +3866,35 @@ async function backOrphanFlag(
  * Flags with no `last_ai_escalation_at` (legacy) are not eligible (no fallback to
  * `updated_at`); flags younger than 5 minutes are skipped (the live timeout path
  * may still be writing its own row); flags older than 7 days are out of window.
- * A flag whose inbound id is not a uuid is skipped and counted, never an error.
+ * A flag whose inbound id is not a uuid (or is empty) is rewritten, conditional
+ * on its exact current value, to `send_timeout_unparseable`, which leaves the
+ * candidate set so it cannot consume visits forever; it is counted as
+ * `malformed`, never an error.
+ *
+ * Convergence is conditional on the promotion write succeeding: a flag whose
+ * row exists but whose `:backed` promotion fails stays eligible and is retried
+ * on the next visit (failures are counted in `backingFailed` and reported once
+ * per run with the property ids). Persistent write failures therefore keep
+ * those flags consuming scan budget until the write works.
  */
 async function repairOrphanedTimeouts(
   supabase: SupabaseClient<Database>,
   windowStartMs: number,
   scanClockMs: number,
-): Promise<{ malformed: number }> {
+): Promise<{ malformed: number; backingFailed: string[] }> {
   const windowIso = new Date(windowStartMs).toISOString();
   const slice = Math.floor(scanClockMs / ORPHAN_SLICE_MS) % ORPHAN_SLICE_COUNT;
   const { lower, upper } = orphanSliceBounds(slice);
   let after: string | null = null;
   let inserted = 0;
   let malformed = 0;
+  const backingFailed: string[] = [];
   for (let page = 0; page < ORPHAN_MAX_PAGES && inserted < ORPHAN_PAGE_SIZE; page += 1) {
     const query = orphanPropertiesQuery(supabase, { windowIso, lower, upper, after });
     const { data, error } = await query;
     if (error) {
       reportError(new Error(error.message), { tags: { surface: "ai_responder_orphan_timeout_scan" } });
-      return { malformed };
+      return { malformed, backingFailed };
     }
     const props = (data ?? []) as Array<{
       id: string;
@@ -3863,11 +3905,11 @@ async function repairOrphanedTimeouts(
     const candidates: Array<{ prop: (typeof props)[number]; inboundId: string; stampedAt: string }> = [];
     for (const prop of props) {
       const inboundId = inboundIdFromTimeoutFlag(prop.last_ai_escalation_reason);
-      if (!inboundId || !prop.org_id) continue;
-      if (!UUID_RE.test(inboundId)) {
-        malformed += 1;
+      if (!inboundId || !UUID_RE.test(inboundId)) {
+        if (await retireMalformedOrphanFlag(supabase, prop)) malformed += 1;
         continue;
       }
+      if (!prop.org_id) continue;
       const stampedAt = prop.last_ai_escalation_at;
       if (!stampedAt) continue;
       const stampedMs = new Date(stampedAt).getTime();
@@ -3885,7 +3927,7 @@ async function repairOrphanedTimeouts(
           .eq("reason", "send_timeout");
         if (existingError) {
           reportError(new Error(existingError.message), { tags: { surface: "ai_responder_orphan_timeout_repair" } });
-          return { malformed };
+          return { malformed, backingFailed };
         }
         for (const r of (rows ?? []) as Array<{ inbound_message_id: string | null }>) {
           if (r.inbound_message_id) existing.add(r.inbound_message_id);
@@ -3897,7 +3939,7 @@ async function repairOrphanedTimeouts(
       if (existing.has(inboundId)) {
         // Row exists but the flag is unmarked (a failed/interrupted backing
         // write): promote it so later visits skip it.
-        await backOrphanFlag(supabase, prop);
+        if (!(await backOrphanFlag(supabase, prop))) backingFailed.push(prop.id);
         continue;
       }
       try {
@@ -3918,7 +3960,7 @@ async function repairOrphanedTimeouts(
         });
         if (insertError) throw new Error(insertError.message);
         inserted += 1;
-        await backOrphanFlag(supabase, prop);
+        if (!(await backOrphanFlag(supabase, prop))) backingFailed.push(prop.id);
       } catch (e) {
         reportError(e, {
           tags: { surface: "ai_responder_orphan_timeout_repair" },
@@ -3927,10 +3969,10 @@ async function repairOrphanedTimeouts(
       }
     }
     const last = props[props.length - 1];
-    if (props.length < ORPHAN_PAGE_SIZE || !last) return { malformed };
+    if (props.length < ORPHAN_PAGE_SIZE || !last) return { malformed, backingFailed };
     after = last.id;
   }
-  return { malformed };
+  return { malformed, backingFailed };
 }
 
 export async function sweepLateSends(
@@ -3948,6 +3990,7 @@ export async function sweepLateSends(
   reconciled: number;
   nextCursor: LateSendSweepCursor | null;
   orphanMalformed: number;
+  orphanBackingFailed: number;
 }> {
   const windowStartMs = Date.now() - (options.sinceMs ?? 7 * 24 * 60 * 60 * 1000);
   const pageSize = options.pageSize ?? 100;
@@ -3957,10 +4000,12 @@ export async function sweepLateSends(
   let cursorA = options.cursor?.a ?? null;
   let exhaustedA = false;
   let orphanMalformed = 0;
+  let orphanBackingFailed = 0;
   const done = () => ({
     scanned,
     reconciled,
     orphanMalformed,
+    orphanBackingFailed,
     nextCursor: exhaustedA ? null : { a: cursorA },
   });
   const resolveUnreconcilable = async (id: string, reason: string): Promise<boolean> => {
@@ -3977,11 +4022,21 @@ export async function sweepLateSends(
   };
 
   // Orphan repair runs FIRST so a repaired row is handled by pass A this run.
-  orphanMalformed = (
-    await repairOrphanedTimeouts(supabase, windowStartMs, options.orphanScanNowMs ?? Date.now())
-  ).malformed;
+  const orphanResult = await repairOrphanedTimeouts(
+    supabase,
+    windowStartMs,
+    options.orphanScanNowMs ?? Date.now(),
+  );
+  orphanMalformed = orphanResult.malformed;
+  orphanBackingFailed = orphanResult.backingFailed.length;
+  if (orphanBackingFailed > 0) {
+    reportError(new Error(`orphan timeout scan could not promote ${orphanBackingFailed} flag(s) to :backed`), {
+      tags: { surface: "ai_responder_orphan_timeout_backing_failed" },
+      extra: { orphanBackingFailed, propertyIds: orphanResult.backingFailed.slice(0, 50) },
+    });
+  }
   if (orphanMalformed > 0) {
-    reportError(new Error(`orphan timeout scan skipped ${orphanMalformed} flag(s) with a malformed inbound id`), {
+    reportError(new Error(`orphan timeout scan retired ${orphanMalformed} flag(s) with a malformed inbound id`), {
       tags: { surface: "ai_responder_orphan_timeout_malformed" },
       extra: { orphanMalformed },
     });

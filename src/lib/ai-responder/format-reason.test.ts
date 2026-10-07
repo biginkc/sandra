@@ -182,6 +182,12 @@ describe("send timeout reasons", () => {
     const b = parseEscalationReason("dead_letter_failed:send_timeout:3f1c2d9e-0000-4000-8000-123456789abc:backed");
     expect(b).toMatchObject({ gate: a!.gate, color: a!.color, shortLabel: a!.shortLabel, longLabel: a!.longLabel });
   });
+  it("send_timeout_unparseable is the send_timeout gate with a needs-review label", () => {
+    const parsed = parseEscalationReason("send_timeout_unparseable");
+    expect(parsed!.gate).toBe("send_timeout");
+    expect(parsed!.shortLabel).toBe("Send timed out");
+    expect(parsed!.longLabel).toBe("Reply timed out at the provider — record unreadable, needs review");
+  });
   it("send_timeout_then_sent warns not to re-send", () => {
     const parsed = parseEscalationReason("send_timeout_then_sent");
     expect(parsed!.longLabel).toBe("Reply accepted by provider late — do not re-send");

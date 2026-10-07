@@ -159,6 +159,8 @@ type MockState = {
   deadLetterInsertAttempts?: number;
   /** Count of bulk `.in('inbound_message_id', ...)` dead-letter queries. */
   deadLetterInQueries?: number;
+  /** Writes that promote a timeout flag to `:backed` fail with a DB error. */
+  backFlagWriteError?: boolean;
   /** Extra flagged properties visible ONLY to the orphan-repair list scan. */
   extraProperties?: Array<Record<string, unknown>>;
   /** fn_renew_ai_send returns an error. */
@@ -571,6 +573,12 @@ function createMockSupabase(state: MockState) {
         return { data: rows.map((r) => ({ org_id: "org-1", ...r })), error: null };
       }
       if (updateData) {
+        if (
+          state.backFlagWriteError &&
+          String((updateData as Record<string, unknown>).last_ai_escalation_reason ?? "").endsWith(":backed")
+        ) {
+          return { data: null, error: { message: "back boom" } };
+        }
         if (state.flagWriteError && "needs_human_attention" in updateData) {
           return { data: null, error: { message: "flag boom" } };
         }
@@ -5386,7 +5394,7 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
           expect(state.property.last_ai_escalation_reason).toBe("reply_skipped:newer_inbound");
         });
 
-        it("a malformed inbound id in the flag is skipped and counted, never an error or an insert", async () => {
+        it("a malformed inbound id is rewritten to send_timeout_unparseable (no attention change), counted, and reported once", async () => {
           const { sweepLateSends } = await import("./dispatch");
           const state = setup();
           state.property.id = ORPHAN_PROP;
@@ -5396,12 +5404,90 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
           state.deadLetters = [];
           const result = await sweepLateSends(createMockSupabase(state) as never, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
           expect(result.orphanMalformed).toBe(1);
+          expect(state.property.last_ai_escalation_reason).toBe("send_timeout_unparseable");
+          expect(state.property.needs_human_attention).toBe(true);
           const malformedReports = reportErrorMock.mock.calls.filter(
             (c) => (c[1] as { tags?: { surface?: string } } | undefined)?.tags?.surface === "ai_responder_orphan_timeout_malformed",
           );
           expect(malformedReports).toHaveLength(1);
           expect(state.deadLetters).toHaveLength(0);
           expect(state.deadLetterInQueries ?? 0).toBe(0);
+          // It left the candidate set: a second visit finds nothing.
+          const again = await sweepLateSends(createMockSupabase(state) as never, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
+          expect(again.orphanMalformed).toBe(0);
+        });
+
+        it("the malformed rewrite is conditional on the exact current value (a replaced flag is untouched)", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          state.property.needs_human_attention = false;
+          state.extraProperties = [{
+            id: uuid("a", 1), org_id: "org-1", needs_human_attention: true,
+            last_ai_escalation_reason: "dead_letter_failed:send_timeout:bad", last_ai_escalation_at: hourAgo(),
+          }];
+          const supabase = createMockSupabase(state) as never;
+          const result = await sweepLateSends(supabase, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
+          expect(result.orphanMalformed).toBe(1);
+          expect(state.extraProperties[0].last_ai_escalation_reason).toBe("send_timeout_unparseable");
+        });
+
+        it("1,000 malformed flags ahead of a valid already-backed record: malformed rewritten on visit one, record promoted on visit two", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          const recent = hourAgo();
+          state.extraProperties = Array.from({ length: 1000 }, (_v, i) => ({
+            id: uuid("a", i), org_id: "org-1", needs_human_attention: true,
+            last_ai_escalation_reason: `send_timeout:bad-${i}`, last_ai_escalation_at: recent,
+          }));
+          const validInbound = "00000000-0000-4000-8000-0000000000f9";
+          state.property.id = "a0000000-0000-4000-8000-000000009999";
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = `send_timeout:${validInbound}`;
+          state.property.last_ai_escalation_at = recent;
+          state.deadLetters = [{
+            id: "dl-valid", org_id: "org-1", property_id: state.property.id, inbound_message_id: validInbound,
+            body: "x", reason: "send_timeout", created_at: recent, resolved_at: recent,
+          }];
+          const supabase = createMockSupabase(state) as never;
+          const first = await sweepLateSends(supabase, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
+          expect(first.orphanMalformed).toBe(1000);
+          expect((state.extraProperties ?? []).every((p) => p.last_ai_escalation_reason === "send_timeout_unparseable")).toBe(true);
+          expect(String(state.property.last_ai_escalation_reason).endsWith(":backed")).toBe(false);
+          const second = await sweepLateSends(supabase, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
+          expect(second.orphanMalformed).toBe(0);
+          expect(state.property.last_ai_escalation_reason).toBe(`send_timeout:${validInbound}:backed`);
+          expect(state.deadLetters).toHaveLength(1);
+        });
+
+        it("a promotion failure is counted, reported once per run with ids, and retried on the next visit", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          const recent = hourAgo();
+          const inbound = "00000000-0000-4000-8000-0000000000fa";
+          state.property.id = ORPHAN_PROP;
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = `send_timeout:${inbound}`;
+          state.property.last_ai_escalation_at = recent;
+          state.deadLetters = [{
+            id: "dl-1", org_id: "org-1", property_id: ORPHAN_PROP, inbound_message_id: inbound,
+            body: "x", reason: "send_timeout", created_at: recent, resolved_at: recent,
+          }];
+          const supabase = createMockSupabase(state) as never;
+          state.backFlagWriteError = true;
+          const first = await sweepLateSends(supabase, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
+          expect(first.orphanBackingFailed).toBe(1);
+          expect(state.property.last_ai_escalation_reason).toBe(`send_timeout:${inbound}`);
+          const reports = () => reportErrorMock.mock.calls.filter(
+            (c) => (c[1] as { tags?: { surface?: string } } | undefined)?.tags?.surface === "ai_responder_orphan_timeout_backing_failed",
+          );
+          expect(reports()).toHaveLength(1);
+          expect(JSON.stringify(reports()[0][1])).toContain(ORPHAN_PROP);
+          // Still eligible: retried next visit, and succeeds once the write works.
+          state.backFlagWriteError = false;
+          const second = await sweepLateSends(supabase, { orphanScanNowMs: ORPHAN_SLICE_A_NOW });
+          expect(second.orphanBackingFailed).toBe(0);
+          expect(state.property.last_ai_escalation_reason).toBe(`send_timeout:${inbound}:backed`);
+          expect(reports()).toHaveLength(1);
         });
 
         it("the existence check is bulk `.in` queries of at most 100 uuids", async () => {
