@@ -7,7 +7,7 @@ import {
   getCallerMembershipsOrThrow,
   type Membership,
 } from "@/lib/auth/memberships";
-import { shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
+import { isAcquisitionsCaller, shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { reportError } from "@/lib/errors/report";
 import {
   createSupabaseDialpadDispatchDb,
@@ -33,6 +33,7 @@ import {
   MyLeadsReadError,
 } from "@/lib/my-leads/queries";
 
+import { decideDialpadCallRoute } from "@/lib/dialpad-cti/call-route";
 import { MyLeadsClient, type MyLeadsFocus } from "./client";
 import {
   parseSelectedLeadParam,
@@ -349,6 +350,19 @@ export default async function MyLeadsPage({
         },
       );
     }
+  }
+
+  // Same rule as every other Call button (layout): Dialpad for active Acquisitions members only. A member with no
+  // live binding stays on Dialpad and gets the server's "not verified" denial, never a silent Telnyx call.
+  if (
+    decideDialpadCallRoute({
+      clickToDialFlag: callFeatures.clickToDial,
+      apiDialSchemaReady: callFeatures.clickToDial,
+      bootstrap: dialpad,
+      acquisitionsMember: isAcquisitionsCaller(memberships[0]),
+    }) !== "dialpad"
+  ) {
+    dialpad = null;
   }
 
   return (

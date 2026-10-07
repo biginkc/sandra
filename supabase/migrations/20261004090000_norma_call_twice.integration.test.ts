@@ -54,6 +54,8 @@ async function withDb(fn: (db: Client, ctx: Ctx) => Promise<void>, beforeUpgrade
     );
     if (beforeUpgrade) await beforeUpgrade(db, ctx);
     await db.query(retryMigration);
+    // Explicit activation in this transaction-only retry-contract fixture.
+    await db.query("update public.norma_retry_admission set enabled=true where singleton=true");
     await fn(db, ctx);
   } finally {
     await db.query("rollback").catch(() => {});

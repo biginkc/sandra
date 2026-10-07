@@ -130,6 +130,8 @@ export type MyLeadAttempt = {
   sourceLabel?: string
   recordingUrl?: string | null
   callActivityId?: string | null
+  /** A Dialpad call's activity id: Sandra's own copy of the recording plays only when it is authorized and stored. */
+  dialpadCallActivityId?: string | null
   followUpObligationId?: string | null
   followUpStatus?: "required" | "draft" | "claimed" | "sending" | "accepted" | "delivered" | "failed_not_dispatched" | "unknown" | "blocked" | "delivery_failed" | "voided" | "exception_closed" | null
   followUpMessage?: string | null

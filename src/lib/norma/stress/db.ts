@@ -172,6 +172,9 @@ export async function createScratchDb(): Promise<Scratch> {
     for (const file of MIGRATIONS) {
       await setup.query(readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"));
     }
+    // This suite exercises the separately activated retry contract. The migration
+    // itself stays OFF; only this owned disposable database explicitly opts in.
+    await setup.query("update public.norma_retry_admission set enabled=true where singleton=true");
     await setup.query(AUDIT_SQL);
   } catch (error) {
     await setup.end().catch(() => undefined);

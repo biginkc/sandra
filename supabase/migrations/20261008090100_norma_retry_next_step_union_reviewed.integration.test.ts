@@ -3,6 +3,9 @@ import { describe, expect, it } from "vitest";
 import { complete, create, dispatched, lead, load, migrations, svc, tasksFor, withDb } from "@tests/integration/norma-next-step-support";
 
 const UNION = load("20261008090100_norma_retry_next_step_union_reviewed.sql");
+// Existing retry/fencing scenarios deliberately opt in in their rolled-back fixture.
+// Dedicated admission tests exercise the unmodified default-OFF migration.
+const ENABLE_RETRY = "update public.norma_retry_admission set enabled=true where singleton=true;";
 const ROLLBACK = load("../rollbacks/20261008090100_norma_retry_next_step_union_reviewed.sql");
 
 describe("Norma retry and My Leads next step union", () => {
@@ -30,7 +33,7 @@ describe("Norma retry and My Leads next step union", () => {
       expect(tasks).toHaveLength(1);
       expect(tasks[0]).toMatchObject({ type: "appointment", mode: "phone", status: "open", source_key: `norma_call:${id}` });
       expect(tasks[0].description).toContain("tomorrow");
-    }, `${migrations()}\n${UNION}`);
+    }, `${migrations()}\n${UNION}\n${ENABLE_RETRY}`);
   });
 
   it("uses the shared review writer and preserves DNC read-only task behavior", async () => {
@@ -50,7 +53,7 @@ describe("Norma retry and My Leads next step union", () => {
       await db.query("set local session_replication_role='origin'");
       expect(await complete(db, dncId, dncCall, "callback_requested", { callback_raw: "do not call" })).toMatchObject({ status: "completed", task_id: null });
       expect(await tasksFor(db, dnc.property)).toHaveLength(0);
-    }, `${migrations()}\n${UNION}`);
+    }, `${migrations()}\n${UNION}\n${ENABLE_RETRY}`);
   });
 
   it("requires explicit attempt one metadata for retry and rejects legacy mutators on attempt two", async () => {
@@ -83,7 +86,7 @@ describe("Norma retry and My Leads next step union", () => {
       expect((await svc<{ b: string }>(db, "select public.fn_norma_bind_call_id($1,$2,$3) as b", [id, "union-second", 2])).rows[0]!.b).toBe("bound");
       expect((await svc<{ r: string }>(db, "select public.fn_norma_mark_needs_review($1,'review',$2) as r", [id, 2])).rows[0]!.r).toBe("needs_review");
       expect((await svc<{ r: string }>(db, "select public.fn_norma_mark_dispatch_rejected($1,'late') as r", [id])).rows[0]!.r).toBe("needs_review");
-    }, `${migrations()}\n${UNION}`);
+    }, `${migrations()}\n${UNION}\n${ENABLE_RETRY}`);
   });
 
   it("keeps retry and shared next-step behavior after the safe rollback repair", async () => {
@@ -102,7 +105,7 @@ describe("Norma retry and My Leads next step union", () => {
       const legacyCall = await dispatched(db, legacyId, "rollback-legacy");
       expect(await complete(db, legacyId, legacyCall, "no_answer")).toMatchObject({ result: "applied", status: "completed" });
       expect(await complete(db, legacyId, legacyCall, "no_answer")).toMatchObject({ result: "replayed" });
-    }, `${migrations()}\n${UNION}\n${ROLLBACK}`);
+    }, `${migrations()}\n${UNION}\n${ROLLBACK}\n${ENABLE_RETRY}`);
   });
 
   it("leaves attempt two unchanged for every legacy or malformed completion payload", async () => {
@@ -142,7 +145,7 @@ describe("Norma retry and My Leads next step union", () => {
       const numericBefore = await snapshot(numericId, numeric.property);
       expect((await svc<{ r: Record<string, unknown> }>(db, "select public.fn_norma_complete_call($1,$2,$3,$4::jsonb) as r", [numericId, "matrix-number-second", "callback_requested", '{"attempt":2.0}'])).rows[0]!.r).toMatchObject({ result: "stale_attempt" });
       expect(await snapshot(numericId, numeric.property)).toEqual(numericBefore);
-    }, `${migrations()}\n${UNION}`);
+    }, `${migrations()}\n${UNION}\n${ENABLE_RETRY}`);
   });
 
   it("keeps omitted-attempt RPC calls legacy-compatible on attempt one and fenced on attempt two", async () => {
@@ -203,7 +206,7 @@ describe("Norma retry and My Leads next step union", () => {
         expect((await svc<{ value: string }>(db, "select public.fn_norma_mark_needs_review(p_request_id => $1, p_reason => $2) as value", [id, "late"])).rows[0].value).toBe(state);
         expect(await snapshot(id, l.property)).toEqual(before);
       }
-    }, `${migrations()}\n${UNION}`);
+    }, `${migrations()}\n${UNION}\n${ENABLE_RETRY}`);
   });
 
   it("keeps one service-role-only overload for every Norma RPC", async () => {
@@ -242,7 +245,7 @@ describe("Norma retry and My Leads next step union", () => {
       expect((await db.query("select public.fn_norma_complete_call(p_request_id => $1, p_call_id => $2, p_outcome => $3, p_payload => $4::jsonb) as value", [claimId, claimCall, "callback_requested", "{}"])) .rows[0].value).toMatchObject({ result: "applied" });
       expect((await db.query("select public.fn_norma_claim_dispatch(p_request_id => $1) as value", [fenceId])).rows[0].value).toBe(true);
       expect((await db.query("select public.fn_norma_presend_fence(p_request_id => $1) as value", [fenceId])).rows[0].value).toBe(true);
-    }, `${migrations()}\n${UNION}`);
+    }, `${migrations()}\n${UNION}\n${ENABLE_RETRY}`);
   });
 
   it("admits only a fresh dispatching row at the matching attempt and fails closed otherwise", async () => {
@@ -278,7 +281,7 @@ describe("Norma retry and My Leads next step union", () => {
       expect((await svc<{ value: string }>(db, "select public.fn_norma_mark_needs_review($1,'fence',$2) as value", [reviewedId, 1])).rows[0].value).toBe("needs_review");
       expect((await svc<{ result: string }>(db, "select (public.fn_norma_mark_reviewed($1,$2,$3)->>'result') as result", [reviewedId, reviewed.property, ctx.assignee])).rows[0].result).toBe("reviewed");
       expect((await svc<{ value: boolean }>(db, "select public.fn_norma_presend_fence($1) as value", [reviewedId])).rows[0].value).toBe(false);
-    }, `${migrations()}\n${UNION}`);
+    }, `${migrations()}\n${UNION}\n${ENABLE_RETRY}`);
   });
 
   it("keeps the recovery SQL body identical to the forward repair", () => {
@@ -312,7 +315,7 @@ describe("Norma retry and My Leads next step union", () => {
         expect.objectContaining({ type: "appointment", status: "completed", source_key: `norma_call:${id}` }),
         expect.objectContaining({ type: "appointment", status: "open", mode: "phone", source_key: `norma_call:${id}:${callId}` }),
       ]));
-    }, `${migrations()}\n${UNION}`);
+    }, `${migrations()}\n${UNION}\n${ENABLE_RETRY}`);
   });
 
 });

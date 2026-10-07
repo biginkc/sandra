@@ -27,6 +27,21 @@ export function isActiveAcquisitionsMember(
 }
 
 /**
+ * The Acquisitions group for call routing: acquisitions_enabled with active Sandra access, ANY role
+ * (an owner who is designated Acquisitions counts). Separate from isActiveAcquisitionsMember, which
+ * is member-only and gates the shared Messages and Leads surfaces.
+ */
+export function isAcquisitionsCaller(
+  membership: Pick<Membership, "acquisitions_enabled"> & {
+    access_status?: string | null;
+    access_expires_at?: string | null;
+    deletion_prepared_at?: string | null;
+  },
+): boolean {
+  return membership.acquisitions_enabled === true && hasActiveSandraAccess(membership);
+}
+
+/**
  * Owners retain the shared Messages and Leads board. A non-owner is scoped
  * away from both surfaces only when their active membership is Acquisitions.
  * The page boundary separately requires at least one active membership, so a

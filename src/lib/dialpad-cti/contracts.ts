@@ -64,6 +64,7 @@ export const DIALPAD_DENIAL_DETAILS = [
   'revoker_not_owner',
   'dialpad_user_already_bound',
   'intent_already_matched',
+  'outside_calling_hours',
 ] as const;
 export type DialpadDenialDetail = (typeof DIALPAD_DENIAL_DETAILS)[number];
 

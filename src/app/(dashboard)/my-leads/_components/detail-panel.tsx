@@ -138,6 +138,9 @@ export function MyLeadDetailPanel({
               </div>
             )}
             {visible && attempt.callActivityId && <MyLeadCallArtifacts key={attempt.callActivityId} callActivityId={attempt.callActivityId} />}
+            {visible && !attempt.callActivityId && attempt.dialpadCallActivityId && (
+              <MyLeadCallArtifacts key={attempt.dialpadCallActivityId} callActivityId={attempt.dialpadCallActivityId} recordingOnly />
+            )}
           </div>
         )}
       />

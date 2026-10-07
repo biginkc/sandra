@@ -79,8 +79,8 @@ const MUTANTS: Mutant[] = [
       mutateFunction(
         q,
         "public.fn_norma_complete_call(uuid, text, text, jsonb)",
-        "if p_outcome = 'no_answer' and r.attempt = 1 and r.status in ('dispatching', 'dispatched')\n     and (v_payload ->> 'attempt') = '1' then",
-        "if p_outcome <> 'unknown' and r.attempt = 1 and r.status in ('dispatching', 'dispatched')\n     and (v_payload ->> 'attempt') = '1' then",
+        "if p_outcome = 'no_answer' and r.attempt = 1 and r.status in ('dispatching', 'dispatched')\n     and (v_payload ->> 'attempt') = '1'",
+        "if p_outcome <> 'unknown' and r.attempt = 1 and r.status in ('dispatching', 'dispatched')\n     and (v_payload ->> 'attempt') = '1'",
       ),
   },
   {
@@ -90,8 +90,8 @@ const MUTANTS: Mutant[] = [
       mutateFunction(
         q,
         "public.fn_norma_complete_call(uuid, text, text, jsonb)",
-        "if p_outcome = 'no_answer' and r.attempt = 1 and r.status in ('dispatching', 'dispatched')\n     and (v_payload ->> 'attempt') = '1' then",
-        "if false then",
+        "if p_outcome = 'no_answer' and r.attempt = 1 and r.status in ('dispatching', 'dispatched')\n     and (v_payload ->> 'attempt') = '1'",
+        "if false",
       ),
   },
   {
@@ -214,8 +214,8 @@ const SCENE_MUTANTS: SceneMutant[] = [
       mutateFunction(
         q,
         "public.fn_norma_complete_call(uuid, text, text, jsonb)",
-        "if p_outcome = 'no_answer' and r.attempt = 1 and r.status in ('dispatching', 'dispatched')\n     and (v_payload ->> 'attempt') = '1' then",
-        "if p_outcome = 'no_answer' and r.attempt = 1 and r.status in ('dispatching', 'dispatched') then",
+        "if p_outcome = 'no_answer' and r.attempt = 1 and r.status in ('dispatching', 'dispatched')\n     and (v_payload ->> 'attempt') = '1'",
+        "if p_outcome = 'no_answer' and r.attempt = 1 and r.status in ('dispatching', 'dispatched')",
       ),
     scene: async (h) => {
       const ctx = await h.lead({ enrollments: ["active"] }, { kind: "voicemail" });

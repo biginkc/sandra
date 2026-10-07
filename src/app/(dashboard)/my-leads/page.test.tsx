@@ -298,10 +298,38 @@ describe("MyLeadsPage availability boundary", () => {
     },
   );
 
+  it.each([
+    [true, true],
+    [false, false],
+  ])("owner with acquisitions_enabled=%s gets Dialpad=%s", async (enabled, expectDialpad) => {
+    mocks.getCallerMembershipsOrThrow.mockResolvedValue([
+      { ...activeAcquisitionsMembership, user_id: "owner-1", role: "owner", acquisitions_enabled: enabled },
+    ]);
+    mocks.getAcquisitionRoster.mockResolvedValue({
+      viewer: { ...viewer, userId: "owner-1", isOwner: true },
+      roster: { ...baseRoster, members: [...baseRoster.members, { id: "owner-1", label: "Owner", role: "owner", acquisitionsEnabled: enabled, active: true, hasHistory: false }] },
+    });
+    const bootstrap = { connectionId: "c-1", binding: { status: "verified", dialpadUserId: "d-1" }, grants: [] };
+    mocks.loadDialpadCallingBootstrap.mockResolvedValue(bootstrap);
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    expect(
+      (mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0],
+    ).toMatchObject({ dialpad: expectDialpad ? bootstrap : null });
+  });
+
+  it("keeps an unbound acquisitions member on Dialpad (the server's not-verified denial), not Telnyx", async () => {
+    const bootstrap = { connectionId: "c-1", binding: { status: "none" }, grants: [] };
+    mocks.loadDialpadCallingBootstrap.mockResolvedValue(bootstrap);
+    renderPage(await MyLeadsPage({ searchParams: Promise.resolve({}) }));
+    expect(
+      (mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0],
+    ).toMatchObject({ dialpad: bootstrap });
+  });
+
   it("passes the Dialpad calling bootstrap to the client only for the session's own org and rep", async () => {
     const bootstrap = {
       connectionId: "c-1",
-      binding: { status: "none" },
+      binding: { status: "verified", dialpadUserId: "d-1" },
       grants: [],
     };
     mocks.loadDialpadCallingBootstrap.mockResolvedValue(bootstrap);

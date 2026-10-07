@@ -36,7 +36,7 @@ import {
   getDialpadCallStatusAction,
 } from './dialpad-actions';
 
-const viewer = () => ({ userId: 'rep-1', orgId: 'org-1', isOwner: false, client: { auth: { getUser: mocks.getUser } } });
+const viewer = (acquisitions = true) => ({ userId: 'rep-1', orgId: 'org-1', isOwner: false, acquisitions, client: { auth: { getUser: mocks.getUser } } });
 const actor = { orgId: 'org-1', userId: 'rep-1' };
 
 beforeEach(() => {
@@ -62,6 +62,12 @@ describe('dialLeadAction', () => {
       { propertyId: 'p', contactId: 'c', phoneSlot: null, idempotencyKey: 'k' },
       { env: process.env },
     );
+  });
+  it('returns not_configured for a caller outside Acquisitions without touching the dial flow', async () => {
+    mocks.myLeadsViewer.mockResolvedValue(viewer(false));
+    const outcome = await dialLeadAction(input);
+    expect(outcome).toMatchObject({ ok: false, code: 'not_configured' });
+    expect(mocks.startDialpadApiCall).not.toHaveBeenCalled();
   });
   it('passes an explicit phone slot through', async () => {
     mocks.startDialpadApiCall.mockResolvedValue({ ok: true });
