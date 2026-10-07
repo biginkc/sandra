@@ -101,7 +101,7 @@ async function seedDecision(
   by: "system" | "human",
 ) {
   const id = randomUUID();
-  const resolvedOutcome = status === "pending" ? "null" : status === "corrected" ? "'wrong_number'" : `'${outcome}'`;
+  const resolvedOutcome = status === "pending" || status === "superseded" ? "null" : status === "corrected" ? "'wrong_number'" : `'${outcome}'`;
   const resolvedAt = status === "pending" ? "null" : "now()";
   const resolvedBy = status !== "pending" && status !== "superseded" && by === "human" ? `'${reviewerId}'` : "null";
   const superseded = status === "superseded" ? "'new_ai_decision'" : "null";
@@ -193,7 +193,7 @@ describe("fn_messages_v2_scorecard", () => {
     await seedDecision(b2, "nurture", "confirmed", "system");
     await leadEvent(b2.propertyId, "dispo_set", "user", { from: null, to: "nurture" }, 96);
     // B3: human override AFTER the 72h window does not count
-    const b3 = await seedRun({ outcome: "nurture", conf: 0.93, ageHours: 200 });
+    const b3 = await seedRun({ outcome: "nurture", conf: 0.93, ageHours: 150 });
     await seedDecision(b3, "nurture", "confirmed", "system");
     await leadEvent(b3.propertyId, "dispo_set", "user", { from: "nurture", to: "not_interested" }, 20);
     // C: auto, 1d old -> auto_applied but not settled
