@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   FLORIDA_MAX_TEXTS_PER_24H,
+  MULTI_ZONE_AREA_CODES,
   checkFloridaCap,
   checkRecipientQuietHours,
   stateForPhone,
+  zonesForAreaCode,
 } from "./quiet-hours-recipient";
 
 // 2026-10-07 (daylight time everywhere that observes it).
@@ -98,6 +100,78 @@ describe("checkRecipientQuietHours", () => {
       state: "FL",
     });
     expect(checkRecipientQuietHours("+18505550100", at("2026-10-07T13:30:00Z"))).toMatchObject({ ok: true });
+  });
+
+  it("an area code that spans zones must be open in EVERY zone", () => {
+    // 850 (FL panhandle: Eastern + Central). 8:30pm Eastern = 7:30pm Central:
+    // Florida's 8pm close has passed in the Eastern part -> refused.
+    expect(checkRecipientQuietHours("+18505550100", at("2026-10-08T00:30:00Z"))).toMatchObject({
+      ok: false,
+      reason: "outside_window",
+      state: "FL",
+      localTime: "20:30",
+    });
+    // 7:30pm Eastern / 6:30pm Central: open in both.
+    expect(checkRecipientQuietHours("+18505550100", at("2026-10-07T23:30:00Z"))).toMatchObject({ ok: true, florida: true });
+    // 208 (Idaho: Mountain + Pacific). 7:30am Pacific = 8:30am Mountain -> refused.
+    expect(checkRecipientQuietHours("+12085550100", at("2026-10-07T14:30:00Z"))).toMatchObject({
+      ok: false,
+      reason: "outside_window",
+      state: "ID",
+      localTime: "07:30",
+    });
+    // 8:30am Pacific / 9:30am Mountain: open in both.
+    expect(checkRecipientQuietHours("+12085550100", at("2026-10-07T15:30:00Z"))).toMatchObject({ ok: true });
+    // ...and the evening edge binds on the EASTERN-most zone: 9:30pm Mountain is closed even though 8:30pm Pacific is open.
+    expect(checkRecipientQuietHours("+12085550100", at("2026-10-08T03:30:00Z"))).toMatchObject({ ok: false });
+  });
+
+  it("every other split-zone area code is checked against all of its zones", () => {
+    // [phone, UTC instant, expected ok, why]. Times are in October 2026 (DST in effect except AZ).
+    const cases: Array<[string, string, boolean]> = [
+      ["+18125550100", "2026-10-07T12:30:00Z", false], // 812 IN: 7:30am Central (Evansville) though 8:30am Eastern
+      ["+18125550100", "2026-10-07T13:30:00Z", true],
+      ["+15745550100", "2026-10-08T01:30:00Z", false], // 574 IN: 9:30pm Eastern closed though 8:30pm Central
+      ["+19065550100", "2026-10-07T12:30:00Z", false], // 906 MI: 7:30am Central (Wisconsin line)
+      ["+16205550100", "2026-10-07T13:30:00Z", false], // 620 KS: 7:30am Mountain
+      ["+17855550100", "2026-10-07T14:30:00Z", true],
+      ["+13085550100", "2026-10-07T13:30:00Z", false], // 308 NE
+      ["+16055550100", "2026-10-07T13:30:00Z", false], // 605 SD
+      ["+17015550100", "2026-10-07T13:30:00Z", false], // 701 ND
+      ["+15415550100", "2026-10-07T14:30:00Z", false], // 541 OR: 7:30am Pacific
+      ["+14585550100", "2026-10-07T14:30:00Z", false], // 458 OR overlay
+      ["+12705550100", "2026-10-08T01:30:00Z", false], // 270 KY: 9:30pm Eastern (Elizabethtown)
+      ["+14235550100", "2026-10-07T12:30:00Z", false], // 423 TN: 7:30am Central
+      ["+17755550100", "2026-10-07T14:30:00Z", false], // 775 NV: West Wendover
+      ["+19285550100", "2026-10-08T03:30:00Z", false], // 928 AZ: 8:30pm Phoenix = 9:30pm Navajo (DST)
+      ["+19075550100", "2026-10-07T16:30:00Z", false], // 907 AK: 8:30am Anchorage = 7:30am Adak
+    ];
+    for (const [phone, iso, ok] of cases) {
+      expect(checkRecipientQuietHours(phone, at(iso)).ok, `${phone} @ ${iso}`).toBe(ok);
+    }
+  });
+
+  it("single-zone corrections to the state default still hold", () => {
+    expect(zonesForAreaCode("219")).toEqual(["America/Chicago"]);
+    expect(zonesForAreaCode("865")).toEqual(["America/New_York"]);
+    expect(zonesForAreaCode("915")).toEqual(["America/Denver"]);
+    expect(zonesForAreaCode("816")).toEqual(["America/Chicago"]);
+    expect(zonesForAreaCode("999")).toBeNull();
+  });
+
+  it("audit: the multi-zone table is exactly the reviewed list, and every zone is a valid IANA zone", () => {
+    expect([...MULTI_ZONE_AREA_CODES].sort()).toEqual(
+      [
+        "208", "270", "308", "364", "423", "448", "458", "541", "574", "605", "620", "701", "775", "785",
+        "812", "850", "906", "907", "928", "930", "986",
+      ].sort(),
+    );
+    for (const code of MULTI_ZONE_AREA_CODES) {
+      expect(stateForPhone(`+1${code}5550100`), code).not.toBeNull();
+      for (const zone of zonesForAreaCode(code)!) {
+        expect(() => new Intl.DateTimeFormat("en-US", { timeZone: zone }), `${code} ${zone}`).not.toThrow();
+      }
+    }
   });
 
   it("fails closed when the state cannot be resolved", () => {

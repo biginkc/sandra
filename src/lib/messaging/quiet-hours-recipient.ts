@@ -84,20 +84,81 @@ const STATE_BY_AREA_CODE: ReadonlyMap<string, string> = new Map(
   ),
 );
 
+const NY = "America/New_York";
+const CHI = "America/Chicago";
+const DEN = "America/Denver";
+const LA = "America/Los_Angeles";
+
 /**
- * Area codes whose zone differs from their state's dominant zone in
- * `STATE_TO_TZ`. Without these a Central-time recipient in a mostly-Eastern
- * state could be texted at 7am local.
+ * Area codes whose recipients are NOT all in their state's dominant zone in
+ * `STATE_TO_TZ`. A code that spans two zones lists EVERY zone it covers and the
+ * send window must be open in all of them (a text at 8:30pm Eastern to an 850
+ * number is 7:30pm Central, but the Tallahassee recipient is still past 8pm).
+ *
+ * Source: the time-zone boundary counties of 49 CFR Part 71 (US DOT), matched
+ * to NANPA area-code geography and overlays. Audited state by state: only the
+ * states below have a time-zone line that cuts across an area code. Informal
+ * local-time practices (e.g. Kenton OK, Jackpot NV, Phenix City AL) are not
+ * legal zones and are not listed. Entries are deliberately conservative: when a
+ * code reaches even one county in a second zone, both zones are required.
+ *
+ *   FL 850/448   panhandle: Eastern (Tallahassee) + Central (Pensacola, Panama City)
+ *   ID 208/986   Boise south = Mountain, north panhandle = Pacific
+ *   IN 574/812/930  Eastern + the Central counties (Starke, Pulaski; Evansville area)
+ *   MI 906       Upper Peninsula: Eastern + 4 Central counties on the Wisconsin line
+ *   KY 270/364   Eastern (Hardin, Meade, Larue...) + western Central counties
+ *   TN 423       Eastern + Central (Marion, Bledsoe, Sequatchie counties)
+ *   KS 620/785   Central + the four western Mountain counties
+ *   NE 308       Central + Mountain panhandle
+ *   SD 605       Central (east river) + Mountain (west river)
+ *   ND 701       Central + the southwestern Mountain counties
+ *   OR 541/458   Pacific + Malheur County (Mountain)
+ *   NV 775       Pacific + West Wendover (Mountain)
+ *   AZ 928       Phoenix (no DST) + the Navajo Nation (observes DST = Mountain)
+ *   AK 907       Alaska + the Aleutians west of 169 30 W (Hawaii-Aleutian)
+ * Whole-code single-zone corrections to the state default:
+ *   IN 219 Central, TN 865 Eastern, TX 915 Mountain (El Paso, Hudspeth).
  */
-const AREA_CODE_TZ_OVERRIDES: Readonly<Record<string, string>> = {
-  "850": "America/Chicago", // Florida panhandle
-  "219": "America/Chicago", // NW Indiana
-  "270": "America/Chicago", // western Kentucky
-  "364": "America/Chicago", // western Kentucky
-  "423": "America/New_York", // east Tennessee
-  "865": "America/New_York", // east Tennessee
-  "915": "America/Denver", // El Paso, Texas
+const AREA_CODE_ZONES: Readonly<Record<string, readonly string[]>> = {
+  "850": [NY, CHI],
+  "448": [NY, CHI], // 850 overlay
+  "208": ["America/Boise", LA],
+  "986": ["America/Boise", LA], // 208 overlay
+  "574": ["America/Indianapolis", CHI],
+  "812": ["America/Indianapolis", CHI],
+  "930": ["America/Indianapolis", CHI], // 812 overlay
+  "219": [CHI], // NW Indiana (Lake, Porter, LaPorte, Newton, Jasper)
+  "906": ["America/Detroit", CHI],
+  "270": [CHI, NY],
+  "364": [CHI, NY], // 270 overlay
+  "423": [NY, CHI],
+  "865": [NY],
+  "620": [CHI, DEN],
+  "785": [CHI, DEN],
+  "308": [CHI, DEN],
+  "605": [CHI, DEN],
+  "701": [CHI, DEN],
+  "541": [LA, DEN],
+  "458": [LA, DEN], // 541 overlay
+  "775": [LA, DEN],
+  "928": ["America/Phoenix", DEN],
+  "907": ["America/Anchorage", "America/Adak"],
+  "915": [DEN], // El Paso, Hudspeth
 };
+
+/** Exported for the audit test: the time zones a recipient with this area code may be in. */
+export function zonesForAreaCode(code: string): readonly string[] | null {
+  const override = AREA_CODE_ZONES[code];
+  if (override) return override;
+  const state = STATE_BY_AREA_CODE.get(code);
+  const zone = state ? STATE_TO_TZ[state] : undefined;
+  return zone ? [zone] : null;
+}
+
+/** Exported for the audit test. */
+export const MULTI_ZONE_AREA_CODES: readonly string[] = Object.entries(AREA_CODE_ZONES)
+  .filter(([, zones]) => zones.length > 1)
+  .map(([code]) => code);
 
 function areaCodeOf(phone: string | null | undefined): string | null {
   if (!phone) return null;
@@ -119,11 +180,21 @@ export const FLORIDA_QUIET_HOURS_CLOSE_HOUR = 20;
 export const FLORIDA_MAX_TEXTS_PER_24H = 3;
 
 export type RecipientQuietHoursCheck =
-  | { ok: true; state: string; localTime: string; zone: string; florida: boolean }
+  | {
+      ok: true;
+      state: string;
+      /** Local time in the first zone (display only; every zone was checked). */
+      localTime: string;
+      zone: string;
+      /** Every zone the recipient's area code may be in; the window is open in all of them. */
+      zones: readonly string[];
+      florida: boolean;
+    }
   | {
       ok: false;
       reason: "outside_window" | "unknown_recipient_state";
       state: string | null;
+      /** Local time in the zone that is closed (outside_window), else null. */
       localTime: string | null;
     };
 
@@ -143,7 +214,9 @@ function localClock(zone: string, now: Date): { hour: number; localTime: string 
 
 /**
  * Is `now` inside the send window where the RECIPIENT is? 8am-9pm local,
- * 8am-8pm for Florida. Unknown state or zone fails closed.
+ * 8am-8pm when any part of the area code is Florida. An area code that spans
+ * time zones must be open in EVERY zone it covers. Unknown state or zone fails
+ * closed.
  */
 export function checkRecipientQuietHours(
   phone: string | null | undefined,
@@ -151,20 +224,24 @@ export function checkRecipientQuietHours(
 ): RecipientQuietHoursCheck {
   const code = areaCodeOf(phone);
   const state = code ? (STATE_BY_AREA_CODE.get(code) ?? null) : null;
-  const zone = code ? (AREA_CODE_TZ_OVERRIDES[code] ?? (state ? STATE_TO_TZ[state] : undefined)) : undefined;
-  if (!state || !zone) {
+  const zones = code ? zonesForAreaCode(code) : null;
+  if (!state || !zones || zones.length === 0) {
     return { ok: false, reason: "unknown_recipient_state", state: null, localTime: null };
-  }
-  const clock = localClock(zone, now);
-  if (!clock) {
-    return { ok: false, reason: "unknown_recipient_state", state, localTime: null };
   }
   const florida = state === "FL";
   const close = florida ? FLORIDA_QUIET_HOURS_CLOSE_HOUR : RECIPIENT_QUIET_HOURS_CLOSE_HOUR;
-  if (clock.hour < RECIPIENT_QUIET_HOURS_OPEN_HOUR || clock.hour >= close) {
-    return { ok: false, reason: "outside_window", state, localTime: clock.localTime };
+  let firstLocalTime: string | null = null;
+  for (const zone of zones) {
+    const clock = localClock(zone, now);
+    if (!clock) {
+      return { ok: false, reason: "unknown_recipient_state", state, localTime: null };
+    }
+    if (clock.hour < RECIPIENT_QUIET_HOURS_OPEN_HOUR || clock.hour >= close) {
+      return { ok: false, reason: "outside_window", state, localTime: clock.localTime };
+    }
+    firstLocalTime ??= clock.localTime;
   }
-  return { ok: true, state, localTime: clock.localTime, zone, florida };
+  return { ok: true, state, localTime: firstLocalTime ?? "", zone: zones[0]!, zones, florida };
 }
 
 export type FloridaCapCheck =
