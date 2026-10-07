@@ -10,8 +10,7 @@ import { listExtrasFor } from "@/app/(dashboard)/my-leads/_components/extras-sto
 import { extrasConfirmed, saveExtrasRequest, type ExtrasRequest } from "@/app/(dashboard)/my-leads/_components/extras-saver";
 import type { PostCallExtrasState } from "@/app/(dashboard)/my-leads/_components/types";
 import { useAttemptWorkflow, type AttemptOpening } from "@/app/(dashboard)/my-leads/_components/use-attempt-workflow";
-import { DialStatus } from "@/app/(dashboard)/my-leads/_components/dial-status";
-import { useApiDial } from "@/app/(dashboard)/my-leads/_components/use-api-dial";
+import { useOptionalDialpadCall } from "@/components/dialpad/dialpad-call-context";
 import { WorkflowRecoveryContext } from "@/app/(dashboard)/my-leads/_components/workflow-form";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -73,13 +72,14 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false, post
   }, []);
 
   // The same dial path (and per-lead key lifecycle) as the My Leads page.
-  const { dialFlight, dialActive, startApiDial, statusHandlers } = useApiDial((id) =>
-    id === propertyId ? { contactId: lead.homeowner.contactId, label: title } : null,
-  );
+  // The flight and its lock are owned by the persistent layout provider.
+  const dialpadCall = useOptionalDialpadCall();
+  const dialActive = dialpadCall?.dialActive ?? false;
   const canDial = clickToDial && !!lead.homeowner.contactId && lead.homeowner.phones.length > 0 && !queueRow.contactDnc && !dialActive;
   const onCall = () => {
     if (!canDial) return;
-    void startApiDial(propertyId, 1);
+    if (!lead.homeowner.contactId) return;
+    dialpadCall?.startCall({ propertyId, contactId: lead.homeowner.contactId, label: title });
   };
 
   // Post-call prompt (P1c) docked; the attempt workflow core is the same one the queue uses.
@@ -234,15 +234,6 @@ export function CallScreen({ data, viewerLabel = null, clickToDial = false, post
             Back to My Leads
           </Link>
         </div>
-        {clickToDial ? (
-          <div className="w-full">
-            <DialStatus
-              flight={dialFlight}
-              {...statusHandlers}
-              onEnded={() => router.refresh()}
-            />
-          </div>
-        ) : null}
       </header>
 
       {/* ≥1024px: two columns. Below: single column in the D7 order. */}

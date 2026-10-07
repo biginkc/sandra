@@ -65,6 +65,10 @@
       "schedule": "*/1 * * * *"
     },
     {
+      "path": "/api/cron/dialpad-recording-download",
+      "schedule": "*/1 * * * *"
+    },
+    {
       "path": "/api/cron/direct-recording-sweep",
       "schedule": "*/1 * * * *"
     },
@@ -96,7 +100,8 @@
       "codex/disposable-canary-runner-20260912": false,
       "codex/slack-hosted-canary-20261004": false,
       "codex/norma-schema-first-20261004": false,
-      "codex/norma-runtime-admission-20261004": false
+      "codex/norma-runtime-admission-20261004": false,
+      "main": false
     }
   }
 }

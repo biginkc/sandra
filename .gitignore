@@ -67,3 +67,6 @@ supabase/.temp/
 /scripts/direct-call-feasibility/.run/
 scripts/filter-volume/results/
 scripts/search-volume/results/
+
+# SWC compiled plugin cache (machine-specific)
+.swc/

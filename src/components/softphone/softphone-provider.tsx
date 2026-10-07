@@ -60,6 +60,8 @@ import {
   isJitterTransportEnabled,
   isSoftphoneTransportEnabled,
 } from "@/lib/dialer/transport-selection";
+import { useCallLock } from "@/components/calls/call-lock-context";
+import { CALL_LOCK_MESSAGE } from "@/lib/calls/call-lock";
 import {
   transitionSoftphoneState,
   type SoftphoneState,
@@ -280,6 +282,8 @@ export function SoftphoneProvider({
   const transportFactory =
     suppliedTransportFactory ??
     (directMode ? createDirectCallTransport : createSoftphoneCallTransport);
+  const callLock = useCallLock();
+  const [lockToken] = useState(() => Symbol("softphone"));
   const [phone, setPhone] = useState<SoftphoneState>("closed");
   const [target, setTarget] = useState<SoftphoneTarget | null>(null);
   const [dialInput, setDialInput] = useState("");
@@ -697,6 +701,17 @@ export function SoftphoneProvider({
     return () => clearTimeout(checkingTimer);
   }, [callingEnabled, directMode, showToast, transition, transportFactory]);
 
+  // The shared call lock is held from the moment a start is accepted until the softphone is back to
+  // closed, idle or wrap. Runs after every render so a start that aborts within one batch still releases.
+  useEffect(() => {
+    if (phone === "preparing" || phone === "live" || phone === "held" || startInFlightRef.current) {
+      // Includes a call restored after a reload: it holds the lock too.
+      callLock.acquire("softphone", lockToken);
+    } else {
+      callLock.release(lockToken);
+    }
+  });
+
   const startTarget = useCallback(
     async (
       prepare: () => Promise<
@@ -711,6 +726,12 @@ export function SoftphoneProvider({
         return;
       }
       if (startInFlightRef.current) return;
+      // The lowest dial entry: openLead, the typed keypad, recents and "Call with coach" all pass here.
+      if (!callLock.acquire("softphone", lockToken)) {
+        setError(CALL_LOCK_MESSAGE);
+        showToast(CALL_LOCK_MESSAGE);
+        return;
+      }
       const reliabilityTiming =
         suppliedTiming ?? createReliabilityTimingSession();
       if (!suppliedTiming) reliabilityTiming.mark("ui_click");
@@ -1107,6 +1128,8 @@ export function SoftphoneProvider({
       }
     },
     [
+      callLock,
+      lockToken,
       callingEnabled,
       coachPreference.enabled,
       coachPreference.scriptId,

@@ -1,4 +1,5 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react"
+import { renderWithDialpad as render } from "@/components/dialpad/test-shell";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -136,15 +137,16 @@ describe("CallScreen", () => {
       expect(rawKeys()[2]).not.toBe(first);
     });
 
-    it("keeps the key after a thrown request (it may have dialed)", async () => {
+    it("after a thrown request (it may have dialed) the Call button stays disabled while the hold lasts, and the key is kept", async () => {
       const user = userEvent.setup();
       mocks.dialLead.mockRejectedValue(new Error("network"));
       render(<CallScreen postCallPrompt data={data} clickToDial />);
       await user.click(callButton());
       await screen.findByTestId("dial-status");
-      await user.click(callButton());
-      await waitFor(() => expect(mocks.dialLead).toHaveBeenCalledTimes(2));
-      expect(rawKeys()[1]).toBe(rawKeys()[0]);
+      // The lock is held for a possibly-ringing call: no second dial is offered.
+      await waitFor(() => expect(callButton()).toBeDisabled());
+      expect(mocks.dialLead).toHaveBeenCalledTimes(1);
+      expect(rawKeys()).toHaveLength(1);
     });
 
     it("releases the key on a server-proven non-dispatch (freshAttemptKey)", async () => {
@@ -158,18 +160,20 @@ describe("CallScreen", () => {
       expect(rawKeys()[1]).not.toBe(rawKeys()[0]);
     });
 
-    it("releases the key when the poll reports ended, and a failed call keeps polling and keeps the key", async () => {
+    it("failed call: Dismiss hides and Mark call ended releases; an ended poll mints a new key", async () => {
       const user = userEvent.setup();
       mocks.dialLead.mockResolvedValue({ ok: true, intentId: "i-1", state: "dialing", uncertain: false });
       mocks.dialStatus.mockResolvedValue({ ok: true, status: { state: "failed" } });
       const { unmount } = render(<CallScreen postCallPrompt data={data} clickToDial />);
       await user.click(callButton());
       await screen.findByText(/It may have rung/);
-      // `failed` is not final: the Dismiss keeps the key.
+      // `failed` is not final: Dismiss only hides the panel (lock and key stay) and the lead is not dialed again.
       await user.click(screen.getByRole("button", { name: "Dismiss" }));
-      await user.click(callButton());
-      await waitFor(() => expect(mocks.dialLead).toHaveBeenCalledTimes(2));
-      expect(rawKeys()[1]).toBe(rawKeys()[0]);
+      expect(mocks.dialLead).toHaveBeenCalledTimes(1);
+      // The panel is hidden but the call is still tracked; the rep brings it back and confirms the call really ended; only then is the key released.
+      await user.click(await screen.findByTestId("dialpad-call-show"));
+      await user.click(await screen.findByRole("button", { name: "Mark call ended" }));
+      await user.click(screen.getByRole("button", { name: "Yes, it ended" }));
       unmount();
 
       mocks.dialLead.mockClear();

@@ -1,0 +1,38 @@
+import { type StressConfig, type FaultName } from "./config";
+import { runChaos } from "./engine";
+import { EXPECTED_CATCH } from "./selftest-spec";
+
+/**
+ * Harness self-test. Before the real run, three fault-injection builds (duplicate a send, drop an
+ * offer, attach a note to the wrong lead) must each turn the run RED, and a control run with no
+ * fault must NOT. A harness that cannot fail proves nothing.
+ *
+ * Each run starts from empty tenant tables (the same `reset_tenant_tables()` the e2e lanes use) so
+ * the fresh-database proof holds. Short profile: self-test runs can never produce PASS.
+ */
+
+export type SelfTestRow = { fault: FaultName; faultFired: boolean; expectedRed: boolean; verdict: string; failingChecks: number[]; ok: boolean; note: string };
+
+export { EXPECTED_CATCH } from "./selftest-spec";
+
+/** A fault is caught only if it actually fired AND a check it is meant to trip went red: an unrelated failure of the same check earns nothing. */
+export function faultCaught(fault: FaultName, failingChecks: readonly number[], fired: boolean): boolean {
+  return fired && EXPECTED_CATCH[fault].some((id) => failingChecks.includes(id));
+}
+
+export async function runSelfTest(base: StressConfig): Promise<{ ok: boolean; rows: SelfTestRow[] }> {
+  const rows: SelfTestRow[] = [];
+  const order: FaultName[] = ["none", "duplicate_send", "drop_offer", "wrong_lead_note"];
+  for (const fault of order) {
+    const cfg: StressConfig = { ...base, fault, runId: `${base.runId}-${fault === "none" ? "control" : fault.replace(/_/g, "")}`.slice(0, 24), runTag: "" };
+    cfg.runTag = `STRESS-${cfg.runId}`;
+    const r = await runChaos({ cfg, profile: "short", resetFirst: true, env: { ...process.env, STRESS_ALLOW_PARTIAL: "1" } });
+    const failing = r.summary.checks.filter((c) => !c.ok && !c.deferred).map((c) => c.id);
+    const expectedRed = fault !== "none";
+    const red = r.summary.verdict === "FAIL";
+    const caught = faultCaught(fault, failing, r.faultFired);
+    const ok = expectedRed ? red && caught : r.summary.verdict === "PARTIAL_PASS";
+    rows.push({ fault, faultFired: r.faultFired, expectedRed, verdict: r.summary.verdict, failingChecks: failing, ok, note: expectedRed ? (caught ? "caught by the intended check" : r.faultFired ? `NOT caught by any of checks ${EXPECTED_CATCH[fault].join(",")}` : "the injected fault never fired") : r.summary.reasons.join("; ") || "clean control held" });
+  }
+  return { ok: rows.every((r) => r.ok), rows };
+}
