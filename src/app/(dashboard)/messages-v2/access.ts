@@ -24,6 +24,21 @@ export function messagesV2OrgId(memberships: readonly Membership[]): string | nu
   return allowed?.org_id ?? null;
 }
 
+/**
+ * Org plus whether the caller is an owner there. Owners may also open the
+ * legacy /messages thread; Acquisitions callers are denied that surface and
+ * are linked to the lead page instead. An owner membership wins.
+ */
+export function messagesV2Context(
+  memberships: readonly Membership[],
+): { orgId: string; isOwner: boolean } | null {
+  const active = memberships.filter((membership) => hasActiveSandraAccess(membership));
+  const owner = active.find((membership) => membership.role === "owner");
+  if (owner) return { orgId: owner.org_id, isOwner: true };
+  const acq = active.find((membership) => isAcquisitionsCaller(membership));
+  return acq ? { orgId: acq.org_id, isOwner: false } : null;
+}
+
 export class MessagesV2AccessError extends Error {
   constructor() {
     super("Messages v2 access is unavailable.");

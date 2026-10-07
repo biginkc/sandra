@@ -1,5 +1,10 @@
 export { currentPipelineRun, runWithPipelineRun } from "./context";
 export {
+  STALE_RUNNING_REASON,
+  getPipelineCoverage,
+  sweepStalePipelineRuns,
+} from "./maintenance";
+export {
   finishRunFromOutcome,
   runStatusForOutcome,
   type DispatchOutcomeLike,
@@ -7,6 +12,7 @@ export {
 export {
   type RecordStepInput,
   finishRun,
+  pipelineRunsEnabled,
   recordStep,
   resumeRun,
   sanitizeStepDetail,

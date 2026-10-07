@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Membership } from "@/lib/auth/memberships";
 
-import { canAccessMessagesV2, messagesV2OrgId } from "./access";
+import { canAccessMessagesV2, messagesV2Context, messagesV2OrgId } from "./access";
 
 const m = (over: Partial<Membership>): Membership => ({
   user_id: "u",
@@ -40,5 +40,20 @@ describe("messagesV2OrgId", () => {
   it("returns null when nothing qualifies", () => {
     expect(messagesV2OrgId([m({})])).toBeNull();
     expect(messagesV2OrgId([])).toBeNull();
+  });
+});
+
+describe("messagesV2Context", () => {
+  it("marks owners as owners and prefers an owner membership", () => {
+    expect(
+      messagesV2Context([m({ org_id: "acq", acquisitions_enabled: true }), m({ org_id: "own", role: "owner" })]),
+    ).toEqual({ orgId: "own", isOwner: true });
+  });
+  it("marks acquisitions-only callers as non-owners", () => {
+    expect(messagesV2Context([m({ acquisitions_enabled: true })])).toEqual({ orgId: "o", isOwner: false });
+  });
+  it("returns null when nothing qualifies", () => {
+    expect(messagesV2Context([m({})])).toBeNull();
+    expect(messagesV2Context([m({ role: "owner", access_status: "suspended" })])).toBeNull();
   });
 });

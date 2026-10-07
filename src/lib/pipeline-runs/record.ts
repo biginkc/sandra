@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { reportError } from "@/lib/errors/report";
 import type { Database, Json } from "@/lib/supabase/types";
 
 import type {
@@ -20,21 +21,37 @@ const FORBIDDEN_DETAIL_KEY =
   /^(body|text|content|preview|phone|phones|phone_number|from|to|message_body|message_text|inbound_body|inbound_text|reply_body|reply_text)$/i;
 const PHONE_LIKE = /(?:\+?\d[\d\s().-]{8,}\d)/;
 
+// UUIDs and ISO-8601 dates/timestamps are digit-heavy but harmless ids/times.
+const SAFE_TOKENS =
+  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?/gi;
+
+function looksLikePhone(value: string): boolean {
+  return PHONE_LIKE.test(value.replace(SAFE_TOKENS, " "));
+}
+
+/**
+ * Kill switch: PIPELINE_RUNS_ENABLED=0 turns every recorder into a no-op
+ * (startRun returns null, so no context ever exists). Default on.
+ */
+export function pipelineRunsEnabled(): boolean {
+  return (process.env.PIPELINE_RUNS_ENABLED ?? "1").trim() !== "0";
+}
+
 function report(stage: string, error: unknown): void {
-  console.error("[pipeline-runs] record failed", {
-    stage,
-    message:
-      error instanceof Error
-        ? error.message
-        : typeof error === "object" && error && "message" in error
-          ? String((error as { message: unknown }).message)
-          : "Unknown pipeline run error",
-  });
+  const err =
+    error instanceof Error
+      ? error
+      : new Error(
+          typeof error === "object" && error && "message" in error
+            ? String((error as { message: unknown }).message)
+            : "Unknown pipeline run error",
+        );
+  reportError(err, { tags: { surface: "pipeline_runs", stage } });
 }
 
 function sanitizeValue(value: unknown): unknown {
   if (typeof value === "string") {
-    return PHONE_LIKE.test(value) ? undefined : value;
+    return looksLikePhone(value) ? undefined : value;
   }
   if (Array.isArray(value)) {
     return value.map(sanitizeValue).filter((v) => v !== undefined);
@@ -106,7 +123,15 @@ async function withMaxSeq(
     .order("seq", { ascending: false })
     .limit(1)
     .maybeSingle();
-  return { runId, orgId, seq: data?.seq ?? 0 };
+  const { data: heldRow } = await admin
+    .from("pipeline_run_steps")
+    .select("seq")
+    .eq("run_id", runId)
+    .eq("kind", "action")
+    .eq("result", "held")
+    .limit(1)
+    .maybeSingle();
+  return { runId, orgId, seq: data?.seq ?? 0, ...(heldRow ? { held: true } : {}) };
 }
 
 /** One run per inbound message. Returns null (never throws) on failure. */
@@ -114,6 +139,7 @@ export async function startRun(
   admin: Admin,
   input: StartRunInput,
 ): Promise<PipelineRunContext | null> {
+  if (!pipelineRunsEnabled()) return null;
   try {
     const { data, error } = await admin
       .from("pipeline_runs")
@@ -169,6 +195,9 @@ export async function recordStep(
   // Issue the seq before any await so concurrent callers stay ordered.
   ctx.seq += 1;
   const seq = ctx.seq;
+  // A deferred disposition (applied later by a human) makes the final run
+  // status "held" rather than "closed"; see runStatusForOutcome.
+  if (step.kind === "action" && step.result === "held") ctx.held = true;
   try {
     const { error } = await admin.from("pipeline_run_steps").insert({
       run_id: ctx.runId,

@@ -4,6 +4,7 @@ import {
   buildModeBadges,
   computeHeaderStats,
   deriveOpenHolds,
+  describeCoverage,
   groupStepsByRun,
 } from "./queries";
 import type { PipelineRun, PipelineRunStep } from "./types";
@@ -29,54 +30,124 @@ function run(over: Partial<PipelineRun> & { id: string }): PipelineRun {
   };
 }
 
+const iso = (s: string) => `2026-10-08T${s}Z`;
+
 describe("deriveOpenHolds", () => {
-  it("returns held and escalated runs oldest first", () => {
-    const runs = [
-      run({ id: "b", status: "escalated", conversation_id: "c2", started_at: "2026-10-08T11:00:00Z" }),
-      run({ id: "a", status: "held", conversation_id: "c1", started_at: "2026-10-08T09:00:00Z" }),
-      run({ id: "x", status: "replied", conversation_id: "c3" }),
-    ];
-    expect(deriveOpenHolds(runs).map((r) => r.id)).toEqual(["a", "b"]);
+  it("is empty when nothing is flagged or pending, whatever the run statuses say", () => {
+    const runs = [run({ id: "h", status: "held", property_id: "p1" }), run({ id: "e", status: "escalated", property_id: "p2" })];
+    expect(deriveOpenHolds({ properties: [], decisions: [], reviews: [], runs })).toEqual([]);
   });
 
-  it("drops a hold once a later run exists on the same conversation", () => {
+  it("opens a hold for a flagged property and attaches its latest run", () => {
     const runs = [
-      run({ id: "hold", status: "held", conversation_id: "c1", started_at: "2026-10-08T09:00:00Z" }),
-      run({ id: "later", status: "replied", conversation_id: "c1", started_at: "2026-10-08T09:30:00Z" }),
+      run({ id: "old", property_id: "p1", started_at: iso("09:00:00") }),
+      run({ id: "new", property_id: "p1", started_at: iso("10:00:00") }),
     ];
-    expect(deriveOpenHolds(runs)).toEqual([]);
+    const holds = deriveOpenHolds({
+      properties: [{ id: "p1", last_ai_escalation_at: iso("09:30:00"), last_ai_escalation_reason: "seller_angry", updated_at: iso("09:30:00") }],
+      decisions: [], reviews: [], runs,
+    });
+    expect(holds).toHaveLength(1);
+    expect(holds[0]).toMatchObject({ id: "p1", property_id: "p1", sources: ["needs_attention"], since: iso("09:30:00") });
+    expect(holds[0].run?.id).toBe("new");
+    expect(holds[0].reason).toContain("seller_angry");
   });
 
-  it("keeps the hold when the later run is on a different conversation", () => {
-    const runs = [
-      run({ id: "hold", status: "held", conversation_id: "c1", started_at: "2026-10-08T09:00:00Z" }),
-      run({ id: "other", status: "replied", conversation_id: "c2", started_at: "2026-10-08T09:30:00Z" }),
-    ];
-    expect(deriveOpenHolds(runs).map((r) => r.id)).toEqual(["hold"]);
+  it("still holds when the run is closed but a hold step was recorded (flag is the truth)", () => {
+    const runs = [run({ id: "r", status: "closed", property_id: "p1" })];
+    const holds = deriveOpenHolds({
+      properties: [{ id: "p1", last_ai_escalation_at: null, last_ai_escalation_reason: null, updated_at: iso("08:00:00") }],
+      decisions: [], reviews: [], runs,
+    });
+    expect(holds.map((h) => h.run?.id)).toEqual(["r"]);
   });
 
-  it("only the newest of two holds on one conversation stays open", () => {
+  it("a later replied run does NOT clear a flagged property", () => {
     const runs = [
-      run({ id: "old", status: "held", conversation_id: "c1", started_at: "2026-10-08T09:00:00Z" }),
-      run({ id: "new", status: "escalated", conversation_id: "c1", started_at: "2026-10-08T10:00:00Z" }),
+      run({ id: "hold", status: "held", property_id: "p1", conversation_id: "c1", started_at: iso("09:00:00") }),
+      run({ id: "later", status: "replied", property_id: "p1", conversation_id: "c1", started_at: iso("09:30:00") }),
     ];
-    expect(deriveOpenHolds(runs).map((r) => r.id)).toEqual(["new"]);
+    const holds = deriveOpenHolds({
+      properties: [{ id: "p1", last_ai_escalation_at: iso("09:00:00"), last_ai_escalation_reason: null, updated_at: iso("09:00:00") }],
+      decisions: [], reviews: [], runs,
+    });
+    expect(holds).toHaveLength(1);
   });
 
-  it("keeps holds with no conversation id (nothing can supersede them)", () => {
-    expect(deriveOpenHolds([run({ id: "n", status: "held" })]).map((r) => r.id)).toEqual(["n"]);
+  it("a held run whose flag has cleared is not a hold", () => {
+    const runs = [run({ id: "h", status: "held", property_id: "p1" })];
+    expect(deriveOpenHolds({ properties: [], decisions: [], reviews: [], runs })).toEqual([]);
+  });
+
+  it("merges flag + pending decision + pending review for one property into one card", () => {
+    const holds = deriveOpenHolds({
+      properties: [{ id: "p1", last_ai_escalation_at: iso("10:00:00"), last_ai_escalation_reason: null, updated_at: iso("10:00:00") }],
+      decisions: [{ property_id: "p1", conversation_id: "c1", source_inbound_message_id: "m1", created_at: iso("09:00:00") }],
+      reviews: [{ property_id: "p1", conversation_id: "c1", source_inbound_message_id: "m2", disposition: "dnc", created_at: iso("09:30:00") }],
+      runs: [],
+    });
+    expect(holds).toHaveLength(1);
+    expect(holds[0].sources).toEqual(["needs_attention", "jev_decision", "disposition_review"]);
+    expect(holds[0].since).toBe(iso("09:00:00"));
+    expect(holds[0].conversation_id).toBe("c1");
+  });
+
+  it("pending decisions and reviews open holds without a flag, matched to their run by inbound message", () => {
+    const runs = [
+      run({ id: "other", property_id: null, inbound_message_id: "m9", started_at: iso("11:00:00") }),
+      run({ id: "src", property_id: null, inbound_message_id: "m1", started_at: iso("08:00:00") }),
+    ];
+    const holds = deriveOpenHolds({
+      properties: [],
+      decisions: [{ property_id: "p1", conversation_id: "c1", source_inbound_message_id: "m1", created_at: iso("08:00:01") }],
+      reviews: [], runs,
+    });
+    expect(holds.map((h) => [h.id, h.run?.id])).toEqual([["p1", "src"]]);
+  });
+
+  it("falls back to a runless card for holds older than the seam", () => {
+    const holds = deriveOpenHolds({
+      properties: [{ id: "p1", last_ai_escalation_at: null, last_ai_escalation_reason: null, updated_at: iso("01:00:00") }],
+      decisions: [], reviews: [], runs: [],
+    });
+    expect(holds).toHaveLength(1);
+    expect(holds[0].run).toBeNull();
+    expect(holds[0].since).toBe(iso("01:00:00"));
+  });
+
+  it("orders holds oldest first", () => {
+    const holds = deriveOpenHolds({
+      properties: [
+        { id: "late", last_ai_escalation_at: iso("11:00:00"), last_ai_escalation_reason: null, updated_at: iso("11:00:00") },
+        { id: "early", last_ai_escalation_at: iso("07:00:00"), last_ai_escalation_reason: null, updated_at: iso("07:00:00") },
+      ],
+      decisions: [], reviews: [], runs: [],
+    });
+    expect(holds.map((h) => h.id)).toEqual(["early", "late"]);
   });
 });
 
 describe("computeHeaderStats", () => {
-  it("counts runs started within the last hour and open holds", () => {
+  it("counts runs started within the last hour and passes through open holds", () => {
     const now = Date.parse("2026-10-08T12:00:00Z");
     const runs = [
       run({ id: "1", started_at: "2026-10-08T11:30:00Z" }),
       run({ id: "2", started_at: "2026-10-08T10:30:00Z" }),
-      run({ id: "3", status: "held", conversation_id: "c", started_at: "2026-10-08T11:59:00Z" }),
     ];
-    expect(computeHeaderStats(runs, now)).toEqual({ runsLastHour: 2, openHolds: 1 });
+    expect(computeHeaderStats(runs, now, 3)).toEqual({ runsLastHour: 1, openHolds: 3 });
+  });
+});
+
+describe("describeCoverage", () => {
+  it("is null without coverage data", () => {
+    expect(describeCoverage(null)).toBeNull();
+  });
+  it("shows inbound / runs and is healthy when runs cover inbound", () => {
+    expect(describeCoverage({ inboundMessages: 4, runs: 4 })).toEqual({ text: "4 inbound / 4 runs (last hour)", gap: false });
+    expect(describeCoverage({ inboundMessages: 0, runs: 0 })?.gap).toBe(false);
+  });
+  it("flags a gap when runs < inbound", () => {
+    expect(describeCoverage({ inboundMessages: 5, runs: 3 })).toEqual({ text: "5 inbound / 3 runs (last hour)", gap: true });
   });
 });
 

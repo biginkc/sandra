@@ -1003,12 +1003,14 @@ async function resolveAndApplyRoute(
     case "opt_out":
       const isJevBelowThresholdOptOut = classification.kind === "jev_route" && !classification.eligibleForAutoAccept;
       const optOutResult = isJevBelowThresholdOptOut
-        ? await proposeDeferredJevDisposition(supabase, {
+        ? await proposeJevOptOutSuppression(supabase, {
             propertyId: input.propertyId,
+            contactId: input.contactId,
             conversationId: input.conversationId ?? null,
             inboundMessageId: input.inboundMessageId ?? null,
+            inboundFromPhone: input.inboundFromPhone ?? null,
+            orgId: property.org_id,
             classificationRunId: classification.classificationRunId,
-            dispo: "opted_out",
             reason: route.reason,
             expectedRevision: jevRevision!,
           })
@@ -1868,6 +1870,56 @@ async function applyResponderOptOut(
   return result;
 }
 
+/**
+ * Jev opted_out below the confidence threshold (review 2026-10-08, BLOCKING):
+ * stop texting NOW, defer only the disposition write. Legacy always
+ * suppressed the phone on opt_out (applyResponderOptOut); a below-threshold
+ * Jev result must not leave the number reachable while a human reviews it.
+ * Mirrors proposeJevDncSuppression: same applyPhoneLevelOptOut call and
+ * idempotency key as the immediate path, then the deferred review proposal.
+ */
+async function proposeJevOptOutSuppression(
+  supabase: SupabaseClient<Database>,
+  args: {
+    propertyId: string;
+    contactId: string;
+    conversationId: string | null;
+    inboundMessageId: string | null;
+    inboundFromPhone: string | null;
+    orgId: string;
+    classificationRunId: string;
+    reason: string;
+    expectedRevision: number;
+  },
+): Promise<ResponderDispoResult> {
+  const contact = await loadContactPhone(supabase, args.contactId);
+  await applyPhoneLevelOptOut(supabase, {
+    contactId: args.contactId,
+    fromPhone: args.inboundFromPhone ?? contact.phone ?? "",
+    orgId: args.orgId,
+    source: "ai_responder",
+    sourceDetail: { propertyId: args.propertyId, reason: args.reason } as Json,
+    occurredAt: new Date(),
+    providerId: "ai_responder",
+    surface: "stop",
+    idempotencyKey: `ai-responder:${args.propertyId}:${args.contactId}:${args.reason}`,
+    leadEvent: {
+      propertyId: args.propertyId,
+      actorType: "ai",
+      trigger: "ai_responder",
+    },
+  });
+  return proposeDeferredJevDisposition(supabase, {
+    propertyId: args.propertyId,
+    conversationId: args.conversationId,
+    inboundMessageId: args.inboundMessageId,
+    classificationRunId: args.classificationRunId,
+    dispo: "opted_out",
+    reason: args.reason,
+    expectedRevision: args.expectedRevision,
+  });
+}
+
 async function applyResponderDnc(
   supabase: SupabaseClient<Database>,
   args: {
@@ -2009,12 +2061,10 @@ async function proposeJevDncSuppression(
  * calls `fn_propose_deferred_ai_disposition_review`
  * (20261008140400_jev_deferred_disposition_proposal.sql) instead, which
  * creates the pending review with `dispo_applied=false` and never
- * touches `outreach_dispo`. Unlike dnc's Option B, this applies ZERO
- * suppression side effect either — a below-threshold Jev inference of
- * wrong_number/not_interested/opted_out is a model guess, not the
- * deterministic STOP-keyword path, so callers of this function must
- * skip their own `applyPhoneLevelOptOut` calls entirely rather than
- * routing them through here.
+ * touches `outreach_dispo`. This function itself applies no suppression.
+ * wrong_number/not_interested have none; below-threshold opted_out is
+ * suppressed immediately by its caller (proposeJevOptOutSuppression) before
+ * this proposal is written.
  */
 async function proposeDeferredJevDisposition(
   supabase: SupabaseClient<Database>,

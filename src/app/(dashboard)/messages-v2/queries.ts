@@ -1,6 +1,9 @@
 import type {
   HeaderStats,
+  HoldSource,
   ModeBadge,
+  OpenHold,
+  PipelineCoverage,
   PipelineRun,
   PipelineRunStep,
   RunWithSteps,
@@ -9,37 +12,131 @@ import type {
 export const MAX_RUNS = 200;
 const HOUR_MS = 60 * 60 * 1000;
 
+export type HoldPropertyRow = {
+  id: string;
+  last_ai_escalation_at: string | null;
+  last_ai_escalation_reason: string | null;
+  updated_at: string | null;
+};
+export type HoldDecisionRow = {
+  property_id: string;
+  conversation_id: string;
+  source_inbound_message_id: string;
+  created_at: string;
+};
+export type HoldReviewRow = HoldDecisionRow & { disposition: string };
+
+const SOURCE_LABEL: Record<HoldSource, string> = {
+  needs_attention: "Needs attention",
+  jev_decision: "Jev decision pending",
+  disposition_review: "Disposition review pending",
+};
+
 /**
- * Held / escalated runs that nobody has followed up on, oldest first. A hold
- * is "open" until a later run exists on the same conversation (the seller
- * texted again, or a human acted and the pipeline re-ran). Runs without a
- * conversation id cannot be superseded.
+ * Open holds, derived from the tables that actually own the hold state: a
+ * flagged property (needs_human_attention), a pending Jev decision, or a
+ * pending disposition review. A hold stays open until THAT flag/row clears,
+ * regardless of what later pipeline runs say. Each is joined to its most
+ * recent run (by property, conversation or source inbound message) for the
+ * card; with no run the card is a fallback. One hold per property, oldest
+ * first. Callers pass only flagged properties and pending rows.
  */
-export function deriveOpenHolds<T extends PipelineRun>(runs: readonly T[]): T[] {
-  const latestByConversation = new Map<string, number>();
-  for (const run of runs) {
-    if (!run.conversation_id) continue;
-    const t = Date.parse(run.started_at);
-    const prev = latestByConversation.get(run.conversation_id);
-    if (prev === undefined || t > prev) latestByConversation.set(run.conversation_id, t);
+export function deriveOpenHolds<T extends PipelineRun>(input: {
+  properties: readonly HoldPropertyRow[];
+  decisions: readonly HoldDecisionRow[];
+  reviews: readonly HoldReviewRow[];
+  runs: readonly T[];
+}): OpenHold<T>[] {
+  type Acc = {
+    sources: Set<HoldSource>;
+    times: string[];
+    conversations: Set<string>;
+    messages: Set<string>;
+    notes: string[];
+  };
+  const byProperty = new Map<string, Acc>();
+  const acc = (id: string): Acc => {
+    let a = byProperty.get(id);
+    if (!a) {
+      a = { sources: new Set(), times: [], conversations: new Set(), messages: new Set(), notes: [] };
+      byProperty.set(id, a);
+    }
+    return a;
+  };
+
+  for (const p of input.properties) {
+    const a = acc(p.id);
+    a.sources.add("needs_attention");
+    const t = p.last_ai_escalation_at ?? p.updated_at;
+    if (t) a.times.push(t);
+    if (p.last_ai_escalation_reason) a.notes.push(p.last_ai_escalation_reason);
   }
-  return runs
-    .filter((run) => {
-      if (run.status !== "held" && run.status !== "escalated") return false;
-      if (!run.conversation_id) return true;
-      return latestByConversation.get(run.conversation_id) === Date.parse(run.started_at);
-    })
-    .sort((a, b) => Date.parse(a.started_at) - Date.parse(b.started_at));
+  for (const d of input.decisions) {
+    const a = acc(d.property_id);
+    a.sources.add("jev_decision");
+    a.times.push(d.created_at);
+    a.conversations.add(d.conversation_id);
+    a.messages.add(d.source_inbound_message_id);
+  }
+  for (const r of input.reviews) {
+    const a = acc(r.property_id);
+    a.sources.add("disposition_review");
+    a.times.push(r.created_at);
+    a.conversations.add(r.conversation_id);
+    a.messages.add(r.source_inbound_message_id);
+    a.notes.push(r.disposition);
+  }
+
+  const order: HoldSource[] = ["needs_attention", "jev_decision", "disposition_review"];
+  const holds: OpenHold<T>[] = [];
+  for (const [propertyId, a] of byProperty) {
+    let run: T | null = null;
+    for (const candidate of input.runs) {
+      const matches =
+        candidate.property_id === propertyId ||
+        a.messages.has(candidate.inbound_message_id) ||
+        (candidate.conversation_id !== null && a.conversations.has(candidate.conversation_id));
+      if (matches && (!run || Date.parse(candidate.started_at) > Date.parse(run.started_at))) {
+        run = candidate;
+      }
+    }
+    const since =
+      [...a.times].sort((x, y) => Date.parse(x) - Date.parse(y))[0] ?? run?.started_at ?? new Date(0).toISOString();
+    const sources = order.filter((s) => a.sources.has(s));
+    const labels = sources.map((s) => SOURCE_LABEL[s]).join(" · ");
+    holds.push({
+      id: propertyId,
+      property_id: propertyId,
+      conversation_id: [...a.conversations][0] ?? run?.conversation_id ?? null,
+      sources,
+      since,
+      reason: a.notes.length > 0 ? `${labels} (${[...new Set(a.notes)].join(", ")})` : labels,
+      run,
+    });
+  }
+  return holds.sort((x, y) => Date.parse(x.since) - Date.parse(y.since));
 }
 
 export function computeHeaderStats(
   runs: readonly PipelineRun[],
   nowMs: number,
+  openHolds: number,
 ): HeaderStats {
   const cutoff = nowMs - HOUR_MS;
   return {
     runsLastHour: runs.filter((r) => Date.parse(r.started_at) >= cutoff).length,
-    openHolds: deriveOpenHolds(runs).length,
+    openHolds,
+  };
+}
+
+/** Seam-health line: every inbound should have a run. `gap` when runs < inbound. */
+export function describeCoverage(
+  coverage: PipelineCoverage | null | undefined,
+): { text: string; gap: boolean } | null {
+  if (!coverage) return null;
+  return {
+    text: `${coverage.inboundMessages} inbound / ${coverage.runs} runs (last hour)`,
+    gap: coverage.runs < coverage.inboundMessages,
   };
 }
 
@@ -77,24 +174,26 @@ export type LooseSupabase = { from(table: string): any };
 
 export type MessagesV2Data = {
   runs: RunWithSteps[];
-  holds: RunWithSteps[];
-  stats: HeaderStats;
+  holds: OpenHold<RunWithSteps>[];
   badges: ModeBadge[];
   nowMs: number;
 };
 
+const STEP_CHUNK = 40;
+const HOLD_LIMIT = 200;
+
 /**
  * Server loader. Every query is org-scoped explicitly (RLS also applies).
- * Holds come from the newest-200 window plus a separate held/escalated
- * query so an old unanswered hold does not fall off the page. Known limit:
- * a superseding run older than the window start is not seen.
+ * Holds come from properties.needs_human_attention plus pending Jev
+ * decisions and pending disposition reviews, each joined to its most recent
+ * run. Steps are fetched for exactly the runs that are rendered.
  */
 export async function loadMessagesV2Data(
   supabase: LooseSupabase,
   orgId: string,
   nowMs: number = Date.now(),
 ): Promise<MessagesV2Data> {
-  const [windowRes, holdRes, configRes, thresholdRes] = await Promise.all([
+  const [windowRes, flaggedRes, decisionRes, reviewRes, configRes, thresholdRes] = await Promise.all([
     supabase
       .from("pipeline_runs")
       .select("*")
@@ -102,12 +201,23 @@ export async function loadMessagesV2Data(
       .order("started_at", { ascending: false })
       .limit(MAX_RUNS),
     supabase
-      .from("pipeline_runs")
-      .select("*")
+      .from("properties")
+      .select("id, last_ai_escalation_at, last_ai_escalation_reason, updated_at")
       .eq("org_id", orgId)
-      .in("status", ["held", "escalated"])
-      .order("started_at", { ascending: false })
-      .limit(MAX_RUNS),
+      .eq("needs_human_attention", true)
+      .limit(HOLD_LIMIT),
+    supabase
+      .from("jev_lead_decisions")
+      .select("property_id, conversation_id, source_inbound_message_id, created_at")
+      .eq("org_id", orgId)
+      .eq("status", "pending")
+      .limit(HOLD_LIMIT),
+    supabase
+      .from("ai_disposition_reviews")
+      .select("property_id, conversation_id, source_inbound_message_id, disposition, created_at")
+      .eq("org_id", orgId)
+      .eq("status", "pending")
+      .limit(HOLD_LIMIT),
     supabase
       .from("ai_responder_configs")
       .select("classifier_provider, classifier_mode")
@@ -122,26 +232,64 @@ export async function loadMessagesV2Data(
   ]);
 
   const windowRuns = (windowRes.data ?? []) as PipelineRun[];
-  const holdRuns = (holdRes.data ?? []) as PipelineRun[];
-  const pool = new Map<string, PipelineRun>();
-  for (const run of [...windowRuns, ...holdRuns]) pool.set(run.id, run);
-  const poolRuns = [...pool.values()];
+  const properties = (flaggedRes.data ?? []) as HoldPropertyRow[];
+  const decisions = (decisionRes.data ?? []) as HoldDecisionRow[];
+  const reviews = (reviewRes.data ?? []) as HoldReviewRow[];
 
-  let stepsByRun = new Map<string, PipelineRunStep[]>();
-  if (poolRuns.length > 0) {
-    const oldest = poolRuns.reduce(
-      (min, r) => (Date.parse(r.started_at) < Date.parse(min) ? r.started_at : min),
-      poolRuns[0].started_at,
-    );
-    const stepsRes = await supabase
-      .from("pipeline_run_steps")
-      .select("*")
-      .eq("org_id", orgId)
-      .gte("created_at", oldest)
-      .order("created_at", { ascending: true })
-      .limit(5000);
-    stepsByRun = groupStepsByRun((stepsRes.data ?? []) as PipelineRunStep[]);
+  // Runs for the hold cards: by property and by source inbound message, so a
+  // hold older than the feed window still gets its context.
+  const propertyIds = [
+    ...new Set([...properties.map((p) => p.id), ...decisions.map((d) => d.property_id), ...reviews.map((r) => r.property_id)]),
+  ];
+  const messageIds = [...new Set([...decisions, ...reviews].map((r) => r.source_inbound_message_id))];
+  const [byPropertyRes, byMessageRes] = await Promise.all([
+    propertyIds.length === 0
+      ? { data: [] }
+      : supabase
+          .from("pipeline_runs")
+          .select("*")
+          .eq("org_id", orgId)
+          .in("property_id", propertyIds)
+          .order("started_at", { ascending: false })
+          .limit(HOLD_LIMIT * 3),
+    messageIds.length === 0
+      ? { data: [] }
+      : supabase
+          .from("pipeline_runs")
+          .select("*")
+          .eq("org_id", orgId)
+          .in("inbound_message_id", messageIds),
+  ]);
+  const pool = new Map<string, PipelineRun>();
+  for (const run of [
+    ...windowRuns,
+    ...((byPropertyRes.data ?? []) as PipelineRun[]),
+    ...((byMessageRes.data ?? []) as PipelineRun[]),
+  ]) {
+    pool.set(run.id, run);
   }
+
+  const openHolds = deriveOpenHolds({ properties, decisions, reviews, runs: [...pool.values()] });
+
+  // Steps only for the runs that render: the feed window and the hold runs.
+  const loadedRunIds = [
+    ...new Set([...windowRuns.map((r) => r.id), ...openHolds.flatMap((h) => (h.run ? [h.run.id] : []))]),
+  ];
+  const stepChunks: string[][] = [];
+  for (let i = 0; i < loadedRunIds.length; i += STEP_CHUNK) stepChunks.push(loadedRunIds.slice(i, i + STEP_CHUNK));
+  const stepResults = await Promise.all(
+    stepChunks.map((ids) =>
+      supabase
+        .from("pipeline_run_steps")
+        .select("*")
+        .eq("org_id", orgId)
+        .in("run_id", ids)
+        .order("seq", { ascending: true }),
+    ),
+  );
+  const stepsByRun = groupStepsByRun(
+    stepResults.flatMap((res) => (res.data ?? []) as PipelineRunStep[]),
+  );
   const withSteps = (run: PipelineRun): RunWithSteps => ({
     ...run,
     steps: stepsByRun.get(run.id) ?? [],
@@ -150,8 +298,7 @@ export async function loadMessagesV2Data(
   const configRow = (configRes.data ?? [])[0] ?? null;
   return {
     runs: windowRuns.map(withSteps),
-    holds: deriveOpenHolds(poolRuns).map(withSteps),
-    stats: computeHeaderStats(poolRuns, nowMs),
+    holds: openHolds.map((h) => ({ ...h, run: h.run ? withSteps(h.run) : null })),
     badges: buildModeBadges(configRow, (thresholdRes.data ?? []) as Array<{ outcome: string }>),
     nowMs,
   };

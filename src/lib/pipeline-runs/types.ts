@@ -37,6 +37,8 @@ export type PipelineRunContext = {
   runId: string;
   orgId: string;
   seq: number;
+  /** True once an action step recorded a deferred (held) disposition. */
+  held?: boolean;
 };
 
 /** Optional everywhere so call sites stay one-liners and tests stay unchanged. */

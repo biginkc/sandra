@@ -72,16 +72,25 @@ describe("RunCard", () => {
     expect(screen.queryByTestId("run-pulse")).not.toBeInTheDocument();
   });
 
-  it("links to the thread in a new tab", () => {
+  it("links to the lead page in a new tab when the run has a property", () => {
     render(<RunCard run={baseRun()} label={label} />);
     const link = screen.getByRole("link", { name: /open thread/i });
-    expect(link).toHaveAttribute("href", "/messages?thread=conv-1");
+    expect(link).toHaveAttribute("href", "/leads/p1");
     expect(link).toHaveAttribute("target", "_blank");
     expect(link.getAttribute("rel")).toContain("noopener");
   });
 
-  it("omits the thread link when there is no conversation", () => {
-    render(<RunCard run={baseRun({ conversation_id: null })} label={label} />);
+  it("links to /messages only for owners when there is no property", () => {
+    const run = baseRun({ property_id: null });
+    const { unmount } = render(<RunCard run={run} label={label} isOwner />);
+    expect(screen.getByRole("link", { name: /open thread/i })).toHaveAttribute("href", "/messages?thread=conv-1");
+    unmount();
+    render(<RunCard run={run} label={label} isOwner={false} />);
+    expect(screen.queryByRole("link", { name: /open thread/i })).not.toBeInTheDocument();
+  });
+
+  it("omits the link when there is neither property nor conversation", () => {
+    render(<RunCard run={baseRun({ property_id: null, conversation_id: null })} label={label} isOwner />);
     expect(screen.queryByRole("link", { name: /open thread/i })).not.toBeInTheDocument();
   });
 

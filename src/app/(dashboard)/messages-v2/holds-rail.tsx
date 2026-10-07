@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 import { holdReason } from "./step-format";
-import type { RunLabel, RunWithSteps } from "./types";
+import type { OpenHold, RunLabel, RunWithSteps } from "./types";
 
 const HOUR = 60 * 60 * 1000;
 
@@ -49,17 +49,18 @@ function Phase2Actions() {
 }
 
 export function HoldCard({
-  run,
+  hold,
   label,
   nowMs,
 }: {
-  run: RunWithSteps;
+  hold: OpenHold<RunWithSteps>;
   label: RunLabel | undefined;
   nowMs: number;
 }) {
-  const age = Math.max(0, nowMs - Date.parse(run.started_at));
+  const run = hold.run;
+  const age = Math.max(0, nowMs - Date.parse(hold.since));
   const tone = ageTone(age);
-  const why = holdReason(run.steps, run.reason);
+  const why = run ? holdReason(run.steps, run.reason) : null;
   return (
     <article
       data-testid="hold-card"
@@ -68,10 +69,10 @@ export function HoldCard({
       <header className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <time
           suppressHydrationWarning
-          dateTime={run.started_at}
+          dateTime={hold.since}
           className="text-xs tabular-nums text-muted-foreground"
         >
-          {format(new Date(run.started_at), "h:mm a")}
+          {format(new Date(hold.since), "h:mm a")}
         </time>
         <span className="font-semibold">{label?.name ?? "Unknown sender"}</span>
         {label?.address && <span className="text-muted-foreground">· {label.address}</span>}
@@ -83,7 +84,7 @@ export function HoldCard({
           {formatAge(age)}
         </span>
       </header>
-      {run.inbound_preview && (
+      {run?.inbound_preview && (
         <p className="mt-2 flex gap-2">
           <span aria-hidden className="text-muted-foreground">◀</span>
           <span>{run.inbound_preview}</span>
@@ -92,7 +93,7 @@ export function HoldCard({
       <p className="mt-2 flex gap-2">
         <span aria-hidden className="text-sky-600">●</span>
         <span>
-          {run.status === "escalated" ? "Escalated" : "Held"}
+          {hold.reason}
           {why ? ` · ${why}` : ""}
         </span>
       </p>
@@ -118,7 +119,7 @@ export function HoldsRail({
   labels,
   nowMs,
 }: {
-  holds: readonly RunWithSteps[];
+  holds: readonly OpenHold<RunWithSteps>[];
   labels: ReadonlyMap<string, RunLabel>;
   nowMs: number;
 }) {
@@ -132,8 +133,8 @@ export function HoldsRail({
           No open holds.
         </p>
       ) : (
-        holds.map((run) => (
-          <HoldCard key={run.id} run={run} label={labels.get(run.id)} nowMs={nowMs} />
+        holds.map((hold) => (
+          <HoldCard key={hold.id} hold={hold} label={labels.get(hold.id)} nowMs={nowMs} />
         ))
       )}
       <ShadowScorecard />

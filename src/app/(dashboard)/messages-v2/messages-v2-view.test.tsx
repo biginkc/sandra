@@ -2,7 +2,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MessagesV2View } from "./messages-v2-view";
-import type { PipelineRun, PipelineRunStep, RunWithSteps } from "./types";
+import type { OpenHold, PipelineCoverage, PipelineRun, PipelineRunStep, RunWithSteps } from "./types";
 
 const mocks = vi.hoisted(() => {
   const handlers: Array<{ filter: Record<string, string>; cb: (p: { new: unknown }) => void }> = [];
@@ -44,8 +44,12 @@ const run = (id: string, over: Partial<PipelineRun> = {}): RunWithSteps => ({
 });
 
 const NOW = Date.now();
-const props = (runs: RunWithSteps[] = [], holds: RunWithSteps[] = []) => ({
-  runs, holds, nowMs: NOW,
+const openHold = (id: string, r: RunWithSteps | null = null): OpenHold<RunWithSteps> => ({
+  id, property_id: id, conversation_id: null, sources: ["needs_attention"],
+  since: new Date(NOW - 5 * 60_000).toISOString(), reason: "Needs attention", run: r,
+});
+const props = (runs: RunWithSteps[] = [], holds: OpenHold<RunWithSteps>[] = [], coverage?: PipelineCoverage | null) => ({
+  orgId: "org-1", isOwner: true, coverage, runs, holds, nowMs: NOW,
   badges: [{ label: "not_interested", mode: "AUTO" as const }, { label: "nurture", mode: "SHADOW" as const }],
   labels: runs.map((r) => [r.id, { name: `Name ${r.id}`, address: null }] as [string, { name: string; address: null }]),
 });
@@ -79,16 +83,27 @@ describe("MessagesV2View", () => {
     expect(within(screen.getByLabelText("Legend")).getAllByRole("listitem")).toHaveLength(6);
   });
 
-  it("subscribes to runs INSERT/UPDATE and steps INSERT on messages-v2:feed with the session token", async () => {
+  it("subscribes on messages-v2:feed with the session token, every subscription filtered to the org", async () => {
     await mount();
     expect(mocks.client.channel).toHaveBeenCalledWith("messages-v2:feed");
     await waitFor(() => expect(mocks.client.realtime.setAuth).toHaveBeenCalledWith("tok"));
     const seen = mocks.handlers.map((h) => `${h.filter.event}:${h.filter.table}`).sort();
     expect(seen).toEqual([
+      "*:ai_disposition_reviews",
+      "INSERT:lead_events",
       "INSERT:pipeline_run_steps",
       "INSERT:pipeline_runs",
       "UPDATE:pipeline_runs",
     ]);
+    for (const h of mocks.handlers) expect(h.filter.filter).toBe("org_id=eq.org-1");
+  });
+
+  it("refreshes (throttled) when a disposition review or lead event changes", async () => {
+    await mount();
+    await act(async () => {
+      mocks.handlers.find((h) => h.filter.table === "ai_disposition_reviews")!.cb({ new: {} });
+    });
+    await waitFor(() => expect(mocks.refresh).toHaveBeenCalled());
   });
 
   it("adds a streamed run on top and appends streamed steps without refreshing", async () => {
@@ -104,13 +119,33 @@ describe("MessagesV2View", () => {
     expect(mocks.refresh).not.toHaveBeenCalled();
   });
 
-  it("applies run UPDATEs (pulse stops, hold appears in the rail)", async () => {
+  it("applies run UPDATEs (pulse stops) but a held run alone does not open a hold", async () => {
     await mount(props([run("a")]));
     expect(screen.getByTestId("run-pulse")).toBeInTheDocument();
     await fire("UPDATE", "pipeline_runs", run("a", { status: "held", completed_at: new Date().toISOString() }));
     expect(screen.queryByTestId("run-pulse")).not.toBeInTheDocument();
-    expect(screen.getAllByTestId("hold-card")).toHaveLength(1);
-    expect(screen.getByTestId("header-status")).toHaveTextContent("1 holds");
+    expect(screen.queryAllByTestId("hold-card")).toHaveLength(0);
+  });
+
+  it("renders server-derived holds, including a runless fallback card", async () => {
+    await mount(props([run("a")], [openHold("p1", run("a", { status: "closed" })), openHold("p2")]));
+    expect(screen.getAllByTestId("hold-card")).toHaveLength(2);
+    expect(screen.getByTestId("header-status")).toHaveTextContent("2 holds");
+  });
+
+  it("shows inbound/run coverage and highlights a gap", async () => {
+    const { unmount } = render(<MessagesV2View {...props([], [], { inboundMessages: 3, runs: 3 })} />);
+    expect(screen.getByTestId("coverage")).toHaveTextContent("3 inbound / 3 runs (last hour)");
+    expect(screen.getByTestId("coverage")).toHaveAttribute("data-gap", "false");
+    unmount();
+    render(<MessagesV2View {...props([], [], { inboundMessages: 5, runs: 2 })} />);
+    expect(screen.getByTestId("coverage")).toHaveTextContent("5 inbound / 2 runs (last hour)");
+    expect(screen.getByTestId("coverage")).toHaveAttribute("data-gap", "true");
+  });
+
+  it("omits the coverage stat when unavailable", async () => {
+    await mount(props([], [], null));
+    expect(screen.queryByTestId("coverage")).not.toBeInTheDocument();
   });
 
   it("falls back to a refresh when a step arrives for an unknown run", async () => {

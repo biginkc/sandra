@@ -86,13 +86,32 @@ export function StepLine({ step }: { step: PipelineRunStep }) {
   }
 }
 
+/**
+ * Where "open thread" goes. The lead page admits both owners and
+ * Acquisitions callers; the legacy /messages inbox denies Acquisitions, so it
+ * is only offered to owners when there is no property to open.
+ */
+export function openThreadHref(
+  run: Pick<RunWithSteps, "property_id" | "conversation_id">,
+  isOwner: boolean,
+): string | null {
+  if (run.property_id) return `/leads/${encodeURIComponent(run.property_id)}`;
+  if (run.conversation_id && isOwner) {
+    return `/messages?thread=${encodeURIComponent(run.conversation_id)}`;
+  }
+  return null;
+}
+
 export function RunCard({
   run,
   label,
+  isOwner = false,
 }: {
   run: RunWithSteps;
   label: RunLabel | undefined;
+  isOwner?: boolean;
 }) {
+  const threadHref = openThreadHref(run, isOwner);
   const name = label?.name ?? "Unknown sender";
   const passedGates = run.steps.filter((s) => s.kind === "gate" && s.result === "pass");
   const visible = run.steps.filter((s) => !(s.kind === "gate" && s.result === "pass"));
@@ -146,9 +165,9 @@ export function RunCard({
         )}
       </ul>
 
-      {run.conversation_id && (
+      {threadHref && (
         <a
-          href={`/messages?thread=${encodeURIComponent(run.conversation_id)}`}
+          href={threadHref}
           target="_blank"
           rel="noopener noreferrer"
           className="mt-3 inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"

@@ -39,7 +39,7 @@ export async function loadRunLabels(
 ): Promise<Map<string, RunLabel>> {
   const contactIds = [...new Set(runs.map((r) => r.contact_id).filter((v): v is string => !!v))];
   const propertyIds = [...new Set(runs.map((r) => r.property_id).filter((v): v is string => !!v))];
-  const unknownMsgIds = runs.filter((r) => !r.contact_id).map((r) => r.inbound_message_id);
+  const unknownMsgIds = runs.filter((r) => !r.contact_id && r.inbound_message_id).map((r) => r.inbound_message_id);
 
   const contacts = new Map<string, string | null>();
   const properties = new Map<string, { address: string | null; city: string | null }>();

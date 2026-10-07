@@ -84,6 +84,30 @@ export type ModeBadge = {
   mode: "AUTO" | "SHADOW" | "LEGACY";
 };
 
+export type HoldSource = "needs_attention" | "jev_decision" | "disposition_review";
+
+/**
+ * An open hold: something a human still has to act on. Derived from the
+ * underlying sources of truth (properties.needs_human_attention, pending
+ * jev_lead_decisions, pending ai_disposition_reviews), one card per property.
+ * `run` is the most recent pipeline run for context, or null when the hold is
+ * older than the pipeline-run seam.
+ */
+export type OpenHold<R extends PipelineRun = PipelineRun> = {
+  /** Property id (one hold per property). */
+  id: string;
+  property_id: string;
+  conversation_id: string | null;
+  sources: HoldSource[];
+  /** ISO time the oldest underlying item opened. */
+  since: string;
+  /** Plain-text description of why it is open (source labels + escalation reason). */
+  reason: string;
+  run: R | null;
+};
+
+export type PipelineCoverage = { inboundMessages: number; runs: number };
+
 export type HeaderStats = {
   runsLastHour: number;
   openHolds: number;

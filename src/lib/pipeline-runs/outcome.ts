@@ -13,7 +13,10 @@ export type DispatchOutcomeLike =
   | { outcome: "opted_out"; reason: string }
   | { outcome: "skipped"; reason: string };
 
-export function runStatusForOutcome(outcome: DispatchOutcomeLike): {
+export function runStatusForOutcome(
+  outcome: DispatchOutcomeLike,
+  opts: { held?: boolean } = {},
+): {
   status: RunStatus;
   finalOutcome: string;
   reason: string | null;
@@ -41,7 +44,9 @@ export function runStatusForOutcome(outcome: DispatchOutcomeLike): {
     case "auto_closed":
     case "opted_out":
       return {
-        status: "closed",
+        // A deferred disposition awaiting human confirmation is a hold, not
+        // a close, even though dispatch reports {updated:true}.
+        status: opts.held ? "held" : "closed",
         finalOutcome: outcome.outcome,
         reason: outcome.reason,
         outboundMessageId: null,
@@ -56,14 +61,20 @@ export function runStatusForOutcome(outcome: DispatchOutcomeLike): {
   }
 }
 
-/** The one funnel call: stamp the run's terminal state from a dispatch outcome. */
+/**
+ * Stamp the run's terminal state from a dispatch outcome. Call sites (keep in
+ * sync): inbound.ts via stampAiResponderTerminalOutcome (immediate dispatch
+ * and its skip/escalate paths) and workflows/ai-reply-delay.ts (the delayed
+ * dispatch, which calls this directly after resuming the run). Both go through
+ * this function, so status mapping lives in one place.
+ */
 export async function finishRunFromOutcome(
   admin: SupabaseClient<Database>,
   ctx: MaybeRunContext,
   outcome: DispatchOutcomeLike,
 ): Promise<void> {
   if (!ctx) return;
-  const mapped = runStatusForOutcome(outcome);
+  const mapped = runStatusForOutcome(outcome, { held: ctx.held === true });
   await finishRun(admin, ctx, {
     status: mapped.status,
     finalOutcome: mapped.finalOutcome,

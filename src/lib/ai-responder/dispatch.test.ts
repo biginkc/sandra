@@ -1768,10 +1768,18 @@ describe("dispatchAiResponse debounce", () => {
           expect(result.outcome).not.toBe("sent");
           expect(generateAiReply).not.toHaveBeenCalled();
           expect(sendSmsToContact).not.toHaveBeenCalled();
-          // No suppression side effect either — a below-threshold Jev
-          // inference is a model guess, not the deterministic STOP path
-          // (unlike dnc's own Option B, which suppresses immediately).
-          expect(applyPhoneLevelOptOut).not.toHaveBeenCalled();
+          // opted_out suppresses the phone immediately at ANY confidence
+          // (only the disposition write is deferred); the other two
+          // below-threshold choices have no suppression side effect.
+          if (choice === "opted_out") {
+            expect(applyPhoneLevelOptOut).toHaveBeenCalledTimes(1);
+            expect(applyPhoneLevelOptOut).toHaveBeenCalledWith(
+              expect.anything(),
+              expect.objectContaining({ surface: "stop", source: "ai_responder", contactId: CONTACT_ID }),
+            );
+          } else {
+            expect(applyPhoneLevelOptOut).not.toHaveBeenCalled();
+          }
         } finally { vi.stubGlobal("fetch", originalFetch); }
       },
     );

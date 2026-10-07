@@ -10,10 +10,12 @@ import { useThrottledRefresh } from "../messages/use-throttled-refresh";
 import { appendStep, upsertRun } from "./feed-state";
 import { HoldsRail } from "./holds-rail";
 import { loadRunLabels } from "./labels";
-import { computeHeaderStats, deriveOpenHolds, type LooseSupabase } from "./queries";
+import { computeHeaderStats, describeCoverage, type LooseSupabase } from "./queries";
 import { RunCard } from "./run-card";
 import type {
   ModeBadge,
+  OpenHold,
+  PipelineCoverage,
   PipelineRun,
   PipelineRunStep,
   RunLabel,
@@ -21,9 +23,14 @@ import type {
 } from "./types";
 
 export type MessagesV2ViewProps = {
+  orgId: string;
+  /** Owners may open the legacy /messages inbox; Acquisitions callers may not. */
+  isOwner?: boolean;
   runs: RunWithSteps[];
-  /** Open holds from the server (may include runs older than the feed window). */
-  holds: RunWithSteps[];
+  /** Open holds from the server (flag / pending decision / pending review). */
+  holds: OpenHold<RunWithSteps>[];
+  /** Inbound vs run counts for the last hour; null when unavailable. */
+  coverage?: PipelineCoverage | null;
   badges: ModeBadge[];
   /** Server-resolved display labels, as [runId, label] pairs. */
   labels: Array<[string, RunLabel]>;
@@ -46,7 +53,7 @@ const BADGE_CLASS: Record<ModeBadge["mode"], string> = {
 };
 
 export function MessagesV2View(props: MessagesV2ViewProps) {
-  const { badges } = props;
+  const { badges, orgId, isOwner = false } = props;
   const requestRefresh = useThrottledRefresh();
 
   const [lastInitial, setLastInitial] = useState(props);
@@ -63,27 +70,40 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
   const [live, setLive] = useState(false);
   if (lastInitial.runs !== props.runs || lastInitial.holds !== props.holds) {
     setLastInitial(props);
-    setRuns(props.runs);
+    // Render-phase sync must not write the ref (react-hooks/refs); the
+    // effect below mirrors committed state into it.
+    setRunsState(props.runs);
     setLabels((curr) => new Map([...curr, ...props.labels]));
   }
+  useEffect(() => {
+    runsRef.current = runs;
+  }, [runs]);
 
-  // Server holds older than the feed window have no live card to update, so
-  // they ride along as static rows.
+  // Holds are server-derived from the flag / pending rows; a hold's run card
+  // is swapped for the live copy when the feed has it (streamed steps).
   const holds = useMemo(() => {
-    const inFeed = new Set(runs.map((r) => r.id));
-    const extras = props.holds.filter((h) => !inFeed.has(h.id));
-    return deriveOpenHolds([...runs, ...extras]);
+    const live = new Map(runs.map((r) => [r.id, r]));
+    return props.holds.map((h) => (h.run ? { ...h, run: live.get(h.run.id) ?? h.run } : h));
   }, [runs, props.holds]);
 
   const stats = useMemo(
-    () => ({ runsLastHour: computeHeaderStats(runs, nowMs).runsLastHour, openHolds: holds.length }),
+    () => computeHeaderStats(runs, nowMs, holds.length),
     [runs, holds, nowMs],
   );
+  const coverage = describeCoverage(props.coverage);
 
   useEffect(() => {
     const id = window.setInterval(() => setNowMs(Date.now()), 30_000);
     return () => window.clearInterval(id);
   }, []);
+
+  // properties (the needs_human_attention flag) is not in the realtime
+  // publication, so a cleared flag is only seen via the published tables below
+  // or this slow poll. The refresh is throttled and skipped while hidden.
+  useEffect(() => {
+    const id = window.setInterval(requestRefresh, 60_000);
+    return () => window.clearInterval(id);
+  }, [requestRefresh]);
 
   // Fetch display labels for runs that arrive over realtime.
   const requested = useRef(new Set<string>(props.labels.map(([id]) => id)));
@@ -106,6 +126,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
 
   useEffect(() => {
     const supabase = createClient();
+    const orgFilter = `org_id=eq.${orgId}`;
     let mounted = true;
     let wasDown = false;
     let channel: ReturnType<typeof supabase.channel> | null = null;
@@ -121,26 +142,38 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         .on(
           // pipeline_* tables are not in the generated Database type yet.
           "postgres_changes" as never,
-          { event: "INSERT", schema: "public", table: "pipeline_runs" } as never,
+          { event: "INSERT", schema: "public", table: "pipeline_runs", filter: orgFilter } as never,
           ((payload: { new: PipelineRun }) => {
             setRuns(upsertRun(runsRef.current, payload.new));
           }) as never,
         )
         .on(
           "postgres_changes" as never,
-          { event: "UPDATE", schema: "public", table: "pipeline_runs" } as never,
+          { event: "UPDATE", schema: "public", table: "pipeline_runs", filter: orgFilter } as never,
           ((payload: { new: PipelineRun }) => {
             setRuns(upsertRun(runsRef.current, payload.new));
           }) as never,
         )
         .on(
           "postgres_changes" as never,
-          { event: "INSERT", schema: "public", table: "pipeline_run_steps" } as never,
+          { event: "INSERT", schema: "public", table: "pipeline_run_steps", filter: orgFilter } as never,
           ((payload: { new: PipelineRunStep }) => {
             const res = appendStep(runsRef.current, payload.new);
             setRuns(res.runs);
             if (res.unknownRun) requestRefresh();
           }) as never,
+        )
+        // Hold sources: a pending/resolved disposition review or a new lead
+        // event (human action) means the hold set may have changed.
+        .on(
+          "postgres_changes" as never,
+          { event: "*", schema: "public", table: "ai_disposition_reviews", filter: orgFilter } as never,
+          (() => requestRefresh()) as never,
+        )
+        .on(
+          "postgres_changes" as never,
+          { event: "INSERT", schema: "public", table: "lead_events", filter: orgFilter } as never,
+          (() => requestRefresh()) as never,
         )
         .subscribe(((status: string) => {
           if (!mounted) return;
@@ -160,7 +193,7 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
       mounted = false;
       if (channel) supabase.removeChannel(channel);
     };
-  }, [requestRefresh, setRuns]);
+  }, [requestRefresh, setRuns, orgId]);
 
   // Keep the newest card in view when the operator is already at the top.
   const feedRef = useRef<HTMLDivElement>(null);
@@ -184,6 +217,19 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         <p className="ml-auto text-sm text-muted-foreground" data-testid="header-status">
           <span aria-hidden className={live ? "text-emerald-600" : "text-muted-foreground"}>●</span>{" "}
           {live ? "live" : "connecting"} · {stats.runsLastHour} runs last hour · {stats.openHolds} holds
+          {coverage && (
+            <>
+              {" "}·{" "}
+              <span
+                data-testid="coverage"
+                data-gap={coverage.gap ? "true" : "false"}
+                className={cn(coverage.gap && "font-medium text-red-600 dark:text-red-400")}
+                title={coverage.gap ? "Fewer runs than inbound texts: the pipeline seam may be failing silently" : undefined}
+              >
+                {coverage.text}
+              </span>
+            </>
+          )}
         </p>
       </header>
 
@@ -196,7 +242,9 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
                 No pipeline runs yet. New inbound texts will appear here as they are processed.
               </p>
             ) : (
-              runs.map((run) => <RunCard key={run.id} run={run} label={labels.get(run.id)} />)
+              runs.map((run) => (
+                <RunCard key={run.id} run={run} label={labels.get(run.id)} isOwner={isOwner} />
+              ))
             )}
           </div>
         </section>

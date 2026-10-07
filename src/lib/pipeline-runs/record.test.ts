@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const { reportError } = vi.hoisted(() => ({ reportError: vi.fn() }));
+vi.mock("@/lib/errors/report", () => ({ reportError }));
 
 import {
   finishRun,
@@ -18,6 +21,7 @@ function fakeAdmin(opts: {
   maxSeq?: number | null;
   stepError?: { message: string };
   throwOn?: string;
+  heldStep?: boolean;
 } = {}) {
   const calls: Call[] = [];
   const admin = {
@@ -62,6 +66,9 @@ function fakeAdmin(opts: {
       builder.maybeSingle = () => {
         done();
         if (table === "pipeline_run_steps") {
+          if (filters.some((f) => (f as unknown[])[0] === "result")) {
+            return Promise.resolve({ data: opts.heldStep ? { seq: 2 } : null, error: null });
+          }
           return Promise.resolve({
             data: opts.maxSeq == null ? null : { seq: opts.maxSeq },
             error: null,
@@ -226,8 +233,52 @@ describe("finishRun / updateRun / resumeRun", () => {
   it("resumeRun continues the seq counter from the stored max", async () => {
     const { admin } = fakeAdmin({ existingRun: { id: "run-9", org_id: "org-1" }, maxSeq: 7 });
     expect(await resumeRun(admin, "run-9")).toEqual({ runId: "run-9", orgId: "org-1", seq: 7 });
+    const held = fakeAdmin({ existingRun: { id: "run-9", org_id: "org-1" }, maxSeq: 7, heldStep: true });
+    expect(await resumeRun(held.admin, "run-9")).toEqual({ runId: "run-9", orgId: "org-1", seq: 7, held: true });
     const none = fakeAdmin({ existingRun: null });
     expect(await resumeRun(none.admin, "gone")).toBeNull();
     expect(await resumeRun(none.admin, null)).toBeNull();
+  });
+});
+
+describe("seam hardening", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    reportError.mockClear();
+  });
+
+  it("routes failures through reportError", async () => {
+    const { admin } = fakeAdmin({ insertError: { message: "db down" } });
+    await startRun(admin, { orgId: "o", inboundMessageId: "m" });
+    expect(reportError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "db down" }),
+      expect.objectContaining({ tags: expect.objectContaining({ surface: "pipeline_runs", stage: "start" }) }),
+    );
+  });
+
+  it("PIPELINE_RUNS_ENABLED=0 makes startRun a no-op returning null", async () => {
+    vi.stubEnv("PIPELINE_RUNS_ENABLED", "0");
+    const { admin, calls } = fakeAdmin();
+    expect(await startRun(admin, { orgId: "o", inboundMessageId: "m" })).toBeNull();
+    expect(calls).toHaveLength(0);
+    vi.stubEnv("PIPELINE_RUNS_ENABLED", "1");
+    expect(await startRun(admin, { orgId: "o", inboundMessageId: "m" })).not.toBeNull();
+  });
+
+  it("keeps UUIDs and ISO timestamps but still drops real-looking phones", () => {
+    expect(
+      sanitizeStepDetail({
+        id: "3f2b8c1e-5a7d-4e9f-8b6a-1c2d3e4f5a6b",
+        at: "2026-10-08T14:27:00.000Z",
+        day: "2026-10-08",
+        phone_text: "reach me at (913) 555-1234",
+        intl: "+1 913-555-1234",
+        mixed: "3f2b8c1e-5a7d-4e9f-8b6a-1c2d3e4f5a6b 9135551234",
+      }),
+    ).toEqual({
+      id: "3f2b8c1e-5a7d-4e9f-8b6a-1c2d3e4f5a6b",
+      at: "2026-10-08T14:27:00.000Z",
+      day: "2026-10-08",
+    });
   });
 });
