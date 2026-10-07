@@ -58,6 +58,13 @@ import {
   REP_SMS_HUMAN_TAKEOVER_REASON,
 } from "./rep-sms-human-takeover";
 import { aiReplyDelayWorkflow } from "@/workflows/ai-reply-delay";
+import {
+  finishRun,
+  finishRunFromOutcome,
+  recordStep,
+  startRun,
+  type PipelineRunContext,
+} from "@/lib/pipeline-runs";
 import { upgradeNormaHoldPauses } from "@/lib/norma";
 import { applyPhoneLevelOptOut } from "./opt-out-phone";
 import type { MessagingProvider } from "./types";
@@ -428,6 +435,16 @@ export async function handleInboundWebhook(
             { status: 500 },
           );
         }
+        if (!insertOutcome.duplicate) {
+          await recordKeywordExitRun(supabase, {
+            orgId,
+            insertOutcome,
+            body: ev.body,
+            gate: "dnc_keyword",
+            status: "closed",
+            reason: "dnc_keyword",
+          });
+        }
         await markWebhookEventProcessed(
           supabase,
           provider.providerId,
@@ -502,6 +519,16 @@ export async function handleInboundWebhook(
             { status: 500 },
           );
         }
+        if (!insertOutcome.duplicate) {
+          await recordKeywordExitRun(supabase, {
+            orgId,
+            insertOutcome,
+            body: ev.body,
+            gate: "stop_keyword",
+            status: "closed",
+            reason: "stop_keyword",
+          });
+        }
         await markWebhookEventProcessed(
           supabase,
           provider.providerId,
@@ -550,6 +577,16 @@ export async function handleInboundWebhook(
             { error: "inbound message insert failed" },
             { status: 500 },
           );
+        }
+        if (!insertOutcome.duplicate) {
+          await recordKeywordExitRun(supabase, {
+            orgId,
+            insertOutcome,
+            body: ev.body,
+            gate: "help_keyword",
+            status: "skipped",
+            reason: "help_keyword",
+          });
         }
         await markWebhookEventProcessed(
           supabase,
@@ -647,6 +684,16 @@ export async function handleInboundWebhook(
             { status: 500 },
           );
         }
+        if (!insertOutcome.duplicate) {
+          await recordKeywordExitRun(supabase, {
+            orgId,
+            insertOutcome,
+            body: ev.body,
+            gate: "wrong_number_keyword",
+            status: "closed",
+            reason: "wrong_number_keyword",
+          });
+        }
         await markWebhookEventProcessed(
           supabase,
           provider.providerId,
@@ -703,8 +750,26 @@ export async function handleInboundWebhook(
         continue;
       }
       const inboundState = readInboundMessageState(insertOutcome.metadata);
+      // Messages v2 evidence: one run per inbound message. Observation only;
+      // null (never an error) when recording is unavailable.
+      const runCtx = orgId
+        ? await startRun(supabase, {
+            orgId,
+            inboundMessageId: insertOutcome.messageId,
+            propertyId: effectivePropertyId,
+            contactId: effectiveContactId,
+            conversationId: insertOutcome.conversationId,
+            mode: "legacy",
+            inboundPreview: ev.body,
+          })
+        : null;
 
       if (!effectivePropertyId) {
+        await finishRun(supabase, runCtx, {
+          status: "skipped",
+          finalOutcome: "skipped",
+          reason: "no_property",
+        });
         if (effectiveContactId && !inboundState.ownerNotificationSentAt) {
           try {
             const adminUserIds = await listAdminUserIds(supabase);
@@ -1039,6 +1104,16 @@ export async function handleInboundWebhook(
       }
 
       if (repSmsHumanTakeover) {
+        await recordStep(supabase, runCtx, {
+          kind: "gate",
+          name: "rep_sms_human_takeover",
+          result: "block",
+        });
+        await finishRun(supabase, runCtx, {
+          status: "skipped",
+          finalOutcome: "skipped",
+          reason: REP_SMS_HUMAN_TAKEOVER_REASON,
+        });
         await markWebhookEventProcessed(
           supabase,
           provider.providerId,
@@ -1061,6 +1136,7 @@ export async function handleInboundWebhook(
             inboundToPhone: ev.to,
             inboundBody: ev.body,
             inboundMessageId: insertOutcome.messageId,
+            runId: runCtx?.runId ?? null,
           };
           const delayConfig = await loadAiReplyDelayConfig(
             supabase,
@@ -1076,23 +1152,26 @@ export async function handleInboundWebhook(
             : 0;
 
           if (delaySeconds === 0) {
-            await dispatchAndStampAiResponder(supabase, dispatchInput);
+            await dispatchAndStampAiResponder(supabase, dispatchInput, runCtx);
           } else {
             const preGates = await checkAiResponderDispatchPreGates(
               supabase,
               dispatchInput,
+              { runContext: runCtx },
             );
             if (!preGates.ok) {
               await stampAiResponderTerminalOutcome(supabase, {
                 messageId: insertOutcome.messageId,
                 conversationId: insertOutcome.conversationId,
                 outcome: preGates.outcome,
+                runContext: runCtx,
               });
             } else {
               const keywordEscalation = await applyKeywordEscalation(supabase, {
                 propertyId: effectivePropertyId,
                 inboundBody: ev.body,
                 escalationKeywords: delayConfig!.escalationKeywords,
+                runContext: runCtx,
               });
 
               if (keywordEscalation.escalated) {
@@ -1103,6 +1182,7 @@ export async function handleInboundWebhook(
                     outcome: "escalated",
                     reason: keywordEscalation.reason,
                   },
+                  runContext: runCtx,
                 });
               } else {
                 const scheduledAt = new Date(
@@ -1119,8 +1199,15 @@ export async function handleInboundWebhook(
                       inboundBody: ev.body,
                       inboundMessageId: insertOutcome.messageId,
                       delaySeconds,
+                      runId: runCtx?.runId ?? null,
                     },
                   ]);
+                  await recordStep(supabase, runCtx, {
+                    kind: "action",
+                    name: "reply_delay_scheduled",
+                    result: "applied",
+                    detail: { delaySeconds },
+                  });
 
                   try {
                     await markInboundMessageState(
@@ -1160,7 +1247,11 @@ export async function handleInboundWebhook(
                     },
                   });
                   try {
-                    await dispatchAndStampAiResponder(supabase, dispatchInput);
+                    await dispatchAndStampAiResponder(
+                      supabase,
+                      dispatchInput,
+                      runCtx,
+                    );
                   } catch (fallbackError) {
                     reportError(fallbackError, {
                       tags: {
@@ -1177,6 +1268,11 @@ export async function handleInboundWebhook(
                       effectivePropertyId,
                       "workflow_start_and_fallback_failed",
                     );
+                    await finishRun(supabase, runCtx, {
+                      status: "error",
+                      finalOutcome: "error",
+                      reason: "workflow_start_and_fallback_failed",
+                    });
                     await markInboundMessageState(
                       supabase,
                       insertOutcome.messageId,
@@ -1201,7 +1297,18 @@ export async function handleInboundWebhook(
               externalId: ev.externalId,
             },
           });
+          await finishRun(supabase, runCtx, {
+            status: "error",
+            finalOutcome: "error",
+            reason: "ai_responder_exception",
+          });
         }
+      } else if (!effectiveContactId) {
+        await finishRun(supabase, runCtx, {
+          status: "skipped",
+          finalOutcome: "skipped",
+          reason: "no_contact",
+        });
       }
 
       await markWebhookEventProcessed(
@@ -1554,16 +1661,69 @@ function isMissingWebhookProcessingClaimSupport(message: string): boolean {
 async function dispatchAndStampAiResponder(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
+  runContext?: PipelineRunContext | null,
 ): Promise<AiDispatchOutcome> {
   const outcome = await dispatchAiResponse(supabase, input, {
     anthropic: new Anthropic(),
+    ...(runContext ? { runContext } : {}),
   });
   await stampAiResponderTerminalOutcome(supabase, {
     messageId: input.inboundMessageId!,
     conversationId: input.conversationId ?? null,
     outcome,
+    runContext,
   });
   return outcome;
+}
+
+/**
+ * Evidence for the keyword exits that insert the inbound message before the
+ * AI path: one run, one blocking gate step, terminal state. Never throws.
+ */
+async function recordKeywordExitRun(
+  supabase: SupabaseClient<Database>,
+  args: {
+    orgId: string | null;
+    insertOutcome: {
+      messageId?: string | null;
+      contactId?: string | null;
+      propertyId?: string | null;
+      conversationId?: string | null;
+    };
+    body: string;
+    gate:
+      | "stop_keyword"
+      | "dnc_keyword"
+      | "help_keyword"
+      | "wrong_number_keyword";
+    status: "closed" | "skipped";
+    reason: string;
+  },
+): Promise<void> {
+  try {
+    if (!args.orgId || !args.insertOutcome.messageId) return;
+    const ctx = await startRun(supabase, {
+      orgId: args.orgId,
+      inboundMessageId: args.insertOutcome.messageId,
+      propertyId: args.insertOutcome.propertyId ?? null,
+      contactId: args.insertOutcome.contactId ?? null,
+      conversationId: args.insertOutcome.conversationId ?? null,
+      mode: "legacy",
+      inboundPreview: args.body,
+    });
+    await recordStep(supabase, ctx, {
+      kind: "gate",
+      name: args.gate,
+      result: "block",
+    });
+    await finishRun(supabase, ctx, {
+      status: args.status,
+      finalOutcome: args.status,
+      reason: args.reason,
+    });
+  } catch {
+    // Evidence is best-effort; never affect message handling.
+  }
 }
 
 async function stampAiResponderTerminalOutcome(
@@ -1572,9 +1732,11 @@ async function stampAiResponderTerminalOutcome(
     messageId: string;
     conversationId: string | null;
     outcome: AiDispatchOutcome;
+    runContext?: PipelineRunContext | null;
   },
 ): Promise<void> {
   const completedAt = new Date().toISOString();
+  await finishRunFromOutcome(supabase, args.runContext, args.outcome);
   await recordAiResponderOutcomeForThread(supabase, {
     conversationId: args.conversationId,
     outcome: args.outcome,

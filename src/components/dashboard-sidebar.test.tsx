@@ -87,4 +87,15 @@ describe("DashboardMobileNav", () => {
       "/my-leads",
     );
   });
+
+  it("shows Messages v2 right after Messages only when granted", () => {
+    const { rerender } = render(<DashboardSidebar />);
+    expect(screen.queryByRole("link", { name: "Messages v2" })).not.toBeInTheDocument();
+
+    rerender(<DashboardSidebar showMessagesV2 />);
+    const v2 = screen.getByRole("link", { name: "Messages v2" });
+    expect(v2).toHaveAttribute("href", "/messages-v2");
+    const links = screen.getAllByRole("link");
+    expect(links[links.indexOf(screen.getByRole("link", { name: "Messages" })) + 1]).toBe(v2);
+  });
 });

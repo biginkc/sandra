@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { createHash } from "node:crypto";
 
 import { reportError } from "@/lib/errors/report";
+import { recordStep, type MaybeRunContext } from "@/lib/pipeline-runs";
 import type { ResponderRoute } from "../ai-responder/route";
 import type { AiStructuredOutput } from "../ai-responder/types";
 import type { Database } from "../supabase/types";
@@ -10,7 +11,7 @@ import { buildTwoWayThreadState } from "./context";
 import { resolvePolicyOutcome } from "./policy";
 import { classifyWithJev, JevProviderError } from "./providers/jev-gateway";
 import { loadOrgThresholdMap, resolveThresholdDecision } from "./thresholds";
-import type { SmsClassificationDecision } from "./types";
+import { JEV_OUTCOME_TO_ACTION, type SmsClassificationDecision } from "./types";
 
 const SCHEMA_VERSION = JEV_SCHEMA_VERSION;
 const POLICY_VERSION = JEV_POLICY_VERSION;
@@ -169,6 +170,8 @@ export async function classifyForDispatch(
   deps: {
     fetch: typeof fetch;
     typesafeApiKey: string;
+    /** Messages v2 evidence run; observation only, never read for decisions. */
+    runContext?: MaybeRunContext;
   },
 ): Promise<ClassificationBridgeResult> {
   if (config.classifierProvider !== "jev") {
@@ -248,6 +251,12 @@ export async function classifyForDispatch(
       extra: { propertyId: input.propertyId },
     });
     await persistFailedRun(supabase, input, kind).catch(() => {});
+    await recordStep(supabase, deps.runContext, {
+      kind: "jev",
+      name: "classify",
+      result: "error",
+      detail: { reason: kind },
+    });
     if (config.classifierMode === "automatic") {
       return { kind: "jev_automatic_failed", classificationRunId: null, reason: kind };
     }
@@ -298,6 +307,39 @@ export async function classifyForDispatch(
     });
     return null;
   });
+  // Evidence only (never read back): the judgment, then the threshold verdict.
+  await recordStep(supabase, deps.runContext, {
+    kind: "jev",
+    name: "classify",
+    result: classificationRunId ? "pass" : "error",
+    detail: {
+      classificationRunId,
+      outcome: decision.outcome,
+      probabilities: decision.probabilities,
+      nativeConfidence,
+      model: decision.model,
+      latencyMs: decision.latencyMs,
+    },
+  });
+  await recordStep(supabase, deps.runContext, {
+    kind: "threshold",
+    name: "resolve_threshold",
+    result: thresholdDecision.status === "auto_apply" ? "pass" : "held",
+    detail: {
+      decision:
+        thresholdDecision.status === "auto_apply"
+          ? "auto_apply"
+          : thresholdDecision.status === "needs_decision"
+            ? "needs_decision"
+            : "human_gated",
+      outcome: decision.outcome,
+      threshold: thresholdAtDecision,
+      version: thresholdVersion,
+      ...(thresholdDecision.status === "human_gated"
+        ? { reason: thresholdDecision.reason }
+        : {}),
+    },
+  });
   if (!classificationRunId) {
     // Audit write failed. Root review of dbbb12e6, finding 2: in
     // automatic mode a Jev decision that couldn't even be durably
@@ -316,6 +358,16 @@ export async function classifyForDispatch(
     // applies uniformly to every Jev outcome, including nurture/
     // no_action — shadow mode must never act on any Jev result, not
     // just route-shaped ones, or "shadow" stops meaning "audit only".
+    await recordStep(supabase, deps.runContext, {
+      kind: "shadow",
+      name: "would_apply",
+      result: "would_apply",
+      detail: {
+        outcome: decision.outcome,
+        wouldRoute: JEV_OUTCOME_TO_ACTION[decision.outcome] ?? decision.outcome,
+        thresholdDecision: thresholdDecision.status,
+      },
+    });
     return { kind: "use_legacy", classificationRunId };
   }
 

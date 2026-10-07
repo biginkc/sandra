@@ -11,6 +11,16 @@ import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
 import type { Database, Json } from "@/lib/supabase/types";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 
+import {
+  currentPipelineRun,
+  recordStep,
+  resumeRun,
+  runWithPipelineRun,
+  updateRun,
+  type MaybeRunContext,
+  type PipelineRunContext,
+  type RecordStepInput,
+} from "@/lib/pipeline-runs";
 import { listAdminUserIds } from "@/lib/auth/admins";
 import { createNotification } from "@/lib/notifications/dispatch";
 import {
@@ -30,6 +40,7 @@ import { IDENTITY_REPLY_BODY, isIdentityQuestion } from "./identity";
 import { matchEscalationKeyword } from "./keywords";
 import { resolveResponderOutcome, type ResponderRoute } from "./route";
 import { validateAiReplyBody } from "./safety";
+import { getOutboundSenderName } from "@/lib/messaging/sender-persona";
 import type {
   AiMessageMetadata,
   AiStructuredOutput,
@@ -66,11 +77,24 @@ export type AiDispatchInput = {
   inboundToPhone?: string | null;
   inboundBody: string;
   inboundMessageId?: string | null;
+  /** Messages v2 evidence run for this inbound; observation only. */
+  runId?: string | null;
 };
 
 export type AiDispatchOptions = {
   checkSuperseded?: boolean;
+  /** Already-resolved run context (skips the runId lookup). */
+  runContext?: PipelineRunContext | null;
 };
+
+/** Best-effort evidence step against the ambient (or given) run. Never throws. */
+async function trace(
+  supabase: SupabaseClient<Database>,
+  step: RecordStepInput,
+  ctx?: MaybeRunContext,
+): Promise<void> {
+  await recordStep(supabase, ctx ?? currentPipelineRun(), step);
+}
 
 const AI_REPLY_THREAD_DEBOUNCE_MS = 45_000;
 const DEESCALATION_TEMPLATE_WITH_NAME =
@@ -117,15 +141,38 @@ export async function applyKeywordEscalation(
     propertyId: string;
     inboundBody: string;
     escalationKeywords?: ReadonlyArray<string> | null;
+    runContext?: MaybeRunContext;
   },
 ): Promise<{ escalated: true; reason: string } | { escalated: false }> {
   const keywordMatch = matchEscalationKeyword(args.inboundBody, {
     allowedPhrases: args.escalationKeywords ?? undefined,
   });
-  if (!keywordMatch) return { escalated: false };
+  if (!keywordMatch) {
+    await trace(
+      supabase,
+      { kind: "gate", name: "escalation_keyword", result: "pass" },
+      args.runContext,
+    );
+    return { escalated: false };
+  }
 
   const reason = `keyword:${keywordMatch.tier}`;
-  await markPropertyNeedsAttention(supabase, args.propertyId, reason);
+  await trace(
+    supabase,
+    {
+      kind: "gate",
+      name: "escalation_keyword",
+      result: "block",
+      detail: { tier: keywordMatch.tier },
+    },
+    args.runContext,
+  );
+  await markPropertyNeedsAttention(
+    supabase,
+    args.propertyId,
+    reason,
+    args.runContext,
+  );
   return { escalated: true, reason };
 }
 
@@ -134,12 +181,22 @@ export async function checkAiResponderDispatchPreGates(
   input: AiDispatchInput,
   options: AiDispatchOptions = {},
 ): Promise<AiDispatchPreGateResult> {
+  const runCtx = options.runContext ?? currentPipelineRun();
+  const blocked = async (
+    reason: string,
+  ): Promise<void> =>
+    trace(
+      supabase,
+      { kind: "gate", name: reason, result: "block", detail: { reason } },
+      runCtx,
+    );
   if (input.inboundMessageId) {
     const existingReply = await findExistingAiReplyForInbound(
       supabase,
       input.inboundMessageId,
     );
     if (existingReply) {
+      await blocked("already_replied");
       return {
         ok: false,
         outcome: { outcome: "skipped", reason: "already_replied" },
@@ -149,6 +206,7 @@ export async function checkAiResponderDispatchPreGates(
     if (options.checkSuperseded === true) {
       const latestInbound = await findLatestInboundInThread(supabase, input);
       if (latestInbound && latestInbound.id !== input.inboundMessageId) {
+        await blocked("superseded_by_newer_inbound");
         return {
           ok: false,
           outcome: {
@@ -168,22 +226,39 @@ export async function checkAiResponderDispatchPreGates(
     .eq("id", input.propertyId)
     .maybeSingle();
   if (!property) {
+    await blocked("property_not_found");
     return {
       ok: false,
       outcome: { outcome: "skipped", reason: "property_not_found" },
     };
   }
   if (isTerminalAiResponderProperty(property)) {
+    await blocked("already_terminal");
     return {
       ok: false,
       outcome: { outcome: "skipped", reason: "already_terminal" },
     };
   }
 
+  await trace(supabase, { kind: "gate", name: "pre_gates", result: "pass" }, runCtx);
   return { ok: true, property };
 }
 
 export async function dispatchAiResponse(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  deps: { anthropic: AnthropicLike } & AiDispatchOptions,
+): Promise<AiDispatchOutcome> {
+  // Evidence only: resolve the run (null when none / lookup fails) and expose
+  // it ambiently. Nothing below branches on it.
+  const runContext =
+    deps.runContext ?? (input.runId ? await resumeRun(supabase, input.runId) : null);
+  return runWithPipelineRun(runContext, () =>
+    dispatchAiResponseCore(supabase, input, { ...deps, runContext }),
+  );
+}
+
+async function dispatchAiResponseCore(
   supabase: SupabaseClient<Database>,
   input: AiDispatchInput,
   deps: { anthropic: AnthropicLike } & AiDispatchOptions,
@@ -193,6 +268,7 @@ export async function dispatchAiResponse(
   // --------------------------------------------------------------------------
   const preGates = await checkAiResponderDispatchPreGates(supabase, input, {
     checkSuperseded: deps.checkSuperseded,
+    runContext: deps.runContext,
   });
   if (!preGates.ok) return preGates.outcome;
   const { property } = preGates;
@@ -205,6 +281,17 @@ export async function dispatchAiResponse(
     .eq("org_id", property.org_id)
     .eq("active", true)
     .maybeSingle();
+
+  if (deps.runContext) {
+    await updateRun(supabase, deps.runContext, {
+      mode:
+        config?.classifier_provider === "jev"
+          ? config.classifier_mode === "automatic"
+            ? "automatic"
+            : "shadow"
+          : "legacy",
+    });
+  }
 
   // --------------------------------------------------------------------------
   // 2. Keyword gate (runs even without a config so we surface the right
@@ -247,6 +334,18 @@ export async function dispatchAiResponse(
     currentTurn,
     withinBusinessHours,
   });
+
+  await trace(
+    supabase,
+    decision.skip
+      ? {
+          kind: "gate",
+          name: "ai_skip",
+          result: "block",
+          detail: { reason: decision.reason },
+        }
+      : { kind: "gate", name: "ai_skip", result: "pass" },
+  );
 
   if (decision.skip) {
     // Classify/reply-eligibility decoupling (Jev workflow, 2026-09-20):
@@ -293,8 +392,18 @@ export async function dispatchAiResponse(
       AI_REPLY_THREAD_DEBOUNCE_MS,
     );
     if (recentReply) {
+      await trace(supabase, {
+        kind: "gate",
+        name: "duplicate_throttled",
+        result: "block",
+      });
       return { outcome: "skipped", reason: "duplicate_throttled" };
     }
+    await trace(supabase, {
+      kind: "gate",
+      name: "duplicate_throttled",
+      result: "pass",
+    });
   }
 
   const responseClaim = await claimAiResponse(supabase, {
@@ -304,6 +413,7 @@ export async function dispatchAiResponse(
     contactId: input.contactId,
     conversationId: input.conversationId ?? null,
   });
+  await traceClaim(supabase, responseClaim, deps.runContext);
   if (!responseClaim.claimed) {
     return {
       outcome: "skipped",
@@ -318,6 +428,12 @@ export async function dispatchAiResponse(
     const safety = validateAiReplyBody(IDENTITY_REPLY_BODY);
     if (!safety.ok) {
       const reason = `safety:${safety.reason}`;
+      await trace(supabase, {
+        kind: "gate",
+        name: "safety",
+        result: "block",
+        detail: { reason: safety.reason },
+      });
       await markPropertyNeedsAttention(supabase, input.propertyId, reason);
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
@@ -420,6 +536,7 @@ async function classifyAndApplyDespiteReplyIneligibility(
     contactId: input.contactId,
     conversationId: input.conversationId ?? null,
   });
+  await traceClaim(supabase, responseClaim);
   if (!responseClaim.claimed) {
     return {
       outcome: "skipped",
@@ -506,7 +623,11 @@ async function classifyAndHandleNonRouteOutcomes(
       classifierProvider: (config?.classifier_provider as "legacy" | "jev") ?? "legacy",
       classifierMode: (config?.classifier_mode as "shadow" | "automatic") ?? "shadow",
     },
-    { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "" },
+    {
+      fetch,
+      typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "",
+      runContext: currentPipelineRun(),
+    },
   );
 
   if (classification.kind === "jev_nurture") {
@@ -529,6 +650,12 @@ async function classifyAndHandleNonRouteOutcomes(
       applyResult.status === "already_nurture" ||
       applyResult.status === "replayed"
     ) {
+      await trace(supabase, {
+        kind: "action",
+        name: "apply_nurture",
+        result: "applied",
+        detail: { status: applyResult.status },
+      });
       if (applyResult.status === "applied") {
         await recordLeadEvent({
           propertyId: input.propertyId,
@@ -543,6 +670,12 @@ async function classifyAndHandleNonRouteOutcomes(
       });
       return { handled: true, outcome: { outcome: "auto_closed", reason: "model:nurture" } };
     }
+    await trace(supabase, {
+      kind: "action",
+      name: "apply_nurture",
+      result: applyResult.status === "already_terminal" ? "skipped" : "error",
+      detail: { status: applyResult.status },
+    });
     if (applyResult.status === "already_terminal") {
       // Benign, not an error: something more specific than nurture is
       // already set (possibly by a human while Jev was classifying) —
@@ -617,6 +750,12 @@ async function classifyAndHandleNonRouteOutcomes(
       applyResult.status === "already_qualified" ||
       applyResult.status === "replayed"
     ) {
+      await trace(supabase, {
+        kind: "action",
+        name: "promote_new_lead",
+        result: "applied",
+        detail: { status: applyResult.status },
+      });
       if (applyResult.status === "applied") {
         await recordLeadEvent({
           propertyId: input.propertyId,
@@ -636,6 +775,12 @@ async function classifyAndHandleNonRouteOutcomes(
     // a human exactly like the below-threshold case above, rather than
     // treating a promotion failure as a skip.
     const reason = "jev_new_lead_promotion_failed";
+    await trace(supabase, {
+      kind: "action",
+      name: "promote_new_lead",
+      result: "error",
+      detail: { status: applyResult.status },
+    });
     await markPropertyNeedsAttention(supabase, input.propertyId, reason);
     await completeAiResponseClaim(supabase, {
       claimId: responseClaim.claimId,
@@ -877,6 +1022,12 @@ async function resolveAndApplyRoute(
             reason: route.reason,
             expectedRevision: jevRevision,
           });
+      await traceDisposition(
+        supabase,
+        "opted_out",
+        optOutResult,
+        isJevBelowThresholdOptOut,
+      );
       if (!optOutResult.updated) {
         const outcome = closeOutcome(optOutResult, route.reason);
         await completeAiResponseClaim(supabase, {
@@ -925,6 +1076,7 @@ async function resolveAndApplyRoute(
             orgId: property.org_id,
             reason: route.reason,
           });
+      await traceDisposition(supabase, "dnc", dncResult, isJevDnc);
       const dncOutcome = closeOutcome(dncResult, route.reason);
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
@@ -956,6 +1108,12 @@ async function resolveAndApplyRoute(
             reason: route.reason,
             expectedRevision: jevRevision,
           });
+      await traceDisposition(
+        supabase,
+        "wrong_number",
+        wrongNumberResult,
+        isJevBelowThresholdWrongNumber,
+      );
       const wrongNumberOutcome = closeOutcome(wrongNumberResult, route.reason);
       if (jevAutoAccept && wrongNumberResult.updated && input.inboundMessageId) {
         await maybeAutoAcceptJevReview(
@@ -990,6 +1148,12 @@ async function resolveAndApplyRoute(
             reason: route.reason,
             expectedRevision: jevRevision,
           });
+      await traceDisposition(
+        supabase,
+        route.dispo,
+        autoCloseResult,
+        isJevBelowThresholdAutoClose,
+      );
       const autoCloseOutcome = closeOutcome(autoCloseResult, route.reason);
       if (jevAutoAccept && autoCloseResult.updated && input.inboundMessageId) {
         await maybeAutoAcceptJevReview(
@@ -1015,6 +1179,12 @@ async function resolveAndApplyRoute(
       const safety = validateAiReplyBody(bodyResult.body);
       if (!safety.ok) {
         const reason = `safety:${safety.reason}`;
+        await trace(supabase, {
+          kind: "gate",
+          name: "safety",
+          result: "block",
+          detail: { reason: safety.reason },
+        });
         await markPropertyNeedsAttention(supabase, input.propertyId, reason);
         await completeAiResponseClaim(supabase, {
           claimId: responseClaim.claimId,
@@ -1022,6 +1192,7 @@ async function resolveAndApplyRoute(
         });
         return { outcome: "escalated", reason };
       }
+      await trace(supabase, { kind: "gate", name: "safety", result: "pass" });
 
       const sent = await sendResponderMessage(supabase, {
         input,
@@ -1262,6 +1433,11 @@ async function sendResponderMessage(
       args.input.inboundMessageId,
     );
     if (existingReply) {
+      await trace(supabase, {
+        kind: "gate",
+        name: "already_replied",
+        result: "block",
+      });
       return { outcome: "skipped", reason: "already_replied" };
     }
   }
@@ -1270,6 +1446,12 @@ async function sendResponderMessage(
     sendResult.status === "blocked_terminal_dispo" ||
     sendResult.status === "blocked_automated_suppressed"
   ) {
+    await trace(supabase, {
+      kind: "gate",
+      name: "send_suppressed",
+      result: "block",
+      detail: { status: sendResult.status },
+    });
     return { outcome: "skipped", reason: "already_terminal" };
   }
 
@@ -1314,6 +1496,20 @@ async function sendResponderMessage(
     })
     .eq("id", messageId);
 
+  await trace(supabase, {
+    kind: "reply",
+    name: "ai_reply",
+    result: "sent",
+    detail: {
+      outboundMessageId: messageId,
+      actor: "ai",
+      confidence: args.confidence,
+      persona: getOutboundSenderName(),
+    },
+  });
+  await updateRun(supabase, currentPipelineRun(), {
+    outboundMessageId: messageId,
+  });
   return { outcome: "sent", messageId, confidence: args.confidence };
 }
 
@@ -1948,6 +2144,57 @@ async function loadContactPhone(
   };
 }
 
+async function traceClaim(
+  supabase: SupabaseClient<Database>,
+  claim: { claimed: boolean; claimId?: string | null; reason?: string },
+  ctx?: MaybeRunContext,
+): Promise<void> {
+  const runCtx = ctx ?? currentPipelineRun();
+  if (!runCtx) return;
+  await trace(
+    supabase,
+    claim.claimed
+      ? {
+          kind: "action",
+          name: "claim",
+          result: "applied",
+          detail: { claimId: claim.claimId ?? null },
+        }
+      : {
+          kind: "action",
+          name: "claim",
+          result: "skipped",
+          detail: { reason: claim.reason ?? "already_claimed" },
+        },
+    runCtx,
+  );
+  if (claim.claimed && claim.claimId) {
+    await updateRun(supabase, runCtx, { claimId: claim.claimId });
+  }
+}
+
+async function traceDisposition(
+  supabase: SupabaseClient<Database>,
+  name: string,
+  result: ResponderDispoResult,
+  deferred: boolean,
+): Promise<void> {
+  await trace(supabase, {
+    kind: "action",
+    name,
+    result: result.updated
+      ? deferred
+        ? "held"
+        : "applied"
+      : result.reason === "db_error"
+        ? "error"
+        : "skipped",
+    detail: result.updated
+      ? { deferred }
+      : { deferred, reason: result.reason },
+  });
+}
+
 function closeOutcome(
   result: ResponderDispoResult,
   reason: string,
@@ -2023,7 +2270,14 @@ export async function markPropertyNeedsAttention(
   supabase: SupabaseClient<Database>,
   propertyId: string,
   reason: string,
+  runContext?: MaybeRunContext,
 ): Promise<void> {
+  // Evidence first: the hold is recorded whether or not the flag write wins.
+  await trace(
+    supabase,
+    { kind: "hold", name: "needs_attention", result: "held", detail: { reason } },
+    runContext,
+  );
   const now = new Date().toISOString();
   const { data: updated, error } = await supabase
     .from("properties")

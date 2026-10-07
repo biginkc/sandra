@@ -13,6 +13,7 @@ import {
   List,
   Megaphone,
   MessageSquare,
+  Radio,
   Droplet,
   Search,
   Sparkles,
@@ -63,6 +64,7 @@ const ITEMS: readonly Item[] = [
   { href: "/sequences", label: "Drips", icon: Droplet },
   { href: "/templates", label: "Templates", icon: FileText },
   { href: "/messages", label: "Messages", icon: MessageSquare },
+  { href: "/messages-v2", label: "Messages v2", icon: Radio },
   { href: "/jev", label: "Jev", icon: Sparkles, matchAlso: ["/jev/needs-decision", "/jev/review"] },
   { href: "/leads", label: "Leads", icon: LayoutDashboard },
   { href: "/my-leads", label: "My Leads", icon: ClipboardList },
@@ -76,11 +78,13 @@ function visibleItems(
   showMyRecordings: boolean,
   showCalculators: boolean,
   showMessagesAndLeads: boolean,
+  showMessagesV2: boolean,
 ): readonly Item[] {
   const items = ITEMS.filter(
     (item) =>
       (item.href !== "/my-leads" || showMyLeads) &&
       (item.href !== "/calculators" || showCalculators) &&
+      (item.href !== "/messages-v2" || showMessagesV2) &&
       ((item.href !== "/messages" && item.href !== "/leads" && item.href !== "/jev") || showMessagesAndLeads),
   );
   const recordings: Item[] = [];
@@ -109,6 +113,7 @@ export function DashboardSidebar({
   showRecordings = false,
   showMyRecordings = false,
   showMessagesAndLeads = true,
+  showMessagesV2 = false,
   initialAcquisitionBadge = null,
   onRefreshAcquisitionBadge,
 }: {
@@ -118,6 +123,7 @@ export function DashboardSidebar({
   showRecordings?: boolean;
   showMyRecordings?: boolean;
   showMessagesAndLeads?: boolean;
+  showMessagesV2?: boolean;
   initialAcquisitionBadge?: number | null;
   onRefreshAcquisitionBadge?: MyLeadsBadgeRefresh;
 }) {
@@ -129,6 +135,7 @@ export function DashboardSidebar({
     showMyRecordings,
     showCalculators,
     showMessagesAndLeads,
+    showMessagesV2,
   );
 
   const isActive = (item: Item): boolean => {
@@ -173,6 +180,7 @@ export function DashboardMobileNav({
   showRecordings = false,
   showMyRecordings = false,
   showMessagesAndLeads = true,
+  showMessagesV2 = false,
   initialAcquisitionBadge = null,
   onRefreshAcquisitionBadge,
 }: {
@@ -181,6 +189,7 @@ export function DashboardMobileNav({
   showRecordings?: boolean;
   showMyRecordings?: boolean;
   showMessagesAndLeads?: boolean;
+  showMessagesV2?: boolean;
   initialAcquisitionBadge?: number | null;
   onRefreshAcquisitionBadge?: MyLeadsBadgeRefresh;
 }) {
@@ -191,6 +200,7 @@ export function DashboardMobileNav({
     showMyRecordings,
     showCalculators,
     showMessagesAndLeads,
+    showMessagesV2,
   );
 
   const isActiveHref = (href: string): boolean =>

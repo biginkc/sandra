@@ -3427,6 +3427,132 @@ export type Database = {
         }
         Relationships: []
       }
+      pipeline_run_steps: {
+        Row: {
+          created_at: string
+          detail: Json
+          id: string
+          kind: string
+          name: string
+          org_id: string
+          result: string
+          run_id: string
+          seq: number
+        }
+        Insert: {
+          created_at?: string
+          detail?: Json
+          id?: string
+          kind: string
+          name: string
+          org_id: string
+          result: string
+          run_id: string
+          seq: number
+        }
+        Update: {
+          created_at?: string
+          detail?: Json
+          id?: string
+          kind?: string
+          name?: string
+          org_id?: string
+          result?: string
+          run_id?: string
+          seq?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "pipeline_run_steps_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "pipeline_run_steps_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "pipeline_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      pipeline_runs: {
+        Row: {
+          classification_run_id: string | null
+          claim_id: string | null
+          completed_at: string | null
+          contact_id: string | null
+          conversation_id: string | null
+          created_at: string
+          final_outcome: string | null
+          id: string
+          inbound_message_id: string
+          inbound_preview: string | null
+          mode: string
+          org_id: string
+          outbound_message_id: string | null
+          property_id: string | null
+          reason: string | null
+          started_at: string
+          status: string
+        }
+        Insert: {
+          classification_run_id?: string | null
+          claim_id?: string | null
+          completed_at?: string | null
+          contact_id?: string | null
+          conversation_id?: string | null
+          created_at?: string
+          final_outcome?: string | null
+          id?: string
+          inbound_message_id: string
+          inbound_preview?: string | null
+          mode?: string
+          org_id: string
+          outbound_message_id?: string | null
+          property_id?: string | null
+          reason?: string | null
+          started_at?: string
+          status?: string
+        }
+        Update: {
+          classification_run_id?: string | null
+          claim_id?: string | null
+          completed_at?: string | null
+          contact_id?: string | null
+          conversation_id?: string | null
+          created_at?: string
+          final_outcome?: string | null
+          id?: string
+          inbound_message_id?: string
+          inbound_preview?: string | null
+          mode?: string
+          org_id?: string
+          outbound_message_id?: string | null
+          property_id?: string | null
+          reason?: string | null
+          started_at?: string
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "pipeline_runs_inbound_message_id_fkey"
+            columns: ["inbound_message_id"]
+            isOneToOne: true
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "pipeline_runs_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       properties: {
         Row: {
           search_text: string | null
