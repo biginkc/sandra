@@ -29,6 +29,10 @@
       "schedule": "*/10 * * * *"
     },
     {
+      "path": "/api/cron/hold-alerts",
+      "schedule": "*/5 * * * *"
+    },
+    {
       "path": "/api/cron/sweep-stuck-skip-trace",
       "schedule": "*/1 * * * *"
     },
