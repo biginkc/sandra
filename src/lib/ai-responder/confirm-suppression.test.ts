@@ -18,6 +18,7 @@ vi.mock("@/lib/supabase/admin", () => ({ createAdminClient }));
 import {
   applySuppressionForConfirmedReview,
   applyConfirmedSuppression,
+  listOutstandingSuppressionReviews,
   SUPPRESSION_INCOMPLETE_WARNING,
 } from "./confirm-suppression";
 
@@ -124,16 +125,21 @@ function lookupClient(disposition: string, overrides: Record<string, unknown> = 
       ai_reason: "said stop",
       source_inbound_message_id: "msg-1",
     },
-    properties: { homeowner_contact_id: "contact-1" },
+    properties: { homeowner_contact_id: "contact-1", org_id: "org-1" },
     contacts: { phone_1: "+18165550100" },
     messages: { from_address: "+18165550100" },
     ...overrides,
   };
   const updates: Array<{ table: string; values: unknown }> = [];
+  const inserts: Array<{ table: string; values: unknown }> = [];
   const chain = (table: string) => {
     const c: Record<string, unknown> = {};
     c.select = () => c;
     c.eq = () => c;
+    c.insert = async (values: unknown) => {
+      inserts.push({ table, values });
+      return { error: null };
+    };
     c.update = (values: unknown) => {
       updates.push({ table, values });
       return c;
@@ -142,7 +148,7 @@ function lookupClient(disposition: string, overrides: Record<string, unknown> = 
     c.then = (resolve: (v: unknown) => void) => resolve({ error: null });
     return c;
   };
-  return { from: chain, updates };
+  return { from: chain, updates, inserts };
 }
 
 describe("applySuppressionForConfirmedReview", () => {
@@ -213,22 +219,38 @@ describe("applySuppressionForConfirmedReview", () => {
     expect(hold?.values).toEqual(
       expect.objectContaining({
         needs_human_attention: true,
-        last_ai_escalation_reason: "suppression_incomplete",
+        last_ai_escalation_reason: "suppression_incomplete:review-1",
       }),
     );
+    expect(admin.inserts[0]).toMatchObject({
+      table: "lead_events",
+      values: expect.objectContaining({
+        event_type: "suppression_incomplete",
+        source_type: "ai_disposition_reviews",
+        source_id: "review-1",
+      }),
+    });
   });
 });
 
 describe("suppression_incomplete hold vs timeout flags", () => {
-  function failingClient(currentReason: string | null) {
+  function failingClient(currentReason: string | null, ledgerError: unknown = null) {
     const updates: unknown[] = [];
+    const inserts: unknown[] = [];
     applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
     createAdminClient.mockReturnValue({
       from: () => {
         const c: Record<string, unknown> = {};
         c.select = () => c;
         c.eq = () => c;
-        c.maybeSingle = async () => ({ data: { last_ai_escalation_reason: currentReason }, error: null });
+        c.maybeSingle = async () => ({
+          data: { org_id: "org-1", last_ai_escalation_reason: currentReason },
+          error: null,
+        });
+        c.insert = async (v: unknown) => {
+          inserts.push(v);
+          return { error: ledgerError };
+        };
         c.update = (v: unknown) => {
           updates.push(v);
           return { eq: async () => ({ error: null }) };
@@ -236,27 +258,96 @@ describe("suppression_incomplete hold vs timeout flags", () => {
         return c;
       },
     } as never);
-    return updates;
+    return { updates, inserts };
   }
 
   for (const reason of ["send_timeout:abc", "dead_letter_failed:send_timeout:abc"]) {
-    it(`keeps existing ${reason} reason and still raises the hold`, async () => {
-      const updates = failingClient(reason);
+    it(`keeps existing ${reason} reason, raises the hold, and records the failed review id as a lead event`, async () => {
+      const { updates, inserts } = failingClient(reason);
       await applyConfirmedSuppression({ ...base, disposition: "dnc" });
       expect(updates).toHaveLength(1);
       expect(updates[0]).toMatchObject({ needs_human_attention: true });
       expect(updates[0]).not.toHaveProperty("last_ai_escalation_reason");
-    });
-  }
-
-  for (const reason of [null, "low_confidence"]) {
-    it(`sets suppression_incomplete over ${reason ?? "null"}`, async () => {
-      const updates = failingClient(reason);
-      await applyConfirmedSuppression({ ...base, disposition: "dnc" });
-      expect(updates[0]).toMatchObject({
-        needs_human_attention: true,
-        last_ai_escalation_reason: "suppression_incomplete",
+      expect(inserts[0]).toMatchObject({
+        org_id: "org-1",
+        property_id: "property-1",
+        event_type: "suppression_incomplete",
+        source_type: "ai_disposition_reviews",
+        source_id: "review-1",
       });
     });
   }
+
+  it("falls back to the suppression reason when the ledger write fails, so the id is never lost", async () => {
+    const { updates } = failingClient("send_timeout:abc", { message: "insert failed" });
+    await applyConfirmedSuppression({ ...base, disposition: "dnc" });
+    expect(updates[0]).toMatchObject({ last_ai_escalation_reason: "suppression_incomplete:review-1" });
+  });
+
+  it("treats a duplicate ledger row (unique violation) as recorded", async () => {
+    const { updates } = failingClient("send_timeout:abc", { code: "23505", message: "dup" });
+    await applyConfirmedSuppression({ ...base, disposition: "dnc" });
+    expect(updates[0]).not.toHaveProperty("last_ai_escalation_reason");
+  });
+
+  for (const reason of [null, "low_confidence"]) {
+    it(`sets suppression_incomplete:<reviewId> over ${reason ?? "null"}`, async () => {
+      const { updates } = failingClient(reason);
+      await applyConfirmedSuppression({ ...base, disposition: "dnc" });
+      expect(updates[0]).toMatchObject({
+        needs_human_attention: true,
+        last_ai_escalation_reason: "suppression_incomplete:review-1",
+      });
+    });
+  }
+});
+
+describe("listOutstandingSuppressionReviews", () => {
+  function ledger(reason: string | null, events: Array<{ event_type: string; source_id: string; created_at: string }>) {
+    return {
+      from: (table: string) => {
+        const c: Record<string, unknown> = {};
+        c.select = () => c;
+        c.eq = () => c;
+        c.in = async () => ({ data: events, error: null });
+        c.maybeSingle = async () => ({ data: table === "properties" ? { last_ai_escalation_reason: reason } : null, error: null });
+        return c;
+      },
+    };
+  }
+
+  it("returns the reason id plus unresolved failure events, dropping ones with a later retried_ok", async () => {
+    const result = await listOutstandingSuppressionReviews(
+      ledger("suppression_incomplete:A", [
+        { event_type: "suppression_incomplete", source_id: "A", created_at: "2026-01-02" },
+        { event_type: "suppression_incomplete", source_id: "B", created_at: "2026-01-01" },
+        { event_type: "suppression_retried_ok", source_id: "B", created_at: "2026-01-03" },
+        { event_type: "suppression_incomplete", source_id: "C", created_at: "2026-01-04" },
+      ]),
+      "property-1",
+    );
+    expect(result.reviewIds.sort()).toEqual(["A", "C"]);
+  });
+
+  it("finds a timeout-preserved failure from its lead event", async () => {
+    const result = await listOutstandingSuppressionReviews(
+      ledger("send_timeout:x", [{ event_type: "suppression_incomplete", source_id: "A", created_at: "2026-01-01" }]),
+      "property-1",
+    );
+    expect(result.reviewIds).toEqual(["A"]);
+  });
+
+  it("throws when the ledger cannot be read", async () => {
+    const bad = {
+      from: () => {
+        const c: Record<string, unknown> = {};
+        c.select = () => c;
+        c.eq = () => c;
+        c.in = async () => ({ data: null, error: { message: "boom" } });
+        c.maybeSingle = async () => ({ data: { last_ai_escalation_reason: null }, error: null });
+        return c;
+      },
+    };
+    await expect(listOutstandingSuppressionReviews(bad, "property-1")).rejects.toThrow("boom");
+  });
 });

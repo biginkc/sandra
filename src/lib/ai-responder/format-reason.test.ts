@@ -192,4 +192,15 @@ describe("send timeout reasons", () => {
     const parsed = parseEscalationReason("send_timeout_then_sent");
     expect(parsed!.longLabel).toBe("Reply accepted by provider late — do not re-send");
   });
+  it("suppression_incomplete labels the same with or without a review id, never showing the uuid", () => {
+    const bare = parseEscalationReason("suppression_incomplete");
+    const withId = parseEscalationReason("suppression_incomplete:3f1c2d9e-0000-4000-8000-123456789abc");
+    expect(withId).toMatchObject({
+      gate: "suppression_incomplete",
+      shortLabel: "Suppression incomplete",
+      color: "rose",
+      longLabel: bare!.longLabel,
+    });
+    expect(withId!.longLabel).not.toMatch(/3f1c2d9e/);
+  });
 });

@@ -1,12 +1,16 @@
 "use client";
 
 import { AlertTriangleIcon, RotateCcwIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { parseEscalationReason } from "@/lib/ai-responder/format-reason";
 
-import { clearNeedsHumanAttention, retrySuppressionForProperty } from "./ai-actions";
+import {
+  clearNeedsHumanAttention,
+  listOutstandingSuppressionFailures,
+  retrySuppressionForProperty,
+} from "./ai-actions";
 
 /**
  * Banner shown on lead detail when `properties.needs_human_attention`
@@ -40,7 +44,26 @@ export function AiAttentionBanner({
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const visible = initialVisible && !dismissed;
-  const suppressionIncomplete = reason === "suppression_incomplete";
+  const reasonIsSuppression =
+    reason === "suppression_incomplete" ||
+    !!reason?.startsWith("suppression_incomplete:");
+  // Failed reviews can also hide behind a preserved send-timeout reason, so
+  // the outstanding list is loaded whenever the banner is showing.
+  const [outstanding, setOutstanding] = useState<number | null>(null);
+  useEffect(() => {
+    if (!initialVisible) return;
+    let live = true;
+    listOutstandingSuppressionFailures(propertyId)
+      .then((r) => {
+        if (live && r?.ok) setOutstanding(r.data.reviewIds.length);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [propertyId, initialVisible, reason]);
+  const outstandingCount = outstanding ?? (reasonIsSuppression ? 1 : 0);
+  const suppressionIncomplete = reasonIsSuppression || outstandingCount > 0;
 
   if (!visible) return null;
 
@@ -72,8 +95,9 @@ export function AiAttentionBanner({
       const r = await retrySuppressionForProperty(propertyId);
       if (!r.ok) {
         setFailure(r.error.message);
-      } else if (r.data.cleared) {
-        setDismissed(true);
+      } else {
+        setOutstanding(r.data.remaining);
+        if (r.data.cleared) setDismissed(true);
       }
     } catch (error) {
       setFailure(
@@ -116,6 +140,9 @@ export function AiAttentionBanner({
               data-testid="ai-attention-suppression-warning"
             >
               Suppression is incomplete: this number may still be texted.
+              {outstandingCount > 1
+                ? ` ${outstandingCount} confirmed opt-outs still need suppression.`
+                : " 1 confirmed opt-out still needs suppression."}{" "}
               Retry suppression before dismissing.
             </div>
           ) : null}
@@ -138,7 +165,9 @@ export function AiAttentionBanner({
             className="min-h-11 w-full sm:min-h-8 sm:w-auto"
             data-testid="ai-attention-retry-suppression"
           >
-            Retry suppression
+            {outstandingCount > 1
+              ? `Retry suppression (${outstandingCount})`
+              : "Retry suppression"}
           </Button>
         ) : null}
       <Button

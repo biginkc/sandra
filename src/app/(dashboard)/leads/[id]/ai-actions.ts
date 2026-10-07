@@ -5,7 +5,10 @@ import { revalidatePath } from "next/cache";
 
 import {
   applySuppressionForConfirmedReview,
-  SUPPRESSION_INCOMPLETE_REASON,
+  isSuppressionIncompleteReason,
+  listOutstandingSuppressionReviews,
+  recordSuppressionRetriedOk,
+  suppressionIncompleteReason,
 } from "@/lib/ai-responder/confirm-suppression";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
@@ -71,15 +74,12 @@ export async function clearNeedsHumanAttention(
 }
 
 /**
- * Re-run phone suppression for the latest confirmed opted_out/dnc review on
- * a property whose earlier suppression failed (`suppression_incomplete`
- * hold). Success clears the hold (only when the hold is the
- * suppression_incomplete one, so a preserved send-timeout flag stays up) and
- * audits it; failure keeps the hold and returns the warning.
+ * Outstanding failed-suppression review ids for a property (hold reason id plus
+ * unresolved `suppression_incomplete` lead events). Read-only; drives the banner.
  */
-export async function retrySuppressionForProperty(
+export async function listOutstandingSuppressionFailures(
   propertyId: string,
-): Promise<Result<{ cleared: boolean }>> {
+): Promise<Result<{ reviewIds: string[] }>> {
   try {
     const supabase = await createClient();
     const {
@@ -92,70 +92,155 @@ export async function retrySuppressionForProperty(
         error: { code: "UNAUTHENTICATED", message: "Not signed in" },
       };
     }
-    const { data: review, error: reviewError } = await supabase
+    const { reviewIds } = await listOutstandingSuppressionReviews(
+      supabase as never,
+      propertyId,
+    );
+    return ok({ reviewIds });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "list_outstanding_suppression" },
+      extra: { propertyId },
+    });
+    return errFromUnknown(e, "RETRY_SUPPRESSION_FAILED");
+  }
+}
+
+/**
+ * Re-run phone suppression for exactly the confirmed opted_out/dnc reviews
+ * whose suppression failed: the id carried in the `suppression_incomplete:<id>`
+ * hold reason plus unresolved `suppression_incomplete` lead events (no later
+ * `suppression_retried_ok`). Each success is recorded; the hold is cleared only
+ * when nothing remains outstanding afterwards AND the hold reason is still the
+ * exact value seen after the retries (a concurrent new failure rewrites it, so
+ * an older retry cannot clear it). On partial success the reason is pointed at
+ * a remaining id. A preserved send-timeout flag is never cleared.
+ */
+export async function retrySuppressionForProperty(
+  propertyId: string,
+): Promise<Result<{ cleared: boolean; remaining: number }>> {
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser();
+    if (authError || !user) {
+      return {
+        ok: false,
+        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
+      };
+    }
+    const fail = (message: string) => ({
+      ok: false as const,
+      error: { code: "RETRY_SUPPRESSION_FAILED", message },
+    });
+
+    const outstanding = await listOutstandingSuppressionReviews(
+      supabase as never,
+      propertyId,
+    );
+    let ids = outstanding.reviewIds;
+    if (ids.length === 0 && isSuppressionIncompleteReason(outstanding.reason)) {
+      // Legacy bare `suppression_incomplete` hold with no recorded id: fall
+      // back to the most recent confirmed opt-out/DNC review.
+      const { data: latest, error: latestError } = await supabase
+        .from("ai_disposition_reviews")
+        .select("id")
+        .eq("property_id", propertyId)
+        .eq("status", "confirmed")
+        .in("disposition", ["opted_out", "dnc"])
+        .order("human_reviewed_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (latestError) return fail(latestError.message);
+      if (latest) ids = [latest.id];
+    }
+    if (ids.length === 0) {
+      return fail("No failed suppression found for this lead");
+    }
+
+    const { data: reviews, error: reviewError } = await supabase
       .from("ai_disposition_reviews")
       .select("id")
       .eq("property_id", propertyId)
       .eq("status", "confirmed")
       .in("disposition", ["opted_out", "dnc"])
-      .order("human_reviewed_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (reviewError) {
-      return {
-        ok: false,
-        error: { code: "RETRY_SUPPRESSION_FAILED", message: reviewError.message },
-      };
+      .in("id", ids);
+    if (reviewError) return fail(reviewError.message);
+    const valid = new Set(((reviews ?? []) as Array<{ id: string }>).map((r) => r.id));
+    const targets = ids.filter((id) => valid.has(id));
+    if (targets.length === 0) {
+      return fail("No confirmed opt-out or DNC review found for this lead");
     }
-    if (!review) {
-      return {
-        ok: false,
-        error: {
-          code: "RETRY_SUPPRESSION_FAILED",
-          message: "No confirmed opt-out or DNC review found for this lead",
-        },
-      };
+
+    let warning: string | null = null;
+    for (const reviewId of targets) {
+      const suppression = await applySuppressionForConfirmedReview(
+        supabase as never,
+        reviewId,
+        user.id,
+      );
+      if (suppression.ok) {
+        await recordSuppressionRetriedOk({ propertyId, reviewId, actorId: user.id });
+      } else {
+        warning = suppression.warning;
+      }
     }
-    const suppression = await applySuppressionForConfirmedReview(
-      supabase as never,
-      review.id,
-      user.id,
-    );
-    if (!suppression.ok) {
-      return {
-        ok: false,
-        error: { code: "SUPPRESSION_INCOMPLETE", message: suppression.warning },
-      };
-    }
-    const { data: cleared, error: clearError } = await supabase
-      .from("properties")
-      .update({
-        needs_human_attention: false,
-        last_ai_escalation_reason: null,
-        last_ai_escalation_at: null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", propertyId)
-      .eq("last_ai_escalation_reason", SUPPRESSION_INCOMPLETE_REASON)
-      .select("id")
-      .maybeSingle();
-    if (clearError) {
-      return {
-        ok: false,
-        error: { code: "CLEAR_ATTENTION_FAILED", message: clearError.message },
-      };
-    }
-    if (cleared) {
-      await recordLeadEvent({
-        propertyId,
-        actorType: "user",
-        actorId: user.id,
-        eventType: LEAD_EVENT_TYPES.AI_ESCALATION_CLEARED,
-        payload: { from: true, to: false, via: "retry_suppression", reviewId: review.id },
-      });
+
+    const after = await listOutstandingSuppressionReviews(supabase as never, propertyId);
+    let cleared = false;
+    if (isSuppressionIncompleteReason(after.reason)) {
+      if (after.reviewIds.length === 0) {
+        const { data: clearedRow, error: clearError } = await supabase
+          .from("properties")
+          .update({
+            needs_human_attention: false,
+            last_ai_escalation_reason: null,
+            last_ai_escalation_at: null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", propertyId)
+          .eq("last_ai_escalation_reason", after.reason as string)
+          .select("id")
+          .maybeSingle();
+        if (clearError) {
+          return {
+            ok: false,
+            error: { code: "CLEAR_ATTENTION_FAILED", message: clearError.message },
+          };
+        }
+        if (clearedRow) {
+          cleared = true;
+          await recordLeadEvent({
+            propertyId,
+            actorType: "user",
+            actorId: user.id,
+            eventType: LEAD_EVENT_TYPES.AI_ESCALATION_CLEARED,
+            payload: { from: true, to: false, via: "retry_suppression", reviewIds: targets },
+          });
+        }
+      } else if (!after.reviewIds.some((id) => after.reason === suppressionIncompleteReason(id))) {
+        // The reason points at a review that is now resolved; keep the hold
+        // but point it at a still-outstanding id.
+        await supabase
+          .from("properties")
+          .update({
+            last_ai_escalation_reason: suppressionIncompleteReason(after.reviewIds[0]),
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", propertyId)
+          .eq("last_ai_escalation_reason", after.reason as string);
+      }
     }
     revalidatePath(`/leads/${propertyId}`);
-    return ok({ cleared: !!cleared });
+    if (warning) {
+      return {
+        ok: false,
+        error: { code: "SUPPRESSION_INCOMPLETE", message: warning },
+      };
+    }
+    return ok({ cleared, remaining: after.reviewIds.length });
   } catch (e) {
     reportError(e, {
       tags: { surface: "retry_suppression" },

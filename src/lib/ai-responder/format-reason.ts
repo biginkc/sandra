@@ -69,6 +69,7 @@ export function parseEscalationReason(
   const color: ReasonColor =
     gate === "provider_billing" ||
     gate === "provider_auth" ||
+    gate === "suppression_incomplete" ||
     gate === "dead_letter_failed"
       ? "rose"
       : "amber";
@@ -108,6 +109,8 @@ function formatLongLabel(gate: string, detail: string): string | null {
       return "Reply timed out at the provider — held for review";
     case "send_timeout_then_sent":
       return "Reply accepted by provider late — do not re-send";
+    case "suppression_incomplete":
+      return "Confirmed opt-out saved, but the number may not be suppressed yet - retry suppression";
     case "provider_billing":
       return "Anthropic credits exhausted - AI responder down until topped up";
     case "provider_auth":
@@ -139,6 +142,8 @@ function formatShortLabel(gate: string): string {
       return "Send timed out";
     case "send_timeout_then_sent":
       return "Sent late";
+    case "suppression_incomplete":
+      return "Suppression incomplete";
     case "provider_billing":
       return "API credits out";
     case "provider_auth":

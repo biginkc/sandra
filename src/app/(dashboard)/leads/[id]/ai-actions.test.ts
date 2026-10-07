@@ -5,13 +5,16 @@ const { createClient, recordLeadEvent } = vi.hoisted(() => ({
   recordLeadEvent: vi.fn().mockResolvedValue(undefined),
 }));
 
-const { applySuppressionForConfirmedReview } = vi.hoisted(() => ({
+const { applySuppressionForConfirmedReview, recordSuppressionRetriedOk } = vi.hoisted(() => ({
   applySuppressionForConfirmedReview: vi.fn(),
+  recordSuppressionRetriedOk: vi.fn(),
 }));
-vi.mock("@/lib/ai-responder/confirm-suppression", () => ({
+vi.mock("@/lib/ai-responder/confirm-suppression", async (importActual) => ({
+  ...(await importActual<typeof import("@/lib/ai-responder/confirm-suppression")>()),
   applySuppressionForConfirmedReview,
-  SUPPRESSION_INCOMPLETE_REASON: "suppression_incomplete",
+  recordSuppressionRetriedOk,
 }));
+vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
@@ -165,69 +168,258 @@ describe("lead AI actions ledger", () => {
 vi.mock("@/lib/leads/training", () => ({ assertNotTrainingTarget: vi.fn().mockResolvedValue(undefined) }));
 
 describe("retrySuppressionForProperty", () => {
-  function retryClient(opts: { review: { id: string } | null; cleared: { id: string } | null }) {
-    const updates: unknown[] = [];
-    const eqs: Array<[string, unknown]> = [];
-    const builder: Record<string, unknown> = {};
-    let table = "";
-    builder.select = () => builder;
-    builder.in = () => builder;
-    builder.order = () => builder;
-    builder.limit = () => builder;
-    builder.eq = (c: string, v: unknown) => {
-      eqs.push([c, v]);
-      return builder;
-    };
-    builder.update = (v: unknown) => {
-      updates.push(v);
-      return builder;
-    };
-    builder.maybeSingle = async () => ({
-      data: table === "ai_disposition_reviews" ? opts.review : opts.cleared,
-      error: null,
-    });
-    return {
-      updates,
-      eqs,
-      client: {
-        auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } }, error: null }) },
-        from: (t: string) => {
-          table = t;
-          return builder;
-        },
+  type Ev = { event_type: string; source_id: string; created_at: string };
+  type State = {
+    reason: string | null;
+    events: Ev[];
+    reviews: string[]; // confirmed opted_out/dnc review ids
+    latest?: string | null;
+  };
+
+  /** Stateful fake: retried_ok writes land in `events`, reason updates honour the eq guard. */
+  function world(state: State) {
+    const updates: Array<{ values: Record<string, unknown>; matched: boolean }> = [];
+    const client = {
+      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } }, error: null }) },
+      from: (table: string) => {
+        const filters: Array<[string, unknown]> = [];
+        let inIds: string[] | null = null;
+        let pending: Record<string, unknown> | null = null;
+        const c: Record<string, unknown> = {};
+        c.select = () => c;
+        c.order = () => c;
+        c.limit = () => c;
+        c.eq = (col: string, v: unknown) => {
+          filters.push([col, v]);
+          return c;
+        };
+        c.in = (col: string, v: string[]) => {
+          if (table === "ai_disposition_reviews" && col === "id") {
+            inIds = v;
+            return c;
+          }
+          if (table === "lead_events") return Promise.resolve({ data: state.events, error: null });
+          return c;
+        };
+        c.update = (v: Record<string, unknown>) => {
+          pending = v;
+          return c;
+        };
+        const settle = () => {
+          if (table === "properties" && pending) {
+            const guard = filters.find(([col]) => col === "last_ai_escalation_reason");
+            const matched = !guard || guard[1] === state.reason;
+            updates.push({ values: pending, matched });
+            if (matched && "last_ai_escalation_reason" in pending) {
+              state.reason = pending.last_ai_escalation_reason as string | null;
+            }
+            return matched ? { id: "property-1" } : null;
+          }
+          return null;
+        };
+        c.maybeSingle = async () => {
+          if (table === "properties" && !pending) {
+            return { data: { last_ai_escalation_reason: state.reason }, error: null };
+          }
+          if (table === "properties") return { data: settle(), error: null };
+          if (table === "ai_disposition_reviews") {
+            return { data: state.latest ? { id: state.latest } : null, error: null };
+          }
+          return { data: null, error: null };
+        };
+        c.then = (resolve: (v: unknown) => void) => {
+          if (table === "ai_disposition_reviews") {
+            const ids = (inIds ?? []).filter((id) => state.reviews.includes(id));
+            return resolve({ data: ids.map((id) => ({ id })), error: null });
+          }
+          if (table === "properties" && pending) return resolve({ data: settle(), error: null });
+          return resolve({ data: null, error: null });
+        };
+        return c;
       },
     };
+    recordSuppressionRetriedOk.mockImplementation(async ({ reviewId }: { reviewId: string }) => {
+      state.events.push({ event_type: "suppression_retried_ok", source_id: reviewId, created_at: "2026-02-01" });
+    });
+    return { client, updates, state };
   }
+  const failedEv = (id: string, at = "2026-01-01"): Ev => ({
+    event_type: "suppression_incomplete",
+    source_id: id,
+    created_at: at,
+  });
 
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
 
-  it("re-runs suppression, clears the hold and audits on success", async () => {
-    const { client, updates, eqs } = retryClient({ review: { id: "review-9" }, cleared: { id: "property-1" } });
-    createClient.mockResolvedValue(client);
+  it("retries the review named in the reason, records it, and clears the hold on success", async () => {
+    const w = world({ reason: "suppression_incomplete:A", events: [failedEv("A")], reviews: ["A", "B"] });
+    createClient.mockResolvedValue(w.client);
     applySuppressionForConfirmedReview.mockResolvedValue({ ok: true });
-    await expect(retrySuppressionForProperty("property-1")).resolves.toEqual({ ok: true, data: { cleared: true } });
-    expect(applySuppressionForConfirmedReview).toHaveBeenCalledWith(client, "review-9", "user-1");
-    expect(updates[0]).toMatchObject({ needs_human_attention: false, last_ai_escalation_reason: null });
-    expect(eqs).toContainEqual(["last_ai_escalation_reason", "suppression_incomplete"]);
+    await expect(retrySuppressionForProperty("property-1")).resolves.toEqual({
+      ok: true,
+      data: { cleared: true, remaining: 0 },
+    });
+    expect(applySuppressionForConfirmedReview).toHaveBeenCalledTimes(1);
+    expect(applySuppressionForConfirmedReview).toHaveBeenCalledWith(w.client, "A", "user-1");
+    expect(recordSuppressionRetriedOk).toHaveBeenCalledWith({
+      propertyId: "property-1",
+      reviewId: "A",
+      actorId: "user-1",
+    });
+    expect(w.state.reason).toBeNull();
     expect(recordLeadEvent).toHaveBeenCalledWith(
       expect.objectContaining({ eventType: "ai_escalation_cleared", payload: expect.objectContaining({ via: "retry_suppression" }) }),
     );
   });
 
-  it("keeps the hold and returns the warning when suppression fails again", async () => {
-    const { client, updates } = retryClient({ review: { id: "review-9" }, cleared: null });
-    createClient.mockResolvedValue(client);
-    applySuppressionForConfirmedReview.mockResolvedValue({ ok: false, warning: "Confirmed, but suppression incomplete — retry." });
+  it("two-review interleaving: B succeeded earlier, A fails later -> retry targets A only, B untouched; A success clears", async () => {
+    // B failed then was retried OK (resolved); A failed afterwards and owns the hold.
+    const w = world({
+      reason: "suppression_incomplete:A",
+      events: [
+        failedEv("B", "2026-01-01"),
+        { event_type: "suppression_retried_ok", source_id: "B", created_at: "2026-01-02" },
+        failedEv("A", "2026-01-03"),
+      ],
+      reviews: ["A", "B"],
+      latest: "B", // the old behaviour would have picked the latest-confirmed review
+    });
+    createClient.mockResolvedValue(w.client);
+    applySuppressionForConfirmedReview.mockResolvedValue({ ok: true });
     const r = await retrySuppressionForProperty("property-1");
-    expect(r).toMatchObject({ ok: false, error: { message: "Confirmed, but suppression incomplete — retry." } });
-    expect(updates).toHaveLength(0);
+    expect(applySuppressionForConfirmedReview).toHaveBeenCalledTimes(1);
+    expect(applySuppressionForConfirmedReview.mock.calls[0][1]).toBe("A");
+    expect(r).toEqual({ ok: true, data: { cleared: true, remaining: 0 } });
+  });
+
+  it("does not clear the hold while another failed review is still outstanding (partial success)", async () => {
+    const w = world({
+      reason: "suppression_incomplete:A",
+      events: [failedEv("A"), failedEv("B", "2026-01-02")],
+      reviews: ["A", "B"],
+    });
+    createClient.mockResolvedValue(w.client);
+    applySuppressionForConfirmedReview.mockImplementation(async (_c: unknown, id: string) =>
+      id === "A" ? { ok: true } : { ok: false, warning: "Confirmed, but suppression incomplete — retry." },
+    );
+    const r = await retrySuppressionForProperty("property-1");
+    expect(r).toMatchObject({ ok: false, error: { code: "SUPPRESSION_INCOMPLETE" } });
+    expect(recordSuppressionRetriedOk).toHaveBeenCalledTimes(1);
+    expect(recordSuppressionRetriedOk).toHaveBeenCalledWith(expect.objectContaining({ reviewId: "A" }));
+    expect(w.state.reason).toBe("suppression_incomplete:B");
     expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
-  it("errors when there is no confirmed opt-out/DNC review", async () => {
-    const { client } = retryClient({ review: null, cleared: null });
-    createClient.mockResolvedValue(client);
+  it("a concurrent new failure is not cleared by an older successful retry", async () => {
+    const w = world({ reason: "suppression_incomplete:A", events: [failedEv("A")], reviews: ["A", "C"] });
+    createClient.mockResolvedValue(w.client);
+    applySuppressionForConfirmedReview.mockImplementation(async () => {
+      // while A's retry runs, review C fails and takes over the hold
+      w.state.events.push(failedEv("C", "2026-01-05"));
+      w.state.reason = "suppression_incomplete:C";
+      return { ok: true };
+    });
+    const r = await retrySuppressionForProperty("property-1");
+    expect(r).toEqual({ ok: true, data: { cleared: false, remaining: 1 } });
+    expect(w.state.reason).toBe("suppression_incomplete:C");
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("a failure landing after the final read cannot be cleared: the clear is guarded on the exact reason", async () => {
+    const w = world({ reason: "suppression_incomplete:A", events: [failedEv("A")], reviews: ["A"] });
+    createClient.mockResolvedValue(w.client);
+    applySuppressionForConfirmedReview.mockResolvedValue({ ok: true });
+    const origFrom = w.client.from;
+    let reads = 0;
+    w.client.from = (t: string) => {
+      const c = origFrom(t) as Record<string, (...a: unknown[]) => unknown>;
+      if (t === "properties") {
+        const mb = c.maybeSingle;
+        c.maybeSingle = async () => {
+          const out = (await mb()) as { data: { last_ai_escalation_reason?: string } | null };
+          if (out.data && "last_ai_escalation_reason" in out.data && ++reads === 2) {
+            // race: reason flips to C right after our final read
+            w.state.reason = "suppression_incomplete:C";
+          }
+          return out;
+        };
+      }
+      return c;
+    };
+    const r = await retrySuppressionForProperty("property-1");
+    expect(r).toEqual({ ok: true, data: { cleared: false, remaining: 0 } });
+    expect(w.state.reason).toBe("suppression_incomplete:C");
+  });
+
+  it("timeout flag preserved: retries the review from the lead event, records it, and leaves the timeout hold", async () => {
+    const w = world({ reason: "send_timeout:msg-1", events: [failedEv("A")], reviews: ["A"] });
+    createClient.mockResolvedValue(w.client);
+    applySuppressionForConfirmedReview.mockResolvedValue({ ok: true });
+    const r = await retrySuppressionForProperty("property-1");
+    expect(applySuppressionForConfirmedReview).toHaveBeenCalledWith(w.client, "A", "user-1");
+    expect(recordSuppressionRetriedOk).toHaveBeenCalledWith(expect.objectContaining({ reviewId: "A" }));
+    expect(r).toEqual({ ok: true, data: { cleared: false, remaining: 0 } });
+    expect(w.state.reason).toBe("send_timeout:msg-1");
+    expect(w.updates).toHaveLength(0);
+  });
+
+  it("keeps the hold and returns the warning when suppression fails again", async () => {
+    const w = world({ reason: "suppression_incomplete:A", events: [failedEv("A")], reviews: ["A"] });
+    createClient.mockResolvedValue(w.client);
+    applySuppressionForConfirmedReview.mockResolvedValue({ ok: false, warning: "Confirmed, but suppression incomplete — retry." });
+    const r = await retrySuppressionForProperty("property-1");
+    expect(r).toMatchObject({ ok: false, error: { message: "Confirmed, but suppression incomplete — retry." } });
+    expect(recordSuppressionRetriedOk).not.toHaveBeenCalled();
+    expect(w.state.reason).toBe("suppression_incomplete:A");
+    expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("legacy bare suppression_incomplete hold with no recorded id falls back to the latest confirmed review", async () => {
+    const w = world({ reason: "suppression_incomplete", events: [], reviews: ["Z"], latest: "Z" });
+    createClient.mockResolvedValue(w.client);
+    applySuppressionForConfirmedReview.mockResolvedValue({ ok: true });
+    await expect(retrySuppressionForProperty("property-1")).resolves.toEqual({
+      ok: true,
+      data: { cleared: true, remaining: 0 },
+    });
+    expect(applySuppressionForConfirmedReview.mock.calls[0][1]).toBe("Z");
+  });
+
+  it("ignores failed ids that are not confirmed opt-out/DNC reviews of this property", async () => {
+    const w = world({ reason: "suppression_incomplete:A", events: [failedEv("A")], reviews: [] });
+    createClient.mockResolvedValue(w.client);
     await expect(retrySuppressionForProperty("property-1")).resolves.toMatchObject({ ok: false });
     expect(applySuppressionForConfirmedReview).not.toHaveBeenCalled();
+  });
+
+  it("errors when nothing is outstanding", async () => {
+    const w = world({ reason: "low_confidence", events: [], reviews: ["A"] });
+    createClient.mockResolvedValue(w.client);
+    await expect(retrySuppressionForProperty("property-1")).resolves.toMatchObject({ ok: false });
+    expect(applySuppressionForConfirmedReview).not.toHaveBeenCalled();
+  });
+});
+
+describe("listOutstandingSuppressionFailures", () => {
+  it("returns the outstanding review ids for the banner", async () => {
+    const c: Record<string, unknown> = {};
+    c.select = () => c;
+    c.eq = () => c;
+    c.in = async () => ({
+      data: [{ event_type: "suppression_incomplete", source_id: "A", created_at: "2026-01-01" }],
+      error: null,
+    });
+    c.maybeSingle = async () => ({ data: { last_ai_escalation_reason: "send_timeout:x" }, error: null });
+    createClient.mockResolvedValue({
+      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } }, error: null }) },
+      from: () => c,
+    });
+    const { listOutstandingSuppressionFailures } = await import("./ai-actions");
+    await expect(listOutstandingSuppressionFailures("property-1")).resolves.toEqual({
+      ok: true,
+      data: { reviewIds: ["A"] },
+    });
   });
 });
