@@ -72,7 +72,7 @@ describe("HoldsRail", () => {
     render(<HoldsRail holds={[hold("a", 5)]} labels={new Map()} nowMs={NOW} />);
     const rail = screen.getByLabelText("Holds");
     expect(rail).toHaveClass("lg:overflow-y-auto", "lg:min-h-0");
-    expect(within(rail).getByRole("heading", { name: /Holds/ })).toHaveClass("sticky", "top-0");
+    expect(within(rail).getByRole("heading", { name: /Holds/ })).toHaveClass("lg:sticky", "lg:top-0");
   });
 
   it("shows the latest alert delivery status on the hold card (failures are visible, not silent)", () => {

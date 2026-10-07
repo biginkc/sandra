@@ -256,7 +256,7 @@ export function HoldsRail({
       data-testid="holds-scroll"
       className="flex flex-col gap-3 lg:min-h-0 lg:overflow-y-auto lg:pr-1"
     >
-      <h2 className="sticky top-0 z-10 bg-background pb-1 text-sm font-semibold">
+      <h2 className="lg:sticky lg:top-0 z-10 bg-background pb-1 text-sm font-semibold">
         Holds <span className="text-muted-foreground">{count}</span>
       </h2>
       {holdFailures.length > 0 && (
