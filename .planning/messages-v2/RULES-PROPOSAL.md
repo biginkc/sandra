@@ -176,7 +176,7 @@ Candidate H-5 (multi-property; LLM-drafted, keyword-proxy evidence Q16)
 ```
 Hold for a human, and never auto-reply, any inbound that refers to more than one property or asks which property we mean.
 ```
-Candidate H-6 (length; LLM-drafted, keyword-proxy evidence Q16)
+Candidate H-6 (length; LLM-drafted, length-check evidence Q16)
 ```
 Hold for a human, and never auto-reply, any inbound longer than 200 characters.
 ```
@@ -184,7 +184,7 @@ Candidate H-7 (legal; LLM-drafted, keyword-proxy evidence Q16)
 ```
 Hold for a human, and never auto-reply, any inbound that mentions an attorney, lawyer, court, code violation, TCPA, FCC, police or a threat to report us.
 ```
-Candidate H-8 (Jev flags; LLM-drafted, keyword-proxy evidence Q16). Jev `escalationReason` counts over 13 days: hot_lead 49, call_request 27, price_or_offer 23, third_party 27, multi_property 4, distress 2, needs_review 39, uncertain 38.
+Candidate H-8 (Jev flags; LLM-drafted, Jev escalationReason evidence Q06). Jev `escalationReason` counts over 13 days: hot_lead 49, call_request 27, price_or_offer 23, third_party 27, multi_property 4, distress 2, needs_review 39, uncertain 38.
 ```
 Hold for a human, and never auto-reply, any message where Jev's escalation reason is anything other than not_applicable.
 ```
