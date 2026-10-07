@@ -62,7 +62,8 @@ export function AiAttentionBanner({
       live = false;
     };
   }, [propertyId, initialVisible, reason]);
-  const outstandingCount = outstanding ?? (reasonIsSuppression ? 1 : 0);
+  // `outstanding` is the loaded count (null until loaded or if the load failed).
+  const outstandingCount = outstanding ?? 0;
   const suppressionIncomplete = reasonIsSuppression || outstandingCount > 0;
 
   if (!visible) return null;
@@ -142,7 +143,9 @@ export function AiAttentionBanner({
               Suppression is incomplete: this number may still be texted.
               {outstandingCount > 1
                 ? ` ${outstandingCount} confirmed opt-outs still need suppression.`
-                : " 1 confirmed opt-out still needs suppression."}{" "}
+                : outstandingCount === 1
+                  ? " 1 confirmed opt-out still needs suppression."
+                  : " Suppression status loading or unavailable."}{" "}
               Retry suppression before dismissing.
             </div>
           ) : null}

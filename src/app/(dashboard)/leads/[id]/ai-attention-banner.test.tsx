@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -157,5 +157,38 @@ describe("<AiAttentionBanner />", () => {
     await user.click(await screen.findByRole("button", { name: "Retry suppression (2)" }));
     expect(await screen.findByRole("button", { name: "Retry suppression" })).toBeInTheDocument();
     expect(screen.getByTestId("ai-attention-banner")).toBeInTheDocument();
+  });
+
+  it("does not claim a count when the loaded count is 0 or the load failed", async () => {
+    listOutstandingSuppressionFailures.mockResolvedValue({ ok: true, data: { reviewIds: [] } });
+    render(
+      <AiAttentionBanner
+        propertyId="prop-1"
+        initialVisible
+        reason="suppression_incomplete:review-a"
+        nowMs={NOW_MS}
+      />,
+    );
+    const warning = await screen.findByTestId("ai-attention-suppression-warning");
+    await waitFor(() => expect(listOutstandingSuppressionFailures).toHaveBeenCalled());
+    expect(warning).toHaveTextContent("Suppression status loading or unavailable");
+    expect(warning).not.toHaveTextContent("1 confirmed opt-out");
+  });
+
+  it("says 1 confirmed opt-out only when exactly one is loaded", async () => {
+    listOutstandingSuppressionFailures.mockResolvedValue({ ok: true, data: { reviewIds: ["review-a"] } });
+    render(
+      <AiAttentionBanner
+        propertyId="prop-1"
+        initialVisible
+        reason="suppression_incomplete:review-a"
+        nowMs={NOW_MS}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("ai-attention-suppression-warning")).toHaveTextContent(
+        "1 confirmed opt-out still needs suppression",
+      ),
+    );
   });
 });

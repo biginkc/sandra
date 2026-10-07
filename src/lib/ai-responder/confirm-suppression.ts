@@ -211,34 +211,49 @@ async function raiseSuppressionIncompleteHold(
       .maybeSingle();
     if (readError) throw new Error(readError.message);
     const existing: string | null = current?.last_ai_escalation_reason ?? null;
+    const orgId: string | undefined = current?.org_id;
+    // Idempotent via the unique index: a duplicate row counts as recorded.
+    const writeLedger = async (id: string): Promise<boolean> => {
+      try {
+        if (!orgId) throw new Error("property not found");
+        const { error: ledgerError } = await admin.from("lead_events").insert({
+          org_id: orgId,
+          property_id: propertyId,
+          actor_type: "system",
+          event_type: SUPPRESSION_INCOMPLETE_EVENT,
+          payload: { reviewId: id },
+          source_type: SUPPRESSION_FAILED_SOURCE,
+          source_id: id,
+        });
+        if (ledgerError && (ledgerError as { code?: string }).code !== "23505") {
+          throw new Error(ledgerError.message);
+        }
+        return true;
+      } catch (ledgerErr) {
+        reportError(ledgerErr, {
+          tags: { surface: "confirm_ai_disposition_suppression_ledger" },
+          extra: { reviewId: id, propertyId },
+        });
+        return false;
+      }
+    };
     // Record the failed review id in the ledger BEFORE touching the hold, so
     // it survives a preserved timeout reason or a concurrent overwrite.
-    let ledgerOk = false;
-    try {
-      if (!current?.org_id) throw new Error("property not found");
-      const { error: ledgerError } = await admin.from("lead_events").insert({
-        org_id: current.org_id,
-        property_id: propertyId,
-        actor_type: "system",
-        event_type: SUPPRESSION_INCOMPLETE_EVENT,
-        payload: { reviewId },
-        source_type: SUPPRESSION_FAILED_SOURCE,
-        source_id: reviewId,
-      });
-      if (ledgerError && (ledgerError as { code?: string }).code !== "23505") {
-        throw new Error(ledgerError.message);
-      }
-      ledgerOk = true;
-    } catch (ledgerErr) {
-      reportError(ledgerErr, {
-        tags: { surface: "confirm_ai_disposition_suppression_ledger" },
-        extra: { reviewId, propertyId },
-      });
+    const ledgerOk = await writeLedger(reviewId);
+    // The existing reason may be the ONLY record of an earlier failure A whose
+    // ledger write failed. Backfill A before overwriting it; if that fails,
+    // keep A's reason (B is outstanding via its own ledger row).
+    const existingId = suppressionReviewIdFromReason(existing);
+    let keepEarlierSuppression = false;
+    if (existingId && existingId !== reviewId) {
+      const backfilled = await writeLedger(existingId);
+      keepEarlierSuppression = !backfilled && ledgerOk;
     }
     // A send-timeout flag is a different, still-open problem: keep its
     // reason/timestamp and only (re)raise the hold - but only if the failed
     // id is durably in the ledger; otherwise the suppression reason wins.
-    const keepReason = isTimeoutEscalationReason(existing) && ledgerOk;
+    const keepReason =
+      (isTimeoutEscalationReason(existing) && ledgerOk) || keepEarlierSuppression;
     const { error } = await admin
       .from("properties")
       .update(

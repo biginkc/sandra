@@ -19,6 +19,7 @@ import {
   applySuppressionForConfirmedReview,
   applyConfirmedSuppression,
   listOutstandingSuppressionReviews,
+  recordSuppressionRetriedOk,
   SUPPRESSION_INCOMPLETE_WARNING,
 } from "./confirm-suppression";
 
@@ -349,5 +350,96 @@ describe("listOutstandingSuppressionReviews", () => {
       },
     };
     await expect(listOutstandingSuppressionReviews(bad, "property-1")).rejects.toThrow("boom");
+  });
+});
+
+describe("overwriting an existing suppression_incomplete reason (r24)", () => {
+  type Ev = { event_type: string; source_id: string; created_at: string };
+  function statefulAdmin(initialReason: string | null) {
+    const state = { reason: initialReason, events: [] as Ev[], seq: 0 };
+    const failLedgerFor = new Set<string>();
+    const failUpdate = { on: false };
+    const admin = {
+      from: (table: string) => {
+        let pendingUpdate: Record<string, unknown> | null = null;
+        const c: Record<string, unknown> = {};
+        c.select = () => c;
+        c.eq = () => (pendingUpdate ? Promise.resolve(applyUpdate()) : c);
+        const applyUpdate = () => {
+          if (failUpdate.on) return { error: { message: "update failed" } };
+          if (pendingUpdate && "last_ai_escalation_reason" in pendingUpdate) {
+            state.reason = pendingUpdate.last_ai_escalation_reason as string | null;
+          }
+          return { error: null };
+        };
+        c.in = async () => ({ data: state.events, error: null });
+        c.maybeSingle = async () => ({
+          data: table === "properties"
+            ? { org_id: "org-1", last_ai_escalation_reason: state.reason }
+            : null,
+          error: null,
+        });
+        c.insert = async (v: { event_type: string; source_id: string }) => {
+          if (failLedgerFor.has(`${v.event_type}:${v.source_id}`)) {
+            return { error: { message: "insert failed" } };
+          }
+          if (state.events.some((e) => e.event_type === v.event_type && e.source_id === v.source_id)) {
+            return { error: { code: "23505", message: "dup" } };
+          }
+          state.events.push({ event_type: v.event_type, source_id: v.source_id, created_at: String(++state.seq).padStart(4, "0") });
+          return { error: null };
+        };
+        c.update = (v: Record<string, unknown>) => {
+          pendingUpdate = v;
+          return c;
+        };
+        return c;
+      },
+    };
+    createAdminClient.mockReturnValue(admin as never);
+    return { state, failLedgerFor, failUpdate, admin };
+  }
+
+  it("A fails + ledger fails -> B fails + ledger ok -> retry B: A stays outstanding, hold not cleared", async () => {
+    const { state, failLedgerFor } = statefulAdmin(null);
+    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    failLedgerFor.add("suppression_incomplete:A");
+    await applyConfirmedSuppression({ ...base, reviewId: "A", disposition: "dnc" });
+    expect(state.reason).toBe("suppression_incomplete:A");
+    expect(state.events).toHaveLength(0);
+
+    await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
+    // A's backfill failed: the existing reason must NOT be overwritten.
+    expect(state.reason).toBe("suppression_incomplete:A");
+    expect(state.events.map((e) => e.source_id)).toEqual(["B"]);
+
+    await recordSuppressionRetriedOk({ propertyId: "property-1", reviewId: "B", actorId: "user-1" });
+    const out = await listOutstandingSuppressionReviews(createAdminClient() as never, "property-1");
+    expect(out.reviewIds).toEqual(["A"]);
+  });
+
+  it("backfills a ledger row for A before overwriting its reason with B", async () => {
+    const { state } = statefulAdmin("suppression_incomplete:A");
+    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
+    expect(state.reason).toBe("suppression_incomplete:B");
+    expect(state.events.map((e) => e.source_id).sort()).toEqual(["A", "B"]);
+  });
+
+  it("the A backfill is idempotent (duplicate row counts as recorded)", async () => {
+    const { state } = statefulAdmin("suppression_incomplete:A");
+    state.events.push({ event_type: "suppression_incomplete", source_id: "A", created_at: "0000" });
+    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
+    expect(state.reason).toBe("suppression_incomplete:B");
+  });
+
+  it("reports and leaves the hold as is when the hold update fails", async () => {
+    const { state, failUpdate } = statefulAdmin("low_confidence");
+    failUpdate.on = true;
+    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    const r = await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
+    expect(r).toEqual({ ok: false, warning: SUPPRESSION_INCOMPLETE_WARNING });
+    expect(state.reason).toBe("low_confidence");
   });
 });

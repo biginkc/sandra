@@ -174,6 +174,7 @@ describe("retrySuppressionForProperty", () => {
     events: Ev[];
     reviews: string[]; // confirmed opted_out/dnc review ids
     latest?: string | null;
+    repointError?: boolean;
   };
 
   /** Stateful fake: retried_ok writes land in `events`, reason updates honour the eq guard. */
@@ -232,7 +233,10 @@ describe("retrySuppressionForProperty", () => {
             const ids = (inIds ?? []).filter((id) => state.reviews.includes(id));
             return resolve({ data: ids.map((id) => ({ id })), error: null });
           }
-          if (table === "properties" && pending) return resolve({ data: settle(), error: null });
+          if (table === "properties" && pending) {
+            if (state.repointError) return resolve({ data: null, error: { message: "repoint failed" } });
+            return resolve({ data: settle(), error: null });
+          }
           return resolve({ data: null, error: null });
         };
         return c;
@@ -310,6 +314,27 @@ describe("retrySuppressionForProperty", () => {
     expect(recordSuppressionRetriedOk).toHaveBeenCalledWith(expect.objectContaining({ reviewId: "A" }));
     expect(w.state.reason).toBe("suppression_incomplete:B");
     expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("a failed partial-success repoint is reported and leaves the hold as is", async () => {
+    const w = world({
+      reason: "suppression_incomplete:A",
+      events: [failedEv("A"), failedEv("B", "2026-01-02")],
+      reviews: ["A", "B"],
+      repointError: true,
+    });
+    createClient.mockResolvedValue(w.client);
+    applySuppressionForConfirmedReview.mockImplementation(async (_c: unknown, id: string) =>
+      id === "A" ? { ok: true } : { ok: false, warning: "Confirmed, but suppression incomplete — retry." },
+    );
+    const r = await retrySuppressionForProperty("property-1");
+    expect(r).toMatchObject({ ok: false, error: { code: "SUPPRESSION_INCOMPLETE" } });
+    expect(w.state.reason).toBe("suppression_incomplete:A");
+    const { reportError } = await import("@/lib/errors/report");
+    expect(reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "retry_suppression_repoint" } }),
+    );
   });
 
   it("a concurrent new failure is not cleared by an older successful retry", async () => {
@@ -420,6 +445,23 @@ describe("listOutstandingSuppressionFailures", () => {
     await expect(listOutstandingSuppressionFailures("property-1")).resolves.toEqual({
       ok: true,
       data: { reviewIds: ["A"] },
+    });
+  });
+
+  it("uses the LIST_SUPPRESSION_FAILED code when the ledger cannot be read", async () => {
+    const c: Record<string, unknown> = {};
+    c.select = () => c;
+    c.eq = () => c;
+    c.in = async () => ({ data: null, error: { message: "boom" } });
+    c.maybeSingle = async () => ({ data: { last_ai_escalation_reason: null }, error: null });
+    createClient.mockResolvedValue({
+      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } }, error: null }) },
+      from: () => c,
+    });
+    const { listOutstandingSuppressionFailures } = await import("./ai-actions");
+    await expect(listOutstandingSuppressionFailures("property-1")).resolves.toMatchObject({
+      ok: false,
+      error: { code: "LIST_SUPPRESSION_FAILED" },
     });
   });
 });

@@ -102,7 +102,13 @@ export async function listOutstandingSuppressionFailures(
       tags: { surface: "list_outstanding_suppression" },
       extra: { propertyId },
     });
-    return errFromUnknown(e, "RETRY_SUPPRESSION_FAILED");
+    return {
+      ok: false,
+      error: {
+        code: "LIST_SUPPRESSION_FAILED",
+        message: e instanceof Error ? e.message : "Could not load suppression status",
+      },
+    };
   }
 }
 
@@ -223,7 +229,7 @@ export async function retrySuppressionForProperty(
       } else if (!after.reviewIds.some((id) => after.reason === suppressionIncompleteReason(id))) {
         // The reason points at a review that is now resolved; keep the hold
         // but point it at a still-outstanding id.
-        await supabase
+        const { error: repointError } = await supabase
           .from("properties")
           .update({
             last_ai_escalation_reason: suppressionIncompleteReason(after.reviewIds[0]),
@@ -231,6 +237,13 @@ export async function retrySuppressionForProperty(
           })
           .eq("id", propertyId)
           .eq("last_ai_escalation_reason", after.reason as string);
+        if (repointError) {
+          // Hold stays exactly as it was; the ledger still lists what remains.
+          reportError(new Error(repointError.message), {
+            tags: { surface: "retry_suppression_repoint" },
+            extra: { propertyId },
+          });
+        }
       }
     }
     revalidatePath(`/leads/${propertyId}`);
