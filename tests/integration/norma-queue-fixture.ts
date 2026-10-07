@@ -58,6 +58,11 @@ function findOptionalLegacyClaimMigration(): string | null {
   return files[0] ?? null;
 }
 
+/** True when the queue migration is already in the database (a run-owned full-chain stack). */
+async function queueAlreadyApplied(db: Client): Promise<boolean> {
+  return (await db.query("select to_regclass('public.norma_queue_entries') is not null and to_regclass('public.norma_queue_control') is not null as a")).rows[0].a === true;
+}
+
 export type QueueChainOptions = {
   /**
    * Runs after the existing Norma chain is applied and BEFORE the queue migration(s) (and before the optional
@@ -96,7 +101,14 @@ export async function openQueueFixture(connectionString: string, opts: QueueChai
   await db.connect();
   try {
     await db.query("begin");
-    await applyQueueChain(db, opts);
+    // Applied mode: a run-owned DISPOSABLE database built from the full current chain already contains the queue migrations, and the
+    // My Leads fixture guard cannot roll a fully-migrated chain back. The schema is then exactly production's: skip the replay and
+    // run each test in its rollback savepoint. A scenario that must seed rows BEFORE the migration cannot run there and says so.
+    if (await queueAlreadyApplied(db)) {
+      if (opts.beforeQueueMigration) throw new Error("PRE_QUEUE_STATE_REQUIRED: this scenario seeds rows before the queue migration, but the database already has it (full-chain mode)");
+    } else {
+      await applyQueueChain(db, opts);
+    }
   } catch (error) {
     await db.query("rollback").catch(() => {});
     await db.end();
@@ -190,7 +202,14 @@ export async function openConcurrentFixture(connectionString: string): Promise<C
     if (load.error || load.status !== 0 || cloneErrors.length) throw new Error(`schema clone into ${name} failed (psql exit ${load.status ?? "n/a"}): ${load.error?.message ?? cloneErrors.slice(0, 5).join(" | ") ?? String(load.stderr).slice(0, 2000)}`);
     owner = new Client({ connectionString: url });
     await owner.connect();
-    await applyQueueChain(owner); // autocommit: each migration is committed
+    if (await queueAlreadyApplied(owner)) {
+      // Full-chain source: the clone already has every migration; schema-only dumps drop seed rows, so copy the queue/Norma seed tables' data.
+      const seed = execFileSync("pg_dump", ["--data-only", "--no-owner", "-t", "public.norma_state_timezones", "-t", "public.norma_queue_control", "-t", "public.norma_retry_admission", base], { maxBuffer: 64 * 1024 * 1024 });
+      const loaded = spawnSync("psql", ["-q", "-X", "-v", "ON_ERROR_STOP=1", "-d", url], { input: seed, encoding: "utf8" });
+      if (loaded.error || loaded.status !== 0) throw new Error(`seed copy into ${name} failed: ${loaded.error?.message ?? String(loaded.stderr).slice(0, 500)}`);
+    } else {
+      await applyQueueChain(owner); // autocommit: each migration is committed
+    }
     await owner.query(TEST_CLOCK_SQL);
   } catch (error) {
     await teardown();
