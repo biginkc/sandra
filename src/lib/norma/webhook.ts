@@ -6,6 +6,8 @@ import { reportError } from "@/lib/errors/report";
 import type { Database } from "@/lib/supabase/types";
 
 import { withConvertedCallbackTime } from "./callback-wiring";
+import type { DispatchResult } from "./dispatch";
+import { dispatchScheduledRetry } from "./retry";
 import type { CallbackTimeProvider } from "./callback-time";
 import { mapBlandCallToOutcome } from "./outcome";
 import { completeNormaCall } from "./rpc";
@@ -75,6 +77,13 @@ export type WebhookResponse = { status: number; body: Record<string, unknown> };
 
 const respond = (status: number, body: Record<string, unknown>): WebhookResponse => ({ status, body });
 
+/** Only attempts 1 and 2 are valid. Invalid values become 0 (a fenced no-op); missing legacy metadata remains 1. */
+function parseAttempt(value: unknown): number {
+  if (value === undefined || value === null) return 1;
+  const n = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value.trim()) ? Number(value) : 0;
+  return n === 1 || n === 2 ? n : 0;
+}
+
 function str(value: unknown): string | null {
   return typeof value === "string" && value.trim() && value.trim().length <= MAX_IDENTITY ? value.trim() : null;
 }
@@ -90,7 +99,13 @@ function str(value: unknown): string | null {
  */
 export async function handleBlandCallWebhook(
   request: Request,
-  deps: { client: SupabaseClient<Database>; secret: string | undefined; callbackTimeProvider?: CallbackTimeProvider | null },
+  deps: {
+    client: SupabaseClient<Database>;
+    secret: string | undefined;
+    callbackTimeProvider?: CallbackTimeProvider | null;
+    /** Runs the call-twice retry (the ordinary dispatchNormaCall). Without it the sweep dispatches the retry. */
+    dispatch?: (requestId: string) => Promise<DispatchResult>;
+  },
 ): Promise<WebhookResponse> {
   if (!deps.secret) return respond(500, { error: "not_configured" });
 
@@ -153,9 +168,13 @@ export async function handleBlandCallWebhook(
       callId,
       outcome: mapping.outcome,
       payload: mapping.payload,
+      // Calls sent before call-twice carry no attempt: they are attempt 1.
+      attempt: parseAttempt(metadata.attempt),
     });
     if (result.result === "applied" || result.result === "replayed") {
-      return respond(200, { status: result.result });
+      // Attempt 1 was confirmed not answered: place the one retry now.
+      const retry = await dispatchScheduledRetry(result, row.id, deps.dispatch);
+      return respond(200, { status: result.result, ...(retry ? { retry: retry.status } : {}) });
     }
     reportError(new Error(`norma webhook completion ${result.result}`), {
       tags: { surface: "norma_webhook" },

@@ -4,6 +4,7 @@
  */
 import type { CoachCallContext, ScriptBundle } from "@biginkc/coach";
 
+import type { ProviderData } from "@/lib/comps/provider-data";
 import type { FactField } from "@/lib/call-facts/types";
 import type { CompSale, LeadCompRow, VerifyReason } from "@/lib/comps/types";
 import type { BuyerEntity, TitleCompany } from "@/lib/contract-defaults/resolve";
@@ -33,7 +34,7 @@ export type CallScreenScript = {
 };
 
 /** `lead_comps` member columns (never `raw`). */
-export type LeadCompPublic = Omit<LeadCompRow, "raw"> & { comps: CompSale[]; verify_reasons: VerifyReason[] };
+export type LeadCompPublic = Omit<LeadCompRow, "raw"> & { comps: CompSale[]; verify_reasons: VerifyReason[]; providerData?: ProviderData | null };
 
 export type CallScreenComps = {
   latest: LeadCompPublic | null;

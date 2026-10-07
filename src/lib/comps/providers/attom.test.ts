@@ -62,11 +62,21 @@ describe("createAttomProvider", () => {
     expect(calls[0]).toContain("address1=100+Sample+Ave");
     expect(calls[0]).toContain("address2=Sample+City%2C+MO+64000");
     expect(calls[1]).toContain(`${ATTOM_COMPS_PATH}/100000001`);
+    expect(calls[1]).toContain("bathroomRange=1");
+    expect(calls[1]).not.toContain("bathroomsRange");
     expect(r.billedCalls).toBe(2);
     expect(r.asIs.value).toBe(185000);
     expect(r.comps).toEqual([]);
     expect(r.raw.compsStatus).toBe("not_entitled");
     expect(r.providerPropertyId).toBe("100000001");
+  });
+  it("preserves HTTP 206 source status and body for the UI", async () => {
+    const body = { RESPONSE_GROUP: { RESPONSE: { RESPONSE_DATA: { PROPERTY_INFORMATION_RESPONSE_ext: { SUBJECT_PROPERTY_ext: { PROPERTY: [{ PRODUCT_INFO_ext: { STATUS: { "@_Condition": "MinimumCompsNotMet" } } }] } } } } } };
+    const r = await provider({ [ATTOM_AVM_PATH]: { status: 200, body: fixture }, [ATTOM_COMPS_PATH]: { status: 206, body } }).fetch(subject, new AbortController().signal);
+    expect(r.raw.comparables).toEqual(body);
+    expect(r.raw.compsSearch).toEqual(expect.objectContaining({ miles: "1", saleDateRange: "12" }));
+    expect(r.comps).toEqual([]);
+    expect(r.billedCalls).toBe(2);
   });
   it("uses attomid when the lead carries one", async () => {
     const calls: string[] = [];
