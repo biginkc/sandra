@@ -88,6 +88,9 @@ function formatLongLabel(gate: string, detail: string): string | null {
     case "generate_error":
       return "model call failed";
     case "dead_letter_failed":
+      if (detail.startsWith("send_timeout")) {
+        return "Reply timed out at the provider AND its text could not be saved - check the pipeline run";
+      }
       return `reply could not be sent AND its text could not be saved (${detail.replace(/[:_]/g, " ")}) - check the pipeline run`;
     case "send_timeout":
       return "Reply timed out at the provider — held for review";

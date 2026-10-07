@@ -2910,7 +2910,9 @@ export async function flagAndDeadLetter(
       guard: args.guard,
     });
     if (stored) return { deadLettered: true, flagReason: firstReason, flagged };
-    const failedReason = `dead_letter_failed:${args.reason}`;
+    // Keep the originating identity (`dead_letter_failed:send_timeout:<id>`):
+    // a late reconciliation and the orphan repair both bind to the inbound id.
+    const failedReason = `dead_letter_failed:${firstReason}`;
     args.guard?.();
     // The flag is already set (needs_human_attention), so rewrite only OUR
     // reason; a different flag reason is never overwritten.
@@ -3013,6 +3015,22 @@ async function failClosed(
 const SEND_TIMEOUT_FLAG_PREFIX = "send_timeout:";
 function sendTimeoutFlagReason(inboundMessageId: string | null): string {
   return inboundMessageId ? `${SEND_TIMEOUT_FLAG_PREFIX}${inboundMessageId}` : "send_timeout";
+}
+const DEAD_LETTER_FAILED_TIMEOUT_PREFIX = `dead_letter_failed:${SEND_TIMEOUT_FLAG_PREFIX}`;
+/** Both flag spellings a timeout for this inbound can carry (identity-bound). */
+function sendTimeoutFlagReasons(inboundMessageId: string | null): string[] {
+  const primary = sendTimeoutFlagReason(inboundMessageId);
+  return [primary, `dead_letter_failed:${primary}`];
+}
+/** Inbound id carried by a `send_timeout:<id>` / `dead_letter_failed:send_timeout:<id>` flag. */
+function inboundIdFromTimeoutFlag(reason: string | null | undefined): string | null {
+  if (!reason) return null;
+  const rest = reason.startsWith(DEAD_LETTER_FAILED_TIMEOUT_PREFIX)
+    ? reason.slice(DEAD_LETTER_FAILED_TIMEOUT_PREFIX.length)
+    : reason.startsWith(SEND_TIMEOUT_FLAG_PREFIX)
+      ? reason.slice(SEND_TIMEOUT_FLAG_PREFIX.length)
+      : "";
+  return rest.length > 0 ? rest : null;
 }
 
 /**
@@ -3511,8 +3529,9 @@ function reconcileLateSend(
  * (acceptance, not delivery: the provider took the text after our timeout).
  * Appends a `sent_late` marker dead-letter row (the table is insert-only; the
  * reason name is historical, read it as "accepted by provider late") and moves
- * the flag reason from `send_timeout:<inbound_id>` to `send_timeout_then_sent`,
- * but ONLY while the flag still carries THIS inbound's identity (a newer flag
+ * the flag reason from `send_timeout:<inbound_id>` (or the insert-failure
+ * fallback `dead_letter_failed:send_timeout:<inbound_id>`) to
+ * `send_timeout_then_sent`, but ONLY while the flag still carries THIS inbound's identity (a newer flag
  * reason, including another inbound's timeout, is never overwritten).
  *
  * The flag update runs EVERY time, even when the marker already exists: the
@@ -3572,7 +3591,7 @@ export async function reconcileLateSendForInbound(
         updated_at: new Date().toISOString(),
       })
       .eq("id", args.propertyId)
-      .eq("last_ai_escalation_reason", sendTimeoutFlagReason(args.inboundMessageId))
+      .in("last_ai_escalation_reason", sendTimeoutFlagReasons(args.inboundMessageId))
       .select("id")
       .maybeSingle();
     if (error) {
@@ -3602,9 +3621,13 @@ export async function reconcileLateSendForInbound(
       }
       const currentReason = (current as { last_ai_escalation_reason?: string | null } | null)
         ?.last_ai_escalation_reason ?? null;
-      if (currentReason === sendTimeoutFlagReason(args.inboundMessageId)) return "error";
+      if (currentReason !== null && sendTimeoutFlagReasons(args.inboundMessageId).includes(currentReason)) {
+        return "error";
+      }
       if (currentReason !== "send_timeout_then_sent") resolutionReason = "flag_replaced";
     }
+    // Works with NO dead-letter row (insert failed / process died): the marker
+    // above is written regardless and the stamp below simply matches nothing.
     // Durable resolution, stamped LAST: the original send_timeout row(s) stay
     // unresolved until the flag conversion above has succeeded, so the sweeper
     // (which reads only unresolved rows) re-drives a failed flag update.
@@ -3642,12 +3665,13 @@ export async function reconcileLateSendForInbound(
  * text did reach the provider but whose in-process reconciliation never ran
  * (the invocation froze or died). Call from the stale-run cron.
  *
- * The ONLY candidate source is the unresolved `send_timeout` dead-letter rows
+ * The main candidate source is the unresolved `send_timeout` dead-letter rows
  * (`resolved_at is null`, served by a partial index, oldest first, keyset
- * paginated, never offset). There is deliberately no scan of `properties`: a
- * flag stuck on `send_timeout:<inbound_id>` is repaired through its timeout row
- * because `reconcileLateSendForInbound` stamps `resolved_at` only AFTER the
- * flag conversion succeeds, so a stuck flag always has an unresolved row.
+ * paginated, never offset): `reconcileLateSendForInbound` stamps `resolved_at`
+ * only AFTER the flag conversion succeeds, so a stuck flag normally has an
+ * unresolved row. The one gap (process death between the flag write and the row
+ * insert) is closed by `repairOrphanedTimeouts`, a small bounded properties scan
+ * that creates the missing row first.
  *
  * Rows that can never be reconciled are stamped resolved (with
  * `resolution_reason`) on first sight so they are not re-read every run and
@@ -3674,6 +3698,99 @@ export async function reconcileLateSendForInbound(
 export type LateSendSweepCursor = {
   a: { createdAt: string; id: string } | null;
 };
+
+const ORPHAN_PAGE_SIZE = 200;
+const ORPHAN_MAX_PAGES = 5;
+const ORPHAN_MIN_AGE_MS = 5 * 60 * 1000;
+export const ORPHAN_PLACEHOLDER_BODY = "[reply text unavailable — orphaned timeout]";
+
+/**
+ * Third, bounded source: a property flagged `send_timeout:<id>` /
+ * `dead_letter_failed:send_timeout:<id>` with NO dead-letter row for that inbound
+ * (the process died between the flag write and the row insert, or the insert
+ * failed and the after() callback also died). Inserts a synthetic `send_timeout`
+ * row (body = placeholder: the text is lost in this double failure) so the normal
+ * pass handles it from then on. Properties that already have a row are untouched.
+ * Keyset by property id, 200 per page, at most 5 pages scanned and 200 rows
+ * inserted per run, 7-day window, flags younger than 5 minutes skipped (the live
+ * timeout path may still be writing its own row).
+ */
+async function repairOrphanedTimeouts(
+  supabase: SupabaseClient<Database>,
+  windowStartMs: number,
+): Promise<void> {
+  const windowIso = new Date(windowStartMs).toISOString();
+  let after: string | null = null;
+  let inserted = 0;
+  for (let page = 0; page < ORPHAN_MAX_PAGES && inserted < ORPHAN_PAGE_SIZE; page += 1) {
+    let query = supabase
+      .from("properties")
+      .select("id, org_id, last_ai_escalation_reason, last_ai_escalation_at, updated_at")
+      .eq("needs_human_attention", true)
+      .or(
+        "last_ai_escalation_reason.like.send_timeout:%,last_ai_escalation_reason.like.dead_letter_failed:send_timeout:%",
+      )
+      .or(
+        `last_ai_escalation_at.gte.${windowIso},and(last_ai_escalation_at.is.null,updated_at.gte.${windowIso})`,
+      );
+    if (after) query = query.gt("id", after);
+    const { data, error } = await query.order("id", { ascending: true }).limit(ORPHAN_PAGE_SIZE);
+    if (error) {
+      reportError(new Error(error.message), { tags: { surface: "ai_responder_orphan_timeout_scan" } });
+      return;
+    }
+    const props = (data ?? []) as Array<{
+      id: string;
+      org_id: string | null;
+      last_ai_escalation_reason: string | null;
+      last_ai_escalation_at: string | null;
+      updated_at: string | null;
+    }>;
+    for (const prop of props) {
+      if (inserted >= ORPHAN_PAGE_SIZE) break;
+      const inboundId = inboundIdFromTimeoutFlag(prop.last_ai_escalation_reason);
+      if (!inboundId || !prop.org_id) continue;
+      const stampedAt = prop.last_ai_escalation_at ?? prop.updated_at;
+      const stampedMs = stampedAt ? new Date(stampedAt).getTime() : Number.NaN;
+      if (Number.isFinite(stampedMs) && Date.now() - stampedMs < ORPHAN_MIN_AGE_MS) continue;
+      try {
+        const { data: existing, error: existingError } = await supabase
+          .from("ai_reply_dead_letters")
+          .select("id")
+          .eq("inbound_message_id", inboundId)
+          .eq("reason", "send_timeout")
+          .limit(1);
+        if (existingError) throw new Error(existingError.message);
+        if ((existing ?? []).length > 0) continue;
+        const { data: inbound, error: inboundError } = await supabase
+          .from("messages")
+          .select("conversation_id")
+          .eq("id", inboundId)
+          .maybeSingle();
+        if (inboundError) throw new Error(inboundError.message);
+        const { error: insertError } = await supabase.from("ai_reply_dead_letters").insert({
+          org_id: prop.org_id,
+          conversation_id: (inbound as { conversation_id?: string | null } | null)?.conversation_id ?? null,
+          property_id: prop.id,
+          inbound_message_id: inboundId,
+          body: ORPHAN_PLACEHOLDER_BODY,
+          reason: "send_timeout",
+          ...(stampedAt ? { created_at: stampedAt } : {}),
+        });
+        if (insertError) throw new Error(insertError.message);
+        inserted += 1;
+      } catch (e) {
+        reportError(e, {
+          tags: { surface: "ai_responder_orphan_timeout_repair" },
+          extra: { propertyId: prop.id },
+        });
+      }
+    }
+    const last = props[props.length - 1];
+    if (props.length < ORPHAN_PAGE_SIZE || !last) return;
+    after = last.id;
+  }
+}
 
 export async function sweepLateSends(
   supabase: SupabaseClient<Database>,
@@ -3703,6 +3820,9 @@ export async function sweepLateSends(
     }
     return true;
   };
+
+  // Orphan repair runs FIRST so a repaired row is handled by pass A this run.
+  await repairOrphanedTimeouts(supabase, windowStartMs);
 
   for (let page = 0; page < maxPages; page += 1) {
     let query = supabase

@@ -157,6 +157,8 @@ type MockState = {
   /** pass-B per-inbound send_timeout lookup returns an error. */
   deadLetterLookupError?: boolean;
   deadLetterInsertAttempts?: number;
+  /** Extra flagged properties visible ONLY to the orphan-repair list scan. */
+  extraProperties?: Array<Record<string, unknown>>;
   /** fn_renew_ai_send returns an error. */
   renewError?: boolean;
   /** ensure_sms_conversation_id returns an error. */
@@ -218,6 +220,7 @@ type MockState = {
     homeowner_contact_id: string;
     needs_human_attention: boolean;
     last_ai_escalation_reason?: string | null;
+    last_ai_escalation_at?: string | null;
     org_id: string;
     outreach_dispo: string | null;
     state: string;
@@ -517,12 +520,20 @@ function createMockSupabase(state: MockState) {
     let likeFilter: { field: string; prefix: string } | null = null;
     let allowedDispos: string[] | null = null;
     let allowsNullDispo = false;
+    const inFilters = new Map<string, unknown[]>();
+    let orphanMode = false;
+    let orphanWindowIso: string | null = null;
+    let gtId: string | null = null;
+    let listLimit: number | null = null;
 
     const matchesCurrentProperty = () => {
       for (const [field, value] of eqFilters) {
         if (state.property[field as keyof MockState["property"]] !== value) {
           return false;
         }
+      }
+      for (const [field, values] of inFilters) {
+        if (!values.includes(state.property[field as keyof MockState["property"]])) return false;
       }
       if (allowedDispos) {
         const current = state.property.outreach_dispo;
@@ -533,6 +544,22 @@ function createMockSupabase(state: MockState) {
     };
 
     const execute = () => {
+      if (orphanMode && !updateData) {
+        const all = [state.property as unknown as Record<string, unknown>, ...(state.extraProperties ?? [])];
+        let rows = all.filter((p) => {
+          const reason = typeof p.last_ai_escalation_reason === "string" ? p.last_ai_escalation_reason : "";
+          const stamped = String(p.last_ai_escalation_at ?? p.updated_at ?? orphanWindowIso ?? "");
+          return (
+            p.needs_human_attention === true &&
+            (reason.startsWith("send_timeout:") || reason.startsWith("dead_letter_failed:send_timeout:")) &&
+            (gtId === null || String(p.id) > gtId) &&
+            (orphanWindowIso === null || stamped >= orphanWindowIso)
+          );
+        });
+        rows = rows.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+        if (listLimit !== null) rows = rows.slice(0, listLimit);
+        return { data: rows.map((r) => ({ org_id: "org-1", ...r })), error: null };
+      }
       if (updateData) {
         if (state.flagWriteError && "needs_human_attention" in updateData) {
           return { data: null, error: { message: "flag boom" } };
@@ -568,8 +595,18 @@ function createMockSupabase(state: MockState) {
       },
       order: () => query,
       range: () => query,
-      limit: () => query,
-      gt: () => query,
+      limit(n: number) {
+        listLimit = n;
+        return query;
+      },
+      gt(_field: string, value: string) {
+        gtId = value;
+        return query;
+      },
+      in(field: string, values: unknown[]) {
+        inFilters.set(field, values);
+        return query;
+      },
       eq(field: string, value: unknown) {
         eqFilters.set(field, value);
         return query;
@@ -582,6 +619,16 @@ function createMockSupabase(state: MockState) {
         return Promise.resolve(execute());
       },
       or(filter: string) {
+        if (filter.includes("send_timeout:%")) {
+          orphanMode = true;
+          eqFilters.delete("needs_human_attention");
+          return query;
+        }
+        const win = /last_ai_escalation_at\.gte\.([^,]+),/.exec(filter);
+        if (win) {
+          orphanWindowIso = win[1];
+          return query;
+        }
         allowsNullDispo = filter.includes("outreach_dispo.is.null");
         const match = filter.match(/outreach_dispo\.in\.\(([^)]*)\)/);
         allowedDispos = match?.[1] ? match[1].split(",").filter(Boolean) : null;
@@ -970,7 +1017,7 @@ function createMockSupabase(state: MockState) {
           insert: async (row: Record<string, unknown>) => {
             state.deadLetterInsertAttempts = (state.deadLetterInsertAttempts ?? 0) + 1;
             if (state.deadLetterInsertError) return { error: state.deadLetterInsertError };
-            (state.deadLetters ??= []).push(row);
+            (state.deadLetters ??= []).push({ id: `gen-${String((state.deadLetters?.length ?? 0) + 1).padStart(5, "0")}`, ...row });
             return { error: null };
           },
         };
@@ -4357,7 +4404,7 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
       });
       const result = await dispatchAiResponse(createMockSupabase(state) as never, inp("inbound-to"), anthropic);
       expect(result).toEqual({ outcome: "escalated", reason: "send_timeout" });
-      expect(state.property.last_ai_escalation_reason).toBe("dead_letter_failed:send_timeout");
+      expect(state.property.last_ai_escalation_reason).toBe("dead_letter_failed:send_timeout:inbound-to");
     });
 
     it("a competitor still queued after the LAST attempt flags with the text dead-lettered (and dead_letter_failed when that fails)", async () => {
@@ -4959,17 +5006,154 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
         expect((state.deadLetters ?? []).filter((d) => d.reason === "sent_late")).toHaveLength(1);
       });
 
-      it("never scans properties: candidates come only from unresolved send_timeout rows", async () => {
+      it("pass A candidates are still only unresolved send_timeout rows; the properties scan is the bounded orphan source", async () => {
         const { sweepLateSends } = await import("./dispatch");
         const state = setup();
         state.property.needs_human_attention = true;
         state.property.last_ai_escalation_reason = "send_timeout:inbound-orphan";
+        state.property.last_ai_escalation_at = new Date(Date.now() - 3_600_000).toISOString();
         state.deadLetters = [];
-        const supabase = createMockSupabase(state) as { from: (t: string) => unknown };
-        const tables: string[] = [];
-        const spy = { ...supabase, from: (t: string) => { tables.push(t); return supabase.from(t); } };
-        await sweepLateSends(spy as never);
-        expect(tables).not.toContain("properties");
+        await sweepLateSends(createMockSupabase(state) as never);
+        // Orphan repair inserted exactly one synthetic recovery row.
+        expect(state.deadLetters).toEqual([
+          expect.objectContaining({ inbound_message_id: "inbound-orphan", reason: "send_timeout", property_id: PROPERTY_ID, body: expect.stringContaining("unavailable") }),
+        ]);
+      });
+
+      describe("orphaned timeout flags (no dead-letter row)", () => {
+        const hourAgo = () => new Date(Date.now() - 3_600_000).toISOString();
+
+        it("insert failure -> provider acceptance -> after(): the dead_letter_failed fallback flag is converted and the marker written", async () => {
+          const state = createMockState();
+          afterTasks.capture = true;
+          state.deadLetterInsertError = { message: "dl boom" };
+          const { land } = await lateScenario(state);
+          expect(state.property.last_ai_escalation_reason).toBe("dead_letter_failed:send_timeout:inbound-late");
+          state.deadLetterInsertError = undefined;
+          land();
+          await Promise.all(afterTasks.fns.map((fn) => fn()));
+          expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
+          expect(state.deadLetters).toEqual([expect.objectContaining({ reason: "sent_late", inbound_message_id: "inbound-late" })]);
+        });
+
+        it("reconcile converts the fallback flag with no dead-letter row present", async () => {
+          const { reconcileLateSendForInbound } = await import("./dispatch");
+          const state = setup();
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = "dead_letter_failed:send_timeout:inbound-late";
+          const result = await reconcileLateSendForInbound(createMockSupabase(state) as never, {
+            orgId: "org-1", conversationId: CONVERSATION_ID, propertyId: PROPERTY_ID,
+            inboundMessageId: "inbound-late", body: "Hi", confirmedSent: true,
+          });
+          expect(result).toBe("reconciled");
+          expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
+          expect((state.deadLetters ?? []).filter((d) => d.reason === "sent_late")).toHaveLength(1);
+        });
+
+        it("identity binding holds for the fallback spelling too", async () => {
+          const { reconcileLateSendForInbound } = await import("./dispatch");
+          const state = setup();
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = "dead_letter_failed:send_timeout:inbound-B";
+          await reconcileLateSendForInbound(createMockSupabase(state) as never, {
+            orgId: "org-1", conversationId: CONVERSATION_ID, propertyId: PROPERTY_ID,
+            inboundMessageId: "inbound-A", body: "A", confirmedSent: true,
+          });
+          expect(state.property.last_ai_escalation_reason).toBe("dead_letter_failed:send_timeout:inbound-B");
+        });
+
+        it("process loss before the row insert, then acceptance: a later sweep repairs and converts the flag", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = "send_timeout:inbound-late";
+          state.property.last_ai_escalation_at = hourAgo();
+          state.deadLetters = [];
+          pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
+          const result = await sweepLateSends(createMockSupabase(state) as never);
+          expect(result.reconciled).toBe(1);
+          expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
+          expect(state.deadLetters?.filter((d) => d.reason === "send_timeout")).toEqual([
+            expect.objectContaining({ inbound_message_id: "inbound-late", resolved_at: expect.any(String) }),
+          ]);
+          expect(state.deadLetters?.filter((d) => d.reason === "sent_late")).toHaveLength(1);
+        });
+
+        it("the same repair works for the dead_letter_failed fallback flag", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = "dead_letter_failed:send_timeout:inbound-late";
+          state.property.last_ai_escalation_at = hourAgo();
+          state.deadLetters = [];
+          pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
+          await sweepLateSends(createMockSupabase(state) as never);
+          expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
+        });
+
+        it("a property whose row already exists is untouched (no second row)", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = "send_timeout:inbound-x";
+          state.property.last_ai_escalation_at = hourAgo();
+          state.deadLetters = [
+            { id: "t1", org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: PROPERTY_ID, inbound_message_id: "inbound-x", body: "real text", reason: "send_timeout", created_at: hourAgo() },
+          ];
+          await sweepLateSends(createMockSupabase(state) as never);
+          expect(state.deadLetters).toHaveLength(1);
+          expect(state.deadLetters?.[0].body).toBe("real text");
+        });
+
+        it("a flag younger than 5 minutes is not repaired (the live timeout path may still be writing)", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = "send_timeout:inbound-new";
+          state.property.last_ai_escalation_at = new Date().toISOString();
+          state.deadLetters = [];
+          await sweepLateSends(createMockSupabase(state) as never);
+          expect(state.deadLetters).toHaveLength(0);
+        });
+
+        it("a flag older than the 7-day window is not repaired", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = "send_timeout:inbound-old";
+          state.property.last_ai_escalation_at = new Date(Date.now() - 8 * 24 * 3_600_000).toISOString();
+          state.deadLetters = [];
+          await sweepLateSends(createMockSupabase(state) as never);
+          expect(state.deadLetters).toHaveLength(0);
+        });
+
+        it("obstruction: 200 orphans do not starve a 201st orphan or a normal unresolved row across two runs", async () => {
+          const { sweepLateSends } = await import("./dispatch");
+          const state = setup();
+          const at = hourAgo();
+          state.extraProperties = Array.from({ length: 200 }, (_v, i) => ({
+            id: `a-${String(i).padStart(3, "0")}`, org_id: "org-1", needs_human_attention: true,
+            last_ai_escalation_reason: `send_timeout:in-${i}`, last_ai_escalation_at: at,
+          }));
+          // property-1 sorts after the 200 extras: the 201st orphan.
+          state.property.needs_human_attention = true;
+          state.property.last_ai_escalation_reason = "send_timeout:inbound-late";
+          state.property.last_ai_escalation_at = at;
+          pushOutbound(state, { id: "late-out", status: "sent", metadata: aiReplyTo("inbound-late") });
+          // A normal unresolved row for a different (non-flagged) property.
+          state.deadLetters = [
+            { id: "normal", org_id: "org-1", conversation_id: CONVERSATION_ID, property_id: "other", inbound_message_id: "inbound-normal", body: "x", reason: "send_timeout", created_at: at },
+          ];
+          pushOutbound(state, { id: "normal-out", status: "sent", metadata: aiReplyTo("inbound-normal") });
+          const supabase = createMockSupabase(state) as never;
+          await sweepLateSends(supabase);
+          expect(state.deadLetters?.find((d) => d.id === "normal")?.resolved_at).toEqual(expect.any(String));
+          expect(state.deadLetters?.filter((d) => d.reason === "send_timeout" && d.body === "[reply text unavailable — orphaned timeout]")).toHaveLength(200);
+          expect(state.property.last_ai_escalation_reason).toBe("send_timeout:inbound-late");
+          await sweepLateSends(supabase);
+          expect(state.property.last_ai_escalation_reason).toBe("send_timeout_then_sent");
+          expect(state.deadLetters?.filter((d) => d.reason === "send_timeout" && d.body === "[reply text unavailable — orphaned timeout]")).toHaveLength(201);
+        });
       });
 
       it("stamps rows missing ids, terminally failed replies, and stale no-reply rows as unreconcilable (with a reason) and never re-reads them", async () => {
@@ -5220,7 +5404,10 @@ describe("fix round 5: retries are never silently dropped; fencing at the provid
             return {
               ...r,
               update: r.update.bind(r),
-              select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: null, error: { message: "read boom" } }) }) }),
+              select: (c?: string) =>
+                c?.includes("org_id")
+                  ? r.select(c)
+                  : { eq: () => ({ maybeSingle: () => Promise.resolve({ data: null, error: { message: "read boom" } }) }) },
             };
           });
           await sweepLateSends(failing);

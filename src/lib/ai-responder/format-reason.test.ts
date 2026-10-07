@@ -157,6 +157,14 @@ describe("provider failure reasons", () => {
 });
 
 describe("send timeout reasons", () => {
+  it("dead_letter_failed:send_timeout:<inbound_id> keeps the loud gate, names the timeout, hides the uuid", () => {
+    const parsed = parseEscalationReason("dead_letter_failed:send_timeout:3f1c2d9e-0000-4000-8000-123456789abc");
+    expect(parsed!.gate).toBe("dead_letter_failed");
+    expect(parsed!.color).toBe("rose");
+    expect(parsed!.shortLabel).toBe("Reply text not saved");
+    expect(parsed!.longLabel).toMatch(/timed out/i);
+    expect(parsed!.longLabel).not.toMatch(/3f1c/);
+  });
   it("send_timeout:<inbound_id> never shows the raw uuid", () => {
     const parsed = parseEscalationReason("send_timeout:3f1c2d9e-0000-4000-8000-123456789abc");
     expect(parsed!.longLabel).toBe("Reply timed out at the provider — held for review");
