@@ -78,6 +78,12 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
   reviews: readonly HoldReviewRow[];
   /** Pending ai_reply_drafts rows: a hold source of their own. Body is never read. */
   drafts?: readonly HoldDraftRow[];
+  /**
+   * Alert cron only: newest inbound seller message per property since the alert
+   * watermark. It counts as fresh activity on a flagged lead, so a lead flagged
+   * before alerts existed still alerts when the seller writes again.
+   */
+  inboundAfter?: ReadonlyMap<string, string>;
   runs: readonly T[];
 }): OpenHold<T>[] {
   type Acc = {
@@ -90,8 +96,6 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     notes: string[];
     flagReason?: string | null;
     flagAt?: string | null;
-    /** True when a flagged property's start time is unknown (backlog): the hold's alert start is then unknown. */
-    startUnknown?: boolean;
     /** created_at of every pending decision / review / draft (raw strings, never re-parsed). */
     rowTimes: string[];
     noProperty?: boolean;
@@ -122,8 +126,11 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     // unless a pending decision/review supplies an earlier-known time.
     if (p.last_ai_escalation_at) a.times.push(p.last_ai_escalation_at);
     a.flagAt = p.last_ai_escalation_at;
+    // Unknown flag start (flagged before the column existed) simply adds no instant here;
+    // new activity (pending rows, a later seller message) is what can still make it alert.
     if (p.needs_human_attention_since) a.alertTimes.push(p.needs_human_attention_since);
-    else a.startUnknown = true;
+    const inbound = input.inboundAfter?.get(p.id);
+    if (inbound) a.alertTimes.push(inbound);
     a.flagReason = p.last_ai_escalation_reason;
     if (p.last_ai_escalation_reason) {
       a.notes.push(p.last_ai_escalation_reason);
@@ -169,7 +176,6 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     a.sources.add("pending_draft");
     a.times.push(d.created_at);
     a.alertTimes.push(d.created_at);
-    a.alertTimes.push(d.created_at);
     a.rowTimes.push(d.created_at);
     // Sorted oldest first above, so the last assignment is the newest draft.
     a.draft = d;
@@ -203,11 +209,11 @@ export function deriveOpenHolds<T extends PipelineRun>(input: {
     const since =
       [...a.times].sort((x, y) => Date.parse(x) - Date.parse(y))[0] ?? null;
     const sources = order.filter((s) => a.sources.has(s));
-    // When the hold began, for alerting only: the oldest reliable start, or null
-    // when a flagged property's start is unknown (the backlog), which never alerts.
-    const alertSince = a.startUnknown
-      ? null
-      : ([...a.alertTimes].sort((x, y) => compareInstants(x, y))[0] ?? null);
+    // The hold's effective start, for alerting only: the NEWEST reliable instant (flag start,
+    // pending decision/review/draft, later seller message). Null = nothing reliable known.
+    // Old activity stays silent; anything at or after the watermark alerts.
+    const alertSince =
+      [...a.alertTimes].sort((x, y) => compareInstants(y, x))[0] ?? null;
     const labels =
       sources
         .filter((s) => s !== "pending_draft")
@@ -434,6 +440,62 @@ function chunked<T>(items: readonly T[], size = STEP_CHUNK): T[][] {
   return out;
 }
 const HOLD_LIMIT = 200;
+const INBOUND_CHUNK = 50;
+const INBOUND_ROW_CAP = 1000;
+
+/**
+ * Newest inbound seller message per property at/after `sinceIso`, for the given
+ * properties. Uses idx_messages_property_direction_created, 50 properties per
+ * query. A chunk that fills the row cap may have crowded some properties out, so
+ * those are re-asked one at a time (limit 1).
+ */
+async function loadInboundAfter(
+  supabase: LooseSupabase,
+  orgId: string,
+  sinceIso: string,
+  propertyIds: readonly string[],
+): Promise<{ byProperty: Map<string, string>; failed: boolean }> {
+  const byProperty = new Map<string, string>();
+  let failed = false;
+  type Row = { property_id: string | null; created_at: string };
+  const note = (rows: Row[]) => {
+    for (const r of rows) {
+      if (!r.property_id) continue;
+      const prev = byProperty.get(r.property_id);
+      if (!prev || compareInstants(r.created_at, prev) > 0) byProperty.set(r.property_id, r.created_at);
+    }
+  };
+  const base = () =>
+    supabase
+      .from("messages")
+      .select("property_id, created_at")
+      .eq("org_id", orgId)
+      .eq("direction", "inbound")
+      .gte("created_at", sinceIso)
+      .order("created_at", { ascending: false });
+  const results = await Promise.all(
+    chunked(propertyIds, INBOUND_CHUNK).map(async (ids) => ({
+      ids,
+      res: await base().in("property_id", ids).limit(INBOUND_ROW_CAP),
+    })),
+  );
+  for (const { ids, res } of results) {
+    if (res.error) {
+      failed = true;
+      continue;
+    }
+    const rows = (res.data ?? []) as Row[];
+    note(rows);
+    if (rows.length >= INBOUND_ROW_CAP) {
+      for (const id of ids.filter((x) => !byProperty.has(x))) {
+        const one = await base().eq("property_id", id).limit(1);
+        if (one.error) failed = true;
+        else note((one.data ?? []) as Row[]);
+      }
+    }
+  }
+  return { byProperty, failed };
+}
 
 /**
  * Server loader. Every query is org-scoped explicitly (RLS also applies).
@@ -452,6 +514,11 @@ export async function loadMessagesV2Data(
      * carry no message text).
      */
     includeDraftBody?: boolean;
+    /**
+     * Alert cron: the org's alert watermark. Flagged leads with an unknown flag
+     * start are checked for a seller message at/after it (indexed, chunked).
+     */
+    alertsSince?: string;
   } = {},
 ): Promise<MessagesV2Data> {
   // Distinct-hold totals come from separate id-only queries (one per source),
@@ -637,11 +704,22 @@ export async function loadMessagesV2Data(
     pool.set(run.id, run);
   }
 
+  const inboundAfter = opts.alertsSince
+    ? await loadInboundAfter(
+        supabase,
+        orgId,
+        opts.alertsSince,
+        properties.filter((p) => !p.needs_human_attention_since).map((p) => p.id),
+      )
+    : null;
+  if (inboundAfter?.failed) contextErrors.push("inbound lookup");
+
   const openHolds = deriveOpenHolds({
     properties,
     decisions,
     reviews,
     drafts,
+    inboundAfter: inboundAfter?.byProperty,
     runs: [...pool.values()],
   });
 

@@ -96,3 +96,20 @@ describe("alerts only for holds that start after alerts were enabled", () => {
     expect(s.archived).toBeGreaterThan(0);
   });
 });
+
+describe("seller activity after the watermark on a lead flagged before it", () => {
+  // The query layer turns "old flag + new inbound / new pending row" into a post-watermark startedAt
+  // (see queries.test.ts); here the core must alert exactly once for it and stay silent otherwise.
+  it("old-flagged lead with new activity alerts once; old activity stays silent; post-watermark flag with an old draft alerts", async () => {
+    const reflagged = hold({ holdKey: "a:x", propertyId: "a", startedAt: "2026-10-08T11:30:00.000Z" }); // old flag, new inbound
+    const stale = hold({ holdKey: "b:x", propertyId: "b", startedAt: "2026-07-01T00:00:00.000Z" }); // old flag, only old activity
+    const flagNewDraftOld = hold({ holdKey: "c:x", propertyId: "c", startedAt: "2026-10-08T11:00:00.000Z" }); // flag after wm, draft older
+    const t = makeDeps({ holds: [reflagged, stale, flagNewDraftOld], nowIso: "2026-10-08T12:00:00.000Z" });
+    t.store.watermarks.set(ORG, MARK);
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(new Set(t.store.rows.map((r) => r.holdKey))).toEqual(new Set(["a:x", "c:x"]));
+    const before = t.sent.length;
+    await runHoldAlertsForOrg(t.deps, ORG);
+    expect(t.sent.length).toBe(before);
+  });
+});

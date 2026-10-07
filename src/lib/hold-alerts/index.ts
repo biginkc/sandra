@@ -46,8 +46,9 @@ async function loadAlertHolds(
   db: LooseSupabase,
   orgId: string,
   hotReasons: readonly string[],
+  alertsSince: string,
 ): Promise<{ holds: HoldInfo[]; complete: boolean }> {
-  const data = await loadMessagesV2Data(db, orgId);
+  const data = await loadMessagesV2Data(db, orgId, undefined, { alertsSince });
   const labels = await loadRunLabels(
     db,
     data.holds.map((h) => ({
@@ -74,7 +75,7 @@ export function createHoldAlertDeps(
     store: createSupabaseDeliveryStore(db),
     baseUrl: resolveAppBaseUrl(env),
     emailEnabled: env.HOLD_ALERT_EMAIL_ENABLED === "1",
-    loadHolds: (orgId) => loadAlertHolds(db, orgId, hotReasons),
+    loadHolds: (orgId, alertsSince) => loadAlertHolds(db, orgId, hotReasons, alertsSince),
     async loadRecipients(orgId): Promise<Recipient[]> {
       const { data, error } = await db.from("memberships").select(MEMBERSHIP_COLUMNS).eq("org_id", orgId);
       if (error) throw new Error(`memberships lookup failed: ${error.message}`);

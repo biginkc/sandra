@@ -397,7 +397,7 @@ function fakeSupabase(results: Record<string, (calls: Call) => Result>) {
       const calls: Call = [];
       queries.push(calls);
       const q: Record<string, unknown> = {};
-      for (const m of ["select", "eq", "in", "order", "limit", "not"]) {
+      for (const m of ["select", "eq", "in", "order", "limit", "not", "gte"]) {
         q[m] = (...args: unknown[]) => {
           calls.push({ table, method: m, args });
           return q;
@@ -1213,28 +1213,110 @@ describe("deriveOpenHolds alert_since (when the hold began, for alert eligibilit
     expect(h.alert_since).toBeNull();
   });
 
-  it("stays null when a newer pending decision joins a backlog flag", () => {
+  it("backlog flag with only old pending activity: alert_since is that old activity (pre-watermark, silent)", () => {
+    const [h] = deriveOpenHolds({
+      properties: [prop({ since: null })],
+      decisions: [decision(iso("03:00:00"))],
+      reviews: [],
+      runs: [],
+    });
+    expect(h.alert_since).toBe(iso("03:00:00"));
+  });
+
+  it("backlog flag with nothing reliable known is null", () => {
+    const [h] = deriveOpenHolds({ properties: [prop({ since: null })], decisions: [], reviews: [], runs: [] });
+    expect(h.alert_since).toBeNull();
+  });
+
+  it("backlog flag plus a newer pending decision starts at the decision", () => {
     const [h] = deriveOpenHolds({
       properties: [prop({ since: null })],
       decisions: [decision(iso("11:00:00"))],
       reviews: [],
       runs: [],
     });
-    expect(h.alert_since).toBeNull();
+    expect(h.alert_since).toBe(iso("11:00:00"));
   });
 
-  it("is the oldest reliable start across sources", () => {
+  it("backlog flag plus a seller message after the watermark starts at that message", () => {
+    const [h] = deriveOpenHolds({
+      properties: [prop({ since: null })],
+      decisions: [],
+      reviews: [],
+      inboundAfter: new Map([["p1", iso("12:30:00")]]),
+      runs: [],
+    });
+    expect(h.alert_since).toBe(iso("12:30:00"));
+  });
+
+  it("a flag raised after an old pending decision starts at the flag, not the older decision", () => {
     const [h] = deriveOpenHolds({
       properties: [prop({ since: iso("09:00:00") })],
       decisions: [decision(iso("08:00:00"))],
       reviews: [],
       runs: [],
     });
-    expect(h.alert_since).toBe(iso("08:00:00"));
+    expect(h.alert_since).toBe(iso("09:00:00"));
+  });
+
+  it("a flag raised after an old pending draft starts at the flag, not the older draft", () => {
+    const [h] = deriveOpenHolds({
+      properties: [prop({ since: iso("09:00:00") })],
+      decisions: [],
+      reviews: [],
+      drafts: [
+        { id: "d1", property_id: "p1", conversation_id: null, inbound_message_id: null, run_id: null, created_at: iso("02:00:00") },
+      ],
+      runs: [],
+    });
+    expect(h.alert_since).toBe(iso("09:00:00"));
   });
 
   it("is the decision's created_at for a hold with no flagged property", () => {
     const [h] = deriveOpenHolds({ properties: [], decisions: [decision(iso("11:00:00"))], reviews: [], runs: [] });
     expect(h.alert_since).toBe(iso("11:00:00"));
+  });
+});
+
+describe("loadMessagesV2Data alertsSince (seller messages on backlog-flagged leads)", () => {
+  const flagged = (id: string, since: string | null) => ({
+    id,
+    last_ai_escalation_at: iso("01:00:00"),
+    last_ai_escalation_reason: "needs_review",
+    updated_at: iso("01:00:00"),
+    needs_human_attention_since: since,
+  });
+  const WM = iso("10:00:00");
+
+  it("asks for inbound messages only for properties with an unknown flag start, at/after the watermark", async () => {
+    const { client, queries } = fakeSupabase({
+      properties: (c) => (isHead(c) ? { data: [] } : { data: [flagged("old", null), flagged("tracked", iso("11:00:00"))] }),
+      messages: () => ({ data: [{ property_id: "old", created_at: iso("12:00:00") }] }),
+    });
+    const data = await loadMessagesV2Data(client, "org", undefined, { alertsSince: WM });
+    const msgQueries = queries.filter((q) => q[0]?.table === "messages");
+    expect(msgQueries).toHaveLength(1);
+    const call = (q: Call, m: string) => q.find((c) => c.method === m)!.args;
+    expect(call(msgQueries[0]!, "in")).toEqual(["property_id", ["old"]]);
+    expect(call(msgQueries[0]!, "gte")).toEqual(["created_at", WM]);
+    expect(msgQueries[0]!.some((c) => c.method === "eq" && c.args[0] === "direction" && c.args[1] === "inbound")).toBe(true);
+    expect(data.holds.find((h) => h.id === "old")!.alert_since).toBe(iso("12:00:00"));
+    expect(data.holds.find((h) => h.id === "tracked")!.alert_since).toBe(iso("11:00:00"));
+  });
+
+  it("makes no messages query without alertsSince (the page)", async () => {
+    const { client, queries } = fakeSupabase({
+      properties: (c) => (isHead(c) ? { data: [] } : { data: [flagged("old", null)] }),
+    });
+    await loadMessagesV2Data(client, "org");
+    expect(queries.some((q) => q[0]?.table === "messages")).toBe(false);
+  });
+
+  it("a backlog lead with no seller message after the watermark stays unknown (silent)", async () => {
+    const { client } = fakeSupabase({
+      properties: (c) => (isHead(c) ? { data: [] } : { data: [flagged("old", null)] }),
+    });
+    const data = await loadMessagesV2Data(client, "org", undefined, { alertsSince: WM });
+    expect(data.holds[0]!.alert_since).toBeNull();
   });
 });

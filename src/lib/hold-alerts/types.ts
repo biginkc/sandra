@@ -13,7 +13,7 @@ export type HoldInfo = {
   holdKey: string;
   propertyId: string;
   since: string | null;
-  /** When the hold began (oldest reliable start); null = unknown (backlog), which never alerts. */
+  /** When the hold began (oldest reliable start); null = nothing reliable known (pre-watermark activity is silent). */
   startedAt: string | null;
   /** First name (or "Unknown ···1234"), from the page's label loader. */
   name: string;
@@ -112,7 +112,7 @@ export interface HoldAlertDeps {
    * `complete` is false when the underlying hold queries were truncated or
    * failed: an incomplete set must never be used to decide a hold has closed.
    */
-  loadHolds(orgId: string): Promise<{ holds: HoldInfo[]; complete: boolean }>;
+  loadHolds(orgId: string, alertsSince: string): Promise<{ holds: HoldInfo[]; complete: boolean }>;
   /** Active owner + acquisitions members. */
   loadRecipients(orgId: string): Promise<Recipient[]>;
   /**

@@ -25,7 +25,7 @@ type Task = {
   eligible?: () => Promise<boolean>;
 };
 
-/** A hold may alert only when it began at or after the watermark. Unknown start (backlog) never does. */
+/** A hold may alert only when it began at or after the watermark. No known start never does. */
 export function isNewHold(hold: Pick<HoldInfo, "startedAt">, alertsSinceMs: number): boolean {
   if (!hold.startedAt || !Number.isFinite(alertsSinceMs)) return false;
   const startedMs = Date.parse(hold.startedAt);
@@ -74,7 +74,7 @@ export async function runHoldAlertsForOrg(
   if (mark.created) return summary;
   const alertsSinceMs = Date.parse(mark.alertsSince);
 
-  const loaded = await deps.loadHolds(orgId);
+  const loaded = await deps.loadHolds(orgId, mark.alertsSince);
   const openHolds = loaded.holds;
   const holds = openHolds.filter((h) => isNewHold(h, alertsSinceMs));
   // Archive-on-clear: a property that is no longer held closes its delivery
