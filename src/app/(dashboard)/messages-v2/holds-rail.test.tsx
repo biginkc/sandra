@@ -139,12 +139,10 @@ describe("HoldsRail", () => {
     expect(screen.getByText(/needs_human_review/)).toBeInTheDocument();
   });
 
-  it("disables every action with a Phase 2 tooltip", () => {
+  it("renders the actions disabled (not hidden) when no action handlers are supplied", () => {
     render(<HoldsRail holds={[hold("a", 5)]} labels={new Map()} nowMs={NOW} />);
     for (const name of ["Send", "Edit", "Take over", "Assign", "Dismiss"]) {
-      const btn = screen.getByRole("button", { name: new RegExp(`^${name}`) });
-      expect(btn).toBeDisabled();
-      expect(btn.closest("[title]")).toHaveAttribute("title", "Phase 2");
+      expect(screen.getByRole("button", { name: new RegExp(`^${name}`) })).toBeDisabled();
     }
   });
 
@@ -405,7 +403,7 @@ describe("HoldsRail degraded states", () => {
     render(<HoldsRail holds={[h]} labels={new Map()} nowMs={NOW} />);
     expect(screen.getByTestId("hold-age")).toHaveTextContent("age unknown");
   });
-  it("shows the draft-held fact (never a body) when a pending draft exists", () => {
+  it("shows the draft-held fact (no body unless the page loaded it) when a pending draft exists", () => {
     render(
       <HoldsRail
         holds={[{ ...hold("a", 5), draft_held: true }, hold("b", 5)]}
@@ -414,8 +412,7 @@ describe("HoldsRail degraded states", () => {
       />,
     );
     expect(screen.getAllByTestId("draft-held")).toHaveLength(1);
-    expect(screen.getByTestId("draft-held")).toHaveTextContent(
-      "Claude draft held (Phase 1 to act)",
-    );
+    expect(screen.getByTestId("draft-held")).toHaveTextContent("Claude draft held");
+    expect(screen.queryByTestId("draft-text")).toBeNull();
   });
 });

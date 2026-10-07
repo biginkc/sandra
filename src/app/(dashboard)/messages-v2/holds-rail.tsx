@@ -2,9 +2,14 @@
 
 import { format } from "date-fns/format";
 
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
+import type { HoldActionsApi } from "./hold-action-types";
+import {
+  DisabledHoldActions,
+  effectiveDraftBody,
+  HoldActionControls,
+} from "./hold-action-controls";
 import { holdReason } from "./step-format";
 import type {
   HoldsMeta,
@@ -37,31 +42,17 @@ const TONE_CLASS: Record<AgeTone, string> = {
   red: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200",
 };
 
-const ACTIONS = ["Send", "Edit", "Take over ↗", "Assign", "Dismiss"] as const;
-
-/** Phase 0 is read-only: every action renders disabled with a Phase 2 tooltip. */
-function Phase2Actions() {
-  return (
-    <div className="mt-3 flex flex-wrap gap-2">
-      {ACTIONS.map((action) => (
-        <span key={action} title="Phase 2">
-          <Button type="button" size="xs" variant="outline" disabled>
-            {action}
-          </Button>
-        </span>
-      ))}
-    </div>
-  );
-}
-
 export function HoldCard({
   hold,
   label,
   nowMs,
+  actions,
 }: {
   hold: OpenHold<RunWithSteps>;
   label: RunLabel | undefined;
   nowMs: number;
+  /** Server actions for the five hold actions; absent = shown disabled. */
+  actions?: HoldActionsApi;
 }) {
   const run = hold.run;
   const age = hold.since ? Math.max(0, nowMs - Date.parse(hold.since)) : null;
@@ -136,7 +127,15 @@ export function HoldCard({
           <span aria-hidden className="text-violet-600">
             ●
           </span>
-          <span>Claude draft held (Phase 1 to act)</span>
+          <span>Claude draft held</span>
+        </p>
+      )}
+      {effectiveDraftBody(hold) !== null && (
+        <p
+          data-testid="draft-text"
+          className="mt-1 whitespace-pre-wrap rounded-lg bg-secondary/60 p-2"
+        >
+          {effectiveDraftBody(hold)}
         </p>
       )}
       {informational && (
@@ -164,7 +163,12 @@ export function HoldCard({
           <span>reply text saved for review</span>
         </p>
       )}
-      {!informational && <Phase2Actions />}
+      {!informational &&
+        (actions ? (
+          <HoldActionControls hold={hold} actions={actions} />
+        ) : (
+          <DisabledHoldActions title="Actions unavailable" />
+        ))}
     </article>
   );
 }
@@ -193,8 +197,10 @@ export function HoldsRail({
   labels,
   nowMs,
   meta,
+  actions,
 }: {
   meta?: HoldsMeta;
+  actions?: HoldActionsApi;
   holds: readonly OpenHold<RunWithSteps>[];
   labels: ReadonlyMap<string, RunLabel>;
   nowMs: number;
@@ -257,6 +263,7 @@ export function HoldsRail({
             hold={hold}
             label={labels.get(hold.id)}
             nowMs={nowMs}
+            actions={actions}
           />
         ))
       )}
