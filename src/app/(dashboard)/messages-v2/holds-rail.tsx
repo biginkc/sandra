@@ -169,18 +169,6 @@ export function HoldCard({
   );
 }
 
-export function ShadowScorecard() {
-  return (
-    <section
-      aria-label="Shadow scorecard"
-      className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground"
-    >
-      <h3 className="font-medium text-foreground">Shadow scorecard</h3>
-      <p className="mt-1">Available after 2h of shadow traffic.</p>
-    </section>
-  );
-}
-
 const SOURCE_NAME: Record<HoldSource, string> = {
   needs_attention: "needs-attention",
   jev_decision: "Jev decision",
@@ -260,7 +248,6 @@ export function HoldsRail({
           />
         ))
       )}
-      <ShadowScorecard />
     </aside>
   );
 }

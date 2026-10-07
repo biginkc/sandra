@@ -18,6 +18,8 @@ import {
   type LooseSupabase,
 } from "./queries";
 import { RunCard } from "./run-card";
+import { ScorecardCard } from "./scorecard-card";
+import type { ScorecardRow } from "./scorecard";
 import type {
   HoldsMeta,
   ModeBadge,
@@ -48,6 +50,8 @@ export type MessagesV2ViewProps = {
   /** Mode badge queries failed (reason text). */
   badgesError?: string | null;
   badges: ModeBadge[];
+  /** Scorecard rows (7d) loaded on the server; null means the card loads them itself. */
+  scorecardRows?: ScorecardRow[] | null;
   /** Server-resolved display labels, as [runId, label] pairs. */
   labels: Array<[string, RunLabel]>;
   nowMs: number;
@@ -363,6 +367,8 @@ export function MessagesV2View(props: MessagesV2ViewProps) {
         </section>
         <HoldsRail holds={holds} labels={labels} nowMs={nowMs} meta={meta} />
       </div>
+
+      <ScorecardCard orgId={orgId} initialRows={props.scorecardRows ?? null} />
 
       <ul
         aria-label="Legend"

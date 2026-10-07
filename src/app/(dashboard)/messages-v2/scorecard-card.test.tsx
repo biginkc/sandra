@@ -1,0 +1,162 @@
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { ScorecardCard } from "./scorecard-card";
+import type { Sample, ScorecardRow } from "./scorecard";
+
+vi.mock("@/lib/supabase/client", () => ({ createClient: () => ({ rpc: vi.fn() }) }));
+
+const batch = (c: number, n: number, agreed: number): Sample[] =>
+  Array.from({ length: n }, (_, i) => [c, i < agreed ? 1 : 0] as Sample);
+
+const row = (outcome: string, over: Partial<ScorecardRow> = {}): ScorecardRow => ({
+  outcome,
+  runs: 0,
+  auto_applied: 0,
+  held: 0,
+  auto_settled: 0,
+  auto_agreed: 0,
+  held_decided: 0,
+  held_agreed: 0,
+  threshold: null,
+  automation_enabled: null,
+  samples: [],
+  ...over,
+});
+
+const ROWS: ScorecardRow[] = [
+  row("nurture", {
+    runs: 80,
+    auto_applied: 60,
+    held: 20,
+    auto_settled: 50,
+    auto_agreed: 47,
+    held_decided: 10,
+    held_agreed: 7,
+    threshold: 0.9,
+    automation_enabled: true,
+    samples: [...batch(0.7, 20, 10), ...batch(0.9, 30, 28), ...batch(0.95, 40, 40)],
+  }),
+  row("new_lead", {
+    runs: 12,
+    held: 12,
+    threshold: 0.95,
+    automation_enabled: false,
+    samples: batch(0.9, 12, 12),
+  }),
+];
+
+const section = (name: string) => screen.getByTestId(`scorecard-${name}`);
+
+let writeText: ReturnType<typeof vi.fn>;
+beforeEach(() => {
+  writeText = vi.fn(async () => undefined);
+  Object.defineProperty(navigator, "clipboard", {
+    value: { writeText },
+    configurable: true,
+  });
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("ScorecardCard", () => {
+  it("renders per-outcome counts, agreement, threshold and automation state", () => {
+    render(<ScorecardCard orgId="o" initialRows={ROWS} load={vi.fn()} />);
+    const nurture = within(section("nurture"));
+    expect(nurture.getByText(/80 runs/)).toBeInTheDocument();
+    expect(nurture.getByText(/60 auto/)).toBeInTheDocument();
+    expect(nurture.getByText(/20 held/)).toBeInTheDocument();
+    expect(nurture.getByText(/auto agreement/i).parentElement).toHaveTextContent("94%");
+    expect(nurture.getByText(/held agreement/i).parentElement).toHaveTextContent("70%");
+    expect(nurture.getByText(/threshold 0\.900/i)).toBeInTheDocument();
+    expect(nurture.getByText(/automation on/i)).toBeInTheDocument();
+    expect(within(section("new_lead")).getByText(/automation off/i)).toBeInTheDocument();
+  });
+
+  it("shows every outcome even with no data, with n/a rates", () => {
+    render(<ScorecardCard orgId="o" initialRows={[]} load={vi.fn()} />);
+    for (const o of ["new_lead", "wrong_number", "not_interested", "nurture", "opted_out"]) {
+      expect(section(o)).toBeInTheDocument();
+    }
+    expect(within(section("opted_out")).getAllByText(/n\/a/).length).toBeGreaterThan(0);
+  });
+
+  it("suggests a threshold and copies the exact rule text without applying anything", async () => {
+    render(<ScorecardCard orgId="o" initialRows={ROWS} load={vi.fn()} />);
+    const nurture = within(section("nurture"));
+    expect(nurture.getByText(/suggested ≥ 0\.900/i)).toBeInTheDocument();
+    expect(screen.getByText(/suggestion only/i)).toBeInTheDocument();
+    fireEvent.click(nurture.getByRole("button", { name: /copy for approval/i }));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(
+        "nurture: auto-apply at native confidence ≥ 0.900",
+      ),
+    );
+    expect(await nurture.findByText(/copied/i)).toBeInTheDocument();
+  });
+
+  it("shows insufficient data with no copy button under 30 samples", () => {
+    render(<ScorecardCard orgId="o" initialRows={ROWS} load={vi.fn()} />);
+    const nl = within(section("new_lead"));
+    expect(nl.getByText(/insufficient data \(12\/30\)/i)).toBeInTheDocument();
+    expect(nl.queryByRole("button", { name: /copy/i })).not.toBeInTheDocument();
+  });
+
+  it("says when no cutoff reaches 95%", () => {
+    render(
+      <ScorecardCard
+        orgId="o"
+        initialRows={[row("opted_out", { runs: 50, samples: batch(0.9, 50, 40) })]}
+        load={vi.fn()}
+      />,
+    );
+    const el = within(section("opted_out"));
+    expect(el.getByText(/no cutoff reaches 95%/i)).toBeInTheDocument();
+    expect(el.queryByRole("button", { name: /copy/i })).not.toBeInTheDocument();
+  });
+
+  it("defaults to 7d and reloads for 30d on toggle", async () => {
+    const load = vi.fn(async () => [row("nurture", { runs: 999 })]);
+    render(<ScorecardCard orgId="org-1" initialRows={ROWS} load={load} />);
+    expect(screen.getByRole("button", { name: "7d" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "30d" }));
+    await waitFor(() => expect(load).toHaveBeenCalledWith("org-1", 30));
+    expect(await within(section("nurture")).findByText(/999 runs/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "30d" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("polls every 60 seconds", async () => {
+    vi.useFakeTimers();
+    const load = vi.fn(async () => ROWS);
+    render(<ScorecardCard orgId="o" initialRows={ROWS} load={load} />);
+    expect(load).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(load).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it("loads on mount when the server had no data, and shows a degraded state on failure", async () => {
+    const load = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    render(<ScorecardCard orgId="o" initialRows={null} load={load} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/scorecard unavailable/i);
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps stale rows and flags a failed refresh", async () => {
+    const load = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    render(<ScorecardCard orgId="o" initialRows={ROWS} load={load} />);
+    fireEvent.click(screen.getByRole("button", { name: "30d" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/scorecard unavailable/i);
+    expect(within(section("nurture")).getByText(/80 runs/)).toBeInTheDocument();
+  });
+});
