@@ -9,6 +9,7 @@ import {
   isRetryOutcome,
   recordRetryScheduled,
   type AiRetryOutcome,
+  type RetryReply,
 } from "@/lib/ai-responder/retry";
 import { recordAiResponderOutcomeForThread } from "@/lib/messages/ai-responder-thread-state";
 import { markInboundMessageState } from "@/lib/messaging/inbound-state";
@@ -28,6 +29,8 @@ export type AiReplyDelayParams = {
   runId?: string | null;
   /** 0/undefined = first dispatch; N = the Nth retry after a contended / failed reply. */
   retryAttempt?: number;
+  /** The reply the previous attempt generated, re-sent verbatim (never logged). */
+  retryReply?: RetryReply;
 };
 
 async function dispatchStep(
@@ -49,6 +52,7 @@ async function dispatchStep(
       inboundMessageId: params.inboundMessageId,
       ...(params.runId ? { runId: params.runId } : {}),
       ...(params.retryAttempt ? { retryAttempt: params.retryAttempt } : {}),
+      ...(params.retryReply ? { retryReply: params.retryReply } : {}),
     },
     {
       anthropic: new Anthropic(),
@@ -92,7 +96,11 @@ export async function aiReplyDelayWorkflow(
   // reaches REPLY_RETRY_MAX (dead-letter + flag), so this loop always ends.
   while (isRetryOutcome(outcome)) {
     await sleep(`${outcome.delaySeconds}s`);
-    outcome = await dispatchStep({ ...params, retryAttempt: outcome.attempt });
+    outcome = await dispatchStep({
+      ...params,
+      retryAttempt: outcome.attempt,
+      ...(outcome.reply ? { retryReply: outcome.reply } : {}),
+    });
   }
   return outcome;
 }

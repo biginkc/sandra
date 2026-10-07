@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   persistTakeover: vi.fn(async () => undefined),
   markAttention: vi.fn(async () => undefined),
   recordThread: vi.fn(async () => undefined),
+  deadLetter: vi.fn(async () => true),
 }));
 
 vi.mock("@supabase/supabase-js", async () => {
@@ -58,6 +59,11 @@ vi.mock("@/lib/notifications/dispatch", () => ({
 }));
 
 vi.mock("@/lib/auth/admins", () => ({ listAdminUserIds: mocks.listAdmins }));
+
+vi.mock("@/lib/ai-responder/retry", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/ai-responder/retry")>()),
+  writeReplyDeadLetter: mocks.deadLetter,
+}));
 
 vi.mock("@/lib/ai-responder/delay", () => ({
   computeReplyDelaySeconds: vi.fn(() => 0),
@@ -344,6 +350,13 @@ describe("handleInboundWebhook retry outcome (immediate dispatch)", () => {
     reason: "send_reserved_elsewhere" as const,
     attempt: 1,
     delaySeconds: 20,
+    reply: {
+      body: "Hi there, still interested?",
+      confidence: 0.91,
+      sentiment: "neutral" as const,
+      orgId: "org-1",
+      kind: "send_reply" as const,
+    },
   };
 
   it("re-schedules the same inbound through the delay workflow and does NOT stamp a terminal outcome", async () => {
@@ -357,7 +370,11 @@ describe("handleInboundWebhook retry outcome (immediate dispatch)", () => {
       propertyId: "property-1",
       delaySeconds: 20,
       retryAttempt: 1,
+      // The generated reply rides in the durable workflow params so the retry
+      // re-sends it verbatim (no re-classification, no re-generation).
+      retryReply: expect.objectContaining({ body: "Hi there, still interested?", orgId: "org-1" }),
     });
+    expect(mocks.deadLetter).not.toHaveBeenCalled();
     // Inbound is stamped `delayed` (so a webhook redelivery does not race the
     // retry), never with the retry outcome or a terminal state.
     expect(mocks.markState).toHaveBeenCalledWith(
@@ -369,15 +386,22 @@ describe("handleInboundWebhook retry outcome (immediate dispatch)", () => {
     expect(mocks.markAttention).not.toHaveBeenCalled();
   });
 
-  it("when the retry cannot be scheduled, the property is flagged reply_skipped:<reason> and a terminal escalation is stamped", async () => {
+  it("when the retry cannot be scheduled, the generated reply is dead-lettered, the property is flagged reply_skipped:<reason> and a terminal escalation is stamped", async () => {
     mocks.dispatchAi.mockResolvedValueOnce(retryOutcome as never);
     mocks.startWorkflow.mockRejectedValueOnce(new Error("queue down"));
     await runWebhook();
-    expect(mocks.markAttention).toHaveBeenCalledWith(
-      expect.anything(),
+    expect(mocks.deadLetter).toHaveBeenCalledTimes(1);
+    expect((mocks.deadLetter.mock.calls[0] as unknown[])[2]).toMatchObject({
+      orgId: "org-1",
+      propertyId: "property-1",
+      inboundMessageId: "message-1",
+      body: "Hi there, still interested?",
+      reason: "send_reserved_elsewhere",
+    });
+    expect((mocks.markAttention.mock.calls[0] as unknown[]).slice(1, 3)).toEqual([
       "property-1",
       "reply_skipped:send_reserved_elsewhere",
-    );
+    ]);
     expect(mocks.markState).toHaveBeenCalledWith(
       expect.anything(),
       "message-1",

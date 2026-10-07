@@ -154,6 +154,20 @@ describe("aiReplyDelayWorkflow", () => {
       );
     });
 
+    it("carries the generated reply from each retry outcome into the next dispatch (and from the workflow params into the first)", async () => {
+      const reply = { body: "Hi there", confidence: 0.9, sentiment: "neutral", orgId: "org-1", kind: "send_reply" };
+      dispatchAiResponse
+        .mockResolvedValueOnce({ ...retry(1), reply })
+        .mockResolvedValueOnce({ outcome: "sent", messageId: "outbound-1", confidence: 0.9 });
+      await aiReplyDelayWorkflow(params);
+      expect(dispatchAiResponse.mock.calls[0]![1].retryReply).toBeUndefined();
+      expect(dispatchAiResponse.mock.calls[1]![1].retryReply).toEqual(reply);
+
+      dispatchAiResponse.mockClear();
+      await aiReplyDelayWorkflow({ ...params, retryAttempt: 2, retryReply: reply as never });
+      expect(dispatchAiResponse.mock.calls[0]![1].retryReply).toEqual(reply);
+    });
+
     it("a workflow started AS a retry passes its retryAttempt to the first dispatch", async () => {
       await aiReplyDelayWorkflow({ ...params, delaySeconds: 20, retryAttempt: 2 });
       expect(dispatchAiResponse.mock.calls[0]![1].retryAttempt).toBe(2);

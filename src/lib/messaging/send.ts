@@ -300,6 +300,8 @@ async function loadRepSmsIdempotencyRow(
 
 export type SendSmsOutcome =
   | { status: "sent"; messageId: string; externalId: string }
+  /** `beforeProviderSubmit` refused: nothing was submitted to the provider. */
+  | { status: "blocked_before_provider"; messageId: string }
   | { status: "queued"; messageId: string; toAddress?: string }
   | { status: "paused"; messageId: string; toAddress?: string }
   /** A bulk-campaign destination is already represented by an outbound row. */
@@ -489,6 +491,16 @@ export type SendSmsInput = {
    * into a separate provider-default fallback below; replies stay strict.
    */
   requireStickyFrom?: boolean;
+  /**
+   * Fencing hook, awaited as the LAST step before the provider submission
+   * (after every preflight await: sender lookup, suppression re-check, canary
+   * eligibility). Return false to abort: no provider call is made, the pending
+   * row is marked failed and `blocked_before_provider` is returned. A throw is
+   * treated as false. The AI responder uses it to re-validate its send lease
+   * at the real provider boundary, so a preflight that was paused past lease
+   * expiry can never submit.
+   */
+  beforeProviderSubmit?: () => Promise<boolean>;
   /**
    * Sequence first-touches can have no prior inbound and no campaign snapshot.
    * When true, the provider default may be used, but inventory-aware providers
@@ -981,6 +993,42 @@ export async function sendSmsToContact(
       propertyId: input.propertyId, body: input.body,
       enrollmentId: input.sequenceContext?.enrollmentId,
     });
+    if (input.beforeProviderSubmit) {
+      let proceed = false;
+      try {
+        proceed = (await input.beforeProviderSubmit()) === true;
+      } catch {
+        proceed = false;
+      }
+      if (!proceed) {
+        // Never reached the provider. The row must not keep a uniqueness-bearing
+        // generated_by stamp, or the retry of the same inbound would collide
+        // with it (idx_messages_ai_responder_inbound_unique) and read as
+        // "already replied".
+        const baseMeta = (inputMetadata ?? {}) as Record<string, unknown>;
+        const stamp = typeof baseMeta.generated_by === "string" ? baseMeta.generated_by : null;
+        await supabase
+          .from("messages")
+          .update({
+            status: "failed",
+            failed_at: new Date().toISOString(),
+            error_message: "aborted_before_provider",
+            metadata: {
+              ...baseMeta,
+              ...(stamp ? { generated_by: `${stamp}_aborted` } : {}),
+              abortedBeforeProvider: true,
+            } as Json,
+          })
+          .eq("id", pending.id)
+          .eq("status", "pending");
+        if (input.repSmsReceipt) {
+          await recordRepSmsDeliveryLedgerResult(input.repSmsReceipt, "failed_not_dispatched", {
+            providerError: "aborted_before_provider",
+          });
+        }
+        return { status: "blocked_before_provider", messageId: pending.id };
+      }
+    }
     providerCallStarted = true;
     const result = await provider.sendSms({
       to: destination.phone,

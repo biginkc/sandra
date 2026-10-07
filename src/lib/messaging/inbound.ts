@@ -59,6 +59,7 @@ import {
 } from "./rep-sms-human-takeover";
 import {
   isRetryOutcome,
+  writeReplyDeadLetter,
   recordRetryScheduled,
   type AiRetryOutcome,
 } from "@/lib/ai-responder/retry";
@@ -1675,16 +1676,35 @@ async function dispatchAndStampAiResponder(
   if (isRetryOutcome(outcome)) {
     // Nothing was sent or stored. Re-dispatch the same inbound through the
     // delay workflow; the run stays `running` and the inbound is NOT stamped
-    // terminal (it is stamped `delayed`, which also keeps a webhook redelivery
-    // from racing the retry).
+    // terminal. It is stamped `delayed`, and that stamp does two real jobs:
+    //  - a webhook REDELIVERY of this inbound is skipped by the
+    //    `!inboundState.aiResponder` gate in the webhook handler (no second
+    //    dispatch races the retry);
+    //  - a LATER inbound's run treats this one as handled (see
+    //    `newerInboundIsHandled` in ai-responder/dispatch), so it neither
+    //    flags nor double-answers while the retry is pending.
     if (await scheduleReplyRetry(supabase, input, outcome, runContext)) {
       return outcome;
     }
-    // Could not even schedule it: surface to a human rather than drop it.
+    // Could not even schedule it: the generated reply is dead-lettered (its
+    // only durable copy) and a human is flagged rather than dropping it.
+    if (outcome.reply) {
+      await writeReplyDeadLetter(supabase, runContext, {
+        orgId: outcome.reply.orgId,
+        conversationId: input.conversationId ?? null,
+        propertyId: input.propertyId,
+        inboundMessageId: input.inboundMessageId ?? null,
+        body: outcome.reply.body,
+        reason: outcome.reason,
+      });
+    }
     await markPropertyNeedsAttention(
       supabase,
       input.propertyId,
-      `reply_skipped:${outcome.reason}`,
+      outcome.reason === "draft_persist_failed"
+        ? outcome.reason
+        : `reply_skipped:${outcome.reason}`,
+      runContext,
     );
     const terminal: AiDispatchOutcome = { outcome: "escalated", reason: outcome.reason };
     await stampAiResponderTerminalOutcome(supabase, {
@@ -1723,6 +1743,7 @@ async function scheduleReplyRetry(
         delaySeconds: retry.delaySeconds,
         runId: runContext?.runId ?? input.runId ?? null,
         retryAttempt: retry.attempt,
+        ...(retry.reply ? { retryReply: retry.reply } : {}),
       },
     ]);
     await recordRetryScheduled(supabase, runContext, retry);

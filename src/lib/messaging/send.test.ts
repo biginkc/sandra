@@ -262,6 +262,100 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
   });
 });
 
+describe("sendSmsToContact — beforeProviderSubmit fence", () => {
+  function scripted() {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const base = fakeSupabase({
+      contacts: [
+        { data: CONTACT_ROW, error: null },
+        { data: { do_not_contact: false, sms_opted_out: false }, error: null }, // fresh re-check
+      ],
+      properties: [
+        { data: PROPERTY_ROW, error: null },
+        { data: PROPERTY_ROW, error: null }, // fresh re-check
+      ],
+      messages: [
+        { data: { id: "msg-f" }, error: null }, // pending insert
+        { data: { id: "msg-f" }, error: null }, // sent CAS / abort update
+      ],
+      webhook_events: [{ data: [], error: null }],
+    });
+    const updates: Array<Record<string, unknown>> = [];
+    const realFrom = base.from;
+    base.from = (table: string) => {
+      const builder = realFrom(table);
+      const realUpdate = builder.update;
+      builder.update = (value: Record<string, unknown>) => {
+        if (table === "messages") updates.push(value);
+        return realUpdate(value);
+      };
+      return builder;
+    };
+    return { provider, supabase: base, updates };
+  }
+  const aiInput = {
+    origin: "automated" as const,
+    contactId: CONTACT_ID,
+    propertyId: PROPERTY_ID,
+    body: "hello",
+    from: "+18165551234",
+    metadata: { generated_by: "ai_responder_v1", inbound_message_id: "inbound-1" },
+  };
+
+  it("a refusing hook means NO provider call: the pending row is failed and its uniqueness-bearing stamp is retired", async () => {
+    const { provider, supabase, updates } = scripted();
+    const hook = vi.fn().mockResolvedValue(false);
+    const outcome = await sendSmsToContact(supabase, { ...aiInput, beforeProviderSubmit: hook });
+    expect(hook).toHaveBeenCalledTimes(1);
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ status: "blocked_before_provider", messageId: "msg-f" });
+    expect(updates[0]).toMatchObject({
+      status: "failed",
+      error_message: "aborted_before_provider",
+      metadata: expect.objectContaining({
+        generated_by: "ai_responder_v1_aborted",
+        inbound_message_id: "inbound-1",
+        abortedBeforeProvider: true,
+      }),
+    });
+  });
+
+  it("a hook that throws is a refusal", async () => {
+    const { provider, supabase } = scripted();
+    const outcome = await sendSmsToContact(supabase, {
+      ...aiInput,
+      beforeProviderSubmit: async () => {
+        throw new Error("renew boom");
+      },
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(outcome.status).toBe("blocked_before_provider");
+  });
+
+  it("runs after every preflight check and immediately before the provider; true lets the send proceed", async () => {
+    const { provider, supabase } = scripted();
+    const order: string[] = [];
+    vi.mocked(isSmsPhoneSuppressed).mockImplementation(async () => {
+      order.push("suppression");
+      return false;
+    });
+    provider.sendSms.mockImplementation(async () => {
+      order.push("provider");
+      return { externalId: "ext-1", providerStatus: "queued", raw: {} };
+    });
+    const outcome = await sendSmsToContact(supabase, {
+      ...aiInput,
+      beforeProviderSubmit: async () => {
+        order.push("fence");
+        return true;
+      },
+    });
+    expect(order).toEqual(["suppression", "fence", "provider"]);
+    expect(outcome).toMatchObject({ status: "sent", messageId: "msg-f" });
+  });
+});
+
 describe("releaseQueuedMessage — claimed payload", () => {
   afterEach(() => {
     vi.unstubAllEnvs();

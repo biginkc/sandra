@@ -146,6 +146,12 @@ export async function claimAiResponse(
   };
 }
 
+/**
+ * Completes (or errors) a claim. Returns true when the write landed (or there
+ * was no claim row to write), false when it failed (already reported). The
+ * retry path depends on the result: a retry whose claim lease could not be
+ * released can never run, so the caller must not schedule it.
+ */
 export async function completeAiResponseClaim(
   supabase: SupabaseClient<Database>,
   args: {
@@ -156,26 +162,78 @@ export async function completeAiResponseClaim(
     /** Expire the lease now so the same inbound can be reclaimed (retry). */
     releaseLease?: boolean;
   },
-): Promise<void> {
-  if (!args.claimId) return;
+): Promise<boolean> {
+  if (!args.claimId) return true;
   const now = new Date().toISOString();
-  const { error } = await supabase
-    .from("ai_response_claims")
-    .update({
-      status: args.errorMessage ? "error" : "completed",
-      completed_at: args.errorMessage ? null : now,
-      outbound_message_id: args.outboundMessageId ?? null,
-      outcome: args.outcome,
-      error_message: args.errorMessage ?? null,
-      ...(args.releaseLease ? { lease_expires_at: now } : {}),
-      updated_at: now,
-    })
-    .eq("id", args.claimId);
-  if (error) {
-    reportError(new Error(error.message), {
+  try {
+    const { error } = await supabase
+      .from("ai_response_claims")
+      .update({
+        status: args.errorMessage ? "error" : "completed",
+        completed_at: args.errorMessage ? null : now,
+        outbound_message_id: args.outboundMessageId ?? null,
+        outcome: args.outcome,
+        error_message: args.errorMessage ?? null,
+        ...(args.releaseLease ? { lease_expires_at: now } : {}),
+        updated_at: now,
+      })
+      .eq("id", args.claimId);
+    if (error) {
+      reportError(new Error(error.message), {
+        tags: { surface: "ai_response_claim_complete" },
+        extra: { claimId: args.claimId, outcome: args.outcome },
+      });
+      return false;
+    }
+    return true;
+  } catch (e) {
+    reportError(e, {
       tags: { surface: "ai_response_claim_complete" },
       extra: { claimId: args.claimId, outcome: args.outcome },
     });
+    return false;
+  }
+}
+
+/**
+ * Dedicated lease expiry for a retry whose normal completion write failed:
+ * marks the claim `error` (retry_scheduled) with its lease already expired so
+ * the re-dispatch of the same inbound can reclaim it. Returns false (error
+ * surfaced) when even this fails; the caller must then dead-letter + flag
+ * instead of scheduling a retry that cannot run.
+ */
+export async function expireAiResponseClaimLease(
+  supabase: SupabaseClient<Database>,
+  args: { claimId: string | null | undefined; errorMessage: string },
+): Promise<boolean> {
+  if (!args.claimId) return true;
+  const now = new Date().toISOString();
+  try {
+    const { data, error } = await supabase
+      .from("ai_response_claims")
+      .update({
+        status: "error",
+        error_message: args.errorMessage,
+        lease_expires_at: now,
+        updated_at: now,
+      })
+      .eq("id", args.claimId)
+      .select("id")
+      .maybeSingle();
+    if (error || !data) {
+      reportError(new Error(error?.message ?? "claim row not found when expiring lease"), {
+        tags: { surface: "ai_response_claim_expire_lease" },
+        extra: { claimId: args.claimId },
+      });
+      return false;
+    }
+    return true;
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "ai_response_claim_expire_lease" },
+      extra: { claimId: args.claimId },
+    });
+    return false;
   }
 }
 
