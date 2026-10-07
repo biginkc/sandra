@@ -148,7 +148,7 @@ function lookupClient(disposition: string, overrides: Record<string, unknown> = 
       return c;
     };
     c.maybeSingle = async () => ({ data: rows[table], error: null });
-    c.then = (resolve: (v: unknown) => void) => resolve({ error: null });
+    c.then = (resolve: (v: unknown) => void) => resolve({ data: [{ id: "property-1" }], error: null });
     return c;
   };
   return { from: chain, updates, inserts };
@@ -256,7 +256,11 @@ describe("suppression_incomplete hold vs timeout flags", () => {
         };
         c.update = (v: unknown) => {
           updates.push(v);
-          return { eq: async () => ({ error: null }) };
+          const b: Record<string, unknown> = {};
+          b.eq = () => b;
+          b.is = () => b;
+          b.select = async () => ({ data: [{ id: "property-1" }], error: null });
+          return b;
         };
         return c;
       },
@@ -358,29 +362,39 @@ describe("listOutstandingSuppressionReviews", () => {
 describe("overwriting an existing suppression_incomplete reason (r24)", () => {
   type Ev = { event_type: string; source_id: string; created_at: string };
   function statefulAdmin(initialReason: string | null) {
-    const state = { reason: initialReason, events: [] as Ev[], seq: 0 };
+    const state = {
+      reason: initialReason,
+      events: [] as Ev[],
+      seq: 0,
+      writes: [] as Array<{ reason: string | null; conditional: boolean }>,
+    };
+    // Holds the first `expected` reads of the property until all have arrived.
+    let release!: () => void;
+    const barrier = {
+      expected: 0,
+      arrived: 0,
+      release: () => release(),
+      gate: new Promise<void>((r) => { release = r; }),
+    };
     const failLedgerFor = new Set<string>();
     const failUpdate = { on: false };
     const admin = {
       from: (table: string) => {
-        let pendingUpdate: Record<string, unknown> | null = null;
         const c: Record<string, unknown> = {};
         c.select = () => c;
-        c.eq = () => (pendingUpdate ? Promise.resolve(applyUpdate()) : c);
-        const applyUpdate = () => {
-          if (failUpdate.on) return { error: { message: "update failed" } };
-          if (pendingUpdate && "last_ai_escalation_reason" in pendingUpdate) {
-            state.reason = pendingUpdate.last_ai_escalation_reason as string | null;
-          }
-          return { error: null };
-        };
+        c.eq = () => c;
         c.in = async () => ({ data: state.events, error: null });
-        c.maybeSingle = async () => ({
-          data: table === "properties"
+        c.maybeSingle = async () => {
+          const data = table === "properties"
             ? { org_id: "org-1", last_ai_escalation_reason: state.reason }
-            : null,
-          error: null,
-        });
+            : null;
+          if (table === "properties" && barrier.expected > 0) {
+            barrier.arrived++;
+            if (barrier.arrived >= barrier.expected) barrier.release();
+            await barrier.gate;
+          }
+          return { data, error: null };
+        };
         c.insert = async (v: { event_type: string; source_id: string }) => {
           if (failLedgerFor.has(`${v.event_type}:${v.source_id}`)) {
             return { error: { message: "insert failed" } };
@@ -392,14 +406,28 @@ describe("overwriting an existing suppression_incomplete reason (r24)", () => {
           return { error: null };
         };
         c.update = (v: Record<string, unknown>) => {
-          pendingUpdate = v;
-          return c;
+          const filters: Array<[string, unknown]> = [];
+          const run = () => {
+            if (failUpdate.on) return { data: null, error: { message: "update failed" } };
+            const f = filters.find(([col]) => col === "last_ai_escalation_reason");
+            if (f && f[1] !== state.reason) return { data: [], error: null };
+            if ("last_ai_escalation_reason" in v) {
+              state.reason = v.last_ai_escalation_reason as string | null;
+            }
+            state.writes.push({ reason: state.reason, conditional: !!f });
+            return { data: [{ id: "property-1" }], error: null };
+          };
+          const b: Record<string, unknown> = {};
+          b.eq = (col: string, val: unknown) => { filters.push([col, val]); return b; };
+          b.is = (col: string, val: unknown) => { filters.push([col, val]); return b; };
+          b.select = async () => run();
+          return b;
         };
         return c;
       },
     };
     createAdminClient.mockReturnValue(admin as never);
-    return { state, failLedgerFor, failUpdate, admin };
+    return { state, failLedgerFor, failUpdate, admin, barrier };
   }
 
   it("A fails + ledger fails -> B fails + ledger ok -> retry B: A stays outstanding, hold not cleared", async () => {
@@ -484,6 +512,109 @@ describe("overwriting an existing suppression_incomplete reason (r24)", () => {
     expect(reportError).toHaveBeenCalledWith(
       expect.any(Error),
       expect.objectContaining({ tags: { surface: "confirm_ai_disposition_suppression_id_cap" } }),
+    );
+  });
+
+  it("concurrent failures A and B (both read null, both ledger writes fail): neither id is lost", async () => {
+    const { state, failLedgerFor, barrier } = statefulAdmin(null);
+    barrier.expected = 2;
+    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    failLedgerFor.add("suppression_incomplete:A");
+    failLedgerFor.add("suppression_incomplete:B");
+    await Promise.all([
+      applyConfirmedSuppression({ ...base, reviewId: "A", disposition: "dnc" }),
+      applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" }),
+    ]);
+    expect(state.reason).toBe("suppression_incomplete:A,B");
+    expect(state.events).toHaveLength(0);
+
+    await recordSuppressionRetriedOk({ propertyId: "property-1", reviewId: "B", actorId: "user-1" });
+    const out = await listOutstandingSuppressionReviews(createAdminClient() as never, "property-1");
+    expect(out.reviewIds).toEqual(["A"]);
+    expect(state.reason).toBe("suppression_incomplete:A,B");
+  });
+
+  it("outstanding is [A, B] before any retry", async () => {
+    const { state, failLedgerFor, barrier } = statefulAdmin(null);
+    barrier.expected = 2;
+    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    failLedgerFor.add("suppression_incomplete:A");
+    failLedgerFor.add("suppression_incomplete:B");
+    await Promise.all([
+      applyConfirmedSuppression({ ...base, reviewId: "A", disposition: "dnc" }),
+      applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" }),
+    ]);
+    const out = await listOutstandingSuppressionReviews(createAdminClient() as never, "property-1");
+    expect(out.reviewIds).toEqual(["A", "B"]);
+    expect(state.writes.every((w) => w.conditional)).toBe(true);
+  });
+
+  it("a conflict that resolves on retry writes the merged value conditionally", async () => {
+    const { state, failLedgerFor, admin } = statefulAdmin(null);
+    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    failLedgerFor.add("suppression_incomplete:A");
+    failLedgerFor.add("suppression_incomplete:B");
+    // Another writer lands "A" between B's read and B's write.
+    const realFrom = admin.from;
+    let injected = false;
+    admin.from = (table: string) => {
+      const c = realFrom(table) as Record<string, (...a: unknown[]) => unknown>;
+      if (table === "properties") {
+        const realUpdate = c.update;
+        c.update = (...a: unknown[]) => {
+          if (!injected) {
+            injected = true;
+            state.reason = "suppression_incomplete:A";
+          }
+          return realUpdate(...a);
+        };
+      }
+      return c;
+    };
+    await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
+    expect(state.reason).toBe("suppression_incomplete:A,B");
+    expect(state.writes).toEqual([{ reason: "suppression_incomplete:A,B", conditional: true }]);
+    expect(reportError).not.toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "confirm_ai_disposition_suppression_pointer_conflict" } }),
+    );
+  });
+
+  it("persistent conflict: after 5 retries writes the merged union unconditionally and reports", async () => {
+    const { state, failLedgerFor, admin } = statefulAdmin("suppression_incomplete:A");
+    applyPhoneLevelOptOut.mockRejectedValue(new Error("db down"));
+    failLedgerFor.add("suppression_incomplete:A");
+    failLedgerFor.add("suppression_incomplete:B");
+    // Every conditional write loses a race: the pointer keeps changing under it.
+    let n = 0;
+    const realFrom = admin.from;
+    admin.from = (table: string) => {
+      const c = realFrom(table) as Record<string, (...a: unknown[]) => unknown>;
+      if (table === "properties") {
+        const realUpdate = c.update;
+        c.update = (...a: unknown[]) => {
+          const values = a[0] as { last_ai_escalation_reason?: string };
+          const b = realUpdate(...a) as { select: () => Promise<unknown> };
+          const realSelect = b.select;
+          b.select = async () => {
+            if (n < 6 && "last_ai_escalation_reason" in values) {
+              n++;
+              state.reason = `suppression_incomplete:A,X${n}`;
+              return { data: [], error: null };
+            }
+            return realSelect();
+          };
+          return b;
+        };
+      }
+      return c;
+    };
+    await applyConfirmedSuppression({ ...base, reviewId: "B", disposition: "dnc" });
+    expect(n).toBe(6);
+    expect(suppressionReviewIdsFromReason(state.reason)).toEqual(["A", "B"]);
+    expect(reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { surface: "confirm_ai_disposition_suppression_pointer_conflict" } }),
     );
   });
 

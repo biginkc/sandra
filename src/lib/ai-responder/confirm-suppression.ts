@@ -19,6 +19,7 @@ export { suppressionReviewIdsFromReason };
 
 /** Max failed ids one hold reason carries (oldest kept). */
 export const MAX_SUPPRESSION_REASON_IDS = 10;
+const MAX_POINTER_CONFLICT_RETRIES = 5;
 
 /** Builds `suppression_incomplete:<idA>,<idB>`: de-duplicated, capped at 10 (oldest kept). */
 export function suppressionIncompleteReason(reviewIds: string | string[]): string {
@@ -215,20 +216,13 @@ async function raiseSuppressionIncompleteHold(
   try {
     const admin = createAdminClient();
     const now = new Date().toISOString();
-    const { data: current, error: readError } = await admin
-      .from("properties")
-      .select("org_id, last_ai_escalation_reason")
-      .eq("id", propertyId)
-      .maybeSingle();
-    if (readError) throw new Error(readError.message);
-    const existing: string | null = current?.last_ai_escalation_reason ?? null;
-    const orgId: string | undefined = current?.org_id;
+    const orgIdBox: { orgId?: string } = {};
     // Idempotent via the unique index: a duplicate row counts as recorded.
     const writeLedger = async (id: string): Promise<boolean> => {
       try {
-        if (!orgId) throw new Error("property not found");
+        if (!orgIdBox.orgId) throw new Error("property not found");
         const { error: ledgerError } = await admin.from("lead_events").insert({
-          org_id: orgId,
+          org_id: orgIdBox.orgId,
           property_id: propertyId,
           actor_type: "system",
           event_type: SUPPRESSION_INCOMPLETE_EVENT,
@@ -248,63 +242,114 @@ async function raiseSuppressionIncompleteHold(
         return false;
       }
     };
+    const readPointer = async (): Promise<string | null> => {
+      const { data: current, error: readError } = await admin
+        .from("properties")
+        .select("org_id, last_ai_escalation_reason")
+        .eq("id", propertyId)
+        .maybeSingle();
+      if (readError) throw new Error(readError.message);
+      orgIdBox.orgId = current?.org_id;
+      return current?.last_ai_escalation_reason ?? null;
+    };
+
+    let existing = await readPointer();
     // Record the failed review id in the ledger BEFORE touching the hold, so
     // it survives a preserved timeout reason or a concurrent overwrite.
     const ledgerOk = await writeLedger(reviewId);
-    // The existing reason may be the ONLY record of earlier failures whose
-    // ledger writes failed. Backfill each before touching the reason.
-    const existingIds = suppressionReviewIdsFromReason(existing);
-    const unbackedIds: string[] = [];
-    for (const id of existingIds) {
-      // The current id's own write already failed (or succeeded) above; keep
-      // its original position rather than re-trying it here.
-      if (id === reviewId) {
-        if (!ledgerOk) unbackedIds.push(id);
-        continue;
+    // Backfill results are remembered so a re-merge after a conflict only
+    // writes ledger rows for ids it has not already tried.
+    const backfilled = new Map<string, boolean>();
+
+    // Builds the pointer write for the value currently read. Returns null
+    // reason when the existing reason is kept (hold-only update).
+    const plan = async (
+      current: string | null,
+    ): Promise<{ keepReason: boolean; nextReason: string | null }> => {
+      // The existing reason may be the ONLY record of earlier failures whose
+      // ledger writes failed. Backfill each before touching the reason.
+      const unbackedIds: string[] = [];
+      for (const id of suppressionReviewIdsFromReason(current)) {
+        // The current id's own write already failed (or succeeded) above;
+        // keep its original position rather than re-trying it here.
+        if (id === reviewId) {
+          if (!ledgerOk) unbackedIds.push(id);
+          continue;
+        }
+        let ok = backfilled.get(id);
+        if (ok === undefined) {
+          ok = await writeLedger(id);
+          backfilled.set(id, ok);
+        }
+        if (!ok) unbackedIds.push(id);
       }
-      if (!(await writeLedger(id))) unbackedIds.push(id);
-    }
-    // A send-timeout flag is a different, still-open problem: keep its
-    // reason/timestamp and only (re)raise the hold - but only if the failed
-    // id is durably in the ledger; otherwise the suppression reason wins.
-    // Likewise keep the existing suppression reason while an earlier id has no
-    // ledger row (it lives only in that reason) and this id is ledger-backed.
-    const keepReason =
-      (isTimeoutEscalationReason(existing) && ledgerOk) ||
-      (unbackedIds.some((id) => id !== reviewId) && ledgerOk);
-    // Ledger write for this id failed: APPEND it to the ids already in the
-    // reason (never replace), de-duplicated and capped at the oldest ids.
-    let nextReason: string | null = null;
-    if (!keepReason) {
-      // This id is ledger-backed (earlier ids were backfilled): repoint to it.
-      // Only ids that still have NO ledger row need to ride on the pointer;
-      // backfilled ids are durable already, so the 10-id cap is effectively
-      // unreachable in practice.
+      // A send-timeout flag is a different, still-open problem: keep its
+      // reason/timestamp and only (re)raise the hold - but only if the failed
+      // id is durably in the ledger; otherwise the suppression reason wins.
+      // Likewise keep the existing suppression reason while an earlier id has
+      // no ledger row (it lives only in that reason) and this id is
+      // ledger-backed.
+      const keepReason =
+        (isTimeoutEscalationReason(current) && ledgerOk) ||
+        (unbackedIds.some((id) => id !== reviewId) && ledgerOk);
+      if (keepReason) return { keepReason, nextReason: null };
+      // Ledger write for this id failed: APPEND it to the ids already in the
+      // reason (never replace), de-duplicated, oldest first, capped at the
+      // oldest ids. A ledger-backed id repoints to itself (earlier ids were
+      // backfilled and are durable).
       const all = ledgerOk
         ? [reviewId]
         : [...new Set([...unbackedIds, reviewId])];
-      nextReason = suppressionIncompleteReason(all);
       if (all.length > MAX_SUPPRESSION_REASON_IDS) {
         reportError(new Error("suppression_incomplete reason id cap reached"), {
           tags: { surface: "confirm_ai_disposition_suppression_id_cap" },
           extra: { propertyId, dropped: all.slice(MAX_SUPPRESSION_REASON_IDS) },
         });
       }
+      return { keepReason, nextReason: suppressionIncompleteReason(all) };
+    };
+
+    // Compare-and-set: the pointer is only written if it still holds the value
+    // this attempt read, so a concurrent failure's ids cannot be overwritten.
+    // On conflict, re-read, re-merge and retry; as a last resort write the
+    // merged union unconditionally and report.
+    for (let attempt = 0; attempt <= MAX_POINTER_CONFLICT_RETRIES + 1; attempt++) {
+      const lastResort = attempt > MAX_POINTER_CONFLICT_RETRIES;
+      const { keepReason, nextReason } = await plan(existing);
+      const values = keepReason
+        ? { needs_human_attention: true, updated_at: now }
+        : {
+            needs_human_attention: true,
+            last_ai_escalation_reason: nextReason,
+            last_ai_escalation_at: now,
+            updated_at: now,
+          };
+      let query = admin.from("properties").update(values).eq("id", propertyId);
+      const conditional = !keepReason && !lastResort;
+      if (conditional) {
+        query =
+          existing === null
+            ? query.is("last_ai_escalation_reason", null)
+            : query.eq("last_ai_escalation_reason", existing);
+      }
+      const { data: written, error } = await query.select("id");
+      if (error) throw new Error(error.message);
+      if (!conditional) {
+        if (lastResort) {
+          reportError(new Error("suppression_incomplete pointer write conflicted; wrote merged union unconditionally"), {
+            tags: { surface: "confirm_ai_disposition_suppression_pointer_conflict" },
+            extra: { propertyId, reviewId },
+          });
+        }
+        return;
+      }
+      if (Array.isArray(written) && written.length > 0) return;
+      // Zero rows: someone changed the pointer since we read it.
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.random() * 20 * (attempt + 1)),
+      );
+      existing = await readPointer();
     }
-    const { error } = await admin
-      .from("properties")
-      .update(
-        keepReason
-          ? { needs_human_attention: true, updated_at: now }
-          : {
-              needs_human_attention: true,
-              last_ai_escalation_reason: nextReason,
-              last_ai_escalation_at: now,
-              updated_at: now,
-            },
-      )
-      .eq("id", propertyId);
-    if (error) throw new Error(error.message);
   } catch (holdError) {
     reportError(holdError, {
       tags: { surface: "confirm_ai_disposition_suppression_hold" },
